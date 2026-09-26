@@ -42,12 +42,26 @@ function words(s: string): string[] {
 function stripHeredocs(cmd: string): string {
   const lines = cmd.split('\n');
   const out: string[] = [];
+  let q: string | null = null;   // quote state carries across lines (a quoted string can span them)
   for (let i = 0; i < lines.length; i++) {
-    out.push(lines[i]);
+    const line = lines[i];
+    out.push(line);
+    // Jim's audit: only a REAL heredoc operator counts, found with the same quote-aware scan as
+    // segments(): not inside quotes, not a here-string (`<<<`), and preceded by start/space/;|&(
+    // so `$((a<<b))` is arithmetic, not a heredoc. `cat<<EOF` therefore stays unstripped: the
+    // conservative (old) classification.
     const delims: string[] = [];
-    const re = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(lines[i]))) delims.push(m[2]);
+    for (let j = 0; j < line.length; j++) {
+      const c = line[j];
+      if (q) { if (c === q && line[j - 1] !== '\\') q = null; continue; }
+      if (c === '"' || c === "'") { q = c; continue; }
+      if (c !== '<' || line[j + 1] !== '<') continue;
+      const before = j === 0 ? '' : line[j - 1];
+      if (line[j + 2] === '<' || before === '<' || !(before === '' || /[\s;|&(]/.test(before))) { j += 1; continue; }
+      const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line.slice(j));
+      if (m) { delims.push(m[2]); j += m[0].length - 1; }
+    }
+    if (delims.length) q = null;   // the body starts on the next line whatever the operator line held
     for (const d of delims) {
       i++;
       while (i < lines.length && lines[i].trim() !== d) i++;

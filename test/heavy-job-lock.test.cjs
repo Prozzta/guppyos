@@ -67,8 +67,24 @@ HEAVY.push(
   ['cd /c/Dunder/_work/andy-cut156 && rm -rf dist && npm run -s dist:win > /c/tmp/dist158.log 2>&1; echo EXIT=$?', 'build'],
   ["python - <<'EOF'\nprint(1)\nEOF\nnpm ci > ci.log 2>&1", 'install'],
   ['npm ci &>ci.log', 'install'],
-  ['node --test 2>&1 | tail', 'suite']
+  ['node --test 2>&1 | tail', 'suite'],
+  // Jim's HEAVY-CLASSIFIER-FP audit R1: things that look like `<<` but are not heredocs must not
+  // swallow the lines after them.
+  ['wc -w <<< hello\nnpm run dist:win', 'build'],
+  ['wc -w <<<hello\nnpm ci', 'install'],
+  ['echo "use <<EOF for heredocs"\nnpm ci', 'install'],
+  ['echo $((a<<b))\nnpm ci', 'install'],
+  ["echo 'x <<EOF'\nnpm ci", 'install'],
+  // A real heredoc with a heavy command after its terminator stays heavy.
+  ["cat > /tmp/a.txt <<-EOF\n\tnode --test test/a.cjs\n\tEOF\nnpm ci", 'install']
 );
+
+// KNOWN GAPS (Jim's audit, pre-existing: light before and after HEAVY-CLASSIFIER-FP). Pinned so
+// that a future fix updates this list on purpose instead of changing behaviour silently.
+test('CLASSIFIER KNOWN GAPS: $(heavy) in an UNQUOTED heredoc body and process substitution stay light', () => {
+  assert.equal(classifyCommand('cat <<EOF\n$(npm run dist:win)\nEOF').heavy, false, 'bash expands $(..) in an unquoted body: a real gap');
+  assert.equal(classifyCommand('diff <(npm ci) x').heavy, false, 'process substitution: a real gap');
+});
 
 test('CLASSIFIER: every heavy command in the corpus is heavy, with its kind', () => {
   for (const [cmd, kind] of HEAVY) {
