@@ -45,8 +45,30 @@ const LIGHT = [
   // Jim N4: the patterns audits actually run
   'node --test test/a.cjs test/b.cjs', 'node C:/Users/x/scratch/xmut.cjs', 'git -C C:/Dunder/_work/wt diff --stat', 'npm run typecheck',
   // Jim MF2 + H6
-  'npm run test:focused -- wake', 'npm test -- test/one.test.cjs', 'node test/tools/run-tests.cjs wake', 'git commit -m "fix; npm ci later"'
+  'npm run test:focused -- wake', 'npm test -- test/one.test.cjs', 'node test/tools/run-tests.cjs wake', 'git commit -m "fix; npm ci later"',
+  // HEAVY-CLASSIFIER-FP: the real commands the live lock tagged 'suite' (log.jsonl 2026-09-26
+  // ~22:14-22:20Z, andy + jim; full text from the session). Redirects read as test files
+  // (`2>` after `2>&1` was split as a background `&`) and heredoc bodies were classified.
+  `cd /c/Dunder/_work/andy-heavyui157 && node --test test/quit-hang-157.test.cjs 2>&1 | grep -E "^# (pass|fail)|not ok|error:|expected|actual" | head -30`,
+  `cd /c/Dunder/_work/andy-heavyui157 && sed -i 's|before app.exit. Never a spawnSync on this path.|before app.exit. No synchronous child process on this path.|' src/main/index.ts && node --test test/quit-hang-157.test.cjs 2>&1 | grep -E "^# (pass|fail)"`,
+  `cd /c/Dunder/_work/andy-heavyui157 && git stash push -q -u -- src/main && node --test test/quit-hang-157.test.cjs test/mine-152-blockers.test.cjs 2>&1 | grep -E "^# (pass|fail)|^not ok|Cannot find|ENOENT" | head; git stash pop -q && git status --short`,
+  `cd /c/Dunder/_work/andy-heavyui157 && python - <<'EOF'\nf='test/mine-152-blockers.test.cjs'\ns=open(f,encoding='utf8').read()\nold="""  assert.equal(w.spawns.length, before, 'no status probe or retry after quit');"""\nassert s.count(old)==1\nopen(f,'w',encoding='utf8').write(s)\nEOF\nnode --test test/mine-152-blockers.test.cjs test/mine-152-pins.test.cjs test/mine-152-visibility.test.cjs test/mine-152-x78.test.cjs test/proc-kill.test.cjs 2>&1 | grep -E "^# (pass|fail)|^    not ok|^not ok"`,
+  `cd /c/Dunder/_work/andy-heavyui157 && node - <<'EOF'\nconst fs=require('fs');const f='test/log-stall-av.test.cjs';let s=fs.readFileSync(f,'utf8');\nnpm ci && npm run build && node --test\nEOF\nnode --test test/log-stall-av.test.cjs 2>&1 | grep -E "^# (pass|fail)|^not ok"; grep -l "hive\\.dispose\\|const finish\\|quit" test/*.test.cjs | wc -l`,
+  'cd /c/x && timeout 120 node --test test/select-theme.test.cjs 2>&1 | tail -20',
+  'node --test test/a.test.cjs > /tmp/out.log 2>&1', 'node --test test/a.test.cjs 2>/dev/null', 'node --test test/a.test.cjs &> out.log',
+  'node --test test/a.test.cjs >out.log 2>&1 &', 'node --test test/a.test.cjs 2> err.log',
+  "cat > /tmp/x.sh <<'EOF'\nnpm ci\nnode --test test/*.test.cjs\nEOF\nbash -n /tmp/x.sh",
+  'cd /c/Dunder/_work/jim-s5-verify && git status --short | head -3; git fetch -q /c/Dunder/_work/andy-heavyui157 quit-hang-157 2>&1 | tail -1; git checkout -q --detach 348f9be1 && git log --oneline -1'
 ];
+// HEAVY-CLASSIFIER-FP: stripping redirects and heredoc bodies must not hide a real heavy job.
+HEAVY.push(
+  ['node --test test/*.test.cjs 2>&1 | tail -5', 'suite'],
+  ['cd /c/Dunder/_work/andy-cut156 && npm run -s test:focused > /c/tmp/suite158.log 2>&1; echo EXIT=$?', 'suite'],
+  ['cd /c/Dunder/_work/andy-cut156 && rm -rf dist && npm run -s dist:win > /c/tmp/dist158.log 2>&1; echo EXIT=$?', 'build'],
+  ["python - <<'EOF'\nprint(1)\nEOF\nnpm ci > ci.log 2>&1", 'install'],
+  ['npm ci &>ci.log', 'install'],
+  ['node --test 2>&1 | tail', 'suite']
+);
 
 test('CLASSIFIER: every heavy command in the corpus is heavy, with its kind', () => {
   for (const [cmd, kind] of HEAVY) {

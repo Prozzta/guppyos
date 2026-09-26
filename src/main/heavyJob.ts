@@ -36,6 +36,42 @@ function words(s: string): string[] {
   return out;
 }
 
+/** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
+ *  stdin (a python/node edit script, a file's text), never commands this shell runs, so a line in
+ *  it must not be classified. The `<<` line itself stays; the terminator line is dropped too. */
+function stripHeredocs(cmd: string): string {
+  const lines = cmd.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    out.push(lines[i]);
+    const delims: string[] = [];
+    const re = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(lines[i]))) delims.push(m[2]);
+    for (const d of delims) {
+      i++;
+      while (i < lines.length && lines[i].trim() !== d) i++;
+    }
+  }
+  return out.join('\n');
+}
+
+/** HEAVY-CLASSIFIER-FP: drop redirections and their targets (`2>&1`, `> x.log`, `2>/dev/null`,
+ *  `&>x`, `<<EOF`), so a redirect never reads as a positional argument: `node --test a.cjs 2>&1`
+ *  used to leave `2>` behind as a "test file" that is not a .js file -> "a glob or a directory". */
+function stripRedirects(ws: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < ws.length; i++) {
+    const w = ws[i];
+    const m = /^(\d*(?:>>?|<<?-?|<>)|&>>?)(&?)(.*)$/.exec(w);
+    if (!m) { out.push(w); continue; }
+    // Operator with its target attached (`>x.log`, `2>&1`, `<<EOF`): drop just this word.
+    // A bare operator (`>`, `2>`, `<<`): its target is the next word; drop both.
+    if (!m[3]) i++;
+  }
+  return out;
+}
+
 /** The segments a shell would run: split on ; && || | and newlines, OUTSIDE quotes. */
 function segments(cmd: string): string[] {
   const out: string[] = [];
@@ -44,6 +80,8 @@ function segments(cmd: string): string[] {
     const c = cmd[i];
     if (q) { cur += c; if (c === q && cmd[i - 1] !== '\\') q = null; continue; }
     if (c === '"' || c === "'") { q = c; cur += c; continue; }
+    // A redirection's `&` (`2>&1`, `>&2`, `&>x`, `<&0`) is not a separator or a background `&`.
+    if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>')) { cur += c; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&') { cur += ' &'; out.push(cur); cur = ''; continue; } // a lone & = background
       out.push(cur); cur = '';
@@ -154,8 +192,8 @@ function classifyWords(ws0: string[], depth: number): HeavyClass {
 
 /** Classify a command line: heavy if ANY segment it runs is heavy. */
 export function classifyCommand(cmd: string, depth = 0): HeavyClass {
-  for (const seg of segments(cmd)) {
-    const c = classifyWords(words(seg.replace(/\s&$/, '')), depth);
+  for (const seg of segments(stripHeredocs(cmd))) {
+    const c = classifyWords(stripRedirects(words(seg.replace(/\s&$/, ''))), depth);
     if (c.heavy) return c;
   }
   return { heavy: false };
