@@ -11,6 +11,33 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.58] — 2026-09-27
+
+**Quitting no longer freezes the window.** Rollback: 1.1.57.
+
+### Fixed
+
+- **Quitting no longer freezes the window.** While the app shut down, it stopped each agent's
+  processes and the memory service one at a time and waited on each, which could keep the window
+  frozen long enough for Windows to report the app as not responding. It looked like a crash on
+  quit. The window now closes straight away, and the clean-up runs in the background with a time
+  limit of a few seconds.
+- **Windows shutdown and sign-out no longer wait on the running-terminals prompt.** The app now
+  shuts its agents down and closes by itself, so a PC restart is not held up and no agent
+  processes are left behind.
+- **No more brief stutters when an agent is archived, restarted or respawned.** The last step of
+  stopping an agent's processes no longer pauses the window (about half a second to a second and
+  a half each time on Windows).
+- **A full reset and a home-folder move wait for the memory service to stop** before they delete
+  or copy its files, so neither can leave a half-deleted or half-copied memory palace behind.
+
+### Added
+
+- **Hangs and crashes are now logged.** The event log records how long each window took to load,
+  when a window stops or starts responding, when a window's page process or a helper process dies
+  unexpectedly, and how long each step of quitting took. A slow start or a freeze can now be
+  measured instead of pieced together afterwards.
+
 ## [1.1.57] — 2026-09-26
 
 **Two Settings fixes.** Rollback: 1.1.56.
