@@ -23,7 +23,7 @@ const REAL = fs.readFileSync(path.join(__dirname, 'fixtures', 'mempalace', 'repa
 let pid = 4_700_000;
 
 function fakeWorld(t, script) {
-  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree;
+  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree, realKillAsync = procKill.killTreesAsync;
   cp.spawn = (bin, args) => {
     const proc = new EventEmitter();
     proc.pid = ++pid; proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.kill = () => true;
@@ -33,7 +33,8 @@ function fakeWorld(t, script) {
   };
   cp.spawnSync = () => ({ status: 0, stdout: '', stderr: '' });
   procKill.hardKillTree = () => {};
-  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; });
+  procKill.killTreesAsync = () => Promise.resolve();   // QUIT-HANG: stop()'s batched async kill
+  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; procKill.killTreesAsync = realKillAsync; });
 }
 const verb = (s) => s.args.join(' ');
 function home(t) {

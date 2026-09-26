@@ -6,7 +6,7 @@ import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { ensureKilled, hardKillTree } from './procKill';
+import { ensureKilled, hardKillTree, killTreesAsync } from './procKill';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
@@ -913,5 +913,30 @@ export class PtyManager {
       }
     }
     this.sessions.clear();
+  }
+
+  /** QUIT-HANG: the app-quit form of killAll, which never blocks the main thread.
+   *  killAll's per-terminal synchronous taskkill froze the UI for the whole sweep
+   *  (6 big agent trees ran past Windows' ~5 s hang threshold -> AppHang). Same
+   *  contract as killAll: sessions are forgotten and natural-exit teardown is
+   *  suppressed at once; on Windows every tree is swept by ONE async batched
+   *  `taskkill /T /F` and each ConPTY is closed only AFTER that sweep (or its cap),
+   *  so the tree is still intact when taskkill enumerates it (276f782a's point).
+   *  POSIX closes the ptys and group-kills after the grace, as killAll does. */
+  killAllAsync(capMs?: number): Promise<void> {
+    this.exitHandler = null;
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    if (process.platform !== 'win32') {
+      for (const s of sessions) {
+        try { s.proc.kill(); } catch { /* noop */ }
+        ensureKilled(s.proc.pid);
+      }
+      return Promise.resolve();
+    }
+    const closePtys = (): void => {
+      for (const s of sessions) { try { s.proc.kill(); } catch { /* noop */ } }
+    };
+    return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys);
   }
 }

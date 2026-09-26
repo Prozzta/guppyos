@@ -1,4 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
+import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
@@ -2904,6 +2905,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   const wc = win.webContents;
 
   allWindows.add(win);
+  watchWindowHealth(win, isFloor);
   // Global timer events follow the user — the most-recently-focused window is
   // primary. The primary is also seeded synchronously so boot events route now.
   win.on('focus', () => { mainWindow = win; });
@@ -4373,7 +4375,13 @@ ipcMain.handle('history:search', (_evt, query: unknown, limit: unknown) =>
 /** Tear the harness down and quit. Shared by the hard "kill all & quit" path
  *  and the closing-time conclusion (after the god confirmed the floor saved). */
 function teardownAndQuit(): void {
+  const alreadyQuitting = allowQuit;
   allowQuit = true;
+  const t0 = Date.now();
+  // QUIT-HANG: hide every window FIRST. The teardown below is quick now, but a window
+  // that stays on screen while the main thread is busy is what Windows ghosts and
+  // files as an AppHang; a hidden one cannot read as a frozen floor.
+  for (const w of BrowserWindow.getAllWindows()) { try { if (!w.isDestroyed()) w.hide(); } catch { /* closing */ } }
   // Each teardown step is best-effort: a throw here (e.g. a dying child or a
   // half-torn-down socket) must never abort the quit or pop a crash dialog.
   try { clearMissionTimers(); } catch (e) { console.error('[quit] clearMissionTimers:', e); }
@@ -4387,12 +4395,31 @@ function teardownAndQuit(): void {
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[quit] slack.stop:', e); }
   try { stopWebhookServer(); } catch (e) { console.error('[quit] webhook.stop:', e); }
-  try { memory.stop({ quitting: true }); } catch (e) { console.error('[quit] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
-  try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
+  // The two slow steps (every agent's process tree, the mempalace daemon) run async;
+  // will-quit joins them, bounded, before app.exit. No synchronous child process on this path.
+  void beginQuitWork();
+  if (!alreadyQuitting) { try { hive.appendLog({ kind: 'quit-teardown', syncMs: Date.now() - t0 }); } catch { /* log is best-effort */ } }
   app.quit();
+}
+
+/** Upper bound on the async quit work (tree kills + daemon stop) that will-quit waits for. */
+const QUIT_WORK_CAP_MS = 5_500;
+let quitWork: Promise<QuitReport> | null = null;
+/** QUIT-HANG: start the slow teardown once (idempotent) and hand back its bounded report.
+ *  memory.stop and killAllAsync both forget their state synchronously, so a second quit
+ *  path (window-all-closed, will-quit) joins this promise instead of starting over. */
+function beginQuitWork(): Promise<QuitReport> {
+  if (!quitWork) {
+    const ptys = ptyManager.list().length;
+    quitWork = runQuitSteps([
+      { name: 'memory', run: () => memory.stop({ quitting: true }) },
+      { name: 'ptys', run: () => ptyManager.killAllAsync() }
+    ], QUIT_WORK_CAP_MS).then((r) => ({ ...r, steps: { ...r.steps, ptyCount: ptys } }));
+  }
+  return quitWork;
 }
 ipcMain.handle('app:confirmClose', () => {
   closingTime.cancel(); // a hard quit overrides a closing time in progress
@@ -6214,6 +6241,34 @@ app.whenReady().then(() => {
   });
 });
 
+/** QUIT-HANG F3: the rows that make a slow start or a freeze measurable instead of
+ *  inferred (Jim's SLOW-START-FLOOR-CRASH had to reconstruct both from WER and gaps
+ *  in log.jsonl). F2: a Windows logoff/shutdown (`session-end`) skips the
+ *  running-terminals confirm, which would otherwise hold the shutdown on our modal
+ *  or leave every agent tree orphaned, and runs the ordinary teardown. */
+function watchWindowHealth(win: BrowserWindow, isFloor: boolean): void {
+  const created = Date.now();
+  const wc = win.webContents;
+  const row = (kind: string, extra: Record<string, unknown> = {}): void => {
+    try { hive.appendLog({ kind, floor: isFloor, ...extra }); } catch { /* best-effort */ }
+  };
+  wc.once('did-finish-load', () => row('window-ready', { ms: Date.now() - created, sinceProcessStartMs: Math.round(process.uptime() * 1000) }));
+  let hungAt = 0;
+  win.on('unresponsive', () => { hungAt = Date.now(); row('window-unresponsive'); });
+  win.on('responsive', () => { row('window-responsive', hungAt ? { hungMs: Date.now() - hungAt } : {}); hungAt = 0; });
+  wc.on('render-process-gone', (_e, d) => row('render-process-gone', { reason: d.reason, exitCode: d.exitCode }));
+  win.on('session-end', () => {
+    row('session-end');
+    try { closingTime.cancel(); } catch { /* not started */ }
+    teardownAndQuit();
+  });
+}
+
+app.on('child-process-gone', (_e, d) => {
+  if (d.reason === 'clean-exit') return;   // a utility worker finishing normally is not news
+  try { hive.appendLog({ kind: 'child-process-gone', type: d.type, reason: d.reason, exitCode: d.exitCode, name: d.name ?? d.serviceName }); } catch { /* best-effort */ }
+});
+
 // before-quit covers Cmd-Q / dock-quit; the per-window close handler covers
 // the red close button. Both routes hit the same warning UX.
 app.on('before-quit', (e) => {
@@ -6238,9 +6293,9 @@ app.on('will-quit', () => {
   // statusline pointing at Munder while Munder is closed. Idempotent: a no-op when the
   // teardown path already released it.
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[will-quit] stopAgyStatusline:', e); }
-  // MINE-152: kill any mempalace mine/repair tree and stop the resident daemon (bounded,
-  // synchronous). Every quit path passes here; a second call is a no-op.
-  try { memory.stop({ quitting: true }); } catch (e) { console.error('[will-quit] memory.stop:', e); }
+  // MINE-152: kill any mempalace mine/repair tree and stop the resident daemon. Every quit
+  // path passes here. QUIT-HANG: async and bounded; the flush handler below joins it.
+  void beginQuitWork();
 });
 
 app.on('window-all-closed', () => {
@@ -6271,8 +6326,16 @@ app.on('will-quit', (e) => {
   if (analyticsFlushed) return;
   analyticsFlushed = true;
   e.preventDefault();
-  const finish = (): void => { try { hive.dispose(); } catch { /* rows are on disk */ } app.exit(0); };
+  const t0 = Date.now();
+  let report: QuitReport | null = null;
+  const finish = (): void => {
+    try { hive.appendLog({ kind: 'quit-done', waitMs: Date.now() - t0, work: report }); } catch { /* best-effort */ }
+    try { hive.dispose(); } catch { /* rows are on disk */ }
+    app.exit(0);
+  };
   Promise.all([
+    // QUIT-HANG: agent trees + mempalace daemon, already running async (bounded inside).
+    beginQuitWork().then((r) => { report = r; }),
     Promise.race([
       analytics.endSession(),
       new Promise<void>((r) => setTimeout(r, 1200))

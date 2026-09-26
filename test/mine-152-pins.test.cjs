@@ -30,7 +30,7 @@ const STAGED = fs.readFileSync(path.join(FIX, 'repair-status-3.7.1-staged.txt'),
 let pid = 4_300_000;
 function fakeWorld(t, script = (s) => s.proc.exit(0)) {
   const spawns = [], killed = [], prio = [];
-  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree, realPrio = os.setPriority;
+  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree, realKillAsync = procKill.killTreesAsync, realPrio = os.setPriority;
   cp.spawn = (bin, args) => {
     const proc = new EventEmitter();
     proc.pid = ++pid; proc.stdout = new EventEmitter(); proc.stderr = new EventEmitter(); proc.kill = () => true;
@@ -41,8 +41,9 @@ function fakeWorld(t, script = (s) => s.proc.exit(0)) {
   };
   cp.spawnSync = () => ({ status: 0, stdout: '', stderr: '' });
   procKill.hardKillTree = (p) => killed.push(p);
+  procKill.killTreesAsync = (pids) => { killed.push(...pids); return Promise.resolve(); };   // QUIT-HANG: stop()'s batched async kill
   os.setPriority = (p, v) => prio.push([p, v]);
-  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; os.setPriority = realPrio; });
+  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; procKill.killTreesAsync = realKillAsync; os.setPriority = realPrio; });
   return { spawns, killed, prio };
 }
 function home(t) {

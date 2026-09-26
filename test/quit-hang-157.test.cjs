@@ -1,0 +1,211 @@
+'use strict';
+
+/**
+ * QUIT-HANG (Jim's SLOW-START-FLOOR-CRASH, 2026-09-26): quitting froze the app window
+ * (WER AppHangB1 x3) because teardown ran a synchronous `taskkill /T /F` per agent
+ * terminal plus a synchronous `mempalace daemon stop`, all on Electron's main thread.
+ *
+ *  F1 the quit path never calls spawnSync: ONE async batched taskkill for every tree,
+ *     ConPTY closed only after the sweep, the daemon stop async, the whole batch capped;
+ *     windows hidden first; will-quit joins the work before app.exit.
+ *  F2 a Windows logoff/shutdown (`session-end`) runs the teardown without the confirm.
+ *  F3 log rows: window-ready, unresponsive/responsive, render/child-process-gone,
+ *     quit timings.
+ *
+ * child_process is faked at the module boundary; process.platform is forced to win32
+ * where the Windows path is under test, so this runs the same on every OS.
+ */
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const cp = require('node:child_process');
+const { EventEmitter } = require('node:events');
+const loadTs = require('./load-ts.cjs');
+
+const procKill = loadTs('src/main/procKill.ts');
+const { PtyManager } = loadTs('src/main/pty.ts');
+const { runQuitSteps } = loadTs('src/main/quitTeardown.ts');
+
+/** Source as LF (a Windows checkout with autocrlf has CRLF). */
+const readSrc = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8').replace(/\r\n/g, '\n');
+const INDEX = readSrc('src/main/index.ts');
+const between = (src, from, to) => {
+  const a = src.indexOf(from);
+  assert.ok(a >= 0, `missing ${from}`);
+  const b = src.indexOf(to, a + from.length);
+  assert.ok(b > a, `missing ${to} after ${from}`);
+  return src.slice(a, b);
+};
+
+/** Force win32, fake spawn (recorded, scripted), and make any spawnSync a loud failure
+ *  that also BLOCKS like the real one, so a sync call shows up in timing as well. */
+function winWorld(t, { exitAfterMs = 0 } = {}) {
+  const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+  const spawns = [];
+  const syncs = [];
+  const realSpawn = cp.spawn, realSync = cp.spawnSync;
+  cp.spawn = (bin, args, opts) => {
+    const proc = new EventEmitter();
+    proc.pid = 90_000 + spawns.length;
+    spawns.push({ bin, args: [...args], opts, proc });
+    if (exitAfterMs != null) setTimeout(() => proc.emit('close', 0), exitAfterMs);
+    return proc;
+  };
+  cp.spawnSync = (bin, args) => {
+    syncs.push({ bin, args: [...args] });
+    const end = Date.now() + 150; while (Date.now() < end) { /* a real sync child blocks */ }
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; Object.defineProperty(process, 'platform', realPlatform); });
+  return { spawns, syncs };
+}
+
+function fakeSession(pid, log) {
+  return { proc: { pid, kill: () => log.push(`kill ${pid}`) } };
+}
+
+// ── F1: the tree kill ──────────────────────────────────────────────────────
+
+test('F1 killTreesAsync: ONE async taskkill /T /F for every tree, never spawnSync, returns at once', async (t) => {
+  const w = winWorld(t, { exitAfterMs: 20 });
+  const t0 = Date.now();
+  const p = procKill.killTreesAsync([11, 22, 22, 0, -3, 1.5, 33]);
+  assert.ok(Date.now() - t0 < 50, 'the call itself does not block');
+  await p;
+  assert.equal(w.syncs.length, 0, 'no spawnSync');
+  assert.equal(w.spawns.length, 1, 'one batched taskkill');
+  assert.equal(w.spawns[0].bin, 'taskkill');
+  assert.deepEqual(w.spawns[0].args, ['/T', '/F', '/PID', '11', '/PID', '22', '/PID', '33']);
+  assert.equal(w.spawns[0].opts.windowsHide, true, 'never flashes a console window');
+});
+
+test('F1 killTreesAsync: nothing to kill spawns nothing; a taskkill that never exits is capped', async (t) => {
+  const w = winWorld(t, { exitAfterMs: null });
+  await procKill.killTreesAsync([]);
+  assert.equal(w.spawns.length, 0);
+  const t0 = Date.now();
+  await procKill.killTreesAsync([44], 40);
+  const took = Date.now() - t0;
+  assert.ok(took >= 35 && took < 1000, `capped at ~40 ms (took ${took})`);
+});
+
+test('F1 PtyManager.killAllAsync: one batched sweep of every tree, ConPTY closed only AFTER it, no spawnSync', async (t) => {
+  const log = [];
+  const w = winWorld(t, { exitAfterMs: null });
+  const m = new PtyManager();
+  let exits = 0;
+  m.exitHandler = () => { exits++; };
+  m.sessions.set('a', fakeSession(101, log));
+  m.sessions.set('b', fakeSession(202, log));
+  m.sessions.set('c', fakeSession(303, log));
+  const t0 = Date.now();
+  const done = m.killAllAsync(1000);
+  assert.ok(Date.now() - t0 < 50, 'returns without blocking the main thread');
+  assert.equal(m.sessions.size, 0, 'sessions forgotten at once');
+  assert.equal(m.exitHandler, null, 'natural-exit teardown suppressed at once');
+  assert.equal(w.spawns.length, 1);
+  assert.deepEqual(w.spawns[0].args, ['/T', '/F', '/PID', '101', '/PID', '202', '/PID', '303']);
+  assert.deepEqual(log, [], 'the trees are still intact while taskkill enumerates them');
+  w.spawns[0].proc.emit('close', 0);
+  await done;
+  assert.deepEqual(log, ['kill 101', 'kill 202', 'kill 303']);
+  assert.equal(w.syncs.length, 0);
+  assert.equal(exits, 0);
+});
+
+test('F1 PtyManager.killAllAsync: a wedged taskkill still closes every ConPTY at the cap', async (t) => {
+  const log = [];
+  winWorld(t, { exitAfterMs: null });
+  const m = new PtyManager();
+  m.sessions.set('a', fakeSession(7, log));
+  await m.killAllAsync(30);
+  assert.deepEqual(log, ['kill 7']);
+});
+
+// ── F1: the bounded batch ──────────────────────────────────────────────────
+
+test('F1 runQuitSteps: steps run concurrently, each timed, a hang is capped, a throw is recorded', async () => {
+  const started = [];
+  const t0 = Date.now();
+  const r = await runQuitSteps([
+    { name: 'fast', run: () => { started.push('fast'); return new Promise((res) => setTimeout(res, 10)); } },
+    { name: 'hang', run: () => { started.push('hang'); return new Promise(() => {}); } },
+    { name: 'boom', run: () => { started.push('boom'); throw new Error('x'); } }
+  ], 60);
+  const took = Date.now() - t0;
+  assert.deepEqual(started, ['fast', 'hang', 'boom'], 'all started together');
+  assert.ok(took >= 55 && took < 1000, `bounded by the cap (took ${took})`);
+  assert.equal(r.capped, true);
+  assert.equal(typeof r.steps.fast, 'number');
+  assert.equal(r.steps.hang, 'pending');
+  assert.equal(r.steps.boom, 'error');
+});
+
+test('F1 runQuitSteps: settles as soon as every step does (the cap is a ceiling, not a wait)', async () => {
+  const t0 = Date.now();
+  const r = await runQuitSteps([{ name: 'a', run: () => Promise.resolve() }], 5_000);
+  assert.ok(Date.now() - t0 < 500);
+  assert.equal(r.capped, false);
+});
+
+// ── F1: wiring (index.ts) ──────────────────────────────────────────────────
+
+test('F1 WIRING: the quit path has no synchronous tree kill or daemon stop', () => {
+  const teardown = between(INDEX, 'function teardownAndQuit(): void {', '/** Upper bound on the async quit work');
+  assert.doesNotMatch(teardown, /ptyManager\.killAll\(\)/, 'no per-terminal spawnSync taskkill');
+  assert.doesNotMatch(teardown, /memory\.stop\(/, 'the daemon stop is inside the async quit work');
+  assert.doesNotMatch(teardown, /spawnSync|hardKillTree/);
+  assert.match(teardown, /void beginQuitWork\(\)/);
+  const work = between(INDEX, 'function beginQuitWork(', '\n}\n');
+  assert.match(work, /memory\.stop\(\{ quitting: true \}\)/);
+  assert.match(work, /ptyManager\.killAllAsync\(\)/);
+  assert.match(work, /if \(!quitWork\)/, 'idempotent: every quit path joins one batch');
+  const cap = Number(/const QUIT_WORK_CAP_MS = ([\d_]+);/.exec(INDEX)[1].replace(/_/g, ''));
+  assert.ok(cap > 0 && cap <= 6_000, `bounded total (${cap} ms)`);
+  const pty = readSrc('src/main/pty.ts');
+  const asyncKill = between(pty, '  killAllAsync(capMs?: number): Promise<void> {', '\n  }\n');
+  assert.doesNotMatch(asyncKill, /hardKillTree|spawnSync/);
+});
+
+test('F1 WIRING: windows are hidden before any teardown step', () => {
+  const teardown = between(INDEX, 'function teardownAndQuit(): void {', "ipcMain.handle('app:confirmClose'");
+  const hide = teardown.indexOf('w.hide()');
+  assert.ok(hide > 0, 'hides every window');
+  assert.ok(hide < teardown.indexOf('clearMissionTimers()'), 'first');
+});
+
+test('F1 WIRING: will-quit joins the quit work before app.exit, and logs the timings', () => {
+  const flush = between(INDEX, "let analyticsFlushed = false;\napp.on('will-quit', (e) => {", '\n});\n');
+  assert.match(flush, /e\.preventDefault\(\)/);
+  assert.match(flush, /beginQuitWork\(\)\.then/);
+  assert.match(flush, /kind: 'quit-done'/);
+  assert.match(flush, /app\.exit\(0\)/);
+  const first = between(INDEX, "app.on('will-quit', () => {", '\n});\n');
+  assert.doesNotMatch(first, /memory\.stop\(/);
+  assert.match(first, /void beginQuitWork\(\)/);
+});
+
+// ── F2 / F3 ────────────────────────────────────────────────────────────────
+
+test('F2 WIRING: a Windows session-end skips the confirm and runs the teardown', () => {
+  const health = between(INDEX, 'function watchWindowHealth(', '\n}\n');
+  const end = between(health, "win.on('session-end'", '});');
+  assert.match(end, /teardownAndQuit\(\)/);
+  assert.match(end, /closingTime\.cancel\(\)/);
+  assert.match(INDEX, /allWindows\.add\(win\);\n  watchWindowHealth\(win, isFloor\);/, 'every window, primary and floor');
+  // teardownAndQuit sets allowQuit first, so the close handler's confirm is bypassed.
+  assert.match(between(INDEX, 'function teardownAndQuit(): void {', 'const t0'), /allowQuit = true;/);
+});
+
+test('F3 WIRING: freeze and slow-start rows exist', () => {
+  const health = between(INDEX, 'function watchWindowHealth(', '\n}\n');
+  for (const kind of ['window-ready', 'window-unresponsive', 'window-responsive', 'render-process-gone']) {
+    assert.ok(health.includes(`'${kind}'`), kind);
+  }
+  assert.match(health, /wc\.once\('did-finish-load'/);
+  assert.match(INDEX, /app\.on\('child-process-gone'[\s\S]{0,400}kind: 'child-process-gone'/);
+  assert.match(INDEX, /kind: 'quit-teardown', syncMs/);
+});

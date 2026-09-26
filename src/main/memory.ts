@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync, statSync,
 import { basename, dirname, join } from 'node:path';
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { constants as osConstants, setPriority } from 'node:os';
-import { ensureKilled, hardKillTree } from './procKill';
+import { ensureKilled, hardKillTree, killTreesAsync } from './procKill';
 import { quarantineDirsToReap, quarantineStampMs, nextMineDelayMs } from './palaceReap';
 import {
   archivedAgentIds, fingerprintMemory, loadMineState, queueChangedMemory,
@@ -331,31 +331,47 @@ export class MemoryManager {
    * a repair, the daemon start/stop clients) is killed with its whole process tree:
    * mempalace is a launcher around python, and killing only the launcher orphans the
    * python child. A daemon this manager may have started is stopped with
-   * `mempalace daemon stop`: synchronously and bounded when quitting (nothing async
-   * survives quit), fire-and-forget otherwise (home change, reset).
+   * `mempalace daemon stop`: awaited and bounded (QUIT_DAEMON_STOP_MS) when quitting,
+   * fire-and-forget otherwise (home change, reset).
+   *
+   * QUIT-HANG: nothing here blocks the main thread any more. The trees go down in ONE
+   * async batched kill and the quit-time daemon stop is an async child: the old
+   * spawnSync pair froze Electron's UI thread for up to 5 s + 10 s per child at quit,
+   * long enough for Windows to ghost the window and file an AppHang. The returned
+   * promise resolves once both are done or capped; it never rejects. A second call is a
+   * no-op (resolves at once): will-quit joins the FIRST call's promise, not a new one.
    */
-  stop(opts: { quitting?: boolean } = {}): void {
+  stop(opts: { quitting?: boolean } = {}): Promise<void> {
     this.mineStopped = true;
     if (this.pendingSwap) {
       try { rmSync(this.pendingSwap.staged, { recursive: true, force: true }); } catch { /* N2 reaps it next start */ }
       this.pendingSwap = null;
     }
     if (this.mineTimer) { clearTimeout(this.mineTimer); this.mineTimer = null; }
-    for (const child of [...this.children]) {
-      if (child.pid) hardKillTree(child.pid);
-    }
+    const pids: number[] = [];
+    for (const child of [...this.children]) { if (child.pid) pids.push(child.pid); }
     this.children.clear();
-    if (!this.daemonMayRun) return;
+    const trees = killTreesAsync(pids).catch(() => undefined);
+    if (!this.daemonMayRun) return trees;
     this.daemonMayRun = false;
     this.daemonStart = null;
     const bin = this.bin();
-    if (!bin) return;
-    if (opts.quitting) {
-      try { spawnSync(bin, ['daemon', 'stop'], { env: this.childEnv(), stdio: 'ignore', timeout: QUIT_DAEMON_STOP_MS, windowsHide: true }); }
-      catch { /* best effort: quit goes ahead */ }
-    } else {
+    if (!bin) return trees;
+    if (!opts.quitting) {
       void this.stopDaemon();
+      return trees;
     }
+    const daemon = new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+      const timer = setTimeout(finish, QUIT_DAEMON_STOP_MS);   // ref'd on purpose: the quit awaits this cap
+      try {
+        const proc = spawn(bin, ['daemon', 'stop'], { env: this.childEnv(), stdio: 'ignore', windowsHide: true });
+        proc.once('close', finish);
+        proc.once('error', finish);
+      } catch { finish(); }   // best effort: quit goes ahead
+    });
+    return Promise.all([trees, daemon]).then(() => undefined);
   }
 
   /** spawn + remember the child until it exits, so stop() can reap it. */

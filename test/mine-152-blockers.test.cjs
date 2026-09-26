@@ -31,7 +31,7 @@ function fakeWorld(t, script) {
   const spawns = [];
   const syncs = [];
   const killed = [];
-  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree;
+  const realSpawn = cp.spawn, realSync = cp.spawnSync, realKill = procKill.hardKillTree, realKillAsync = procKill.killTreesAsync;
   cp.spawn = (bin, args) => {
     const proc = new EventEmitter();
     proc.pid = ++pid;
@@ -46,7 +46,8 @@ function fakeWorld(t, script) {
   };
   cp.spawnSync = (bin, args, opts) => { syncs.push({ bin, args: [...args], opts }); return { status: 0, stdout: '', stderr: '' }; };
   procKill.hardKillTree = (p) => { killed.push(p); };
-  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; });
+  procKill.killTreesAsync = (pids) => { killed.push(...pids); return Promise.resolve(); };   // QUIT-HANG: stop()'s batched async kill
+  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; procKill.hardKillTree = realKill; procKill.killTreesAsync = realKillAsync; });
   return { spawns, syncs, killed };
 }
 
@@ -279,7 +280,8 @@ test('(2) quit while the job SUBMIT client is in flight: killed, and nothing new
   submit.proc.emit('close', null);
   await pass;
   await tick();
-  assert.equal(w.spawns.length, before, 'no status probe or retry after quit');
+  // QUIT-HANG: the quit-time daemon stop is an async child now (it was a spawnSync).
+  assert.deepEqual(w.spawns.slice(before).map(verb), ['daemon stop'], 'no status probe or retry after quit');
 });
 
 test('X2: an unreachable daemon is forgotten (the next mine starts one); a live one is not', async (t) => {
@@ -317,7 +319,7 @@ test('X2: parseDaemonJobState reads the real `daemon jobs` layout', () => {
 
 // ── (2) quit ────────────────────────────────────────────────────────────────
 
-test('(2) QUIT: every in-flight mempalace tree is killed and the daemon stopped (sync, bounded); a second stop is a no-op', async (t) => {
+test('(2) QUIT: every in-flight mempalace tree is killed and the daemon stopped (async, bounded, never spawnSync); a second stop is a no-op', async (t) => {
   const w = fakeWorld(t, (s) => daemonCli(s, { wait: 'hang' }));   // the job's wait client is in flight
   const root = home(t); agent(root, 'a', 'x');
   const m = manager(t, root);
@@ -327,18 +329,29 @@ test('(2) QUIT: every in-flight mempalace tree is killed and the daemon stopped 
   await until(() => w.spawns.some((s) => verb(s) === `daemon wait ${JOB}`));
   const mine = w.spawns.find((s) => verb(s) === `daemon wait ${JOB}`);
   const before = w.spawns.length;
-  m.stop({ quitting: true });
-  assert.ok(w.killed.includes(mine.proc.pid), 'the mine\'s whole tree (python child included) is killed');
-  const stops = w.syncs.filter((s) => s.args.join(' ') === 'daemon stop');
-  assert.equal(stops.length, 1, 'daemon stop, synchronously');
-  assert.ok(stops[0].opts.timeout > 0 && stops[0].opts.timeout <= 10_000, 'bounded');
-  m.stop({ quitting: true });
-  assert.equal(w.syncs.filter((s) => s.args.join(' ') === 'daemon stop').length, 1, 'idempotent');
+  const stopped = m.stop({ quitting: true });
+  assert.ok(stopped instanceof Promise, 'QUIT-HANG: stop hands back a promise the quit can join');
+  assert.ok(w.killed.includes(mine.proc.pid), "the mine's whole tree (python child included) is killed");
+  assert.equal(w.syncs.length, 0, 'QUIT-HANG: nothing synchronous on the quit path');
+  const stops = w.spawns.filter((s) => verb(s) === 'daemon stop');
+  assert.equal(stops.length, 1, 'daemon stop, as an async child');
+  await stopped;
+  const again = m.stop({ quitting: true });
+  await again;
+  assert.equal(w.spawns.filter((s) => verb(s) === 'daemon stop').length, 1, 'idempotent');
   mine.proc.emit('close', null);
   await pass;
   assert.equal(miner.loadMineState(root).entries.a, undefined, 'a killed mine never records a fingerprint');
   await tick();
-  assert.equal(w.spawns.length, before, 'after quit, nothing new is spawned (no status probe, no retry)');
+  assert.equal(w.spawns.length, before + 1, 'after quit, nothing new is spawned but the one daemon stop (no status probe, no retry)');
+});
+
+test('(2) QUIT: the quit-time daemon stop is capped (bounded) and nothing on the stop path is synchronous', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'memory.ts'), 'utf8');
+  assert.match(src, /const QUIT_DAEMON_STOP_MS = 5_000;/);
+  const stop = src.slice(src.indexOf('  stop(opts: { quitting?: boolean } = {}): Promise<void> {'), src.indexOf('  /** spawn + remember the child until it exits'));
+  assert.match(stop, /setTimeout\(finish, QUIT_DAEMON_STOP_MS\)/);
+  assert.doesNotMatch(stop, /spawnSync|hardKillTree\(/, 'no synchronous child or kill on the stop path');
 });
 
 test('(2) a stopped manager starts nothing new', async (t) => {
@@ -477,7 +490,10 @@ test('(4) a memory.md appended to every minute is mined within ~10 min of its fi
 
 test('(2) WIRING: every quit path stops memory in quitting mode (will-quit and teardownAndQuit)', () => {
   const index = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
-  assert.match(index, /app\.on\('will-quit', \(\) => \{[\s\S]{0,1200}memory\.stop\(\{ quitting: true \}\)/);
+  // QUIT-HANG: both paths start the same idempotent async quit work, which stops memory in quitting mode.
+  assert.match(index, /app\.on\('will-quit', \(\) => \{[\s\S]{0,1200}void beginQuitWork\(\)/);
   const teardown = index.slice(index.indexOf('function teardownAndQuit(): void {'), index.indexOf("ipcMain.handle('app:confirmClose'"));
-  assert.match(teardown, /memory\.stop\(\{ quitting: true \}\)/);
+  assert.match(teardown, /void beginQuitWork\(\)/);
+  const work = index.slice(index.indexOf('function beginQuitWork('), index.indexOf('function beginQuitWork(') + 800);
+  assert.match(work, /memory\.stop\(\{ quitting: true \}\)/);
 });

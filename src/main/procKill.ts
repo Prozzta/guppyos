@@ -17,7 +17,7 @@
  * daemon the agent intentionally left running (a dev server started via a Bash
  * tool) must survive its parent session.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 /** Grace between the polite signal and the SIGKILL escalation. */
 export const KILL_GRACE_MS = 4_000;
@@ -40,6 +40,45 @@ export function hardKillTree(pid: number): void {
   try { process.kill(-pid, 'SIGKILL'); } catch {
     try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
   }
+}
+
+/** Cap for one batched async tree kill (see killTreesAsync). */
+export const KILL_TREES_ASYNC_MS = 5_000;
+
+/**
+ * QUIT-HANG: kill several process trees WITHOUT blocking the calling (main) thread.
+ *
+ * hardKillTree's `spawnSync('taskkill')` froze Electron's main thread for the whole
+ * sweep: one synchronous taskkill per agent terminal (each a big tree) at quit ran past
+ * the ~5 s after which Windows ghosts the window and files an AppHang. Here Windows gets
+ * ONE asynchronous `taskkill /T /F /PID a /PID b ...` (taskkill carries on past a pid
+ * that is already gone), resolved when it exits or after `capMs`, whichever is first;
+ * a taskkill still running at the cap is left to finish on its own. POSIX group
+ * SIGKILLs are syscalls, never a blocking child, so they run inline. Never rejects.
+ */
+export function killTreesAsync(pids: readonly number[], capMs = KILL_TREES_ASYNC_MS): Promise<void> {
+  const valid = [...new Set(pids.filter((p) => Number.isInteger(p) && p > 0))];
+  if (valid.length === 0) return Promise.resolve();
+  if (process.platform !== 'win32') {
+    for (const pid of valid) {
+      try { process.kill(-pid, 'SIGKILL'); } catch {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+      }
+    }
+    return Promise.resolve();
+  }
+  const args = ['/T', '/F'];
+  for (const pid of valid) args.push('/PID', String(pid));
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = (): void => { if (done) return; done = true; clearTimeout(timer); resolve(); };
+    const timer = setTimeout(finish, capMs);   // ref'd on purpose: the quit awaits this cap
+    try {
+      const proc = spawn('taskkill', args, { stdio: 'ignore', windowsHide: true });
+      proc.once('close', finish);
+      proc.once('error', finish);
+    } catch { finish(); }
+  });
 }
 
 /** After a graceful kill (node-pty's SIGHUP), make sure the PIDs actually get
