@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
+import { deleteLegacyPalace, legacyPalaceInfo } from './legacyPalace';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
@@ -4259,19 +4260,47 @@ ipcMain.handle('tools:status', (): ToolStatus[] => {
   });
 });
 
-// ─── IPC: semantic memory (MemPalace CLI) ───────────────────────────────────
-// refresh() = resetBinCache + an idempotent start(). The poll is the one thing
-// that reliably notices mempalace being installed after boot, so it is what arms
-// the mine loop that boot's start() had to skip — otherwise the pill reads
-// "getting ready" until the app is restarted.
-ipcMain.handle('hive:memoryStatus', () => memory.refresh());
-ipcMain.handle('hive:searchMemory', (_evt, query: unknown, wing: unknown) => {
-  if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
-  return memory.search(query, { wing: typeof wing === 'string' ? wing : undefined });
+// ─── IPC: semantic memory (the memory engine) ───────────────────────────────
+// MEMPALACE-REMOVAL: the Memory panel, Command Center and the voice tools ask the memory
+// engine directly (main-internal, caller wing `human`); there is no CLI to find and no mine
+// step. The status also reports the OLD MemPalace data still on disk, which only the Human
+// can delete (god's D2: confirmed, never automatic, all or nothing).
+const memoryReply = (r: { exit: number; text?: string; error?: string }): { ok: boolean; output: string; error?: string } =>
+  r.exit === 0 ? { ok: true, output: r.text ?? '' } : { ok: false, output: r.text ?? '', error: r.error ?? `exit ${r.exit}` };
+ipcMain.handle('hive:memoryStatus', async () => {
+  const reason = nativeMemory.unavailable();
+  let index: Record<string, unknown> | null = null;
+  if (!reason) {
+    const r = await nativeMemory.query('status');
+    if (r.exit === 0 && r.json && typeof r.json === 'object') index = r.json as Record<string, unknown>;
+  }
+  return { enabled: readConfig().semanticMemory !== false, available: reason === null, reason, index, legacy: legacyPalaceInfo(readConfig().harnessHome) };
 });
-ipcMain.handle('hive:memoryWakeUp', (_evt, wing: unknown) =>
-  memory.wakeUp(typeof wing === 'string' ? wing : undefined));
-ipcMain.handle('hive:mineNow', () => { memory.mineNow(); return { ok: true }; });
+ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) => {
+  if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
+  return memoryReply(await nativeMemory.query('search', { query, ...(typeof wing === 'string' && wing ? { wing } : {}) }));
+});
+ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) =>
+  memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {})));
+ipcMain.handle('memory:deleteLegacyData', async () => {
+  const home = readConfig().harnessHome;
+  const info = legacyPalaceInfo(home);
+  if (!home || !info) return { ok: true, bytes: 0, paths: [] };
+  const mb = (info.bytes / 1048576).toFixed(0);
+  const opts = {
+    type: 'warning' as const,
+    buttons: [`Delete ${mb} MB`, 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    message: `Delete the old MemPalace data (${mb} MB)?`,
+    detail: `The app no longer uses it. This removes:\n${info.paths.join('\n')}\n\nYour agents' memory is kept: it lives in the memory engine and in each agent's memory.md.`
+  };
+  const choice = mainWindow ? await dialog.showMessageBox(mainWindow, opts) : await dialog.showMessageBox(opts);
+  if (choice.response !== 0) return { ok: false, cancelled: true, error: 'cancelled', locked: [] };
+  const r = deleteLegacyPalace(home);
+  try { hive.appendLog({ kind: 'legacy-palace-delete', ok: r.ok, bytes: r.ok ? r.bytes : info.bytes, ...(r.ok ? {} : { error: r.error, locked: r.locked.slice(0, 20) }) }); } catch { /* best-effort */ }
+  return r;
+});
 // Condense memory.md on demand: an explicit id condenses that one agent (skips
 // the size trigger — a "condense now" button); no id runs a full threshold scan.
 ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>

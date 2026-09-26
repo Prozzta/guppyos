@@ -2,32 +2,29 @@ import { useEffect, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 
+/** MEMPALACE-REMOVAL: the memory engine's status (mirrors the preload's MemoryStatus). */
 interface MemoryStatus {
-  available: boolean;
   enabled: boolean;
-  active: boolean;
-  initialized: boolean;
-  palacePath: string | null;
-  model: 'minilm' | 'embeddinggemma';
-  bin: string | null;
-  miningMode: 'unknown' | 'daemon' | 'one-shot';
-  miningWarning: string | null;
-  swapPending?: { attempts: number; max: number; nextAt: number } | null;
+  available: boolean;
+  reason: 'disabled' | 'no-hive' | 'no-runtime' | 'shim-failed' | null;
+  index: { sources?: number; chunks?: number; dbBytes?: number } | null;
+  legacy: { paths: string[]; bytes: number } | null;
 }
 
-type ModelId = 'minilm' | 'embeddinggemma';
+const mb = (bytes: number): string => `${Math.max(1, Math.round(bytes / 1048576))} MB`;
 
-// Plain-language framing of each model — lead with the benefit the user actually
-// chooses between, not the model's codename.
-const MODELS: { id: ModelId; title: string; detail: string }[] = [
-  { id: 'minilm',         title: 'Fast',         detail: 'English only · ~90 MB' },
-  { id: 'embeddinggemma', title: 'Multilingual', detail: 'all languages · ~300 MB' },
-];
+/** Plain-language reason memory cannot run (the pill's "Unavailable" line). */
+const WHY: Record<string, string> = {
+  'no-hive': 'No hive folder is set up yet.',
+  'no-runtime': 'The memory engine is missing from this install. Reinstalling the app restores it.',
+  'shim-failed': "The memory command couldn't be written into the hive folder."
+};
 
 /**
- * Lets the human search the shared memory agents build up across sessions, turn
- * it on/off, and pick how it searches. Agents read/write it directly; this is
- * the human-facing window into the same memory.
+ * Lets the human search the shared memory agents build up across sessions and turn it on or
+ * off. Agents read and write the same memory through the memory engine; this is the
+ * human-facing window into it. Since 1.1.59 there is nothing to install and no model to pick:
+ * the engine is built in. Old MemPalace data, if any is left on disk, can be deleted here.
  */
 export function MemoryPanel() {
   const [open, setOpen] = useState(false);
@@ -35,16 +32,13 @@ export function MemoryPanel() {
   const [query, setQuery] = useState('');
   const [result, setResult] = useState<string>('');
   const [busy, setBusy] = useState(false);
+  const [legacyNote, setLegacyNote] = useState<string>('');
 
   const refreshStatus = async () => {
     try { setStatus(await window.cth.memoryStatus()); } catch { /* ignore */ }
   };
   useEffect(() => { refreshStatus(); }, []);
 
-  const setModel = async (model: ModelId) => {
-    await window.cth.updateConfig({ embeddingModel: model });
-    await refreshStatus();
-  };
   const toggleEnabled = async () => {
     await window.cth.updateConfig({ semanticMemory: !(status?.enabled ?? true) });
     await refreshStatus();
@@ -62,21 +56,29 @@ export function MemoryPanel() {
     }
   };
 
-  const active = status?.active;
-  const pill = active ? `🧠 memory · ${status?.model}` : '🧠 memory';
+  const deleteLegacy = async () => {
+    setLegacyNote('');
+    const r = await window.cth.deleteLegacyMemoryData();
+    if (r.ok) setLegacyNote(r.paths.length ? `Deleted ${mb(r.bytes)} of old MemPalace data.` : 'Nothing to delete.');
+    else if (!('cancelled' in r && r.cancelled)) {
+      setLegacyNote(`Nothing was deleted: ${r.error}.${r.locked.length ? ` In use: ${r.locked.slice(0, 3).join(', ')}${r.locked.length > 3 ? ` and ${r.locked.length - 3} more` : ''}. Close whatever holds them (an old MemPalace process, or restart the PC) and try again.` : ''}`);
+    }
+    await refreshStatus();
+  };
 
-  // One clear state line: is memory working, off, or not set up?
-  const state: { dot: string; label: string } = !status?.available
-    ? { dot: 'var(--cth-coral)', label: 'Not set up' }
+  const active = !!status?.available;
+  const pill = '🧠 memory';
+
+  // One clear state line: is memory working, off, or unavailable (and why)?
+  const state: { dot: string; label: string } = !status
+    ? { dot: 'var(--cth-ink-500)', label: '…' }
     : !status.enabled
       ? { dot: 'var(--cth-ink-500)', label: 'Off' }
-      : status.miningMode === 'one-shot'
-        ? { dot: 'var(--cth-lemon)', label: 'On · compatibility mining' }
-      : status.initialized
-        ? { dot: 'var(--cth-mint)', label: 'On · ready' }
-        : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };
-
-  const canSearch = !!status?.available && !!status?.enabled;
+      : !status.available
+        ? { dot: 'var(--cth-coral)', label: 'Unavailable' }
+        : typeof status.index?.sources === 'number'
+          ? { dot: 'var(--cth-mint)', label: `On · ${status.index.sources} notes indexed` }
+          : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };
 
   return (
     <div style={{ position: 'absolute', bottom: 12, left: 12, width: open ? 380 : 'auto', zIndex: 40 }}>
@@ -112,7 +114,7 @@ export function MemoryPanel() {
                 <span style={{ width: 9, height: 9, background: state.dot, boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }} />
                 {state.label}
               </span>
-              {status?.available && (
+              {status && (
                 <PixelButton
                   variant={status.enabled ? 'secondary' : 'primary'}
                   size="sm"
@@ -123,93 +125,14 @@ export function MemoryPanel() {
               )}
             </div>
 
-            {status?.swapPending && (
+            {status?.enabled && !status.available && status.reason && WHY[status.reason] && (
               <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45, background: 'var(--cth-cream-100)', padding: 8 }}>
-                A rebuilt, smaller palace is waiting to be swapped in: the palace is in use (try {status.swapPending.attempts} of {status.swapPending.max}). Mining resumes after.
-              </div>
-            )}
-
-            {status?.miningWarning && (
-              <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45, background: 'var(--cth-cream-100)', padding: 8 }}>
-                {status.miningWarning}
-              </div>
-            )}
-
-            {/* Not installed: show full self-sufficient setup so any machine can follow it. */}
-            {!status?.available && (
-              <div style={{
-                fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: 1.6,
-                background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 10
-              }}>
-                Meaning-based search isn't installed yet.
-                {/* The commands used to be inlined here, hardcoded for macOS
-                    (`curl … | sh`, `source ~/.zshrc`) — dead text under cmd.exe or
-                    PowerShell, on the platform most likely to be missing the tool.
-                    Setup owns the platform-correct commands now, plus the uv
-                    dependency, the live detected state, and the delegate-to-Michael
-                    path. One source of truth beats two that disagree by OS. */}
-                <div style={{ marginTop: 8 }}>
-                  <PixelButton
-                    variant="primary"
-                    size="sm"
-                    onClick={() => {
-                      // Prerequisites moved from a Command Center tab into
-                      // Settings; requesting the old tab key is now a no-op that
-                      // silently does nothing on click.
-                      window.dispatchEvent(new CustomEvent('cth:open-settings', {
-                        detail: { section: 'Prerequisites' }
-                      }));
-                      setOpen(false);
-                    }}
-                  >
-                    set it up in Prerequisites →
-                  </PixelButton>
-                </div>
-                <div style={{ marginTop: 8, color: 'var(--cth-ink-500)' }}>
-                  Agents still keep plain notes without it.
-                </div>
-              </div>
-            )}
-
-            {/* Model: a benefit-framed choice, not a codename dump. */}
-            {status?.available && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span style={{ fontSize: 11, color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-display)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  Search language
-                </span>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {MODELS.map((m) => {
-                    const sel = status.model === m.id;
-                    return (
-                      <button
-                        key={m.id}
-                        onClick={() => setModel(m.id)}
-                        style={{
-                          flex: 1, textAlign: 'left', cursor: 'pointer', border: 'none',
-                          padding: '7px 9px 6px',
-                          background: sel ? 'var(--cth-lemon-light)' : 'var(--cth-cream-100)',
-                          boxShadow: sel ? 'inset 0 0 0 1.5px var(--cth-ink-500)' : 'inset 0 0 0 1px var(--cth-ink-300)',
-                          fontFamily: 'var(--cth-font-ui)'
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: 'var(--cth-ink-900)' }}>
-                          <span style={{
-                            width: 8, height: 8, flexShrink: 0,
-                            background: sel ? 'var(--cth-ink-900)' : 'transparent',
-                            boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)'
-                          }} />
-                          {m.title}
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--cth-ink-500)', marginTop: 3 }}>{m.detail}</div>
-                      </button>
-                    );
-                  })}
-                </div>
+                {WHY[status.reason]} Agents still keep plain notes in memory.md.
               </div>
             )}
 
             {/* Search the memory. */}
-            {canSearch && (
+            {active && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <input
@@ -239,6 +162,23 @@ export function MemoryPanel() {
                   }}>{result}</pre>
                 )}
               </div>
+            )}
+
+            {/* Old MemPalace data: shown only while some is left; deleted only on request. */}
+            {status?.legacy && (
+              <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45, background: 'var(--cth-cream-100)', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <span>
+                  Old MemPalace data ({mb(status.legacy.bytes)}) is still on disk at {status.legacy.paths[0]}. The app no longer uses it.
+                </span>
+                <div>
+                  <PixelButton variant="secondary" size="sm" onClick={deleteLegacy}>
+                    Delete old MemPalace data ({mb(status.legacy.bytes)})
+                  </PixelButton>
+                </div>
+              </div>
+            )}
+            {legacyNote && (
+              <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45 }}>{legacyNote}</div>
             )}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--cth-ink-300)', paddingTop: 10 }}>

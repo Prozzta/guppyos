@@ -1088,7 +1088,7 @@ function MemoryTab({ godId, who: controlledWho, onWho }: { godId: string; who?: 
         {textSearched && textResults.length === 0 && <Muted>Nothing matched.</Muted>}
       </Section>
 
-      <Section title="SEMANTIC SEARCH (MemPalace)">
+      <Section title="SEMANTIC SEARCH">
         <div style={{ display: 'flex', gap: 6 }}>
           <input
             value={query}

@@ -353,17 +353,17 @@ export interface HarnessConfig {
   providerDefaultModels?: Partial<Record<AgentProvider, string>>;
 }
 
+/** MEMPALACE-REMOVAL: the memory engine's status (the only memory since 1.1.59). */
 export interface MemoryStatus {
-  available: boolean;
+  /** Settings' semantic memory switch. */
   enabled: boolean;
-  active: boolean;
-  initialized: boolean;
-  palacePath: string | null;
-  model: 'minilm' | 'embeddinggemma';
-  bin: string | null;
-  miningMode: 'unknown' | 'daemon' | 'one-shot';
-  miningWarning: string | null;
-  swapPending?: { attempts: number; max: number; nextAt: number } | null;
+  /** Usable right now (on, a hive, the bundled runtime present). */
+  available: boolean;
+  reason: 'disabled' | 'no-hive' | 'no-runtime' | 'shim-failed' | null;
+  /** The engine's own status (sources, chunks, dbBytes, perWing, ...) when available. */
+  index: { sources?: number; chunks?: number; dbBytes?: number; perWing?: Array<{ wing: string; chunks: number }> } | null;
+  /** OLD MemPalace data still on disk (the app no longer uses it), or null. */
+  legacy: { paths: string[]; bytes: number } | null;
 }
 
 /** Enterprise Knowledge Graph — corpus status, one document, and a search hit. */
@@ -888,9 +888,9 @@ const api = {
   stopWorker: (workerId: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('workers:stop', workerId),
 
-  // ─── Semantic memory (MemPalace CLI) ─────────────────────────────────────
+  // ─── Semantic memory (the memory engine) ─────────────────────────────────
   memoryStatus: (): Promise<MemoryStatus> => ipcRenderer.invoke('hive:memoryStatus'),
-  /** Which external tools (uv, mempalace, git, each agent engine) are actually
+  /** Which external tools (git, each agent engine) are actually
    *  present on this machine, with a platform-resolved install command each. */
   toolsStatus: (): Promise<ToolStatus[]> => ipcRenderer.invoke('tools:status'),
   /** Settings hero payload — plan + sponsor, fetched from the repo and cached. */
@@ -917,7 +917,10 @@ const api = {
     ipcRenderer.invoke('hive:searchMemory', query, wing),
   memoryWakeUp: (wing?: string): Promise<{ ok: boolean; output: string; error?: string }> =>
     ipcRenderer.invoke('hive:memoryWakeUp', wing),
-  mineNow: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('hive:mineNow'),
+  /** Delete the OLD MemPalace data after a native confirm in main; all or nothing (a locked
+   *  file, e.g. a still-running legacy daemon, is reported and nothing is deleted). */
+  deleteLegacyMemoryData: (): Promise<{ ok: true; bytes: number; paths: string[] } | { ok: false; error: string; locked: string[]; cancelled?: boolean }> =>
+    ipcRenderer.invoke('memory:deleteLegacyData'),
   /** Condense agent memory.md files (the janitor's missing half). With an id,
    *  condense that agent on demand; without, run a full threshold scan. Returns
    *  the per-agent outcomes ({ id, condensed, reason, oldBytes?, newBytes? }). */
