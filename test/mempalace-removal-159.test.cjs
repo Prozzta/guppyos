@@ -119,3 +119,68 @@ test('(b) deleteLegacyPalace is ALL OR NOTHING: a locked file stops it, earlier 
   assert.equal(fs.readFileSync(path.join(h, 'palace', 'chroma.sqlite3'), 'utf8'), 'abcd');
   assert.deepEqual(fs.readdirSync(h).sort(), ['.mempalace-mine-state.json', 'palace', 'palace.mempalace-backup-1'], 'everything back where it was');
 });
+
+// ── (d) the legacy MemoryManager is gone; D3 / D4 / M1 ───────────────────────────────────────
+
+const { legacyDaemonRoots, stopLegacyDaemon } = loadTs('src/main/legacyPalace.ts');
+
+test('(d) the legacy miner is deleted, and nothing in main starts mempalace, uv or python any more', () => {
+  for (const f of ['memory.ts', 'incrementalMiner.ts', 'palaceReap.ts', 'palaceRebuild.ts']) {
+    assert.equal(fs.existsSync(path.join(REPO, 'src', 'main', f)), false, f);
+  }
+  const dir = path.join(REPO, 'src', 'main');
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
+  for (const f of walk(dir).filter((p) => /\.ts$/.test(p))) {
+    const code = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
+    assert.doesNotMatch(code, /spawn(Sync)?\(\s*(bin|['"](mempalace|uv|python)['"])/, path.relative(REPO, f));
+    // devIsolation still SCRUBS an inherited MEMPALACE_PALACE_PATH (a 1.1.58 terminal's): never sets one.
+    if (!f.endsWith('devIsolation.ts')) assert.doesNotMatch(code, /MEMPALACE_PALACE_PATH|MEMPALACE_EMBEDDING|MUNDER_LEGACY_MEMPALACE/, path.relative(REPO, f));
+  }
+  assert.doesNotMatch(read('src/shared/toolCatalog.ts'), /id: 'uv'|id: 'mempalace'/);
+});
+
+test('(d) D3: our legacy daemon is recognised by its real command line; an agent prompt quoting it, another palace, or a non-python process is not', () => {
+  const palace = String.raw`C:\Dunder\palace`;
+  const py = String.raw`C:\Users\X\AppData\Roaming\uv\tools\mempalace\Scripts\python.exe`;
+  const rows = [
+    { pid: 15668, parentPid: 22432, commandLine: String.raw`${py} -m mempalace.daemon serve --palace C:\Dunder\palace` },
+    { pid: 22632, parentPid: 15668, commandLine: String.raw`${py} -m mempalace.daemon serve --palace C:\Dunder\palace` },
+    { pid: 3, parentPid: 1, commandLine: String.raw`claude.exe --append-system-prompt "run python.exe -m mempalace.daemon serve --palace C:\Dunder\palace"` },
+    { pid: 4, parentPid: 1, commandLine: String.raw`${py} -m mempalace.daemon serve --palace D:\Other\palace` },
+    { pid: 5, parentPid: 1, commandLine: String.raw`"C:\Program Files\mempalace\mempalace.exe" --palace "c:/dunder/palace/" daemon serve` }
+  ];
+  assert.deepEqual(legacyDaemonRoots(rows, palace).map((r) => r.pid), [15668, 5], 'roots only (the child goes with its tree); quoted/forward-slash palace matches');
+  assert.deepEqual(legacyDaemonRoots(rows, 'C:/Nowhere'), []);
+});
+
+test('(d) D3: stopped once, logged once; a survivor is reported as legacy-daemon-running; none / no listing = nothing', async () => {
+  const cmd = String.raw`python.exe -m mempalace.daemon serve --palace C:\Dunder\palace`;
+  const rows = [{ pid: 7, parentPid: 1, commandLine: cmd }];
+  const logs = []; const kills = [];
+  let alive = true;
+  const deps = { probe: async () => (alive ? rows : []), kill: async (p) => { kills.push(p); alive = false; }, log: (r) => logs.push(r) };
+  assert.equal(await stopLegacyDaemon(String.raw`C:\Dunder\palace`, deps), 'stopped');
+  assert.deepEqual(kills, [[7]]);
+  assert.deepEqual(logs.map((r) => [r.kind, r.pids]), [['legacy-daemon-stopped', [7]]]);
+  const stuck = []; 
+  assert.equal(await stopLegacyDaemon(String.raw`C:\Dunder\palace`, { probe: async () => rows, kill: async () => {}, log: (r) => stuck.push(r) }), 'running');
+  assert.deepEqual(stuck.map((r) => [r.kind, r.pids]), [['legacy-daemon-running', [7]]]);
+  const none = [];
+  assert.equal(await stopLegacyDaemon(String.raw`C:\Dunder\palace`, { probe: async () => [], kill: async () => { throw new Error('no'); }, log: (r) => none.push(r) }), 'none');
+  assert.equal(await stopLegacyDaemon(String.raw`C:\Dunder\palace`, { probe: async () => null, kill: async () => {}, log: (r) => none.push(r) }), 'none');
+  assert.equal(await stopLegacyDaemon(null, deps), 'none');
+  assert.deepEqual(none, []);
+});
+
+test('(d) D3 + D4 run at start-up, in the background: one memory-engine-json-ignored row when the file is there; the daemon stop is fire-and-forget', () => {
+  const fn = between(INDEX, 'function noteLegacyMemoryOnStart(): void {', '\n}\n');
+  assert.match(fn, /kind: 'memory-engine-json-ignored'/);
+  assert.match(fn, /void stopLegacyDaemon\(home \? join\(home, 'palace'\) : null,/);
+  assert.match(INDEX, /noteLegacyMemoryOnStart\(\);/);
+});
+
+test('(d) M1: the index delete covers the WAL/SHM and retries a handle Windows is still releasing', () => {
+  const fn = between(INDEX, 'function deleteMemoryIndex(file: string | null): void {', '\n}\n');
+  assert.match(fn, /\[file, `\$\{file\}-wal`, `\$\{file\}-shm`\]/);
+  assert.match(fn, /maxRetries: 10/);
+});

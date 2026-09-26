@@ -277,14 +277,16 @@ test('NO-GIT: an EXISTING hive/.git is left exactly as it was (never deleted, ne
   assert.deepEqual(snap(), before, 'the .git tree and the hive .gitignore are untouched');
 });
 
-test('NO-GIT: every agent\'s MINE ignore file (read by mempalace, not git) is still refreshed once per process, running or not', async () => {
+test('NO-GIT + MEMPALACE-REMOVAL: no mine-ignore .gitignore is written any more (only mempalace mine read it); an existing one is left alone', async () => {
   const home = fs.mkdtempSync(path.join(JAIL, 'ng-'));
   const idle = path.join(home, 'hive', 'agents', 'sleeper'); fs.mkdirSync(idle, { recursive: true });
+  fs.writeFileSync(path.join(idle, '.gitignore'), 'mine\n');
   const hive = new (NOGIT_HIVE())(() => home);
-  await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
-  const ig = fs.readFileSync(path.join(idle, '.gitignore'), 'utf8');
-  assert.match(ig, /\.codex/, 'an agent that never spawns still gets its mine ignore');
-  hive.dispose();
+  try {
+    await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
+    assert.equal(fs.existsSync(path.join(home, 'hive', 'agents', 'a1', '.gitignore')), false, 'a new agent gets none');
+    assert.equal(fs.readFileSync(path.join(idle, '.gitignore'), 'utf8'), 'mine\n', 'an existing one is untouched');
+  } finally { hive.dispose(); }
 });
 
 test('NO-GIT STATIC: no git anywhere in the hive layer; the committer is gone; quit no longer waits on a flush', () => {

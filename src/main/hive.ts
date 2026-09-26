@@ -264,22 +264,6 @@ function shortRand(): string {
   return randomBytes(3).toString('hex');
 }
 
-/** Non-memory files `mempalace mine` must not ingest (Claude Code hooks config,
- *  cursor, raw inbox/outbox JSON). `mempalace mine` honors .gitignore, so we drop
- *  one in each agent dir; written on birth here and refreshed by the mine loop.
- *
- *  `.codex/` is here for a second reason as well, and it is the load-bearing one:
- *  a Codex worker's CODEX_HOME lives INSIDE its agent dir (see installCodexHooks —
- *  Codex can only be given hooks through a config.toml in its own home, so it
- *  cannot share the user's ~/.codex). Codex then fills that folder with full
- *  session transcripts, an 80MB+ logs sqlite and a plugin cache, and the hive's
- *  git repo was faithfully versioning every revision of all of it. Twenty Codex
- *  agents took the hive's .git to 7.5GB, at which point git's own auto-gc tried to
- *  repack it and took 22GB of RAM doing so — the machine swapped, the app stopped
- *  responding. None of it was ever wanted in history: it is Codex's private
- *  scratch state, and it stays on disk (so resume still works) either way. */
-const MINE_IGNORE_LINES = ['settings.json', 'cursor.json', 'inbox/', 'outbox/', '.codex/'];
-
 /**
  * HOOK-BROKER P4 (AGY): `<hive>/bin/agy-oneway.cmd`, the cheap one-way delivery for AGY's
  * observational hooks and its statusline. AGY 1.2.11 can only run commands (no http or MCP hook,
@@ -315,19 +299,6 @@ export function mergeNoProxy(existing: string | undefined): string {
   const parts = (existing ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   for (const host of ['127.0.0.1', 'localhost']) if (!parts.includes(host)) parts.push(host);
   return parts.join(',');
-}
-
-/** Idempotently ensure `<agentDir>/.gitignore` excludes the non-memory files.
- *  Append-only: writes only the missing lines, leaving any existing entries. */
-function ensureMineIgnore(agentDir: string): void {
-  const path = join(agentDir, '.gitignore');
-  let existing = '';
-  try { if (existsSync(path)) existing = readFileSync(path, 'utf8'); } catch { return; }
-  const have = new Set(existing.split('\n').map((l) => l.trim()));
-  const missing = MINE_IGNORE_LINES.filter((l) => !have.has(l));
-  if (missing.length === 0) return;
-  const prefix = existing && !existing.endsWith('\n') ? existing + '\n' : existing;
-  try { writeFileSync(path, prefix + missing.join('\n') + '\n', 'utf8'); } catch { /* best-effort */ }
 }
 
 /**
@@ -855,25 +826,8 @@ export class HiveManager {
     // read its history, and every commit cost ~59 process starts (git plus the identity-guard
     // hooks), each an antivirus scan. A new hive is not git-initialised; an existing hive/.git
     // is LEFT ON DISK untouched (the Human can remove it), and its hooks simply stop firing.
-    //
-    // What survives from the old commit prep: every agent's MINE ignore file (mempalace mine
-    // honours .gitignore; it keeps Codex homes and raw inbox JSON out of the palace). Agents that
-    // are not running never pass through spawn, so they are refreshed once per process here.
-    this.refreshMineIgnores(root);
-  }
-
-  /** Has the once-per-process mine-ignore refresh run? */
-  private mineIgnoresRefreshed = false;
-
-  /** Ensure every agent dir's .gitignore (read by mempalace mine, not by git) is current. */
-  private refreshMineIgnores(root: string): void {
-    if (this.mineIgnoresRefreshed) return;
-    this.mineIgnoresRefreshed = true;
-    const agentsDir = join(root, 'agents');
-    try {
-      if (!existsSync(agentsDir)) return;
-      for (const id of readdirSync(agentsDir)) ensureMineIgnore(join(agentsDir, id));
-    } catch { /* best-effort */ }
+    // MEMPALACE-REMOVAL: the per-agent mine-ignore .gitignore files are no longer written (only
+    // `mempalace mine` read them); existing ones are left on disk.
   }
 
   /** Validate an agent's cwd the way a spawn does — it must be an ABSOLUTE path
@@ -953,7 +907,6 @@ export class HiveManager {
     if (!existsSync(memory)) {
       writeFileSync(memory, `# Memory — ${meta.name} (${meta.id})\n\n_Append durable facts, decisions, and context below._\n`, 'utf8');
     }
-    ensureMineIgnore(dir); // keep settings.json / cursor / messages out of mempalace's index
     const cursor = join(dir, 'cursor.json');
     if (!existsSync(cursor)) this.writeJson(cursor, { lastProcessed: null });
 

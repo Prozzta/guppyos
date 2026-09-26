@@ -243,10 +243,8 @@ export interface HarnessConfig {
    *  Seeded from MCP_CATALOG (safe-readonly ON, write/secret OFF); the user flips
    *  these in Settings. A server is wired into an agent only when enabled here. */
   mcpDefaults?: { [id: string]: { enabled: boolean } };
-  /** Enable semantic memory (MemPalace CLI). No-op if mempalace isn't installed. */
+  /** Semantic memory (the built-in memory engine): its master switch. Default on. */
   semanticMemory: boolean;
-  /** Embedding model for the palace: lightweight 'minilm' or multilingual 'embeddinggemma'. */
-  embeddingModel: 'minilm' | 'embeddinggemma';
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** One-time guard: has the built-in hourly ops standup been seeded into an
@@ -481,7 +479,6 @@ const DEFAULTS: HarnessConfig = {
   integrations: [],
   defaultWorkerTokenCap: 0, // 0 = unlimited (human directive: NO per-worker cap)
   semanticMemory: true,
-  embeddingModel: 'minilm',
   missions: [OPS_STANDUP_MISSION],
   notifications: false,
   strongKeepalive: false,

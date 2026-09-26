@@ -104,3 +104,56 @@ export function deleteLegacyPalace(home: string, fs: FsDeps = realFs, now = Date
   for (const [, aside] of moved) { try { fs.rm(aside); } catch { /* moved aside: the next attempt finds nothing to delete */ } }
   return { ok: true, bytes: info.bytes, paths: info.paths };
 }
+
+// ── god's D3: a legacy daemon 1.1.58 left running ─────────────────────────────────────────────
+
+export interface ProcLike { pid: number; parentPid: number; commandLine: string }
+
+const norm = (p: string): string => p.replace(/^["']|["']$/g, '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+/**
+ * OUR legacy daemon's processes: an executable that is python or mempalace (never, say, an
+ * agent whose prompt merely mentions the text) running `mempalace.daemon serve` (or
+ * `mempalace ... daemon serve`) with `--palace` = this hive's palace. On this floor it is
+ * `...\uv\tools\mempalace\Scripts\python.exe -m mempalace.daemon serve --palace C:\Dunder\palace`
+ * (a launcher and its child). Returns the ROOTS only (a match whose parent is not a match):
+ * killing a root's tree takes its children with it.
+ */
+export function legacyDaemonRoots(rows: readonly ProcLike[], palacePath: string): ProcLike[] {
+  const want = norm(palacePath);
+  const matches = rows.filter((r) => {
+    const cmd = r.commandLine ?? '';
+    const exe = /^\s*(?:"([^"]+)"|(\S+))/.exec(cmd);
+    const base = (exe?.[1] ?? exe?.[2] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase();
+    if (!/^(python[\d.]*|pythonw|mempalace)(\.exe)?$/.test(base)) return false;
+    if (!/(-m\s+mempalace\.daemon|mempalace(\.exe)?["']?\s+(?:\S+\s+)*daemon)\s+serve\b/i.test(cmd)) return false;
+    const m = /--palace(?:=|\s+)("[^"]+"|'[^']+'|\S+)/.exec(cmd);
+    return !!m && norm(m[1]) === want;
+  });
+  const pids = new Set(matches.map((r) => r.pid));
+  return matches.filter((r) => !pids.has(r.parentPid));
+}
+
+export interface StopDaemonDeps {
+  probe: () => Promise<ProcLike[] | null>;
+  kill: (pids: number[]) => Promise<void>;
+  log: (row: Record<string, unknown>) => void;
+}
+
+/** Stop our leftover legacy daemon ONCE (async, bounded by its deps), and say so: one
+ *  `legacy-daemon-stopped` row, or `legacy-daemon-running` with the pids when it survives.
+ *  Nothing when there is none, or when processes cannot be listed (not Windows). */
+export async function stopLegacyDaemon(palacePath: string | null, d: StopDaemonDeps): Promise<'none' | 'stopped' | 'running'> {
+  if (!palacePath) return 'none';
+  const rows = await d.probe().catch(() => null);
+  if (!rows) return 'none';
+  const roots = legacyDaemonRoots(rows, palacePath);
+  if (!roots.length) return 'none';
+  const pids = roots.map((r) => r.pid);
+  await d.kill(pids).catch(() => undefined);
+  const after = await d.probe().catch(() => null);
+  const left = after ? legacyDaemonRoots(after, palacePath).map((r) => r.pid) : pids;
+  if (left.length) { d.log({ kind: 'legacy-daemon-running', pids: left, palace: palacePath }); return 'running'; }
+  d.log({ kind: 'legacy-daemon-stopped', pids, palace: palacePath });
+  return 'stopped';
+}

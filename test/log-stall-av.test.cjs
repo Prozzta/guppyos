@@ -85,7 +85,7 @@ test('F1 wiring (B1/B3): no opt-in call; dispose() runs before reset\'s rm, befo
   // QUIT-HANG reshaped finish (quit-done row first); what matters: dispose, then app.exit.
   assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,300}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
   const reset = idx.slice(idx.indexOf("ipcMain.handle('app:resetAll'"));
-  const disposeAt = reset.indexOf('hive.dispose();'), rmAt = reset.indexOf('rmSync(dir,');
+  const disposeAt = reset.indexOf('hive.dispose();'), rmAt = reset.indexOf('rmSync(hiveDir,');
   assert.ok(disposeAt > 0 && rmAt > disposeAt, 'reset: dispose, then rm');
   const change = idx.slice(idx.indexOf("ipcMain.handle('config:changeHome'"));
   const dAt = change.indexOf('hive.dispose();'), cpAt = change.indexOf('cpSync(src,');

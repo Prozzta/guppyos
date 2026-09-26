@@ -2,8 +2,8 @@
  * PREREQUISITES — the external tools this app needs, and whether you have them.
  *
  * Several of the harness's best features are thin wrappers over tools that live
- * OUTSIDE the app bundle: mempalace for semantic memory, uv to install it, git
- * for worktrees, one CLI per agent engine. Every one of them degrades silently
+ * OUTSIDE the app bundle: git for worktrees, one CLI per agent engine (semantic
+ * memory is built in). Every one of them degrades silently
  * when missing — which is the right runtime behaviour and a terrible diagnostic
  * one, because "off" and "broken" look identical from the floor. This page is the
  * single place that distinguishes them, and the only place that says what each
@@ -23,7 +23,6 @@ import { setupPrompt, type ToolStatus, type ToolKind } from '../../../shared/too
 
 const SECTIONS: { kind: ToolKind; title: string; blurb: string }[] = [
   { kind: 'prerequisite', title: 'Prerequisites', blurb: 'The groundwork everything else builds on.' },
-  { kind: 'memory', title: 'Memory layer', blurb: 'Meaning-based recall across everything your agents learn.' },
   { kind: 'engine', title: 'Agent engines', blurb: 'The CLIs your agents run on. You need whichever ones you actually use — not all of them.' }
 ];
 

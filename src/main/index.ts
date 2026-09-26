@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
-import { deleteLegacyPalace, legacyPalaceInfo } from './legacyPalace';
+import { deleteLegacyPalace, legacyPalaceInfo, stopLegacyDaemon } from './legacyPalace';
+import { killTreesAsync } from './procKill';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
@@ -65,7 +66,6 @@ import {
 } from '../shared/capacityStrip';
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import type { UsageProvider } from './usage';
-import { MemoryManager } from './memory';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
@@ -644,11 +644,6 @@ hookServer.setHeavyLock(heavyLock);
 // writes the command hooks exactly as before.
 // LOG-STALL-AV F1: the app keeps log.jsonl / cost-ledger.jsonl open (closed on quit).
 hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), revoke: (id) => hookServer.revokeHookToken(id) });
-const memory = new MemoryManager(
-  () => readConfig().harnessHome,
-  () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; },
-  (event) => hive.appendLog(event)
-);
 // NATIVE-MEMORY: the memory engine (the only one since MEMPALACE-REMOVAL, 1.1.59). It runs in a
 // utility process forked on the first memory request or the post-start prewarm, never at
 // start-up itself. Settings' semantic memory (`semanticMemory`) is its master switch.
@@ -670,6 +665,29 @@ const nativeMemory = new NativeMemoryWiring({
   }
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
+/** Delete a memory-engine index file and its WAL/SHM. Call only after nativeMemory.shutdown()
+ *  (Jim M1); retries ride out a handle Windows releases a moment after the worker exits. */
+function deleteMemoryIndex(file: string | null): void {
+  if (!file) return;
+  for (const f of [file, `${file}-wal`, `${file}-shm`]) {
+    try { rmSync(f, { force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) { console.error('[memory] rm index', f, e); }
+  }
+}
+/** MEMPALACE-REMOVAL start-up notes (god's D3 + D4). Never blocks start-up; never throws. */
+function noteLegacyMemoryOnStart(): void {
+  const root = hive.root();
+  const home = readConfig().harnessHome;
+  if (root && existsSync(join(root, 'memory-engine.json'))) {
+    let mode: unknown = null;
+    try { mode = (JSON.parse(readFileSync(join(root, 'memory-engine.json'), 'utf8')) as { mode?: unknown }).mode ?? null; } catch { /* unreadable */ }
+    try { hive.appendLog({ kind: 'memory-engine-json-ignored', mode }); } catch { /* best-effort */ }
+  }
+  void stopLegacyDaemon(home ? join(home, 'palace') : null, {
+    probe: probeProcesses,
+    kill: (pids) => killTreesAsync(pids),
+    log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+  }).catch(() => undefined);
+}
 // Enterprise Knowledge Graph — file-backed store + agent CLI (default OFF).
 const knowledge = new KnowledgeManager();
 /** Reads the reflect tunables from config each tick (defaults baked in here so a
@@ -690,7 +708,8 @@ function reflectSettings(): ReflectSettings {
 const reflector = new MemoryReflector(
   () => readConfig().harnessHome,
   () => readConfig().defaultCommand ?? 'claude',
-  () => memory.env(),
+  // MEMPALACE-REMOVAL: the reflector's Haiku call needs no memory env any more.
+  () => ({}),
   reflectSettings,
   (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } }
 );
@@ -3888,10 +3907,10 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
-  // R1 (QUIT-HANG audit): stop() now kills mine/repair trees asynchronously; the copy below
-  // must wait for them, or a mine still writing the palace is copied torn. Bounded, never rejects.
-  let memoryStopped: Promise<void> = Promise.resolve();
-  try { memoryStopped = memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
+  // The memory engine's index is keyed by the hive root, so the new home builds its own; the
+  // old one is deleted after a successful move (Jim M1: shut the worker down FIRST).
+  const oldIndex = nativeMemory.dbFile();
+  const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
@@ -3900,11 +3919,12 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 
   if (mode === 'move' && oldHome) {
     try {
-      // roster.json + its backups ride along with hive/palace: the roster is the
+      // roster.json + its backups ride along with the hive: the roster is the
       // renderer's half of the same state, and leaving it behind would move the
       // agents' sessions and memory to the new home while their names, notes and
-      // worktree paths stayed at the old one.
-      for (const sub of ['hive', 'palace', 'roster.json', 'roster-backups']) {
+      // worktree paths stayed at the old one. The old MemPalace `palace` is NOT
+      // copied (MEMPALACE-REMOVAL): nothing reads it; it stays in the old home.
+      for (const sub of ['hive', 'roster.json', 'roster-backups']) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
         // cpSync copies the whole tree incl. .git and is cross-device safe (unlike
@@ -3921,6 +3941,8 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
       reconcileWebhookServer();
       return { ok: false, error: `Could not copy data: ${e instanceof Error ? e.message : String(e)}` };
     }
+    // Moved: the old hive's index is an orphan now (the new home indexes its own copy).
+    deleteMemoryIndex(oldIndex);
   }
 
   // Repoint config and relaunch so every service re-bootstraps against newHome.
@@ -4227,29 +4249,13 @@ ipcMain.handle('skills:reveal', (_evt, path: unknown) => {
  * --version would be a dozen process launches on every panel open, and several of
  * these CLIs boot a TUI when invoked bare. `resolveCommand` returns its input
  * unchanged when it finds nothing, so "resolved to a real, existing path that is
- * not just the bare name" is the found test.
- *
- * mempalace is the one row that does NOT come from PATH: the memory subsystem
- * already resolves it (including uv/pip locations PATH may not carry for a
- * Finder-launched app) and knows whether the palace is initialised, so it is
- * authoritative and reused rather than re-probed differently here.
+ * not just the bare name" is the found test. (MEMPALACE-REMOVAL: there is no
+ * mempalace or uv row any more: memory is built in.)
  */
 ipcMain.handle('tools:status', (): ToolStatus[] => {
   const win = process.platform === 'win32';
-  const mem = (() => { try { memory.resetBinCache(); return memory.status(); } catch { return null; } })();
   return toolCatalog().map((spec): ToolStatus => {
     const installCommand = win ? spec.install.win32 : spec.install.posix;
-    if (spec.id === 'mempalace') {
-      return {
-        ...spec,
-        installCommand,
-        found: !!mem?.available,
-        path: mem?.bin ?? null,
-        detail: mem?.available
-          ? (mem.initialized ? 'palace initialised' : 'installed — palace not built yet')
-          : undefined
-      };
-    }
     if (!spec.bin) return { ...spec, installCommand, found: false, path: null };
     let path: string | null = null;
     try {
@@ -4434,8 +4440,8 @@ function teardownAndQuit(): void {
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
-  // The two slow steps (every agent's process tree, the mempalace daemon) run async;
-  // will-quit joins them, bounded, before app.exit. No synchronous child process on this path.
+  // The slow step (every agent's process tree) runs async;
+  // will-quit joins it, bounded, before app.exit. No synchronous child process on this path.
   void beginQuitWork();
   if (!alreadyQuitting) { try { hive.appendLog({ kind: 'quit-teardown', syncMs: Date.now() - t0 }); } catch { /* log is best-effort */ } }
   app.quit();
@@ -4445,13 +4451,12 @@ function teardownAndQuit(): void {
 const QUIT_WORK_CAP_MS = 5_500;
 let quitWork: Promise<QuitReport> | null = null;
 /** QUIT-HANG: start the slow teardown once (idempotent) and hand back its bounded report.
- *  memory.stop and killAllAsync both forget their state synchronously, so a second quit
+ *  killAllAsync forgets its state synchronously, so a second quit
  *  path (window-all-closed, will-quit) joins this promise instead of starting over. */
 function beginQuitWork(): Promise<QuitReport> {
   if (!quitWork) {
     const ptys = ptyManager.list().length;
     quitWork = runQuitSteps([
-      { name: 'memory', run: () => memory.stop({ quitting: true }) },
       { name: 'ptys', run: () => ptyManager.killAllAsync() }
     ], QUIT_WORK_CAP_MS).then((r) => ({ ...r, steps: { ...r.steps, ptyCount: ptys } }));
   }
@@ -4511,23 +4516,26 @@ ipcMain.handle('app:resetAll', async () => {
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
-  // R1 (QUIT-HANG audit): a live mine/repair python holding chroma.sqlite3 makes the palace
-  // rm below fail (EBUSY) on Windows; wait for the async tree kill first. Bounded, never rejects.
-  let memoryStopped: Promise<void> = Promise.resolve();
-  try { memoryStopped = memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
+  // Jim M1: the memory worker holds <key>.sqlite(-wal/-shm) open, so an rm before it stops
+  // fails with EBUSY on Windows (and was swallowed). Shut it down FIRST (bounded), then delete.
+  const memoryIndex = nativeMemory.dbFile();
+  const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
-  // git history) and the semantic-memory palace. Only these harness-created
-  // subdirs are removed — never the user's whole harnessHome folder.
+  // git history) and the memory engine's index of it. Only harness-created data
+  // is removed — never the user's whole harnessHome folder, and never the old
+  // MemPalace `palace` (MEMPALACE-REMOVAL: that is the Human's to delete, in the
+  // Memory panel).
   await memoryStopped;
-  for (const dir of [hive.root(), memory.palacePath()]) {
-    if (!dir) continue;
-    try { rmSync(dir, { recursive: true, force: true }); }
-    catch (e) { console.error('[reset] rm', dir, e); }
+  deleteMemoryIndex(memoryIndex);
+  const hiveDir = hive.root();
+  if (hiveDir) {
+    try { rmSync(hiveDir, { recursive: true, force: true }); }
+    catch (e) { console.error('[reset] rm', hiveDir, e); }
   }
   // The roster is the renderer's half of the same state, so it retires with the
   // hive — archived into roster-backups/ rather than deleted, and cleared as the
@@ -6004,7 +6012,10 @@ function bootstrapHiveServices(): void {
     if (r.ok && r.endpoint) { hive.setOtelEndpoint(r.endpoint); console.log('[telemetry] collector listening', r.endpoint); }
     else console.error('[telemetry] collector failed to start:', r.error);
   });
-  memory.start(); // init shared palace + mine loop (no-op without mempalace)
+  // MEMPALACE-REMOVAL: nothing to start for memory (the engine forks lazily / at prewarm).
+  // god's D4: a leftover memory-engine.json is ignored; say so once. D3: stop a legacy
+  // daemon 1.1.58 may have left running on this hive's palace, once, in the background.
+  noteLegacyMemoryOnStart();
   reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
 
   armAlwaysOnBeats();
@@ -6179,7 +6190,7 @@ app.whenReady().then(() => {
       userData: app.getPath('userData'),
       harnessHome: cfgHome,
       hiveRoot: hive.root() ?? '',
-      palace: memory.palacePath() ?? '',
+      palace: cfgHome ? join(cfgHome, 'palace') : '',
       worktrees: cfgHome ? join(cfgHome, 'worktrees') : '',
       pipeName: hive.sockPath() ?? ''
     };
@@ -6332,8 +6343,8 @@ app.on('will-quit', () => {
   // statusline pointing at Munder while Munder is closed. Idempotent: a no-op when the
   // teardown path already released it.
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[will-quit] stopAgyStatusline:', e); }
-  // MINE-152: kill any mempalace mine/repair tree and stop the resident daemon. Every quit
-  // path passes here. QUIT-HANG: async and bounded; the flush handler below joins it.
+  // QUIT-HANG: every quit path starts the agent-tree sweep here (idempotent); async and
+  // bounded; the flush handler below joins it.
   void beginQuitWork();
 });
 
@@ -6373,7 +6384,7 @@ app.on('will-quit', (e) => {
     app.exit(0);
   };
   Promise.all([
-    // QUIT-HANG: agent trees + mempalace daemon, already running async (bounded inside).
+    // QUIT-HANG: the agent trees, already being swept async (bounded inside).
     beginQuitWork().then((r) => { report = r; }),
     Promise.race([
       analytics.endSession(),

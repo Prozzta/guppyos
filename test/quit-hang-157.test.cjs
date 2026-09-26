@@ -156,11 +156,11 @@ test('F1 runQuitSteps: settles as soon as every step does (the cap is a ceiling,
 test('F1 WIRING: the quit path has no synchronous tree kill or daemon stop', () => {
   const teardown = between(INDEX, 'function teardownAndQuit(): void {', '/** Upper bound on the async quit work');
   assert.doesNotMatch(teardown, /ptyManager\.killAll\(\)/, 'no per-terminal spawnSync taskkill');
-  assert.doesNotMatch(teardown, /memory\.stop\(/, 'the daemon stop is inside the async quit work');
+  assert.doesNotMatch(teardown, /memory\.stop\(/, 'no legacy memory stop (MEMPALACE-REMOVAL: there is no daemon)');
   assert.doesNotMatch(teardown, /spawnSync|hardKillTree/);
   assert.match(teardown, /void beginQuitWork\(\)/);
   const work = between(INDEX, 'function beginQuitWork(', '\n}\n');
-  assert.match(work, /memory\.stop\(\{ quitting: true \}\)/);
+  assert.doesNotMatch(work, /memory\.stop\(/);
   assert.match(work, /ptyManager\.killAllAsync\(\)/);
   assert.match(work, /if \(!quitWork\)/, 'idempotent: every quit path joins one batch');
   const cap = Number(/const QUIT_WORK_CAP_MS = ([\d_]+);/.exec(INDEX)[1].replace(/_/g, ''));
@@ -212,37 +212,22 @@ test('F3 WIRING: freeze and slow-start rows exist', () => {
 
 // ── Jim's audit (QUIT-HANG-157-AUDIT.md): R1, M10, and the normal-use sync kills ──
 
-test('R1: reset and changeHome await memory.stop() before they rm / copy the palace', () => {
+// MEMPALACE-REMOVAL turned R1 into Jim's M1: there is no MemoryManager; what reset and
+// changeHome must wait for now is the memory engine's worker, which holds the index open.
+test('R1 / M1: reset and changeHome shut the memory worker down and AWAIT it before they rm / copy', () => {
   const reset = between(INDEX, "ipcMain.handle('app:resetAll', async () => {", '\n});\n');
-  const rStop = reset.indexOf('memoryStopped = memory.stop()');
+  const rStop = reset.indexOf('memoryStopped = nativeMemory.shutdown()');
   const rAwait = reset.indexOf('await memoryStopped;');
-  const rRm = reset.indexOf('rmSync(dir');
-  assert.ok(rStop > 0 && rAwait > rStop && rRm > rAwait, 'stop -> await -> rm');
+  const rIdx = reset.indexOf('deleteMemoryIndex(memoryIndex)');
+  const rRm = reset.indexOf('rmSync(hiveDir');
+  assert.ok(rStop > 0 && rAwait > rStop && rIdx > rAwait && rRm > rAwait, 'shutdown -> await -> delete the index and the hive');
   const change = between(INDEX, "ipcMain.handle('config:changeHome', async", '\n});\n');
-  const cStop = change.indexOf('memoryStopped = memory.stop()');
+  const cStop = change.indexOf('memoryStopped = nativeMemory.shutdown()');
   const cAwait = change.indexOf('await memoryStopped;');
   const cCopy = change.indexOf('cpSync(src');
-  assert.ok(cStop > 0 && cAwait > cStop && cCopy > cAwait, 'stop -> await -> copy');
-  assert.doesNotMatch(INDEX, /try \{ memory\.stop\(\); \}/, 'no caller drops the stop promise');
-});
-
-test('R1: memory.stop() resolves only after the child trees are killed (non-quit too)', async (t) => {
-  const { MemoryManager } = loadTs('src/main/memory.ts');
-  const real = procKill.killTreesAsync;
-  let release;
-  const seen = [];
-  procKill.killTreesAsync = (pids) => { seen.push(...pids); return new Promise((r) => { release = r; }); };
-  t.after(() => { procKill.killTreesAsync = real; });
-  const m = new MemoryManager(() => null, () => ({ enabled: false }));
-  m.children.add({ pid: 4242 });
-  let resolved = false;
-  const p = m.stop().then(() => { resolved = true; });
-  await new Promise((r) => setTimeout(r, 20));
-  assert.deepEqual(seen, [4242]);
-  assert.equal(resolved, false, 'still waiting on the tree kill');
-  release();
-  await p;
-  assert.equal(resolved, true);
+  const cIdx = change.indexOf('deleteMemoryIndex(oldIndex)');
+  assert.ok(cStop > 0 && cAwait > cStop && cCopy > cAwait && cIdx > cCopy, 'shutdown -> await -> copy -> delete the old index');
+  assert.doesNotMatch(INDEX, /memory\.stop\(/, 'the legacy MemoryManager is gone');
 });
 
 test('M10: the F3 rows hang off the right Electron events', () => {
@@ -265,8 +250,8 @@ test('follow-up: ensureKilled sweeps with the async batched kill, never spawnSyn
 });
 
 test('follow-up: no synchronous tree kill left on normal-use paths', () => {
-  const memory = readSrc('src/main/memory.ts');
-  assert.doesNotMatch(memory, /hardKillTree/, 'mine/repair/daemon-stop timeouts use killTreesAsync');
+  // memory.ts (the legacy miner, with its mine/repair/daemon-stop timeouts) is deleted outright.
+  assert.equal(fs.existsSync(path.join(__dirname, '..', 'src', 'main', 'memory.ts')), false);
   const pk = readSrc('src/main/procKill.ts');
   const ensure = between(pk, 'export function ensureKilled(', '\n}\n');
   assert.doesNotMatch(ensure, /hardKillTree\(/);

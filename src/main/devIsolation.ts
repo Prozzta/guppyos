@@ -21,7 +21,8 @@
  *   - hook pipe: hive.ts derives the pipe id from the hive root (sha1), so it is
  *     distinct by construction; a `dev-` marker is added so it is obviously so.
  *   - inherited env: a dev launched from an agent terminal inherits Stable's
- *     HIVE_ROOT / HIVE_SOCK / AGENT_* / MEMPALACE_PALACE_PATH. They are scrubbed
+ *     HIVE_ROOT / HIVE_SOCK / AGENT_* / the memory engine's MEMORY_TOKEN and endpoint
+ *     (and a 1.1.58 terminal's MEMPALACE_PALACE_PATH). They are scrubbed
  *     from process.env at bootstrap so nothing in this process (or any child)
  *     can pick up Stable's identity by accident.
  *   - a startup guard hard-fails if any resolved dev path equals or lies inside a
@@ -46,6 +47,11 @@ export const STABLE_ENV_KEYS = [
   'AGENT_DIR',
   'AGENT_NAME',
   'MEMPALACE_PALACE_PATH',
+  // MEMPALACE-REMOVAL: the memory engine's per-agent token, endpoint and hive. Inherited, they
+  // would let a dev build (or an agent it spawns) query Stable's memory and hive.
+  'MEMORY_TOKEN',
+  'MUNDER_MEMORY_URL',
+  'MUNDER_HIVE_ROOT',
   // Provider routing Stable injects per agent (Dwight M3 matrix): each would
   // point a dev-spawned agent at a Stable-owned home or endpoint.
   'MD_SLACK_REPLY_CONFIG',
