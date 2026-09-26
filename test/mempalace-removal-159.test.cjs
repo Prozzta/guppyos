@@ -49,6 +49,8 @@ test('(a) Jim R1 (M2b): withMemoryPath puts the shim FIRST, reuses a Windows `Pa
   assert.equal(Object.keys(win).filter((k) => k.toUpperCase() === 'PATH').length, 1, 'exactly one PATH key');
   assert.deepEqual(withMemoryPath({ X: '1' }, mem, { Path: 'P' }), { X: '1', Path: `S${d}P`, MEMORY_TOKEN: 't'.repeat(32), MUNDER_HIVE_ROOT: 'H' }, 'PATH from the process env, under its key');
   assert.equal(withMemoryPath({}, mem, {}).PATH, 'S', 'no PATH anywhere: the shim dir alone');
+  // Jim H4: the SAME key in both, so the lookup collides: the env's own PATH wins over the process's.
+  assert.equal(withMemoryPath({ Path: 'A' }, mem, { Path: 'B' }).Path, `S${d}A`);
   const env = { Path: 'A', X: '1' };
   assert.equal(withMemoryPath(env, null, { PATH: 'P' }), env, 'no memory: the env is returned untouched');
   assert.equal(env.Path, 'A');
