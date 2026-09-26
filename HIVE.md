@@ -192,6 +192,10 @@ is the primary control surface — tune the prompt, not the code.
   lets the human search the same palace.
   - *Still open*: reflection/summarization to bound `memory.md`; needs a live
     `mempalace` install to validate retrieval end-to-end.
+  - *Superseded* (1.1.54 → 1.1.59): the built-in memory engine replaced the MemPalace
+    CLI (native index in userData, MiniLM on onnxruntime, served to agents through a
+    `mempalace` shim), and 1.1.59 removed MemPalace entirely: no Python, no daemon, no
+    mining. See README, "Semantic memory: the built-in memory engine".
 
 ---
 

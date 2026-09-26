@@ -91,8 +91,9 @@ on one):
 - **Hive messaging.** Coordinate or hand off by writing an outbox message JSON
   to god or another agent (`$AGENT_DIR/outbox/`). This is your always-available
   channel.
-- **Semantic memory (MemPalace).** If enabled for you: `mempalace search
-  "<query>"` to recall shared knowledge, `mempalace wake-up` for a digest.
+- **Semantic memory (the built-in memory engine).** If enabled for you:
+  `mempalace search "<query>"` to recall shared knowledge, `mempalace wake-up`
+  for a digest. Your memory.md is indexed automatically.
 - **Enterprise Knowledge Graph.** If enabled: `node "$KG_CLI" search "<query>"`
   for ranked passages, `node "$KG_CLI" list`, `node "$KG_CLI" get <id>` — use it
   for company-specific facts instead of guessing.

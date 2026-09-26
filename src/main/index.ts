@@ -940,9 +940,9 @@ async function finalizeWorkerWorktree(wtPath: string, origCwd: string, worker: W
     if (!r.ok) { console.error('[worker] removeWorktree failed:', r.error); return; }
     // Worktree is gone (clean/integrated at teardown), but DEFER its scratch-dir
     // cleanup to the throttled GC sweep rather than deleting it synchronously here:
-    // HIVE_ROOT/agents/<id> holds the worker's memory.md and the MemPalace miner
-    // ingests it asynchronously, so an immediate delete can beat the miner and
-    // permanently lose the worker's durable notes from the shared palace. Register
+    // HIVE_ROOT/agents/<id> holds the worker's memory.md and the memory engine
+    // indexes it asynchronously, so an immediate delete can beat the indexer and
+    // lose the worker's durable notes from the shared memory. Register
     // it (its worktree path is now absent) so the sweep's path-gone branch reclaims
     // the scratch after a window — same throttled path the preserved case uses.
     preservedWorktrees.set(wtPath, {
@@ -2021,18 +2021,18 @@ function skillsResourceDir(): string {
 }
 
 /** Where the helper discovers `{ port, token }` for the loopback endpoint. Kept
- *  under userData (NOT the git repo, NOT mined into MemPalace). */
+ *  under userData (NOT the git repo, NOT in the hive the memory engine indexes). */
 function slackReplyConfigPath(): string {
   return join(app.getPath('userData'), 'slack-reply.json');
 }
 
 /** Ledger of task ids whose done-summary has already been posted. Ids ONLY — no
- *  secret ever lands here. Under userData (out of the repo, out of MemPalace). */
+ *  secret ever lands here. Under userData (out of the repo, out of the indexed hive). */
 function slackDoneNotifiedPath(): string {
   return join(app.getPath('userData'), 'slack-done-notified.json');
 }
 
-/** Directory where downloaded Slack attachments are saved (out of repo, out of MemPalace). */
+/** Directory where downloaded Slack attachments are saved (out of repo, out of the indexed hive). */
 function slackFilesDir(): string {
   return join(app.getPath('userData'), 'slack-files');
 }

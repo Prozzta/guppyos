@@ -47,7 +47,7 @@ const FEATURES: Feature[] = [
   {
     icon: 'web',
     label: 'LONG-TERM MEMORY',
-    desc: 'Each agent keeps notes, mined into a shared, searchable MemPalace.',
+    desc: 'Each agent keeps notes, indexed into a shared, searchable memory (built in).',
     descPlain: "Agents remember what they've done, so they don't start from scratch every time.",
     tint: 'var(--cth-mint-light)', edge: 'var(--cth-mint)'
   },

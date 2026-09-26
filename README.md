@@ -327,46 +327,44 @@ Two data planes feed one renderer:
   8 MB to `log.<stamp>.jsonl` (the last 8 kept; the ledger keeps all). A file that was
   already oversize is kept whole as `*.legacy-*.jsonl`. The activity feed and the lifetime
   cost read across the rolled-over files; search them as `log*.jsonl`.
-- **Semantic memory.** `memory.ts` drives the MemPalace CLI and its resident daemon: changed
-  memory files are mined incrementally as background daemon jobs, judged by the job's state
-  rather than by silence. A bloated palace is rebuilt from its own database into a staging
-  copy, verified per collection, and swapped in; each step (`palace-repair-*`,
-  `palace-swap-*`, `palace-reclaim`) is logged to `log.jsonl`.
-- **The native memory engine** (since 1.1.54, **shipped off**). It is an in-app
-  replacement for the MemPalace search agents run (`mempalace search` / `wake-up` /
-  `status`).
-  - **Worker.** One lazy `utilityProcess` worker, forked on the first memory request, at
-    below-normal priority. The model is unloaded when idle.
+- **Semantic memory: the built-in memory engine** (the only memory since 1.1.59; MemPalace
+  and its Python CLI are no longer used or needed). Agents run `mempalace search` /
+  `wake-up` / `status` as before; the command is served by the engine.
+  - **Switch.** Settings' semantic memory (on by default) is the one switch. There is no
+    mode file: a `hive/memory-engine.json` left from an earlier version is ignored.
+  - **Worker.** One lazy `utilityProcess` worker, started 30 s after the first window loads
+    (or on the first memory request), at below-normal priority. The model is unloaded when
+    idle.
   - **Index.** One SQLite file (`better-sqlite3`, WAL) with FTS5 plus `sqlite-vec` (`vec0`,
     cosine). A hybrid search fuses the two by RRF.
   - **Embeddings.** A single bundled all-MiniLM-L6-v2 (fp32) runs on `onnxruntime-node`, CPU
     only. It uses its own WordPiece tokenizer, is pinned by SHA-256 and is never downloaded.
   - **Sources.** An allow-list: each agent's `memory.md` and its direct `agents/<id>/*.md`
     notes, plus opt-ins in `hive/memory-sources.json`. `board.md` and path escapes are
-    rejected.
+    rejected. Indexing is automatic; there is no `mine` step.
   - **Indexing and compaction.** Chunk-diff ingestion, so an append re-embeds only new
     chunks. Compaction runs through `VACUUM INTO` and a verified swap.
   - **Storage.** The index lives in the app's data folder
-    (`<userData>/memory/<hash>.sqlite`). It is disposable, rebuilt from the Markdown, and
-    never touches the palace.
-  - **Access.** Agents reach it through a `mempalace` shim (`hive/bin/memory`) that posts to
-    `/memory/<token>` on the loopback broker. The shim is authenticated by a per-spawn
-    `MEMORY_TOKEN`.
-  - **Modes,** set in `hive/memory-engine.json`: `legacy` (the default; the Python CLI, as
-    before), `shadow` (legacy answers, and the engine logs a redacted comparison), `native`
-    and `fallback-legacy` (an immediate brake). The rollout is staged: legacy → shadow → a
-    per-cohort quality gate on real queries → native.
+    (`<userData>/memory/<hash>.sqlite`). It is disposable and rebuilt from the Markdown. A
+    reset deletes it (after the worker has stopped); a home move leaves the new home to
+    build its own.
+  - **Access.** Agents reach it through a `mempalace` shim (`hive/bin/memory`, first on the
+    agent's PATH) that posts to `/memory/<token>` on the loopback broker, authenticated by a
+    per-spawn `MEMORY_TOKEN`. When the shim cannot be put on PATH, the agent gets no memory
+    line in its prompt rather than someone else's `mempalace`. The Memory panel, Command
+    Center and voice tools ask the engine directly, inside the app.
   - **Measured against MemPalace,** on frozen copies of a real hive:
     - **Quality**, over 373 real, labelled searches: NDCG@5 +20.7 points and recall@10 +32.5
       points overall, and better in every search type.
     - **Speed**, end to end through the agent's own command: about 120–165 ms against about
       1.5–1.8 s.
     - **Storage:** an index of 10.6 MB against an 80 MB palace.
-  - **Until the cutover, MemPalace and its Python CLI are still required.** Legacy is the
-    default and legacy mining is unchanged, so the palace stays current for a rollback.
-  - **An early `wake-up`** (since 1.1.55) no longer meets an empty index: in native mode
-    the worker is started 30 s after the first window loads, each agent's own notes are
-    indexed first, and a wake-up waits up to 5 s for them.
+  - **Old MemPalace data** (`<home>/palace` and its repair copies) is left on disk and never
+    read. The Memory panel shows its size and deletes it only on request, all or nothing (a
+    file still held open is reported and nothing is removed). On start, a MemPalace daemon an
+    earlier version left running on this hive's palace is stopped once.
+  - **An early `wake-up`** (since 1.1.55) does not meet an empty index: each agent's own
+    notes are indexed first, and a wake-up waits up to 5 s for them.
 - **Mid-turn mail** (since 1.1.55). The hook server tracks each agent's turn and, at its next
   tool call, adds an `<inbox-update>` notice for inbox files that arrived since the turn
   began (each announced once, at most five listed, sender text escaped). A message may carry

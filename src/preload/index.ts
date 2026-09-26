@@ -766,7 +766,7 @@ const api = {
   },
   ensureHarnessHome: (path: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('config:ensureHome', path),
-  /** Change the harness home folder. 'move' copies the existing hive + palace
+  /** Change the harness home folder. 'move' copies the existing hive
    *  into the new folder (old kept as a safety net); 'fresh' just re-points and
    *  bootstraps an empty home. On success the app relaunches (never resolves);
    *  on failure (e.g. copy error) returns { ok: false, error }. */
@@ -1133,7 +1133,7 @@ const api = {
   },
 
   // ─── Reset ─────────────────────────────────────────────────────────────────
-  /** Wipe all hive data + the memory palace, reset config, and relaunch the app
+  /** Wipe all hive data + its memory index, reset config, and relaunch the app
    *  into onboarding. The process exits, so this promise never resolves. */
   resetAll: (): Promise<void> => ipcRenderer.invoke('app:resetAll'),
 

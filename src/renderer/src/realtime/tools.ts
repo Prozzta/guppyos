@@ -354,7 +354,7 @@ export function realtimeReadTools(): ReturnType<typeof tool>[] {
               : `${agentId} has not recorded any memory yet.`;
           }
 
-          // query alone → semantic across the whole palace, then text fallback across all agents.
+          // query alone → semantic across the whole hive memory, then text fallback across all agents.
           if (query) {
             const res = await window.cth.searchMemory(query);
             if (res.ok && res.output.trim()) return clip(res.output.trim(), 1600);

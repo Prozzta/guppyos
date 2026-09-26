@@ -641,8 +641,8 @@ export class HiveManager {
 
   /**
    * NATIVE-MEMORY section 6: `<root>/bin/memory/`, the directory the app PREPENDS to an agent's
-   * PATH once the native engine is past `legacy`, so `mempalace` resolves to the shim before a
-   * uv-installed mempalace.exe. Two wrappers, both running the shim on Electron-as-Node:
+   * PATH (whenever semantic memory is on), so `mempalace` resolves to the shim before any
+   * mempalace.exe the user may have installed. Two wrappers, both running the shim on Electron-as-Node:
    * `mempalace.cmd` (cmd.exe, PowerShell) and `mempalace` (Git bash, POSIX sh).
    * Written only when the content changed, via temp + rename: a shell may be reading it.
    * Returns the directory, or null (no hive, or the write failed).
@@ -3344,8 +3344,8 @@ export class HiveManager {
    * record (those carry user.email / account / org / hashed-user-id). The sample
    * is PII-free by construction upstream (the provider's normalize step), so we
    * add no redaction here; we just must not widen what we write. The file lives
-   * at the hive ROOT, so `mempalace mine` (which only scans per-agent dirs) never
-   * ingests it — no palace noise, no MINE_IGNORE entry needed.
+   * at the hive ROOT, so the memory engine (which indexes only agents' Markdown)
+   * never ingests it.
    *
    * Like appendLog: append to disk now (durable immediately). Best-effort — never throws
    * into the beat.

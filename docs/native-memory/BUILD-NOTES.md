@@ -1,5 +1,11 @@
 # Native memory engine: build notes (branch `memory-154`)
 
+> **1.1.59 (MEMPALACE-REMOVAL):** these notes record how the engine was built and cut over.
+> Since 1.1.59 the engine is the ONLY memory: the `memory-engine.json` modes (`legacy`,
+> `shadow`, `fallback-legacy`), the shadow/parity path, the legacy CLI exec in the shim and
+> `src/main/memory.ts` are all gone, and there is no brake back to MemPalace (a rollback is a
+> reinstall of 1.1.58). The mode, rollback and parity sections below are history.
+
 **Status:** built and tested on branch `memory-154`, off `origin/release-1.1.53` (`79ee6b91`, with `76c8d3ce` carried).
 - Nothing is pushed, released or cut.
 - The default mode is `legacy`, which changes **nothing**: no worker, no token, no PATH change, and the `/memory` route answers 403 (no `MEMORY_TOKEN` is ever minted in `legacy`, so no caller can authenticate).

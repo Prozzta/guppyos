@@ -387,7 +387,7 @@ export const DEFAULT_DROP_HTML = `<style>
         <div class="card">
           <span class="tag">Prerequisites</span>
           <h2>Whether you actually have the tools</h2>
-          <p>MemPalace, uv, git and every agent engine, with live status and where
+          <p>git and every agent engine, with live status and where
           each one sits on disk. One button asks Michael to fill in the gaps.</p>
         </div>
         <div class="card">
