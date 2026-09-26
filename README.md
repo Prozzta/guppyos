@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.58" src="https://img.shields.io/badge/version-1.1.58-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.59" src="https://img.shields.io/badge/version-1.1.59-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -189,10 +189,14 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **Settings fixes** (1.1.57) — Settings shows what you saved when
   you reopen it (every control read its value from app start), and dropdowns are readable
   in the dark theme and match the other inputs in both themes.
-- **Quitting without a freeze** (1.1.58, the current release) — quitting no longer
+- **Quitting without a freeze** (1.1.58) — quitting no longer
   freezes the window (the clean-up runs in the background, time-limited), a Windows
   shutdown or sign-out closes the app without the running-terminals prompt, small stutters
   when an agent is archived or restarted are gone, and hangs and crashes are now logged.
+- **MemPalace removed** (1.1.59, the current release) — the built-in memory engine is the
+  only memory and is always on (no Python, no background indexer); agents keep their
+  `mempalace` commands; old MemPalace data can be deleted from the Memory panel; the
+  heavy-job lock no longer blocks light commands.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

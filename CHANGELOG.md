@@ -11,6 +11,53 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.59] — 2026-09-27
+
+**MemPalace is removed: the built-in memory engine is the only memory.** Rollback: 1.1.58
+(reinstall; there is no switch back to MemPalace inside 1.1.59).
+
+### Removed
+
+- **MemPalace and everything around it.** The app no longer runs the MemPalace indexer, its
+  resident background process (about 800 MB to 1.6 GB of memory), or Python at all. The uv and
+  MemPalace rows are gone from Prerequisites, and so is the "Search language" model choice in
+  the Memory panel.
+- **The memory-engine mode file.** `hive/memory-engine.json` (legacy, shadow, native,
+  fallback-legacy) no longer does anything. A leftover one is ignored and noted once in the
+  event log.
+
+### Changed
+
+- **The memory engine is always on** (turn it off in Settings or the Memory panel). Before,
+  every install without that mode file quietly used MemPalace, or had no memory search at all
+  when MemPalace was not installed.
+- **Agents keep their commands.** `mempalace search`, `mempalace wake-up` and `mempalace
+  status` still work, answered by the memory engine; `memory.md` and agents' notes are indexed
+  automatically, with no mine step.
+- **An agent never reaches a different `mempalace`.** If the app cannot put its own command
+  first, the agent simply gets no memory instructions, rather than a MemPalace you may have
+  installed yourself.
+- **The Memory panel, Command Center search and the voice assistant** ask the memory engine
+  directly. The panel shows Off, Unavailable (and why), or how many notes are indexed.
+- **Reset and moving the home folder** wait for the memory engine to stop before they delete
+  or copy anything. Reset now also deletes the memory index; a move no longer copies the old
+  MemPalace folder.
+
+### Added
+
+- **"Delete old MemPalace data (N MB)"** in the Memory panel, shown while any is left on disk.
+  It is never automatic: it asks first, shows what it removes, and deletes all of it or nothing
+  (a file still in use is reported, and nothing is removed). Your agents' memory is kept.
+- **On the first start, an old MemPalace background process** that an earlier version left
+  running on this hive's palace is stopped once, and the event log says so.
+
+### Fixed
+
+- **The heavy-job lock no longer blocks light commands.** A single test file with `2>&1`, an
+  edit script fed through a heredoc, or a `git fetch` counted as a whole test suite. Redirects,
+  heredoc bodies, `#` comments and `$(( ))` arithmetic are now read correctly, and real heavy
+  jobs still take the slot.
+
 ## [1.1.58] — 2026-09-27
 
 **Quitting no longer freezes the window.** Rollback: 1.1.57.
