@@ -109,14 +109,19 @@ export function terminalAutomationBlock(
  * was typed. Require its numbered option rows, not prose that happens to quote them.
  * Rendered xterm rows can split one option across one continuation row. */
 export function isRemoteControlDialogScreen(screen: string): boolean {
-  const rows = screen.split(/\r?\n/).slice(-15).map((row) => row.trim());
-  const hasOption = (number: number, label: string): boolean => rows.some((row, index) => {
+  const rows = screen.split(/\r?\n/)
+    .map((row) => row.trim().replace(/^[\u2502\u2503|]+\s*|\s*[\u2502\u2503|]+$/g, '').trim());
+  while (rows.at(-1) === '') rows.pop();
+  const visibleRows = rows.slice(-15);
+  const hasOption = (number: number, labels: readonly string[]): boolean => visibleRows.some((row, index) => {
     const match = row.match(new RegExp(`^(?:\\u276f\\s*)?${number}\\.\\s+(.+?)\\s*$`, 'i'));
     if (!match) return false;
     const text = match[1].toLowerCase();
-    return text === label || (index + 1 < rows.length && `${text} ${rows[index + 1].toLowerCase()}` === label);
+    return labels.includes(text)
+      || (index + 1 < visibleRows.length && labels.includes(`${text} ${visibleRows[index + 1].toLowerCase()}`));
   });
-  return hasOption(1, 'disconnect this session') && hasOption(2, 'show qr code');
+  return hasOption(1, ['disconnect this session'])
+    && hasOption(2, ['show qr code', 'hide qr code']);
 }
 
 /** Automatic writes may own the prompt only when no user draft or picker does. */

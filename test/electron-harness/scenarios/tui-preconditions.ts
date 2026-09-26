@@ -69,6 +69,8 @@ const NON_COMPOSER: Record<string, string> = {
   // this dialog when `/remote-control` is typed again. The delivery block recognizes
   // these stable labels rather than treating every unknown dialog as a picker.
   'claude remote-control reconnect': `${clear} Remote Control is already connected\r\n\r\n ❯ 1. Disconnect this session\r\n   2. Show QR code\r\n   3. Continue\r\n`,
+  'claude remote-control reconnect qr visible': `${clear} Remote Control is already connected\r\n\r\n ❯ 1. Disconnect this session\r\n   2. Hide QR code\r\n   3. Continue\r\n`,
+  'claude remote-control reconnect bordered': `${clear} ┃ ❯ 1. Disconnect this session ┃\r\n┃   2. Show QR code ┃\r\n┃   3. Continue ┃\r\n`,
   // NOT A REAL SCREEN, AND THAT IS ITS ENTIRE PURPOSE. Nobody has enumerated this
   // one, so it is the arm that proves the detector fails CLOSED rather than open.
   'a screen nobody has met': `${clear} Select your region\r\n\r\n   1. United States\r\n   2. European Union\r\n   3. Other\r\n`

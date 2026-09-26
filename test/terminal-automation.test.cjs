@@ -26,6 +26,12 @@ test('interactive provider commands pause queue automation', () => {
 test('REMOTE-PROMPT-EATS-FIRST-INPUT: the Claude RC reconnect dialog blocks delivery even when labels wrap', () => {
   assert.equal(isRemoteControlDialogScreen('1. Disconnect this session\n2. Show QR code\n3. Continue'), true);
   assert.equal(isRemoteControlDialogScreen('❯ 1. Disconnect this\n session\n2. Show QR\n code\n3. Continue'), true);
+  assert.equal(isRemoteControlDialogScreen('1. Disconnect this session\n2. Hide QR code\n3. Continue'), true,
+    'the dialog stays open after its QR toggle changes label');
+  assert.equal(isRemoteControlDialogScreen('│ ❯ 1. Disconnect this session │\n│   2. Show QR code │\n│   3. Continue │'), true,
+    'a bordered rendering remains structural dialog evidence');
+  assert.equal(isRemoteControlDialogScreen(`1. Disconnect this session\n2. Show QR code${'\n'.repeat(20)}`), true,
+    'trailing blank viewport rows are ignored before the bottom-row scan');
   assert.equal(isRemoteControlDialogScreen('Claude opened [Disconnect this session | Show QR code | Continue]'), false,
     'a quoted dialog in ordinary terminal output must not indefinitely block automation');
   assert.equal(isRemoteControlDialogScreen(`${Array.from({ length: 16 }, () => 'old output').join('\n')}\n1. Disconnect this session\n2. Show QR code`), true,

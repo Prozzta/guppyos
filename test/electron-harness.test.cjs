@@ -200,7 +200,7 @@ test('HARNESS: the captured Claude RC reconnect dialog blocks delivery without c
   const r = await runScenario(scenario('tui-preconditions'), { timeoutMs: 60_000 });
   assert.equal(r.ok, true);
   for (const [name, s] of Object.entries(r.nonComposer)) {
-    const expected = name === 'claude remote-control reconnect' ? 'picker' : null;
+    const expected = name.startsWith('claude remote-control reconnect') ? 'picker' : null;
     assert.equal(s.automationBlock, expected, `${name}: only the captured RC reconnect dialog blocks delivery`);
   }
 });
