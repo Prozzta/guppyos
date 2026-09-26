@@ -74,6 +74,7 @@ HEAVY.push(
   ['wc -w <<<hello\nnpm ci', 'install'],
   ['echo "use <<EOF for heredocs"\nnpm ci', 'install'],
   ['echo $((a<<b))\nnpm ci', 'install'],
+  ['echo $(( a << b ))\nnpm ci', 'install'],
   ["echo 'x <<EOF'\nnpm ci", 'install'],
   // A real heredoc with a heavy command after its terminator stays heavy.
   ["cat > /tmp/a.txt <<-EOF\n\tnode --test test/a.cjs\n\tEOF\nnpm ci", 'install']

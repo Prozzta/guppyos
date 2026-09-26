@@ -58,6 +58,9 @@ function stripHeredocs(cmd: string): string {
       if (c !== '<' || line[j + 1] !== '<') continue;
       const before = j === 0 ? '' : line[j - 1];
       if (line[j + 2] === '<' || before === '<' || !(before === '' || /[\s;|&(]/.test(before))) { j += 1; continue; }
+      // Inside an open `$(( ... ))` a spaced `<<` is a shift (Jim's follow-up), not a heredoc.
+      const head = line.slice(0, j);
+      if ((head.match(/\$\(\(/g) ?? []).length > (head.match(/\)\)/g) ?? []).length) { j += 1; continue; }
       const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line.slice(j));
       if (m) { delims.push(m[2]); j += m[0].length - 1; }
     }
