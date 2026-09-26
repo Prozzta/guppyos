@@ -31,9 +31,27 @@ test('(a) the memory engine is on by default: its switch is Settings\' semantic 
 test('(a) Jim M2, fail closed: the prompt\'s memory line follows the spawn\'s memory env (shim first on PATH), decided BEFORE the prompt is built', () => {
   const spawn = between(INDEX, 'const mem = nativeMemory.spawnEnv(opts.hive.id);', 'catch (e) {');
   assert.match(spawn, /semanticMemory: mem !== null,/);
-  assert.ok(spawn.indexOf('semanticMemory: mem !== null') < spawn.indexOf('opts.env = { ...base, ...mem.env'), 'the prompt gate and the env come from the same decision');
-  assert.match(spawn, /\[pathKey\]: basePath \? `\$\{mem\.shimDir\}\$\{delimiter\}\$\{basePath\}` : mem\.shimDir/, 'the shim dir goes FIRST on the final PATH');
+  // The same `mem` feeds the prompt gate and, unconditionally, the final env (Jim R1 / mutant M2b:
+  // no branch around the merge; withMemoryPath itself decides, and is tested behaviourally below).
+  const gate = spawn.indexOf('semanticMemory: mem !== null');
+  const merge = spawn.indexOf('opts.env = withMemoryPath(opts.env as Record<string, string | undefined>, mem, process.env)');
+  assert.ok(gate > 0 && merge > gate, 'the prompt gate and the env come from the same decision');
+  assert.doesNotMatch(spawn.slice(merge - 200, merge), /if \(/, 'the merge is not skipped behind a condition');
   assert.doesNotMatch(INDEX, /semanticMemory: memory\.active\(\)/, 'no longer gated on a legacy binary');
+});
+
+test('(a) Jim R1 (M2b): withMemoryPath puts the shim FIRST, reuses a Windows `Path` key (no second PATH), and leaves env untouched without memory', () => {
+  const { withMemoryPath } = require('./load-ts.cjs')('src/main/nativeMemory/mainWiring.ts');
+  const d = path.delimiter;
+  const mem = { env: { MEMORY_TOKEN: 't'.repeat(32), MUNDER_HIVE_ROOT: 'H' }, shimDir: 'S' };
+  const win = withMemoryPath({ Path: `A${d}B`, X: '1' }, mem, { PATH: 'IGNORED' });
+  assert.deepEqual(win, { Path: `S${d}A${d}B`, X: '1', MEMORY_TOKEN: 't'.repeat(32), MUNDER_HIVE_ROOT: 'H' });
+  assert.equal(Object.keys(win).filter((k) => k.toUpperCase() === 'PATH').length, 1, 'exactly one PATH key');
+  assert.deepEqual(withMemoryPath({ X: '1' }, mem, { Path: 'P' }), { X: '1', Path: `S${d}P`, MEMORY_TOKEN: 't'.repeat(32), MUNDER_HIVE_ROOT: 'H' }, 'PATH from the process env, under its key');
+  assert.equal(withMemoryPath({}, mem, {}).PATH, 'S', 'no PATH anywhere: the shim dir alone');
+  const env = { Path: 'A', X: '1' };
+  assert.equal(withMemoryPath(env, null, { PATH: 'P' }), env, 'no memory: the env is returned untouched');
+  assert.equal(env.Path, 'A');
 });
 
 test('(a) agent-facing text says "the memory engine", keeps the `mempalace` command, and names no MEMPALACE_* variable', () => {

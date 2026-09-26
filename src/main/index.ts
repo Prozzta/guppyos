@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, pow
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { deleteLegacyPalace, legacyPalaceInfo, stopLegacyDaemon } from './legacyPalace';
 import { killTreesAsync } from './procKill';
-import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
+import { NativeMemoryWiring, toUnpacked, withMemoryPath } from './nativeMemory/mainWiring';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
 import {
@@ -11,7 +11,7 @@ import {
   readlinkSync, symlinkSync, appendFileSync, mkdtempSync
 } from 'node:fs';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-import { join, resolve, sep, basename, dirname, isAbsolute, delimiter } from 'node:path';
+import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
@@ -3372,13 +3372,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // NATIVE-MEMORY: the agent's MEMORY_TOKEN and PATH with the mempalace shim FIRST, on the
       // final PATH. Windows env keys are case-insensitive: PATH is set under the key the env
       // already uses (usually `Path`), never as a second, conflicting one.
-      if (mem) {
-        const base = opts.env as Record<string, string | undefined>;
-        const pathKey = Object.keys(base).find((k) => k.toUpperCase() === 'PATH')
-          ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-        const basePath = base[pathKey] ?? process.env[pathKey];
-        opts.env = { ...base, ...mem.env, [pathKey]: basePath ? `${mem.shimDir}${delimiter}${basePath}` : mem.shimDir } as typeof opts.env;
-      }
+      opts.env = withMemoryPath(opts.env as Record<string, string | undefined>, mem, process.env) as typeof opts.env;
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex

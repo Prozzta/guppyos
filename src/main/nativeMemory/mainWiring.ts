@@ -16,7 +16,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
 import type { WorkerConfig } from './worker';
 
@@ -177,6 +177,24 @@ export class NativeMemoryWiring {
   shutdown(): Promise<void> {
     return this.client.shutdown();
   }
+}
+
+/**
+ * The agent's final env with its memory env merged and the shim dir FIRST on PATH (Jim M2), or
+ * `env` unchanged when `mem` is null (no memory: no token, no shim). Windows env keys are
+ * case-insensitive, so PATH goes under the key the env already uses (usually `Path`), else the
+ * process env's key, never as a second, conflicting one. Pure.
+ */
+export function withMemoryPath(
+  env: Record<string, string | undefined>,
+  mem: { env: Record<string, string>; shimDir: string } | null,
+  processEnv: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  if (!mem) return env;
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH')
+    ?? Object.keys(processEnv).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  const basePath = env[pathKey] ?? processEnv[pathKey];
+  return { ...env, ...mem.env, [pathKey]: basePath ? `${mem.shimDir}${delimiter}${basePath}` : mem.shimDir };
 }
 
 /** A path inside app.asar, mapped to its asar-unpacked copy (a DLL cannot load from the archive). */
