@@ -1396,6 +1396,7 @@ test('the renderer cannot type programmatically: no chain, no order, no ticket, 
     'exactly two asks of main: the boot-prompt helper and the queue drain');
   assert.match(hive, /admissionClass: next\.manual \? 'USER_RELEASED' : 'CAPACITY_GATED'/, 'send-now is a DECLARED class, not a fall-through');
   assert.match(hive, /admissionClass: 'BOOT_SEQUENCE'/);
+  assert.doesNotMatch(codeOnly(hive), /remoteControlCommandForProvider|\/remote-control/, 'Claude Remote Control is an argv concern, never a boot keystroke');
   assert.match(hive, /requestId: `queue:\$\{srcId\}:\$\{next\.id\}`/, 'a queue item is asked under its OWN stable id: at most once');
   // The acknowledgement is reachable only from a COMMIT.
   assert.match(hive, /if \(outcome\.kind !== 'COMMITTED'\) throw new Error\(outcome\.kind\);/);
@@ -1412,6 +1413,15 @@ test('the renderer cannot type programmatically: no chain, no order, no ticket, 
     assert.ok(!codeOnly(preload).includes(gone), `preload no longer exposes \`${gone}\``);
   }
   assert.match(preload, /ipcRenderer\.invoke\('autoSubmit:submit', req\)/);
+});
+
+test('REMOTE-PROMPT-EATS-FIRST-INPUT: Claude God receives argv remote control before both fresh and resumed TUI startup', () => {
+  const index = codeOnly(read('src/main/index.ts'));
+  const claude = index.slice(index.indexOf('if (opts.hive && claudeProvider)'));
+  assert.match(claude, /opts\.hive\.isGod && remoteControlLabel && !args\.includes\('--remote-control'\)/);
+  assert.match(claude, /args\.push\('--remote-control', remoteControlLabel\)/);
+  assert.ok(claude.indexOf("args.push('--remote-control', remoteControlLabel)") < claude.indexOf('const explicitSid ='), 'flag is assembled before the fresh/resume branch');
+  assert.match(index, /\[boot-sequence\].*COMMITTED/);
 });
 
 test("main's pty:write REFUSES renderer-origin PROGRAMMATIC, before anything is written", () => {

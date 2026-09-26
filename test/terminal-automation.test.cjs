@@ -6,6 +6,7 @@ const loadTs = require('./load-ts.cjs');
 
 const {
   canAutomateTerminal,
+  isRemoteControlDialogScreen,
   isStaleTerminalDraft,
   opensInteractiveTerminalUi,
   shouldFollowTerminalOutput,
@@ -20,6 +21,18 @@ test('interactive provider commands pause queue automation', () => {
   assert.equal(opensInteractiveTerminalUi(' /provider '), true);
   assert.equal(opensInteractiveTerminalUi('/compact'), false);
   assert.equal(opensInteractiveTerminalUi('implement this'), false);
+});
+
+test('REMOTE-PROMPT-EATS-FIRST-INPUT: the Claude RC reconnect dialog blocks delivery even when labels wrap', () => {
+  assert.equal(isRemoteControlDialogScreen('1. Disconnect this session\n2. Show QR code\n3. Continue'), true);
+  assert.equal(isRemoteControlDialogScreen('❯ 1. Disconnect this\n session\n2. Show QR\n code\n3. Continue'), true);
+  assert.equal(isRemoteControlDialogScreen('Claude opened [Disconnect this session | Show QR code | Continue]'), false,
+    'a quoted dialog in ordinary terminal output must not indefinitely block automation');
+  assert.equal(isRemoteControlDialogScreen(`${Array.from({ length: 16 }, () => 'old output').join('\n')}\n1. Disconnect this session\n2. Show QR code`), true,
+    'the dialog is recognized in the bottom fifteen visible rows');
+  assert.equal(isRemoteControlDialogScreen('normal composer prompt'), false);
+  const ready = { exited: false, pickerOpen: false, inputDirty: false, settleUntil: 0, modalOpen: true };
+  assert.equal(terminalAutomationBlock(ready, Number.MAX_SAFE_INTEGER), 'picker', 'a visible modal never expires');
 });
 
 test('a command with an argument opens no picker to wait for', () => {

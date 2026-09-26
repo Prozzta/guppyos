@@ -65,6 +65,10 @@ const NON_COMPOSER: Record<string, string> = {
   // Enter on this one ACCEPTS A TERMS OF SERVICE AND A DATA-COLLECTION AGREEMENT ON
   // THE HUMAN'S BEHALF. It is the reason the detector must fail closed.
   'agy consent': `${clear} ...to collect and use my Interactions data, subject to the\r\n Google Antigravity CLI Terms of Service and Google Privacy Policy\r\n\r\n [Previous]      [Done]\r\n\r\n Navigate - enter Toggle\r\n`,
+  // Claude Code 2.1.283: an already connected resumed Remote Control session opens
+  // this dialog when `/remote-control` is typed again. The delivery block recognizes
+  // these stable labels rather than treating every unknown dialog as a picker.
+  'claude remote-control reconnect': `${clear} Remote Control is already connected\r\n\r\n ❯ 1. Disconnect this session\r\n   2. Show QR code\r\n   3. Continue\r\n`,
   // NOT A REAL SCREEN, AND THAT IS ITS ENTIRE PURPOSE. Nobody has enumerated this
   // one, so it is the arm that proves the detector fails CLOSED rather than open.
   'a screen nobody has met': `${clear} Select your region\r\n\r\n   1. United States\r\n   2. European Union\r\n   3. Other\r\n`

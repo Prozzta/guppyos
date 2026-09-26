@@ -514,7 +514,12 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   onOutcome: (r) => {
     // An outcome can raise an INTERFERED hold or settle one: the impact string moves.
     pushAgentImpact();
-    if (r.outcome.kind === 'COMMITTED') return;
+    if (r.outcome.kind === 'COMMITTED') {
+      if (r.admissionClass === 'BOOT_SEQUENCE') {
+        console.log(`[boot-sequence] ${r.agentId} on ${r.ptyId ?? '-'}: COMMITTED`);
+      }
+      return;
+    }
     const why = 'reason' in r.outcome ? r.outcome.reason : '';
     console.log(`[auto-submit] ${r.admissionClass} ${r.agentId} on ${r.ptyId ?? '-'}: ${r.outcome.kind} ${why}`);
   }
@@ -3429,10 +3434,17 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // opaque when several agents run at once — especially with remoteControlAtStartup
     // on, where RC auto-enables for every session. Slugify the friendly name into a
     // single safe token; Claude still appends its own random suffix for uniqueness.
+    const remoteControlLabel = (opts.hive.name || opts.hive.id || '')
+      .trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!args.includes('--remote-control-session-name-prefix')) {
-      const label = (opts.hive.name || opts.hive.id || '')
-        .trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-      if (label) args.push('--remote-control-session-name-prefix', label);
+      if (remoteControlLabel) args.push('--remote-control-session-name-prefix', remoteControlLabel);
+    }
+    // Never type `/remote-control Michael` into a resumed God TUI: Claude's
+    // already-connected session opens a Disconnect/QR/Continue dialog that can
+    // consume the Human's first line. This flag is effective before the TUI owns
+    // input and applies identically to a fresh or resumed God session.
+    if (opts.hive.isGod && remoteControlLabel && !args.includes('--remote-control')) {
+      args.push('--remote-control', remoteControlLabel);
     }
     // Coarse runaway cap.
     if (typeof cfg.maxTurns === 'number' && cfg.maxTurns > 0 && !args.includes('--max-turns')) {

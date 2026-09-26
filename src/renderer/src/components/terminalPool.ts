@@ -40,6 +40,7 @@ import {
 } from './terminalRecovery';
 import {
   canAutomateTerminal,
+  isRemoteControlDialogScreen,
   opensInteractiveTerminalUi,
   shouldFollowTerminalOutput,
   terminalAutomationBlock,
@@ -582,11 +583,29 @@ function automationStateOf(entry: TerminalEntry, now = Date.now()) {
   return {
     exited: entry.exited,
     pickerOpen: entry.automationBlocked,
+    modalOpen: remoteControlDialogVisible(entry),
     pickerOpenedAt: entry.automationBlocked ? entry.automationBlockedAt : undefined,
     inputDirty,
     inputDirtyAt: inputDirty ? entry.inputDirtyAt : undefined,
     settleUntil: entry.automationSettleUntil
   };
+}
+
+/** Program-owned Remote Control dialogs have no preceding local keystroke, so the
+ * slash-command picker latch cannot see them. Only rendered visible rows are read. */
+function remoteControlDialogVisible(entry: TerminalEntry): boolean {
+  if (!entry.everAttached || entry.exited) return false;
+  try {
+    const buf = entry.term.buffer.active;
+    const rows: string[] = [];
+    for (let y = 0; y < entry.term.rows; y += 1) {
+      const line = buf.getLine(buf.baseY + y);
+      if (line) rows.push(line.translateToString(true));
+    }
+    return isRemoteControlDialogScreen(rows.join('\n'));
+  } catch {
+    return false;
+  }
 }
 
 /** Drop the picker latch and give the TUI a moment to repaint the freed line. */

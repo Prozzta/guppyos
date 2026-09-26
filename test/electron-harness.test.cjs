@@ -190,12 +190,9 @@ test('HARNESS: a screen nobody enumerated is refused too — the detector fails 
     'and so is the consent screen, where Enter accepts a ToS');
 });
 
-test('HARNESS: nothing in production blocks automation while any of these owns the screen', async () => {
-  // A PRODUCTION FINDING, REPORTED NOT PATCHED. `opensInteractiveTerminalUi` matches
-  // what the USER TYPED against a set of bare slash-commands; every screen here is
-  // opened by the PROGRAM, so no input passes through that check and the picker
-  // block cannot latch. Invisible to the automation seam BY CONSTRUCTION.
-  //
+test('HARNESS: the captured Claude RC reconnect dialog blocks delivery without classifying every dialog as a picker', async () => {
+  // The dialog is opened by Claude rather than a local slash-command keystroke, so
+  // it needs a screen-derived picker block. The detector is deliberately narrow.
   // This establishes the PRECONDITION for the swallowed-text hazard — that the app
   // believes it is safe to type while a modal is up. It does not show the Enter
   // answering the modal; that needs a live TUI, which this environment cannot spawn.
@@ -203,7 +200,8 @@ test('HARNESS: nothing in production blocks automation while any of these owns t
   const r = await runScenario(scenario('tui-preconditions'), { timeoutMs: 60_000 });
   assert.equal(r.ok, true);
   for (const [name, s] of Object.entries(r.nonComposer)) {
-    assert.equal(s.automationBlock, null, `${name}: the automation seam sees no reason to wait`);
+    const expected = name === 'claude remote-control reconnect' ? 'picker' : null;
+    assert.equal(s.automationBlock, expected, `${name}: only the captured RC reconnect dialog blocks delivery`);
   }
 });
 

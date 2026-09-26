@@ -10,8 +10,7 @@ import {
 } from '@/store/config';
 import {
   clearCommandForProvider,
-  compactionCommandForProvider,
-  remoteControlCommandForProvider
+  compactionCommandForProvider
 } from '../../../shared/providerAutomation';
 import { DEFAULT_CONTEXT_TRIGGER, type ContextRule } from '../../../shared/triggers';
 import type { AgentProvider } from '../../../shared/agentProvider';
@@ -29,7 +28,6 @@ const GOD_ID = 'god';
 const SPAWN_ACCENTS = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'] as const;
 const GOD_PTY = `pty-${GOD_ID}`;
 
-const REMOTE_CONTROL_SETTLE_MS = 1500;
 // Provider-agnostic PTY-quiescence idle fallback (#2e). A non-Claude bridge that
 // fires a 'working' event but never its turn-end signal (Stop / session.idle /
 // agent_end) would pin the agent 'working' forever → the idle-only inbox-wake nudge
@@ -104,7 +102,7 @@ const BOOT_PROMPT_RETRY_MS = 1500;
 const BOOT_PROMPT_MAX_ATTEMPTS = 40;
 
 /**
- * Hand a BOOT-SEQUENCE prompt (remote-control, seed, orientation) to main, and keep
+ * Hand a BOOT-SEQUENCE prompt (seed or orientation) to main, and keep
  * asking while main says "not now".
  *
  * A REFUSED or ABORTED outcome left NOTHING on the prompt — the terminal was not ready, a
@@ -272,7 +270,7 @@ export function useHive(config: HarnessConfig | null): void {
   const godSpawning = useRef(false);
   // Per-agent timestamp until which auto-typers (inbox-wake #3, queue-drain #4)
   // must leave the agent alone — set while its boot sequence is typing so nothing
-  // collides with /remote-control + the orientation prompt.
+  // collides with a seed or orientation prompt.
   const bootGraceUntil = useRef<Record<string, number>>({});
   // Agents whose one-time TUI protocol seed (Crush, seedDelivery:'type-into-tui')
   // has already been typed — guards effect #3b against re-seeding. (ondev-b)
@@ -378,10 +376,9 @@ export function useHive(config: HarnessConfig | null): void {
       useStore.getState().addAgent(god);
       useStore.getState().setGodStatus('ready');
 
-      // Kick Michael off once his TUI is up. Always re-enable remote control so
-      // the human can approve permission prompts from their phone (best-effort — a
-      // failed/unknown slash command just prints to his terminal and is harmless).
-      // Then, ONLY on a genuinely fresh spawn, hand him the orientation prompt —
+      // Kick Michael off once his TUI is up. Main enables Remote Control with a
+      // `--remote-control Michael` spawn flag, never a typed slash command. ONLY
+      // on a genuinely fresh spawn, hand him the orientation prompt —
       // a RESUMED Michael already has his full context and must not be re-oriented
       // mid-thread (that would reset the floor's situational awareness). Both go
       // through the per-pty submit chain, so they're strictly sequential and can't
@@ -391,12 +388,6 @@ export function useHive(config: HarnessConfig | null): void {
       bootGraceUntil.current[GOD_ID] = Date.now() + BOOT_GRACE_MS;
       void (async () => {
         try {
-          const remoteCommand = remoteControlCommandForProvider(godProvider, 'Michael');
-          if (remoteCommand) {
-            // settleMs pauses the chain ~1.5s after /remote-control before the
-            // orientation prompt (fresh spawns only) is submitted next.
-            await submitBootPrompt(GOD_ID, remoteCommand, REMOTE_CONTROL_SETTLE_MS);
-          }
           if (!cancelled && !resumedGod) {
             // A type-into-tui god (Crush) can't ride its hive protocol on argv, so the
             // main process hands it back as seedPrompt — type it FIRST (identity), then

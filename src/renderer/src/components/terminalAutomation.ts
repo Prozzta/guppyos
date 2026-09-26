@@ -61,6 +61,9 @@ export const STALE_PICKER_MS = 1_800_000;
 export interface TerminalAutomationState {
   exited: boolean;
   pickerOpen: boolean;
+  /** A provider-owned modal observed from its screen output. Unlike the local
+   * picker latch, it must not expire while the dialog remains visible. */
+  modalOpen?: boolean;
   inputDirty: boolean;
   settleUntil: number;
   inputDirtyAt?: number; // last keystroke that left a draft; absent ⇒ never expires
@@ -95,10 +98,25 @@ export function terminalAutomationBlock(
   now = Date.now()
 ): TerminalAutomationBlock {
   if (state.exited) return 'exited';
+  if (state.modalOpen) return 'picker';
   if (state.pickerOpen && !isStaleTerminalPicker(state, now)) return 'picker';
   if (state.inputDirty && !isStaleTerminalDraft(state, now)) return 'draft';
   if (now < state.settleUntil) return 'settling';
   return null;
+}
+
+/** Claude's Remote Control reconnect dialog owns input even though no slash command
+ * was typed. Require its numbered option rows, not prose that happens to quote them.
+ * Rendered xterm rows can split one option across one continuation row. */
+export function isRemoteControlDialogScreen(screen: string): boolean {
+  const rows = screen.split(/\r?\n/).slice(-15).map((row) => row.trim());
+  const hasOption = (number: number, label: string): boolean => rows.some((row, index) => {
+    const match = row.match(new RegExp(`^(?:\\u276f\\s*)?${number}\\.\\s+(.+?)\\s*$`, 'i'));
+    if (!match) return false;
+    const text = match[1].toLowerCase();
+    return text === label || (index + 1 < rows.length && `${text} ${rows[index + 1].toLowerCase()}` === label);
+  });
+  return hasOption(1, 'disconnect this session') && hasOption(2, 'show qr code');
 }
 
 /** Automatic writes may own the prompt only when no user draft or picker does. */
