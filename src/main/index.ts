@@ -3885,10 +3885,15 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
   try { stopWebhookServer(); } catch (e) { console.error('[changeHome] webhook.stop:', e); }
-  try { memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
+  // R1 (QUIT-HANG audit): stop() now kills mine/repair trees asynchronously; the copy below
+  // must wait for them, or a mine still writing the palace is copied torn. Bounded, never rejects.
+  let memoryStopped: Promise<void> = Promise.resolve();
+  try { memoryStopped = memory.stop(); } catch (e) { console.error('[changeHome] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
+
+  await memoryStopped;
 
   if (mode === 'move' && oldHome) {
     try {
@@ -4462,7 +4467,7 @@ ipcMain.handle('app:startClosingTime', () => closingTime.start());
 ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 
 // ─── IPC: full reset (wipe data + config, relaunch into onboarding) ──────────
-ipcMain.handle('app:resetAll', () => {
+ipcMain.handle('app:resetAll', async () => {
   allowQuit = true;
   // Tear everything down first so nothing writes back into the dirs we wipe.
   try { clearMissionTimers(); } catch (e) { console.error('[reset] clearMissionTimers:', e); }
@@ -4475,7 +4480,10 @@ ipcMain.handle('app:resetAll', () => {
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[reset] slack.stop:', e); }
-  try { memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
+  // R1 (QUIT-HANG audit): a live mine/repair python holding chroma.sqlite3 makes the palace
+  // rm below fail (EBUSY) on Windows; wait for the async tree kill first. Bounded, never rejects.
+  let memoryStopped: Promise<void> = Promise.resolve();
+  try { memoryStopped = memory.stop(); } catch (e) { console.error('[reset] memory.stop:', e); }
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
@@ -4484,6 +4492,7 @@ ipcMain.handle('app:resetAll', () => {
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the semantic-memory palace. Only these harness-created
   // subdirs are removed — never the user's whole harnessHome folder.
+  await memoryStopped;
   for (const dir of [hive.root(), memory.palacePath()]) {
     if (!dir) continue;
     try { rmSync(dir, { recursive: true, force: true }); }

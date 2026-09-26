@@ -209,3 +209,70 @@ test('F3 WIRING: freeze and slow-start rows exist', () => {
   assert.match(INDEX, /app\.on\('child-process-gone'[\s\S]{0,400}kind: 'child-process-gone'/);
   assert.match(INDEX, /kind: 'quit-teardown', syncMs/);
 });
+
+// ── Jim's audit (QUIT-HANG-157-AUDIT.md): R1, M10, and the normal-use sync kills ──
+
+test('R1: reset and changeHome await memory.stop() before they rm / copy the palace', () => {
+  const reset = between(INDEX, "ipcMain.handle('app:resetAll', async () => {", '\n});\n');
+  const rStop = reset.indexOf('memoryStopped = memory.stop()');
+  const rAwait = reset.indexOf('await memoryStopped;');
+  const rRm = reset.indexOf('rmSync(dir');
+  assert.ok(rStop > 0 && rAwait > rStop && rRm > rAwait, 'stop -> await -> rm');
+  const change = between(INDEX, "ipcMain.handle('config:changeHome', async", '\n});\n');
+  const cStop = change.indexOf('memoryStopped = memory.stop()');
+  const cAwait = change.indexOf('await memoryStopped;');
+  const cCopy = change.indexOf('cpSync(src');
+  assert.ok(cStop > 0 && cAwait > cStop && cCopy > cAwait, 'stop -> await -> copy');
+  assert.doesNotMatch(INDEX, /try \{ memory\.stop\(\); \}/, 'no caller drops the stop promise');
+});
+
+test('R1: memory.stop() resolves only after the child trees are killed (non-quit too)', async (t) => {
+  const { MemoryManager } = loadTs('src/main/memory.ts');
+  const real = procKill.killTreesAsync;
+  let release;
+  const seen = [];
+  procKill.killTreesAsync = (pids) => { seen.push(...pids); return new Promise((r) => { release = r; }); };
+  t.after(() => { procKill.killTreesAsync = real; });
+  const m = new MemoryManager(() => null, () => ({ enabled: false }));
+  m.children.add({ pid: 4242 });
+  let resolved = false;
+  const p = m.stop().then(() => { resolved = true; });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(seen, [4242]);
+  assert.equal(resolved, false, 'still waiting on the tree kill');
+  release();
+  await p;
+  assert.equal(resolved, true);
+});
+
+test('M10: the F3 rows hang off the right Electron events', () => {
+  const health = between(INDEX, 'function watchWindowHealth(', '\n}\n');
+  assert.match(health, /win\.on\('unresponsive', \(\) => \{[^\n]*'window-unresponsive'/);
+  assert.match(health, /win\.on\('responsive', \(\) => \{[^\n]*'window-responsive'/);
+  assert.match(health, /wc\.on\('render-process-gone', [^\n]*'render-process-gone'/);
+  assert.match(health, /wc\.once\('did-finish-load', [^\n]*'window-ready'/);
+  assert.match(health, /win\.on\('session-end', /);
+  assert.match(INDEX, /app\.on\('child-process-gone', /);
+});
+
+test('follow-up: ensureKilled sweeps with the async batched kill, never spawnSync', async (t) => {
+  const w = winWorld(t, { exitAfterMs: 5 });
+  procKill.ensureKilled(5150, 10);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(w.syncs.length, 0, 'no spawnSync');
+  assert.equal(w.spawns.length, 1);
+  assert.deepEqual(w.spawns[0].args, ['/T', '/F', '/PID', '5150']);
+});
+
+test('follow-up: no synchronous tree kill left on normal-use paths', () => {
+  const memory = readSrc('src/main/memory.ts');
+  assert.doesNotMatch(memory, /hardKillTree/, 'mine/repair/daemon-stop timeouts use killTreesAsync');
+  const pk = readSrc('src/main/procKill.ts');
+  const ensure = between(pk, 'export function ensureKilled(', '\n}\n');
+  assert.doesNotMatch(ensure, /hardKillTree\(/);
+  // The only sync sweep left is PtyManager.killAll, used by reset/changeHome right
+  // before they exit/relaunch (accepted in the audit).
+  const pty = readSrc('src/main/pty.ts');
+  assert.equal((pty.match(/hardKillTree\(/g) || []).length, 1);
+  assert.match(between(pty, '  killAll() {', '\n  }\n'), /hardKillTree\(pid\)/);
+});

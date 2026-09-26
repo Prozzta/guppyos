@@ -17,7 +17,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, rmSync, statSync,
 import { basename, dirname, join } from 'node:path';
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { constants as osConstants, setPriority } from 'node:os';
-import { ensureKilled, hardKillTree, killTreesAsync } from './procKill';
+import { ensureKilled, killTreesAsync } from './procKill';
 import { quarantineDirsToReap, quarantineStampMs, nextMineDelayMs } from './palaceReap';
 import {
   archivedAgentIds, fingerprintMemory, loadMineState, queueChangedMemory,
@@ -704,7 +704,7 @@ export class MemoryManager {
       };
       proc.stdout?.on('data', (d) => { output += d.toString(); });
       proc.stderr?.on('data', (d) => { error += d.toString(); });
-      const timer = setTimeout(() => { timedOut = true; if (proc.pid) hardKillTree(proc.pid); finish(null); }, capMs);
+      const timer = setTimeout(() => { timedOut = true; if (proc.pid) void killTreesAsync([proc.pid]); finish(null); }, capMs);
       timer.unref?.();
       proc.once('close', (code) => finish(code));
       proc.once('error', () => finish(null));
@@ -746,7 +746,7 @@ export class MemoryManager {
         // SLOW, not unsupported: no usage error came back. Never a reason for one-shot
         // mining. Abandon this start (the client's whole tree, then `daemon stop`, so no
         // half-started daemon is left running), and let the normal retry try again.
-        if (proc.pid) hardKillTree(proc.pid);
+        if (proc.pid) void killTreesAsync([proc.pid]);
         this.daemonStart = null;
         if (!this.slowDaemonLogged) {
           this.slowDaemonLogged = true;
@@ -796,7 +796,7 @@ export class MemoryManager {
       let proc: ChildProcess;
       try { proc = this.spawnTracked(bin, ['daemon', 'stop'], { env: this.childEnv(), stdio: 'ignore' }); }
       catch { resolve(); return; }
-      const timer = setTimeout(() => { if (proc.pid) hardKillTree(proc.pid); resolve(); }, DAEMON_STOP_WAIT_MS);
+      const timer = setTimeout(() => { if (proc.pid) void killTreesAsync([proc.pid]); resolve(); }, DAEMON_STOP_WAIT_MS);
       timer.unref?.();
       proc.once('close', () => { clearTimeout(timer); this.daemonMayRun = false; resolve(); });
       proc.once('error', () => { clearTimeout(timer); resolve(); });

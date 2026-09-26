@@ -88,6 +88,8 @@ export function killTreesAsync(pids: readonly number[], capMs = KILL_TREES_ASYNC
  *  alive during quit. */
 export function ensureKilled(pid: number | undefined, graceMs = KILL_GRACE_MS): void {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return;
-  const t = setTimeout(() => hardKillTree(pid), graceMs);
+  // QUIT-HANG follow-up: the async sweep, not hardKillTree's spawnSync taskkill, which
+  // stalled the UI 0.3-1.5 s on every archive/restart/respawn on Windows.
+  const t = setTimeout(() => { void killTreesAsync([pid]); }, graceMs);
   t.unref?.();
 }

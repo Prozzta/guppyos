@@ -82,7 +82,8 @@ test('F1 (B1/B3): a HiveManager holds its log open by default; dispose() release
 test('F1 wiring (B1/B3): no opt-in call; dispose() runs before reset\'s rm, before change-home\'s copy, and at quit', () => {
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.doesNotMatch(idx, /keepAppendFilesOpen\(/, 'the default is the app\'s path: nothing to turn on');
-  assert.match(idx, /const finish = \(\): void => \{ try \{ hive\.dispose\(\); \}/);
+  // QUIT-HANG reshaped finish (quit-done row first); what matters: dispose, then app.exit.
+  assert.match(idx, /const finish = \(\): void => \{[\s\S]{0,300}?try \{ hive\.dispose\(\); \}[\s\S]{0,120}?app\.exit\(0\);/);
   const reset = idx.slice(idx.indexOf("ipcMain.handle('app:resetAll'"));
   const disposeAt = reset.indexOf('hive.dispose();'), rmAt = reset.indexOf('rmSync(dir,');
   assert.ok(disposeAt > 0 && rmAt > disposeAt, 'reset: dispose, then rm');
