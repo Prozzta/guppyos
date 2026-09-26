@@ -55,6 +55,7 @@ function stripHeredocs(cmd: string): string {
       const c = line[j];
       if (q) { if (c === q && line[j - 1] !== '\\') q = null; continue; }
       if (c === '"' || c === "'") { q = c; continue; }
+      if (c === '#' && (j === 0 || /\s/.test(line[j - 1]))) break;   // a comment: nothing after it runs
       if (c !== '<' || line[j + 1] !== '<') continue;
       const before = j === 0 ? '' : line[j - 1];
       if (line[j + 2] === '<' || before === '<' || !(before === '' || /[\s;|&(]/.test(before))) { j += 1; continue; }
@@ -97,6 +98,9 @@ function segments(cmd: string): string[] {
     const c = cmd[i];
     if (q) { cur += c; if (c === q && cmd[i - 1] !== '\\') q = null; continue; }
     if (c === '"' || c === "'") { q = c; cur += c; continue; }
+    // HEAVY-CLASSIFIER-EDGES N2: an unquoted `#` at a word start comments out the rest of the line
+    // (an apostrophe in a comment used to open a "quote" that swallowed the following lines).
+    if (c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
     // A redirection's `&` (`2>&1`, `>&2`, `&>x`, `<&0`) is not a separator or a background `&`.
     if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>')) { cur += c; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {

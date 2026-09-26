@@ -75,6 +75,9 @@ HEAVY.push(
   ['echo "use <<EOF for heredocs"\nnpm ci', 'install'],
   ['echo $((a<<b))\nnpm ci', 'install'],
   ['echo $(( a << b ))\nnpm ci', 'install'],
+  // HEAVY-CLASSIFIER-EDGES N2: an apostrophe in a comment must not open a quote.
+  ["# don't forget\nnpm ci", 'install'],
+  ["echo hi # it's fine\nnpm run dist:win", 'build'],
   ["echo 'x <<EOF'\nnpm ci", 'install'],
   // A real heredoc with a heavy command after its terminator stays heavy.
   ["cat > /tmp/a.txt <<-EOF\n\tnode --test test/a.cjs\n\tEOF\nnpm ci", 'install']
