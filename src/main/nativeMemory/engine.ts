@@ -40,7 +40,6 @@ export interface EngineDeps {
   store: NativeMemoryStore;
   embedder: EmbedderLike;
   countTokens: (text: string) => number;
-  mode: () => string;
   now?: () => number;
   /** Non-recursive fs.watch; injected so tests can drive changes. Null = no watcher. */
   watch?: ((dir: string, onChange: (file: string) => void) => { close(): void }) | null;
@@ -183,14 +182,6 @@ export class MemoryEngine {
     });
   }
 
-  /** Raw hits (the parity replay and shadow diagnostics). */
-  searchHits(a: SearchArgs): Promise<SearchHit[]> {
-    return this.enqueue(PRIORITY.search, async () => {
-      const [qv] = await this.embed([a.query]);
-      return this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, k: a.results ?? 10 });
-    });
-  }
-
   async wakeUp(wing: string | null): Promise<EngineReply> {
     // (b) A wake-up is the caller's (or an explicit) wing: index it first.
     this.preferWing(wing);
@@ -211,7 +202,7 @@ export class MemoryEngine {
     return this.enqueue(PRIORITY.status, async () => {
       const c = this.d.store.counts();
       const perWing = this.d.store.db.prepare('SELECT wing, count(*) AS chunks FROM chunks GROUP BY wing ORDER BY wing').all() as Array<{ wing: string; chunks: number }>;
-      const s = { ...c, dbBytes: this.d.store.fileBytes(), perWing, mode: this.d.mode() };
+      const s = { ...c, dbBytes: this.d.store.fileBytes(), perWing };
       return { exit: 0, text: formatStatus(s), json: { ...s, embedded: this.stats.embedded, failed: this.failed.size, modelLoaded: this.d.embedder.loaded } };
     });
   }

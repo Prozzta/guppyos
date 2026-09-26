@@ -9,7 +9,7 @@ import {
   readlinkSync, symlinkSync, appendFileSync, mkdtempSync
 } from 'node:fs';
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
-import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
+import { join, resolve, sep, basename, dirname, isAbsolute, delimiter } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
@@ -648,20 +648,19 @@ const memory = new MemoryManager(
   () => { const c = readConfig(); return { enabled: c.semanticMemory !== false, model: c.embeddingModel ?? 'minilm' }; },
   (event) => hive.appendLog(event)
 );
-// NATIVE-MEMORY (1.1.54): the MemPalace replacement. Default mode `legacy` makes this inert:
-// no worker, no token, no PATH change, the /memory route answers 404. Past legacy, the engine
-// runs in a utility process forked on the first memory request (never at start-up).
+// NATIVE-MEMORY: the memory engine (the only one since MEMPALACE-REMOVAL, 1.1.59). It runs in a
+// utility process forked on the first memory request or the post-start prewarm, never at
+// start-up itself. Settings' semantic memory (`semanticMemory`) is its master switch.
 /** NATIVE-WAKEUP-EMPTY-INDEX (a): the spec's lazy-fork floor after the first window is idle. */
 const NATIVE_MEMORY_PREWARM_DELAY_MS = 30_000;
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
-  palacePath: () => memory.palacePath(),
+  enabled: () => readConfig().semanticMemory !== false,
   userData: app.getPath('userData'),
   resourcesDir: app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'),
   workerEntry: join(__dirname, 'memoryWorker.js'),
   fork: (entry) => utilityProcess.fork(entry, [], { serviceName: 'munder-memory', stdio: 'ignore' }) as unknown as WorkerHandle,
   memoryBaseUrl: () => hookServer.memoryBaseUrl(),
-  legacyBin: () => memory.bin(),
   writeShim: (shimScript) => hive.writeMemoryShim(shimScript),
   log: (row) => hive.appendLog(row),
   vecLoadablePath: () => {
@@ -3319,10 +3318,14 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   let seedPrompt: string | undefined;
   if (opts.hive && hive.enabled()) {
     try {
+      // NATIVE-MEMORY (Jim M2, fail closed): the agent's memory env is decided FIRST, and the
+      // prompt's memory line is written only when the shim really goes first on its PATH. With
+      // no shim, `mempalace` would resolve to whatever the user has installed.
+      const mem = nativeMemory.spawnEnv(opts.hive.id);
       const inj = await hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
         {
-          semanticMemory: memory.active(),
+          semanticMemory: mem !== null,
           knowledgeGraph: knowledge.active(),
           // Bake the ABSOLUTE KG CLI path into the agent's prompt. The prompt used
           // to spell it `$KG_CLI`, which is POSIX-only: under cmd.exe/PowerShell it
@@ -3344,18 +3347,17 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if (inj.refusal) return { ok: false, error: inj.refusal };
       opts.args = [...(opts.args ?? []), ...inj.args];
       seedPrompt = inj.seedPrompt;
-      // Point the agent's mempalace CLI at the shared palace + the `kg` CLI at the
-      // enterprise knowledge store (both no-ops / empty when their flags are off).
-      opts.env = { ...(opts.env ?? {}), ...inj.env, ...memory.env(), ...knowledge.env() };
-      // NATIVE-MEMORY: past `legacy`, the agent's MEMORY_TOKEN and PATH with the mempalace
-      // shim first. Windows env keys are case-insensitive: PATH is set under the key the env
+      // The `kg` CLI at the enterprise knowledge store (empty when the KG is off).
+      opts.env = { ...(opts.env ?? {}), ...inj.env, ...knowledge.env() };
+      // NATIVE-MEMORY: the agent's MEMORY_TOKEN and PATH with the mempalace shim FIRST, on the
+      // final PATH. Windows env keys are case-insensitive: PATH is set under the key the env
       // already uses (usually `Path`), never as a second, conflicting one.
-      {
+      if (mem) {
         const base = opts.env as Record<string, string | undefined>;
         const pathKey = Object.keys(base).find((k) => k.toUpperCase() === 'PATH')
           ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-        const { PATH: shimPath, ...nm } = nativeMemory.spawnEnv(opts.hive.id, base[pathKey] ?? process.env[pathKey]);
-        opts.env = { ...base, ...nm, ...(shimPath ? { [pathKey]: shimPath } : {}) } as typeof opts.env;
+        const basePath = base[pathKey] ?? process.env[pathKey];
+        opts.env = { ...base, ...mem.env, [pathKey]: basePath ? `${mem.shimDir}${delimiter}${basePath}` : mem.shimDir } as typeof opts.env;
       }
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
@@ -6104,13 +6106,12 @@ app.whenReady().then(() => {
     void runMemoryBenchHost(memoryBenchDir, (hiveRoot, baseUrl, idleUnloadMs, dbFile) => {
       const w = new NativeMemoryWiring({
         hiveRoot: () => hiveRoot,
-        palacePath: () => null,
+        enabled: () => true,
         userData: app.getPath('userData'),
         resourcesDir: app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'),
         workerEntry: join(__dirname, 'memoryWorker.js'),
         fork: (entry) => utilityProcess.fork(entry, [], { serviceName: 'munder-memory-bench', stdio: 'ignore' }) as unknown as WorkerHandle,
         memoryBaseUrl: baseUrl,
-        legacyBin: () => null,
         writeShim: () => null,
         log: () => undefined,
         vecLoadablePath: () => {

@@ -2,7 +2,7 @@
 /**
  * NATIVE-MEMORY (1.1.54), the parts that run in plain Node: the tokenizer, the chunker, the
  * source allow-list and migration report, the CLI text, request validation, tokens, the main-side
- * client (deadlines, crash, lazy fork), the wiring (legacy = no change), the HookServer route and
+ * client (deadlines, crash, lazy fork), the wiring (native always on; fail closed), the HookServer route and
  * the `mempalace` shim. The store/engine/worker against the real natives are in
  * native-memory-electron.test.cjs.
  */
@@ -24,7 +24,7 @@ const { chunkMarkdown, CHUNK_MAX_TOKENS } = loadTs('src/main/nativeMemory/chunke
 const { discoverSources, safeRelativeMd, MAX_SOURCE_BYTES } = loadTs('src/main/nativeMemory/sources.ts');
 const { formatSearch, formatWakeUp } = loadTs('src/main/nativeMemory/format.ts');
 const { ftsQuery, rrf, compactionDecision } = loadTs('src/main/nativeMemory/store.ts');
-const { validateRequest, parseMode, MemoryTokens, NativeMemoryClient, EXIT } = loadTs('src/main/nativeMemory/service.ts');
+const { validateRequest, MemoryTokens, NativeMemoryClient, EXIT } = loadTs('src/main/nativeMemory/service.ts');
 const { NativeMemoryWiring, dbFileFor, toUnpacked } = loadTs('src/main/nativeMemory/mainWiring.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 
@@ -158,21 +158,20 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 // ── requests, tokens, client ─────────────────────────────────────────────
 
-test('VALIDATION (section 6): ranges, ISO dates, wing names, --palace must be a served path; wake-up without --wing is the CALLER\'s', () => {
-  const served = ['C:\\Dunder\\hive', 'C:/Dunder/palace'];
+test('VALIDATION (section 6): ranges, ISO dates, wing names; --palace is accepted and IGNORED (MEMPALACE-REMOVAL); wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
-  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1', served), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1' } });
+  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1' } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
-    assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1', served).exit, EXIT.usage, JSON.stringify(bad));
+    assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1').exit, EXIT.usage, JSON.stringify(bad));
   }
-  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: {} }, 'andy', served), { op: 'wake-up', args: { wing: 'andy' } });
-  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { wing: 'jim' } }, 'andy', served), { op: 'wake-up', args: { wing: 'jim' } });
-  assert.equal(validateRequest({ cmd: 'search', args: { query: 'x' }, palace: 'c:/dunder/palace/' }, 'a', served).op, 'search', '--palace = the served palace (case, slashes)');
-  assert.equal(validateRequest({ cmd: 'search', args: { query: 'x' }, palace: 'D:/other' }, 'a', served).exit, EXIT.usage);
-  assert.equal(validateRequest({ cmd: 'mine', args: {} }, 'a', served).exit, EXIT.usage);
-  assert.equal(parseMode('{"mode":"native"}'), 'native');
-  assert.equal(parseMode('{"mode":"yolo"}'), 'legacy');
-  assert.equal(parseMode(null), 'legacy');
+  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: {} }, 'andy'), { op: 'wake-up', args: { wing: 'andy' } });
+  assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { wing: 'jim' } }, 'andy'), { op: 'wake-up', args: { wing: 'jim' } });
+  // An old habit (`--palace C:/Dunder/palace`, or any other path) keeps working: one index per hive.
+  for (const palace of ['c:/dunder/palace/', 'D:/other', 'C:\\Dunder\\hive']) {
+    assert.equal(validateRequest({ cmd: 'search', args: { query: 'x' }, palace }, 'a').op, 'search', palace);
+  }
+  assert.equal(validateRequest({ cmd: 'mine', args: {} }, 'a').exit, EXIT.usage);
+  assert.equal(validateRequest({ cmd: 'shadow', args: { query: 'x' } }, 'a').exit, EXIT.usage, 'the shadow path is gone');
 });
 
 test('MEMORY_TOKEN: minted per agent, resolves only its own agent, revoked on exit, re-minting retires the old one', () => {
@@ -256,55 +255,82 @@ test('CLIENT: no runtime pieces (no config) = exit 3 and nothing forked', async 
 
 // ── wiring ────────────────────────────────────────────────────────────────
 
+/** A resources dir with the runtime pieces workerConfig() checks for (manifest, model, vec0). */
+function runtime(root) {
+  const res = path.join(root, 'res');
+  const plat = `${process.platform}-${process.arch}`;
+  const vec = path.join(root, 'vec0.bin');
+  fs.writeFileSync(vec, 'v');
+  fs.mkdirSync(path.join(res, 'models', 'm', 'onnx'), { recursive: true });
+  fs.writeFileSync(path.join(res, 'models', 'm', 'onnx', 'model.onnx'), 'o');
+  fs.writeFileSync(path.join(res, 'models', 'native-memory-manifest.json'), JSON.stringify({ model: { dir: 'm', onnxSha256: 'a', tokenizerSha256: 'b' }, vec0: { [plat]: { package: 'p', file: 'vec0.bin', sha256: 'c' } } }));
+  return { resourcesDir: res, vecLoadablePath: () => vec };
+}
+
 function wiring(root, over = {}) {
   const logs = [];
   const workers = [];
   const w = new NativeMemoryWiring({
-    hiveRoot: () => root, palacePath: () => path.join(root, 'palace'), userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'),
+    hiveRoot: () => root, enabled: () => true, userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'),
     workerEntry: 'w.js', fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => 'http://127.0.0.1:5555/memory',
-    legacyBin: () => 'C:/uv/mempalace.exe', writeShim: () => path.join(root, 'bin', 'memory'), log: (r) => logs.push(r), vecLoadablePath: () => null, ...over
+    writeShim: () => path.join(root, 'bin', 'memory'), log: (r) => logs.push(r), vecLoadablePath: () => null, ...over
   });
   return { w, logs, workers };
 }
 
-test('WIRING: mode `legacy` (the default) changes NOTHING - no env, no PATH, the endpoint answers native-memory-off, nothing forked', async () => {
+test('WIRING (MEMPALACE-REMOVAL): with NO memory-engine.json (every default install) an agent gets MEMORY_TOKEN, the endpoint, its hive and the shim dir; no MEMPALACE_* / legacy env; a bad token is 403/exit 5', async () => {
   const root = hive({ 'agents/a1/memory.md': 'm' });
-  const { w, workers } = wiring(root);
-  assert.equal(w.mode(), 'legacy');
-  assert.deepEqual(w.spawnEnv('a1', 'C:/Windows'), {});
-  const tok = w.tokens.mint('a1');
-  const r = await w.handle(tok, { cmd: 'search', args: { query: 'x' } });
-  assert.equal(r.body.exit, EXIT.unavailable);
-  assert.equal(workers.length, 0);
-});
-
-test('WIRING: past legacy an agent gets MEMORY_TOKEN, the endpoint, its hive, the legacy CLI path, and PATH with the shim dir FIRST; a bad token is 403/exit 5', async () => {
-  const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': '{"mode":"native"}' });
-  const { w } = wiring(root);
-  const env = w.spawnEnv('a1', 'C:\\Windows;C:\\uv');
-  assert.match(env.MEMORY_TOKEN, /^[0-9a-f]{32}$/);
-  assert.equal(env.MUNDER_MEMORY_URL, 'http://127.0.0.1:5555/memory');
-  assert.equal(env.MUNDER_HIVE_ROOT, root);
-  assert.equal(env.MUNDER_LEGACY_MEMPALACE, 'C:/uv/mempalace.exe');
-  assert.equal(env.PATH.split(path.delimiter)[0], path.join(root, 'bin', 'memory'), 'the shim resolves before a uv-installed mempalace');
+  assert.equal(fs.existsSync(path.join(root, 'memory-engine.json')), false);
+  const { w } = wiring(root, runtime(root));
+  const m = w.spawnEnv('a1');
+  assert.ok(m, 'memory is on by default');
+  assert.equal(m.shimDir, path.join(root, 'bin', 'memory'));
+  assert.match(m.env.MEMORY_TOKEN, /^[0-9a-f]{32}$/);
+  assert.equal(m.env.MUNDER_MEMORY_URL, 'http://127.0.0.1:5555/memory');
+  assert.equal(m.env.MUNDER_HIVE_ROOT, root);
+  assert.deepEqual(Object.keys(m.env).sort(), ['MEMORY_TOKEN', 'MUNDER_HIVE_ROOT', 'MUNDER_MEMORY_URL'], 'no MUNDER_LEGACY_MEMPALACE, no MEMPALACE_*');
   assert.equal((await w.handle('f'.repeat(32), { cmd: 'status' })).status, 403);
-  assert.equal(w.tokens.resolve(env.MEMORY_TOKEN), 'a1');
+  assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), 'a1');
   w.agentExited('a1');
-  assert.equal(w.tokens.resolve(env.MEMORY_TOKEN), null, 'revoked with the agent');
+  assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), null, 'revoked with the agent');
 });
 
-test('WIRING: shadow requests log ONLY a redacted row (a query hash, counts, overlap, latency) - never the query text', async () => {
-  const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': '{"mode":"shadow"}' });
-  const { w, logs } = wiring(root);
-  w.client.request = async () => ({ ok: true, exit: 0, json: [{ wing: 'a1', source: 'agents/a1/memory.md' }, { wing: 'b2', source: 'agents/b2/X.md' }] });
-  const tok = w.tokens.mint('a1');
-  const r = await w.handle(tok, { cmd: 'shadow', args: { query: 'secret project name', legacy: [{ rank: 1, wing: 'a1', room: 'memory', source: 'memory.md' }], legacyMs: 1600 } });
-  assert.equal(r.body.exit, 0);
-  assert.equal(logs.length, 1);
-  assert.equal(logs[0].kind, 'native-memory-shadow');
-  assert.equal(logs[0].overlapSources, 1);
-  assert.equal(logs[0].legacyMs, 1600);
-  assert.ok(!JSON.stringify(logs).includes('secret'), 'no query text stored');
+test('WIRING: a leftover memory-engine.json (any mode, even legacy) is ignored: memory stays on', async () => {
+  for (const mode of ['legacy', 'fallback-legacy', 'shadow', 'native']) {
+    const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': JSON.stringify({ mode }) });
+    const { w } = wiring(root, runtime(root));
+    assert.ok(w.spawnEnv('a1'), mode);
+  }
+});
+
+test('WIRING (Jim M2, fail closed): semantic memory off, no runtime, or a failed shim write = null (no memory env, so no prompt line); one log row per reason', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  const off = wiring(root, { ...runtime(root), enabled: () => false });
+  assert.equal(off.w.spawnEnv('a1'), null);
+  assert.equal(off.logs.length, 0, 'turned off is a choice, not a fault: no row');
+  assert.equal((await off.w.query('status')).exit, EXIT.unavailable);
+  const noRt = wiring(root);   // vecLoadablePath null: the runtime is missing
+  assert.equal(noRt.w.spawnEnv('a1'), null);
+  assert.equal(noRt.w.spawnEnv('a2'), null);
+  assert.deepEqual(noRt.logs.map((r) => [r.kind, r.reason]), [['native-memory-unavailable', 'no-runtime']], 'one row, not one per spawn');
+  const noShim = wiring(root, { ...runtime(root), writeShim: () => null });
+  assert.equal(noShim.w.spawnEnv('a1'), null, 'no shim on PATH -> no memory (never a user-installed mempalace)');
+  assert.deepEqual(noShim.logs.map((r) => [r.kind, r.reason, r.agentId]), [['native-memory-unavailable', 'shim-failed', 'a1']]);
+  assert.equal(noShim.w.tokens.resolve('0'.repeat(32)), null);
+});
+
+test('WIRING: query() serves the Memory panel / Command Center as caller `human` through the same validation; there is no token and no HTTP route for it', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  const { w } = wiring(root, runtime(root));
+  const seen = [];
+  w.client.request = async (op, args) => { seen.push({ op, args }); return { ok: true, exit: 0, text: 'T\n' }; };
+  assert.equal((await w.query('search', { query: 'log rotation', wing: 'jim' })).text, 'T\n');
+  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human' } });
+  assert.equal((await w.query('search', { query: '' })).exit, EXIT.usage);
+  await w.query('wake-up', { wing: 'andy' });
+  assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy' } });
+  const hooks = fs.readFileSync(path.join(REPO, 'src', 'main', 'hooks.ts'), 'utf8');
+  assert.doesNotMatch(hooks, /\.query\(/, 'the HookServer never calls query()');
 });
 
 test('WIRING: the vec0 path maps from inside app.asar to app.asar.unpacked (the installed layout nests it under sqlite-vec)', () => {
@@ -345,7 +371,7 @@ test('ROUTE: /memory/<token> reaches the handler with the token and body; no han
   const base = s.memoryBaseUrl();
   assert.match(base, /^http:\/\/127\.0\.0\.1:\d+\/memory$/);
   const tok = 'ab'.repeat(16);
-  assert.equal((await post(`${base}/${tok}`, {})).status, 404, 'no handler (legacy): the route does not exist');
+  assert.equal((await post(`${base}/${tok}`, {})).status, 404, 'no handler: the route does not exist');
   const seen = [];
   s.setMemoryHandler(async (token, body) => { seen.push({ token, body }); return { status: 200, body: { exit: 0, text: 'ok' } }; });
   const r = await post(`${base}/${tok}`, { cmd: 'status' });
@@ -383,17 +409,10 @@ test('SHIM parseArgs: MemPalace 3.7.1 argv shapes (global --palace, --flag value
   assert.throws(() => parseArgs(['search', 'x', '--wing']), /needs a value/);
 });
 
-test('SHIM modes: legacy / fallback-legacy EXEC the legacy CLI with the same argv; native posts to the endpoint and prints its text with its exit; mine is a named refusal', async (t) => {
+test('SHIM (MEMPALACE-REMOVAL): posts to the endpoint and prints its text with its exit, with NO mode file; --palace is accepted and not sent; never spawns anything; mine is a named refusal', async (t) => {
   const calls = [];
-  const shim = loadShim((bin, argv, o) => { calls.push({ bin, argv, stdio: o.stdio }); return { status: 7, stdout: Buffer.from('LEGACY OUT\n') }; });
+  const shim = loadShim((bin, argv) => { calls.push({ bin, argv }); return { status: 7 }; });
   const root = hive({});
-  const legacyBin = process.execPath;
-  const env = (mode, extra = {}) => { fs.writeFileSync(path.join(root, 'memory-engine.json'), JSON.stringify({ mode })); return { MUNDER_HIVE_ROOT: root, MUNDER_LEGACY_MEMPALACE: legacyBin, ...extra }; };
-  assert.equal((await capture((io) => shim.main(['search', 'x'], env('legacy'), io))).code, 7, 'legacy: its exit code');
-  assert.deepEqual(calls[0].argv, ['search', 'x']);
-  assert.equal((await capture((io) => shim.main(['--palace', 'P', 'wake-up'], env('fallback-legacy'), io))).code, 7);
-  assert.deepEqual(calls[1].argv, ['--palace', 'P', 'wake-up']);
-  // native, against a real loopback endpoint
   const seen = [];
   const srv = http.createServer((req, res) => {
     let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => {
@@ -404,34 +423,28 @@ test('SHIM modes: legacy / fallback-legacy EXEC the legacy CLI with the same arg
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r)); t.after(() => srv.close());
   const url = `http://127.0.0.1:${srv.address().port}/memory`;
-  const n = await capture((io) => shim.main(['search', 'log', 'rotation', '--wing', 'jim'], env('native', { MUNDER_MEMORY_URL: url, MEMORY_TOKEN: 'ab'.repeat(16), MEMPALACE_PALACE_PATH: 'C:/Dunder/palace' }), io));
+  const env = (extra = {}) => ({ MUNDER_HIVE_ROOT: root, MUNDER_MEMORY_URL: url, MEMORY_TOKEN: 'ab'.repeat(16), ...extra });
+  const n = await capture((io) => shim.main(['--palace', 'C:/Dunder/palace', 'search', 'log', 'rotation', '--wing', 'jim'], env({ MEMPALACE_PALACE_PATH: 'C:/Dunder/palace' }), io));
   assert.deepEqual(n, { code: 0, out: 'NATIVE TEXT\n', err: '' });
-  assert.deepEqual(seen[0], { url: `/memory/${'ab'.repeat(16)}`, body: { cmd: 'search', args: { wing: 'jim', query: 'log rotation' }, palace: 'C:/Dunder/palace' } });
-  assert.equal((await capture((io) => shim.main(['status'], env('native', { MUNDER_MEMORY_URL: url, MEMORY_TOKEN: 'cd'.repeat(16) }), io))).code, 5, '403 -> exit 5');
-  const mine = await capture((io) => shim.main(['mine', 'x'], env('native', { MUNDER_MEMORY_URL: url, MEMORY_TOKEN: 'ab'.repeat(16) }), io));
+  assert.deepEqual(seen[0], { url: `/memory/${'ab'.repeat(16)}`, body: { cmd: 'search', args: { wing: 'jim', query: 'log rotation' } } });
+  fs.writeFileSync(path.join(root, 'memory-engine.json'), '{"mode":"legacy"}');
+  assert.equal((await capture((io) => shim.main(['wake-up'], env(), io))).code, 0, 'a leftover legacy mode file changes nothing');
+  assert.equal((await capture((io) => shim.main(['status'], env({ MEMORY_TOKEN: 'cd'.repeat(16) }), io))).code, 5, '403 -> exit 5');
+  const mine = await capture((io) => shim.main(['mine', 'x'], env(), io));
   assert.equal(mine.code, 2);
-  assert.match(mine.err, /not available with the native memory engine/);
-  assert.equal(calls.length, 2, 'native never runs the legacy CLI');
+  assert.match(mine.err, /indexes memory\.md .* automatically/);
+  assert.equal(calls.length, 0, 'the shim never spawns a process');
+  assert.doesNotMatch(fs.readFileSync(SHIM, 'utf8'), /child_process|spawnSync|MUNDER_LEGACY_MEMPALACE|memory-engine\.json|fallback-legacy/);
 });
 
-test('SHIM: app not running = exit 3 with one line of guidance; no endpoint env = exit 3; shadow prints ONLY legacy output and sends its ranks', async (t) => {
-  const posts = [];
-  const shim = loadShim((bin, argv) => ({ status: 0, stdout: Buffer.from('\n' + '='.repeat(60) + '\n  Results for: "q"\n' + '='.repeat(60) + '\n\n  [1] jim / general\n      Source: AUDIT.md\n      Match:  cosine_sim=0.5  bm25=1.0\n\n      x\n\n') }));
+test('SHIM: app not running = exit 3 with one line of guidance; no endpoint env = exit 3', async () => {
+  const shim = loadShim(() => ({}));
   const root = hive({});
-  fs.writeFileSync(path.join(root, 'memory-engine.json'), '{"mode":"native"}');
   const down = await capture((io) => shim.main(['search', 'q'], { MUNDER_HIVE_ROOT: root, MUNDER_MEMORY_URL: 'http://127.0.0.1:1/memory', MEMORY_TOKEN: 'ab'.repeat(16) }, io));
   assert.equal(down.code, 3);
   assert.equal(down.err.trim().split('\n').length, 1);
+  assert.doesNotMatch(down.err, /fallback-legacy/);
   assert.equal((await capture((io) => shim.main(['search', 'q'], { MUNDER_HIVE_ROOT: root }, io))).code, 3);
-  const srv = http.createServer((req, res) => { let b = ''; req.on('data', (d) => { b += d; }); req.on('end', () => { posts.push(JSON.parse(b)); res.end('{"exit":0}'); }); });
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r)); t.after(() => srv.close());
-  fs.writeFileSync(path.join(root, 'memory-engine.json'), '{"mode":"shadow"}');
-  const sh = await capture((io) => shim.main(['search', 'q'], { MUNDER_HIVE_ROOT: root, MUNDER_LEGACY_MEMPALACE: process.execPath, MUNDER_MEMORY_URL: `http://127.0.0.1:${srv.address().port}/memory`, MEMORY_TOKEN: 'ab'.repeat(16) }, io));
-  assert.equal(sh.code, 0);
-  assert.match(sh.out, /\[1\] jim \/ general/);
-  assert.ok(!sh.out.includes('NATIVE'), 'shadow prints only the legacy answer');
-  assert.equal(posts[0].cmd, 'shadow');
-  assert.deepEqual(posts[0].args.legacy, [{ rank: 1, wing: 'jim', room: 'general', source: 'AUDIT.md' }]);
 });
 
 test('SHIM on PATH (section 6): the generated wrappers run the shim on Electron-as-Node, and are rewritten only when changed', () => {
@@ -452,39 +465,6 @@ test('SHIM on PATH (section 6): the generated wrappers run the shim on Electron-
 });
 
 // ── parity statistics (gate 4) ────────────────────────────────────────────
-
-test('PARITY STATS: NDCG@5 / recall@10 by hand; a paired bootstrap is seeded and brackets the mean; kappa; the gate fails a real regression and passes parity', () => {
-  const S = require(path.join(REPO, 'scripts', 'native-memory-parity-stats.cjs'));
-  assert.ok(Math.abs(S.ndcgAt([2, 0, 1], [2, 1, 0], 5) - ((3 + 1 / 2) / (3 + 1 / Math.log2(3)))) < 1e-12);
-  assert.equal(S.ndcgAt([0, 0], [0, 0], 5), null, 'no relevant item: not scored');
-  assert.equal(S.recallAt([1, 0, 2], [1, 2, 1, 0], 10), 2 / 3);
-  const a = S.pairedBootstrap([0.1, -0.05, 0.02, 0.0, 0.03], 2000, 7);
-  const b = S.pairedBootstrap([0.1, -0.05, 0.02, 0.0, 0.03], 2000, 7);
-  assert.deepEqual(a, b, 'seeded');
-  assert.ok(a.lo <= a.mean && a.mean <= a.hi);
-  assert.equal(S.kappa({ x: 0, y: 1, z: 2 }, { x: 0, y: 1, z: 2 }), 1);
-  // Synthetic: 10 semantic queries; items A (legacy rank 1) and B (native rank 1).
-  const mk = (nativeGood) => {
-    const sheet = { queries: [] }; const key = []; const pub = { results: [] };
-    for (let i = 1; i <= 10; i++) {
-      const qid = `q${i}`;
-      sheet.queries.push({ qid, items: [{ item: `${qid}-A`, label: 2 }, { item: `${qid}-B`, label: nativeGood ? 2 : 0 }] });
-      key.push({ qid, cohort: 'semantic', items: [{ item: `${qid}-A`, legacyRank: 1, nativeRank: nativeGood ? 2 : null }, { item: `${qid}-B`, legacyRank: null, nativeRank: 1 }] });
-      pub.results.push({ qid, legacy: [{ scope: 'in-scope' }] });
-    }
-    return { sheet, key, pub };
-  };
-  assert.equal(S.evaluate(mk(true)).pass, true, 'native as good: pass');
-  const bad = S.evaluate(mk(false));
-  assert.equal(bad.pass, false, 'native misses the relevant item every time: fail');
-  assert.ok(bad.adjusted.overall.ndcg5.lo < -0.05);
-  // The same misses, but legacy's item is out of scope (excluded): scope-adjusted, not a regression.
-  const ex = mk(false);
-  ex.pub.results.forEach((r) => { r.legacy[0].scope = 'excluded'; });
-  const exr = S.evaluate(ex);
-  assert.equal(exr.raw.overall.pass, false);
-  assert.notEqual(exr.adjusted.overall.ndcg5?.lo ?? 0, bad.adjusted.overall.ndcg5.lo, 'excluded legacy hits leave the judged pool');
-});
 
 test('ZERO PYTHON (and zero child processes) on the native path: the built worker bundle never requires child_process; native CLI calls never run the legacy CLI (see SHIM modes)', () => {
   const bundle = path.join(REPO, 'out', 'main', 'memoryWorker.js');
@@ -532,65 +512,6 @@ test('IDLE UNLOAD (Jim R2): every embed re-arms ONE unload timer of MODEL_IDLE_U
 test('ALLOW-LIST: a DIRECTORY named like a Markdown file is not a source', () => {
   const root = hive({ 'agents/a1/memory.md': 'm', 'agents/a1/notes.md/inner.txt': 'x' });
   assert.deepEqual(discoverSources(root).eligible.map((e) => e.path), ['agents/a1/memory.md']);
-});
-
-test('PARITY STATS: a cohort whose queries have no relevant item (no-match) is reported, not gated; excluded queries are not scored', () => {
-  const S = require(path.join(REPO, 'scripts', 'native-memory-parity-stats.cjs'));
-  const sheet = { queries: [] }; const key = []; const pub = { results: [] };
-  for (let i = 1; i <= 9; i++) {
-    const qid = `n${i}`;
-    sheet.queries.push({ qid, items: [{ item: `${qid}-A`, label: 0 }, { item: `${qid}-B`, label: 0 }] });
-    key.push({ qid, cohort: 'no-match', items: [{ item: `${qid}-A`, legacyRank: 1, nativeRank: null }, { item: `${qid}-B`, legacyRank: null, nativeRank: 1 }] });
-    pub.results.push({ qid, legacy: [{ scope: 'in-scope' }] });
-  }
-  sheet.queries.push({ qid: 's1', items: [{ item: 's1-A', label: 2 }] });
-  key.push({ qid: 's1', cohort: 'semantic', items: [{ item: 's1-A', legacyRank: 1, nativeRank: 1 }] });
-  pub.results.push({ qid: 's1', legacy: [{ scope: 'in-scope' }] });
-  const r = S.evaluate({ sheet, key, pub, exclude: ['n9'] });
-  assert.equal(r.labelledQueries, 9, 'n9 excluded');
-  assert.deepEqual(r.excluded, ['n9']);
-  assert.equal(r.adjusted['no-match'].scored, 0);
-  assert.equal(r.adjusted['no-match'].gated, false);
-  assert.equal(r.adjusted['no-match'].pass, null);
-});
-
-// ── gate 6 (god's gate-4 decision): per-cohort shadow diagnostics ─────────
-
-test('GATE-6 DIAGNOSTICS: queries are classified into the spec cohorts by shape; the review window is opt-in, dated and self-expiring', () => {
-  const { classifyQuery, reviewCaptureActive } = loadTs('src/main/nativeMemory/service.ts');
-  assert.equal(classifyQuery('anything', 'jim-mtujpe28'), 'wing-scoped');
-  for (const q of ['LOG-STALL rotation', 'commit 4955862c', '1.1.52 palace repair', 'worker_wake stall', 'hooks.ts route']) assert.equal(classifyQuery(q, null), 'exact-identifier', q);
-  for (const q of ['"kept open" log', 'C:/Dunder path', 'why: the gate', 'item (b) decision']) assert.equal(classifyQuery(q, null), 'punctuation', q);
-  assert.equal(classifyQuery('how does the wake confirmation work', null), 'semantic');
-  const now = Date.parse('2026-09-27T00:00:00Z');
-  assert.equal(reviewCaptureActive(null, now), false, 'default: off');
-  assert.equal(reviewCaptureActive('{"mode":"shadow"}', now), false);
-  assert.equal(reviewCaptureActive('{"mode":"shadow","reviewCaptureUntil":"2026-09-28T00:00:00Z"}', now), true);
-  assert.equal(reviewCaptureActive('{"mode":"shadow","reviewCaptureUntil":"2026-09-26T00:00:00Z"}', now), false, 'expires by itself');
-  assert.equal(reviewCaptureActive('{"reviewCaptureUntil":"soon"}', now), false);
-});
-
-test('GATE-6 DIAGNOSTICS: the redacted shadow row carries the cohort and ranked source HASHES (never text); the review flag reaches the worker only inside the window', async () => {
-  const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': '{"mode":"shadow"}' });
-  const { w, logs } = wiring(root);
-  const sent = [];
-  w.client.request = async (op, args) => { sent.push({ op, args }); return { ok: true, exit: 0, json: [{ wing: 'a1', source: 'agents/a1/memory.md' }] }; };
-  const tok = w.tokens.mint('a1');
-  await w.handle(tok, { cmd: 'shadow', args: { query: 'LOG-STALL secret text', legacy: [{ rank: 1, wing: 'a1', room: 'memory', source: 'memory.md' }], legacyMs: 1500 } });
-  assert.equal(logs[0].cohort, 'exact-identifier');
-  assert.equal(logs[0].legacyRanked.length, 1);
-  assert.deepEqual(logs[0].legacyRanked, logs[0].nativeRanked, 'same wing|source -> same hash');
-  assert.equal(logs[0].reviewCaptured, false);
-  assert.equal(sent[0].args.review, false);
-  assert.ok(!JSON.stringify(logs).includes('secret'));
-  await w.handle(tok, { cmd: 'shadow', args: { query: 'nothing found here', legacy: [] } });
-  assert.equal(logs[1].cohort, 'no-match', 'legacy answered nothing');
-  fs.writeFileSync(path.join(root, 'memory-engine.json'), JSON.stringify({ mode: 'shadow', reviewCaptureUntil: new Date(Date.now() + 3600e3).toISOString() }));
-  await w.handle(tok, { cmd: 'shadow', args: { query: 'q', legacy: [] } });
-  assert.equal(sent[2].args.review, true, 'inside the window the worker is told to capture');
-  assert.equal(sent[2].args.agent, 'a1');
-  assert.equal(logs[2].reviewCaptured, true);
-  assert.ok(!JSON.stringify(logs).includes('"q"'), 'the hive log still has no text');
 });
 
 test('SMOKE / BENCH FLAGS are inert unless passed: no flag -> null; index.ts redirects userData and branches ONLY when one is present', () => {

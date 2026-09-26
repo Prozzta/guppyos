@@ -77,8 +77,8 @@ export function formatWakeUp(identity: string | null, entries: WakeEntry[]): str
   return `Wake-up text (~${Math.floor(text.length / 4)} tokens):\n${'='.repeat(50)}\n${text}\n`;
 }
 
-export function formatStatus(s: { sources: number; chunks: number; vectors: number; generation: number; dbBytes: number; perWing: Array<{ wing: string; chunks: number }>; mode: string }): string {
-  const L = [`MemPalace (native index, mode ${s.mode}): ${s.sources} sources, ${s.chunks} chunks, ${s.vectors} vectors, ${(s.dbBytes / 1048576).toFixed(1)} MB, generation ${s.generation}`];
+export function formatStatus(s: { sources: number; chunks: number; vectors: number; generation: number; dbBytes: number; perWing: Array<{ wing: string; chunks: number }> }): string {
+  const L = [`Memory engine (native index): ${s.sources} sources, ${s.chunks} chunks, ${s.vectors} vectors, ${(s.dbBytes / 1048576).toFixed(1)} MB, generation ${s.generation}`];
   for (const w of s.perWing) L.push(`  WING: ${w.wing}  (${w.chunks} chunks)`);
   return L.join('\n') + '\n';
 }

@@ -2,18 +2,22 @@
  * NATIVE-MEMORY: the Electron glue in main. Everything here is short and synchronous or a
  * message post; the engine itself is in the utility process (worker.ts).
  *
- *   mode()        the persisted feature flag (default `legacy`: this module then does NOTHING:
- *                 no worker, no token, no PATH change, no endpoint)
- *   spawnEnv(id)  what an agent's spawn gets past `legacy`: MEMORY_TOKEN, the endpoint, the hive
- *                 root, the legacy CLI's path, and PATH with the shim dir first
- *   handle(...)   the HookServer `/memory/<token>` handler
+ * MEMPALACE-REMOVAL (1.1.59): the native engine is the ONLY memory. There is no mode file any
+ * more; the one switch is Settings' semantic memory (config `semanticMemory`, default on).
+ *
+ *   spawnEnv(id)  what a spawning agent gets: MEMORY_TOKEN, the endpoint, the hive root, and the
+ *                 shim dir to put FIRST on PATH, or null when memory is off or unavailable (then
+ *                 the prompt carries no memory line: fail closed, Jim M2)
+ *   handle(...)   the HookServer `/memory/<token>` handler (agents)
+ *   query(...)    the same ops for main-internal callers (the Memory panel, Command Center,
+ *                 voice tools) as the caller wing `human`; never reachable over HTTP
  *   agentExited   revoke the agent's token
- *   shutdown()    drain and stop the worker (quit)
+ *   shutdown()    drain and stop the worker (quit, reset, home change)
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
-import { classifyQuery, EXIT, MemoryTokens, MODE_FILE, NativeMemoryClient, parseMode, reviewCaptureActive, validateRequest, WAKE_UP_DEADLINE_MS, type MemoryMode, type WorkerHandle } from './service';
+import { join } from 'node:path';
+import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
 import type { WorkerConfig } from './worker';
 
 export interface RuntimeManifest {
@@ -23,7 +27,8 @@ export interface RuntimeManifest {
 
 export interface WiringDeps {
   hiveRoot: () => string | null;
-  palacePath: () => string | null;
+  /** Settings' semantic memory (config `semanticMemory !== false`): the master switch. */
+  enabled: () => boolean;
   userData: string;
   /** resources dir: packaged `process.resourcesPath`, dev the repo's `resources/`. */
   resourcesDir: string;
@@ -31,7 +36,6 @@ export interface WiringDeps {
   workerEntry: string;
   fork: (entry: string) => WorkerHandle;
   memoryBaseUrl: () => string | null;
-  legacyBin: () => string | null;
   writeShim: (shimScript: string) => string | null;
   log: (row: Record<string, unknown>) => void;
   /** The sqlite-vec loadable library's path on the REAL filesystem (asar-unpacked), resolved by
@@ -46,23 +50,17 @@ export function dbFileFor(userData: string, hiveRoot: string): string {
   return join(userData, 'memory', `${key}.sqlite`);
 }
 
+/** Why memory is not available (one log row per reason per run, not one per spawn). */
+export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'shim-failed';
+
 export class NativeMemoryWiring {
   readonly tokens = new MemoryTokens();
   readonly client: NativeMemoryClient;
   private manifest: RuntimeManifest | null = null;
+  private loggedUnavailable = new Set<MemoryUnavailable>();
 
   constructor(private readonly d: WiringDeps) {
     this.client = new NativeMemoryClient({ fork: () => d.fork(d.workerEntry), config: () => this.workerConfig(), log: d.log });
-  }
-
-  private modeRaw(): string | null {
-    const root = this.d.hiveRoot();
-    if (!root) return null;
-    try { return readFileSync(join(root, MODE_FILE), 'utf8'); } catch { return null; }
-  }
-
-  mode(): MemoryMode {
-    return parseMode(this.modeRaw());
   }
 
   private runtimeManifest(): RuntimeManifest | null {
@@ -93,41 +91,56 @@ export class NativeMemoryWiring {
     if (!vecPath) return null;
     const modelDir = join(this.d.resourcesDir, 'models', m.model.dir);
     if (!existsSync(vecPath) || !existsSync(join(modelDir, 'onnx', 'model.onnx'))) return null;
-    return {
-      hiveRoot: root,
-      dbFile,
-      modelDir,
-      modelSha256: m.model.onnxSha256,
-      vecPath,
-      vecSha256: v.sha256,
-      modeFile: join(root, MODE_FILE)
-    };
+    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256 };
   }
 
-  /** Env for a spawning agent. `legacy`: nothing at all (zero behaviour change). */
-  spawnEnv(agentId: string, basePath: string | undefined): Record<string, string> {
-    if (this.mode() === 'legacy') return {};
+  /** The current hive's index file (reset / home change delete it, after shutdown()). */
+  dbFile(): string | null {
     const root = this.d.hiveRoot();
-    const url = this.d.memoryBaseUrl();
-    const shimDir = this.d.writeShim(join(this.d.resourcesDir, 'mempalace-shim.cjs'));
-    if (!root || !shimDir) return {};
-    const env: Record<string, string> = {
-      MEMORY_TOKEN: this.tokens.mint(agentId),
-      MUNDER_HIVE_ROOT: root,
-      MUNDER_LEGACY_MEMPALACE: this.d.legacyBin() ?? '',
-      PATH: basePath ? `${shimDir}${delimiter}${basePath}` : shimDir
-    };
-    if (url) env.MUNDER_MEMORY_URL = url;
-    return env;
+    return root ? dbFileFor(this.d.userData, root) : null;
   }
 
-  /** NATIVE-WAKEUP-EMPTY-INDEX (a), god: when the mode is NATIVE, fork the worker (its below-normal
-   *  startup backfill runs; the model loads at the first embed) instead of waiting for the first
-   *  request, so the first task-start wake-up does not meet an empty index. main calls it no
-   *  earlier than 30 s after the first window finished loading (the spec's lazy rule). Legacy,
-   *  shadow and fallback-legacy: nothing (legacy keeps its zero-startup-work contract). */
+  /** Why memory is unusable right now, or null when it is usable (switch on, hive, runtime). */
+  unavailable(): MemoryUnavailable | null {
+    if (!this.d.enabled()) return 'disabled';
+    if (!this.d.hiveRoot()) return 'no-hive';
+    if (!this.workerConfig()) return 'no-runtime';
+    return null;
+  }
+
+  private noteUnavailable(reason: MemoryUnavailable, agentId?: string): null {
+    if (!this.loggedUnavailable.has(reason)) {
+      this.loggedUnavailable.add(reason);
+      this.d.log({ kind: 'native-memory-unavailable', reason, ...(agentId ? { agentId } : {}) });
+    }
+    return null;
+  }
+
+  /**
+   * What a spawning agent gets, or null: then the agent has NO memory and its prompt carries no
+   * memory line (Jim M2, fail closed). A null must never fall through to a `mempalace` found on
+   * the user's PATH (their own uv install would search or create ~/.mempalace), which is why the
+   * shim dir is returned on its own: the caller puts it FIRST on the agent's final PATH.
+   */
+  spawnEnv(agentId: string): { env: Record<string, string>; shimDir: string } | null {
+    const why = this.unavailable();
+    if (why) return why === 'disabled' ? null : this.noteUnavailable(why, agentId);
+    const root = this.d.hiveRoot() as string;
+    const shimDir = this.d.writeShim(join(this.d.resourcesDir, 'mempalace-shim.cjs'));
+    if (!shimDir) return this.noteUnavailable('shim-failed', agentId);
+    const env: Record<string, string> = { MEMORY_TOKEN: this.tokens.mint(agentId), MUNDER_HIVE_ROOT: root };
+    const url = this.d.memoryBaseUrl();
+    if (url) env.MUNDER_MEMORY_URL = url;
+    return { env, shimDir };
+  }
+
+  /** NATIVE-WAKEUP-EMPTY-INDEX (a), god: fork the worker (its below-normal startup backfill runs;
+   *  the model loads at the first embed) instead of waiting for the first request, so the first
+   *  task-start wake-up does not meet an empty index. main calls it no earlier than 30 s after the
+   *  first window finished loading (the spec's lazy rule). Nothing when memory is unavailable. */
   prewarm(): boolean {
-    if (this.mode() !== 'native') return false;
+    const why = this.unavailable();
+    if (why) { if (why !== 'disabled') this.noteUnavailable(why); return false; }
     const ok = this.client.prewarm();
     this.d.log({ kind: 'native-memory-prewarm', forked: ok });
     return ok;
@@ -141,39 +154,24 @@ export class NativeMemoryWiring {
   async handle(token: string, body: unknown): Promise<{ status: number; body: unknown }> {
     const agentId = this.tokens.resolve(token);
     if (!agentId) return { status: 403, body: { exit: EXIT.unauthorized, error: 'unauthorized' } };
-    const mode = this.mode();
-    if (mode === 'legacy' || mode === 'fallback-legacy') return { status: 200, body: { exit: EXIT.unavailable, error: `native memory is off (mode ${mode})` } };
-    const served = [this.d.hiveRoot(), this.d.palacePath()].filter((x): x is string => !!x);
-    const v = validateRequest((body ?? {}) as Record<string, unknown>, agentId, served);
-    if ('exit' in v) return { status: 200, body: { exit: v.exit, error: v.error } };
-    if (v.op === 'hits') {
-      // Shadow: compare with the legacy ranking the shim saw; store ONLY a redacted row (plus,
-      // inside an opt-in review window, the worker's private review file: see reviewCaptureActive).
-      const review = mode === 'shadow' && reviewCaptureActive(this.modeRaw());
-      const r = await this.client.request('hits', { ...v.args, review, agent: agentId }, 2_000);
-      const b = (body ?? {}) as { args?: { legacyMs?: number } };
-      const legacy = (v.args.legacy as Array<{ rank: number; source: string; wing: string }>) ?? [];
-      const native = Array.isArray(r.json) ? (r.json as Array<{ source: string; wing: string }>) : [];
-      const lset = new Set(legacy.map((x) => `${x.wing}|${String(x.source).split('/').pop()}`));
-      const overlap = native.filter((x) => lset.has(`${x.wing}|${x.source.split('/').pop()}`)).length;
-      this.d.log({
-        kind: 'native-memory-shadow', agent: agentId,
-        queryHash: createHash('sha256').update(String(v.args.query)).digest('hex').slice(0, 16),
-        // Gate 6 needs per-cohort n: the cohort from the query's shape, no-match from the outcome.
-        cohort: legacy.length === 0 ? 'no-match' : classifyQuery(String(v.args.query), (v.args.wing as string | null) ?? null),
-        legacyN: legacy.length, nativeN: native.length, overlapSources: overlap,
-        // Ranked, redacted: hashes of wing|source, so gate 6 can compute overlap / rank agreement.
-        legacyRanked: legacy.map((x) => createHash('sha256').update(`${x.wing}|${String(x.source).split('/').pop()}`).digest('hex').slice(0, 12)),
-        nativeRanked: native.map((x) => createHash('sha256').update(`${x.wing}|${x.source.split('/').pop()}`).digest('hex').slice(0, 12)),
-        reviewCaptured: review,
-        legacyMs: typeof b.args?.legacyMs === 'number' ? b.args.legacyMs : null, nativeOk: r.ok, nativeError: r.error ?? null
-      });
-      return { status: 200, body: { exit: EXIT.ok } };
-    }
+    const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
+    return { status: 200, body: { exit: r.exit, text: r.text, json: r.json, error: r.error } };
+  }
+
+  /** Main-internal callers (the renderer IPC): the same validation and ops as an agent, as the
+   *  caller wing `human`. There is deliberately no HTTP route to this (Jim's note). */
+  query(cmd: 'search' | 'wake-up' | 'status', args: Record<string, unknown> = {}): Promise<Reply> {
+    return this.run({ cmd, args }, 'human');
+  }
+
+  private async run(body: Record<string, unknown>, callerWing: string): Promise<Reply> {
+    const why = this.unavailable();
+    if (why) return { ok: false, exit: EXIT.unavailable, error: why === 'disabled' ? 'memory is turned off in Settings' : `memory is unavailable (${why})` };
+    const v = validateRequest(body, callerWing);
+    if ('exit' in v) return { ok: false, exit: v.exit, error: v.error };
     // NATIVE-WAKEUP N1: a wake-up may wait up to WAKE_WAIT_MS for its wing on a filling index,
     // so its deadline covers that wait plus the cold budget. status keeps 2 s; search its own.
-    const r = await this.client.request(v.op, v.args, v.op === 'search' ? undefined : v.op === 'wake-up' ? WAKE_UP_DEADLINE_MS : 2_000);
-    return { status: 200, body: { exit: r.exit, text: r.text, json: r.json, error: r.error } };
+    return this.client.request(v.op, v.args, v.op === 'search' ? undefined : v.op === 'wake-up' ? WAKE_UP_DEADLINE_MS : 2_000);
   }
 
   shutdown(): Promise<void> {

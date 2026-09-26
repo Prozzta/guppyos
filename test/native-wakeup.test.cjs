@@ -94,27 +94,27 @@ function fakeWorker() {
   w.postMessage = (m) => w.posted.push(m); w.on = (ev, fn) => w.handlers[ev].push(fn); w.kill = () => true;
   return w;
 }
-function wiring(root) {
+function wiring(root, enabled = true) {
   const logs = []; const workers = [];
-  const w = new NativeMemoryWiring({ hiveRoot: () => root, palacePath: () => null, userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'), workerEntry: 'w.js',
-    fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => null, legacyBin: () => null, writeShim: () => null, log: (r) => logs.push(r), vecLoadablePath: () => null });
+  const w = new NativeMemoryWiring({ hiveRoot: () => root, enabled: () => enabled, userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'), workerEntry: 'w.js',
+    fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => null, writeShim: () => null, log: (r) => logs.push(r), vecLoadablePath: () => null });
   w.workerConfig = () => ({ hiveRoot: root });
   return { w, logs, workers };
 }
 
-test('(a) prewarm forks the worker ONLY in native mode (its startup backfill then runs); idempotent; legacy/shadow/fallback-legacy/no file fork nothing', () => {
-  const native = wiring(hive({ 'memory-engine.json': '{"mode":"native"}', ...THREE }));
-  assert.equal(native.w.prewarm(), true);
-  assert.equal(native.workers.length, 1);
-  assert.equal(native.workers[0].posted[0].op, 'init', 'forked with its config (the worker backfills at startup)');
-  assert.equal(native.w.prewarm(), true);
-  assert.equal(native.workers.length, 1, 'idempotent: one worker');
-  assert.deepEqual(native.logs.filter((r) => r.kind === 'native-memory-prewarm').map((r) => r.forked), [true, true]);
-  for (const mode of ['legacy', 'shadow', 'fallback-legacy', null]) {
-    const x = wiring(hive(mode ? { 'memory-engine.json': JSON.stringify({ mode }) } : {}));
-    assert.equal(x.w.prewarm(), false, String(mode));
-    assert.equal(x.workers.length, 0, `${mode}: nothing forked (zero startup work)`);
+test('(a) prewarm forks the worker whenever memory is on (MEMPALACE-REMOVAL: no mode file needed; a leftover one is ignored); idempotent; semantic memory OFF forks nothing', () => {
+  for (const files of [{ ...THREE }, { 'memory-engine.json': '{"mode":"legacy"}', ...THREE }]) {
+    const on = wiring(hive(files));
+    assert.equal(on.w.prewarm(), true);
+    assert.equal(on.workers.length, 1);
+    assert.equal(on.workers[0].posted[0].op, 'init', 'forked with its config (the worker backfills at startup)');
+    assert.equal(on.w.prewarm(), true);
+    assert.equal(on.workers.length, 1, 'idempotent: one worker');
+    assert.deepEqual(on.logs.filter((r) => r.kind === 'native-memory-prewarm').map((r) => r.forked), [true, true]);
   }
+  const off = wiring(hive({ ...THREE }), false);
+  assert.equal(off.w.prewarm(), false);
+  assert.equal(off.workers.length, 0, 'turned off in Settings: zero startup work');
 });
 
 test('(a) WIRING: index.ts prewarms once, 30 s after the first window finished loading (the spec\'s lazy floor), and the worker still backfills at its startup', () => {

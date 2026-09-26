@@ -5,7 +5,7 @@
  *
  * Protocol (both directions structured-clone messages on the parent port):
  *   main -> worker  { id, op, args, deadline }      op: search | wake-up | status | backfill |
- *                                                        report | hits | compact | shutdown
+ *                                                        report | compact | shutdown
  *   worker -> main  { id, ok, exit, text?, json?, error? }   and  { event, ...fields }
  * A request whose deadline passed while it waited in the queue is answered `expired` without
  * running: the caller already gave up on it.
@@ -17,8 +17,6 @@ import { OnnxEmbedder, type OrtLike } from './embedder';
 import { MemoryEngine } from './engine';
 import { NativeMemoryStore, type StoreOpenOptions } from './store';
 import { discoverSources, sha256 } from './sources';
-import { AppendFile } from '../appendLog';
-import { classifyQuery } from './service';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './wordpiece';
 
 export interface WorkerConfig {
@@ -29,7 +27,6 @@ export interface WorkerConfig {
   modelSha256: string | null;
   vecPath: string;
   vecSha256: string | null;
-  modeFile: string;
   /** Optional idle-unload override (the speed bench only); absent = MODEL_IDLE_UNLOAD_MS. */
   idleUnloadMs?: number;
 }
@@ -40,15 +37,6 @@ export interface Port {
 }
 
 export interface WorkerMessage { id: number; op: string; args?: Record<string, unknown>; deadline?: number }
-
-export function readMode(modeFile: string): string {
-  try {
-    const m = JSON.parse(readFileSync(modeFile, 'utf8')) as { mode?: unknown };
-    return typeof m.mode === 'string' ? m.mode : 'legacy';
-  } catch {
-    return 'legacy';
-  }
-}
 
 /** Open the store; a file that fails `quick_check` is quarantined and a fresh one created
  *  (it is a cache: the backfill rebuilds it from the Markdown). */
@@ -88,7 +76,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   };
   const embedder = new OnnxEmbedder(modelPath, tokenizer, verifiedOrt, { intraOpNumThreads: 2 });
   const engine = new MemoryEngine({
-    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), mode: () => readMode(cfg.modeFile),
+    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t),
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     ...(typeof cfg.idleUnloadMs === 'number' && cfg.idleUnloadMs > 0 ? { idleUnloadMs: cfg.idleUnloadMs } : {})
@@ -98,9 +86,6 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   port.postMessage({ event: 'ready' });
 
   const reply = (id: number, r: Record<string, unknown>): void => port.postMessage({ id, ...r });
-  // Gate-6 review capture (opt-in window, see service.reviewCaptureActive): beside the index in
-  // userData, never in the hive. Kept open like the hive log (no rescan per row), rotated at 8 MB.
-  const reviewFile = new AppendFile(`${cfg.dbFile}.shadow-review.jsonl`, { keep: Infinity });
   port.on('message', (e) => {
     const m = e.data as WorkerMessage;
     if (!m || typeof m.id !== 'number' || typeof m.op !== 'string') return;
@@ -113,21 +98,6 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     switch (m.op) {
       case 'search':
         guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
-        break;
-      case 'hits':
-        guard(engine.searchHits({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, results: Number(a.results ?? 10) }), (h) => {
-          const json = h.map((x) => ({ chunkId: x.chunkId, wing: x.wing, room: x.room, source: x.source, cosineSim: x.cosineSim, bm25: x.bm25, contentSha: sha256(x.content) }));
-          if (a.review === true) {
-            const legacy = Array.isArray(a.legacy) ? a.legacy : [];
-            const q = String(a.query ?? '');
-            reviewFile.append(JSON.stringify({
-              at: new Date().toISOString(), agent: a.agent ?? null, query: q, wing: a.wing ?? null,
-              cohort: legacy.length === 0 ? 'no-match' : classifyQuery(q, (a.wing as string) ?? null),
-              legacy, native: h.map((x, i) => ({ rank: i + 1, wing: x.wing, room: x.room, source: x.source, chunkId: x.chunkId, text: x.content }))
-            }) + '\n');
-          }
-          return { exit: 0, json };
-        });
         break;
       case 'wake-up':
         guard(engine.wakeUp((a.wing as string) ?? null), (r) => ({ exit: r.exit, text: r.text }));
@@ -147,7 +117,6 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
         guard(engine.compact((f) => openOrQuarantine(f, openOpts).store, renameSync, (f) => rmSync(f, { force: true })), (r) => ({ exit: 0, json: { result: r } }));
         break;
       case 'shutdown':
-        try { reviewFile.close(); } catch { /* closed */ }
         void engine.close().then(() => { try { engine.storeRef().close(); } catch { /* closed */ } reply(m.id, { ok: true, exit: 0 }); });
         break;
       default:

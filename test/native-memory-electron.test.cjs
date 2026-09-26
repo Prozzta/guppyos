@@ -154,20 +154,9 @@ test('ROLLBACK SAFETY (static): no native-memory module names the palace, mempal
   const dir = path.join(REPO, 'src', 'main', 'nativeMemory');
   for (const f of fs.readdirSync(dir)) {
     const src = fs.readFileSync(path.join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-    // The one allowed mention: main compares a shim's --palace argument with the served palace
-    // PATH (a string check, so an agent's --palace keeps working). Nothing opens it.
-    const code = src.replace('const served = [this.d.hiveRoot(), this.d.palacePath()].filter((x): x is string => !!x);', '');
-    assert.doesNotMatch(code, /palacePath\(\)|chroma|\.mempalace|mempalace_embedder/i, f);
+    assert.doesNotMatch(src, /palacePath\(\)|chroma|\.mempalace|mempalace_embedder/i, f);
   }
   const worker = fs.readFileSync(path.join(dir, 'worker.ts'), 'utf8');
   const cfg = /export interface WorkerConfig \{([\s\S]*?)\n\}/.exec(worker)[1];
   assert.doesNotMatch(cfg, /palace/i, 'the worker is never told where the palace is');
-});
-
-test('GATE-6 REVIEW CAPTURE: only with the flag does the worker write query text + both rankings, beside the index in userData, never in the hive', { skip: !HAVE_ELECTRON || !HAVE_MODEL }, () => {
-  const j = run('review');
-  assert.equal(j.noFileWithoutFlag, true, 'default: nothing written');
-  assert.equal(j.rows, 1);
-  assert.deepEqual(j.row, { agent: 'a1', query: 'frobnicator', cohort: 'semantic', legacyN: 1, nativeTop: 'agents/a1/memory.md', hasText: true });
-  assert.equal(j.inHive, false);
 });

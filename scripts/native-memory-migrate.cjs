@@ -47,7 +47,7 @@ const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
   const store = NativeMemoryStore.open(DB, { Database, vecPath, vecSha256: sha(fs.readFileSync(vecPath)) });
   const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(fs.readFileSync(path.join(modelDir, 'tokenizer.json'), 'utf8'))));
   const emb = new OnnxEmbedder(path.join(modelDir, 'onnx', 'model.onnx'), tok, ort, { intraOpNumThreads: 2 });
-  const eng = new MemoryEngine({ hiveRoot: HIVE, store, embedder: emb, countTokens: (t) => tok.count(t), mode: () => 'migration', watch: null });
+  const eng = new MemoryEngine({ hiveRoot: HIVE, store, embedder: emb, countTokens: (t) => tok.count(t), watch: null });
   let rssPeak = 0;
   const sampler = setInterval(() => { rssPeak = Math.max(rssPeak, process.memoryUsage().rss); }, 100);
   const rssBefore = process.memoryUsage().rss;

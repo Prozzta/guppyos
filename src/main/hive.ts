@@ -1696,11 +1696,11 @@ export class HiveManager {
     const inRoot = (...parts: string[]): string => join(root, ...parts);
     const ctxLine = 'LIVE CONTEXT: each agent row in the LIVE ROSTER carries a `ctx NN%` tag — its live context-window occupancy. Treat it as the real headroom signal when routing: prefer an agent with a LOW `ctx` for a big task; treat a HIGH `ctx` (near 100%) as busy rather than idle, even if the cumulative token count looks modest.';
 
+    // MEMPALACE-REMOVAL: `semanticMemory` is true only when the spawn really put the memory
+    // engine's `mempalace` shim first on the agent's PATH (Jim M2), so this line never points an
+    // agent at some other `mempalace` the user may have installed.
     const memoryLine = semanticMemory
-      // The palace location is named, not spelled as `$MEMPALACE_PALACE_PATH`:
-      // `mempalace` reads that env var itself, and the POSIX `$` form was noise
-      // (or an empty expansion) for a Windows agent that tried to use it literally.
-      ? 'Semantic memory: the whole hive shares a searchable MemPalace at the path in your MEMPALACE_PALACE_PATH environment variable. To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are mined into the palace automatically — write durable facts there.'
+      ? 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
       : '';
     // Enterprise Knowledge Graph (opt-in). Volatile-free: the bundled-node launcher
     // and the KG CLI are both fixed absolute paths for an install, so baking them
@@ -3573,16 +3573,16 @@ request is NOT failed or deleted, it waits in \`spawn-requests/\` and runs if th
 If a request of yours has sat there without moving, that is why, and it is a decision to raise with the
 human rather than retry. Route work to an agent already on the floor first either way.
 
-## Semantic memory (optional — when \`mempalace\` is installed)
-When \`MEMPALACE_PALACE_PATH\` is set in your environment, the hive shares a
-searchable MemPalace and you have the \`mempalace\` CLI:
+## Semantic memory (the built-in memory engine)
+When semantic memory is on (Settings; the default), the hive shares a searchable
+memory and you have the \`mempalace\` command, served by the app's memory engine:
 - \`mempalace search "<query>"\` — recall relevant past knowledge across the whole
   team by meaning (not just keywords). Add \`--wing <agent-id>\` to scope to one
   agent, \`--results N\` to widen.
 - \`mempalace wake-up\` — a short digest of what matters, good at the start of a task.
 
-Your \`memory.md\` is mined into the palace automatically, so the durable facts you
-write there become searchable by every agent. You don't run \`mine\` yourself.
+Your \`memory.md\` is indexed automatically, so the durable facts you write there
+become searchable by every agent. There is no \`mine\` step.
 `;
 
 // ─── cth-hook shim (written to <hive>/bin/cth-hook.cjs) ──────────────────────
