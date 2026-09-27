@@ -3087,10 +3087,11 @@ export class HiveManager {
         // CODEX-BLOAT-165 fix 2 (Settings): the tool-output cap; Off = no key of ours.
         ...(toolOutputTokenLimit !== null ? { tool_output_token_limit: toolOutputTokenLimit } : {})
       });
-      // MEMSPIKE-168: no whole-transcript replay on resize. Inline mode (a seed's
+      // MEMSPIKE-168: bound the transcript replay on resize. Inline mode (a seed's
       // tui.alternate_screen = "never" or fullscreen_transcript = false) re-emits the entire
-      // conversation on every pty resize (1.1 MB per resize on a 200-turn thread, measured);
-      // the alternate screen answers a resize with ~3 KB. Only this generated copy changes.
+      // conversation on every pty resize (1.1 MB per resize on a 200-turn thread, measured;
+      // ~35 KB with the reflow cap); the alternate screen answers a resize with ~3 KB.
+      // CODEX_TUI_KEYS selects the set (the Human's choice). Only this generated copy changes.
       config = setCodexTuiKeys(config, CODEX_TUI_KEYS);
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',

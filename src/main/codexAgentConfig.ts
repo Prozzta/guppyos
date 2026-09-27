@@ -99,11 +99,26 @@ export function setCodexTopLevelKeys(config: string, entries: Record<string, num
  * A seed that turns inline mode on (the user's choice for their own terminal) would otherwise
  * make every layout change in our embedded xterm push another full copy of the conversation.
  */
-export const CODEX_TUI_KEYS: Readonly<Record<string, string | number | boolean>> = {
+export const CODEX_TUI_KEYS_FULLSCREEN: Readonly<Record<string, string | number | boolean>> = {
   alternate_screen: 'always',
   fullscreen_transcript: true,
   terminal_resize_reflow_max_rows: 50
 };
+
+/**
+ * The alternative: keep whatever mode the seed chose (so an inline-mode user keeps Codex's
+ * history in our xterm scrollback) and only cap an inline replay at ~35 KB per resize.
+ */
+export const CODEX_TUI_KEYS_REFLOW_ONLY: Readonly<Record<string, string | number | boolean>> = {
+  terminal_resize_reflow_max_rows: 50
+};
+
+/**
+ * THE SELECTION (the Human's choice, RENDERER-MEMSPIKE): one of the two sets above. Reflow-only
+ * until the Human answers: FULLSCREEN moves Codex's history out of our xterm scrollback, against
+ * the standing never-shrink-scrollback rule, until the History view exists.
+ */
+export const CODEX_TUI_KEYS: Readonly<Record<string, string | number | boolean>> = CODEX_TUI_KEYS_REFLOW_ONLY;
 
 const TUI_TABLE = /^\s*\[\s*(["']?)tui\1\s*\]\s*(#.*)?$/;
 
@@ -119,17 +134,86 @@ function keyLine(line: string, key: string): boolean {
   return new RegExp(`^\\s*(["']?)${esc}\\1\\s*=`).test(line);
 }
 
+const TUI_INLINE = /^\s*(["']?)tui\1\s*=\s*\{/;
+
+/**
+ * Split the text after an inline table's `{` into its raw `key = value` pairs, up to the
+ * matching `}`. Quotes, nested {} and [] and (multi-line, TOML 1.1) comments are respected.
+ * Returns null when the table never closes.
+ */
+function inlineTablePairs(text: string): { pairs: string[]; rest: string } | null {
+  const pairs: string[] = [];
+  let cur = '';
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c) j += c === '"' && text[j] === '\\' ? 2 : 1;
+      cur += text.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (c === '#') {
+      while (i < text.length && text[i] !== '\n') i++;
+      cur += '\n';
+      continue;
+    }
+    if (c === '{' || c === '[') depth++;
+    if (c === ']') depth--;
+    if (c === '}') {
+      if (depth === 0) {
+        if (cur.trim()) pairs.push(cur.trim());
+        return { pairs, rest: text.slice(i + 1) };
+      }
+      depth--;
+    }
+    if (c === ',' && depth === 0) {
+      if (cur.trim()) pairs.push(cur.trim());
+      cur = '';
+      continue;
+    }
+    cur += c;
+  }
+  return null;
+}
+
+/**
+ * MS-169 F1: a seed may write its tui settings as a top-level inline table
+ * (`tui = { alternate_screen = "never", ... }`), which forbids any later `[tui]` header or
+ * `tui.x` key. Rewrite it as an equivalent `[tui]` table at the end (its pairs verbatim), so
+ * ours can be set in the usual way. Anything else (or an unclosed table) is returned unchanged.
+ */
+function tuiInlineToTable(config: string): string {
+  const lines = config.split(/\r?\n/);
+  const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
+  const topEnd = firstTable < 0 ? lines.length : firstTable;
+  const at = lines.slice(0, topEnd).findIndex((l) => TUI_INLINE.test(l));
+  if (at < 0) return config;
+  const open = lines[at].indexOf('{');
+  const tail = [lines[at].slice(open + 1), ...lines.slice(at + 1, topEnd)].join('\n');
+  const parsed = inlineTablePairs(tail);
+  if (!parsed) return config;
+  // The lines the inline table spanned; whatever follows its `}` on the last one is a comment.
+  const spanned = tail.slice(0, tail.length - parsed.rest.length).split('\n').length;
+  const kept = [...lines.slice(0, at), ...lines.slice(at + spanned)];
+  while (kept.length && kept[kept.length - 1].trim() === '') kept.pop();
+  const pairs = parsed.pairs.map((p) => p.replace(/\s*\n\s*/g, ' '));
+  return `${kept.join('\n')}${kept.length ? '\n\n' : ''}[tui]\n${pairs.join('\n')}\n`;
+}
+
 /**
  * Set keys of the `[tui]` table in OUR copy. The seed's values for the same keys are removed
  * (in its `[tui]` table, and as top-level dotted `tui.<key> =` lines, since TOML forbids a
  * duplicate key); every other tui setting the user has (theme, notifications, ...) is kept.
  * Ours go right under the seed's `[tui]` header; else, when the seed writes tui settings as
  * top-level dotted keys (which forbid a later `[tui]` header), as dotted keys beside them;
- * else into a new `[tui]` table at the end.
+ * else into a new `[tui]` table at the end. A top-level inline `tui = { ... }` is first rewritten
+ * as a `[tui]` table (tuiInlineToTable).
  */
 export function setCodexTuiKeys(config: string, entries: Readonly<Record<string, string | number | boolean>>): string {
   const keys = Object.keys(entries);
-  const lines = config.split(/\r?\n/);
+  const lines = tuiInlineToTable(config).split(/\r?\n/);
   const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
   const topEnd = firstTable < 0 ? lines.length : firstTable;
   const dottedTui = lines.slice(0, topEnd).some((l) => /^\s*(["']?)tui\1\s*\./.test(l));
@@ -151,7 +235,7 @@ export function setCodexTuiKeys(config: string, entries: Readonly<Record<string,
     out.push(line);
   }
   if (topOutEnd < 0) topOutEnd = out.length;
-  const note = '# munder-hive: no transcript replay on resize (auto-generated; do not edit)';
+  const note = '# munder-hive: bounded transcript replay on resize (auto-generated; do not edit)';
   if (header >= 0) {
     out.splice(header, 0, note, ...keys.map((k) => `${k} = ${tomlValue(entries[k])}`));
     return out.join('\n');
