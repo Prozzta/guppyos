@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { CodexVersionLog, codexSupportsNoDaemon, readCodexVersion } from './codexCli';
@@ -41,6 +41,7 @@ import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
 import { installRendererRecovery, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
+import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
@@ -200,6 +201,12 @@ if (memorySmokeOut || memoryBenchDir) {
   app.setPath('userData', smokeUserData);
   app.setPath('sessionData', smokeUserData);
 }
+
+// RENDERER-RECOVERY-164 (the Human's final scope): LOCAL crash dumps, started as early as the
+// userData/crashDumps paths are final (just above). uploadToServer:false, no submit URL: a
+// renderer crash now leaves a minidump in app.getPath('crashDumps') instead of Crashpad's
+// generic "not connected" exit (0xFFFF7003) and nothing. Its cost is marked in startup-timing.
+const crashReporterStart = startLocalCrashReporter(crashReporter);
 
 // Keep the main process alive on an unexpected throw/rejection. The harness is a
 // multi-agent supervisor — a single stray throw (e.g. node-pty's ConPTY console
@@ -6288,6 +6295,10 @@ app.whenReady().then(() => {
 
   // STARTUP-TIMING-162: arm the first-60-s recorder (it stops by itself) and its PTY markers.
   startupTiming.start();
+  // RENDERER-RECOVERY-164: what starting the local crash reporter cost, on the same clock.
+  startupTiming.mark('crash-reporter-start', undefined, crashReporterStart.startedAt);
+  startupTiming.mark('crash-reporter-ready', undefined, crashReporterStart.readyAt);
+  if (!crashReporterStart.ok) { try { hive.appendLog({ kind: 'crash-reporter-failed', error: crashReporterStart.error ?? null }); } catch { /* best-effort */ } }
   ptyManager.setStartupHooks({
     spawned: (id) => startupTiming.mark('agent-spawn', id),
     firstOutput: (id) => startupTiming.mark('agent-first-output', id),
@@ -6339,7 +6350,12 @@ app.whenReady().then(() => {
   // off, the app keeps Electron's default menu — zero behavior change.
   if (readConfig().multiWindow) installAppMenu();
   createWindow();
-  // RENDERER-RECOVERY-164: the memory sampler is PARKED (see rendererMemory); not started.
+  // RENDERER-RECOVERY-164: the in-memory renderer ring (no disk writes unless a threshold is crossed).
+  startRendererMemorySampler();
+  // ...and prune local crash dumps to the newest KEEP_DUMPS, async (off the startup path).
+  void pruneDumps(app.getPath('crashDumps'), KEEP_DUMPS).then((gone) => {
+    if (gone.length) { try { hive.appendLog({ kind: 'crash-dumps-pruned', count: gone.length, kept: KEEP_DUMPS }); } catch { /* best-effort */ } }
+  }).catch(() => { /* best-effort */ });
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -6404,6 +6420,7 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     log: (r) => row(String(r.kind), { ...r, processUptimeMs: Math.round(process.uptime() * 1000) }),
     quitting: () => allowQuit,
     recentMemory: () => rendererMemory.recent(),
+    findDump: (since) => waitForDump(app.getPath('crashDumps'), since),
     install: () => { /* createWindow already wires the replacement via watchWindowHealth */ },
     setNotice: (w, notice) => { if (!w.webContents.isDestroyed()) recoveryNotices.set(w.webContents.id, notice); },
     recreate: (old) => recreateWindowAfterCrash(old, isFloor, recovery),
@@ -6426,13 +6443,15 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
   });
 }
 
-/** RENDERER-RECOVERY-164 addendum, PARKED (god 2b540e: the Human is weighing a lighter design,
- *  likely an in-memory ring flushed into the crash row plus a threshold row). The sampler exists
- *  and the crash row already carries `recentMemory`, but NOTHING starts it and it has no `log`:
- *  no per-minute disk row is written. startRendererMemorySampler() is the switch once decided. */
+/** RENDERER-RECOVERY-164 (the Human's final scope): renderer + GPU memory sampled every SAMPLE_MS
+ *  from main's own process metrics (no renderer ping, no IPC) into an IN-MEMORY ring of the last
+ *  10. Normally NOTHING is written: the ring is flushed into the next render-process-gone row.
+ *  The only row is one renderer-memory-alert per renderer when it passes 1.5 GB or doubles from
+ *  its first sample, and it goes through hive.appendLog (the kept-open fast appender). */
 const rendererMemory = new RendererMemorySampler({
   metrics: () => app.getAppMetrics(),
-  now: () => Date.now()
+  now: () => Date.now(),
+  alert: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
 });
 let rendererMemoryTimer: ReturnType<typeof setInterval> | null = null;
 function startRendererMemorySampler(): void {

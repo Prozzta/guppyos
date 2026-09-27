@@ -86,6 +86,9 @@ export interface RecoveryDeps<W extends RecoverableWindow> {
   quitting: () => boolean;
   /** The last memory samples to attach to the crash row (RendererMemorySampler.recent). */
   recentMemory?: () => unknown[];
+  /** The crash dump written for this crash, if one appears (crashDumps.waitForDump). Only the
+   *  LOG ROW waits for it (bounded); the recovery itself never does. */
+  findDump?: (crashedAt: number) => Promise<{ path: string; size: number } | null>;
   /** Re-arm on the replacement window (the same policy, so the streak carries over). */
   install: (win: W) => void;
 }
@@ -100,7 +103,11 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
   win.webContents.on('render-process-gone', (_e, d) => {
     const at = deps.now();
     const decision = deps.quitting() ? { action: 'ignore' as const, streak: 0 } : deps.policy.onGone(d.reason, at);
-    deps.log({ kind: 'render-process-gone', reason: d.reason, exitCode: d.exitCode, pid, windowUptimeMs: at - created, recovery: decision.action, streak: decision.streak, recentMemory: deps.recentMemory?.() ?? [] });
+    const row = { kind: 'render-process-gone', reason: d.reason, exitCode: d.exitCode, pid, windowUptimeMs: at - created, recovery: decision.action, streak: decision.streak, recentMemory: deps.recentMemory?.() ?? [] };
+    if (deps.findDump) {
+      const write = (dump: { path: string; size: number } | null): void => { deps.log({ ...row, crashedAt: at, dumpPath: dump?.path ?? null, dumpBytes: dump?.size ?? null }); };
+      deps.findDump(at).then(write, () => write(null));
+    } else deps.log(row);
     if (decision.action === 'reload') {
       deps.setTimer(() => {
         if (win.isDestroyed() || win.webContents.isDestroyed()) return;
@@ -134,6 +141,10 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
  */
 export const SAMPLE_MS = 60_000;
 export const KEEP_SAMPLES = 10;
+/** A renderer at or over this many MB raises one alert row (the Human: 1.5 GB). */
+export const ALERT_MB = 1536;
+/** ...or at this multiple of its first sample. */
+export const ALERT_FACTOR = 2;
 
 /** The part of Electron's ProcessMetric the sampler reads (memory sizes are in KB). */
 export interface ProcessMetricLike {
@@ -159,7 +170,17 @@ export class RendererMemorySampler {
     log?: (row: Record<string, unknown>) => void;
     now: () => number;
     keep?: number;
+    /** ONE row per renderer per condition when it crosses a threshold (the only disk write). */
+    alert?: (row: Record<string, unknown>) => void;
+    /** Renderer size (MB, private bytes, else working set) that raises an alert. */
+    alertMb?: number;
+    /** A renderer this many times its FIRST sample raises an alert. */
+    alertFactor?: number;
   }) {}
+
+  /** pid -> the renderer's first sampled size (MB), and the alerts already raised for it. */
+  private readonly firstMb = new Map<number, number>();
+  private readonly alerted = new Set<string>();
 
   /** Take one sample, remember it, and log it. Never throws. */
   sample(): MemorySample | null {
@@ -176,10 +197,32 @@ export class RendererMemorySampler {
         uptimeS: typeof p.creationTime === 'number' ? Math.round((at - p.creationTime) / 1000) : null
       }));
     const s: MemorySample = { at, procs };
+    this.checkThresholds(s);
     this.ring.push(s);
     while (this.ring.length > (this.deps.keep ?? KEEP_SAMPLES)) this.ring.shift();
     if (this.deps.log) { try { this.deps.log({ kind: 'renderer-memory', procs }); } catch { /* logging never breaks sampling */ } }
     return s;
+  }
+
+  private checkThresholds(s: MemorySample): void {
+    if (!this.deps.alert) return;
+    const limit = this.deps.alertMb ?? ALERT_MB;
+    const factor = this.deps.alertFactor ?? ALERT_FACTOR;
+    for (const p of s.procs) {
+      if (p.type !== 'renderer') continue;
+      const size = p.privateMb ?? p.workingSetMb;
+      if (size === null) continue;
+      if (!this.firstMb.has(p.pid)) this.firstMb.set(p.pid, size);
+      const first = this.firstMb.get(p.pid) as number;
+      const raise = (why: 'over-limit' | 'doubled'): void => {
+        const key = `${p.pid}|${why}`;
+        if (this.alerted.has(key)) return;
+        this.alerted.add(key);
+        try { this.deps.alert?.({ kind: 'renderer-memory-alert', why, pid: p.pid, mb: size, firstMb: first, limitMb: limit, factor, recent: this.recent() }); } catch { /* never breaks sampling */ }
+      };
+      if (size >= limit) raise('over-limit');
+      if (first > 0 && size >= first * factor) raise('doubled');
+    }
   }
 
   /** The last KEEP samples, oldest first (a copy). */

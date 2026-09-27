@@ -32,7 +32,7 @@ export const STARTUP_LONGTASK_MIN_MS = 50;
 export const STARTUP_MAX_RENDERER_ROWS = 300;
 
 /** The marks main accepts; anything else is dropped. */
-export const STARTUP_MARKS = ['window-ready', 'agent-spawn', 'agent-first-output', 'first-agent-redraw', 'terminal-open', 'memory-worker-fork'] as const;
+export const STARTUP_MARKS = ['window-ready', 'agent-spawn', 'agent-first-output', 'first-agent-redraw', 'terminal-open', 'memory-worker-fork', 'crash-reporter-start', 'crash-reporter-ready'] as const;
 export type StartupMark = (typeof STARTUP_MARKS)[number];
 /** The marks a renderer may report (main's own marks cannot be forged over IPC). */
 const RENDERER_MARKS: ReadonlySet<string> = new Set<StartupMark>(['first-agent-redraw', 'terminal-open']);
