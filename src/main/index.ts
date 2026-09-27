@@ -105,6 +105,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
+import { AGY_ROTATE_MAX_DB_BYTES, CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { InboxWakeBridge } from './inboxWakeBridge';
 import { WakeStallWatch } from './wakeStall';
 import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
@@ -3184,6 +3185,23 @@ function installAppMenu(): void {
  *  Agent "resume session" field looked like it was doing. Find the agent whose
  *  CODEX_HOME owns this rollout and RETURN that home so the resumed agent can be
  *  pointed at it (the rollout AND its state_5.sqlite index live there together). */
+/** CODEX-BLOAT-165 fix 1: should this automatic Codex resume start a fresh thread instead?
+ *  Logs a `codex-thread-rotated` row when it does. Any read failure keeps the old behaviour. */
+function rotateCodexThread(agentId: string, sid: string, ownerHome: string): boolean {
+  try {
+    const info = findCodexRollout(ownerHome, sid);
+    if (!info) return false;
+    const d = decideThreadRotation(info, Date.now(), CODEX_ROTATE_MAX_ROLLOUT_BYTES);
+    if (!d.rotate) return false;
+    hive.appendLog(threadRotatedLogRow(agentId, 'codex', sid, d));
+    console.log(`[resume] ${agentId}: codex thread ${sid} rotated (${d.reason}, ${d.bytes} bytes); starting fresh`);
+    return true;
+  } catch (e) {
+    console.warn('[resume] codex rotation check failed; resuming:', e);
+    return false;
+  }
+}
+
 function findCodexHomeForSession(sessionId: string, siblingsRoot: string): string | null {
   try {
     if (!sessionId || !/^[0-9a-fA-F][0-9a-fA-F-]{15,}$/.test(sessionId)) return null;
@@ -3561,7 +3579,20 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // resumeSessionId was read ONLY in the Claude branch, so a Codex agent
     // silently ignored it and started a brand-new empty session.
     const typedSid = typeof opts.resumeSessionId === 'string' ? opts.resumeSessionId.trim() : '';
-    const sid = typedSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
+    let sid = typedSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
+    // CODEX-BLOAT-165 fix 1: an AUTOMATIC resume (restore, revive) of a thread from before
+    // today, or one grown past the size cap, starts fresh instead. A typed id and "Restart &
+    // Continue" (requireResume) are the human asking for THAT thread, so they still resume.
+    const mayRotate = !typedSid && opts.requireResume !== true;
+    if (sid && rf && mayRotate && provider === 'antigravity') {
+      const info = findAgyConversation(join(homedir(), '.gemini'), sid);
+      const d = info ? decideThreadRotation(info, Date.now(), AGY_ROTATE_MAX_DB_BYTES) : null;
+      if (d?.rotate) {
+        hive.appendLog(threadRotatedLogRow(opts.hive.id, provider, sid, d));
+        console.log(`[resume] ${opts.hive.id}: antigravity conversation ${sid} rotated (${d.reason}); starting fresh`);
+        sid = undefined;
+      }
+    }
     if (sid && rf) {
       const args = opts.args ?? [];
       if (!args.includes(rf)) { args.push(rf, sid); opts.args = args; didResume = true; }
@@ -3578,6 +3609,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if (!ownerHome) {
         console.warn(`[resume] codex session "${sid}" not found in any agent CODEX_HOME - starting fresh`);
         if (typedSid) resumeNotFound = true;
+      } else if (mayRotate && rotateCodexThread(opts.hive.id, sid, ownerHome)) {
+        // A fresh thread: no `resume`, in the agent's own CODEX_HOME with its own instructions.
       } else {
         if (ownerHome !== myHome) opts.env = { ...(opts.env ?? {}), CODEX_HOME: ownerHome };
         // N1 (AGY-STARTUP-TURN, Codex): a resume under ANOTHER agent's CODEX_HOME carries THIS
