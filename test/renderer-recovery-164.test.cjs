@@ -144,7 +144,7 @@ test('WIRING: clean-exit and a renderer lost during quit are logged but not reco
 
 // ── the memory sampler (the Human's addendum) ────────────────────────────────────
 
-test('SAMPLER: renderer (Tab) + GPU only, KB -> MB, pid and uptime; one renderer-memory row per sample; ring of 10; never throws', () => {
+test('SAMPLER: renderer (Tab), GPU and main (Browser, MEMSPIKE-167), KB -> MB, pid and uptime; one renderer-memory row per sample; ring of 20 at 15 s; never throws', () => {
   const rows = [];
   let t = 1_000_000;
   const metrics = [
@@ -156,18 +156,20 @@ test('SAMPLER: renderer (Tab) + GPU only, KB -> MB, pid and uptime; one renderer
   const s = new R.RendererMemorySampler({ metrics: () => metrics, log: (r) => rows.push(r), now: () => t }); // with a log (for when it is switched on)
   const one = s.sample();
   assert.deepEqual(one.procs, [
+    { pid: 1, type: 'main', workingSetMb: 244.1, privateMb: 234.4, uptimeS: 1000 },
     { pid: 7, type: 'renderer', workingSetMb: 500, privateMb: 400, uptimeS: 60 },
     { pid: 8, type: 'gpu', workingSetMb: 125, privateMb: null, uptimeS: 120 }
   ]);
   assert.deepEqual(rows[0], { kind: 'renderer-memory', procs: one.procs });
-  for (let i = 0; i < 14; i += 1) { t += 60_000; s.sample(); }
-  assert.equal(s.recent().length, R.KEEP_SAMPLES, 'only the last 10 are kept');
-  assert.equal(s.recent()[0].at, 1_000_000 + 5 * 60_000, 'oldest first');
+  for (let i = 0; i < 24; i += 1) { t += 15_000; s.sample(); }
+  assert.equal(R.KEEP_SAMPLES, 20);
+  assert.equal(s.recent().length, R.KEEP_SAMPLES, 'only the last 20 are kept (5 minutes at 15 s)');
+  assert.equal(s.recent()[0].at, 1_000_000 + 5 * 15_000, 'oldest first');
   const bad = new R.RendererMemorySampler({ metrics: () => { throw new Error('x'); }, log: () => { throw new Error('y'); }, now: () => t });
   assert.equal(bad.sample(), null);
   const noisy = new R.RendererMemorySampler({ metrics: () => metrics, log: () => { throw new Error('y'); }, now: () => t });
   assert.ok(noisy.sample(), 'a failing log does not stop sampling');
-  assert.equal(R.SAMPLE_MS, 60_000);
+  assert.equal(R.SAMPLE_MS, 15_000, 'MEMSPIKE-167: fast enough to act within ~30 s');
 });
 
 test('SAMPLER wiring (final): in-memory ring started after the first window; the ONLY row is the alert, via hive.appendLog', () => {

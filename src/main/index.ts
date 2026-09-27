@@ -40,7 +40,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
-import { installRendererRecovery, performRecreate, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
+import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, probeRendererHeap, recoverRendererForMemory, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
@@ -6445,6 +6445,9 @@ app.whenReady().then(() => {
 function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { partition?: string; policy: RecoveryPolicy }): void {
   const created = Date.now();
   const wc = win.webContents;
+  const wcId = wc.id; // read now: a destroyed webContents throws on .id
+  recoveryPolicies.set(wcId, recovery.policy);
+  win.once('closed', () => { recoveryPolicies.delete(wcId); });
   const row = (kind: string, extra: Record<string, unknown> = {}): void => {
     try { hive.appendLog({ kind, floor: isFloor, ...extra }); } catch { /* best-effort */ }
   };
@@ -6459,7 +6462,7 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
     // The only row the recovery writes is this window's render-process-gone (with pid/uptime/recovery).
-    log: (r) => { const { kind: _kind, ...rest } = r; row('render-process-gone', { ...rest, processUptimeMs: Math.round(process.uptime() * 1000) }); },
+    log: (r) => { const { kind: _kind, ...rest } = r; row('render-process-gone', { ...rest, ...(memoryCaused() ? { cause: 'memory' } : {}), processUptimeMs: Math.round(process.uptime() * 1000) }); },
     quitting: () => allowQuit,
     recentMemory: () => rendererMemory.recent(),
     findDump: async (since) => {
@@ -6468,7 +6471,11 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
       return dump;
     },
     install: () => { /* createWindow already wires the replacement via watchWindowHealth */ },
-    setNotice: (w, notice) => { if (!w.webContents.isDestroyed()) recoveryNotices.set(w.webContents.id, notice); },
+    setNotice: (w, notice) => {
+      if (w.webContents.isDestroyed()) return;
+      recoveryPolicies.set(w.webContents.id, recovery.policy);
+      recoveryNotices.set(w.webContents.id, memoryCaused() ? { ...notice, reason: 'memory: the view used over 1.5 GB' } : notice);
+    },
     recreate: (old) => recreateWindowAfterCrash(old, isFloor, recovery),
     giveUp: (w, decision) => {
       row('render-recovery-stopped', { streak: decision.streak });
@@ -6501,13 +6508,50 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
 const rendererMemory = new RendererMemorySampler({
   metrics: () => app.getAppMetrics(),
   now: () => Date.now(),
-  alert: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+  alert: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  // MEMSPIKE-167: over 1.5 GB on two consecutive samples -> main kills the renderer and the
+  // ordinary recovery brings the view back (a frozen renderer cannot be asked to reload).
+  onOverLimit: (pid, mbNow) => {
+    const outcome = recoverRendererForMemory(pid, {
+      windows: () => BrowserWindow.getAllWindows(),
+      givenUp: (w) => recoveryPolicies.get(w.webContents.id)?.givenUp ?? false,
+      beforeKill: () => { memoryRecoveryAt = Date.now(); }
+    });
+    try {
+      hive.appendLog({ kind: 'render-recovery-memory', pid, mb: mbNow, limitMb: ALERT_MB, outcome,
+        mainRssMb: Math.round(process.memoryUsage().rss / 104857.6) / 10, recent: rendererMemory.recent() });
+    } catch { /* best-effort */ }
+  },
+  // MEMSPIKE-167: a time-boxed look inside a renderer that just doubled; never on one already
+  // over the limit (it is about to be recovered), never awaited by anything.
+  onDoubled: (pid, mbNow) => {
+    if (mbNow >= ALERT_MB) { try { hive.appendLog({ kind: 'renderer-memory-heap', pid, mb: mbNow, probe: 'skipped-over-limit' }); } catch { /* best-effort */ } return; }
+    const w = BrowserWindow.getAllWindows().find((x) => { try { return !x.isDestroyed() && x.webContents.getOSProcessId() === pid; } catch { return false; } });
+    if (!w) return;
+    void probeRendererHeap(w.webContents.debugger, 5_000).then((r) => {
+      try { hive.appendLog({ kind: 'renderer-memory-heap', pid, mb: mbNow, ...r }); } catch { /* best-effort */ }
+    });
+  }
 });
+/** MEMSPIKE-167: each window's recovery policy (so a memory recovery never kills a renderer whose
+ *  window already gave up), and when the last memory recovery started (the notice says why). */
+const recoveryPolicies = new Map<number, RecoveryPolicy>();
+let memoryRecoveryAt = 0;
+const memoryCaused = (): boolean => Date.now() - memoryRecoveryAt <= MEMORY_CAUSE_MS;
 let rendererMemoryTimer: ReturnType<typeof setInterval> | null = null;
+let ptyTrafficTimer: ReturnType<typeof setInterval> | null = null;
 function startRendererMemorySampler(): void {
   if (rendererMemoryTimer) return;
   rendererMemoryTimer = setInterval(() => { rendererMemory.sample(); }, SAMPLE_MS);
   rendererMemoryTimer.unref?.();
+  // MEMSPIKE-167: one folded row a minute with each PTY's output and resizes, and main's own
+  // memory, so a flooded terminal, a resize loop or a backlog held in main shows at once.
+  ptyTrafficTimer = setInterval(() => {
+    const counts = ptyManager.takeTraffic();
+    if (!Object.keys(counts).length) return;
+    try { hive.appendLog({ kind: 'pty-traffic', counts, mainRssMb: Math.round(process.memoryUsage().rss / 104857.6) / 10 }); } catch { /* best-effort */ }
+  }, 60_000);
+  ptyTrafficTimer.unref?.();
 }
 
 /** RENDERER-RECOVERY-164: one-shot "the view crashed and was restored" notices, keyed by the

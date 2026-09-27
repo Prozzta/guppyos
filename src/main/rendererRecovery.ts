@@ -129,6 +129,71 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
   });
 }
 
+/** MEMSPIKE-167: how long after a memory recovery the notice and the crash row say "memory". */
+export const MEMORY_CAUSE_MS = 15_000;
+
+/** A window the memory recovery can act on (a BrowserWindow, narrowed). */
+export interface MemoryRecoverableWindow {
+  isDestroyed(): boolean;
+  webContents: { id: number; isDestroyed(): boolean; getOSProcessId(): number; forcefullyCrashRenderer(): void };
+}
+
+/**
+ * MEMSPIKE-167: recover a runaway renderer WITHOUT its cooperation. A frozen renderer may never
+ * run a reload, so main kills its process (forcefullyCrashRenderer); the ordinary
+ * render-process-gone recovery then reloads, recreates once, or gives up (its 2-minute streak is
+ * what stops a memory loop). A renderer whose window already gave up is left alone: killing it
+ * then would only leave a dead window. Returns what happened, for the log row.
+ */
+export function recoverRendererForMemory<W extends MemoryRecoverableWindow>(
+  pid: number,
+  deps: { windows: () => W[]; givenUp: (w: W) => boolean; beforeKill: (w: W) => void }
+): 'killed' | 'no-window' | 'given-up' | 'failed' {
+  const win = deps.windows().find((w) => {
+    try { return !w.isDestroyed() && !w.webContents.isDestroyed() && w.webContents.getOSProcessId() === pid; } catch { return false; }
+  });
+  if (!win) return 'no-window';
+  if (deps.givenUp(win)) return 'given-up';
+  try { deps.beforeKill(win); } catch { /* the kill matters more than the bookkeeping */ }
+  try { win.webContents.forcefullyCrashRenderer(); return 'killed'; } catch { return 'failed'; }
+}
+
+/**
+ * MEMSPIKE-167: a cheap, TIME-BOXED look inside a renderer that just doubled: V8 heap usage and
+ * DOM counters over the DevTools protocol (no heap snapshot: on a GB-sized heap a snapshot
+ * freezes the renderer and roughly doubles its memory, the opposite of containment). Never
+ * awaited by the recovery; a renderer that does not answer within `timeoutMs` is skipped.
+ */
+export async function probeRendererHeap(
+  dbg: { attach(v?: string): void; detach(): void; isAttached(): boolean; sendCommand(m: string, p?: object): Promise<unknown> },
+  timeoutMs: number
+): Promise<Record<string, unknown>> {
+  const t0 = Date.now();
+  let attachedHere = false;
+  try {
+    if (!dbg.isAttached()) { dbg.attach('1.3'); attachedHere = true; }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<'timeout'>((r) => { timer = setTimeout(() => r('timeout'), timeoutMs); });
+    const work = Promise.all([
+      dbg.sendCommand('Runtime.getHeapUsage') as Promise<{ usedSize: number; totalSize: number }>,
+      dbg.sendCommand('Memory.getDOMCounters') as Promise<{ documents: number; nodes: number; jsEventListeners: number }>
+    ]);
+    const r = await Promise.race([work, timeout]);
+    if (timer) clearTimeout(timer);
+    if (r === 'timeout') return { probe: 'timeout', ms: Date.now() - t0 };
+    const [heap, dom] = r;
+    return {
+      probe: 'ok', ms: Date.now() - t0,
+      jsHeapUsedMb: Math.round(heap.usedSize / 104857.6) / 10, jsHeapTotalMb: Math.round(heap.totalSize / 104857.6) / 10,
+      domDocuments: dom.documents, domNodes: dom.nodes, jsEventListeners: dom.jsEventListeners
+    };
+  } catch (e) {
+    return { probe: 'failed', error: e instanceof Error ? e.message : String(e), ms: Date.now() - t0 };
+  } finally {
+    if (attachedHere) { try { dbg.detach(); } catch { /* gone */ } }
+  }
+}
+
 /**
  * RENDERER-RECOVERY-164 addendum (the Human: "logging, but the fast append way").
  *
@@ -139,8 +204,10 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
  * module does no file I/O of its own. The last KEEP samples stay in memory and are attached
  * to the next `render-process-gone` row, so the minutes before a crash are always on record.
  */
-export const SAMPLE_MS = 60_000;
-export const KEEP_SAMPLES = 10;
+// MEMSPIKE-167: every 15 s (was 60 s), so a runaway renderer (+2 GB/min on 2026-09-27) is caught
+// on two consecutive over-limit samples within ~30 s; the ring keeps the same 5 minutes.
+export const SAMPLE_MS = 15_000;
+export const KEEP_SAMPLES = 20;
 /** A renderer at or over this many MB raises one alert row (the Human: 1.5 GB). */
 export const ALERT_MB = 1536;
 /** ...or at this multiple of its first sample. */
@@ -156,7 +223,7 @@ export interface ProcessMetricLike {
 
 export interface MemorySample {
   at: number;
-  procs: Array<{ pid: number; type: 'renderer' | 'gpu'; workingSetMb: number | null; privateMb: number | null; uptimeS: number | null }>;
+  procs: Array<{ pid: number; type: 'renderer' | 'gpu' | 'main'; workingSetMb: number | null; privateMb: number | null; uptimeS: number | null }>;
 }
 
 const mb = (kb: number | undefined): number | null => (typeof kb === 'number' && Number.isFinite(kb) ? Math.round(kb / 102.4) / 10 : null);
@@ -176,7 +243,16 @@ export class RendererMemorySampler {
     alertMb?: number;
     /** A renderer this many times its FIRST sample raises an alert. */
     alertFactor?: number;
+    /** MEMSPIKE-167: a renderer over alertMb on TWO CONSECUTIVE samples (the confirming sample).
+     *  Called once per renderer pid; main recovers it (the renderer's cooperation is not needed). */
+    onOverLimit?: (pid: number, mb: number) => void;
+    /** MEMSPIKE-167: the renderer just doubled (once per pid; diagnostics only). */
+    onDoubled?: (pid: number, mb: number) => void;
   }) {}
+
+  /** pid -> the previous sample was already over the limit; and the pids already handed over. */
+  private readonly overOnce = new Set<number>();
+  private readonly recovered = new Set<number>();
 
   /** pid -> the renderer's first sampled size (MB), and the alerts already raised for it. */
   private readonly firstMb = new Map<number, number>();
@@ -187,11 +263,12 @@ export class RendererMemorySampler {
     let list: ProcessMetricLike[];
     try { list = this.deps.metrics(); } catch { return null; }
     const at = this.deps.now();
+    // MEMSPIKE-167: main ('Browser') too, so a backlog held in MAIN (an IPC queue) shows up.
     const procs = list
-      .filter((p) => p.type === 'Tab' || p.type === 'GPU')
+      .filter((p) => p.type === 'Tab' || p.type === 'GPU' || p.type === 'Browser')
       .map((p) => ({
         pid: p.pid,
-        type: p.type === 'GPU' ? 'gpu' as const : 'renderer' as const,
+        type: p.type === 'GPU' ? 'gpu' as const : p.type === 'Browser' ? 'main' as const : 'renderer' as const,
         workingSetMb: mb(p.memory?.workingSetSize),
         privateMb: mb(p.memory?.privateBytes),
         uptimeS: typeof p.creationTime === 'number' ? Math.round((at - p.creationTime) / 1000) : null
@@ -221,7 +298,22 @@ export class RendererMemorySampler {
         try { this.deps.alert?.({ kind: 'renderer-memory-alert', why, pid: p.pid, mb: size, firstMb: first, limitMb: limit, factor, recent: this.recent() }); } catch { /* never breaks sampling */ }
       };
       if (size >= limit) raise('over-limit');
-      if (first > 0 && size >= first * factor) raise('doubled');
+      if (first > 0 && size >= first * factor) {
+        const fresh = !this.alerted.has(`${p.pid}|doubled`);
+        raise('doubled');
+        if (fresh) { try { this.deps.onDoubled?.(p.pid, size); } catch { /* diagnostics never break sampling */ } }
+      }
+      // The confirming sample: act only on the SECOND consecutive over-limit sample of one pid,
+      // and only once per pid (a recovered renderer comes back with a new pid).
+      if (size >= limit) {
+        if (this.overOnce.has(p.pid) && !this.recovered.has(p.pid)) {
+          this.recovered.add(p.pid);
+          try { this.deps.onOverLimit?.(p.pid, size); } catch { /* never breaks sampling */ }
+        }
+        this.overOnce.add(p.pid);
+      } else {
+        this.overOnce.delete(p.pid);
+      }
     }
   }
 
