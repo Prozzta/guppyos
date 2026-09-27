@@ -112,7 +112,8 @@ test('(a) a Codex hive spawn carries --no-daemon exactly when the caller says th
 test('(a)+(b) wiring: a Codex spawn logs its CLI and gates the flag on that same reading; the app-start row is off the start-up path', () => {
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(idx, /if \(provider === 'codex'\) \{\n\s+const cli = codexCliNow\(\);\n\s+codexVersionLog\.note\(cli\.version, cli\.path, 'spawn', opts\.hive\.id\);\n\s+codexNoDaemon = codexSupportsNoDaemon\(cli\.version\);/);
-  assert.match(idx, /skillsDir: skillsResourceDir\(\),\n\s+codexNoDaemon\n/);
+  // 1.1.65 (codex-bloat fix 2) added settings after codexNoDaemon, so it may end with a comma.
+  assert.match(idx, /skillsDir: skillsResourceDir\(\),\n\s+codexNoDaemon,?\n/);
   // "Off the start-up path" (Jim's audit): the app-start row is taken on an unref'd timer,
   // NATIVE_MEMORY_PREWARM_DELAY_MS after the first window finished loading, never inline.
   assert.match(idx, /webContents\.once\('did-finish-load', \(\) => \{[\s\S]*?const c = setTimeout\(\(\) => \{\n\s+try \{ const cli = codexCliNow\(\); if \(cli\.path\) codexVersionLog\.note\(cli\.version, cli\.path, 'app-start'\); \} catch \{ \/\* best-effort \*\/ \}\n\s+\}, NATIVE_MEMORY_PREWARM_DELAY_MS\);\n\s+c\.unref\?\.\(\);/);
