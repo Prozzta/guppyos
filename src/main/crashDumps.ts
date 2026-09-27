@@ -76,18 +76,24 @@ export async function pruneDumps(dir: string, keep = KEEP_DUMPS, fs: DumpFs = re
 export async function waitForDump(
   dir: string,
   sinceMs: number,
-  opts: { tries?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  opts: { tries?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; exclude?: ReadonlySet<string> } = {},
   fs: DumpFs = realFs
 ): Promise<DumpFile | null> {
   const tries = opts.tries ?? 12;
   const intervalMs = opts.intervalMs ?? 250;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  // A dump's mtime can trail the crash event slightly either way; allow a small skew.
-  const floor = sinceMs - 2_000;
+  // Jim RR-164 (LOW): match the dump to THIS crash. A dump counts only inside a window around
+  // the crash (its mtime can trail the event slightly either way), never one already attributed
+  // to an earlier crash (a fast crash loop), and the one nearest the crash time wins.
+  const floor = sinceMs - DUMP_SKEW_MS;
+  const ceiling = sinceMs + tries * intervalMs + DUMP_SKEW_MS;
   for (let i = 0; i < tries; i += 1) {
-    const hit = (await listDumps(dir, fs)).find((d) => d.mtimeMs >= floor);
-    if (hit) return hit;
+    const hits = (await listDumps(dir, fs)).filter((d) => d.mtimeMs >= floor && d.mtimeMs <= ceiling && !opts.exclude?.has(d.path));
+    if (hits.length) return hits.sort((a, b) => Math.abs(a.mtimeMs - sinceMs) - Math.abs(b.mtimeMs - sinceMs))[0];
     await sleep(intervalMs);
   }
   return null;
 }
+
+/** How far a dump's mtime may sit from its crash event and still belong to it. */
+export const DUMP_SKEW_MS = 2_000;

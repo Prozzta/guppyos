@@ -40,7 +40,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
-import { installRendererRecovery, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
+import { installRendererRecovery, performRecreate, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
@@ -3072,6 +3072,9 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     const count = ptyManager.list().length;
     if (count === 0) return;
     e.preventDefault();
+    // Jim RR-164 (2): the quit warning is a modal in the renderer; if that renderer is gone
+    // (crashed, recovery given up), ask natively instead of waiting on nothing.
+    if (rendererGone(wc)) { if (confirmQuitNatively(count, win)) teardownAndQuit(); return; }
     win.focus();
     wc.send('app:closeRequested', { ptyCount: count });
   });
@@ -6421,19 +6424,27 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     log: (r) => { const { kind: _kind, ...rest } = r; row('render-process-gone', { ...rest, processUptimeMs: Math.round(process.uptime() * 1000) }); },
     quitting: () => allowQuit,
     recentMemory: () => rendererMemory.recent(),
-    findDump: (since) => waitForDump(app.getPath('crashDumps'), since),
+    findDump: async (since) => {
+      const dump = await waitForDump(app.getPath('crashDumps'), since, { exclude: attributedDumps });
+      if (dump) attributedDumps.add(dump.path);
+      return dump;
+    },
     install: () => { /* createWindow already wires the replacement via watchWindowHealth */ },
     setNotice: (w, notice) => { if (!w.webContents.isDestroyed()) recoveryNotices.set(w.webContents.id, notice); },
     recreate: (old) => recreateWindowAfterCrash(old, isFloor, recovery),
     giveUp: (w, decision) => {
       row('render-recovery-stopped', { streak: decision.streak });
+      // Jim RR-164 (2): the dialog can actually quit. The window's own quit warning lives in its
+      // (dead) renderer, so X / Ctrl+Q would wait on nothing; "Quit now" runs the teardown here.
       void dialog.showMessageBox({
         type: 'error',
         title: 'Munder Difflin',
         message: 'The app window keeps crashing, so it will not be restored again.',
-        detail: `Its view crashed ${decision.streak} times within a few minutes. Your agents are still running in the background. Quit and reopen Munder Difflin to get the window back.`,
-        buttons: ['OK']
-      }).catch(() => { /* no display */ });
+        detail: `Its view crashed ${decision.streak} times within a few minutes. Your agents are still running in the background. Quit now and reopen Munder Difflin to get the window back.`,
+        buttons: ['Quit now', 'Keep agents running'],
+        defaultId: 0,
+        cancelId: 1
+      }).then((r) => { if (r.response === 0) teardownAndQuit(); }).catch(() => { /* no display */ });
       void w;
     }
   });
@@ -6464,6 +6475,32 @@ function startRendererMemorySampler(): void {
 /** RENDERER-RECOVERY-164: one-shot "the view crashed and was restored" notices, keyed by the
  *  webContents that should show it; the renderer takes its own on mount. */
 const recoveryNotices = new Map<number, RecoveryNotice>();
+/** Dumps already attributed to a crash row, so a fast crash loop never reuses one. */
+const attributedDumps = new Set<string>();
+/** Jim RR-164 (1): the recovered page's preload asks this once, synchronously, so the renderer
+ *  starts on the terminals (not the launch-time HivePicker, whose switch path would tear down
+ *  the live agents). True while a recovery notice is pending for this window. */
+ipcMain.on('window:recoveringSync', (evt) => { evt.returnValue = recoveryNotices.has(evt.sender.id); });
+
+/** The renderer of this window is gone (crashed, or the window is being torn down). */
+function rendererGone(wc: Electron.WebContents): boolean {
+  try { return wc.isDestroyed() || wc.isCrashed(); } catch { return true; }
+}
+
+/** Jim RR-164 (2): the native stand-in for the renderer's quit warning. True = quit. */
+function confirmQuitNatively(ptyCount: number, parent: BrowserWindow | null): boolean {
+  const opts: Electron.MessageBoxSyncOptions = {
+    type: 'warning',
+    buttons: ['Quit and stop agents', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Munder Difflin',
+    message: `Quit Munder Difflin? ${ptyCount} running terminal${ptyCount === 1 ? '' : 's'} will be stopped.`,
+    detail: 'The app window is not showing (its view crashed), so this is asked here instead.'
+  };
+  const choice = parent && !parent.isDestroyed() ? dialog.showMessageBoxSync(parent, opts) : dialog.showMessageBoxSync(opts);
+  return choice === 0;
+}
 ipcMain.handle('window:takeRecoveryNotice', (evt) => {
   const n = recoveryNotices.get(evt.sender.id) ?? null;
   recoveryNotices.delete(evt.sender.id);
@@ -6482,13 +6519,18 @@ ipcMain.handle('window:takeRecoveryNotice', (evt) => {
 function recreateWindowAfterCrash(old: BrowserWindow, isFloor: boolean, recovery: { partition?: string; policy: RecoveryPolicy }): BrowserWindow | null {
   if (old.isDestroyed()) return null;
   const bounds = (() => { try { return old.getBounds(); } catch { return null; } })();
-  const next = createWindow({ floor: isFloor, partition: recovery.partition, recovery: recovery.policy });
-  if (bounds) { try { next.setBounds(bounds); } catch { /* best-effort */ } }
-  const moved = ptyManager.reassignOwner(old.webContents, next.webContents);
-  try { hive.appendLog({ kind: 'render-recovery-recreate', floor: isFloor, ptysMoved: moved }); } catch { /* best-effort */ }
-  if (mainWindow === old) mainWindow = next;
-  try { old.destroy(); } catch { /* already gone */ }
-  return next;
+  return performRecreate<BrowserWindow>(old, {
+    create: () => {
+      const next = createWindow({ floor: isFloor, partition: recovery.partition, recovery: recovery.policy });
+      if (bounds) { try { next.setBounds(bounds); } catch { /* best-effort */ } }
+      return next;
+    },
+    reassign: (from, to) => ptyManager.reassignOwner(from.webContents, to.webContents),
+    getMain: () => mainWindow,
+    setMain: (w) => { mainWindow = w; },
+    destroy: (w) => { try { w.destroy(); } catch { /* already gone */ } },
+    log: (row) => { try { hive.appendLog({ ...row, floor: isFloor }); } catch { /* best-effort */ } }
+  });
 }
 
 app.on('child-process-gone', (_e, d) => {
@@ -6504,9 +6546,10 @@ app.on('before-quit', (e) => {
   if (count === 0) return;
   e.preventDefault();
   if (mainWindow) {
+    if (rendererGone(mainWindow.webContents)) { if (confirmQuitNatively(count, mainWindow)) teardownAndQuit(); return; }
     mainWindow.focus();
     mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
-  }
+  } else if (confirmQuitNatively(count, null)) teardownAndQuit();
 });
 
 // The last chance to flush a coalesced capacity write. `before-quit` can be

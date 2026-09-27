@@ -228,3 +228,27 @@ export class RendererMemorySampler {
   /** The last KEEP samples, oldest first (a copy). */
   recent(): MemorySample[] { return this.ring.map((s) => ({ at: s.at, procs: s.procs.map((p) => ({ ...p })) })); }
 }
+
+/**
+ * The recreate itself, as injected steps so its ORDER is tested by behaviour (Jim RR-164):
+ * create the replacement FIRST, hand every PTY the old window owned to it, repoint the
+ * primary-window pointer if it named the old window (a focused floor included), and only then
+ * destroy the old window. destroy() skips 'close' (no quit warning / floor confirm); its
+ * 'closed' still runs, and a floor's killByOwner then finds nothing to kill.
+ */
+export interface RecreateSteps<W> {
+  create: () => W;
+  reassign: (from: W, to: W) => number;
+  getMain: () => W | null;
+  setMain: (w: W) => void;
+  destroy: (w: W) => void;
+  log?: (row: Record<string, unknown>) => void;
+}
+export function performRecreate<W>(old: W, steps: RecreateSteps<W>): W {
+  const next = steps.create();
+  const moved = steps.reassign(old, next);
+  try { steps.log?.({ kind: 'render-recovery-recreate', ptysMoved: moved }); } catch { /* best-effort */ }
+  if (steps.getMain() === old) steps.setMain(next);
+  steps.destroy(old);
+  return next;
+}

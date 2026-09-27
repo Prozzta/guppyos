@@ -676,6 +676,9 @@ const api = {
     ipcRenderer.invoke('pty:kill', id),
   /** RENDERER-RECOVERY-164: the one-shot "view crashed and was restored" notice for THIS
    *  window, or null. Main clears it once taken. */
+  /** Jim RR-164 (1): true when this page is the view main just brought back after a renderer
+   *  crash; read once at load (sync IPC) so App can skip the launch-time HivePicker. */
+  recovering: ((): boolean => { try { return ipcRenderer.sendSync('window:recoveringSync') === true; } catch { return false; } })(),
   takeRecoveryNotice: (): Promise<{ at: number; action: 'reload' | 'recreate'; reason: string; streak: number } | null> =>
     ipcRenderer.invoke('window:takeRecoveryNotice'),
   listPtys: (): Promise<Array<{

@@ -57,6 +57,9 @@ export function App() {
   // leaves a one-shot localStorage flag so we don't bounce back onto the picker for
   // the hive we just chose. Also set true on onboarding completion (below).
   const [hiveOpened, setHiveOpened] = useState<boolean>(() => {
+    // RENDERER-RECOVERY-164 (Jim): a view main brought back after a crash goes straight to the
+    // live floor; the picker's switch path would tear down agents that are still running.
+    if (window.cth?.recovering === true) return true;
     try {
       if (window.localStorage.getItem('cth.skipHivePickerOnce')) {
         window.localStorage.removeItem('cth.skipHivePickerOnce');
