@@ -94,9 +94,9 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     abortCapability: (agentId) => abortCapability(w.ptyForAgent(agentId)),
     readScreen: (ptyId, needle, expectedTail) => w.requestScreenReading(ptyId, needle, expectedTail),
     // CODEX-WAKE-161 F1 / F3. A PTY whose provider main never resolved keeps the old behaviour.
-    enterGapMs: (ptyId) => {
+    enterGapMs: (ptyId, textLength) => {
       const provider = w.providerForPty(ptyId);
-      return provider ? automaticEnterGapMs(provider) : null;
+      return provider ? automaticEnterGapMs(provider, textLength) : null;
     },
     verifySubmit: (ptyId) => {
       const provider = w.providerForPty(ptyId);

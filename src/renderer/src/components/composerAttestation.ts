@@ -26,6 +26,37 @@ function compactComposerText(text: string): string {
 }
 
 /**
+ * CODEX-WAKE-162: the ASCII skeleton of a text - printable ASCII and whitespace only, runs of
+ * whitespace collapsed. A TUI may DROP characters it cannot echo: Codex's composer dropped the
+ * wake line's em dash (`message(s)  at least`), so an exact comparison never recognised our
+ * own stuck text and F2/F3 read it as gone (Jim, POST-INSTALL-161). Comparing skeletons on
+ * BOTH sides survives that; it is used only after the exact forms missed.
+ */
+export function asciiSkeleton(text: string): string {
+  return text.replace(/[^\x20-\x7e\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * CODEX-WAKE-162: does a screen row contain the needle? Exactly, or, when the needle carries
+ * characters a TUI may drop, by ASCII skeleton on both sides (the row reads of F2/F3).
+ */
+export function needleMatcher(needle: string): (row: string) => boolean {
+  const skeleton = asciiSkeleton(needle);
+  const bySkeleton = skeleton !== needle && skeleton.length >= 4;
+  return (row) => row.includes(needle) || (bySkeleton && asciiSkeleton(row).includes(skeleton));
+}
+
+/** A skeleton shorter than this proves too little (an all-non-ASCII text has none). */
+export const MIN_SKELETON_CHARS = 8;
+
+function skeletonEndsWith(observed: string, expectedTail: string): boolean {
+  const expected = asciiSkeleton(expectedTail);
+  if (expected.length < MIN_SKELETON_CHARS) return false;
+  const seen = asciiSkeleton(observed);
+  return seen.endsWith(expected) || compactComposerText(seen).endsWith(compactComposerText(expected));
+}
+
+/**
  * Attest the visible composer region, from its prompt marker through the
  * cursor row. This deliberately does not depend on IBufferLine.isWrapped:
  * Ink and ratatui can render a multi-row editor with explicit line breaks.
@@ -50,7 +81,9 @@ export function composerRegionEndsWith(buffer: IBuffer, cursorAbsoluteY: number,
     // TUIs can hard-wrap an opaque inbox id in the middle of the token. Its inserted
     // newline is layout whitespace, not an edit; compare the compact form as well.
     return normalizeComposerText(observed).endsWith(expected)
-      || compactComposerText(observed).endsWith(compactExpected);
+      || compactComposerText(observed).endsWith(compactExpected)
+      // CODEX-WAKE-162: the TUI dropped characters it cannot echo (see asciiSkeleton).
+      || skeletonEndsWith(observed, expectedTail);
   }
   return false;
 }

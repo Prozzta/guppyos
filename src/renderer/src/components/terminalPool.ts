@@ -48,7 +48,7 @@ import {
   type TerminalAutomationBlock
 } from './terminalAutomation';
 import { sanitizeTerminalSelection } from './terminalSelection';
-import { composerRegionEndsWith } from './composerAttestation';
+import { composerRegionEndsWith, needleMatcher } from './composerAttestation';
 import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalEntry {
@@ -691,6 +691,7 @@ export function readScreenForNeedle(ptyId: string, needle: string, expectedTail?
     const buf = entry.term.buffer.active;
     const promptLine = buf.getLine(buf.baseY + buf.cursorY);
     if (!promptLine) return null;
+    const has = needleMatcher(needle);   // CODEX-WAKE-162: tolerant of TUI-dropped characters
     let screenCount = 0;
     for (let y = 0; y < entry.term.rows; y += 1) {
       const line = buf.getLine(buf.baseY + y);

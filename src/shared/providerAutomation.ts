@@ -338,8 +338,19 @@ export function automaticAbortCapability(provider: AgentProvider): AutomaticAbor
  * 800 ms is well past the measured edge (between 200 and 300 ms). null = the default gap.
  */
 export const CODEX_ENTER_GAP_MS = 800;
-export function automaticEnterGapMs(provider: AgentProvider): number | null {
-  return provider === 'codex' ? CODEX_ENTER_GAP_MS : null;
+/**
+ * CODEX-WAKE-162: the gap grows with the payload (Jim, POST-INSTALL-161: 800 ms failed 1 in 10
+ * live, under load). Over CODEX_ENTER_GAP_FREE_CHARS, each character adds
+ * CODEX_ENTER_GAP_PER_CHAR_MS, capped at CODEX_ENTER_GAP_MAX_MS: the 407-char wake line waits
+ * about 1.2 s; a short reply keeps 800 ms.
+ */
+export const CODEX_ENTER_GAP_FREE_CHARS = 200;
+export const CODEX_ENTER_GAP_PER_CHAR_MS = 2;
+export const CODEX_ENTER_GAP_MAX_MS = 2_000;
+export function automaticEnterGapMs(provider: AgentProvider, textLength = 0): number | null {
+  if (provider !== 'codex') return null;
+  const extra = Math.max(0, Math.floor(textLength) - CODEX_ENTER_GAP_FREE_CHARS) * CODEX_ENTER_GAP_PER_CHAR_MS;
+  return Math.min(CODEX_ENTER_GAP_MAX_MS, CODEX_ENTER_GAP_MS + (Number.isFinite(extra) ? extra : 0));
 }
 
 /**

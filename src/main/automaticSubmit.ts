@@ -445,7 +445,7 @@ export interface OwnerDeps {
   /** CODEX-WAKE-161 F1: the gap between the staged text and its Enter on this PTY, when the
    *  provider needs longer than GAP_MS (see providerAutomation.automaticEnterGapMs). Absent or
    *  null = GAP_MS. */
-  enterGapMs?: (ptyId: string) => number | null;
+  enterGapMs?: (ptyId: string, textLength: number) => number | null;
   /** CODEX-WAKE-161 F3: after the Enter, read the composer and require our text GONE from
    *  it before settling COMMITTED (a TUI that turned the Enter into a newline leaves it
    *  there). Absent / false = the write-level COMMITTED as before. */
@@ -579,7 +579,11 @@ export const PRIOR_TEXT_UNREADABLE_HOLD_MS = 10 * 60_000;
  *  for our text to leave it. A TUI redraws its cleared composer within a frame or two; the
  *  window only has to outlast the renderer's parse of that redraw. */
 export const SUBMIT_VERIFY_POLL_MS = 250;
-export const SUBMIT_VERIFY_WINDOW_MS = 1_500;
+/** CODEX-WAKE-162: 2.5 s (was 1.5 s): under load a TUI's redraw can lag the Enter. */
+export const SUBMIT_VERIFY_WINDOW_MS = 2_500;
+/** CODEX-WAKE-162: 'gone' must be read this many times in a row before COMMITTED (one
+ *  mid-redraw frame is not proof). */
+export const SUBMIT_GONE_READS = 2;
 /** A human write this recent means the line is theirs, whatever the mirror says yet.
  *  Longer than the renderer's own ECHO_GRACE (1000 ms), inside which even the renderer
  *  does not trust the screen to overrule a keystroke. */
@@ -991,7 +995,8 @@ export class AutomaticSubmitOwner {
     // ── GAP ──────────────────────────────────────────────────────────────────────────
     // CODEX-WAKE-161 F1: a provider may need a longer gap (Codex: an Enter inside its paste-burst
     // window after a fast burst is taken as a newline).
-    await this.sleep(deps.enterGapMs?.(ptyId) ?? GAP_MS);
+    // CODEX-WAKE-162: the gap may scale with the payload's length.
+    await this.sleep(deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS);
 
     // ── COMMIT | ABORT | INTERFERED ──────────────────────────────────────────────────
     const verdict = await Promise.resolve(commitSection(staged, deps));
@@ -1074,12 +1079,16 @@ export class AutomaticSubmitOwner {
     if (!needle) return { kind: 'COMMITTED' };
     const cleared = async (): Promise<boolean | null> => {
       const started = this.deps.now();
+      let gone = 0;
       for (;;) {
         await this.sleep(SUBMIT_VERIFY_POLL_MS);
         const seen = await this.readScreen(s.ptyId, needle, s.req.text);
         if (!seen) return null;
-        if (!seen.onPromptRow && seen.promptTailMatches !== true) return true;
-        if (this.deps.now() - started >= SUBMIT_VERIFY_WINDOW_MS) return false;
+        if (!seen.onPromptRow && seen.promptTailMatches !== true) {
+          if (++gone >= SUBMIT_GONE_READS) return true;
+        } else gone = 0;
+        // At the window's end a last reading of 'gone' stands (it was not contradicted).
+        if (this.deps.now() - started >= SUBMIT_VERIFY_WINDOW_MS) return gone > 0;
       }
     };
     const first = await cleared();
