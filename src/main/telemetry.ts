@@ -27,7 +27,8 @@
  * any `electron` import so it can be smoke-tested as a plain Node module.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { readAgentUsage } from './transcript';
+import { mayReadClaudeTranscripts, readAgentUsage } from './transcript';
+import type { AgentProvider } from '../shared/agentProvider';
 import { normalizeModel } from './pricing';
 
 // ─── The locked cross-lane contract (do not change without re-agreeing) ───────
@@ -123,6 +124,9 @@ export interface TelemetryCollectorOptions {
    *  cwd (the common case for hive workers) pulls in every other agent's and
    *  every past session's history too. */
   resolveSessionId?: (agentId: string) => string | undefined;
+  /** The agent's provider. The transcript fallback runs for 'claude' only; anything
+   *  else, or no answer, reads nothing (START-FIXES-163 (2)). */
+  resolveProvider?: (agentId: string) => AgentProvider | undefined;
 }
 
 export class TelemetryCollector {
@@ -133,6 +137,7 @@ export class TelemetryCollector {
   private readonly emit?: (channel: string, payload: unknown) => void;
   private readonly resolveCwd?: (agentId: string) => string | null;
   private readonly resolveSessionId?: (agentId: string) => string | undefined;
+  private readonly resolveProvider?: (agentId: string) => AgentProvider | undefined;
 
   /** sessionId → running accumulation. */
   private readonly sessions = new Map<string, SessionAccum>();
@@ -152,6 +157,7 @@ export class TelemetryCollector {
     this.emit = opts.emit;
     this.resolveCwd = opts.resolveCwd;
     this.resolveSessionId = opts.resolveSessionId;
+    this.resolveProvider = opts.resolveProvider;
   }
 
   /** Bind the loopback OTLP listener. The handler is live the instant this
@@ -415,7 +421,11 @@ export class TelemetryCollector {
     if (!cwd) return null;
     const sessionId = this.resolveSessionId?.(agentId);
     if (!sessionId) return null;
-    const u = readAgentUsage(cwd, { sessionId });
+    // START-FIXES-163 (2): only a Claude agent may read Claude transcripts. With no
+    // resolver the provider is unknown, and unknown is excluded.
+    const provider = this.resolveProvider?.(agentId);
+    if (!mayReadClaudeTranscripts(provider)) return null;
+    const u = readAgentUsage(cwd, { sessionId, provider });
     if (!u.inputTokens && !u.outputTokens && !u.cacheReadTokens && !u.cacheWriteTokens) return null;
     return {
       agentId,

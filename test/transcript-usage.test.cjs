@@ -63,7 +63,7 @@ test('sums usage across records and files', () => {
   const { cwd, dir } = makeProject();
   fs.writeFileSync(path.join(dir, 'a.jsonl'), rec(100) + '\n' + rec(200) + '\n');
   fs.writeFileSync(path.join(dir, 'b.jsonl'), rec(50) + '\n');
-  const u = readAgentUsage(cwd);
+  const u = readAgentUsage(cwd, { provider: 'claude' });
   assert.equal(u.outputTokens, 350);
   assert.equal(u.inputTokens, 30);
   assert.ok(u.estimatedCostUsd > 0);
@@ -73,16 +73,16 @@ test('appended records are picked up (incremental tail parse)', () => {
   const { cwd, dir } = makeProject();
   const f = path.join(dir, 'a.jsonl');
   fs.writeFileSync(f, rec(100) + '\n');
-  assert.equal(readAgentUsage(cwd).outputTokens, 100); // primes the cache
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 100); // primes the cache
   fs.appendFileSync(f, rec(25) + '\n' + rec(75) + '\n');
-  assert.equal(readAgentUsage(cwd).outputTokens, 200);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 200);
 });
 
 test('repeat reads with no change are stable', () => {
   const { cwd, dir } = makeProject();
   fs.writeFileSync(path.join(dir, 'a.jsonl'), rec(100) + '\n');
-  const a = readAgentUsage(cwd);
-  const b = readAgentUsage(cwd);
+  const a = readAgentUsage(cwd, { provider: 'claude' });
+  const b = readAgentUsage(cwd, { provider: 'claude' });
   assert.deepEqual(b, a);
 });
 
@@ -91,56 +91,56 @@ test('a partial trailing line is not counted until completed', () => {
   const f = path.join(dir, 'a.jsonl');
   const full = rec(500);
   fs.writeFileSync(f, rec(100) + '\n' + full.slice(0, 40)); // torn mid-write
-  assert.equal(readAgentUsage(cwd).outputTokens, 100);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 100);
   fs.appendFileSync(f, full.slice(40) + '\n'); // writer finishes the line
-  assert.equal(readAgentUsage(cwd).outputTokens, 600, 'completed line counts exactly once');
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 600, 'completed line counts exactly once');
 });
 
 test('a rewritten (shrunk) file is re-parsed from scratch', () => {
   const { cwd, dir } = makeProject();
   const f = path.join(dir, 'a.jsonl');
   fs.writeFileSync(f, rec(100) + '\n' + rec(200) + '\n');
-  assert.equal(readAgentUsage(cwd).outputTokens, 300);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 300);
   fs.writeFileSync(f, rec(40) + '\n'); // smaller rewrite
-  assert.equal(readAgentUsage(cwd).outputTokens, 40);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 40);
 });
 
 test('a deleted file drops out of the totals', () => {
   const { cwd, dir } = makeProject();
   fs.writeFileSync(path.join(dir, 'a.jsonl'), rec(100) + '\n');
   fs.writeFileSync(path.join(dir, 'b.jsonl'), rec(50) + '\n');
-  assert.equal(readAgentUsage(cwd).outputTokens, 150);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 150);
   fs.rmSync(path.join(dir, 'b.jsonl'));
-  assert.equal(readAgentUsage(cwd).outputTokens, 100);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 100);
 });
 
 test('sessionId filter sums only that session, incrementally too', () => {
   const { cwd, dir } = makeProject();
   const f = path.join(dir, 'a.jsonl');
   fs.writeFileSync(f, rec(100, { sessionId: 's1' }) + '\n' + rec(999, { sessionId: 's2' }) + '\n');
-  assert.equal(readAgentUsage(cwd, { sessionId: 's1' }).outputTokens, 100);
+  assert.equal(readAgentUsage(cwd, { sessionId: 's1', provider: 'claude' }).outputTokens, 100);
   fs.appendFileSync(f, rec(11, { sessionId: 's1' }) + '\n' + rec(888, { sessionId: 's2' }) + '\n');
-  assert.equal(readAgentUsage(cwd, { sessionId: 's1' }).outputTokens, 111);
-  assert.equal(readAgentUsage(cwd, { sessionId: 's2' }).outputTokens, 1887);
-  assert.equal(readAgentUsage(cwd).outputTokens, 1998, 'unfiltered still sums everything');
+  assert.equal(readAgentUsage(cwd, { sessionId: 's1', provider: 'claude' }).outputTokens, 111);
+  assert.equal(readAgentUsage(cwd, { sessionId: 's2', provider: 'claude' }).outputTokens, 1887);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 1998, 'unfiltered still sums everything');
 });
 
 test('malformed lines and non-assistant records are skipped', () => {
   const { cwd, dir } = makeProject();
   fs.writeFileSync(path.join(dir, 'a.jsonl'),
     'not json\n' + JSON.stringify({ type: 'user' }) + '\n' + rec(70) + '\n\n');
-  assert.equal(readAgentUsage(cwd).outputTokens, 70);
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).outputTokens, 70);
 });
 
 test('model is the last one seen (per current semantics)', () => {
   const { cwd, dir } = makeProject();
   fs.writeFileSync(path.join(dir, 'a.jsonl'),
     rec(1, { model: 'claude-haiku-4-5' }) + '\n' + rec(2, { model: 'claude-opus-4-8' }) + '\n');
-  assert.equal(readAgentUsage(cwd).model, 'claude-opus-4-8');
+  assert.equal(readAgentUsage(cwd, { provider: 'claude' }).model, 'claude-opus-4-8');
 });
 
 test('missing project dir yields zeros', () => {
-  const u = readAgentUsage('/nonexistent/cwd/for/testing');
+  const u = readAgentUsage('/nonexistent/cwd/for/testing', { provider: 'claude' });
   assert.equal(u.outputTokens, 0);
   assert.equal(u.estimatedCostUsd, 0);
 });

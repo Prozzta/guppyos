@@ -70,7 +70,7 @@ import type { UsageProvider } from './usage';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
-import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
+import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -365,7 +365,14 @@ const telemetry = new TelemetryCollector({
   resolveCwd: (agentId) => hive.registry().agents[agentId]?.cwd ?? null,
   // D11: scopes the transcript fallback to this agent's own session instead of
   // summing every transcript in a (routinely shared) cwd.
-  resolveSessionId: (agentId) => hive.lastSession(agentId)
+  resolveSessionId: (agentId) => hive.lastSession(agentId),
+  // START-FIXES-163 (2): the fallback reads Claude transcripts for Claude agents only.
+  // A registry entry with no provider is a legacy Claude agent (the spawn path's
+  // own `?? 'claude'`); an unknown agent has no provider and reads nothing.
+  resolveProvider: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? (a.provider ?? 'claude') : undefined;
+  }
 });
 // Usage provider (Seam 1) — the INTEGRATION swap: Oscar's telemetry collector (#7)
 // IS the provider, replacing Lane A's interim StubUsageProvider. Same
@@ -4569,7 +4576,8 @@ ipcMain.handle('app:resetAll', async () => {
 // Reconciler/fallback path: per-cwd transcript sum, now priced PER MODEL (cost
 // bug #1 fixed in pricing.ts). Kept for back-compat with the existing UsageRow.
 ipcMain.handle('hive:agentUsage', (_evt, cwd: unknown) =>
-  typeof cwd === 'string' ? readAgentUsage(cwd) : null);
+  // Per-CWD, not per-agent (no agent reads here), and no renderer calls it today.
+  typeof cwd === 'string' ? readAgentUsage(cwd, { provider: 'claude' }) : null);
 // Current context size (tokens) of an agent's LIVE session — the transcript
 // path is learned from the agent's hook payloads (SessionStart fires right at
 // spawn), so this works even when several agents share one cwd. Null until the
@@ -4579,7 +4587,11 @@ ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
   if (typeof agentId !== 'string') return null;
   const tp = hookServer.transcriptPath(agentId);
   if (!tp) return null;
-  return readContextTokens(tp) ?? 0;
+  // START-FIXES-163 (2): a non-Claude agent's gauge never reads a transcript.
+  const a = hive.registry().agents[agentId];
+  const provider = a ? (a.provider ?? 'claude') : undefined;
+  if (!mayReadClaudeTranscripts(provider)) return null;
+  return readContextTokens(tp, provider) ?? 0;
 });
 
 // A consolidated, NON-SENSITIVE per-agent directory for the voice read-layer

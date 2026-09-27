@@ -64,7 +64,7 @@ export interface UsageProvider {
  *  Wired (in index.ts) to the hive registry: cwd for the transcript dir,
  *  sessionId for the resume/dedup key, model for the (best-effort) tier. */
 export interface UsageResolver {
-  (agentId: string): { cwd: string; sessionId?: string | null; model?: string | null } | null;
+  (agentId: string): { cwd: string; sessionId?: string | null; model?: string | null; provider?: import('../shared/agentProvider').AgentProvider } | null;
 }
 
 /** Strip the `[1m]` (or `[…]`) context-window suffix so the model id matches the
@@ -86,7 +86,7 @@ export class StubUsageProvider implements UsageProvider {
   getAgentUsage(agentId: string): AgentUsageSample | null {
     const info = this.resolve(agentId);
     if (!info) return null;
-    const u = readAgentUsage(info.cwd); // cumulative running totals across transcripts
+    const u = readAgentUsage(info.cwd, { provider: info.provider }); // cumulative running totals across transcripts
     return {
       agentId,
       sessionId: info.sessionId ?? null,

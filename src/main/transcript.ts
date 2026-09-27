@@ -2,6 +2,29 @@ import { closeSync, cpSync, existsSync, fstatSync, mkdirSync, openSync, readSync
 import os from 'node:os';
 import path from 'node:path';
 import { estimateCostUsd, normalizeModel } from './pricing';
+// Type-only on purpose: this module is compiled standalone by test/transcript-usage,
+// so it takes no runtime import beyond node and ./pricing.
+import type { AgentProvider } from '../shared/agentProvider';
+
+/**
+ * START-FIXES-163 (2), the Human's rule: an agent that is not a Claude agent NEVER
+ * reads Claude transcripts, on any path. Every per-agent reader below takes the
+ * agent's provider and refuses before touching the disk unless it is exactly
+ * 'claude' — so a new provider is excluded by default, not by remembering to add
+ * it to a list. (A registry entry with no provider is a legacy CLAUDE agent — the
+ * spawn path treats it as one — and callers resolve that to 'claude' themselves.)
+ *
+ * Why it matters: a Codex or AGY agent's session id can never match a Claude
+ * record, yet the usage fallback parsed every transcript in its cwd looking for
+ * one — all 546 MB of C:/PrzEdit, twice, on the first 30 s beat of every start
+ * (WHY-162 chain 1, the ~5 s main-process freeze).
+ */
+export function mayReadClaudeTranscripts(provider: AgentProvider | undefined | null): boolean {
+  return provider === 'claude'; // same test as isClaudeProvider (shared/agentProvider)
+}
+
+/** Test seam: counts every per-agent transcript read that got past the provider gate. */
+export const transcriptReadStats = { usageDirScans: 0, contextReads: 0 };
 
 /** Claude Code's project key: the absolute cwd with EVERY non-alphanumeric
  *  character turned into a dash — the leading slash and any dots included.
@@ -189,6 +212,9 @@ export interface ReadUsageOptions {
    *  every `.jsonl` under the shared project dir. When unset, all are summed
    *  (the legacy behavior, used when the agent's session id isn't yet known). */
   sessionId?: string;
+  /** REQUIRED: the reading agent's provider. Anything but 'claude' reads nothing
+   *  (START-FIXES-163 (2)). Required so no call site can forget it. */
+  provider: AgentProvider | undefined;
 }
 
 /** Per-file incremental parse state for the usage cache. Transcripts are
@@ -305,8 +331,10 @@ function readFileUsage(dir: string, file: string, sessionId: string | undefined)
  *  Called from the ~30s breaker/cost beat for every agent without live OTel, so
  *  it must stay cheap on multi-MB transcript dirs: per-file incremental caching
  *  above means a steady-state call is a readdir + one stat per file. */
-export function readAgentUsage(cwd: string, opts: ReadUsageOptions = {}): AgentUsage {
+export function readAgentUsage(cwd: string, opts: ReadUsageOptions = { provider: undefined }): AgentUsage {
   const usage = zero();
+  if (!mayReadClaudeTranscripts(opts.provider)) return usage;
+  transcriptReadStats.usageDirScans += 1;
   try {
     const dir = projectDir(cwd);
     if (!existsSync(dir)) return usage;
@@ -341,7 +369,9 @@ function num(v: unknown): number {
  *  holds no assistant message yet. */
 const CONTEXT_TAIL_BYTES = 256 * 1024;
 
-export function readContextTokens(transcriptPath: string): number | null {
+export function readContextTokens(transcriptPath: string, provider: AgentProvider | undefined): number | null {
+  if (!mayReadClaudeTranscripts(provider)) return null;
+  transcriptReadStats.contextReads += 1;
   try {
     if (!existsSync(transcriptPath)) return null;
     const fd = openSync(transcriptPath, 'r');

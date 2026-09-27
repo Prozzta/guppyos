@@ -64,7 +64,7 @@ function makeSharedProject() {
 
 test('D11: pre-fix fingerprint — an unfiltered read sums a shared cwd\'s whole history', () => {
   const { cwd } = makeSharedProject();
-  const legacy = readAgentUsage(cwd); // no sessionId filter — the old transcriptFallback call
+  const legacy = readAgentUsage(cwd, { provider: 'claude' }); // no sessionId filter — the old transcriptFallback call
   assert.equal(legacy.outputTokens, 1_000_000, 'the foreign session alone should already be huge');
 });
 
@@ -74,7 +74,8 @@ test('D11: transcript fallback attributes only the agent\'s own session, not the
 
   const telemetry = new TelemetryCollector({
     resolveCwd: () => cwd,
-    resolveSessionId: () => 'my-session'
+    resolveSessionId: () => 'my-session',
+    resolveProvider: () => 'claude'
   });
   const sample = telemetry.getAgentUsage('worker-x');
   assert.ok(sample, 'expected a sample from the agent\'s own transcript');
@@ -86,6 +87,7 @@ test('D11: with no session id known yet, a brand-new agent reports no usage inst
 
   const telemetry = new TelemetryCollector({
     resolveCwd: () => cwd,
+    resolveProvider: () => 'claude',
     resolveSessionId: () => undefined // no hook has fired for this agent yet
   });
   // Pre-fix this returned the foreign session's ~1,000,000-token pseudo-total —
@@ -99,7 +101,8 @@ test('D11: a returned fallback sample keeps sessionId empty (preserves the #56 c
 
   const telemetry = new TelemetryCollector({
     resolveCwd: () => cwd,
-    resolveSessionId: () => 'my-session'
+    resolveSessionId: () => 'my-session',
+    resolveProvider: () => 'claude'
   });
   const sample = telemetry.getAgentUsage('worker-x');
   assert.equal(sample.sessionId, '', 'a transcript-fallback sample must never look like a live OTel session');
