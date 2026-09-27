@@ -61,12 +61,20 @@ ipcMain.handle('page:mode', () => { loads += 1; return { mode: loads === 1 ? 'ho
 ipcMain.handle('page:notice', (e) => { const n = notices.get(e.sender.id) ?? null; notices.delete(e.sender.id); return n; });
 
 const waiters = [];
+// An event that arrives BEFORE its waiter is registered is kept, not lost: under a busy machine
+// the page can report 'got3' before the harness awaits it (that race once failed the suite).
+const early = [];
 const waitFor = (name, pred = () => true, ms = 30_000) => new Promise((resolve, reject) => {
+  const hit = early.findIndex((e) => e.name === name && pred(e.data));
+  if (hit >= 0) { const [e] = early.splice(hit, 1); resolve(e.data); return; }
   const w = { name, pred, resolve };
   waiters.push(w);
   setTimeout(() => { const i = waiters.indexOf(w); if (i >= 0) { waiters.splice(i, 1); reject(new Error(`timed out waiting for ${name}`)); } }, ms);
 });
-const emit = (name, data) => { for (const w of [...waiters]) if (w.name === name && w.pred(data)) { waiters.splice(waiters.indexOf(w), 1); w.resolve(data); } };
+const emit = (name, data) => {
+  const w = waiters.find((x) => x.name === name && x.pred(data));
+  if (w) { waiters.splice(waiters.indexOf(w), 1); w.resolve(data); } else early.push({ name, data });
+};
 ipcMain.on('page:ready', (e, d) => emit('ready', { wcId: e.sender.id, ...d }));
 ipcMain.on('page:got3', (e) => emit('got3', { wcId: e.sender.id }));
 
