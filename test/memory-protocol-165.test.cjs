@@ -88,6 +88,71 @@ test('CRLF memory files stay CRLF', (t) => {
   assert.equal(/[^\r]\n/.test(fs.readFileSync(r.archive, 'utf8')), false);
 });
 
+// ── CB-165 audit F1-F3 ──────────────────────────────────────────────────────────────────
+
+test('F1: a long newest section never leaves memory.md nearly empty (the cut is at the LAST heading at or before the mark)', (t) => {
+  // Jim's case: many small old sections, then one ~11 KB section just inside the 12 KB mark,
+  // then small ones. Cutting at the first heading AFTER the mark kept only ~1.8 KB.
+  let text = HEAD;
+  for (let i = 0; i < 40; i++) text += `\n## old ${i}\n- ${'o'.repeat(900)} fact-${i}\n`;
+  text += `\n## big\n${('- ' + 'b'.repeat(98) + '\n').repeat(110)}`; // ~11 KB, no headings inside
+  text += `\n## last\n- the newest fact\n`;
+  const sp = M.splitMemory(text);
+  const keptBytes = Buffer.byteLength(sp.tail);
+  assert.ok(keptBytes >= M.MEMORY_KEEP_TAIL_BYTES, `kept ${keptBytes} >= 12 KB`);
+  assert.ok(keptBytes <= M.MEMORY_KEEP_TAIL_BYTES * M.MEMORY_KEEP_MAX_FACTOR, `kept ${keptBytes} <= 24 KB`);
+  assert.match(sp.tail, /^## /, 'the cut is at a section heading');
+  assert.equal(sp.header + sp.older + sp.tail, text, 'nothing lost');
+});
+
+test('F1: with no heading in range, the cut falls back to a line break and still keeps >= 12 KB', () => {
+  const body = ('- ' + 'z'.repeat(98) + '\n').repeat(400); // ~40 KB, no headings at all
+  const text = HEAD + body;
+  const sp = M.splitMemory(text);
+  const keptBytes = Buffer.byteLength(sp.tail);
+  assert.ok(keptBytes >= M.MEMORY_KEEP_TAIL_BYTES && keptBytes < M.MEMORY_KEEP_TAIL_BYTES + 200, `kept ${keptBytes}`);
+  assert.ok(sp.older.endsWith('\n'), 'the cut is at a line start');
+  assert.equal(sp.header + sp.older + sp.tail, text);
+});
+
+test('F1: a heading further back than 2 x 12 KB is not used (line-break fallback instead)', () => {
+  const text = HEAD + '\n## only\n' + ('- ' + 'q'.repeat(98) + '\n').repeat(400);
+  const sp = M.splitMemory(text);
+  const keptBytes = Buffer.byteLength(sp.tail);
+  assert.ok(keptBytes <= M.MEMORY_KEEP_TAIL_BYTES * M.MEMORY_KEEP_MAX_FACTOR, `kept ${keptBytes}`);
+  assert.doesNotMatch(sp.tail, /## only/);
+});
+
+test('F2: an append that races the rollover aborts the replace, so memory.md keeps it', (t) => {
+  const dir = tmp(t, 'cb165-mem-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  M.rolloverTestHooks.beforeReplace = (f) => fs.appendFileSync(f, '\n## late\n- LATE-APPEND\n');
+  t.after(() => { M.rolloverTestHooks.beforeReplace = undefined; });
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.rotated, false);
+  assert.equal(r.raced, true);
+  const kept = fs.readFileSync(file, 'utf8');
+  assert.match(kept, /LATE-APPEND/, 'the late append survives');
+  assert.match(kept, /fact-0\n/, 'memory.md was not replaced');
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'no tmp file left');
+  M.rolloverTestHooks.beforeReplace = undefined;
+  assert.equal(M.rolloverMemory(dir).rotated, true, 'the next rollover (next spawn) succeeds');
+});
+
+test('F3: a full day archive (~1 MB) makes the rollover start memory-archive-<date>-2.md', (t) => {
+  const dir = tmp(t, 'cb165-mem-');
+  const now = new Date(2026, 8, 27, 18, 0, 0).getTime();
+  const first = path.join(dir, 'memory-archive-2026-09-27.md');
+  fs.writeFileSync(first, 'x'.repeat(M.MEMORY_ARCHIVE_MAX_BYTES - 1000));
+  fs.writeFileSync(path.join(dir, 'memory.md'), bigMemory(90));
+  const r = M.rolloverMemory(dir, now);
+  assert.equal(r.rotated, true);
+  assert.equal(path.basename(r.archive), 'memory-archive-2026-09-27-2.md');
+  assert.equal(fs.statSync(first).size, M.MEMORY_ARCHIVE_MAX_BYTES - 1000, 'the full archive is untouched');
+  assert.equal(M.archivePathFor(dir, now, 10), first, 'a small add still fits the first file');
+});
+
 test('the archive is picked up by the memory indexer (a direct agents/<id>/*.md), so memory search still finds it', (t) => {
   const root = tmp(t, 'cb165-hive-');
   const dir = path.join(root, 'agents', 'dwight-x');

@@ -14,13 +14,15 @@
  * Run at spawn (ensureAgent), when the agent's previous process is gone, so no agent is
  * appending while the file is rewritten. Best-effort: any failure leaves memory.md untouched.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 /** memory.md above this many bytes is rolled over. */
 export const MEMORY_ROLLOVER_BYTES = 32 * 1024;
 /** About this much of the newest text stays in memory.md after a rollover. */
 export const MEMORY_KEEP_TAIL_BYTES = 12 * 1024;
+/** A heading cut keeps at most this many times MEMORY_KEEP_TAIL_BYTES (else a line-break cut). */
+export const MEMORY_KEEP_MAX_FACTOR = 2;
 /** An archive file is started afresh (`-2`, `-3`, ...) before it passes this. The indexer
  *  skips any source over 2 MB (nativeMemory/sources.ts MAX_SOURCE_BYTES). */
 export const MEMORY_ARCHIVE_MAX_BYTES = 1024 * 1024;
@@ -38,8 +40,10 @@ export interface MemorySplit {
 }
 
 /**
- * Split memory text into header / older / tail. The cut is at the first `## ` heading inside
- * the last `keepBytes`; failing that, at the first line break there. Pure.
+ * Split memory text into header / older / tail. The cut is at the LAST `## ` heading at or
+ * before the `keepBytes` mark, so at least `keepBytes` stay, but no further back than
+ * MEMORY_KEEP_MAX_FACTOR x `keepBytes`; failing that, at the line break at or before the mark.
+ * (Cutting at the first heading AFTER the mark could keep one short section: CB-165 F1.) Pure.
  */
 export function splitMemory(text: string, keepBytes: number = MEMORY_KEEP_TAIL_BYTES): MemorySplit {
   const lines = text.split('\n');
@@ -58,9 +62,16 @@ export function splitMemory(text: string, keepBytes: number = MEMORY_KEEP_TAIL_B
   let from = body.length;
   let bytes = 0;
   while (from > 0 && bytes < keepBytes) { from--; bytes += Buffer.byteLength(body[from], 'utf8'); }
-  const heading = body.indexOf('\n## ', from - 1);
-  let cut = heading >= 0 ? heading + 1 : body.indexOf('\n', from);
-  if (cut < 0) cut = from;
+  // The furthest-back char index a heading cut may use (about MAX_FACTOR x keepBytes kept).
+  let min = from;
+  while (min > 0 && bytes < keepBytes * MEMORY_KEEP_MAX_FACTOR) { min--; bytes += Buffer.byteLength(body[min], 'utf8'); }
+  const heading = from > 0 ? body.lastIndexOf('\n## ', from - 1) : -1;
+  let cut: number;
+  if (heading >= 0 && heading + 1 >= min) cut = heading + 1;
+  else {
+    const nl = from > 0 ? body.lastIndexOf('\n', from - 1) : -1;
+    cut = nl >= 0 ? nl + 1 : from;
+  }
   if (cut <= 0) return { header, older: '', tail: body };
   return { header, older: body.slice(0, cut), tail: body.slice(cut) };
 }
@@ -83,11 +94,16 @@ export function archivePathFor(dir: string, now: number, adding: number): string
   return join(dir, `memory-archive-${date}-${now}.md`);
 }
 
+/** Tests only: runs after the archive and the tmp file are written, just before the re-check. */
+export const rolloverTestHooks: { beforeReplace?: (file: string) => void } = {};
+
 export interface RolloverResult {
   rotated: boolean;
   bytesBefore?: number;
   bytesAfter?: number;
   archive?: string;
+  /** memory.md changed between the read and the replace, so the rollover was abandoned. */
+  raced?: boolean;
 }
 
 /**
@@ -97,7 +113,8 @@ export interface RolloverResult {
 export function rolloverMemory(dir: string, now: number = Date.now(), limit: number = MEMORY_ROLLOVER_BYTES, keepBytes: number = MEMORY_KEEP_TAIL_BYTES): RolloverResult {
   const file = join(dir, 'memory.md');
   if (!existsSync(file)) return { rotated: false };
-  const before = statSync(file).size;
+  const st0 = statSync(file);
+  const before = st0.size;
   if (before <= limit) return { rotated: false, bytesBefore: before };
   const raw = readFileSync(file, 'utf8');
   const crlf = raw.includes('\r\n');
@@ -114,6 +131,15 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   const next = `${header}${!header || header.endsWith('\n\n') ? '' : '\n'}${pointer}${tail}`;
   const tmp = `${file}.rollover-${process.pid}.tmp`;
   writeFileSync(tmp, eol(next), 'utf8');
+  // CB-165 F2: a lingering process may have appended since the read. Replacing the file now
+  // would lose that append, so abort; the archive copy is harmless (the text is also still in
+  // memory.md) and the next spawn rolls over again.
+  rolloverTestHooks.beforeReplace?.(file);
+  const st1 = statSync(file);
+  if (st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs) {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    return { rotated: false, bytesBefore: before, raced: true, archive };
+  }
   renameSync(tmp, file);
   return { rotated: true, bytesBefore: before, bytesAfter: statSync(file).size, archive };
 }
