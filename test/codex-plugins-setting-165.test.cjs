@@ -120,10 +120,22 @@ test('the control renders off by default, with the restart hint and the help tex
 test('the control follows the 1.1.57 rules and sits next to the tool cap in Agents & Models', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'CodexPluginsSetting.tsx'), 'utf8');
   assert.match(src, /useEffect\(\(\) => \{\s*void window\.cth\.getConfig\(\)/, 'reads the CURRENT config on mount');
-  assert.match(src, /window\.cth\.updateConfig\(\{ codexInheritPlugins: value \}\)/, 'saves only its key');
+  assert.match(src, /update: \(patch\) => window\.cth\.updateConfig\(patch\)/, 'saves through window.cth.updateConfig');
+  assert.match(src, /fx\.update\(\{ codexInheritPlugins: value \}\)/, 'saves only its key');
   assert.doesNotMatch(src, /#[0-9a-fA-F]{3,8}\b|rgb\(|\bwhite\b|\bblack\b/, 'theme tokens only (dark mode)');
   const modal = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'components', 'SettingsModal.tsx'), 'utf8');
   assert.match(modal, /<CodexToolOutputSetting \/>[\s\S]{0,300}<CodexPluginsSetting \/>/);
+});
+
+test('a save shows what main saved; a FAILED save puts the previous value back and says so', async () => {
+  const log = [];
+  const fx = (update) => ({ update, setOn: (v) => log.push(['on', v]), setError: (e) => log.push(['err', e]) });
+  await ui.saveCodexInheritPlugins(true, false, fx(async (p) => ({ codexInheritPlugins: p.codexInheritPlugins })));
+  assert.deepEqual(log.splice(0), [['on', true], ['on', true], ['err', null]]);
+  await ui.saveCodexInheritPlugins(true, false, fx(async () => { throw new Error('refused'); }));
+  assert.deepEqual(log.splice(0), [['on', true], ['on', false], ['err', ui.CODEX_PLUGINS_COPY.saveFailed]]);
+  await ui.saveCodexInheritPlugins(false, true, fx(async () => { throw new Error('refused'); }));
+  assert.deepEqual(log.splice(0), [['on', false], ['on', true], ['err', ui.CODEX_PLUGINS_COPY.saveFailed]]);
 });
 
 test('codexInheritPluginsOf: only an explicit true is on', () => {

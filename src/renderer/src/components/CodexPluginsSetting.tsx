@@ -31,6 +31,28 @@ export function codexInheritPluginsOf(c: { codexInheritPlugins?: unknown } | nul
   return c?.codexInheritPlugins === true;
 }
 
+/** One save: show the new value at once, then what main saved; on a failed save put the
+ *  previous value back and say so. Pure apart from the passed-in effects (tested). */
+export async function saveCodexInheritPlugins(
+  value: boolean,
+  prev: boolean,
+  fx: {
+    update: (patch: { codexInheritPlugins: boolean }) => Promise<{ codexInheritPlugins?: unknown } | null | undefined>;
+    setOn: (v: boolean) => void;
+    setError: (e: string | null) => void;
+  }
+): Promise<void> {
+  fx.setOn(value);
+  try {
+    const c = await fx.update({ codexInheritPlugins: value });
+    fx.setOn(codexInheritPluginsOf(c));
+    fx.setError(null);
+  } catch {
+    fx.setOn(prev);
+    fx.setError(CODEX_PLUGINS_COPY.saveFailed);
+  }
+}
+
 export function CodexPluginsSetting() {
   const [on, setOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,12 +62,9 @@ export function CodexPluginsSetting() {
   }, []);
 
   const save = (value: boolean) => {
-    const prev = on;
-    setOn(value);
-    void window.cth.updateConfig({ codexInheritPlugins: value }).then((c) => {
-      setOn(codexInheritPluginsOf(c));
-      setError(null);
-    }).catch(() => { setOn(prev); setError(CODEX_PLUGINS_COPY.saveFailed); });
+    void saveCodexInheritPlugins(value, on, {
+      update: (patch) => window.cth.updateConfig(patch), setOn, setError
+    });
   };
 
   return (
