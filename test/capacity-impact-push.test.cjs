@@ -62,7 +62,9 @@ test('main pushes on every event that can move the string', () => {
   const main = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   assert.match(main, /onChange: \(\) => \{ pushCapacityStrip\(\); pushAgentUsage\(\); pushAgentImpact\(\); inboxWake\?\.onCapacityChange\(\); \}/, 'capacity publication (carries decay)');
   assert.match(main, /onAdmission: \(\) => pushAgentImpact\(\)/, 'admission-ledger move');
-  assert.match(main, /onOutcome: \(r\) => \{\s*pushAgentImpact\(\);\s*if \(r\.outcome\.kind === 'COMMITTED'\) return;/, 'every submit outcome, before the COMMITTED early return');
+  // The COMMITTED branch may do more before it returns (REMOTE-PROMPT logs a BOOT_SEQUENCE commit);
+  // what is pinned is that the push comes FIRST, before any early return.
+  assert.match(main, /onOutcome: \(r\) => \{\s*pushAgentImpact\(\);\s*if \(r\.outcome\.kind === 'COMMITTED'\) (?:return;|\{[\s\S]*?return;\s*\})/,'every submit outcome, before the COMMITTED early return');
   assert.match(main, /ptyProvider\.delete\(id\);[\s\S]{0,120}?pushAgentUsage\(\);\s*pushAgentImpact\(\);/, 'agent leave');
   assert.match(main, /ptyProvider\.set\(opts\.id, provider\);[\s\S]{0,120}?pushAgentUsage\(\);\s*pushAgentImpact\(\);/, 'agent spawn');
   assert.match(main, /writeConfig\(\{ autoDeliveryPausedAgents: Array\.from\(current\)\.sort\(\) \}\);\s*pushAgentImpact\(\);/, 'the floor switch');
