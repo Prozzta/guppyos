@@ -199,6 +199,9 @@ export interface RegistryAgent extends AgentMeta {
    *  resume after a crash/restart) AND the cost accounting/dedup key on every
    *  AgentUsageSample / cost-ledger row. */
   sessionId?: string;
+  /** The `sessionId` before the current one (START-FIXES-163 (1)): the fallback resume
+   *  key when the current one has no transcript, e.g. a phantom OTel start-up id. */
+  previousSessionId?: string;
   /** Most recent Claude model id reported by this agent's status line. This is
    *  per-agent because Claude Code's global settings file cannot preserve
    *  independent `/model` choices across a hive. */
@@ -1344,6 +1347,10 @@ export class HiveManager {
       const reg = this.registry();
       const agent = reg.agents[agentId];
       if (!agent || agent.sessionId === sessionId) return; // unknown agent or unchanged → no write
+      // START-FIXES-163 (1): keep the id this one replaces. If the new key later turns
+      // out to have no transcript, the next spawn resumes this one instead of silently
+      // starting fresh (index.ts, the Claude resume block).
+      if (agent.sessionId) agent.previousSessionId = agent.sessionId;
       agent.sessionId = sessionId;
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
@@ -1390,6 +1397,12 @@ export class HiveManager {
    *  `claude --resume <id>` spawn so a restarted agent resumes its thread. */
   lastSession(agentId: string): string | undefined {
     return this.registry().agents[agentId]?.sessionId;
+  }
+
+  /** The session id `lastSession` replaced, or undefined. The resume fallback when
+   *  the last id has no transcript on disk (START-FIXES-163 (1)). */
+  previousSession(agentId: string): string | undefined {
+    return this.registry().agents[agentId]?.previousSessionId;
   }
 
   /** The per-agent Claude model last reported by its status line. */

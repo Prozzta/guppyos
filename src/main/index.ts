@@ -70,7 +70,7 @@ import type { UsageProvider } from './usage';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
-import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd } from './transcript';
+import { readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -1814,7 +1814,14 @@ function runBreakerBeat(progressWindowMs: number): void {
     // (it was already being written to the cost ledger one line above). Same id,
     // same liveness gate; recordSession writes only on change, so this is a
     // no-op once the hooks are flowing.
-    if (sample?.sessionId) hive.recordSession(id, sample.sessionId);
+    // START-FIXES-163 (1): NOT always the same id. A resumed Claude emits its start-up
+    // metric under a new process session id that has no transcript (WHY-162 chain 2),
+    // and recording it replaced the real --resume key with a phantom: a quick restart
+    // then came up fresh and lost its context. So a sample id may only fill an EMPTY
+    // key, or replace one when its own transcript is on disk.
+    if (sample?.sessionId && shouldRecordSampleSession(hive.lastSession(id), sample.sessionId, reg.agents[id]?.cwd)) {
+      hive.recordSession(id, sample.sessionId);
+    }
     if (id === reg.godId) continue;            // breaker skips god
     // Progress = fresh coordination files OR a recent OTel tool span. The span
     // leg closes the background-work blind spot: subagent/Workflow tool calls
@@ -3476,6 +3483,20 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if (seedSessionTranscript(opts.cwd, sid)) {
         args.push('--resume', sid);
         didResume = true;
+      } else if (!explicitSid) {
+        // START-FIXES-163 (1): the recorded key has no transcript (a phantom OTel id
+        // from before the gate, or a session that never wrote a turn). Resume the id it
+        // replaced when THAT one is on disk, instead of silently starting fresh. Logged
+        // either way, so a lost context is never invisible again.
+        const previous = hive.previousSession(opts.hive.id);
+        const cwd = opts.cwd;
+        const pick = chooseResumeSession(sid, previous, (s) => seedSessionTranscript(cwd, s));
+        if (pick.sessionId) {
+          args.push('--resume', pick.sessionId);
+          didResume = true;
+        }
+        hive.appendLog({ kind: 'resume-miss', agentId: opts.hive.id, missing: sid, previous: previous ?? null, outcome: pick.outcome });
+        console.warn(`[resume] ${opts.hive.id}: session ${sid} has no transcript; ${pick.sessionId ? `resuming previous ${pick.sessionId}` : 'starting fresh'}`);
       } else if (explicitSid) {
         // The user typed a session id in the Add Agent dialog but it isn't in any
         // Claude project dir — we fall back to a FRESH session rather than a broken

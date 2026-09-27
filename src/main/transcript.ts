@@ -72,6 +72,44 @@ export function projectDir(cwd: string): string {
  *  crafted id like `../../x` would otherwise traverse out of the project dirs). */
 const VALID_SESSION_ID = /^[A-Za-z0-9_-]+$/;
 
+/** Whether `<projectDir(cwd)>/<sessionId>.jsonl` exists: one `existsSync`, no read.
+ *  START-FIXES-163 (1): the gate before an OTel sample's session id may become the
+ *  resume key. A resumed Claude emits its start-up metric under a fresh process id
+ *  that has no transcript anywhere (WHY-162 chain 2). */
+export function sessionTranscriptExists(cwd: string, sessionId: string): boolean {
+  try {
+    if (!cwd || !sessionId || !VALID_SESSION_ID.test(sessionId)) return false;
+    return existsSync(path.join(projectDir(cwd), `${sessionId}.jsonl`));
+  } catch {
+    return false;
+  }
+}
+
+/** May an OTel sample's session id become this agent's resume key? Only when there is
+ *  no key yet (the sample is then the only source), or when the sample's own transcript
+ *  exists. A phantom start-up id never replaces a real key. */
+export function shouldRecordSampleSession(current: string | undefined, sampleId: string, cwd: string | undefined): boolean {
+  if (!sampleId) return false;
+  if (!current) return true;
+  if (current === sampleId) return false;
+  return !!cwd && sessionTranscriptExists(cwd, sampleId);
+}
+
+/** The Claude resume decision for a restored agent (no user-typed id), as data.
+ *  `seed` is seedSessionTranscript bound to the spawn cwd. The last key wins when
+ *  its transcript is there. When it is not (a phantom), the id it replaced is tried,
+ *  and `miss` says a resume-miss row is owed either way. */
+export function chooseResumeSession(
+  last: string | undefined,
+  previous: string | undefined,
+  seed: (sessionId: string) => boolean
+): { sessionId?: string; miss: boolean; outcome?: 'resumed-previous' | 'fresh' } {
+  if (!last) return { miss: false };
+  if (seed(last)) return { sessionId: last, miss: false };
+  if (previous && previous !== last && seed(previous)) return { sessionId: previous, miss: true, outcome: 'resumed-previous' };
+  return { miss: true, outcome: 'fresh' };
+}
+
 export function seedSessionTranscript(cwd: string, sessionId: string): boolean {
   try {
     if (!sessionId || !VALID_SESSION_ID.test(sessionId)) return false;
