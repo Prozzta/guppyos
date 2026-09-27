@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.60" src="https://img.shields.io/badge/version-1.1.60-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.61" src="https://img.shields.io/badge/version-1.1.61-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -195,9 +195,13 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **The Python memory CLI removed** (1.1.59) — the built-in memory engine is the only
   memory and is always on (no Python, no background indexer); the heavy-job lock no longer
   blocks light commands.
-- **The `memory` command** (1.1.60, the current release) — agents' memory searches reach
-  the memory engine again (one PATH per agent terminal, with the app's command first); the
-  command is `memory`, and the old engine's last traces are gone from the app.
+- **The `memory` command** (1.1.60) — agents' memory searches reach the memory engine again
+  (one PATH per agent terminal, with the app's command first); the command is `memory`, and
+  the old engine's last traces are gone from the app.
+- **Codex wake-ups that arrive** (1.1.61, the current release) — Codex gets its Enter after its
+  paste window and the app checks the wake line really went out (never typing it twice); mail
+  that failed to wake an agent is retried with a backoff; God's Remote Control is switched on at
+  start instead of typed, so it no longer eats the first line.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

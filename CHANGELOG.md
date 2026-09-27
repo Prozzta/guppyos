@@ -11,6 +11,38 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.61] — 2026-09-27
+
+**Codex agents get their mail, and God's remote control no longer eats your first line.**
+Rollback: 1.1.60 (reinstall).
+
+### Fixed
+
+- **Codex agents now actually receive their inbox wake-ups.** The app typed the wake line and
+  pressed Enter 140 ms later; Codex treats a fast burst of text as a paste, and an Enter that
+  soon becomes a new line in its input box instead of sending. Wake lines piled up unsent until
+  someone pressed Enter by hand. Codex now gets its Enter 800 ms after the text (measured on
+  Codex 0.157.1: 140-200 ms never sent, 300 ms and more always did).
+- **The app checks that a Codex wake-up really went out.** After the Enter it reads Codex's
+  input box: if the text is still there it presses Enter once more, and if that does not work
+  either it stops and shows a hold on the agent's card instead of typing again.
+- **A wake line left unsent is never typed a second time.** The app now reads the whole input
+  box, not just the cursor's line, so it sees its own unsent text and presses Enter on it (or
+  holds it for you if anyone touched it).
+- **Mail that failed to wake an agent twice is no longer forgotten.** It is logged and offered
+  again after 5, 10, 20, then every 30 minutes.
+- **God's Remote Control no longer swallows the first thing you type.** It is switched on when
+  God starts, instead of by typing `/remote-control` into a session that may already be
+  connected (whose reconnect dialog took your next line), and automatic typing waits while
+  that dialog is on screen.
+
+### Added
+
+- **The Codex version is logged** when the app starts and each time a Codex agent starts, with
+  an extra log line when it changes, so a Codex update is visible.
+- **Codex agents start with `--no-daemon`** when the installed Codex supports it (0.157 and
+  later), keeping each agent on its own in-process server.
+
 ## [1.1.60] — 2026-09-27
 
 **Agents' memory command is `memory`, and it now actually reaches the memory engine.**
