@@ -282,6 +282,13 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
     fontSizeRef.current = fontSize;
     const entry = acquireTerminal(ptyId, THEMES[ptyThemeRef.current], fontSize);
     entry.term.options.fontSize = fontSize;
+    // The same guard as tryFit: never fit a host with no real size. A view mounted inside a
+    // display:none tab has a 0x0 host, and fitting it proposed a phantom grid and resized the
+    // pty to it (MEMSPIKE-168: one needless pty resize, a full Codex repaint, per hidden
+    // mount). The font size is applied above either way; the ResizeObserver refits with it
+    // once the host has a size.
+    const container = hostRef.current;
+    if (!container || !container.clientWidth || !container.clientHeight) return;
     try {
       const before = { cols: entry.term.cols, rows: entry.term.rows };
       entry.fit.fit();
