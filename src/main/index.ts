@@ -40,7 +40,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
-import { installRendererRecovery, RecoveryPolicy, type RecoveryNotice } from './rendererRecovery';
+import { installRendererRecovery, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
@@ -6339,6 +6339,8 @@ app.whenReady().then(() => {
   // off, the app keeps Electron's default menu — zero behavior change.
   if (readConfig().multiWindow) installAppMenu();
   createWindow();
+  // RENDERER-RECOVERY-164: renderer + GPU memory rows every 60 s (fast appender only).
+  startRendererMemorySampler();
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -6402,6 +6404,7 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     setTimer: (fn, ms) => setTimeout(fn, ms),
     log: (r) => row(String(r.kind), { ...r, processUptimeMs: Math.round(process.uptime() * 1000) }),
     quitting: () => allowQuit,
+    recentMemory: () => rendererMemory.recent(),
     install: () => { /* createWindow already wires the replacement via watchWindowHealth */ },
     setNotice: (w, notice) => { if (!w.webContents.isDestroyed()) recoveryNotices.set(w.webContents.id, notice); },
     recreate: (old) => recreateWindowAfterCrash(old, isFloor, recovery),
@@ -6422,6 +6425,21 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     try { closingTime.cancel(); } catch { /* not started */ }
     teardownAndQuit();
   });
+}
+
+/** RENDERER-RECOVERY-164 addendum: renderer + GPU memory every SAMPLE_MS, read from main's own
+ *  process metrics (no renderer ping), written ONLY through hive.appendLog (the kept-open fast
+ *  appender). The last samples ride along on the next render-process-gone row. */
+const rendererMemory = new RendererMemorySampler({
+  metrics: () => app.getAppMetrics(),
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  now: () => Date.now()
+});
+let rendererMemoryTimer: ReturnType<typeof setInterval> | null = null;
+function startRendererMemorySampler(): void {
+  if (rendererMemoryTimer) return;
+  rendererMemoryTimer = setInterval(() => { rendererMemory.sample(); }, SAMPLE_MS);
+  rendererMemoryTimer.unref?.();
 }
 
 /** RENDERER-RECOVERY-164: one-shot "the view crashed and was restored" notices, keyed by the

@@ -15,6 +15,7 @@ import { HivePicker } from '@/components/HivePicker';
 import { QuitWarningModal, type ClosingTimeState } from '@/components/QuitWarningModal';
 import { CompletionToast } from '@/realtime/CompletionToast';
 import { UpdateToast } from '@/components/UpdateToast';
+import { RecoveryNotice } from '@/components/RecoveryNotice';
 import { CapacityStrip } from '@/components/CapacityStrip';
 import { CapacityDetailPanel } from '@/components/CapacityDetailPanel';
 import { CapacityLimitBanner } from '@/components/CapacityLimitBanner';
@@ -284,6 +285,7 @@ export function App() {
       {/* v0.3.4: background-update toast ("restart to update"); renders null until
           main's updater pushes a status. */}
       <UpdateToast />
+      <RecoveryNotice />
       {/* Title bar */}
       <div
         className="cth-titlebar-drag"

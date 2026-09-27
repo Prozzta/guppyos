@@ -84,6 +84,8 @@ export interface RecoveryDeps<W extends RecoverableWindow> {
   setNotice: (win: W, notice: RecoveryNotice) => void;
   /** While the app is quitting, a dying renderer is not recovered. */
   quitting: () => boolean;
+  /** The last memory samples to attach to the crash row (RendererMemorySampler.recent). */
+  recentMemory?: () => unknown[];
   /** Re-arm on the replacement window (the same policy, so the streak carries over). */
   install: (win: W) => void;
 }
@@ -98,7 +100,7 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
   win.webContents.on('render-process-gone', (_e, d) => {
     const at = deps.now();
     const decision = deps.quitting() ? { action: 'ignore' as const, streak: 0 } : deps.policy.onGone(d.reason, at);
-    deps.log({ kind: 'render-process-gone', reason: d.reason, exitCode: d.exitCode, pid, windowUptimeMs: at - created, recovery: decision.action, streak: decision.streak });
+    deps.log({ kind: 'render-process-gone', reason: d.reason, exitCode: d.exitCode, pid, windowUptimeMs: at - created, recovery: decision.action, streak: decision.streak, recentMemory: deps.recentMemory?.() ?? [] });
     if (decision.action === 'reload') {
       deps.setTimer(() => {
         if (win.isDestroyed() || win.webContents.isDestroyed()) return;
@@ -118,4 +120,67 @@ export function installRendererRecovery<W extends RecoverableWindow>(win: W, dep
       deps.giveUp(win, decision);
     }
   });
+}
+
+/**
+ * RENDERER-RECOVERY-164 addendum (the Human: "logging, but the fast append way").
+ *
+ * Every SAMPLE_MS, main reads `app.getAppMetrics()` (no renderer involvement: no ping, no IPC)
+ * and writes one `renderer-memory` row with each renderer ('Tab') and the GPU process: pid,
+ * working set and private MB, process uptime. The row goes out through the caller's `log`,
+ * which in the app is `hive.appendLog`, the kept-open fast appender (appendLog.ts). This
+ * module does no file I/O of its own. The last KEEP samples stay in memory and are attached
+ * to the next `render-process-gone` row, so the minutes before a crash are always on record.
+ */
+export const SAMPLE_MS = 60_000;
+export const KEEP_SAMPLES = 10;
+
+/** The part of Electron's ProcessMetric the sampler reads (memory sizes are in KB). */
+export interface ProcessMetricLike {
+  pid: number;
+  type: string;
+  creationTime?: number;
+  memory?: { workingSetSize?: number; privateBytes?: number };
+}
+
+export interface MemorySample {
+  at: number;
+  procs: Array<{ pid: number; type: 'renderer' | 'gpu'; workingSetMb: number | null; privateMb: number | null; uptimeS: number | null }>;
+}
+
+const mb = (kb: number | undefined): number | null => (typeof kb === 'number' && Number.isFinite(kb) ? Math.round(kb / 102.4) / 10 : null);
+
+export class RendererMemorySampler {
+  private readonly ring: MemorySample[] = [];
+
+  constructor(private readonly deps: {
+    metrics: () => ProcessMetricLike[];
+    log: (row: Record<string, unknown>) => void;
+    now: () => number;
+    keep?: number;
+  }) {}
+
+  /** Take one sample, remember it, and log it. Never throws. */
+  sample(): MemorySample | null {
+    let list: ProcessMetricLike[];
+    try { list = this.deps.metrics(); } catch { return null; }
+    const at = this.deps.now();
+    const procs = list
+      .filter((p) => p.type === 'Tab' || p.type === 'GPU')
+      .map((p) => ({
+        pid: p.pid,
+        type: p.type === 'GPU' ? 'gpu' as const : 'renderer' as const,
+        workingSetMb: mb(p.memory?.workingSetSize),
+        privateMb: mb(p.memory?.privateBytes),
+        uptimeS: typeof p.creationTime === 'number' ? Math.round((at - p.creationTime) / 1000) : null
+      }));
+    const s: MemorySample = { at, procs };
+    this.ring.push(s);
+    while (this.ring.length > (this.deps.keep ?? KEEP_SAMPLES)) this.ring.shift();
+    try { this.deps.log({ kind: 'renderer-memory', procs }); } catch { /* logging never breaks sampling */ }
+    return s;
+  }
+
+  /** The last KEEP samples, oldest first (a copy). */
+  recent(): MemorySample[] { return this.ring.map((s) => ({ at: s.at, procs: s.procs.map((p) => ({ ...p })) })); }
 }
