@@ -11,6 +11,34 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.62] — 2026-09-27
+
+**Codex wake-ups are checked properly, and the app measures its own start-up.**
+Rollback: 1.1.61 (reinstall).
+
+### Fixed
+
+- **A Codex wake line is no longer sent twice.** Codex's input box drops characters it cannot
+  show, and it dropped the dash in the wake line, so the app's check never recognised its own
+  unsent line: it could decide the line had gone out when it had not, and type it a second
+  time. The check now ignores characters an agent's screen drops, and the wake line uses only
+  plain characters.
+- **The Codex send check is sturdier when the machine is busy.** The app now wants to see the
+  line gone twice in a row (for up to 2.5 s) before it counts it as sent, and Codex's Enter
+  waits a little longer for longer text (about 1.2 s for a wake line, at most 2 s).
+- **The memory engine no longer starts the moment the app opens.** The Memory panel only asks
+  a running engine for its status; until the first search, or 30 s after start, it reads
+  "starts on first use" (as in 1.1.58).
+
+### Added
+
+- **A start-up timing log.** For the first 60 s after it starts, the app writes compact
+  `startup-timing` rows to the hive log: how long the main process was blocked each second,
+  window tasks of 50 ms or more, how much output each terminal sent each second, and markers
+  (window ready, each agent start, its first output and first drawing, each terminal opening,
+  the memory engine starting). A final row names the worst second and the longest task. The
+  rows hold numbers and agent ids only, never terminal content, and logging stops after 60 s.
+
 ## [1.1.61] — 2026-09-27
 
 **Codex agents get their mail, and God's remote control no longer eats your first line.**
