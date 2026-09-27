@@ -309,3 +309,19 @@ test('service: a vanished file is re-resolved, and reads as no-transcript', () =
   fs.rmSync(p);
   assert.deepEqual(svc.page({ agentId: 'v' }), { ok: false, reason: 'no-transcript' });
 });
+
+test('service: Codex with no recorded session falls back to the home\'s newest rollout', () => {
+  const home = path.join(SANDBOX, 'agents', 'c2', '.codex');
+  const day = path.join(home, 'sessions', '2026', '01', '02');
+  fs.mkdirSync(day, { recursive: true });
+  const old = path.join(day, 'rollout-2026-01-02T09-00-00-01a00000-0000-7000-8000-00000000000a.jsonl');
+  const neu = path.join(day, 'rollout-2026-01-02T10-00-00-01a00000-0000-7000-8000-00000000000b.jsonl');
+  fs.writeFileSync(old, JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'old' } }) + '\n');
+  fs.writeFileSync(neu, JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'new' } }) + '\n');
+  fs.utimesSync(old, new Date('2026-01-02T09:00:00Z'), new Date('2026-01-02T09:00:00Z'));
+  fs.utimesSync(neu, new Date('2026-01-02T10:00:00Z'), new Date('2026-01-02T10:00:00Z'));
+  const svc = service({ c2: { provider: 'codex' } }, { codexHomes: { c2: home } });
+  assert.deepEqual(brief(svc.page({ agentId: 'c2' }).items), ['user:new']);
+  // Not a Codex worker (no home): no transcript, and no walk of anything else.
+  assert.deepEqual(service({ c3: { provider: 'codex' } }).page({ agentId: 'c3' }), { ok: false, reason: 'no-transcript' });
+});

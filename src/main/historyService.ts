@@ -31,7 +31,8 @@ import {
 import { normalizeLine } from './historyNormalize';
 import { readLinesBackward, readLinesForward, type LineRef, type TailLimits } from './historyTail';
 import { projectDir } from './transcript';
-import { findCodexRollout, findNewestRollout } from './codexThreadRotation';
+import { findCodexRollout } from './codexThreadRotation';
+import { findNewestRollout } from './codexRolloutCapacity';
 
 export interface HistoryAgentFacts {
   provider?: string;

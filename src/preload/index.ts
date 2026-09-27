@@ -11,6 +11,7 @@ import type { UpdateStatus } from '../shared/updateState';
 import type { CapacityStripCollection } from '../shared/capacityStrip';
 import type { AgentImpact, AgentImpactPush } from '../shared/deliveryHold';
 import type { AgentUsagePush, AgentUsageView } from '../shared/agentUsage';
+import type { HistoryPage, HistoryRequest } from '../shared/history';
 import type { ProviderCapacityDetailView } from '../shared/capacityDetail';
 export type { ProviderCapacityDetailView } from '../shared/capacityDetail';
 export type { AgentUsagePush, AgentUsageView } from '../shared/agentUsage';
@@ -1157,6 +1158,10 @@ const api = {
    *  have fired at least once (the transcript path is learned from them). */
   agentContext: (agentId: string): Promise<number | null> =>
     ipcRenderer.invoke('hive:agentContext', agentId),
+  /** HISTORY-VIEW-169: one bounded page of the agent's conversation from its provider's own
+   *  transcript. Tail by default; `before` pages older, `after` follows growth (byte cursors). */
+  historyPage: (req: HistoryRequest): Promise<HistoryPage> =>
+    ipcRenderer.invoke('hive:history', req),
 
   // ─── Live telemetry (OTel collector — the usage-provider seam + spans) ──────
   /** Live cumulative usage for an agent (OTel-preferred, transcript fallback). */

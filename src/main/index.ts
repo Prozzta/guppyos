@@ -106,6 +106,8 @@ import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
+import { HistoryService } from './historyService';
+import { geminiHome } from './capacityScope';
 import { InboxWakeBridge } from './inboxWakeBridge';
 import { WakeStallWatch } from './wakeStall';
 import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
@@ -4660,6 +4662,21 @@ ipcMain.handle('hive:agentContext', (_evt, agentId: unknown) => {
   if (!mayReadClaudeTranscripts(provider)) return null;
   return readContextTokens(tp, provider) ?? 0;
 });
+
+// HISTORY-VIEW-169: one bounded page of an agent's conversation, read from the provider's
+// OWN transcript (Claude JSONL, Codex rollout, AGY brain transcript), not the terminal's
+// scrollback. The renderer passes the agent id and a byte cursor only; the file is resolved
+// here. Never throws: a missing source is a reason the tab shows.
+const historyService = new HistoryService({
+  agent: (id) => {
+    const a = hive.enabled() ? hive.registry().agents[id] : undefined;
+    return a ? { provider: a.provider, cwd: a.cwd, sessionId: a.sessionId } : null;
+  },
+  transcriptPath: (id) => hookServer.transcriptPath(id),
+  codexHomeFor: (id) => (hive.enabled() ? hive.codexHomeFor(id) : null),
+  geminiHome: () => geminiHome()
+});
+ipcMain.handle('hive:history', (_evt, req: unknown) => historyService.page(req));
 
 // A consolidated, NON-SENSITIVE per-agent directory for the voice read-layer
 // (Realtime Michael's get_agent_detail / list_agents). One read that joins
