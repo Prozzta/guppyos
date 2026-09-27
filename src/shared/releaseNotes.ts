@@ -252,8 +252,36 @@ export function htmlToNoteText(html: string | null | undefined): string {
   if (!/<[a-z!/][^>]*>/i.test(html)) return html;
   // UAV-163 M2: a release that ships a drop page (`<!-- drop -->…<!-- /drop -->`,
   // src/shared/releaseDrop.ts) must reach the toast with its markers, or the drop can
-  // never be found. Such a body goes through untouched; the drop page replaces the digest.
-  if (/<!--\s*drop\s*-->[\s\S]*<!--\s*\/drop\s*-->/.test(html)) return html;
+  // never be found. M3: only the text AROUND it is converted; the block is kept raw and
+  // appended, so the digest reads real bullets and extractDropHtml still finds the page.
+  const drop = dropBlockOf(html);
+  if (drop) return `${convertHtml(html.replace(drop, '\n'))}\n\n${drop}`.trim();
+  return convertHtml(html);
+}
+
+/** The drop markers, exactly as src/shared/releaseDrop.ts reads them (first opener to
+ *  the next closer). Duplicated, not imported: this module takes no imports. */
+const DROP_OPEN = '<!-- drop -->';
+const DROP_CLOSE = '<!-- /drop -->';
+
+/** The whole `<!-- drop -->…<!-- /drop -->` block, markers included, or null. */
+function dropBlockOf(body: string): string | null {
+  const start = body.indexOf(DROP_OPEN);
+  if (start === -1) return null;
+  const end = body.indexOf(DROP_CLOSE, start + DROP_OPEN.length);
+  return end === -1 ? null : body.slice(start, end + DROP_CLOSE.length);
+}
+
+/** A release body with its drop block removed, for a DIGEST (UAV-163 M3): the drop's
+ *  own markup otherwise mashes into the bullets ("Fixedonepage"). Unchanged when there
+ *  is no complete drop block. */
+export function withoutDropBlock(body: string | null | undefined): string | undefined {
+  if (typeof body !== 'string') return undefined;
+  const drop = dropBlockOf(body);
+  return drop ? body.replace(drop, '\n').trim() : body;
+}
+
+function convertHtml(html: string): string {
   return html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')

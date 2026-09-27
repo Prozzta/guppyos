@@ -153,7 +153,7 @@ test('the badge and Settings render the ReleasePicker from releaseChoices', () =
   const picker = read('src/renderer/src/components/ReleasePicker.tsx');
   assert.match(picker, /<select/);
   assert.match(picker, /i === 0 \? ' \(latest\)' : ''/);
-  assert.match(picker, /summarizeReleaseNotes\(option\?\.notes\)/);
+  assert.match(picker, /summarizeReleaseNotes\(withoutDropBlock\(option\?\.notes\)\)/);
 });
 
 // RENDERED (hidden Electron window, test/electron-harness): the production badge and
@@ -228,4 +228,21 @@ test('M2: a drop page survives the HTML conversion, so the downloaded toast can 
   assert.ok(extractDropHtml(opts[0].notes));
   // Without a drop, comments are still stripped as before.
   assert.doesNotMatch(htmlToNoteText('<p>a</p><!-- note -->'), /<!--/);
+});
+
+test('M3: the picker digest reads the bullets AROUND a drop, never the drop page itself', () => {
+  const { withoutDropBlock } = loadTs('src/shared/releaseNotes.ts');
+  const { extractDropHtml } = loadTs('src/shared/releaseDrop.ts');
+  const html = '<h2>What&#39;s new in 1.2.0</h2><ul><li>Fixed one</li><li>Added two</li></ul>\n'
+    + '<!-- drop -->\n<section><h1>Fixed</h1><p>one</p><p>page</p></section>\n<!-- /drop -->';
+  const note = htmlToNoteText(html);
+  // The toast still finds the drop (M2)...
+  assert.equal(extractDropHtml(note), '<section><h1>Fixed</h1><p>one</p><p>page</p></section>');
+  // ...and the digest the picker shows is the real bullets, with no "Fixedonepage".
+  const digest = summarizeReleaseNotes(withoutDropBlock(note));
+  assert.deepEqual(digest, ['Fixed one', 'Added two']);
+  assert.ok(!digest.join(' ').includes('Fixedonepage'));
+  assert.equal(withoutDropBlock('no drop here'), 'no drop here');
+  assert.equal(withoutDropBlock(undefined), undefined);
+  assert.match(read('src/renderer/src/components/ReleasePicker.tsx'), /summarizeReleaseNotes\(withoutDropBlock\(option\?\.notes\)\)/);
 });

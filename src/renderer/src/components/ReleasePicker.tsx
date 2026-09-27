@@ -12,7 +12,7 @@
  * do (native download vs. installer link) depends on it.
  */
 import { useMemo } from 'react';
-import { summarizeReleaseNotes } from '@shared/releaseNotes';
+import { summarizeReleaseNotes, withoutDropBlock } from '@shared/releaseNotes';
 import type { ReleaseOption } from '@shared/updateState';
 
 export function ReleasePicker({
@@ -27,7 +27,8 @@ export function ReleasePicker({
   onOpenRelease?: (url: string) => void;
 }) {
   const option = choices.find((c) => c.version === selected) ?? choices[0];
-  const notes = useMemo(() => summarizeReleaseNotes(option?.notes), [option?.notes]);
+  // UAV-163 M3: a release's drop page is not digest material; the text around it is.
+  const notes = useMemo(() => summarizeReleaseNotes(withoutDropBlock(option?.notes)), [option?.notes]);
   if (!option) return null;
 
   return (
