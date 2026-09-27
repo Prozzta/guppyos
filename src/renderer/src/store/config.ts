@@ -67,6 +67,8 @@ export interface HarnessConfig {
   orchestratorMaySpawn?: boolean;
   /** HEAVY-JOB-SERIALIZE: heavy jobs (installs, builds, full suites, benches) at once; 'off' = no limit. Default 1. */
   heavyJobsAtOnce?: number | 'off';
+  /** CODEX-BLOAT-165 fix 2: tool_output_token_limit for hive Codex agents (1000-20000) or 'off'. Default 4000. Mirrors src/main/config.ts. */
+  codexToolOutputTokenLimit?: number | 'off';
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;

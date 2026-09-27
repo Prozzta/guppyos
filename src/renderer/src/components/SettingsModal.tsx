@@ -13,6 +13,7 @@ import {
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
+import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { openFirstCapacityDetail } from '../capacity/detailSelection';
 import { UpdatesSection } from './UpdatesSection';
 import { SettingsHeroCard } from './SettingsHeroCard';
@@ -1109,6 +1110,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 
                       <AiEnginesSettings config={config} />
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      {/* CODEX-BLOAT-165 fix 2: the hive Codex agents' tool output cap */}
+                      <CodexToolOutputSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

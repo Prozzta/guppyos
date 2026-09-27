@@ -14,6 +14,7 @@ import { defaultMcpDefaults } from '../shared/mcpCatalog';
 import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
 import { isAgentUsageDisplay } from '../shared/agentUsage';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
+import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
 import type { IntegrationRecord } from '../shared/integrations';
 import {
@@ -228,6 +229,11 @@ export interface HarnessConfig {
    *  further one is denied at PreToolUse, naming the holders. 'off' = no limit (the guard does
    *  nothing). Default 1. Read live on every hook: a change applies without restarting agents. */
   heavyJobsAtOnce?: number | 'off';
+  /** CODEX-BLOAT-165 fix 2 (Settings → Agents & Models, "Codex tool output cap"): the
+   *  `tool_output_token_limit` written into each hive Codex agent's OWN config.toml, in Codex's
+   *  estimated tokens (1000-20000), or 'off' (no key written). Default 4000. Never written to the
+   *  user's ~/.codex/config.toml. Codex reads it at start: a change reaches an agent at its next start. */
+  codexToolOutputTokenLimit?: number | 'off';
   /** The command we run when spawning a new agent. */
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
@@ -464,6 +470,7 @@ const DEFAULTS: HarnessConfig = {
   autoMode: true,
   orchestratorMaySpawn: false,
   heavyJobsAtOnce: 1,
+  codexToolOutputTokenLimit: CODEX_TOOL_OUTPUT_LIMIT_DEFAULT,
   defaultCommand: 'claude',
   godProvider: 'claude',
   godModel: 'claude-opus-4-8',
@@ -712,6 +719,13 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
   const current = readConfig();
   const next: HarnessConfig = { ...current, ...patch };
+  // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-20000. Anything else is refused
+  // and changes nothing (the renderer reverts its control on the rejection).
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'codexToolOutputTokenLimit')) {
+    const n = normalizeCodexToolOutputLimit(patch.codexToolOutputTokenLimit);
+    if (n === null) throw new Error('invalid codexToolOutputTokenLimit');
+    next.codexToolOutputTokenLimit = n;
+  }
   // Project INGESTION — a registered repo is typed by hand ("~/dev/foo") as often
   // as it is picked from the folder dialog. Expand `~` here so the persisted list
   // (and therefore every agent's default cwd) is ABSOLUTE; Node's fs/spawn treat

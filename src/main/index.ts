@@ -3437,7 +3437,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           // W3 — default-MCP consent state + the bundled skills source dir.
           mcpDefaults: readConfig().mcpDefaults,
           skillsDir: skillsResourceDir(),
-          codexNoDaemon
+          codexNoDaemon,
+          // CODEX-BLOAT-165 fix 2: Settings' Codex tool output cap, into this agent's config.toml.
+          codexToolOutputTokenLimit: readConfig().codexToolOutputTokenLimit
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and

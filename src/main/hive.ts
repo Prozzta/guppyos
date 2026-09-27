@@ -29,6 +29,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory } from './memoryRollover';
 import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, disableCodexPlugins, setCodexTopLevelKeys } from './codexAgentConfig';
+import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   DEV_ISOLATION, sanitizeCodexConfigForDev, hookPipeId,
@@ -907,6 +908,9 @@ export class HiveManager {
       skillsDir?: string;
       /** CODEX-WAKE-161 (a): the installed Codex CLI has `--no-daemon` (>= 0.157.0). */
       codexNoDaemon?: boolean;
+      /** CODEX-BLOAT-165 fix 2: HarnessConfig.codexToolOutputTokenLimit (a number, 'off', or
+       *  absent = the default), written into this agent's own config.toml. */
+      codexToolOutputTokenLimit?: number | 'off';
     } = {}
   ): Promise<SpawnInjection> {
     const root = this.root();
@@ -1072,7 +1076,7 @@ export class HiveManager {
               this.reconcileAgyStatusline();
             }
             else if (desc.shim === 'codex') {
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null);
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit));
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
@@ -2929,7 +2933,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null): { home: string; refusal?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3015,7 +3019,11 @@ export class HiveManager {
       if (config) config = disableCodexPlugins(config).text;
       // CODEX-BLOAT-165 fix 6: compact at ~120K instead of the model default (~220-243K
       // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
-      config = setCodexTopLevelKeys(config, { model_auto_compact_token_limit: CODEX_AUTO_COMPACT_TOKEN_LIMIT });
+      config = setCodexTopLevelKeys(config, {
+        model_auto_compact_token_limit: CODEX_AUTO_COMPACT_TOKEN_LIMIT,
+        // CODEX-BLOAT-165 fix 2 (Settings): the tool-output cap; Off = no key of ours.
+        ...(toolOutputTokenLimit !== null ? { tool_output_token_limit: toolOutputTokenLimit } : {})
+      });
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
