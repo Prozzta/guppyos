@@ -28,6 +28,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory } from './memoryRollover';
+import { disableCodexPlugins } from './codexAgentConfig';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   DEV_ISOLATION, sanitizeCodexConfigForDev, hookPipeId,
@@ -3005,6 +3006,10 @@ export class HiveManager {
         config = s.text;
         console.warn(`[dev-isolation] codex config seed for ${home}: rewrote ${s.rewrittenHomes} CODEX_HOME key(s) to the DEV home, made ${s.rewrittenPipes} named pipe(s) DEV-distinct, dropped ${s.droppedTables} [projects.*] trust table(s)`);
       }
+      // CODEX-BLOAT-165 fix 5: the seed's plugins (browser, computer-use, documents, ...) are
+      // OFF in this agent's copy: each one adds tools and instructions to every request. Only
+      // this generated file changes; the user's ~/.codex/config.toml is read, never written.
+      if (config) config = disableCodexPlugins(config).text;
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
