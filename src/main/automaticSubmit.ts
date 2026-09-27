@@ -1014,6 +1014,8 @@ export class AutomaticSubmitOwner {
     // window after a fast burst is taken as a newline).
     // CODEX-WAKE-162: the gap may scale with the payload's length.
     // START-FIXES-163 (3): the same gap, recorded for the Enter-write diagnostics row.
+    // KEEP EQUAL to the sleep below: that line is pinned verbatim (codex-wake-162 and the
+    // mutant census), so the expression is repeated; enterGapMs is pure, so they agree.
     const gapMs = deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS;
     await this.sleep(deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS);
 

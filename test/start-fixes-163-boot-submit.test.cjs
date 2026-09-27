@@ -134,8 +134,12 @@ test('(3) LOGGING ONLY: the same submits write exactly the same bytes and settle
 test('(3) wiring: boot-submit rows per attempt/outcome, per Enter write, THREW in main and renderer; no swallowed catch', () => {
   const idx = read('src/main/index.ts');
   assert.match(idx, /const boot = r\.admissionClass === 'BOOT_SEQUENCE'\s*\? \{ kind: 'boot-submit', agentId: r\.agentId, requestId: r\.requestId, attempt:/);
-  assert.match(idx, /if \(boot\) hive\.appendLog\(\{ \.\.\.boot, outcome: o\.kind, reason: o\.reason \?\? null/);
-  assert.match(idx, /if \(boot\) hive\.appendLog\(\{ \.\.\.boot, outcome: 'THREW'/);
+  // Jim N3: both rows sit inside try, so logging can never turn an outcome into a rejection.
+  assert.match(idx, /try \{ if \(boot && bootSubmitRowDue\(boot\.requestId, o\.kind, o\.reason\)\) hive\.appendLog\(\{ \.\.\.boot, outcome: o\.kind, reason: o\.reason \?\? null[^\n]*\} catch \{ \/\* logging only \*\/ \}\s*return outcome;/);
+  assert.match(idx, /try \{ if \(boot\) \{ bootSubmitRowDue\(boot\.requestId, 'THREW', undefined\); hive\.appendLog\(\{ \.\.\.boot, outcome: 'THREW'[^\n]*\} catch \{ \/\* logging only \*\/ \}\s*throw e;/);
+  assert.match(idx, /const bootSubmitRowDue = createBootSubmitRowGate\(\);/);
+  // Jim N1: the recorded gap is marked to stay equal to the pinned sleep.
+  assert.match(read('src/main/automaticSubmit.ts'), /KEEP EQUAL to the sleep below[\s\S]{0,200}const gapMs = deps\.enterGapMs\?\.\(ptyId, req\.text\.length\) \?\? GAP_MS;\s*await this\.sleep\(deps\.enterGapMs\?\.\(ptyId, req\.text\.length\) \?\? GAP_MS\);/);
   assert.match(idx, /\}\)\.then\(\(outcome\) => \{[\s\S]*?return outcome;/, 'every outcome passes through unchanged');
   assert.match(idx, /outcome: 'ENTER_WRITE', ok: r\.ok, reason: r\.error \?\? null, gapMs: r\.gapMs/);
   assert.match(idx, /ipcMain\.on\('autoSubmit:bootSubmitThrew'/);
@@ -144,4 +148,25 @@ test('(3) wiring: boot-submit rows per attempt/outcome, per Enter write, THREW i
   assert.match(hive, /window\.cth\.logBootSubmitThrew\?\.\(GOD_ID, message\)/);
   assert.doesNotMatch(hive, /catch \{ \/\* PTY may have died during startup \*\/ \}/, 'the orientation error is no longer swallowed');
   assert.match(read('src/preload/index.ts'), /ipcRenderer\.send\('autoSubmit:bootSubmitThrew', agentId, message\)/);
+});
+
+test('(3) Jim N2: 40 REFUSED retries log ONE row; a change of reason, and every final outcome, always log', () => {
+  const { createBootSubmitRowGate } = loadTs('src/main/bootSubmitLog.ts');
+  const due = createBootSubmitRowGate();
+  const rows = [];
+  const attempt = (req, kind, reason) => { if (due(req, kind, reason)) rows.push(`${kind}:${reason ?? ''}`); };
+  for (let i = 0; i < 25; i += 1) attempt('boot:god:1', 'REFUSED', 'TERMINAL_NOT_READY');
+  for (let i = 0; i < 10; i += 1) attempt('boot:god:1', 'ABORTED', 'HUMAN_TYPING');
+  for (let i = 0; i < 5; i += 1) attempt('boot:god:1', 'REFUSED', 'TERMINAL_NOT_READY');
+  attempt('boot:god:1', 'COMMITTED');
+  assert.deepEqual(rows, ['REFUSED:TERMINAL_NOT_READY', 'ABORTED:HUMAN_TYPING', 'REFUSED:TERMINAL_NOT_READY', 'COMMITTED:']);
+  // Requests are independent, and a final outcome resets the memory.
+  rows.length = 0;
+  attempt('boot:a:1', 'REFUSED', 'X'); attempt('boot:b:1', 'REFUSED', 'X'); attempt('boot:a:1', 'REFUSED', 'X');
+  attempt('boot:a:1', 'INTERFERED', 'PICKER_LATCHED_AFTER_STAGE'); attempt('boot:a:1', 'REFUSED', 'X');
+  assert.deepEqual(rows, ['REFUSED:X', 'REFUSED:X', 'INTERFERED:PICKER_LATCHED_AFTER_STAGE', 'REFUSED:X']);
+  // Bounded memory.
+  const small = createBootSubmitRowGate(2);
+  small('r1', 'REFUSED', 'X'); small('r2', 'REFUSED', 'X'); small('r3', 'REFUSED', 'X');
+  assert.equal(small('r1', 'REFUSED', 'X'), true, 'the oldest was evicted, so it logs again rather than growing forever');
 });

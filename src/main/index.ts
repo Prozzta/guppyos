@@ -40,6 +40,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
+import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
   addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe,
@@ -4895,13 +4896,17 @@ ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
     text: r.text, settleMs
   }).then((outcome) => {
     const o = outcome as { kind: string; reason?: string; detail?: string };
-    if (boot) hive.appendLog({ ...boot, outcome: o.kind, reason: o.reason ?? null, ...(o.detail ? { detail: o.detail } : {}) });
+    // Logging is wrapped so it can never turn an outcome into a rejection.
+    try { if (boot && bootSubmitRowDue(boot.requestId, o.kind, o.reason)) hive.appendLog({ ...boot, outcome: o.kind, reason: o.reason ?? null, ...(o.detail ? { detail: o.detail } : {}) }); } catch { /* logging only */ }
     return outcome;
   }, (e: unknown) => {
-    if (boot) hive.appendLog({ ...boot, outcome: 'THREW', reason: e instanceof Error ? e.message : String(e) });
+    try { if (boot) { bootSubmitRowDue(boot.requestId, 'THREW', undefined); hive.appendLog({ ...boot, outcome: 'THREW', reason: e instanceof Error ? e.message : String(e) }); } } catch { /* logging only */ }
     throw e;
   });
 });
+
+// START-FIXES-163 (3), Jim N2: REFUSED/ABORTED retries are logged on change only.
+const bootSubmitRowDue = createBootSubmitRowGate();
 
 // START-FIXES-163 (3): the renderer's boot-prompt caller gave up (a final outcome, a
 // dead PTY, an IPC failure). It used to swallow this; now it lands in log.jsonl.
