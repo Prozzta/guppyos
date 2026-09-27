@@ -4549,7 +4549,7 @@ function beginQuitWork(): Promise<QuitReport> {
     const ptys = ptyManager.list().length;
     quitWork = runQuitSteps([
       { name: 'ptys', run: () => ptyManager.killAllAsync() }
-    ], QUIT_WORK_CAP_MS).then((r) => ({ ...r, steps: { ...r.steps, ptyCount: ptys } }));
+    ], QUIT_WORK_CAP_MS).then((r) => ({ ...r, steps: { ...r.steps, ptyCount: ptys, ptyExitsPending: ptyManager.exitsPending } }));
   }
   return quitWork;
 }

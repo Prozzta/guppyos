@@ -997,9 +997,30 @@ export class PtyManager {
       }
       return Promise.resolve();
     }
+    // EXIT-CRASH (Jim, EXIT-CRASH-WHY.md): node-pty's per-PTY exit callback (conpty.cc, a
+    // ThreadSafeFunction BlockingCall) lands ~200 ms after the kill. Resolving before it meant
+    // app.exit ran first and the callback hit node's teardown: an uncaught Napi::Error and a crash
+    // dump on EVERY quit. So wait for every session's exit too, capped at EXIT_WAIT_MS.
+    this.exitsPending = sessions.length;
+    const exited = sessions.map((s) => new Promise<void>((resolve) => {
+      const done = (): void => { this.exitsPending = Math.max(0, this.exitsPending - 1); resolve(); };
+      try {
+        if (typeof s.proc.onExit !== 'function') { done(); return; }
+        const sub = s.proc.onExit(() => { try { sub?.dispose?.(); } catch { /* noop */ } done(); });
+      } catch { done(); }
+    }));
     const closePtys = (): void => {
       for (const s of sessions) { try { s.proc.kill(); } catch { /* noop */ } }
     };
-    return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys);
+    const allExited = (): Promise<void> => Promise.race([
+      Promise.all(exited).then(() => undefined),
+      new Promise<void>((resolve) => { setTimeout(resolve, PtyManager.EXIT_WAIT_MS); })
+    ]);
+    return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys).then(allExited);
   }
+
+  /** EXIT-CRASH: how long the quit waits for the ConPTY exit callbacks after the kill. */
+  static readonly EXIT_WAIT_MS = 1_500;
+  /** EXIT-CRASH: sessions whose exit had not arrived yet (quit-done reports it). */
+  exitsPending = 0;
 }

@@ -125,6 +125,52 @@ test('F1 PtyManager.killAllAsync: a wedged taskkill still closes every ConPTY at
   assert.deepEqual(log, ['kill 7']);
 });
 
+test('EXIT-CRASH: killAllAsync resolves only after every ConPTY exit callback (or EXIT_WAIT_MS), and reports what is still pending', async (t) => {
+  const log = [];
+  const w = winWorld(t, { exitAfterMs: null });
+  const m = new PtyManager();
+  const subs = [];
+  const exitable = (pid) => {
+    const listeners = [];
+    return { pid, kill: () => log.push(`kill ${pid}`), onExit: (fn) => { listeners.push(fn); const d = { dispose: () => subs.push(pid) }; return d; }, fire: () => listeners.forEach((fn) => fn({ exitCode: 0 })) };
+  };
+  const a = exitable(1); const b = exitable(2);
+  m.sessions.set('a', { proc: a }); m.sessions.set('b', { proc: b });
+  let resolved = false;
+  const done = m.killAllAsync(1000).then(() => { resolved = true; });
+  assert.equal(m.exitsPending, 2);
+  w.spawns[0].proc.emit('close', 0);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(log, ['kill 1', 'kill 2'], 'killed');
+  assert.equal(resolved, false, 'NOT resolved before the exits arrive (the crash was app.exit racing them)');
+  a.fire();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(resolved, false); assert.equal(m.exitsPending, 1);
+  b.fire();
+  await done;
+  assert.equal(m.exitsPending, 0);
+  assert.deepEqual(subs.sort(), [1, 2], 'each one-shot listener is disposed');
+});
+
+test('EXIT-CRASH: an exit that never comes is capped at EXIT_WAIT_MS (the quit never hangs on it)', async (t) => {
+  const w = winWorld(t, { exitAfterMs: null });
+  const m = new PtyManager();
+  assert.equal(PtyManager.EXIT_WAIT_MS, 1500);
+  m.sessions.set('a', { proc: { pid: 5, kill: () => {}, onExit: () => ({ dispose() {} }) } });
+  const t0 = Date.now();
+  const done = m.killAllAsync(1000);
+  w.spawns[0].proc.emit('close', 0);
+  await done;
+  const took = Date.now() - t0;
+  assert.ok(took >= 1400 && took < 3000, `capped (took ${took})`);
+  assert.equal(m.exitsPending, 1, 'quit-done reports the one still pending');
+});
+
+test('EXIT-CRASH wiring: quit-done carries ptyExitsPending', () => {
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(idx, /steps: \{ \.\.\.r\.steps, ptyCount: ptys, ptyExitsPending: ptyManager\.exitsPending \}/);
+});
+
 // ── F1: the bounded batch ──────────────────────────────────────────────────
 
 test('F1 runQuitSteps: steps run concurrently, each timed, a hang is capped, a throw is recorded', async () => {
