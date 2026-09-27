@@ -28,17 +28,21 @@ const mod = { exports: {} };
 new Function('module', 'exports', 'require', js)(mod, mod.exports, require);
 const R = mod.exports;
 
-const LIMIT_MB = Number(argOf('limit-mb', '600'));
+// Low and BOUNDED: the hog stops allocating a little past the limit (then only spins, still
+// frozen), so it never starves other tests running beside it in the suite (it once took ~1.4 GB).
+const LIMIT_MB = Number(argOf('limit-mb', '400'));
+const HOG_MAX_MB = LIMIT_MB + 250;
 const page = join(sandbox, 'page.html');
 writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>memrecovery</title><script>
   const { ipcRenderer } = require('electron');
   let got = 0;
   ipcRenderer.on('pty:data:t1', () => { got += 1; if (got === 3) ipcRenderer.send('page:got3'); });
-  ipcRenderer.invoke('page:mode').then((mode) => {
+  ipcRenderer.invoke('page:mode').then(({ mode, maxMb }) => {
     ipcRenderer.invoke('page:notice').then((n) => ipcRenderer.send('page:ready', { mode, notice: n }));
     if (mode === 'hog') {
-      // FROZEN and growing: never yields to the event loop again (so it cannot run a reload).
-      setTimeout(() => { const keep = []; for (;;) { keep.push(new Array(262144).fill(keep.length)); } }, 50);
+      // FROZEN: never yields to the event loop again (so it cannot run a reload). It grows in
+      // 2 MB steps up to maxMb, then only spins.
+      setTimeout(() => { const keep = []; for (;;) { if (keep.length * 2 < maxMb) keep.push(new Array(262144).fill(keep.length)); } }, 50);
     }
   });
 </script>`);
@@ -53,7 +57,7 @@ let loads = 0;
 let ticks = 0;
 const notices = new Map();
 setInterval(() => { ticks += 1; if (owner && !owner.isDestroyed()) { try { owner.send('pty:data:t1', 'x'); } catch { /* gone */ } } }, 40);
-ipcMain.handle('page:mode', () => { loads += 1; return loads === 1 ? 'hog' : 'calm'; });
+ipcMain.handle('page:mode', () => { loads += 1; return { mode: loads === 1 ? 'hog' : 'calm', maxMb: HOG_MAX_MB }; });
 ipcMain.handle('page:notice', (e) => { const n = notices.get(e.sender.id) ?? null; notices.delete(e.sender.id); return n; });
 
 const waiters = [];

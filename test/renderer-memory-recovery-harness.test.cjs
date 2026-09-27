@@ -39,6 +39,7 @@ test('RENDERED: a FROZEN renderer that keeps allocating is killed by main on a c
   assert.equal(r.actions.length, 1, 'one recovery for one runaway renderer');
   assert.equal(r.actions[0].outcome, 'killed', 'killed without the renderer cooperating');
   assert.ok(r.actions[0].mb >= r.limitMb, `acted over the limit: ${r.actions[0].mb} MB`);
+  assert.ok(r.actions[0].mb <= r.limitMb + 400, `the hog stays bounded (never starves the suite): ${r.actions[0].mb} MB`);
   assert.equal(r.gone.recovery, 'reload', 'the ordinary recovery took over');
   assert.equal(r.notice && r.notice.reason, 'memory', 'the restored notice says why');
   assert.ok(r.steps.some((s) => s.phase === 'recovered' && s.sameWc && s.newPid), 'the same window, a new renderer process');
