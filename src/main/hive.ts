@@ -1763,6 +1763,9 @@ export class HiveManager {
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, append what you learned to memory.md so future-you remembers.',
       guardrailsLine,
+      // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
+      // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
+      meta.provider === 'codex' ? CODEX_OUTPUT_HYGIENE_LINE : '',
       memoryLine,
       knowledgeLine,
       godLine,
@@ -3453,6 +3456,10 @@ export class HiveManager {
   }
 
 }
+
+/** CODEX-BLOAT-165 fix 7: the output-hygiene rule in a Codex agent's developer_instructions.
+ *  Stable text (no volatile values), so the instructions stay prompt-cache-stable. */
+export const CODEX_OUTPUT_HYGIENE_LINE = 'OUTPUT HYGIENE (every tool output stays in your context and is re-sent with every later request): never print a whole file, log or CSV. Read what you need: a line range or head/tail (Get-Content -TotalCount N / -Tail N, head, tail, sed -n), or matches (rg, Select-String). Cap command output (| Select-Object -First 50, | head -50). Write large results to a file and report a short summary plus its path. Make big edits with small apply_patch hunks or by writing a file; never echo a whole file back.';
 
 /** CODEX-BLOAT-165 fix 4: a drained message body longer than this is cut, with a pointer to its file. */
 export const DRAIN_BODY_MAX_CHARS = 2000;
