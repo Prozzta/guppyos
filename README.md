@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.62" src="https://img.shields.io/badge/version-1.1.62-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.63" src="https://img.shields.io/badge/version-1.1.63-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -202,10 +202,14 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   paste window and the app checks the wake line really went out (never typing it twice); mail
   that failed to wake an agent is retried with a backoff; God's Remote Control is switched on at
   start instead of typed, so it no longer eats the first line.
-- **Start-up measured** (1.1.62, the current release) — the first 60 s of every start are
+- **Start-up measured** (1.1.62) — the first 60 s of every start are
   logged as timing rows (main-process stalls, slow window tasks, per-terminal output, agent
   markers), the memory engine waits until it is first used, and Codex's wake check ignores
   characters its screen drops, so a wake line is never sent twice.
+- **Restarts that keep context** (1.1.63, the current release) — a quick restart resumes a
+  Claude agent's real session instead of a new empty one, non-Claude agents never read Claude
+  transcripts (no more start-up freeze), a healthy restored Codex reading no longer holds its
+  wake-ups, and the update check lists every newer version to choose from.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

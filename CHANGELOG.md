@@ -11,6 +11,42 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.63] — 2026-09-27
+
+**Agents keep their context across a quick restart, start-up no longer freezes, and you can pick which update to install.**
+Rollback: 1.1.62 (reinstall).
+
+### Fixed
+
+- **A quick restart no longer costs a Claude agent its context.** A resumed Claude reports its
+  first start-up numbers under a new, empty session id, and the app saved that id as the one
+  to resume next time. A restart before the agent's first turn then started it fresh. Such an
+  id now only fills an empty slot, or one whose transcript exists; the previous id is kept, and
+  if the saved id has no transcript the app resumes the previous one. Either way it writes a
+  `resume-miss` row to the hive log.
+- **No more ~5 s freeze about 30 s after every start.** Codex and Antigravity agents have no
+  Claude usage data, so the app looked for their usage in the Claude transcripts of their
+  folder, reading and parsing all of them (over 500 MB here) twice and finding nothing. Agents
+  that are not Claude agents now never read Claude transcripts, on any path.
+- **Stuck Codex wake-ups after a restart.** When the app restored a healthy saved usage reading
+  for a Codex agent, the agent's next hook re-read the same line and tied the agent to a pool
+  still marked "unconfirmed", so every automatic wake was held. A healthy restored reading no
+  longer does that; a restored reading that shows a real limit still holds, so a restart can't
+  clear a real limit.
+
+### Added
+
+- **Choose which update to install.** When more than one newer version is published, the
+  version badge and Settings → Updates show them all in a drop-down, the latest selected, with
+  each version's own notes. In Settings the latest downloads inside the app as before; an older
+  version downloads its installer. The check still makes no extra network requests, and a
+  failed or oversized fallback check is now logged instead of silently showing nothing.
+- **Boot-prompt logging.** Each attempt to send an agent's start-up prompt writes a
+  `boot-submit` row (its outcome and reason, each Enter sent, and any error), so an orientation
+  that never went out can be traced. Nothing about how the prompt is sent has changed.
+- **Capacity diagnostics.** A `capacity-bind` row records which usage pool an agent is tied to,
+  and a held wake-up's log row now says why it was held.
+
 ## [1.1.62] — 2026-09-27
 
 **Codex wake-ups are checked properly, and the app measures its own start-up.**
