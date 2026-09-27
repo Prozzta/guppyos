@@ -106,6 +106,19 @@ test('upgrading a pre-1.1.66 agent.md (no tools:) records the moment; a later re
   assert.equal(s.hive.agyToolsSince('p2'), upgraded, 'unchanged by a rewrite that already had tools');
 });
 
+test('F1: a kill/exit (removeAgyAgent) then a respawn does NOT move the marker, so a good post-fix conversation keeps resuming', async (t) => {
+  const s = sandbox(t);
+  await s.hive.ensureAgent({ id: 'p3', name: 'Pia', provider: 'antigravity', cwd: s.home });
+  const first = s.hive.agyToolsSince('p3');
+  assert.ok(first !== null);
+  s.hive.removeAgyAgent('p3');
+  assert.equal(fs.existsSync(agentFile(s.home, 'p3')), false, 'agent.md removed on exit');
+  await new Promise((r) => setTimeout(r, 5));
+  await s.hive.ensureAgent({ id: 'p3', name: 'Pia', provider: 'antigravity', cwd: s.home });
+  assert.match(fs.readFileSync(agentFile(s.home, 'p3'), 'utf8'), /\ntools:\n/, 'rewritten with tools');
+  assert.equal(s.hive.agyToolsSince('p3'), first, 'the marker did not move');
+});
+
 test('decideAgyRotation: a conversation created before the tools list ROTATES (agy-toolset), even today and small', () => {
   const now = new Date(2026, 8, 27, 22, 0, 0).getTime();
   const since = now - 60_000;

@@ -2580,7 +2580,8 @@ export class HiveManager {
     const body = HiveManager.agyAgentMarkdown(meta, prompt);
     try {
       let hadTools = false;
-      if (existsSync(file)) {
+      const existed = existsSync(file);
+      if (existed) {
         const cur = readFileSync(file, 'utf8');
         hadTools = /\ntools:\n/.test(cur);
         if (cur === body) return HiveManager.agyAgentName(meta.id);
@@ -2596,7 +2597,10 @@ export class HiveManager {
       // AGY-TOOLS-166: the moment this agent's agy agent first carried `tools`. A conversation
       // created before it has no command or write tools, for good (agy fixes the toolset when a
       // conversation is created), so an automatic resume of one starts fresh (index.ts).
-      if (!hadTools) this.markAgyToolsSince(meta.id);
+      // Stamped only on a real UPGRADE (an existing file without tools:) or when this agent was
+      // never stamped. A kill/exit removes agent.md (removeAgyAgent), so the next spawn rewrites
+      // it from nothing: re-stamping then would rotate a GOOD post-fix conversation (Jim, AGY-166 F1).
+      if ((existed && !hadTools) || this.agyToolsSince(meta.id) === null) this.markAgyToolsSince(meta.id);
       return HiveManager.agyAgentName(meta.id);
     } catch (e) {
       console.error('[hive] installAgyAgent failed:', e);
