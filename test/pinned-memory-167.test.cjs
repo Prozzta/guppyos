@@ -201,6 +201,50 @@ test('seed: an append racing the seed aborts it (memory.md keeps the append, no 
   assert.deepEqual(fs.readdirSync(dir), ['memory.md']);
 });
 
+// ── `memory wake-up`: the L0.5 block ───────────────────────────────────────────────────
+
+const F = loadTs('src/main/nativeMemory/format.ts');
+const ENTRIES = [{ wing: 'x', room: 'memory', source: 'agents/x/memory.md', content: '## d\n- newest' }, { wing: 'x', room: 'audit', source: 'agents/x/AUDIT.md', content: 'y'.repeat(900) }];
+
+test('wake-up: the section is printed verbatim as its own L0.5 block between IDENTITY and L1; L1 is unchanged', () => {
+  const lessons = '1. Cite only URLs you fetched and opened.\n   - quote the page, with its link\n2. Commit only under the repo identity.';
+  const withPin = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${lessons}\n\n`);
+  const without = F.formatWakeUp('You are X.', ENTRIES);
+  assert.ok(withPin.includes(`## L0 — IDENTITY\nYou are X.\n\n## L0.5 — HOW I WORK (standing lessons)\n${lessons}\n\n## L1 — ESSENTIAL STORY\n`), withPin);
+  const l1 = (t) => t.slice(t.indexOf('## L1'));
+  assert.equal(l1(withPin), l1(without), 'the L1 part is identical');
+  assert.equal(F.WAKE_MAX_CHARS, 3200, 'the L1 budget is unchanged');
+  assert.doesNotMatch(F.formatWakeUp('You are X.', ENTRIES, M.PINNED_SEED.replace(/\n_.*_\n$/, '\n')), /L0\.5/, 'an empty section prints no block');
+  assert.equal(F.formatWakeUp('You are X.', ENTRIES, ''), without);
+});
+
+test('wake-up: the block has its own 6 KB budget: the first 6 KB (at a line break) plus a "read the rest in memory.md" note', () => {
+  const big = Array.from({ length: 100 }, (_, i) => `${i + 1}. ${'w'.repeat(95)}`).join('\n'); // ~10 KB
+  const out = F.formatWakeUp('You are X.', ENTRIES, `## How I work (standing lessons)\n${big}\n`);
+  const block = out.slice(out.indexOf('## L0.5'), out.indexOf('## L1'));
+  const body = block.split('\n').slice(1).join('\n');
+  assert.match(block, /… \(over 6 KB: read the rest in memory\.md\)\n\n$/);
+  const shown = body.slice(0, body.indexOf('\n…'));
+  assert.ok(big.startsWith(shown + '\n'), 'a verbatim prefix, cut at a line break');
+  assert.ok(Buffer.byteLength(shown) <= F.WAKE_PINNED_MAX_BYTES && Buffer.byteLength(shown) > F.WAKE_PINNED_MAX_BYTES - 200);
+  assert.match(out, /## L1 — ESSENTIAL STORY\n\n\[memory\]\n {2}- ## d - newest {2}\(memory\.md\)\n\n\[audit\]\n {2}- y{397}\.\.\. {2}\(AUDIT\.md\)\n$/, 'L1 still gets its full budget');
+});
+
+test('wake-up (engine): the caller wing\'s memory.md section is read from the file (CRLF too) and printed', async (t) => {
+  const { MemoryEngine } = loadTs('src/main/nativeMemory/engine.ts');
+  const root = tmp(t, 'pin167-wake-');
+  fs.mkdirSync(path.join(root, 'agents', 'ph'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'agents', 'ph', 'identity.md'), 'You are Phyllis.');
+  fs.writeFileSync(path.join(root, 'agents', 'ph', 'memory.md'), (HEAD + '\n' + PIN + notes(2).slice(1)).replace(/\n/g, '\r\n'));
+  const store = { setMeta() {}, sourceShas: () => new Map(), removeSource() {}, planDiff: () => ({ keep: [], add: [], remove: [] }), applyDiff: () => true, wakeUp: () => ENTRIES, search: () => [] };
+  const eng = new MemoryEngine({ hiveRoot: root, store, embedder: { loaded: true, embed: async (x) => x.map(() => new Float32Array(384)), unload: async () => {} },
+    countTokens: (x) => x.split(/\s+/).length, mode: () => 'native', watch: null, setTimer: (fn, ms) => (ms === 0 ? setImmediate(fn) : { ms }), clearTimer: () => {} });
+  const r = await eng.wakeUp('ph');
+  assert.ok(r.text.includes('## L0.5 — HOW I WORK (standing lessons)\n1. Cite only URLs you fetched and opened.\n2. Commit only under the repo identity.\n\n## L1'), r.text);
+  const none = await eng.wakeUp('nobody');
+  assert.doesNotMatch(none.text, /L0\.5/);
+});
+
 // ── the spawn wiring and the protocol text (a real HiveManager, HOME redirected) ────────
 
 const { HiveManager } = loadTs('src/main/hive.ts');

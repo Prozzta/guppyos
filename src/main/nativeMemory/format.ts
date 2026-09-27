@@ -1,7 +1,8 @@
 /**
  * NATIVE-MEMORY section 6: the `memory` command's text. `search` prints ranked hits;
  * `wake-up` follows the section-4 CONTENT contract in its frame (the "Wake-up text (~N
- * tokens):" header and the L0/L1 headings).
+ * tokens):" header and the L0/L1 headings). PINNED-MEMORY adds an L0.5 block between them: the
+ * agent's `## How I work (standing lessons)` section, verbatim, on its own budget.
  */
 import type { SearchHit } from './store';
 
@@ -48,13 +49,31 @@ export interface WakeEntry { wing: string; room: string; source: string; content
 /** ~800 tokens: the legacy L1 cap was 3200 characters. */
 export const WAKE_MAX_CHARS = 3200;
 const SNIPPET = 400;
+/** The L0.5 block's own budget (the pinned section's 6 KB soft cap); never taken from L1's. */
+export const WAKE_PINNED_MAX_BYTES = 6 * 1024;
 
-export function formatWakeUp(identity: string | null, entries: WakeEntry[]): string {
+/** The pinned section's lines (its heading dropped: the block has its own), verbatim, capped. */
+function pinnedBlock(pinned: string): string {
+  const body = pinned.replace(/\r\n/g, '\n').replace(/^[^\n]*\n?/, '').replace(/\s+$/, '');
+  const buf = Buffer.from(body, 'utf8');
+  if (buf.length <= WAKE_PINNED_MAX_BYTES) return body;
+  // The first 6 KB, cut at a line break when there is one (never inside a UTF-8 sequence).
+  let cut = buf.lastIndexOf(0x0a, WAKE_PINNED_MAX_BYTES);
+  if (cut <= 0) {
+    cut = WAKE_PINNED_MAX_BYTES;
+    while (cut > 0 && (buf[cut] & 0xc0) === 0x80) cut--;
+  }
+  return `${buf.subarray(0, cut).toString('utf8')}\n… (over 6 KB: read the rest in memory.md)`;
+}
+
+export function formatWakeUp(identity: string | null, entries: WakeEntry[], pinned: string | null = null): string {
   const parts: string[] = [];
   parts.push(identity && identity.trim()
     ? `## L0 — IDENTITY\n${identity.trim().slice(0, 800)}`
     : '## L0 — IDENTITY\nNo identity file for this wing (agents/<id>/identity.md).');
   parts.push('');
+  const lessons = pinned ? pinnedBlock(pinned) : '';
+  if (lessons.trim()) parts.push(`## L0.5 — HOW I WORK (standing lessons)\n${lessons}`, '');
   if (!entries.length) {
     parts.push('## L1 — No memories yet.');
   } else {

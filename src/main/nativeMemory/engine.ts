@@ -14,6 +14,7 @@ import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, sha256, type Discovery, type SourceEntry } from './sources';
 import { compactionDecision, NativeMemoryStore, type SearchHit } from './store';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
+import { pinnedSection } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
 /** Chunks embedded per queue step before yielding (spec section 3: <= 8). ONE: a search that
@@ -190,11 +191,14 @@ export class MemoryEngine {
     if (wing) await this.waitForWing(wing, this.d.wakeWaitMs ?? WAKE_WAIT_MS);
     return this.enqueue(PRIORITY.wake, async () => {
       let identity: string | null = null;
+      let pinned: string | null = null;
       if (wing && /^[A-Za-z0-9._-]+$/.test(wing)) {
         try { identity = readFileSync(join(this.d.hiveRoot, 'agents', wing, 'identity.md'), 'utf8'); } catch { identity = null; }
+        // PINNED-MEMORY: the standing lessons, read from memory.md itself (never ranked or cut up).
+        try { pinned = pinnedSection(readFileSync(join(this.d.hiveRoot, 'agents', wing, 'memory.md'), 'utf8')); } catch { pinned = null; }
       }
       const entries = this.d.store.wakeUp(wing, WAKE_MAX_CHARS);
-      return { exit: 0, text: formatWakeUp(identity, entries) };
+      return { exit: 0, text: formatWakeUp(identity, entries, pinned) };
     });
   }
 
