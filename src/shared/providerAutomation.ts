@@ -324,3 +324,30 @@ const AUTOMATIC_ABORT_CAPABILITY: Record<AgentProvider, AutomaticAbortCapability
 export function automaticAbortCapability(provider: AgentProvider): AutomaticAbortCapability {
   return AUTOMATIC_ABORT_CAPABILITY[provider] ?? ABORT_UNKNOWN;
 }
+
+/**
+ * CODEX-WAKE-161 F1: the gap between an automatic payload and its Enter, for a provider that
+ * needs longer than the owner's default (GAP_MS, 140 ms). Codex reads a fast burst of input as
+ * a paste and takes an Enter inside its paste-burst window as a NEWLINE, so the wake line sat
+ * unsent in the composer. MEASURED on codex-cli 0.157.1 (Windows, ConPTY, a headless scratch
+ * pty with the real binary; the 407-char wake line):
+ *   Enter after 140 ms: 0/5 submitted; 200 ms: 0/4; 300, 400, 500 ms: 4/4 each; 800,
+ *   1500, 4000 ms: all submitted.
+ *   A bracketed paste (Jim's first proposal) did NOT help through ConPTY: 0/5 at 140 ms,
+ *   1/2 at 1500 ms. So the payload stays raw and only the gap changes.
+ * 800 ms is well past the measured edge (between 200 and 300 ms). null = the default gap.
+ */
+export const CODEX_ENTER_GAP_MS = 800;
+export function automaticEnterGapMs(provider: AgentProvider): number | null {
+  return provider === 'codex' ? CODEX_ENTER_GAP_MS : null;
+}
+
+/**
+ * CODEX-WAKE-161 F3: providers where the owner reads the composer after its Enter and settles
+ * COMMITTED only once our text has left it. Codex: the provider whose Enter was observed
+ * turning into a newline. (Claude's own turn confirmation already covers it in the wake
+ * coordinator; widening this is a measured decision, not a default.)
+ */
+export function automaticVerifySubmit(provider: AgentProvider): boolean {
+  return provider === 'codex';
+}

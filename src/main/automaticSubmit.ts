@@ -442,6 +442,14 @@ export interface OwnerDeps {
   setTimer: (fn: () => void, ms: number) => unknown;
   /** Told of every settled outcome. Diagnostics and UI; never a decision input. */
   onOutcome?: (record: OutcomeRecord) => void;
+  /** CODEX-WAKE-161 F1: the gap between the staged text and its Enter on this PTY, when the
+   *  provider needs longer than GAP_MS (see providerAutomation.automaticEnterGapMs). Absent or
+   *  null = GAP_MS. */
+  enterGapMs?: (ptyId: string) => number | null;
+  /** CODEX-WAKE-161 F3: after the Enter, read the composer and require our text GONE from
+   *  it before settling COMMITTED (a TUI that turned the Enter into a newline leaves it
+   *  there). Absent / false = the write-level COMMITTED as before. */
+  verifySubmit?: (ptyId: string) => boolean;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -491,7 +499,10 @@ export type InterferenceReason =
   | 'ERASE_NOT_VERIFIED'
   | 'ENTER_WRITE_FAILED'
   | 'PRIOR_TEXT_ON_PROMPT'
-  | 'PRIOR_TEXT_UNREADABLE';
+  | 'PRIOR_TEXT_UNREADABLE'
+  /** CODEX-WAKE-161 F3: our text was still in the composer after the Enter AND after one
+   *  more Enter of our own: the TUI is not taking it. Held for a person, visibly. */
+  | 'SUBMIT_NOT_ACCEPTED';
 
 export type SubmitOutcome =
   /** The Enter went out. The one outcome a caller may acknowledge a queue item on. */
@@ -564,6 +575,11 @@ export const OUTCOME_REPLAY_TTL_MS = 5 * 60_000;
  *  holds it for a person instead (INTERFERED PRIOR_TEXT_UNREADABLE: visible, resolvable). */
 export const PRIOR_TEXT_UNREADABLE_MAX = 5;
 export const PRIOR_TEXT_UNREADABLE_HOLD_MS = 10 * 60_000;
+/** CODEX-WAKE-161 F3: how often, and for how long, the composer is re-read after an Enter
+ *  for our text to leave it. A TUI redraws its cleared composer within a frame or two; the
+ *  window only has to outlast the renderer's parse of that redraw. */
+export const SUBMIT_VERIFY_POLL_MS = 250;
+export const SUBMIT_VERIFY_WINDOW_MS = 1_500;
 /** A human write this recent means the line is theirs, whatever the mirror says yet.
  *  Longer than the renderer's own ECHO_GRACE (1000 ms), inside which even the renderer
  *  does not trust the screen to overrule a keystroke. */
@@ -911,7 +927,13 @@ export class AutomaticSubmitOwner {
           return this.refuse(decision, 'PRIOR_TEXT_UNVERIFIED', 'no screen reading');
         }
         this.priorUnreadable.delete(ptyId);
-        if (seen.onPromptRow) {
+        // CODEX-WAKE-161 F2: the cursor's row is not the whole composer. An Enter that became a
+        // NEWLINE leaves our text on the row ABOVE an empty cursor row - exactly the shape a
+        // real submit leaves in the transcript - so the cursor-row needle alone read "absent"
+        // and a second copy was typed under the first. The renderer's composer read (from the
+        // prompt marker down to the cursor) tells them apart: after a real submit the cursor
+        // row IS the new, empty prompt, so our text is not in that composer.
+        if (seen.onPromptRow || seen.promptTailMatches === true) {
           const own = this.ownDrafts.get(ptyId);
           // WAKE-SELF-TEXT-HOLD: our previous Enter may have reached the PTY while the
           // provider left the line unsent. This is safe to re-enter only with all three
@@ -921,6 +943,10 @@ export class AutomaticSubmitOwner {
             && own.incarnation === incarnation && own.humanStage === deps.humanGeneration(ptyId)) {
             const retried = this.reenterOwnDraft(req, ptyId, incarnation, decision, own.humanStage);
             if (retried.kind === 'COMMITTED') this.ownDrafts.delete(ptyId);
+            // F3 for this Enter too: the draft being re-entered is the prior text.
+            if (retried.kind === 'COMMITTED' && deps.verifySubmit?.(ptyId)) {
+              return this.verifySubmitted({ req: { ...req, text: req.priorText }, ptyId, incarnation, decision: null, humanStage: own.humanStage });
+            }
             return retried;
           }
           return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0 }, 'PRIOR_TEXT_ON_PROMPT', undefined);
@@ -963,7 +989,9 @@ export class AutomaticSubmitOwner {
     const staged: Staged = { req, ptyId, incarnation, decision, humanStage };
 
     // ── GAP ──────────────────────────────────────────────────────────────────────────
-    await this.sleep(GAP_MS);
+    // CODEX-WAKE-161 F1: a provider may need a longer gap (Codex: an Enter inside its paste-burst
+    // window after a fast burst is taken as a newline).
+    await this.sleep(deps.enterGapMs?.(ptyId) ?? GAP_MS);
 
     // ── COMMIT | ABORT | INTERFERED ──────────────────────────────────────────────────
     const verdict = await Promise.resolve(commitSection(staged, deps));
@@ -971,6 +999,7 @@ export class AutomaticSubmitOwner {
       case 'ENTERED':
         if (verdict.ok) {
           this.ownDrafts.set(ptyId, { text: req.text, humanStage: staged.humanStage, incarnation: staged.incarnation });
+          if (deps.verifySubmit?.(ptyId)) return this.verifySubmitted(staged);
           return { kind: 'COMMITTED' };
         }
         // The Enter did not go out and our text is still on a live prompt: residue we
@@ -1024,6 +1053,46 @@ export class AutomaticSubmitOwner {
         // No decision reaches this path, so a late admission result is impossible.
         return this.interfere(staged, 'PROVENANCE_LOST_AFTER_STAGE', verdict.basis);
     }
+  }
+
+  /**
+   * CODEX-WAKE-161 F3: a POSITIVE commit. The Enter went out (the grant is already confirmed
+   * as a launch); now the composer must show our text gone. Polled, because the TUI's redraw
+   * reaches the renderer a frame or two later.
+   *
+   *   gone                    COMMITTED.
+   *   no reading / no needle  COMMITTED: nothing here can prove otherwise, and the wake
+   *                           coordinator's provider confirmation still judges the turn.
+   *   still there             ONE more Enter of our own (the same critical section and the
+   *                           same proofs as every automatic Enter: same incarnation, no
+   *                           human key since STAGE), then the same wait. Still there after
+   *                           that is INTERFERED SUBMIT_NOT_ACCEPTED: visible, held for a
+   *                           person, never typed over.
+   */
+  private async verifySubmitted(s: Staged): Promise<SubmitOutcome> {
+    const needle = needleFor(s.req.text);
+    if (!needle) return { kind: 'COMMITTED' };
+    const cleared = async (): Promise<boolean | null> => {
+      const started = this.deps.now();
+      for (;;) {
+        await this.sleep(SUBMIT_VERIFY_POLL_MS);
+        const seen = await this.readScreen(s.ptyId, needle, s.req.text);
+        if (!seen) return null;
+        if (!seen.onPromptRow && seen.promptTailMatches !== true) return true;
+        if (this.deps.now() - started >= SUBMIT_VERIFY_WINDOW_MS) return false;
+      }
+    };
+    const first = await cleared();
+    if (first !== false) return { kind: 'COMMITTED' };
+    // The grant went out with the first Enter; this one carries none.
+    const again: Staged = { ...s, decision: null };
+    const verdict = commitSection(again, this.deps);
+    if (verdict.kind === 'FAILED') return { kind: 'FAILED', reason: verdict.reason };
+    if (verdict.kind === 'INTERFERED') return this.interfere(again, verdict.reason, verdict.detail);
+    if (verdict.kind !== 'ENTERED' || !verdict.ok) return this.interfere(again, 'ENTER_WRITE_FAILED', verdict.kind === 'ENTERED' ? verdict.error : verdict.basis);
+    const second = await cleared();
+    if (second !== false) return { kind: 'COMMITTED' };
+    return this.interfere(again, 'SUBMIT_NOT_ACCEPTED', 'our text stayed in the composer after two Enters');
   }
 
   private readScreen(ptyId: string, needle: string, expectedTail?: string): Promise<ScreenReading | null> {

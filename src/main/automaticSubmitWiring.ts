@@ -8,7 +8,7 @@
  * electron-facing half (the IPC handlers, the webContents send) is a few lines in
  * `index.ts` that hand this module plain functions.
  */
-import { automaticAbortCapability, terminalReadyToReceive } from '../shared/providerAutomation';
+import { automaticAbortCapability, automaticEnterGapMs, automaticVerifySubmit, terminalReadyToReceive } from '../shared/providerAutomation';
 import { automaticDeliveryEligibility, type TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { AgentProvider } from '../shared/agentProvider';
@@ -93,6 +93,15 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     },
     abortCapability: (agentId) => abortCapability(w.ptyForAgent(agentId)),
     readScreen: (ptyId, needle, expectedTail) => w.requestScreenReading(ptyId, needle, expectedTail),
+    // CODEX-WAKE-161 F1 / F3. A PTY whose provider main never resolved keeps the old behaviour.
+    enterGapMs: (ptyId) => {
+      const provider = w.providerForPty(ptyId);
+      return provider ? automaticEnterGapMs(provider) : null;
+    },
+    verifySubmit: (ptyId) => {
+      const provider = w.providerForPty(ptyId);
+      return provider ? automaticVerifySubmit(provider) : false;
+    },
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),
       revalidate: (claim) => w.capacity.revalidate(claim, claim.target),

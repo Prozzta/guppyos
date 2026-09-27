@@ -1242,7 +1242,7 @@ const MUTANTS = [
     edits: [["      return this.interfere(s, 'ERASE_NOT_VERIFIED',", "      if (s.decision) deps.capacity.cancelGrant(s.decision);\n      return this.interfere(s, 'ERASE_NOT_VERIFIED',"]],
     killer: 'everyOutcomeAccountsForItsGrant', dies: /EVERY OUTCOME ACCOUNTS FOR ITS GRANT/ },
   { name: 'the Enter sent in the same chunk as the payload',
-    edits: [['    await this.sleep(GAP_MS);', '    await this.sleep(0);']],
+    edits: [['    await this.sleep(deps.enterGapMs?.(ptyId) ?? GAP_MS);', '    await this.sleep(0);']],
     killer: 'gapIsHonoured', dies: /one GAP after the payload/ }
 ];
 
