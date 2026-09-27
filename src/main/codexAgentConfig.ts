@@ -85,3 +85,81 @@ export function setCodexTopLevelKeys(config: string, entries: Record<string, num
   if (!ours.length) return kept.join('\n');
   return `# --- munder-hive: per-agent token limits (auto-generated; do not edit) ---\n${ours.join('\n')}\n\n${kept.join('\n')}`;
 }
+
+/**
+ * MEMSPIKE-168: the [tui] keys OUR copy always carries, whatever the seed says. Measured through
+ * the ConPTY the app uses (node-pty, Windows inbox conhost), Codex 0.157.1, one resize, a resumed
+ * 200-turn thread:
+ *   - inline mode (`alternate_screen = "never"`, `--no-alt-screen`, or
+ *     `fullscreen_transcript = false`) re-emits the WHOLE transcript on every resize:
+ *     1.14-1.18 MB per resize (1.37 MB at start), ~5x each history line;
+ *   - alternate screen + fullscreen transcript (the 0.157 defaults): 2.8-3.1 KB per resize;
+ *   - `terminal_resize_reflow_max_rows = 50` caps an inline replay at ~35 KB, and changes
+ *     nothing in the alternate screen, so it is the bound if inline mode is ever entered anyway.
+ * A seed that turns inline mode on (the user's choice for their own terminal) would otherwise
+ * make every layout change in our embedded xterm push another full copy of the conversation.
+ */
+export const CODEX_TUI_KEYS: Readonly<Record<string, string | number | boolean>> = {
+  alternate_screen: 'always',
+  fullscreen_transcript: true,
+  terminal_resize_reflow_max_rows: 50
+};
+
+const TUI_TABLE = /^\s*\[\s*(["']?)tui\1\s*\]\s*(#.*)?$/;
+
+function tomlValue(v: string | number | boolean): string {
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (typeof v === 'number') return String(Math.trunc(v));
+  return v ? 'true' : 'false';
+}
+
+/** A key line `key = ...` (bare or quoted) inside a table. */
+function keyLine(line: string, key: string): boolean {
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*(["']?)${esc}\\1\\s*=`).test(line);
+}
+
+/**
+ * Set keys of the `[tui]` table in OUR copy. The seed's values for the same keys are removed
+ * (in its `[tui]` table, and as top-level dotted `tui.<key> =` lines, since TOML forbids a
+ * duplicate key); every other tui setting the user has (theme, notifications, ...) is kept.
+ * Ours go right under the seed's `[tui]` header; else, when the seed writes tui settings as
+ * top-level dotted keys (which forbid a later `[tui]` header), as dotted keys beside them;
+ * else into a new `[tui]` table at the end.
+ */
+export function setCodexTuiKeys(config: string, entries: Readonly<Record<string, string | number | boolean>>): string {
+  const keys = Object.keys(entries);
+  const lines = config.split(/\r?\n/);
+  const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
+  const topEnd = firstTable < 0 ? lines.length : firstTable;
+  const dottedTui = lines.slice(0, topEnd).some((l) => /^\s*(["']?)tui\1\s*\./.test(l));
+  const out: string[] = [];
+  let inTui = false;
+  let header = -1;
+  let topOutEnd = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (i === topEnd) topOutEnd = out.length;
+    if (ANY_TABLE.test(line)) {
+      inTui = TUI_TABLE.test(line);
+      out.push(line);
+      if (inTui && header < 0) header = out.length;
+      continue;
+    }
+    if (i < topEnd && keys.some((k) => keyLine(line, `tui.${k}`))) continue;
+    if (inTui && keys.some((k) => keyLine(line, k))) continue;
+    out.push(line);
+  }
+  if (topOutEnd < 0) topOutEnd = out.length;
+  const note = '# munder-hive: no transcript replay on resize (auto-generated; do not edit)';
+  if (header >= 0) {
+    out.splice(header, 0, note, ...keys.map((k) => `${k} = ${tomlValue(entries[k])}`));
+    return out.join('\n');
+  }
+  if (dottedTui) {
+    out.splice(topOutEnd, 0, note, ...keys.map((k) => `tui.${k} = ${tomlValue(entries[k])}`), '');
+    return out.join('\n');
+  }
+  while (out.length && out[out.length - 1].trim() === '') out.pop();
+  return `${out.join('\n')}${out.length ? '\n\n' : ''}[tui]\n${note}\n${keys.map((k) => `${k} = ${tomlValue(entries[k])}`).join('\n')}\n`;
+}

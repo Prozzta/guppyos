@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
-import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, disableCodexPlugins, setCodexTopLevelKeys } from './codexAgentConfig';
+import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
 import {
@@ -3087,6 +3087,11 @@ export class HiveManager {
         // CODEX-BLOAT-165 fix 2 (Settings): the tool-output cap; Off = no key of ours.
         ...(toolOutputTokenLimit !== null ? { tool_output_token_limit: toolOutputTokenLimit } : {})
       });
+      // MEMSPIKE-168: no whole-transcript replay on resize. Inline mode (a seed's
+      // tui.alternate_screen = "never" or fullscreen_transcript = false) re-emits the entire
+      // conversation on every pty resize (1.1 MB per resize on a 200-turn thread, measured);
+      // the alternate screen answers a resize with ~3 KB. Only this generated copy changes.
+      config = setCodexTuiKeys(config, CODEX_TUI_KEYS);
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
