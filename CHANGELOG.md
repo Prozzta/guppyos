@@ -11,6 +11,33 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.60] — 2026-09-27
+
+**Agents' memory command is `memory`, and it now actually reaches the memory engine.**
+Rollback: 1.1.59 (reinstall).
+
+### Fixed
+
+- **Agents' memory searches reach the app's memory engine again.** In 1.1.59 an agent's
+  terminal got two PATH settings, and Git Bash used the one without the app's memory command,
+  so `mempalace` ran a copy installed on the machine instead (which found nothing). Each agent
+  terminal now gets exactly one PATH, with the app's memory command first.
+
+### Changed
+
+- **The command is `memory`:** `memory search "<query>"`, `memory wake-up` and
+  `memory status`. Agents' instructions, the hive protocol and the capabilities skill say so.
+  Restarted agents pick it up; the old `mempalace` command is no longer provided by the app.
+
+### Removed
+
+- **Everything left of MemPalace in the app:** the "Delete old MemPalace data" button, the
+  one-time stop of its background process, and every mention in the app, its tests and its
+  docs (the changelog keeps its history).
+- **Files older versions generated that nothing reads:** on start the app deletes
+  `hive/memory-engine.json`, each agent's `.gitignore` that is exactly the list older
+  versions wrote (an edited one is kept), and the retired `embeddingModel` setting.
+
 ## [1.1.59] — 2026-09-27
 
 **MemPalace is removed: the built-in memory engine is the only memory.** Rollback: 1.1.58
