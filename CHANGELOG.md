@@ -11,6 +11,39 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.66] — 2026-09-28
+
+**Antigravity agents can write files and run commands again in a new conversation.**
+Rollback: 1.1.65 (reinstall).
+
+### Fixed
+
+- **An Antigravity (AGY) agent in a new conversation could only read.** Since 1.1.55 the app starts
+  an AGY agent as its own custom agent, and agy gives a custom agent only a few basic tools
+  (read a file, search the web) unless the agent lists the tools it needs. An agent that kept
+  resuming an older conversation still had everything, so nobody noticed. 1.1.65 started each
+  agent's conversation fresh, and from then on Phyllis could read her inbox but could not write a
+  reply, move a message or save a file; she answered only in chat. The agent now lists the
+  tools a hive agent needs (run commands, read, write and edit files, search, read web pages, manage
+  tasks). It still starts idle, and the hooks still fire.
+- **A conversation from before this fix is not resumed automatically.** agy fixes a conversation's
+  tools when it is created, so an old conversation stays read-only forever. When the app restores
+  or revives an AGY agent whose conversation predates the fix, it starts a fresh one (the hive log
+  says `antigravity-thread-rotated`, reason `agy-toolset`). A session id you type, and
+  "Restart & Continue", still resume exactly that conversation.
+
+### Tests
+
+- **The test suite now passes completely on Windows.** The 8 tests that had always failed here
+  were written for Mac/Linux: a Mac-style path, a multi-line shell script, a Mac/Linux-only socket,
+  and a way of faking the home folder that Windows ignores (so 4 of them read the real
+  `~/.claude`). They now test the same behaviour correctly on every platform; the few checks that
+  only exist on Mac/Linux are skipped on Windows with the reason, and have a Windows twin where
+  Windows behaves differently. From this release the release gate is **0 failures**.
+- A live check for AGY (`test/tools/agy-tools-gate.cjs`) runs the real agy in a sealed test home
+  and fails the release if a new conversation cannot run a command and write a file, or does
+  not start idle.
+
 ## [1.1.65] — 2026-09-27
 
 **Codex agents cost far fewer tokens: they start a fresh conversation each day, read a short memory digest, and keep less of each tool output.**
