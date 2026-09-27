@@ -506,7 +506,9 @@ const providerCapacity = new CapacityRuntime({
   // v1.1.46 integration: ONE onChange carries both followers - the CRIT-15-PRE impact push
   // and the inbox-wake retry HINT (admission decides; the hint never submits by itself).
   onChange: () => { pushCapacityStrip(); pushAgentUsage(); pushAgentImpact(); inboxWake?.onCapacityChange(); },
-  onAdmission: () => pushAgentImpact()
+  onAdmission: () => pushAgentImpact(),
+  // CAPACITY-DUP-CONFIRM-163: which pool an agent was bound to, and when (or a skipped bind).
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
 });
 // L0-FUSION stage 5 - THE ONE OWNER of programmatic stage -> final revalidation -> Enter.
 // Main resolves the PTY, main holds it against other programmatic writers, and main's

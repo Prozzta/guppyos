@@ -125,9 +125,16 @@ export class InboxWakeBridge {
     }
     void submitted
       .then((outcome) => outcome ?? { kind: 'FAILED' }, () => ({ kind: 'FAILED' }))
-      .then((outcome: { kind: string; reason?: unknown }) => {
+      .then((outcome: { kind: string; reason?: unknown; detail?: unknown }) => {
         const kind = outcome.kind;
-        this.deps.diag?.('settle', { agentId, cause, mode, outcome: kind, ...(typeof outcome.reason === 'string' ? { reason: outcome.reason } : {}), requestId: claim.requestId });
+        // CAPACITY-DUP-CONFIRM-163: `detail` carries WHY (for CAPACITY_HOLD, the admission
+        // basis such as UNKNOWN:INDETERMINATE); without it a hold's cause is invisible.
+        this.deps.diag?.('settle', {
+          agentId, cause, mode, outcome: kind,
+          ...(typeof outcome.reason === 'string' ? { reason: outcome.reason } : {}),
+          ...(typeof outcome.detail === 'string' ? { detail: outcome.detail.slice(0, 200) } : {}),
+          requestId: claim.requestId
+        });
         coordinator.settle(claim, kind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
         this.deps.log?.(`[inbox-wake] ${kind === 'COMMITTED' ? 'commit' : 'release'} ${agentId} cause=${cause} outcome=${kind}`);
       });

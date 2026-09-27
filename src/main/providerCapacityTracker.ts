@@ -290,6 +290,17 @@ export interface IngestResult {
   /** The published projection moved. Always false when `accepted` is false. */
   changed: boolean;
   reason: 'ACCEPTED' | 'DUPLICATE' | 'FUTURE_SKEW' | 'OUT_OF_ORDER' | 'CAP_POOLS' | 'UNBOUNDED_IDENTITY';
+  /**
+   * CAPACITY-DUP-CONFIRM-163. Set only on a DUPLICATE whose pool still holds an
+   * UNCONFIRMED RESTORED reading: the arriving line is the very line the durable store
+   * restored (a Codex hook re-reads the rollout tail, and an idle agent's newest usable
+   * line is the one saved before the restart). It does NOT confirm the restore (the
+   * L0-TAIL rule above is unchanged), so the pool stays UNKNOWN(RESTORED). 'HEALTHY'
+   * when that restored reading was an all-clear: every applicable window positive, no
+   * carried limit identity, no hard evidence, no breach or conflict. The runtime uses
+   * it to decide whether the re-read may bind an agent to the pool.
+   */
+  unconfirmedRestore?: 'HEALTHY' | 'NOT_HEALTHY';
 }
 
 /**
@@ -555,7 +566,12 @@ export class ProviderCapacityTracker {
       if (order === 0) {
         // Exact duplicate: same ordering key, same content. A pure no-op (§7) —
         // but an ACCEPTED one: the reading is valid, it simply says nothing new.
-        if (identical) return { accepted: true, changed: false, reason: 'DUPLICATE' };
+        if (identical) {
+          if (!prev.restoredUnconfirmed) return { accepted: true, changed: false, reason: 'DUPLICATE' };
+          const healthy = allWindowsPositive(prev.observation) && prev.continuitySince === null
+            && !prev.capBreach && !prev.conflicted && !hasHardEvidence(prev.observation);
+          return { accepted: true, changed: false, reason: 'DUPLICATE', unconfirmedRestore: healthy ? 'HEALTHY' : 'NOT_HEALTHY' };
+        }
         if (!hasHardEvidence(reading)) conflicted = true;
       } else if (identical) {
         // A live RENEWAL: newer reading, identical values. The freshness deadline

@@ -79,6 +79,12 @@ export interface CapacityRuntimeDeps {
    * a renderer polling for it. Optional, and it feeds nothing back.
    */
   onAdmission?: () => void;
+  /**
+   * CAPACITY-DUP-CONFIRM-163: one diagnostic row per change of an agent's pool binding
+   * (`capacity-bind`), and per agent+pool the first time a restored-duplicate bind is
+   * skipped. Ids, pool keys and state names only. Optional; feeds nothing back.
+   */
+  log?: (row: Record<string, unknown>) => void;
 }
 
 /**
@@ -106,6 +112,8 @@ export class CapacityRuntime {
   /** agentId → the Antigravity ACCOUNT scope its accepted ticks came from. Lets Monitor
    *  name the sibling family an agent is not gated by, without making it a member of it. */
   private readonly agyScopeByAgent = new Map<string, string>();
+  /** agent|pool pairs whose skipped restored-duplicate bind was already logged. */
+  private readonly loggedBindSkips = new Set<string>();
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
@@ -147,8 +155,25 @@ export class CapacityRuntime {
    */
   ingest(agentId: string | null, obs: CapacityObservation): void {
     const result = this.tracker.ingestDetailed(obs);
-    const moved = !!agentId && result.accepted && this.poolForAgent.get(agentId) !== obs.poolKey;
-    if (agentId && result.accepted) this.poolForAgent.set(agentId, obs.poolKey);
+    // CAPACITY-DUP-CONFIRM-163: the same line the store restored, re-read from the
+    // provider's file, says nothing new and confirms nothing - so it must not be the
+    // thing that puts an agent behind an UNKNOWN(RESTORED) pool it can then never leave
+    // (only this agent's own next model turn writes a newer line, and the hold blocks
+    // that turn). A HEALTHY restore leaves the agent unbound, as it was before its first
+    // hook; a NOT_HEALTHY one binds as before and holds, so a restart still cannot clear
+    // a real limitation. It never CHANGES a binding either: an agent already bound
+    // elsewhere stays where its own live readings put it.
+    const skipBind = !!agentId && result.unconfirmedRestore === 'HEALTHY' && this.poolForAgent.get(agentId) !== obs.poolKey;
+    if (skipBind) {
+      const key = `${agentId}|${obs.poolKey}`;
+      if (!this.loggedBindSkips.has(key)) {
+        this.loggedBindSkips.add(key);
+        this.logBind(agentId as string, obs.poolKey, 'skipped-restored-duplicate');
+      }
+    }
+    const moved = !skipBind && !!agentId && result.accepted && this.poolForAgent.get(agentId) !== obs.poolKey;
+    if (agentId && result.accepted && !skipBind) this.poolForAgent.set(agentId, obs.poolKey);
+    if (moved) this.logBind(agentId as string, obs.poolKey, result.reason === 'DUPLICATE' ? 'bound-duplicate' : 'bound');
     if (result.changed) this.publish();
     else if (moved) this.deps.onChange?.();
     this.rearm();
@@ -196,6 +221,7 @@ export class CapacityRuntime {
       const active = tick.activeLimitId === 'gemini' ? b : a;
       moved = this.poolForAgent.get(agentId) !== active.poolKey;
       this.poolForAgent.set(agentId, active.poolKey);
+      if (moved) this.logBind(agentId, active.poolKey, 'bound');
       // Which ACCOUNT this agent draws on, so Monitor can name the sibling family it is
       // not gated by. Committed with the mapping, for the same reason.
       this.agyScopeByAgent.set(agentId, tick.accountScope);
@@ -218,6 +244,15 @@ export class CapacityRuntime {
   poolKeyForAgyFamily(agentId: string, family: AgyFamily): string | null {
     const scope = this.agyScopeByAgent.get(agentId);
     return scope ? poolKeyFor('antigravity', scope, family) : null;
+  }
+
+  /** CAPACITY-DUP-CONFIRM-163: the `capacity-bind` row, with the pool's state at that moment. */
+  private logBind(agentId: string, poolKey: string, outcome: 'bound' | 'bound-duplicate' | 'skipped-restored-duplicate'): void {
+    if (!this.deps.log) return;
+    const pool = this.tracker.pool(poolKey);
+    try {
+      this.deps.log({ kind: 'capacity-bind', agentId, poolKey, outcome, state: pool?.state ?? null, stateReason: pool?.stateReason ?? null });
+    } catch { /* diagnostics never break an ingest */ }
   }
 
   /** Agents whose own accepted readings landed in this pool. A copy: never a handle. */
