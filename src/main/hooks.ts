@@ -177,6 +177,15 @@ export function applyUrlIdentity(p: Record<string, unknown>, urlAgentId: string)
 
 /** How many distinct {version, driftCode} pairs are counted before they share one bucket. */
 const AGY_DRIFT_KEYS_MAX = 32;
+/** A working Codex session normally writes a rate-limit reading quickly. Keep a
+ * silent failure visible without turning every unchanged-file hook into a log row. */
+const CODEX_NO_READING_AFTER_MS = 5 * 60_000;
+
+interface CodexNoReading {
+  sessionId: string;
+  firstHookAt: number;
+  reported: boolean;
+}
 
 export class HookServer {
   private server: Server | null = null;
@@ -192,8 +201,10 @@ export class HookServer {
    *  without depending on a renderer round-trip. */
   private contextById = new Map<string, { tokens: number; limit: number; ts: number }>();
   /** L0 — Codex allowance, read from the rollout a Codex worker is already writing.
-   *  Holds only a per-home cache (newest rollout path + last mtime seen). */
+   *  Holds only a per-home cache (rollout path + last size/mtime seen). */
   private codexCapacity = new CodexRolloutCapacitySource();
+  /** One delayed diagnostic per agent/session if hook traffic never produces a reading. */
+  private codexNoReading = new Map<string, CodexNoReading>();
 
   constructor(
     private hive: HiveManager,
@@ -646,14 +657,30 @@ export class HookServer {
   }
 
   /** Read this agent's Codex allowance, if it is a Codex worker and anything moved. */
-  private observeCodexCapacity(agentId: string, event: string): void {
+  private observeCodexCapacity(agentId: string, event: string, sessionId?: string): void {
     try {
       const home = this.hive.codexHomeFor(agentId);
       if (!home) return;
-      const obs = this.codexCapacity.observe(home, { rescan: event === 'SessionStart' });
+      const obs = this.codexCapacity.observe(home, { rescan: event === 'SessionStart', sessionId });
       // The agent is carried with the reading: a pool key is a provider fact, and
       // which agents draw on it can only be learned from readings that arrived.
-      if (obs) this.onCapacity?.(agentId, obs);
+      if (obs) {
+        this.codexNoReading.delete(agentId);
+        this.onCapacity?.(agentId, obs);
+        return;
+      }
+      if (!sessionId) return;
+      const now = Date.now();
+      let pending = this.codexNoReading.get(agentId);
+      if (!pending || pending.sessionId !== sessionId) {
+        pending = { sessionId, firstHookAt: now, reported: false };
+        this.codexNoReading.set(agentId, pending);
+      }
+      if (!pending.reported && now - pending.firstHookAt >= CODEX_NO_READING_AFTER_MS) {
+        pending.reported = true;
+        // Diagnostics are appendLog-only: never console-log a session identifier.
+        this.hive.appendLog({ kind: 'capacity-codex-no-reading', agentId, sessionId, waitingMs: now - pending.firstHookAt });
+      }
     } catch { /* telemetry must never break a hook boundary */ }
   }
 
@@ -793,7 +820,7 @@ export class HookServer {
     // and it makes no provider request of any kind. Non-Codex agents cost one
     // existence check. Session boundaries force a rescan, because a new session
     // means a new rollout file rather than an append to the old one.
-    if (agentId && this.onCapacity) this.observeCodexCapacity(agentId, event);
+    if (agentId && this.onCapacity) this.observeCodexCapacity(agentId, event, p.session_id);
 
     // Status-line payloads carry the session's EXACT context accounting —
     // current tokens AND the real window size (200k vs 1M, which nothing else

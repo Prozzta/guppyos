@@ -10,11 +10,11 @@
  * boundary rather than on a hook.
  *
  * WHAT IT COSTS, AND THE TWO GUARDS THAT KEEP IT SMALL.
- *   - Locating the newest rollout means walking three levels of dated directories,
- *     so the resolved path is CACHED and only re-resolved when the caller says a
- *     session boundary happened or the cached file disappears.
- *   - A cached file is `stat`ed and only read when its mtime has ADVANCED. An
- *     unchanged file is not reopened, so an idle agent costs one stat.
+ *   - Locating a rollout means walking three levels of dated directories, so the
+ *     resolved path is CACHED and only re-resolved at a session boundary, when its
+ *     hook session changes, or when the cached file disappears.
+ *   - A cached file is `stat`ed and only read when its size grows or its mtime
+ *     advances. An unchanged file is not reopened, so an idle agent costs one stat.
  * Only the tail is read. A rollout grows without bound, and the newest snapshot is
  * at the end - though not necessarily within reach; see TAIL_BYTES.
  *
@@ -22,7 +22,7 @@
  * exactly one thing in a Codex home: the session rollout.
  */
 import { existsSync, readdirSync, statSync, openSync, readSync, closeSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { normalizeCodexRateLimits } from './capacityNormalize';
 import { codexAccountScope } from './capacityScope';
@@ -49,10 +49,16 @@ const TAIL_BYTES = 256 * 1024;
 interface HomeCache {
   file: string | null;
   mtimeMs: number;
+  size: number;
 }
 
-/** Newest `rollout-*.jsonl` under `<home>/sessions`, by mtime. */
-export function findNewestRollout(codexHome: string): string | null {
+/** Newest `rollout-*.jsonl` for this session under `<home>/sessions`, by mtime.
+ *
+ * A hook's session id is the authority here: an agent can have several dated
+ * rollouts at once, and picking whichever one was most recently touched can bind
+ * a new hook to an older thread. The filename is Codex's stable association.
+ */
+export function findNewestRollout(codexHome: string, sessionId?: string): string | null {
   const root = join(codexHome, 'sessions');
   if (!existsSync(root)) return null;
   let newest: { file: string; mtimeMs: number } | null = null;
@@ -71,6 +77,7 @@ export function findNewestRollout(codexHome: string): string | null {
         try { names = readdirSync(dayDir); } catch { continue; }
         for (const name of names) {
           if (!name.startsWith('rollout-') || !name.endsWith('.jsonl')) continue;
+          if (sessionId && !name.endsWith(`-${sessionId}.jsonl`)) continue;
           const file = join(dayDir, name);
           try {
             const st = statSync(file);
@@ -172,25 +179,34 @@ export class CodexRolloutCapacitySource {
    * Observe one Codex home. Returns null when there is nothing NEW to report —
    * which is the common case and is deliberately cheap.
    *
-   * `rescan` forces re-resolution of the newest rollout file; the caller passes it
-   * at a session boundary, when a new file is the whole point.
+   * `rescan` forces re-resolution. A session id is stronger still: a cached file
+   * for another session is always replaced with the matching rollout.
    */
-  observe(codexHome: string, opts: { rescan?: boolean; now?: number } = {}): CapacityObservation | null {
+  observe(codexHome: string, opts: { rescan?: boolean; sessionId?: string; now?: number } = {}): CapacityObservation | null {
     const now = opts.now ?? Date.now();
     let entry = this.cache.get(codexHome);
-    if (!entry || opts.rescan || !entry.file || !existsSync(entry.file)) {
-      const file = findNewestRollout(codexHome);
-      entry = { file, mtimeMs: 0 };
+    const cachedSessionMatches = !opts.sessionId || (entry?.file !== null && entry?.file !== undefined
+      && basename(entry.file).endsWith(`-${opts.sessionId}.jsonl`));
+    if (!entry || opts.rescan || !entry.file || !existsSync(entry.file) || !cachedSessionMatches) {
+      const file = findNewestRollout(codexHome, opts.sessionId);
+      entry = { file, mtimeMs: 0, size: 0 };
       this.cache.set(codexHome, entry);
     }
     if (!entry.file) return null;
 
     let mtimeMs: number;
-    try { mtimeMs = statSync(entry.file).mtimeMs; } catch { entry.file = null; return null; }
-    // Unchanged file: nothing was appended, so there is nothing new to read. This is
-    // the guard that keeps an idle agent at one stat per hook boundary.
-    if (mtimeMs <= entry.mtimeMs) return null;
+    let size: number;
+    try {
+      const stat = statSync(entry.file);
+      mtimeMs = stat.mtimeMs;
+      size = stat.size;
+    } catch { entry.file = null; return null; }
+    // Windows can hold an open rollout's mtime at creation while it grows. Either
+    // a size increase OR an mtime advance makes the tail worth reading; an idle
+    // agent still pays just this one stat per hook boundary.
+    if (size <= entry.size && mtimeMs <= entry.mtimeMs) return null;
     entry.mtimeMs = mtimeMs;
+    entry.size = size;
 
     const scope = this.scopeOf(codexHome);
     return latestUsableRateLimits(readTail(entry.file), (rateLimits, observedAt, sequence) => normalizeCodexRateLimits({

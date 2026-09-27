@@ -69,6 +69,32 @@ test('a status tick WITHOUT rate_limits observes nothing - absence is not an emp
   assert.equal(seen.length, 0);
 });
 
+test('a Codex session with hooks but no rollout reading emits one delayed appendLog diagnostic', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-codex-no-reading-'));
+  const rows = [];
+  const hive = {
+    sockPath: () => null,
+    codexHomeFor: () => home,
+    recordSession: () => {},
+    appendLog: (row) => rows.push(row),
+    registry: () => ({ agents: {} })
+  };
+  const s = new HookServer(hive, () => null, () => ({}), undefined, undefined, undefined, undefined, () => {});
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  try {
+    s.handle({ hook_event_name: 'PostToolUse', agent_id: 'dwight', session_id: 'session-1' });
+    now += 5 * 60_000;
+    s.handle({ hook_event_name: 'PostToolUse', agent_id: 'dwight', session_id: 'session-1' });
+    s.handle({ hook_event_name: 'PostToolUse', agent_id: 'dwight', session_id: 'session-1' });
+  } finally {
+    Date.now = originalNow;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+  assert.deepEqual(rows, [{ kind: 'capacity-codex-no-reading', agentId: 'dwight', sessionId: 'session-1', waitingMs: 5 * 60_000 }]);
+});
+
 test('a malformed rate_limits payload is ignored and never throws on a status tick', () => {
   for (const junk of ['nonsense', 42, [], { five_hour: 'nope' }, { five_hour: {} }]) {
     const seen = [];

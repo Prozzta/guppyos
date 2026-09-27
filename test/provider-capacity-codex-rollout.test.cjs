@@ -81,32 +81,32 @@ test('an UNCHANGED file is not read a second time - the idle path reports nothin
   h.cleanup();
 });
 
-test('an APPENDED snapshot is picked up on the next observation', () => {
+test('an APPENDED snapshot is picked up even when Windows keeps the rollout mtime frozen', () => {
   const h = makeHome([line(2, 0, '2026-09-09T20:42:56.262Z')]);
   const s = source();
+  const frozen = new Date(Date.now() - 60_000);
+  fs.utimesSync(h.file, frozen, frozen);
   s.observe(h.home);
   fs.appendFileSync(h.file, line(50, 20, '2026-09-09T21:30:00.000Z') + '\n');
-  // Force a distinct mtime: a same-millisecond append is indistinguishable from no
-  // append, and this test is about the read, not about filesystem timer resolution.
-  const t = new Date(Date.now() + 5000);
-  fs.utimesSync(h.file, t, t);
+  // Codex can keep an open file's modified time at creation on Windows. Pin it
+  // back after growing the file so size is the only change the reader can see.
+  fs.utimesSync(h.file, frozen, frozen);
   const obs = s.observe(h.home);
   assert.ok(obs);
   assert.equal(obs.windows.find((w) => w.kind === 'FIVE_HOUR').remainingPercent, 50);
   h.cleanup();
 });
 
-test('a NEW session file is found on rescan, and the newest file wins', () => {
-  const h = makeHome([line(2, 0, '2026-09-09T20:42:56.262Z')]);
+test('a NEW session file replaces a cached old-session file without waiting for rescan', () => {
+  const h = makeHome([line(2, 0, '2026-09-09T20:42:56.262Z')], ['2026', '09', '09'], 'rollout-2026-09-09T22-42-33-old-session.jsonl');
   const s = source();
-  s.observe(h.home);
+  s.observe(h.home, { sessionId: 'old-session' });
   const dir = path.join(h.home, 'sessions', '2026', '09', '10');
   fs.mkdirSync(dir, { recursive: true });
-  const newer = path.join(dir, 'rollout-2026-09-10T09-00-00-bbb.jsonl');
+  const newer = path.join(dir, 'rollout-2026-09-10T09-00-00-new-session.jsonl');
   fs.writeFileSync(newer, line(80, 40, '2026-09-10T09:00:00.000Z') + '\n');
-  const t = new Date(Date.now() + 10_000);
-  fs.utimesSync(newer, t, t);
-  const obs = s.observe(h.home, { rescan: true });
+  // Do not rely on it winning an mtime race: the hook's session id selects it.
+  const obs = s.observe(h.home, { sessionId: 'new-session' });
   assert.ok(obs);
   assert.equal(obs.windows.find((w) => w.kind === 'FIVE_HOUR').remainingPercent, 20);
   h.cleanup();
