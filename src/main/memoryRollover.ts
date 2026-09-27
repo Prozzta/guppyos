@@ -14,7 +14,7 @@
  * Run at spawn (ensureAgent), when the agent's previous process is gone, so no agent is
  * appending while the file is rewritten. Best-effort: any failure leaves memory.md untouched.
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 /** memory.md above this many bytes is rolled over. */
@@ -57,23 +57,24 @@ export function splitMemory(text: string, keepBytes: number = MEMORY_KEEP_TAIL_B
   while (kept.length > 1 && kept[kept.length - 1].trim() === '' && kept[kept.length - 2].trim() === '') kept.pop();
   const header = h ? kept.join('\n') + '\n' : '';
   const body = lines.slice(h).join('\n');
-  if (Buffer.byteLength(body, 'utf8') <= keepBytes) return { header, older: '', tail: body };
-  // A char index at least `keepBytes` BYTES from the end.
-  let from = body.length;
-  let bytes = 0;
-  while (from > 0 && bytes < keepBytes) { from--; bytes += Buffer.byteLength(body[from], 'utf8'); }
-  // The furthest-back char index a heading cut may use (about MAX_FACTOR x keepBytes kept).
-  let min = from;
-  while (min > 0 && bytes < keepBytes * MEMORY_KEEP_MAX_FACTOR) { min--; bytes += Buffer.byteLength(body[min], 'utf8'); }
-  const heading = from > 0 ? body.lastIndexOf('\n## ', from - 1) : -1;
+  // Work in UTF-8 BYTES (not UTF-16 units), so emoji-heavy text still keeps >= keepBytes.
+  const buf = Buffer.from(body, 'utf8');
+  if (buf.length <= keepBytes) return { header, older: '', tail: body };
+  // The byte index exactly `keepBytes` from the end, and the furthest-back index a heading
+  // cut may use (MAX_FACTOR x keepBytes kept).
+  const from = buf.length - keepBytes;
+  const min = Math.max(0, buf.length - keepBytes * MEMORY_KEEP_MAX_FACTOR);
+  const heading = buf.lastIndexOf('\n## ', from - 1);
   let cut: number;
   if (heading >= 0 && heading + 1 >= min) cut = heading + 1;
   else {
-    const nl = from > 0 ? body.lastIndexOf('\n', from - 1) : -1;
+    const nl = buf.lastIndexOf('\n', from - 1);
     cut = nl >= 0 ? nl + 1 : from;
   }
+  // Never split a UTF-8 sequence (only reachable when there is no line break at all).
+  while (cut > 0 && (buf[cut] & 0xc0) === 0x80) cut--;
   if (cut <= 0) return { header, older: '', tail: body };
-  return { header, older: body.slice(0, cut), tail: body.slice(cut) };
+  return { header, older: buf.subarray(0, cut).toString('utf8'), tail: buf.subarray(cut).toString('utf8') };
 }
 
 function localDate(now: number): string {
@@ -125,19 +126,26 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   const archive = archivePathFor(dir, now, Buffer.byteLength(older, 'utf8'));
   const archiveName = basename(archive);
   const title = (header.split('\n')[0] || '# Memory').replace(/^#\s*/, '');
-  const archiveHead = existsSync(archive) ? '\n' : `# Memory archive - ${title}\n\n_Older notes rolled out of memory.md by the app. Indexed: \`memory search\` finds them._\n\n`;
+  // Remember the archive's size so a raced abort can undo its append (no duplicate on retry).
+  let archiveSizeBefore = -1;
+  try { archiveSizeBefore = statSync(archive).size; } catch { /* a new archive */ }
+  const archiveHead = archiveSizeBefore >= 0 ? '\n' : `# Memory archive - ${title}\n\n_Older notes rolled out of memory.md by the app. Indexed: \`memory search\` finds them._\n\n`;
   appendFileSync(archive, eol(`${archiveHead}<!-- rolled ${new Date(now).toISOString()} -->\n${older.replace(/\n*$/, '\n')}`), 'utf8');
   const pointer = `${POINTER_HEAD}${archiveName} (and earlier memory-archive-*.md files); \`memory search\` finds them._\n\n`;
   const next = `${header}${!header || header.endsWith('\n\n') ? '' : '\n'}${pointer}${tail}`;
   const tmp = `${file}.rollover-${process.pid}.tmp`;
   writeFileSync(tmp, eol(next), 'utf8');
   // CB-165 F2: a lingering process may have appended since the read. Replacing the file now
-  // would lose that append, so abort; the archive copy is harmless (the text is also still in
-  // memory.md) and the next spawn rolls over again.
+  // would lose that append, so abort: undo this archive append (the text is still in memory.md,
+  // and the next spawn's rollover must not archive it twice) and leave memory.md as it is.
   rolloverTestHooks.beforeReplace?.(file);
   const st1 = statSync(file);
   if (st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs) {
     try { unlinkSync(tmp); } catch { /* best effort */ }
+    try {
+      if (archiveSizeBefore < 0) unlinkSync(archive);
+      else truncateSync(archive, archiveSizeBefore);
+    } catch { /* best effort: a leftover copy is only a duplicate search hit */ }
     return { rotated: false, bytesBefore: before, raced: true, archive };
   }
   renameSync(tmp, file);

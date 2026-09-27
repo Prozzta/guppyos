@@ -951,6 +951,7 @@ export class HiveManager {
       try {
         const r = rolloverMemory(dir);
         if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: meta.id, bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
+        else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: meta.id, bytesBefore: r.bytesBefore });
       } catch (e) { console.warn('[hive] memory rollover failed:', e); }
     }
     const cursor = join(dir, 'cursor.json');

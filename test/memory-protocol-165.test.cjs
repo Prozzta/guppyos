@@ -116,11 +116,38 @@ test('F1: with no heading in range, the cut falls back to a line break and still
 });
 
 test('F1: a heading further back than 2 x 12 KB is not used (line-break fallback instead)', () => {
-  const text = HEAD + '\n## only\n' + ('- ' + 'q'.repeat(98) + '\n').repeat(400);
+  const text = HEAD + '- lead line\n\n## only\n' + ('- ' + 'q'.repeat(98) + '\n').repeat(400);
+  assert.ok(M.splitMemory(text, 1e9).tail.includes('\n## only'), 'the heading is matchable (preceded by a line break)');
   const sp = M.splitMemory(text);
   const keptBytes = Buffer.byteLength(sp.tail);
   assert.ok(keptBytes <= M.MEMORY_KEEP_TAIL_BYTES * M.MEMORY_KEEP_MAX_FACTOR, `kept ${keptBytes}`);
   assert.doesNotMatch(sp.tail, /## only/);
+});
+
+test('nit 1: a heading between 24 KB and the 12 KB mark is NOT used: the cut is a line break near 12 KB', () => {
+  // ~30 KB before the heading, ~20 KB after it: the heading sits ~20 KB from the end, inside
+  // 2 x 12 KB, so it is used; move it to ~30 KB from the end and it must not be.
+  const filler = (n, c) => ('- ' + c.repeat(98) + '\n').repeat(n);
+  const inRange = M.splitMemory(HEAD + filler(300, 'a') + '\n## mid\n' + filler(200, 'b'));
+  assert.match(inRange.tail, /^## mid/, 'a heading ~20 KB from the end is used');
+  const outOfRange = M.splitMemory(HEAD + filler(300, 'a') + '\n## mid\n' + filler(300, 'b'));
+  assert.doesNotMatch(outOfRange.tail, /## mid/, 'a heading ~30 KB from the end is not used');
+  const kept = Buffer.byteLength(outOfRange.tail);
+  assert.ok(kept >= M.MEMORY_KEEP_TAIL_BYTES && kept < M.MEMORY_KEEP_TAIL_BYTES + 200, `kept ${kept}`);
+});
+
+test('nit 2: emoji-heavy text still keeps at least 12 KB (bytes, not UTF-16 units)', () => {
+  const line = '- ' + '\u{1F600}'.repeat(24) + ' fact\n'; // 4-byte chars, 2 UTF-16 units each
+  const text = HEAD + ('\n## e\n' + line.repeat(5)).repeat(120);
+  const sp = M.splitMemory(text);
+  const kept = Buffer.byteLength(sp.tail);
+  assert.ok(kept >= M.MEMORY_KEEP_TAIL_BYTES, `kept ${kept} >= 12 KB`);
+  assert.ok(kept <= M.MEMORY_KEEP_TAIL_BYTES * M.MEMORY_KEEP_MAX_FACTOR);
+  assert.equal(sp.header + sp.older + sp.tail, text, 'nothing lost, no broken characters');
+  // No newline at all: the cut must not split a 4-byte character.
+  const flat = M.splitMemory(HEAD + '\u{1F600}'.repeat(5000), 1001); // 1001: the mark falls mid-character
+  assert.equal(flat.older + flat.tail, '\u{1F600}'.repeat(5000));
+  assert.ok(!flat.tail.startsWith('\uDE00') && !flat.tail.includes('\uFFFD'));
 });
 
 test('F2: an append that races the rollover aborts the replace, so memory.md keeps it', (t) => {
@@ -136,8 +163,41 @@ test('F2: an append that races the rollover aborts the replace, so memory.md kee
   assert.match(kept, /LATE-APPEND/, 'the late append survives');
   assert.match(kept, /fact-0\n/, 'memory.md was not replaced');
   assert.deepEqual(fs.readdirSync(dir).filter((n) => n.endsWith('.tmp')), [], 'no tmp file left');
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('memory-archive-')), [], 'nit 3: the new archive was undone');
   M.rolloverTestHooks.beforeReplace = undefined;
-  assert.equal(M.rolloverMemory(dir).rotated, true, 'the next rollover (next spawn) succeeds');
+  const r2 = M.rolloverMemory(dir);
+  assert.equal(r2.rotated, true, 'the next rollover (next spawn) succeeds');
+  const arch = fs.readFileSync(r2.archive, 'utf8');
+  assert.equal(arch.split('<!-- rolled ').length - 1, 1, 'nit 3: one rolled block, not two');
+  assert.equal(arch.split('fact-0\n').length - 1, 1, 'nit 3: fact-0 archived once');
+});
+
+test('nit 3: a raced abort restores an EXISTING archive to its previous size', (t) => {
+  const dir = tmp(t, 'cb165-mem-');
+  const now = new Date(2026, 8, 27, 18, 0, 0).getTime();
+  const archive = path.join(dir, 'memory-archive-2026-09-27.md');
+  fs.writeFileSync(archive, '# Memory archive - earlier\n\nold stuff\n');
+  const before = fs.readFileSync(archive, 'utf8');
+  fs.writeFileSync(path.join(dir, 'memory.md'), bigMemory(90));
+  M.rolloverTestHooks.beforeReplace = (f) => fs.appendFileSync(f, '- late\n');
+  t.after(() => { M.rolloverTestHooks.beforeReplace = undefined; });
+  assert.equal(M.rolloverMemory(dir, now).raced, true);
+  assert.equal(fs.readFileSync(archive, 'utf8'), before);
+});
+
+test('nit 2 (F2 mtime half): a same-size rewrite during the rollover is also caught', (t) => {
+  const dir = tmp(t, 'cb165-mem-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  M.rolloverTestHooks.beforeReplace = (f) => {
+    const st = fs.statSync(f);
+    fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('fact-89', 'FACT-89')); // same size
+    fs.utimesSync(f, st.atime, new Date(st.mtimeMs + 5000));
+  };
+  t.after(() => { M.rolloverTestHooks.beforeReplace = undefined; });
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.raced, true);
+  assert.match(fs.readFileSync(file, 'utf8'), /FACT-89/, 'the rewrite survives');
 });
 
 test('F3: a full day archive (~1 MB) makes the rollover start memory-archive-<date>-2.md', (t) => {
@@ -225,4 +285,22 @@ test('ensureAgent rolls an oversized memory.md over at spawn, and PROTOCOL.md st
   const proto = fs.readFileSync(path.join(s.home, 'harness', 'hive', 'PROTOCOL.md'), 'utf8');
   assert.match(proto, /never print it whole/);
   assert.match(proto, /memory-archive-<date>\.md/);
+});
+
+test('nit 4: a raced rollover at spawn is logged (memory-rollover-raced) and memory.md is kept', async (t) => {
+  const s = sandbox(t);
+  const dir = path.join(s.home, 'harness', 'hive', 'agents', 'dw-3');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'memory.md'), bigMemory(90));
+  const rows = [];
+  const realAppend = s.hive.appendLog.bind(s.hive);
+  s.hive.appendLog = (row) => { rows.push(row); return realAppend(row); };
+  M.rolloverTestHooks.beforeReplace = (f) => fs.appendFileSync(f, '- late\n');
+  t.after(() => { M.rolloverTestHooks.beforeReplace = undefined; });
+  await s.hive.ensureAgent({ id: 'dw-3', name: 'Dwight', provider: 'claude', cwd: s.home });
+  const row = rows.find((r) => r.kind === 'memory-rollover-raced');
+  assert.ok(row, 'a memory-rollover-raced row');
+  assert.equal(row.agentId, 'dw-3');
+  assert.ok(!rows.some((r) => r.kind === 'memory-rollover'), 'no rollover row');
+  assert.match(fs.readFileSync(path.join(dir, 'memory.md'), 'utf8'), /- late\n$/);
 });
