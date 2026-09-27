@@ -41,12 +41,21 @@ function quit(mode) {
   });
 }
 
-test('EXIT-CRASH: a quit with 4 real ConPTYs crashes in node-pty\'s exit callback before the fix, and not after it', { timeout: 120_000, skip: process.platform !== 'win32' ? 'ConPTY is win32-only' : false }, async () => {
-  const before = await quit('old');
+// The fixed quit is deterministic and is what the suite gates on. The PRE-FIX crash is a race
+// (the exit callback against app.exit): on a busy machine it can lose, so reproducing it is an
+// opt-in evidence run (MD_EXITCRASH_REPRO=1), never a suite assertion (0-failure gate: no tests
+// that depend on winning a race). In the harness it reproduces INTERMITTENTLY (0xC0000005 + a dump
+// in 1 of 2 isolated runs); the deterministic evidence is the real app (Jim, EXIT-CRASH-WHY: +207 ms).
+test('EXIT-CRASH: a quit with 4 real ConPTYs exits cleanly with NO crash dump, after every exit arrived', { timeout: 120_000, skip: process.platform !== 'win32' ? 'ConPTY is win32-only' : false }, async () => {
   const after = await quit('new');
-  console.log(`old: exit ${before.code}, ${before.dumps} dump(s); new: exit ${after.code}, ${after.dumps} dump(s), ${after.r && after.r.ms} ms, pending ${after.r && after.r.pending}`);
-  assert.ok(before.dumps >= 1 || before.code !== 0, `the pre-fix order reproduces the crash (exit ${before.code}, ${before.dumps} dumps)`);
-  assert.equal(after.dumps, 0, 'no crash dump after the fix');
+  console.log(`new: exit ${after.code}, ${after.dumps} dump(s), ${after.r && after.r.ms} ms, pending ${after.r && after.r.pending}`);
+  assert.equal(after.dumps, 0, 'no crash dump');
   assert.equal(after.code, 0, 'a clean exit');
   assert.equal(after.r && after.r.pending, 0, 'every exit arrived before app.exit');
+});
+
+test('EXIT-CRASH evidence (opt-in): the pre-fix order crashes', { timeout: 120_000, skip: process.platform !== 'win32' || process.env.MD_EXITCRASH_REPRO !== '1' ? 'opt-in: MD_EXITCRASH_REPRO=1 (a race, not a gate)' : false }, async () => {
+  const before = await quit('old');
+  console.log(`old: exit ${before.code}, ${before.dumps} dump(s)`);
+  assert.ok(before.dumps >= 1 || before.code !== 0, `the pre-fix order crashed (exit ${before.code}, ${before.dumps} dumps)`);
 });
