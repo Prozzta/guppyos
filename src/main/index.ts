@@ -3074,7 +3074,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     e.preventDefault();
     // Jim RR-164 (2): the quit warning is a modal in the renderer; if that renderer is gone
     // (crashed, recovery given up), ask natively instead of waiting on nothing.
-    if (rendererGone(wc)) { if (confirmQuitNatively(count, win)) teardownAndQuit(); return; }
+    if (rendererGone(wc)) { quitOrCancelNatively(count, win); return; }
     win.focus();
     wc.send('app:closeRequested', { ptyCount: count });
   });
@@ -6487,6 +6487,18 @@ function rendererGone(wc: Electron.WebContents): boolean {
   try { return wc.isDestroyed() || wc.isCrashed(); } catch { return true; }
 }
 
+/** Jim RR-164 (LOW): the native confirm does exactly what the renderer's modal does:
+ *  Quit = app:confirmClose (a hard quit cancels a closing time in progress, then tears
+ *  down); Cancel = app:cancelClose (a restart-to-install that was waiting is called off). */
+function quitOrCancelNatively(ptyCount: number, parent: BrowserWindow | null): void {
+  if (confirmQuitNatively(ptyCount, parent)) {
+    try { closingTime.cancel(); } catch { /* not started */ }
+    teardownAndQuit();
+  } else {
+    abortPendingRestart();
+  }
+}
+
 /** Jim RR-164 (2): the native stand-in for the renderer's quit warning. True = quit. */
 function confirmQuitNatively(ptyCount: number, parent: BrowserWindow | null): boolean {
   const opts: Electron.MessageBoxSyncOptions = {
@@ -6546,10 +6558,10 @@ app.on('before-quit', (e) => {
   if (count === 0) return;
   e.preventDefault();
   if (mainWindow) {
-    if (rendererGone(mainWindow.webContents)) { if (confirmQuitNatively(count, mainWindow)) teardownAndQuit(); return; }
+    if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
     mainWindow.focus();
     mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
-  } else if (confirmQuitNatively(count, null)) teardownAndQuit();
+  } else quitOrCancelNatively(count, null);
 });
 
 // The last chance to flush a coalesced capacity write. `before-quit` can be

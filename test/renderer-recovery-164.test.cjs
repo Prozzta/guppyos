@@ -409,9 +409,25 @@ test('AUDIT (1) wiring: the recovered page learns it synchronously at load and A
 
 test('AUDIT (2) wiring: with the renderer gone, close and before-quit ask natively; the give-up dialog can quit', () => {
   const idx = read('src/main/index.ts');
-  assert.match(idx, /if \(rendererGone\(wc\)\) \{ if \(confirmQuitNatively\(count, win\)\) teardownAndQuit\(\); return; \}\s*win\.focus\(\);\s*wc\.send\('app:closeRequested'/);
-  assert.match(idx, /if \(rendererGone\(mainWindow\.webContents\)\) \{ if \(confirmQuitNatively\(count, mainWindow\)\) teardownAndQuit\(\); return; \}/);
-  assert.match(idx, /\} else if \(confirmQuitNatively\(count, null\)\) teardownAndQuit\(\);/, 'no window at all: still quittable');
+  assert.match(idx, /if \(rendererGone\(wc\)\) \{ quitOrCancelNatively\(count, win\); return; \}\s*win\.focus\(\);\s*wc\.send\('app:closeRequested'/);
+  assert.match(idx, /if \(rendererGone\(mainWindow\.webContents\)\) \{ quitOrCancelNatively\(count, mainWindow\); return; \}/);
+  assert.match(idx, /\} else quitOrCancelNatively\(count, null\);/, 'no window at all: still quittable');
+  // Jim LOW: the same effects as the renderer modal (app:confirmClose / app:cancelClose).
+  assert.match(idx, /function quitOrCancelNatively\(ptyCount: number, parent: BrowserWindow \| null\): void \{\s*if \(confirmQuitNatively\(ptyCount, parent\)\) \{\s*try \{ closingTime\.cancel\(\); \}[^\n]*\n\s*teardownAndQuit\(\);\s*\} else \{\s*abortPendingRestart\(\);/);
   assert.match(idx, /function rendererGone\(wc: Electron\.WebContents\): boolean \{\s*try \{ return wc\.isDestroyed\(\) \|\| wc\.isCrashed\(\); \} catch \{ return true; \}/);
   assert.match(idx, /buttons: \['Quit now', 'Keep agents running'\],[\s\S]{0,120}\.then\(\(r\) => \{ if \(r\.response === 0\) teardownAndQuit\(\); \}\)/);
+});
+
+test('AUDIT M24: the dump NEAREST the crash wins, even when a newer dump inside the window exists', async () => {
+  const D = loadTs('src/main/crashDumps.ts');
+  const t = 5_000_000;
+  const files = new Map([['C/near.dmp', t + 100], ['C/newer.dmp', t + 1_900]]);
+  const norm = (p) => p.replace(/\\/g, '/');
+  const fake = {
+    readdir: async () => [...files.keys()].map((k) => ({ name: k.slice(2), isDirectory: () => false, isFile: () => true })),
+    stat: async (p) => ({ mtimeMs: files.get(norm(p)), size: 1 }),
+    unlink: async () => {}
+  };
+  const hit = await D.waitForDump('C', t, { tries: 1, sleep: async () => {} }, fake);
+  assert.equal(norm(hit.path), 'C/near.dmp', 'nearest to the crash time, not the newest file');
 });
