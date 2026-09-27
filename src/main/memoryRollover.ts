@@ -90,6 +90,18 @@ export function liftPinned(body: string): { pinned: string; rest: string } {
   return { pinned, rest };
 }
 
+/** PINNED-MEMORY migration check: whether an agent's memory.md has the section, its size, and how
+ *  many lessons it holds (non-blank lines after the heading, the seed's italic line not counted). */
+export interface PinnedStatus { agent: string; present: boolean; bytes: number; lessons: number }
+
+export function pinnedStatus(agent: string, memoryText: string | null): PinnedStatus {
+  const pinned = memoryText === null ? '' : pinnedSection(memoryText);
+  if (!pinned) return { agent, present: false, bytes: 0, lessons: 0 };
+  const lines = pinned.replace(/\r\n/g, '\n').split('\n').slice(1).map((l) => l.trim());
+  const lessons = lines.filter((l) => l && !/^_.*_$/.test(l)).length;
+  return { agent, present: true, bytes: Buffer.byteLength(pinned, 'utf8'), lessons };
+}
+
 /** The pinned section of a memory.md text (LF or CRLF), '' if none. */
 export function pinnedSection(text: string): string {
   return splitMemory(text.replace(/\r\n/g, '\n'), Number.POSITIVE_INFINITY).pinned;

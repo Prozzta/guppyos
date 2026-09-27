@@ -8,13 +8,13 @@
  * step and then yields), so a search that arrives mid-backfill waits for one step, not for
  * the backfill.
  */
-import { readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
+import { readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, sha256, type Discovery, type SourceEntry } from './sources';
 import { compactionDecision, NativeMemoryStore, type SearchHit } from './store';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
-import { pinnedSection } from '../memoryRollover';
+import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
 export const PRIORITY = { search: 0, wake: 1, status: 1, ingest: 2, backfill: 3, compact: 4 } as const;
 /** Chunks embedded per queue step before yielding (spec section 3: <= 8). ONE: a search that
@@ -206,7 +206,17 @@ export class MemoryEngine {
     return this.enqueue(PRIORITY.status, async () => {
       const c = this.d.store.counts();
       const perWing = this.d.store.db.prepare('SELECT wing, count(*) AS chunks FROM chunks GROUP BY wing ORDER BY wing').all() as Array<{ wing: string; chunks: number }>;
-      const s = { ...c, dbBytes: this.d.store.fileBytes(), perWing };
+      // PINNED-MEMORY: every agent's standing-lessons section, read from its memory.md (small files).
+      const memoryPinned: PinnedStatus[] = [];
+      try {
+        for (const e of readdirSync(join(this.d.hiveRoot, 'agents'), { withFileTypes: true })) {
+          if (!e.isDirectory() || !/^[A-Za-z0-9._-]+$/.test(e.name)) continue;
+          let text: string | null = null;
+          try { text = readFileSync(join(this.d.hiveRoot, 'agents', e.name, 'memory.md'), 'utf8'); } catch { continue; }
+          memoryPinned.push(pinnedStatus(e.name, text));
+        }
+      } catch { /* no agents dir */ }
+      const s = { ...c, dbBytes: this.d.store.fileBytes(), perWing, memoryPinned };
       return { exit: 0, text: formatStatus(s), json: { ...s, embedded: this.stats.embedded, failed: this.failed.size, modelLoaded: this.d.embedder.loaded } };
     });
   }

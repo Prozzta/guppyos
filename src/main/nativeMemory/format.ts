@@ -95,8 +95,17 @@ export function formatWakeUp(identity: string | null, entries: WakeEntry[], pinn
   return `Wake-up text (~${Math.floor(text.length / 4)} tokens):\n${'='.repeat(50)}\n${text}\n`;
 }
 
-export function formatStatus(s: { sources: number; chunks: number; vectors: number; generation: number; dbBytes: number; perWing: Array<{ wing: string; chunks: number }> }): string {
+export function formatStatus(s: { sources: number; chunks: number; vectors: number; generation: number; dbBytes: number; perWing: Array<{ wing: string; chunks: number }>; memoryPinned?: Array<{ agent: string; present: boolean; bytes: number; lessons: number }> }): string {
   const L = [`Memory engine (native index): ${s.sources} sources, ${s.chunks} chunks, ${s.vectors} vectors, ${(s.dbBytes / 1048576).toFixed(1)} MB, generation ${s.generation}`];
   for (const w of s.perWing) L.push(`  WING: ${w.wing}  (${w.chunks} chunks)`);
+  // PINNED-MEMORY migration check: each agent's "## How I work (standing lessons)" section.
+  if (s.memoryPinned?.length) {
+    L.push('memory-pinned (## How I work (standing lessons)):');
+    for (const p of s.memoryPinned) {
+      L.push(p.present
+        ? `  ${p.agent}: ${p.lessons} lesson(s), ${p.bytes} B${p.bytes > 6 * 1024 ? '  (over 6 KB: merge and shorten)' : ''}${p.lessons === 0 ? '  (empty: move your method lessons here)' : ''}`
+        : `  ${p.agent}: no section`);
+    }
+  }
   return L.join('\n') + '\n';
 }

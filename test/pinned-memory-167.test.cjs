@@ -245,6 +245,30 @@ test('wake-up (engine): the caller wing\'s memory.md section is read from the fi
   assert.doesNotMatch(none.text, /L0\.5/);
 });
 
+test('memory status: a memory-pinned line per agent (lessons, bytes; no section / empty / over 6 KB flagged), and in the JSON', async (t) => {
+  const { MemoryEngine } = loadTs('src/main/nativeMemory/engine.ts');
+  const root = tmp(t, 'pin167-status-');
+  const put = (id, text) => { fs.mkdirSync(path.join(root, 'agents', id), { recursive: true }); if (text !== null) fs.writeFileSync(path.join(root, 'agents', id, 'memory.md'), text); };
+  put('ph', (HEAD + '\n' + PIN + notes(2).slice(1)).replace(/\n/g, '\r\n')); // 2 lessons, CRLF
+  put('dw', HEAD + '\n' + M.PINNED_SEED + '\n## Notes\n- x\n');                // seeded, empty
+  put('jm', HEAD + '\n- no section here\n');                                    // not migrated
+  put('big', HEAD + '\n## How I work (standing lessons)\n' + ('- ' + 'l'.repeat(98) + '\n').repeat(70)); // ~7 KB
+  put('nomem', null);                                                              // no memory.md: not listed
+  const store = { setMeta() {}, sourceShas: () => new Map(), removeSource() {}, planDiff: () => ({ keep: [], add: [], remove: [] }), applyDiff: () => true, wakeUp: () => [], search: () => [],
+    counts: () => ({ sources: 1, chunks: 2, vectors: 2, generation: 1 }), fileBytes: () => 1024, db: { prepare: () => ({ all: () => [] }) } };
+  const eng = new MemoryEngine({ hiveRoot: root, store, embedder: { loaded: true, embed: async (x) => x.map(() => new Float32Array(384)), unload: async () => {} },
+    countTokens: (x) => x.split(/\s+/).length, mode: () => 'native', watch: null, setTimer: (fn, ms) => (ms === 0 ? setImmediate(fn) : { ms }), clearTimer: () => {} });
+  const r = await eng.status();
+  assert.match(r.text, /memory-pinned \(## How I work \(standing lessons\)\):/);
+  assert.match(r.text, /\n {2}ph: 2 lesson\(s\), \d+ B\n/);
+  assert.match(r.text, /\n {2}dw: 0 lesson\(s\), \d+ B {2}\(empty: move your method lessons here\)\n/);
+  assert.match(r.text, /\n {2}jm: no section\n/);
+  assert.match(r.text, /\n {2}big: 70 lesson\(s\), \d+ B {2}\(over 6 KB: merge and shorten\)\n/);
+  assert.doesNotMatch(r.text, /nomem/);
+  const byAgent = Object.fromEntries(r.json.memoryPinned.map((p) => [p.agent, p]));
+  assert.deepEqual({ present: byAgent.jm.present, lessons: byAgent.ph.lessons }, { present: false, lessons: 2 });
+});
+
 // ── the spawn wiring and the protocol text (a real HiveManager, HOME redirected) ────────
 
 const { HiveManager } = loadTs('src/main/hive.ts');
