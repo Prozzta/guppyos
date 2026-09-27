@@ -3,6 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import brandLogo from '@brand/logo.png?url';
 import './design/global.css';
+import { startRendererStartupTiming } from './startupTiming';
+
+// STARTUP-TIMING-162: long tasks and first redraws of the first 60 s (then it stops).
+startRendererStartupTiming();
 
 const favicon = document.createElement('link');
 favicon.rel = 'icon';

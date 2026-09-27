@@ -21,6 +21,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
+import { noteFirstAgentRedraw, startupRedrawPending } from '../startupTiming';
 import {
   classifyPathToken, isPathToken, pathTokenMatcher, stripPathToken, type PathAction
 } from '@shared/terminalPaths';
@@ -225,7 +226,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (!chunk) return;
     const active = term.buffer.active;
     const follow = shouldFollowTerminalOutput(active.viewportY, active.baseY);
+    const firstWrite = startupRedrawPending(ptyId);
     term.write(chunk, () => {
+      if (firstWrite) noteFirstAgentRedraw(ptyId);
       if (follow) {
         try { term.scrollToBottom(); } catch { /* terminal may be detaching */ }
       }

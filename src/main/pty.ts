@@ -337,6 +337,14 @@ export function parseNpmCmdShim(shimPath: string, content: string): NpmShimTarge
   return { interpreter, scriptPath };
 }
 
+/** STARTUP-TIMING-162: what the PTY layer reports to the start-up recorder. */
+export interface PtyStartupHooks {
+  spawned(id: string): void;
+  firstOutput(id: string): void;
+  /** false once the recorder has stopped: the hooks are then dropped. */
+  recording(): boolean;
+}
+
 export class PtyManager {
   private sessions = new Map<string, PtySession>();
   private webContents: WebContents | null = null;
@@ -345,6 +353,8 @@ export class PtyManager {
    *  (archive, worktree removal, map cleanup) that the explicit kill() path
    *  runs. Best-effort — set once by the main process. */
   private exitHandler: ((id: string, exitCode?: number) => void) | null = null;
+  /** STARTUP-TIMING-162: spawn and first-output markers while the start-up recorder runs. */
+  private startupHooks: PtyStartupHooks | null = null;
 
   /** The default/fallback output sink — set to the PRIMARY window. Used only for
    *  sessions with no recorded owner; owned sessions route to their owner. */
@@ -380,6 +390,17 @@ export class PtyManager {
    *  onExit after the session is cleaned up. The exit code is forwarded so the
    *  handler can distinguish a clean exit (e.g. a successful first-time CLI
    *  install → auto restart-and-continue) from a crash. */
+  /** STARTUP-TIMING-162: set once by main; dropped by itself when the recorder stops. */
+  setStartupHooks(hooks: PtyStartupHooks | null): void {
+    this.startupHooks = hooks;
+  }
+
+  private startupHook(): PtyStartupHooks | null {
+    const h = this.startupHooks;
+    if (h && !h.recording()) this.startupHooks = null;
+    return this.startupHooks;
+  }
+
   setExitHandler(handler: (id: string, exitCode?: number) => void): void {
     this.exitHandler = handler;
   }
@@ -389,6 +410,7 @@ export class PtyManager {
     // Drop trailing output from a process whose id was already reclaimed by
     // a respawn (or killed) — it would corrupt the new session's screen.
     if (this.sessions.get(id) !== session) return;
+    if (!session.hasOutput && this.startupHooks) { try { this.startupHook()?.firstOutput(id); } catch { /* best-effort */ } }
     session.hasOutput = true;
     session.lastOutputAt = Date.now();
     if (session.out) session.out.push(data);
@@ -736,6 +758,7 @@ export class PtyManager {
       this.sessions.set(opts.id, session);
 
       proc.onData((data) => this.deliverData(opts.id, session, data));
+      if (this.startupHooks) { try { this.startupHook()?.spawned(opts.id); } catch { /* best-effort */ } }
       proc.onExit(({ exitCode, signal }) => {
         // Stale exit from a process whose id was reclaimed (kill()+respawn) — do
         // NOT touch the live session or tell the renderer the new pty died.

@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, pow
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { CodexVersionLog, codexSupportsNoDaemon, readCodexVersion } from './codexCli';
+import { StartupTiming } from './startupTiming';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
 import {
@@ -12,6 +13,7 @@ import {
 import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
 import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
 import { request as httpsRequest } from 'node:https';
@@ -661,13 +663,24 @@ function codexCliNow(): { path: string | null; version: string | null } {
   const path = ptyManager.commandPath('codex');
   return { path, version: readCodexVersion(path) };
 }
+/** STARTUP-TIMING-162: the first 60 s, measured (loop delay, renderer long tasks, markers), then it
+ *  stops. Armed in whenReady; every `t` is ms since the process started. */
+const startupTiming = new StartupTiming({
+  origin: performance.timeOrigin,
+  now: Date.now,
+  log: (row) => hive.appendLog(row),
+  histogram: () => monitorEventLoopDelay({ resolution: 10 })
+});
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
   userData: app.getPath('userData'),
   resourcesDir: app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'),
   workerEntry: join(__dirname, 'memoryWorker.js'),
-  fork: (entry) => utilityProcess.fork(entry, [], { serviceName: 'munder-memory', stdio: 'ignore' }) as unknown as WorkerHandle,
+  fork: (entry) => {
+    startupTiming.mark('memory-worker-fork');
+    return utilityProcess.fork(entry, [], { serviceName: 'munder-memory', stdio: 'ignore' }) as unknown as WorkerHandle;
+  },
   memoryBaseUrl: () => hookServer.memoryBaseUrl(),
   writeCommand: (script) => hive.writeMemoryCommand(script),
   log: (row) => hive.appendLog(row),
@@ -3704,6 +3717,8 @@ ipcMain.handle('app:copyToClipboard', (_evt, text: unknown) => {
   try { clipboard.writeText(text); return { ok: true }; }
   catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
+// STARTUP-TIMING-162: the renderer's long tasks and first-redraw marks (validated in startupTiming).
+ipcMain.on('startup:timing', (_evt, batch: unknown) => startupTiming.fromRenderer(batch));
 ipcMain.handle('app:readClipboard', () => {
   try { return clipboard.readText(); } catch { return ''; }
 });
@@ -6192,6 +6207,14 @@ app.whenReady().then(() => {
   // setMicGate(true)); macOS TCC stays a second gate regardless.
   if (readConfig().realtimeVoiceEnabled) writeConfig({ realtimeVoiceEnabled: false });
 
+  // STARTUP-TIMING-162: arm the first-60-s recorder (it stops by itself) and its PTY markers.
+  startupTiming.start();
+  ptyManager.setStartupHooks({
+    spawned: (id) => startupTiming.mark('agent-spawn', id),
+    firstOutput: (id) => startupTiming.mark('agent-first-output', id),
+    recording: () => startupTiming.recording
+  });
+
   // Anonymous product analytics (PostHog) — the full contract lives in
   // TELEMETRY.md. No-op unless a build-time key was injected (official releases
   // only), and gated on DO_NOT_TRACK + the telemetryEnabled config (opt-out).
@@ -6242,6 +6265,7 @@ app.whenReady().then(() => {
   // first task-start wake-up does not meet an empty index. The mode is read at fire time; any
   // other mode does nothing. A first memory request before then forks it as always.
   mainWindow?.webContents.once('did-finish-load', () => {
+    startupTiming.mark('window-ready');
     const t = setTimeout(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can

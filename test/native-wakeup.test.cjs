@@ -120,7 +120,7 @@ test('(a) prewarm forks the worker whenever memory is on (no mode file needed; a
 test('(a) WIRING: index.ts prewarms once, 30 s after the first window finished loading (the spec\'s lazy floor), and the worker still backfills at its startup', () => {
   const idx = fs.readFileSync(path.join(REPO, 'src', 'main', 'index.ts'), 'utf8');
   assert.match(idx, /const NATIVE_MEMORY_PREWARM_DELAY_MS = 30_000;/);
-  assert.match(idx, /createWindow\(\);\s*(\/\/[^\n]*\n\s*)*mainWindow\?\.webContents\.once\('did-finish-load', \(\) => \{\s*const t = setTimeout\(\(\) => \{ try \{ nativeMemory\.prewarm\(\); \}[^\n]*\}, NATIVE_MEMORY_PREWARM_DELAY_MS\);/);
+  assert.match(idx, /createWindow\(\);\s*(\/\/[^\n]*\n\s*)*mainWindow\?\.webContents\.once\('did-finish-load', \(\) => \{\s*startupTiming\.mark\('window-ready'\);\s*const t = setTimeout\(\(\) => \{ try \{ nativeMemory\.prewarm\(\); \}[^\n]*\}, NATIVE_MEMORY_PREWARM_DELAY_MS\);/);
   const worker = fs.readFileSync(path.join(REPO, 'src', 'main', 'nativeMemory', 'worker.ts'), 'utf8');
   assert.match(worker, /void engine\.backfill\(\)\.catch/, 'the forked worker backfills at startup');
 });
