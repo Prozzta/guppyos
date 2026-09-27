@@ -155,7 +155,8 @@ export class RendererMemorySampler {
 
   constructor(private readonly deps: {
     metrics: () => ProcessMetricLike[];
-    log: (row: Record<string, unknown>) => void;
+    /** Optional: without it the sampler is IN-MEMORY ONLY (no row is written). */
+    log?: (row: Record<string, unknown>) => void;
     now: () => number;
     keep?: number;
   }) {}
@@ -177,7 +178,7 @@ export class RendererMemorySampler {
     const s: MemorySample = { at, procs };
     this.ring.push(s);
     while (this.ring.length > (this.deps.keep ?? KEEP_SAMPLES)) this.ring.shift();
-    try { this.deps.log({ kind: 'renderer-memory', procs }); } catch { /* logging never breaks sampling */ }
+    if (this.deps.log) { try { this.deps.log({ kind: 'renderer-memory', procs }); } catch { /* logging never breaks sampling */ } }
     return s;
   }
 

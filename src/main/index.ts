@@ -6339,8 +6339,7 @@ app.whenReady().then(() => {
   // off, the app keeps Electron's default menu — zero behavior change.
   if (readConfig().multiWindow) installAppMenu();
   createWindow();
-  // RENDERER-RECOVERY-164: renderer + GPU memory rows every 60 s (fast appender only).
-  startRendererMemorySampler();
+  // RENDERER-RECOVERY-164: the memory sampler is PARKED (see rendererMemory); not started.
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -6427,12 +6426,12 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
   });
 }
 
-/** RENDERER-RECOVERY-164 addendum: renderer + GPU memory every SAMPLE_MS, read from main's own
- *  process metrics (no renderer ping), written ONLY through hive.appendLog (the kept-open fast
- *  appender). The last samples ride along on the next render-process-gone row. */
+/** RENDERER-RECOVERY-164 addendum, PARKED (god 2b540e: the Human is weighing a lighter design,
+ *  likely an in-memory ring flushed into the crash row plus a threshold row). The sampler exists
+ *  and the crash row already carries `recentMemory`, but NOTHING starts it and it has no `log`:
+ *  no per-minute disk row is written. startRendererMemorySampler() is the switch once decided. */
 const rendererMemory = new RendererMemorySampler({
   metrics: () => app.getAppMetrics(),
-  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
   now: () => Date.now()
 });
 let rendererMemoryTimer: ReturnType<typeof setInterval> | null = null;
