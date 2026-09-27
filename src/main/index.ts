@@ -4280,15 +4280,8 @@ ipcMain.handle('tools:status', (): ToolStatus[] => {
 // (main-internal, caller wing `human`); there is no CLI to find and no mine step.
 const memoryReply = (r: { exit: number; text?: string; error?: string }): { ok: boolean; output: string; error?: string } =>
   r.exit === 0 ? { ok: true, output: r.text ?? '' } : { ok: false, output: r.text ?? '', error: r.error ?? `exit ${r.exit}` };
-ipcMain.handle('hive:memoryStatus', async () => {
-  const reason = nativeMemory.unavailable();
-  let index: Record<string, unknown> | null = null;
-  if (!reason) {
-    const r = await nativeMemory.query('status');
-    if (r.exit === 0 && r.json && typeof r.json === 'object') index = r.json as Record<string, unknown>;
-  }
-  return { enabled: readConfig().semanticMemory !== false, available: reason === null, reason, index };
-});
+// MEMORY-STATUS-LAZY: asking never forks the worker (statusReport; the panel asks at start-up).
+ipcMain.handle('hive:memoryStatus', async () => ({ enabled: readConfig().semanticMemory !== false, ...(await nativeMemory.statusReport()) }));
 ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
   return memoryReply(await nativeMemory.query('search', { query, ...(typeof wing === 'string' && wing ? { wing } : {}) }));

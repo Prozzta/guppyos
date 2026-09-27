@@ -145,6 +145,26 @@ export class NativeMemoryWiring {
     return ok;
   }
 
+  /** Is the worker forked right now? (MEMORY-STATUS-LAZY: status never forks it) */
+  running(): boolean {
+    return this.client.forked;
+  }
+
+  /** MEMORY-STATUS-LAZY (STARTUP-STALL-159): the Memory panel's status. The panel asks on mount,
+   *  at start-up, so this NEVER forks the worker (that bypassed the 30 s lazy prewarm and put the
+   *  fork, DB open and backfill inside the boot). A worker not running yet reports
+   *  `running: false` and no index ("starts on first use", as on 1.1.58); a running one is asked. */
+  async statusReport(): Promise<{ available: boolean; running: boolean; reason: MemoryUnavailable | null; index: Record<string, unknown> | null }> {
+    const reason = this.unavailable();
+    const running = this.running();
+    let index: Record<string, unknown> | null = null;
+    if (!reason && running) {
+      const r = await this.query('status');
+      if (r.exit === 0 && r.json && typeof r.json === 'object') index = r.json as Record<string, unknown>;
+    }
+    return { available: reason === null, running, reason, index };
+  }
+
   agentExited(agentId: string): void {
     this.tokens.revoke(agentId);
   }

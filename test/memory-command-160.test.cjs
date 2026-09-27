@@ -114,7 +114,7 @@ test('the command ships as resources/memory-cli.cjs (packaged beside the models)
 
 test('IPC: search / wake-up / status go to the memory engine; there is no old-data delete, no start-up legacy note, no legacy module', () => {
   const ipc = between(INDEX, '// ─── IPC: semantic memory (the memory engine)', '// Condense memory.md on demand');
-  assert.match(ipc, /nativeMemory\.query\('status'\)/);
+  assert.match(ipc, /nativeMemory\.statusReport\(\)/, 'MEMORY-STATUS-LAZY: status goes through statusReport, which never forks the worker');
   assert.match(ipc, /nativeMemory\.query\('search', \{ query,/);
   assert.match(ipc, /nativeMemory\.query\('wake-up'/);
   for (const gone of ['memory:deleteLegacyData', 'legacyPalace', 'stopLegacyDaemon', 'noteLegacyMemoryOnStart', 'memory-engine-json-ignored', "'hive:mineNow'"]) {

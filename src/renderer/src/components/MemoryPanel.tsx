@@ -6,6 +6,8 @@ import { PixelButton } from './PixelButton';
 interface MemoryStatus {
   enabled: boolean;
   available: boolean;
+  /** The worker is running; false = it starts on first use (status never starts it). */
+  running?: boolean;
   reason: 'disabled' | 'no-hive' | 'no-runtime' | 'command-failed' | null;
   index: { sources?: number; chunks?: number; dbBytes?: number } | null;
 }
@@ -62,6 +64,8 @@ export function MemoryPanel() {
       ? { dot: 'var(--cth-ink-500)', label: 'Off' }
       : !status.available
         ? { dot: 'var(--cth-coral)', label: 'Unavailable' }
+        : status.running === false
+          ? { dot: 'var(--cth-mint)', label: 'On · starts on first use' }
         : typeof status.index?.sources === 'number'
           ? { dot: 'var(--cth-mint)', label: `On · ${status.index.sources} notes indexed` }
           : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };

@@ -358,6 +358,8 @@ export interface MemoryStatus {
   enabled: boolean;
   /** Usable right now (on, a hive, the bundled runtime present). */
   available: boolean;
+  /** The worker is running (MEMORY-STATUS-LAZY: false = it starts on first use; `index` is then null). */
+  running: boolean;
   reason: 'disabled' | 'no-hive' | 'no-runtime' | 'command-failed' | null;
   /** The engine's own status (sources, chunks, dbBytes, perWing, ...) when available. */
   index: { sources?: number; chunks?: number; dbBytes?: number; perWing?: Array<{ wing: string; chunks: number }> } | null;
