@@ -28,6 +28,7 @@ const opt = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] :
 const AGY = opt('--agy', path.join(process.env.LOCALAPPDATA || '', 'agy', 'bin', 'agy.exe'));
 const MODEL = opt('--model', 'Gemini 3.8 Flash (Low)');
 const KEEP = argv.includes('--keep');
+const IDLE_ONLY = argv.includes('--idle-only'); // no model turn: the idle check alone (and a hang check)
 const REPO = path.resolve(__dirname, '..', '..');
 const loadTs = require(path.join(REPO, 'test', 'load-ts.cjs'));
 const { HiveManager } = loadTs('src/main/hive.ts');
@@ -150,15 +151,27 @@ async function idleGate() {
     { name: 'xterm-256color', cols: 120, rows: 30, cwd: d.cwd, env: jailEnv(d) });
   await new Promise((r) => setTimeout(r, 20000));
   const hooks = hookCounts(d);
+  // Kill the WHOLE tree: p.kill() alone left agy (and the ConPTY host) running, and the gate
+  // process then never exited (AGY-166 audit item 2; one hung for minutes inside a hive terminal).
+  try { cp.execFileSync('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* already gone */ }
   try { p.kill(); } catch { /* gone */ }
   return { d, checks: { 'idle for 20 s: no hook event (no startup turn)': Object.keys(hooks).length === 0 }, detail: { hooks } };
 }
 
+/** Exit NOW with `code`: a live ConPTY handle can keep node from ever exiting after process.exit's
+ *  cleanup, so the gate also terminates itself if it is still alive a moment later. */
+function hardExit(code) {
+  process.exitCode = code;
+  setTimeout(() => { try { process.reallyExit(code); } catch { process.kill(process.pid, 'SIGKILL'); } }, 1000).unref?.();
+  process.exit(code);
+}
+
 (async () => {
   if (!fs.existsSync(AGY)) { console.error(`agy not found at ${AGY} (pass --agy)`); process.exit(2); }
-  const results = [await toolsGate(), await idleGate()];
+  const results = IDLE_ONLY ? [{ checks: {}, detail: { hooks: { skipped: 1 } } }, await idleGate()] : [await toolsGate(), await idleGate()];
   // The idle check is only meaningful when the hook logger demonstrably works (the tools run fired it).
-  results[1].checks['the hook logger works (seen in the tools run), so "no hook" is real'] = Object.keys(results[0].detail.hooks).length > 0;
+  if (!IDLE_ONLY) results[1].checks['the hook logger works (seen in the tools run), so "no hook" is real'] = Object.keys(results[0].detail.hooks).length > 0;
+  else console.log('NOTE  --idle-only: the hook logger is not proven in this run; run the full gate for a meaningful idle check');
   let ok = true;
   for (const res of results) {
     for (const [name, pass] of Object.entries(res.checks)) { console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}`); ok = ok && pass; }
@@ -166,5 +179,5 @@ async function idleGate() {
     if (res.d && !KEEP) fs.rmSync(res.d.J, { recursive: true, force: true });
   }
   console.log(ok ? 'AGY-TOOLS GATE: PASS' : 'AGY-TOOLS GATE: FAIL');
-  process.exit(ok ? 0 : 1);
-})().catch((e) => { console.error('AGY-TOOLS GATE could not run:', e.message); process.exit(2); });
+  hardExit(ok ? 0 : 1);
+})().catch((e) => { console.error('AGY-TOOLS GATE could not run:', e.message); hardExit(2); });
