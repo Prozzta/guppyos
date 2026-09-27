@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.67" src="https://img.shields.io/badge/version-1.1.67-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.68" src="https://img.shields.io/badge/version-1.1.68-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -220,9 +220,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **Antigravity agents that can act** (1.1.66) — a new Antigravity
   conversation gets its tools (run commands, write and edit files) again, a live check guards it,
   and the Windows test suite passes with 0 failures.
-- **A window that recovers from a memory runaway** (1.1.67, the current release) — the app
+- **A window that recovers from a memory runaway** (1.1.67) — the app
   restarts its own view when it passes 1.5 GB twice in a row, even when frozen, while the agents
   keep running, and logs what it needs to find the cause.
+- **Lessons that stay put** (1.1.68, the current release) — each agent's `## How I work (standing
+  lessons)` section is never archived and is read at every task start, and quitting no longer
+  crashes at the end.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

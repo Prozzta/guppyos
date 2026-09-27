@@ -11,6 +11,40 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.68] — 2026-09-28
+
+**Agents keep their "how I work" lessons in front of them again, and quitting the app no longer crashes.**
+Rollback: 1.1.67 (reinstall).
+
+### Fixed
+
+- **Agents no longer lose their working lessons when their memory is split.** 1.1.65 moved the
+  older part of a large memory.md into an archive and told agents to read only the newest notes.
+  Their hard-won method lessons ("cite only pages you opened", "commit only under the repo
+  identity", ...) were in the older part, so they were archived and never read again; one agent's
+  research quality dropped sharply. Now each memory.md has a section at the top,
+  **`## How I work (standing lessons)`**, that is never archived:
+  - it is kept word for word at the top whenever the file is split;
+  - agents read it at the start of every task, and `memory wake-up` shows it in full;
+  - agents put new method lessons there (as bullets or `###` subheadings; a `##` heading ends the
+    section).
+  An empty section is added to each agent's memory.md the next time it starts; an existing one is
+  kept as it is.
+- **Quitting the app no longer ends in a crash.** On every quit, a terminal's exit notice arrived
+  after the app had already started shutting down, which crashed it at the very end (and left a
+  crash report). The app now waits for every terminal to finish closing first (at most 1.5
+  seconds).
+
+### Added
+
+- `memory status` lists each agent's lessons section: how many lessons, its size, or that it is
+  missing or empty.
+
+### Good to know
+
+- Lessons already moved into an archive are not moved back automatically: each agent will be
+  asked to move its own lessons into the new section.
+
 ## [1.1.67] — 2026-09-28
 
 **If the app's window runs away with memory, the app now brings it back by itself instead of freezing.**
