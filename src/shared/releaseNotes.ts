@@ -250,6 +250,10 @@ const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"'
 export function htmlToNoteText(html: string | null | undefined): string {
   if (typeof html !== 'string') return '';
   if (!/<[a-z!/][^>]*>/i.test(html)) return html;
+  // UAV-163 M2: a release that ships a drop page (`<!-- drop -->…<!-- /drop -->`,
+  // src/shared/releaseDrop.ts) must reach the toast with its markers, or the drop can
+  // never be found. Such a body goes through untouched; the drop page replaces the digest.
+  if (/<!--\s*drop\s*-->[\s\S]*<!--\s*\/drop\s*-->/.test(html)) return html;
   return html
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -263,8 +267,10 @@ export function htmlToNoteText(html: string | null | undefined): string {
     .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, e: string) => {
       const k = e.toLowerCase();
       if (k in ENTITIES) return ENTITIES[k];
-      if (k.startsWith('#x')) return String.fromCodePoint(parseInt(k.slice(2), 16));
-      if (k.startsWith('#')) return String.fromCodePoint(Number(k.slice(1)));
+      // UAV-163 M1: fromCodePoint throws RangeError past U+10FFFF, and this runs inside
+      // the update-available listener; an impossible entity stays as its text.
+      const cp = k.startsWith('#x') ? parseInt(k.slice(2), 16) : k.startsWith('#') ? Number(k.slice(1)) : NaN;
+      if (Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff) return String.fromCodePoint(cp);
       return m;
     })
     .replace(/[ \t]+\n/g, '\n')

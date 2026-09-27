@@ -124,6 +124,30 @@ export function newerReleases(
 }
 
 /**
+ * The fallback poll's raw response body -> the newer releases, or why it could not be
+ * read (truncated, not JSON, or GitHub's error object such as a rate limit). The
+ * caller logs the error instead of failing silently (UAV-163 C1).
+ */
+export function releaseListFromBody(
+  body: string,
+  current: string,
+  platform: string,
+  arch: string,
+  pickAsset?: (assets: ReadonlyArray<{ name?: string; browser_download_url?: string }> | undefined) => string | null
+): { versions: ReleaseOption[] } | { error: string } {
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch (e) {
+    return { error: `not JSON (${body.length} B): ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!Array.isArray(parsed)) {
+    const msg = parsed && typeof parsed === 'object' && typeof (parsed as { message?: unknown }).message === 'string'
+      ? (parsed as { message: string }).message : typeof parsed;
+    return { error: `not a release list: ${msg}` };
+  }
+  return { versions: newerReleases(parsed, current, platform, arch, pickAsset) };
+}
+
+/**
  * electron-updater's `releaseNotes` with `fullChangelog = true` — an array of
  * `{version, note}` for every release in (current, latest], read from the atom
  * feed it already downloaded — -> the options list. The latest release is

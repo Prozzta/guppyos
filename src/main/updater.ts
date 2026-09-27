@@ -5,7 +5,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path';
 import { readConfig } from './config';
 import { DEFAULT_DROP_HTML } from '../shared/releaseDrop';
-import { reduceStatus, clampPercent, isNewer, installerUrl, newerReleases, releaseOptionsFromNotes, REPO, type UpdateStatus } from '../shared/updateState';
+import { reduceStatus, clampPercent, isNewer, installerUrl, releaseListFromBody, releaseOptionsFromNotes, REPO, type UpdateStatus } from '../shared/updateState';
 import { htmlToNoteText } from '../shared/releaseNotes';
 
 /**
@@ -50,6 +50,12 @@ import { htmlToNoteText } from '../shared/releaseNotes';
 // half-repointed: the feed moved while the release lookup or the download link
 // did not.
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+/** Releases the fallback list asks for. The picker never shows more than the native
+ *  path can (the atom feed's 10 newest), and 10 full release bodies (~80-95 KB today)
+ *  stay far inside FALLBACK_BODY_CAP. At per_page=30 the list crossed the cap at
+ *  ~28-33 releases and the fallback went silent (Jim, UAV-163 C1). */
+export const FALLBACK_LIST_PAGE = 10;
+const FALLBACK_BODY_CAP = 262_144;
 const FALLBACK_CACHE_MS = 60 * 60 * 1000;     // 1h between fallback release-list polls
 
 export type { UpdateStatus };
@@ -226,18 +232,30 @@ function fallbackCheck(reason: string | undefined, force = false): void {
     const req = httpsRequest(
       {
         hostname: 'api.github.com',
-        path: `/repos/${REPO}/releases?per_page=30`,
+        path: `/repos/${REPO}/releases?per_page=${FALLBACK_LIST_PAGE}`,
         method: 'GET',
         headers: { 'User-Agent': 'munder-difflin-updater', Accept: 'application/vnd.github+json' },
         timeout: 10_000
       },
       (res) => {
         let body = '';
+        let capped = false;
         res.setEncoding('utf8');
-        res.on('data', (d) => { body += d; if (body.length > 262_144) req.destroy(); });
+        res.on('data', (d) => {
+          body += d;
+          if (!capped && body.length > FALLBACK_BODY_CAP) {
+            // Never silent: a destroyed request emits no 'end', so say why here.
+            capped = true;
+            logLine(`fallback release list over the ${FALLBACK_BODY_CAP} B body cap; dropped (no update shown this check)`);
+            req.destroy();
+          }
+        });
         res.on('end', () => {
+          if (capped) return; // already logged; a partial body is not a list
+          const parsed = releaseListFromBody(body, app.getVersion(), process.platform, process.arch, (a) => pickDownloadAsset(a));
+          if ('error' in parsed) { logLine(`fallback release list unreadable (HTTP ${res.statusCode ?? '?'}): ${parsed.error}`); return; }
           try {
-            const versions = newerReleases(JSON.parse(body), app.getVersion(), process.platform, process.arch, (a) => pickDownloadAsset(a));
+            const versions = parsed.versions;
             const top = versions[0];
             if (top) {
               emit({
@@ -253,7 +271,7 @@ function fallbackCheck(reason: string | undefined, force = false): void {
                 versions
               });
             }
-          } catch { /* malformed body — try again next interval */ }
+          } catch (e) { logLine(`fallback release list not emitted: ${errText(e)}`); }
         });
       }
     );

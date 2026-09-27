@@ -10,7 +10,7 @@
  *   - native path: `fullChangelog = true` makes electron-updater return
  *     `releaseNotes` as [{version, note}] for every release in (current, latest],
  *     from the releases.atom feed it downloads anyway;
- *   - fallback path: `/releases?per_page=30` instead of `/releases/latest`,
+ *   - fallback path: `/releases?per_page=10` instead of `/releases/latest`,
  *     still ONE request;
  *   - the status carries `versions` (newest first) and a ReleasePicker in the
  *     badge and in Settings lets the user pick, latest preselected.
@@ -25,7 +25,7 @@ const loadTs = require('./load-ts.cjs');
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
-const { newerReleases, releaseOptionsFromNotes, releaseChoices, optionDownloadUrl, installerUrl, REPO } =
+const { newerReleases, releaseListFromBody, releaseOptionsFromNotes, releaseChoices, optionDownloadUrl, installerUrl, REPO } =
   loadTs('src/shared/updateState.ts');
 const { htmlToNoteText, summarizeReleaseNotes } = loadTs('src/shared/releaseNotes.ts');
 
@@ -129,7 +129,8 @@ test('htmlToNoteText: atom HTML -> digestible text; markdown passes through unto
 test('updater.ts: fullChangelog on, one-request fallback list, versions emitted on both paths', () => {
   const src = read('src/main/updater.ts');
   assert.match(src, /autoUpdater\.fullChangelog\s*=\s*true/);
-  assert.match(src, /\/releases\?per_page=30/);
+  assert.match(src, /\/releases\?per_page=\$\{FALLBACK_LIST_PAGE\}/);
+  assert.match(src, /export const FALLBACK_LIST_PAGE = 10;/, 'UAV-163 C1: 10, the most the native atom path can show');
   assert.doesNotMatch(src, /path:\s*`\/repos\/\$\{REPO\}\/releases\/latest`/, 'fallback must use the list, not releases/latest');
   // Still exactly one fallback API request builder (release body lookup is the other, by tag).
   assert.equal((src.match(/hostname:\s*'api\.github\.com'/g) ?? []).length, 2);
@@ -180,4 +181,51 @@ test('RENDERED: badge and Settings offer 1.1.62/61/60, latest preselected, and d
   // C. one newer version: unchanged one-click download
   assert.equal(r.single.hasSelect, false);
   assert.equal(r.single.opened.length, 1);
+});
+
+// ── Jim's UAV-163 audit: C1, M1, M2 ─────────────────────────────────────────────────────
+
+test('C1: a long release list still yields versions; a truncated or error body is an ERROR, never silence', () => {
+  // 30 releases of ~9.5 KB each (Jim's worst case at per_page=30, ~285 KB).
+  const big = Array.from({ length: 30 }, (_, i) => rel(`1.2.${30 - i}`, { body: `## What's new in 1.2.${30 - i}\n\n- change\n\n${'x'.repeat(9_500)}` }));
+  const body = JSON.stringify(big);
+  assert.ok(body.length > 262_144, `fixture is over the old cap (${body.length} B)`);
+  const ok = releaseListFromBody(body, '1.2.0', 'win32', 'x64');
+  assert.ok('versions' in ok);
+  assert.equal(ok.versions.length, 30);
+  assert.equal(ok.versions[0].version, '1.2.30');
+  // What per_page=10 actually asks for stays far under the 256 KB cap.
+  assert.ok(JSON.stringify(big.slice(0, 10)).length < 262_144 / 2);
+  // A body the cap cut short, or GitHub's rate-limit object, is reported, not swallowed.
+  const cut = releaseListFromBody(body.slice(0, 262_144), '1.2.0', 'win32', 'x64');
+  assert.ok('error' in cut && /not JSON \(262144 B\)/.test(cut.error), JSON.stringify(cut));
+  const limited = releaseListFromBody(JSON.stringify({ message: 'API rate limit exceeded' }), '1.2.0', 'win32', 'x64');
+  assert.deepEqual(limited, { error: 'not a release list: API rate limit exceeded' });
+});
+
+test('C1 wiring: the fallback logs the body cap and any unreadable list; per_page=10', () => {
+  const src = read('src/main/updater.ts');
+  assert.match(src, /if \(!capped && body\.length > FALLBACK_BODY_CAP\) \{[\s\S]*?logLine\(`fallback release list over the/);
+  assert.match(src, /if \(capped\) return;/);
+  assert.match(src, /if \('error' in parsed\) \{ logLine\(`fallback release list unreadable/);
+  assert.doesNotMatch(src, /catch \{ \/\* malformed body/, 'no silent catch left on this path');
+});
+
+test('M1: an out-of-range numeric entity stays as text instead of throwing inside the update listener', () => {
+  assert.doesNotThrow(() => htmlToNoteText('<p>a &#99999999; b &#x110000; c &#x1F600;</p>'));
+  const t = htmlToNoteText('<p>a &#99999999; b &#x110000; c &#x1F600; d &#65;</p>');
+  assert.equal(t, 'a &#99999999; b &#x110000; c \u{1F600} d A');
+  assert.doesNotThrow(() => releaseOptionsFromNotes([{ version: '1.2.0', note: '<p>&#99999999;</p>' }], '1.2.0', '1.1.0', 'win32', 'x64', htmlToNoteText));
+});
+
+test('M2: a drop page survives the HTML conversion, so the downloaded toast can still find it', () => {
+  const { extractDropHtml } = loadTs('src/shared/releaseDrop.ts');
+  const html = '<h2>What&#39;s new</h2><ul><li>x</li></ul>\n<!-- drop -->\n<section class="drop"><h1>Big release</h1></section>\n<!-- /drop -->';
+  const note = htmlToNoteText(html);
+  assert.equal(extractDropHtml(note), '<section class="drop"><h1>Big release</h1></section>');
+  // Through the native path's note selection too.
+  const opts = releaseOptionsFromNotes([{ version: '1.2.0', note: html }], '1.2.0', '1.1.0', 'win32', 'x64', htmlToNoteText);
+  assert.ok(extractDropHtml(opts[0].notes));
+  // Without a drop, comments are still stripped as before.
+  assert.doesNotMatch(htmlToNoteText('<p>a</p><!-- note -->'), /<!--/);
 });
