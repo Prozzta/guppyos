@@ -6,8 +6,10 @@
  *   1st crash -> reload after RELOAD_DELAY_MS, with a one-shot "restored" notice
  *   2nd crash within WINDOW_MS -> recreate the window once (terminals handed over)
  *   3rd crash within WINDOW_MS -> stop recovering, a dialog; the agents keep running
- * plus the Human's addendum: renderer + GPU memory every 60 s through the FAST appender,
- * the last 10 samples attached to the crash row. No crash reporter, no heartbeat.
+ * plus the Human's final scope: LOCAL crash dumps (uploadToServer:false, pruned to 3, the dump
+ * path in the crash row) and an in-memory ring of renderer/GPU memory (one alert row only), and
+ * Jim's RR-164 audit: a recovered view skips the HivePicker, the app can still quit when the
+ * renderer is gone, and the recreate order is tested by behaviour. No heartbeat, no IPC ping.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -272,7 +274,7 @@ test('WIRING: the reporter starts as early as the paths are final, local only; d
   assert.doesNotMatch(idx, /crashReporter\.start\(/, 'only through startLocalCrashReporter (which passes uploadToServer:false)');
   assert.doesNotMatch(idx, /submitURL/);
   assert.match(idx, /void pruneDumps\(app\.getPath\('crashDumps'\), KEEP_DUMPS\)\.then\(/, 'prune is async, not awaited on the startup path');
-  assert.match(idx, /findDump: \(since\) => waitForDump\(app\.getPath\('crashDumps'\), since\),/);
+  assert.match(idx, /findDump: async \(since\) => \{\s*const dump = await waitForDump\(app\.getPath\('crashDumps'\), since, \{ exclude: attributedDumps \}\);/);
   assert.match(idx, /startupTiming\.mark\('crash-reporter-start', undefined, crashReporterStart\.startedAt\);\s*startupTiming\.mark\('crash-reporter-ready', undefined, crashReporterStart\.readyAt\);/);
   const dumps = read('src/main/crashDumps.ts');
   assert.doesNotMatch(dumps.replace(/\/\*[\s\S]*?\*\//g, ''), /Sync\(/, 'crashDumps.ts uses no synchronous fs call');
@@ -303,11 +305,11 @@ test('PTY: reassignOwner moves every session of the old window (and the default 
 test('MAIN WIRING: recreate hands terminals over BEFORE destroying the old window; destroy (not close) skips the quit warning', () => {
   const idx = read('src/main/index.ts');
   const fn = idx.slice(idx.indexOf('function recreateWindowAfterCrash('), idx.indexOf("app.on('child-process-gone'"));
-  const iCreate = fn.indexOf('createWindow({ floor: isFloor, partition: recovery.partition, recovery: recovery.policy })');
-  const iMove = fn.indexOf('ptyManager.reassignOwner(old.webContents, next.webContents)');
-  const iDestroy = fn.indexOf('old.destroy()');
-  assert.ok(iCreate > 0 && iMove > iCreate && iDestroy > iMove, 'create -> hand over -> destroy');
-  assert.doesNotMatch(fn, /old\.close\(\)/);
+  assert.match(fn, /return performRecreate<BrowserWindow>\(old, \{/, 'the order lives in performRecreate (tested by behaviour)');
+  assert.match(fn, /create: \(\) => \{\s*const next = createWindow\(\{ floor: isFloor, partition: recovery\.partition, recovery: recovery\.policy \}\);/);
+  assert.match(fn, /reassign: \(from, to\) => ptyManager\.reassignOwner\(from\.webContents, to\.webContents\),/);
+  assert.match(fn, /getMain: \(\) => mainWindow,\s*setMain: \(w\) => \{ mainWindow = w; \},\s*destroy: \(w\) => \{ try \{ w\.destroy\(\); \}/);
+  assert.doesNotMatch(fn, /\.close\(\)/);
   assert.match(idx, /const partition = isFloor \? \(opts\.partition \?\? `persist:floor-\$\{\+\+floorSeq\}`\) : undefined;/, 'a recreated floor keeps its partition');
   assert.match(idx, /watchWindowHealth\(win, isFloor, \{ partition, policy: opts\.recovery \?\? new RecoveryPolicy\(\) \}\);/, 'the streak carries over');
   assert.match(idx, /ipcMain\.handle\('window:takeRecoveryNotice', \(evt\) => \{\s*const n = recoveryNotices\.get\(evt\.sender\.id\) \?\? null;\s*recoveryNotices\.delete\(evt\.sender\.id\);/, 'the notice is one-shot per window');
@@ -315,4 +317,101 @@ test('MAIN WIRING: recreate hands terminals over BEFORE destroying the old windo
   // No per-reload main listeners: recovery is installed once per window (createWindow).
   assert.equal((idx.match(/installRendererRecovery\(/g) ?? []).length, 1);
   assert.equal((idx.match(/watchWindowHealth\(win, isFloor/g) ?? []).length, 1);
+});
+
+// ── Jim's RR-164 audit ─────────────────────────────────────────────────────────
+
+test('AUDIT M6: the 2-minute boundary is inclusive (a crash exactly WINDOW_MS after the last still counts)', () => {
+  const p = new R.RecoveryPolicy();
+  assert.equal(p.onGone('crashed', 0).action, 'reload');
+  assert.equal(p.onGone('crashed', R.WINDOW_MS).action, 'recreate', 'gap == WINDOW_MS continues the streak');
+  const q = new R.RecoveryPolicy();
+  q.onGone('crashed', 0);
+  assert.equal(q.onGone('crashed', R.WINDOW_MS + 1).action, 'reload', 'one ms more starts a new one');
+});
+
+test('AUDIT M11/M19 (behaviour): performRecreate creates FIRST, hands over, repoints the main pointer (a focused floor too), destroys LAST', () => {
+  const run = (mainIs) => {
+    const calls = [];
+    const old = { name: 'old' }; const other = { name: 'other' };
+    let main = mainIs === 'old' ? old : other;
+    const next = R.performRecreate(old, {
+      create: () => { calls.push('create'); return { name: 'next' }; },
+      reassign: (from, to) => { calls.push(`reassign:${from.name}->${to.name}`); return 3; },
+      getMain: () => main,
+      setMain: (w) => { calls.push(`setMain:${w.name}`); main = w; },
+      destroy: (w) => { calls.push(`destroy:${w.name}`); },
+      log: (row) => calls.push(`log:${row.ptysMoved}`)
+    });
+    return { calls, main: main.name, next: next.name };
+  };
+  const a = run('old');
+  assert.deepEqual(a.calls, ['create', 'reassign:old->next', 'log:3', 'setMain:next', 'destroy:old']);
+  assert.equal(a.main, 'next', 'the main-window pointer follows the recreated window (a focused floor included)');
+  const b = run('other');
+  assert.deepEqual(b.calls, ['create', 'reassign:old->next', 'log:3', 'destroy:old'], 'a pointer to another window is left alone');
+  assert.equal(b.main, 'other');
+});
+
+test('AUDIT M21: a window destroyed during the recreate delay is not recreated', () => {
+  const w = rig();
+  const win = fakeWindow();
+  R.installRendererRecovery(win, w.deps);
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 });
+  w.run(500);
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 });
+  win.destroyed = true; // closed by the user during the 500 ms
+  w.run(500);
+  assert.equal(w.recreated.length, 0);
+});
+
+test('AUDIT M22: KEEP_DUMPS is 3 and pruneDumps keeps KEEP_DUMPS by default', async () => {
+  const D = loadTs('src/main/crashDumps.ts');
+  assert.equal(D.KEEP_DUMPS, 3);
+  const files = new Map([['C/a.dmp', 1], ['C/b.dmp', 2], ['C/c.dmp', 3], ['C/d.dmp', 4], ['C/e.dmp', 5]]);
+  const norm = (p) => p.replace(/\\/g, '/');
+  const fake = {
+    readdir: async () => [...files.keys()].map((k) => ({ name: k.slice(2), isDirectory: () => false, isFile: () => true })),
+    stat: async (p) => ({ mtimeMs: files.get(norm(p)), size: 1 }),
+    unlink: async (p) => { files.delete(norm(p)); }
+  };
+  await D.pruneDumps('C', undefined, fake);
+  assert.deepEqual([...files.keys()].sort(), ['C/c.dmp', 'C/d.dmp', 'C/e.dmp']);
+});
+
+test('AUDIT LOW: a dump is matched to ITS crash: inside the time window, nearest wins, never one already attributed', async () => {
+  const D = loadTs('src/main/crashDumps.ts');
+  const t = 1_000_000;
+  const files = new Map([['C/old.dmp', t - 60_000], ['C/prev.dmp', t - 500], ['C/mine.dmp', t + 300], ['C/late.dmp', t + 60_000]]);
+  const norm = (p) => p.replace(/\\/g, '/');
+  const fake = {
+    readdir: async () => [...files.keys()].map((k) => ({ name: k.slice(2), isDirectory: () => false, isFile: () => true })),
+    stat: async (p) => ({ mtimeMs: files.get(norm(p)), size: 1 }),
+    unlink: async () => {}
+  };
+  const opts = { tries: 1, sleep: async () => {} };
+  assert.equal(norm((await D.waitForDump('C', t, opts, fake)).path), 'C/mine.dmp', 'nearest to the crash, not merely the newest');
+  assert.equal(norm((await D.waitForDump('C', t, { ...opts, exclude: new Set([path.join('C', 'mine.dmp')]) }, fake)).path), 'C/prev.dmp');
+  assert.equal(await D.waitForDump('C', t, { ...opts, exclude: new Set([path.join('C', 'mine.dmp'), path.join('C', 'prev.dmp')]) }, fake), null, 'old/late dumps are outside the window');
+  const idx = read('src/main/index.ts');
+  assert.match(idx, /waitForDump\(app\.getPath\('crashDumps'\), since, \{ exclude: attributedDumps \}\);\s*if \(dump\) attributedDumps\.add\(dump\.path\);/);
+});
+
+test('AUDIT (1) wiring: the recovered page learns it synchronously at load and App skips the picker', () => {
+  const idx = read('src/main/index.ts');
+  assert.match(idx, /ipcMain\.on\('window:recoveringSync', \(evt\) => \{ evt\.returnValue = recoveryNotices\.has\(evt\.sender\.id\); \}\);/);
+  assert.match(read('src/preload/index.ts'), /recovering: \(\(\): boolean => \{ try \{ return ipcRenderer\.sendSync\('window:recoveringSync'\) === true; \} catch \{ return false; \} \}\)\(\),/);
+  assert.match(read('src/renderer/src/App.tsx'), /useState<boolean>\(\(\) => \{\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(window\.cth\?\.recovering === true\) return true;/);
+  // The notice is set BEFORE the reload / right after the recreate, so the flag is true at load.
+  const mod = read('src/main/rendererRecovery.ts');
+  assert.match(mod, /deps\.setNotice\(win, \{ at, action: 'reload'[^\n]*\);\s*try \{ win\.webContents\.reload\(\); \}/);
+});
+
+test('AUDIT (2) wiring: with the renderer gone, close and before-quit ask natively; the give-up dialog can quit', () => {
+  const idx = read('src/main/index.ts');
+  assert.match(idx, /if \(rendererGone\(wc\)\) \{ if \(confirmQuitNatively\(count, win\)\) teardownAndQuit\(\); return; \}\s*win\.focus\(\);\s*wc\.send\('app:closeRequested'/);
+  assert.match(idx, /if \(rendererGone\(mainWindow\.webContents\)\) \{ if \(confirmQuitNatively\(count, mainWindow\)\) teardownAndQuit\(\); return; \}/);
+  assert.match(idx, /\} else if \(confirmQuitNatively\(count, null\)\) teardownAndQuit\(\);/, 'no window at all: still quittable');
+  assert.match(idx, /function rendererGone\(wc: Electron\.WebContents\): boolean \{\s*try \{ return wc\.isDestroyed\(\) \|\| wc\.isCrashed\(\); \} catch \{ return true; \}/);
+  assert.match(idx, /buttons: \['Quit now', 'Keep agents running'\],[\s\S]{0,120}\.then\(\(r\) => \{ if \(r\.response === 0\) teardownAndQuit\(\); \}\)/);
 });

@@ -72,6 +72,27 @@ function finish(payload) {
  */
 async function bundleScenario(entry) {
   const esbuild = require('esbuild');
+  // Vite-style asset imports (`x.png?url`, `x.tmj?raw`) and the `@brand` alias, so a scenario can
+  // mount the REAL App (RR-164): ?url resolves to a file URL, ?raw to the file's text.
+  const viteAssets = {
+    name: 'vite-assets',
+    setup(build) {
+      const { dirname, resolve: res, join: j } = require('node:path');
+      const { pathToFileURL } = require('node:url');
+      const root = j(__dirname, '..', '..');
+      build.onResolve({ filter: /\?(url|raw|worker)$/ }, (args) => {
+        const [spec, kind] = args.path.split('?');
+        const p = spec.startsWith('@brand/') ? res(root, 'docs', spec.slice(7))
+          : spec.startsWith('@/') ? res(root, 'src', 'renderer', 'src', spec.slice(2))
+            : res(dirname(args.importer), spec);
+        return { path: p, namespace: `vite-${kind}` };
+      });
+      // ?worker (monaco): a stub Worker class; a scenario never opens the editor.
+      build.onLoad({ filter: /.*/, namespace: 'vite-worker' }, () => ({ contents: 'export default class { postMessage() {} terminate() {} addEventListener() {} removeEventListener() {} }', loader: 'js' }));
+      build.onLoad({ filter: /.*/, namespace: 'vite-url' }, (args) => ({ contents: `export default ${JSON.stringify(pathToFileURL(args.path).href)};`, loader: 'js' }));
+      build.onLoad({ filter: /.*/, namespace: 'vite-raw' }, async (args) => ({ contents: `export default ${JSON.stringify(await require('node:fs/promises').readFile(args.path, 'utf8'))};`, loader: 'js' }));
+    }
+  };
   const cssAsStyleTag = {
     name: 'css-as-style-tag',
     setup(build) {
@@ -100,7 +121,9 @@ async function bundleScenario(entry) {
       '@': join(__dirname, '..', '..', 'src', 'renderer', 'src')
     },
     jsx: 'automatic',
-    plugins: [cssAsStyleTag],
+    // What electron-vite defines for the renderer, so a scenario can mount the REAL App (RR-164).
+    define: { 'import.meta.env': '{"DEV":false,"PROD":true,"MODE":"production"}', __APP_VERSION__: '"0.0.0-harness"' },
+    plugins: [viteAssets, cssAsStyleTag],
     logLevel: 'silent'
   });
   return out.outputFiles[0].text;
