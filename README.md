@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.66" src="https://img.shields.io/badge/version-1.1.66-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.67" src="https://img.shields.io/badge/version-1.1.67-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -217,9 +217,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   conversation each day (or past 20 MB) instead of resuming one forever, agents read a memory
   digest instead of their whole memory file, large memory files are archived, and Settings has a
   tool output cap (default 4,000 tokens) and a plugins choice (off by default).
-- **Antigravity agents that can act** (1.1.66, the current release) — a new Antigravity
+- **Antigravity agents that can act** (1.1.66) — a new Antigravity
   conversation gets its tools (run commands, write and edit files) again, a live check guards it,
   and the Windows test suite passes with 0 failures.
+- **A window that recovers from a memory runaway** (1.1.67, the current release) — the app
+  restarts its own view when it passes 1.5 GB twice in a row, even when frozen, while the agents
+  keep running, and logs what it needs to find the cause.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

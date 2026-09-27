@@ -11,6 +11,31 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.67] — 2026-09-28
+
+**If the app's window runs away with memory, the app now brings it back by itself instead of freezing.**
+Rollback: 1.1.66 (reinstall).
+
+### Fixed
+
+- **A runaway window no longer has to be killed by hand.** On 27 September the part of the app
+  that draws the window grew from 250 MB to almost 3 GB in two minutes and froze; the app only
+  noted it in its log, and the app had to be killed. Now the app checks every 15 seconds. When
+  the window is over 1.5 GB on two checks in a row, the app itself restarts the window's view.
+  This works even when the view is frozen. The agents keep running throughout, and their
+  terminals come back. The "restored" note says it was because of memory.
+- **It cannot loop.** A second runaway within two minutes replaces the window; a third stops and
+  offers to quit, as with a crash.
+
+### Added (to find the cause next time)
+
+- When the window's memory doubles, the app takes a quick, time-limited look at what inside it is
+  growing (script memory versus page elements) and logs it. It never delays the recovery.
+- Once a minute the app logs how much output each agent terminal received, how often it was
+  resized, and the app's own memory, so a flooded terminal or a resize loop is visible at once.
+
+The cause of the 27 September spike itself is still being investigated; this release contains it.
+
 ## [1.1.66] — 2026-09-28
 
 **Antigravity agents can write files and run commands again in a new conversation.**
