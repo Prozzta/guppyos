@@ -11,6 +11,33 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.69] — 2026-09-28
+
+**Codex agents' usage readings stay current again, and resizing a Codex terminal no longer floods it.**
+Rollback: 1.1.68 (reinstall).
+
+### Fixed
+
+- **Codex agents' usage allowance stays up to date.** The app reads a Codex agent's remaining
+  allowance from the conversation file Codex is writing. On Windows that file's "last changed"
+  time can stay at its creation time while it grows, so after the first reading the app saw
+  "unchanged" and stopped updating; an agent with several conversation files could also be read
+  from an older one. The app now reads the conversation of the session that is actually running,
+  and notices new readings when the file grows.
+- **Resizing a Codex terminal no longer re-sends its whole conversation.** When Codex runs in its
+  inline mode (a setting in the user's own Codex config), every resize of its terminal re-printed
+  the entire conversation: about 1.1 MB per resize on a long conversation. The hive's own copy of
+  each agent's Codex config now caps that at the last 50 rows (about 35 KB per resize). Codex's
+  history stays in the terminal's scrollback, and the user's own Codex config is never changed.
+- **A hidden terminal no longer resizes its agent.** Changing the font size while a terminal was
+  hidden sent the agent a resize to a zero-sized grid; it now waits until the terminal is shown.
+
+### Good to know
+
+- A Codex setting written on one line as `tui = { ... }` is kept as it is in the hive's copy.
+- If a Codex agent's hooks run for 5 minutes without a single usage reading, the app writes one
+  `capacity-codex-no-reading` row to the hive log, so a silent failure is visible.
+
 ## [1.1.68] — 2026-09-28
 
 **Agents keep their "how I work" lessons in front of them again, and quitting the app no longer crashes.**
