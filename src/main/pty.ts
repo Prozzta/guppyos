@@ -372,6 +372,16 @@ export class PtyManager {
     return n;
   }
 
+  /** RENDERER-RECOVERY-164: hand every PTY owned by `from` to `to`, so a window recreated
+   *  after a renderer crash keeps the terminals of the one it replaces (and closing the
+   *  old window can no longer reach them). Returns how many moved. */
+  reassignOwner(from: WebContents, to: WebContents): number {
+    let n = 0;
+    for (const s of this.sessions.values()) if (s.owner === from) { s.owner = to; n += 1; }
+    if (this.webContents === from) this.webContents = to;
+    return n;
+  }
+
   /** Kill every PTY owned by a window (its onExit runs the normal teardown:
    *  archive + worktree cleanup). Called when a floor window closes so its
    *  terminals don't linger as orphaned processes writing to a dead webContents. */

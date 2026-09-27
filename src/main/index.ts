@@ -40,6 +40,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
+import { installRendererRecovery, RecoveryPolicy, type RecoveryNotice } from './rendererRecovery';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
@@ -2917,8 +2918,11 @@ ipcMain.handle('hire:openFile', async () => {
  * window — cascades its position, and on close stops only its OWN terminals
  * while the app keeps running.
  */
-function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
+function createWindow(opts: { floor?: boolean; partition?: string; recovery?: RecoveryPolicy } = {}): BrowserWindow {
   const isFloor = opts.floor === true;
+  // RENDERER-RECOVERY-164: a recreated floor keeps its OWN session partition (its office
+  // state), and the replacement inherits the crash streak so the loop guard still counts.
+  const partition = isFloor ? (opts.partition ?? `persist:floor-${++floorSeq}`) : undefined;
 
   // Primary restores saved geometry; floors cascade off the focused window.
   let saved: WindowBounds | null = null;
@@ -2951,7 +2955,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
       // Each floor gets its OWN persistent session partition → isolated
       // localStorage so floors never share or stomp each other's office state.
       // The primary keeps the DEFAULT session so existing persisted state loads.
-      ...(isFloor ? { partition: `persist:floor-${++floorSeq}` } : {})
+      ...(partition ? { partition } : {})
     }
   });
 
@@ -2960,7 +2964,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   const wc = win.webContents;
 
   allWindows.add(win);
-  watchWindowHealth(win, isFloor);
+  watchWindowHealth(win, isFloor, { partition, policy: opts.recovery ?? new RecoveryPolicy() });
   // Global timer events follow the user — the most-recently-focused window is
   // primary. The primary is also seeded synchronously so boot events route now.
   win.on('focus', () => { mainWindow = win; });
@@ -3073,7 +3077,10 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   // navigation must NOT flip readiness off (the renderer only drains on mount,
   // so a later deep link would otherwise queue and sit until a full reload).
   win.webContents.on('did-start-navigation', (details) => {
-    if (details.isMainFrame) rendererReadyForHires = false;
+    if (!details.isMainFrame) return;
+    rendererReadyForHires = false;
+    // RENDERER-RECOVERY-164: the fresh renderer re-subscribes on mount.
+    try { capacityDetailTicker.closed(wc.id); } catch { /* not started */ }
   });
 
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
@@ -6377,7 +6384,7 @@ app.whenReady().then(() => {
  *  in log.jsonl). F2: a Windows logoff/shutdown (`session-end`) skips the
  *  running-terminals confirm, which would otherwise hold the shutdown on our modal
  *  or leave every agent tree orphaned, and runs the ordinary teardown. */
-function watchWindowHealth(win: BrowserWindow, isFloor: boolean): void {
+function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { partition?: string; policy: RecoveryPolicy }): void {
   const created = Date.now();
   const wc = win.webContents;
   const row = (kind: string, extra: Record<string, unknown> = {}): void => {
@@ -6387,12 +6394,64 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean): void {
   let hungAt = 0;
   win.on('unresponsive', () => { hungAt = Date.now(); row('window-unresponsive'); });
   win.on('responsive', () => { row('window-responsive', hungAt ? { hungMs: Date.now() - hungAt } : {}); hungAt = 0; });
-  wc.on('render-process-gone', (_e, d) => row('render-process-gone', { reason: d.reason, exitCode: d.exitCode }));
+  // RENDERER-RECOVERY-164 (WHITE-SCREEN-162): the row now carries pid/uptime and the
+  // recovery taken; 1.1.62 only logged it and left the window white.
+  installRendererRecovery(win, {
+    policy: recovery.policy,
+    now: () => Date.now(),
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    log: (r) => row(String(r.kind), { ...r, processUptimeMs: Math.round(process.uptime() * 1000) }),
+    quitting: () => allowQuit,
+    install: () => { /* createWindow already wires the replacement via watchWindowHealth */ },
+    setNotice: (w, notice) => { if (!w.webContents.isDestroyed()) recoveryNotices.set(w.webContents.id, notice); },
+    recreate: (old) => recreateWindowAfterCrash(old, isFloor, recovery),
+    giveUp: (w, decision) => {
+      row('render-recovery-stopped', { streak: decision.streak });
+      void dialog.showMessageBox({
+        type: 'error',
+        title: 'Munder Difflin',
+        message: 'The app window keeps crashing, so it will not be restored again.',
+        detail: `Its view crashed ${decision.streak} times within a few minutes. Your agents are still running in the background. Quit and reopen Munder Difflin to get the window back.`,
+        buttons: ['OK']
+      }).catch(() => { /* no display */ });
+      void w;
+    }
+  });
   win.on('session-end', () => {
     row('session-end');
     try { closingTime.cancel(); } catch { /* not started */ }
     teardownAndQuit();
   });
+}
+
+/** RENDERER-RECOVERY-164: one-shot "the view crashed and was restored" notices, keyed by the
+ *  webContents that should show it; the renderer takes its own on mount. */
+const recoveryNotices = new Map<number, RecoveryNotice>();
+ipcMain.handle('window:takeRecoveryNotice', (evt) => {
+  const n = recoveryNotices.get(evt.sender.id) ?? null;
+  recoveryNotices.delete(evt.sender.id);
+  return n;
+});
+
+/**
+ * RENDERER-RECOVERY-164: replace a window whose renderer crashed twice in a row.
+ *
+ * Order matters. The replacement is created FIRST, then every PTY the old window owned is
+ * handed to it (and the default sink with it), and only then is the old window DESTROYED:
+ * destroy() skips 'close', so neither the primary's quit warning nor a floor's close
+ * confirmation runs, and a floor's 'closed' handler (killByOwner) finds nothing left to kill.
+ * The agents never notice.
+ */
+function recreateWindowAfterCrash(old: BrowserWindow, isFloor: boolean, recovery: { partition?: string; policy: RecoveryPolicy }): BrowserWindow | null {
+  if (old.isDestroyed()) return null;
+  const bounds = (() => { try { return old.getBounds(); } catch { return null; } })();
+  const next = createWindow({ floor: isFloor, partition: recovery.partition, recovery: recovery.policy });
+  if (bounds) { try { next.setBounds(bounds); } catch { /* best-effort */ } }
+  const moved = ptyManager.reassignOwner(old.webContents, next.webContents);
+  try { hive.appendLog({ kind: 'render-recovery-recreate', floor: isFloor, ptysMoved: moved }); } catch { /* best-effort */ }
+  if (mainWindow === old) mainWindow = next;
+  try { old.destroy(); } catch { /* already gone */ }
+  return next;
 }
 
 app.on('child-process-gone', (_e, d) => {
