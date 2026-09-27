@@ -32,17 +32,29 @@ const golden = () => JSON.parse(fs.readFileSync(FIXTURE, 'utf8'));
 
 // ─── harness ────────────────────────────────────────────────────────────────
 
+/** The shim's own watchdog (agyStatuslineShim.ts WATCHDOG_MS). */
+const WATCHDOG_MS = 400;
+
 function shimFile(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-shim-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'agy-statusline.cjs');
   fs.writeFileSync(file, AGY_STATUSLINE_SHIM, 'utf8');
-  // Loaded with --require BEFORE the shim: records how long the shim itself ran, from its
-  // first line to process exit, into a side file - so stdout and stderr stay exactly what
-  // the shim wrote. Process creation is outside this window by construction.
+  // Loaded with --require BEFORE the shim: records how long the shim itself ran (first line to
+  // exit) AND which of its timers fired, into a side file - so stdout and stderr stay exactly
+  // what the shim wrote. With SHIM_STRETCH_WATCHDOG=1 the shim's 400 ms watchdog is pushed to
+  // 60 s: a path that must end ON ITS OWN then either does, or hangs until the test guard kills
+  // it. That is the contract itself, with no wall-clock bound a busy machine can break
+  // (FLAKY-TIMING: the old '< 300 ms in-process' bounds flaked under the full suite).
   fs.writeFileSync(path.join(dir, 'timing-preload.cjs'),
     "const t0 = process.hrtime.bigint();\n" +
-    "process.on('exit', () => { require('fs').writeFileSync(process.env.SHIM_ELAPSED_FILE, String(Number(process.hrtime.bigint() - t0) / 1e6)); });\n");
+    "const fired = [];\n" +
+    "const realSetTimeout = global.setTimeout;\n" +
+    "global.setTimeout = function (fn, ms, ...rest) {\n" +
+    "  const delay = process.env.SHIM_STRETCH_WATCHDOG === '1' && ms === " + WATCHDOG_MS + " ? 60000 : ms;\n" +
+    "  return realSetTimeout(function (...a) { fired.push(ms); return fn.apply(this, a); }, delay, ...rest);\n" +
+    "};\n" +
+    "process.on('exit', () => { require('fs').writeFileSync(process.env.SHIM_ELAPSED_FILE, JSON.stringify({ ms: Number(process.hrtime.bigint() - t0) / 1e6, fired })); });\n");
   return { dir, file };
 }
 
@@ -68,13 +80,13 @@ async function server(t, dir) {
 }
 
 /** Run the shim. `stdin` null leaves stdin OPEN (to test the watchdog). */
-function runShim(file, { stdin, env = {}, args = [], preload = null } = {}) {
+function runShim(file, { stdin, env = {}, args = [], preload = null, stretchWatchdog = false } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const elapsedFile = path.join(path.dirname(file), `elapsed-${++elapsedSeq}.txt`);
     const extra = preload ? ['--require', preload] : [];
     const child = spawn(process.execPath, ['--require', path.join(path.dirname(file), 'timing-preload.cjs'), ...extra, file, ...args], {
-      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, SHIM_ELAPSED_FILE: elapsedFile, ...env },
+      env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, SHIM_ELAPSED_FILE: elapsedFile, ...(stretchWatchdog ? { SHIM_STRETCH_WATCHDOG: '1' } : {}), ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true
     });
@@ -87,8 +99,9 @@ function runShim(file, { stdin, env = {}, args = [], preload = null } = {}) {
     child.on('close', (code, signal) => {
       clearTimeout(guard);
       let inProcess = null;
-      try { inProcess = Number(fs.readFileSync(elapsedFile, 'utf8')); } catch (e) { /* never exited cleanly */ }
-      resolve({ code: signal ? `killed:${signal}` : code, out, err, ms: Date.now() - started, inProcess });
+      let fired = null;
+      try { const rec = JSON.parse(fs.readFileSync(elapsedFile, 'utf8')); inProcess = rec.ms; fired = rec.fired; } catch (e) { /* never exited cleanly */ }
+      resolve({ code: signal ? `killed:${signal}` : code, out, err, ms: Date.now() - started, inProcess, fired });
     });
     if (stdin !== null) child.stdin.end(stdin);
   });
@@ -109,26 +122,21 @@ const settle = () => new Promise((r) => setTimeout(r, 50));
  * End-to-end latency under a real AGY on a loaded machine is a packaged-gate measurement
  * (commit 5), and a real risk - AGY auto-disables a statusline that keeps failing.
  */
-const WATCHDOG_MS = 400;
-/** A fast path must finish well inside the watchdog. Generous, because a starved CPU
- *  still slows the shim's own few milliseconds of work. */
-const FAST_PATH_MAX_MS = 300;
-/** How far past the watchdog a starved process may be scheduled before it exits. */
-const WATCHDOG_SLACK_MS = 1500;
+/** The shim's 150 ms connect deadline (agyStatuslineShim.ts CONNECT_MS). */
+const CONNECT_MS = 150;
 
 // ─── the happy path ─────────────────────────────────────────────────────────
 
 test('SHIM: one sanitized line out, one envelope to HIVE_SOCK, exit 0 - fast', async (t) => {
   const { dir, file } = shimFile(t);
   const srv = await server(t, dir);
-  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock, AGENT_ID: 'andy-1' } });
+  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock, AGENT_ID: 'andy-1' }, stretchWatchdog: true });
   await settle();
 
-  assert.equal(r.code, 0);
+  assert.equal(r.code, 0, 'exits by itself - with the watchdog out of reach, a hang would be killed by the guard');
   assert.equal(r.out, `AGY ${String.fromCharCode(183)} Gemini 3.8 Flash (High) ${String.fromCharCode(183)} working\n`);
   assert.equal(r.err, '');
-  assert.ok(r.inProcess !== null && r.inProcess < FAST_PATH_MAX_MS,
-    `exits on its own, not by the watchdog: ${r.inProcess} ms in-process (${r.ms} ms wall)`);
+  assert.deepEqual(r.fired, [], `exits on its own: no timer ended it (${r.inProcess} ms in-process)`);
 
   assert.equal(srv.got.length, 1, 'exactly one envelope');
   const lines = srv.got[0].split('\n').filter(Boolean);
@@ -194,10 +202,9 @@ test('SHIM FAILURES: dead socket, bad JSON, empty, array, oversize - all exit 0,
     ['over the 64 KiB ceiling', big, { HIVE_SOCK: srv.sock }]
   ];
   for (const [name, stdin, env] of cases) {
-    const r = await runShim(file, { stdin, env });
-    assert.equal(r.code, 0, `${name}: exit 0`);
-    assert.ok(r.inProcess !== null && r.inProcess < FAST_PATH_MAX_MS,
-      `${name}: exits on its own - ${r.inProcess} ms in-process (${r.ms} ms wall)`);
+    const r = await runShim(file, { stdin, env, stretchWatchdog: true });
+    assert.equal(r.code, 0, `${name}: exit 0, by itself (the watchdog is out of reach)`);
+    assert.ok(r.fired !== null && !r.fired.includes(WATCHDOG_MS), `${name}: exits on its own, not by the watchdog (fired: ${JSON.stringify(r.fired)})`);
     if (name !== 'dead socket') assert.equal(r.out, '', `${name}: nothing printed`);
   }
   await settle();
@@ -208,9 +215,10 @@ test('SHIM WATCHDOG: stdin that never closes still exits 0 at ~400 ms', async (t
   const { file } = shimFile(t);
   const r = await runShim(file, { stdin: null });
   assert.equal(r.code, 0, 'exits by itself - not killed by the test guard');
-  // It ends at all (no hang), and it ends because of the 400 ms watchdog - not before.
-  assert.ok(r.inProcess >= WATCHDOG_MS - 10, `the WATCHDOG ended it, not an early exit: ${r.inProcess} ms in-process`);
-  assert.ok(r.inProcess < WATCHDOG_MS + WATCHDOG_SLACK_MS, `and it did fire: ${r.inProcess} ms in-process`);
+  // It ends at all (no hang), and it ends because of the 400 ms watchdog - not before. Which
+  // timer fired is recorded, so no upper wall-clock bound is needed (the 5 s guard catches a hang).
+  assert.ok(r.fired !== null && r.fired.includes(WATCHDOG_MS), `the WATCHDOG ended it (fired: ${JSON.stringify(r.fired)})`);
+  assert.ok(r.inProcess >= WATCHDOG_MS - 10, `not an early exit: ${r.inProcess} ms in-process`);
 });
 
 test('SHIM CONNECT DEADLINE: a socket that never connects is abandoned at ~150 ms, long before the watchdog', async (t) => {
@@ -223,10 +231,12 @@ test('SHIM CONNECT DEADLINE: a socket that never connects is abandoned at ~150 m
   fs.writeFileSync(hang,
     "const net = require('net');\n" +
     "net.createConnection = function () { return new net.Socket(); };\n");
-  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: 'unused-by-the-fake' }, preload: hang });
-  assert.equal(r.code, 0);
-  assert.ok(r.inProcess !== null && r.inProcess >= 130, `it waited for the deadline: ${r.inProcess} ms`);
-  assert.ok(r.inProcess < 300, `and the DEADLINE ended it, not the 400 ms watchdog: ${r.inProcess} ms in-process`);
+  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: 'unused-by-the-fake' }, preload: hang, stretchWatchdog: true });
+  // With the watchdog out of reach, only the deadline can end this: without it the shim hangs
+  // until the test guard kills it (code 'killed:...'), whatever the machine's load.
+  assert.equal(r.code, 0, 'the DEADLINE ended it (a missing deadline hangs until the guard kills it)');
+  assert.ok(r.fired !== null && r.fired.includes(CONNECT_MS), `the 150 ms deadline fired: ${JSON.stringify(r.fired)}`);
+  assert.ok(r.inProcess >= CONNECT_MS - 20, `it waited for the deadline: ${r.inProcess} ms`);
 });
 
 // ─── endpoint selection ─────────────────────────────────────────────────────
