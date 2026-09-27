@@ -3178,13 +3178,6 @@ function installAppMenu(): void {
 
 
 // ─── IPC: pty lifecycle ─────────────────────────────────────────────────────
-/** Codex stores its rollout transcripts under a PER-AGENT CODEX_HOME
- *  (<hive>/agents/<id>/.codex/sessions/<Y>/<M>/<D>/rollout-*-<sessionId>.jsonl).
- *  A NEWLY added agent gets an empty CODEX_HOME, so `codex resume <sid>` finds
- *  nothing and silently opens a BLANK session — which is exactly what the Add
- *  Agent "resume session" field looked like it was doing. Find the agent whose
- *  CODEX_HOME owns this rollout and RETURN that home so the resumed agent can be
- *  pointed at it (the rollout AND its state_5.sqlite index live there together). */
 /** CODEX-BLOAT-165 fix 1: should this automatic Codex resume start a fresh thread instead?
  *  Logs a `codex-thread-rotated` row when it does. Any read failure keeps the old behaviour. */
 function rotateCodexThread(agentId: string, sid: string, ownerHome: string): boolean {
@@ -3202,6 +3195,13 @@ function rotateCodexThread(agentId: string, sid: string, ownerHome: string): boo
   }
 }
 
+/** Codex stores its rollout transcripts under a PER-AGENT CODEX_HOME
+ *  (<hive>/agents/<id>/.codex/sessions/<Y>/<M>/<D>/rollout-*-<sessionId>.jsonl).
+ *  A NEWLY added agent gets an empty CODEX_HOME, so `codex resume <sid>` finds
+ *  nothing and silently opens a BLANK session — which is exactly what the Add
+ *  Agent "resume session" field looked like it was doing. Find the agent whose
+ *  CODEX_HOME owns this rollout and RETURN that home so the resumed agent can be
+ *  pointed at it (the rollout AND its state_5.sqlite index live there together). */
 function findCodexHomeForSession(sessionId: string, siblingsRoot: string): string | null {
   try {
     if (!sessionId || !/^[0-9a-fA-F][0-9a-fA-F-]{15,}$/.test(sessionId)) return null;
