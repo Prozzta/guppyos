@@ -268,3 +268,74 @@ test('F4: a twice-unconfirmed wake is never burned: reconcile does not re-pend i
   c.reconcile('dw', ['m2']);
   assert.deepEqual(c.state('dw').pending, ['m2']);
 });
+
+// ── Jim's guard tests (CODEX-WAKE-161-AUDIT T1): the safety claims that hold in the code, pinned ──
+// Adopted verbatim from agents/jim-mtujpe28/jim-codex161-guards.test.cjs (they reuse world() above).
+
+test('JIM F2-guard: a human key after our stage -> our stacked draft is HELD, never re-Entered', async () => {
+  const w = world({ enter: 'newline-once' });
+  w.deps.verifySubmit = () => false;
+  w.owner = new AutomaticSubmitOwner(w.deps);
+  assert.deepEqual(await submit(w), { kind: 'COMMITTED' });
+  w.gen += 1; // a human keystroke since STAGE
+  w.deps.verifySubmit = () => true;
+  const out = await submit(w, { requestId: 'wake-1:again', priorText: NUDGE });
+  assert.equal(out.kind, 'INTERFERED');
+  assert.equal(out.reason, 'PRIOR_TEXT_ON_PROMPT');
+  assert.deepEqual(w.writes, [NUDGE, '\r'], 'no Enter pressed on a human-touched draft');
+});
+
+test('JIM F2-guard: composer text ending in our wake but NOT our remembered draft -> HELD', async () => {
+  const w = world({ enter: 'newline-once' });
+  w.deps.verifySubmit = () => false;
+  w.owner = new AutomaticSubmitOwner(w.deps);
+  assert.deepEqual(await submit(w, { text: 'human prefix ' + NUDGE }), { kind: 'COMMITTED' });
+  w.deps.verifySubmit = () => true;
+  const out = await submit(w, { requestId: 'wake-1:again', priorText: NUDGE });
+  assert.equal(out.kind, 'INTERFERED');
+  assert.equal(out.reason, 'PRIOR_TEXT_ON_PROMPT');
+  assert.equal(w.writes.filter((x) => x === '\r').length, 1);
+});
+
+test('JIM F3 on the re-Enter path: a re-Entered draft that stays -> ONE more Enter then SUBMIT_NOT_ACCEPTED', async () => {
+  const w = world({ enter: 'newline' });
+  w.deps.verifySubmit = () => false;
+  w.owner = new AutomaticSubmitOwner(w.deps);
+  assert.deepEqual(await submit(w), { kind: 'COMMITTED' });
+  w.deps.verifySubmit = () => true;
+  const out = await submit(w, { requestId: 'wake-1:again', priorText: NUDGE });
+  assert.equal(out.kind, 'INTERFERED');
+  assert.equal(out.reason, 'SUBMIT_NOT_ACCEPTED');
+  assert.deepEqual(w.writes, [NUDGE, '\r', '\r', '\r'], 'never a second copy; bounded Enters');
+});
+
+test('JIM F3: a human key during the verify window -> the second Enter is NOT sent (HUMAN_INPUT_AFTER_STAGE)', async () => {
+  const w = world({ enter: 'newline' });
+  const read = w.deps.readScreen;
+  w.deps.readScreen = (...a) => { w.gen += 1; return read(...a); };
+  w.owner = new AutomaticSubmitOwner(w.deps);
+  const out = await submit(w);
+  assert.equal(out.kind, 'INTERFERED');
+  assert.equal(out.reason, 'HUMAN_INPUT_AFTER_STAGE');
+  assert.deepEqual(w.writes, [NUDGE, '\r'], 'one Enter only');
+});
+
+test('F4 (Jim, surviving mutant): mail that leaves the disk during its backoff leaves the retry table: back on disk, it is plain pending at once', () => {
+  const c = new WorkerWakeWatchdog();
+  const facts = (now) => ({ agentId: 'dw', ptyId: 'p', paused: false, halted: false, autoDeliveryPaused: false, inhibited: false, lastOutputAt: now - 60_000 });
+  let now = 2_000_000;
+  c.reconcile('dw', ['m1']);
+  for (let i = 0; i < 2; i++) {
+    const claim = c.claim(facts(now), 'reconcile', 'reconcile', now);
+    c.settle(claim, 'COMMITTED', now, true);
+    now += SUBMIT_CONFIRM_MS;
+    c.beat('dw', now);
+    now += 20_000;
+  }
+  assert.deepEqual(c.state('dw').pending, [], 'waiting out a backoff');
+  c.reconcile('dw', []);        // moved to .done by hand
+  c.reconcile('dw', ['m1']);    // and back (a person restored it)
+  assert.deepEqual(c.state('dw').pending, ['m1'], 'no stale retry entry holds it back');
+  const claim = c.claim(facts(now), 'reconcile', 'reconcile', now);
+  assert.equal(/:retry\d+$/.test(claim.requestId), false, 'and it is a fresh announcement, not a retry');
+});
