@@ -293,6 +293,30 @@ test('Jim F2: the seed treats a fenced copy of the heading as absent (it seeds a
   assert.equal(M.seedPinnedSection(dir).seeded, true);
 });
 
+test('Jim re-check (C): an UNCLOSED fence in the lessons is plain text, so the next ## still ends the section (no swallowing, rollover keeps working)', () => {
+  const body = ['## How I work (standing lessons)', '- lesson 1', '```', '- lesson 2', '', '## Notes', '- a note', ''].join('\n');
+  const { pinned, rest } = M.liftPinned(body);
+  assert.match(pinned, /- lesson 1\n```\n- lesson 2\n/);
+  assert.match(rest, /^## Notes\n- a note\n/, 'the notes are not swallowed into the section');
+});
+
+test('Jim re-check (D): an unclosed fence BEFORE the real heading does not hide it (no duplicate seed; lessons not archived)', (t) => {
+  const dir = tmp(t, 'pin167-unclosed-');
+  const text = HEAD + '\n```\n' + PIN + '## Notes\n- n\n';
+  fs.writeFileSync(path.join(dir, 'memory.md'), text);
+  assert.equal(M.seedPinnedSection(dir).seeded, false, 'the real heading is found');
+  assert.equal((fs.readFileSync(path.join(dir, 'memory.md'), 'utf8').match(/## How I work/g) || []).length, 1);
+  assert.match(M.liftPinned(text.slice(HEAD.length)).pinned, /Cite only URLs/);
+});
+
+test('Jim re-check (E): fences pair by character and length (~~~ does not close ```, and a ~~~ fence works)', () => {
+  assert.deepEqual(M.fencedLines(['```', '~~~', '## x', '```']), [true, true, true, true], '~~~ inside ``` is content');
+  assert.deepEqual(M.fencedLines(['~~~', '## y', '~~~']), [true, true, true]);
+  assert.deepEqual(M.fencedLines(['````', '```', '## z', '````']), [true, true, true, true], 'a shorter closer does not close');
+  const body = ['## How I work (standing lessons)', '- l1', '~~~', '## quoted', '~~~', '- l2', '', '## Notes', ''].join('\n');
+  assert.match(M.liftPinned(body).pinned, /- l1\n~~~\n## quoted\n~~~\n- l2\n/);
+});
+
 test('Jim F3: an italic lesson counts; only the seed line does not', () => {
   const txt = HEAD + '\n' + M.PINNED_SEED + '- plain\n_an italic lesson_\n\n## Notes\n';
   assert.equal(M.pinnedStatus('a', txt).lessons, 2);

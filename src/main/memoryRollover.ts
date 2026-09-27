@@ -58,8 +58,29 @@ export interface MemorySplit {
   tail: string;
 }
 
-/** A Markdown code-fence line (``` or ~~~). Headings inside a fence are text, not structure. */
-const FENCE = /^\s*(```|~~~)/;
+/**
+ * Which lines sit inside a code fence (the fence lines included). Headings there are quoted text,
+ * not structure. Paired CommonMark-style (Jim, PINNED re-check): an opener is up to 3 spaces then 3+
+ * backticks or tildes; its closer uses the SAME character, at least as many, and nothing else on
+ * the line. An opener with no closer before the end is plain text, so an unclosed fence can never
+ * swallow the rest of the file. Pure; one helper for liftPinned and the seed check.
+ */
+export function fencedLines(lines: readonly string[]): boolean[] {
+  const out = lines.map(() => false);
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i]);
+    if (!open) continue;
+    const ch = open[1][0];
+    const min = open[1].length;
+    const close = new RegExp(`^ {0,3}\\${ch}{${min},}\\s*$`);
+    let j = i + 1;
+    while (j < lines.length && !close.test(lines[j])) j += 1;
+    if (j >= lines.length) continue; // unclosed: plain text
+    for (let k = i; k <= j; k += 1) out[k] = true;
+    i = j;
+  }
+  return out;
+}
 
 /**
  * Lift every `## How I work (standing lessons)` section (its heading up to the next `## ` heading,
@@ -73,16 +94,16 @@ export function liftPinned(body: string): { pinned: string; rest: string } {
   let rest = '';
   let inside = false;
   let dropBlank = false;
-  let fenced = false;
-  for (const c of chunks) {
+  const fenced = fencedLines(chunks.map((c) => c.replace(/\n$/, '')));
+  for (let i = 0; i < chunks.length; i += 1) {
+    const c = chunks[i];
     const line = c.replace(/\n$/, '');
     if (dropBlank) {
       dropBlank = false;
       if (line.trim() === '') continue;
     }
-    // Jim PINNED F2: inside a code fence a heading is quoted text, never a section boundary.
-    if (FENCE.test(line)) fenced = !fenced;
-    else if (fenced) { if (inside) pinned += c; else rest += c; continue; }
+    // Jim PINNED F2: inside a (paired) code fence a heading is quoted text, never a boundary.
+    if (fenced[i]) { if (inside) pinned += c; else rest += c; continue; }
     if (line.trimEnd() === PINNED_HEADING) {
       if (!pinned) pinned = c;
       inside = true;
@@ -267,8 +288,8 @@ export function seedPinnedSection(dir: string): SeedResult {
   const crlf = raw.includes('\r\n');
   const text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const lines = text.split('\n');
-  let fenced = false;
-  const hasHeading = lines.some((l) => { if (FENCE.test(l)) { fenced = !fenced; return false; } return !fenced && l.trimEnd() === PINNED_HEADING; });
+  const fenced = fencedLines(lines);
+  const hasHeading = lines.some((l, i) => !fenced[i] && l.trimEnd() === PINNED_HEADING);
   if (hasHeading) {
     return { seeded: false, pinnedBytes: Buffer.byteLength(pinnedSection(text), 'utf8') };
   }
