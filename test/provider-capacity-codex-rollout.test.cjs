@@ -97,6 +97,32 @@ test('an APPENDED snapshot is picked up even when Windows keeps the rollout mtim
   h.cleanup();
 });
 
+test('a same-size rewrite is picked up when its rollout mtime advances', () => {
+  const h = makeHome([line(2, 0, '2026-09-09T20:42:56.262Z')]);
+  const s = source();
+  assert.ok(s.observe(h.home));
+  // 2 -> 5 leaves the encoded line the same size, so mtime is the only signal.
+  fs.writeFileSync(h.file, line(5, 0, '2026-09-09T21:30:00.000Z') + '\n');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(h.file, later, later);
+  const obs = s.observe(h.home);
+  assert.ok(obs);
+  assert.equal(obs.windows.find((w) => w.kind === 'FIVE_HOUR').remainingPercent, 95);
+  h.cleanup();
+});
+
+test('a session hook ignores a newer rollout belonging to another session', () => {
+  const h = makeHome([line(20, 0, '2026-09-09T20:42:56.262Z')], ['2026', '09', '09'], 'rollout-2026-09-09T22-42-33-target.jsonl');
+  const other = path.join(path.dirname(h.file), 'rollout-2026-09-09T22-42-34-other.jsonl');
+  fs.writeFileSync(other, line(80, 0, '2026-09-09T21:30:00.000Z') + '\n');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(other, later, later);
+  const obs = source().observe(h.home, { sessionId: 'target' });
+  assert.ok(obs);
+  assert.equal(obs.windows.find((w) => w.kind === 'FIVE_HOUR').remainingPercent, 80);
+  h.cleanup();
+});
+
 test('a NEW session file replaces a cached old-session file without waiting for rescan', () => {
   const h = makeHome([line(2, 0, '2026-09-09T20:42:56.262Z')], ['2026', '09', '09'], 'rollout-2026-09-09T22-42-33-old-session.jsonl');
   const s = source();

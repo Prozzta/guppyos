@@ -185,6 +185,9 @@ interface CodexNoReading {
   sessionId: string;
   firstHookAt: number;
   reported: boolean;
+  /** A null observation after this is the ordinary unchanged-rollout path, not
+   * evidence that the session failed to produce a reading. */
+  gotReading: boolean;
 }
 
 export class HookServer {
@@ -665,7 +668,13 @@ export class HookServer {
       // The agent is carried with the reading: a pool key is a provider fact, and
       // which agents draw on it can only be learned from readings that arrived.
       if (obs) {
-        this.codexNoReading.delete(agentId);
+        let pending = this.codexNoReading.get(agentId);
+        if (!pending || pending.sessionId !== sessionId) {
+          pending = { sessionId: sessionId ?? '', firstHookAt: Date.now(), reported: false, gotReading: true };
+          this.codexNoReading.set(agentId, pending);
+        } else {
+          pending.gotReading = true;
+        }
         this.onCapacity?.(agentId, obs);
         return;
       }
@@ -673,10 +682,10 @@ export class HookServer {
       const now = Date.now();
       let pending = this.codexNoReading.get(agentId);
       if (!pending || pending.sessionId !== sessionId) {
-        pending = { sessionId, firstHookAt: now, reported: false };
+        pending = { sessionId, firstHookAt: now, reported: false, gotReading: false };
         this.codexNoReading.set(agentId, pending);
       }
-      if (!pending.reported && now - pending.firstHookAt >= CODEX_NO_READING_AFTER_MS) {
+      if (!pending.gotReading && !pending.reported && now - pending.firstHookAt >= CODEX_NO_READING_AFTER_MS) {
         pending.reported = true;
         // Diagnostics are appendLog-only: never console-log a session identifier.
         this.hive.appendLog({ kind: 'capacity-codex-no-reading', agentId, sessionId, waitingMs: now - pending.firstHookAt });
