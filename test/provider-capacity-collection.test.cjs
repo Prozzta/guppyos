@@ -99,15 +99,16 @@ test('a Codex reading suppresses the delayed diagnostic across unchanged-file ho
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-codex-has-reading-'));
   const rows = [];
   const file = path.join(home, 'sessions', '2026', '09', '09', 'rollout-2026-09-09T22-42-33-session-1.jsonl');
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ timestamp: '2026-09-09T20:42:56.262Z', ordinal: 1, payload: { rate_limits: { limit_id: 'codex', primary: { used_percent: 2, window_minutes: 300, resets_at: 1789004151 }, secondary: { used_percent: 0, window_minutes: 10080, resets_at: 1789590951 } } } }) + '\n');
   const hive = { sockPath: () => null, codexHomeFor: () => home, recordSession: () => {}, appendLog: (row) => rows.push(row), registry: () => ({ agents: {} }), isGod: () => false };
   const s = new HookServer(hive, () => null, () => ({}), undefined, undefined, undefined, undefined, () => {});
   const originalNow = Date.now;
   let now = 1_000_000;
   Date.now = () => now;
   try {
+    // The usual live order: the first hook lands before Codex creates its rollout.
     s.handle({ hook_event_name: 'UserPromptSubmit', agent_id: 'dwight', session_id: 'session-1' });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ timestamp: '2026-09-09T20:42:56.262Z', ordinal: 1, payload: { rate_limits: { limit_id: 'codex', primary: { used_percent: 2, window_minutes: 300, resets_at: 1789004151 }, secondary: { used_percent: 0, window_minutes: 10080, resets_at: 1789590951 } } } }) + '\n');
     now += 1_000;
     s.handle({ hook_event_name: 'PreToolUse', agent_id: 'dwight', session_id: 'session-1' });
     now += 6 * 60_000;
