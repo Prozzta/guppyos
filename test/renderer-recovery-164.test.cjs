@@ -173,8 +173,7 @@ test('SAMPLER wiring (PARKED, god 2b540e): in-memory only, NOT started, no disk 
   const block = idx.slice(idx.indexOf('const rendererMemory = new RendererMemorySampler({'), idx.indexOf('function startRendererMemorySampler'));
   assert.match(block, /metrics: \(\) => app\.getAppMetrics\(\),\s*now: \(\) => Date\.now\(\)\s*\}\);/, 'no log: nothing is written');
   assert.doesNotMatch(block, /appendLog|appendFileSync|writeFileSync|openSync|fs\./, 'no file write of any kind');
-  const calls = idx.match(/startRendererMemorySampler\(\)/g) ?? [];
-  assert.equal(calls.length, 1, 'only the definition: nothing starts the sampler while it is parked');
+  assert.equal((idx.match(/startRendererMemorySampler\(\);/g) ?? []).length, 0, 'nothing calls the sampler while it is parked');
   assert.match(idx, /recentMemory: \(\) => rendererMemory\.recent\(\),/, 'the crash row is wired (empty while parked)');
   // When it is switched on, its timer never holds the process open.
   assert.match(idx, /rendererMemoryTimer = setInterval\(\(\) => \{ rendererMemory\.sample\(\); \}, SAMPLE_MS\);\s*rendererMemoryTimer\.unref\?\.\(\);/);
