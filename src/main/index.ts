@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
+import { CodexVersionLog, codexSupportsNoDaemon, readCodexVersion } from './codexCli';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
 import {
@@ -647,6 +648,14 @@ hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hoo
 // start-up itself. Settings' semantic memory (`semanticMemory`) is its master switch.
 /** NATIVE-WAKEUP-EMPTY-INDEX (a): the spec's lazy-fork floor after the first window is idle. */
 const NATIVE_MEMORY_PREWARM_DELAY_MS = 30_000;
+/** CODEX-WAKE-161 addendum (b): which Codex CLI the agents run, logged at start and per spawn,
+ *  with a row when it changes (a global npm update silently changes every Codex agent). */
+const codexVersionLog = new CodexVersionLog(join(app.getPath('userData'), 'codex-cli-version.json'), (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } });
+/** The installed Codex CLI: its resolved path and version (null when not installed / unreadable). */
+function codexCliNow(): { path: string | null; version: string | null } {
+  const path = ptyManager.commandPath('codex');
+  return { path, version: readCodexVersion(path) };
+}
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
@@ -3327,6 +3336,14 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // prompt's memory line is written only when the `memory` command really goes first on
       // its PATH.
       const mem = nativeMemory.spawnEnv(opts.hive.id);
+      // CODEX-WAKE-161 addendum (a)+(b): log the CLI this Codex agent gets, and pin it to its
+      // in-process app-server with --no-daemon when (and only when) the CLI has that flag.
+      let codexNoDaemon = false;
+      if (provider === 'codex') {
+        const cli = codexCliNow();
+        codexVersionLog.note(cli.version, cli.path, 'spawn', opts.hive.id);
+        codexNoDaemon = codexSupportsNoDaemon(cli.version);
+      }
       const inj = await hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
         {
@@ -3340,7 +3357,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           theme: readConfig().terminalTheme ?? 'light',
           // W3 — default-MCP consent state + the bundled skills source dir.
           mcpDefaults: readConfig().mcpDefaults,
-          skillsDir: skillsResourceDir()
+          skillsDir: skillsResourceDir(),
+          codexNoDaemon
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and
@@ -6221,6 +6239,12 @@ app.whenReady().then(() => {
   mainWindow?.webContents.once('did-finish-load', () => {
     const t = setTimeout(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
+    // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
+    // start a login shell on macOS). Only when Codex is installed at all.
+    const c = setTimeout(() => {
+      try { const cli = codexCliNow(); if (cli.path) codexVersionLog.note(cli.version, cli.path, 'app-start'); } catch { /* best-effort */ }
+    }, NATIVE_MEMORY_PREWARM_DELAY_MS);
+    c.unref?.();
   });
   // Auto-start the Slack webhook server when configured. Best-effort: a tunnel
   // failure (offline) is logged, not fatal. The tunnel URL is ephemeral and

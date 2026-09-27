@@ -900,6 +900,8 @@ export class HiveManager {
        *  copied into the agent's `.claude/skills/` per spawn; undefined or missing
        *  is a no-op (tolerated until Kevin populates the resource dir). */
       skillsDir?: string;
+      /** CODEX-WAKE-161 (a): the installed Codex CLI has `--no-daemon` (>= 0.157.0). */
+      codexNoDaemon?: boolean;
     } = {}
   ): Promise<SpawnInjection> {
     const root = this.root();
@@ -1069,6 +1071,11 @@ export class HiveManager {
               // that already vets hook sources"). Without it the hooks silently
               // never fire. Must precede the positional prompt.
               preArgs.push('--dangerously-bypass-hook-trust');
+              // CODEX-WAKE-161 (a): pin the in-process app-server each agent already runs (no
+              // shared background server across agents; silences the "running without the
+              // shared background server" notice). Only for a CLI that has the flag: an older
+              // one refuses unknown flags, and the agent would not start.
+              if (opts.codexNoDaemon) preArgs.push('--no-daemon');
             }
             else if (desc.shim === 'pi') {
               // Pi (earendil-works) has a rich pi.on(event) lifecycle. We drop a
