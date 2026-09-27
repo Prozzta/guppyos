@@ -164,7 +164,9 @@ export class CapacityRuntime {
     // a real limitation. It never CHANGES a binding either: an agent already bound
     // elsewhere stays where its own live readings put it.
     const skipBind = !!agentId && result.unconfirmedRestore === 'HEALTHY' && this.poolForAgent.get(agentId) !== obs.poolKey;
-    if (skipBind) {
+    // Logged only for an agent still UNBOUNDED: one already bound elsewhere keeps that
+    // binding, and a skip beside it is not news (Andy, CAP-163 N1).
+    if (skipBind && !this.poolForAgent.has(agentId as string)) {
       const key = `${agentId}|${obs.poolKey}`;
       if (!this.loggedBindSkips.has(key)) {
         this.loggedBindSkips.add(key);

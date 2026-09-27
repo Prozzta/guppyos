@@ -569,6 +569,10 @@ export class ProviderCapacityTracker {
         if (identical) {
           if (!prev.restoredUnconfirmed) return { accepted: true, changed: false, reason: 'DUPLICATE' };
           const healthy = allWindowsPositive(prev.observation) && prev.continuitySince === null
+            // `!prev.conflicted` is defensive only: a restore commits conflicted=false and any
+            // live commit clears restoredUnconfirmed, so the two never meet (Andy, CAP-163 N2).
+            // `!prev.capBreach` is defensive too: a breach is stored as its bounded stand-in with
+            // no windows, which allWindowsPositive already refuses.
             && !prev.capBreach && !prev.conflicted && !hasHardEvidence(prev.observation);
           return { accepted: true, changed: false, reason: 'DUPLICATE', unconfirmedRestore: healthy ? 'HEALTHY' : 'NOT_HEALTHY' };
         }

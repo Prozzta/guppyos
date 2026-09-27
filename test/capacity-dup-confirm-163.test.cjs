@@ -111,12 +111,13 @@ test('a restored EXHAUSTED reading re-read as a duplicate still binds and HOLDS 
 });
 
 test('an agent ALREADY bound keeps its binding when a restored duplicate arrives', () => {
-  const { rt } = restarted(obs([win(), weekly()]));
+  const { rt, rows } = restarted(obs([win(), weekly()]));
   const other = { ...obs([win(), weekly()]), poolKey: 'codex:acct-b:codex', accountScope: 'acct-b', streamId: 'codex-rollout:/b.jsonl', observedAt: RESTART, receivedAt: RESTART };
   rt.ingest('dwight', other);
   assert.equal(rt.poolKeyOf('dwight'), 'codex:acct-b:codex');
   rt.ingest('dwight', obs([win(), weekly()]));
   assert.equal(rt.poolKeyOf('dwight'), 'codex:acct-b:codex', 'the skip never unbinds');
+  assert.deepEqual(rows.filter((r) => r.outcome === 'skipped-restored-duplicate'), [], 'no skip row for an agent already bound elsewhere (Andy N1)');
 });
 
 test('tracker: the DUPLICATE result names an unconfirmed restore and its health; a plain duplicate does not', () => {
@@ -157,4 +158,64 @@ test('the settle row carries the owner\'s detail: a CAPACITY_HOLD says which bas
   const settle = diags.find((d) => d.stage === 'settle');
   assert.ok(settle, 'a settle row');
   assert.deepEqual([settle.outcome, settle.reason, settle.detail], ['REFUSED', 'CAPACITY_HOLD', 'UNKNOWN:INDETERMINATE']);
+});
+
+/** A runtime whose tracker restored the given store pools (e.g. a carried continuitySince). */
+function restartedWith(pools) {
+  const now = RESTART;
+  const tracker = new ProviderCapacityTracker(L0_SEM_POLICY, () => now, () => 0);
+  assert.equal(restoreCapacityStore(tracker, JSON.parse(JSON.stringify(pools))), 1);
+  const rt = new CapacityRuntime({ deliver: () => {}, now: () => now, setTimer: () => ({}), clearTimer: () => {} }, tracker);
+  return { rt, tracker };
+}
+
+/** Each HEALTHY clause, pinned on an otherwise all-positive restore (Andy, CAP-163): the
+ *  duplicate must BIND the agent and its wake must HOLD, never proceed unbound. */
+function mustHold(rt, tracker, label) {
+  assert.equal(rt.poolKeyOf('dwight'), KEY, `${label}: bound to the unconfirmed pool`);
+  const v = verdictFor(rt, 'dwight');
+  assert.equal(v.action, 'HOLD', `${label}: held (${v.basis})`);
+  assert.equal(tracker.pool(KEY).state, 'UNKNOWN');
+}
+
+// Through the real store a hard-evidence reading always carries its limit identity
+// (continuitySince), so the continuity clause catches it first. These two restore a store
+// entry WITHOUT the since (a store written before continuity existed, or edited), which is
+// the only way the hard-evidence clause decides alone - so each pins that clause by itself.
+test('HEALTHY needs no hard evidence: positive windows but providerReachedType set -> binds and HOLDS', () => {
+  const r = { ...obs([win(), weekly()]), providerReachedType: 'rate_limit_reached' };
+  const { rt, tracker } = restartedWith([{ observation: r, continuitySince: null }]);
+  rt.ingest('dwight', { ...r });
+  mustHold(rt, tracker, 'providerReachedType');
+});
+
+test('HEALTHY needs no hard evidence: positive windows but ordinaryUsageAllowed false -> binds and HOLDS', () => {
+  const r = { ...obs([win(), weekly()]), ordinaryUsageAllowed: false };
+  const { rt, tracker } = restartedWith([{ observation: r, continuitySince: null }]);
+  rt.ingest('dwight', { ...r });
+  mustHold(rt, tracker, 'ordinaryUsageAllowed:false');
+});
+
+test('HEALTHY needs no carried limit identity: positive windows but a restored continuitySince -> binds and HOLDS', () => {
+  const r = obs([win(), weekly()]);
+  const { rt, tracker } = restartedWith([{ observation: r, continuitySince: T0 - 3_600_000 }]);
+  rt.ingest('dwight', { ...r });
+  mustHold(rt, tracker, 'continuitySince');
+});
+
+test('the real path: a restored reading with providerReachedType carries its since, and still HOLDS', () => {
+  const r = { ...obs([win(), weekly()]), providerReachedType: 'rate_limit_reached' };
+  const { rt, tracker } = restarted(r);
+  rt.ingest('dwight', { ...r });
+  mustHold(rt, tracker, 'providerReachedType via the store');
+});
+
+// A breach is stored as its bounded stand-in with NO windows, so allWindowsPositive already
+// refuses it and the capBreach clause is defensive (it cannot decide alone). The case still
+// pins the behaviour: an over-cap restore must never leave the agent unbound.
+test('HEALTHY needs no cap breach: an over-cap restore (17 all-positive windows) -> binds and HOLDS', () => {
+  const many = Array.from({ length: 17 }, (_, i) => win({ windowId: `w${i}`, label: `w${i}` }));
+  const { rt, tracker } = restarted(obs(many));
+  rt.ingest('dwight', obs(many.map((w) => ({ ...w }))));
+  mustHold(rt, tracker, 'capBreach');
 });
