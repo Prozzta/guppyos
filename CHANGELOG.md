@@ -11,6 +11,34 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.64] — 2026-09-27
+
+**The app window recovers by itself if its view crashes, and a crash now leaves a local dump.**
+Rollback: 1.1.63 (reinstall).
+
+### Fixed
+
+- **A crashed view no longer leaves a white window.** In 1.1.62 the part of the app that draws
+  the window crashed once and nothing replaced it: the window stayed white for hours while the
+  agents kept working unseen. Now the app brings the view back on its own:
+  - the first crash reloads the window after half a second;
+  - a second crash within two minutes replaces the window, and it keeps every agent terminal;
+  - a third crash within two minutes stops, and a dialog lets you quit.
+  The agents keep running throughout. A restored view opens straight on your agents, not on the
+  hive picker, and shows a short "restored" note. Terminal history from before the crash is not
+  shown again.
+- **The app can always be quit.** If the window's view is gone, quitting asks in a native dialog
+  instead of waiting on the view.
+
+### Added
+
+- **Local crash dumps.** If the view crashes, a crash dump is saved in the app's own folder, never
+  sent anywhere, so the cause can be found. The newest three are kept, and the crash's log row
+  names its dump.
+- **Memory notes for the view.** Once a minute the app notes how much memory the view and the
+  graphics process use, in memory only. The last ten readings go into the crash row, and a log
+  row is written only if the view passes 1.5 GB or doubles in size.
+
 ## [1.1.63] — 2026-09-27
 
 **Agents keep their context across a quick restart, start-up no longer freezes, and you can pick which update to install.**
