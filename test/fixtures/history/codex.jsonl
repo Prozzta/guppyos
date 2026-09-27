@@ -1,0 +1,21 @@
+{"timestamp":"2026-01-01T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-000000000001","cwd":"C:\\proj","originator":"codex-tui","base_instructions":{"text":"You are Codex"}}}
+{"timestamp":"2026-01-01T10:00:00.100Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-01-01T10:00:00.200Z","ordinal":2,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer instructions"}]}}
+{"timestamp":"2026-01-01T10:00:00.300Z","ordinal":3,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>x</environment_context>"}]}}
+{"timestamp":"2026-01-01T10:00:01.000Z","ordinal":4,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"UserMessage","id":"i1","content":[{"type":"text","text":"hi","text_elements":[]}]}}}
+{"timestamp":"2026-01-01T10:00:02.000Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"Reasoning","id":"r1","summary_text":[],"raw_content":[]}}}
+{"timestamp":"2026-01-01T10:00:02.100Z","ordinal":6,"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"gAAAA"}}
+{"timestamp":"2026-01-01T10:00:03.000Z","ordinal":7,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"Hello! Running tests."}],"phase":"commentary"}}}
+{"timestamp":"2026-01-01T10:00:03.100Z","ordinal":8,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello! Running tests."}]}}
+{"timestamp":"2026-01-01T10:00:03.200Z","ordinal":9,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"c1","name":"exec","input":"const r = await run()"}}
+{"timestamp":"2026-01-01T10:00:04.000Z","ordinal":10,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"CommandExecution","id":"e1","command":["C:\\Windows\\powershell.exe","-Command","npm test"],"parsed_cmd":[{"type":"unknown","cmd":"npm test"}],"status":"completed","stdout":"RAW TOOL OUTPUT","aggregated_output":"RAW TOOL OUTPUT","exit_code":1}}}
+{"timestamp":"2026-01-01T10:00:04.100Z","ordinal":11,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"RAW TOOL OUTPUT"}]}}
+{"timestamp":"2026-01-01T10:00:05.000Z","ordinal":12,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"FileChange","id":"f1","changes":{"C:\\proj\\a.ts":{"type":"update","unified_diff":"@@ -1 +1 @@"}},"status":"completed"}}}
+{"timestamp":"2026-01-01T10:00:06.000Z","ordinal":13,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"Extension","kind":"web.search","id":"w1","query":"codex rollout format","results":[{"snippet":"RAW TOOL OUTPUT"}]}}}
+{"timestamp":"2026-01-01T10:00:07.000Z","ordinal":14,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1}},"rate_limits":{"limit_id":"codex"}}}
+{"timestamp":"2026-01-01T10:00:08.000Z","ordinal":15,"type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}}
+{"timestamp":"2026-01-01T10:00:08.100Z","ordinal":16,"type":"event_msg","payload":{"type":"item_completed","turn_id":"t1","item":{"type":"ContextCompaction","id":"cc1"}}}
+{"timestamp":"2026-01-01T10:00:09.000Z","ordinal":17,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"done"}}
+{"timestamp":"2026-01-01T10:00:10.000Z","type":"event_msg","payload":{"type":"user_message","message":"legacy prompt"}}
+{"timestamp":"2026-01-01T10:00:11.000Z","type":"event_msg","payload":{"type":"agent_message","message":"legacy reply"}}
+{"timestamp":"2026-01-01T10:00:12.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"ls\"]}","call_id":"c2"}}
