@@ -222,7 +222,7 @@ test('(1) REAL loop delay: Node\'s histogram sees a blocked main thread in the r
 
 // ── the renderer half ───────────────────────────────────────────────────────
 
-test('(1) renderer: buffered long tasks and each terminal\'s FIRST redraw go to main in batches; after 60 s it stops, disconnects and flushes', () => {
+test('(1) renderer: buffered long tasks and each terminal\'s FIRST redraw go to main in batches; after 55 s (R2: before main closes) it stops, disconnects and flushes', () => {
   const sent = [];
   const timers = [];
   let observer = null;
@@ -250,7 +250,7 @@ test('(1) renderer: buffered long tasks and each terminal\'s FIRST redraw go to 
     const flush = timers.find((x) => x.kind === 'i');
     const stop = timers.find((x) => x.kind === 't');
     assert.equal(flush.ms, 2_000);
-    assert.equal(stop.ms, 60_000 - 400);
+    assert.equal(stop.ms, 55_000 - 400, 'R2: the final batch leaves before main closes at 60 s');
     assert.equal(timers.filter((x) => x.kind === 't').length, 1, 'armed once');
 
     observer.cb({ getEntries: () => [{ startTime: 100.4, duration: 812.6, name: 'self', attribution: [{ containerType: 'window', containerSrc: 'https://x' }] }, { startTime: 1, duration: 20, name: 'self' }] });
@@ -290,11 +290,12 @@ test('(1) WIRING: armed in whenReady, window-ready on the main window, the memor
   assert.ok(ready.indexOf('startupTiming.start();') > 0 && ready.indexOf('startupTiming.start();') < ready.indexOf('bootstrapHiveServices();'), 'armed before the hive and the agents start');
   assert.match(idx, /mainWindow\?\.webContents\.once\('did-finish-load', \(\) => \{\s*startupTiming\.mark\('window-ready'\);/);
   assert.match(idx, /fork: \(entry\) => \{\s*startupTiming\.mark\('memory-worker-fork'\);\s*return utilityProcess\.fork\(entry, \[\], \{ serviceName: 'munder-memory'/);
-  assert.match(idx, /spawned: \(id\) => startupTiming\.mark\('agent-spawn', id\),\s*firstOutput: \(id\) => startupTiming\.mark\('agent-first-output', id\),\s*recording: \(\) => startupTiming\.recording/);
+  assert.match(idx, /spawned: \(id\) => startupTiming\.mark\('agent-spawn', id\),\s*firstOutput: \(id\) => startupTiming\.mark\('agent-first-output', id\),\s*output: \(id, chars\) => startupTiming\.ptyOutput\(id, chars\),\s*recording: \(\) => startupTiming\.recording/);
   assert.match(idx, /ipcMain\.on\('startup:timing', \(_evt, batch: unknown\) => startupTiming\.fromRenderer\(batch\)\)/);
   const pty = code('src/main/pty.ts');
-  assert.match(pty, /if \(!session\.hasOutput && this\.startupHooks\) \{ try \{ this\.startupHook\(\)\?\.firstOutput\(id\); \} catch \{\s*\} \}\s*session\.hasOutput = true;/,
-    'first output = the PTY\'s first bytes, checked before hasOutput flips; after the window only a null check');
+  assert.match(pty, /if \(this\.startupHooks\) \{\s*try \{\s*const h = this\.startupHook\(\);\s*if \(h\) \{ if \(!session\.hasOutput\) h\.firstOutput\(id\); h\.output\(id, data\.length\); \}\s*\} catch \{\s*\}\s*\}\s*session\.hasOutput = true;/,
+    'first output = the PTY\'s first bytes, checked before hasOutput flips; R1 counts every chunk (a length); after the window only a null check');
+  assert.match(code('src/renderer/src/components/terminalPool.ts'), /entry\.term\.open\(entry\.host\);\s*entry\.opened = true;\s*noteTerminalOpen\(entry\.ptyId\);/, 'R1: terminal-open mark');
   assert.match(pty, /proc\.onData\(\(data\) => this\.deliverData\(opts\.id, session, data\)\);\s*if \(this\.startupHooks\) \{ try \{ this\.startupHook\(\)\?\.spawned\(opts\.id\); \} catch \{\s*\} \}/);
   assert.match(pty, /if \(h && !h\.recording\(\)\) this\.startupHooks = null;/, 'the hooks drop themselves when the recorder stops');
   const pool = code('src/renderer/src/components/terminalPool.ts');
@@ -374,4 +375,52 @@ test('(2) WIRING: the IPC answers from statusReport (never query(\'status\') dir
   const panel = code('src/renderer/src/components/MemoryPanel.tsx');
   assert.match(panel, /status\.running === false\s*\? \{ dot: 'var\(--cth-mint\)', label: 'On · starts on first use' \}/);
   assert.match(code('src/preload/index.ts'), /running: boolean;/);
+});
+
+// ── Jim's R1-R4 (STARTUP-TIMING-162-AUDIT) ─────────────────────────────────────────────────
+
+test('R1: per-terminal output counts per second, one row per terminal per loop row (and at stop); counts only, no content; nothing after stop', () => {
+  const r = rig();
+  r.rec.start();
+  r.rec.ptyOutput('god', 100);            // second 0 (t=500)
+  r.advance(600); r.rec.ptyOutput('god', 50);   // t=1100: second 1
+  r.rec.ptyOutput('dwight-1', 3_000_000);
+  r.advance(2_000); r.rec.ptyOutput('god', 7);  // t=3100: second 3
+  r.rec.ptyOutput('god', 0); r.rec.ptyOutput('god', NaN); r.rec.ptyOutput('C:\evil path', 5);
+  for (let i = 0; i < STARTUP_LOOP_ROW_SAMPLES; i++) r.tick(1);
+  const rows = r.rows.filter((x) => x.ev === 'pty-bytes');
+  assert.deepEqual(rows, [
+    { kind: 'startup-timing', ev: 'pty-bytes', id: 'god', t: 0, stepMs: 1000, chars: [100, 50, 0, 7] },
+    { kind: 'startup-timing', ev: 'pty-bytes', id: 'dwight-1', t: 1000, stepMs: 1000, chars: [3_000_000] }
+  ], 'flushed with the loop row; an unsafe id is never written');
+  r.rec.ptyOutput('god', 9);
+  r.rec.stop();
+  assert.deepEqual(r.rows.filter((x) => x.ev === 'pty-bytes').at(-1).chars, [9], 'the partial segment flushes at stop');
+  const n = r.rows.length;
+  r.rec.ptyOutput('god', 9);
+  r.rec.stop();
+  assert.equal(r.rows.length, n);
+});
+
+test('R1: terminal-open is a renderer mark (once per terminal); R3: renderer times are clamped to [0, window]', () => {
+  const r = rig();
+  r.rec.start();
+  r.rec.fromRenderer({
+    marks: [{ name: 'terminal-open', at: 1_000_000 + 2_000, id: 'god' }, { name: 'terminal-open', at: 1_000_000 + 2_500, id: 'god' }],
+    longtasks: [{ at: 1_000_000 - 50_000, ms: 60 }, { at: 1_000_000 + 9e9, ms: 70 }]
+  });
+  r.rec.fromRenderer({ marks: [{ name: 'first-agent-redraw', at: -5, id: 'x' }] });
+  assert.deepEqual(r.rows.filter((x) => x.ev === 'mark').map((m) => [m.name, m.id, m.t]), [['terminal-open', 'god', 2000], ['first-agent-redraw', 'x', 0]]);
+  assert.deepEqual(r.rows.filter((x) => x.ev === 'longtask').map((x) => x.t), [0, STARTUP_TIMING_WINDOW_MS]);
+});
+
+test('R4: both timers are unref\'d (they never hold the process open)', () => {
+  const handles = [];
+  const mk = () => { const h = { unrefd: false, unref() { this.unrefd = true; } }; handles.push(h); return h; };
+  const hist = { enable() {}, disable() {}, reset() {}, max: 0, percentile: () => 0 };
+  const rec = new StartupTiming({ origin: 0, now: () => 10, log: () => {}, histogram: () => hist,
+    setInterval: mk, clearInterval: () => {}, setTimeout: mk, clearTimeout: () => {} });
+  rec.start();
+  assert.equal(handles.length, 2, 'the sampler and the stop timer');
+  assert.ok(handles.every((h) => h.unrefd), 'both unref\'d');
 });

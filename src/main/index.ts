@@ -6212,6 +6212,7 @@ app.whenReady().then(() => {
   ptyManager.setStartupHooks({
     spawned: (id) => startupTiming.mark('agent-spawn', id),
     firstOutput: (id) => startupTiming.mark('agent-first-output', id),
+    output: (id, chars) => startupTiming.ptyOutput(id, chars),
     recording: () => startupTiming.recording
   });
 

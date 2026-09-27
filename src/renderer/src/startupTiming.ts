@@ -1,6 +1,6 @@
 /**
  * STARTUP-TIMING-162, the renderer half: long tasks (>= 50 ms) and each terminal's first
- * redraw (xterm parsed its first bytes) during the first 60 s, sent to main in small batches
+ * redraw (xterm parsed its first bytes) (and each terminal's open) during the first 55 s, sent to main in small batches
  * (main writes the `startup-timing` rows; see src/main/startupTiming.ts). Then it stops.
  *
  * Cheap: the Long Tasks API is the browser's own; a batch leaves at most every 2 s; the data
@@ -8,7 +8,9 @@
  * recording, and one boolean check after. No content: numbers, ids and attribution names only.
  */
 
-export const RENDERER_TIMING_WINDOW_MS = 60_000;
+/** R2: 55 s, not 60: this document starts after main's origin, so its final batch must leave
+ *  before main's 60 s window closes (a later batch is dropped there). */
+export const RENDERER_TIMING_WINDOW_MS = 55_000;
 export const RENDERER_TIMING_FLUSH_MS = 2_000;
 const LONGTASK_MIN_MS = 50;
 
@@ -65,6 +67,12 @@ export function startRendererStartupTiming(): void {
     send();
     redrawn.clear();
   }, left);
+}
+
+/** R1: a terminal was opened (xterm open; WebGL and layout are long-task candidates). */
+export function noteTerminalOpen(ptyId: string): void {
+  if (!recording) return;
+  marks.push({ name: 'terminal-open', at: epoch(performance.now()), id: ptyId });
 }
 
 /** Is this terminal's first redraw still to be reported? (checked before term.write) */

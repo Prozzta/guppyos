@@ -12,6 +12,9 @@
  *                  first bytes), first-agent-redraw (id, xterm parsed its first bytes in the
  *                  renderer), memory-worker-fork
  *   ev 'longtask'  a renderer long task (>= 50 ms): start, duration, attribution names only
+ *   ev 'pty-bytes' (R1) per terminal, the output main forwarded each second (UTF-16 chars, a
+ *                  count only), one row per terminal per ~10 s, so a long task can be matched
+ *                  to the terminal whose replay flooded the renderer at that second
  *   ev 'end'       the worst second and the longest task, so one row answers "where was it"
  *
  * CHEAP, OFF THE HOT PATH: the delay histogram is Node's native one (no JS per tick); the 1 s
@@ -29,10 +32,10 @@ export const STARTUP_LONGTASK_MIN_MS = 50;
 export const STARTUP_MAX_RENDERER_ROWS = 300;
 
 /** The marks main accepts; anything else is dropped. */
-export const STARTUP_MARKS = ['window-ready', 'agent-spawn', 'agent-first-output', 'first-agent-redraw', 'memory-worker-fork'] as const;
+export const STARTUP_MARKS = ['window-ready', 'agent-spawn', 'agent-first-output', 'first-agent-redraw', 'terminal-open', 'memory-worker-fork'] as const;
 export type StartupMark = (typeof STARTUP_MARKS)[number];
 /** The marks a renderer may report (main's own marks cannot be forged over IPC). */
-const RENDERER_MARKS: ReadonlySet<string> = new Set<StartupMark>(['first-agent-redraw']);
+const RENDERER_MARKS: ReadonlySet<string> = new Set<StartupMark>(['first-agent-redraw', 'terminal-open']);
 
 /** The subset of Node's IntervalHistogram used here (values in ns). */
 export interface DelayHistogram {
@@ -83,6 +86,8 @@ export class StartupTiming {
   private worst = { ms: 0, t: 0 };
   private longest = { ms: 0, t: 0 };
   private longtasks = 0;
+  /** R1: per terminal, the chars forwarded per second since `fromSec` (flushed with the loop rows). */
+  private ptyOut = new Map<string, { fromSec: number; chars: number[] }>();
   private readonly windowMs: number;
 
   constructor(private readonly d: StartupTimingDeps) {
@@ -94,6 +99,9 @@ export class StartupTiming {
 
   /** ms since the process started. */
   t(at: number = this.d.now()): number { return Math.round(at - this.d.origin); }
+
+  /** R3: a time reported by the renderer, clamped to the window (never negative or far-future). */
+  private clampT(at: number): number { return Math.min(this.windowMs, Math.max(0, this.t(at))); }
 
   private row(ev: string, extra: Record<string, unknown>): void {
     try { this.d.log({ kind: 'startup-timing', ev, ...extra }); } catch { /* best-effort */ }
@@ -138,6 +146,26 @@ export class StartupTiming {
     this.maxMs = [];
     this.p99Ms = [];
     this.rowStart = this.t();
+    this.flushPty();
+  }
+
+  /** R1: a terminal's output reached main (`chars` = the chunk's length). A count, never content. */
+  ptyOutput(id: string, chars: number): void {
+    if (!this.open || !num(chars) || chars <= 0) return;
+    const sec = Math.max(0, Math.floor(this.t() / 1000));
+    let seg = this.ptyOut.get(id);
+    if (!seg) { seg = { fromSec: sec, chars: [] }; this.ptyOut.set(id, seg); }
+    const i = sec - seg.fromSec;
+    if (i < 0) return;
+    while (seg.chars.length <= i) seg.chars.push(0);
+    seg.chars[i] += chars;
+  }
+
+  private flushPty(): void {
+    for (const [id, seg] of this.ptyOut) {
+      if (ID_RE.test(id)) this.row('pty-bytes', { id, t: seg.fromSec * 1000, stepMs: 1000, chars: seg.chars });
+    }
+    this.ptyOut.clear();
   }
 
   /** A main-side marker. `id` (an agent id) makes it once per id; without one, once per run. */
@@ -146,7 +174,7 @@ export class StartupTiming {
     const key = id ? `${name}\u0000${id}` : name;
     if (this.seen.has(key)) return;
     this.seen.add(key);
-    this.row('mark', { name, t: this.t(at), ...(id ? { id } : {}) });
+    this.row('mark', { name, t: at === undefined ? this.t() : this.clampT(at), ...(id ? { id } : {}) });
   }
 
   /** The renderer's batch (IPC), validated: allow-listed names, safe ids, numbers. */
@@ -169,7 +197,7 @@ export class StartupTiming {
       for (const e of b.longtasks.slice(0, 100)) {
         if (!e || !num(e.at) || !num(e.ms) || e.ms < STARTUP_LONGTASK_MIN_MS || e.ms > 600_000) continue;
         if (!room()) continue;
-        const t = this.t(e.at);
+        const t = this.clampT(e.at);
         const ms = Math.round(e.ms);
         this.longtasks++;
         if (ms > this.longest.ms) this.longest = { ms, t };
@@ -187,6 +215,7 @@ export class StartupTiming {
     if (!this.open) return;
     if (this.hist) this.sample();
     this.flushLoop();
+    this.flushPty();
     this.open = false;
     try { this.hist?.disable(); } catch { /* gone */ }
     this.hist = null;

@@ -341,6 +341,8 @@ export function parseNpmCmdShim(shimPath: string, content: string): NpmShimTarge
 export interface PtyStartupHooks {
   spawned(id: string): void;
   firstOutput(id: string): void;
+  /** R1: a chunk's length (a count, never content). */
+  output(id: string, chars: number): void;
   /** false once the recorder has stopped: the hooks are then dropped. */
   recording(): boolean;
 }
@@ -410,7 +412,12 @@ export class PtyManager {
     // Drop trailing output from a process whose id was already reclaimed by
     // a respawn (or killed) — it would corrupt the new session's screen.
     if (this.sessions.get(id) !== session) return;
-    if (!session.hasOutput && this.startupHooks) { try { this.startupHook()?.firstOutput(id); } catch { /* best-effort */ } }
+    if (this.startupHooks) {
+      try {
+        const h = this.startupHook();
+        if (h) { if (!session.hasOutput) h.firstOutput(id); h.output(id, data.length); }
+      } catch { /* best-effort */ }
+    }
     session.hasOutput = true;
     session.lastOutputAt = Date.now();
     if (session.out) session.out.push(data);

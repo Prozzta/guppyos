@@ -21,7 +21,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
-import { noteFirstAgentRedraw, startupRedrawPending } from '../startupTiming';
+import { noteFirstAgentRedraw, noteTerminalOpen, startupRedrawPending } from '../startupTiming';
 import {
   classifyPathToken, isPathToken, pathTokenMatcher, stripPathToken, type PathAction
 } from '@shared/terminalPaths';
@@ -695,10 +695,10 @@ export function readScreenForNeedle(ptyId: string, needle: string, expectedTail?
     let screenCount = 0;
     for (let y = 0; y < entry.term.rows; y += 1) {
       const line = buf.getLine(buf.baseY + y);
-      if (line && line.translateToString(true).includes(needle)) screenCount += 1;
+      if (line && has(line.translateToString(true))) screenCount += 1;
     }
     return {
-      onPromptRow: promptLine.translateToString(true).includes(needle),
+      onPromptRow: has(promptLine.translateToString(true)),
       screenCount,
       ...(typeof expectedTail === 'string' && expectedTail.length > 0 && expectedTail.length <= 8192
         ? { promptTailMatches: composerRegionEndsWith(buf, buf.baseY + buf.cursorY, expectedTail) }
@@ -953,6 +953,7 @@ function openTerminalOnce(entry: TerminalEntry): void {
   if (entry.opened) return;
   entry.term.open(entry.host);
   entry.opened = true;
+  noteTerminalOpen(entry.ptyId);   // STARTUP-TIMING-162 R1 (only in the first 55 s)
   entry.unsub.push(attachInputOrigin(entry.ptyId, entry.term));
   establishInputProvenance(entry);
 }
