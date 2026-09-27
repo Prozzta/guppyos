@@ -1,8 +1,7 @@
 /**
- * NATIVE-MEMORY section 6: the CLI's text, byte-compatible with MemPalace 3.7.1 `search`
- * (searcher.py, the hybrid path) so agent prompts and habits need no change. `wake-up` follows
- * the section-4 CONTENT contract instead of the legacy layout's contents, but keeps its frame
- * (the "Wake-up text (~N tokens):" header and the L0/L1 headings).
+ * NATIVE-MEMORY section 6: the `memory` command's text. `search` prints ranked hits;
+ * `wake-up` follows the section-4 CONTENT contract in its frame (the "Wake-up text (~N
+ * tokens):" header and the L0/L1 headings).
  */
 import type { SearchHit } from './store';
 

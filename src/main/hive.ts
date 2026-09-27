@@ -294,6 +294,10 @@ export interface HookBroker {
  *  agent longer than this, and a failed HTTP hook is non-blocking in Claude. */
 export const HOOK_HTTP_TIMEOUT_S = 30;
 
+/** The exact `.gitignore` older builds wrote into each agent dir for a retired indexer (see
+ *  pruneRetiredHiveFiles). Line endings normalised to \n before comparing. */
+export const RETIRED_AGENT_GITIGNORE = 'settings.json\ncursor.json\ninbox/\noutbox/\n.codex/\n';
+
 /** NO_PROXY with loopback added (merged with any existing value, no duplicates). */
 export function mergeNoProxy(existing: string | undefined): string {
   const parts = (existing ?? '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -641,25 +645,31 @@ export class HiveManager {
 
   /**
    * NATIVE-MEMORY section 6: `<root>/bin/memory/`, the directory the app PREPENDS to an agent's
-   * PATH (whenever semantic memory is on), so `mempalace` resolves to the shim before any
-   * mempalace.exe the user may have installed. Two wrappers, both running the shim on Electron-as-Node:
-   * `mempalace.cmd` (cmd.exe, PowerShell) and `mempalace` (Git bash, POSIX sh).
+   * PATH (whenever semantic memory is on), so `memory` resolves to the app's memory command.
+   * Two wrappers, both running the command's script on Electron-as-Node: `memory.cmd` (cmd.exe,
+   * PowerShell) and `memory` (Git bash, POSIX sh). The directory holds ONLY these: anything else
+   * in it (a wrapper an older build wrote) is removed, so no other command name resolves from it.
    * Written only when the content changed, via temp + rename: a shell may be reading it.
    * Returns the directory, or null (no hive, or the write failed).
    */
-  writeMemoryShim(shimScript: string): string | null {
+  writeMemoryCommand(script: string): string | null {
     const root = this.root();
     if (!root) return null;
     const dir = join(root, 'bin', 'memory');
     const exe = process.execPath;
     const files: Array<[string, string, number]> = process.platform === 'win32'
       ? [
-          ['mempalace.cmd', `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${shimScript}" %*\r\n`, 0o644],
-          ['mempalace', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${shimScript.replace(/\\/g, '/')}" "$@"\n`, 0o755]
+          ['memory.cmd', `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${script}" %*\r\n`, 0o644],
+          ['memory', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, 0o755]
         ]
-      : [['mempalace', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${shimScript}" "$@"\n`, 0o755]];
+      : [['memory', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${script}" "$@"\n`, 0o755]];
     try {
       mkdirSync(dir, { recursive: true });
+      const keep = new Set(files.map(([name]) => name));
+      for (const name of readdirSync(dir)) {
+        if (keep.has(name)) continue;
+        try { rmSync(join(dir, name), { force: true, recursive: true }); } catch { /* in use: retried at the next spawn */ }
+      }
       for (const [name, content, mode] of files) {
         const p = join(dir, name);
         let cur: string | null = null;
@@ -672,7 +682,7 @@ export class HiveManager {
       }
       return dir;
     } catch (e) {
-      console.error('[hive] writeMemoryShim failed:', e);
+      console.error('[hive] writeMemoryCommand failed:', e);
       return null;
     }
   }
@@ -826,8 +836,25 @@ export class HiveManager {
     // read its history, and every commit cost ~59 process starts (git plus the identity-guard
     // hooks), each an antivirus scan. A new hive is not git-initialised; an existing hive/.git
     // is LEFT ON DISK untouched (the Human can remove it), and its hooks simply stop firing.
-    // MEMPALACE-REMOVAL: the per-agent mine-ignore .gitignore files are no longer written (only
-    // `mempalace mine` read them); existing ones are left on disk.
+    this.pruneRetiredHiveFiles(root);
+  }
+
+  /**
+   * 1.1.60: remove files older builds generated that nothing reads any more. Only files the app
+   * wrote itself go: `<hive>/memory-engine.json` (the old memory mode switch), and an agent's
+   * `.gitignore` whose content is EXACTLY the list the app used to write there (an edited one is
+   * the user's and stays). Idempotent and best-effort: a failure leaves the file for next time.
+   */
+  pruneRetiredHiveFiles(root: string): void {
+    try { rmSync(join(root, 'memory-engine.json'), { force: true }); } catch { /* next start */ }
+    let ids: string[] = [];
+    try { ids = readdirSync(join(root, 'agents')); } catch { return; }
+    for (const id of ids) {
+      const p = join(root, 'agents', id, '.gitignore');
+      try {
+        if (readFileSync(p, 'utf8').replace(/\r\n/g, '\n') === RETIRED_AGENT_GITIGNORE) rmSync(p, { force: true });
+      } catch { /* absent or unreadable: leave it */ }
+    }
   }
 
   /** Validate an agent's cwd the way a spawn does — it must be an ABSOLUTE path
@@ -1649,11 +1676,10 @@ export class HiveManager {
     const inRoot = (...parts: string[]): string => join(root, ...parts);
     const ctxLine = 'LIVE CONTEXT: each agent row in the LIVE ROSTER carries a `ctx NN%` tag — its live context-window occupancy. Treat it as the real headroom signal when routing: prefer an agent with a LOW `ctx` for a big task; treat a HIGH `ctx` (near 100%) as busy rather than idle, even if the cumulative token count looks modest.';
 
-    // MEMPALACE-REMOVAL: `semanticMemory` is true only when the spawn really put the memory
-    // engine's `mempalace` shim first on the agent's PATH (Jim M2), so this line never points an
-    // agent at some other `mempalace` the user may have installed.
+    // `semanticMemory` is true only when the spawn really put the app's `memory` command first
+    // on the agent's PATH (Jim M2), so this line never names a command the agent cannot run.
     const memoryLine = semanticMemory
-      ? 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `mempalace search "<query>"`; run `mempalace wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
+      ? 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `memory search "<query>"`; run `memory wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
       : '';
     // Enterprise Knowledge Graph (opt-in). Volatile-free: the bundled-node launcher
     // and the KG CLI are both fixed absolute paths for an install, so baking them
@@ -3528,11 +3554,11 @@ human rather than retry. Route work to an agent already on the floor first eithe
 
 ## Semantic memory (the built-in memory engine)
 When semantic memory is on (Settings; the default), the hive shares a searchable
-memory and you have the \`mempalace\` command, served by the app's memory engine:
-- \`mempalace search "<query>"\` — recall relevant past knowledge across the whole
+memory and you have the \`memory\` command, served by the app's memory engine:
+- \`memory search "<query>"\` — recall relevant past knowledge across the whole
   team by meaning (not just keywords). Add \`--wing <agent-id>\` to scope to one
   agent, \`--results N\` to widen.
-- \`mempalace wake-up\` — a short digest of what matters, good at the start of a task.
+- \`memory wake-up\` — a short digest of what matters, good at the start of a task.
 
 Your \`memory.md\` is indexed automatically, so the durable facts you write there
 become searchable by every agent. There is no \`mine\` step.

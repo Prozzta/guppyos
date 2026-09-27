@@ -1,8 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
-import { deleteLegacyPalace, legacyPalaceInfo, stopLegacyDaemon } from './legacyPalace';
-import { killTreesAsync } from './procKill';
-import { NativeMemoryWiring, toUnpacked, withMemoryPath } from './nativeMemory/mainWiring';
+import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn } from 'node:child_process';
 import {
@@ -25,7 +23,7 @@ import { resolveCommand as resolveCliCommand, isSafeCommandName } from './shellE
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import {
-  readConfig, writeConfig, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
+  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import {
@@ -644,7 +642,7 @@ hookServer.setHeavyLock(heavyLock);
 // writes the command hooks exactly as before.
 // LOG-STALL-AV F1: the app keeps log.jsonl / cost-ledger.jsonl open (closed on quit).
 hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), revoke: (id) => hookServer.revokeHookToken(id) });
-// NATIVE-MEMORY: the memory engine (the only one since MEMPALACE-REMOVAL, 1.1.59). It runs in a
+// NATIVE-MEMORY: the memory engine (the only memory). It runs in a
 // utility process forked on the first memory request or the post-start prewarm, never at
 // start-up itself. Settings' semantic memory (`semanticMemory`) is its master switch.
 /** NATIVE-WAKEUP-EMPTY-INDEX (a): the spec's lazy-fork floor after the first window is idle. */
@@ -657,7 +655,7 @@ const nativeMemory = new NativeMemoryWiring({
   workerEntry: join(__dirname, 'memoryWorker.js'),
   fork: (entry) => utilityProcess.fork(entry, [], { serviceName: 'munder-memory', stdio: 'ignore' }) as unknown as WorkerHandle,
   memoryBaseUrl: () => hookServer.memoryBaseUrl(),
-  writeShim: (shimScript) => hive.writeMemoryShim(shimScript),
+  writeCommand: (script) => hive.writeMemoryCommand(script),
   log: (row) => hive.appendLog(row),
   vecLoadablePath: () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -672,21 +670,6 @@ function deleteMemoryIndex(file: string | null): void {
   for (const f of [file, `${file}-wal`, `${file}-shm`]) {
     try { rmSync(f, { force: true, maxRetries: 10, retryDelay: 100 }); } catch (e) { console.error('[memory] rm index', f, e); }
   }
-}
-/** MEMPALACE-REMOVAL start-up notes (god's D3 + D4). Never blocks start-up; never throws. */
-function noteLegacyMemoryOnStart(): void {
-  const root = hive.root();
-  const home = readConfig().harnessHome;
-  if (root && existsSync(join(root, 'memory-engine.json'))) {
-    let mode: unknown = null;
-    try { mode = (JSON.parse(readFileSync(join(root, 'memory-engine.json'), 'utf8')) as { mode?: unknown }).mode ?? null; } catch { /* unreadable */ }
-    try { hive.appendLog({ kind: 'memory-engine-json-ignored', mode }); } catch { /* best-effort */ }
-  }
-  void stopLegacyDaemon(home ? join(home, 'palace') : null, {
-    probe: probeProcesses,
-    kill: (pids) => killTreesAsync(pids),
-    log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
-  }).catch(() => undefined);
 }
 // Enterprise Knowledge Graph — file-backed store + agent CLI (default OFF).
 const knowledge = new KnowledgeManager();
@@ -708,7 +691,7 @@ function reflectSettings(): ReflectSettings {
 const reflector = new MemoryReflector(
   () => readConfig().harnessHome,
   () => readConfig().defaultCommand ?? 'claude',
-  // MEMPALACE-REMOVAL: the reflector's Haiku call needs no memory env any more.
+  // The reflector's Haiku call needs no memory env.
   () => ({}),
   reflectSettings,
   (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } }
@@ -3336,11 +3319,13 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // seedDelivery:'type-into-tui') rather than passed on argv. Surfaced in the spawn
   // result so the renderer types it through the per-pty write-chain. (ondev-b)
   let seedPrompt: string | undefined;
+  // `pathPrepend` is main's alone (the memory command's dir); never taken from the renderer.
+  opts.pathPrepend = undefined;
   if (opts.hive && hive.enabled()) {
     try {
       // NATIVE-MEMORY (Jim M2, fail closed): the agent's memory env is decided FIRST, and the
-      // prompt's memory line is written only when the shim really goes first on its PATH. With
-      // no shim, `mempalace` would resolve to whatever the user has installed.
+      // prompt's memory line is written only when the `memory` command really goes first on
+      // its PATH.
       const mem = nativeMemory.spawnEnv(opts.hive.id);
       const inj = await hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
@@ -3369,10 +3354,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       seedPrompt = inj.seedPrompt;
       // The `kg` CLI at the enterprise knowledge store (empty when the KG is off).
       opts.env = { ...(opts.env ?? {}), ...inj.env, ...knowledge.env() };
-      // NATIVE-MEMORY: the agent's MEMORY_TOKEN and PATH with the mempalace shim FIRST, on the
-      // final PATH. Windows env keys are case-insensitive: PATH is set under the key the env
-      // already uses (usually `Path`), never as a second, conflicting one.
-      opts.env = withMemoryPath(opts.env as Record<string, string | undefined>, mem, process.env) as typeof opts.env;
+      // NATIVE-MEMORY: the agent's MEMORY_TOKEN, and the `memory` command's dir FIRST on its
+      // one final PATH (buildPtyEnv merges it; there is never a second PATH-like key).
+      if (mem) {
+        opts.env = { ...opts.env, ...mem.env };
+        opts.pathPrepend = [mem.commandDir];
+      }
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex
@@ -3916,8 +3903,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
       // roster.json + its backups ride along with the hive: the roster is the
       // renderer's half of the same state, and leaving it behind would move the
       // agents' sessions and memory to the new home while their names, notes and
-      // worktree paths stayed at the old one. The old MemPalace `palace` is NOT
-      // copied (MEMPALACE-REMOVAL): nothing reads it; it stays in the old home.
+      // worktree paths stayed at the old one.
       for (const sub of ['hive', 'roster.json', 'roster-backups']) {
         const src = join(oldHome, sub);
         if (!existsSync(src)) continue;
@@ -4243,8 +4229,7 @@ ipcMain.handle('skills:reveal', (_evt, path: unknown) => {
  * --version would be a dozen process launches on every panel open, and several of
  * these CLIs boot a TUI when invoked bare. `resolveCommand` returns its input
  * unchanged when it finds nothing, so "resolved to a real, existing path that is
- * not just the bare name" is the found test. (MEMPALACE-REMOVAL: there is no
- * mempalace or uv row any more: memory is built in.)
+ * not just the bare name" is the found test. (Memory is built in: it has no row.)
  */
 ipcMain.handle('tools:status', (): ToolStatus[] => {
   const win = process.platform === 'win32';
@@ -4261,10 +4246,8 @@ ipcMain.handle('tools:status', (): ToolStatus[] => {
 });
 
 // ─── IPC: semantic memory (the memory engine) ───────────────────────────────
-// MEMPALACE-REMOVAL: the Memory panel, Command Center and the voice tools ask the memory
-// engine directly (main-internal, caller wing `human`); there is no CLI to find and no mine
-// step. The status also reports the OLD MemPalace data still on disk, which only the Human
-// can delete (god's D2: confirmed, never automatic, all or nothing).
+// The Memory panel, Command Center and the voice tools ask the memory engine directly
+// (main-internal, caller wing `human`); there is no CLI to find and no mine step.
 const memoryReply = (r: { exit: number; text?: string; error?: string }): { ok: boolean; output: string; error?: string } =>
   r.exit === 0 ? { ok: true, output: r.text ?? '' } : { ok: false, output: r.text ?? '', error: r.error ?? `exit ${r.exit}` };
 ipcMain.handle('hive:memoryStatus', async () => {
@@ -4274,7 +4257,7 @@ ipcMain.handle('hive:memoryStatus', async () => {
     const r = await nativeMemory.query('status');
     if (r.exit === 0 && r.json && typeof r.json === 'object') index = r.json as Record<string, unknown>;
   }
-  return { enabled: readConfig().semanticMemory !== false, available: reason === null, reason, index, legacy: legacyPalaceInfo(readConfig().harnessHome) };
+  return { enabled: readConfig().semanticMemory !== false, available: reason === null, reason, index };
 });
 ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
@@ -4282,25 +4265,6 @@ ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) 
 });
 ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) =>
   memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {})));
-ipcMain.handle('memory:deleteLegacyData', async () => {
-  const home = readConfig().harnessHome;
-  const info = legacyPalaceInfo(home);
-  if (!home || !info) return { ok: true, bytes: 0, paths: [] };
-  const mb = (info.bytes / 1048576).toFixed(0);
-  const opts = {
-    type: 'warning' as const,
-    buttons: [`Delete ${mb} MB`, 'Cancel'],
-    defaultId: 1,
-    cancelId: 1,
-    message: `Delete the old MemPalace data (${mb} MB)?`,
-    detail: `The app no longer uses it. This removes:\n${info.paths.join('\n')}\n\nYour agents' memory is kept: it lives in the memory engine and in each agent's memory.md.`
-  };
-  const choice = mainWindow ? await dialog.showMessageBox(mainWindow, opts) : await dialog.showMessageBox(opts);
-  if (choice.response !== 0) return { ok: false, cancelled: true, error: 'cancelled', locked: [] };
-  const r = deleteLegacyPalace(home);
-  try { hive.appendLog({ kind: 'legacy-palace-delete', ok: r.ok, bytes: r.ok ? r.bytes : info.bytes, ...(r.ok ? {} : { error: r.error, locked: r.locked.slice(0, 20) }) }); } catch { /* best-effort */ }
-  return r;
-});
 // Condense memory.md on demand: an explicit id condenses that one agent (skips
 // the size trigger — a "condense now" button); no id runs a full threshold scan.
 ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>
@@ -4521,9 +4485,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
   // git history) and the memory engine's index of it. Only harness-created data
-  // is removed — never the user's whole harnessHome folder, and never the old
-  // MemPalace `palace` (MEMPALACE-REMOVAL: that is the Human's to delete, in the
-  // Memory panel).
+  // is removed — never the user's whole harnessHome folder.
   await memoryStopped;
   deleteMemoryIndex(memoryIndex);
   const hiveDir = hive.root();
@@ -6006,10 +5968,9 @@ function bootstrapHiveServices(): void {
     if (r.ok && r.endpoint) { hive.setOtelEndpoint(r.endpoint); console.log('[telemetry] collector listening', r.endpoint); }
     else console.error('[telemetry] collector failed to start:', r.error);
   });
-  // MEMPALACE-REMOVAL: nothing to start for memory (the engine forks lazily / at prewarm).
-  // god's D4: a leftover memory-engine.json is ignored; say so once. D3: stop a legacy
-  // daemon 1.1.58 may have left running on this hive's palace, once, in the background.
-  noteLegacyMemoryOnStart();
+  // Nothing to start for memory: the engine forks lazily / at prewarm.
+  const retiredKeys = pruneRetiredConfigKeys();
+  if (retiredKeys.length) { try { hive.appendLog({ kind: 'config-retired-keys-removed', keys: retiredKeys }); } catch { /* best-effort */ } }
   reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
 
   armAlwaysOnBeats();
@@ -6146,7 +6107,7 @@ app.whenReady().then(() => {
         workerEntry: join(__dirname, 'memoryWorker.js'),
         fork: (entry) => utilityProcess.fork(entry, [], { serviceName: 'munder-memory-bench', stdio: 'ignore' }) as unknown as WorkerHandle,
         memoryBaseUrl: baseUrl,
-        writeShim: () => null,
+        writeCommand: () => null,
         log: () => undefined,
         vecLoadablePath: () => {
           // eslint-disable-next-line @typescript-eslint/no-require-imports

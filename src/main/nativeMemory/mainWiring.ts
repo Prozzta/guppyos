@@ -2,11 +2,11 @@
  * NATIVE-MEMORY: the Electron glue in main. Everything here is short and synchronous or a
  * message post; the engine itself is in the utility process (worker.ts).
  *
- * MEMPALACE-REMOVAL (1.1.59): the native engine is the ONLY memory. There is no mode file any
- * more; the one switch is Settings' semantic memory (config `semanticMemory`, default on).
+ * The memory engine is the ONLY memory. There is no mode file:
+ * the one switch is Settings' semantic memory (config `semanticMemory`, default on).
  *
  *   spawnEnv(id)  what a spawning agent gets: MEMORY_TOKEN, the endpoint, the hive root, and the
- *                 shim dir to put FIRST on PATH, or null when memory is off or unavailable (then
+ *                 `memory` command dir to put FIRST on PATH, or null when memory is off or unavailable (then
  *                 the prompt carries no memory line: fail closed, Jim M2)
  *   handle(...)   the HookServer `/memory/<token>` handler (agents)
  *   query(...)    the same ops for main-internal callers (the Memory panel, Command Center,
@@ -16,7 +16,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
 import type { WorkerConfig } from './worker';
 
@@ -36,7 +36,7 @@ export interface WiringDeps {
   workerEntry: string;
   fork: (entry: string) => WorkerHandle;
   memoryBaseUrl: () => string | null;
-  writeShim: (shimScript: string) => string | null;
+  writeCommand: (script: string) => string | null;
   log: (row: Record<string, unknown>) => void;
   /** The sqlite-vec loadable library's path on the REAL filesystem (asar-unpacked), resolved by
    *  sqlite-vec's own `getLoadablePath()` - a path lookup only; main never loads it. The
@@ -51,7 +51,7 @@ export function dbFileFor(userData: string, hiveRoot: string): string {
 }
 
 /** Why memory is not available (one log row per reason per run, not one per spawn). */
-export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'shim-failed';
+export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'command-failed';
 
 export class NativeMemoryWiring {
   readonly tokens = new MemoryTokens();
@@ -118,20 +118,19 @@ export class NativeMemoryWiring {
 
   /**
    * What a spawning agent gets, or null: then the agent has NO memory and its prompt carries no
-   * memory line (Jim M2, fail closed). A null must never fall through to a `mempalace` found on
-   * the user's PATH (their own uv install would search or create ~/.mempalace), which is why the
-   * shim dir is returned on its own: the caller puts it FIRST on the agent's final PATH.
+   * memory line (Jim M2, fail closed). The command dir is returned on its own: the pty layer
+   * puts it FIRST on the agent's one final PATH (buildPtyEnv's `pathPrepend`).
    */
-  spawnEnv(agentId: string): { env: Record<string, string>; shimDir: string } | null {
+  spawnEnv(agentId: string): { env: Record<string, string>; commandDir: string } | null {
     const why = this.unavailable();
     if (why) return why === 'disabled' ? null : this.noteUnavailable(why, agentId);
     const root = this.d.hiveRoot() as string;
-    const shimDir = this.d.writeShim(join(this.d.resourcesDir, 'mempalace-shim.cjs'));
-    if (!shimDir) return this.noteUnavailable('shim-failed', agentId);
+    const commandDir = this.d.writeCommand(join(this.d.resourcesDir, 'memory-cli.cjs'));
+    if (!commandDir) return this.noteUnavailable('command-failed', agentId);
     const env: Record<string, string> = { MEMORY_TOKEN: this.tokens.mint(agentId), MUNDER_HIVE_ROOT: root };
     const url = this.d.memoryBaseUrl();
     if (url) env.MUNDER_MEMORY_URL = url;
-    return { env, shimDir };
+    return { env, commandDir };
   }
 
   /** NATIVE-WAKEUP-EMPTY-INDEX (a), god: fork the worker (its below-normal startup backfill runs;
@@ -177,24 +176,6 @@ export class NativeMemoryWiring {
   shutdown(): Promise<void> {
     return this.client.shutdown();
   }
-}
-
-/**
- * The agent's final env with its memory env merged and the shim dir FIRST on PATH (Jim M2), or
- * `env` unchanged when `mem` is null (no memory: no token, no shim). Windows env keys are
- * case-insensitive, so PATH goes under the key the env already uses (usually `Path`), else the
- * process env's key, never as a second, conflicting one. Pure.
- */
-export function withMemoryPath(
-  env: Record<string, string | undefined>,
-  mem: { env: Record<string, string>; shimDir: string } | null,
-  processEnv: Record<string, string | undefined>
-): Record<string, string | undefined> {
-  if (!mem) return env;
-  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH')
-    ?? Object.keys(processEnv).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-  const basePath = env[pathKey] ?? processEnv[pathKey];
-  return { ...env, ...mem.env, [pathKey]: basePath ? `${mem.shimDir}${delimiter}${basePath}` : mem.shimDir };
 }
 
 /** A path inside app.asar, mapped to its asar-unpacked copy (a DLL cannot load from the archive). */

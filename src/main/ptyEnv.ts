@@ -43,11 +43,23 @@ const CLAUDE_CONFIG_KEEP = new Set([
   'CLAUDE_CODE_USE_VERTEX'
 ]);
 
+/** Env keys are case-insensitive on Windows, so `Path` and `PATH` are the same variable. */
+const isPathKey = (k: string): boolean => k.toUpperCase() === 'PATH';
+
+/**
+ * The child gets exactly ONE PATH key (1.1.60, Jim POST-INSTALL-159 item 7). A
+ * Windows parent env spells it `Path`, and a per-agent env may carry its own. Before, a second
+ * `PATH` key was added beside them, and the child (Git Bash/MSYS) kept one and dropped the other,
+ * losing the memory command's dir. Now every PATH-like key is dropped from both layers, and
+ * the one `PATH` is: `pathPrepend` dirs first, then the agent's own PATH value if it set one,
+ * else `userPath`.
+ */
 export function buildPtyEnv(
   parentEnv: NodeJS.ProcessEnv,
   userPath: string,
   agentEnv?: Record<string, string>,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  pathPrepend: string[] = []
 ): Record<string, string> {
   // Layer 1 — inherit, minus the parent session's Claude identity. Only this
   // layer is stripped: a marker set deliberately via `agentEnv` below survives,
@@ -56,12 +68,22 @@ export function buildPtyEnv(
   const inherited: Record<string, string> = {};
   for (const [k, v] of Object.entries(parentEnv)) {
     if (v === undefined) continue;
+    if (isPathKey(k)) continue;
     if (CLAUDE_MARKER_RE.test(k) && !CLAUDE_CONFIG_KEEP.has(k)) continue;
     inherited[k] = v;
   }
+  const agent: Record<string, string> = {};
+  let agentPath: string | undefined;
+  for (const [k, v] of Object.entries(agentEnv ?? {})) {
+    if (isPathKey(k)) agentPath = v;
+    else agent[k] = v;
+  }
+  const sep = platform === 'win32' ? ';' : ':';
+  const front = pathPrepend.filter(Boolean);
+  const rest = (agentPath ?? userPath).split(sep).filter((p) => p && !front.includes(p));
   return {
     ...inherited,
-    PATH: userPath,
+    PATH: [...front, ...rest].join(sep),
     TERM: 'xterm-256color',
     COLORTERM: 'truecolor',
     // Help apps that look for a real interactive shell
@@ -84,7 +106,7 @@ export function buildPtyEnv(
           LC_CTYPE:
             parentEnv.LC_ALL ?? parentEnv.LC_CTYPE ?? parentEnv.LANG ?? 'en_US.UTF-8'
         }),
-    // Per-agent hive identity (AGENT_ID, HIVE_ROOT, …) when provided.
-    ...(agentEnv ?? {})
+    // Per-agent hive identity (AGENT_ID, HIVE_ROOT, …) when provided (its PATH is merged above).
+    ...agent
   };
 }

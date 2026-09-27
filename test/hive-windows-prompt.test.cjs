@@ -48,7 +48,7 @@ function promptOf(inj) {
 test('no POSIX shell variables survive into agent-facing text', async (t) => {
   const { inj } = await floor(t);
   const prompt = promptOf(inj);
-  for (const dead of ['$HIVE_NODE', '$KG_CLI', '$KG_ROOT', '$MEMPALACE_PALACE_PATH']) {
+  for (const dead of ['$HIVE_NODE', '$KG_CLI', '$KG_ROOT']) {
     assert.ok(!prompt.includes(dead), `${dead} expands to nothing under cmd.exe/PowerShell`);
   }
 });

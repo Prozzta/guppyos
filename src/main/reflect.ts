@@ -195,8 +195,8 @@ export class MemoryReflector {
   /**
    * @param getHome      Lazily resolve harnessHome so reflection follows config.
    * @param getCommand   The base `claude` command (only its binary name is used).
-   * @param getMemoryEnv Extra env merged into the call (empty since MEMPALACE-REMOVAL; kept
-   *   so a future memory env has one place to go).
+   * @param getMemoryEnv Extra env merged into the call (empty today; kept so a future
+   *   memory env has one place to go).
    * @param getSettings  Reflect tunables (interval + thresholds), read each tick.
    * @param appendLog    Sink for `condense`/`condense-abort` events (hive log.jsonl).
    */

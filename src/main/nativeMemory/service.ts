@@ -8,9 +8,6 @@
  *   - fork the worker LAZILY, on the first memory request (never on app start), and re-fork it
  *     after a crash with a bounded backoff.
  * It never opens the database, loads an extension, embeds, reads a source, or runs SQL.
- *
- * MEMPALACE-REMOVAL (1.1.59): the native engine is the only memory; the `memory-engine.json`
- * mode switch, the shadow/parity path and the legacy CLI are gone.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { WorkerConfig } from './worker';
@@ -182,17 +179,15 @@ export class MemoryTokens {
   }
 }
 
-export interface MemoryRequest { cmd?: unknown; args?: unknown; palace?: unknown }
+export interface MemoryRequest { cmd?: unknown; args?: unknown }
 
 const WING = /^[A-Za-z0-9._-]{1,120}$/;
 const ISO = /^\d{4}-\d{2}-\d{2}([T ][0-9:.+Z-]*)?$/;
 
-/** Validate a shim request into a worker op (section 6 ranges). Pure. */
+/** Validate a `memory` command request into a worker op (section 6 ranges). Pure. */
 export function validateRequest(body: MemoryRequest, callerWing: string): { op: string; args: Record<string, unknown> } | { exit: number; error: string } {
   const cmd = body.cmd;
   const a = (body.args && typeof body.args === 'object' ? body.args : {}) as Record<string, unknown>;
-  // MEMPALACE-REMOVAL: `--palace` is accepted and IGNORED (there is one index per hive), so an old
-  // habit such as `--palace C:/Dunder/palace` keeps working instead of turning into exit 2.
   const optWing = (v: unknown): string | null | { bad: true } => (v === undefined || v === null || v === '' ? null : typeof v === 'string' && WING.test(v) ? v : { bad: true });
   if (cmd === 'search') {
     const q = a.query;

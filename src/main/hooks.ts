@@ -145,7 +145,7 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
 /** The broker's URLs: /hook/<agentId>/<32-hex token> (Claude HTTP hooks) and
  *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3). */
 const HOOK_ROUTE = /^\/(hook|mcp|status)\/([^/?#]+)\/([0-9a-f]{32})$/;
-/** NATIVE-MEMORY: the `mempalace` shim's endpoint. The caller is identified by its MEMORY_TOKEN
+/** NATIVE-MEMORY: the `memory` command's endpoint. The caller is identified by its MEMORY_TOKEN
  *  alone (the handler resolves it); no agent id in the URL to trust. */
 const MEMORY_ROUTE = /^\/memory\/([0-9a-f]{32})$/;
 /** A memory request is a query, not a document. */

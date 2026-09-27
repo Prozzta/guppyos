@@ -622,6 +622,26 @@ function migrateTriggersV1(cfg: HarnessConfig): HarnessConfig {
   }
 }
 
+/** Keys older builds persisted that nothing reads any more (1.1.60: the retired indexer's model
+ *  choice). readConfig drops them, and pruneRetiredConfigKeys rewrites the file once. */
+export const RETIRED_CONFIG_KEYS = ['embeddingModel'] as const;
+
+/** Remove RETIRED_CONFIG_KEYS from config.json on disk, touching nothing else (no defaults are
+ *  merged in). Best-effort; returns the keys removed. */
+export function pruneRetiredConfigKeys(): string[] {
+  const p = configPath();
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+    const gone = RETIRED_CONFIG_KEYS.filter((k) => k in parsed);
+    if (!gone.length) return [];
+    for (const k of gone) delete parsed[k];
+    writeFileSync(p, JSON.stringify(parsed, null, 2), 'utf8');
+    return gone;
+  } catch {
+    return [];
+  }
+}
+
 export function readConfig(): HarnessConfig {
   const p = configPath();
   // No file yet = a first run with nothing to migrate; the defaults ARE the
@@ -631,6 +651,7 @@ export function readConfig(): HarnessConfig {
   try {
     const raw = readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
+    for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
     return normalizeStoredHomes(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed })));
   } catch {
     return clampDevHome(withTriggerDefaults({ ...DEFAULTS }));

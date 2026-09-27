@@ -277,7 +277,7 @@ test('NO-GIT: an EXISTING hive/.git is left exactly as it was (never deleted, ne
   assert.deepEqual(snap(), before, 'the .git tree and the hive .gitignore are untouched');
 });
 
-test('NO-GIT + MEMPALACE-REMOVAL: no mine-ignore .gitignore is written any more (only mempalace mine read it); an existing one is left alone', async () => {
+test('NO-GIT: no .gitignore is written into agent dirs any more; a user-edited one is left alone', async () => {
   const home = fs.mkdtempSync(path.join(JAIL, 'ng-'));
   const idle = path.join(home, 'hive', 'agents', 'sleeper'); fs.mkdirSync(idle, { recursive: true });
   fs.writeFileSync(path.join(idle, '.gitignore'), 'mine\n');

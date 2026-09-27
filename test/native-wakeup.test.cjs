@@ -1,7 +1,7 @@
 'use strict';
 /**
  * NATIVE-WAKEUP-EMPTY-INDEX (1.1.55; god andynwe, decision a+b). On the first native start,
- * Phyllis's task-start `mempalace wake-up` met an EMPTY index ("## L1 - No memories yet."):
+ * Phyllis's task-start `memory wake-up` met an EMPTY index ("## L1 - No memories yet."):
  * hers was the first memory request, so it forked the worker and only then did the backfill
  * begin (~85-100 s).
  *  (a) In NATIVE mode, main forks the worker (whose below-normal startup backfill fills the
@@ -97,12 +97,12 @@ function fakeWorker() {
 function wiring(root, enabled = true) {
   const logs = []; const workers = [];
   const w = new NativeMemoryWiring({ hiveRoot: () => root, enabled: () => enabled, userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'), workerEntry: 'w.js',
-    fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => null, writeShim: () => null, log: (r) => logs.push(r), vecLoadablePath: () => null });
+    fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => null, writeCommand: () => null, log: (r) => logs.push(r), vecLoadablePath: () => null });
   w.workerConfig = () => ({ hiveRoot: root });
   return { w, logs, workers };
 }
 
-test('(a) prewarm forks the worker whenever memory is on (MEMPALACE-REMOVAL: no mode file needed; a leftover one is ignored); idempotent; semantic memory OFF forks nothing', () => {
+test('(a) prewarm forks the worker whenever memory is on (no mode file needed; a leftover one is ignored); idempotent; semantic memory OFF forks nothing', () => {
   for (const files of [{ ...THREE }, { 'memory-engine.json': '{"mode":"legacy"}', ...THREE }]) {
     const on = wiring(hive(files));
     assert.equal(on.w.prewarm(), true);

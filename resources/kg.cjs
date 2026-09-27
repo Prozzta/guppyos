@@ -4,7 +4,7 @@
  * kg.cjs — the agent-facing Knowledge Graph CLI.
  *
  * A spawned agent queries the enterprise knowledge store by running this via its
- * shell, exactly the way the hive surfaces MemPalace (`mempalace search …`):
+ * shell, exactly the way the hive surfaces semantic memory (`memory search …`):
  *
  *   node "$KG_CLI" search "<query>" [--limit N] [--json]
  *   node "$KG_CLI" list [--json]

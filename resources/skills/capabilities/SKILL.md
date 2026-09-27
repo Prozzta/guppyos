@@ -92,7 +92,7 @@ on one):
   to god or another agent (`$AGENT_DIR/outbox/`). This is your always-available
   channel.
 - **Semantic memory (the built-in memory engine).** If enabled for you:
-  `mempalace search "<query>"` to recall shared knowledge, `mempalace wake-up`
+  `memory search "<query>"` to recall shared knowledge, `memory wake-up`
   for a digest. Your memory.md is indexed automatically.
 - **Enterprise Knowledge Graph.** If enabled: `node "$KG_CLI" search "<query>"`
   for ranked passages, `node "$KG_CLI" list`, `node "$KG_CLI" get <id>` — use it

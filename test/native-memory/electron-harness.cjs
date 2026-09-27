@@ -247,7 +247,7 @@ S.guards = async () => {
 
 S.palaceUntouched = async () => {
   // ROLLBACK SAFETY (Human, via god): the native engine never deletes, moves or mutates the
-  // MemPalace store. A harness home with a palace beside the hive (the live layout: <home>/hive,
+  // old palace store left on disk. A harness home with a palace beside the hive (the live layout: <home>/hive,
   // <home>/palace); the worker runs its whole life (backfill, search, wake-up, status, a FORCED
   // compaction, shutdown); the palace tree must be identical afterwards: the same files, bytes,
   // SHA-256 and mtimes, and nothing added.
@@ -257,7 +257,7 @@ S.palaceUntouched = async () => {
   const palace = path.join(home, 'palace');
   const put = (rel, buf) => { const p = path.join(palace, ...rel.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, buf); };
   put('chroma.sqlite3', crypto.randomBytes(64 * 1024));
-  put('mempalace_embedder.json', '{"model":"minilm"}');
+  put('embedder.json', '{"model":"minilm"}');
   put('22acf1f6-5ec3-4a67-a1c1-bc875d043bd4/data_level0.bin', crypto.randomBytes(32 * 1024));
   put('22acf1f6-5ec3-4a67-a1c1-bc875d043bd4/header.bin', crypto.randomBytes(100));
   const old = Date.now() - 86400000;

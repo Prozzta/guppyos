@@ -150,11 +150,11 @@ test('ROLLBACK SAFETY (Human, via god): a worker\'s whole life (backfill, search
   assert.equal(j.hiveHasNoPalaceWrites, true);
 });
 
-test('ROLLBACK SAFETY (static): no native-memory module names the palace, mempalace config or chroma; the worker config has no palace field', () => {
+test('ROLLBACK SAFETY (static): no native-memory module names the old palace store or chroma; the worker config has no palace field', () => {
   const dir = path.join(REPO, 'src', 'main', 'nativeMemory');
   for (const f of fs.readdirSync(dir)) {
     const src = fs.readFileSync(path.join(dir, f), 'utf8').replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-    assert.doesNotMatch(src, /palacePath\(\)|chroma|\.mempalace|mempalace_embedder/i, f);
+    assert.doesNotMatch(src, /palace|chroma/i, f);
   }
   const worker = fs.readFileSync(path.join(dir, 'worker.ts'), 'utf8');
   const cfg = /export interface WorkerConfig \{([\s\S]*?)\n\}/.exec(worker)[1];

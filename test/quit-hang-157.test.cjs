@@ -3,7 +3,7 @@
 /**
  * QUIT-HANG (Jim's SLOW-START-FLOOR-CRASH, 2026-09-26): quitting froze the app window
  * (WER AppHangB1 x3) because teardown ran a synchronous `taskkill /T /F` per agent
- * terminal plus a synchronous `mempalace daemon stop`, all on Electron's main thread.
+ * terminal plus a synchronous memory-daemon stop, all on Electron's main thread.
  *
  *  F1 the quit path never calls spawnSync: ONE async batched taskkill for every tree,
  *     ConPTY closed only after the sweep, the daemon stop async, the whole batch capped;
@@ -156,7 +156,7 @@ test('F1 runQuitSteps: settles as soon as every step does (the cap is a ceiling,
 test('F1 WIRING: the quit path has no synchronous tree kill or daemon stop', () => {
   const teardown = between(INDEX, 'function teardownAndQuit(): void {', '/** Upper bound on the async quit work');
   assert.doesNotMatch(teardown, /ptyManager\.killAll\(\)/, 'no per-terminal spawnSync taskkill');
-  assert.doesNotMatch(teardown, /memory\.stop\(/, 'no legacy memory stop (MEMPALACE-REMOVAL: there is no daemon)');
+  assert.doesNotMatch(teardown, /memory\.stop\(/, 'no legacy memory stop (there is no daemon)');
   assert.doesNotMatch(teardown, /spawnSync|hardKillTree/);
   assert.match(teardown, /void beginQuitWork\(\)/);
   const work = between(INDEX, 'function beginQuitWork(', '\n}\n');
@@ -212,7 +212,7 @@ test('F3 WIRING: freeze and slow-start rows exist', () => {
 
 // ── Jim's audit (QUIT-HANG-157-AUDIT.md): R1, M10, and the normal-use sync kills ──
 
-// MEMPALACE-REMOVAL turned R1 into Jim's M1: there is no MemoryManager; what reset and
+// The daemon's removal (1.1.59) turned R1 into Jim's M1: there is no MemoryManager; what reset and
 // changeHome must wait for now is the memory engine's worker, which holds the index open.
 test('R1 / M1: reset and changeHome shut the memory worker down and AWAIT it before they rm / copy', () => {
   const reset = between(INDEX, "ipcMain.handle('app:resetAll', async () => {", '\n});\n');

@@ -2,7 +2,7 @@
  * QUIT-HANG: the slow part of app teardown, run OFF the main thread's critical path.
  *
  * Quit used to run a synchronous `taskkill /T /F` per agent terminal plus a synchronous
- * `mempalace daemon stop` on Electron's main thread. Together they passed the ~5 s after
+ * memory-daemon stop on Electron's main thread. Together they passed the ~5 s after
  * which Windows ghosts the window and files an AppHang (WER AppHangB1, three times on
  * 2026-09-26), which read as "the floor crashed on quit". Each slow step is now async;
  * this runs them concurrently, times each one for the quit log row, and caps the whole

@@ -280,9 +280,9 @@ function envFor(set, opts = {}) {
 }
 
 test('the API key is ALWAYS stripped - it overrides a subscription silently', () => {
-  const env = envFor({ ANTHROPIC_API_KEY: 'sk-inherited' }, { env: { ANTHROPIC_API_KEY: 'sk-from-opts', MEMPALACE_PALACE_PATH: 'C:/palace' } });
+  const env = envFor({ ANTHROPIC_API_KEY: 'sk-inherited' }, { env: { ANTHROPIC_API_KEY: 'sk-from-opts', AGENT_EXTRA: 'C:/extra' } });
   assert.ok(!('ANTHROPIC_API_KEY' in env), 'stripping must happen AFTER the merge, or opts.env puts it back');
-  assert.equal(env.MEMPALACE_PALACE_PATH, 'C:/palace', 'the rest of opts.env still merges');
+  assert.equal(env.AGENT_EXTRA, 'C:/extra', 'the rest of opts.env still merges');
   assert.ok(env.PATH, 'and the resolved shell PATH is preserved');
 });
 
@@ -395,7 +395,7 @@ test('breadcrumb: env is reported as KEY NAMES ONLY - never a value', async () =
   const SECRET = 'sk-ant-do-not-log-me';
   const p = runHiddenClaude('x', {
     model: 'm', cwd: h.cwd,
-    env: { ANTHROPIC_BASE_URL: 'https://gw.example', ANTHROPIC_AUTH_TOKEN: SECRET, MEMPALACE_PALACE_PATH: '/p' }
+    env: { ANTHROPIC_BASE_URL: 'https://gw.example', ANTHROPIC_AUTH_TOKEN: SECRET, AGENT_EXTRA: '/p' }
   }, h.deps);
   h.child.emit('close', 1);
   const r = await p;

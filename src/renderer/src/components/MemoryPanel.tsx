@@ -2,29 +2,26 @@ import { useEffect, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 
-/** MEMPALACE-REMOVAL: the memory engine's status (mirrors the preload's MemoryStatus). */
+/** The memory engine's status (mirrors the preload's MemoryStatus). */
 interface MemoryStatus {
   enabled: boolean;
   available: boolean;
-  reason: 'disabled' | 'no-hive' | 'no-runtime' | 'shim-failed' | null;
+  reason: 'disabled' | 'no-hive' | 'no-runtime' | 'command-failed' | null;
   index: { sources?: number; chunks?: number; dbBytes?: number } | null;
-  legacy: { paths: string[]; bytes: number } | null;
 }
-
-const mb = (bytes: number): string => `${Math.max(1, Math.round(bytes / 1048576))} MB`;
 
 /** Plain-language reason memory cannot run (the pill's "Unavailable" line). */
 const WHY: Record<string, string> = {
   'no-hive': 'No hive folder is set up yet.',
   'no-runtime': 'The memory engine is missing from this install. Reinstalling the app restores it.',
-  'shim-failed': "The memory command couldn't be written into the hive folder."
+  'command-failed': "The memory command couldn't be written into the hive folder."
 };
 
 /**
  * Lets the human search the shared memory agents build up across sessions and turn it on or
  * off. Agents read and write the same memory through the memory engine; this is the
- * human-facing window into it. Since 1.1.59 there is nothing to install and no model to pick:
- * the engine is built in. Old MemPalace data, if any is left on disk, can be deleted here.
+ * human-facing window into it. There is nothing to install and no model to pick: the engine
+ * is built in.
  */
 export function MemoryPanel() {
   const [open, setOpen] = useState(false);
@@ -32,7 +29,6 @@ export function MemoryPanel() {
   const [query, setQuery] = useState('');
   const [result, setResult] = useState<string>('');
   const [busy, setBusy] = useState(false);
-  const [legacyNote, setLegacyNote] = useState<string>('');
 
   const refreshStatus = async () => {
     try { setStatus(await window.cth.memoryStatus()); } catch { /* ignore */ }
@@ -54,16 +50,6 @@ export function MemoryPanel() {
     } finally {
       setBusy(false);
     }
-  };
-
-  const deleteLegacy = async () => {
-    setLegacyNote('');
-    const r = await window.cth.deleteLegacyMemoryData();
-    if (r.ok) setLegacyNote(r.paths.length ? `Deleted ${mb(r.bytes)} of old MemPalace data.` : 'Nothing to delete.');
-    else if (!('cancelled' in r && r.cancelled)) {
-      setLegacyNote(`Nothing was deleted: ${r.error}.${r.locked.length ? ` In use: ${r.locked.slice(0, 3).join(', ')}${r.locked.length > 3 ? ` and ${r.locked.length - 3} more` : ''}. Close whatever holds them (an old MemPalace process, or restart the PC) and try again.` : ''}`);
-    }
-    await refreshStatus();
   };
 
   const active = !!status?.available;
@@ -162,23 +148,6 @@ export function MemoryPanel() {
                   }}>{result}</pre>
                 )}
               </div>
-            )}
-
-            {/* Old MemPalace data: shown only while some is left; deleted only on request. */}
-            {status?.legacy && (
-              <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45, background: 'var(--cth-cream-100)', padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <span>
-                  Old MemPalace data ({mb(status.legacy.bytes)}) is still on disk at {status.legacy.paths[0]}. The app no longer uses it.
-                </span>
-                <div>
-                  <PixelButton variant="secondary" size="sm" onClick={deleteLegacy}>
-                    Delete old MemPalace data ({mb(status.legacy.bytes)})
-                  </PixelButton>
-                </div>
-              </div>
-            )}
-            {legacyNote && (
-              <div style={{ fontSize: 11, color: 'var(--cth-ink-700)', lineHeight: 1.45 }}>{legacyNote}</div>
             )}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--cth-ink-300)', paddingTop: 10 }}>

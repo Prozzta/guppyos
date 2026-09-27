@@ -4,8 +4,8 @@
  *
  * Why this file exists: the app ships as one Electron bundle, but several of its
  * best features are thin wrappers over tools that live outside it — git for
- * worktrees and one CLI per agent engine. (Semantic memory is built in since
- * MEMPALACE-REMOVAL, 1.1.59: no mempalace or uv row.) Every one of them degrades
+ * worktrees and one CLI per agent engine. (Semantic memory is built in: no row.)
+ * Every one of them degrades
  * SILENTLY when absent, which is friendly right up until the user cannot tell
  * "off" from "broken" and has no single place that says which is which. This
  * catalog is that place.

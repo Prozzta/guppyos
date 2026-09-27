@@ -3,7 +3,7 @@
  * NATIVE-MEMORY (1.1.54), the parts that run in plain Node: the tokenizer, the chunker, the
  * source allow-list and migration report, the CLI text, request validation, tokens, the main-side
  * client (deadlines, crash, lazy fork), the wiring (native always on; fail closed), the HookServer route and
- * the `mempalace` shim. The store/engine/worker against the real natives are in
+ * the `memory` command. The store/engine/worker against the real natives are in
  * native-memory-electron.test.cjs.
  */
 const test = require('node:test');
@@ -126,7 +126,7 @@ test('ALLOW-LIST: a Markdown file over the size cap is excluded by rule (a paste
 
 // ── text ──────────────────────────────────────────────────────────────────
 
-test('GOLDEN search text = MemPalace 3.7.1 searcher.py (hybrid path), including the filter lines and the no-results line', () => {
+test('GOLDEN search text (the hybrid path), including the filter lines and the no-results line', () => {
   const hits = [{ chunkId: 1, wing: 'oscar-mu3300lb', room: 'general', source: 'agents/oscar-mu3300lb/UPSTREAM.md', content: 'line one\nline two\n', cosineSim: 0.4361, bm25: 1.3472, score: 1 }];
   const text = formatSearch('log rotation', { wing: 'oscar-mu3300lb', since: '2026-09-01' }, hits);
   assert.equal(text, [
@@ -158,7 +158,7 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 // ── requests, tokens, client ─────────────────────────────────────────────
 
-test('VALIDATION (section 6): ranges, ISO dates, wing names; --palace is accepted and IGNORED (MEMPALACE-REMOVAL); wake-up without --wing is the CALLER\'s', () => {
+test('VALIDATION (section 6): ranges, ISO dates, wing names; wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
   assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1' } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
@@ -166,10 +166,6 @@ test('VALIDATION (section 6): ranges, ISO dates, wing names; --palace is accepte
   }
   assert.deepEqual(validateRequest({ cmd: 'wake-up', args: {} }, 'andy'), { op: 'wake-up', args: { wing: 'andy' } });
   assert.deepEqual(validateRequest({ cmd: 'wake-up', args: { wing: 'jim' } }, 'andy'), { op: 'wake-up', args: { wing: 'jim' } });
-  // An old habit (`--palace C:/Dunder/palace`, or any other path) keeps working: one index per hive.
-  for (const palace of ['c:/dunder/palace/', 'D:/other', 'C:\\Dunder\\hive']) {
-    assert.equal(validateRequest({ cmd: 'search', args: { query: 'x' }, palace }, 'a').op, 'search', palace);
-  }
   assert.equal(validateRequest({ cmd: 'mine', args: {} }, 'a').exit, EXIT.usage);
   assert.equal(validateRequest({ cmd: 'shadow', args: { query: 'x' } }, 'a').exit, EXIT.usage, 'the shadow path is gone');
 });
@@ -273,29 +269,28 @@ function wiring(root, over = {}) {
   const w = new NativeMemoryWiring({
     hiveRoot: () => root, enabled: () => true, userData: path.join(root, 'ud'), resourcesDir: path.join(root, 'res'),
     workerEntry: 'w.js', fork: () => { const x = fakeWorker(); workers.push(x); return x; }, memoryBaseUrl: () => 'http://127.0.0.1:5555/memory',
-    writeShim: () => path.join(root, 'bin', 'memory'), log: (r) => logs.push(r), vecLoadablePath: () => null, ...over
+    writeCommand: () => path.join(root, 'bin', 'memory'), log: (r) => logs.push(r), vecLoadablePath: () => null, ...over
   });
   return { w, logs, workers };
 }
 
-test('WIRING (MEMPALACE-REMOVAL): with NO memory-engine.json (every default install) an agent gets MEMORY_TOKEN, the endpoint, its hive and the shim dir; no MEMPALACE_* / legacy env; a bad token is 403/exit 5', async () => {
+test('WIRING: every install (no mode file) gives an agent MEMORY_TOKEN, the endpoint, its hive and the memory command dir, nothing else; a bad token is 403/exit 5', async () => {
   const root = hive({ 'agents/a1/memory.md': 'm' });
-  assert.equal(fs.existsSync(path.join(root, 'memory-engine.json')), false);
   const { w } = wiring(root, runtime(root));
   const m = w.spawnEnv('a1');
   assert.ok(m, 'memory is on by default');
-  assert.equal(m.shimDir, path.join(root, 'bin', 'memory'));
+  assert.equal(m.commandDir, path.join(root, 'bin', 'memory'));
   assert.match(m.env.MEMORY_TOKEN, /^[0-9a-f]{32}$/);
   assert.equal(m.env.MUNDER_MEMORY_URL, 'http://127.0.0.1:5555/memory');
   assert.equal(m.env.MUNDER_HIVE_ROOT, root);
-  assert.deepEqual(Object.keys(m.env).sort(), ['MEMORY_TOKEN', 'MUNDER_HIVE_ROOT', 'MUNDER_MEMORY_URL'], 'no MUNDER_LEGACY_MEMPALACE, no MEMPALACE_*');
+  assert.deepEqual(Object.keys(m.env).sort(), ['MEMORY_TOKEN', 'MUNDER_HIVE_ROOT', 'MUNDER_MEMORY_URL'], 'only these three');
   assert.equal((await w.handle('f'.repeat(32), { cmd: 'status' })).status, 403);
   assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), 'a1');
   w.agentExited('a1');
   assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), null, 'revoked with the agent');
 });
 
-test('WIRING: a leftover memory-engine.json (any mode, even legacy) is ignored: memory stays on', async () => {
+test('WIRING: a leftover mode file from an older build changes nothing: memory stays on', async () => {
   for (const mode of ['legacy', 'fallback-legacy', 'shadow', 'native']) {
     const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': JSON.stringify({ mode }) });
     const { w } = wiring(root, runtime(root));
@@ -303,7 +298,7 @@ test('WIRING: a leftover memory-engine.json (any mode, even legacy) is ignored: 
   }
 });
 
-test('WIRING (Jim M2, fail closed): semantic memory off, no runtime, or a failed shim write = null (no memory env, so no prompt line); one log row per reason', async () => {
+test('WIRING (Jim M2, fail closed): semantic memory off, no runtime, or a failed command write = null (no memory env, so no prompt line); one log row per reason', async () => {
   const root = hive({ 'agents/a1/memory.md': 'm' });
   const off = wiring(root, { ...runtime(root), enabled: () => false });
   assert.equal(off.w.spawnEnv('a1'), null);
@@ -313,10 +308,10 @@ test('WIRING (Jim M2, fail closed): semantic memory off, no runtime, or a failed
   assert.equal(noRt.w.spawnEnv('a1'), null);
   assert.equal(noRt.w.spawnEnv('a2'), null);
   assert.deepEqual(noRt.logs.map((r) => [r.kind, r.reason]), [['native-memory-unavailable', 'no-runtime']], 'one row, not one per spawn');
-  const noShim = wiring(root, { ...runtime(root), writeShim: () => null });
-  assert.equal(noShim.w.spawnEnv('a1'), null, 'no shim on PATH -> no memory (never a user-installed mempalace)');
-  assert.deepEqual(noShim.logs.map((r) => [r.kind, r.reason, r.agentId]), [['native-memory-unavailable', 'shim-failed', 'a1']]);
-  assert.equal(noShim.w.tokens.resolve('0'.repeat(32)), null);
+  const noCmd = wiring(root, { ...runtime(root), writeCommand: () => null });
+  assert.equal(noCmd.w.spawnEnv('a1'), null, 'no memory command on PATH -> no memory');
+  assert.deepEqual(noCmd.logs.map((r) => [r.kind, r.reason, r.agentId]), [['native-memory-unavailable', 'command-failed', 'a1']]);
+  assert.equal(noCmd.w.tokens.resolve('0'.repeat(32)), null);
 });
 
 test('WIRING: query() serves the Memory panel / Command Center as caller `human` through the same validation; there is no token and no HTTP route for it', async () => {
@@ -381,17 +376,17 @@ test('ROUTE: /memory/<token> reaches the handler with the token and body; no han
   assert.equal((await post(`${base}/nothex`, {})).status, 404);
 });
 
-// ── the shim ──────────────────────────────────────────────────────────────
+// ── the `memory` command ────────────────────────────────────────────────────
 
-const SHIM = path.join(REPO, 'resources', 'mempalace-shim.cjs');
-function loadShim(spawnSyncImpl) {
+const CLI = path.join(REPO, 'resources', 'memory-cli.cjs');
+function loadCli(spawnSyncImpl) {
   const cp = require('node:child_process');
   const real = cp.spawnSync;
   cp.spawnSync = spawnSyncImpl;
-  delete require.cache[require.resolve(SHIM)];
-  try { return require(SHIM); } finally { cp.spawnSync = real; }
+  delete require.cache[require.resolve(CLI)];
+  try { return require(CLI); } finally { cp.spawnSync = real; }
 }
-/** Run shim.main with its output captured through the injectable writers (never by patching
+/** Run cli.main with its output captured through the injectable writers (never by patching
  *  process.stdout, which the test runner itself is writing to). */
 async function capture(fn) {
   const out = []; const err = [];
@@ -400,18 +395,19 @@ async function capture(fn) {
   return { code, out: out.join(''), err: err.join('') };
 }
 
-test('SHIM parseArgs: MemPalace 3.7.1 argv shapes (global --palace, --flag value and --flag=value, a multi-word query)', () => {
-  const { parseArgs } = loadShim(() => ({}));
-  assert.deepEqual(parseArgs(['--palace', 'P', 'search', 'log', 'rotation', '--wing', 'w', '--results=3']).args, { wing: 'w', results: 3, query: 'log rotation' });
-  assert.equal(parseArgs(['--palace', 'P', 'search', 'x']).palace, 'P');
+test('CLI parseArgs: --flag value and --flag=value, a multi-word query; unknown global options are refused', () => {
+  const { parseArgs } = loadCli(() => ({}));
+  assert.deepEqual(parseArgs(['search', 'log', 'rotation', '--wing', 'w', '--results=3']).args, { wing: 'w', results: 3, query: 'log rotation' });
   assert.equal(parseArgs(['wake-up', '--wing', 'andy']).args.wing, 'andy');
+  assert.equal(parseArgs(['status', '--format', 'json']).format, 'json');
   assert.throws(() => parseArgs(['--bogus']), /unknown option/);
+  assert.throws(() => parseArgs(['--palace', 'P', 'search', 'x']), /unknown option --palace/, 'no palace option any more');
   assert.throws(() => parseArgs(['search', 'x', '--wing']), /needs a value/);
 });
 
-test('SHIM (MEMPALACE-REMOVAL): posts to the endpoint and prints its text with its exit, with NO mode file; --palace is accepted and not sent; never spawns anything; mine is a named refusal', async (t) => {
+test('CLI: posts to the endpoint and prints its text with its exit; never spawns anything; an unknown command is a named refusal', async (t) => {
   const calls = [];
-  const shim = loadShim((bin, argv) => { calls.push({ bin, argv }); return { status: 7 }; });
+  const cli = loadCli((bin, argv) => { calls.push({ bin, argv }); return { status: 7 }; });
   const root = hive({});
   const seen = [];
   const srv = http.createServer((req, res) => {
@@ -424,49 +420,54 @@ test('SHIM (MEMPALACE-REMOVAL): posts to the endpoint and prints its text with i
   await new Promise((r) => srv.listen(0, '127.0.0.1', r)); t.after(() => srv.close());
   const url = `http://127.0.0.1:${srv.address().port}/memory`;
   const env = (extra = {}) => ({ MUNDER_HIVE_ROOT: root, MUNDER_MEMORY_URL: url, MEMORY_TOKEN: 'ab'.repeat(16), ...extra });
-  const n = await capture((io) => shim.main(['--palace', 'C:/Dunder/palace', 'search', 'log', 'rotation', '--wing', 'jim'], env({ MEMPALACE_PALACE_PATH: 'C:/Dunder/palace' }), io));
+  const n = await capture((io) => cli.main(['search', 'log', 'rotation', '--wing', 'jim'], env(), io));
   assert.deepEqual(n, { code: 0, out: 'NATIVE TEXT\n', err: '' });
   assert.deepEqual(seen[0], { url: `/memory/${'ab'.repeat(16)}`, body: { cmd: 'search', args: { wing: 'jim', query: 'log rotation' } } });
-  fs.writeFileSync(path.join(root, 'memory-engine.json'), '{"mode":"legacy"}');
-  assert.equal((await capture((io) => shim.main(['wake-up'], env(), io))).code, 0, 'a leftover legacy mode file changes nothing');
-  assert.equal((await capture((io) => shim.main(['status'], env({ MEMORY_TOKEN: 'cd'.repeat(16) }), io))).code, 5, '403 -> exit 5');
-  const mine = await capture((io) => shim.main(['mine', 'x'], env(), io));
+  assert.equal((await capture((io) => cli.main(['wake-up'], env(), io))).code, 0);
+  assert.equal((await capture((io) => cli.main(['status'], env({ MEMORY_TOKEN: 'cd'.repeat(16) }), io))).code, 5, '403 -> exit 5');
+  const mine = await capture((io) => cli.main(['mine', 'x'], env(), io));
   assert.equal(mine.code, 2);
-  assert.match(mine.err, /indexes memory\.md .* automatically/);
-  assert.equal(calls.length, 0, 'the shim never spawns a process');
-  assert.doesNotMatch(fs.readFileSync(SHIM, 'utf8'), /child_process|spawnSync|MUNDER_LEGACY_MEMPALACE|memory-engine\.json|fallback-legacy/);
+  assert.match(mine.err, /^memory: unknown command "mine"; use search, wake-up or status/);
+  const help = await capture((io) => cli.main(['--help'], env(), io));
+  assert.equal(help.code, 0);
+  assert.match(help.out, /^usage: memory \{search QUERY/);
+  assert.equal(calls.length, 0, 'the command never spawns a process');
+  assert.doesNotMatch(fs.readFileSync(CLI, 'utf8'), /child_process|spawnSync|memory-engine\.json|palace/i);
 });
 
-test('SHIM: app not running = exit 3 with one line of guidance; no endpoint env = exit 3', async () => {
-  const shim = loadShim(() => ({}));
+test('CLI: app not running = exit 3 with one line of guidance; no endpoint env = exit 3', async () => {
+  const cli = loadCli(() => ({}));
   const root = hive({});
-  const down = await capture((io) => shim.main(['search', 'q'], { MUNDER_HIVE_ROOT: root, MUNDER_MEMORY_URL: 'http://127.0.0.1:1/memory', MEMORY_TOKEN: 'ab'.repeat(16) }, io));
+  const down = await capture((io) => cli.main(['search', 'q'], { MUNDER_HIVE_ROOT: root, MUNDER_MEMORY_URL: 'http://127.0.0.1:1/memory', MEMORY_TOKEN: 'ab'.repeat(16) }, io));
   assert.equal(down.code, 3);
   assert.equal(down.err.trim().split('\n').length, 1);
   assert.doesNotMatch(down.err, /fallback-legacy/);
-  assert.equal((await capture((io) => shim.main(['search', 'q'], { MUNDER_HIVE_ROOT: root }, io))).code, 3);
+  assert.equal((await capture((io) => cli.main(['search', 'q'], { MUNDER_HIVE_ROOT: root }, io))).code, 3);
 });
 
-test('SHIM on PATH (section 6): the generated wrappers run the shim on Electron-as-Node, and are rewritten only when changed', () => {
+test('CLI on PATH (section 6): the generated wrappers run the command on Electron-as-Node, are rewritten only when changed, and nothing else stays in the dir', () => {
   const { HiveManager } = loadTs('src/main/hive.ts');
   const home = dir();
   const h = new HiveManager(() => home);
-  fs.mkdirSync(path.join(home, 'hive'), { recursive: true });
-  const d = h.writeMemoryShim('C:\\app\\resources\\mempalace-shim.cjs');
+  fs.mkdirSync(path.join(home, 'hive', 'bin', 'memory'), { recursive: true });
+  // Wrappers an older build left in the dir: removed, so only `memory` resolves from it.
+  for (const stale of ['oldcmd', 'oldcmd.cmd']) fs.writeFileSync(path.join(home, 'hive', 'bin', 'memory', stale), 'x');
+  const d = h.writeMemoryCommand('C:\\app\\resources\\memory-cli.cjs');
   assert.equal(d, path.join(home, 'hive', 'bin', 'memory'));
+  assert.deepEqual(fs.readdirSync(d).sort(), process.platform === 'win32' ? ['memory', 'memory.cmd'] : ['memory']);
   if (process.platform === 'win32') {
-    assert.equal(fs.readFileSync(path.join(d, 'mempalace.cmd'), 'utf8'), `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "C:\\app\\resources\\mempalace-shim.cjs" %*\r\n`);
-    assert.equal(fs.readFileSync(path.join(d, 'mempalace'), 'utf8'), `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath.replace(/\\/g, '/')}" "C:/app/resources/mempalace-shim.cjs" "$@"\n`);
+    assert.equal(fs.readFileSync(path.join(d, 'memory.cmd'), 'utf8'), `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${process.execPath}" "C:\\app\\resources\\memory-cli.cjs" %*\r\n`);
+    assert.equal(fs.readFileSync(path.join(d, 'memory'), 'utf8'), `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${process.execPath.replace(/\\/g, '/')}" "C:/app/resources/memory-cli.cjs" "$@"\n`);
   }
-  const m0 = fs.statSync(path.join(d, 'mempalace')).mtimeMs;
-  h.writeMemoryShim('C:\\app\\resources\\mempalace-shim.cjs');
-  assert.equal(fs.statSync(path.join(d, 'mempalace')).mtimeMs, m0, 'unchanged content is not rewritten');
+  const m0 = fs.statSync(path.join(d, 'memory')).mtimeMs;
+  h.writeMemoryCommand('C:\\app\\resources\\memory-cli.cjs');
+  assert.equal(fs.statSync(path.join(d, 'memory')).mtimeMs, m0, 'unchanged content is not rewritten');
   h.dispose();
 });
 
 // ── parity statistics (gate 4) ────────────────────────────────────────────
 
-test('ZERO PYTHON (and zero child processes) on the native path: the built worker bundle never requires child_process; native CLI calls never run the legacy CLI (see SHIM modes)', () => {
+test('ZERO PYTHON (and zero child processes) on the native path: the built worker bundle never requires child_process', () => {
   const bundle = path.join(REPO, 'out', 'main', 'memoryWorker.js');
   if (!fs.existsSync(bundle)) return;   // built by `npm run build`; the gate runs after it
   const src = fs.readFileSync(bundle, 'utf8');
@@ -529,11 +530,11 @@ test('SMOKE / BENCH FLAGS are inert unless passed: no flag -> null; index.ts red
   assert.match(idx, /app\.whenReady\(\)\.then\(\(\) => \{\r?\n  if \(memoryBenchDir\) \{/, 'the bench branch runs only with the flag');
 });
 
-test('SHIM parseArgs follows argparse (the legacy CLI): a dash-led token with whitespace is query text; `--` ends options; an unknown bare option is still unsupported (exit 2, as legacy)', () => {
-  const { parseArgs } = loadShim(() => ({}));
+test('CLI parseArgs: a dash-led token with whitespace is query text; `--` ends options; an unknown bare option is unsupported (exit 2)', () => {
+  const { parseArgs } = loadCli(() => ({}));
   assert.equal(parseArgs(['search', '--format json --session-id <uuid>']).args.query, '--format json --session-id <uuid>');
   assert.deepEqual(parseArgs(['search', '--format json --session-id <uuid>']).rest, []);
   assert.equal(parseArgs(['search', '--', '--wing']).args.query, '--wing');
   assert.equal(parseArgs(['search', '--', '--wing']).args.wing, undefined);
-  assert.deepEqual(parseArgs(['search', '--native-memory-smoke=']).rest, ['--native-memory-smoke='], 'unknown option: rejected, as argparse does');
+  assert.deepEqual(parseArgs(['search', '--native-memory-smoke=']).rest, ['--native-memory-smoke='], 'unknown option: rejected');
 });

@@ -118,19 +118,19 @@ test('checkIsolation: rejects a pipe equal to Stable\'s and one without the dev 
 });
 
 test('scrubInheritedEnv removes exactly the Stable identity keys and reports them', () => {
-  const env = { PATH: 'keep', MEMPALACE_EMBEDDING_MODEL: 'minilm', CLAUDE_CONFIG_DIR: 'keep-too',
+  const env = { PATH: 'keep', UNRELATED_MODEL: 'minilm', CLAUDE_CONFIG_DIR: 'keep-too',
     OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:1', OTEL_METRICS_EXPORTER: 'otlp' };
   for (const k of iso.STABLE_ENV_KEYS) env[k] = 'stable-value';
   // Every key Dwight's audit listed must be in the scrub set.
   for (const k of ['KG_ROOT', 'KG_CLI', 'KG_CORE', 'MD_BROKER_URL', 'MD_BROKER_TOKEN', 'HIVE_PROXY_SESSION',
     'OPENAI_BASE_URL', 'CRUSH_PROXY_BASE_URL', 'CLAUDE_CODE_ENABLE_TELEMETRY', 'OPENCODE_CONFIG_CONTENT',
-    'HIVE_ROOT', 'HIVE_SOCK', 'HIVE_NODE', 'AGENT_ID', 'AGENT_DIR', 'AGENT_NAME', 'MEMPALACE_PALACE_PATH']) {
+    'HIVE_ROOT', 'HIVE_SOCK', 'HIVE_NODE', 'AGENT_ID', 'AGENT_DIR', 'AGENT_NAME', 'MEMORY_TOKEN', 'MUNDER_MEMORY_URL', 'MUNDER_HIVE_ROOT']) {
     assert.ok(iso.STABLE_ENV_KEYS.includes(k), `${k} must be scrubbed`);
   }
   const removed = iso.scrubInheritedEnv(env);
   assert.deepEqual(removed.sort(), [...iso.STABLE_ENV_KEYS, 'OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_METRICS_EXPORTER'].sort());
   assert.equal(env.PATH, 'keep');
-  assert.equal(env.MEMPALACE_EMBEDDING_MODEL, 'minilm');
+  assert.equal(env.UNRELATED_MODEL, 'minilm');
   assert.equal(env.CLAUDE_CONFIG_DIR, 'keep-too');
   for (const k of iso.STABLE_ENV_KEYS) assert.equal(k in env, false);
   assert.equal(Object.keys(env).some((k) => k.startsWith('OTEL_')), false);
