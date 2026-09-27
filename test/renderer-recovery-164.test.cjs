@@ -168,25 +168,115 @@ test('SAMPLER: renderer (Tab) + GPU only, KB -> MB, pid and uptime; one renderer
   assert.equal(R.SAMPLE_MS, 60_000);
 });
 
-test('SAMPLER wiring (PARKED, god 2b540e): in-memory only, NOT started, no disk row; the crash row is wired for recentMemory', () => {
+test('SAMPLER wiring (final): in-memory ring started after the first window; the ONLY row is the alert, via hive.appendLog', () => {
   const idx = read('src/main/index.ts');
   const block = idx.slice(idx.indexOf('const rendererMemory = new RendererMemorySampler({'), idx.indexOf('function startRendererMemorySampler'));
-  assert.match(block, /metrics: \(\) => app\.getAppMetrics\(\),\s*now: \(\) => Date\.now\(\)\s*\}\);/, 'no log: nothing is written');
-  assert.doesNotMatch(block, /appendLog|appendFileSync|writeFileSync|openSync|fs\./, 'no file write of any kind');
-  assert.equal((idx.match(/startRendererMemorySampler\(\);/g) ?? []).length, 0, 'nothing calls the sampler while it is parked');
-  assert.match(idx, /recentMemory: \(\) => rendererMemory\.recent\(\),/, 'the crash row is wired (empty while parked)');
-  // When it is switched on, its timer never holds the process open.
+  assert.match(block, /metrics: \(\) => app\.getAppMetrics\(\),\s*now: \(\) => Date\.now\(\),\s*alert: \(row\) => \{ try \{ hive\.appendLog\(row\); \}/, 'alerts go through the kept-open fast appender');
+  assert.doesNotMatch(block, /\blog:/, 'no per-sample row');
+  assert.doesNotMatch(block, /appendFileSync|writeFileSync|openSync|fs\./, 'no direct file write');
+  assert.match(idx, /createWindow\(\);\s*\/\/ RENDERER-RECOVERY-164[^\n]*\n\s*startRendererMemorySampler\(\);/);
   assert.match(idx, /rendererMemoryTimer = setInterval\(\(\) => \{ rendererMemory\.sample\(\); \}, SAMPLE_MS\);\s*rendererMemoryTimer\.unref\?\.\(\);/);
-  // Without a log the sampler keeps its ring and writes nothing.
-  const rows = [];
-  const s = new R.RendererMemorySampler({ metrics: () => [{ pid: 7, type: 'Tab', memory: { workingSetSize: 1024 } }], now: () => 1 });
-  s.sample();
-  assert.equal(s.recent().length, 1);
-  assert.deepEqual(rows, []);
+  assert.match(idx, /recentMemory: \(\) => rendererMemory\.recent\(\),/, 'the ring is flushed into the crash row');
+  const hive = read('src/main/hive.ts');
+  const append = hive.slice(hive.indexOf('  appendLog(event: Record<string, unknown>): void {'), hive.indexOf('  appendLog(event: Record<string, unknown>): void {') + 500);
+  assert.match(append, /this\.appendFileFor\(join\(root, 'log\.jsonl'\), LOG_KEEP_ROTATED\)\.append\(line\);/, 'hive.appendLog is the kept-open AppendFile path');
   const mod = read('src/main/rendererRecovery.ts').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-  assert.doesNotMatch(mod, /require\(|from 'node:fs'|from 'fs'|from 'electron'/, 'the module does no I/O and imports nothing');
+  assert.doesNotMatch(mod, /require\(|from 'node:fs'|from 'fs'|from 'electron'/, 'the recovery module does no I/O and imports nothing');
   assert.doesNotMatch(mod, /ipcMain|ipcRenderer|heartbeat/i, 'no renderer ping');
-  assert.doesNotMatch(idx, /crashReporter\.start/, 'no crash reporter (out of scope)');
+});
+
+test('SAMPLER alerts: ONE row per renderer per condition (over 1.5 GB, or 2x its first sample); GPU never alerts; nothing else is written', () => {
+  assert.equal(R.ALERT_MB, 1536); assert.equal(R.ALERT_FACTOR, 2);
+  const alerts = [];
+  let mbR = 400; let mbR2 = 1600; let mbG = 5000;
+  const metrics = () => [
+    { pid: 7, type: 'Tab', memory: { privateBytes: mbR * 1024 } },
+    { pid: 8, type: 'Tab', memory: { privateBytes: mbR2 * 1024 } },
+    { pid: 9, type: 'GPU', memory: { privateBytes: mbG * 1024 } }
+  ];
+  const s = new R.RendererMemorySampler({ metrics, now: () => 1, alert: (r) => alerts.push(r) });
+  s.sample();
+  assert.deepEqual(alerts.map((a) => [a.pid, a.why]), [[8, 'over-limit']], 'pid 8 starts over the limit; GPU is ignored');
+  mbR = 799; s.sample();
+  assert.equal(alerts.length, 1, 'just under double: nothing');
+  mbR = 800; s.sample(); s.sample();
+  assert.deepEqual(alerts.map((a) => [a.pid, a.why]), [[8, 'over-limit'], [7, 'doubled']], 'doubled once, not every sample');
+  mbR = 1600; s.sample(); s.sample();
+  assert.deepEqual(alerts.map((a) => [a.pid, a.why]), [[8, 'over-limit'], [7, 'doubled'], [7, 'over-limit']]);
+  assert.equal(alerts[1].firstMb, 400); assert.equal(alerts[1].kind, 'renderer-memory-alert');
+  assert.ok(Array.isArray(alerts[1].recent) && alerts[1].recent.length > 0, 'the alert carries the ring so far');
+});
+
+test('CRASH DUMPS: local only (uploadToServer false, no submit URL); prune keeps the newest 3; waitForDump finds the new one or gives up', async () => {
+  const D = loadTs('src/main/crashDumps.ts');
+  const calls = [];
+  const res = D.startLocalCrashReporter({ start: (o) => calls.push(o) }, (() => { let t = 100; return () => (t += 2); })());
+  assert.deepEqual(calls, [{ uploadToServer: false, compress: true }], 'no submitURL, uploads off');
+  assert.equal(res.ok, true); assert.equal(res.readyAt - res.startedAt, 2);
+  assert.equal(D.startLocalCrashReporter({ start: () => { throw new Error('boom'); } }).ok, false, 'never throws');
+  // A fake Crashpad tree: reports/ with 5 dumps, pending/ with 1, and a non-dump.
+  const files = new Map([
+    ['C/reports/a.dmp', 1000], ['C/reports/b.dmp', 5000], ['C/reports/c.dmp', 3000], ['C/reports/d.dmp', 4000],
+    ['C/reports/e.dmp', 2000], ['C/pending/f.dmp', 6000], ['C/settings.dat', 9999]
+  ]);
+  const norm = (p) => p.replace(/\\/g, '/');
+  const fake = {
+    readdir: async (dir) => {
+      const d = norm(dir); const kids = new Set();
+      for (const k of files.keys()) if (k.startsWith(d + '/')) kids.add(k.slice(d.length + 1).split('/')[0]);
+      return [...kids].map((name) => ({ name, isDirectory: () => ![...files.keys()].includes(d + '/' + name), isFile: () => [...files.keys()].includes(d + '/' + name) }));
+    },
+    stat: async (p) => ({ mtimeMs: files.get(norm(p)), size: 42 }),
+    unlink: async (p) => { files.delete(norm(p)); }
+  };
+  const gone = (await D.pruneDumps('C', 3, fake)).map(norm).sort();
+  assert.deepEqual(gone, ['C/reports/a.dmp', 'C/reports/e.dmp', 'C/reports/c.dmp'].sort(), 'the 3 oldest deleted');
+  assert.deepEqual([...files.keys()].filter((k) => k.endsWith('.dmp')).sort(), ['C/pending/f.dmp', 'C/reports/b.dmp', 'C/reports/d.dmp']);
+  assert.ok(files.has('C/settings.dat'), 'non-dumps are never touched');
+  const hit = await D.waitForDump('C', 5500, { tries: 2, sleep: async () => {} }, fake);
+  assert.equal(norm(hit.path), 'C/pending/f.dmp');
+  assert.equal(await D.waitForDump('C', 99999, { tries: 3, sleep: async () => {} }, fake), null, 'no dump appears -> null');
+});
+
+test('CRASH ROW: with findDump the row waits for the dump (the recovery does not), and carries dumpPath / crashedAt', async () => {
+  const w = rig();
+  let resolveDump;
+  w.deps.findDump = () => new Promise((r) => { resolveDump = r; });
+  const win = fakeWindow();
+  R.installRendererRecovery(win, w.deps);
+  win.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 });
+  w.run(500);
+  assert.equal(win.webContents.reloads, 1, 'recovered at 500 ms without waiting for the dump');
+  assert.equal(w.rows.length, 0, 'the row waits for the dump');
+  resolveDump({ path: 'C:/x/Crashpad/reports/abc.dmp', size: 123 });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(w.rows.length, 1);
+  assert.equal(w.rows[0].dumpPath, 'C:/x/Crashpad/reports/abc.dmp');
+  assert.equal(w.rows[0].dumpBytes, 123);
+  assert.equal(typeof w.rows[0].crashedAt, 'number');
+  // No dump: the row is still written, with dumpPath null.
+  const v = rig(); v.deps.findDump = async () => null;
+  const win2 = fakeWindow(); R.installRendererRecovery(win2, v.deps);
+  win2.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: -36861 });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(v.rows[0].dumpPath, null);
+});
+
+test('WIRING: the reporter starts as early as the paths are final, local only; dumps pruned async after the first window; marks on startup-timing', () => {
+  const idx = read('src/main/index.ts');
+  const iSmoke = idx.indexOf("app.setPath('sessionData', smokeUserData);");
+  const iStart = idx.indexOf('const crashReporterStart = startLocalCrashReporter(crashReporter);');
+  const iLock = idx.indexOf('const gotInstanceLock = app.requestSingleInstanceLock();');
+  const iDevPaths = idx.indexOf("app.setPath('crashDumps', crashDir);");
+  assert.ok(iDevPaths > 0 && iSmoke > iDevPaths && iStart > iSmoke && iLock > iStart, 'after the dev/smoke path setup, before the single-instance lock and any window');
+  assert.doesNotMatch(idx, /crashReporter\.start\(/, 'only through startLocalCrashReporter (which passes uploadToServer:false)');
+  assert.doesNotMatch(idx, /submitURL/);
+  assert.match(idx, /void pruneDumps\(app\.getPath\('crashDumps'\), KEEP_DUMPS\)\.then\(/, 'prune is async, not awaited on the startup path');
+  assert.match(idx, /findDump: \(since\) => waitForDump\(app\.getPath\('crashDumps'\), since\),/);
+  assert.match(idx, /startupTiming\.mark\('crash-reporter-start', undefined, crashReporterStart\.startedAt\);\s*startupTiming\.mark\('crash-reporter-ready', undefined, crashReporterStart\.readyAt\);/);
+  const dumps = read('src/main/crashDumps.ts');
+  assert.doesNotMatch(dumps.replace(/\/\*[\s\S]*?\*\//g, ''), /Sync\(/, 'crashDumps.ts uses no synchronous fs call');
+  assert.match(read('src/main/startupTiming.ts'), /'crash-reporter-start', 'crash-reporter-ready'\] as const;/);
 });
 
 // ── PTY hand-over for a recreated window ─────────────────────────────────────────
