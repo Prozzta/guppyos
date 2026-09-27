@@ -46,7 +46,7 @@ test('AGY spawns IDLE: `--agent munder-<id>` and NO initial prompt; the protocol
   assert.ok(i >= 0, `--agent passed: ${JSON.stringify(inj.args)}`);
   assert.equal(inj.args[i + 1], 'munder-phyllis-mu11xldm');
   const md = fs.readFileSync(agentFile(s.home, 'phyllis-mu11xldm'), 'utf8');
-  assert.match(md, /^---\nname: munder-phyllis-mu11xldm\ndescription: ".*Written by the Munder Difflin app.*"\nmainAgent: true\ninheritCustomizations: true\nsubagent: false\nhidden: true\n---\n\n# Phyllis \(phyllis-mu11xldm\), a Munder Difflin hive agent\n\n/);
+  assert.match(md, /^---\nname: munder-phyllis-mu11xldm\ndescription: ".*Written by the Munder Difflin app.*"\nmainAgent: true\ninheritCustomizations: true\nsubagent: false\nhidden: true\ntools:\n(  - [a-z_]+\n)+---\n\n# Phyllis \(phyllis-mu11xldm\), a Munder Difflin hive agent\n\n/);
   assert.match(md, /HIVE PROTOCOL/);
   assert.match(md, /You are "Phyllis" \(phyllis-mu11xldm\)/);
   assert.equal((md.match(/^# /gm) || []).length, 1, 'exactly ONE H1 section');

@@ -24,7 +24,7 @@ export const CODEX_ROTATE_MAX_ROLLOUT_BYTES = 20 * 1024 * 1024;
 /** Antigravity's per-conversation SQLite db, same rule (Phyllis: 9.1 MB then 22 MB). */
 export const AGY_ROTATE_MAX_DB_BYTES = 20 * 1024 * 1024;
 
-export type ThreadRotationReason = 'day-boundary' | 'size';
+export type ThreadRotationReason = 'day-boundary' | 'size' | 'agy-toolset';
 
 export interface ThreadFileInfo {
   path: string;
@@ -70,6 +70,20 @@ export function decideThreadRotation(
   if (info.bytes > maxBytes) return { rotate: true, reason: 'size', ...base };
   if (info.startedAt < localDayStart(now)) return { rotate: true, reason: 'day-boundary', ...base };
   return { rotate: false, reason: null, ...base };
+}
+
+/** AGY-TOOLS-166: an AGY conversation created before its agent mounted the full toolset has no
+ *  command or write tools, and agy never adds them later. Rotate it (checked before size/day). */
+export function decideAgyRotation(
+  info: ThreadFileInfo,
+  now: number,
+  toolsSince: number | null,
+  maxBytes: number = AGY_ROTATE_MAX_DB_BYTES
+): ThreadRotationDecision {
+  if (toolsSince !== null && info.startedAt < toolsSince) {
+    return { rotate: true, reason: 'agy-toolset', bytes: info.bytes, ageMs: Math.max(0, now - info.startedAt) };
+  }
+  return decideThreadRotation(info, now, maxBytes);
 }
 
 /** The rollout for `sessionId` under `<codexHome>/sessions` (walked; bounded depth), or null. */

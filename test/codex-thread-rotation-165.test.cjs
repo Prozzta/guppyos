@@ -112,5 +112,7 @@ test('wiring: a rotation logs through hive.appendLog, and AGY gets the same rule
   assert.match(fn, /hive\.appendLog\(threadRotatedLogRow\(agentId, 'codex', sid, d\)\)/);
   assert.match(fn, /decideThreadRotation\(info, Date\.now\(\), CODEX_ROTATE_MAX_ROLLOUT_BYTES\)/);
   assert.match(fn, /catch \(e\) \{[\s\S]*return false;/, 'a failed check keeps resuming');
-  assert.match(INDEX, /if \(sid && rf && mayRotate && provider === 'antigravity'\) \{[\s\S]{0,400}AGY_ROTATE_MAX_DB_BYTES[\s\S]{0,300}sid = undefined;/);
+  // 1.1.66 AGY-TOOLS: decideAgyRotation adds the agy-toolset reason; its default size cap is AGY_ROTATE_MAX_DB_BYTES.
+  assert.match(INDEX, /if \(sid && rf && mayRotate && provider === 'antigravity'\) \{[\s\S]{0,500}decideAgyRotation\(info, Date\.now\(\), hive\.agyToolsSince\(opts\.hive\.id\)\)[\s\S]{0,300}sid = undefined;/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'codexThreadRotation.ts'), 'utf8'), /maxBytes: number = AGY_ROTATE_MAX_DB_BYTES\n?\r?\n?\)/);
 });

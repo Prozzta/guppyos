@@ -2532,6 +2532,18 @@ export class HiveManager {
    *  `--agent <name>`, the body applied as instructions, no turn at start, the global hooks still
    *  fire, and `--conversation` resume keeps it. Strings are JSON-quoted (valid YAML), and a
    *  prompt line that starts with `#` is escaped so it cannot open a second section. */
+  /** AGY-TOOLS-166: the built-in tools a hive agent's agy custom agent mounts. A Markdown custom
+   *  agent gets ONLY agy's fundamental tools (view_file, search_web, send_message, manage_task)
+   *  unless it lists `tools`, so from 1.1.55 to 1.1.65 a FRESH `--agent` conversation could not run
+   *  a command or write a file (no outbox, no inbox move, no deliverable). agy rejects the WHOLE
+   *  agent on one unknown name (exit 3 before any model call) and has no wildcard, so every name
+   *  here is verified against agy's registry (jailed probe, 2026-09-27, AGY-TOOLS-PROBE.md). This
+   *  is the set a working default-agent hive conversation used, plus multi_replace_file_content. */
+  static readonly AGY_AGENT_TOOLS: readonly string[] = [
+    'run_command', 'view_file', 'write_to_file', 'replace_file_content',
+    'multi_replace_file_content', 'search_web', 'read_url_content', 'manage_task'
+  ];
+
   static agyAgentMarkdown(meta: { id: string; name: string }, prompt: string): string {
     const name = HiveManager.agyAgentName(meta.id);
     return [
@@ -2545,6 +2557,9 @@ export class HiveManager {
       'subagent: false',
       // Kept out of the user's /agents panel (harmless to --agent selection, verified).
       'hidden: true',
+      // AGY-TOOLS-166: without this list the agent cannot run commands or write files.
+      'tools:',
+      ...HiveManager.AGY_AGENT_TOOLS.map((t) => `  - ${t}`),
       '---',
       '',
       `# ${meta.name} (${meta.id}), a Munder Difflin hive agent`,
@@ -2564,8 +2579,10 @@ export class HiveManager {
     const file = join(dir, 'agent.md');
     const body = HiveManager.agyAgentMarkdown(meta, prompt);
     try {
+      let hadTools = false;
       if (existsSync(file)) {
         const cur = readFileSync(file, 'utf8');
+        hadTools = /\ntools:\n/.test(cur);
         if (cur === body) return HiveManager.agyAgentName(meta.id);
         // Someone else's agent under our name: never overwrite it.
         if (!cur.includes(HiveManager.AGY_AGENT_MARK)) {
@@ -2576,11 +2593,33 @@ export class HiveManager {
       mkdirSync(dir, { recursive: true });
       writeFileSync(`${file}.tmp`, body, 'utf8');
       renameSync(`${file}.tmp`, file);
+      // AGY-TOOLS-166: the moment this agent's agy agent first carried `tools`. A conversation
+      // created before it has no command or write tools, for good (agy fixes the toolset when a
+      // conversation is created), so an automatic resume of one starts fresh (index.ts).
+      if (!hadTools) this.markAgyToolsSince(meta.id);
       return HiveManager.agyAgentName(meta.id);
     } catch (e) {
       console.error('[hive] installAgyAgent failed:', e);
       return null;
     }
+  }
+
+  /** AGY-TOOLS-166: when this agent's agy agent first mounted the full toolset (ms), or null. Kept
+   *  in the hive agent's own folder, not in the user's ~/.gemini. */
+  agyToolsSince(agentId: string): number | null {
+    try {
+      const n = Number(readFileSync(join(this.agentDir(agentId), HiveManager.AGY_TOOLS_SINCE_FILE), 'utf8').trim());
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch { return null; }
+  }
+
+  static readonly AGY_TOOLS_SINCE_FILE = 'agy-tools-since';
+
+  private markAgyToolsSince(agentId: string): void {
+    try {
+      mkdirSync(this.agentDir(agentId), { recursive: true });
+      writeFileSync(join(this.agentDir(agentId), HiveManager.AGY_TOOLS_SINCE_FILE), String(Date.now()), 'utf8');
+    } catch (e) { console.warn('[hive] could not record agy-tools-since:', e); }
   }
 
   /** Remove this agent's agy custom agent when it leaves the floor (killed or archived), so

@@ -105,7 +105,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
-import { AGY_ROTATE_MAX_DB_BYTES, CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
+import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { InboxWakeBridge } from './inboxWakeBridge';
 import { WakeStallWatch } from './wakeStall';
 import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
@@ -3590,7 +3590,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     const mayRotate = !typedSid && opts.requireResume !== true;
     if (sid && rf && mayRotate && provider === 'antigravity') {
       const info = findAgyConversation(join(homedir(), '.gemini'), sid);
-      const d = info ? decideThreadRotation(info, Date.now(), AGY_ROTATE_MAX_DB_BYTES) : null;
+      // AGY-TOOLS-166: a conversation from before the agent's tools: list is tool-less for good.
+      const d = info ? decideAgyRotation(info, Date.now(), hive.agyToolsSince(opts.hive.id)) : null;
       if (d?.rotate) {
         hive.appendLog(threadRotatedLogRow(opts.hive.id, provider, sid, d));
         console.log(`[resume] ${opts.hive.id}: antigravity conversation ${sid} rotated (${d.reason}); starting fresh`);
