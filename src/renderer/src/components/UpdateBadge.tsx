@@ -13,8 +13,9 @@
  * is wiring and pixels.
  */
 import { useCallback, useEffect, useState } from 'react';
-import { describeUpdate, manualDownloadUrl, manualInstallSteps, pendingVersion, reduceStatus, type UpdateStatus } from '@shared/updateState';
+import { describeUpdate, manualDownloadUrl, manualInstallSteps, optionDownloadUrl, pendingVersion, reduceStatus, releaseChoices, type UpdateStatus } from '@shared/updateState';
 import { PixelButton } from './PixelButton';
+import { ReleasePicker } from './ReleasePicker';
 
 declare const __APP_VERSION__: string;
 
@@ -25,6 +26,10 @@ export function UpdateBadge() {
   /** The version whose download was just started, for the "now replace the
    *  app" notice. Local state: it is a one-off explanation, not an update state. */
   const [started, setStarted] = useState<string | null>(null);
+  /** The version picker is open (only when more than one newer release exists),
+   *  and the version chosen in it — null means "the latest". */
+  const [picking, setPicking] = useState(false);
+  const [chosen, setChosen] = useState<string | null>(null);
 
   useEffect(() => {
     // Subscribe first, then pull — main may have emitted before this window
@@ -37,13 +42,29 @@ export function UpdateBadge() {
   }, []);
 
   const view = describeUpdate(status, __APP_VERSION__);
+  const choices = releaseChoices(status, __APP_VERSION__);
+  const selected = choices.find((c) => c.version === chosen) ?? choices[0];
+
+  /** Download the release chosen in the picker: its installer, in the browser. */
+  const downloadChosen = useCallback(async () => {
+    if (!selected) return;
+    try {
+      await window.cth.updateOpenRelease(optionDownloadUrl(selected, window.cth.platform, window.cth.arch));
+      setStarted(selected.version);
+    } catch { /* nothing to report beyond what main already logs */ }
+    setPicking(false);
+  }, [selected]);
 
   const onClick = useCallback(async () => {
     if (view.action === 'none' || busy) return;
     setBusy(true);
     try {
       if (view.action === 'check') await window.cth.updateCheckNow();
-      else if (view.action === 'manual' && status) {
+      else if (view.action === 'manual' && status && choices.length > 1) {
+        // More than one newer release: let the user pick which, latest first.
+        setChosen(null);
+        setPicking((p) => !p);
+      } else if (view.action === 'manual' && status) {
         // The click IS the download. Auto-update lives in Settings.
         const url = manualDownloadUrl(status, window.cth.platform, window.cth.arch);
         if (url) {
@@ -53,7 +74,7 @@ export function UpdateBadge() {
       }
     } catch { /* the emitted status carries the failure — nothing to do here */ }
     setBusy(false);
-  }, [view.action, busy, status]);
+  }, [view.action, busy, status, choices.length]);
 
   const interactive = view.action !== 'none' && !view.busy;
   // The chip only earns colour when it wants something: ready = mint (act on
@@ -107,7 +128,7 @@ export function UpdateBadge() {
     </button>
 
     {/* Hover card: what the click does and what to do with the file, for this OS. */}
-    {pending && hover && !started && (
+    {pending && hover && !started && !picking && (
       <div
         role="tooltip"
         className="cth-titlebar-nodrag"
@@ -120,7 +141,7 @@ export function UpdateBadge() {
         }}
       >
         <div style={{ fontFamily: 'var(--cth-font-mono, monospace)', fontWeight: 700, fontSize: 12.5 }}>
-          Click to download v{pending}
+          {choices.length > 1 ? `Click to choose from ${choices.length} newer versions` : `Click to download v${pending}`}
         </div>
         <div style={{ marginTop: 4, color: 'var(--cth-ink-700)' }}>
           Download the latest version and replace the app you have. Prefer the app to update itself? Settings &rarr; Updates.
@@ -132,6 +153,38 @@ export function UpdateBadge() {
         <ol style={{ margin: '4px 0 0', paddingLeft: 18, color: 'var(--cth-ink-700)' }}>
           {steps.steps.map((t) => <li key={t}>{t}</li>)}
         </ol>
+      </div>
+    )}
+
+    {/* More than one newer release: pick which to download. */}
+    {picking && selected && !started && (
+      <div
+        role="dialog"
+        aria-label="Choose a version to download"
+        className="cth-titlebar-nodrag"
+        style={{
+          position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 400,
+          width: 380, padding: '12px 14px',
+          background: 'var(--cth-paper-100)', color: INK,
+          border: `2px solid ${INK}`, boxShadow: `4px 4px 0 ${INK}`,
+          fontFamily: 'var(--cth-font-ui)', fontSize: 12.5, lineHeight: 1.5, textAlign: 'left'
+        }}
+      >
+        <div style={{ fontFamily: 'var(--cth-font-mono, monospace)', fontWeight: 700, fontSize: 13, marginBottom: 8 }}>
+          {choices.length} newer versions are published
+        </div>
+        <ReleasePicker
+          choices={choices}
+          selected={selected.version}
+          onSelect={setChosen}
+          onOpenRelease={(url) => { void window.cth.updateOpenRelease(url); }}
+        />
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
+          <PixelButton variant="ghost" size="sm" onClick={() => setPicking(false)}>cancel</PixelButton>
+          <PixelButton variant="primary" size="sm" onClick={() => { void downloadChosen(); }}>
+            download v{selected.version}
+          </PixelButton>
+        </div>
       </div>
     )}
 

@@ -5,7 +5,8 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path';
 import { readConfig } from './config';
 import { DEFAULT_DROP_HTML } from '../shared/releaseDrop';
-import { reduceStatus, clampPercent, isNewer, installerUrl, REPO, type UpdateStatus } from '../shared/updateState';
+import { reduceStatus, clampPercent, isNewer, installerUrl, newerReleases, releaseOptionsFromNotes, REPO, type UpdateStatus } from '../shared/updateState';
+import { htmlToNoteText } from '../shared/releaseNotes';
 
 /**
  * Auto-update from GitHub releases.
@@ -18,7 +19,7 @@ import { reduceStatus, clampPercent, isNewer, installerUrl, REPO, type UpdateSta
  * → `update:restartAndInstall`). The app never restarts on its own.
  *
  * Fallback path (win-portable exe, or a genuine updater error): a plain
- * `releases/latest` poll — semver-compare against the running version and show a
+ * `releases` list poll — semver-compare against the running version and show a
  * notify-only state linking the release page.
  *
  * Everything is gated on the `autoUpdate` HarnessConfig flag (default ON,
@@ -49,7 +50,7 @@ import { reduceStatus, clampPercent, isNewer, installerUrl, REPO, type UpdateSta
 // half-repointed: the feed moved while the release lookup or the download link
 // did not.
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
-const FALLBACK_CACHE_MS = 60 * 60 * 1000;     // 1h between releases/latest polls
+const FALLBACK_CACHE_MS = 60 * 60 * 1000;     // 1h between fallback release-list polls
 
 export type { UpdateStatus };
 
@@ -201,7 +202,22 @@ function fetchReleaseBody(version: string, done: (notes: string | undefined) => 
   } catch { done(undefined); }
 }
 
-/** Notify-only check against releases/latest (no download). Never throws. */
+/** `info.releaseNotes` for ONE release: with `fullChangelog` it is the array of
+ *  every newer release, so pick the entry for `version`; a plain string is the
+ *  release's own note. Either way it is the atom feed's HTML, made digestible. */
+function noteFor(releaseNotes: unknown, version: string): string | undefined {
+  if (typeof releaseNotes === 'string') return htmlToNoteText(releaseNotes) || undefined;
+  if (!Array.isArray(releaseNotes)) return undefined;
+  const hit = (releaseNotes as Array<{ version?: unknown; note?: unknown }>)
+    .find((r) => typeof r?.version === 'string' && r.version.replace(/^v/, '') === version.replace(/^v/, ''));
+  return typeof hit?.note === 'string' ? htmlToNoteText(hit.note) || undefined : undefined;
+}
+
+/** Notify-only check against the releases list (no download). Never throws.
+ *
+ *  ONE request, same as the `releases/latest` poll it replaced: `/releases`
+ *  returns every recent release with its body and assets, which is what the
+ *  version picker needs, and the newest stable one still drives the headline. */
 function fallbackCheck(reason: string | undefined, force = false): void {
   const now = Date.now();
   if (!force && now - lastFallbackCheck < FALLBACK_CACHE_MS) return;
@@ -210,7 +226,7 @@ function fallbackCheck(reason: string | undefined, force = false): void {
     const req = httpsRequest(
       {
         hostname: 'api.github.com',
-        path: `/repos/${REPO}/releases/latest`,
+        path: `/repos/${REPO}/releases?per_page=30`,
         method: 'GET',
         headers: { 'User-Agent': 'munder-difflin-updater', Accept: 'application/vnd.github+json' },
         timeout: 10_000
@@ -221,19 +237,20 @@ function fallbackCheck(reason: string | undefined, force = false): void {
         res.on('data', (d) => { body += d; if (body.length > 262_144) req.destroy(); });
         res.on('end', () => {
           try {
-            const rel = JSON.parse(body) as { tag_name?: string; html_url?: string; body?: string; assets?: Array<{ name?: string; browser_download_url?: string }> };
-            const tag = rel.tag_name ?? '';
-            if (tag && isNewer(tag, app.getVersion())) {
+            const versions = newerReleases(JSON.parse(body), app.getVersion(), process.platform, process.arch, (a) => pickDownloadAsset(a));
+            const top = versions[0];
+            if (top) {
               emit({
                 state: 'available-manual',
-                version: tag.replace(/^v/, ''),
-                url: rel.html_url ?? `https://github.com/${REPO}/releases/latest`,
+                version: top.version,
+                url: top.url,
                 reason,
-                downloadUrl: pickDownloadAsset(rel.assets) ?? undefined,
+                downloadUrl: top.downloadUrl,
                 // Already in the response we just parsed — carrying it costs
                 // nothing and lets the notify-only toast show "What's new" too.
                 // NOT a new request: see TELEMETRY.md, this app never adds one.
-                notes: typeof rel.body === 'string' ? rel.body : undefined
+                notes: top.notes,
+                versions
               });
             }
           } catch { /* malformed body — try again next interval */ }
@@ -456,9 +473,15 @@ export function initAutoUpdater(getWebContents: () => WebContents | null): void 
       // test/update-feed-owner.test.cjs.
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = false; // install ONLY on explicit restart
+      // Every release between this one and the latest, not just the latest:
+      // electron-updater then returns releaseNotes as [{version, note}] for all
+      // of them, read from the releases.atom feed it downloads anyway (10 newest)
+      // — so the version picker costs no extra request.
+      autoUpdater.fullChangelog = true;
       autoUpdater.on('update-available', (info) => {
-        logLine(`update available: ${info.version}`);
-        emit({ state: 'available', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes : undefined });
+        const versions = releaseOptionsFromNotes(info.releaseNotes, info.version, app.getVersion(), process.platform, process.arch, htmlToNoteText);
+        logLine(`update available: ${info.version} (${versions.length} newer: ${versions.map((r) => r.version).join(', ')})`);
+        emit({ state: 'available', version: info.version, notes: noteFor(info.releaseNotes, info.version), versions });
       });
       autoUpdater.on('download-progress', (p) => {
         const version = lastStatus && 'version' in lastStatus ? lastStatus.version : app.getVersion();
@@ -466,7 +489,7 @@ export function initAutoUpdater(getWebContents: () => WebContents | null): void 
       });
       autoUpdater.on('update-downloaded', (info) => {
         logLine(`update downloaded: ${info.version} — waiting for the user to restart`);
-        emit({ state: 'downloaded', version: info.version, notes: typeof info.releaseNotes === 'string' ? info.releaseNotes : undefined });
+        emit({ state: 'downloaded', version: info.version, notes: noteFor(info.releaseNotes, info.version) });
       });
       autoUpdater.on('error', (err) => {
         const message = errText(err);

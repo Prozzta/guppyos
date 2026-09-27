@@ -8,12 +8,26 @@
  * and does — live here where they can be unit-tested without booting Electron.
  */
 
+/** One newer release the user can choose to install. `notes` is that
+ *  release's own body (markdown, or plain text converted from the atom feed's
+ *  HTML); `url` is its release page; `downloadUrl` its installer for THIS
+ *  machine when the release named one. */
+export interface ReleaseOption {
+  version: string;
+  notes?: string;
+  url: string;
+  downloadUrl?: string;
+}
+
 export type UpdateStatus =
   /** Nothing known yet (fresh window, or dev build where we never check). */
   | { state: 'idle' }
   | { state: 'checking' }
   | { state: 'not-available' }
-  | { state: 'available'; version: string; notes?: string }
+  /** `versions`: EVERY newer release known, newest first (so
+   *  `versions[0].version === version`). Optional: a status without it is the
+   *  one-version list `[version]` — see `releaseChoices`. */
+  | { state: 'available'; version: string; notes?: string; versions?: ReleaseOption[] }
   | { state: 'downloading'; version: string; percent: number }
   | { state: 'downloaded'; version: string; notes?: string }
   /** This install can't self-update (win-portable, or the native path failed):
@@ -25,7 +39,9 @@ export type UpdateStatus =
       /** Direct asset for THIS platform/arch, when the release has one. The
        *  modal's primary button downloads it; without it the button falls back
        *  to the releases page. */
-      downloadUrl?: string }
+      downloadUrl?: string;
+      /** Every newer release, newest first — same contract as on 'available'. */
+      versions?: ReleaseOption[] }
   /** First launch after the version moved: `version` is the one now RUNNING and
    *  `notes` its release body, so the renderer can show that release's page. */
   | { state: 'just-updated'; version: string; notes?: string }
@@ -57,6 +73,120 @@ export function installerUrl(version: string, platform: string, arch: string): s
     : platform === 'win32' ? `Munder-Difflin-${v}-win-x64-setup.exe`
     : `Munder-Difflin-${v}-linux-x86_64.AppImage`;
   return `https://github.com/${REPO}/releases/download/v${v}/${file}`;
+}
+
+/** Newest first, numerically (0.3.10 above 0.3.9). */
+function byNewest(a: ReleaseOption, b: ReleaseOption): number {
+  return isNewer(a.version, b.version) ? -1 : isNewer(b.version, a.version) ? 1 : 0;
+}
+
+/** Keep only versions newer than `current`, one row per version, newest first. */
+function tidy(list: ReleaseOption[], current: string): ReleaseOption[] {
+  const seen = new Set<string>();
+  const out: ReleaseOption[] = [];
+  for (const r of list) {
+    const v = r.version.replace(/^v/, '');
+    if (!parseVersion(v) || !isNewer(v, current) || seen.has(v)) continue;
+    seen.add(v);
+    out.push({ ...r, version: v });
+  }
+  return out.sort(byNewest);
+}
+
+/**
+ * The fallback poll's `GET /releases` list -> every newer, published, stable
+ * release. Drafts and prereleases are dropped (the native path never offers
+ * them either), and each keeps its own body and this machine's installer.
+ */
+export function newerReleases(
+  releases: unknown,
+  current: string,
+  platform: string,
+  arch: string,
+  pickAsset: (assets: ReadonlyArray<{ name?: string; browser_download_url?: string }> | undefined) => string | null = () => null
+): ReleaseOption[] {
+  if (!Array.isArray(releases)) return [];
+  const list: ReleaseOption[] = [];
+  for (const raw of releases as Array<Record<string, unknown>>) {
+    if (!raw || typeof raw !== 'object' || raw.draft === true || raw.prerelease === true) continue;
+    const tag = typeof raw.tag_name === 'string' ? raw.tag_name : '';
+    const version = tag.replace(/^v/, '');
+    if (!parseVersion(version)) continue;
+    list.push({
+      version,
+      notes: typeof raw.body === 'string' ? raw.body : undefined,
+      url: typeof raw.html_url === 'string' ? raw.html_url : `https://github.com/${REPO}/releases/tag/v${version}`,
+      downloadUrl: pickAsset(raw.assets as ReadonlyArray<{ name?: string; browser_download_url?: string }> | undefined)
+        ?? installerUrl(version, platform, arch)
+    });
+  }
+  return tidy(list, current);
+}
+
+/**
+ * electron-updater's `releaseNotes` with `fullChangelog = true` — an array of
+ * `{version, note}` for every release in (current, latest], read from the atom
+ * feed it already downloaded — -> the options list. The latest release is
+ * ALWAYS in the result even if the feed somehow lacked it, because that one is
+ * what electron-updater itself resolved. `toText` turns the feed's HTML into
+ * something the markdown digest can read.
+ */
+export function releaseOptionsFromNotes(
+  releaseNotes: unknown,
+  latest: string,
+  current: string,
+  platform: string,
+  arch: string,
+  toText: (html: string) => string = (h) => h
+): ReleaseOption[] {
+  const list: ReleaseOption[] = [];
+  const option = (version: string, note: unknown): ReleaseOption => {
+    const v = version.replace(/^v/, '');
+    return {
+      version: v,
+      notes: typeof note === 'string' && note.trim() ? toText(note) : undefined,
+      url: `https://github.com/${REPO}/releases/tag/v${v}`,
+      downloadUrl: installerUrl(v, platform, arch)
+    };
+  };
+  if (Array.isArray(releaseNotes)) {
+    for (const r of releaseNotes as Array<{ version?: unknown; note?: unknown }>) {
+      if (r && typeof r.version === 'string') list.push(option(r.version, r.note));
+    }
+  }
+  const out = tidy(list, current);
+  if (!out.some((r) => r.version === latest.replace(/^v/, '')) && isNewer(latest, current)) {
+    out.unshift(option(latest, typeof releaseNotes === 'string' ? releaseNotes : undefined));
+    out.sort(byNewest);
+  }
+  return out;
+}
+
+/**
+ * The versions a picker offers for `status`, newest first — the first entry is
+ * the preselected one. A status that predates `versions` (or carries an empty
+ * list) is its own single version, so every surface can treat "one release"
+ * and "many" the same way.
+ */
+export function releaseChoices(status: UpdateStatus | null, current: string): ReleaseOption[] {
+  if (!status || (status.state !== 'available' && status.state !== 'available-manual')) return [];
+  const own: ReleaseOption = {
+    version: status.version,
+    notes: status.notes,
+    url: status.state === 'available-manual' ? status.url : `https://github.com/${REPO}/releases/tag/v${status.version}`,
+    downloadUrl: status.state === 'available-manual' ? status.downloadUrl : undefined
+  };
+  const list = tidy([...(status.versions ?? []), own], current);
+  // The status's own version leads even if a list somehow named something
+  // newer: it is what the headline and the native download refer to.
+  const i = list.findIndex((r) => r.version === status.version.replace(/^v/, ''));
+  if (i > 0) list.unshift(...list.splice(i, 1));
+  return list;
+}
+
+/** Where downloading `option` goes: its own asset, else the conventional installer. */
+export function optionDownloadUrl(option: ReleaseOption, platform: string, arch: string): string {
+  return option.downloadUrl ?? installerUrl(option.version, platform, arch);
 }
 
 /** The newer release a status knows about, or null. Every state that names a

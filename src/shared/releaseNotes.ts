@@ -233,3 +233,44 @@ export function summarizeReleaseNotes(
   }
   return out;
 }
+
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+
+/**
+ * The atom feed's release HTML -> markdown-ish text that `summarizeReleaseNotes`
+ * can digest.
+ *
+ * electron-updater reads release notes from `releases.atom`, where GitHub has
+ * already rendered the body to HTML. The digest was written for the markdown
+ * body, so given raw HTML it had no headings or bullets to find. This puts
+ * them back: headings -> `## `, list items -> `- `, paragraphs and breaks ->
+ * newlines, everything else stripped, entities decoded. A body with no tags is
+ * returned unchanged, so markdown is safe to pass through.
+ */
+export function htmlToNoteText(html: string | null | undefined): string {
+  if (typeof html !== 'string') return '';
+  if (!/<[a-z!/][^>]*>/i.test(html)) return html;
+  return html
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<h([1-6])[^>]*>/gi, (_m, n: string) => `\n${'#'.repeat(Number(n))} `)
+    .replace(/<li[^>]*>/gi, '\n- ')
+    .replace(/<hr[^>]*>/gi, '\n---\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|ul|ol|li|blockquote|table|tr|pre)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (m, e: string) => {
+      const k = e.toLowerCase();
+      if (k in ENTITIES) return ENTITIES[k];
+      if (k.startsWith('#x')) return String.fromCodePoint(parseInt(k.slice(2), 16));
+      if (k.startsWith('#')) return String.fromCodePoint(Number(k.slice(1)));
+      return m;
+    })
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    // A source newline between two <li> leaves a blank line inside the list.
+    .replace(/(\n- [^\n]*)\n\n(?=- )/g, '$1\n')
+    .replace(/(\n- [^\n]*)\n\n(?=- )/g, '$1\n')
+    .trim();
+}

@@ -13,8 +13,9 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { summarizeReleaseNotes } from '@shared/releaseNotes';
-import { describeUpdateSettings, manualDownloadUrl, manualInstallSteps, pendingVersion, reduceStatus, type UpdateStatus } from '@shared/updateState';
+import { describeUpdateSettings, manualDownloadUrl, manualInstallSteps, optionDownloadUrl, pendingVersion, reduceStatus, releaseChoices, type UpdateStatus } from '@shared/updateState';
 import { PixelButton } from './PixelButton';
+import { ReleasePicker } from './ReleasePicker';
 
 declare const __APP_VERSION__: string;
 
@@ -32,14 +33,26 @@ export function UpdatesSection() {
     return off;
   }, []);
 
-  const view = describeUpdateSettings(status, __APP_VERSION__);
+  const baseView = describeUpdateSettings(status, __APP_VERSION__);
+  /** Every newer release, latest first; the picker only shows for 2+. */
+  const choices = releaseChoices(status, __APP_VERSION__);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const selected = choices.find((c) => c.version === chosen) ?? choices[0];
+  /** An OLDER release is chosen. electron-updater can only fetch the release
+   *  `releases/latest` points at, so that choice is always a manual install. */
+  const olderChosen = !!selected && !!status && 'version' in status && selected.version !== status.version;
+  const view = olderChosen && selected
+    ? { ...baseView, headline: `v${selected.version} selected`, detail: `You're on v${__APP_VERSION__}. An older release installs by hand: download it, then replace the app.`, button: `Download v${selected.version} installer`, action: 'manual' as const }
+    : baseView;
   /** The manual path is always on offer next to the automatic one. */
-  const pending = pendingVersion(status, __APP_VERSION__);
+  const pending = selected?.version ?? pendingVersion(status, __APP_VERSION__);
   const [manualStarted, setManualStarted] = useState<string | null>(null);
   const steps = manualInstallSteps(window.cth.platform ?? 'darwin');
   const downloadManually = () => {
     if (!status) return;
-    const url = manualDownloadUrl(status, window.cth.platform, window.cth.arch);
+    const url = selected
+      ? optionDownloadUrl(selected, window.cth.platform, window.cth.arch)
+      : manualDownloadUrl(status, window.cth.platform, window.cth.arch);
     if (!url) return;
     void window.cth.updateOpenRelease(url);
     setManualStarted(pending);
@@ -61,12 +74,13 @@ export function UpdatesSection() {
       if (view.action === 'restart') await window.cth.updateRestartAndInstall();
       else if (view.action === 'download') await window.cth.updateDownload();
       else if (view.action === 'check') await window.cth.updateCheckNow();
+      else if (view.action === 'manual') downloadManually();
       else if (view.action === 'open-release') {
         await window.cth.updateOpenRelease(status?.state === 'available-manual' ? status.url : undefined);
       }
     } catch { /* the emitted status carries the failure — nothing to do here */ }
     setBusy(false);
-  }, [view.action, busy, status]);
+  }, [view.action, busy, status, selected]);
 
   return (
     <div>
@@ -91,7 +105,7 @@ export function UpdatesSection() {
           </span>
         </div>
         <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center' }}>
-          {pending && (
+          {pending && !olderChosen && (
             <PixelButton
               variant="secondary"
               size="sm"
@@ -135,7 +149,17 @@ export function UpdatesSection() {
           </ol>
         </div>
       )}
-      {notes.length > 0 && (
+      {choices.length > 1 && selected && (
+        <div style={{ marginTop: 10 }}>
+          <ReleasePicker
+            choices={choices}
+            selected={selected.version}
+            onSelect={setChosen}
+            onOpenRelease={(url) => { void window.cth.updateOpenRelease(url); }}
+          />
+        </div>
+      )}
+      {choices.length <= 1 && notes.length > 0 && (
         <ul style={{
           listStyle: 'none', margin: '8px 0 0', padding: 0,
           display: 'flex', flexDirection: 'column', gap: 4
