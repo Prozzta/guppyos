@@ -3439,7 +3439,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           skillsDir: skillsResourceDir(),
           codexNoDaemon,
           // CODEX-BLOAT-165 fix 2: Settings' Codex tool output cap, into this agent's config.toml.
-          codexToolOutputTokenLimit: readConfig().codexToolOutputTokenLimit
+          codexToolOutputTokenLimit: readConfig().codexToolOutputTokenLimit,
+          // CODEX-BLOAT-165 fix 5: Settings' "inherit my Codex plugins" (default off).
+          codexInheritPlugins: readConfig().codexInheritPlugins === true
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and

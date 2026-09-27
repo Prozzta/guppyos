@@ -234,6 +234,11 @@ export interface HarnessConfig {
    *  estimated tokens (1000-10000), or 'off' (no key written). Default 4000. Never written to the
    *  user's ~/.codex/config.toml. Codex reads it at start: a change reaches an agent at its next start. */
   codexToolOutputTokenLimit?: number | 'off';
+  /** CODEX-BLOAT-165 fix 5 (Settings → Agents & Models, "Hive Codex agents inherit my Codex
+   *  plugins"): true = each hive Codex agent's own config.toml keeps the plugins copied from the
+   *  user's ~/.codex/config.toml as they are; false (the default) = they are turned off there.
+   *  The user's file is never written. Codex reads it at start: a change reaches an agent at its next start. */
+  codexInheritPlugins?: boolean;
   /** The command we run when spawning a new agent. */
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
@@ -471,6 +476,7 @@ const DEFAULTS: HarnessConfig = {
   orchestratorMaySpawn: false,
   heavyJobsAtOnce: 1,
   codexToolOutputTokenLimit: CODEX_TOOL_OUTPUT_LIMIT_DEFAULT,
+  codexInheritPlugins: false,
   defaultCommand: 'claude',
   godProvider: 'claude',
   godModel: 'claude-opus-4-8',
@@ -725,6 +731,11 @@ export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
     const n = normalizeCodexToolOutputLimit(patch.codexToolOutputTokenLimit);
     if (n === null) throw new Error('invalid codexToolOutputTokenLimit');
     next.codexToolOutputTokenLimit = n;
+  }
+  // CODEX-BLOAT-165 fix 5: a boolean only; anything else is refused and changes nothing.
+  if (patch && Object.prototype.hasOwnProperty.call(patch, 'codexInheritPlugins')
+    && typeof patch.codexInheritPlugins !== 'boolean') {
+    throw new Error('invalid codexInheritPlugins');
   }
   // Project INGESTION — a registered repo is typed by hand ("~/dev/foo") as often
   // as it is picked from the folder dialog. Expand `~` here so the persisted list

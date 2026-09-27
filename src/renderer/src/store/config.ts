@@ -69,6 +69,8 @@ export interface HarnessConfig {
   heavyJobsAtOnce?: number | 'off';
   /** CODEX-BLOAT-165 fix 2: tool_output_token_limit for hive Codex agents (1000-10000) or 'off'. Default 4000. Mirrors src/main/config.ts. */
   codexToolOutputTokenLimit?: number | 'off';
+  /** CODEX-BLOAT-165 fix 5: hive Codex agents keep the user's Codex plugins (default false). Mirrors src/main/config.ts. */
+  codexInheritPlugins?: boolean;
   defaultCommand: string;
   /** Default model for newly spawned agents (e.g. 'claude-sonnet-4-6[1m]'); unset = CLI default. */
   defaultModel?: string;

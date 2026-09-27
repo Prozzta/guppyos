@@ -282,6 +282,8 @@ export interface HarnessConfig {
   autoMode: boolean;
   /** CODEX-BLOAT-165 fix 2: tool_output_token_limit for hive Codex agents (1000-10000) or 'off'. Mirrors src/main/config.ts. */
   codexToolOutputTokenLimit?: number | 'off';
+  /** CODEX-BLOAT-165 fix 5: hive Codex agents keep the user's Codex plugins (default false). Mirrors src/main/config.ts. */
+  codexInheritPlugins?: boolean;
   defaultCommand: string;
   defaultModel?: string;
   /** Which provider+model powers the GOD orchestrator ("Michael"). Default

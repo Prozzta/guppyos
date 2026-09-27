@@ -14,6 +14,7 @@ import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
+import { CodexPluginsSetting } from './CodexPluginsSetting';
 import { openFirstCapacityDetail } from '../capacity/detailSelection';
 import { UpdatesSection } from './UpdatesSection';
 import { SettingsHeroCard } from './SettingsHeroCard';
@@ -1115,6 +1116,9 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       {/* CODEX-BLOAT-165 fix 2: the hive Codex agents' tool output cap */}
                       <CodexToolOutputSetting />
+
+                      {/* CODEX-BLOAT-165 fix 5: whether hive Codex agents inherit the user's plugins */}
+                      <CodexPluginsSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

@@ -911,6 +911,9 @@ export class HiveManager {
       /** CODEX-BLOAT-165 fix 2: HarnessConfig.codexToolOutputTokenLimit (a number, 'off', or
        *  absent = the default), written into this agent's own config.toml. */
       codexToolOutputTokenLimit?: number | 'off';
+      /** CODEX-BLOAT-165 fix 5: HarnessConfig.codexInheritPlugins. Only `true` keeps the
+       *  inherited plugins; absent or false turns them off in this agent's config.toml. */
+      codexInheritPlugins?: boolean;
     } = {}
   ): Promise<SpawnInjection> {
     const root = this.root();
@@ -1077,7 +1080,7 @@ export class HiveManager {
               this.reconcileAgyStatusline();
             }
             else if (desc.shim === 'codex') {
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit));
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
@@ -2934,7 +2937,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false): { home: string; refusal?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3014,10 +3017,11 @@ export class HiveManager {
         config = s.text;
         console.warn(`[dev-isolation] codex config seed for ${home}: rewrote ${s.rewrittenHomes} CODEX_HOME key(s) to the DEV home, made ${s.rewrittenPipes} named pipe(s) DEV-distinct, dropped ${s.droppedTables} [projects.*] trust table(s)`);
       }
-      // CODEX-BLOAT-165 fix 5: the seed's plugins (browser, computer-use, documents, ...) are
-      // OFF in this agent's copy: each one adds tools and instructions to every request. Only
-      // this generated file changes; the user's ~/.codex/config.toml is read, never written.
-      if (config) config = disableCodexPlugins(config).text;
+      // CODEX-BLOAT-165 fix 5: unless Settings says to inherit them, the seed's plugins
+      // (browser, computer-use, documents, ...) are OFF in this agent's copy: each one adds
+      // tools and instructions to every request. Only this generated file changes; the user's
+      // ~/.codex/config.toml is read, never written.
+      if (config && !inheritPlugins) config = disableCodexPlugins(config).text;
       // CODEX-BLOAT-165 fix 6: compact at ~120K instead of the model default (~220-243K
       // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
       config = setCodexTopLevelKeys(config, {
