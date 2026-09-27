@@ -5,6 +5,7 @@
  * agent's `## How I work (standing lessons)` section, verbatim, on its own budget.
  */
 import type { SearchHit } from './store';
+import { PINNED_SOFT_CAP_BYTES } from '../memoryRollover';
 
 export interface SearchFlags {
   wing?: string | null;
@@ -103,7 +104,7 @@ export function formatStatus(s: { sources: number; chunks: number; vectors: numb
     L.push('memory-pinned (## How I work (standing lessons)):');
     for (const p of s.memoryPinned) {
       L.push(p.present
-        ? `  ${p.agent}: ${p.lessons} lesson(s), ${p.bytes} B${p.bytes > 6 * 1024 ? '  (over 6 KB: merge and shorten)' : ''}${p.lessons === 0 ? '  (empty: move your method lessons here)' : ''}`
+        ? `  ${p.agent}: ${p.lessons} lesson(s), ${p.bytes} B${p.bytes > PINNED_SOFT_CAP_BYTES ? '  (over 6 KB: merge and shorten)' : ''}${p.lessons === 0 ? '  (empty: move your method lessons here)' : ''}`
         : `  ${p.agent}: no section`);
     }
   }

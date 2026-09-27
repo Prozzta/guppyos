@@ -1782,7 +1782,7 @@ export class HiveManager {
       semanticMemory
         ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${inDir('memory.md')} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them). Then read EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`
         : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then read the LAST ~40 lines of ${inDir('memory.md')} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed) and EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`,
-      `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead; keep that section under ~6 KB, merging and shortening lessons when it grows.`,
+      `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
       guardrailsLine,
@@ -3597,7 +3597,8 @@ between agents.
 - \`identity.md\`  — who you are (read-only; the harness writes it).
 - \`memory.md\`    — your long-term memory. Its \`## How I work (standing lessons)\` section, at the top,
   holds your METHOD lessons (how you work): read it at the start of every task, and put new method
-  lessons there, not dated facts (keep it under ~6 KB; merge and shorten lessons when it grows). Then
+  lessons there as bullets or \`###\` subheadings, not dated facts (a \`##\` heading ends the section;
+  keep it under ~6 KB; merge and shorten lessons when it grows). Then
   run \`memory wake-up\` (semantic memory on) or read only the last ~40 lines; never print it whole.
   Append facts and decisions at the end as you learn. Above 32 KB the app moves the older part to
   \`memory-archive-<date>.md\`, which \`memory search\` still finds; the standing lessons are never archived.

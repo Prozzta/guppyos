@@ -157,7 +157,8 @@ test('seed: an empty section goes under the generated header (before the notes);
   assert.equal(r.seeded, true);
   const once = read(file);
   assert.equal(once, HEAD + '\n' + M.PINNED_SEED + notes(3));
-  assert.match(M.PINNED_SEED, /^## How I work \(standing lessons\)\n_Your method lessons \(how you work\); kept at the top, never archived\._\n$/);
+  // Jim PINNED F1: the seed states the rule (a ## heading ends the section).
+  assert.match(M.PINNED_SEED, /^## How I work \(standing lessons\)\n_Your method lessons \(how you work\): bullets or ### subheadings only, a ## heading ends this section; kept at the top, never archived\._\n$/);
   assert.equal(M.seedPinnedSection(dir).seeded, false);
   assert.equal(read(file), once, 'a second seed changes nothing');
   assert.equal(M.splitMemory(once).pinned, M.PINNED_SEED + '\n');
@@ -267,6 +268,35 @@ test('memory status: a memory-pinned line per agent (lessons, bytes; no section 
   assert.doesNotMatch(r.text, /nomem/);
   const byAgent = Object.fromEntries(r.json.memoryPinned.map((p) => [p.agent, p]));
   assert.deepEqual({ present: byAgent.jm.present, lessons: byAgent.ph.lessons }, { present: false, lessons: 2 });
+});
+
+test('Jim F1: protocol line 2 and PROTOCOL.md state the rule (bullets or ### only; a ## heading ends the section)', () => {
+  const hive = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(hive, /as bullets or \\`###\\` subheadings only \(a \\`##\\` heading ends that section and what follows it gets archived\)/);
+  assert.match(hive, /lessons there as bullets or \\`###\\` subheadings, not dated facts \(a \\`##\\` heading ends the section;/);
+});
+
+test('Jim F2: a heading quoted inside a code fence is text: not lifted, and it does not end a section', () => {
+  const body = [
+    '## How I work (standing lessons)', '- lesson 1', '```', '## not a heading', '```', '- lesson 2', '',
+    '## Notes', '```md', '## How I work (standing lessons)', '- quoted, not a lesson', '```', '- a note', ''
+  ].join('\n');
+  const { pinned, rest } = M.liftPinned(body);
+  assert.match(pinned, /- lesson 1\n```\n## not a heading\n```\n- lesson 2\n/, 'a fenced ## inside the section does not end it');
+  assert.doesNotMatch(pinned, /quoted, not a lesson/, 'a fenced copy of the heading is not lifted');
+  assert.match(rest, /```md\n## How I work \(standing lessons\)\n- quoted, not a lesson\n```\n- a note/, 'the fence stays whole in the notes');
+});
+
+test('Jim F2: the seed treats a fenced copy of the heading as absent (it seeds a real one)', (t) => {
+  const dir = tmp(t, 'pin167-fence-');
+  fs.writeFileSync(path.join(dir, 'memory.md'), HEAD + '\n## Notes\n```\n## How I work (standing lessons)\n```\n');
+  assert.equal(M.seedPinnedSection(dir).seeded, true);
+});
+
+test('Jim F3: an italic lesson counts; only the seed line does not', () => {
+  const txt = HEAD + '\n' + M.PINNED_SEED + '- plain\n_an italic lesson_\n\n## Notes\n';
+  assert.equal(M.pinnedStatus('a', txt).lessons, 2);
+  assert.equal(M.pinnedStatus('b', HEAD + '\n' + M.PINNED_SEED + '\n## Notes\n').lessons, 0);
 });
 
 // ── the spawn wiring and the protocol text (a real HiveManager, HOME redirected) ────────

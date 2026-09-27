@@ -38,7 +38,10 @@ export const POINTER_HEAD = '_Older notes are archived in ';
 /** The pinned section's heading, matched exactly (trailing blanks aside). */
 export const PINNED_HEADING = '## How I work (standing lessons)';
 /** The empty section the spawn seeds under the generated header. */
-export const PINNED_SEED = `${PINNED_HEADING}\n_Your method lessons (how you work); kept at the top, never archived._\n`;
+/** The seed's italic line (not a lesson; statuses do not count it). Jim PINNED F1: it states the
+ *  rule, because a `## ` heading inside the lessons ends the section and archives what follows. */
+export const PINNED_SEED_LINE = '_Your method lessons (how you work): bullets or ### subheadings only, a ## heading ends this section; kept at the top, never archived._';
+export const PINNED_SEED = `${PINNED_HEADING}\n${PINNED_SEED_LINE}\n`;
 /** Soft cap: above it the spawn logs `memory-pinned-over-cap` (once a day); nothing is cut. */
 export const PINNED_SOFT_CAP_BYTES = 6 * 1024;
 /** Hard stop: above it the rollover leaves memory.md untouched (`memory-pinned-too-large`). */
@@ -55,6 +58,9 @@ export interface MemorySplit {
   tail: string;
 }
 
+/** A Markdown code-fence line (``` or ~~~). Headings inside a fence are text, not structure. */
+const FENCE = /^\s*(```|~~~)/;
+
 /**
  * Lift every `## How I work (standing lessons)` section (its heading up to the next `## ` heading,
  * the app's pointer line, or EOF) out of `body`, in order. A repeated heading is merged into the
@@ -67,12 +73,16 @@ export function liftPinned(body: string): { pinned: string; rest: string } {
   let rest = '';
   let inside = false;
   let dropBlank = false;
+  let fenced = false;
   for (const c of chunks) {
     const line = c.replace(/\n$/, '');
     if (dropBlank) {
       dropBlank = false;
       if (line.trim() === '') continue;
     }
+    // Jim PINNED F2: inside a code fence a heading is quoted text, never a section boundary.
+    if (FENCE.test(line)) fenced = !fenced;
+    else if (fenced) { if (inside) pinned += c; else rest += c; continue; }
     if (line.trimEnd() === PINNED_HEADING) {
       if (!pinned) pinned = c;
       inside = true;
@@ -98,7 +108,9 @@ export function pinnedStatus(agent: string, memoryText: string | null): PinnedSt
   const pinned = memoryText === null ? '' : pinnedSection(memoryText);
   if (!pinned) return { agent, present: false, bytes: 0, lessons: 0 };
   const lines = pinned.replace(/\r\n/g, '\n').split('\n').slice(1).map((l) => l.trim());
-  const lessons = lines.filter((l) => l && !/^_.*_$/.test(l)).length;
+  // Jim PINNED F3: only the app's own seed line is not a lesson (an italic lesson still counts).
+  const seedLines = new Set([PINNED_SEED_LINE, '_Your method lessons (how you work); kept at the top, never archived._']);
+  const lessons = lines.filter((l) => l && !seedLines.has(l)).length;
   return { agent, present: true, bytes: Buffer.byteLength(pinned, 'utf8'), lessons };
 }
 
@@ -255,7 +267,9 @@ export function seedPinnedSection(dir: string): SeedResult {
   const crlf = raw.includes('\r\n');
   const text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const lines = text.split('\n');
-  if (lines.some((l) => l.trimEnd() === PINNED_HEADING)) {
+  let fenced = false;
+  const hasHeading = lines.some((l) => { if (FENCE.test(l)) { fenced = !fenced; return false; } return !fenced && l.trimEnd() === PINNED_HEADING; });
+  if (hasHeading) {
     return { seeded: false, pinnedBytes: Buffer.byteLength(pinnedSection(text), 'utf8') };
   }
   let h = 0;
