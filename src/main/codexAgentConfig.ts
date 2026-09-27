@@ -56,3 +56,32 @@ export function disableCodexPlugins(config: string): { text: string; disabled: n
   closeTable();
   return { text: out.join('\n'), disabled };
 }
+
+/** Fix 6: compact at ~120K tokens instead of the model default (~220-243K of a 258K window,
+ *  measured). Only sane once threads rotate (fix 1): on a thread with an 87K retained floor it
+ *  would compact every 20-30K tokens. */
+export const CODEX_AUTO_COMPACT_TOKEN_LIMIT = 120_000;
+
+/** A top-level key line of the seed (before its first table), bare or quoted. */
+function topLevelKey(line: string, key: string): boolean {
+  const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^\\s*(["']?)${esc}\\1\\s*=`).test(line);
+}
+
+/**
+ * Set top-level scalar keys in OUR copy: any seed line for the same key before the first table
+ * is removed (TOML forbids a duplicate key), and ours go first in the file. A `null` value only
+ * removes. Values are numbers or already-TOML-encoded strings.
+ */
+export function setCodexTopLevelKeys(config: string, entries: Record<string, number | null>): string {
+  const lines = config.split(/\r?\n/);
+  const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
+  const topEnd = firstTable < 0 ? lines.length : firstTable;
+  const keys = Object.keys(entries);
+  const kept = lines.filter((l, i) => i >= topEnd || !keys.some((k) => topLevelKey(l, k)));
+  const ours = keys
+    .filter((k) => typeof entries[k] === 'number' && Number.isFinite(entries[k] as number))
+    .map((k) => `${k} = ${Math.trunc(entries[k] as number)}`);
+  if (!ours.length) return kept.join('\n');
+  return `# --- munder-hive: per-agent token limits (auto-generated; do not edit) ---\n${ours.join('\n')}\n\n${kept.join('\n')}`;
+}

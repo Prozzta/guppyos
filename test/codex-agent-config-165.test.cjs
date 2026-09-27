@@ -90,3 +90,28 @@ test('fix 5: the generated per-agent config.toml has every plugin off; the globa
   assert.match(cfg.developer_instructions, /You are "Dwight"/);
   assert.equal(fs.readFileSync(path.join(s.home, '.codex', 'config.toml'), 'utf8'), SEED, 'the global file is never written');
 });
+
+// ── fix 6: auto-compact limit ─────────────────────────────────────────────────────────────
+
+test('fix 6: CODEX_AUTO_COMPACT_TOKEN_LIMIT is 120000', () => {
+  assert.equal(C.CODEX_AUTO_COMPACT_TOKEN_LIMIT, 120000);
+});
+
+test('fix 6: setCodexTopLevelKeys replaces a seed top-level value (bare or quoted), leaves table keys, and null only removes', () => {
+  const seed = 'model = "m"\nmodel_auto_compact_token_limit = 999\n"model_auto_compact_token_limit" = 5\n\n[profiles.p]\nmodel_auto_compact_token_limit = 7\n';
+  const out = C.setCodexTopLevelKeys(seed, { model_auto_compact_token_limit: 120000 });
+  const cfg = toml.parse(out); // a duplicate key would throw
+  assert.equal(cfg.model_auto_compact_token_limit, 120000);
+  assert.equal(cfg.profiles.p.model_auto_compact_token_limit, 7, 'a profile value is the user\'s choice');
+  assert.equal(cfg.model, 'm');
+  const removed = toml.parse(C.setCodexTopLevelKeys(seed, { model_auto_compact_token_limit: null }));
+  assert.equal(removed.model_auto_compact_token_limit, undefined);
+  assert.equal(toml.parse(C.setCodexTopLevelKeys('', { a_limit: 5 })).a_limit, 5, 'an empty seed');
+});
+
+test('fix 6: the generated per-agent config.toml carries model_auto_compact_token_limit = 120000 at top level', async (t) => {
+  const { cfg, text } = await agentConfig(t, 'model_auto_compact_token_limit = 250000\n' + SEED);
+  assert.equal(cfg.model_auto_compact_token_limit, 120000);
+  assert.ok(text.indexOf('model_auto_compact_token_limit = 120000') < text.indexOf('['), 'before the first table');
+  assert.match(cfg.developer_instructions, /You are "Dwight"/, 'the instructions are still set');
+});

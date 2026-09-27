@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory } from './memoryRollover';
-import { disableCodexPlugins } from './codexAgentConfig';
+import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, disableCodexPlugins, setCodexTopLevelKeys } from './codexAgentConfig';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   DEV_ISOLATION, sanitizeCodexConfigForDev, hookPipeId,
@@ -3010,6 +3010,9 @@ export class HiveManager {
       // OFF in this agent's copy: each one adds tools and instructions to every request. Only
       // this generated file changes; the user's ~/.codex/config.toml is read, never written.
       if (config) config = disableCodexPlugins(config).text;
+      // CODEX-BLOAT-165 fix 6: compact at ~120K instead of the model default (~220-243K
+      // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
+      config = setCodexTopLevelKeys(config, { model_auto_compact_token_limit: CODEX_AUTO_COMPACT_TOKEN_LIMIT });
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
