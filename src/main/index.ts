@@ -6349,13 +6349,13 @@ app.whenReady().then(() => {
   // Multi-window floors (opt-in): install the menu carrying "New Floor". When
   // off, the app keeps Electron's default menu — zero behavior change.
   if (readConfig().multiWindow) installAppMenu();
-  createWindow();
-  // RENDERER-RECOVERY-164: the in-memory renderer ring (no disk writes unless a threshold is crossed).
+  // RENDERER-RECOVERY-164: the in-memory renderer ring (first sample in SAMPLE_MS; no disk writes
+  // unless a threshold is crossed), and local crash dumps pruned to the newest KEEP_DUMPS, async.
   startRendererMemorySampler();
-  // ...and prune local crash dumps to the newest KEEP_DUMPS, async (off the startup path).
   void pruneDumps(app.getPath('crashDumps'), KEEP_DUMPS).then((gone) => {
     if (gone.length) { try { hive.appendLog({ kind: 'crash-dumps-pruned', count: gone.length, kept: KEEP_DUMPS }); } catch { /* best-effort */ } }
   }).catch(() => { /* best-effort */ });
+  createWindow();
   // NATIVE-WAKEUP-EMPTY-INDEX (a): in NATIVE mode, fork the memory worker (its below-normal
   // startup backfill fills the index) 30 s after the first window finished loading, the spec's
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
@@ -6417,7 +6417,8 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
     policy: recovery.policy,
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
-    log: (r) => row(String(r.kind), { ...r, processUptimeMs: Math.round(process.uptime() * 1000) }),
+    // The only row the recovery writes is this window's render-process-gone (with pid/uptime/recovery).
+    log: (r) => { const { kind: _kind, ...rest } = r; row('render-process-gone', { ...rest, processUptimeMs: Math.round(process.uptime() * 1000) }); },
     quitting: () => allowQuit,
     recentMemory: () => rendererMemory.recent(),
     findDump: (since) => waitForDump(app.getPath('crashDumps'), since),

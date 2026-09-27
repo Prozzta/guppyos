@@ -174,7 +174,7 @@ test('SAMPLER wiring (final): in-memory ring started after the first window; the
   assert.match(block, /metrics: \(\) => app\.getAppMetrics\(\),\s*now: \(\) => Date\.now\(\),\s*alert: \(row\) => \{ try \{ hive\.appendLog\(row\); \}/, 'alerts go through the kept-open fast appender');
   assert.doesNotMatch(block, /\blog:/, 'no per-sample row');
   assert.doesNotMatch(block, /appendFileSync|writeFileSync|openSync|fs\./, 'no direct file write');
-  assert.match(idx, /createWindow\(\);\s*\/\/ RENDERER-RECOVERY-164[^\n]*\n\s*startRendererMemorySampler\(\);/);
+  assert.match(idx, /startRendererMemorySampler\(\);\s*void pruneDumps\([\s\S]{0,400}\}\)\.catch\(\(\) => \{ \/\* best-effort \*\/ \}\);\s*createWindow\(\);/, 'started once at startup, beside the first window');
   assert.match(idx, /rendererMemoryTimer = setInterval\(\(\) => \{ rendererMemory\.sample\(\); \}, SAMPLE_MS\);\s*rendererMemoryTimer\.unref\?\.\(\);/);
   assert.match(idx, /recentMemory: \(\) => rendererMemory\.recent\(\),/, 'the ring is flushed into the crash row');
   const hive = read('src/main/hive.ts');

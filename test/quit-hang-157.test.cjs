@@ -195,7 +195,8 @@ test('F2 WIRING: a Windows session-end skips the confirm and runs the teardown',
   const end = between(health, "win.on('session-end'", '});');
   assert.match(end, /teardownAndQuit\(\)/);
   assert.match(end, /closingTime\.cancel\(\)/);
-  assert.match(INDEX, /allWindows\.add\(win\);\n  watchWindowHealth\(win, isFloor\);/, 'every window, primary and floor');
+  // RENDERER-RECOVERY-164: the call now also passes the window's recovery state (partition + crash streak).
+  assert.match(INDEX, /allWindows\.add\(win\);\n  watchWindowHealth\(win, isFloor, \{ partition, policy: opts\.recovery \?\? new RecoveryPolicy\(\) \}\);/, 'every window, primary and floor');
   // teardownAndQuit sets allowQuit first, so the close handler's confirm is bypassed.
   assert.match(between(INDEX, 'function teardownAndQuit(): void {', 'const t0'), /allowQuit = true;/);
 });
@@ -234,7 +235,10 @@ test('M10: the F3 rows hang off the right Electron events', () => {
   const health = between(INDEX, 'function watchWindowHealth(', '\n}\n');
   assert.match(health, /win\.on\('unresponsive', \(\) => \{[^\n]*'window-unresponsive'/);
   assert.match(health, /win\.on\('responsive', \(\) => \{[^\n]*'window-responsive'/);
-  assert.match(health, /wc\.on\('render-process-gone', [^\n]*'render-process-gone'/);
+  // RENDERER-RECOVERY-164: render-process-gone is now handled by installRendererRecovery, which still
+  // writes the 'render-process-gone' row (plus pid/uptime/recovery) and then recovers the window.
+  assert.match(health, /installRendererRecovery\(win, \{[\s\S]*?log: \(r\) => \{ const \{ kind: _kind, \.\.\.rest \} = r; row\('render-process-gone'/);
+  assert.match(require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'src', 'main', 'rendererRecovery.ts'), 'utf8'), /win\.webContents\.on\('render-process-gone'[\s\S]{0,400}kind: 'render-process-gone'/);
   assert.match(health, /wc\.once\('did-finish-load', [^\n]*'window-ready'/);
   assert.match(health, /win\.on\('session-end', /);
   assert.match(INDEX, /app\.on\('child-process-gone', /);
