@@ -15,7 +15,7 @@ Give every agent on the floor on-demand access to the enterprise's own context �
 Two halves:
 
 1. **Ingest → store (in-app):** the user adds files. The main process parses/extracts text per modality, chunks it, and writes it to a local file-backed store. The renderer manages the corpus (toggle on, add files, see counts).
-2. **Retrieve (agent-facing):** a spawned agent runs `kg search "<query>"` via Bash and gets back ranked, source-attributed snippets it can act on — exactly the way the hive already exposes **MemPalace** (`mempalace search "<query>"`).
+2. **Retrieve (agent-facing):** a spawned agent runs `kg search "<query>"` via Bash and gets back ranked, source-attributed snippets it can act on — exactly the way the hive already exposes semantic memory (`memory search "<query>"`).
 
 It is **read-mostly** for agents (they query; they do not write the corpus) and **opt-in** for the user (flag default off). It must never change harness behaviour when the flag is off.
 
@@ -27,10 +27,10 @@ It is **read-mostly** for agents (they query; they do not write the corpus) and 
 
 | Option | Verdict |
 |---|---|
-| **CLI invoked via Bash** ✅ | This is the **established hive pattern**: MemPalace is surfaced to agents as `mempalace search …` documented in the injected system prompt (`hive.ts injectedPrompt`), with paths passed as spawn env. It is **provider-agnostic** — Claude, Codex, and Antigravity agents all have a shell, so all of them can query KG with zero per-provider work. No per-agent `settings.json`, no server handshake, no SDK. Mirrors the existing `md-slack-reply.cjs` helper (a bundled pure-JS `.cjs` that agents call as `node "<path>" …`). |
+| **CLI invoked via Bash** ✅ | This is the **established hive pattern**: semantic memory is surfaced to agents as `memory search …` documented in the injected system prompt (`hive.ts injectedPrompt`), with paths passed as spawn env. It is **provider-agnostic** — Claude, Codex, and Antigravity agents all have a shell, so all of them can query KG with zero per-provider work. No per-agent `settings.json`, no server handshake, no SDK. Mirrors the existing `md-slack-reply.cjs` helper (a bundled pure-JS `.cjs` that agents call as `node "<path>" …`). |
 | MCP server | Rejected for v1. Heaviest option: requires writing/merging an MCP server config into **every** agent's Claude settings, a running stdio/SSE transport, and is Claude-specific (Codex/Antigravity agents wouldn't get it). Real value only once we need typed tool schemas or streaming — a clean **v2** upgrade that can sit *behind the same `kg` CLI contract*. |
 | Built-in Claude tool | Not available to us — we don't control the model's tool set except via MCP. |
-| Skill file (`.claude/skills/…`) | Viable, but it's just documentation pointing at a CLI anyway, and it's Claude-only. We instead document the CLI in the injected system prompt (one flag-gated line) — same effect, provider-agnostic, and consistent with how MemPalace is taught. A skill can be added later as sugar. |
+| Skill file (`.claude/skills/…`) | Viable, but it's just documentation pointing at a CLI anyway, and it's Claude-only. We instead document the CLI in the injected system prompt (one flag-gated line) — same effect, provider-agnostic, and consistent with how semantic memory is taught. A skill can be added later as sugar. |
 
 **Decision:** ship a small **`kg` CLI** (pure-JS `.cjs`, no native deps) in `resources/`, injected into agents via env (`KG_CLI`, `KG_ROOT`) and taught via one flag-gated line in the injected system prompt. MCP is the documented v2.
 
@@ -42,7 +42,7 @@ The dispatch says *pick the simplest that works*. Embeddings would need a model 
 - **Good enough** for a v1 enterprise corpus (policies, templates, specs, code) where users search with the literal vocabulary of their own documents.
 - **Forward-compatible** — the agent contract is `kg search "<q>"`; swapping the index implementation (FTS5, then embeddings) is invisible to agents. See §8.
 
-**Decision:** keyword scoring in v1. **SQLite FTS5** (BM25, ships free with the existing `better-sqlite3` dep) is the documented next step; **embeddings** (via MemPalace's existing local embedder, or a small model) is the v2 after that.
+**Decision:** keyword scoring in v1. **SQLite FTS5** (BM25, ships free with the existing `better-sqlite3` dep) is the documented next step; **embeddings** (via the memory engine's bundled embedder, or a small model) is the v2 after that.
 
 ### 2.3 Store — **file-backed** (`index.jsonl` + per-doc folders), not SQLite, for v1
 
@@ -146,7 +146,7 @@ kg get <docId>                              # full extracted text of one artifac
 
 ### 5.1 How the agent learns about it
 
-One flag-gated line appended to the injected system prompt (`hive.ts injectedPrompt`), beside the MemPalace line, **volatile-free** (references the `$KG_CLI`/`$KG_ROOT` env vars, not interpolated absolute paths or counts — preserves the prompt-cache invariant):
+One flag-gated line appended to the injected system prompt (`hive.ts injectedPrompt`), beside the semantic-memory line, **volatile-free** (references the `$KG_CLI`/`$KG_ROOT` env vars, not interpolated absolute paths or counts — preserves the prompt-cache invariant):
 
 > *Enterprise knowledge: this org has a private knowledge base of its own documents, policies, and business context. When a task needs that context, run `node "$KG_CLI" search "<query>"` to retrieve relevant passages (use `kg list` to see what's available, `kg get <id>` for a full document). Prefer it over guessing about company-specific facts.*
 
@@ -156,7 +156,7 @@ The line only appears when `knowledgeGraph.enabled` is true (the manager's `acti
 
 ## 6. Where it plugs into the harness (all additive)
 
-Mirrors the MemPalace / Slack wiring 1:1 so it composes with existing code and other in-flight branches:
+Mirrors the semantic-memory / Slack wiring 1:1 so it composes with existing code and other in-flight branches:
 
 | Layer | File | Change |
 |---|---|---|
@@ -189,7 +189,7 @@ Mirrors the MemPalace / Slack wiring 1:1 so it composes with existing code and o
 
 1. **More modalities:** PDF (poppler hook → bundled parser), xlsx/docx/pptx, image **OCR/vision** enrichment over the already-stored originals.
 2. **FTS5 index:** swap the keyword scorer for SQLite FTS5/BM25 (free with `better-sqlite3`), fronted by a loopback query endpoint so the out-of-process CLI keeps its native-free contract. Agent interface unchanged.
-3. **Embeddings / semantic search:** reuse MemPalace's local embedder to add a vector index; `kg search` blends keyword + semantic. Agent interface unchanged.
+3. **Embeddings / semantic search:** reuse the memory engine's bundled embedder to add a vector index; `kg search` blends keyword + semantic. Agent interface unchanged.
 4. **True graph layer:** promote `tags`/`source`/`modality` + extracted entities into typed relations; optionally a renderer view (distinct from Jim's message graph).
 5. **MCP surface:** wrap the same store in an MCP server for typed tool-call access when an agent benefits from schema'd queries — behind the same data + the same flag.
 6. **Renderer management panel:** drag-drop ingestion, per-doc preview, re-index, delete — beyond the minimal Settings toggle shipped in v1.

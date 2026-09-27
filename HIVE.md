@@ -54,8 +54,7 @@ stream, retrieval, reflection, and planning.
    SQLite FTS index when keyword recall isn't enough. A heavyweight vector layer
    (Letta/Mem0/Zep) is *not* needed at 5–15 agents and is architecturally wrong
    here (they want to own the agent runtime; our runtime is the `claude` CLI).
-   Optional future upgrade: **MemPalace over MCP** (validate its retrieval first —
-   its public benchmarks are overstated per independent audit).
+   Semantic recall came later as the app's own memory engine (see Phase 3).
 5. **Autonomous loop = `Stop` hook.** An agent that finishes drains its inbox via
    a `Stop` hook that returns `{"decision":"block","reason":…}` to keep it
    working, guarded by `stop_hook_active` to prevent infinite loops.
@@ -182,20 +181,13 @@ is the primary control surface — tune the prompt, not the code.
   there is no separate approval queue — human-in-the-loop is native to each
   agent's Claude Code session (permission prompts, approvable remotely from a
   phone). Idle agents are woken when they hold unread inbox messages.
-- **Phase 3 — Semantic memory** ✅ (CLI integration): `memory.ts` wraps the
-  **MemPalace CLI** (not MCP, by decision). The harness keeps one shared palace
-  under `harnessHome`, points every agent's `MEMPALACE_PALACE_PATH` at it, mines
-  each agent's `memory.md` into its own wing (mtime-gated), and agents recall via
-  `mempalace search` / `wake-up`. Detect-and-degrade: a no-op when `mempalace`
-  isn't installed (markdown memory still works). Default model `minilm` (light,
-  for low-RAM Macs); `embeddinggemma` is the multilingual opt-in. A `MemoryPanel`
-  lets the human search the same palace.
-  - *Still open*: reflection/summarization to bound `memory.md`; needs a live
-    `mempalace` install to validate retrieval end-to-end.
-  - *Superseded* (1.1.54 → 1.1.59): the built-in memory engine replaced the MemPalace
-    CLI (native index in userData, MiniLM on onnxruntime, served to agents through a
-    `mempalace` shim), and 1.1.59 removed MemPalace entirely: no Python, no daemon, no
-    mining. See README, "Semantic memory: the built-in memory engine".
+- **Phase 3 — Semantic memory** ✅: the built-in memory engine (a native index in
+  userData, MiniLM on onnxruntime). Each agent's `memory.md` and notes are indexed
+  into its own wing automatically, and agents recall via the `memory` command
+  (`memory search` / `wake-up` / `status`). A `MemoryPanel` lets the human search the
+  same index. See README, "Semantic memory: the built-in memory engine".
+  - *History*: until 1.1.53 this phase wrapped an external Python CLI; 1.1.54 added
+    the engine, and 1.1.59 made it the only memory (no Python, no daemon, no mining).
 
 ---
 

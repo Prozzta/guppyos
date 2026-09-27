@@ -1,18 +1,18 @@
 # Native memory engine: build notes (branch `memory-154`)
 
-> **1.1.59 (MEMPALACE-REMOVAL):** these notes record how the engine was built and cut over.
-> Since 1.1.59 the engine is the ONLY memory: the `memory-engine.json` modes (`legacy`,
-> `shadow`, `fallback-legacy`), the shadow/parity path, the legacy CLI exec in the shim and
-> `src/main/memory.ts` are all gone, and there is no brake back to MemPalace (a rollback is a
-> reinstall of 1.1.58). The mode, rollback and parity sections below are history.
+> **History.** These notes record how the engine was built (1.1.54) and cut over. Since
+> 1.1.59 the engine is the ONLY memory: the `memory-engine.json` modes (`legacy`, `shadow`,
+> `fallback-legacy`), the shadow/parity path, the legacy Python CLI and `src/main/memory.ts`
+> are all gone. Since 1.1.60 agents run it as the `memory` command. The mode, rollback and
+> parity sections below describe 1.1.54 and are history.
 
 **Status:** built and tested on branch `memory-154`, off `origin/release-1.1.53` (`79ee6b91`, with `76c8d3ce` carried).
 - Nothing is pushed, released or cut.
 - The default mode is `legacy`, which changes **nothing**: no worker, no token, no PATH change, and the `/memory` route answers 403 (no `MEMORY_TOKEN` is ever minted in `legacy`, so no caller can authenticate).
 
-**Scope lock** (the Human, via god): 1.1.54 is PURELY the MemPalace replacement.
+**Scope lock** (the Human, via god): 1.1.54 is PURELY the replacement of the legacy Python memory CLI.
 - No other fixes, cards, refactors or doc sweeps.
-- `src/main/memory.ts`, the legacy MemPalace manager, is **unchanged**.
+- `src/main/memory.ts`, the legacy memory manager, is **unchanged**.
 - One carry: `76c8d3ce` is a cherry-pick of `e9daa0b8`. It is **test-only** (it fixes a load flake in `test/log-stall-av.test.cjs` that broke green gates) and **ships nothing**.
 
 **Spec:** `agents/oscar-mu3300lb/NATIVE-MEMORY-SPEC.md`.
@@ -32,7 +32,7 @@
 | Worker | `worker.ts` → `out/main/memoryWorker.js` | The utility-process entry. The config comes in the first message. Stale requests are answered `expired`. Also: below-normal priority, a model and DLL digest check before loading, and quarantine of a corrupt DB. |
 | Main | `service.ts`, `mainWiring.ts` | Forks the worker lazily (on the first memory request). Every request gets a deadline and never blocks: 250 ms warm, 2 s cold, then a named degraded reply. Crash restarts are bounded. Also: per-agent `MEMORY_TOKEN`s, the feature flag (`<hive>/memory-engine.json`), and redacted shadow diagnostics. |
 | Endpoint | `hooks.ts` | `POST /memory/<token>` on the existing loopback broker, with a 64 KB body cap. |
-| CLI shim | `resources/mempalace-shim.cjs`; wrappers in `<hive>/bin/memory/` (from `hive.writeMemoryShim`) | `search` / `wake-up` / `status` / `--version`, and `--palace` / `MEMPALACE_PALACE_PATH`. Modes: `legacy` / `fallback-legacy` run the legacy CLI; `shadow` prints legacy output only; `native` answers from the engine. Exit codes are 0/2/3/4/5. Past `legacy`, the shim directory is prepended to each agent's PATH. |
+| Agent command | `resources/memory-cli.cjs`; wrappers `memory` / `memory.cmd` in `<hive>/bin/memory/` (from `hive.writeMemoryCommand`) | `search` / `wake-up` / `status`. Exit codes are 0/2/3/4/5. The directory goes first on each agent's single PATH. (In 1.1.54 this was a shim under the legacy CLI's name, with the modes below.) |
 | Packaging | `electron-builder.yml`, `build/afterPack-memory-prune.cjs`, `resources/models/native-memory-manifest.json`, `scripts/fetch-memory-model.cjs` | One bundled fp32 model, pinned by SHA-256 and never downloaded at runtime. `vec0` and ORT are unpacked from the asar. The ORT runtime is pruned to the target platform/arch CPU build, without DirectML. |
 | Markers | `scripts/release-markers.cjs` | The existing 7 markers plus `vec0.dll`, ORT and the model, each checked by SHA-256 against the manifest. Prints `ALL 10 MARKERS OK`. |
 | Tools | `scripts/native-memory-migrate.cjs`, `native-memory-parity.cjs`, `native-memory-parity-stats.cjs` | Copy-only migration with a report; the parity replay with engine-blind label sheets; NDCG@5 / recall@10 with a paired bootstrap and kappa. |
@@ -50,7 +50,7 @@
 2. **`legacy` is inert.** The shim is prepended to PATH only past `legacy`, so a default install runs exactly as 1.1.53.
 3. **`--since` / `--before` use `chunks.filed_at`**: the source's mtime when that chunk was first indexed. An unchanged chunk keeps its date.
 4. **Filtered vector search** (wing/room/date) is an exact scan with `vec_distance_cosine` over the filtered rows. vec0 KNN cannot pre-filter by a joined column. Unfiltered queries use vec0 KNN.
-5. **Wake-up L0** is the wing's own `agents/<id>/identity.md`. Legacy L0 was a global `~/.mempalace/identity.txt` that nobody had configured.
+5. **Wake-up L0** is the wing's own `agents/<id>/identity.md`. Legacy L0 was a global identity file in the legacy CLI's home folder that nobody had configured.
 6. **The backfill yields every 4 chunks, not 8** (the spec allows up to 8). With 8, a search during a backfill had a p95 of 255 ms, over the 250 ms warm deadline. See the measurements.
 7. **vec0 delete-slot reuse, which the spec listed as unproven, was measured** on 0.1.9. Going 400 → 20 → 400 *different* chunks grew the file 2%. vec0 pre-allocates 1,024-vector chunks and reuses freed slots, and `VACUUM INTO` comes out at the live size.
 8. **Packaging finding.** A platform-level `files:` list in electron-builder *replaces* the top-level list (it packed `docs/`, `blog/` and the model twice). The prune is therefore an `afterPack` hook.
@@ -120,7 +120,7 @@ All measurements were taken on **copies**. The live palace, the installed app an
 | Installed-layout pre-check (packaged exe as Node, **not** the gate-2 smoke) | The worker bundle loaded from inside `app.asar`, with the unpacked better-sqlite3, the nested vec0.dll and the pruned ORT, ingested and searched a scratch hive: OK |
 
 **Gate 2: the built-app utility-process smoke. PASSED**
-- Run under god's conditions: the built exe with `--native-memory-smoke` only; no window; a fresh temp userData and a temp scratch hive; the env scrubbed of MEMPALACE/HIVE/AGENT/MUNDER/MEMORY variables and anything naming a live path; HOME/USERPROFILE jailed.
+- Run under god's conditions: the built exe with `--native-memory-smoke` only; no window; a fresh temp userData and a temp scratch hive; the env scrubbed of the legacy engine's and the HIVE/AGENT/MUNDER/MEMORY variables and anything naming a live path; HOME/USERPROFILE jailed.
 - The process tree was recorded with WMI creation events:
   - main (`Munder Difflin.exe`);
   - a **utility process `node.mojom.NodeService`** (the memory worker);
@@ -132,7 +132,7 @@ All measurements were taken on **copies**. The live palace, the installed app an
 - **Not covered here:** the mac and Linux artifacts (not buildable on this host), and the Defender/BitDefender scan-time observation (it needs an install).
 
 **Parity** (gate 4), a **documented spec deviation**, as god decided
-- **Why:** the spec wants 30–50 intents from real transcripts. Real `mempalace search` calls are rare: **6 distinct intents** exist, from 3 agents, before the build started; everything else was diagnostics.
+- **Why:** the spec wants 30–50 intents from real transcripts. Real legacy `search` calls are rare: **6 distinct intents** exist, from 3 agents, before the build started; everything else was diagnostics.
 - **God's decision.** The gate-4 set is **the 6 real intents plus 48 authored by Phyllis** (not the builder): 8 in each of the spec's cohorts (exact identifier, semantic paraphrase, wing-scoped, no-match, punctuation/quoting, stale/removed). That makes 54 queries, and every cohort has n ≥ 8, so each can be gated.
 - **Labellers:** JIM is the primary labeller (blind, shuffled union, 0/1/2); PHYLLIS takes a random 20% (seed 20260926, 11 queries) for kappa; the Human spot-checks 10 queries (seed 1590).
 - **Real-query parity is re-run on SHADOW diagnostics before any native cutover (gate 6).**
@@ -234,8 +234,8 @@ Runtime-cold (first shim run of the session; reported, not gated): 639.2 ms. Mai
 Kappa (all second labels): 0.490. Labelled queries: 373; excluded: r01.
 
 **How the speed numbers were measured** (Jim's method, Addendum 2; god's conditions)
-- **End-to-end** means the wrapper an agent runs on PATH (`mempalace.cmd` through cmd, and the POSIX `mempalace` through Git bash) → the shim on Electron-as-Node → the built app's windowless bench host (`--native-memory-bench`: the same main-side memory code, the real `utilityProcess` worker) → the answer.
-- **Legacy** is the uv `mempalace.exe` through the same wrappers (Python start included), always `--palace` on the **frozen copy**, asserted before every call.
+- **End-to-end** means the wrapper an agent runs on PATH (the `.cmd` wrapper through cmd, and the POSIX wrapper through Git bash) → the shim on Electron-as-Node → the built app's windowless bench host (`--native-memory-bench`: the same main-side memory code, the real `utilityProcess` worker) → the answer.
+- **Legacy** is the uv-installed legacy CLI through the same wrappers (Python start included), always `--palace` on the **frozen copy**, asserted before every call.
 - **Repetitions:** 3 per query per engine per wrapper; one warm-up discarded per engine per host start.
 - **Native** comes from run 2, on the fixed build: the host restarted every 100 queries (it self-stops at god's 20-min cap), 1,116 successful calls per wrapper.
 - **Legacy warm** comes from run 1. Those calls never touch the bench host, so they stand (god, andynativeonly). Percentiles count **successful calls only**.
@@ -279,7 +279,7 @@ Kappa (all second labels): 0.490. Labelled queries: 373; excluded: r01.
    - While it is open, the **worker** also appends the query text and both rankings (native with chunk text) to `<userData>/memory/<key>.shadow-review.jsonl`: beside the index, **never in the hive** (legacy mines agent folders), never in `log.jsonl`.
    - The file is kept open and rotated like the hive log.
 3. **Reaching n.**
-   - Real `mempalace search` traffic is sparse: 6 intents in all the transcripts before this build.
+   - Real legacy `search` traffic is sparse: 6 intents in all the transcripts before this build.
    - So the window is opened for a bounded period while agents work normally in shadow mode, and god and the Human decide its length and scope.
    - The review file is then turned into engine-blind label sheets. The same tooling (`native-memory-parity.cjs` / `-stats.cjs`) adds a reader for it, and a labeller outside the build does the labelling.
    - Gate 6 is scored per cohort on the real queries, with the ≥ −5 lower bound per cohort and a scorable n ≥ 8. At the observed variance, a certain pass needs more per cohort (see above).
@@ -289,11 +289,11 @@ Kappa (all second labels): 0.490. Labelled queries: 373; excluded: r01.
 ## Rollback (1.1.54 → 1.1.53) and why it is safe
 
 **What 1.1.54 never touches:**
-- **The MemPalace store and config.** The native engine never opens, moves, mutates or deletes `<harnessHome>/palace` or `~/.mempalace`.
+- **The legacy store and config.** The native engine never opens, moves, mutates or deletes `<harnessHome>/palace` or the legacy CLI's home folder.
   - Its worker is never given the palace path.
-  - A static test pins that no native-memory module names the palace, Chroma or MemPalace config, and that the worker config has no palace field.
+  - A static test pins that no native-memory module names the palace, Chroma or the legacy config, and that the worker config has no palace field.
 - **The palace, byte for byte.** An Electron-backed test runs a worker's whole life (backfill, search, wake-up, status, a forced compaction) over a harness home that contains a palace. It asserts the palace tree is **byte-identical afterwards**: the same file list, sizes, SHA-256 and mtimes, with nothing added.
-- **Legacy mining.** `memory.ts` is unchanged, so legacy MemPalace mining keeps running exactly as in 1.1.53, in every mode. The palace a rollback finds is current.
+- **Legacy mining.** `memory.ts` is unchanged, so legacy mining keeps running exactly as in 1.1.53, in every mode. The palace a rollback finds is current.
 
 **Where the native index lives:** in its own path, `<userData>/memory/<sha256(hiveRoot)[:16]>.sqlite`.
 - Next to it: `-wal`/`-shm`, one `.prior` after a compaction, and `.corrupt-*` on quarantine.
@@ -301,20 +301,20 @@ Kappa (all second labels): 0.490. Labelled queries: 373; excluded: r01.
 
 **New files in the hive:**
 - `<hive>/memory-engine.json`, the flag. Absent means `legacy`, and 1.1.53 never reads it.
-- `<hive>/bin/memory/mempalace{,.cmd}`, written only past `legacy`. 1.1.53 never puts them on PATH.
+- The shim wrappers in `<hive>/bin/memory/`, written only past `legacy`. 1.1.53 never puts them on PATH.
 
 **Steps:**
 1. Reinstall 1.1.53 (its installer or the in-app downgrade).
 2. Restart the agents once, so their PATH and env are 1.1.53's: no shim, no `MEMORY_TOKEN`.
-3. Nothing else is needed. The palace is intact and current, and `mempalace` resolves to the uv-installed CLI as before.
+3. Nothing else is needed. The palace is intact and current, and the agents' memory command resolves to the uv-installed legacy CLI as before.
 4. Optional cleanup, which 1.1.53 does not need: delete `<userData>/memory/`, `<hive>/memory-engine.json` and `<hive>/bin/memory/`.
 
-**Rolling back within 1.1.54:** set `<hive>/memory-engine.json` to `{"mode":"fallback-legacy"}`. The very next `mempalace` call runs the legacy CLI, with no data migration.
+**Rolling back within 1.1.54:** set `<hive>/memory-engine.json` to `{"mode":"fallback-legacy"}`. The very next memory call runs the legacy CLI, with no data migration.
 
 ## Operator runbook notes (Jim's audit, MEMORY-154-AUDIT.md)
 
 - **Delete the gate-6 review file after labelling.** `<userData>/memory/<key>.shadow-review.jsonl` (and its rotated `*.shadow-review.<stamp>.jsonl`) holds query **and chunk text**. It is kept whole while the review window is open (`keep: Infinity`). When the gate-6 labels are done, delete it with the app closed.
-- **N3, worker down:** after 3 crashes within 10 minutes the worker stays down until the app restarts, and memory requests answer exit 3. Set `<hive>/memory-engine.json` to `{"mode":"fallback-legacy"}`: the next `mempalace` call runs the legacy CLI. Restart the app to retry native.
+- **N3, worker down:** after 3 crashes within 10 minutes the worker stays down until the app restarts, and memory requests answer exit 3. Set `<hive>/memory-engine.json` to `{"mode":"fallback-legacy"}`: the next memory call runs the legacy CLI. Restart the app to retry native.
 - **N4, a mode change takes effect for NEW agent spawns.** `MEMORY_TOKEN`, the endpoint and the PATH with the shim are injected at spawn. After moving from `legacy` to `shadow`/`native`, respawn the agents. The shim reads the mode on every call, so moving back to `fallback-legacy`/`legacy` takes effect at once for agents that already have the shim.
 - **N2 (fixed here):** when the idle timer unloads the model, the worker tells main, and the next search gets the cold budget (2 s), not the warm one (250 ms). A test pins it.
 - **For 1.1.55** (non-blocking):

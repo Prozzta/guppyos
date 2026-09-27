@@ -160,7 +160,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **A floor that doesn't stall itself** (1.1.52) — hive commits
   moved off the main thread (a ~2.1 s freeze per routed message → ~11 ms); agent hooks
   delivered to the app without starting processes (~450 ms → ~1 ms per Claude hook);
-  MemPalace mining judged by the daemon's job state, with a bloated palace (673 MB for
+  memory mining judged by the old indexer's job state, with a bloated index (673 MB for
   ~30 MB of content) rebuilt, verified row for row and swapped in automatically; and
   Antigravity hooks that actually load, so gates, steers and end-of-turn signals reach
   AGY agents.
@@ -172,11 +172,10 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   message); an active turn that needs the provider's confirmation, so an agent can no
   longer be stuck "active" by a stale status or a swallowed Enter; and the Ask Me cards.
 - **Memory search without Python** (1.1.54) — a native engine in the
-  app replaces the MemPalace search agents run (warm end to end ~127 ms against ~1,750 ms
-  for the Python CLI; better ranking on every cohort of 373 real, labelled queries, NDCG@5
-  +20.7 points). It ships off: legacy by default (MemPalace and Python are still required
-  until the cutover), then a staged rollout with an immediate `fallback-legacy` brake. The
-  palace is never touched.
+  app replaces the Python memory CLI agents ran (warm end to end ~127 ms against ~1,750 ms;
+  better ranking on every cohort of 373 real, labelled queries, NDCG@5 +20.7 points). It
+  shipped off: legacy by default (the Python CLI still required until the cutover), then a
+  staged rollout with an immediate `fallback-legacy` brake. The old index was never touched.
 - **Mail mid-turn, one heavy job at a time, and Talk** (1.1.55) — an
   agent is told about mail that arrives while it works, at its next tool call; installs,
   builds, full suites and benches take a slot (default one at a time, set in Settings), so
@@ -193,9 +192,8 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   freezes the window (the clean-up runs in the background, time-limited), a Windows
   shutdown or sign-out closes the app without the running-terminals prompt, small stutters
   when an agent is archived or restarted are gone, and hangs and crashes are now logged.
-- **MemPalace removed** (1.1.59, the current release) — the built-in memory engine is the
-  only memory and is always on (no Python, no background indexer); agents keep their
-  `mempalace` commands; old MemPalace data can be deleted from the Memory panel; the
+- **The Python memory CLI removed** (1.1.59, the current release) — the built-in memory
+  engine is the only memory and is always on (no Python, no background indexer); the
   heavy-job lock no longer blocks light commands.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
@@ -331,11 +329,11 @@ Two data planes feed one renderer:
   8 MB to `log.<stamp>.jsonl` (the last 8 kept; the ledger keeps all). A file that was
   already oversize is kept whole as `*.legacy-*.jsonl`. The activity feed and the lifetime
   cost read across the rolled-over files; search them as `log*.jsonl`.
-- **Semantic memory: the built-in memory engine** (the only memory since 1.1.59; MemPalace
-  and its Python CLI are no longer used or needed). Agents run `mempalace search` /
-  `wake-up` / `status` as before; the command is served by the engine.
+- **Semantic memory: the built-in memory engine** (the only memory since 1.1.59; no Python
+  is used or needed). Agents run `memory search` / `wake-up` / `status`, served by the
+  engine.
   - **Switch.** Settings' semantic memory (on by default) is the one switch. There is no
-    mode file: a `hive/memory-engine.json` left from an earlier version is ignored.
+    mode file: one left from an earlier version (`hive/memory-engine.json`) is removed at start.
   - **Worker.** One lazy `utilityProcess` worker, started 30 s after the first window loads
     (or on the first memory request), at below-normal priority. The model is unloaded when
     idle.
@@ -352,21 +350,19 @@ Two data planes feed one renderer:
     (`<userData>/memory/<hash>.sqlite`). It is disposable and rebuilt from the Markdown. A
     reset deletes it (after the worker has stopped); a home move leaves the new home to
     build its own.
-  - **Access.** Agents reach it through a `mempalace` shim (`hive/bin/memory`, first on the
-    agent's PATH) that posts to `/memory/<token>` on the loopback broker, authenticated by a
-    per-spawn `MEMORY_TOKEN`. When the shim cannot be put on PATH, the agent gets no memory
-    line in its prompt rather than someone else's `mempalace`. The Memory panel, Command
-    Center and voice tools ask the engine directly, inside the app.
-  - **Measured against MemPalace,** on frozen copies of a real hive:
+  - **Access.** Agents reach it through the `memory` command (`hive/bin/memory`, first on
+    the agent's one PATH) that posts to `/memory/<token>` on the loopback broker,
+    authenticated by a per-spawn `MEMORY_TOKEN`. When the command cannot be put on PATH, the
+    agent gets no memory line in its prompt. The Memory panel, Command Center and voice tools
+    ask the engine directly, inside the app.
+  - **Measured against the old Python CLI,** on frozen copies of a real hive:
     - **Quality**, over 373 real, labelled searches: NDCG@5 +20.7 points and recall@10 +32.5
       points overall, and better in every search type.
     - **Speed**, end to end through the agent's own command: about 120–165 ms against about
       1.5–1.8 s.
     - **Storage:** an index of 10.6 MB against an 80 MB palace.
-  - **Old MemPalace data** (`<home>/palace` and its repair copies) is left on disk and never
-    read. The Memory panel shows its size and deletes it only on request, all or nothing (a
-    file still held open is reported and nothing is removed). On start, a MemPalace daemon an
-    earlier version left running on this hive's palace is stopped once.
+  - **Data from the retired Python CLI** (`<home>/palace`) is never read. The app does not
+    delete it: removing it, and the CLI itself, is a one-time manual clean-up.
   - **An early `wake-up`** (since 1.1.55) does not meet an empty index: each agent's own
     notes are indexed first, and a wake-up waits up to 5 s for them.
 - **Mid-turn mail** (since 1.1.55). The hook server tracks each agent's turn and, at its next

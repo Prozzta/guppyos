@@ -98,7 +98,7 @@ Memory files are structured markdown (verified against live `agents/*/memory.md`
 3. Count how many **distinct agents** mention each candidate. Keep candidates mentioned by **≥ 2 agents** (shared knowledge is the interesting signal; an agent's solo notes aren't a "hive topic"). This naturally bounds the topic-node count.
 4. Cap at the **top N = 24** topics by agent-count to keep the graph legible; surface the cap in the UI ("showing 24 of M topics") — never silently truncate.
 
-This is heuristic, not semantic. **Note:** MemPalace (`window.cth.searchMemory`) is the *semantic* memory; we are intentionally not using it for topic nodes in v1 because it returns ranked snippets for a query, not an enumerable topic set. A v2 could derive topic clusters from MemPalace — listed in §11.
+This is heuristic, not semantic. **Note:** the memory engine (`window.cth.searchMemory`) is the *semantic* memory; we are intentionally not using it for topic nodes in v1 because it returns ranked snippets for a query, not an enumerable topic set. A v2 could derive topic clusters from the memory engine — listed in §11.
 
 ---
 
@@ -198,7 +198,7 @@ The data-loading logic mirrors `ActivityTab` (poll `hiveLog` on a 5s interval) a
 - **Memory fetch cost:** topic extraction needs every agent's memory text. Fetch lazily and cache by id; only refetch when the topics layer is enabled, so the default (agents-only) view does N=0 memory reads beyond what hover needs.
 - **Stability:** deterministic seeding + pinned dragged nodes → the graph doesn't reshuffle on every poll.
 - **Worktree caveat:** this runs in the Electron renderer; it cannot be exercised by a full GUI run from the worktree. The Phase 2 bar is a clean `npm run typecheck` + `npm run build` (per dispatch).
-- **Non-goals (v1):** time-scrubbing/playback; editing memory from the graph; semantic (MemPalace-derived) topic clustering; persisting layout across app restarts. All candidate v2 follow-ups.
+- **Non-goals (v1):** time-scrubbing/playback; editing memory from the graph; semantic (memory-engine-derived) topic clustering; persisting layout across app restarts. All candidate v2 follow-ups.
 
 ---
 
