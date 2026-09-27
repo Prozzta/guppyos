@@ -10,7 +10,8 @@
  * The parent owns the sandbox directory.
  */
 const { app, BrowserWindow, crashReporter } = require('electron');
-const { writeFileSync, readFileSync, mkdirSync } = require('node:fs');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
+const { writeFileSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const ts = require('typescript');
 
@@ -21,11 +22,8 @@ const sandbox = argOf('sandbox', null);
 const mode = argOf('mode', 'dump');
 const withReporter = argOf('reporter', 'on') === 'on';
 if (!sandbox) { process.stderr.write('crash-dump harness: --sandbox required\n'); process.exit(2); }
-const crashDir = join(sandbox, 'Crashpad');
-mkdirSync(crashDir, { recursive: true });
-app.setPath('userData', sandbox);
-app.setPath('sessionData', sandbox);
-app.setPath('crashDumps', crashDir);
+// HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
+const crashDir = isolateAppPaths(app, sandbox, { reporter: false }).crashDumps; // it starts (or skips) its own reporter below
 
 const load = (rel) => {
   const src = readFileSync(join(__dirname, '..', '..', 'src', 'main', rel), 'utf8');

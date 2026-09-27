@@ -10,18 +10,15 @@
  * userData, sessionData and crashDumps all live in the sandbox; no window is created.
  */
 const { app, crashReporter } = require('electron');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 const { join } = require('node:path');
-const { mkdirSync } = require('node:fs');
 
 const argOf = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const sandbox = argOf('sandbox', null);
 const mode = argOf('mode', 'new');
 if (!sandbox) { process.stderr.write('pty-quit harness: --sandbox required\n'); process.exit(2); }
-app.setPath('userData', sandbox);
-app.setPath('sessionData', sandbox);
-const dumps = join(sandbox, 'crashDumps');
-mkdirSync(dumps, { recursive: true });
-app.setPath('crashDumps', dumps);
+// HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
+const dumps = isolateAppPaths(app, sandbox, { reporter: false }).crashDumps; // its own reporter below
 crashReporter.start({ uploadToServer: false, submitURL: '', compress: false });
 
 const loadTs = require(join(__dirname, '..', 'load-ts.cjs'));

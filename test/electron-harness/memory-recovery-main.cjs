@@ -10,6 +10,7 @@
  * crashDumps, userData and sessionData are all inside the sandbox.
  */
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 const { writeFileSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const ts = require('typescript');
@@ -18,9 +19,8 @@ const MARKER = '__MEMRECOVERY_RESULT__';
 const argOf = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const sandbox = argOf('sandbox', null);
 if (!sandbox) { process.stderr.write('memory-recovery harness: --sandbox required\n'); process.exit(2); }
-app.setPath('userData', sandbox);
-app.setPath('sessionData', sandbox);
-app.setPath('crashDumps', join(sandbox, 'crashDumps'));
+// HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
+isolateAppPaths(app, sandbox);
 
 const src = readFileSync(join(__dirname, '..', '..', 'src', 'main', 'rendererRecovery.ts'), 'utf8');
 const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

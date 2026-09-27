@@ -25,6 +25,7 @@
  * failures" - the ticket expires and nothing is typed.
  */
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
@@ -48,8 +49,8 @@ if (!sandboxRoot) {
   process.stderr.write('harness: refusing to run without --sandbox <dir>; the parent (run.cjs) owns the sandbox lifecycle\n');
   process.exit(2);
 }
-app.setPath('userData', sandboxRoot);
-app.setPath('sessionData', sandboxRoot);
+// HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
+isolateAppPaths(app, sandboxRoot);
 
 /** Arrival order per id, in the order main actually received them. */
 const seen = new Map();

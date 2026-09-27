@@ -51,7 +51,10 @@ const electronBin = require('electron');
 assert.strictEqual(typeof electronBin, 'string', 'expected electron package to export the binary path');
 
 const fixture = path.join(__dirname, 'fixtures', 'quit-sweep-main.cjs');
-const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'quit-sweep-')), 'pids.json');
+// HARNESS-CRASHPAD: this test owns the fixture's sandbox (userData, crashDumps, ...) and removes it
+// after the child has exited; the fixture refuses to run without one.
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-sweep-'));
+const pidFile = path.join(sandbox, 'pids.json');
 
 function isAlive(pid) {
   const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
@@ -64,7 +67,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE; // must launch as Electron, not as Node
 
-  const child = spawn(electronBin, [fixture, `--pid-file=${pidFile}`], {
+  const child = spawn(electronBin, [fixture, `--pid-file=${pidFile}`, `--sandbox=${sandbox}`], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
     windowsHide: true
@@ -102,6 +105,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     console.log(`  ok  quit sweep reaped the whole tree inside Electron (pids: ${recorded.pids.join(',')})`);
   } catch (e) {
     console.error(`FAIL  ${e.message}`);
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch { /* best effort */ }
   }
 })();

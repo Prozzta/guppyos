@@ -15,6 +15,7 @@
  * The parent (run in the test) owns the sandbox directory, as with the other harnesses.
  */
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 const { writeFileSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const ts = require('typescript');
@@ -23,8 +24,9 @@ const MARKER = '__RECOVERY_RESULT__';
 const argOf = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const sandbox = argOf('sandbox', null);
 if (!sandbox) { process.stderr.write('recovery harness: --sandbox required\n'); process.exit(2); }
-app.setPath('userData', sandbox);
-app.setPath('sessionData', sandbox);
+// HARNESS-CRASHPAD: this harness crashes its renderer on purpose; without crashDumps in the
+// sandbox, those dumps landed in the live app's %APPDATA%/munder-difflin/Crashpad.
+isolateAppPaths(app, sandbox);
 
 // The real module, transpiled in-process (it has no imports).
 const src = readFileSync(join(__dirname, '..', '..', 'src', 'main', 'rendererRecovery.ts'), 'utf8');

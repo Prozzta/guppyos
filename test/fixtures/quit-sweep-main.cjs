@@ -26,12 +26,16 @@
  *    fixed pattern completing, not a red/green repro of the hang.
  */
 const { app, BrowserWindow } = require('electron');
+const { isolateAppPaths } = require('../electron-harness/isolate-paths.cjs');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
 const pidFile = process.argv.find((a) => a.startsWith('--pid-file='))?.slice('--pid-file='.length);
+// HARNESS-CRASHPAD: without this the fixture ran on the LIVE app's %APPDATA%/munder-difflin
+// (userData, Crashpad): it passed no path at all. The test owns the sandbox.
+isolateAppPaths(app, process.argv.find((a) => a.startsWith('--sandbox='))?.slice('--sandbox='.length));
 
 function bail(code, message) {
   try {
