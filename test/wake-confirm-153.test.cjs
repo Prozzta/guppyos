@@ -23,7 +23,7 @@ const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
 const W = loadTs('src/main/workerWake.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, REANNOUNCE_AFTER_MS, WORKER_WAKE_IDLE_MS } = W;
+const { WorkerWakeWatchdog, inboxWakeRequestId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, REANNOUNCE_AFTER_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const OWN = loadTs('src/main/automaticSubmit.ts');
 const { ADMISSION_REASON } = loadTs('src/main/capacityAdmission.ts');
@@ -179,14 +179,31 @@ test('CODEX (2) Dwight: COMMITTED, no provider turn start: nothing for 60 s, the
   assert.equal(again.requestId, inboxWakeRequestId('dwight', ['god-dwightupstream']) + ':again', 'not the COMMITTED id the owner would replay without typing');
   assert.equal(again.priorText, inboxNudgeText(['god-dwightupstream']), 'the owner must see the unsent nudge gone first');
   await f.flush();
-  // The second one is not confirmed either: no third announcement, ever.
-  for (let k = 1; k <= 5; k++) {
-    f.now += SUBMIT_CONFIRM_MS;
+  // CODEX-WAKE-161 F4: the second one is not confirmed either. It used to be dropped here
+  // for good (the mail sat on disk, every claim said no-pending-ids). Now it is logged as
+  // exhausted and offered again after a backoff - never in a tight loop, never silently.
+  const againAt = f.now;
+  f.now = againAt + SUBMIT_CONFIRM_MS;
+  f.bridge.reconcileAll(['dwight']);
+  await f.flush();
+  const ex = f.diags.find((d) => d.stage === 'wake-ids-exhausted' && d.agentId === 'dwight');
+  assert.ok(ex, 'logged wake-ids-exhausted');
+  assert.deepEqual([ex.idList, ex.attempt, ex.retryInMs], [['god-dwightupstream'], 1, WAKE_RETRY_BASE_MS]);
+  assert.equal(f.coordinator.state('dwight').lifecycle, 'unknown');
+  for (let t = SUBMIT_CONFIRM_MS; t < WAKE_RETRY_BASE_MS; t += SUBMIT_CONFIRM_MS) {
+    f.now = againAt + SUBMIT_CONFIRM_MS + t;
     f.bridge.reconcileAll(['dwight']);
     await f.flush();
   }
-  assert.equal(f.reqs.length, 2, 'ONCE per id: no loop');
-  assert.equal(f.coordinator.state('dwight').lifecycle, 'unknown');
+  assert.equal(f.reqs.length, 2, 'nothing more inside the backoff: no loop');
+  f.now = againAt + SUBMIT_CONFIRM_MS + WAKE_RETRY_BASE_MS;
+  f.bridge.reconcileAll(['dwight']);
+  await f.flush();
+  assert.equal(f.reqs.length, 3, 'offered again once the backoff ends');
+  assert.equal(f.reqs[2].requestId, inboxWakeRequestId('dwight', ['god-dwightupstream']) + ':retry1', 'a fresh request id per retry');
+  assert.equal(f.reqs[2].priorText, inboxNudgeText(['god-dwightupstream']), 'and it still checks the prompt first (F2: never a stacked copy)');
+  assert.equal(wakeRetryDelayMs(2), 2 * WAKE_RETRY_BASE_MS);
+  assert.equal(wakeRetryDelayMs(9), WAKE_RETRY_MAX_MS, 'capped');
 });
 
 test('CODEX (2) the re-claim is typed only after a clean prompt; the unsent nudge still there is HELD (never double-typed)', async () => {

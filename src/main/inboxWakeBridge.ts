@@ -247,7 +247,14 @@ export class InboxWakeBridge {
         // The beat's own lifecycle edges (deferred idle, unconfirmed submit, re-announce),
         // after the reconcile so ids that left the disk are not re-pended.
         const edge = this.deps.coordinator.beat(agentId, this.deps.now());
-        if (edge) this.deps.diag?.(edge.kind, { agentId, ...('ids' in edge ? { ids: edge.ids.length } : {}) });
+        if (edge) {
+          this.deps.diag?.(edge.kind, {
+            agentId, ...('ids' in edge ? { ids: edge.ids.length } : {}),
+            // CODEX-WAKE-161 F4: say WHICH mail keeps failing, and when it is offered again.
+            ...(edge.kind === 'wake-ids-exhausted' ? { idList: edge.ids, attempt: edge.attempt, retryInMs: edge.retryInMs, requeued: edge.requeued.length } : {}),
+            ...(edge.kind === 'wake-retry' ? { idList: edge.ids, attempt: edge.attempt } : {})
+          });
+        }
         this.requestInboxWake(agentId, 'reconcile', 'reconcile', ids);
       } catch (e) {
         this.deps.diag?.('throw', { agentId, cause: 'reconcile', mode: 'reconcile', error: String(e) });

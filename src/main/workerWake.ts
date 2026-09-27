@@ -88,6 +88,21 @@ export const SUBMIT_CONFIRM_MS = 60_000;
  */
 export const REANNOUNCE_AFTER_MS = 3 * 60_000;
 
+/**
+ * CODEX-WAKE-161 F4 (Jim, CODEX-WAKE-ROOTCAUSE). A wake whose re-announcement ALSO went
+ * unconfirmed used to be dropped silently: its ids stayed "announced" forever and every later
+ * claim said `no-pending-ids` while the mail sat on disk. Now it is never silent and never
+ * final: a `wake-ids-exhausted` edge (a log row) each time, and the ids are offered again after
+ * a backoff (5, 10, 20, then every 30 minutes) under a fresh request id. A retry cannot stack a
+ * second copy on an unsent one: the claim carries the recheck, and the owner re-presses its
+ * own draft or holds the prompt for a person (F2), and verifies a Codex submit (F3).
+ */
+export const WAKE_RETRY_BASE_MS = 5 * 60_000;
+export const WAKE_RETRY_MAX_MS = 30 * 60_000;
+export function wakeRetryDelayMs(attempt: number): number {
+  return Math.min(WAKE_RETRY_MAX_MS, WAKE_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
+}
+
 /** A hook event message that means "the agent needs the human" — permission /
  *  approve / confirm prompts (mirrors the renderer's needsHuman detection in
  *  useHive.ts). Anything matching the idle-waiting shape is NOT a HITL hold. */
@@ -216,6 +231,8 @@ interface AgentWake {
   announcedAt: Map<string, number>;
   /** Ids already re-pended once (unconfirmed submit or stale announcement). Never again. */
   reannounced: Set<string>;
+  /** F4: ids whose re-announcement was unconfirmed too: attempt count and when to offer again. */
+  retries: Map<string, { attempt: number; at: number }>;
   /** See WakeClaim.recheck; carried until a claim that checked it COMMITS. */
   recheck: readonly string[] | null;
   /** AGY's last invocation hook was PreInvocation (a model call is running): a deferred
@@ -227,7 +244,12 @@ interface AgentWake {
 export type WakeBeatEdge =
   | { kind: 'deferred-idle' }
   | { kind: 'submit-unconfirmed'; ids: readonly string[] }
-  | { kind: 'reannounce'; ids: readonly string[] };
+  | { kind: 'reannounce'; ids: readonly string[] }
+  /** F4: the re-announced ids went unconfirmed AGAIN (`ids`); offered again in `retryInMs`.
+   *  `requeued`: first-time unconfirmed ids of the same commit, re-pended now as before. */
+  | { kind: 'wake-ids-exhausted'; ids: readonly string[]; attempt: number; retryInMs: number; requeued: readonly string[] }
+  /** F4: exhausted ids whose backoff ended are pending again. */
+  | { kind: 'wake-retry'; ids: readonly string[]; attempt: number };
 
 /** How many closed turn ids are remembered per agent. Only a straggler of a RECENT turn
  *  can still be in flight, so a short window is enough. */
@@ -259,7 +281,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, announcedAt: new Map(), reannounced: new Set(), recheck: null, invoking: false
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, announcedAt: new Map(), reannounced: new Set(), retries: new Map(), recheck: null, invoking: false
       };
       this.agents.set(agentId, r);
     }
@@ -298,7 +320,9 @@ export class WorkerWakeWatchdog {
   }
 
   private known(r: AgentWake, id: string): boolean {
-    return r.pending.has(id) || r.announced.has(id) || !!r.inFlight?.ids.includes(id) || !!r.held?.ids.includes(id);
+    // F4: an exhausted id waiting out its backoff is known too, or reconcile would re-pend it
+    // on the very next beat and the backoff would be a tight loop.
+    return r.pending.has(id) || r.announced.has(id) || r.retries.has(id) || !!r.inFlight?.ids.includes(id) || !!r.held?.ids.includes(id);
   }
 
   /** Record a PTY spawn: its boot sequence is left alone, its lifecycle starts unknown, and a
@@ -574,17 +598,39 @@ export class WorkerWakeWatchdog {
     }
     if (r.lifecycle === 'active' && r.provisional && now - r.activeSince >= SUBMIT_CONFIRM_MS) {
       const ids: string[] = [];
+      const exhausted: string[] = [];
+      let attempt = 0;
       for (const id of r.commitIds) {
-        if (!r.announced.has(id) || r.reannounced.has(id)) continue;
+        if (!r.announced.has(id)) continue;
         r.announced.delete(id);
         r.announcedAt.delete(id);
+        if (r.reannounced.has(id)) {
+          // F4: unconfirmed again. Not dropped: offered again after a backoff.
+          const next = (r.retries.get(id)?.attempt ?? 0) + 1;
+          r.retries.set(id, { attempt: next, at: now + wakeRetryDelayMs(next) });
+          attempt = Math.max(attempt, next);
+          exhausted.push(id);
+          continue;
+        }
         r.reannounced.add(id);
         r.pending.add(id);
         ids.push(id);
       }
       this.closeUnconfirmed(r);
       this.endEpoch(r, 'unknown');
+      if (exhausted.length) return { kind: 'wake-ids-exhausted', ids: exhausted.sort(), attempt, retryInMs: wakeRetryDelayMs(attempt), requeued: ids };
       return { kind: 'submit-unconfirmed', ids };
+    }
+    if (r.lifecycle !== 'active' && !r.inFlight && !r.held) {
+      const due: string[] = [];
+      let attempt = 0;
+      for (const [id, t] of r.retries) {
+        if (t.at > now || r.pending.has(id) || r.announced.has(id)) continue;
+        r.pending.add(id);
+        attempt = Math.max(attempt, t.attempt);
+        due.push(id);
+      }
+      if (due.length) return { kind: 'wake-retry', ids: due.sort(), attempt };
     }
     if (r.lifecycle === 'idle' && !r.inFlight && !r.held) {
       const ids = this.requeueStale(r, now);
@@ -610,6 +656,7 @@ export class WorkerWakeWatchdog {
     for (const id of [...r.pending]) if (!current.has(id)) r.pending.delete(id);
     for (const id of [...r.announced]) if (!current.has(id)) { r.announced.delete(id); r.announcedAt.delete(id); }
     for (const id of [...r.reannounced]) if (!current.has(id)) r.reannounced.delete(id);
+    for (const id of [...r.retries.keys()]) if (!current.has(id)) r.retries.delete(id);
     if (r.held && !r.held.ids.some((id) => current.has(id))) r.held = null;
     for (const id of current) if (!this.known(r, id)) r.pending.add(id);
   }
@@ -660,7 +707,9 @@ export class WorkerWakeWatchdog {
     // a remembered COMMITTED for that id without typing: the second announcement is a new
     // request. Once per id, so one suffix is enough.
     const again = ids.some((id) => r.reannounced.has(id));
-    const requestId = inboxWakeRequestId(f.agentId, ids) + (again ? ':again' : '');
+    // F4: each backoff retry is a new request too (the owner still remembers the last one).
+    const retry = Math.max(0, ...ids.map((id) => r.retries.get(id)?.attempt ?? 0));
+    const requestId = inboxWakeRequestId(f.agentId, ids) + (retry > 0 ? `:retry${retry}` : again ? ':again' : '');
     const claim: WakeClaim = Object.freeze({
       agentId: f.agentId, requestId, ids: Object.freeze(ids), cause,
       ...(r.recheck ? { recheck: r.recheck } : {})
