@@ -442,6 +442,9 @@ export interface OwnerDeps {
   setTimer: (fn: () => void, ms: number) => unknown;
   /** Told of every settled outcome. Diagnostics and UI; never a decision input. */
   onOutcome?: (record: OutcomeRecord) => void;
+  /** START-FIXES-163 (3): told of every automatic Enter write, ok or failed, with the
+   *  gap it waited after staging. Diagnostics only; never a decision input. */
+  onEnterWrite?: (record: EnterWriteRecord) => void;
   /** CODEX-WAKE-161 F1: the gap between the staged text and its Enter on this PTY, when the
    *  provider needs longer than GAP_MS (see providerAutomation.automaticEnterGapMs). Absent or
    *  null = GAP_MS. */
@@ -528,6 +531,20 @@ export interface OutcomeRecord {
   admissionClass: AdmissionClass;
   outcome: SubmitOutcome;
   at: number;
+}
+
+/** START-FIXES-163 (3): one automatic Enter write, for the boot-submit rows. */
+export interface EnterWriteRecord {
+  requestId: string;
+  agentId: string;
+  ptyId: string;
+  admissionClass: AdmissionClass;
+  ok: boolean;
+  error?: string;
+  /** What the owner waited between staging and this Enter (0 for a re-Enter). */
+  gapMs: number;
+  /** True for a re-Enter on our own untouched prior draft (no STAGE). */
+  reentry: boolean;
 }
 
 export interface Inhibition { requestId: string; reason: InterferenceReason; at: number; incarnation: unknown }
@@ -996,10 +1013,13 @@ export class AutomaticSubmitOwner {
     // CODEX-WAKE-161 F1: a provider may need a longer gap (Codex: an Enter inside its paste-burst
     // window after a fast burst is taken as a newline).
     // CODEX-WAKE-162: the gap may scale with the payload's length.
+    // START-FIXES-163 (3): the same gap, recorded for the Enter-write diagnostics row.
+    const gapMs = deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS;
     await this.sleep(deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS);
 
     // ── COMMIT | ABORT | INTERFERED ──────────────────────────────────────────────────
     const verdict = await Promise.resolve(commitSection(staged, deps));
+    if (verdict.kind === 'ENTERED') this.reportEnterWrite(staged, verdict.ok, verdict.ok ? undefined : verdict.error, gapMs, false);
     switch (verdict.kind) {
       case 'ENTERED':
         if (verdict.ok) {
@@ -1018,6 +1038,17 @@ export class AutomaticSubmitOwner {
       case 'LATE_REFUSAL':
         return this.abort(staged, verdict.basis);
     }
+  }
+
+  /** START-FIXES-163 (3): one diagnostics record per automatic Enter write. Never throws
+   *  into the submit path. */
+  private reportEnterWrite(s: Staged, ok: boolean, error: string | undefined, gapMs: number, reentry: boolean): void {
+    try {
+      this.deps.onEnterWrite?.({
+        requestId: s.req.requestId, agentId: s.req.agentId, ptyId: s.ptyId,
+        admissionClass: s.req.admissionClass, ok, ...(error === undefined ? {} : { error }), gapMs, reentry
+      });
+    } catch { /* diagnostics must never change an outcome */ }
   }
 
   /** INTERFERED: write NOTHING. Hold, flag, inhibit - and keep the grant IN SUSPENSE.
@@ -1046,6 +1077,7 @@ export class AutomaticSubmitOwner {
     if (decision) deps.capacity.cancelGrant(decision);
     const staged: Staged = { req, ptyId, incarnation, decision: null, humanStage };
     const verdict = commitSection(staged, deps);
+    if (verdict.kind === 'ENTERED') this.reportEnterWrite(staged, verdict.ok, verdict.ok ? undefined : verdict.error, 0, true);
     switch (verdict.kind) {
       case 'ENTERED':
         return verdict.ok ? { kind: 'COMMITTED' }

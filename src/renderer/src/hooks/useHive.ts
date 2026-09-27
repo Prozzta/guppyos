@@ -114,7 +114,7 @@ const BOOT_PROMPT_MAX_ATTEMPTS = 40;
 async function submitBootPrompt(agentId: string, text: string, settleMs?: number): Promise<void> {
   const requestId = oneOffRequestId('boot', agentId);
   for (let attempt = 0; attempt < BOOT_PROMPT_MAX_ATTEMPTS; attempt += 1) {
-    const outcome = await window.cth.autoSubmit({ requestId, agentId, admissionClass: 'BOOT_SEQUENCE', text, settleMs });
+    const outcome = await window.cth.autoSubmit({ requestId, agentId, admissionClass: 'BOOT_SEQUENCE', text, settleMs, attempt: attempt + 1 });
     if (outcome.kind === 'COMMITTED') return;
     if (outcome.kind !== 'REFUSED' && outcome.kind !== 'ABORTED') {
       throw new Error(`boot prompt for ${agentId} not delivered: ${outcome.kind}`);
@@ -395,7 +395,13 @@ export function useHive(config: HarnessConfig | null): void {
             if (res.seedPrompt) await submitBootPrompt(GOD_ID, res.seedPrompt);
             await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);
           }
-        } catch { /* PTY may have died during startup */ }
+        } catch (e) {
+          // START-FIXES-163 (3): never swallowed again. The PTY may have died, or main
+          // settled the orientation as INTERFERED/FAILED; either way it goes to the log.
+          const message = e instanceof Error ? e.message : String(e);
+          console.warn('[boot-submit]', GOD_ID, message);
+          try { window.cth.logBootSubmitThrew?.(GOD_ID, message); } catch { /* older preload */ }
+        }
         finally { bootGraceUntil.current[GOD_ID] = 0; }
       })();
     }, 1200);

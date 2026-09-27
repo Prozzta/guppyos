@@ -49,6 +49,7 @@ export interface OwnerWiring {
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   onOutcome?: (record: OutcomeRecord) => void;
+  onEnterWrite?: OwnerDeps['onEnterWrite'];
 }
 
 export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
@@ -116,7 +117,8 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
       if (typeof t.unref === 'function') t.unref();
       return t;
     }),
-    onOutcome: w.onOutcome
+    onOutcome: w.onOutcome,
+    onEnterWrite: w.onEnterWrite
   };
 }
 

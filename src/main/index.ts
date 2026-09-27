@@ -520,6 +520,15 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   ptyForAgent: (agentId) => ptyForAgent(agentId),
   providerForPty: (ptyId) => ptyProvider.get(ptyId),
   requestScreenReading: (ptyId, needle, expectedTail) => screenReadings.request(ptyId, needle, expectedTail),
+  // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
+  // not, with the gap it waited. Logging only: it changes no submit behaviour.
+  onEnterWrite: (r) => {
+    if (r.admissionClass !== 'BOOT_SEQUENCE') return;
+    hive.appendLog({
+      kind: 'boot-submit', agentId: r.agentId, requestId: r.requestId, attempt: null,
+      outcome: 'ENTER_WRITE', ok: r.ok, reason: r.error ?? null, gapMs: r.gapMs, reentry: r.reentry
+    });
+  },
   onOutcome: (r) => {
     // An outcome can raise an INTERFERED hold or settle one: the impact string moves.
     pushAgentImpact();
@@ -4875,9 +4884,32 @@ ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
     return { kind: 'REJECTED', reason: 'BAD_REQUEST' };
   }
   const settleMs = typeof r.settleMs === 'number' && r.settleMs >= 0 && r.settleMs <= 10_000 ? r.settleMs : undefined;
+  // START-FIXES-163 (3): one row per boot-prompt attempt, whatever it settles as
+  // (COMMITTED, INTERFERED with its reason, REFUSED/ABORTED while the TUI boots, FAILED),
+  // and a THREW row if the owner itself threw. Logging only: the outcome passes through.
+  const boot = r.admissionClass === 'BOOT_SEQUENCE'
+    ? { kind: 'boot-submit', agentId: r.agentId, requestId: r.requestId, attempt: typeof r.attempt === 'number' && Number.isInteger(r.attempt) && r.attempt > 0 ? r.attempt : null }
+    : null;
   return automaticSubmit.submit({
     requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass as AdmissionClass,
     text: r.text, settleMs
+  }).then((outcome) => {
+    const o = outcome as { kind: string; reason?: string; detail?: string };
+    if (boot) hive.appendLog({ ...boot, outcome: o.kind, reason: o.reason ?? null, ...(o.detail ? { detail: o.detail } : {}) });
+    return outcome;
+  }, (e: unknown) => {
+    if (boot) hive.appendLog({ ...boot, outcome: 'THREW', reason: e instanceof Error ? e.message : String(e) });
+    throw e;
+  });
+});
+
+// START-FIXES-163 (3): the renderer's boot-prompt caller gave up (a final outcome, a
+// dead PTY, an IPC failure). It used to swallow this; now it lands in log.jsonl.
+ipcMain.on('autoSubmit:bootSubmitThrew', (_evt, agentId: unknown, message: unknown) => {
+  if (typeof agentId !== 'string' || !agentId) return;
+  hive.appendLog({
+    kind: 'boot-submit', agentId, attempt: null, outcome: 'THREW', source: 'renderer',
+    reason: typeof message === 'string' ? message.slice(0, 500) : String(message)
   });
 });
 

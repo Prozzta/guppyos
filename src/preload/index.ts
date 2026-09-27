@@ -1213,8 +1213,11 @@ const api = {
    * own stable id: it is delivered AT MOST ONCE however many times it is asked. Resolves
    * with what happened; never rejects for a delivery reason.
    */
-  autoSubmit: (req: { requestId: string; agentId: string; admissionClass: AutoSubmitClass; text: string; settleMs?: number }): Promise<AutoSubmitOutcome> =>
+  autoSubmit: (req: { requestId: string; agentId: string; admissionClass: AutoSubmitClass; text: string; settleMs?: number; attempt?: number }): Promise<AutoSubmitOutcome> =>
     ipcRenderer.invoke('autoSubmit:submit', req),
+  /** START-FIXES-163 (3): a boot prompt was given up on; main writes a boot-submit THREW row. */
+  logBootSubmitThrew: (agentId: string, message: string): void =>
+    ipcRenderer.send('autoSubmit:bootSubmitThrew', agentId, message),
   /**
    * L0-FUSION stage 5.4b - A HUMAN says the prompt that was interfered with is dealt with.
    * The only way an INTERFERED hold ends while its terminal lives. Call it from a person's
