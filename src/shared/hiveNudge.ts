@@ -12,6 +12,10 @@
 /** The fixed head of every nudge; the ids that follow differ per nudge. */
 const NUDGE_HEAD = 'You have new hive inbox message(s)';
 
+/** Route A: Codex retains this user item across compaction, so it must stay short,
+ * fixed, and useful if its UserPromptSubmit hook cannot answer. */
+export const CODEX_INBOX_WAKE_SENTINEL = '[hive] check inbox';
+
 /**
  * Build the nudge, naming the messages that prompted it.
  *
@@ -39,6 +43,12 @@ export function inboxNudgeText(ids: string[]): string {
 /** The nudge without ids, for size checks (tests, docs). */
 export const INBOX_NUDGE_FIXED_CHARS = inboxNudgeText([]).length;
 
+/** Keep Codex's retained user item free of dynamic inbox ids. The hook supplies
+ * those current facts as transient developer context instead. */
+export function inboxWakeTextForProvider(provider: string | undefined, ids: string[]): string {
+  return provider === 'codex' ? CODEX_INBOX_WAKE_SENTINEL : inboxNudgeText(ids);
+}
+
 /**
  * Is this queued text an inbox-wake nudge?
  *
@@ -47,5 +57,6 @@ export const INBOX_NUDGE_FIXED_CHARS = inboxNudgeText([]).length;
  * `isCompactionCommand`, and the queue's one-pending rule leans on it the same way.
  */
 export function isInboxNudge(text: string): boolean {
-  return text.trim().startsWith(NUDGE_HEAD);
+  const trimmed = text.trim();
+  return trimmed === CODEX_INBOX_WAKE_SENTINEL || trimmed.startsWith(NUDGE_HEAD);
 }

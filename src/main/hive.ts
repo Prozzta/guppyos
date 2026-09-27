@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
-import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexFeatureFlags, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
 import {
@@ -1789,6 +1789,7 @@ export class HiveManager {
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
       meta.provider === 'codex' ? CODEX_OUTPUT_HYGIENE_LINE : '',
+      meta.provider === 'codex' ? 'Codex inbox wake: the automatic inbox-check prompt is a wake sentinel. Its hook supplies current inbox facts; read your authoritative inbox and handle its current messages.' : '',
       memoryLine,
       knowledgeLine,
       godLine,
@@ -3093,6 +3094,9 @@ export class HiveManager {
       // ~35 KB with the reflow cap); the alternate screen answers a resize with ~3 KB.
       // CODEX_TUI_KEYS selects the set (the Human's choice). Only this generated copy changes.
       config = setCodexTuiKeys(config, CODEX_TUI_KEYS);
+      // Route A: UserPromptSubmit additionalContext must not be retained as a
+      // client developer message after compaction. This is our generated home only.
+      config = setCodexFeatureFlags(config, { retain_client_developer_messages: false });
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];

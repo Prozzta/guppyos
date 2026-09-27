@@ -109,9 +109,23 @@ test('fix 6: setCodexTopLevelKeys replaces a seed top-level value (bare or quote
   assert.equal(toml.parse(C.setCodexTopLevelKeys('', { a_limit: 5 })).a_limit, 5, 'an empty seed');
 });
 
+test('Route A: setCodexFeatureFlags pins retain_client_developer_messages off without changing other feature flags', () => {
+  const seed = '[features]\nretain_client_developer_messages = true\njs_repl = false\n\n[profiles.p]\nretain_client_developer_messages = true\n';
+  const cfg = toml.parse(C.setCodexFeatureFlags(seed, { retain_client_developer_messages: false }));
+  assert.equal(cfg.features.retain_client_developer_messages, false);
+  assert.equal(cfg.features.js_repl, false);
+  assert.equal(cfg.profiles.p.retain_client_developer_messages, true, 'a profile key is untouched');
+  assert.equal(toml.parse(C.setCodexFeatureFlags('model = "m"\n', { retain_client_developer_messages: false })).features.retain_client_developer_messages, false, 'a missing table is added');
+});
+
 test('fix 6: the generated per-agent config.toml carries model_auto_compact_token_limit = 120000 at top level', async (t) => {
   const { cfg, text } = await agentConfig(t, 'model_auto_compact_token_limit = 250000\n' + SEED);
   assert.equal(cfg.model_auto_compact_token_limit, 120000);
   assert.ok(text.indexOf('model_auto_compact_token_limit = 120000') < text.indexOf('['), 'before the first table');
   assert.match(cfg.developer_instructions, /You are "Dwight"/, 'the instructions are still set');
+});
+
+test('Route A: generated Codex config pins retain_client_developer_messages = false even when the seed enables it', async (t) => {
+  const { cfg } = await agentConfig(t, '[features]\nretain_client_developer_messages = true\n');
+  assert.equal(cfg.features.retain_client_developer_messages, false);
 });

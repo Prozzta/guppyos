@@ -111,7 +111,7 @@ import { WakeStallWatch } from './wakeStall';
 import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
-import { inboxNudgeText } from '../shared/hiveNudge';
+import { inboxWakeTextForProvider } from '../shared/hiveNudge';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
@@ -602,7 +602,7 @@ inboxWake = new InboxWakeBridge({
   // it is CAPACITY_GATED work through the one submit owner - admission, the READY gate,
   // the prompt and human-draft guards, the final revalidation next to the Enter.
   submit: (req) => automaticSubmit.submit(req),
-  text: (ids) => inboxNudgeText([...ids]),
+  text: (ids, agentId) => inboxWakeTextForProvider(agentId ? hive.registry().agents[agentId]?.provider : undefined, [...ids]),
   setImmediate: (fn) => { setImmediate(fn); },
   now: () => Date.now(),
   log: (line) => console.log(line),

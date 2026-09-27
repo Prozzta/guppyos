@@ -247,3 +247,21 @@ export function setCodexTuiKeys(config: string, entries: Readonly<Record<string,
   while (out.length && out[out.length - 1].trim() === '') out.pop();
   return `${out.join('\n')}${out.length ? '\n\n' : ''}[tui]\n${note}\n${keys.map((k) => `${k} = ${tomlValue(entries[k])}`).join('\n')}\n`;
 }
+
+/** Pin scalar booleans in the root [features] table without reformating the
+ * user's seed. Feature flags are per-agent policy, unlike profile overrides. */
+export function setCodexFeatureFlags(config: string, entries: Record<string, boolean>): string {
+  const lines = config.split(/\r?\n/);
+  const keys = Object.keys(entries);
+  const featureHeader = /^\s*\[\s*features\s*\]\s*(?:#.*)?$/;
+  const firstFeature = lines.findIndex((line) => featureHeader.test(line));
+  if (firstFeature < 0) {
+    const flags = keys.map((key) => `${key} = ${entries[key]}`).join('\n');
+    return `${config.replace(/\s*$/, '')}\n\n[features]\n${flags}\n`;
+  }
+  const end = lines.findIndex((line, index) => index > firstFeature && ANY_TABLE.test(line));
+  const featureEnd = end < 0 ? lines.length : end;
+  const kept = lines.filter((line, index) => index <= firstFeature || index >= featureEnd || !keys.some((key) => topLevelKey(line, key)));
+  kept.splice(firstFeature + 1, 0, ...keys.map((key) => `${key} = ${entries[key]}`));
+  return kept.join('\n');
+}

@@ -26,6 +26,7 @@ import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
 import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, rebuildToolHook } from './codexHookMcp';
 import type { CapacityObservation } from '../shared/providerCapacity';
+import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 
 interface HookPayload {
   hook_event_name?: string;
@@ -1079,12 +1080,20 @@ export class HookServer {
       ? `<goal>\n${goalRaw}\n</goal>`
       : null;
 
-    if (steer || roster || goal || mail) {
+    // Route A: Codex retains the short user sentinel, while this hook-only
+    // developer context carries the facts that change on every wake. A fresh
+    // directory read also makes an already-handled wake harmless.
+    const inboxWake = event === 'UserPromptSubmit' && !!agentId && !fromSubagent
+      && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL && this.hive.codexHomeFor(agentId)
+      ? `<hive-inbox-wake>\nCurrent unread inbox file ids: ${JSON.stringify(this.hive.inboxFileNames(agentId).map((name) => name.replace(/\.json$/, '')).sort())}.\nThe inbox directory is authoritative; ids already in inbox/.done/ were handled. Read it and handle every current message, then move handled files to inbox/.done/.\n</hive-inbox-wake>`
+      : null;
+
+    if (steer || roster || goal || mail || inboxWake) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [roster, goal, steer, mail].filter(Boolean).join('\n\n')
+          additionalContext: [roster, goal, steer, mail, inboxWake].filter(Boolean).join('\n\n')
         }
       };
     }

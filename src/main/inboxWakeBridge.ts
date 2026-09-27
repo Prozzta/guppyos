@@ -38,8 +38,8 @@ export interface InboxWakeBridgeDeps {
   facts: (agentId: string) => Omit<WorkerWakeFacts, 'agentId'> | null;
   /** AutomaticSubmitOwner.submit - the ONLY way a wake reaches a terminal. */
   submit: (req: InboxWakeSubmit) => Promise<{ kind: string }>;
-  /** The payload for a batch of ids (inboxNudgeText). */
-  text: (ids: readonly string[]) => string;
+  /** The provider-aware visible payload for a batch of ids. */
+  text: (ids: readonly string[], agentId?: string) => string;
   setImmediate: (fn: () => void) => void;
   now: () => number;
   log?: (line: string) => void;
@@ -115,8 +115,8 @@ export class InboxWakeBridge {
         requestId: claim.requestId,
         agentId,
         admissionClass: 'CAPACITY_GATED',
-        text: this.deps.text(claim.ids),
-        ...(claim.recheck ? { priorText: this.deps.text(claim.recheck) } : {})
+        text: this.deps.text(claim.ids, agentId),
+        ...(claim.recheck ? { priorText: this.deps.text(claim.recheck, agentId) } : {})
       });
       this.deps.diag?.('submit', { agentId, cause, mode, requestId: claim.requestId });
     } catch (e) {
