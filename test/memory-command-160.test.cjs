@@ -61,6 +61,23 @@ test('buildPtyEnv: without an agent PATH the base is userPath; the memory dir is
   assert.equal(buildPtyEnv({ PATH: '/a' }, '/u:/v', {}, 'linux', ['/m']).PATH, '/m:/u:/v', 'POSIX separator');
 });
 
+test('a real Git Bash given buildPtyEnv\'s env resolves `memory` to the app\'s dir, not a decoy on the inherited Windows `Path` (the 1.1.59 failure, end to end)', (t) => {
+  const bash = ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe'].find((p) => fs.existsSync(p));
+  if (process.platform !== 'win32' || !bash) { t.skip('needs Windows + Git Bash'); return; }
+  const memDir = dir('mem-');
+  const decoy = dir('decoy-');
+  for (const d of [memDir, decoy]) fs.writeFileSync(path.join(d, 'memory'), '#!/bin/sh\necho x\n');
+  // The parent's `Path` holds the decoy (as the Human's own tools dir did); userPath too.
+  const env = buildPtyEnv({ Path: decoy, SystemRoot: process.env.SystemRoot }, decoy, { AGENT_ID: 'a1' }, 'win32', [memDir]);
+  assert.deepEqual(pathKeys(env), ['PATH']);
+  const r = require('node:child_process').spawnSync(bash, ['--noprofile', '--norc', '-c', 'command -v memory'], { env, encoding: 'utf8', timeout: 20000 });
+  assert.equal(r.status, 0, r.stderr);
+  // MSYS prints its own spelling of the dir (e.g. /tmp/...), so compare the unique dir names.
+  const got = r.stdout.trim();
+  assert.ok(got.endsWith(`/${path.basename(memDir)}/memory`), got);
+  assert.ok(!got.includes(path.basename(decoy)), got);
+});
+
 test('spawn: the memory env and the dir come from ONE decision; pty.ts hands the dir to buildPtyEnv; the renderer cannot set it', () => {
   const spawn = between(INDEX, 'const mem = nativeMemory.spawnEnv(opts.hive.id);', 'catch (e) {');
   assert.match(spawn, /semanticMemory: mem !== null,/);
