@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.64" src="https://img.shields.io/badge/version-1.1.64-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.65" src="https://img.shields.io/badge/version-1.1.65-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -210,9 +210,13 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   Claude agent's real session instead of a new empty one, non-Claude agents never read Claude
   transcripts (no more start-up freeze), a healthy restored Codex reading no longer holds its
   wake-ups, and the update check lists every newer version to choose from.
-- **A view that comes back** (1.1.64, the current release) — if the window's view crashes, the
+- **A view that comes back** (1.1.64) — if the window's view crashes, the
   app reloads it (or replaces the window, keeping every agent terminal), opens straight on the
   agents, saves a local crash dump, and can always be quit.
+- **Leaner Codex agents** (1.1.65, the current release) — a Codex agent starts a fresh
+  conversation each day (or past 20 MB) instead of resuming one forever, agents read a memory
+  digest instead of their whole memory file, large memory files are archived, and Settings has a
+  tool output cap (default 4,000 tokens) and a plugins choice (off by default).
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

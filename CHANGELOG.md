@@ -11,6 +11,53 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.65] — 2026-09-27
+
+**Codex agents cost far fewer tokens: they start a fresh conversation each day, read a short memory digest, and keep less of each tool output.**
+Rollback: 1.1.64 (reinstall).
+
+### Fixed
+
+- **Codex agents no longer drag their whole history into every request.** The app resumed each
+  Codex agent's same conversation forever. One agent's conversation had run for 12 days (133 MB),
+  and every request re-sent about 158,000 tokens, most of it old wake-up messages that Codex keeps
+  even when it compacts. Now an automatic resume starts a **fresh conversation** when the old one
+  began before today or has grown past 20 MB. The agent keeps its identity, memory and inbox. A
+  typed session id, "Restart & Continue" and a model change still resume the same conversation.
+  Each fresh start writes a `codex-thread-rotated` row to the hive log. Antigravity agents get the
+  same rule.
+- **Agents no longer read their whole memory.md at every task.** The protocol now asks for the
+  `memory wake-up` digest or a `memory search` (or only the last lines of memory.md), and still
+  reads every inbox message.
+
+### Changed
+
+- **Large memory files are split.** When an agent starts and its memory.md is over 32 KB, the
+  older part moves to `memory-archive-<date>.md` next to it; memory.md keeps its header and at
+  least the newest 12 KB. Nothing is lost: the archive is still found by `memory search`.
+- **A shorter wake-up line** (150 characters instead of 370).
+- **Codex agents compact earlier** (at about 120,000 tokens instead of about 230,000), and they are
+  told not to print whole files.
+
+### Added
+
+- **Codex tool output cap** (Settings → Agents & Models). How much of each command or tool output
+  a hive Codex agent keeps in its conversation: 1,000 to 10,000 tokens, default 4,000, or Off. A
+  longer output keeps its beginning and its end, with a "…N tokens truncated…" marker in between.
+- **"Hive Codex agents inherit my Codex plugins"** (Settings → Agents & Models), **off by default**.
+  Off: hive Codex agents start without the plugins in your Codex config (browser, computer use,
+  documents, pdf, ...), which keeps every request smaller. On: they get your plugins as before.
+
+Both settings apply to a Codex agent at its next start. They change only the hive agents' own
+Codex configs; your own `~/.codex/config.toml` is never changed.
+
+### Good to know
+
+- **On the first start of 1.1.65, every Codex agent whose conversation began before today starts
+  a fresh one.** Its identity, memory and inbox carry over; what was only in the old conversation
+  does not. Use "Restart & Continue" on an agent if you need its old conversation once more.
+- **Memory files over 32 KB are split** the next time each agent starts (see above).
+
 ## [1.1.64] — 2026-09-27
 
 **The app window recovers by itself if its view crashes, and a crash now leaves a local dump.**
