@@ -75,7 +75,7 @@ function makeJail() {
   return d;
 }
 
-const DROP = /^(AGENT_|HIVE_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE|ANTIGRAVITY_|GEMINI_|MEMPALACE_)/i;
+const DROP = /^(AGENT_|HIVE_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE|ANTIGRAVITY_|GEMINI_)/i;
 function jailEnv(d) {
   const e = {};
   for (const [k, v] of Object.entries(process.env)) if (!DROP.test(k)) e[k] = v;
