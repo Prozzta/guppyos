@@ -231,7 +231,7 @@ export interface HarnessConfig {
   heavyJobsAtOnce?: number | 'off';
   /** CODEX-BLOAT-165 fix 2 (Settings → Agents & Models, "Codex tool output cap"): the
    *  `tool_output_token_limit` written into each hive Codex agent's OWN config.toml, in Codex's
-   *  estimated tokens (1000-20000), or 'off' (no key written). Default 4000. Never written to the
+   *  estimated tokens (1000-10000), or 'off' (no key written). Default 4000. Never written to the
    *  user's ~/.codex/config.toml. Codex reads it at start: a change reaches an agent at its next start. */
   codexToolOutputTokenLimit?: number | 'off';
   /** The command we run when spawning a new agent. */
@@ -719,7 +719,7 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
 export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
   const current = readConfig();
   const next: HarnessConfig = { ...current, ...patch };
-  // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-20000. Anything else is refused
+  // CODEX-BLOAT-165 fix 2: 'off' or a number, clamped to 1000-10000. Anything else is refused
   // and changes nothing (the renderer reverts its control on the rejection).
   if (patch && Object.prototype.hasOwnProperty.call(patch, 'codexToolOutputTokenLimit')) {
     const n = normalizeCodexToolOutputLimit(patch.codexToolOutputTokenLimit);

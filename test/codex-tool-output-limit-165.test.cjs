@@ -1,7 +1,7 @@
 'use strict';
 /**
  * CODEX-BLOAT-165 fix 2: the Codex tool-output cap (`tool_output_token_limit`), configurable in
- * Settings → Agents & Models. Default 4000, 1000-20000, or Off. Persisted in the app config and
+ * Settings → Agents & Models. Default 4000, 1000-10000, or Off. Persisted in the app config and
  * written ONLY into our per-agent Codex config.toml (Off = no key). Never the global file.
  *
  * HOME IS REDIRECTED AND ASSERTED before any hive is built; the app config lives in a temp
@@ -29,10 +29,10 @@ const ui = loadTs('src/renderer/src/components/CodexToolOutputSetting.tsx');
 
 // ── the value contract ────────────────────────────────────────────────────────────────────
 
-test('default 4000, range 1000-20000', () => {
+test('default 4000, range 1000-10000', () => {
   assert.equal(L.CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, 4000);
   assert.equal(L.CODEX_TOOL_OUTPUT_LIMIT_MIN, 1000);
-  assert.equal(L.CODEX_TOOL_OUTPUT_LIMIT_MAX, 20000);
+  assert.equal(L.CODEX_TOOL_OUTPUT_LIMIT_MAX, 10000, "Codex's own policy limit (audit F4)");
 });
 
 test('normalize: off, in-range numbers, clamping, rounding; garbage is INVALID (null)', () => {
@@ -41,7 +41,8 @@ test('normalize: off, in-range numbers, clamping, rounding; garbage is INVALID (
   assert.equal(L.normalizeCodexToolOutputLimit(7000), 7000);
   assert.equal(L.normalizeCodexToolOutputLimit(999), 1000, 'clamped up');
   assert.equal(L.normalizeCodexToolOutputLimit(-5), 1000, 'clamped up');
-  assert.equal(L.normalizeCodexToolOutputLimit(50000), 20000, 'clamped down');
+  assert.equal(L.normalizeCodexToolOutputLimit(50000), 10000, 'clamped down');
+  assert.equal(L.normalizeCodexToolOutputLimit(15000), 10000, 'above Codex\'s own 10,000 is clamped');
   assert.equal(L.normalizeCodexToolOutputLimit(4000.6), 4001, 'rounded');
   for (const bad of [NaN, Infinity, '4000', 'abc', '', null, undefined, true, {}, []]) {
     assert.equal(L.normalizeCodexToolOutputLimit(bad), null, JSON.stringify(bad));
@@ -52,19 +53,19 @@ test('for the config.toml: absent/invalid -> the default, off -> no key (null), 
   assert.equal(L.codexToolOutputLimitForConfig(undefined), 4000);
   assert.equal(L.codexToolOutputLimitForConfig('garbage'), 4000);
   assert.equal(L.codexToolOutputLimitForConfig('off'), null);
-  assert.equal(L.codexToolOutputLimitForConfig(12000), 12000);
-  assert.equal(L.codexToolOutputLimitForConfig(25000), 20000);
+  assert.equal(L.codexToolOutputLimitForConfig(8000), 8000);
+  assert.equal(L.codexToolOutputLimitForConfig(25000), 10000);
 });
 
 test('the Settings field: whole numbers only (clamped, and it says so); anything else refused', () => {
   assert.deepEqual(L.parseCodexToolOutputLimitInput('6000'), { ok: true, value: 6000, clamped: false });
-  assert.deepEqual(L.parseCodexToolOutputLimitInput(' 12,000 '), { ok: true, value: 12000, clamped: false });
+  assert.deepEqual(L.parseCodexToolOutputLimitInput(' 8,000 '), { ok: true, value: 8000, clamped: false });
   assert.deepEqual(L.parseCodexToolOutputLimitInput('500'), { ok: true, value: 1000, clamped: true });
-  assert.deepEqual(L.parseCodexToolOutputLimitInput('99999'), { ok: true, value: 20000, clamped: true });
+  assert.deepEqual(L.parseCodexToolOutputLimitInput('99999'), { ok: true, value: 10000, clamped: true });
   for (const bad of ['', 'abc', '4.5', '-3', '4k', 'off']) {
     const r = L.parseCodexToolOutputLimitInput(bad);
     assert.equal(r.ok, false, bad);
-    assert.match(r.error, /whole number from 1000 to 20000/);
+    assert.match(r.error, /whole number from 1000 to 10000/);
   }
 });
 
@@ -74,7 +75,7 @@ test('app config: the default is 4000; a custom value, a clamped value and Off p
   assert.equal(readConfig().codexToolOutputTokenLimit, 4000, 'default');
   assert.equal(writeConfig({ codexToolOutputTokenLimit: 7000 }).codexToolOutputTokenLimit, 7000);
   assert.equal(readConfig().codexToolOutputTokenLimit, 7000, 'custom value read back');
-  assert.equal(writeConfig({ codexToolOutputTokenLimit: 90000 }).codexToolOutputTokenLimit, 20000, 'clamped');
+  assert.equal(writeConfig({ codexToolOutputTokenLimit: 90000 }).codexToolOutputTokenLimit, 10000, 'clamped');
   assert.equal(writeConfig({ codexToolOutputTokenLimit: 'off' }).codexToolOutputTokenLimit, 'off');
   assert.equal(readConfig().codexToolOutputTokenLimit, 'off', 'Off read back');
   for (const bad of ['abc', null, {}, NaN]) {
@@ -121,13 +122,13 @@ test('config.toml: absent setting -> tool_output_token_limit = 4000 (replacing t
 });
 
 test('config.toml: a custom value reaches it; an out-of-range one arrives clamped', async (t) => {
-  assert.equal((await cfgFor(t, 12000)).cfg.tool_output_token_limit, 12000);
+  assert.equal((await cfgFor(t, 8000)).cfg.tool_output_token_limit, 8000);
   assert.equal((await cfgFor(t, 500)).cfg.tool_output_token_limit, 1000);
 });
 
 test('config.toml: Off writes no key of ours (the other limits and fixes stay)', async (t) => {
   const { cfg, text } = await cfgFor(t, 'off');
-  assert.ok(!/tool_output_token_limit = (4000|1000|20000)/.test(text), 'no key of ours');
+  assert.ok(!/tool_output_token_limit = (4000|1000|10000)/.test(text), 'no key of ours');
   assert.equal(cfg.model_auto_compact_token_limit, 120000);
   assert.equal(cfg.plugins['pdf@x'].enabled, false);
 });

@@ -2,7 +2,7 @@
  * CODEX-BLOAT-165 fix 2 — Settings → Agents & Models → "Codex tool output cap".
  *
  * The `tool_output_token_limit` the app writes into each hive Codex agent's OWN config.toml
- * (never the user's ~/.codex/config.toml). A number from 1000 to 20000 (default 4000), or Off.
+ * (never the user's ~/.codex/config.toml). A number from 1000 to 10000 (default 4000), or Off.
  *
  * Its own save lifecycle, like CapacityDisplaySetting: it reads the CURRENT config from main
  * when it mounts (the 1.1.57 rule: Settings shows what was saved, not what the app started
@@ -28,7 +28,7 @@ export const CODEX_TOOL_OUTPUT_COPY = {
     + 'estimated tokens (about 4 characters each). A longer output keeps its beginning and its end; the middle '
     + 'is replaced by a "…N tokens truncated…" marker. Everything kept is re-sent with every later request, so a '
     + 'lower cap means cheaper requests; the agent can re-run a command with a filter when it needs the middle. '
-    + `Codex's own limit (10,000 for current models) still applies. Off: no hive cap. From ${CODEX_TOOL_OUTPUT_LIMIT_MIN} `
+    + `Codex's own limit (10,000 for current models) still applies, so that is the maximum. Off: no hive cap. From ${CODEX_TOOL_OUTPUT_LIMIT_MIN} `
     + `to ${CODEX_TOOL_OUTPUT_LIMIT_MAX}; default ${CODEX_TOOL_OUTPUT_LIMIT_DEFAULT}. Only hive Codex agents; your own `
     + 'Codex config is not changed.',
   restartHint: 'Codex reads this when an agent starts: running Codex agents keep their current cap until they are '

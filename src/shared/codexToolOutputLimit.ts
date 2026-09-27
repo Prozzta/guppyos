@@ -7,7 +7,7 @@
  * (a usize), and it bounds what the MODEL sees of each tool output on later requests. The unit is
  * Codex's estimated token (about 4 characters). An output over the cap keeps its beginning and end;
  * the middle is replaced by `…N tokens truncated…`. The model's own policy (10,000 for the current
- * models) still applies on top, so values at or above it change nothing. Codex reads config.toml
+ * models) still applies on top, which is why the maximum is 10,000. Codex reads config.toml
  * when it starts: a change reaches an agent at its next start.
  *
  * Pure; shared by main (validation, the config.toml writer) and the Settings control.
@@ -15,7 +15,9 @@
 
 export const CODEX_TOOL_OUTPUT_LIMIT_DEFAULT = 4000;
 export const CODEX_TOOL_OUTPUT_LIMIT_MIN = 1000;
-export const CODEX_TOOL_OUTPUT_LIMIT_MAX = 20000;
+/** Codex's own policy truncates at 10,000 for every current model (models_cache.json), so a
+ *  larger cap would change nothing (CB-165 audit F4). */
+export const CODEX_TOOL_OUTPUT_LIMIT_MAX = 10000;
 
 /** The stored setting: a token count, or 'off' (the key is omitted from our config.toml). */
 export type CodexToolOutputLimitSetting = number | 'off';
