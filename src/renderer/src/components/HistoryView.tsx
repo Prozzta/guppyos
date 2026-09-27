@@ -119,7 +119,7 @@ export function HistoryList({ win, first, last, padTop, padBottom, loading, foll
       {win.items.length === 0 && (
         <div style={{ padding: 16, fontSize: 13, color: 'var(--cth-ink-500)', textAlign: 'center' }}>No turns yet.</div>
       )}
-      <div style={{ height: padTop }} />
+      <div data-pad-top style={{ height: padTop }} />
       {win.items.slice(first, last).map((item) => (
         <div key={item.id} data-hid={item.id}><HistoryRow item={item} /></div>
       ))}
@@ -154,8 +154,9 @@ export function HistoryView({ agentId }: HistoryViewProps) {
   const stick = useRef(true);
   const heights = useRef(new Map<string, number>());
   const widthRef = useRef(0);
-  // Set before an older page is prepended, so the view keeps its place.
-  const anchor = useRef<{ height: number; top: number } | null>(null);
+  // Set before an older page is prepended: the row that was first on screen, and how far
+  // below the viewport's top it sat. Held until that row is mounted and measured in place.
+  const anchor = useRef<{ id: string; delta: number; until: number } | null>(null);
 
   const loadTail = useCallback(async () => {
     if (busy.current) return;
@@ -187,7 +188,10 @@ export function HistoryView({ agentId }: HistoryViewProps) {
       if (next === 'reload') reload = true;
       else {
         const el = scroller.current;
-        if (el) anchor.current = { height: el.scrollHeight, top: el.scrollTop };
+        if (el) {
+          const row = [...el.querySelectorAll<HTMLElement>('[data-hid]')].find((r) => r.offsetTop + r.offsetHeight > el.scrollTop);
+          anchor.current = row ? { id: row.dataset.hid!, delta: row.offsetTop - el.scrollTop, until: Date.now() + 1500 } : null;
+        }
         stick.current = false;
         setWin(next);
       }
@@ -205,6 +209,7 @@ export function HistoryView({ agentId }: HistoryViewProps) {
       stick.current = true;
       setAtBottom(true);
       el.scrollTop = el.scrollHeight;
+      setScrollTop(el.scrollTop);
       return;
     }
     void loadTail();
@@ -257,12 +262,27 @@ export function HistoryView({ agentId }: HistoryViewProps) {
       const h = row.offsetHeight;
       if (h > 0 && Math.abs((heights.current.get(id) ?? -1) - h) > 0.5) { heights.current.set(id, h); changed = true; }
     });
-    if (anchor.current) {
-      el.scrollTop = anchor.current.top + (el.scrollHeight - anchor.current.height);
-      anchor.current = null;
+    const a = anchor.current;
+    if (a) {
+      const items = winRef.current.items;
+      const idx = items.findIndex((i) => i.id === a.id);
+      if (idx < 0 || Date.now() > a.until) anchor.current = null;
+      else {
+        // In the DOM when mounted; otherwise from the (partly estimated) heights above it.
+        const row = el.querySelector<HTMLElement>(`[data-hid="${CSS.escape(a.id)}"]`);
+        const pad = el.querySelector<HTMLElement>('[data-pad-top]');
+        let top = pad ? pad.offsetTop : 0;
+        if (row) top = row.offsetTop;
+        else for (let i = 0; i < idx; i += 1) top += heights.current.get(items[i].id) ?? EST_ROW;
+        const want = Math.max(0, top - a.delta);
+        if (Math.abs(el.scrollTop - want) >= 1) el.scrollTop = want;
+        if (row && !changed) anchor.current = null;
+      }
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
     }
+    // Programmatic scrolls update the virtual window now, not on a later scroll event.
+    if (Math.abs(el.scrollTop - scrollTop) >= 1) setScrollTop(el.scrollTop);
     if (changed) setMeasureTick((n) => n + 1);
   });
 
