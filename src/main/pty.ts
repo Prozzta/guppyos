@@ -417,11 +417,30 @@ export class PtyManager {
     this.exitHandler = handler;
   }
 
+  /** MEMSPIKE-167: per-PTY traffic since the last takeTraffic() (output chars and chunks sent
+   *  toward the renderer, resizes, redraws). Counters only: nothing is kept but the numbers. */
+  private traffic = new Map<string, { chars: number; chunks: number; resizes: number; redraws: number }>();
+
+  private trafficOf(id: string): { chars: number; chunks: number; resizes: number; redraws: number } {
+    let t = this.traffic.get(id);
+    if (!t) { t = { chars: 0, chunks: 0, resizes: 0, redraws: 0 }; this.traffic.set(id, t); }
+    return t;
+  }
+
+  /** The traffic counted since the previous call, per PTY id, and reset (one folded log row a
+   *  minute: a flooded terminal or a resize loop shows at once). */
+  takeTraffic(): Record<string, { chars: number; chunks: number; resizes: number; redraws: number }> {
+    const out = Object.fromEntries(this.traffic);
+    this.traffic = new Map();
+    return out;
+  }
+
   /** One chunk of a live session's output (node-pty onData). */
   private deliverData(id: string, session: PtySession, data: string): void {
     // Drop trailing output from a process whose id was already reclaimed by
     // a respawn (or killed) — it would corrupt the new session's screen.
     if (this.sessions.get(id) !== session) return;
+    const t = this.trafficOf(id); t.chars += data.length; t.chunks += 1;
     if (this.startupHooks) {
       try {
         const h = this.startupHook();
@@ -863,6 +882,7 @@ export class PtyManager {
   resize(id: string, cols: number, rows: number): { ok: boolean; error?: string } {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
+    this.trafficOf(id).resizes += 1;
     try {
       s.proc.resize(cols, rows);
       return { ok: true };
@@ -877,6 +897,7 @@ export class PtyManager {
   redraw(id: string): { ok: boolean; error?: string } {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
+    this.trafficOf(id).redraws += 1;
     try {
       s.proc.resize(s.proc.cols, s.proc.rows);
       return { ok: true };
