@@ -54,7 +54,9 @@ test('RENDERED: the reporter adds no measurable startup cost (start() ms; time-t
   }
   console.log(`crashReporter.start(): ${JSON.stringify(cost)} ms; ready with ${JSON.stringify(on)} (median ${median(on)}), without ${JSON.stringify(off)} (median ${median(off)})`);
   // Bounds are loose on purpose: under the full suite the machine is busy. Measured alone:
-  // start() 25-37 ms warm; median time-to-ready 288 ms with vs 261 ms without.
-  assert.ok(median(cost) <= 150, `start() itself is cheap: ${JSON.stringify(cost)} ms`);
+  // start() 25-37 ms warm; median time-to-ready 288 ms with vs 261 ms without. Under the full
+  // suite on a busy floor start() measured 93-189 ms (1.1.66 run), so 150 ms flaked; 400 ms still
+  // catches a start() that blocks (a synchronous handler launch or dump scan costs seconds).
+  assert.ok(median(cost) <= 400, `start() itself is cheap: ${JSON.stringify(cost)} ms`);
   assert.ok(median(on) - median(off) <= 500, `time-to-ready difference within run-to-run noise: with ${median(on)} vs without ${median(off)} ms`);
 });
