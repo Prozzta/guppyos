@@ -25,11 +25,19 @@ const NUDGE_HEAD = 'You have new hive inbox message(s)';
  * PURE ASCII (CODEX-WAKE-162): a TUI may drop characters it cannot echo. Codex's composer
  * dropped the em dash this text used to carry, so the owner's screen attestation never
  * matched its own stuck wake line (Jim, POST-INSTALL-161). Keep every character printable ASCII.
+ *
+ * SHORT (CODEX-BLOAT-165 fix 4): every nudge is a user turn, and Codex's compaction keeps user
+ * turns, so each one was re-sent on every later request of the thread (357 retained copies, about
+ * 43K tokens, in Dwight's). The fixed part is now 150 chars instead of 370; the standing rules it
+ * used to repeat (act autonomously, when to message god) are in the protocol already.
  */
 export function inboxNudgeText(ids: string[]): string {
   const named = ids.length ? ` - at least: ${ids.join(', ')}` : '';
-  return `${NUDGE_HEAD}${named}. Read your inbox, act on what is pending there, and move handled ones to inbox/.done/. Your inbox directory is authoritative: work everything still pending in it, and if a named id is already in inbox/.done/ you handled it on an earlier turn and can ignore that one. Act autonomously; only message god if you genuinely need a decision.`;
+  return `${NUDGE_HEAD}${named}. Read your inbox (authoritative; ids already in inbox/.done/ were handled), act, move handled ones to inbox/.done/.`;
 }
+
+/** The nudge without ids, for size checks (tests, docs). */
+export const INBOX_NUDGE_FIXED_CHARS = inboxNudgeText([]).length;
 
 /**
  * Is this queued text an inbox-wake nudge?

@@ -1643,7 +1643,7 @@ export class HiveManager {
     this.atomicWriteJson(cursorPath, cursor);
     this.appendLog({ kind: 'drain', agentId, count: fresh.length });
 
-    const lines = fresh.map((m) => `- [from ${m.from}, ${m.act}] ${m.subject}: ${m.body}`).join('\n');
+    const lines = drainLines(fresh, join(dir, 'inbox'));
     const reason = [
       `You have ${fresh.length} new hive message(s) in your inbox. Address them before finishing:`,
       lines,
@@ -3444,6 +3444,33 @@ export class HiveManager {
     renameSync(tmp, p);
   }
 
+}
+
+/** CODEX-BLOAT-165 fix 4: a drained message body longer than this is cut, with a pointer to its file. */
+export const DRAIN_BODY_MAX_CHARS = 2000;
+/** ...and once the drained text passes this, later messages are listed by subject and file only. */
+export const DRAIN_TOTAL_MAX_CHARS = 8000;
+
+/**
+ * The Stop-drain lines. A drain reason becomes model input (and, in a Codex thread, a retained
+ * turn), so it is bounded: each body is capped at DRAIN_BODY_MAX_CHARS and the whole list at
+ * about DRAIN_TOTAL_MAX_CHARS. Cut text is never lost: the line names the message file.
+ */
+export function drainLines(msgs: HiveMessage[], inboxDir: string): string {
+  const out: string[] = [];
+  let total = 0;
+  for (const m of msgs) {
+    const file = join(inboxDir, `${m.id}.json`);
+    const head = `- [from ${m.from}, ${m.act}] ${m.subject}`;
+    const body = String(m.body ?? '');
+    let line: string;
+    if (total >= DRAIN_TOTAL_MAX_CHARS) line = `${head} (body not shown; full message at ${file})`;
+    else if (body.length > DRAIN_BODY_MAX_CHARS) line = `${head}: ${body.slice(0, DRAIN_BODY_MAX_CHARS)}...(truncated; full message at ${file})`;
+    else line = `${head}: ${body}`;
+    total += line.length + 1;
+    out.push(line);
+  }
+  return out.join('\n');
 }
 
 // ─── PROTOCOL.md (written into the hive, readable by every agent) ────────────

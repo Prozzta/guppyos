@@ -219,8 +219,9 @@ test('Codex gap scales with the payload: 800 ms up to 200 chars, +2 ms per char,
   assert.equal(PA.automaticEnterGapMs('codex'), 800);
   assert.equal(PA.automaticEnterGapMs('codex', 12), 800);
   assert.equal(PA.automaticEnterGapMs('codex', 200), 800);
-  assert.equal(PA.automaticEnterGapMs('codex', REAL.length), 800 + (REAL.length - 200) * 2);
-  assert.ok(PA.automaticEnterGapMs('codex', REAL.length) >= 1_100, `the wake line waits ${PA.automaticEnterGapMs('codex', REAL.length)} ms`);
+  // CODEX-BLOAT-165 fix 4 shortened the wake line (~170 chars with one id), so it now takes the base gap.
+  assert.equal(PA.automaticEnterGapMs('codex', REAL.length), 800 + Math.max(0, REAL.length - 200) * 2);
+  assert.equal(PA.automaticEnterGapMs('codex', 350), 1_100, 'a 350-char payload waits 1.1 s');
   assert.equal(PA.automaticEnterGapMs('codex', 50_000), PA.CODEX_ENTER_GAP_MAX_MS);
   assert.equal(PA.automaticEnterGapMs('codex', NaN), 800);
   for (const p of ['claude', 'antigravity', 'gemini']) assert.equal(PA.automaticEnterGapMs(p, 5000), null, p);
