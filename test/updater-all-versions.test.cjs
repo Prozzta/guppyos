@@ -119,8 +119,8 @@ test('htmlToNoteText: atom HTML -> digestible text; markdown passes through unto
   const md = "## What's new\n\n- **bold** `code`";
   assert.equal(htmlToNoteText(md), md);
   assert.equal(htmlToNoteText(undefined), '');
-  const t = htmlToNoteText('<h1>Title</h1><p>Lead &lt;x&gt; &#x2014; ok</p><hr><h2>What&#39;s new</h2><ul>\n<li><strong>A</strong> one</li>\n<li>B&nbsp;two</li></ul><!-- drop --><script>bad()</script>');
-  assert.match(t, /^# Title\nLead <x> — ok/);
+  const t = htmlToNoteText('<h1>Title</h1><p>Lead a &lt; b &#x2014; ok</p><hr><h2>What&#39;s new</h2><ul>\n<li><strong>A</strong> one</li>\n<li>B&nbsp;two</li></ul><!-- drop --><script>bad()</script>');
+  assert.match(t, /^# Title\nLead a < b — ok/);
   assert.match(t, /## What's new\n\n- A one\n- B two/);
   assert.doesNotMatch(t, /bad\(\)|<\/?[a-z]|drop/);
   assert.deepEqual(summarizeReleaseNotes(t), ['A one', 'B two']);
