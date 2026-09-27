@@ -154,3 +154,30 @@ test('the badge and Settings render the ReleasePicker from releaseChoices', () =
   assert.match(picker, /i === 0 \? ' \(latest\)' : ''/);
   assert.match(picker, /summarizeReleaseNotes\(option\?\.notes\)/);
 });
+
+// RENDERED (hidden Electron window, test/electron-harness): the production badge and
+// Settings block, fed the Human's case. Launches a real, never-shown Electron process.
+test('RENDERED: badge and Settings offer 1.1.62/61/60, latest preselected, and download the one picked', async () => {
+  const { runScenario } = require('./electron-harness/run.cjs');
+  const r = await runScenario(path.join(__dirname, 'electron-harness', 'scenarios', 'update-picker.tsx'), { timeoutMs: 120_000 });
+  assert.equal(r.ok, true, `scenario failed: ${r.error ?? ''}`);
+  // A. badge
+  assert.equal(r.badge.openedAfterChipClick, 0, 'with 3 choices the chip opens the picker, it does not download');
+  assert.deepEqual(r.badge.options, ['v1.1.62 (latest)', 'v1.1.61', 'v1.1.60']);
+  assert.equal(r.badge.preselected, '1.1.62');
+  assert.match(r.badge.notesLatest, /only in 1\.1\.62/);
+  assert.match(r.badge.notesPicked, /only in 1\.1\.60/, 'the notes follow the selection');
+  assert.equal(r.badge.dlLabel, 'download v1.1.60');
+  assert.deepEqual(r.badge.opened, [`https://github.com/${REPO}/releases/download/v1.1.60/Munder-Difflin-1.1.60-win-x64-setup.exe`]);
+  // B. Settings
+  assert.equal(r.settings.hasSelect, true);
+  assert.equal(r.settings.nativeBtn, 'Download v1.1.62', 'the latest keeps the native download');
+  assert.equal(r.settings.downloadsAfterNative, 1);
+  assert.equal(r.settings.olderLabel, 'Download v1.1.61 installer');
+  assert.match(r.settings.settingsNotes, /only in 1\.1\.61/);
+  assert.deepEqual(r.settings.opened, [`https://github.com/${REPO}/releases/download/v1.1.61/Munder-Difflin-1.1.61-win-x64-setup.exe`]);
+  assert.equal(r.settings.downloadsAfterOlder, 1, 'an older pick never triggers the native (latest-only) download');
+  // C. one newer version: unchanged one-click download
+  assert.equal(r.single.hasSelect, false);
+  assert.equal(r.single.opened.length, 1);
+});
