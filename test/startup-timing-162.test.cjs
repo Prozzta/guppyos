@@ -424,3 +424,16 @@ test('R4: both timers are unref\'d (they never hold the process open)', () => {
   assert.equal(handles.length, 2, 'the sampler and the stop timer');
   assert.ok(handles.every((h) => h.unrefd), 'both unref\'d');
 });
+
+test('R1 (Jim, CUT-162-AUDIT): stop() flushes the final pty-bytes segment itself, even with no loop rows (no histogram)', () => {
+  const rows = [];
+  let now = 1_000;
+  const rec = new StartupTiming({ origin: 0, now: () => now, log: (x) => rows.push(x), histogram: () => null,
+    setTimeout: () => 1, clearTimeout: () => {} });
+  rec.start();
+  rec.ptyOutput('god', 42);
+  now = 2_500; rec.ptyOutput('god', 8);
+  rec.stop();
+  assert.deepEqual(rows.filter((x) => x.ev === 'pty-bytes'), [{ kind: 'startup-timing', ev: 'pty-bytes', id: 'god', t: 1000, stepMs: 1000, chars: [42, 8] }],
+    'the last seconds of output are not lost');
+});
