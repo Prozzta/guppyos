@@ -65,17 +65,28 @@ test('the no-node script explains the real problem instead of failing at it', ()
   assert.deepEqual(executable, [], `these would run on a machine with no node: ${executable}`);
 });
 
+// The POSIX script is multi-line, so these two pin the platform (the win32 script is ONE cmd.exe
+// line chained with &, checked by its own tests below). Unpinned, they tested the host's shape.
 test('the native rung actually runs, and says why it differs', () => {
-  const out = script('claude', false);
+  const out = script('claude', false, 'linux');
   assert.match(out, /no Node needed/);
-  const native = installInfoForProvider('claude').nativeCommand;
+  const native = installInfoForProvider('claude', 'linux').nativeCommand;
   assert.ok(out.split('\n').includes(native), 'the installer must be an executed line, not only echoed');
 });
 
 test('with npm present nothing mentions a missing Node', () => {
-  const out = script('claude', true);
+  const out = script('claude', true, 'linux');
   assert.doesNotMatch(out, /Node\.js is not installed/);
   assert.ok(out.split('\n').includes('npm install -g @anthropic-ai/claude-code'));
+});
+
+test('win32 twin: the native installer and the npm command are EXECUTED segments of the one cmd.exe line', () => {
+  const segs = (out) => out.split('&').map((s) => s.trim());
+  const native = installInfoForProvider('claude', 'win32').nativeCommand;
+  assert.ok(segs(script('claude', false, 'win32')).includes(native), 'the native installer runs');
+  const withNpm = script('claude', true, 'win32');
+  assert.doesNotMatch(withNpm, /Node\.js is not installed/);
+  assert.ok(segs(withNpm).includes('npm install -g @anthropic-ai/claude-code'), 'npm install runs');
 });
 
 test('the Windows script stays a single quote-free cmd.exe line', () => {

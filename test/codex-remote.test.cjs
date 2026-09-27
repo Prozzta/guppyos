@@ -20,6 +20,14 @@ test('Codex remote uses a short stable per-agent home alias', () => {
   assert.equal(first, again);
   assert.notEqual(first, other);
   assert.ok(first.length < 80);
+});
+
+test('Codex remote endpoint is a unix socket under the alias root (POSIX only)', {
+  // A unix-domain socket with a sun_path limit; the app never enables Codex remote on win32
+  // (enableCodexRemote returns false there), so there is no Windows endpoint to check.
+  skip: process.platform === 'win32' ? 'Codex remote is POSIX-only (disabled on win32)' : false
+}, () => {
+  const first = codexRemoteAliasPath('/very/long/hive/agent/.codex', 'dev-1', '/tmp');
   assert.match(codexRemoteEndpoint(first), /^unix:\/\/\/tmp\//);
 });
 

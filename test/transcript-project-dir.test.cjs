@@ -4,8 +4,8 @@
 // the dotted-path cases that the first version's dot-free fixtures could not
 // catch.
 //
-// POSIX-only: projectDir() resolves against os.homedir(), which these cases
-// redirect via $HOME — a knob Windows does not honour.
+// projectDir() resolves against os.homedir(): $HOME on POSIX, USERPROFILE on Windows. The
+// redirect sets both and asserts it took, so no case can read the real ~/.claude.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,13 +16,16 @@ const loadTs = require('./load-ts.cjs');
 
 const { projectDir } = loadTs('src/main/transcript.ts');
 
-/** projectDir() resolves against os.homedir(), which POSIX reads from $HOME — so
- *  each case gets a throwaway home and never touches the real ~/.claude. */
+/** projectDir() resolves against os.homedir() ($HOME on POSIX, USERPROFILE on Windows), so
+ *  each case gets a throwaway home, set in BOTH, and never touches the real ~/.claude. */
 function withHome(run) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-transcript-'));
   const prev = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
   process.env.HOME = home;
+  process.env.USERPROFILE = home;
   try {
+    assert.equal(os.homedir(), home, 'home redirect failed: refusing to touch the real ~/.claude');
     return run(home, (key) => {
       const dir = path.join(home, '.claude/projects', key);
       fs.mkdirSync(dir, { recursive: true });
@@ -31,6 +34,8 @@ function withHome(run) {
   } finally {
     if (prev === undefined) delete process.env.HOME;
     else process.env.HOME = prev;
+    if (prevProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevProfile;
     fs.rmSync(home, { recursive: true, force: true });
   }
 }
@@ -90,14 +95,19 @@ test('the dotted legacy twin loses to the dotted current spelling', () => {
   });
 });
 
-test('a legacy-only install still resolves, so old transcripts stay readable', () => {
+// The legacy spelling is a POSIX-only artefact (legacyProjectKey: on win32 the "legacy" key IS the
+// current key, since Windows never had the old spelling), so a legacy-ONLY fallback exists on POSIX
+// only. The win32 behaviour has its own test below.
+const POSIX_LEGACY = { skip: process.platform === 'win32' ? 'legacy key spelling is POSIX-only (win32 has none)' : false };
+
+test('a legacy-only install still resolves, so old transcripts stay readable', POSIX_LEGACY, () => {
   withHome((_home, mkProject) => {
     const legacy = mkProject('Users-me-app');
     assert.equal(projectDir('/Users/me/app'), legacy);
   });
 });
 
-test('a legacy-only install with dots resolves to its undashed twin', () => {
+test('a legacy-only install with dots resolves to its undashed twin', POSIX_LEGACY, () => {
   withHome((_home, mkProject) => {
     // The legacy key kept dots, so the fallback has to keep them too — deriving
     // it from the new key by stripping the leading dash would look for
@@ -128,5 +138,14 @@ test('a root cwd never resolves to the projects directory itself', () => {
     const resolved = projectDir('/');
     assert.notEqual(resolved, path.join(home, '.claude/projects'));
     assert.equal(path.basename(resolved), '-');
+  });
+});
+
+test('win32: there is no legacy spelling, so a POSIX-style twin is never picked and the current key is used', {
+  skip: process.platform === 'win32' ? false : 'win32-only behaviour'
+}, () => {
+  withHome((home, mkProject) => {
+    mkProject('Users-me-app'); // what the POSIX legacy key would have been
+    assert.equal(projectDir('/Users/me/app'), path.join(home, '.claude/projects', '-Users-me-app'));
   });
 });

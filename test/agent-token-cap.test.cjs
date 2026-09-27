@@ -37,7 +37,9 @@ test('consecutive agent caps survive an interleaved config update', () => {
     jim: 100,
     pam: 200
   });
-  assert.deepEqual(config.registeredRepos, ['/workspace/project']);
+  // Repos are stored ABSOLUTE (expandTilde -> path.resolve, 913b8ad8): on win32 '/workspace/project'
+  // is drive-relative and becomes '<drive>:\\workspace\\project'. The same normalisation, per platform.
+  assert.deepEqual(config.registeredRepos, [path.resolve('/workspace/project')]);
 });
 
 test('setting and clearing caps use the latest persisted map', () => {
