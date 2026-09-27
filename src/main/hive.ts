@@ -27,7 +27,7 @@ import { basename, join, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
-import { rolloverMemory } from './memoryRollover';
+import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, disableCodexPlugins, setCodexTopLevelKeys } from './codexAgentConfig';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
@@ -946,16 +946,30 @@ export class HiveManager {
 
     const memory = join(dir, 'memory.md');
     if (!existsSync(memory)) {
-      writeFileSync(memory, `# Memory — ${meta.name} (${meta.id})\n\n_Append durable facts, decisions, and context below._\n`, 'utf8');
+      writeFileSync(memory, `# Memory — ${meta.name} (${meta.id})\n\n_Append durable facts, decisions, and context below._\n\n${PINNED_SEED}`, 'utf8');
     } else {
+      // PINNED-MEMORY: seed an empty "## How I work (standing lessons)" section under the header
+      // (idempotent; an existing one is adopted). BEFORE the rollover, which keeps it at the top.
+      let pinnedBytes = 0;
+      try {
+        const sd = seedPinnedSection(dir);
+        pinnedBytes = sd.pinnedBytes;
+        if (sd.raced) this.appendLog({ kind: 'memory-pinned-seed-raced', agentId: meta.id });
+      } catch (e) { console.warn('[hive] memory pinned seed failed:', e); }
       // CODEX-BLOAT-165 fix 3: cap memory.md. Above MEMORY_ROLLOVER_BYTES the older part moves
       // to memory-archive-<date>.md (still indexed and searchable). At spawn, so no live
       // process of this agent is appending to it. Best-effort: never blocks a spawn.
       try {
         const r = rolloverMemory(dir);
+        if (r.pinnedBytes !== undefined) pinnedBytes = r.pinnedBytes;
         if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: meta.id, bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
         else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: meta.id, bytesBefore: r.bytesBefore });
+        else if (r.pinnedTooLarge) this.appendLog({ kind: 'memory-pinned-too-large', agentId: meta.id, pinnedBytes: r.pinnedBytes, bytesBefore: r.bytesBefore });
       } catch (e) { console.warn('[hive] memory rollover failed:', e); }
+      // Over the soft cap nothing is cut; the row (once per agent per day) makes it visible.
+      try {
+        if (pinnedBytes > PINNED_SOFT_CAP_BYTES && pinnedOverCapDue(dir)) this.appendLog({ kind: 'memory-pinned-over-cap', agentId: meta.id, pinnedBytes });
+      } catch (e) { console.warn('[hive] memory pinned cap check failed:', e); }
     }
     const cursor = join(dir, 'cursor.json');
     if (!existsSync(cursor)) this.writeJson(cursor, { lastProcessed: null });
@@ -1764,12 +1778,13 @@ export class HiveManager {
       'HIVE PROTOCOL — follow it every task:',
       // CODEX-BLOAT-165 fix 3: never "read memory.md" whole at every task start (it was 86K chars
       // for one agent, re-sent on every later request of the job). The digest, or its tail.
+      // PINNED-MEMORY: but first the standing method lessons, which the rollover never archives.
       semanticMemory
-        ? `1. At the START of a task, run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${inDir('memory.md')} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them). Then read EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`
-        : `1. At the START of a task, read the LAST ~40 lines of ${inDir('memory.md')} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed) and EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`,
-      `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}.`,
+        ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${inDir('memory.md')} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them). Then read EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`
+        : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then read the LAST ~40 lines of ${inDir('memory.md')} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed) and EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`,
+      `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead; keep that section under ~6 KB, merging and shortening lessons when it grows.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
-      '4. At the END of a task, append what you learned to memory.md so future-you remembers.',
+      '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
       guardrailsLine,
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
@@ -3580,9 +3595,12 @@ between agents.
 
 ## Your workspace — \`agents/<your-id>/\`
 - \`identity.md\`  — who you are (read-only; the harness writes it).
-- \`memory.md\`    — your long-term memory. At the start of a task run \`memory wake-up\` (semantic memory on)
-  or read only its last ~40 lines; never print it whole. Append to it as you learn. Above 32 KB the app moves
-  the older part to \`memory-archive-<date>.md\`, which \`memory search\` still finds.
+- \`memory.md\`    — your long-term memory. Its \`## How I work (standing lessons)\` section, at the top,
+  holds your METHOD lessons (how you work): read it at the start of every task, and put new method
+  lessons there, not dated facts (keep it under ~6 KB; merge and shorten lessons when it grows). Then
+  run \`memory wake-up\` (semantic memory on) or read only the last ~40 lines; never print it whole.
+  Append facts and decisions at the end as you learn. Above 32 KB the app moves the older part to
+  \`memory-archive-<date>.md\`, which \`memory search\` still finds; the standing lessons are never archived.
 - \`inbox/\`       — messages addressed to you. Read them at the start of a task.
 - \`inbox/.done/\` — move a message here once you've handled it.
 - \`outbox/\`      — drop messages here to send them. The harness delivers them.

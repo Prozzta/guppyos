@@ -200,3 +200,121 @@ test('seed: an append racing the seed aborts it (memory.md keeps the append, no 
   assert.equal(read(file), HEAD + notes(2) + '- LATE\n');
   assert.deepEqual(fs.readdirSync(dir), ['memory.md']);
 });
+
+// ── the spawn wiring and the protocol text (a real HiveManager, HOME redirected) ────────
+
+const { HiveManager } = loadTs('src/main/hive.ts');
+
+function sandbox(t, { live = false } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pin167-home-'));
+  const realHome = process.env.HOME; const realProfile = process.env.USERPROFILE;
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  t.after(() => {
+    if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+    if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
+  });
+  assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before constructing any hive');
+  fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.codex', 'auth.json'), '{"x":1}');
+  const hiveHome = path.join(home, 'harness');
+  const hive = live ? new HiveManager(() => hiveHome, undefined, {}, () => true) : new HiveManager(() => hiveHome);
+  const rows = [];
+  const realAppend = hive.appendLog.bind(hive);
+  hive.appendLog = (row) => { rows.push(row); return realAppend(row); };
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  return { home, hive, rows, agentDir: (id) => path.join(hiveHome, 'hive', 'agents', id) };
+}
+const promptOf = (inj) => inj.args[inj.args.indexOf('--append-system-prompt') + 1];
+const line = (p, n) => p.split('\n').find((l) => l.startsWith(`${n}. `));
+const NAMES_SECTION = /read the `## How I work \(standing lessons\)` section at the top of .*memory\.md/;
+
+test('protocol (Claude, semantic memory and not): line 1 first reads the section; the record steps put METHOD lessons there', async (t) => {
+  const s = sandbox(t);
+  for (const semanticMemory of [true, false]) {
+    const inj = await s.hive.ensureAgent({ id: `jim-${semanticMemory}`, name: 'Jim', provider: 'claude', cwd: s.home }, { semanticMemory });
+    const p = promptOf(inj);
+    const l1 = line(p, 1);
+    assert.match(l1, NAMES_SECTION);
+    assert.ok(l1.indexOf('How I work') < l1.indexOf(semanticMemory ? 'memory wake-up' : 'LAST ~40 lines'), 'the section comes first');
+    assert.match(line(p, 2), /METHOD lessons .* `## How I work \(standing lessons\)` section .*under ~6 KB.*merging and shortening/);
+    assert.match(line(p, 4), /METHOD lessons in its `## How I work \(standing lessons\)` section, facts and decisions appended at the end/);
+  }
+  const proto = read(path.join(s.home, 'harness', 'hive', 'PROTOCOL.md'));
+  assert.match(proto, /`## How I work \(standing lessons\)` section, at the top/);
+  assert.match(proto, /under ~6 KB/);
+  assert.match(proto, /never archived/);
+});
+
+test('protocol (Codex developer_instructions, AGY agent.md): the same line 1 names the section; Codex text is stable across spawns', async (t) => {
+  const s = sandbox(t, { live: true });
+  const inj = await s.hive.ensureAgent({ id: 'dw-1', name: 'Dwight', provider: 'codex', cwd: s.home }, { semanticMemory: true });
+  const cfg = require('toml').parse(read(path.join(inj.env.CODEX_HOME, 'config.toml')));
+  assert.match(line(cfg.developer_instructions, 1), NAMES_SECTION);
+  // A section edit between spawns does not change developer_instructions (prompt-cache stable).
+  fs.appendFileSync(path.join(s.agentDir('dw-1'), 'memory.md'), '\n' + PIN);
+  const inj2 = await s.hive.ensureAgent({ id: 'dw-1', name: 'Dwight', provider: 'codex', cwd: s.home }, { semanticMemory: true });
+  const cfg2 = require('toml').parse(read(path.join(inj2.env.CODEX_HOME, 'config.toml')));
+  assert.equal(cfg2.developer_instructions, cfg.developer_instructions);
+  assert.doesNotMatch(cfg2.developer_instructions, /Cite only URLs|_Your method lessons/, 'the section itself is not copied in');
+
+  await s.hive.ensureAgent({ id: 'ph-1', name: 'Phyllis', provider: 'antigravity', cwd: s.home });
+  const md = read(path.join(s.home, '.gemini', 'config', 'agents', 'munder-ph-1', 'agent.md'));
+  assert.match(line(md, 1), NAMES_SECTION);
+});
+
+test('spawn: a new memory.md starts with the seeded section; an old one is seeded once (idempotent across spawns)', async (t) => {
+  const s = sandbox(t);
+  await s.hive.ensureAgent({ id: 'new-1', name: 'Nia', provider: 'claude', cwd: s.home });
+  const fresh = read(path.join(s.agentDir('new-1'), 'memory.md'));
+  assert.equal(fresh, '# Memory — Nia (new-1)\n\n_Append durable facts, decisions, and context below._\n\n' + M.PINNED_SEED);
+
+  const dir = s.agentDir('old-1');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'memory.md'), HEAD + notes(3));
+  await s.hive.ensureAgent({ id: 'old-1', name: 'Olga', provider: 'claude', cwd: s.home });
+  const once = read(path.join(dir, 'memory.md'));
+  assert.equal(once, HEAD + '\n' + M.PINNED_SEED + notes(3));
+  await s.hive.ensureAgent({ id: 'old-1', name: 'Olga', provider: 'claude', cwd: s.home });
+  assert.equal(read(path.join(dir, 'memory.md')), once);
+});
+
+test('spawn: an existing heading (Phyllis, after the pointer) is adopted, then moved to the top by the rollover; never archived', async (t) => {
+  const s = sandbox(t);
+  const dir = s.agentDir('ph-2');
+  fs.mkdirSync(dir, { recursive: true });
+  const pointer = '_Older notes are archived in memory-archive-2026-09-27.md (and earlier memory-archive-*.md files); `memory search` finds them._\n';
+  fs.writeFileSync(path.join(dir, 'memory.md'), HEAD + '\n' + pointer + '\n' + PIN + notes(60).slice(1));
+  await s.hive.ensureAgent({ id: 'ph-2', name: 'Phyllis', provider: 'claude', cwd: s.home });
+  const kept = read(path.join(dir, 'memory.md'));
+  assert.equal(kept.split('## How I work (standing lessons)').length - 1, 1, 'no second heading');
+  assert.ok(kept.startsWith(HEAD + '\n' + PIN + '_Older notes are archived in '), kept.slice(0, 300));
+  assert.doesNotMatch(archives(dir), /Cite only URLs/);
+  assert.ok(s.rows.some((r) => r.kind === 'memory-rollover' && r.agentId === 'ph-2'));
+});
+
+test('spawn: over 6 KB logs memory-pinned-over-cap once a day (record in the agent dir), nothing cut; over 24 KB logs memory-pinned-too-large, no rollover', async (t) => {
+  const s = sandbox(t);
+  const dir = s.agentDir('ov-1');
+  fs.mkdirSync(dir, { recursive: true });
+  const over6 = '## How I work (standing lessons)\n' + ('- ' + 'm'.repeat(98) + '\n').repeat(80) + '\n';
+  fs.writeFileSync(path.join(dir, 'memory.md'), HEAD + '\n' + over6 + notes(3).slice(1));
+  await s.hive.ensureAgent({ id: 'ov-1', name: 'Ovid', provider: 'claude', cwd: s.home });
+  await s.hive.ensureAgent({ id: 'ov-1', name: 'Ovid', provider: 'claude', cwd: s.home });
+  const cap = s.rows.filter((r) => r.kind === 'memory-pinned-over-cap');
+  assert.equal(cap.length, 1, 'logged once');
+  assert.equal(cap[0].agentId, 'ov-1');
+  assert.equal(cap[0].pinnedBytes, Buffer.byteLength(over6));
+  assert.ok(fs.existsSync(path.join(dir, M.PINNED_OVER_CAP_DAY_FILE)), 'the day record is in the agent dir');
+  assert.ok(read(path.join(dir, 'memory.md')).includes(over6), 'not truncated');
+
+  const dir2 = s.agentDir('ov-2');
+  fs.mkdirSync(dir2, { recursive: true });
+  const over24 = '## How I work (standing lessons)\n' + ('- ' + 'h'.repeat(98) + '\n').repeat(260) + '\n';
+  const text = HEAD + '\n' + over24 + notes(60).slice(1);
+  fs.writeFileSync(path.join(dir2, 'memory.md'), text);
+  await s.hive.ensureAgent({ id: 'ov-2', name: 'Oona', provider: 'claude', cwd: s.home });
+  const big = s.rows.find((r) => r.kind === 'memory-pinned-too-large');
+  assert.ok(big && big.agentId === 'ov-2' && big.pinnedBytes > M.PINNED_HARD_CAP_BYTES, JSON.stringify(big));
+  assert.ok(!s.rows.some((r) => r.kind === 'memory-rollover' && r.agentId === 'ov-2'), 'no rollover');
+  assert.equal(read(path.join(dir2, 'memory.md')), text, 'memory.md untouched');
+});
