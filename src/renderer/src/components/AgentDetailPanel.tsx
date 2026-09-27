@@ -10,6 +10,7 @@ import { CommandCenterPanel } from './CommandCenterPanel';
 import { disposeTerminal } from './terminalPool';
 import { SidebarTabs } from './SidebarTabs';
 import { ThreadsPanel } from './ThreadsPanel';
+import { HistoryView } from './HistoryView';
 import { ToolWaterfall } from './ToolWaterfall';
 import { AgentControlStrip } from './AgentControlStrip';
 import { EditAgentModal } from './EditAgentModal';
@@ -279,6 +280,10 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
               This agent has no live terminal. Spawn an agent through "add agent" to use the terminal tab.
             </EmptyTab>
           )
+        )}
+
+        {sidebarTab === 'history' && (
+          <HistoryView agentId={agent.id} />
         )}
 
         {sidebarTab === 'git' && (

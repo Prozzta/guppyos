@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { type SidebarTab } from '@/store/store';
 import { type AccentColorName } from '@/design/tokens';
 import { Icon, type IconName } from './Icon';
@@ -6,6 +7,9 @@ import { Icon, type IconName } from './Icon';
 // full Monaco editor + file tree, which superseded the read-only browser.
 const TABS: { key: SidebarTab; label: string; icon: IconName }[] = [
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
+  // HISTORY-VIEW-169: the conversation from the provider's own transcript (the terminal's
+  // scrollback is frames and replays, not a record).
+  { key: 'history',  label: 'history',  icon: 'clock' },
   { key: 'git',      label: 'git',      icon: 'code' },
   { key: 'messages', label: 'messages', icon: 'bell' },
   { key: 'traces',   label: 'traces',   icon: 'web' }
@@ -17,9 +21,25 @@ export interface SidebarTabsProps {
   onChange: (tab: SidebarTab) => void;
 }
 
+/** Below this width the inactive tabs drop their words and keep their icons (the tip and
+ *  aria-label still name them). Five labelled tabs need ~510px; the default sidebar is 420. */
+export const TABS_COMPACT_BELOW = 520;
+
 export function SidebarTabs({ current, accent, onChange }: SidebarTabsProps) {
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      if (w > 0) setCompact(w < TABS_COMPACT_BELOW);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   return (
-    <div style={{
+    <div ref={rowRef} style={{
       display: 'flex',
       gap: 0,
       background: 'var(--cth-cream-200)',
@@ -32,8 +52,11 @@ export function SidebarTabs({ current, accent, onChange }: SidebarTabsProps) {
           <button
             key={t.key}
             onClick={() => onChange(t.key)}
+            title={t.label}
+            aria-label={t.label}
             style={{
-              flex: 1,
+              flex: compact && !active ? '0 1 auto' : 1,
+              minWidth: 0,
               height: 36,
               padding: '0 10px',
               border: 'none',
@@ -52,7 +75,7 @@ export function SidebarTabs({ current, accent, onChange }: SidebarTabsProps) {
               gap: 6
             }}
           >
-            <Icon name={t.icon} /> {t.label.toUpperCase()}
+            <Icon name={t.icon} />{compact && !active ? null : ` ${t.label.toUpperCase()}`}
           </button>
         );
       })}
