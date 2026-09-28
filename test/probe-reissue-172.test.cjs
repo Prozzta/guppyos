@@ -22,7 +22,7 @@ const { readSource: read } = require('./read-source.cjs');
 const { CapacityRuntime } = loadTs('src/main/capacityRuntime.ts');
 const { ADMISSION_REASON, probeReissueBackoffMs, PROBE_REISSUE_CAP_MS } = loadTs('src/main/capacityAdmission.ts');
 const { ProviderCapacityTracker, L0_SEM_POLICY } = loadTs('src/main/providerCapacityTracker.ts');
-const { CapacityProbeWatch, lastVisibleLine, PROBE_NO_TURN_WAIT_MS } = loadTs('src/main/capacityProbeWatch.ts');
+const { CapacityProbeWatch, lastVisibleLine, redactTail, PROBE_NO_TURN_WAIT_MS } = loadTs('src/main/capacityProbeWatch.ts');
 
 const Z = (iso) => Date.parse(iso);
 const POOL = 'codex:acct-d:codex';
@@ -195,4 +195,28 @@ test('WIRING: hooks stamp hookSeenAt; the runtime reports launches to the watch;
   const pty = read('src/main/pty.ts');
   assert.match(pty, /session\.tail = \(session\.tail \+ data\)\.slice\(-PTY_TAIL_CHARS\);/);
   assert.match(pty, /export const PTY_TAIL_CHARS = 4096;/);
+});
+
+test('B / NIT 1: the logged tail line is REDACTED (log.jsonl is read by every agent)', () => {
+  const r = watchRig({ hookAt: undefined, tail: '\x1b[2K\r\u203a export OPENAI_API_KEY=sk-proj-AbCdEf0123456789xyzXYZ and Bearer abcdefgh12345678 ghp_0123456789abcdefghij0123 then c2VjcmV0LXRva2VuLXRoYXQtaXMtbG9uZy1lbm91Z2gtdG8tbWF0dGVy' });
+  r.watch.launched({ agentId: 'a', poolKey: POOL, attempt: 0 });
+  r.run();
+  const tail = r.logs[0].tail;
+  for (const secret of ['sk-proj-AbCdEf0123456789xyzXYZ', 'abcdefgh12345678', 'ghp_0123456789abcdefghij0123', 'c2VjcmV0LXRva2VuLXRoYXQtaXMtbG9uZy1lbm91Z2gtdG8tbWF0dGVy']) {
+    assert.ok(!tail.includes(secret), `leaked ${secret}: ${tail}`);
+  }
+  assert.match(tail, /\[redacted\]/);
+  assert.equal(redactTail('\u203a Working (12s \u2022 esc to interrupt)'), '\u203a Working (12s \u2022 esc to interrupt)', 'ordinary text survives');
+  assert.equal(redactTail(null), null);
+});
+
+test('NIT 3: a repeated confirm of the same grant does NOT restart its backoff', () => {
+  const w = world();
+  w.runtime.ingest('dwight-mu32ztys', dwightReading());
+  w.to('2026-09-28T03:03:18Z');
+  const d = w.wake(); // granted and confirmed at 03:03:18
+  w.to('2026-09-28T03:08:00Z');
+  w.runtime.confirmLaunch(d); // e.g. "already handled" after the launch was confirmed
+  w.to('2026-09-28T03:13:18Z');
+  assert.equal(w.wake().probeAttempt, 1, 'the backoff counts from the FIRST confirmation');
 });

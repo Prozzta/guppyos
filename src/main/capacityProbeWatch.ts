@@ -11,7 +11,20 @@
  * idle time. The next occurrence explains itself. Diagnostics only: it decides nothing and
  * re-issues nothing (the admission backoff does that).
  */
+import { redactSecrets } from './hive';
+
 export const PROBE_NO_TURN_WAIT_MS = 2 * 60_000;
+
+/**
+ * PROBE-172-AUDIT NIT 1 (Andy): the tail line goes to log.jsonl, which every agent reads, and it can
+ * be the composer's contents or anything a CLI printed. So: the hive's own secret-shape battery
+ * (redactSecrets: provider keys, JWTs, PEM, Bearer, key=value), plus any 32+ character
+ * base64/hex-like run. Over-redaction (a git SHA) is fine for a diagnostic line.
+ */
+export function redactTail(line: string | null): string | null {
+  if (!line) return line;
+  return redactSecrets(line).replace(/[A-Za-z0-9+/_=-]{32,}/g, '[redacted]');
+}
 
 export interface ProbeWatchDeps {
   now: () => number;
@@ -39,7 +52,7 @@ export class CapacityProbeWatch {
         this.deps.log({
           kind: 'capacity-probe-no-turn', agentId: probe.agentId, poolKey: probe.poolKey, attempt: probe.attempt,
           waitedMs: this.deps.now() - launchedAt, lastHookAgoMs: hookAt !== undefined ? this.deps.now() - hookAt : null,
-          ptyIdleMs: this.deps.idleMs(probe.agentId) ?? null, tail: this.deps.tailLine(probe.agentId)
+          ptyIdleMs: this.deps.idleMs(probe.agentId) ?? null, tail: redactTail(this.deps.tailLine(probe.agentId))
         });
       } catch { /* diagnostics never break anything */ }
     }, waitMs);
