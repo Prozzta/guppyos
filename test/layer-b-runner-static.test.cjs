@@ -271,9 +271,13 @@ test('SOURCE: no --force worktree removal (node_modules goes first), no fixed ca
   assert.equal(lb.GLOBAL_WALL_MS, 55 * 60_000, 'under the heavy lock\'s 60 min TTL');
 });
 
-test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confirmed AND --uac-risk-accepted; the DRY run starts no codex binary', () => {
+test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confirmed AND --uac-risk-accepted; the DRY run starts no codex binary', (t) => {
   const prev = process.env.LAYERB_SOAK;
   process.env.LAYERB_SOAK = '1';
+  // From an agent shell the runner's own env check (HIVE_NODE ...) would refuse first: scrub those here.
+  const scrubbed = {};
+  for (const k of Object.keys(process.env)) if (/^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_)/i.test(k)) { scrubbed[k] = process.env[k]; delete process.env[k]; }
+  t.after(() => Object.assign(process.env, scrubbed));
   try {
     const pre = (argv) => { const r = new lb.LayerB(lb.parseArgs(argv)); r.layout(); return () => r.preflight(); };
     assert.throws(pre(['--go']), /--floor-paused-confirmed/);
@@ -298,11 +302,11 @@ test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) star
   const main = src.slice(src.indexOf('async main() {'), src.indexOf('/** R1: the Codex agent really runs'));
   const watchAt = main.indexOf('this.sessionWatch = new WindowWatch(process.pid');
   assert.ok(watchAt > 0);
-  for (const step of ['sweepStale(', 'this.codexSandboxHelp()', 'this.build()', 'this.seed()', 'this.installCredentials()', 'this.proveClaudeJail()', 'this.proveCodexSandbox()', 'this.launch(']) {
+  for (const step of ['this.startupSweep()', 'this.codexSandboxHelp()', 'this.build()', 'this.seed()', 'this.installCredentials()', 'this.proveClaudeJail()', 'this.proveCodexSandbox()', 'this.launch(']) {
     const at = main.indexOf(step);
     assert.ok(at > watchAt, `${step} comes after the session watch starts`);
   }
-  assert.ok(main.indexOf("waitFor('the session window watch reports'") < main.indexOf('sweepStale('), 'and it has reported before anything runs');
+  assert.ok(main.indexOf("waitFor('the session window watch reports'") < main.indexOf('this.startupSweep()'), 'and it has reported before anything runs');
   // Nothing in main before the watch spawns.
   const before = main.slice(0, watchAt);
   assert.ok(!/spawn|this\.build|this\.launch|codexSandboxHelp|prove/.test(before.replace('this.preflight()', '')));
@@ -373,10 +377,11 @@ test('R4 FAIL-CLOSED (Dwight a): an injected shred failure KEEPS the stale dir, 
   assert.equal(fs.existsSync(cred), true, 'the evidence of the failure stays');
   // A shred that "succeeds" but leaves the file is a failure too; so is a removal that leaves the dir.
   assert.equal(lb.sweepStale(tmp, null, { shred: () => true, rm: () => {} }).ok, false);
-  // main: a failed sweep throws BEFORE build() and installCredentials().
+  // main: the sweep (which throws when not ok) runs BEFORE build() and installCredentials().
   const main = src.slice(src.indexOf('async main() {'));
-  const thr = main.indexOf("if (!sweep.ok) throw new Error(");
+  const thr = main.indexOf('sweep = this.startupSweep();');
   assert.ok(thr > 0 && thr < main.indexOf('this.build()') && thr < main.indexOf('this.installCredentials()'));
+  { const m = src.slice(src.indexOf('startupSweep(ops) {')); assert.ok(m.indexOf("if (!sweep.ok) throw new Error('the startup sweep could not prove") > 0 && m.indexOf("if (!sweep.ok) throw") < 600, 'startupSweep throws when not ok'); }
 });
 
 test('R3: a FAILED scan is a failure (never a vacuous "all gone"); the fallback kills only roots whose handle is still open', async (t) => {
@@ -493,6 +498,96 @@ test('decision 5: a real-credential change during the run is INCONCLUSIVE with a
   c3.deleteAll();
   assert.equal(c3.verifyRealUnchanged()[0].verdict, 'UNCHANGED');
   assert.match(src, /this\.check\(c\.verdict !== 'FAIL', `credentials: the REAL \$\{c\.label\} file/);
+});
+
+test('R4 FAIL-CLOSED on TRAVERSAL (Dwight x2): a root readdir, an lstat or a nested readdir failure keeps everything and aborts before the build and any credential copy', (t) => {
+  const mkStale = () => {
+    const tmp = tmpRoot(t, 'md-lb-sweeptrav-');
+    const stale = path.join(tmp, 'md-layerb-2026-09-03T10-00-00-000Z');
+    const cred = path.join(stale, 'jail', 'home', '.claude', '.credentials.json');
+    fs.mkdirSync(path.dirname(cred), { recursive: true });
+    fs.writeFileSync(cred, 'secret');
+    return { tmp, stale, cred };
+  };
+  const real = (d) => fs.readdirSync(d, { withFileTypes: true });
+  const injections = {
+    'root readdir': (x) => ({ readdir: (d) => { if (path.resolve(d) === path.resolve(x.tmp)) throw new Error('EACCES (injected root)'); return real(d); } }),
+    'lstat': () => ({ lstat: () => { throw new Error('EPERM (injected lstat)'); } }),
+    'nested readdir': (x) => ({ readdir: (d) => { if (path.resolve(d) === path.resolve(path.join(x.stale, 'jail'))) throw new Error('EIO (injected nested)'); return real(d); } })
+  };
+  for (const [name, inject] of Object.entries(injections)) {
+    const x = mkStale();
+    let shredCalls = 0; let rmCalls = 0;
+    const ops = { ...inject(x), shred: () => { shredCalls++; return true; }, rm: () => { rmCalls++; } };
+    const r = lb.sweepStale(x.tmp, null, ops);
+    assert.equal(r.ok, false, `${name}: not clean`);
+    assert.match(r.done.map((d) => d.error).join(' '), /injected/, `${name}: the error is reported`);
+    assert.equal(rmCalls, 0, `${name}: nothing removed`);
+    assert.equal(shredCalls, 0, `${name}: nothing shredded from an incomplete listing`);
+    assert.equal(fs.existsSync(x.cred), true, `${name}: the stale credential and its dir stay`);
+    // The run method throws: main calls it inside its try, BEFORE the build and the credential copy.
+    const run = new lb.LayerB(lb.parseArgs([]));
+    run.s = { base: path.join(x.tmp, 'md-layerb-current') };
+    const origTmp = os.tmpdir;
+    os.tmpdir = () => x.tmp;
+    try { assert.throws(() => run.startupSweep(ops), /could not prove the stale credentials gone/, `${name}: startupSweep aborts`); }
+    finally { os.tmpdir = origTmp; }
+    assert.equal(run.checks.some((c) => !c.ok && /startup sweep/.test(c.label)), true);
+  }
+  const main = src.slice(src.indexOf('async main() {'));
+  const at = main.indexOf('sweep = this.startupSweep();');
+  assert.ok(at > 0 && at < main.indexOf('this.build()') && at < main.indexOf('this.installCredentials()') && at < main.indexOf('this.codexSandboxHelp()'));
+  assert.ok(at > main.indexOf('try {'), 'inside the try: the teardown still runs');
+  // The sweep has no catch that continues silently.
+  const sw = src.slice(src.indexOf('function sweepStale('), src.indexOf('class LiveWatch {'));
+  assert.ok(!/catch \{\s*(continue|return[^;]*ok: true)/.test(sw), 'no silent skip or clean return on an error');
+  assert.ok(!/walk\(/.test(sw), 'the lenient walk() helper is not used by the sweep');
+});
+
+test('the other swallowing catches fail closed: an unreadable live location, an unreadable real credential, an unreadable token source', (t) => {
+  // Live watch: a root that exists but cannot be listed is a FAILURE, not an empty (clean) listing.
+  const root = tmpRoot(t, 'md-lb-livefail-');
+  const w = new lb.LiveWatch([root], []).start();
+  const orig = fs.readdirSync;
+  fs.readdirSync = (d, ...rest) => { if (path.resolve(String(d)) === path.resolve(root)) { const e = new Error('EACCES (injected)'); e.code = 'EACCES'; throw e; } return orig.call(fs, d, ...rest); };
+  let r;
+  try { r = w.compare(['lb-claude']); } finally { fs.readdirSync = orig; }
+  assert.equal(r.ok, false);
+  assert.match(r.failures.join(' '), /cannot stat\/hash a live location/);
+  // A MISSING live root (MunderDevData may not exist) is not an error.
+  const w2 = new lb.LiveWatch([path.join(root, 'absent')], [path.join(root, 'absent.json')]).start();
+  assert.equal(w2.compare(['x']).ok, true);
+  // The real credential unreadable at the end: FAIL, never "inconclusive" or "unchanged".
+  const c = new lb.Credentials();
+  const realF = path.join(root, 'real.json');
+  fs.writeFileSync(realF, '{}');
+  c.copy('codex', realF, path.join(root, 'jail', 'auth.json'));
+  c.deleteAll();
+  fs.rmSync(realF);
+  assert.equal(c.verifyRealUnchanged()[0].verdict, 'FAIL');
+  // A token source that exists but cannot be read ABORTS (it would otherwise count as 0 tokens).
+  const run = new lb.LayerB(lb.parseArgs([]));
+  const dir = path.join(root, 'ledger-is-a-dir.jsonl');
+  fs.mkdirSync(dir);
+  assert.deepEqual(run.tokenLines(dir), []);
+  assert.equal(run.aborted(), true);
+  assert.match(String(run.abort.signal.reason.message), /cannot read the token source/);
+  assert.deepEqual(new lb.LayerB(lb.parseArgs([])).tokenLines(path.join(root, 'absent.jsonl')), [], 'a missing source is simply empty');
+});
+
+test('J1/J2 wiring: the runner narrows the Claude jail roots and keeps both credential copies outside every read root', () => {
+  assert.match(src, /this\.jailRoots = \{ readRoots: \[claude\.cwd, claude\.dir\], writeRoots: \[claude\.cwd, path\.join\(claude\.dir, 'outbox'\)\] \};/);
+  assert.match(src, /protectPaths: \[s\.jail, codexDir, this\.jailPolicy, this\.jailLog, s\.stubs, path\.join\(s\.hive, 'state'\)\]/);
+  assert.match(src, /if \(inside\(c\.dest, r\)\) throw new Error\(`the \$\{c\.label\} credential copy/);
+  // Where the copies go (jail home; the Codex agent's own home) is outside both read roots by layout.
+  const home = 'C:\\sb\\jail\\home'; const work = 'C:\\sb\\work\\lb-claude'; const cdir = 'C:\\sb\\devroot\\hive\\agents\\lb-claude';
+  for (const cred of [path.join(home, '.claude', '.credentials.json'), 'C:\\sb\\devroot\\hive\\agents\\lb-codex\\.codex\\auth.json']) {
+    assert.equal(lb.inside(cred, work) || lb.inside(cred, cdir), false, cred);
+  }
+  // The installed-hook proof covers J1/J2 too.
+  const proof = src.slice(src.indexOf('proveClaudeJail() {'), src.indexOf('codexSandboxHelp() {'));
+  assert.match(proof, /'deny', \{ tool_name: 'Grep', tool_input: \{ pattern: 'refresh_token', path: this\.s\.base \} \}/);
+  assert.match(proof, /'deny', \{ tool_name: 'Write', tool_input: \{ file_path: path\.join\(claude\.dir, 'inbox', 'forged\.json'\)/);
 });
 
 test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {

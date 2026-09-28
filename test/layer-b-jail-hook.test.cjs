@@ -27,15 +27,25 @@ function sandbox(t) {
   const work = path.join(base, 'work', 'lb-claude');
   const agent = path.join(base, 'devroot', 'hive', 'agents', 'lb-claude');
   const home = path.join(base, 'jail', 'home');
-  for (const d of [work, path.join(agent, 'outbox'), path.join(home, '.claude')]) fs.mkdirSync(d, { recursive: true });
+  const codexAgent = path.join(base, 'devroot', 'hive', 'agents', 'lb-codex');
+  for (const d of [work, path.join(agent, 'outbox'), path.join(agent, 'inbox', '.done'), path.join(home, '.claude'), path.join(codexAgent, '.codex'), path.join(base, 'devroot', 'hive', 'state', 'mail')]) fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(work, 'b3-bulk.txt'), 'line 1\n');
-  const policy = {
-    writeRoots: [work, agent], readRoots: [base], home,
-    protect: ['.claude', '.codex', '.claude.json', '.credentials.json', 'auth.json', 'settings.json', 'settings.local.json', 'layer-b-jail-policy.json']
-  };
+  fs.writeFileSync(path.join(agent, 'memory.md'), '# lb-claude\n');
+  // The two OAuth copies, where the runner puts them (decoys here).
+  const claudeCred = path.join(home, '.claude', '.credentials.json');
+  const codexCred = path.join(codexAgent, '.codex', 'auth.json');
+  fs.writeFileSync(claudeCred, '{"refresh_token":"decoy"}');
+  fs.writeFileSync(codexCred, '{"refresh_token":"decoy"}');
   const policyFile = path.join(base, 'layer-b-jail-policy.json');
+  // J1/J2 (Jim): read = the work dir + the agent dir; write = the work dir + the outbox; the concrete
+  // protected paths are the jailed home, the Codex agent dir and the policy.
+  const policy = {
+    writeRoots: [work, path.join(agent, 'outbox')], readRoots: [work, agent], home,
+    protect: ['.claude', '.codex', '.claude.json', '.credentials.json', 'auth.json', 'settings.json', 'settings.local.json', 'layer-b-jail-policy.json'],
+    protectPaths: [home, codexAgent, policyFile]
+  };
   fs.writeFileSync(policyFile, JSON.stringify(policy));
-  return { base, work, agent, home, policy, policyFile };
+  return { base, work, agent, home, codexAgent, claudeCred, codexCred, policy, policyFile };
 }
 const pay = (tool, input, cwd) => ({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, cwd });
 const denied = (s, tool, input, cwd = s.work) => decide(pay(tool, input, cwd), s.policy);
@@ -126,7 +136,7 @@ test('DENY inside the sandbox: the jail\'s own files and anything outside the tw
     assert.ok(denied(s, 'Write', { file_path: p, content: 'x' }), `Write ${p}`);
     assert.ok(denied(s, 'Read', { file_path: p }), `Read ${p}`);
   }
-  assert.ok(denied(s, 'Write', { file_path: path.join(s.base, 'devroot', 'hive', 'registry.json'), content: 'x' }), 'readable, not writable');
+  assert.ok(denied(s, 'Write', { file_path: path.join(s.base, 'devroot', 'hive', 'registry.json'), content: 'x' }), 'not writable');
   assert.ok(denied(s, 'Edit', { file_path: path.join(s.base, 'devroot', 'hive', 'agents', 'god', 'inbox', 'x.json'), old_string: 'a', new_string: 'b' }));
 });
 
@@ -134,7 +144,7 @@ test('ALLOW: exactly what the layer-(b) facts need (read its files, write its ou
   const s = sandbox(t);
   assert.equal(denied(s, 'Write', { file_path: path.join(s.agent, 'outbox', 'r1.json'), content: '{}' }), null, 'the outbox reply');
   assert.equal(denied(s, 'Write', { file_path: 'notes.txt', content: 'x' }), null, 'relative to its cwd');
-  assert.equal(denied(s, 'Edit', { file_path: path.join(s.agent, 'memory.md'), old_string: 'a', new_string: 'b' }), null);
+  assert.equal(denied(s, 'Edit', { file_path: path.join(s.work, 'notes.txt'), old_string: 'a', new_string: 'b' }), null);
   assert.equal(denied(s, 'MultiEdit', { file_path: path.join(s.work, 'x.txt'), edits: [] }), null);
   assert.equal(denied(s, 'Read', { file_path: path.join(s.work, 'b3-bulk.txt'), offset: 1, limit: 300 }), null);
   assert.equal(denied(s, 'Read', { file_path: path.join(s.base, 'devroot', 'hive', 'agents', 'lb-claude', 'memory.md') }), null);
@@ -163,4 +173,57 @@ test('END TO END: the real hook script exits 2 (deny) for Jim\'s escapes and 0 (
   assert.equal(run('not json').status, 2, 'unparseable payload: deny');
   assert.equal(run('{}', path.join(s.base, 'missing.json')).status, 2, 'missing policy: deny');
   assert.equal(fs.existsSync('C:\\Dunder\\hive\\PWNED.txt'), false);
+});
+
+test('J1 (Jim probe2): no search can reach an OAuth copy, whatever its root, default path or pattern', (t) => {
+  const s = sandbox(t);
+  const cases = [
+    ['Grep', { pattern: 'refresh_token', path: s.base }, s.work],
+    ['Grep', { pattern: 'refresh_token' }, s.base],
+    ['Grep', { pattern: 'refresh_token' }, s.home],
+    ['Grep', { pattern: 'refresh_token', path: s.home }, s.work],
+    ['Grep', { pattern: 'refresh_token', path: path.join(s.base, 'devroot') }, s.work],
+    ['Glob', { pattern: '**/auth.json', path: s.base }, s.work],
+    ['Glob', { pattern: '**/auth.json' }, s.base],
+    ['Glob', { pattern: '**/.credentials.json', path: path.join(s.home, '..') }, s.work],
+    ['LS', { path: s.codexAgent }, s.work],
+    ['LS', { path: path.join(s.codexAgent, '.codex') }, s.work],
+    ['LS', { path: path.join(s.base, 'devroot', 'hive', 'agents') }, s.work],
+    ['Read', { file_path: s.codexCred }, s.work],
+    ['Read', { file_path: s.claudeCred }, s.work]
+  ];
+  for (const [tool, input, cwd] of cases) assert.ok(denied(s, tool, input, cwd), `${tool} ${JSON.stringify(input)} (cwd ${cwd}) must be DENIED`);
+  // Inside a READ root: a root holding a protected NAME, a protected PATH, or a link is refused
+  // too (no reliance on ripgrep skipping hidden dirs).
+  fs.mkdirSync(path.join(s.agent, '.claude', 'skills'), { recursive: true });
+  fs.writeFileSync(path.join(s.agent, 'settings.json'), '{}');
+  assert.ok(denied(s, 'Grep', { pattern: 'x', path: s.agent }), 'agent dir holds .claude and settings.json');
+  assert.ok(denied(s, 'Grep', { pattern: 'x' }, s.agent), 'default path = that agent dir');
+  assert.ok(denied(s, 'Glob', { pattern: '**/*.json' }, s.agent));
+  assert.ok(denied(s, 'LS', { path: s.agent }));
+  const s2 = sandbox(t);
+  s2.policy.protectPaths.push(path.join(s2.work, 'secret-place'));
+  assert.ok(denied(s2, 'Grep', { pattern: 'x', path: s2.work }), 'a root that is an ancestor of a protected path (even one not created yet)');
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'md-lb-j1-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const s4 = sandbox(t);
+  let linked = false;
+  try { fs.symlinkSync(outside, path.join(s4.work, 'lnk'), 'junction'); linked = true; } catch { /* junctions unavailable */ }
+  if (linked) assert.ok(denied(s4, 'Glob', { pattern: '**/*' }, s4.work), 'a junction under the root');
+  // A clean root stays searchable: what B2/B3 need.
+  const s3 = sandbox(t);
+  assert.equal(denied(s3, 'Grep', { pattern: 'line', path: s3.work }), null);
+  assert.equal(denied(s3, 'Grep', { pattern: 'line' }, s3.work), null);
+  assert.equal(denied(s3, 'Glob', { pattern: 'b3-*.txt' }, s3.work), null);
+  assert.equal(denied(s3, 'LS', { path: s3.work }), null);
+});
+
+test('J2 (Jim): the agent cannot forge its own inbox, its .done or any state file; only its work dir and outbox are writable', (t) => {
+  const s = sandbox(t);
+  for (const f of [path.join(s.agent, 'inbox', 'forged.json'), path.join(s.agent, 'inbox', '.done', 'forged.json'), path.join(s.agent, 'inbox', '.undelivered', 'x.json'),
+    path.join(s.base, 'devroot', 'hive', 'state', 'mail', 'lb-claude.json'), path.join(s.base, 'devroot', 'hive', 'registry.json'), path.join(s.base, 'devroot', 'hive', 'log.jsonl'),
+    path.join(s.agent, 'memory.md'), path.join(s.agent, 'identity.md'), path.join(s.base, 'devroot', 'hive', 'agents', 'god', 'inbox', 'x.json')]) {
+    for (const tool of ['Write', 'Edit', 'MultiEdit']) assert.ok(denied(s, tool, { file_path: f, content: '{}', old_string: 'a', new_string: 'b', edits: [] }), `${tool} ${f} must be DENIED`);
+  }
+  assert.equal(denied(s, 'Write', { file_path: path.join(s.agent, 'outbox', 'reply.json'), content: '{}' }), null, 'the outbox reply stays ALLOWED');
 });

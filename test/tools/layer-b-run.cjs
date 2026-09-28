@@ -744,8 +744,8 @@ class Credentials {
    *  own refresh (the real file changed within 10 s of the jailed copy changing). */
   verifyRealUnchanged() {
     return this.copies.map((c) => {
-      let st = null; let sha = null;
-      try { st = fs.statSync(c.real); sha = shaReadOnly(c.real); } catch { /* vanished */ }
+      let st = null; let sha = null; let readError = null;
+      try { st = fs.statSync(c.real); sha = shaReadOnly(c.real); } catch (e) { readError = e.message; }
       const mtimeSame = !!st && st.mtimeMs === c.mtimeMs;
       const sizeSame = !!st && st.size === c.size;
       const shaSame = sha === c.realSha;
@@ -754,8 +754,8 @@ class Credentials {
       try { jailMtime = c.jailMtimeAtEnd ?? fs.statSync(c.dest).mtimeMs; } catch { jailMtime = null; }
       const jailRefreshed = c.done ? c.done.tokenRefreshed === true : null;
       const correlated = !unchanged && !!st && jailRefreshed === true && jailMtime !== null && Math.abs(st.mtimeMs - jailMtime) < 10_000;
-      const verdict = unchanged ? 'UNCHANGED' : (correlated ? 'FAIL' : 'INCONCLUSIVE');
-      const attribution = unchanged ? '' : (correlated
+      const verdict = readError ? 'FAIL' : (unchanged ? 'UNCHANGED' : (correlated ? 'FAIL' : 'INCONCLUSIVE'));
+      const attribution = readError ? `the real file cannot be read to prove it unchanged: ${readError}` : unchanged ? '' : (correlated
         ? `the real file changed within 10 s of the jailed copy's own refresh (real mtime ${new Date(st.mtimeMs).toISOString()}, jail ${new Date(jailMtime).toISOString()})`
         : `changed during the run (real mtime ${st ? new Date(st.mtimeMs).toISOString() : 'gone'}); this run has no write path to it (W refuses it, the agents are jailed); the live floor's own CLIs refresh it; jailed copy refreshed: ${jailRefreshed}`);
       return { label: c.label, real: c.real, unchanged, verdict, attribution, shaSame, mtimeSame, sizeSame };
@@ -765,26 +765,47 @@ class Credentials {
 }
 
 /**
- * R4 startup sweep, FAIL-CLOSED (Dwight): an earlier run killed hard can leave its sandbox, with
- * PLAINTEXT credential copies, in %TEMP%. For every stale md-layerb-<stamp> dir (not this run's)
- * every credential file is SHREDDED; only if every one is provably gone is the dir removed. ANY
- * shred or removal failure keeps that dir and makes the result ok:false, and the caller aborts
- * BEFORE the build or any credential is copied. `ops` is injectable for the tests.
+ * R4 startup sweep, FAIL-CLOSED in every step (Dwight x2): an earlier run killed hard can leave its
+ * sandbox, with PLAINTEXT credential copies, in %TEMP%. For every stale md-layerb-<stamp> dir (not
+ * this run's) every credential file is SHREDDED; only if every one is provably gone is the dir
+ * removed. ANY error, while listing %TEMP%, inspecting an entry, walking a stale dir at any depth,
+ * shredding or removing, keeps that dir and makes the result ok:false; the caller aborts BEFORE the
+ * build and before any credential is copied. An incomplete traversal is never "clean". `ops`
+ * (readdir, lstat, shred, rm) is injectable for the tests.
  */
 function sweepStale(tmp, currentBase, ops = {}) {
+  const readdir = ops.readdir || ((d) => fs.readdirSync(d, { withFileTypes: true }));
+  const lstat = ops.lstat || ((p) => fs.lstatSync(p));
   const shred = ops.shred || ((f) => W.shred(f));
   const rm = ops.rm || ((d) => W.rm(d));
   const done = [];
-  let names = [];
-  try { names = fs.readdirSync(tmp); } catch { return { ok: true, done }; }
+  let names;
+  try { names = readdir(tmp).map((e) => (typeof e === 'string' ? e : e.name)); }
+  catch (e) { return { ok: false, done: [{ dir: tmp, credentials: 0, shredded: 0, removed: false, error: `cannot list ${tmp}: ${e.message}` }] }; }
+  /** Every credential file under `dir`, or a thrown error: no directory may be skipped. */
+  const findCreds = (dir) => {
+    const out = [];
+    const stack = [dir];
+    while (stack.length) {
+      const d = stack.pop();
+      for (const e of readdir(d)) {   // throws: the caller records it and keeps the dir
+        const f = path.join(d, e.name);
+        if (e.isSymbolicLink()) throw new Error(`a link inside a stale sandbox (${f}): not followed, not removed`);
+        if (e.isDirectory()) stack.push(f);
+        else if (CREDENTIAL_NAMES.includes(e.name.toLowerCase())) out.push(f);
+      }
+    }
+    return out;
+  };
   for (const n of names.filter((x) => STALE_PREFIX.test(x))) {
     const dir = path.join(tmp, n);
     if (currentBase && norm(dir) === norm(currentBase)) continue;
-    let st = null;
-    try { st = fs.lstatSync(dir); } catch { continue; }
+    let st;
+    try { st = lstat(dir); } catch (e) { done.push({ dir, credentials: 0, shredded: 0, removed: false, error: `cannot inspect ${dir}: ${e.message}` }); continue; }
     if (!st.isDirectory() || st.isSymbolicLink()) { done.push({ dir, credentials: 0, shredded: 0, removed: false, error: 'not a plain directory: left alone' }); continue; }
     W.allowRoot(dir);
-    const creds = walk(dir, (f) => CREDENTIAL_NAMES.includes(path.basename(f).toLowerCase()));
+    let creds;
+    try { creds = findCreds(dir); } catch (e) { done.push({ dir, credentials: 0, shredded: 0, removed: false, error: `cannot walk ${dir} completely: ${e.message}` }); continue; }
     let shredded = 0;
     const errors = [];
     for (const f of creds) {
@@ -821,16 +842,16 @@ class LiveWatch {
     );
   }
   snapshot() {
-    const snap = { entries: {}, keys: {} };
+    const snap = { entries: {}, keys: {}, errors: [] };
     for (const r of this.roots) {
       let names = [];
-      try { names = fs.readdirSync(r); } catch { continue; }
+      try { names = fs.readdirSync(r); } catch (e) { if (e.code !== 'ENOENT') snap.errors.push(`${r}: ${e.message}`); continue; }
       for (const n of names) {
         const f = path.join(r, n);
-        try { const st = fs.lstatSync(f); snap.entries[f] = { size: st.size, mtimeMs: st.mtimeMs, dir: st.isDirectory() }; } catch { /* raced */ }
+        try { const st = fs.lstatSync(f); snap.entries[f] = { size: st.size, mtimeMs: st.mtimeMs, dir: st.isDirectory() }; } catch (e) { if (e.code !== 'ENOENT') snap.errors.push(`${f}: ${e.message}`); }
       }
     }
-    for (const k of this.keyFiles) { try { snap.keys[k] = shaReadOnly(k); } catch { snap.keys[k] = null; } }
+    for (const k of this.keyFiles) { try { snap.keys[k] = shaReadOnly(k); } catch (e) { snap.keys[k] = null; if (e.code !== 'ENOENT') snap.errors.push(`${k}: ${e.message}`); } }
     return snap;
   }
   start() { this.before = this.snapshot(); return this; }
@@ -847,6 +868,7 @@ class LiveWatch {
       if (m) failures.push(`${f} ${b ? 'changed' : 'appeared'} and its name carries this run's marker "${m}"`);
     }
     for (const f of Object.keys(this.before.entries)) if (!after.entries[f]) changed.push({ file: f, kind: 'removed' });
+    for (const e of [...this.before.errors, ...after.errors]) failures.push(`cannot stat/hash a live location, so it cannot be shown untouched: ${e}`);
     const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k] }));
     return { ok: failures.length === 0, failures, changed, keys };
   }
@@ -1014,6 +1036,15 @@ class LayerB {
     this.check(true, 'preflight: the sandbox root passes the product isolation guard; its pipe is neither the live nor the MunderDevData pipe', `${r.root} / ${paths.pipeName}`);
     this.liveUserData = liveUserData;
     return { iso, liveUserData, livePipe, fixedPipe };
+  }
+
+  /** R4 (Dwight): the fail-closed startup sweep. Throws (so main aborts BEFORE the build and any
+   *  credential copy) unless every stale credential is provably shredded and its dir removed. */
+  startupSweep(ops) {
+    const sweep = sweepStale(os.tmpdir(), this.s.base, ops);
+    this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed', JSON.stringify(sweep.done));
+    if (!sweep.ok) throw new Error('the startup sweep could not prove the stale credentials gone: aborting before the build');
+    return sweep;
   }
 
   /** Global wall clock (R5): build included, under the heavy-job lock's TTL. */
@@ -1267,7 +1298,13 @@ class LayerB {
     const codex = spec.find((a) => a.id === IDS.codex);
     this.jailPolicy = path.join(s.base, 'layer-b-jail-policy.json');
     this.jailLog = path.join(s.base, 'jail-decisions.jsonl');
-    W.writeJson(this.jailPolicy, { writeRoots: [claude.cwd, claude.dir], readRoots: [s.base], protect: JAIL_PROTECT, home: s.home, log: this.jailLog });
+    // J1/J2 (Jim): read = the Claude work dir + its agent dir (the facts read b2-*.txt / b3-bulk.txt in
+    // the work dir, and the agent's own memory.md); write = the work dir + its OUTBOX only (never its
+    // inbox or a state file). The credential copies live outside every read root (asserted when they
+    // are installed), and a search whose root covers a protected path or name is denied.
+    const codexDir = path.join(s.hive, 'agents', IDS.codex);
+    this.jailRoots = { readRoots: [claude.cwd, claude.dir], writeRoots: [claude.cwd, path.join(claude.dir, 'outbox')] };
+    W.writeJson(this.jailPolicy, { ...this.jailRoots, protect: JAIL_PROTECT, protectPaths: [s.jail, codexDir, this.jailPolicy, this.jailLog, s.stubs, path.join(s.hive, 'state')], home: s.home, log: this.jailLog });
     this.writeClaudeSettings(null);
     W.writeJson(path.join(s.home, '.claude.json'), {
       hasCompletedOnboarding: true, theme: 'dark', bypassPermissionsModeAccepted: true,
@@ -1309,7 +1346,11 @@ class LayerB {
     // where the agent's CODEX_HOME points: <hive>/agents/<id>/.codex/auth.json (a regular file,
     // which migrateCodexAuthLink preserves).
     this.creds.copy('codex', real.codex, path.join(s.hive, 'agents', IDS.codex, '.codex', 'auth.json'));
-    this.check(true, `credentials: ${this.args.dryRun ? 'DECOY ' : ''}logins copied read-only into the jail (claude, codex); nothing else copied`);
+    // J1: no credential copy may sit under any read root of the Claude jail.
+    for (const c of this.creds.copies) for (const r of (this.jailRoots || { readRoots: [] }).readRoots) {
+      if (inside(c.dest, r)) throw new Error(`the ${c.label} credential copy ${c.dest} is under the Claude read root ${r}`);
+    }
+    this.check(true, `credentials: ${this.args.dryRun ? 'DECOY ' : ''}logins copied read-only into the jail (claude, codex); nothing else copied; none under a Claude read root`);
   }
 
   // ── zero-token confinement proofs (R1, god c0a73f (a)(b)) ─────────────────
@@ -1328,12 +1369,15 @@ class LayerB {
       ['deny', { tool_name: 'Read', tool_input: { file_path: path.join(home, '.claude', '.credentials.json') } }],
       ['deny', { tool_name: 'Bash', tool_input: { command: 'echo x > C:\\Dunder\\hive\\md-layerb-jail-proof.txt' } }],
       ['deny', { tool_name: 'Bash', tool_input: { command: `echo x > "${path.join(home, '.codex', 'md-layerb-jail-proof.txt')}"` } }],
+      ['deny', { tool_name: 'Grep', tool_input: { pattern: 'refresh_token', path: this.s.base } }],
+      ['deny', { tool_name: 'Glob', tool_input: { pattern: '**/auth.json', path: this.s.base } }],
+      ['deny', { tool_name: 'Write', tool_input: { file_path: path.join(claude.dir, 'inbox', 'forged.json'), content: '{}' } }],
       ['allow', { tool_name: 'Write', tool_input: { file_path: path.join(claude.dir, 'outbox', 'proof.json'), content: '{}' } }]
     ];
     const results = cases.map(([want, p]) => {
       const r = spawnSync(m[1], [m[2], m[3]], { input: JSON.stringify({ hook_event_name: 'PreToolUse', cwd: claude.cwd, ...p }), encoding: 'utf8', windowsHide: true, timeout: 30_000 });
       const got = r.status === 2 ? 'deny' : (r.status === 0 ? 'allow' : `exit ${r.status}`);
-      return { want, got, tool: p.tool_name, target: p.tool_input.file_path || p.tool_input.command };
+      return { want, got, tool: p.tool_name, target: p.tool_input.file_path || p.tool_input.command || p.tool_input.path };
     });
     const ok = results.every((x) => x.want === x.got) && (st.permissions && st.permissions.deny || []).some((d) => /^Write\(\/\/c\/Dunder\/\*\*\)$/i.test(d));
     this.proofs = { ...(this.proofs || {}), claudeJail: results };
@@ -1518,9 +1562,16 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   claudeEvents() { return this.claudeTranscripts().flatMap(jsonLines); }
   codexEvents() { return this.codexRollouts().flatMap(jsonLines); }
 
+  /** Lines of a token source; a file that EXISTS but cannot be read ABORTS (never counted as 0). */
+  tokenLines(f) {
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return []; this.stop(`cannot read the token source ${f}: ${e.message}`); return []; }
+    return text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  }
+
   pollTokens() {
     // (a) The sandbox cost ledger: per (agent, session) the largest cumulative sample.
-    const ledgerRows = walk(this.s.hive, (p) => /cost-ledger[^\\/]*\.jsonl$/.test(p)).flatMap(jsonLines);
+    const ledgerRows = walk(this.s.hive, (p) => /cost-ledger[^\\/]*\.jsonl$/.test(p)).flatMap((f) => this.tokenLines(f));
     const perSession = {};
     for (const r of ledgerRows) {
       const k = `${r.agent_id}\u0000${r.session_id}`;
@@ -1532,7 +1583,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     // (b) Claude's own transcripts: every assistant message's usage, once per message id.
     const seen = new Set();
     let claudeT = 0;
-    for (const e of this.claudeEvents()) {
+    for (const e of this.claudeTranscripts().flatMap((f) => this.tokenLines(f))) {
       const u = e && e.message && e.message.usage;
       if (!u) continue;
       const k = e.message.id || e.uuid;
@@ -1544,7 +1595,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     let codexT = 0;
     for (const f of this.codexRollouts()) {
       let last = 0;
-      for (const e of jsonLines(f)) {
+      for (const e of this.tokenLines(f)) {
         const info = e && e.payload && e.payload.type === 'token_count' && e.payload.info;
         const tot = info && info.total_token_usage;
         if (tot) last = Math.max(last, tot.total_tokens || ((tot.input_tokens || 0) + (tot.output_tokens || 0)));
@@ -2183,9 +2234,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       await this.waitFor('the session window watch reports', 30_000, () => this.sessionWatch.lines > 0, 500);
       // R4 (Dwight, fail-closed): leftover credentials of an earlier killed run are shredded first;
       // any failure keeps that dir and ABORTS here, before the build and before any credential copy.
-      sweep = sweepStale(os.tmpdir(), s.base);
-      this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed', JSON.stringify(sweep.done));
-      if (!sweep.ok) throw new Error('the startup sweep could not prove the stale credentials gone: aborting before the build');
+      sweep = this.startupSweep();
       // god 4dd770 (2) + 57634c: the real run's FIRST codex binary is the help; the live probe (and
       // everything after it) needs --codex-sandbox-probe, given only after god has read the help.
       if (!this.args.dryRun) {

@@ -28,7 +28,10 @@
  *   and protected names inside the jail (.claude, .codex, settings, credentials, the policy).
  *
  * Policy (a JSON file, argv[2]; it lives OUTSIDE every root the agent may write):
- *   { writeRoots, readRoots, protect, home, log? }
+ *   { writeRoots, readRoots, protect, protectPaths, home, log? }
+ *   J1/J2 (Jim): readRoots = the Claude work dir + agent dir only (no credential copy under any of
+ *   them); writeRoots = the work dir + the agent's outbox only (never its inbox or any state file);
+ *   a Grep/Glob/LS whose root covers a protected path, a protected name or a link is denied.
  * Deny = exit code 2 with the reason on stderr (the documented blocking form). Any error = deny
  * (fail closed). Allow = exit 0, no output.
  */
@@ -96,6 +99,39 @@ function resolveToolPath(raw, policy, cwd) {
   return { abs, real };
 }
 
+/** J1 (Jim): a SEARCH (Grep/Glob/LS) may not cover anything protected. Its root is refused when it
+ *  equals or is an ancestor of a protected concrete path (policy.protectPaths), or when a bounded
+ *  walk under it (no link followed) meets a protected NAME or any link/junction, or is too big to
+ *  prove clean. A hidden directory is walked like any other: nothing relies on the search tool
+ *  skipping it. */
+const SEARCH_WALK_LIMIT = 20_000;
+function searchRootProblem(rootReal, policy) {
+  for (const pp of policy.protectPaths || []) {
+    const k = key(realOf(W32.resolve(pp)));
+    const r = key(rootReal);
+    if (k === r || k.startsWith(r + '\\')) return `the search root covers the protected ${pp}`;
+  }
+  const names = new Set((policy.protect || []).map((n) => String(n).toLowerCase()));
+  const stack = [rootReal];
+  let seen = 0;
+  while (stack.length) {
+    const d = stack.pop();
+    let ents = [];
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { if (d === rootReal && e.code === 'ENOENT') return null; return `cannot list ${d} to prove it holds nothing protected`; }
+    for (const e of ents) {
+      if (++seen > SEARCH_WALK_LIMIT) return 'the search root is too large to prove it holds nothing protected';
+      const f = W32.join(d, e.name);
+      if (names.has(e.name.toLowerCase())) return `the search root holds the protected ${f}`;
+      if (e.isSymbolicLink()) return `the search root holds a link (${f})`;
+      if (e.isDirectory()) {
+        try { if (fs.lstatSync(f).isSymbolicLink()) return `the search root holds a junction (${f})`; } catch { /* raced */ }
+        stack.push(f);
+      }
+    }
+  }
+  return null;
+}
+
 const protectedPath = (p, policy) => {
   const segs = key(p).split('\\');
   return (policy.protect || []).some((name) => segs.includes(String(name).toLowerCase()));
@@ -126,6 +162,10 @@ function decide(payload, policy) {
   if (r.bad) return `${tool}: ${r.bad}`;
   if (!within(r.real, roots)) return `${tool} outside the jail: ${r.real}`;
   if (protectedPath(r.real, policy) || protectedPath(r.abs, policy)) return `${tool} on a protected jail file: ${r.real}`;
+  if (isRead && tool !== 'Read') {
+    const why = searchRootProblem(r.real, policy);
+    if (why) return `${tool}: ${why}`;
+  }
   // Glob/Grep patterns: never absolute, rooted, home-based or climbing.
   for (const field of ['pattern', 'glob']) {
     const pat = tool === 'Glob' || (tool === 'Grep' && field === 'glob') ? input[field] : undefined;
@@ -136,7 +176,7 @@ function decide(payload, policy) {
   return null;
 }
 
-module.exports = { decide, resolveToolPath, realOf, within, READ_TOOLS, WRITE_TOOLS };
+module.exports = { decide, resolveToolPath, realOf, within, searchRootProblem, READ_TOOLS, WRITE_TOOLS };
 
 if (require.main === module) {
   let policy = null;
