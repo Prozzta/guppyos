@@ -24,6 +24,8 @@ import {
   buildSpawnCommand,
   tokenizeCommand,
   modelsForProvider,
+  unknownModelSuffix,
+  useModelCatalogVersion,
   seedModelForProvider,
   inferAgentProvider,
   providerPreset,
@@ -140,6 +142,7 @@ export interface AddAgentModalProps {
 }
 
 export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModalProps) {
+  useModelCatalogVersion(); // REFRESH-MODELS: re-render when the models file is refreshed
   const addAgent = useStore(s => s.addAgent);
   // Deep links and file batches share one FIFO. The head alone seeds the form;
   // every item still requires an explicit spawn or skip.
@@ -914,7 +917,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                           // the command field already carries it either way.
                           const known = modelsForProvider(provider);
                           return model && !known.some((m) => m.id === model)
-                            ? [...known, { id: model, label: `${model} (from hire)` }]
+                            ? [...known, { id: model, label: `${model} ${unknownModelSuffix(provider, '(from hire)')}` }]
                             : known;
                         })().map((m) => {
                           const active = (model ?? '') === (m.id ?? '');

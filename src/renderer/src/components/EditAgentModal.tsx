@@ -12,6 +12,8 @@ import {
   AGENT_PROVIDER_PRESETS,
   buildSpawnCommand,
   modelsForProvider,
+  unknownModelSuffix,
+  useModelCatalogVersion,
   seedModelForProvider,
   inferAgentProvider,
   providerPreset
@@ -30,6 +32,7 @@ export interface EditAgentModalProps {
  * via updateAgent (engine changes apply on the next restart).
  */
 export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
+  useModelCatalogVersion(); // REFRESH-MODELS: re-render when the models file is refreshed
   const updateAgent = useStore((s) => s.updateAgent);
   const [config, setConfig] = useState<HarnessConfig | null>(null);
 
@@ -222,7 +225,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                     {(() => {
                       const known = modelsForProvider(provider);
                       return model && !known.some((m) => m.id === model)
-                        ? [...known, { id: model, label: `${model} (current)` }]
+                        ? [...known, { id: model, label: `${model} ${unknownModelSuffix(provider, '(current)')}` }]
                         : known;
                     })().map((m) => {
                       const active = (model ?? '') === (m.id ?? '');

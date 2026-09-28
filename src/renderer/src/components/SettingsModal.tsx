@@ -1,5 +1,6 @@
 import { useState, useEffect, type CSSProperties } from 'react';
 import { AGENT_MODELS, type HarnessConfig } from '@/store/config';
+import { ModelsRefreshPanel } from './ModelsRefreshPanel';
 import { useStore } from '@/store/store';
 import {
   CLONE_NODE_BLURB,
@@ -1081,6 +1082,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                   {activeSection === 'Agents & Models' && (
                     <>
+                      <ModelsRefreshPanel />
                       <div>
                         <div style={{
                           fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',

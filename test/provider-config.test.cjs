@@ -87,7 +87,8 @@ test('model picker options stay provider-specific', () => {
   );
   assert.deepEqual(
     modelsForProvider('codex').map((model) => model.id),
-    [undefined, 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
+    // REFRESH-MODELS (1.1.73): the floor refreshed to codex 0.157.1's `debug models` (visibility "list")
+    [undefined, 'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5']
   );
   assert.deepEqual(
     modelsForProvider('grok').map((model) => model.id),

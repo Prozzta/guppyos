@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { AgentProvider } from '../shared/agentProvider';
+import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
@@ -912,6 +913,15 @@ const api = {
   /** Which external tools (git, each agent engine) are actually
    *  present on this machine, with a platform-resolved install command each. */
   toolsStatus: (): Promise<ToolStatus[]> => ipcRenderer.invoke('tools:status'),
+  /** REFRESH-MODELS: the models file (userData/models.json), or null. A file read, never a lookup. */
+  modelCatalog: (): Promise<ModelsCatalog | null> => ipcRenderer.invoke('models:catalog'),
+  /** REFRESH-MODELS: the Settings button. Queries every provider, rewrites the file, returns the per-provider rows. */
+  refreshModels: (): Promise<{ file: ModelsCatalog; rows: ModelsRefreshRow[] }> => ipcRenderer.invoke('models:refresh'),
+  onModelCatalogChanged: (cb: (file: ModelsCatalog) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, file: ModelsCatalog) => cb(file);
+    ipcRenderer.on('models:catalogChanged', listener);
+    return () => ipcRenderer.removeListener('models:catalogChanged', listener);
+  },
   /** Settings hero payload — plan + sponsor, fetched from the repo and cached. */
   heroPayload: (force?: boolean): Promise<{ hero: HeroPayload; fetchedAt: number; stale: boolean }> =>
     ipcRenderer.invoke('hero:payload', force),

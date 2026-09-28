@@ -1,5 +1,7 @@
 // Mirrors src/main/config.ts. Kept as a renderer-side type-only module
 // so we don't have to reach into the preload package to type-check.
+import { useSyncExternalStore } from 'react';
+import { catalogModels, type ModelsCatalog } from '@shared/modelCatalog';
 import {
   AGENT_PROVIDER_PRESETS,
   providerPreset,
@@ -199,9 +201,15 @@ export const CODEX_MODELS: ModelOption[] = [
   // harness's `config.defaultModel`; the pickers mark that one separately, and
   // labelling both "default" is what made the two impossible to tell apart.
   { id: undefined, label: 'CLI default' },
+  // REFRESH-MODELS: the floor (no models file yet, or codex not listed). Refreshed to codex
+  // 0.157.1's `debug models` list (visibility "list") on 2026-09-28.
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
+  { id: 'gpt-6-sol', label: 'GPT-6 Sol' },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' }
+  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+  { id: 'gpt-5.5', label: 'GPT-5.5' }
 ];
 
 /** Models offered when an agent runs on the Antigravity CLI (`agy`). agy's
@@ -215,11 +223,19 @@ export const ANTIGRAVITY_MODELS: ModelOption[] = [
   // harness's `config.defaultModel`; the pickers mark that one separately, and
   // labelling both "default" is what made the two impossible to tell apart.
   { id: undefined, label: 'CLI default' },
+  // REFRESH-MODELS: the floor (no models file yet, or agy not listed). Refreshed to agy 1.2.12's
+  // `agy models` list on 2026-09-28: the retired 3.5 Flash ids are gone (agy silently ran 3.8).
+  { id: 'Gemini 3.8 Flash (High)', label: 'Gemini 3.8 Flash · High' },
+  { id: 'Gemini 3.8 Flash (Medium)', label: 'Gemini 3.8 Flash · Med' },
+  { id: 'Gemini 3.8 Flash (Low)', label: 'Gemini 3.8 Flash · Low' },
+  { id: 'Gemini 3.7 Flash (High)', label: 'Gemini 3.7 Flash · High' },
+  { id: 'Gemini 3.7 Flash (Medium)', label: 'Gemini 3.7 Flash · Med' },
+  { id: 'Gemini 3.7 Flash (Low)', label: 'Gemini 3.7 Flash · Low' },
+  { id: 'Gemini 3.6 Flash (High)', label: 'Gemini 3.6 Flash · High' },
+  { id: 'Gemini 3.6 Flash (Medium)', label: 'Gemini 3.6 Flash · Med' },
+  { id: 'Gemini 3.6 Flash (Low)', label: 'Gemini 3.6 Flash · Low' },
   { id: 'Gemini 3.1 Pro (High)', label: 'Gemini 3.1 Pro · High' },
   { id: 'Gemini 3.1 Pro (Low)', label: 'Gemini 3.1 Pro · Low' },
-  { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash · High' },
-  { id: 'Gemini 3.5 Flash (Medium)', label: 'Gemini 3.5 Flash · Med' },
-  { id: 'Gemini 3.5 Flash (Low)', label: 'Gemini 3.5 Flash · Low' },
   { id: 'Claude Sonnet 4.6 (Thinking)', label: 'Claude Sonnet 4.6' },
   { id: 'Claude Opus 4.6 (Thinking)', label: 'Claude Opus 4.6' },
   { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B' }
@@ -353,8 +369,61 @@ export const KIMI_MODELS: ModelOption[] = [
 // importers keep their path.
 export { tokenizeCommand } from '@shared/commandLine';
 
+// ── REFRESH-MODELS: the models file, as main hands it over ─────────────────────────────
+// Loaded ONCE per window (a file read in main, never a lookup) and replaced when the Settings
+// button refreshes it. Module-level subscribe/getSnapshot: a re-render never re-subscribes.
+let modelCatalog: ModelsCatalog | null = null;
+let catalogVersion = 0;
+const catalogListeners = new Set<() => void>();
+let catalogLoading: Promise<void> | null = null;
+
+export function setModelCatalog(next: ModelsCatalog | null): void {
+  modelCatalog = next;
+  catalogVersion += 1;
+  for (const l of [...catalogListeners]) { try { l(); } catch { /* a listener never breaks the rest */ } }
+}
+export function currentModelCatalog(): ModelsCatalog | null { return modelCatalog; }
+function subscribeCatalog(l: () => void): () => void { catalogListeners.add(l); return () => { catalogListeners.delete(l); }; }
+function catalogVersionSnapshot(): number { return catalogVersion; }
+/** Re-renders a picker when the models file changes. */
+export function useModelCatalogVersion(): number {
+  return useSyncExternalStore(subscribeCatalog, catalogVersionSnapshot, catalogVersionSnapshot);
+}
+
+type CatalogApi = { modelCatalog?: () => Promise<ModelsCatalog | null>; onModelCatalogChanged?: (cb: (f: ModelsCatalog) => void) => () => void };
+/** Read the models file once (App mount) and follow its changes. Idempotent. */
+export function loadModelCatalog(): Promise<void> {
+  if (catalogLoading) return catalogLoading;
+  const api = (typeof window !== 'undefined' ? (window as unknown as { cth?: CatalogApi }).cth : undefined);
+  if (!api?.modelCatalog) return Promise.resolve();
+  api.onModelCatalogChanged?.((f) => setModelCatalog(f));
+  catalogLoading = api.modelCatalog().then((f) => { if (f) setModelCatalog(f); }).catch(() => { catalogLoading = null; });
+  return catalogLoading;
+}
+
+/** A provider's picker list from the models file, or null (use the floor). Claude keeps the
+ *  curated `[1m]` context variants of the listed models (the Models API does not list them). */
+function catalogOptions(provider: AgentProvider): ModelOption[] | null {
+  const list = catalogModels(modelCatalog, provider);
+  if (!list) return null;
+  const options: ModelOption[] = [{ id: undefined, label: 'CLI default' }, ...list.map((m) => ({ id: m.id, label: m.label }))];
+  if (provider === 'claude') {
+    const ids = new Set(list.map((m) => m.id));
+    for (const m of AGENT_MODELS) if (m.id && /\[1m\]$/.test(m.id) && ids.has(m.id.replace(/\[1m\]$/, '')) && !ids.has(m.id)) options.push(m);
+  }
+  return options;
+}
+
+/** How a picker labels a saved model that is not in the provider's list: once the list is the
+ *  provider's own (refreshed), that model is one it no longer offers. */
+export function unknownModelSuffix(provider: AgentProvider, fallback: string): string {
+  return catalogModels(modelCatalog, provider) ? '· not in the refreshed list' : fallback;
+}
+
 /** The model preset list for a given provider's picker. */
 export function modelsForProvider(provider: AgentProvider): ModelOption[] {
+  const refreshed = catalogOptions(provider);
+  if (refreshed) return refreshed;
   if (provider === 'codex') return CODEX_MODELS;
   if (provider === 'grok') return GROK_MODELS;
   if (provider === 'kimi') return KIMI_MODELS;
