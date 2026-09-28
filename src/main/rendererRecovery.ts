@@ -158,39 +158,255 @@ export function recoverRendererForMemory<W extends MemoryRecoverableWindow>(
   try { win.webContents.forcefullyCrashRenderer(); return 'killed'; } catch { return 'failed'; }
 }
 
+/** RENDERER-PROFILE: the DevTools-protocol surface profileRenderer needs (Electron's Debugger). */
+export interface ProfilerDebugger {
+  attach(v?: string): void;
+  detach(): void;
+  isAttached(): boolean;
+  sendCommand(m: string, p?: object): Promise<unknown>;
+  on(event: 'message', listener: (e: unknown, method: string, params: unknown) => void): unknown;
+  removeListener(event: 'message', listener: (e: unknown, method: string, params: unknown) => void): unknown;
+}
+
+/** RENDERER-PROFILE budgets: the whole look is capped at PROFILE_TIMEOUT_MS. */
+export const PROFILE_TIMEOUT_MS = 5_000;
+export const PROFILE_SAMPLE_MS = 3_000;
+export const PROFILE_PAUSE_WAIT_MS = 1_000;
+export const PROFILE_MAX_BYTES = 8 * 1024 * 1024;
+export const PROFILE_SAMPLING_US = 1_000;
+
+interface CpuProfileNode { id: number; callFrame: { functionName: string; url: string; lineNumber: number }; hitCount?: number; children?: number[] }
+
+/** "fn file.js:12" for a DevTools call frame (lines are 0-based in the protocol). */
+function frameName(f: { functionName?: string; url?: string; lineNumber?: number; location?: { lineNumber?: number } }): string {
+  const fn = f.functionName || '(anonymous)';
+  const file = (f.url || '').split(/[\\/]/).pop() || '';
+  const line = typeof f.lineNumber === 'number' ? f.lineNumber : f.location?.lineNumber;
+  return file ? `${fn} ${file}:${typeof line === 'number' ? line + 1 : '?'}` : fn;
+}
+
+/** Self and inclusive sample counts per function, top `n` of each, from a CPU profile. */
+export function summarizeCpuProfile(profile: { nodes: CpuProfileNode[] }, n = 8): { samples: number; self: Array<{ fn: string; pct: number }>; inclusive: Array<{ fn: string; pct: number }> } {
+  const byId = new Map(profile.nodes.map((x) => [x.id, x]));
+  const parent = new Map<number, number>();
+  for (const x of profile.nodes) for (const c of x.children ?? []) parent.set(c, x.id);
+  const self = new Map<string, number>();
+  const incl = new Map<string, number>();
+  let samples = 0;
+  for (const x of profile.nodes) {
+    const hits = x.hitCount ?? 0;
+    if (!hits) continue;
+    samples += hits;
+    const name = frameName(x.callFrame);
+    self.set(name, (self.get(name) ?? 0) + hits);
+    const seen = new Set<string>();
+    for (let id: number | undefined = x.id; id !== undefined; id = parent.get(id)) {
+      const node = byId.get(id);
+      if (!node) break;
+      const fn = frameName(node.callFrame);
+      if (seen.has(fn)) continue; // recursion counts once per sample
+      seen.add(fn);
+      incl.set(fn, (incl.get(fn) ?? 0) + hits);
+    }
+  }
+  const top = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).slice(0, n)
+    .map(([fn, h]) => ({ fn, pct: samples ? Math.round((h / samples) * 1000) / 10 : 0 }));
+  return { samples, self: top(self), inclusive: top(incl).filter((e) => e.fn !== '(root)') };
+}
+
 /**
- * MEMSPIKE-167: a cheap, TIME-BOXED look inside a renderer that just doubled: V8 heap usage and
- * DOM counters over the DevTools protocol (no heap snapshot: on a GB-sized heap a snapshot
- * freezes the renderer and roughly doubles its memory, the opposite of containment). Never
- * awaited by the recovery; a renderer that does not answer within `timeoutMs` is skipped.
+ * RENDERER-PROFILE (option A, god 2026-09-28): WHAT a renderer is doing when it just doubled.
+ *
+ * Measured on Electron 32 (test/renderer-profile-harness): a renderer busy in JavaScript answers
+ * NOTHING on a DevTools session attached at that moment. Debugger.enable, Profiler.*,
+ * Runtime.getHeapUsage and Memory.getDOMCounters all time out, which is why the 1.1.67 heap probe
+ * timed out on all 3 overnight spikes. Chromium serves only a few methods from a V8 interrupt
+ * (Debugger.pause, Performance.getMetrics, ...), and only on a session whose domains were
+ * enabled BEFORE the renderer got stuck.
+ *
+ * So each window gets ONE long-lived session, ARMED while its page is healthy
+ * (Debugger.enable + Performance.enable). On a doubled spike, capture():
+ *   1. Performance.getMetrics: JS heap, DOM nodes, script vs layout time. Served even when busy.
+ *   2. Debugger.pause: the JS stack. Then, while paused (the nested message loop):
+ *      Runtime.getHeapUsage, Memory.getDOMCounters and Profiler.start. Then resume.
+ *   3. After ~sampleMs: pause again, Profiler.stop, resume. The top functions go in the row; the
+ *      full profile goes to `write` (a .cpuprofile).
+ *
+ * Safeguards:
+ * - Every step is raced against ONE deadline.
+ * - A pause we did not ask for (a `debugger;` statement, a late pause request that hit after its
+ *   wait) is resumed at once, unless DevTools is open: that pause is the developer's.
+ * - Every pause we take is resumed.
+ * - Any failure or timeout detaches (a detach also resumes) and disarms. The next page load
+ *   re-arms.
+ * - Nothing here throws.
  */
-export async function probeRendererHeap(
-  dbg: { attach(v?: string): void; detach(): void; isAttached(): boolean; sendCommand(m: string, p?: object): Promise<unknown> },
-  timeoutMs: number
-): Promise<Record<string, unknown>> {
-  const t0 = Date.now();
-  let attachedHere = false;
+export interface ProbeDebugger extends ProfilerDebugger {
+  on(event: 'message', listener: (e: unknown, method: string, params: unknown) => void): unknown;
+  on(event: 'detach', listener: (e: unknown, reason: string) => void): unknown;
+}
+
+const PERF_METRICS = ['JSHeapUsedSize', 'JSHeapTotalSize', 'Nodes', 'Documents', 'JSEventListeners', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration', 'TaskDuration'];
+/** How long arming may take on a healthy page. */
+export const PROBE_ARM_TIMEOUT_MS = 3_000;
+
+export class RendererProbe {
+  private armed = false;
+  private arming: Promise<boolean> | null = null;
+  private attachedHere = false;
+  private expectPause: ((params: unknown) => void) | null = null;
+  private paused = false;
+  /** Pauses we did not ask for and resumed (a `debugger;` statement, a late pause request). */
+  foreignResumes = 0;
+
+  constructor(private readonly dbg: ProbeDebugger, private readonly deps: { devToolsOpen?: () => boolean } = {}) {
+    dbg.on('message', (_e, method, params) => {
+      if (method === 'Debugger.resumed') { this.paused = false; return; }
+      if (method !== 'Debugger.paused') return;
+      this.paused = true;
+      if (this.expectPause) { const r = this.expectPause; this.expectPause = null; r(params); return; }
+      if (this.deps.devToolsOpen?.()) return; // the developer's own pause
+      this.foreignResumes += 1;
+      this.dbg.sendCommand('Debugger.resume').catch(() => { /* detached */ });
+    });
+    dbg.on('detach', () => { this.armed = false; this.attachedHere = false; this.paused = false; });
+  }
+
+  isArmed(): boolean { return this.armed; }
+
+  /** Attach and enable Debugger + Performance, on a HEALTHY page. Idempotent; false on failure. */
+  arm(timeoutMs = PROBE_ARM_TIMEOUT_MS): Promise<boolean> {
+    if (this.armed) return Promise.resolve(true);
+    if (this.arming) return this.arming;
+    this.arming = (async () => {
+      try {
+        if (!this.dbg.isAttached()) { this.dbg.attach('1.3'); this.attachedHere = true; }
+        const ok = await raceMs(Promise.all([this.dbg.sendCommand('Debugger.enable'), this.dbg.sendCommand('Performance.enable')]), timeoutMs);
+        if (ok === 'timeout') { this.giveUp(); return false; }
+        this.armed = true;
+        return true;
+      } catch {
+        this.giveUp();
+        return false;
+      } finally {
+        this.arming = null;
+      }
+    })();
+    return this.arming;
+  }
+
+  /** Detach (if we attached) and disarm. A detach also resumes a paused renderer. */
+  giveUp(): void {
+    this.armed = false;
+    this.expectPause = null;
+    if (this.attachedHere) { try { this.dbg.detach(); } catch { /* gone */ } }
+    this.attachedHere = false;
+    this.paused = false;
+  }
+
+  /** Pause and wait for OUR paused event (at most waitMs). null when no JS was running. */
+  private async pauseNow(waitMs: number, deadline: number): Promise<{ callFrames?: Array<{ functionName?: string; url?: string; location?: { lineNumber?: number } }> } | null> {
+    const got = new Promise<unknown>((r) => { this.expectPause = r; });
+    const sent = await raceUntil(this.dbg.sendCommand('Debugger.pause'), deadline);
+    if (sent === 'timeout') { this.expectPause = null; throw new Error('pause-send'); }
+    const p = await raceUntil(got, Math.min(deadline, Date.now() + waitMs));
+    if (p === 'timeout') { this.expectPause = null; return null; } // a late hit is resumed as foreign
+    return p as { callFrames?: Array<{ functionName?: string; url?: string; location?: { lineNumber?: number } }> };
+  }
+
+  private async resume(deadline: number): Promise<void> {
+    if (!this.paused) return;
+    if (await raceUntil(this.dbg.sendCommand('Debugger.resume'), deadline) === 'timeout') throw new Error('resume');
+  }
+
+  /** The spike look. Resolves with the row fields; never throws, never leaves the page paused. */
+  async capture(opts: { write: (json: string) => Promise<string | null>; timeoutMs?: number; sampleMs?: number; pauseWaitMs?: number; maxBytes?: number }): Promise<Record<string, unknown>> {
+    const t0 = Date.now();
+    const deadline = t0 + (opts.timeoutMs ?? PROFILE_TIMEOUT_MS);
+    const pauseWait = opts.pauseWaitMs ?? PROFILE_PAUSE_WAIT_MS;
+    const out: Record<string, unknown> = { armed: this.armed };
+    let stage = 'arm';
+    try {
+      // Not armed (a page that never finished loading, or a re-arm pending): try now. Only a
+      // renderer that is not stuck can be armed; a stuck one is reported, not waited on.
+      if (!this.armed && !(await this.arm(Math.max(0, deadline - Date.now())))) return { ...out, profile: 'timeout', stage, ms: Date.now() - t0 };
+
+      stage = 'metrics';
+      const m = await raceUntil(this.dbg.sendCommand('Performance.getMetrics') as Promise<{ metrics: Array<{ name: string; value: number }> }>, deadline);
+      if (m !== 'timeout') out.metrics = Object.fromEntries(m.metrics.filter((x) => PERF_METRICS.includes(x.name)).map((x) => [x.name, /Size$/.test(x.name) ? Math.round(x.value / 104857.6) / 10 : Math.round(x.value * 1000) / 1000]));
+
+      stage = 'pause';
+      const p = await this.pauseNow(pauseWait, deadline);
+      out.stack = p ? (p.callFrames ?? []).slice(0, 15).map(frameName) : null;
+      if (p) {
+        const heap = await raceUntil(this.dbg.sendCommand('Runtime.getHeapUsage') as Promise<{ usedSize: number; totalSize: number }>, deadline);
+        if (heap !== 'timeout') { out.jsHeapUsedMb = Math.round(heap.usedSize / 104857.6) / 10; out.jsHeapTotalMb = Math.round(heap.totalSize / 104857.6) / 10; }
+        const dom = await raceUntil(this.dbg.sendCommand('Memory.getDOMCounters') as Promise<{ documents: number; nodes: number; jsEventListeners: number }>, deadline);
+        if (dom !== 'timeout') { out.domNodes = dom.nodes; out.domDocuments = dom.documents; out.jsEventListeners = dom.jsEventListeners; }
+      }
+
+      stage = 'profile';
+      const started = await raceUntil((async () => {
+        await this.dbg.sendCommand('Profiler.enable');
+        await this.dbg.sendCommand('Profiler.setSamplingInterval', { interval: PROFILE_SAMPLING_US });
+        await this.dbg.sendCommand('Profiler.start');
+      })(), deadline);
+      if (started === 'timeout') throw new Error('profiler-start');
+      await this.resume(deadline);
+      // Leave room for the second pause and the stop reply inside the deadline.
+      const sampleMs = Math.max(0, Math.min(opts.sampleMs ?? PROFILE_SAMPLE_MS, deadline - Date.now() - pauseWait - 750));
+      await new Promise((r) => setTimeout(r, sampleMs));
+
+      stage = 'profile-stop';
+      const p2 = await this.pauseNow(pauseWait, deadline); // busy: stop needs the nested loop; idle: it answers anyway
+      const stopped = await raceUntil(this.dbg.sendCommand('Profiler.stop') as Promise<{ profile: { nodes: CpuProfileNode[] } }>, deadline);
+      if (p2) await this.resume(deadline);
+      if (stopped === 'timeout') throw new Error('profiler-stop');
+      void this.dbg.sendCommand('Profiler.disable').catch(() => {});
+      const summary = summarizeCpuProfile(stopped.profile);
+      const json = JSON.stringify(stopped.profile);
+      const maxBytes = opts.maxBytes ?? PROFILE_MAX_BYTES;
+      let file: string | null = null;
+      if (json.length <= maxBytes) { try { file = await opts.write(json); } catch { file = null; } }
+      return { ...out, profile: 'ok', ms: Date.now() - t0, sampledMs: sampleMs, samples: summary.samples, topSelf: summary.self, topInclusive: summary.inclusive, file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      this.giveUp(); // detach resumes; the next page load re-arms
+      return { ...out, profile: /^(pause-send|resume|profiler-start|profiler-stop)$/.test(why) ? 'timeout' : 'failed', stage, error: why, ms: Date.now() - t0, gaveUp: true };
+    }
+  }
+}
+
+function raceMs<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  return raceUntil(p, Date.now() + ms);
+}
+
+function raceUntil<T>(p: Promise<T>, deadline: number): Promise<T | 'timeout'> {
+  const ms = deadline - Date.now();
+  if (ms <= 0) { p.catch(() => {}); return Promise.resolve('timeout'); }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const t = new Promise<'timeout'>((r) => { timer = setTimeout(() => r('timeout'), ms); });
+  return Promise.race([p, t]).finally(() => { if (timer) clearTimeout(timer); });
+}
+
+/** RENDERER-PROFILE: how many .cpuprofile files are kept (oldest removed first). */
+export const PROFILE_KEEP_FILES = 10;
+
+/** RENDERER-PROFILE: write one profile as `<dir>/<iso>-pid<pid>.cpuprofile` (opens in Chrome
+ *  DevTools' Performance panel) and prune to the newest `keep`. Async fs only, so main never
+ *  blocks on a multi-MB write. Returns the path, or null on any failure. */
+export async function saveRendererProfile(dir: string, pid: number, json: string, keep = PROFILE_KEEP_FILES): Promise<string | null> {
+  const fsp = await import('node:fs/promises');
+  const path = await import('node:path');
   try {
-    if (!dbg.isAttached()) { dbg.attach('1.3'); attachedHere = true; }
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const timeout = new Promise<'timeout'>((r) => { timer = setTimeout(() => r('timeout'), timeoutMs); });
-    const work = Promise.all([
-      dbg.sendCommand('Runtime.getHeapUsage') as Promise<{ usedSize: number; totalSize: number }>,
-      dbg.sendCommand('Memory.getDOMCounters') as Promise<{ documents: number; nodes: number; jsEventListeners: number }>
-    ]);
-    const r = await Promise.race([work, timeout]);
-    if (timer) clearTimeout(timer);
-    if (r === 'timeout') return { probe: 'timeout', ms: Date.now() - t0 };
-    const [heap, dom] = r;
-    return {
-      probe: 'ok', ms: Date.now() - t0,
-      jsHeapUsedMb: Math.round(heap.usedSize / 104857.6) / 10, jsHeapTotalMb: Math.round(heap.totalSize / 104857.6) / 10,
-      domDocuments: dom.documents, domNodes: dom.nodes, jsEventListeners: dom.jsEventListeners
-    };
-  } catch (e) {
-    return { probe: 'failed', error: e instanceof Error ? e.message : String(e), ms: Date.now() - t0 };
-  } finally {
-    if (attachedHere) { try { dbg.detach(); } catch { /* gone */ } }
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}-pid${pid}.cpuprofile`);
+    await fsp.writeFile(file, json);
+    const all = (await fsp.readdir(dir)).filter((f) => f.endsWith('.cpuprofile')).sort();
+    for (const old of all.slice(0, Math.max(0, all.length - keep))) { try { await fsp.unlink(path.join(dir, old)); } catch { /* in use */ } }
+    return file;
+  } catch {
+    return null;
   }
 }
 

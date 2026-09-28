@@ -41,7 +41,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
-import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, probeRendererHeap, recoverRendererForMemory, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
+import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
@@ -6532,6 +6532,12 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
   const wcId = wc.id; // read now: a destroyed webContents throws on .id
   recoveryPolicies.set(wcId, recovery.policy);
   win.once('closed', () => { recoveryPolicies.delete(wcId); });
+  // RENDERER-PROFILE: arm the probe while the page is healthy (every load, incl. a recovery
+  // reload); a busy renderer can only be looked into through a session armed before it got stuck.
+  const probe = new RendererProbe(wc.debugger, { devToolsOpen: () => { try { return wc.isDevToolsOpened(); } catch { return false; } } });
+  rendererProbes.set(wcId, probe);
+  win.once('closed', () => { rendererProbes.delete(wcId); });
+  wc.on('did-finish-load', () => { void probe.arm(); });
   const row = (kind: string, extra: Record<string, unknown> = {}): void => {
     try { hive.appendLog({ kind, floor: isFloor, ...extra }); } catch { /* best-effort */ }
   };
@@ -6609,17 +6615,32 @@ const rendererMemory = new RendererMemorySampler({
   // MEMSPIKE-167: a time-boxed look inside a renderer that just doubled; never on one already
   // over the limit (it is about to be recovered), never awaited by anything.
   onDoubled: (pid, mbNow) => {
-    if (mbNow >= ALERT_MB) { try { hive.appendLog({ kind: 'renderer-memory-heap', pid, mb: mbNow, probe: 'skipped-over-limit' }); } catch { /* best-effort */ } return; }
+    if (mbNow >= ALERT_MB) { try { hive.appendLog({ kind: 'renderer-memory-profile', pid, mb: mbNow, profile: 'skipped-over-limit' }); } catch { /* best-effort */ } return; }
     const w = BrowserWindow.getAllWindows().find((x) => { try { return !x.isDestroyed() && x.webContents.getOSProcessId() === pid; } catch { return false; } });
     if (!w) return;
-    void probeRendererHeap(w.webContents.debugger, 5_000).then((r) => {
-      try { hive.appendLog({ kind: 'renderer-memory-heap', pid, mb: mbNow, ...r }); } catch { /* best-effort */ }
-    });
+    // RENDERER-PROFILE (option A): the window's probe session was armed (Debugger + Performance
+    // enabled) while its page was healthy, because a renderer busy in JS answers nothing on a
+    // session attached now; that is why the 1.1.67 heap probe timed out on all 3 overnight
+    // spikes. One row: Performance.getMetrics, the paused JS stack, heap and DOM counters, and a
+    // ~3 s CPU profile (userData/renderer-profiles, newest 10). Time-boxed, never awaited, one
+    // look at a time.
+    const probe = rendererProbes.get(w.webContents.id);
+    if (!probe) return;
+    if (rendererLookBusy) { try { hive.appendLog({ kind: 'renderer-memory-profile', pid, mb: mbNow, profile: 'skipped-busy' }); } catch { /* best-effort */ } return; }
+    rendererLookBusy = true;
+    void probe.capture({ write: (json) => saveRendererProfile(join(app.getPath('userData'), 'renderer-profiles'), pid, json) })
+      .then((r) => { try { hive.appendLog({ kind: 'renderer-memory-profile', pid, mb: mbNow, foreignResumes: probe.foreignResumes, ...r }); } catch { /* best-effort */ } })
+      .catch(() => { /* capture never throws */ })
+      .finally(() => { rendererLookBusy = false; });
   }
 });
 /** MEMSPIKE-167: each window's recovery policy (so a memory recovery never kills a renderer whose
  *  window already gave up), and when the last memory recovery started (the notice says why). */
 const recoveryPolicies = new Map<number, RecoveryPolicy>();
+/** RENDERER-PROFILE: a spike look is in progress; a second doubled renderer is skipped. */
+let rendererLookBusy = false;
+/** RENDERER-PROFILE: each window's long-lived probe session (armed on every page load). */
+const rendererProbes = new Map<number, RendererProbe>();
 let memoryRecoveryAt = 0;
 const memoryCaused = (): boolean => Date.now() - memoryRecoveryAt <= MEMORY_CAUSE_MS;
 let rendererMemoryTimer: ReturnType<typeof setInterval> | null = null;

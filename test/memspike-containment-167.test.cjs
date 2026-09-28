@@ -104,18 +104,89 @@ test('the recovery loop is capped by the existing policy: kill, reload, kill, re
   assert.equal(policy.givenUp, true, 'recoverRendererForMemory then answers given-up');
 });
 
-test('probeRendererHeap: heap + DOM counters, detached after; a renderer that does not answer is skipped at the time box', async () => {
-  const cmds = []; let attached = false;
-  const dbg = { isAttached: () => attached, attach: () => { attached = true; }, detach: () => { attached = false; },
-    sendCommand: async (m) => { cmds.push(m); return m === 'Runtime.getHeapUsage' ? { usedSize: 524288000, totalSize: 629145600 } : { documents: 3, nodes: 1200, jsEventListeners: 88 }; } };
-  const r = await R.probeRendererHeap(dbg, 1000);
-  assert.equal(r.probe, 'ok'); assert.equal(r.jsHeapUsedMb, 500); assert.equal(r.domNodes, 1200);
-  assert.equal(attached, false, 'detached again');
-  const hung = { isAttached: () => false, attach: () => {}, detach: () => {}, sendCommand: () => new Promise(() => {}) };
-  const t0 = Date.now(); const h = await R.probeRendererHeap(hung, 200);
-  assert.equal(h.probe, 'timeout'); assert.ok(Date.now() - t0 < 1500, 'bounded');
-  const busy = { isAttached: () => true, attach: () => { throw new Error('no'); }, detach: () => { throw new Error('must not detach what it did not attach'); }, sendCommand: async () => { throw new Error('gone'); } };
-  assert.equal((await R.probeRendererHeap(busy, 200)).probe, 'failed');
+/** A scripted DevTools session: `answers[method]` is a value, a function, or 'hang'. */
+function fakeDbg(answers = {}) {
+  const listeners = { message: [], detach: [] };
+  const d = {
+    attached: false, cmds: [],
+    isAttached: () => d.attached, attach: () => { d.attached = true; }, detach: () => { d.attached = false; for (const l of listeners.detach) l({}, 'client'); },
+    on: (ev, l) => { listeners[ev].push(l); },
+    removeListener: () => {},
+    emit: (method, params) => { for (const l of listeners.message) l({}, method, params); },
+    sendCommand: (m, p) => {
+      d.cmds.push(m);
+      const a = answers[m];
+      if (a === 'hang') return new Promise(() => {});
+      if (m === 'Debugger.pause' && a === undefined) { setTimeout(() => d.emit('Debugger.paused', { callFrames: [{ functionName: 'spin', url: 'app.js', location: { lineNumber: 9 } }] }), 5); return Promise.resolve({}); }
+      if (m === 'Debugger.resume') { setTimeout(() => d.emit('Debugger.resumed', {}), 1); return Promise.resolve({}); }
+      if (m === 'Profiler.stop' && a === undefined) return Promise.resolve({ profile: { nodes: [{ id: 1, callFrame: { functionName: '(root)', url: '', lineNumber: -1 }, hitCount: 0, children: [2] }, { id: 2, callFrame: { functionName: 'spin', url: 'app.js', lineNumber: 9 }, hitCount: 40 }] } });
+      if (m === 'Performance.getMetrics' && a === undefined) return Promise.resolve({ metrics: [{ name: 'JSHeapUsedSize', value: 524288000 }, { name: 'Nodes', value: 1200 }, { name: 'Timestamp', value: 1 }] });
+      return Promise.resolve(typeof a === 'function' ? a(p) : (a ?? {}));
+    }
+  };
+  return d;
+}
+
+test('RendererProbe: an armed capture reads metrics, the paused stack, heap/DOM, a profile; resumes every pause it took', async () => {
+  const d = fakeDbg({ 'Runtime.getHeapUsage': { usedSize: 524288000, totalSize: 629145600 }, 'Memory.getDOMCounters': { documents: 3, nodes: 1200, jsEventListeners: 88 } });
+  const probe = new R.RendererProbe(d);
+  assert.equal(await probe.arm(), true);
+  assert.deepEqual(d.cmds.slice(0, 2), ['Debugger.enable', 'Performance.enable']);
+  let written = null;
+  const r = await probe.capture({ sampleMs: 20, write: async (json) => { written = json; return 'C:/p.cpuprofile'; } });
+  assert.equal(r.profile, 'ok', JSON.stringify(r));
+  assert.deepEqual(r.metrics, { JSHeapUsedSize: 500, Nodes: 1200 });
+  assert.deepEqual(r.stack, ['spin app.js:10']);
+  assert.equal(r.jsHeapUsedMb, 500); assert.equal(r.domNodes, 1200);
+  assert.equal(r.topSelf[0].fn, 'spin app.js:10'); assert.equal(r.file, 'C:/p.cpuprofile'); assert.ok(written);
+  assert.equal(d.cmds.filter((m) => m === 'Debugger.pause').length, d.cmds.filter((m) => m === 'Debugger.resume').length, 'every pause taken is resumed');
+  assert.equal(d.attached, true, 'stays armed for the next spike');
+});
+
+test('RendererProbe: a renderer that stops answering mid-capture is given up on: bounded, detached, disarmed', async () => {
+  const d = fakeDbg({ 'Profiler.start': 'hang' });
+  const probe = new R.RendererProbe(d);
+  await probe.arm();
+  const t0 = Date.now();
+  const r = await probe.capture({ timeoutMs: 400, write: async () => null });
+  assert.equal(r.profile, 'timeout'); assert.equal(r.gaveUp, true); assert.ok(Date.now() - t0 < 1500, 'bounded');
+  assert.equal(d.attached, false, 'detached (which also resumes a paused renderer)');
+  assert.equal(probe.isArmed(), false);
+});
+
+test('RendererProbe: arming a renderer that does not answer times out and detaches; a failed attach never throws', async () => {
+  const d = fakeDbg({ 'Debugger.enable': 'hang' });
+  const probe = new R.RendererProbe(d);
+  assert.equal(await probe.arm(100), false);
+  assert.equal(d.attached, false);
+  const noAttach = fakeDbg(); noAttach.attach = () => { throw new Error('Another debugger is already attached'); };
+  assert.equal(await new R.RendererProbe(noAttach).arm(100), false);
+});
+
+test('RendererProbe: a pause it did not request is resumed at once, unless DevTools is open (the developer pause)', async () => {
+  const d = fakeDbg();
+  let devtools = false;
+  const probe = new R.RendererProbe(d, { devToolsOpen: () => devtools });
+  await probe.arm();
+  d.emit('Debugger.paused', { reason: 'other', callFrames: [] });
+  assert.equal(probe.foreignResumes, 1);
+  assert.equal(d.cmds.filter((m) => m === 'Debugger.resume').length, 1);
+  devtools = true;
+  d.emit('Debugger.paused', { reason: 'other', callFrames: [] });
+  assert.equal(probe.foreignResumes, 1, 'left alone while DevTools is open');
+});
+
+test('summarizeCpuProfile: self and inclusive per function; recursion counted once per sample', () => {
+  const nodes = [
+    { id: 1, callFrame: { functionName: '(root)', url: '', lineNumber: -1 }, hitCount: 0, children: [2] },
+    { id: 2, callFrame: { functionName: 'outer', url: 'a.js', lineNumber: 0 }, hitCount: 10, children: [3] },
+    { id: 3, callFrame: { functionName: 'outer', url: 'a.js', lineNumber: 0 }, hitCount: 30, children: [4] },
+    { id: 4, callFrame: { functionName: 'leaf', url: 'a.js', lineNumber: 4 }, hitCount: 60 }
+  ];
+  const s = R.summarizeCpuProfile({ nodes });
+  assert.equal(s.samples, 100);
+  assert.deepEqual(s.self[0], { fn: 'leaf a.js:5', pct: 60 });
+  assert.deepEqual(s.inclusive.find((e) => e.fn === 'outer a.js:1'), { fn: 'outer a.js:1', pct: 100 });
 });
 
 test('PTY traffic: chars/chunks per output chunk, resizes and redraws counted per PTY; takeTraffic returns and resets', () => {
@@ -130,8 +201,9 @@ test('MAIN WIRING: onOverLimit kills via recoverRendererForMemory and logs rende
   const idx = read('src/main/index.ts');
   assert.match(idx, /onOverLimit: \(pid, mbNow\) => \{\s*const outcome = recoverRendererForMemory\(pid, \{\s*windows: \(\) => BrowserWindow\.getAllWindows\(\),\s*givenUp: \(w\) => recoveryPolicies\.get\(w\.webContents\.id\)\?\.givenUp \?\? false,\s*beforeKill: \(\) => \{ memoryRecoveryAt = Date\.now\(\); \}/);
   assert.match(idx, /kind: 'render-recovery-memory', pid, mb: mbNow, limitMb: ALERT_MB, outcome,\s*mainRssMb:/);
-  assert.match(idx, /if \(mbNow >= ALERT_MB\) \{ try \{ hive\.appendLog\(\{ kind: 'renderer-memory-heap', pid, mb: mbNow, probe: 'skipped-over-limit' \}\)/);
-  assert.match(idx, /void probeRendererHeap\(w\.webContents\.debugger, 5_000\)/, 'never awaited, 5 s box');
+  assert.match(idx, /if \(mbNow >= ALERT_MB\) \{ try \{ hive\.appendLog\(\{ kind: 'renderer-memory-profile', pid, mb: mbNow, profile: 'skipped-over-limit' \}\)/);
+  assert.match(idx, /void probe\.capture\(\{ write: \(json\) => saveRendererProfile\(join\(app\.getPath\('userData'\), 'renderer-profiles'\), pid, json\) \}\)/, 'never awaited');
+  assert.match(idx, /const probe = new RendererProbe\(wc\.debugger, [\s\S]{0,200}wc\.on\('did-finish-load', \(\) => \{ void probe\.arm\(\); \}\);/, 'armed on every load of every window');
   assert.match(idx, /reason: 'memory: the view used over 1\.5 GB'/);
   assert.match(idx, /\.\.\.\(memoryCaused\(\) \? \{ cause: 'memory' \} : \{\}\)/);
   assert.match(idx, /kind: 'pty-traffic', counts, mainRssMb:/);
