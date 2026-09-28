@@ -114,8 +114,11 @@ function runOneway(cmdFile, args, env, stdin) {
     const t0 = Date.now();
     const p = spawn('cmd.exe', ['/d', '/c', cmdFile, ...args], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let out = '', err = ''; p.stdout.on('data', (d) => { out += d; }); p.stderr.on('data', (d) => { err += d; });
+    // A HANG guard only (from spawn, so it includes cmd.exe's startup): never a timing bound.
+    const guard = setTimeout(() => { try { p.kill(); } catch (e) { /* gone */ } }, 60_000);
+    p.stdin.on('error', () => {});
     p.stdin.end(stdin);
-    p.on('close', (code) => resolve({ code, out, err, ms: Date.now() - t0 }));
+    p.on('close', (code, signal) => { clearTimeout(guard); resolve({ code: signal ? `killed:${signal}` : code, out, err, ms: Date.now() - t0 }); });
   });
 }
 const settle = () => new Promise((r) => setTimeout(r, 150));
@@ -178,9 +181,18 @@ test('REAL: with the app down (no pipe) the command exits 0 at once, printing no
   const cmdFile = path.join(fs.mkdtempSync(path.join(JAIL, 'down-')), 'agy-oneway.cmd');
   fs.writeFileSync(cmdFile, agyOnewayCmd(`\\\\.\\pipe\\p4-absent-${process.pid}`));
   const r = await runOneway(cmdFile, ['agy-status', TOKEN], { AGENT_ID: 'phyllis' }, '{}');
-  assert.equal(r.code, 0); assert.equal(r.out, '', 'no stdout');
+  t.diagnostic(`app down: ${r.ms} ms from spawning cmd.exe (not asserted)`);
+  assert.equal(r.code, 0, 'exits by itself (a hang is killed by the guard)'); assert.equal(r.out, '', 'no stdout');
   assert.equal(r.err, '', 'no stderr either (cmd\'s own "cannot find the file" included)');
-  assert.ok(r.ms < 3000, `fast: ${r.ms} ms`);
+  // FLAKY-TIMING (Andy, flaky-170): "at once" was `r.ms < 3000` from spawning cmd.exe, which a
+  // saturated machine can exceed on process creation alone (FLAKY-XAUDIT finding 6). What makes
+  // an app-down hook slow is the COMMAND waiting or retrying for the pipe; cmd has no other way to
+  // spend seconds. So: the command is exactly one redirect attempt and an exit - no wait, retry,
+  // loop, or helper process - which the hang guard above backs up at run time.
+  const lines = agyOnewayCmd('P').split('\r\n').filter(Boolean);
+  assert.equal(lines.length, 3, `three lines: echo off, one write attempt, exit: ${JSON.stringify(lines)}`);
+  assert.equal(lines[2], 'exit /b 0');
+  assert.doesNotMatch(agyOnewayCmd('P'), /\b(timeout|ping|choice|waitfor|goto|call|start|for|powershell|pwsh|node|cscript|wscript)\b|:\w/i, 'no wait, retry, loop or helper process');
 });
 
 test('config: AGY PostToolUse/PostInvocation are the one-way command; PreToolUse/PreInvocation/Stop keep the shim; command type only', { skip: !WIN }, async () => {

@@ -65,6 +65,17 @@ function postStatus(port, id, token, body) {
     req.on('error', reject); req.end(data);
   });
 }
+/**
+ * FLAKY-TIMING (Andy, flaky-170): a shell FUNCTION named `read` shadows the builtin for the
+ * sourced script, calls the builtin and reports on stderr every read that ended by its `-t`
+ * timeout (status > 128). The script's only way to be slow without starting a process (which
+ * PATH='' and the STATIC census rule out) is waiting out a `read -t 2` on the socket, so "fast"
+ * is checked by that EVENT - no read timed out - instead of a wall-clock bound from spawning
+ * bash, which measured 3.1-3.5 s under a saturated machine (FLAKY-XAUDIT finding 6).
+ */
+const TRACE_READ_TIMEOUTS = 'read() { builtin read "$@"; local rc=$?; if [ $rc -gt 128 ]; then printf \'READ-TIMEOUT(%s) \' "$*" >&2; fi; return $rc; }; ';
+/** A HANG guard only (counts from spawn, so it includes bash's startup): never a timing bound. */
+const HANG_GUARD_MS = 60_000;
 /** Run the statusLine command the way Claude does: a shell -c with the status JSON on stdin. */
 function runStatusLine(command, stdin, env = {}) {
   return new Promise((resolve) => {
@@ -72,8 +83,10 @@ function runStatusLine(command, stdin, env = {}) {
     const ch = spawn(BASH, ['-c', command], { env: { ...process.env, ...env }, windowsHide: true });
     let out = '', err = '';
     ch.stdout.on('data', (d) => { out += d; }); ch.stderr.on('data', (d) => { err += d; });
+    const guard = setTimeout(() => { try { ch.kill(); } catch (e) { /* gone */ } }, HANG_GUARD_MS);
+    ch.stdin.on('error', () => {});
     ch.stdin.end(stdin);
-    ch.on('close', (code) => resolve({ code, out, err, ms: Date.now() - t0 }));
+    ch.on('close', (code, signal) => { clearTimeout(guard); resolve({ code: signal ? `killed:${signal}` : code, out, err, ms: Date.now() - t0 }); });
   });
 }
 async function settingsFor(brokerStub) {
@@ -183,16 +196,16 @@ test('R1 REAL: the script under Git bash with an EMPTY PATH (so no external prog
   fs.writeFileSync(file, CLAUDE_STATUS_SH);
   const cmd = claudeStatusCommand(file.replace(/\\/g, '/'), parts);
   // LANG is UTF-8 on purpose: the script must count BYTES for Content-Length regardless.
-  const r = await runStatusLine(cmd, JSON.stringify(STATUS), { PATH: '', LANG: 'C.UTF-8', LC_ALL: '' });
+  const r = await runStatusLine(TRACE_READ_TIMEOUTS + cmd, JSON.stringify(STATUS), { PATH: '', LANG: 'C.UTF-8', LC_ALL: '' });
+  t.diagnostic(`status line: ${r.ms} ms from spawning bash (not asserted)`);
   assert.equal(r.code, 0, r.err);
-  assert.equal(r.err, '', 'nothing on stderr: every step was a builtin');
+  assert.equal(r.err, '', 'nothing on stderr: every step was a builtin, and no read waited out its timeout');
   assert.equal(r.out, 'ctx 45k/200k (23%)');
   assert.equal(rec.handled.length, 1);
   assert.equal(rec.handled[0].hook_event_name, 'Status');
   assert.equal(rec.handled[0].note, 'héllo ✓', 'UTF-8 intact (Content-Length counted in bytes)');
   assert.deepEqual(rec.models, [['a1', 'claude-opus-5-5']]);
   assert.equal(rec.capacity.length, 1);
-  assert.ok(r.ms < 3000, `fast: ${r.ms} ms`);
 });
 
 test('R1 REAL: with the broker down the script prints nothing, exits 0, and writes nothing to stderr', { skip: !HAVE_BASH }, async () => {
