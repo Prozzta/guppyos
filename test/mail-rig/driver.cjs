@@ -19,8 +19,6 @@ const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
 const { rigEnv } = require('./isolation.cjs');
 
 const HOST = path.join(__dirname, 'rig-host.cjs');
-/** Real silence a freshly booted stub's PTY must show before the simulated clock moves. */
-const BOOT_QUIET_MS = 400;
 const BAD_ENV = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
 
 /** The host's ENTIRE env: an allowlist (isolation.cjs rigEnv), never the parent minus a few keys. */
@@ -230,15 +228,16 @@ class Rig {
   }
 
   /**
-   * A barrier, not a delay: wait until each agent's PTY has produced its boot output and then been
-   * silent for BOOT_QUIET_MS of REAL time, before the simulated clock moves. Output is mapped onto
-   * the simulated clock with the offset in force when it arrived, so boot output that ConPTY
-   * delivered AFTER the 40 s advance (seen under full-suite load) was stamped "now" and made the
-   * first reconcile beat refuse the wake as lifecycle-unknown-not-quiescent.
+   * An EVENT barrier: the simulated clock moves only after the HOST's PTY stream has carried each
+   * stub's boot-complete sentinel, the last bytes a stub writes at boot. PTY output is mapped onto
+   * the simulated clock with the offset in force when it ARRIVES, so boot output that ConPTY
+   * delivered after setup's 40 s advance (seen under full-suite load) was stamped "now" and the
+   * first reconcile beat refused the wake as lifecycle-unknown-not-quiescent. The timeout is a
+   * failure (with diagnostics), never a pass.
    */
   async settleBoot(ids) {
     for (const id of ids) {
-      await waitFor(async () => (await this.call('ptyQuietMs', { id })) >= BOOT_QUIET_MS, { what: `${id}'s boot output to settle`, timeoutMs: 30_000, intervalMs: 50, diag: () => this.diagnose(id) });
+      await waitFor(() => this.call('bootSeen', { id }), { what: `${id}'s boot-complete sentinel in the host's PTY stream`, timeoutMs: 60_000, intervalMs: 50, diag: () => this.diagnose(id) });
     }
   }
 

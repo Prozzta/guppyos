@@ -129,7 +129,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -326,6 +326,19 @@ async function buildFloor() {
   }
   // index.ts:1124 (onExit): teardownPty(id, 'pty-exit').
   ptyManager.setExitHandler((id, exitCode) => teardownPty(id, exitCode, 'pty-exit'));
+  // The renderer's PTY data sink (there is no window): watch each stream for the stub's
+  // boot-complete sentinel, escape sequences removed (ConPTY may interleave them).
+  const bootBuf = new Map();
+  ptyManager.attachWebContents({
+    isDestroyed: () => false,
+    send: (channel, data) => {
+      if (typeof channel !== 'string' || !channel.startsWith('pty:data:') || typeof data !== 'string') return;
+      const id = channel.slice('pty:data:'.length);
+      if (rig.bootSeen.has(id)) return;
+      const buf = ((bootBuf.get(id) || '') + data.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|[\r\n]/g, '')).slice(-200);
+      if (buf.includes('[rig-boot-complete]')) { rig.bootSeen.add(id); bootBuf.delete(id); } else bootBuf.set(id, buf);
+    }
+  });
 
   // ——— bootstrapHiveServices (index.ts), the mail-relevant part ———
   hive.ensureHive();
@@ -453,9 +466,9 @@ async function main() {
     // The `pty:kill` IPC (index.ts:3937): kill, then the shared teardown.
     killPty: ({ id }) => { const p = ptyOf(id); const r = ptyManager.kill(p); f.teardownPty(p); return r; },
     hasPty: ({ id }) => !!f.ptyForAgent(id),
-    // REAL ms since this agent's PTY last produced output (-1: no output yet). The driver waits on
-    // it before moving the simulated clock (see Rig.settleBoot).
-    ptyQuietMs: ({ id }) => { const p = f.ptyForAgent(id); const at = p ? (ptyManager.lastOutputAt(p) ?? 0) : 0; return at > 0 ? Date.now() - at : -1; },
+    // Has this agent's CURRENT PTY carried the stub's boot-complete sentinel (the last bytes it
+    // writes at boot)? The driver moves the simulated clock only after it has (Rig.settleBoot).
+    bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
     // C1 (deterministic lateness): the NEXT mail-claim settle of this agent is measured as if its
     // response had flushed `ms` after the hook arrived. The response itself leaves at once, so it

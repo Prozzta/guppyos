@@ -113,6 +113,10 @@ class FakeAgent {
     this.out(`fake ${this.flavour} agent ${this.agentId}\r\n`);
     this.enqueue(() => this.onSessionStart());
     this.out('> ');
+    // The boot-complete sentinel: the LAST bytes this stub writes at boot (nothing is written again
+    // until input arrives). The driver moves the simulated clock only after the HOST's PTY stream
+    // has carried it (Rig.settleBoot).
+    this.out(BOOT_SENTINEL);
   }
 
   setupFlavour() {
@@ -706,6 +710,9 @@ function summarize(p) {
   for (const k of Object.keys(o)) if (typeof o[k] === 'string' && o[k].length > 400) o[k] = `${o[k].slice(0, 400)}…`;
   return o;
 }
+
+/** See start(): the host looks for it in the PTY stream (rig-host bootSeen). */
+const BOOT_SENTINEL = '[rig-boot-complete]';
 
 function pickEnv() {
   const keys = ['AGENT_ID', 'HIVE_ROOT', 'HIVE_SOCK', 'CODEX_HOME', 'GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'HOME', 'USERPROFILE', 'OPENAI_BASE_URL', 'HIVE_PROXY_SESSION'];
