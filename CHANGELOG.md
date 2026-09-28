@@ -11,6 +11,38 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.71] — 2026-09-28
+
+**The app's window no longer goes white when an agent reaches its usage limit.**
+Rollback: 1.1.70 (reinstall).
+
+### Fixed
+
+- **No more white screen when an agent is held.** When an agent was on hold (for example, its
+  provider's usage limit was reached) or when delivery was paused for the whole floor, the
+  agent's card asked the app for its status again on every redraw, thousands of times a second.
+  The window ran out of memory within a minute and went white, and every restart of the window
+  did the same until the hold ended. The card now asks once and keeps the answer, and updates
+  arrive as before.
+
+### Changed
+
+- **Hive agents always run in their own terminal.** Claude Code's background mode (`/background`,
+  `--bg`, agent view) is turned off for hive agents, because a background session runs with the
+  settings of whichever agent started the background service and could act under the wrong
+  agent's identity.
+
+### Good to know
+
+- **Installing (as for 1.1.70): stop Claude Code's background service first.**
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.71.
+- If an agent stays held after its usage limit has reset, give it one turn by typing in its
+  terminal; the fresh reading clears the hold.
+
 ## [1.1.70] — 2026-09-28
 
 **Quitting the app no longer crashes, and a new HISTORY tab shows each agent's conversation.**

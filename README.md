@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.70" src="https://img.shields.io/badge/version-1.1.70-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.71" src="https://img.shields.io/badge/version-1.1.71-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -228,9 +228,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   crashes at the end.
 - **Codex readings that keep up** (1.1.69) — Codex agents' usage allowance
   updates again on Windows, and a resize no longer re-sends a Codex agent's whole conversation.
-- **A clean quit and a history view** (1.1.70, the current release) — quitting no longer crashes
+- **A clean quit and a history view** (1.1.70) — quitting no longer crashes
   (the terminal library's race is fixed at its source), a read-only HISTORY tab shows each agent's
   conversation, and a model you switch in an agent's terminal is kept after a restart.
+- **A window that stays up when an agent is held** (1.1.71, the current release) — an agent at
+  its usage limit no longer turns the window white, and hive agents always run in their own
+  terminal.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
