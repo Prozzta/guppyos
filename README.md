@@ -23,7 +23,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.73" src="https://img.shields.io/badge/version-1.1.73-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.74" src="https://img.shields.io/badge/version-1.1.74-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -236,8 +236,10 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   terminal.
 - **Holds that clear themselves** (1.1.72) — an agent held at its usage
   limit recovers after the reset on its own, and new agents start on each CLI's own default model.
-- **No waiting on helper programs** (1.1.73, the current release) — reset, moving the home folder and
+- **No waiting on helper programs** (1.1.73) — reset, moving the home folder and
   importing PDFs never freeze the window, and "Refresh models" updates every model picker.
+- **Files that are never silently wiped** (1.1.74, the current release) — a damaged task board,
+  agent list or settings file is kept and named in a banner instead of being overwritten.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

@@ -11,6 +11,33 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.74] — 2026-09-28
+
+**A damaged task board, agent list or settings file is never silently wiped or reset any more; a banner names it.**
+Rollback: 1.1.73 (reinstall).
+
+### Fixed
+
+- **No more silent data loss from a damaged file.** If the hive's task board (tasks.json), its agent
+  list (registry.json) or the app's settings (config.json) could not be read, the app used to treat
+  it as empty and the next save overwrote it: tasks, agents or settings were lost. Now the app
+  refuses to save over a damaged file, keeps a copy of it next to the original, and shows a banner
+  in the window naming the file, so it can be repaired. Until then the floor shows what it safely
+  can, and changes that would use the damaged file are refused.
+- **Saves can no longer be cut off halfway.** The app writes these files to a temporary copy and
+  swaps it in, so a crash or power loss leaves the old version or the new one, never a half-written
+  file. If another program briefly holds the file open, the app retries.
+
+### Good to know
+
+- A file that is simply missing (for example on a fresh install) is still created as before.
+- **Installing (as for the last releases): stop Claude Code's background service first.**
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.74.
+
 ## [1.1.73] — 2026-09-28
 
 **A "Refresh models" button brings every model picker up to date, and the app no longer freezes on reset, on moving its home folder, or when adding PDFs.**
