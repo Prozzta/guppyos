@@ -307,7 +307,9 @@ async function buildFloor() {
   hive.setDeliveryObserver(({ agentId, messageId }) => inboxWake?.onDelivery(agentId, messageId));
 
   // ——— teardown (index.ts:932 teardownPty, the mail-relevant steps) ———
-  function teardownPty(ptyId, exitCode) {
+  // Q32 (god 0f1672): index.ts teardownPty(id, archiveReason = 'explicit'): every kill site calls it
+  // with the default (a tab / voice kill bounces); only the PTY's own exit passes 'pty-exit'.
+  function teardownPty(ptyId, exitCode, archiveReason = 'explicit') {
     const agentId = ptyToAgent.get(ptyId);
     diags.push({ stage: 'pty-exit', ptyId, agentId: agentId ?? null, exitCode: exitCode ?? null, at: clock.now() });
     if (!agentId) return;
@@ -316,9 +318,10 @@ async function buildFloor() {
     try { workerWake.forget(agentId, ptyId); } catch { /* best effort */ }
     if (![...ptyToAgent.values()].includes(agentId)) { try { hookServer.abortMailTurn(agentId, 'pty-exit'); } catch { /* best effort */ } }
     try { hive.stopProxyBridge(agentId); } catch { /* best effort */ }
-    try { hive.setArchived(agentId, true); } catch { /* best effort */ }
+    try { hive.setArchived(agentId, true, archiveReason); } catch { /* best effort */ }
   }
-  ptyManager.setExitHandler((id, exitCode) => teardownPty(id, exitCode));
+  // index.ts:1124 (onExit): teardownPty(id, 'pty-exit').
+  ptyManager.setExitHandler((id, exitCode) => teardownPty(id, exitCode, 'pty-exit'));
 
   // ——— bootstrapHiveServices (index.ts), the mail-relevant part ———
   hive.ensureHive();
@@ -410,7 +413,12 @@ async function main() {
     spawn: (a) => f.spawnAgent(a),
     register: async (a) => { const cwd = path.join(WORK, a.id); fs.mkdirSync(cwd, { recursive: true }); await hive.ensureAgent({ id: a.id, name: a.name || a.id, provider: a.provider || 'claude', cwd, isGod: a.isGod === true }); if (a.archived) hive.setArchived(a.id, true); return { ok: true }; },
     // The EXPLICIT archive (the `hive:setArchived` IPC / the voice setArchived action), never the boot orphan pass.
+    // index.ts:4487 passes no reason: hive.setArchived(id, archived === true), the 'explicit' default.
     archiveExplicit: ({ id }) => { hive.setArchived(id, true); return { ok: true }; },
+    // The boot orphan pass (index.ts:1531 archiveOrphanedAgents): hive.setArchived(id, true, 'orphan').
+    archiveOrphan: ({ id }) => { hive.setArchived(id, true, 'orphan'); return { ok: true }; },
+    // Un-archive (the same IPC with archived false): restores .undelivered/ (Q32 safeguard).
+    unarchive: ({ id }) => { hive.setArchived(id, false); return { ok: true }; },
     send: ({ from = 'god-1', ...msg }) => hive.send(msg, from),
     routeOnce: () => hive.routeOnce(),
     ledger: ({ id }) => hive.mail.ledger(id),

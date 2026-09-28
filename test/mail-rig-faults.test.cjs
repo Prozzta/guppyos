@@ -301,6 +301,40 @@ test('F9 mail to an archived agent (explicit archive): the sender is bounced, th
   assert.ok(rig.contexts('cl-1').some((c) => c.ids.includes(bounce.id)), 'the sender SAW the bounce');
 });
 
+// ——————————————————————————————————————————————————————————————————————————— F9 (Q32 reasons)
+
+test('F9b archive reasons (Q32, god 0f1672): a crash (PTY exit) and the boot orphan pass keep mail flowing; a tab kill and the explicit archive bounce and set mail aside', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: {} }, { id: 'cl-c', flavour: 'claude', scenario: { manualTurns: true } }]);
+  const reason = async (id) => (await rig.call('registry')).agents[id];
+  // A crash: the process exits on its own (index.ts onExit -> teardownPty(id, 'pty-exit')).
+  rig.cue('cl-c', { cue: 'crash' });
+  await waitFor(async () => (await reason('cl-c'))?.archived === true, { what: 'the crashed agent archived' });
+  assert.equal((await reason('cl-c')).archiveReason, 'pty-exit');
+  const kept = await rig.call('send', { to: 'cl-c', subject: 'while down', body: 'keep me' });
+  assert.ok(kept?.id, 'routed, not refused');
+  await waitFor(() => rig.inboxFiles('cl-c').includes(kept.id), { what: 'delivered into the crashed agent\'s inbox' });
+  assert.equal((await rig.entry('cl-c', kept.id))?.state, 'delivered');
+  assert.ok(!(await rig.rows('drop')).some((r) => r.reason === 'archived'), 'no archived drop for a crash');
+  // The boot orphan pass (index.ts archiveOrphanedAgents -> setArchived(id, true, 'orphan')).
+  await rig.call('register', { id: 'cl-o', provider: 'claude' });
+  await rig.call('archiveOrphan', { id: 'cl-o' });
+  assert.equal((await reason('cl-o')).archiveReason, 'orphan');
+  const kept2 = await rig.call('send', { to: 'cl-o', subject: 'orphan', body: 'keep me too' });
+  await waitFor(() => rig.inboxFiles('cl-o').includes(kept2.id), { what: 'delivered into the orphan\'s inbox' });
+  // A tab kill (pty:kill -> teardownPty(id), the explicit default) bounces.
+  await rig.call('killPty', { id: 'cl-1' });
+  assert.equal((await reason('cl-1')).archiveReason, 'explicit');
+  // The explicit archive of the crashed agent (hive:setArchived) sets its unread mail aside and bounces new mail.
+  await rig.call('archiveExplicit', { id: 'cl-c' });
+  assert.equal((await reason('cl-c')).archiveReason, 'explicit');
+  await waitFor(() => !rig.inboxFiles('cl-c').includes(kept.id), { what: 'set aside' });
+  assert.ok(fs.readdirSync(path.join(rig.agentDir('cl-c'), 'inbox', '.undelivered')).includes(`${kept.id}.json`), 'in .undelivered/');
+  await rig.call('send', { to: 'cl-c', subject: 'after', body: 'bounce me' });
+  await rig.call('send', { to: 'cl-1', subject: 'after kill', body: 'bounce me too' });
+  await waitFor(async () => (await rig.rows('drop')).filter((r) => r.reason === 'archived').length >= 2, { what: 'two archived drop rows' });
+});
+
 // ——————————————————————————————————————————————————————————————————————————— F10
 
 test('F10 old-habit agent bulk-moves inbox/*.json mid-turn: unsurfaced mail is still surfaced (from .done), mail-agent-moved rows', T, async (t) => {
