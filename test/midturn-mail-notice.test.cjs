@@ -160,8 +160,32 @@ test('N7 BUDGET: the L1 hook path (turn tracking + the inbox check) against a 50
   const list = hive.inboxFileNames.bind(hive); const head = hive.inboxHeader.bind(hive);
   hive.inboxFileNames = (...a) => { listings++; return list(...a); };
   hive.inboxHeader = (...a) => { headers++; return head(...a); };
+  // FLAKY-XAUDIT finding 5: counting calls to the two hive methods does not pin what they COST - an
+  // inboxFileNames that reads every file it lists (M6b) kept both counts. So the real sync fs work
+  // on the hook path is counted too (as log-stall-av F1 does): calls per API and bytes read.
+  const SYNC = ['readdirSync', 'readFileSync', 'readSync', 'openSync', 'statSync', 'lstatSync', 'existsSync', 'accessSync', 'realpathSync', 'opendirSync', 'writeFileSync', 'appendFileSync'];
+  const fsCalls = {}; let readBytes = 0; const realFs = {};
+  for (const k of SYNC) {
+    realFs[k] = fs[k];
+    fs[k] = function (...a) {
+      fsCalls[k] = (fsCalls[k] || 0) + 1;
+      const r = realFs[k].apply(this, a);
+      if (k === 'readFileSync' && r) readBytes += typeof r === 'string' ? Buffer.byteLength(r) : r.length;
+      if (k === 'readSync' && typeof r === 'number') readBytes += r;
+      return r;
+    };
+  }
+  t.after(() => Object.assign(fs, realFs));
+  const snap = () => ({ calls: { ...fsCalls }, bytes: readBytes });
+  const delta = (s) => {
+    const d = {};
+    for (const [k, v] of Object.entries(fsCalls)) if (v - (s.calls[k] || 0)) d[k] = v - (s.calls[k] || 0);
+    return { calls: d, bytes: readBytes - s.bytes };
+  };
   const ms = [];
-  for (let i = 0; i < 1000; i++) {
+  const HOOKS = 1000;
+  const loop0 = snap();
+  for (let i = 0; i < HOOKS; i++) {
     const before = listings;
     const t0 = process.hrtime.bigint();
     server.trackTurn('andy-1', 'PostToolUse');
@@ -169,13 +193,23 @@ test('N7 BUDGET: the L1 hook path (turn tracking + the inbox check) against a 50
     ms.push(Number(process.hrtime.bigint() - t0) / 1e6);
     assert.equal(listings - before, 1, 'exactly one inbox listing per hook');
   }
+  const loop = delta(loop0);
+  t.diagnostic(`sync fs over ${HOOKS} hooks with nothing new: ${JSON.stringify(loop)}`);
   assert.equal(headers, 0, 'no file is read while nothing is new');
+  assert.deepEqual(loop.calls, { readdirSync: HOOKS }, `the hook path's only sync fs work is ONE directory listing per hook: ${JSON.stringify(loop.calls)}`);
+  assert.equal(loop.bytes, 0, 'not one byte of any inbox file is read while nothing is new');
   hive.send({ to: 'andy-1', act: 'inform', subject: 'new one' }, 'god-1');
   const l0 = listings;
+  const new0 = snap();
   assert.match(server.midTurnMail('andy-1'), /new one/);
+  const onNew = delta(new0);
   assert.equal(listings - l0, 1); assert.equal(headers, 1, 'one header read: the new file only');
+  assert.equal(onNew.calls.readdirSync, 1, 'one listing for the hook that finds the new file');
+  assert.equal(onNew.calls.readFileSync, 1, `one file read - the new one, not the 50 old ones: ${JSON.stringify(onNew)}`);
+  assert.ok(onNew.bytes < 4096, `a small header read only: ${onNew.bytes} bytes`);
   assert.equal(server.midTurnMail('andy-1'), null, 'announced once');
   assert.equal(headers, 1, 'no re-read of an announced file');
+  Object.assign(fs, realFs);
   // FLAKY-TIMING: the cost contract is pinned by the COUNTS above (exactly one listing per hook, no
   // file read while nothing is new, one header read for one new file), which hold under any load.
   // The latency is reported, not asserted: a p50 < 1 ms / p99 < 25 ms bound failed under the suite.
