@@ -142,35 +142,54 @@ function committingStore() {
     wakeUp: (wing) => committed.filter((c) => !wing || c.wing === wing), search: () => []
   };
 }
-function slowEngine(root, store, { embedMs = 30, wakeWaitMs, timers } = {}) {
+/** `timers` records every timer REGISTERED (its ms), `fired` every timer that FIRED, in order. */
+function slowEngine(root, store, { embedMs = 30, wakeWaitMs, timers, fired } = {}) {
   return new MemoryEngine({ hiveRoot: root, store, embedder: { loaded: true, embed: async (t) => { await sleep(embedMs); return t.map(() => new Float32Array(384)); }, unload: async () => {} },
     // Real timers, UNREF'd: the model's idle-unload timer (minutes) must not keep the test process alive.
-    countTokens: words, mode: () => 'native', watch: null, setTimer: (fn, ms) => { timers?.push(ms); return ms === 0 ? setImmediate(fn) : setTimeout(fn, ms).unref(); }, clearTimer: (t) => clearTimeout(t), ...(wakeWaitMs ? { wakeWaitMs } : {}) });
+    countTokens: words, mode: () => 'native', watch: null, setTimer: (fn, ms) => { timers?.push(ms); const run = () => { fired?.push(ms); fn(); }; return ms === 0 ? setImmediate(run) : setTimeout(run, ms).unref(); }, clearTimer: (t) => clearTimeout(t), ...(wakeWaitMs ? { wakeWaitMs } : {}) });
 }
 
-test('N1: on a FILLING index a wake-up waits for its OWN wing and answers with its notes, well inside the bound', async () => {
+test('N1: on a FILLING index a wake-up waits for its OWN wing and answers with its notes, well inside the bound', async (t) => {
   const root = hive({ 'agents/a1/memory.md': '# a1\nalpha notes', 'agents/a2/memory.md': '# a2\nbeta notes', 'agents/a3/memory.md': '# a3\nGAMMA OWN NOTES' });
   const store = committingStore();
-  const eng = slowEngine(root, store);
+  const fired = [];
+  const eng = slowEngine(root, store, { fired });
   const bf = eng.backfill();
   const t0 = Date.now();
   const r = await eng.wakeUp('a3');
+  const firedAtAnswer = [...fired];
   const ms = Date.now() - t0;
+  t.diagnostic(`answered in ${ms} ms (bound ${WAKE_WAIT_MS} ms)`);
   assert.match(r.text, /GAMMA OWN NOTES/, 'its own notes, not "No memories yet"');
-  assert.ok(ms < WAKE_WAIT_MS, `answered in ${ms} ms`);
+  // FLAKY-TIMING (Andy, flaky-170): "well inside the bound" is judged by WHICH event ended the
+  // wait - its wing finishing, not the 5 s wake-wait timer - instead of a wall-clock read that
+  // host load can stretch. A wake-up that waited out the bound has that timer in `fired`.
+  assert.ok(!firedAtAnswer.includes(WAKE_WAIT_MS), `its wing finishing ended the wait, not the ${WAKE_WAIT_MS} ms bound (fired: ${JSON.stringify(firedAtAnswer)})`);
   await bf;
 });
 
-test('N1: when its wing cannot finish in time, the wake-up still answers at about the BOUND (with whatever exists)', async () => {
+test('N1: when its wing cannot finish in time, the wake-up still answers at about the BOUND (with whatever exists)', async (t) => {
   const big = Array.from({ length: 40 }, (_, i) => `## part ${i}\n${'word '.repeat(150)}`).join('\n\n');
   const root = hive({ 'agents/a1/memory.md': big, 'agents/a3/memory.md': `# a3\n${big}` });
   const store = committingStore();
-  const eng = slowEngine(root, store, { embedMs: 40, wakeWaitMs: 300 });
+  const fired = [];
+  const eng = slowEngine(root, store, { embedMs: 40, wakeWaitMs: 300, fired });
   const bf = eng.backfill();
+  let bfDone = false;
+  void bf.then(() => { bfDone = true; });
   const t0 = Date.now();
   const r = await eng.wakeUp('a3');
+  const firedAtAnswer = [...fired];
+  const bfDoneAtAnswer = bfDone;
   const ms = Date.now() - t0;
-  assert.ok(ms >= 250 && ms < 1500, `bounded: ${ms} ms`);
+  t.diagnostic(`answered in ${ms} ms (bound 300 ms)`);
+  // FLAKY-TIMING (Andy, flaky-170): the old '< 1500 ms' was an upper wall-clock bound on real work.
+  // "Bounded" is now the EVENT: the 300 ms wake-wait timer fired before the answer, and the answer
+  // came while the backfill (80 parts x 40 ms, own wing first) was still running - an unbounded
+  // wake-up waits for its wing, i.e. past the backfill's end. The lower bound is a timer (load-safe).
+  assert.ok(firedAtAnswer.includes(300), `the 300 ms bound ended the wait (fired: ${JSON.stringify(firedAtAnswer)})`);
+  assert.equal(bfDoneAtAnswer, false, 'answered while the backfill was still running, not after it');
+  assert.ok(ms >= 250, `not before the bound: ${ms} ms`);
   assert.equal(r.exit, 0);
   await bf;
 });
@@ -184,9 +203,15 @@ test('N1: a SEARCH never waits for a wing; and with no backfill running a wake-u
   const timers = [];
   const eng = slowEngine(root, store, { embedMs: 40, wakeWaitMs: 2000, timers });
   const bf = eng.backfill();
+  let bfDone = false;
+  void bf.then(() => { bfDone = true; });
   const before = timers.length;
   await eng.search({ query: 'q', caller: 'a3' });
   assert.ok(!timers.slice(before).includes(2000), 'a search does not wait for the wing (no wake-wait timer)');
+  // FLAKY-XAUDIT finding 4: the other way a search can wait is the QUEUE - behind the backfill's
+  // steps (PRIORITY.search must stay ahead of them). Event order, not wall clock: the search must
+  // settle while the backfill (40 parts x 40 ms) is still running.
+  assert.equal(bfDone, false, 'the search settled while the backfill was still running (it did not queue behind it)');
   await bf;
   const after = timers.length;
   await eng.wakeUp('a3');
