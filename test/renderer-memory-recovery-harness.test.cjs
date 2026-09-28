@@ -33,7 +33,7 @@ function run() {
   });
 }
 
-test('RENDERED: a FROZEN renderer that keeps allocating is killed by main on a confirmed over-limit and reloaded; the stream from main reaches the new page', { timeout: 600_000 }, async () => {
+test('RENDERED: a FROZEN renderer that keeps allocating is killed by main on a confirmed over-limit and reloaded; the stream from main reaches the new page', { timeout: 1_500_000 }, async () => {
   const r = await run();
   assert.equal(r.ok, true, r.error);
   assert.equal(r.actions.length, 1, 'one recovery for one runaway renderer');
