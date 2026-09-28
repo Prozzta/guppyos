@@ -231,6 +231,22 @@ test('(b) panelMatchesPoll: only a completed poll, on the marker\'s panel, with 
   assert.equal(lb.panelMatchesPoll(snapFor({ rows }), call, 'Marker-V1-abc', N).ok, true);
 });
 
+test('Jim LOW gap R4: panelMatchesPoll rejects on the NONCE COUNT ALONE (same states, same row count, header and tab right)', () => {
+  const N = 'LBN-00000001';
+  const snapFor = (rows) => standalone(lb.domPanelSnapshot)(fakeDoc({ rows }), N);
+  const call = (bodies) => ({ seq: 9, doneAt: 1, rows: bodies.map((b, i) => ({ id: `m${i}`, state: 'delivered', body: b })) });
+  // The poll has TWO rows with the nonce; the DOM shows the same two delivered rows, ONE with it.
+  const dom = snapFor([{ state: 'delivered', label: 'waiting', body: `${N} a` }, { state: 'delivered', label: 'waiting', body: 'other' }]);
+  const r = lb.panelMatchesPoll(dom, call([`${N} a`, `${N} b`]), 'Marker-V1-abc', N);
+  assert.equal(r.ok, false, 'the state multiset matches; only the nonce count differs');
+  assert.match(r.why, /the poll returned 2 row\(s\) with the nonce, the DOM shows 1/);
+  // And the other way round: the DOM shows the nonce the poll does not have.
+  const r2 = lb.panelMatchesPoll(snapFor([{ state: 'delivered', label: 'waiting', body: `${N} a` }, { state: 'delivered', label: 'waiting', body: `${N} b` }]), call([`${N} a`, 'other']), 'Marker-V1-abc', N);
+  assert.equal(r2.ok, false);
+  assert.match(r2.why, /the poll returned 1 row\(s\) with the nonce, the DOM shows 2/);
+  assert.equal(lb.panelMatchesPoll(dom, call([`${N} a`, 'other']), 'Marker-V1-abc', N).ok, true, 'equal counts match');
+});
+
 test('(b) waitPanelPoll: returns ok ONLY when the condition holds; the 10 s cap returns ok:false with the snapshot; no probe returns at once', async () => {
   const N = 'LBN-00000001';
   const snapOk = standalone(lb.domPanelSnapshot)(fakeDoc({ rows: [{ state: 'delivered', label: 'waiting', body: N }] }), N);

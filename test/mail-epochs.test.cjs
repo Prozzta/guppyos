@@ -30,7 +30,7 @@ const { HiveManager } = loadTs('src/main/hive.ts');
 const { InboxWakeBridge, MAIL_DEGRADE_AFTER_WAKES } = loadTs('src/main/inboxWakeBridge.ts');
 const W = loadTs('src/main/workerWake.ts');
 const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, SUBMIT_CONFIRM_MS, WORKER_WAKE_COOLDOWN_MS } = W;
-const { MAIL_STALE_EPOCH_MS } = loadTs('src/main/mailLedger.ts');
+const { MAIL_STALE_EPOCH_MS, MAIL_UNPARSEABLE_AFTER, MAIL_UNPARSEABLE_SPAN_MS } = loadTs('src/main/mailLedger.ts');
 const { coordinatorPendingIds } = loadTs('src/main/mailReaders.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -779,6 +779,47 @@ test('Jim LOW residual: a RESPAWN as a different provider invalidates the cached
   hive.registry = () => { reads++; return reg(); };
   server.mailChannel('sw-1'); server.mailChannel('sw-1');
   assert.equal(reads, 0, 'served from the provider cache');
+});
+
+test('§11.19 #4 (Q28 cadence pin): an unparseable body is re-tried every 30 s at the hooks; 3 failures spanning >= 60 s close it terminally', async (t) => {
+  const w = await world(t, { providers: { 'cl-1': 'claude' } });
+  assert.equal(HookServer.MAIL_UNREADABLE_RETRY_MS, 30_000);
+  assert.equal(MAIL_UNPARSEABLE_AFTER, 3);
+  assert.equal(MAIL_UNPARSEABLE_SPAN_MS, 60_000);
+  const m = w.send('cl-1', { subject: 'garbled', body: 'x' });
+  fs.writeFileSync(path.join(w.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`), '{ not json');
+  const t0 = Date.now();
+  const realNow = Date.now;
+  let at = t0;
+  Date.now = () => at;
+  w.hive.mail.now = () => at;
+  const hookAt = (sec) => { at = t0 + sec * 1000; w.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' }); w.fire('cl-1', 'Stop'); w.hive.mail.flushAll(); return w.entry('cl-1', m.id); };
+  try {
+    assert.equal(hookAt(0).parseFails, 1, 'the first failure is counted');
+    assert.equal(hookAt(10).parseFails, 1, 'inside 30 s: skipped, not re-counted');
+    assert.equal(hookAt(30).parseFails, 2, 'at 30 s: tried again');
+    assert.equal(hookAt(59).parseFails, 2, '29 s after the last try: skipped');
+    const e = hookAt(60);
+    assert.deepEqual([e.state, e.missingReason, e.parseFails], ['acted', 'unparseable', 3], 'the third, 60 s after the first: closed terminally');
+  } finally { Date.now = realNow; }
+});
+
+test('Jim LOW gap D2: stop() CLEARS the provider cache: nothing cached survives the unsubscribe (the next read goes to the registry)', async (t) => {
+  const home = fs.mkdtempSync(path.join(JAIL, 'd2-'));
+  const hive = new HiveManager(() => home, () => true);
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
+  const server = new HookServer(hive, () => null, () => ({ notifications: false }));
+  assert.equal(server.mailChannel('sw-1').provider, 'claude');
+  assert.equal(server.providerCache.size, 1, 'cached');
+  server.stop();
+  assert.equal(server.providerCache.size, 0, 'stop() cleared it');
+  // A provider change that no provisioning event announces (the server is unsubscribed now):
+  // the very next read must see it, inside the 5 s window.
+  const reg = hive.registry.bind(hive);
+  hive.registry = () => { const r = reg(); r.agents['sw-1'] = { ...r.agents['sw-1'], provider: 'codex' }; return r; };
+  assert.equal(server.mailChannel('sw-1').provider, 'codex', 'read fresh after stop()');
 });
 
 test('Jim LOW nit: stop() unsubscribes from onAgentProvisioned: the listener count goes back down and a later provisioning no longer touches that server\'s cache', async (t) => {
