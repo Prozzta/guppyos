@@ -654,6 +654,10 @@ inboxWake = new InboxWakeBridge({
     abortSince: (agentId, since) => { hookServer.abortMailEpochsSince(agentId, since, 'submit-unconfirmed'); },
     closeStale: (agentId, now) => hookServer.closeStaleMailEpochs(agentId, now),
     hasOpenEpoch: (agentId) => hive.mail.openEpochs(agentId).length > 0,
+    // Layer-b dry run #4: N1-due ids get one extra immediate re-offer; open (surfacing/surfaced)
+    // ids keep their re-offer state across a reconcile beat.
+    n1DueIds: (agentId) => hive.mail.n1Due(agentId),
+    openIds: (agentId) => hive.mail.openNotDelivered(agentId),
     // §11.18 #42 (Q39): a Codex agent's running session cannot be told (its wake is the fixed
     // sentinel), so its alert says to respawn it.
     degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),

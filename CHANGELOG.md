@@ -49,6 +49,11 @@ Rollback: 1.1.74 (reinstall).
   testing of this release, the third offer could reuse an earlier request and be skipped without
   being typed, delaying the message by about five minutes. This only affected the new mail
   handling; 1.1.74 was not affected.
+- **Mail whose "seen" check keeps failing no longer waits five minutes.** When the app cannot
+  confirm twice that an agent saw a message, the third offer is confirmed on timing alone. During
+  testing of this release (layer b) that third offer could wait about five minutes on an idle agent,
+  because the second failed check had used up the immediate retry. It is now offered at once. Only
+  the new mail handling was affected; 1.1.74 was not.
 - **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
   unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
   broadcasts one reminder, "move your mail again", because agents may have noted the new rule in

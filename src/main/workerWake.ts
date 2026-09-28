@@ -225,6 +225,9 @@ interface AgentWake {
   /** Ids already re-pended once (an unconfirmed submit, or still delivered at the close of their
    *  wake's epoch). A second time goes to the F4 backoff instead. */
   reannounced: Set<string>;
+  /** N1 (layer-b dry run #4): ids that got their ONE extra immediate re-offer because the ledger
+   *  said they reached the N1 threshold (the next surfacing confirms on latency alone). */
+  n1Reoffered: Set<string>;
   /** F4: ids whose re-announcement was unconfirmed too: attempt count and when to offer again. */
   retries: Map<string, { attempt: number; at: number }>;
   /** See WakeClaim.recheck; carried until a claim that checked it COMMITS. */
@@ -322,7 +325,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), retries: new Map(), recheck: null, invoking: false
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false
       };
       this.agents.set(agentId, r);
     }
@@ -358,9 +361,16 @@ export class WorkerWakeWatchdog {
    * ran and ended, so an unsurfaced id never reached the model and goes back to pending whether or
    * not the turn start was confirmed (a Codex UserPromptSubmit that never arrives, and a turn
    * shorter than one beat). `unconfirmedStart` says the guard was passed that way.
+   *
+   * N1 (§11.17, layer-b dry run #4): `n1Due` are the ids whose ledger count of consecutive
+   * unconfirmed surfacings reached MAIL_UNCONFIRMED_FALLBACK_AFTER, so their NEXT surfacing is
+   * confirmed on the latency rule alone. Such an id was surfaced, not "claimed-but-unsurfaced"
+   * (§11.3), and the once-budget would send exactly the confirming surfacing to the 5-minute F4
+   * backoff. It gets ONE extra immediate re-offer (`n1Reoffered`); after that, F4 as before.
    */
-  repend(agentId: string, deliveredIds: readonly string[], now = Date.now(), opts: { turnEnded?: boolean } = {}): { requeued: string[]; exhausted: string[]; attempt: number; retryInMs: number; unconfirmedStart: boolean } {
-    const out = { requeued: [] as string[], exhausted: [] as string[], attempt: 0, retryInMs: 0, unconfirmedStart: false };
+  repend(agentId: string, deliveredIds: readonly string[], now = Date.now(), opts: { turnEnded?: boolean; n1Due?: readonly string[] } = {}): { requeued: string[]; exhausted: string[]; n1: string[]; attempt: number; retryInMs: number; unconfirmedStart: boolean } {
+    const out = { requeued: [] as string[], exhausted: [] as string[], n1: [] as string[], attempt: 0, retryInMs: 0, unconfirmedStart: false };
+    const n1Due = new Set(opts.n1Due ?? []);
     const r = this.agents.get(agentId);
     if (!r) return out;
     if (r.lifecycle === 'active' && r.provisional) {
@@ -372,6 +382,13 @@ export class WorkerWakeWatchdog {
       if (!delivered.has(id)) continue;
       r.announced.delete(id);
       if (r.reannounced.has(id)) {
+        if (n1Due.has(id) && !r.n1Reoffered.has(id)) {
+          r.n1Reoffered.add(id);
+          r.pending.add(id);
+          out.requeued.push(id);
+          out.n1.push(id);
+          continue;
+        }
         const next = (r.retries.get(id)?.attempt ?? 0) + 1;
         r.retries.set(id, { attempt: next, at: now + wakeRetryDelayMs(next) });
         out.attempt = Math.max(out.attempt, next);
@@ -712,14 +729,22 @@ export class WorkerWakeWatchdog {
    * LEDGER's delivered ids (the caller passes them); files on disk imply nothing. Ids no longer
    * delivered (surfaced, acted) leave every set; delivered ids that nothing knows about become
    * pending (a lost callback, a restart, a back-edge). No ordering is inferred from the id strings.
+   *
+   * `openIds` (layer-b dry run #4): ids the ledger still has OPEN but not delivered (surfacing,
+   * surfaced). Their re-offer state (announced, reannounced, n1Reoffered, the F4 retry; the
+   * generation lives outside and survives anyway) is KEPT: a beat that lands in the short
+   * surfacing window must not reset the budget, or whether a message waits 5 minutes would
+   * depend on beat timing. Only ids that left the ledger's open set (acted, gone) are forgotten.
    */
-  reconcile(agentId: string, currentInboxIds: readonly string[]): void {
+  reconcile(agentId: string, currentInboxIds: readonly string[], openIds: readonly string[] = []): void {
     const current = new Set(currentInboxIds.filter((id) => typeof id === 'string' && id.length > 0));
+    const keep = new Set([...current, ...openIds.filter((id) => typeof id === 'string' && id.length > 0)]);
     const r = this.rec(agentId);
     for (const id of [...r.pending]) if (!current.has(id)) r.pending.delete(id);
-    for (const id of [...r.announced]) if (!current.has(id)) r.announced.delete(id);
-    for (const id of [...r.reannounced]) if (!current.has(id)) r.reannounced.delete(id);
-    for (const id of [...r.retries.keys()]) if (!current.has(id)) r.retries.delete(id);
+    for (const id of [...r.announced]) if (!keep.has(id)) r.announced.delete(id);
+    for (const id of [...r.reannounced]) if (!keep.has(id)) r.reannounced.delete(id);
+    for (const id of [...r.n1Reoffered]) if (!keep.has(id)) r.n1Reoffered.delete(id);
+    for (const id of [...r.retries.keys()]) if (!keep.has(id)) r.retries.delete(id);
     if (r.held && !r.held.ids.some((id) => current.has(id))) r.held = null;
     for (const id of current) if (!this.known(r, id)) r.pending.add(id);
   }

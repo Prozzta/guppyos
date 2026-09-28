@@ -256,6 +256,27 @@ test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed
   assert.equal(new Set(outs.map((o) => o.requestId)).size, 3);
 });
 
+test('N1 BUDGET (layer-b dry run #4): an idle agent whose surfacing evidence never appears reaches acted via latency-fallback in SECONDS, event-driven after one kick beat: no simulated time, no 5-minute F4 wait', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { hookMode: 'discard' } }]);
+  const clock0 = await rig.call('advance', { ms: 0 });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-budget', body: 'no transcript evidence: two unconfirmed surfacings, then the latency fallback' });
+  // ONE beat at the same simulated instant starts the first wake (an idle agent's delivery wake
+  // needs the beat's idle reading); after that no beat and no advance: only the Stop-driven
+  // re-offers may move it.
+  await rig.beat();
+  // Before the fix the second unconfirmed surfacing spent the once-budget and the confirming
+  // third surfacing waited out the F4 backoff (300 s): this never held.
+  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted by the N1 fallback, event-driven', timeoutMs: 30_000 });
+  const e = await rig.entry('cl-1', m.id);
+  assert.equal(e.confirmMethod, 'latency-fallback');
+  assert.equal(e.surfaceCount, 3, 'two unconfirmed surfacings, then the confirming one');
+  assert.equal(await rig.call('advance', { ms: 0 }), clock0, 'the simulated clock never moved');
+  const wake = (await rig.call('diags', {})).filter((d) => d.agentId === 'cl-1');
+  assert.ok(wake.some((r) => r.stage === 'wake-repend' && Array.isArray(r.n1) && r.n1.includes(m.id)), 'the N1 re-offer is logged');
+  assert.ok(!wake.some((r) => r.stage === 'wake-ids-exhausted' && (r.idList || []).includes(m.id)), 'never sent to the F4 backoff');
+});
+
 test('N2 hookless (custom) and proxy (qwen) work orders: acted = the confirmed PTY write, via:"work-order", never backlog', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cu-1', flavour: 'custom', scenario: {} }, { id: 'qw-1', flavour: 'qwen', scenario: {} }]);

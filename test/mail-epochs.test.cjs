@@ -77,6 +77,8 @@ async function world(t, { providers = {}, confirms = () => true, probe = null, g
       abortSince: (a, since) => { server.abortMailEpochsSince(a, since, 'submit-unconfirmed'); },
       closeStale: (a, now) => server.closeStaleMailEpochs(a, now),
       hasOpenEpoch: (a) => hive.mail.openEpochs(a).length > 0,
+      n1DueIds: (a) => hive.mail.n1Due(a),
+      openIds: (a) => hive.mail.openNotDelivered(a),
       degrade: (a, reason, detail) => hive.mail.degradeChannel(a, reason, detail)
     }
   });

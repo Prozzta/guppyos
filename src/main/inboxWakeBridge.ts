@@ -39,6 +39,13 @@ export interface InboxWakeMail {
   closeStale(agentId: string, now: number): string[];
   /** Does the agent have a surfacing epoch open in the ledger? */
   hasOpenEpoch(agentId: string): boolean;
+  /** N1 (layer-b dry run #4): the agent's DELIVERED ids whose consecutive unconfirmed surfacings
+   *  reached MAIL_UNCONFIRMED_FALLBACK_AFTER (their next surfacing confirms on latency alone).
+   *  Optional: absent, nothing is N1-due (the once-budget alone, as before). */
+  n1DueIds?(agentId: string): string[];
+  /** The agent's ids OPEN in the ledger but not delivered (surfacing, surfaced): reconcile keeps
+   *  their re-offer state. Optional: absent, none (as before). */
+  openIds?(agentId: string): string[];
   /** §11.10: switch to legacy-read, log `mail-channel-degraded`, raise the UI alert. */
   degrade(agentId: string, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): boolean;
   /** One durable hive log row (main: hive.appendLog). Optional: absent, nothing is logged. */
@@ -127,7 +134,7 @@ export class InboxWakeBridge {
     this.deps.diag?.('enter', { agentId, cause, mode });
     // The beat passes the ids it has just read and reconciled: one inbox read per beat.
     const ids = readIds ?? this.deps.inboxIds(agentId);
-    if (!readIds) coordinator.reconcile(agentId, ids);
+    if (!readIds) coordinator.reconcile(agentId, ids, this.openIds(agentId));
     const f = this.deps.facts(agentId);
     const now = this.deps.now();
     this.deps.diag?.('facts', {
@@ -261,16 +268,23 @@ export class InboxWakeBridge {
     if (!agentId) return;
     const delivered = this.deps.inboxIds(agentId);
     const turnEnded = reason === 'stop' || reason === 'stop-failure';
-    const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now(), { turnEnded });
+    let n1Due: string[] = [];
+    try { n1Due = this.deps.mail?.n1DueIds?.(agentId) ?? []; } catch { n1Due = []; }
+    const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now(), { turnEnded, n1Due });
     if (!r.requeued.length && !r.exhausted.length) return;
     if (r.unconfirmedStart) {
       try {
         this.deps.mail?.log?.({ kind: 'mail-repend', agentId, reason, outcome, unconfirmedStart: true, requeued: r.requeued, ...(r.exhausted.length ? { exhausted: r.exhausted } : {}) });
       } catch { /* logging never breaks the wake path */ }
     }
-    this.deps.diag?.('wake-repend', { agentId, outcome, reason, requeued: r.requeued.length, redelivered: redelivered.length, ...(r.requeued.length ? { idList: r.requeued } : {}) });
+    this.deps.diag?.('wake-repend', { agentId, outcome, reason, requeued: r.requeued.length, redelivered: redelivered.length, ...(r.requeued.length ? { idList: r.requeued } : {}), ...(r.n1.length ? { n1: r.n1 } : {}) });
     if (r.exhausted.length) this.deps.diag?.('wake-ids-exhausted', { agentId, ids: r.exhausted.length, idList: r.exhausted, attempt: r.attempt, retryInMs: r.retryInMs, requeued: r.requeued.length });
     if (r.requeued.length) this.scheduleWake(agentId, 'hook');
+  }
+
+  /** The ledger's open-but-not-delivered ids (reconcile keeps their re-offer state). */
+  private openIds(agentId: string): string[] {
+    try { return this.deps.mail?.openIds?.(agentId) ?? []; } catch { return []; }
   }
 
   /** §11.10: a mail block was returned to this agent (HookServer). */
@@ -402,7 +416,7 @@ export class InboxWakeBridge {
       // skipped every tick, forever). Reported, then rethrown - unchanged behaviour.
       try {
         const ids = this.deps.inboxIds(agentId);
-        this.deps.coordinator.reconcile(agentId, ids);
+        this.deps.coordinator.reconcile(agentId, ids, this.openIds(agentId));
         try { this.closeLostCodexTurn(agentId, ids); }
         catch (e) { this.deps.diag?.('codex-rollout', { agentId, closed: false, why: 'probe-threw', error: String(e) }); }
         // The beat's own lifecycle edges (deferred idle, unconfirmed submit, F4 retry), after the

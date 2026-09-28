@@ -719,6 +719,19 @@ export function pendingEntries(doc: MailLedgerDoc): MailEntry[] {
   return Object.values(doc.entries).filter((e) => e.state === 'delivered' && !e.setAsideAt).sort(bySeq);
 }
 
+/** N1 (layer-b dry run #4): the pending ids whose NEXT surfacing is confirmed on the latency rule
+ *  alone (MAIL_UNCONFIRMED_FALLBACK_AFTER consecutive unconfirmed surfacings). The wake
+ *  coordinator gives them one extra immediate re-offer instead of the F4 backoff. */
+export function n1DueIds(doc: MailLedgerDoc): string[] {
+  return pendingEntries(doc).filter((e) => e.unconfirmedSurfacings >= MAIL_UNCONFIRMED_FALLBACK_AFTER).map((e) => e.id);
+}
+
+/** The ids open in the ledger but not delivered (surfacing, surfaced): the wake coordinator's
+ *  reconcile keeps their re-offer state (layer-b dry run #4). */
+export function openNotDeliveredIds(doc: MailLedgerDoc): string[] {
+  return Object.values(doc.entries).filter((e) => e.state === 'surfacing' || e.state === 'surfaced').sort(bySeq).map((e) => e.id);
+}
+
 /**
  * God db52b8: mark (`on`) or clear the set-aside flag of these not-acted entries. Marking happens
  * in the same step as the explicit archive's move into inbox/.undelivered/; clearing, in the
@@ -1570,6 +1583,8 @@ export class MailLedger {
     return this.hasAgent(agentId) ? this.state(agentId).doc : emptyLedger(agentId);
   }
   pending(agentId: string): MailEntry[] { return pendingEntries(this.docOrEmpty(agentId)); }
+  n1Due(agentId: string): string[] { return n1DueIds(this.docOrEmpty(agentId)); }
+  openNotDelivered(agentId: string): string[] { return openNotDeliveredIds(this.docOrEmpty(agentId)); }
   backlog(agentId: string): MailEntry[] { return backlogEntries(this.docOrEmpty(agentId)); }
   awaitingReply(agentId: string): MailObligation[] { return awaitingReplyEntries(this.docOrEmpty(agentId), this.now()); }
   openRequests(agentId: string): MailObligation[] { return openRequestEntries(this.docOrEmpty(agentId), this.now()); }
