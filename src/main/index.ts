@@ -6338,6 +6338,10 @@ function bootstrapHiveServices(): void {
     try { hive.appendLog({ kind: 'model-default-cleared', previous: clearedDefaultModel }); } catch { /* best-effort */ }
   }
   control.replaceAutoDeliveryPauses(readConfig().autoDeliveryPausedAgents ?? []);
+  // ZT-I1-MAIL §7.1 (one-shot, idempotent): every agent's ledger imported, archived agents' unread
+  // mail moved to inbox/.undelivered (listed once for the Human, never woken), the §11.12(c) lesson
+  // scan. BEFORE archiveOrphanedAgents: after it, every agent without a live PTY reads as archived.
+  try { hive.migrateMail(); } catch (e) { try { hive.appendLog({ kind: 'mail-migration-error', error: String(e).slice(0, 300) }); } catch { /* best-effort */ } }
   archiveOrphanedAgents(); // #57/#58: archive stale archived:false entries with no live PTY
   hive.startRouter();
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers

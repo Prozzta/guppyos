@@ -29,6 +29,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
 import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
+import { mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, runMailMigration, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
@@ -2879,6 +2880,38 @@ export class HiveManager {
       : 12;
     return out.slice(0, lim);
   }
+  /**
+   * ZT-I1-MAIL §7.1 / §11.12(c): the one-shot, idempotent upgrade pass (see mailMigration.ts).
+   * Reads the registry for MUTATION, so a damaged registry throws and the pass waits for the next
+   * boot (a read-only fallback would record every agent as absent and write the marker). The
+   * caller runs it BEFORE archiveOrphanedAgents, while `archived` still means "closed".
+   */
+  migrateMail(): MailMigrationResult {
+    const root = this.root();
+    if (!root) return { ran: false };
+    if (mailMigrationDone(root)) return { ran: false };
+    const reg = this.registryForMutation();
+    const agents = Object.keys(reg.agents ?? {})
+      .filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id))
+      .map((id) => ({ id, archived: reg.agents[id]?.archived === true }));
+    return runMailMigration({ root, agents, mail: this.mail, appendLog: (row) => this.appendLog(row) });
+  }
+
+  /** §7.1 step 2: the archived agents' mail moved to inbox/.undelivered, or null. */
+  undeliveredReport(): UndeliveredReport | null {
+    const root = this.root();
+    return root ? readUndeliveredReport(root) : null;
+  }
+
+  /** The Human dismissed the undelivered report (shown once; persisted). */
+  markUndeliveredSeen(): boolean {
+    const root = this.root();
+    if (!root) return false;
+    const changed = markUndeliveredSeen(root);
+    if (changed) this.appendLog({ kind: 'mail-undelivered-seen' });
+    return changed;
+  }
+
   /**
    * The fleet `inboxBacklog` (ZT-I1-MAIL §3 #6): the agent's mail not yet acted, from its LEDGER
    * (delivered + surfacing + surfaced; terminal work orders are acted by definition, N2). File
