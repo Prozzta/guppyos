@@ -7,11 +7,11 @@
  * under node:test against a sandboxed home.
  *
  * Sources:
- *  - Claude Code: the hook-learned transcript_path, else
+ *  - Claude Code: the hook-learned transcript_path (only inside Claude's projects dir), else
  *    `projectDir(cwd)/<registry sessionId>.jsonl`.
  *  - Codex: the rollout for the registry sessionId under the agent's own CODEX_HOME, else a
  *    hook transcript_path inside that home, else the home's newest rollout.
- *  - Antigravity: the hook transcript_path, else
+ *  - Antigravity: the hook transcript_path (only inside the brain dir), else
  *    `<gemini home>/antigravity-cli/brain/<conversation>/.system_generated/logs/transcript.jsonl`.
  *
  * The resolved path is cached per agent and re-resolved only when the session id or the
@@ -20,6 +20,7 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   HISTORY_PAGE_DEFAULT,
@@ -60,6 +61,20 @@ function inside(dir: string, child: string): boolean {
   return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+/**
+ * HISTORY-169-AUDIT F2: where a hook-reported transcript_path may live, per provider. The
+ * hook payload is a CLI's claim, so it is only trusted inside that provider's own store:
+ *  - Claude: `<config dir>/projects` (~/.claude, or CLAUDE_CONFIG_DIR when set);
+ *  - Codex: the agent's own CODEX_HOME;
+ *  - Antigravity: `<gemini home>/antigravity-cli/brain`.
+ */
+export function claudeProjectRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const roots = [path.join(os.homedir(), '.claude', 'projects')];
+  const cfg = env.CLAUDE_CONFIG_DIR?.trim();
+  if (cfg) roots.push(path.join(cfg, 'projects'));
+  return roots;
+}
+
 function asProvider(p: string | undefined): HistoryProvider | null {
   const v = p ?? 'claude';
   return v === 'claude' || v === 'codex' || v === 'antigravity' ? v : null;
@@ -94,7 +109,7 @@ export class HistoryService {
   private locate(agentId: string, provider: HistoryProvider, sid: string, hookPath: string, cwd: string): string | null {
     const hookOk = hookPath.endsWith('.jsonl') && isFile(hookPath);
     if (provider === 'claude') {
-      if (hookOk) return hookPath;
+      if (hookOk && claudeProjectRoots().some((root) => inside(root, hookPath))) return hookPath;
       if (sid && cwd && path.isAbsolute(cwd)) {
         const p = path.join(projectDir(cwd), `${sid}.jsonl`);
         if (isFile(p)) return p;
@@ -110,9 +125,10 @@ export class HistoryService {
       return findNewestRollout(home);
     }
     // antigravity
-    if (hookOk && path.basename(hookPath) === 'transcript.jsonl') return hookPath;
+    const brain = path.join(this.deps.geminiHome(), 'antigravity-cli', 'brain');
+    if (hookOk && path.basename(hookPath) === 'transcript.jsonl' && inside(brain, hookPath)) return hookPath;
     if (sid) {
-      const p = path.join(this.deps.geminiHome(), 'antigravity-cli', 'brain', sid, '.system_generated', 'logs', 'transcript.jsonl');
+      const p = path.join(brain, sid, '.system_generated', 'logs', 'transcript.jsonl');
       if (isFile(p)) return p;
     }
     return null;

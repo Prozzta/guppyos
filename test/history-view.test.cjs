@@ -236,7 +236,9 @@ test('service: Claude resolves projectDir(cwd)/<sessionId>.jsonl inside the sand
   assert.equal(page.end, page.size);
   assert.ok(!('file' in page) && !JSON.stringify(page).includes(SANDBOX), 'no path is sent to the renderer');
 
-  const hook = tmp('hook.jsonl', lines('claude.jsonl').slice(-2).join('\n') + '\n');
+  // A hook path is trusted only inside Claude's projects dir (HISTORY-169-AUDIT F2).
+  const hook = path.join(dir, 'hook.jsonl');
+  fs.writeFileSync(hook, lines('claude.jsonl').slice(-2).join('\n') + '\n');
   const svc2 = service({ a1: { provider: 'claude', cwd, sessionId: sid } }, { hookPaths: { a1: hook } });
   assert.deepEqual(brief(svc2.page({ agentId: 'a1' }).items), ['user:Thanks, done?', 'assistant:Yes.', 'tool:Read: C:\\proj\\a.ts']);
 });
@@ -303,7 +305,10 @@ test('service: bad requests and missing sources are reasons, never throws; path-
 });
 
 test('service: a vanished file is re-resolved, and reads as no-transcript', () => {
-  const p = tmp('vanish.jsonl', '{"type":"user","message":{"content":"hey"}}\n');
+  const vdir = path.join(HOME, '.claude', 'projects', 'vanish');
+  fs.mkdirSync(vdir, { recursive: true });
+  const p = path.join(vdir, 'vanish.jsonl');
+  fs.writeFileSync(p, '{"type":"user","message":{"content":"hey"}}\n');
   const svc = service({ v: { provider: 'claude' } }, { hookPaths: { v: p } });
   assert.equal(svc.page({ agentId: 'v' }).items.length, 1);
   fs.rmSync(p);

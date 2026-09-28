@@ -9,7 +9,8 @@
  *
  * CURSORS ARE BYTE OFFSETS of line starts in that file. The files are append-only, so an
  * offset stays valid while the file grows, and paging older and following newer are both
- * a single seek.
+ * a single seek. The one exception is a resync cursor INSIDE a line too long to skip in one
+ * request (historyTail RESYNC): it is passed back unchanged and the reader carries on from it.
  */
 
 export type HistoryProvider = 'claude' | 'codex' | 'antigravity';
@@ -56,7 +57,7 @@ export type HistoryPage =
       fileName: string;
       /** Oldest first, newest last. */
       items: HistoryItem[];
-      /** Byte range covered: [start, end). `end` is always a line boundary. */
+      /** Byte range covered: [start, end). Line boundaries, or a resync cursor inside an oversized line. */
       start: number;
       end: number;
       /** True when `start` is 0: there is nothing older. */

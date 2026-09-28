@@ -22,6 +22,14 @@
  *
  * Growth is detected by SIZE, not mtime: on Windows a Codex rollout's mtime can stay at
  * its creation time while the file grows.
+ *
+ * RESYNC (HISTORY-169-AUDIT F1): a line longer than even `budget + skipMax` cannot be
+ * skipped in one request. Rather than stopping at the same boundary forever (follow and
+ * older paging would stall, re-reading the whole budget every time), the reader then hands
+ * back a cursor INSIDE that line: the furthest byte it scanned. A cursor that is not a line
+ * start (the byte before it is not 0x0A) can only be one of these, so the next read starts
+ * in skip mode and carries on to the line's end (forward) or start (backward). Such a
+ * cursor is only ever produced here, and only inside a line already judged oversized.
  */
 import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 
@@ -65,6 +73,14 @@ function limitsOf(l: TailLimits = {}): Required<TailLimits> {
   };
 }
 
+/** Is `at` inside a line (not a line start)? Only resync cursors are. */
+function midLine(fd: number, at: number, size: number): boolean {
+  if (at <= 0 || at > size) return false;
+  const b = Buffer.alloc(1);
+  readSync(fd, b, 0, 1, at - 1);
+  return b[0] !== 0x0a;
+}
+
 function decode(parts: Buffer[]): string {
   const s = (parts.length === 1 ? parts[0] : Buffer.concat(parts)).toString('utf8');
   return s.endsWith('\r') ? s.slice(0, -1) : s;
@@ -87,6 +103,9 @@ export function readLinesBackward(
   try {
     const size = fstatSync(fd).size;
     const top = from === null ? size : Math.max(0, Math.min(from, size));
+    // `from` inside a line: a resync cursor (see RESYNC). The window ends exactly there, and
+    // the rest of that oversized line (back to its start) is skipped, not treated as a fragment.
+    const resume = from !== null && midLine(fd, top, size);
     const out: LineRef[] = [];
     let skipped = 0;
     let bytesRead = 0;
@@ -94,9 +113,9 @@ export function readLinesBackward(
     // The bytes of the line being assembled, AFTER `pos` (latest part last).
     let carry: Buffer[] = [];
     let carryLen = 0;
-    let oversized = false;
+    let oversized = resume;
     // null until the first newline is met: until then we are inside the trailing fragment.
-    let end: number | null = null;
+    let end: number | null = resume ? top : null;
     // The start of the oldest line fully handled: the window's start if we stop now.
     let boundary = top;
     let stopped = false;
@@ -154,7 +173,10 @@ export function readLinesBackward(
     }
     const windowEnd = end ?? boundary;
     out.reverse();
-    return { lines: out, start: Math.min(boundary, windowEnd), end: windowEnd, size, skipped, bytesRead };
+    // Stopped INSIDE an oversized line: hand back the furthest byte scanned (a resync cursor),
+    // so the next older page carries on from there instead of rescanning the same bytes.
+    const start = stopped && oversized && end !== null ? pos : Math.min(boundary, windowEnd);
+    return { lines: out, start, end: windowEnd, size, skipped, bytesRead };
   } finally {
     closeSync(fd);
   }
@@ -179,7 +201,8 @@ export function readLinesForward(file: string, after: number, limits?: TailLimit
     let boundary = startAt;
     let carry: Buffer[] = [];
     let carryLen = 0;
-    let oversized = false;
+    // `after` inside a line: a resync cursor (see RESYNC). Skip on to that line's end.
+    let oversized = midLine(fd, startAt, size);
     const buf = Buffer.alloc(Math.max(1, chunk));
     let stopped = false;
     while (pos < size && !stopped) {
@@ -215,8 +238,10 @@ export function readLinesForward(file: string, after: number, limits?: TailLimit
       }
       pos += n;
     }
-    // Whatever is carried has no newline yet: still being written. Not returned.
-    return { lines: out, start: startAt, end: boundary, size, skipped, bytesRead };
+    // Whatever is carried has no newline yet: still being written. Not returned. Inside an
+    // oversized line, hand back the furthest byte scanned (a resync cursor) so the next read
+    // does not rescan it.
+    return { lines: out, start: startAt, end: oversized ? pos : boundary, size, skipped, bytesRead };
   } finally {
     closeSync(fd);
   }
