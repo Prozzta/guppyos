@@ -684,6 +684,114 @@ class Cdp {
 
 // ─────────────────────────────────────────────────────────────────────────── stub TUIs (dry run)
 
+// ─────────────────────────────────────────────────────────────────────────── B8 poll observation
+// god's hard condition for B8: no fixed sleep. The runner waits until a Threads poll has COMPLETED
+// after the selection, observed in the MAIN process: the registered 'hive:inbox' invoke handler
+// (src/main/index.ts, the ThreadsPanel's only reader) is wrapped, transparently, so every completed
+// call is recorded with a sequence number, its agent id and the rows it returned. Electron looks
+// the handler up in ipcMain._invokeHandlers at each invoke, so the wrapper sees the next poll. The
+// three functions below are serialized over the inspector (and unit-tested on fakes).
+
+/** MAIN process: install the transparent wrapper (idempotent). Returns JSON {ok, seq, error}. */
+function installInboxProbe(ipcMain, root, now) {
+  const g = root.__lbInboxProbe || (root.__lbInboxProbe = { seq: 0, calls: [], installed: false, error: null });
+  if (g.installed) return JSON.stringify({ ok: true, seq: g.seq, already: true });
+  const map = ipcMain && ipcMain._invokeHandlers;
+  const orig = map && typeof map.get === 'function' ? map.get('hive:inbox') : undefined;
+  if (typeof orig !== 'function') {
+    g.error = 'no hive:inbox handler in ipcMain._invokeHandlers: a completed poll cannot be observed';
+    return JSON.stringify({ ok: false, seq: g.seq, error: g.error });
+  }
+  const wrapped = async function (evt, ...args) {
+    const call = { seq: ++g.seq, id: typeof args[0] === 'string' ? args[0] : null, startedAt: now(), doneAt: null, ok: null, rows: null, error: null };
+    try {
+      const rows = await orig.call(this, evt, ...args);
+      call.ok = true;
+      call.rows = Array.isArray(rows) ? rows.map((r) => ({ id: String(r && r.id), state: r && r.mail_state != null ? String(r.mail_state) : 'unknown', body: String((r && r.body) || '').slice(0, 200) })) : [];
+      return rows;
+    } catch (e) {
+      call.ok = false; call.error = String(e && e.message);
+      throw e;
+    } finally {
+      call.doneAt = now();
+      g.calls.push(call);
+      if (g.calls.length > 64) g.calls.splice(0, g.calls.length - 64);
+    }
+  };
+  wrapped.__lbOriginal = orig;
+  map.set('hive:inbox', wrapped);
+  g.installed = true; g.error = null;
+  return JSON.stringify({ ok: true, seq: g.seq });
+}
+/** MAIN process: put the original handler back. */
+function uninstallInboxProbe(ipcMain, root) {
+  const g = root.__lbInboxProbe;
+  const map = ipcMain && ipcMain._invokeHandlers;
+  const cur = map && typeof map.get === 'function' ? map.get('hive:inbox') : undefined;
+  if (cur && typeof cur.__lbOriginal === 'function') map.set('hive:inbox', cur.__lbOriginal);
+  if (g) g.installed = false;
+  return JSON.stringify({ ok: !(map && map.get('hive:inbox') && map.get('hive:inbox').__lbOriginal) });
+}
+/** MAIN process: the current sequence number, and the NEWEST completed, successful call for the
+ *  agent that STARTED after `afterSeq` (null if none yet). */
+function inboxProbeQuery(root, agentId, afterSeq) {
+  const g = root.__lbInboxProbe;
+  if (!g) return JSON.stringify({ installed: false, seq: 0, call: null, error: 'probe not installed' });
+  let call = null;
+  for (const c of g.calls) if (c.ok && c.id === agentId && c.seq > afterSeq && (!call || c.seq > call.seq)) call = c;
+  return JSON.stringify({ installed: g.installed, seq: g.seq, call, error: g.error });
+}
+
+/** RENDERER: a small snapshot of the detail panel. The agent's name comes from the header's
+ *  "Rename <name>" button (AgentNameEditor; the visible name is upper-cased, so the aria-label is
+ *  the exact one), the tab states from SidebarTabs (the active tab has the cream-100 background:
+ *  the buttons carry no aria-selected), and the rows from the ThreadsPanel's state spans. */
+function domPanelSnapshot(doc, nonce) {
+  const edit = doc.querySelector('[aria-label="Edit this agent"]');
+  let h = edit;
+  while (h && !(h.querySelector && h.querySelector('button[aria-label^="Rename "]'))) h = h.parentElement;
+  const rename = h ? h.querySelector('button[aria-label^="Rename "]') : null;
+  const header = h ? { name: rename ? String(rename.getAttribute('aria-label')).slice('Rename '.length) : null, text: String(h.textContent || '').slice(0, 200) } : null;
+  const tabNames = ['terminal', 'history', 'messages', 'traces', 'git'];
+  const tabs = [...doc.querySelectorAll('button[aria-label]')].filter((b) => tabNames.includes(b.getAttribute('aria-label')))
+    .map((b) => ({ label: b.getAttribute('aria-label'), active: /cream-100/.test(String(b.getAttribute('style') || '')) }));
+  const spans = [...doc.querySelectorAll('span[title^="mail state:"]')];
+  const rows = spans.map((s) => {
+    const row = s.parentElement && s.parentElement.parentElement;
+    return { state: String(s.getAttribute('title')).slice('mail state: '.length), label: s.textContent, text: String((row && row.textContent) || '').slice(0, 300) };
+  });
+  return { at: Date.now(), header, tabs, messagesTabActive: tabs.some((t) => t.label === 'messages' && t.active), stateSpans: spans.length, rows, nonceRows: nonce ? rows.filter((r) => r.text.includes(nonce)).length : null };
+}
+
+/** Does the DOM show exactly what the completed poll returned, on the right agent's panel? */
+function panelMatchesPoll(snap, call, marker, nonce) {
+  if (!call) return { ok: false, why: 'no hive:inbox poll for the agent has completed since the mark' };
+  if (!snap || !snap.header) return { ok: false, why: 'no detail-panel header in the DOM' };
+  if (String(snap.header.name || '').toLowerCase() !== String(marker).toLowerCase()) return { ok: false, why: `the detail panel shows ${JSON.stringify(snap.header.name)}, not ${marker}` };
+  if (!snap.messagesTabActive) return { ok: false, why: 'the messages tab is not the active one' };
+  const want = call.rows.map((r) => r.state).sort();
+  const got = snap.rows.map((r) => r.state).sort();
+  if (JSON.stringify(want) !== JSON.stringify(got)) return { ok: false, why: `the DOM rows ${JSON.stringify(got)} are not the completed poll's ${JSON.stringify(want)}` };
+  const wantN = call.rows.filter((r) => r.body.includes(nonce)).length;
+  const gotN = snap.rows.filter((r) => r.text.includes(nonce)).length;
+  if (wantN !== gotN) return { ok: false, why: `the poll returned ${wantN} row(s) with the nonce, the DOM shows ${gotN}` };
+  return { ok: true, why: `poll #${call.seq} (done ${new Date(call.doneAt).toISOString()}) rendered: ${got.length} row(s), ${gotN} with the nonce` };
+}
+
+/** mail-hook-late rows in the hive log text(s). A row for a STUB agent is a runner defect (the stub
+ *  hook client hung up before reading the reply): `stub` lists those. `stubIds`: the stub agents;
+ *  `stubSince`: from this ts on every agent is a stub (the rollback's 1.1.74 phase), or null. */
+function lateHookRows(texts, stubIds, stubSince) {
+  const rows = [];
+  for (const t of texts) for (const l of String(t).split('\n')) {
+    if (!l.includes('mail-hook-late')) continue;
+    let r; try { r = JSON.parse(l); } catch { continue; }
+    if (r && r.kind === 'mail-hook-late') rows.push(r);
+  }
+  const stub = rows.filter((r) => stubIds.includes(r.agentId) || (stubSince != null && Number(r.ts) >= stubSince));
+  return { rows, stub };
+}
+
 /** The canary's stand-in CLI (cloned from packaged-wake-canary.cjs), plus one plumbing-only reply:
  *  on each typed turn it answers god with any LBN- token found in its own inbox files. That is a
  *  FILE READ, so a dry run never counts as proof of B1-B7: it only validates the plumbing. */
@@ -694,8 +802,21 @@ const AGENT_ID = ${JSON.stringify(agentId)}; const PIPE = ${JSON.stringify(pipe)
 const TYPED = ${JSON.stringify(typedLog)}; const DIR = ${JSON.stringify(agentDir)};
 const SESSION = 'layerb-stub-' + AGENT_ID; const STOP_DELAY_MS = ${Number(stopDelayMs) || 600};
 const answered = new Set();
+// Mirrors the real hook shim (src/main/hive.ts HOOK_SHIM): WRITE the payload (no half-close), READ
+// the whole reply, and only then hang up (on 'end'), capped at 5 s. The old c.end(payload) sent its
+// EOF at once: the server then auto-ends before its reply is written (measured: EOF ~50 ms in), so
+// the flush signal is meaningless and dry run #3 logged every mail block as mail-hook-late.
 function emit(payload) {
-  try { const c = net.createConnection(PIPE, function () { c.end(JSON.stringify(Object.assign({ agent_id: AGENT_ID, session_id: SESSION }, payload)) + '\\n'); }); c.on('error', function () {}); } catch (e) {}
+  try {
+    let settled = false; let cap = null;
+    const c = net.createConnection(PIPE, function () { c.write(JSON.stringify(Object.assign({ agent_id: AGENT_ID, session_id: SESSION }, payload)) + '\\n'); });
+    const finish = function () { if (settled) return; settled = true; if (cap) clearTimeout(cap); try { c.destroy(); } catch (e) {} };
+    cap = setTimeout(finish, 5000);
+    c.setEncoding('utf8');
+    c.on('data', function () {});
+    c.on('end', finish);
+    c.on('error', finish);
+  } catch (e) {}
 }
 function replyFromInbox() {
   if (AGENT_ID === 'god') return;
@@ -989,7 +1110,7 @@ class LayerB {
     this.procs = new ProcTracker();
     this.creds = new Credentials();
     this.ledgerHistory = {};   // agentId -> id -> [{t,state,hookKind,surfaceCount,epoch}]
-    this.samples = { b9: [], hidden: [] };
+    this.samples = { b9: [], b8: [], hidden: [] };
     this.tokens = {};
     this.appOut = '';
     this.startedAt = null;
@@ -1728,21 +1849,67 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     }
     await this.procs.scan();
   }
-  async threadRows() {
+  // ── B8: the panel, observed by condition (god: no fixed sleep) ────────────
+  async inboxProbe(kind, agentId, afterSeq) {
+    const root = 'globalThis';
+    const ipc = `process.mainModule.require('electron').ipcMain`;
+    const expr = kind === 'install' ? `(${installInboxProbe.toString()})(${ipc}, ${root}, Date.now)`
+      : kind === 'uninstall' ? `(${uninstallInboxProbe.toString()})(${ipc}, ${root})`
+        : `(${inboxProbeQuery.toString()})(${root}, ${JSON.stringify(agentId)}, ${Number(afterSeq) || 0})`;
+    return JSON.parse(await this.mainCdp.eval(expr, undefined, { sync: true }));
+  }
+  async panelSnapshot(nonce) {
+    return this.page.eval(`(${domPanelSnapshot.toString()})(document, ${JSON.stringify(nonce || '')})`);
+  }
+  /** Select the agent's card (unless it is already the current one) and open the messages tab.
+   *  Nothing here waits: waitPanelPoll proves the panel from a completed poll. */
+  async selectAgentPanel(agentId, name) {
     return this.page.eval(`(() => {
+      const want = ${JSON.stringify(String(name).toUpperCase())};
+      const cards = [...document.querySelectorAll('[role="button"]')].filter((x) => (x.textContent || '').toUpperCase().includes(want) && x.offsetParent !== null)
+        .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+      const card = cards[0] || null;
+      if (card && card.getAttribute('aria-current') !== 'true') card.click();
       const tab = document.querySelector('button[aria-label="messages"]');
-      if (tab && tab.getAttribute('aria-selected') !== 'true') tab.click();
-      return [...document.querySelectorAll('span[title^="mail state:"]')].map((s) => {
-        const row = s.parentElement && s.parentElement.parentElement;
-        return { state: s.title.slice('mail state: '.length), label: s.textContent, text: (row && row.textContent || '').slice(0, 300) };
-      });
+      if (tab && !/cream-100/.test(String(tab.getAttribute('style') || ''))) tab.click();
+      return { card: !!card, wasCurrent: !!card && card.getAttribute('aria-current') === 'true', tab: !!tab };
     })()`);
   }
-  async selectAgentPanel(agentId, name) {
-    // The roster seeds selectedId; if the panel shows someone else, click the agent's name.
-    await this.page.eval(`(() => { const want = ${JSON.stringify(name)}; const el = [...document.querySelectorAll('button,[role=button],div,span')].find(x => (x.textContent||'').trim() === want && x.offsetParent !== null); if (el) el.click(); return !!el; })()`);
-    await sleep(800);
-    await this.threadRows();
+  /** CONDITION wait: a hive:inbox poll for the agent that STARTED after `afterSeq` has COMPLETED
+   *  (main-process probe) and the DOM shows exactly its rows on the agent's panel. 10 s is only the
+   *  fail-safe cap: on it the result is {ok:false} with the snapshot (the caller FAILs B8). */
+  async waitPanelPoll(agentId, marker, afterSeq, nonce, label) {
+    const cap = Date.now() + 10_000;
+    let last = null;
+    for (;;) {
+      if (this.aborted()) throw new Error('aborted');
+      const q = await this.inboxProbe('query', agentId, afterSeq);
+      const snap = await this.panelSnapshot(nonce);
+      const m = panelMatchesPoll(snap, q.call, marker, nonce);
+      last = { label, afterSeq, probe: { installed: q.installed, seq: q.seq, error: q.error, call: q.call && { seq: q.call.seq, startedAt: q.call.startedAt, doneAt: q.call.doneAt, rows: q.call.rows.length } }, match: m, snap };
+      if (m.ok) return { ok: true, ...last };
+      if (!q.installed || Date.now() >= cap) return { ok: false, capped: Date.now() >= cap, ...last };
+      await sleep(250);   // the gap between two CONDITION checks; success needs the condition
+    }
+  }
+  /** The DOM rows AND the reader's rows in ONE renderer evaluation (the DOM is read first). */
+  async captureRowsAndInbox(agentId, nonce) {
+    return this.page.eval(`(async () => {
+      const dom = (${domPanelSnapshot.toString()})(document, ${JSON.stringify(nonce)});
+      let ipc = null; let ipcError = null;
+      try { ipc = (await window.cth.hiveInbox(${JSON.stringify(agentId)})).map((r) => ({ id: r.id, state: r.mail_state ?? 'unknown', hasNonce: String(r.body || '').includes(${JSON.stringify(nonce)}) })); } catch (e) { ipcError = String(e && e.message); }
+      return { dom, ipc, ipcError };
+    })()`);
+  }
+  /** Wait for a completed, rendered poll after this point, then capture; every step is recorded
+   *  (evidence b8-dom.json). */
+  async b8Observe(agentId, marker, nonce, label) {
+    const mark = await this.inboxProbe('query', agentId, 0);
+    const w = await this.waitPanelPoll(agentId, marker, mark.seq, nonce, label);
+    const cap = w.ok ? await this.captureRowsAndInbox(agentId, nonce) : null;
+    const rec = { label, wait: w, capture: cap };
+    this.samples.b8.push(rec);
+    return rec;
   }
 
   // ── the facts ─────────────────────────────────────────────────────────────
@@ -1760,6 +1927,22 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
 
   dryNote(plumbing) { return `dry-run stubs: not a proof of the real CLI; plumbing ${plumbing}`; }
 
+  /** B8's verdict. A wait that hits its 10 s cap (or a probe that cannot observe a completed poll)
+   *  is a FAIL with the DOM snapshot; the snapshots are in evidence/b8-dom.json. */
+  b8Verdict({ probe, selected, obsBefore, obsAfter, domBefore, domAfter, acted }) {
+    const snapOf = (o) => (o && o.wait ? JSON.stringify({ header: o.wait.snap && o.wait.snap.header, tabs: o.wait.snap && o.wait.snap.tabs, stateSpans: o.wait.snap && o.wait.snap.stateSpans, probe: o.wait.probe, why: o.wait.match && o.wait.match.why }) : 'none');
+    if (!probe || !probe.ok) return ['FAIL', `the Threads poll completion cannot be observed (${probe && probe.error}); no timing fallback. Selection: ${JSON.stringify(selected)}`];
+    for (const o of [obsBefore, obsAfter]) {
+      if (o && !o.wait.ok) return ['FAIL', `${o.label}: no completed, rendered Threads poll for ${IDS.claude} within the 10 s cap: ${o.wait.match.why}; snapshot ${snapOf(o)}`];
+    }
+    const ipcN = (o) => (o.capture && Array.isArray(o.capture.ipc) ? o.capture.ipc.filter((r) => r.hasNonce).map((r) => r.state) : `error: ${o.capture && o.capture.ipcError}`);
+    const detail = `panel header ${JSON.stringify(obsBefore.wait.snap.header && obsBefore.wait.snap.header.name)} (${obsBefore.wait.match.why}); Threads DOM rows for the message: before Stop ${JSON.stringify(domBefore.map((r) => r.label))} (hive:inbox in the same evaluation: ${JSON.stringify(ipcN(obsBefore))}), after Stop/acted ${JSON.stringify(domAfter.map((r) => r.label))} (hive:inbox: ${JSON.stringify(ipcN(obsAfter))})`;
+    if (!domBefore.length) return ['FAIL', `${detail} (the ledger said delivered, yet the rendered poll shows no row for it)`];
+    if (!acted) return ['NOT-PROVEN', `${detail} (the message never reached acted)`];
+    const ok = domAfter.length >= domBefore.length && domAfter.some((r) => /handled/.test(r.label));
+    return [ok ? 'PASS' : 'FAIL', detail];
+  }
+
   /** B9 + B1 + B8 (Claude): held delivered while delivery is paused (B9 samples), then woken:
    *  the <hive-mail> body reaches the model at UserPromptSubmit (B1); the Threads DOM keeps the row
    *  across Stop (B8). */
@@ -1770,8 +1953,12 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const since = Date.now();
     const id = this.send(C, 'B1', `${N1}\n\nReply to god now with one hive message (act "inform") whose body is exactly this token: ${N1}\nDo not read, list or open any file for this. Do nothing else.`);
     await this.waitState(C, id, ['delivered'], 120_000);
+    // B8 (god): the Threads rows are read only once a poll has COMPLETED after the selection and is
+    // RENDERED (main-process hive:inbox probe + DOM match); no fixed sleep decides anything.
+    let probe;
+    try { probe = await this.inboxProbe('install'); } catch (e) { probe = { ok: false, error: `probe install: ${e && e.message}` }; }
+    const selected = await this.selectAgentPanel(C, this.markerV1);
     // B9: while the LEDGER says delivered, the renderer queue's precondition reader must say non-empty.
-    await this.selectAgentPanel(C, this.markerV1);
     let violations = 0;
     for (let i = 0; i < 10; i++) {
       const before = this.entry(C, id);
@@ -1783,25 +1970,24 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.samples.b9.push({ at: Date.now(), held, pending, ok });
       await sleep(2000);
     }
-    const domBefore = (await this.threadRows()).filter((r) => r.text.includes(N1));
+    const obsBefore = probe.ok ? await this.b8Observe(C, this.markerV1, N1, 'before Stop (held delivered)') : null;
     await this.page.eval(`window.cth.controlAutoDelivery(${JSON.stringify(C)}, false)`);
     const heldSamples = this.samples.b9.filter((x) => x.held).length;
     let reply = null;
     try { reply = await this.waitReply(C, N1, 6 * 60_000); } catch (e) { log(`B1: ${e.message}`); }
     let acted = null;
     try { acted = await this.waitState(C, id, ['acted'], 3 * 60_000); } catch (e) { log(`B1: ${e.message}`); }
-    await sleep(4000);   // the Threads panel polls every 3 s
-    const domAfter = (await this.threadRows()).filter((r) => r.text.includes(N1));
+    const obsAfter = probe.ok ? await this.b8Observe(C, this.markerV1, N1, 'after Stop/acted') : null;
+    try { await this.inboxProbe('uninstall'); } catch (e) { log(`B8: probe uninstall: ${e && e.message}`); }
+    const nonceRows = (o) => (o && o.capture ? o.capture.dom.rows.filter((r) => r.text.includes(N1)) : []);
+    const domBefore = nonceRows(obsBefore);
+    const domAfter = nonceRows(obsAfter);
     // B9 (round 7): a miss is a FAIL; "acted never reached" alone is NOT-PROVEN, never a FAIL.
     const b9 = violations > 0 ? 'FAIL' : (heldSamples < 5 ? 'NOT-PROVEN' : (!acted ? 'NOT-PROVEN' : 'PASS'));
     this.fact('B9', b9,
       `${heldSamples} samples with the ledger at delivered; ${violations} where hive:mailPending (the queue precondition's reader) lacked it; later acted: ${!!acted}`
       + (b9 === 'NOT-PROVEN' && !acted && heldSamples >= 5 ? ' (NOT-PROVEN: the message never reached acted, so "never dropped while delivered" is not shown through to the end)' : ''));
-    const panel = await this.page.eval(`(() => { const t = document.querySelector('[data-testid="agent-effective-model"]'); let n = t; for (let i = 0; n && i < 8; i++) n = n.parentElement; return n ? (n.textContent || '').includes(${JSON.stringify(this.markerV1)}) : null; })()`).catch(() => null);
-    const b8ok = domBefore.length >= 1 && domAfter.length >= domBefore.length && !!acted && domAfter.some((r) => /handled/.test(r.label));
-    this.fact('B8', b8ok ? 'PASS' : (domBefore.length ? (acted ? 'FAIL' : 'NOT-PROVEN') : 'NOT-PROVEN'),
-      `the detail panel shows ${this.markerV1}: ${panel}; Threads DOM rows for the message: before Stop ${JSON.stringify(domBefore.map((r) => r.label))}, after Stop/acted ${JSON.stringify(domAfter.map((r) => r.label))}`
-      + (!domBefore.length ? (panel === false ? ' (NOT-PROVEN: the panel shows another agent)' : ' (NOT-PROVEN: no row to follow)') : ''));
+    this.fact('B8', ...this.b8Verdict({ probe, selected, obsBefore, obsAfter, domBefore, domAfter, acted }));
     const kinds = this.seenHookKinds(C, id);
     const inboxCalls = this.inboxToolCalls(C, since);
     if (this.args.dryRun) return this.fact('B1', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} acted=${!!acted} hookKinds=${kinds.join(',')}`));
@@ -2102,6 +2288,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     W.writeJson(path.join(s.hive, 'registry.json'), reg);
     const typedBefore = fs.readFileSync(this.typed[C], 'utf8').length;
     const rowsBefore = this.rows().length;
+    this.allStubsSince = Date.now();   // from here every agent runs a stub TUI (lateHookRows)
     await this.launch(this.exe174, '1.1.74+seams (rollback)');
     await this.openTheConfig();
     await this.waitAgentsUp('rollback');
@@ -2196,12 +2383,24 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       liveWatch = this.liveWatch ? this.liveWatch.compare(this.markers()) : null;
       if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only)', liveWatch.failures.join('; '));
     } catch (e) { this.check(false, 'live-location check', e.message); }
+    try { this.assertNoStubLateHooks(); } catch (e) { this.check(false, 'the hive log was read for mail-hook-late rows', e.message); }
     let evidence = null;
     try { evidence = this.collectEvidence(); } catch (e) { this.check(false, 'the evidence was collected', e.message); }
     const keep = !!this.exitUnproven || this.args.keepSandbox;
     let sandboxRemoved = false;
     if (!keep) { try { W.rm(this.s.base); sandboxRemoved = !fs.existsSync(this.s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } this.check(sandboxRemoved, 'the sandbox was removed', this.s.base); }
     return { credentials, buildCleanup, liveWatch, evidence, survivors, sandboxRemoved };
+  }
+
+  /** A stub hook client reads every reply (it mirrors the real shim), so ANY mail-hook-late row for
+   *  a stub agent is a runner defect that fakes mail loss: the run FAILS and the report lists them. */
+  assertNoStubLateHooks() {
+    const texts = walk(this.s.hive, (p) => /log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive).map((p) => fs.readFileSync(p, 'utf8'));
+    const stubIds = this.spec.filter((a) => a.stub).map((a) => a.id);
+    const late = lateHookRows(texts, stubIds, this.allStubsSince || null);
+    this.lateHooks = late;
+    this.check(late.stub.length === 0, 'no mail-hook-late row for a STUB agent (its hook client reads every reply, like the real shim)',
+      late.stub.length ? `${late.stub.length} row(s): ${late.stub.slice(0, 5).map((r) => `${r.agentId} ${r.hookKind} ${JSON.stringify(r.ids)} latency ${r.latencyMs}`).join('; ')}` : `${late.rows.length} late row(s) in all, none for a stub`);
   }
 
   // ── evidence + report ─────────────────────────────────────────────────────
@@ -2227,6 +2426,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     W.write(path.join(dst, 'app-output.log'), redact(this.appOut));
     W.write(path.join(dst, 'ledger-history.json'), redact(JSON.stringify(this.ledgerHistory, null, 2)));
     W.write(path.join(dst, 'samples.json'), redact(JSON.stringify({ ...this.samples, windowWatch: this.watchHits || [] }, null, 2)));
+    W.write(path.join(dst, 'b8-dom.json'), redact(JSON.stringify(this.samples.b8 || [], null, 2)));
     W.write(path.join(dst, 'proofs.json'), redact(JSON.stringify(this.proofs || {}, null, 2)));
     this.check(skipped.length === 0, 'every evidence file was copied', skipped.join('; '));
     return dst;
@@ -2276,6 +2476,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       `Windows: ${this.samples.hidden.length} isVisible checks; window-watch hits ${(this.watchHits || []).length}.`,
       `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base} — ${extra.sandboxRemoved ? 'REMOVED' : `KEPT (${extra.survivors && extra.survivors.length ? `no proof that every process exited: ${extra.survivors.join(', ')}` : (this.args.keepSandbox ? '--keep-sandbox' : 'removal failed or never created; see the checks')})`}`,
       `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`, '',
+      '## mail-hook-late rows', '', ...(this.lateHooks ? [
+        `- ${this.lateHooks.stub.length ? 'FAIL' : 'PASS'}: ${this.lateHooks.stub.length} row(s) for a stub agent (a runner defect: the stub hung up before the reply); ${this.lateHooks.rows.length} in all`,
+        ...this.lateHooks.rows.map((r) => `- ${this.lateHooks.stub.includes(r) ? '**stub** ' : ''}${new Date(Number(r.ts) || 0).toISOString()} ${r.agentId} ${r.hookKind}/${r.transport} ids ${JSON.stringify(r.ids)} epoch ${r.epoch} latency ${r.latencyMs} (limit ${r.limitMs})`)
+      ] : ['- not read (the teardown did not reach the log)']), '',
       '## Inconclusive', '', ...(this.inconclusive.length ? this.inconclusive.map((x) => `- ${x}`) : ['- none']), '',
       '## Processes', '', `- surviving (no proof of exit): ${(extra.survivors || []).length ? extra.survivors.join(', ') + ' — the sandbox and the 1.1.74 worktree were KEPT' : 'none'}`, '',
       '## codex sandbox windows --help (real run)', '', extra.codexHelp ? '```\n' + extra.codexHelp.text + '\n```' : '- not run (dry run, or not reached)', '',
@@ -2392,7 +2596,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

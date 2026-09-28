@@ -695,20 +695,23 @@ test('round 7 (4): CDP evaluation: main-process expressions never await a promis
   await assert.rejects(mk([Object.assign((c) => { c.contextsCreated += 2; }, { msg: 'Execution context was destroyed.' })]).c.eval('p()'), /destroyed/);
   await assert.rejects(mk(['Target closed']).c.eval('p()'), /Target closed/);
   // The runner's two main-process evaluations are the sync kind.
-  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 2);
+  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 3, 'the userData/packaged check, the window list, the B8 hive:inbox probe');
   assert.ok(!/this\.mainCdp\.eval\((?![\s\S]*?\{ sync: true \})/.test(src.replace(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g, '')));
 });
 
-test('round 7: B9 NOT-PROVEN (not FAIL) when acted is never reached; B8 checks the panel; Claude restored last; the stub echoes task tokens; the god can only be the stub', () => {
+test('round 7: B9 NOT-PROVEN (not FAIL) when acted is never reached; B8 checks the panel HEADER (dry run #3); Claude restored last; the stub echoes task tokens; the god can only be the stub', () => {
   const b = src.slice(src.indexOf('async factB1B8B9() {'), src.indexOf('async factB2() {'));
   assert.match(b, /const b9 = violations > 0 \? 'FAIL' : \(heldSamples < 5 \? 'NOT-PROVEN' : \(!acted \? 'NOT-PROVEN' : 'PASS'\)\);/);
-  assert.match(b, /data-testid="agent-effective-model"/);
+  // Dry run #3: agent-effective-model renders only with a known run model (never on a stub); the
+  // panel is now proven from the header's Rename button per completed poll (layer-b-b8-stub.test.cjs).
+  assert.ok(!/agent-effective-model/.test(b));
+  assert.match(b, /this\.fact\('B8', \.\.\.this\.b8Verdict\(/);
   const seed = src.slice(src.indexOf('  seed() {'), src.indexOf('  writeRoster(map) {'));
   assert.ok(seed.indexOf('{ id: IDS.codex, name:') < seed.indexOf('{ id: IDS.claude, name:'), 'Claude is restored last, so it stays selected');
   assert.match(seed, /defaultCommand: spec\.find\(\(a\) => a\.id === IDS\.god\)\.command,/);
   assert.match(seed, /godProvider: 'claude',/);
   assert.match(src, /match\(\/LB\[NT\]-\[0-9a-f\]\{8\}\/g\)/);
-  const up = src.slice(src.indexOf('async waitAgentsUp(label) {'), src.indexOf('async threadRows() {'));
+  const up = src.slice(src.indexOf('async waitAgentsUp(label) {'), src.indexOf('async inboxProbe(kind, agentId, afterSeq) {'));
   assert.match(up, /const ok = !!god && norm\(String\(god\.command\)\) === norm\(this\.node\);/);
   assert.match(up, /this\.stop\(`\$\{label\}: the god PTY is not the stub/);
 });
