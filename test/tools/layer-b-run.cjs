@@ -62,7 +62,7 @@ const isolation = require(path.join(REPO, 'test', 'mail-rig', 'isolation.cjs'));
 const V1174_SHA = 'b5e22e0b';
 const CAPS = { perAgentTokens: 400_000, totalTokens: 1_000_000, wallMs: 30 * 60_000 };
 /** Rough per-fact token estimates; a fact is skipped (NOT-PROVEN, "budget") when it cannot fit. */
-const FACT_EST = { B1: 40_000, B2: 70_000, B4: 45_000, B3: 190_000, B5: 45_000, B6: 130_000, B7: 160_000 };
+const FACT_EST = { B1: 40_000, B2: 70_000, B4: 45_000, B3: 190_000, B5: 45_000, B6: 150_000, B7: 160_000 };
 const DEFAULT_MODELS = { claude: 'claude-haiku-4-5-20251001', codex: 'gpt-5.6-luna' };
 const IDS = { claude: 'lb-claude', codex: 'lb-codex', god: 'god' };
 const NUDGE_HEADS = ['You have new hive mail', 'You have new hive inbox message(s)'];
@@ -438,6 +438,62 @@ class Credentials {
       return { label: c.label, real: c.real, unchanged: !!st && st.mtimeMs === c.mtimeMs && st.size === c.size };
     });
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────── B6 tiers (pure)
+
+/** Strip every <hive-mail>...</hive-mail> block (those are what B6 measures, not growth). */
+const withoutMail = (text) => String(text).replace(/<hive-mail[\s\S]*?<\/hive-mail>/g, '');
+
+/**
+ * B6 tiers 1 and 2 from a Codex rollout (pure: events in, verdict out). turnStart[k] is when turn
+ * k+1's mail was sent; nonces[k] its nonce; blocks[k] its mail block in tokens (~4 chars/token).
+ * Turns are the rollout's task_started segments at/after turnStart[0].
+ */
+function b6Tiers(events, { turnStart, nonces, blocks }) {
+  const ts = (e) => (e && e.timestamp ? Date.parse(e.timestamp) : NaN);
+  const evs = events.filter((e) => ts(e) >= turnStart[0]).sort((a, b) => ts(a) - ts(b));
+  const isStart = (e) => e.payload && /^(task_started|turn_started)$/.test(String(e.payload.type));
+  const segs = [];
+  for (const e of evs) { if (isStart(e)) segs.push([]); if (segs.length) segs[segs.length - 1].push(e); }
+  const usage = (seg) => seg.filter((e) => e.payload && e.payload.type === 'token_count' && e.payload.info && e.payload.info.last_token_usage).map((e) => e.payload.info.last_token_usage);
+  const out = { tier1: '', tier2: '', verdict: null, retained: null, ratio: null };
+  if (segs.length < 4 || usage(segs[0]).length === 0 || usage(segs[3]).length === 0) {
+    out.tier1 = `not measurable (${segs.length} turn segments; need 4 with token counts)`;
+  } else {
+    const in1 = usage(segs[0])[0].input_tokens || 0;
+    const in4 = usage(segs[3])[0].input_tokens || 0;
+    let outputs = 0;
+    for (const seg of segs.slice(0, 3)) for (const u of usage(seg)) outputs += u.output_tokens || 0;
+    const textOf = (e) => { const p = e.payload || {}; return withoutMail(JSON.stringify(p.content || p.arguments || p.output || p.input || p.action || '')); };
+    let chars = 0;
+    // Model OUTPUT (assistant text, reasoning, tool-call arguments) is already in `outputs`; count
+    // only what enters the history from outside the model: turn texts and tool outputs.
+    const external = (e) => e.type === 'response_item' && e.payload
+      && ((e.payload.type === 'message' && /^(user|developer)$/.test(String(e.payload.role))) || /_output$/.test(String(e.payload.type)));
+    for (const seg of segs.slice(0, 3)) for (const e of seg) if (external(e)) chars += textOf(e).length;
+    for (const e of segs[3]) { if (e.type === 'response_item' && e.payload && e.payload.role === 'user') { chars += textOf(e).length; break; } }
+    const growth = outputs + Math.round(chars / 4);
+    const earlier = blocks.slice(0, 3).reduce((a, b) => a + b, 0);
+    const retained = in4 - in1 - growth - (blocks[3] || 0) + (blocks[0] || 0);
+    const ratio = earlier > 0 ? retained / earlier : null;
+    out.retained = Math.round(retained); out.ratio = ratio;
+    out.verdict = ratio === null ? null : (ratio >= 0.5 ? 'FAIL' : (ratio < 0.1 ? 'PASS' : null));
+    out.tier1 = `in1 ${in1}, in4 ${in4}, growth ${growth} (outputs ${outputs} + ~${Math.round(chars / 4)} text), blocks ${blocks.map((b) => Math.round(b)).join('/')}: retained ~${Math.round(retained)} = ${ratio === null ? '?' : Math.round(ratio * 100)}% of the ${Math.round(earlier)} earlier-block tokens -> ${out.verdict || 'NOT-PROVEN'} (FAIL >= 50%, PASS < 10%)`;
+  }
+  const compacted = evs.filter((e) => e.type === 'compacted' || (e.payload && e.payload.type === 'compacted'));
+  const early = nonces.slice(0, 3);
+  if (compacted.length) {
+    const hist = JSON.stringify(compacted.map((e) => (e.payload && e.payload.replacement_history) || []));
+    const kept = early.filter((n) => hist.includes(n));
+    out.tier2 = `a compaction happened: replacement_history carries ${kept.length} of the turn 1-3 nonces${kept.length ? ` (${kept.join(',')})` : ''}`;
+  } else {
+    const t4 = segs[3] ? ts(segs[3][0]) : Infinity;
+    const persisted = evs.filter((e) => e.type === 'response_item' && /<hive-mail/.test(JSON.stringify(e.payload || {})));
+    const carry = persisted.filter((e) => early.some((n) => JSON.stringify(e.payload).includes(n)));
+    out.tier2 = `persisted response_items with <hive-mail>: ${persisted.length}; carrying a turn 1-3 nonce: ${carry.length} (${carry.filter((e) => ts(e) < t4).length} before turn 4)`;
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── the run
@@ -957,9 +1013,12 @@ class LayerB {
   async guard(ids, fn) {
     try { await fn(); } catch (e) {
       if (this.aborted()) throw e;
-      for (const id of ids) if (!this.facts[id]) this.fact(id, 'NOT-PROVEN', `error: ${e && e.message}`);
+      for (const id of ids) if (!this.facts[id]) this.fact(id, this.unproven(id), `error: ${e && e.message}`);
     }
   }
+
+  /** What an unproven fact is reported as: B7 is GATE-BLOCKED in a real run (§11.18 items 50-53). */
+  unproven(id) { return id === 'B7' && !this.args.dryRun ? 'GATE-BLOCKED' : 'NOT-PROVEN'; }
 
   dryNote(plumbing) { return `dry-run stubs: not a proof of the real CLI; plumbing ${plumbing}`; }
 
@@ -1035,19 +1094,39 @@ class LayerB {
       reply ? [reply.p] : []);
   }
 
-  /** B5 + B6 (Codex): Route A context reaches the model; and after 3 wakes the 4th turn's retained
-   *  history holds no earlier <hive-mail> block. */
+  /** B5 + B6 (Codex). B5: Route A context reaches the model. B6 (§11.18 items 50-53, Creed on
+   *  Q44): is the mail block RETAINED across turns? Three tiers, all reported; tier 1 decides.
+   *   1. PRIMARY, token delta: turns 1-3 carry a ~2k-token padded block around a unique nonce.
+   *      retained = in4 - in1 - growth - block4 + block1, where in_k is the input_tokens of turn k's
+   *      FIRST request (rollout token_count), growth = the conversation's own growth between them
+   *      (output tokens of every turn 1-3 request, exact; plus turn texts, tool calls and tool
+   *      outputs persisted in turns 1-3 and turn 4's own prompt, ~4 chars/token, <hive-mail> text
+   *      excluded), and block_k = turn k's mail block (~4 chars/token). Full retention gives the sum
+   *      of blocks 1-3, none gives 0. >= 50% of that sum: FAIL; < 10%: PASS; between: NOT-PROVEN.
+   *   2. SUPPORTING: persisted response_items carrying an earlier turn's nonce; after a compaction,
+   *      the compacted item's replacement_history instead.
+   *   3. TERTIARY: turn 4 asks for turn 1's nonce; the answer is recorded.
+   *  A B6 FAIL is a DESIGN finding (the CODEX-BLOAT retention), not a runner bug. */
   async factB5B6() {
     const X = IDS.codex;
     const since = Date.now();
-    const filler = 'Background (no action needed): ' + 'the quick brown fox jumps over the lazy dog. '.repeat(60);
+    const pad = (n) => { const w = 'the quick brown fox jumps over the lazy dog'.split(' '); const out = []; for (let i = 0; i < n; i++) out.push(w[i % w.length]); return out.join(' '); };
+    // ~2k tokens: ~1,600 filler words (about 1.2 tokens per word here) split around the nonce.
+    const padded = (N) => '\n Background (no action needed): ' + pad(800) + '\n\n' + N + '\n\n' + pad(800);
     const nonces = [];
     const replies = [];
+    const blocks = [];
+    const turnStart = [];
     for (let turn = 1; turn <= 4; turn++) {
       if (turn > 1 && !this.fits(X, 'B6')) { this.fact('B6', 'NOT-PROVEN', `budget/wall-clock: stopped before turn ${turn}`); break; }
       const N = nonce();
       nonces.push(N);
-      const id = this.send(X, turn === 1 ? 'B5' : `B6T${turn}`, `${N}\n\nReply to god now with one hive message (act "inform") whose body is exactly this token: ${N}\nDo not read, list or open any file for this.\n\n${filler}`);
+      const body = turn < 4
+        ? `${N}\n\nReply to god now with one hive message (act "inform") whose body is exactly this token: ${N}\nDo not read, list or open any file for this.\n${padded(N)}`
+        : `${N}\n\nWithout reading any file: what was the LBN- token in the FIRST hive mail you received in this conversation? Reply to god with one hive message (act "inform") whose body is: ${N} followed by that token, or ${N} UNKNOWN if you do not have it.`;
+      blocks.push(body.length / 4);
+      turnStart.push(Date.now());
+      const id = this.send(X, turn === 1 ? 'B5' : `B6T${turn}`, body);
       let r = null;
       try { r = await this.waitReply(X, N, 6 * 60_000); } catch (e) { log(`B5/B6 turn ${turn}: ${e.message}`); }
       replies.push(r);
@@ -1062,18 +1141,16 @@ class LayerB {
     }
     if (this.facts.B6) return;
     if (this.args.dryRun) return this.fact('B6', 'NOT-PROVEN', this.dryNote(`${replies.filter(Boolean).length}/4 replies`));
-    // Mechanical: a persisted history item (response_item) carrying an EARLIER turn's <hive-mail>
-    // block at or after the 4th turn started is retention. Evidence: per-turn input tokens.
-    const ev = this.codexEvents();
-    const persisted = ev.filter((e) => e.type === 'response_item' && /<hive-mail/.test(JSON.stringify(e.payload || {})));
-    const retainedEarlier = persisted.filter((e) => nonces.slice(0, 3).some((n) => JSON.stringify(e.payload).includes(n)));
-    const inputs = ev.filter((e) => e.payload && e.payload.type === 'token_count' && e.payload.info && e.payload.info.last_token_usage)
-      .map((e) => e.payload.info.last_token_usage.input_tokens);
     const all4 = replies.length === 4 && replies.every(Boolean);
-    const persistedAny = persisted.length;
-    this.fact('B6', !all4 ? 'NOT-PROVEN' : (retainedEarlier.length ? 'FAIL' : 'PASS'),
-      `4 wakes replied: ${all4}; persisted history items with <hive-mail>: ${persistedAny}, carrying turn 1-3 nonces: ${retainedEarlier.length}; per-request input tokens: ${inputs.join(',')}. `
-      + 'Method: the rollout\'s persisted response_items (see NOTES: confirm with god/Creed that this is the retained input).', this.codexRollouts());
+    const t = b6Tiers(this.codexEvents(), { turnStart, nonces, blocks });
+    // Tier 3: the turn-4 answer.
+    const r4 = replies[3] ? String(replies[3].m.body) : '';
+    const recalled = !!r4 && r4.includes(nonces[0]);
+    const tier3 = !replies[3] ? 'no turn-4 reply' : (recalled ? `recalled turn 1's nonce ${nonces[0]}` : `did not recall it (${JSON.stringify(r4.slice(0, 80))})`);
+    const status = !all4 || t.verdict === null ? 'NOT-PROVEN' : t.verdict;
+    this.fact('B6', status,
+      `TIER 1 (decides): ${t.tier1}. TIER 2: ${t.tier2}. TIER 3: ${tier3}. 4 wakes replied: ${all4}.`
+      + (status === 'FAIL' ? ' A FAIL is a DESIGN finding (mail blocks retained across Codex turns), not a runner bug.' : ''), this.codexRollouts());
   }
 
   /** Phase B: stop the app, change the Claude prompt marker (its agent name), relaunch with resume;
@@ -1140,24 +1217,51 @@ class LayerB {
       reply ? [reply.p] : []);
   }
 
-  /** B7 (Codex): force compaction mid-epoch; RECORD whether a compact-source SessionStart fires and
-   *  whether the re-surface path is used (§11.18 #21: a release gate either way). */
+  /** B7 (Codex), §11.18 items 50-53 (Creed on Q45): FORCE a compaction mid-epoch by typing
+   *  /compact into the running turn (on top of the lowered 40k auto-compact limit); if none happens,
+   *  retry ONCE. Then RECORD whether a compact-source SessionStart fired and whether the re-surface
+   *  path was used. PASS = a compaction really happened inside the epoch and was recorded. If none can
+   *  be forced: GATE-BLOCKED (god decides). NOT-PROVEN never passes the gate, and B7 is never PASS
+   *  without a mid-epoch compaction. */
   async factB7() {
     const X = IDS.codex;
-    const N7 = nonce();
+    if (this.args.dryRun) return this.fact('B7', 'NOT-PROVEN', this.dryNote('no compaction is possible on a stub'));
     const bulkPath = path.join(this.spec.find((a) => a.id === X).cwd, 'b7-bulk.txt');
-    const since = Date.now();
-    const id = this.send(X, 'B7', `${N7}\n\nTask: print the file ${bulkPath} to your terminal in four parts (lines 1-400, 401-800, 801-1200, 1201-1601) with four separate shell commands. Then reply to god with one hive message (act "inform") whose body is: ${N7} followed by the last line of that file.`);
-    let reply = null;
-    try { reply = await this.waitReply(X, N7, 8 * 60_000); } catch (e) { log(`B7: ${e.message}`); }
-    const ev = this.codexEvents().filter((e) => e.timestamp && Date.parse(e.timestamp) >= since);
-    const compacted = ev.some((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e)));
-    const compactHook = this.rows().filter((r) => r.ts >= since && r.agentId === X && /"source":"compact"/.test(JSON.stringify(r)));
-    const kinds = this.seenHookKinds(X, id);
-    if (this.args.dryRun) return this.fact('B7', 'NOT-PROVEN', this.dryNote(`reply=${!!reply}`));
-    this.fact('B7', compacted ? 'PASS' : 'NOT-PROVEN',
-      `RECORD: compaction mid-epoch: ${compacted}; compact-source SessionStart seen: ${compactHook.length > 0}; re-surface path used: ${kinds.includes('SessionStart')} (hookKinds ${kinds.join(',') || 'none'}); reply quoting the nonce: ${!!reply}`,
-      this.codexRollouts());
+    const tries = [];
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (attempt > 1 && !this.fits(X, 'B7')) { tries.push({ attempt, skipped: 'budget/wall-clock' }); break; }
+      const N7 = nonce();
+      const since = Date.now();
+      const id = this.send(X, `B7A${attempt}`, `${N7}\n\nTask: print the file ${bulkPath} to your terminal in four parts (lines 1-400, 401-800, 801-1200, 1201-1601) with four separate shell commands, one at a time. Then reply to god with one hive message (act "inform") whose body is: ${N7} followed by the last line of that file.`);
+      let typed = false;
+      try {
+        // Mid-epoch = the turn has started (the mail is surfacing/surfaced) and made a tool call.
+        await this.waitState(X, id, ['surfacing', 'surfaced'], 5 * 60_000);
+        await this.waitFor('the B7 turn\'s first tool call', 3 * 60_000, () => this.codexEvents().some((e) => e.timestamp && Date.parse(e.timestamp) >= since
+          && e.payload && /function_call|local_shell_call|custom_tool_call/.test(String(e.payload.type))));
+        await this.page.eval(`window.cth.writePty(${JSON.stringify(`pty-${X}`)}, '/compact', 'HUMAN')`);
+        await sleep(700);
+        await this.page.eval(`window.cth.writePty(${JSON.stringify(`pty-${X}`)}, '\\r', 'HUMAN')`);
+        typed = true;
+      } catch (e) { log(`B7 attempt ${attempt}: ${e.message}`); }
+      let reply = null;
+      try { reply = await this.waitReply(X, N7, 8 * 60_000); } catch (e) { log(`B7 attempt ${attempt}: ${e.message}`); }
+      let acted = null;
+      try { acted = await this.waitState(X, id, ['acted'], 3 * 60_000); } catch { /* recorded below */ }
+      const end = acted && acted.actedAt ? acted.actedAt : Date.now();
+      const ev = this.codexEvents().filter((e) => e.timestamp && Date.parse(e.timestamp) >= since);
+      const compactAt = ev.filter((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e))).map((e) => Date.parse(e.timestamp));
+      const midEpoch = compactAt.some((t) => t <= end);
+      const compactHook = this.rows().filter((r) => r.ts >= since && r.agentId === X && /"source":"compact"/.test(JSON.stringify(r)));
+      const kinds = this.seenHookKinds(X, id);
+      tries.push({ attempt, typed, compactions: compactAt.length, midEpoch, compactHook: compactHook.length, resurfaced: kinds.includes('SessionStart'), kinds, reply: !!reply });
+      if (midEpoch) break;
+    }
+    const hit = tries.find((t) => t.midEpoch);
+    const detail = tries.map((t) => t.skipped ? `attempt ${t.attempt}: skipped (${t.skipped})`
+      : `attempt ${t.attempt}: /compact typed ${t.typed}; compactions ${t.compactions}, mid-epoch ${t.midEpoch}; compact-source SessionStart ${t.compactHook > 0}; re-surface path used ${t.resurfaced} (hookKinds ${t.kinds.join(',') || 'none'}); reply ${t.reply}`).join(' | ');
+    this.fact('B7', hit ? 'PASS' : 'GATE-BLOCKED', `RECORD: ${detail}`
+      + (hit ? '' : '. No mid-epoch compaction could be forced after one retry: GATE-BLOCKED, god decides.'), this.codexRollouts());
   }
 
   /** N4 against the BUILT artefact: the packaged CHANGELOG (app:info's reader) + the rollback text. */
@@ -1289,7 +1393,7 @@ class LayerB {
   report(extra) {
     const s = this.s;
     const order = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B9', 'N4', 'ROLLBACK'];
-    for (const f of order) if (!this.facts[f]) this.fact(f, 'NOT-PROVEN', this.aborted() ? `not reached: ${this.abort.signal.reason && this.abort.signal.reason.message}` : 'not reached');
+    for (const f of order) if (!this.facts[f]) this.fact(f, this.unproven(f), this.aborted() ? `not reached: ${this.abort.signal.reason && this.abort.signal.reason.message}` : 'not reached');
     const facts = order.map((f) => this.facts[f]);
     const asserted = this.args.dryRun ? facts.filter((f) => ['B8', 'B9', 'N4', 'ROLLBACK'].includes(f.id)) : facts;
     const ok = asserted.every((f) => f.status === 'PASS') && this.checks.every((c) => c.ok);
@@ -1362,7 +1466,7 @@ class LayerB {
         if (this.fits(IDS.claude, 'B3')) await this.guard(['B3'], () => this.factB3()); else this.fact('B3', 'NOT-PROVEN', 'budget');
       })();
       const codexB = (async () => {
-        if (this.fits(IDS.codex, 'B7')) await this.guard(['B7'], () => this.factB7()); else this.fact('B7', 'NOT-PROVEN', 'budget');
+        if (this.fits(IDS.codex, 'B7')) await this.guard(['B7'], () => this.factB7()); else this.fact('B7', this.unproven('B7'), 'budget');
       })();
       const settledB = await Promise.allSettled([claudeB, codexB]);
       for (const r of settledB) if (r.status === 'rejected') log(`phase B: ${r.reason && r.reason.message}`);
@@ -1394,7 +1498,7 @@ class LayerB {
   }
 }
 
-module.exports = { W, liveForbidden, inside, parseArgs, CAPS, Credentials, ProcTracker, stubSource, LayerB, IDS, DEFAULT_MODELS };
+module.exports = { b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, Credentials, ProcTracker, stubSource, LayerB, IDS, DEFAULT_MODELS };
 
 if (require.main === module) {
   let lb = null;

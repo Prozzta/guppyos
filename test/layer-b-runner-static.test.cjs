@@ -129,3 +129,63 @@ test('ProcTracker: grows the tree, keeps orphans, and never adopts a stranger th
   assert.equal(t.known.has(999), false);
   assert.equal(t.known.get(200).created, '1100', 'the record keeps OUR process identity');
 });
+
+// ─── §11.18 items 50-53 (Creed on Q44/Q45)
+
+test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {
+  const t0 = Date.parse('2026-09-28T10:00:00Z');
+  const at = (s) => new Date(t0 + s * 1000).toISOString();
+  const nonces = ['LBN-00000001', 'LBN-00000002', 'LBN-00000003', 'LBN-00000004'];
+  const blocks = [2000, 2000, 2000, 100];
+  /** 4 turns; turn k's first request has input in[k]; each turn outputs 50 tokens; a 400-char tool output per turn. */
+  const rollout = (inputs, extra = []) => {
+    const ev = [];
+    inputs.forEach((inp, k) => {
+      const s = k * 100 + 1;
+      ev.push({ timestamp: at(s), type: 'event_msg', payload: { type: 'task_started' } });
+      ev.push({ timestamp: at(s + 1), type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'x'.repeat(40) }] } });
+      ev.push({ timestamp: at(s + 2), type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: inp, output_tokens: 50 } } } });
+      ev.push({ timestamp: at(s + 3), type: 'response_item', payload: { type: 'function_call_output', output: 'y'.repeat(400) } });
+    });
+    return [...ev, ...extra];
+  };
+  const opts = { turnStart: [t0, t0 + 100_000, t0 + 200_000, t0 + 300_000], nonces, blocks };
+  // growth = outputs 3*50 + text ~((40+400)*3 + 40 + quoting)/4; build in4 from a chosen retention.
+  const base = lb.b6Tiers(rollout([10_000, 10_000, 10_000, 10_000]), opts);
+  assert.ok(base.retained !== null, base.tier1);
+  const growthPlus = 10_000 - base.retained;   // in4 that means "exactly zero retained" is in1 + (10k - retained)
+  const verdictAt = (retained) => lb.b6Tiers(rollout([10_000, 10_000, 10_000, growthPlus + retained]), opts);
+  assert.equal(verdictAt(0).verdict, 'PASS');
+  assert.equal(verdictAt(550).verdict, 'PASS', '9% of 6000');
+  assert.equal(verdictAt(1200).verdict, null, '20%: NOT-PROVEN');
+  assert.equal(verdictAt(3000).verdict, 'FAIL', '50%');
+  assert.equal(verdictAt(6000).verdict, 'FAIL', 'full retention');
+  assert.match(verdictAt(6000).tier1, /100% of the 6000 earlier-block tokens -> FAIL/);
+  // Fewer than 4 turns: not measurable, no verdict.
+  assert.equal(lb.b6Tiers(rollout([10_000, 10_000]), opts).verdict, null);
+  // <hive-mail> text never counts as growth.
+  assert.equal(lb.withoutMail('a<hive-mail id="x">body</hive-mail>b'), 'ab');
+});
+
+test('B6 tier 2: persisted items carrying an earlier nonce; after a compaction, replacement_history instead', () => {
+  const t0 = Date.parse('2026-09-28T10:00:00Z');
+  const opts = { turnStart: [t0, t0 + 1, t0 + 2, t0 + 3], nonces: ['LBN-0000000a', 'LBN-0000000b', 'LBN-0000000c', 'LBN-0000000d'], blocks: [2000, 2000, 2000, 100] };
+  const item = { timestamp: new Date(t0 + 5000).toISOString(), type: 'response_item', payload: { type: 'message', role: 'developer', content: '<hive-mail>LBN-0000000a</hive-mail>' } };
+  assert.match(lb.b6Tiers([item], opts).tier2, /carrying a turn 1-3 nonce: 1/);
+  const compacted = { timestamp: new Date(t0 + 6000).toISOString(), type: 'compacted', payload: { replacement_history: [{ content: 'LBN-0000000b' }] } };
+  assert.match(lb.b6Tiers([item, compacted], opts).tier2, /replacement_history carries 1 of the turn 1-3 nonces \(LBN-0000000b\)/);
+});
+
+test('B6 tier 3 + B7 rulings are wired: turn 4 asks for turn 1\'s nonce; B7 forces /compact, retries once, GATE-BLOCKED otherwise, never NOT-PROVEN in a real run', () => {
+  assert.match(src, /what was the LBN- token in the FIRST hive mail/);
+  assert.match(src, /const recalled = !!r4 && r4\.includes\(nonces\[0\]\);/);
+  assert.match(src, /TIER 1 \(decides\): \$\{t\.tier1\}\. TIER 2: \$\{t\.tier2\}\. TIER 3: \$\{tier3\}/);
+  assert.match(src, /for \(let attempt = 1; attempt <= 2; attempt\+\+\)/, 'one retry');
+  assert.match(src, /writePty\(.*, '\/compact', 'HUMAN'\)/, '/compact typed into the running turn');
+  assert.match(src, /this\.fact\('B7', hit \? 'PASS' : 'GATE-BLOCKED'/);
+  assert.match(src, /unproven\(id\) \{ return id === 'B7' && !this\.args\.dryRun \? 'GATE-BLOCKED' : 'NOT-PROVEN'; \}/);
+  assert.ok(!/this\.fact\('B7', 'NOT-PROVEN', (?!this\.dryNote)/.test(src), 'B7 is never NOT-PROVEN outside the dry run');
+  assert.ok(!/this\.fact\('B7', 'PASS'/.test(src), 'B7 PASS only through the mid-epoch hit');
+  // Only PASS passes: the report's ok needs every asserted fact at PASS.
+  assert.match(src, /asserted\.every\(\(f\) => f\.status === 'PASS'\)/);
+});
