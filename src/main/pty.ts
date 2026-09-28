@@ -53,6 +53,8 @@ interface PtySession {
    *  file) and the idle handshake that gates god's PTY nudge (never type into a
    *  PTY that produced output in the last few seconds = mid-stream). */
   lastOutputAt: number;
+  /** PROBE-REISSUE (B): the last PTY_TAIL_CHARS of raw output (diagnostics only). */
+  tail: string;
   /** True after the child has emitted at least one frame. Automation waits for
    *  this before typing, so startup prompts cannot outrun the TUI subscription. */
   hasOutput: boolean;
@@ -176,6 +178,8 @@ export interface NpmShimTarget {
  *  not seen) resolves to null and falls back to the cmd.exe path — never worse
  *  than today's behaviour. */
 const SHIM_INTERPRETERS = new Set(['node', 'bun', 'deno']);
+/** PROBE-REISSUE (B): how much raw output each PTY keeps for a diagnostic tail line. */
+export const PTY_TAIL_CHARS = 4096;
 /** The shim's target must look like a JS entry point. A shim that points at
  *  something else is not a shape we understand → null. */
 const SHIM_SCRIPT_EXT = /\.(?:c|m)?js$/i;
@@ -449,6 +453,8 @@ export class PtyManager {
     }
     session.hasOutput = true;
     session.lastOutputAt = Date.now();
+    // PROBE-REISSUE (B): the last few KB of raw output, for a diagnostic row's tail line.
+    session.tail = (session.tail + data).slice(-PTY_TAIL_CHARS);
     if (session.out) session.out.push(data);
     else this.safeSend(`pty:data:${id}`, data, session.owner);
   }
@@ -783,6 +789,7 @@ export class PtyManager {
         cwd: opts.cwd,
         command: resolved,
         lastOutputAt: Date.now(),
+        tail: '',
         hasOutput: false,
         owner,
         humanInputGeneration: 0,
@@ -930,6 +937,11 @@ export class PtyManager {
       lastOutputAt: s.lastOutputAt,
       hasOutput: s.hasOutput
     }));
+  }
+
+  /** PROBE-REISSUE (B): the last PTY_TAIL_CHARS of raw output, or undefined if no such PTY. */
+  tail(id: string): string | undefined {
+    return this.sessions.get(id)?.tail;
   }
 
   /** Epoch ms of this PTY's most recent output, or undefined if no such PTY. */

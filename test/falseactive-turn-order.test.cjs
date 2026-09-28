@@ -102,7 +102,7 @@ test('WIRING: the payload turn_id reaches noteHook (HookServer -> index -> bridg
   assert.match(hooks, /this\.onEvent\?\.\(agentId, event, p\.message, [^;]*typeof p\.turn_id === 'string' && p\.turn_id \? p\.turn_id : undefined\);/,
     'the HookServer forwards the payload turn_id to its observer');
   const index = codeOnly(readSource('src/main/index.ts'));
-  assert.match(index, /\(agentId, event, message, fullyIdle, turnId\) => inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId\)/);
+  assert.match(index, /\(agentId, event, message, fullyIdle, turnId\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId\); \}/);
   const bridge = codeOnly(readSource('src/main/inboxWakeBridge.ts'));
   assert.match(bridge, /onHook\(agentId: string \| undefined, event: string \| undefined, message: string \| undefined, fullyIdle\?: boolean, turnId\?: string\): void \{/);
   assert.match(bridge, /coordinator\.noteHook\(agentId, event, message, this\.deps\.now\(\), fullyIdle, turnId\)/);

@@ -269,7 +269,7 @@ test('index.ts wires every edge to the ONE bridge, registered before the router 
   // AGY 1.1.48 c4: the hook stream now also carries agy's own terminal qualifier, so a
   // Stop that says it is NOT fully idle can be refused. Still ONE hand-off to ONE bridge.
   // FALSEACTIVE-STALL-2: the hook stream now also carries the Codex turn_id (straggler rule).
-  assert.match(index, /\(agentId, event, message, fullyIdle, turnId\) => inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId\)/, 'the hook stream');
+  assert.match(index, /\(agentId, event, message, fullyIdle, turnId\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId\); \}/, 'the hook stream');
   assert.match(index, /transition === 'UNPAUSED' \|\| transition === 'RESUMED' \|\| transition === 'AUTO_DELIVERY_RELEASED'/, 'only releases retry');
   assert.match(index, /onChange: \(\) => \{ pushCapacityStrip\(\); pushAgentUsage\(\); pushAgentImpact\(\); inboxWake\?\.onCapacityChange\(\); \}/);
   assert.match(index, /if \(resolved\) inboxWake\?\.onInterferenceResolved\(agentId, how as InterferenceResolution\);/);

@@ -72,6 +72,24 @@ export type AdmissionVerdict =
  */
 export const RECOVERY_RESERVATION_TTL_MS = 60_000;
 
+/**
+ * PROBE-REISSUE (1.1.72, god's GO "A" on Jim's DWIGHT-HOLD chain, relayed to the Human): how long
+ * a CONFIRMED post-reset probe that produced no fresh reading holds before the pool may try
+ * again. Live 2026-09-28: Dwight's one probe was typed at 03:03Z, no turn followed (no hook, so
+ * no rate-limit reading), and a confirmed grant never expired, so the hold was permanent: every
+ * later wake was refused POST_RESET_SINGLE_PROBE_ALREADY_GRANTED for hours.
+ *
+ * Attempt n (0 = the first probe) may be re-issued this long after it was confirmed:
+ * 10, 20, 40, 80 min, then capped at 2 h. At most one probe in flight, and about six in the
+ * first two hours instead of never. Any fresh reading ends it, as before, because the probe
+ * key (and the state) changes.
+ */
+export const PROBE_REISSUE_BASE_MS = 10 * 60_000;
+export const PROBE_REISSUE_CAP_MS = 2 * 60 * 60_000;
+export function probeReissueBackoffMs(attempt: number): number {
+  return Math.min(PROBE_REISSUE_BASE_MS * 2 ** Math.max(0, attempt), PROBE_REISSUE_CAP_MS);
+}
+
 export const ADMISSION_REASON = {
   NO_POOL: 'NO_CAPACITY_POOL_FOR_AGENT',
   OMITTED_POOL_LIMITED: 'UNRESOLVED_BINDING_UNDER_OBSERVED_LIMIT',
@@ -118,6 +136,13 @@ export interface AdmissionDecision {
    * caller cannot confirm a launch it was never granted.
    */
   grantId: string | null;
+  /**
+   * PROBE-REISSUE: on a post-reset probe ALLOW only. 0 = the first probe for this passed reset;
+   * n > 0 = the n-th re-issue after earlier confirmed probes brought no fresh reading.
+   */
+  probeAttempt?: number;
+  /** PROBE-REISSUE: on a post-reset probe ALLOW only, the agent it was decided for. */
+  probeAgentId?: string;
 }
 
 /** What the seam needs from the world. Injected, so the decision stays testable. */
@@ -157,6 +182,8 @@ export interface AdmissionDeps {
    * caught exactly that drift when a defaulted one arrived with the TTL.
    */
   now: () => number;
+  /** PROBE-REISSUE: one capacity-probe-reissue row per re-issued probe. Optional. */
+  log?: (row: Record<string, unknown>) => void;
 }
 
 export class CapacityAdmission {
@@ -201,9 +228,19 @@ export class CapacityAdmission {
       // an epoch (there is none). `epoch` is a value no real limit epoch can equal.
       const probeKey = this.deps.postResetProbeKey?.(decision.poolKey) ?? null;
       const grantId = `${decision.poolKey}#post-reset:${probeKey}#${++this.grantSeq}`;
+      const attempt = decision.probeAttempt ?? 0;
+      const previous = this.recoveryGrants.get(decision.poolKey);
       this.recoveryGrants.set(decision.poolKey, {
-        epoch: POST_RESET_EPOCH, probeKey, grantId, confirmed: false, reservedAt: this.deps.now()
+        epoch: POST_RESET_EPOCH, probeKey, grantId, confirmed: false, reservedAt: this.deps.now(), attempt
       });
+      if (attempt > 0) {
+        try {
+          this.deps.log?.({
+            kind: 'capacity-probe-reissue', agentId, poolKey: decision.poolKey, probeKey, attempt,
+            sinceConfirmedMs: previous?.confirmedAt !== undefined ? this.deps.now() - previous.confirmedAt : null
+          });
+        } catch { /* diagnostics never decide */ }
+      }
       return { ...decision, grantId };
     }
     if (decision.reason === ADMISSION_REASON.RECOVERING_GRANT && decision.poolKey) {
@@ -275,9 +312,14 @@ export class CapacityAdmission {
           if (probeKey !== null) {
             const held = this.recoveryGrants.get(poolKey);
             if (held && held.epoch === POST_RESET_EPOCH && held.probeKey === probeKey && !this.abandoned(held)) {
+              // PROBE-REISSUE: a CONFIRMED probe that brought no fresh reading (the key and the
+              // state would have moved) is spent only for its backoff, not for ever.
+              if (this.reissuable(held)) {
+                return { ...at('ALLOW', ADMISSION_REASON.POST_RESET_PROBE_GRANT), probeAttempt: (held.attempt ?? 0) + 1, probeAgentId: agentId };
+              }
               return at('REFUSE', ADMISSION_REASON.POST_RESET_PROBE_SPENT);
             }
-            return at('ALLOW', ADMISSION_REASON.POST_RESET_PROBE_GRANT);
+            return { ...at('ALLOW', ADMISSION_REASON.POST_RESET_PROBE_GRANT), probeAttempt: 0, probeAgentId: agentId };
           }
           return at('UNKNOWN_NOT_INFERRED_SAFE', ADMISSION_REASON.STALE_AFTER_UNHEALTHY);
         }
@@ -302,7 +344,24 @@ export class CapacityAdmission {
   confirmLaunch(decision: AdmissionDecision): void {
     const held = decision.poolKey ? this.recoveryGrants.get(decision.poolKey) : undefined;
     if (!held || !decision.grantId || held.grantId !== decision.grantId) return;
+    if (!held.confirmed) held.confirmedAt = this.deps.now();
     held.confirmed = true;
+  }
+
+  /**
+   * PROBE-REISSUE: when this pool's confirmed post-reset probe may be re-issued (ms epoch), or
+   * null when there is no such probe. For the runtime's one-shot re-check timer, so a held
+   * agent is re-tried at the boundary instead of waiting for an unrelated event.
+   */
+  probeReissueAt(poolKey: string): number | null {
+    const held = this.recoveryGrants.get(poolKey);
+    if (!held || held.epoch !== POST_RESET_EPOCH || !held.confirmed || held.confirmedAt === undefined) return null;
+    return held.confirmedAt + probeReissueBackoffMs(held.attempt ?? 0);
+  }
+
+  /** A confirmed post-reset probe whose backoff has run out (and no fresh reading since). */
+  private reissuable(held: RecoveryGrant): boolean {
+    return held.confirmed && held.confirmedAt !== undefined && this.deps.now() - held.confirmedAt >= probeReissueBackoffMs(held.attempt ?? 0);
   }
 
   /**
@@ -380,6 +439,10 @@ interface RecoveryGrant {
   reservedAt: number;
   /** Set by `holdGrantForHuman`: possibly launched, awaiting a person. No TTL applies. */
   heldForHuman?: boolean;
+  /** PROBE-REISSUE: when the launch was confirmed (post-reset probes read it). */
+  confirmedAt?: number;
+  /** PROBE-REISSUE: which attempt this post-reset probe is (0 = the first). */
+  attempt?: number;
 }
 
 function decision(

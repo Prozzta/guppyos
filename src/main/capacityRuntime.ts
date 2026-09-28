@@ -85,6 +85,11 @@ export interface CapacityRuntimeDeps {
    * skipped. Ids, pool keys and state names only. Optional; feeds nothing back.
    */
   log?: (row: Record<string, unknown>) => void;
+  /**
+   * PROBE-REISSUE (B): a post-reset probe turn was really launched for this agent. main watches
+   * for the turn it should produce (capacityProbeWatch.ts). Optional; feeds nothing back.
+   */
+  onProbeLaunched?: (probe: { agentId: string; poolKey: string; attempt: number }) => void;
 }
 
 /**
@@ -132,7 +137,8 @@ export class CapacityRuntime {
       collectionAdmission: () => this.tracker.collectionAdmission(),
       staleLastKnown,
       postResetProbeKey: (poolKey) => this.tracker.postResetProbeKey(poolKey),
-      now: this.now
+      now: this.now,
+      log: (row) => { try { this.deps.log?.(row); } catch { /* diagnostics never decide */ } }
     });
   }
 
@@ -286,6 +292,27 @@ export class CapacityRuntime {
   confirmLaunch(decision: AdmissionDecision): void {
     this.admission.confirmLaunch(decision);
     this.admissionMoved();
+    // PROBE-REISSUE: a post-reset probe went out. Re-check the pool when its backoff runs out
+    // (a capacity change is what re-tries held agents), and let main watch for the turn.
+    if (decision.reason === ADMISSION_REASON.POST_RESET_PROBE_GRANT && decision.poolKey && this.admission.holdsGrant(decision)) {
+      const at = this.admission.probeReissueAt(decision.poolKey);
+      if (at !== null) this.armProbeReissue(at);
+      if (decision.probeAgentId) {
+        try { this.deps.onProbeLaunched?.({ agentId: decision.probeAgentId, poolKey: decision.poolKey, attempt: decision.probeAttempt ?? 0 }); } catch { /* never decides */ }
+      }
+    }
+  }
+
+  /** PROBE-REISSUE: one one-shot per confirmed probe, at its re-issue time. */
+  private armProbeReissue(at: number): void {
+    if (this.stopped) return;
+    const handle = this.setTimer(() => {
+      this.lapseTimers.delete(handle);
+      if (this.stopped) return;
+      this.admissionMoved();
+      try { this.deps.onChange?.(); } catch { /* display and hints never decide */ }
+    }, Math.max(0, at - this.now()) + 1);
+    this.lapseTimers.add(handle);
   }
 
   /** The work MAY have started and only a person can say — see `holdGrantForHuman`. */

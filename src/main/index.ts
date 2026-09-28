@@ -52,6 +52,7 @@ import {
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
+import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
 import { CapacityStore, capacityStorePath } from './capacityPersistence';
 import type { CapacityNotifyIntent } from './capacityNotify';
@@ -517,6 +518,17 @@ let capacityDisplayThreshold: number | null = null;
 const capacityThresholdNow = (): number =>
   (capacityDisplayThreshold ??= capacityDisplayThresholdOf(readConfig()));
 const capacityStrip = new CapacityStripPresenter({ weeklyThreshold: capacityThresholdNow });
+// PROBE-REISSUE (B): when each agent's hooks last reported anything, and the watch that logs a
+// post-reset probe which produced no turn (with the terminal's last visible line).
+const hookSeenAt = new Map<string, number>();
+const capacityProbeWatch = new CapacityProbeWatch({
+  now: () => Date.now(),
+  setTimer: (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; },
+  lastHookAt: (agentId) => hookSeenAt.get(agentId),
+  tailLine: (agentId) => { const id = ptyForAgent(agentId); const raw = id ? ptyManager.tail(id) : undefined; return raw ? lastVisibleLine(raw) : null; },
+  idleMs: (agentId) => { const id = ptyForAgent(agentId); return id ? ptyManager.idleFor(id) : undefined; },
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+});
 const providerCapacity = new CapacityRuntime({
   deliver: (intents) => {
     for (const intent of intents) {
@@ -531,7 +543,8 @@ const providerCapacity = new CapacityRuntime({
   onChange: () => { pushCapacityStrip(); pushAgentUsage(); pushAgentImpact(); inboxWake?.onCapacityChange(); },
   onAdmission: () => pushAgentImpact(),
   // CAPACITY-DUP-CONFIRM-163: which pool an agent was bound to, and when (or a skipped bind).
-  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } }
+  log: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  onProbeLaunched: (probe) => capacityProbeWatch.launched(probe)
 });
 // L0-FUSION stage 5 - THE ONE OWNER of programmatic stage -> final revalidation -> Enter.
 // Main resolves the PTY, main holds it against other programmatic writers, and main's
@@ -653,7 +666,7 @@ const hookServer = new HookServer(
   standingGoalFromRoster,
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
-  (agentId, event, message, fullyIdle, turnId) => inboxWake?.onHook(agentId, event, message, fullyIdle, turnId),
+  (agentId, event, message, fullyIdle, turnId) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId); },
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or

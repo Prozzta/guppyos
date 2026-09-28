@@ -59,7 +59,7 @@ const LIMIT = (at) => obs({
 function rig(over = {}) {
   const r = {
     now: T0, mono: 0, seq: 0, timers: [],
-    writes: [], record: [],
+    writes: [], record: [], logs: [],
     session: { incarnation: 1, gen: 0, lastHumanAt: undefined, hasOutput: true,
       inputState: { mouseTrackingMode: 'none', inputOriginAttached: true, selfTest: 'pass' },
       promptState: { block: null } },
@@ -70,7 +70,7 @@ function rig(over = {}) {
   const setTimer = (fn, ms) => { const t = { at: r.now + ms, seq: (r.seq += 1), fn, ms }; r.timers.push(t); return { id: t.seq, unref() { return this; } }; };
   r.tracker = new ProviderCapacityTracker(L0_SEM_POLICY, () => r.now, () => r.mono);
   r.runtime = new (over.Runtime ?? CapacityRuntime)({
-    deliver: () => {}, now: () => r.now, setTimer,
+    deliver: () => {}, now: () => r.now, setTimer, log: (row) => r.logs.push(row),
     clearTimer: (h) => { r.timers = r.timers.filter((t) => t.seq !== (h && h.id)); }
   }, r.tracker);
   if (over.Admission) {
@@ -751,9 +751,21 @@ K1A.oneProbePerPassedReset = async (classes) => {
   assert.deepEqual([second.kind, second.reason, second.detail], ['REFUSED', 'CAPACITY_HOLD', ADMISSION_REASON.POST_RESET_PROBE_SPENT],
     'ONE PROBE PER PASSED RESET: a second ask after the probe is refused until fresh evidence');
   assert.deepEqual({ ...gateFor(r, 'jim') }, { evidence: 'POST_RESET_PROBE_SPENT', holds: true, basis: ADMISSION_REASON.POST_RESET_PROBE_SPENT });
-  elapse(r, 3_600_000);
-  assert.equal((await r.settle(wake(r, 'hour-later'))).kind, 'REFUSED', 'an hour on, with no new reading, it is STILL refused: no timer re-arms the probe');
-  assert.equal(r.writes.filter((d) => d === '\r').length, 1, 'exactly one Enter ever went out on this evidence');
+  // PROBE-REISSUE (1.1.72, god's GO "A", relayed to the Human; supersedes "until fresh evidence"):
+  // a confirmed probe that brought no reading is spent for its BACKOFF, not for ever.
+  elapse(r, TEN_MINUTES - 1_000);
+  assert.equal((await r.settle(wake(r, 'inside-backoff'))).kind, 'REFUSED', 'INSIDE THE BACKOFF the spent probe still holds');
+  assert.equal(r.writes.filter((d) => d === '\r').length, 1, 'exactly one Enter went out inside the backoff');
+  elapse(r, 1_000);
+  const re1 = await r.settle(wake(r, 'reissue-1'));
+  assert.equal(re1.kind, 'COMMITTED', 'AT THE BACKOFF a probe with no reading is RE-ISSUED (attempt 1): no permanent hold');
+  assert.deepEqual(r.logs.filter((x) => x.kind === 'capacity-probe-reissue').map((x) => [x.attempt, x.sinceConfirmedMs >= TEN_MINUTES]), [[1, true]], 'and logged as capacity-probe-reissue');
+  assert.equal((await r.settle(wake(r, 'after-reissue'))).kind, 'REFUSED', 'still ONE probe in flight at a time');
+  elapse(r, 2 * TEN_MINUTES - 1_000);
+  assert.equal((await r.settle(wake(r, 'inside-backoff-2'))).kind, 'REFUSED', 'the backoff DOUBLES: attempt 1 holds for 20 minutes');
+  elapse(r, 1_000);
+  assert.equal((await r.settle(wake(r, 'reissue-2'))).kind, 'COMMITTED', 'and then attempt 2 goes out');
+  assert.equal(r.writes.filter((d) => d === '\r').length, 3, 'three Enters in half an hour, never a storm');
 };
 
 K1A.aLaterPassedResetIsANewProbe = async (classes) => {
@@ -769,6 +781,8 @@ K1A.aLaterPassedResetIsANewProbe = async (classes) => {
   elapse(r, laterReset - r.now + 60_000);
   assert.notEqual(r.tracker.postResetProbeKey(POOL), firstKey, 'a different reading and a different reset: a different key');
   assert.equal((await r.settle(wake(r, 'probe-2'))).kind, 'COMMITTED', 'a LATER passed reset on NEWER evidence is allowed its own single probe');
+  assert.deepEqual(r.logs.filter((x) => x.kind === 'capacity-probe-reissue'), [],
+    'a LATER passed reset on NEWER evidence is a NEW probe (attempt 0), never a re-issue of the old one');
   assert.equal((await r.settle(wake(r, 'probe-2b'))).kind, 'REFUSED', 'and only one');
 };
 
@@ -844,10 +858,10 @@ K1A.aDeadTerminalSpendsTheProbeAndOnlyAFreshReadingLiftsIt = async (classes) => 
   r.prompt = '';
   assert.equal(r.owner.inhibition('pty-jim'), null, 'the hold does not outlive its terminal');
   assert.equal(probeReason(r), ADMISSION_REASON.POST_RESET_PROBE_SPENT, 'TERMINAL DEATH SPENDS THE HELD PROBE - it is not handed back');
-  elapse(r, TEN_MINUTES);
+  elapse(r, TEN_MINUTES - 1_000); // PROBE-REISSUE: inside the re-issue backoff
   const again = await r.settle(wake(r, 'after-death'));
   assert.deepEqual([again.kind, again.reason, r.writes.filter((d) => d === '\r').length], ['REFUSED', 'CAPACITY_HOLD', 0],
-    'NO SECOND PROBE goes out on the same evidence: automatic delivery stays held, ten minutes on');
+    'NO SECOND PROBE goes out on the same evidence: automatic delivery stays held inside the backoff');
   assert.deepEqual({ ...gateFor(r, 'jim') }, { evidence: 'POST_RESET_PROBE_SPENT', holds: true, basis: ADMISSION_REASON.POST_RESET_PROBE_SPENT });
   // The way out: a fresh accepted reading from ANY agent on the pool - not only this one.
   r.runtime.ingest('dwight', healthy(r, 2));
@@ -861,7 +875,7 @@ K1A.alreadyHandledSpendsTheProbeAndTheHumansOwnReadingEndsIt = async (classes) =
   const r = await interferedProbe(classes);
   assert.equal(r.owner.resolveInterference('pty-jim', 'ALREADY_HANDLED'), true);
   r.prompt = ''; r.session.promptState = { block: null };
-  elapse(r, TEN_MINUTES);
+  elapse(r, TEN_MINUTES - 1_000); // PROBE-REISSUE: inside the re-issue backoff
   assert.equal(probeReason(r), ADMISSION_REASON.POST_RESET_PROBE_SPENT, '"already handled" CONFIRMS the probe: spent for good on this evidence, reservation TTL or not');
   assert.equal((await r.settle(wake(r, 'still-held'))).kind, 'REFUSED');
   r.runtime.ingest('jim', healthy(r, 2)); // the reading the human's own turn produced
@@ -906,7 +920,17 @@ const POST_RESET_MUTANTS = [
     killer: 'oneProbePerPassedReset', dies: /ONE PROBE PER PASSED RESET/ },
   { name: 'the probe is offered before the reset has passed',
     edits: [['          if (probeKey !== null) {', '          if (true) {']],
-    killer: 'aPassedKnownResetExitsTheHoldAsItsOwnState', dies: /before the reset the pool is simply held/ }
+    killer: 'aPassedKnownResetExitsTheHoldAsItsOwnState', dies: /before the reset the pool is simply held/ },
+  // PROBE-REISSUE (1.1.72)
+  { name: 'a confirmed probe is never re-issued (the permanent hold of 2026-09-28)',
+    edits: [['              if (this.reissuable(held)) {', '              if (false) {']],
+    killer: 'oneProbePerPassedReset', dies: /AT THE BACKOFF a probe with no reading is RE-ISSUED/ },
+  { name: 're-issue ignores the backoff',
+    edits: [['this.deps.now() - held.confirmedAt >= probeReissueBackoffMs(held.attempt ?? 0)', 'this.deps.now() - held.confirmedAt >= 0']],
+    killer: 'oneProbePerPassedReset', dies: /ONE PROBE PER PASSED RESET|INSIDE THE BACKOFF the spent probe still holds/ },
+  { name: 'the backoff never doubles',
+    edits: [['return Math.min(PROBE_REISSUE_BASE_MS * 2 ** Math.max(0, attempt), PROBE_REISSUE_CAP_MS);', 'return Math.min(PROBE_REISSUE_BASE_MS, PROBE_REISSUE_CAP_MS);']],
+    killer: 'oneProbePerPassedReset', dies: /the backoff DOUBLES/ }
 ];
 
 test('MUTANT (automaticSubmit.ts): terminal death RETURNING the held probe lets a SECOND probe go out', async () => {
