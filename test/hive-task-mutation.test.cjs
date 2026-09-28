@@ -101,34 +101,61 @@ test('malformed tasks.json is quarantined and addTask refuses to overwrite it', 
     'the operator gets a durable, loud integrity event');
 });
 
-test('malformed registry.json fails closed instead of becoming an empty roster', (t) => {
+test('malformed registry.json keeps read-only views alive but refuses every mutation', (t) => {
   const hive = floor(t);
   hive.writeTasks([card('existing')]); // bootstraps the authoritative hive files
   const file = path.join(hive.root(), 'registry.json');
   const corrupt = '{"agents":';
   fs.writeFileSync(file, corrupt, 'utf8');
 
-  assert.throws(() => hive.registry(), /registry\.json is invalid JSON; refusing to overwrite it/);
+  assert.deepEqual(hive.registry(), { godId: null, agents: {} }, 'read-only consumers receive safe defaults');
+  assert.match(hive.integrityIssues()[0].quarantine, /^registry\.json\.corrupt-/);
+  assert.match(hive.setAgentHold('nobody', true).error, /registry\.json is invalid JSON; refusing to overwrite it/);
   assert.equal(fs.readFileSync(file, 'utf8'), corrupt);
   const copies = fs.readdirSync(hive.root()).filter((name) => name.startsWith('registry.json.corrupt-'));
   assert.equal(copies.length, 1);
   assert.equal(fs.readFileSync(path.join(hive.root(), copies[0]), 'utf8'), corrupt);
 });
 
-test('a simulated failure before atomic rename leaves the old task ledger valid and intact', (t) => {
+test('missing authorities bootstrap with defaults, while a corrupt cursor refuses its write', (t) => {
+  const hive = floor(t);
+  hive.ensureHive();
+  const root = hive.root();
+  fs.rmSync(path.join(root, 'registry.json'));
+  fs.rmSync(path.join(root, 'tasks.json'));
+  assert.deepEqual(hive.registry(), { godId: null, agents: {} });
+  assert.deepEqual(hive.tasks(), { tasks: [] });
+  assert.equal(hive.addTask(card('first')), true, 'missing tasks.json may be freshly created');
+
+  const agent = path.join(root, 'agents', 'probe');
+  fs.mkdirSync(path.join(agent, 'inbox', '.done'), { recursive: true });
+  fs.writeFileSync(path.join(agent, 'cursor.json'), '{"lastProcessed":', 'utf8');
+  assert.throws(() => hive.drainForStop('probe'), /cursor\.json is invalid JSON; refusing to overwrite it/);
+});
+
+test('Windows rename retries publish after transient locks and leave no temp file', (t) => {
   const hive = floor(t);
   hive.writeTasks([card('old')]);
   const file = path.join(hive.root(), 'tasks.json');
-  const before = fs.readFileSync(file, 'utf8');
   const renameSync = fs.renameSync;
-  fs.renameSync = () => { throw new Error('simulated crash before rename'); };
+  let attempts = 0;
+  fs.renameSync = (...args) => {
+    attempts++;
+    if (attempts < 3) {
+      const error = new Error('simulated Windows sharing violation');
+      error.code = 'EPERM';
+      throw error;
+    }
+    return renameSync(...args);
+  };
   try {
-    assert.throws(() => hive.writeTasks([card('new')]), /simulated crash before rename/);
+    hive.writeTasks([card('new')]);
   } finally {
     fs.renameSync = renameSync;
   }
-  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the published ledger was never truncated');
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.map((task) => task.id), ['old']);
+  assert.equal(attempts, 3);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.map((task) => task.id), ['new']);
+  assert.equal(fs.readdirSync(hive.root()).some((name) => name.startsWith('tasks.json.tmp-')), false);
 });
 
 test('renderer task actions never send a whole stale ledger back to main', () => {

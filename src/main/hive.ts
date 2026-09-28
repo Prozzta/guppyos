@@ -249,6 +249,21 @@ export interface Registry {
   agents: Record<string, RegistryAgent>;
 }
 
+/** A read-only warning for a damaged source of truth.  Writes which would use
+ * this source remain refused; the UI can still show the rest of the floor. */
+export interface HiveIntegrityIssue {
+  file: string;
+  quarantine: string | null;
+  error: string;
+}
+
+class HiveAuthorityCorruptError extends Error {
+  constructor(readonly issue: HiveIntegrityIssue) {
+    super(`Hive authority ${issue.file} is invalid JSON; refusing to overwrite it.`);
+    this.name = 'HiveAuthorityCorruptError';
+  }
+}
+
 /** How many hook-reported session ids an agent keeps as its ownership record. */
 export const HOOK_SESSION_IDS_CAP = 20;
 
@@ -542,6 +557,9 @@ export class HiveManager {
   /** A corrupt authority file is copied aside once per bad contents. Repeating a
    *  read must still fail closed, but must not fill the hive with identical copies. */
   private readonly quarantinedJsonFingerprints = new Map<string, string>();
+  /** Sources currently known corrupt. Kept separately from the fingerprint so
+   * the renderer can make the safety stop visible to the human. */
+  private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
   /** Bumped by start/stop, so a scan queued before a stop never runs after it. */
@@ -982,7 +1000,7 @@ export class HiveManager {
     // Resolve role BEFORE writing identity.md. A restart passes the floor
     // roster's `description`, which can be a status caption ("on standby").
     // identity.md and registry.role are the durable job from the hire.
-    const reg = this.registry();
+    const reg = this.registryForMutation();
     const prev = reg.agents[meta.id];
     if (meta.cwd) meta = { ...meta, cwd: expandTilde(meta.cwd) };
     const role = preferredAgentRole(meta.role, prev?.role, !!meta.isGod);
@@ -1312,7 +1330,7 @@ export class HiveManager {
     const next = role.trim();
     if (!next) return { ok: false, error: 'empty role' };
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[id];
       if (!agent) return { ok: false, error: 'unknown agent' };
       if (agent.role === next) return { ok: true };
@@ -1337,7 +1355,7 @@ export class HiveManager {
     const root = this.root();
     if (!root) return;
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[id];
       // An archived agent's hook token is revoked even when the flag is already set.
       if (archived) this.hookBroker?.revoke(id);
@@ -1369,7 +1387,7 @@ export class HiveManager {
     const root = this.root();
     if (!root) return { ok: false, error: 'hive disabled (no harnessHome)' };
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[id];
       if (!agent) return { ok: false, error: 'Agent not found' };
       if (!!agent.onHold === hold) return { ok: true, onHold: hold };
@@ -1402,7 +1420,7 @@ export class HiveManager {
     if (!nextName) return { ok: false, error: 'Name is required' };
 
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[id];
       if (!agent) return { ok: false, error: 'Agent not found' };
       if (agent.name === nextName) return { ok: true, name: nextName };
@@ -1445,7 +1463,7 @@ export class HiveManager {
     const root = this.root();
     if (!root || !sessionId) return;
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[agentId];
       if (!agent) return; // unknown agent → no write
       const hookIds = agent.hookSessionIds ?? [];
@@ -1517,7 +1535,7 @@ export class HiveManager {
     if (!root || !model.trim()) return;
     const now = Date.now();
     try {
-      const reg = this.registry();
+      const reg = this.registryForMutation();
       const agent = reg.agents[agentId];
       if (!agent || (agent.provider ?? 'claude') !== provider) return;
       const before = agent.model;
@@ -1818,7 +1836,7 @@ export class HiveManager {
     const dir = this.agentDir(agentId);
     if (!existsSync(dir)) return { block: false };
     const cursorPath = join(dir, 'cursor.json');
-    const cursor = this.readAuthoritativeJson<{ lastProcessed: string | null }>(cursorPath);
+    const cursor = this.readAuthoritativeJson<{ lastProcessed: string | null }>(cursorPath, () => ({ lastProcessed: null }));
     const fresh = this.inbox(agentId)
       .filter((m) => !cursor.lastProcessed || m.id > cursor.lastProcessed)
       .sort((a, b) => (a.id < b.id ? -1 : 1));
@@ -2470,8 +2488,13 @@ export class HiveManager {
 
   registry(): Registry {
     const root = this.root();
-    if (!root) return { godId: null, agents: {} };
-    return this.readAuthoritativeJson<Registry>(join(root, 'registry.json'));
+    if (!root) return this.emptyRegistry();
+    try {
+      return this.readAuthoritativeJson(join(root, 'registry.json'), () => this.emptyRegistry());
+    } catch (error) {
+      if (error instanceof HiveAuthorityCorruptError) return this.emptyRegistry();
+      throw error;
+    }
   }
   board(): string {
     const root = this.root();
@@ -2479,7 +2502,33 @@ export class HiveManager {
   }
   tasks(): unknown {
     const root = this.root();
-    return root ? this.readAuthoritativeJson(join(root, 'tasks.json')) : { tasks: [] };
+    if (!root) return { tasks: [] };
+    try {
+      return this.readAuthoritativeJson(join(root, 'tasks.json'), () => ({ tasks: [] }));
+    } catch (error) {
+      if (error instanceof HiveAuthorityCorruptError) return { tasks: [] };
+      throw error;
+    }
+  }
+
+  /** Force a fresh integrity scan for the small set of UI-readable authorities. */
+  integrityIssues(): HiveIntegrityIssue[] {
+    this.registry();
+    this.tasks();
+    return [...this.authorityIssues.values()];
+  }
+
+  private emptyRegistry(): Registry {
+    return { godId: null, agents: {} };
+  }
+  /** Mutations must never operate on the read-only fallback. */
+  private registryForMutation(): Registry {
+    const root = this.root();
+    return root ? this.readAuthoritativeJson(join(root, 'registry.json'), () => this.emptyRegistry()) : this.emptyRegistry();
+  }
+  private tasksForMutation(): { tasks?: HiveTask[] } {
+    const root = this.root();
+    return root ? this.readAuthoritativeJson(join(root, 'tasks.json'), () => ({ tasks: [] })) : { tasks: [] };
   }
 
   /** Persist the task ledger to hive/tasks.json. Mirrors the board/message persist
@@ -2500,7 +2549,7 @@ export class HiveManager {
     if (!root) return;
     this.ensureHive();
     const path = join(root, 'tasks.json');
-    const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path);
+    const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path, () => ({ tasks: [] }));
     const merged = mergeTaskLedger(current?.tasks, tasks);
     this.atomicWriteJson(path, { tasks: merged });
     this.appendLog({ kind: 'tasks', count: merged.length });
@@ -2510,7 +2559,7 @@ export class HiveManager {
    *  use this instead of re-writing a collection they read before another
    *  source (webhook, Slack, god, voice) added work. Idempotent by task id. */
   addTask(task: HiveTask): boolean {
-    const ledger = this.tasks() as { tasks?: HiveTask[] };
+    const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     if (tasks.some((current) => current?.id === task.id)) return false;
     this.writeTasks([...tasks, task]);
@@ -2520,7 +2569,7 @@ export class HiveManager {
   /** Patch one card against the latest on-disk ledger, preserving unrelated
    *  cards and fields (notably webhook.tokenHash and Slack thread metadata). */
   patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>): boolean {
-    const ledger = this.tasks() as { tasks?: HiveTask[] };
+    const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const index = tasks.findIndex((task) => task?.id === id);
     if (index < 0) return false;
@@ -2532,7 +2581,7 @@ export class HiveManager {
 
   /** Delete only the named card from the latest on-disk ledger. */
   deleteTask(id: string): boolean {
-    const ledger = this.tasks() as { tasks?: HiveTask[] };
+    const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const next = tasks.filter((task) => task?.id !== id);
     if (next.length === tasks.length) return false;
@@ -2681,7 +2730,9 @@ export class HiveManager {
   sweepAgyAgents(): number {
     if (!this.mayWriteGlobalConfig('Antigravity agent sweep')) return 0;
     const dir = join(homedir(), '.gemini', 'config', 'agents');
-    const live = new Set(Object.entries(this.registry().agents).filter(([, a]) => !a.archived).map(([id]) => HiveManager.agyAgentName(id)));
+    let registry: Registry;
+    try { registry = this.registryForMutation(); } catch { return 0; }
+    const live = new Set(Object.entries(registry.agents).filter(([, a]) => !a.archived).map(([id]) => HiveManager.agyAgentName(id)));
     let removed = 0;
     let names: string[] = [];
     try { names = readdirSync(dir).filter((n) => n.startsWith('munder-')); } catch { return 0; }
@@ -3699,20 +3750,26 @@ export class HiveManager {
    * one byte-identical quarantine copy for repair, log it, and make the caller
    * fail so its write is refused.
    */
-  private readAuthoritativeJson<T>(p: string): T {
+  private readAuthoritativeJson<T>(p: string, onMissing: () => T): T {
     let raw: string;
     try {
       raw = readFileSync(p, 'utf8');
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.quarantinedJsonFingerprints.delete(p);
+        this.authorityIssues.delete(p);
+        return onMissing();
+      }
       throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
     }
     try {
       const parsed = JSON.parse(raw) as T;
       this.quarantinedJsonFingerprints.delete(p);
+      this.authorityIssues.delete(p);
       return parsed;
     } catch (error) {
       const fingerprint = createHash('sha256').update(raw).digest('hex');
-      let quarantine: string | null = null;
+      let quarantine: string | null = this.authorityIssues.get(p)?.quarantine ?? null;
       if (this.quarantinedJsonFingerprints.get(p) !== fingerprint) {
         quarantine = `${p}.corrupt-${Date.now()}-${shortRand()}`;
         try {
@@ -3724,13 +3781,14 @@ export class HiveManager {
         }
       }
       const detail = error instanceof Error ? error.message : String(error);
+      const issue: HiveIntegrityIssue = { file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail };
+      this.authorityIssues.set(p, issue);
       try {
         this.appendLog({ kind: 'hive-authority-corrupt', file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail });
       } catch (logError) {
         console.error(`[hive] could not log corrupt authority ${basename(p)}:`, logError);
       }
-      const where = quarantine ? ` A copy was saved as ${basename(quarantine)}.` : '';
-      throw new Error(`Hive authority ${basename(p)} is invalid JSON; refusing to overwrite it.${where} Repair it, then retry.`);
+      throw new HiveAuthorityCorruptError(issue);
     }
   }
   private writeJson(p: string, data: unknown): void {
@@ -3738,8 +3796,25 @@ export class HiveManager {
   }
   private atomicWriteJson(p: string, data: unknown): void {
     const tmp = `${p}.tmp-${shortRand()}`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    renameSync(tmp, p);
+    try {
+      writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      this.renameWithRetry(tmp, p);
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
+      throw error;
+    }
+  }
+  private renameWithRetry(tmp: string, target: string): void {
+    let last: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try { renameSync(tmp, target); return; } catch (error) {
+        last = error;
+        const code = (error as NodeJS.ErrnoException).code;
+        if ((code !== 'EPERM' && code !== 'EBUSY') || attempt === 4) break;
+        sleepSync(20 * (attempt + 1));
+      }
+    }
+    throw new Error(`Could not atomically publish ${basename(target)} after Windows rename retries: ${last instanceof Error ? last.message : String(last)}`);
   }
 
 }

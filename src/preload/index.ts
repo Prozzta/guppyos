@@ -113,6 +113,12 @@ export interface HiveRegistry {
   } & ModelPinFields>;
 }
 
+export interface IntegrityIssue {
+  file: string;
+  quarantine: string | null;
+  error: string;
+}
+
 /** One row of the consolidated voice read-layer directory (`hive:agentDirectory`):
  *  everything the office-floor sidebar + telemetry know for an agent, joined into
  *  one PII-free record. Includes archived agents. */
@@ -869,6 +875,8 @@ const api = {
 
   // ─── Hive (multi-agent coordination) ─────────────────────────────────────
   hiveRegistry: (): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry'),
+  hiveIntegrity: (): Promise<IntegrityIssue[]> => ipcRenderer.invoke('hive:integrity'),
+  configIntegrity: (): Promise<IntegrityIssue | null> => ipcRenderer.invoke('config:integrity'),
   /** Persist a hire/job role to hive registry.json + identity.md (no respawn). */
   hivePatchAgentRole: (id: string, role: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('hive:patchAgentRole', id, role),

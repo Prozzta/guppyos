@@ -29,7 +29,7 @@ import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
   readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
-  modelForHiveSpawn, takeClearedDefaultModel, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
+  modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, resolveSpawnArgs } from '../shared/modelPin';
 import {
@@ -4303,6 +4303,8 @@ ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
+ipcMain.handle('hive:integrity', () => hive.integrityIssues());
+ipcMain.handle('config:integrity', () => configIntegrityIssue());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {
   if (typeof id !== 'string' || typeof name !== 'string') {
     return { ok: false, error: 'Invalid rename request' };

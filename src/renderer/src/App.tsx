@@ -17,6 +17,7 @@ import { QuitWarningModal, type ClosingTimeState } from '@/components/QuitWarnin
 import { CompletionToast } from '@/realtime/CompletionToast';
 import { UpdateToast } from '@/components/UpdateToast';
 import { RecoveryNotice } from '@/components/RecoveryNotice';
+import { IntegrityRepairBanner } from '@/components/IntegrityRepairBanner';
 import { CapacityStrip } from '@/components/CapacityStrip';
 import { CapacityDetailPanel } from '@/components/CapacityDetailPanel';
 import { CapacityLimitBanner } from '@/components/CapacityLimitBanner';
@@ -292,6 +293,7 @@ export function App() {
           main's updater pushes a status. */}
       <UpdateToast />
       <RecoveryNotice />
+      <IntegrityRepairBanner />
       {/* Title bar */}
       <div
         className="cth-titlebar-drag"

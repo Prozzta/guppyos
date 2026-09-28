@@ -1,5 +1,6 @@
 import { app } from 'electron';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -544,6 +545,83 @@ function configPath(): string {
   return join(app.getPath('userData'), 'config.json');
 }
 
+export interface ConfigIntegrityIssue {
+  file: string;
+  quarantine: string | null;
+  error: string;
+}
+
+let configIntegrity: ConfigIntegrityIssue | null = null;
+let configCorruptFingerprint: string | null = null;
+
+function configDefaults(): HarnessConfig {
+  return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
+}
+
+/** A tiny bounded backoff for Windows handles held by an editor or AV scanner. */
+function sleepSync(ms: number): void {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+
+function renameWithRetry(tmp: string, target: string): void {
+  let last: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { renameSync(tmp, target); return; } catch (error) {
+      last = error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== 'EPERM' && code !== 'EBUSY') || attempt === 4) break;
+      sleepSync(20 * (attempt + 1));
+    }
+  }
+  throw new Error(`Could not atomically publish config.json after Windows rename retries: ${last instanceof Error ? last.message : String(last)}`);
+}
+
+function writeConfigAtomically(p: string, data: unknown): void {
+  const tmp = `${p}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    renameWithRetry(tmp, p);
+  } catch (error) {
+    try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
+    throw error;
+  }
+}
+
+function noteCorruptConfig(p: string, raw: string, error: unknown): void {
+  const fingerprint = createHash('sha256').update(raw).digest('hex');
+  let quarantine: string | null = configIntegrity?.quarantine ?? null;
+  if (configCorruptFingerprint !== fingerprint) {
+    const candidate = `${p}.corrupt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      copyFileSync(p, candidate);
+      quarantine = candidate.split(/[\\/]/).pop() ?? candidate;
+      configCorruptFingerprint = fingerprint;
+    } catch (copyError) {
+      quarantine = null;
+      console.error('[config] could not quarantine corrupt config.json:', copyError);
+    }
+  }
+  configIntegrity = {
+    file: 'config.json',
+    quarantine,
+    error: error instanceof Error ? error.message : String(error)
+  };
+  console.error(`[config] config.json is invalid JSON; writes are paused until repaired.${quarantine ? ` Copy: ${quarantine}` : ''}`);
+}
+
+/** Reads enough to surface a persisted config problem to the renderer banner. */
+export function configIntegrityIssue(): ConfigIntegrityIssue | null {
+  readConfig();
+  return configIntegrity;
+}
+
+function assertConfigWritable(): void {
+  if (!configIntegrity) return;
+  const copy = configIntegrity.quarantine ? ` A copy was saved as ${configIntegrity.quarantine}.` : '';
+  throw new Error(`config.json is invalid JSON; refusing to overwrite it.${copy} Repair it, then retry.`);
+}
+
 /**
  * Deep-fill the trigger sub-objects, and hand back copies of them.
  *
@@ -691,13 +769,16 @@ export const RETIRED_CONFIG_KEYS = ['embeddingModel'] as const;
 export function pruneRetiredConfigKeys(): string[] {
   const p = configPath();
   try {
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+    const raw = readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
     const gone = RETIRED_CONFIG_KEYS.filter((k) => k in parsed);
     if (!gone.length) return [];
     for (const k of gone) delete parsed[k];
-    writeFileSync(p, JSON.stringify(parsed, null, 2), 'utf8');
+    assertConfigWritable();
+    writeConfigAtomically(p, parsed);
     return gone;
-  } catch {
+  } catch (error) {
+    if (error instanceof SyntaxError) noteCorruptConfig(p, readFileSync(p, 'utf8'), error);
     return [];
   }
 }
@@ -709,14 +790,26 @@ export function readConfig(): HarnessConfig {
   // conjure a config.json before onboarding has written one. A fresh install has
   // nothing to clear, so its first write records the default-model flag as done
   // (otherwise a default the user picks before that write would be cleared).
-  if (!existsSync(p)) return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
+  if (!existsSync(p)) {
+    configIntegrity = null;
+    configCorruptFingerprint = null;
+    return configDefaults();
+  }
+  let raw: string | undefined;
   try {
-    const raw = readFileSync(p, 'utf8');
+    raw = readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
+    configIntegrity = null;
+    configCorruptFingerprint = null;
     return normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
-  } catch {
-    return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
+  } catch (error) {
+    if (typeof raw === 'string') {
+      noteCorruptConfig(p, raw, error);
+      return configDefaults();
+    }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configDefaults();
+    throw new Error(`config.json could not be read: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -767,7 +860,8 @@ function persistConfig(next: HarnessConfig): HarnessConfig {
   clampDevHome(next);
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(next, null, 2), 'utf8');
+  assertConfigWritable();
+  writeConfigAtomically(p, next);
   return next;
 }
 
@@ -875,9 +969,11 @@ export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
  *  onboarding again. Used by the "reset & start over" flow. */
 export function resetConfig(): HarnessConfig {
   const p = configPath();
+  readConfig();
+  assertConfigWritable();
   mkdirSync(dirname(p), { recursive: true });
   // A reset is a fresh install: nothing to clear, so the default-model flag is done.
-  writeFileSync(p, JSON.stringify({ ...DEFAULTS, defaultModelCliMigratedV1: true }, null, 2), 'utf8');
+  writeConfigAtomically(p, { ...DEFAULTS, defaultModelCliMigratedV1: true });
   // Drop the migration latch too: the file on disk is back to `triggersMigratedV1:
   // false`, and a latch left set would keep the flag from ever being written again
   // in this process. The migration itself is a no-op on defaults either way.
