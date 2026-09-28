@@ -222,6 +222,9 @@ export interface RegistryAgent extends AgentMeta {
   liveModel?: string;
   /** MODEL-PINBACK: when the current process was launched (ms since epoch). */
   launchedAt?: number;
+  /** MODEL-PINBACK: who made the pin: 'user' (human terminal input preceded it, kept on
+   *  respawn) or 'auto' (none did: shown and logged, not kept). Absent = a pre-rule pin. */
+  modelPinSource?: 'user' | 'auto';
   /** Whether `cwd` is actually usable for a (re)spawn — i.e. an ABSOLUTE path
    *  that exists as a directory. Computed + persisted at spawn so the roster
    *  reliably exposes each worker's environment validity. A non-absolute fragment
@@ -1431,29 +1434,67 @@ export class HiveManager {
   ): void {
     const root = this.root();
     if (!root || !model.trim()) return;
+    const now = Date.now();
     try {
       const reg = this.registry();
       const agent = reg.agents[agentId];
       if (!agent || (agent.provider ?? 'claude') !== provider) return;
       const before = agent.model;
-      const r = applyLiveModel(agent, model, opts);
+      const beforeFrom = agent.modelPinnedFrom;
+      // What the live model moved FROM: the last live model of this process, else its launch
+      // model (for a pre-MODEL-PINBACK entry, the previous pin).
+      const from = agent.liveModel ?? agent.launchModel ?? before ?? null;
+      // USER OR AUTO: did HUMAN input reach this agent's pty since the previous observation (or
+      // since launch)? Unknown (no source wired, no live pty) is not proof of a human: 'auto'.
+      const since = this.modelObservedAt.get(agentId) ?? agent.launchedAt ?? 0;
+      const human = this.humanInputAt?.(agentId);
+      const humanInputSince = typeof human === 'number' && human > since;
+      const r = applyLiveModel(agent, model, { ...opts, humanInputSince });
+      if (r.action !== 'stale' && r.action !== 'unknown-launch') this.modelObservedAt.set(agentId, now);
       if (!r.changed) return;
-      agent.lastSeen = Date.now();
+      agent.lastSeen = now;
       this.atomicWriteJson(join(root, 'registry.json'), reg);
-      if (agent.model !== before) this.appendLog({ kind: 'model', agentId, model: agent.model ?? null, provider, from: agent.modelPinnedFrom ?? null });
+      // Jim SHOULD-FIX: an automatic CLI fallback (a plan-limit Opus->Sonnet switch, or a Codex/AGY
+      // equivalent reported as the live model) cannot be told apart from a user's /model, and it
+      // pins too. Every pin and every clear is therefore logged with its source, so a pin can be
+      // traced to the observation that made it. No expiry: that is the Human's decision.
+      const evidence = HiveManager.MODEL_EVIDENCE[provider];
+      if (agent.model !== undefined && (agent.model !== before || agent.modelPinnedFrom !== beforeFrom)) {
+        this.appendLog({ kind: 'model-pinned', agentId, provider, source: agent.modelPinSource ?? null, from, to: agent.model, requested: agent.requestedModel ?? null, evidence });
+      } else if (agent.model === undefined && before !== undefined) {
+        this.appendLog({ kind: 'model-pin-cleared', agentId, provider, pinned: before, from, to: model.trim(), requested: agent.requestedModel ?? null, evidence });
+      }
     } catch { /* best-effort - never crash a status line or a hook */ }
   }
+
+  /** MODEL-PINBACK user/auto: when a live model was last observed per agent (in memory; a new
+   *  process starts from its launch time). */
+  private modelObservedAt = new Map<string, number>();
+  /** MODEL-PINBACK user/auto: when HUMAN-origin input last reached the agent's live pty (main
+   *  wires this to PtyManager.lastHumanInputAt). Unset = never a human: every pin is 'auto'. */
+  private humanInputAt: ((agentId: string) => number | undefined) | null = null;
+  setHumanInputSource(fn: ((agentId: string) => number | undefined) | null): void { this.humanInputAt = fn; }
+
+  /** MODEL-PINBACK: which observation a live model came from (the `evidence` of a pin log row). */
+  static readonly MODEL_EVIDENCE: Readonly<Record<'claude' | 'codex' | 'antigravity', 'status-line' | 'rollout-turn_context' | 'agy-statusline'>> = {
+    claude: 'status-line',
+    codex: 'rollout-turn_context',
+    antigravity: 'agy-statusline'
+  };
 
   /** MODEL-PINBACK: record a spawn's requested/launch model on its (about to be written) entry.
    *  A pin that no longer applies (the picker changed the request since) is dropped here. */
   private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string }): void {
     const requested = spawn.requested?.trim() || undefined;
     const launch = spawn.launch?.trim() || undefined;
-    if (resolveSpawnModel(entry, requested).dropPin) {
-      this.appendLog({ kind: 'model-pin-dropped', agentId, pinned: entry.model ?? null, from: entry.modelPinnedFrom ?? null, requested: requested ?? null });
+    const resolved = resolveSpawnModel(entry, requested);
+    if (resolved.dropPin) {
+      this.appendLog({ kind: 'model-pin-dropped', agentId, reason: resolved.dropReason ?? null, source: entry.modelPinSource ?? null, pinned: entry.model ?? null, from: entry.modelPinnedFrom ?? null, requested: requested ?? null });
       delete entry.model;
       delete entry.modelPinnedFrom;
+      delete entry.modelPinSource;
     }
+    this.modelObservedAt.delete(agentId);
     if (requested) entry.requestedModel = requested; else delete entry.requestedModel;
     if (launch) entry.launchModel = launch; else delete entry.launchModel;
     delete entry.liveModel;

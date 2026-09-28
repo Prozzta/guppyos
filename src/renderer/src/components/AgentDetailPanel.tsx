@@ -19,18 +19,18 @@ import { Icon } from './Icon';
 import { AgentNameEditor } from './AgentNameEditor';
 import { useStore, type Agent } from '@/store/store';
 import { usePtyParser } from '@/hooks/usePtyParser';
-import { effectiveModel, sameModel } from '@shared/modelPin';
+import { modelPinLabel, type ModelPinFields } from '@shared/modelPin';
 
 /** MODEL-PINBACK G3: the model main knows this agent runs (live, else launched, else pinned) and
  *  the pinned in-TUI switch, from the hive registry. Read-only; refreshed every 15 s. */
-function useRegistryModel(agentId: string): { effective?: string; pinned?: string } {
-  const [m, setM] = useState<{ effective?: string; pinned?: string }>({});
+function useRegistryModel(agentId: string): ModelPinFields | undefined {
+  const [m, setM] = useState<ModelPinFields | undefined>(undefined);
   useEffect(() => {
     let alive = true;
     const read = (): void => {
       void window.cth.hiveRegistry().then((reg) => {
         const e = reg.agents?.[agentId];
-        if (alive) setM({ effective: effectiveModel(e), pinned: e?.model });
+        if (alive) setM(e);
       }).catch(() => { /* hive not ready */ });
     };
     read();
@@ -110,7 +110,7 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
   const isFullscreenedHere = fullscreenAgentId === agent.id;
 
   const onPtyStream = usePtyParser(agent.id);
-  const runModel = useRegistryModel(agent.id);
+  const runModel = modelPinLabel(useRegistryModel(agent.id), agent.model);
 
   // Michael gets the full command-center dashboard instead of the plain panel.
   if (agent.isGod) return <CommandCenterPanel agent={agent} />;
@@ -190,15 +190,19 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
               fontSize: 12, color: 'var(--cth-ink-500)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
             }}>{agent.project}</span>
-            {runModel.effective && (
+            {runModel.model && (
               <span
                 data-testid="agent-effective-model"
-                title={`Runs ${runModel.effective}${runModel.pinned ? ` (switched in its terminal; kept on restart${agent.model && !sameModel(agent.model, runModel.pinned) ? ` over the picked ${agent.model}` : ''})` : ''}`}
+                title={runModel.tooltip}
                 style={{
                   fontSize: 12, color: 'var(--cth-ink-500)', flexShrink: 1, minWidth: 0,
                   whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
                 }}
-              >· {runModel.effective}{runModel.pinned ? ' *' : ''}</span>
+              >· {runModel.model}{runModel.marker && (
+                <span style={{ marginLeft: 4, fontSize: 10, color: runModel.marker === 'auto' ? 'var(--cth-coral)' : 'var(--cth-ink-700)' }}>
+                  [{runModel.marker}]
+                </span>
+              )}</span>
             )}
           </div>
         </div>

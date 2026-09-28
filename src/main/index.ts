@@ -1612,6 +1612,13 @@ function lastCoordinationAt(agentId: string): number {
   return Math.max(...times);
 }
 
+// MODEL-PINBACK user/auto: a live model switch counts as the user's only when HUMAN-origin
+// terminal input (never an app write: those are PROGRAMMATIC/CONTROL) reached the agent's pty.
+hive.setHumanInputSource((agentId) => {
+  const ptyId = ptyForAgent(agentId);
+  return ptyId ? ptyManager.lastHumanInputAt(ptyId) : undefined;
+});
+
 /** PTY id owning a given agent id, or undefined. */
 function ptyForAgent(agentId: string): string | undefined {
   for (const [ptyId, a] of ptyToAgent) if (a === agentId) return ptyId;

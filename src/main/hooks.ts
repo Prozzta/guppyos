@@ -711,6 +711,7 @@ export class HookServer {
    * normaliser: it is not logged, not stored, and not passed on.
    */
   private handleAgyStatus(p: HookPayload): unknown {
+    this.observeAgyModel(p);
     try {
       const c = classifyAgyStatusLine({
         payload: p.agy_status,
@@ -736,17 +737,32 @@ export class HookServer {
       }
       const agentId = typeof p.agent_id === 'string' && p.agent_id ? p.agent_id : null;
       this.onAgyTick?.(agentId, c.tick);
-      // MODEL-PINBACK G2: the MEASURED model of a hive agent's AGY session (`model.id` is the
-      // same label `--model` takes). A session nobody spawned (agent_id null) moves nothing.
-      if (agentId) {
-        try {
-          const status = p.agy_status as { model?: { id?: unknown } } | undefined;
-          const id = typeof status?.model?.id === 'string' ? status.model.id : '';
-          if (id.trim()) this.hive.observeLiveModel(agentId, 'antigravity', id, { observedAt: c.tick.readAt });
-        } catch { /* telemetry must never break the pipe */ }
-      }
     } catch { /* telemetry must never break the pipe */ }
     return {};
+  }
+
+  /**
+   * MODEL-PINBACK G2: the MEASURED model of a hive agent's AGY session. Independent of the
+   * capacity classification on purpose: a tick without a usable quota map still names the model.
+   * `model.id` is the picker id format `--model` takes (live capture: "Gemini 3.7 Flash (Low)",
+   * "Claude Sonnet 4.6 (Thinking)"), so no normalisation. A boot tick carries `model: null` and is
+   * ignored: never a baseline, never a pin. A session nobody spawned (agent_id null) moves
+   * nothing. AGY silently substitutes a retired id (launched "Gemini 3.5 Flash (Medium)", every
+   * tick says "Gemini 3.8 Flash (High)"): with no human input that is an AUTO pin, not carried.
+   */
+  private observeAgyModel(p: HookPayload): void {
+    try {
+      const agentId = typeof p.agent_id === 'string' && p.agent_id ? p.agent_id : null;
+      if (!agentId) return;
+      const status = p.agy_status as { model?: unknown; agent_state?: unknown } | undefined;
+      if (!status || typeof status !== 'object' || status.agent_state === 'authenticating') return;
+      const model = status.model as { id?: unknown } | null | undefined;
+      const id = model && typeof model === 'object' && typeof model.id === 'string' ? model.id.trim() : '';
+      if (!id) return;
+      const now = Date.now();
+      const readAt = typeof p.read_at === 'number' && Number.isFinite(p.read_at) && p.read_at <= now ? p.read_at : now;
+      this.hive.observeLiveModel(agentId, 'antigravity', id, { observedAt: readAt });
+    } catch { /* telemetry must never break the pipe */ }
   }
 
   /** The transcript file of an agent's CURRENT session, if any hook has fired. */

@@ -21,11 +21,22 @@
  *   - an observation stamped before this process was launched (a stale rollout line from the
  *     previous process of a resumed thread).
  *
- * LIMITATION. A client-side AUTOMATIC model change (a CLI that falls back to another model on a
- * usage limit and reports it as the live model) looks exactly like a user switch here and is
- * pinned. A purely provider-side reroute that the CLI does not report is invisible and pins
- * nothing.
+ * USER OR AUTO. A CLI can also change model ON ITS OWN (a plan-limit Opus->Sonnet fallback, or
+ * a Codex/AGY equivalent) and report it as the live model; the observation itself cannot tell
+ * that from a user's `/model`. So every pin carries a SOURCE, decided by the only evidence main
+ * has: whether HUMAN input (renderer-originated terminal input, `shared/inputOrigin.ts`; app
+ * writes are PROGRAMMATIC or CONTROL and never count) reached this agent's pty since the
+ * previous live-model observation (or since launch). Yes = 'user', no = 'auto'.
+ *   - A 'user' pin is kept across a respawn (while the picker is unchanged).
+ *   - An 'auto' pin is shown and logged but NOT kept: the respawn runs the picker model and logs
+ *     the auto pin as dropped.
+ * The signal is necessary, not sufficient: a fallback that happens in a turn the human just
+ * typed a prompt for is classified 'user'. A pin from before this rule has no source and is
+ * kept as it always was. A purely provider-side reroute that the CLI does not report is
+ * invisible and pins nothing.
  */
+
+export type ModelPinSource = 'user' | 'auto';
 
 export interface ModelPinFields {
   /** The pinned live model (a user's in-TUI switch), if any. */
@@ -40,6 +51,9 @@ export interface ModelPinFields {
   liveModel?: string;
   /** When this process was launched (ms). Absent = spawned before MODEL-PINBACK. */
   launchedAt?: number;
+  /** Who made the pin: 'user' (human input preceded it) or 'auto' (none did). Absent = a pin
+   *  from before this rule, kept as before. */
+  modelPinSource?: ModelPinSource;
 }
 
 const norm = (m: string | undefined | null): string => (m ?? '').trim().toLowerCase();
@@ -81,12 +95,14 @@ export function withModelFlag(args: readonly string[], model: string, flag = '--
 export function resolveSpawnModel(
   entry: ModelPinFields | undefined,
   requested: string | undefined
-): { model: string | undefined; pinApplied: boolean; dropPin: boolean } {
+): { model: string | undefined; pinApplied: boolean; dropPin: boolean; dropReason?: 'auto-not-kept' | 'picker-changed' } {
   const req = requested?.trim() || undefined;
   const pin = entry?.model?.trim() || undefined;
   if (!pin) return { model: req, pinApplied: false, dropPin: false };
+  // An automatic switch is never carried into a new process: the picker model runs again.
+  if (entry?.modelPinSource === 'auto') return { model: req, pinApplied: false, dropPin: true, dropReason: 'auto-not-kept' };
   if (sameModel(entry?.modelPinnedFrom, req)) return { model: pin, pinApplied: true, dropPin: false };
-  return { model: req, pinApplied: false, dropPin: true };
+  return { model: req, pinApplied: false, dropPin: true, dropReason: 'picker-changed' };
 }
 
 export type LiveModelAction = 'stale' | 'unknown-launch' | 'baseline' | 'unchanged' | 'pin' | 'unpin';
@@ -102,8 +118,9 @@ export type LiveModelAction = 'stale' | 'unknown-launch' | 'baseline' | 'unchang
 export function applyLiveModel(
   entry: ModelPinFields,
   liveRaw: string,
-  opts: { observedAt?: number; fallbackBaseline?: string } = {}
+  opts: { observedAt?: number; fallbackBaseline?: string; humanInputSince?: boolean } = {}
 ): { action: LiveModelAction; changed: boolean } {
+  const source: ModelPinSource = opts.humanInputSince === true ? 'user' : 'auto';
   const live = liveRaw.trim();
   if (!live) return { action: 'unchanged', changed: false };
   const baseline = entry.requestedModel ?? opts.fallbackBaseline;
@@ -112,12 +129,14 @@ export function applyLiveModel(
       if (entry.model === undefined && entry.modelPinnedFrom === undefined) return { action: 'unpin', changed: false };
       delete entry.model;
       delete entry.modelPinnedFrom;
+      delete entry.modelPinSource;
       return { action: 'unpin', changed: true };
     }
     if (sameModel(entry.model, live) && sameModel(entry.modelPinnedFrom, entry.requestedModel)) {
       return { action: 'pin', changed: false };
     }
     entry.model = live;
+    entry.modelPinSource = source;
     if (entry.requestedModel !== undefined) entry.modelPinnedFrom = entry.requestedModel;
     else delete entry.modelPinnedFrom;
     return { action: 'pin', changed: true };
@@ -144,6 +163,21 @@ export function applyLiveModel(
   entry.liveModel = live;
   setPin();
   return { action: sameModel(live, baseline) ? 'unpin' : 'pin', changed: true };
+}
+
+/** G3 panel text for an agent's model: a small marker and a plain tooltip. The marker is only
+ *  present while a pin is in force, and says which kind. */
+export function modelPinLabel(entry: ModelPinFields | undefined, picked?: string): { model?: string; marker: '' | 'pinned' | 'auto'; tooltip: string } {
+  const model = effectiveModel(entry);
+  if (!model) return { marker: '', tooltip: '' };
+  const over = picked && entry?.model && !sameModel(picked, entry.model) ? ` over the picked ${picked}` : '';
+  if (entry?.model && entry.modelPinSource === 'auto') {
+    return { model, marker: 'auto', tooltip: `Runs ${entry.model}. Auto: the CLI switched model on its own (e.g. a usage-limit fallback)${over}; not kept after a restart.` };
+  }
+  if (entry?.model) {
+    return { model, marker: 'pinned', tooltip: `Runs ${entry.model}. Pinned: switched by you in the terminal${over}; kept after a restart. Change the model picker to override.` };
+  }
+  return { model, marker: '', tooltip: `Runs ${model}.` };
 }
 
 /** The model an agent is running as far as main knows: live, else launched, else pinned. */
