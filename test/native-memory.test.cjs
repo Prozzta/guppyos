@@ -475,37 +475,66 @@ test('ZERO PYTHON (and zero child processes) on the native path: the built worke
   assert.doesNotMatch(src, /\bpython\b|\buv tool\b/i);
 });
 
-test('MAIN BUDGET (section 3): the synchronous part of a memory request in main (token, mode, validation, post) does at most one small sync read', async (t) => {
+test('MAIN BUDGET (section 3): the synchronous part of a memory request in main (token, mode, validation, post) does two existence checks and little CPU', async (t) => {
+  // FLAKY-XAUDIT finding 3: with no runtime manifest every request returned exit 3 'no-runtime'
+  // before validation, so the budget was measured on an early return. A fake runtime (manifest
+  // under resourcesDir/models, a model file and vec0, as workerConfig() expects) makes every
+  // request reach validation and the post to the worker - the path the title names.
   const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': '{"mode":"native"}' });
-  const { w } = wiring(root);
-  w.client.request = () => new Promise(() => {});   // the worker's time is not main's
+  const { w } = wiring(root, runtime(root));
+  let posted = 0;
+  w.client.request = () => { posted += 1; return new Promise(() => {}); };   // the worker's time is not main's
   const tok = w.tokens.mint('a1');
-  const times = [];
-  // FLAKY-TIMING: the budget is pinned by what main DOES per request, which holds under any load:
-  // at most ONE synchronous fs call (today: reading the small memory-engine.json mode file), and
-  // never a big read. A p95 < 2 ms wall-clock bound failed under the parallel suite.
+  const N = 400;
+  // Warm-up: the manifest is read once and cached; the fs budget is about every request after it.
+  // Its CPU still counts: a one-off stall on the first request is a stall on main all the same.
+  const cw0 = process.cpuUsage();
+  void w.handle(tok, { cmd: 'search', args: { query: 'warm', results: 5 } });
+  const cw = process.cpuUsage(cw0);
+  const warmCpuMs = (cw.user + cw.system) / 1000;
+  assert.equal(posted, 1, 'the warm-up request reached the post (a runtime is present)');
+  posted = 0;
+  // FLAKY-TIMING: the budget is pinned by what main DOES per request, which holds under any load.
+  // (1) Sync fs: today exactly the two existsSync checks in workerConfig() (vec0 and the model file);
+  //     anything more on the request path is sync I/O creeping onto main.
   const SYNC = ['readFileSync', 'statSync', 'existsSync', 'readdirSync', 'writeFileSync', 'openSync', 'readSync', 'lstatSync', 'realpathSync', 'accessSync', 'appendFileSync', 'mkdirSync', 'renameSync', 'rmSync', 'copyFileSync'];
   const counts = {}; let readBytes = 0; const real = {};
   for (const k of SYNC) {
     real[k] = fs[k];
     fs[k] = function (...a) { counts[k] = (counts[k] || 0) + 1; const r = real[k].apply(this, a); if (k === 'readFileSync' && r) readBytes += typeof r === 'string' ? Buffer.byteLength(r) : r.length; return r; };
   }
+  // (2) CPU: process.cpuUsage does not grow while main waits for a CPU, so a saturated machine
+  //     cannot break it, but compute on main (a 5 ms stall per request, or one 300 ms stall) can.
+  const times = [];
+  const cpu = [warmCpuMs];
+  const cpu0 = process.cpuUsage();
   try {
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < N; i++) {
+      const c0 = process.cpuUsage();
       const t0 = process.hrtime.bigint();
       void w.handle(tok, { cmd: 'search', args: { query: `query ${i}`, results: 5 } });
       times.push(Number(process.hrtime.bigint() - t0) / 1e6);
+      const c = process.cpuUsage(c0);
+      cpu.push((c.user + c.system) / 1000);
     }
   } finally { for (const k of SYNC) fs[k] = real[k]; }
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  assert.ok(total <= 400, `at most one synchronous fs call per request: ${JSON.stringify(counts)}`);
-  assert.ok(readBytes <= 400 * 4096, `only small reads on main: ${readBytes} bytes over 400 requests`);
+  const cpuAll = process.cpuUsage(cpu0);
+  const cpuTotalMs = (cpuAll.user + cpuAll.system) / 1000;
   times.sort((a, b) => a - b);
   const p95 = times[Math.floor(times.length * 0.95)];
-  t.diagnostic(`main-side p95 ${p95.toFixed(3)} ms (spec budget 2 ms; measured in the packaged gate)`);
-  // A loose bound that still catches real compute on main (an embed or a tokenizer load costs tens to
-  // hundreds of ms), not the 2 ms spec figure, which host load alone can exceed.
-  assert.ok(p95 < 50, `p95 ${p95.toFixed(3)} ms`);
+  t.diagnostic(`main-side wall p95 ${p95.toFixed(3)} ms (spec budget 2 ms; measured in the packaged gate; not asserted - host load moves it)`);
+  t.diagnostic(`main-side CPU ${cpuTotalMs.toFixed(1)} ms over ${N} requests (${(cpuTotalMs / N).toFixed(3)} ms each), max one request ${Math.max(...cpu).toFixed(1)} ms; sync fs ${JSON.stringify(counts)}`);
+
+  assert.equal(posted, N, 'every request reached validation and the post to the worker');
+  assert.deepEqual(Object.keys(counts), ['existsSync'], `only the two runtime existence checks: ${JSON.stringify(counts)}`);
+  assert.ok(counts.existsSync <= 2 * N, `at most two sync fs calls per request (today exactly 2): ${JSON.stringify(counts)}`);
+  assert.equal(readBytes, 0, 'no reads on the request path once the manifest is cached');
+  // Measured ~0.2 ms of CPU per request (process.cpuUsage ticks at ~15.6 ms on Windows, so the
+  // total over N is what resolves it). 2.5 ms each is ~12x headroom, and a 5 ms stall per request
+  // (FLAKY-XAUDIT M7d) still fails; the per-request max (warm-up included; measured <= 32 ms, two
+  // Windows ticks) catches one long stall (M7c, 300 ms).
+  assert.ok(cpuTotalMs / N < 2.5, `CPU per request ${(cpuTotalMs / N).toFixed(3)} ms (budget 2.5 ms)`);
+  assert.ok(Math.max(...cpu) < 150, `no single request burns 150 ms of CPU: max ${Math.max(...cpu).toFixed(1)} ms`);
 });
 
 test('IDLE UNLOAD (Jim R2): every embed re-arms ONE unload timer of MODEL_IDLE_UNLOAD_MS; firing it unloads the model', async () => {
