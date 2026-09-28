@@ -80,6 +80,7 @@ ipcMain.on('page:got3', (e) => emit('got3', { wcId: e.sender.id }));
 
 const policy = new R.RecoveryPolicy();
 let memoryAt = 0;
+let memoryKillPending = false;
 
 app.whenReady().then(async () => {
   try {
@@ -89,7 +90,11 @@ app.whenReady().then(async () => {
       policy, now: () => Date.now(), setTimer: (fn, ms) => setTimeout(fn, ms),
       log: (row) => { note({ row: { reason: row.reason, recovery: row.recovery, streak: row.streak } }); emit('gone', row); },
       quitting: () => false,
-      setNotice: (w, n) => { notices.set(w.webContents.id, Date.now() - memoryAt < 15_000 ? { ...n, reason: 'memory' } : n); },
+      // FLAKY-TIMING (Andy, flaky-170): this stand-in for index.ts's setNotice marked the notice
+      // 'memory' only when it came < 15 s (wall clock) after the kill. The harness's question is
+      // plumbing - beforeKill ran before the kill, and the reload's notice follows it - so it is
+      // now answered by that ORDER: a memory kill not yet reported marks the next notice.
+      setNotice: (w, n) => { const mem = memoryKillPending; memoryKillPending = false; notices.set(w.webContents.id, mem ? { ...n, reason: 'memory', sinceKillMs: Date.now() - memoryAt } : n); },
       recreate: () => null, install: () => {}, giveUp: (w, d) => emit('gaveUp', d)
     });
     owner = win.webContents;
@@ -102,7 +107,7 @@ app.whenReady().then(async () => {
       alertMb: LIMIT_MB,
       onOverLimit: (pid, mb) => {
         const outcome = R.recoverRendererForMemory(pid, {
-          windows: () => BrowserWindow.getAllWindows(), givenUp: () => policy.givenUp, beforeKill: () => { memoryAt = Date.now(); }
+          windows: () => BrowserWindow.getAllWindows(), givenUp: () => policy.givenUp, beforeKill: () => { memoryAt = Date.now(); memoryKillPending = true; }
         });
         actions.push({ pid, mb, outcome, at: Date.now() });
         note({ phase: 'over-limit', pid, mb, outcome });

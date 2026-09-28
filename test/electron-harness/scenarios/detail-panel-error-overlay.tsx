@@ -16,6 +16,17 @@ import { useStore, type Agent } from '../../../src/renderer/src/store/store';
 
 declare global { interface Window { __harnessRun: () => Promise<void>; harness: { report: (p: unknown) => void; click: (x: number, y: number) => Promise<boolean> } } }
 const sleep = (ms: number) => new Promise<void>((r) => { setTimeout(r, ms); });
+/** FLAKY-TIMING (Andy, flaky-170): wait for a condition (polling), up to a generous deadline,
+ *  instead of a fixed sleep a busy renderer can outrun. A condition that never holds still fails. */
+async function until(what: () => boolean, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (!what()) { if (Date.now() > end) return false; await sleep(20); }
+  return true;
+}
+const alertUp = () => !!document.querySelector('[role="alert"]');
+/** The error's own reset is 4 s from when it is SET; polling for it to clear needs only a deadline
+ *  well past that. A reset that never fires still fails, at the deadline. */
+const CLEAR_DEADLINE_MS = 15_000;
 const cth = (window as unknown as { cth: Record<string, unknown> }).cth;
 const ERR = 'spawn wt.exe ENOENT: the system terminal could not be started in C:/Users/someone/projects/a-rather-long-folder-name';
 const extra: Record<string, (...a: unknown[]) => Promise<unknown>> = {
@@ -36,8 +47,10 @@ window.__harnessRun = async () => {
     createRoot(document.getElementById('root')!).render(
       <div style={{ width: 420, height: '100vh', display: 'flex', flexDirection: 'column' }}><AgentDetailPanel agent={agent} /></div>
     );
-    await sleep(800);
-    const termBtn = document.querySelector('[aria-label="Open a system terminal in this agent\'s folder"]')?.closest('button') as HTMLElement | null;
+    const findTermBtn = () => document.querySelector('[aria-label="Open a system terminal in this agent\'s folder"]')?.closest('button') as HTMLElement | null;
+    await until(() => !!findTermBtn(), 10_000);
+    await sleep(300);   // let the mount settle (layout) before the "before" reads
+    const termBtn = findTermBtn();
     out.foundOpenButton = !!termBtn;
     // The terminal area starts where the tab bar ends; its top edge moving = the grid moving.
     const tabsBottom = () => {
@@ -56,23 +69,20 @@ window.__harnessRun = async () => {
     out.tabsBefore = tabsBottom();
     out.buttonsBefore = probe();
     termBtn?.click();
-    await sleep(500);
-    out.alertShown = !!document.querySelector('[role="alert"]');
+    // The error is set when openTerminalAt answers; the 4 s reset starts then, so a poll sees it.
+    out.alertShown = await until(alertUp, 10_000);
     out.alertPointerEvents = (() => { const a = document.querySelector('[role="alert"]'); return a ? getComputedStyle(a).pointerEvents : null; })();
     out.tipCarriesError = (termBtn?.querySelector('[data-tip]')?.getAttribute('data-tip') ?? '').includes(ERR);
     out.tabsDuring = tabsBottom();
     out.buttonsDuring = probe();
-    await sleep(4200); // past the 4 s reset
-    out.alertShownAfter = !!document.querySelector('[role="alert"]');
+    out.alertShownAfter = !(await until(() => !alertUp(), CLEAR_DEADLINE_MS)); // it clears on its own (4 s reset)
     out.tabsAfter = tabsBottom();
     // D3 (Jim): the THROWN failure path must clear too, not only the ok:false one.
     extra.openTerminalAt = () => Promise.reject(new Error('THROWN: ' + ERR));
     termBtn?.click();
-    await sleep(500);
-    out.thrownAlertShown = !!document.querySelector('[role="alert"]');
+    out.thrownAlertShown = await until(alertUp, 10_000);
     out.thrownButtons = probe();
-    await sleep(4200);
-    out.thrownAlertShownAfter = !!document.querySelector('[role="alert"]');
+    out.thrownAlertShownAfter = !(await until(() => !alertUp(), CLEAR_DEADLINE_MS));
     window.harness.report({ ok: true, ...out });
   } catch (e) {
     window.harness.report({ ok: false, error: String((e as Error)?.stack ?? e), ...out });

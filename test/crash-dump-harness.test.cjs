@@ -58,5 +58,11 @@ test('RENDERED: the reporter adds no measurable startup cost (start() ms; time-t
   // suite on a busy floor start() measured 93-189 ms (1.1.66 run), so 150 ms flaked; 400 ms still
   // catches a start() that blocks (a synchronous handler launch or dump scan costs seconds).
   assert.ok(median(cost) <= 400, `start() itself is cheap: ${JSON.stringify(cost)} ms`);
-  assert.ok(median(on) - median(off) <= 500, `time-to-ready difference within run-to-run noise: with ${median(on)} vs without ${median(off)} ms`);
+  // FLAKY-TIMING (Andy, flaky-170): the time-to-ready DIFFERENCE is reported, no longer asserted.
+  // It is two medians of three whole-Electron launches each, i.e. mostly process creation, which a
+  // saturated machine moves by hundreds of ms (317 ms measured under load against a 500 ms bound).
+  // It also adds no detection: the only reporter code in this harness before 'ready' is
+  // startLocalCrashReporter (one crashReporter.start call), and its cost is the start() bound above,
+  // measured in-process around exactly that call.
+  console.log(`time-to-ready difference (diagnostic): ${median(on) - median(off)} ms`);
 });

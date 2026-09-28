@@ -119,6 +119,9 @@ function installBridgeStub(): void {
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => { setTimeout(r, ms); });
+/** FLAKY-TIMING (Andy, flaky-170): a poll's deadline is a hang guard, so it is generous - a
+ *  mirror that never arrives still fails, at the deadline, and a busy renderer cannot. */
+const MIRROR_DEADLINE_MS = 30_000;
 async function until(what: () => boolean, ms: number): Promise<boolean> {
   const end = Date.now() + ms;
   while (Date.now() < end) { if (what()) return true; await sleep(20); }
@@ -160,7 +163,7 @@ async function open(id: string): Promise<{ ta: HTMLTextAreaElement; rowText: () 
   attachTerminal(entry, root());
   pty(id).tui.boot();
   // Both mirrors must have ARRIVED through the production path before anything is asked.
-  const ready = await until(() => pty(id).inputState !== undefined && pty(id).promptState !== undefined && entry.inputSelfTest !== 'unknown', 5_000);
+  const ready = await until(() => pty(id).inputState !== undefined && pty(id).promptState !== undefined && entry.inputSelfTest !== 'unknown', MIRROR_DEADLINE_MS);
   pty(id).log.length = 0; // the self-test's own bytes are not part of any arm
   const rowText = () => {
     const buf = entry.term.buffer.active;
@@ -241,7 +244,7 @@ window.__harnessRun = async () => {
     {
       const t = await open('drf');
       pressKey(t.ta, 'h'); pressKey(t.ta, 'i');
-      const mirrored = await until(() => pty('drf').promptState?.block === 'draft', 3_000);
+      const mirrored = await until(() => pty('drf').promptState?.block === 'draft', MIRROR_DEADLINE_MS);
       await sleep(1_700); // past HUMAN_QUIET_MS, so the DRAFT - not recency - is what refuses
       const outcome = await submit('drf', 'r-drf', 'must not be typed five');
       result.drf = { ready: t.ready, mirrored, promptBlocks: pty('drf').promptBlocks, outcome,

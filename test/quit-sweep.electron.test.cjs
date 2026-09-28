@@ -56,9 +56,16 @@ const fixture = path.join(__dirname, 'fixtures', 'quit-sweep-main.cjs');
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-sweep-'));
 const pidFile = path.join(sandbox, 'pids.json');
 
-function isAlive(pid) {
+/** The image name running as `pid` right now, or null when no process has that pid. */
+function imageOf(pid) {
   const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
-  return out.includes(`"${pid}"`);
+  const m = out.split(/\r?\n/).map((l) => /^"([^"]*)","(\d+)"/.exec(l)).find((x) => x && Number(x[2]) === pid);
+  return m ? m[1] : null;
+}
+/** Still alive = the same image under the same pid (a reused pid of another program is not ours). */
+function isAlive(pid, image) {
+  const now = imageOf(pid);
+  return now !== null && (image == null || now === image);
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -93,8 +100,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     assert.strictEqual(exitCode, 0, `electron exited ${exitCode}; output:\n${output}`);
     assert.ok(recorded.pids.length >= 2, `expected root+descendant, saw: ${recorded.pids.join(',')}`);
 
-    await sleep(500); // let the OS finish reaping what taskkill force-killed
-    const survivors = recorded.pids.filter(isAlive);
+    // FLAKY-TIMING (Andy, flaky-170): a fixed sleep(500) raced the OS reaping what taskkill
+    // force-killed on a busy machine. Poll for the EVENT (every recorded process gone) with a
+    // generous deadline instead. The leak this guards leaves `Start-Sleep 300` processes alive
+    // for five minutes, so it still fails - at the deadline - and a pid reused by another
+    // program is not counted as a survivor.
+    const images = new Map(recorded.pids.map((pid) => [pid, imageOf(pid)]));
+    const REAP_DEADLINE_MS = 30_000;
+    const reapStart = Date.now();
+    let survivors = recorded.pids.filter((pid) => isAlive(pid, images.get(pid)));
+    while (survivors.length && Date.now() - reapStart < REAP_DEADLINE_MS) {
+      await sleep(250);
+      survivors = survivors.filter((pid) => isAlive(pid, images.get(pid)));
+    }
     if (survivors.length) {
       // Clean up the leak before failing, so a red run doesn't strand processes.
       for (const pid of survivors) {

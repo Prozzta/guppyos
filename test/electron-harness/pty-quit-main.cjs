@@ -28,6 +28,12 @@ const pty = require('node-pty');
 
 app.whenReady().then(async () => {
   const m = new PtyManager();
+  // FLAKY-TIMING (Andy, flaky-170): the gate is the ORDER - app.exit only after every ConPTY exit
+  // arrived (pending 0, no dump). With the production 1.5 s cap, a saturated machine delivering
+  // the 4 exits later than 1.5 s failed the gate without any defect. The cap's own value and
+  // behaviour are pinned in quit-hang-157 (EXIT-CRASH tests); here it is only a hang guard.
+  const productionCap = PtyManager.EXIT_WAIT_MS;
+  PtyManager.EXIT_WAIT_MS = 60_000;
   const procs = [];
   for (let i = 0; i < 4; i += 1) {
     const p = pty.spawn('cmd.exe', ['/k'], { name: 'xterm-256color', cols: 80, rows: 24, cwd: sandbox, env: process.env, useConpty: true });
@@ -43,6 +49,6 @@ app.whenReady().then(async () => {
   } else {
     await m.killAllAsync();
   }
-  process.stdout.write(`__PTYQUIT__${JSON.stringify({ mode, ms: Date.now() - t0, pending: m.exitsPending })}\n`);
+  process.stdout.write(`__PTYQUIT__${JSON.stringify({ mode, ms: Date.now() - t0, pending: m.exitsPending, productionCap })}\n`);
   app.exit(0);
 });
