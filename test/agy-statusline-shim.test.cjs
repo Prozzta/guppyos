@@ -113,8 +113,16 @@ async function server(t, dir) {
   return { sock, got };
 }
 
-/** Run the shim. `stdin` null leaves stdin OPEN (to test the watchdog). */
-function runShim(file, { stdin, env = {}, args = [], preload = null, stretchWatchdog = false } = {}) {
+/**
+ * Run the shim. `stdin` null leaves stdin OPEN (to test the watchdog).
+ *
+ * The watchdog is STRETCHED by default (FLAKY-170): the shim's real 400 ms watchdog counts wall
+ * time from its first line, so on a saturated machine it ended healthy shims before they printed
+ * (load harness: "state words" got '' instead of " idle"). Every test that is about WHAT the shim
+ * prints or sends therefore runs without it; speed is pinned by CPU time (assertFast), and the
+ * watchdog itself by the WATCHDOG test, which passes `stretchWatchdog: false`.
+ */
+function runShim(file, { stdin, env = {}, args = [], preload = null, stretchWatchdog = true } = {}) {
   return new Promise((resolve) => {
     const started = Date.now();
     const elapsedFile = path.join(path.dirname(file), `elapsed-${++elapsedSeq}.txt`);
@@ -276,7 +284,7 @@ test('SHIM FAILURES: dead socket, bad JSON, empty, array, oversize - all exit 0,
 
 test('SHIM WATCHDOG: stdin that never closes still exits 0 at ~400 ms', async (t) => {
   const { file } = shimFile(t);
-  const r = await runShim(file, { stdin: null });
+  const r = await runShim(file, { stdin: null, stretchWatchdog: false });
   assert.equal(r.code, 0, 'exits by itself - not killed by the test guard');
   // It ends at all (no hang), and it ends because of the 400 ms watchdog - not before. Which
   // timer fired is recorded, so no upper wall-clock bound is needed (the hang guard catches a hang).
