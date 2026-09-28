@@ -120,8 +120,6 @@ export const CODEX_TUI_KEYS_REFLOW_ONLY: Readonly<Record<string, string | number
  */
 export const CODEX_TUI_KEYS: Readonly<Record<string, string | number | boolean>> = CODEX_TUI_KEYS_REFLOW_ONLY;
 
-const TUI_TABLE = /^\s*\[\s*(["']?)tui\1\s*\]\s*(#.*)?$/;
-
 function tomlValue(v: string | number | boolean): string {
   if (typeof v === 'string') return JSON.stringify(v);
   if (typeof v === 'number') return String(Math.trunc(v));
@@ -133,8 +131,6 @@ function keyLine(line: string, key: string): boolean {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`^\\s*(["']?)${esc}\\1\\s*=`).test(line);
 }
-
-const TUI_INLINE = /^\s*(["']?)tui\1\s*=\s*\{/;
 
 /**
  * Split the text after an inline table's `{` into its raw `key = value` pairs, up to the
@@ -178,17 +174,23 @@ function inlineTablePairs(text: string): { pairs: string[]; rest: string } | nul
   return null;
 }
 
+/** `name` as a regex source, for a bare root-table name like `tui` or `features`. */
+function nameSource(name: string): string {
+  return name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * MS-169 F1: a seed may write its tui settings as a top-level inline table
- * (`tui = { alternate_screen = "never", ... }`), which forbids any later `[tui]` header or
- * `tui.x` key. Rewrite it as an equivalent `[tui]` table at the end (its pairs verbatim), so
+ * MS-169 F1 / WAKEA-169 F1: a seed may write a root table as a top-level inline table
+ * (`tui = { ... }`, `features = { ... }`), which forbids any later `[name]` header or
+ * `name.x` key. Rewrite it as an equivalent `[name]` table at the end (its pairs verbatim), so
  * ours can be set in the usual way. Anything else (or an unclosed table) is returned unchanged.
  */
-function tuiInlineToTable(config: string): string {
+function inlineRootTableToTable(config: string, name: string): string {
+  const inline = new RegExp(`^\\s*(["']?)${nameSource(name)}\\1\\s*=\\s*\\{`);
   const lines = config.split(/\r?\n/);
   const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
   const topEnd = firstTable < 0 ? lines.length : firstTable;
-  const at = lines.slice(0, topEnd).findIndex((l) => TUI_INLINE.test(l));
+  const at = lines.slice(0, topEnd).findIndex((l) => inline.test(l));
   if (at < 0) return config;
   const open = lines[at].indexOf('{');
   const tail = [lines[at].slice(open + 1), ...lines.slice(at + 1, topEnd)].join('\n');
@@ -199,69 +201,74 @@ function tuiInlineToTable(config: string): string {
   const kept = [...lines.slice(0, at), ...lines.slice(at + spanned)];
   while (kept.length && kept[kept.length - 1].trim() === '') kept.pop();
   const pairs = parsed.pairs.map((p) => p.replace(/\s*\n\s*/g, ' '));
-  return `${kept.join('\n')}${kept.length ? '\n\n' : ''}[tui]\n${pairs.join('\n')}\n`;
+  return `${kept.join('\n')}${kept.length ? '\n\n' : ''}[${name}]\n${pairs.join('\n')}\n`;
 }
 
 /**
- * Set keys of the `[tui]` table in OUR copy. The seed's values for the same keys are removed
- * (in its `[tui]` table, and as top-level dotted `tui.<key> =` lines, since TOML forbids a
- * duplicate key); every other tui setting the user has (theme, notifications, ...) is kept.
- * Ours go right under the seed's `[tui]` header; else, when the seed writes tui settings as
- * top-level dotted keys (which forbid a later `[tui]` header), as dotted keys beside them;
- * else into a new `[tui]` table at the end. A top-level inline `tui = { ... }` is first rewritten
- * as a `[tui]` table (tuiInlineToTable).
+ * THE shared root-table setter (WAKEA-169 F1): set scalar keys of the root table `[name]` in OUR
+ * copy, whatever shape the seed gives that table. TOML allows exactly one definition of a table,
+ * so ours must join the seed's:
+ *   - a top-level inline `name = { ... }` is first rewritten as one `[name]` table;
+ *   - a `[name]` table: ours go right under its header;
+ *   - top-level dotted `name.x = ...` keys (which forbid a later `[name]` header): ours are
+ *     written as dotted keys beside them;
+ *   - no such table: a new `[name]` table at the end.
+ * The seed's values for the same keys are removed (in `[name]`, and as top-level dotted
+ * `name.<key>` lines), since TOML forbids a duplicate key; every other key of the user's is kept.
+ * `note` is an optional comment line written above ours.
  */
-export function setCodexTuiKeys(config: string, entries: Readonly<Record<string, string | number | boolean>>): string {
+export function setCodexRootTableKeys(
+  config: string,
+  name: string,
+  entries: Readonly<Record<string, string | number | boolean>>,
+  note?: string
+): string {
   const keys = Object.keys(entries);
-  const lines = tuiInlineToTable(config).split(/\r?\n/);
+  const header = new RegExp(`^\\s*\\[\\s*(["']?)${nameSource(name)}\\1\\s*\\]\\s*(#.*)?$`);
+  const dotted = new RegExp(`^\\s*(["']?)${nameSource(name)}\\1\\s*\\.`);
+  const lines = inlineRootTableToTable(config, name).split(/\r?\n/);
   const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
   const topEnd = firstTable < 0 ? lines.length : firstTable;
-  const dottedTui = lines.slice(0, topEnd).some((l) => /^\s*(["']?)tui\1\s*\./.test(l));
+  const hasDotted = lines.slice(0, topEnd).some((l) => dotted.test(l));
   const out: string[] = [];
-  let inTui = false;
-  let header = -1;
+  let inTable = false;
+  let at = -1;
   let topOutEnd = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (i === topEnd) topOutEnd = out.length;
     if (ANY_TABLE.test(line)) {
-      inTui = TUI_TABLE.test(line);
+      inTable = header.test(line);
       out.push(line);
-      if (inTui && header < 0) header = out.length;
+      if (inTable && at < 0) at = out.length;
       continue;
     }
-    if (i < topEnd && keys.some((k) => keyLine(line, `tui.${k}`))) continue;
-    if (inTui && keys.some((k) => keyLine(line, k))) continue;
+    if (i < topEnd && keys.some((k) => keyLine(line, `${name}.${k}`))) continue;
+    if (inTable && keys.some((k) => keyLine(line, k))) continue;
     out.push(line);
   }
   if (topOutEnd < 0) topOutEnd = out.length;
-  const note = '# munder-hive: bounded transcript replay on resize (auto-generated; do not edit)';
-  if (header >= 0) {
-    out.splice(header, 0, note, ...keys.map((k) => `${k} = ${tomlValue(entries[k])}`));
+  const head = note ? [note] : [];
+  if (at >= 0) {
+    out.splice(at, 0, ...head, ...keys.map((k) => `${k} = ${tomlValue(entries[k])}`));
     return out.join('\n');
   }
-  if (dottedTui) {
-    out.splice(topOutEnd, 0, note, ...keys.map((k) => `tui.${k} = ${tomlValue(entries[k])}`), '');
+  if (hasDotted) {
+    out.splice(topOutEnd, 0, ...head, ...keys.map((k) => `${name}.${k} = ${tomlValue(entries[k])}`), '');
     return out.join('\n');
   }
   while (out.length && out[out.length - 1].trim() === '') out.pop();
-  return `${out.join('\n')}${out.length ? '\n\n' : ''}[tui]\n${note}\n${keys.map((k) => `${k} = ${tomlValue(entries[k])}`).join('\n')}\n`;
+  return `${out.join('\n')}${out.length ? '\n\n' : ''}[${name}]\n${[...head, ...keys.map((k) => `${k} = ${tomlValue(entries[k])}`)].join('\n')}\n`;
+}
+
+/** MEMSPIKE-168: the selected `[tui]` keys in OUR copy (see CODEX_TUI_KEYS). */
+export function setCodexTuiKeys(config: string, entries: Readonly<Record<string, string | number | boolean>>): string {
+  return setCodexRootTableKeys(config, 'tui', entries,
+    '# munder-hive: bounded transcript replay on resize (auto-generated; do not edit)');
 }
 
 /** Pin scalar booleans in the root [features] table without reformating the
  * user's seed. Feature flags are per-agent policy, unlike profile overrides. */
 export function setCodexFeatureFlags(config: string, entries: Record<string, boolean>): string {
-  const lines = config.split(/\r?\n/);
-  const keys = Object.keys(entries);
-  const featureHeader = /^\s*\[\s*features\s*\]\s*(?:#.*)?$/;
-  const firstFeature = lines.findIndex((line) => featureHeader.test(line));
-  if (firstFeature < 0) {
-    const flags = keys.map((key) => `${key} = ${entries[key]}`).join('\n');
-    return `${config.replace(/\s*$/, '')}\n\n[features]\n${flags}\n`;
-  }
-  const end = lines.findIndex((line, index) => index > firstFeature && ANY_TABLE.test(line));
-  const featureEnd = end < 0 ? lines.length : end;
-  const kept = lines.filter((line, index) => index <= firstFeature || index >= featureEnd || !keys.some((key) => topLevelKey(line, key)));
-  kept.splice(firstFeature + 1, 0, ...keys.map((key) => `${key} = ${entries[key]}`));
-  return kept.join('\n');
+  return setCodexRootTableKeys(config, 'features', entries);
 }
