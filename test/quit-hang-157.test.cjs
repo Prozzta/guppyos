@@ -69,6 +69,35 @@ function winWorld(t, { exitAfterMs = 0 } = {}) {
   return { spawns, syncs };
 }
 
+/** Every setTimeout delay registered from now until the test ends (the real timers still run). */
+function recordTimers(t) {
+  const delays = [];
+  const real = global.setTimeout;
+  global.setTimeout = function (fn, ms, ...rest) { delays.push(ms); return real.call(this, fn, ms, ...rest); };
+  t.after(() => { global.setTimeout = real; });
+  return { delays, stop: () => { global.setTimeout = real; } };
+}
+
+/** Settles before a far-away marker? (An uncapped wait loses the race; load cannot make a capped one lose it.) */
+async function settlesBefore(p, markerMs = 60_000) {
+  const LOST = Symbol('marker');
+  let marker;
+  const r = await Promise.race([p.then(() => 'settled'), new Promise((res) => { marker = setTimeout(() => res(LOST), markerMs); })]);
+  clearTimeout(marker);
+  return r === 'settled';
+}
+
+/** CPU time (ms) a synchronous call burns on this thread's process - load-independent. */
+function cpuOf(fn) {
+  const c0 = process.cpuUsage();
+  const r = fn();
+  const c = process.cpuUsage(c0);
+  return { r, cpuMs: (c.user + c.system) / 1000 };
+}
+/** A synchronous call that "returns at once" spends almost no CPU (measured ~0-16 ms at Windows'
+ *  15.6 ms tick); 100 ms still catches a non-child sync stall on the quit path (FLAKY-XAUDIT M2b). */
+const RETURN_AT_ONCE_CPU_MS = 100;
+
 function fakeSession(pid, log) {
   return { proc: { pid, kill: () => log.push(`kill ${pid}`) } };
 }
@@ -77,7 +106,8 @@ function fakeSession(pid, log) {
 
 test('F1 killTreesAsync: ONE async taskkill /T /F for every tree, never spawnSync, returns at once', async (t) => {
   const w = winWorld(t, { exitAfterMs: 20 });
-  const p = procKill.killTreesAsync([11, 22, 22, 0, -3, 1.5, 33]);
+  const { r: p, cpuMs } = cpuOf(() => procKill.killTreesAsync([11, 22, 22, 0, -3, 1.5, 33]));
+  assert.ok(cpuMs < RETURN_AT_ONCE_CPU_MS, `the call itself burns no CPU to speak of: ${cpuMs} ms`);
   // The call itself does not block: it returned while its taskkill was still running (the fake
   // closes on a 20 ms timer, which cannot fire inside a synchronous call, however busy the machine).
   assert.equal(w.spawns.length, 1, 'taskkill started');
@@ -95,10 +125,17 @@ test('F1 killTreesAsync: nothing to kill spawns nothing; a taskkill that never e
   const w = winWorld(t, { exitAfterMs: null });
   await procKill.killTreesAsync([]);
   assert.equal(w.spawns.length, 0);
+  // FLAKY-TIMING (Andy, flaky-170; FLAKY-XAUDIT nit 7): one rule for every capped wait here -
+  // the lower bound is a timer (load-proof); the cap is checked by the TIMER it registers and by
+  // settling at all (its taskkill never exits), not by a wall-clock upper bound.
+  const timers = recordTimers(t);
   const t0 = Date.now();
-  await procKill.killTreesAsync([44], 40);
+  const p = procKill.killTreesAsync([44], 40);
+  timers.stop();
+  assert.ok(timers.delays.includes(40), `the cap is a 40 ms timer (registered: ${JSON.stringify(timers.delays)})`);
+  assert.equal(await settlesBefore(p), true, 'a taskkill that never exits is capped: the call settles');
   const took = Date.now() - t0;
-  assert.ok(took >= 35 && took < 1000, `capped at ~40 ms (took ${took})`);
+  assert.ok(took >= 35, `capped at ~40 ms, not earlier (took ${took})`);
 });
 
 test('F1 PtyManager.killAllAsync: one batched sweep of every tree, ConPTY closed only AFTER it, no spawnSync', async (t) => {
@@ -110,7 +147,8 @@ test('F1 PtyManager.killAllAsync: one batched sweep of every tree, ConPTY closed
   m.sessions.set('a', fakeSession(101, log));
   m.sessions.set('b', fakeSession(202, log));
   m.sessions.set('c', fakeSession(303, log));
-  const done = m.killAllAsync(1000);
+  const { r: done, cpuMs } = cpuOf(() => m.killAllAsync(1000));
+  assert.ok(cpuMs < RETURN_AT_ONCE_CPU_MS, `the call itself burns no CPU to speak of: ${cpuMs} ms`);
   // Returns without blocking the main thread: its taskkill never exits (exitAfterMs null), so a
   // call that waited for it could not have returned at all; and no synchronous child API ran.
   assert.equal(w.spawns[0].proc.closed, false, 'returned while its taskkill is still running');
@@ -168,12 +206,19 @@ test('EXIT-CRASH: an exit that never comes is capped at EXIT_WAIT_MS (the quit n
   const m = new PtyManager();
   assert.equal(PtyManager.EXIT_WAIT_MS, 1500);
   m.sessions.set('a', { proc: { pid: 5, kill: () => {}, onExit: () => ({ dispose() {} }) } });
+  // FLAKY-TIMING (Andy, flaky-170): the same rule as the killTreesAsync cap - the lower bound is a
+  // timer; the upper side is the timer that is registered (EXIT_WAIT_MS, not the 5.5 s quit cap)
+  // and the wait settling at all, not `took < 3000`.
+  const timers = recordTimers(t);
   const t0 = Date.now();
   const done = m.killAllAsync(1000);
   w.spawns[0].proc.emit('close', 0);
-  await done;
+  assert.equal(await settlesBefore(done), true, 'an exit that never comes is capped: the call settles');
+  timers.stop();
   const took = Date.now() - t0;
-  assert.ok(took >= 1400 && took < 3000, `capped (took ${took})`);
+  assert.ok(timers.delays.includes(PtyManager.EXIT_WAIT_MS), `capped by an EXIT_WAIT_MS timer (registered: ${JSON.stringify(timers.delays)})`);
+  assert.ok(!timers.delays.some((ms) => ms > PtyManager.EXIT_WAIT_MS && ms < 60_000), `no longer cap in play: ${JSON.stringify(timers.delays)}`);
+  assert.ok(took >= 1400, `capped at EXIT_WAIT_MS, not earlier (took ${took})`);
   assert.equal(m.exitsPending, 1, 'quit-done reports the one still pending');
 });
 
