@@ -11,6 +11,43 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.72] — 2026-09-28
+
+**An agent held at its usage limit is no longer stuck there after the limit resets, and new agents start on each CLI's own default model.**
+Rollback: 1.1.71 (reinstall).
+
+### Fixed
+
+- **A held agent recovers by itself after its usage limit resets.** After a reset the app sends the
+  agent one short test message to get a fresh usage reading. If that message produced no turn, the
+  agent stayed held for hours. The app now tries again after 10, 20, 40 and 80 minutes, then every
+  2 hours, until a fresh reading arrives; any fresh reading ends it at once. When a test message
+  produces no turn, the hive log records why (the terminal's last line, with anything that looks
+  like a key or token removed).
+
+### Changed
+
+- **New agents start on the CLI's own default model.** When you add an agent, "CLI default" is
+  preselected for every provider, and Settings has a "CLI default" choice. Existing agents keep the
+  model they have. The saved Claude default model is cleared once by this update (the old value is
+  written to the hive log); the orchestrator's model is not changed. A model you pick afterwards is
+  kept.
+
+### Added
+
+- **The app records what its window is doing if its memory suddenly doubles.** It writes one
+  diagnostic row naming the busiest functions and saves a CPU profile (the newest 10 are kept in the
+  app's data folder, under renderer-profiles). This does not change how the app behaves.
+
+### Good to know
+
+- **Installing (as for 1.1.70 and 1.1.71): stop Claude Code's background service first.**
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.72.
+
 ## [1.1.71] — 2026-09-28
 
 **The app's window no longer goes white when an agent reaches its usage limit.**
