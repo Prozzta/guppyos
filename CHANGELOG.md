@@ -11,6 +11,45 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.73] — 2026-09-28
+
+**A "Refresh models" button brings every model picker up to date, and the app no longer freezes on reset, on moving its home folder, or when adding PDFs.**
+Rollback: 1.1.72 (reinstall).
+
+### Added
+
+- **Settings -> Agents & Models -> "Refresh models".** Only when you press it (nothing is looked up at launch), one button asks each installed agent program
+  which models it offers (Antigravity, Codex, OpenCode; Claude only when you have stored your own
+  Anthropic API key) and updates every model picker. Nothing is looked up unless you press it; until
+  then, and for any program that cannot list its models, the built-in list is used. A model an agent
+  uses that is no longer offered is marked in the picker.
+- **A per-agent Codex compaction setting (for trials).** An operator can give one Codex agent a
+  different "compact the conversation at" limit (40,000 to 200,000 tokens); without it, the default of
+  120,000 is used.
+
+### Fixed
+
+- **No more freezes from waiting on helper programs.** Reset and "Change home folder" stopped each
+  agent terminal one at a time and waited for each, which froze the window for about a quarter of
+  a second per agent (longer on a busy machine). Importing PDFs into the knowledge graph also froze
+  it while each file was converted. Both now run in the background, and nothing the app does on its
+  main thread waits for another program any more. While a reset or move is in progress, no new
+  agent can start.
+- **Release notes are included in the app.** The notes the voice assistant reads ("what's new")
+  were never packaged. They are now, and it reads the two newest releases.
+
+### Good to know
+
+- Refreshing the Codex list runs `codex debug models` as you, so Codex may update its own cache
+  in your Codex folder.
+- A program you install by hand is found the next time you start an agent or press Refresh.
+- **Installing (as for the last releases): stop Claude Code's background service first.**
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.73.
+
 ## [1.1.72] — 2026-09-28
 
 **An agent held at its usage limit is no longer stuck there after the limit resets, and new agents start on each CLI's own default model.**
