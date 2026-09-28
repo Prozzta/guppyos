@@ -1,0 +1,430 @@
+/**
+ * ZT-I1-MAIL (1.1.75) slice 2: how a message BODY reaches the agent (INBOX-DESIGN.md §2, §11.1,
+ * §11.2, §11.6, §11.9, §11.17).
+ *
+ * Pure pieces the HookServer composes:
+ *  - `buildMailBlock`: the `<hive-mail>` block for one hook response, inside a character budget
+ *    that is JOINED with every other context in the same additionalContext (§11.2). An id is only
+ *    reported as surfacing when its whole entry (or its deliberate truncation with the file path)
+ *    lies inside the budget, so nothing ever sits past Claude's 10,000-character spill point.
+ *  - `mailChannelMode` / `mailEvidenceKind`: the §11.9 provider defaults.
+ *  - `mailEvidenceIn` + `readFileWindow`: the §11.1 deterministic confirmation (a Claude transcript
+ *    `hook_additional_context` attachment, or a Codex rollout developer-role input, carrying the
+ *    `hive-mail:<id>` marker). Keyed on the marker, never on record position (N1).
+ *  - `mailLatencyLimitMs`: the §11.1 latency rule per hook transport.
+ *
+ * Every character a sender controls is escaped: `<`/`>` (so it cannot close the tag, as
+ * `<inbox-update>` always did) and the `hive-mail:` marker prefix (so a body quoting another id
+ * cannot forge that id's delivery evidence).
+ */
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import type { AgentProvider } from '../shared/agentProvider';
+import type { MailChannelOverride, MailEntry, MailObligation } from './mailLedger';
+
+/** §11.2: mail budget = this − length(roster + goal + steer + any other joined context). */
+export const MAIL_JOINED_BUDGET = 9_500;
+/** §11.2: under this, the block carries headers only and nothing is marked surfacing. */
+export const MAIL_HEADERS_ONLY_BELOW = 1_500;
+/** §2.1: a single body over the budget is surfaced as its first this-many characters + the path. */
+export const MAIL_TRUNCATE_CHARS = 7_000;
+/** The most messages considered for one hook (bounded work per hook; the rest drip). */
+export const MAIL_BLOCK_MAX_ITEMS = 50;
+/** The most piggyback reminder lines (option B) in one block. */
+export const MAIL_REMINDER_MAX = 5;
+/** The most deferred ids named in the "will follow" line. */
+const DEFERRED_NAMED_MAX = 10;
+
+/** The HTTP hook timeout Claude applies (mirrors hive.ts HOOK_HTTP_TIMEOUT_S; §11.1). */
+export const MAIL_HTTP_HOOK_TIMEOUT_MS = 30_000;
+/** §11.1: an http / mcp response must leave within timeout − 5 s to count as delivered. */
+export const MAIL_HTTP_LATENCY_LIMIT_MS = MAIL_HTTP_HOOK_TIMEOUT_MS - 5_000;
+/**
+ * The command shims (HOOK_SHIM, AGY_HOOK_SHIM) give up after 5 s and print NOTHING, so on the
+ * pipe the provider-side budget is the shim's, not the provider's 30 s. The shim also spends its
+ * own start-up (~0.1-0.7 s) inside that window. The limit is half of it (a Creed question in NOTES;
+ * trivially reversible).
+ */
+export const MAIL_PIPE_LATENCY_LIMIT_MS = 2_500;
+/** §11.1 evidence scan: the most bytes read per scan (a bounded window from the claim offset). */
+export const MAIL_EVIDENCE_SCAN_MAX_BYTES = 2 * 1024 * 1024;
+/** Bytes re-read before the claim-time offset (a line in flight when the size was taken). */
+export const MAIL_EVIDENCE_SCAN_BACK_BYTES = 64 * 1024;
+
+// ————————————————————————————————————————————————————————————— provider modes (§11.9)
+
+/**
+ * - `inject`: bodies travel in hook context (Claude, Codex, AGY).
+ * - `legacy-read`: hook-capable but unverified injection (gemini, grok, opencode, pi): the nudge
+ *   carries ids + path, the agent reads the files; slice 3 marks them acted at its Stop.
+ * - `legacy-move`: no Stop signal (cursor): 1.1.74 semantics, the agent moves the file (§11.7).
+ * - `work-order`: proxy tier and hookless (qwen, crush, kimi, copilot, custom): the body is typed
+ *   into the PTY; acted on the confirmed write (N2).
+ */
+export type MailChannelMode = 'inject' | 'legacy-read' | 'legacy-move' | 'work-order';
+
+export function mailChannelMode(provider: AgentProvider | undefined, override?: MailChannelOverride | null): MailChannelMode {
+  const p = provider ?? 'claude';
+  let mode: MailChannelMode;
+  switch (p) {
+    case 'claude': case 'codex': case 'antigravity': mode = 'inject'; break;
+    case 'gemini': case 'grok': case 'opencode': case 'pi': mode = 'legacy-read'; break;
+    case 'cursor': mode = 'legacy-move'; break;
+    default: mode = 'work-order';
+  }
+  // Degradation (§11.10) only ever moves an injection agent to legacy-read.
+  if (mode === 'inject' && override?.mode === 'legacy-read') return 'legacy-read';
+  return mode;
+}
+
+/** How a surfacing is confirmed (§11.1): a readable record, or the latency rule. */
+export type MailEvidenceKind = 'claude-transcript' | 'codex-rollout' | 'latency';
+
+export function mailEvidenceKind(provider: AgentProvider | undefined): MailEvidenceKind {
+  const p = provider ?? 'claude';
+  if (p === 'claude') return 'claude-transcript';
+  if (p === 'codex') return 'codex-rollout';
+  return 'latency';
+}
+
+/** The hook events that carry the block for an injection provider (AGY has no
+ *  UserPromptSubmit; its PreInvocation fires before every model call). */
+export function mailSurfaceEvents(provider: AgentProvider | undefined): ReadonlySet<string> {
+  return (provider ?? 'claude') === 'antigravity' ? AGY_EVENTS : CLAUDE_CODEX_EVENTS;
+}
+const AGY_EVENTS: ReadonlySet<string> = new Set(['PreInvocation']);
+const CLAUDE_CODEX_EVENTS: ReadonlySet<string> = new Set(['UserPromptSubmit', 'PostToolUse']);
+
+/** §11.1: the latest a response may leave the harness and still count as delivered. */
+export function mailLatencyLimitMs(transport: string | undefined): number {
+  return transport === 'http' || transport === 'mcp' ? MAIL_HTTP_LATENCY_LIMIT_MS : MAIL_PIPE_LATENCY_LIMIT_MS;
+}
+
+/** §11.6: never surface into a slash-command prompt (`/compact`, any built-in command). */
+export function isSlashPrompt(prompt: unknown): boolean {
+  return typeof prompt === 'string' && prompt.trimStart().startsWith('/');
+}
+
+// ————————————————————————————————————————————————————————————— the block (§2.1, §11.2)
+
+/** The evidence marker for one id (only ever written next to that id's body). */
+export function mailMarker(id: string): string {
+  return `hive-mail:${escapeMailText(id)}`;
+}
+
+/** Sender-controlled text: cannot close a tag and cannot forge a marker. */
+export function escapeMailText(s: unknown): string {
+  const str = typeof s === 'string' ? s : s === undefined || s === null ? '' : (JSON.stringify(s) ?? String(s));
+  return str.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/hive-mail:/gi, (m) => `${m.slice(0, -1)}&#58;`);
+}
+
+/** §11.2: what is left for mail once the other contexts are joined ('\n\n' separators). */
+export function mailBudgetFor(others: Array<string | null | undefined>): number {
+  const parts = others.filter((x): x is string => typeof x === 'string' && x.length > 0);
+  if (!parts.length) return MAIL_JOINED_BUDGET;
+  // + 2: the separator between the others and the mail block.
+  return MAIL_JOINED_BUDGET - (parts.join('\n\n').length + 2);
+}
+
+export interface MailBlockItem {
+  entry: MailEntry;
+  /** The message body as read from the inbox file. */
+  body: string;
+  /** The full inbox file path, named when the body is truncated. */
+  path: string;
+}
+
+export interface MailBlockInput {
+  items: MailBlockItem[];
+  /** The mail budget for this hook (`mailBudgetFor`). */
+  budget: number;
+  /** turn-start (UserPromptSubmit, AGY's first PreInvocation) or mid-turn (P6 wording). */
+  phase: 'turn-start' | 'mid-turn';
+  /** Option B piggyback: open obligations; only shown when the block carries mail anyway. */
+  reminders?: MailObligation[];
+  /** Pending mail whose body was not read because it cannot fit this hook anyway (bounded work
+   *  per hook): always deferred, counted in the "will follow" line, listed in headers-only mode. */
+  more?: MailEntry[];
+}
+
+export interface MailBlock {
+  /** The block, or null when nothing fits (or nothing is pending). */
+  text: string | null;
+  /** Ids whose whole entry, or deliberate truncation, is in `text`: the ones to claim. */
+  surfacing: string[];
+  /** The subset of `surfacing` that was truncated (first MAIL_TRUNCATE_CHARS + path). */
+  truncated: string[];
+  /** Ids named by header only (no body, no marker): they stay delivered. */
+  headersOnly: string[];
+  /** Ids not in the block at all: they stay delivered and drip into a later hook. */
+  deferred: string[];
+}
+
+const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], headersOnly: [], deferred: [] };
+
+function flagsOf(e: MailEntry): string[] {
+  const out: string[] = [];
+  if (e.requiresReply) out.push('(reply expected)');
+  if (e.supersedes?.length) out.push(`(SUPERSEDES ${escapeMailText(e.supersedes.join(', '))})`);
+  return out;
+}
+
+function renderItem(it: MailBlockItem, truncate: boolean): string {
+  const e = it.entry;
+  const lines: string[] = [];
+  lines.push(`[${mailMarker(e.id)}] from: ${escapeMailText(e.from)} | act: ${escapeMailText(e.act)} | subject: "${escapeMailText(e.subject)}"`);
+  const meta: string[] = [];
+  if (e.conversation) meta.push(`conversation: ${escapeMailText(e.conversation)}`);
+  if (e.inReplyTo) meta.push(`in_reply_to: ${escapeMailText(e.inReplyTo)}`);
+  meta.push(...flagsOf(e));
+  if (meta.length) lines.push(meta.join(' | '));
+  if (e.redelivered) lines.push('(re-delivered: this may already have been handled — check before acting)');
+  if (e.legacy && e.surfacedAt == null) lines.push('(delivered before 1.1.75; may already have been handled)');
+  const body = escapeMailText(it.body);
+  if (truncate) {
+    lines.push('', `${body.slice(0, MAIL_TRUNCATE_CHARS)}`, `[... truncated: ${body.length} characters in total. The full message is in ${escapeMailText(it.path)}]`);
+  } else {
+    lines.push('', body);
+  }
+  return lines.join('\n');
+}
+
+function headerLine(e: MailEntry): string {
+  const flags = flagsOf(e);
+  return `- [${escapeMailText(e.id)}] from ${escapeMailText(e.from)}: "${escapeMailText(e.subject.slice(0, 160))}"${flags.length ? ` ${flags.join(' ')}` : ''}`;
+}
+
+function ageText(ms: number): string {
+  const m = Math.floor(ms / 60_000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `${h}h` : `${Math.floor(h / 24)}d`;
+}
+
+function reminderLines(reminders: MailObligation[], exclude: Set<string>): string[] {
+  const seen = new Set<string>();
+  const rows: MailObligation[] = [];
+  for (const r of reminders) {
+    const e = r.entry;
+    // Only obligations the agent has already SEEN (surfacing / surfaced / acted); unseen mail is
+    // the block itself or its "will follow" line.
+    if (seen.has(e.id) || exclude.has(e.id) || e.state === 'delivered') continue;
+    seen.add(e.id);
+    rows.push(r);
+  }
+  if (!rows.length) return [];
+  const shown = rows.slice(0, MAIL_REMINDER_MAX).map((r) => {
+    const e = r.entry;
+    const what = e.act === 'request' ? 'request' : 'reply expected';
+    return `- [${escapeMailText(e.id)}] from ${escapeMailText(e.from)}: "${escapeMailText(e.subject.slice(0, 120))}" (${what}, ${ageText(r.ageMs)} ago)`;
+  });
+  if (rows.length > shown.length) shown.push(`- and ${rows.length - shown.length} more`);
+  return ['Still open (no reply routed yet):', ...shown];
+}
+
+function assemble(phase: MailBlockInput['phase'], rendered: string[], deferred: MailEntry[], reminders: string[]): string {
+  const n = rendered.length;
+  const head = phase === 'mid-turn'
+    ? `${n} new message(s) arrived during this turn. Consider these before you send or finish: one may change or cancel what you are doing.`
+    : `Hive mail for you: ${n} message(s), oldest first. The full text of each is below.`;
+  const parts: string[] = ['<hive-mail>', head, '', rendered.join('\n\n---\n\n')];
+  if (deferred.length) {
+    const named = deferred.slice(0, DEFERRED_NAMED_MAX).map((e) => `[${escapeMailText(e.id)}]`).join(', ');
+    parts.push('', `${deferred.length} more message(s) will follow at a later hook: ${named}${deferred.length > DEFERRED_NAMED_MAX ? ', ...' : ''}`);
+  }
+  if (reminders.length) parts.push('', ...reminders);
+  parts.push('</hive-mail>');
+  return parts.join('\n');
+}
+
+/** Headers only (§11.2 small budget, or the Claude PreToolUse peek): no body, no marker. */
+export function buildMailHeaders(entries: MailEntry[], budget: number, lead?: string): { text: string | null; ids: string[] } {
+  if (!entries.length || budget <= 0) return { text: null, ids: [] };
+  const intro = lead ?? `${entries.length} message(s) are waiting; their text follows at a later hook:`;
+  const open = `<hive-mail>\n${intro}\n`;
+  const close = '</hive-mail>';
+  let text = open;
+  const ids: string[] = [];
+  for (const e of entries) {
+    const line = `${headerLine(e)}\n`;
+    const more = entries.length - ids.length - 1;
+    const tail = more > 0 ? `- and ${more} more\n` : '';
+    if ((text + line + tail + close).length > budget) {
+      if (!ids.length) return { text: null, ids: [] };
+      const rest = entries.length - ids.length;
+      const restLine = `- and ${rest} more\n`;
+      if ((text + restLine + close).length <= budget) text += restLine;
+      break;
+    }
+    text += line;
+    ids.push(e.id);
+  }
+  const out = text + close;
+  return out.length <= budget ? { text: out, ids } : { text: null, ids: [] };
+}
+
+/** Oldest first; a superseding message joins the group of the pending message it supersedes. */
+function groupItems(items: MailBlockItem[]): MailBlockItem[][] {
+  const sorted = [...items].sort((a, b) => a.entry.seq - b.entry.seq);
+  const groupOf = new Map<string, MailBlockItem[]>();
+  const groups: MailBlockItem[][] = [];
+  const byRef = new Map<string, MailBlockItem>();
+  for (const it of sorted) {
+    byRef.set(it.entry.id, it);
+    if (it.entry.senderId && !byRef.has(it.entry.senderId)) byRef.set(it.entry.senderId, it);
+  }
+  for (const it of sorted) {
+    let target: MailBlockItem[] | undefined;
+    for (const ref of it.entry.supersedes ?? []) {
+      const old = byRef.get(ref);
+      if (old && old !== it && old.entry.seq < it.entry.seq) { target = groupOf.get(old.entry.id); if (target) break; }
+    }
+    if (target) { target.push(it); groupOf.set(it.entry.id, target); continue; }
+    const g = [it];
+    groups.push(g);
+    groupOf.set(it.entry.id, g);
+  }
+  return groups;
+}
+
+/**
+ * The `<hive-mail>` block for one hook. Oldest first (supersede pairs kept together), strictly
+ * inside `budget`: the first group that does not fit stops the block (later mail never overtakes
+ * earlier mail); what is left is deferred and drips into a later hook. A single message too large
+ * for the whole budget is truncated to its first MAIL_TRUNCATE_CHARS characters plus its path.
+ * Under MAIL_HEADERS_ONLY_BELOW, or when not even the first message fits, the block names headers
+ * only and nothing is surfacing.
+ */
+export function buildMailBlock(input: MailBlockInput): MailBlock {
+  const sorted = input.items.slice().sort((a, b) => a.entry.seq - b.entry.seq);
+  const items = sorted.slice(0, MAIL_BLOCK_MAX_ITEMS);
+  const inItems = new Set(items.map((i) => i.entry.id));
+  const more = [...sorted.slice(MAIL_BLOCK_MAX_ITEMS).map((i) => i.entry), ...(input.more ?? []).filter((e) => !inItems.has(e.id))]
+    .sort((a, b) => a.seq - b.seq);
+  const everything = [...items.map((i) => i.entry), ...more];
+  if (!everything.length || input.budget <= 0) return { ...EMPTY, deferred: everything.map((e) => e.id) };
+  const budget = input.budget;
+  const headersOnly = (): MailBlock => {
+    const h = buildMailHeaders(everything, budget);
+    return { text: h.text, surfacing: [], truncated: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)) };
+  };
+  if (!items.length) return headersOnly();
+  if (budget < MAIL_HEADERS_ONLY_BELOW) return headersOnly();
+
+  const render = (it: MailBlockItem): { text: string; truncated: boolean } | null => {
+    const full = renderItem(it, false);
+    if (assemble(input.phase, [full], [], []).length <= budget) return { text: full, truncated: false };
+    if (it.body.length <= MAIL_TRUNCATE_CHARS) return null;          // too big for this hook, not over the limit
+    const cut = renderItem(it, true);
+    return assemble(input.phase, [cut], [], []).length <= budget ? { text: cut, truncated: true } : null;
+  };
+
+  const chosen: Array<{ it: MailBlockItem; text: string; truncated: boolean }> = [];
+  const groups = groupItems(items);
+  /** Everything not in the block (so far, plus `extra`): the "will follow" line. */
+  const remaining = (list: typeof chosen): MailEntry[] => {
+    const inBlock = new Set(list.map((c) => c.it.entry.id));
+    return [...items.map((x) => x.entry).filter((e) => !inBlock.has(e.id)), ...more];
+  };
+  let stop = false;
+  for (let gi = 0; gi < groups.length && !stop; gi++) {
+    const g = groups[gi];
+    const rendered = g.map((it) => ({ it, r: render(it) }));
+    const fits = (list: typeof chosen): boolean =>
+      assemble(input.phase, list.map((c) => c.text), remaining(list), []).length <= budget;
+    if (rendered.every((x) => x.r)) {
+      const add = rendered.map((x) => ({ it: x.it, text: x.r!.text, truncated: x.r!.truncated }));
+      if (fits([...chosen, ...add])) { chosen.push(...add); continue; }
+      // A pair that can never fit together at this budget is placed member by member.
+      if (g.length === 1 || assemble(input.phase, add.map((a) => a.text), [], []).length <= budget) { stop = true; break; }
+    } else if (g.length === 1) { stop = true; break; }
+    for (const x of rendered) {
+      if (!x.r) { stop = true; break; }
+      const add = { it: x.it, text: x.r.text, truncated: x.r.truncated };
+      if (!fits([...chosen, add])) { stop = true; break; }
+      chosen.push(add);
+    }
+  }
+  // Defensive: never exceed the budget (fits() already guarantees it for the chosen prefix).
+  while (chosen.length && assemble(input.phase, chosen.map((c) => c.text), remaining(chosen), []).length > budget) chosen.pop();
+  if (!chosen.length) return headersOnly();
+  const chosenIds = new Set(chosen.map((c) => c.it.entry.id));
+  const deferred = [...items.map((i) => i.entry).filter((e) => !chosenIds.has(e.id)), ...more];
+  const texts = chosen.map((c) => c.text);
+  let text = assemble(input.phase, texts, deferred, []);
+  const rem = reminderLines(input.reminders ?? [], new Set([...chosenIds, ...deferred.map((e) => e.id)]));
+  if (rem.length) {
+    // Reminders are the lowest priority: drop lines from the end until they fit, or drop them all.
+    for (let k = rem.length; k > 1; k--) {
+      const withRem = assemble(input.phase, texts, deferred, rem.slice(0, k));
+      if (withRem.length <= budget) { text = withRem; break; }
+    }
+  }
+  return {
+    text,
+    surfacing: chosen.map((c) => c.it.entry.id),
+    truncated: chosen.filter((c) => c.truncated).map((c) => c.it.entry.id),
+    headersOnly: [],
+    deferred: deferred.map((e) => e.id)
+  };
+}
+
+// ————————————————————————————————————————————————————————————— evidence (§11.1)
+
+/**
+ * Ids whose marker appears in a DELIVERY record of `text` (JSONL):
+ *  - Claude: a record whose `attachment.type` is `hook_additional_context`;
+ *  - Codex: a `response_item` whose payload is a developer-role message.
+ * Only lines holding a marker are parsed; a partial last line is ignored (retried next scan).
+ */
+export function mailEvidenceIn(text: string, ids: Iterable<string>, kind: MailEvidenceKind): Set<string> {
+  const found = new Set<string>();
+  if (kind === 'latency' || !text) return found;
+  const want = new Map<string, string>();
+  for (const id of ids) want.set(`[${mailMarker(id)}]`, id);
+  if (!want.size) return found;
+  for (const line of text.split('\n')) {
+    if (!line.includes('hive-mail:')) continue;
+    const hits = [...want.keys()].filter((m) => line.includes(m));
+    if (!hits.length) continue;
+    let rec: unknown;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (!isDeliveryRecord(rec, kind)) continue;
+    for (const m of hits) { found.add(want.get(m)!); want.delete(m); }
+    if (!want.size) break;
+  }
+  return found;
+}
+
+function isDeliveryRecord(rec: unknown, kind: MailEvidenceKind): boolean {
+  if (!rec || typeof rec !== 'object') return false;
+  const r = rec as Record<string, unknown>;
+  if (kind === 'claude-transcript') {
+    const a = r.attachment as Record<string, unknown> | undefined;
+    return !!a && typeof a === 'object' && a.type === 'hook_additional_context';
+  }
+  const p = r.payload as Record<string, unknown> | undefined;
+  return r.type === 'response_item' && !!p && typeof p === 'object' && p.role === 'developer';
+}
+
+/** Read up to `maxBytes` of `file` from `from` (bounded; null on any error). */
+export function readFileWindow(file: string, from: number, maxBytes = MAIL_EVIDENCE_SCAN_MAX_BYTES): { text: string; size: number } | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(file, 'r');
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, Math.min(from, size));
+    const len = Math.max(0, Math.min(maxBytes, size - start));
+    const buf = Buffer.alloc(len);
+    let off = 0;
+    while (off < len) {
+      const n = readSync(fd, buf, off, len - off, start + off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return { text: buf.subarray(0, off).toString('utf8'), size };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) { try { closeSync(fd); } catch { /* noop */ } }
+  }
+}

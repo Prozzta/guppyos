@@ -119,6 +119,8 @@ export interface IntegrityIssue {
   error: string;
   /** ZT-I1-MAIL: already rebuilt (a mail ledger); a notice, nothing is paused. */
   repaired?: boolean;
+  /** ZT-I1-MAIL N1: a notice that is not a damaged file (mail-evidence-missing); nothing is paused. */
+  notice?: string;
 }
 
 /** One row of the consolidated voice read-layer directory (`hive:agentDirectory`):
@@ -894,6 +896,9 @@ const api = {
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
   hiveInbox: (id: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id),
+  /** ZT-I1-MAIL N2: the PTY write of a terminal work order was confirmed (COMMITTED). */
+  hiveWorkOrderDelivered: (e: { agentId: string; messageId: string; from?: string; act?: string; subject?: string; requiresReply?: boolean }): Promise<boolean> =>
+    ipcRenderer.invoke('hive:workOrderDelivered', e),
   /** Ask MAIN to consider waking this agent. A hint with no payload and no decision:
    *  main re-reads the inbox, applies every guard and owns the claim. Never a submit. */
   hiveRequestInboxWake: (id: string): Promise<boolean> => ipcRenderer.invoke('hive:requestInboxWake', id),

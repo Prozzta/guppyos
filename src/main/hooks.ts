@@ -13,7 +13,7 @@
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync, rmSync, statSync } from 'node:fs';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
@@ -27,6 +27,33 @@ import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
 import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, rebuildToolHook } from './codexHookMcp';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
+import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
+import { MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailObligation } from './mailLedger';
+import {
+  MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
+  buildMailBlock, buildMailHeaders, isSlashPrompt, mailBudgetFor, mailChannelMode, mailEvidenceIn,
+  mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow,
+  type MailBlockItem, type MailChannelMode, type MailEvidenceKind
+} from './mailSurface';
+
+/**
+ * ZT-I1-MAIL slice 2: one hook response that carried mail bodies. The ids are `surfacing`
+ * (tentative) from the moment the response is built; the transport settles the claim when the
+ * response is flushed (§11.1 latency, measured from request receipt to response flush).
+ */
+export interface MailClaim {
+  agentId: string;
+  ids: string[];
+  epoch: string;
+  hookKind: string;
+  transport: HookTransport | undefined;
+  evidence: MailEvidenceKind;
+  /** N1: ids whose evidence already failed MAIL_UNCONFIRMED_FALLBACK_AFTER times in a row: they
+   *  are confirmed on the latency rule alone (`latency-fallback`, `mail-evidence-missing`). */
+  fallbackIds: string[];
+  /** Set when the response is settled: flush − receipt, or null when it never flushed. */
+  latencyMs?: number | null;
+}
 
 interface HookPayload {
   hook_event_name?: string;
@@ -91,6 +118,34 @@ interface HookPayload {
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
+
+/** MIDTURN-MAIL-BLIND L1 + ZT-I1-MAIL: one agent's turn as the hook stream shows it. */
+interface TurnState {
+  open: boolean;
+  /** Legacy notice (<inbox-update>): the inbox files present when the turn began. */
+  known: Set<string>;
+  noticed: Set<string>;
+  /** The surfacing epoch (provider turn id, else the harness counter). */
+  epoch: string;
+  /** N3: ids already put into a hook response in this epoch; never surfaced twice in it. */
+  injected: Set<string>;
+  /** How many mail-carrying hooks ran in this turn (AGY's first PreInvocation is its turn start). */
+  mailHooks: number;
+}
+
+/** An evidence scan still waiting for tentative ids of one epoch (§11.1). */
+interface EvidenceWait {
+  epoch: string;
+  ids: Set<string>;
+  kind: MailEvidenceKind;
+  /** The transcript/rollout the claim was made against, and its size then (the record is
+   *  written after the claim, so the scan starts there). Null: unknown at claim time. */
+  file: string | null;
+  offset: number;
+  /** The size at the last scan (an unchanged file is not re-read). */
+  scannedFile: string | null;
+  scannedSize: number;
+}
 
 /**
  * HOOK-BROKER P4 (AGY): the one-way pipe framing. AGY has no zero-process hook or statusline
@@ -230,7 +285,7 @@ export class HookServer {
      *  synchronously BEFORE this server returns its hook response. It must not submit
      *  or block: the inbox-wake bridge only records lifecycle/HITL state here and defers
      *  any retry with setImmediate, so the response (Stop included) is unchanged. */
-    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string) => void,
+    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string) => void,
     /** L0 — provider allowance observed on the status line. Optional so the server
      *  runs unchanged where no tracker is wired (tests, and any build without L0).
      *  HookServer deliberately does not hold the tracker: it hands over a
@@ -269,8 +324,10 @@ export class HookServer {
     this.server = createServer((conn) => {
       let buf = '';
       let oneway = false;
+      let receivedAt = 0;
       conn.on('end', () => { if (oneway) this.onOneway(buf); });
       conn.on('data', (d) => {
+        if (!receivedAt) receivedAt = Date.now();
         buf += d.toString();
         // P4: a one-way AGY frame (a text header, not JSON): read to the end, never reply.
         if (oneway || /^agy(-status)? /.test(buf)) { oneway = true; if (buf.length > HOOK_HTTP_BODY_MAX) { oneway = false; conn.destroy(); } return; }
@@ -279,7 +336,9 @@ export class HookServer {
         let payload: HookPayload = {};
         try { payload = JSON.parse(buf.slice(0, nl)); } catch { /* ignore */ }
         let res: unknown = {};
-        try { res = this.handle(this.stampArrival(payload, 'pipe')); } catch { res = {}; }
+        let claims: MailClaim[] = [];
+        try { res = this.handle(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
+        this.watchMailFlush(conn, claims, receivedAt);
         conn.end(JSON.stringify(res ?? {}));
       });
       conn.on('error', () => { /* shim hung up — ignore */ });
@@ -460,6 +519,8 @@ export class HookServer {
   hookBrokerPort(): number | null { return this.httpDown ? null : this.httpPort; }
 
   private onHttp(req: IncomingMessage, res: ServerResponse): void {
+    // §11.1: hook latency is measured from request receipt to response flush.
+    const receivedAt = Date.now();
     const reply = (status: number, body: unknown): void => {
       if (res.headersSent) return;
       res.writeHead(status, { 'content-type': 'application/json' });
@@ -502,7 +563,7 @@ export class HookServer {
     req.on('end', () => {
       if (tooBig) return;
       if (route === 'mcp') {
-        void this.onMcp(agentId, expected, Buffer.concat(chunks).toString('utf8'), res);
+        void this.onMcp(agentId, expected, Buffer.concat(chunks).toString('utf8'), res, receivedAt);
         return;
       }
       let payload: Record<string, unknown> = {};
@@ -520,7 +581,9 @@ export class HookServer {
         return;
       }
       let out: unknown = {};
-      try { out = this.handle(this.stampArrival(payload as HookPayload, 'http')); } catch { out = {}; }
+      let claims: MailClaim[] = [];
+      try { out = this.handle(this.stampArrival(payload as HookPayload, 'http')); claims = this.takeMailClaims(); } catch { out = {}; }
+      this.watchMailFlush(res, claims, receivedAt);
       reply(200, out);
     });
     req.on('error', () => { /* client went away */ });
@@ -540,8 +603,10 @@ export class HookServer {
     return { url: url.replace('/hook/', '/mcp/'), token };
   }
 
-  private async onMcp(agentId: string, token: Buffer, body: string, res: ServerResponse): Promise<void> {
+  private async onMcp(agentId: string, token: Buffer, body: string, res: ServerResponse, receivedAt = Date.now()): Promise<void> {
+    const claims: MailClaim[] = [];
     const send = (status: number, obj: unknown): void => {
+      this.watchMailFlush(res, claims, receivedAt);
       if (res.headersSent) return;
       if (obj === null) { res.writeHead(status); res.end(); return; }
       res.writeHead(status, { 'content-type': 'application/json', 'mcp-session-id': 'munder' });
@@ -565,6 +630,7 @@ export class HookServer {
         ok({});
       } else if (m.method === 'tools/call') {
         const r = await this.onMcpToolCall(agentId, token, m.params ?? {});
+        if ('claims' in r && r.claims) claims.push(...r.claims);
         if ('error' in r) err(r.error.code, r.error.message);
         else ok({ content: [{ type: 'text', text: JSON.stringify(r.result) }], structuredContent: r.result, isError: false });
       } else {
@@ -578,7 +644,7 @@ export class HookServer {
   /** One Codex tool hook. The static input must carry this agent's token (`k`), so a call the
    *  MODEL makes to the visible tool cannot inject hook events; then the payload is rebuilt
    *  from the rollout and handled exactly like a command hook's. */
-  private async onMcpToolCall(agentId: string, token: Buffer, params: Record<string, unknown>): Promise<{ result: unknown } | { error: { code: number; message: string } }> {
+  private async onMcpToolCall(agentId: string, token: Buffer, params: Record<string, unknown>): Promise<{ result: unknown; claims?: MailClaim[] } | { error: { code: number; message: string } }> {
     const args = (params.arguments && typeof params.arguments === 'object' ? params.arguments : {}) as Record<string, unknown>;
     const k = typeof args.k === 'string' && /^[0-9a-f]{32}$/.test(args.k) ? Buffer.from(args.k, 'hex') : null;
     if (params.name !== HIVE_HOOK_TOOL || !k || k.length !== token.length || !timingSafeEqual(k, token)) {
@@ -610,8 +676,9 @@ export class HookServer {
     const own = this.hive.registry().agents[agentId]?.sessionId;
     if (threadId && own && threadId !== own) p.provider_agent_id = threadId;
     let out: unknown = {};
-    try { out = this.handle(this.stampArrival(p, 'mcp')); } catch { out = {}; }
-    return { result: out ?? {} };
+    let claims: MailClaim[] = [];
+    try { out = this.handle(this.stampArrival(p, 'mcp')); claims = this.takeMailClaims(); } catch { out = {}; }
+    return { result: out ?? {}, claims };
   }
 
   /** P4: one AGY one-way frame. A hook from a hive agent is handled like the shim's (the reply
@@ -782,22 +849,42 @@ export class HookServer {
 
   /** MIDTURN-MAIL-BLIND L1: per agent, whether a turn is open, the inbox files present when it
    *  began (the turn's own mail, never announced), and the ones already announced. */
-  private readonly turns = new Map<string, { open: boolean; known: Set<string>; noticed: Set<string> }>();
+  private readonly turns = new Map<string, TurnState>();
   static readonly MIDTURN_MAIL_MAX_LISTED = 5;
+  /** ZT-I1-MAIL: the harness turn counter behind a surfacing epoch when the provider supplies no
+   *  turn id (§1.1). Boot-tagged, so an epoch never repeats across restarts. */
+  private turnCounter = 0;
+  private readonly bootTag = Date.now().toString(36);
 
   /** Turn boundaries, for every provider:
    *  - a turn BEGINS at UserPromptSubmit / SessionStart (Claude, Codex), or at the first
    *    PreInvocation / PostToolUse while no turn is open (AGY has no UserPromptSubmit; and a
    *    state lost across an app restart re-opens quietly). The inbox is snapshotted then.
-   *  - a turn ENDS at Stop. */
-  private trackTurn(agentId: string, event: string): void {
+   *  - a turn ENDS at Stop.
+   *  - C5 (§11.5): a SessionStart with source `compact` inside an open turn is NOT a boundary: the
+   *    epoch, the known set and the ids already surfaced in it all survive compaction.
+   *  Each turn carries its surfacing EPOCH: the provider's turn id when it sends one (Codex), else
+   *  the harness turn counter. A later hook with a different provider turn id moves the epoch. */
+  private trackTurn(agentId: string, event: string, p?: HookPayload): void {
     const t = this.turns.get(agentId);
+    const turnId = typeof p?.turn_id === 'string' && p.turn_id ? p.turn_id : null;
     const snapshot = (): void => {
-      this.turns.set(agentId, { open: true, known: new Set(this.hive.inboxFileNames?.(agentId) ?? []), noticed: new Set() });
+      this.turns.set(agentId, {
+        open: true, known: new Set(this.hive.inboxFileNames?.(agentId) ?? []), noticed: new Set(),
+        epoch: turnId ?? `h-${this.bootTag}-${++this.turnCounter}`, injected: new Set(), mailHooks: 0
+      });
     };
+    if (event === 'SessionStart' && p?.source === 'compact' && t?.open) return;
     if (event === 'UserPromptSubmit' || event === 'SessionStart') { snapshot(); return; }
     if (event === 'Stop') { if (t) t.open = false; return; }
-    if ((event === 'PreInvocation' || event === 'PostToolUse') && !t?.open) snapshot();
+    if ((event === 'PreInvocation' || event === 'PostToolUse') && !t?.open) { snapshot(); return; }
+    if (t?.open && turnId && t.epoch !== turnId) { t.epoch = turnId; t.injected = new Set(); t.mailHooks = 0; }
+  }
+
+  /** The surfacing epoch of the agent's current (or last) turn, or null before any hook. Slice 3's
+   *  Stop / StopFailure close this epoch. */
+  mailEpoch(agentId: string): string | null {
+    return this.turns.get(agentId)?.epoch ?? null;
   }
 
   /** The notice for inbox files that appeared since this turn began and were not announced yet,
@@ -821,6 +908,242 @@ export class HookServer {
     if (fresh.length > lines.length) lines.push(`- and ${fresh.length - lines.length} more`);
     if (!peek) { try { this.hive.appendLog({ kind: 'midturn-mail-notice', agentId, count: fresh.length }); } catch { /* noop */ } }
     return `<inbox-update>\n${fresh.length} new message(s) arrived in your inbox during this turn:\n${lines.join('\n')}\nRead them before you send or finish: one may change or cancel what you are doing.\n</inbox-update>`;
+  }
+
+  // — ZT-I1-MAIL slice 2: bodies in hook context (§2, §11.1, §11.2, §11.6, §11.9) —
+
+  /** Claims made by the handle() call in progress; the transport takes them after handle(). */
+  private mailClaims: MailClaim[] = [];
+  /** §11.1: tentative ids per agent waiting for transcript / rollout evidence. */
+  private readonly mailAwaiting = new Map<string, EvidenceWait[]>();
+  /** §11.1: ids whose hook response left too late (or never flushed), per agent and epoch. Slice 3
+   *  passes them to closeEpoch as `late` (`mail-surface-late`). */
+  private readonly mailLate = new Map<string, Map<string, Set<string>>>();
+  /** Inbox bodies that could not be read (moved by the agent, deleted, unparseable): skipped. */
+  private readonly mailUnreadable = new Map<string, Set<string>>();
+  private readonly providerCache = new Map<string, { provider: AgentProvider | undefined; mode: MailChannelMode; at: number }>();
+  static readonly PROVIDER_CACHE_MS = 5_000;
+
+  /** The claims of the last handle() call (the transport settles them after the flush). */
+  takeMailClaims(): MailClaim[] {
+    const c = this.mailClaims;
+    this.mailClaims = [];
+    return c;
+  }
+
+  /** Settle `claims` when `stream` has flushed its response (`finish`), or as never flushed
+   *  (`close` first: the provider hung up, e.g. at its own timeout). */
+  private watchMailFlush(stream: { once(event: 'finish' | 'close', fn: () => void): unknown }, claims: MailClaim[], receivedAt: number): void {
+    if (!claims.length) return;
+    let settled = false;
+    stream.once('finish', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, Date.now()); });
+    stream.once('close', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, null); });
+  }
+
+  /**
+   * §11.1 latency rule, at the response flush. A response that left at or after the transport's
+   * limit (or never flushed) is LATE: its ids stay tentative and are recorded for slice 3's close
+   * (`mail-surface-late`). Otherwise:
+   *  - latency-evidence providers (AGY and any channel without a readable record): confirmed;
+   *  - evidence providers: only the N1 fallback ids are confirmed here (`latency-fallback`, with
+   *    `mail-evidence-missing` and the UI notice); the rest wait for the transcript / rollout.
+   */
+  settleMailClaims(claims: MailClaim[], receivedAt: number, flushedAt: number | null): void {
+    const mail = this.hive.mail;
+    for (const c of claims) {
+      const latency = flushedAt === null ? null : Math.max(0, flushedAt - receivedAt);
+      c.latencyMs = latency;
+      const limit = mailLatencyLimitMs(c.transport);
+      if (latency === null || latency >= limit) {
+        let byEpoch = this.mailLate.get(c.agentId);
+        if (!byEpoch) { byEpoch = new Map(); this.mailLate.set(c.agentId, byEpoch); }
+        const set = byEpoch.get(c.epoch) ?? new Set<string>();
+        for (const id of c.ids) set.add(id);
+        byEpoch.set(c.epoch, set);
+        while (byEpoch.size > 8) byEpoch.delete(byEpoch.keys().next().value as string);
+        try { this.hive.appendLog({ kind: 'mail-hook-late', agentId: c.agentId, ids: c.ids, epoch: c.epoch, hookKind: c.hookKind, transport: c.transport ?? null, latencyMs: latency, limitMs: limit }); } catch { /* best effort */ }
+        continue;
+      }
+      if (!mail) continue;
+      try {
+        if (c.evidence === 'latency') {
+          mail.confirmSurfaced(c.agentId, c.ids, c.epoch, 'latency');
+        } else if (c.fallbackIds.length) {
+          const done = mail.confirmSurfaced(c.agentId, c.fallbackIds, c.epoch, 'latency-fallback');
+          if (done.length) mail.noteEvidenceMissing(c.agentId, done, c.epoch, c.evidence);
+        }
+      } catch { /* the ledger logs its own failures; a hook never breaks on it */ }
+    }
+  }
+
+  /** Ids surfaced in `epoch` whose response was late (for closeEpoch's `late`). */
+  mailLateIds(agentId: string, epoch: string): string[] {
+    return [...(this.mailLate.get(agentId)?.get(epoch) ?? [])];
+  }
+
+  /** The agent's provider and mail channel mode (§11.9), cached briefly (registry.json is read
+   *  from disk). With no ledger on the hive (a test double) there is no injection. */
+  mailChannel(agentId: string): { provider: AgentProvider | undefined; mode: MailChannelMode } {
+    const now = Date.now();
+    const c = this.providerCache.get(agentId);
+    if (c && now - c.at < HookServer.PROVIDER_CACHE_MS) return c;
+    let provider: AgentProvider | undefined;
+    try { provider = normalizeAgentProvider(this.hive.registry?.().agents[agentId]?.provider); } catch { provider = undefined; }
+    if (!provider) { try { if (this.hive.codexHomeFor?.(agentId)) provider = 'codex'; } catch { /* none */ } }
+    let override = null;
+    try { override = this.hive.mail?.channelOverride(agentId) ?? null; } catch { override = null; }
+    const entry = { provider, mode: this.hive.mail ? mailChannelMode(provider, override) : 'legacy-move' as MailChannelMode, at: now };
+    this.providerCache.set(agentId, entry);
+    return entry;
+  }
+
+  /** The transcript (Claude) or rollout (Codex) that records what reached the model. */
+  private evidenceFile(agentId: string, kind: MailEvidenceKind): string | null {
+    if (kind === 'latency') return null;
+    const known = this.transcriptPaths.get(agentId);
+    if (known) return known;
+    if (kind === 'codex-rollout') {
+      try {
+        const home = this.hive.codexHomeFor(agentId);
+        const session = this.hive.registry().agents[agentId]?.sessionId;
+        if (home && session) return this.threadRollouts.find(home, session);
+      } catch { /* none */ }
+    }
+    return null;
+  }
+
+  /** Pending mail for this agent that this epoch has not surfaced, with its bodies. Bounded work
+   *  per hook: bodies are read only while they could still fit one block (twice the joined budget,
+   *  at most 50 files); the rest are returned as `more` (header only, always deferred). */
+  private mailItems(agentId: string, t: TurnState | undefined): { items: MailBlockItem[]; more: MailEntry[] } {
+    const mail = this.hive.mail;
+    const none = { items: [] as MailBlockItem[], more: [] as MailEntry[] };
+    if (!mail) return none;
+    let pending: MailEntry[];
+    try { pending = mail.pending(agentId); } catch { return none; }
+    const skip = this.mailUnreadable.get(agentId);
+    const items: MailBlockItem[] = [];
+    const more: MailEntry[] = [];
+    let chars = 0;
+    for (const e of pending) {
+      if (t?.injected.has(e.id) || skip?.has(e.id)) continue;
+      if (items.length >= 50 || chars > 2 * MAIL_JOINED_BUDGET) { more.push(e); continue; }
+      const got = this.hive.inboxMessage?.(agentId, e.id) ?? null;
+      if (!got) {
+        // Moved by the agent (the 1.1.74 habit), deleted, oversize or unparseable: never shown as
+        // a body; slice 4's reader decides what the ledger makes of it.
+        const set = skip ?? new Set<string>();
+        set.add(e.id);
+        this.mailUnreadable.set(agentId, set);
+        try { this.hive.appendLog({ kind: 'mail-body-missing', agentId, id: e.id }); } catch { /* best effort */ }
+        continue;
+      }
+      const body = typeof got.msg.body === 'string' ? got.msg.body : JSON.stringify(got.msg.body ?? '') ?? '';
+      items.push({ entry: e, body, path: got.path });
+      chars += body.length;
+    }
+    return { items, more };
+  }
+
+  private mailReminders(agentId: string): MailObligation[] {
+    const mail = this.hive.mail;
+    if (!mail) return [];
+    try { return [...mail.awaitingReply(agentId), ...mail.openRequests(agentId)]; } catch { return []; }
+  }
+
+  /**
+   * The `<hive-mail>` block for this hook, inside the joined budget (§11.2), and the claim of its
+   * ids as `surfacing` in the current epoch. Null when nothing is pending or nothing fits.
+   */
+  private surfaceMail(agentId: string, event: string, p: HookPayload, provider: AgentProvider | undefined, others: Array<string | null>): string | null {
+    const mail = this.hive.mail;
+    if (!mail) return null;
+    const t = this.turns.get(agentId);
+    const epoch = t?.epoch ?? `h-${this.bootTag}-${++this.turnCounter}`;
+    const phase = event === 'UserPromptSubmit' || (event === 'PreInvocation' && (t?.mailHooks ?? 0) === 0) ? 'turn-start' : 'mid-turn';
+    if (t) t.mailHooks++;
+    const { items, more } = this.mailItems(agentId, t);
+    if (!items.length && !more.length) return null;
+    const block = buildMailBlock({ items, more, budget: mailBudgetFor(others), phase, reminders: this.mailReminders(agentId) });
+    if (!block.text) return null;
+    if (!block.surfacing.length) return block.text;     // headers only: nothing is claimed
+    let claimed: string[] = [];
+    try { claimed = mail.claimSurfacing(agentId, block.surfacing, epoch, event); } catch (e) {
+      try { this.hive.appendLog({ kind: 'mail-ledger-error', agentId, op: 'surfacing', error: String(e) }); } catch { /* noop */ }
+      return null;   // never show a body the ledger did not record
+    }
+    for (const id of claimed) t?.injected.add(id);
+    if (!claimed.length) return block.text;
+    const kind = mailEvidenceKind(provider);
+    const byId = new Map(items.map((i) => [i.entry.id, i.entry]));
+    const fallbackIds = kind === 'latency' ? [] : claimed.filter((id) => (byId.get(id)?.unconfirmedSurfacings ?? 0) >= MAIL_UNCONFIRMED_FALLBACK_AFTER);
+    this.mailClaims.push({ agentId, ids: claimed, epoch, hookKind: event, transport: p.transport, evidence: kind, fallbackIds });
+    if (kind !== 'latency') {
+      const file = this.evidenceFile(agentId, kind);
+      let offset = 0;
+      if (file) { try { offset = statSync(file).size; } catch { offset = 0; } }
+      const list = this.mailAwaiting.get(agentId) ?? [];
+      const same = list.find((w) => w.epoch === epoch && w.file === file);
+      if (same) for (const id of claimed) same.ids.add(id);
+      else list.push({ epoch, ids: new Set(claimed), kind, file, offset, scannedFile: null, scannedSize: -1 });
+      this.mailAwaiting.set(agentId, list);
+    }
+    return block.text;
+  }
+
+  /** Claude PreToolUse (the SEND moment, N1 of 1.1.55): the headers of mail waiting for its body,
+   *  as a PEEK. No body, no marker, no claim: the PostToolUse after it carries the bodies. */
+  private mailPeek(agentId: string): string | null {
+    const t = this.turns.get(agentId);
+    if (!t?.open || !this.hive.mail) return null;
+    let pending: MailEntry[];
+    try { pending = this.hive.mail.pending(agentId); } catch { return null; }
+    const skip = this.mailUnreadable.get(agentId);
+    const waiting = pending.filter((e) => !t.injected.has(e.id) && !skip?.has(e.id));
+    if (!waiting.length) return null;
+    return buildMailHeaders(waiting, MAIL_JOINED_BUDGET, `${waiting.length} new message(s) arrived during this turn; their full text follows after this tool call:`).text;
+  }
+
+  /**
+   * §11.1 deterministic confirmation for Claude (session transcript) and Codex (rollout): the
+   * record written for a hook response carrying `hive-mail:<id>` confirms that id (`evidence`).
+   * Run at every hook of the agent while ids wait (the record lands after the response), and
+   * exported for slice 3's Stop before it closes the epoch. Reads a bounded window from the
+   * claim-time size (the file tail); an unchanged file is not re-read. Returns the ids confirmed.
+   */
+  confirmMailSurfacing(agentId: string): string[] {
+    const list = this.mailAwaiting.get(agentId);
+    const mail = this.hive.mail;
+    if (!list?.length || !mail) return [];
+    const confirmed: string[] = [];
+    try {
+      const doc = mail.ledger(agentId);
+      for (const w of list) {
+        for (const id of [...w.ids]) {
+          const e = doc.entries[id];
+          if (!e || e.state !== 'surfacing' || e.epoch !== w.epoch) w.ids.delete(id);
+        }
+        if (!w.ids.size) continue;
+        const file = this.evidenceFile(agentId, w.kind);
+        if (!file) continue;
+        let size: number;
+        try { size = statSync(file).size; } catch { continue; }
+        if (file === w.scannedFile && size === w.scannedSize) continue;
+        const from = file === w.file ? Math.max(0, w.offset - MAIL_EVIDENCE_SCAN_BACK_BYTES) : Math.max(0, size - MAIL_EVIDENCE_SCAN_MAX_BYTES);
+        const win = readFileWindow(file, from, MAIL_EVIDENCE_SCAN_MAX_BYTES);
+        if (!win) continue;
+        w.scannedFile = file;
+        w.scannedSize = size;
+        const found = mailEvidenceIn(win.text, w.ids, w.kind);
+        if (!found.size) continue;
+        const done = mail.confirmSurfaced(agentId, found, w.epoch, 'evidence');
+        for (const id of found) w.ids.delete(id);
+        confirmed.push(...done);
+      }
+    } catch { /* evidence is best effort: an unconfirmed id is re-surfaced, never lost */ }
+    const left = list.filter((w) => w.ids.size);
+    if (left.length) this.mailAwaiting.set(agentId, left); else this.mailAwaiting.delete(agentId);
+    return confirmed;
   }
 
   /** HEAVY-JOB-SERIALIZE: the app-held heavy-job lock (main wires it; null in tests = no lock). */
@@ -865,14 +1188,21 @@ export class HookServer {
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== agentId;
     if (agentId && typeof p.env_agent_id === 'string' && p.env_agent_id) this.noteIdentityMismatch(agentId, p.env_agent_id, event, p.session_id);
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
-    if (agentId && !fromSubagent) this.trackTurn(agentId, event);
+    if (agentId && !fromSubagent) this.trackTurn(agentId, event, p);
+    // A new response starts with no claims (a direct handle() call that nobody settled leaves none).
+    this.mailClaims = [];
     if (!fromSubagent) {
+      // §11.9: `source` (SessionStart startup|resume|clear|compact) reaches the hook diag row.
       this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
-        typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined);
+        typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
+        typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
     }
+    // §11.1: the record of an earlier response lands after it, so every later hook of the agent
+    // (Stop included) looks for the evidence while tentative ids wait.
+    if (agentId && !fromSubagent && this.mailAwaiting.has(agentId)) this.confirmMailSurfacing(agentId);
 
     // L0 — Codex has no status line. It stamps its rate-limit snapshot onto the
     // token_count event of every turn in the rollout it is already writing, so the
@@ -1095,18 +1425,26 @@ export class HookServer {
     if ((event === 'UserPromptSubmit' || event === 'PostToolUse' || event === 'PreInvocation') && agentId && this.control && !fromSubagent && p.transport !== 'pipe-oneway') {
       steer = this.control.takeSteer(agentId) ?? null;
     }
+    // ZT-I1-MAIL §11.9: injection providers (Claude, Codex, AGY) get message BODIES in hook
+    // context (the <hive-mail> block, built below against the joined budget); every other
+    // provider keeps the 1.1.74 header notice (legacy-read / legacy-move).
+    const channel = agentId && !fromSubagent ? this.mailChannel(agentId) : null;
+    const injecting = channel?.mode === 'inject';
     // MIDTURN-MAIL-BLIND L1: mail that arrived DURING this turn, named once, on the same
     // answering hooks the steer uses (Claude/Codex PostToolUse, AGY PreInvocation). Never on a
     // one-way hook (its reply is not read) or a subagent's.
-    const mail = (event === 'PostToolUse' || event === 'PreInvocation') && agentId && !fromSubagent && p.transport !== 'pipe-oneway'
-      ? this.midTurnMail(agentId)
-      // N1 (Jim): the SEND moment is a tool call, so PreToolUse carries it too, as a PEEK (not
-      // consumed: the PostToolUse after it still delivers it). CLAUDE ONLY (the http transport):
-      // AGY's shim turns any PreToolUse reply object into a decision and fails CLOSED (a notice
-      // would DENY the tool), and Codex's PreToolUse context handling is unverified.
-      : event === 'PreToolUse' && agentId && !fromSubagent && p.transport === 'http'
-        ? this.midTurnMail(agentId, true)
-        : null;
+    const mail = !agentId || fromSubagent ? null
+      : injecting
+        // N1 (Jim, 1.1.55): the SEND moment is a tool call, so Claude's PreToolUse carries the
+        // HEADERS of waiting mail as a peek (no body, no marker, no claim); PostToolUse brings the
+        // bodies. CLAUDE ONLY (the http transport): AGY's shim turns any PreToolUse reply object
+        // into a decision and fails CLOSED, and Codex's PreToolUse context handling is unverified.
+        ? (event === 'PreToolUse' && p.transport === 'http' ? this.mailPeek(agentId) : null)
+        : (event === 'PostToolUse' || event === 'PreInvocation') && p.transport !== 'pipe-oneway'
+          ? this.midTurnMail(agentId)
+          : event === 'PreToolUse' && p.transport === 'http'
+            ? this.midTurnMail(agentId, true)
+            : null;
 
     // Keep god's roster CURRENT. fleet.json is always fresh on disk, but god's
     // context is not: after a restart it resumes a transcript describing the old
@@ -1133,20 +1471,33 @@ export class HookServer {
       ? `<goal>\n${goalRaw}\n</goal>`
       : null;
 
-    // Route A: Codex retains the short user sentinel, while this hook-only
-    // developer context carries the facts that change on every wake. A fresh
-    // directory read also makes an already-handled wake harmless.
-    const inboxWake = event === 'UserPromptSubmit' && !!agentId && !fromSubagent
-      && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL && this.hive.codexHomeFor(agentId)
-      ? `<hive-inbox-wake>\nCurrent unread inbox file ids: ${JSON.stringify(this.hive.inboxFileNames(agentId).map((name) => name.replace(/\.json$/, '')).sort())}.\nThe inbox directory is authoritative; ids already in inbox/.done/ were handled. Read it and handle every current message, then move handled files to inbox/.done/.\n</hive-inbox-wake>`
-      : null;
+    // ZT-I1-MAIL §2.2: the message BODIES, from the ledger's delivered ids, on every turn start
+    // (UserPromptSubmit; AGY's PreInvocation) and mid-turn (PostToolUse / later PreInvocations,
+    // the P6 wording), so a human-typed turn or a running turn surfaces mail with no wake.
+    // Budgeted JOINTLY with everything else in this one additionalContext (§11.2). Never into a
+    // slash-command prompt (§11.6: `/compact` and every built-in); that mail waits for the next
+    // turn start or PostToolUse. Never on a one-way hook or a subagent's.
+    // Route A (Codex): the short user sentinel is retained; the block replaces the old
+    // <hive-inbox-wake> id list as the hook-only developer context.
+    const surfaces = injecting && !!agentId && !fromSubagent && p.transport !== 'pipe-oneway'
+      && mailSurfaceEvents(channel?.provider).has(event)
+      && !(event === 'UserPromptSubmit' && isSlashPrompt(p.prompt));
+    let mailBlock: string | null = null;
+    if (surfaces && agentId) {
+      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [roster, goal, steer, mail]); } catch { mailBlock = null; }
+      const none = '<hive-mail>\nNo new hive mail to show for this wake.\n</hive-mail>';
+      if (!mailBlock && event === 'UserPromptSubmit' && channel?.provider === 'codex' && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL
+        && mailBudgetFor([roster, goal, steer, mail]) >= none.length) {
+        mailBlock = none;
+      }
+    }
 
-    if (steer || roster || goal || mail || inboxWake) {
+    if (steer || roster || goal || mail || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [roster, goal, steer, mail, inboxWake].filter(Boolean).join('\n\n')
+          additionalContext: [roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n')
         }
       };
     }

@@ -589,7 +589,9 @@ export function useHive(config: HarnessConfig | null): void {
         const marker = `Message: ${msg.id}`;
         if ((messageQueues[target.id] ?? []).some((queued) => queued.text.includes(marker))) return;
         seenTerminalHandoffs.current.add(msg.id);
-        enqueueMessage(target.id, terminalWorkOrderPrompt(msg));
+        enqueueMessage(target.id, terminalWorkOrderPrompt(msg), {
+          workOrder: { messageId: msg.id, from: msg.from, act: msg.act, subject: msg.subject, requiresReply: msg.requiresReply }
+        });
         return;
       }
       seenTerminalHandoffs.current.add(msg.id);
@@ -832,6 +834,11 @@ export function useHive(config: HarnessConfig | null): void {
         );
         if (sent) {
           delete sendFailures[next.id];
+          // ZT-I1-MAIL N2: a COMMITTED work order is the whole message typed into the PTY: main
+          // records it acted via:"work-order". Best effort: the delivery itself already happened.
+          if (next.workOrder) {
+            void window.cth.hiveWorkOrderDelivered({ agentId: target.id, ...next.workOrder }).catch(() => { /* main logs its own failures */ });
+          }
           return { sent: true, message: next };
         }
         // NOT DELIVERED, AND NOTHING OF OURS IS ON THE PROMPT (REFUSED / ABORTED): main

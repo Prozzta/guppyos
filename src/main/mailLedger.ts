@@ -139,6 +139,16 @@ export interface MailLedgerDoc {
   /** Reader #11: the last `acted` transition (agent turn completed with the mail seen). */
   lastActedAt: number | null;
   entries: Record<string, MailEntry>;
+  /** §2.2/§11.9/§11.10: a per-agent override of the provider's default mail channel (slice 3
+   *  degradation writes it; absent or null = the provider default). */
+  channel?: MailChannelOverride | null;
+}
+
+/** A per-agent channel override. Only degradation to legacy-read exists today (§11.10). */
+export interface MailChannelOverride {
+  mode: 'legacy-read';
+  reason: string;
+  since: number;
 }
 
 export interface MailEvent {
@@ -427,6 +437,16 @@ export function applyPrune(doc: MailLedgerDoc, now: number, retentionMs = MAIL_A
   return d.step();
 }
 
+/** Set (or clear, with null) the agent's channel override. Idempotent; no log row (the caller
+ *  logs the reason, e.g. `mail-channel-degraded`). A harness change: not activity. */
+export function applyChannelOverride(doc: MailLedgerDoc, override: MailChannelOverride | null): MailStep {
+  const cur = doc.channel ?? null;
+  if ((cur === null && override === null) || (cur && override && cur.mode === override.mode && cur.reason === override.reason)) return unchanged(doc);
+  const next: MailLedgerDoc = { ...doc, channel: override };
+  // `changed` names no entry; a sentinel keeps the shell's "anything changed?" test honest.
+  return { doc: next, changed: ['#channel'], logs: [], events: [], archive: [] };
+}
+
 // ————————————————————————————————————————————————————————————————— pure queries
 
 function bySeq(a: MailEntry, b: MailEntry): number {
@@ -641,7 +661,10 @@ export interface MailIntegrityIssue {
   quarantine: string | null;
   error: string;
   /** The ledger was rebuilt (nothing is paused); the banner words it as a notice. */
-  repaired: true;
+  repaired?: true;
+  /** A notice that is not a damaged file (N1 `mail-evidence-missing`): the banner shows this
+   *  text; nothing is paused. */
+  notice?: string;
 }
 
 export interface MailLedgerOptions {
@@ -722,7 +745,25 @@ export class MailLedger {
 
   /** Integrity notices for the `hive:integrity` banner: one per rebuilt ledger this session. */
   integrityIssues(): MailIntegrityIssue[] {
-    return [...this.issues.values()];
+    return [...this.issues.values(), ...this.notices.values()];
+  }
+
+  /** N1 notices, one per agent for the session (the evidence reader needs fixing). */
+  private readonly notices = new Map<string, MailIntegrityIssue>();
+
+  /**
+   * N1 (§11.17): the surfacing evidence reader failed twice in a row for these ids, so they were
+   * confirmed on the latency rule alone. Logs `mail-evidence-missing` and raises a UI notice
+   * through the `hive:integrity` banner (once per agent per session; the row is per call).
+   */
+  noteEvidenceMissing(agentId: string, ids: string[], epoch: string, evidence: string): void {
+    if (!ids.length) return;
+    this.log({ kind: 'mail-evidence-missing', agentId, ids, epoch, evidence });
+    if (this.notices.has(agentId)) return;
+    this.notices.set(agentId, {
+      file: `state/mail/${agentId}.json`, quarantine: null, error: 'mail-evidence-missing',
+      notice: `Mail delivery evidence for ${agentId} could not be found in its ${evidence === 'codex-rollout' ? 'Codex rollout' : 'session transcript'}; messages were confirmed by hook timing instead. The transcript reader may need updating (see mail-evidence-missing in the log).`
+    });
   }
 
   // — load —
@@ -984,6 +1025,17 @@ export class MailLedger {
   recordWorkOrder(agentId: string, msg: MailMessageLike): void {
     const st = this.state(agentId);
     this.commit(st, applyWorkOrder(st.doc, msg, this.now()));
+  }
+
+  /** The agent's channel override (§11.10 degradation), or null for the provider default. */
+  channelOverride(agentId: string): MailChannelOverride | null {
+    return this.docOrEmpty(agentId).channel ?? null;
+  }
+
+  /** Set or clear the channel override (slice 3's degradation trigger calls this). */
+  setChannelOverride(agentId: string, override: MailChannelOverride | null): boolean {
+    const st = this.state(agentId);
+    return this.commit(st, applyChannelOverride(st.doc, override)).changed.length > 0;
   }
 
   /** A hook response carried these ids: delivered → surfacing. Returns the ids claimed. */

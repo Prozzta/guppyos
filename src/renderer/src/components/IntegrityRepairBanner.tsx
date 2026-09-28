@@ -28,7 +28,9 @@ export function IntegrityRepairBanner() {
   if (!issues.length) return null;
   // ZT-I1-MAIL: a rebuilt mail ledger is a notice, not a pause: the harness already rebuilt it
   // from the log and the inbox, and re-delivers anything it could not prove was handled.
-  const paused = issues.some((issue) => !issue.repaired);
+  // N1 (mail-evidence-missing) is a notice too: nothing is paused, the evidence reader needs work.
+  const paused = issues.some((issue) => !issue.repaired && !issue.notice);
+  const rebuilt = issues.some((issue) => issue.repaired);
   return (
     <div role="alert" aria-live="assertive" data-integrity-repair-banner="" style={{
       position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)', zIndex: 45,
@@ -36,10 +38,12 @@ export function IntegrityRepairBanner() {
       background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1.5px var(--cth-status-blocked)',
       fontFamily: 'var(--cth-font-ui)', color: 'var(--cth-ink-900)', display: 'flex', flexDirection: 'column', gap: 3
     }}>
-      <span style={{ fontSize: 13, fontWeight: 700 }}>{paused ? 'Hive data needs repair — changes are paused.' : 'Hive mail records were damaged and have been rebuilt.'}</span>
+      <span style={{ fontSize: 13, fontWeight: 700 }}>{paused ? 'Hive data needs repair — changes are paused.' : rebuilt ? 'Hive mail records were damaged and have been rebuilt.' : 'Hive mail needs attention.'}</span>
       {issues.map((issue) => (
         <span key={`${issue.file}:${issue.quarantine ?? ''}`} style={{ fontSize: 12, color: 'var(--cth-ink-700)' }}>
-          {issue.repaired
+          {issue.notice
+            ? issue.notice
+            : issue.repaired
             ? `${issue.file} was corrupt and was rebuilt from the log and the inbox; mail it could not prove handled is re-delivered, marked as possibly handled.${issue.quarantine ? ` Saved copy: ${issue.quarantine}.` : ''}`
             : `${issue.file} is corrupt.${issue.quarantine ? ` Saved copy: ${issue.quarantine}.` : ''} Repair the original, then retry.`}
         </span>

@@ -668,7 +668,7 @@ const hookServer = new HookServer(
   standingGoalFromRoster,
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
-  (agentId, event, message, fullyIdle, turnId) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId); },
+  (agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); },
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
@@ -4322,6 +4322,14 @@ ipcMain.handle('hive:tasks', () => hive.tasks());
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 ipcMain.handle('hive:inbox', (_evt, id: unknown) => (typeof id === 'string' ? hive.inbox(id) : []));
+// ZT-I1-MAIL N2: the renderer confirmed a terminal work order's PTY write (COMMITTED): the ledger
+// records it acted via:"work-order" (the whole body is in the typed text; never in the backlog).
+ipcMain.handle('hive:workOrderDelivered', (_evt, e: unknown) => {
+  if (!e || typeof e !== 'object') return false;
+  const r = e as Record<string, unknown>;
+  if (typeof r.agentId !== 'string' || typeof r.messageId !== 'string') return false;
+  return hive.recordWorkOrderDelivered(r.agentId, r.messageId, { from: r.from, act: r.act, subject: r.subject, requiresReply: r.requiresReply });
+});
 // The renderer's 4s inbox HINT (plan A, god's ruling). It is a TRIGGER, never a producer:
 // it carries no decision and no payload, and it reaches the terminal only through the one
 // main-owned path, with main's one claim and its one stable request id. That is the whole

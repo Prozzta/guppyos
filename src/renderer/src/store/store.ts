@@ -141,6 +141,9 @@ export interface QueuedMessage {
    *  from, and delivering it afterwards costs a full turn to discover nothing is
    *  there. Declarative (a string, not a closure) so it survives persistQueues. */
   precondition?: 'inbox-nonempty';
+  /** ZT-I1-MAIL N2: this item is a terminal work order for hive message `messageId`; its
+   *  confirmed (COMMITTED) write is reported to main, which records the message acted. */
+  workOrder?: { messageId: string; from: string; act: string; subject: string; requiresReply: boolean };
 }
 
 // 'files' retired in v0.3.4 (the per-agent IDE button superseded it) — a
@@ -285,7 +288,7 @@ interface State {
   /** Park a message for an agent. Returns nothing; the flush loop delivers it.
    *  `meta.instruction`, when set, is what gets typed into the PTY instead of
    *  `text` (UI/card surfaces still show `text`). */
-  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string }; instruction?: string; precondition?: QueuedMessage['precondition'] }) => void;
+  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string }; instruction?: string; precondition?: QueuedMessage['precondition']; workOrder?: QueuedMessage['workOrder'] }) => void;
   /** Drop a single queued message (user removed it, or it was just delivered). */
   removeQueuedMessage: (agentId: string, messageId: string) => void;
   /** "Send now" while floor auto-delivery is paused: marks the message manual
@@ -888,7 +891,8 @@ export const useStore = create<State>((set, get) => ({
         id: newQueuedId(), text: trimmed, ts: Date.now(),
         ...(meta?.slack ? { slack: meta.slack } : {}),
         ...(meta?.instruction ? { instruction: meta.instruction } : {}),
-        ...(meta?.precondition ? { precondition: meta.precondition } : {})
+        ...(meta?.precondition ? { precondition: meta.precondition } : {}),
+        ...(meta?.workOrder ? { workOrder: meta.workOrder } : {})
       };
       const messageQueues = { ...s.messageQueues, [agentId]: [...(s.messageQueues[agentId] ?? []), msg] };
       persistQueues(messageQueues);

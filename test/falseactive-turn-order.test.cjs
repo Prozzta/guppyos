@@ -99,11 +99,11 @@ const { readSource, codeOnly } = require('./read-source.cjs');
 test('WIRING: the payload turn_id reaches noteHook (HookServer -> index -> bridge -> coordinator)', () => {
   const hooks = codeOnly(readSource('src/main/hooks.ts'));
   assert.match(hooks, /turn_id\?: string;/, 'the payload type carries turn_id');
-  assert.match(hooks, /this\.onEvent\?\.\(agentId, event, p\.message, [^;]*typeof p\.turn_id === 'string' && p\.turn_id \? p\.turn_id : undefined\);/,
+  assert.match(hooks, /this\.onEvent\?\.\(agentId, event, p\.message, [^;]*typeof p\.turn_id === 'string' && p\.turn_id \? p\.turn_id : undefined,\s*typeof p\.source === 'string' && p\.source \? p\.source\.slice\(0, 40\) : undefined\);/,
     'the HookServer forwards the payload turn_id to its observer');
   const index = codeOnly(readSource('src/main/index.ts'));
-  assert.match(index, /\(agentId, event, message, fullyIdle, turnId\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId\); \}/);
+  assert.match(index, /\(agentId, event, message, fullyIdle, turnId, source\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(agentId, event, message, fullyIdle, turnId, source\); \}/);
   const bridge = codeOnly(readSource('src/main/inboxWakeBridge.ts'));
-  assert.match(bridge, /onHook\(agentId: string \| undefined, event: string \| undefined, message: string \| undefined, fullyIdle\?: boolean, turnId\?: string\): void \{/);
+  assert.match(bridge, /onHook\(agentId: string \| undefined, event: string \| undefined, message: string \| undefined, fullyIdle\?: boolean, turnId\?: string, source\?: string\): void \{/);
   assert.match(bridge, /coordinator\.noteHook\(agentId, event, message, this\.deps\.now\(\), fullyIdle, turnId\)/);
 });

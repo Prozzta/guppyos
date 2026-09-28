@@ -189,7 +189,7 @@ test('lastVisibleLine: CSI/OSC stripped, CR and cursor moves split lines, capped
 
 test('WIRING: hooks stamp hookSeenAt; the runtime reports launches to the watch; each PTY keeps a bounded tail', () => {
   const idx = read('src/main/index.ts');
-  assert.match(idx, /\(agentId, event, message, fullyIdle, turnId\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(/);
+  assert.match(idx, /\(agentId, event, message, fullyIdle, turnId, source\) => \{ if \(agentId\) hookSeenAt\.set\(agentId, Date\.now\(\)\); inboxWake\?\.onHook\(/);
   assert.match(idx, /onProbeLaunched: \(probe\) => capacityProbeWatch\.launched\(probe\)/);
   assert.match(idx, /tailLine: \(agentId\) => \{ const id = ptyForAgent\(agentId\); const raw = id \? ptyManager\.tail\(id\) : undefined; return raw \? lastVisibleLine\(raw\) : null; \}/);
   const pty = read('src/main/pty.ts');

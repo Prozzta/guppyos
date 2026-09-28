@@ -263,6 +263,8 @@ export interface HiveIntegrityIssue {
   error: string;
   /** ZT-I1-MAIL: the source was already rebuilt (a mail ledger); nothing is paused. */
   repaired?: boolean;
+  /** ZT-I1-MAIL N1: a notice that is not a damaged file (mail-evidence-missing); nothing is paused. */
+  notice?: string;
 }
 
 class HiveAuthorityCorruptError extends Error {
@@ -660,6 +662,21 @@ export class HiveManager {
       return { id: String(m.id ?? file.replace(/\.json$/, '')), from: String(m.from ?? '?'), subject: String(m.subject ?? ''), ...normalizeSupersedes(m.supersedes) };
     } catch { return null; }
   }
+
+  /** ZT-I1-MAIL slice 2: one inbox message, parsed, for the <hive-mail> block (bounded: a file
+   *  over 1 MB or unparseable is null, as is a file the agent already moved). */
+  inboxMessage(agentId: string, id: string): { path: string; msg: Partial<HiveMessage> } | null {
+    // A ledger id is valid (§4.1), or a legacy file stem imported from this inbox: never a path.
+    if (!isValidMailId(id) && !/^[^\\/:*?"<>|]+$/.test(id)) return null;
+    if (id.includes('..')) return null;
+    const path = join(this.agentDir(agentId), 'inbox', `${id}.json`);
+    try {
+      if (statSync(path).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return null;
+      const msg = JSON.parse(readFileSync(path, 'utf8')) as unknown;
+      return msg && typeof msg === 'object' && !Array.isArray(msg) ? { path, msg: msg as Partial<HiveMessage> } : null;
+    } catch { return null; }
+  }
+  static readonly INBOX_MESSAGE_MAX_BYTES = 1024 * 1024;
 
   private agentDir(id: string): string {
     return join(this.root()!, 'agents', id);
@@ -2289,6 +2306,10 @@ export class HiveManager {
   /** Non-Claude providers cannot drain hive inbox; hand direct mail to the
    *  renderer so it can queue a terminal work order for the target PTY. */
   private emitTerminalHandoff(msg: HiveMessage, targetId: string): boolean {
+    // N2: remembered until the renderer confirms the PTY write (bounded; the renderer's
+    // confirmation carries the header fields too, so a restart in between loses only the body hash).
+    this.handoffs.set(`${targetId}|${msg.id}`, msg);
+    if (this.handoffs.size > HiveManager.HANDOFFS_MAX) this.handoffs.delete(this.handoffs.keys().next().value as string);
     const delivered = this.emit?.('hive:terminalHandoff', {
       id: msg.id,
       from: msg.from,
@@ -2309,6 +2330,38 @@ export class HiveManager {
       delivered
     });
     return delivered;
+  }
+
+  /** N2: terminal work orders emitted and not yet confirmed written, by `<target>|<id>`. */
+  private readonly handoffs = new Map<string, HiveMessage>();
+  static readonly HANDOFFS_MAX = 500;
+
+  /**
+   * ZT-I1-MAIL N2 (§11.17): the renderer confirmed (COMMITTED) the PTY write of the terminal work
+   * order for `messageId`. The whole body is in the typed text, so the ledger records it
+   * `acted via:"work-order"` (never in the backlog). `fallback` carries the header fields the
+   * renderer holds, for a confirmation that arrives after this process forgot the handoff.
+   * Idempotent; never throws.
+   */
+  recordWorkOrderDelivered(agentId: string, messageId: string, fallback: { from?: unknown; act?: unknown; subject?: unknown; requiresReply?: unknown } = {}): boolean {
+    if (typeof agentId !== 'string' || typeof messageId !== 'string' || !agentId || !messageId) return false;
+    const key = `${agentId}|${messageId}`;
+    const known = this.handoffs.get(key);
+    const msg = known ?? {
+      id: messageId,
+      from: typeof fallback.from === 'string' ? fallback.from : '?',
+      act: (typeof fallback.act === 'string' ? fallback.act : 'inform') as MessageAct,
+      subject: typeof fallback.subject === 'string' ? fallback.subject : '',
+      requires_reply: fallback.requiresReply === true
+    };
+    try {
+      this.mail.recordWorkOrder(agentId, msg as HiveMessage);
+      this.handoffs.delete(key);
+      return true;
+    } catch (e) {
+      this.appendLog({ kind: 'mail-ledger-error', agentId, id: messageId, op: 'work-order', error: String(e) });
+      return false;
+    }
   }
 
   // — router: drain outboxes → inboxes —
