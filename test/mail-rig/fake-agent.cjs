@@ -92,7 +92,11 @@ class FakeAgent {
 
   start() {
     fs.writeFileSync(path.join(this.dir, 'pid'), String(process.pid));
-    this.rec('start', { argv: this.argv.map((a) => (a.length > 300 ? `${a.slice(0, 300)}…(${a.length})` : a)), pid: process.pid, cwd: process.cwd(), env: pickEnv(), envAll: Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|CLAUDE|CODEX_|GEMINI_|HOME$|USERPROFILE$|OPENAI_|ANTHROPIC_)/i.test(k))) });
+    // Isolation (allowlist env, jailed PATH): the stub checks ITSELF, as the host does, and records
+    // every problem (the RIG test and the negative control assert none).
+    let isolation = [];
+    try { require('./isolation.cjs').checkIsolation(process.env, path.dirname(process.env.RIG_DIR || '.'), { allow: require('./isolation.cjs').allowRigBaseUrls, who: 'stub' }); } catch (e) { isolation = String(e.message).split('\n').slice(1).map((s) => s.trim()); }
+    this.rec('start', { isolation, envNames: Object.keys(process.env).sort(), path: process.env.PATH || process.env.Path || '', argv: this.argv.map((a) => (a.length > 300 ? `${a.slice(0, 300)}…(${a.length})` : a)), pid: process.pid, cwd: process.cwd(), env: pickEnv(), envAll: Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|CLAUDE|CODEX_|GEMINI_|HOME$|USERPROFILE$|OPENAI_|ANTHROPIC_)/i.test(k))) });
     this.setupFlavour();
     this.writeComposer();
     // The rig host is this process's lifeline: a kill -9 of the app ends its CLIs too (as the

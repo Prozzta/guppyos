@@ -16,26 +16,15 @@ const path = require('node:path');
 const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
+const { rigEnv } = require('./isolation.cjs');
 
 const HOST = path.join(__dirname, 'rig-host.cjs');
 const BAD_ENV = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
 
+/** The host's ENTIRE env: an allowlist (isolation.cjs rigEnv), never the parent minus a few keys. */
 function scrubbedEnv(sandbox) {
-  const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!BAD_ENV.test(k) && v !== undefined) env[k] = v;
-  const pathKey = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'PATH';
-  const parts = String(env[pathKey] || '').split(path.delimiter).filter((p) => p && !/dunder[\\/]hive|[\\/]hive[\\/]bin/i.test(p));
-  for (const k of Object.keys(env)) if (k.toLowerCase() === 'path') delete env[k];
-  env.PATH = parts.join(path.delimiter);
-  const home = path.join(sandbox, 'home');
-  env.HOME = home;
-  env.USERPROFILE = home;
-  env.CODEX_HOME = path.join(home, '.codex');
-  // Inside the jail, laid out as a real install is (~/.gemini): the AGY statusline lease and the
-  // AGY hooks then share one Gemini home, as on a machine where the variable is unset.
-  env.GEMINI_CLI_HOME = path.join(home, '.gemini');
-  // Never a real provider endpoint from anything this tree starts (the host re-points them at its fake LLM).
-  for (const k of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL']) delete env[k];
+  const env = rigEnv(sandbox);
+  for (const k of Object.keys(env)) if (BAD_ENV.test(k)) throw new Error(`rig env: ${k} is not allowlisted`);
   return env;
 }
 

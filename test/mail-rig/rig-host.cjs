@@ -56,6 +56,10 @@ function assertIsolated() {
   }
 }
 assertIsolated();
+// Allowlist isolation (Dwight audit 3, god e7e031): no credential-family variable, no PATH dir
+// outside the sandbox and the Windows system dirs, no provider command resolvable outside rig/bin.
+// Fail fast, before any product module loads.
+require('./isolation.cjs').checkIsolation(process.env, SANDBOX, { who: 'rig-host' });
 fs.mkdirSync(HOME, { recursive: true });
 const HARNESS_HOME = path.join(SANDBOX, 'harness');
 const RIG_DIR = path.join(SANDBOX, 'rig');
@@ -409,7 +413,7 @@ async function main() {
   const { hive, hookServer, workerWake, control, ptyManager, automaticSubmit, rig } = f;
   const ptyOf = (id) => { const p = f.ptyForAgent(id); if (!p) throw new Error(`no pty for ${id}`); return p; };
   const cmds = {
-    ping: () => ({ pid: process.pid, home: os.homedir(), hiveRoot: hive.root(), sock: hive.sockPath(), llm: rig.llm.url }),
+    ping: () => ({ pid: process.pid, home: os.homedir(), hiveRoot: hive.root(), sock: hive.sockPath(), llm: rig.llm.url, envNames: Object.keys(process.env).sort(), path: process.env.PATH || '' }),
     spawn: (a) => f.spawnAgent(a),
     register: async (a) => { const cwd = path.join(WORK, a.id); fs.mkdirSync(cwd, { recursive: true }); await hive.ensureAgent({ id: a.id, name: a.name || a.id, provider: a.provider || 'claude', cwd, isGod: a.isGod === true }); if (a.archived) hive.setArchived(a.id, true); return { ok: true }; },
     // The EXPLICIT archive (the `hive:setArchived` IPC / the voice setArchived action), never the boot orphan pass.
