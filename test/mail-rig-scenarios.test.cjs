@@ -289,8 +289,11 @@ const has175 = /^#+\s*\[?v?1\.1\.75\b/m.test(changelog);
 test('N4 the rollback text is present: god\'s one reminder broadcast (§11.12(b)) in the 1.1.75 release notes', has175 ? {} : { todo: 'the 1.1.75 CHANGELOG entry is the final slice\'s job (not written yet)' }, () => {
   const at = changelog.search(/^#+\s*\[?v?1\.1\.75\b/m);
   assert.ok(at >= 0, 'a 1.1.75 section exists');
-  const next = changelog.slice(at + 1).search(/^#+\s*\[?v?1\.1\.\d+\b/m);
-  const section = next >= 0 ? changelog.slice(at, at + 1 + next) : changelog.slice(at);
+  // The section ends at the next release heading AFTER its own heading line (slicing from at + 1
+  // left "# [1.1.75]" at the start of the string, which the ^ anchor matched: an empty section).
+  const body = changelog.indexOf('\n', at) + 1;
+  const next = changelog.slice(body).search(/^#+\s*\[?v?1\.1\.\d+\b/m);
+  const section = next >= 0 ? changelog.slice(at, body + next) : changelog.slice(at);
   assert.ok(section.includes('1.1.74 restored: move handled mail to inbox/.done again'), 'the exact reminder text');
   assert.match(section, /archived/i, 'the archived-bounce behaviour change is listed');
   assert.match(section, /acted/i, 'acted = seen is listed');
