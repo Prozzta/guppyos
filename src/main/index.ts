@@ -385,7 +385,18 @@ const telemetry = new TelemetryCollector({
   resolveProvider: (agentId) => {
     const a = hive.registry().agents[agentId];
     return a ? (a.provider ?? 'claude') : undefined;
-  }
+  },
+  // SESSION-CROSSWIRE: usage, spans and the sampled resume key follow the agent whose
+  // own hooks reported a session, not the OTel agent.id label. Memoised for 1 s: OTLP
+  // batches arrive every few seconds per agent and each would otherwise re-read the registry.
+  resolveSessionOwners: (() => {
+    let at = 0; let owners: ReadonlyMap<string, string> = new Map();
+    return () => {
+      const now = Date.now();
+      if (now - at > 1000) { owners = hive.hookSessionOwners(); at = now; }
+      return owners;
+    };
+  })()
 });
 // Usage provider (Seam 1) — the INTEGRATION swap: Oscar's telemetry collector (#7)
 // IS the provider, replacing Lane A's interim StubUsageProvider. Same
@@ -1857,8 +1868,10 @@ function runBreakerBeat(progressWindowMs: number): void {
     // and recording it replaced the real --resume key with a phantom: a quick restart
     // then came up fresh and lost its context. So a sample id may only fill an EMPTY
     // key, or replace one when its own transcript is on disk.
+    // SESSION-CROSSWIRE: and the sample is marked as such, so it never replaces a key this
+    // agent's own hooks wrote, nor takes an id another agent claims (hive.recordSession).
     if (sample?.sessionId && shouldRecordSampleSession(hive.lastSession(id), sample.sessionId, reg.agents[id]?.cwd)) {
-      hive.recordSession(id, sample.sessionId);
+      hive.recordSession(id, sample.sessionId, 'sample');
     }
     if (id === reg.godId) continue;            // breaker skips god
     // Progress = fresh coordination files OR a recent OTel tool span. The span
@@ -3566,8 +3579,13 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // session rather than launching a `--resume` against a missing id.
     const explicitSid = typeof opts.resumeSessionId === 'string' ? opts.resumeSessionId.trim() : '';
     const sid = explicitSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
+    // SESSION-CROSSWIRE: an automatic resume never picks up a session another agent
+    // claims, whether it is the last key or the previous-key fallback. A typed id is the
+    // human asking for that thread, so it is not checked.
+    const agentId = opts.hive.id;
+    const foreign = (s: string): boolean => hive.sessionClaimedByOther(agentId, s);
     if (sid && !args.includes('--resume')) {
-      if (seedSessionTranscript(opts.cwd, sid)) {
+      if ((explicitSid || !foreign(sid)) && seedSessionTranscript(opts.cwd, sid)) {
         args.push('--resume', sid);
         didResume = true;
       } else if (!explicitSid) {
@@ -3577,13 +3595,13 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         // either way, so a lost context is never invisible again.
         const previous = hive.previousSession(opts.hive.id);
         const cwd = opts.cwd;
-        const pick = chooseResumeSession(sid, previous, (s) => seedSessionTranscript(cwd, s));
+        const pick = chooseResumeSession(sid, previous, (s) => seedSessionTranscript(cwd, s), foreign);
         if (pick.sessionId) {
           args.push('--resume', pick.sessionId);
           didResume = true;
         }
-        hive.appendLog({ kind: 'resume-miss', agentId: opts.hive.id, missing: sid, previous: previous ?? null, outcome: pick.outcome });
-        console.warn(`[resume] ${opts.hive.id}: session ${sid} has no transcript; ${pick.sessionId ? `resuming previous ${pick.sessionId}` : 'starting fresh'}`);
+        hive.appendLog({ kind: 'resume-miss', agentId: opts.hive.id, missing: sid, previous: previous ?? null, outcome: pick.outcome, ...(pick.refused ? { refusedForeign: pick.refused } : {}) });
+        console.warn(`[resume] ${opts.hive.id}: session ${sid} ${pick.refused?.includes(sid) ? 'belongs to another agent' : 'has no transcript'}; ${pick.sessionId ? `resuming previous ${pick.sessionId}` : 'starting fresh'}`);
       } else if (explicitSid) {
         // The user typed a session id in the Add Agent dialog but it isn't in any
         // Claude project dir — we fall back to a FRESH session rather than a broken

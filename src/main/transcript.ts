@@ -125,12 +125,24 @@ export function shouldRecordSampleSession(current: string | undefined, sampleId:
 export function chooseResumeSession(
   last: string | undefined,
   previous: string | undefined,
-  seed: (sessionId: string) => boolean
-): { sessionId?: string; miss: boolean; outcome?: 'resumed-previous' | 'fresh' } {
+  seed: (sessionId: string) => boolean,
+  foreign: (sessionId: string) => boolean = () => false
+): { sessionId?: string; miss: boolean; outcome?: 'resumed-previous' | 'fresh'; refused?: string[] } {
   if (!last) return { miss: false };
-  if (seed(last)) return { sessionId: last, miss: false };
-  if (previous && previous !== last && seed(previous)) return { sessionId: previous, miss: true, outcome: 'resumed-previous' };
-  return { miss: true, outcome: 'fresh' };
+  // SESSION-CROSSWIRE: an id another agent claims is never resumed (nor seeded); it is
+  // listed in `refused` so the resume-miss row says why.
+  const refused: string[] = [];
+  const usable = (s: string): boolean => {
+    if (foreign(s)) { refused.push(s); return false; }
+    return seed(s);
+  };
+  if (usable(last)) return { sessionId: last, miss: false };
+  const pick: { sessionId?: string; miss: boolean; outcome?: 'resumed-previous' | 'fresh'; refused?: string[] } =
+    previous && previous !== last && usable(previous)
+      ? { sessionId: previous, miss: true, outcome: 'resumed-previous' }
+      : { miss: true, outcome: 'fresh' };
+  if (refused.length) pick.refused = refused;
+  return pick;
 }
 
 export function seedSessionTranscript(cwd: string, sessionId: string): boolean {

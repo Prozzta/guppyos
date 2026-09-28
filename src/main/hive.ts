@@ -206,6 +206,14 @@ export interface RegistryAgent extends AgentMeta {
   /** The `sessionId` before the current one (START-FIXES-163 (1)): the fallback resume
    *  key when the current one has no transcript, e.g. a phantom OTel start-up id. */
   previousSessionId?: string;
+  /** SESSION-CROSSWIRE: who wrote `sessionId`. 'hook' = a hook payload from this
+   *  agent's own process (authoritative); 'sample' = the OTel cost sample. Absent on
+   *  keys written before 1.1.70. A sample never replaces a 'hook' key. */
+  sessionSource?: 'hook' | 'sample';
+  /** SESSION-CROSSWIRE: the session ids this agent's own hooks have reported (newest
+   *  last, capped). The ownership record: a restart never resumes, and a sample is
+   *  never charged against, a session id another agent's hooks claim. */
+  hookSessionIds?: string[];
   /** The PINNED model: a live in-TUI `/model` switch (Claude status line, Codex rollout
    *  turn_context, Antigravity statusline), kept so a respawn stays on it. Per agent because a
    *  CLI's global settings cannot preserve independent choices across a hive. See
@@ -236,6 +244,25 @@ export interface RegistryAgent extends AgentMeta {
 export interface Registry {
   godId: string | null;
   agents: Record<string, RegistryAgent>;
+}
+
+/** How many hook-reported session ids an agent keeps as its ownership record. */
+export const HOOK_SESSION_IDS_CAP = 20;
+
+/** SESSION-CROSSWIRE: does an agent other than `agentId` claim `sessionId`?
+ *  - This agent's own hooks reported it → never foreign.
+ *  - Another agent's hooks reported it → foreign.
+ *  - Another agent holds it as its current or previous key → foreign too. That also
+ *    covers keys written before 1.1.70, which carry no hook record: an id two agents
+ *    both hold is contested and resumes for neither, rather than for the wrong one. */
+export function sessionClaimedByOther(reg: Registry, agentId: string, sessionId: string): boolean {
+  if (!sessionId) return false;
+  if (reg.agents[agentId]?.hookSessionIds?.includes(sessionId)) return false;
+  for (const [id, a] of Object.entries(reg.agents)) {
+    if (id === agentId) continue;
+    if (a.hookSessionIds?.includes(sessionId) || a.sessionId === sessionId || a.previousSessionId === sessionId) return true;
+  }
+  return false;
 }
 
 /** Build env + extra spawn args that make an agent process hive-aware. */
@@ -1393,22 +1420,55 @@ export class HiveManager {
    * idempotent resume after a crash/restart AND the accounting/dedup key for cost
    * samples. Best-effort — never throws into a hook handler.
    */
-  recordSession(agentId: string, sessionId: string): void {
+  recordSession(agentId: string, sessionId: string, source: 'hook' | 'sample' = 'hook'): void {
     const root = this.root();
     if (!root || !sessionId) return;
     try {
       const reg = this.registry();
       const agent = reg.agents[agentId];
-      if (!agent || agent.sessionId === sessionId) return; // unknown agent or unchanged → no write
-      // START-FIXES-163 (1): keep the id this one replaces. If the new key later turns
-      // out to have no transcript, the next spawn resumes this one instead of silently
-      // starting fresh (index.ts, the Claude resume block).
-      if (agent.sessionId) agent.previousSessionId = agent.sessionId;
-      agent.sessionId = sessionId;
+      if (!agent) return; // unknown agent → no write
+      const hookIds = agent.hookSessionIds ?? [];
+      if (source === 'sample') {
+        // SESSION-CROSSWIRE: the OTel sample's agent.id label is not proof of ownership.
+        // Claude Code background jobs report under the resource attributes of whichever
+        // agent's process hosts them, so the sample carried Andy's live session as
+        // Jim's. The sample may not replace a key this agent's own hooks wrote, nor take
+        // an id another agent claims.
+        if (agent.sessionId === sessionId) return;
+        if (agent.sessionId && agent.sessionSource === 'hook') return;
+        if (sessionClaimedByOther(reg, agentId, sessionId)) return;
+      } else if (agent.sessionId === sessionId && agent.sessionSource === 'hook' && hookIds.includes(sessionId)) {
+        return; // unchanged and already owned → no write (the common hook case)
+      }
+      const changed = agent.sessionId !== sessionId;
+      if (changed) {
+        // START-FIXES-163 (1): keep the id this one replaces. If the new key later turns
+        // out to have no transcript, the next spawn resumes this one instead of silently
+        // starting fresh (index.ts, the Claude resume block).
+        if (agent.sessionId) agent.previousSessionId = agent.sessionId;
+        agent.sessionId = sessionId;
+      }
+      agent.sessionSource = source;
+      if (source === 'hook' && !hookIds.includes(sessionId)) agent.hookSessionIds = [...hookIds, sessionId].slice(-HOOK_SESSION_IDS_CAP);
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
-      this.appendLog({ kind: 'session', agentId, sessionId });
+      if (changed) this.appendLog({ kind: 'session', agentId, sessionId, source });
     } catch { /* best-effort — never crash a hook handler */ }
+  }
+
+  /** SESSION-CROSSWIRE: does another agent claim `sessionId`? The resume guard. */
+  sessionClaimedByOther(agentId: string, sessionId: string): boolean {
+    return sessionClaimedByOther(this.registry(), agentId, sessionId);
+  }
+
+  /** SESSION-CROSSWIRE: session id → the agent whose own hooks reported it. Cost
+   *  attribution follows this, not the OTel agent.id label. */
+  hookSessionOwners(): Map<string, string> {
+    const owners = new Map<string, string>();
+    for (const [id, a] of Object.entries(this.registry().agents)) {
+      for (const sid of a.hookSessionIds ?? []) owners.set(sid, id);
+    }
+    return owners;
   }
 
   /**

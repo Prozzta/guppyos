@@ -102,9 +102,9 @@ test('(1) the registry keeps the id a new session replaced (previousSessionId)',
 
 test('(1) wiring: the beat gates the sample id; the spawn resumes the previous id and logs resume-miss', () => {
   const src = read('src/main/index.ts');
-  assert.match(src, /if \(sample\?\.sessionId && shouldRecordSampleSession\(hive\.lastSession\(id\), sample\.sessionId, reg\.agents\[id\]\?\.cwd\)\) \{\s*hive\.recordSession\(id, sample\.sessionId\);/);
+  assert.match(src, /if \(sample\?\.sessionId && shouldRecordSampleSession\(hive\.lastSession\(id\), sample\.sessionId, reg\.agents\[id\]\?\.cwd\)\) \{\s*hive\.recordSession\(id, sample\.sessionId, 'sample'\);/);
   assert.doesNotMatch(src, /if \(sample\?\.sessionId\) hive\.recordSession\(id, sample\.sessionId\);/, 'the ungated copy is gone');
-  assert.match(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\)\)/);
+  assert.match(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\), foreign\)/);
   assert.match(src, /kind: 'resume-miss', agentId: opts\.hive\.id, missing: sid, previous: previous \?\? null, outcome: pick\.outcome/);
 });
 

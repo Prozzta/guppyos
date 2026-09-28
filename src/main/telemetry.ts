@@ -127,6 +127,10 @@ export interface TelemetryCollectorOptions {
   /** The agent's provider. The transcript fallback runs for 'claude' only; anything
    *  else, or no answer, reads nothing (START-FIXES-163 (2)). */
   resolveProvider?: (agentId: string) => AgentProvider | undefined;
+  /** SESSION-CROSSWIRE: session id → the agent whose own hooks reported it (from the
+   *  hive registry). When present it overrides the OTel `agent.id` label, which a
+   *  Claude Code background job inherits from whichever agent's process hosts it. */
+  resolveSessionOwners?: () => ReadonlyMap<string, string>;
 }
 
 export class TelemetryCollector {
@@ -138,11 +142,10 @@ export class TelemetryCollector {
   private readonly resolveCwd?: (agentId: string) => string | null;
   private readonly resolveSessionId?: (agentId: string) => string | undefined;
   private readonly resolveProvider?: (agentId: string) => AgentProvider | undefined;
+  private readonly resolveSessionOwners?: () => ReadonlyMap<string, string>;
 
   /** sessionId → running accumulation. */
   private readonly sessions = new Map<string, SessionAccum>();
-  /** agentId → its sessionIds (lets getAgentUsage aggregate across --resume). */
-  private readonly agentSessions = new Map<string, Set<string>>();
   /** agentId → ring buffer of recent tool spans. */
   private readonly spans = new Map<string, ToolSpan[]>();
   /** Push subscribers (Lane A breaker + dashboard). */
@@ -158,6 +161,7 @@ export class TelemetryCollector {
     this.resolveCwd = opts.resolveCwd;
     this.resolveSessionId = opts.resolveSessionId;
     this.resolveProvider = opts.resolveProvider;
+    this.resolveSessionOwners = opts.resolveSessionOwners;
   }
 
   /** Bind the loopback OTLP listener. The handler is live the instant this
@@ -220,8 +224,9 @@ export class TelemetryCollector {
   /** Everything the renderer needs on cold start (it missed the live pushes). */
   snapshot(): TelemetrySnapshot {
     const usage: AgentUsageSample[] = [];
-    for (const agentId of this.agentSessions.keys()) {
-      const s = this.aggregateLive(agentId);
+    const owners = this.sessionOwners();
+    for (const agentId of this.effectiveAgents(this.sessions.keys(), owners)) {
+      const s = this.aggregateLive(agentId, owners);
       if (s) usage.push(s);
     }
     const spans: Record<string, ToolSpan[]> = {};
@@ -285,7 +290,7 @@ export class TelemetryCollector {
   private ingestMetrics(body: unknown): void {
     const root = body as { resourceMetrics?: ResourceMetrics[] };
     if (!Array.isArray(root?.resourceMetrics)) return;
-    const touched = new Set<string>(); // agentIds with new data this batch
+    const touched = new Set<string>(); // sessionIds with new data this batch
     for (const rm of root.resourceMetrics) {
       const resAttrs = flattenAttrs(rm.resource?.attributes);
       for (const sm of rm.scopeMetrics ?? []) {
@@ -308,29 +313,33 @@ export class TelemetryCollector {
                 case 'cacheRead': accum.cacheRead += value; break;
                 case 'cacheCreation': accum.cacheCreation += value; break;
               }
-              touched.add(agentId);
+              touched.add(sessionId);
             } else if (metric.name === 'claude_code.cost.usage') {
               accum.usd += value;
-              touched.add(agentId);
+              touched.add(sessionId);
             }
           }
         }
       }
     }
-    for (const agentId of touched) this.publishUsage(agentId);
+    const owners = this.sessionOwners();
+    for (const agentId of this.effectiveAgents(touched, owners)) this.publishUsage(agentId, owners);
   }
 
   private ingestLogs(body: unknown): void {
     const root = body as { resourceLogs?: ResourceLogs[] };
     if (!Array.isArray(root?.resourceLogs)) return;
+    const logOwners = this.sessionOwners();
     for (const rl of root.resourceLogs) {
       const resAttrs = flattenAttrs(rl.resource?.attributes);
       for (const sl of rl.scopeLogs ?? []) {
         for (const lr of sl.logRecords ?? []) {
           const attrs = flattenAttrs(lr.attributes);
           const name = str(attrs['event.name']) || str(lr.body?.stringValue);
-          const agentId = str(attrs['agent.id']) || str(resAttrs['agent.id']);
           const sessionId = str(attrs['session.id']);
+          // SESSION-CROSSWIRE: spans and api errors follow the session's hook-recorded
+          // owner too, so another agent's tool calls never count as this agent's progress.
+          const agentId = (sessionId && logOwners.get(sessionId)) || str(attrs['agent.id']) || str(resAttrs['agent.id']);
           if (!agentId) continue;
           if (name === 'tool_result') {
             const span: ToolSpan = {
@@ -367,10 +376,22 @@ export class TelemetryCollector {
       accum = { agentId, model: '', ts: Date.now(), input: 0, output: 0, cacheRead: 0, cacheCreation: 0, usd: 0 };
       this.sessions.set(sessionId, accum);
     }
-    let set = this.agentSessions.get(agentId);
-    if (!set) { set = new Set(); this.agentSessions.set(agentId, set); }
-    set.add(sessionId);
     return accum;
+  }
+
+  /** SESSION-CROSSWIRE: the hook-recorded owner of each session (empty without a resolver). */
+  private sessionOwners(): ReadonlyMap<string, string> {
+    try { return this.resolveSessionOwners?.() ?? new Map(); } catch { return new Map(); }
+  }
+
+  /** The distinct agents that own `sessionIds`: hook owner first, else the OTel label. */
+  private effectiveAgents(sessionIds: Iterable<string>, owners: ReadonlyMap<string, string>): Set<string> {
+    const agents = new Set<string>();
+    for (const sid of sessionIds) {
+      const a = this.sessions.get(sid);
+      if (a) agents.add(owners.get(sid) ?? a.agentId);
+    }
+    return agents;
   }
 
   private pushSpan(span: ToolSpan): void {
@@ -382,13 +403,18 @@ export class TelemetryCollector {
 
   /** Sum an agent's live sessions into one cumulative sample (sessionId/model =
    *  the most recently active session). Null if the agent has no live data. */
-  private aggregateLive(agentId: string): AgentUsageSample | null {
-    const set = this.agentSessions.get(agentId);
-    if (!set || set.size === 0) return null;
+  private aggregateLive(agentId: string, owners: ReadonlyMap<string, string> = this.sessionOwners()): AgentUsageSample | null {
+    // SESSION-CROSSWIRE: an agent's sessions are the ones it owns: the hook-recorded
+    // owner when there is one, else the OTel label. So a session labelled as this
+    // agent that another agent's hooks claim is neither charged here nor offered as
+    // this agent's resume key, and it is charged to its owner instead.
+    const mine: string[] = [];
+    for (const [sid, a] of this.sessions) if ((owners.get(sid) ?? a.agentId) === agentId) mine.push(sid);
+    if (mine.length === 0) return null;
     const out: AgentUsageSample = {
       agentId, sessionId: '', ts: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, model: '', usd: 0
     };
-    for (const sid of set) {
+    for (const sid of mine) {
       const a = this.sessions.get(sid);
       if (!a) continue;
       out.input += a.input;
@@ -440,8 +466,8 @@ export class TelemetryCollector {
     };
   }
 
-  private publishUsage(agentId: string): void {
-    const sample = this.aggregateLive(agentId);
+  private publishUsage(agentId: string, owners: ReadonlyMap<string, string>): void {
+    const sample = this.aggregateLive(agentId, owners);
     if (!sample) return;
     for (const cb of this.usageSubs) { try { cb(sample); } catch { /* subscriber threw */ } }
     this.emit?.('telemetry:event', { kind: 'usage', sample } satisfies TelemetryEvent);
