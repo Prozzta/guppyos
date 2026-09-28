@@ -46,20 +46,26 @@ function winWorld(t, { exitAfterMs = 0 } = {}) {
   Object.defineProperty(process, 'platform', { value: 'win32' });
   const spawns = [];
   const syncs = [];
-  const realSpawn = cp.spawn, realSync = cp.spawnSync;
+  const realSpawn = cp.spawn, realSync = cp.spawnSync, realExecSync = cp.execSync, realExecFileSync = cp.execFileSync;
   cp.spawn = (bin, args, opts) => {
     const proc = new EventEmitter();
     proc.pid = 90_000 + spawns.length;
+    proc.closed = false;
     spawns.push({ bin, args: [...args], opts, proc });
-    if (exitAfterMs != null) setTimeout(() => proc.emit('close', 0), exitAfterMs);
+    if (exitAfterMs != null) setTimeout(() => { proc.closed = true; proc.emit('close', 0); }, exitAfterMs);
     return proc;
   };
-  cp.spawnSync = (bin, args) => {
-    syncs.push({ bin, args: [...args] });
+  // EVERY synchronous child API is a recorded failure that also blocks like the real one. (The
+  // "call returns at once" checks below are event checks, not wall-clock bounds: FLAKY-TIMING.)
+  const syncTrap = (api) => (bin, args) => {
+    syncs.push({ api, bin, args: Array.isArray(args) ? [...args] : [] });
     const end = Date.now() + 150; while (Date.now() < end) { /* a real sync child blocks */ }
-    return { status: 0, stdout: '', stderr: '' };
+    return api === 'spawnSync' ? { status: 0, stdout: '', stderr: '' } : '';
   };
-  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; Object.defineProperty(process, 'platform', realPlatform); });
+  cp.spawnSync = syncTrap('spawnSync');
+  cp.execSync = syncTrap('execSync');
+  cp.execFileSync = syncTrap('execFileSync');
+  t.after(() => { cp.spawn = realSpawn; cp.spawnSync = realSync; cp.execSync = realExecSync; cp.execFileSync = realExecFileSync; Object.defineProperty(process, 'platform', realPlatform); });
   return { spawns, syncs };
 }
 
@@ -71,9 +77,12 @@ function fakeSession(pid, log) {
 
 test('F1 killTreesAsync: ONE async taskkill /T /F for every tree, never spawnSync, returns at once', async (t) => {
   const w = winWorld(t, { exitAfterMs: 20 });
-  const t0 = Date.now();
   const p = procKill.killTreesAsync([11, 22, 22, 0, -3, 1.5, 33]);
-  assert.ok(Date.now() - t0 < 50, 'the call itself does not block');
+  // The call itself does not block: it returned while its taskkill was still running (the fake
+  // closes on a 20 ms timer, which cannot fire inside a synchronous call, however busy the machine).
+  assert.equal(w.spawns.length, 1, 'taskkill started');
+  assert.equal(w.spawns[0].proc.closed, false, 'the call returned before its taskkill exited: it did not wait');
+  assert.deepEqual(w.syncs, [], 'no synchronous child API at all');
   await p;
   assert.equal(w.syncs.length, 0, 'no spawnSync');
   assert.equal(w.spawns.length, 1, 'one batched taskkill');
@@ -101,9 +110,11 @@ test('F1 PtyManager.killAllAsync: one batched sweep of every tree, ConPTY closed
   m.sessions.set('a', fakeSession(101, log));
   m.sessions.set('b', fakeSession(202, log));
   m.sessions.set('c', fakeSession(303, log));
-  const t0 = Date.now();
   const done = m.killAllAsync(1000);
-  assert.ok(Date.now() - t0 < 50, 'returns without blocking the main thread');
+  // Returns without blocking the main thread: its taskkill never exits (exitAfterMs null), so a
+  // call that waited for it could not have returned at all; and no synchronous child API ran.
+  assert.equal(w.spawns[0].proc.closed, false, 'returned while its taskkill is still running');
+  assert.deepEqual(w.syncs, [], 'no synchronous child API at all');
   assert.equal(m.sessions.size, 0, 'sessions forgotten at once');
   assert.equal(m.exitHandler, null, 'natural-exit teardown suppressed at once');
   assert.equal(w.spawns.length, 1);
@@ -183,7 +194,9 @@ test('F1 runQuitSteps: steps run concurrently, each timed, a hang is capped, a t
   ], 60);
   const took = Date.now() - t0;
   assert.deepEqual(started, ['fast', 'hang', 'boom'], 'all started together');
-  assert.ok(took >= 55 && took < 1000, `bounded by the cap (took ${took})`);
+  // The lower bound is a timer (the 60 ms cap) and so load-proof; an uncapped hang never settles
+  // at all (the test times out), so no upper wall-clock bound is needed (FLAKY-TIMING).
+  assert.ok(took >= 55, `bounded by the cap, not earlier (took ${took})`);
   assert.equal(r.capped, true);
   assert.equal(typeof r.steps.fast, 'number');
   assert.equal(r.steps.hang, 'pending');
@@ -191,9 +204,16 @@ test('F1 runQuitSteps: steps run concurrently, each timed, a hang is capped, a t
 });
 
 test('F1 runQuitSteps: settles as soon as every step does (the cap is a ceiling, not a wait)', async () => {
-  const t0 = Date.now();
-  const r = await runQuitSteps([{ name: 'a', run: () => Promise.resolve() }], 5_000);
-  assert.ok(Date.now() - t0 < 500);
+  // Event, not wall clock (FLAKY-TIMING): with a 60 s cap, a runQuitSteps that waited for its cap
+  // loses the race to a 10 s marker; one that settles when its steps do always wins it.
+  const WAITED = Symbol('waited-for-the-cap');
+  let marker;
+  const r = await Promise.race([
+    runQuitSteps([{ name: 'a', run: () => Promise.resolve() }], 60_000),
+    new Promise((res) => { marker = setTimeout(() => res(WAITED), 10_000); })
+  ]);
+  clearTimeout(marker);
+  assert.notEqual(r, WAITED, 'settled as soon as its step did, not at the cap');
   assert.equal(r.capped, false);
 });
 
