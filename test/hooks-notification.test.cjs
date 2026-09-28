@@ -34,6 +34,7 @@ require.cache[electron] = {
 const { HiveManager } = loadTs('src/main/hive.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 const { modelForHiveSpawn } = loadTs('src/main/config.ts');
+const { resolveSpawnArgs } = loadTs('src/shared/modelPin.ts');
 const CONFIG = { notifications: true };
 
 function tmpHome() {
@@ -114,10 +115,35 @@ test('notifications setting off suppresses the OS toast but the hook still resol
   assert.deepEqual(res, {}, 'the hook itself still resolves normally');
 });
 
+// MODEL-DEFAULT-CLI: with no picked model and no Settings default a Claude worker launches with NO
+// --model, so its first Status model is the CLI's own default: a BASELINE, not a switch
+// (src/shared/modelPin.ts). The model it moves to afterwards is the /model switch, and THAT is the
+// agent's restart-safe model (the next spawn's --model). This replaces a version of this test that
+// relied on the worker role tier (Sonnet 4.6) as the implicit baseline, a --model the spawn path no
+// longer adds.
 test('Status captures Claude model.id as the agent\'s restart-safe model', async (t) => {
   const { hive, fire } = await floor(t);
+  let humanAt = 0;
+  hive.setHumanInputSource(() => humanAt);
+  // Spawned on the CLI default: nothing requested, nothing launched with.
+  await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: hive.root() }, { spawnModel: {} });
+  await fire({ hook_event_name: 'Status', model: { id: 'claude-sonnet-5' } });
+  assert.equal(hive.lastModel('jim-1'), undefined, 'the CLI default is the baseline, never a pin');
+  assert.equal(hive.registry().agents['jim-1'].liveModel, 'claude-sonnet-5');
+
+  humanAt = Date.now() + 1000; // the human typed /model
   await fire({ hook_event_name: 'Status', model: { id: 'claude-opus-5-5[1m]' } });
   assert.equal(hive.lastModel('jim-1'), 'claude-opus-5-5[1m]');
+  assert.equal(hive.registry().agents['jim-1'].modelPinSource, 'user');
+  const agent = hive.registry().agents['jim-1'];
+  const r = resolveSpawnArgs(agent, [], { fallback: modelForHiveSpawn(agent, CONFIG) });
+  assert.deepEqual(r.args, ['--model', 'claude-opus-5-5[1m]'], 'the switch survives a restart');
+});
+
+test('a pre-MODEL-PINBACK entry with no app default: a Status model is not taken as a switch', async (t) => {
+  const { hive, fire } = await floor(t);
+  await fire({ hook_event_name: 'Status', model: { id: 'claude-opus-5-5[1m]' } });
+  assert.equal(hive.lastModel('jim-1'), undefined, 'no launch record and no default = unknown launch, no pin');
 });
 
 test('a Status report at the app default leaves no pin, so a later Settings default reaches respawn', async (t) => {
