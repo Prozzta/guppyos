@@ -20,25 +20,59 @@ const acted = async (rig, agentId, id) => (await rig.entry(agentId, id))?.state 
 
 // Unit tests: mail-surface "C1 latency rule (AGY)…", "C1 latency rule (Claude over http)…";
 // mail-epochs "§11.1 + Q8: a LATE surfacing is re-pended at Stop as mail-surface-late…".
-test('C1 hook-response latency past the limit (AGY pipe, a stalled main thread): mail-surface-late with transport and elapsed ms, then re-surfaced with the marker', T, async (t) => {
+// DETERMINISM (Dwight's audit, god 9b5fc7): C1 used to make the response late with a 3.2 s busy-wait
+// on the host's main thread. The AGY hook shim gives up 5 s after IT starts (AGY_HOOK_SHIM), so the
+// late block reached the CLI only if everything else fit in the ~1.8 s left: a wall-clock race that
+// failed in another runner. No stall between the 2.5 s limit and the 5 s cap is race-free, so:
+//  - C1: the response leaves at once and its flush is MEASURED 3.2 s after arrival (lateNextFlush);
+//  - C1b: a real main-thread stall PAST the shim's cap, where the outcome is certain (the shim is
+//    always gone): the block never reaches the CLI, and the mail comes back with the marker.
+test('C1 hook-response latency past the limit (AGY pipe, the flush measured 3.2 s after arrival): mail-surface-late with transport and elapsed ms, then re-surfaced with the marker', T, async (t) => {
   const rig = await startRig(t);
+  const diag = () => rig.diagnose('ag-1');
   await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
   const m = await rig.call('send', { to: 'ag-1', subject: 'c1', body: 'answered too late' });
-  await rig.call('stallNextHook', { id: 'ag-1', ms: 3_200, event: 'PreInvocation' });   // pipe limit: 5 s - min(5 s, 50%) = 2.5 s
+  await rig.call('lateNextFlush', { id: 'ag-1', ms: 3_200 });   // pipe limit: 5 s - min(5 s, 50%) = 2.5 s
   await rig.beat();
-  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'the (late) block still reached the CLI', timeoutMs: 30_000 });
-  await sleep(300);
+  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'the (late) block still reached the CLI', diag });
+  await waitFor(async () => (await rig.rows('mail-hook-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-hook-late at the flush', diag });
   assert.equal((await rig.entry('ag-1', m.id)).state, 'surfacing', 'a late response is never confirmed by latency');
   rig.cue('ag-1', { cue: 'stop' });
-  await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late' });
+  await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
   const row = (await rig.rows('mail-surface-late')).find((r) => r.ids.includes(m.id));
   assert.equal(row.transport, 'pipe');
-  assert.ok(row.latencyMs >= 2_500 && row.latencyMs < 6_000, `elapsed ${row.latencyMs} ms`);
+  assert.ok(row.latencyMs >= 3_200 && row.latencyMs < 6_000, `elapsed ${row.latencyMs} ms`);
   assert.equal((await rig.entry('ag-1', m.id)).state, 'delivered');
   await rig.beatUntil(() => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false, stepMs: 15_000 });
   assert.ok(rig.contexts('ag-1').filter((c) => c.ids.includes(m.id))[1].context.includes(REDELIVERED), 'with the marker');
   rig.cue('ag-1', { cue: 'stop' });
-  await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once in time' });
+  await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once in time', diag });
+  assert.equal(rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length, 2);
+});
+
+test('C1b a real main-thread stall past the AGY shim\'s own 5 s give-up: the block never reaches the CLI, the claim settles late, and the mail is re-surfaced with the marker and acted once', T, async (t) => {
+  const rig = await startRig(t);
+  const diag = () => rig.diagnose('ag-1');
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
+  const m = await rig.call('send', { to: 'ag-1', subject: 'c1b', body: 'the shim gave up' });
+  await rig.call('stallNextHook', { id: 'ag-1', ms: 6_000, event: 'PreInvocation' });
+  await rig.beat();
+  await waitFor(() => rig.hooks('ag-1', 'PreInvocation').length >= 1, { what: 'the PreInvocation hook returned', timeoutMs: 30_000, diag });
+  const h = rig.hooks('ag-1', 'PreInvocation')[0];
+  assert.equal(h.response, null, 'the shim exited with no output');
+  assert.ok(!rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), 'nothing reached the model');
+  await waitFor(async () => (await rig.rows('mail-hook-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-hook-late', diag });
+  assert.equal((await rig.entry('ag-1', m.id)).state, 'surfacing', 'never confirmed');
+  rig.cue('ag-1', { cue: 'stop' });
+  await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
+  const row = (await rig.rows('mail-surface-late')).find((r) => r.ids.includes(m.id));
+  assert.equal(row.transport, 'pipe');
+  assert.ok(row.latencyMs === null || row.latencyMs >= 5_000, `elapsed ${row.latencyMs} ms`);
+  assert.equal((await rig.entry('ag-1', m.id)).state, 'delivered');
+  await rig.beatUntil(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 're-surfaced', settle: false, stepMs: 15_000 });
+  assert.ok(rig.contexts('ag-1').find((c) => c.ids.includes(m.id)).context.includes(REDELIVERED), 'with the marker');
+  rig.cue('ag-1', { cue: 'stop' });
+  await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once', diag });
 });
 
 // Unit test: mail-surface "C2: roster + a 10k steer + mail: nothing past the budget, nothing surfacing; …".

@@ -450,6 +450,18 @@ async function main() {
     killPty: ({ id }) => { const p = ptyOf(id); const r = ptyManager.kill(p); f.teardownPty(p); return r; },
     hasPty: ({ id }) => !!f.ptyForAgent(id),
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
+    // C1 (deterministic lateness): the NEXT mail-claim settle of this agent is measured as if its
+    // response had flushed `ms` after the hook arrived. The response itself leaves at once, so it
+    // never races the provider shim's own give-up timer (the AGY shim exits 5 s after it starts).
+    // A test seam on the rig's own instance, like holdArchives; the product method runs unchanged.
+    lateNextFlush: ({ id, ms }) => {
+      const orig = hookServer.settleMailClaims;
+      hookServer.settleMailClaims = function lateOnce(claims, receivedAt, flushedAt) {
+        if (claims.some((c) => c.agentId === id)) { hookServer.settleMailClaims = orig; return orig.call(this, claims, receivedAt - ms, flushedAt); }
+        return orig.call(this, claims, receivedAt, flushedAt);
+      };
+      return true;
+    },
     holdArchives: ({ on }) => {
       // F2: freeze the harness `.done` rename AFTER the durable ledger write, and say so on disk,
       // so the driver can kill -9 this process exactly between the two (a test seam on the rig's

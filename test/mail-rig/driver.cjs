@@ -178,6 +178,30 @@ class Rig {
     process.stderr.write(`${lines.join('\n')}\n`);
   }
 
+  /**
+   * A failure dump for one agent (C1 and any waitFor given `diag`): its ledger entries, the mail
+   * and late rows, the wake diagnostics, and the stub's hook records WITH their timings and
+   * transports, prompts, contexts and turn ends.
+   */
+  async diagnose(agentId) {
+    const lines = [`----- rig diagnostics for ${agentId} (${this.sandbox})`];
+    const call = (cmd, args) => this.call(cmd, args, 5_000).catch((e) => ({ error: String(e) }));
+    const led = await call('ledger', { id: agentId });
+    for (const e of Object.values(led?.entries ?? {})) lines.push(`ledger ${e.id}: state=${e.state} epoch=${e.epoch ?? null} surfaceCount=${e.surfaceCount} redelivered=${e.redelivered} confirm=${e.confirmMethod ?? null}`);
+    const rows = await call('logRows', { n: 2000 });
+    for (const r of (Array.isArray(rows) ? rows : [])) {
+      if (r.agentId !== agentId || !/^mail/.test(String(r.kind))) continue;
+      lines.push(`row ${r.kind}${r.stage ? '/' + r.stage : ''} ${JSON.stringify({ ids: r.ids, epoch: r.epoch, reason: r.reason, transport: r.transport, latencyMs: r.latencyMs, limitMs: r.limitMs, hookKind: r.hookKind })}`);
+    }
+    const diags = await call('diags', {});
+    lines.push('wake: ' + (Array.isArray(diags) ? diags : []).filter((d) => d.agentId === agentId && !['enter', 'facts', 'schedule'].includes(d.stage)).map((d) => `${d.stage}:${d.why ?? d.outcome ?? d.event ?? ''}`).join(' '));
+    for (const r of this.transcript(agentId)) {
+      if (r.kind === 'hook') lines.push(`stub hook ${r.event} transport=${r.transport} exit=${r.exit} ms=${r.ms ?? null} t=${r.t ?? null} response=${r.response ? JSON.stringify(r.response).slice(0, 120) : null}`);
+      else if (['prompt', 'context', 'turn-end', 'cue', 'exit', 'host-gone'].includes(r.kind)) lines.push(`stub ${r.kind} ${JSON.stringify({ t: r.t, event: r.event, ids: r.ids, how: r.how, cue: r.cue?.cue })}`);
+    }
+    return lines.join('\n');
+  }
+
   // ——— the fake CLIs ———
 
   stubDir(agentId) { return path.join(this.rigDir, 'stubs', agentId); }
@@ -284,7 +308,7 @@ async function startRig(t) {
 }
 
 /** Poll `fn` until it returns a truthy value; fail naming `what` after `timeoutMs`. */
-async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condition' } = {}) {
+async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condition', diag = null } = {}) {
   const until = Date.now() + timeoutMs;
   let last;
   while (Date.now() < until) {
@@ -292,7 +316,10 @@ async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condit
     if (last && !(last instanceof Error)) return last;
     await sleep(intervalMs);
   }
-  throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}${last instanceof Error ? ` (last error: ${last.message})` : ''}`);
+  // `diag`: an async dump appended to the failure (e.g. () => rig.diagnose(agentId)).
+  let extra = '';
+  if (diag) { try { extra = `\n${await diag()}`; } catch (e) { extra = `\n(diagnostics failed: ${e})`; } }
+  throw new Error(`timed out after ${timeoutMs} ms waiting for ${what}${last instanceof Error ? ` (last error: ${last.message})` : ''}${extra}`);
 }
 
 const markersIn = (text) => [...String(text ?? '').matchAll(/\[hive-mail:([^\]]+)\]/g)].map((m) => m[1]);
