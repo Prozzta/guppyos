@@ -130,6 +130,7 @@ test('main wiring: every intent goes through toastFor + the setting gate; the ra
   const fnStart = main.indexOf('function capacityToast(');
   const fn = main.slice(fnStart, main.indexOf('\n}\n', fnStart));
   assert.match(fn, /return deliverCapacityToast\(toast, \{/);
-  assert.match(fn, /notificationsOn: \(\) => readConfig\(\)\.notifications === true/);
+  // Layer-b test infrastructure (MUNDER_HIDDEN, dev only): a hidden run never toasts; otherwise unchanged.
+  assert.match(fn, /notificationsOn: \(\) => !DEV_HIDDEN && readConfig\(\)\.notifications === true/);
   assert.ok(!/stateReason|->/.test(fn), 'the old raw "codex AVAILABLE -> LIMITED (REASON)" body is gone');
 });

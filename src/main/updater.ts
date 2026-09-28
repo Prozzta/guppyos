@@ -7,6 +7,7 @@ import { readConfig } from './config';
 import { DEFAULT_DROP_HTML } from '../shared/releaseDrop';
 import { reduceStatus, clampPercent, isNewer, installerUrl, releaseListFromBody, releaseOptionsFromNotes, REPO, type UpdateStatus } from '../shared/updateState';
 import { htmlToNoteText } from '../shared/releaseNotes';
+import { DEV_HIDDEN } from './devIsolation';
 
 /**
  * Auto-update from GitHub releases.
@@ -465,6 +466,7 @@ export function initAutoUpdater(getWebContents: () => WebContents | null): void 
     const href = typeof url === 'string' ? url : `https://github.com/${REPO}/releases/latest`;
     // Only ever open the project's releases page — this is not a generic opener.
     if (!href.startsWith(`https://github.com/${REPO}/`)) return { ok: false };
+    if (DEV_HIDDEN) return { ok: false };   // MUNDER_HIDDEN (dev only): a hidden run opens no browser
     // An asset URL means the badge's download click, not the notes link. It is
     // the only positive trace the manual path leaves, and it has to be written
     // by the build being REPLACED, so the version that reads it is the next one

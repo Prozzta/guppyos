@@ -28,6 +28,23 @@ test('devDataRoot is FIXED on win32 and ignores the environment (no MUNDER_DEV_D
   try { assert.equal(iso.devDataRoot(WIN), 'C:\\Dunder\\MunderDevData'); }
   finally { if (saved === undefined) delete process.env.MUNDER_DEV_DATA; else process.env.MUNDER_DEV_DATA = saved; }
   assert.equal(iso.devDataRoot('linux').endsWith('MunderDevData'), true);
+  // The removed MUNDER_DEV_DATA stays ignored even under MUNDER_DEV=1.
+  assert.equal(iso.devDataRoot(WIN, { MUNDER_DEV_DATA: 'D:\\x\\devdata' }, true), 'C:\\Dunder\\MunderDevData');
+});
+
+test('devDataRoot contract (layer b): FIXED unless the validated MUNDER_DEV_ROOT is present UNDER MUNDER_DEV', () => {
+  const FIXED = 'C:\\Dunder\\MunderDevData';
+  assert.equal(iso.fixedDevDataRoot(WIN), FIXED);
+  // Not under MUNDER_DEV: the override is ignored, whatever it says.
+  assert.equal(iso.devDataRoot(WIN, { MUNDER_DEV_ROOT: 'D:\\sandbox\\run1' }, false), FIXED);
+  // Under MUNDER_DEV, unset or blank: still the fixed root.
+  assert.equal(iso.devDataRoot(WIN, {}, true), FIXED);
+  assert.equal(iso.devDataRoot(WIN, { MUNDER_DEV_ROOT: '   ' }, true), FIXED);
+  // Under MUNDER_DEV, a valid absolute path: that root, normalised.
+  assert.equal(iso.devDataRoot(WIN, { MUNDER_DEV_ROOT: 'D:\\sandbox\\run1\\' }, true), 'D:\\sandbox\\run1');
+  // Under MUNDER_DEV, an invalid one THROWS rather than falling back to the fixed root.
+  assert.throws(() => iso.devDataRoot(WIN, { MUNDER_DEV_ROOT: 'relative\\dir' }, true), /refusing MUNDER_DEV_ROOT/);
+  assert.throws(() => iso.devDataRoot(WIN, { MUNDER_DEV_ROOT: 'C:\\Dunder\\hive\\x' }, true), /refusing MUNDER_DEV_ROOT/);
 });
 
 test('devPaths derive hive/palace/worktrees/userData under the root with a dev pipe marker', () => {

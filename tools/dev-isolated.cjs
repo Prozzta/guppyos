@@ -9,6 +9,8 @@
  *
  * Pass-through: extra args go to electron-vite (`npm run dev:isolated -- --help`).
  * The data root is fixed (C:\Dunder\MunderDevData on Windows); there is no override.
+ * The layer-b test seams (MUNDER_DEV_ROOT, MUNDER_HIDDEN) are REMOVED from the child env
+ * here: only test/tools/layer-b-run.cjs sets them, never an interactive dev session.
  */
 const { spawn } = require('node:child_process');
 const path = require('node:path');
@@ -27,6 +29,8 @@ const STABLE_ENV_PREFIXES = ['OTEL_'];
 const env = { ...process.env, MUNDER_DEV: '1' };
 const scrubbed = Object.keys(env).filter((k) => STABLE_ENV_KEYS.includes(k) || STABLE_ENV_PREFIXES.some((p) => k.startsWith(p)));
 for (const k of scrubbed) delete env[k];
+delete env.MUNDER_DEV_ROOT;
+delete env.MUNDER_HIDDEN;
 
 const isWin = process.platform === 'win32';
 const bin = path.join(__dirname, '..', 'node_modules', '.bin', isWin ? 'electron-vite.cmd' : 'electron-vite');

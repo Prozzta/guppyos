@@ -19,6 +19,7 @@ import type { HiveManager } from './hive';
 import { classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
+import { DEV_HIDDEN } from './devIsolation';
 import type { CircuitBreaker } from './breaker';
 import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
@@ -1831,7 +1832,8 @@ export class HookServer {
    *  setting. Only the OS toast is gated; the hive:hookEvent emit is always sent
    *  so avatars/UI stay live regardless. Best-effort: never throw into the hook. */
   private notify(title: string, body: string): void {
-    if (!this.getConfig().notifications) return;
+    // MUNDER_HIDDEN (dev only, layer-b test infrastructure): a hidden run shows no toast.
+    if (DEV_HIDDEN || !this.getConfig().notifications) return;
     try {
       if (!Notification.isSupported()) return;
       new Notification({ title, body }).show();

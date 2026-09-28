@@ -21,6 +21,10 @@ const os = require('node:os');
 const path = require('node:path');
 
 process.env.MUNDER_DEV = '1';
+// The layer-b seams are absent here: this file pins the FIXED root's clamp (the override has its
+// own tests in dev-hidden-root.test.cjs).
+delete process.env.MUNDER_DEV_ROOT;
+delete process.env.MUNDER_HIDDEN;
 const loadTs = require('./load-ts.cjs');
 
 const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-devcfg-'));
@@ -34,6 +38,12 @@ const onDisk = () => JSON.parse(fs.readFileSync(path.join(userData, 'config.json
 
 test('DEV_ISOLATION is on for this process', () => {
   assert.equal(iso.DEV_ISOLATION, true);
+});
+
+test('with no MUNDER_DEV_ROOT the clamp target is the FIXED dev root (the mission contract)', () => {
+  assert.equal(iso.devDataRoot(), iso.fixedDevDataRoot());
+  assert.equal(DEV_HOME, iso.fixedDevDataRoot());
+  assert.equal(iso.DEV_HIDDEN, false);
 });
 
 test('wizard path: an out-of-tree harnessHome is clamped ON DISK, not only on read', () => {

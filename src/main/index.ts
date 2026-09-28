@@ -19,8 +19,8 @@ import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
-  DEV_ISOLATION, devDataRoot, devPaths, stableForbiddenPaths, checkIsolation,
-  scrubInheritedEnv, devWindowTitle
+  DEV_ISOLATION, DEV_HIDDEN, DEV_ROOT_ENV, resolveDevDataRoot, fixedDevDataRoot, devPaths,
+  stableForbiddenPaths, checkIsolation, devRootOverrideViolations, scrubInheritedEnv, devWindowTitle
 } from './devIsolation';
 import { isSafeCommandName } from './shellEnv';
 import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
@@ -163,10 +163,24 @@ if (DEV_ISOLATION) {
     const raw = JSON.parse(readFileSync(join(stableUserData, 'config.json'), 'utf8')) as { harnessHome?: unknown };
     if (typeof raw.harnessHome === 'string') stableHome = raw.harnessHome;
   } catch { /* no Stable config readable — the literal list still applies */ }
-  const root = devDataRoot();
+  // MUNDER_DEV_ROOT (layer-b test infrastructure): the one validated relocation of the
+  // whole root. A refused value EXITS here; it never falls back to the fixed root.
+  const rootRes = resolveDevDataRoot({ liveUserData: stableUserData });
+  if (!rootRes.ok) {
+    console.error(`[dev-isolation] REFUSING TO START — ${DEV_ROOT_ENV}="${rootRes.value}" ${rootRes.reason}`);
+    process.exit(97);
+  }
+  const root = rootRes.root;
   const paths = devPaths(root);
   devStableForbidden = stableForbiddenPaths({ defaultUserData: stableUserData, stableHarnessHome: stableHome });
-  const violations = checkIsolation(paths, devStableForbidden);
+  // An overridden root must not collide with the FIXED dev root either (its data, its
+  // pipe, its single-instance lock under its userData): forbid it from here on too, so
+  // the ready-time live check below re-verifies against it.
+  if (rootRes.override) devStableForbidden.push(fixedDevDataRoot());
+  const violations = [
+    ...checkIsolation(paths, devStableForbidden),
+    ...(rootRes.override ? devRootOverrideViolations(paths) : [])
+  ];
   if (violations.length) {
     console.error('[dev-isolation] REFUSING TO START — resolved dev paths overlap Stable:\n  ' + violations.join('\n  '));
     process.exit(97);
@@ -194,6 +208,7 @@ if (DEV_ISOLATION) {
   const scrubbed = scrubInheritedEnv(process.env);
   console.warn(
     `[dev-isolation] MUNDER_DEV=1 — userData=${paths.userData} harnessHome=${paths.harnessHome} pipe=${paths.pipeName}` +
+    (rootRes.override ? ` (root from ${DEV_ROOT_ENV})` : '') + (DEV_HIDDEN ? ' (hidden run: no window is shown)' : '') +
     (scrubbed.length ? ` (scrubbed inherited Stable env: ${scrubbed.join(', ')})` : '')
   );
 }
@@ -1805,7 +1820,8 @@ function reengageGod(digest: string): void {
  */
 function capacityToast(toast: CapacityToast | null): NoticeDelivery {
   return deliverCapacityToast(toast, {
-    notificationsOn: () => readConfig().notifications === true,
+    // MUNDER_HIDDEN (dev only): a hidden run never puts a toast on the desktop.
+    notificationsOn: () => !DEV_HIDDEN && readConfig().notifications === true,
     supported: () => Notification.isSupported(),
     show: (t) => { new Notification({ title: t.title, body: t.body }).show(); }
   });
@@ -1906,7 +1922,7 @@ function pushAgentImpact(): void {
 
 /** A native toast for breaker constrain/stop, gated on the notifications setting. */
 function breakerToast(title: string, body: string): void {
-  if (!readConfig().notifications) return;
+  if (DEV_HIDDEN || !readConfig().notifications) return;   // MUNDER_HIDDEN: no toast
   try { if (Notification.isSupported()) new Notification({ title, body }).show(); }
   catch { /* unsupported platform */ }
 }
@@ -2931,13 +2947,13 @@ const pendingHires: HireManifest[] = [];
 let rendererReadyForHires = false;
 
 function deliverHire(manifest: HireManifest): void {
+  // MUNDER_HIDDEN (dev only): never show or focus the window of a hidden run.
   if (rendererReadyForHires && mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show();
-    mainWindow.focus();
+    if (!DEV_HIDDEN) { mainWindow.show(); mainWindow.focus(); }
     mainWindow.webContents.send('hire:import', manifest);
   } else {
     pendingHires.push(manifest);
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    if (!DEV_HIDDEN && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
       mainWindow.focus();
     }
@@ -2994,7 +3010,7 @@ if (!gotInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', (_evt, argv) => {
-    if (mainWindow) {
+    if (mainWindow && !DEV_HIDDEN) {   // MUNDER_HIDDEN: never restore or focus
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
@@ -3019,6 +3035,7 @@ ipcMain.handle('hire:drainPending', () => {
 // IPC: "import hires…" file picker in the Add-Agent modal. Every selected file
 // is validated independently; valid neighbours survive an invalid manifest.
 ipcMain.handle('hire:openFile', async () => {
+  if (DEV_HIDDEN) return { ok: false, manifests: [], errors: [], error: 'cancelled' };   // MUNDER_HIDDEN: no dialog
   const res = await dialog.showOpenDialog({
     title: 'Import hire manifests',
     filters: [{ name: 'Hire manifest', extensions: ['json'] }],
@@ -3141,7 +3158,10 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   }
 
 
-  win.once('ready-to-show', () => win.show());
+  // MUNDER_HIDDEN=1 under MUNDER_DEV=1 (layer-b test infrastructure): the window is
+  // built with show:false and is NEVER shown, so it has no taskbar button either. CDP
+  // drives it; backgroundThrottling:false (above) keeps its timers running unthrottled.
+  win.once('ready-to-show', () => { if (!DEV_HIDDEN) win.show(); });
   // MUNDER_DEV=1: the renderer's <title> (index.html) replaces the BrowserWindow
   // `title` option as soon as the page loads, so the DEV marker must be applied
   // to every title the page sets — that is the whole point of the marker
@@ -3160,7 +3180,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   // release body arrives here. http(s) only — an unguarded openExternal will
   // happily launch file://, or a registered custom scheme, on the user's machine.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+    if (!DEV_HIDDEN && /^https?:\/\//i.test(url)) shell.openExternal(url);   // MUNDER_HIDDEN: no browser
     return { action: 'deny' };
   });
 
@@ -3173,7 +3193,8 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
       // via a self-contained native dialog (no renderer modal). Confirming lets
       // the window close; its PTYs are stopped in the 'closed' handler.
       const owned = ptyManager.countByOwner(wc);
-      if (owned > 0) {
+      // MUNDER_HIDDEN: no dialog; whoever closes a hidden run's floor owns that decision.
+      if (owned > 0 && !DEV_HIDDEN) {
         const choice = dialog.showMessageBoxSync(win, {
           type: 'warning',
           buttons: ['Close floor', 'Cancel'],
@@ -3193,7 +3214,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     // Jim RR-164 (2): the quit warning is a modal in the renderer; if that renderer is gone
     // (crashed, recovery given up), ask natively instead of waiting on nothing.
     if (rendererGone(wc)) { quitOrCancelNatively(count, win); return; }
-    win.focus();
+    if (!DEV_HIDDEN) win.focus();   // MUNDER_HIDDEN: never focus
     wc.send('app:closeRequested', { ptyCount: count });
   });
 
@@ -3990,6 +4011,7 @@ ipcMain.on('app:readClipboardSync', (evt) => {
 ipcMain.handle('dialog:chooseFolder', async (evt) => {
   const win = BrowserWindow.fromWebContents(evt.sender);
   if (!win) return { ok: false as const, error: 'no window' };
+  if (DEV_HIDDEN) return { ok: false as const, error: 'cancelled' };   // MUNDER_HIDDEN: no dialog
   const res = await dialog.showOpenDialog(win, {
     properties: ['openDirectory', 'createDirectory'],
     title: 'Pick a folder'
@@ -4281,6 +4303,7 @@ ipcMain.handle('fs:revealPath', async (_evt, p: unknown) => {
   if (typeof p !== 'string' || !p.length || p.length > 4096 || p.includes('\0')) {
     return { ok: false, error: 'bad request' };
   }
+  if (DEV_HIDDEN) return { ok: false, error: 'hidden run' };   // MUNDER_HIDDEN: no Explorer window
   const st = await statAbs(p);
   if (!st.exists) return { ok: false, error: 'not found' };
   if (st.isFile) { shell.showItemInFolder(st.path); return { ok: true }; }
@@ -4558,6 +4581,7 @@ ipcMain.handle('skills:reveal', (_evt, path: unknown) => {
   const inRoot = skillRoots.some((r) => target.startsWith(resolve(r) + sep))
     || (readConfig().registeredRepos ?? []).some((c) => target.startsWith(resolve(c) + sep));
   if (!inRoot) return { ok: false, error: 'outside a managed skills directory' };
+  if (DEV_HIDDEN) return { ok: false, error: 'hidden run' };   // MUNDER_HIDDEN: no Explorer window
   shell.showItemInFolder(target);
   return { ok: true };
 });
@@ -4669,6 +4693,7 @@ ipcMain.handle('kg:ingestFiles', async (_evt, payload: unknown) => {
 ipcMain.handle('kg:addFiles', async (evt) => {
   const win = BrowserWindow.fromWebContents(evt.sender);
   if (!win) return { ok: false as const, error: 'no window' };
+  if (DEV_HIDDEN) return { ok: false as const, error: 'cancelled' };   // MUNDER_HIDDEN: no dialog
   const res = await dialog.showOpenDialog(win, {
     properties: ['openFile', 'multiSelections'],
     title: 'Add documents to the Knowledge Graph'
@@ -4693,6 +4718,7 @@ ipcMain.handle('kg:addFiles', async (evt) => {
 ipcMain.handle('dialog:attachFiles', async (evt) => {
   const win = BrowserWindow.fromWebContents(evt.sender);
   if (!win) return { ok: false as const, error: 'no window' };
+  if (DEV_HIDDEN) return { ok: false as const, error: 'cancelled' };   // MUNDER_HIDDEN: no dialog
   const res = await dialog.showOpenDialog(win, {
     properties: ['openFile', 'multiSelections'],
     title: 'Attach images or files',
@@ -5363,6 +5389,7 @@ ipcMain.handle('app:openExternal', async (_evt, url: unknown) => {
   if (typeof url !== 'string' || !/^(x-apple\.systempreferences:|https:\/\/)/.test(url)) {
     return { ok: false, error: 'blocked url' };
   }
+  if (DEV_HIDDEN) return { ok: false, error: 'hidden run' };   // MUNDER_HIDDEN: no browser
   await shell.openExternal(url);
   return { ok: true };
 });
@@ -5734,7 +5761,8 @@ const completionWatcher = initCompletionWatcher({
       return [];
     }
   },
-  onNotify: (evt) => { try { if (Notification.isSupported()) new Notification({ title: 'Michael', body: evt.summary }).show(); } catch { /* best-effort */ } }
+  // MUNDER_HIDDEN (dev only): no toast from a hidden run.
+  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: 'Michael', body: evt.summary }).show(); } catch { /* best-effort */ } }
 });
 
 registerRealtimeActionIpc({
@@ -6607,7 +6635,7 @@ app.whenReady().then(() => {
     if (violations.length) {
       const msg = 'Refusing to start: resolved DEV paths overlap the Stable installation.\n\n' + violations.join('\n');
       console.error('[dev-isolation] ' + msg);
-      try { dialog.showErrorBox('Munder Difflin DEV — isolation guard', msg); } catch { /* headless */ }
+      if (!DEV_HIDDEN) { try { dialog.showErrorBox('Munder Difflin DEV — isolation guard', msg); } catch { /* headless */ } }
       allowQuit = true;
       app.exit(97);
       return;
@@ -6776,7 +6804,8 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
       row('render-recovery-stopped', { streak: decision.streak });
       // Jim RR-164 (2): the dialog can actually quit. The window's own quit warning lives in its
       // (dead) renderer, so X / Ctrl+Q would wait on nothing; "Quit now" runs the teardown here.
-      void dialog.showMessageBox({
+      // MUNDER_HIDDEN: no dialog; the row above is the record, and the agents keep running.
+      if (!DEV_HIDDEN) void dialog.showMessageBox({
         type: 'error',
         title: 'Munder Difflin',
         message: 'The app window keeps crashing, so it will not be restored again.',
@@ -6893,6 +6922,9 @@ function quitOrCancelNatively(ptyCount: number, parent: BrowserWindow | null): v
 
 /** Jim RR-164 (2): the native stand-in for the renderer's quit warning. True = quit. */
 function confirmQuitNatively(ptyCount: number, parent: BrowserWindow | null): boolean {
+  // MUNDER_HIDDEN (dev only): nobody can answer a dialog in a hidden run, and whoever asked
+  // it to quit owns it, so the answer is quit (no dialog is shown).
+  if (DEV_HIDDEN) return true;
   const opts: Electron.MessageBoxSyncOptions = {
     type: 'warning',
     buttons: ['Quit and stop agents', 'Cancel'],
@@ -6951,7 +6983,7 @@ app.on('before-quit', (e) => {
   e.preventDefault();
   if (mainWindow) {
     if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
-    mainWindow.focus();
+    if (!DEV_HIDDEN) mainWindow.focus();   // MUNDER_HIDDEN: never focus
     mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
   } else quitOrCancelNatively(count, null);
 });

@@ -59,7 +59,7 @@ const PROVIDER_HOMES = ['C:\\Users\\FiercePC\\.claude', 'C:\\Users\\FiercePC\\.c
 /** Everything the code under test, a mutant of it, or a provider session can put in the
  *  way. Removed before a killer runs; restored after, whatever the killer did to them. */
 const AMBIENT = ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH',
-  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'MUNDER_DEV', 'MUNDER_DEV_DATA'];
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'MUNDER_DEV', 'MUNDER_DEV_DATA', 'MUNDER_DEV_ROOT', 'MUNDER_HIDDEN'];
 function hermetic(fn) {
   const saved = Object.fromEntries(AMBIENT.map((k) => [k, process.env[k]]));
   for (const k of AMBIENT) delete process.env[k];

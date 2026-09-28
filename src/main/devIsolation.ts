@@ -93,11 +93,107 @@ const STABLE_LITERALS_WIN32 = [
   'C:\\Dunder\\tunnels.json'
 ];
 
-/** The dev data root: FIXED by the mission contract (no environment override —
- *  a relocatable root was removed at Dwight's audit of 0d1441db). Windows uses
- *  the mission's dedicated location; other platforms `~/MunderDevData`. */
-export function devDataRoot(platform: NodeJS.Platform = process.platform): string {
+/** The dev data root the mission contract FIXES: Windows uses the mission's
+ *  dedicated location; other platforms `~/MunderDevData`. The old unconditional
+ *  `MUNDER_DEV_DATA` override (relative paths allowed, honoured even without
+ *  MUNDER_DEV, nothing refused) was removed at Dwight's audit of 0d1441db and
+ *  stays removed: `MUNDER_DEV_DATA` is ignored. */
+export function fixedDevDataRoot(platform: NodeJS.Platform = process.platform): string {
   return platform === 'win32' ? 'C:\\Dunder\\MunderDevData' : join(homedir(), 'MunderDevData');
+}
+
+/** ZT-I1-MAIL layer (b), test infrastructure: the ONE explicit, validated per-run
+ *  relocation of the whole dev root (userData, hive, harness home, single-instance
+ *  lock and pipe all derive from it). Honoured only under MUNDER_DEV=1. */
+export const DEV_ROOT_ENV = 'MUNDER_DEV_ROOT';
+/** ZT-I1-MAIL layer (b), test infrastructure: a hidden run (no window is ever shown,
+ *  focused or restored; no toast, dialog or external app). Honoured only under MUNDER_DEV=1. */
+export const DEV_HIDDEN_ENV = 'MUNDER_HIDDEN';
+
+export type DevRootResolution =
+  | { ok: true; root: string; override: boolean }
+  | { ok: false; value: string; reason: string };
+
+/**
+ * The dev root in force. Without MUNDER_DEV=1 the environment is NOT READ AT ALL (a
+ * packaged/Stable run can never be relocated): the fixed root comes back, and it is
+ * never used there anyway. Under MUNDER_DEV=1 with `MUNDER_DEV_ROOT` unset or blank,
+ * the fixed root (the mission contract, unchanged). With it set, the value must be:
+ *   - an absolute path (on Windows a drive-letter path: no relative, drive-relative,
+ *     rooted-without-drive or UNC form), without NUL;
+ *   - neither equal to, inside, nor containing the fixed dev root, a Stable literal
+ *     (C:\Dunder\hive, palace, worktrees, roster ...) or the live userData.
+ * Anything else is a refusal (`ok:false`), which the bootstrap turns into a loud exit:
+ * a bad override never falls back to the fixed root, because a run that asked for a
+ * sandbox must not quietly land in MunderDevData.
+ */
+export function resolveDevDataRoot(opts: {
+  env?: NodeJS.ProcessEnv;
+  dev?: boolean;
+  platform?: NodeJS.Platform;
+  /** Electron's default userData (Stable's), when known (the bootstrap passes it). */
+  liveUserData?: string | null;
+} = {}): DevRootResolution {
+  const platform = opts.platform ?? process.platform;
+  const fixed = fixedDevDataRoot(platform);
+  if (!(opts.dev ?? DEV_ISOLATION)) return { ok: true, root: fixed, override: false };
+  const env = opts.env ?? process.env;
+  const raw = typeof env[DEV_ROOT_ENV] === 'string' ? (env[DEV_ROOT_ENV] as string).trim() : '';
+  if (!raw) return { ok: true, root: fixed, override: false };
+  const refuse = (reason: string): DevRootResolution => ({ ok: false, value: raw, reason });
+  if (raw.includes('\0')) return refuse('contains NUL');
+  const lib = platform === 'win32' ? win32 : posix;
+  if (platform === 'win32' ? !/^[A-Za-z]:[\\/]/.test(raw) : !posix.isAbsolute(raw)) {
+    return refuse('not an absolute path');
+  }
+  let root = lib.resolve(raw);
+  while (root.length > 3 && (root.endsWith('\\') || root.endsWith('/'))) root = root.slice(0, -1);
+  const forbidden = [fixed, ...(platform === 'win32' ? STABLE_LITERALS_WIN32 : [])];
+  if (opts.liveUserData) forbidden.push(opts.liveUserData);
+  for (const f of forbidden) {
+    if (isInside(root, f, platform)) return refuse(`equals or lies inside "${f}"`);
+    if (isInside(f, root, platform)) return refuse(`contains "${f}"`);
+  }
+  return { ok: true, root, override: true };
+}
+
+/** The dev data root in force (see resolveDevDataRoot). Throws on a refused
+ *  override: the bootstrap has already exited 97 on one, so reaching this with a
+ *  bad value is a bug, and throwing beats silently using the fixed root. */
+export function devDataRoot(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  dev: boolean = DEV_ISOLATION
+): string {
+  const r = resolveDevDataRoot({ env, dev, platform });
+  if (!r.ok) throw new Error(`[dev-isolation] refusing ${DEV_ROOT_ENV}="${r.value}": ${r.reason}`);
+  return r.root;
+}
+
+/** True only for a hidden dev run: MUNDER_DEV=1 AND MUNDER_HIDDEN=1. Without
+ *  MUNDER_DEV the environment is not read. */
+export function hiddenRun(env: NodeJS.ProcessEnv = process.env, dev: boolean = DEV_ISOLATION): boolean {
+  if (!dev) return false;
+  return env[DEV_HIDDEN_ENV] === '1';
+}
+
+/** Read once at load, like DEV_ISOLATION. */
+export const DEV_HIDDEN: boolean = hiddenRun();
+
+/** An override root must not reach the fixed dev root's pipe (the pipe id hashes
+ *  the hive-root STRING, so this is checked on top of the directory checks). */
+export function devRootOverrideViolations(
+  resolved: ResolvedPaths,
+  platform: NodeJS.Platform = process.platform
+): string[] {
+  const fixedPipe = devPaths(fixedDevDataRoot(platform), platform).pipeName;
+  const cmp = (s: string) => (platform === 'win32' ? s.toLowerCase() : s);
+  const out: string[] = [];
+  if (cmp(resolved.pipeName) === cmp(fixedPipe)) out.push(`pipe "${resolved.pipeName}" equals the fixed dev root's pipe`);
+  for (const [name, p] of [['userData', resolved.userData], ['hiveRoot', resolved.hiveRoot], ['harnessHome', resolved.harnessHome]] as const) {
+    if (isInside(p, fixedDevDataRoot(platform), platform)) out.push(`${name} "${p}" is inside the fixed dev root`);
+  }
+  return out;
 }
 
 /** Electron userData for the dev build: `<root>/userData`. */
