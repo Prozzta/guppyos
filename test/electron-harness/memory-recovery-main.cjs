@@ -50,7 +50,8 @@ writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>memrecovery</ti
 const result = { steps: [], ok: false };
 const note = (s) => { result.steps.push({ t: Date.now(), ...s }); };
 const finish = (extra = {}) => { Object.assign(result, extra); process.stdout.write(`${MARKER}${JSON.stringify(result)}\n`); app.exit(0); };
-setTimeout(() => finish({ error: 'timeout' }), 90_000).unref?.();
+// Hang guards only (FLAKY-170): generous, since a saturated machine stretched this run to ~125 s.
+setTimeout(() => finish({ error: 'timeout' }), 400_000).unref?.();
 
 let owner = null;
 let loads = 0;
@@ -64,7 +65,7 @@ const waiters = [];
 // An event that arrives BEFORE its waiter is registered is kept, not lost: under a busy machine
 // the page can report 'got3' before the harness awaits it (that race once failed the suite).
 const early = [];
-const waitFor = (name, pred = () => true, ms = 30_000) => new Promise((resolve, reject) => {
+const waitFor = (name, pred = () => true, ms = 180_000) => new Promise((resolve, reject) => {
   const hit = early.findIndex((e) => e.name === name && pred(e.data));
   if (hit >= 0) { const [e] = early.splice(hit, 1); resolve(e.data); return; }
   const w = { name, pred, resolve };

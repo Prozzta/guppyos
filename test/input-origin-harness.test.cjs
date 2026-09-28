@@ -18,7 +18,7 @@ const { runScenario } = require('./electron-harness/run.cjs');
 const scenario = join(__dirname, 'electron-harness', 'scenarios', 'input-origin.ts');
 
 test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic paste, self-test, mirror', async () => {
-  const r = await runScenario(scenario, { timeoutMs: 60_000 });
+  const r = await runScenario(scenario, { timeoutMs: 300_000 });
   assert.equal(r.ok, true, `scenario failed: ${r.error ?? ''}`);
   assert.equal(r.opened, true, 'the terminal was really opened');
 

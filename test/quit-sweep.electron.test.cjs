@@ -88,7 +88,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       // Hung fixture: reap it (and anything it spawned) so the TEST never leaks.
       try { execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { timeout: 10_000 }); } catch { /* gone */ }
       resolve('timeout');
-    }, 60_000);
+    }, 300_000); // a HANG guard (FLAKY-170: generous; a saturated machine stretches the fixture past a minute)
     child.on('exit', (code) => { clearTimeout(timeout); resolve(code); });
   });
 

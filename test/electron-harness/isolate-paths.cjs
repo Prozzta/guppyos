@@ -26,6 +26,25 @@ function inside(dir, root) {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
+/**
+ * FLAKY-170 (Andy): a harness window is HIDDEN, so Chromium treats its renderer as a background
+ * tab: it drops the renderer process to background priority (Windows priority 4) and throttles its
+ * timers. Under a saturated machine that starves the renderer outright - measured under 34 CPU
+ * hogs: 15 harness renderers at priority 4 with 0-0.8 s of CPU over 130 s, while the tests waited
+ * on them until their hang guards fired. A test's hidden window is the foreground work of that
+ * test, not a background tab, so it keeps normal scheduling. Nothing under test depends on
+ * backgrounding (the app's own windows are visible). Must run before 'ready'; every harness main
+ * calls isolateAppPaths at the top, which calls this.
+ */
+function keepRenderersScheduled(app) {
+  if (!app.commandLine) return; // a unit test's fake app
+  // disable-gpu too: a hidden harness window draws nothing on screen, and under the same load
+  // dozens of concurrent GPU-process start-ups were a large share of the stalled launches.
+  for (const sw of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows', 'disable-gpu']) {
+    app.commandLine.appendSwitch(sw);
+  }
+}
+
 function isolateAppPaths(app, sandbox, opts = {}) {
   if (!sandbox) {
     process.stderr.write('harness: refusing to run without a sandbox (HARNESS-CRASHPAD)\n');
@@ -47,6 +66,7 @@ function isolateAppPaths(app, sandbox, opts = {}) {
     process.stderr.write(`harness: ${outside.join(', ')} resolved outside the sandbox (HARNESS-CRASHPAD)\n`);
     process.exit(2);
   }
+  keepRenderersScheduled(app);
   if (opts.reporter !== false) {
     require('electron').crashReporter.start({ uploadToServer: false, submitURL: '', compress: false });
   }

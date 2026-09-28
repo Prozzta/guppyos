@@ -28,7 +28,7 @@ const { runScenario } = require('./electron-harness/run.cjs');
 
 const scenario = path.join(__dirname, 'electron-harness', 'scenarios', 'auto-submit-fusion.ts');
 let run = null;
-const result = () => (run ??= runScenario(scenario, { timeoutMs: 90_000 }));
+const result = () => (run ??= runScenario(scenario, { timeoutMs: 300_000 }));
 
 test('the scenario ran, every terminal rendered, and both mirrors ARRIVED through the production path', async () => {
   const r = await result();

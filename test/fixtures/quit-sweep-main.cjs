@@ -50,7 +50,7 @@ function descendantsOf(root) {
   const raw = execFileSync('powershell.exe', [
     '-NoProfile', '-Command',
     'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'
-  ], { encoding: 'utf8', timeout: 30_000, windowsHide: true });
+  ], { encoding: 'utf8', timeout: 120_000, windowsHide: true });
   const byParent = new Map();
   for (const row of JSON.parse(raw)) {
     const list = byParent.get(row.ParentProcessId) ?? [];
@@ -72,7 +72,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Belt-and-braces: if anything below wedges, die loudly instead of hanging the
 // outer test until its own timeout. app.exit() on the happy path preempts this.
-setTimeout(() => bail(4, 'fixture timed out'), 45_000);
+// FLAKY-170: generous hang guards - under a saturated machine a PowerShell/WMI query alone took > 30 s.
+setTimeout(() => bail(4, 'fixture timed out'), 240_000);
 
 // Mirror src/main/index.ts's quit-adjacent handler set. Their PRESENCE matters:
 // a registered window-all-closed listener suppresses Electron's own
@@ -136,7 +137,8 @@ app.whenReady().then(async () => {
 
   // Wait until the grandchild exists — killing a tree of one proves nothing.
   let pids = [];
-  for (let i = 0; i < 30 && pids.length < 2; i++) {
+  const growDeadline = Date.now() + 120_000;
+  while (pids.length < 2 && Date.now() < growDeadline) {
     await sleep(500);
     pids = [rootPid, ...descendantsOf(rootPid)];
   }

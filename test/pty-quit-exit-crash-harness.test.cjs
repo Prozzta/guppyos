@@ -46,7 +46,7 @@ function quit(mode) {
 // opt-in evidence run (MD_EXITCRASH_REPRO=1), never a suite assertion (0-failure gate: no tests
 // that depend on winning a race). In the harness it reproduces INTERMITTENTLY (0xC0000005 + a dump
 // in 1 of 2 isolated runs); the deterministic evidence is the real app (Jim, EXIT-CRASH-WHY: +207 ms).
-test('EXIT-CRASH: a quit with 4 real ConPTYs exits cleanly with NO crash dump, after every exit arrived', { timeout: 120_000, skip: process.platform !== 'win32' ? 'ConPTY is win32-only' : false }, async () => {
+test('EXIT-CRASH: a quit with 4 real ConPTYs exits cleanly with NO crash dump, after every exit arrived', { timeout: 600_000, skip: process.platform !== 'win32' ? 'ConPTY is win32-only' : false }, async () => {
   const after = await quit('new');
   console.log(`new: exit ${after.code}, ${after.dumps} dump(s), ${after.r && after.r.ms} ms, pending ${after.r && after.r.pending}`);
   assert.equal(after.dumps, 0, 'no crash dump');
@@ -54,7 +54,7 @@ test('EXIT-CRASH: a quit with 4 real ConPTYs exits cleanly with NO crash dump, a
   assert.equal(after.r && after.r.pending, 0, 'every exit arrived before app.exit');
 });
 
-test('EXIT-CRASH evidence (opt-in): the pre-fix order crashes', { timeout: 120_000, skip: process.platform !== 'win32' || process.env.MD_EXITCRASH_REPRO !== '1' ? 'opt-in: MD_EXITCRASH_REPRO=1 (a race, not a gate)' : false }, async () => {
+test('EXIT-CRASH evidence (opt-in): the pre-fix order crashes', { timeout: 600_000, skip: process.platform !== 'win32' || process.env.MD_EXITCRASH_REPRO !== '1' ? 'opt-in: MD_EXITCRASH_REPRO=1 (a race, not a gate)' : false }, async () => {
   const before = await quit('old');
   console.log(`old: exit ${before.code}, ${before.dumps} dump(s)`);
   assert.ok(before.dumps >= 1 || before.code !== 0, `the pre-fix order crashed (exit ${before.code}, ${before.dumps} dumps)`);

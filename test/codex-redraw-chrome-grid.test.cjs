@@ -27,7 +27,7 @@ const { readSource, codeOnly } = require('./read-source.cjs');
 
 const scenario = path.join(__dirname, 'electron-harness', 'scenarios', 'terminal-chrome-grid.tsx');
 let run = null;
-const result = () => (run ??= runScenario(scenario, { timeoutMs: 120_000 }));
+const result = () => (run ??= runScenario(scenario, { timeoutMs: 300_000 }));
 
 test('RENDERED: the terminal keeps its exact height through every control and composer state', async () => {
   const r = await result();
@@ -83,7 +83,7 @@ test('STATIC: AgentDetailPanel error banner and the composer chrome are grid-sta
 // ─── R-1 (Jim's audit of 6f6aa2e0): the floating error must not trap clicks, and must clear ───
 const errScenario = path.join(__dirname, 'electron-harness', 'scenarios', 'detail-panel-error-overlay.tsx');
 let errRun = null;
-const errResult = () => (errRun ??= runScenario(errScenario, { timeoutMs: 120_000 }));
+const errResult = () => (errRun ??= runScenario(errScenario, { timeoutMs: 300_000 }));
 
 test('RENDERED R-1: a failed "open terminal" floats its error WITHOUT taking the operator controls\' clicks, and clears', async () => {
   const r = await errResult();

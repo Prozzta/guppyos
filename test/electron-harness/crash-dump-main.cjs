@@ -34,20 +34,37 @@ const load = (rel) => {
 };
 const D = load('crashDumps.ts');
 
-const start = withReporter ? D.startLocalCrashReporter(crashReporter) : null;
+// FLAKY-170 (Andy): what start() DOES on main, measured load-independently - its CPU time and every
+// synchronous fs call it makes - next to the wall time (which a saturated machine stretches to
+// seconds: one sample measured 7080 ms, with no defect).
+const SYNC_FS = ['readFileSync', 'readdirSync', 'statSync', 'lstatSync', 'existsSync', 'openSync', 'readSync', 'writeFileSync', 'unlinkSync', 'rmSync', 'mkdirSync', 'copyFileSync', 'renameSync', 'accessSync'];
+const startSyncFs = {};
+let startCpuMs = null;
+let start = null;
+if (withReporter) {
+  const fsMod = require('node:fs');
+  const real = {};
+  for (const k of SYNC_FS) { real[k] = fsMod[k]; fsMod[k] = function (...a) { startSyncFs[k] = (startSyncFs[k] || 0) + 1; return real[k].apply(this, a); }; }
+  const c0 = process.cpuUsage();
+  try { start = D.startLocalCrashReporter(crashReporter); } finally { Object.assign(fsMod, real); }
+  const c = process.cpuUsage(c0);
+  startCpuMs = (c.user + c.system) / 1000;
+}
 const finish = (r) => { process.stdout.write(`${MARKER}${JSON.stringify(r)}\n`); app.exit(0); };
-setTimeout(() => finish({ ok: false, error: 'timeout' }), 45_000).unref?.();
+// A hang guard only (FLAKY-170: generous; a loaded machine measured launches up to ~100 s).
+setTimeout(() => finish({ ok: false, error: 'timeout' }), 300_000).unref?.();
 
 app.whenReady().then(async () => {
   const readyMs = Date.now() - t0;
   const startCostMs = start ? start.readyAt - start.startedAt : null;
-  if (mode === 'ready') { finish({ ok: true, readyMs, startCostMs, reporter: withReporter }); return; }
+  if (mode === 'ready') { finish({ ok: true, readyMs, startCostMs, startCpuMs, startSyncFs, reporter: withReporter }); return; }
   const page = join(sandbox, 'crash.html');
   writeFileSync(page, '<!doctype html><meta charset="utf-8"><script>setTimeout(() => process.crash(), 300);</script>');
   const win = new BrowserWindow({ show: false, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } });
   const since = Date.now();
   win.webContents.on('render-process-gone', async (_e, d) => {
-    const dump = await D.waitForDump(crashDir, since, { tries: 40, intervalMs: 250 });
+    // Up to 100 s for Crashpad to write the dump (it returns at the first one found): a poll deadline, not a bound.
+    const dump = await D.waitForDump(crashDir, since, { tries: 400, intervalMs: 250 });
     finish({ ok: true, reason: d.reason, exitCode: d.exitCode, dumpPath: dump?.path ?? null, dumpBytes: dump?.size ?? null, inSandbox: !!dump && dump.path.startsWith(crashDir), startCostMs, readyMs, uploadsEnabled: crashReporter.getUploadToServer() });
   });
   win.loadFile(page);
