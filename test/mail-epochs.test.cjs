@@ -705,3 +705,25 @@ test('god cce9ab: a mode SWITCH immediately followed by a Stop is closed in the 
   assert.ok(!/return c;/.test(fn), 'no cached mode is returned');
   assert.match(fn, /override = this\.hive\.mail\?\.channelOverride\(agentId\)/);
 });
+
+test('Jim LOW residual: a RESPAWN as a different provider invalidates the cached provider: the very next hook reads the new one', async (t) => {
+  const home = fs.mkdtempSync(path.join(JAIL, 'respawn-'));
+  const hive = new HiveManager(() => home, () => true);
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
+  const server = new HookServer(hive, () => null, () => ({ notifications: false }));
+  t.after(() => { try { server.stop(); } catch { /* noop */ } });
+  assert.equal(server.mailChannel('sw-1').provider, 'claude', 'cached as claude');
+  // The same id is respawned as Codex (the pty:spawn path calls ensureAgent), inside the 5 s window.
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'codex', cwd: home });
+  const ch = server.mailChannel('sw-1');
+  assert.equal(ch.provider, 'codex', 'the respawn invalidated the cached provider');
+  assert.equal(ch.mode, 'inject', 'and the mode follows the new provider (Codex Route A)');
+  // The cache itself still works between spawns (one registry read per window).
+  let reads = 0;
+  const reg = hive.registry.bind(hive);
+  hive.registry = () => { reads++; return reg(); };
+  server.mailChannel('sw-1'); server.mailChannel('sw-1');
+  assert.equal(reads, 0, 'served from the provider cache');
+});

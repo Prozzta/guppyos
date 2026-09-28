@@ -325,7 +325,11 @@ export class HookServer {
      *  normaliser is already built on. HookServer still knows nothing about pools, wake
      *  or admission; it hands over the canonical record and the caller routes it. */
     private onAgyTick?: (agentId: string | null, tick: AgyStatusTick) => void
-  ) {}
+  ) {
+    // Jim LOW residual: a (re)spawn rewrites the agent's registry entry, possibly with a DIFFERENT
+    // provider; the cached provider must not outlive it (the very next hook reads the new one).
+    try { this.hive.onAgentProvisioned?.((agentId) => { this.providerCache.delete(agentId); }); } catch { /* a test double */ }
+  }
 
   /** Bounded drift tally, keyed `version|driftCode`. Fixed-string keys only: the payload
    *  that drifted is never stored, so this can be read out or logged safely. */

@@ -1171,6 +1171,9 @@ export class HiveManager {
     if (opts.spawnModel) this.recordLaunchModel(reg.agents[meta.id], meta.id, opts.spawnModel);
     if (meta.isGod) reg.godId = meta.id;
     this.atomicWriteJson(join(root, 'registry.json'), reg);
+    // Jim LOW residual (god-approved): the registry entry (its provider above all) was just
+    // (re)written by a spawn, respawn or relaunch; a reader's cached copy is stale NOW.
+    for (const cb of this.provisionedListeners) { try { cb(meta.id); } catch { /* a listener never breaks a spawn */ } }
 
     this.appendLog({ kind: 'spawn', agentId: meta.id, name: meta.name, isGod: !!meta.isGod });
     // Q32 refinement (god 0f1672): a restore brings back mail set aside in inbox/.undelivered/.
@@ -2286,6 +2289,13 @@ export class HiveManager {
   }
 
   private deliveryObserver: ((delivery: InboxDelivery) => void) | null = null;
+  private readonly provisionedListeners = new Set<(agentId: string) => void>();
+  /** Called with the agent id each time ensureAgent (every spawn, respawn and relaunch) has
+   *  written its registry entry. Returns the unsubscribe. */
+  onAgentProvisioned(cb: (agentId: string) => void): () => void {
+    this.provisionedListeners.add(cb);
+    return () => { this.provisionedListeners.delete(cb); };
+  }
   /** Observe every durable inbox write, after it lands (direct and bounced to god alike).
    *  Never fires for a missing inbox or a terminal handoff. Separate from
    *  `setRoutedObserver`, whose targets are routing INTENT, not proof of a write. */
