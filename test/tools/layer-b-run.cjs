@@ -25,19 +25,26 @@
  *      agent without auto mode is a supported product configuration, and nothing B5-B7 test (the
  *      Route A hook context, retention, compaction) depends on the command sandbox.
  *    - Claude: the product's arguments are UNCHANGED (--permission-mode bypassPermissions). The
- *      jailed ~/.claude/settings.json adds permissions.deny rules for the live paths AND a
- *      PreToolUse hook (test/tools/layer-b-jail-hook.cjs) that denies any write outside the jail,
- *      any read outside the sandbox and risky shell forms. Claude's docs: deny rules and a hook deny
- *      apply in every permission mode, bypassPermissions included; user and --settings hooks both run.
- *    - Zero-token proofs before any agent starts (dry and real run): the installed hook command is
- *      fed payloads targeting C:\Dunder\hive and the real ~/.claude and must deny; the real codex
- *      binary's own sandbox runner (codex sandbox windows) runs a probe that tries to write markers
- *      into C:\Dunder\hive, the real ~/.codex and ~/.claude: refused, markers never appear, and a
- *      write inside the jail succeeds (positive control).
+ *      jailed ~/.claude/settings.json holds a PreToolUse hook (test/tools/layer-b-jail-hook.cjs) that
+ *      is a STRICT ALLOWLIST (Jim's re-audit): Read/Glob/Grep/LS inside the sandbox and
+ *      Write/Edit/MultiEdit inside the agent's own work + agent dir, on the REAL resolved path; every
+ *      other tool (Bash, PowerShell, MCP, Agent/Task, Web*, NotebookEdit, unknown) is DENIED. The
+ *      permissions rules mirror it (deny those tools and the live paths; allow the jail). Claude's
+ *      docs: a hook deny and deny rules apply in every permission mode, bypassPermissions included.
+ *      The facts need nothing else: the agent reads files and WRITES its outbox reply (B2 uses six
+ *      Read calls where it used shell sleeps before).
+ *    - Zero-token proofs before any agent starts: the installed hook command is fed payloads that
+ *      target C:\Dunder\hive and the real ~/.claude and must deny (both modes). Codex (god 57634c):
+ *      the DRY run starts NO codex binary. The REAL run needs --floor-paused-confirmed AND
+ *      --uac-risk-accepted; its first codex binary is `codex sandbox windows --help` (recorded in the
+ *      report), and it then STOPS (exit 3) unless --codex-sandbox-probe is given, which god gives
+ *      after reading that help: the probe then tries to write markers into C:\Dunder\hive, the real
+ *      ~/.codex and ~/.claude (refused, never appear; a jail write succeeds), then the run goes on.
  *    - After the run (dry and real): the live hive, MunderDevData, the real ~/.claude, ~/.codex and
- *      the live userData are compared with a snapshot taken before (top-level mtime/size, key-file
- *      SHA-256): a change carrying a run marker FAILS; the real credential files must be
- *      byte-identical (SHA-256 + mtime + size).
+ *      the live userData are compared with a snapshot taken before, STAT + HASH ONLY (no content is
+ *      read or reported): a new/changed entry whose NAME carries a run marker FAILS. A change of the
+ *      real credential files (SHA-256 + mtime + size) is INCONCLUSIVE with attribution, and FAILS
+ *      only if it coincides with the jailed copy's own refresh (god 4dd770 decision 5).
  *  - No window ever: MUNDER_HIDDEN skips every show/focus. From the moment the app process exists, a
  *    hidden PowerShell watcher enumerates the top-level windows of the app's whole process tree
  *    every 1.5 s, and flags any browser the tree starts, any WerFault or consent.exe (UAC) that
@@ -82,12 +89,18 @@
  *
  * USAGE (never without god's OK: it builds and LAUNCHES the app):
  *   LAYERB_SOAK=1 node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 \
- *     node test/tools/layer-b-run.cjs --dry-run-stubs --go        # plumbing, zero tokens
- *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go         # the real run
+ *     node test/tools/layer-b-run.cjs --dry-run-stubs --go             # plumbing, zero tokens, no codex binary
+ *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted
+ *       # REAL, step 1: records `codex sandbox windows --help` and STOPS (exit 3) for god's review
+ *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted --codex-sandbox-probe
+ *       # REAL, step 2 (after god's OK on the help): the sandbox probe, then the full run
  * Without --go it only runs the static preflight (no build, no launch, nothing written).
+ * --floor-paused-confirmed: the operator confirms the live floor is PAUSED (god 4dd770 decision 3).
+ * --uac-risk-accepted: the Human accepts one possible UAC prompt and is standing by (god 57634c).
  * Options: --skip-build (reuse dist/), --no-rollback, --keep-sandbox, --keep-v1174, --no-git-path,
  *   --claude-model <id>, --codex-model <id>, --v1174-dir <dir>, --report-dir <dir>.
- * Exit 0 = every asserted fact PASS (dry run: every plumbing check PASS).
+ * Exit 0 = every asserted fact PASS (dry run: every plumbing check PASS); 3 = stopped by design.
+ * Release check (not part of this run): node scripts/verify-packaged-no-seams.cjs <shipped app.asar>
  */
 const { spawn, spawnSync } = require('node:child_process');
 const crypto = require('node:crypto');
@@ -132,6 +145,7 @@ const inside = (child, parent) => { const r = path.relative(norm(parent), norm(c
 
 function parseArgs(argv) {
   const a = { dryRun: false, go: false, skipBuild: false, rollback: true, keepSandbox: false, keepV1174: false, gitPath: true,
+    floorPaused: false, uacRisk: false, codexProbe: false,
     models: { ...DEFAULT_MODELS }, v1174Dir: null, reportDir: null };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -141,6 +155,9 @@ function parseArgs(argv) {
     else if (k === '--no-rollback') a.rollback = false;
     else if (k === '--keep-sandbox') a.keepSandbox = true;
     else if (k === '--keep-v1174') a.keepV1174 = true;
+    else if (k === '--floor-paused-confirmed') a.floorPaused = true;
+    else if (k === '--uac-risk-accepted') a.uacRisk = true;
+    else if (k === '--codex-sandbox-probe') a.codexProbe = true;
     else if (k === '--no-git-path') a.gitPath = false;
     else if (k === '--claude-model') a.models.claude = argv[++i];
     else if (k === '--codex-model') a.models.codex = argv[++i];
@@ -412,16 +429,24 @@ class ProcTracker {
     }
     return { ok: false, scanFailed: true, why, killed: [], fallback, survivors: [`UNKNOWN (${why})`] };
   }
-  /** Synchronous last resort (signals, crashes): the same identity-checked kill, no event loop. */
+  /** Synchronous kill (signals, crashes, the teardown's second attempt): the same identity-checked
+   *  kill, then a re-scan. Returns { ok } = proof that no process of ours is left. */
   killSyncBestEffort() {
     let snap;
-    try { snap = this.scanSync(); } catch { this.killRootsByHandle('emergency scan failed'); return; }   // no identity proof: only the open-handle roots
+    try { snap = this.scanSync(); } catch { this.killRootsByHandle('emergency scan failed'); return { ok: false, why: 'scan failed' }; }   // no identity proof: only the open-handle roots
+    if (this.known.size && !snap.procs.length) { this.killRootsByHandle('emergency scan empty'); return { ok: false, why: 'scan empty' }; }
     const alive = new Map(snap.procs.map((p) => [p.pid, p]));
+    const same = (k, a) => !!a && (k.created === null ? /munder difflin/i.test(a.name) : a.created === k.created);
     for (const k of [...this.known.values()].sort((a, b) => b.depth - a.depth)) {
-      const a = alive.get(k.pid);
-      if (!a || (k.created === null ? !/munder difflin/i.test(a.name) : a.created !== k.created)) continue;
+      if (!same(k, alive.get(k.pid))) continue;
       try { spawnSync('taskkill', ['/F', '/PID', String(k.pid)], { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch { /* gone */ }
     }
+    let after;
+    try { after = this.scanSync(); } catch { return { ok: false, why: 'post-kill scan failed' }; }
+    if (!after.procs.length) return { ok: false, why: 'post-kill scan empty' };
+    const again = new Map(after.procs.map((p) => [p.pid, p]));
+    const survivors = [...this.known.values()].filter((k) => same(k, again.get(k.pid))).map((k) => `${k.pid}:${k.name}`);
+    return { ok: survivors.length === 0, survivors };
   }
 }
 
@@ -519,16 +544,24 @@ const JAIL_PROTECT = ['.claude', '.codex', '.claude.json', '.credentials.json', 
 /** Windows path -> Claude's POSIX rule form: C:\Dunder\hive -> //c/Dunder/hive (docs: permissions). */
 const claudeRulePath = (p) => '//' + path.resolve(p).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase()).replace(/\\/g, '/');
 
-/** The jailed ~/.claude/settings.json: the first-run keys, the deny rules and the jail hook. */
-function claudeJailSettings({ node, policyFile, liveDenied, env }) {
-  const deny = [];
-  for (const p of liveDenied) for (const tool of ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']) deny.push(`${tool}(${claudeRulePath(p)}/**)`, `${tool}(${claudeRulePath(p)})`);
-  deny.push('WebFetch', 'WebSearch');
+/** Tools the jail denies outright (mirrored in permissions.deny; the hook denies anything not on its
+ *  allowlist, these included). */
+const JAIL_DENY_TOOLS = ['Bash', 'PowerShell', 'BashOutput', 'KillShell', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Agent', 'Task', 'Skill', 'SlashCommand', 'mcp__*'];
+
+/** The jailed ~/.claude/settings.json: the first-run keys, the permission rules (deny the live
+ *  paths and every non-file tool; allow Read/Glob/Grep/LS in the sandbox and Write/Edit/MultiEdit in
+ *  the agent's own dirs) and the PreToolUse jail hook, the hard guarantee. */
+function claudeJailSettings({ node, policyFile, liveDenied, readRoots = [], writeRoots = [], env }) {
+  const deny = [...JAIL_DENY_TOOLS];
+  for (const p of liveDenied) for (const tool of ['Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'LS']) deny.push(`${tool}(${claudeRulePath(p)}/**)`, `${tool}(${claudeRulePath(p)})`);
+  const allow = [];
+  for (const r of readRoots) for (const tool of ['Read', 'Glob', 'Grep', 'LS']) allow.push(`${tool}(${claudeRulePath(r)}/**)`);
+  for (const r of writeRoots) for (const tool of ['Write', 'Edit', 'MultiEdit']) allow.push(`${tool}(${claudeRulePath(r)}/**)`);
   const q = (s) => `"${String(s).replace(/\\/g, '/')}"`;
   return {
     skipDangerousModePermissionPrompt: true,
     skipAutoPermissionPrompt: true,
-    permissions: { deny },
+    permissions: { deny, allow },
     hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `${q(node)} ${q(JAIL_HOOK)} ${q(policyFile)}`, timeout: 30 }] }] },
     ...(env ? { env } : {})
   };
@@ -696,7 +729,7 @@ class Credentials {
     for (const c of this.copies) {
       if (c.done) { out.push(c.done); continue; }
       let refreshed = null;
-      try { if (fs.existsSync(c.dest)) refreshed = sha256(fs.readFileSync(c.dest)) !== c.jailSha; } catch { /* unreadable */ }
+      try { if (fs.existsSync(c.dest)) { refreshed = sha256(fs.readFileSync(c.dest)) !== c.jailSha; c.jailMtimeAtEnd = fs.statSync(c.dest).mtimeMs; } } catch { /* unreadable */ }
       let deleted = false;
       try { deleted = W.shred(c.dest); } catch (e) { out.push({ label: c.label, deleted: false, error: e.message, tokenRefreshed: refreshed }); continue; }
       c.done = { label: c.label, deleted: deleted && !fs.existsSync(c.dest), tokenRefreshed: refreshed };
@@ -704,7 +737,11 @@ class Credentials {
     }
     return out;
   }
-  /** The real files must be exactly as they were: SHA-256 (read-only) AND mtime AND size (Dwight). */
+  /** The real files must be exactly as they were: SHA-256 (read-only) AND mtime AND size (Dwight).
+   *  Decision 5 (god 4dd770): a change during the run is INCONCLUSIVE with attribution, not a FAIL:
+   *  this run has no write path to the real file (W refuses it; the agents are jailed), and the live
+   *  floor's own CLIs refresh their login. It FAILS only when it correlates with the jailed copy's
+   *  own refresh (the real file changed within 10 s of the jailed copy changing). */
   verifyRealUnchanged() {
     return this.copies.map((c) => {
       let st = null; let sha = null;
@@ -712,44 +749,65 @@ class Credentials {
       const mtimeSame = !!st && st.mtimeMs === c.mtimeMs;
       const sizeSame = !!st && st.size === c.size;
       const shaSame = sha === c.realSha;
-      return { label: c.label, real: c.real, unchanged: mtimeSame && sizeSame && shaSame, shaSame, mtimeSame, sizeSame };
+      const unchanged = mtimeSame && sizeSame && shaSame;
+      let jailMtime = null;
+      try { jailMtime = c.jailMtimeAtEnd ?? fs.statSync(c.dest).mtimeMs; } catch { jailMtime = null; }
+      const jailRefreshed = c.done ? c.done.tokenRefreshed === true : null;
+      const correlated = !unchanged && !!st && jailRefreshed === true && jailMtime !== null && Math.abs(st.mtimeMs - jailMtime) < 10_000;
+      const verdict = unchanged ? 'UNCHANGED' : (correlated ? 'FAIL' : 'INCONCLUSIVE');
+      const attribution = unchanged ? '' : (correlated
+        ? `the real file changed within 10 s of the jailed copy's own refresh (real mtime ${new Date(st.mtimeMs).toISOString()}, jail ${new Date(jailMtime).toISOString()})`
+        : `changed during the run (real mtime ${st ? new Date(st.mtimeMs).toISOString() : 'gone'}); this run has no write path to it (W refuses it, the agents are jailed); the live floor's own CLIs refresh it; jailed copy refreshed: ${jailRefreshed}`);
+      return { label: c.label, real: c.real, unchanged, verdict, attribution, shaSame, mtimeSame, sizeSame };
     });
   }
+
 }
 
 /**
- * R4 startup sweep: an earlier run killed hard (kill -9, power loss) can leave its sandbox, with
- * PLAINTEXT credential copies, in %TEMP%. Every stale md-layerb-<stamp> dir (not this run's) has its
- * credential files SHREDDED first, then the dir is removed. Returns what it did.
+ * R4 startup sweep, FAIL-CLOSED (Dwight): an earlier run killed hard can leave its sandbox, with
+ * PLAINTEXT credential copies, in %TEMP%. For every stale md-layerb-<stamp> dir (not this run's)
+ * every credential file is SHREDDED; only if every one is provably gone is the dir removed. ANY
+ * shred or removal failure keeps that dir and makes the result ok:false, and the caller aborts
+ * BEFORE the build or any credential is copied. `ops` is injectable for the tests.
  */
-function sweepStale(tmp, currentBase) {
+function sweepStale(tmp, currentBase, ops = {}) {
+  const shred = ops.shred || ((f) => W.shred(f));
+  const rm = ops.rm || ((d) => W.rm(d));
   const done = [];
   let names = [];
-  try { names = fs.readdirSync(tmp); } catch { return done; }
+  try { names = fs.readdirSync(tmp); } catch { return { ok: true, done }; }
   for (const n of names.filter((x) => STALE_PREFIX.test(x))) {
     const dir = path.join(tmp, n);
     if (currentBase && norm(dir) === norm(currentBase)) continue;
     let st = null;
     try { st = fs.lstatSync(dir); } catch { continue; }
-    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    if (!st.isDirectory() || st.isSymbolicLink()) { done.push({ dir, credentials: 0, shredded: 0, removed: false, error: 'not a plain directory: left alone' }); continue; }
     W.allowRoot(dir);
     const creds = walk(dir, (f) => CREDENTIAL_NAMES.includes(path.basename(f).toLowerCase()));
     let shredded = 0;
-    for (const f of creds) { try { if (W.shred(f)) shredded++; } catch (e) { log(`sweep: could not shred ${f}: ${e.message}`); } }
-    try { W.rm(dir); } catch (e) { log(`sweep: could not remove ${dir}: ${e.message}`); }
-    done.push({ dir, credentials: creds.length, shredded, removed: !fs.existsSync(dir) });
+    const errors = [];
+    for (const f of creds) {
+      try { if (shred(f) && !fs.existsSync(f)) shredded++; else errors.push(`${f} still exists`); } catch (e) { errors.push(`${f}: ${e.message}`); }
+    }
+    let removed = false;
+    if (!errors.length) {
+      try { rm(dir); removed = !fs.existsSync(dir); if (!removed) errors.push(`${dir} still exists`); } catch (e) { errors.push(`${dir}: ${e.message}`); }
+    }
+    done.push({ dir, credentials: creds.length, shredded, removed, ...(errors.length ? { error: errors.join('; ') } : {}) });
   }
-  return done;
+  const ok = done.every((d) => d.removed && d.shredded === d.credentials && !d.error);
+  return { ok, done };
 }
 
 // ─────────────────────────────────────────────────────────────────────────── live-location watch
 
 /**
- * R1 (god c0a73f (c)): what the live floor's files looked like before the run, compared after it.
- * Top-level entries of each live root (size + mtime) and SHA-256 of key files, all READ-ONLY. The
- * live floor keeps writing its own files during the run, so a CHANGE alone is reported, and it
- * FAILS only when the name or the NEW bytes carry one of this run's markers (sandbox path, stamp,
- * agent ids, nonces).
+ * R1 (god c0a73f (c)), decision 4 (god 4dd770): what the live floor's files looked like before the
+ * run, compared after it. STAT + HASH ONLY, read-only, and no file CONTENT is ever read into the
+ * report: top-level entries of each live root (size, mtime) and the SHA-256 of a few key files. The
+ * live floor keeps writing its own files during the run, so a change alone is REPORTED; it FAILS
+ * only when a new or changed entry's NAME carries one of this run's markers.
  */
 class LiveWatch {
   constructor(roots, keyFiles) { this.roots = roots; this.keyFiles = keyFiles; this.before = null; }
@@ -776,28 +834,17 @@ class LiveWatch {
     return snap;
   }
   start() { this.before = this.snapshot(); return this; }
-  /** Compare with the snapshot. `markers` = strings only this run produces. */
+  /** Compare with the snapshot (names and stat only). `markers` = strings only this run produces. */
   compare(markers) {
     const after = this.snapshot();
     const changed = []; const failures = [];
-    const hasMarker = (text) => markers.find((m) => m && String(text).toLowerCase().includes(String(m).toLowerCase()));
-    const newBytes = (f, before) => {
-      try {
-        const st = fs.statSync(f);
-        if (st.isDirectory()) return '';
-        const from = before && !before.dir && st.size >= before.size ? before.size : 0;
-        const len = Math.min(st.size - from, 4 * 1024 * 1024);
-        if (len <= 0) return '';
-        const fd = fs.openSync(f, 'r');
-        try { const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, from); return b.toString('utf8'); } finally { fs.closeSync(fd); }
-      } catch { return ''; }
-    };
+    const hasMarker = (name) => markers.find((m) => m && String(name).toLowerCase().includes(String(m).toLowerCase()));
     for (const [f, a] of Object.entries(after.entries)) {
       const b = this.before.entries[f];
       if (b && b.size === a.size && b.mtimeMs === a.mtimeMs) continue;
       changed.push({ file: f, kind: b ? 'changed' : 'new' });
-      const m = hasMarker(path.basename(f)) || hasMarker(newBytes(f, b));
-      if (m) failures.push(`${f} ${b ? 'changed' : 'appeared'} and carries this run's marker "${m}"`);
+      const m = hasMarker(path.basename(f));
+      if (m) failures.push(`${f} ${b ? 'changed' : 'appeared'} and its name carries this run's marker "${m}"`);
     }
     for (const f of Object.keys(this.before.entries)) if (!after.entries[f]) changed.push({ file: f, kind: 'removed' });
     const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k] }));
@@ -883,6 +930,7 @@ class LayerB {
     this.nonces = [];
     this.proofs = {};
     this.watchHits = [];
+    this.inconclusive = [];
   }
 
   fact(id, status, detail, evidence = []) {
@@ -935,6 +983,13 @@ class LayerB {
     if (this.args.go && process.env[HEAVY_GATE] !== '1') {
       throw new Error(`--go needs ${HEAVY_GATE}=1 on the invoking command line, so the floor's heavy-job lock holds the slot for the whole run (see the header)`);
     }
+    // God 4dd770 (3) + 57634c: the REAL run needs the floor paused AND the Human's acceptance of one
+    // possible UAC prompt (the Codex Windows sandbox), both confirmed by the operator.
+    if (this.args.go && !this.args.dryRun) {
+      if (!this.args.floorPaused) throw new Error('the REAL run needs --floor-paused-confirmed: pause the live floor first (god 4dd770 decision 3)');
+      if (!this.args.uacRisk) throw new Error('the REAL run needs --uac-risk-accepted: the Human accepts one possible UAC prompt and stands by (god 57634c)');
+    }
+    if (this.args.dryRun && this.args.codexProbe) throw new Error('--codex-sandbox-probe is for the real run only: the dry run starts no codex binary (god 57634c)');
     // The sandbox root, validated by the PRODUCT's own guard, with the live userData forbidden.
     const loadTs = require(path.join(REPO, 'test', 'load-ts.cjs'));
     const iso = loadTs(path.join(REPO, 'src', 'main', 'devIsolation.ts'));
@@ -1036,32 +1091,39 @@ class LayerB {
     this.assertSeamsInAsar(path.join(dir, 'dist', 'win-unpacked', 'resources', 'app.asar'), '1.1.74+seams');
   }
 
-  /** The end of the run (R6): out/ rebuilt WITHOUT the seams (so a test bundle can never be
-   *  packaged by accident), then the 1.1.74 worktree removed: its node_modules COPY first, then
-   *  out/ and dist/, then `git worktree remove` WITHOUT --force (a refusal is reported, not forced). */
-  cleanupBuild() {
+  /** Always at the end (in the teardown, i.e. a finally), and in the emergency path: out/ rebuilt
+   *  WITHOUT the seams, so a failed run can never leave a seams bundle for a later packaging. */
+  rebuildOutWithoutSeams() {
+    if (!this.builtOut) return [];
+    try {
+      run('npm.cmd', ['run', 'build'], REPO, 'rebuild out/ WITHOUT the layer-b seams', { env: buildEnv(this.s ? path.join(this.s.base, 'build-cache') : null, { seams: false }), deadline: Date.now() + 10 * 60_000 });
+      this.builtOut = false;
+      return ['out/ rebuilt without the seams'];
+    } catch (e) {
+      this.check(false, 'out/ rebuilt without the layer-b seams', e.message);
+      return [`out/ rebuild FAILED: ${e.message} (run npm run build before any packaging)`];
+    }
+  }
+
+  /** Only with proof that every process exited: the 1.1.74 worktree is removed, its node_modules
+   *  COPY first, then out/ and dist/, then `git worktree remove` WITHOUT --force (a refusal is
+   *  reported and the worktree left). */
+  removeV1174() {
     const out = [];
-    if (this.builtOut) {
-      try {
-        run('npm.cmd', ['run', 'build'], REPO, 'rebuild out/ WITHOUT the layer-b seams', { env: buildEnv(path.join(this.s.base, 'build-cache'), { seams: false }), deadline: Date.now() + 10 * 60_000 });
-        out.push('out/ rebuilt without the seams');
-      } catch (e) { out.push(`out/ rebuild FAILED: ${e.message}`); this.check(false, 'out/ rebuilt without the layer-b seams', e.message); }
-    }
-    if (this.v1174Dir && !this.args.keepV1174 && !this.args.v1174Dir && fs.existsSync(this.v1174Dir)) {
-      const dir = this.v1174Dir;
-      const nm = path.join(dir, 'node_modules');
-      try {
-        if (fs.existsSync(nm)) {
-          if (fs.lstatSync(nm).isSymbolicLink()) throw new Error('node_modules is a link: refusing to remove through it');
-          W.rm(nm);
-        }
-        for (const d of ['out', 'dist']) W.rm(path.join(dir, d));
-        if (fs.existsSync(nm)) throw new Error('the node_modules copy is still there');
-        const r = spawnSync('git', ['worktree', 'remove', dir], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-        out.push(r.status === 0 ? `removed the 1.1.74 worktree ${dir}` : `git worktree remove REFUSED (${(r.stderr || '').trim()}); left in place`);
-        this.check(r.status === 0, 'the 1.1.74 worktree removed (node_modules copy first, no --force)', (r.stderr || '').trim());
-      } catch (e) { out.push(`1.1.74 cleanup: ${e.message}`); this.check(false, 'the 1.1.74 worktree removed', e.message); }
-    }
+    if (!this.v1174Dir || this.args.keepV1174 || this.args.v1174Dir || !fs.existsSync(this.v1174Dir)) return out;
+    const dir = this.v1174Dir;
+    const nm = path.join(dir, 'node_modules');
+    try {
+      if (fs.existsSync(nm)) {
+        if (fs.lstatSync(nm).isSymbolicLink()) throw new Error('node_modules is a link: refusing to remove through it');
+        W.rm(nm);
+      }
+      for (const d of ['out', 'dist']) W.rm(path.join(dir, d));
+      if (fs.existsSync(nm)) throw new Error('the node_modules copy is still there');
+      const r = spawnSync('git', ['worktree', 'remove', dir], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+      out.push(r.status === 0 ? `removed the 1.1.74 worktree ${dir}` : `git worktree remove REFUSED (${(r.stderr || '').trim()}); left in place`);
+      this.check(r.status === 0, 'the 1.1.74 worktree removed (node_modules copy first, no --force)', (r.stderr || '').trim());
+    } catch (e) { out.push(`1.1.74 cleanup: ${e.message}`); this.check(false, 'the 1.1.74 worktree removed', e.message); }
     return out;
   }
 
@@ -1133,7 +1195,8 @@ class LayerB {
     const home = os.homedir();
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
     const liveDenied = [LIVE.dunder, path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
-    W.writeJson(path.join(s.home, '.claude', 'settings.json'), claudeJailSettings({ node: this.node, policyFile: this.jailPolicy, liveDenied, env: extraEnv }));
+    const pol = readJson(this.jailPolicy, {});
+    W.writeJson(path.join(s.home, '.claude', 'settings.json'), claudeJailSettings({ node: this.node, policyFile: this.jailPolicy, liveDenied, readRoots: pol.readRoots || [], writeRoots: pol.writeRoots || [], env: extraEnv }));
   }
 
   seed() {
@@ -1218,6 +1281,7 @@ class LayerB {
     const bulk = (n, tag) => { const out = []; for (let i = 1; i <= n; i++) out.push(`line ${String(i).padStart(4, '0')} ${Array.from({ length: 18 }, () => words[crypto.randomInt(words.length)]).join(' ')}`); out.push(`END-${tag}`); return out.join('\n'); };
     this.bulkEnd = { claude: `END-${hex(4)}`, codex: `END-${hex(4)}` };
     W.write(path.join(claude.cwd, 'b3-bulk.txt'), bulk(1500, this.bulkEnd.claude.slice(4)));
+    for (let i = 1; i <= 6; i++) W.write(path.join(claude.cwd, `b2-${i}.txt`), bulk(40, `B2-${i}`));   // B2: six Read calls (no shell in the jail)
     W.write(path.join(codex.cwd, 'b7-bulk.txt'), bulk(1600, this.bulkEnd.codex.slice(4)));
   }
 
@@ -1276,7 +1340,28 @@ class LayerB {
     return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; deny rules present', JSON.stringify(results));
   }
 
-  /** (b) The real codex binary's own sandbox runner (`codex sandbox windows`, zero tokens) runs a
+  /** God 4dd770 (2) + 57634c: the FIRST codex binary the real run starts is `codex sandbox windows
+   *  --help` (clap help, zero tokens), under the session window watch, with an empty CODEX_HOME in the
+   *  sandbox. The report records what it says about the unelevated/elevated setup. The dry run never
+   *  starts any codex binary. */
+  codexSandboxHelp() {
+    const shim = whichOn(parentPath(), 'codex');
+    const exe = shim ? codexExe(shim) : null;
+    if (!exe) { this.check(false, 'codex sandbox windows --help: the codex.exe was found', shim || 'codex not on PATH'); return null; }
+    const home = path.join(this.s.base, 'help-codex-home');
+    W.mkdir(home);
+    const env = buildEnv(null, { seams: false });
+    env.CODEX_HOME = home;
+    const r = spawnSync(exe, ['sandbox', 'windows', '--help'], { cwd: this.s.base, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+    const text = redact(`${r.stdout || ''}${r.stderr || ''}`);
+    const setup = text.split(/\r?\n/).filter((l) => /elevat|unelevat|setup|admin|uac|restricted|sandbox/i.test(l));
+    this.codexHelp = { exe, status: r.status, text: text.slice(0, 8000), setupLines: setup };
+    W.write(path.join(this.s.report, 'codex-sandbox-windows-help.txt'), text);
+    this.check(r.status === 0 && text.length > 0, 'codex sandbox windows --help ran (zero tokens) and was recorded', `exit ${r.status}; setup-related lines: ${setup.length}`);
+    return this.codexHelp;
+  }
+
+  /** (b) [REAL RUN ONLY, --codex-sandbox-probe] The real codex binary's own sandbox runner (`codex sandbox windows`, zero tokens) runs a
    *  probe under the jail's config: writes into C:\Dunder\hive, the real ~/.codex and ~/.claude must
    *  be REFUSED and the markers must never appear; a write inside the jail must succeed. */
   proveCodexSandbox() {
@@ -1609,7 +1694,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const T = `LBT-${hex(4)}`;
     const N2 = nonce();
     const since = Date.now();
-    const task = this.send(C, 'B2', `${T}\n\nRun these shell commands one per tool call, in order, waiting for each: \`sleep 8\`, \`sleep 8\`, \`sleep 8\`. After the third, reply to god with one hive message (act "inform") whose body is: ${T} followed by every token of the form LBN-xxxxxxxx that reached you in hive mail DURING this task, or NONE. Do not read, list or open any inbox file.`);
+    const task = this.send(C, 'B2', `${T}\n\nRead these six files with your Read tool, ONE file per tool call, in this order, and do not batch them: ${[1, 2, 3, 4, 5, 6].map((i) => path.join(this.spec.find((a) => a.id === C).cwd, `b2-${i}.txt`)).join(', ')}. After the sixth, reply to god with one hive message (act "inform") whose body is: ${T} followed by every token of the form LBN-xxxxxxxx that reached you in hive mail DURING this task, or NONE. Do not read, list or open any inbox file.`);
     await this.waitState(C, task, ['surfacing', 'surfaced', 'acted'], 5 * 60_000);
     // Mid-turn = after the first tool call of that turn (a stub has no transcript: plumbing only).
     if (this.args.dryRun) await sleep(2000);
@@ -1923,17 +2008,77 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       [path.join(s.hive, 'state', 'mail')]);
   }
 
+  /** Stop every process of the app. NO PROOF OF EXIT (Dwight, R3): the run is ABORTED before any
+   *  relaunch or next phase, the survivors are recorded, and the teardown keeps the sandbox and the
+   *  evidence. */
   async stopApp(label) {
     try { this.page && this.page.close(); } catch { /* gone */ }
     try { this.mainCdp && this.mainCdp.close(); } catch { /* gone */ }
     this.page = null; this.mainCdp = null;
     const r = await this.procs.killAll();
     if (this.watch) { this.watchHits = this.watchHits.concat(this.watch.hits); this.watch.stop(); this.watch = null; }
+    const proven = r.ok === true && !r.scanFailed && r.survivors.length === 0;
     // R3: a scan failure is a FAILURE, never a vacuous "all gone".
-    this.check(r.ok === true && !r.scanFailed && r.survivors.length === 0, `${label}: every process started is gone (exact PID tree)`,
+    this.check(proven, `${label}: every process started is gone (exact PID tree)`,
       r.scanFailed ? `SCAN FAILED (${r.why}); fell back to taskkill /T on open-handle roots ${JSON.stringify(r.fallback)}` : `killed ${r.killed.length}${r.survivors.length ? `; SURVIVORS ${r.survivors.join(',')}` : ''}`);
     this.killReport = (this.killReport || []).concat([{ label, ...r }]);
+    if (!proven) {
+      this.exitUnproven = { label, survivors: r.survivors, fallback: r.fallback || [], why: r.why || null };
+      this.stop(`${label}: no proof that every process exited (${r.survivors.join(', ')})`);
+      throw new Error(`${label}: no proof of exit`);
+    }
+    this.exitUnproven = null;
     await sleep(1500);
+  }
+
+  /**
+   * The end of every run, in this order (R4, Dwight):
+   *  1. stop the app; if there is no proof of exit, ONE further kill attempt (sync, identity-checked,
+   *     then the open-handle fallback) and a re-check;
+   *  2. shred the credential copies (always: they are the priority), then check the real files;
+   *  3. rebuild out/ WITHOUT the seams (always: a failed run can never leave a seams bundle);
+   *  4. ONLY with proof of exit: remove the 1.1.74 worktree and the sandbox. Without it both stay
+   *     (with the evidence) and the report names the surviving processes.
+   */
+  async teardown() {
+    for (const t of this.bg) clearInterval(t);
+    try { this.pollTokens(); } catch { /* best effort */ }
+    try { await this.stopApp('final'); } catch { /* recorded in exitUnproven */ }
+    if (this.exitUnproven) {
+      try { this.procs.killSyncBestEffort(); } catch { /* recorded below */ }
+      this.exitUnproven = null;
+      try { await this.stopApp('final (second kill attempt)'); } catch { /* still unproven */ }
+    }
+    if (this.watch) { this.watch.stop(); this.watch = null; }
+    const credentials = [];
+    const del = this.creds.deleteAll();
+    const real = this.creds.verifyRealUnchanged();
+    for (const d of del) credentials.push({ ...d, ...(real.find((x) => x.label === d.label) || {}) });
+    for (const c of credentials) {
+      this.check(c.deleted, `credentials: the ${c.label} copy is shredded`);
+      this.check(c.verdict !== 'FAIL', `credentials: the REAL ${c.label} file (SHA-256 + mtime + size): ${c.verdict}`, `${c.real}${c.attribution ? ` — ${c.attribution}` : ''}`);
+      if (c.verdict === 'INCONCLUSIVE') this.inconclusive.push(`the real ${c.label} credential: ${c.attribution}`);
+      this.check(c.tokenRefreshed !== null && c.tokenRefreshed !== undefined, `credentials: whether ${c.label} refreshed its token is known`, `refreshed=${c.tokenRefreshed}`);
+    }
+    const buildCleanup = [];
+    try { buildCleanup.push(...this.rebuildOutWithoutSeams()); } catch (e) { buildCleanup.push(`out/ rebuild: ${e.message}`); }
+    const survivors = this.exitUnproven ? this.exitUnproven.survivors : [];
+    if (!this.exitUnproven) {
+      try { buildCleanup.push(...this.removeV1174()); } catch (e) { buildCleanup.push(`1.1.74 cleanup: ${e.message}`); }
+    } else {
+      buildCleanup.push('NO PROOF OF EXIT: the 1.1.74 worktree and the sandbox are KEPT (with the evidence)');
+    }
+    let liveWatch = null;
+    try {
+      liveWatch = this.liveWatch ? this.liveWatch.compare(this.markers()) : null;
+      if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only)', liveWatch.failures.join('; '));
+    } catch (e) { this.check(false, 'live-location check', e.message); }
+    let evidence = null;
+    try { evidence = this.collectEvidence(); } catch (e) { log(`evidence: ${e.message}`); }
+    const keep = !!this.exitUnproven || this.args.keepSandbox;
+    let sandboxRemoved = false;
+    if (!keep) { try { W.rm(this.s.base); sandboxRemoved = !fs.existsSync(this.s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } }
+    return { credentials, buildCleanup, liveWatch, evidence, survivors, sandboxRemoved };
   }
 
   // ── evidence + report ─────────────────────────────────────────────────────
@@ -1973,7 +2118,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     for (const f of order) if (!this.facts[f]) this.fact(f, this.unproven(f), this.aborted() ? `not reached: ${this.abort.signal.reason && this.abort.signal.reason.message}` : 'not reached');
     const facts = order.map((f) => this.facts[f]);
     const asserted = this.args.dryRun ? facts.filter((f) => ['B8', 'B9', 'N4', 'ROLLBACK'].includes(f.id)) : facts;
-    const ok = asserted.every((f) => f.status === 'PASS') && this.checks.every((c) => c.ok);
+    const ok = !this.stopReason && asserted.every((f) => f.status === 'PASS') && this.checks.every((c) => c.ok);
     const json = {
       mode: this.args.dryRun ? 'dry-run-stubs' : 'real', ok, startedAt: new Date(this.startedAt || Date.now()).toISOString(),
       durationMs: this.startedAt ? Date.now() - this.startedAt : 0, abort: this.aborted() ? String(this.abort.signal.reason && this.abort.signal.reason.message) : null,
@@ -1984,7 +2129,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       sandbox: s.base, evidence: extra.evidence
     };
     W.write(path.join(s.report, 'layer-b-report.json'), redact(JSON.stringify(json, null, 2)));
-    const cred = (c) => `- ${c.label}: copy shredded ${c.deleted}; REAL file byte-identical (SHA-256 ${c.shaSame}, mtime ${c.mtimeSame}, size ${c.sizeSame}); **token refresh during the run: ${c.tokenRefreshed === null ? 'unknown' : (c.tokenRefreshed ? 'YES (the jailed copy changed: the real login may need a re-login)' : 'no')}**`;
+    const cred = (c) => `- ${c.label}: copy shredded ${c.deleted}; REAL file: **${c.verdict}** (SHA-256 ${c.shaSame}, mtime ${c.mtimeSame}, size ${c.sizeSame})${c.attribution ? ` — ${c.attribution}` : ''}; **token refresh during the run: ${c.tokenRefreshed === null || c.tokenRefreshed === undefined ? 'unknown' : (c.tokenRefreshed ? 'YES (the jailed copy changed: the real login may need a re-login)' : 'no')}**`;
     const lw = extra.liveWatch || {};
     const md = [
       `# Layer (b) run — ${json.mode} — ${ok ? 'PASS' : 'NOT PASSED'}`, '',
@@ -2002,7 +2147,11 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       '## Warnings', '', ...json.warnings.map((w) => `- ${w}`), '',
       `Windows: ${this.samples.hidden.length} isVisible checks; window-watch hits ${(this.watchHits || []).length}.`,
       `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base}${this.args.keepSandbox ? ' (kept)' : ' (removed)'}`,
-      `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`
+      `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`, '',
+      '## Inconclusive', '', ...(this.inconclusive.length ? this.inconclusive.map((x) => `- ${x}`) : ['- none']), '',
+      '## Processes', '', `- surviving (no proof of exit): ${(extra.survivors || []).length ? extra.survivors.join(', ') + ' — the sandbox and the 1.1.74 worktree were KEPT' : 'none'}`, '',
+      '## codex sandbox windows --help (real run)', '', extra.codexHelp ? '```\n' + extra.codexHelp.text + '\n```' : '- not run (dry run, or not reached)', '',
+      extra.stopReason ? `**Stopped by design:** ${extra.stopReason}` : ''
     ].join('\n');
     W.write(path.join(s.report, 'layer-b-report.md'), redact(md));
     return { ok, json };
@@ -2012,33 +2161,50 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   async main() {
     this.runStart = Date.now();
     const s = this.layout();
-    log(`mode: ${this.args.dryRun ? 'DRY RUN (stub TUIs, zero tokens)' : 'REAL (claude + codex)'}; sandbox ${s.base}`);
+    log(`mode: ${this.args.dryRun ? 'DRY RUN (stub TUIs, zero tokens, no codex binary)' : 'REAL (claude + codex)'}; sandbox ${s.base}`);
     const { liveUserData } = this.preflight();
     if (!this.args.go) {
-      log('preflight OK. Nothing was built, launched or written (pass --go with LAYERB_SOAK=1, and god\'s OK, to run).');
+      log('preflight OK. Nothing was built, launched or written (see the header for --go and its required flags).');
       return 0;
     }
     W.allowRoot(s.base);
     W.allowRoot(s.report);
-    // R4: shred credentials an earlier killed run left behind, then remove its sandbox.
-    const sweep = sweepStale(os.tmpdir(), s.base);
-    if (sweep.length) log(`startup sweep: ${JSON.stringify(sweep)}`);
-    this.check(sweep.every((x) => x.removed && x.shredded === x.credentials), 'startup sweep: stale md-layerb-* sandboxes shredded and removed', JSON.stringify(sweep));
-    // god c0a73f (c): the live locations, before anything runs.
-    this.liveWatch = LiveWatch.defaults().start();
+    W.mkdir(s.report);
+    // R8 / Dwight (c): the session window watch covers this runner's WHOLE process tree and starts
+    // BEFORE any other process of the run (the sweep spawns nothing; every later step does).
+    this.sessionWatch = new WindowWatch(process.pid, {
+      onHit: (why) => { this.check(false, 'NO WINDOW (session)', why); this.stop(`a window/browser/crash dialog appeared: ${why}`); },
+      onBlind: (why) => { if (!this.aborted()) { this.check(false, 'the session window watch sees', why); this.stop(`the session window watch went blind: ${why}`); } }
+    }).start();
     let result = { ok: false };
-    const credResults = [];
-    let buildCleanup = [];
-    let liveResult = null;
+    let td = null;
+    let sweep = { ok: true, done: [] };
     try {
+      await this.waitFor('the session window watch reports', 30_000, () => this.sessionWatch.lines > 0, 500);
+      // R4 (Dwight, fail-closed): leftover credentials of an earlier killed run are shredded first;
+      // any failure keeps that dir and ABORTS here, before the build and before any credential copy.
+      sweep = sweepStale(os.tmpdir(), s.base);
+      this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed', JSON.stringify(sweep.done));
+      if (!sweep.ok) throw new Error('the startup sweep could not prove the stale credentials gone: aborting before the build');
+      // god 4dd770 (2) + 57634c: the real run's FIRST codex binary is the help; the live probe (and
+      // everything after it) needs --codex-sandbox-probe, given only after god has read the help.
+      if (!this.args.dryRun) {
+        this.codexSandboxHelp();
+        if (!this.args.codexProbe) {
+          this.stopReason = 'codex sandbox windows --help recorded; god reviews it, then the run is repeated with --codex-sandbox-probe';
+          throw new Error(this.stopReason);
+        }
+      }
+      this.liveWatch = LiveWatch.defaults().start();
       this.build();
       this.appEnv(liveUserData);
       this.seed();
       this.installCredentials();
       this.factN4();
-      // R1 zero-token proofs, dry and real: a failure stops the run before any agent starts.
+      // R1 zero-token proofs, before any agent: the Claude jail (both modes); the Codex sandbox probe
+      // only in the real run behind --codex-sandbox-probe (the dry run starts no codex binary).
       if (!this.proveClaudeJail()) throw new Error('the Claude jail proof failed');
-      if (!this.proveCodexSandbox()) throw new Error('the Codex sandbox proof failed');
+      if (!this.args.dryRun && !this.proveCodexSandbox()) throw new Error('the Codex sandbox proof failed');
       this.startedAt = Date.now();
       this.startMonitors();
       await this.launch(this.exe175, '1.1.75 (phase A)');
@@ -2074,29 +2240,12 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       log(`run stopped: ${e && e.message}`);
       if (!this.aborted()) this.stop(String(e && e.message));
     } finally {
-      for (const t of this.bg) clearInterval(t);
-      try { this.pollTokens(); } catch { /* best effort */ }
-      // R4 order: every process FIRST (so no CLI can rewrite a token), then the credentials.
-      await this.stopApp('final').catch((e) => { this.check(false, 'final kill', e.message); });
-      const del = this.creds.deleteAll();
-      const real = this.creds.verifyRealUnchanged();
-      for (const d of del) credResults.push({ ...d, ...(real.find((r) => r.label === d.label) || {}) });
-      for (const c of credResults) {
-        this.check(c.deleted, `credentials: the ${c.label} copy is shredded`);
-        this.check(c.unchanged, `credentials: the REAL ${c.label} file is byte-identical (SHA-256 + mtime + size)`, `${c.real} sha ${c.shaSame} mtime ${c.mtimeSame} size ${c.sizeSame}`);
-        this.check(c.tokenRefreshed !== null, `credentials: whether ${c.label} refreshed its token is known`, `refreshed=${c.tokenRefreshed}`);
-      }
-      try { buildCleanup = this.cleanupBuild(); } catch (e) { buildCleanup = [`cleanup: ${e.message}`]; }
-      try {
-        liveResult = this.liveWatch.compare(this.markers());
-        this.check(liveResult.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run', liveResult.failures.join('; '));
-      } catch (e) { this.check(false, 'live-location check', e.message); }
-      let evidence = null;
-      try { evidence = this.collectEvidence(); } catch (e) { log(`evidence: ${e.message}`); }
-      result = this.report({ credentials: credResults, evidence, liveWatch: liveResult, buildCleanup, sweep });
-      if (!this.args.keepSandbox) { try { W.rm(s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } }
+      td = await this.teardown();
+      if (this.sessionWatch) { this.watchHits = this.watchHits.concat(this.sessionWatch.hits); this.sessionWatch.stop(); }
+      result = this.report({ ...td, sweep: sweep.done, codexHelp: this.codexHelp || null, stopReason: this.stopReason || null });
     }
     log(`report: ${path.join(s.report, 'layer-b-report.md')}`);
+    if (this.stopReason) { log(`STOPPED BY DESIGN: ${this.stopReason}`); return 3; }
     log(result.ok ? 'LAYER (b): PASS' : 'LAYER (b): NOT PASSED');
     return result.ok ? 0 : 1;
   }
@@ -2116,20 +2265,30 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
   let exiting = false;
-  /** R4 order, synchronous (no event loop may be left): 1. kill every process we started, so no
-   *  CLI can rewrite a refreshed token; 2. shred the credential copies; 3. remove the sandbox. */
+  /** R4 order, synchronous (no event loop may be left): 1. kill every process we started (so no CLI
+   *  can rewrite a refreshed token); 2. shred the credential copies (always); 3. remove the sandbox
+   *  ONLY if the kill was proven, else keep it (with the evidence) and say so; 4. rebuild out/
+   *  without the seams. */
   const emergency = (code) => {
     if (exiting) return;
     exiting = true;
-    try { if (lb) lb.procs.killSyncBestEffort(); } catch { /* best effort */ }
+    let proven = false;
+    try { if (lb) proven = lb.procs.killSyncBestEffort().ok === true; } catch { proven = false; }
     try { if (lb && lb.watch) lb.watch.stop(); } catch { /* best effort */ }
+    try { if (lb && lb.sessionWatch) lb.sessionWatch.stop(); } catch { /* best effort */ }
     try { if (lb) lb.creds.deleteAll(); } catch { /* best effort */ }
-    try { if (lb && lb.s && !lb.args.keepSandbox && fs.existsSync(lb.s.base)) W.rm(lb.s.base); } catch { /* best effort */ }
+    try {
+      if (lb && lb.s && !lb.args.keepSandbox && fs.existsSync(lb.s.base)) {
+        if (proven) W.rm(lb.s.base);
+        else console.error(`[layer-b] NO PROOF OF EXIT: the sandbox ${lb.s.base} is KEPT; check for surviving processes`);
+      }
+    } catch { /* best effort */ }
+    try { if (lb) lb.rebuildOutWithoutSeams(); } catch { /* best effort */ }
     process.exit(code);
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(sig, () => { log(`${sig}: cleaning up`); emergency(130); });

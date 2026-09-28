@@ -117,10 +117,10 @@ export const LAYERB_SEAMS_BUILT: boolean = typeof __LAYERB_SEAMS__ === 'undefine
 /** ZT-I1-MAIL layer (b), test infrastructure: the ONE explicit, validated per-run
  *  relocation of the whole dev root (userData, hive, harness home, single-instance
  *  lock and pipe all derive from it). Honoured only under MUNDER_DEV=1. */
-export const DEV_ROOT_ENV = 'MUNDER_DEV_ROOT';
+export const DEV_ROOT_ENV: string = LAYERB_SEAMS_BUILT ? 'MUNDER_DEV_ROOT' : '';   // '' (and folded away) in a normal build
 /** ZT-I1-MAIL layer (b), test infrastructure: a hidden run (no window is ever shown,
  *  focused or restored; no toast, dialog or external app). Honoured only under MUNDER_DEV=1. */
-export const DEV_HIDDEN_ENV = 'MUNDER_HIDDEN';
+export const DEV_HIDDEN_ENV: string = LAYERB_SEAMS_BUILT ? 'MUNDER_HIDDEN' : '';   // '' (and folded away) in a normal build
 
 export type DevRootResolution =
   | { ok: true; root: string; override: boolean }

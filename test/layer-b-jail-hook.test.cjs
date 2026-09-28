@@ -1,11 +1,12 @@
 'use strict';
 /**
- * ZT-I1-MAIL layer (b), R1 proof (god c0a73f (a)): the Claude jail hook (test/tools/layer-b-jail-hook.cjs)
- * DENIES writes, reads and shell commands that reach C:\Dunder\hive, the real ~/.claude, ~/.codex or
- * the live userData, and anything outside the sandbox; it allows the agent's own work inside it.
- * Zero tokens: synthetic PreToolUse payloads, both through decide() and through the real script as a
- * child process (stdin JSON -> exit 2 + reason, the documented blocking form). No CLI is started, and
- * nothing outside a temp dir is touched (the denied paths are only named, never opened).
+ * ZT-I1-MAIL layer (b), R1 proof (god c0a73f (a)) + Jim's re-audit: the Claude jail hook
+ * (test/tools/layer-b-jail-hook.cjs) is a STRICT ALLOWLIST. Read/Glob/Grep/LS inside the sandbox and
+ * Write/Edit/MultiEdit inside the agent's own dirs are the only things it allows; every other tool
+ * (Bash, PowerShell, MCP, Agent/Task, Web*, NotebookEdit, unknown) is denied, and every path form
+ * that could reach C:\Dunder\hive, the real ~/.claude/.codex or the live userData is denied.
+ * Zero tokens: synthetic PreToolUse payloads, in-process and through the real script (exit 2 =
+ * deny). No CLI is started; the denied targets are only named, never opened.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -27,6 +28,7 @@ function sandbox(t) {
   const agent = path.join(base, 'devroot', 'hive', 'agents', 'lb-claude');
   const home = path.join(base, 'jail', 'home');
   for (const d of [work, path.join(agent, 'outbox'), path.join(home, '.claude')]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(work, 'b3-bulk.txt'), 'line 1\n');
   const policy = {
     writeRoots: [work, agent], readRoots: [base], home,
     protect: ['.claude', '.codex', '.claude.json', '.credentials.json', 'auth.json', 'settings.json', 'settings.local.json', 'layer-b-jail-policy.json']
@@ -36,86 +38,129 @@ function sandbox(t) {
   return { base, work, agent, home, policy, policyFile };
 }
 const pay = (tool, input, cwd) => ({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, cwd });
+const denied = (s, tool, input, cwd = s.work) => decide(pay(tool, input, cwd), s.policy);
 
-const LIVE_TARGETS = () => [
-  'C:\\Dunder\\hive\\agents\\god\\inbox\\x.json', 'C:/Dunder/hive/registry.json', 'c:\\dunder\\HIVE\\log.jsonl',
-  'C:\\Dunder\\MunderDevData\\hive\\x', path.join(REAL_HOME, '.claude', 'settings.json'), path.join(REAL_HOME, '.claude', '.credentials.json'),
-  path.join(REAL_HOME, '.claude.json'), path.join(REAL_HOME, '.codex', 'auth.json'), path.join(LIVE_USERDATA, 'config.json')
-];
-
-test('DENY: Write/Edit/MultiEdit/NotebookEdit/Read on the live hive, the real ~/.claude, ~/.codex and the live userData', (t) => {
+test('JIM\'S PROBE (re-audit 17-42): every escape is DENIED', (t) => {
   const s = sandbox(t);
-  for (const target of LIVE_TARGETS()) {
-    for (const [tool, key] of [['Write', 'file_path'], ['Edit', 'file_path'], ['MultiEdit', 'file_path'], ['NotebookEdit', 'notebook_path'], ['Read', 'file_path']]) {
-      const why = decide(pay(tool, { [key]: target, content: 'x' }, s.work), s.policy);
-      assert.ok(why, `${tool} ${target} must be DENIED`);
-    }
-    assert.ok(decide(pay('Glob', { path: path.dirname(target), pattern: '*' }, s.work), s.policy), `Glob in ${path.dirname(target)}`);
-    assert.ok(decide(pay('Grep', { path: target, pattern: 'x' }, s.work), s.policy), `Grep ${target}`);
-  }
-  // Relative escapes and home forms resolve outside too.
-  for (const p of ['..\\..\\..\\x.txt', '~/.claude/settings.json', '/c/Dunder/hive/x', '\\\\server\\share\\x']) {
-    assert.ok(decide(pay('Write', { file_path: p, content: 'x' }, s.work), s.policy), `Write ${p}`);
-  }
-});
-
-test('DENY: shell commands that name a live path, the home, a POSIX drive, a parent escape, a download, a window or a link', (t) => {
-  const s = sandbox(t);
-  const cmds = [
-    'echo x > C:\\Dunder\\hive\\agents\\god\\inbox\\m.json', 'echo x > "C:/Dunder/hive/registry.json"', 'type C:\\Dunder\\hive\\log.jsonl',
-    `copy x.txt ${path.join(REAL_HOME, '.claude', 'settings.json')}`, `cat "${path.join(REAL_HOME, '.codex', 'auth.json')}"`,
-    'echo x > ~/.claude/settings.json', 'cat $HOME/.codex/auth.json', 'type %USERPROFILE%\\.claude.json', 'Get-Content $env:USERPROFILE\\.claude.json',
-    'echo x > /c/Dunder/hive/x', 'cd .. && echo x > y', 'cat ../../x', 'curl https://example.com -o x', 'Invoke-WebRequest https://x -OutFile y',
-    'start https://example.com', 'explorer.exe .', 'mklink /J j C:\\Dunder', 'ln -s /c/Dunder j', 'cat /etc/passwd', 'echo x > /tmp/x',
-    'cat .credentials.json', 'rm -rf .claude', 'setx PATH x', `echo x > ${LIVE_USERDATA}\\config.json`
+  const cases = [
+    ['Bash', { command: 'echo x > \\Dunder\\hive\\PWNED.txt' }],
+    ['Bash', { command: 'cd \\ && cd Dunder && cd hive && echo x > PWNED.txt' }],
+    ['PowerShell', { command: '[IO.File]::WriteAllText([IO.Path]::Combine([char]67+":\\","Dunder","hive","PWNED.txt"),"x")' }],
+    ['Bash', { command: 'node -e "require(\'fs\').writeFileSync(String.fromCharCode(67)+\':/Dunder/hive/PWNED.txt\',\'x\')"' }],
+    ['Bash', { command: 'pushd $(printf "C:")\\\\Dunder && echo x > hive/PWNED.txt' }],
+    ['Bash', { command: 'cmd /c "cd /d C: && cd \\Dunder\\hive && echo x > PWNED.txt"' }],
+    ['Write', { file_path: 'C:/Dunder/hive/PWNED.txt', content: 'x' }],
+    ['mcp__filesystem__write_file', { path: 'C:\\Dunder\\hive\\PWNED.txt', content: 'x' }],
+    ['mcp__munder-hive__send', { to: 'god', body: 'x' }],
+    ['Agent', { prompt: 'write x into C:\\Dunder\\hive\\PWNED.txt' }],
+    ['Task', { prompt: 'write x into C:\\Dunder\\hive\\PWNED.txt', subagent_type: 'general-purpose' }]
   ];
-  for (const c of cmds) assert.ok(decide(pay('Bash', { command: c }, s.work), s.policy), `Bash "${c}" must be DENIED`);
-  assert.ok(decide(pay('PowerShell', { command: 'Set-Content C:\\Dunder\\hive\\x y' }, s.work), s.policy));
-  assert.ok(decide(pay('Bash', { command: 'echo ok' }, 'C:\\Dunder\\hive'), s.policy), 'a shell that starts outside the sandbox');
-  assert.ok(decide(pay('WebFetch', { url: 'https://example.com' }, s.work), s.policy));
-  assert.ok(decide(pay('WebSearch', { query: 'x' }, s.work), s.policy));
+  for (const [tool, input] of cases) assert.ok(denied(s, tool, input), `${tool} ${JSON.stringify(input)} must be DENIED`);
 });
 
-test('DENY inside the sandbox: the jail\'s own files (settings, credentials, .claude, the policy) are protected', (t) => {
+test('DENY: every non-allowlisted tool, even a harmless one', (t) => {
+  const s = sandbox(t);
+  for (const tool of ['Bash', 'PowerShell', 'BashOutput', 'KillShell', 'WebFetch', 'WebSearch', 'NotebookEdit', 'NotebookRead', 'Agent', 'Task', 'TodoWrite', 'Skill', 'ToolSearch', 'SlashCommand', 'mcp__x__y', 'SomethingNew', '', undefined]) {
+    assert.ok(denied(s, tool, { command: 'echo ok', file_path: path.join(s.work, 'x.txt'), notebook_path: path.join(s.work, 'n.ipynb') }), `${tool} must be DENIED`);
+  }
+});
+
+test('DENY: the live hive, the real ~/.claude, ~/.codex and the live userData, through Read/Write/Edit/MultiEdit/Glob/Grep', (t) => {
+  const s = sandbox(t);
+  const targets = [
+    'C:\\Dunder\\hive\\agents\\god\\inbox\\x.json', 'C:/Dunder/hive/registry.json', 'c:\\dunder\\HIVE\\log.jsonl', 'C:\\Dunder\\MunderDevData\\hive\\x',
+    path.join(REAL_HOME, '.claude', 'settings.json'), path.join(REAL_HOME, '.claude', '.credentials.json'), path.join(REAL_HOME, '.claude.json'),
+    path.join(REAL_HOME, '.codex', 'auth.json'), path.join(LIVE_USERDATA, 'config.json')
+  ];
+  for (const target of targets) {
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'Read']) assert.ok(denied(s, tool, { file_path: target, content: 'x' }), `${tool} ${target}`);
+    assert.ok(denied(s, 'Glob', { path: path.dirname(target), pattern: '*' }), `Glob in ${path.dirname(target)}`);
+    assert.ok(denied(s, 'Grep', { path: target, pattern: 'x' }), `Grep ${target}`);
+    assert.ok(denied(s, 'LS', { path: path.dirname(target) }), `LS ${path.dirname(target)}`);
+  }
+});
+
+test('DENY: every path form that could leave the jail (rooted, relative, .., ~, UNC, device, POSIX drive, ADS, 8.3, dots, reserved names)', (t) => {
+  const s = sandbox(t);
+  const forms = [
+    '\\Dunder\\hive\\PWNED.txt', '/Dunder/hive/PWNED.txt',                           // drive-less rooted: on the cwd's drive
+    '..\\..\\..\\..\\..\\Dunder\\hive\\x', '../../../../../../Dunder/hive/x',           // climbing out of the cwd
+    path.join('..', '..', '..', '..', 'jail', 'home', '.claude', 'settings.json'),      // climbing into a protected jail file
+    '~/.claude/settings.json', '~\\.claude.json', '~admin/x',                            // home forms (the jailed ~ still hits a protected name)
+    '\\\\localhost\\C$\\Dunder\\hive\\x', '//localhost/C$/Dunder/hive/x', '\\\\?\\UNC\\localhost\\C$\\Dunder\\hive\\x',
+    '\\\\?\\C:\\Dunder\\hive\\x', '\\\\.\\C:\\Dunder\\hive\\x', '\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\x', '\\\\.\\pipe\\munder-difflin-23c0d031569a',
+    '/c/Dunder/hive/x', 'C:Dunder\\hive\\x',                                             // POSIX drive, drive-relative
+    path.join(s.work, 'x.txt:hidden'), path.join(s.work, 'x.txt::$DATA'),               // alternate data streams
+    'C:\\DUNDER~1\\hive\\x', 'C:\\Dunder\\hive.\\x', 'C:\\Dunder\\hive \\x', path.join(s.work, 'x.txt.'),
+    path.join(s.work, 'CON'), path.join(s.work, 'nul.txt'), path.join(s.work, 'COM1'),
+    path.join(s.work, '*.json')
+  ];
+  for (const f of forms) assert.ok(denied(s, 'Write', { file_path: f, content: 'x' }), `Write ${f} must be DENIED`);
+  for (const f of forms.filter((x) => !x.includes('*'))) assert.ok(denied(s, 'Read', { file_path: f }), `Read ${f} must be DENIED`);
+  // 8.3 short names are resolved: if the real temp dir has a short alias, the SAME dir via the alias is inside the jail.
+  const tmpShort = process.env.TEMP && process.env.TEMP.includes('~') ? process.env.TEMP : null;
+  if (tmpShort) assert.equal(denied(s, 'Read', { file_path: path.join(tmpShort, path.relative(os.tmpdir(), s.work), 'b3-bulk.txt') }), null, 'a short-name alias of an in-jail file resolves inside');
+  // Glob/Grep patterns may not leave the search root.
+  for (const pattern of ['C:/Dunder/**', '/Dunder/**', '../../**', '~/**', '**/../../x', 'x:y']) assert.ok(denied(s, 'Glob', { pattern }), `Glob pattern ${pattern}`);
+  assert.ok(denied(s, 'Grep', { pattern: 'x', glob: '../../**' }), 'Grep glob climbing');
+  // A session cwd outside the sandbox: nothing is allowed.
+  assert.ok(denied(s, 'Read', { file_path: 'x.txt' }, 'C:\\Dunder\\hive'));
+  assert.ok(denied(s, 'Read', { file_path: 'x.txt' }, ''));
+});
+
+test('DENY via links: a junction inside the jail that points at a live location is followed (realpath), and so is its missing child', (t) => {
+  const s = sandbox(t);
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'md-lb-outside-'));   // stands in for a live location outside the jail
+  t.after(() => fs.rmSync(target, { recursive: true, force: true }));
+  const link = path.join(s.work, 'escape');
+  try { fs.symlinkSync(target, link, 'junction'); } catch (e) { t.skip(`cannot create a junction here: ${e.message}`); return; }
+  assert.ok(denied(s, 'Write', { file_path: path.join(link, 'x.txt'), content: 'x' }), 'a new file behind a junction');
+  assert.ok(denied(s, 'Read', { file_path: path.join(link, 'deeper', 'y.txt') }), 'a missing child behind a junction');
+  assert.ok(denied(s, 'Glob', { path: link, pattern: '*' }));
+});
+
+test('DENY inside the sandbox: the jail\'s own files and anything outside the two write roots', (t) => {
   const s = sandbox(t);
   for (const p of [path.join(s.home, '.claude', 'settings.json'), path.join(s.home, '.claude', '.credentials.json'), path.join(s.home, '.claude.json'),
     path.join(s.agent, 'settings.json'), path.join(s.agent, '.claude', 'skills', 'x.md'), path.join(s.agent, '.codex', 'auth.json'), s.policyFile]) {
-    assert.ok(decide(pay('Write', { file_path: p, content: 'x' }, s.work), s.policy), `Write ${p}`);
-    assert.ok(decide(pay('Read', { file_path: p }, s.work), s.policy), `Read ${p}`);
+    assert.ok(denied(s, 'Write', { file_path: p, content: 'x' }), `Write ${p}`);
+    assert.ok(denied(s, 'Read', { file_path: p }), `Read ${p}`);
   }
-  // The jail root itself is readable but not writable outside the two write roots.
-  assert.ok(decide(pay('Write', { file_path: path.join(s.base, 'devroot', 'hive', 'registry.json'), content: 'x' }, s.work), s.policy));
+  assert.ok(denied(s, 'Write', { file_path: path.join(s.base, 'devroot', 'hive', 'registry.json'), content: 'x' }), 'readable, not writable');
+  assert.ok(denied(s, 'Edit', { file_path: path.join(s.base, 'devroot', 'hive', 'agents', 'god', 'inbox', 'x.json'), old_string: 'a', new_string: 'b' }));
 });
 
-test('ALLOW: the agent\'s own work inside the jail (its cwd, its outbox, reads in the sandbox, harmless shell)', (t) => {
+test('ALLOW: exactly what the layer-(b) facts need (read its files, write its outbox reply)', (t) => {
   const s = sandbox(t);
-  assert.equal(decide(pay('Write', { file_path: path.join(s.agent, 'outbox', 'r1.json'), content: '{}' }, s.work), s.policy), null);
-  assert.equal(decide(pay('Write', { file_path: 'notes.txt', content: 'x' }, s.work), s.policy), null, 'relative to its cwd');
-  assert.equal(decide(pay('Read', { file_path: path.join(s.work, 'b3-bulk.txt'), offset: 1, limit: 300 }, s.work), s.policy), null);
-  assert.equal(decide(pay('Read', { file_path: path.join(s.base, 'devroot', 'hive', 'agents', 'lb-claude', 'memory.md') }, s.work), s.policy), null);
-  assert.equal(decide(pay('Glob', { pattern: '*.txt' }, s.work), s.policy), null);
-  for (const c of ['sleep 8', 'ping -n 6 127.0.0.1 > /dev/null', 'echo hello', `type "${path.join(s.work, 'b3-bulk.txt')}"`]) {
-    assert.equal(decide(pay('Bash', { command: c }, s.work), s.policy), null, `Bash "${c}"`);
-  }
-  assert.equal(decide(pay('mcp__munder-hive__send', { to: 'god' }, s.work), s.policy), null, 'the product\'s own tools');
+  assert.equal(denied(s, 'Write', { file_path: path.join(s.agent, 'outbox', 'r1.json'), content: '{}' }), null, 'the outbox reply');
+  assert.equal(denied(s, 'Write', { file_path: 'notes.txt', content: 'x' }), null, 'relative to its cwd');
+  assert.equal(denied(s, 'Edit', { file_path: path.join(s.agent, 'memory.md'), old_string: 'a', new_string: 'b' }), null);
+  assert.equal(denied(s, 'MultiEdit', { file_path: path.join(s.work, 'x.txt'), edits: [] }), null);
+  assert.equal(denied(s, 'Read', { file_path: path.join(s.work, 'b3-bulk.txt'), offset: 1, limit: 300 }), null);
+  assert.equal(denied(s, 'Read', { file_path: path.join(s.base, 'devroot', 'hive', 'agents', 'lb-claude', 'memory.md') }), null);
+  assert.equal(denied(s, 'Glob', { pattern: '*.txt' }), null);
+  assert.equal(denied(s, 'Grep', { pattern: 'line', path: s.work }), null);
+  assert.equal(denied(s, 'LS', { path: s.work }), null);
 });
 
-test('END TO END: the real hook script, fed a PreToolUse payload on stdin, exits 2 (deny) or 0 (allow); garbage fails closed', (t) => {
+test('END TO END: the real hook script exits 2 (deny) for Jim\'s escapes and 0 (allow) for an in-jail Write; garbage fails closed', (t) => {
   const s = sandbox(t);
-  const run = (payload) => spawnSync(process.execPath, [HOOK, s.policyFile], { input: typeof payload === 'string' ? payload : JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 30_000 });
-  for (const target of LIVE_TARGETS()) {
-    const r = run(pay('Write', { file_path: target, content: 'x' }, s.work));
-    assert.equal(r.status, 2, `${target}: ${r.stderr}`);
+  const run = (payload, policy = s.policyFile) => spawnSync(process.execPath, [HOOK, policy], { input: typeof payload === 'string' ? payload : JSON.stringify(payload), encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+  for (const p of [
+    pay('Bash', { command: 'echo x > \\Dunder\\hive\\PWNED.txt' }, s.work),
+    pay('Write', { file_path: '\\Dunder\\hive\\PWNED.txt', content: 'x' }, s.work),
+    pay('mcp__filesystem__write_file', { path: 'C:\\Dunder\\hive\\PWNED.txt' }, s.work),
+    pay('Agent', { prompt: 'x' }, s.work),
+    pay('Write', { file_path: path.join(REAL_HOME, '.claude', 'settings.json'), content: 'x' }, s.work)
+  ]) {
+    const r = run(p);
+    assert.equal(r.status, 2, `${JSON.stringify(p.tool_input)}: ${r.stderr}`);
     assert.match(r.stderr, /\[layer-b jail\] DENIED/);
   }
-  const hiveCmd = run(pay('Bash', { command: 'echo x > C:\\Dunder\\hive\\marker.txt' }, s.work));
-  assert.equal(hiveCmd.status, 2);
   const ok = run(pay('Write', { file_path: path.join(s.agent, 'outbox', 'r.json'), content: '{}' }, s.work));
   assert.equal(ok.status, 0, ok.stderr);
   assert.equal(ok.stdout, '');
   assert.equal(run('not json').status, 2, 'unparseable payload: deny');
-  const noPolicy = spawnSync(process.execPath, [HOOK, path.join(s.base, 'missing.json')], { input: '{}', encoding: 'utf8', windowsHide: true });
-  assert.equal(noPolicy.status, 2, 'missing policy: deny');
-  // Nothing was created at any denied target (they were never opened).
-  assert.equal(fs.existsSync('C:\\Dunder\\hive\\marker.txt'), false);
+  assert.equal(run('{}', path.join(s.base, 'missing.json')).status, 2, 'missing policy: deny');
+  assert.equal(fs.existsSync('C:\\Dunder\\hive\\PWNED.txt'), false);
 });

@@ -8,43 +8,47 @@
  * hooks beside it, and Claude runs both). Claude's docs: "PreToolUse hooks fire before any
  * permission-mode check, in every permission mode ... A hook that returns deny blocks the tool even
  * in bypassPermissions mode." So the product keeps its normal Claude arguments
- * (--permission-mode bypassPermissions) and this hook is the guarantee; the permissions.deny rules
- * the runner writes beside it are a second, independent layer.
+ * (--permission-mode bypassPermissions) and this hook is the guarantee; the permissions rules the
+ * runner writes beside it are a second, independent layer.
+ *
+ * A STRICT ALLOWLIST (Jim's re-audit: a text blocklist over shell commands cannot be made safe):
+ *   Read / Glob / Grep / LS    allowed only for a path inside `readRoots`;
+ *   Write / Edit / MultiEdit   allowed only for a path inside `writeRoots`;
+ *   EVERYTHING ELSE IS DENIED: Bash, PowerShell, every MCP tool, Agent/Task, WebFetch, WebSearch,
+ *   NotebookEdit, and any tool this file does not know.
+ * The layer-(b) facts need nothing more: the agent reads files and replies by WRITING an outbox JSON.
+ *
+ * Paths are resolved the way Windows would, then checked on the REAL path:
+ *   absolute; drive-less rooted (\x or /x, on the cwd's drive); relative to cwd; `..`; `~`;
+ *   device paths (\\?\C:\x, \\.\C:\x -> C:\x; any other device or \\?\UNC\ form is denied); UNC
+ *   (denied); 8.3 short names, symlinks and junctions (realpath where the path exists, else the
+ *   realpath of its nearest existing parent plus the rest). Denied outright as ambiguous: a single
+ *   letter POSIX drive (/c/...), an alternate data stream or any stray colon, a segment ending in a
+ *   dot or a space, a reserved device name (CON, NUL, COM1 ...), wildcards in a Read/Write path,
+ *   and protected names inside the jail (.claude, .codex, settings, credentials, the policy).
  *
  * Policy (a JSON file, argv[2]; it lives OUTSIDE every root the agent may write):
- *   writeRoots   Write/Edit/MultiEdit/NotebookEdit only inside these;
- *   readRoots    Read/Glob/Grep/LS/NotebookRead and any absolute path in a shell command only inside
- *                these (the whole sandbox);
- *   protect      path segments that are denied even inside the roots (.claude, .codex, settings,
- *                credentials): the agent can never edit its own jail or read a login;
- *   home         the jailed HOME, for ~ expansion;
- *   log          optional: one JSON line per decision (evidence).
- * Shell commands (Bash, PowerShell) are checked textually: every absolute path they name must be
- * inside readRoots and unprotected, and home/env/UNC/parent-escape/POSIX-drive forms, network
- * downloaders and window-openers are denied outright. WebFetch/WebSearch are denied (not needed).
- * Everything else (the product's mcp__ tools, TodoWrite, Task ...) is allowed: their own file and
- * shell calls come back through this hook.
- *
+ *   { writeRoots, readRoots, protect, home, log? }
  * Deny = exit code 2 with the reason on stderr (the documented blocking form). Any error = deny
  * (fail closed). Allow = exit 0, no output.
  */
 const fs = require('node:fs');
 const path = require('node:path');
 
-const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
-const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead']);
-const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
-const NET_TOOLS = new Set(['WebFetch', 'WebSearch']);
 const W32 = path.win32;
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS']);
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
+const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
 
-/** Canonical (lower-case, resolved, symlinks/junctions followed where the path exists). */
-function canon(p) {
-  let probe = W32.resolve(p);
+/** The real, canonical form of an ABSOLUTE drive path: realpath (8.3 names, links, junctions
+ *  resolved) where it exists, else the nearest existing parent's realpath plus the remaining tail. */
+function realOf(abs) {
+  let probe = abs;
   const tail = [];
-  for (let i = 0; i < 64; i++) {
+  for (let i = 0; i < 128; i++) {
     try {
       const real = fs.realpathSync.native(probe);
-      return W32.join(real, ...tail.reverse()).replace(/[\\/]+$/, '').toLowerCase();
+      return W32.join(real, ...tail.reverse());
     } catch {
       const parent = W32.dirname(probe);
       if (parent === probe) break;
@@ -52,79 +56,87 @@ function canon(p) {
       probe = parent;
     }
   }
-  return W32.resolve(p).replace(/[\\/]+$/, '').toLowerCase();
+  return abs;
 }
-const within = (p, roots) => { const c = canon(p); return roots.some((r) => { const rc = canon(r); return c === rc || c.startsWith(rc + '\\'); }); };
+const key = (p) => W32.normalize(p).replace(/[\\/]+$/, '').toLowerCase();
+function within(real, roots) {
+  const r = key(real);
+  return roots.some((root) => { const k = key(realOf(W32.resolve(root))); return r === k || r.startsWith(k + '\\'); });
+}
+
+/**
+ * Resolve a tool path argument. Returns { abs, real } or { bad }.
+ */
+function resolveToolPath(raw, policy, cwd) {
+  if (typeof raw !== 'string' || !raw.trim()) return { bad: 'no path' };
+  let s = raw.trim();
+  if (s.includes('\0')) return { bad: 'NUL in the path' };
+  // Device paths: only the plain drive forms are unwrapped; everything else is denied.
+  const dev = /^[\\/]{2}[?.][\\/](.*)$/.exec(s);
+  if (dev) {
+    if (!/^[A-Za-z]:[\\/]/.test(dev[1])) return { bad: `device path ${s}` };
+    s = dev[1];
+  }
+  if (/^[\\/]{2}/.test(s)) return { bad: `UNC path ${s}` };
+  if (/^\/[A-Za-z](\/|$)/.test(s)) return { bad: `POSIX drive path ${s}` };
+  if (s === '~' || /^~[\\/]/.test(s)) s = W32.join(policy.home, s.slice(1));
+  else if (/^~/.test(s)) return { bad: `another user's home ${s}` };
+  if (/^[A-Za-z]:(?![\\/])/.test(s)) return { bad: `drive-relative path ${s}` };
+  // A colon anywhere but right after the drive letter: an alternate data stream or worse.
+  if (s.slice(/^[A-Za-z]:/.test(s) ? 2 : 0).includes(':')) return { bad: `a colon in the path ${s}` };
+  if (!W32.isAbsolute(cwd || '') || !/^[A-Za-z]:[\\/]/.test(cwd)) return { bad: `no usable cwd (${cwd})` };
+  // Drive-less rooted (\x, /x) resolves on the cwd's drive; relative resolves against cwd.
+  const abs = W32.resolve(cwd, s);
+  if (!/^[A-Za-z]:\\/.test(abs)) return { bad: `unresolvable ${s}` };
+  for (const seg of abs.slice(3).split('\\').filter(Boolean)) {
+    if (/[. ]$/.test(seg)) return { bad: `a segment ending in a dot or space (${seg})` };
+    if (RESERVED.test(seg)) return { bad: `a reserved device name (${seg})` };
+  }
+  const real = realOf(abs);
+  return { abs, real };
+}
+
 const protectedPath = (p, policy) => {
-  const segs = W32.resolve(p).toLowerCase().split(/[\\/]+/);
+  const segs = key(p).split('\\');
   return (policy.protect || []).some((name) => segs.includes(String(name).toLowerCase()));
 };
-
-function resolveArg(p, policy, cwd) {
-  let s = String(p || '').trim();
-  if (!s) return null;
-  if (s === '~' || /^~[\\/]/.test(s)) s = W32.join(policy.home, s.slice(1));
-  if (/^\/[a-zA-Z]\//.test(s)) return { bad: `POSIX drive path ${s}` };      // /c/Users/... (Git Bash form)
-  if (/^\\\\|^\/\//.test(s)) return { bad: `UNC path ${s}` };
-  return { abs: W32.isAbsolute(s) && /^[A-Za-z]:/.test(s) ? W32.resolve(s) : W32.resolve(cwd, s) };
-}
-
-/** A shell command: every absolute path inside readRoots and unprotected; risky forms refused. */
-function checkShell(cmd, policy, cwd) {
-  const text = String(cmd || '');
-  const refuse = [
-    [/(^|[\s"'=(;|&])~(?=[\\/\s"']|$)/, 'the home directory (~)'],
-    [/\$HOME\b|\$\{HOME\}|%USERPROFILE%|%HOMEPATH%|%APPDATA%|%LOCALAPPDATA%|\$env:/i, 'a home/profile variable'],
-    [/(^|[\s"'=])\/[a-zA-Z]\//, 'a POSIX drive path (/c/...)'],
-    [/\\\\[^\s\\]+\\|(^|[\s"'])\/\/[^\s/]/, 'a UNC path'],
-    [/(^|[\\/\s"'])\.\.([\\/\s"']|$)/, 'a parent-directory escape (..)'],
-    [/\b(curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|Start-BitsTransfer|certutil|bitsadmin)\b/i, 'a network download'],
-    [/\b(start|explorer(\.exe)?|Start-Process|rundll32|mshta|msedge|chrome|firefox|cmd\s+\/c\s+start)\b/i, 'a window/app launcher'],
-    [/\b(mklink|New-Item\s+[^|]*-ItemType\s+(SymbolicLink|Junction)|ln\s+-s)\b/i, 'a link (could escape the jail)'],
-    [/\b(setx|reg(\.exe)?\s+(add|delete)|Set-ItemProperty)\b/i, 'a registry/env write']
-  ];
-  for (const [re, what] of refuse) if (re.test(text)) return `the command uses ${what}`;
-  const drives = text.match(/[A-Za-z]:[\\/][^\s"'|;&<>`]*/g) || [];
-  for (const d of drives) {
-    if (!within(d, policy.readRoots)) return `the command names ${d}, outside the sandbox`;
-    if (protectedPath(d, policy)) return `the command names ${d}, a protected jail file`;
-  }
-  // Absolute POSIX paths other than /dev/null (e.g. /tmp, /usr, /etc) are outside the jail.
-  const posix = text.match(/(^|[\s"'=<>|;&])\/(?!dev\/null\b)[A-Za-z0-9_.-][^\s"'|;&<>]*/g) || [];
-  if (posix.length) return `the command names ${posix[0].trim()}, outside the sandbox`;
-  const names = (policy.protect || []).filter((n) => new RegExp(`(^|[\\\\/\\s"'])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([\\\\/\\s"']|$)`, 'i').test(text));
-  if (names.length) return `the command names the protected ${names[0]}`;
-  if (!within(cwd, policy.readRoots)) return `the shell starts outside the sandbox (${cwd})`;
-  return null;
-}
 
 /** The decision for one PreToolUse payload: null = allow, a string = the deny reason. */
 function decide(payload, policy) {
   if (!payload || typeof payload !== 'object') return 'unreadable hook payload';
-  const tool = String(payload.tool_name || '');
+  if (!policy || !Array.isArray(policy.readRoots) || !Array.isArray(policy.writeRoots)) return 'no jail policy';
+  const tool = typeof payload.tool_name === 'string' ? payload.tool_name : '';
   const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
-  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : policy.home;
-  if (NET_TOOLS.has(tool)) return `${tool} is not allowed in the layer-b jail`;
-  if (SHELL_TOOLS.has(tool)) return checkShell(input.command, policy, cwd);
-  if (WRITE_TOOLS.has(tool) || READ_TOOLS.has(tool)) {
-    const raw = input.file_path ?? input.notebook_path ?? input.path ?? (READ_TOOLS.has(tool) ? cwd : null);
-    const r = resolveArg(raw, policy, cwd);
-    if (!r) return `${tool} without a path`;
-    if (r.bad) return `${tool}: ${r.bad}`;
-    const roots = WRITE_TOOLS.has(tool) ? policy.writeRoots : policy.readRoots;
-    if (!within(r.abs, roots)) return `${tool} outside the jail: ${r.abs}`;
-    if (protectedPath(r.abs, policy)) return `${tool} on a protected jail file: ${r.abs}`;
-    // A Glob pattern may itself be absolute.
-    if (tool === 'Glob' && typeof input.pattern === 'string' && /^[A-Za-z]:[\\/]|^[\\/~]/.test(input.pattern)) {
-      const pr = resolveArg(input.pattern.replace(/[*?[{].*$/, ''), policy, cwd);
-      if (!pr || pr.bad || !within(pr.abs, roots)) return `Glob pattern outside the jail: ${input.pattern}`;
-    }
-    return null;
+  const cwd = typeof payload.cwd === 'string' && payload.cwd ? payload.cwd : '';
+  const isRead = READ_TOOLS.has(tool);
+  const isWrite = WRITE_TOOLS.has(tool);
+  if (!isRead && !isWrite) return `${tool || 'an unnamed tool'} is not allowed in the layer-b jail (allowlist: Read, Glob, Grep, LS, Write, Edit, MultiEdit)`;
+  // The cwd itself must be inside the sandbox (relative paths resolve against it).
+  const c = resolveToolPath(cwd, policy, cwd);
+  if (c.bad || !within(c.real, policy.readRoots)) return `the session cwd is outside the sandbox (${cwd})`;
+  const roots = isWrite ? policy.writeRoots : policy.readRoots;
+  let raw;
+  if (tool === 'Read' || isWrite) raw = input.file_path;
+  else raw = input.path === undefined || input.path === null || input.path === '' ? cwd : input.path;
+  if (isWrite || tool === 'Read') {
+    if (typeof raw !== 'string') return `${tool} without a file_path`;
+    if (/[*?]/.test(raw)) return `${tool}: a wildcard in the path`;
   }
+  const r = resolveToolPath(raw, policy, cwd);
+  if (r.bad) return `${tool}: ${r.bad}`;
+  if (!within(r.real, roots)) return `${tool} outside the jail: ${r.real}`;
+  if (protectedPath(r.real, policy) || protectedPath(r.abs, policy)) return `${tool} on a protected jail file: ${r.real}`;
+  // Glob/Grep patterns: never absolute, rooted, home-based or climbing.
+  for (const field of ['pattern', 'glob']) {
+    const pat = tool === 'Glob' || (tool === 'Grep' && field === 'glob') ? input[field] : undefined;
+    if (typeof pat !== 'string') continue;
+    if (/^([A-Za-z]:|[\\/~])/.test(pat) || /(^|[\\/])\.\.([\\/]|$)/.test(pat) || pat.includes(':')) return `${tool} ${field} leaves the search root: ${pat}`;
+  }
+  if (tool === 'MultiEdit' && input.edits !== undefined && !Array.isArray(input.edits)) return 'MultiEdit with malformed edits';
   return null;
 }
 
-module.exports = { decide, checkShell, canon, within };
+module.exports = { decide, resolveToolPath, realOf, within, READ_TOOLS, WRITE_TOOLS };
 
 if (require.main === module) {
   let policy = null;

@@ -127,62 +127,6 @@ test('AST: every spawn / spawnSync call, at any nesting, passes windowsHide: tru
   assert.equal(calls((n) => /^(exec|execSync|execFile|execFileSync|fork)$/.test(n.expression.getText(sf))).length, 0);
 });
 
-test('SOURCE: no --force worktree removal (node_modules goes first), no fixed canary port, nothing without --go, the heavy-job gate', () => {
-  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(src), 'never --force as an argument');
-  const rm = src.indexOf("['worktree', 'remove', dir]");
-  assert.ok(rm > 0, 'the 1.1.74 worktree is removed');
-  const clean = src.slice(src.indexOf('cleanupBuild() {'), rm);
-  assert.ok(clean.indexOf('W.rm(nm)') > 0 && clean.indexOf('W.rm(nm)') < clean.length, 'node_modules removed before');
-  assert.match(clean, /isSymbolicLink\(\)\) throw new Error\('node_modules is a link/, 'never removed through a link');
-  assert.equal((src.match(/'worktree', 'remove'/g) || []).length, 1);
-  assert.ok(!/9333/.test(src));
-  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
-  assert.match(src, /if \(!this\.args\.go\) \{[\s\S]{0,300}return 0;/);
-  const main = src.slice(src.indexOf('async main() {'));
-  assert.ok(main.indexOf('return 0;') < main.indexOf('W.allowRoot(s.base)'), 'without --go nothing is even registered for writing');
-  assert.match(src, /if \(this\.args\.go && process\.env\[HEAVY_GATE\] !== '1'\)/);
-  assert.equal(lb.HEAVY_GATE, 'LAYERB_SOAK');
-  // The floor's classifier really takes the slot for such a command line.
-  const { classifyCommand } = require('./load-ts.cjs')(path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts'));
-  assert.equal(classifyCommand('LAYERB_SOAK=1 node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 node test/tools/layer-b-run.cjs --go').heavy, true);
-  assert.equal(lb.parseArgs([]).go, false);
-  assert.equal(lb.parseArgs(['--dry-run-stubs']).dryRun, true);
-  assert.equal(lb.parseArgs(['--keep-v1174']).keepV1174, true);
-  assert.throws(() => lb.parseArgs(['--claude-model', 'x; rm -rf']), /bad model id/);
-  assert.match(src, /isolation\.rigEnv\(s\.jail, process\.env\)/);
-  assert.match(src, /MUNDER_DEV: '1', MUNDER_HIDDEN: '1', MUNDER_DEV_ROOT: s\.devRoot/);
-  assert.match(src, /isolation\.checkIsolation\(probe, s\.base/);
-  assert.deepEqual(lb.CAPS, { perAgentTokens: 400_000, totalTokens: 1_000_000, wallMs: 30 * 60_000 });
-  assert.equal(lb.GLOBAL_WALL_MS, 55 * 60_000, 'under the heavy lock\'s 60 min TTL');
-});
-
-test('R1 confinement: Codex runs workspace-write with jail-only roots, no network, unelevated; Claude\'s jail settings deny and hook', (t) => {
-  assert.ok(!/--dangerously-bypass-approvals-and-sandbox`/.test(src) && !/command = `codex[^`]*dangerously/.test(src), 'Codex never gets the bypass flag');
-  assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
-  assert.match(src, /command = `claude --model \$\{this\.args\.models\.claude\} --permission-mode bypassPermissions`;/, 'Claude arguments unchanged from the product');
-  const toml = lb.codexSandboxToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex']);
-  assert.match(toml, /^sandbox_mode = "workspace-write"$/m);
-  assert.match(toml, /^approval_policy = "never"$/m);
-  assert.match(toml, /^writable_roots = \['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex'\]$/m);
-  assert.match(toml, /^network_access = false$/m);
-  assert.match(toml, /^\[windows\]\nsandbox = "unelevated"$/m);
-  const st = lb.claudeJailSettings({ node: 'C:\\n\\node.exe', policyFile: 'C:\\sb\\layer-b-jail-policy.json', liveDenied: ['C:\\Dunder', path.join(os.homedir(), '.claude')], env: { X: '1' } });
-  assert.ok(st.permissions.deny.includes('Write(//c/Dunder/**)') && st.permissions.deny.includes('Edit(//c/Dunder/**)') && st.permissions.deny.includes('Read(//c/Dunder/**)'));
-  assert.ok(st.permissions.deny.some((d) => /^Write\(\/\/c\/.*\/\.claude\/\*\*\)$/.test(d)));
-  assert.ok(st.permissions.deny.includes('WebFetch'));
-  assert.equal(st.hooks.PreToolUse[0].matcher, '*');
-  assert.match(st.hooks.PreToolUse[0].hooks[0].command, /^"C:\/n\/node\.exe" ".*\/test\/tools\/layer-b-jail-hook\.cjs" "C:\/sb\/layer-b-jail-policy\.json"$/);
-  assert.deepEqual(st.env, { X: '1' });
-  // Phase B keeps the jail; the proofs run BEFORE any agent starts, dry and real, and stop the run on failure.
-  assert.match(src, /this\.writeClaudeSettings\(\{ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String\(pct\) \}\);/);
-  const main = src.slice(src.indexOf('async main() {'));
-  assert.ok(main.indexOf('this.proveClaudeJail()') < main.indexOf('this.launch(') && main.indexOf('this.proveCodexSandbox()') < main.indexOf('this.launch('));
-  assert.match(main, /if \(!this\.proveClaudeJail\(\)\) throw/);
-  assert.match(main, /if \(!this\.proveCodexSandbox\(\)\) throw/);
-  assert.match(src, /\['sandbox', 'windows', '--', this\.node, script\]/, 'the real codex sandbox runner, zero tokens');
-  assert.match(src, /checkCodexSeed\(\)/);
-});
-
 test('Credentials: SHA-256 + mtime + size (a same-size edit with the mtime restored is CAUGHT), token-refresh verdict, shredded copy', (t) => {
   const root = tmpRoot(t, 'md-lb-cred-');
   const real = path.join(root, 'real', 'auth.json');
@@ -214,25 +158,6 @@ test('Credentials: SHA-256 + mtime + size (a same-size edit with the mtime resto
   assert.equal(lb.realCredentialPaths({}).codex, path.join(os.homedir(), '.codex', 'auth.json'));
 });
 
-test('R4 startup sweep: a stale md-layerb-* sandbox has its credentials SHREDDED, then is removed; this run\'s and other dirs are left', (t) => {
-  const tmp = tmpRoot(t, 'md-lb-sweep-');
-  const stale = path.join(tmp, 'md-layerb-2026-09-01T10-00-00-000Z');
-  const mine = path.join(tmp, 'md-layerb-2026-09-28T10-00-00-000Z');
-  const other = path.join(tmp, 'md-layerb-v1174');
-  for (const f of [path.join(stale, 'jail', 'home', '.claude', '.credentials.json'), path.join(stale, 'devroot', 'hive', 'agents', 'lb-codex', '.codex', 'auth.json'), path.join(stale, 'x.txt'), path.join(mine, 'keep.txt'), path.join(other, 'package.json')]) {
-    fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, 'secret');
-  }
-  const done = lb.sweepStale(tmp, mine);
-  assert.deepEqual(done.map((d) => [path.basename(d.dir), d.credentials, d.shredded, d.removed]), [['md-layerb-2026-09-01T10-00-00-000Z', 2, 2, true]]);
-  assert.equal(fs.existsSync(stale), false);
-  assert.equal(fs.existsSync(path.join(mine, 'keep.txt')), true);
-  assert.equal(fs.existsSync(path.join(other, 'package.json')), true);
-  // Shred before remove (source order).
-  const fn = src.slice(src.indexOf('function sweepStale('), src.indexOf('class LiveWatch'));
-  assert.ok(fn.indexOf('W.shred(f)') < fn.indexOf('W.rm(dir)'));
-});
-
 test('ProcTracker: grows the tree, keeps orphans, and never adopts a stranger through a reused pid', () => {
   const tr = new lb.ProcTracker();
   tr.addRoot(100);
@@ -248,39 +173,6 @@ test('ProcTracker: grows the tree, keeps orphans, and never adopts a stranger th
   scan([{ pid: 200, ppid: 4, name: 'explorer.exe', created: '5000' }, { pid: 999, ppid: 200, name: 'notepad.exe', created: '5100' }]);
   assert.equal(tr.known.has(999), false);
   assert.equal(tr.known.get(200).created, '1100');
-});
-
-test('R3: a FAILED scan is a failure (never a vacuous "all gone"); the fallback kills only roots whose handle is still open', async (t) => {
-  const tr = new lb.ProcTracker();
-  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { windowsHide: true, stdio: 'ignore' });
-  t.after(() => { try { sleeper.kill(); } catch { /* gone */ } });
-  const exited = { pid: 4, exitCode: 0, signalCode: null };   // an exited handle: must NOT be touched
-  tr.addRoot(sleeper.pid, sleeper);
-  tr.handles.set(4, exited);
-  tr.scan = async () => { throw new Error('scan failed'); };
-  const r = await tr.killAll();
-  assert.equal(r.ok, false);
-  assert.equal(r.scanFailed, true);
-  assert.deepEqual(r.fallback, [sleeper.pid]);
-  assert.ok(r.survivors.length > 0, 'reported as unknown, not as none');
-  await new Promise((res) => { if (sleeper.exitCode !== null || sleeper.signalCode !== null) return res(); sleeper.once('exit', res); setTimeout(res, 10_000); });
-  assert.ok(sleeper.exitCode !== null || sleeper.signalCode !== null, 'the open-handle root was killed');
-  // An EMPTY scan with known pids is a failure too.
-  const tr2 = new lb.ProcTracker();
-  tr2.addRoot(123456);
-  tr2.scan = async () => ({ procs: [], visible: [] });
-  assert.equal((await tr2.killAll()).ok, false);
-  // stopApp treats it as a failed check.
-  assert.match(src, /this\.check\(r\.ok === true && !r\.scanFailed && r\.survivors\.length === 0,/);
-});
-
-test('R4: the emergency path kills FIRST, then shreds the credentials, then removes the sandbox; finally does kill before credentials', () => {
-  const em = src.slice(src.indexOf('const emergency = (code) => {'), src.indexOf("for (const sig of ['SIGINT'"));
-  const k = em.indexOf('killSyncBestEffort()'); const c = em.indexOf('creds.deleteAll()'); const r = em.indexOf('W.rm(lb.s.base)');
-  assert.ok(k > 0 && c > k && r > c, `order kill ${k} < creds ${c} < sandbox ${r}`);
-  const fin = src.slice(src.indexOf('} finally {', src.indexOf('async main() {')));
-  assert.ok(fin.indexOf("this.stopApp('final')") < fin.indexOf('this.creds.deleteAll()'));
-  assert.match(src, /process\.on\('exit', \(\) => \{ try \{ if \(lb && !exiting\) \{ lb\.procs\.killRootsByHandle\('process exit'\); lb\.creds\.deleteAll\(\); \}/);
 });
 
 test('caps: a token ledger over the per-agent cap ABORTS the run (and so does the total)', (t) => {
@@ -350,26 +242,257 @@ test('R9: evidence is redacted (token-shaped strings, auth headers, token fields
   assert.match(ev, /W\.write\(path\.join\(dst, rel\), redact\(text\)\)/);
 });
 
-test('live-location watch: a change is reported, but only a change carrying a run marker FAILS', (t) => {
+test('SOURCE: no --force worktree removal (node_modules goes first), no fixed canary port, nothing without --go, the heavy-job gate', () => {
+  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(src), 'never --force as an argument');
+  const rm = src.indexOf("['worktree', 'remove', dir]");
+  assert.ok(rm > 0, 'the 1.1.74 worktree is removed');
+  const clean = src.slice(src.indexOf('removeV1174() {'), rm);
+  assert.ok(clean.indexOf('W.rm(nm)') > 0, 'node_modules removed before');
+  assert.match(clean, /isSymbolicLink\(\)\) throw new Error\('node_modules is a link/, 'never removed through a link');
+  assert.equal((src.match(/'worktree', 'remove'/g) || []).length, 1);
+  assert.ok(!/9333/.test(src));
+  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
+  assert.match(src, /if \(!this\.args\.go\) \{[\s\S]{0,300}return 0;/);
+  const main = src.slice(src.indexOf('async main() {'));
+  assert.ok(main.indexOf('return 0;') < main.indexOf('W.allowRoot(s.base)'), 'without --go nothing is even registered for writing');
+  assert.match(src, /if \(this\.args\.go && process\.env\[HEAVY_GATE\] !== '1'\)/);
+  assert.equal(lb.HEAVY_GATE, 'LAYERB_SOAK');
+  const { classifyCommand } = require('./load-ts.cjs')(path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts'));
+  assert.equal(classifyCommand('LAYERB_SOAK=1 node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 node test/tools/layer-b-run.cjs --go').heavy, true);
+  assert.equal(lb.parseArgs([]).go, false);
+  assert.equal(lb.parseArgs(['--dry-run-stubs']).dryRun, true);
+  assert.equal(lb.parseArgs(['--keep-v1174']).keepV1174, true);
+  assert.deepEqual(['floorPaused', 'uacRisk', 'codexProbe'].map((k) => lb.parseArgs([])[k]), [false, false, false], 'every gate is OFF by default');
+  assert.throws(() => lb.parseArgs(['--claude-model', 'x; rm -rf']), /bad model id/);
+  assert.match(src, /isolation\.rigEnv\(s\.jail, process\.env\)/);
+  assert.match(src, /MUNDER_DEV: '1', MUNDER_HIDDEN: '1', MUNDER_DEV_ROOT: s\.devRoot/);
+  assert.match(src, /isolation\.checkIsolation\(probe, s\.base/);
+  assert.deepEqual(lb.CAPS, { perAgentTokens: 400_000, totalTokens: 1_000_000, wallMs: 30 * 60_000 });
+  assert.equal(lb.GLOBAL_WALL_MS, 55 * 60_000, 'under the heavy lock\'s 60 min TTL');
+});
+
+test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confirmed AND --uac-risk-accepted; the DRY run starts no codex binary', () => {
+  const prev = process.env.LAYERB_SOAK;
+  process.env.LAYERB_SOAK = '1';
+  try {
+    const pre = (argv) => { const r = new lb.LayerB(lb.parseArgs(argv)); r.layout(); return () => r.preflight(); };
+    assert.throws(pre(['--go']), /--floor-paused-confirmed/);
+    assert.throws(pre(['--go', '--floor-paused-confirmed']), /--uac-risk-accepted/);
+    assert.throws(pre(['--go', '--uac-risk-accepted']), /--floor-paused-confirmed/);
+    assert.throws(pre(['--go', '--dry-run-stubs', '--codex-sandbox-probe']), /real run only/);
+    assert.doesNotThrow(pre(['--go', '--dry-run-stubs']), 'the dry run needs neither');
+  } finally { if (prev === undefined) delete process.env.LAYERB_SOAK; else process.env.LAYERB_SOAK = prev; }
+  const main = src.slice(src.indexOf('async main() {'));
+  // Real: the help first, then STOP unless --codex-sandbox-probe; the probe only in the real run.
+  assert.match(main, /if \(!this\.args\.dryRun\) \{\s*this\.codexSandboxHelp\(\);\s*if \(!this\.args\.codexProbe\) \{/);
+  assert.ok(main.indexOf('this.codexSandboxHelp()') < main.indexOf('this.build()'), 'the help comes before the build');
+  assert.match(main, /if \(!this\.args\.dryRun && !this\.proveCodexSandbox\(\)\) throw/);
+  // Every codex-binary spawn in the runner lives in the two real-run-only methods.
+  const codexSpawns = calls((n) => /^spawnSync$/.test(n.expression.getText(sf)) && n.arguments[0] && n.arguments[0].getText(sf) === 'exe');
+  const owners = codexSpawns.map((c) => { let x = c; while (x && !(ts.isMethodDeclaration(x))) x = x.parent; return x ? x.name.getText(sf) : null; });
+  assert.deepEqual(owners.sort(), ['codexSandboxHelp', 'proveCodexSandbox']);
+  assert.match(src, /'sandbox', 'windows', '--help'/);
+});
+
+test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) starts BEFORE any other process of the run', () => {
+  const main = src.slice(src.indexOf('async main() {'), src.indexOf('/** R1: the Codex agent really runs'));
+  const watchAt = main.indexOf('this.sessionWatch = new WindowWatch(process.pid');
+  assert.ok(watchAt > 0);
+  for (const step of ['sweepStale(', 'this.codexSandboxHelp()', 'this.build()', 'this.seed()', 'this.installCredentials()', 'this.proveClaudeJail()', 'this.proveCodexSandbox()', 'this.launch(']) {
+    const at = main.indexOf(step);
+    assert.ok(at > watchAt, `${step} comes after the session watch starts`);
+  }
+  assert.ok(main.indexOf("waitFor('the session window watch reports'") < main.indexOf('sweepStale('), 'and it has reported before anything runs');
+  // Nothing in main before the watch spawns.
+  const before = main.slice(0, watchAt);
+  assert.ok(!/spawn|this\.build|this\.launch|codexSandboxHelp|prove/.test(before.replace('this.preflight()', '')));
+  assert.match(src, /onBlind: \(why\) => \{ if \(!this\.aborted\(\)\) \{ this\.check\(false, 'the session window watch sees'/);
+});
+
+test('R1 confinement: Codex runs workspace-write with jail-only roots, no network, unelevated; Claude\'s jail settings are an allowlist mirror + the hook', (t) => {
+  assert.ok(!/command = `codex[^`]*dangerously/.test(src), 'Codex never gets the bypass flag');
+  assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
+  assert.match(src, /command = `claude --model \$\{this\.args\.models\.claude\} --permission-mode bypassPermissions`;/, 'Claude arguments unchanged from the product');
+  const toml = lb.codexSandboxToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex']);
+  assert.match(toml, /^sandbox_mode = "workspace-write"$/m);
+  assert.match(toml, /^approval_policy = "never"$/m);
+  assert.match(toml, /^writable_roots = \['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex'\]$/m);
+  assert.match(toml, /^network_access = false$/m);
+  assert.match(toml, /^\[windows\]\nsandbox = "unelevated"$/m);
+  const st = lb.claudeJailSettings({ node: 'C:\\n\\node.exe', policyFile: 'C:\\sb\\layer-b-jail-policy.json', liveDenied: ['C:\\Dunder', path.join(os.homedir(), '.claude')], readRoots: ['C:\\sb'], writeRoots: ['C:\\sb\\work\\lb-claude'], env: { X: '1' } });
+  for (const tool of ['Bash', 'PowerShell', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Agent', 'Task', 'mcp__*']) assert.ok(st.permissions.deny.includes(tool), `deny ${tool}`);
+  assert.ok(st.permissions.deny.includes('Write(//c/Dunder/**)') && st.permissions.deny.includes('Read(//c/Dunder/**)'));
+  assert.deepEqual(st.permissions.allow.sort(), ['Edit(//c/sb/work/lb-claude/**)', 'Glob(//c/sb/**)', 'Grep(//c/sb/**)', 'LS(//c/sb/**)', 'MultiEdit(//c/sb/work/lb-claude/**)', 'Read(//c/sb/**)', 'Write(//c/sb/work/lb-claude/**)'].sort());
+  assert.equal(st.hooks.PreToolUse[0].matcher, '*');
+  assert.match(st.hooks.PreToolUse[0].hooks[0].command, /^"C:\/n\/node\.exe" ".*\/test\/tools\/layer-b-jail-hook\.cjs" "C:\/sb\/layer-b-jail-policy\.json"$/);
+  assert.deepEqual(st.env, { X: '1' });
+  // The hook's allowlist is exactly the tools the permissions allow.
+  const hook = require('./tools/layer-b-jail-hook.cjs');
+  assert.deepEqual([...hook.READ_TOOLS, ...hook.WRITE_TOOLS].sort(), ['Edit', 'Glob', 'Grep', 'LS', 'MultiEdit', 'Read', 'Write']);
+  // The facts need no shell: no fact prompt asks for a shell command, and B2 uses Read calls.
+  const facts = src.slice(src.indexOf('async factB1B8B9() {'), src.indexOf('factN4() {'));
+  const claudeFacts = ['factB1B8B9', 'factB2', 'factB4', 'factB3'].map((f) => src.slice(src.indexOf(`async ${f}() {`), src.indexOf('\n  }\n', src.indexOf(`async ${f}() {`))));
+  for (const f of claudeFacts) assert.ok(!/shell command|sleep \d|\bBash\b|PowerShell|run these/i.test(f), 'a Claude fact asks for a shell');
+  assert.match(facts, /Read these six files with your Read tool, ONE file per tool call/);
+  // Phase B keeps the jail; the proof runs BEFORE any agent starts and stops the run on failure.
+  assert.match(src, /this\.writeClaudeSettings\(\{ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String\(pct\) \}\);/);
+  const main = src.slice(src.indexOf('async main() {'));
+  assert.ok(main.indexOf('this.proveClaudeJail()') < main.indexOf('this.launch('));
+  assert.match(main, /if \(!this\.proveClaudeJail\(\)\) throw/);
+  assert.match(src, /checkCodexSeed\(\)/);
+});
+
+test('R4 startup sweep: a stale md-layerb-* sandbox has its credentials SHREDDED, then is removed; this run\'s and other dirs are left', (t) => {
+  const tmp = tmpRoot(t, 'md-lb-sweep-');
+  const stale = path.join(tmp, 'md-layerb-2026-09-01T10-00-00-000Z');
+  const mine = path.join(tmp, 'md-layerb-2026-09-28T10-00-00-000Z');
+  const other = path.join(tmp, 'md-layerb-v1174');
+  for (const f of [path.join(stale, 'jail', 'home', '.claude', '.credentials.json'), path.join(stale, 'devroot', 'hive', 'agents', 'lb-codex', '.codex', 'auth.json'), path.join(stale, 'x.txt'), path.join(mine, 'keep.txt'), path.join(other, 'package.json')]) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, 'secret');
+  }
+  const r = lb.sweepStale(tmp, mine);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.done.map((d) => [path.basename(d.dir), d.credentials, d.shredded, d.removed]), [['md-layerb-2026-09-01T10-00-00-000Z', 2, 2, true]]);
+  assert.equal(fs.existsSync(stale), false);
+  assert.equal(fs.existsSync(path.join(mine, 'keep.txt')), true);
+  assert.equal(fs.existsSync(path.join(other, 'package.json')), true);
+});
+
+test('R4 FAIL-CLOSED (Dwight a): an injected shred failure KEEPS the stale dir, ok:false, and the run aborts before the build and any credential copy', (t) => {
+  const tmp = tmpRoot(t, 'md-lb-sweepfail-');
+  const stale = path.join(tmp, 'md-layerb-2026-09-02T10-00-00-000Z');
+  const cred = path.join(stale, 'jail', 'home', '.claude', '.credentials.json');
+  fs.mkdirSync(path.dirname(cred), { recursive: true });
+  fs.writeFileSync(cred, 'secret');
+  let rmCalled = false;
+  const r = lb.sweepStale(tmp, null, { shred: () => { throw new Error('EBUSY (injected)'); }, rm: () => { rmCalled = true; } });
+  assert.equal(r.ok, false);
+  assert.match(r.done[0].error, /EBUSY \(injected\)/);
+  assert.equal(rmCalled, false, 'the dir is NOT removed after a failed shred');
+  assert.equal(fs.existsSync(cred), true, 'the evidence of the failure stays');
+  // A shred that "succeeds" but leaves the file is a failure too; so is a removal that leaves the dir.
+  assert.equal(lb.sweepStale(tmp, null, { shred: () => true, rm: () => {} }).ok, false);
+  // main: a failed sweep throws BEFORE build() and installCredentials().
+  const main = src.slice(src.indexOf('async main() {'));
+  const thr = main.indexOf("if (!sweep.ok) throw new Error(");
+  assert.ok(thr > 0 && thr < main.indexOf('this.build()') && thr < main.indexOf('this.installCredentials()'));
+});
+
+test('R3: a FAILED scan is a failure (never a vacuous "all gone"); the fallback kills only roots whose handle is still open', async (t) => {
+  const tr = new lb.ProcTracker();
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { windowsHide: true, stdio: 'ignore' });
+  t.after(() => { try { sleeper.kill(); } catch { /* gone */ } });
+  const exited = { pid: 4, exitCode: 0, signalCode: null };
+  tr.addRoot(sleeper.pid, sleeper);
+  tr.handles.set(4, exited);
+  tr.scan = async () => { throw new Error('scan failed'); };
+  const r = await tr.killAll();
+  assert.equal(r.ok, false);
+  assert.equal(r.scanFailed, true);
+  assert.deepEqual(r.fallback, [sleeper.pid]);
+  assert.ok(r.survivors.length > 0, 'reported as unknown, not as none');
+  await new Promise((res) => { if (sleeper.exitCode !== null || sleeper.signalCode !== null) return res(); sleeper.once('exit', res); setTimeout(res, 10_000); });
+  assert.ok(sleeper.exitCode !== null || sleeper.signalCode !== null, 'the open-handle root was killed');
+  const tr2 = new lb.ProcTracker();
+  tr2.addRoot(123456);
+  tr2.scan = async () => ({ procs: [], visible: [] });
+  assert.equal((await tr2.killAll()).ok, false, 'an EMPTY scan with known pids is a failure');
+});
+
+test('NO PROOF OF EXIT (Dwight b): stopApp aborts the run before any relaunch; the teardown kills again, SHREDS the credentials, KEEPS the sandbox and names the survivors', async (t) => {
+  const root = tmpRoot(t, 'md-lb-noexit-');
+  const run = new lb.LayerB(lb.parseArgs([]));
+  run.s = { base: root, hive: path.join(root, 'hive'), home: path.join(root, 'home'), report: path.join(root, 'report'), stubs: path.join(root, 'stubs') };
+  fs.mkdirSync(run.s.hive, { recursive: true });
+  // A credential copy in the jail.
+  const real = path.join(root, 'decoy-real', 'auth.json');
+  fs.mkdirSync(path.dirname(real), { recursive: true });
+  fs.writeFileSync(real, '{"t":"decoy"}');
+  const dest = path.join(root, 'jail', '.codex', 'auth.json');
+  run.creds.copy('codex', real, dest);
+  // An injected failed kill: every attempt fails, synchronous and asynchronous.
+  let asyncKills = 0; let syncKills = 0;
+  run.procs.killAll = async () => { asyncKills++; return { ok: false, scanFailed: true, why: 'injected', killed: [], fallback: [4242], survivors: ['4242:claude.exe'] }; };
+  run.procs.killSyncBestEffort = () => { syncKills++; return { ok: false, survivors: ['4242:claude.exe'] }; };
+  // 1. stopApp throws AND aborts, so no phase/relaunch can follow.
+  await assert.rejects(run.stopApp('phase A'), /no proof of exit/);
+  assert.equal(run.aborted(), true);
+  assert.deepEqual(run.exitUnproven.survivors, ['4242:claude.exe']);
+  assert.match(src, /async relaunchForPhaseB\(\) \{[\s\S]*?await this\.stopApp\('phase A'\);[\s\S]*?this\.relaunchAt = Date\.now\(\);/, 'the relaunch comes after a stopApp that throws on no proof');
+  // 2. The teardown: a further kill attempt, then the credentials, the sandbox KEPT, the survivors reported.
+  run.exitUnproven = null;
+  const td = await run.teardown();
+  assert.ok(asyncKills >= 3 && syncKills >= 1, `a further kill attempt was made (async ${asyncKills}, sync ${syncKills})`);
+  assert.equal(fs.existsSync(dest), false, 'the credential copy was shredded');
+  assert.deepEqual(td.credentials.map((c) => [c.label, c.deleted]), [['codex', true]]);
+  assert.deepEqual(td.survivors, ['4242:claude.exe']);
+  assert.equal(td.sandboxRemoved, false);
+  assert.equal(fs.existsSync(root), true, 'the sandbox (and the evidence) is KEPT');
+  assert.ok(td.buildCleanup.some((x) => /NO PROOF OF EXIT/.test(x)));
+  // Order inside teardown: kill attempts, then credentials.
+  const tdSrc = src.slice(src.indexOf('async teardown() {'), src.indexOf('// ── evidence + report'));
+  assert.ok(tdSrc.indexOf('killSyncBestEffort') < tdSrc.indexOf('this.creds.deleteAll()'));
+  assert.ok(tdSrc.indexOf("this.stopApp('final')") < tdSrc.indexOf('this.creds.deleteAll()'));
+  assert.ok(tdSrc.indexOf('rebuildOutWithoutSeams') > 0, 'out/ is rebuilt without the seams in every teardown');
+});
+
+test('R4: the emergency path kills FIRST, then shreds the credentials, then removes the sandbox only with proof, then rebuilds out/', () => {
+  const em = src.slice(src.indexOf('const emergency = (code) => {'), src.indexOf("for (const sig of ['SIGINT'"));
+  const k = em.indexOf('killSyncBestEffort()'); const c = em.indexOf('creds.deleteAll()'); const r = em.indexOf('W.rm(lb.s.base)'); const o = em.indexOf('rebuildOutWithoutSeams()');
+  assert.ok(k > 0 && c > k && r > c && o > r, `order kill ${k} < creds ${c} < sandbox ${r} < out ${o}`);
+  assert.match(em, /if \(proven\) W\.rm\(lb\.s\.base\);\s*else console\.error\(`\[layer-b\] NO PROOF OF EXIT/);
+  assert.match(src, /process\.on\('exit', \(\) => \{ try \{ if \(lb && !exiting\) \{ lb\.procs\.killRootsByHandle\('process exit'\); lb\.creds\.deleteAll\(\); \}/);
+});
+
+test('decision 4: the live-location watch is STAT + HASH only (no content read); a change is reported, only a NAME carrying a run marker FAILS', (t) => {
   const root = tmpRoot(t, 'md-lb-live-');
   const f = path.join(root, 'log.jsonl');
   fs.writeFileSync(f, '{"kind":"x"}\n');
   const w = new lb.LiveWatch([root], [f]).start();
-  fs.appendFileSync(f, '{"kind":"the live floor writing its own row"}\n');
-  let r = w.compare(['md-layerb-2026', 'lb-claude', 'LBN-12345678']);
-  assert.equal(r.ok, true);
-  assert.ok(r.changed.some((c) => c.file === f));
-  assert.equal(r.keys[0].same, false);
   fs.appendFileSync(f, '{"from":"lb-claude","body":"LBN-12345678"}\n');
-  r = w.compare(['md-layerb-2026', 'lb-claude', 'LBN-12345678']);
-  assert.equal(r.ok, false);
-  assert.match(r.failures[0], /marker "lb-claude"|marker "LBN-12345678"/);
+  const r = w.compare(['md-layerb-2026', 'lb-claude', 'LBN-12345678']);
+  assert.equal(r.ok, true, 'content is never read, so a marker INSIDE a live file is not looked at');
+  assert.ok(r.changed.some((c) => c.file === f));
+  assert.equal(r.keys[0].same, false, 'the key-file hash shows the change');
   fs.writeFileSync(path.join(root, 'md-layerb-probe-0000000000000000.txt'), 'x');
-  assert.equal(w.compare(['md-layerb-probe']).ok, false, 'a new file named with a marker fails');
-  // Wired for BOTH modes, after the kill and the credential shredding.
+  assert.equal(w.compare(['md-layerb-probe']).ok, false, 'a new file NAMED with a marker fails');
+  const lw = src.slice(src.indexOf('class LiveWatch {'), src.indexOf('function b6Tiers('));
+  assert.ok(!/readSync\(|readFileSync\(|createReadStream/.test(lw.replace(/shaReadOnly\(k\)/g, '')), 'no content read besides the hash');
   const main = src.slice(src.indexOf('async main() {'));
   assert.match(main, /this\.liveWatch = LiveWatch\.defaults\(\)\.start\(\);/);
-  assert.ok(main.indexOf('this.liveWatch.compare(this.markers())') > main.indexOf('this.creds.deleteAll()'));
+  const td = src.slice(src.indexOf('async teardown() {'), src.indexOf('// ── evidence + report'));
+  assert.ok(td.indexOf('this.liveWatch.compare(this.markers())') > td.indexOf('this.creds.deleteAll()'));
+});
+
+test('decision 5: a real-credential change during the run is INCONCLUSIVE with attribution; FAIL only if it coincides with the jailed copy\'s refresh', (t) => {
+  const root = tmpRoot(t, 'md-lb-incon-');
+  const mk = (name) => { const real = path.join(root, name, 'real.json'); fs.mkdirSync(path.dirname(real), { recursive: true }); fs.writeFileSync(real, '{"t":"a"}'); const past = new Date(Date.now() - 3_600_000); fs.utimesSync(real, past, past); return real; };
+  // (1) the live floor refreshes the real file; the jailed copy is untouched: INCONCLUSIVE.
+  const c1 = new lb.Credentials();
+  const r1 = mk('one');
+  c1.copy('claude', r1, path.join(root, 'jail1', '.credentials.json'));
+  fs.writeFileSync(r1, '{"t":"live-floor-refresh"}');
+  c1.deleteAll();
+  const v1 = c1.verifyRealUnchanged()[0];
+  assert.equal(v1.verdict, 'INCONCLUSIVE');
+  assert.match(v1.attribution, /no write path to it/);
+  // (2) the jailed copy refreshed AND the real file changed at the same moment: FAIL.
+  const c2 = new lb.Credentials();
+  const r2 = mk('two');
+  const d2 = path.join(root, 'jail2', 'auth.json');
+  c2.copy('codex', r2, d2);
+  fs.writeFileSync(d2, '{"t":"jail-refresh"}');
+  fs.writeFileSync(r2, '{"t":"jail-refresh"}');
+  c2.deleteAll();
+  assert.equal(c2.verifyRealUnchanged()[0].verdict, 'FAIL');
+  // (3) nothing changed: UNCHANGED.
+  const c3 = new lb.Credentials();
+  const r3 = mk('three');
+  c3.copy('codex', r3, path.join(root, 'jail3', 'auth.json'));
+  c3.deleteAll();
+  assert.equal(c3.verifyRealUnchanged()[0].verdict, 'UNCHANGED');
+  assert.match(src, /this\.check\(c\.verdict !== 'FAIL', `credentials: the REAL \$\{c\.label\} file/);
 });
 
 test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {
