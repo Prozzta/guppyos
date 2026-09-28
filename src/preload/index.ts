@@ -117,6 +117,8 @@ export interface IntegrityIssue {
   file: string;
   quarantine: string | null;
   error: string;
+  /** ZT-I1-MAIL: already rebuilt (a mail ledger); a notice, nothing is paused. */
+  repaired?: boolean;
 }
 
 /** One row of the consolidated voice read-layer directory (`hive:agentDirectory`):

@@ -27,6 +27,8 @@ import { basename, join, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
+import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
+import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
@@ -91,6 +93,10 @@ export interface HiveMessage {
   /** Set by the ROUTER, never trusted from a sender: this message answers one that the sender's
    *  own unread inbox had already superseded when it was sent (see routeMessage). */
   superseded_by?: string;
+  /** ZT-I1-MAIL §4.1: set by the ROUTER only, when it replaced an invalid or colliding
+   *  sender-supplied id: the sender's original value. in_reply_to / supersedes resolve against
+   *  either value. */
+  sender_id?: string;
 }
 
 /** A sender's `supersedes` (a string or an array), bounded: up to 10 non-empty ids of at most
@@ -255,6 +261,8 @@ export interface HiveIntegrityIssue {
   file: string;
   quarantine: string | null;
   error: string;
+  /** ZT-I1-MAIL: the source was already rebuilt (a mail ledger); nothing is paused. */
+  repaired?: boolean;
 }
 
 class HiveAuthorityCorruptError extends Error {
@@ -539,11 +547,23 @@ export class HiveManager {
    * and a copy must see the rows. Safe to call more than once; a later row simply reopens.
    */
   dispose(): void {
+    // ZT-I1-MAIL: the coalesced ledger writes land before the log closes (quit, home change).
+    try { this.mail.dispose(); } catch (e) { try { this.appendLog({ kind: 'mail-ledger-write-failed', error: String(e) }); } catch { /* noop */ } }
     this.closeAppendFiles();
   }
   setHookBroker(broker: HookBroker | null): void {
     this.hookBroker = broker;
   }
+
+  /** ZT-I1-MAIL: the harness-owned per-agent mail ledger (`hive/state/mail/<agentId>.json`).
+   *  Lazy per agent; every closure reads the live root, so a home change needs no rewiring. */
+  readonly mail = new MailLedger({
+    root: () => this.root(),
+    appendLog: (row) => this.appendLog(row),
+    // A corrupt-ledger rebuild reads the recent log (bounded; rotated files included).
+    readLogRows: () => this.logTail(HiveManager.MAIL_REBUILD_LOG_ROWS)
+  });
+  static readonly MAIL_REBUILD_LOG_ROWS = 50_000;
 
   private routerTimer: unknown = null;
   /** One non-recursive watcher per active outbox, keyed by its absolute path. */
@@ -2016,7 +2036,10 @@ export class HiveManager {
     // N3 (Jim): the reply's in_reply_to AND up to 3 of its ancestors, so a cancel of the ORIGINAL
     // dispatch also flags a reply to a request derived from it. An ancestor is found hive-wide by
     // its file name (<id>.json in some agent's inbox or inbox/.done): stats only, no parsing.
+    // ZT-I1-MAIL §4.1: in_reply_to resolves against the ledger id AND the sender_id alias (a
+    // reassigned id), in the ledger of the agent replying.
     const targets = new Set<string>([msg.in_reply_to]);
+    try { for (const a of this.mail.aliases(msg.from, msg.in_reply_to)) targets.add(a); } catch { /* not an agent */ }
     let cur: string | null = msg.in_reply_to;
     for (let hop = 0; hop < HiveManager.SUPERSEDE_ANCESTOR_HOPS && cur; hop++) {
       const parent: string | null = this.findDeliveredMessage(cur)?.in_reply_to ?? null;
@@ -2067,10 +2090,28 @@ export class HiveManager {
   /** Atomically deliver a message into a recipient agent's inbox.
    *  Returns false when the recipient has no inbox, so the caller can bounce and
    *  log the drop rather than let the message vanish. */
-  private deliver(msg: HiveMessage, toId: string): boolean {
+  private deliver(original: HiveMessage, toId: string): boolean {
     const inbox = join(this.agentDir(toId), 'inbox');
     if (!existsSync(inbox)) return false; // unknown recipient — the caller reports it
-    this.atomicWriteJson(join(inbox, `${msg.id}.json`), msg);
+    // ZT-I1-MAIL §4.1: admission against the recipient's ledger, inbox/ and .done/. A duplicate
+    // (same from, same body) was already delivered: dropped idempotently. An invalid or colliding
+    // id gets a fresh one for THIS copy, the sender's value kept as sender_id.
+    let msg = original;
+    try {
+      const admitted = this.mail.admit(toId, msg);
+      if (admitted.duplicate) return true;
+      msg = admitted.msg as HiveMessage;
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-ledger-error', agentId: toId, id: msg.id, op: 'admit', error: String(e) }); } catch { /* noop */ }
+      if (!isValidMailId(msg.id)) msg = { ...msg, id: freshMailId(), sender_id: msg.sender_id ?? String(msg.id).slice(0, 200) };
+    }
+    // Nothing is ever written outside the inbox: a valid id cannot leave it, and this re-checks.
+    const file = join(inbox, `${msg.id}.json`);
+    if (!isValidMailId(msg.id) || dirname(file) !== inbox) throw new Error(`refusing to deliver outside ${toId}'s inbox`);
+    this.atomicWriteJson(file, msg);
+    try { this.mail.markDelivered(toId, msg); } catch (e) {
+      try { this.appendLog({ kind: 'mail-ledger-error', agentId: toId, id: msg.id, op: 'delivered', error: String(e) }); } catch { /* noop */ }
+    }
     // THE successful-delivery edge (pre-M1 event-wake bridge): only after the durable write.
     // An observer failure can never turn a written delivery into a routing failure.
     // DIAGNOSIS ONLY (diag-1.1.46-wake): a durable write with NO observer registered is the
@@ -2102,6 +2143,15 @@ export class HiveManager {
   private routeMessage(msg: HiveMessage): void {
     // The router alone sets superseded_by: a sender cannot pre-mark its own mail.
     delete msg.superseded_by;
+    // ZT-I1-MAIL §4.1: ...and sender_id. An id that is not filename-safe (traversal, overlong,
+    // reserved) is replaced for every recipient alike before anything is written.
+    delete msg.sender_id;
+    if (!isValidMailId(msg.id)) {
+      const senderId = (typeof msg.id === 'string' ? msg.id : JSON.stringify(msg.id) ?? String(msg.id)).slice(0, 200);
+      msg.id = freshMailId();
+      msg.sender_id = senderId;
+      try { this.appendLog({ kind: 'mail-id-reassigned', from: msg.from, senderId, id: msg.id, reason: 'invalid' }); } catch { /* noop */ }
+    }
     // MIDTURN-MAIL-BLIND L2: a reply to a request that was cancelled or corrected while its
     // sender was mid-turn is still DELIVERED (its content may still matter), but flagged in the
     // subject and the superseded_by field, so the requester sees at once it answers a superseded
@@ -2127,6 +2177,13 @@ export class HiveManager {
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
+    // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
+    // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
+    if (msg.in_reply_to) {
+      try { this.mail.markReplied(msg.from, msg.in_reply_to, msg.id, resolveTo(msg.to)); } catch (e) {
+        try { this.appendLog({ kind: 'mail-ledger-error', agentId: msg.from, id: msg.id, op: 'replied', error: String(e) }); } catch { /* noop */ }
+      }
+    }
     const targets = msg.to === 'broadcast'
       // The roster for fan-out is the ACTIVE registry: skip the send-only prep
       // assistant and any archived agent (closed tab). Hookless providers are
@@ -2515,7 +2572,7 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry();
     this.tasks();
-    return [...this.authorityIssues.values()];
+    return [...this.authorityIssues.values(), ...this.mail.integrityIssues()];
   }
 
   private emptyRegistry(): Registry {
@@ -3795,26 +3852,7 @@ export class HiveManager {
     this.atomicWriteJson(p, data);
   }
   private atomicWriteJson(p: string, data: unknown): void {
-    const tmp = `${p}.tmp-${shortRand()}`;
-    try {
-      writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-      this.renameWithRetry(tmp, p);
-    } catch (error) {
-      try { rmSync(tmp, { force: true }); } catch { /* preserve the publish error */ }
-      throw error;
-    }
-  }
-  private renameWithRetry(tmp: string, target: string): void {
-    let last: unknown;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try { renameSync(tmp, target); return; } catch (error) {
-        last = error;
-        const code = (error as NodeJS.ErrnoException).code;
-        if ((code !== 'EPERM' && code !== 'EBUSY') || attempt === 4) break;
-        sleepSync(20 * (attempt + 1));
-      }
-    }
-    throw new Error(`Could not atomically publish ${basename(target)} after Windows rename retries: ${last instanceof Error ? last.message : String(last)}`);
+    atomicWriteJsonFile(p, data);
   }
 
 }

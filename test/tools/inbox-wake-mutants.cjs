@@ -89,8 +89,8 @@ const MUTANTS = [
     "    if (event === 'Stop') { r.lifecycle = 'idle'; return false; }"],
   // ── the router and the control edges ──
   ['w the delivery edge fires before the durable write', HIVE,
-    "    this.atomicWriteJson(join(inbox, `${msg.id}.json`), msg);\n    // THE successful-delivery edge",
-    "    try { this.deliveryObserver?.({ agentId: toId, messageId: msg.id }); } catch { /* */ }\n    this.atomicWriteJson(join(inbox, `${msg.id}.json`), msg);\n    // THE successful-delivery edge"],
+    "    this.atomicWriteJson(file, msg);\n",
+    "    try { this.deliveryObserver?.({ agentId: toId, messageId: msg.id }); } catch { /* */ }\n    this.atomicWriteJson(file, msg);\n"],
   ['w a watch hint no longer schedules a scan', HIVE,
     '        const w = this.routerRuntime.watch(dir, () => this.scheduleRouteOnce());',
     '        const w = this.routerRuntime.watch(dir, () => {});'],
