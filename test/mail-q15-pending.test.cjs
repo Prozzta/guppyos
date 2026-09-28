@@ -148,10 +148,79 @@ test('Q15: the terminal close is PERSISTED: after a restart it is still acted/mi
   assert.deepEqual(hive.mail.pending('andy-1').map((x) => x.id).sort(), [kept.id, lost.id].sort());
 });
 
-test('Q15 wiring: the hook reader closes a MISSING body terminally; an unparseable one is only skipped', () => {
+test('Q15/Q28 wiring: the hook reader closes a MISSING body terminally; an unparseable one is counted (Q28) and skipped meanwhile', () => {
   const { readSource, codeOnly } = require('./read-source.cjs');
   const hooks = codeOnly(readSource('src/main/hooks.ts'), 'hooks.ts');
   const body = hooks.slice(hooks.indexOf('private readMailBody('), hooks.indexOf('private mailReminders('));
   assert.match(body, /if \(got\.reason === 'missing'\) \{[\s\S]*?this\.hive\.mail\?\.bodyMissing\(agentId, id, 'missing'\)[\s\S]*?if \(closed\) return null;/);
   assert.match(body, /noteBodyMissing\(agentId, id, got\.reason\)/, 'the row and the banner stay');
+  // Creed Q28 (updated: it used to be skipped only): counted in the ledger, closed at the third.
+  assert.match(body, /if \(got\.reason === 'unreadable'\) \{[\s\S]*?this\.hive\.mail\?\.parseFailed\(agentId, id\)[\s\S]*?if \(r === 'closed'\)/);
+});
+
+// ── Q28 (Creed): an UNPARSEABLE body closes terminally after 3 failures spanning >= 60 s ────────
+
+test('Q28 pure: 3 failed parses spanning >= 60 s close it (acted, body-unparseable, rows); fewer, or faster, only count; a changed file restarts the count', () => {
+  let doc = L.emptyLedger('andy-1');
+  doc = L.applyDelivered(doc, msg('u', { act: 'request' }), 1).doc;
+  const before = { act: doc.lastActivityAt, acted: doc.lastActedAt };
+  let s = L.applyParseFailed(doc, 'u', '10:1', 1_000);
+  assert.deepEqual([s.doc.entries.u.state, s.doc.entries.u.parseFails, s.logs], ['delivered', 1, []], 'a count writes no row');
+  s = L.applyParseFailed(s.doc, 'u', '10:1', 31_000);
+  s = L.applyParseFailed(s.doc, 'u', '10:1', 60_999);
+  assert.deepEqual([s.doc.entries.u.state, s.doc.entries.u.parseFails], ['delivered', 3], '3 failures inside 60 s: not yet');
+  // A changed file (size:mtime) starts again.
+  const reset = L.applyParseFailed(s.doc, 'u', '11:2', 61_000);
+  assert.deepEqual([reset.doc.entries.u.parseFails, reset.doc.entries.u.parseFailSince], [1, 61_000]);
+  s = L.applyParseFailed(s.doc, 'u', '10:1', 61_000);
+  const e = s.doc.entries.u;
+  assert.deepEqual([e.state, e.missingReason, e.parseFails, typeof e.missingAt], ['acted', 'unparseable', 4, 'number']);
+  assert.deepEqual(s.archive, [], 'the file stays where it is');
+  assert.deepEqual(s.logs.map((r) => [r.kind, r.reason ?? null]), [['mail', 'body-unparseable'], ['mail-body-unparseable', null]]);
+  assert.equal(s.logs[1].spanMs, 60_000);
+  assert.equal(s.events[0].harness, true);
+  assert.deepEqual({ act: s.doc.lastActivityAt, acted: s.doc.lastActedAt }, before, 'not activity');
+  assert.deepEqual(L.pendingEntries(s.doc), []);
+  assert.deepEqual(L.backlogEntries(s.doc), []);
+  assert.deepEqual(L.openRequestEntries(s.doc, 70_000).map((o) => o.entry.id), ['u'], 'still owed; fleet flags it missing');
+  assert.deepEqual(L.applyParseFailed(s.doc, 'u', '10:1', 99_000).changed, [], 'only a delivered entry counts');
+});
+
+test('Q28: persisted through a restart (no wake), with the banner; redelivered only when the file CHANGES and then parses', async (t) => {
+  const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
+  let hive = new HiveManager(() => home, () => true);
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await hive.ensureAgent({ id: 'andy-1', name: 'Andy', provider: 'claude', cwd: home });
+  const m = hive.send({ to: 'andy-1', act: 'inform', subject: 'garbled', body: 'x' }, 'god-1');
+  const file = path.join(hive.root(), 'agents', 'andy-1', 'inbox', `${m.id}.json`);
+  const saved = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, '{ not json');
+  let now = Date.now();
+  hive.mail.now = () => now;
+  assert.equal(hive.mail.parseFailed('andy-1', m.id), 'counted');
+  now += 30_000;
+  assert.equal(hive.mail.parseFailed('andy-1', m.id), 'counted');
+  now += 30_000;
+  assert.equal(hive.mail.parseFailed('andy-1', m.id), 'closed');
+  assert.ok(hive.integrityIssues().some((i) => i.error === 'mail-body-unparseable' && i.notice), 'the banner');
+  assert.equal(hive.logTail(200).filter((r) => r.kind === 'mail-body-unparseable').length, 1);
+  assert.deepEqual(hive.mail.pending('andy-1'), []);
+  hive.dispose();
+  // Restart: still closed, nothing pending, the file is NOT archived.
+  hive = new HiveManager(() => home, () => true);
+  assert.deepEqual([hive.mail.ledger('andy-1').entries[m.id].state, hive.mail.ledger('andy-1').entries[m.id].missingReason], ['acted', 'unparseable']);
+  assert.deepEqual(hive.mail.pending('andy-1'), [], 'no restart wake (Jim follow-up 3)');
+  hive.mail.flush('andy-1');
+  assert.ok(fs.existsSync(file), 'not moved into .done');
+  // The beat's reconcile: an unchanged file is not "reappeared" (unlike a missing body) ...
+  assert.deepEqual(hive.mail.reconcileInbox('andy-1').reappeared, []);
+  // ... a changed file that still does not parse is not either ...
+  fs.writeFileSync(file, '{ still not json at all');
+  assert.deepEqual(hive.mail.reconcileInbox('andy-1').reappeared, []);
+  // ... a repaired file is a new delivered transition.
+  fs.writeFileSync(file, saved);
+  assert.deepEqual(hive.mail.reconcileInbox('andy-1').reappeared, [m.id]);
+  const e = hive.mail.ledger('andy-1').entries[m.id];
+  assert.deepEqual([e.state, e.missingAt, e.parseFails], ['delivered', null, 0]);
 });

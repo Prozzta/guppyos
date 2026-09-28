@@ -52,7 +52,7 @@ import {
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
-import { actionableBacklog, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
+import { actionableBacklog, actionablePending, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
@@ -119,7 +119,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
-import { mailPromptMode, type MailPromptMode } from './mailSurface';
+import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
@@ -664,12 +664,13 @@ inboxWake = new InboxWakeBridge({
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
 
-/** ZT-I1-MAIL §5 / §11.7: the mail mode an agent's wake text follows (mailPromptMode). */
-function wakeMailMode(agentId: string): MailPromptMode {
+/** ZT-I1-MAIL §5 / §11.7: the mail mode an agent's wake text follows (mailNudgeMode). */
+function wakeMailMode(agentId: string): MailNudgeMode {
   const mode = hookServer.mailChannel(agentId).mode;
   let override = null;
   try { override = hive.mail.channelOverride(agentId); } catch { override = null; }
-  return mailPromptMode(mode, override);
+  // Creed Q27: a degraded agent's nudge says the channel is degraded and what to do instead.
+  return mailNudgeMode(mode, override);
 }
 
 /** ZT-I1-MAIL §3 #1: the wake coordinator's pending source (see the bridge's `inboxIds`), and
@@ -1772,8 +1773,9 @@ function godActionableInboxCount(): number {
   try {
     const godId = hive.registry().godId;
     if (!godId) return 0;
-    // ZT-I1-MAIL §11.8 #13: god's mail not yet acted, from the ledger, not inbox/ files.
-    return actionableBacklog(hive.mail, godId);
+    // ZT-I1-MAIL §11.8 #13, Creed Q23: the re-engage GATE counts only mail god has not been shown
+    // yet (ledger delivered), not mail it is already looking at mid-turn; from the ledger.
+    return actionablePending(hive.mail, godId);
   } catch { return 0; }
 }
 

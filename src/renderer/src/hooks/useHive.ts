@@ -70,8 +70,10 @@ function withStandingGoal(agent: Agent, text: string): string {
 // him to work running the floor. Kept terse and action-oriented.
 const INITIAL_GOD_PROMPT = [
   "You're online as Michael, the orchestrator of the hive. Get oriented, then start running the floor:",
-  // ZT-I1-MAIL §5 P8: mail is delivered in context; nobody drains an inbox any more.
-  '1. Read your memory.md; pending mail is delivered in your context.',
+  // ZT-I1-MAIL §5 P8: how mail reaches god depends on its mail mode (delivered in context, or read
+  // from inbox/ when legacy or degraded); the renderer does not know it, so this line is neutral
+  // and defers to the start-up instructions (P1), which are mode-specific (Jim, slices 4/4b/5).
+  '1. Read your memory.md; then handle your pending hive mail as your start-up instructions describe.',
   '2. Review board.md + tasks.json and the current roster of agents (active vs archived).',
   '3. Check fleet health: read fleet.json in the hive root for every agent\'s live tokens, cost, status, breaker level, and inbox backlog (`claude agents` will NOT show your hive\'s agents). Flag anyone stalled, over-budget, or breaker-armed.',
   '4. Skim COMMANDS.md (hive root) for the Claude Code commands you can use — and run `memory wake-up` for a memory digest (the built-in memory engine; skip it if semantic memory is off).',

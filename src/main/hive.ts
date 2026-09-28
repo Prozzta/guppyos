@@ -4137,6 +4137,9 @@ export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, m
     : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then read the LAST ~40 lines of ${memoryMd} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed).`;
   const mail = mode === 'inject'
     ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files. If a message is marked re-delivered, check whether you already handled it.'
+    : mode === 'work-order'
+      // Creed Q26: the whole message is typed into this terminal; it is handled at that write.
+      ? 'Messages for you are typed into this terminal as hive work orders, each one in full; the harness records them. You do not read, list or move inbox files.'
     : mode === 'legacy-read'
       ? `Then read EVERY file in ${inboxDir} (messages other agents sent you) and act on each. Leave the files where they are: the harness archives each message when your turn ends.`
       : `Then read EVERY file in ${inboxDir} (messages other agents sent you). After handling an inbox message, move its file into ${doneDir}.`;

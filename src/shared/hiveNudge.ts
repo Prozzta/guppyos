@@ -16,8 +16,9 @@ const NUDGE_HEAD = 'You have new hive mail';
  *  persisted queues of older sessions: recognised as a nudge too. */
 const LEGACY_NUDGE_HEAD = 'You have new hive inbox message(s)';
 
-/** §5 / §11.7: which mail instructions a nudge carries (mirrors main's `MailPromptMode`). */
-export type NudgeMailMode = 'inject' | 'legacy-read' | 'legacy-move';
+/** §5 / §11.7: which mail instructions a nudge carries (mirrors main's `MailNudgeMode`). */
+export type NudgeMailMode = 'inject' | 'legacy-read' | 'legacy-move' | 'work-order' | 'degraded-move' | 'degraded-read';
+const NUDGE_MODES: readonly NudgeMailMode[] = ['inject', 'legacy-read', 'legacy-move', 'work-order', 'degraded-move', 'degraded-read'];
 
 /** Route A: Codex retains this user item across compaction, so it must stay short,
  * fixed, and useful if its UserPromptSubmit hook cannot answer. */
@@ -47,15 +48,20 @@ export function inboxNudgeText(ids: string[], mode: NudgeMailMode = 'inject'): s
   // ZT-I1-MAIL §5 P4: the ids stay (the submit attestation and "did I already see this?", #58);
   // the read/move instruction goes. The bodies are in the hook context of this very turn.
   if (mode === 'inject') return `${NUDGE_HEAD} (delivered in context below)${ids.length ? `: ${list}` : ''}.`;
-  // Legacy-read (§2.2): the agent reads the files; the harness archives them at its Stop.
-  if (mode === 'legacy-read') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Read those files in your inbox/ and act; the harness archives them when your turn ends.`;
+  // Creed Q27: a degraded injection agent still runs with the injection P1 ("you do not read or
+  // move inbox files") until it respawns, so its nudge says the channel changed and what to do.
+  if (mode === 'degraded-move') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Mail channel degraded: read each file in your inbox/ and move it to inbox/.done/ yourself once handled.`;
+  if (mode === 'degraded-read') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Mail channel degraded: read those files in your inbox/ and act; the harness archives them when your turn ends.`;
+  // Legacy-read (§2.2): the agent reads the files; the harness archives them at its Stop. Also a
+  // terminal work-order agent (Creed Q26: never "move"; its mail normally arrives typed whole).
+  if (mode === 'legacy-read' || mode === 'work-order') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Read those files in your inbox/ and act; the harness archives them when your turn ends.`;
   // Legacy-move (§11.7: no Stop signal): the 1.1.74 text, unchanged.
   const named = ids.length ? ` - at least: ${list}` : '';
   return `${LEGACY_NUDGE_HEAD}${named}. Read your inbox (authoritative; ids already in inbox/.done/ were handled), act, move handled ones to inbox/.done/.`;
 }
 
 /** The nudge without ids, for size checks (tests, docs): the longest fixed text of the modes. */
-export const INBOX_NUDGE_FIXED_CHARS = Math.max(...(['inject', 'legacy-read', 'legacy-move'] as const).map((m) => inboxNudgeText([], m).length));
+export const INBOX_NUDGE_FIXED_CHARS = Math.max(...NUDGE_MODES.map((m) => inboxNudgeText([], m).length));
 
 /** Keep Codex's retained user item free of dynamic inbox ids. The hook supplies
  * those current facts as transient developer context instead. */

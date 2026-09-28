@@ -83,19 +83,36 @@ export function mailChannelMode(provider: AgentProvider | undefined, override?: 
 }
 
 /**
- * §5 / §11.7: which mail instructions an agent's PROMPTS carry (spawn prompt P1, wake nudge P4).
+ * §5 / §11.7: which mail instructions an agent's SPAWN PROMPT carries (P1).
  *  - `inject`: bodies arrive in context; the agent never reads, lists or moves inbox files.
  *  - `legacy-read`: the agent reads the files; the harness archives them at its Stop (no "move").
  *  - `legacy-move`: no Stop signal, 1.1.74 semantics: read AND move handled files to .done. That
- *    is cursor, the terminal work-order agents (no Stop either), and an injection agent degraded
- *    for zero hook traffic (§11.10: its own move is what counts as handled, Creed's ruling).
+ *    is cursor and an injection agent degraded for zero hook traffic (§11.10: its own move is what
+ *    counts as handled, Creed's ruling).
+ *  - `work-order` (Creed Q26): the terminal work-order agents: each message is typed into the
+ *    terminal whole and is handled at the confirmed write (N2), so NO read or move instruction.
  */
-export type MailPromptMode = 'inject' | 'legacy-read' | 'legacy-move';
+export type MailPromptMode = 'inject' | 'legacy-read' | 'legacy-move' | 'work-order';
 
 export function mailPromptMode(mode: MailChannelMode, override?: MailChannelOverride | null): MailPromptMode {
   if (mode === 'inject') return 'inject';
   if (mode === 'legacy-read') return override?.reason === 'zero-hook-traffic' ? 'legacy-move' : 'legacy-read';
+  if (mode === 'work-order') return 'work-order';
   return 'legacy-move';
+}
+
+/**
+ * Which text the wake NUDGE carries (P4; mirrors `NudgeMailMode` in shared/hiveNudge.ts). As the
+ * prompt mode, except (Creed Q27) a DEGRADED injection agent, whose running session still holds the
+ * injection P1 until it respawns: its nudge says the channel is degraded and what to do instead:
+ * `degraded-move` (zero hook traffic: read the file and move it to .done yourself) or
+ * `degraded-read` (no mail block, Stop still seen: read the file; the harness archives it).
+ */
+export type MailNudgeMode = MailPromptMode | 'degraded-move' | 'degraded-read';
+
+export function mailNudgeMode(mode: MailChannelMode, override?: MailChannelOverride | null): MailNudgeMode {
+  if (mode === 'legacy-read' && override?.mode === 'legacy-read') return override.reason === 'zero-hook-traffic' ? 'degraded-move' : 'degraded-read';
+  return mailPromptMode(mode, override);
 }
 
 /** How a surfacing is confirmed (§11.1): a readable record, or the latency rule. */

@@ -140,6 +140,13 @@ export interface MailEntry {
    *  Cleared when the file reappears in inbox/ (a new delivered transition). */
   missingAt?: number | null;
   missingReason?: string | null;
+  /** Q28 (Creed): failed parses of this delivered body (the file exists but cannot be parsed, or is
+   *  over 1 MB), since `parseFailSince`, for the file state `parseFailSig` (inbox file size:mtime).
+   *  MAIL_UNPARSEABLE_AFTER failures spanning MAIL_UNPARSEABLE_SPAN_MS close it terminally
+   *  (`missingReason:"unparseable"`). Persisted, so a restart neither resets it nor wakes. */
+  parseFails?: number;
+  parseFailSince?: number | null;
+  parseFailSig?: string | null;
   /** Set by a back-edge; the next surfacing carries the "re-delivered" marker. Cleared on confirm. */
   redelivered: boolean;
   /** §7.1: delivered before 1.1.75 (or with no ledger evidence); marker until first confirmed. */
@@ -464,6 +471,42 @@ export function applyBodyMissing(doc: MailLedgerDoc, id: string, why: string, no
   return d.step();
 }
 
+/** Q28 (Creed): failures before an unparseable body is closed, and the least time they span. */
+export const MAIL_UNPARSEABLE_AFTER = 3;
+export const MAIL_UNPARSEABLE_SPAN_MS = 60_000;
+/** The reason an unparseable body is closed with (`missingReason`). */
+export const MAIL_MISSING_UNPARSEABLE = 'unparseable';
+
+/**
+ * Q28 (Creed): one failed parse of a DELIVERED inbox entry whose file is there but cannot be
+ * parsed. A changed file (`sig`) starts the count again. The MAIL_UNPARSEABLE_AFTER-th failure at
+ * least MAIL_UNPARSEABLE_SPAN_MS after the first closes it like a missing body: acted, flagged
+ * (`missingReason:"unparseable"`), no archive (the file stays where it is), rows
+ * `{kind:"mail", stage:"acted", reason:"body-unparseable"}` and `mail-body-unparseable`. Harness-
+ * caused: not activity. The count itself writes no row.
+ */
+export function applyParseFailed(doc: MailLedgerDoc, id: string, sig: string, now: number): MailStep {
+  const e = doc.entries[id];
+  if (!e || e.via !== 'inbox' || e.state !== 'delivered') return unchanged(doc);
+  const fresh = e.parseFailSig !== sig || !e.parseFails || e.parseFailSince == null;
+  const fails = fresh ? 1 : (e.parseFails ?? 0) + 1;
+  const since = fresh ? now : e.parseFailSince!;
+  const d = new Draft(doc, now);
+  if (fails >= MAIL_UNPARSEABLE_AFTER && now - since >= MAIL_UNPARSEABLE_SPAN_MS) {
+    const next: MailEntry = {
+      ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null,
+      missingAt: now, missingReason: MAIL_MISSING_UNPARSEABLE, parseFails: fails, parseFailSince: since, parseFailSig: sig
+    };
+    d.put(next);
+    d.event(next, 'acted', true, 'body-unparseable');
+    d.row({ kind: 'mail', stage: 'acted', ids: [id], reason: 'body-unparseable' });
+    d.row({ kind: 'mail-body-unparseable', id, fails, spanMs: now - since });
+    return d.step();
+  }
+  d.put({ ...e, parseFails: fails, parseFailSince: since, parseFailSig: sig, updatedAt: now });
+  return d.step();
+}
+
 /** Q15: the file of an entry closed as body-missing is back in inbox/: a NEW delivered transition
  *  (row `reason:"reappeared"`), so it is surfaced like any delivered message. Harness-caused: not
  *  activity. */
@@ -471,7 +514,7 @@ export function applyReappeared(doc: MailLedgerDoc, id: string, now: number): Ma
   const e = doc.entries[id];
   if (!e || e.state !== 'acted' || !e.missingAt) return unchanged(doc);
   const d = new Draft(doc, now);
-  const next: MailEntry = { ...e, state: 'delivered', actedAt: null, missingAt: null, missingReason: null, updatedAt: now };
+  const next: MailEntry = { ...e, state: 'delivered', actedAt: null, missingAt: null, missingReason: null, parseFails: 0, parseFailSince: null, parseFailSig: null, updatedAt: now };
   d.put(next);
   d.event(next, 'delivered', true, 'reappeared');
   d.row({ kind: 'mail', stage: 'delivered', id, from: e.from, act: e.act, requiresReply: e.requiresReply, reason: 'reappeared' });
@@ -1054,7 +1097,7 @@ export class MailLedger {
     // body-missing entry (Q15) whose file is back in inbox/ is redelivered instead.
     for (const e of Object.values(st.doc.entries)) {
       if (e.state !== 'acted' || e.via !== 'inbox' || !existsSync(join(inboxDir, `${e.id}.json`))) continue;
-      if (e.missingAt) this.commit(st, applyReappeared(st.doc, e.id, now));
+      if (e.missingAt) { if (this.unparseableRecovered(st.agentId, e)) this.commit(st, applyReappeared(st.doc, e.id, now)); }
       else st.archive.add(e.id);
     }
     this.commit(st, applyPrune(st.doc, now));
@@ -1304,6 +1347,45 @@ export class MailLedger {
     return this.commit(st, applyBodyMissing(st.doc, id, why, this.now())).changed.length > 0;
   }
 
+  /** Q28: the inbox file's state (size:mtime), or null when it is not there. */
+  private inboxFileSig(agentId: string, id: string): string | null {
+    const dir = this.inboxDir(agentId);
+    if (!dir || !isValidMailId(id)) return null;
+    try { const s = statSync(join(dir, `${id}.json`)); return s.isFile() ? `${s.size}:${s.mtimeMs}` : null; } catch { return null; }
+  }
+
+  /** Q28: an unparseable-closed entry whose inbox file CHANGED and now parses is readable again. */
+  private unparseableRecovered(agentId: string, e: MailEntry): boolean {
+    if (e.missingReason !== MAIL_MISSING_UNPARSEABLE) return true;   // a missing body: its file is back
+    const sig = this.inboxFileSig(agentId, e.id);
+    if (sig === null || sig === e.parseFailSig) return false;
+    try {
+      const p = join(this.inboxDir(agentId)!, `${e.id}.json`);
+      if (statSync(p).size > MESSAGE_FILE_MAX_BYTES) return false;
+      const m = JSON.parse(readFileSync(p, 'utf8')) as unknown;
+      return !!m && typeof m === 'object' && !Array.isArray(m);
+    } catch { return false; }
+  }
+
+  /**
+   * Q28 (Creed): the hook could not parse this delivered body (its file exists). Counts the failure
+   * (persisted); the third one spanning at least 60 s closes it terminally (acted,
+   * `reason:"body-unparseable"`) with a `mail-body-unparseable` row and a banner notice. Returns
+   * `closed`, `counted`, or `none` (not a delivered inbox entry, or not an agent).
+   */
+  parseFailed(agentId: string, id: string): 'closed' | 'counted' | 'none' {
+    if (!this.hasAgent(agentId)) return 'none';
+    const st = this.state(agentId);
+    const step = this.commit(st, applyParseFailed(st.doc, id, this.inboxFileSig(agentId, id) ?? '-', this.now()));
+    if (!step.changed.length) return 'none';
+    if (st.doc.entries[id]?.state !== 'acted') return 'counted';
+    this.notices.set(`${agentId}|body-unparseable`, {
+      file: `agents/${agentId}/inbox/${id}.json`, quarantine: null, error: 'mail-body-unparseable',
+      notice: `A hive message for ${agentId} (${id}) could not be read (its file is damaged or too large) after ${MAIL_UNPARSEABLE_AFTER} tries, so it was closed without reaching the agent. It comes back if the file is repaired (see mail-body-unparseable in the log).`
+    });
+    return 'closed';
+  }
+
   /**
    * Jim audit #4: a cheap disk → ledger reconcile for the wake beat (the load-time one only runs
    * once per process). One readdir of inbox/; a `*.json` file the ledger does not know (written
@@ -1328,7 +1410,8 @@ export class MailLedger {
       const known = st.doc.entries[id];
       // Q15: a body-missing entry whose file is back: a new delivered transition.
       if (known?.missingAt && known.state === 'acted') {
-        if (this.commit(st, applyReappeared(st.doc, id, now)).changed.length) reappeared.push(id);
+        // Q28: an unparseable-closed file comes back only when it changed AND now parses.
+        if (this.unparseableRecovered(agentId, known) && this.commit(st, applyReappeared(st.doc, id, now)).changed.length) reappeared.push(id);
         continue;
       }
       if (known) continue;

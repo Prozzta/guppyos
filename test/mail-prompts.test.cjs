@@ -4,8 +4,9 @@
  *  - Injection-mode agents (claude, codex, antigravity) are never told to read, list or MOVE inbox
  *    files: no text they get pairs "move" with inbox/.done.
  *  - Legacy-read agents (gemini, grok, opencode, pi; an agent degraded for "no mail block") keep a
- *    read instruction WITHOUT "move"; no-Stop agents (cursor, the terminal work-order agents, an
- *    agent degraded for zero hook traffic: Creed's ruling) keep the 1.1.74 read-and-move text.
+ *    read instruction WITHOUT "move"; no-Stop agents (cursor, an agent degraded for zero hook
+ *    traffic: Creed's ruling) keep the 1.1.74 read-and-move text; the terminal work-order agents
+ *    get neither (Creed Q26); a degraded agent's nudge says so (Creed Q27).
  *  - P1 carries the §11.12(c) sentence for every agent.
  *  - drainForStop and WORKER_WAKE_NUDGE stay gone (P11, P12).
  * Zero model tokens. HOME, USERPROFILE, CODEX_HOME and GEMINI_CLI_HOME are jailed and asserted first.
@@ -28,8 +29,8 @@ test.after(() => {
 
 const H = loadTs('src/main/hive.ts');
 const { HiveManager, protocolLineOne, MAIL_RULES_NOT_IN_MEMORY } = H;
-const { mailPromptMode } = loadTs('src/main/mailSurface.ts');
-const { inboxNudgeText, inboxWakeTextForProvider } = loadTs('src/shared/hiveNudge.ts');
+const { mailPromptMode, mailNudgeMode } = loadTs('src/main/mailSurface.ts');
+const { inboxNudgeText, inboxWakeTextForProvider, isInboxNudge, INBOX_NUDGE_FIXED_CHARS } = loadTs('src/shared/hiveNudge.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
 /** "move" and inbox/.done (any separator) in the same sentence. */
@@ -52,13 +53,34 @@ async function floor(t) {
   return { hive, home, root, promptFor };
 }
 
-test('mailPromptMode: inject stays inject; legacy-read stays read unless degraded for zero hook traffic; no-Stop modes move', () => {
+test('mailPromptMode: inject stays inject; legacy-read stays read unless degraded for zero hook traffic; cursor moves; work orders have their own text (Creed Q26)', () => {
   assert.equal(mailPromptMode('inject', null), 'inject');
   assert.equal(mailPromptMode('legacy-read', null), 'legacy-read');
   assert.equal(mailPromptMode('legacy-read', { mode: 'legacy-read', reason: 'no-mail-block', since: 1 }), 'legacy-read');
   assert.equal(mailPromptMode('legacy-read', { mode: 'legacy-read', reason: 'zero-hook-traffic', since: 1 }), 'legacy-move');
   assert.equal(mailPromptMode('legacy-move', null), 'legacy-move');
-  assert.equal(mailPromptMode('work-order', null), 'legacy-move');
+  // Creed Q26 (updated from 'legacy-move'): a work-order agent is never told to read or move files.
+  assert.equal(mailPromptMode('work-order', null), 'work-order');
+});
+
+test('Creed Q27: the wake nudge of a DEGRADED agent says the channel is degraded, and what to do; ASCII and short', () => {
+  const zh = { mode: 'legacy-read', reason: 'zero-hook-traffic', since: 1 };
+  const nb = { mode: 'legacy-read', reason: 'no-mail-block', since: 1 };
+  assert.equal(mailNudgeMode('legacy-read', zh), 'degraded-move');
+  assert.equal(mailNudgeMode('legacy-read', nb), 'degraded-read');
+  assert.equal(mailNudgeMode('legacy-read', null), 'legacy-read', 'a gemini-style agent is not "degraded"');
+  assert.equal(mailNudgeMode('inject', null), 'inject');
+  assert.equal(mailNudgeMode('legacy-move', null), 'legacy-move');
+  assert.equal(mailNudgeMode('work-order', null), 'work-order');
+  const move = inboxNudgeText(['m1'], 'degraded-move');
+  assert.equal(move, 'You have new hive mail: m1. Mail channel degraded: read each file in your inbox/ and move it to inbox/.done/ yourself once handled.');
+  const read = inboxNudgeText(['m1'], 'degraded-read');
+  assert.match(read, /^You have new hive mail: m1\. Mail channel degraded: read those files in your inbox\/ and act; the harness archives them when your turn ends\.$/);
+  assert.ok(!pairsMoveWithDone(read));
+  for (const t of [move, read]) { assert.match(t, /^[ -~]+$/, 'ASCII'); assert.ok(isInboxNudge(t)); }
+  assert.ok(INBOX_NUDGE_FIXED_CHARS <= 160, `${INBOX_NUDGE_FIXED_CHARS}`);
+  // A work-order agent's nudge (only if a file ever reached its inbox) never says "move".
+  assert.ok(!pairsMoveWithDone(inboxNudgeText(['m1'], 'work-order')));
 });
 
 test('P1 line one, per mode, with the §11.12(c) sentence in every one', () => {
@@ -100,16 +122,22 @@ test('P2/P3: the PROTOCOL template describes inbox/ and .done/ as harness-owned 
   assert.doesNotMatch(p, /move a message here/);
 });
 
-test('§11.7: legacy-read agents keep a read instruction without "move"; cursor and the work-order agents keep read-and-move', async (t) => {
+test('§11.7: legacy-read agents keep a read instruction without "move"; only cursor keeps read-and-move; work-order agents get neither (Creed Q26)', async (t) => {
   const { promptFor } = await floor(t);
   for (const provider of ['gemini', 'grok', 'opencode', 'pi']) {
     const p = await promptFor(`lr-${provider}`, provider);
     assert.match(p, /read EVERY file in .*inbox.* Leave the files where they are: the harness archives each message when your turn ends\./, provider);
     assert.ok(!pairsMoveWithDone(p), provider);
   }
-  for (const provider of ['cursor', 'qwen', 'kimi']) {
-    const p = await promptFor(`lm-${provider}`, provider);
-    assert.match(p, /After handling an inbox message, move its file into .*inbox.\.done\./, provider);
+  const cursor = await promptFor('lm-cursor', 'cursor');
+  assert.match(cursor, /After handling an inbox message, move its file into .*inbox.\.done\./);
+  // Creed Q26 (updated: qwen and kimi used to get read-and-move): every work-order provider.
+  for (const provider of ['qwen', 'crush', 'kimi', 'copilot', 'custom']) {
+    const p = await promptFor(`wo-${provider}`, provider);
+    assert.match(p, /Messages for you are typed into this terminal as hive work orders, each one in full; the harness records them\. You do not read, list or move inbox files\./, provider);
+    assert.doesNotMatch(p, /EVERY file in/, provider);
+    assert.ok(!pairsMoveWithDone(p), provider);
+    assert.ok(p.includes(MAIL_RULES_NOT_IN_MEMORY), provider);
   }
 });
 
@@ -134,14 +162,19 @@ test('P4: the wake text follows the mode (index.ts wires wakeMailMode); Codex ke
   assert.match(inboxWakeTextForProvider('cursor', ['m1'], 'legacy-move'), /move handled ones to inbox\/\.done\//);
   const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   assert.match(index, /text: \(ids, agentId\) => inboxWakeTextForProvider\(agentId \? hive\.registry\(\)\.agents\[agentId\]\?\.provider : undefined, \[\.\.\.ids\], agentId \? wakeMailMode\(agentId\) : 'inject'\)/);
-  assert.match(index, /function wakeMailMode\(agentId: string\): MailPromptMode \{[\s\S]*?return mailPromptMode\(mode, override\);/);
+  // Creed Q27 (updated from mailPromptMode): the nudge mode knows degradation.
+  assert.match(index, /function wakeMailMode\(agentId: string\): MailNudgeMode \{[\s\S]*?return mailNudgeMode\(mode, override\);/);
 });
 
 test('P7-P10: god, the first god prompt, closing time and the heartbeat say "delivered to you", never "drain your inbox"', () => {
   const hive = readSource('src/main/hive.ts');
   assert.match(hive, /handle the mail delivered to you and triage every other agent/);
   assert.doesNotMatch(hive, /drain your inbox/i);
-  assert.match(readSource('src/renderer/src/hooks/useHive.ts'), /'1\. Read your memory\.md; pending mail is delivered in your context\.'/);
+  // Jim (slices 4/4b/5 follow-up 2): neutral, true in every mail mode (updated from "pending mail is
+  // delivered in your context", which is false for a legacy or degraded god).
+  const useHive = readSource('src/renderer/src/hooks/useHive.ts');
+  assert.match(useHive, /'1\. Read your memory\.md; then handle your pending hive mail as your start-up instructions describe\.'/);
+  assert.doesNotMatch(useHive, /pending mail is delivered in your context/);
   const closing = readSource('src/main/closingTime.ts');
   assert.match(closing, /a shutdown brief has been delivered to you/);
   assert.doesNotMatch(closing, /drain(ing)? your inbox/i);

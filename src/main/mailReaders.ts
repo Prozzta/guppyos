@@ -53,6 +53,8 @@ export function coordinatorPendingIds(agentId: string, deps: PendingSourceDeps):
 /** The ledger queries the readers use (MailLedger's public API). */
 export interface MailReaderLedger {
   backlog(agentId: string): MailEntry[];
+  /** Delivered, not yet shown (seq order). */
+  pending(agentId: string): MailEntry[];
   awaitingReply(agentId: string): MailObligation[];
   openRequests(agentId: string): MailObligation[];
   lastActivityAt(agentId: string): number | null;
@@ -69,6 +71,13 @@ export const SYSTEM_SENDERS: ReadonlySet<string> = new Set(['heartbeat', 'schedu
  *  (the standup names the agent `unknown` rather than guessing zero). */
 export function actionableBacklog(mail: MailReaderLedger, agentId: string, system: ReadonlySet<string> = SYSTEM_SENDERS): number {
   return mail.backlog(agentId).filter((e) => !system.has(e.from)).length;
+}
+
+/** #13 as the heartbeat's RE-ENGAGE GATE (Creed Q23): only mail god has not been SHOWN yet
+ *  (delivered), minus system senders. Mail god is already looking at (surfacing / surfaced, the
+ *  Stop not yet in) never re-engages it. The digest and the UI may keep the not-acted count. */
+export function actionablePending(mail: MailReaderLedger, agentId: string, system: ReadonlySet<string> = SYSTEM_SENDERS): number {
+  return mail.pending(agentId).filter((e) => !system.has(e.from)).length;
 }
 
 /** #12: does the agent have mail not yet acted? */

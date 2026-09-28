@@ -648,6 +648,34 @@ test('Q13: an UNPARSEABLE body (the file is there) stays delivered, logged and k
   assert.deepEqual(f.server.mailSkippedIds('cl-1'), []);
 });
 
+test('Q28 (Creed): the hook re-tries an unparseable body after 30 s; the third failure spanning >= 60 s closes it (no block, no wake, banner)', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'garbled body' }, 'god-1');
+  const file = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`);
+  fs.writeFileSync(file, '{ not json');
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  f.hive.mail.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  assert.equal(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' })), '');
+  assert.equal(f.entryOf('cl-1', m.id).parseFails, 1);
+  f.fire('cl-1', 'PostToolUse', {});
+  assert.equal(f.entryOf('cl-1', m.id).parseFails, 1, 'inside 30 s the unchanged file is not re-read');
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), [m.id], 'kept out of wakes meanwhile');
+  now += 30_000;
+  f.fire('cl-1', 'PostToolUse', {});
+  assert.equal(f.entryOf('cl-1', m.id).parseFails, 2);
+  now += 30_000;
+  assert.equal(f.ctx(f.fire('cl-1', 'PostToolUse', {})), '');
+  const e = f.entryOf('cl-1', m.id);
+  assert.deepEqual([e.state, e.missingReason], ['acted', 'unparseable']);
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), [], 'closed: not pending, nothing to skip');
+  assert.deepEqual(f.hive.mail.pending('cl-1'), []);
+  assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-unparseable' && r.id === m.id).length, 1);
+  assert.ok(f.hive.integrityIssues().some((i) => i.error === 'mail-body-unparseable'));
+});
+
 test('Q13 (Jim audit #2): a TRANSIENT read error (an antivirus lock) is retried at the next hook, never recorded as missing', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude' } });
   const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'locked body' }, 'god-1');

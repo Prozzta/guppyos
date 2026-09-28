@@ -1082,7 +1082,10 @@ export class HookServer {
   private readonly mailLate = new Map<string, Map<string, Map<string, MailLateDetail>>>();
   /** Q13: bodies in neither inbox/ nor .done/ (or unparseable), with the files' signature then:
    *  skipped until either file changes. A transient read error is never recorded here (retried). */
-  private readonly mailUnreadable = new Map<string, Map<string, string>>();
+  private readonly mailUnreadable = new Map<string, Map<string, { sig: string; at: number }>>();
+  /** Q28: an unparseable body (unchanged file) is re-tried after this long, so its failures are
+   *  counted (3 spanning >= 60 s close it terminally). */
+  static readonly MAIL_UNREADABLE_RETRY_MS = 30_000;
   /** Q13: `mail-agent-moved` is logged once per id per process. */
   private readonly mailMovedLogged = new Set<string>();
   /** Q11: ids that held a block back at an earlier hook (passed over if they still do not fit). */
@@ -1215,11 +1218,13 @@ export class HookServer {
    *  (the file reappears, is rewritten, is moved) clears the record and it is read again. */
   private mailBodySkipped(agentId: string, id: string): boolean {
     const skip = this.mailUnreadable.get(agentId);
-    const sig = skip?.get(id);
-    if (sig === undefined) return false;
+    const rec = skip?.get(id);
+    if (rec === undefined) return false;
     let now: string | null = null;
     try { now = this.hive.mailBodySig?.(agentId, id) ?? null; } catch { now = null; }
-    if (now !== null && now !== sig) { skip!.delete(id); return false; }
+    if (now !== null && now !== rec.sig) { skip!.delete(id); return false; }
+    // Q28: the same unparseable file is tried again after a while (it still stays out of wakes).
+    if (Date.now() - rec.at >= HookServer.MAIL_UNREADABLE_RETRY_MS) return false;
     return true;
   }
 
@@ -1251,9 +1256,18 @@ export class HookServer {
         try { closed = this.hive.mail?.bodyMissing(agentId, id, 'missing') ?? false; } catch { closed = false; }
         if (closed) return null;
       }
-      // Unparseable (or the ledger refused the close): skipped until either file changes.
-      const skip = this.mailUnreadable.get(agentId) ?? new Map<string, string>();
-      skip.set(id, got.sig);
+      if (got.reason === 'unreadable') {
+        // Q28 (Creed): the failure is counted in the ledger (persisted); the third one spanning at
+        // least 60 s closes it terminally (acted, body-unparseable, row + banner): no wake, ever,
+        // across restarts. The beat redelivers it once the file changes and parses.
+        let r: 'closed' | 'counted' | 'none' = 'none';
+        try { r = this.hive.mail?.parseFailed(agentId, id) ?? 'none'; } catch { r = 'none'; }
+        if (r === 'closed') { this.mailUnreadable.get(agentId)?.delete(id); return null; }
+      }
+      // Unparseable (or the ledger refused the close): skipped until either file changes, and
+      // re-tried after MAIL_UNREADABLE_RETRY_MS so the Q28 count can reach its close.
+      const skip = this.mailUnreadable.get(agentId) ?? new Map<string, { sig: string; at: number }>();
+      skip.set(id, { sig: got.sig, at: Date.now() });
       this.mailUnreadable.set(agentId, skip);
       return null;
     }

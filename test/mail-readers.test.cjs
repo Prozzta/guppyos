@@ -99,10 +99,17 @@ test('#6: fleetMailFields: awaitingReply (acted, requires_reply, not replied) an
   assert.deepEqual(f.openRequests, []);
   assert.deepEqual(f.awaitingReply.map((o) => o.id), [q.id]);
   // Bounded lists, full counts.
-  for (let k = 0; k < 14; k++) hive.send({ to: 'andy-1', act: 'request', subject: `r${k}`, body: String(k) }, 'god-1');
+  const many = [];
+  for (let k = 0; k < 14; k++) many.push(hive.send({ to: 'andy-1', act: 'request', subject: `r${k}`, body: String(k) }, 'god-1'));
   f = R.fleetMailFields(hive.mail, 'andy-1');
   assert.equal(f.openRequests.length, R.FLEET_OBLIGATIONS_MAX);
   assert.equal(f.openRequestCount, 14);
+  // Jim (slices 4/4b/5 follow-up 1): the awaitingReply list has the same cap, with its full count.
+  act('andy-1', many.map((m) => m.id));
+  f = R.fleetMailFields(hive.mail, 'andy-1');
+  assert.equal(f.awaitingReplyCount, 15, 'q (requires_reply) + the 14 acted requests');
+  assert.equal(f.awaitingReply.length, R.FLEET_OBLIGATIONS_MAX);
+  assert.deepEqual(f.awaitingReply.map((o) => o.id)[0], q.id, 'oldest first');
 });
 
 // ── #9 / #13 / #12: standup, god actionable, digest ─────────────────────────────────────────
@@ -120,6 +127,22 @@ test('#9/#13: actionable = ledger not-acted minus system senders; handled mail s
   assert.equal(R.actionableBacklog(hive.mail, 'god-1'), 0);
   assert.equal(R.hasBacklog(hive.mail, 'god-1'), true, '#12: the system mail is still not acted');
   assert.equal(R.hasBacklog(hive.mail, 'andy-1'), false);
+});
+
+test('#13 gate (Creed Q23): the re-engage count is DELIVERED mail only (minus system senders); mail god is already shown does not re-engage it', async (t) => {
+  const { hive, act } = await floor(t);
+  const w = hive.send({ to: 'god-1', act: 'inform', subject: 'worker result', body: 'r' }, 'andy-1');
+  hive.send({ to: 'god-1', act: 'request', subject: 'Heartbeat', body: 'digest' }, 'heartbeat');
+  assert.equal(R.actionablePending(hive.mail, 'god-1'), 1);
+  hive.mail.claimSurfacing('god-1', [w.id], 'mid', 'PostToolUse');
+  assert.equal(R.actionablePending(hive.mail, 'god-1'), 0, 'surfacing: god is looking at it');
+  assert.equal(R.actionableBacklog(hive.mail, 'god-1'), 1, 'the standup / digest count still has it until acted');
+  hive.mail.confirmSurfaced('god-1', [w.id], 'mid', 'evidence');
+  assert.equal(R.actionablePending(hive.mail, 'god-1'), 0, 'surfaced');
+  hive.mail.closeEpoch('god-1', 'mid', 'abnormal', { reason: 'interrupted' });
+  assert.equal(R.actionablePending(hive.mail, 'god-1'), 1, 're-delivered: counts again');
+  act('god-1', [w.id]);
+  assert.equal(R.actionablePending(hive.mail, 'god-1'), 0);
 });
 
 test('#9: a ledger that throws is a failure to observe, not a zero', () => {
@@ -270,7 +293,9 @@ test('PIN #11: lastCoordinationAt = acted transitions + own outbox/memory writes
 test('PIN #12/#13: the digest and god\'s actionable count read the ledger', () => {
   assert.match(fn('function buildHeartbeatDigest', 'const header'), /hasBacklog\(hive\.mail, id\)/);
   const god = fn('function godActionableInboxCount', 'function reengageGod');
-  assert.match(god, /actionableBacklog\(hive\.mail, godId\)/);
+  // Creed Q23: the re-engage gate counts delivered (not yet shown) mail only.
+  assert.match(god, /actionablePending\(hive\.mail, godId\)/);
+  assert.ok(!/actionableBacklog\(/.test(god), 'not the not-acted count');
   assert.ok(!/hive\.inbox\(/.test(god));
 });
 
