@@ -3306,6 +3306,9 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
   // Record the spawning window as the PTY's owner so its output routes ONLY back
   // to that floor, then run the shared spawn core.
   const owner = BrowserWindow.fromWebContents(evt.sender)?.webContents ?? null;
+  // Refused up front during a reset/changeHome (no worktree or hive provisioning either);
+  // PtyManager.spawn refuses too, for every other door.
+  if (ptyManager.shutdownReason !== null) return { ok: false, error: ptyManager.shutdownReason };
   return spawnAgentCore(opts, owner);
 });
 
@@ -3351,6 +3354,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // isn't archived and no worktree is torn down) before the relaunch takes over.
   {
     const bin = opts.command.trim().split(/\s+/)[0] || opts.command;
+    // USER-initiated check (Jim's audit CHANGE 2): never trust a cached miss here - a CLI the user
+    // just installed by hand must be seen now, not after the 60 s miss TTL. Background checks keep it.
+    if (bin && !opts.noAutoInstall) invalidateCommandCache(bin);
     if (bin && !opts.noAutoInstall && !(await ptyManager.isCommandAvailable(bin))) {
       // The installer commands are `npm install -g …`. Probe for npm the same way
       // we probe for the engine CLI, so a no-Node machine gets the node-free rung
@@ -3358,6 +3364,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // An npm whose Node is BELOW the floor counts as unavailable: founder rule
       // (2026-08-07) is "their Node newer than ours → leave it alone; absent or
       // older → install the latest stable for them".
+      invalidateCommandCache('npm');
+      invalidateCommandCache('node');
       const npmAvailable =
         (await ptyManager.isCommandAvailable('npm')) &&
         nodeIsUsable(await detectNodeVersion(await ptyManager.commandPath('node')));
@@ -4136,6 +4144,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   writeConfig({ harnessHome: newHome });
   // SYNC-CHILD-CALLS: the async bulk kill (one batched taskkill, then the ConPTY exits awaited),
   // and only THEN relaunch/exit — never a per-terminal synchronous taskkill on the main thread.
+  ptyManager.refuseNewSpawns('The harness home is changing and the app is restarting; agents cannot start now.');
   try { await ptyManager.killAllAsync(); } catch (e) { console.error('[changeHome] killAllAsync:', e); }
   app.relaunch();
   app.exit(0);
@@ -4716,6 +4725,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   // SYNC-CHILD-CALLS: async bulk kill, still BEFORE hive.dispose and the rm below.
+  ptyManager.refuseNewSpawns('The app is resetting; agents cannot start now.');
   try { await ptyManager.killAllAsync(); } catch (e) { console.error('[reset] killAllAsync:', e); }
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
@@ -5863,6 +5873,8 @@ async function processSpawnRequest(filePath: string): Promise<void> {
   }
   // Missing-CLI → FAIL FAST. A headless worker has no human to watch an installer,
   // so we never run the cc49e1e install banner here — we reject and tell god.
+  // A requested spawn: re-resolve rather than trust a cached miss (Jim's audit CHANGE 2).
+  invalidateCommandCache(bin);
   if (!(await ptyManager.isCommandAvailable(bin))) { fail(`engine CLI "${bin}" is not installed`); return; }
 
   const isolate = raw.isolate !== false; // default true

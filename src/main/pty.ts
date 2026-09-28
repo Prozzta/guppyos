@@ -571,6 +571,7 @@ export class PtyManager {
   }
 
   async spawn(opts: SpawnOptions, owner: WebContents | null = null): Promise<{ ok: boolean; error?: string }> {
+    if (this.shutdownReason !== null) return { ok: false, error: this.shutdownReason };
     if (this.sessions.has(opts.id)) {
       return { ok: false, error: `pty already exists for id ${opts.id}` };
     }
@@ -608,7 +609,9 @@ export class PtyManager {
       const shimSpawn = needsCmd && typeof opts.shellScript !== 'string'
         ? await this.resolveWindowsShimSpawn(resolved)
         : null;
-      // The lookups above yielded: another spawn may have claimed this id meanwhile.
+      // The lookups above yielded: a reset/changeHome may have closed the manager, or another
+      // spawn may have claimed this id, meanwhile.
+      if (this.shutdownReason !== null) return { ok: false, error: this.shutdownReason };
       if (this.sessions.has(opts.id)) {
         return { ok: false, error: `pty already exists for id ${opts.id}` };
       }
@@ -922,6 +925,16 @@ export class PtyManager {
       new Promise<void>((resolve) => { setTimeout(resolve, PtyManager.EXIT_WAIT_MS); })
     ]);
     return killTreesAsync(sessions.map((s) => s.proc.pid), capMs).then(closePtys, closePtys).then(allExited);
+  }
+
+  /** SYNC-CHILD-CALLS (Jim's audit NIT): set by reset/changeHome BEFORE their awaited bulk kill.
+   *  While it is set every spawn() refuses with this message, so a renderer-initiated pty:spawn in
+   *  the await window cannot start a terminal that the kill already missed. Never cleared: both
+   *  paths end in app.exit/relaunch. */
+  shutdownReason: string | null = null;
+
+  refuseNewSpawns(reason: string): void {
+    this.shutdownReason = reason;
   }
 
   /** EXIT-CRASH: how long the quit waits for the ConPTY exit callbacks after the kill. */

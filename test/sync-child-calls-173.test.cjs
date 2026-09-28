@@ -109,9 +109,11 @@ function scanFile(file, text) {
 
 /** @param readFile (rel) => source, so a mutant can be overlaid. Asserts; returns the census. */
 function syncChildCensus(readFile) {
-  const files = [...walkSrc('src/main'), ...walkSrc('src/preload')];
-  assert.ok(files.includes('src/main/index.ts') && files.includes('src/main/kg-core.cjs') && files.includes('src/preload/index.ts'),
-    'SYNC-CHILD CENSUS: the walk reaches main, its .cjs sidecars and preload');
+  // src/shared too (Jim's audit CHANGE 1): main imports it, so a sync call there runs on main.
+  const files = [...walkSrc('src/main'), ...walkSrc('src/preload'), ...walkSrc('src/shared')];
+  assert.ok(files.includes('src/main/index.ts') && files.includes('src/main/kg-core.cjs') && files.includes('src/preload/index.ts')
+    && files.includes('src/shared/modelCatalog.ts'),
+    'SYNC-CHILD CENSUS: the walk reaches main, its .cjs sidecars, preload and shared');
   const found = {};
   for (const f of files) {
     for (const h of scanFile(f, readFile(f))) (found[f] ??= []).push(h);
@@ -189,14 +191,20 @@ const MUTANTS = [
     add: "\nimport * as cpNs from 'node:child_process';\nfunction rogueWhere(): string { return cpNs.execSync('where claude').toString(); }\n" },
   { name: 'a computed name on a namespace', file: 'src/main/shellEnv.ts',
     anchor: "export { isSafeCommandName };",
-    add: "\nimport * as cpNs from 'node:child_process';\nexport const rogue = (): unknown => (cpNs as unknown as Record<string, (c: string) => unknown>)['spawn' + 'Sync']('where');" }
+    add: "\nimport * as cpNs from 'node:child_process';\nexport const rogue = (): unknown => (cpNs as unknown as Record<string, (c: string) => unknown>)['spawn' + 'Sync']('where');" },
+  { name: "execFileSync in src/shared (main imports it; Jim's probe E5)", file: 'src/shared/modelCatalog.ts', prepend: true,
+    add: "import { execFileSync } from 'node:child_process';\nexport const rogue = (): unknown => execFileSync('where', ['x']);\n" }
 ];
 
 for (const m of MUTANTS) {
   test(`SYNC-CHILD CENSUS mutant: ${m.name} in ${m.file} dies at the census`, () => {
     const real = read(m.file);
-    assert.equal(real.split(m.anchor).length - 1, 1, 'the mutant insertion point matches EXACTLY ONCE');
-    const mutated = real.replace(m.anchor, () => `${m.anchor}${m.add}`);
+    let mutated;
+    if (m.prepend) mutated = m.add + real;
+    else {
+      assert.equal(real.split(m.anchor).length - 1, 1, 'the mutant insertion point matches EXACTLY ONCE');
+      mutated = real.replace(m.anchor, () => `${m.anchor}${m.add}`);
+    }
     const overlay = (f) => (f === m.file ? mutated : read(f));
     syncChildCensus(read); // passes on the real tree...
     assert.throws(() => syncChildCensus(overlay), (e) => e instanceof assert.AssertionError && /SYNC-CHILD CENSUS/.test(e.message) && e.message.includes(m.file),
@@ -481,4 +489,57 @@ test('ONE exec primitive: a hung `where` in the app resolver gets the MODELS-173
   assert.deepEqual(r, { path: 'claude', found: false }, 'a timed-out lookup is a miss');
   assert.deepEqual(calls[0], { file: 'where', args: ['claude'], timeout: 0 }, 'win32: execFile timeout 0, execP times the run');
   assert.deepEqual(calls[1], { file: 'taskkill', args: ['/PID', '4242', '/T', '/F'], timeout: R.TREE_KILL_TIMEOUT_MS });
+});
+
+// ─── Jim's audit CHANGE 2: a USER-initiated check never trusts a cached miss ──────────
+
+test('USER check: a miss cached by an earlier check is re-resolved, and the just-installed CLI is found', async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const g = rig();
+  const pm = new PtyManager();
+  pm.resolver = g.r;
+  assert.equal(await pm.isCommandAvailable('codex'), false, 'not installed yet: a miss, now cached');
+  g.answers.set('codex', { path: 'C:\npm\codex.cmd', found: true });
+  g.onDisk.add('C:\npm\codex.cmd');
+  g.advance(1_000);
+  assert.equal(await pm.isCommandAvailable('codex'), false, 'a BACKGROUND check keeps trusting the miss inside the TTL');
+  g.r.invalidate('codex'); // what the user paths do first (invalidateCommandCache(bin))
+  assert.equal(await pm.isCommandAvailable('codex'), true, 'the user-initiated check sees the install at once');
+  assert.deepEqual(g.lookups, ['codex', 'codex']);
+});
+
+test('WIRING: both user spawn checks drop the cached answer right before isCommandAvailable(bin)', () => {
+  const idx = read('src/main/index.ts');
+  assert.match(idx, /if \(bin && !opts\.noAutoInstall\) invalidateCommandCache\(bin\);\r?\n\s+if \(bin && !opts\.noAutoInstall && !\(await ptyManager\.isCommandAvailable\(bin\)\)\) \{/,
+    'the agent spawn / auto-install check');
+  assert.match(idx, /invalidateCommandCache\('npm'\);\r?\n\s+invalidateCommandCache\('node'\);\r?\n\s+const npmAvailable =/, 'and the npm/node rung check under it');
+  assert.match(idx, /invalidateCommandCache\(bin\);\r?\n\s+if \(!\(await ptyManager\.isCommandAvailable\(bin\)\)\) \{ fail\(`engine CLI/, 'the engine check');
+  assert.equal((idx.match(/isCommandAvailable\(/g) || []).length, 3, 'no other isCommandAvailable caller to classify');
+});
+
+// ─── Jim's audit NIT: no pty spawn during the reset/changeHome await window ───────────
+
+test('refuseNewSpawns: spawn refuses at once, and also when the refusal lands during its own awaits', async () => {
+  const os = require('node:os');
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const pm = new PtyManager();
+  const MSG = 'The app is resetting; agents cannot start now.';
+  // Refused while the async lookup is in flight (the await window the NIT is about).
+  pm.resolver = { resolve: async (c) => { pm.refuseNewSpawns(MSG); return { path: c, found: false }; } };
+  assert.deepEqual(await pm.spawn({ id: 'a', cwd: os.tmpdir(), command: 'claude' }), { ok: false, error: MSG });
+  const asked = [];
+  pm.resolver = { resolve: async (c) => { asked.push(c); return { path: c, found: false }; } };
+  assert.deepEqual(await pm.spawn({ id: 'b', cwd: os.tmpdir(), command: 'claude' }), { ok: false, error: MSG });
+  assert.deepEqual(asked, [], 'once refused, nothing is even resolved');
+  assert.equal(pm.list().length, 0);
+});
+
+test('WIRING: reset and changeHome refuse new spawns BEFORE the awaited kill; pty:spawn refuses up front', () => {
+  const idx = read('src/main/index.ts');
+  for (const ch of ['app:resetAll', 'config:changeHome']) {
+    const body = handlerBody(idx, ch);
+    const refuse = body.indexOf('ptyManager.refuseNewSpawns(');
+    assert.ok(refuse > 0 && refuse < body.indexOf('await ptyManager.killAllAsync()'), `${ch}: refuse before the kill`);
+  }
+  assert.match(handlerBody(idx, 'pty:spawn'), /if \(ptyManager\.shutdownReason !== null\) return \{ ok: false, error: ptyManager\.shutdownReason \};\r?\n\s+return spawnAgentCore\(/);
 });
