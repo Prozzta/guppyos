@@ -125,6 +125,25 @@ test('fix 6: the generated per-agent config.toml carries model_auto_compact_toke
   assert.match(cfg.developer_instructions, /You are "Dwight"/, 'the instructions are still set');
 });
 
+test('Stage 1b: an optional registry limit applies to that agent only and the user config is unchanged', async (t) => {
+  const seed = 'model_auto_compact_token_limit = 250000\n' + SEED;
+  const s = sandbox(t, seed);
+  const meta = { id: 'trial-agent', name: 'Trial', provider: 'codex', cwd: s.home };
+  await s.hive.ensureAgent(meta);
+  const registryFile = path.join(s.home, 'harness', 'hive', 'registry.json');
+  const registry = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+  registry.agents['trial-agent'].codexAutoCompactTokenLimit = 80000;
+  fs.writeFileSync(registryFile, JSON.stringify(registry), 'utf8');
+  const trial = await s.hive.ensureAgent(meta);
+  const trialCfg = toml.parse(fs.readFileSync(path.join(trial.env.CODEX_HOME, 'config.toml'), 'utf8'));
+  assert.equal(trialCfg.model_auto_compact_token_limit, 80000);
+  assert.equal(fs.readFileSync(path.join(s.home, '.codex', 'config.toml'), 'utf8'), seed, 'the user global config is unchanged');
+  const control = await agentConfig(t, seed);
+  assert.equal(control.cfg.model_auto_compact_token_limit, 120000, 'an unset agent retains the fleet default');
+  assert.equal(C.codexAutoCompactTokenLimitForAgent(undefined), 120000);
+  assert.equal(C.codexAutoCompactTokenLimitForAgent(80000), 80000);
+});
+
 test('Route A: generated Codex config pins retain_client_developer_messages = false even when the seed enables it', async (t) => {
   const { cfg } = await agentConfig(t, '[features]\nretain_client_developer_messages = true\n');
   assert.equal(cfg.features.retain_client_developer_messages, false);

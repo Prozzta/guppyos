@@ -62,6 +62,16 @@ export function disableCodexPlugins(config: string): { text: string; disabled: n
  *  would compact every 20-30K tokens. */
 export const CODEX_AUTO_COMPACT_TOKEN_LIMIT = 120_000;
 
+/**
+ * A registry-controlled override for one Codex agent. Unset (and malformed) values retain the
+ * fleet default; the value is deliberately not tied to any particular agent ID.
+ */
+export function codexAutoCompactTokenLimitForAgent(override?: number): number {
+  return typeof override === 'number' && Number.isSafeInteger(override) && override >= 1_000
+    ? override
+    : CODEX_AUTO_COMPACT_TOKEN_LIMIT;
+}
+
 /** A top-level key line of the seed (before its first table), bare or quoted. */
 function topLevelKey(line: string, key: string): boolean {
   const esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -242,6 +252,9 @@ export function setCodexRootTableKeys(
   entries: Readonly<Record<string, string | number | boolean>>,
   note?: string
 ): string {
+  // The document root has no TOML table header. Keep its established duplicate-safe writer
+  // behind this shared entry point so per-agent scalar policy follows the same config path.
+  if (name === '') return setCodexTopLevelKeys(config, entries as Record<string, number | null>);
   const keys = Object.keys(entries);
   const header = new RegExp(`^\\s*\\[\\s*(["']?)${nameSource(name)}\\1\\s*\\]\\s*(#.*)?$`);
   const dotted = new RegExp(`^\\s*(["']?)${nameSource(name)}\\1\\s*\\.`);

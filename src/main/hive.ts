@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
-import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexFeatureFlags, setCodexModel, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
@@ -239,6 +239,9 @@ export interface RegistryAgent extends AgentMeta {
    *  (e.g. "ClaudeTerminalHarness") spawns into a nonexistent dir and fails; this
    *  flag makes that visible instead of letting it slip through silently. */
   cwdValid?: boolean;
+  /** Optional operator-set per-agent Codex compaction threshold. Unset keeps the fleet default;
+   * applied into the agent's generated config.toml on its next spawn. */
+  codexAutoCompactTokenLimit?: number;
 }
 
 export interface Registry {
@@ -1142,7 +1145,7 @@ export class HiveManager {
               this.reconcileAgyStatusline();
             }
             else if (desc.shim === 'codex') {
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch);
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, reg.agents[meta.id]?.codexAutoCompactTokenLimit);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
@@ -3144,7 +3147,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number): { home: string; refusal?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3231,8 +3234,8 @@ export class HiveManager {
       if (config && !inheritPlugins) config = disableCodexPlugins(config).text;
       // CODEX-BLOAT-165 fix 6: compact at ~120K instead of the model default (~220-243K
       // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
-      config = setCodexTopLevelKeys(config, {
-        model_auto_compact_token_limit: CODEX_AUTO_COMPACT_TOKEN_LIMIT,
+      config = setCodexRootTableKeys(config, '', {
+        model_auto_compact_token_limit: codexAutoCompactTokenLimitForAgent(autoCompactTokenLimit),
         // CODEX-BLOAT-165 fix 2 (Settings): the tool-output cap; Off = no key of ours.
         ...(toolOutputTokenLimit !== null ? { tool_output_token_limit: toolOutputTokenLimit } : {})
       });
