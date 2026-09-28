@@ -409,8 +409,42 @@ test('(dry #4) waitState reads log.jsonl ROWS: a ~0.7 s surfacing that went back
     const fake = { s: { hive: dir }, entry: () => ({ state: 'delivered' }), waitFor: lb.LayerB.prototype.waitFor, aborted: () => false, abort: { signal: { throwIfAborted() {} } } };
     fs.appendFileSync(file, JSON.stringify({ kind: 'mail-surface-late', stage: 'redelivered', agentId: 'lb-claude', ids: ['b2'], epoch: 'e9' }) + '\n');
     const got = await lb.LayerB.prototype.waitState.call(fake, 'lb-claude', 'b2', ['surfacing', 'surfaced', 'acted'], 5_000);
-    assert.deepEqual(got, { state: 'surfacing', via: 'log' });
+    assert.deepEqual([got.state, got.via, got.actedAt], ['surfacing', 'log', null]);
+    assert.deepEqual(got.entry, { state: 'delivered' }, 'the ledger entry rides along on the log path too');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
   const ws = method('async waitState(agentId, id, states, budgetMs)');
-  assert.match(ws, /logReachedStates\(this\.logTail\.read\(\), agentId, id\)/);
+  assert.match(ws, /logReachedAt\(this\.logTail\.read\(\), agentId, id\)/);
+});
+
+test('Jim MEDIUM (6a5b855b audit): waitState\'s LOG path carries actedAt from the acted ROW\'s ts (and the entry); B7 never bounds by Date.now()', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-acted-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'log.jsonl'), [
+      { ts: 1000, kind: 'mail', stage: 'delivered', agentId: 'lb-codex', id: 'b7' },
+      { ts: 2000, kind: 'mail', stage: 'surfaced', agentId: 'lb-codex', ids: ['b7'] },
+      { ts: 3000, kind: 'mail', stage: 'acted', agentId: 'lb-codex', ids: ['b7'] }
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const ledger = { state: 'acted', actedAt: 2999, updatedAt: 3001 };
+    const mk = (entry) => ({ s: { hive: dir }, entry: () => entry, waitFor: lb.LayerB.prototype.waitFor, abort: { signal: { throwIfAborted() {} } } });
+    const got = await lb.LayerB.prototype.waitState.call(mk(ledger), 'lb-codex', 'b7', ['acted'], 5_000);
+    assert.equal(got.via, 'log');
+    assert.equal(got.actedAt, 3000, 'the acted ROW is the authority');
+    assert.equal(got.at, 3000);
+    assert.equal(got.entry, ledger, 'the ledger entry rides along');
+    assert.equal(lb.b7EpochEnd(got), 3000);
+    // No acted row yet, the ledger says acted: its actedAt.
+    const d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-acted2-'));
+    try {
+      fs.writeFileSync(path.join(d2, 'log.jsonl'), '');
+      const g2 = await lb.LayerB.prototype.waitState.call({ ...mk(ledger), s: { hive: d2 } }, 'lb-codex', 'b7', ['acted'], 5_000);
+      assert.deepEqual([g2.via, g2.actedAt], ['ledger', 2999]);
+    } finally { fs.rmSync(d2, { recursive: true, force: true }); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  // Neither available: null, never a clock reading.
+  assert.equal(lb.b7EpochEnd(null), null);
+  assert.equal(lb.b7EpochEnd({ state: 'acted', via: 'log', actedAt: null }), null);
+  const b7 = src.slice(src.indexOf('  async factB7() {'), src.indexOf('\n  }\n', src.indexOf('  async factB7() {')));
+  assert.match(b7, /const end = b7EpochEnd\(acted\);/);
+  assert.match(b7, /const compactAt = end === null \? \[\] :/);
+  assert.ok(!/Date\.now\(\)/.test(b7.slice(b7.indexOf('const end = '), b7.indexOf('const midEpoch'))), 'no Date.now() in the bound');
 });

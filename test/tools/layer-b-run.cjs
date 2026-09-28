@@ -798,19 +798,30 @@ function lateHookRows(texts, stubIds, stubSince) {
  *  late or abnormal back-edge of an epoch (it was surfacing), a mail-hook-late (its block was
  *  built), or a later surfaced/acted row prove it. */
 function logReachedStates(rows, agentId, id) {
-  const out = new Set();
+  return new Set(logReachedAt(rows, agentId, id).keys());
+}
+/** The same, with WHEN: state -> the ts of the FIRST row that proves it (Jim, 6a5b855b audit: the
+ *  acted row's ts is the authority for actedAt; B7 bounds its compactions by it). */
+function logReachedAt(rows, agentId, id) {
+  const out = new Map();
+  const put = (st, r) => { if (!out.has(st)) out.set(st, Number.isFinite(Number(r.ts)) ? Number(r.ts) : null); };
   for (const r of rows) {
     if (!r || r.agentId !== agentId) continue;
     const ids = Array.isArray(r.ids) ? r.ids : (r.id ? [r.id] : []);
     if (!ids.includes(id)) continue;
-    if (r.kind === 'mail' && r.stage === 'delivered') out.add('delivered');
-    else if (r.kind === 'mail' && r.stage === 'surfaced') { out.add('surfacing'); out.add('surfaced'); }
-    else if (r.kind === 'mail' && r.stage === 'acted') out.add('acted');
-    else if ((r.kind === 'mail-surface-unconfirmed' || r.kind === 'mail-surface-late') && r.stage === 'redelivered') out.add('surfacing');
-    else if (r.kind === 'mail' && r.stage === 'redelivered' && r.epoch) out.add('surfacing');
-    else if (r.kind === 'mail-hook-late') out.add('surfacing');
+    if (r.kind === 'mail' && r.stage === 'delivered') put('delivered', r);
+    else if (r.kind === 'mail' && r.stage === 'surfaced') { put('surfacing', r); put('surfaced', r); }
+    else if (r.kind === 'mail' && r.stage === 'acted') put('acted', r);
+    else if ((r.kind === 'mail-surface-unconfirmed' || r.kind === 'mail-surface-late') && r.stage === 'redelivered') put('surfacing', r);
+    else if (r.kind === 'mail' && r.stage === 'redelivered' && r.epoch) put('surfacing', r);
+    else if (r.kind === 'mail-hook-late') put('surfacing', r);
   }
   return out;
+}
+
+/** B7's mid-epoch bound: the acted time of the waitState result, or null (unknown). */
+function b7EpochEnd(acted) {
+  return acted && Number.isFinite(acted.actedAt) ? acted.actedAt : null;
 }
 
 /** Incremental reader of the sandbox hive's log.jsonl (by byte offset; a rotation, i.e. a smaller
@@ -1778,12 +1789,16 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
    *  sampling missed a ~0.7 s surfacing), or the ledger's current state. */
   async waitState(agentId, id, states, budgetMs) {
     this.logTail = this.logTail || new HiveLogTail(this.s.hive);
+    // Every result carries the same fields on both paths (Jim, 6a5b855b audit): the ledger entry
+    // (or null), `at` (when the state was reached), and `actedAt`, whose authority is the acted
+    // ROW's ts, then the ledger's actedAt, else null. Never a clock reading.
     return this.waitFor(`${id} to reach ${states.join('/')}`, budgetMs, () => {
-      const reached = logReachedStates(this.logTail.read(), agentId, id);
-      const hit = states.find((st) => reached.has(st));
-      if (hit) return { state: hit, via: 'log' };
+      const reached = logReachedAt(this.logTail.read(), agentId, id);
       const e = this.entry(agentId, id);
-      return e && states.includes(e.state) ? { state: e.state, via: 'ledger', entry: e } : null;
+      const actedAt = reached.get('acted') ?? (e && Number.isFinite(e.actedAt) ? e.actedAt : null);
+      const hit = states.find((st) => reached.has(st));
+      if (hit) return { state: hit, via: 'log', at: reached.get(hit), actedAt, entry: e };
+      return e && states.includes(e.state) ? { state: e.state, via: 'ledger', at: e.updatedAt ?? null, actedAt, entry: e } : null;
     }, 250);
   }
 
@@ -2290,9 +2305,11 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       try { reply = await this.waitReply(X, N7, 8 * 60_000); } catch (e) { log(`B7 attempt ${attempt}: ${e.message}`); }
       let acted = null;
       try { acted = await this.waitState(X, id, ['acted'], 3 * 60_000); } catch { /* recorded below */ }
-      const end = acted && acted.actedAt ? acted.actedAt : Date.now();
+      // The epoch's end is the acted time (the acted row's ts). Unknown (never acted, or no time):
+      // no compaction can be shown mid-epoch, so none counts (never Date.now(), Jim 6a5b855b audit).
+      const end = b7EpochEnd(acted);
       const ev = this.codexEvents().filter((e) => e.timestamp && Date.parse(e.timestamp) >= since);
-      const compactAt = ev.filter((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e))).map((e) => Date.parse(e.timestamp)).filter((t) => t <= end);
+      const compactAt = end === null ? [] : ev.filter((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e))).map((e) => Date.parse(e.timestamp)).filter((t) => t <= end);
       const midEpoch = compactAt.length > 0;
       const firstCompact = midEpoch ? Math.min(...compactAt) : null;
       const compactHook = this.rows().filter((r) => r.ts >= since && r.agentId === X && /"source":"compact"/.test(JSON.stringify(r)));
@@ -2301,12 +2318,12 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       let replyAt = null;
       try { replyAt = reply ? fs.statSync(reply.p).mtimeMs : null; } catch { replyAt = null; }
       const recallable = midEpoch && !!reply && replyAt !== null && replyAt > firstCompact;
-      tries.push({ attempt, typed, compactions: compactAt.length, midEpoch, compactHook: compactHook.length, resurfaced, recallable, kinds: this.seenHookKinds(X, id), reply: !!reply });
+      tries.push({ attempt, typed, epochEnd: end, compactions: compactAt.length, midEpoch, compactHook: compactHook.length, resurfaced, recallable, kinds: this.seenHookKinds(X, id), reply: !!reply });
       if (midEpoch) break;
     }
     const hit = tries.find((t) => t.midEpoch);
     const detail = tries.map((t) => t.skipped ? `attempt ${t.attempt}: skipped (${t.skipped})`
-      : `attempt ${t.attempt}: /compact typed ${t.typed}; mid-epoch compactions ${t.compactions}; compact-source SessionStart ${t.compactHook > 0}; mail re-surfaced after it ${t.resurfaced}; nonce recalled after it ${t.recallable} (hookKinds ${t.kinds.join(',') || 'none'}; reply ${t.reply})`).join(' | ');
+      : `attempt ${t.attempt}: /compact typed ${t.typed}; ${t.epochEnd === null ? 'epoch end UNKNOWN (no acted time): no compaction can count as mid-epoch; ' : ''}mid-epoch compactions ${t.compactions}; compact-source SessionStart ${t.compactHook > 0}; mail re-surfaced after it ${t.resurfaced}; nonce recalled after it ${t.recallable} (hookKinds ${t.kinds.join(',') || 'none'}; reply ${t.reply})`).join(' | ');
     const status = !hit ? 'GATE-BLOCKED' : (hit.resurfaced || hit.recallable ? 'PASS' : 'FAIL');
     this.fact('B7', status, `RECORD: ${detail}`
       + (!hit ? '. No mid-epoch compaction could be forced after one retry: GATE-BLOCKED, god decides.' : '')
@@ -2690,7 +2707,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, logReachedStates, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
