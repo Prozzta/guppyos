@@ -661,11 +661,20 @@ export class HookServer {
   }
 
   /** Read this agent's Codex allowance, if it is a Codex worker and anything moved. */
-  private observeCodexCapacity(agentId: string, event: string, sessionId?: string): void {
+  private observeCodexCapacity(agentId: string, event: string, sessionId?: string, fromSubagent = false): void {
     try {
       const home = this.hive.codexHomeFor(agentId);
       if (!home) return;
-      const obs = this.codexCapacity.observe(home, { rescan: event === 'SessionStart', sessionId });
+      const read = this.codexCapacity.observeRollout(home, { rescan: event === 'SessionStart', sessionId });
+      // MODEL-PINBACK G2: the live model, from the tail read above (no second walk or read).
+      // Only the agent's OWN session: the rollout is bound to this hook's session id, and a
+      // subagent's rollout runs the subagent's model. A line older than this process's launch
+      // is a previous process's turn and is ignored inside observeLiveModel.
+      if (read.turnModel && sessionId && !fromSubagent) {
+        this.hive.observeLiveModel(agentId, 'codex', read.turnModel.model, { observedAt: read.turnModel.observedAt ?? undefined });
+      }
+      if (!this.onCapacity) return;
+      const obs = read.capacity;
       // The agent is carried with the reading: a pool key is a provider fact, and
       // which agents draw on it can only be learned from readings that arrived.
       if (obs) {
@@ -727,6 +736,15 @@ export class HookServer {
       }
       const agentId = typeof p.agent_id === 'string' && p.agent_id ? p.agent_id : null;
       this.onAgyTick?.(agentId, c.tick);
+      // MODEL-PINBACK G2: the MEASURED model of a hive agent's AGY session (`model.id` is the
+      // same label `--model` takes). A session nobody spawned (agent_id null) moves nothing.
+      if (agentId) {
+        try {
+          const status = p.agy_status as { model?: { id?: unknown } } | undefined;
+          const id = typeof status?.model?.id === 'string' ? status.model.id : '';
+          if (id.trim()) this.hive.observeLiveModel(agentId, 'antigravity', id, { observedAt: c.tick.readAt });
+        } catch { /* telemetry must never break the pipe */ }
+      }
     } catch { /* telemetry must never break the pipe */ }
     return {};
   }
@@ -830,7 +848,8 @@ export class HookServer {
     // and it makes no provider request of any kind. Non-Codex agents cost one
     // existence check. Session boundaries force a rescan, because a new session
     // means a new rollout file rather than an append to the old one.
-    if (agentId && this.onCapacity) this.observeCodexCapacity(agentId, event, p.session_id);
+    // MODEL-PINBACK G2: the same tail read also yields the thread's live model (turn_context).
+    if (agentId) this.observeCodexCapacity(agentId, event, p.session_id, fromSubagent);
 
     // Status-line payloads carry the session's EXACT context accounting —
     // current tokens AND the real window size (200k vs 1M, which nothing else

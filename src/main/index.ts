@@ -29,6 +29,7 @@ import {
   readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
+import { effectiveModel, resolveSpawnArgs } from '../shared/modelPin';
 import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
@@ -3411,6 +3412,22 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   let seedPrompt: string | undefined;
   // `pathPrepend` is main's alone (the memory command's dir); never taken from the renderer.
   opts.pathPrepend = undefined;
+  // MODEL-PINBACK: the model this spawn really runs. The renderer's `--model` is the request (the
+  // picker); a pinned in-TUI switch replaces it while that request is unchanged (see
+  // src/shared/modelPin.ts). Resolved BEFORE ensureAgent, so the registry records it and a Codex
+  // agent's config.toml names it (G1). Claude with no request falls back to its app default, as
+  // the Claude block below always did.
+  let spawnModel: { requested?: string; launch?: string } | undefined;
+  if (opts.hive && hive.enabled() && (provider === 'claude' || provider === 'codex' || provider === 'antigravity')) {
+    try {
+      const r = resolveSpawnArgs(hive.registry().agents[opts.hive.id], opts.args ?? [], {
+        flag: providerPreset(provider).modelFlag ?? '--model',
+        fallback: provider === 'claude' ? modelForHiveSpawn(opts.hive, readConfig()) : undefined
+      });
+      opts.args = r.args;
+      spawnModel = { requested: r.requested, launch: r.launch };
+    } catch (e) { console.warn('[model-pin] spawn model resolution failed:', e); }
+  }
   if (opts.hive && hive.enabled()) {
     try {
       // NATIVE-MEMORY (Jim M2, fail closed): the agent's memory env is decided FIRST, and the
@@ -3443,7 +3460,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           // CODEX-BLOAT-165 fix 2: Settings' Codex tool output cap, into this agent's config.toml.
           codexToolOutputTokenLimit: readConfig().codexToolOutputTokenLimit,
           // CODEX-BLOAT-165 fix 5: Settings' "inherit my Codex plugins" (default off).
-          codexInheritPlugins: readConfig().codexInheritPlugins === true
+          codexInheritPlugins: readConfig().codexInheritPlugins === true,
+          // MODEL-PINBACK: recorded on the registry entry; a Codex config.toml carries `launch`.
+          spawnModel
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and
@@ -3500,7 +3519,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // cross-session message to it came back "held for the recipient user's
     // approval" with no surface for anyone to ever grant that approval.
     const args = argsWithAutoModeFlag(opts.args ?? [], cfg.autoMode, provider);
-    // Model precedence: an explicit renderer --model wins; otherwise the model
+    // (MODEL-PINBACK resolves the model above whenever the hive is enabled, so this is the
+    // hive-disabled fallback.) Model precedence: an explicit renderer --model wins; otherwise the model
     // recorded from this agent's Claude status line wins over app-wide defaults.
     // This keeps separate agents' `/model` choices out of Claude's shared global
     // settings file while retaining the existing god/worker fallback behavior.
@@ -4720,7 +4740,10 @@ ipcMain.handle('hive:agentDirectory', () => {
       lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
       contextTokens: ctx?.tokens ?? null,
       contextLimit: ctx?.limit ?? null,
-      contextPct: ctx && ctx.limit > 0 ? Math.round((ctx.tokens / ctx.limit) * 100) : null
+      contextPct: ctx && ctx.limit > 0 ? Math.round((ctx.tokens / ctx.limit) * 100) : null,
+      // MODEL-PINBACK G3: what the agent runs (live, else launched, else pinned) - read-only.
+      effectiveModel: effectiveModel(a) ?? null,
+      pinnedModel: a.model ?? null
     };
   });
   return { godId: reg.godId, agents };

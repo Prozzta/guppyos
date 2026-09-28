@@ -167,6 +167,37 @@ export function latestUsableRateLimits<T>(
 }
 
 /**
+ * MODEL-PINBACK G2: the model of the newest `turn_context` in a rollout tail, with its own
+ * timestamp. Codex writes one `turn_context` per turn carrying the model that turn runs, so after
+ * an in-TUI `/model` the next turn's line names the new model. Null when the tail holds none.
+ */
+export function latestTurnContextModel(tail: string): { model: string; observedAt: number | null } | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('turn_context')) continue;
+    let obj: unknown;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (typeof obj !== 'object' || obj === null) continue;
+    const rec = obj as Record<string, unknown>;
+    if (rec.type !== 'turn_context') continue;
+    const payload = (typeof rec.payload === 'object' && rec.payload !== null) ? rec.payload as Record<string, unknown> : null;
+    const model = typeof payload?.model === 'string' ? payload.model.trim() : '';
+    if (!model) continue;
+    const ts = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : NaN;
+    return { model, observedAt: Number.isFinite(ts) ? ts : null };
+  }
+  return null;
+}
+
+/** One rollout read: the capacity observation and the thread's live model, from ONE tail. */
+export interface CodexRolloutRead {
+  capacity: CapacityObservation | null;
+  /** The newest turn_context's model, when the tail was read (the file changed) and held one. */
+  turnModel: { model: string; observedAt: number | null } | null;
+}
+
+/**
  * Stateful reader over a set of Codex homes. One instance lives in main; the state
  * it holds is only the per-home cache described at the top of the file.
  */
@@ -183,6 +214,13 @@ export class CodexRolloutCapacitySource {
    * for another session is always replaced with the matching rollout.
    */
   observe(codexHome: string, opts: { rescan?: boolean; sessionId?: string; now?: number } = {}): CapacityObservation | null {
+    return this.observeRollout(codexHome, opts).capacity;
+  }
+
+  /** `observe`, plus the live model from the SAME tail read (MODEL-PINBACK G2). Nothing new
+   *  (an unchanged file) is `{ capacity: null, turnModel: null }`. */
+  observeRollout(codexHome: string, opts: { rescan?: boolean; sessionId?: string; now?: number } = {}): CodexRolloutRead {
+    const none: CodexRolloutRead = { capacity: null, turnModel: null };
     const now = opts.now ?? Date.now();
     let entry = this.cache.get(codexHome);
     const cachedSessionMatches = !opts.sessionId || (entry?.file !== null && entry?.file !== undefined
@@ -192,7 +230,7 @@ export class CodexRolloutCapacitySource {
       entry = { file, mtimeMs: 0, size: 0 };
       this.cache.set(codexHome, entry);
     }
-    if (!entry.file) return null;
+    if (!entry.file) return none;
 
     let mtimeMs: number;
     let size: number;
@@ -200,21 +238,23 @@ export class CodexRolloutCapacitySource {
       const stat = statSync(entry.file);
       mtimeMs = stat.mtimeMs;
       size = stat.size;
-    } catch { entry.file = null; return null; }
+    } catch { entry.file = null; return none; }
     // Windows can hold an open rollout's mtime at creation while it grows. Either
     // a size increase OR an mtime advance makes the tail worth reading; an idle
     // agent still pays just this one stat per hook boundary.
-    if (size <= entry.size && mtimeMs <= entry.mtimeMs) return null;
+    if (size <= entry.size && mtimeMs <= entry.mtimeMs) return none;
     entry.mtimeMs = mtimeMs;
     entry.size = size;
 
     const scope = this.scopeOf(codexHome);
-    return latestUsableRateLimits(readTail(entry.file), (rateLimits, observedAt, sequence) => normalizeCodexRateLimits({
+    const tail = readTail(entry.file);
+    const file = entry.file;
+    const capacity = latestUsableRateLimits(tail, (rateLimits, observedAt, sequence) => normalizeCodexRateLimits({
       rateLimits,
       accountScope: scope,
       // The FILE is the stream: `ordinal` restarts at zero in each new session
       // file, so an ordinal only orders events within the file it came from.
-      streamId: `codex-rollout:${entry.file}`,
+      streamId: `codex-rollout:${file}`,
       sourceSequence: sequence,
       // The event's own timestamp, not now: a rollout copy is authoritative at the
       // time it was written, and the tracker orders readings by that. An older
@@ -224,6 +264,7 @@ export class CodexRolloutCapacitySource {
       receivedAt: now,
       source: 'codex-rollout'
     }));
+    return { capacity, turnModel: latestTurnContextModel(tail) };
   }
 
   /** Drop a home's cache — used when an agent is removed. */

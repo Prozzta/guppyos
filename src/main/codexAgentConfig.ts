@@ -87,6 +87,25 @@ export function setCodexTopLevelKeys(config: string, entries: Record<string, num
 }
 
 /**
+ * MODEL-PINBACK G1: when the app launches this agent with `--model <picked>`, the flag beats any
+ * `model =` in config.toml, so a seed `model` line copied from the user's ~/.codex/config.toml is
+ * inert and misleading (it named gpt-6-astra while every request ran gpt-5.6-terra). OUR copy
+ * then states the model the agent really runs: the seed's top-level `model` line is replaced by
+ * `model = "<picked>"`. With nothing picked (`null`/empty) the text is returned unchanged, so the
+ * seed's model applies, as Codex itself would do. A profile's own `model` (inside a table) is
+ * left alone: the flag beats it too, but it is only read when that profile is selected.
+ */
+export function setCodexModel(config: string, picked: string | null | undefined): string {
+  const model = picked?.trim();
+  if (!model) return config;
+  const lines = config.split(/\r?\n/);
+  const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
+  const topEnd = firstTable < 0 ? lines.length : firstTable;
+  const kept = lines.filter((l, i) => i >= topEnd || !topLevelKey(l, 'model'));
+  return `# --- munder-hive: the model this agent is launched with (--model; auto-generated; do not edit) ---\nmodel = ${JSON.stringify(model).replace(/\u007f/g, '\\u007F')}\n\n${kept.join('\n')}`;
+}
+
+/**
  * MEMSPIKE-168: the [tui] keys OUR copy always carries, whatever the seed says. Measured through
  * the ConPTY the app uses (node-pty, Windows inbox conhost), Codex 0.157.1, one resize, a resumed
  * 200-turn thread:

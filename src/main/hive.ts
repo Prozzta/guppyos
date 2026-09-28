@@ -28,7 +28,8 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
-import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexFeatureFlags, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { CODEX_AUTO_COMPACT_TOKEN_LIMIT, CODEX_TUI_KEYS, disableCodexPlugins, setCodexFeatureFlags, setCodexModel, setCodexTopLevelKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
 import {
@@ -205,10 +206,22 @@ export interface RegistryAgent extends AgentMeta {
   /** The `sessionId` before the current one (START-FIXES-163 (1)): the fallback resume
    *  key when the current one has no transcript, e.g. a phantom OTel start-up id. */
   previousSessionId?: string;
-  /** Most recent Claude model id reported by this agent's status line. This is
-   *  per-agent because Claude Code's global settings file cannot preserve
-   *  independent `/model` choices across a hive. */
+  /** The PINNED model: a live in-TUI `/model` switch (Claude status line, Codex rollout
+   *  turn_context, Antigravity statusline), kept so a respawn stays on it. Per agent because a
+   *  CLI's global settings cannot preserve independent choices across a hive. See
+   *  src/shared/modelPin.ts (MODEL-PINBACK) for when it is set, used and dropped. */
   model?: string;
+  /** MODEL-PINBACK: the requested (picker) model the pin replaced; the pin applies only while
+   *  the spawn still requests it. Absent = pinned while nothing was requested. */
+  modelPinnedFrom?: string;
+  /** MODEL-PINBACK: the renderer's `--model` at the last spawn (absent = none). */
+  requestedModel?: string;
+  /** MODEL-PINBACK: the `--model` the current process was launched with (absent = CLI default). */
+  launchModel?: string;
+  /** MODEL-PINBACK: the last live model observed from the current process. */
+  liveModel?: string;
+  /** MODEL-PINBACK: when the current process was launched (ms since epoch). */
+  launchedAt?: number;
   /** Whether `cwd` is actually usable for a (re)spawn — i.e. an ABSOLUTE path
    *  that exists as a directory. Computed + persisted at spawn so the roster
    *  reliably exposes each worker's environment validity. A non-absolute fragment
@@ -914,6 +927,10 @@ export class HiveManager {
       /** CODEX-BLOAT-165 fix 5: HarnessConfig.codexInheritPlugins. Only `true` keeps the
        *  inherited plugins; absent or false turns them off in this agent's config.toml. */
       codexInheritPlugins?: boolean;
+      /** MODEL-PINBACK: the spawn's model. `requested` is the renderer's `--model`, `launch` the
+       *  one the CLI is really given (the pin, when it applies). Recorded on the registry entry;
+       *  a Codex agent's config.toml carries `launch`. Absent = not recorded (older callers). */
+      spawnModel?: { requested?: string; launch?: string };
     } = {}
   ): Promise<SpawnInjection> {
     const root = this.root();
@@ -995,6 +1012,7 @@ export class HiveManager {
       archived: false,
       lastSeen: Date.now()
     };
+    if (opts.spawnModel) this.recordLaunchModel(reg.agents[meta.id], meta.id, opts.spawnModel);
     if (meta.isGod) reg.godId = meta.id;
     this.atomicWriteJson(join(root, 'registry.json'), reg);
 
@@ -1094,7 +1112,7 @@ export class HiveManager {
               this.reconcileAgyStatusline();
             }
             else if (desc.shim === 'codex') {
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true);
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
@@ -1391,38 +1409,55 @@ export class HiveManager {
   }
 
   /**
-   * Persist only a Claude `/model` divergence from the current app default.
-   * Returning to the default removes the pin, so Settings model changes continue
-   * to reach agents that have not deliberately selected another model.
+   * Claude status-line model (kept for its callers): `appDefault` is the model a Claude agent runs
+   * when nothing is requested, so a pre-MODEL-PINBACK entry keeps the old rule (pin a divergence
+   * from the default, clear it on a return). See observeLiveModel.
    */
   recordModel(agentId: string, model: string, appDefault: string | undefined): void {
+    this.observeLiveModel(agentId, 'claude', model, { fallbackBaseline: appDefault });
+  }
+
+  /**
+   * MODEL-PINBACK G2: one live-model observation from a provider bridge. Pins a user's in-TUI
+   * switch (and clears it on a return to the requested model) per src/shared/modelPin.ts. The
+   * entry must be of `provider`: a bridged provider's display model never becomes another
+   * provider's CLI argument. Writes the registry only when something changed.
+   */
+  observeLiveModel(
+    agentId: string,
+    provider: 'claude' | 'codex' | 'antigravity',
+    model: string,
+    opts: { observedAt?: number; fallbackBaseline?: string } = {}
+  ): void {
     const root = this.root();
-    const next = model.trim();
-    if (!root || !next) return;
+    if (!root || !model.trim()) return;
     try {
       const reg = this.registry();
       const agent = reg.agents[agentId];
-      // Status payload shapes are shared by provider bridges. Only a real Claude
-      // agent may turn one into a Claude CLI argument on a later respawn.
-      if (!agent || agent.provider !== 'claude') return;
-      // `[1m]` selects a different context window and must remain a real pin.
-      // Only harmless whitespace/case differences are equivalent to the default.
-      const key = next.toLowerCase();
-      const defaultKey = appDefault?.trim().toLowerCase() ?? '';
-      if (defaultKey && key === defaultKey) {
-        if (!agent.model) return;
-        delete agent.model;
-        agent.lastSeen = Date.now();
-        this.atomicWriteJson(join(root, 'registry.json'), reg);
-        this.appendLog({ kind: 'model', agentId, model: null });
-        return;
-      }
-      if (agent.model?.trim().toLowerCase() === key) return;
-      agent.model = next;
+      if (!agent || (agent.provider ?? 'claude') !== provider) return;
+      const before = agent.model;
+      const r = applyLiveModel(agent, model, opts);
+      if (!r.changed) return;
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
-      this.appendLog({ kind: 'model', agentId, model: next });
-    } catch { /* best-effort â€” never crash a status line */ }
+      if (agent.model !== before) this.appendLog({ kind: 'model', agentId, model: agent.model ?? null, provider, from: agent.modelPinnedFrom ?? null });
+    } catch { /* best-effort - never crash a status line or a hook */ }
+  }
+
+  /** MODEL-PINBACK: record a spawn's requested/launch model on its (about to be written) entry.
+   *  A pin that no longer applies (the picker changed the request since) is dropped here. */
+  private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string }): void {
+    const requested = spawn.requested?.trim() || undefined;
+    const launch = spawn.launch?.trim() || undefined;
+    if (resolveSpawnModel(entry, requested).dropPin) {
+      this.appendLog({ kind: 'model-pin-dropped', agentId, pinned: entry.model ?? null, from: entry.modelPinnedFrom ?? null, requested: requested ?? null });
+      delete entry.model;
+      delete entry.modelPinnedFrom;
+    }
+    if (requested) entry.requestedModel = requested; else delete entry.requestedModel;
+    if (launch) entry.launchModel = launch; else delete entry.launchModel;
+    delete entry.liveModel;
+    entry.launchedAt = Date.now();
   }
 
   /** The last known session_id for an agent, or undefined. Used to build a
@@ -1437,7 +1472,7 @@ export class HiveManager {
     return this.registry().agents[agentId]?.previousSessionId;
   }
 
-  /** The per-agent Claude model last reported by its status line. */
+  /** The per-agent pinned model (a live in-TUI switch), if any. */
   lastModel(agentId: string): string | undefined {
     return this.registry().agents[agentId]?.model;
   }
@@ -2996,7 +3031,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string): { home: string; refusal?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3097,6 +3132,9 @@ export class HiveManager {
       // Route A: UserPromptSubmit additionalContext must not be retained as a
       // client developer message after compaction. This is our generated home only.
       config = setCodexFeatureFlags(config, { retain_client_developer_messages: false });
+      // MODEL-PINBACK G1: with `--model <picked>` the seed's `model` line is inert; ours names the
+      // model the agent really runs. Nothing picked: the seed's line stays and Codex uses it.
+      config = setCodexModel(config, launchModel);
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
