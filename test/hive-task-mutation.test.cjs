@@ -85,6 +85,52 @@ test('patch refuses an unknown card without rewriting the ledger', (t) => {
   assert.deepEqual(tasks(hive), [card('existing')]);
 });
 
+test('malformed tasks.json is quarantined and addTask refuses to overwrite it', (t) => {
+  const hive = floor(t);
+  hive.writeTasks([card('existing')]);
+  const file = path.join(hive.root(), 'tasks.json');
+  const corrupt = '{"tasks":["half-written"';
+  fs.writeFileSync(file, corrupt, 'utf8');
+
+  assert.throws(() => hive.addTask(card('new')), /tasks\.json is invalid JSON; refusing to overwrite it/);
+  assert.equal(fs.readFileSync(file, 'utf8'), corrupt, 'the bad authority file remains untouched for repair');
+  const copies = fs.readdirSync(hive.root()).filter((name) => name.startsWith('tasks.json.corrupt-'));
+  assert.equal(copies.length, 1, 'one byte-identical copy is quarantined');
+  assert.equal(fs.readFileSync(path.join(hive.root(), copies[0]), 'utf8'), corrupt);
+  assert.match(fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8'), /"kind":"hive-authority-corrupt"/,
+    'the operator gets a durable, loud integrity event');
+});
+
+test('malformed registry.json fails closed instead of becoming an empty roster', (t) => {
+  const hive = floor(t);
+  hive.writeTasks([card('existing')]); // bootstraps the authoritative hive files
+  const file = path.join(hive.root(), 'registry.json');
+  const corrupt = '{"agents":';
+  fs.writeFileSync(file, corrupt, 'utf8');
+
+  assert.throws(() => hive.registry(), /registry\.json is invalid JSON; refusing to overwrite it/);
+  assert.equal(fs.readFileSync(file, 'utf8'), corrupt);
+  const copies = fs.readdirSync(hive.root()).filter((name) => name.startsWith('registry.json.corrupt-'));
+  assert.equal(copies.length, 1);
+  assert.equal(fs.readFileSync(path.join(hive.root(), copies[0]), 'utf8'), corrupt);
+});
+
+test('a simulated failure before atomic rename leaves the old task ledger valid and intact', (t) => {
+  const hive = floor(t);
+  hive.writeTasks([card('old')]);
+  const file = path.join(hive.root(), 'tasks.json');
+  const before = fs.readFileSync(file, 'utf8');
+  const renameSync = fs.renameSync;
+  fs.renameSync = () => { throw new Error('simulated crash before rename'); };
+  try {
+    assert.throws(() => hive.writeTasks([card('new')]), /simulated crash before rename/);
+  } finally {
+    fs.renameSync = renameSync;
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), before, 'the published ledger was never truncated');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).tasks.map((task) => task.id), ['old']);
+});
+
 test('renderer task actions never send a whole stale ledger back to main', () => {
   const root = path.resolve(__dirname, '..');
   const preload = fs.readFileSync(path.join(root, 'src/preload/index.ts'), 'utf8');

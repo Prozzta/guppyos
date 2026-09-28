@@ -4346,19 +4346,22 @@ ipcMain.handle('hive:addTask', (_evt, task: unknown) => {
     return { ok: false, error: 'invalid task' };
   }
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  return { ok: hive.addTask(task as HiveTask) };
+  try { return { ok: hive.addTask(task as HiveTask) }; }
+  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 ipcMain.handle('hive:patchTask', (_evt, id: unknown, patch: unknown) => {
   if (typeof id !== 'string' || !id || !patch || typeof patch !== 'object' || Array.isArray(patch)) {
     return { ok: false, error: 'invalid task patch' };
   }
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  return { ok: hive.patchTask(id, patch as Partial<Omit<HiveTask, 'id'>>) };
+  try { return { ok: hive.patchTask(id, patch as Partial<Omit<HiveTask, 'id'>>) }; }
+  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 ipcMain.handle('hive:deleteTask', (_evt, id: unknown) => {
   if (typeof id !== 'string' || !id) return { ok: false, error: 'invalid task id' };
   if (!hive.enabled()) return { ok: false, error: 'hive disabled (no harnessHome)' };
-  return { ok: hive.deleteTask(id) };
+  try { return { ok: hive.deleteTask(id) }; }
+  catch (e) { return { ok: false, error: e instanceof Error ? e.message : String(e) }; }
 });
 ipcMain.handle('hive:setArchived', (_evt, id: unknown, archived: unknown) => {
   if (typeof id !== 'string') return { ok: false, error: 'invalid id' };

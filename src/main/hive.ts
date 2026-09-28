@@ -539,6 +539,9 @@ export class HiveManager {
   private readonly outboxRejectNotices = new Map<string, string | null>();
   /** A delivered file whose normal archive failed must never be delivered twice. */
   private readonly outboxDeliveredArchives = new Map<string, string | null>();
+  /** A corrupt authority file is copied aside once per bad contents. Repeating a
+   *  read must still fail closed, but must not fill the hive with identical copies. */
+  private readonly quarantinedJsonFingerprints = new Map<string, string>();
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
   /** Bumped by start/stop, so a scan queued before a stop never runs after it. */
@@ -1815,7 +1818,7 @@ export class HiveManager {
     const dir = this.agentDir(agentId);
     if (!existsSync(dir)) return { block: false };
     const cursorPath = join(dir, 'cursor.json');
-    const cursor = this.readJson<{ lastProcessed: string | null }>(cursorPath, { lastProcessed: null });
+    const cursor = this.readAuthoritativeJson<{ lastProcessed: string | null }>(cursorPath);
     const fresh = this.inbox(agentId)
       .filter((m) => !cursor.lastProcessed || m.id > cursor.lastProcessed)
       .sort((a, b) => (a.id < b.id ? -1 : 1));
@@ -2468,7 +2471,7 @@ export class HiveManager {
   registry(): Registry {
     const root = this.root();
     if (!root) return { godId: null, agents: {} };
-    return this.readJson<Registry>(join(root, 'registry.json'), { godId: null, agents: {} });
+    return this.readAuthoritativeJson<Registry>(join(root, 'registry.json'));
   }
   board(): string {
     const root = this.root();
@@ -2476,7 +2479,7 @@ export class HiveManager {
   }
   tasks(): unknown {
     const root = this.root();
-    return root ? this.readJson(join(root, 'tasks.json'), { tasks: [] }) : { tasks: [] };
+    return root ? this.readAuthoritativeJson(join(root, 'tasks.json')) : { tasks: [] };
   }
 
   /** Persist the task ledger to hive/tasks.json. Mirrors the board/message persist
@@ -2497,9 +2500,9 @@ export class HiveManager {
     if (!root) return;
     this.ensureHive();
     const path = join(root, 'tasks.json');
-    const current = this.readJson<{ tasks?: unknown }>(path, { tasks: [] });
+    const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path);
     const merged = mergeTaskLedger(current?.tasks, tasks);
-    this.writeJson(path, { tasks: merged });
+    this.atomicWriteJson(path, { tasks: merged });
     this.appendLog({ kind: 'tasks', count: merged.length });
   }
 
@@ -3689,8 +3692,49 @@ export class HiveManager {
   private readJson<T>(p: string, fallback: T): T {
     try { return JSON.parse(readFileSync(p, 'utf8')) as T; } catch { return fallback; }
   }
+  /**
+   * Read a source of truth which may later be read-modify-written. Unlike a
+   * cache, invalid JSON must never become an empty in-memory ledger: that turns
+   * the next write into silent data loss. Preserve the original in place, keep
+   * one byte-identical quarantine copy for repair, log it, and make the caller
+   * fail so its write is refused.
+   */
+  private readAuthoritativeJson<T>(p: string): T {
+    let raw: string;
+    try {
+      raw = readFileSync(p, 'utf8');
+    } catch (error) {
+      throw new Error(`Hive authority ${basename(p)} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    try {
+      const parsed = JSON.parse(raw) as T;
+      this.quarantinedJsonFingerprints.delete(p);
+      return parsed;
+    } catch (error) {
+      const fingerprint = createHash('sha256').update(raw).digest('hex');
+      let quarantine: string | null = null;
+      if (this.quarantinedJsonFingerprints.get(p) !== fingerprint) {
+        quarantine = `${p}.corrupt-${Date.now()}-${shortRand()}`;
+        try {
+          copyFileSync(p, quarantine);
+          this.quarantinedJsonFingerprints.set(p, fingerprint);
+        } catch (copyError) {
+          quarantine = null;
+          console.error(`[hive] could not quarantine corrupt ${basename(p)}:`, copyError);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      try {
+        this.appendLog({ kind: 'hive-authority-corrupt', file: basename(p), quarantine: quarantine ? basename(quarantine) : null, error: detail });
+      } catch (logError) {
+        console.error(`[hive] could not log corrupt authority ${basename(p)}:`, logError);
+      }
+      const where = quarantine ? ` A copy was saved as ${basename(quarantine)}.` : '';
+      throw new Error(`Hive authority ${basename(p)} is invalid JSON; refusing to overwrite it.${where} Repair it, then retry.`);
+    }
+  }
   private writeJson(p: string, data: unknown): void {
-    writeFileSync(p, JSON.stringify(data, null, 2), 'utf8');
+    this.atomicWriteJson(p, data);
   }
   private atomicWriteJson(p: string, data: unknown): void {
     const tmp = `${p}.tmp-${shortRand()}`;
