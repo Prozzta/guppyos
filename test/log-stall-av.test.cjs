@@ -100,7 +100,7 @@ test('F1 wiring (B1/B3): no opt-in call; dispose() runs before reset\'s rm, befo
   assert.ok(dAt > 0 && cpAt > dAt, 'change home: dispose, then copy');
 });
 
-test('F1 GATE (Jim\'s probe): with a large pre-existing log, an app append is sub-millisecond (it was ~390-460 ms)', async () => {
+test('F1 GATE (Jim\'s probe): with a large pre-existing log, an app append never reads or copies the log (the read cost ~390-460 ms)', async () => {
   const home = dir();
   const hive = new HiveManager(() => home);
   await hive.ensureAgent({ id: 'a1', name: 'A', provider: 'claude', cwd: home });
