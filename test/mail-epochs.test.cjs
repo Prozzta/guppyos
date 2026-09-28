@@ -31,6 +31,7 @@ const { InboxWakeBridge, MAIL_DEGRADE_AFTER_WAKES } = loadTs('src/main/inboxWake
 const W = loadTs('src/main/workerWake.ts');
 const { WorkerWakeWatchdog, inboxWakeRequestId, SUBMIT_CONFIRM_MS, WORKER_WAKE_COOLDOWN_MS } = W;
 const { MAIL_STALE_EPOCH_MS } = loadTs('src/main/mailLedger.ts');
+const { coordinatorPendingIds } = loadTs('src/main/mailReaders.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
 const markersIn = (text) => [...(text ?? '').matchAll(/\[hive-mail:([^\]]+)\]/g)].map((m) => m[1]);
@@ -51,12 +52,14 @@ async function world(t, { providers = {}, confirms = () => true, probe = null, g
   const reg = hive.registry.bind(hive);
   hive.registry = () => { const r = reg(); for (const [id, p] of Object.entries(providers)) r.agents[id] = { ...r.agents[id], provider: p }; return r; };
   const coordinator = new WorkerWakeWatchdog();
-  const pending = (a) => {
-    const mode = server.mailChannel(a).mode;
-    if (mode === 'legacy-move' || mode === 'work-order') return hive.inbox(a).map((m) => m.id);
-    const skip = new Set(server.mailSkippedIds(a));
-    return hive.mail.pending(a).map((e) => e.id).filter((id) => !skip.has(id));
-  };
+  // The REAL pending rule index.ts wires (mailReaders.coordinatorPendingIds), with the same deps
+  // (mutant K13: a copy here let a broken skip filter in main survive).
+  const pending = (a) => coordinatorPendingIds(a, {
+    mode: (x) => server.mailChannel(x).mode,
+    pending: (x) => hive.mail.pending(x),
+    skipped: (x) => server.mailSkippedIds(x),
+    files: (x) => hive.inbox(x).map((m) => m.id)
+  });
   const bridge = new InboxWakeBridge({
     coordinator,
     inboxIds: pending,
@@ -628,5 +631,6 @@ test('WIRING: main connects the mail epochs and the wake coordinator both ways; 
   assert.match(index, /workerWake\.noteSpawn\(opts\.id, Date\.now\(\), opts\.hive\.id\);\s*try \{ hookServer\.abortMailTurn\(opts\.hive\.id, 'respawn'\); \}/, 'after noteSpawn');
   assert.match(index, /workerWake\.forget\(agentId, id\);[^\n]*\n\s*try \{ forgetWakeRows\(wakeRows, agentId\); \}[^\n]*\n\s*if \(!\[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\)\) \{ try \{ hookServer\.abortMailTurn\(agentId, 'pty-exit'\); \}/);
   assert.match(index, /inboxIds: \(agentId\) => mailPendingIds\(agentId\),/);
-  assert.match(index, /function mailPendingIds\(agentId: string\): string\[\] \{[\s\S]*?if \(mode === 'legacy-move' \|\| mode === 'work-order'\) return files\(\);[\s\S]*?hive\.mail\.pending\(agentId\)/);
+  // K13: main's pending source IS the tested rule, wired to the HookServer and the ledger.
+  assert.match(index, /function mailPendingIds\(agentId: string\): string\[\] \{\s*return coordinatorPendingIds\(agentId, \{\s*mode: \(a\) => hookServer\.mailChannel\(a\)\.mode,\s*pending: \(a\) => hive\.mail\.pending\(a\),\s*skipped: \(a\) => hookServer\.mailSkippedIds\(a\),\s*files: \(a\) => hive\.inbox\(a\)\.map\(\(m\) => m\.id\)\s*\}\);\s*\}/);
 });

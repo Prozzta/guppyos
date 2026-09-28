@@ -1242,10 +1242,19 @@ export class HookServer {
     try { got = read.call(this.hive, agentId, id); } catch { return null; }
     if (!got.ok) {
       if (got.reason === 'transient') return null;
+      try { this.hive.mail?.noteBodyMissing(agentId, id, got.reason); } catch { /* best effort */ }
+      if (got.reason === 'missing') {
+        // Q15 (god's ruling): in NEITHER place is terminal and persisted (acted, reason
+        // body-missing): never pending, never a wake, across restarts. The beat's reconcile
+        // redelivers it if the file comes back into inbox/.
+        let closed = false;
+        try { closed = this.hive.mail?.bodyMissing(agentId, id, 'missing') ?? false; } catch { closed = false; }
+        if (closed) return null;
+      }
+      // Unparseable (or the ledger refused the close): skipped until either file changes.
       const skip = this.mailUnreadable.get(agentId) ?? new Map<string, string>();
       skip.set(id, got.sig);
       this.mailUnreadable.set(agentId, skip);
-      try { this.hive.mail?.noteBodyMissing(agentId, id, got.reason); } catch { /* best effort */ }
       return null;
     }
     if (got.moved && !this.mailMovedLogged.has(`${agentId}|${id}`)) {

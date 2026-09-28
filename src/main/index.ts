@@ -52,7 +52,7 @@ import {
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
-import { actionableBacklog, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
+import { actionableBacklog, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
@@ -661,17 +661,15 @@ inboxWake = new InboxWakeBridge({
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
 
-/** ZT-I1-MAIL §3 #1: the wake coordinator's pending source (see the bridge's `inboxIds`). */
+/** ZT-I1-MAIL §3 #1: the wake coordinator's pending source (see the bridge's `inboxIds`), and
+ *  the renderer queue's precondition (#16). The rule itself is coordinatorPendingIds (tested). */
 function mailPendingIds(agentId: string): string[] {
-  const files = (): string[] => hive.inbox(agentId).map((m) => m.id).filter(Boolean);
-  const mode = hookServer.mailChannel(agentId).mode;
-  if (mode === 'legacy-move' || mode === 'work-order') return files();
-  try {
-    const skip = new Set(hookServer.mailSkippedIds(agentId));
-    return hive.mail.pending(agentId).map((e) => e.id).filter((id) => !skip.has(id));
-  } catch {
-    return files();
-  }
+  return coordinatorPendingIds(agentId, {
+    mode: (a) => hookServer.mailChannel(a).mode,
+    pending: (a) => hive.mail.pending(a),
+    skipped: (a) => hookServer.mailSkippedIds(a),
+    files: (a) => hive.inbox(a).map((m) => m.id)
+  });
 }
 hive.setDeliveryObserver(({ agentId, messageId }) => {
   // Proves the observer is registered AND that deliver() reached it, independently of

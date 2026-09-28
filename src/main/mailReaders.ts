@@ -21,6 +21,35 @@
  */
 import type { MailEntry, MailObligation } from './mailLedger';
 
+/** The inputs of the coordinator's pending source (index.ts wires them to the HookServer and
+ *  the hive). */
+export interface PendingSourceDeps {
+  mode: (agentId: string) => string;
+  pending: (agentId: string) => Array<{ id: string }>;
+  skipped: (agentId: string) => Iterable<string>;
+  files: (agentId: string) => unknown[];
+}
+
+/**
+ * §3 #1-#3 / §11.8 #16: the ids the wake coordinator treats as pending for an agent, and the
+ * renderer queue's "something to announce" precondition.
+ *  - inject and legacy-read agents: the ledger's `delivered` ids (arrival order), minus the Q13
+ *    skipped ids (a body the harness cannot show must never loop wakes);
+ *  - legacy-move (cursor, §11.7) and work-order agents: the inbox files, 1.1.74 semantics (for
+ *    them file position IS state); likewise when the ledger cannot be read.
+ */
+export function coordinatorPendingIds(agentId: string, deps: PendingSourceDeps): string[] {
+  const files = (): string[] => deps.files(agentId).filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const mode = deps.mode(agentId);
+  if (mode === 'legacy-move' || mode === 'work-order') return files();
+  try {
+    const skip = new Set(deps.skipped(agentId));
+    return deps.pending(agentId).map((e) => e.id).filter((id) => !skip.has(id));
+  } catch {
+    return files();
+  }
+}
+
 /** The ledger queries the readers use (MailLedger's public API). */
 export interface MailReaderLedger {
   backlog(agentId: string): MailEntry[];
@@ -79,6 +108,8 @@ export interface FleetObligation {
   state: string;
   ageSec: number;
   conversation?: string;
+  /** Q15: the body was in neither inbox/ nor inbox/.done/; closed by the harness, still owed. */
+  missing?: true;
 }
 
 /** fleet.json caps each per-agent list (god reads fleet.json every standup; tokens count). The
@@ -100,7 +131,8 @@ function obligation(o: MailObligation): FleetObligation {
   return {
     id: e.id, from: e.from, act: e.act, subject: e.subject.slice(0, 120), state: e.state,
     ageSec: Math.max(0, Math.round(o.ageMs / 1000)),
-    ...(e.conversation ? { conversation: e.conversation } : {})
+    ...(e.conversation ? { conversation: e.conversation } : {}),
+    ...(e.missingAt ? { missing: true as const } : {})
   };
 }
 

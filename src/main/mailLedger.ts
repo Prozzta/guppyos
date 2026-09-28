@@ -135,6 +135,11 @@ export interface MailEntry {
   surfaceCount: number;
   /** N1: consecutive surfacings that reached a normal close unconfirmed. Reset on confirm. */
   unconfirmedSurfacings: number;
+  /** Q15 (god's ruling): the body was in neither inbox/ nor inbox/.done/, so the harness closed
+   *  the entry terminally (acted, `reason:"body-missing"`). Persisted: no restart re-wakes it.
+   *  Cleared when the file reappears in inbox/ (a new delivered transition). */
+  missingAt?: number | null;
+  missingReason?: string | null;
   /** Set by a back-edge; the next surfacing carries the "re-delivered" marker. Cleared on confirm. */
   redelivered: boolean;
   /** §7.1: delivered before 1.1.75 (or with no ledger evidence); marker until first confirmed. */
@@ -433,6 +438,43 @@ export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode
     d.doc.lastActedAt = now;
     d.row({ kind: 'mail', stage: 'acted', ids: done, mode, ...(opts.epoch ? { epoch: opts.epoch } : {}), ...(opts.reason ? { reason: opts.reason } : {}) });
   }
+  return d.step();
+}
+
+/**
+ * Q15 (god's ruling, superseding a separate "missing" state): a DELIVERED inbox message whose body
+ * is in neither inbox/ nor inbox/.done/ is closed terminally as `acted`, with `missingAt` and
+ * `missingReason` persisted in the entry, so pending, the backlog and every reader stop counting
+ * it and no restart wakes it again. The harness did this, not an agent: not activity (lastActedAt
+ * and lastActivityAt stay), and no .done rename (there is no file). One loud `kind:"mail"`
+ * `stage:"acted"` row with `reason:"body-missing"`. An open obligation (requires_reply, or
+ * act:"request") stays on the open lists, flagged missing.
+ */
+export function applyBodyMissing(doc: MailLedgerDoc, id: string, why: string, now: number): MailStep {
+  const e = doc.entries[id];
+  if (!e || e.via !== 'inbox' || e.state !== 'delivered') return unchanged(doc);
+  const d = new Draft(doc, now);
+  const next: MailEntry = {
+    ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null,
+    missingAt: now, missingReason: String(why || 'missing').slice(0, 80)
+  };
+  d.put(next);
+  d.event(next, 'acted', true, 'body-missing');
+  d.row({ kind: 'mail', stage: 'acted', ids: [id], reason: 'body-missing', why: next.missingReason });
+  return d.step();
+}
+
+/** Q15: the file of an entry closed as body-missing is back in inbox/: a NEW delivered transition
+ *  (row `reason:"reappeared"`), so it is surfaced like any delivered message. Harness-caused: not
+ *  activity. */
+export function applyReappeared(doc: MailLedgerDoc, id: string, now: number): MailStep {
+  const e = doc.entries[id];
+  if (!e || e.state !== 'acted' || !e.missingAt) return unchanged(doc);
+  const d = new Draft(doc, now);
+  const next: MailEntry = { ...e, state: 'delivered', actedAt: null, missingAt: null, missingReason: null, updatedAt: now };
+  d.put(next);
+  d.event(next, 'delivered', true, 'reappeared');
+  d.row({ kind: 'mail', stage: 'delivered', id, from: e.from, act: e.act, requiresReply: e.requiresReply, reason: 'reappeared' });
   return d.step();
 }
 
@@ -900,8 +942,9 @@ export class MailLedger {
   /**
    * Q13 (god's ruling): a delivered message whose body is in NEITHER inbox/ nor inbox/.done/ (or
    * cannot be parsed) is logged `mail-body-missing` (once per id per session) and raised LOUDLY
-   * through the integrity banner (one notice per agent per session). It stays delivered: nothing
-   * is ever marked handled because a file went missing.
+   * through the integrity banner (one notice per agent per session). The row and the banner only:
+   * for a body in neither place the caller then closes the entry with `bodyMissing` (Q15, acted
+   * `reason:"body-missing"`, flagged, never activity); an unparseable body stays delivered.
    */
   noteBodyMissing(agentId: string, id: string, why: string): void {
     const key = `${agentId}|${id}`;
@@ -1007,9 +1050,12 @@ export class MailLedger {
       if (known.has(f.id)) continue;
       this.commit(st, applyDelivered(st.doc, diskEntryMessage(f), now, { harness: true, reason: 'recovered' }));
     }
-    // Crash between the ledger write and the .done rename: finish the rename (idempotent).
+    // Crash between the ledger write and the .done rename: finish the rename (idempotent). A
+    // body-missing entry (Q15) whose file is back in inbox/ is redelivered instead.
     for (const e of Object.values(st.doc.entries)) {
-      if (e.state === 'acted' && e.via === 'inbox' && existsSync(join(inboxDir, `${e.id}.json`))) st.archive.add(e.id);
+      if (e.state !== 'acted' || e.via !== 'inbox' || !existsSync(join(inboxDir, `${e.id}.json`))) continue;
+      if (e.missingAt) this.commit(st, applyReappeared(st.doc, e.id, now));
+      else st.archive.add(e.id);
     }
     this.commit(st, applyPrune(st.doc, now));
     if (st.archive.size) this.markDirty(st);
@@ -1250,6 +1296,14 @@ export class MailLedger {
     return this.commit(st, applyLegacyActed(st.doc, ids, mode, this.now(), opts)).changed;
   }
 
+  /** Q15: close a delivered id whose body is in neither inbox/ nor .done/ (see applyBodyMissing).
+   *  Returns true when it changed. */
+  bodyMissing(agentId: string, id: string, why: string): boolean {
+    if (!this.hasAgent(agentId)) return false;
+    const st = this.state(agentId);
+    return this.commit(st, applyBodyMissing(st.doc, id, why, this.now())).changed.length > 0;
+  }
+
   /**
    * Jim audit #4: a cheap disk → ledger reconcile for the wake beat (the load-time one only runs
    * once per process). One readdir of inbox/; a `*.json` file the ledger does not know (written
@@ -1258,8 +1312,8 @@ export class MailLedger {
    * at most `maxReads` per call. `moveIsHandled` (legacy-move, §11.7): a delivered id whose file
    * the agent moved to .done is acted (`agent-moved`).
    */
-  reconcileInbox(agentId: string, opts: { moveIsHandled?: boolean; maxReads?: number } = {}): { recovered: string[]; moved: string[] } {
-    const none = { recovered: [] as string[], moved: [] as string[] };
+  reconcileInbox(agentId: string, opts: { moveIsHandled?: boolean; maxReads?: number } = {}): { recovered: string[]; moved: string[]; reappeared: string[] } {
+    const none = { recovered: [] as string[], moved: [] as string[], reappeared: [] as string[] };
     if (!this.hasAgent(agentId)) return none;
     const st = this.state(agentId);
     const inboxDir = this.inboxDir(agentId)!;
@@ -1269,8 +1323,15 @@ export class MailLedger {
     const recovered: string[] = [];
     let reads = 0;
     const now = this.now();
+    const reappeared: string[] = [];
     for (const id of onDisk) {
-      if (st.doc.entries[id]) continue;
+      const known = st.doc.entries[id];
+      // Q15: a body-missing entry whose file is back: a new delivered transition.
+      if (known?.missingAt && known.state === 'acted') {
+        if (this.commit(st, applyReappeared(st.doc, id, now)).changed.length) reappeared.push(id);
+        continue;
+      }
+      if (known) continue;
       if (reads++ >= (opts.maxReads ?? 50)) break;
       const full = join(inboxDir, `${id}.json`);
       let msg: Partial<MailMessageLike> | null = null;
@@ -1292,7 +1353,7 @@ export class MailLedger {
       const gone = pendingEntries(st.doc).filter((e) => e.via === 'inbox' && !onDisk.has(e.id) && existsSync(join(inboxDir, '.done', `${e.id}.json`))).map((e) => e.id);
       if (gone.length) moved.push(...this.commit(st, applyLegacyActed(st.doc, gone, 'legacy-move', now, { reason: 'agent-moved' })).changed);
     }
-    return { recovered, moved };
+    return { recovered, moved, reappeared };
   }
 
   /** Close a surfacing epoch (see applyCloseEpoch). */

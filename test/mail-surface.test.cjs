@@ -556,7 +556,7 @@ test('Q13 / §7.1 step 4 (#46): a body the agent already moved to .done (the 1.1
   assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing').length, 0);
 });
 
-test('Q13: a body in NEITHER inbox/ nor .done/ is logged mail-body-missing once, raises the integrity banner, is kept out of wakes; it is read again once a file reappears', async (t) => {
+test('Q13/Q15 (god\'s ruling): a body in NEITHER inbox/ nor .done/ is logged mail-body-missing once, raises the banner, and is closed TERMINALLY (acted, reason body-missing, persisted); it is redelivered once the file reappears in inbox/', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude' } });
   const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'lost body' }, 'god-1');
   const file = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`);
@@ -567,11 +567,37 @@ test('Q13: a body in NEITHER inbox/ nor .done/ is logged mail-body-missing once,
   assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing' && r.id === m.id).length, 1);
   const notice = f.hive.integrityIssues().find((i) => i.error === 'mail-body-missing');
   assert.ok(notice && notice.notice && notice.notice.includes(m.id), 'loud: the integrity banner');
-  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered', 'never marked handled because a file went missing');
+  const e = f.entryOf('cl-1', m.id);
+  assert.equal(e.state, 'acted', 'Q15: terminal, so it never loops wakes or counts as backlog');
+  assert.equal(typeof e.missingAt, 'number');
+  assert.equal(e.missingReason, 'missing');
+  assert.ok(f.logRows().some((r) => r.kind === 'mail' && r.stage === 'acted' && r.reason === 'body-missing' && r.ids.includes(m.id)), 'the loud acted row');
+  assert.deepEqual(f.hive.mail.pending('cl-1'), []);
+  assert.deepEqual(f.hive.mail.backlog('cl-1'), []);
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), [], 'no skip bookkeeping needed: it is not pending');
+  // The file comes back: the beat's reconcile makes it a new delivered transition, surfaced again.
+  fs.writeFileSync(file, saved);
+  assert.deepEqual(f.hive.mail.reconcileInbox('cl-1').reappeared, [m.id]);
+  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered');
+  assert.equal(f.entryOf('cl-1', m.id).missingAt, null);
+  assert.ok(f.logRows().some((r) => r.kind === 'mail' && r.stage === 'delivered' && r.reason === 'reappeared' && r.id === m.id));
+  const c = f.ctx(f.fire('cl-1', 'PostToolUse', {}));
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('lost body'), 'the file came back: read again');
+});
+
+test('Q13: an UNPARSEABLE body (the file is there) stays delivered, logged and kept out of wakes until the file changes', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'garbled body' }, 'god-1');
+  const file = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`);
+  const saved = fs.readFileSync(file, 'utf8');
+  fs.writeFileSync(file, '{ not json');
+  assert.equal(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' })), '');
+  assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing' && r.id === m.id).length, 1);
+  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered', 'the file exists: never closed as missing');
   assert.deepEqual(f.server.mailSkippedIds('cl-1'), [m.id], 'kept out of the wake coordinator\'s pending set');
   fs.writeFileSync(file, saved);
   const c = f.ctx(f.fire('cl-1', 'PostToolUse', {}));
-  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('lost body'), 'the file came back: read again');
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('garbled body'), 'the file changed: read again');
   assert.deepEqual(f.server.mailSkippedIds('cl-1'), []);
 });
 
