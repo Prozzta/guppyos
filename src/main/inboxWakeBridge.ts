@@ -61,6 +61,11 @@ interface DegradeWatch {
   /** The wake whose turn is being watched. */
   open: { claimedAt: number; ids: readonly string[]; blocks: number } | null;
   degraded: boolean;
+  /** §11.19 #1: when a mail block last reached this agent (0 = never), watch or no watch. A block
+   *  built between a wake's CLAIM and its COMMITTED (the turn's hook raced the settle), and then
+   *  flushed late, used to fall outside every watch: the wake counted as "no mail block" and three
+   *  of them degraded a working channel (dry runs #3/#4 B5). */
+  lastBlockAt: number;
 }
 
 export interface InboxWakeSubmit {
@@ -289,8 +294,15 @@ export class InboxWakeBridge {
 
   /** §11.10: a mail block was returned to this agent (HookServer). */
   onMailBlock(agentId: string): void {
-    const w = this.degradeWatch.get(agentId);
-    if (w?.open) w.open.blocks += 1;
+    // §11.19 #1: the degrade counts only wakes whose hook ran and built NO block. A block, whenever
+    // it was built (inside the watch, before the COMMITTED that opens it, or after the watch ended)
+    // and however late its response flushed (late is N1's business, never the degrade's), proves
+    // the channel reaches the agent: the no-mail-block streak starts over.
+    let w = this.degradeWatch.get(agentId);
+    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
+    w.lastBlockAt = this.deps.now();
+    w.streak = 0;
+    if (w.open) w.open.blocks += 1;
   }
 
   private readonly degradeWatch = new Map<string, DegradeWatch>();
@@ -299,7 +311,7 @@ export class InboxWakeBridge {
     const mail = this.deps.mail;
     if (!mail) return null;
     let w = this.degradeWatch.get(agentId);
-    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false }; this.degradeWatch.set(agentId, w); }
+    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
     if (w.degraded) return null;
     let mode = '';
     try { mode = mail.mode(agentId); } catch { mode = ''; }
@@ -312,7 +324,8 @@ export class InboxWakeBridge {
     const open = w?.open;
     if (!w || !open) return;
     w.open = null;
-    if (open.blocks > 0) { w.streak = 0; return; }
+    // A block built since this wake's CLAIM counts for it, even one whose hook raced the settle.
+    if (open.blocks > 0 || (open.claimedAt > 0 && w.lastBlockAt >= open.claimedAt)) { w.streak = 0; return; }
     const facts = this.deps.coordinator.turnFacts(agentId);
     const confirmed = facts.turnStartAt >= open.claimedAt && open.claimedAt > 0;
     const pending = new Set(this.deps.inboxIds(agentId));

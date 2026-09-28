@@ -54,6 +54,12 @@ Rollback: 1.1.74 (reinstall).
   testing of this release (layer b) that third offer could wait about five minutes on an idle agent,
   because the second failed check had used up the immediate retry. It is now offered at once. Only
   the new mail handling was affected; 1.1.74 was not.
+- **A slow hook no longer switches an agent to reading its own files.** When a hook answered late,
+  the app could wrongly decide the agent never got its mail and switch it to reading its files
+  after three such wakes. Late answers now count only toward re-offering the message.
+- **An agent whose hooks stop reaching the app entirely is switched to reading its files after
+  about five minutes or more, not at once.** The switch waits for three wakes, and after two
+  unanswered wakes the app waits five minutes before the third. This is accepted.
 - **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
   unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
   broadcasts one reminder, "move your mail again", because agents may have noted the new rule in

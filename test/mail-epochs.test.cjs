@@ -571,6 +571,57 @@ test('§11.10: a wake turn that DID get a mail block (even headers only, with it
   assert.equal(w.rows('mail-channel-degraded').length, 0);
 });
 
+test('§11.19 #1 (dry runs #3/#4 B5): a wake whose hook RACED its COMMITTED and flushed LATE did get a block: 3 of them never degrade the channel', async (t) => {
+  const w = await world(t, { providers: { 'cl-1': 'claude' } });
+  w.fire('cl-1', 'Stop');
+  const unsettled = [];
+  w.outcome = () => new Promise((res) => unsettled.push(() => res({ kind: 'COMMITTED' })));
+  for (let k = 1; k <= MAIL_DEGRADE_AFTER_WAKES + 1; k++) {
+    w.now += 10_000;
+    w.send('cl-1', { subject: `r${k}`, body: `raced ${k}` });
+    await w.flush();
+    assert.ok(unsettled.length > 0, `wake ${k} claimed, its submit not settled yet`);
+    assert.equal(w.rows('mail-channel-degraded').length, 0, `not degraded after ${k - 1} raced, late wake(s) that each got a block`);
+    // The typed wake's UserPromptSubmit arrives BEFORE the owner reports COMMITTED (the watch is
+    // not open yet), and its response flushes LATE (the client hung up: mail-hook-late).
+    w.now += 50;
+    const ctx = w.ctx(w.fire('cl-1', 'UserPromptSubmit', { prompt: 'wake' }));
+    assert.ok(ctx.includes('<hive-mail>'), 'a mail block was built');
+    w.server.settleMailClaims(w.server.takeMailClaims(), w.now, null);
+    w.now += 50;
+    while (unsettled.length) unsettled.shift()();
+    await w.flush();
+    w.now += 100;
+    w.fire('cl-1', 'Stop');                                  // the late ids go back to delivered
+    await w.flush();
+  }
+  assert.ok(w.rows('mail-hook-late').length >= MAIL_DEGRADE_AFTER_WAKES, 'every wake\'s hook was late');
+  assert.equal(w.rows('mail-channel-degraded').length, 0, 'late is N1\'s business, never the degrade\'s');
+  assert.equal(w.hive.mail.channelOverride('cl-1'), null);
+});
+
+test('§11.19 #1: a block built AFTER the wake\'s watch ended (its Stop) still resets the no-mail-block streak', async (t) => {
+  const w = await world(t, { providers: { 'ag-1': 'antigravity' } });
+  w.fire('ag-1', 'Stop', { transport: 'pipe', fully_idle: true });
+  const blockless = async (k) => {
+    w.now += 10_000;
+    w.send('ag-1', { subject: `w${k}`, body: `b${k}` });
+    await w.flush();
+    w.now += 100;
+    w.bridge.onProviderStatus('ag-1', 'running', null, w.now);
+    w.now += 100;
+    w.fire('ag-1', 'Stop', { transport: 'pipe', fully_idle: true });
+  };
+  await blockless(1);
+  await blockless(2);
+  w.bridge.onMailBlock('ag-1');                              // a block reached it after that watch
+  await blockless(3);
+  assert.equal(w.rows('mail-channel-degraded').length, 0, 'the streak started over: 1 of 3');
+  await blockless(4);
+  await blockless(5);
+  assert.equal(w.rows('mail-channel-degraded')[0]?.reason, 'no-mail-block', '3 blockless wakes in a row still degrade');
+});
+
 // ————————————————————————————————————————————————— legacy channels (§2.2, §11.7) and old habits (§7.1)
 
 test('legacy-read (§2.2): the ids the wake named and the mid-turn notice named are acted at the Stop, and archived by the harness', async (t) => {
