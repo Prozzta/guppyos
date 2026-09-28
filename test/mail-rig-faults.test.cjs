@@ -18,6 +18,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { startRig, waitFor, sleep, markersIn, REDELIVERED } = require('./mail-rig/driver.cjs');
+const { checkIsolation, SECRET_NAME } = require('./mail-rig/isolation.cjs');
 
 const T = { timeout: 180_000 };
 const acted = async (rig, agentId, id) => (await rig.entry(agentId, id))?.state === 'acted';
@@ -44,7 +45,9 @@ test('RIG the sandbox instance is isolated: own home, harness home, hive and pip
       assert.ok(!/Dunder[\\/]hive/i.test(v), `${id}: ${k} never names the live hive`);
     }
     assert.ok(inside(start.cwd), `${id}: works in the sandbox`);
+    assert.deepEqual(start.isolation, [], `${id}: the stub's own isolation check is clean`);
   }
+  assert.deepEqual(info.envNames.filter((k) => SECRET_NAME.test(k) && !/_BASE_URL$/i.test(k)), [], 'no credential-family variable in the host');
   // The settings/config each real CLI would read point only at loopback and the sandbox pipe.
   const settings = JSON.parse(fs.readFileSync(path.join(rig.agentDir('cl-1'), 'settings.json'), 'utf8'));
   for (const [ev, groups] of Object.entries(settings.hooks)) {
@@ -58,6 +61,54 @@ test('RIG the sandbox instance is isolated: own home, harness home, hive and pip
   await rig.stop();
   const alive = () => rig.stubPids().filter((p) => { try { process.kill(p, 0); return true; } catch { return false; } });
   await waitFor(() => alive().length === 0, { what: 'every stub gone with its instance', timeoutMs: 10_000 });
+});
+
+// ——————————————————————————————————————————————————————————————————————————— ISO (negative control)
+
+test('ISO negative control: parent credentials and decoy agy/codex/claude on the PARENT PATH never reach the rig; the decoys never run; the guard trips on both', T, async (t) => {
+  const fsp = require('node:fs');
+  const os = require('node:os');
+  const decoy = fsp.mkdtempSync(path.join(os.tmpdir(), 'md-rig-decoy-'));
+  const marker = path.join(decoy, 'EXECUTED');
+  for (const name of ['agy', 'codex', 'claude']) {
+    fsp.writeFileSync(path.join(decoy, `${name}.cmd`), `@echo off\r\necho ${name} %* >> "${marker}"\r\nexit /b 0\r\n`);
+  }
+  const sentinels = { SLACK_BOT_TOKEN: 'xoxb-sentinel', WEBHOOK_SECRET: 'sentinel', ANTHROPIC_AUTH_TOKEN: 'sentinel', AWS_SECRET_ACCESS_KEY: 'sentinel', GITHUB_TOKEN: 'sentinel', OPENAI_API_KEY: 'sentinel' };
+  const pathKey = Object.keys(process.env).find((k) => k.toLowerCase() === 'path') || 'PATH';
+  const saved = { path: process.env[pathKey], ...Object.fromEntries(Object.keys(sentinels).map((k) => [k, process.env[k]])) };
+  Object.assign(process.env, sentinels);
+  process.env[pathKey] = `${decoy}${path.delimiter}${saved.path}`;
+  t.after(() => {
+    process.env[pathKey] = saved.path;
+    for (const k of Object.keys(sentinels)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+    fsp.rmSync(decoy, { recursive: true, force: true });
+  });
+  // The guard itself trips on each kind of leak (so a green run below means something).
+  const sandboxLike = fsp.mkdtempSync(path.join(os.tmpdir(), 'md-rig-decoy-sb-'));
+  t.after(() => fsp.rmSync(sandboxLike, { recursive: true, force: true }));
+  assert.throws(() => checkIsolation({ SLACK_BOT_TOKEN: 'x', PATH: '' }, sandboxLike), /secret-shaped variable SLACK_BOT_TOKEN/);
+  assert.throws(() => checkIsolation({ PATH: decoy }, sandboxLike), /PATH dir outside the sandbox/);
+  assert.throws(() => checkIsolation({ PATH: decoy, PATHEXT: '.CMD' }, sandboxLike), /provider command agy resolves outside the rig bin/);
+
+  const rig = await startRig(t);
+  const info = await rig.call('ping');
+  for (const k of Object.keys(sentinels)) assert.ok(!info.envNames.includes(k), `host: no ${k}`);
+  assert.ok(!info.path.toLowerCase().includes(decoy.toLowerCase()), 'host PATH: no decoy dir');
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: {} }, { id: 'cx-1', flavour: 'codex', scenario: {} }, { id: 'cl-1', flavour: 'claude', scenario: {} }]);
+  const sent = {};
+  for (const id of ['ag-1', 'cx-1', 'cl-1']) sent[id] = await rig.call('send', { to: id, subject: 'iso', body: 'hello' });
+  await rig.beatUntil(async () => {
+    for (const id of ['ag-1', 'cx-1', 'cl-1']) if (!rig.contexts(id).some((c) => c.ids.includes(sent[id].id)) && !rig.transcript(id).some((r) => r.kind === 'read-file')) return false;
+    return true;
+  }, { what: 'each agent took a turn with its mail (hooks and wakes ran)', stepMs: 70_000 });
+  for (const id of ['ag-1', 'cx-1', 'cl-1']) {
+    const start = rig.transcript(id).find((r) => r.kind === 'start');
+    assert.deepEqual(start.isolation, [], `${id}: isolated`);
+    for (const k of Object.keys(sentinels)) assert.ok(!start.envNames.includes(k), `${id}: no ${k}`);
+    assert.ok(!start.path.toLowerCase().includes(decoy.toLowerCase()), `${id}: no decoy dir on PATH`);
+    assert.ok(rig.hooks(id).length > 0, `${id}: its hooks ran`);
+  }
+  assert.ok(!fsp.existsSync(marker), `no decoy was ever executed${fsp.existsSync(marker) ? `: ${fsp.readFileSync(marker, 'utf8')}` : ''}`);
 });
 
 // ——————————————————————————————————————————————————————————————————————————— F1
@@ -402,6 +453,11 @@ test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the t
   assert.equal(before.lifecycle, 'active');
   assert.equal(before.provisional, true, 'the turn start was never confirmed');
   assert.deepEqual(before.announced, [m.id]);
+  // The Codex case exactly: its UserPromptSubmit never reached the app (the shim died), and no beat
+  // has read the rollout's task_started yet.
+  const ups = rig.hooks('cx-1', 'UserPromptSubmit');
+  assert.ok(ups.length >= 1 && ups.every((h) => h.transport === 'none'), 'no UserPromptSubmit reached the app');
+  assert.equal((await rig.call('diags')).filter((d) => d.agentId === 'cx-1' && d.stage === 'codex-rollout' && d.confirmed).length, 0, 'no rollout confirmation before the Stop');
   const ends = rig.turnEnds('cx-1').length;
   rig.cue('cx-1', { cue: 'stop' });
   await waitFor(() => rig.turnEnds('cx-1').length > ends, { what: 'turn end' });
