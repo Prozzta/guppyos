@@ -95,7 +95,7 @@ test('builder: under 1,500 characters of budget the block is HEADERS ONLY and no
   assert.equal(S.buildMailBlock({ items, budget: -500, phase: 'turn-start' }).text, null);
 });
 
-test('builder: one body too big for the whole budget is TRUNCATED to its first 7,000 characters plus the full file path; a smaller one that does not fit waits', () => {
+test('builder: one body too big for the whole budget is TRUNCATED (at most its first 7,000 characters) plus the full file path; below 7,000 it is truncated to what fits (Jim audit #3)', () => {
   const big = item({ id: 'big' }, 'A'.repeat(7_000) + 'B'.repeat(5_000));
   big.path = 'C:/hive/agents/a/inbox/big.json';
   const blk = S.buildMailBlock({ items: [big], budget: 9_500, phase: 'turn-start' });
@@ -108,10 +108,48 @@ test('builder: one body too big for the whole budget is TRUNCATED to its first 7
   const mid = S.buildMailBlock({ items: [item({ id: 'mid' }, 'M'.repeat(8_000))], budget: 9_500, phase: 'turn-start' });
   assert.deepEqual(mid.truncated, []);
   assert.deepEqual(mid.surfacing, ['mid']);
-  // 6,000 characters in a 3,000 budget: not over the limit (7,000), so it WAITS (headers only now).
-  const wait = S.buildMailBlock({ items: [item({ id: 'w' }, 'W'.repeat(6_000))], budget: 3_000, phase: 'turn-start' });
-  assert.deepEqual(wait.surfacing, []);
-  assert.deepEqual(wait.headersOnly, ['w']);
+  // 6,000 characters in a 3,000 budget: it can never fit this budget whole, so it is truncated to
+  // what IS left (header + as much body as fits + the path), not held back (Jim audit #3).
+  const fit = S.buildMailBlock({ items: [item({ id: 'w' }, 'W'.repeat(6_000))], budget: 3_000, phase: 'turn-start' });
+  assert.deepEqual(fit.surfacing, ['w']);
+  assert.deepEqual(fit.truncated, ['w']);
+  assert.ok(fit.text.length <= 3_000, `${fit.text.length}`);
+  assert.ok(fit.text.includes('W'.repeat(S.MAIL_TRUNCATE_MIN_CHARS)) && !fit.text.includes('W'.repeat(3_000)));
+  assert.ok(fit.text.includes('6000 characters in total. The full message is in'));
+});
+
+test('Jim audit #3 (the probe): a 12,000-character message then a small one, at every budget from 9,500 down to 1,500: both surface, the big one truncated to fit; never headers only', () => {
+  for (const budget of [9_500, 8_000, 7_200, 5_000, 3_000, 2_000, 1_500]) {
+    const big = item({ id: `big-${budget}` }, 'B'.repeat(12_000));
+    const small = item({ id: `small-${budget}` }, 'tiny');
+    const blk = S.buildMailBlock({ items: [big, small], budget, phase: 'turn-start' });
+    assert.ok(blk.text.length <= budget, `${budget}: ${blk.text.length}`);
+    assert.equal(blk.surfacing[0], `big-${budget}`, `${budget}: the big one is not held back`);
+    assert.deepEqual(blk.truncated, [`big-${budget}`]);
+    // The small one follows in the same block, or at the very next hook (nothing blocks it).
+    if (!blk.surfacing.includes(`small-${budget}`)) {
+      const next = S.buildMailBlock({ items: [small], budget, phase: 'mid-turn' });
+      assert.deepEqual(next.surfacing, [`small-${budget}`], `${budget}`);
+    }
+  }
+});
+
+test('Q11 (god\'s ruling): a big message cannot block smaller later ones for more than one hook', () => {
+  // A message whose header alone is huge (200 escaped "<" = 800 characters) cannot be truncated to
+  // the 1,000-character minimum inside a 2,000 budget: at the first hook it holds the block back.
+  const big = item({ id: 'huge', subject: '<'.repeat(200) }, 'H'.repeat(5_000));
+  const s1 = item({ id: 's1' }, 'one');
+  const s2 = item({ id: 's2' }, 'two');
+  const h1 = S.buildMailBlock({ items: [big, s1, s2], budget: 2_000, phase: 'turn-start' });
+  assert.deepEqual(h1.surfacing, [], 'strictly oldest first at this hook');
+  assert.deepEqual(h1.blocked, ['huge']);
+  // The next hook passes over it: the smaller ones surface; the big one keeps waiting (never lost).
+  const h2 = S.buildMailBlock({ items: [big, s1, s2], budget: 2_000, phase: 'mid-turn', skippable: new Set(h1.blocked) });
+  assert.deepEqual(h2.surfacing, ['s1', 's2']);
+  assert.ok(h2.deferred.includes('huge'));
+  assert.match(h2.text, /1 more message\(s\) will follow at a later hook: \[huge\]/);
+  // With room, it surfaces in its turn.
+  assert.deepEqual(S.buildMailBlock({ items: [big], budget: 9_500, phase: 'mid-turn', skippable: new Set(['huge']) }).surfacing, ['huge']);
 });
 
 test('builder: the drip: what does not fit is deferred in order (later mail never overtakes earlier mail) and named in a "will follow" line', () => {
@@ -501,13 +539,55 @@ test('legacy providers get no bodies: legacy-read (grok) and legacy-move (cursor
   }
 });
 
-test('a body the agent already moved (the 1.1.74 habit) is skipped, logged once, never shown', async (t) => {
+test('Q13 / §7.1 step 4 (#46): a body the agent already moved to .done (the 1.1.74 habit) is read from .done and SURFACED, logged mail-agent-moved once; the move is never "handled"', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude' } });
-  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'b' }, 'god-1');
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'moved body' }, 'god-1');
   const dir = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox');
   fs.renameSync(path.join(dir, `${m.id}.json`), path.join(dir, '.done', `${m.id}.json`));
+  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered', 'a move changes nothing in the ledger');
+  const c = f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' }));
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('moved body'), c);
+  assert.equal(f.entryOf('cl-1', m.id).state, 'surfacing');
+  f.fire('cl-1', 'PostToolUse', {});
+  f.hive.mail.redeliver('cl-1', [m.id], 'test');   // surfaced again later: still logged only once
+  f.fire('cl-1', 'SessionStart', { source: 'startup' });
+  f.fire('cl-1', 'UserPromptSubmit', { prompt: 'again' });
+  assert.equal(f.logRows().filter((r) => r.kind === 'mail-agent-moved' && r.id === m.id).length, 1);
+  assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing').length, 0);
+});
+
+test('Q13: a body in NEITHER inbox/ nor .done/ is logged mail-body-missing once, raises the integrity banner, is kept out of wakes; it is read again once a file reappears', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'lost body' }, 'god-1');
+  const file = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox', `${m.id}.json`);
+  const saved = fs.readFileSync(file, 'utf8');
+  fs.rmSync(file);
   assert.equal(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' })), '');
   f.fire('cl-1', 'PostToolUse', {});
   assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing' && r.id === m.id).length, 1);
-  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered');
+  const notice = f.hive.integrityIssues().find((i) => i.error === 'mail-body-missing');
+  assert.ok(notice && notice.notice && notice.notice.includes(m.id), 'loud: the integrity banner');
+  assert.equal(f.entryOf('cl-1', m.id).state, 'delivered', 'never marked handled because a file went missing');
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), [m.id], 'kept out of the wake coordinator\'s pending set');
+  fs.writeFileSync(file, saved);
+  const c = f.ctx(f.fire('cl-1', 'PostToolUse', {}));
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('lost body'), 'the file came back: read again');
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), []);
+});
+
+test('Q13 (Jim audit #2): a TRANSIENT read error (an antivirus lock) is retried at the next hook, never recorded as missing', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'x', body: 'locked body' }, 'god-1');
+  const real = f.hive.mailBody.bind(f.hive);
+  let locked = true;
+  f.hive.mailBody = (agentId, id) => (locked && id === m.id ? { ok: false, reason: 'transient', sig: 'x' } : real(agentId, id));
+  assert.equal(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' })), '');
+  assert.deepEqual(f.server.mailSkippedIds('cl-1'), []);
+  assert.equal(f.logRows().filter((r) => r.kind === 'mail-body-missing').length, 0);
+  locked = false;
+  assert.ok(f.ctx(f.fire('cl-1', 'PostToolUse', {})).includes(`[hive-mail:${m.id}]`));
+  // The real reader classifies a lock as transient (not missing).
+  const dir = path.join(f.hive.root(), 'agents', 'cl-1', 'inbox');
+  fs.mkdirSync(path.join(dir, 'isdir.json'));
+  assert.equal(real('cl-1', 'isdir').reason, 'transient', 'EISDIR is not "gone"');
 });

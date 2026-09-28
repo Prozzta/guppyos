@@ -64,9 +64,16 @@ test('Route A: a Codex sentinel wake carries the <hive-mail> block (bodies, from
   assert.equal(claims.length, 1);
   assert.equal(claims[0].evidence, 'codex-rollout', 'Codex is confirmed from its rollout, not by latency');
 
-  // A later sentinel wake with nothing new: a short note, never a stale list.
+  // turn-1 ends normally (its surfacing confirmed): the mail is acted.
+  hive.mail.confirmSurfaced('codex-1', [first.id], 'turn-1', 'evidence');
+  server.handle({ hook_event_name: 'Stop', agent_id: 'codex-1', turn_id: 'turn-1', transport: 'pipe' });
+  assert.equal(hive.mail.ledger('codex-1').entries[first.id].state, 'acted');
+  // A later sentinel wake with nothing new: a short note, never a stale list, and (Q12) a
+  // `mail-empty-wake` row, since the coordinator woke the agent for nothing.
   const again = server.handle({ hook_event_name: 'UserPromptSubmit', agent_id: 'codex-1', prompt: CODEX_INBOX_WAKE_SENTINEL, turn_id: 'turn-2', transport: 'pipe' });
   assert.equal(again.hookSpecificOutput.additionalContext, '<hive-mail>\nNo new hive mail to show for this wake.\n</hive-mail>');
+  const empty = hive.logTail(200).filter((r) => r.kind === 'mail-empty-wake');
+  assert.deepEqual(empty.map((r) => [r.agentId, r.epoch]), [['codex-1', 'turn-2']]);
 
   // New mail mid-turn reaches Codex on its PostToolUse (mcp), in the same epoch.
   const second = hive.send({ to: 'codex-1', act: 'inform', subject: 'second', body: 'the second body' }, 'god-1');

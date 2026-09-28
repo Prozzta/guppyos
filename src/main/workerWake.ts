@@ -17,8 +17,11 @@
  * per-message-id dedup. Duplicate delivery / hook / control / scan signals coalesce; they
  * can never produce a second turn.
  *
- *  - pendingIds    observed in the inbox, not yet in a committed wake;
- *  - announcedIds  in a COMMITTED wake, while still on disk (never re-announced);
+ *  - pendingIds    delivered (ZT-I1-MAIL: the LEDGER's delivered ids, not files on disk), not yet
+ *                  in a committed wake;
+ *  - announcedIds  in a COMMITTED wake, while still delivered. §11.3: at the close of the wake's
+ *                  epoch (Stop or abnormal end) the ones still delivered go back to pending ONCE
+ *                  (`repend`), then the F4 backoff applies. Nothing re-offers mail by time alone;
  *  - inFlight      the sole claimed submission (immutable: new mail waits for the next edge);
  *  - held          an INTERFERED claim, until a human says SEND_AGAIN or ALREADY_HANDLED.
  *
@@ -80,13 +83,6 @@ export const STOP_SETTLE_MS = 5_000;
  * long, the lifecycle goes back to `unknown` and the claim's ids are re-pended ONCE.
  */
 export const SUBMIT_CONFIRM_MS = 60_000;
-
-/**
- * WAKE-NO-PENDING-IDS hardening (Jim, WAKE-BUGS-152 (2)). An id announced this long ago and
- * still on disk when the agent is idle again was overlooked (or its turn failed); it is
- * re-pended ONCE, so it is announced one more time and never looped.
- */
-export const REANNOUNCE_AFTER_MS = 3 * 60_000;
 
 /**
  * CODEX-WAKE-161 F4 (Jim, CODEX-WAKE-ROOTCAUSE). A wake whose re-announcement ALSO went
@@ -227,9 +223,8 @@ interface AgentWake {
   /** An idle reading refused only by the confirm grace, applied on a later beat unless
    *  something newer said active (0 = none). */
   pendingIdleAt: number;
-  /** id -> when it was announced (COMMITTED). */
-  announcedAt: Map<string, number>;
-  /** Ids already re-pended once (unconfirmed submit or stale announcement). Never again. */
+  /** Ids already re-pended once (an unconfirmed submit, or still delivered at the close of their
+   *  wake's epoch). A second time goes to the F4 backoff instead. */
   reannounced: Set<string>;
   /** F4: ids whose re-announcement was unconfirmed too: attempt count and when to offer again. */
   retries: Map<string, { attempt: number; at: number }>;
@@ -244,7 +239,6 @@ interface AgentWake {
 export type WakeBeatEdge =
   | { kind: 'deferred-idle' }
   | { kind: 'submit-unconfirmed'; ids: readonly string[] }
-  | { kind: 'reannounce'; ids: readonly string[] }
   /** F4: the re-announced ids went unconfirmed AGAIN (`ids`); offered again in `retryInMs`.
    *  `requeued`: first-time unconfirmed ids of the same commit, re-pended now as before. */
   | { kind: 'wake-ids-exhausted'; ids: readonly string[]; attempt: number; retryInMs: number; requeued: readonly string[] }
@@ -281,7 +275,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, announcedAt: new Map(), reannounced: new Set(), retries: new Map(), recheck: null, invoking: false
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), retries: new Map(), recheck: null, invoking: false
       };
       this.agents.set(agentId, r);
     }
@@ -303,20 +297,38 @@ export class WorkerWakeWatchdog {
     r.pendingIdleAt = 0;
   }
 
-  /** Ids announced more than REANNOUNCE_AFTER_MS ago, still on disk, never re-pended:
-   *  back to pending, once each. */
-  private requeueStale(r: AgentWake, now: number): string[] {
-    const ids: string[] = [];
-    for (const id of [...r.announced]) {
-      const at = r.announcedAt.get(id) ?? 0;
-      if (r.reannounced.has(id) || !(at > 0 && now - at >= REANNOUNCE_AFTER_MS)) continue;
+  /**
+   * ZT-I1-MAIL §11.3 (C3; replaces the time-based re-announce): the epoch of a wake has CLOSED
+   * (its Stop, a Codex task_complete, or an abnormal end), and `deliveredIds` are the ledger's
+   * delivered ids NOW. An announced id that is still delivered was not surfaced in that turn (a
+   * budget overflow in a text-only turn, an abnormal end): it goes back to pending ONCE; a second
+   * time it goes to the F4 backoff (never burned, never silent). "Announced" is thereby keyed to
+   * the ledger: no id stays announced and delivered after its epoch closed.
+   *
+   * Never over our own unconfirmed nudge: while the lifecycle is active on a PROVISIONAL epoch the
+   * nudge may still sit in the composer (the submit-unconfirmed path owns those ids).
+   */
+  repend(agentId: string, deliveredIds: readonly string[], now = Date.now()): { requeued: string[]; exhausted: string[]; attempt: number; retryInMs: number } {
+    const out = { requeued: [] as string[], exhausted: [] as string[], attempt: 0, retryInMs: 0 };
+    const r = this.agents.get(agentId);
+    if (!r || (r.lifecycle === 'active' && r.provisional)) return out;
+    const delivered = new Set(deliveredIds);
+    for (const id of [...r.announced].sort()) {
+      if (!delivered.has(id)) continue;
       r.announced.delete(id);
-      r.announcedAt.delete(id);
+      if (r.reannounced.has(id)) {
+        const next = (r.retries.get(id)?.attempt ?? 0) + 1;
+        r.retries.set(id, { attempt: next, at: now + wakeRetryDelayMs(next) });
+        out.attempt = Math.max(out.attempt, next);
+        out.exhausted.push(id);
+        continue;
+      }
       r.reannounced.add(id);
       r.pending.add(id);
-      ids.push(id);
+      out.requeued.push(id);
     }
-    return ids.sort();
+    if (out.attempt) out.retryInMs = wakeRetryDelayMs(out.attempt);
+    return out;
   }
 
   private known(r: AgentWake, id: string): boolean {
@@ -374,9 +386,6 @@ export class WorkerWakeWatchdog {
       r.openTurnId = null;
       r.stoppedAt = at;
       r.invoking = false;
-      // The turn is over and the agent is idle: an id it was told about minutes ago and
-      // left on disk gets one more announcement (bounded: once per id).
-      this.requeueStale(r, at);
       if (turnId && !r.closedTurns.includes(turnId)) {
         r.closedTurns.push(turnId);
         if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
@@ -584,8 +593,8 @@ export class WorkerWakeWatchdog {
    *                        SUBMIT_CONFIRM_MS: lifecycle unknown (quiescence rules apply
    *                        again), the claim's ids back to pending ONCE, and the next claim
    *                        must first see the unsent nudge absent from the prompt;
-   *  - reannounce          idle, and ids announced REANNOUNCE_AFTER_MS ago are still on
-   *                        disk: back to pending, once each.
+   *  - wake-retry          F4: exhausted ids whose backoff ended are pending again.
+   * ZT-I1-MAIL: there is no time-based re-announce any more (§3 #2, §11.3); see `repend`.
    */
   beat(agentId: string, now = Date.now()): WakeBeatEdge | null {
     const r = this.agents.get(agentId);
@@ -603,7 +612,6 @@ export class WorkerWakeWatchdog {
       for (const id of r.commitIds) {
         if (!r.announced.has(id)) continue;
         r.announced.delete(id);
-        r.announcedAt.delete(id);
         if (r.reannounced.has(id)) {
           // F4: unconfirmed again. Not dropped: offered again after a backoff.
           const next = (r.retries.get(id)?.attempt ?? 0) + 1;
@@ -632,10 +640,6 @@ export class WorkerWakeWatchdog {
       }
       if (due.length) return { kind: 'wake-retry', ids: due.sort(), attempt };
     }
-    if (r.lifecycle === 'idle' && !r.inFlight && !r.held) {
-      const ids = this.requeueStale(r, now);
-      if (ids.length) return { kind: 'reannounce', ids };
-    }
     return null;
   }
 
@@ -646,15 +650,16 @@ export class WorkerWakeWatchdog {
   }
 
   /**
-   * Align with the files, which are authoritative: ids no longer on disk leave every set,
-   * ids on disk that nothing knows about become pending (a lost callback, a restart). No
-   * ordering is inferred from the id strings.
+   * Align with the authoritative pending set. ZT-I1-MAIL §3 #1: for a ledger agent that is the
+   * LEDGER's delivered ids (the caller passes them); files on disk imply nothing. Ids no longer
+   * delivered (surfaced, acted) leave every set; delivered ids that nothing knows about become
+   * pending (a lost callback, a restart, a back-edge). No ordering is inferred from the id strings.
    */
   reconcile(agentId: string, currentInboxIds: readonly string[]): void {
     const current = new Set(currentInboxIds.filter((id) => typeof id === 'string' && id.length > 0));
     const r = this.rec(agentId);
     for (const id of [...r.pending]) if (!current.has(id)) r.pending.delete(id);
-    for (const id of [...r.announced]) if (!current.has(id)) { r.announced.delete(id); r.announcedAt.delete(id); }
+    for (const id of [...r.announced]) if (!current.has(id)) r.announced.delete(id);
     for (const id of [...r.reannounced]) if (!current.has(id)) r.reannounced.delete(id);
     for (const id of [...r.retries.keys()]) if (!current.has(id)) r.retries.delete(id);
     if (r.held && !r.held.ids.some((id) => current.has(id))) r.held = null;
@@ -732,7 +737,7 @@ export class WorkerWakeWatchdog {
     if (!r || r.inFlight?.requestId !== claim.requestId) return;
     r.inFlight = null;
     if (outcomeKind === 'COMMITTED') {
-      for (const id of claim.ids) { r.announced.add(id); r.announcedAt.set(id, at); }
+      for (const id of claim.ids) r.announced.add(id);
       r.lifecycle = 'active';          // a turn just started; new mail waits for its Stop
       r.activeSince = at;              // and THIS is the edge terminal proof must be newer than
       r.pendingIdleAt = 0;
@@ -741,7 +746,7 @@ export class WorkerWakeWatchdog {
       r.commitIds = claim.ids;
       if (claim.recheck) r.recheck = null;   // the prompt was seen clear, and this went out
     } else if (outcomeKind === 'HUMAN_HANDLED') {
-      for (const id of claim.ids) { r.announced.add(id); r.announcedAt.set(id, at); }
+      for (const id of claim.ids) r.announced.add(id);
       r.recheck = null;
     } else if (outcomeKind === 'INTERFERED') {
       r.held = claim;                  // no automatic retry until a human rules
@@ -759,7 +764,7 @@ export class WorkerWakeWatchdog {
     if (how === 'SEND_AGAIN') {
       for (const id of held.ids) if (!r.announced.has(id)) r.pending.add(id);
     } else {
-      for (const id of held.ids) { r.announced.add(id); r.announcedAt.set(id, Date.now()); }
+      for (const id of held.ids) r.announced.add(id);
       r.recheck = null;                // a person dealt with the prompt
     }
     return true;
@@ -784,10 +789,11 @@ export class WorkerWakeWatchdog {
     };
   }
 
-  /** Read-only: the open turn as the hooks named it, and the active epoch (FALSEACTIVE-STALL-2). */
-  turnFacts(agentId: string): { openTurnId: string | null; activeSince: number } {
+  /** Read-only: the open turn as the hooks named it, the active epoch (FALSEACTIVE-STALL-2), and
+   *  when the last claim was taken and the provider last said a turn started (§11.10 input). */
+  turnFacts(agentId: string): { openTurnId: string | null; activeSince: number; claimedAt: number; turnStartAt: number } {
     const r = this.agents.get(agentId);
-    return { openTurnId: r?.openTurnId ?? null, activeSince: r?.activeSince ?? 0 };
+    return { openTurnId: r?.openTurnId ?? null, activeSince: r?.activeSince ?? 0, claimedAt: r?.claimedAt ?? 0, turnStartAt: r?.turnStartAt ?? 0 };
   }
 
   /** Forget per-agent state (the agent's PTY was closed). */

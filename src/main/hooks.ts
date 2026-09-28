@@ -28,13 +28,31 @@ import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, rebuildToolHook }
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
-import { MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailObligation } from './mailLedger';
+import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailLateDetail, type MailObligation } from './mailLedger';
 import {
   MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
   buildMailBlock, buildMailHeaders, isSlashPrompt, mailBudgetFor, mailChannelMode, mailEvidenceIn,
   mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow,
   type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
+
+/**
+ * ZT-I1-MAIL slice 3: what the mail epochs need from the wake coordinator (main wires it; tests
+ * may omit it: no lifecycle is then "active" and no wake ids are known).
+ */
+export interface MailCoordination {
+  /** N3 (§11.17): the agent's wake lifecycle is ACTIVE on a provider-confirmed turn. A
+   *  UserPromptSubmit then joins the live epoch instead of closing it as abnormal. */
+  lifecycleActive(agentId: string): boolean;
+  /** Legacy-read (§2.2): the ids COMMITTED wakes named to the agent (announced), for the Stop
+   *  that ends the wake's turn; empty while our own nudge is still unconfirmed. */
+  wakeIds(agentId: string): readonly string[];
+  /** Called after every epoch close (normal or abnormal) with the ids that went back to
+   *  delivered: §11.3 keys the coordinator's announced set to the ledger. */
+  onEpochClosed?(agentId: string, outcome: 'normal' | 'abnormal', reason: string, redelivered: readonly string[]): void;
+  /** §11.10: a mail block was returned to this agent (degradation input). */
+  onMailBlock?(agentId: string): void;
+}
 
 /**
  * ZT-I1-MAIL slice 2: one hook response that carried mail bodies. The ids are `surfacing`
@@ -131,6 +149,8 @@ interface TurnState {
   injected: Set<string>;
   /** How many mail-carrying hooks ran in this turn (AGY's first PreInvocation is its turn start). */
   mailHooks: number;
+  /** Legacy-read: ids the mid-turn <inbox-update> notice named in this turn (acted at its Stop). */
+  legacyNamed: Set<string>;
 }
 
 /** An evidence scan still waiting for tentative ids of one epoch (§11.1). */
@@ -871,20 +891,160 @@ export class HookServer {
     const snapshot = (): void => {
       this.turns.set(agentId, {
         open: true, known: new Set(this.hive.inboxFileNames?.(agentId) ?? []), noticed: new Set(),
-        epoch: turnId ?? `h-${this.bootTag}-${++this.turnCounter}`, injected: new Set(), mailHooks: 0
+        epoch: turnId ?? `h-${this.bootTag}-${++this.turnCounter}`, injected: new Set(), mailHooks: 0, legacyNamed: new Set()
       });
     };
     if (event === 'SessionStart' && p?.source === 'compact' && t?.open) return;
-    if (event === 'UserPromptSubmit' || event === 'SessionStart') { snapshot(); return; }
-    if (event === 'Stop') { if (t) t.open = false; return; }
+    if (event === 'Stop') {
+      // ZT-I1-MAIL §1.1: the Stop that closes the surfacing epoch makes its surfaced ids acted.
+      // AGY's non-terminal Stop (fully_idle false) is mid-chain: the turn goes on.
+      if (p?.fully_idle === false) return;
+      // #45: a Codex Stop naming ANOTHER turn (a straggler) closes that turn only.
+      if (turnId && t && t.epoch !== turnId) { this.closeMailEpoch(agentId, turnId, 'normal', 'stop'); return; }
+      if (t) t.open = false;
+      this.closeMailEpoch(agentId, t?.epoch ?? null, 'normal', 'stop');
+      return;
+    }
+    if (event === 'StopFailure') {
+      // §11.4: an API error ended the turn: surfaced ids go back to delivered with the marker.
+      if (t) t.open = false;
+      this.closeMailEpoch(agentId, t?.epoch ?? null, 'abnormal', 'stop-failure');
+      return;
+    }
+    if (event === 'UserPromptSubmit') {
+      // N3 (§11.17): the human typing into a LIVE turn joins its epoch (a Codex turn id still names it).
+      if (t?.open && this.mailLifecycleActive(agentId)) {
+        if (turnId && t.epoch !== turnId) { t.epoch = turnId; t.injected = new Set(); t.mailHooks = 0; }
+        return;
+      }
+      // §11.4: otherwise any epoch still open ended without a Stop (an interrupt): abnormal, and
+      // its ids are surfaced again, with the marker, in THIS turn (the block below).
+      this.abortMailEpochs(agentId, t?.open ? 'interrupted' : 'next-turn');
+      snapshot();
+      return;
+    }
+    if (event === 'SessionStart') {
+      // A new or resumed session: nothing surfaced in the old one is in this context.
+      this.abortMailEpochs(agentId, `session-${typeof p?.source === 'string' && p.source ? p.source.slice(0, 20) : 'start'}`);
+      snapshot();
+      return;
+    }
     if ((event === 'PreInvocation' || event === 'PostToolUse') && !t?.open) { snapshot(); return; }
     if (t?.open && turnId && t.epoch !== turnId) { t.epoch = turnId; t.injected = new Set(); t.mailHooks = 0; }
   }
 
-  /** The surfacing epoch of the agent's current (or last) turn, or null before any hook. Slice 3's
-   *  Stop / StopFailure close this epoch. */
+  /** The surfacing epoch of the agent's current (or last) turn, or null before any hook. */
   mailEpoch(agentId: string): string | null {
     return this.turns.get(agentId)?.epoch ?? null;
+  }
+
+  // — ZT-I1-MAIL slice 3: epoch closes (§1.1, §11.1, §11.3, §11.4, §11.5, §11.7, N3) —
+
+  private coordination: MailCoordination | null = null;
+  /** Main wires the wake coordinator in (N3's lifecycle, legacy-read wake ids, §11.3 re-keying). */
+  setMailCoordination(c: MailCoordination | null): void { this.coordination = c; }
+
+  private mailLifecycleActive(agentId: string): boolean {
+    try { return this.coordination?.lifecycleActive(agentId) ?? false; } catch { return false; }
+  }
+
+  /**
+   * Close one surfacing epoch in the ledger.
+   *  - normal (its Stop, a Codex task_complete for the same turn): the evidence is scanned first
+   *    (§11.1), then surfaced ids become acted (and archived), tentative ones go back to delivered
+   *    (`mail-surface-unconfirmed`, or `mail-surface-late` with the transport and elapsed time);
+   *    for a legacy-read agent, the ids the harness named to it are acted too (§2.2);
+   *  - abnormal (StopFailure, an interrupt, a new session, PTY exit/respawn, submit-unconfirmed,
+   *    the 30-minute backstop): everything open goes back to delivered with the marker.
+   * The coordinator is told either way (§11.3), even when nothing was open (`epoch` null).
+   */
+  closeMailEpoch(agentId: string, epoch: string | null, outcome: 'normal' | 'abnormal', reason: string): { acted: string[]; redelivered: string[] } {
+    const out = { acted: [] as string[], redelivered: [] as string[] };
+    const mail = this.hive.mail;
+    if (!mail || !mail.hasAgent(agentId)) return out;
+    try {
+      if (epoch) {
+        if (outcome === 'normal') this.confirmMailSurfacing(agentId);
+        const r = mail.closeEpoch(agentId, epoch, outcome, {
+          reason, late: this.mailLateIds(agentId, epoch), lateDetail: this.mailLateDetail(agentId, epoch)
+        });
+        out.acted.push(...r.acted);
+        out.redelivered.push(...r.redelivered);
+        this.mailLate.get(agentId)?.delete(epoch);
+        const waits = this.mailAwaiting.get(agentId)?.filter((w) => w.epoch !== epoch);
+        if (waits?.length) this.mailAwaiting.set(agentId, waits); else this.mailAwaiting.delete(agentId);
+      }
+      if (outcome === 'normal' && this.mailChannel(agentId).mode === 'legacy-read') {
+        const t = this.turns.get(agentId);
+        const named = new Set<string>([...(t && t.epoch === epoch ? t.legacyNamed : []), ...(this.coordination?.wakeIds(agentId) ?? [])]);
+        if (named.size) out.acted.push(...mail.legacyActed(agentId, named, 'legacy-read', { epoch }));
+      }
+    } catch (e) {
+      try { this.hive.appendLog({ kind: 'mail-ledger-error', agentId, op: 'close', epoch, error: String(e) }); } catch { /* noop */ }
+    }
+    try { this.coordination?.onEpochClosed?.(agentId, outcome, reason, out.redelivered); } catch { /* the coordinator never breaks a hook */ }
+    return out;
+  }
+
+  /** Close every epoch still open for this agent as abnormal (optionally only those opened at or
+   *  after `since`). The current turn is closed with them. Returns the epochs closed. */
+  private abortMailEpochs(agentId: string, reason: string, since?: number, notifyEmpty = false): string[] {
+    const mail = this.hive.mail;
+    if (!mail || !mail.hasAgent(agentId)) return [];
+    let open: Array<{ epoch: string; since: number }> = [];
+    try { open = mail.openEpochs(agentId); } catch { open = []; }
+    const closed: string[] = [];
+    for (const e of open) {
+      if (since !== undefined && e.since < since) continue;
+      this.closeMailEpoch(agentId, e.epoch, 'abnormal', reason);
+      closed.push(e.epoch);
+    }
+    const t = this.turns.get(agentId);
+    if (t && (since === undefined || closed.includes(t.epoch))) t.open = false;
+    // A dead PTY also ends a wake whose turn never surfaced anything: the coordinator still hears it.
+    if (!closed.length && notifyEmpty) this.closeMailEpoch(agentId, null, 'abnormal', reason);
+    return closed;
+  }
+
+  /** §1.1 abnormal end outside any hook: PTY exit, crash or respawn (noteSpawn). */
+  abortMailTurn(agentId: string, reason: string): string[] {
+    return this.abortMailEpochs(agentId, reason, undefined, true);
+  }
+
+  /** §1.1 `submit-unconfirmed` for the carrying wake: the epochs opened since that wake's claim. */
+  abortMailEpochsSince(agentId: string, since: number, reason = 'submit-unconfirmed'): string[] {
+    return this.abortMailEpochs(agentId, reason, since);
+  }
+
+  /** §1.1 / §11.4 last backstop: an epoch open for MAIL_STALE_EPOCH_MS with no Stop, closed as
+   *  abnormal. The CALLER applies the idle gate (the lifecycle is idle by the existing signals). */
+  closeStaleMailEpochs(agentId: string, now: number, maxAgeMs = MAIL_STALE_EPOCH_MS): string[] {
+    const mail = this.hive.mail;
+    if (!mail || !mail.hasAgent(agentId)) return [];
+    let open: Array<{ epoch: string; since: number }> = [];
+    try { open = mail.openEpochs(agentId); } catch { return []; }
+    const closed: string[] = [];
+    for (const e of open) {
+      if (now - e.since < maxAgeMs) continue;
+      this.closeMailEpoch(agentId, e.epoch, 'abnormal', 'stale-epoch');
+      closed.push(e.epoch);
+    }
+    const t = this.turns.get(agentId);
+    if (t && closed.includes(t.epoch)) t.open = false;
+    return closed;
+  }
+
+  /** Codex: rollout `task_complete` for the SAME turn id closes that turn's epoch normally. A
+   *  completion of any other turn (#52, a stale one) touches nothing else. */
+  closeMailTurn(agentId: string, turnId: string): { acted: string[]; redelivered: string[] } {
+    const mail = this.hive.mail;
+    if (!turnId || !mail || !mail.hasAgent(agentId)) return { acted: [], redelivered: [] };
+    let open = false;
+    try { open = mail.openEpochs(agentId).some((e) => e.epoch === turnId); } catch { open = false; }
+    const t = this.turns.get(agentId);
+    if (t && t.epoch === turnId) t.open = false;
+    if (!open) return { acted: [], redelivered: [] };
+    return this.closeMailEpoch(agentId, turnId, 'normal', 'task-complete');
   }
 
   /** The notice for inbox files that appeared since this turn began and were not announced yet,
@@ -897,7 +1057,8 @@ export class HookServer {
     if (!t?.open) return null;
     const fresh = (this.hive.inboxFileNames?.(agentId) ?? []).filter((f) => !t.known.has(f) && !t.noticed.has(f)).sort();
     if (!fresh.length) return null;
-    if (!peek) for (const f of fresh) t.noticed.add(f);
+    // Legacy-read (§2.2): what the notice NAMES is what the agent was told to read; its Stop acts it.
+    if (!peek) for (const f of fresh) { t.noticed.add(f); t.legacyNamed.add(f.replace(/\.json$/, '')); }
     const esc = (s: string): string => s.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const lines = fresh.slice(0, HookServer.MIDTURN_MAIL_MAX_LISTED).map((f) => {
       const h = this.hive.inboxHeader?.(agentId, f) ?? null;
@@ -916,11 +1077,16 @@ export class HookServer {
   private mailClaims: MailClaim[] = [];
   /** §11.1: tentative ids per agent waiting for transcript / rollout evidence. */
   private readonly mailAwaiting = new Map<string, EvidenceWait[]>();
-  /** §11.1: ids whose hook response left too late (or never flushed), per agent and epoch. Slice 3
-   *  passes them to closeEpoch as `late` (`mail-surface-late`). */
-  private readonly mailLate = new Map<string, Map<string, Set<string>>>();
-  /** Inbox bodies that could not be read (moved by the agent, deleted, unparseable): skipped. */
-  private readonly mailUnreadable = new Map<string, Set<string>>();
+  /** §11.1: ids whose hook response left too late (or never flushed), per agent and epoch, with how
+   *  (Q8: transport + elapsed). The epoch close passes them as `late` (`mail-surface-late`). */
+  private readonly mailLate = new Map<string, Map<string, Map<string, MailLateDetail>>>();
+  /** Q13: bodies in neither inbox/ nor .done/ (or unparseable), with the files' signature then:
+   *  skipped until either file changes. A transient read error is never recorded here (retried). */
+  private readonly mailUnreadable = new Map<string, Map<string, string>>();
+  /** Q13: `mail-agent-moved` is logged once per id per process. */
+  private readonly mailMovedLogged = new Set<string>();
+  /** Q11: ids that held a block back at an earlier hook (passed over if they still do not fit). */
+  private readonly mailBlocked = new Map<string, Set<string>>();
   private readonly providerCache = new Map<string, { provider: AgentProvider | undefined; mode: MailChannelMode; at: number }>();
   static readonly PROVIDER_CACHE_MS = 5_000;
 
@@ -957,8 +1123,8 @@ export class HookServer {
       if (latency === null || latency >= limit) {
         let byEpoch = this.mailLate.get(c.agentId);
         if (!byEpoch) { byEpoch = new Map(); this.mailLate.set(c.agentId, byEpoch); }
-        const set = byEpoch.get(c.epoch) ?? new Set<string>();
-        for (const id of c.ids) set.add(id);
+        const set = byEpoch.get(c.epoch) ?? new Map<string, MailLateDetail>();
+        for (const id of c.ids) set.set(id, { transport: c.transport ?? null, latencyMs: latency });
         byEpoch.set(c.epoch, set);
         while (byEpoch.size > 8) byEpoch.delete(byEpoch.keys().next().value as string);
         try { this.hive.appendLog({ kind: 'mail-hook-late', agentId: c.agentId, ids: c.ids, epoch: c.epoch, hookKind: c.hookKind, transport: c.transport ?? null, latencyMs: latency, limitMs: limit }); } catch { /* best effort */ }
@@ -978,7 +1144,17 @@ export class HookServer {
 
   /** Ids surfaced in `epoch` whose response was late (for closeEpoch's `late`). */
   mailLateIds(agentId: string, epoch: string): string[] {
-    return [...(this.mailLate.get(agentId)?.get(epoch) ?? [])];
+    return [...(this.mailLate.get(agentId)?.get(epoch)?.keys() ?? [])];
+  }
+
+  /** Q8: per late id, the transport and elapsed ms of its response (for the `mail-surface-late` row). */
+  mailLateDetail(agentId: string, epoch: string): Record<string, MailLateDetail> {
+    return Object.fromEntries(this.mailLate.get(agentId)?.get(epoch) ?? []);
+  }
+
+  /** Q13: ids whose body is in neither inbox/ nor .done/ (they are kept out of wakes). */
+  mailSkippedIds(agentId: string): string[] {
+    return [...(this.mailUnreadable.get(agentId)?.keys() ?? [])];
   }
 
   /** The agent's provider and mail channel mode (§11.9), cached briefly (registry.json is read
@@ -1021,28 +1197,63 @@ export class HookServer {
     if (!mail) return none;
     let pending: MailEntry[];
     try { pending = mail.pending(agentId); } catch { return none; }
-    const skip = this.mailUnreadable.get(agentId);
     const items: MailBlockItem[] = [];
     const more: MailEntry[] = [];
     let chars = 0;
     for (const e of pending) {
-      if (t?.injected.has(e.id) || skip?.has(e.id)) continue;
+      if (t?.injected.has(e.id) || this.mailBodySkipped(agentId, e.id)) continue;
       if (items.length >= 50 || chars > 2 * MAIL_JOINED_BUDGET) { more.push(e); continue; }
-      const got = this.hive.inboxMessage?.(agentId, e.id) ?? null;
-      if (!got) {
-        // Moved by the agent (the 1.1.74 habit), deleted, oversize or unparseable: never shown as
-        // a body; slice 4's reader decides what the ledger makes of it.
-        const set = skip ?? new Set<string>();
-        set.add(e.id);
-        this.mailUnreadable.set(agentId, set);
-        try { this.hive.appendLog({ kind: 'mail-body-missing', agentId, id: e.id }); } catch { /* best effort */ }
-        continue;
-      }
-      const body = typeof got.msg.body === 'string' ? got.msg.body : JSON.stringify(got.msg.body ?? '') ?? '';
-      items.push({ entry: e, body, path: got.path });
-      chars += body.length;
+      const got = this.readMailBody(agentId, e.id);
+      if (!got) continue;
+      items.push({ entry: e, body: got.body, path: got.path });
+      chars += got.body.length;
     }
     return { items, more };
+  }
+
+  /** Q13: is this body recorded as missing/unreadable, with its files unchanged since? A change
+   *  (the file reappears, is rewritten, is moved) clears the record and it is read again. */
+  private mailBodySkipped(agentId: string, id: string): boolean {
+    const skip = this.mailUnreadable.get(agentId);
+    const sig = skip?.get(id);
+    if (sig === undefined) return false;
+    let now: string | null = null;
+    try { now = this.hive.mailBodySig?.(agentId, id) ?? null; } catch { now = null; }
+    if (now !== null && now !== sig) { skip!.delete(id); return false; }
+    return true;
+  }
+
+  /**
+   * One message body for the block (Q13, god's ruling). From inbox/; when the agent already moved
+   * it (the 1.1.74 habit), from inbox/.done/, logged `mail-agent-moved` once per id: a move is
+   * never "handled" (§7.1 step 4). In neither place, or unparseable: `mail-body-missing` plus the
+   * integrity banner, skipped until the files change. A transient read error (an antivirus lock)
+   * is simply retried at the next hook.
+   */
+  private readMailBody(agentId: string, id: string): { body: string; path: string } | null {
+    const read = this.hive.mailBody;
+    if (!read) {
+      // A test double without the Q13 reader: the plain inbox read.
+      const got = this.hive.inboxMessage?.(agentId, id) ?? null;
+      if (!got) return null;
+      return { body: typeof got.msg.body === 'string' ? got.msg.body : JSON.stringify(got.msg.body ?? '') ?? '', path: got.path };
+    }
+    let got: ReturnType<HiveManager['mailBody']>;
+    try { got = read.call(this.hive, agentId, id); } catch { return null; }
+    if (!got.ok) {
+      if (got.reason === 'transient') return null;
+      const skip = this.mailUnreadable.get(agentId) ?? new Map<string, string>();
+      skip.set(id, got.sig);
+      this.mailUnreadable.set(agentId, skip);
+      try { this.hive.mail?.noteBodyMissing(agentId, id, got.reason); } catch { /* best effort */ }
+      return null;
+    }
+    if (got.moved && !this.mailMovedLogged.has(`${agentId}|${id}`)) {
+      this.mailMovedLogged.add(`${agentId}|${id}`);
+      try { this.hive.appendLog({ kind: 'mail-agent-moved', agentId, id }); } catch { /* best effort */ }
+    }
+    const body = typeof got.msg.body === 'string' ? got.msg.body : JSON.stringify(got.msg.body ?? '') ?? '';
+    return { body, path: got.path };
   }
 
   private mailReminders(agentId: string): MailObligation[] {
@@ -1064,7 +1275,12 @@ export class HookServer {
     if (t) t.mailHooks++;
     const { items, more } = this.mailItems(agentId, t);
     if (!items.length && !more.length) return null;
-    const block = buildMailBlock({ items, more, budget: mailBudgetFor(others), phase, reminders: this.mailReminders(agentId) });
+    const blockedBefore = this.mailBlocked.get(agentId);
+    const block = buildMailBlock({ items, more, budget: mailBudgetFor(others), phase, reminders: this.mailReminders(agentId), skippable: blockedBefore });
+    // Q11: what held the block back at THIS hook may be passed over at the next one.
+    const nextBlocked = new Set([...(blockedBefore ?? [])].filter((id) => !block.surfacing.includes(id)));
+    for (const id of block.blocked) nextBlocked.add(id);
+    if (nextBlocked.size) this.mailBlocked.set(agentId, nextBlocked); else this.mailBlocked.delete(agentId);
     if (!block.text) return null;
     if (!block.surfacing.length) return block.text;     // headers only: nothing is claimed
     let claimed: string[] = [];
@@ -1073,9 +1289,16 @@ export class HookServer {
       return null;   // never show a body the ledger did not record
     }
     for (const id of claimed) t?.injected.add(id);
-    if (!claimed.length) return block.text;
+    this.registerMailClaim(agentId, claimed, epoch, event, p, provider, items.map((i) => i.entry));
+    return block.text;
+  }
+
+  /** A hook response carries `claimed` (now `surfacing`): settle it at the flush (latency, N1)
+   *  and wait for the transcript / rollout record (§11.1). */
+  private registerMailClaim(agentId: string, claimed: string[], epoch: string, event: string, p: HookPayload, provider: AgentProvider | undefined, entries: MailEntry[]): void {
+    if (!claimed.length) return;
     const kind = mailEvidenceKind(provider);
-    const byId = new Map(items.map((i) => [i.entry.id, i.entry]));
+    const byId = new Map(entries.map((e) => [e.id, e]));
     const fallbackIds = kind === 'latency' ? [] : claimed.filter((id) => (byId.get(id)?.unconfirmedSurfacings ?? 0) >= MAIL_UNCONFIRMED_FALLBACK_AFTER);
     this.mailClaims.push({ agentId, ids: claimed, epoch, hookKind: event, transport: p.transport, evidence: kind, fallbackIds });
     if (kind !== 'latency') {
@@ -1088,6 +1311,47 @@ export class HookServer {
       else list.push({ epoch, ids: new Set(claimed), kind, file, offset, scannedFile: null, scannedSize: -1 });
       this.mailAwaiting.set(agentId, list);
     }
+  }
+
+  /**
+   * §11.5: SessionStart(compact) inside a turn is not an epoch boundary; it re-injects the ids
+   * this epoch already surfaced (not yet acted), from the ledger, through the SessionStart
+   * additionalContext. That re-injection is itself a surfacing step (surfaced → surfacing, same
+   * epoch), confirmed as in §11.1. Ids that do not fit the joined budget go back to delivered
+   * with the marker and drip in at the next hooks of the same turn.
+   */
+  private reinjectMail(agentId: string, p: HookPayload, provider: AgentProvider | undefined, others: Array<string | null>): string | null {
+    const mail = this.hive.mail;
+    const t = this.turns.get(agentId);
+    if (!mail || !t?.open) return null;
+    let open: MailEntry[];
+    try {
+      open = Object.values(mail.ledger(agentId).entries)
+        .filter((e) => e.epoch === t.epoch && (e.state === 'surfaced' || e.state === 'surfacing'))
+        .sort((a, b) => a.seq - b.seq);
+    } catch { return null; }
+    if (!open.length) return null;
+    const items: MailBlockItem[] = [];
+    for (const e of open) {
+      const got = this.readMailBody(agentId, e.id);
+      if (got) items.push({ entry: e, body: got.body, path: got.path });
+    }
+    const block = buildMailBlock({ items, budget: mailBudgetFor(others), phase: 'compact' });
+    const fit = block.text ? block.surfacing : [];
+    const out = open.map((e) => e.id).filter((id) => !fit.includes(id) && items.some((i) => i.entry.id === id));
+    let claimed: string[] = [];
+    try {
+      claimed = mail.reinject(agentId, fit, t.epoch, 'SessionStart');
+      if (out.length) {
+        mail.redeliver(agentId, out, 'compact-overflow');
+        for (const id of out) t.injected.delete(id);   // they may surface again in this epoch
+      }
+    } catch (e) {
+      try { this.hive.appendLog({ kind: 'mail-ledger-error', agentId, op: 'reinject', error: String(e) }); } catch { /* noop */ }
+      return null;
+    }
+    if (!claimed.length) return null;
+    this.registerMailClaim(agentId, claimed, t.epoch, 'SessionStart', p, provider, open);
     return block.text;
   }
 
@@ -1489,8 +1753,17 @@ export class HookServer {
       if (!mailBlock && event === 'UserPromptSubmit' && channel?.provider === 'codex' && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL
         && mailBudgetFor([roster, goal, steer, mail]) >= none.length) {
         mailBlock = none;
+        // Q12 (god's ruling): a wake with nothing to show means the coordinator woke for mail that
+        // was not pending: a coordinator bug signal.
+        try { this.hive.appendLog({ kind: 'mail-empty-wake', agentId, epoch: this.mailEpoch(agentId), provider: 'codex' }); } catch { /* best effort */ }
       }
     }
+    // §11.5: SessionStart(compact) inside a turn re-injects what this epoch already surfaced.
+    if (injecting && agentId && !fromSubagent && event === 'SessionStart' && p.source === 'compact' && p.transport !== 'pipe-oneway') {
+      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [roster, goal, steer, mail]); } catch { mailBlock = null; }
+    }
+    // §11.10: a mail block reached this agent (the degradation watch counts wakes without one).
+    if (mailBlock && agentId) { try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ } }
 
     if (steer || roster || goal || mail || mailBlock) {
       this.emit(agentId, event, p);

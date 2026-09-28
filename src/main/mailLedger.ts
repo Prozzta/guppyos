@@ -379,7 +379,64 @@ export function applyMarkActed(doc: MailLedgerDoc, ids: Iterable<string>, epoch:
   return d.step();
 }
 
-function backEdge(d: Draft, entries: MailEntry[], reason: string, countUnconfirmed: boolean, kind = 'mail', epoch?: string | null): void {
+/**
+ * §11.5 compaction re-inject: ids still open in `epoch` (surfaced, or still tentative) were put
+ * into the context again (SessionStart `compact`): back to `surfacing` in the SAME epoch, with
+ * `surfaceCount++`. The re-injection is itself a surfacing step, confirmed as in §11.1; a normal
+ * close with no confirmation re-pends it like any other. No row (the `surfaced` row is the budget).
+ */
+export function applyReinject(doc: MailLedgerDoc, ids: Iterable<string>, epoch: string, hookKind: string, now: number): MailStep {
+  const d = new Draft(doc, now);
+  for (const id of ids) {
+    const e = d.doc.entries[id];
+    if (!e || e.epoch !== epoch || (e.state !== 'surfaced' && e.state !== 'surfacing')) continue;
+    const next: MailEntry = { ...e, state: 'surfacing', hookKind, surfacingAt: now, surfaceCount: e.surfaceCount + 1, updatedAt: now };
+    d.put(next);
+    d.event(next, 'surfacing', false, 'reinject');
+  }
+  return d.step();
+}
+
+/** Open ids (surfacing / surfaced) back to `delivered` with the marker, one row (`reason`):
+ *  e.g. a compaction re-inject that did not fit the budget, so the body drips in again. */
+export function applyRedeliver(doc: MailLedgerDoc, ids: Iterable<string>, reason: string, now: number): MailStep {
+  const want = new Set(ids);
+  const open = Object.values(doc.entries).filter((e) => want.has(e.id) && (e.state === 'surfacing' || e.state === 'surfaced')).sort(bySeq);
+  if (!open.length) return unchanged(doc);
+  const d = new Draft(doc, now);
+  backEdge(d, open, reason, false);
+  return d.step();
+}
+
+/**
+ * Acted WITHOUT a surfacing, for the channels where the harness does not put the body in context:
+ *  - `legacy-read` (§2.2, §11.9, §11.10): hook-capable agents that read the files themselves; the
+ *    ids the harness named to them (the wake's ids, the mid-turn notice) become acted at the Stop
+ *    of that turn, and the harness archives the files;
+ *  - `legacy-move` (§11.7, cursor): no Stop signal, 1.1.74 semantics: the AGENT moved the file,
+ *    and for that agent only, file position means handled (`reason:"agent-moved"`). Never idle.
+ * Only `delivered` inbox entries move. One row per call.
+ */
+export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode: 'legacy-read' | 'legacy-move', now: number, opts: { epoch?: string | null; reason?: string } = {}): MailStep {
+  const d = new Draft(doc, now);
+  const done: string[] = [];
+  for (const id of ids) {
+    const e = d.doc.entries[id];
+    if (!e || e.state !== 'delivered' || e.via !== 'inbox' || done.includes(id)) continue;
+    const next: MailEntry = { ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null };
+    d.put(next);
+    d.event(next, 'acted', false, opts.reason ?? mode);
+    done.push(id);
+    d.archive.push(id);
+  }
+  if (done.length) {
+    d.doc.lastActedAt = now;
+    d.row({ kind: 'mail', stage: 'acted', ids: done, mode, ...(opts.epoch ? { epoch: opts.epoch } : {}), ...(opts.reason ? { reason: opts.reason } : {}) });
+  }
+  return d.step();
+}
+
+function backEdge(d: Draft, entries: MailEntry[], reason: string, countUnconfirmed: boolean, kind = 'mail', epoch?: string | null, extra: Record<string, unknown> = {}): void {
   const ids: string[] = [];
   for (const e of entries) {
     const next: MailEntry = {
@@ -391,8 +448,11 @@ function backEdge(d: Draft, entries: MailEntry[], reason: string, countUnconfirm
     d.event(next, 'redelivered', true, reason);
     ids.push(e.id);
   }
-  if (ids.length) d.row({ kind, stage: 'redelivered', reason, ids, ...(epoch !== undefined ? { epoch } : {}) });
+  if (ids.length) d.row({ kind, stage: 'redelivered', reason, ids, ...(epoch !== undefined ? { epoch } : {}), ...extra });
 }
+
+/** Q8: how a late response left the harness (the `mail-surface-late` row names both). */
+export interface MailLateDetail { transport: string | null; latencyMs: number | null }
 
 export type EpochOutcome = 'normal' | 'abnormal';
 
@@ -406,7 +466,7 @@ export type EpochOutcome = 'normal' | 'abnormal';
  *    marker (`kind:"mail"`, `stage:"redelivered"`, `reason`).
  * Idempotent: a second close of the same epoch finds nothing open.
  */
-export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: EpochOutcome, now: number, opts: { reason?: string; late?: Iterable<string> } = {}): MailStep {
+export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: EpochOutcome, now: number, opts: { reason?: string; late?: Iterable<string>; lateDetail?: Record<string, MailLateDetail> } = {}): MailStep {
   const open = Object.values(doc.entries).filter((e) => e.epoch === epoch && (e.state === 'surfacing' || e.state === 'surfaced')).sort(bySeq);
   if (!open.length) return unchanged(doc);
   if (outcome === 'abnormal') {
@@ -423,7 +483,18 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
   const late = new Set(opts.late ?? []);
   const tentative = open.filter((e) => e.state === 'surfacing');
   backEdge(d, tentative.filter((e) => !late.has(e.id)).map((e) => d.doc.entries[e.id]), 'unconfirmed', true, 'mail-surface-unconfirmed', epoch);
-  backEdge(d, tentative.filter((e) => late.has(e.id)).map((e) => d.doc.entries[e.id]), 'late', true, 'mail-surface-late', epoch);
+  // Q8: one `mail-surface-late` row per distinct (transport, elapsed ms), so each row names both.
+  const groups = new Map<string, { detail: MailLateDetail | null; entries: MailEntry[] }>();
+  for (const e of tentative.filter((x) => late.has(x.id))) {
+    const detail = opts.lateDetail?.[e.id] ?? null;
+    const key = detail ? `${detail.transport}|${detail.latencyMs}` : '-';
+    const g = groups.get(key) ?? { detail, entries: [] };
+    g.entries.push(d.doc.entries[e.id]);
+    groups.set(key, g);
+  }
+  for (const g of groups.values()) {
+    backEdge(d, g.entries, 'late', true, 'mail-surface-late', epoch, g.detail ? { transport: g.detail.transport, latencyMs: g.detail.latencyMs } : {});
+  }
   return d.step();
 }
 
@@ -823,6 +894,45 @@ export class MailLedger {
     });
   }
 
+  /** Q13 ruling: ids whose body is in neither inbox/ nor inbox/.done/ (or cannot be parsed). */
+  private readonly bodyMissingLogged = new Set<string>();
+
+  /**
+   * Q13 (god's ruling): a delivered message whose body is in NEITHER inbox/ nor inbox/.done/ (or
+   * cannot be parsed) is logged `mail-body-missing` (once per id per session) and raised LOUDLY
+   * through the integrity banner (one notice per agent per session). It stays delivered: nothing
+   * is ever marked handled because a file went missing.
+   */
+  noteBodyMissing(agentId: string, id: string, why: string): void {
+    const key = `${agentId}|${id}`;
+    if (this.bodyMissingLogged.has(key)) return;
+    this.bodyMissingLogged.add(key);
+    this.log({ kind: 'mail-body-missing', agentId, id, why });
+    const noticeKey = `${agentId}|body-missing`;
+    if (this.notices.has(noticeKey)) return;
+    this.notices.set(noticeKey, {
+      file: `agents/${agentId}/inbox/${id}.json`, quarantine: null, error: 'mail-body-missing',
+      notice: `A hive message for ${agentId} (${id}) is in its mail record but its file is missing or unreadable in both inbox/ and inbox/.done/, so it cannot be shown to the agent (see mail-body-missing in the log).`
+    });
+  }
+
+  /**
+   * §11.10: switch an injection agent to legacy-read (the channel override), log
+   * `mail-channel-degraded` and raise a UI alert through the integrity banner. Returns true when
+   * the mode changed (a second call is a no-op).
+   */
+  degradeChannel(agentId: string, reason: string, detail: Record<string, unknown> = {}): boolean {
+    if (!this.hasAgent(agentId)) return false;
+    const changed = this.setChannelOverride(agentId, { mode: 'legacy-read', reason, since: this.now() });
+    if (!changed) return false;
+    this.log({ kind: 'mail-channel-degraded', agentId, reason, mode: 'legacy-read', ...detail });
+    this.notices.set(`${agentId}|degraded`, {
+      file: `state/mail/${agentId}.json`, quarantine: null, error: 'mail-channel-degraded',
+      notice: `Mail for ${agentId} is no longer reaching it through its hooks (${reason === 'zero-hook-traffic' ? 'no hook traffic across 3 wakes' : '3 wakes started a turn with no mail block'}); it now reads its inbox files instead (legacy-read). Check the agent's hook setup (see mail-channel-degraded in the log).`
+    });
+    return true;
+  }
+
   // — load —
   private readDir(dir: string): DiskMessage[] {
     let names: string[];
@@ -1122,8 +1232,71 @@ export class MailLedger {
     return this.commit(st, applyMarkActed(st.doc, ids, epoch, this.now())).changed;
   }
 
+  /** §11.5: compaction re-inject, surfaced/surfacing → surfacing in the same epoch. Returns the ids. */
+  reinject(agentId: string, ids: Iterable<string>, epoch: string, hookKind: string): string[] {
+    const st = this.state(agentId);
+    return this.commit(st, applyReinject(st.doc, ids, epoch, hookKind, this.now())).changed;
+  }
+
+  /** Open ids back to delivered with the marker (see applyRedeliver). Returns the ids. */
+  redeliver(agentId: string, ids: Iterable<string>, reason: string): string[] {
+    const st = this.state(agentId);
+    return this.commit(st, applyRedeliver(st.doc, ids, reason, this.now())).changed;
+  }
+
+  /** Acted without a surfacing, for legacy-read (at Stop) and legacy-move (agent moved). */
+  legacyActed(agentId: string, ids: Iterable<string>, mode: 'legacy-read' | 'legacy-move', opts: { epoch?: string | null; reason?: string } = {}): string[] {
+    const st = this.state(agentId);
+    return this.commit(st, applyLegacyActed(st.doc, ids, mode, this.now(), opts)).changed;
+  }
+
+  /**
+   * Jim audit #4: a cheap disk → ledger reconcile for the wake beat (the load-time one only runs
+   * once per process). One readdir of inbox/; a `*.json` file the ledger does not know (written
+   * while admit/markDelivered threw, or by a writer other than deliver()) is read and recorded
+   * `delivered` with `reason:"recovered"` (logged). Bodies are read only for those unknown files,
+   * at most `maxReads` per call. `moveIsHandled` (legacy-move, §11.7): a delivered id whose file
+   * the agent moved to .done is acted (`agent-moved`).
+   */
+  reconcileInbox(agentId: string, opts: { moveIsHandled?: boolean; maxReads?: number } = {}): { recovered: string[]; moved: string[] } {
+    const none = { recovered: [] as string[], moved: [] as string[] };
+    if (!this.hasAgent(agentId)) return none;
+    const st = this.state(agentId);
+    const inboxDir = this.inboxDir(agentId)!;
+    let names: string[];
+    try { names = readdirSync(inboxDir); } catch { return none; }
+    const onDisk = new Set(names.filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -'.json'.length)));
+    const recovered: string[] = [];
+    let reads = 0;
+    const now = this.now();
+    for (const id of onDisk) {
+      if (st.doc.entries[id]) continue;
+      if (reads++ >= (opts.maxReads ?? 50)) break;
+      const full = join(inboxDir, `${id}.json`);
+      let msg: Partial<MailMessageLike> | null = null;
+      let mtimeMs = now;
+      try {
+        const s = statSync(full);
+        if (!s.isFile()) continue;
+        mtimeMs = s.mtimeMs;
+        if (s.size <= MESSAGE_FILE_MAX_BYTES) {
+          const parsed = JSON.parse(readFileSync(full, 'utf8')) as unknown;
+          if (parsed && typeof parsed === 'object') msg = parsed as Partial<MailMessageLike>;
+        }
+      } catch { /* unparseable: still a message file on disk */ }
+      const step = this.commit(st, applyDelivered(st.doc, diskEntryMessage({ id, msg, mtimeMs }), now, { harness: true, reason: 'recovered' }));
+      if (step.changed.length) recovered.push(id);
+    }
+    const moved: string[] = [];
+    if (opts.moveIsHandled) {
+      const gone = pendingEntries(st.doc).filter((e) => e.via === 'inbox' && !onDisk.has(e.id) && existsSync(join(inboxDir, '.done', `${e.id}.json`))).map((e) => e.id);
+      if (gone.length) moved.push(...this.commit(st, applyLegacyActed(st.doc, gone, 'legacy-move', now, { reason: 'agent-moved' })).changed);
+    }
+    return { recovered, moved };
+  }
+
   /** Close a surfacing epoch (see applyCloseEpoch). */
-  closeEpoch(agentId: string, epoch: string, outcome: EpochOutcome, opts: { reason?: string; late?: Iterable<string> } = {}): { acted: string[]; redelivered: string[] } {
+  closeEpoch(agentId: string, epoch: string, outcome: EpochOutcome, opts: { reason?: string; late?: Iterable<string>; lateDetail?: Record<string, MailLateDetail> } = {}): { acted: string[]; redelivered: string[] } {
     const st = this.state(agentId);
     const step = this.commit(st, applyCloseEpoch(st.doc, epoch, outcome, this.now(), opts));
     return {

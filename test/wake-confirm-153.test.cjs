@@ -12,8 +12,9 @@
  *      For a provider that reports turn starts the epoch is provisional; unconfirmed for
  *      SUBMIT_CONFIRM_MS: lifecycle unknown, ids re-pended ONCE, and the next nudge is typed
  *      only after the screen shows the unsent one is not on the prompt (else held).
- *  (3) WAKE-NO-PENDING-IDS hardening: an id announced REANNOUNCE_AFTER_MS ago and still on
- *      disk when the agent is idle again is re-announced once.
+ *  (3) WAKE-NO-PENDING-IDS hardening, as ZT-I1-MAIL §11.3 (1.1.75) replaced it: an announced id
+ *      the ledger still calls delivered when its wake's epoch closes (the Stop) is re-pended
+ *      ONCE at that close, then the F4 backoff; the old time-based re-announce is gone.
  *
  * The coordinator, bridge and owner are REAL; the clock is fake. Timings are the live
  * floor's (Phyllis 06:29:54, Dwight 06:27:56 to 06:28:20, 2026-09-26).
@@ -23,7 +24,7 @@ const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
 const W = loadTs('src/main/workerWake.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, REANNOUNCE_AFTER_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
+const { WorkerWakeWatchdog, inboxWakeRequestId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const OWN = loadTs('src/main/automaticSubmit.ts');
 const { ADMISSION_REASON } = loadTs('src/main/capacityAdmission.ts');
@@ -452,46 +453,58 @@ test('OWNER (2) no screen reading: REFUSED PRIOR_TEXT_UNVERIFIED, nothing typed,
 
 // ─── (3) re-announce ────────────────────────────────────────────────────────────────
 
-test('RE-ANNOUNCE (3) announced, Stop with the file still on disk: nothing before 3 min; after it exactly ONE re-claim, then never again', async () => {
+test('RE-PEND (3, §11.3) an announced id still delivered at the Stop that closes its wake\'s epoch: ONE re-claim at that Stop (never by time), then the F4 backoff', async () => {
   const f = floor({ confirms: false });
-  f.inbox.set('jim', ['m1']);
+  f.inbox.set('jim', ['m1']);          // the ledger's delivered ids
   f.coordinator.noteHook('jim', 'Stop', undefined, 0, true);
   f.now = 1000;
   f.bridge.onDelivery('jim', 'm1');
   await f.flush();
   assert.equal(f.reqs.length, 1);
-  f.now = 60_000;
+  // Time alone re-offers nothing (the 3-minute re-announce is gone).
+  f.now = 60 * 60_000;
+  f.bridge.reconcileAll(['jim']);
+  await f.flush();
+  assert.equal(f.reqs.length, 1, 'no time-based re-offer');
+  assert.ok(!f.diags.some((d) => d.stage === 'reannounce'));
+  // The wake's turn ends with m1 still delivered (a text-only turn whose block overflowed): the
+  // epoch close (HookServer calls it before the Stop is reported) re-pends it, and the Stop's
+  // own retry edge claims it.
+  f.bridge.onMailEpochClosed('jim', 'normal', 'stop');
   f.bridge.onHook('jim', 'Stop', undefined);
   await f.flush();
-  f.now = 120_000;
-  f.bridge.reconcileAll(['jim']);
-  assert.equal(f.reqs.length, 1, 'announced 2 min ago: the agent may still get to it');
-  f.now = 1000 + REANNOUNCE_AFTER_MS;
-  f.bridge.reconcileAll(['jim']);
-  assert.ok(f.diags.some((d) => d.stage === 'reannounce' && d.ids === 1));
+  assert.ok(f.diags.some((d) => d.stage === 'wake-repend' && d.requeued === 1));
   assert.equal(f.reqs.length, 2, 'one more announcement');
   assert.equal(f.reqs[1].requestId, inboxWakeRequestId('jim', ['m1']) + ':again');
   assert.equal(f.reqs[1].priorText, undefined, 'that nudge was a real turn: no prompt check');
+  // Still delivered at the next close: not burned, not looped: the F4 backoff.
+  f.now += 1000;
+  f.bridge.onMailEpochClosed('jim', 'normal', 'stop');
+  f.bridge.onHook('jim', 'Stop', undefined);
   await f.flush();
-  for (let k = 1; k <= 4; k++) {
-    f.now += REANNOUNCE_AFTER_MS;
-    f.bridge.onHook('jim', 'Stop', undefined);
-    await f.flush();
-    f.bridge.reconcileAll(['jim']);
-    await f.flush();
-  }
   assert.equal(f.reqs.length, 2, 'once per id');
+  assert.ok(f.diags.some((d) => d.stage === 'wake-ids-exhausted' && d.attempt === 1));
+  f.now += WAKE_RETRY_BASE_MS;
+  f.bridge.reconcileAll(['jim']);
+  await f.flush();
+  assert.equal(f.reqs.length, 3, 'offered again after the backoff');
+  assert.equal(f.reqs[2].requestId, inboxWakeRequestId('jim', ['m1']) + ':retry1');
 });
 
-test('RE-ANNOUNCE (3) on the Stop itself, only ids on disk, never while active', () => {
+test('RE-PEND (3, §11.3) keyed to the ledger: only ids still delivered, never over our own unconfirmed nudge, never while merely waiting', () => {
   const c = new WorkerWakeWatchdog();
   c.noteHook('a', 'Stop', undefined, 0, true);
   c.noteDelivery('a', 'm1'); c.noteDelivery('a', 'm2');
-  c.settle(c.claim(fact('a'), 'hook', 'event', 10), 'COMMITTED', 10);
-  c.reconcile('a', ['m1']);                    // m2 was handled
-  assert.equal(c.beat('a', 10 + REANNOUNCE_AFTER_MS), null, 'active: the agent is working');
-  assert.equal(c.noteHook('a', 'Stop', undefined, 10 + REANNOUNCE_AFTER_MS, true), true);
-  assert.deepEqual(c.state('a').pending, ['m1'], 'the Stop re-pends the stale id that is still on disk');
+  c.settle(c.claim(fact('a'), 'hook', 'event', 10), 'COMMITTED', 10, true);
+  assert.equal(c.state('a').provisional, true);
+  assert.deepEqual(c.repend('a', ['m1', 'm2'], 20).requeued, [], 'the nudge may still sit unsent in the composer');
+  c.noteHook('a', 'UserPromptSubmit', undefined, 30);   // the provider confirmed the turn
+  assert.equal(c.beat('a', 10 + 60 * 60_000), null, 'active and an hour old: nothing is re-offered by time');
+  const r = c.repend('a', ['m1'], 40);                     // m2 was surfaced (no longer delivered)
+  assert.deepEqual(r.requeued, ['m1']);
+  assert.deepEqual(c.state('a').pending, ['m1']);
+  assert.deepEqual(c.state('a').announced, ['m2']);
+  assert.deepEqual(c.repend('a', ['m1'], 50).requeued, [], 'not announced any more: nothing to do');
 });
 
 test('WIRING: main says which providers confirm turn starts (claude, codex, antigravity), by the agent\'s live PTY', () => {

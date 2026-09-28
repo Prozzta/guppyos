@@ -613,7 +613,19 @@ inboxWake = new InboxWakeBridge({
     const provider = ptyId ? ptyProvider.get(ptyId) : undefined;
     return provider === 'claude' || provider === 'codex' || provider === 'antigravity';
   },
-  inboxIds: (agentId) => hive.inbox(agentId).map((m) => m.id).filter(Boolean),
+  // ZT-I1-MAIL §3 #1: pending = the LEDGER's delivered ids (files on disk imply nothing), minus
+  // bodies that are in neither inbox/ nor .done/ (Q13: shown loudly, never a wake loop). The
+  // 1.1.74 file listing stays for the providers whose own file moves mean "handled" (cursor,
+  // §11.7) or that take mail as terminal work orders, and when the hive has no ledger.
+  inboxIds: (agentId) => mailPendingIds(agentId),
+  mail: {
+    mode: (agentId) => hookServer.mailChannel(agentId).mode,
+    closeTurn: (agentId, turnId) => { hookServer.closeMailTurn(agentId, turnId); },
+    abortSince: (agentId, since) => { hookServer.abortMailEpochsSince(agentId, since, 'submit-unconfirmed'); },
+    closeStale: (agentId, now) => hookServer.closeStaleMailEpochs(agentId, now),
+    hasOpenEpoch: (agentId) => hive.mail.openEpochs(agentId).length > 0,
+    degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail)
+  },
   facts: (agentId) => {
     const ptyId = ptyForAgent(agentId);
     if (!ptyId) return null;
@@ -647,6 +659,19 @@ inboxWake = new InboxWakeBridge({
   }
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
+
+/** ZT-I1-MAIL §3 #1: the wake coordinator's pending source (see the bridge's `inboxIds`). */
+function mailPendingIds(agentId: string): string[] {
+  const files = (): string[] => hive.inbox(agentId).map((m) => m.id).filter(Boolean);
+  const mode = hookServer.mailChannel(agentId).mode;
+  if (mode === 'legacy-move' || mode === 'work-order') return files();
+  try {
+    const skip = new Set(hookServer.mailSkippedIds(agentId));
+    return hive.mail.pending(agentId).map((e) => e.id).filter((id) => !skip.has(id));
+  } catch {
+    return files();
+  }
+}
 hive.setDeliveryObserver(({ agentId, messageId }) => {
   // Proves the observer is registered AND that deliver() reached it, independently of
   // anything the bridge then decides.
@@ -702,6 +727,18 @@ const heavyLock = new HeavyJobLock({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
 });
 hookServer.setHeavyLock(heavyLock);
+// ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
+//  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a
+//    provider-confirmed turn (our own unconfirmed nudge is a new turn, not a live one);
+//  - legacy-read: the ids a COMMITTED, confirmed wake named are acted at that turn's Stop;
+//  - §11.3: every epoch close re-keys the announced set to the ledger (re-pend once, then F4);
+//  - §11.10: every mail block feeds the degradation watch.
+hookServer.setMailCoordination({
+  lifecycleActive: (agentId) => { const s = workerWake.state(agentId); return s.lifecycle === 'active' && !s.provisional; },
+  wakeIds: (agentId) => { const s = workerWake.state(agentId); return s.lifecycle === 'active' && s.provisional ? [] : s.announced; },
+  onEpochClosed: (agentId, outcome, reason, redelivered) => inboxWake?.onMailEpochClosed(agentId, outcome, reason, redelivered),
+  onMailBlock: (agentId) => inboxWake?.onMailBlock(agentId)
+});
 // HOOK-BROKER: Claude agents POST their hooks to the HookServer in-process (0 processes per
 // hook). The hive asks for a per-spawn URL; with the broker not listening it gets null and
 // writes the command hooks exactly as before.
@@ -916,6 +953,9 @@ function teardownPty(id: string): void {
     // Drop watchdog state so a dead agent can't get nudged or leak its grace.
     try { workerWake.forget(agentId, id); } catch { /* best-effort */ }
     try { forgetWakeRows(wakeRows, agentId); } catch { /* best-effort */ }
+    // ZT-I1-MAIL §1.1: the PTY exited (or crashed): its open mail epoch ends abnormally. Not when
+    // another PTY of the same agent is alive (a restart in place spawns the new one first).
+    if (![...ptyToAgent.values()].includes(agentId)) { try { hookServer.abortMailTurn(agentId, 'pty-exit'); } catch { /* best-effort */ } }
     try { nativeMemory.agentExited(agentId); } catch { /* best-effort */ }
     // HEAVY-JOB-SERIALIZE: its jobs went with the PTY (unless another PTY of it is still alive).
     if (![...ptyToAgent.values()].includes(agentId)) { try { heavyLock.agentGone(agentId); } catch { /* best-effort */ } }
@@ -3724,6 +3764,10 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // Inbox wake: boot grace starts at spawn so the initial orientation prompt is never
     // mistaken for an idle agent; a new incarnation also releases a stale INTERFERED hold.
     workerWake.noteSpawn(opts.id, Date.now(), opts.hive.id);
+    // ZT-I1-MAIL §1.1: a (re)spawn ends whatever mail epoch the previous incarnation had open:
+    // abnormal, its ids re-delivered with the marker (after noteSpawn, so the coordinator's
+    // announced ids from the dead incarnation are re-pended too).
+    try { hookServer.abortMailTurn(opts.hive.id, 'respawn'); } catch { /* best-effort */ }
   }
   // Pre-accept Claude Code's bypass-mode warning + folder-trust dialog so the
   // agent (spawned with --permission-mode bypassPermissions) doesn't stall on an
@@ -6314,6 +6358,17 @@ function runWorkerWakeBeat(): void {
   // Proves the 15s beat is ARMED and running at all, and over how many agents. This alone
   // separates "armAlwaysOnBeats never ran" from "it ran and every claim was refused".
   wakeDiag('beat', { live: live.length, agents: live.join(',') });
+  // ZT-I1-MAIL (Jim audit #4): mail that reached inbox/ outside deliver() (a ledger error, another
+  // writer) is recorded delivered here, one readdir per agent. §11.7: for an agent with no Stop
+  // signal (cursor; an agent degraded because its hooks went silent) the agent's own move to
+  // .done means handled, 1.1.74 semantics. Work-order agents keep 1.1.74 file semantics.
+  for (const agentId of live) {
+    try {
+      const mode = hookServer.mailChannel(agentId).mode;
+      const noStop = mode === 'legacy-move' || (mode === 'legacy-read' && hive.mail.channelOverride(agentId)?.reason === 'zero-hook-traffic');
+      if (mode !== 'work-order') hive.mail.reconcileInbox(agentId, { moveIsHandled: noStop });
+    } catch { /* best effort: the next beat retries */ }
+  }
   inboxWake.reconcileAll(live);
 }
 

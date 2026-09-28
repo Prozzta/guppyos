@@ -678,6 +678,48 @@ export class HiveManager {
   }
   static readonly INBOX_MESSAGE_MAX_BYTES = 1024 * 1024;
 
+  /**
+   * ZT-I1-MAIL Q13 (god's ruling): a delivered message's body for the <hive-mail> block. From
+   * inbox/, else from inbox/.done/ when the agent already moved it (`moved`: the 1.1.74 habit; a
+   * move is never "handled"). Failures say why: `missing` (in neither place), `unreadable`
+   * (oversize, not JSON, not an object), or `transient` (a lock or permission error the next hook
+   * retries). `sig` fingerprints both files, so a skipped body is retried once either changes.
+   */
+  mailBody(agentId: string, id: string):
+    | { ok: true; path: string; msg: Partial<HiveMessage>; moved: boolean }
+    | { ok: false; reason: 'missing' | 'unreadable' | 'transient'; sig: string } {
+    const sig = (): string => this.mailBodySig(agentId, id);
+    if ((!isValidMailId(id) && !/^[^\\/:*?"<>|]+$/.test(id)) || id.includes('..')) return { ok: false, reason: 'unreadable', sig: 'invalid' };
+    const inbox = join(this.agentDir(agentId), 'inbox');
+    let transient = false;
+    for (const [path, moved] of [[join(inbox, `${id}.json`), false], [join(inbox, '.done', `${id}.json`), true]] as const) {
+      let raw: string;
+      try {
+        if (statSync(path).size > HiveManager.INBOX_MESSAGE_MAX_BYTES) return { ok: false, reason: 'unreadable', sig: sig() };
+        raw = readFileSync(path, 'utf8');
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+        transient = true;   // EBUSY / EPERM / EACCES / EMFILE ...: try again at the next hook
+        continue;
+      }
+      try {
+        const msg = JSON.parse(raw) as unknown;
+        if (msg && typeof msg === 'object' && !Array.isArray(msg)) return { ok: true, path, msg: msg as Partial<HiveMessage>, moved };
+      } catch { /* unparseable */ }
+      return { ok: false, reason: 'unreadable', sig: sig() };
+    }
+    return { ok: false, reason: transient ? 'transient' : 'missing', sig: sig() };
+  }
+
+  /** The inbox/ and .done/ files of one message (size + mtime, or absent), as one string. */
+  mailBodySig(agentId: string, id: string): string {
+    const inbox = join(this.agentDir(agentId), 'inbox');
+    return [join(inbox, `${id}.json`), join(inbox, '.done', `${id}.json`)].map((p) => {
+      try { const s = statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; }
+    }).join('|');
+  }
+
   private agentDir(id: string): string {
     return join(this.root()!, 'agents', id);
   }
@@ -1712,6 +1754,9 @@ export class HiveManager {
       statusLine: { type: 'command', command: statusCommand, padding: 0 },
       hooks: {
         Stop: [hook()],
+        // ZT-I1-MAIL §11.4: an API error (rate_limit, overloaded, server_error, max_output_tokens)
+        // ends the turn with StopFailure instead of Stop: the mail epoch closes as abnormal.
+        StopFailure: [hook()],
         SubagentStop: [hook()],
         PreToolUse: [hook('*')],
         PostToolUse: [hook('*')],

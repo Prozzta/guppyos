@@ -18,7 +18,41 @@
  * HookServer finish its synchronous Stop response before any submit is attempted.
  * Electron-free; every effect is injected.
  */
-import type { InterferenceHow, ProviderStatus, WakeCause, WakeClaim, WakeMode, WorkerWakeFacts, WorkerWakeWatchdog } from './workerWake';
+import { WORKER_WAKE_IDLE_MS, type InterferenceHow, type ProviderStatus, type WakeCause, type WakeClaim, type WakeMode, type WorkerWakeFacts, type WorkerWakeWatchdog } from './workerWake';
+
+/** §11.10: this many wakes in a row, with no mail block (or no hook traffic at all), degrade. */
+export const MAIL_DEGRADE_AFTER_WAKES = 3;
+
+/**
+ * ZT-I1-MAIL slice 3: the ledger side of the wake path (main wires HookServer + MailLedger in;
+ * absent in deployments and tests that predate the ledger: nothing below runs then).
+ */
+export interface InboxWakeMail {
+  /** The agent's mail channel mode (inject | legacy-read | legacy-move | work-order). */
+  mode(agentId: string): string;
+  /** Codex (§1.1): rollout task_complete for the SAME turn id closes that turn's epoch. */
+  closeTurn(agentId: string, turnId: string): void;
+  /** §1.1 submit-unconfirmed: the epochs opened since the carrying wake's claim end abnormally. */
+  abortSince(agentId: string, since: number): void;
+  /** §1.1 / §11.4 backstop: epochs older than 30 min end abnormally (the bridge applies the idle
+   *  gate). Returns the epochs closed. */
+  closeStale(agentId: string, now: number): string[];
+  /** Does the agent have a surfacing epoch open in the ledger? */
+  hasOpenEpoch(agentId: string): boolean;
+  /** §11.10: switch to legacy-read, log `mail-channel-degraded`, raise the UI alert. */
+  degrade(agentId: string, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): boolean;
+}
+
+/** §11.10: per agent, the wake-by-wake evidence that the mail channel works. */
+interface DegradeWatch {
+  /** COMMITTED wakes since the last hook traffic from the agent (trigger B). */
+  quiet: number;
+  /** Consecutive confirmed wake turns that returned no mail block while their ids waited (A). */
+  streak: number;
+  /** The wake whose turn is being watched. */
+  open: { claimedAt: number; ids: readonly string[]; blocks: number } | null;
+  degraded: boolean;
+}
 
 export interface InboxWakeSubmit {
   requestId: string;
@@ -55,6 +89,8 @@ export interface InboxWakeBridgeDeps {
   /** CODEX-FALSEACTIVE-153: does this agent's provider report its own turn starts? Then
    *  our COMMITTED epoch is provisional until it does. Absent = no (the plain reading). */
   confirmsTurnStart?: (agentId: string) => boolean;
+  /** ZT-I1-MAIL slice 3: the mail ledger's epochs and channel (see InboxWakeMail). */
+  mail?: InboxWakeMail;
 }
 
 export class InboxWakeBridge {
@@ -136,6 +172,7 @@ export class InboxWakeBridge {
           requestId: claim.requestId
         });
         coordinator.settle(claim, kind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
+        if (kind === 'COMMITTED') this.noteMailCommit(agentId, claim);
         this.deps.log?.(`[inbox-wake] ${kind === 'COMMITTED' ? 'commit' : 'release'} ${agentId} cause=${cause} outcome=${kind}`);
       });
     return claim;
@@ -150,7 +187,11 @@ export class InboxWakeBridge {
 
   /** HookServer observation (before its response): record lifecycle, retry after the turn. */
   onHook(agentId: string | undefined, event: string | undefined, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string): void {
+    // §11.10 trigger B: any hook from the agent is hook traffic (the status line is not a hook).
+    if (agentId && event && event !== 'Status') { const w = this.degradeWatch.get(agentId); if (w) w.quiet = 0; }
     const edge = this.deps.coordinator.noteHook(agentId, event, message, this.deps.now(), fullyIdle, turnId);
+    // §11.10 trigger A: the Stop ends the watched wake's turn.
+    if (agentId && event === 'Stop' && fullyIdle !== false) this.endMailWatch(agentId);
     // The lifecycle is sourced ONLY here, from the live hook stream - the one input no
     // in-harness test ever drove. Every hook boundary is recorded so a packaged run shows
     // whether Stop/Notification ever arrive at all, and what the lifecycle became.
@@ -200,6 +241,97 @@ export class InboxWakeBridge {
     }
   }
 
+  // — ZT-I1-MAIL slice 3: epochs and the ledger (§11.3, §11.10, §1.1 backstop) —
+
+  /**
+   * §11.3: a mail epoch of this agent closed (its Stop, a Codex task_complete, or an abnormal end:
+   * StopFailure, an interrupt, a new session, PTY exit/respawn, submit-unconfirmed, the backstop).
+   * Every id a wake announced that the ledger still calls delivered returns to pending ONCE, then
+   * the F4 backoff. HookServer calls this BEFORE it reports the hook itself, so a Stop's own retry
+   * edge picks the re-pended ids up.
+   */
+  onMailEpochClosed(agentId: string, outcome: 'normal' | 'abnormal', reason: string, redelivered: readonly string[] = []): void {
+    if (!agentId) return;
+    const delivered = this.deps.inboxIds(agentId);
+    const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now());
+    if (!r.requeued.length && !r.exhausted.length) return;
+    this.deps.diag?.('wake-repend', { agentId, outcome, reason, requeued: r.requeued.length, redelivered: redelivered.length, ...(r.requeued.length ? { idList: r.requeued } : {}) });
+    if (r.exhausted.length) this.deps.diag?.('wake-ids-exhausted', { agentId, ids: r.exhausted.length, idList: r.exhausted, attempt: r.attempt, retryInMs: r.retryInMs, requeued: r.requeued.length });
+    if (r.requeued.length) this.scheduleWake(agentId, 'hook');
+  }
+
+  /** §11.10: a mail block was returned to this agent (HookServer). */
+  onMailBlock(agentId: string): void {
+    const w = this.degradeWatch.get(agentId);
+    if (w?.open) w.open.blocks += 1;
+  }
+
+  private readonly degradeWatch = new Map<string, DegradeWatch>();
+
+  private degradeFor(agentId: string): DegradeWatch | null {
+    const mail = this.deps.mail;
+    if (!mail) return null;
+    let w = this.degradeWatch.get(agentId);
+    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false }; this.degradeWatch.set(agentId, w); }
+    if (w.degraded) return null;
+    let mode = '';
+    try { mode = mail.mode(agentId); } catch { mode = ''; }
+    return mode === 'inject' ? w : null;
+  }
+
+  /** §11.10 trigger A: the watched wake's turn is over (its Stop, or the next wake). */
+  private endMailWatch(agentId: string): void {
+    const w = this.degradeWatch.get(agentId);
+    const open = w?.open;
+    if (!w || !open) return;
+    w.open = null;
+    if (open.blocks > 0) { w.streak = 0; return; }
+    const facts = this.deps.coordinator.turnFacts(agentId);
+    const confirmed = facts.turnStartAt >= open.claimedAt && open.claimedAt > 0;
+    const pending = new Set(this.deps.inboxIds(agentId));
+    // A wake whose mail already reached the agent another way (a human turn) proves nothing.
+    if (!confirmed || !open.ids.some((id) => pending.has(id))) return;
+    w.streak += 1;
+    if (w.streak >= MAIL_DEGRADE_AFTER_WAKES) this.degrade(agentId, w, 'no-mail-block', { wakes: w.streak });
+  }
+
+  /** §11.10: a wake COMMITTED for this agent. Trigger B counts it; trigger A starts watching it. */
+  private noteMailCommit(agentId: string, claim: WakeClaim): void {
+    const w = this.degradeFor(agentId);
+    if (!w) return;
+    this.endMailWatch(agentId);
+    if (w.degraded) return;
+    w.quiet += 1;
+    w.open = { claimedAt: this.deps.coordinator.turnFacts(agentId).claimedAt, ids: claim.ids, blocks: 0 };
+    if (w.quiet >= MAIL_DEGRADE_AFTER_WAKES) this.degrade(agentId, w, 'zero-hook-traffic', { wakes: w.quiet });
+  }
+
+  private degrade(agentId: string, w: DegradeWatch, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): void {
+    w.degraded = true;
+    w.open = null;
+    let changed = false;
+    try { changed = this.deps.mail?.degrade(agentId, reason, detail) ?? false; } catch { changed = false; }
+    this.deps.diag?.('mail-channel-degraded', { agentId, reason, changed, ...detail });
+  }
+
+  /**
+   * §1.1 / §11.4 last backstop: a surfacing epoch open for 30 minutes with no Stop closes as
+   * abnormal, ONLY while the lifecycle is idle by the existing signals (recorded idle, or unknown
+   * with a quiescent PTY, or no PTY at all): long active turns are never cut. Once per epoch (a
+   * closed epoch is not open any more).
+   */
+  private closeStaleMail(agentId: string): void {
+    const mail = this.deps.mail;
+    if (!mail) return;
+    const now = this.deps.now();
+    const st = this.deps.coordinator.state(agentId);
+    const f = this.deps.facts(agentId);
+    const quiet = !f || (f.lastOutputAt > 0 && now - f.lastOutputAt >= WORKER_WAKE_IDLE_MS);
+    if (!(st.lifecycle === 'idle' || (st.lifecycle === 'unknown' && quiet))) return;
+    const closed = mail.closeStale(agentId, now);
+    if (closed.length) this.deps.diag?.('mail-epoch-stale', { agentId, epochs: closed.length });
+  }
+
   /** Agents a missing/unreadable rollout was already reported for (log once per agent). */
   private readonly rolloutReported = new Set<string>();
 
@@ -213,8 +345,11 @@ export class InboxWakeBridge {
     if (!probeFn) return;
     const st = this.deps.coordinator.state(agentId);
     if (st.lifecycle !== 'active') return;
-    // A provisional epoch is probed with or without mail: its confirmation is a turn START.
-    if (inboxIds.length === 0 && !st.provisional) return;   // nothing waiting: nothing is stuck
+    // A provisional epoch is probed with or without mail: its confirmation is a turn START. So
+    // is a turn with a mail epoch open (ZT-I1-MAIL: its task_complete makes that mail acted).
+    let mailOpen = false;
+    try { mailOpen = this.deps.mail?.hasOpenEpoch(agentId) ?? false; } catch { mailOpen = false; }
+    if (inboxIds.length === 0 && !st.provisional && !mailOpen) return;   // nothing waiting: nothing is stuck
     const probe = probeFn(agentId);
     if (!probe) return;                                      // not a Codex agent
     if (!probe.ok) {
@@ -237,7 +372,13 @@ export class InboxWakeBridge {
       this.deps.diag?.('codex-stuck-active', { agentId, recovered: true, turn: latest.turnId, at: latest.at });
     }
     const closed = this.deps.coordinator.noteProviderTurnEnded(agentId, latest.turnId, latest.at);
-    if (closed) this.deps.diag?.('codex-rollout', { agentId, closed: true, turn: latest.turnId, at: latest.at });
+    if (closed) {
+      this.deps.diag?.('codex-rollout', { agentId, closed: true, turn: latest.turnId, at: latest.at });
+      // §1.1: task_complete for the SAME turn id is a closing source (the ledger epoch is keyed
+      // by that turn id, so a stale completion of an earlier turn can never act this turn's mail).
+      try { this.deps.mail?.closeTurn(agentId, latest.turnId); } catch { /* the ledger logs its own failures */ }
+      this.endMailWatch(agentId);
+    }
   }
 
   /** The reconciliation beat: the same path, in reconcile mode, over every live agent. */
@@ -251,9 +392,15 @@ export class InboxWakeBridge {
         this.deps.coordinator.reconcile(agentId, ids);
         try { this.closeLostCodexTurn(agentId, ids); }
         catch (e) { this.deps.diag?.('codex-rollout', { agentId, closed: false, why: 'probe-threw', error: String(e) }); }
-        // The beat's own lifecycle edges (deferred idle, unconfirmed submit, re-announce),
-        // after the reconcile so ids that left the disk are not re-pended.
+        // The beat's own lifecycle edges (deferred idle, unconfirmed submit, F4 retry), after the
+        // reconcile so ids that are no longer delivered are not re-pended.
+        const claimedAt = this.deps.coordinator.turnFacts(agentId).claimedAt;
         const edge = this.deps.coordinator.beat(agentId, this.deps.now());
+        if (edge && (edge.kind === 'submit-unconfirmed' || edge.kind === 'wake-ids-exhausted') && claimedAt > 0) {
+          // §1.1: submit-unconfirmed ends the carrying wake's epoch abnormally.
+          try { this.deps.mail?.abortSince(agentId, claimedAt); } catch { /* best effort */ }
+        }
+        try { this.closeStaleMail(agentId); } catch { /* best effort */ }
         if (edge) {
           this.deps.diag?.(edge.kind, {
             agentId, ...('ids' in edge ? { ids: edge.ids.length } : {}),

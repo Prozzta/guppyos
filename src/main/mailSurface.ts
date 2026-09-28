@@ -25,8 +25,11 @@ import type { MailChannelOverride, MailEntry, MailObligation } from './mailLedge
 export const MAIL_JOINED_BUDGET = 9_500;
 /** §11.2: under this, the block carries headers only and nothing is marked surfacing. */
 export const MAIL_HEADERS_ONLY_BELOW = 1_500;
-/** §2.1: a single body over the budget is surfaced as its first this-many characters + the path. */
+/** §2.1: a single body over the budget is surfaced as (at most) its first this-many characters + the path. */
 export const MAIL_TRUNCATE_CHARS = 7_000;
+/** Jim audit #3: the truncation fits the budget that is LEFT (header + as much body as fits + the
+ *  path), but never below this many body characters; below it the message waits for a roomier hook. */
+export const MAIL_TRUNCATE_MIN_CHARS = 1_000;
 /** The most messages considered for one hook (bounded work per hook; the rest drip). */
 export const MAIL_BLOCK_MAX_ITEMS = 50;
 /** The most piggyback reminder lines (option B) in one block. */
@@ -36,15 +39,18 @@ const DEFERRED_NAMED_MAX = 10;
 
 /** The HTTP hook timeout Claude applies (mirrors hive.ts HOOK_HTTP_TIMEOUT_S; §11.1). */
 export const MAIL_HTTP_HOOK_TIMEOUT_MS = 30_000;
-/** §11.1: an http / mcp response must leave within timeout − 5 s to count as delivered. */
-export const MAIL_HTTP_LATENCY_LIMIT_MS = MAIL_HTTP_HOOK_TIMEOUT_MS - 5_000;
-/**
- * The command shims (HOOK_SHIM, AGY_HOOK_SHIM) give up after 5 s and print NOTHING, so on the
- * pipe the provider-side budget is the shim's, not the provider's 30 s. The shim also spends its
- * own start-up (~0.1-0.7 s) inside that window. The limit is half of it (a Creed question in NOTES;
- * trivially reversible).
- */
-export const MAIL_PIPE_LATENCY_LIMIT_MS = 2_500;
+/** The command shims (HOOK_SHIM, AGY_HOOK_SHIM) give up after 5 s and print NOTHING, so on the
+ *  pipe the provider-side budget is the shim's, not the provider's 30 s. */
+export const MAIL_PIPE_HOOK_TIMEOUT_MS = 5_000;
+/** §11.18 #9 (Q8 ruling): a response counts as delivered only when it is flushed before the
+ *  transport timeout minus min(5 s, 50% of the timeout). */
+export function mailLatencyLimitFor(timeoutMs: number): number {
+  return timeoutMs - Math.min(5_000, timeoutMs * 0.5);
+}
+/** http / mcp: 30 s − 5 s = 25 s. */
+export const MAIL_HTTP_LATENCY_LIMIT_MS = mailLatencyLimitFor(MAIL_HTTP_HOOK_TIMEOUT_MS);
+/** The pipe: 5 s − 2.5 s = 2.5 s. */
+export const MAIL_PIPE_LATENCY_LIMIT_MS = mailLatencyLimitFor(MAIL_PIPE_HOOK_TIMEOUT_MS);
 /** §11.1 evidence scan: the most bytes read per scan (a bounded window from the claim offset). */
 export const MAIL_EVIDENCE_SCAN_MAX_BYTES = 2 * 1024 * 1024;
 /** Bytes re-read before the claim-time offset (a line in flight when the size was taken). */
@@ -137,13 +143,17 @@ export interface MailBlockInput {
   items: MailBlockItem[];
   /** The mail budget for this hook (`mailBudgetFor`). */
   budget: number;
-  /** turn-start (UserPromptSubmit, AGY's first PreInvocation) or mid-turn (P6 wording). */
-  phase: 'turn-start' | 'mid-turn';
+  /** turn-start (UserPromptSubmit, AGY's first PreInvocation), mid-turn (P6 wording), or compact
+   *  (§11.5: the SessionStart `compact` re-injection of mail already surfaced in this turn). */
+  phase: 'turn-start' | 'mid-turn' | 'compact';
   /** Option B piggyback: open obligations; only shown when the block carries mail anyway. */
   reminders?: MailObligation[];
   /** Pending mail whose body was not read because it cannot fit this hook anyway (bounded work
    *  per hook): always deferred, counted in the "will follow" line, listed in headers-only mode. */
   more?: MailEntry[];
+  /** Q11 (god's ruling): ids that already held the block back at an earlier hook. If they still do
+   *  not fit, they are passed over so that smaller later mail is not blocked for a second hook. */
+  skippable?: ReadonlySet<string>;
 }
 
 export interface MailBlock {
@@ -157,9 +167,12 @@ export interface MailBlock {
   headersOnly: string[];
   /** Ids not in the block at all: they stay delivered and drip into a later hook. */
   deferred: string[];
+  /** Q11: the group that did not fit and held back everything after it at THIS hook (the caller
+   *  passes it back as `skippable` next time). Empty when nothing was held back. */
+  blocked: string[];
 }
 
-const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], headersOnly: [], deferred: [] };
+const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], headersOnly: [], deferred: [], blocked: [] };
 
 function flagsOf(e: MailEntry): string[] {
   const out: string[] = [];
@@ -168,7 +181,7 @@ function flagsOf(e: MailEntry): string[] {
   return out;
 }
 
-function renderItem(it: MailBlockItem, truncate: boolean): string {
+function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_CHARS): string {
   const e = it.entry;
   const lines: string[] = [];
   lines.push(`[${mailMarker(e.id)}] from: ${escapeMailText(e.from)} | act: ${escapeMailText(e.act)} | subject: "${escapeMailText(e.subject)}"`);
@@ -181,7 +194,7 @@ function renderItem(it: MailBlockItem, truncate: boolean): string {
   if (e.legacy && e.surfacedAt == null) lines.push('(delivered before 1.1.75; may already have been handled)');
   const body = escapeMailText(it.body);
   if (truncate) {
-    lines.push('', `${body.slice(0, MAIL_TRUNCATE_CHARS)}`, `[... truncated: ${body.length} characters in total. The full message is in ${escapeMailText(it.path)}]`);
+    lines.push('', `${body.slice(0, Math.max(0, keep))}`, `[... truncated: ${body.length} characters in total. The full message is in ${escapeMailText(it.path)}]`);
   } else {
     lines.push('', body);
   }
@@ -225,7 +238,9 @@ function assemble(phase: MailBlockInput['phase'], rendered: string[], deferred: 
   const n = rendered.length;
   const head = phase === 'mid-turn'
     ? `${n} new message(s) arrived during this turn. Consider these before you send or finish: one may change or cancel what you are doing.`
-    : `Hive mail for you: ${n} message(s), oldest first. The full text of each is below.`;
+    : phase === 'compact'
+      ? `Your context was compacted. ${n} message(s) you already received in this turn, again in full, oldest first:`
+      : `Hive mail for you: ${n} message(s), oldest first. The full text of each is below.`;
   const parts: string[] = ['<hive-mail>', head, '', rendered.join('\n\n---\n\n')];
   if (deferred.length) {
     const named = deferred.slice(0, DEFERRED_NAMED_MAX).map((e) => `[${escapeMailText(e.id)}]`).join(', ');
@@ -288,11 +303,14 @@ function groupItems(items: MailBlockItem[]): MailBlockItem[][] {
 
 /**
  * The `<hive-mail>` block for one hook. Oldest first (supersede pairs kept together), strictly
- * inside `budget`: the first group that does not fit stops the block (later mail never overtakes
- * earlier mail); what is left is deferred and drips into a later hook. A single message too large
- * for the whole budget is truncated to its first MAIL_TRUNCATE_CHARS characters plus its path.
- * Under MAIL_HEADERS_ONLY_BELOW, or when not even the first message fits, the block names headers
- * only and nothing is surfacing.
+ * inside `budget`: the first group that does not fit stops the block (later mail does not overtake
+ * earlier mail at that hook); what is left is deferred and drips into a later hook. Q11: a group
+ * that already held the block back at an earlier hook (`skippable`) and still does not fit is passed
+ * over instead, so a big message never blocks smaller later ones for more than one hook.
+ * A message too large for the WHOLE budget is truncated to fit what is left (Jim audit #3): its
+ * header, as much of its body as fits (at most MAIL_TRUNCATE_CHARS, at least
+ * MAIL_TRUNCATE_MIN_CHARS) and the path of the full file. Under MAIL_HEADERS_ONLY_BELOW, or when
+ * nothing fits, the block names headers only and nothing is surfacing.
  */
 export function buildMailBlock(input: MailBlockInput): MailBlock {
   const sorted = input.items.slice().sort((a, b) => a.entry.seq - b.entry.seq);
@@ -303,49 +321,70 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
   const everything = [...items.map((i) => i.entry), ...more];
   if (!everything.length || input.budget <= 0) return { ...EMPTY, deferred: everything.map((e) => e.id) };
   const budget = input.budget;
+  type Chosen = { it: MailBlockItem; text: string; truncated: boolean };
+  const chosen: Chosen[] = [];
+  const blocked: string[] = [];
   const headersOnly = (): MailBlock => {
     const h = buildMailHeaders(everything, budget);
-    return { text: h.text, surfacing: [], truncated: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)) };
+    return { text: h.text, surfacing: [], truncated: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)), blocked };
   };
   if (!items.length) return headersOnly();
   if (budget < MAIL_HEADERS_ONLY_BELOW) return headersOnly();
 
-  const render = (it: MailBlockItem): { text: string; truncated: boolean } | null => {
-    const full = renderItem(it, false);
-    if (assemble(input.phase, [full], [], []).length <= budget) return { text: full, truncated: false };
-    if (it.body.length <= MAIL_TRUNCATE_CHARS) return null;          // too big for this hook, not over the limit
-    const cut = renderItem(it, true);
-    return assemble(input.phase, [cut], [], []).length <= budget ? { text: cut, truncated: true } : null;
-  };
-
-  const chosen: Array<{ it: MailBlockItem; text: string; truncated: boolean }> = [];
-  const groups = groupItems(items);
-  /** Everything not in the block (so far, plus `extra`): the "will follow" line. */
-  const remaining = (list: typeof chosen): MailEntry[] => {
+  /** Everything not in the block: the "will follow" line. */
+  const remaining = (list: Chosen[]): MailEntry[] => {
     const inBlock = new Set(list.map((c) => c.it.entry.id));
     return [...items.map((x) => x.entry).filter((e) => !inBlock.has(e.id)), ...more];
   };
-  let stop = false;
-  for (let gi = 0; gi < groups.length && !stop; gi++) {
-    const g = groups[gi];
-    const rendered = g.map((it) => ({ it, r: render(it) }));
-    const fits = (list: typeof chosen): boolean =>
-      assemble(input.phase, list.map((c) => c.text), remaining(list), []).length <= budget;
-    if (rendered.every((x) => x.r)) {
-      const add = rendered.map((x) => ({ it: x.it, text: x.r!.text, truncated: x.r!.truncated }));
-      if (fits([...chosen, ...add])) { chosen.push(...add); continue; }
-      // A pair that can never fit together at this budget is placed member by member.
-      if (g.length === 1 || assemble(input.phase, add.map((a) => a.text), [], []).length <= budget) { stop = true; break; }
-    } else if (g.length === 1) { stop = true; break; }
-    for (const x of rendered) {
-      if (!x.r) { stop = true; break; }
-      const add = { it: x.it, text: x.r.text, truncated: x.r.truncated };
-      if (!fits([...chosen, add])) { stop = true; break; }
-      chosen.push(add);
+  const sizeOf = (list: Chosen[]): number => assemble(input.phase, list.map((c) => c.text), remaining(list), []).length;
+  const fits = (list: Chosen[]): boolean => sizeOf(list) <= budget;
+  /** One message placed after `list`: whole when it fits; truncated to what is left when it can
+   *  never fit the whole budget; null when it must wait for a later hook. */
+  const place = (it: MailBlockItem, list: Chosen[]): Chosen | null => {
+    const full = renderItem(it, false);
+    const whole: Chosen = { it, text: full, truncated: false };
+    if (fits([...list, whole])) return whole;
+    if (assemble(input.phase, [full], [], []).length <= budget) return null;   // fits a later hook whole
+    const bodyLen = escapeMailText(it.body).length;
+    const overhead = sizeOf([...list, { it, text: renderItem(it, true, 0), truncated: true }]);
+    const keep = Math.min(MAIL_TRUNCATE_CHARS, bodyLen - 1, budget - overhead);
+    if (keep < MAIL_TRUNCATE_MIN_CHARS) return null;
+    const cut: Chosen = { it, text: renderItem(it, true, keep), truncated: true };
+    return fits([...list, cut]) ? cut : null;
+  };
+
+  const groups = groupItems(items);
+  const skippable = input.skippable ?? new Set<string>();
+  for (const g of groups) {
+    // The group as a whole (supersede pairs together) ...
+    const trial: Chosen[] = [...chosen];
+    let whole = true;
+    for (const it of g) {
+      const c = place(it, trial);
+      if (!c) { whole = false; break; }
+      trial.push(c);
     }
+    if (whole) { chosen.splice(0, chosen.length, ...trial); continue; }
+    // ... or, for a pair that can never fit together at this budget, member by member.
+    const pairFitsSomeHook = g.length > 1 && assemble(input.phase, g.map((it) => renderItem(it, false)), [], []).length <= budget;
+    let placed = 0;
+    if (g.length > 1 && !pairFitsSomeHook) {
+      for (const it of g) {
+        const c = place(it, chosen);
+        if (!c) break;
+        chosen.push(c);
+        placed++;
+      }
+      if (placed === g.length) continue;
+    }
+    const rest = g.slice(placed).map((it) => it.entry.id);
+    // Q11: it held the block back at an earlier hook already: pass over it this time.
+    if (rest.some((id) => skippable.has(id))) continue;
+    blocked.push(...rest);
+    break;
   }
-  // Defensive: never exceed the budget (fits() already guarantees it for the chosen prefix).
-  while (chosen.length && assemble(input.phase, chosen.map((c) => c.text), remaining(chosen), []).length > budget) chosen.pop();
+  // Defensive: never exceed the budget (fits() already guarantees it for the chosen list).
+  while (chosen.length && sizeOf(chosen) > budget) chosen.pop();
   if (!chosen.length) return headersOnly();
   const chosenIds = new Set(chosen.map((c) => c.it.entry.id));
   const deferred = [...items.map((i) => i.entry).filter((e) => !chosenIds.has(e.id)), ...more];
@@ -364,7 +403,8 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
     surfacing: chosen.map((c) => c.it.entry.id),
     truncated: chosen.filter((c) => c.truncated).map((c) => c.it.entry.id),
     headersOnly: [],
-    deferred: deferred.map((e) => e.id)
+    deferred: deferred.map((e) => e.id),
+    blocked
   };
 }
 
