@@ -27,6 +27,14 @@ process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 test.after(() => { for (const [k, v] of Object.entries(realEnv)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } fs.rmSync(JAIL, { recursive: true, force: true }); });
 
 const { AppendFile, rotatedFiles, filesInOrder, APPEND_ROTATE_BYTES, LOG_KEEP_ROTATED } = loadTs('src/main/appendLog.ts');
+
+/** FLAKY-TIMING: wait until `cond()` holds (asynchronous closes landing), polling, up to `maxMs`.
+ *  A fixed sleep failed under load; a condition that never holds still fails, at the deadline. */
+async function until(cond, maxMs = 5000) {
+  const end = Date.now() + maxMs;
+  while (!cond()) { if (Date.now() > end) return false; await new Promise((r) => setTimeout(r, 20)); }
+  return true;
+}
 const { CostLedgerTotals } = loadTs('src/main/costLifetime.ts');
 const { planWakeRow, newWakeRowState, takeFolded, forgetWakeRows } = loadTs('src/main/wakeRowPolicy.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
@@ -100,11 +108,21 @@ test('F1 GATE (Jim\'s probe): with a large pre-existing log, an app append is su
   const big = Buffer.alloc(20 * 1024 * 1024, 0x20); big[big.length - 1] = 0x0a;
   hive.dispose();   // the file is replaced under the manager: a fresh open, as in a new process
   fs.writeFileSync(log, big);
-  const ms = [];
-  for (let i = 0; i < 40; i++) { const t0 = process.hrtime.bigint(); hive.appendLog({ kind: 'probe', i }); ms.push(Number(process.hrtime.bigint() - t0) / 1e6); }
+  // FLAKY-TIMING: the defect was a synchronous read of the whole log on the append path (~390-460
+  // ms at 20 MB). It is checked by what the appends DO, not by how long a busy machine takes:
+  // no byte of the log is read or copied while appending (the 20 MB file is renamed, never read).
+  let readBytes = 0; let copies = 0;
+  const real = { readFileSync: fs.readFileSync, readSync: fs.readSync, copyFileSync: fs.copyFileSync, createReadStream: fs.createReadStream };
+  fs.readFileSync = function (...a) { const r = real.readFileSync.apply(this, a); readBytes += typeof r === 'string' ? Buffer.byteLength(r) : r.length; return r; };
+  fs.readSync = function (...a) { const n = real.readSync.apply(this, a); readBytes += n; return n; };
+  fs.copyFileSync = function (...a) { copies += 1; return real.copyFileSync.apply(this, a); };
+  fs.createReadStream = function (...a) { copies += 1; return real.createReadStream.apply(this, a); };
+  try {
+    for (let i = 0; i < 40; i++) hive.appendLog({ kind: 'probe', i });
+  } finally { Object.assign(fs, real); }
   hive.dispose();
-  ms.sort((a, b) => a - b);
-  assert.ok(ms[20] < 2, `p50 ${ms[20].toFixed(3)} ms`);
+  assert.ok(readBytes < 64 * 1024, `the append path read ${readBytes} bytes (a whole-log read is ${big.length})`);
+  assert.equal(copies, 0, 'nothing copied or streamed on the append path');
   const legacy = rotatedFiles(log).filter((r) => r.legacy);
   assert.equal(legacy.length, 1, 'the 20 MB file went to a legacy file');
   assert.equal(fs.statSync(legacy[0].path).size, big.length, 'every byte of it kept');
@@ -120,8 +138,9 @@ test('F2: rotation at the cap; the live file stays under it; rotated names sort 
   for (let i = 0; i < 120; i++) f.append(JSON.stringify({ i, pad: 'x'.repeat(40) }) + '\n');
   f.close();
   // N2 closes a rotated file asynchronously, and on Windows a pruned file stays listed until
-  // its handle closes. Here rotations come every few rows in ONE tick, so let the closes land.
-  await new Promise((r) => setTimeout(r, 100));
+  // its handle closes. Here rotations come every few rows in ONE tick, so wait for the closes to
+  // land (FLAKY-TIMING: a fixed 100 ms failed under load; a wrong retention still fails at the deadline).
+  await until(() => rotatedFiles(p).filter((r) => !r.legacy).length === 3);
   const rot = rotatedFiles(p);
   assert.equal(rot.filter((r) => r.legacy).length, 1, 'the legacy file is kept');
   assert.equal(fs.readFileSync(rot.find((r) => r.legacy).path, 'utf8'), 'L'.repeat(2000) + '\n', 'byte-identical');
@@ -167,8 +186,10 @@ test('F2 (N2): the rotated file\'s descriptor is closed ASYNCHRONOUSLY (its anti
     assert.equal(syncCloses, 0, 'no synchronous close on the append path');
     f.close();
   } finally { fs.close = realClose; fs.closeSync = realCloseSync; }
-  await new Promise((r) => setTimeout(r, 50));
-  const all = filesInOrder(p).flatMap(rows).map((l) => JSON.parse(l).i);
+  // Wait for the asynchronous closes to land (FLAKY-TIMING: was a fixed 50 ms).
+  const read = () => { try { return filesInOrder(p).flatMap(rows).map((l) => JSON.parse(l).i); } catch { return null; } };
+  await until(() => { const a = read(); return !!a && a.length === 30; });
+  const all = read();
   assert.deepEqual(all, [...Array(30).keys()]);
 });
 
