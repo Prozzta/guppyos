@@ -39,10 +39,13 @@ directories:
 files:
   - out/**
   - package.json
-  # v0.3.4: shipped so the voice get_app_info tool can read release notes.
-  - CHANGELOG.md
   - "!**/*.{md,map,ts,tsx}"
   - "!**/{.eslintrc,.prettierrc,tsconfig*.json,electron.vite.config.*}"
+  # v0.3.4: shipped so the voice get_app_info tool (main 'app:info') can read release notes from
+  # <appPath>/CHANGELOG.md. It MUST come AFTER the md exclude above: electron-builder applies these
+  # patterns in order, so while it sat before "!**/*.md" it was removed again and never shipped
+  # (CHANGELOG-NOT-PACKAGED, 1.1.73). scripts/verify-packaged-changelog.cjs checks the built asar.
+  - CHANGELOG.md
 
 # Ship the standalone Slack reply helper as a plain file under the app's
 # resources dir (process.resourcesPath). It runs under `node`, NOT inside the
