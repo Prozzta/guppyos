@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { AgentProvider } from '../shared/agentProvider';
+import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
@@ -108,7 +109,7 @@ export interface HiveRegistry {
     lastSeen: number;
     archived?: boolean;
     sessionId?: string;
-  }>;
+  } & ModelPinFields>;
 }
 
 /** One row of the consolidated voice read-layer directory (`hive:agentDirectory`):
@@ -141,6 +142,10 @@ export interface AgentDirectoryEntry {
   contextTokens: number | null;
   contextLimit: number | null;
   contextPct: number | null;
+  /** MODEL-PINBACK G3: the model this agent runs as far as main knows (live, else launched,
+   *  else pinned), and the pinned in-TUI switch, if any. Read-only. */
+  effectiveModel: string | null;
+  pinnedModel: string | null;
 }
 
 export interface AgentDirectory {
