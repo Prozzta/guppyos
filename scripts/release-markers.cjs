@@ -24,9 +24,25 @@ if (!root || !modelsDir) { console.error('usage: release-markers.cjs <node_modul
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'resources', 'models', 'native-memory-manifest.json'), 'utf8'));
 const agent = path.join(root, 'node-pty', 'lib', 'conpty_console_list_agent.js');
 const src = fs.existsSync(agent) ? fs.readFileSync(agent, 'utf8') : '';
+const ptyRoot = path.join(root, 'node-pty');
+const ptySource = path.join(ptyRoot, 'src', 'win', 'conpty.cc');
+const ptyPackagePath = path.join(ptyRoot, 'package.json');
+const ptyPackage = fs.existsSync(ptyPackagePath) ? JSON.parse(fs.readFileSync(ptyPackagePath, 'utf8')) : null;
+const raceMarkerPath = path.join(ptyRoot, '.munder-conpty-race-fix.json');
+const raceMarker = fs.existsSync(raceMarkerPath) ? JSON.parse(fs.readFileSync(raceMarkerPath, 'utf8')) : null;
 const findFile = (dir, name) => { const out = []; const walk = (d) => { let es = []; try { es = fs.readdirSync(d, { withFileTypes: true }); } catch { return; } for (const e of es) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (e.name === name) out.push(p); } }; walk(dir); return out; };
 const built = (pkg, name) => findFile(path.join(root, pkg), name).filter((p) => fs.statSync(p).size > 0);
 const sha = (p) => { try { return crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex'); } catch { return null; } };
+const raceBinaryProvenance = () => {
+  if (!raceMarker || !ptyPackage || ptyPackage.version !== '1.1.0' || raceMarker.version !== '1.1.0' || !fs.existsSync(ptySource) || !raceMarker.files || typeof raceMarker.files !== 'object') return false;
+  if (raceMarker.sourceSha256 !== sha(ptySource)) return false;
+  const sourceMtimeMs = fs.statSync(ptySource).mtimeMs;
+  const binaries = [path.join(ptyRoot, 'build', 'Release', 'conpty.node')].filter((p) => fs.existsSync(p) && fs.statSync(p).size > 0);
+  return binaries.length > 0 && binaries.every((p) => {
+    const record = raceMarker.files[path.relative(ptyRoot, p).replaceAll('\\', '/')];
+    return record && record.sha256 === sha(p) && fs.statSync(p).mtimeMs > sourceMtimeMs;
+  });
+};
 const plat = 'win32-x64';
 const vec = manifest.vec0[plat];
 const ort = manifest.ort[plat];
@@ -34,6 +50,8 @@ const checks = [
   ['conpty guard present', src.includes('try { consoleProcessList = getConsoleProcessList(shellPid); } catch (e) { consoleProcessList = []; }')],
   ['unguarded form absent', src.length > 0 && !src.includes('var consoleProcessList = getConsoleProcessList(shellPid);')],
   ['send guard present', src.includes('try { process.send({ consoleProcessList: consoleProcessList }); } catch (e)')],
+  ['node-pty #922 backport source', fs.existsSync(ptySource) && fs.readFileSync(ptySource, 'utf8').includes('std::mutex g_ptyHandlesMutex')],
+  ['conpty race-fix rebuilt binary provenance', raceBinaryProvenance()],
   ['pty.node built', built('node-pty', 'pty.node').length > 0],
   ['conpty.node built', built('node-pty', 'conpty.node').length > 0],
   ['winpty-agent.exe built', built('node-pty', 'winpty-agent.exe').length > 0],
