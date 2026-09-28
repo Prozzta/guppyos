@@ -46,6 +46,7 @@ function launch(dir, ops) {
     '  if (op.op === "read") { const c = m.readConfig(); out.push({ defaultModel: c.defaultModel ?? null, godModel: c.godModel ?? null, flag: c.defaultModelCliMigratedV1 ?? null }); }',
     '  else if (op.op === "write") { m.writeConfig(op.patch); out.push(null); }',
     '  else if (op.op === "take") out.push(m.takeClearedDefaultModel());',
+    '  else if (op.op === "reset") { m.resetConfig(); out.push(null); }',
     '}',
     'process.stdout.write(JSON.stringify(out));'
   ].join('\n');
@@ -116,6 +117,30 @@ test('NEW INSTALL: no defaultModel; a default the user picks before any config.j
   const fresh = mkUserData();
   const l3 = launch(fresh, [{ op: 'read' }]);
   assert.equal(l3[0].defaultModel, null);
+});
+
+// MDC-172-AUDIT D3 / D8 (Jim): the two paths that REPLACE the config must also be born flagged, or
+// a default the user picks afterwards (in the same process, where the latch is already set) is
+// written unflagged and cleared on the next launch.
+test('RESET (D3): a default picked after Reset settings survives the next launch', () => {
+  const dir = mkUserData();
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ defaultModel: 'claude-opus-5', godModel: 'claude-opus-5-5[1m]' }));
+  const l1 = launch(dir, [{ op: 'read' }, { op: 'reset' }, { op: 'write', patch: { defaultModel: 'claude-sonnet-5' } }]);
+  assert.equal(l1[0].defaultModel, null, 'launch 1 clears the saved default once');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).defaultModelCliMigratedV1, true, 'the reset config is flagged on disk');
+  const l2 = launch(dir, [{ op: 'read' }]);
+  assert.equal(l2[0].defaultModel, 'claude-sonnet-5', 'the default picked after the reset is kept');
+});
+
+test('CORRUPT CONFIG (D8): a default picked after the corrupt-config fallback survives the next launch', () => {
+  const dir = mkUserData();
+  fs.writeFileSync(path.join(dir, 'config.json'), '{ this is not json');
+  const l1 = launch(dir, [{ op: 'read' }, { op: 'write', patch: { defaultModel: 'claude-sonnet-5' } }]);
+  assert.equal(l1[0].defaultModel, null, 'the fallback has no defaultModel');
+  const disk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+  assert.equal(disk.defaultModelCliMigratedV1, true, 'the config written after the fallback is flagged');
+  const l2 = launch(dir, [{ op: 'read' }]);
+  assert.equal(l2[0].defaultModel, 'claude-sonnet-5', 'the default picked after the fallback is kept');
 });
 
 test('MAIN: bootstrapHiveServices writes ONE hive log row with the cleared value', () => {
