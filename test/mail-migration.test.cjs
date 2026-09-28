@@ -67,7 +67,12 @@ async function floor(t) {
   for (let i = 0; i < 3; i++) writeMsg(dir('meredith-1', 'inbox'), `m${i}`, { subject: `for meredith ${i}` });
   writeMsg(dir('meredith-1', 'inbox', '.done'), 'm-old');
   fs.writeFileSync(dir('andy-1', 'memory.md'), LESSONS);
-  hive.setArchived('meredith-1', true);
+  // Archived the 1.1.74 way (the flag only, no reason, nothing moved): since df70e4 a 1.1.75
+  // explicit setArchived would already set her mail aside.
+  const regPath = path.join(root, 'registry.json');
+  const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+  reg.agents['meredith-1'].archived = true;
+  fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
   // A clean slate: no ledger was written by the setup (ensureAgent does not touch mail).
   hive.mail.dispose();
   for (const f of fs.existsSync(path.join(root, 'state', 'mail')) ? fs.readdirSync(path.join(root, 'state', 'mail')) : []) fs.rmSync(path.join(root, 'state', 'mail', f), { recursive: true, force: true });

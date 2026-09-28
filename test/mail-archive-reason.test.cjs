@@ -233,17 +233,94 @@ test('0f1672: restoring meredith returns her .undelivered files to inbox/ and th
   assert.ok(hive.logTail(5000).some((r) => r.kind === 'mail' && r.stage === 'delivered' && r.reason === 'undelivered-restored' && r.id === 'p0'));
 });
 
-test('0f1672: a returning file whose name is taken (inbox, .done or the ledger) gets a fresh <stem>.N; nothing is overwritten', async (t) => {
+test('0f1672: a returning file whose name is taken (inbox, .done or an acted entry) gets a fresh <stem>.N; nothing is overwritten', async (t) => {
   const { hive, dir, files } = await floor(t);
   writeMsg(dir('pam-1', 'inbox', '.undelivered'), 'dup', { subject: 'the returning one' });
   writeMsg(dir('pam-1', 'inbox', '.undelivered'), 'done-dup', { subject: 'returning 2' });
+  // While pam is active (an orphan archive moves nothing), a live 'dup' arrives and a 'done-dup' is handled.
+  hive.setArchived('pam-1', true, 'orphan');
   hive.send({ id: 'dup', to: 'pam-1', act: 'inform', subject: 'the live one', body: 'live' }, 'god-1');
   writeMsg(dir('pam-1', 'inbox', '.done'), 'done-dup');
-  hive.setArchived('pam-1', true);
   hive.setArchived('pam-1', false);
   assert.deepEqual(files('pam-1'), ['done-dup.1.json', 'dup.1.json', 'dup.json']);
   assert.equal(JSON.parse(fs.readFileSync(dir('pam-1', 'inbox', 'dup.json'), 'utf8')).subject, 'the live one');
   assert.equal(hive.mail.ledger('pam-1').entries['dup.1'].subject, 'the returning one');
+  assert.equal(hive.mail.ledger('pam-1').entries.dup.subject, 'the live one');
+});
+
+// ————————————————————————————————————————————————— df70e4 / 016ccd: every explicit archive sets mail aside
+
+test('df70e4: a post-upgrade EXPLICIT archive with 2 unread moves both to .undelivered/ and reports them; restore returns both exactly once', async (t) => {
+  const { hive, root, files, rows, restore, pending } = await floor(t);
+  hive.migrateMail();                                  // the upgrade is done (marker written)
+  assert.equal(fs.existsSync(path.join(root, 'state', 'mail', 'migration.json')), true);
+  hive.send({ id: 'u1', to: 'pam-1', act: 'request', subject: 'one', body: 'b1', requires_reply: true }, 'jim-1');
+  hive.send({ id: 'u2', to: 'pam-1', act: 'inform', subject: 'two', body: 'b2' }, 'god-1');
+  hive.mail.claimSurfacing('pam-1', ['u2'], 'turn-1', 'UserPromptSubmit');   // surfacing, not acted
+  hive.setArchived('pam-1', true);                     // tab kill / Human archive
+  assert.deepEqual(files('pam-1'), []);
+  assert.deepEqual(files('pam-1', '.undelivered'), ['u1.json', 'u2.json']);
+  const rep = hive.undeliveredReport();
+  assert.deepEqual(rep.items.map((i) => `${i.agentId}/${i.id}/${i.subject}`), ['pam-1/u1/one', 'pam-1/u2/two']);
+  assert.equal(rep.seenAt, null, 'the banner shows');
+  assert.equal(rows('mail-undelivered-set-aside').length, 1);
+  // The banner: dismissed once; a later explicit archive with NEW items shows it again.
+  assert.equal(hive.markUndeliveredSeen(), true);
+  await restore('pam-1');
+  assert.deepEqual(files('pam-1'), ['u1.json', 'u2.json'], 'both back under their own names');
+  assert.deepEqual(files('pam-1', '.undelivered'), []);
+  const e = hive.mail.ledger('pam-1').entries;
+  assert.deepEqual([e.u1.state, e.u2.state], ['delivered', 'delivered'], 'the surfacing one is back to delivered');
+  assert.deepEqual(pending('pam-1'), ['u1', 'u2']);
+  assert.deepEqual(hive.mail.openRequests('pam-1').map((o) => o.entry.id), ['u1']);
+  assert.equal(hive.undeliveredReport().items.length, 0);
+  await restore('pam-1');
+  hive.setArchived('pam-1', false);
+  assert.equal(rows('mail-undelivered-restored').length, 1, 'exactly once');
+  assert.deepEqual(files('pam-1'), ['u1.json', 'u2.json']);
+  // Archived again with new mail: the report gets the new items and the banner shows again.
+  hive.send({ id: 'u3', to: 'pam-1', act: 'inform', subject: 'three', body: 'b3' }, 'god-1');
+  hive.setArchived('pam-1', true);
+  const again = hive.undeliveredReport();
+  assert.equal(again.seenAt, null);
+  assert.deepEqual(again.items.map((i) => i.id).sort(), ['u1', 'u2', 'u3']);
+});
+
+test('df70e4: an orphan or pty-exit archive moves nothing', async (t) => {
+  const { hive, files, rows } = await floor(t);
+  hive.send({ id: 'k1', to: 'pam-1', act: 'inform', subject: 'k', body: 'b' }, 'god-1');
+  hive.send({ id: 'k2', to: 'jim-1', act: 'inform', subject: 'k', body: 'b' }, 'god-1');
+  hive.setArchived('pam-1', true, 'orphan');
+  hive.setArchived('jim-1', true, 'pty-exit');
+  assert.deepEqual(files('pam-1'), ['k1.json']);
+  assert.deepEqual(files('jim-1'), ['k2.json']);
+  assert.deepEqual(files('pam-1', '.undelivered'), []);
+  assert.deepEqual(files('jim-1', '.undelivered'), []);
+  assert.equal(hive.undeliveredReport(), null);
+  assert.equal(rows('mail-undelivered-set-aside').length, 0);
+});
+
+test('df70e4: archiving twice is idempotent (no second move, no new report item, banner stays dismissed); an upgrade from orphan sets aside', async (t) => {
+  const { hive, files, rows } = await floor(t);
+  hive.send({ id: 'i1', to: 'pam-1', act: 'inform', subject: 'i', body: 'b' }, 'god-1');
+  hive.setArchived('pam-1', true, 'orphan');
+  assert.deepEqual(files('pam-1'), ['i1.json'], 'orphan: kept');
+  hive.setArchived('pam-1', true);                     // the Human archives the orphaned card: explicit
+  assert.deepEqual(files('pam-1', '.undelivered'), ['i1.json']);
+  hive.markUndeliveredSeen();
+  const before = JSON.stringify(hive.undeliveredReport());
+  hive.setArchived('pam-1', true);
+  hive.setArchived('pam-1', true);
+  assert.deepEqual(files('pam-1', '.undelivered'), ['i1.json']);
+  assert.equal(JSON.stringify(hive.undeliveredReport()), before, 'the report is unchanged and stays seen');
+  assert.equal(rows('mail-undelivered-set-aside').length, 1);
+  // The same code path as the migration: setArchived calls mailMigration.setAsideUndelivered,
+  // which is moveUndelivered + the directory-built report.
+  const mig = codeOnly(readSource('src/main/mailMigration.ts'), 'mailMigration.ts');
+  const fn = mig.slice(mig.indexOf('export function setAsideUndelivered('), mig.indexOf('export function runMailMigration('));
+  assert.match(fn, /const r = moveUndelivered\(root, agentId\);\s*mergeUndeliveredReport\(root, listUndelivered\(root, agentId, now\), now\);/);
+  assert.match(mig, /moveUndelivered\(root, a\.id\)/);
+  assert.match(mig, /mergeUndeliveredReport\(root, moved, now\)/);
 });
 
 test('WIRING (Q31 pin): the migration runs BEFORE the orphan sweep, reads explicit archives, and the sweep records orphan', async (t) => {

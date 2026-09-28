@@ -30,7 +30,7 @@ import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
 import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
-import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
+import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
@@ -1467,7 +1467,10 @@ export class HiveManager {
       if (archived) this.hookBroker?.revoke(id);
       if (!agent) return;
       if (archived) {
-        if (agent.archived === true && (reason !== 'explicit' || archivedForMail(agent))) return;
+        if (agent.archived === true && (reason !== 'explicit' || archivedForMail(agent))) {
+          if (reason === 'explicit') this.setAsideUndelivered(id);   // idempotent re-check
+          return;
+        }
         agent.archived = true;
         agent.archiveReason = reason;
       } else {
@@ -1479,7 +1482,30 @@ export class HiveManager {
       this.atomicWriteJson(join(root, 'registry.json'), reg);
       this.appendLog({ kind: 'archive', agentId: id, archived, ...(archived ? { reason } : {}) });
       if (!archived) this.restoreUndelivered(id);
+      else if (reason === 'explicit') this.setAsideUndelivered(id);
     } catch { /* best-effort — never crash a lifecycle handler */ }
+  }
+
+  /**
+   * God df70e4 / 016ccd: an EXPLICIT archive sets the agent's unread inbox files aside exactly as
+   * the §7.1 step-2 migration does (mailMigration.setAsideUndelivered: the same moveUndelivered and
+   * directory-built report; the banner re-shows for new items). Orphan and pty-exit archives move
+   * nothing. The agent's ledger is left as it is: its not-acted entries keep their ids, nothing
+   * reads pending for an archived agent (no PTY, no wake, no fleet ledger backlog), and the restore
+   * gives each file its own name back (restoreUndelivered). Logged; never throws.
+   */
+  setAsideUndelivered(id: string): number {
+    const root = this.root();
+    if (!root || !isValidMailId(id)) return 0;
+    try {
+      const r = setAsideUndelivered(root, id);
+      if (r.moved) this.appendLog({ kind: 'mail-undelivered-set-aside', agentId: id, count: r.moved });
+      if (r.errors.length) this.appendLog({ kind: 'mail-undelivered-set-aside-error', agentId: id, errors: r.errors.slice(0, 5) });
+      return r.moved;
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-undelivered-set-aside-error', agentId: id, error: String(e).slice(0, 300) }); } catch { /* noop */ }
+      return 0;
+    }
   }
 
   /**
@@ -1498,9 +1524,14 @@ export class HiveManager {
       if (!existsSync(join(root, 'agents', id, 'inbox', UNDELIVERED_DIR))) return [];
       if (!this.mail.hasAgent(id)) return [];
       this.mail.ledger(id);
-      const moved = restoreUndeliveredFiles(root, id, (stem) => !!this.mail.ledger(id).entries[stem]);
+      // df70e4: a NOT-acted entry of the same stem is this very message (set aside by an explicit
+      // archive after 1.1.75): it takes its name back and its entry is reused; an acted one is not.
+      const moved = restoreUndeliveredFiles(root, id, (stem) => this.mail.ledger(id).entries[stem]?.state === 'acted');
       if (!moved.length) return [];
       const ids = this.mail.admitRestored(id, moved.map((m) => m.id));
+      // An entry still surfacing/surfaced from before the archive goes back to delivered (re-shown).
+      const open = moved.map((m) => m.id).filter((m) => { const st = this.mail.ledger(id).entries[m]?.state; return st === 'surfacing' || st === 'surfaced'; });
+      if (open.length) this.mail.redeliver(id, open, 'undelivered-restored');
       try { dropUndeliveredItems(root, id, moved.map((m) => m.file)); } catch { /* the report is informational */ }
       this.appendLog({ kind: 'mail-undelivered-restored', agentId: id, count: moved.length, ids: moved.map((m) => m.id).slice(0, 50) });
       return ids;

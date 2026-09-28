@@ -247,6 +247,38 @@ export function dropUndeliveredItems(root: string, agentId: string, files: reado
   return true;
 }
 
+/**
+ * The undelivered report merges by agent + file, so a re-run after a crash never loses items. It is
+ * written only when an item is new; new items reset `seenAt` (the banner shows again), otherwise a
+ * report the Human already saw stays seen. Returns the report's items.
+ */
+function mergeUndeliveredReport(root: string, listed: readonly UndeliveredItem[], now: number): UndeliveredItem[] {
+  const prior = readUndeliveredReport(root);
+  const items: UndeliveredItem[] = prior?.items ?? [];
+  const key = (i: UndeliveredItem): string => `${i.agentId}|${i.file}`;
+  const seen = new Set(items.map(key));
+  const fresh = listed.filter((i) => !seen.has(key(i)));
+  if (!fresh.length) return items;
+  mkdirSync(join(root, 'state', 'mail'), { recursive: true });
+  atomicWriteJson(join(root, MAIL_UNDELIVERED_REPORT), {
+    version: 1, createdAt: prior?.createdAt ?? now, updatedAt: now, seenAt: null, items: [...items, ...fresh]
+  } satisfies UndeliveredReport);
+  return [...items, ...fresh];
+}
+
+/**
+ * God df70e4 / 016ccd: an EXPLICIT archive after the upgrade runs the migration's own §7.1 step 2
+ * for that agent: moveUndelivered (inbox/*.json → inbox/.undelivered/) and the report built from
+ * the directory. Idempotent (a second call finds nothing new). Returns the files moved on this
+ * call (their original stems) and any per-file errors; throws only when the report cannot be written.
+ */
+export function setAsideUndelivered(root: string, agentId: string, now: number = Date.now()): { moved: number; errors: string[] } {
+  if (!isValidMailId(agentId)) return { moved: 0, errors: [] };
+  const r = moveUndelivered(root, agentId);
+  mergeUndeliveredReport(root, listUndelivered(root, agentId, now), now);
+  return r;
+}
+
 // ————————————————————————————————————————————————————————————————— the pass
 
 /**
@@ -299,22 +331,7 @@ export function runMailMigration(deps: MailMigrationDeps): MailMigrationResult {
   }
   deps.mail.flushAll();
 
-  // The undelivered report merges by agent + id, so a re-run after a crash never loses items.
-  const reportPath = join(root, MAIL_UNDELIVERED_REPORT);
-  const prior = readUndeliveredReport(root);
-  let undelivered: UndeliveredItem[] = prior?.items ?? [];
-  if (moved.length) {
-    const key = (i: UndeliveredItem): string => `${i.agentId}|${i.file}`;
-    const seen = new Set(undelivered.map(key));
-    const fresh = moved.filter((i) => !seen.has(key(i)));
-    undelivered = [...undelivered, ...fresh];
-    atomicWriteJson(reportPath, {
-      version: 1, createdAt: prior?.createdAt ?? now, updatedAt: now,
-      // New items are shown again; a report the Human already saw stays seen otherwise.
-      seenAt: fresh.length ? null : prior?.seenAt ?? null,
-      items: undelivered
-    } satisfies UndeliveredReport);
-  }
+  const undelivered = mergeUndeliveredReport(root, moved, now);
 
   const report: MigrationReport = { version: 1, at: now, agents: rows, lessons };
   atomicWriteJson(join(root, MAIL_MIGRATION_REPORT), report);

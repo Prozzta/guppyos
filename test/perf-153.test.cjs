@@ -267,7 +267,8 @@ test('NO-GIT: a new hive, agents, mail (send + outbox routing), tasks, role, ren
   });
   assert.deepEqual(calls, [], 'no git process of any kind');
   assert.equal(fs.existsSync(path.join(home, 'hive', '.git')), false, 'a new hive is not git-initialised');
-  assert.equal(fs.readdirSync(path.join(home, 'hive', 'agents', 'b2', 'inbox')).filter((f) => f.endsWith('.json')).length, 6, 'and the mail was delivered');
+  // df70e4: the explicit archive of b2 at the end set its unread mail aside in inbox/.undelivered/.
+  assert.equal(fs.readdirSync(path.join(home, 'hive', 'agents', 'b2', 'inbox', '.undelivered')).filter((f) => f.endsWith('.json')).length, 6, 'and the mail was delivered');
   assert.ok(fs.existsSync(path.join(home, 'hive', 'tasks.json')));
 });
 
