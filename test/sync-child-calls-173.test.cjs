@@ -412,7 +412,8 @@ function fakeDeps(platform, out, onDisk, env = {}) {
 test('lookupCommandAsync (win32): async `where`, no shell, first PATHEXT hit (never the extensionless sh-shim)', async () => {
   const { calls, d } = fakeDeps('win32', () => 'C:\\npm\\claude\r\nC:\\npm\\claude.cmd\r\n', ['C:\\npm\\claude', 'C:\\npm\\claude.cmd'], { PATHEXT: '.COM;.EXE;.BAT;.CMD' });
   assert.deepEqual(await R.lookupCommandAsync('claude', d), { path: 'C:\\npm\\claude.cmd', found: true });
-  assert.deepEqual(calls.map((c) => [c.file, c.args, c.opts.timeout, c.opts.windowsHide, c.opts.shell]), [['where', ['claude'], 3000, true, undefined]]);
+  assert.deepEqual(calls.map((c) => [c.file, c.args, c.opts.timeout, c.opts.windowsHide, c.opts.shell]), [['where', ['claude'], 0, true, undefined]],
+    'win32: execFile timeout 0 - execP runs the 3 s time box itself and kills the TREE on expiry');
   const miss = fakeDeps('win32', () => Object.assign(new Error('exit 1'), { code: 1 }), ['C:\\AppData\\npm\\codex.cmd'], { APPDATA: 'C:\\AppData' });
   assert.deepEqual(await R.lookupCommandAsync('codex', miss.d), { path: 'C:\\AppData\\npm\\codex.cmd', found: true }, 'the install-dir candidates still apply');
   const none = fakeDeps('win32', () => '', [], {});
@@ -459,4 +460,25 @@ test('PtyManager.isCommandAvailable / commandPath go through the injectable asyn
   assert.equal(await pm.commandPath('codex'), 'C:\\npm\\codex.cmd');
   assert.equal(await pm.commandPath('agy'), null);
   assert.deepEqual(asked, ['codex', 'agy', 'codex', 'agy']);
+});
+
+test('ONE exec primitive: a hung `where` in the app resolver gets the MODELS-173 tree-safe time box (async taskkill /T /F)', async () => {
+  const P = loadTs('src/main/providerModels.ts');
+  assert.equal(P.TREE_KILL_TIMEOUT_MS, R.TREE_KILL_TIMEOUT_MS, 'providerModels re-exports the shared constant');
+  const calls = [];
+  const d = {
+    platform: 'win32', env: {}, exists: () => false,
+    exec: (file, args, opts, cb) => {
+      calls.push({ file, args, timeout: opts.timeout });
+      if (file === 'taskkill') { setImmediate(() => cb(null, 'SUCCESS')); return { pid: 2 }; }
+      return { pid: 4242 }; // `where` hangs: never calls back
+    }
+  };
+  const realSetTimeout = global.setTimeout;
+  global.setTimeout = (fn, ms, ...a) => realSetTimeout(fn, ms === 3000 ? 5 : ms, ...a); // shrink the 3 s box
+  let r;
+  try { r = await R.lookupCommandAsync('claude', d); } finally { global.setTimeout = realSetTimeout; }
+  assert.deepEqual(r, { path: 'claude', found: false }, 'a timed-out lookup is a miss');
+  assert.deepEqual(calls[0], { file: 'where', args: ['claude'], timeout: 0 }, 'win32: execFile timeout 0, execP times the run');
+  assert.deepEqual(calls[1], { file: 'taskkill', args: ['/PID', '4242', '/T', '/F'], timeout: R.TREE_KILL_TIMEOUT_MS });
 });
