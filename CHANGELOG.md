@@ -11,6 +11,62 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.70] — 2026-09-28
+
+**Quitting the app no longer crashes, and a new HISTORY tab shows each agent's conversation.**
+Rollback: 1.1.69 (reinstall).
+
+### Fixed
+
+- **Quitting the app no longer crashes.** The crash at the very end of a quit came from a race
+  inside the terminal library (node-pty) on Windows: a terminal's exit notice could still be
+  delivered while the terminal was being torn down. 1.1.68 made the app wait for its terminals
+  before quitting, which made the crash rarer but did not remove it. The race is now fixed in the
+  terminal library itself (a backport of the upstream node-pty fix #922), which is built into the
+  app.
+- **An agent is never restarted into another agent's conversation.** When two agents worked in
+  the same folder, the conversation an agent would resume after a restart could switch to
+  another agent's, every half minute, and usage could be counted against the wrong agent. An
+  agent's own hooks now decide which conversation is its own; a restart never resumes a
+  conversation another agent owns, and usage is counted for the agent that ran it. This also
+  holds for Claude Code's background sessions, which can run with another agent's settings: each
+  agent's start-up hook now names the agent itself.
+- **A model you switch inside an agent's terminal is kept.** When you change an agent's model
+  with `/model` in its terminal, the agent now starts on that model again after a restart. When
+  the agent's CLI falls back to another model by itself, the panel shows that model marked
+  `[auto]`, and it is not kept: the next start uses the model you chose.
+- **The agent panel shows the model the agent really runs**, not only the one it was started
+  with.
+- **Codex configs stay valid** when the user's own Codex config writes its `[tui]` or `[features]`
+  settings on one line (`tui = { ... }`) or as dotted keys (`tui.something = ...`).
+- **The test suite no longer fails on a busy machine.** Tests that depended on how fast the
+  machine was now check what the code does instead; the full suite passes with 0 failures.
+
+### Added
+
+- **A read-only HISTORY tab beside TERMINAL.** It shows an agent's conversation as its provider
+  recorded it (Claude, Codex or Antigravity), from the provider's own transcript. It is bounded:
+  it shows the most recent part first, and "Load older" fetches more.
+- **Codex agents are woken with a short line.** A Codex agent with new mail is now woken with one
+  short line instead of a long nudge, so its conversation is not filled with repeated
+  instructions.
+
+### Good to know
+
+- **Before starting 1.1.70, stop Claude Code's background service** (it can keep old agent
+  sessions running with the wrong agent's settings):
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.70.
+- On the first start after updating, a conversation that two agents both claimed is resumed by
+  neither of them; each starts on its own previous conversation, or fresh. You can restart an
+  agent with its session id (Add Agent) to continue a specific conversation.
+- Antigravity runs some model ids as a different model without saying so: an agent set to
+  "Gemini 3.5 Flash" is actually run as "Gemini 3.8 Flash (High)". The agent panel shows the model
+  it really runs.
+
 ## [1.1.69] — 2026-09-28
 
 **Codex agents' usage readings stay current again, and resizing a Codex terminal no longer floods it.**
