@@ -210,3 +210,41 @@ test('MAIN WIRING: onOverLimit kills via recoverRendererForMemory and logs rende
   assert.match(idx, /recoveryPolicies\.set\(wcId, recovery\.policy\);\s*win\.once\('closed', \(\) => \{ recoveryPolicies\.delete\(wcId\); \}\);/);
   assert.doesNotMatch(idx, /takeHeapSnapshot/, 'no full heap snapshot (it would freeze and double a GB heap)');
 });
+
+// RPROF Finding 2 (Andy, on the real trigger): the ROW alone must name the loop.
+test('RPROF-2 (b): paused frames resolve their url through scriptId and keep line:col', async () => {
+  const d = fakeDbg({ 'Debugger.pause': () => { setTimeout(() => d.emit('Debugger.paused', { callFrames: [{ functionName: 'read$1', url: '', location: { scriptId: '7', lineNumber: 4, columnNumber: 2 } }] }), 5); return {}; } });
+  const probe = new R.RendererProbe(d);
+  await probe.arm();
+  d.emit('Debugger.scriptParsed', { scriptId: '7', url: 'file:///C:/app/out/renderer/assets/index-abc.js' });
+  const r = await probe.capture({ sampleMs: 60, write: async () => null });
+  assert.equal(r.profile, 'ok', JSON.stringify(r));
+  assert.equal(r.stack[0], 'read$1 index-abc.js:5:3');
+});
+
+test('RPROF-2 (c): several paused stacks per capture (a busy renderer), and the app frames across them', async () => {
+  const d = fakeDbg();
+  const probe = new R.RendererProbe(d);
+  await probe.arm();
+  const r = await probe.capture({ sampleMs: 90, write: async () => null });
+  assert.ok(r.stacks.length >= R.PROFILE_STACKS, `stacks: ${r.stacks.length}`);
+  assert.deepEqual(r.stackApp[0], { fn: 'spin app.js:10', stacks: r.stacks.length });
+  assert.equal(d.cmds.filter((m) => m === 'Debugger.pause').length, d.cmds.filter((m) => m === 'Debugger.resume').length, 'every extra pause is resumed');
+});
+
+test('RPROF-2 (a): top 25 by default, plus an app-only list without React internals and pseudo frames', () => {
+  const nodes = [{ id: 1, callFrame: { functionName: '(root)', url: '', lineNumber: -1 }, hitCount: 0, children: [2] },
+    { id: 2, callFrame: { functionName: 'commitRootImpl', url: 'index.js', lineNumber: 0 }, hitCount: 50, children: [3] },
+    { id: 3, callFrame: { functionName: 'subscribe$5', url: 'index.js', lineNumber: 47 }, hitCount: 5, children: [4] },
+    { id: 4, callFrame: { functionName: 'read$1', url: 'index.js', lineNumber: 28 }, hitCount: 3 },
+    { id: 5, callFrame: { functionName: '(program)', url: '', lineNumber: -1 }, hitCount: 40 }];
+  for (let i = 0; i < 30; i++) nodes.push({ id: 100 + i, callFrame: { functionName: `f${i}`, url: 'index.js', lineNumber: i }, hitCount: 100 });
+  nodes[0].children.push(5, ...nodes.slice(5).map((x) => x.id));
+  const s = R.summarizeCpuProfile({ nodes });
+  assert.equal(R.PROFILE_TOP_N, 25);
+  assert.equal(s.self.length, 25);
+  const app = s.app.map((e) => e.fn);
+  assert.ok(!app.some((f) => /^commitRootImpl|^\(program\)/.test(f)), 'no React internals, no pseudo frames');
+  assert.ok(R.isAppFrame('read$1') && R.isAppFrame('runawayAllocator') && !R.isAppFrame('performSyncWorkOnRoot') && !R.isAppFrame('(anonymous)'));
+  assert.deepEqual(R.appFramesAcross([['read$1 index.js:29', 'commitRootImpl index.js:1'], ['read$1 index.js:29']]), [{ fn: 'read$1 index.js:29', stacks: 2 }]);
+});

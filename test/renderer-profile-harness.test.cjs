@@ -59,6 +59,11 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     assert.ok(b.profile.ms <= 5_500, `time-boxed: ${b.profile.ms} ms`);
     assert.ok(b.fileNodes > 0, 'the .cpuprofile was written and parses');
     assert.ok(b.worstGapMs < 1_000, `main never blocked: worst gap ${b.worstGapMs} ms`);
+    // RPROF Finding 2: the ROW alone names the loop, with locations.
+    assert.match(b.profile.stack[0], /^runawayAllocator busy\.html:\d+:\d+$/, 'the paused frame has file:line:col');
+    assert.ok(b.profile.stacks.length >= 3, `several paused stacks: ${b.profile.stacks.length}`);
+    assert.ok(b.profile.stackApp[0].fn.startsWith('runawayAllocator') && b.profile.stackApp[0].stacks === b.profile.stacks.length, `in every stack: ${JSON.stringify(b.profile.stackApp)}`);
+    assert.ok(b.profile.topApp.some((e) => e.fn.startsWith('runawayAllocator')), `the app-only list names it: ${JSON.stringify(b.profile.topApp)}`);
   });
 
   await t.test('busy + NOT armed (the 1.1.67 situation): times out at arm, gives up, detaches', () => {
@@ -74,6 +79,7 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     const i = r.idle;
     assert.equal(i.profile.profile, 'ok', JSON.stringify(i.profile));
     assert.equal(i.profile.stack, null);
+    assert.equal(i.profile.stacks, undefined, 'no extra pauses spent on an idle renderer');
     assert.equal(i.answers, 'pong', 'not left paused');
     assert.equal(i.attachedAfter, true, 'the armed session stays for the next spike');
   });

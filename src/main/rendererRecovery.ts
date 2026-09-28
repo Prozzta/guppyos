@@ -174,24 +174,46 @@ export const PROFILE_SAMPLE_MS = 3_000;
 export const PROFILE_PAUSE_WAIT_MS = 1_000;
 export const PROFILE_MAX_BYTES = 8 * 1024 * 1024;
 export const PROFILE_SAMPLING_US = 1_000;
+/** RPROF Finding 2 (a): the loop's own functions ranked 10-17 on the real trigger; 25 keeps them. */
+export const PROFILE_TOP_N = 25;
+/** RPROF Finding 2 (c): paused stacks per capture (one is a single sample). */
+export const PROFILE_STACKS = 3;
 
-interface CpuProfileNode { id: number; callFrame: { functionName: string; url: string; lineNumber: number }; hitCount?: number; children?: number[] }
+interface CpuProfileNode { id: number; callFrame: { functionName: string; url: string; lineNumber: number; columnNumber?: number }; hitCount?: number; children?: number[] }
 
 /** "fn file.js:12" for a DevTools call frame (lines are 0-based in the protocol). */
-function frameName(f: { functionName?: string; url?: string; lineNumber?: number; location?: { lineNumber?: number } }): string {
+function frameName(f: { functionName?: string; url?: string; lineNumber?: number; columnNumber?: number; location?: { lineNumber?: number; columnNumber?: number } }): string {
   const fn = f.functionName || '(anonymous)';
   const file = (f.url || '').split(/[\\/]/).pop() || '';
   const line = typeof f.lineNumber === 'number' ? f.lineNumber : f.location?.lineNumber;
-  return file ? `${fn} ${file}:${typeof line === 'number' ? line + 1 : '?'}` : fn;
+  const col = typeof f.columnNumber === 'number' ? f.columnNumber : f.location?.columnNumber;
+  // RPROF Finding 2 (b): line:col everywhere, so a frame can be mapped through the sourcemap.
+  return file ? `${fn} ${file}:${typeof line === 'number' ? line + 1 : '?'}${typeof col === 'number' ? `:${col + 1}` : ''}` : fn;
+}
+
+/**
+ * RPROF Finding 2 (a): frames that are not the app's own code. The renderer bundle is one file
+ * (React included), so the URL cannot tell them apart: a vendor path does, where there is one,
+ * and otherwise React's scheduler/reconciler/commit entry points by name. It is a heuristic for
+ * the `topApp` list only; the unfiltered lists are kept beside it.
+ */
+const PSEUDO_FRAME = /^\((program|idle|root|garbage collector|anonymous)\)/;
+const VENDOR_URL = /node_modules|[\\/](react-dom|react|scheduler)[.\-]/;
+const REACT_INTERNAL = /^(commit[A-Z]\w*|performSyncWorkOnRoot|performConcurrentWorkOnRoot|performWorkOnRoot\w*|performUnitOfWork|workLoop\w*|beginWork\w*|completeWork\w*|completeUnitOfWork|renderWithHooks|renderRoot\w*|reconcile\w*|updateFunctionComponent|updateMemoComponent|updateSimpleMemoComponent|mountIndeterminateComponent|flush\w*|invokePassive\w*|recursivelyTraverse\w*|scheduleUpdateOnFiber|dispatchSetState|dispatchReducerAction|batchedUpdates\w*|processRootSchedule\w*|ensureRootIsScheduled|performWorkUntilDeadline|runWithFiberInDEV|callCallback\w*|invokeGuardedCallback\w*|checkIfSnapshotChanged|subscribeToStore|updateStoreInstance|mountSyncExternalStore|updateSyncExternalStore|forceStoreRerender)\b/;
+export function isAppFrame(name: string, url = ''): boolean {
+  if (PSEUDO_FRAME.test(name)) return false;
+  if (url && VENDOR_URL.test(url)) return false;
+  return !REACT_INTERNAL.test(name);
 }
 
 /** Self and inclusive sample counts per function, top `n` of each, from a CPU profile. */
-export function summarizeCpuProfile(profile: { nodes: CpuProfileNode[] }, n = 8): { samples: number; self: Array<{ fn: string; pct: number }>; inclusive: Array<{ fn: string; pct: number }> } {
+export function summarizeCpuProfile(profile: { nodes: CpuProfileNode[] }, n = PROFILE_TOP_N): { samples: number; self: Array<{ fn: string; pct: number }>; inclusive: Array<{ fn: string; pct: number }>; app: Array<{ fn: string; pct: number }> } {
   const byId = new Map(profile.nodes.map((x) => [x.id, x]));
   const parent = new Map<number, number>();
   for (const x of profile.nodes) for (const c of x.children ?? []) parent.set(c, x.id);
   const self = new Map<string, number>();
   const incl = new Map<string, number>();
+  const app = new Map<string, number>();
   let samples = 0;
   for (const x of profile.nodes) {
     const hits = x.hitCount ?? 0;
@@ -207,11 +229,12 @@ export function summarizeCpuProfile(profile: { nodes: CpuProfileNode[] }, n = 8)
       if (seen.has(fn)) continue; // recursion counts once per sample
       seen.add(fn);
       incl.set(fn, (incl.get(fn) ?? 0) + hits);
+      if (isAppFrame(node.callFrame.functionName || '(anonymous)', node.callFrame.url)) app.set(fn, (app.get(fn) ?? 0) + hits);
     }
   }
   const top = (m: Map<string, number>) => [...m].sort((a, b) => b[1] - a[1]).slice(0, n)
     .map(([fn, h]) => ({ fn, pct: samples ? Math.round((h / samples) * 1000) / 10 : 0 }));
-  return { samples, self: top(self), inclusive: top(incl).filter((e) => e.fn !== '(root)') };
+  return { samples, self: top(self), inclusive: top(incl).filter((e) => e.fn !== '(root)'), app: top(app) };
 }
 
 /**
@@ -261,6 +284,7 @@ export class RendererProbe {
 
   constructor(private readonly dbg: ProbeDebugger, private readonly deps: { devToolsOpen?: () => boolean } = {}) {
     dbg.on('message', (_e, method, params) => {
+      if (method === 'Debugger.scriptParsed') { this.noteScript(params); return; }
       if (method === 'Debugger.resumed') { this.paused = false; return; }
       if (method !== 'Debugger.paused') return;
       this.paused = true;
@@ -273,6 +297,21 @@ export class RendererProbe {
   }
 
   isArmed(): boolean { return this.armed; }
+
+  /** RPROF Finding 2 (b): scriptId -> url, from Debugger.scriptParsed (a paused frame often
+   *  carries an empty url). Bounded; cleared if a page ever parses an absurd number of scripts. */
+  private readonly scriptUrls = new Map<string, string>();
+  private noteScript(params: unknown): void {
+    const p = params as { scriptId?: unknown; url?: unknown } | null;
+    if (!p || typeof p.scriptId !== 'string' || typeof p.url !== 'string' || !p.url) return;
+    if (this.scriptUrls.size >= 20_000) this.scriptUrls.clear();
+    this.scriptUrls.set(p.scriptId, p.url);
+  }
+
+  /** A paused event's frames as "fn file:line:col", the url resolved through the scriptId. */
+  private stackOf(p: { callFrames?: Array<{ functionName?: string; url?: string; location?: { scriptId?: string; lineNumber?: number; columnNumber?: number } }> }): string[] {
+    return (p.callFrames ?? []).slice(0, 15).map((f) => frameName({ ...f, url: f.url || (f.location?.scriptId ? this.scriptUrls.get(f.location.scriptId) : '') || '' }));
+  }
 
   /** Attach and enable Debugger + Performance, on a HEALTHY page. Idempotent; false on failure. */
   arm(timeoutMs = PROBE_ARM_TIMEOUT_MS): Promise<boolean> {
@@ -305,13 +344,13 @@ export class RendererProbe {
   }
 
   /** Pause and wait for OUR paused event (at most waitMs). null when no JS was running. */
-  private async pauseNow(waitMs: number, deadline: number): Promise<{ callFrames?: Array<{ functionName?: string; url?: string; location?: { lineNumber?: number } }> } | null> {
+  private async pauseNow(waitMs: number, deadline: number): Promise<{ callFrames?: Array<{ functionName?: string; url?: string; location?: { scriptId?: string; lineNumber?: number; columnNumber?: number } }> } | null> {
     const got = new Promise<unknown>((r) => { this.expectPause = r; });
     const sent = await raceUntil(this.dbg.sendCommand('Debugger.pause'), deadline);
     if (sent === 'timeout') { this.expectPause = null; throw new Error('pause-send'); }
     const p = await raceUntil(got, Math.min(deadline, Date.now() + waitMs));
     if (p === 'timeout') { this.expectPause = null; return null; } // a late hit is resumed as foreign
-    return p as { callFrames?: Array<{ functionName?: string; url?: string; location?: { lineNumber?: number } }> };
+    return p as { callFrames?: Array<{ functionName?: string; url?: string; location?: { scriptId?: string; lineNumber?: number; columnNumber?: number } }> };
   }
 
   private async resume(deadline: number): Promise<void> {
@@ -320,7 +359,7 @@ export class RendererProbe {
   }
 
   /** The spike look. Resolves with the row fields; never throws, never leaves the page paused. */
-  async capture(opts: { write: (json: string) => Promise<string | null>; timeoutMs?: number; sampleMs?: number; pauseWaitMs?: number; maxBytes?: number }): Promise<Record<string, unknown>> {
+  async capture(opts: { write: (json: string) => Promise<string | null>; timeoutMs?: number; sampleMs?: number; pauseWaitMs?: number; maxBytes?: number; stacks?: number }): Promise<Record<string, unknown>> {
     const t0 = Date.now();
     const deadline = t0 + (opts.timeoutMs ?? PROFILE_TIMEOUT_MS);
     const pauseWait = opts.pauseWaitMs ?? PROFILE_PAUSE_WAIT_MS;
@@ -337,7 +376,11 @@ export class RendererProbe {
 
       stage = 'pause';
       const p = await this.pauseNow(pauseWait, deadline);
-      out.stack = p ? (p.callFrames ?? []).slice(0, 15).map(frameName) : null;
+      out.stack = p ? this.stackOf(p) : null;
+      // RPROF Finding 2 (c): one paused stack is ONE sample (on the real trigger it twice landed in
+      // React's commit code). More are taken during the profile window, and the app frames across
+      // all of them are counted.
+      const stacks: string[][] = p ? [out.stack as string[]] : [];
       if (p) {
         const heap = await raceUntil(this.dbg.sendCommand('Runtime.getHeapUsage') as Promise<{ usedSize: number; totalSize: number }>, deadline);
         if (heap !== 'timeout') { out.jsHeapUsedMb = Math.round(heap.usedSize / 104857.6) / 10; out.jsHeapTotalMb = Math.round(heap.totalSize / 104857.6) / 10; }
@@ -355,10 +398,21 @@ export class RendererProbe {
       await this.resume(deadline);
       // Leave room for the second pause and the stop reply inside the deadline.
       const sampleMs = Math.max(0, Math.min(opts.sampleMs ?? PROFILE_SAMPLE_MS, deadline - Date.now() - pauseWait - 750));
-      await new Promise((r) => setTimeout(r, sampleMs));
+      const sampleEnd = Date.now() + sampleMs;
+      // Extra paused stacks, spread over the window; only for a renderer that is running JS (the
+      // first pause answered) - an idle one would spend a pause wait on each for nothing.
+      const extra = p ? (opts.stacks ?? PROFILE_STACKS) - 1 : 0;
+      for (let i = 1; i <= extra; i++) {
+        const at = sampleEnd - sampleMs + Math.round((sampleMs * i) / (extra + 1));
+        await new Promise((r) => setTimeout(r, Math.max(0, at - Date.now())));
+        const pi = await this.pauseNow(Math.min(pauseWait, 300), deadline);
+        if (pi) { stacks.push(this.stackOf(pi)); await this.resume(deadline); }
+      }
+      await new Promise((r) => setTimeout(r, Math.max(0, sampleEnd - Date.now())));
 
       stage = 'profile-stop';
       const p2 = await this.pauseNow(pauseWait, deadline); // busy: stop needs the nested loop; idle: it answers anyway
+      if (p2) stacks.push(this.stackOf(p2));
       const stopped = await raceUntil(this.dbg.sendCommand('Profiler.stop') as Promise<{ profile: { nodes: CpuProfileNode[] } }>, deadline);
       if (p2) await this.resume(deadline);
       if (stopped === 'timeout') throw new Error('profiler-stop');
@@ -368,13 +422,28 @@ export class RendererProbe {
       const maxBytes = opts.maxBytes ?? PROFILE_MAX_BYTES;
       let file: string | null = null;
       if (json.length <= maxBytes) { try { file = await opts.write(json); } catch { file = null; } }
-      return { ...out, profile: 'ok', ms: Date.now() - t0, sampledMs: sampleMs, samples: summary.samples, topSelf: summary.self, topInclusive: summary.inclusive, file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
+      return { ...out, profile: 'ok', ms: Date.now() - t0, sampledMs: sampleMs, samples: summary.samples, topSelf: summary.self, topInclusive: summary.inclusive, topApp: summary.app,
+        ...(stacks.length ? { stacks, stackApp: appFramesAcross(stacks) } : {}), file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       this.giveUp(); // detach resumes; the next page load re-arms
       return { ...out, profile: /^(pause-send|resume|profiler-start|profiler-stop)$/.test(why) ? 'timeout' : 'failed', stage, error: why, ms: Date.now() - t0, gaveUp: true };
     }
   }
+}
+
+/** RPROF Finding 2 (c): app frames across several paused stacks, most frequent first (each
+ *  function counted once per stack). "fn file:line:col" -> the number of stacks it appears in. */
+export function appFramesAcross(stacks: string[][]): Array<{ fn: string; stacks: number }> {
+  const n = new Map<string, number>();
+  for (const st of stacks) {
+    for (const fr of new Set(st)) {
+      const name = fr.split(' ')[0];
+      if (!isAppFrame(name, fr)) continue;
+      n.set(fr, (n.get(fr) ?? 0) + 1);
+    }
+  }
+  return [...n].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([fn, c]) => ({ fn, stacks: c }));
 }
 
 function raceMs<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
