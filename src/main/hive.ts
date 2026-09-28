@@ -707,7 +707,7 @@ export class HiveManager {
    */
   mailBody(agentId: string, id: string):
     | { ok: true; path: string; msg: Partial<HiveMessage>; moved: boolean }
-    | { ok: false; reason: 'missing' | 'unreadable' | 'transient'; sig: string } {
+    | { ok: false; reason: 'missing' | 'unreadable' | 'transient' | 'set-aside'; sig: string } {
     const sig = (): string => this.mailBodySig(agentId, id);
     if ((!isValidMailId(id) && !/^[^\\/:*?"<>|]+$/.test(id)) || id.includes('..')) return { ok: false, reason: 'unreadable', sig: 'invalid' };
     const inbox = join(this.agentDir(agentId), 'inbox');
@@ -729,6 +729,9 @@ export class HiveManager {
       } catch { /* unparseable */ }
       return { ok: false, reason: 'unreadable', sig: sig() };
     }
+    // God db52b8: set aside by an explicit archive (inbox/.undelivered/): not missing. Skipped
+    // until the restore brings it back.
+    if (!transient && existsSync(join(inbox, UNDELIVERED_DIR, `${id}.json`))) return { ok: false, reason: 'set-aside', sig: sig() };
     return { ok: false, reason: transient ? 'transient' : 'missing', sig: sig() };
   }
 
@@ -1499,6 +1502,16 @@ export class HiveManager {
     if (!root || !isValidMailId(id)) return 0;
     try {
       const r = setAsideUndelivered(root, id);
+      // God db52b8: in the same step, every not-acted ledger entry whose file is now in
+      // .undelivered/ is marked set-aside, so a still-live session (an explicit archive without a
+      // teardown: the IPC or the voice action) neither surfaces it, nor finds it "missing", nor
+      // acts it at its Stop.
+      try {
+        if (this.mail.hasAgent(id)) {
+          const stems = readdirSync(join(root, 'agents', id, 'inbox', UNDELIVERED_DIR)).filter((n) => n.endsWith('.json') && !n.includes('.tmp')).map((n) => n.slice(0, -'.json'.length));
+          this.mail.setAside(id, stems, true);
+        }
+      } catch { /* no .undelivered/ (nothing set aside) */ }
       if (r.moved) this.appendLog({ kind: 'mail-undelivered-set-aside', agentId: id, count: r.moved });
       if (r.errors.length) this.appendLog({ kind: 'mail-undelivered-set-aside-error', agentId: id, errors: r.errors.slice(0, 5) });
       return r.moved;
@@ -1528,6 +1541,8 @@ export class HiveManager {
       // archive after 1.1.75): it takes its name back and its entry is reused; an acted one is not.
       const moved = restoreUndeliveredFiles(root, id, (stem) => this.mail.ledger(id).entries[stem]?.state === 'acted');
       if (!moved.length) return [];
+      // God db52b8: the returned entries are no longer set aside.
+      this.mail.setAside(id, moved.map((m) => m.id), false);
       const ids = this.mail.admitRestored(id, moved.map((m) => m.id));
       // An entry still surfacing/surfaced from before the archive goes back to delivered (re-shown).
       const open = moved.map((m) => m.id).filter((m) => { const st = this.mail.ledger(id).entries[m]?.state; return st === 'surfacing' || st === 'surfaced'; });

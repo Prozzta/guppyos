@@ -102,6 +102,54 @@ async function world(t, { providers = {}, confirms = () => true, probe = null, g
   return w;
 }
 
+// ————————————————————————————————————————————————— god db52b8: explicit archive of a LIVE session
+
+test('db52b8: an explicit archive while the PTY is still live (IPC / voice, no teardown), then a hook and a Stop: set aside, no body-missing, no banner, no rename; restore returns each exactly once under its own id', async (t) => {
+  const w = await world(t, { providers: { 'cl-1': 'claude' } });
+  const inbox = path.join(w.hive.root(), 'agents', 'cl-1', 'inbox');
+  const ls = (...p) => { try { return fs.readdirSync(path.join(inbox, ...p)).filter((n) => n.endsWith('.json')).sort(); } catch { return []; } };
+  const m1 = w.send('cl-1', { subject: 'one', body: 'surfaced before the archive' });
+  assert.deepEqual(markersIn(w.ctx(w.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' }))), [m1.id]);
+  w.confirm('cl-1');
+  assert.equal(w.entry('cl-1', m1.id).state, 'surfaced');
+  const m2 = w.send('cl-1', { subject: 'two', body: 'delivered mid-turn' });
+  assert.equal(w.entry('cl-1', m2.id).state, 'delivered');
+  // The explicit archive WITHOUT a teardown: the session is still live.
+  w.hive.setArchived('cl-1', true);
+  assert.deepEqual(ls(), [], 'both files set aside');
+  assert.deepEqual(ls('.undelivered'), [`${m1.id}.json`, `${m2.id}.json`].sort());
+  assert.ok(w.entry('cl-1', m1.id).setAsideAt && w.entry('cl-1', m2.id).setAsideAt, 'marked set-aside in the same step');
+  assert.deepEqual(w.hive.mail.pending('cl-1').map((e) => e.id), [], 'not pending while set aside');
+  // A later hook of the live session, then its Stop.
+  const post = w.ctx(w.fire('cl-1', 'PostToolUse', {}));
+  assert.deepEqual(markersIn(post), [], 'nothing surfaced from .undelivered/');
+  w.fire('cl-1', 'Stop');
+  w.hive.mail.flushAll();
+  assert.equal(w.entry('cl-1', m1.id).state, 'surfaced', 'never acted at the Stop');
+  assert.equal(w.entry('cl-1', m2.id).state, 'delivered', 'never closed as missing');
+  assert.ok(!w.entry('cl-1', m2.id).missingAt && !w.entry('cl-1', m1.id).missingAt);
+  for (const kind of ['mail-body-missing', 'mail-archive-failed']) assert.deepEqual(w.rows(kind), [], `no ${kind} row`);
+  assert.ok(!w.rows('mail').some((r) => r.stage === 'acted'), 'no acted row');
+  assert.ok(!w.hive.integrityIssues().some((i) => i.error === 'mail-body-missing'), 'no false banner');
+  assert.deepEqual(ls('.done'), [], 'nothing renamed into .done');
+  // Restore: both come back once, under their own ids, delivered and pending (m1 with the marker).
+  w.hive.setArchived('cl-1', false);
+  assert.deepEqual(ls(), [`${m1.id}.json`, `${m2.id}.json`].sort(), 'own names, no <stem>.N');
+  assert.deepEqual(ls('.undelivered'), []);
+  for (const m of [m1, m2]) {
+    const e = w.entry('cl-1', m.id);
+    assert.deepEqual({ state: e.state, setAside: e.setAsideAt ?? null }, { state: 'delivered', setAside: null });
+  }
+  assert.deepEqual(w.hive.mail.pending('cl-1').map((e) => e.id).sort(), [m1.id, m2.id].sort());
+  assert.equal(Object.keys(w.hive.mail.ledger('cl-1').entries).filter((id) => id.startsWith(m1.id) || id.startsWith(m2.id)).length, 2, 'exactly one entry each');
+  const again = w.ctx(w.fire('cl-1', 'UserPromptSubmit', { prompt: 'back' }));
+  assert.deepEqual(markersIn(again).sort(), [m1.id, m2.id].sort(), 'each surfaced once after the restore');
+  w.confirm('cl-1');
+  w.fire('cl-1', 'Stop');
+  assert.equal(w.entry('cl-1', m1.id).state, 'acted');
+  assert.equal(w.entry('cl-1', m2.id).state, 'acted');
+});
+
 // ————————————————————————————————————————————————— the ledger's epochs at Stop (§1.1, §11.1)
 
 test('Stop: a surfaced id becomes acted ONLY for the epoch that Stop closes; the harness then moves its file to .done', async (t) => {

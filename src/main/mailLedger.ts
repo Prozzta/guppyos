@@ -147,6 +147,11 @@ export interface MailEntry {
   parseFails?: number;
   parseFailSince?: number | null;
   parseFailSig?: string | null;
+  /** God db52b8: an explicit archive moved this entry's file into inbox/.undelivered/ (possibly
+   *  while its PTY was still live). A set-aside entry is not pending, is never surfaced, never
+   *  closed by an epoch (acted or back-edged), never body-missing; the restore clears it and the
+   *  entry is delivered again under its own id. Absent/null = not set aside. */
+  setAsideAt?: number | null;
   /** Set by a back-edge; the next surfacing carries the "re-delivered" marker. Cleared on confirm. */
   redelivered: boolean;
   /** §7.1: delivered before 1.1.75 (or with no ledger evidence); marker until first confirmed. */
@@ -405,7 +410,7 @@ export function applyMarkActed(doc: MailLedgerDoc, ids: Iterable<string>, epoch:
   const done: string[] = [];
   for (const id of ids) {
     const e = d.doc.entries[id];
-    if (!e || e.state !== 'surfaced' || e.epoch !== epoch) continue;
+    if (!e || e.state !== 'surfaced' || e.epoch !== epoch || e.setAsideAt) continue;
     const next: MailEntry = { ...e, state: 'acted', actedAt: now, updatedAt: now };
     d.put(next);
     d.event(next, 'acted', false);
@@ -462,7 +467,7 @@ export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode
   const done: string[] = [];
   for (const id of ids) {
     const e = d.doc.entries[id];
-    if (!e || e.state !== 'delivered' || e.via !== 'inbox' || done.includes(id)) continue;
+    if (!e || e.state !== 'delivered' || e.via !== 'inbox' || done.includes(id) || e.setAsideAt) continue;
     const next: MailEntry = { ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null };
     d.put(next);
     d.event(next, 'acted', false, opts.reason ?? mode);
@@ -487,7 +492,7 @@ export function applyLegacyActed(doc: MailLedgerDoc, ids: Iterable<string>, mode
  */
 export function applyBodyMissing(doc: MailLedgerDoc, id: string, why: string, now: number): MailStep {
   const e = doc.entries[id];
-  if (!e || e.via !== 'inbox' || e.state !== 'delivered') return unchanged(doc);
+  if (!e || e.via !== 'inbox' || e.state !== 'delivered' || e.setAsideAt) return unchanged(doc);
   const d = new Draft(doc, now);
   const next: MailEntry = {
     ...e, state: 'acted', actedAt: now, updatedAt: now, epoch: null, hookKind: null, surfacingAt: null,
@@ -515,7 +520,7 @@ export const MAIL_MISSING_UNPARSEABLE = 'unparseable';
  */
 export function applyParseFailed(doc: MailLedgerDoc, id: string, sig: string, now: number): MailStep {
   const e = doc.entries[id];
-  if (!e || e.via !== 'inbox' || e.state !== 'delivered') return unchanged(doc);
+  if (!e || e.via !== 'inbox' || e.state !== 'delivered' || e.setAsideAt) return unchanged(doc);
   const fresh = e.parseFailSig !== sig || !e.parseFails || e.parseFailSince == null;
   const fails = fresh ? 1 : (e.parseFails ?? 0) + 1;
   const since = fresh ? now : e.parseFailSince!;
@@ -580,7 +585,9 @@ export type EpochOutcome = 'normal' | 'abnormal';
  * Idempotent: a second close of the same epoch finds nothing open.
  */
 export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: EpochOutcome, now: number, opts: { reason?: string; late?: Iterable<string>; lateDetail?: Record<string, MailLateDetail> } = {}): MailStep {
-  const open = Object.values(doc.entries).filter((e) => e.epoch === epoch && (e.state === 'surfacing' || e.state === 'surfaced')).sort(bySeq);
+  // God db52b8: a set-aside entry (its file is in inbox/.undelivered/) is left exactly as it is:
+  // never acted, never renamed, never back-edged; the restore returns it (restoreUndelivered).
+  const open = Object.values(doc.entries).filter((e) => e.epoch === epoch && (e.state === 'surfacing' || e.state === 'surfaced') && !e.setAsideAt).sort(bySeq);
   if (!open.length) return unchanged(doc);
   if (outcome === 'abnormal') {
     const d = new Draft(doc, now);
@@ -709,7 +716,22 @@ export function aliasesIn(doc: MailLedgerDoc, ref: string): string[] {
 
 /** Coordinator pending: `delivered`, arrival order. */
 export function pendingEntries(doc: MailLedgerDoc): MailEntry[] {
-  return Object.values(doc.entries).filter((e) => e.state === 'delivered').sort(bySeq);
+  return Object.values(doc.entries).filter((e) => e.state === 'delivered' && !e.setAsideAt).sort(bySeq);
+}
+
+/**
+ * God db52b8: mark (`on`) or clear the set-aside flag of these not-acted entries. Marking happens
+ * in the same step as the explicit archive's move into inbox/.undelivered/; clearing, in the
+ * restore that moves the files back. No state change, no row (the hive logs the move itself).
+ */
+export function applySetAside(doc: MailLedgerDoc, ids: Iterable<string>, on: boolean, now: number): MailStep {
+  const d = new Draft(doc, now);
+  for (const id of ids) {
+    const e = d.doc.entries[id];
+    if (!e || e.state === 'acted' || !!e.setAsideAt === on) continue;
+    d.put({ ...e, setAsideAt: on ? now : null, updatedAt: now });
+  }
+  return d.step();
 }
 
 /** fleet `inboxBacklog` (§3 #6): not acted. Work orders are acted by definition (N2). */
@@ -743,7 +765,7 @@ export interface OpenEpoch { epoch: string; since: number; ids: string[] }
 export function openEpochsOf(doc: MailLedgerDoc): OpenEpoch[] {
   const by = new Map<string, OpenEpoch>();
   for (const e of Object.values(doc.entries).sort(bySeq)) {
-    if ((e.state !== 'surfacing' && e.state !== 'surfaced') || !e.epoch) continue;
+    if ((e.state !== 'surfacing' && e.state !== 'surfaced') || !e.epoch || e.setAsideAt) continue;
     const cur = by.get(e.epoch) ?? { epoch: e.epoch, since: e.surfacingAt ?? e.updatedAt, ids: [] };
     cur.since = Math.min(cur.since, e.surfacingAt ?? e.updatedAt);
     cur.ids.push(e.id);
@@ -1382,6 +1404,13 @@ export class MailLedger {
   legacyActed(agentId: string, ids: Iterable<string>, mode: 'legacy-read' | 'legacy-move', opts: { epoch?: string | null; reason?: string } = {}): string[] {
     const st = this.state(agentId);
     return this.commit(st, applyLegacyActed(st.doc, ids, mode, this.now(), opts)).changed;
+  }
+
+  /** God db52b8: mark / clear set-aside entries (see applySetAside). Returns the ids changed. */
+  setAside(agentId: string, ids: Iterable<string>, on: boolean): string[] {
+    if (!this.hasAgent(agentId)) return [];
+    const st = this.state(agentId);
+    return this.commit(st, applySetAside(st.doc, ids, on, this.now())).changed;
   }
 
   /** Q15: close a delivered id whose body is in neither inbox/ nor .done/ (see applyBodyMissing).

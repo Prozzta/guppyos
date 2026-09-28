@@ -1246,7 +1246,8 @@ export class HookServer {
     let got: ReturnType<HiveManager['mailBody']>;
     try { got = read.call(this.hive, agentId, id); } catch { return null; }
     if (!got.ok) {
-      if (got.reason === 'transient') return null;
+      // God db52b8: set aside by an explicit archive: never missing, never counted, not remembered.
+      if (got.reason === 'transient' || got.reason === 'set-aside') return null;
       try { this.hive.mail?.noteBodyMissing(agentId, id, got.reason); } catch { /* best effort */ }
       if (got.reason === 'missing') {
         // Q15 (god's ruling): in NEITHER place is terminal and persisted (acted, reason
