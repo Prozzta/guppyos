@@ -227,3 +227,83 @@ test('J2 (Jim): the agent cannot forge its own inbox, its .done or any state fil
   }
   assert.equal(denied(s, 'Write', { file_path: path.join(s.agent, 'outbox', 'reply.json'), content: '{}' }), null, 'the outbox reply stays ALLOWED');
 });
+
+test('FAIL CLOSED (Dwight): an injected lstat failure inside a search root DENIES the search (the entry is never walked); the same root is ALLOWED without it', (t) => {
+  const s = sandbox(t);
+  const sub = path.join(s.work, 'sub');
+  fs.mkdirSync(path.join(sub, 'deeper'), { recursive: true });
+  fs.writeFileSync(path.join(sub, 'deeper', 'a.txt'), 'x');
+  // Control: the clean root is searchable.
+  assert.equal(denied(s, 'Grep', { pattern: 'x', path: s.work }), null, 'ALLOW control');
+  assert.equal(denied(s, 'Glob', { pattern: '**/*.txt' }, s.work), null, 'ALLOW control (default path)');
+  const orig = fs.lstatSync;
+  let walkedInto = false;
+  const origReaddir = fs.readdirSync;
+  fs.lstatSync = function (p, ...rest) {
+    if (path.resolve(String(p)).toLowerCase() === path.resolve(sub).toLowerCase()) { const e = new Error('EPERM (injected lstat)'); e.code = 'EPERM'; throw e; }
+    return orig.call(fs, p, ...rest);
+  };
+  fs.readdirSync = function (p, ...rest) {
+    if (path.resolve(String(p)).toLowerCase() === path.resolve(sub).toLowerCase()) walkedInto = true;
+    return origReaddir.call(fs, p, ...rest);
+  };
+  try {
+    const why = denied(s, 'Grep', { pattern: 'x', path: s.work });
+    assert.ok(why, 'DENIED on an lstat failure');
+    assert.match(why, /cannot inspect .*sub.*EPERM/);
+    assert.ok(denied(s, 'Glob', { pattern: '**/*.txt' }, s.work), 'DENIED with the default path too');
+    assert.ok(denied(s, 'LS', { path: s.work }));
+    assert.equal(walkedInto, false, 'the unproven entry was never walked');
+  } finally { fs.lstatSync = orig; fs.readdirSync = origReaddir; }
+  assert.equal(denied(s, 'Grep', { pattern: 'x', path: s.work }), null, 'ALLOW again once lstat works');
+});
+
+test('FAIL CLOSED: a dangling link or junction, an unlistable root, or a root that does not exist is DENIED, never resolved lexically', (t) => {
+  const s = sandbox(t);
+  // A junction whose target is gone: lstat works, realpath fails. Writing "through" it must be denied.
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'md-lb-dangle-'));
+  const link = path.join(s.work, 'dangling');
+  let made = false;
+  try { fs.symlinkSync(target, link, 'junction'); made = true; } catch { /* junctions unavailable */ }
+  fs.rmSync(target, { recursive: true, force: true });
+  if (made) {
+    assert.ok(denied(s, 'Write', { file_path: path.join(link, 'x.txt'), content: 'x' }), 'Write through a dangling junction');
+    assert.ok(denied(s, 'Read', { file_path: path.join(link, 'x.txt') }), 'Read through a dangling junction');
+    assert.ok(denied(s, 'Write', { file_path: link, content: 'x' }), 'Write onto the dangling junction itself');
+  }
+  // realOf refuses an existing path it cannot resolve (injected realpath failure on an existing file).
+  const hook = require(HOOK);
+  const f = path.join(s.work, 'b3-bulk.txt');
+  const origRp = fs.realpathSync.native;
+  fs.realpathSync.native = function (p, ...rest) { if (path.resolve(String(p)).toLowerCase() === f.toLowerCase()) { const e = new Error('EACCES (injected realpath)'); e.code = 'EACCES'; throw e; } return origRp.call(fs.realpathSync, p, ...rest); };
+  try {
+    assert.equal(hook.realOf(f), null, 'an existing path that cannot be resolved is null, not its lexical form');
+    assert.ok(denied(s, 'Read', { file_path: f }), 'and the Read is denied');
+  } finally { fs.realpathSync.native = origRp; }
+  assert.equal(denied(s, 'Read', { file_path: f }), null, 'ALLOW control');
+  // Only a proven-missing component is resolved through its parent (a new file in the outbox).
+  assert.equal(denied(s, 'Write', { file_path: path.join(s.agent, 'outbox', 'new-dir', 'r.json'), content: '{}' }), null);
+  // A search root that does not exist, or cannot be listed, is denied.
+  assert.ok(denied(s, 'Grep', { pattern: 'x', path: path.join(s.work, 'nope') }), 'a missing search root');
+  const origReaddir = fs.readdirSync;
+  fs.readdirSync = function (p, ...rest) { if (path.resolve(String(p)).toLowerCase() === s.work.toLowerCase()) { const e = new Error('EIO (injected)'); e.code = 'EIO'; throw e; } return origReaddir.call(fs, p, ...rest); };
+  try { assert.ok(denied(s, 'LS', { path: s.work }), 'an unlistable root'); } finally { fs.readdirSync = origReaddir; }
+});
+
+test('SOURCE: every catch in the jail hook denies (or is the non-deciding evidence log)', () => {
+  const src = fs.readFileSync(HOOK, 'utf8');
+  const catches = src.match(/catch \{[^}]*\}|catch \(e\) \{[^}]*\}/g) || [];
+  const ok = [
+    /catch \(e\) \{ missing = !!e && e\.code === 'ENOENT'; \}/,          // realOf: only a PROVEN-missing component is skipped
+    /catch \(e\) \{ return `cannot list /,                                // searchRootProblem: deny
+    /catch \(e\) \{ return `cannot inspect /,                             // searchRootProblem: deny
+    /catch \(e\) \{\s*verdict = `the jail hook failed closed/,            // main: deny
+    /catch \{ \/\* evidence is best effort; the decision is not \*\/ \}/  // the log line only
+  ];
+  const realOfCatch = src.slice(src.indexOf('function realOf('), src.indexOf('const key ='));
+  assert.match(realOfCatch, /if \(!missing\) return null;/, 'realOf: anything but ENOENT is null (denied)');
+  for (const c of catches) {
+    if (/^catch \{\s*$/.test(c) || c === 'catch {\n      let missing = false;') continue;
+    assert.ok(ok.some((re) => re.test(c)) || /^catch \{\s*let missing/.test(c.replace(/\s+/g, ' ')), `an unreviewed catch: ${c}`);
+  }
+});

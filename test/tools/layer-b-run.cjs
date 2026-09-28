@@ -241,12 +241,19 @@ const W = {
 
 // ─────────────────────────────────────────────────────────────────────────── small helpers
 
+/** A JSON file a decision depends on: missing -> `missing` (default: throw); unreadable or
+ *  unparseable -> THROW (never a silent empty value). */
+function readJsonStrict(p, missing) {
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch (e) { if (e && e.code === 'ENOENT' && missing !== undefined) return missing; throw new Error(`cannot read ${p}: ${e && e.message}`); }
+  try { return JSON.parse(text); } catch (e) { throw new Error(`cannot parse ${p}: ${e.message}`); }
+}
 function readJson(p, fallback = null) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return fallback; } }
 function readLines(p) { try { return fs.readFileSync(p, 'utf8').split('\n').filter(Boolean); } catch { return []; } }
 function jsonLines(p) { return readLines(p).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean); }
 function walk(dir, pred, out = []) {
   let ents = [];
-  try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (e && e.code === 'ENOENT') return out; throw new Error(`cannot list ${dir}: ${e && e.message}`); }
   for (const e of ents) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) walk(p, pred, out); else if (pred(p)) out.push(p);
@@ -753,7 +760,7 @@ class Credentials {
       let jailMtime = null;
       try { jailMtime = c.jailMtimeAtEnd ?? fs.statSync(c.dest).mtimeMs; } catch { jailMtime = null; }
       const jailRefreshed = c.done ? c.done.tokenRefreshed === true : null;
-      const correlated = !unchanged && !!st && jailRefreshed === true && jailMtime !== null && Math.abs(st.mtimeMs - jailMtime) < 10_000;
+      const correlated = !unchanged && !!st && jailRefreshed === true && (jailMtime === null || Math.abs(st.mtimeMs - jailMtime) < 10_000);
       const verdict = readError ? 'FAIL' : (unchanged ? 'UNCHANGED' : (correlated ? 'FAIL' : 'INCONCLUSIVE'));
       const attribution = readError ? `the real file cannot be read to prove it unchanged: ${readError}` : unchanged ? '' : (correlated
         ? `the real file changed within 10 s of the jailed copy's own refresh (real mtime ${new Date(st.mtimeMs).toISOString()}, jail ${new Date(jailMtime).toISOString()})`
@@ -1501,7 +1508,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       const t = setInterval(async () => {
         if (running || this.aborted()) return;
         running = true;
-        try { await fn(); } catch (e) { if (!this.aborted()) log(`monitor: ${e.message}`); } finally { running = false; }
+        try { await fn(); } catch (e) { if (!this.aborted()) { this.check(false, 'a run monitor kept working', e.message); this.stop(`a monitor failed: ${e.message}`); } } finally { running = false; }
       }, ms);
       this.bg.push(t);
     };
@@ -1517,7 +1524,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 
   // ── sandbox reads ─────────────────────────────────────────────────────────
-  rows() { return walk(this.s.hive, (p) => /[\\/]log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive).flatMap(jsonLines); }
+  rows() { return walk(this.s.hive, (p) => /[\\/]log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive).flatMap((f) => this.tokenLines(f)); }
   ledger(agentId) { return readJson(path.join(this.s.hive, 'state', 'mail', `${agentId}.json`), { entries: {} }); }
   entry(agentId, id) { return (this.ledger(agentId).entries || {})[id] || null; }
   pollLedgers() {
@@ -1559,14 +1566,22 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   // ── transcripts / tokens ──────────────────────────────────────────────────
   claudeTranscripts() { return walk(path.join(this.s.home, '.claude', 'projects'), (p) => p.endsWith('.jsonl')); }
   codexRollouts() { return walk(path.join(this.s.hive, 'agents', IDS.codex, '.codex', 'sessions'), (p) => /rollout-.*\.jsonl$/.test(p)); }
-  claudeEvents() { return this.claudeTranscripts().flatMap(jsonLines); }
-  codexEvents() { return this.codexRollouts().flatMap(jsonLines); }
+  claudeEvents() { return this.claudeTranscripts().flatMap((f) => this.tokenLines(f)); }
+  codexEvents() { return this.codexRollouts().flatMap((f) => this.tokenLines(f)); }
 
   /** Lines of a token source; a file that EXISTS but cannot be read ABORTS (never counted as 0). */
   tokenLines(f) {
     let text;
     try { text = fs.readFileSync(f, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return []; this.stop(`cannot read the token source ${f}: ${e.message}`); return []; }
-    return text.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const lines = text.split('\n').filter(Boolean);
+    const out = [];
+    let bad = 0;
+    lines.forEach((l, i) => { try { out.push(JSON.parse(l)); } catch { if (i < lines.length - 1) bad++; } });   // only the LAST line may be half-written
+    if (bad) {
+      this.badEvidence = this.badEvidence || new Set();
+      if (!this.badEvidence.has(f)) { this.badEvidence.add(f); this.check(false, 'every evidence line parses (JSONL)', `${f}: ${bad} unparseable line(s) before the last`); }
+    }
+    return out;
   }
 
   pollTokens() {
@@ -1834,7 +1849,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     })();
     this.sessionBefore = (readJson(path.join(s.hive, 'registry.json'), { agents: {} }).agents[IDS.claude] || {});
     await this.stopApp('phase A');
-    const reg = readJson(path.join(s.hive, 'registry.json'));
+    const reg = readJsonStrict(path.join(s.hive, 'registry.json'));
     if (reg && reg.agents && reg.agents[IDS.claude]) reg.agents[IDS.claude].name = this.markerV2;
     if (reg && reg.agents && reg.agents[IDS.codex]) reg.agents[IDS.codex].codexAutoCompactTokenLimit = 40_000;   // B7 (the product's minimum)
     W.writeJson(path.join(s.hive, 'registry.json'), reg);
@@ -1995,7 +2010,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     // Snapshot what 1.1.74 must find.
     const snap = (id) => {
       const inbox = path.join(s.hive, 'agents', id, 'inbox');
-      const ls = (d) => { try { return fs.readdirSync(d).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)); } catch { return []; } };
+      const ls = (d) => { try { return fs.readdirSync(d).filter((n) => n.endsWith('.json')).map((n) => n.slice(0, -5)); } catch (e) { if (e && e.code === 'ENOENT') return []; throw new Error(`cannot list ${d}: ${e && e.message}`); } };
       return { inbox: ls(inbox), done: ls(path.join(inbox, '.done')), undelivered: ls(path.join(inbox, '.undelivered')) };
     };
     const hashDir = (d) => { const h = crypto.createHash('sha256'); for (const f of walk(d, () => true).sort()) h.update(f).update(fs.readFileSync(f)); return h.digest('hex'); };
@@ -2003,7 +2018,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const problems = [];
     for (const a of this.spec) {
       before[a.id] = snap(a.id);
-      const led = this.ledger(a.id).entries || {};
+      const led = readJsonStrict(path.join(s.hive, 'state', 'mail', `${a.id}.json`), { entries: {} }).entries || {};
       for (const e of Object.values(led)) {
         const inInbox = before[a.id].inbox.includes(e.id); const inDone = before[a.id].done.includes(e.id); const inUnd = before[a.id].undelivered.includes(e.id);
         if (e.state === 'acted' && !(inDone || e.missingAt || e.reason)) problems.push(`${a.id}/${e.id} acted but not in .done`);
@@ -2014,7 +2029,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const mailStateHash = hashDir(path.join(s.hive, 'state', 'mail'));
     // 1.1.74 runs the STUB TUIs: its only job here is to read the hive (zero tokens).
     const node = path.join(this.env.RIG_NODE_DIR, path.basename(process.execPath));
-    const reg = readJson(path.join(s.hive, 'registry.json'));
+    const reg = readJsonStrict(path.join(s.hive, 'registry.json'));
     const stubCommands = {};
     for (const a of this.spec) {
       const dir = path.join(s.hive, 'agents', a.id);
@@ -2112,10 +2127,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.check(c.tokenRefreshed !== null && c.tokenRefreshed !== undefined, `credentials: whether ${c.label} refreshed its token is known`, `refreshed=${c.tokenRefreshed}`);
     }
     const buildCleanup = [];
-    try { buildCleanup.push(...this.rebuildOutWithoutSeams()); } catch (e) { buildCleanup.push(`out/ rebuild: ${e.message}`); }
+    try { buildCleanup.push(...this.rebuildOutWithoutSeams()); } catch (e) { buildCleanup.push(`out/ rebuild: ${e.message}`); this.check(false, 'out/ rebuilt without the layer-b seams', e.message); }
     const survivors = this.exitUnproven ? this.exitUnproven.survivors : [];
     if (!this.exitUnproven) {
-      try { buildCleanup.push(...this.removeV1174()); } catch (e) { buildCleanup.push(`1.1.74 cleanup: ${e.message}`); }
+      try { buildCleanup.push(...this.removeV1174()); } catch (e) { buildCleanup.push(`1.1.74 cleanup: ${e.message}`); this.check(false, 'the 1.1.74 worktree removed', e.message); }
     } else {
       buildCleanup.push('NO PROOF OF EXIT: the 1.1.74 worktree and the sandbox are KEPT (with the evidence)');
     }
@@ -2125,10 +2140,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only)', liveWatch.failures.join('; '));
     } catch (e) { this.check(false, 'live-location check', e.message); }
     let evidence = null;
-    try { evidence = this.collectEvidence(); } catch (e) { log(`evidence: ${e.message}`); }
+    try { evidence = this.collectEvidence(); } catch (e) { this.check(false, 'the evidence was collected', e.message); }
     const keep = !!this.exitUnproven || this.args.keepSandbox;
     let sandboxRemoved = false;
-    if (!keep) { try { W.rm(this.s.base); sandboxRemoved = !fs.existsSync(this.s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } }
+    if (!keep) { try { W.rm(this.s.base); sandboxRemoved = !fs.existsSync(this.s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } this.check(sandboxRemoved, 'the sandbox was removed', this.s.base); }
     return { credentials, buildCleanup, liveWatch, evidence, survivors, sandboxRemoved };
   }
 
@@ -2138,10 +2153,11 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const s = this.s;
     const dst = path.join(s.report, 'evidence');
     const never = /(^|[\\/])(auth\.json|\.credentials\.json)$/i;
+    const skipped = [];
     const take = (from, rel) => {
       if (!fs.existsSync(from) || never.test(from)) return;
       let text;
-      try { text = fs.readFileSync(from, 'utf8'); } catch { return; }
+      try { text = fs.readFileSync(from, 'utf8'); } catch (e) { skipped.push(`${from}: ${e.message}`); return; }
       W.write(path.join(dst, rel), redact(text));
     };
     for (const f of walk(s.hive, (p) => /log[^\\/]*\.jsonl$|cost-ledger[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === s.hive)) take(f, path.basename(f));
@@ -2155,6 +2171,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     W.write(path.join(dst, 'ledger-history.json'), redact(JSON.stringify(this.ledgerHistory, null, 2)));
     W.write(path.join(dst, 'samples.json'), redact(JSON.stringify({ ...this.samples, windowWatch: this.watchHits || [] }, null, 2)));
     W.write(path.join(dst, 'proofs.json'), redact(JSON.stringify(this.proofs || {}, null, 2)));
+    this.check(skipped.length === 0, 'every evidence file was copied', skipped.join('; '));
     return dst;
   }
 
@@ -2314,7 +2331,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

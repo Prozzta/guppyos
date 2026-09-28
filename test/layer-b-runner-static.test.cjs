@@ -590,6 +590,48 @@ test('J1/J2 wiring: the runner narrows the Claude jail roots and keeps both cred
   assert.match(proof, /'deny', \{ tool_name: 'Write', tool_input: \{ file_path: path\.join\(claude\.dir, 'inbox', 'forged\.json'\)/);
 });
 
+test('god 1a3c97 catch sweep (runner): listing, reading, monitoring and cleanup errors FAIL instead of looking clean', (t) => {
+  const root = tmpRoot(t, 'md-lb-catch-');
+  // walk(): a missing dir is empty; any other listing error THROWS (injected).
+  assert.deepEqual(lb.walk(path.join(root, 'absent'), () => true), []);
+  const orig = fs.readdirSync;
+  fs.readdirSync = function (d, ...rest) { if (path.resolve(String(d)) === path.resolve(root)) { const e = new Error('EACCES (injected)'); e.code = 'EACCES'; throw e; } return orig.call(fs, d, ...rest); };
+  try { assert.throws(() => lb.walk(root, () => true), /cannot list .*EACCES/); } finally { fs.readdirSync = orig; }
+  // readJsonStrict: missing -> the given default; unreadable or unparseable -> throw.
+  assert.deepEqual(lb.readJsonStrict(path.join(root, 'none.json'), { entries: {} }), { entries: {} });
+  assert.throws(() => lb.readJsonStrict(path.join(root, 'none.json')), /cannot read/);
+  fs.writeFileSync(path.join(root, 'bad.json'), '{"entries": ');
+  assert.throws(() => lb.readJsonStrict(path.join(root, 'bad.json'), {}), /cannot parse/);
+  // Evidence lines: only the LAST line may be half-written; an earlier bad line fails a check once.
+  const run = new lb.LayerB(lb.parseArgs([]));
+  const f = path.join(root, 'rollout.jsonl');
+  fs.writeFileSync(f, '{"a":1}\nnot json\n{"b":2}\n{"half":');
+  assert.deepEqual(run.tokenLines(f), [{ a: 1 }, { b: 2 }]);
+  run.tokenLines(f);
+  assert.equal(run.checks.filter((c) => !c.ok && /every evidence line parses/.test(c.label)).length, 1, 'one failed check, not one per poll');
+  const fine = new lb.LayerB(lb.parseArgs([]));
+  fs.writeFileSync(path.join(root, 'ok.jsonl'), '{"a":1}\n{"half":');
+  assert.deepEqual(fine.tokenLines(path.join(root, 'ok.jsonl')), [{ a: 1 }]);
+  assert.equal(fine.checks.length, 0, 'a half-written LAST line is normal');
+  // Source pins for the rest (each was a catch that continued).
+  assert.match(src, /catch \(e\) \{ if \(!this\.aborted\(\)\) \{ this\.check\(false, 'a run monitor kept working', e\.message\); this\.stop\(`a monitor failed/, 'a failing monitor stops the run');
+  assert.match(src, /claudeEvents\(\) \{ return this\.claudeTranscripts\(\)\.flatMap\(\(f\) => this\.tokenLines\(f\)\); \}/);
+  assert.match(src, /codexEvents\(\) \{ return this\.codexRollouts\(\)\.flatMap\(\(f\) => this\.tokenLines\(f\)\); \}/);
+  assert.match(src, /rows\(\) \{ return walk\([^\n]*\.flatMap\(\(f\) => this\.tokenLines\(f\)\); \}/);
+  const rb = src.slice(src.indexOf('async factRollback() {'), src.indexOf('async stopApp('));
+  assert.match(rb, /catch \(e\) \{ if \(e && e\.code === 'ENOENT'\) return \[\]; throw new Error\(`cannot list/, 'rollback: an unreadable inbox is an error');
+  assert.match(rb, /readJsonStrict\(path\.join\(s\.hive, 'state', 'mail'/, 'rollback: an unreadable ledger is an error');
+  assert.match(rb, /const reg = readJsonStrict\(path\.join\(s\.hive, 'registry\.json'\)\);/);
+  assert.match(src, /async relaunchForPhaseB\(\) \{[\s\S]*?const reg = readJsonStrict\(path\.join\(s\.hive, 'registry\.json'\)\);/);
+  const td = src.slice(src.indexOf('async teardown() {'), src.indexOf('// ── evidence + report'));
+  assert.match(td, /this\.check\(false, 'out\/ rebuilt without the layer-b seams', e\.message\)/);
+  assert.match(td, /this\.check\(false, 'the 1\.1\.74 worktree removed', e\.message\)/);
+  assert.match(td, /this\.check\(false, 'the evidence was collected', e\.message\)/);
+  assert.match(td, /this\.check\(sandboxRemoved, 'the sandbox was removed'/);
+  assert.match(src, /this\.check\(skipped\.length === 0, 'every evidence file was copied'/);
+  assert.match(src, /jailRefreshed === true && \(jailMtime === null \|\| Math\.abs/, 'an unknown jail refresh time cannot rule out correlation');
+});
+
 test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {
   const t0 = Date.parse('2026-09-28T10:00:00Z');
   const at = (s) => new Date(t0 + s * 1000).toISOString();

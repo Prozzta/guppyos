@@ -44,7 +44,10 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit']);
 const RESERVED = /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³])(\..*)?$/i;
 
 /** The real, canonical form of an ABSOLUTE drive path: realpath (8.3 names, links, junctions
- *  resolved) where it exists, else the nearest existing parent's realpath plus the remaining tail. */
+ *  resolved) where it exists, else the nearest existing parent's realpath plus the remaining tail.
+ *  FAIL CLOSED (Dwight): a component may be skipped only when lstat PROVES it does not exist
+ *  (ENOENT). Anything else, a dangling link or junction (lstat works, realpath fails), an access or
+ *  I/O error, returns null, and every caller denies null. */
 function realOf(abs) {
   let probe = abs;
   const tail = [];
@@ -53,18 +56,22 @@ function realOf(abs) {
       const real = fs.realpathSync.native(probe);
       return W32.join(real, ...tail.reverse());
     } catch {
+      let missing = false;
+      try { fs.lstatSync(probe); } catch (e) { missing = !!e && e.code === 'ENOENT'; }
+      if (!missing) return null;
       const parent = W32.dirname(probe);
-      if (parent === probe) break;
+      if (parent === probe) return null;
       tail.push(W32.basename(probe));
       probe = parent;
     }
   }
-  return abs;
+  return null;
 }
 const key = (p) => W32.normalize(p).replace(/[\\/]+$/, '').toLowerCase();
 function within(real, roots) {
+  if (typeof real !== 'string') return false;
   const r = key(real);
-  return roots.some((root) => { const k = key(realOf(W32.resolve(root))); return r === k || r.startsWith(k + '\\'); });
+  return roots.some((root) => { const rr = realOf(W32.resolve(root)); if (rr === null) return false; const k = key(rr); return r === k || r.startsWith(k + '\\'); });
 }
 
 /**
@@ -96,6 +103,7 @@ function resolveToolPath(raw, policy, cwd) {
     if (RESERVED.test(seg)) return { bad: `a reserved device name (${seg})` };
   }
   const real = realOf(abs);
+  if (real === null) return { bad: `cannot prove where ${abs} really leads (a dangling link or an unreadable path)` };
   return { abs, real };
 }
 
@@ -107,7 +115,9 @@ function resolveToolPath(raw, policy, cwd) {
 const SEARCH_WALK_LIMIT = 20_000;
 function searchRootProblem(rootReal, policy) {
   for (const pp of policy.protectPaths || []) {
-    const k = key(realOf(W32.resolve(pp)));
+    const rp = realOf(W32.resolve(pp));
+    if (rp === null) return `cannot resolve the protected ${pp}`;
+    const k = key(rp);
     const r = key(rootReal);
     if (k === r || k.startsWith(r + '\\')) return `the search root covers the protected ${pp}`;
   }
@@ -117,14 +127,16 @@ function searchRootProblem(rootReal, policy) {
   while (stack.length) {
     const d = stack.pop();
     let ents = [];
-    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { if (d === rootReal && e.code === 'ENOENT') return null; return `cannot list ${d} to prove it holds nothing protected`; }
+    try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return `cannot list ${d} to prove it holds nothing protected (${e && e.code})`; }
     for (const e of ents) {
       if (++seen > SEARCH_WALK_LIMIT) return 'the search root is too large to prove it holds nothing protected';
       const f = W32.join(d, e.name);
       if (names.has(e.name.toLowerCase())) return `the search root holds the protected ${f}`;
       if (e.isSymbolicLink()) return `the search root holds a link (${f})`;
       if (e.isDirectory()) {
-        try { if (fs.lstatSync(f).isSymbolicLink()) return `the search root holds a junction (${f})`; } catch { /* raced */ }
+        let st;
+        try { st = fs.lstatSync(f); } catch (e) { return `cannot inspect ${f} to prove it is not a link (${e && e.code})`; }
+        if (st.isSymbolicLink()) return `the search root holds a junction (${f})`;
         stack.push(f);
       }
     }
