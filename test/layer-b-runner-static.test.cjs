@@ -665,6 +665,54 @@ test('round 6: every PowerShell start is -EncodedCommand (never -Command - over 
   assert.ok(!/' \(removed\)'|' \(kept\)'/.test(rep), 'no fixed "(removed)" wording any more');
 });
 
+test('round 7 (4): CDP evaluation: main-process expressions never await a promise; a renderer promise is re-evaluated ONCE only after a proven-benign context loss', async () => {
+  const mk = (fails, state = {}) => {
+    const c = new lb.Cdp('ws://x', 'renderer');
+    Object.assign(c, state);
+    const sent = [];
+    c.send = async (method, params) => {
+      sent.push(params);
+      if (fails.length) { const f = fails.shift(); if (typeof f === 'function') f(c); throw new Error(`CDP Runtime.evaluate: ${f.msg || f}`); }
+      return { result: { value: 'ok' } };
+    };
+    return { c, sent };
+  };
+  // Main process: awaitPromise:false, and no retry on any error.
+  const m = mk(['Promise was collected']);
+  await assert.rejects(m.c.eval('1', undefined, { sync: true }), /Promise was collected/);
+  assert.equal(m.sent[0].awaitPromise, false);
+  assert.equal(m.sent.length, 1);
+  // Renderer: one logged re-evaluation for a benign loss on a healthy target.
+  const r = mk(['Promise was collected']);
+  assert.equal(await r.c.eval('p()'), 'ok');
+  assert.equal(r.sent.length, 2);
+  assert.equal(r.sent[0].awaitPromise, true);
+  assert.equal(r.c.reevals.length, 1);
+  // ... but never twice, never after a crash or a detach, never in a reload loop, never for other errors.
+  await assert.rejects(mk(['Promise was collected', 'Promise was collected']).c.eval('p()'), /collected/);
+  await assert.rejects(mk(['Promise was collected'], { crashed: true }).c.eval('p()'), /collected/);
+  await assert.rejects(mk(['Execution context was destroyed.'], { detached: true }).c.eval('p()'), /destroyed/);
+  await assert.rejects(mk([Object.assign((c) => { c.contextsCreated += 2; }, { msg: 'Execution context was destroyed.' })]).c.eval('p()'), /destroyed/);
+  await assert.rejects(mk(['Target closed']).c.eval('p()'), /Target closed/);
+  // The runner's two main-process evaluations are the sync kind.
+  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 2);
+  assert.ok(!/this\.mainCdp\.eval\((?![\s\S]*?\{ sync: true \})/.test(src.replace(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g, '')));
+});
+
+test('round 7: B9 NOT-PROVEN (not FAIL) when acted is never reached; B8 checks the panel; Claude restored last; the stub echoes task tokens; the god can only be the stub', () => {
+  const b = src.slice(src.indexOf('async factB1B8B9() {'), src.indexOf('async factB2() {'));
+  assert.match(b, /const b9 = violations > 0 \? 'FAIL' : \(heldSamples < 5 \? 'NOT-PROVEN' : \(!acted \? 'NOT-PROVEN' : 'PASS'\)\);/);
+  assert.match(b, /data-testid="agent-effective-model"/);
+  const seed = src.slice(src.indexOf('  seed() {'), src.indexOf('  writeRoster(map) {'));
+  assert.ok(seed.indexOf('{ id: IDS.codex, name:') < seed.indexOf('{ id: IDS.claude, name:'), 'Claude is restored last, so it stays selected');
+  assert.match(seed, /defaultCommand: spec\.find\(\(a\) => a\.id === IDS\.god\)\.command,/);
+  assert.match(seed, /godProvider: 'claude',/);
+  assert.match(src, /match\(\/LB\[NT\]-\[0-9a-f\]\{8\}\/g\)/);
+  const up = src.slice(src.indexOf('async waitAgentsUp(label) {'), src.indexOf('async threadRows() {'));
+  assert.match(up, /const ok = !!god && norm\(String\(god\.command\)\) === norm\(this\.node\);/);
+  assert.match(up, /this\.stop\(`\$\{label\}: the god PTY is not the stub/);
+});
+
 test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {
   const t0 = Date.parse('2026-09-28T10:00:00Z');
   const at = (s) => new Date(t0 + s * 1000).toISOString();

@@ -630,17 +630,22 @@ class Cdp {
       await sleep(1000);
     }
   }
-  constructor(url) { this.url = url; this.id = 0; this.pending = new Map(); }
+  constructor(url, label = 'cdp') { this.url = url; this.label = label; this.id = 0; this.pending = new Map(); this.crashed = false; this.detached = false; this.contextsCreated = 0; this.reevals = []; }
   async open() {
     const WebSocket = require('ws');
     this.ws = new WebSocket(this.url);
     await new Promise((r, rej) => { this.ws.once('open', r); this.ws.once('error', rej); });
     this.ws.on('message', (raw) => {
       let m; try { m = JSON.parse(raw); } catch { return; }
+      if (m.method === 'Inspector.targetCrashed') this.crashed = true;
+      if (m.method === 'Inspector.detached') this.detached = true;
+      if (m.method === 'Runtime.executionContextCreated') this.contextsCreated++;
       const p = this.pending.get(m.id);
       if (p) { this.pending.delete(m.id); p(m); }
     });
+    this.ws.on('close', () => { this.detached = true; });
     await this.send('Runtime.enable', {});
+    try { await this.send('Inspector.enable', {}); } catch { /* the Node inspector has no Inspector domain; crash detection is the renderer's */ }
     return this;
   }
   send(method, params = {}, timeoutMs = 20_000) {
@@ -651,10 +656,28 @@ class Cdp {
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
-  async eval(expression, timeoutMs) {
-    const r = await this.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, timeoutMs);
-    if (r.exceptionDetails) throw new Error(`eval failed: ${JSON.stringify(r.exceptionDetails).slice(0, 300)}`);
-    return r.result ? r.result.value : undefined;
+  /**
+   * Evaluate. `sync: true` (every MAIN-process expression) sends awaitPromise:false: there is no
+   * promise to collect. A promise-returning renderer evaluation that fails with "Promise was
+   * collected" or a destroyed/unknown execution context is re-evaluated ONCE, logged, and only when
+   * the target is proven healthy: no crash, no detach, and at most one new execution context since
+   * the call began (one reload). A crash, a detach, a reload loop or a second failure THROWS.
+   */
+  async eval(expression, timeoutMs, { sync = false } = {}) {
+    const ctxBefore = this.contextsCreated;
+    const once = async () => {
+      const r = await this.send('Runtime.evaluate', { expression, awaitPromise: !sync, returnByValue: true }, timeoutMs);
+      if (r.exceptionDetails) throw new Error(`eval failed: ${JSON.stringify(r.exceptionDetails).slice(0, 300)}`);
+      return r.result ? r.result.value : undefined;
+    };
+    try { return await once(); } catch (e) {
+      const benign = /Promise was collected|Execution context was destroyed|Cannot find context with specified id/i.test(String(e && e.message));
+      const healthy = !this.crashed && !this.detached && this.contextsCreated - ctxBefore <= 1;
+      if (sync || !benign || !healthy) throw e;
+      this.reevals.push({ at: new Date().toISOString(), error: String(e.message), newContexts: this.contextsCreated - ctxBefore });
+      log(`${this.label}: re-evaluating once after a benign "${e.message}" (no crash, no detach, ${this.contextsCreated - ctxBefore} new context(s))`);
+      return once();
+    }
   }
   close() { try { this.ws.close(); } catch { /* gone */ } }
 }
@@ -679,7 +702,7 @@ function replyFromInbox() {
   const found = [];
   for (const d of [path.join(DIR, 'inbox'), path.join(DIR, 'inbox', '.done')]) {
     let names = []; try { names = fs.readdirSync(d).filter((n) => n.endsWith('.json')); } catch (e) {}
-    for (const n of names) { try { const m = JSON.parse(fs.readFileSync(path.join(d, n), 'utf8')); const t = String(m.body || '').match(/LBN-[0-9a-f]{8}/g) || []; for (const x of t) if (!answered.has(x)) { answered.add(x); found.push(x); } } catch (e) {} }
+    for (const n of names) { try { const m = JSON.parse(fs.readFileSync(path.join(d, n), 'utf8')); const t = String(m.body || '').match(/LB[NT]-[0-9a-f]{8}/g) || []; for (const x of t) if (!answered.has(x)) { answered.add(x); found.push(x); } } catch (e) {} }
   }
   if (!found.length) return;
   const id = 'stub-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -1264,8 +1287,10 @@ class LayerB {
     this.typed = {};
     const spec = [
       { id: IDS.god, name: 'Michael', provider: 'claude', isGod: true, role: 'orchestrator', stub: true },
-      { id: IDS.claude, name: this.markerV1, provider: 'claude', isGod: false, role: 'worker', stub: dry },
-      { id: IDS.codex, name: 'Codex-LB', provider: 'codex', isGod: false, role: 'worker', stub: dry }
+      // Order matters (B8): the renderer selects each restored agent in turn, so the LAST one (Claude)
+      // is the one whose detail panel, and so whose Threads, is showing.
+      { id: IDS.codex, name: 'Codex-LB', provider: 'codex', isGod: false, role: 'worker', stub: dry },
+      { id: IDS.claude, name: this.markerV1, provider: 'claude', isGod: false, role: 'worker', stub: dry }
     ];
     for (const a of spec) {
       const dir = path.join(s.hive, 'agents', a.id);
@@ -1313,7 +1338,12 @@ class LayerB {
       costCapTokens: CAPS.totalTokens,
       agentTokenCaps: { [IDS.claude]: CAPS.perAgentTokens, [IDS.codex]: CAPS.perAgentTokens },
       circuitBreaker: { enabled: true, hardStop: true },
-      missions: [{ id: 'heartbeat', kind: 'heartbeat', enabled: true, intervalMs: 120000, quietThresholdMs: 300000, lastFiredAt: 0 }]
+      missions: [{ id: 'heartbeat', kind: 'heartbeat', enabled: true, intervalMs: 120000, quietThresholdMs: 300000, lastFiredAt: 0 }],
+      // useHive's god bootstrap spawns buildSpawnCommand(config) = defaultCommand when pty-god is not
+      // live yet. Unset, that is the REAL `claude` (an unplanned god agent in the real run).
+      defaultCommand: spec.find((a) => a.id === IDS.god).command,
+      godProvider: 'claude',
+      autoMode: false
     });
     // R1 Claude jail: the policy lives at the sandbox root (readable, never writable by the agent).
     const claude = spec.find((a) => a.id === IDS.claude);
@@ -1485,11 +1515,11 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     // Refused at bootstrap? The app exits 97 at once.
     await sleep(3000);
     if (proc.exitCode !== null) throw new Error(`${label} exited at boot (${proc.exitCode}): ${this.appOut.slice(-1500)}`);
-    this.mainCdp = await new Cdp(await Cdp.target(inspPort, (t) => t.type === 'node', 60_000, this.abort.signal)).open();
-    this.page = await new Cdp(await Cdp.target(cdpPort, (t) => t.type === 'page', 90_000, this.abort.signal)).open();
+    this.mainCdp = await new Cdp(await Cdp.target(inspPort, (t) => t.type === 'node', 60_000, this.abort.signal), 'main').open();
+    this.page = await new Cdp(await Cdp.target(cdpPort, (t) => t.type === 'page', 90_000, this.abort.signal), 'renderer').open();
     await this.assertHidden(`${label} at launch`);
     // The app's own view of where it runs.
-    const where = await this.mainCdp.eval(`(() => { const e = process.mainModule.require('electron'); return JSON.stringify({ userData: e.app.getPath('userData'), packaged: e.app.isPackaged, appPath: e.app.getAppPath() }); })()`);
+    const where = await this.mainCdp.eval(`(() => { const e = process.mainModule.require('electron'); return JSON.stringify({ userData: e.app.getPath('userData'), packaged: e.app.isPackaged, appPath: e.app.getAppPath() }); })()`, undefined, { sync: true });
     const w = JSON.parse(where);
     this.check(norm(w.userData) === norm(this.s.userData), `${label}: userData is the sandbox's`, w.userData);
     this.check(w.packaged === true && /app\.asar$/i.test(w.appPath), `${label}: runs PACKAGED from app.asar`, w.appPath);
@@ -1506,7 +1536,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   async assertHidden(label) {
     if (this.watch && !this.watch.healthy()) { this.stop(`the window watch is silent (${label})`); throw new Error('window watch silent'); }
     if (!this.mainCdp) return 0;
-    const wins = JSON.parse(await this.mainCdp.eval(`JSON.stringify(process.mainModule.require('electron').BrowserWindow.getAllWindows().map((w) => ({ id: w.id, visible: w.isVisible(), minimized: w.isMinimized(), focused: w.isFocused() })))`));
+    const wins = JSON.parse(await this.mainCdp.eval(`JSON.stringify(process.mainModule.require('electron').BrowserWindow.getAllWindows().map((w) => ({ id: w.id, visible: w.isVisible(), minimized: w.isMinimized(), focused: w.isFocused() })))`, undefined, { sync: true }));
     this.samples.hidden.push({ at: new Date().toISOString(), label, windows: wins, watchLines: this.watch ? this.watch.lines : 0 });
     const shown = wins.filter((w) => w.visible || w.focused);
     if (shown.length) {
@@ -1687,7 +1717,15 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       const l = await this.ptys();
       return want.every((id) => (l || []).some((p) => p.id === id && p.hasOutput));
     }, 2000);
-    for (const p of await this.ptys()) this.procs.known.has(p.pid) || log(`pty ${p.id} pid ${p.pid}`);
+    const ptys = await this.ptys();
+    for (const p of ptys) this.procs.known.has(p.pid) || log(`pty ${p.id} pid ${p.pid}`);
+    // The god must be the STUB (never the real claude the renderer's god bootstrap would default to).
+    const god = ptys.find((p) => p.id === `pty-${IDS.god}`);
+    const ok = !!god && norm(String(god.command)) === norm(this.node);
+    if (!this.check(ok, `${label}: pty-god runs the stub, not a real CLI`, god ? god.command : 'no pty-god')) {
+      this.stop(`${label}: the god PTY is not the stub (${god ? god.command : 'none'})`);
+      throw new Error('the god is not the stub');
+    }
     await this.procs.scan();
   }
   async threadRows() {
@@ -1754,12 +1792,16 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     try { acted = await this.waitState(C, id, ['acted'], 3 * 60_000); } catch (e) { log(`B1: ${e.message}`); }
     await sleep(4000);   // the Threads panel polls every 3 s
     const domAfter = (await this.threadRows()).filter((r) => r.text.includes(N1));
-    const b9ok = heldSamples >= 5 && violations === 0 && !!acted;
-    this.fact('B9', b9ok ? 'PASS' : (heldSamples < 5 ? 'NOT-PROVEN' : 'FAIL'),
-      `${heldSamples} samples with the ledger at delivered; ${violations} where hive:mailPending (the queue precondition's reader) lacked it; later acted: ${!!acted}`);
+    // B9 (round 7): a miss is a FAIL; "acted never reached" alone is NOT-PROVEN, never a FAIL.
+    const b9 = violations > 0 ? 'FAIL' : (heldSamples < 5 ? 'NOT-PROVEN' : (!acted ? 'NOT-PROVEN' : 'PASS'));
+    this.fact('B9', b9,
+      `${heldSamples} samples with the ledger at delivered; ${violations} where hive:mailPending (the queue precondition's reader) lacked it; later acted: ${!!acted}`
+      + (b9 === 'NOT-PROVEN' && !acted && heldSamples >= 5 ? ' (NOT-PROVEN: the message never reached acted, so "never dropped while delivered" is not shown through to the end)' : ''));
+    const panel = await this.page.eval(`(() => { const t = document.querySelector('[data-testid="agent-effective-model"]'); let n = t; for (let i = 0; n && i < 8; i++) n = n.parentElement; return n ? (n.textContent || '').includes(${JSON.stringify(this.markerV1)}) : null; })()`).catch(() => null);
     const b8ok = domBefore.length >= 1 && domAfter.length >= domBefore.length && !!acted && domAfter.some((r) => /handled/.test(r.label));
-    this.fact('B8', b8ok ? 'PASS' : (domBefore.length ? 'FAIL' : 'NOT-PROVEN'),
-      `Threads DOM rows for the message: before Stop ${JSON.stringify(domBefore.map((r) => r.label))}, after Stop/acted ${JSON.stringify(domAfter.map((r) => r.label))}`);
+    this.fact('B8', b8ok ? 'PASS' : (domBefore.length ? (acted ? 'FAIL' : 'NOT-PROVEN') : 'NOT-PROVEN'),
+      `the detail panel shows ${this.markerV1}: ${panel}; Threads DOM rows for the message: before Stop ${JSON.stringify(domBefore.map((r) => r.label))}, after Stop/acted ${JSON.stringify(domAfter.map((r) => r.label))}`
+      + (!domBefore.length ? (panel === false ? ' (NOT-PROVEN: the panel shows another agent)' : ' (NOT-PROVEN: no row to follow)') : ''));
     const kinds = this.seenHookKinds(C, id);
     const inboxCalls = this.inboxToolCalls(C, since);
     if (this.args.dryRun) return this.fact('B1', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} acted=${!!acted} hookKinds=${kinds.join(',')}`));
@@ -2350,7 +2392,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
