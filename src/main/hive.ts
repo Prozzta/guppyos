@@ -1265,6 +1265,13 @@ export class HiveManager {
     }
     const args: string[] = [];
     if (!claudeProvider) return { args, env };
+    // JOB-ENV-IDENTITY: keep every hive agent out of Claude Code's shared background daemon.
+    // Parking a session there (agent view, /background, --bg) moves it into ONE daemon whose
+    // env belongs to whichever agent started it (live 2026-09-27: Andy's session ran with
+    // AGENT_ID=jim, a dead OTel port after a restart, Jim's OTel label). This is the CLI's
+    // own switch ("Disable agent view (`claude agents`, `--bg`, /background, the on-demand
+    // daemon)"); the per-agent settings file sets disableAgentView too.
+    env.CLAUDE_CODE_DISABLE_AGENT_VIEW = '1';
 
     args.push('--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false, opts.knowledgeGraph ?? false, opts.kgCliPath));
 
@@ -1620,6 +1627,9 @@ export class HiveManager {
       // listens. The terminal reports the current theme the moment the CLI enables
       // 2031, so startup still matches without pinning anything.
       ...(theme ? { theme: 'auto' } : {}),
+      // JOB-ENV-IDENTITY: no agent view / background daemon for a hive agent (see the
+      // CLAUDE_CODE_DISABLE_AGENT_VIEW spawn env; this is the settings form of the same switch).
+      disableAgentView: true,
       // W3 — default skills/MCP bundle. Written into the PER-SESSION settings file
       // only (never ~/.claude), so the user's own MCP servers are never clobbered;
       // Claude merges this additively. Omitted entirely when empty so a settings
