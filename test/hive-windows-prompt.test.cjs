@@ -22,7 +22,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
-const { HiveManager } = loadTs('src/main/hive.ts');
+const { HiveManager, protocolLineOne } = loadTs('src/main/hive.ts');
 const { argsToCommandLine } = require('node-pty/lib/windowsPtyAgent.js');
 
 const KG_CLI = path.join('/Applications', 'Munder Difflin.app', 'Contents', 'Resources', 'kg.cjs');
@@ -72,10 +72,10 @@ test('the KG line degrades to the env-var spelling when no path is supplied', as
 test('protocol paths use native separators the agent can actually use', async (t) => {
   const { inj, dir, root } = await floor(t);
   const prompt = promptOf(inj);
+  // (ZT-I1-MAIL §5 P1: an injection-mode agent's prompt no longer names its inbox paths at all;
+  // the read/move line of the legacy modes is checked below.)
   for (const p of [
     path.join(dir, 'memory.md'),
-    path.join(dir, 'inbox'),
-    path.join(dir, 'inbox', '.done'),
     path.join(dir, 'outbox'),
     path.join(root, 'PROTOCOL.md'),
     path.join(root, 'fleet.json'),
@@ -96,15 +96,18 @@ test('protocol paths use native separators the agent can actually use', async (t
   }
 });
 
-test('the Stop-hook drain text uses native separators too', async (t) => {
-  const { hive, dir } = await floor(t);
-  hive.send({ to: 'god-1', act: 'request', subject: 'ping', body: 'hello' }, 'tester');
-  const { block, reason } = hive.drainForStop('god-1');
-  assert.equal(block, true);
-  assert.ok(reason.includes(path.join(dir, 'inbox')));
-  assert.ok(reason.includes(path.join(dir, 'inbox', '.done')));
-  assert.ok(!reason.includes('/inbox/ for full detail'), 'old mixed-separator form');
-  assert.ok(!reason.includes('inbox/.done/'), 'old mixed-separator form');
+// ZT-I1-MAIL P11: the Stop-hook drain text is deleted with drainForStop. Its native-separator
+// guarantee now applies to the legacy read (and read-and-move) line 1 that names the inbox paths.
+test('the legacy mail line 1 (read; read and move) uses native separators too', async (t) => {
+  const { dir } = await floor(t);
+  for (const mode of ['legacy-read', 'legacy-move']) {
+    const line = protocolLineOne(mode, true, path.join(dir, 'memory.md'), path.join(dir, 'inbox'), path.join(dir, 'inbox', '.done'));
+    assert.ok(line.includes(path.join(dir, 'inbox')), mode);
+    for (const old of ['/inbox/ (messages', '/inbox/.done/.']) assert.ok(!line.includes(old), `${mode}: ${old}`);
+    if (path.sep === '\\') assert.ok(!line.includes(`${dir}/`), 'mixed-separator path leaked back in');
+  }
+  const move = protocolLineOne('legacy-move', true, path.join(dir, 'memory.md'), path.join(dir, 'inbox'), path.join(dir, 'inbox', '.done'));
+  assert.ok(move.includes(path.join(dir, 'inbox', '.done')));
 });
 
 test('the injected prompt survives the Windows ARRAY argv path byte for byte', async (t) => {

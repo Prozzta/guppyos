@@ -32,9 +32,8 @@
  */
 import { createHash } from 'node:crypto';
 
-/** The #151 nudge text, kept for reference; the wake itself uses `inboxNudgeText(ids)`. */
-export const WORKER_WAKE_NUDGE =
-  'You have new hive inbox message(s) — read your inbox, act on them now, and move handled ones to inbox/.done/. Act autonomously; only message god if you genuinely need a decision.';
+// ZT-I1-MAIL §3 / P12: the #151 WORKER_WAKE_NUDGE text (dead since the wake used
+// inboxNudgeText) is deleted. The nudge is shared/hiveNudge.ts's inboxNudgeText(ids, mode).
 
 /** Reconciliation fallback: no PTY output for this long = quiescent (renderer QUIESCE_IDLE_MS). */
 export const WORKER_WAKE_IDLE_MS = 12_000;

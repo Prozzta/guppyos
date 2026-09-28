@@ -4,7 +4,7 @@
  * Lives under `<harnessHome>/hive/` as a single git repo that ONLY this main
  * process commits to (agents never call git — they just write files). See
  * HIVE.md for the full design. Responsibilities:
- *   - per-agent workspace (identity.md, memory.md, inbox/, outbox/, cursor.json)
+ *   - per-agent workspace (identity.md, memory.md, inbox/, outbox/)
  *   - hive identity (registry.json: id/role/cwd/session — what agents read),
  *     separate from the UI floor roster (`<harnessHome>/roster.json`)
  *   - shared blackboard (board.md), task ledger, and an append-only event log (log.jsonl)
@@ -29,6 +29,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
 import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
+import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
@@ -46,6 +47,7 @@ import {
   canReceiveInbox,
   providerPreset,
   bridgeOf,
+  normalizeAgentProvider,
   type AgentProvider
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
@@ -1121,8 +1123,6 @@ export class HiveManager {
         if (pinnedBytes > PINNED_SOFT_CAP_BYTES && pinnedOverCapDue(dir)) this.appendLog({ kind: 'memory-pinned-over-cap', agentId: meta.id, pinnedBytes });
       } catch (e) { console.warn('[hive] memory pinned cap check failed:', e); }
     }
-    const cursor = join(dir, 'cursor.json');
-    if (!existsSync(cursor)) this.writeJson(cursor, { lastProcessed: null });
 
     // upsert registry — spread the PRIOR entry first so a respawn preserves
     // fields the spawn `meta` doesn't carry, above all `sessionId`. Without this,
@@ -1909,35 +1909,9 @@ export class HiveManager {
     for (const id of [...this.proxyChildren.keys()]) this.stopProxyBridge(id);
   }
 
-  /**
-   * Drain an agent's inbox for the Stop hook. Returns whether to block-to-continue
-   * and the message text to feed back. Uses the per-agent cursor so a message is
-   * surfaced exactly once (no infinite loop).
-   */
-  drainForStop(agentId: string): { block: boolean; reason?: string } {
-    const dir = this.agentDir(agentId);
-    if (!existsSync(dir)) return { block: false };
-    const cursorPath = join(dir, 'cursor.json');
-    const cursor = this.readAuthoritativeJson<{ lastProcessed: string | null }>(cursorPath, () => ({ lastProcessed: null }));
-    const fresh = this.inbox(agentId)
-      .filter((m) => !cursor.lastProcessed || m.id > cursor.lastProcessed)
-      .sort((a, b) => (a.id < b.id ? -1 : 1));
-    if (fresh.length === 0) return { block: false };
-
-    cursor.lastProcessed = fresh[fresh.length - 1].id;
-    this.atomicWriteJson(cursorPath, cursor);
-    this.appendLog({ kind: 'drain', agentId, count: fresh.length });
-
-    const lines = drainLines(fresh, join(dir, 'inbox'));
-    const reason = [
-      `You have ${fresh.length} new hive message(s) in your inbox. Address them before finishing:`,
-      lines,
-      // Native separators (join, not string-concatenated `/`) so a Windows agent is
-      // handed a path its own shell/tools accept, not `C:\…\agents\god/inbox/`.
-      `Open the files in ${join(dir, 'inbox')} for full detail, act on each, then move handled ones to ${join(dir, 'inbox', '.done')}. Reply via your outbox if a message requires it.`
-    ].join('\n');
-    return { block: true, reason };
-  }
+  // ZT-I1-MAIL §3 / P11: the Stop-hook drain (`drainForStop`, its cursor.json and drainLines) is
+  // DELETED. It was dead since the Stop reply became non-blocking, and 1.1.75 delivers mail in hook
+  // context with the harness marking it acted at Stop. Pinned gone (inbox-wake-pins, mail-prompts).
 
   // — agent-facing text —
 
@@ -1977,6 +1951,18 @@ export class HiveManager {
    *    read `C:\Users\x\hive\agents\god/inbox/`. Use join() so the agent's own
    *    tooling gets a path it can pass straight to its shell.
    */
+  /**
+   * ZT-I1-MAIL §5 / §11.7: the mail mode the agent's prompt text follows, from its provider and
+   * its ledger's channel override (§11.10). Read at spawn, so a degraded agent gets its legacy
+   * text on its next spawn (the prompt stays stable for the life of a session). An unreadable
+   * ledger means no override.
+   */
+  private promptMailMode(meta: AgentMeta): MailPromptMode {
+    let override = null;
+    try { override = this.mail.channelOverride(meta.id); } catch { override = null; }
+    return mailPromptMode(mailChannelMode(normalizeAgentProvider(meta.provider), override), override);
+  }
+
   private injectedPrompt(
     meta: AgentMeta,
     dir: string,
@@ -2024,8 +2010,8 @@ export class HiveManager {
       ? `SPAWNING A WORKER: you can start an ephemeral worker yourself by writing ONE JSON file into ${inRoot('spawn-requests')}/<id>.json. Required: \`objective\` (what the worker must do) and \`cwd\` (the repo it runs in). Optional: \`name\`, \`command\`, \`provider\`, \`model\`, \`isolate\` (default true = its own git worktree), \`tokenCap\`, and \`slack\` ({channel, thread_ts}) to route its failures back to a thread. The harness polls that directory, spawns \`worker-<id>\`, and moves the request to \`spawn-requests/.done/\` on success or \`.failed/\` with a reason. This is the ONLY way you can spawn; a hire manifest under research/hires/ needs the human to confirm it in the UI, so it is not a route you can complete on your own. Reuse an existing agent first, as above — a worker is a fresh spend every time.`
       : '';
     const godLine = meta.isGod
-      ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; drain your inbox continually and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. Stay aware of who is already on the floor and delegate OPPORTUNISTICALLY: BEFORE you spawn anything, CHECK THE LIVE ROSTER (active agents in registry.json + their state in fleet.json) and prefer routing to an EXISTING agent that fits — above all when the request names one ("ask Pam to…", "have Jim…"), route to that agent instead of reflexively creating a new one. Reuse an idle or already-running agent whose role matches; only spawn a fresh agent when no existing one is a sensible fit, and say that you checked. One capable owner beats a duplicate. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
-        + ` MONITOR the floor by reading ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as an inbox message to you — read it, act on it, and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+      ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; handle the mail delivered to you and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. Stay aware of who is already on the floor and delegate OPPORTUNISTICALLY: BEFORE you spawn anything, CHECK THE LIVE ROSTER (active agents in registry.json + their state in fleet.json) and prefer routing to an EXISTING agent that fits — above all when the request names one ("ask Pam to…", "have Jim…"), route to that agent instead of reflexively creating a new one. Reuse an idle or already-running agent whose role matches; only spawn a fresh agent when no existing one is a sensible fit, and say that you checked. One capable owner beats a duplicate. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
+        + ` MONITOR the floor by reading ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
       : meta.isAssistant
       ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
@@ -2041,9 +2027,8 @@ export class HiveManager {
       // CODEX-BLOAT-165 fix 3: never "read memory.md" whole at every task start (it was 86K chars
       // for one agent, re-sent on every later request of the job). The digest, or its tail.
       // PINNED-MEMORY: but first the standing method lessons, which the rollover never archives.
-      semanticMemory
-        ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${inDir('memory.md')} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them). Then read EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`
-        : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${inDir('memory.md')} (your method lessons; follow them); then read the LAST ~40 lines of ${inDir('memory.md')} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed) and EVERY file in ${inDir('inbox')} (messages other agents sent you). After handling an inbox message, move its file into ${inDir('inbox', '.done')}.`,
+      // ZT-I1-MAIL §5 P1 (+ §11.12(c)): the mail sentence follows the agent's mail mode (§11.7).
+      protocolLineOne(this.promptMailMode(meta), semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
       `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
@@ -2051,7 +2036,11 @@ export class HiveManager {
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
       meta.provider === 'codex' ? CODEX_OUTPUT_HYGIENE_LINE : '',
-      meta.provider === 'codex' ? 'Codex inbox wake: the automatic inbox-check prompt is a wake sentinel. Its hook supplies current inbox facts; read your authoritative inbox and handle its current messages.' : '',
+      meta.provider === 'codex'
+        ? (this.promptMailMode(meta) === 'inject'
+          ? 'Codex mail wake: the automatic inbox-check prompt is a wake sentinel. Its hook delivers your new mail into this turn as a <hive-mail> block; handle it from there.'
+          : 'Codex inbox wake: the automatic inbox-check prompt is a wake sentinel. Its hook supplies current inbox facts; read your authoritative inbox and handle its current messages.')
+        : '',
       memoryLine,
       knowledgeLine,
       godLine,
@@ -3398,7 +3387,7 @@ export class HiveManager {
    *  Codex's hook contract is already Claude-shaped: snake_case stdin
    *  (hook_event_name/tool_name/tool_input/session_id/cwd) and a matching response
    *  contract, where `Stop` honoring {decision:'block',reason} means "continue,
-   *  using reason as the next prompt" — exactly what drainForStop() returns. So we
+   *  using reason as the next prompt" — never used: the Stop reply is non-blocking. So we
    *  reuse the Claude `cth-hook` shim VERBATIM (no translator, unlike agy) and let
    *  HookServer handle everything unchanged.
    *
@@ -3526,7 +3515,7 @@ export class HiveManager {
       // this config.toml from the user's (their model/provider/trust settings carry
       // over) and append a `[[hooks.<Event>]]` group per event, each pointing at the
       // SAME cth-hook shim — reused verbatim (Codex's hook payload + response are
-      // already Claude-shaped, so HookServer/drainForStop run unchanged). Regenerated
+      // already Claude-shaped, so HookServer runs unchanged). Regenerated
       // each spawn (idempotent). A single-quoted TOML literal avoids path escaping
       // (hive roots are space/quote-free). NOTE: hooks fire in INTERACTIVE codex
       // sessions (how hive workers run), not in headless `codex exec`.
@@ -4071,31 +4060,29 @@ export class HiveManager {
  *  Stable text (no volatile values), so the instructions stay prompt-cache-stable. */
 export const CODEX_OUTPUT_HYGIENE_LINE = 'OUTPUT HYGIENE (every tool output stays in your context and is re-sent with every later request): never print a whole file, log or CSV. Read what you need: a line range or head/tail (Get-Content -TotalCount N / -Tail N, head, tail, sed -n), or matches (rg, Select-String). Cap command output (| Select-Object -First 50, | head -50). Write large results to a file and report a short summary plus its path. Make big edits with small apply_patch hunks or by writing a file; never echo a whole file back.';
 
-/** CODEX-BLOAT-165 fix 4: a drained message body longer than this is cut, with a pointer to its file. */
-export const DRAIN_BODY_MAX_CHARS = 2000;
-/** ...and once the drained text passes this, later messages are listed by subject and file only. */
-export const DRAIN_TOTAL_MAX_CHARS = 8000;
+/** ZT-I1-MAIL §11.12(c): part of P1 for every agent, so a lesson recorded under an older build
+ *  cannot override the current mail rules after an upgrade or a rollback. */
+export const MAIL_RULES_NOT_IN_MEMORY = 'Mail handling is defined by the current protocol text, not by your memory: do not record mail-handling rules in memory.md.';
 
 /**
- * The Stop-drain lines. A drain reason becomes model input (and, in a Codex thread, a retained
- * turn), so it is bounded: each body is capped at DRAIN_BODY_MAX_CHARS and the whole list at
- * about DRAIN_TOTAL_MAX_CHARS. Cut text is never lost: the line names the message file.
+ * Line 1 of the spawn prompt's HIVE PROTOCOL (ZT-I1-MAIL §5 P1, §11.7, §11.12(c)).
+ *  - inject: mail arrives in context as a <hive-mail> block; the agent never reads, lists or
+ *    moves inbox files (the harness archives them at the Stop that completes the turn);
+ *  - legacy-read: the agent reads the files, never moves them (the harness archives at Stop);
+ *  - legacy-move: no Stop signal (cursor, terminal work-order agents, an agent degraded for zero
+ *    hook traffic): the 1.1.74 text, read AND move handled files into .done.
+ * Native-separator paths (the 🪟 note on injectedPrompt).
  */
-export function drainLines(msgs: HiveMessage[], inboxDir: string): string {
-  const out: string[] = [];
-  let total = 0;
-  for (const m of msgs) {
-    const file = join(inboxDir, `${m.id}.json`);
-    const head = `- [from ${m.from}, ${m.act}] ${m.subject}`;
-    const body = String(m.body ?? '');
-    let line: string;
-    if (total >= DRAIN_TOTAL_MAX_CHARS) line = `${head} (body not shown; full message at ${file})`;
-    else if (body.length > DRAIN_BODY_MAX_CHARS) line = `${head}: ${body.slice(0, DRAIN_BODY_MAX_CHARS)}...(truncated; full message at ${file})`;
-    else line = `${head}: ${body}`;
-    total += line.length + 1;
-    out.push(line);
-  }
-  return out.join('\n');
+export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, memoryMd: string, inboxDir: string, doneDir: string): string {
+  const memory = semanticMemory
+    ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
+    : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then read the LAST ~40 lines of ${memoryMd} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed).`;
+  const mail = mode === 'inject'
+    ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files. If a message is marked re-delivered, check whether you already handled it.'
+    : mode === 'legacy-read'
+      ? `Then read EVERY file in ${inboxDir} (messages other agents sent you) and act on each. Leave the files where they are: the harness archives each message when your turn ends.`
+      : `Then read EVERY file in ${inboxDir} (messages other agents sent you). After handling an inbox message, move its file into ${doneDir}.`;
+  return `${memory} ${mail} ${MAIL_RULES_NOT_IN_MEMORY}`;
 }
 
 // ─── PROTOCOL.md (written into the hive, readable by every agent) ────────────
@@ -4141,12 +4128,24 @@ between agents.
   run \`memory wake-up\` (semantic memory on) or read only the last ~40 lines; never print it whole.
   Append facts and decisions at the end as you learn. Above 32 KB the app moves the older part to
   \`memory-archive-<date>.md\`, which \`memory search\` still finds; the standing lessons are never archived.
-- \`inbox/\`       — messages addressed to you. Read them at the start of a task.
-- \`inbox/.done/\` — move a message here once you've handled it.
+- \`inbox/\`, \`inbox/.done/\` — harness-owned storage of the messages addressed to you (\`.done/\` =
+  handled). You may read them for history; how mail reaches you is below.
 - \`outbox/\`      — drop messages here to send them. The harness delivers them.
 
 **Never write into another agent's folder.** Write to your own \`outbox/\`; the
 orchestrator routes it. This keeps every file single-writer.
+
+## Receiving mail
+Messages for you arrive inside your context as a \`<hive-mail>\` block (at the start of a turn, or
+after a tool call); the harness tracks them and archives each one into \`inbox/.done/\` itself once
+the turn in which you saw it ends. You do not read, list or move inbox files. If a message is marked
+re-delivered, check whether you already handled it.
+
+Exception: an agent whose CLI cannot receive the block is told how to take its mail in its own
+start-up instructions (it reads the files itself). Follow those instructions.
+
+Mail handling is defined by the current protocol text, not by your memory: do not record
+mail-handling rules in memory.md.
 
 ## Sending a message
 Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
@@ -4180,7 +4179,7 @@ unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes th
   the god/orchestrator, the human's proxy on the floor).
 - \`board.md\` is the shared plan. Don't edit it directly — \`propose\` changes to \`god\`,
   who is its sole scribe.
-- Re-reading a message you already moved to \`.done/\` is a no-op. Don't reprocess.
+- A message in \`inbox/.done/\` has been handled. Don't reprocess it.
 
 ## The work: board.md vs tasks.json
 There are two shared surfaces, both in the hive root:
@@ -4200,10 +4199,11 @@ content, and \`/compact\` your own session when context gets heavy.
 ## Fleet monitoring (orchestrator)
 You (god) are responsible for situational awareness. To see the live state of every agent, read
 \`fleet.json\` in the hive root — it is refreshed continuously with each agent's tokens, cost, status,
-breaker level, last tool, last-active time, and inbox backlog. Pair it with \`registry.json\` (the roster)
+breaker level, last tool, last-active time, mail backlog (\`inboxBacklog\`: not yet handled), and the
+requests still owed a reply (\`awaitingReply\`, \`openRequests\`, each with its age). Pair it with \`registry.json\` (the roster)
 and \`log.jsonl\` (the event feed; it rotates at 8 MB, so older rows are in \`log.*.jsonl\`, search \`log*.jsonl\`). IMPORTANT: \`claude agents\` will NOT show your hive's sibling
 sessions (they're spawned independently) — \`fleet.json\` is your source of truth for them. For a deeper
-look at one agent, read its \`agents/<id>/memory.md\` and \`inbox/\`, or send it a \`query\`. A full
+look at one agent, read its \`agents/<id>/memory.md\` and its mail (\`inbox/\`, \`inbox/.done/\`), or send it a \`query\`. A full
 Claude Code command reference (slash = your own session only; CLI = your shell, can target the fleet)
 is in \`COMMANDS.md\` in the hive root.
 

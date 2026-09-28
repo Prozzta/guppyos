@@ -55,12 +55,25 @@ test('the nudge names the messages that prompted it', () => {
   assert.match(text, /2026-08-19T17-10-00-000Z-broadcast-retro-rule/);
 });
 
-test('the nudge keeps the pending inbox authoritative, not the id list', () => {
-  // A nudge suppressed by the one-pending rule leaves its ids unnamed, so an
-  // agent that stopped at the list would miss that mail entirely.
+test('ZT-I1-MAIL §5 P4: the injection-mode nudge says the mail is delivered in context; it never asks for a read or a move', () => {
   const text = inboxNudgeText(['msg-1']);
-  assert.match(text, /authoritative/);
-  assert.match(text, /inbox\/\.done\//);
+  assert.equal(text, 'You have new hive mail (delivered in context below): msg-1.');
+  assert.doesNotMatch(text, /move|inbox\/|\.done|read/i);
+});
+
+test('ZT-I1-MAIL §5 P4 / §11.7: legacy-read keeps a read sentence WITHOUT "move"; no-Stop agents keep the 1.1.74 authoritative read-and-move text', () => {
+  const read = inboxNudgeText(['msg-1'], 'legacy-read');
+  assert.match(read, /msg-1/);
+  assert.match(read, /Read those files in your inbox\//);
+  assert.doesNotMatch(read, /move/i);
+  const move = inboxNudgeText(['msg-1'], 'legacy-move');
+  // A nudge suppressed by the one-pending rule leaves its ids unnamed, so an agent that
+  // stopped at the list would miss that mail entirely: the inbox stays authoritative.
+  assert.match(move, /authoritative/);
+  assert.match(move, /move handled ones to inbox\/\.done\//);
+  for (const m of ['inject', 'legacy-read', 'legacy-move']) {
+    for (const ids of [[], ['a', 'b']]) assert.equal(isInboxNudge(inboxNudgeText(ids, m)), true, `${m} ${ids}`);
+  }
 });
 
 test('a nudge with no ids is still a well-formed nudge', () => {

@@ -255,7 +255,6 @@ test('classifyHook: idle-waiting shapes are idle, other events are null', () => 
   assert.equal(classifyHook('UserPromptSubmit', undefined), null);
 });
 
-test('the #151 nudge text is kept for reference', () => {
-  assert.equal(WORKER_WAKE_NUDGE.length > 100, true);
-  assert.match(WORKER_WAKE_NUDGE, /read your inbox/i);
+test('ZT-I1-MAIL P12: the dead #151 WORKER_WAKE_NUDGE text is deleted (the wake uses inboxNudgeText)', () => {
+  assert.equal(WORKER_WAKE_NUDGE, undefined);
 });

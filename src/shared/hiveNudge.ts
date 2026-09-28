@@ -4,13 +4,20 @@
  *
  * The nudge is QUEUED the moment fresh mail is seen but TYPED only once the agent
  * is idle and off cooldown, and it survives a renderer reload in the persisted
- * queue. By the time it lands, the agent has often already drained that mail and
- * filed it under `inbox/.done/` — so the nudge arrives against an inbox the agent
- * itself just emptied.
+ * queue. By the time it lands, the mail has often already reached the agent (1.1.75: in the
+ * hook context of a turn it was already in; before, by reading its inbox), so the nudge
+ * arrives with nothing new to show.
  */
 
-/** The fixed head of every nudge; the ids that follow differ per nudge. */
-const NUDGE_HEAD = 'You have new hive inbox message(s)';
+/** The fixed head of every nudge; the ids that follow differ per nudge. ZT-I1-MAIL (1.1.75, §5
+ *  P4): mail travels in hook context, so the injection-mode nudge only says it is there. */
+const NUDGE_HEAD = 'You have new hive mail';
+/** The 1.1.74 head, still typed for agents that move their own mail (§11.7), and still in the
+ *  persisted queues of older sessions: recognised as a nudge too. */
+const LEGACY_NUDGE_HEAD = 'You have new hive inbox message(s)';
+
+/** §5 / §11.7: which mail instructions a nudge carries (mirrors main's `MailPromptMode`). */
+export type NudgeMailMode = 'inject' | 'legacy-read' | 'legacy-move';
 
 /** Route A: Codex retains this user item across compaction, so it must stay short,
  * fixed, and useful if its UserPromptSubmit hook cannot answer. */
@@ -35,18 +42,25 @@ export const CODEX_INBOX_WAKE_SENTINEL = '[hive] check inbox';
  * 43K tokens, in Dwight's). The fixed part is now 150 chars instead of 370; the standing rules it
  * used to repeat (act autonomously, when to message god) are in the protocol already.
  */
-export function inboxNudgeText(ids: string[]): string {
-  const named = ids.length ? ` - at least: ${ids.join(', ')}` : '';
-  return `${NUDGE_HEAD}${named}. Read your inbox (authoritative; ids already in inbox/.done/ were handled), act, move handled ones to inbox/.done/.`;
+export function inboxNudgeText(ids: string[], mode: NudgeMailMode = 'inject'): string {
+  const list = ids.join(', ');
+  // ZT-I1-MAIL §5 P4: the ids stay (the submit attestation and "did I already see this?", #58);
+  // the read/move instruction goes. The bodies are in the hook context of this very turn.
+  if (mode === 'inject') return `${NUDGE_HEAD} (delivered in context below)${ids.length ? `: ${list}` : ''}.`;
+  // Legacy-read (§2.2): the agent reads the files; the harness archives them at its Stop.
+  if (mode === 'legacy-read') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Read those files in your inbox/ and act; the harness archives them when your turn ends.`;
+  // Legacy-move (§11.7: no Stop signal): the 1.1.74 text, unchanged.
+  const named = ids.length ? ` - at least: ${list}` : '';
+  return `${LEGACY_NUDGE_HEAD}${named}. Read your inbox (authoritative; ids already in inbox/.done/ were handled), act, move handled ones to inbox/.done/.`;
 }
 
-/** The nudge without ids, for size checks (tests, docs). */
-export const INBOX_NUDGE_FIXED_CHARS = inboxNudgeText([]).length;
+/** The nudge without ids, for size checks (tests, docs): the longest fixed text of the modes. */
+export const INBOX_NUDGE_FIXED_CHARS = Math.max(...(['inject', 'legacy-read', 'legacy-move'] as const).map((m) => inboxNudgeText([], m).length));
 
 /** Keep Codex's retained user item free of dynamic inbox ids. The hook supplies
  * those current facts as transient developer context instead. */
-export function inboxWakeTextForProvider(provider: string | undefined, ids: string[]): string {
-  return provider === 'codex' ? CODEX_INBOX_WAKE_SENTINEL : inboxNudgeText(ids);
+export function inboxWakeTextForProvider(provider: string | undefined, ids: string[], mode: NudgeMailMode = 'inject'): string {
+  return provider === 'codex' ? CODEX_INBOX_WAKE_SENTINEL : inboxNudgeText(ids, mode);
 }
 
 /**
@@ -58,5 +72,5 @@ export function inboxWakeTextForProvider(provider: string | undefined, ids: stri
  */
 export function isInboxNudge(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed === CODEX_INBOX_WAKE_SENTINEL || trimmed.startsWith(NUDGE_HEAD);
+  return trimmed === CODEX_INBOX_WAKE_SENTINEL || trimmed.startsWith(NUDGE_HEAD) || trimmed.startsWith(LEGACY_NUDGE_HEAD);
 }

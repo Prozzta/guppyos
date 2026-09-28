@@ -42,7 +42,8 @@ const lock = require('./canary-lock.cjs');
 
 const REPO = resolve(__dirname, '..', '..');
 const APP_EXE = join(REPO, 'dist', 'win-unpacked', 'Munder Difflin.exe');
-const NUDGE_HEAD = 'You have new hive inbox message(s)';
+// ZT-I1-MAIL §5 P4: the injection-mode nudge head, and the 1.1.74 one (still typed for no-Stop agents).
+const NUDGE_HEADS = ['You have new hive mail', 'You have new hive inbox message(s)'];
 
 // devIsolation.ts: the dev root is fixed by the mission contract (no env override).
 const DEV_ROOT = 'C:\\Dunder\\MunderDevData';
@@ -242,7 +243,7 @@ function rows() {
 }
 
 const nudges = (typedLog) => (existsSync(typedLog) ? readFileSync(typedLog, 'utf8') : '')
-  .split('\n').filter((l) => l.includes(NUDGE_HEAD));
+  .split('\n').filter((l) => NUDGE_HEADS.some((h) => l.includes(h)));
 
 async function waitFor(label, budgetMs, fn) {
   const until = Date.now() + budgetMs;

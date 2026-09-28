@@ -119,6 +119,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
+import { mailPromptMode, type MailPromptMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
@@ -644,7 +645,9 @@ inboxWake = new InboxWakeBridge({
   // it is CAPACITY_GATED work through the one submit owner - admission, the READY gate,
   // the prompt and human-draft guards, the final revalidation next to the Enter.
   submit: (req) => automaticSubmit.submit(req),
-  text: (ids, agentId) => inboxWakeTextForProvider(agentId ? hive.registry().agents[agentId]?.provider : undefined, [...ids]),
+  // ZT-I1-MAIL §5 P4 / §11.7: the nudge follows the agent's mail mode (inject: "delivered in
+  // context"; legacy-read: read, no move; no Stop signal: the 1.1.74 read-and-move text).
+  text: (ids, agentId) => inboxWakeTextForProvider(agentId ? hive.registry().agents[agentId]?.provider : undefined, [...ids], agentId ? wakeMailMode(agentId) : 'inject'),
   setImmediate: (fn) => { setImmediate(fn); },
   now: () => Date.now(),
   log: (line) => console.log(line),
@@ -660,6 +663,14 @@ inboxWake = new InboxWakeBridge({
   }
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
+
+/** ZT-I1-MAIL §5 / §11.7: the mail mode an agent's wake text follows (mailPromptMode). */
+function wakeMailMode(agentId: string): MailPromptMode {
+  const mode = hookServer.mailChannel(agentId).mode;
+  let override = null;
+  try { override = hive.mail.channelOverride(agentId); } catch { override = null; }
+  return mailPromptMode(mode, override);
+}
 
 /** ZT-I1-MAIL §3 #1: the wake coordinator's pending source (see the bridge's `inboxIds`), and
  *  the renderer queue's precondition (#16). The rule itself is coordinatorPendingIds (tested). */
@@ -1731,12 +1742,12 @@ function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
   // instead of the "quiet" line — this beat fired BECAUSE of unread actionable
   // inbox, not because the floor went quiet, and god must read it now.
   const header = actionable > 0
-    ? `Floor heartbeat — ${actionable} actionable inbox message(s) awaiting you (worker/human mail). Drain your inbox NOW and act on them.`
+    ? `Floor heartbeat — ${actionable} actionable message(s) delivered to you and not yet handled (worker/human mail). Act on them now.`
     : `Floor heartbeat — quiet ~${Math.round(quietMs / 60000)}m.`;
   return [
     header,
     `Active agents (${active.length}): ${names}.`,
-    withInbox.length ? `Undrained inbox: ${withInbox.join(', ')}.` : 'No undrained inboxes.',
+    withInbox.length ? `Mail not yet handled: ${withInbox.join(', ')}.` : 'No mail waiting.',
     '',
     'Board (head):',
     boardHead || '(empty)',

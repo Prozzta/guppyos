@@ -247,14 +247,15 @@ function sandbox(t) {
 const promptOf = (inj) => inj.args[inj.args.indexOf('--append-system-prompt') + 1];
 const line1 = (p) => p.split('\n').find((l) => l.startsWith('1. '));
 
-test('Claude + semantic memory: line 1 says memory wake-up / memory search, not "read memory.md", and still reads every inbox file', async (t) => {
+test('Claude + semantic memory: line 1 says memory wake-up / memory search, not "read memory.md"; its mail arrives in context (ZT-I1-MAIL §5 P1)', async (t) => {
   const s = sandbox(t);
   const inj = await s.hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: s.home }, { semanticMemory: true });
   const l1 = line1(promptOf(inj));
   assert.match(l1, /run `memory wake-up`/);
   assert.match(l1, /`memory search "<query>"`/);
   assert.match(l1, /do NOT read .*memory\.md whole/);
-  assert.match(l1, /read EVERY file in .*inbox/);
+  assert.match(l1, /Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them\. You do not read, list or move inbox files\./);
+  assert.doesNotMatch(l1, /EVERY file in/);
   assert.doesNotMatch(l1, /At the START of a task, read [^ ]*memory\.md and/);
 });
 
@@ -264,7 +265,7 @@ test('Claude without semantic memory: line 1 reads only the TAIL of memory.md (n
   const l1 = line1(promptOf(inj));
   assert.doesNotMatch(l1, /memory wake-up|memory search/);
   assert.match(l1, /LAST ~40 lines of .*memory\.md/);
-  assert.match(l1, /EVERY file in .*inbox/);
+  assert.match(l1, /<hive-mail> block/);
 });
 
 test('Codex gets the same line 1 in its developer_instructions', async (t) => {

@@ -70,7 +70,8 @@ function withStandingGoal(agent: Agent, text: string): string {
 // him to work running the floor. Kept terse and action-oriented.
 const INITIAL_GOD_PROMPT = [
   "You're online as Michael, the orchestrator of the hive. Get oriented, then start running the floor:",
-  '1. Read your memory.md and drain every message in your inbox.',
+  // ZT-I1-MAIL §5 P8: mail is delivered in context; nobody drains an inbox any more.
+  '1. Read your memory.md; pending mail is delivered in your context.',
   '2. Review board.md + tasks.json and the current roster of agents (active vs archived).',
   '3. Check fleet health: read fleet.json in the hive root for every agent\'s live tokens, cost, status, breaker level, and inbox backlog (`claude agents` will NOT show your hive\'s agents). Flag anyone stalled, over-budget, or breaker-armed.',
   '4. Skim COMMANDS.md (hive root) for the Claude Code commands you can use — and run `memory wake-up` for a memory digest (the built-in memory engine; skip it if semantic memory is off).',

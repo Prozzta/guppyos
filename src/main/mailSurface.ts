@@ -82,6 +82,22 @@ export function mailChannelMode(provider: AgentProvider | undefined, override?: 
   return mode;
 }
 
+/**
+ * §5 / §11.7: which mail instructions an agent's PROMPTS carry (spawn prompt P1, wake nudge P4).
+ *  - `inject`: bodies arrive in context; the agent never reads, lists or moves inbox files.
+ *  - `legacy-read`: the agent reads the files; the harness archives them at its Stop (no "move").
+ *  - `legacy-move`: no Stop signal, 1.1.74 semantics: read AND move handled files to .done. That
+ *    is cursor, the terminal work-order agents (no Stop either), and an injection agent degraded
+ *    for zero hook traffic (§11.10: its own move is what counts as handled, Creed's ruling).
+ */
+export type MailPromptMode = 'inject' | 'legacy-read' | 'legacy-move';
+
+export function mailPromptMode(mode: MailChannelMode, override?: MailChannelOverride | null): MailPromptMode {
+  if (mode === 'inject') return 'inject';
+  if (mode === 'legacy-read') return override?.reason === 'zero-hook-traffic' ? 'legacy-move' : 'legacy-read';
+  return 'legacy-move';
+}
+
 /** How a surfacing is confirmed (§11.1): a readable record, or the latency rule. */
 export type MailEvidenceKind = 'claude-transcript' | 'codex-rollout' | 'latency';
 

@@ -24,8 +24,9 @@ const { inboxNudgeText, isInboxNudge } = loadTs('src/shared/hiveNudge.ts');
 
 const IDS = ['2026-09-27T10-29-35-315Z-god-dwight-canary5'];
 const REAL = inboxNudgeText(IDS);
-/** What 1.1.61 typed: the same text with the em dash (the regression Jim reproduced). */
-const LEGACY = REAL.replace(' - at least: ', ' — at least: ');
+/** What 1.1.61 typed: the 1.1.74 read-and-move text (still typed for no-Stop agents, §11.7) with
+ *  the em dash (the regression Jim reproduced). */
+const LEGACY = inboxNudgeText(IDS, 'legacy-move').replace(' - at least: ', ' — at least: ');
 /** Codex's composer: whatever it cannot echo is dropped (observed: the em dash). */
 const codexDrop = (t) => t.replace(/[^\x20-\x7e]/g, '');
 
@@ -107,12 +108,16 @@ const submit = (w, text, over = {}) => w.settle(w.owner.submit({ requestId: 'wak
 // ── the wake text ─────────────────────────────────────────────────────────────────────────
 
 test('the wake text is pure printable ASCII (every TUI echoes it verbatim) and is still recognised as a nudge', () => {
-  for (const ids of [[], IDS, ['a', 'b', 'c']]) {
-    const t = inboxNudgeText(ids);
-    assert.match(t, /^[\x20-\x7e]+$/, JSON.stringify(t));
-    assert.ok(isInboxNudge(t));
+  for (const mode of ['inject', 'legacy-read', 'legacy-move']) {
+    for (const ids of [[], IDS, ['a', 'b', 'c']]) {
+      const t = inboxNudgeText(ids, mode);
+      assert.match(t, /^[\x20-\x7e]+$/, JSON.stringify(t));
+      assert.ok(isInboxNudge(t));
+    }
   }
-  assert.match(REAL, / - at least: 2026-09-27T10-29-35-315Z-god-dwight-canary5\. Read your inbox/);
+  // ZT-I1-MAIL §5 P4 (#58): still ASCII, still names the ids.
+  assert.equal(REAL, 'You have new hive mail (delivered in context below): 2026-09-27T10-29-35-315Z-god-dwight-canary5.');
+  assert.notEqual(LEGACY, inboxNudgeText(IDS, 'legacy-move'), 'the em-dash case really differs');
   assert.match(needleFor(REAL), /^[\x20-\x7e]+$/, 'the head needle is ASCII too');
 });
 

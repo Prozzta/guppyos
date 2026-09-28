@@ -118,7 +118,7 @@ export class ClosingTimeController {
         '',
         `1. BROADCAST closing time to the team (message with "to":"broadcast"). Current workers: ${names}.`,
         '   Tell each worker to immediately: park or commit any work-in-progress safely, append its current state + concrete next steps to its memory.md, and then reply to you with a message whose subject is exactly "CLOSING-TIME-ACK".',
-        '2. WAIT and keep draining your inbox until EVERY worker above has sent its CLOSING-TIME-ACK. Nudge stragglers once if needed.',
+        '2. WAIT and keep handling the mail delivered to you until EVERY worker above has sent its CLOSING-TIME-ACK. Nudge stragglers once if needed.',
         '3. Save your own state: update board.md and append your shift summary to your memory.md.',
         `4. CONCLUDE by sending a message with "to":"human" and the subject exactly "CLOSING-TIME-COMPLETE" — the harness watches for it and closes the app. Do not send it before every worker has acked: the harness independently verifies the ACKs and will reject a premature conclusion.`,
         '',
@@ -136,7 +136,7 @@ export class ClosingTimeController {
     // closing time within one tool call. Idle agents are covered by the
     // inbox-wake nudge; busy ones by the steer — both rails, no PTY typing.
     this.control?.steer(this.godId,
-      'CLOSING TIME was pressed by the human: pause your current work at the next sensible point and drain your inbox NOW — a shutdown brief is waiting there. Coordinate the floor shutdown before anything else.');
+      'CLOSING TIME was pressed by the human: pause your current work at the next sensible point — a shutdown brief has been delivered to you. Coordinate the floor shutdown before anything else.');
     for (const id of this.workers) {
       this.control?.steer(id,
         'CLOSING TIME — the office is shutting down. Finish your current step but do NOT start new work. Park or commit your work-in-progress safely, append your current state + concrete next steps to your memory.md, then reply to god with a message whose subject is exactly "CLOSING-TIME-ACK".');

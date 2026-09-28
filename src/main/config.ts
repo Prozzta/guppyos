@@ -126,7 +126,7 @@ export const HEARTBEAT_MISSION: ScheduledMission = {
   intervalMs: 120_000,
   to: 'god',
   body:
-    'Floor heartbeat: the team has gone quiet. Review the digest in your inbox, ' +
+    'Floor heartbeat: the team has gone quiet. Review the digest delivered to you, ' +
     're-engage anyone stalled or blocked, and keep the board accurate — or rest ' +
     'if the work is genuinely done.',
   enabled: false,

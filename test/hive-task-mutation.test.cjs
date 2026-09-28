@@ -117,7 +117,7 @@ test('malformed registry.json keeps read-only views alive but refuses every muta
   assert.equal(fs.readFileSync(path.join(hive.root(), copies[0]), 'utf8'), corrupt);
 });
 
-test('missing authorities bootstrap with defaults, while a corrupt cursor refuses its write', (t) => {
+test('missing authorities bootstrap with defaults, while a corrupt legacy cursor.json is never overwritten', (t) => {
   const hive = floor(t);
   hive.ensureHive();
   const root = hive.root();
@@ -127,10 +127,14 @@ test('missing authorities bootstrap with defaults, while a corrupt cursor refuse
   assert.deepEqual(hive.tasks(), { tasks: [] });
   assert.equal(hive.addTask(card('first')), true, 'missing tasks.json may be freshly created');
 
+  // ZT-I1-MAIL P11: drainForStop, cursor.json's only reader and writer, is deleted; an agent
+  // folder from an older build keeps its cursor.json byte for byte (nothing rewrites it).
   const agent = path.join(root, 'agents', 'probe');
   fs.mkdirSync(path.join(agent, 'inbox', '.done'), { recursive: true });
   fs.writeFileSync(path.join(agent, 'cursor.json'), '{"lastProcessed":', 'utf8');
-  assert.throws(() => hive.drainForStop('probe'), /cursor\.json is invalid JSON; refusing to overwrite it/);
+  hive.send({ to: 'probe', act: 'inform', subject: 'x', body: 'y' }, 'god');
+  assert.equal(fs.readFileSync(path.join(agent, 'cursor.json'), 'utf8'), '{"lastProcessed":');
+  assert.equal(typeof hive.drainForStop, 'undefined');
 });
 
 test('Windows rename retries publish after transient locks and leave no temp file', (t) => {
