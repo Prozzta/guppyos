@@ -141,18 +141,37 @@ test('a malformed line is still reported as {raw}, exactly as before', async (t)
 
 test('COST: the tail read does not scale with file size', async (t) => {
   const { hive, log } = await floor(t);
+  // FLAKY-TIMING (Andy, flaky-170): the cost is pinned by the BYTES the tail reads, counted at
+  // the fs layer, instead of `tBig < 10*tSmall + 200` over two wall-clock loops (two samples of
+  // host load). The defect - a whole-file read - reads the whole file, whatever the machine's load.
+  let readBytes = 0; let streams = 0;
+  const real = { readSync: fs.readSync, readFileSync: fs.readFileSync, createReadStream: fs.createReadStream };
+  const counting = () => {
+    fs.readSync = function (...a) { const n = real.readSync.apply(this, a); readBytes += n; return n; };
+    fs.readFileSync = function (...a) { const r = real.readFileSync.apply(this, a); readBytes += typeof r === 'string' ? Buffer.byteLength(r) : r.length; return r; };
+    fs.createReadStream = function (...a) { streams += 1; return real.createReadStream.apply(this, a); };
+  };
+  t.after(() => Object.assign(fs, real));
+  const tails = () => {
+    readBytes = 0; streams = 0; counting();
+    const a = process.hrtime.bigint();
+    try { for (let i = 0; i < 20; i++) hive.logTail(60); } finally { Object.assign(fs, real); }
+    return { bytes: readBytes, streams, ms: Number(process.hrtime.bigint() - a) / 1e6 };
+  };
   writeRows(log, 2000);
   const small = fs.statSync(log).size;
-  const tSmall = (() => { const a = process.hrtime.bigint(); for (let i = 0; i < 20; i++) hive.logTail(60); return Number(process.hrtime.bigint() - a) / 1e6; })();
+  const s = tails();
 
   writeRows(log, 200000);
   const big = fs.statSync(log).size;
   assert.ok(big > small * 50, `fixture must actually be much bigger (${small} -> ${big})`);
-  const tBig = (() => { const a = process.hrtime.bigint(); for (let i = 0; i < 20; i++) hive.logTail(60); return Number(process.hrtime.bigint() - a) / 1e6; })();
+  const b = tails();
+  t.diagnostic(`20 tails: ${small} B file read ${s.bytes} B in ${s.ms.toFixed(0)} ms; ${big} B file read ${b.bytes} B in ${b.ms.toFixed(0)} ms (times not asserted)`);
 
-  // The naive version is linear in file size; 50x the bytes cost ~50x the time. Allow a
-  // generous constant factor for filesystem noise - this fails loudly if anyone restores a
-  // whole-file read, and does not flake on a slow machine.
-  assert.ok(tBig < tSmall * 10 + 200,
-    `logTail must not scale with the file: ${small}B took ${tSmall.toFixed(0)}ms, ${big}B took ${tBig.toFixed(0)}ms`);
+  assert.equal(b.streams + s.streams, 0, 'no stream over the log');
+  assert.ok(s.bytes > 0, 'the counter sees the tail reads');
+  // The bounded window reads the same bytes whatever the file size; a whole-file read reads
+  // 20x the 50x-bigger file.
+  assert.ok(b.bytes <= s.bytes * 2, `logTail must not scale with the file: ${small} B file -> ${s.bytes} B read, ${big} B file -> ${b.bytes} B read`);
+  assert.ok(b.bytes < big, `20 tails of a ${big} B file read ${b.bytes} B - less than the file once`);
 });
