@@ -169,6 +169,14 @@ app.whenReady().then(async () => {
       return new Promise((resolve) => setTimeout(() => resolve({ size: win.getSize() }), 120));
     });
 
+    // IMPACT-LOOP-171: the renderer's OWN process memory (private bytes, as the app's
+    // RendererMemorySampler reads it), which a page cannot observe about itself.
+    ipcMain.handle('harness:metrics', () => {
+      const pid = win.webContents.getOSProcessId();
+      const r = app.getAppMetrics().find((x) => x.pid === pid);
+      return r ? { privateMb: Math.round((r.memory.privateBytes || 0) / 1024), workingSetMb: Math.round(r.memory.workingSetSize / 1024) } : null;
+    });
+
     // A REAL CLICK. `element.click()` dispatches an untrusted synthetic event from inside
     // the page; this goes through Chromium's input pipeline at window coordinates, so it
     // is hit-tested against what is actually rendered there and arrives `isTrusted`.
