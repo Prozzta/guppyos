@@ -1091,7 +1091,11 @@ export class HookServer {
   private readonly mailMovedLogged = new Set<string>();
   /** Q11: ids that held a block back at an earlier hook (passed over if they still do not fit). */
   private readonly mailBlocked = new Map<string, Set<string>>();
-  private readonly providerCache = new Map<string, { provider: AgentProvider | undefined; mode: MailChannelMode; at: number }>();
+  /** ONLY the provider is cached (it changes only with a respawn, and it costs a registry.json
+   *  read). The mail MODE is never cached: it follows the ledger's channel override, which a
+   *  degradation switches at any moment (god cce9ab: a Stop 5 s after the switch was closed in the
+   *  old mode, so its legacy-read acted never happened). */
+  private readonly providerCache = new Map<string, { provider: AgentProvider | undefined; at: number }>();
   static readonly PROVIDER_CACHE_MS = 5_000;
 
   /** The claims of the last handle() call (the transport settles them after the flush). */
@@ -1161,20 +1165,24 @@ export class HookServer {
     return [...(this.mailUnreadable.get(agentId)?.keys() ?? [])];
   }
 
-  /** The agent's provider and mail channel mode (§11.9), cached briefly (registry.json is read
-   *  from disk). With no ledger on the hive (a test double) there is no injection. */
+  /** The agent's provider (cached briefly: registry.json is read from disk) and its mail channel
+   *  mode (§11.9), computed FRESH on every call from the ledger's channel override (an in-memory
+   *  read), so a degradation applies to the very next hook. With no ledger on the hive (a test
+   *  double) there is no injection. */
   mailChannel(agentId: string): { provider: AgentProvider | undefined; mode: MailChannelMode } {
     const now = Date.now();
-    const c = this.providerCache.get(agentId);
-    if (c && now - c.at < HookServer.PROVIDER_CACHE_MS) return c;
     let provider: AgentProvider | undefined;
-    try { provider = normalizeAgentProvider(this.hive.registry?.().agents[agentId]?.provider); } catch { provider = undefined; }
-    if (!provider) { try { if (this.hive.codexHomeFor?.(agentId)) provider = 'codex'; } catch { /* none */ } }
+    const c = this.providerCache.get(agentId);
+    if (c && now - c.at < HookServer.PROVIDER_CACHE_MS) {
+      provider = c.provider;
+    } else {
+      try { provider = normalizeAgentProvider(this.hive.registry?.().agents[agentId]?.provider); } catch { provider = undefined; }
+      if (!provider) { try { if (this.hive.codexHomeFor?.(agentId)) provider = 'codex'; } catch { /* none */ } }
+      this.providerCache.set(agentId, { provider, at: now });
+    }
     let override = null;
     try { override = this.hive.mail?.channelOverride(agentId) ?? null; } catch { override = null; }
-    const entry = { provider, mode: this.hive.mail ? mailChannelMode(provider, override) : 'legacy-move' as MailChannelMode, at: now };
-    this.providerCache.set(agentId, entry);
-    return entry;
+    return { provider, mode: this.hive.mail ? mailChannelMode(provider, override) : 'legacy-move' as MailChannelMode };
   }
 
   /** The transcript (Claude) or rollout (Codex) that records what reached the model. */

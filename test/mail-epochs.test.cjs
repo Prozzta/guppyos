@@ -683,3 +683,25 @@ test('WIRING: main connects the mail epochs and the wake coordinator both ways; 
   // K13: main's pending source IS the tested rule, wired to the HookServer and the ledger.
   assert.match(index, /function mailPendingIds\(agentId: string\): string\[\] \{\s*return coordinatorPendingIds\(agentId, \{\s*mode: \(a\) => hookServer\.mailChannel\(a\)\.mode,\s*pending: \(a\) => hive\.mail\.pending\(a\),\s*skipped: \(a\) => hookServer\.mailSkippedIds\(a\),\s*files: \(a\) => hive\.inbox\(a\)\.map\(\(m\) => m\.id\)\s*\}\);\s*\}/);
 });
+
+test('god cce9ab: a mode SWITCH immediately followed by a Stop is closed in the NEW mode: the wake-named mail is acted under legacy-read (the mode is never cached)', async (t) => {
+  const w = await world(t, { providers: { 'cl-1': 'claude' }, confirms: () => false });
+  w.fire('cl-1', 'Stop', { transport: 'pipe' });
+  assert.equal(w.server.mailChannel('cl-1').mode, 'inject', 'inject before the switch (and the provider is now cached)');
+  const m = w.send('cl-1', { subject: 'named by the wake' });
+  await w.flush();
+  assert.equal(w.reqs.length, 1, 'one wake');
+  // The degradation lands between the wake and the turn: the SAME millisecond, no cache expiry.
+  w.hive.mail.degradeChannel('cl-1', 'zero-hook-traffic', {});
+  assert.equal(w.server.mailChannel('cl-1').mode, 'legacy-read', 'the very next read sees the switch');
+  w.fire('cl-1', 'UserPromptSubmit', { prompt: w.reqs[0].text, transport: 'pipe' });
+  w.fire('cl-1', 'Stop', { transport: 'pipe' });
+  assert.equal(w.entry('cl-1', m.id).state, 'acted', 'acted at that Stop');
+  assert.ok(w.rows('mail').some((r) => r.stage === 'acted' && r.mode === 'legacy-read' && r.ids.includes(m.id)), 'under legacy-read');
+  // Source pin: the cache holds the provider only; the mode is computed on every call.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(src, /private readonly providerCache = new Map<string, \{ provider: AgentProvider \| undefined; at: number \}>\(\);/);
+  const fn = src.slice(src.indexOf('  mailChannel(agentId: string)'), src.indexOf('\n  }\n', src.indexOf('  mailChannel(agentId: string)')));
+  assert.ok(!/return c;/.test(fn), 'no cached mode is returned');
+  assert.match(fn, /override = this\.hive\.mail\?\.channelOverride\(agentId\)/);
+});
