@@ -18,7 +18,8 @@
  * Every lookup is async: executables are resolved with `where` / `command -v` through execFile,
  * never a sync child process on main. A .cmd/.bat shim runs through cmd.exe /d /s /c with fixed
  * arguments; a path with a quote or cmd metacharacter is refused. Each run is hidden and time-boxed.
- * The file is re-validated on every read, so a hand edit cannot put an unsafe id on a command line.
+ * The file is re-validated when it is loaded (once per process, then cached; a refresh replaces the
+ * cached copy with its own validated result), so a hand edit cannot put an unsafe id on a command line.
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
