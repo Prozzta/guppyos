@@ -11,6 +11,26 @@
 //   already patched -> no-op (second npm ci / npm rebuild / npm run postinstall)
 //   anything else  -> throw (different node-pty, partial patch, line-ending change, ...)
 // `--root <node-pty dir>` targets another tree (used by the self-test only).
+//
+// Lock scope = upstream's exactly (resize/clear/kill hold g_ptyHandlesMutex for the whole
+// call, including ClosePseudoConsole). Deadlock review:
+//   - One mutex only, so no lock-order inversion is possible; the question is only whether a
+//     holder can wait on something that itself needs the mutex.
+//   - Watcher threads take it after WaitForSingleObject(hShell) returns, for
+//     GetExitCodeProcess + CloseHandle + erase (none block), and release it BEFORE
+//     tsfn.BlockingCall; with the unlimited queue (size 0) BlockingCall does not wait for the
+//     main thread anyway.
+//   - ClosePseudoConsole on inbox conhost can block until conhost has drained its output
+//     pipe. That pipe is read by node-pty's conout Worker thread (JS, net sockets), which
+//     never calls into conpty.node, and conhost's exit does not depend on any watcher
+//     thread. A watcher that wakes meanwhile just waits for kill() to return.
+//   - The only thread join (the tsfn finalizer's th->join()) runs from the main thread's
+//     event loop, never inside a locked native call, so the main thread never joins a
+//     watcher while holding the mutex.
+//   - Releasing before ClosePseudoConsole (upstream does not) would re-open a
+//     use-after-free: the watcher may erase (free) the baton whose hpc/hShell kill reads.
+//   Cost: if ClosePseudoConsole hangs (a pre-existing conhost drain hazard), other PTYs'
+//   exit notifications wait too; the main thread is blocked in that case regardless.
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
