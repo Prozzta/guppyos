@@ -81,7 +81,7 @@ export type PreconditionVerdict = 'send' | 'drop';
  *  indefinitely. */
 export async function checkPrecondition(
   message: DeliveryGateMessage,
-  readInbox: () => Promise<{ id?: string }[]>
+  readInbox: () => Promise<readonly unknown[]>
 ): Promise<PreconditionVerdict> {
   if (message.precondition !== 'inbox-nonempty') return 'send';
   try {

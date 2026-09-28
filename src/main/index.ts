@@ -52,6 +52,7 @@ import {
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
 import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
+import { actionableBacklog, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
@@ -1197,7 +1198,9 @@ function collectFloorState(): FloorState {
       // The SAME exclusion the heartbeat already uses. Counting the scheduler's
       // own beats as floor activity would be the "hash your own exhaust" mistake
       // — it is the dispatch we are deciding about that puts them there.
-      actionableInbox = hive.inbox(id).filter((msg) => !SYSTEM_SENDERS.has(msg.from)).length;
+      // ZT-I1-MAIL §11.8 #9: from the LEDGER (not acted), never from inbox/ file
+      // position: the harness archives at Stop, so a file count means nothing.
+      actionableInbox = actionableBacklog(hive.mail, id);
     } catch {
       // NOT zero. A zero here is indistinguishable from an empty inbox, so two
       // failed reads in a row would hash identically and the gate would suppress
@@ -1652,29 +1655,35 @@ function isFloorQuiet(thresholdMs: number): boolean {
   const agentsDir = join(root, 'agents');
   if (existsSync(agentsDir)) {
     for (const id of readdirSync(agentsDir)) {
-      pushMtime(join(agentsDir, id, 'inbox'));
       pushMtime(join(agentsDir, id, 'outbox', '.sent'));
     }
   }
+  // ZT-I1-MAIL §11.8 #10: mail activity is the LEDGER's last non-harness transition, not the
+  // inbox/ directory mtime, which the harness's own rename into .done moves. An agent whose
+  // ledger cannot be read falls back to its inbox mtime (louder, so never a false "quiet").
+  let active: string[] = [];
+  try { active = Object.entries(hive.registry().agents).filter(([, a]) => !a.archived).map(([id]) => id); } catch { /* none */ }
+  const mail = floorMailActivityAt(hive.mail, active);
+  if (mail.at !== null) times.push(mail.at);
+  for (const id of mail.failed) pushMtime(join(agentsDir, id, 'inbox'));
   for (const t of ptyManager.list()) times.push(t.lastOutputAt);
   if (times.length === 0) return false; // nothing to judge → don't fire
   return Date.now() - Math.max(...times) > thresholdMs;
 }
 
-/** Newest coordination-file mtime for one agent (inbox + inbox/.done, outbox +
- *  outbox/.sent, memory.md) — FILES only, deliberately excluding PTY output, so
- *  "no-progress" means "not coordinating" even while the agent is busy printing
- *  tokens. inbox/.done and the outbox dir count because handling mail (moving a
- *  message to .done, drafting an outbox message) IS coordination — without them
- *  an inbox-ack turn reads as no-progress (issue #109's second trigger). */
+/** Newest coordination time for one agent: its own outbox + outbox/.sent and memory.md mtimes,
+ *  plus its last ACTED mail transition from the ledger. Deliberately excludes PTY output, so
+ *  "no-progress" means "not coordinating" even while the agent is busy printing tokens. Handling
+ *  mail IS coordination (without it an inbox-ack turn reads as no-progress, issue #109's second
+ *  trigger), but since 1.1.75 the HARNESS moves handled mail into inbox/.done, so neither the
+ *  inbox nor the .done mtime is the agent's doing (ZT-I1-MAIL §11.8 #11): the ledger's `acted`
+ *  transition is the signal. A delivery into the inbox is the sender's act, not this agent's. */
 function lastCoordinationAt(agentId: string): number {
   const root = hive.root();
   if (!root) return 0;
-  const times: number[] = [0];
+  const times: number[] = [0, mailCoordinationAt(hive.mail, agentId)];
   const pushMtime = (p: string): void => { try { times.push(statSync(p).mtimeMs); } catch { /* missing */ } };
   const dir = join(root, 'agents', agentId);
-  pushMtime(join(dir, 'inbox'));
-  pushMtime(join(dir, 'inbox', '.done'));
   pushMtime(join(dir, 'outbox'));
   pushMtime(join(dir, 'outbox', '.sent'));
   pushMtime(join(dir, 'memory.md'));
@@ -1718,7 +1727,8 @@ function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
   const names = active.map(([, a]) => a.name).join(', ') || '—';
   const boardHead = hive.board().split('\n').slice(0, 10).join('\n').trim();
   const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
-  const withInbox = active.filter(([id]) => hive.inbox(id).length > 0).map(([, a]) => a.name);
+  // ZT-I1-MAIL §11.8 #12: mail not yet acted, from the ledger (the harness archives at Stop).
+  const withInbox = active.filter(([id]) => { try { return hasBacklog(hive.mail, id); } catch { return hive.inbox(id).length > 0; } }).map(([, a]) => a.name);
   // When real agent/human mail is waiting, lead with an explicit call-to-action
   // instead of the "quiet" line — this beat fired BECAUSE of unread actionable
   // inbox, not because the floor went quiet, and god must read it now.
@@ -1740,11 +1750,9 @@ function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
   ].join('\n');
 }
 
-/** Senders whose mail is the scheduler's OWN noise (heartbeat beats, ops-standup
- *  via 'scheduler', breaker steers, generic 'system') — never a reason to wake
- *  god. Everything else (a worker agent id, 'webhook', a human reply) is real
- *  mail god must act on. Kept narrow so any future real sender counts by default. */
-const SYSTEM_SENDERS = new Set(['heartbeat', 'scheduler', 'breaker', 'system']);
+// SYSTEM_SENDERS (the scheduler's own noise: heartbeat, scheduler, breaker, system) lives in
+// mailReaders.ts, next to the ledger readers that apply it. Kept narrow so any future real
+// sender counts by default.
 
 /** Count of UNREAD actionable messages in god's inbox — real agent/human mail,
  *  excluding the scheduler's own beats. Drives an inbox-aware re-engage so a
@@ -1755,7 +1763,8 @@ function godActionableInboxCount(): number {
   try {
     const godId = hive.registry().godId;
     if (!godId) return 0;
-    return hive.inbox(godId).filter((m) => !SYSTEM_SENDERS.has(m.from)).length;
+    // ZT-I1-MAIL §11.8 #13: god's mail not yet acted, from the ledger, not inbox/ files.
+    return actionableBacklog(hive.mail, godId);
   } catch { return 0; }
 }
 
@@ -1972,6 +1981,12 @@ function runBreakerBeat(progressWindowMs: number): void {
  *  it cannot answer "what has this agent cost us". See costLifetime.ts. */
 const costTotals = new CostLedgerTotals();
 
+/** ZT-I1-MAIL §3 #6: one agent's mail fields for fleet.json, from its ledger. A ledger that
+ *  cannot be read keeps the backlog (file count) and publishes no obligation lists. */
+function fleetMail(id: string): Partial<ReturnType<typeof fleetMailFields>> & { inboxBacklog: number } {
+  try { return fleetMailFields(hive.mail, id); } catch { return { inboxBacklog: hive.inboxBacklog(id) }; }
+}
+
 /** Build + write the live fleet snapshot Michael reads (`<hive>/fleet.json`).
  *  Always-on (independent of the heartbeat) since `claude agents` can't see the
  *  hive's sibling sessions. PII-free; never throws (called from a timer). */
@@ -2007,7 +2022,9 @@ function writeFleetSnapshot(): void {
           sessionUsd,
           lastTool: spans.length ? spans[spans.length - 1].tool : null,
           lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
-          inboxBacklog: hive.inboxBacklog(id),
+          // ZT-I1-MAIL §3 #6: inboxBacklog (not acted), awaitingReply[] (§4.3) and
+          // openRequests[] (§11.13 option B), all from the ledger. Zero-token: data only.
+          ...fleetMail(id),
           onHold: !!a.onHold,
           // D8: this agent's wake history, next to the backlog it is supposed to drain.
           // Those two numbers together are the whole question — mail waiting, and whether
@@ -4365,7 +4382,17 @@ ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
-ipcMain.handle('hive:inbox', (_evt, id: unknown) => (typeof id === 'string' ? hive.inbox(id) : []));
+// ZT-I1-MAIL §11.8 #15: the Threads panel reads inbox/ AND inbox/.done/ with the ledger state as a
+// column, so the view does not empty when the harness archives at Stop.
+ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
+  if (typeof id !== 'string' || !id) return [];
+  let archived = false;
+  try { archived = !!hive.registry().agents[id]?.archived; } catch { /* unknown: not archived */ }
+  return hive.mailHistory(id, { archived });
+});
+// ZT-I1-MAIL §11.8 #16: the queue's "inbox-nonempty" precondition asks the LEDGER (the wake
+// coordinator's pending source: delivered, not yet surfaced), not the inbox listing.
+ipcMain.handle('hive:mailPending', (_evt, id: unknown) => (typeof id === 'string' && id ? mailPendingIds(id) : []));
 // ZT-I1-MAIL N2: the renderer confirmed a terminal work order's PTY write (COMMITTED): the ledger
 // records it acted via:"work-order" (the whole body is in the typed text; never in the backlog).
 ipcMain.handle('hive:workOrderDelivered', (_evt, e: unknown) => {
@@ -4880,7 +4907,7 @@ ipcMain.handle('hive:agentDirectory', () => {
       isAssistant: !!a.isAssistant,
       sessionId: a.sessionId ?? null,
       hasMemory: hive.hasMemory(id),
-      inboxBacklog: hive.inboxBacklog(id),
+      inboxBacklog: hive.inboxBacklog(id, { archived: !!a.archived }),
       breaker: breaker.levelFor(id),
       tokens,
       usd: u ? Number(u.usd.toFixed(4)) : 0,
@@ -5651,10 +5678,15 @@ const completionWatcher = initCompletionWatcher({
     // Voice dispatches go out from:michael-voice, so done-replies normally land in its
     // inbox — but an assignee may address god out of habit. Merge both inboxes (de-dupe
     // by id) so a god-addressed completion isn't missed; the detector filters by sender.
+    // ZT-I1-MAIL §11.8 #14: god's mail is read from its LEDGER (every state), so a done-reply the
+    // harness archived into .done at god's Stop is still seen; the inbox files are kept as well
+    // (michael-voice is no agent and has no ledger; a ledger error must not blind the watcher).
     try {
       const mv = hive.inbox('michael-voice') as unknown as InboxMessage[];
       const godId = hive.registry().godId;
-      const god = godId ? (hive.inbox(godId) as unknown as InboxMessage[]) : [];
+      let godLedger: InboxMessage[] = [];
+      if (godId) { try { godLedger = ledgerInboxMessages(hive.mail, godId); } catch { godLedger = []; } }
+      const god = godId ? [...(hive.inbox(godId) as unknown as InboxMessage[]), ...godLedger] : [];
       const seen = new Set<string>();
       return [...mv, ...god].filter((m) => !!m?.id && !seen.has(m.id) && seen.add(m.id) !== undefined);
     } catch {

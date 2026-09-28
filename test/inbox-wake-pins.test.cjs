@@ -71,7 +71,9 @@ test('the renderer HINTS but never SUBMITS an inbox wake; ordinary queued messag
   assert.ok(!/inboxNudgeText|enqueueMessage|autoSubmit/.test(hint),
     'the hint loop builds no text, queues nothing and submits nothing');
   // Effect #4 - the ordinary queue drain - stays, including its inbox precondition check.
-  assert.match(hive, /checkPrecondition\(next, \(\) => window\.cth\.hiveInbox\(srcId\)\)/);
+  // ZT-I1-MAIL §11.8 #16: the precondition reads the LEDGER's delivered ids (hive:mailPending),
+  // not the inbox listing, since the harness archives files itself.
+  assert.match(hive, /checkPrecondition\(next, \(\) => window\.cth\.hiveMailPending\(srcId\)\)/);
   assert.match(hive, /enqueueMessage\(/, 'the renderer still queues its own sends (e.g. /compact)');
 });
 

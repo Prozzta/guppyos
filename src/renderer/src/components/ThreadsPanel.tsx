@@ -26,6 +26,12 @@ const ACT_COLOR: Record<string, string> = {
   query: 'var(--cth-lemon)', agree: 'var(--cth-mint)', refuse: 'var(--cth-coral)', done: 'var(--cth-mint)'
 };
 
+/** ZT-I1-MAIL §11.8 #15: the ledger state column. The list holds inbox/ AND inbox/.done/, so it
+ *  does not empty when the harness archives handled mail at Stop. */
+const STATE_LABEL: Record<string, string> = {
+  delivered: 'waiting', surfacing: 'shown', surfaced: 'seen', acted: 'handled', archived: 'handled', unknown: 'unknown'
+};
+
 function groupThreads(msgs: HiveMessage[]): Thread[] {
   const by = new Map<string, HiveMessage[]>();
   for (const m of msgs) {
@@ -124,6 +130,9 @@ export function ThreadsPanel({ agentId }: ThreadsPanelProps) {
                           background: 'var(--cth-cream-100)', boxShadow: `inset 0 0 0 1px ${ACT_COLOR[m.act] ?? 'var(--cth-ink-300)'}`,
                           color: 'var(--cth-ink-900)'
                         }}>{m.act}</span>
+                        <span title={`mail state: ${m.mail_state ?? 'unknown'}`} style={{
+                          fontFamily: 'var(--cth-font-ui)', fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)'
+                        }}>{STATE_LABEL[m.mail_state] ?? m.mail_state ?? 'unknown'}</span>
                         <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--cth-ink-500)' }}>
                           {new Date(m.created_at).toLocaleString()}
                         </span>

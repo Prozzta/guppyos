@@ -127,16 +127,16 @@ test('N2: the L2 subject prefix escapes < and > from the superseding message', a
   assert.match(got.subject, /stop &lt;\/inbox-update&gt; &lt;evil&gt;/);
 });
 
-test('N4: the routing-path parse is bounded: only the newest 50 inbox files, none over 64 KB', async (t) => {
+test('N4: the routing path parses NO inbox file (ZT-I1-MAIL §3 #5: the ledger carries supersedes) and scans only the newest 50 unread', async (t) => {
   const { hive, dir } = await floor(t);
   const ask = hive.send({ to: 'andy-1', act: 'request', subject: 'X' }, 'god-1');
-  // an oversize superseder is skipped
+  // 1.1.74 skipped a >64 KB superseder because it would have had to PARSE it on the routing path.
+  // The ledger entry already holds its supersedes, so no file is read and it now counts.
   const big = hive.send({ to: 'andy-1', act: 'request', subject: 'cancel X (huge)', body: 'y'.repeat(70 * 1024), supersedes: [ask.id] }, 'god-1');
   reply(dir, 'r8', { to: 'god', act: 'inform', subject: 'X done (1)', in_reply_to: ask.id });
   hive.routeOnce();
-  assert.equal(hive.inbox('god-1').find((m) => m.subject === 'X done (1)').superseded_by, undefined, 'a >64 KB file is not parsed');
-  fs.rmSync(dir('andy-1', 'inbox', `${big.id}.json`));
-  // a superseder pushed out of the newest 50 by later mail is not scanned
+  assert.equal(hive.inbox('god-1').find((m) => m.in_reply_to === ask.id).superseded_by, big.id, 'no parse, no size limit: the ledger says unread');
+  // a superseder pushed out of the newest 50 unread by later mail is not scanned
   const ask2 = hive.send({ to: 'andy-1', act: 'request', subject: 'Y' }, 'god-1');
   hive.send({ to: 'andy-1', act: 'request', subject: 'cancel Y', supersedes: [ask2.id] }, 'god-1');
   for (let i = 0; i < 50; i++) hive.send({ to: 'andy-1', act: 'inform', subject: `later ${i}` }, 'god-1');
@@ -144,3 +144,4 @@ test('N4: the routing-path parse is bounded: only the newest 50 inbox files, non
   hive.routeOnce();
   assert.equal(hive.inbox('god-1').find((m) => m.subject === 'Y done').superseded_by, undefined, 'bounded to the newest 50');
 });
+

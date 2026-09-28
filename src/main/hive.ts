@@ -2086,12 +2086,16 @@ export class HiveManager {
   }
 
   /**
-   * MIDTURN-MAIL-BLIND L2: the message in the SENDER's still-unread inbox that supersedes the
-   * one `msg` answers, if any. The case it catches: A asks B for X; B starts working; A sends
-   * "cancel X" (supersedes: [X]); B, mid-turn, never sees it and sends its result for X. The
-   * cancel is then sitting unread in B's inbox (not in inbox/.done) at the moment B's reply is
-   * routed. A superseding message that B has already READ (moved to .done) is not a match: then
-   * the reply was sent knowingly. Reads only B's inbox directory (a handful of files).
+   * MIDTURN-MAIL-BLIND L2: the message still UNREAD by the SENDER that supersedes the one `msg`
+   * answers, if any. The case it catches: A asks B for X; B starts working; A sends "cancel X"
+   * (supersedes: [X]); B, mid-turn, never sees it and sends its result for X. A superseding
+   * message B has already seen is not a match: then the reply was sent knowingly.
+   *
+   * ZT-I1-MAIL §3 #5: "unread" is read from B's LEDGER, not from file position (the harness now
+   * moves files itself, at Stop): the superseding message is still `delivered` there, i.e. never
+   * surfaced into B's context. For a legacy-move agent (cursor, §11.7) its own move into .done
+   * still means it read the message, so the file must also still be in inbox/. No file is parsed
+   * on the routing path: the ledger entry carries id, from, subject and supersedes.
    */
   private unreadSupersederFor(msg: HiveMessage): HiveMessage | null {
     if (!msg.in_reply_to) return null;
@@ -2109,26 +2113,21 @@ export class HiveManager {
       targets.add(parent);
       cur = parent;
     }
+    let unread: ReturnType<MailLedger['pending']>;
+    try { unread = this.mail.pending(msg.from); } catch { return null; }
     const inbox = join(this.agentDir(msg.from), 'inbox');
-    let files: string[];
-    try { files = readdirSync(inbox).filter((f) => f.endsWith('.json')); } catch { return null; }
-    // N4 (Jim): a bounded synchronous parse, on the routing path: the newest 50 files (ids are
-    // time-stamped, so the name order is the arrival order), none over 64 KB.
-    files.sort();
-    for (const f of files.slice(-HiveManager.SUPERSEDE_SCAN_MAX_FILES).reverse()) {
-      try {
-        const full = join(inbox, f);
-        if (statSync(full).size > HiveManager.SUPERSEDE_SCAN_MAX_BYTES) continue;
-        const m = JSON.parse(readFileSync(full, 'utf8')) as Partial<HiveMessage>;
-        const sup = normalizeSupersedes(m.supersedes).supersedes;
-        if (sup && sup.some((s) => targets.has(s)) && typeof m.id === 'string') return m as HiveMessage;
-      } catch { /* a file being written: not a match this time */ }
+    // N4 (Jim), kept: the newest 50 unread messages (arrival order, never id order).
+    for (const e of unread.slice(-HiveManager.SUPERSEDE_SCAN_MAX_FILES).reverse()) {
+      if (!e.supersedes?.some((s) => targets.has(s))) continue;
+      if (e.via !== 'inbox' || !existsSync(join(inbox, `${e.id}.json`))) continue;
+      return { id: e.id, from: e.from, subject: e.subject, supersedes: e.supersedes } as unknown as HiveMessage;
     }
     return null;
   }
 
   static readonly SUPERSEDE_ANCESTOR_HOPS = 3;
   static readonly SUPERSEDE_SCAN_MAX_FILES = 50;
+  /** The bound on the ancestor lookup's parse (findDeliveredMessage). */
   static readonly SUPERSEDE_SCAN_MAX_BYTES = 64 * 1024;
 
   /** A delivered message by id: <id>.json in any agent's inbox or inbox/.done, or null. */
@@ -2891,12 +2890,85 @@ export class HiveManager {
       : 12;
     return out.slice(0, lim);
   }
-  /** Count undrained inbox messages for an agent (cheap — for the fleet snapshot). */
-  inboxBacklog(id: string): number {
+  /**
+   * The fleet `inboxBacklog` (ZT-I1-MAIL §3 #6): the agent's mail not yet acted, from its LEDGER
+   * (delivered + surfacing + surfaced; terminal work orders are acted by definition, N2). File
+   * position means nothing any more: the harness moves a file into .done only when it is acted.
+   * An archived agent's ledger is never loaded here (its inbox is left to the §7.1 step-2
+   * migration), so it counts its files, as before; so does a ledger that cannot be read.
+   */
+  inboxBacklog(id: string, opts: { archived?: boolean } = {}): number {
+    if (!opts.archived) {
+      try { return this.mail.backlog(id).length; } catch { /* fall back to the files */ }
+    }
     const dir = join(this.agentDir(id), 'inbox');
     if (!existsSync(dir)) return 0;
     try { return readdirSync(dir).filter((f) => f.endsWith('.json')).length; } catch { return 0; }
   }
+
+  /**
+   * ZT-I1-MAIL §11.8 #15: an agent's mail for the Threads panel, from inbox/ AND inbox/.done/, so
+   * the view does not empty when the harness archives at Stop. Each message carries its ledger
+   * state as `mail_state` (`delivered | surfacing | surfaced | acted`; `archived` for a .done
+   * file the ledger no longer holds, e.g. pruned after 7 days or handled before 1.1.75; `unknown`
+   * for an inbox file with no ledger entry) and `archived` (the file is in .done). Bounded: every
+   * inbox file plus the newest .done files by mtime, `limit` in all; parsed files are cached by
+   * path + size + mtime, so a 3 s poll re-reads only what changed. An archived agent's ledger is
+   * not loaded (see inboxBacklog).
+   */
+  mailHistory(agentId: string, opts: { limit?: number; archived?: boolean } = {}): Array<HiveMessage & { mail_state: string; archived: boolean }> {
+    const limit = Math.max(1, Math.min(1000, Math.round(opts.limit ?? HiveManager.MAIL_HISTORY_LIMIT)));
+    const inbox = join(this.agentDir(agentId), 'inbox');
+    const list = (dir: string, archived: boolean): Array<{ path: string; stem: string; archived: boolean; mtimeMs: number; size: number }> => {
+      let names: string[];
+      try { names = readdirSync(dir).filter((f) => f.endsWith('.json')); } catch { return []; }
+      const out: Array<{ path: string; stem: string; archived: boolean; mtimeMs: number; size: number }> = [];
+      for (const n of names) {
+        const p = join(dir, n);
+        try { const st = statSync(p); if (st.isFile()) out.push({ path: p, stem: n.slice(0, -5), archived, mtimeMs: st.mtimeMs, size: st.size }); } catch { /* moved meanwhile */ }
+      }
+      return out;
+    };
+    const live = list(inbox, false);
+    const liveStems = new Set(live.map((f) => f.stem));
+    const done = list(join(inbox, '.done'), true).filter((f) => !liveStems.has(f.stem)).sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const files = [...live.sort((a, b) => b.mtimeMs - a.mtimeMs), ...done].slice(0, Math.max(limit, 0));
+    let entries: Record<string, { state: string }> = {};
+    if (!opts.archived) {
+      try { entries = this.mail.ledger(agentId).entries; } catch { entries = {}; }
+    }
+    const seen = new Set<string>();
+    const out: Array<HiveMessage & { mail_state: string; archived: boolean }> = [];
+    for (const f of files.sort((a, b) => a.mtimeMs - b.mtimeMs)) {
+      const key = `${f.path}|${f.size}|${f.mtimeMs}`;
+      let msg = this.mailHistoryCache.get(f.path);
+      if (!msg || msg.key !== key) {
+        let parsed: HiveMessage | null = null;
+        try {
+          if (f.size <= HiveManager.INBOX_MESSAGE_MAX_BYTES) {
+            const m = JSON.parse(readFileSync(f.path, 'utf8')) as unknown;
+            if (m && typeof m === 'object' && !Array.isArray(m)) parsed = m as HiveMessage;
+          }
+        } catch { parsed = null; }
+        msg = { key, msg: parsed };
+        this.mailHistoryCache.set(f.path, msg);
+        if (this.mailHistoryCache.size > HiveManager.MAIL_HISTORY_CACHE_MAX) {
+          const first = this.mailHistoryCache.keys().next().value;
+          if (first !== undefined) this.mailHistoryCache.delete(first);
+        }
+      }
+      if (!msg.msg) continue;
+      const id = typeof msg.msg.id === 'string' && msg.msg.id ? msg.msg.id : f.stem;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const state = entries[f.stem]?.state ?? entries[id]?.state ?? (f.archived ? 'archived' : 'unknown');
+      out.push({ ...msg.msg, id, mail_state: state, archived: f.archived });
+    }
+    return out;
+  }
+  static readonly MAIL_HISTORY_LIMIT = 200;
+  static readonly MAIL_HISTORY_CACHE_MAX = 2000;
+  private readonly mailHistoryCache = new Map<string, { key: string; msg: HiveMessage | null }>();
   /** Install the Antigravity (`agy`) lifecycle-hook bridge: write the normalizer
    *  shim and merge a `munder-hive` hook group into agy's global hooks.json so a
    *  Gemini worker reports PreToolUse/PostToolUse/Stop/PreInvocation/PostInvocation

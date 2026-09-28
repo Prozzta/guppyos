@@ -785,7 +785,9 @@ export function useHive(config: HarnessConfig | null): void {
       // there is still something in the inbox — the agent routinely drains it in
       // the very turn the nudge was queued from. Stale ones are DROPPED, not
       // deferred, so they cannot park at the queue head and starve the rest.
-      if (await checkPrecondition(next, () => window.cth.hiveInbox(srcId)) === 'drop') {
+      // ZT-I1-MAIL §11.8 #16: "something to announce" = the ledger still holds mail as
+      // delivered (not yet surfaced into the agent's context), not "a file is in inbox/".
+      if (await checkPrecondition(next, () => window.cth.hiveMailPending(srcId)) === 'drop') {
         removeQueuedMessage(srcId, next.id);
         return { sent: false };
       }

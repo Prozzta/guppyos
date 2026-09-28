@@ -82,6 +82,14 @@ export interface HiveMessage {
   created_at: string;
 }
 
+/** ZT-I1-MAIL §11.8 #15: a message as the Threads panel reads it, from inbox/ or inbox/.done/,
+ *  with its ledger state: `delivered | surfacing | surfaced | acted`, `archived` (a .done file
+ *  the ledger no longer holds) or `unknown` (an inbox file with no ledger entry). */
+export interface HiveMailRow extends HiveMessage {
+  mail_state: string;
+  archived: boolean;
+}
+
 /** A hive message reshaped for the voice read-layer (`hive:messages`). `subject`
  *  and `body` are REDACTED in the main process before crossing this boundary —
  *  the renderer never receives a raw body or a secret. Mirror of `VoiceMessage`
@@ -895,7 +903,11 @@ const api = {
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
-  hiveInbox: (id: string): Promise<HiveMessage[]> => ipcRenderer.invoke('hive:inbox', id),
+  /** ZT-I1-MAIL §11.8 #15: inbox/ + inbox/.done/ (bounded), each with its ledger state. */
+  hiveInbox: (id: string): Promise<HiveMailRow[]> => ipcRenderer.invoke('hive:inbox', id),
+  /** ZT-I1-MAIL §11.8 #16: the ids the ledger holds as delivered (not yet surfaced) for this
+   *  agent: the wake coordinator's pending set. */
+  hiveMailPending: (id: string): Promise<string[]> => ipcRenderer.invoke('hive:mailPending', id),
   /** ZT-I1-MAIL N2: the PTY write of a terminal work order was confirmed (COMMITTED). */
   hiveWorkOrderDelivered: (e: { agentId: string; messageId: string; from?: string; act?: string; subject?: string; requiresReply?: boolean }): Promise<boolean> =>
     ipcRenderer.invoke('hive:workOrderDelivered', e),

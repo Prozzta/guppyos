@@ -176,6 +176,10 @@ test('fleet.json carries the floor rollup and each agent its own counters', () =
   // (HEAVY-JOB-SERIALIZE 1.1.55 adds the heavy-lock holders to the same snapshot.)
   assert.match(index, /hive\.writeFleetSnapshot\(\{ ts: now, agents, wake: wakeTelemetry\.snapshot\(now\)(, heavyLock: [^\n]*)? \}\)/);
   assert.match(index, /wake: wakeTelemetry\.forAgent\(id\)/, 'per-agent counters ride with the row');
-  const row = index.slice(index.indexOf('inboxBacklog: hive.inboxBacklog(id)'), index.indexOf('wake: wakeTelemetry.forAgent(id)'));
-  assert.ok(row.length < 500, 'and they sit next to the backlog they explain');
+  // ZT-I1-MAIL §3 #6: the backlog (and awaitingReply / openRequests) now come from the ledger
+  // through fleetMail(id); the wake counters still sit next to it.
+  const at = index.indexOf('...fleetMail(id),');
+  assert.ok(at > 0, 'the row spreads the ledger mail fields');
+  const row = index.slice(at, index.indexOf('wake: wakeTelemetry.forAgent(id)'));
+  assert.ok(row.length > 0 && row.length < 500, 'and they sit next to the backlog they explain');
 });
