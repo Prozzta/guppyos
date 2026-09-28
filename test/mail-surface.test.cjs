@@ -135,9 +135,11 @@ test('Jim audit #3 (the probe): a 12,000-character message then a small one, at 
 });
 
 test('Q11 (god\'s ruling): a big message cannot block smaller later ones for more than one hook', () => {
-  // A message whose header alone is huge (200 escaped "<" = 800 characters) cannot be truncated to
-  // the 1,000-character minimum inside a 2,000 budget: at the first hook it holds the block back.
-  const big = item({ id: 'huge', subject: '<'.repeat(200) }, 'H'.repeat(5_000));
+  // A message whose header alone is huge (subject, conversation and in_reply_to of 200 escaped "<",
+  // 800 characters each) cannot surface inside a 2,000 budget at all, not even as header + path
+  // (Q22): at the first hook it holds the block back. (Slice-fixup Q22: with only a huge SUBJECT it
+  // now surfaces as header + path at once, see the Q22 test below, so the header is made larger.)
+  const big = item({ id: 'huge', subject: '<'.repeat(200), conversation: '<'.repeat(200), inReplyTo: '<'.repeat(200) }, 'H'.repeat(5_000));
   const s1 = item({ id: 's1' }, 'one');
   const s2 = item({ id: 's2' }, 'two');
   const h1 = S.buildMailBlock({ items: [big, s1, s2], budget: 2_000, phase: 'turn-start' });
@@ -150,6 +152,37 @@ test('Q11 (god\'s ruling): a big message cannot block smaller later ones for mor
   assert.match(h2.text, /1 more message\(s\) will follow at a later hook: \[huge\]/);
   // With room, it surfaces in its turn.
   assert.deepEqual(S.buildMailBlock({ items: [big], budget: 9_500, phase: 'mid-turn', skippable: new Set(['huge']) }).surfacing, ['huge']);
+});
+
+test('Q22 (Creed): under 1,000 characters LEFT, a message waits for the fresh budget of the next hook (and then truncates to fit, never header + path)', () => {
+  const a0 = item({ id: 'a0' }, 'a'.repeat(1_900));
+  const big = item({ id: 'big' }, 'B'.repeat(5_000));
+  const h1 = S.buildMailBlock({ items: [a0, big], budget: 3_000, phase: 'turn-start' });
+  assert.deepEqual(h1.surfacing, ['a0']);
+  assert.deepEqual(h1.pathOnly, []);
+  assert.deepEqual(h1.blocked, ['big'], 'under the floor after a0: it waits');
+  const h2 = S.buildMailBlock({ items: [big], budget: 3_000, phase: 'mid-turn', skippable: new Set(h1.blocked) });
+  assert.deepEqual(h2.surfacing, ['big']);
+  assert.deepEqual(h2.truncated, ['big']);
+  assert.deepEqual(h2.pathOnly, [], 'a fresh budget leaves the floor: a real truncation');
+  assert.ok(h2.text.includes('B'.repeat(S.MAIL_TRUNCATE_MIN_CHARS)));
+});
+
+test('Q22 (Creed): when even a FRESH budget leaves under 1,000 characters, the message surfaces as header + path only (pathOnly), never waiting forever', () => {
+  const big = item({ id: 'huge', subject: '<'.repeat(200) }, 'H'.repeat(5_000));
+  const small = item({ id: 's1' }, 'one');
+  const blk = S.buildMailBlock({ items: [big, small], budget: 1_800, phase: 'turn-start' });
+  assert.deepEqual(blk.surfacing[0], 'huge');
+  assert.deepEqual(blk.pathOnly, ['huge']);
+  assert.ok(blk.truncated.includes('huge'));
+  assert.ok(blk.text.length <= 1_800, `${blk.text.length}`);
+  assert.ok(blk.text.includes('[hive-mail:huge]'), 'the marker: it is a surfacing');
+  assert.ok(blk.text.includes('[body not shown: 5000 characters do not fit this hook. The full message is in C:/hive/agents/a/inbox/huge.json; read it there]'));
+  assert.ok(!blk.text.includes('HHHH'), 'no body at all');
+  // A roomier hook gets a real truncation, not header + path.
+  const roomy = S.buildMailBlock({ items: [big], budget: 9_500, phase: 'turn-start' });
+  assert.deepEqual(roomy.pathOnly, []);
+  assert.deepEqual(roomy.surfacing, ['huge']);
 });
 
 test('builder: the drip: what does not fit is deferred in order (later mail never overtakes earlier mail) and named in a "will follow" line', () => {
@@ -317,6 +350,20 @@ test('C2: roster + a 10k steer + mail: nothing past the budget, nothing surfacin
   assert.equal(g.entryOf('god-1', m2.id).state, 'delivered', 'it drips into the next hook');
   const post = g.ctx(g.fire('god-1', 'PostToolUse', {}));
   assert.ok(post.includes(`[hive-mail:${m2.id}]`), 'the next hook has room (no roster, goal or steer)');
+});
+
+test('Q22 (Creed): a hook whose whole budget leaves under 1,000 body characters surfaces header + path and writes ONE mail-truncated row', async (t) => {
+  const f = await floor(t, { steer: 'S'.repeat(7_700), providers: { 'jim-1': 'claude' } });
+  const m = f.hive.send({ to: 'jim-1', act: 'inform', subject: '<'.repeat(200), body: 'H'.repeat(5_000) }, 'god-1');
+  const c = f.ctx(f.fire('jim-1', 'UserPromptSubmit', { prompt: 'go', transport: 'http' }));
+  assert.ok(c.length <= 9_500, `joined ${c.length}`);
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('[body not shown: 5000 characters'), c.slice(-600));
+  assert.ok(!c.includes('HHHH'));
+  assert.equal(f.entryOf('jim-1', m.id).state, 'surfacing', 'claimed like any surfacing');
+  const rows = f.logRows().filter((r) => r.kind === 'mail-truncated');
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ agentId: rows[0].agentId, id: rows[0].id, bodyChars: rows[0].bodyChars, shown: rows[0].shown, hookKind: rows[0].hookKind },
+    { agentId: 'jim-1', id: m.id, bodyChars: 5_000, shown: 'header+path', hookKind: 'UserPromptSubmit' });
 });
 
 test('drip: messages that do not fit the turn-start block follow at the next PostToolUse calls, oldest first, each once per epoch (N3)', async (t) => {

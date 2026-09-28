@@ -179,6 +179,9 @@ export interface MailBlock {
   surfacing: string[];
   /** The subset of `surfacing` that was truncated (first MAIL_TRUNCATE_CHARS + path). */
   truncated: string[];
+  /** Q22 (Creed): the subset of `truncated` shown as header + path only, because even this hook's
+   *  whole budget leaves under MAIL_TRUNCATE_MIN_CHARS for the body. The caller logs `mail-truncated`. */
+  pathOnly: string[];
   /** Ids named by header only (no body, no marker): they stay delivered. */
   headersOnly: string[];
   /** Ids not in the block at all: they stay delivered and drip into a later hook. */
@@ -188,7 +191,7 @@ export interface MailBlock {
   blocked: string[];
 }
 
-const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], headersOnly: [], deferred: [], blocked: [] };
+const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], pathOnly: [], headersOnly: [], deferred: [], blocked: [] };
 
 function flagsOf(e: MailEntry): string[] {
   const out: string[] = [];
@@ -197,7 +200,7 @@ function flagsOf(e: MailEntry): string[] {
   return out;
 }
 
-function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_CHARS): string {
+function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_CHARS, pathOnly = false): string {
   const e = it.entry;
   const lines: string[] = [];
   lines.push(`[${mailMarker(e.id)}] from: ${escapeMailText(e.from)} | act: ${escapeMailText(e.act)} | subject: "${escapeMailText(e.subject)}"`);
@@ -209,7 +212,9 @@ function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_C
   if (e.redelivered) lines.push('(re-delivered: this may already have been handled — check before acting)');
   if (e.legacy && e.surfacedAt == null) lines.push('(delivered before 1.1.75; may already have been handled)');
   const body = escapeMailText(it.body);
-  if (truncate) {
+  if (pathOnly) {
+    lines.push('', `[body not shown: ${body.length} characters do not fit this hook. The full message is in ${escapeMailText(it.path)}; read it there]`);
+  } else if (truncate) {
     lines.push('', `${body.slice(0, Math.max(0, keep))}`, `[... truncated: ${body.length} characters in total. The full message is in ${escapeMailText(it.path)}]`);
   } else {
     lines.push('', body);
@@ -325,7 +330,9 @@ function groupItems(items: MailBlockItem[]): MailBlockItem[][] {
  * over instead, so a big message never blocks smaller later ones for more than one hook.
  * A message too large for the WHOLE budget is truncated to fit what is left (Jim audit #3): its
  * header, as much of its body as fits (at most MAIL_TRUNCATE_CHARS, at least
- * MAIL_TRUNCATE_MIN_CHARS) and the path of the full file. Under MAIL_HEADERS_ONLY_BELOW, or when
+ * MAIL_TRUNCATE_MIN_CHARS) and the path of the full file. Q22: under that floor it waits for the
+ * next hook's fresh budget; when even this hook's whole budget leaves under the floor, it surfaces
+ * as its header + the path only (`pathOnly`, logged `mail-truncated`). Under MAIL_HEADERS_ONLY_BELOW, or when
  * nothing fits, the block names headers only and nothing is surfacing.
  */
 export function buildMailBlock(input: MailBlockInput): MailBlock {
@@ -337,12 +344,12 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
   const everything = [...items.map((i) => i.entry), ...more];
   if (!everything.length || input.budget <= 0) return { ...EMPTY, deferred: everything.map((e) => e.id) };
   const budget = input.budget;
-  type Chosen = { it: MailBlockItem; text: string; truncated: boolean };
+  type Chosen = { it: MailBlockItem; text: string; truncated: boolean; pathOnly?: boolean };
   const chosen: Chosen[] = [];
   const blocked: string[] = [];
   const headersOnly = (): MailBlock => {
     const h = buildMailHeaders(everything, budget);
-    return { text: h.text, surfacing: [], truncated: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)), blocked };
+    return { text: h.text, surfacing: [], truncated: [], pathOnly: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)), blocked };
   };
   if (!items.length) return headersOnly();
   if (budget < MAIL_HEADERS_ONLY_BELOW) return headersOnly();
@@ -364,7 +371,16 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
     const bodyLen = escapeMailText(it.body).length;
     const overhead = sizeOf([...list, { it, text: renderItem(it, true, 0), truncated: true }]);
     const keep = Math.min(MAIL_TRUNCATE_CHARS, bodyLen - 1, budget - overhead);
-    if (keep < MAIL_TRUNCATE_MIN_CHARS) return null;
+    if (keep < MAIL_TRUNCATE_MIN_CHARS) {
+      // Q22 (Creed): under the floor after what is already placed. If this hook's whole budget
+      // (the message first, nothing before it) would leave the floor, it waits for the next hook's
+      // fresh budget. If even that leaves under the floor, it surfaces as header + path only.
+      // "Fresh" = this hook's budget with the message placed first (the rest named as following).
+      const aloneKeep = Math.min(MAIL_TRUNCATE_CHARS, bodyLen - 1, budget - sizeOf([{ it, text: renderItem(it, true, 0), truncated: true }]));
+      if (aloneKeep >= MAIL_TRUNCATE_MIN_CHARS) return null;
+      const bare: Chosen = { it, text: renderItem(it, true, 0, true), truncated: true, pathOnly: true };
+      return fits([...list, bare]) ? bare : null;
+    }
     const cut: Chosen = { it, text: renderItem(it, true, keep), truncated: true };
     return fits([...list, cut]) ? cut : null;
   };
@@ -418,6 +434,7 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
     text,
     surfacing: chosen.map((c) => c.it.entry.id),
     truncated: chosen.filter((c) => c.truncated).map((c) => c.it.entry.id),
+    pathOnly: chosen.filter((c) => c.pathOnly).map((c) => c.it.entry.id),
     headersOnly: [],
     deferred: deferred.map((e) => e.id),
     blocked

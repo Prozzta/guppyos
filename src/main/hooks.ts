@@ -1298,8 +1298,18 @@ export class HookServer {
       return null;   // never show a body the ledger did not record
     }
     for (const id of claimed) t?.injected.add(id);
+    this.logPathOnly(agentId, block, claimed, epoch, event, items);
     this.registerMailClaim(agentId, claimed, epoch, event, p, provider, items.map((i) => i.entry));
     return block.text;
+  }
+
+  /** Q22 (Creed): one `mail-truncated` row per message surfaced as header + path only. */
+  private logPathOnly(agentId: string, block: { pathOnly: string[] }, claimed: string[], epoch: string, hookKind: string, items: MailBlockItem[]): void {
+    for (const id of block.pathOnly) {
+      if (!claimed.includes(id)) continue;
+      const it = items.find((i) => i.entry.id === id);
+      try { this.hive.appendLog({ kind: 'mail-truncated', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, shown: 'header+path' }); } catch { /* noop */ }
+    }
   }
 
   /** A hook response carries `claimed` (now `surfacing`): settle it at the flush (latency, N1)
@@ -1360,6 +1370,7 @@ export class HookServer {
       return null;
     }
     if (!claimed.length) return null;
+    this.logPathOnly(agentId, block, claimed, t.epoch, 'SessionStart', items);
     this.registerMailClaim(agentId, claimed, t.epoch, 'SessionStart', p, provider, open);
     return block.text;
   }
