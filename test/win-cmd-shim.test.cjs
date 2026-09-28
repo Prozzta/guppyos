@@ -159,14 +159,15 @@ test('interpreter flags between program and script are refused, never dropped', 
   assert.equal(parseNpmCmdShim(SHIM, withFlags), null);
 });
 
-test('the win32 branch is genuinely platform-gated', () => {
+test('the win32 branch is genuinely platform-gated', async () => {
   // Proves the macOS/Linux spawn path is untouched: on any non-win32 host the shim
   // probe short-circuits before it ever looks at the filesystem.
   const mgr = new PtyManager();
   const probe = mgr['resolveWindowsShimSpawn'].bind(mgr);
   if (process.platform === 'win32') return; // the guard under test is the negative one
-  assert.equal(probe(SHIM), null);
-  assert.equal(probe(`${NPM_DIR}\\opencode`), null);
+  // SYNC-CHILD-CALLS: resolveWindowsShimSpawn is async now (it awaits the shared resolver).
+  assert.equal(await probe(SHIM), null);
+  assert.equal(await probe(`${NPM_DIR}\\opencode`), null);
 });
 
 // ── the payload: does a hostile prompt actually survive? ─────────────────────

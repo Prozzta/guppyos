@@ -17,7 +17,7 @@
  * daemon the agent intentionally left running (a dev server started via a Bash
  * tool) must survive its parent session.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 /** Grace between the polite signal and the SIGKILL escalation. */
 export const KILL_GRACE_MS = 4_000;
@@ -27,20 +27,9 @@ export function isAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-/** Forcefully kill pid and its descendants NOW. Group-SIGKILL on POSIX (falls
- *  back to the single pid when the group id is gone); `taskkill /T /F` on
- *  Windows. Killing the group of an already-dead leader is exactly the
- *  orphan-reaping case: any surviving members still hold the group id. */
-export function hardKillTree(pid: number): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  if (process.platform === 'win32') {
-    try { spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 10_000 }); } catch { /* gone */ }
-    return;
-  }
-  try { process.kill(-pid, 'SIGKILL'); } catch {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
-  }
-}
+// SYNC-CHILD-CALLS: hardKillTree (a spawnSync `taskkill /T /F`, 10 s cap per pid) is removed.
+// Its last caller, PtyManager.killAll (reset/changeHome), is gone too; every tree kill is
+// killTreesAsync below, so no path in main can block on a synchronous kill.
 
 /** Cap for one batched async tree kill (see killTreesAsync). */
 export const KILL_TREES_ASYNC_MS = 5_000;
@@ -48,7 +37,7 @@ export const KILL_TREES_ASYNC_MS = 5_000;
 /**
  * QUIT-HANG: kill several process trees WITHOUT blocking the calling (main) thread.
  *
- * hardKillTree's `spawnSync('taskkill')` froze Electron's main thread for the whole
+ * The old hardKillTree's `spawnSync('taskkill')` froze Electron's main thread for the whole
  * sweep: one synchronous taskkill per agent terminal (each a big tree) at quit ran past
  * the ~5 s after which Windows ghosts the window and files an AppHang. Here Windows gets
  * ONE asynchronous `taskkill /T /F /PID a /PID b ...` (taskkill carries on past a pid
@@ -88,7 +77,7 @@ export function killTreesAsync(pids: readonly number[], capMs = KILL_TREES_ASYNC
  *  alive during quit. */
 export function ensureKilled(pid: number | undefined, graceMs = KILL_GRACE_MS): void {
   if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) return;
-  // QUIT-HANG follow-up: the async sweep, not hardKillTree's spawnSync taskkill, which
+  // QUIT-HANG follow-up: the async sweep, not the old hardKillTree's sync taskkill, which
   // stalled the UI 0.3-1.5 s on every archive/restart/respawn on Windows.
   const t = setTimeout(() => { void killTreesAsync([pid]); }, graceMs);
   t.unref?.();

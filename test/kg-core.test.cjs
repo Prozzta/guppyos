@@ -17,8 +17,8 @@ const kg = require('../src/main/kg-core.cjs');
 const CLI = path.join(__dirname, '..', 'resources', 'kg.cjs');
 
 let failures = 0;
-function test(name, fn) {
-  try { fn(); console.log(`  ✓ ${name}`); }
+async function test(name, fn) {
+  try { await fn(); console.log(`  ✓ ${name}`); }
   catch (err) { failures++; console.log(`  ✗ ${name}\n     ${err && err.message}`); }
 }
 
@@ -35,7 +35,7 @@ function writeFixture(dir, name, content) {
   console.log('knowledge-graph core tests');
 
   // ─── tokenize ───────────────────────────────────────────────────────────
-  test('tokenize lowercases, splits on non-alphanumerics, drops stop-words and 1-char tokens', () => {
+  await test('tokenize lowercases, splits on non-alphanumerics, drops stop-words and 1-char tokens', async () => {
     const toks = kg.tokenize('The Refund-Policy is X, valid for 30 days!');
     assert.ok(toks.includes('refund'), 'has refund');
     assert.ok(toks.includes('policy'), 'has policy');
@@ -46,7 +46,7 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── detectModality ─────────────────────────────────────────────────────
-  test('detectModality buckets by extension', () => {
+  await test('detectModality buckets by extension', async () => {
     assert.strictEqual(kg.detectModality('a/b/notes.md'), 'text');
     assert.strictEqual(kg.detectModality('logo.PNG'), 'image');
     assert.strictEqual(kg.detectModality('report.pdf'), 'pdf');
@@ -56,7 +56,7 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── chunkText ──────────────────────────────────────────────────────────
-  test('chunkText returns one chunk for short text and multiple for long text', () => {
+  await test('chunkText returns one chunk for short text and multiple for long text', async () => {
     assert.deepStrictEqual(kg.chunkText(''), []);
     assert.deepStrictEqual(kg.chunkText('short note'), ['short note']);
     const long = ('paragraph alpha. '.repeat(120) + '\n\n').repeat(6); // ~12k chars
@@ -65,7 +65,7 @@ function writeFixture(dir, name, content) {
     for (const c of chunks) assert.ok(c.length <= 1500, `chunk under cap: ${c.length}`);
   });
 
-  test('chunkText always terminates and covers the text (deterministic)', () => {
+  await test('chunkText always terminates and covers the text (deterministic)', async () => {
     const text = 'word '.repeat(5000);
     const a = kg.chunkText(text, { size: 800, overlap: 120 });
     const b = kg.chunkText(text, { size: 800, overlap: 120 });
@@ -74,7 +74,7 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── scoreChunk ─────────────────────────────────────────────────────────
-  test('scoreChunk: 0 when no term matches, higher for title + phrase matches', () => {
+  await test('scoreChunk: 0 when no term matches, higher for title + phrase matches', async () => {
     const terms = kg.tokenize('refund policy');
     const none = kg.scoreChunk({ title: 'Holidays', text: 'office closed friday' }, terms, 'refund policy');
     assert.strictEqual(none, 0);
@@ -85,12 +85,12 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── ingest → search round-trip: TEXT modality ──────────────────────────
-  test('ingest a markdown doc, then search finds it with a snippet', () => {
+  await test('ingest a markdown doc, then search finds it with a snippet', async () => {
     const root = tmpRoot();
     const src = writeFixture(root, 'refund-policy.md',
       '# Refund Policy 2026\n\nCustomers may request a full refund within 30 days of purchase. '
       + 'Refunds for enterprise plans require manager approval.\n');
-    const { docId, chunkCount, meta } = kg.ingest(root, { srcPath: src, tags: ['policy', 'support'] });
+    const { docId, chunkCount, meta } = await kg.ingest(root, { srcPath: src, tags: ['policy', 'support'] });
     assert.ok(docId, 'returns a docId');
     assert.ok(chunkCount >= 1, 'at least one chunk');
     assert.strictEqual(meta.modality, 'text');
@@ -108,12 +108,12 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── ingest → search round-trip: IMAGE modality (metadata-level) ────────
-  test('ingest an image by metadata (no OCR) and find it by caption/tags', () => {
+  await test('ingest an image by metadata (no OCR) and find it by caption/tags', async () => {
     const root = tmpRoot();
     // a tiny fake binary file standing in for an image artifact
     const img = path.join(root, 'org-chart.png');
     fs.writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
-    const { docId, meta } = kg.ingest(root, {
+    const { docId, meta } = await kg.ingest(root, {
       srcPath: img, title: 'Company Org Chart',
       caption: 'Engineering reports to the CTO; Sales reports to the CRO.',
       tags: ['orgchart', 'leadership']
@@ -129,10 +129,10 @@ function writeFixture(dir, name, content) {
   });
 
   // ─── list / getDoc / removeDoc ──────────────────────────────────────────
-  test('list, get, and remove manage the corpus and prune the index', () => {
+  await test('list, get, and remove manage the corpus and prune the index', async () => {
     const root = tmpRoot();
-    const a = kg.ingest(root, { text: 'Alpha document about onboarding new hires.', title: 'Onboarding' });
-    const b = kg.ingest(root, { text: 'Beta document about the deployment runbook.', title: 'Runbook' });
+    const a = await kg.ingest(root, { text: 'Alpha document about onboarding new hires.', title: 'Onboarding' });
+    const b = await kg.ingest(root, { text: 'Beta document about the deployment runbook.', title: 'Runbook' });
 
     const docs = kg.list(root);
     assert.strictEqual(docs.length, 2, 'two docs listed');
@@ -150,19 +150,19 @@ function writeFixture(dir, name, content) {
     assert.strictEqual(s.docCount, 1);
   });
 
-  test('search returns [] for empty query or empty store', () => {
+  await test('search returns [] for empty query or empty store', async () => {
     const root = tmpRoot();
     assert.deepStrictEqual(kg.search(root, 'anything'), [], 'empty store');
-    kg.ingest(root, { text: 'hello world', title: 'Greeting' });
+    await kg.ingest(root, { text: 'hello world', title: 'Greeting' });
     assert.deepStrictEqual(kg.search(root, '   '), [], 'blank query');
   });
 
   // ─── the real agent CLI (out-of-process retrieval path) ─────────────────
   console.log('knowledge-graph agent CLI (kg.cjs) tests');
 
-  test('agent runs `kg search` against KG_ROOT and gets ranked, attributed results', () => {
+  await test('agent runs `kg search` against KG_ROOT and gets ranked, attributed results', async () => {
     const root = tmpRoot();
-    kg.ingest(root, {
+    await kg.ingest(root, {
       srcPath: writeFixture(root, 'pto.md',
         '# PTO Policy\n\nFull-time employees accrue 20 days of paid time off per year. '
         + 'Unused PTO rolls over up to 5 days.\n'),
@@ -176,9 +176,9 @@ function writeFixture(dir, name, content) {
     assert.ok(/id:/.test(res.stdout), 'CLI surfaces a doc id for `kg get`');
   });
 
-  test('agent `kg search --json` is machine-parseable', () => {
+  await test('agent `kg search --json` is machine-parseable', async () => {
     const root = tmpRoot();
-    kg.ingest(root, { text: 'The wifi password is hunter2 for the guest network.', title: 'Wifi' });
+    await kg.ingest(root, { text: 'The wifi password is hunter2 for the guest network.', title: 'Wifi' });
     const res = spawnSync(process.execPath, [CLI, 'search', 'guest wifi password', '--json'],
       { encoding: 'utf8', env: { ...process.env, KG_ROOT: root } });
     assert.strictEqual(res.status, 0, `exit 0 (stderr: ${res.stderr})`);
@@ -187,12 +187,54 @@ function writeFixture(dir, name, content) {
     assert.strictEqual(parsed[0].title, 'Wifi');
   });
 
-  test('agent CLI degrades gracefully when KG_ROOT is unset (flag off)', () => {
+  await test('agent CLI degrades gracefully when KG_ROOT is unset (flag off)', async () => {
     const env = { ...process.env };
     delete env.KG_ROOT;
     const res = spawnSync(process.execPath, [CLI, 'search', 'anything'], { encoding: 'utf8', env });
     assert.strictEqual(res.status, 0, 'exits 0 (non-fatal) when KG is off');
     assert.ok(/not configured|off|unavailable/i.test(res.stderr + res.stdout), 'explains it is off');
+  });
+
+  // ─── SYNC-CHILD-CALLS: pdftotext is an ASYNC child (fake execFile) ────────
+  await test('pdftotext runs through async execFile: same args, 20 s cap, 32 MB buffer, hidden', async () => {
+    const root = tmpRoot();
+    const pdf = writeFixture(root, 'handbook.pdf', '%PDF-1.4 fake');
+    const calls = [];
+    let deliver;
+    const execFile = (file, args, opts, cb) => { calls.push({ file, args, opts }); deliver = cb; };
+    let settled = false;
+    const p = kg.ingest(root, { srcPath: pdf }, { execFile }).then((r) => { settled = true; return r; });
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(calls.length, 1, 'one pdftotext per PDF');
+    assert.strictEqual(calls[0].file, 'pdftotext');
+    assert.deepStrictEqual(calls[0].args, ['-q', pdf, '-']);
+    assert.strictEqual(calls[0].opts.timeout, 20000);
+    assert.strictEqual(calls[0].opts.maxBuffer, 32 * 1024 * 1024);
+    assert.strictEqual(calls[0].opts.windowsHide, true);
+    assert.strictEqual(settled, false, 'ingest waits for the child without blocking the caller');
+    deliver(null, 'Vacation policy: twenty days of paid leave.');
+    const { meta } = await p;
+    assert.strictEqual(meta.extractor, 'pdftotext@1');
+    assert.strictEqual(kg.search(root, 'vacation policy')[0].docId, meta.id);
+  });
+
+  await test('pdftotext failure (absent / timeout / non-zero) falls back to pdf-pending, as before', async () => {
+    const root = tmpRoot();
+    const pdf = writeFixture(root, 'scan.pdf', '%PDF-1.4 fake');
+    for (const err of [Object.assign(new Error('spawn pdftotext ENOENT'), { code: 'ENOENT' }),
+      Object.assign(new Error('killed'), { killed: true, signal: 'SIGTERM' }),
+      Object.assign(new Error('exit 1'), { code: 1 })]) {
+      const { meta } = await kg.ingest(root, { srcPath: pdf, title: 'Scan' }, { execFile: (f, a, o, cb) => cb(err, '') });
+      assert.strictEqual(meta.extractor, 'pdf-pending@1');
+    }
+    const threw = await kg.ingest(root, { srcPath: pdf }, { execFile: () => { throw new Error('EPERM'); } });
+    assert.strictEqual(threw.meta.extractor, 'pdf-pending@1', 'a throwing spawn is a miss, not a crash');
+    assert.strictEqual(await kg.tryPdfToText(path.join(root, 'missing.pdf'), () => { throw new Error('must not run'); }), null);
+  });
+
+  await test('kg-core.cjs has no synchronous child process left', async () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'kg-core.cjs'), 'utf8');
+    assert.ok(!/spawnSync|execSync|execFileSync/.test(src), 'no *Sync child API');
   });
 
   // ─── summary ────────────────────────────────────────────────────────────

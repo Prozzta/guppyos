@@ -33,7 +33,8 @@ interface KgIngestInput {
   caption?: string; modality?: string; source?: string;
 }
 interface KgCore {
-  ingest(root: string, input: KgIngestInput): { docId: string; chunkCount: number; meta: KgMeta };
+  /** Async: a PDF is extracted by an async pdftotext child (SYNC-CHILD-CALLS). */
+  ingest(root: string, input: KgIngestInput): Promise<{ docId: string; chunkCount: number; meta: KgMeta }>;
   search(root: string, query: string, opts?: { limit?: number }): KgHit[];
   list(root: string): KgMeta[];
   getDoc(root: string, docId: string): { meta: KgMeta; text: string } | null;

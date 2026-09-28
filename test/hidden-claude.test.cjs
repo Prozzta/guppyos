@@ -80,9 +80,15 @@ function harness({ cwd, uuid = UUID } = {}) {
     randomUUID: () => uuid,
     setTimeout: (fn, ms) => clock.setTimeout(fn, ms),
     clearTimeout: (t) => clock.clearTimeout(t),
-    ensureKilled: (pid) => killed.push(pid)
+    ensureKilled: (pid) => killed.push(pid),
+    // SYNC-CHILD-CALLS: the command lookup and the shell PATH are async deps now; resolved at
+    // once here so no real `where` runs, and `started()` lets them settle before the test drives
+    // the child.
+    resolveCommand: async (bin) => bin,
+    shellPath: async () => process.env.PATH || '/usr/bin'
   };
-  return { clock, child, calls, killed, deps, cwd: cwd || os.tmpdir() };
+  const started = () => new Promise((r) => setImmediate(r));
+  return { clock, child, calls, killed, deps, started, cwd: cwd || os.tmpdir() };
 }
 
 function envelope(overrides = {}) {
@@ -116,6 +122,7 @@ test('THE REGRESSION: a newer decoy transcript plus output delivered after the o
   const decoyBefore = fs.statSync(decoy).atimeMs;
 
   const p = runHiddenClaude('condense this memory', { model: 'claude-haiku-4-5', cwd: root }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
 
   let settled = false;
   p.then(() => { settled = true; });
@@ -144,9 +151,10 @@ test('THE REGRESSION: a newer decoy transcript plus output delivered after the o
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('THE REGRESSION, second half: argv owns one session and the prompt goes on stdin', () => {
+test('THE REGRESSION, second half: argv owns one session and the prompt goes on stdin', async () => {
   const h = harness();
   runHiddenClaude('the whole prompt, including memory text', { model: 'claude-haiku-4-5', cwd: h.cwd, jsonSchema: { type: 'object' } }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   const { args } = h.calls[0];
   const flat = args.join(' ');
 
@@ -164,6 +172,7 @@ test('THE REGRESSION, second half: argv owns one session and the prompt goes on 
 test('close drains stdout: bytes emitted after exit are still parsed', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   const body = envelope();
   h.child.stdout.emit('data', body.slice(0, body.length - 5));
   h.child.emit('exit', 0, null);
@@ -177,6 +186,7 @@ test('close drains stdout: bytes emitted after exit are still parsed', async () 
 test('a timeout kills the tree once and ignores the close that follows', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd, timeoutMs: 1000 }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.clock.advance(1001);
   const r = await p;
   assert.equal(r.ok, false);
@@ -193,6 +203,7 @@ test('a timeout kills the tree once and ignores the close that follows', async (
 test('oversized stdout is killed and refused rather than truncated into a summary', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.stdout.emit('data', 'x'.repeat(1024 * 1024 + 1));
   const r = await p;
   assert.equal(r.ok, false);
@@ -203,6 +214,7 @@ test('oversized stdout is killed and refused rather than truncated into a summar
 test('a nonzero exit reports the code and a BOUNDED stderr tail, never the payload', async () => {
   const h = harness();
   const p = runHiddenClaude('secret memory text', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.stderr.emit('data', `${'noise\n'.repeat(4000)}the real reason\n`);
   h.child.emit('close', 3, null);
   const r = await p;
@@ -215,6 +227,7 @@ test('a nonzero exit reports the code and a BOUNDED stderr tail, never the paylo
 test('a spawn error is a stable failure, not a throw into the reflect loop', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.emit('error', new Error('spawn claude ENOENT'));
   const r = await p;
   assert.equal(r.ok, false);
@@ -267,39 +280,40 @@ test('readEnvelope refuses an envelope that reports its own error', () => {
 // ─── the billing guard (Dwight's caveat) ───
 
 /** Run one spawn with a controlled environment, and hand back what the child was given. */
-function envFor(set, opts = {}) {
+async function envFor(set, opts = {}) {
   const h = harness();
   const before = {};
   for (const [k, v] of Object.entries(set)) { before[k] = process.env[k]; if (v === null) delete process.env[k]; else process.env[k] = v; }
   try {
     runHiddenClaude('x', { model: 'm', cwd: h.cwd, ...opts }, h.deps);
+    await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   } finally {
     for (const k of Object.keys(set)) { if (before[k] === undefined) delete process.env[k]; else process.env[k] = before[k]; }
   }
   return h.calls[0].options.env;
 }
 
-test('the API key is ALWAYS stripped - it overrides a subscription silently', () => {
-  const env = envFor({ ANTHROPIC_API_KEY: 'sk-inherited' }, { env: { ANTHROPIC_API_KEY: 'sk-from-opts', AGENT_EXTRA: 'C:/extra' } });
+test('the API key is ALWAYS stripped - it overrides a subscription silently', async () => {
+  const env = await envFor({ ANTHROPIC_API_KEY: 'sk-inherited' }, { env: { ANTHROPIC_API_KEY: 'sk-from-opts', AGENT_EXTRA: 'C:/extra' } });
   assert.ok(!('ANTHROPIC_API_KEY' in env), 'stripping must happen AFTER the merge, or opts.env puts it back');
   assert.equal(env.AGENT_EXTRA, 'C:/extra', 'the rest of opts.env still merges');
   assert.ok(env.PATH, 'and the resolved shell PATH is preserved');
 });
 
-test('the bearer token is stripped when there is NO base URL - a bare override', () => {
-  const env = envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: null });
+test('the bearer token is stripped when there is NO base URL - a bare override', async () => {
+  const env = await envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: null });
   assert.ok(!(GATEWAY_TOKEN_ENV in env), 'on its own the token overrides a subscription like a key');
 });
 
-test('the bearer token is KEPT when a base URL is set - a configured gateway is deliberate', () => {
-  const env = envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: 'https://gateway.example/v1' });
+test('the bearer token is KEPT when a base URL is set - a configured gateway is deliberate', async () => {
+  const env = await envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: 'https://gateway.example/v1' });
   assert.equal(env[GATEWAY_TOKEN_ENV], 'sk-token', 'stripping it would send this one call somewhere the user did not choose');
   assert.equal(env[GATEWAY_URL_ENV], 'https://gateway.example/v1');
   assert.ok(!('ANTHROPIC_API_KEY' in env), 'the API key strip stays unconditional either way');
 });
 
-test('a gateway configured through opts.env counts too - the check reads the MERGED env', () => {
-  const env = envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: null },
+test('a gateway configured through opts.env counts too - the check reads the MERGED env', async () => {
+  const env = await envFor({ ANTHROPIC_AUTH_TOKEN: 'sk-token', ANTHROPIC_BASE_URL: null },
     { env: { ANTHROPIC_BASE_URL: 'https://gateway.example/v1' } });
   assert.equal(env[GATEWAY_TOKEN_ENV], 'sk-token');
 });
@@ -375,6 +389,7 @@ test('describeExitFailure: a null exit code is reported, not swallowed', () => {
 test('breadcrumb: a non-zero exit carries diag with the resolved argv and exit code', async () => {
   const h = harness();
   const p = runHiddenClaude('condense this', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.stdout.emit('data', REFUSED);
   h.child.emit('close', 1);
   const r = await p;
@@ -397,6 +412,7 @@ test('breadcrumb: env is reported as KEY NAMES ONLY - never a value', async () =
     model: 'm', cwd: h.cwd,
     env: { ANTHROPIC_BASE_URL: 'https://gw.example', ANTHROPIC_AUTH_TOKEN: SECRET, AGENT_EXTRA: '/p' }
   }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.emit('close', 1);
   const r = await p;
 
@@ -410,6 +426,7 @@ test('breadcrumb: env is reported as KEY NAMES ONLY - never a value', async () =
 test('breadcrumb: a TIMEOUT is explained too, and snapshots before the kill', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd, timeoutMs: 180000 }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.stdout.emit('data', 'partial output so far');
   h.clock.advance(180000);
   const r = await p;
@@ -424,6 +441,7 @@ test('breadcrumb: a TIMEOUT is explained too, and snapshots before the kill', as
 test('breadcrumb: a SUCCESS carries no diag - there is nothing to explain', async () => {
   const h = harness();
   const p = runHiddenClaude('x', { model: 'm', cwd: h.cwd }, h.deps);
+  await h.started(); // SYNC-CHILD-CALLS: the spawn follows the async command lookup
   h.child.stdout.emit('data', envelope());
   h.child.emit('close', 0);
   const r = await p;

@@ -22,7 +22,8 @@ import {
   DEV_ISOLATION, devDataRoot, devPaths, stableForbiddenPaths, checkIsolation,
   scrubInheritedEnv, devWindowTitle
 } from './devIsolation';
-import { resolveCommand as resolveCliCommand, isSafeCommandName } from './shellEnv';
+import { isSafeCommandName } from './shellEnv';
+import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
@@ -309,9 +310,9 @@ async function enableCodexRemoteForSpawn(
       ...(opts.env ?? {}),
       CODEX_HOME: alias
     };
-    // shellEnv's resolver mirrors PtyManager's (which is private + returns
-    // {path, found}); the daemon just needs the best executable path.
-    const executable = resolveCliCommand(opts.command);
+    // The shared async resolver (commandResolver.ts), the same one PtyManager spawns through;
+    // the daemon just needs the best executable path.
+    const executable = (await resolveCommandAsync(opts.command)).path;
     const started = await runCodexDaemonCommand(
       executable,
       ['app-server', 'daemon', 'start'],
@@ -715,8 +716,8 @@ const NATIVE_MEMORY_PREWARM_DELAY_MS = 30_000;
  *  with a row when it changes (a global npm update silently changes every Codex agent). */
 const codexVersionLog = new CodexVersionLog(join(app.getPath('userData'), 'codex-cli-version.json'), (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } });
 /** The installed Codex CLI: its resolved path and version (null when not installed / unreadable). */
-function codexCliNow(): { path: string | null; version: string | null } {
-  const path = ptyManager.commandPath('codex');
+async function codexCliNow(): Promise<{ path: string | null; version: string | null }> {
+  const path = await ptyManager.commandPath('codex');
   return { path, version: readCodexVersion(path) };
 }
 /** STARTUP-TIMING-162: the first 60 s, measured (loop delay, renderer long tasks, markers), then it
@@ -1051,6 +1052,9 @@ ptyManager.setExitHandler((id, exitCode) => {
   const pending = pendingInstallRelaunch.get(id);
   if (pending) {
     pendingInstallRelaunch.delete(id);
+    // SYNC-CHILD-CALLS: the resolver caches misses (60 s). An installer just ran — it may have
+    // put the CLI, npm or node on disk — so every cached answer is dropped before the relaunch.
+    invalidateCommandCache();
     if (exitCode === 0) {
       // Re-arm the renderer's pooled terminal (clear the "process exited" line +
       // re-enable input) so the freshly-spawned CLI paints onto a clean, typeable
@@ -3347,7 +3351,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // isn't archived and no worktree is torn down) before the relaunch takes over.
   {
     const bin = opts.command.trim().split(/\s+/)[0] || opts.command;
-    if (bin && !opts.noAutoInstall && !ptyManager.isCommandAvailable(bin)) {
+    if (bin && !opts.noAutoInstall && !(await ptyManager.isCommandAvailable(bin))) {
       // The installer commands are `npm install -g …`. Probe for npm the same way
       // we probe for the engine CLI, so a no-Node machine gets the node-free rung
       // (or an honest manual hint) instead of watching `npm: not found` scroll by.
@@ -3355,14 +3359,14 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // (2026-08-07) is "their Node newer than ours → leave it alone; absent or
       // older → install the latest stable for them".
       const npmAvailable =
-        ptyManager.isCommandAvailable('npm') &&
-        nodeIsUsable(detectNodeVersion(ptyManager.commandPath('node')));
+        (await ptyManager.isCommandAvailable('npm')) &&
+        nodeIsUsable(await detectNodeVersion(await ptyManager.commandPath('node')));
       // Only reach the network when we actually need to (npm missing/too old);
       // resolveNodeInstaller is timeout-bounded and returns null offline, which
       // simply drops the ladder to the native/manual rung.
       const nodeInstaller = npmAvailable ? null : await resolveNodeInstaller();
       const rung = chooseInstallRung(installInfoForProvider(provider), npmAvailable, nodeInstaller);
-      const res = ptyManager.spawn(
+      const res = await ptyManager.spawn(
         {
           id: opts.id,
           cwd: opts.cwd,
@@ -3472,7 +3476,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // in-process app-server with --no-daemon when (and only when) the CLI has that flag.
       let codexNoDaemon = false;
       if (provider === 'codex') {
-        const cli = codexCliNow();
+        const cli = await codexCliNow();
         codexVersionLog.note(cli.version, cli.path, 'spawn', opts.hive.id);
         codexNoDaemon = codexSupportsNoDaemon(cli.version);
       }
@@ -3788,7 +3792,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (provider === 'codex' && opts.hive?.id) {
     await enableCodexRemoteForSpawn(opts, opts.hive.id);
   }
-  const res = ptyManager.spawn(opts, owner);
+  const res = await ptyManager.spawn(opts, owner);
   if (res.ok) analytics.track('agent_spawned', { provider });
   syncKeepAwake(); // arm the power-save blocker while ≥1 agent PTY is alive (#18)
   // Hand the resolved worktree path back to the renderer so it can persist it on
@@ -4130,7 +4134,9 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // (Identical recovery path to resetAll — relaunch is the clean re-bind.)
   allowQuit = true;
   writeConfig({ harnessHome: newHome });
-  try { ptyManager.killAll(); } catch (e) { console.error('[changeHome] killAll:', e); }
+  // SYNC-CHILD-CALLS: the async bulk kill (one batched taskkill, then the ConPTY exits awaited),
+  // and only THEN relaunch/exit — never a per-terminal synchronous taskkill on the main thread.
+  try { await ptyManager.killAllAsync(); } catch (e) { console.error('[changeHome] killAllAsync:', e); }
   app.relaunch();
   app.exit(0);
   return { ok: true as const }; // unreachable (process exits) — typed for the renderer
@@ -4459,18 +4465,22 @@ ipcMain.handle('models:refresh', async () => {
   return { file, rows };
 });
 
-ipcMain.handle('tools:status', (): ToolStatus[] => {
+ipcMain.handle('tools:status', async (): Promise<ToolStatus[]> => {
   const win = process.platform === 'win32';
-  return toolCatalog().map((spec): ToolStatus => {
+  // SYNC-CHILD-CALLS: every row resolves through the shared ASYNC resolver, in parallel (this was
+  // one synchronous `where` per row, on every panel open). Opening the panel is how a user checks
+  // a CLI they just installed, so each row's cached answer is dropped first: fresh, but async.
+  return Promise.all(toolCatalog().map(async (spec): Promise<ToolStatus> => {
     const installCommand = win ? spec.install.win32 : spec.install.posix;
     if (!spec.bin) return { ...spec, installCommand, found: false, path: null };
     let path: string | null = null;
     try {
-      const resolved = resolveCliCommand(spec.bin);
-      if (resolved !== spec.bin && existsSync(resolved)) path = resolved;
+      invalidateCommandCache(spec.bin);
+      const r = await resolveCommandAsync(spec.bin);
+      if (r.found && r.path !== spec.bin && existsSync(r.path)) path = r.path;
     } catch { /* a probe must never take the panel down */ }
     return { ...spec, installCommand, found: !!path, path };
-  });
+  }));
 });
 
 // ─── IPC: semantic memory (the memory engine) ───────────────────────────────
@@ -4504,18 +4514,21 @@ ipcMain.handle('kg:remove', (_evt, id: unknown) =>
   ({ ok: typeof id === 'string' && id ? knowledge.remove(id) : false }));
 // Ingest one or more files from disk. Best-effort per file; returns per-file
 // results so the UI can report partial success.
-ipcMain.handle('kg:ingestFiles', (_evt, payload: unknown) => {
+ipcMain.handle('kg:ingestFiles', async (_evt, payload: unknown) => {
   const p = (payload ?? {}) as { paths?: unknown; tags?: unknown };
   const paths = Array.isArray(p.paths) ? p.paths.filter((x): x is string => typeof x === 'string') : [];
   const tags = Array.isArray(p.tags) ? p.tags.filter((x): x is string => typeof x === 'string') : undefined;
-  const results = paths.map((srcPath) => {
+  // SYNC-CHILD-CALLS: ingest is async (a PDF's pdftotext runs as an async child); files still go
+  // one at a time, in order, each with its own ok/error.
+  const results: Array<{ ok: true; srcPath: string; docId: string; chunkCount: number } | { ok: false; srcPath: string; error: string }> = [];
+  for (const srcPath of paths) {
     try {
-      const r = knowledge.ingestFile(srcPath, { tags });
-      return { ok: true as const, srcPath, docId: r.docId, chunkCount: r.chunkCount };
+      const r = await knowledge.ingestFile(srcPath, { tags });
+      results.push({ ok: true as const, srcPath, docId: r.docId, chunkCount: r.chunkCount });
     } catch (e) {
-      return { ok: false as const, srcPath, error: e instanceof Error ? e.message : String(e) };
+      results.push({ ok: false as const, srcPath, error: e instanceof Error ? e.message : String(e) });
     }
-  });
+  }
   return { results };
 });
 // Open a multi-file picker and ingest the chosen artifacts in one round-trip.
@@ -4527,14 +4540,15 @@ ipcMain.handle('kg:addFiles', async (evt) => {
     title: 'Add documents to the Knowledge Graph'
   });
   if (res.canceled || res.filePaths.length === 0) return { ok: false as const, error: 'cancelled' };
-  const results = res.filePaths.map((srcPath) => {
+  const results: Array<{ ok: true; srcPath: string; docId: string; chunkCount: number } | { ok: false; srcPath: string; error: string }> = [];
+  for (const srcPath of res.filePaths) {
     try {
-      const r = knowledge.ingestFile(srcPath);
-      return { ok: true as const, srcPath, docId: r.docId, chunkCount: r.chunkCount };
+      const r = await knowledge.ingestFile(srcPath);
+      results.push({ ok: true as const, srcPath, docId: r.docId, chunkCount: r.chunkCount });
     } catch (e) {
-      return { ok: false as const, srcPath, error: e instanceof Error ? e.message : String(e) };
+      results.push({ ok: false as const, srcPath, error: e instanceof Error ? e.message : String(e) });
     }
-  });
+  }
   return { ok: true as const, results };
 });
 
@@ -4701,7 +4715,8 @@ ipcMain.handle('app:resetAll', async () => {
   const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
   try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
-  try { ptyManager.killAll(); } catch (e) { console.error('[reset] killAll:', e); }
+  // SYNC-CHILD-CALLS: async bulk kill, still BEFORE hive.dispose and the rm below.
+  try { await ptyManager.killAllAsync(); } catch (e) { console.error('[reset] killAllAsync:', e); }
   // The hive's kept-open log and ledger: an open file makes the rm below fail (ENOTEMPTY).
   try { hive.dispose(); } catch (e) { console.error('[reset] hive.dispose:', e); }
   // Erase the hive (Michael's + every agent's memory, inboxes, tasks, board,
@@ -5846,7 +5861,7 @@ async function processSpawnRequest(filePath: string): Promise<void> {
   }
   // Missing-CLI → FAIL FAST. A headless worker has no human to watch an installer,
   // so we never run the cc49e1e install banner here — we reject and tell god.
-  if (!ptyManager.isCommandAvailable(bin)) { fail(`engine CLI "${bin}" is not installed`); return; }
+  if (!(await ptyManager.isCommandAvailable(bin))) { fail(`engine CLI "${bin}" is not installed`); return; }
 
   const isolate = raw.isolate !== false; // default true
   // Base branch the worktree will be cut from (for the ahead-of-base safety check).
@@ -6521,7 +6536,7 @@ app.whenReady().then(() => {
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
     // start a login shell on macOS). Only when Codex is installed at all.
     const c = setTimeout(() => {
-      try { const cli = codexCliNow(); if (cli.path) codexVersionLog.note(cli.version, cli.path, 'app-start'); } catch { /* best-effort */ }
+      void codexCliNow().then((cli) => { if (cli.path) codexVersionLog.note(cli.version, cli.path, 'app-start'); }).catch(() => { /* best-effort */ });
     }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     c.unref?.();
   });

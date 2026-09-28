@@ -57,12 +57,20 @@ test('a Node at or above the floor is left alone; below it is not', () => {
   assert.equal(nodeIsUsable(''), false);
 });
 
-test('detectNodeVersion returns null rather than guessing when the probe fails', () => {
-  assert.equal(detectNodeVersion('/usr/bin/node', () => 'v24.19.0\n'), 'v24.19.0');
-  assert.equal(detectNodeVersion(null, () => 'v24.19.0'), null);
-  assert.equal(detectNodeVersion('/usr/bin/node', () => { throw new Error('ENOENT'); }), null);
+test('detectNodeVersion returns null rather than guessing when the probe fails', async () => {
+  // SYNC-CHILD-CALLS: async now (the default probe is an async execFile, not execFileSync).
+  assert.equal(await detectNodeVersion('/usr/bin/node', () => 'v24.19.0\n'), 'v24.19.0');
+  assert.equal(await detectNodeVersion('/usr/bin/node', async () => 'v24.19.0\n'), 'v24.19.0');
+  assert.equal(await detectNodeVersion(null, () => 'v24.19.0'), null);
+  assert.equal(await detectNodeVersion('/usr/bin/node', () => { throw new Error('ENOENT'); }), null);
+  assert.equal(await detectNodeVersion('/usr/bin/node', async () => { throw new Error('ETIMEDOUT'); }), null);
   // Garbage on stdout is not a version. Treating it as one would skip the install.
-  assert.equal(detectNodeVersion('/usr/bin/node', () => 'command not found'), null);
+  assert.equal(await detectNodeVersion('/usr/bin/node', () => 'command not found'), null);
+});
+
+test('detectNodeVersion default probe: the real node, async, returns its version', async () => {
+  assert.equal(await detectNodeVersion(process.execPath), process.version);
+  assert.equal(await detectNodeVersion(process.execPath + '-missing'), null);
 });
 
 // ── picking what to download ────────────────────────────────────────────────

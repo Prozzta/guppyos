@@ -10,8 +10,10 @@
  * Windows). So only a PLAIN command name is resolved; anything else is refused.
  *
  * The predicate is `isSafeCommandName`, applied at three sites:
- *   1. resolveCommand (shellEnv.ts) — refuses to hand a non-plain name to which;
- *   2. resolveCommandUncached (pty.ts) — the same, and drops shell:true on `where`;
+ *   1+2. lookupCommandAsync + CommandResolver.resolve (commandResolver.ts, SYNC-CHILD-CALLS:
+ *      the one shared async resolver that replaced shellEnv.resolveCommand and
+ *      PtyManager.resolveCommandUncached) — refuses to hand a non-plain name to
+ *      which/where, and runs `where` with no shell;
  *   3. the spawn-request intake (index.ts) — refuses a bin that is neither a plain
  *      name nor an absolute path, before any resolution.
  *
@@ -81,10 +83,10 @@ test('the tokenizer still yields a non-plain bin, so the allowlist is load-beari
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { resolveCommand } = loadTs('src/main/shellEnv.ts');
+const { resolveCommandAsync, CommandResolver } = loadTs('src/main/commandResolver.ts');
 const readSrc = (rel) => fs.readFileSync(path.resolve(__dirname, '..', rel), 'utf8');
 
-test('resolveCommand returns a non-plain name unchanged — it never reaches the shell lookup', () => {
+test('resolveCommandAsync returns a non-plain name unchanged — it never reaches the shell lookup', async () => {
   // A bare name (no `/` or `\`) that is not a plain command name must come straight
   // back, BEFORE any `captureFromLoginShell(\`which …\`)`. Equality means the shell
   // interpolation was never reached — a resolved binary would be an absolute path.
@@ -96,23 +98,32 @@ test('resolveCommand returns a non-plain name unchanged — it never reaches the
   try { fs.rmSync(probe, { force: true }); } catch { /* nothing to clean */ }
   const nonPlain = 'claude;touch md_wiring_probe';
   try {
-    assert.equal(resolveCommand(nonPlain), nonPlain);
+    assert.deepEqual(await resolveCommandAsync(nonPlain), { path: nonPlain, found: false });
+    // And no child process at all: a resolver whose lookup would throw is never asked.
+    const r = new CommandResolver({ lookup: () => { throw new Error('the lookup ran'); } });
+    assert.deepEqual(await r.resolve(nonPlain), { path: nonPlain, found: false });
+    assert.equal(r.lookups, 0);
     assert.equal(fs.existsSync(probe), false, 'the name reached a shell — the guard did not hold');
   } finally {
     try { fs.rmSync(probe, { force: true }); } catch { /* best effort */ }
   }
 });
 
-test('pty.ts resolver validates before which/where', () => {
-  const src = readSrc('src/main/pty.ts');
-  // The guard must sit in resolveCommandUncached and precede the spawnSync('where')
-  // and the captureFromLoginShell(`which …`) calls, and `where` must not run under
-  // a shell (which would re-parse the argument).
-  assert.match(src, /if \(!isSafeCommandName\(command\)\) return \{ path: command, found: false \};/);
-  assert.doesNotMatch(src, /spawnSync\('where', \[command\], \{ encoding: 'utf8', timeout: 3000, shell: true \}\)/);
-  const guardAt = src.indexOf('if (!isSafeCommandName(command)) return { path: command, found: false };');
-  const whichAt = src.indexOf('captureFromLoginShell(`which ${command}`)');
-  assert.ok(guardAt > 0 && whichAt > guardAt, 'the guard must precede the `which` interpolation');
+test('the shared resolver validates before which/where', () => {
+  const src = readSrc('src/main/commandResolver.ts');
+  // The guard must sit in lookupCommandAsync and precede the `where` exec and the
+  // login-shell `which` interpolation, and `where` must not run under a shell (which
+  // would re-parse the argument).
+  const guard = 'if (!isSafeCommandName(command)) return { path: command, found: false };';
+  assert.ok(src.includes(guard));
+  assert.doesNotMatch(src, /shell: true/);
+  const guardAt = src.indexOf(guard);
+  const whereAt = src.indexOf("execP(d, 'where', [command]");
+  const whichAt = src.indexOf('captureFromLoginShellAsync(`which ${command}`, d)');
+  assert.ok(guardAt > 0 && whereAt > guardAt, 'the guard must precede `where`');
+  assert.ok(whichAt > guardAt, 'the guard must precede the `which` interpolation');
+  // pty.ts no longer has a resolver of its own: it delegates to this one.
+  assert.doesNotMatch(readSrc('src/main/pty.ts'), /'where'|which \$\{command\}/);
 });
 
 test('index.ts validates the bin at the spawn-request intake', () => {
@@ -121,6 +132,6 @@ test('index.ts validates the bin at the spawn-request intake', () => {
   // and it does so BEFORE isCommandAvailable(bin) (which itself calls the resolver).
   assert.match(src, /if \(!isSafeCommandName\(bin\) && !isAbsolute\(bin\)\) \{/);
   const guardAt = src.indexOf('if (!isSafeCommandName(bin) && !isAbsolute(bin)) {');
-  const availAt = src.indexOf('if (!ptyManager.isCommandAvailable(bin))');
+  const availAt = src.indexOf('if (!(await ptyManager.isCommandAvailable(bin)))');
   assert.ok(guardAt > 0 && availAt > guardAt, 'the guard must precede isCommandAvailable(bin)');
 });

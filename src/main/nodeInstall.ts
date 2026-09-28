@@ -16,6 +16,7 @@
  * Nothing here imports electron: the URL/artifact/script logic is all pure, so it
  * is testable without booting an app.
  */
+import { execFile } from 'node:child_process';
 
 /** Lowest Node major we consider usable. Below this we offer the upgrade; at or
  *  above it we leave the user's own install completely alone — an existing,
@@ -52,24 +53,27 @@ export function nodeIsUsable(version: string | null | undefined): boolean {
   return major !== null && major >= NODE_FLOOR_MAJOR;
 }
 
-type VersionProbe = (nodePath: string) => string;
+type VersionProbe = (nodePath: string) => string | Promise<string>;
 
-const execNodeVersion: VersionProbe = (nodePath) =>
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  require('node:child_process')
-    .execFileSync(nodePath, ['--version'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+/** SYNC-CHILD-CALLS: async execFile (it was execFileSync, a node start-up of frozen main thread on
+ *  the missing-CLI spawn path). Same 5 s cap, stdout only, hidden window. */
+const execNodeVersion: VersionProbe = (nodePath) => new Promise<string>((resolve, reject) => {
+  execFile(nodePath, ['--version'], { encoding: 'utf8', timeout: 5000, windowsHide: true }, (err, stdout) => {
+    if (err) reject(err); else resolve(String(stdout ?? ''));
+  });
+});
 
 /** `node --version` from the binary the user's PATH actually resolves (see
  *  pty.commandPath). Null when node is absent or the probe fails at all — both
  *  mean "we cannot vouch for this runtime", which routes into the install rung
  *  rather than silently assuming it is fine. */
-export function detectNodeVersion(
+export async function detectNodeVersion(
   nodePath: string | null | undefined,
   probe: VersionProbe = execNodeVersion
-): string | null {
+): Promise<string | null> {
   if (!nodePath) return null;
   try {
-    const out = (probe(nodePath) || '').trim();
+    const out = ((await probe(nodePath)) || '').trim();
     return /^v?\d+\./.test(out) ? out : null;
   } catch {
     return null;

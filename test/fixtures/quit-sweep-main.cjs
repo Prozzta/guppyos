@@ -8,10 +8,13 @@
  * bugs at once:
  *
  * 1. The tree leak: spawn a real PTY whose child has a child of its own,
- *    record the live tree's PIDs to --pid-file, then run PtyManager.killAll()
- *    on the quit path. Pre-fix, ensureKilled's 4s unref'd taskkill timer could
- *    never fire before the process exited (~1.2s after killAll), so the tree
- *    survived the app; the synchronous win32 sweep must kill it here.
+ *    record the live tree's PIDs to --pid-file, then run the quit path's bulk kill.
+ *    Pre-fix, ensureKilled's 4s unref'd taskkill timer could never fire before the
+ *    process exited (~1.2s after killAll), so the tree survived the app.
+ *    SYNC-CHILD-CALLS: the synchronous PtyManager.killAll() is removed; this runs
+ *    the app's real shape instead — killAllAsync() started by the teardown and
+ *    JOINED by will-quit before app.exit (index.ts beginQuitWork) — and the
+ *    batched async sweep must kill the tree here.
  *
  * 2. The quit hang: in the real app, quitting teardownAndQuit-style (killAll +
  *    app.quit() inside the confirm-close IPC invoke, window still open) with
@@ -79,6 +82,8 @@ setTimeout(() => bail(4, 'fixture timed out'), 240_000);
 // a registered window-all-closed listener suppresses Electron's own
 // default-quit path, which changes the internal quit state flow.
 let teardown = () => app.quit(); // rebound once the PtyManager exists
+/** index.ts's quitWork: the async bulk kill, joined (bounded) by will-quit. */
+let quitWork = null;
 app.on('before-quit', () => { /* app checks allowQuit + pty count here */ });
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') teardown();
@@ -93,10 +98,13 @@ app.on('will-quit', (e) => {
   analyticsFlushed = true;
   e.preventDefault();
   const finish = () => app.exit(0);
-  Promise.race([
+  const flush = Promise.race([
     new Promise(() => { /* a flush that never settles */ }),
     new Promise((r) => setTimeout(r, 1_200))
-  ]).then(finish, finish);
+  ]);
+  // index.ts joins beginQuitWork() (capped by QUIT_WORK_CAP_MS) before the exit.
+  const work = Promise.race([quitWork ?? Promise.resolve(), new Promise((r) => setTimeout(r, 6_000))]);
+  Promise.all([flush, work]).then(finish, finish);
 });
 
 app.whenReady().then(async () => {
@@ -125,7 +133,7 @@ app.whenReady().then(async () => {
   const script =
     `Start-Process -WindowStyle Hidden -FilePath '${psExe}' ` +
     `-ArgumentList '-NoProfile','-Command','Start-Sleep 300'; Start-Sleep 300`;
-  const res = mgr.spawn({
+  const res = await mgr.spawn({
     id: 'quit-sweep-fixture',
     cwd: os.tmpdir(),
     command: psExe,
@@ -147,10 +155,10 @@ app.whenReady().then(async () => {
 
   // The quit path under test, exactly as the app runs it: the renderer invokes
   // a handle (app:confirmClose), and INSIDE that pending invoke main runs
-  // killAll + app.quit() with the window still open. The will-quit handler
+  // the async bulk kill + app.quit() with the window still open. The will-quit handler
   // above supplies the bounded-flush deferral and the final app.exit(0).
   const { ipcMain } = require('electron');
-  teardown = () => { mgr.killAll(); app.quit(); };
+  teardown = () => { quitWork = mgr.killAllAsync(); app.quit(); };
   ipcMain.handle('fixture:confirmClose', () => teardown());
   void win.webContents.executeJavaScript(
     `require('electron').ipcRenderer.invoke('fixture:confirmClose')`

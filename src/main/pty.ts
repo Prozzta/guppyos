@@ -5,12 +5,12 @@ import type { TerminalPromptState } from '../shared/promptState';
 import type { WebContents } from 'electron';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { ensureKilled, hardKillTree, killTreesAsync } from './procKill';
+import { ensureKilled, killTreesAsync } from './procKill';
 import { expandTilde } from './fs';
 import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
-import { captureFromLoginShell, isSafeCommandName, userShellPath } from './shellEnv';
+import { userShellPathAsync } from './shellEnv';
+import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -486,113 +486,31 @@ export class PtyManager {
 
   /** Whether an engine CLI is actually installed/locatable on this machine.
    *  Used PRE-SPAWN by the missing-CLI auto-install path: a bare `claude`/`codex`
-   *  that resolveCommand can't locate would otherwise be spawned and die with
-   *  "process exited (code 1)". Reuses the exact same `which`/`where` +
-   *  candidate-dir logic as spawn(), so detection and spawning never disagree. */
-  isCommandAvailable(command: string): boolean {
-    return this.resolveCommand(command).found;
+   *  that the resolver can't locate would otherwise be spawned and die with
+   *  "process exited (code 1)". Same resolver + cache as spawn(), so detection and
+   *  spawning never disagree. */
+  async isCommandAvailable(command: string): Promise<boolean> {
+    return (await this.resolveCommand(command)).found;
   }
 
   /** The absolute path a bare command resolves to for THIS user, or null when it
    *  isn't installed. Same resolution + cache as spawn(), so a caller that probes
    *  a binary (e.g. `node --version`, to decide whether it is too old to keep)
    *  inspects exactly the executable an agent would have run. */
-  commandPath(command: string): string | null {
-    const r = this.resolveCommand(command);
+  async commandPath(command: string): Promise<string | null> {
+    const r = await this.resolveCommand(command);
     return r.found ? r.path : null;
   }
 
-  /** Session cache of SUCCESSFUL command resolutions. Each miss costs a full
-   *  interactive-shell launch (`$SHELL -ilc which …` sources the user's whole
-   *  zshrc — nvm/asdf init is routinely ~1s) run synchronously on the main
-   *  process, and every agent spawn used to pay it TWICE (pre-check + spawn) —
-   *  a multi-second all-windows freeze per spawn, ×N on a team restore.
-   *  Negatives are deliberately NOT cached: the missing-CLI auto-install path
-   *  must see a just-installed binary on its re-check. */
-  private readonly resolvedCommands = new Map<string, { path: string; found: boolean }>();
+  /** SYNC-CHILD-CALLS: the app-wide async resolver (commandResolver.ts), replaceable in tests.
+   *  It used to be a private synchronous where.exe / login-shell which here, ~80 ms (Windows) to
+   *  ~1 s (a heavy zshrc) of frozen main thread per spawn, with misses never cached. */
+  resolver: Pick<CommandResolver, 'resolve'> = commandResolver;
 
-  /** Resolve a bare command (e.g. 'claude') against the user's PATH +
-   *  common install locations. Needed because Electron's spawn env on
-   *  macOS launches without the user's interactive shell PATH. Returns the
-   *  best path AND whether an existing executable was actually located (`found`):
-   *  when nothing is found, `path` falls back to the bare command (spawn would
-   *  ENOENT) and `found` is false — the signal the missing-CLI path keys on. */
-  private resolveCommand(command: string): { path: string; found: boolean } {
-    const cached = this.resolvedCommands.get(command);
-    // Trust a positive hit only while the binary still exists (uninstall/update
-    // between spawns must re-probe rather than hand out a dead path).
-    if (cached && existsSync(cached.path)) return cached;
-    const res = this.resolveCommandUncached(command);
-    if (res.found) this.resolvedCommands.set(command, res);
-    else this.resolvedCommands.delete(command);
-    return res;
-  }
-
-  private resolveCommandUncached(command: string): { path: string; found: boolean } {
-    // Already an absolute/relative path (Unix `/` or Windows `\`) — pass through;
-    // `found` reflects whether that path actually exists on disk.
-    if (command.includes('/') || command.includes('\\')) return { path: command, found: existsSync(command) };
-    // Only a plain command name is resolved against PATH. Anything else is
-    // refused here so it never reaches `which`/`where`; `found:false` makes the
-    // caller treat it as missing.
-    if (!isSafeCommandName(command)) return { path: command, found: false };
-    if (process.platform === 'win32') {
-      // `where` is the Windows equivalent of `which`.
-      // It can return MULTIPLE matches in PATH order; the first is often an
-      // EXTENSIONLESS shim (bare `claude`). Skip extensionless hits and take
-      // the first PATHEXT-eligible one (.CMD/.BAT/.EXE/…). NOTE: even .CMD/.BAT
-      // files are not directly spawnable by node-pty's CreateProcess (error 193);
-      // spawn() either decodes the shim to its real interpreter or, failing that,
-      // routes it through `cmd.exe /c` (see resolveWindowsShimSpawn below).
-      try {
-        // No `shell:true`: `command` is proven metacharacter-free above, and
-        // running `where` directly keeps cmd.exe from re-parsing the argument.
-        const res = spawnSync('where', [command], { encoding: 'utf8', timeout: 3000 });
-        const lines = (res.stdout ?? '').trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-        const pathExts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
-          .split(';').map((e) => e.trim().toUpperCase()).filter(Boolean);
-        const isExecutable = (p: string): boolean => {
-          const dot = p.lastIndexOf('.');
-          const sep = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
-          if (dot <= sep) return false; // no extension on the basename
-          return pathExts.includes(p.slice(dot).toUpperCase());
-        };
-        const exe = lines.find((p) => isExecutable(p) && existsSync(p));
-        if (exe) return { path: exe, found: true };
-      } catch { /* fall through */ }
-      // Common Windows install locations (npm global = %APPDATA%\npm\<cmd>.cmd).
-      const appData = process.env.APPDATA ?? '';
-      const localAppData = process.env.LOCALAPPDATA ?? '';
-      const home = process.env.USERPROFILE ?? process.env.HOME ?? '';
-      const winCandidates = [
-        `${appData}\\npm\\${command}.cmd`,
-        `${appData}\\npm\\${command}`,
-        `${localAppData}\\Programs\\claude\\${command}.exe`,
-        `${home}\\.claude\\local\\${command}.cmd`,
-        `${home}\\.claude\\local\\${command}`
-      ];
-      for (const c of winCandidates) if (existsSync(c)) return { path: c, found: true };
-      // Last resort — let node-pty try; will fail with ENOENT if missing.
-      return { path: command, found: false };
-    }
-    // macOS / Linux — `which` against an interactive shell so we pick up nvm/asdf/brew paths.
-    // Fenced capture (shellEnv): rc-file chatter can't poison the which output.
-    const which = captureFromLoginShell(`which ${command}`);
-    if (which) {
-      const path = which.trim().split('\n').map((l) => l.trim()).filter(Boolean).pop();
-      if (path && existsSync(path)) return { path, found: true };
-    }
-    // Common explicit locations
-    const candidates = [
-      `/opt/homebrew/bin/${command}`,
-      `/usr/local/bin/${command}`,
-      `${process.env.HOME ?? ''}/.local/bin/${command}`,
-      `${process.env.HOME ?? ''}/.claude/local/${command}`,
-      `${process.env.HOME ?? ''}/.volta/bin/${command}`
-    ];
-    for (const c of candidates) if (existsSync(c)) return { path: c, found: true };
-    // Last resort — let node-pty try; will fail with ENOENT if missing.
-    return { path: command, found: false };
+  /** Resolve a bare command (e.g. 'claude') against the user's PATH + common install
+   *  locations: the best path AND whether an existing executable was actually located. */
+  private resolveCommand(command: string): Promise<ResolvedCommand> {
+    return this.resolver.resolve(command);
   }
 
   /**
@@ -610,7 +528,7 @@ export class PtyManager {
    * not installed or itself not a real .exe) degrades to exactly today's cmd.exe
    * behaviour. Never throws.
    */
-  private resolveWindowsShimSpawn(resolved: string): { file: string; script: string | null } | null {
+  private async resolveWindowsShimSpawn(resolved: string): Promise<{ file: string; script: string | null } | null> {
     if (process.platform !== 'win32') return null;
     try {
       const lower = resolved.toLowerCase();
@@ -638,7 +556,7 @@ export class PtyManager {
         return { file: target.scriptPath, script: null };
       }
 
-      const interp = this.resolveCommand(target.interpreter);
+      const interp = await this.resolveCommand(target.interpreter);
       if (!interp.found) return null;
       // Must be a REAL executable: if `node` itself only resolves to a `.cmd`
       // (e.g. our own bundled-runtime shim appended to PATH), spawning it directly
@@ -652,7 +570,7 @@ export class PtyManager {
     }
   }
 
-  spawn(opts: SpawnOptions, owner: WebContents | null = null): { ok: boolean; error?: string } {
+  async spawn(opts: SpawnOptions, owner: WebContents | null = null): Promise<{ ok: boolean; error?: string }> {
     if (this.sessions.has(opts.id)) {
       return { ok: false, error: `pty already exists for id ${opts.id}` };
     }
@@ -663,16 +581,15 @@ export class PtyManager {
     if (!existsSync(opts.cwd)) {
       return { ok: false, error: `cwd does not exist: ${opts.cwd}` };
     }
-    const resolved = this.resolveCommand(opts.command).path;
+    // SYNC-CHILD-CALLS: resolution and the shell PATH are async (no child process blocks main).
+    const [resolved, shellPath] = await Promise.all([
+      this.resolveCommand(opts.command).then((r) => r.path),
+      process.platform === 'win32' ? Promise.resolve(process.env.PATH || '') : userShellPathAsync()
+    ]);
     try {
       // Build a user-shell PATH so child can resolve subprocess deps. Cached
-      // for the session (shellEnv.userShellPath, fenced against rc-file noise) —
-      // the interactive-shell launch it replaces cost ~1s of main-thread freeze
-      // on EVERY spawn.
-      const userPath = withHiveRuntimeFallback(
-        process.platform === 'win32' ? (process.env.PATH || '') : userShellPath(),
-        opts.env?.HIVE_ROOT
-      );
+      // for the session (shellEnv.userShellPathAsync, fenced against rc-file noise).
+      const userPath = withHiveRuntimeFallback(shellPath, opts.env?.HIVE_ROOT);
 
       // On Windows, .cmd/.bat files (and extensionless shims) cannot be executed
       // directly by CreateProcess — only .exe/.com can. Two ways out, in order of
@@ -689,8 +606,12 @@ export class PtyManager {
       // macOS/Linux and every undecodable Windows target keep today's behaviour.
       // Skipped entirely for a shellScript spawn, which never executes `resolved`.
       const shimSpawn = needsCmd && typeof opts.shellScript !== 'string'
-        ? this.resolveWindowsShimSpawn(resolved)
+        ? await this.resolveWindowsShimSpawn(resolved)
         : null;
+      // The lookups above yielded: another spawn may have claimed this id meanwhile.
+      if (this.sessions.has(opts.id)) {
+        return { ok: false, error: `pty already exists for id ${opts.id}` };
+      }
       let file: string;
       let spawnArgs: string[] | string;
       if (typeof opts.shellScript === 'string') {
@@ -956,48 +877,20 @@ export class PtyManager {
     return s ? Date.now() - s.lastOutputAt : undefined;
   }
 
-  /** Bulk-kill every PTY for app quit / reset. This is wholesale shutdown, not
-   *  individual agent lifecycle, so it suppresses the natural-exit teardown —
-   *  we don't want to archive every agent or fire a storm of `git worktree
-   *  remove` while the process is tearing down.
+  /** Bulk-kill every PTY for app quit, reset and changeHome. This is wholesale shutdown, not
+   *  individual agent lifecycle, so natural-exit teardown is suppressed at once — we don't want to
+   *  archive every agent or fire a storm of `git worktree remove` while the process tears down.
    *
-   *  On Windows the tree sweep runs SYNCHRONOUSLY here, unlike kill():
-   *  ensureKilled's grace timer is unref'd, and on the quit path the main
-   *  process exits (will-quit caps the analytics flush at ~1.2s) long before
-   *  the 4s grace — so the deferred `taskkill /T /F` never ran and agent trees
-   *  survived the app. conpty's own kill is async and best-effort (and our
-   *  conpty patch degrades a failed console enumeration to killing nothing),
-   *  so the synchronous sweep is the only reliable reaper at quit. POSIX keeps
-   *  the graceful path: closing the pty HUPs the foreground process group, so
-   *  trees die without us SIGKILLing mid-cleanup. */
-  killAll() {
-    this.exitHandler = null;
-    const sweepNow = process.platform === 'win32';
-    for (const s of this.sessions.values()) {
-      const pid = s.proc.pid;
-      if (sweepNow) {
-        // Capture and kill the intact Windows process tree before closing
-        // ConPTY: once the root exits, taskkill may no longer be able to find
-        // descendants by that PID. Keep node-pty cleanup independent so a
-        // failure in either operation cannot prevent the other.
-        try { hardKillTree(pid); } catch { /* noop */ }
-        try { s.proc.kill(); } catch { /* noop */ }
-      } else {
-        try { s.proc.kill(); } catch { /* noop */ }
-        ensureKilled(pid);
-      }
-    }
-    this.sessions.clear();
-  }
-
-  /** QUIT-HANG: the app-quit form of killAll, which never blocks the main thread.
-   *  killAll's per-terminal synchronous taskkill froze the UI for the whole sweep
-   *  (6 big agent trees ran past Windows' ~5 s hang threshold -> AppHang). Same
-   *  contract as killAll: sessions are forgotten and natural-exit teardown is
-   *  suppressed at once; on Windows every tree is swept by ONE async batched
-   *  `taskkill /T /F` and each ConPTY is closed only AFTER that sweep (or its cap),
-   *  so the tree is still intact when taskkill enumerates it (276f782a's point).
-   *  POSIX closes the ptys and group-kills after the grace, as killAll does. */
+   *  SYNC-CHILD-CALLS: this is the ONLY bulk kill. The synchronous killAll() it replaced ran one
+   *  spawnSync `taskkill /T /F` per terminal (~110 ms idle, ~250-290 ms under load, capped at 10 s
+   *  EACH) and froze the main thread for all of them on reset/changeHome (SYNC-KILLALL-WHY.md).
+   *  It is gone, not merely unused, so no user path can reach a synchronous kill again.
+   *
+   *  QUIT-HANG: on Windows every tree is swept by ONE async batched `taskkill /T /F` and each
+   *  ConPTY is closed only AFTER that sweep (or its cap), so the tree is still intact when taskkill
+   *  enumerates it (276f782a's point); then the ConPTY exit callbacks are awaited (EXIT_WAIT_MS),
+   *  so an app.exit/relaunch after this resolves never races them. POSIX closes the ptys and
+   *  group-kills after the grace. Never rejects. */
   killAllAsync(capMs?: number): Promise<void> {
     this.exitHandler = null;
     const sessions = [...this.sessions.values()];

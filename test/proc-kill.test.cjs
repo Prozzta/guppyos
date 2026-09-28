@@ -24,7 +24,8 @@ const js = ts.transpileModule(fs.readFileSync(SRC, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText;
 fs.writeFileSync(path.join(out, 'procKill.js'), js, 'utf8');
-const { isAlive, hardKillTree, ensureKilled } = require(path.join(out, 'procKill.js'));
+// SYNC-CHILD-CALLS: hardKillTree (sync) is removed; the group reap is killTreesAsync's POSIX branch.
+const { isAlive, killTreesAsync, ensureKilled } = require(path.join(out, 'procKill.js'));
 
 if (process.platform === 'win32') {
   // The smoke import above IS the win32 assertion; everything below is POSIX-only. This
@@ -66,17 +67,17 @@ async function test(name, fn) {
     const pid = spawnStubbornTree();
     await sleep(200);
     assert.ok(isAlive(pid), 'leader should be alive');
-    hardKillTree(pid);
+    await killTreesAsync([pid]);
     await sleep(200);
-    assert.ok(!isAlive(pid), 'leader should be dead after hardKillTree');
+    assert.ok(!isAlive(pid), 'leader should be dead after killTreesAsync');
   });
 
-  await test('hardKillTree reaps the WHOLE group, not just the leader', async () => {
+  await test('killTreesAsync reaps the WHOLE group, not just the leader', async () => {
     const pid = spawnStubbornTree();
     await sleep(300);
     const before = groupPids(pid);
     assert.ok(before.length >= 2, `expected leader+child in group, saw: ${before.join(',')}`);
-    hardKillTree(pid);
+    await killTreesAsync([pid]);
     await sleep(300);
     assert.deepEqual(groupPids(pid), [], 'group should be empty');
   });
@@ -87,7 +88,7 @@ async function test(name, fn) {
     try { process.kill(pid, 'SIGHUP'); } catch { /* noop */ }
     await sleep(300);
     assert.ok(isAlive(pid), 'a HUP-trapping leader survives a bare SIGHUP — this is the leaked-PID case');
-    hardKillTree(pid); // cleanup
+    await killTreesAsync([pid]); // cleanup
   });
 
   await test('ensureKilled escalates after the grace and releases every PID', async () => {

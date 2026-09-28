@@ -1,7 +1,8 @@
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { randomUUID as nodeRandomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { resolveCommand, userShellPath } from './shellEnv';
+import { userShellPathAsync } from './shellEnv';
+import { resolveCommandAsync } from './commandResolver';
 import { expandTilde } from './fs';
 import { ensureKilled } from './procKill';
 
@@ -142,6 +143,11 @@ export interface HiddenClaudeDeps {
   setTimeout: (fn: () => void, ms: number) => NodeJS.Timeout;
   clearTimeout: (t: NodeJS.Timeout) => void;
   ensureKilled: (pid: number | undefined) => void;
+  /** SYNC-CHILD-CALLS: the executable for `binary`, resolved ASYNC (default: the shared
+   *  commandResolver; its bare name when nothing is installed, so the spawn ENOENTs honestly). */
+  resolveCommand?: (binary: string) => Promise<string>;
+  /** The user's shell PATH for the child (default: shellEnv.userShellPathAsync). */
+  shellPath?: () => Promise<string>;
 }
 
 const defaultDeps: HiddenClaudeDeps = {
@@ -200,18 +206,16 @@ export function runHiddenClaude(
   opts: HiddenClaudeOptions,
   deps: HiddenClaudeDeps = defaultDeps
 ): Promise<HiddenClaudeResult> {
-  return new Promise((resolve) => {
-    if (!prompt.trim()) { resolve({ ok: false, error: 'empty prompt' }); return; }
-    // Defense-in-depth: `~` is shell syntax, not a path Node understands.
-    const cwd = opts.cwd ? expandTilde(opts.cwd) : opts.cwd;
-    if (!cwd || !existsSync(cwd)) {
-      resolve({ ok: false, error: `cwd does not exist: ${opts.cwd}` });
-      return;
-    }
-
+  if (!prompt.trim()) return Promise.resolve({ ok: false, error: 'empty prompt' });
+  // Defense-in-depth: `~` is shell syntax, not a path Node understands.
+  const cwd = opts.cwd ? expandTilde(opts.cwd) : opts.cwd;
+  if (!cwd || !existsSync(cwd)) return Promise.resolve({ ok: false, error: `cwd does not exist: ${opts.cwd}` });
+  const binary = (opts.command || 'claude').trim().split(/\s+/)[0] || 'claude';
+  const resolveExe = deps.resolveCommand ?? (async (b: string) => (await resolveCommandAsync(b)).path);
+  const shellPathOf = deps.shellPath ?? userShellPathAsync;
+  // SYNC-CHILD-CALLS: the `where` / login-shell lookups are async; nothing blocks main here.
+  return Promise.all([resolveExe(binary), shellPathOf()]).then(([exe, shellPath]) => new Promise<HiddenClaudeResult>((resolve) => {
     const sessionId = deps.randomUUID();
-    const binary = (opts.command || 'claude').trim().split(/\s+/)[0] || 'claude';
-    const exe = resolveCommand(binary);
     const disallowed = opts.disallowedTools ?? ['Edit', 'Write', 'NotebookEdit'];
     const addDirs = (opts.addDirs ?? []).filter((d) => d && existsSync(d));
     const timeoutMs = opts.timeoutMs ?? 180_000;
@@ -232,7 +236,7 @@ export function runHiddenClaude(
     // limit, and argv is visible to every process on the machine.
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
-      PATH: userShellPath(),
+      PATH: shellPath,
       ...(opts.env ?? {}),
     };
     for (const k of API_KEY_ENV) delete env[k];
@@ -346,7 +350,7 @@ export function runHiddenClaude(
     } catch (e) {
       abort(e instanceof Error ? e.message : String(e));
     }
-  });
+  }), (e: unknown): HiddenClaudeResult => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
 }
 
 /**

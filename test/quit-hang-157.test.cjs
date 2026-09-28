@@ -370,9 +370,11 @@ test('follow-up: no synchronous tree kill left on normal-use paths', () => {
   const pk = readSrc('src/main/procKill.ts');
   const ensure = between(pk, 'export function ensureKilled(', '\n}\n');
   assert.doesNotMatch(ensure, /hardKillTree\(/);
-  // The only sync sweep left is PtyManager.killAll, used by reset/changeHome right
-  // before they exit/relaunch (accepted in the audit).
+  // UPDATED for SYNC-CHILD-CALLS: this used to pin PtyManager.killAll as the one sync sweep
+  // left (reset/changeHome, accepted in the QUIT-HANG audit). SYNC-KILLALL-WHY.md measured it at
+  // ~110-290 ms of frozen main thread PER terminal, so it is removed: reset and changeHome await
+  // killAllAsync, and hardKillTree (its only sync taskkill) is gone from procKill.ts.
   const pty = readSrc('src/main/pty.ts');
-  assert.equal((pty.match(/hardKillTree\(/g) || []).length, 1);
-  assert.match(between(pty, '  killAll() {', '\n  }\n'), /hardKillTree\(pid\)/);
+  assert.doesNotMatch(pty, /hardKillTree\(|\n  killAll\(\) \{/);
+  assert.doesNotMatch(pk, /export function hardKillTree|import \{[^}]*spawnSync/);
 });

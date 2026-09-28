@@ -21,7 +21,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
+const childProcess = require('node:child_process');
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 const DEFAULT_CHUNK_SIZE = 1200; // chars per chunk (approx; broken on boundaries)
@@ -171,7 +171,7 @@ function makeSnippet(text, queryTerms) {
  * v1 covers text-family (verbatim) and images (metadata-level); PDF is a
  * best-effort poppler hook; everything else is treated as text.
  */
-function extractText(input) {
+async function extractText(input, deps = {}) {
   const { srcPath, inlineText, modality, title, caption, tags, source } = input;
 
   if (typeof inlineText === 'string' && inlineText.length) {
@@ -186,7 +186,7 @@ function extractText(input) {
   }
 
   if (modality === 'pdf') {
-    const out = tryPdfToText(srcPath);
+    const out = await tryPdfToText(srcPath, deps.execFile);
     if (out != null && out.trim()) {
       return { text: out, title: title || deriveTitle(out) || source, extractor: 'pdftotext@1', mime: 'application/pdf' };
     }
@@ -205,23 +205,33 @@ function extractText(input) {
   return { text: inlineText || '', title: title || source || 'untitled', extractor: 'empty@1', mime: 'text/plain' };
 }
 
-/** Best-effort PDF → text via poppler's `pdftotext` if it's on PATH; else null. */
-function tryPdfToText(srcPath) {
-  if (!srcPath || !fs.existsSync(srcPath)) return null;
-  try {
-    const res = spawnSync('pdftotext', ['-q', srcPath, '-'], { encoding: 'utf8', timeout: 20000, maxBuffer: 32 * 1024 * 1024 });
-    if (res.status === 0 && typeof res.stdout === 'string') return res.stdout;
-  } catch { /* pdftotext not installed */ }
-  return null;
+/** Per-PDF cap for pdftotext. */
+const PDFTOTEXT_TIMEOUT_MS = 20000;
+const PDFTOTEXT_MAX_BUFFER = 32 * 1024 * 1024;
+
+/** Best-effort PDF → text via poppler's `pdftotext` if it's on PATH; else null.
+ *  SYNC-CHILD-CALLS: ASYNC (execFile) — this runs in the Electron main process (kg:ingestFiles,
+ *  the Add-documents dialog), where the synchronous spawn it replaced froze every window for up to 20 s
+ *  per PDF. Same cap, same buffer, hidden window; resolves (never rejects) with the text or null. */
+function tryPdfToText(srcPath, execFileImpl = childProcess.execFile) {
+  if (!srcPath || !fs.existsSync(srcPath)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      execFileImpl('pdftotext', ['-q', srcPath, '-'],
+        { encoding: 'utf8', timeout: PDFTOTEXT_TIMEOUT_MS, maxBuffer: PDFTOTEXT_MAX_BUFFER, windowsHide: true },
+        (err, stdout) => resolve(!err && typeof stdout === 'string' ? stdout : null));
+    } catch { resolve(null); /* pdftotext not installed */ }
+  });
 }
 
 // ─── Store operations ────────────────────────────────────────────────────────
 /**
  * Ingest one artifact into the store at `kgRoot`.
  * input: { srcPath?, inlineText?/text?, title?, tags?, caption?, modality?, source?, id? }
- * Returns { docId, chunkCount, meta }.
+ * Returns a Promise of { docId, chunkCount, meta } (async only for the PDF extractor's child
+ * process; deps.execFile replaces child_process.execFile in tests).
  */
-function ingest(kgRoot, input = {}) {
+async function ingest(kgRoot, input = {}, deps = {}) {
   ensureDir(kgRoot);
   ensureDir(path.join(kgRoot, 'docs'));
 
@@ -245,7 +255,7 @@ function ingest(kgRoot, input = {}) {
     } catch { /* best-effort copy */ }
   }
 
-  const ex = extractText({ srcPath, inlineText, modality, title: input.title, caption: input.caption, tags, source });
+  const ex = await extractText({ srcPath, inlineText, modality, title: input.title, caption: input.caption, tags, source }, deps);
   const fullText = String(ex.text || '');
   fs.writeFileSync(path.join(docDir, 'text.md'), fullText, 'utf8');
 
@@ -354,6 +364,6 @@ function stats(kgRoot) {
 
 module.exports = {
   ingest, search, list, getDoc, removeDoc, stats,
-  detectModality, extractText, chunkText, tokenize, scoreChunk, makeSnippet, deriveTitle,
-  DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP
+  detectModality, extractText, tryPdfToText, chunkText, tokenize, scoreChunk, makeSnippet, deriveTitle,
+  DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP, PDFTOTEXT_TIMEOUT_MS
 };
