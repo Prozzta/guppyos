@@ -18,7 +18,7 @@ const asar = require('@electron/asar');
 
 /** What main's 'app:info' returns as `changelog` for this text (index.ts, keep in step). */
 function releaseNotesOf(text) {
-  return text ? text.split(/\n## /).slice(1, 3).map((s) => `## ${s}`).join('\n').slice(0, 8000) : '';
+  return text ? text.split(/\n## /).slice(1).filter((s) => !/^\[?unreleased\]?/i.test(s)).slice(0, 2).map((s) => `## ${s}`).join('\n').slice(0, 8000) : '';
 }
 
 function verify(asarPath) {

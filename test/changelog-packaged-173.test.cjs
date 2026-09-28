@@ -68,8 +68,9 @@ test('verify: FAILS when it is empty or has no "## " section, and when other .md
 
 test('the check reads release notes exactly as main\'s app:info does', () => {
   const idx = read('src/main/index.ts');
-  assert.match(idx, /changelog\.split\(\/\\n## \/\)\.slice\(1, 3\)\.map\(\(s\) => `## \$\{s\}`\)\.join\('\\n'\)\.slice\(0, 8000\)/, 'main still reads the top two sections');
+  assert.ok(idx.includes("changelog.split(/\\n## /).slice(1).filter((s) => !/^\\[?unreleased\\]?/i.test(s)).slice(0, 2).map((s) => `## ${s}`).join('\\n').slice(0, 8000)"), 'main reads the two newest RELEASED sections, like the check');
   assert.match(idx, /join\(app\.getAppPath\(\), 'CHANGELOG\.md'\)/, 'main reads it from the asar root');
-  const notes = releaseNotesOf(CL);
-  assert.ok(notes.startsWith('## [Unreleased]') && notes.includes('## [1.1.73]'));
+  const notes = releaseNotesOf(CL + '\r\n## [1.1.72] - 2026-09-28\r\n\r\n- older\r\n\r\n## [1.1.71]\r\n- oldest\r\n');
+  assert.ok(notes.startsWith('## [1.1.73]') && notes.includes('## [1.1.72]'), 'the two newest released sections');
+  assert.ok(!/Unreleased/.test(notes) && !notes.includes('1.1.71'), '[Unreleased] skipped; only two');
 });

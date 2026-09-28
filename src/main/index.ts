@@ -5689,8 +5689,10 @@ ipcMain.handle('app:info', () => {
   for (const p of [join(app.getAppPath(), 'CHANGELOG.md'), join(process.cwd(), 'CHANGELOG.md')]) {
     try { changelog = readFileSync(p, 'utf8'); if (changelog) break; } catch { /* try next */ }
   }
+  // The two newest RELEASED sections: "## [Unreleased]" is work in progress, not release notes
+  // (Andy CHANGELOG audit nit). scripts/verify-packaged-changelog.cjs reads it the same way.
   const top = changelog
-    ? changelog.split(/\n## /).slice(1, 3).map((s) => `## ${s}`).join('\n').slice(0, 8000)
+    ? changelog.split(/\n## /).slice(1).filter((s) => !/^\[?unreleased\]?/i.test(s)).slice(0, 2).map((s) => `## ${s}`).join('\n').slice(0, 8000)
     : '';
   return { version: app.getVersion(), changelog: top };
 });
