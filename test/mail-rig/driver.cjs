@@ -19,6 +19,8 @@ const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
 const { rigEnv } = require('./isolation.cjs');
 
 const HOST = path.join(__dirname, 'rig-host.cjs');
+/** Real silence a freshly booted stub's PTY must show before the simulated clock moves. */
+const BOOT_QUIET_MS = 400;
 const BAD_ENV = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
 
 /** The host's ENTIRE env: an allowlist (isolation.cjs rigEnv), never the parent minus a few keys. */
@@ -222,8 +224,22 @@ class Rig {
       if (!r.ok) throw new Error(`spawn ${s.id} failed: ${r.error}`);
     }
     for (const s of specs) await this.waitReady(s);
+    await this.settleBoot(specs.map((s) => s.id));
     // WORKER_WAKE_BOOT_GRACE_MS (35 s) on the coordinator's (simulated) clock.
     await this.call('advance', { ms: 40_000 });
+  }
+
+  /**
+   * A barrier, not a delay: wait until each agent's PTY has produced its boot output and then been
+   * silent for BOOT_QUIET_MS of REAL time, before the simulated clock moves. Output is mapped onto
+   * the simulated clock with the offset in force when it arrived, so boot output that ConPTY
+   * delivered AFTER the 40 s advance (seen under full-suite load) was stamped "now" and made the
+   * first reconcile beat refuse the wake as lifecycle-unknown-not-quiescent.
+   */
+  async settleBoot(ids) {
+    for (const id of ids) {
+      await waitFor(async () => (await this.call('ptyQuietMs', { id })) >= BOOT_QUIET_MS, { what: `${id}'s boot output to settle`, timeoutMs: 30_000, intervalMs: 50, diag: () => this.diagnose(id) });
+    }
   }
 
   async waitReady(s, minStarts = 1) {
@@ -243,6 +259,7 @@ class Rig {
     const r = await this.call('spawn', s);
     if (!r.ok) throw new Error(`respawn ${s.id} failed: ${r.error}`);
     await this.waitReady(s, before + 1);
+    await this.settleBoot([s.id]);
     await this.call('advance', { ms: 40_000 });
     return r;
   }

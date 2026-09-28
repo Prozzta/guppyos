@@ -453,6 +453,9 @@ async function main() {
     // The `pty:kill` IPC (index.ts:3937): kill, then the shared teardown.
     killPty: ({ id }) => { const p = ptyOf(id); const r = ptyManager.kill(p); f.teardownPty(p); return r; },
     hasPty: ({ id }) => !!f.ptyForAgent(id),
+    // REAL ms since this agent's PTY last produced output (-1: no output yet). The driver waits on
+    // it before moving the simulated clock (see Rig.settleBoot).
+    ptyQuietMs: ({ id }) => { const p = f.ptyForAgent(id); const at = p ? (ptyManager.lastOutputAt(p) ?? 0) : 0; return at > 0 ? Date.now() - at : -1; },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
     // C1 (deterministic lateness): the NEXT mail-claim settle of this agent is measured as if its
     // response had flushed `ms` after the hook arrived. The response itself leaves at once, so it
