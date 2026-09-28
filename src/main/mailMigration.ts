@@ -108,7 +108,8 @@ export interface MigrationReport {
 
 export interface MailMigrationDeps {
   root: string;
-  /** The registry's agents, own keys only. */
+  /** The registry's agents, own keys only. `archived` = archived EXPLICITLY (Q31: the caller
+   *  passes archivedForMail; an orphan or pty-exit archive counts as active here). */
   agents: Array<{ id: string; archived: boolean }>;
   mail: { ledger(agentId: string): MailLedgerDoc; flushAll(): void };
   appendLog: (row: Record<string, unknown>) => void;
@@ -161,27 +162,89 @@ function header(p: string): { from: string | null; act: string | null; subject: 
   } catch { return none; }
 }
 
-/** §7.1 step 2 for one archived agent: inbox/*.json → inbox/.undelivered/. Never overwrites. */
-function moveUndelivered(root: string, agentId: string, now: number): UndeliveredItem[] {
+/**
+ * §7.1 step 2 for one archived agent: inbox/*.json → inbox/.undelivered/. Never overwrites. Each
+ * file is tried on its own (Jim, slice 6/7 audit): a rename that throws (an AV lock) is counted in
+ * `errors` and the rest still move. What reaches the report is read back from .undelivered/ itself
+ * (listUndelivered), never from this pass's own list, so a crash or a failure between the renames
+ * and the report write loses nothing: the retry lists what the earlier pass moved.
+ */
+function moveUndelivered(root: string, agentId: string): { moved: number; errors: string[] } {
   const inbox = join(root, 'agents', agentId, 'inbox');
   let names: string[];
-  try { names = readdirSync(inbox); } catch { return []; }
+  try { names = readdirSync(inbox); } catch { return { moved: 0, errors: [] }; }
   const files = names.filter((n) => n.endsWith('.json') && !n.includes('.tmp'));
-  if (!files.length) return [];
+  if (!files.length) return { moved: 0, errors: [] };
   const dest = join(inbox, UNDELIVERED_DIR);
   mkdirSync(dest, { recursive: true });
-  const out: UndeliveredItem[] = [];
+  let moved = 0;
+  const errors: string[] = [];
   for (const n of files) {
     const src = join(inbox, n);
-    try { if (!statSync(src).isFile()) continue; } catch { continue; }
-    const stem = n.slice(0, -'.json'.length);
-    let target = n;
-    for (let i = 1; existsSync(join(dest, target)); i++) target = `${stem}.${i}.json`;
-    const h = header(src);
-    renameWithRetry(src, join(dest, target));
-    out.push({ agentId, id: stem, file: `agents/${agentId}/inbox/${UNDELIVERED_DIR}/${target}`, ...h, movedAt: now });
+    try {
+      if (!statSync(src).isFile()) continue;
+      const stem = n.slice(0, -'.json'.length);
+      let target = n;
+      for (let i = 1; existsSync(join(dest, target)); i++) target = `${stem}.${i}.json`;
+      renameWithRetry(src, join(dest, target));
+      moved++;
+    } catch (error) {
+      errors.push(`${n}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { moved, errors };
+}
+
+/** The report items for what sits in an agent's inbox/.undelivered/ now (the source of truth). */
+function listUndelivered(root: string, agentId: string, now: number): UndeliveredItem[] {
+  const dir = join(root, 'agents', agentId, 'inbox', UNDELIVERED_DIR);
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return []; }
+  const out: UndeliveredItem[] = [];
+  for (const n of names.filter((x) => x.endsWith('.json') && !x.includes('.tmp')).sort()) {
+    const p = join(dir, n);
+    try { if (!statSync(p).isFile()) continue; } catch { continue; }
+    out.push({ agentId, id: n.slice(0, -'.json'.length), file: `agents/${agentId}/inbox/${UNDELIVERED_DIR}/${n}`, ...header(p), movedAt: now });
   }
   return out;
+}
+
+/**
+ * ZT-I1-MAIL Q32 refinement (god 0f1672): an agent is restored, so its `inbox/.undelivered/*.json`
+ * go back to `inbox/`. A stem already taken (a file in inbox/ or .done/, or `taken(stem)`, the
+ * ledger) becomes `<stem>.N`; nothing is ever overwritten. Returns what moved: the new id (the
+ * inbox file stem) and the report path of the file it came from. Idempotent: a moved file is gone.
+ */
+export function restoreUndeliveredFiles(root: string, agentId: string, taken: (stem: string) => boolean): Array<{ id: string; file: string }> {
+  const inbox = join(root, 'agents', agentId, 'inbox');
+  const src = join(inbox, UNDELIVERED_DIR);
+  let names: string[];
+  try { names = readdirSync(src); } catch { return []; }
+  const out: Array<{ id: string; file: string }> = [];
+  for (const n of names.filter((x) => x.endsWith('.json') && !x.includes('.tmp')).sort()) {
+    const from = join(src, n);
+    try { if (!statSync(from).isFile()) continue; } catch { continue; }
+    const stem = n.slice(0, -'.json'.length);
+    const free = (id: string): boolean => isValidMailId(id) && !taken(id)
+      && !existsSync(join(inbox, `${id}.json`)) && !existsSync(join(inbox, '.done', `${id}.json`));
+    let id = stem;
+    for (let i = 1; !free(id) && i < 1000; i++) id = `${stem}.${i}`;
+    if (!free(id)) continue;
+    renameWithRetry(from, join(inbox, `${id}.json`));
+    out.push({ id, file: `agents/${agentId}/inbox/${UNDELIVERED_DIR}/${n}` });
+  }
+  return out;
+}
+
+/** Q32 refinement: restored files leave the undelivered report (their mail is delivered now). */
+export function dropUndeliveredItems(root: string, agentId: string, files: readonly string[]): boolean {
+  const r = readUndeliveredReport(root);
+  if (!r || !files.length) return false;
+  const gone = new Set(files);
+  const items = r.items.filter((i) => !(i.agentId === agentId && gone.has(i.file)));
+  if (items.length === r.items.length) return false;
+  atomicWriteJson(join(root, MAIL_UNDELIVERED_REPORT), { ...r, updatedAt: Date.now(), items } satisfies UndeliveredReport);
+  return true;
 }
 
 // ————————————————————————————————————————————————————————————————— the pass
@@ -199,14 +262,19 @@ export function runMailMigration(deps: MailMigrationDeps): MailMigrationResult {
   const rows: MigrationAgentRow[] = [];
   const lessons: MigrationReport['lessons'] = [];
   const moved: UndeliveredItem[] = [];
+  let movedCount = 0;
   for (const a of deps.agents) {
     if (!isValidMailId(a.id)) continue;
     const row: MigrationAgentRow = { agentId: a.id, archived: a.archived };
     try {
       if (a.archived) {
-        const items = moveUndelivered(root, a.id, now);
-        moved.push(...items);
-        row.undelivered = items.length;
+        const r = moveUndelivered(root, a.id);
+        row.undelivered = r.moved;
+        movedCount += r.moved;
+        // Listed from the directory, also when a file failed: every file moved so far (on this
+        // pass or an earlier, interrupted one) reaches the report before any marker.
+        moved.push(...listUndelivered(root, a.id, now));
+        if (r.errors.length) throw new Error(`${r.errors.length} file(s) not moved to ${UNDELIVERED_DIR}: ${r.errors[0]}`);
       } else {
         // The first touch runs the §7.1 import (idempotent: an existing ledger is only loaded).
         const doc = deps.mail.ledger(a.id);
@@ -254,7 +322,7 @@ export function runMailMigration(deps: MailMigrationDeps): MailMigrationResult {
     kind: 'mail-migration',
     agents: rows.length,
     legacyPending: rows.reduce((n, r) => n + (r.legacyPending ?? 0), 0),
-    undelivered: moved.length,
+    undelivered: movedCount,
     lessons: lessons.length,
     errors: rows.filter((r) => r.error).length
   });

@@ -51,7 +51,7 @@ import {
   addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe,
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
-import { HiveManager, type AgentMeta, type HiveMessage, type HiveTask } from './hive';
+import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { actionableBacklog, actionablePending, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
@@ -618,7 +618,7 @@ inboxWake = new InboxWakeBridge({
   // ZT-I1-MAIL §3 #1: pending = the LEDGER's delivered ids (files on disk imply nothing), minus
   // bodies that are in neither inbox/ nor .done/ (Q13: shown loudly, never a wake loop). The
   // 1.1.74 file listing stays for the providers whose own file moves mean "handled" (cursor,
-  // §11.7) or that take mail as terminal work orders, and when the hive has no ledger.
+  // §11.7), and when the hive has no ledger. Work-order agents: none (god 1c7544, handoffs).
   inboxIds: (agentId) => mailPendingIds(agentId),
   mail: {
     mode: (agentId) => hookServer.mailChannel(agentId).mode,
@@ -929,7 +929,7 @@ const preservedWorktrees = new Map<string, PreservedWorktree>();
  * step is wrapped so a teardown error can never crash the caller (an IPC
  * handler or node-pty's onExit).
  */
-function teardownPty(id: string): void {
+function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): void {
   // Ephemeral-worker flag, read BEFORE the cleanup below deletes the entry. All
   // worker deaths (done-release, idle/token reap, manual stop, crash) funnel
   // through here, so this is the one place their floor card gets archived
@@ -976,7 +976,9 @@ function teardownPty(id: string): void {
     // PTY never leaves an orphan loopback listener. No-op for non-proxy agents.
     try { hive.stopProxyBridge(agentId); } catch (e) { console.error('[hive] stopProxyBridge failed:', e); }
     if (hive.enabled()) {
-      try { hive.setArchived(agentId, true); } catch (e) { console.error('[hive] setArchived failed:', e); }
+      // Q32 (god 0f1672): a kill (tab, voice, breaker, worker release) is an explicit archive and
+      // bounces mail; a process that died on its own (onExit) is 'pty-exit' and keeps its mail.
+      try { hive.setArchived(agentId, true, archiveReason); } catch (e) { console.error('[hive] setArchived failed:', e); }
     }
   }
   // 2) Remove the isolated worktree, if any. Non-blocking; errors are logged.
@@ -1117,7 +1119,9 @@ ptyManager.setExitHandler((id, exitCode) => {
     }
     // Non-zero exit = install failed; leave its honest manual-fix message on screen.
   }
-  teardownPty(id);
+  // Q32 (god 0f1672): the process ended on its own (an explicit kill tore down first and made
+  // this a no-op), so the archive is 'pty-exit': mail keeps being delivered, never bounced.
+  teardownPty(id, 'pty-exit');
 });
 
 /** Keep the system from suspending the harness while agents are running.
@@ -1524,7 +1528,7 @@ function archiveOrphanedAgents(): void {
       if (a.archived) continue;
       if (id === reg.godId) continue;        // god is never archived
       if (ptyForAgent(id)) continue;         // has a live PTY → genuinely active
-      hive.setArchived(id, true);            // stale archived:false orphan → archive
+      hive.setArchived(id, true, 'orphan');  // stale archived:false orphan → archive (Q32: no bounce)
       console.log('[migration] archived orphaned agent (no live PTY):', id);
     }
   } catch (e) {
@@ -4398,7 +4402,8 @@ ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? h
 ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
   if (typeof id !== 'string' || !id) return [];
   let archived = false;
-  try { archived = !!hive.registry().agents[id]?.archived; } catch { /* unknown: not archived */ }
+  // Q32: an orphan or pty-exit archive keeps its ledger (mail is still delivered to it).
+  try { archived = archivedForMail(hive.registry().agents[id]); } catch { /* unknown: not archived */ }
   return hive.mailHistory(id, { archived });
 });
 // ZT-I1-MAIL §11.8 #16: the queue's "inbox-nonempty" precondition asks the LEDGER (the wake
@@ -4939,7 +4944,7 @@ ipcMain.handle('hive:agentDirectory', () => {
       isAssistant: !!a.isAssistant,
       sessionId: a.sessionId ?? null,
       hasMemory: hive.hasMemory(id),
-      inboxBacklog: hive.inboxBacklog(id, { archived: !!a.archived }),
+      inboxBacklog: hive.inboxBacklog(id, { archived: archivedForMail(a) }),
       breaker: breaker.levelFor(id),
       tokens,
       usd: u ? Number(u.usd.toFixed(4)) : 0,
@@ -6429,12 +6434,15 @@ function runWorkerWakeBeat(): void {
   // ZT-I1-MAIL (Jim audit #4): mail that reached inbox/ outside deliver() (a ledger error, another
   // writer) is recorded delivered here, one readdir per agent. §11.7: for an agent with no Stop
   // signal (cursor; an agent degraded because its hooks went silent) the agent's own move to
-  // .done means handled, 1.1.74 semantics. Work-order agents keep 1.1.74 file semantics.
+  // .done means handled, 1.1.74 semantics. Work-order agents get their leftover files as handoffs.
   for (const agentId of live) {
     try {
       const mode = hookServer.mailChannel(agentId).mode;
       const noStop = mode === 'legacy-move' || (mode === 'legacy-read' && hive.mail.channelOverride(agentId)?.reason === 'zero-hook-traffic');
       if (mode !== 'work-order') hive.mail.reconcileInbox(agentId, { moveIsHandled: noStop });
+      // god 1c7544 + Q34: a work-order agent's leftover inbox files go out as normal terminal work
+      // orders (acted + archived on the COMMITTED write), re-announced at most 3 times.
+      else hive.handOffWorkOrderLeftovers(agentId);
     } catch { /* best effort: the next beat retries */ }
   }
   inboxWake.reconcileAll(live);

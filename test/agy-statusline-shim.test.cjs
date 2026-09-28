@@ -491,7 +491,7 @@ test('WIRING: startup TAKES NOTHING - it gives back leftovers; the lease is take
   assert.ok(start.includes("code: 'unsafe-command-path'"), 'an unexpressible path refuses the lease, named');
   // Released when the LAST AGY agent leaves the floor.
   const index = read('src/main/index.ts');
-  const teardown = index.slice(index.indexOf('function teardownPty(id: string): void {'), index.indexOf('// 2) Remove the isolated worktree'));
+  const teardown = index.slice(index.indexOf("function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): void {"), index.indexOf('// 2) Remove the isolated worktree'));
   assert.ok(teardown.includes("leftProvider === 'antigravity' && ![...ptyProvider.values()].includes('antigravity')"));
   assert.ok(teardown.includes('hive.agyAgentsGone()'));
 });

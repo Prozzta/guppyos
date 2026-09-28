@@ -45,9 +45,11 @@ test('K13: inject / legacy-read agents: the ledger\'s delivered ids in order, MI
   assert.deepEqual(R.coordinatorPendingIds('x', deps({ skipped: () => [] })), ['a', 'b', 'c']);
 });
 
-test('K13: legacy-move and work-order agents keep 1.1.74 file semantics; a failing ledger falls back to the files', () => {
+test('K13: legacy-move agents keep 1.1.74 file semantics; work-order agents are never nudged about files (god 1c7544); a failing ledger falls back to the files', () => {
   assert.deepEqual(R.coordinatorPendingIds('x', deps({ mode: () => 'legacy-move' })), ['f1', 'f2']);
-  assert.deepEqual(R.coordinatorPendingIds('x', deps({ mode: () => 'work-order' })), ['f1', 'f2']);
+  // god 1c7544: a work-order agent's leftover files go out as terminal handoffs, never a nudge.
+  assert.deepEqual(R.coordinatorPendingIds('x', deps({ mode: () => 'work-order' })), []);
+  assert.deepEqual(R.coordinatorPendingIds('x', deps({ mode: () => 'work-order', pending: () => { throw new Error('ledger'); } })), []);
   assert.deepEqual(R.coordinatorPendingIds('x', deps({ pending: () => { throw new Error('ledger'); } })), ['f1', 'f2']);
   assert.deepEqual(R.coordinatorPendingIds('x', deps({ skipped: () => { throw new Error('hooks'); } })), ['f1', 'f2']);
   assert.deepEqual(R.coordinatorPendingIds('x', deps({ mode: () => 'legacy-move', files: () => ['ok', '', undefined, 7] })), ['ok']);

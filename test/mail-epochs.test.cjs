@@ -603,9 +603,10 @@ test('Jim audit #4: an inbox file written outside deliver() reaches the ledger o
   assert.deepEqual({ state: e.state, subject: e.subject, act: e.act }, { state: 'delivered', subject: 'written by hand', act: 'request' });
   assert.ok(w.rows('mail').some((r) => r.stage === 'delivered' && r.reason === 'recovered' && r.id === 'side-door-1'));
   assert.deepEqual(w.hive.mail.reconcileInbox('cl-1').recovered, [], 'idempotent');
-  // The beat runs it for every live agent before the wake reconcile (work orders excluded).
+  // The beat runs it for every live agent before the wake reconcile. Work-order agents instead
+  // get their leftover files as terminal handoffs (god 1c7544 + Q34).
   const index = codeOnly(readSource('src/main/index.ts'));
-  assert.match(index, /for \(const agentId of live\) \{\s*try \{\s*const mode = hookServer\.mailChannel\(agentId\)\.mode;\s*const noStop = mode === 'legacy-move' \|\| \(mode === 'legacy-read' && hive\.mail\.channelOverride\(agentId\)\?\.reason === 'zero-hook-traffic'\);\s*if \(mode !== 'work-order'\) hive\.mail\.reconcileInbox\(agentId, \{ moveIsHandled: noStop \}\);\s*\} catch \{[^}]*\}\s*\}\s*inboxWake\.reconcileAll\(live\);/);
+  assert.match(index, /for \(const agentId of live\) \{\s*try \{\s*const mode = hookServer\.mailChannel\(agentId\)\.mode;\s*const noStop = mode === 'legacy-move' \|\| \(mode === 'legacy-read' && hive\.mail\.channelOverride\(agentId\)\?\.reason === 'zero-hook-traffic'\);\s*if \(mode !== 'work-order'\) hive\.mail\.reconcileInbox\(agentId, \{ moveIsHandled: noStop \}\);\s*(\/\/[^\n]*\n\s*)*else hive\.handOffWorkOrderLeftovers\(agentId\);\s*\} catch \{[^}]*\}\s*\}\s*inboxWake\.reconcileAll\(live\);/);
 });
 
 // ————————————————————————————————————————————————— pins

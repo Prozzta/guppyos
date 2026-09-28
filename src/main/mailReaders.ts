@@ -35,13 +35,17 @@ export interface PendingSourceDeps {
  * renderer queue's "something to announce" precondition.
  *  - inject and legacy-read agents: the ledger's `delivered` ids (arrival order), minus the Q13
  *    skipped ids (a body the harness cannot show must never loop wakes);
- *  - legacy-move (cursor, §11.7) and work-order agents: the inbox files, 1.1.74 semantics (for
- *    them file position IS state); likewise when the ledger cannot be read.
+ *  - legacy-move (cursor, §11.7): the inbox files, 1.1.74 semantics (for it file position IS
+ *    state); likewise when the ledger cannot be read;
+ *  - work-order agents: nothing (god 1c7544). They are never nudged about files: routed mail is a
+ *    terminal handoff, and a leftover inbox file goes out as one too (hive
+ *    handOffWorkOrderLeftovers, bounded by Q34), so no nudge text can be false for them.
  */
 export function coordinatorPendingIds(agentId: string, deps: PendingSourceDeps): string[] {
   const files = (): string[] => deps.files(agentId).filter((id): id is string => typeof id === 'string' && id.length > 0);
   const mode = deps.mode(agentId);
-  if (mode === 'legacy-move' || mode === 'work-order') return files();
+  if (mode === 'work-order') return [];
+  if (mode === 'legacy-move') return files();
   try {
     const skip = new Set(deps.skipped(agentId));
     return deps.pending(agentId).map((e) => e.id).filter((id) => !skip.has(id));

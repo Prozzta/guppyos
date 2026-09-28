@@ -332,6 +332,34 @@ export function applyWorkOrder(doc: MailLedgerDoc, msg: MailMessageLike, now: nu
 }
 
 /**
+ * ZT-I1-MAIL god 1c7544 (Jim's work-order leftover finding): an inbox FILE of a work-order agent
+ * (written before 1.1.75, or while the agent ran a hook provider) was handed to the agent as a
+ * normal terminal work order, and the renderer confirmed (COMMITTED) the PTY write. It is acted
+ * `via:"work-order"` and its file is archived to .done by the harness (the agent moves nothing).
+ * A ledger entry not yet acted is closed; with no entry one is created as by applyWorkOrder. An
+ * acted entry is left alone (the MailLedger shell finishes its rename). One `kind:"mail"`
+ * `stage:"acted"` row with `reason:"work-order-leftover"`.
+ */
+export function applyWorkOrderLeftover(doc: MailLedgerDoc, msg: MailMessageLike, now: number): MailStep {
+  const e = doc.entries[msg.id];
+  if (e?.state === 'acted') return unchanged(doc);
+  const d = new Draft(doc, now);
+  let entry: MailEntry;
+  if (e) {
+    entry = { ...e, via: 'work-order', state: 'acted', actedAt: now, surfacedAt: now, surfaceCount: e.surfaceCount + 1, hookKind: 'work-order', epoch: null, surfacingAt: null, updatedAt: now };
+  } else {
+    entry = { ...entryFromMessage(msg, doc.nextSeq, now, 'work-order', false), actedAt: now, surfaceCount: 1, surfacedAt: now, hookKind: 'work-order' };
+    d.doc.nextSeq = doc.nextSeq + 1;
+  }
+  d.put(entry);
+  d.archive.push(entry.id);
+  d.doc.lastActedAt = now;
+  d.row({ kind: 'mail', stage: 'acted', ids: [entry.id], via: 'work-order', reason: 'work-order-leftover', from: entry.from, act: entry.act, requiresReply: entry.requiresReply });
+  d.event(entry, 'acted', false, 'work-order');
+  return d.step();
+}
+
+/**
  * The harness returned a hook response whose mail block holds these ids: `delivered → surfacing`
  * (tentative, §11.1), bound to `epoch`. Returns the ids actually claimed in `changed`.
  *  - an id already surfacing/surfaced in the SAME epoch is a no-op (N3: dedup by id per epoch);
@@ -1285,6 +1313,19 @@ export class MailLedger {
     this.commit(st, applyWorkOrder(st.doc, msg, this.now(), opts));
   }
 
+  /** god 1c7544: a work-order agent's leftover inbox file was confirmed typed as a work order:
+   *  acted via work-order, and its file goes to .done (also when the entry was already acted and
+   *  only the rename was left, e.g. a crash in between; never for a Q15/Q28 closed entry). */
+  recordWorkOrderLeftover(agentId: string, msg: MailMessageLike): void {
+    const st = this.state(agentId);
+    const e = st.doc.entries[msg.id];
+    if (e?.state === 'acted') {
+      if (!e.missingAt) { st.archive.add(msg.id); this.markDirty(st); }
+      return;
+    }
+    this.commit(st, applyWorkOrderLeftover(st.doc, msg, this.now()));
+  }
+
   /** §11.18 #1: explicitly close an open obligation without a reply. Returns the ids closed. */
   closeObligation(agentId: string, ref: string, reason: string): string[] {
     if (!ref || !this.hasAgent(agentId)) return [];
@@ -1437,6 +1478,41 @@ export class MailLedger {
       if (gone.length) moved.push(...this.commit(st, applyLegacyActed(st.doc, gone, 'legacy-move', now, { reason: 'agent-moved' })).changed);
     }
     return { recovered, moved, reappeared };
+  }
+
+  /**
+   * ZT-I1-MAIL Q32 refinement (god 0f1672): files a restore moved back from inbox/.undelivered/
+   * enter the ledger as `delivered` (`reason:"undelivered-restored"`; harness, not activity), so
+   * the agent is woken for them as for any delivered mail. An id already in the ledger is left
+   * alone (applyDelivered). Returns the ids that entered.
+   */
+  admitRestored(agentId: string, ids: readonly string[]): string[] {
+    const st = this.state(agentId);
+    const inboxDir = this.inboxDir(agentId)!;
+    const now = this.now();
+    const out: string[] = [];
+    for (const id of ids) {
+      if (!isValidMailId(id)) continue;
+      const full = join(inboxDir, `${id}.json`);
+      let msg: Partial<MailMessageLike> | null = null;
+      let size: number;
+      let mtimeMs: number;
+      try {
+        const s = statSync(full);
+        if (!s.isFile()) continue;
+        size = s.size;
+        mtimeMs = s.mtimeMs;
+      } catch { continue; }
+      try {
+        if (size <= MESSAGE_FILE_MAX_BYTES) {
+          const parsed = JSON.parse(readFileSync(full, 'utf8')) as unknown;
+          if (parsed && typeof parsed === 'object') msg = parsed as Partial<MailMessageLike>;
+        }
+      } catch { /* unparseable: still a message file on disk (the Q28 rule applies later) */ }
+      const step = this.commit(st, applyDelivered(st.doc, diskEntryMessage({ id, msg, mtimeMs }), now, { harness: true, reason: 'undelivered-restored' }));
+      if (step.changed.length) out.push(id);
+    }
+    return out;
   }
 
   /** Close a surfacing epoch (see applyCloseEpoch). */

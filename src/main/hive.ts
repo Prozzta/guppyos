@@ -30,7 +30,7 @@ import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
 import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
-import { mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, runMailMigration, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
+import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
@@ -196,6 +196,16 @@ export interface AgentMeta {
   isAssistant?: boolean;
 }
 
+/** Q32: why an agent is archived (see RegistryAgent.archiveReason). */
+export type ArchiveReason = 'explicit' | 'orphan' | 'pty-exit';
+/** Q32: the archive reasons that keep mail flowing (delivered, surfaced on restore). */
+const NON_BOUNCING_ARCHIVE_REASONS: ReadonlySet<string> = new Set<ArchiveReason>(['orphan', 'pty-exit']);
+/** Q32 / §4.2: an archived agent whose mail bounces (and whose inbox the §7.1 step-2 migration
+ *  sets aside): archived for an explicit reason, or with no reason (archived before 1.1.75). */
+export function archivedForMail(a: { archived?: boolean; archiveReason?: string } | undefined | null): boolean {
+  return a?.archived === true && !NON_BOUNCING_ARCHIVE_REASONS.has(a.archiveReason ?? '');
+}
+
 export interface RegistryAgent extends AgentMeta {
   status: 'idle' | 'working' | 'blocked' | 'gone';
   lastSeen: number;
@@ -203,6 +213,12 @@ export interface RegistryAgent extends AgentMeta {
    *  (not deleted) so its history/memory survive; only agents with a live PTY
    *  are 'active'. Broadcast fan-out + roster reads skip archived agents. */
   archived?: boolean;
+  /** ZT-I1-MAIL Q32 (god 7048a1 + 0f1672): WHY the agent is archived; absent while active.
+   *  'explicit' (a Human/god archive: IPC, realtime action, tab kill, voice kill) bounces mail
+   *  (§4.2); 'orphan' (the boot sweep) and 'pty-exit' (the process died on its own) do NOT: the
+   *  mail is delivered and surfaced when the agent is restored. Absent on an archived agent =
+   *  archived before 1.1.75, counted as explicit. Cleared on restore. */
+  archiveReason?: ArchiveReason;
   /** The human has this agent 1:1 and Michael must leave it alone until they
    *  flip it back. Held agents stay ACTIVE and keep their terminal — this is
    *  "do not dispatch to them", not "they are gone", which is why it is its own
@@ -1147,11 +1163,15 @@ export class HiveManager {
       archived: false,
       lastSeen: Date.now()
     };
+    // Q32: a restore clears the archive reason with the flag.
+    delete reg.agents[meta.id].archiveReason;
     if (opts.spawnModel) this.recordLaunchModel(reg.agents[meta.id], meta.id, opts.spawnModel);
     if (meta.isGod) reg.godId = meta.id;
     this.atomicWriteJson(join(root, 'registry.json'), reg);
 
     this.appendLog({ kind: 'spawn', agentId: meta.id, name: meta.name, isGod: !!meta.isGod });
+    // Q32 refinement (god 0f1672): a restore brings back mail set aside in inbox/.undelivered/.
+    this.restoreUndelivered(meta.id);
     // Only logs on an invalid cwd (rare) — not a per-spawn line, so no log spam.
     if (!cwd.valid) {
       this.appendLog({ kind: 'cwd_invalid', agentId: meta.id, cwd: meta.cwd, issue: cwd.issue });
@@ -1431,8 +1451,13 @@ export class HiveManager {
    * tab archives the agent (retained + flagged, NOT deleted); a (re)spawn clears
    * it. No-op if the agent isn't registered or the flag is already set the way
    * asked. Best-effort — never throws, so a dying PTY/kill handler can't crash.
+   *
+   * ZT-I1-MAIL Q32 (god 7048a1 + 0f1672): `reason` is recorded as `archiveReason` (see
+   * RegistryAgent). An explicit archive of an agent archived for a non-bouncing reason upgrades
+   * the reason; a non-bouncing reason never downgrades an explicit one. Un-archiving clears the
+   * reason and moves inbox/.undelivered back into inbox/ and the ledger (restoreUndelivered).
    */
-  setArchived(id: string, archived: boolean): void {
+  setArchived(id: string, archived: boolean, reason: ArchiveReason = 'explicit'): void {
     const root = this.root();
     if (!root) return;
     try {
@@ -1440,12 +1465,49 @@ export class HiveManager {
       const agent = reg.agents[id];
       // An archived agent's hook token is revoked even when the flag is already set.
       if (archived) this.hookBroker?.revoke(id);
-      if (!agent || agent.archived === archived) return;
-      agent.archived = archived;
+      if (!agent) return;
+      if (archived) {
+        if (agent.archived === true && (reason !== 'explicit' || archivedForMail(agent))) return;
+        agent.archived = true;
+        agent.archiveReason = reason;
+      } else {
+        if (agent.archived !== true && agent.archiveReason === undefined) { this.restoreUndelivered(id); return; }
+        agent.archived = false;
+        delete agent.archiveReason;
+      }
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
-      this.appendLog({ kind: 'archive', agentId: id, archived });
+      this.appendLog({ kind: 'archive', agentId: id, archived, ...(archived ? { reason } : {}) });
+      if (!archived) this.restoreUndelivered(id);
     } catch { /* best-effort — never crash a lifecycle handler */ }
+  }
+
+  /**
+   * ZT-I1-MAIL Q32 refinement (god 0f1672): a restored agent gets back the mail the §7.1 step-2
+   * migration set aside in inbox/.undelivered/: each file returns to inbox/ (a name already taken
+   * in inbox/, .done/ or the ledger gets `<stem>.N`) and enters the ledger as delivered
+   * (`reason:"undelivered-restored"`), so a 1.1.74 archive that was really a crash loses nothing.
+   * The ledger is touched FIRST, so the §7.1 first-touch import can never take the returned files
+   * for legacy mail. Idempotent (an empty or missing .undelivered/ is a no-op), logged
+   * `mail-undelivered-restored`; the restored items leave the undelivered report. Never throws.
+   */
+  restoreUndelivered(id: string): string[] {
+    const root = this.root();
+    if (!root || !isValidMailId(id)) return [];
+    try {
+      if (!existsSync(join(root, 'agents', id, 'inbox', UNDELIVERED_DIR))) return [];
+      if (!this.mail.hasAgent(id)) return [];
+      this.mail.ledger(id);
+      const moved = restoreUndeliveredFiles(root, id, (stem) => !!this.mail.ledger(id).entries[stem]);
+      if (!moved.length) return [];
+      const ids = this.mail.admitRestored(id, moved.map((m) => m.id));
+      try { dropUndeliveredItems(root, id, moved.map((m) => m.file)); } catch { /* the report is informational */ }
+      this.appendLog({ kind: 'mail-undelivered-restored', agentId: id, count: moved.length, ids: moved.map((m) => m.id).slice(0, 50) });
+      return ids;
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-undelivered-restore-error', agentId: id, error: String(e).slice(0, 300) }); } catch { /* noop */ }
+      return [];
+    }
   }
 
   /**
@@ -2266,13 +2328,16 @@ export class HiveManager {
         }
         continue;
       }
-      if (direct && reg.agents[t]?.archived) {
+      // Q32 (god 7048a1 + 0f1672): only an EXPLICIT archive bounces. An agent the boot sweep
+      // archived ('orphan') or whose process died on its own ('pty-exit') keeps receiving mail:
+      // delivered now, surfaced when it is restored (e.g. mail in the seconds before a tab restore).
+      if (direct && archivedForMail(reg.agents[t])) {
         // §4.2: mail to an archived agent bounces to the SENDER, who is best placed to re-route.
         // A sender that is archived, not an agent (the router, 'system', 'human') or the send-only
         // assistant gets the existing no-inbox rule instead: the bounce goes to god.
         const notice = `[undeliverable: ${t} is archived — resend to an active agent or god]`;
         const sender = reg.agents[msg.from];
-        const toSender = knownAgent(msg.from) && !sender?.archived && !sender?.isAssistant;
+        const toSender = knownAgent(msg.from) && !archivedForMail(sender) && !sender?.isAssistant;
         const bouncedTo = toSender ? msg.from : godId;
         this.appendLog({ kind: 'drop', reason: 'archived', from: msg.from, to: t, id: msg.id, bouncedTo });
         if (toSender) {
@@ -2409,6 +2474,81 @@ export class HiveManager {
   private readonly handoffs = new Map<string, HiveMessage>();
   static readonly HANDOFFS_MAX = 500;
 
+  /** Q34 (god 7048a1) as the backstop of god 1c7544: a leftover is RE-announced at most this often. */
+  static readonly WORK_ORDER_LEFTOVER_MAX_REANNOUNCE = 3;
+  /** Before re-announce n (1-based): 5, 10, 20 minutes (the F4 cadence); the renderer holds a
+   *  handoff until the agent is idle, so an unconfirmed one is not re-offered sooner. */
+  static workOrderLeftoverDelayMs(n: number): number {
+    return Math.min(30 * 60_000, 5 * 60_000 * 2 ** Math.max(0, n - 1));
+  }
+  /** Leftover announcements this session, by `<agent>|<id>`: how many, when the next is due, and
+   *  whether the loud stuck row was written. */
+  private readonly leftoverAnnounces = new Map<string, { count: number; nextAt: number; stuck: boolean }>();
+
+  /**
+   * ZT-I1-MAIL god 1c7544 (Jim's work-order leftover finding) + Q34: a WORK-ORDER agent (no Stop,
+   * no inbox reader) with message files in inbox/ (written before 1.1.75, or while it ran a hook
+   * provider) gets each one through the NORMAL terminal work-order handoff, carrying its body;
+   * the renderer's COMMITTED confirmation (recordWorkOrderDelivered) acts it via work-order and
+   * the harness archives the file to .done. No nudge text, no agent move.
+   * An unconfirmed handoff is re-announced at most WORK_ORDER_LEFTOVER_MAX_REANNOUNCE times (5,
+   * 10, 20 min apart); then it stops, the file stays listed (backlog, Threads panel) and one loud
+   * `mail-work-order-file-stuck` row is written. A failed emit (renderer down) is not an
+   * announcement. Unparseable files and Q15/Q28 closed entries are left listed, never handed off.
+   * Files the ledger does not know are first recorded delivered (reconcileInbox), so they count in
+   * the backlog. The caller (the wake beat) runs it only for live agents whose mail mode is work-order.
+   */
+  handOffWorkOrderLeftovers(agentId: string, now: number = Date.now()): { handedOff: string[]; stuck: string[] } {
+    const out = { handedOff: [] as string[], stuck: [] as string[] };
+    const root = this.root();
+    if (!root || !isValidMailId(agentId)) return out;
+    const inbox = join(root, 'agents', agentId, 'inbox');
+    let names: string[];
+    try { names = readdirSync(inbox); } catch { return out; }
+    const ids = names.filter((n) => n.endsWith('.json') && !n.includes('.tmp')).map((n) => n.slice(0, -'.json'.length)).filter(isValidMailId).sort();
+    const prefix = `${agentId}|`;
+    const onDisk = new Set(ids);
+    for (const k of [...this.leftoverAnnounces.keys()]) if (k.startsWith(prefix) && !onDisk.has(k.slice(prefix.length))) this.leftoverAnnounces.delete(k);
+    // A file the ledger does not know yet (another writer) is recorded delivered first, so it
+    // counts in the backlog until its work order is confirmed (it is never a wake: pending is
+    // empty for a work-order agent).
+    try { this.mail.reconcileInbox(agentId); } catch { /* the ledger logs its own failures */ }
+    let entries: Record<string, { state: string; missingAt?: number | null }> = {};
+    try { entries = this.mail.ledger(agentId).entries; } catch { entries = {}; }
+    const max = HiveManager.WORK_ORDER_LEFTOVER_MAX_REANNOUNCE;
+    for (const id of ids) {
+      const e = entries[id];
+      if (e?.missingAt) continue;
+      if (e?.state === 'acted') { try { this.mail.recordWorkOrderLeftover(agentId, { id, from: '?' }); } catch { /* next beat */ } continue; }
+      const key = `${prefix}${id}`;
+      const st = this.leftoverAnnounces.get(key) ?? { count: 0, nextAt: 0, stuck: false };
+      if (st.stuck || (st.count > 0 && now < st.nextAt)) continue;
+      if (st.count > max) {
+        st.stuck = true;
+        this.leftoverAnnounces.set(key, st);
+        out.stuck.push(id);
+        continue;
+      }
+      let msg: HiveMessage;
+      try {
+        const full = join(inbox, `${id}.json`);
+        if (statSync(full).size > 1024 * 1024) continue;
+        const parsed = JSON.parse(readFileSync(full, 'utf8')) as Partial<HiveMessage>;
+        if (!parsed || typeof parsed !== 'object') continue;
+        msg = { ...(parsed as HiveMessage), id, to: agentId };
+      } catch { continue; }
+      if (!this.emitTerminalHandoff(msg, agentId)) continue;
+      st.count += 1;
+      st.nextAt = now + HiveManager.workOrderLeftoverDelayMs(st.count);
+      this.leftoverAnnounces.set(key, st);
+      out.handedOff.push(id);
+    }
+    if (out.stuck.length) {
+      this.appendLog({ kind: 'mail-work-order-file-stuck', agentId, ids: out.stuck, announces: max + 1, why: 'work-order handoff never confirmed; no longer announced, the file stays listed' });
+    }
+    return out;
+  }
+
   /**
    * ZT-I1-MAIL N2 (§11.17): the renderer confirmed (COMMITTED) the PTY write of the terminal work
    * order for `messageId`. The whole body is in the typed text, so the ledger records it
@@ -2428,6 +2568,15 @@ export class HiveManager {
       requires_reply: fallback.requiresReply === true
     };
     try {
+      // god 1c7544: a leftover inbox file handed off as a work order is acted via work-order and
+      // its file archived to .done by the harness.
+      const root = this.root();
+      if (root && isValidMailId(agentId) && isValidMailId(messageId) && existsSync(join(root, 'agents', agentId, 'inbox', `${messageId}.json`))) {
+        this.mail.recordWorkOrderLeftover(agentId, msg as HiveMessage);
+        this.handoffs.delete(key);
+        this.leftoverAnnounces.delete(key);
+        return true;
+      }
       // Q14: a confirmation this process has no handoff for (it arrived after a restart) is
       // recorded from the header fields only: restored, with no body hash.
       this.mail.recordWorkOrder(agentId, msg as HiveMessage, { restored: !known });
@@ -2894,7 +3043,10 @@ export class HiveManager {
     const reg = this.registryForMutation();
     const agents = Object.keys(reg.agents ?? {})
       .filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id))
-      .map((id) => ({ id, archived: reg.agents[id]?.archived === true }));
+      // Q31 (god 7048a1): .undelivered/ only for EXPLICIT archives. A reason-less archive was
+      // already archived in the registry before this boot's orphan sweep (which runs after this
+      // pass), so it counts as explicit; an orphan or pty-exit archive is an active agent here.
+      .map((id) => ({ id, archived: archivedForMail(reg.agents[id]) }));
     return runMailMigration({ root, agents, mail: this.mail, appendLog: (row) => this.appendLog(row) });
   }
 
