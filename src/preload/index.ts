@@ -90,6 +90,43 @@ export interface HiveMailRow extends HiveMessage {
   archived: boolean;
 }
 
+/** ZT-I1-MAIL §4.3 / §11.13 option B: one open obligation (mirror of main's FleetObligation). */
+export interface MailObligation {
+  id: string;
+  from: string;
+  act: string;
+  subject: string;
+  state: string;
+  ageSec: number;
+  conversation?: string;
+  /** Q15: the body was lost (in neither inbox/ nor inbox/.done/); still owed. */
+  missing?: true;
+}
+
+/** One agent that owes replies (mirror of main's MailObligationsAgent). */
+export interface MailObligationsAgent {
+  agentId: string;
+  name: string;
+  awaitingReply: MailObligation[];
+  awaitingReplyCount: number;
+  openRequests: MailObligation[];
+  openRequestCount: number;
+}
+
+/** §7.1 step 2: an archived agent's unread mail, moved to inbox/.undelivered at the upgrade. */
+export interface UndeliveredMailReport {
+  version: 1;
+  createdAt: number;
+  updatedAt: number;
+  seenAt: number | null;
+  items: Array<{ agentId: string; id: string; file: string; from: string | null; act: string | null; subject: string | null; createdAt: string | null; movedAt: number }>;
+}
+
+export interface MailObligationsSnapshot {
+  agents: MailObligationsAgent[];
+  undelivered: UndeliveredMailReport | null;
+}
+
 /** A hive message reshaped for the voice read-layer (`hive:messages`). `subject`
  *  and `body` are REDACTED in the main process before crossing this boundary —
  *  the renderer never receives a raw body or a secret. Mirror of `VoiceMessage`
@@ -908,6 +945,14 @@ const api = {
   /** ZT-I1-MAIL §11.8 #16: the ids the ledger holds as delivered (not yet surfaced) for this
    *  agent: the wake coordinator's pending set. */
   hiveMailPending: (id: string): Promise<string[]> => ipcRenderer.invoke('hive:mailPending', id),
+  /** ZT-I1-MAIL §4.3 / option B: every open request / awaited reply (Command Center badge + list)
+   *  and the §7.1 undelivered report. Data only; nothing wakes. */
+  hiveMailObligations: (): Promise<MailObligationsSnapshot> => ipcRenderer.invoke('hive:mailObligations'),
+  /** §11.18 #1: the Human closes an open obligation without a reply (`agentId` owes it). */
+  hiveCloseObligation: (agentId: string, id: string): Promise<{ ok: boolean; closed: string[]; error?: string }> =>
+    ipcRenderer.invoke('hive:closeObligation', agentId, id),
+  /** §7.1 step 2: the Human dismissed the undelivered report (persisted; shown once). */
+  hiveUndeliveredSeen: (): Promise<boolean> => ipcRenderer.invoke('hive:undeliveredSeen'),
   /** ZT-I1-MAIL N2: the PTY write of a terminal work order was confirmed (COMMITTED). */
   hiveWorkOrderDelivered: (e: { agentId: string; messageId: string; from?: string; act?: string; subject?: string; requiresReply?: boolean }): Promise<boolean> =>
     ipcRenderer.invoke('hive:workOrderDelivered', e),

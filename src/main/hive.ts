@@ -29,6 +29,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
 import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
+import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, runMailMigration, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
@@ -2910,6 +2911,30 @@ export class HiveManager {
     const changed = markUndeliveredSeen(root);
     if (changed) this.appendLog({ kind: 'mail-undelivered-seen' });
     return changed;
+  }
+
+  /**
+   * ZT-I1-MAIL §4.3 + §11.13 option B: the Command Center's open-request list, over the active
+   * registry agents (the agent listed owes the reply). Data only: nothing here ever wakes anyone.
+   */
+  mailObligations(): MailObligationsAgent[] {
+    const reg = this.registry();
+    const agents = Object.keys(reg.agents ?? {})
+      .filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id) && !reg.agents[id]?.archived)
+      .map((id) => ({ id, name: reg.agents[id]?.name }));
+    return mailObligationsView(this.mail, agents);
+  }
+
+  /**
+   * §11.18 #1: the Human's explicit close of an open obligation (the one caller of
+   * `MailLedger.closeObligation`). `agentId` must be a registry agent (exact match) and `id` a
+   * valid mail id. Returns the ids closed (`[]` for nothing open under that id).
+   */
+  closeMailObligation(agentId: unknown, id: unknown): string[] {
+    if (typeof agentId !== 'string' || typeof id !== 'string' || !isValidMailId(id)) return [];
+    const reg = this.registry();
+    if (!Object.prototype.hasOwnProperty.call(reg.agents ?? {}, agentId)) return [];
+    return this.mail.closeObligation(agentId, id, 'closed-by-human');
   }
 
   /**

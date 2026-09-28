@@ -174,3 +174,49 @@ export function ledgerInboxMessages(mail: MailReaderLedger, agentId: string): Le
       created_at: new Date(e.deliveredAt).toISOString()
     }));
 }
+
+/** One agent's row in the Command Center open-request list (§4.3, §11.13 option B). */
+export interface MailObligationsAgent {
+  /** The agent that owes the reply (the recipient of the request). */
+  agentId: string;
+  name: string;
+  awaitingReply: FleetObligation[];
+  awaitingReplyCount: number;
+  openRequests: FleetObligation[];
+  openRequestCount: number;
+}
+
+/** The UI's list bound per agent (the counts are always full). */
+export const UI_OBLIGATIONS_MAX = 50;
+
+/**
+ * §4.3 / option B: the Command Center's open-request view over the given (active) agents. Only
+ * agents that owe something are listed. An agent whose ledger cannot be read is skipped (the
+ * fleet row keeps its file backlog; the UI shows no guess). Zero-token: data only, no wake.
+ */
+export function mailObligationsView(mail: MailReaderLedger, agents: Array<{ id: string; name?: string }>, max = UI_OBLIGATIONS_MAX): MailObligationsAgent[] {
+  const out: MailObligationsAgent[] = [];
+  for (const a of agents) {
+    let f: FleetMailFields;
+    try { f = fleetMailFields(mail, a.id, max); } catch { continue; }
+    if (!f.awaitingReplyCount && !f.openRequestCount) continue;
+    out.push({
+      agentId: a.id, name: a.name || a.id,
+      awaitingReply: f.awaitingReply, awaitingReplyCount: f.awaitingReplyCount,
+      openRequests: f.openRequests, openRequestCount: f.openRequestCount
+    });
+  }
+  return out;
+}
+
+/** The distinct open obligations across the view (an entry can be both a request and
+ *  requires_reply): the Command Center badge count. */
+export function openObligationCount(view: MailObligationsAgent[]): number {
+  let n = 0;
+  for (const a of view) {
+    const ids = new Set([...a.awaitingReply, ...a.openRequests].map((o) => o.id));
+    // Beyond the display bound, the full counts are the best lower bound.
+    n += Math.max(ids.size, a.awaitingReplyCount, a.openRequestCount);
+  }
+  return n;
+}

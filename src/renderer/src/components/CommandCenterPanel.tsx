@@ -12,6 +12,7 @@ import { AskMeTab } from './AskMeTab';
 import { TriggersTab } from './triggers/TriggersTab';
 import { TriggerHistoryTab } from './triggers/TriggerHistoryTab';
 import { WorkersTab } from './WorkersTab';
+import { OpenRequestsTab, UndeliveredMailBanner, openRequestsBadgeCount, useMailObligations } from './OpenRequestsTab';
 import { SkillsTab } from './SkillsTab';
 import { acquireTerminal, disposeTerminal, resetTerminal } from './terminalPool';
 import { terminalInstanceKey } from './terminalRecovery';
@@ -46,7 +47,7 @@ import { canReceiveInbox } from '@shared/agentProvider';
 // Both the AskMe (#human) tab and the Triggers tab live here. Triggers replaced
 // the old Schedules tab: schedules are now one of four trigger types, and the
 // whole surface lives in ./triggers (see src/shared/triggers.ts for the contract).
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'triggers' | 'trigger-history'
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'requests' | 'triggers' | 'trigger-history'
   | 'memory' | 'graph' | 'activity' | 'skills' | 'workers';
 
 /** Fallback denominator for the per-agent token meter when no floor token budget
@@ -70,6 +71,8 @@ const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'
   { key: 'floor', label: 'monitor', icon: 'mcp' },
   { key: 'tasks', label: 'tasks', icon: 'check' },
   { key: 'human', label: 'ask me', icon: 'bell' },
+  // ZT-I1-MAIL §4.3 / §11.13 option B: open requests awaiting a reply (badge = how many).
+  { key: 'requests', label: 'requests', icon: 'ledger' },
   { key: 'triggers', label: 'triggers', icon: 'clock' },
   { key: 'trigger-history', label: 'history', icon: 'ledger' },
   { key: 'memory', label: 'memory', icon: 'sparkle' },
@@ -97,6 +100,10 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
     if (!showHistory && tab === 'trigger-history') setTab('terminal');
   }, [showHistory, tab]);
   const visibleTabs = TABS.filter((t) => t.key !== 'trigger-history' || showHistory);
+  // ZT-I1-MAIL: one poll feeds the requests badge, the requests tab and the once-only
+  // undelivered-mail banner (§7.1 step 2). Data only; nothing here wakes an agent.
+  const mailObligations = useMailObligations();
+  const openRequests = openRequestsBadgeCount(mailObligations.snap);
 
   // External tab requests (the office task board → 'tasks', the boss-room
   // calendar → 'triggers'). seq-keyed so clicking again re-opens the tab even
@@ -282,9 +289,16 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
             }}
           >
             <Icon name={t.icon} /> {t.label}
+            {t.key === 'requests' && openRequests > 0 && (
+              <span data-open-requests-badge="" title={`${openRequests} open request(s) awaiting a reply`} style={{
+                fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: '14px', minWidth: 14, padding: '0 4px',
+                background: 'var(--cth-ink-900)', color: 'var(--cth-cream-50)', textAlign: 'center'
+              }}>{openRequests}</span>
+            )}
           </button>
         ))}
       </div>
+      <UndeliveredMailBanner snap={mailObligations.snap} refresh={mailObligations.refresh} />
 
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
@@ -319,6 +333,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
         {tab === 'tasks' && <TasksKanban />}
         {tab === 'human' && <AskMeTab />}
+        {tab === 'requests' && <OpenRequestsTab snap={mailObligations.snap} refresh={mailObligations.refresh} />}
         {tab === 'triggers' && <TriggersTab />}
         {tab === 'trigger-history' && <TriggerHistoryTab />}
         {tab === 'memory' && (

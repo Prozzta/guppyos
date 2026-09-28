@@ -4402,6 +4402,27 @@ ipcMain.handle('hive:inbox', (_evt, id: unknown) => {
 // ZT-I1-MAIL §11.8 #16: the queue's "inbox-nonempty" precondition asks the LEDGER (the wake
 // coordinator's pending source: delivered, not yet surfaced), not the inbox listing.
 ipcMain.handle('hive:mailPending', (_evt, id: unknown) => (typeof id === 'string' && id ? mailPendingIds(id) : []));
+// ZT-I1-MAIL §4.3 / §11.13 option B: the Command Center's open-request list (badge + list) and
+// the §7.1 step-2 undelivered report (shown once). Data only: nothing here wakes an agent.
+ipcMain.handle('hive:mailObligations', () => {
+  if (!hive.enabled()) return { agents: [], undelivered: null };
+  let agents: ReturnType<typeof hive.mailObligations> = [];
+  try { agents = hive.mailObligations(); } catch { /* ledger trouble: the banner says so */ }
+  let undelivered: ReturnType<typeof hive.undeliveredReport> = null;
+  try { undelivered = hive.undeliveredReport(); } catch { /* no report */ }
+  return { agents, undelivered };
+});
+// §11.18 #1: the Human's explicit close. The ONLY caller of closeObligation.
+ipcMain.handle('hive:closeObligation', (_evt, agentId: unknown, id: unknown) => {
+  if (!hive.enabled()) return { ok: false, closed: [] };
+  try { const closed = hive.closeMailObligation(agentId, id); return { ok: closed.length > 0, closed }; }
+  catch (e) { return { ok: false, closed: [], error: e instanceof Error ? e.message : String(e) }; }
+});
+// §7.1 step 2: the Human dismissed the undelivered report (persisted: shown once).
+ipcMain.handle('hive:undeliveredSeen', () => {
+  if (!hive.enabled()) return false;
+  try { return hive.markUndeliveredSeen(); } catch { return false; }
+});
 // ZT-I1-MAIL N2: the renderer confirmed a terminal work order's PTY write (COMMITTED): the ledger
 // records it acted via:"work-order" (the whole body is in the typed text; never in the backlog).
 ipcMain.handle('hive:workOrderDelivered', (_evt, e: unknown) => {
