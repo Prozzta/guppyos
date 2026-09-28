@@ -142,10 +142,10 @@ function committingStore() {
     wakeUp: (wing) => committed.filter((c) => !wing || c.wing === wing), search: () => []
   };
 }
-function slowEngine(root, store, { embedMs = 30, wakeWaitMs } = {}) {
+function slowEngine(root, store, { embedMs = 30, wakeWaitMs, timers } = {}) {
   return new MemoryEngine({ hiveRoot: root, store, embedder: { loaded: true, embed: async (t) => { await sleep(embedMs); return t.map(() => new Float32Array(384)); }, unload: async () => {} },
     // Real timers, UNREF'd: the model's idle-unload timer (minutes) must not keep the test process alive.
-    countTokens: words, mode: () => 'native', watch: null, setTimer: (fn, ms) => (ms === 0 ? setImmediate(fn) : setTimeout(fn, ms).unref()), clearTimer: (t) => clearTimeout(t), ...(wakeWaitMs ? { wakeWaitMs } : {}) });
+    countTokens: words, mode: () => 'native', watch: null, setTimer: (fn, ms) => { timers?.push(ms); return ms === 0 ? setImmediate(fn) : setTimeout(fn, ms).unref(); }, clearTimer: (t) => clearTimeout(t), ...(wakeWaitMs ? { wakeWaitMs } : {}) });
 }
 
 test('N1: on a FILLING index a wake-up waits for its OWN wing and answers with its notes, well inside the bound', async () => {
@@ -179,15 +179,18 @@ test('N1: a SEARCH never waits for a wing; and with no backfill running a wake-u
   const big = Array.from({ length: 40 }, (_, i) => `## part ${i}\n${'word '.repeat(150)}`).join('\n\n');
   const root = hive({ 'agents/a3/memory.md': big });
   const store = committingStore();
-  const eng = slowEngine(root, store, { embedMs: 40, wakeWaitMs: 2000 });
+  // FLAKY-TIMING: "does not wait" is checked by what the engine DOES, not by wall clock: waiting
+  // for a wing always registers the wake-wait timer (waitForWing), so none may be registered here.
+  const timers = [];
+  const eng = slowEngine(root, store, { embedMs: 40, wakeWaitMs: 2000, timers });
   const bf = eng.backfill();
-  const t0 = Date.now();
+  const before = timers.length;
   await eng.search({ query: 'q', caller: 'a3' });
-  assert.ok(Date.now() - t0 < 1000, 'a search does not wait for the wing');
+  assert.ok(!timers.slice(before).includes(2000), 'a search does not wait for the wing (no wake-wait timer)');
   await bf;
-  const t1 = Date.now();
+  const after = timers.length;
   await eng.wakeUp('a3');
-  assert.ok(Date.now() - t1 < 200, 'nothing pending: immediate');
+  assert.ok(!timers.slice(after).includes(2000), 'nothing pending: the wake-up registers no wait at all');
 });
 
 test('N1: main\'s wake-up deadline covers the wait + the cold budget, and mainWiring uses it for wake-up only', () => {
