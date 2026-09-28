@@ -44,7 +44,7 @@ function launch(dir, ops) {
     'const out = [];',
     'for (const op of ops) {',
     '  if (op.op === "read") { const c = m.readConfig(); out.push({ defaultModel: c.defaultModel ?? null, godModel: c.godModel ?? null, flag: c.defaultModelCliMigratedV1 ?? null }); }',
-    '  else if (op.op === "write") { m.writeConfig(op.patch); out.push(null); }',
+    '  else if (op.op === "write") { try { m.writeConfig(op.patch); out.push(null); } catch (e) { out.push({ error: String(e && e.message || e) }); } }',
     '  else if (op.op === "take") out.push(m.takeClearedDefaultModel());',
     '  else if (op.op === "reset") { m.resetConfig(); out.push(null); }',
     '}',
@@ -132,15 +132,20 @@ test('RESET (D3): a default picked after Reset settings survives the next launch
   assert.equal(l2[0].defaultModel, 'claude-sonnet-5', 'the default picked after the reset is kept');
 });
 
-test('CORRUPT CONFIG (D8): a default picked after the corrupt-config fallback survives the next launch', () => {
+// D8 under LEDGER-WIPE (1.1.74): a corrupt config.json is no longer replaced by defaults on the next
+// write. The read falls back to defaults (born flagged, so the migration never runs on them), the
+// write is REFUSED, the original bytes stay, and a quarantine copy is kept. Once repaired, the
+// normal D3 path applies.
+test('CORRUPT CONFIG (D8): the fallback is flagged, a write is refused, the damaged file is kept', () => {
   const dir = mkUserData();
-  fs.writeFileSync(path.join(dir, 'config.json'), '{ this is not json');
+  const bad = '{ this is not json';
+  fs.writeFileSync(path.join(dir, 'config.json'), bad);
   const l1 = launch(dir, [{ op: 'read' }, { op: 'write', patch: { defaultModel: 'claude-sonnet-5' } }]);
   assert.equal(l1[0].defaultModel, null, 'the fallback has no defaultModel');
-  const disk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
-  assert.equal(disk.defaultModelCliMigratedV1, true, 'the config written after the fallback is flagged');
-  const l2 = launch(dir, [{ op: 'read' }]);
-  assert.equal(l2[0].defaultModel, 'claude-sonnet-5', 'the default picked after the fallback is kept');
+  assert.equal(l1[0].flag, true, 'the fallback is born flagged');
+  assert.ok(l1[1] && /refusing to overwrite/.test(l1[1].error), `the write is refused: ${JSON.stringify(l1[1])}`);
+  assert.equal(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'), bad, 'the damaged original is kept byte for byte');
+  assert.ok(fs.readdirSync(dir).some((f) => f.startsWith('config.json.corrupt-')), 'a quarantine copy exists');
 });
 
 test('MAIN: bootstrapHiveServices writes ONE hive log row with the cleared value', () => {

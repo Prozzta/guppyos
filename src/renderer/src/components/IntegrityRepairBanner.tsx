@@ -12,7 +12,11 @@ export function IntegrityRepairBanner() {
     const refresh = () => {
       void Promise.all([window.cth.hiveIntegrity(), window.cth.configIntegrity()])
         .then(([hive, config]) => {
-          if (alive) setIssues(config ? [...hive, config] : hive);
+          // A malformed answer must never take the whole window down (it rendered inside App):
+          // keep only well-formed issues.
+          const valid = (x: unknown): x is IntegrityIssue => !!x && typeof x === 'object' && typeof (x as IntegrityIssue).file === 'string';
+          const list = [...(Array.isArray(hive) ? hive : []), ...(config ? [config] : [])].filter(valid);
+          if (alive) setIssues(list);
         })
         .catch(() => { /* IPC recovery must not disturb the office UI */ });
     };
