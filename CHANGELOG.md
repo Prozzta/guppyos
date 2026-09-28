@@ -43,6 +43,12 @@ Rollback: 1.1.74 (reinstall).
   requests tab).
 - If an agent's mail stops reaching it through its hooks, it switches to reading its files itself
   and you get an alert. For a Codex agent the alert says to respawn it to restore mail delivery.
+- **A message that has to be offered again is always typed again.** When a message is shown to an
+  agent but the app cannot confirm the agent saw it, the app offers it again (up to three times in
+  all). Each new offer now gets a new request, so it is typed into the agent every time. During
+  testing of this release, the third offer could reuse an earlier request and be skipped without
+  being typed, delaying the message by about five minutes. This only affected the new mail
+  handling; 1.1.74 was not affected.
 - **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
   unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
   broadcasts one reminder, "move your mail again", because agents may have noted the new rule in

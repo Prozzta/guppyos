@@ -19,7 +19,7 @@ const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, WORKER_WAKE_IDLE_MS } = loadTs('src/main/workerWake.ts');
+const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, WORKER_WAKE_IDLE_MS } = loadTs('src/main/workerWake.ts');
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const { inboxNudgeText } = loadTs('src/shared/hiveNudge.ts');
 
@@ -98,7 +98,7 @@ test('DoD C1: an outbox file routes to god and commits EXACTLY ONE guarded wake 
   const call = f.owner.calls[0];
   assert.equal(call.agentId, 'god-1');
   assert.equal(call.admissionClass, 'CAPACITY_GATED');
-  assert.equal(call.requestId, inboxWakeRequestId('god-1', ['done-1']));
+  assert.equal(call.requestId, inboxWakeClaimId('god-1', ['done-1'], 0));
   assert.equal(call.text, inboxNudgeText(['done-1']));
   assert.match(call.text, /done-1/);
   assert.deepEqual(f.owner.enters, ['god-1'], 'exactly one Enter');

@@ -243,11 +243,11 @@ test('F4: a twice-unconfirmed wake is never burned: reconcile does not re-pend i
     c.settle(claim, 'COMMITTED', now, true);
     return claim;
   };
-  assert.equal(commit().requestId.endsWith(':again'), false);
+  assert.equal(commit().requestId.endsWith(':0'), true, 'the first announcement: generation 0');
   now += SUBMIT_CONFIRM_MS;
   assert.equal(c.beat('dw', now).kind, 'submit-unconfirmed');
   now += 20_000;
-  assert.equal(commit().requestId.endsWith(':again'), true);
+  assert.equal(commit().requestId.endsWith(':1'), true, 'the re-announcement: a new generation, never the COMMITTED id');
   now += SUBMIT_CONFIRM_MS;
   const edge = c.beat('dw', now);
   assert.deepEqual([edge.kind, edge.ids, edge.attempt, edge.retryInMs], ['wake-ids-exhausted', ['m1'], 1, WAKE_RETRY_BASE_MS]);
@@ -260,7 +260,7 @@ test('F4: a twice-unconfirmed wake is never burned: reconcile does not re-pend i
   assert.deepEqual(c.beat('dw', now + WAKE_RETRY_BASE_MS), { kind: 'wake-retry', ids: ['m1'], attempt: 1 });
   assert.deepEqual(c.state('dw').pending, ['m1']);
   now += WAKE_RETRY_BASE_MS + 20_000;
-  assert.equal(commit().requestId.endsWith(':retry1'), true, 'a fresh request id, not a replay');
+  assert.equal(commit().requestId.endsWith(':2'), true, 'a fresh request id, not a replay (the next generation)');
   // Mail that leaves the disk leaves the retry table too.
   c.settle(c.state('dw').inFlight ?? { agentId: 'dw', requestId: 'x', ids: [] }, 'COMMITTED', now, false);
   c.reconcile('dw', []);
@@ -337,5 +337,6 @@ test('F4 (Jim, surviving mutant): mail that leaves the disk during its backoff l
   c.reconcile('dw', ['m1']);    // and back (a person restored it)
   assert.deepEqual(c.state('dw').pending, ['m1'], 'no stale retry entry holds it back');
   const claim = c.claim(facts(now), 'reconcile', 'reconcile', now);
-  assert.equal(/:retry\d+$/.test(claim.requestId), false, 'and it is a fresh announcement, not a retry');
+  assert.match(claim.requestId, /:\d+$/, 'a generation-suffixed id');
+  assert.ok(Number(claim.requestId.split(':').pop()) >= 1, 'a NEW generation: never an id already COMMITTED for this set');
 });

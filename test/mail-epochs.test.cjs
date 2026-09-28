@@ -29,7 +29,7 @@ const { HookServer } = loadTs('src/main/hooks.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const { InboxWakeBridge, MAIL_DEGRADE_AFTER_WAKES } = loadTs('src/main/inboxWakeBridge.ts');
 const W = loadTs('src/main/workerWake.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, SUBMIT_CONFIRM_MS, WORKER_WAKE_COOLDOWN_MS } = W;
+const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, SUBMIT_CONFIRM_MS, WORKER_WAKE_COOLDOWN_MS } = W;
 const { MAIL_STALE_EPOCH_MS } = loadTs('src/main/mailLedger.ts');
 const { coordinatorPendingIds } = loadTs('src/main/mailReaders.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
@@ -396,7 +396,7 @@ test('C3 (§11.3): a text-only wake turn whose block overflowed: the id never su
   const b = w.send('cl-1', { subject: 'b', body: 'B'.repeat(6_000) });
   await w.flush();
   assert.equal(w.reqs.length, 1);
-  assert.equal(w.reqs[0].requestId, inboxWakeRequestId('cl-1', [a.id, b.id].sort()));
+  assert.equal(w.reqs[0].requestId, inboxWakeClaimId('cl-1', [a.id, b.id].sort(), 0));
   const c = w.ctx(w.fire('cl-1', 'UserPromptSubmit', { prompt: w.reqs[0].text }));
   assert.deepEqual(markersIn(c), [a.id], 'b did not fit this block');
   w.confirm('cl-1');
@@ -407,7 +407,7 @@ test('C3 (§11.3): a text-only wake turn whose block overflowed: the id never su
   assert.ok(w.diags.some((d) => d.stage === 'wake-repend' && d.requeued === 1));
   await w.flush();
   assert.equal(w.reqs.length, 2, 're-pended and woken at that Stop');
-  assert.equal(w.reqs[1].requestId, inboxWakeRequestId('cl-1', [b.id]) + ':again');
+  assert.equal(w.reqs[1].requestId, inboxWakeClaimId('cl-1', [b.id], 0), 'a NEW id: [b] alone was never announced before (its own first generation)');
   // No id is announced and delivered after its epoch closed.
   const s = w.coordinator.state('cl-1');
   assert.ok(!s.pending.includes(a.id) && !s.announced.includes(a.id));

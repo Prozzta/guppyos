@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
 const W = loadTs('src/main/workerWake.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
+const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const OWN = loadTs('src/main/automaticSubmit.ts');
 const { ADMISSION_REASON } = loadTs('src/main/capacityAdmission.ts');
@@ -177,7 +177,7 @@ test('CODEX (2) Dwight: COMMITTED, no provider turn start: nothing for 60 s, the
   assert.ok(f.diags.some((d) => d.stage === 'submit-unconfirmed' && d.agentId === 'dwight' && d.ids === 1), 'logged submit-unconfirmed');
   assert.equal(f.reqs.length, 2, 'one re-claim, on the same beat (unknown + quiescent)');
   const again = f.reqs[1];
-  assert.equal(again.requestId, inboxWakeRequestId('dwight', ['god-dwightupstream']) + ':again', 'not the COMMITTED id the owner would replay without typing');
+  assert.equal(again.requestId, inboxWakeClaimId('dwight', ['god-dwightupstream'], 1), 'not the COMMITTED id the owner would replay without typing (the next generation)');
   assert.equal(again.priorText, inboxNudgeText(['god-dwightupstream']), 'the owner must see the unsent nudge gone first');
   await f.flush();
   // CODEX-WAKE-161 F4: the second one is not confirmed either. It used to be dropped here
@@ -201,7 +201,7 @@ test('CODEX (2) Dwight: COMMITTED, no provider turn start: nothing for 60 s, the
   f.bridge.reconcileAll(['dwight']);
   await f.flush();
   assert.equal(f.reqs.length, 3, 'offered again once the backoff ends');
-  assert.equal(f.reqs[2].requestId, inboxWakeRequestId('dwight', ['god-dwightupstream']) + ':retry1', 'a fresh request id per retry');
+  assert.equal(f.reqs[2].requestId, inboxWakeClaimId('dwight', ['god-dwightupstream'], 2), 'a fresh request id per retry (the next generation)');
   assert.equal(f.reqs[2].priorText, inboxNudgeText(['god-dwightupstream']), 'and it still checks the prompt first (F2: never a stacked copy)');
   assert.equal(wakeRetryDelayMs(2), 2 * WAKE_RETRY_BASE_MS);
   assert.equal(wakeRetryDelayMs(9), WAKE_RETRY_MAX_MS, 'capped');
@@ -475,7 +475,7 @@ test('RE-PEND (3, §11.3) an announced id still delivered at the Stop that close
   await f.flush();
   assert.ok(f.diags.some((d) => d.stage === 'wake-repend' && d.requeued === 1));
   assert.equal(f.reqs.length, 2, 'one more announcement');
-  assert.equal(f.reqs[1].requestId, inboxWakeRequestId('jim', ['m1']) + ':again');
+  assert.equal(f.reqs[1].requestId, inboxWakeClaimId('jim', ['m1'], 1));
   assert.equal(f.reqs[1].priorText, undefined, 'that nudge was a real turn: no prompt check');
   // Still delivered at the next close: not burned, not looped: the F4 backoff.
   f.now += 1000;
@@ -488,7 +488,7 @@ test('RE-PEND (3, §11.3) an announced id still delivered at the Stop that close
   f.bridge.reconcileAll(['jim']);
   await f.flush();
   assert.equal(f.reqs.length, 3, 'offered again after the backoff');
-  assert.equal(f.reqs[2].requestId, inboxWakeRequestId('jim', ['m1']) + ':retry1');
+  assert.equal(f.reqs[2].requestId, inboxWakeClaimId('jim', ['m1'], 2));
 });
 
 test('RE-PEND (3, §11.3) keyed to the ledger: only ids still delivered, never over our own unconfirmed nudge, never while merely waiting', () => {
@@ -548,7 +548,7 @@ test('RE-PEND (§11.18 #41, Q38) the Codex case at the bridge: no UserPromptSubm
   f.bridge.onHook('cx', 'Stop', undefined, undefined, 'T1');
   await f.flush();
   assert.equal(f.reqs.length, 2, 're-offered at that Stop');
-  assert.equal(f.reqs[1].requestId, inboxWakeRequestId('cx', ['m1']) + ':again');
+  assert.equal(f.reqs[1].requestId, inboxWakeClaimId('cx', ['m1'], 1));
   assert.deepEqual(rows, [{ kind: 'mail-repend', agentId: 'cx', reason: 'stop', outcome: 'normal', unconfirmedStart: true, requeued: ['m1'] }]);
   // A confirmed turn's re-pend writes no such row (the wake-repend diag covers it).
   f.now = 7000;

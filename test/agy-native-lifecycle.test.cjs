@@ -26,7 +26,7 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
-const { WorkerWakeWatchdog, inboxWakeRequestId, WORKER_WAKE_IDLE_MS, WORKER_WAKE_HITL_REARM_MS, PROVIDER_IDLE_CONFIRM_MS } =
+const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, WORKER_WAKE_IDLE_MS, WORKER_WAKE_HITL_REARM_MS, PROVIDER_IDLE_CONFIRM_MS } =
   loadTs('src/main/workerWake.ts');
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const { classifyAgyStatusLine } = loadTs('src/main/capacityNormalize.ts');
@@ -238,7 +238,7 @@ test('THE RECOVERY: one matching native idle closes the epoch and produces EXACT
   assert.equal(f.owner.calls.length, 2, 'exactly one further wake');
   assert.deepEqual(f.owner.enters, ['a1', 'a1'], 'and exactly one further Enter');
   const second = f.owner.calls[1];
-  assert.equal(second.requestId, inboxWakeRequestId('a1', ['m2']), 'through the existing stable pending-id request');
+  assert.equal(second.requestId, inboxWakeClaimId('a1', ['m2'], 0), 'through the existing stable pending-id request (its first generation)');
   assert.equal(second.admissionClass, 'CAPACITY_GATED', 'and the existing admission class');
   assert.equal(second.text, inboxNudgeText(['m2']));
 });
@@ -477,7 +477,7 @@ test('CONFIRM GRACE: it expires, so a genuinely finished turn is still recovered
   f.deliver('a1', idle, openedAt + PROVIDER_IDLE_CONFIRM_MS);
   await f.flush();
   assert.equal(f.owner.calls.length, 2, 'past the grace the mail is delivered');
-  assert.equal(f.owner.calls[1].requestId, inboxWakeRequestId('a1', ['m2']));
+  assert.equal(f.owner.calls[1].requestId, inboxWakeClaimId('a1', ['m2'], 0));
 });
 
 test('CONFIRM GRACE does NOT need a running tick first: a short silent turn still recovers', async () => {

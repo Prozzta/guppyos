@@ -251,16 +251,51 @@ const CLOSED_TURN_MEMORY = 16;
  *  UserPromptSubmit is not in here: a new prompt is never a straggler of an old turn. */
 const IN_TURN_EVENTS = new Set(['PreToolUse', 'PostToolUse']);
 
-/** `inbox-wake:<agent>:<sha256 of the sorted ids>` - the same batch always has the same id. */
+/** `inbox-wake:<agent>:<sha256 of the sorted ids>` - the same batch always has the same BASE. */
 export function inboxWakeRequestId(agentId: string, ids: readonly string[]): string {
   const digest = createHash('sha256').update([...ids].sort().join('\n')).digest('hex');
   return `inbox-wake:${agentId}:${digest}`;
 }
 
+/**
+ * ZT-I1-MAIL 1.1.75 (layer-b dry run #2, god c59e35): the request id of a wake CLAIM is
+ * `<base>:<generation>`. The owner (automaticSubmit) delivers a request id AT MOST ONCE and
+ * replays a remembered COMMITTED without typing, so every NEW announcement of the same id set
+ * needs a NEW id, however often the set comes back: a re-pend at Stop (§11.3 / Q38), an N1
+ * unconfirmed back-edge, an unconfirmed submit, an F4 retry. The old scheme allowed one `:again`
+ * and `:retryN`, and it keyed "already re-announced" on state that reconcile() drops while an id is
+ * surfacing (the ledger's delivered set), so the third announcement reused a COMMITTED id and was
+ * replayed untyped (a 5-minute stall). The generation is per agent and per id set, survives
+ * reconcile() and forget(), and is bounded by the claims themselves (N1: at most 2 unconfirmed
+ * re-surfacings; F4: the backoff). A GENUINE duplicate, the same claim asked again, keeps its id
+ * and still dedups in the owner.
+ */
+export function inboxWakeClaimId(agentId: string, ids: readonly string[], generation: number): string {
+  return `${inboxWakeRequestId(agentId, ids)}:${generation}`;
+}
+/** Generations remembered per agent (most recent id sets). Far above anything one agent's mail
+ *  can hold at once; the oldest set is dropped first. */
+export const WAKE_GENERATION_MEMORY = 512;
+
 export class WorkerWakeWatchdog {
   /** ptyId → spawn timestamp (boot grace). */
   private spawnedAt = new Map<string, number>();
   private agents = new Map<string, AgentWake>();
+  /** agentId -> (claim base id -> last generation used). Deliberately OUTSIDE AgentWake: neither
+   *  reconcile() nor forget() may reset it, or a later announcement of the same set would reuse a
+   *  COMMITTED request id and be replayed without typing. */
+  private generations = new Map<string, Map<string, number>>();
+
+  /** The next generation for this agent's id set (0 for the first announcement). */
+  private nextGeneration(agentId: string, base: string): number {
+    let m = this.generations.get(agentId);
+    if (!m) { m = new Map(); this.generations.set(agentId, m); }
+    const gen = (m.get(base) ?? -1) + 1;
+    m.delete(base);
+    m.set(base, gen);
+    while (m.size > WAKE_GENERATION_MEMORY) m.delete(m.keys().next().value as string);
+    return gen;
+  }
   /** DIAGNOSIS ONLY (diag-1.1.46-wake): the guard that refused this agent's last claim. */
   private lastWhy = new Map<string, string>();
 
@@ -718,13 +753,10 @@ export class WorkerWakeWatchdog {
     const ids = [...r.pending].sort();
     r.pending.clear();
     r.claimedAt = now;
-    // A re-announced id was COMMITTED once under the plain request id, and the owner replays
-    // a remembered COMMITTED for that id without typing: the second announcement is a new
-    // request. Once per id, so one suffix is enough.
-    const again = ids.some((id) => r.reannounced.has(id));
-    // F4: each backoff retry is a new request too (the owner still remembers the last one).
-    const retry = Math.max(0, ...ids.map((id) => r.retries.get(id)?.attempt ?? 0));
-    const requestId = inboxWakeRequestId(f.agentId, ids) + (retry > 0 ? `:retry${retry}` : again ? ':again' : '');
+    // Every announcement of this id set is a NEW request (see inboxWakeClaimId): the owner replays
+    // a remembered COMMITTED without typing, so a re-pend, an N1 back-edge, an unconfirmed submit or
+    // an F4 retry must never reuse an earlier id.
+    const requestId = inboxWakeClaimId(f.agentId, ids, this.nextGeneration(f.agentId, inboxWakeRequestId(f.agentId, ids)));
     const claim: WakeClaim = Object.freeze({
       agentId: f.agentId, requestId, ids: Object.freeze(ids), cause,
       ...(r.recheck ? { recheck: r.recheck } : {})

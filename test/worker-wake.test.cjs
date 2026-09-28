@@ -14,6 +14,7 @@ const {
   InboxWakeCoordinator,
   classifyHook,
   inboxWakeRequestId,
+  inboxWakeClaimId,
   WORKER_WAKE_NUDGE,
   WORKER_WAKE_IDLE_MS,
   WORKER_WAKE_BOOT_GRACE_MS,
@@ -48,8 +49,8 @@ test('B2 two ids before a claim = one sorted immutable batch; a third in flight 
   const claim = c.claim(fact(), 'delivery', 'event', NOW);
   assert.deepEqual([...claim.ids], ['m1', 'm2']);
   assert.ok(Object.isFrozen(claim) && Object.isFrozen(claim.ids), 'immutable');
-  assert.equal(claim.requestId, inboxWakeRequestId('alice', ['m2', 'm1']), 'stable id from the SORTED set');
-  assert.match(claim.requestId, /^inbox-wake:alice:[0-9a-f]{64}$/);
+  assert.equal(claim.requestId, inboxWakeClaimId('alice', ['m2', 'm1'], 0), 'stable id from the SORTED set (first generation)');
+  assert.match(claim.requestId, /^inbox-wake:alice:[0-9a-f]{64}:0$/, '<base>:<generation>, generation 0 first');
   c.noteDelivery('alice', 'm3');
   assert.deepEqual([...claim.ids], ['m1', 'm2'], 'the claim is never enlarged');
   c.noteHook('alice', 'Stop', '', NOW);      // even with fresh idle evidence and new mail...

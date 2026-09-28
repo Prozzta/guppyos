@@ -475,7 +475,7 @@ test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the t
   assert.deepEqual(row.requeued, [m.id]);
   assert.equal((await rig.entry('cx-1', m.id)).state, 'delivered', 'never acted: it never reached the model');
   const outs = (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED');
-  assert.ok(outs[1].requestId.endsWith(':again'), 'the re-announcement is a new request');
+  assert.ok(outs[1].requestId.endsWith(':1') && outs[0].requestId.endsWith(':0'), 'the re-announcement is a new request (the next generation)');
 });
 
 // ——————————————————————————————————————————————————————————————————————————— F12

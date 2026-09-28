@@ -229,6 +229,33 @@ test('N1 the unconfirmed re-surface loop is bounded: context DISCARDED (no trans
   assert.equal(rig.contexts('cl-1').filter((c) => c.ids.includes(m.id)).length, 3, 'the loop stopped at 3');
 });
 
+test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed surfacing (reconcile drops the id from the delivered set) and EVERY re-announcement is still TYPED under a new request id, never replayed', T, async (t) => {
+  const rig = await startRig(t);
+  // Manual turns: each typed wake opens a turn that stays open until the 'stop' cue, so a beat
+  // (and its reconcile against the LEDGER's delivered set, which no longer holds the surfacing id)
+  // runs INSIDE the surfacing, exactly as in the packaged dry run.
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { hookMode: 'discard', manualTurns: true } }]);
+  const m = await rig.call('send', { to: 'cl-1', subject: 'n1-gen', body: 'context is discarded: surfaced twice unconfirmed, then the fallback' });
+  const typed = () => rig.prompts('cl-1').filter((p) => String(p.text || '').includes(m.id)).length;
+  const surfacing = async () => ['surfacing', 'surfaced'].includes((await rig.entry('cl-1', m.id)).state);
+  for (let n = 1; n <= 3; n++) {
+    await rig.beatUntil(async () => typed() >= n && (await surfacing()), { what: `announcement ${n} typed and surfacing`, stepMs: 16_000, settle: false });
+    await rig.beat();                 // a reconcile while the id is surfacing (not delivered)
+    await sleep(300);
+    rig.cue('cl-1', { cue: 'stop' });
+    if (n < 3) await waitFor(async () => (await rig.entry('cl-1', m.id)).state === 'delivered', { what: `surfacing ${n} unconfirmed -> back to delivered` });
+  }
+  await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted after the fallback surfacing' });
+  const e = await rig.entry('cl-1', m.id);
+  assert.equal(e.confirmMethod, 'latency-fallback');
+  assert.equal(e.surfaceCount, 3);
+  assert.equal(typed(), 3, 'three announcements TYPED into the agent');
+  const outs = (await rig.call('outcomes')).filter((o) => o.agentId === 'cl-1' && o.requestId.startsWith('inbox-wake:') && o.outcome.kind === 'COMMITTED');
+  assert.equal(outs.length, 3, 'three committed wake requests (a replay would add none and type nothing)');
+  assert.deepEqual(outs.map((o) => o.requestId.split(':').pop()), ['0', '1', '2'], 'generations 0, 1, 2 of the same id set');
+  assert.equal(new Set(outs.map((o) => o.requestId)).size, 3);
+});
+
 test('N2 hookless (custom) and proxy (qwen) work orders: acted = the confirmed PTY write, via:"work-order", never backlog', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cu-1', flavour: 'custom', scenario: {} }, { id: 'qw-1', flavour: 'qwen', scenario: {} }]);
