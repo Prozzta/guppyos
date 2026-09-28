@@ -108,3 +108,25 @@ test('the generation memory is bounded per agent (oldest id set dropped first)',
   }
   assert.ok(c.generations.get('z').size <= WAKE_GENERATION_MEMORY);
 });
+
+test('a claim that did NOT commit (REFUSED / FAILED) is retried under the SAME id; only a COMMITTED one advances the generation', () => {
+  const c = new WorkerWakeWatchdog();
+  let now = 5_000_000;
+  c.reconcile('r', ['m1']);
+  const a = c.claim(facts('r', now), 'reconcile', 'reconcile', now);
+  c.settle(a, 'REFUSED', now, false);
+  now += 70_000;
+  const b = c.claim(facts('r', now), 'reconcile', 'reconcile', now);
+  assert.equal(b.requestId, a.requestId, 'the owner released the id: the retry reuses it');
+  c.settle(b, 'FAILED', now, false);
+  now += 70_000;
+  const d = c.claim(facts('r', now), 'reconcile', 'reconcile', now);
+  assert.equal(d.requestId, a.requestId);
+  c.settle(d, 'COMMITTED', now, false);
+  c.noteHook('r', 'Stop', '', now + 1000);
+  c.reconcile('r', []);
+  c.reconcile('r', ['m1']);
+  now += 70_000;
+  const e = c.claim(facts('r', now), 'reconcile', 'reconcile', now);
+  assert.ok(e && e.requestId.endsWith(':1'), 'after a COMMIT the next announcement is the next generation');
+});

@@ -267,8 +267,10 @@ export function inboxWakeRequestId(agentId: string, ids: readonly string[]): str
  * surfacing (the ledger's delivered set), so the third announcement reused a COMMITTED id and was
  * replayed untyped (a 5-minute stall). The generation is per agent and per id set, survives
  * reconcile() and forget(), and is bounded by the claims themselves (N1: at most 2 unconfirmed
- * re-surfacings; F4: the backoff). A GENUINE duplicate, the same claim asked again, keeps its id
- * and still dedups in the owner.
+ * re-surfacings; F4: the backoff). The generation advances only after a claim of the set
+ * COMMITTED: a claim the owner did not commit (REFUSED/ABORTED/FAILED release the id; INTERFERED
+ * holds it for a person) is retried under the SAME id, as before. A GENUINE duplicate, the same
+ * claim asked again, keeps its id and still dedups in the owner.
  */
 export function inboxWakeClaimId(agentId: string, ids: readonly string[], generation: number): string {
   return `${inboxWakeRequestId(agentId, ids)}:${generation}`;
@@ -284,17 +286,28 @@ export class WorkerWakeWatchdog {
   /** agentId -> (claim base id -> last generation used). Deliberately OUTSIDE AgentWake: neither
    *  reconcile() nor forget() may reset it, or a later announcement of the same set would reuse a
    *  COMMITTED request id and be replayed without typing. */
-  private generations = new Map<string, Map<string, number>>();
+  private generations = new Map<string, Map<string, { gen: number; committed: boolean }>>();
 
-  /** The next generation for this agent's id set (0 for the first announcement). */
+  /** The generation for this agent's id set: 0 for the first announcement, the NEXT one once the
+   *  previous claim for the set COMMITTED (a re-announcement: the owner would replay that id without
+   *  typing). A claim that did NOT commit (REFUSED, ABORTED, FAILED: the owner released its id, and
+   *  INTERFERED: the owner holds it for a person) is retried under the SAME id, as before. */
   private nextGeneration(agentId: string, base: string): number {
     let m = this.generations.get(agentId);
     if (!m) { m = new Map(); this.generations.set(agentId, m); }
-    const gen = (m.get(base) ?? -1) + 1;
+    const prev = m.get(base);
+    const gen = !prev ? 0 : prev.committed ? prev.gen + 1 : prev.gen;
     m.delete(base);
-    m.set(base, gen);
+    m.set(base, { gen, committed: false });
     while (m.size > WAKE_GENERATION_MEMORY) m.delete(m.keys().next().value as string);
     return gen;
+  }
+
+  /** The claim's generation COMMITTED: the next announcement of its set gets a new one. */
+  private markCommitted(claim: WakeClaim): void {
+    const base = inboxWakeRequestId(claim.agentId, claim.ids);
+    const e = this.generations.get(claim.agentId)?.get(base);
+    if (e && claim.requestId === `${base}:${e.gen}`) e.committed = true;
   }
   /** DIAGNOSIS ONLY (diag-1.1.46-wake): the guard that refused this agent's last claim. */
   private lastWhy = new Map<string, string>();
@@ -779,6 +792,7 @@ export class WorkerWakeWatchdog {
     if (!r || r.inFlight?.requestId !== claim.requestId) return;
     r.inFlight = null;
     if (outcomeKind === 'COMMITTED') {
+      this.markCommitted(claim);
       for (const id of claim.ids) r.announced.add(id);
       r.lifecycle = 'active';          // a turn just started; new mail waits for its Stop
       r.activeSince = at;              // and THIS is the edge terminal proof must be newer than
