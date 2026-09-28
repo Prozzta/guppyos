@@ -137,10 +137,18 @@ window.__harnessRun = async () => {
     // timer jitter while pinning both directions independent of the constant: raise it past
     // 145 and the upper read fails; drop it below 25 and the lower read does. inspect() is a
     // pure read and does not itself rearm the drain.
-    await sleep(Math.max(0, 25 - (Date.now() - imeEmittedAt)));
-    result.heldAt25 = inspectInputOrigin('io')?.held;      // < 50 -> still held
-    await sleep(120);
-    result.heldAt145 = inspectInputOrigin('io')?.held;     // > 50 -> drained
+    // FLAKY-TIMING: the reads used to be sleeps measured from the IME emit, so a starved renderer
+    // woke past 50 ms and read "drained" at "~25 ms". Now the window is (re)opened synchronously and
+    // the two reads are timers scheduled in the SAME TICK as its drain timer: expired timers run in
+    // due-time order however late the renderer wakes, so +25 always reads before the +50 drain and
+    // +145 always after it. The literals still pin both directions of the constant.
+    void imeEmittedAt;
+    await sleep(60);                                        // let the IME's held window drain first
+    ta.dispatchEvent(new Event('input', { bubbles: true })); // opens held NOW: drain due at +HELD_DRAIN_MS
+    const readAt = (ms: number) => new Promise<boolean | undefined>((r) => { setTimeout(() => r(inspectInputOrigin('io')?.held), ms); });
+    const at25 = readAt(25), at145 = readAt(145);
+    result.heldAt25 = await at25;      // < 50 -> still held
+    result.heldAt145 = await at145;    // > 50 -> drained
 
     // ARM 8 - the mouse-mode MIRROR follows the TUI and comes back. Kills: "one-shot at
     // arm time". Read from xterm's own modes, forwarded to (the stub of) main.
@@ -178,7 +186,9 @@ window.__harnessRun = async () => {
       recordedOk.push(st); return realReport(id, st);
     };
     await write(term, '[?1000h');   // mouse mode -> new state -> first report REJECTED
-    await sleep(400);                    // the 100ms retry fires and is accepted
+    // The 100 ms retry fires and is accepted. FLAKY-TIMING: poll for it (5 s deadline) instead of a
+    // fixed 400 ms; a retry that never comes still fails, at the deadline.
+    for (let i = 0; i < 250 && !recordedOk.some((st) => (st as { mouseTrackingMode?: string }).mouseTrackingMode === 'vt200'); i++) await sleep(20);
     window.cth.reportTerminalInputState = realReport;
     result.retryLanded = recordedOk.some((st) => (st as { mouseTrackingMode?: string }).mouseTrackingMode === 'vt200');
     await write(term, '[?1000l');
@@ -207,15 +217,23 @@ window.__harnessRun = async () => {
     // must already be closed. KILLS THE REARM MUTANT: a variant that rearms after returning
     // CONTROL keeps the window open at the poll, so gapB_heldAfterOriginalDrain reads true.
     await sleep(60);                                            // ensure the Gap-A held window has drained
+    // FLAKY-TIMING: the reply and the poll are timers scheduled in the SAME TICK that opens held at T,
+    // so they run in due-time order against its +50 drain whatever the load: the reply at +30 is
+    // always inside the window, and the read at +66 is always after the original drain and before a
+    // reply-rearmed one (+80).
     ta.dispatchEvent(new Event('input', { bubbles: true }));   // open held at T
-    const heldOpenedAt = Date.now();
-    await sleep(30);
-    sent.length = 0;
-    term.input('\x1b[6;5R', false);                            // a CPR reply INSIDE held, ~T+30
-    result.gapB_replyOrigin = lastOrigin();                    // CONTROL
-    result.gapB_heldRightAfterReply = inspectInputOrigin('io')?.held === true;   // still true: original drain not yet
-    await sleep(Math.max(0, 66 - (Date.now() - heldOpenedAt))); // poll at ~T+66 (> 50, < 80)
-    result.gapB_heldAfterOriginalDrain = inspectInputOrigin('io')?.held;         // MUST be false (no rearm)
+    const replied = new Promise<void>((r) => { setTimeout(() => {
+      sent.length = 0;
+      term.input('\x1b[6;5R', false);                          // a CPR reply INSIDE held, at T+30
+      result.gapB_replyOrigin = lastOrigin();                  // CONTROL
+      result.gapB_heldRightAfterReply = inspectInputOrigin('io')?.held === true;  // still true: original drain not yet
+      r();
+    }, 30); });
+    const polled = new Promise<void>((r) => { setTimeout(() => {
+      result.gapB_heldAfterOriginalDrain = inspectInputOrigin('io')?.held;       // MUST be false (no rearm)
+      r();
+    }, 66); });
+    await replied; await polled;
 
     // ARM 13 - BLOCKER 2 overlap (Dwight 24.3), CONVERGENCE SANITY (not a standalone
     // mutant-killer - the reused-id arm below is): fire two resets back-to-back so the first
