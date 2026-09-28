@@ -61,15 +61,27 @@ export function disableCodexPlugins(config: string): { text: string; disabled: n
  *  measured). Only sane once threads rotate (fix 1): on a thread with an 87K retained floor it
  *  would compact every 20-30K tokens. */
 export const CODEX_AUTO_COMPACT_TOKEN_LIMIT = 120_000;
+/**
+ * A trial override must leave room above the measured ~18K post-compaction floor and below the
+ * ~258K model window.  Values outside this range would either compact nearly every request or
+ * silently turn compaction off, so fail closed to the fleet default instead.
+ */
+export const CODEX_AUTO_COMPACT_TOKEN_LIMIT_MIN = 40_000;
+export const CODEX_AUTO_COMPACT_TOKEN_LIMIT_MAX = 200_000;
+
+export function isCodexAutoCompactTokenLimitOverride(value: unknown): value is number {
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= CODEX_AUTO_COMPACT_TOKEN_LIMIT_MIN
+    && value <= CODEX_AUTO_COMPACT_TOKEN_LIMIT_MAX;
+}
 
 /**
  * A registry-controlled override for one Codex agent. Unset (and malformed) values retain the
  * fleet default; the value is deliberately not tied to any particular agent ID.
  */
-export function codexAutoCompactTokenLimitForAgent(override?: number): number {
-  return typeof override === 'number' && Number.isSafeInteger(override) && override >= 1_000
-    ? override
-    : CODEX_AUTO_COMPACT_TOKEN_LIMIT;
+export function codexAutoCompactTokenLimitForAgent(override?: unknown): number {
+  return isCodexAutoCompactTokenLimitOverride(override) ? override : CODEX_AUTO_COMPACT_TOKEN_LIMIT;
 }
 
 /** A top-level key line of the seed (before its first table), bare or quoted. */

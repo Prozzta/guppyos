@@ -142,6 +142,17 @@ test('Stage 1b: an optional registry limit applies to that agent only and the us
   assert.equal(control.cfg.model_auto_compact_token_limit, 120000, 'an unset agent retains the fleet default');
   assert.equal(C.codexAutoCompactTokenLimitForAgent(undefined), 120000);
   assert.equal(C.codexAutoCompactTokenLimitForAgent(80000), 80000);
+  for (const unsafe of [1000, 17999, 400000, 1e9]) {
+    assert.equal(C.codexAutoCompactTokenLimitForAgent(unsafe), 120000, `${unsafe} falls back to the fleet default`);
+  }
+  assert.equal(C.codexAutoCompactTokenLimitForAgent(40000), 40000, 'lower safe bound is inclusive');
+  assert.equal(C.codexAutoCompactTokenLimitForAgent(200000), 200000, 'upper safe bound is inclusive');
+  registry.agents['trial-agent'].codexAutoCompactTokenLimit = 1000;
+  fs.writeFileSync(registryFile, JSON.stringify(registry), 'utf8');
+  const unsafe = await s.hive.ensureAgent(meta);
+  assert.equal(toml.parse(fs.readFileSync(path.join(unsafe.env.CODEX_HOME, 'config.toml'), 'utf8')).model_auto_compact_token_limit, 120000, 'an unsafe registry value is never provisioned');
+  const ignored = fs.readFileSync(path.join(s.home, 'harness', 'hive', 'log.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse).filter((row) => row.kind === 'codex-compact-limit-ignored');
+  assert.deepEqual(ignored.map(({ agentId, value }) => ({ agentId, value })), [{ agentId: 'trial-agent', value: 1000 }], 'one ignored-value row is emitted per spawn');
 });
 
 test('Route A: generated Codex config pins retain_client_developer_messages = false even when the seed enables it', async (t) => {
