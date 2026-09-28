@@ -155,6 +155,19 @@ test('Creed\'s ruling: an agent degraded for ZERO HOOK TRAFFIC gets the 1.1.74 r
   assert.match(nb, /Codex inbox wake: .*read your authoritative inbox/, 'a degraded Codex agent reads its inbox on a sentinel wake');
 });
 
+test('Q39 (§11.18 #42): a degraded Codex agent\'s alert says "respawn to restore mail delivery"; other providers\' alerts do not; main passes it for codex', async (t) => {
+  const { hive, promptFor } = await floor(t);
+  await promptFor('cx-9', 'codex');
+  await promptFor('cl-9', 'claude');
+  assert.equal(hive.mail.degradeChannel('cx-9', 'no-mail-block', {}, { respawnToRestore: true }), true);
+  assert.equal(hive.mail.degradeChannel('cl-9', 'no-mail-block', {}), true);
+  const notice = (id) => hive.mail.integrityIssues().find((i) => i.error === 'mail-channel-degraded' && i.notice.startsWith(`Mail for ${id} `))?.notice ?? '';
+  assert.ok(notice('cx-9').includes('respawn to restore mail delivery'), notice('cx-9'));
+  assert.ok(notice('cl-9') && !/respawn/.test(notice('cl-9')), notice('cl-9'));
+  const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  assert.match(index, /degrade: \(agentId, reason, detail\) => hive\.mail\.degradeChannel\(agentId, reason, detail, \{ respawnToRestore: hive\.registry\(\)\.agents\[agentId\]\?\.provider === 'codex' \}\)/);
+});
+
 test('P4: the wake text follows the mode (index.ts wires wakeMailMode); Codex keeps its fixed sentinel', () => {
   assert.equal(inboxWakeTextForProvider('claude', ['m1'], 'inject'), 'You have new hive mail (delivered in context below): m1.');
   assert.equal(inboxWakeTextForProvider('codex', ['m1'], 'inject'), '[hive] check inbox');

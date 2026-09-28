@@ -353,6 +353,37 @@ test('F11 Stop never arrives (AGY false-active): the 30-minute stale-epoch back-
   assert.equal((await rig.call('diags')).filter((d) => d.stage === 'mail-epoch-stale' && d.agentId === 'ag-1').length, 1, 'the back-edge fired ONCE');
 });
 
+// ——————————————————————————————————————————————————————————————————————————— Q38
+
+test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the turn ends before the 15 s beat: the mail is re-offered at that Stop (mail-repend, unconfirmedStart:true)', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cx-1', flavour: 'codex', scenario: { hookMode: 'ups-silent', manualTurns: true } }]);
+  const m = await rig.call('send', { to: 'cx-1', subject: 'q38', body: 'a short turn' });
+  const commits = async () => (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED').length;
+  await beatUntil(rig, async () => (await commits()) >= 1, { what: 'the wake COMMITTED', stepMs: 6 * 60_000, settle: false });
+  await waitFor(() => rig.prompts('cx-1').length >= 1, { what: 'the wake typed' });
+  await waitFor(async () => !(await rig.call('wakeState', { id: 'cx-1' })).inFlight, { what: 'the wake settled' });
+  // No beat yet: the rollout's task_started has not been read, the start is unconfirmed.
+  const before = await rig.call('wakeState', { id: 'cx-1' });
+  assert.equal(before.lifecycle, 'active');
+  assert.equal(before.provisional, true, 'the turn start was never confirmed');
+  assert.deepEqual(before.announced, [m.id]);
+  const ends = rig.turnEnds('cx-1').length;
+  rig.cue('cx-1', { cue: 'stop' });
+  await waitFor(() => rig.turnEnds('cx-1').length > ends, { what: 'turn end' });
+  // Re-offered: a second COMMITTED wake for the same id, on the Stop's own edge (or, if the owner
+  // refused that instant, the next beat: without the re-pend nothing would ever offer it again).
+  await beatUntil(rig, async () => (await commits()) >= 2, { what: 'the mail re-offered', stepMs: 15_000, settle: false });
+  const row = (await rig.rows('mail-repend')).find((r) => r.agentId === 'cx-1');
+  assert.ok(row, 'a mail-repend row');
+  assert.equal(row.unconfirmedStart, true);
+  assert.equal(row.reason, 'stop');
+  assert.deepEqual(row.requeued, [m.id]);
+  assert.equal((await rig.entry('cx-1', m.id)).state, 'delivered', 'never acted: it never reached the model');
+  const outs = (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED');
+  assert.ok(outs[1].requestId.endsWith(':again'), 'the re-announcement is a new request');
+});
+
 // ——————————————————————————————————————————————————————————————————————————— F12
 
 test('F12 hook shim exits 127 (zero hook traffic): degrades after 3 wakes, mail-channel-degraded, the mail is still read', T, async (t) => {

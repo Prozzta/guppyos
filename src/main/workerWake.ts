@@ -305,12 +305,20 @@ export class WorkerWakeWatchdog {
    * the ledger: no id stays announced and delivered after its epoch closed.
    *
    * Never over our own unconfirmed nudge: while the lifecycle is active on a PROVISIONAL epoch the
-   * nudge may still sit in the composer (the submit-unconfirmed path owns those ids).
+   * nudge may still sit in the composer (the submit-unconfirmed path owns those ids), EXCEPT at a
+   * turn end (`turnEnded`: any Stop or StopFailure, §11.18 #41 / Q38): the provider says a turn
+   * ran and ended, so an unsurfaced id never reached the model and goes back to pending whether or
+   * not the turn start was confirmed (a Codex UserPromptSubmit that never arrives, and a turn
+   * shorter than one beat). `unconfirmedStart` says the guard was passed that way.
    */
-  repend(agentId: string, deliveredIds: readonly string[], now = Date.now()): { requeued: string[]; exhausted: string[]; attempt: number; retryInMs: number } {
-    const out = { requeued: [] as string[], exhausted: [] as string[], attempt: 0, retryInMs: 0 };
+  repend(agentId: string, deliveredIds: readonly string[], now = Date.now(), opts: { turnEnded?: boolean } = {}): { requeued: string[]; exhausted: string[]; attempt: number; retryInMs: number; unconfirmedStart: boolean } {
+    const out = { requeued: [] as string[], exhausted: [] as string[], attempt: 0, retryInMs: 0, unconfirmedStart: false };
     const r = this.agents.get(agentId);
-    if (!r || (r.lifecycle === 'active' && r.provisional)) return out;
+    if (!r) return out;
+    if (r.lifecycle === 'active' && r.provisional) {
+      if (!opts.turnEnded) return out;
+      out.unconfirmedStart = true;
+    }
     const delivered = new Set(deliveredIds);
     for (const id of [...r.announced].sort()) {
       if (!delivered.has(id)) continue;
@@ -379,7 +387,10 @@ export class WorkerWakeWatchdog {
   noteHook(agentId: string | undefined, event: string | undefined, message: string | undefined, at = Date.now(), fullyIdle?: boolean, turnId?: string): boolean {
     if (!agentId || !event) return false;
     const r = this.rec(agentId);
-    if (event === 'Stop') {
+    // §11.18 #43 (Q40): StopFailure (an API error) ends the turn exactly as Stop does. Without
+    // this the lifecycle stayed active until Claude's own idle Notification (~60 s), and a mail
+    // wake re-pended by the abnormal close was refused as lifecycle-active until then.
+    if (event === 'Stop' || event === 'StopFailure') {
       if (fullyIdle === false) return false;   // the provider says the turn is not over
       this.endEpoch(r, 'idle');
       r.openTurnId = null;

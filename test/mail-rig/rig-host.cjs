@@ -263,7 +263,8 @@ async function buildFloor() {
       abortSince: (agentId, since) => { hookServer.abortMailEpochsSince(agentId, since, 'submit-unconfirmed'); },
       closeStale: (agentId, now) => hookServer.closeStaleMailEpochs(agentId, now),
       hasOpenEpoch: (agentId) => hive.mail.openEpochs(agentId).length > 0,
-      degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail)
+      degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),
+      log: (row) => hive.appendLog(row)
     },
     facts: (agentId) => {
       const ptyId = ptyForAgent(agentId);

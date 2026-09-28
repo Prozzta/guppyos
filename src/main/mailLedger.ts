@@ -1034,15 +1034,19 @@ export class MailLedger {
    * §11.10: switch an injection agent to legacy-read (the channel override), log
    * `mail-channel-degraded` and raise a UI alert through the integrity banner. Returns true when
    * the mode changed (a second call is a no-op).
+   *
+   * §11.18 #42 (Q39): `respawnToRestore` (main passes it for a Codex agent) adds "respawn to
+   * restore mail delivery" to the alert: Codex's wake is its fixed sentinel, so the running session
+   * cannot be told to read its files; the legacy-read instructions reach it with its next spawn.
    */
-  degradeChannel(agentId: string, reason: string, detail: Record<string, unknown> = {}): boolean {
+  degradeChannel(agentId: string, reason: string, detail: Record<string, unknown> = {}, opts: { respawnToRestore?: boolean } = {}): boolean {
     if (!this.hasAgent(agentId)) return false;
     const changed = this.setChannelOverride(agentId, { mode: 'legacy-read', reason, since: this.now() });
     if (!changed) return false;
     this.log({ kind: 'mail-channel-degraded', agentId, reason, mode: 'legacy-read', ...detail });
     this.notices.set(`${agentId}|degraded`, {
       file: `state/mail/${agentId}.json`, quarantine: null, error: 'mail-channel-degraded',
-      notice: `Mail for ${agentId} is no longer reaching it through its hooks (${reason === 'zero-hook-traffic' ? 'no hook traffic across 3 wakes' : '3 wakes started a turn with no mail block'}); it now reads its inbox files instead (legacy-read). Check the agent's hook setup (see mail-channel-degraded in the log).`
+      notice: `Mail for ${agentId} is no longer reaching it through its hooks (${reason === 'zero-hook-traffic' ? 'no hook traffic across 3 wakes' : '3 wakes started a turn with no mail block'}); it now reads its inbox files instead (legacy-read)${opts.respawnToRestore ? `, but its running session keeps its old instructions: respawn to restore mail delivery` : ''}. Check the agent's hook setup (see mail-channel-degraded in the log).`
     });
     return true;
   }

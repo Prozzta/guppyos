@@ -98,11 +98,9 @@ test('C4 StopFailure is an abnormal end (re-surfaced with the marker); an interr
   rig.cue('cl-1', { cue: 'stop-failure' });
   await waitFor(async () => { const e = await rig.entry('cl-1', m.id); return e.state === 'delivered' && e.redelivered; }, { what: 'back to delivered' });
   assert.ok((await rig.rows('mail')).some((r) => r.stage === 'redelivered' && r.reason === 'stop-failure' && r.ids.includes(m.id)));
-  // After an API error Claude sits at its prompt and, ~60 s later, says so (idle Notification).
-  // The wake coordinator counts only Stop / Notification as the turn's end (StopFailure closes the
-  // MAIL epoch, not the wake lifecycle): see NOTES Q-slice-8.
-  rig.cue('cl-1', { cue: 'status', message: 'Claude is waiting for your input' });
-  await waitFor(async () => (await rig.call('wakeState', { id: 'cl-1' })).lifecycle === 'idle', { what: 'idle after the API error' });
+  // §11.18 #43 (Q40): StopFailure ends the turn in the wake lifecycle too, so no idle Notification
+  // (~60 s later on a real Claude) is needed before the re-pended mail is offered again.
+  await waitFor(async () => (await rig.call('wakeState', { id: 'cl-1' })).lifecycle === 'idle', { what: 'idle at the StopFailure itself' });
   await rig.beatUntil(() => rig.contexts('cl-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false });
   assert.ok(rig.contexts('cl-1').filter((c) => c.ids.includes(m.id))[1].context.includes(REDELIVERED));
   rig.cue('cl-1', { cue: 'stop' });

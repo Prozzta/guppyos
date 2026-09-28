@@ -626,7 +626,11 @@ inboxWake = new InboxWakeBridge({
     abortSince: (agentId, since) => { hookServer.abortMailEpochsSince(agentId, since, 'submit-unconfirmed'); },
     closeStale: (agentId, now) => hookServer.closeStaleMailEpochs(agentId, now),
     hasOpenEpoch: (agentId) => hive.mail.openEpochs(agentId).length > 0,
-    degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail)
+    // §11.18 #42 (Q39): a Codex agent's running session cannot be told (its wake is the fixed
+    // sentinel), so its alert says to respawn it.
+    degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),
+    // §11.18 #41 (Q38): the `mail-repend` row of a turn end whose start was never confirmed.
+    log: (row) => hive.appendLog(row)
   },
   facts: (agentId) => {
     const ptyId = ptyForAgent(agentId);

@@ -41,6 +41,8 @@ export interface InboxWakeMail {
   hasOpenEpoch(agentId: string): boolean;
   /** §11.10: switch to legacy-read, log `mail-channel-degraded`, raise the UI alert. */
   degrade(agentId: string, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): boolean;
+  /** One durable hive log row (main: hive.appendLog). Optional: absent, nothing is logged. */
+  log?(row: Record<string, unknown>): void;
 }
 
 /** §11.10: per agent, the wake-by-wake evidence that the mail channel works. */
@@ -249,12 +251,23 @@ export class InboxWakeBridge {
    * Every id a wake announced that the ledger still calls delivered returns to pending ONCE, then
    * the F4 backoff. HookServer calls this BEFORE it reports the hook itself, so a Stop's own retry
    * edge picks the re-pended ids up.
+   *
+   * §11.18 #41 (Q38): at ANY Stop (and a StopFailure, which ends the turn too, #43) this happens
+   * whether or not the turn start was confirmed: provider-neutral, and harmless because an id that
+   * is still delivered never reached the model. That case is logged as a `mail-repend` row with
+   * `unconfirmedStart: true`.
    */
   onMailEpochClosed(agentId: string, outcome: 'normal' | 'abnormal', reason: string, redelivered: readonly string[] = []): void {
     if (!agentId) return;
     const delivered = this.deps.inboxIds(agentId);
-    const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now());
+    const turnEnded = reason === 'stop' || reason === 'stop-failure';
+    const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now(), { turnEnded });
     if (!r.requeued.length && !r.exhausted.length) return;
+    if (r.unconfirmedStart) {
+      try {
+        this.deps.mail?.log?.({ kind: 'mail-repend', agentId, reason, outcome, unconfirmedStart: true, requeued: r.requeued, ...(r.exhausted.length ? { exhausted: r.exhausted } : {}) });
+      } catch { /* logging never breaks the wake path */ }
+    }
     this.deps.diag?.('wake-repend', { agentId, outcome, reason, requeued: r.requeued.length, redelivered: redelivered.length, ...(r.requeued.length ? { idList: r.requeued } : {}) });
     if (r.exhausted.length) this.deps.diag?.('wake-ids-exhausted', { agentId, ids: r.exhausted.length, idList: r.exhausted, attempt: r.attempt, retryInMs: r.retryInMs, requeued: r.requeued.length });
     if (r.requeued.length) this.scheduleWake(agentId, 'hook');

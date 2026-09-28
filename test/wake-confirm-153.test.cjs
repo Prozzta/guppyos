@@ -507,6 +507,81 @@ test('RE-PEND (3, §11.3) keyed to the ledger: only ids still delivered, never o
   assert.deepEqual(c.repend('a', ['m1'], 50).requeued, [], 'not announced any more: nothing to do');
 });
 
+test('RE-PEND (§11.18 #41, Q38) at a TURN END the provisional guard does not apply: an unsurfaced id is re-pended whether or not the start was confirmed', () => {
+  const c = new WorkerWakeWatchdog();
+  c.noteHook('a', 'Stop', undefined, 0, true);
+  c.noteDelivery('a', 'm1'); c.noteDelivery('a', 'm2');
+  c.settle(c.claim(fact('a'), 'hook', 'event', 10), 'COMMITTED', 10, true);
+  assert.equal(c.state('a').provisional, true);
+  // Any other close (interrupt, next turn, ...) still leaves our own unconfirmed nudge alone.
+  const r0 = c.repend('a', ['m1', 'm2'], 20);
+  assert.deepEqual([r0.requeued, r0.unconfirmedStart], [[], false]);
+  // A Stop / StopFailure: the provider says a turn ran and ended. m2 was surfaced in it; m1 not.
+  const r = c.repend('a', ['m1'], 30, { turnEnded: true });
+  assert.deepEqual(r.requeued, ['m1']);
+  assert.equal(r.unconfirmedStart, true);
+  assert.deepEqual(c.state('a').pending, ['m1']);
+  // A confirmed turn end is the ordinary path (unconfirmedStart false).
+  const c2 = new WorkerWakeWatchdog();
+  c2.noteHook('b', 'Stop', undefined, 0, true);
+  c2.noteDelivery('b', 'm1');
+  c2.settle(c2.claim(fact('b'), 'hook', 'event', 10), 'COMMITTED', 10, true);
+  c2.noteHook('b', 'UserPromptSubmit', undefined, 20);
+  const r2 = c2.repend('b', ['m1'], 30, { turnEnded: true });
+  assert.deepEqual([r2.requeued, r2.unconfirmedStart], [['m1'], false]);
+});
+
+test('RE-PEND (§11.18 #41, Q38) the Codex case at the bridge: no UserPromptSubmit, the Stop before the 15 s beat: re-offered at that Stop, one mail-repend row with unconfirmedStart:true', async () => {
+  const rows = [];
+  const f = floor({ confirms: true });
+  f.bridge = new InboxWakeBridge({ ...f.bridge.deps, mail: { mode: () => 'inject', closeTurn() {}, abortSince() {}, closeStale: () => [], hasOpenEpoch: () => false, degrade: () => false, log: (row) => rows.push(row) } });
+  f.coordinator.noteHook('cx', 'Stop', undefined, 0, true, 'T0');
+  f.inbox.set('cx', ['m1']);
+  f.now = 1000;
+  f.bridge.onDelivery('cx', 'm1');
+  await f.flush();
+  assert.equal(f.reqs.length, 1);
+  assert.equal(f.coordinator.state('cx').provisional, true, 'the start was never confirmed (its UserPromptSubmit is silent)');
+  // 5 s later, before any beat, the turn ends: HookServer closes the epoch, then reports the Stop.
+  f.now = 6000;
+  f.bridge.onMailEpochClosed('cx', 'normal', 'stop');
+  f.bridge.onHook('cx', 'Stop', undefined, undefined, 'T1');
+  await f.flush();
+  assert.equal(f.reqs.length, 2, 're-offered at that Stop');
+  assert.equal(f.reqs[1].requestId, inboxWakeRequestId('cx', ['m1']) + ':again');
+  assert.deepEqual(rows, [{ kind: 'mail-repend', agentId: 'cx', reason: 'stop', outcome: 'normal', unconfirmedStart: true, requeued: ['m1'] }]);
+  // A confirmed turn's re-pend writes no such row (the wake-repend diag covers it).
+  f.now = 7000;
+  f.coordinator.noteHook('cx', 'UserPromptSubmit', undefined, 7000, undefined, 'T2');
+  f.bridge.onMailEpochClosed('cx', 'normal', 'stop');
+  assert.equal(rows.length, 1);
+});
+
+test('Q40 (§11.18 #43): StopFailure ends the turn in noteHook, exactly as Stop: lifecycle idle, a retry edge, and a re-pended wake goes out without waiting for the idle Notification', async () => {
+  const c = new WorkerWakeWatchdog();
+  c.noteHook('a', 'UserPromptSubmit', undefined, 10);
+  assert.equal(c.state('a').lifecycle, 'active');
+  assert.equal(c.noteHook('a', 'StopFailure', undefined, 20), true, 'a retry edge');
+  assert.equal(c.state('a').lifecycle, 'idle');
+  // AGY's non-terminal qualifier is honoured the same way.
+  c.noteHook('a', 'UserPromptSubmit', undefined, 30);
+  assert.equal(c.noteHook('a', 'StopFailure', undefined, 40, false), false);
+  assert.equal(c.state('a').lifecycle, 'active');
+  // At the bridge: a surfaced id back to delivered at the StopFailure is woken again at once.
+  const f = floor({ confirms: true });
+  f.coordinator.noteHook('cl', 'Stop', undefined, 0, true);
+  f.inbox.set('cl', ['m1']);
+  f.now = 1000;
+  f.bridge.onDelivery('cl', 'm1');
+  await f.flush();
+  f.coordinator.noteHook('cl', 'UserPromptSubmit', undefined, 1500);
+  f.now = 2000;
+  f.bridge.onMailEpochClosed('cl', 'abnormal', 'stop-failure', ['m1']);
+  f.bridge.onHook('cl', 'StopFailure', undefined);
+  await f.flush();
+  assert.equal(f.reqs.length, 2, 'no lifecycle-active refusal after the API error');
+});
+
 test('WIRING: main says which providers confirm turn starts (claude, codex, antigravity), by the agent\'s live PTY', () => {
   const { readSource, codeOnly } = require('./read-source.cjs');
   const index = codeOnly(readSource('src/main/index.ts'));
