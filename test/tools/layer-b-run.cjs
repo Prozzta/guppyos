@@ -327,6 +327,19 @@ function redact(text) {
 // ─────────────────────────────────────────────────────────────────────────── processes & windows
 
 const PS = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+/** The ONLY way the runner starts PowerShell: the script as -EncodedCommand (UTF-16LE base64).
+ *  NEVER `-Command -` over stdin: a multi-line script with an Add-Type here-string and while/try
+ *  blocks is silently not executed that way (exit 0, no output). The command line must stay under
+ *  the 32,767-character Windows limit. */
+const PS_MAX_CMDLINE = 32_000;
+function psArgs(script) {
+  const enc = Buffer.from(String(script), 'utf16le').toString('base64');
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', enc];
+  const len = PS.length + args.reduce((n, a) => n + a.length + 3, 0);
+  if (len > PS_MAX_CMDLINE) throw new Error(`PowerShell command line too long (${len} > ${PS_MAX_CMDLINE})`);
+  return args;
+}
+
 const PS_SCAN = (pids) => `
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @"
@@ -361,19 +374,18 @@ class ProcTracker {
   livePids() { return [...this.known.keys()]; }
   async scan() {
     const out = await new Promise((res) => {
-      const c = spawn(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const c = spawn(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       let so = ''; let se = '';
       c.stdout.on('data', (d) => { so += d; });
       c.stderr.on('data', (d) => { se += d; });
       c.on('close', () => res({ so, se }));
       c.on('error', (e) => res({ so: '', se: String(e) }));
-      c.stdin.end(PS_SCAN(this.livePids()));
     });
     return this.ingest(out);
   }
   /** The same scan, synchronously (signal / exit paths). */
   scanSync() {
-    const r = spawnSync(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true, input: PS_SCAN(this.livePids()), encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
     return this.ingest({ so: r.stdout || '', se: r.stderr || String(r.error || '') });
   }
   ingest(out) {
@@ -512,17 +524,17 @@ class WindowWatch {
    *  the watcher cannot see (it stops reporting or reports errors): both abort the run. */
   constructor(rootPid, { onHit, onBlind }) {
     this.rootPid = rootPid; this.onHit = onHit; this.onBlind = onBlind;
-    this.lines = 0; this.lastAt = 0; this.errors = 0; this.hits = []; this.buf = '';
+    this.lines = 0; this.lastAt = 0; this.errors = 0; this.hits = []; this.buf = ''; this.stderr = ''; this.last = null;
   }
   start() {
-    this.child = spawn(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    this.child.stdin.end(PS_WATCH(this.rootPid));
+    this.child = spawn(PS, psArgs(PS_WATCH(this.rootPid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-2000); });
     this.child.stdout.on('data', (d) => {
       this.buf += d;
       let i;
       while ((i = this.buf.indexOf('\n')) >= 0) { const line = this.buf.slice(0, i).trim(); this.buf = this.buf.slice(i + 1); if (line) this.ingest(line); }
     });
-    this.child.on('exit', () => { if (!this.stopped) this.onBlind('the window watcher exited'); });
+    this.child.on('exit', (code) => { if (!this.stopped) this.onBlind(`the window watcher exited (code ${code}; ${this.lines} line(s); stderr: ${this.stderr.trim().slice(-300) || 'none'})`); });
     this.startedAt = Date.now();
     return this;
   }
@@ -530,7 +542,7 @@ class WindowWatch {
   ingest(line) {
     let m;
     try { m = JSON.parse(line); } catch { return; }
-    this.lines++; this.lastAt = Date.now();
+    this.lines++; this.lastAt = Date.now(); this.last = m;
     if (!m.ok) { if (++this.errors >= 3) this.onBlind(`the window watcher keeps failing: ${m.error}`); return; }
     this.errors = 0;
     const hit = [...(m.visible || []).map((v) => `visible window ${v}`), ...(m.browsers || []).map((b) => `browser started by the tree ${b}`), ...(m.alerts || []).map((a) => `crash/UAC dialog process ${a}`)];
@@ -861,7 +873,7 @@ class LiveWatch {
     for (const k of this.keyFiles) { try { snap.keys[k] = shaReadOnly(k); } catch (e) { snap.keys[k] = null; if (e.code !== 'ENOENT') snap.errors.push(`${k}: ${e.message}`); } }
     return snap;
   }
-  start() { this.before = this.snapshot(); return this; }
+  start() { this.before = this.snapshot(); this.takenAt = new Date().toISOString(); return this; }
   /** Compare with the snapshot (names and stat only). `markers` = strings only this run produces. */
   compare(markers) {
     const after = this.snapshot();
@@ -876,8 +888,11 @@ class LiveWatch {
     }
     for (const f of Object.keys(this.before.entries)) if (!after.entries[f]) changed.push({ file: f, kind: 'removed' });
     for (const e of [...this.before.errors, ...after.errors]) failures.push(`cannot stat/hash a live location, so it cannot be shown untouched: ${e}`);
-    const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k] }));
-    return { ok: failures.length === 0, failures, changed, keys };
+    const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k], hashed: this.before.keys[k] !== null }));
+    const hashed = keys.filter((k) => k.hashed).length;
+    if (hashed === 0) failures.push('no key file could be hashed before the run: the check would prove nothing');
+    if (!Object.keys(this.before.entries).length) failures.push('no live entry could be listed before the run: the check would prove nothing');
+    return { ok: failures.length === 0, failures, changed, keys, hashed, entries: Object.keys(this.before.entries).length, takenAt: this.takenAt };
   }
 }
 
@@ -2210,11 +2225,14 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       `| total | ${(this.tokens && this.tokens.total) || 0} | | | |`, '',
       '## Checks', '', ...this.checks.map((c) => `- ${c.ok ? 'PASS' : 'FAIL'} ${c.label}${c.detail ? ` — ${String(c.detail).slice(0, 300)}` : ''}`), '',
       '## Credentials', '', ...(extra.credentials || []).map(cred), '',
-      '## Live locations (before/after)', '', `- ${lw.ok ? 'PASS' : 'FAIL'}: ${lw.failures && lw.failures.length ? lw.failures.join('; ') : 'no change carries a run marker'}`,
-      `- changed during the run (the live floor writes these itself): ${(lw.changed || []).length}; key files unchanged: ${(lw.keys || []).filter((k) => k.same).length}/${(lw.keys || []).length}`, '',
+      '## Live locations (before/after)', '', ...(extra.liveWatch ? [
+        `- ${lw.ok ? 'PASS' : 'FAIL'}: ${lw.failures.length ? lw.failures.join('; ') : 'no new or changed entry carries a run marker'} (before-snapshot ${lw.takenAt}; ${lw.entries} live entries listed; ${lw.hashed} key files hashed)`,
+        ...(json.abort ? [`- NOTE: the run aborted (${json.abort}); this compares the live locations before it started with after its teardown.`] : [])
+      ] : ['- NOT RUN: no before-snapshot exists (the run stopped before --go started it), so nothing is claimed about the live locations.']),
+      ...(extra.liveWatch ? [`- changed during the run (the live floor writes these itself): ${lw.changed.length}; key files unchanged: ${lw.keys.filter((k) => k.hashed && k.same).length}/${lw.hashed} hashed (${lw.keys.length - lw.hashed} absent before the run)`] : []), '',
       '## Warnings', '', ...json.warnings.map((w) => `- ${w}`), '',
       `Windows: ${this.samples.hidden.length} isVisible checks; window-watch hits ${(this.watchHits || []).length}.`,
-      `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base}${this.args.keepSandbox ? ' (kept)' : ' (removed)'}`,
+      `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base} — ${extra.sandboxRemoved ? 'REMOVED' : `KEPT (${extra.survivors && extra.survivors.length ? `no proof that every process exited: ${extra.survivors.join(', ')}` : (this.args.keepSandbox ? '--keep-sandbox' : 'removal failed or never created; see the checks')})`}`,
       `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`, '',
       '## Inconclusive', '', ...(this.inconclusive.length ? this.inconclusive.map((x) => `- ${x}`) : ['- none']), '',
       '## Processes', '', `- surviving (no proof of exit): ${(extra.survivors || []).length ? extra.survivors.join(', ') + ' — the sandbox and the 1.1.74 worktree were KEPT' : 'none'}`, '',
@@ -2235,6 +2253,8 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       log('preflight OK. Nothing was built, launched or written (see the header for --go and its required flags).');
       return 0;
     }
+    // The live before-snapshot FIRST (stat + hash, read-only), so even an early abort compares against it.
+    this.liveWatch = LiveWatch.defaults().start();
     W.allowRoot(s.base);
     W.allowRoot(s.report);
     W.mkdir(s.report);
@@ -2261,7 +2281,6 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
           throw new Error(this.stopReason);
         }
       }
-      this.liveWatch = LiveWatch.defaults().start();
       this.build();
       this.appEnv(liveUserData);
       this.seed();
@@ -2331,7 +2350,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

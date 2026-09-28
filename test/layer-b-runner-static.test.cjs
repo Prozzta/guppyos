@@ -554,9 +554,18 @@ test('the other swallowing catches fail closed: an unreadable live location, an 
   try { r = w.compare(['lb-claude']); } finally { fs.readdirSync = orig; }
   assert.equal(r.ok, false);
   assert.match(r.failures.join(' '), /cannot stat\/hash a live location/);
-  // A MISSING live root (MunderDevData may not exist) is not an error.
-  const w2 = new lb.LiveWatch([path.join(root, 'absent')], [path.join(root, 'absent.json')]).start();
-  assert.equal(w2.compare(['x']).ok, true);
+  // A MISSING live root (MunderDevData may not exist) is not an error by itself ...
+  fs.writeFileSync(path.join(root, 'key.json'), '{}');
+  const w2 = new lb.LiveWatch([path.join(root, 'absent'), root], [path.join(root, 'absent.json'), path.join(root, 'key.json')]).start();
+  const r2 = w2.compare(['x']);
+  assert.equal(r2.ok, true, JSON.stringify(r2.failures));
+  assert.deepEqual([r2.hashed, r2.keys.length], [1, 2]);
+  // ... but ZERO hashed key files or ZERO listed entries can never pass (round 6: "0/0" was ambiguous).
+  const w3 = new lb.LiveWatch([path.join(root, 'absent')], [path.join(root, 'absent.json')]).start();
+  const r3 = w3.compare(['x']);
+  assert.equal(r3.ok, false);
+  assert.match(r3.failures.join(' '), /no key file could be hashed before the run/);
+  assert.match(r3.failures.join(' '), /no live entry could be listed before the run/);
   // The real credential unreadable at the end: FAIL, never "inconclusive" or "unchanged".
   const c = new lb.Credentials();
   const realF = path.join(root, 'real.json');
@@ -630,6 +639,30 @@ test('god 1a3c97 catch sweep (runner): listing, reading, monitoring and cleanup 
   assert.match(td, /this\.check\(sandboxRemoved, 'the sandbox was removed'/);
   assert.match(src, /this\.check\(skipped\.length === 0, 'every evidence file was copied'/);
   assert.match(src, /jailRefreshed === true && \(jailMtime === null \|\| Math\.abs/, 'an unknown jail refresh time cannot rule out correlation');
+});
+
+test('round 6: every PowerShell start is -EncodedCommand (never -Command - over stdin); the live before-snapshot comes first; the report states what happened', () => {
+  const psCalls = calls((n) => /^(spawn|spawnSync)$/.test(n.expression.getText(sf)) && n.arguments[0] && n.arguments[0].getText(sf) === 'PS');
+  assert.ok(psCalls.length >= 3, `PowerShell starts found: ${psCalls.length}`);
+  for (const c of psCalls) {
+    assert.match(c.arguments[1].getText(sf), /^psArgs\(/, `line ${line(c)} builds its arguments with psArgs`);
+    assert.ok(!/stdin|input:/.test(c.getText(sf)), `line ${line(c)} feeds nothing on stdin`);
+  }
+  assert.ok(!/'-Command'/.test(src), 'no -Command anywhere in the runner');
+  const hook = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-jail-hook.cjs'), 'utf8');
+  assert.ok(!/powershell|'-Command'/i.test(hook.replace(/PowerShell[,']/g, '')), 'the hook starts no PowerShell');
+  // The before-snapshot is the first thing a --go run does, before the session watch and everything else.
+  const main = src.slice(src.indexOf('async main() {'));
+  const snap = main.indexOf('this.liveWatch = LiveWatch.defaults().start();');
+  assert.ok(snap > main.indexOf('return 0;') && snap < main.indexOf('W.allowRoot(s.base)') && snap < main.indexOf('new WindowWatch(process.pid'));
+  assert.equal((main.match(/LiveWatch\.defaults\(\)\.start\(\)/g) || []).length, 1);
+  // Report wording: the live section and the sandbox line say what actually happened.
+  const rep = src.slice(src.indexOf('  report(extra) {'), src.indexOf('  async main() {'));
+  assert.match(rep, /NOT RUN: no before-snapshot exists/);
+  assert.match(rep, /the run aborted \(\$\{json\.abort\}\); this compares the live locations before it started/);
+  assert.match(rep, /key files unchanged: \$\{lw\.keys\.filter\(\(k\) => k\.hashed && k\.same\)\.length\}\/\$\{lw\.hashed\} hashed/);
+  assert.match(rep, /\$\{extra\.sandboxRemoved \? 'REMOVED' : `KEPT \(/);
+  assert.ok(!/' \(removed\)'|' \(kept\)'/.test(rep), 'no fixed "(removed)" wording any more');
 });
 
 test('B6 tier 1: the token-delta verdict (FAIL >= 50% of the earlier blocks, PASS < 10%, NOT-PROVEN between)', () => {
