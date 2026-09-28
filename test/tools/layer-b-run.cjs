@@ -13,37 +13,79 @@
  *
  * HOW IT STAYS SAFE (every point is enforced in code below, not only described):
  *  - The PACKAGED app runs under MUNDER_DEV=1 + MUNDER_HIDDEN=1 + MUNDER_DEV_ROOT=<fresh temp
- *    sandbox>: never C:\Dunder\hive, never C:\Dunder\MunderDevData, never the live userData. The
- *    root and its pipe are validated with the product's own devIsolation.ts BEFORE launch, and read
- *    back from the running app (main-process inspector) AFTER launch.
- *  - No window ever: the window is built show:false and MUNDER_HIDDEN skips every show/focus; the
- *    runner asserts BrowserWindow.isVisible() === false over the main-process inspector AND scans
- *    the OS for any visible top-level window owned by a process it started, at launch and every
- *    few seconds after. Any visible window ABORTS the run.
+ *    sandbox>, built with MUNDER_LAYERB_SEAMS=1 (a normal build compiles the seams out). Never
+ *    C:\Dunder\hive, never C:\Dunder\MunderDevData, never the live userData. The root and its pipe
+ *    are validated with the product's own devIsolation.ts BEFORE launch and read back from the
+ *    running app AFTER launch (userData, packaged, the pipe= bootstrap line: a missing line FAILS).
+ *  - THE AGENTS ARE CONFINED (Jim R1, god c0a73f):
+ *    - Codex: --sandbox workspace-write --ask-for-approval never, writable roots = its own work dir
+ *      and its own hive agent dir (the jail) only, no network for commands, the unelevated Windows
+ *      sandbox (seeded through the jailed ~/.codex/config.toml the product copies per agent). This
+ *      REPLACES the product's auto-mode flag (--dangerously-bypass-approvals-and-sandbox): a Codex
+ *      agent without auto mode is a supported product configuration, and nothing B5-B7 test (the
+ *      Route A hook context, retention, compaction) depends on the command sandbox.
+ *    - Claude: the product's arguments are UNCHANGED (--permission-mode bypassPermissions). The
+ *      jailed ~/.claude/settings.json adds permissions.deny rules for the live paths AND a
+ *      PreToolUse hook (test/tools/layer-b-jail-hook.cjs) that denies any write outside the jail,
+ *      any read outside the sandbox and risky shell forms. Claude's docs: deny rules and a hook deny
+ *      apply in every permission mode, bypassPermissions included; user and --settings hooks both run.
+ *    - Zero-token proofs before any agent starts (dry and real run): the installed hook command is
+ *      fed payloads targeting C:\Dunder\hive and the real ~/.claude and must deny; the real codex
+ *      binary's own sandbox runner (codex sandbox windows) runs a probe that tries to write markers
+ *      into C:\Dunder\hive, the real ~/.codex and ~/.claude: refused, markers never appear, and a
+ *      write inside the jail succeeds (positive control).
+ *    - After the run (dry and real): the live hive, MunderDevData, the real ~/.claude, ~/.codex and
+ *      the live userData are compared with a snapshot taken before (top-level mtime/size, key-file
+ *      SHA-256): a change carrying a run marker FAILS; the real credential files must be
+ *      byte-identical (SHA-256 + mtime + size).
+ *  - No window ever: MUNDER_HIDDEN skips every show/focus. From the moment the app process exists, a
+ *    hidden PowerShell watcher enumerates the top-level windows of the app's whole process tree
+ *    every 1.5 s, and flags any browser the tree starts, any WerFault or consent.exe (UAC) that
+ *    appears: any hit ABORTS. On top, BrowserWindow.isVisible() over the main-process inspector.
  *  - The app's ENTIRE env comes from test/mail-rig/isolation.cjs rigEnv (an allowlist): HOME,
  *    USERPROFILE, APPDATA, LOCALAPPDATA, TEMP, CODEX_HOME, GEMINI_CLI_HOME are jailed; PATH holds
  *    only the real claude + codex binary dir(s), the Git cmd dir (Claude Code on Windows needs Git
  *    Bash; omit with --no-git-path), the node-only dir and the system dirs. Fail-fast on any
  *    secret-shaped variable, any foreign PATH dir, any other provider CLI resolvable, any env value
- *    naming a live path.
+ *    naming a live path. CDP and the main inspector listen on random loopback ports (UNAUTHENTICATED
+ *    while the app holds the jailed logins: the report says so).
  *  - Credentials: each CLI gets ONLY its login credential, COPIED (never moved) from the real file
- *    opened READ-ONLY, into the jail. Nothing else (settings, history, projects) is copied; the few
- *    first-run keys Claude needs are SYNTHESISED. The copies are deleted in `finally`, on every
- *    signal and on process exit; the real files' mtime and size are asserted unchanged.
- *  - Every write/remove the runner does goes through `W` (below), which refuses any path outside
- *    the run's own sandbox / report dir / 1.1.74 build worktree, and any path in a live location.
- *  - Caps: 400k tokens per agent (cache reads included), 1M total, 30 min wall-clock — polled
- *    every few seconds from the sandbox cost ledger AND the CLIs' own transcripts/rollouts (the
- *    larger count wins); any hit ABORTS and the report says what was proven. The sandbox config
- *    also turns the breaker ON with hard stop, the floor token cap and per-agent token caps.
- *  - Every process started is killed by exact PID (the recorded tree), deepest first.
+ *    opened READ-ONLY, into the jail ($CODEX_HOME honoured for the Codex source). Nothing else is
+ *    copied; the few first-run keys Claude needs are SYNTHESISED. The copies are securely deleted
+ *    (overwritten, then removed) in finally, on every signal and on exit, AFTER every process is
+ *    killed. The report states whether a token refresh happened (the jailed copy's SHA-256 before
+ *    and after). A startup sweep securely removes credentials left by an earlier killed run.
+ *  - Every write/remove the runner does goes through W (below), which refuses any path outside the
+ *    run's own roots and any live location. WRITES OUTSIDE W, accounted for:
+ *      - npm run build: out/ in this worktree (rebuilt WITHOUT the seams when the run ends);
+ *      - electron-builder: dist/ in this worktree; its caches point INTO the sandbox
+ *        (ELECTRON_BUILDER_CACHE, ELECTRON_CACHE, npm_config_cache; seeded by copying the user's
+ *        winCodeSign cache read-only) and Electron comes from node_modules/electron/dist;
+ *      - git: the shared .git (worktree metadata + the seam cherry-picks as dangling commits);
+ *      - the 1.1.74 worktree %TEMP%\md-layerb-v1174 (source + a node_modules COPY): removed at the
+ *        end, node_modules first, then git worktree remove WITHOUT --force (--keep-v1174 keeps it);
+ *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>;
+ *      - the app and the CLIs themselves: the sandbox (jail, devroot) only.
+ *    The build env is scrubbed of every secret-shaped variable (GH_TOKEN, CSC_*, NPM tokens ...).
+ *  - Load: --go requires LAYERB_SOAK=1 on the invoking command line, which the floor's HEAVY-JOB
+ *    lock classifies as a heavy "bench" job (heavyJob.ts BENCH_ENV): one heavy job at a time, held
+ *    for the whole run. Global wall-clock cap 55 min (build included, under the lock's 60 min TTL);
+ *    build steps 20 min in total.
+ *  - Caps: 400k tokens per agent (cache reads included), 1M total, 30 min wall-clock for the agent
+ *    phase — polled every few seconds from the sandbox cost ledger AND the CLIs' own
+ *    transcripts/rollouts (the larger count wins); any hit ABORTS and the report says what was
+ *    proven. The sandbox config also turns the breaker ON with hard stop and the token caps.
+ *  - Every process started is killed by exact PID (pid + creation time, deepest first). A failed
+ *    process scan is a FAILURE, and falls back to taskkill /T on the roots whose handle is still
+ *    open (so the pid cannot have been reused). Emergency order: kill, then credentials, then sandbox.
+ *  - Evidence copies are redacted (token-shaped strings, auth headers).
  *
  * USAGE (never without god's OK: it builds and LAUNCHES the app):
- *   node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 \
+ *   LAYERB_SOAK=1 node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 \
  *     node test/tools/layer-b-run.cjs --dry-run-stubs --go        # plumbing, zero tokens
- *   ... node test/tools/layer-b-run.cjs --go                       # the real run
- * Without --go it only prints the plan and runs the static preflight (no build, no launch).
- * Options: --skip-build (reuse dist/), --no-rollback, --keep-sandbox, --no-git-path,
+ *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go         # the real run
+ * Without --go it only runs the static preflight (no build, no launch, nothing written).
+ * Options: --skip-build (reuse dist/), --no-rollback, --keep-sandbox, --keep-v1174, --no-git-path,
  *   --claude-model <id>, --codex-model <id>, --v1174-dir <dir>, --report-dir <dir>.
  * Exit 0 = every asserted fact PASS (dry run: every plumbing check PASS).
  */
@@ -61,6 +103,13 @@ const isolation = require(path.join(REPO, 'test', 'mail-rig', 'isolation.cjs'));
 
 const V1174_SHA = 'b5e22e0b';
 const CAPS = { perAgentTokens: 400_000, totalTokens: 1_000_000, wallMs: 30 * 60_000 };
+/** R5: the whole run (build included) fits under the floor heavy-job lock's 60 min TTL. */
+const GLOBAL_WALL_MS = 55 * 60_000;
+const BUILD_WALL_MS = 20 * 60_000;
+/** The floor heavy-job lock's opt-in bench gate (src/main/heavyJob.ts BENCH_ENV). */
+const HEAVY_GATE = 'LAYERB_SOAK';
+const STALE_PREFIX = /^md-layerb-\d{4}-\d{2}-\d{2}T/;
+const CREDENTIAL_NAMES = ['.credentials.json', 'auth.json'];
 /** Rough per-fact token estimates; a fact is skipped (NOT-PROVEN, "budget") when it cannot fit. */
 const FACT_EST = { B1: 40_000, B2: 70_000, B4: 45_000, B3: 190_000, B5: 45_000, B6: 150_000, B7: 160_000 };
 const DEFAULT_MODELS = { claude: 'claude-haiku-4-5-20251001', codex: 'gpt-5.6-luna' };
@@ -82,7 +131,7 @@ const inside = (child, parent) => { const r = path.relative(norm(parent), norm(c
 // ─────────────────────────────────────────────────────────────────────────── args
 
 function parseArgs(argv) {
-  const a = { dryRun: false, go: false, skipBuild: false, rollback: true, keepSandbox: false, gitPath: true,
+  const a = { dryRun: false, go: false, skipBuild: false, rollback: true, keepSandbox: false, keepV1174: false, gitPath: true,
     models: { ...DEFAULT_MODELS }, v1174Dir: null, reportDir: null };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -91,6 +140,7 @@ function parseArgs(argv) {
     else if (k === '--skip-build') a.skipBuild = true;
     else if (k === '--no-rollback') a.rollback = false;
     else if (k === '--keep-sandbox') a.keepSandbox = true;
+    else if (k === '--keep-v1174') a.keepV1174 = true;
     else if (k === '--no-git-path') a.gitPath = false;
     else if (k === '--claude-model') a.models.claude = argv[++i];
     else if (k === '--codex-model') a.models.codex = argv[++i];
@@ -141,6 +191,33 @@ const W = {
   writeJsonAtomic(p, v) { const tmp = `${p}.${process.pid}.tmp`; W.write(tmp, JSON.stringify(v, null, 2)); fs.renameSync(W.check(tmp), W.check(p)); },
   rm(p) { fs.rmSync(W.check(p), { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); },
   copy(from, to) { W.mkdir(path.dirname(to)); fs.copyFileSync(from, W.check(to)); },
+  /** Overwrite a file's bytes (random, then zeros), flush, then remove it: a credential copy leaves
+   *  no plaintext in the file we can reach. */
+  shred(p) {
+    const r = W.check(p);
+    let st = null;
+    try { st = fs.lstatSync(r); } catch { return false; }
+    if (!st.isFile()) { W.rm(r); return !fs.existsSync(r); }
+    if (st.size > 0) {
+      const fd = fs.openSync(r, 'r+');
+      try {
+        fs.writeSync(fd, crypto.randomBytes(st.size), 0, st.size, 0);
+        fs.writeSync(fd, Buffer.alloc(st.size), 0, st.size, 0);
+        fs.fsyncSync(fd);
+      } finally { fs.closeSync(fd); }
+    }
+    fs.rmSync(r, { force: true });
+    return !fs.existsSync(r);
+  },
+  /** THE ONE EXCEPTION to "never touch a live location": remove a codex-sandbox probe marker the
+   *  sandbox FAILED to refuse. Only an exact small file whose name is this run's unique marker. */
+  removeProbeMarker(p, marker) {
+    const r = path.resolve(p);
+    if (path.basename(r) !== marker || !/^md-layerb-probe-[0-9a-f]{16}\.txt$/.test(marker)) throw new Error(`[layer-b] REFUSED marker removal: ${r}`);
+    const st = fs.lstatSync(r);
+    if (!st.isFile() || st.size > 4096) throw new Error(`[layer-b] REFUSED marker removal (not a small file): ${r}`);
+    fs.rmSync(r);
+  },
   /** A COPY of a tree (never a junction or link): node_modules for the 1.1.74 build. */
   copyTree(from, to) { W.check(to); fs.cpSync(from, to, { recursive: true, verbatimSymlinks: true, errorOnExist: false, force: true }); }
 };
@@ -180,22 +257,47 @@ function whichOn(pathStr, name) {
 }
 const parentPath = () => { const k = Object.keys(process.env).find((x) => x.toLowerCase() === 'path'); return k ? process.env[k] : ''; };
 
-/** Scrubbed env for the build tools (npm / electron-builder): like run-clean-realhome. */
-function buildEnv() {
-  const BAD = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
+/** Build-tool env (npm / electron-builder): hive/agent/Claude identity removed as in
+ *  run-clean-realhome, EVERY secret-shaped variable removed (GH_TOKEN, CSC_*, NPM tokens, ...: R6),
+ *  the caches pointed into the run's own cache dir, and MUNDER_LAYERB_SEAMS=1 so the bundle carries
+ *  the hidden/root seams (only this build; a normal build compiles them out). */
+function buildEnv(cacheDir, { seams = true, parent = process.env } = {}) {
+  const BAD = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE|CSC_|WIN_CSC_|APPLE_|GH_|GITHUB_|NPM_|NODE_AUTH|ELECTRON_BUILDER_|ELECTRON_CACHE|npm_config_)/i;
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) if (!BAD.test(k)) env[k] = v;
+  for (const [k, v] of Object.entries(parent)) if (!BAD.test(k) && !isolation.SECRET_NAME.test(k)) env[k] = v;
   const pk = Object.keys(env).find((k) => k.toLowerCase() === 'path') || 'Path';
   const parts = String(env[pk] || '').split(';').filter((p) => p && !/dunder\\hive|munderdevdata/i.test(p));
   for (const k of Object.keys(env)) if (k.toLowerCase() === 'path') delete env[k];
   env.Path = parts.join(';');
+  if (cacheDir) {
+    env.ELECTRON_BUILDER_CACHE = path.join(cacheDir, 'electron-builder');
+    env.ELECTRON_CACHE = path.join(cacheDir, 'electron');
+    env.npm_config_cache = path.join(cacheDir, 'npm');
+  }
+  if (seams) env.MUNDER_LAYERB_SEAMS = '1';
   return env;
 }
 
-function run(cmd, args, cwd, label, { env = buildEnv(), timeoutMs = 20 * 60_000 } = {}) {
+/** One build step, bounded by what is left of the build budget. */
+function run(cmd, args, cwd, label, { env, deadline = Date.now() + BUILD_WALL_MS } = {}) {
+  if (!env) throw new Error('run() needs an explicit env');
+  const left = deadline - Date.now();
+  if (left <= 0) throw new Error(`${label}: the build budget (${BUILD_WALL_MS / 60000} min) is spent`);
   log(`${label}: ${cmd} ${args.join(' ')}  (in ${cwd})`);
-  const r = spawnSync(cmd, args, { cwd, env, stdio: 'inherit', windowsHide: true, shell: /\.(cmd|bat)$/i.test(cmd), timeout: timeoutMs });
+  const r = spawnSync(cmd, args, { cwd, env, stdio: 'inherit', windowsHide: true, shell: /\.(cmd|bat)$/i.test(cmd), timeout: left });
   if (r.error || r.status !== 0) throw new Error(`${label} failed (${r.error ? r.error.message : `exit ${r.status}`})`);
+}
+
+/** Replace token-shaped strings before anything is copied into the report (R9). */
+function redact(text) {
+  return String(text)
+    .replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED]')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[REDACTED-JWT]')
+    .replace(/("?(?:access|refresh|id)_?[tT]oken"?\s*[:=]\s*)"[^"]*"/g, '$1"[REDACTED]"')
+    .replace(/("?(?:accessToken|refreshToken|idToken|api_?key|apiKey|OPENAI_API_KEY|ANTHROPIC_API_KEY)"?\s*[:=]\s*)"[^"]*"/gi, '$1"[REDACTED]"')
+    .replace(/(authorization\s*[:=]\s*"?(?:bearer|basic)\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]')
+    .replace(/(x-api-key\s*[:=]\s*"?)[A-Za-z0-9._-]+/gi, '$1[REDACTED]');
 }
 
 // ─────────────────────────────────────────────────────────────────────────── processes & windows
@@ -228,8 +330,10 @@ $vis = [LbWin]::Visible([uint32[]]@(${pids.length ? pids.join(',') : '0'}))
 /** Every process this run started, and every descendant ever seen, keyed by pid + creation time
  *  (so a reused pid is never mistaken for ours). Kill is by EXACT pid, deepest first. */
 class ProcTracker {
-  constructor() { this.known = new Map(); this.visibleHits = []; this.scans = 0; }
-  addRoot(pid) { this.known.set(pid, { pid, created: null, name: 'root', depth: 0 }); }
+  constructor() { this.known = new Map(); this.visibleHits = []; this.scans = 0; this.handles = new Map(); }
+  /** A process this run spawned. Its ChildProcess handle is kept: while it has not exited, Windows
+   *  cannot reuse its pid, so it is a safe kill target even when a scan fails. */
+  addRoot(pid, child = null) { this.known.set(pid, { pid, created: null, name: 'root', depth: 0 }); if (child) this.handles.set(pid, child); }
   livePids() { return [...this.known.keys()]; }
   async scan() {
     const out = await new Promise((res) => {
@@ -277,25 +381,41 @@ class ProcTracker {
     if (visible.length) this.visibleHits.push({ at: new Date().toISOString(), visible });
     return { visible, procs };
   }
-  /** Kill every known process that is still the same process, deepest first. */
+  /** Kill every known process that is still the same process, deepest first. A failed scan is a
+   *  FAILURE (R3): nothing can be identity-checked, so only the roots whose handle is still open are
+   *  killed, with their whole tree (taskkill /T), and the result says ok:false. */
   async killAll() {
-    let snap;
-    try { snap = await this.scan(); } catch { snap = { procs: [] }; }
+    let snap = null;
+    let scanError = null;
+    try { snap = await this.scan(); } catch (e) { scanError = e.message; }
+    if (!snap) return this.killRootsByHandle(scanError);
+    if (this.known.size && !snap.procs.length) return this.killRootsByHandle('the process scan returned no processes');
     const alive = new Map(snap.procs.map((p) => [p.pid, p]));
     const same = (k) => alive.has(k.pid) && (k.created === null ? /munder difflin/i.test(alive.get(k.pid).name) : alive.get(k.pid).created === k.created);
-    const ours = [...this.known.values()].filter(same)
-      .sort((a, b) => b.depth - a.depth);
+    const ours = [...this.known.values()].filter(same).sort((a, b) => b.depth - a.depth);
     for (const k of ours) spawnSync('taskkill', ['/F', '/PID', String(k.pid)], { windowsHide: true, stdio: 'ignore' });
     await sleep(1500);
-    let after;
-    try { after = await this.scan(); } catch { after = { procs: [] }; }
+    let after = null;
+    try { after = await this.scan(); } catch (e) { scanError = e.message; }
+    if (!after || !after.procs.length) return { ...this.killRootsByHandle(`the post-kill scan failed: ${scanError || 'no processes'}`), killed: ours.map((k) => `${k.pid}:${k.name}`) };
     const still = after.procs.filter((p) => { const k = this.known.get(p.pid); return k && (k.created === null ? /munder difflin/i.test(p.name) : k.created === p.created); });
-    return { killed: ours.map((k) => `${k.pid}:${k.name}`), survivors: still.map((p) => `${p.pid}:${p.name}`) };
+    return { ok: still.length === 0, scanFailed: false, killed: ours.map((k) => `${k.pid}:${k.name}`), survivors: still.map((p) => `${p.pid}:${p.name}`) };
+  }
+  /** The fallback when no scan can prove identity: taskkill /T /F on every root whose ChildProcess
+   *  handle has not seen an exit (so its pid cannot have been reused). Always ok:false. */
+  killRootsByHandle(why) {
+    const fallback = [];
+    for (const [pid, child] of this.handles) {
+      if (child.exitCode !== null || child.signalCode !== null) continue;
+      spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore', timeout: 15_000 });
+      fallback.push(pid);
+    }
+    return { ok: false, scanFailed: true, why, killed: [], fallback, survivors: [`UNKNOWN (${why})`] };
   }
   /** Synchronous last resort (signals, crashes): the same identity-checked kill, no event loop. */
   killSyncBestEffort() {
     let snap;
-    try { snap = this.scanSync(); } catch { return; }   // no identity proof: kill nothing rather than a stranger
+    try { snap = this.scanSync(); } catch { this.killRootsByHandle('emergency scan failed'); return; }   // no identity proof: only the open-handle roots
     const alive = new Map(snap.procs.map((p) => [p.pid, p]));
     for (const k of [...this.known.values()].sort((a, b) => b.depth - a.depth)) {
       const a = alive.get(k.pid);
@@ -303,6 +423,143 @@ class ProcTracker {
       try { spawnSync('taskkill', ['/F', '/PID', String(k.pid)], { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch { /* gone */ }
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────── the window watcher
+
+/**
+ * R8 (Jim) + god c0a73f: the visibility watch starts WITH the process, not once CDP is up. One
+ * hidden PowerShell runs for the life of each launch: every 1.5 s it walks the process tree under
+ * the root pid (Win32_Process), enumerates the visible top-level windows of that tree (EnumWindows /
+ * IsWindowVisible), and reports any browser the tree started and any WerFault / consent.exe (UAC)
+ * that appeared after it began (those are started by a service, outside the tree). Each line is JSON.
+ */
+const PS_WATCH = (rootPid) => `
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class LbWatch {
+  public delegate bool P(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(P f, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  public static string[] Visible(uint[] pids) {
+    var set = new HashSet<uint>(pids); var o = new List<string>();
+    EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p);
+      if (set.Contains(p) && IsWindowVisible(h)) { var sb = new StringBuilder(256); GetWindowText(h, sb, 256); o.Add(p + ":" + sb.ToString()); }
+      return true; }, IntPtr.Zero);
+    return o.ToArray();
+  }
+}
+"@
+$root = ${Number(rootPid)}
+$since = (Get-Date).ToUniversalTime()
+$browsers = '^(chrome|msedge|firefox|brave|opera|iexplore|msedgewebview2)\\.exe$'
+$alerts = '^(WerFault|WerFaultSecure|consent)\\.exe$'
+while ($true) {
+  try {
+    $all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CreationDate)
+    $kids = @{}; foreach ($p in $all) { $k = [int]$p.ParentProcessId; if (-not $kids.ContainsKey($k)) { $kids[$k] = @() }; $kids[$k] += $p }
+    $tree = New-Object System.Collections.Generic.List[uint32]; $queue = New-Object System.Collections.Queue; $queue.Enqueue([int]$root)
+    $names = @{}
+    while ($queue.Count) { $x = $queue.Dequeue(); if ($tree.Contains([uint32]$x)) { continue }; $tree.Add([uint32]$x); if ($kids.ContainsKey($x)) { foreach ($c in $kids[$x]) { $names[[int]$c.ProcessId] = $c.Name; $queue.Enqueue([int]$c.ProcessId) } } }
+    $vis = [LbWatch]::Visible($tree.ToArray())
+    $br = @($names.GetEnumerator() | Where-Object { $_.Value -match $browsers } | ForEach-Object { "$($_.Key):$($_.Value)" })
+    $al = @($all | Where-Object { $_.Name -match $alerts -and $_.CreationDate -and $_.CreationDate.ToUniversalTime() -gt $since } | ForEach-Object { "$($_.ProcessId):$($_.Name)" })
+    @{ ok = $true; tree = $tree.Count; visible = @($vis); browsers = $br; alerts = $al } | ConvertTo-Json -Compress
+  } catch {
+    @{ ok = $false; error = "$_" } | ConvertTo-Json -Compress
+  }
+  Start-Sleep -Milliseconds 1500
+}
+`;
+
+class WindowWatch {
+  /** `onHit(reason)` is called for any visible window, browser or alert; `onBlind(reason)` when
+   *  the watcher cannot see (it stops reporting or reports errors): both abort the run. */
+  constructor(rootPid, { onHit, onBlind }) {
+    this.rootPid = rootPid; this.onHit = onHit; this.onBlind = onBlind;
+    this.lines = 0; this.lastAt = 0; this.errors = 0; this.hits = []; this.buf = '';
+  }
+  start() {
+    this.child = spawn(PS, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.child.stdin.end(PS_WATCH(this.rootPid));
+    this.child.stdout.on('data', (d) => {
+      this.buf += d;
+      let i;
+      while ((i = this.buf.indexOf('\n')) >= 0) { const line = this.buf.slice(0, i).trim(); this.buf = this.buf.slice(i + 1); if (line) this.ingest(line); }
+    });
+    this.child.on('exit', () => { if (!this.stopped) this.onBlind('the window watcher exited'); });
+    this.startedAt = Date.now();
+    return this;
+  }
+  /** One JSON line from the watcher (exported logic: the static test feeds it). */
+  ingest(line) {
+    let m;
+    try { m = JSON.parse(line); } catch { return; }
+    this.lines++; this.lastAt = Date.now();
+    if (!m.ok) { if (++this.errors >= 3) this.onBlind(`the window watcher keeps failing: ${m.error}`); return; }
+    this.errors = 0;
+    const hit = [...(m.visible || []).map((v) => `visible window ${v}`), ...(m.browsers || []).map((b) => `browser started by the tree ${b}`), ...(m.alerts || []).map((a) => `crash/UAC dialog process ${a}`)];
+    if (hit.length) { this.hits.push({ at: new Date().toISOString(), hit }); this.onHit(hit.join('; ')); }
+  }
+  /** Seen at least one good line, and not silent for too long. */
+  healthy(now = Date.now()) { return this.lines > 0 && now - this.lastAt < 15_000; }
+  stop() {
+    this.stopped = true;
+    if (this.child && this.child.exitCode === null) spawnSync('taskkill', ['/T', '/F', '/PID', String(this.child.pid)], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────── agent confinement
+
+const JAIL_HOOK = path.join(__dirname, 'layer-b-jail-hook.cjs');
+const JAIL_PROTECT = ['.claude', '.codex', '.claude.json', '.credentials.json', 'auth.json', 'settings.json', 'settings.local.json', 'layer-b-jail-policy.json'];
+/** Windows path -> Claude's POSIX rule form: C:\Dunder\hive -> //c/Dunder/hive (docs: permissions). */
+const claudeRulePath = (p) => '//' + path.resolve(p).replace(/^([A-Za-z]):/, (_, d) => d.toLowerCase()).replace(/\\/g, '/');
+
+/** The jailed ~/.claude/settings.json: the first-run keys, the deny rules and the jail hook. */
+function claudeJailSettings({ node, policyFile, liveDenied, env }) {
+  const deny = [];
+  for (const p of liveDenied) for (const tool of ['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']) deny.push(`${tool}(${claudeRulePath(p)}/**)`, `${tool}(${claudeRulePath(p)})`);
+  deny.push('WebFetch', 'WebSearch');
+  const q = (s) => `"${String(s).replace(/\\/g, '/')}"`;
+  return {
+    skipDangerousModePermissionPrompt: true,
+    skipAutoPermissionPrompt: true,
+    permissions: { deny },
+    hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `${q(node)} ${q(JAIL_HOOK)} ${q(policyFile)}`, timeout: 30 }] }] },
+    ...(env ? { env } : {})
+  };
+}
+
+/** The jailed ~/.codex/config.toml the product seeds each Codex agent's home from: workspace-write,
+ *  writable roots = the jail only, no command network, the UNELEVATED Windows sandbox (no setup,
+ *  no UAC). TOML literal strings: Windows paths need no escaping. */
+function codexSandboxToml(writableRoots) {
+  return [
+    'sandbox_mode = "workspace-write"',
+    'approval_policy = "never"',
+    '',
+    '[sandbox_workspace_write]',
+    `writable_roots = [${writableRoots.map((r) => `'${path.resolve(r)}'`).join(', ')}]`,
+    'network_access = false',
+    '',
+    '[windows]',
+    'sandbox = "unelevated"',
+    ''
+  ].join('\n');
+}
+
+/** The vendor codex.exe next to the npm shim (so the probe needs no cmd.exe quoting). */
+function codexExe(shimPath) {
+  const base = path.dirname(shimPath);
+  const cands = [
+    path.join(base, 'node_modules', '@openai', 'codex', 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'),
+    path.join(base, 'node_modules', '@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe')
+  ];
+  return cands.find((c) => fs.existsSync(c)) || null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── CDP
@@ -399,10 +656,21 @@ setInterval(function () {}, 1 << 30);
 // ─────────────────────────────────────────────────────────────────────────── credentials
 
 /** Real credential files, READ ONLY. Claude Code keeps its login in ~/.claude/.credentials.json on
- *  Windows/Linux (Keychain on macOS); Codex in $CODEX_HOME/auth.json, default ~/.codex/auth.json. */
-function realCredentialPaths() {
+ *  Windows/Linux (Keychain on macOS); Codex in $CODEX_HOME/auth.json, default ~/.codex/auth.json
+ *  (R10: $CODEX_HOME honoured; one that points into a live hive or MunderDevData is refused: start
+ *  the runner from a clean shell). */
+function realCredentialPaths(env = process.env) {
   const home = os.homedir();
-  return { claude: path.join(home, '.claude', '.credentials.json'), codex: path.join(home, '.codex', 'auth.json') };
+  const codexHome = env.CODEX_HOME && env.CODEX_HOME.trim() ? path.resolve(env.CODEX_HOME.trim()) : path.join(home, '.codex');
+  if (inside(codexHome, LIVE.hive) || inside(codexHome, LIVE.devData)) throw new Error(`CODEX_HOME points into a live hive (${codexHome}): run from a clean shell`);
+  return { claude: path.join(home, '.claude', '.credentials.json'), codex: path.join(codexHome, 'auth.json') };
+}
+
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+/** SHA-256 of a file opened READ-ONLY (never through W: this reads a real/live file). */
+function shaReadOnly(p) {
+  const fd = fs.openSync(p, 'r');
+  try { const b = fs.readFileSync(fd); const h = sha256(b); b.fill(0); return h; } finally { fs.closeSync(fd); }
 }
 
 class Credentials {
@@ -416,27 +684,124 @@ class Credentials {
     try { buf = fs.readFileSync(fd); } finally { fs.closeSync(fd); }
     W.mkdir(path.dirname(dest));
     W.write(dest, buf, { mode: 0o600, flag: 'wx' });
-    this.copies.push({ label, real, dest, mtimeMs: before.mtimeMs, size: before.size, sha: crypto.createHash('sha256').update(buf).digest('hex') });
+    const sha = sha256(buf);
+    this.copies.push({ label, real, dest, mtimeMs: before.mtimeMs, size: before.size, realSha: sha, jailSha: sha });
     buf.fill(0);
   }
-  /** Synchronous, idempotent: safe from finally, signal handlers and process 'exit'. */
+  /** Synchronous, idempotent: safe from finally, signal handlers and process 'exit'. Records whether
+   *  the CLI refreshed its token in the jail (R2: the copy's SHA-256 at copy time vs now), then
+   *  SHREDS the copy. */
   deleteAll() {
     const out = [];
     for (const c of this.copies) {
-      let changedInJail = null;
-      try { if (fs.existsSync(c.dest)) changedInJail = crypto.createHash('sha256').update(fs.readFileSync(c.dest)).digest('hex') !== c.sha; } catch { /* unreadable */ }
-      try { fs.rmSync(W.check(c.dest), { force: true }); } catch (e) { out.push({ label: c.label, deleted: false, error: e.message }); continue; }
-      out.push({ label: c.label, deleted: !fs.existsSync(c.dest), changedInJail });
+      if (c.done) { out.push(c.done); continue; }
+      let refreshed = null;
+      try { if (fs.existsSync(c.dest)) refreshed = sha256(fs.readFileSync(c.dest)) !== c.jailSha; } catch { /* unreadable */ }
+      let deleted = false;
+      try { deleted = W.shred(c.dest); } catch (e) { out.push({ label: c.label, deleted: false, error: e.message, tokenRefreshed: refreshed }); continue; }
+      c.done = { label: c.label, deleted: deleted && !fs.existsSync(c.dest), tokenRefreshed: refreshed };
+      out.push(c.done);
     }
     return out;
   }
-  /** The real files must be exactly as they were (mtime + size). */
+  /** The real files must be exactly as they were: SHA-256 (read-only) AND mtime AND size (Dwight). */
   verifyRealUnchanged() {
     return this.copies.map((c) => {
-      let st = null;
-      try { st = fs.statSync(c.real); } catch { /* vanished */ }
-      return { label: c.label, real: c.real, unchanged: !!st && st.mtimeMs === c.mtimeMs && st.size === c.size };
+      let st = null; let sha = null;
+      try { st = fs.statSync(c.real); sha = shaReadOnly(c.real); } catch { /* vanished */ }
+      const mtimeSame = !!st && st.mtimeMs === c.mtimeMs;
+      const sizeSame = !!st && st.size === c.size;
+      const shaSame = sha === c.realSha;
+      return { label: c.label, real: c.real, unchanged: mtimeSame && sizeSame && shaSame, shaSame, mtimeSame, sizeSame };
     });
+  }
+}
+
+/**
+ * R4 startup sweep: an earlier run killed hard (kill -9, power loss) can leave its sandbox, with
+ * PLAINTEXT credential copies, in %TEMP%. Every stale md-layerb-<stamp> dir (not this run's) has its
+ * credential files SHREDDED first, then the dir is removed. Returns what it did.
+ */
+function sweepStale(tmp, currentBase) {
+  const done = [];
+  let names = [];
+  try { names = fs.readdirSync(tmp); } catch { return done; }
+  for (const n of names.filter((x) => STALE_PREFIX.test(x))) {
+    const dir = path.join(tmp, n);
+    if (currentBase && norm(dir) === norm(currentBase)) continue;
+    let st = null;
+    try { st = fs.lstatSync(dir); } catch { continue; }
+    if (!st.isDirectory() || st.isSymbolicLink()) continue;
+    W.allowRoot(dir);
+    const creds = walk(dir, (f) => CREDENTIAL_NAMES.includes(path.basename(f).toLowerCase()));
+    let shredded = 0;
+    for (const f of creds) { try { if (W.shred(f)) shredded++; } catch (e) { log(`sweep: could not shred ${f}: ${e.message}`); } }
+    try { W.rm(dir); } catch (e) { log(`sweep: could not remove ${dir}: ${e.message}`); }
+    done.push({ dir, credentials: creds.length, shredded, removed: !fs.existsSync(dir) });
+  }
+  return done;
+}
+
+// ─────────────────────────────────────────────────────────────────────────── live-location watch
+
+/**
+ * R1 (god c0a73f (c)): what the live floor's files looked like before the run, compared after it.
+ * Top-level entries of each live root (size + mtime) and SHA-256 of key files, all READ-ONLY. The
+ * live floor keeps writing its own files during the run, so a CHANGE alone is reported, and it
+ * FAILS only when the name or the NEW bytes carry one of this run's markers (sandbox path, stamp,
+ * agent ids, nonces).
+ */
+class LiveWatch {
+  constructor(roots, keyFiles) { this.roots = roots; this.keyFiles = keyFiles; this.before = null; }
+  static defaults(env = process.env) {
+    const home = os.homedir();
+    const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return new LiveWatch(
+      [LIVE.hive, LIVE.devData, path.join(home, '.claude'), path.join(home, '.codex'), path.join(appData, 'munder-difflin')],
+      [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude.json'), path.join(home, '.codex', 'config.toml'),
+        path.join(appData, 'munder-difflin', 'config.json'), path.join(LIVE.hive, 'registry.json')]
+    );
+  }
+  snapshot() {
+    const snap = { entries: {}, keys: {} };
+    for (const r of this.roots) {
+      let names = [];
+      try { names = fs.readdirSync(r); } catch { continue; }
+      for (const n of names) {
+        const f = path.join(r, n);
+        try { const st = fs.lstatSync(f); snap.entries[f] = { size: st.size, mtimeMs: st.mtimeMs, dir: st.isDirectory() }; } catch { /* raced */ }
+      }
+    }
+    for (const k of this.keyFiles) { try { snap.keys[k] = shaReadOnly(k); } catch { snap.keys[k] = null; } }
+    return snap;
+  }
+  start() { this.before = this.snapshot(); return this; }
+  /** Compare with the snapshot. `markers` = strings only this run produces. */
+  compare(markers) {
+    const after = this.snapshot();
+    const changed = []; const failures = [];
+    const hasMarker = (text) => markers.find((m) => m && String(text).toLowerCase().includes(String(m).toLowerCase()));
+    const newBytes = (f, before) => {
+      try {
+        const st = fs.statSync(f);
+        if (st.isDirectory()) return '';
+        const from = before && !before.dir && st.size >= before.size ? before.size : 0;
+        const len = Math.min(st.size - from, 4 * 1024 * 1024);
+        if (len <= 0) return '';
+        const fd = fs.openSync(f, 'r');
+        try { const b = Buffer.alloc(len); fs.readSync(fd, b, 0, len, from); return b.toString('utf8'); } finally { fs.closeSync(fd); }
+      } catch { return ''; }
+    };
+    for (const [f, a] of Object.entries(after.entries)) {
+      const b = this.before.entries[f];
+      if (b && b.size === a.size && b.mtimeMs === a.mtimeMs) continue;
+      changed.push({ file: f, kind: b ? 'changed' : 'new' });
+      const m = hasMarker(path.basename(f)) || hasMarker(newBytes(f, b));
+      if (m) failures.push(`${f} ${b ? 'changed' : 'appeared'} and carries this run's marker "${m}"`);
+    }
+    for (const f of Object.keys(this.before.entries)) if (!after.entries[f]) changed.push({ file: f, kind: 'removed' });
+    const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k] }));
+    return { ok: failures.length === 0, failures, changed, keys };
   }
 }
 
@@ -491,7 +856,9 @@ function b6Tiers(events, { turnStart, nonces, blocks }) {
     const t4 = segs[3] ? ts(segs[3][0]) : Infinity;
     const persisted = evs.filter((e) => e.type === 'response_item' && /<hive-mail/.test(JSON.stringify(e.payload || {})));
     const carry = persisted.filter((e) => early.some((n) => JSON.stringify(e.payload).includes(n)));
-    out.tier2 = `persisted response_items with <hive-mail>: ${persisted.length}; carrying a turn 1-3 nonce: ${carry.length} (${carry.filter((e) => ts(e) < t4).length} before turn 4)`;
+    const after4 = carry.filter((e) => ts(e) >= t4);
+    out.tier2 = `persisted response_items with <hive-mail>: ${persisted.length}; carrying a turn 1-3 nonce AT/AFTER turn 4 started (retained into turn 4): ${after4.length}; before turn 4 (their own turn): ${carry.length - after4.length}`;
+    out.tier2Retained = after4.length;
   }
   return out;
 }
@@ -513,6 +880,9 @@ class LayerB {
     this.appOut = '';
     this.startedAt = null;
     this.bg = [];
+    this.nonces = [];
+    this.proofs = {};
+    this.watchHits = [];
   }
 
   fact(id, status, detail, evidence = []) {
@@ -561,11 +931,15 @@ class LayerB {
     for (const k of Object.keys(process.env)) {
       if (/^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_)/i.test(k)) throw new Error(`the runner itself carries ${k}: run it through run-clean-realhome.cjs`);
     }
+    // R5: the floor's heavy-job lock is taken by the INVOKING command line (heavyJob.ts BENCH_ENV).
+    if (this.args.go && process.env[HEAVY_GATE] !== '1') {
+      throw new Error(`--go needs ${HEAVY_GATE}=1 on the invoking command line, so the floor's heavy-job lock holds the slot for the whole run (see the header)`);
+    }
     // The sandbox root, validated by the PRODUCT's own guard, with the live userData forbidden.
     const loadTs = require(path.join(REPO, 'test', 'load-ts.cjs'));
     const iso = loadTs(path.join(REPO, 'src', 'main', 'devIsolation.ts'));
     const liveUserData = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'munder-difflin');
-    const r = iso.resolveDevDataRoot({ env: { MUNDER_DEV_ROOT: s.devRoot }, dev: true, platform: 'win32', liveUserData });
+    const r = iso.resolveDevDataRoot({ env: { MUNDER_DEV_ROOT: s.devRoot }, dev: true, seams: true, platform: 'win32', liveUserData });
     if (!r.ok || !r.override) throw new Error(`the sandbox root is refused by devIsolation: ${r.reason || 'not an override'}`);
     const paths = iso.devPaths(r.root, 'win32');
     const livePipe = iso.hookPipeName(LIVE.hive, false, 'win32');
@@ -580,43 +954,73 @@ class LayerB {
     for (const [name, p] of [['userData', paths.userData], ['hive', paths.hiveRoot]]) {
       if (norm(p) === norm(liveUserData) || norm(p) === norm(LIVE.hive) || inside(p, LIVE.devData)) throw new Error(`sandbox ${name} is a live path`);
     }
+    // R10: the Codex login source honours $CODEX_HOME and refuses one inside a live hive.
+    if (!this.args.dryRun) realCredentialPaths();
     this.check(true, 'preflight: the sandbox root passes the product isolation guard; its pipe is neither the live nor the MunderDevData pipe', `${r.root} / ${paths.pipeName}`);
+    this.liveUserData = liveUserData;
     return { iso, liveUserData, livePipe, fixedPipe };
   }
 
+  /** Global wall clock (R5): build included, under the heavy-job lock's TTL. */
+  globalLeft() { return this.runStart + GLOBAL_WALL_MS - Date.now(); }
+
   // ── build ─────────────────────────────────────────────────────────────────
-  seamCommit() {
-    const r = spawnSync('git', ['log', '--diff-filter=A', '--format=%H', '--', 'test/dev-hidden-root.test.cjs'], { cwd: REPO, encoding: 'utf8', windowsHide: true });
-    const sha = (r.stdout || '').trim().split('\n').pop();
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('cannot find the layer-b seam commit (the one that added test/dev-hidden-root.test.cjs)');
-    return sha;
+  /** Every layer-b SEAM commit on this branch, oldest first (they are cherry-picked onto 1.1.74). */
+  seamCommits() {
+    const r = spawnSync('git', ['log', '--reverse', '--format=%H', '-E', '--grep=^ZT-I1-MAIL layer \\(b\\) (test infrastructure|seams)', `${V1174_SHA}..HEAD`], { cwd: REPO, encoding: 'utf8', windowsHide: true });
+    const shas = (r.stdout || '').trim().split('\n').filter((x) => /^[0-9a-f]{40}$/.test(x));
+    if (!shas.length) throw new Error('cannot find the layer-b seam commits (subjects "ZT-I1-MAIL layer (b) test infrastructure" / "... seams")');
+    return shas;
+  }
+
+  /** The run's own build caches (R6): winCodeSign copied READ-ONLY from the user's cache so no
+   *  download is needed; electron-builder, electron and npm then write only here. */
+  seedBuildCache() {
+    const cache = path.join(this.s.base, 'build-cache');
+    W.mkdir(path.join(cache, 'electron-builder'));
+    const userCache = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'electron-builder', 'Cache', 'winCodeSign');
+    if (fs.existsSync(userCache)) W.copyTree(userCache, path.join(cache, 'electron-builder', 'winCodeSign'));
+    return cache;
   }
 
   build() {
     const npm = 'npm.cmd';
-    const eb = path.join(REPO, 'node_modules', '.bin', 'electron-builder.cmd');
+    const deadline = Math.min(Date.now() + BUILD_WALL_MS, this.runStart + GLOBAL_WALL_MS);
+    const cache = this.seedBuildCache();
+    const env = buildEnv(cache);
+    const electronDist = (dir) => `-c.electronDist=${path.join(dir, 'node_modules', 'electron', 'dist')}`;
     W.allowRoot(path.join(REPO, 'dist'));
     if (!this.args.skipBuild) {
-      run(npm, ['run', 'build'], REPO, 'build 1.1.75 (this tree)');
-      run(eb, ['--win', '--dir', '--publish', 'never', '-c.npmRebuild=false'], REPO, 'package 1.1.75 (--dir)');
+      this.builtOut = true;
+      run(npm, ['run', 'build'], REPO, 'build 1.1.75 (this tree, with the layer-b seams)', { env, deadline });
+      run(path.join(REPO, 'node_modules', '.bin', 'electron-builder.cmd'), ['--win', '--dir', '--publish', 'never', '-c.npmRebuild=false', electronDist(REPO)], REPO, 'package 1.1.75 (--dir)', { env, deadline });
     }
     this.exe175 = path.join(REPO, 'dist', 'win-unpacked', 'Munder Difflin.exe');
     if (!fs.existsSync(this.exe175)) throw new Error(`${this.exe175} not found`);
     this.assertSeamsInAsar(path.join(REPO, 'dist', 'win-unpacked', 'resources', 'app.asar'), '1.1.75');
 
     if (!this.args.rollback) return;
-    // 1.1.74 = b5e22e0b PLUS the seam commit cherry-picked (without the seams it would use the
-    // FIXED MunderDevData root and SHOW a window, so it could never run hidden in the sandbox).
+    // 1.1.74 = b5e22e0b PLUS the seam commits cherry-picked as commits on the detached HEAD (without
+    // the seams it would use the FIXED MunderDevData root and SHOW a window).
     const dir = this.args.v1174Dir || path.join(os.tmpdir(), 'md-layerb-v1174');
     W.allowRoot(dir);
     this.v1174Dir = dir;
+    const git = (args, label) => run('git', args, dir, label, { env, deadline });
     if (!fs.existsSync(path.join(dir, 'package.json'))) {
-      const seam = this.seamCommit();
-      run('git', ['worktree', 'add', '--detach', dir, V1174_SHA], REPO, 'detached 1.1.74 worktree');
-      run('git', ['cherry-pick', '--no-commit', seam], dir, `apply the seam commit ${seam.slice(0, 8)} onto 1.1.74`);
+      const seams = this.seamCommits();
+      run('git', ['worktree', 'add', '--detach', dir, V1174_SHA], REPO, 'detached 1.1.74 worktree', { env, deadline });
+      this.v1174Created = true;
+      try {
+        git(['-c', 'user.name=layer-b', '-c', 'user.email=layer-b@localhost', 'cherry-pick', ...seams], `cherry-pick the ${seams.length} seam commit(s) onto 1.1.74`);
+      } catch (e) {
+        spawnSync('git', ['cherry-pick', '--abort'], { cwd: dir, windowsHide: true, stdio: 'ignore' });
+        throw e;
+      }
     }
-    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8', windowsHide: true }).stdout.trim();
-    if (!head.startsWith(V1174_SHA)) throw new Error(`${dir} is at ${head}, not ${V1174_SHA}`);
+    const log174 = spawnSync('git', ['log', '--format=%H', `${V1174_SHA}..HEAD`], { cwd: dir, encoding: 'utf8', windowsHide: true }).stdout.trim().split('\n').filter(Boolean);
+    const base = spawnSync('git', ['merge-base', '--is-ancestor', V1174_SHA, 'HEAD'], { cwd: dir, windowsHide: true }).status === 0;
+    if (!base) throw new Error(`${dir} is not built on ${V1174_SHA}`);
+    this.check(log174.length === this.seamCommits().length, '1.1.74 build = b5e22e0b + exactly the seam commits', `${log174.length} commit(s) on top`);
     if (!fs.existsSync(path.join(dir, 'node_modules', 'electron'))) {
       log('copying node_modules into the 1.1.74 worktree (a COPY, not a junction) …');
       W.copyTree(path.join(REPO, 'node_modules'), path.join(dir, 'node_modules'));
@@ -624,22 +1028,56 @@ class LayerB {
     const nm = fs.lstatSync(path.join(dir, 'node_modules'));
     if (nm.isSymbolicLink()) throw new Error('the 1.1.74 node_modules is a link; it must be a copy');
     if (!this.args.skipBuild || !fs.existsSync(path.join(dir, 'dist', 'win-unpacked', 'Munder Difflin.exe'))) {
-      run(npm, ['run', 'build'], dir, 'build 1.1.74 + seams');
-      run(path.join(dir, 'node_modules', '.bin', 'electron-builder.cmd'), ['--win', '--dir', '--publish', 'never', '-c.npmRebuild=false'], dir, 'package 1.1.74 + seams (--dir)');
+      run(npm, ['run', 'build'], dir, 'build 1.1.74 + seams', { env, deadline });
+      run(path.join(dir, 'node_modules', '.bin', 'electron-builder.cmd'), ['--win', '--dir', '--publish', 'never', '-c.npmRebuild=false', electronDist(dir)], dir, 'package 1.1.74 + seams (--dir)', { env, deadline });
     }
     this.exe174 = path.join(dir, 'dist', 'win-unpacked', 'Munder Difflin.exe');
     if (!fs.existsSync(this.exe174)) throw new Error(`${this.exe174} not found`);
     this.assertSeamsInAsar(path.join(dir, 'dist', 'win-unpacked', 'resources', 'app.asar'), '1.1.74+seams');
   }
 
-  /** Static: the packaged main bundle carries both seams behind MUNDER_DEV (else refuse to launch it). */
+  /** The end of the run (R6): out/ rebuilt WITHOUT the seams (so a test bundle can never be
+   *  packaged by accident), then the 1.1.74 worktree removed: its node_modules COPY first, then
+   *  out/ and dist/, then `git worktree remove` WITHOUT --force (a refusal is reported, not forced). */
+  cleanupBuild() {
+    const out = [];
+    if (this.builtOut) {
+      try {
+        run('npm.cmd', ['run', 'build'], REPO, 'rebuild out/ WITHOUT the layer-b seams', { env: buildEnv(path.join(this.s.base, 'build-cache'), { seams: false }), deadline: Date.now() + 10 * 60_000 });
+        out.push('out/ rebuilt without the seams');
+      } catch (e) { out.push(`out/ rebuild FAILED: ${e.message}`); this.check(false, 'out/ rebuilt without the layer-b seams', e.message); }
+    }
+    if (this.v1174Dir && !this.args.keepV1174 && !this.args.v1174Dir && fs.existsSync(this.v1174Dir)) {
+      const dir = this.v1174Dir;
+      const nm = path.join(dir, 'node_modules');
+      try {
+        if (fs.existsSync(nm)) {
+          if (fs.lstatSync(nm).isSymbolicLink()) throw new Error('node_modules is a link: refusing to remove through it');
+          W.rm(nm);
+        }
+        for (const d of ['out', 'dist']) W.rm(path.join(dir, d));
+        if (fs.existsSync(nm)) throw new Error('the node_modules copy is still there');
+        const r = spawnSync('git', ['worktree', 'remove', dir], { cwd: REPO, encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+        out.push(r.status === 0 ? `removed the 1.1.74 worktree ${dir}` : `git worktree remove REFUSED (${(r.stderr || '').trim()}); left in place`);
+        this.check(r.status === 0, 'the 1.1.74 worktree removed (node_modules copy first, no --force)', (r.stderr || '').trim());
+      } catch (e) { out.push(`1.1.74 cleanup: ${e.message}`); this.check(false, 'the 1.1.74 worktree removed', e.message); }
+    }
+    return out;
+  }
+
+  /** Static: the packaged main bundle carries both seams, the build define is TRUE in it (else it
+   *  would ignore MUNDER_HIDDEN and SHOW a window), and every gate is in place. */
   assertSeamsInAsar(asarPath, label) {
     const asar = require(path.join(REPO, 'node_modules', '@electron', 'asar'));
     let b = '';
     try { b = asar.extractFile(asarPath, path.join('out', 'main', 'index.js')).toString('utf8'); } finally { try { asar.uncache(asarPath); } catch { /* ok */ } }
-    const ok = b.includes('process.env.MUNDER_DEV === "1"') && /function hiddenRun\([^)]*\)\s*\{\s*if \(!dev\) return false;/.test(b)
-      && /ready-to-show", \(\) => \{\s*if \(!DEV_HIDDEN\) win\.show\(\);/.test(b) && b.includes('function resolveDevDataRoot(');
-    if (!this.check(ok, `static: the ${label} packaged bundle carries MUNDER_HIDDEN + MUNDER_DEV_ROOT behind MUNDER_DEV`, asarPath)) {
+    const m = /const LAYERB_SEAMS_BUILT = ([^;\n]+);/.exec(b);
+    let built = null;
+    try { built = m && /^[\w\s"'=!?:()]+$/.test(m[1]) ? Function(`"use strict"; return (${m[1]});`)() : null; } catch { built = null; }
+    const ok = built === true && b.includes('process.env.MUNDER_DEV === "1"') && /function hiddenRun\([^)]*\)\s*\{\s*if \(!dev \|\| !seams\) return false;/.test(b)
+      && /function surfaceWindow\([^)]*\) \{\s*if \(DEV_HIDDEN\) return;/.test(b) && /ready-to-show", \(\) => surfaceWindow\(win, \{ show: true \}\)\)/.test(b)
+      && b.includes('function resolveDevDataRoot(');
+    if (!this.check(ok, `static: the ${label} packaged bundle was built WITH the seams (LAYERB_SEAMS_BUILT=${built}) and gates them`, asarPath)) {
       throw new Error(`${label}: the packaged bundle lacks the hidden/root seams — refusing to launch it (it would show a window or use MunderDevData)`);
     }
   }
@@ -650,10 +1088,11 @@ class LayerB {
     const env = isolation.rigEnv(s.jail, process.env);
     const nodeDir = env.RIG_NODE_DIR;
     const extra = [];
+    const pp = parentPath();
+    this.cliPaths = { claude: whichOn(pp, 'claude'), codex: whichOn(pp, 'codex') };
     if (!this.args.dryRun) {
-      const pp = parentPath();
       for (const name of ['claude', 'codex']) {
-        const p = whichOn(pp, name);
+        const p = this.cliPaths[name];
         if (!p) throw new Error(`the real ${name} CLI is not on PATH`);
         const d = path.dirname(p);
         if (!extra.some((x) => norm(x) === norm(d))) extra.push(d);
@@ -684,7 +1123,17 @@ class LayerB {
     }
     this.check(true, 'the app env is the rig allowlist: jailed homes, no secret-shaped variable, PATH = CLI dir(s) + node + system', env.PATH);
     this.env = env;
+    this.node = path.join(nodeDir, path.basename(process.execPath));
     return env;
+  }
+
+  /** The jailed Claude settings: first-run keys + deny rules + the PreToolUse jail hook (R1). */
+  writeClaudeSettings(extraEnv) {
+    const s = this.s;
+    const home = os.homedir();
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    const liveDenied = [LIVE.dunder, path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
+    W.writeJson(path.join(s.home, '.claude', 'settings.json'), claudeJailSettings({ node: this.node, policyFile: this.jailPolicy, liveDenied, env: extraEnv }));
   }
 
   seed() {
@@ -695,7 +1144,7 @@ class LayerB {
     this.markerV2 = `Marker-V2-${hex(3)}`;
     const agents = {};
     const restorable = [];
-    const node = this.env.RIG_NODE_DIR ? path.join(this.env.RIG_NODE_DIR, path.basename(process.execPath)) : process.execPath;
+    const node = this.node;
     this.typed = {};
     const spec = [
       { id: IDS.god, name: 'Michael', provider: 'claude', isGod: true, role: 'orchestrator', stub: true },
@@ -717,11 +1166,14 @@ class LayerB {
         W.write(stub, stubSource(a.id, s.pipe, this.typed[a.id], dir, 600));
         command = `${JSON.stringify(node)} ${JSON.stringify(stub)}`;
       } else if (a.provider === 'claude') {
+        // UNCHANGED from the product's own auto mode; the jail is the hook + deny rules (R1).
         command = `claude --model ${this.args.models.claude} --permission-mode bypassPermissions`;
       } else {
-        command = `codex --model ${this.args.models.codex} --dangerously-bypass-approvals-and-sandbox`;
+        // R1: the product's auto flag (--dangerously-bypass-approvals-and-sandbox) is REPLACED by
+        // the OS sandbox; the writable roots come from the seeded config.toml below.
+        command = `codex --model ${this.args.models.codex} --sandbox workspace-write --ask-for-approval never`;
       }
-      a.cwd = cwd; a.command = command;
+      a.cwd = cwd; a.command = command; a.dir = dir;
       agents[a.id] = { id: a.id, name: a.name, provider: a.provider, cwd, isGod: a.isGod, role: a.role, capabilities: [],
         status: 'idle', cwdValid: true, archived: false, lastSeen: Date.now(), command };
       restorable.push({ id: a.id, name: a.name, character: 'jim', accent: 'sky', description: 'layer-b', project: 'layer-b',
@@ -747,19 +1199,26 @@ class LayerB {
       circuitBreaker: { enabled: true, hardStop: true },
       missions: [{ id: 'heartbeat', kind: 'heartbeat', enabled: true, intervalMs: 120000, quietThresholdMs: 300000, lastFiredAt: 0 }]
     });
-    // Claude's first-run gates, SYNTHESISED (nothing of the real profile is copied but the login).
-    const claudeCwd = spec.find((a) => a.id === IDS.claude).cwd;
-    W.writeJson(path.join(s.home, '.claude', 'settings.json'), { skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true });
+    // R1 Claude jail: the policy lives at the sandbox root (readable, never writable by the agent).
+    const claude = spec.find((a) => a.id === IDS.claude);
+    const codex = spec.find((a) => a.id === IDS.codex);
+    this.jailPolicy = path.join(s.base, 'layer-b-jail-policy.json');
+    this.jailLog = path.join(s.base, 'jail-decisions.jsonl');
+    W.writeJson(this.jailPolicy, { writeRoots: [claude.cwd, claude.dir], readRoots: [s.base], protect: JAIL_PROTECT, home: s.home, log: this.jailLog });
+    this.writeClaudeSettings(null);
     W.writeJson(path.join(s.home, '.claude.json'), {
       hasCompletedOnboarding: true, theme: 'dark', bypassPermissionsModeAccepted: true,
-      projects: { [claudeCwd]: { hasTrustDialogAccepted: true }, [claudeCwd.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true } }
+      projects: { [claude.cwd]: { hasTrustDialogAccepted: true }, [claude.cwd.replace(/\\/g, '/')]: { hasTrustDialogAccepted: true } }
     });
+    // R1 Codex jail: the seed config the product copies into the agent's own CODEX_HOME.
+    this.codexRoots = [codex.cwd, codex.dir];
+    W.write(path.join(s.home, '.codex', 'config.toml'), codexSandboxToml(this.codexRoots));
     // Bulk files for the compaction facts (B3 Claude, B7 Codex).
     const words = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango'.split(' ');
     const bulk = (n, tag) => { const out = []; for (let i = 1; i <= n; i++) out.push(`line ${String(i).padStart(4, '0')} ${Array.from({ length: 18 }, () => words[crypto.randomInt(words.length)]).join(' ')}`); out.push(`END-${tag}`); return out.join('\n'); };
     this.bulkEnd = { claude: `END-${hex(4)}`, codex: `END-${hex(4)}` };
-    W.write(path.join(claudeCwd, 'b3-bulk.txt'), bulk(1500, this.bulkEnd.claude.slice(4)));
-    W.write(path.join(spec.find((a) => a.id === IDS.codex).cwd, 'b7-bulk.txt'), bulk(1600, this.bulkEnd.codex.slice(4)));
+    W.write(path.join(claude.cwd, 'b3-bulk.txt'), bulk(1500, this.bulkEnd.claude.slice(4)));
+    W.write(path.join(codex.cwd, 'b7-bulk.txt'), bulk(1600, this.bulkEnd.codex.slice(4)));
   }
 
   /** The spawn recipe the renderer restores from. REBUILT from the seed every time (the file roster
@@ -774,7 +1233,7 @@ class LayerB {
   /** Real mode: copy the two logins. Dry run: the SAME code path against decoy "real" files. */
   installCredentials() {
     const s = this.s;
-    let real = realCredentialPaths();
+    let real = this.args.dryRun ? null : realCredentialPaths();
     if (this.args.dryRun) {
       const decoy = path.join(s.base, 'decoy-real');
       W.write(path.join(decoy, '.claude', '.credentials.json'), JSON.stringify({ decoy: hex(8) }));
@@ -789,20 +1248,89 @@ class LayerB {
     this.check(true, `credentials: ${this.args.dryRun ? 'DECOY ' : ''}logins copied read-only into the jail (claude, codex); nothing else copied`);
   }
 
+  // ── zero-token confinement proofs (R1, god c0a73f (a)(b)) ─────────────────
+  /** (a) The INSTALLED Claude hook, run exactly as settings.json names it, denies payloads that
+   *  target the live hive and the real ~/.claude, and allows the agent's own outbox. */
+  proveClaudeJail() {
+    const st = readJson(path.join(this.s.home, '.claude', 'settings.json'), {});
+    const hook = st.hooks && st.hooks.PreToolUse && st.hooks.PreToolUse[0] && st.hooks.PreToolUse[0].hooks[0];
+    const m = hook && /^"([^"]+)" "([^"]+)" "([^"]+)"$/.exec(hook.command);
+    if (!m) return this.check(false, 'R1 Claude jail: the installed hook command is readable', hook ? hook.command : 'no hook');
+    const claude = this.spec.find((a) => a.id === IDS.claude);
+    const home = os.homedir();
+    const cases = [
+      ['deny', { tool_name: 'Write', tool_input: { file_path: 'C:\\Dunder\\hive\\agents\\god\\inbox\\md-layerb-jail-proof.json', content: 'x' } }],
+      ['deny', { tool_name: 'Edit', tool_input: { file_path: path.join(home, '.claude', 'settings.json'), old_string: 'a', new_string: 'b' } }],
+      ['deny', { tool_name: 'Read', tool_input: { file_path: path.join(home, '.claude', '.credentials.json') } }],
+      ['deny', { tool_name: 'Bash', tool_input: { command: 'echo x > C:\\Dunder\\hive\\md-layerb-jail-proof.txt' } }],
+      ['deny', { tool_name: 'Bash', tool_input: { command: `echo x > "${path.join(home, '.codex', 'md-layerb-jail-proof.txt')}"` } }],
+      ['allow', { tool_name: 'Write', tool_input: { file_path: path.join(claude.dir, 'outbox', 'proof.json'), content: '{}' } }]
+    ];
+    const results = cases.map(([want, p]) => {
+      const r = spawnSync(m[1], [m[2], m[3]], { input: JSON.stringify({ hook_event_name: 'PreToolUse', cwd: claude.cwd, ...p }), encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+      const got = r.status === 2 ? 'deny' : (r.status === 0 ? 'allow' : `exit ${r.status}`);
+      return { want, got, tool: p.tool_name, target: p.tool_input.file_path || p.tool_input.command };
+    });
+    const ok = results.every((x) => x.want === x.got) && (st.permissions && st.permissions.deny || []).some((d) => /^Write\(\/\/c\/Dunder\/\*\*\)$/i.test(d));
+    this.proofs = { ...(this.proofs || {}), claudeJail: results };
+    return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; deny rules present', JSON.stringify(results));
+  }
+
+  /** (b) The real codex binary's own sandbox runner (`codex sandbox windows`, zero tokens) runs a
+   *  probe under the jail's config: writes into C:\Dunder\hive, the real ~/.codex and ~/.claude must
+   *  be REFUSED and the markers must never appear; a write inside the jail must succeed. */
+  proveCodexSandbox() {
+    const shim = this.cliPaths && this.cliPaths.codex;
+    const exe = shim ? codexExe(shim) : null;
+    if (!exe) return this.check(false, 'R1 Codex sandbox probe: the codex.exe sandbox runner was found', shim || 'codex not on PATH');
+    const s = this.s;
+    const home = os.homedir();
+    const marker = `md-layerb-probe-${hex(8)}.txt`;
+    const targets = { hive: path.join(LIVE.hive, marker), codex: path.join(home, '.codex', marker), claude: path.join(home, '.claude', marker) };
+    const codex = this.spec.find((a) => a.id === IDS.codex);
+    const insideMarker = path.join(codex.cwd, marker);
+    const probeHome = path.join(s.jail, 'probe-codex-home');
+    W.write(path.join(probeHome, 'config.toml'), codexSandboxToml(this.codexRoots));
+    const script = path.join(s.base, 'codex-sandbox-probe.cjs');
+    W.write(script, `const fs = require('fs'); const out = {};
+for (const [k, p] of Object.entries(${JSON.stringify({ inside: insideMarker, ...targets })})) { try { fs.writeFileSync(p, 'layer-b probe'); out[k] = 'WROTE'; } catch (e) { out[k] = 'refused: ' + e.code; } }
+process.stdout.write('LBPROBE' + JSON.stringify(out));`);
+    const env = { ...this.env, CODEX_HOME: probeHome };
+    const before = Object.fromEntries(Object.entries(targets).map(([k, p]) => [k, fs.existsSync(p)]));
+    const r = spawnSync(exe, ['sandbox', 'windows', '--', this.node, script], { cwd: codex.cwd, env, encoding: 'utf8', windowsHide: true, timeout: 90_000 });
+    const res = (() => { const i = (r.stdout || '').indexOf('LBPROBE'); try { return i >= 0 ? JSON.parse(r.stdout.slice(i + 7)) : null; } catch { return null; } })();
+    const leaked = [];
+    for (const [k, p] of Object.entries(targets)) {
+      if (!before[k] && fs.existsSync(p)) { leaked.push(k); try { W.removeProbeMarker(p, marker); } catch (e) { log(`probe marker removal: ${e.message}`); } }
+    }
+    const positive = !!res && res.inside === 'WROTE';
+    this.proofs = { ...(this.proofs || {}), codexSandbox: { exe, status: r.status, res, leaked, stderr: String(r.stderr || '').slice(0, 600) } };
+    if (leaked.length) return this.check(false, 'R1 Codex sandbox probe: NO marker reached a live location', `LEAKED into ${leaked.join(', ')} (removed); ${JSON.stringify(res)}`);
+    return this.check(positive && Object.keys(targets).every((k) => res && res[k] && res[k] !== 'WROTE'),
+      'R1 Codex sandbox (zero tokens, codex sandbox windows): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
+      JSON.stringify({ res, status: r.status, stderr: String(r.stderr || '').slice(0, 300) }));
+  }
+
   // ── launch / hidden ───────────────────────────────────────────────────────
   async launch(exe, label) {
     const cdpPort = await freePort();
     let inspPort = await freePort();
     while (inspPort === cdpPort) inspPort = await freePort();
-    const proc = spawn(exe, [`--remote-debugging-port=${cdpPort}`, `--inspect=127.0.0.1:${inspPort}`], {
+    const proc = spawn(exe, [`--remote-debugging-port=${cdpPort}`, '--remote-debugging-address=127.0.0.1', `--inspect=127.0.0.1:${inspPort}`], {
       cwd: this.s.base, env: this.env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true
     });
-    this.procs.addRoot(proc.pid);
+    this.procs.addRoot(proc.pid, proc);
+    // R8: the window watch starts NOW, before CDP exists.
+    this.watch = new WindowWatch(proc.pid, {
+      onHit: (why) => { this.check(false, `NO WINDOW (${label})`, why); this.stop(`a window/browser/crash dialog appeared (${label}): ${why}`); },
+      onBlind: (why) => { if (!this.aborted()) { this.check(false, `the window watch sees (${label})`, why); this.stop(`the window watch went blind (${label}): ${why}`); } }
+    }).start();
     proc.stdout.on('data', (d) => { this.appOut += d; });
     proc.stderr.on('data', (d) => { this.appOut += d; });
     proc.on('exit', (code) => log(`${label} exited (${code})`));
     this.app = { proc, cdpPort, inspPort, label, exe };
-    log(`${label}: launched pid ${proc.pid} (CDP ${cdpPort}, main inspector ${inspPort})`);
+    log(`${label}: launched pid ${proc.pid} (CDP 127.0.0.1:${cdpPort}, main inspector 127.0.0.1:${inspPort}; both UNAUTHENTICATED while the app runs)`);
+    await this.waitFor(`the window watch reports (${label})`, 30_000, () => this.watch.lines > 0, 500);
     // Refused at bootstrap? The app exits 97 at once.
     await sleep(3000);
     if (proc.exitCode !== null) throw new Error(`${label} exited at boot (${proc.exitCode}): ${this.appOut.slice(-1500)}`);
@@ -815,19 +1343,23 @@ class LayerB {
     this.check(norm(w.userData) === norm(this.s.userData), `${label}: userData is the sandbox's`, w.userData);
     this.check(w.packaged === true && /app\.asar$/i.test(w.appPath), `${label}: runs PACKAGED from app.asar`, w.appPath);
     if (norm(w.userData) !== norm(this.s.userData)) throw new Error(`${label}: userData ${w.userData} is not the sandbox's`);
+    // R10: the pipe line MUST be there and must be the sandbox's.
     const pipeLine = /pipe=(\S+)/.exec(this.appOut);
-    if (pipeLine) this.check(pipeLine[1].toLowerCase() === this.s.pipe.toLowerCase(), `${label}: the hook pipe is the sandbox's`, pipeLine[1]);
+    if (!this.check(!!pipeLine && pipeLine[1].toLowerCase() === this.s.pipe.toLowerCase(), `${label}: the hook pipe is the sandbox's`, pipeLine ? pipeLine[1] : 'NO pipe= line printed')) {
+      throw new Error(`${label}: cannot prove the hook pipe`);
+    }
     return this.app;
   }
 
-  /** BrowserWindow.isVisible() over the MAIN inspector, plus an OS scan of every process we started. */
+  /** BrowserWindow.isVisible() over the MAIN inspector, plus the OS watcher's health. */
   async assertHidden(label) {
+    if (this.watch && !this.watch.healthy()) { this.stop(`the window watch is silent (${label})`); throw new Error('window watch silent'); }
+    if (!this.mainCdp) return 0;
     const wins = JSON.parse(await this.mainCdp.eval(`JSON.stringify(process.mainModule.require('electron').BrowserWindow.getAllWindows().map((w) => ({ id: w.id, visible: w.isVisible(), minimized: w.isMinimized(), focused: w.isFocused() })))`));
-    const os1 = await this.procs.scan();
-    this.samples.hidden.push({ at: new Date().toISOString(), label, windows: wins, osVisible: os1.visible });
+    this.samples.hidden.push({ at: new Date().toISOString(), label, windows: wins, watchLines: this.watch ? this.watch.lines : 0 });
     const shown = wins.filter((w) => w.visible || w.focused);
-    if (shown.length || os1.visible.length) {
-      this.check(false, `NO WINDOW (${label})`, JSON.stringify({ shown, os: os1.visible }));
+    if (shown.length) {
+      this.check(false, `NO WINDOW (${label})`, JSON.stringify({ shown }));
       this.stop(`a window became visible (${label})`);
       throw new Error('window visible');
     }
@@ -844,11 +1376,12 @@ class LayerB {
       }, ms);
       this.bg.push(t);
     };
-    every(8_000, async () => { if (this.mainCdp) await this.assertHidden('monitor'); });
+    every(8_000, async () => this.assertHidden('monitor'));
     every(5_000, async () => this.pollTokens());
     every(1_000, async () => this.pollLedgers());
     every(15_000, async () => {
       if (Date.now() - this.startedAt > CAPS.wallMs) this.stop('wall-clock cap (30 min)');
+      if (this.globalLeft() <= 0) this.stop(`global wall-clock cap (${GLOBAL_WALL_MS / 60000} min, build included)`);
       const stops = this.rows().filter((r) => /breaker/i.test(String(r.kind)) && /stop/i.test(JSON.stringify(r)));
       if (stops.length && !this.breakerStop) { this.breakerStop = stops[0]; log(`breaker stop seen: ${JSON.stringify(stops[0]).slice(0, 200)}`); }
     });
@@ -874,6 +1407,7 @@ class LayerB {
   /** Send as god: through god's OUTBOX, so the real router and deliver() edge run. */
   send(to, tag, body) {
     const id = `lb-${tag.toLowerCase()}-${hex(3)}`;
+    for (const n of String(body).match(/LB[NT]-[0-9a-f]{8}/g) || []) if (!this.nonces.includes(n)) this.nonces.push(n);
     W.writeJsonAtomic(path.join(this.s.hive, 'agents', IDS.god, 'outbox', `${id}.json`), {
       id, conversation: `layer-b-${tag.toLowerCase()}`, to, act: 'request', subject: `layer-b ${tag}`, body,
       requires_reply: false, needs_human: false, created_at: new Date().toISOString()
@@ -1172,14 +1706,17 @@ class LayerB {
     // B3: auto-compaction ~25k tokens above the current context (percent of a 200k window).
     const pct = Math.min(95, Math.max(5, Math.ceil(((ctxClaude || 30_000) + 25_000) / 2000)));
     this.b3Pct = pct;
-    W.writeJson(path.join(s.home, '.claude', 'settings.json'), { skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true, env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) } });
+    this.writeClaudeSettings({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) });   // the jail (deny rules + hook) stays
     log(`phase B: marker ${this.markerV1} -> ${this.markerV2}; Claude autocompact at ${pct}% (context was ${ctxClaude}); Codex compact limit 40000`);
+    this.relaunchAt = Date.now();
     await this.launch(this.exe175, '1.1.75 (phase B)');
     await this.openTheConfig();
     await this.waitAgentsUp('phase B');
   }
 
-  /** B4 (Claude): the resumed session sees the NEW --append-system-prompt. */
+  /** B4 (Claude): the RESUMED session sees the NEW --append-system-prompt. R7: only a genuine resume
+   *  of the SAME session counts; a fresh session trivially sees the new marker, so without a proven
+   *  resume B4 is NOT-PROVEN, never PASS. */
   async factB4() {
     const C = IDS.claude;
     const N4 = nonce();
@@ -1187,14 +1724,27 @@ class LayerB {
     let reply = null;
     try { reply = await this.waitReply(C, N4, 6 * 60_000); } catch (e) { log(`B4: ${e.message}`); }
     try { await this.waitState(C, id, ['acted'], 2 * 60_000); } catch { /* reported below */ }
-    const after = (readJson(path.join(this.s.hive, 'registry.json'), { agents: {} }).agents[C] || {});
-    const resumedSame = !!this.sessionBefore.sessionId && JSON.stringify(after).includes(String(this.sessionBefore.sessionId));
+    const resume = this.resumeEvidence(C);
     const body = reply ? String(reply.m.body) : '';
-    if (this.args.dryRun) return this.fact('B4', 'NOT-PROVEN', this.dryNote(`relaunch+rename ok, reply=${!!reply}`));
+    if (this.args.dryRun) return this.fact('B4', 'NOT-PROVEN', this.dryNote(`relaunch+rename ok, reply=${!!reply}, resume evidence ${resume.same}`));
     const v2 = body.includes(this.markerV2); const v1 = body.includes(this.markerV1);
-    this.fact('B4', !reply ? 'NOT-PROVEN' : (v2 && !v1 ? 'PASS' : 'FAIL'),
-      `reply: ${JSON.stringify(body.slice(0, 160))}; expected the NEW marker ${this.markerV2} (old ${this.markerV1}); resumed the same session: ${resumedSame}`
-      + (v1 && !v2 ? ' — the resumed session kept the OLD prompt: §7.1 step 3 then needs a rotation at upgrade' : ''), reply ? [reply.p] : []);
+    const status = !reply || !resume.same ? 'NOT-PROVEN' : (v2 && !v1 ? 'PASS' : 'FAIL');
+    this.fact('B4', status,
+      `resumed the SAME session: ${resume.same} (${resume.why}); reply: ${JSON.stringify(body.slice(0, 160))}; expected the NEW marker ${this.markerV2} (old ${this.markerV1})`
+      + (resume.same && v1 && !v2 ? ' — the resumed session kept the OLD prompt: §7.1 step 3 then needs a rotation at upgrade (a design finding)' : '')
+      + (!resume.same ? ' — no genuine resume proven, so the marker proves nothing' : ''), reply ? [reply.p] : []);
+  }
+
+  /** A genuine resume: the session id before the relaunch is the one Claude continued, i.e. the
+   *  registry still holds it AND the transcript of that session id gained entries after the relaunch. */
+  resumeEvidence(agentId) {
+    const sid = this.sessionBefore && this.sessionBefore.sessionId;
+    if (!sid) return { same: false, why: 'no session id was recorded before the relaunch' };
+    const after = (readJson(path.join(this.s.hive, 'registry.json'), { agents: {} }).agents[agentId] || {});
+    const sameId = after.sessionId === sid;
+    const t = this.claudeTranscripts().filter((f) => path.basename(f, '.jsonl') === sid);
+    const grew = t.some((f) => jsonLines(f).some((e) => e.timestamp && Date.parse(e.timestamp) > this.relaunchAt && (e.sessionId === sid || !e.sessionId)));
+    return { same: sameId && grew, why: `registry session ${sameId ? 'unchanged' : `changed to ${after.sessionId}`}; transcript ${sid} ${grew ? 'continued after the relaunch' : 'did NOT continue'}` };
   }
 
   /** B3 (Claude): compaction inside the epoch re-injects the surfaced mail via SessionStart(compact). */
@@ -1217,12 +1767,16 @@ class LayerB {
       reply ? [reply.p] : []);
   }
 
-  /** B7 (Codex), §11.18 items 50-53 (Creed on Q45): FORCE a compaction mid-epoch by typing
-   *  /compact into the running turn (on top of the lowered 40k auto-compact limit); if none happens,
-   *  retry ONCE. Then RECORD whether a compact-source SessionStart fired and whether the re-surface
-   *  path was used. PASS = a compaction really happened inside the epoch and was recorded. If none can
-   *  be forced: GATE-BLOCKED (god decides). NOT-PROVEN never passes the gate, and B7 is never PASS
-   *  without a mid-epoch compaction. */
+  /** B7 (Codex), §11.18 items 50-53 (Creed on Q45) + god c0a73f: FORCE a compaction mid-epoch by
+   *  typing /compact into the running turn (on top of the lowered 40k auto-compact limit); if none
+   *  happens, retry ONCE. What B7 proves is that THE MAIL SURVIVES the compaction: after the
+   *  compaction event the nonce is either re-surfaced (the ledger shows a new surfacing: SessionStart
+   *  hookKind or a surfaceCount step) or recallable (the reply quoting it was written after the
+   *  compaction). The compact-source SessionStart is recorded either way.
+   *   - compaction mid-epoch AND the mail survived: PASS;
+   *   - compaction mid-epoch, the mail did NOT survive: FAIL (a design finding);
+   *   - no compaction could be forced (or budget, error, not reached): GATE-BLOCKED, god decides.
+   *  Never NOT-PROVEN in a real run, never PASS without the compaction event. */
   async factB7() {
     const X = IDS.codex;
     if (this.args.dryRun) return this.fact('B7', 'NOT-PROVEN', this.dryNote('no compaction is possible on a stub'));
@@ -1250,18 +1804,25 @@ class LayerB {
       try { acted = await this.waitState(X, id, ['acted'], 3 * 60_000); } catch { /* recorded below */ }
       const end = acted && acted.actedAt ? acted.actedAt : Date.now();
       const ev = this.codexEvents().filter((e) => e.timestamp && Date.parse(e.timestamp) >= since);
-      const compactAt = ev.filter((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e))).map((e) => Date.parse(e.timestamp));
-      const midEpoch = compactAt.some((t) => t <= end);
+      const compactAt = ev.filter((e) => e.type === 'compacted' || /context_compacted|"type":"compacted"/.test(JSON.stringify(e))).map((e) => Date.parse(e.timestamp)).filter((t) => t <= end);
+      const midEpoch = compactAt.length > 0;
+      const firstCompact = midEpoch ? Math.min(...compactAt) : null;
       const compactHook = this.rows().filter((r) => r.ts >= since && r.agentId === X && /"source":"compact"/.test(JSON.stringify(r)));
-      const kinds = this.seenHookKinds(X, id);
-      tries.push({ attempt, typed, compactions: compactAt.length, midEpoch, compactHook: compactHook.length, resurfaced: kinds.includes('SessionStart'), kinds, reply: !!reply });
+      const hist = (this.ledgerHistory[X] || {})[id] || [];
+      const resurfaced = midEpoch && hist.some((h, i) => h.t >= firstCompact && (h.hookKind === 'SessionStart' || (i > 0 && h.surfaceCount > hist[i - 1].surfaceCount)));
+      let replyAt = null;
+      try { replyAt = reply ? fs.statSync(reply.p).mtimeMs : null; } catch { replyAt = null; }
+      const recallable = midEpoch && !!reply && replyAt !== null && replyAt > firstCompact;
+      tries.push({ attempt, typed, compactions: compactAt.length, midEpoch, compactHook: compactHook.length, resurfaced, recallable, kinds: this.seenHookKinds(X, id), reply: !!reply });
       if (midEpoch) break;
     }
     const hit = tries.find((t) => t.midEpoch);
     const detail = tries.map((t) => t.skipped ? `attempt ${t.attempt}: skipped (${t.skipped})`
-      : `attempt ${t.attempt}: /compact typed ${t.typed}; compactions ${t.compactions}, mid-epoch ${t.midEpoch}; compact-source SessionStart ${t.compactHook > 0}; re-surface path used ${t.resurfaced} (hookKinds ${t.kinds.join(',') || 'none'}); reply ${t.reply}`).join(' | ');
-    this.fact('B7', hit ? 'PASS' : 'GATE-BLOCKED', `RECORD: ${detail}`
-      + (hit ? '' : '. No mid-epoch compaction could be forced after one retry: GATE-BLOCKED, god decides.'), this.codexRollouts());
+      : `attempt ${t.attempt}: /compact typed ${t.typed}; mid-epoch compactions ${t.compactions}; compact-source SessionStart ${t.compactHook > 0}; mail re-surfaced after it ${t.resurfaced}; nonce recalled after it ${t.recallable} (hookKinds ${t.kinds.join(',') || 'none'}; reply ${t.reply})`).join(' | ');
+    const status = !hit ? 'GATE-BLOCKED' : (hit.resurfaced || hit.recallable ? 'PASS' : 'FAIL');
+    this.fact('B7', status, `RECORD: ${detail}`
+      + (!hit ? '. No mid-epoch compaction could be forced after one retry: GATE-BLOCKED, god decides.' : '')
+      + (status === 'FAIL' ? '. The mail did NOT survive the compaction: a design finding (§11.18 #21).' : ''), this.codexRollouts());
   }
 
   /** N4 against the BUILT artefact: the packaged CHANGELOG (app:info's reader) + the rollback text. */
@@ -1367,27 +1928,43 @@ class LayerB {
     try { this.mainCdp && this.mainCdp.close(); } catch { /* gone */ }
     this.page = null; this.mainCdp = null;
     const r = await this.procs.killAll();
-    this.check(r.survivors.length === 0, `${label}: every process started is gone (exact PID tree)`, `killed ${r.killed.length}${r.survivors.length ? `; SURVIVORS ${r.survivors.join(',')}` : ''}`);
+    if (this.watch) { this.watchHits = this.watchHits.concat(this.watch.hits); this.watch.stop(); this.watch = null; }
+    // R3: a scan failure is a FAILURE, never a vacuous "all gone".
+    this.check(r.ok === true && !r.scanFailed && r.survivors.length === 0, `${label}: every process started is gone (exact PID tree)`,
+      r.scanFailed ? `SCAN FAILED (${r.why}); fell back to taskkill /T on open-handle roots ${JSON.stringify(r.fallback)}` : `killed ${r.killed.length}${r.survivors.length ? `; SURVIVORS ${r.survivors.join(',')}` : ''}`);
     this.killReport = (this.killReport || []).concat([{ label, ...r }]);
     await sleep(1500);
   }
 
   // ── evidence + report ─────────────────────────────────────────────────────
+  /** Evidence is REDACTED (R9) and never includes a credential file. */
   collectEvidence() {
     const s = this.s;
     const dst = path.join(s.report, 'evidence');
     const never = /(^|[\\/])(auth\.json|\.credentials\.json)$/i;
-    const take = (from, rel) => { if (!fs.existsSync(from) || never.test(from)) return; W.copy(from, path.join(dst, rel)); };
+    const take = (from, rel) => {
+      if (!fs.existsSync(from) || never.test(from)) return;
+      let text;
+      try { text = fs.readFileSync(from, 'utf8'); } catch { return; }
+      W.write(path.join(dst, rel), redact(text));
+    };
     for (const f of walk(s.hive, (p) => /log[^\\/]*\.jsonl$|cost-ledger[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === s.hive)) take(f, path.basename(f));
     for (const f of walk(path.join(s.hive, 'state', 'mail'), () => true)) take(f, path.join('state-mail', path.relative(path.join(s.hive, 'state', 'mail'), f)));
     for (const f of walk(path.join(s.hive, 'agents', IDS.god, 'inbox'), (p) => p.endsWith('.json'))) take(f, path.join('god-inbox', path.relative(path.join(s.hive, 'agents', IDS.god, 'inbox'), f)));
     for (const f of this.claudeTranscripts()) take(f, path.join('claude-transcripts', path.basename(f)));
     for (const f of this.codexRollouts()) take(f, path.join('codex-rollouts', path.basename(f)));
     for (const f of walk(s.stubs, (p) => p.endsWith('.log'))) take(f, path.join('stubs', path.basename(f)));
-    W.write(path.join(dst, 'app-output.log'), this.appOut);
-    W.writeJson(path.join(dst, 'ledger-history.json'), this.ledgerHistory);
-    W.writeJson(path.join(dst, 'samples.json'), this.samples);
+    if (this.jailLog) take(this.jailLog, 'jail-decisions.jsonl');
+    W.write(path.join(dst, 'app-output.log'), redact(this.appOut));
+    W.write(path.join(dst, 'ledger-history.json'), redact(JSON.stringify(this.ledgerHistory, null, 2)));
+    W.write(path.join(dst, 'samples.json'), redact(JSON.stringify({ ...this.samples, windowWatch: this.watchHits || [] }, null, 2)));
+    W.write(path.join(dst, 'proofs.json'), redact(JSON.stringify(this.proofs || {}, null, 2)));
     return dst;
+  }
+
+  /** Strings only this run produces (the live-location check looks for them). */
+  markers() {
+    return [this.s.base, this.stamp, 'md-layerb', IDS.claude, IDS.codex, this.markerV1, this.markerV2, ...this.nonces].filter(Boolean);
   }
 
   report(extra) {
@@ -1400,55 +1977,75 @@ class LayerB {
     const json = {
       mode: this.args.dryRun ? 'dry-run-stubs' : 'real', ok, startedAt: new Date(this.startedAt || Date.now()).toISOString(),
       durationMs: this.startedAt ? Date.now() - this.startedAt : 0, abort: this.aborted() ? String(this.abort.signal.reason && this.abort.signal.reason.message) : null,
-      models: this.args.models, caps: CAPS, tokens: this.tokens, breakerStop: this.breakerStop || null,
-      facts, checks: this.checks, windows: { samples: this.samples.hidden.length, visibleHits: this.procs.visibleHits },
-      processes: this.killReport || [], ...extra,
+      models: this.args.models, caps: CAPS, globalWallMs: GLOBAL_WALL_MS, tokens: this.tokens, breakerStop: this.breakerStop || null,
+      facts, checks: this.checks, windows: { samples: this.samples.hidden.length, watchHits: this.watchHits || [] },
+      processes: this.killReport || [], proofs: this.proofs || {}, ...extra,
+      warnings: ['CDP and the main-process inspector listened UNAUTHENTICATED on random 127.0.0.1 ports while the app held the jailed logins; any local process could have attached for the run\'s duration.'],
       sandbox: s.base, evidence: extra.evidence
     };
-    W.writeJson(path.join(s.report, 'layer-b-report.json'), json);
+    W.write(path.join(s.report, 'layer-b-report.json'), redact(JSON.stringify(json, null, 2)));
+    const cred = (c) => `- ${c.label}: copy shredded ${c.deleted}; REAL file byte-identical (SHA-256 ${c.shaSame}, mtime ${c.mtimeSame}, size ${c.sizeSame}); **token refresh during the run: ${c.tokenRefreshed === null ? 'unknown' : (c.tokenRefreshed ? 'YES (the jailed copy changed: the real login may need a re-login)' : 'no')}**`;
+    const lw = extra.liveWatch || {};
     const md = [
       `# Layer (b) run — ${json.mode} — ${ok ? 'PASS' : 'NOT PASSED'}`, '',
       `Started ${json.startedAt}, ${Math.round(json.durationMs / 1000)} s.${json.abort ? ` **Aborted: ${json.abort}.**` : ''}`,
-      `Models: claude ${this.args.models.claude}, codex ${this.args.models.codex}. Caps: ${CAPS.perAgentTokens} per agent, ${CAPS.totalTokens} total, ${CAPS.wallMs / 60000} min.`, '',
+      `Models: claude ${this.args.models.claude}, codex ${this.args.models.codex}. Caps: ${CAPS.perAgentTokens} per agent, ${CAPS.totalTokens} total, ${CAPS.wallMs / 60000} min (agents), ${GLOBAL_WALL_MS / 60000} min (whole run).`, '',
       '| Fact | Status | Detail |', '|---|---|---|',
       ...facts.map((f) => `| ${f.id} | ${f.status} | ${String(f.detail).replace(/\|/g, '/').replace(/\n/g, ' ')} |`), '',
       '## Tokens and cost', '', '| Agent | Used (max of sources) | Ledger | Transcript / rollout | USD (ledger) |', '|---|---|---|---|---|',
       ...[IDS.claude, IDS.codex, IDS.god].map((a) => { const t = this.tokens[a] || {}; return `| ${a} | ${t.used ?? 0} | ${t.ledger ?? 0} | ${t.transcript ?? t.rollout ?? '-'} | ${(t.usd ?? 0).toFixed ? (t.usd ?? 0).toFixed(4) : t.usd} |`; }),
       `| total | ${(this.tokens && this.tokens.total) || 0} | | | |`, '',
       '## Checks', '', ...this.checks.map((c) => `- ${c.ok ? 'PASS' : 'FAIL'} ${c.label}${c.detail ? ` — ${String(c.detail).slice(0, 300)}` : ''}`), '',
-      '## Credentials', '', ...(extra.credentials || []).map((c) => `- ${c.label}: copy deleted ${c.deleted}; real file unchanged ${c.unchanged}; the jailed copy changed during the run (token refresh) ${c.changedInJail}`), '',
-      `Windows: ${this.samples.hidden.length} hidden-checks, visible hits ${this.procs.visibleHits.length}.`,
-      `Evidence: ${extra.evidence}`, `Sandbox: ${s.base}${this.args.keepSandbox ? ' (kept)' : ' (removed)'}`
+      '## Credentials', '', ...(extra.credentials || []).map(cred), '',
+      '## Live locations (before/after)', '', `- ${lw.ok ? 'PASS' : 'FAIL'}: ${lw.failures && lw.failures.length ? lw.failures.join('; ') : 'no change carries a run marker'}`,
+      `- changed during the run (the live floor writes these itself): ${(lw.changed || []).length}; key files unchanged: ${(lw.keys || []).filter((k) => k.same).length}/${(lw.keys || []).length}`, '',
+      '## Warnings', '', ...json.warnings.map((w) => `- ${w}`), '',
+      `Windows: ${this.samples.hidden.length} isVisible checks; window-watch hits ${(this.watchHits || []).length}.`,
+      `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base}${this.args.keepSandbox ? ' (kept)' : ' (removed)'}`,
+      `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`
     ].join('\n');
-    W.write(path.join(s.report, 'layer-b-report.md'), md);
+    W.write(path.join(s.report, 'layer-b-report.md'), redact(md));
     return { ok, json };
   }
 
   // ── main ──────────────────────────────────────────────────────────────────
   async main() {
+    this.runStart = Date.now();
     const s = this.layout();
     log(`mode: ${this.args.dryRun ? 'DRY RUN (stub TUIs, zero tokens)' : 'REAL (claude + codex)'}; sandbox ${s.base}`);
-    W.allowRoot(s.base);
-    W.allowRoot(s.report);
     const { liveUserData } = this.preflight();
     if (!this.args.go) {
-      log('preflight OK. Nothing was built or launched (pass --go, with god\'s OK, to run).');
+      log('preflight OK. Nothing was built, launched or written (pass --go with LAYERB_SOAK=1, and god\'s OK, to run).');
       return 0;
     }
+    W.allowRoot(s.base);
+    W.allowRoot(s.report);
+    // R4: shred credentials an earlier killed run left behind, then remove its sandbox.
+    const sweep = sweepStale(os.tmpdir(), s.base);
+    if (sweep.length) log(`startup sweep: ${JSON.stringify(sweep)}`);
+    this.check(sweep.every((x) => x.removed && x.shredded === x.credentials), 'startup sweep: stale md-layerb-* sandboxes shredded and removed', JSON.stringify(sweep));
+    // god c0a73f (c): the live locations, before anything runs.
+    this.liveWatch = LiveWatch.defaults().start();
     let result = { ok: false };
     const credResults = [];
+    let buildCleanup = [];
+    let liveResult = null;
     try {
       this.build();
       this.appEnv(liveUserData);
       this.seed();
       this.installCredentials();
       this.factN4();
+      // R1 zero-token proofs, dry and real: a failure stops the run before any agent starts.
+      if (!this.proveClaudeJail()) throw new Error('the Claude jail proof failed');
+      if (!this.proveCodexSandbox()) throw new Error('the Codex sandbox proof failed');
       this.startedAt = Date.now();
       this.startMonitors();
       await this.launch(this.exe175, '1.1.75 (phase A)');
       await this.openTheConfig();
       await this.assertHidden('after the config opened');
       await this.waitAgentsUp('phase A');
+      this.checkCodexSeed();
       // Claude and Codex facts run side by side (separate agents, separate budgets).
       const claudeA = (async () => {
         if (this.fits(IDS.claude, 'B1')) await this.guard(['B1', 'B8', 'B9'], () => this.factB1B8B9()); else this.fact('B1', 'NOT-PROVEN', 'budget');
@@ -1479,39 +2076,66 @@ class LayerB {
     } finally {
       for (const t of this.bg) clearInterval(t);
       try { this.pollTokens(); } catch { /* best effort */ }
-      await this.stopApp('final').catch((e) => log(`final kill: ${e.message}`));
+      // R4 order: every process FIRST (so no CLI can rewrite a token), then the credentials.
+      await this.stopApp('final').catch((e) => { this.check(false, 'final kill', e.message); });
       const del = this.creds.deleteAll();
       const real = this.creds.verifyRealUnchanged();
       for (const d of del) credResults.push({ ...d, ...(real.find((r) => r.label === d.label) || {}) });
       for (const c of credResults) {
-        this.check(c.deleted, `credentials: the ${c.label} copy is deleted`);
-        this.check(c.unchanged, `credentials: the REAL ${c.label} file is unchanged (mtime + size)`, c.real);
+        this.check(c.deleted, `credentials: the ${c.label} copy is shredded`);
+        this.check(c.unchanged, `credentials: the REAL ${c.label} file is byte-identical (SHA-256 + mtime + size)`, `${c.real} sha ${c.shaSame} mtime ${c.mtimeSame} size ${c.sizeSame}`);
+        this.check(c.tokenRefreshed !== null, `credentials: whether ${c.label} refreshed its token is known`, `refreshed=${c.tokenRefreshed}`);
       }
+      try { buildCleanup = this.cleanupBuild(); } catch (e) { buildCleanup = [`cleanup: ${e.message}`]; }
+      try {
+        liveResult = this.liveWatch.compare(this.markers());
+        this.check(liveResult.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run', liveResult.failures.join('; '));
+      } catch (e) { this.check(false, 'live-location check', e.message); }
       let evidence = null;
       try { evidence = this.collectEvidence(); } catch (e) { log(`evidence: ${e.message}`); }
-      result = this.report({ credentials: credResults, evidence });
+      result = this.report({ credentials: credResults, evidence, liveWatch: liveResult, buildCleanup, sweep });
       if (!this.args.keepSandbox) { try { W.rm(s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } }
     }
     log(`report: ${path.join(s.report, 'layer-b-report.md')}`);
     log(result.ok ? 'LAYER (b): PASS' : 'LAYER (b): NOT PASSED');
     return result.ok ? 0 : 1;
   }
+
+  /** R1: the Codex agent really runs with the jail's sandbox config (the product copied the seed). */
+  checkCodexSeed() {
+    if (this.args.dryRun) return;
+    const cfg = path.join(this.s.hive, 'agents', IDS.codex, '.codex', 'config.toml');
+    let text = '';
+    try { text = fs.readFileSync(cfg, 'utf8'); } catch { /* reported */ }
+    const ok = /sandbox_mode\s*=\s*"workspace-write"/.test(text) && /writable_roots\s*=\s*\[/.test(text) && /network_access\s*=\s*false/.test(text)
+      && !/danger-full-access/.test(text) && this.codexRoots.every((r) => text.toLowerCase().includes(path.resolve(r).toLowerCase()));
+    if (!this.check(ok, 'R1: the Codex agent home carries the jail sandbox config (workspace-write, jail-only writable roots, no network)', cfg)) {
+      this.stop('the Codex agent is not confined');
+      throw new Error('the Codex agent is not confined');
+    }
+  }
 }
 
-module.exports = { b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, Credentials, ProcTracker, stubSource, LayerB, IDS, DEFAULT_MODELS };
+module.exports = { b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
+  let exiting = false;
+  /** R4 order, synchronous (no event loop may be left): 1. kill every process we started, so no
+   *  CLI can rewrite a refreshed token; 2. shred the credential copies; 3. remove the sandbox. */
   const emergency = (code) => {
-    // Synchronous: credentials first, then every pid we know.
-    try { if (lb) lb.creds.deleteAll(); } catch { /* best effort */ }
+    if (exiting) return;
+    exiting = true;
     try { if (lb) lb.procs.killSyncBestEffort(); } catch { /* best effort */ }
+    try { if (lb && lb.watch) lb.watch.stop(); } catch { /* best effort */ }
+    try { if (lb) lb.creds.deleteAll(); } catch { /* best effort */ }
+    try { if (lb && lb.s && !lb.args.keepSandbox && fs.existsSync(lb.s.base)) W.rm(lb.s.base); } catch { /* best effort */ }
     process.exit(code);
   };
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(sig, () => { log(`${sig}: cleaning up`); emergency(130); });
   process.on('uncaughtException', (e) => { console.error('[layer-b] uncaught:', e); emergency(1); });
   process.on('unhandledRejection', (e) => { console.error('[layer-b] unhandled:', e); emergency(1); });
-  process.on('exit', () => { try { if (lb) lb.creds.deleteAll(); } catch { /* best effort */ } });
+  process.on('exit', () => { try { if (lb && !exiting) { lb.procs.killRootsByHandle('process exit'); lb.creds.deleteAll(); } } catch { /* best effort */ } });
   let args;
   try { args = parseArgs(process.argv.slice(2)); } catch (e) { console.error(e.message); process.exit(2); }
   lb = new LayerB(args);
