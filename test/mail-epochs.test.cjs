@@ -727,3 +727,38 @@ test('Jim LOW residual: a RESPAWN as a different provider invalidates the cached
   server.mailChannel('sw-1'); server.mailChannel('sw-1');
   assert.equal(reads, 0, 'served from the provider cache');
 });
+
+test('Jim LOW nit: stop() unsubscribes from onAgentProvisioned: the listener count goes back down and a later provisioning no longer touches that server\'s cache', async (t) => {
+  const home = fs.mkdtempSync(path.join(JAIL, 'unsub-'));
+  const hive = new HiveManager(() => home, () => true);
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
+  const base = hive.provisionedListeners.size;
+  const servers = Array.from({ length: 5 }, () => new HookServer(hive, () => null, () => ({ notifications: false })));
+  t.after(() => { for (const s of servers) { try { s.stop(); } catch { /* noop */ } } });
+  assert.equal(hive.provisionedListeners.size, base + 5, 'one listener per server');
+  const [a, b] = servers;
+  assert.equal(a.mailChannel('sw-1').provider, 'claude');
+  assert.equal(b.mailChannel('sw-1').provider, 'claude');
+  for (const s of servers) s.stop();
+  assert.equal(hive.provisionedListeners.size, base, 'every stop() removed its listener: nothing piles up');
+  a.stop();
+  assert.equal(hive.provisionedListeners.size, base, 'a second stop() is harmless');
+  // After stop(), a provisioning event reaches no stopped server: its cache is not touched.
+  const seen = [];
+  const del = b.providerCache.delete.bind(b.providerCache);
+  b.providerCache.delete = (k) => { seen.push(k); return del(k); };
+  b.providerCache.set('sw-1', { provider: 'claude', at: Date.now() });
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'codex', cwd: home });
+  assert.deepEqual(seen, [], 'the stopped server\'s listener is gone');
+  // A restarted server subscribes again, once, and sees the next respawn.
+  b.start();
+  t.after(() => { try { b.stop(); } catch { /* noop */ } });
+  b.start();
+  assert.equal(hive.provisionedListeners.size, base + 1, 'start() re-subscribes exactly once');
+  await hive.ensureAgent({ id: 'sw-1', name: 'sw', provider: 'claude', cwd: home });
+  assert.deepEqual(seen, ['sw-1'], 'the restarted server drops the respawned agent\'s cached provider');
+  b.stop();
+  assert.equal(hive.provisionedListeners.size, base);
+});

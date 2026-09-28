@@ -328,7 +328,20 @@ export class HookServer {
   ) {
     // Jim LOW residual: a (re)spawn rewrites the agent's registry entry, possibly with a DIFFERENT
     // provider; the cached provider must not outlive it (the very next hook reads the new one).
-    try { this.hive.onAgentProvisioned?.((agentId) => { this.providerCache.delete(agentId); }); } catch { /* a test double */ }
+    this.subscribeProvisioned();
+  }
+
+  /** The unsubscribe HiveManager.onAgentProvisioned returned; null while not subscribed. stop()
+   *  calls it (Jim's nit: servers built on one hive must not pile up listeners) and start()
+   *  subscribes again, so a restarted server still drops a respawned agent's cached provider. */
+  private unsubscribeProvisioned: (() => void) | null = null;
+
+  private subscribeProvisioned(): void {
+    if (this.unsubscribeProvisioned) return;
+    try {
+      const off = this.hive.onAgentProvisioned?.((agentId) => { this.providerCache.delete(agentId); });
+      this.unsubscribeProvisioned = typeof off === 'function' ? off : null;
+    } catch { /* a test double */ }
   }
 
   /** Bounded drift tally, keyed `version|driftCode`. Fixed-string keys only: the payload
@@ -341,6 +354,7 @@ export class HookServer {
   }
 
   start(): void {
+    this.subscribeProvisioned();
     const sock = this.hive.sockPath();
     if (!sock || this.server) return;
     // Clear a stale socket file left by a previous run.
@@ -374,6 +388,11 @@ export class HookServer {
   }
 
   stop(): void {
+    const off = this.unsubscribeProvisioned;
+    this.unsubscribeProvisioned = null;
+    try { off?.(); } catch { /* noop */ }
+    // Unsubscribed, a respawn is no longer seen: nothing cached may outlive that.
+    this.providerCache.clear();
     try { this.server?.close(); } catch { /* noop */ }
     this.server = null;
     const sock = this.hive.sockPath();
