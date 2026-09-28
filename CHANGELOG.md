@@ -11,6 +11,52 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.75] — 2026-09-28
+
+**The app now handles the mail: agents get each message's text directly and never read or move inbox files.**
+Rollback: 1.1.74 (reinstall).
+
+### Changed
+
+- **Agents no longer read, list or move mail files.** Each new message's text arrives directly in
+  the agent's context at the start of its next turn, and during a turn if it arrives while the agent
+  is working. The instructions telling agents to "move handled files to inbox/.done" are gone.
+- **The app files handled mail itself.** It keeps its own record of every message (delivered, shown
+  to the agent, seen in a completed turn, replied where a reply is expected). When the turn that saw
+  a message finishes, the app moves the message into `inbox/.done` itself.
+- **Exact inbox counts.** The counts in the app come from that record instead of guesses based on
+  files.
+- **A requests tab.** Every request still waiting for a reply is listed, until the reply arrives.
+- **Mail to an agent you or god archived bounces back to the sender** instead of sitting unread.
+  An agent that crashed, or was not restored yet after a restart, keeps receiving its mail and sees
+  it once it is back.
+- **An archived agent's unread mail is set aside, not lost.** It moves to `inbox/.undelivered` and
+  is listed once for you to decide on (for example meredith's old messages). Restoring the agent
+  brings its mail back into its inbox.
+- **Some providers still read their own mail:** gemini, grok, opencode, pi and cursor keep reading
+  their inbox files themselves. The app files their mail when it can prove the turn ended;
+  otherwise they keep today's rule.
+
+### Good to know
+
+- **"Acted" means seen in a completed turn, not done.** Replies are tracked separately (the
+  requests tab).
+- If an agent's mail stops reaching it through its hooks, it switches to reading its files itself
+  and you get an alert. For a Codex agent the alert says to respawn it to restore mail delivery.
+- **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
+  unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
+  broadcasts one reminder, "move your mail again", because agents may have noted the new rule in
+  their memory. The broadcast text is: "1.1.74 restored: move handled mail to inbox/.done again".
+  After a rollback, mail to an archived agent waits in its inbox again instead of bouncing (the
+  archived bounce is a 1.1.75 change), "acted = seen" no longer applies, and mail already set aside
+  in `inbox/.undelivered` stays there until you move it back.
+- **Installing (as for the last releases): stop Claude Code's background service first.**
+  1. Quit the app.
+  2. In a terminal, run `claude daemon status`, then `claude daemon stop --any`.
+     If that fails, stop it by its process id: `taskkill /PID <pid> /T` (the pid is shown by
+     `claude daemon status`).
+  3. Start 1.1.75.
+
 ## [1.1.74] — 2026-09-28
 
 **A damaged task board, agent list or settings file is never silently wiped or reset any more; a banner names it.**
