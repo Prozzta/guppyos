@@ -158,3 +158,32 @@ test('main wires the ledger into the bridge (n1DueIds, openIds), like the rig ho
   const host = readSource('test/mail-rig/rig-host.cjs');
   assert.match(host, /n1DueIds: \(agentId\) => hive\.mail\.n1Due\(agentId\),\s*openIds: \(agentId\) => hive\.mail\.openNotDelivered\(agentId\),/);
 });
+
+test('Jim LOW N3: the N1 re-offer is really PENDING: the very next claim (no reconcile in between) carries the id', () => {
+  const c = new WorkerWakeWatchdog();
+  let now = 11_000_000;
+  round(c, now);
+  now += 70_000;
+  const r2 = round(c, now, { n1Due: ['m1'] });
+  assert.deepEqual(r2.n1, ['m1']);
+  assert.deepEqual(c.state('cl').pending, ['m1'], 'back in pending');
+  now += 70_000;
+  const claim = c.claim(facts('cl', now), 'reconcile', 'reconcile', now);   // NO reconcile first
+  assert.ok(claim, 'claimed at once');
+  assert.deepEqual([...claim.ids], ['m1'], 'the N1-confirming surfacing is offered now');
+});
+
+test('Jim LOW N6: reconcile keeps the re-offer state of an OPEN id but NEVER keeps it pending', () => {
+  const c = new WorkerWakeWatchdog();
+  c.reconcile('cl', ['m1', 'm2'], []);
+  assert.deepEqual(c.state('cl').pending, ['m1', 'm2']);
+  c.reconcile('cl', ['m2'], ['m1']);                         // m1 is surfacing: open, not delivered
+  assert.deepEqual(c.state('cl').pending, ['m2'], 'an open id is not pending (it is not deliverable)');
+  // Also for an id that WAS announced (the state kept is the re-offer state, not pending).
+  const now = 12_000_000;
+  const claim = c.claim(facts('cl', now), 'reconcile', 'reconcile', now);
+  c.settle(claim, 'COMMITTED', now, false);
+  c.reconcile('cl', [], ['m2']);
+  assert.deepEqual(c.state('cl').pending, []);
+  assert.deepEqual(c.state('cl').announced, ['m2'], 'its announced state is kept');
+});
