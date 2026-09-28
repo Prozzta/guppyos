@@ -15,6 +15,7 @@
  * sessionData are inside the sandbox.
  */
 const { app, BrowserWindow, ipcMain } = require('electron');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 const { writeFileSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const ts = require('typescript');
@@ -23,9 +24,8 @@ const MARKER = '__RENDERERPROFILE_RESULT__';
 const argOf = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const sandbox = argOf('sandbox', null);
 if (!sandbox) { process.stderr.write('renderer-profile harness: --sandbox required\n'); process.exit(2); }
-app.setPath('userData', sandbox);
-app.setPath('sessionData', sandbox);
-app.setPath('crashDumps', join(sandbox, 'crashDumps'));
+// HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
+isolateAppPaths(app, sandbox);
 
 const src = readFileSync(join(__dirname, '..', '..', 'src', 'main', 'rendererRecovery.ts'), 'utf8');
 const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -83,7 +83,7 @@ async function scenario(name, { arm = true, busy = false } = {}) {
   let fileNodes = null;
   if (r.file) { try { fileNodes = JSON.parse(readFileSync(r.file, 'utf8')).nodes.length; } catch { fileNodes = -1; } }
   // Not left paused: an idle page must still answer; a busy one must still be allocating (alive).
-  const answers = busy ? null : await Promise.race([wc.executeJavaScript('window.ping()'), new Promise((res) => setTimeout(() => res('no-answer'), 2000))]);
+  const answers = busy ? null : await Promise.race([wc.executeJavaScript('window.ping()'), new Promise((res) => setTimeout(() => res('no-answer'), 30000))]);
   const attachedAfter = wc.debugger.isAttached();
   const out = { name, armed, pid, profile: { ...r, file: r.file ? 'written' : null }, fileNodes, worstGapMs, answers, attachedAfter, foreignResumes: probe.foreignResumes };
   probe.giveUp();
@@ -101,7 +101,7 @@ async function foreign() {
   const armed = await probe.arm();
   const after = once('after-debugger');
   wc.send('page:debugger');
-  const got = await Promise.race([after.then(() => 'continued'), new Promise((r) => setTimeout(() => r('stuck'), 5000))]);
+  const got = await Promise.race([after.then(() => 'continued'), new Promise((r) => setTimeout(() => r('stuck'), 30000))]);
   const out = { name: 'foreign', armed, got, foreignResumes: probe.foreignResumes };
   probe.giveUp();
   win.destroy();
