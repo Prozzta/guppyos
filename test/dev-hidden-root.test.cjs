@@ -11,10 +11,13 @@
  *  - MUNDER_HIDDEN=1: no window is ever shown, focused or restored; no toast, dialog, browser or
  *    Explorer window. Honoured only under MUNDER_DEV=1.
  *
- * INERT MARKER. Without MUNDER_DEV=1 neither variable is even READ (a throwing env proves it), a
- * fresh process that carries both but not MUNDER_DEV resolves the fixed root and not-hidden, no
- * other src/ file reads either name, and — when out/ is built — the shipped main bundle keeps the
- * MUNDER_DEV gate in front of both reads. No app, window or CLI is started by this file.
+ * INERT MARKER. Both seams are read only when BOTH hold: the bundle was built with
+ * MUNDER_LAYERB_SEAMS=1 (electron.vite.config.ts defines __LAYERB_SEAMS__; every normal build, the
+ * release included, compiles them to false), AND the process runs with MUNDER_DEV=1. Otherwise
+ * neither variable is even READ (a throwing env proves it); a fresh process that carries both but
+ * not MUNDER_DEV resolves the fixed root and not-hidden; no other src/ file reads either name; and,
+ * when out/ is built, the bundle's LAYERB_SEAMS_BUILT is evaluated (false for a normal build) and
+ * its gates are checked. No app, window or CLI is started by this file.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -113,6 +116,17 @@ test('INERT: without MUNDER_DEV the environment is NOT READ (a throwing env) —
   assert.equal(iso.hiddenRun({ MUNDER_HIDDEN: 'true' }, true), false, 'only the exact value 1');
 });
 
+test('INERT: a bundle built WITHOUT the layer-b seams ignores both, even under MUNDER_DEV=1 (a throwing env)', () => {
+  const trap = new Proxy({}, { get() { throw new Error('env read in a seamless build'); }, has() { throw new Error('env probed in a seamless build'); } });
+  assert.deepEqual(iso.resolveDevDataRoot({ env: trap, dev: true, seams: false, platform: WIN }), { ok: true, root: FIXED, override: false });
+  assert.equal(iso.hiddenRun(trap, true, false), false);
+  assert.equal(iso.LAYERB_SEAMS_BUILT, true, 'unbundled source (no define) counts as carrying them: the unit tests');
+  const cfg = codeOnly(readSource('electron.vite.config.ts'), 'x.ts');
+  assert.match(cfg, /__LAYERB_SEAMS__: JSON\.stringify\(process\.env\.MUNDER_LAYERB_SEAMS === '1'\)/, 'the define: true only for a MUNDER_LAYERB_SEAMS=1 build');
+  const defineMain = cfg.slice(cfg.indexOf('const defineMain'), cfg.indexOf('};', cfg.indexOf('const defineMain')));
+  assert.ok(defineMain.includes('__LAYERB_SEAMS__'), 'on the MAIN bundle');
+});
+
 /** A fresh process loads devIsolation.ts with exactly `extra` on top of a scrubbed env. */
 function freshLoad(extra) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-hidden-root-'));
@@ -128,7 +142,7 @@ function freshLoad(extra) {
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 }
 
-test('INERT (fresh process, the packaged situation): MUNDER_DEV_ROOT + MUNDER_HIDDEN without MUNDER_DEV change nothing', () => {
+test('INERT (fresh process): MUNDER_DEV_ROOT + MUNDER_HIDDEN without MUNDER_DEV change nothing, packaged or not', () => {
   const sandbox = path.join(os.tmpdir(), 'md-layerb-inert-probe');
   const r = freshLoad({ MUNDER_DEV_ROOT: sandbox, MUNDER_HIDDEN: '1' });
   assert.equal(r.dev, false);
@@ -160,25 +174,69 @@ test('SOURCE: no src/ file other than devIsolation.ts names either variable (one
   assert.deepEqual(hits.map((h) => h.replace(/\\/g, '/')), ['src/main/devIsolation.ts']);
   const src = codeOnly(readSource('src/main/devIsolation.ts'));
   // Both readers return BEFORE touching the env when isolation is off.
-  assert.match(src, /function resolveDevDataRoot[\s\S]*?if \(!\(opts\.dev \?\? DEV_ISOLATION\)\) return \{ ok: true, root: fixed, override: false \};[\s\S]*?const env = opts\.env \?\? process\.env;/);
-  assert.match(src, /function hiddenRun[^{]*\{\s*if \(!dev\) return false;\s*return env\[DEV_HIDDEN_ENV\] === '1';/);
+  assert.match(src, /function resolveDevDataRoot[\s\S]*?if \(!\(opts\.dev \?\? DEV_ISOLATION\) \|\| !\(opts\.seams \?\? LAYERB_SEAMS_BUILT\)\) return \{ ok: true, root: fixed, override: false \};[\s\S]*?const env = opts\.env \?\? process\.env;/);
+  assert.match(src, /function hiddenRun[^{]*\{\s*if \(!dev \|\| !seams\) return false;\s*return env\[DEV_HIDDEN_ENV\] === '1';/);
+  assert.match(src, /export const LAYERB_SEAMS_BUILT: boolean = typeof __LAYERB_SEAMS__ === 'undefined' \? true : __LAYERB_SEAMS__ === true;/);
   assert.match(src, /export const DEV_ISOLATION: boolean = process\.env\.MUNDER_DEV === '1';/);
 });
 
-test('SOURCE: every window-surfacing call in main is behind DEV_HIDDEN; the window is built hidden and unthrottled', () => {
-  const surfacing = /\.show\(\)|\.focus\(\)|\.restore\(\)|showInactive|moveTop|flashFrame|dialog\.show\w+\(|shell\.(openExternal|openPath|showItemInFolder)\(|new Notification\(/;
-  const unguarded = [];
-  for (const f of ['src/main/index.ts', 'src/main/hooks.ts', 'src/main/updater.ts']) {
-    const lines = codeOnly(readSource(f)).split('\n');
-    lines.forEach((line, i) => {
-      if (!surfacing.test(line) || /capacityStore\.restore\(\)/.test(line)) return;
-      const window = lines.slice(Math.max(0, i - 12), i + 1).join('\n');
-      if (!/DEV_HIDDEN/.test(window)) unguarded.push(`${f}:${i + 1}: ${line.trim()}`);
-    });
-  }
+/**
+ * H6 (Jim): the gate check is STRUCTURAL, not a line window, so a multi-line guard is understood and
+ * an unguarded call anywhere is caught. A call is guarded when, walking up to its enclosing function:
+ *  - it sits in the THEN branch of an `if` whose condition contains `!DEV_HIDDEN`, or in the ELSE
+ *    branch of one whose condition is `DEV_HIDDEN ...`;
+ *  - it is the right side of `&&` whose left side contains `!DEV_HIDDEN`;
+ *  - an EARLIER statement of an enclosing block is `if (DEV_HIDDEN ...) return ...`.
+ */
+const SURFACING = /^(show|focus|restore|showInactive|moveTop|flashFrame|showMessageBox|showMessageBoxSync|showErrorBox|showOpenDialog|showOpenDialogSync|showSaveDialog|showSaveDialogSync|openExternal|openPath|showItemInFolder)$/;
+function unguardedSurfacing(text, fileName) {
+  const ts = require('typescript');
+  const sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+  const out = [];
+  const isFn = (n) => ts.isFunctionLike(n);
+  const guardIf = (st) => ts.isIfStatement(st) && /^\(?\s*DEV_HIDDEN\b/.test(st.expression.getText(sf))
+    && (ts.isReturnStatement(st.thenStatement) || (ts.isBlock(st.thenStatement) && st.thenStatement.statements.length === 1 && ts.isReturnStatement(st.thenStatement.statements[0])));
+  const guarded = (call) => {
+    let node = call;
+    while (node.parent && !isFn(node)) {
+      const par = node.parent;
+      if (ts.isIfStatement(par)) {
+        const cond = par.expression.getText(sf);
+        if (node === par.thenStatement && /!DEV_HIDDEN\b/.test(cond)) return true;
+        if (node === par.elseStatement && /^\(?\s*DEV_HIDDEN\b/.test(cond)) return true;
+      }
+      if (ts.isBinaryExpression(par) && par.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && node === par.right && /!DEV_HIDDEN\b/.test(par.left.getText(sf))) return true;
+      if ((ts.isBlock(par) || ts.isSourceFile(par)) && par.statements) {
+        const idx = par.statements.indexOf(node);
+        if (par.statements.slice(0, Math.max(0, idx)).some(guardIf)) return true;
+      }
+      node = par;
+    }
+    return false;
+  };
+  const visit = (n) => {
+    if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && SURFACING.test(n.expression.name.text)) {
+      const recv = n.expression.expression.getText(sf);
+      const benign = /^capacityStore$/.test(recv);
+      if (!benign && !guarded(n)) out.push(`${fileName}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${n.getText(sf).slice(0, 80)}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+test('SOURCE: every window-surfacing call in main is behind DEV_HIDDEN (structural check); the window is built hidden and unthrottled', () => {
+  const files = ['src/main/index.ts', 'src/main/hooks.ts', 'src/main/updater.ts'];   // capacityToast.ts only calls its injected deps.show (index.ts's gated one)
+  const unguarded = files.flatMap((f) => unguardedSurfacing(readSource(f), f));
   assert.deepEqual(unguarded, [], 'a surfacing call with no DEV_HIDDEN gate');
-  const idx = codeOnly(readSource('src/main/index.ts'));
-  assert.match(idx, /win\.once\('ready-to-show', \(\) => \{ if \(!DEV_HIDDEN\) win\.show\(\); \}\);/);
+  const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  // Window show/restore/focus happen ONLY inside surfaceWindow, whose first statement is the gate.
+  const helper = /function surfaceWindow\([^)]*\)[^{]*\{\s*if \(DEV_HIDDEN\) return;/;
+  assert.match(idx, helper);
+  const winCalls = idx.match(/\b\w+\.(show|restore|focus)\(\)/g) || [];
+  assert.deepEqual(winCalls.filter((c) => !/^capacityStore\./.test(c) && !/\bNotification\b/.test(c)).sort(), ['w.focus()', 'w.restore()', 'w.show()'], 'only surfaceWindow touches a window');
+  assert.match(idx, /win\.once\('ready-to-show', \(\) => surfaceWindow\(win, \{ show: true \}\)\);/);
   const ctor = idx.slice(idx.indexOf('const win = new BrowserWindow({'), idx.indexOf("win.once('ready-to-show'"));
   assert.match(ctor, /show: false,/, 'built hidden');
   assert.match(ctor, /backgroundThrottling: false,/, 'hidden timers are not throttled');
@@ -191,6 +249,24 @@ test('SOURCE: every window-surfacing call in main is behind DEV_HIDDEN; the wind
   assert.match(launcher, /delete env\.MUNDER_DEV_ROOT;\s*delete env\.MUNDER_HIDDEN;/);
 });
 
+test('SOURCE: the structural check CATCHES an unguarded call, a multi-line guard removed (H6), and the helper gate removed', () => {
+  const idx = readSource('src/main/index.ts');
+  const hooks = readSource('src/main/hooks.ts');
+  const mutants = [
+    ['surfaceWindow gate removed', idx.replace(/(function surfaceWindow\([^)]*\)[^{]*\{\s*)if \(DEV_HIDDEN\) return;/, '$1'), 'index.ts'],
+    ['H6: a multi-line guard removed (the old hire-import shape)', idx.replace('function deliverHire(manifest: HireManifest): void {', 'function deliverHire(manifest: HireManifest): void {\n  if (mainWindow) {\n    mainWindow.show();\n  }'), 'index.ts'],
+    ['a dialog handler gate removed', idx.replace(/(ipcMain\.handle\('dialog:chooseFolder'[\s\S]*?)if \(DEV_HIDDEN\) return \{ ok: false as const, error: 'cancelled' \};[^\n]*\n/, '$1'), 'index.ts'],
+    ['the hooks toast gate removed', hooks.replace('if (DEV_HIDDEN || !this.getConfig().notifications) return;', 'if (!this.getConfig().notifications) return;'), 'hooks.ts'],
+    ['a gate that guards nothing (an unrelated earlier DEV_HIDDEN)', 'function f() { const x = DEV_HIDDEN; dialog.showErrorBox("a", "b"); }', 'm.ts']
+  ];
+  for (const [name, text, file] of mutants) {
+    assert.notEqual(text, file === 'hooks.ts' ? hooks : idx, `mutant "${name}" did not apply`);
+    assert.ok(unguardedSurfacing(text, file).length > 0, `mutant "${name}" SURVIVED the structural check`);
+  }
+  // And a well-formed multi-line guard passes.
+  assert.deepEqual(unguardedSurfacing('function f() {\n  if (a &&\n      !DEV_HIDDEN) {\n    w.show();\n  }\n}', 'ok.ts'), []);
+});
+
 // ─────────────────────────────────────────────────────────────── the BUILT bundle (static)
 
 const BUNDLE = path.join(REPO, 'out', 'main', 'index.js');
@@ -200,18 +276,31 @@ if (!fs.existsSync(BUNDLE)) {
     'out/main/index.js not built — run npm run build'
   );
 } else {
-  test('BUILT: the shipped main bundle keeps both seams behind MUNDER_DEV, and the window hidden under MUNDER_HIDDEN', () => {
+  test('BUILT: the main bundle gates both seams on the build define AND MUNDER_DEV; a normal build compiles them out', () => {
     const b = readSource(BUNDLE);
     const at = (needle) => { const i = b.indexOf(needle); assert.ok(i >= 0, `missing from out/main/index.js: ${needle}`); return i; };
     at('process.env.MUNDER_DEV === "1"');
+    // The define was applied: no bare identifier is left, and the constant EVALUATES.
+    assert.ok(!/__LAYERB_SEAMS__/.test(b), 'the __LAYERB_SEAMS__ define was substituted');
+    const m = /const LAYERB_SEAMS_BUILT = ([^;\n]+);/.exec(b);
+    assert.ok(m, 'LAYERB_SEAMS_BUILT is in the bundle');
+    assert.match(m[1], /^[\w\s"'=!?:()]+$/, 'a constant expression');
+    const built = Function(`"use strict"; return (${m[1]});`)();
+    const seamsBuild = process.env.MUNDER_LAYERB_SEAMS === '1';
+    // A bundle built by the layer-b runner (MUNDER_LAYERB_SEAMS=1) carries them; every other does not.
+    assert.equal(typeof built, 'boolean');
+    // STRICT: out/ must never hold a seams build unless this run is one (the layer-b runner rebuilds out/
+    // WITHOUT the seams when it finishes, so a stale test bundle can never be packaged by accident).
+    assert.equal(built, seamsBuild, 'LAYERB_SEAMS_BUILT in out/main matches the build flag (false for every normal build)');
     const resolveAt = at('function resolveDevDataRoot(');
     const gate = b.indexOf('override: false', resolveAt);
     const envRead = b.indexOf('process.env', resolveAt);
     assert.ok(gate > resolveAt && envRead > gate, 'resolveDevDataRoot returns the fixed root before it reads the env');
+    assert.match(b.slice(resolveAt, gate), /LAYERB_SEAMS_BUILT/, 'and that return is gated on the build define too');
     const hiddenAt = at('function hiddenRun(');
     const body = b.slice(hiddenAt, b.indexOf('}', b.indexOf('return false', hiddenAt)) + 200);
-    assert.match(body, /if \(!dev\) return false;[\s\S]*=== "1"/, 'hiddenRun reads MUNDER_HIDDEN only under MUNDER_DEV');
-    assert.match(b, /ready-to-show", \(\) => \{\s*if \(!DEV_HIDDEN\) win\.show\(\);/);
-    assert.equal((b.match(/MUNDER_DEV_ROOT/g) || []).length >= 1, true);
+    assert.match(body, /if \(!dev \|\| !seams\) return false;[\s\S]*=== "1"/, 'hiddenRun reads MUNDER_HIDDEN only under MUNDER_DEV in a seams build');
+    assert.match(b, /ready-to-show", \(\) => surfaceWindow\(win, \{ show: true \}\)\)/);
+    assert.match(b, /function surfaceWindow\([^)]*\) \{\s*if \(DEV_HIDDEN\) return;/);
   });
 }

@@ -247,6 +247,19 @@ process.on('unhandledRejection', (reason) => {
 
 const ptyManager = new PtyManager();
 
+/**
+ * MUNDER_HIDDEN (layer-b test infrastructure): the ONE place main shows, restores or focuses a
+ * window. A hidden run never does any of it, so a window built show:false never appears and never
+ * gets a taskbar button. Every caller says exactly what it wants; nothing is implied.
+ */
+function surfaceWindow(w: BrowserWindow | null | undefined, how: { show?: boolean; restore?: boolean; focus?: boolean }): void {
+  if (DEV_HIDDEN) return;
+  if (!w || w.isDestroyed()) return;
+  if (how.restore && w.isMinimized()) w.restore();
+  if (how.show) w.show();
+  if (how.focus) w.focus();
+}
+
 function runCodexDaemonCommand(
   executable: string,
   args: string[],
@@ -1823,7 +1836,7 @@ function capacityToast(toast: CapacityToast | null): NoticeDelivery {
     // MUNDER_HIDDEN (dev only): a hidden run never puts a toast on the desktop.
     notificationsOn: () => !DEV_HIDDEN && readConfig().notifications === true,
     supported: () => Notification.isSupported(),
-    show: (t) => { new Notification({ title: t.title, body: t.body }).show(); }
+    show: (t) => { if (DEV_HIDDEN) return; new Notification({ title: t.title, body: t.body }).show(); }
   });
 }
 
@@ -2947,16 +2960,13 @@ const pendingHires: HireManifest[] = [];
 let rendererReadyForHires = false;
 
 function deliverHire(manifest: HireManifest): void {
-  // MUNDER_HIDDEN (dev only): never show or focus the window of a hidden run.
+  // MUNDER_HIDDEN (dev only): surfaceWindow never shows or focuses the window of a hidden run.
   if (rendererReadyForHires && mainWindow && !mainWindow.isDestroyed()) {
-    if (!DEV_HIDDEN) { mainWindow.show(); mainWindow.focus(); }
+    surfaceWindow(mainWindow, { show: true, focus: true });
     mainWindow.webContents.send('hire:import', manifest);
   } else {
     pendingHires.push(manifest);
-    if (!DEV_HIDDEN && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    surfaceWindow(mainWindow, { show: true, focus: true });
   }
 }
 
@@ -3010,10 +3020,7 @@ if (!gotInstanceLock) {
   app.quit();
 } else {
   app.on('second-instance', (_evt, argv) => {
-    if (mainWindow && !DEV_HIDDEN) {   // MUNDER_HIDDEN: never restore or focus
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    surfaceWindow(mainWindow, { restore: true, focus: true });   // MUNDER_HIDDEN: never restore or focus
     const link = argv.find((a) => a.startsWith('munderdifflin://'));
     if (link) void handleHireLink(link);
   });
@@ -3161,7 +3168,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
   // MUNDER_HIDDEN=1 under MUNDER_DEV=1 (layer-b test infrastructure): the window is
   // built with show:false and is NEVER shown, so it has no taskbar button either. CDP
   // drives it; backgroundThrottling:false (above) keeps its timers running unthrottled.
-  win.once('ready-to-show', () => { if (!DEV_HIDDEN) win.show(); });
+  win.once('ready-to-show', () => surfaceWindow(win, { show: true }));
   // MUNDER_DEV=1: the renderer's <title> (index.html) replaces the BrowserWindow
   // `title` option as soon as the page loads, so the DEV marker must be applied
   // to every title the page sets — that is the whole point of the marker
@@ -3214,7 +3221,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     // Jim RR-164 (2): the quit warning is a modal in the renderer; if that renderer is gone
     // (crashed, recovery given up), ask natively instead of waiting on nothing.
     if (rendererGone(wc)) { quitOrCancelNatively(count, win); return; }
-    if (!DEV_HIDDEN) win.focus();   // MUNDER_HIDDEN: never focus
+    surfaceWindow(win, { focus: true });   // MUNDER_HIDDEN: never focus
     wc.send('app:closeRequested', { ptyCount: count });
   });
 
@@ -6983,7 +6990,7 @@ app.on('before-quit', (e) => {
   e.preventDefault();
   if (mainWindow) {
     if (rendererGone(mainWindow.webContents)) { quitOrCancelNatively(count, mainWindow); return; }
-    if (!DEV_HIDDEN) mainWindow.focus();   // MUNDER_HIDDEN: never focus
+    surfaceWindow(mainWindow, { focus: true });   // MUNDER_HIDDEN: never focus
     mainWindow.webContents.send('app:closeRequested', { ptyCount: count });
   } else quitOrCancelNatively(count, null);
 });

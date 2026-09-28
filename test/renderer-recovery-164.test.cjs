@@ -411,8 +411,8 @@ test('AUDIT (1) wiring: the recovered page learns it synchronously at load and A
 
 test('AUDIT (2) wiring: with the renderer gone, close and before-quit ask natively; the give-up dialog can quit', () => {
   const idx = read('src/main/index.ts');
-  // Layer-b test infrastructure (MUNDER_HIDDEN, dev only): a hidden run never focuses; otherwise unchanged.
-  assert.match(idx, /if \(rendererGone\(wc\)\) \{ quitOrCancelNatively\(count, win\); return; \}\s*if \(!DEV_HIDDEN\) win\.focus\(\);[^\n]*\s*wc\.send\('app:closeRequested'/);
+  // Layer-b test infrastructure (MUNDER_HIDDEN, dev only): the focus goes through surfaceWindow, which a hidden run skips; otherwise unchanged.
+  assert.match(idx, /if \(rendererGone\(wc\)\) \{ quitOrCancelNatively\(count, win\); return; \}\s*surfaceWindow\(win, \{ focus: true \}\);[^\n]*\s*wc\.send\('app:closeRequested'/);
   assert.match(idx, /if \(rendererGone\(mainWindow\.webContents\)\) \{ quitOrCancelNatively\(count, mainWindow\); return; \}/);
   assert.match(idx, /\} else quitOrCancelNatively\(count, null\);/, 'no window at all: still quittable');
   // Jim LOW: the same effects as the renderer modal (app:confirmClose / app:cancelClose).

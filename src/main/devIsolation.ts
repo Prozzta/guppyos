@@ -102,6 +102,18 @@ export function fixedDevDataRoot(platform: NodeJS.Platform = process.platform): 
   return platform === 'win32' ? 'C:\\Dunder\\MunderDevData' : join(homedir(), 'MunderDevData');
 }
 
+declare const __LAYERB_SEAMS__: boolean | undefined;
+
+/**
+ * ZT-I1-MAIL layer (b), test infrastructure: whether THIS bundle carries the two seams below.
+ * electron.vite.config.ts defines __LAYERB_SEAMS__ for every main bundle: true only when the build
+ * ran with MUNDER_LAYERB_SEAMS=1 (the layer-b runner's own sandbox build), false for every other
+ * build, the release included. So in a normal build, packaged or not, MUNDER_DEV_ROOT and
+ * MUNDER_HIDDEN are inert even under MUNDER_DEV=1. Unbundled source (the unit tests, which load the
+ * .ts directly) has no define and counts as carrying them.
+ */
+export const LAYERB_SEAMS_BUILT: boolean = typeof __LAYERB_SEAMS__ === 'undefined' ? true : __LAYERB_SEAMS__ === true;
+
 /** ZT-I1-MAIL layer (b), test infrastructure: the ONE explicit, validated per-run
  *  relocation of the whole dev root (userData, hive, harness home, single-instance
  *  lock and pipe all derive from it). Honoured only under MUNDER_DEV=1. */
@@ -115,9 +127,9 @@ export type DevRootResolution =
   | { ok: false; value: string; reason: string };
 
 /**
- * The dev root in force. Without MUNDER_DEV=1 the environment is NOT READ AT ALL (a
- * packaged/Stable run can never be relocated): the fixed root comes back, and it is
- * never used there anyway. Under MUNDER_DEV=1 with `MUNDER_DEV_ROOT` unset or blank,
+ * The dev root in force. Without MUNDER_DEV=1, or in a bundle built without the layer-b seams
+ * (LAYERB_SEAMS_BUILT false: every normal build, the release included), the environment is NOT
+ * READ AT ALL: the fixed root comes back (and outside MUNDER_DEV it is never used anyway). Under MUNDER_DEV=1 with `MUNDER_DEV_ROOT` unset or blank,
  * the fixed root (the mission contract, unchanged). With it set, the value must be:
  *   - an absolute path (on Windows a drive-letter path: no relative, drive-relative,
  *     rooted-without-drive or UNC form), without NUL;
@@ -133,10 +145,12 @@ export function resolveDevDataRoot(opts: {
   platform?: NodeJS.Platform;
   /** Electron's default userData (Stable's), when known (the bootstrap passes it). */
   liveUserData?: string | null;
+  /** Whether this bundle carries the layer-b seams (default: LAYERB_SEAMS_BUILT). */
+  seams?: boolean;
 } = {}): DevRootResolution {
   const platform = opts.platform ?? process.platform;
   const fixed = fixedDevDataRoot(platform);
-  if (!(opts.dev ?? DEV_ISOLATION)) return { ok: true, root: fixed, override: false };
+  if (!(opts.dev ?? DEV_ISOLATION) || !(opts.seams ?? LAYERB_SEAMS_BUILT)) return { ok: true, root: fixed, override: false };
   const env = opts.env ?? process.env;
   const raw = typeof env[DEV_ROOT_ENV] === 'string' ? (env[DEV_ROOT_ENV] as string).trim() : '';
   if (!raw) return { ok: true, root: fixed, override: false };
@@ -170,10 +184,10 @@ export function devDataRoot(
   return r.root;
 }
 
-/** True only for a hidden dev run: MUNDER_DEV=1 AND MUNDER_HIDDEN=1. Without
- *  MUNDER_DEV the environment is not read. */
-export function hiddenRun(env: NodeJS.ProcessEnv = process.env, dev: boolean = DEV_ISOLATION): boolean {
-  if (!dev) return false;
+/** True only for a hidden dev run: a bundle built with the layer-b seams, MUNDER_DEV=1 AND
+ *  MUNDER_HIDDEN=1. Otherwise the environment is not read. */
+export function hiddenRun(env: NodeJS.ProcessEnv = process.env, dev: boolean = DEV_ISOLATION, seams: boolean = LAYERB_SEAMS_BUILT): boolean {
+  if (!dev || !seams) return false;
   return env[DEV_HIDDEN_ENV] === '1';
 }
 

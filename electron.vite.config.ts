@@ -15,7 +15,11 @@ const define = { __APP_VERSION__: JSON.stringify(pkg.version) };
 const defineMain = {
   ...define,
   __POSTHOG_KEY__: JSON.stringify(process.env.POSTHOG_KEY ?? ''),
-  __POSTHOG_HOST__: JSON.stringify(process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com')
+  __POSTHOG_HOST__: JSON.stringify(process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com'),
+  // ZT-I1-MAIL layer (b) TEST INFRASTRUCTURE: the MUNDER_HIDDEN / MUNDER_DEV_ROOT seams exist in a
+  // bundle only when it is BUILT with MUNDER_LAYERB_SEAMS=1 (test/tools/layer-b-run.cjs does that
+  // for its own sandbox build). Every other build, the release included, compiles them to false.
+  __LAYERB_SEAMS__: JSON.stringify(process.env.MUNDER_LAYERB_SEAMS === '1')
 };
 
 // Copy raw .cjs main-process sidecars into out/main after the main bundle is
