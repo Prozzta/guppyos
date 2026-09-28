@@ -283,7 +283,7 @@ test('isValidMailId: the §4.1 regex, no "..", no reserved names', () => {
 
 test('classifyIncoming: free, duplicate (id or alias), conflict (ledger, file, unreadable)', () => {
   let doc = L.applyDelivered(L.emptyLedger('jim-1'), msg('m1'), T0).doc;
-  doc = L.applyDelivered(doc, msg('fresh-1', { sender_id: 'orig', body: 'aliased' }), T0).doc;
+  doc = L.applyDelivered(doc, msg('fresh-1', { sender_id: 'orig', subject: 's-orig', body: 'aliased' }), T0).doc;
   const none = () => null;
   assert.deepEqual(L.classifyIncoming(doc, msg('m2'), none), { kind: 'free' });
   assert.deepEqual(L.classifyIncoming(doc, msg('m1'), none), { kind: 'dup', existingId: 'm1' });
@@ -293,9 +293,79 @@ test('classifyIncoming: free, duplicate (id or alias), conflict (ledger, file, u
   assert.deepEqual(L.classifyIncoming(doc, msg('orig', { body: 'new' }), none), { kind: 'conflict', reason: 'ledger' });
   // Files in inbox/ or .done/ that the ledger no longer knows (pruned, pre-ledger history).
   const onDisk = (m) => (id) => (id === 'old' ? m : null);
-  assert.deepEqual(L.classifyIncoming(doc, msg('old'), onDisk({ from: 'god-1', body: 'body of old' })), { kind: 'dup', existingId: 'old' });
-  assert.deepEqual(L.classifyIncoming(doc, msg('old'), onDisk({ from: 'god-1', body: 'different' })), { kind: 'conflict', reason: 'file' });
+  assert.deepEqual(L.classifyIncoming(doc, msg('old'), onDisk({ from: 'god-1', subject: 's-old', body: 'body of old' })), { kind: 'dup', existingId: 'old' });
+  assert.deepEqual(L.classifyIncoming(doc, msg('old'), onDisk({ from: 'god-1', subject: 's-old', body: 'different' })), { kind: 'conflict', reason: 'file' });
   assert.deepEqual(L.classifyIncoming(doc, msg('old'), onDisk('unreadable')), { kind: 'conflict', reason: 'unreadable' });
+});
+
+test('§11.18 #3: the duplicate key is from + hash(subject + body): another subject is a different message', () => {
+  const doc = L.applyDelivered(L.emptyLedger('jim-1'), msg('m1', { subject: 'do X', body: 'please' }), T0).doc;
+  const none = () => null;
+  assert.deepEqual(L.classifyIncoming(doc, msg('m1', { subject: 'do X', body: 'please' }), none), { kind: 'dup', existingId: 'm1' });
+  assert.deepEqual(L.classifyIncoming(doc, msg('m1', { subject: 'do X (resent)', body: 'please' }), none), { kind: 'conflict', reason: 'ledger' }, 'same body, new subject: not a duplicate');
+  assert.deepEqual(L.classifyIncoming(doc, msg('m1', { subject: 'do X', body: 'please!' }), none), { kind: 'conflict', reason: 'ledger' });
+  // The act is not part of the key (god's ruling names subject + body only).
+  assert.deepEqual(L.classifyIncoming(doc, msg('m1', { subject: 'do X', body: 'please', act: 'request' }), none), { kind: 'dup', existingId: 'm1' });
+  // Framing: moving characters between subject and body changes the key.
+  assert.notEqual(L.mailContentHash('ab', 'c'), L.mailContentHash('a', 'bc'));
+  const onDisk = (m) => (id) => (id === 'f1' ? m : null);
+  assert.deepEqual(L.classifyIncoming(doc, msg('f1', { subject: 'x', body: 'y' }), onDisk({ from: 'god-1', subject: 'x', body: 'y' })), { kind: 'dup', existingId: 'f1' });
+  assert.deepEqual(L.classifyIncoming(doc, msg('f1', { subject: 'x2', body: 'y' }), onDisk({ from: 'god-1', subject: 'x', body: 'y' })), { kind: 'conflict', reason: 'file' });
+});
+
+test('§11.18 #1: an open request is NEVER pruned until it is replied to or explicitly closed; then the retention runs', () => {
+  let doc = L.emptyLedger('jim-1');
+  doc = L.applyDelivered(doc, msg('req', { act: 'request' }), T0).doc;
+  doc = L.applyDelivered(doc, msg('q', { act: 'inform', requires_reply: true }), T0).doc;
+  doc = L.applyDelivered(doc, msg('info'), T0).doc;
+  doc = L.applyDelivered(doc, msg('req2', { act: 'request' }), T0).doc;
+  doc = L.applyClaimSurfacing(doc, ['req', 'q', 'info', 'req2'], 'e', 'UserPromptSubmit', T0).doc;
+  doc = L.applyConfirmSurfaced(doc, ['req', 'q', 'info', 'req2'], 'e', 'evidence', T0).doc;
+  doc = L.applyCloseEpoch(doc, 'e', 'normal', T0).doc;
+  const later = T0 + 400 * DAY;
+  doc = L.applyPrune(doc, later).doc;
+  assert.deepEqual(Object.keys(doc.entries).sort(), ['q', 'req', 'req2'], 'the plain inform went; both obligations stay, however old');
+  assert.deepEqual(L.openRequestEntries(doc, later).map((o) => o.entry.id), ['req', 'req2']);
+  assert.deepEqual(L.awaitingReplyEntries(doc, later).map((o) => o.entry.id), ['req', 'q', 'req2']);
+  // Replied: prunable 7 days after the reply.
+  doc = L.applyReplied(doc, 'req', 'r1', later).doc;
+  assert.deepEqual(Object.keys(L.applyPrune(doc, later + 6 * DAY).doc.entries).sort(), ['q', 'req', 'req2']);
+  assert.deepEqual(Object.keys(L.applyPrune(doc, later + 7 * DAY + 1).doc.entries).sort(), ['q', 'req2']);
+  // Explicitly closed (no reply): out of both lists at once, prunable 7 days after the close.
+  const closed = L.applyCloseObligation(doc, 'q', later, 'no answer needed');
+  assert.deepEqual(closed.changed, ['q']);
+  assert.deepEqual(closed.logs, [{ agentId: 'jim-1', kind: 'mail-obligation-closed', id: 'q', reason: 'no answer needed' }]);
+  assert.equal(closed.events[0].harness, true, 'a close is not activity');
+  doc = closed.doc;
+  assert.deepEqual(L.awaitingReplyEntries(doc, later).map((o) => o.entry.id), ['req2']);
+  assert.equal(L.applyCloseObligation(doc, 'q', later + 1, 'again').changed.length, 0, 'idempotent');
+  assert.equal(L.applyReplied(doc, 'q', 'late-reply', later + 2).changed.length, 0, 'a reply after the close closes nothing');
+  assert.equal(L.applyCloseObligation(doc, 'info', later, 'x').changed.length, 0, 'not an obligation');
+  assert.deepEqual(Object.keys(L.applyPrune(doc, later + 7 * DAY + 1).doc.entries), ['req2']);
+});
+
+test('§11.18 #1 in a corrupt-ledger rebuild: an old .done request with no replied row is still open; an old replied one is history', () => {
+  const old = T0 - 30 * DAY;
+  const done = [
+    { id: 'old-req', msg: { from: 'god-1', act: 'request', subject: 'r', body: 'b' }, mtimeMs: old },
+    { id: 'old-answered', msg: { from: 'god-1', act: 'request', subject: 'r2', body: 'b2' }, mtimeMs: old },
+    { id: 'old-info', msg: { from: 'god-1', act: 'inform', subject: 'i', body: 'b3' }, mtimeMs: old }
+  ];
+  const logRows = [{ agentId: 'jim-1', kind: 'mail', stage: 'replied', id: 'old-answered', replyId: 'x', ts: old + 1 }];
+  const doc = L.rebuildLedger('jim-1', { inbox: [], done, logRows }, T0);
+  assert.deepEqual(Object.keys(doc.entries), ['old-req']);
+  assert.deepEqual(L.openRequestEntries(doc, T0).map((o) => o.entry.id), ['old-req']);
+});
+
+test('Q14: a work order confirmed after a restart is acted, via:"work-order", restored:true, bodyHash:null (and never a duplicate)', () => {
+  const s = L.applyWorkOrder(L.emptyLedger('ki-1'), msg('w1', { body: undefined }), T0, { restored: true });
+  const e = s.doc.entries.w1;
+  assert.deepEqual({ state: e.state, via: e.via, restored: e.restored, bodyHash: e.bodyHash, contentHash: e.contentHash }, { state: 'acted', via: 'work-order', restored: true, bodyHash: null, contentHash: null });
+  assert.equal(s.logs[0].restored, true);
+  assert.deepEqual(L.classifyIncoming(s.doc, msg('w1', { body: '' }), () => null), { kind: 'conflict', reason: 'ledger' });
+  const live = L.applyWorkOrder(L.emptyLedger('ki-1'), msg('w2'), T0).doc.entries.w2;
+  assert.equal(live.restored, undefined);
+  assert.equal(typeof live.bodyHash, 'string');
 });
 
 // ————————————————————————————————————————————————— pure: rebuild

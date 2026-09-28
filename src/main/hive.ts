@@ -2210,10 +2210,48 @@ export class HiveManager {
       ? selectBroadcastTargets(reg.agents, msg.from)
       // Never deliver to self — guards a god → "human" message looping back to god.
       : [resolveTo(msg.to)].filter((t) => t !== msg.from);
+    // ZT-I1-MAIL §11.18 #6 (god's ruling): a direct `to` must be EXACTLY a registry agent id,
+    // checked here, before anything turns it into a path. 'broadcast', 'god' and 'human' keep
+    // their routing meaning; everything else is an agent id or nothing (no path semantics).
+    const direct = msg.to !== 'broadcast' && msg.to !== 'god' && msg.to !== 'human';
+    const knownAgent = (id: unknown): boolean => typeof id === 'string' && Object.prototype.hasOwnProperty.call(reg.agents, id);
     // Targets that actually took delivery. The log below reports these instead of
     // intent, so a bounced or dropped message can never read as delivered.
     const delivered: string[] = [];
     for (const t of targets) {
+      if (direct && !knownAgent(t)) {
+        // Unknown id: the no-inbox bounce (#24), without resolving it to any directory.
+        this.appendLog({ kind: 'drop', reason: 'no-inbox', from: msg.from, to: t, id: msg.id });
+        if (t !== godId) {
+          this.deliver({
+            ...msg,
+            to: godId,
+            subject: `[undeliverable — no agent "${t}" on this floor; check the id against the roster] ${msg.subject}`
+          }, godId);
+        }
+        continue;
+      }
+      if (direct && reg.agents[t]?.archived) {
+        // §4.2: mail to an archived agent bounces to the SENDER, who is best placed to re-route.
+        // A sender that is archived, not an agent (the router, 'system', 'human') or the send-only
+        // assistant gets the existing no-inbox rule instead: the bounce goes to god.
+        const notice = `[undeliverable: ${t} is archived — resend to an active agent or god]`;
+        const sender = reg.agents[msg.from];
+        const toSender = knownAgent(msg.from) && !sender?.archived && !sender?.isAssistant;
+        const bouncedTo = toSender ? msg.from : godId;
+        this.appendLog({ kind: 'drop', reason: 'archived', from: msg.from, to: t, id: msg.id, bouncedTo });
+        if (toSender) {
+          // A `system` notice carrying the original subject and body, so the sender can resend.
+          // Not a request of its own (no reply obligation) and not a reply to anything.
+          this.deliver({
+            ...msg, from: 'system', to: msg.from, act: 'inform', requires_reply: false, in_reply_to: null,
+            supersedes: undefined, superseded_by: undefined, subject: `${notice} ${msg.subject}`
+          }, msg.from);
+        } else {
+          this.deliver({ ...msg, to: godId, subject: `${notice} ${msg.subject}` }, godId);
+        }
+        continue;
+      }
       // The send-only prep assistant must never be a delivery target: it doesn't
       // drain an inbox, so direct mail to it would rot unread (observed live: a
       // task brief plus the follow-up reprimand about the unread inbox, both
@@ -2355,7 +2393,9 @@ export class HiveManager {
       requires_reply: fallback.requiresReply === true
     };
     try {
-      this.mail.recordWorkOrder(agentId, msg as HiveMessage);
+      // Q14: a confirmation this process has no handoff for (it arrived after a restart) is
+      // recorded from the header fields only: restored, with no body hash.
+      this.mail.recordWorkOrder(agentId, msg as HiveMessage, { restored: !known });
       this.handoffs.delete(key);
       return true;
     } catch (e) {

@@ -55,9 +55,20 @@ export function freshMailId(now: number = Date.now()): string {
   return `${new Date(now).toISOString().replace(/[:.]/g, '-')}-${randomBytes(3).toString('hex')}`;
 }
 
-/** The body fingerprint used by the §4.1 duplicate test. */
+/** The body fingerprint (sha256 of the body). */
 export function mailBodyHash(body: unknown): string {
   return createHash('sha256').update(typeof body === 'string' ? body : JSON.stringify(body ?? '')).digest('hex');
+}
+
+/**
+ * The §4.1 duplicate key (god's ruling, INBOX-DESIGN §11.18 #3): `from` + hash(subject + body).
+ * A resend with a different subject is a different message (fresh id, sender_id kept). The
+ * subject is length-framed, so no subject/body split can collide with another.
+ */
+export function mailContentHash(subject: unknown, body: unknown): string {
+  const sub = typeof subject === 'string' ? subject : String(subject ?? '');
+  const b = typeof body === 'string' ? body : (JSON.stringify(body ?? '') ?? '');
+  return createHash('sha256').update(`${sub.length}:${sub}\n${b}`).digest('hex');
 }
 
 /** The keep-the-sender's-value rule for `sender_id`: a string, bounded. */
@@ -101,7 +112,12 @@ export interface MailEntry {
   conversation?: string;
   inReplyTo?: string | null;
   supersedes?: string[];
-  bodyHash: string;
+  /** sha256 of the body; null for a work order confirmed after a restart (Q14: body unknown). */
+  bodyHash: string | null;
+  /** The §4.1 duplicate key, hash(subject + body) (§11.18 #3). Null when the body is unknown. */
+  contentHash?: string | null;
+  /** Q14: a work order whose confirmation arrived after a restart (header fields only). */
+  restored?: boolean;
   via: MailVia;
   state: MailState;
   /** Arrival order within this ledger. */
@@ -126,6 +142,9 @@ export interface MailEntry {
   requiresReply: boolean;
   repliedAt?: number | null;
   replyId?: string | null;
+  /** §11.18 #1: an open obligation explicitly closed without a reply (closeObligation). */
+  closedAt?: number | null;
+  closeReason?: string | null;
   updatedAt: number;
 }
 
@@ -155,7 +174,7 @@ export interface MailEvent {
   agentId: string;
   id: string;
   /** The transition. `surfacing` has no log row but is still an event. */
-  stage: MailStage | 'surfacing';
+  stage: MailStage | 'surfacing' | 'closed';
   state: MailState;
   at: number;
   /** True for a harness-caused change (a back-edge); readers of "activity" ignore these. */
@@ -176,7 +195,8 @@ export interface MailStep {
 
 export const MAIL_LEDGER_VERSION = 1;
 export const MAIL_WRITE_COALESCE_MS = 250;
-/** §1.2: acted entries are pruned after 7 days; .done stays the history. */
+/** §1.2: acted entries are pruned after 7 days; .done stays the history. An open obligation is
+ *  never pruned until it is replied to or explicitly closed (§11.18 #1). */
 export const MAIL_ACTED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 /** N1: after this many consecutive unconfirmed surfacings, confirm on the latency rule alone. */
 export const MAIL_UNCONFIRMED_FALLBACK_AFTER = 2;
@@ -232,6 +252,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     inReplyTo: typeof msg.in_reply_to === 'string' ? msg.in_reply_to : null,
     ...(Array.isArray(msg.supersedes) && msg.supersedes.length ? { supersedes: msg.supersedes.filter((s) => typeof s === 'string').slice(0, 10) } : {}),
     bodyHash: mailBodyHash(msg.body ?? ''),
+    contentHash: mailContentHash(msg.subject ?? '', msg.body ?? ''),
     via,
     state: via === 'work-order' ? 'acted' : 'delivered',
     seq,
@@ -248,6 +269,11 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
 /** Is this entry an obligation the reply tracker follows (§4.3 + option B)? */
 function replyTracked(e: MailEntry): boolean {
   return e.requiresReply || e.act === 'request';
+}
+
+/** §11.18 #1: an obligation still open (tracked, not replied, not explicitly closed). */
+export function isOpenObligation(e: MailEntry): boolean {
+  return replyTracked(e) && !e.repliedAt && !e.closedAt;
 }
 
 /**
@@ -277,13 +303,18 @@ export function applyDelivered(doc: MailLedgerDoc, msg: MailMessageLike, now: nu
  * N2: a terminal work order (proxy/hookless) is acted on its confirmed PTY write: the whole body
  * is in the typed text. Recorded as acted `via:"work-order"`; never in the backlog; no file.
  */
-export function applyWorkOrder(doc: MailLedgerDoc, msg: MailMessageLike, now: number): MailStep {
+export function applyWorkOrder(doc: MailLedgerDoc, msg: MailMessageLike, now: number, opts: { restored?: boolean } = {}): MailStep {
   if (doc.entries[msg.id]) return unchanged(doc);
   const d = new Draft(doc, now);
-  const entry: MailEntry = { ...entryFromMessage(msg, doc.nextSeq, now, 'work-order', false), actedAt: now, surfaceCount: 1, surfacedAt: now, hookKind: 'work-order' };
+  const base = entryFromMessage(msg, doc.nextSeq, now, 'work-order', false);
+  // Q14: confirmed after a restart, the body is unknown: no hash (it can never match a duplicate).
+  const entry: MailEntry = {
+    ...base, actedAt: now, surfaceCount: 1, surfacedAt: now, hookKind: 'work-order',
+    ...(opts.restored ? { restored: true, bodyHash: null, contentHash: null } : {})
+  };
   d.doc.nextSeq = doc.nextSeq + 1;
   d.put(entry);
-  d.row({ kind: 'mail', stage: 'acted', ids: [entry.id], via: 'work-order', from: entry.from, act: entry.act, requiresReply: entry.requiresReply, ...(entry.senderId ? { senderId: entry.senderId } : {}) });
+  d.row({ kind: 'mail', stage: 'acted', ids: [entry.id], via: 'work-order', from: entry.from, act: entry.act, requiresReply: entry.requiresReply, ...(entry.senderId ? { senderId: entry.senderId } : {}), ...(opts.restored ? { restored: true } : {}) });
   d.event(entry, 'acted', false, 'work-order');
   return d.step();
 }
@@ -407,7 +438,7 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
 export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, now: number, replyTo?: string | null): MailStep {
   const exact = doc.entries[ref];
   const candidates = [...(exact ? [exact] : []), ...Object.values(doc.entries).filter((e) => e.senderId === ref && e.id !== ref).sort(bySeq)]
-    .filter((e) => replyTracked(e) && !e.repliedAt);
+    .filter((e) => isOpenObligation(e));
   const e = (replyTo ? candidates.find((c) => c.from === replyTo) : undefined) ?? candidates[0];
   if (!e) return unchanged(doc);
   const d = new Draft(doc, now);
@@ -415,6 +446,24 @@ export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, n
   d.put(next);
   d.row({ kind: 'mail', stage: 'replied', id: e.id, replyId });
   d.event(next, 'replied', false);
+  return d.step();
+}
+
+/**
+ * §11.18 #1: close an open obligation WITHOUT a reply: the explicit close the prune exemption
+ * names (the Human or god decides a request needs no answer). `ref` resolves like a reply (the
+ * exact id, else sender_id aliases), and the oldest open match is closed. The state is not
+ * changed; the entry becomes prunable. Idempotent. Not activity: no agent turn did it.
+ */
+export function applyCloseObligation(doc: MailLedgerDoc, ref: string, now: number, reason: string): MailStep {
+  const e = resolveEntries(doc, ref).find((c) => isOpenObligation(c));
+  if (!e) return unchanged(doc);
+  const d = new Draft(doc, now);
+  const why = String(reason || 'closed').slice(0, 200);
+  const next: MailEntry = { ...e, closedAt: now, closeReason: why, updatedAt: now };
+  d.put(next);
+  d.row({ kind: 'mail-obligation-closed', id: e.id, reason: why });
+  d.event(next, 'closed', true, why);
   return d.step();
 }
 
@@ -427,9 +476,13 @@ export function applyRestartRecovery(doc: MailLedgerDoc, now: number): MailStep 
   return d.step();
 }
 
-/** §1.2: acted entries older than the retention are dropped (no row: .done is the history). */
+/** §1.2: acted entries older than the retention are dropped (no row: .done is the history).
+ *  §11.18 #1: an open obligation (act:request awaiting its outcome, or requires_reply not replied)
+ *  is NEVER pruned, however old, until it is replied to or explicitly closed; the retention then
+ *  runs from the reply or the close. */
 export function applyPrune(doc: MailLedgerDoc, now: number, retentionMs = MAIL_ACTED_RETENTION_MS): MailStep {
-  const stale = Object.values(doc.entries).filter((e) => e.state === 'acted' && (e.actedAt ?? e.updatedAt) < now - retentionMs);
+  const stale = Object.values(doc.entries).filter((e) => e.state === 'acted' && !isOpenObligation(e)
+    && Math.max(e.actedAt ?? e.updatedAt, e.repliedAt ?? 0, e.closedAt ?? 0) < now - retentionMs);
   if (!stale.length) return unchanged(doc);
   const d = new Draft(doc, now);
   for (const e of stale) delete d.doc.entries[e.id];
@@ -485,7 +538,7 @@ export interface MailObligation { entry: MailEntry; ageMs: number }
 /** §4.3 `awaitingReply`: acted, requires_reply, not replied; age since delivery. */
 export function awaitingReplyEntries(doc: MailLedgerDoc, now: number): MailObligation[] {
   return Object.values(doc.entries)
-    .filter((e) => e.state === 'acted' && e.requiresReply && !e.repliedAt)
+    .filter((e) => e.state === 'acted' && e.requiresReply && !e.repliedAt && !e.closedAt)
     .sort(bySeq)
     .map((entry) => ({ entry, ageMs: Math.max(0, now - entry.deliveredAt) }));
 }
@@ -494,7 +547,7 @@ export function awaitingReplyEntries(doc: MailLedgerDoc, now: number): MailOblig
  *  whatever its delivery state. */
 export function openRequestEntries(doc: MailLedgerDoc, now: number): MailObligation[] {
   return Object.values(doc.entries)
-    .filter((e) => e.act === 'request' && !e.repliedAt)
+    .filter((e) => e.act === 'request' && !e.repliedAt && !e.closedAt)
     .sort(bySeq)
     .map((entry) => ({ entry, ageMs: Math.max(0, now - entry.deliveredAt) }));
 }
@@ -517,26 +570,28 @@ export function openEpochsOf(doc: MailLedgerDoc): OpenEpoch[] {
 
 // ————————————————————————————————————————————————————————————————— pure id admission (§4.1)
 
-export type ExistingMessage = { from: unknown; body: unknown } | 'unreadable' | null;
+export type ExistingMessage = { from: unknown; subject?: unknown; body: unknown } | 'unreadable' | null;
 export type IncomingClass = { kind: 'free' } | { kind: 'dup'; existingId: string } | { kind: 'conflict'; reason: string };
 
 /**
  * Collision test of an incoming id against the recipient's ledger (id and sender_id alias),
  * then `inbox/` and `.done/` (via `readExisting`, which returns the stored message, null when
- * there is no such file, or 'unreadable'). Same `from` + same body hash is a duplicate; any other
- * collision, including an unreadable file, is a conflict (the caller reassigns).
+ * there is no such file, or 'unreadable'). The duplicate key is the same `from` + the same
+ * hash(subject + body) (§11.18 #3): a resend with another subject is a different message. Any
+ * other collision, including an unreadable file, is a conflict (the caller reassigns).
  */
 export function classifyIncoming(doc: MailLedgerDoc, msg: MailMessageLike, readExisting: (id: string) => ExistingMessage): IncomingClass {
-  const hash = mailBodyHash(msg.body ?? '');
+  const content = mailContentHash(msg.subject ?? '', msg.body ?? '');
   const inLedger = [doc.entries[msg.id], ...Object.values(doc.entries).filter((e) => e.senderId === msg.id && e.id !== msg.id)].filter(Boolean) as MailEntry[];
   for (const e of inLedger) {
-    if (e.from === msg.from && e.bodyHash === hash) return { kind: 'dup', existingId: e.id };
+    // No content key (a restored work order, whose body is unknown): never a duplicate.
+    if (e.from === msg.from && typeof e.contentHash === 'string' && e.contentHash === content) return { kind: 'dup', existingId: e.id };
   }
   if (inLedger.length) return { kind: 'conflict', reason: 'ledger' };
   const found = readExisting(msg.id);
   if (found === null) return { kind: 'free' };
   if (found === 'unreadable') return { kind: 'conflict', reason: 'unreadable' };
-  if (String(found.from) === msg.from && mailBodyHash(found.body ?? '') === hash) return { kind: 'dup', existingId: msg.id };
+  if (String(found.from) === msg.from && mailContentHash(found.subject ?? '', found.body ?? '') === content) return { kind: 'dup', existingId: msg.id };
   return { kind: 'conflict', reason: 'file' };
 }
 
@@ -621,8 +676,10 @@ export function rebuildLedger(agentId: string, input: { inbox: DiskMessage[]; do
     put({ ...base, redelivered: e?.surfaced === true });
   }
   for (const f of [...input.done].sort((a, b) => a.mtimeMs - b.mtimeMs || (a.id < b.id ? -1 : 1))) {
-    if (inboxIds.has(f.id) || f.mtimeMs < now - retentionMs) continue;
+    if (inboxIds.has(f.id)) continue;
     const base = entryFromMessage(diskEntryMessage(f), doc.nextSeq, f.mtimeMs, 'inbox', false);
+    // §11.18 #1: an obligation with no replied row is still open, however old its file is.
+    if (f.mtimeMs < now - retentionMs && !(replyTracked(base) && !ev.get(f.id)?.replied)) continue;
     put({ ...base, state: 'acted', actedAt: f.mtimeMs, updatedAt: f.mtimeMs });
   }
   for (const [id, e] of ev) {
@@ -979,7 +1036,8 @@ export class MailLedger {
   /**
    * §4.1 admission, BEFORE the inbox write. An invalid id, or an id colliding with different
    * content, gets a fresh `<ts>-<rand>` id with the sender's value kept as `sender_id`
-   * (`mail-id-reassigned`). Same from + same body = duplicate, dropped (`mail-dedup`).
+   * (`mail-id-reassigned`). Same from + same hash(subject + body) = duplicate, dropped
+   * (`mail-dedup`, §11.18 #3).
    */
   admit(agentId: string, msg: MailMessageLike): AdmitResult {
     const st = this.state(agentId);
@@ -1000,8 +1058,8 @@ export class MailLedger {
         try {
           if (!existsSync(p)) continue;
           if (statSync(p).size > MESSAGE_FILE_MAX_BYTES) return 'unreadable';
-          const m = JSON.parse(readFileSync(p, 'utf8')) as { from?: unknown; body?: unknown };
-          return { from: m?.from, body: m?.body };
+          const m = JSON.parse(readFileSync(p, 'utf8')) as { from?: unknown; subject?: unknown; body?: unknown };
+          return { from: m?.from, subject: m?.subject, body: m?.body };
         } catch { return 'unreadable'; }
       }
       return null;
@@ -1021,10 +1079,18 @@ export class MailLedger {
     this.commit(st, applyDelivered(st.doc, msg, this.now()));
   }
 
-  /** N2: a confirmed terminal work-order write (proxy/hookless): acted via work-order. */
-  recordWorkOrder(agentId: string, msg: MailMessageLike): void {
+  /** N2: a confirmed terminal work-order write (proxy/hookless): acted via work-order.
+   *  `restored` (Q14): confirmed after a restart, so only its header fields are known. */
+  recordWorkOrder(agentId: string, msg: MailMessageLike, opts: { restored?: boolean } = {}): void {
     const st = this.state(agentId);
-    this.commit(st, applyWorkOrder(st.doc, msg, this.now()));
+    this.commit(st, applyWorkOrder(st.doc, msg, this.now(), opts));
+  }
+
+  /** §11.18 #1: explicitly close an open obligation without a reply. Returns the ids closed. */
+  closeObligation(agentId: string, ref: string, reason: string): string[] {
+    if (!ref || !this.hasAgent(agentId)) return [];
+    const st = this.state(agentId);
+    return this.commit(st, applyCloseObligation(st.doc, ref, this.now(), reason)).changed;
   }
 
   /** The agent's channel override (§11.10 degradation), or null for the provider default. */

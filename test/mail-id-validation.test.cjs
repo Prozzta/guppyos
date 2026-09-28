@@ -86,7 +86,7 @@ test('a same-id resend with the same content is dropped idempotently', async (t)
   const { hive, files } = await floor(t);
   const m = { id: 'req-1', to: 'jim-1', act: 'request', subject: 'do X', body: 'please do X' };
   hive.send({ ...m }, 'god-1');
-  hive.send({ ...m, subject: 'do X (resent)' }, 'god-1'); // the subject is not the content test
+  hive.send({ ...m, act: 'inform' }, 'god-1'); // same from + subject + body: the act is not in the key
   assert.deepEqual(files('jim-1'), ['req-1.json']);
   const dedup = rows(hive, 'mail-dedup');
   assert.equal(dedup.length, 1);
@@ -99,6 +99,19 @@ test('a same-id resend with the same content is dropped idempotently', async (t)
   assert.equal(rows(hive, 'mail-dedup').length, 2);
   // The ledger recorded exactly one delivery.
   assert.equal(rows(hive, 'mail').filter((r) => r.stage === 'delivered' && r.agentId === 'jim-1').length, 1);
+});
+
+test('§11.18 #3: a same-id resend with the same body but ANOTHER subject is a different message: fresh id, sender_id kept', async (t) => {
+  const { hive, files } = await floor(t);
+  const m = { id: 'req-2', to: 'jim-1', act: 'request', subject: 'do X', body: 'please do X' };
+  hive.send({ ...m }, 'god-1');
+  hive.send({ ...m, subject: 'do X (resent)' }, 'god-1');
+  assert.equal(files('jim-1').length, 2, 'both kept: nothing silently dropped');
+  const resent = hive.inbox('jim-1').find((x) => x.id !== 'req-2');
+  assert.equal(resent.sender_id, 'req-2');
+  assert.equal(resent.subject, 'do X (resent)');
+  assert.equal(rows(hive, 'mail-dedup').length, 0);
+  assert.deepEqual(rows(hive, 'mail-id-reassigned').map((r) => [r.senderId, r.reason]), [['req-2', 'collision-ledger']]);
 });
 
 test('a same-id message with different content is reassigned, never overwrites', async (t) => {
@@ -188,4 +201,69 @@ test('deliver() records delivered in the ledger; bounces are recorded for god', 
   assert.equal(Object.values(onDisk.entries)[0].state, 'delivered');
   assert.equal(Object.values(onDisk.entries)[0].requiresReply, true);
   assert.equal(fs.existsSync(path.join(root, 'state', 'mail', 'nobody.json')), false);
+});
+
+// ————————————————————————————————————————————————— §11.18 #6 + §4.2: `to` validation, archived bounce
+
+test('§11.18 #6: a direct `to` must EXACTLY match a registry agent id, before any path is resolved; unknown ids bounce as no-inbox', async (t) => {
+  const { home, root, hive, files } = await floor(t);
+  // A directory that looks like an agent but is not in the registry, and path-shaped / case-variant ids.
+  fs.mkdirSync(path.join(root, 'agents', 'ghost', 'inbox'), { recursive: true });
+  const before = new Set(walk(home));
+  const bogus = ['ghost', 'jim-1/../pam-1', '../agents/jim-1', 'JIM-1', 'jim-1 ', 'jim-1\..\pam-1', '__proto__', 'constructor', ''];
+  for (const to of bogus) hive.send({ to, act: 'inform', subject: `to ${JSON.stringify(to)}`, body: 'b' }, 'jim-1');
+  assert.deepEqual(files('pam-1'), [], 'nothing reached pam through a path');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'agents', 'ghost', 'inbox')), [], 'an inbox on disk is not a registry agent');
+  const drops = rows(hive, 'drop').filter((r) => r.reason === 'no-inbox');
+  assert.deepEqual(drops.map((r) => r.to).sort(), bogus.filter((b) => b !== '').concat(['']).sort());
+  // Every one bounced to god (the existing no-inbox rule), and nothing else was written anywhere.
+  assert.equal(files('god-1').length, bogus.length);
+  const added = walk(home).filter((f) => !before.has(f));
+  assert.ok(added.every((f) => f.includes(path.join('agents', 'god-1', 'inbox')) || f.startsWith(path.join('hive', 'state')) || /log\.jsonl$/.test(f)), added.join('\n'));
+  // 'god', 'human', 'broadcast' and a real id keep their routing meaning.
+  hive.send({ to: 'god', act: 'inform', subject: 'g', body: '1' }, 'jim-1');
+  hive.send({ to: 'human', act: 'inform', subject: 'h', body: '2' }, 'jim-1');
+  hive.send({ to: 'pam-1', act: 'inform', subject: 'p', body: '3' }, 'jim-1');
+  hive.send({ to: 'broadcast', act: 'inform', subject: 'b', body: '4' }, 'god-1');
+  assert.equal(files('god-1').length, bogus.length + 2);
+  assert.equal(files('pam-1').length, 2);
+  assert.equal(files('jim-1').length, 1);
+});
+
+test('§4.2: mail to an ARCHIVED agent bounces to the sender with a system notice (logged `drop archived`); the archived inbox is untouched', async (t) => {
+  const { hive, files } = await floor(t);
+  hive.setArchived('pam-1', true);
+  hive.send({ id: 'for-pam', to: 'pam-1', act: 'request', subject: 'review', body: 'the body to resend', requires_reply: true }, 'jim-1');
+  assert.deepEqual(files('pam-1'), [], 'nothing written into the archived inbox');
+  const [bounce] = hive.inbox('jim-1');
+  assert.equal(bounce.from, 'system');
+  assert.equal(bounce.subject, '[undeliverable: pam-1 is archived — resend to an active agent or god] review');
+  assert.equal(bounce.body, 'the body to resend');
+  assert.equal(bounce.act, 'inform');
+  assert.equal(bounce.requires_reply, false);
+  assert.deepEqual(hive.mail.openRequests('jim-1'), [], 'the notice is not an obligation of the sender');
+  const drop = rows(hive, 'drop').find((r) => r.reason === 'archived');
+  assert.deepEqual({ from: drop.from, to: drop.to, id: drop.id, bouncedTo: drop.bouncedTo }, { from: 'jim-1', to: 'pam-1', id: 'for-pam', bouncedTo: 'jim-1' });
+  const msgRow = rows(hive, 'message').find((r) => r.id === 'for-pam');
+  assert.deepEqual(msgRow.delivered, [], 'never reads as delivered');
+  // Broadcast still skips archived agents (no bounce for them).
+  hive.send({ to: 'broadcast', act: 'inform', subject: 'all', body: 'x' }, 'god-1');
+  assert.deepEqual(files('pam-1'), []);
+  assert.equal(rows(hive, 'drop').filter((r) => r.reason === 'archived').length, 1);
+});
+
+test('§4.2: when the sender is itself archived, or is the router / not an agent, the bounce goes to god', async (t) => {
+  const { hive, files } = await floor(t);
+  hive.setArchived('pam-1', true);
+  hive.send({ to: 'pam-1', act: 'inform', subject: 'from the router', body: 'r' }, 'system');
+  hive.setArchived('jim-1', true);
+  hive.send({ to: 'pam-1', act: 'inform', subject: 'from an archived sender', body: 'a' }, 'jim-1');
+  const god = hive.inbox('god-1').map((m) => m.subject).sort();
+  assert.deepEqual(god, [
+    '[undeliverable: pam-1 is archived — resend to an active agent or god] from an archived sender',
+    '[undeliverable: pam-1 is archived — resend to an active agent or god] from the router'
+  ]);
+  assert.deepEqual(files('pam-1'), []);
+  assert.deepEqual(files('jim-1'), [], 'an archived sender gets nothing');
+  assert.deepEqual(rows(hive, 'drop').filter((r) => r.reason === 'archived').map((r) => r.bouncedTo), ['god-1', 'god-1']);
 });
