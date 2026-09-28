@@ -445,7 +445,11 @@ test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the t
   await rig.setup([{ id: 'cx-1', flavour: 'codex', scenario: { hookMode: 'ups-silent', manualTurns: true } }]);
   const m = await rig.call('send', { to: 'cx-1', subject: 'q38', body: 'a short turn' });
   const commits = async () => (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED').length;
-  await beatUntil(rig, async () => (await commits()) >= 1, { what: 'the wake COMMITTED', stepMs: 6 * 60_000, settle: false });
+  // ONE beat: a further beat would read the rollout's task_started and confirm the start, which
+  // is exactly what this case must not have (a beatUntil loop raced the COMMITTED against its next
+  // beat under load). After Rig.setup's boot barrier the first reconcile beat claims.
+  await rig.beat();
+  await waitFor(async () => (await commits()) >= 1, { what: 'the wake COMMITTED', diag: () => rig.diagnose('cx-1') });
   await waitFor(() => rig.prompts('cx-1').length >= 1, { what: 'the wake typed' });
   await waitFor(async () => !(await rig.call('wakeState', { id: 'cx-1' })).inFlight, { what: 'the wake settled' });
   // No beat yet: the rollout's task_started has not been read, the start is unconfirmed.
