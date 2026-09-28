@@ -792,6 +792,55 @@ function lateHookRows(texts, stubIds, stubSince) {
   return { rows, stub };
 }
 
+/** Dry run #4: the ledger states a message REACHED, read from the hive's log.jsonl rows (every
+ *  transition is a row), so a short state (a ~0.7 s surfacing that went back to delivered) is never
+ *  missed the way 1 s ledger sampling missed it. `surfacing` has no row of its own: an unconfirmed,
+ *  late or abnormal back-edge of an epoch (it was surfacing), a mail-hook-late (its block was
+ *  built), or a later surfaced/acted row prove it. */
+function logReachedStates(rows, agentId, id) {
+  const out = new Set();
+  for (const r of rows) {
+    if (!r || r.agentId !== agentId) continue;
+    const ids = Array.isArray(r.ids) ? r.ids : (r.id ? [r.id] : []);
+    if (!ids.includes(id)) continue;
+    if (r.kind === 'mail' && r.stage === 'delivered') out.add('delivered');
+    else if (r.kind === 'mail' && r.stage === 'surfaced') { out.add('surfacing'); out.add('surfaced'); }
+    else if (r.kind === 'mail' && r.stage === 'acted') out.add('acted');
+    else if ((r.kind === 'mail-surface-unconfirmed' || r.kind === 'mail-surface-late') && r.stage === 'redelivered') out.add('surfacing');
+    else if (r.kind === 'mail' && r.stage === 'redelivered' && r.epoch) out.add('surfacing');
+    else if (r.kind === 'mail-hook-late') out.add('surfacing');
+  }
+  return out;
+}
+
+/** Incremental reader of the sandbox hive's log.jsonl (by byte offset; a rotation, i.e. a smaller
+ *  file, re-reads every log*.jsonl). Unparseable lines are skipped (a torn last line is re-read). */
+class HiveLogTail {
+  constructor(hiveDir) { this.dir = hiveDir; this.offset = 0; this.rows = []; this.rest = ''; }
+  read() {
+    const file = path.join(this.dir, 'log.jsonl');
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch (e) { if (e && e.code === 'ENOENT') return this.rows; throw e; }
+    if (size < this.offset) {
+      this.offset = 0; this.rest = '';
+      this.rows = walk(this.dir, (p) => /log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.dir && path.basename(p) !== 'log.jsonl')
+        .flatMap((p) => fs.readFileSync(p, 'utf8').split('\n')).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    }
+    if (size === this.offset) return this.rows;
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(size - this.offset);
+      fs.readSync(fd, buf, 0, buf.length, this.offset);
+      this.offset = size;
+      const text = this.rest + buf.toString('utf8');
+      const lines = text.split('\n');
+      this.rest = lines.pop();
+      for (const l of lines) { try { this.rows.push(JSON.parse(l)); } catch { /* not a row */ } }
+    } finally { fs.closeSync(fd); }
+    return this.rows;
+  }
+}
+
 /** The canary's stand-in CLI (cloned from packaged-wake-canary.cjs), plus one plumbing-only reply:
  *  on each typed turn it answers god with any LBN- token found in its own inbox files. That is a
  *  FILE READ, so a dry run never counts as proof of B1-B7: it only validates the plumbing. */
@@ -1725,8 +1774,17 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     return this.waitFor(`a reply from ${from} carrying ${token}`, budgetMs,
       () => this.godMail(from).find((x) => `${x.m.subject || ''}\n${x.m.body || ''}`.includes(token)) || null, 2000);
   }
+  /** A message reached one of `states`: read from the log.jsonl ROWS (dry run #4: 1 s ledger
+   *  sampling missed a ~0.7 s surfacing), or the ledger's current state. */
   async waitState(agentId, id, states, budgetMs) {
-    return this.waitFor(`${id} to reach ${states.join('/')}`, budgetMs, () => { const e = this.entry(agentId, id); return e && states.includes(e.state) ? e : null; }, 1000);
+    this.logTail = this.logTail || new HiveLogTail(this.s.hive);
+    return this.waitFor(`${id} to reach ${states.join('/')}`, budgetMs, () => {
+      const reached = logReachedStates(this.logTail.read(), agentId, id);
+      const hit = states.find((st) => reached.has(st));
+      if (hit) return { state: hit, via: 'log' };
+      const e = this.entry(agentId, id);
+      return e && states.includes(e.state) ? { state: e.state, via: 'ledger', entry: e } : null;
+    }, 250);
   }
 
   // ── transcripts / tokens ──────────────────────────────────────────────────
@@ -1861,19 +1919,54 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   async panelSnapshot(nonce) {
     return this.page.eval(`(${domPanelSnapshot.toString()})(document, ${JSON.stringify(nonce || '')})`);
   }
-  /** Select the agent's card (unless it is already the current one) and open the messages tab.
-   *  Nothing here waits: waitPanelPoll proves the panel from a completed poll. */
-  async selectAgentPanel(agentId, name) {
+  /** Click the agent's card (unless it is already the current one). Returns what it did. */
+  async clickAgentCard(name) {
     return this.page.eval(`(() => {
       const want = ${JSON.stringify(String(name).toUpperCase())};
       const cards = [...document.querySelectorAll('[role="button"]')].filter((x) => (x.textContent || '').toUpperCase().includes(want) && x.offsetParent !== null)
         .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
       const card = cards[0] || null;
-      if (card && card.getAttribute('aria-current') !== 'true') card.click();
-      const tab = document.querySelector('button[aria-label="messages"]');
-      if (tab && !/cream-100/.test(String(tab.getAttribute('style') || ''))) tab.click();
-      return { card: !!card, wasCurrent: !!card && card.getAttribute('aria-current') === 'true', tab: !!tab };
+      const wasCurrent = !!card && card.getAttribute('aria-current') === 'true';
+      if (card && !wasCurrent) card.click();
+      return { card: !!card, wasCurrent };
     })()`);
+  }
+  /** Click the detail panel's messages tab (unless it is the active one). Returns what it did. */
+  async clickMessagesTab() {
+    return this.page.eval(`(() => {
+      const tab = document.querySelector('button[aria-label="messages"]');
+      const active = !!tab && /cream-100/.test(String(tab.getAttribute('style') || ''));
+      if (tab && !active) tab.click();
+      return { tab: !!tab, wasActive: active };
+    })()`);
+  }
+  /** CONDITION wait on the panel snapshot: `pred(snap)` true, or the 10 s fail-safe cap (ok:false,
+   *  with the last snapshot). 250 ms is only the gap between two checks. */
+  async panelCondition(pred, nonce) {
+    const cap = Date.now() + 10_000;
+    for (;;) {
+      if (this.aborted()) throw new Error('aborted');
+      const snap = await this.panelSnapshot(nonce);
+      if (pred(snap)) return { ok: true, snap };
+      if (Date.now() >= cap) return { ok: false, capped: true, snap };
+      await sleep(250);   // the gap between two CONDITION checks; success needs the condition
+    }
+  }
+  /** B8 selection, dry run #4: THREE condition steps, never one synchronous click pair (the card
+   *  click swaps god's Command Center for the agent's panel only on the next render, so a tab click
+   *  in the same evaluation found no tab). 1: card, then the header names the marker; 2: messages
+   *  tab, then it is the active one. Each step has a 10 s cap that FAILS with the snapshot. Step 3
+   *  (the probe mark and the completed poll) is b8Observe. Every step is recorded in samples.b8. */
+  async b8Prepare(marker, nonce) {
+    const card = await this.clickAgentCard(marker);
+    const header = await this.panelCondition((s) => !!s && !!s.header && String(s.header.name || '').toLowerCase() === String(marker).toLowerCase(), nonce);
+    this.samples.b8.push({ label: 'select: card, then the header names the marker', click: card, wait: header });
+    if (!header.ok) return { ok: false, step: 'card', why: `the detail panel header never named ${marker} within the 10 s cap`, snap: header.snap };
+    const tab = await this.clickMessagesTab();
+    const active = await this.panelCondition((s) => !!s && s.messagesTabActive === true, nonce);
+    this.samples.b8.push({ label: 'select: messages tab, then it is active', click: tab, wait: active });
+    if (!active.ok) return { ok: false, step: 'tab', why: 'the messages tab never became the active one within the 10 s cap', snap: active.snap };
+    return { ok: true };
   }
   /** CONDITION wait: a hive:inbox poll for the agent that STARTED after `afterSeq` has COMPLETED
    *  (main-process probe) and the DOM shows exactly its rows on the agent's panel. 10 s is only the
@@ -1929,9 +2022,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
 
   /** B8's verdict. A wait that hits its 10 s cap (or a probe that cannot observe a completed poll)
    *  is a FAIL with the DOM snapshot; the snapshots are in evidence/b8-dom.json. */
-  b8Verdict({ probe, selected, obsBefore, obsAfter, domBefore, domAfter, acted }) {
+  b8Verdict({ probe, prep, obsBefore, obsAfter, domBefore, domAfter, acted }) {
     const snapOf = (o) => (o && o.wait ? JSON.stringify({ header: o.wait.snap && o.wait.snap.header, tabs: o.wait.snap && o.wait.snap.tabs, stateSpans: o.wait.snap && o.wait.snap.stateSpans, probe: o.wait.probe, why: o.wait.match && o.wait.match.why }) : 'none');
-    if (!probe || !probe.ok) return ['FAIL', `the Threads poll completion cannot be observed (${probe && probe.error}); no timing fallback. Selection: ${JSON.stringify(selected)}`];
+    if (!probe || !probe.ok) return ['FAIL', `the Threads poll completion cannot be observed (${probe && probe.error}); no timing fallback`];
+    if (!prep || !prep.ok) return ['FAIL', `selection step "${prep && prep.step}": ${prep && prep.why}; snapshot ${JSON.stringify({ header: prep && prep.snap && prep.snap.header, tabs: prep && prep.snap && prep.snap.tabs, stateSpans: prep && prep.snap && prep.snap.stateSpans })}`];
     for (const o of [obsBefore, obsAfter]) {
       if (o && !o.wait.ok) return ['FAIL', `${o.label}: no completed, rendered Threads poll for ${IDS.claude} within the 10 s cap: ${o.wait.match.why}; snapshot ${snapOf(o)}`];
     }
@@ -1957,7 +2051,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     // RENDERED (main-process hive:inbox probe + DOM match); no fixed sleep decides anything.
     let probe;
     try { probe = await this.inboxProbe('install'); } catch (e) { probe = { ok: false, error: `probe install: ${e && e.message}` }; }
-    const selected = await this.selectAgentPanel(C, this.markerV1);
+    const prep = await this.b8Prepare(this.markerV1, N1);
     // B9: while the LEDGER says delivered, the renderer queue's precondition reader must say non-empty.
     let violations = 0;
     for (let i = 0; i < 10; i++) {
@@ -1970,14 +2064,14 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.samples.b9.push({ at: Date.now(), held, pending, ok });
       await sleep(2000);
     }
-    const obsBefore = probe.ok ? await this.b8Observe(C, this.markerV1, N1, 'before Stop (held delivered)') : null;
+    const obsBefore = probe.ok && prep.ok ? await this.b8Observe(C, this.markerV1, N1, 'before Stop (held delivered)') : null;
     await this.page.eval(`window.cth.controlAutoDelivery(${JSON.stringify(C)}, false)`);
     const heldSamples = this.samples.b9.filter((x) => x.held).length;
     let reply = null;
     try { reply = await this.waitReply(C, N1, 6 * 60_000); } catch (e) { log(`B1: ${e.message}`); }
     let acted = null;
     try { acted = await this.waitState(C, id, ['acted'], 3 * 60_000); } catch (e) { log(`B1: ${e.message}`); }
-    const obsAfter = probe.ok ? await this.b8Observe(C, this.markerV1, N1, 'after Stop/acted') : null;
+    const obsAfter = probe.ok && prep.ok ? await this.b8Observe(C, this.markerV1, N1, 'after Stop/acted') : null;
     try { await this.inboxProbe('uninstall'); } catch (e) { log(`B8: probe uninstall: ${e && e.message}`); }
     const nonceRows = (o) => (o && o.capture ? o.capture.dom.rows.filter((r) => r.text.includes(N1)) : []);
     const domBefore = nonceRows(obsBefore);
@@ -1987,7 +2081,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     this.fact('B9', b9,
       `${heldSamples} samples with the ledger at delivered; ${violations} where hive:mailPending (the queue precondition's reader) lacked it; later acted: ${!!acted}`
       + (b9 === 'NOT-PROVEN' && !acted && heldSamples >= 5 ? ' (NOT-PROVEN: the message never reached acted, so "never dropped while delivered" is not shown through to the end)' : ''));
-    this.fact('B8', ...this.b8Verdict({ probe, selected, obsBefore, obsAfter, domBefore, domAfter, acted }));
+    this.fact('B8', ...this.b8Verdict({ probe, prep, obsBefore, obsAfter, domBefore, domAfter, acted }));
     const kinds = this.seenHookKinds(C, id);
     const inboxCalls = this.inboxToolCalls(C, since);
     if (this.args.dryRun) return this.fact('B1', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} acted=${!!acted} hookKinds=${kinds.join(',')}`));
@@ -2596,7 +2690,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, logReachedStates, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

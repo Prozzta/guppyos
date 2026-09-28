@@ -264,15 +264,18 @@ test('(b) b8Verdict: a capped wait or an unobservable poll is a FAIL with the sn
   const snap = { header: { name: 'Marker-V1-abc' }, tabs: [], stateSpans: 0 };
   const obs = (ok, rows = [], ipc = []) => ({ label: ok ? 'fine' : 'before Stop', wait: { ok, snap, probe: { seq: 1 }, match: { ok, why: ok ? 'poll #2 rendered' : 'no hive:inbox poll for the agent has completed since the mark' } }, capture: ok ? { dom: { rows }, ipc } : null });
   const r1 = [{ label: 'waiting', text: 'N' }];
-  assert.equal(v({ probe: { ok: false, error: 'no handler' }, selected: {}, obsBefore: null, obsAfter: null, domBefore: [], domAfter: [], acted: true })[0], 'FAIL');
-  const capped = v({ probe: { ok: true }, obsBefore: obs(false), obsAfter: obs(true), domBefore: [], domAfter: [], acted: true });
+  assert.equal(v({ probe: { ok: false, error: 'no handler' }, prep: { ok: true }, obsBefore: null, obsAfter: null, domBefore: [], domAfter: [], acted: true })[0], 'FAIL');
+  const capped = v({ probe: { ok: true }, prep: { ok: true }, obsBefore: obs(false), obsAfter: obs(true), domBefore: [], domAfter: [], acted: true });
   assert.equal(capped[0], 'FAIL');
   assert.match(capped[1], /10 s cap/);
   assert.match(capped[1], /snapshot \{"header":\{"name":"Marker-V1-abc"\}/);
-  assert.equal(v({ probe: { ok: true }, obsBefore: obs(true), obsAfter: obs(true), domBefore: [], domAfter: [], acted: true })[0], 'FAIL');
-  assert.equal(v({ probe: { ok: true }, obsBefore: obs(true, r1), obsAfter: obs(true, r1), domBefore: r1, domAfter: r1, acted: null })[0], 'NOT-PROVEN');
+  assert.equal(v({ probe: { ok: true }, prep: { ok: true }, obsBefore: obs(true), obsAfter: obs(true), domBefore: [], domAfter: [], acted: true })[0], 'FAIL');
+  assert.equal(v({ probe: { ok: true }, prep: { ok: true }, obsBefore: obs(true, r1), obsAfter: obs(true, r1), domBefore: r1, domAfter: r1, acted: null })[0], 'NOT-PROVEN');
+  const unselected = v({ probe: { ok: true }, prep: { ok: false, step: 'tab', why: 'the messages tab never became the active one within the 10 s cap', snap: { header: { name: 'Marker-V1-abc' }, tabs: [{ label: 'terminal', active: true }, { label: 'messages', active: false }], stateSpans: 0 } }, obsBefore: null, obsAfter: null, domBefore: [], domAfter: [], acted: true });
+  assert.equal(unselected[0], 'FAIL', 'a selection step that hit its cap FAILS B8');
+  assert.match(unselected[1], /^selection step "tab": the messages tab never became the active one within the 10 s cap; snapshot \{"header":\{"name":"Marker-V1-abc"\},"tabs":\[\{"label":"terminal","active":true\}/);
   const handled = [{ label: 'handled', text: 'N' }];
-  const pass = v({ probe: { ok: true }, obsBefore: obs(true, r1, [{ state: 'delivered', hasNonce: true }]), obsAfter: obs(true, handled, [{ state: 'acted', hasNonce: true }]), domBefore: r1, domAfter: handled, acted: true });
+  const pass = v({ probe: { ok: true }, prep: { ok: true }, obsBefore: obs(true, r1, [{ state: 'delivered', hasNonce: true }]), obsAfter: obs(true, handled, [{ state: 'acted', hasNonce: true }]), domBefore: r1, domAfter: handled, acted: true });
   assert.equal(pass[0], 'PASS');
   assert.match(pass[1], /panel header "Marker-V1-abc"/);
   assert.match(pass[1], /hive:inbox in the same evaluation: \["delivered"\]/);
@@ -282,7 +285,12 @@ test('(b) static: B8 has no fixed sleep, reads the header (not agent-effective-m
   const fact = src.slice(src.indexOf('  async factB1B8B9() {'), src.indexOf('  async factB2() {'));
   assert.ok(!/agent-effective-model/.test(src), 'the model element renders only when a run model is known');
   assert.deepEqual(fact.match(/sleep\(\d+\)/g), ['sleep(2000)'], 'the only sleep is the B9 sample spacing');
-  assert.ok(!/sleep\(/.test(method('async selectAgentPanel(agentId, name)')), 'the selection does not wait');
+  assert.ok(!/sleep\(/.test(method('async clickAgentCard(name)')) && !/sleep\(/.test(method('async clickMessagesTab()')), 'the clicks do not wait');
+  assert.ok(!/sleep\(/.test(method('async b8Prepare(marker, nonce)')), 'the selection waits only through panelCondition');
+  const pc = method('async panelCondition(pred, nonce)');
+  assert.match(pc, /if \(pred\(snap\)\) return \{ ok: true, snap \};/);
+  assert.match(pc, /if \(Date\.now\(\) >= cap\) return \{ ok: false, capped: true, snap \};/);
+  assert.equal((pc.match(/return \{ ok: true/g) || []).length, 1, 'one way to succeed: the condition');
   assert.ok(!/sleep\(/.test(method('async b8Observe(agentId, marker, nonce, label)')));
   const w = method('async waitPanelPoll(agentId, marker, afterSeq, nonce, label)');
   assert.match(w, /if \(m\.ok\) return \{ ok: true, \.\.\.last \};/);
@@ -296,10 +304,97 @@ test('(b) static: B8 has no fixed sleep, reads the header (not agent-effective-m
   assert.equal((cap.match(/this\.page\.eval\(/g) || []).length, 1, 'ONE renderer evaluation');
   assert.ok(cap.indexOf('domPanelSnapshot') < cap.indexOf('window.cth.hiveInbox('), 'the DOM is read first, then the reader, in the same evaluation');
   // The fact: the probe is installed BEFORE the selection; both observations come after it.
-  assert.ok(fact.indexOf("this.inboxProbe('install')") < fact.indexOf('this.selectAgentPanel(C, this.markerV1)'));
-  assert.ok(fact.indexOf('this.selectAgentPanel(C, this.markerV1)') < fact.indexOf("this.b8Observe(C, this.markerV1, N1, 'before Stop (held delivered)')"));
+  assert.ok(fact.indexOf("this.inboxProbe('install')") < fact.indexOf('this.b8Prepare(this.markerV1, N1)'));
+  assert.ok(fact.indexOf('this.b8Prepare(this.markerV1, N1)') < fact.indexOf("this.b8Observe(C, this.markerV1, N1, 'before Stop (held delivered)')"));
+  assert.match(fact, /const obsBefore = probe\.ok && prep\.ok \? await this\.b8Observe\(/, 'no poll wait on an unproven selection');
   assert.match(fact, /this\.fact\('B8', \.\.\.this\.b8Verdict\(/);
   assert.match(method('collectEvidence()'), /W\.write\(path\.join\(dst, 'b8-dom\.json'\), redact\(JSON\.stringify\(this\.samples\.b8 \|\| \[\], null, 2\)\)\);/);
   // The main-process probe evaluation is the sync kind, like every main-process expression.
   assert.match(method('async inboxProbe(kind, agentId, afterSeq)'), /this\.mainCdp\.eval\(expr, undefined, \{ sync: true \}\)/);
+});
+
+// ─────────────────────────────────────────────────────────────── dry run #4 follow-up
+
+test('(dry #4) B8 selection: card click, then WAIT for the header marker; tab click, then WAIT for it active; the tab is clicked only once the agent panel exists', async () => {
+  const N = 'LBN-00000001';
+  const events = [];
+  // A fake page: the card click swaps the Command Center (no tabs) for the agent's panel only on a
+  // LATER check (the next render), exactly the dry-run #4 failure mode.
+  let panel = 'command-center';
+  let tab = 'terminal';
+  let checks = 0;
+  const snap = () => ({ header: panel === 'agent' ? { name: 'Marker-V1-abc' } : null, tabs: panel === 'agent' ? [{ label: 'terminal', active: tab === 'terminal' }, { label: 'messages', active: tab === 'messages' }] : [], messagesTabActive: panel === 'agent' && tab === 'messages', stateSpans: 0, rows: [] });
+  const fake = { samples: { b8: [] }, aborted: () => false,
+    clickAgentCard: async () => { events.push('card'); setTimeout(() => { panel = 'agent'; }, 300); return { card: true, wasCurrent: false }; },
+    clickMessagesTab: async () => { events.push(`tab(panel=${panel})`); if (panel === 'agent') setTimeout(() => { tab = 'messages'; }, 300); return { tab: panel === 'agent', wasActive: false }; },
+    panelSnapshot: async () => { checks++; return snap(); },
+    panelCondition: lb.LayerB.prototype.panelCondition };
+  const r = await lb.LayerB.prototype.b8Prepare.call(fake, 'Marker-V1-abc', N);
+  assert.deepEqual(r, { ok: true });
+  assert.deepEqual(events, ['card', 'tab(panel=agent)'], 'the tab was clicked only after the header proved the agent panel');
+  assert.equal(fake.samples.b8.length, 2, 'both steps recorded');
+  assert.ok(fake.samples.b8.every((x) => x.wait.ok));
+  assert.ok(checks >= 3, 'it waited on the condition, re-checking');
+});
+
+test('(dry #4) B8 selection: a step that never holds FAILS at its 10 s cap with the snapshot (no tab click on an unproven panel)', async () => {
+  const realNow = Date.now;
+  let t0 = realNow();
+  Date.now = () => (t0 += 3000);
+  try {
+    const events = [];
+    const stuck = { header: { name: 'Marker-V1-abc' }, tabs: [{ label: 'terminal', active: true }, { label: 'messages', active: false }], messagesTabActive: false, stateSpans: 0, rows: [] };
+    const fake = { samples: { b8: [] }, aborted: () => false,
+      clickAgentCard: async () => { events.push('card'); return { card: true, wasCurrent: true }; },
+      clickMessagesTab: async () => { events.push('tab'); return { tab: true, wasActive: false }; },
+      panelSnapshot: async () => stuck, panelCondition: lb.LayerB.prototype.panelCondition };
+    const r = await lb.LayerB.prototype.b8Prepare.call(fake, 'Marker-V1-abc', 'N');
+    assert.equal(r.ok, false);
+    assert.equal(r.step, 'tab');
+    assert.equal(r.snap, stuck);
+    assert.equal(fake.samples.b8[1].wait.capped, true);
+    const wrong = { ...stuck, header: { name: 'Codex-LB' } };
+    const f2 = { ...fake, samples: { b8: [] }, panelSnapshot: async () => wrong, clickMessagesTab: async () => { events.push('tab2'); return {}; } };
+    const r2 = await lb.LayerB.prototype.b8Prepare.call(f2, 'Marker-V1-abc', 'N');
+    assert.equal(r2.step, 'card');
+    assert.ok(!events.includes('tab2'), 'no tab click on the wrong panel');
+  } finally { Date.now = realNow; }
+});
+
+test('(dry #4) waitState reads log.jsonl ROWS: a ~0.7 s surfacing that went back to delivered is seen (1 s ledger sampling missed it)', async () => {
+  const rows = [
+    { kind: 'mail', stage: 'delivered', agentId: 'lb-claude', id: 'm1' },
+    { kind: 'mail-surface-unconfirmed', stage: 'redelivered', agentId: 'lb-claude', ids: ['m1'], epoch: 'e1' },
+    { kind: 'mail-hook-late', agentId: 'lb-claude', ids: ['m2'] },
+    { kind: 'mail', stage: 'surfaced', agentId: 'lb-claude', ids: ['m3'] },
+    { kind: 'mail', stage: 'acted', agentId: 'lb-claude', ids: ['m3'] },
+    { kind: 'mail', stage: 'redelivered', agentId: 'lb-claude', ids: ['m4'], reason: 'restart' },
+    { kind: 'mail', stage: 'acted', agentId: 'lb-codex', ids: ['m1'] }
+  ];
+  const st = (id) => [...lb.logReachedStates(rows, 'lb-claude', id)].sort();
+  assert.deepEqual(st('m1'), ['delivered', 'surfacing'], 'the unconfirmed back-edge proves it was surfacing; another agent\'s row does not count');
+  assert.deepEqual(st('m2'), ['surfacing']);
+  assert.deepEqual(st('m3'), ['acted', 'surfaced', 'surfacing']);
+  assert.deepEqual(st('m4'), [], 'a restart back-edge (no epoch) is not a surfacing');
+  // The tail reads only NEW bytes, keeps a torn last line for later, and survives a rotation.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-tail-'));
+  try {
+    const file = path.join(dir, 'log.jsonl');
+    fs.writeFileSync(file, JSON.stringify(rows[0]) + '\n' + '{"kind":"mail-surface-unconf');
+    const tail = new lb.HiveLogTail(dir);
+    assert.equal(tail.read().length, 1);
+    fs.appendFileSync(file, 'irmed","stage":"redelivered","agentId":"lb-claude","ids":["m1"],"epoch":"e1"}\n');
+    assert.deepEqual([...lb.logReachedStates(tail.read(), 'lb-claude', 'm1')].sort(), ['delivered', 'surfacing']);
+    fs.renameSync(file, path.join(dir, 'log.1.jsonl'));
+    fs.writeFileSync(file, JSON.stringify(rows[4]) + '\n');
+    assert.deepEqual([...lb.logReachedStates(tail.read(), 'lb-claude', 'm1')].sort(), ['delivered', 'surfacing'], 'the rotated rows are kept');
+    assert.ok(lb.logReachedStates(tail.read(), 'lb-claude', 'm3').has('acted'));
+    // waitState itself: resolves from the rows while the LEDGER already says delivered again.
+    const fake = { s: { hive: dir }, entry: () => ({ state: 'delivered' }), waitFor: lb.LayerB.prototype.waitFor, aborted: () => false, abort: { signal: { throwIfAborted() {} } } };
+    fs.appendFileSync(file, JSON.stringify({ kind: 'mail-surface-late', stage: 'redelivered', agentId: 'lb-claude', ids: ['b2'], epoch: 'e9' }) + '\n');
+    const got = await lb.LayerB.prototype.waitState.call(fake, 'lb-claude', 'b2', ['surfacing', 'surfaced', 'acted'], 5_000);
+    assert.deepEqual(got, { state: 'surfacing', via: 'log' });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  const ws = method('async waitState(agentId, id, states, budgetMs)');
+  assert.match(ws, /logReachedStates\(this\.logTail\.read\(\), agentId, id\)/);
 });
