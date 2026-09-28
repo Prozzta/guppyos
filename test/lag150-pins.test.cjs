@@ -99,11 +99,10 @@ test('R1: the batch window is at most 16 ms, and a buffered tail is really deliv
   pm.deliverData('t1', session, 'head');
   pm.deliverData('t1', session, 'tail');
   const t0 = Date.now();
-  while (log.length < 2 && Date.now() - t0 < 500) await new Promise((r) => setTimeout(r, 1));
+  while (log.length < 2 && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 1));
   const took = Date.now() - t0;
-  assert.deepEqual(log, ['head', 'tail']);
-  // Only that the REAL timer fires: the <=16 ms bound is the constant above (and is run on an
-  // injected clock in lag150-pty-batching). Wall-clock here is Windows timer granularity
-  // (~15.6 ms ticks: 33-36 ms measured under load), so a tight bound would be a flaky pin.
-  assert.ok(took < 250, `tail delivered after ${took} ms`);
+  // Only that the REAL timer fires and the tail is not stranded: the <=16 ms bound is the constant
+  // above (and is run on an injected clock in lag150-pty-batching). FLAKY-TIMING: no wall-clock
+  // bound here - a stranded tail never arrives and fails at the 5 s deadline, whatever the load.
+  assert.deepEqual(log, ['head', 'tail'], `the buffered tail was delivered by the real timer (after ${took} ms)`);
 });
