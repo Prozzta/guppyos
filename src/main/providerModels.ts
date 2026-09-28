@@ -137,7 +137,9 @@ export function validModelsFile(v: unknown): ModelsFile | null {
 // ── Running a CLI (async only) ───────────────────────────────────────────────────────────
 
 type ExecErr = Error & { code?: unknown; killed?: boolean };
-export type ModelsExec = (file: string, args: string[], opts: { timeout: number; windowsHide: true; maxBuffer: number; windowsVerbatimArguments?: boolean }, cb: (err: ExecErr | null, stdout: string) => void) => void;
+/** child_process.execFile in the app. It returns the child (its pid is needed to kill a Windows
+ *  process TREE on timeout). `timeout: 0` means no built-in timeout (the caller times the run). */
+export type ModelsExec = (file: string, args: string[], opts: { timeout: number; windowsHide: true; maxBuffer: number; windowsVerbatimArguments?: boolean }, cb: (err: ExecErr | null, stdout: string) => void) => { pid?: number } | void;
 export interface CliDeps {
   platform: NodeJS.Platform;
   env: NodeJS.ProcessEnv;
@@ -145,12 +147,49 @@ export interface CliDeps {
   exists: (p: string) => boolean;
 }
 
+/** How long a tree kill may take before the time box gives up waiting for it. */
+export const TREE_KILL_TIMEOUT_MS = 10_000;
+
+/**
+ * MODELS-173-AUDIT (Dwight): on Windows the time box must end the whole PROCESS TREE. execFile's own
+ * timeout kills only the direct child, and for an npm .cmd shim that is cmd.exe: its node/codex
+ * descendants would keep running, orphaned. So on win32 this times the run itself; on expiry it
+ * awaits `taskkill /PID <pid> /T /F` on the still-live child (the tree goes with it) and then reports a
+ * timeout. Races are tolerated: the process may exit on its own first, and taskkill may fail. POSIX
+ * keeps execFile's timeout.
+ */
 const execP = (d: CliDeps, file: string, args: string[], timeout: number, maxBuffer: number, verbatim = false): Promise<{ stdout: string } | { err: ExecErr }> =>
   new Promise((resolve) => {
+    let settled = false;
+    const done = (r: { stdout: string } | { err: ExecErr }): void => { if (!settled) { settled = true; resolve(r); } };
+    const ownTimer = d.platform === 'win32';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // Once the time box fires, the result IS a timeout: the killed process's own exit (exit 1) can
+    // arrive before taskkill answers and must not be reported instead.
+    let timingOut = false;
     try {
-      d.exec(file, args, { timeout, windowsHide: true, maxBuffer, ...(verbatim ? { windowsVerbatimArguments: true } : {}) },
-        (err, stdout) => resolve(err ? { err } : { stdout: String(stdout) }));
-    } catch (e) { resolve({ err: e as ExecErr }); }
+      const child = d.exec(file, args, { timeout: ownTimer ? 0 : timeout, windowsHide: true, maxBuffer, ...(verbatim ? { windowsVerbatimArguments: true } : {}) },
+        (err, stdout) => { if (timer) clearTimeout(timer); if (timingOut) return; done(err ? { err } : { stdout: String(stdout) }); });
+      if (ownTimer) {
+        timer = setTimeout(() => {
+          if (settled) return;
+          timingOut = true;
+          const pid = child && typeof child.pid === 'number' ? child.pid : null;
+          const timedOut = Object.assign(new Error('timeout'), { killed: true }) as ExecErr;
+          if (!pid) { done({ err: timedOut }); return; }
+          // Await the tree kill (bounded), then report the timeout; an error or race is not fatal.
+          let killDone = false;
+          const finish = (): void => { if (!killDone) { killDone = true; done({ err: timedOut }); } };
+          try {
+            d.exec('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: TREE_KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 }, () => finish());
+          } catch { finish(); }
+          setTimeout(finish, TREE_KILL_TIMEOUT_MS + 1000);
+        }, timeout);
+      }
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      done({ err: e as ExecErr });
+    }
   });
 
 /** Where is `bin`? `where` (Windows) / `command -v` in a login shell, then the usual install dirs. */

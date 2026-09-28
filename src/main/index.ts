@@ -4445,9 +4445,8 @@ ipcMain.handle('models:catalog', () => providerModels.read());
 ipcMain.handle('models:refresh', async () => {
   const cli = {
     platform: process.platform, env: process.env, exists: existsSync,
-    exec: (file: string, args: string[], opts: Parameters<typeof execFile>[2], cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string) => void) => {
-      execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? '')));
-    }
+    exec: (file: string, args: string[], opts: Parameters<typeof execFile>[2], cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string) => void) =>
+      execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? '')))
   };
   const fetchJson = async (url: string, headers: Record<string, string>, timeoutMs: number) => {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });

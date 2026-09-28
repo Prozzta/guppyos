@@ -105,7 +105,8 @@ test('cli adapter: resolved ASYNC via where, run hidden + time-boxed; codex gets
   assert.equal(run.file, 'C:\\W\\cmd.exe', 'the .cmd shim is preferred over the extensionless one and runs through cmd.exe');
   assert.deepEqual(run.args, ['/d', '/s', '/c', '""C:\\n\\codex.cmd" debug models"']);
   assert.equal(run.opts.windowsVerbatimArguments, true);
-  assert.equal(run.opts.windowsHide, true); assert.equal(run.opts.timeout, P.LIST_TIMEOUT_MS); assert.equal(run.opts.maxBuffer, 4 * 1024 * 1024);
+  assert.equal(run.opts.windowsHide, true); assert.equal(run.opts.maxBuffer, 4 * 1024 * 1024);
+  assert.equal(run.opts.timeout, 0, 'on Windows the run is timed by the caller (so the TREE can be killed), not by execFile');
 });
 
 test('cli adapter: not installed / failed (timeout, exit N) / unparsable, each with its reason', async () => {
@@ -241,4 +242,102 @@ test('RENDERED: the Settings button - floor before, one refresh per click burst,
   assert.deepEqual(r.after.picker, ['CLI default', 'Gemini 3.9 Flash · High', 'Gemini 3.8 Flash · High'], 'the picker follows the pushed file');
   assert.equal(r.lastRefreshed, true);
   assert.deepEqual([r.after.button, r.after.disabled], ['Refresh models', false]);
+});
+
+// ── MODELS-173-AUDIT (Dwight): the time box ends the whole Windows process TREE ─────────
+
+test('win32 timeout: the still-live child TREE is killed (taskkill /T /F on its pid), then "timeout"', async () => {
+  const calls = [];
+  const exec = (file, args, opts, cb) => {
+    calls.push({ file, args, opts });
+    if (file === 'taskkill') { setImmediate(() => cb(null, 'SUCCESS')); return { pid: 1 }; }
+    return { pid: 4242 }; // cmd.exe that never finishes (its codex child hangs)
+  };
+  const r = await P.runCli({ platform: 'win32', env: winEnv, exec, exists: () => true }, 'C:\\n\\codex.cmd', ['debug', 'models'], 1024, 40);
+  assert.deepEqual(r, { reason: 'timeout' });
+  const kill = calls.find((c) => c.file === 'taskkill');
+  assert.deepEqual(kill.args, ['/PID', '4242', '/T', '/F']);
+  assert.equal(calls[0].opts.timeout, 0);
+});
+
+test('win32 timeout: a failing or hanging taskkill, and a late exit, are tolerated (still one "timeout")', async () => {
+  let late = null;
+  const exec = (file, args, opts, cb) => {
+    if (file === 'taskkill') { setImmediate(() => cb(Object.assign(new Error('not found'), { code: 128 }), '')); return {}; }
+    late = cb; return { pid: 7 };
+  };
+  const r = await P.runCli({ platform: 'win32', env: winEnv, exec, exists: () => true }, 'C:\\a\\agy.exe', ['models'], 1024, 30);
+  assert.deepEqual(r, { reason: 'timeout' });
+  late(null, 'gemini-x\tGemini X (High)'); // the process exits after all: ignored
+  const quick = await P.runCli({ platform: 'win32', env: winEnv, exec: (f, a, o, cb) => { setImmediate(() => cb(null, 'ok')); return { pid: 9 }; }, exists: () => true }, 'C:\\a\\agy.exe', ['models'], 1024, 5000);
+  assert.deepEqual(quick, { stdout: 'ok' }, 'a run that finishes in time is untouched');
+});
+
+test('POSIX keeps execFile\'s own timeout', async () => {
+  let seen = null;
+  await P.runCli({ platform: 'linux', env: {}, exec: (f, a, o, cb) => { seen = o; setImmediate(() => cb(null, 'x')); }, exists: () => true }, '/usr/bin/agy', ['models'], 1024, 1234);
+  assert.equal(seen.timeout, 1234);
+});
+
+test('REAL (Windows): a .cmd shim whose node grandchild hangs is killed WITH its tree at the time box', { skip: process.platform !== 'win32' }, async (t) => {
+  const cp = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'treekill-'));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ } });
+  const pidFile = path.join(dir, 'grandchild.pid');
+  const shim = path.join(dir, 'hang.cmd');
+  fs.writeFileSync(shim, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)" "${pidFile}"\r\n`);
+  const d = { platform: 'win32', env: process.env, exists: fs.existsSync, exec: (file, args, opts, cb) => cp.execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))) };
+  const t0 = Date.now();
+  const r = await P.runCli(d, shim, ['models'], 1024, 2500);
+  assert.deepEqual(r, { reason: 'timeout' });
+  assert.ok(Date.now() - t0 < 15_000, 'bounded');
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert.ok(pid > 0, 'the grandchild ran');
+  let alive = true;
+  for (let i = 0; i < 40 && alive; i++) {
+    try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 100)); } catch { alive = false; }
+  }
+  if (alive) { try { process.kill(pid); } catch { /* */ } }
+  assert.equal(alive, false, 'the node GRANDCHILD of the .cmd shim is gone (no orphaned tree)');
+});
+
+// ── The Human's rule (god 34c5a5): NO model lookup at launch or on picker open - button only ────
+
+test('NO LOOKUP AT LAUNCH (main): building the adapters, creating the store and reading the file run ZERO child processes', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'models-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let execs = 0; let fetches = 0;
+  const cli = { platform: 'win32', env: winEnv, exists: () => true, exec: () => { execs++; return { pid: 1 }; } };
+  const adapters = P.defaultAdapters(cli, () => 'sk-ant-key', async () => { fetches++; return { status: 200, body: { data: [] } }; });
+  fs.writeFileSync(path.join(dir, 'models.json'), JSON.stringify({ version: 1, refreshedAt: 1, providers: { codex: { status: 'ok', models: [{ id: 'gpt-5.5', label: 'GPT-5.5' }] } } }));
+  const store = new P.ProviderModelStore({ path: path.join(dir, 'models.json'), now: () => 1 });
+  for (let i = 0; i < 5; i++) store.read();
+  assert.ok(Object.keys(adapters).length >= 12);
+  assert.deepEqual([execs, fetches, store.isRefreshing()], [0, 0, false], 'nothing is looked up until refresh() is called');
+});
+
+test('NO LOOKUP AT LAUNCH (index.ts): the adapters are built and run ONLY inside the models:refresh handler', () => {
+  const idx = codeOnly(read('src/main/index.ts'));
+  const handler = idx.slice(idx.indexOf("ipcMain.handle('models:refresh'"), idx.indexOf("ipcMain.handle('tools:status'"));
+  assert.ok(handler.length > 0);
+  for (const call of ['defaultAdapters(', 'providerModels.refresh(']) {
+    assert.equal(idx.split(call).length - 1, 1, `${call} appears exactly once`);
+    assert.ok(handler.includes(call), `${call} is inside the button handler`);
+  }
+  assert.equal((idx.match(/execFile\(/g) || []).length, 1, 'the only execFile call in index.ts is the adapters\' exec (inside the handler)');
+  assert.ok(handler.includes('execFile('));
+});
+
+test('NO LOOKUP AT LAUNCH (renderer): loading the catalog and opening every picker never asks for a refresh', async () => {
+  const saved = global.window;
+  let refreshes = 0; let reads = 0;
+  global.window = { cth: { modelCatalog: async () => { reads++; return null; }, refreshModels: async () => { refreshes++; return { rows: [] }; }, onModelCatalogChanged: () => () => {} } };
+  try {
+    await C.loadModelCatalog();
+    for (const provider of ['claude', 'codex', 'grok', 'kimi', 'gemini', 'antigravity', 'qwen', 'opencode', 'crush', 'pi', 'copilot', 'cursor', 'custom']) C.modelsForProvider(provider);
+    assert.equal(refreshes, 0, 'launch + every picker: zero refreshes');
+    assert.ok(reads <= 1, 'at most one file read');
+  } finally {
+    global.window = saved;
+  }
 });
