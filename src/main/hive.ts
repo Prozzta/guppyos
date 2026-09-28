@@ -1277,7 +1277,7 @@ export class HiveManager {
       const settingsPath = join(dir, 'settings.json');
       // HOOK-BROKER: this spawn's HTTP hook URL (a fresh token), or null -> command hooks.
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
-      this.writeJson(settingsPath, this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl));
+      this.writeJson(settingsPath, this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id));
       args.push('--settings', settingsPath);
     }
     return { args, env };
@@ -1582,10 +1582,12 @@ export class HiveManager {
    *  (W3) the default MCP bundle merged into this PER-SESSION settings file. cwd
    *  scopes the filesystem/git servers; cfg (the consent map) gates which servers
    *  are written. Claude-only — this is invoked solely on the Claude spawn path. */
-  private hookSettings(shim: string, cwd: string, cfg: McpDefaultsMap, theme?: 'light' | 'dark', hookUrl: string | null = null): unknown {
+  private hookSettings(shim: string, cwd: string, cfg: McpDefaultsMap, theme?: 'light' | 'dark', hookUrl: string | null = null, agentId?: string): unknown {
     // Bundled node, NOT bare `node` — see nodeLauncherPath(). Claude runs each of
     // these through `sh -c` with a stripped PATH, where `node` is often absent.
-    const cmd = this.nodeRun(shim);
+    // JOB-ENV (SessionStart): the agent id rides in the command itself, from this per-agent
+    // file, because a background job's env can belong to another agent (hookShimArgs).
+    const cmd = this.nodeRun(shim, ...hookShimArgs(agentId));
     const entry = (matcher?: string) => ({
       ...(matcher ? { matcher } : {}),
       hooks: [{ type: 'command', command: cmd }]
@@ -3880,6 +3882,12 @@ export function brokerUrlParts(url: string | null): { port: number; agentId: str
   return m ? { port: Number(m[1]), agentId: m[2], token: m[3] } : null;
 }
 
+/** JOB-ENV (SessionStart): the shim arguments that carry the agent's own id. Omitted for an
+ *  id that could need shell quoting (the shim then falls back to env AGENT_ID, as before). */
+export function hookShimArgs(agentId: string | undefined): string[] {
+  return agentId && /^[A-Za-z0-9._-]+$/.test(agentId) ? ['--agent', agentId] : [];
+}
+
 /** The statusLine command that sources the script: every part is quote-free by construction. */
 export function claudeStatusCommand(scriptPath: string, parts: { port: number; agentId: string; token: string }): string {
   return `. '${scriptPath}' ${parts.port} ${parts.agentId} ${parts.token}`;
@@ -3897,7 +3905,16 @@ process.stdin.on('end', () => {
   try { payload = JSON.parse(data || '{}'); } catch (_) {}
   // CODEX-HOOK-AGENTID: the hive's own id always wins. A provider may put ITS agent_id in
   // the payload (a Codex or Claude subagent); that value is kept as provider_agent_id.
-  const hiveId = process.env.AGENT_ID || null;
+  // JOB-ENV (SessionStart): the id comes from the per-agent settings file (--agent <id>)
+  // first. A Claude Code background job runs in a shared daemon whose env belongs to
+  // whichever agent started it, so env AGENT_ID can name ANOTHER agent there. A
+  // disagreeing env id is passed along as env_agent_id, for the mismatch row.
+  const argAt = process.argv.indexOf('--agent');
+  const argId = argAt > 0 && process.argv[argAt + 1] && !process.argv[argAt + 1].startsWith('--') ? process.argv[argAt + 1] : null;
+  const envId = process.env.AGENT_ID || null;
+  const hiveId = argId || envId;
+  delete payload.env_agent_id; // only this shim may set it
+  if (argId && envId && envId !== argId) payload.env_agent_id = envId;
   delete payload.provider_agent_id; // only this shim may set it (N3)
   if (payload.agent_id && payload.agent_id !== hiveId) payload.provider_agent_id = payload.agent_id;
   payload.agent_id = hiveId || payload.agent_id || null;

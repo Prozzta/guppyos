@@ -34,6 +34,9 @@ interface HookPayload {
   /** CODEX-HOOK-AGENTID: the provider's OWN agent id, when it sent one that is not the hive's
    *  (a Codex or Claude subagent). The shim stamps agent_id with the hive id regardless. */
   provider_agent_id?: string | null;
+  /** JOB-ENV (SessionStart): the shim's env AGENT_ID when it disagrees with the --agent id from
+   *  the agent's own settings file (a Claude Code background job in another agent's daemon). */
+  env_agent_id?: string | null;
   session_id?: string;
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
@@ -171,6 +174,7 @@ export const MCP_ROLLOUT_RETRY_MS = 20;
  *  the provider's own (a subagent) and becomes provider_agent_id; agent_id is the URL's. */
 export function applyUrlIdentity(p: Record<string, unknown>, urlAgentId: string): void {
   delete p.provider_agent_id;
+  delete p.env_agent_id; // only the command shim may set it
   const own = typeof p.agent_id === 'string' && p.agent_id !== '' ? p.agent_id : null;
   if (own && own !== urlAgentId) p.provider_agent_id = own;
   p.agent_id = urlAgentId;
@@ -831,6 +835,19 @@ export class HookServer {
     return `cmd:${(commandFromToolInput(p.tool_input) ?? '').slice(0, 500)}`;
   }
 
+  /** JOB-ENV (SessionStart): the hook's own id (from the agent's settings file) and its process
+   *  env disagree: the session runs in a Claude Code daemon started by another agent, so
+   *  anything env-based in it (OTel agent.id, the hive CLIs) speaks as that agent. The hook is
+   *  still attributed by the settings id. One row per (agent, env agent, session). */
+  private readonly identityMismatches = new Set<string>();
+  private noteIdentityMismatch(agentId: string, envAgentId: string, event: string, sessionId: string | undefined): void {
+    const key = `${agentId}|${envAgentId}|${sessionId ?? ''}`;
+    if (this.identityMismatches.has(key)) return;
+    if (this.identityMismatches.size >= 256) this.identityMismatches.clear();
+    this.identityMismatches.add(key);
+    try { this.hive.appendLog({ kind: 'hook-identity-mismatch', agentId, envAgentId, event, sessionId: sessionId ?? null }); } catch { /* best effort */ }
+  }
+
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
@@ -846,6 +863,7 @@ export class HookServer {
     // transcript, never drives the wake lifecycle (a subagent's late tool hook would re-open
     // a finished turn), and a subagent's Stop is not this agent's Stop.
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== agentId;
+    if (agentId && typeof p.env_agent_id === 'string' && p.env_agent_id) this.noteIdentityMismatch(agentId, p.env_agent_id, event, p.session_id);
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
     if (agentId && !fromSubagent) this.trackTurn(agentId, event);
     if (!fromSubagent) {
