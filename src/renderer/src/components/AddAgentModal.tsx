@@ -24,6 +24,7 @@ import {
   buildSpawnCommand,
   tokenizeCommand,
   modelsForProvider,
+  seedModelForProvider,
   inferAgentProvider,
   providerPreset,
   isClaudeProvider
@@ -178,9 +179,10 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   };
 
   // Default provider follows whatever the global default command is (claude
-  // unless the user reconfigured it); the model only carries over for Claude.
+  // unless the user reconfigured it). The model is that provider's Settings
+  // default, else undefined = "CLI default" (no --model) — MODEL-DEFAULT-CLI.
   const initialProvider = inferAgentProvider(config.defaultCommand);
-  const initialModel = isClaudeProvider(initialProvider) ? config.defaultModel : undefined;
+  const initialModel = seedModelForProvider(config, initialProvider);
 
   const [name, setName] = useState(pendingHire?.name ?? 'Jim');
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
@@ -214,7 +216,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     // Seed the model: Claude from the global defaultModel; other engines from the
     // per-engine default set in Settings → AI Engines (providerDefaultModels), else
     // the CLI default. This is what makes that Settings field live (Dwight NIT-1).
-    const nextModel = isClaudeProvider(id) ? config.defaultModel : config.providerDefaultModels?.[id];
+    const nextModel = seedModelForProvider(config, id);
     setModel(nextModel);
     const nextPreset = providerPreset(id);
     if (!isClaudeProvider(id) && !nextPreset.resumeFlag && !nextPreset.resumeSubcommand) {

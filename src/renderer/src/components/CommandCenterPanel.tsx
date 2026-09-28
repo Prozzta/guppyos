@@ -359,9 +359,10 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
   const [engineProvider, setEngineProvider] = useState<AgentProvider>('claude');
   const [engineModel, setEngineModel] = useState<string | undefined>(undefined);
   const [restartErrors, setRestartErrors] = useState<Record<string, string>>({});
-  // The harness's own default model (Settings → default model). Michael and every
-  // new agent spawn on this, so the picker marks it — otherwise the only entry
-  // reading "default" was the CLI's, which is a different thing entirely.
+  // The harness's own default model (Settings → default model), if one is set —
+  // unset (MODEL-DEFAULT-CLI, the default) means new agents run "CLI default" and
+  // nothing is marked. When set, new Claude agents spawn on it, so the picker
+  // marks it; the CLI's own default is a different thing entirely.
   const [defaultModel, setDefaultModel] = useState<string | undefined>(undefined);
   // COMPOSER-LAG-152 F1: the dispatch draft lives in DispatchBox, not here, so a keystroke
   // re-renders the box alone and not this whole dashboard. FloorTab only seeds it.

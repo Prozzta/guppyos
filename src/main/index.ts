@@ -27,7 +27,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import {
   readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
-  modelForHiveSpawn, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
+  modelForHiveSpawn, takeClearedDefaultModel, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, resolveSpawnArgs } from '../shared/modelPin';
 import {
@@ -6176,6 +6176,12 @@ function bootstrapHiveServices(): void {
     electron: process.versions.electron,
     platform: process.platform
   });
+  // MODEL-DEFAULT-CLI: config load cleared a saved defaultModel once (config.ts,
+  // migrateDefaultModelCliV1) before the hive existed; record what it was, once.
+  const clearedDefaultModel = takeClearedDefaultModel();
+  if (clearedDefaultModel) {
+    try { hive.appendLog({ kind: 'model-default-cleared', previous: clearedDefaultModel }); } catch { /* best-effort */ }
+  }
   control.replaceAutoDeliveryPauses(readConfig().autoDeliveryPausedAgents ?? []);
   archiveOrphanedAgents(); // #57/#58: archive stale archived:false entries with no live PTY
   hive.startRouter();

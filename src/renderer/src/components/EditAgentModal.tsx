@@ -12,9 +12,9 @@ import {
   AGENT_PROVIDER_PRESETS,
   buildSpawnCommand,
   modelsForProvider,
+  seedModelForProvider,
   inferAgentProvider,
-  providerPreset,
-  isClaudeProvider
+  providerPreset
 } from '@/store/config';
 
 const ACCENTS: AccentColorName[] = ['coral', 'mint', 'sky', 'lemon', 'lilac', 'peach'];
@@ -64,7 +64,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
       setModel(undefined);
       return;
     }
-    const nextModel = isClaudeProvider(id) ? config.defaultModel : config.providerDefaultModels?.[id];
+    const nextModel = seedModelForProvider(config, id);
     setModel(nextModel);
   };
 

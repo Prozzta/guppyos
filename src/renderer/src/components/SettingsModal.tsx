@@ -232,9 +232,12 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     try { await window.cth.updateConfig({ heavyJobsAtOnce: next } as Partial<HarnessConfig>); }
     catch { setHeavyAtOnce(prev); }
   };
-  const [defaultModelSel, setDefaultModelSel] = useState<string>(cfgX.defaultModel ?? 'claude-fable-5');
+  // MODEL-DEFAULT-CLI: unset = "CLI default" (no --model); that entry is shown
+  // selected, and picking it clears defaultModel (undefined crosses the IPC, and
+  // writeConfig's JSON write drops the key — the same clear maxTurns uses).
+  const [defaultModelSel, setDefaultModelSel] = useState<string | undefined>(cfgX.defaultModel || undefined);
   const [defaultModelNote, setDefaultModelNote] = useState('');
-  const saveDefaultModel = async (id: string) => {
+  const saveDefaultModel = async (id: string | undefined) => {
     setDefaultModelSel(id);
     try {
       await window.cth.updateConfig({ defaultModel: id } as Partial<HarnessConfig>);
@@ -1087,14 +1090,15 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                           <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                            Every newly spawned Claude agent (Michael included) starts on this model unless picked per-agent.
-                            Marked “· default” in the model pickers.
+                            Every newly spawned Claude agent starts on this model unless picked per-agent.
+                            “CLI default” passes no model, so Claude Code uses its own. Michael has his own model.
+                            A model set here is marked “· default” in the model pickers.
                           </span>
                           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                             {AGENT_MODELS.map((m) => (
                               <button
                                 key={m.label}
-                                onClick={() => { if (m.id) void saveDefaultModel(m.id); }}
+                                onClick={() => { void saveDefaultModel(m.id); }}
                                 style={{
                                   padding: '3px 8px 1px', border: 'none', cursor: 'pointer',
                                   fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)',

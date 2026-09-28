@@ -449,6 +449,10 @@ export interface HarnessConfig {
   /** One-time guard for `migrateTriggersV1` (legacy webhook → webhookTriggers,
    *  1h → 2h compact cadence). Set once the migration has run to completion. */
   triggersMigratedV1?: boolean;
+  /** One-time guard for `migrateDefaultModelCliV1` (MODEL-DEFAULT-CLI: the old
+   *  factory `defaultModel` seed is cleared once, so new agents start on their
+   *  CLI's own default). Set once it has run; a later explicit choice is kept. */
+  defaultModelCliMigratedV1?: boolean;
 
   // ─── Memory reflection (the janitor's condense half) ───────────────────────
   /** Master toggle for the in-process MemoryReflector. Default on. */
@@ -480,10 +484,9 @@ const DEFAULTS: HarnessConfig = {
   defaultCommand: 'claude',
   godProvider: 'claude',
   godModel: 'claude-opus-4-8',
-  // Global default model for every agent that hasn't picked one explicitly — wins
-  // over the role-based tiers (modelForRole) in the spawn handler, so all agents
-  // (incl. god) default to Fable 5. A per-agent model choice still overrides it.
-  defaultModel: 'claude-fable-5',
+  // MODEL-DEFAULT-CLI: NO factory `defaultModel`. A new agent (any provider)
+  // starts on its CLI's own default (no --model) unless the user picks a model
+  // per agent or sets a default in Settings. godModel above is separate.
   // Seeded from the MCP catalog so the consent defaults never drift from it
   // (safe-readonly ON, write/secret OFF).
   mcpDefaults: defaultMcpDefaults(),
@@ -635,6 +638,50 @@ function migrateTriggersV1(cfg: HarnessConfig): HarnessConfig {
   }
 }
 
+/** MODEL-DEFAULT-CLI (the Human's decision, 1.1.70): the single switch for the
+ *  one-time clear below. true = a saved `defaultModel` (almost always the old
+ *  factory seed, which every earlier build persisted into config.json) is
+ *  cleared once, so new agents start on the CLI default. false = the migration
+ *  does nothing at all (no clear, no flag), so flipping it back later is safe. */
+export const CLEAR_SAVED_DEFAULT_MODEL = true;
+
+/** Same latch role as `triggersMigrationRan`: the migration's own persist must
+ *  not re-enter it before the flag reaches disk. */
+let defaultModelMigrationRan = false;
+/** The value the migration cleared in THIS process, until main takes it to log
+ *  it (the hive logger is not reachable from config load). */
+let clearedDefaultModel: string | null = null;
+
+/**
+ * Clear a saved `defaultModel` exactly once per install, and record
+ * `defaultModelCliMigratedV1` so it never runs again: a default the user picks
+ * in Settings afterwards is an explicit choice and is kept. `godModel` and every
+ * agent's own stored model are untouched. Never worth a failed launch.
+ */
+function migrateDefaultModelCliV1(cfg: HarnessConfig): HarnessConfig {
+  if (!CLEAR_SAVED_DEFAULT_MODEL) return cfg;
+  if (cfg.defaultModelCliMigratedV1 || defaultModelMigrationRan) return cfg;
+  defaultModelMigrationRan = true;
+  try {
+    const next: HarnessConfig = { ...cfg, defaultModelCliMigratedV1: true };
+    const previous = typeof cfg.defaultModel === 'string' ? cfg.defaultModel.trim() : '';
+    delete next.defaultModel;
+    persistConfig(next);
+    if (previous) clearedDefaultModel = previous;
+    return next;
+  } catch {
+    return cfg;
+  }
+}
+
+/** The `defaultModel` the one-time migration cleared in this process, handed
+ *  out ONCE (then null) so main writes exactly one hive log row for it. */
+export function takeClearedDefaultModel(): string | null {
+  const v = clearedDefaultModel;
+  clearedDefaultModel = null;
+  return v;
+}
+
 /** Keys older builds persisted that nothing reads any more (1.1.60: the retired indexer's model
  *  choice). readConfig drops them, and pruneRetiredConfigKeys rewrites the file once. */
 export const RETIRED_CONFIG_KEYS = ['embeddingModel'] as const;
@@ -659,15 +706,17 @@ export function readConfig(): HarnessConfig {
   const p = configPath();
   // No file yet = a first run with nothing to migrate; the defaults ARE the
   // post-migration shape. Deliberately does not persist — a bare read must not
-  // conjure a config.json before onboarding has written one.
-  if (!existsSync(p)) return clampDevHome(withTriggerDefaults({ ...DEFAULTS }));
+  // conjure a config.json before onboarding has written one. A fresh install has
+  // nothing to clear, so its first write records the default-model flag as done
+  // (otherwise a default the user picks before that write would be cleared).
+  if (!existsSync(p)) return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
   try {
     const raw = readFileSync(p, 'utf8');
     const parsed = JSON.parse(raw);
     for (const k of RETIRED_CONFIG_KEYS) delete parsed[k];
-    return normalizeStoredHomes(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed })));
+    return normalizeStoredHomes(migrateDefaultModelCliV1(migrateTriggersV1(withTriggerDefaults({ ...DEFAULTS, ...parsed }))));
   } catch {
-    return clampDevHome(withTriggerDefaults({ ...DEFAULTS }));
+    return clampDevHome(withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true }));
   }
 }
 
@@ -827,12 +876,13 @@ export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
 export function resetConfig(): HarnessConfig {
   const p = configPath();
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(DEFAULTS, null, 2), 'utf8');
+  // A reset is a fresh install: nothing to clear, so the default-model flag is done.
+  writeFileSync(p, JSON.stringify({ ...DEFAULTS, defaultModelCliMigratedV1: true }, null, 2), 'utf8');
   // Drop the migration latch too: the file on disk is back to `triggersMigratedV1:
   // false`, and a latch left set would keep the flag from ever being written again
   // in this process. The migration itself is a no-op on defaults either way.
   triggersMigrationRan = false;
-  return withTriggerDefaults({ ...DEFAULTS });
+  return withTriggerDefaults({ ...DEFAULTS, defaultModelCliMigratedV1: true });
 }
 
 /** Model ids by tier (Lane A #6.4). Kept in sync with AGENT_MODELS in
@@ -871,7 +921,10 @@ export function modelForRole(
 
 /** Resolve a hive Claude spawn model. A saved per-agent `/model` choice is
  * authoritative over app-wide defaults; an explicit argv `--model` is handled
- * by the caller before it calls this helper. */
+ * by the caller before it calls this helper. God: godModel (modelForRole).
+ * Anyone else: the Settings default if one is set, else undefined = NO --model,
+ * the CLI's own default (MODEL-DEFAULT-CLI; the role tiers are not applied to
+ * workers, or a "CLI default" pick would silently become Sonnet). */
 export function modelForHiveSpawn(
   meta: RoleHint,
   config: Pick<HarnessConfig, 'defaultModel' | 'godProvider' | 'godModel'>,
@@ -881,7 +934,7 @@ export function modelForHiveSpawn(
   if (saved) return saved;
   return meta.isGod
     ? modelForRole(meta, config)
-    : config.defaultModel ?? modelForRole(meta, config);
+    : config.defaultModel?.trim() || undefined;
 }
 
 /** Ensure harnessHome exists on disk. Expands `~` first — the onboarding wizard

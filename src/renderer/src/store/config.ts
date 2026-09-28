@@ -174,12 +174,11 @@ export interface ModelOption {
 
 /** The models offered in the "add agent" picker and the per-agent selector.
  *  `[1m]` selects the 1M-token context window variant. */
-// Deliberately has NO "pass no --model flag" entry. Every option here names a
-// real model, because the whole reason to open this picker is to know which
-// model an agent is on — and a no-flag option resolves to whatever Claude Code
-// happens to choose, which the UI cannot show and the user cannot predict. The
-// harness default is marked ` · default` instead, and it names a real model.
+// MODEL-DEFAULT-CLI: first entry is "CLI default" (no --model flag), like every
+// other provider's list. It is what a new agent starts on unless the user set a
+// default in Settings; the harness default (when set) is marked ` · default`.
 export const AGENT_MODELS: ModelOption[] = [
+  { id: undefined, label: 'CLI default' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1' },
   { id: 'claude-fable-5', label: 'Fable 5' },
   { id: 'claude-opus-5-5', label: 'Opus 5.5' },
@@ -369,6 +368,18 @@ export function modelsForProvider(provider: AgentProvider): ModelOption[] {
   if (provider === 'cursor') return CURSOR_MODELS;
   if (provider === 'custom') return [];
   return AGENT_MODELS;
+}
+
+/** The model a NEW agent (Add Agent, or a provider switch in Edit Agent) starts
+ *  on for a provider: Claude from Settings' `defaultModel`, any other engine from
+ *  its per-engine default (Settings → AI Engines). Neither set = undefined = the
+ *  "CLI default" entry, and buildSpawnCommand then passes no --model. */
+export function seedModelForProvider(
+  config: Pick<HarnessConfig, 'defaultModel' | 'providerDefaultModels'>,
+  provider: AgentProvider
+): string | undefined {
+  const m = provider === 'claude' ? config.defaultModel : config.providerDefaultModels?.[provider];
+  return typeof m === 'string' && m.trim() ? m : undefined;
 }
 
 /** Providers shown in the Command Center's cross-provider model picker.
