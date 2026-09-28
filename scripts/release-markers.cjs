@@ -51,7 +51,7 @@ const raceBinaryProvenance = () => {
   const binaries = [path.join(ptyRoot, 'build', 'Release', 'conpty.node')].filter((p) => fs.existsSync(p) && fs.statSync(p).size > 0);
   return binaries.length > 0 && binaries.every((p) => {
     const record = raceMarker.files[path.relative(ptyRoot, p).replaceAll('\\', '/')];
-    return record && record.sha256 === sha(p) && fs.statSync(p).mtimeMs > sourceMtimeMs;
+    return record && record.sha256 === sha(p) && fs.statSync(p).mtimeMs > sourceMtimeMs && racePins.hasMutexImports(p);
   });
 };
 const plat = 'win32-x64';

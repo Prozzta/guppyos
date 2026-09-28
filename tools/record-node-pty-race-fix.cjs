@@ -29,6 +29,8 @@ const sourceStat = fs.statSync(sourcePath);
 const binaries = [path.join(root, 'build', 'Release', 'conpty.node')];
 if (!fs.existsSync(binaries[0])) fail('electron-rebuild did not produce build/Release/conpty.node');
 if (binaries.some((p) => fs.statSync(p).mtimeMs <= sourceStat.mtimeMs)) fail('conpty.node is not newer than patched conpty.cc (stale binary; rerun electron-rebuild -f)');
+// mtime alone can be faked by a plain copy; the lock imports are a property of the #922 code.
+if (!binaries.every(pins.hasMutexImports)) fail(`conpty.node lacks the #922 mutex imports (${pins.MUTEX_IMPORTS.join(', ')}): not built from the patched source`);
 const files = Object.fromEntries(binaries.map((p) => [path.relative(root, p).replaceAll('\\', '/'), { sha256: hash(p), mtimeMs: fs.statSync(p).mtimeMs }]));
 fs.writeFileSync(markerPath, `${JSON.stringify({ version: pkg.version, sourceSha256, sourceMtimeMs: sourceStat.mtimeMs, files }, null, 2)}\n`);
 console.log(`[record-node-pty-race-fix] ${pkg.version}; recorded ${binaries.length} rebuilt conpty.node digest(s)`);
