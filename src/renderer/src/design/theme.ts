@@ -53,12 +53,14 @@ export function toggleAppTheme(): AppTheme {
   return next;
 }
 
+// IMPACT-LOOP-171 sweep: a module-level subscribe, so a re-render never unsubscribes and
+// re-subscribes (it could not loop here - no read on subscribe - but it churned every render).
+function subscribeTheme(onChange: () => void): () => void {
+  subscribers.add(onChange);
+  return () => { subscribers.delete(onChange); };
+}
+const readTheme = (): AppTheme => theme;
+
 export function useAppTheme(): AppTheme {
-  return useSyncExternalStore(
-    (onChange) => {
-      subscribers.add(onChange);
-      return () => subscribers.delete(onChange);
-    },
-    () => theme
-  );
+  return useSyncExternalStore(subscribeTheme, readTheme);
 }
