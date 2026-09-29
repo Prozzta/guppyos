@@ -936,3 +936,49 @@ test('Jim LOW: the sandbox base is judged by its REAL path: a junction out of th
   assert.ok(fs.existsSync(path.join(live, 'keep.txt')), 'removing the junction left its target alone');
 });
 
+test('Jim J2 (07ccbf69 audit): a LIVE location that is itself a junction into the jail is still detected as an overlap (live paths are realpathed too)', (t) => {
+  const tmp = tmpDir(t, 'lb-j2-');
+  const jroot = path.join(tmp, 'jroot');
+  const inJail = path.join(jroot, 'sub');
+  fs.mkdirSync(inJail, { recursive: true });
+  const liveLink = path.join(tmp, 'live-userdata-link');
+  fs.symlinkSync(inJail, liveLink, 'junction');            // the "live userData" is a junction INTO the jail
+  t.after(() => { try { fs.unlinkSync(liveLink); } catch { /* gone */ } });
+  const base = path.join(inJail, 'md-layerb-2026-09-29T02-00-00-000Z');
+  const env = { TEMP: 'C:\\no-such-temp-dir' };
+  // Lexically the base is NOT inside the live path; really it is.
+  assert.ok(!base.toLowerCase().startsWith(liveLink.toLowerCase()));
+  assert.match(lb.sandboxBaseProblems(base, jroot, liveLink, env).join(' | '), /overlaps the live userData/);
+  fs.unlinkSync(liveLink);
+  assert.ok(fs.existsSync(inJail), 'the junction target is intact');
+});
+
+test('Jim J3/J6 (07ccbf69 audit): a realpath error other than ENOENT ABORTS the preflight; it is never swallowed', () => {
+  const env = { TEMP: 'C:\\no-such-temp-dir' };
+  const fail = (code, when) => (p) => { if (when(p)) { const e = new Error(`${code} (injected) ${p}`); e.code = code; throw e; } return path.resolve(p); };
+  const base = 'C:\\jroot\\md-layerb-x';
+  for (const code of ['EACCES', 'EPERM']) {
+    // On the base or the jail root.
+    assert.match(lb.sandboxBaseProblems(base, 'C:\\jroot', null, env, fail(code, (p) => p === base)).join(' '), new RegExp(`cannot resolve the real path.*${code}`));
+    assert.match(lb.sandboxBaseProblems(base, 'C:\\jroot', null, env, fail(code, (p) => p === 'C:\\jroot')).join(' '), new RegExp(code));
+    // On a LIVE location (the userData here) and on %TEMP%: refused too, never a lexical fallback.
+    assert.match(lb.sandboxBaseProblems(base, 'C:\\jroot', 'C:\\live-ud', env, fail(code, (p) => p === 'C:\\live-ud')).join(' '), new RegExp(code), `a ${code} on a live location is not swallowed`);
+    assert.match(lb.sandboxBaseProblems(base, 'C:\\jroot', null, { TEMP: 'C:\\t' }, fail(code, (p) => p === 'C:\\t')).join(' '), new RegExp(code), `a ${code} on %TEMP% is not swallowed`);
+    assert.match(lb.jailRootProblems('C:\\jroot', fail(code, () => true), 'C:\\jroot').join(' '), new RegExp(code));
+  }
+  // A MISSING live location or %TEMP% (ENOENT: e.g. no MunderDevData on this machine) is not an error.
+  assert.deepEqual(lb.sandboxBaseProblems(base, 'C:\\jroot', 'C:\\live-ud', { TEMP: 'C:\\t' }, fail('ENOENT', (p) => p === 'C:\\live-ud' || p === 'C:\\t')), []);
+  // J6: realpathNearest itself throws anything but ENOENT (and walks up on ENOENT only).
+  const real = fs.realpathSync.native;
+  try {
+    // EACCES on the path itself, while its parent resolves fine: it must THROW, never walk up.
+    fs.realpathSync.native = (p) => { if (path.resolve(p).toLowerCase() === 'c:\\anything\\deeper') { const e = new Error('EACCES (injected)'); e.code = 'EACCES'; throw e; } return path.resolve(p); };
+    assert.throws(() => lb.realpathNearest('C:\\anything\\deeper'), /EACCES/);
+    // ENOENT on it: walks up and appends the missing tail.
+    fs.realpathSync.native = (p) => { if (path.resolve(p).toLowerCase() === 'c:\\anything\\deeper') { const e = new Error('ENOENT (injected)'); e.code = 'ENOENT'; throw e; } return path.resolve(p); };
+    assert.equal(lb.realpathNearest('C:\\anything\\deeper'), 'C:\\anything\\deeper');
+  } finally { fs.realpathSync.native = real; }
+  // The preflight turns any problem into a throw (abort).
+  assert.match(method('preflight()'), /if \(baseProblems\.length\) throw new Error/);
+});
+

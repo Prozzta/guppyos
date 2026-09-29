@@ -1129,11 +1129,14 @@ function sandboxBaseProblems(base, jailRoot, liveUserData, env = process.env, re
   try { b = realpath(base); root = realpath(jailRoot); } catch (e) { return [`cannot resolve the real path of ${base}: ${e && e.message}`]; }
   if (!inside(b, root) || norm(b) === norm(root)) out.push(`${b} is not inside the jail root ${root}`);
   const tmpRaw = path.resolve(env.TEMP || env.TMP || os.tmpdir());
-  let tmp = tmpRaw; try { tmp = realpath(tmpRaw); } catch { tmp = tmpRaw; }
+  // Jim J3 (07ccbf69 audit): only a MISSING path (ENOENT) falls back to the path as written; any
+  // other realpath error (EACCES, EPERM ...) is a problem, so the preflight ABORTS.
+  const realOrMissing = (p) => { try { return realpath(p); } catch (e) { if (e && e.code === 'ENOENT') return path.resolve(p); out.push(`cannot resolve the real path of ${p}: ${(e && e.code) || (e && e.message)}`); return null; } };
+  const tmp = realOrMissing(tmpRaw) || tmpRaw;
   if (inside(b, tmp) || inside(b, tmpRaw)) out.push(`${b} is under %TEMP% (${tmp}): codex refuses to create its helper binaries there`);
   for (const [name, live] of [['the live hive', LIVE.hive], ['MunderDevData', LIVE.devData], ['the real ~/.codex', path.join(home, '.codex')], ['the real ~/.claude', path.join(home, '.claude')], ['the live userData', liveUserData]]) {
     if (!live) continue;
-    let rl = path.resolve(live); try { rl = realpath(live); } catch { rl = path.resolve(live); }
+    const rl = realOrMissing(live) || path.resolve(live);
     for (const l of [path.resolve(live), rl]) if (inside(b, l) || inside(l, b)) { out.push(`${b} overlaps ${name} (${live})`); break; }
   }
   return out;
