@@ -881,7 +881,7 @@ test('real step 1: the Claude jail denies every C:\\Dunder sibling of the path t
   assert.ok(!got.some((x) => base.toLowerCase().startsWith(x + path.sep)), 'no deny root contains the base');
   assert.throws(() => lb.dunderDenyRoots(base, D, () => { throw new Error('EACCES (injected)'); }), /for the Claude jail deny rules/, 'fail-closed');
   assert.deepEqual(lb.dunderDenyRoots('C:\\elsewhere\\md-layerb-x', D, () => []), [D], 'a base outside C:\\Dunder keeps the whole-C:\\Dunder deny');
-  assert.match(src, /return \[\.\.\.dunderDenyRoots\(base, LIVE\.dunder, listDir\), path\.join\(home, '\.claude'\),/);
+  assert.match(src, /return \[\.\.\.dunderDenyRoots\(base, LIVE\.dunder, listDir\), \.\.\.liveAppPaths\(\{ APPDATA: appData, LOCALAPPDATA: localAppData \}, home\), REPO\];/);
 });
 
 test('Jim K17: the Codex sandbox probe FAILS when the jail write did not succeed, even with every live write refused', () => {
@@ -1100,5 +1100,40 @@ test('real step 2 (21b4d842): the Claude jail proof checks the NEW deny set (per
   assert.match(proof, /const ok = results\.every\(\(x\) => x\.want === x\.got\) && denyProblems\.length === 0;/);
   assert.ok(!/Write\\\(\\\/\\\/c\\\/Dunder/.test(proof), 'no blanket-deny regex left in the proof');
   assert.match(method('writeClaudeSettings(extraEnv)'), /const liveDenied = claudeLiveDenied\(s\.base, home, appData\);\s*this\.claudeDenied = liveDenied;/);
+});
+
+test('god (on fb5368d6): EVERY liveForbidden() path is covered by the Claude jail deny rules (runtime cross-check); dropping one fails the proof', () => {
+  const D = 'C:\\Dunder';
+  const J = (...p) => path.join(D, ...p);
+  const tree = {
+    [D]: ['hive', 'MunderDevData', 'palace', 'worktrees', '_work', 'roster.json', 'roster-backups'],
+    [J('_work')]: ['andy-zt175', 'andy-scratch'],
+    [J('_work', 'andy-scratch')]: ['lb-jail'],
+    [J('_work', 'andy-scratch', 'lb-jail')]: ['md-layerb-2026-09-29T05-00-00-000Z']
+  };
+  const listDir = (d) => { const k = Object.keys(tree).find((x) => x.toLowerCase() === path.resolve(d).toLowerCase()); if (!k) throw new Error(`ENOENT ${d}`); return tree[k]; };
+  const base = J('_work', 'andy-scratch', 'lb-jail', 'md-layerb-2026-09-29T05-00-00-000Z');
+  const home = 'C:\\Users\\x';
+  const env = { APPDATA: 'C:\\Users\\x\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' };
+  const forbidden = lb.liveForbidden(env, home);
+  for (const p of ['C:\\Users\\x\\AppData\\Roaming\\munder-difflin', 'C:\\Users\\x\\AppData\\Roaming\\Munder Difflin', 'C:\\Users\\x\\AppData\\Local\\Programs\\Munder Difflin', 'C:\\Users\\x\\AppData\\Local\\munder-difflin-updater', J('roster.json'), J('roster-backups')]) {
+    assert.ok(forbidden.includes(p), `liveForbidden names ${p}`);
+  }
+  const live = lb.claudeLiveDenied(base, home, env.APPDATA, listDir, env.LOCALAPPDATA);
+  const deny = lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: live }).permissions.deny;
+  assert.deepEqual(lb.liveCoverageProblems(deny, forbidden, base), [], 'every live path is covered');
+  // REPO\src is covered by the REPO entry itself, not only because the worktree happens to be a
+  // listed sibling: a listing without it (the worktree created after the listing) still covers it.
+  const noRepoSibling = (d) => (path.resolve(d).toLowerCase() === J('_work').toLowerCase() ? ['andy-scratch'] : listDir(d));
+  const live2 = lb.claudeLiveDenied(base, home, env.APPDATA, noRepoSibling, env.LOCALAPPDATA);
+  assert.deepEqual(lb.liveCoverageProblems(lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: live2 }).permissions.deny, forbidden, base), [], 'REPO\\src through the REPO subtree deny');
+  // Mutant: one path dropped from the deny list (the space-named userData, the one fb5368d6 missed).
+  const dropped = lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: live.filter((p) => p !== 'C:\\Users\\x\\AppData\\Roaming\\Munder Difflin') }).permissions.deny;
+  assert.match(lb.liveCoverageProblems(dropped, forbidden, base).join(' | '), /live path C:\\Users\\x\\AppData\\Roaming\\Munder Difflin is not covered/);
+  // Coverage by an ancestor counts, unless that ancestor is the base or an ancestor of it.
+  assert.deepEqual(lb.liveCoverageProblems(lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: ['C:\\Users\\x'] }).permissions.deny, ['C:\\Users\\x\\.codex'], base), []);
+  assert.match(lb.liveCoverageProblems(lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: [D] }).permissions.deny, [J('hive')], base).join(' '), /not covered/, 'a blanket C:\\Dunder deny does not count (it blocks the base)');
+  // The proof runs the cross-check against the REAL liveForbidden().
+  assert.match(method('proveClaudeJail()'), /denyProblems\.push\(\.\.\.liveCoverageProblems\(st\.permissions && st\.permissions\.deny, liveForbidden\(\), this\.s\.base\)\);/);
 });
 

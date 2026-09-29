@@ -198,14 +198,34 @@ function parseArgs(argv) {
 
 /** Live locations no write/remove may ever reach, computed from the REAL profile (the runner runs
  *  under run-clean-realhome, so os.homedir() and APPDATA are the real ones). */
-function liveForbidden(env = process.env) {
-  const home = os.homedir();
-  const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+function liveForbidden(env = process.env, home = os.homedir()) {
   return [
     LIVE.hive, LIVE.devData, path.join(LIVE.dunder, 'palace'), path.join(LIVE.dunder, 'worktrees'),
-    path.join(LIVE.dunder, 'roster.json'), path.join(appData, 'munder-difflin'), path.join(appData, 'Munder Difflin'),
-    path.join(home, '.claude'), path.join(home, '.claude.json'), path.join(home, '.codex'), path.join(home, '.gemini'),
+    path.join(LIVE.dunder, 'roster.json'), path.join(LIVE.dunder, 'roster-backups'),
+    ...liveAppPaths(env, home),
     REPO + path.sep + 'src'
+  ];
+}
+
+/** The live app and provider locations in the user profile (shared by the write guard and the Claude
+ *  jail's deny list, so the two cannot drift):
+ *  - %APPDATA%\munder-difflin: the packaged app's userData (Electron derives it from package.json
+ *    "name": "munder-difflin", package.json:2; there is no "productName" in package.json);
+ *  - %APPDATA%\Munder Difflin: NOT used by the source (electron-builder.yml:2 productName names the
+ *    installer and the install dir, and the dev build's setName is 'munder-difflin-dev',
+ *    src/main/index.ts:199); kept, defensively, in case a build ever derives userData from the
+ *    productName;
+ *  - %LOCALAPPDATA%\Programs\Munder Difflin: the per-user NSIS install dir (electron-builder.yml:155
+ *    oneClick: false, :156 perMachine: false; the default per-user location);
+ *  - %LOCALAPPDATA%\munder-difflin-updater: electron-updater's download cache for the app;
+ *  - the real ~/.claude, ~/.claude.json, ~/.codex, ~/.gemini. */
+function liveAppPaths(env = process.env, home = os.homedir()) {
+  const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+  const localAppData = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+  return [
+    path.join(appData, 'munder-difflin'), path.join(appData, 'Munder Difflin'),
+    path.join(localAppData, 'Programs', 'Munder Difflin'), path.join(localAppData, 'munder-difflin-updater'),
+    path.join(home, '.claude'), path.join(home, '.claude.json'), path.join(home, '.codex'), path.join(home, '.gemini')
   ];
 }
 
@@ -639,8 +659,26 @@ function dunderDenyRoots(base, root = LIVE.dunder, readdir = (d) => fs.readdirSy
 /** The live roots the Claude jail's permission rules deny (626ee708): every C:\\Dunder sibling of the
  *  path to the base (dunderDenyRoots) plus the named live paths: the real ~/.claude, ~/.codex,
  *  ~/.claude.json, ~/.gemini, the live userData, and this repo. */
-function claudeLiveDenied(base, home = os.homedir(), appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), listDir) {
-  return [...dunderDenyRoots(base, LIVE.dunder, listDir), path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
+function claudeLiveDenied(base, home = os.homedir(), appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), listDir, localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')) {
+  return [...dunderDenyRoots(base, LIVE.dunder, listDir), ...liveAppPaths({ APPDATA: appData, LOCALAPPDATA: localAppData }, home), REPO];
+}
+
+/** The runtime cross-check (god, on fb5368d6): EVERY liveForbidden() path must be covered by a subtree
+ *  deny for every path tool, on the path itself or on an ancestor that is NOT the base or an
+ *  ancestor of the base (that one would block the sandbox). Returns the uncovered paths' problems. */
+function liveCoverageProblems(deny, livePaths, base) {
+  const have = new Set((deny || []).map((d) => String(d).toLowerCase()));
+  const b = path.resolve(base);
+  const out = [];
+  for (const live of livePaths) {
+    const chain = [];
+    for (let p = path.resolve(live); ; p = path.dirname(p)) { chain.push(p); if (path.dirname(p) === p) break; }
+    const usable = chain.filter((p) => !inside(b, p));
+    for (const t of JAIL_PATH_TOOLS) {
+      if (!usable.some((p) => have.has(`${t}(${claudeRulePath(p)}/**)`.toLowerCase()))) { out.push(`live path ${live} is not covered by a ${t} deny`); break; }
+    }
+  }
+  return out;
 }
 
 /** Real step 2 (21b4d842): the Claude jail's DENY-RULE proof, pure. Every expected live root is
@@ -1808,6 +1846,8 @@ class LayerB {
     // (626ee708: per-sibling C:\\Dunder denies, never a blanket one that would block the base).
     const denyProblems = claudeDenyProblems(st.permissions && st.permissions.deny, this.claudeDenied || [], this.s.base);
     if (!this.claudeDenied || !this.claudeDenied.length) denyProblems.push('no recorded deny list (writeClaudeSettings did not run)');
+    // Cross-check (god, on fb5368d6): every liveForbidden() path is covered by the deny rules.
+    denyProblems.push(...liveCoverageProblems(st.permissions && st.permissions.deny, liveForbidden(), this.s.base));
     const ok = results.every((x) => x.want === x.got) && denyProblems.length === 0;
     this.proofs = { ...(this.proofs || {}), claudeJail: results, claudeDenyProblems: denyProblems };
     return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; the deny rules cover every live root and never the sandbox base', JSON.stringify({ results, denyProblems: denyProblems.slice(0, 10) }));
@@ -2929,7 +2969,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
