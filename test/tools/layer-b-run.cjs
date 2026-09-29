@@ -95,7 +95,14 @@
  *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted
  *       # REAL, step 1: records `codex --version` + `codex sandbox --help` and STOPS (exit 3) for god's review
  *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted --codex-sandbox-probe
- *       # REAL, step 2 (after god's OK on the help): the sandbox probe, then the full run
+ *       # REAL, step 2 (after god's OK on the help): the sandbox probe ONLY, then STOPS (exit 3) through
+ *       # the full teardown (credential copies shredded + verified, real files checked, sandbox
+ *       # removed, live check, report). --stop-after-probe says the same explicitly (the default).
+ *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted --codex-sandbox-probe --full-run
+ *       # REAL, step 3 (after god's GO on the probe): the probe AGAIN (it must pass in the same run,
+ *       # before any agent), then the full run: the app, the real agents, tokens. launch() refuses
+ *       # to start a real run without --full-run. --full-run needs --codex-sandbox-probe; it cannot be
+ *       # combined with --stop-after-probe or --dry-run-stubs.
  * Without --go it only runs the static preflight (no build, no launch, nothing written).
  * --floor-paused-confirmed: the operator confirms the live floor is PAUSED (god 4dd770 decision 3).
  * --uac-risk-accepted: the Human accepts one possible UAC prompt and is standing by (god 57634c).
@@ -153,7 +160,7 @@ const inside = (child, parent) => { const r = path.relative(norm(parent), norm(c
 
 function parseArgs(argv) {
   const a = { dryRun: false, go: false, skipBuild: false, rollback: true, keepSandbox: false, keepV1174: false, gitPath: true,
-    floorPaused: false, uacRisk: false, codexProbe: false,
+    floorPaused: false, uacRisk: false, codexProbe: false, fullRun: false, stopAfterProbe: false,
     models: { ...DEFAULT_MODELS }, v1174Dir: null, reportDir: null, jailRoot: LB_JAIL_ROOT };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
@@ -166,6 +173,8 @@ function parseArgs(argv) {
     else if (k === '--floor-paused-confirmed') a.floorPaused = true;
     else if (k === '--uac-risk-accepted') a.uacRisk = true;
     else if (k === '--codex-sandbox-probe') a.codexProbe = true;
+    else if (k === '--full-run') a.fullRun = true;
+    else if (k === '--stop-after-probe') a.stopAfterProbe = true;
     else if (k === '--no-git-path') a.gitPath = false;
     else if (k === '--claude-model') a.models.claude = argv[++i];
     else if (k === '--codex-model') a.models.codex = argv[++i];
@@ -175,6 +184,13 @@ function parseArgs(argv) {
     else throw new Error(`unknown argument ${k}`);
   }
   for (const m of Object.values(a.models)) if (!/^[A-Za-z0-9._:[\]-]{1,80}$/.test(String(m))) throw new Error(`bad model id ${m}`);
+  // god (720598c6 finding): step 2 is the probe ONLY. The full real run (the app, real agents,
+  // tokens) needs --full-run, and the probe must pass in the SAME run before any agent.
+  if (a.fullRun && a.stopAfterProbe) throw new Error('--full-run and --stop-after-probe contradict each other');
+  if (a.fullRun && a.dryRun) throw new Error('--full-run is for the real run only (the dry run launches stub TUIs without it)');
+  if (a.fullRun && !a.codexProbe) throw new Error('--full-run needs --codex-sandbox-probe: the probe must pass in the same run before any agent');
+  if (a.stopAfterProbe && !a.codexProbe) throw new Error('--stop-after-probe needs --codex-sandbox-probe');
+  if (a.codexProbe && !a.fullRun) a.stopAfterProbe = true;   // the default: the probe only
   return a;
 }
 
@@ -1042,6 +1058,16 @@ class Credentials {
 
 }
 
+/** Emergency path (Jim LOW): shred the credential copies; an error is LOGGED, never swallowed
+ *  silently (the next run's fail-closed startup sweep stays the backstop). Returns ok. */
+function emergencyShred(lb, logFn = (m) => console.error(m)) {
+  if (!lb || !lb.creds) return true;
+  try { lb.creds.deleteAll(); return true; } catch (e) {
+    try { logFn(`[layer-b] EMERGENCY: shredding the credential copies failed: ${e && e.message}; the next run's startup sweep shreds any leftover`); } catch { /* logging itself failed */ }
+    return false;
+  }
+}
+
 /**
  * R4 startup sweep, FAIL-CLOSED in every step (Dwight x2): an earlier run killed hard can leave its
  * sandbox, with PLAINTEXT credential copies, in lb-jail (or %TEMP%, before real step 1). For every stale md-layerb-<stamp> dir (not
@@ -1818,6 +1844,8 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
 
   // ── launch / hidden ───────────────────────────────────────────────────────
   async launch(exe, label) {
+    // god (720598c6 finding): the app, the real agents and every token path need --full-run.
+    if (!this.args.dryRun && !this.args.fullRun) throw new Error(`launch() refused: a real run needs --full-run (${label})`);
     const cdpPort = await freePort();
     let inspPort = await freePort();
     while (inspPort === cdpPort) inspPort = await freePort();
@@ -2794,6 +2822,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       // only in the real run behind --codex-sandbox-probe (the dry run starts no codex binary).
       if (!this.proveClaudeJail()) throw new Error('the Claude jail proof failed');
       if (!this.args.dryRun && !this.proveCodexSandbox()) throw new Error('the Codex sandbox proof failed');
+      this.probeGate();
       this.startedAt = Date.now();
       this.startMonitors();
       await this.launch(this.exe175, '1.1.75 (phase A)');
@@ -2839,6 +2868,15 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     return result.ok ? 0 : 1;
   }
 
+  /** god (720598c6 finding): a real run WITHOUT --full-run stops right after the (passed) probe,
+   *  through the normal full teardown (main's finally), exit 3. The dry run is not gated here
+   *  (stub TUIs, zero tokens); launch() itself refuses a real run without --full-run. */
+  probeGate() {
+    if (this.args.dryRun || this.args.fullRun) return;
+    this.stopReason = 'codex sandbox probe recorded (passed); the full run needs --full-run and god\'s GO';
+    throw new Error(this.stopReason);
+  }
+
   /** R1: the Codex agent really runs with the jail's sandbox config (the product copied the seed). */
   checkCodexSeed() {
     if (this.args.dryRun) return;
@@ -2854,7 +2892,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
@@ -2870,7 +2908,7 @@ if (require.main === module) {
     try { if (lb) proven = lb.procs.killSyncBestEffort().ok === true; } catch { proven = false; }
     try { if (lb && lb.watch) lb.watch.stop(); } catch { /* best effort */ }
     try { if (lb && lb.sessionWatch) lb.sessionWatch.stop(); } catch { /* best effort */ }
-    try { if (lb) lb.creds.deleteAll(); } catch { /* best effort */ }
+    emergencyShred(lb);
     try {
       if (lb && lb.s && !lb.args.keepSandbox && fs.existsSync(lb.s.base)) {
         if (proven) W.rm(lb.s.base);
@@ -2883,7 +2921,7 @@ if (require.main === module) {
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK', 'SIGHUP']) process.on(sig, () => { log(`${sig}: cleaning up`); emergency(130); });
   process.on('uncaughtException', (e) => { console.error('[layer-b] uncaught:', e); emergency(1); });
   process.on('unhandledRejection', (e) => { console.error('[layer-b] unhandled:', e); emergency(1); });
-  process.on('exit', () => { try { if (lb && !exiting) { lb.procs.killRootsByHandle('process exit'); lb.creds.deleteAll(); } } catch { /* best effort */ } });
+  process.on('exit', () => { if (!lb || exiting) return; try { lb.procs.killRootsByHandle('process exit'); } catch (e) { console.error(`[layer-b] exit: kill by handle failed: ${e && e.message}`); } emergencyShred(lb); });
   let args;
   try { args = parseArgs(process.argv.slice(2)); } catch (e) { console.error(e.message); process.exit(2); }
   lb = new LayerB(args);

@@ -512,10 +512,10 @@ test('NO PROOF OF EXIT (Dwight b): stopApp aborts the run before any relaunch; t
 
 test('R4: the emergency path kills FIRST, then shreds the credentials, then removes the sandbox only with proof, then rebuilds out/', () => {
   const em = src.slice(src.indexOf('const emergency = (code) => {'), src.indexOf("for (const sig of ['SIGINT'"));
-  const k = em.indexOf('killSyncBestEffort()'); const c = em.indexOf('creds.deleteAll()'); const r = em.indexOf('W.rm(lb.s.base)'); const o = em.indexOf('rebuildOutWithoutSeams()');
+  const k = em.indexOf('killSyncBestEffort()'); const c = em.indexOf('emergencyShred(lb)'); const r = em.indexOf('W.rm(lb.s.base)'); const o = em.indexOf('rebuildOutWithoutSeams()');
   assert.ok(k > 0 && c > k && r > c && o > r, `order kill ${k} < creds ${c} < sandbox ${r} < out ${o}`);
   assert.match(em, /if \(proven\) W\.rm\(lb\.s\.base\);\s*else console\.error\(`\[layer-b\] NO PROOF OF EXIT/);
-  assert.match(src, /process\.on\('exit', \(\) => \{ try \{ if \(lb && !exiting\) \{ lb\.procs\.killRootsByHandle\('process exit'\); lb\.creds\.deleteAll\(\); \}/);
+  assert.match(src, /process\.on\('exit', \(\) => \{ if \(!lb \|\| exiting\) return; try \{ lb\.procs\.killRootsByHandle\('process exit'\); \} catch \(e\) \{[^\n]*\} emergencyShred\(lb\); \}\);/);
 });
 
 test('decision 4: the live-location watch is STAT + HASH only (no content read); a change is reported, only a NAME carrying a run marker FAILS', (t) => {
@@ -980,5 +980,84 @@ test('Jim J3/J6 (07ccbf69 audit): a realpath error other than ENOENT ABORTS the 
   } finally { fs.realpathSync.native = real; }
   // The preflight turns any problem into a throw (abort).
   assert.match(method('preflight()'), /if \(baseProblems\.length\) throw new Error/);
+});
+
+test('god (720598c6) (a) argv: --codex-sandbox-probe alone = stop after the probe; --full-run needs the probe, contradicts --stop-after-probe, is real-run only', () => {
+  const p = lb.parseArgs(['--codex-sandbox-probe']);
+  assert.deepEqual([p.codexProbe, p.fullRun, p.stopAfterProbe], [true, false, true], 'the probe ONLY by default');
+  assert.equal(lb.parseArgs(['--codex-sandbox-probe', '--stop-after-probe']).stopAfterProbe, true, 'the explicit flag says the same');
+  const full = lb.parseArgs(['--codex-sandbox-probe', '--full-run']);
+  assert.deepEqual([full.fullRun, full.stopAfterProbe], [true, false]);
+  assert.throws(() => lb.parseArgs(['--codex-sandbox-probe', '--full-run', '--stop-after-probe']), /contradict/);
+  assert.throws(() => lb.parseArgs(['--full-run']), /--full-run needs --codex-sandbox-probe/, 'the probe must pass in the same run');
+  assert.throws(() => lb.parseArgs(['--dry-run-stubs', '--full-run']), /real run only/);
+  assert.throws(() => lb.parseArgs(['--stop-after-probe']), /needs --codex-sandbox-probe/);
+  assert.deepEqual([lb.parseArgs([]).fullRun, lb.parseArgs([]).stopAfterProbe], [false, false]);
+});
+
+test('god (720598c6) (b) flow: with the probe passed, a real run WITHOUT --full-run stops right there (stopReason, through main\'s teardown) and launch() refuses', async () => {
+  const mk = (argv) => { const r = Object.create(lb.LayerB.prototype); r.args = lb.parseArgs(argv); return r; };
+  // The probe passed (stubbed): the gate stops the run, with the reason main's report and exit 3 use.
+  const stopAt = mk(['--codex-sandbox-probe']);
+  assert.throws(() => stopAt.probeGate(), /codex sandbox probe recorded \(passed\); the full run needs --full-run and god's GO/);
+  assert.match(stopAt.stopReason, /the full run needs --full-run/);
+  const go = mk(['--codex-sandbox-probe', '--full-run']);
+  assert.doesNotThrow(() => go.probeGate(), 'with --full-run the run goes on');
+  assert.equal(go.stopReason, undefined);
+  assert.doesNotThrow(() => mk(['--dry-run-stubs']).probeGate(), 'the dry run (stub TUIs, zero tokens) is not gated here');
+  // launch() itself refuses a real run without --full-run, BEFORE anything is spawned.
+  const launched = [];
+  const noFull = mk(['--codex-sandbox-probe']);
+  noFull.procs = { addRoot: () => launched.push('spawned') };
+  await assert.rejects(noFull.launch('C:\\no\\such.exe', '1.1.75 (phase A)'), /launch\(\) refused: a real run needs --full-run/);
+  assert.deepEqual(launched, [], 'nothing spawned');
+  // main: the gate sits right after the probe and before the monitors and the first launch; a
+  // stopReason makes main return 3 after the full teardown in its finally.
+  const main = src.slice(src.indexOf('async main() {'), src.indexOf('/** R1: the Codex agent really runs'));
+  const at = (x) => main.indexOf(x);
+  assert.ok(at('this.proveCodexSandbox()') < at('this.probeGate()') && at('this.probeGate()') < at('this.startMonitors()') && at('this.probeGate()') < at('this.launch('));
+  assert.match(main, /\} finally \{\s*td = await this\.teardown\(\);/);
+  assert.match(main, /if \(this\.stopReason\) \{ log\(`STOPPED BY DESIGN: \$\{this\.stopReason\}`\); return 3; \}/);
+});
+
+test('god (720598c6) (c) static: launch() is unreachable in a real run without args.fullRun', () => {
+  const l = method('async launch(exe, label)');
+  const first = l.split('\n').slice(1).find((x) => x.trim());
+  assert.match(first, /if \(!this\.args\.dryRun && !this\.args\.fullRun\) throw new Error\(`launch\(\) refused: a real run needs --full-run/, 'the FIRST statement of launch()');
+  assert.match(method('probeGate()'), /if \(this\.args\.dryRun \|\| this\.args\.fullRun\) return;\s*this\.stopReason = /);
+  // Every launch call site is in main after the gate, in relaunchForPhaseB, or in the rollback: all
+  // behind launch()'s own guard.
+  const sites = calls((n) => /^this\.launch$/.test(n.expression.getText(sf)));
+  assert.ok(sites.length >= 3);
+});
+
+test('Jim J2b: %TEMP% is realpathed in the guard: a %TEMP% behind a junction still catches a base inside it', (t) => {
+  const tmp = tmpDir(t, 'lb-j2b-');
+  const realTemp = path.join(tmp, 'real-temp');
+  fs.mkdirSync(realTemp);
+  const tempLink = path.join(tmp, 'temp-link');
+  fs.symlinkSync(realTemp, tempLink, 'junction');
+  t.after(() => { try { fs.unlinkSync(tempLink); } catch { /* gone */ } });
+  const base = path.join(realTemp, 'md-layerb-2026-09-29T03-00-00-000Z');
+  // %TEMP% is given as the junction; the base is lexically NOT under it, really it is.
+  assert.match(lb.sandboxBaseProblems(base, realTemp, null, { TEMP: tempLink }).join(' | '), /is under %TEMP%/);
+  fs.unlinkSync(tempLink);
+  assert.ok(fs.existsSync(realTemp), 'the junction target is intact');
+});
+
+test('Jim LOW: the emergency credential shred LOGS its error (never swallowed silently); the startup sweep stays the backstop', () => {
+  const logs = [];
+  assert.equal(lb.emergencyShred({ creds: { deleteAll: () => { throw new Error('EBUSY (injected)'); } } }, (m) => logs.push(m)), false);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /EMERGENCY: shredding the credential copies failed: EBUSY \(injected\); the next run's startup sweep shreds any leftover/);
+  let called = 0;
+  assert.equal(lb.emergencyShred({ creds: { deleteAll: () => { called++; } } }, (m) => logs.push(m)), true);
+  assert.equal(called, 1);
+  assert.equal(lb.emergencyShred(null, (m) => logs.push(m)), true);
+  assert.equal(logs.length, 1);
+  // Both emergency paths use it (no silent catch around deleteAll anywhere).
+  assert.ok(!/try \{[^}]*creds\.deleteAll\(\)[^}]*\} catch \{/.test(src), 'no silent catch around deleteAll');
+  const tail = src.slice(src.indexOf('if (require.main === module) {'));
+  assert.equal((tail.match(/emergencyShred\(lb\)/g) || []).length, 2, 'the signal/crash path and the exit hook');
 });
 
