@@ -53,6 +53,9 @@ function calls(pred) {
   visit(sf);
   return out;
 }
+/** A class method's source (code only), from its signature to its closing brace. */
+const method = (sig) => { const at = src.indexOf(`  ${sig} {`); assert.ok(at >= 0, sig); return src.slice(at, src.indexOf('\n  }\n', at)); };
+const tmpDir = tmpRoot;
 const line = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
 const insideNode = (n, container) => n.getStart(sf) >= container.getStart(sf) && n.getEnd() <= container.getEnd();
 const wObject = (() => {
@@ -295,7 +298,72 @@ test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confi
   const codexSpawns = calls((n) => /^spawnSync$/.test(n.expression.getText(sf)) && n.arguments[0] && n.arguments[0].getText(sf) === 'exe');
   const owners = codexSpawns.map((c) => { let x = c; while (x && !(ts.isMethodDeclaration(x))) x = x.parent; return x ? x.name.getText(sf) : null; });
   assert.deepEqual(owners.sort(), ['codexSandboxHelp', 'proveCodexSandbox']);
-  assert.match(src, /'sandbox', 'windows', '--help'/);
+  // Real step 1 (e9c19b8c): codex 0.157.1 has no `sandbox windows` subcommand; step 1 records
+  // `codex --version` and `codex sandbox --help`, and the probe uses the 0.157.1 syntax.
+  assert.deepEqual(lb.CODEX_HELP_ARGVS, [['--version'], ['sandbox', '--help']]);
+  assert.match(method('codexSandboxHelp()'), /for \(const argv of CODEX_HELP_ARGVS\) \{\s*const r = spawnSync\(exe, argv,/);
+  assert.match(method('proveCodexSandbox()'), /const argv = codexProbeArgv\(codex\.cwd, this\.node, script\);\s*const r = spawnSync\(exe, argv,/);
+});
+
+test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv contains "sandbox windows"', () => {
+  assert.deepEqual(lb.codexProbeArgv('C:\\jail\\work\\lb-codex', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs'),
+    ['sandbox', '-c', 'sandbox_mode="workspace-write"', '-C', 'C:\\jail\\work\\lb-codex', '--', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs']);
+  for (const argv of [...lb.CODEX_HELP_ARGVS, lb.codexProbeArgv('c', 'n', 's')]) {
+    assert.ok(!/sandbox\s+windows/.test(argv.join(' ')), argv.join(' '));
+    assert.ok(!argv.includes('windows'), argv.join(' '));
+  }
+  // Static, over the CODE (comments stripped): no 'sandbox', 'windows' pair and no "sandbox windows" string.
+  assert.ok(!/'sandbox',\s*'windows'/.test(src), 'no argv array with sandbox, windows');
+  assert.ok(!/["'`][^"'`\n]*sandbox windows[^"'`\n]*["'`]/.test(src), 'no string literal with "sandbox windows"');
+  // The version parse the step-1 check depends on.
+  assert.equal(lb.parseCodexVersion('codex-cli 0.157.1\n'), '0.157.1');
+  assert.equal(lb.parseCodexVersion('error: unrecognized'), null);
+  assert.equal(lb.parseCodexVersion(''), null);
+  // Step 1 stops (exit 3) after recording both, as before.
+  const main = src.slice(src.indexOf('async main() {'));
+  assert.match(main, /this\.stopReason = 'codex --version and codex sandbox --help recorded;/);
+  assert.match(method('codexSandboxHelp()'), /this\.check\(ver\.status === 0 && help\.status === 0 && !!version && help\.text\.length > 0,/);
+  assert.match(method('codexSandboxHelp()'), /const home = path\.join\(this\.s\.jail, 'help-codex-home'\);/);
+});
+
+test('real step 1: the sandbox base lives in lb-jail/<run>, never in %TEMP% or a live location; the sweep covers lb-jail/* and %TEMP%', (t) => {
+  assert.equal(lb.LB_JAIL_ROOT, 'C:\\Dunder\\_work\\andy-scratch\\lb-jail');
+  const r = new lb.LayerB(lb.parseArgs([]));
+  const s = r.layout();
+  assert.equal(path.dirname(s.base), lb.LB_JAIL_ROOT);
+  assert.match(path.basename(s.base), /^md-layerb-\d{4}-\d{2}-\d{2}T/, 'the stale-sweep prefix');
+  assert.deepEqual(lb.sandboxBaseProblems(s.base, lb.LB_JAIL_ROOT, 'C:\\Users\\x\\AppData\\Roaming\\munder-difflin', { TEMP: 'C:\\Users\\x\\AppData\\Local\\Temp' }), []);
+  const tmp = os.tmpdir();
+  assert.match(lb.sandboxBaseProblems(path.join(tmp, 'md-layerb-x'), tmp, null, { TEMP: tmp }).join(' '), /under %TEMP%/, 'a %TEMP% base is refused');
+  assert.match(lb.sandboxBaseProblems('C:\\elsewhere\\md-layerb-x', lb.LB_JAIL_ROOT, null, {}).join(' '), /not inside the jail root/);
+  assert.match(lb.sandboxBaseProblems('C:\\Dunder\\hive\\md-layerb-x', 'C:\\Dunder\\hive', null, {}).join(' '), /overlaps the live hive/);
+  assert.match(lb.sandboxBaseProblems('C:\\Dunder\\MunderDevData\\md-layerb-x', 'C:\\Dunder\\MunderDevData', null, {}).join(' '), /overlaps MunderDevData/);
+  assert.match(lb.sandboxBaseProblems(path.join(os.homedir(), '.codex', 'md-layerb-x'), path.join(os.homedir(), '.codex'), null, {}).join(' '), /overlaps the real ~\/\.codex/);
+  assert.match(lb.sandboxBaseProblems('C:\\ud\\md-layerb-x', 'C:\\ud', 'C:\\ud', {}).join(' '), /overlaps the live userData/);
+  assert.match(method('preflight()'), /const baseProblems = sandboxBaseProblems\(s\.base, this\.args\.jailRoot \|\| LB_JAIL_ROOT, liveUserData\);\s*if \(baseProblems\.length\) throw/);
+  // The sweep: both roots, a missing root is empty, any other error is fail-closed.
+  assert.match(method('startupSweep(ops)'), /sweepRoots\(\[this\.args\.jailRoot \|\| LB_JAIL_ROOT, os\.tmpdir\(\)\], this\.s\.base, ops\)/);
+  const jail = tmpDir(t, 'lb-jailroot-');
+  const legacy = tmpDir(t, 'lb-legacytmp-');
+  const staleJ = path.join(jail, 'md-layerb-2026-09-29T01-00-00-000Z');
+  const staleT = path.join(legacy, 'md-layerb-2026-09-20T01-00-00-000Z');
+  for (const d of [staleJ, staleT]) { fs.mkdirSync(path.join(d, 'jail', 'home', '.codex'), { recursive: true }); fs.writeFileSync(path.join(d, 'jail', 'home', '.codex', 'auth.json'), '{"tokens":"x"}'); }
+  const sw = lb.sweepRoots([jail, legacy, path.join(jail, 'does-not-exist')], null);
+  assert.equal(sw.ok, true);
+  assert.deepEqual(sw.done.map((d) => [d.credentials, d.shredded, d.removed]), [[1, 1, true], [1, 1, true]]);
+  assert.ok(!fs.existsSync(staleJ) && !fs.existsSync(staleT), 'both removed, credentials shredded first');
+  const bad = lb.sweepRoots([jail], null, { lstat: () => { const e = new Error('EACCES (injected)'); e.code = 'EACCES'; throw e; } });
+  assert.equal(bad.ok, false, 'a root that cannot be inspected is fail-closed');
+});
+
+test('real step 1: the late-hook check reports NOT RUN (never FAIL, never PASS) when no hive log exists', (t) => {
+  const hive = tmpDir(t, 'lb-nohive-');
+  const checks = [];
+  const fake = { s: { hive: path.join(hive, 'missing') }, spec: undefined, allStubsSince: null, check(ok, label, detail) { checks.push({ ok, label, detail }); return ok; } };
+  lb.LayerB.prototype.assertNoStubLateHooks.call(fake);
+  assert.deepEqual(checks, [], 'no check recorded: neither a FAIL nor a PASS');
+  assert.equal(fake.lateHooks.notRun, true);
+  assert.match(method('report(extra)'), /this\.lateHooks && this\.lateHooks\.notRun \? \['- NOT RUN: no hive log exists \(the run stopped before any app launch\)'\]/);
 });
 
 test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) starts BEFORE any other process of the run', () => {
@@ -791,3 +859,28 @@ test('rulings wired: B6 tier 3 asks for turn 1\'s nonce; B7 forces /compact, ret
   // Only PASS passes.
   assert.match(src, /asserted\.every\(\(f\) => f\.status === 'PASS'\)/);
 });
+
+test('real step 1: the Claude jail denies every C:\\Dunder sibling of the path to the lb-jail base, never the base itself (a deny beats an allow)', () => {
+  const D = 'C:\\Dunder';
+  const J = (...p) => path.join(D, ...p);
+  const tree = {
+    [D]: ['hive', 'MunderDevData', 'palace', '_work', 'roster.json'],
+    [J('_work')]: ['andy-zt175', 'andy-scratch', 'jim-zt175'],
+    [J('_work', 'andy-scratch')]: ['lb-jail', 'flaky170', 'zt175-NOTES.md'],
+    [J('_work', 'andy-scratch', 'lb-jail')]: ['md-layerb-2026-09-29T01-00-00-000Z', 'md-layerb-2026-09-28T01-00-00-000Z', 'help-out.txt']
+  };
+  const base = J('_work', 'andy-scratch', 'lb-jail', 'md-layerb-2026-09-29T01-00-00-000Z');
+  const readdir = (d) => { const k = Object.keys(tree).find((x) => x.toLowerCase() === path.resolve(d).toLowerCase()); if (!k) throw new Error(`ENOENT ${d}`); return tree[k]; };
+  const got = lb.dunderDenyRoots(base, D, readdir).map((x) => x.toLowerCase());
+  for (const p of [J('hive'), J('MunderDevData'), J('palace'), J('roster.json'), J('_work', 'andy-zt175'), J('_work', 'jim-zt175'), J('_work', 'andy-scratch', 'flaky170'), J('_work', 'andy-scratch', 'lb-jail', 'md-layerb-2026-09-28T01-00-00-000Z'), J('worktrees'), J('roster-backups')]) {
+    assert.ok(got.includes(p.toLowerCase()), `denies ${p}`);
+  }
+  for (const p of [D, J('_work'), J('_work', 'andy-scratch'), J('_work', 'andy-scratch', 'lb-jail'), base]) {
+    assert.ok(!got.includes(p.toLowerCase()), `never denies ${p} (an ancestor of, or, the base)`);
+  }
+  assert.ok(!got.some((x) => base.toLowerCase().startsWith(x + path.sep)), 'no deny root contains the base');
+  assert.throws(() => lb.dunderDenyRoots(base, D, () => { throw new Error('EACCES (injected)'); }), /for the Claude jail deny rules/, 'fail-closed');
+  assert.deepEqual(lb.dunderDenyRoots('C:\\elsewhere\\md-layerb-x', D, () => []), [D], 'a base outside C:\\Dunder keeps the whole-C:\\Dunder deny');
+  assert.match(src, /const liveDenied = \[\.\.\.dunderDenyRoots\(s\.base\), path\.join\(home, '\.claude'\),/);
+});
+

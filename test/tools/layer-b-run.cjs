@@ -36,7 +36,7 @@
  *    - Zero-token proofs before any agent starts: the installed hook command is fed payloads that
  *      target C:\Dunder\hive and the real ~/.claude and must deny (both modes). Codex (god 57634c):
  *      the DRY run starts NO codex binary. The REAL run needs --floor-paused-confirmed AND
- *      --uac-risk-accepted; its first codex binary is `codex sandbox windows --help` (recorded in the
+ *      --uac-risk-accepted; its first codex binaries are `codex --version` and `codex sandbox --help` (recorded in the
  *      report), and it then STOPS (exit 3) unless --codex-sandbox-probe is given, which god gives
  *      after reading that help: the probe then tries to write markers into C:\Dunder\hive, the real
  *      ~/.codex and ~/.claude (refused, never appear; a jail write succeeds), then the run goes on.
@@ -72,7 +72,9 @@
  *      - the 1.1.74 worktree %TEMP%\md-layerb-v1174 (source + a node_modules COPY): removed at the
  *        end, node_modules first, then git worktree remove WITHOUT --force (--keep-v1174 keeps it);
  *      - isolation.rigEnv: the jail dirs and the shared node-only dir %TEMP%\md-rig-node-<ver>;
- *      - the app and the CLIs themselves: the sandbox (jail, devroot) only.
+ *      - the app and the CLIs themselves: the sandbox (jail, devroot) only. The sandbox base is
+ *        C:Dunder_workandy-scratchlb-jailmd-layerb-<stamp> (real step 1: codex refuses its
+ *        helper binaries under %TEMP%), removed at the end and verified gone.
  *    The build env is scrubbed of every secret-shaped variable (GH_TOKEN, CSC_*, NPM tokens ...).
  *  - Load: --go requires LAYERB_SOAK=1 on the invoking command line, which the floor's HEAVY-JOB
  *    lock classifies as a heavy "bench" job (heavyJob.ts BENCH_ENV): one heavy job at a time, held
@@ -91,7 +93,7 @@
  *   LAYERB_SOAK=1 node C:/Dunder/_work/andy-scratch/flaky170/run-clean-realhome.cjs C:/Dunder/_work/andy-zt175 \
  *     node test/tools/layer-b-run.cjs --dry-run-stubs --go             # plumbing, zero tokens, no codex binary
  *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted
- *       # REAL, step 1: records `codex sandbox windows --help` and STOPS (exit 3) for god's review
+ *       # REAL, step 1: records `codex --version` + `codex sandbox --help` and STOPS (exit 3) for god's review
  *   LAYERB_SOAK=1 ... node test/tools/layer-b-run.cjs --go --floor-paused-confirmed --uac-risk-accepted --codex-sandbox-probe
  *       # REAL, step 2 (after god's OK on the help): the sandbox probe, then the full run
  * Without --go it only runs the static preflight (no build, no launch, nothing written).
@@ -128,6 +130,12 @@ const FACT_EST = { B1: 40_000, B2: 70_000, B4: 45_000, B3: 190_000, B5: 45_000, 
 const DEFAULT_MODELS = { claude: 'claude-haiku-4-5-20251001', codex: 'gpt-5.6-luna' };
 const IDS = { claude: 'lb-claude', codex: 'lb-codex', god: 'god' };
 const NUDGE_HEADS = ['You have new hive mail', 'You have new hive inbox message(s)'];
+/** Real step 1 (e9c19b8c): codex refuses to create its helper binaries under a temporary dir, and
+ *  every Codex home of the run (the help's, the probe's, each agent's <hive>/agents/<id>/.codex) sits
+ *  inside the sandbox. So the WHOLE sandbox base moves out of %TEMP%, to <LB_JAIL_ROOT>/md-layerb-<stamp>
+ *  (the simplest safe option: one root, one removal, one sweep). */
+const LB_JAIL_ROOT = 'C:\\Dunder\\_work\\andy-scratch\\lb-jail';
+
 const LIVE = {
   hive: 'C:\\Dunder\\hive',
   devData: 'C:\\Dunder\\MunderDevData',
@@ -146,7 +154,7 @@ const inside = (child, parent) => { const r = path.relative(norm(parent), norm(c
 function parseArgs(argv) {
   const a = { dryRun: false, go: false, skipBuild: false, rollback: true, keepSandbox: false, keepV1174: false, gitPath: true,
     floorPaused: false, uacRisk: false, codexProbe: false,
-    models: { ...DEFAULT_MODELS }, v1174Dir: null, reportDir: null };
+    models: { ...DEFAULT_MODELS }, v1174Dir: null, reportDir: null, jailRoot: LB_JAIL_ROOT };
   for (let i = 0; i < argv.length; i++) {
     const k = argv[i];
     if (k === '--dry-run-stubs') a.dryRun = true;
@@ -163,6 +171,7 @@ function parseArgs(argv) {
     else if (k === '--codex-model') a.models.codex = argv[++i];
     else if (k === '--v1174-dir') a.v1174Dir = path.resolve(argv[++i]);
     else if (k === '--report-dir') a.reportDir = path.resolve(argv[++i]);
+    else if (k === '--jail-root') a.jailRoot = path.resolve(argv[++i]);
     else throw new Error(`unknown argument ${k}`);
   }
   for (const m of Object.values(a.models)) if (!/^[A-Za-z0-9._:[\]-]{1,80}$/.test(String(m))) throw new Error(`bad model id ${m}`);
@@ -586,6 +595,31 @@ function claudeJailSettings({ node, policyFile, liveDenied, readRoots = [], writ
   };
 }
 
+/** The Claude jail's permission-deny roots for C:\\Dunder (real step 1). The sandbox base now lives
+ *  INSIDE C:\\Dunder (lb-jail, outside %TEMP%), and a Claude deny rule always beats an allow, so
+ *  denying C:\\Dunder whole would deny the agent's own sandbox. Instead: at every level from
+ *  C:\\Dunder down to the base, every sibling of the path to the base is denied (the live hive,
+ *  MunderDevData, palace, worktrees, roster.json, the other worktrees, the other runs' leftovers ...),
+ *  plus the named live paths whatever the listing says. A listing error THROWS (fail-closed). An
+ *  entry created under C:\\Dunder later is not in these rules; the PreToolUse jail hook, an
+ *  ALLOWLIST (reads in the sandbox, writes in the agent's own dirs), is the hard guarantee. A base
+ *  outside C:\\Dunder keeps the old rule: C:\\Dunder denied whole. */
+function dunderDenyRoots(base, root = LIVE.dunder, readdir = (d) => fs.readdirSync(d)) {
+  const named = [LIVE.hive, LIVE.devData, path.join(root, 'palace'), path.join(root, 'worktrees'), path.join(root, 'roster.json'), path.join(root, 'roster-backups')];
+  const b = path.resolve(base);
+  if (!inside(b, root) || norm(b) === norm(root)) return [path.resolve(root)];
+  const out = [];
+  let cur = path.resolve(root);
+  for (const seg of path.relative(cur, b).split(path.sep)) {
+    let names;
+    try { names = readdir(cur); } catch (e) { throw new Error(`cannot list ${cur} for the Claude jail deny rules: ${e && e.message}`); }
+    for (const n of names) if (n.toLowerCase() !== seg.toLowerCase()) out.push(path.join(cur, n));
+    cur = path.join(cur, seg);
+  }
+  for (const p of named) if (!inside(b, p) && !out.some((x) => norm(x) === norm(p))) out.push(p);
+  return out;
+}
+
 /** The jailed ~/.codex/config.toml the product seeds each Codex agent's home from: workspace-write,
  *  writable roots = the jail only, no command network, the UNELEVATED Windows sandbox (no setup,
  *  no UAC). TOML literal strings: Windows paths need no escaping. */
@@ -602,6 +636,27 @@ function codexSandboxToml(writableRoots) {
     'sandbox = "unelevated"',
     ''
   ].join('\n');
+}
+
+/** Real step 1 (e9c19b8c): codex 0.157.1 has NO `sandbox windows` subcommand; `codex sandbox
+ *  [OPTIONS] [COMMAND]...` runs COMMAND under the Windows restricted-token sandbox, so the old
+ *  `sandbox windows --help` ran a command named "windows". Step 1 records these two instead. */
+const CODEX_HELP_ARGVS = [['--version'], ['sandbox', '--help']];
+
+/** The probe's argv for codex 0.157.1 (help captured in andy-scratch/lb-jail/help-out.txt):
+ *  `codex sandbox -c sandbox_mode="workspace-write" -C <cwd> -- <node> <probe.cjs>`. The writable
+ *  roots, network_access=false and the unelevated Windows sandbox come from the probe's
+ *  CODEX_HOME/config.toml (codexSandboxToml, the same config every Codex agent is seeded with);
+ *  `-c sandbox_mode` states the mode explicitly on the command line too, and `-C` is the agent's
+ *  own cwd (the jail workspace). No `-P` profile: the real run's config defines none. */
+function codexProbeArgv(cwd, node, script) {
+  return ['sandbox', '-c', 'sandbox_mode="workspace-write"', '-C', cwd, '--', node, script];
+}
+
+/** Parse `codex --version` ("codex-cli 0.157.1"); null if it does not say a version. */
+function parseCodexVersion(text) {
+  const m = /codex(?:-cli)?\s+v?(\d+\.\d+\.\d+)/i.exec(String(text || ''));
+  return m ? m[1] : null;
 }
 
 /** The vendor codex.exe next to the npm shim (so the probe needs no cmd.exe quoting). */
@@ -989,7 +1044,7 @@ class Credentials {
 
 /**
  * R4 startup sweep, FAIL-CLOSED in every step (Dwight x2): an earlier run killed hard can leave its
- * sandbox, with PLAINTEXT credential copies, in %TEMP%. For every stale md-layerb-<stamp> dir (not
+ * sandbox, with PLAINTEXT credential copies, in lb-jail (or %TEMP%, before real step 1). For every stale md-layerb-<stamp> dir (not
  * this run's) every credential file is SHREDDED; only if every one is provably gone is the dir
  * removed. ANY error, while listing %TEMP%, inspecting an entry, walking a stale dir at any depth,
  * shredding or removing, keeps that dir and makes the result ok:false; the caller aborts BEFORE the
@@ -1042,6 +1097,41 @@ function sweepStale(tmp, currentBase, ops = {}) {
   }
   const ok = done.every((d) => d.removed && d.shredded === d.credentials && !d.error);
   return { ok, done };
+}
+
+/** The startup sweep over several roots (lb-jail/*, the legacy %TEMP%). A root that does not exist
+ *  (ENOENT) has nothing stale; any other error listing it is ok:false (fail-closed, as sweepStale). */
+function sweepRoots(roots, currentBase, ops = {}) {
+  const lstat = ops.lstat || ((p) => fs.lstatSync(p));
+  const done = [];
+  let ok = true;
+  for (const root of roots) {
+    try { lstat(root); } catch (e) {
+      if (e && e.code === 'ENOENT') continue;
+      ok = false; done.push({ dir: root, credentials: 0, shredded: 0, removed: false, error: `cannot inspect ${root}: ${e && e.message}` }); continue;
+    }
+    const r = sweepStale(root, currentBase, ops);
+    ok = ok && r.ok;
+    done.push(...r.done);
+  }
+  return { ok, done };
+}
+
+/** The sandbox base guard (real step 1): inside the jail root, NOT under %TEMP% (codex refuses its
+ *  helper binaries there), and outside the live hive, MunderDevData, the real ~/.codex and ~/.claude
+ *  and the live userData (and none of those inside it). Returns the problems (empty = ok). */
+function sandboxBaseProblems(base, jailRoot, liveUserData, env = process.env) {
+  const out = [];
+  const home = os.homedir();
+  const b = path.resolve(base);
+  if (!inside(b, jailRoot) || norm(b) === norm(jailRoot)) out.push(`${b} is not inside the jail root ${jailRoot}`);
+  const tmp = path.resolve(env.TEMP || env.TMP || os.tmpdir());
+  if (inside(b, tmp)) out.push(`${b} is under %TEMP% (${tmp}): codex refuses to create its helper binaries there`);
+  for (const [name, live] of [['the live hive', LIVE.hive], ['MunderDevData', LIVE.devData], ['the real ~/.codex', path.join(home, '.codex')], ['the real ~/.claude', path.join(home, '.claude')], ['the live userData', liveUserData]]) {
+    if (!live) continue;
+    if (inside(b, live) || inside(live, b)) out.push(`${b} overlaps ${name} (${live})`);
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── live-location watch
@@ -1202,7 +1292,7 @@ class LayerB {
 
   // ── layout ────────────────────────────────────────────────────────────────
   layout() {
-    const base = path.join(os.tmpdir(), `md-layerb-${this.stamp}`);
+    const base = path.join(this.args.jailRoot || LB_JAIL_ROOT, `md-layerb-${this.stamp}`);
     const s = {
       base,
       devRoot: path.join(base, 'devroot'),
@@ -1257,6 +1347,8 @@ class LayerB {
     for (const [name, p] of [['userData', paths.userData], ['hive', paths.hiveRoot]]) {
       if (norm(p) === norm(liveUserData) || norm(p) === norm(LIVE.hive) || inside(p, LIVE.devData)) throw new Error(`sandbox ${name} is a live path`);
     }
+    const baseProblems = sandboxBaseProblems(s.base, this.args.jailRoot || LB_JAIL_ROOT, liveUserData);
+    if (baseProblems.length) throw new Error(`the sandbox base is refused:\n  ${baseProblems.join('\n  ')}`);
     // R10: the Codex login source honours $CODEX_HOME and refuses one inside a live hive.
     if (!this.args.dryRun) realCredentialPaths();
     this.check(true, 'preflight: the sandbox root passes the product isolation guard; its pipe is neither the live nor the MunderDevData pipe', `${r.root} / ${paths.pipeName}`);
@@ -1267,8 +1359,9 @@ class LayerB {
   /** R4 (Dwight): the fail-closed startup sweep. Throws (so main aborts BEFORE the build and any
    *  credential copy) unless every stale credential is provably shredded and its dir removed. */
   startupSweep(ops) {
-    const sweep = sweepStale(os.tmpdir(), this.s.base, ops);
-    this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed', JSON.stringify(sweep.done));
+    // Both homes a sandbox ever had: the jail root (now) and %TEMP% (before real step 1).
+    const sweep = sweepRoots([this.args.jailRoot || LB_JAIL_ROOT, os.tmpdir()], this.s.base, ops);
+    this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed (lb-jail and %TEMP%)', JSON.stringify(sweep.done));
     if (!sweep.ok) throw new Error('the startup sweep could not prove the stale credentials gone: aborting before the build');
     return sweep;
   }
@@ -1451,7 +1544,7 @@ class LayerB {
     const s = this.s;
     const home = os.homedir();
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    const liveDenied = [LIVE.dunder, path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
+    const liveDenied = [...dunderDenyRoots(s.base), path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
     const pol = readJson(this.jailPolicy, {});
     W.writeJson(path.join(s.home, '.claude', 'settings.json'), claudeJailSettings({ node: this.node, policyFile: this.jailPolicy, liveDenied, readRoots: pol.readRoots || [], writeRoots: pol.writeRoots || [], env: extraEnv }));
   }
@@ -1617,28 +1710,37 @@ class LayerB {
     return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; deny rules present', JSON.stringify(results));
   }
 
-  /** God 4dd770 (2) + 57634c: the FIRST codex binary the real run starts is `codex sandbox windows
-   *  --help` (clap help, zero tokens), under the session window watch, with an empty CODEX_HOME in the
-   *  sandbox. The report records what it says about the unelevated/elevated setup. The dry run never
-   *  starts any codex binary. */
+  /** God 4dd770 (2) + 57634c, fixed at real step 1: the FIRST codex binaries the real run starts are
+   *  `codex --version` and `codex sandbox --help` (clap output, zero tokens), hidden, under the session
+   *  window watch, with an EMPTY CODEX_HOME in the jail (outside %TEMP%: codex refuses to create its
+   *  helper binaries under a temporary dir). Both are recorded; the check needs both to exit 0 and
+   *  the version to parse. The dry run never starts any codex binary. */
   codexSandboxHelp() {
     const shim = whichOn(parentPath(), 'codex');
     const exe = shim ? codexExe(shim) : null;
-    if (!exe) { this.check(false, 'codex sandbox windows --help: the codex.exe was found', shim || 'codex not on PATH'); return null; }
-    const home = path.join(this.s.base, 'help-codex-home');
+    if (!exe) { this.check(false, 'codex --version / codex sandbox --help: the codex.exe was found', shim || 'codex not on PATH'); return null; }
+    const home = path.join(this.s.jail, 'help-codex-home');
     W.mkdir(home);
     const env = buildEnv(null, { seams: false });
     env.CODEX_HOME = home;
-    const r = spawnSync(exe, ['sandbox', 'windows', '--help'], { cwd: this.s.base, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
-    const text = redact(`${r.stdout || ''}${r.stderr || ''}`);
-    const setup = text.split(/\r?\n/).filter((l) => /elevat|unelevat|setup|admin|uac|restricted|sandbox/i.test(l));
-    this.codexHelp = { exe, status: r.status, text: text.slice(0, 8000), setupLines: setup };
-    W.write(path.join(this.s.report, 'codex-sandbox-windows-help.txt'), text);
-    this.check(r.status === 0 && text.length > 0, 'codex sandbox windows --help ran (zero tokens) and was recorded', `exit ${r.status}; setup-related lines: ${setup.length}`);
+    const runs = [];
+    for (const argv of CODEX_HELP_ARGVS) {
+      const r = spawnSync(exe, argv, { cwd: this.s.jail, env, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+      runs.push({ argv, status: r.status, text: redact(`${r.stdout || ''}${r.stderr || ''}`) });
+    }
+    const [ver, help] = runs;
+    const version = parseCodexVersion(ver.text);
+    const text = runs.map((x) => `### codex ${x.argv.join(' ')} (exit ${x.status})\n${x.text}`).join('\n\n');
+    const setup = help.text.split(/\r?\n/).filter((l) => /elevat|unelevat|setup|admin|uac|restricted|sandbox/i.test(l));
+    this.codexHelp = { exe, version, runs: runs.map((x) => ({ argv: x.argv, status: x.status })), text: text.slice(0, 8000), setupLines: setup };
+    W.write(path.join(this.s.report, 'codex-help.txt'), text);
+    this.check(ver.status === 0 && help.status === 0 && !!version && help.text.length > 0,
+      'codex --version and codex sandbox --help ran (zero tokens), exit 0, the version parsed, both recorded',
+      `version ${version || 'UNPARSED'}; exits ${ver.status}/${help.status}; setup-related lines: ${setup.length}`);
     return this.codexHelp;
   }
 
-  /** (b) [REAL RUN ONLY, --codex-sandbox-probe] The real codex binary's own sandbox runner (`codex sandbox windows`, zero tokens) runs a
+  /** (b) [REAL RUN ONLY, --codex-sandbox-probe] The real codex binary's own sandbox runner (`codex sandbox`, 0.157.1 syntax: codexProbeArgv; zero tokens) runs a
    *  probe under the jail's config: writes into C:\Dunder\hive, the real ~/.codex and ~/.claude must
    *  be REFUSED and the markers must never appear; a write inside the jail must succeed. */
   proveCodexSandbox() {
@@ -1659,17 +1761,18 @@ for (const [k, p] of Object.entries(${JSON.stringify({ inside: insideMarker, ...
 process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const env = { ...this.env, CODEX_HOME: probeHome };
     const before = Object.fromEntries(Object.entries(targets).map(([k, p]) => [k, fs.existsSync(p)]));
-    const r = spawnSync(exe, ['sandbox', 'windows', '--', this.node, script], { cwd: codex.cwd, env, encoding: 'utf8', windowsHide: true, timeout: 90_000 });
+    const argv = codexProbeArgv(codex.cwd, this.node, script);
+    const r = spawnSync(exe, argv, { cwd: codex.cwd, env, encoding: 'utf8', windowsHide: true, timeout: 90_000 });
     const res = (() => { const i = (r.stdout || '').indexOf('LBPROBE'); try { return i >= 0 ? JSON.parse(r.stdout.slice(i + 7)) : null; } catch { return null; } })();
     const leaked = [];
     for (const [k, p] of Object.entries(targets)) {
       if (!before[k] && fs.existsSync(p)) { leaked.push(k); try { W.removeProbeMarker(p, marker); } catch (e) { log(`probe marker removal: ${e.message}`); } }
     }
     const positive = !!res && res.inside === 'WROTE';
-    this.proofs = { ...(this.proofs || {}), codexSandbox: { exe, status: r.status, res, leaked, stderr: String(r.stderr || '').slice(0, 600) } };
+    this.proofs = { ...(this.proofs || {}), codexSandbox: { exe, argv, status: r.status, res, leaked, stderr: String(r.stderr || '').slice(0, 600) } };
     if (leaked.length) return this.check(false, 'R1 Codex sandbox probe: NO marker reached a live location', `LEAKED into ${leaked.join(', ')} (removed); ${JSON.stringify(res)}`);
     return this.check(positive && Object.keys(targets).every((k) => res && res[k] && res[k] !== 'WROTE'),
-      'R1 Codex sandbox (zero tokens, codex sandbox windows): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
+      'R1 Codex sandbox (zero tokens, codex sandbox -c sandbox_mode=workspace-write): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
       JSON.stringify({ res, status: r.status, stderr: String(r.stderr || '').slice(0, 300) }));
   }
 
@@ -2506,8 +2609,12 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   /** A stub hook client reads every reply (it mirrors the real shim), so ANY mail-hook-late row for
    *  a stub agent is a runner defect that fakes mail loss: the run FAILS and the report lists them. */
   assertNoStubLateHooks() {
-    const texts = walk(this.s.hive, (p) => /log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive).map((p) => fs.readFileSync(p, 'utf8'));
-    const stubIds = this.spec.filter((a) => a.stub).map((a) => a.id);
+    const files = walk(this.s.hive, (p) => /log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive);
+    // Real step 1: a run that stopped before any app launch has no hive log (and no spec): NOT RUN,
+    // reported as such, never a FAIL and never a PASS.
+    if (!files.length) { this.lateHooks = { notRun: true, rows: [], stub: [] }; return; }
+    const texts = files.map((p) => fs.readFileSync(p, 'utf8'));
+    const stubIds = (this.spec || []).filter((a) => a.stub).map((a) => a.id);
     const late = lateHookRows(texts, stubIds, this.allStubsSince || null);
     this.lateHooks = late;
     this.check(late.stub.length === 0, 'no mail-hook-late row for a STUB agent (its hook client reads every reply, like the real shim)',
@@ -2587,13 +2694,13 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       `Windows: ${this.samples.hidden.length} isVisible checks; window-watch hits ${(this.watchHits || []).length}.`,
       `Evidence (redacted): ${extra.evidence}`, `Sandbox: ${s.base} — ${extra.sandboxRemoved ? 'REMOVED' : `KEPT (${extra.survivors && extra.survivors.length ? `no proof that every process exited: ${extra.survivors.join(', ')}` : (this.args.keepSandbox ? '--keep-sandbox' : 'removal failed or never created; see the checks')})`}`,
       `Build cleanup: ${(extra.buildCleanup || []).join('; ') || 'nothing'}`, `Startup sweep: ${JSON.stringify(extra.sweep || [])}`, '',
-      '## mail-hook-late rows', '', ...(this.lateHooks ? [
+      '## mail-hook-late rows', '', ...(this.lateHooks && this.lateHooks.notRun ? ['- NOT RUN: no hive log exists (the run stopped before any app launch)'] : this.lateHooks ? [
         `- ${this.lateHooks.stub.length ? 'FAIL' : 'PASS'}: ${this.lateHooks.stub.length} row(s) for a stub agent (a runner defect: the stub hung up before the reply); ${this.lateHooks.rows.length} in all`,
         ...this.lateHooks.rows.map((r) => `- ${this.lateHooks.stub.includes(r) ? '**stub** ' : ''}${new Date(Number(r.ts) || 0).toISOString()} ${r.agentId} ${r.hookKind}/${r.transport} ids ${JSON.stringify(r.ids)} epoch ${r.epoch} latency ${r.latencyMs} (limit ${r.limitMs})`)
       ] : ['- not read (the teardown did not reach the log)']), '',
       '## Inconclusive', '', ...(this.inconclusive.length ? this.inconclusive.map((x) => `- ${x}`) : ['- none']), '',
       '## Processes', '', `- surviving (no proof of exit): ${(extra.survivors || []).length ? extra.survivors.join(', ') + ' — the sandbox and the 1.1.74 worktree were KEPT' : 'none'}`, '',
-      '## codex sandbox windows --help (real run)', '', extra.codexHelp ? '```\n' + extra.codexHelp.text + '\n```' : '- not run (dry run, or not reached)', '',
+      '## codex --version / codex sandbox --help (real run)', '', extra.codexHelp ? `version ${extra.codexHelp.version || 'UNPARSED'}\n\n` + '```\n' + extra.codexHelp.text + '\n```' : '- not run (dry run, or not reached)', '',
       extra.stopReason ? `**Stopped by design:** ${extra.stopReason}` : ''
     ].join('\n');
     W.write(path.join(s.report, 'layer-b-report.md'), redact(md));
@@ -2634,7 +2741,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       if (!this.args.dryRun) {
         this.codexSandboxHelp();
         if (!this.args.codexProbe) {
-          this.stopReason = 'codex sandbox windows --help recorded; god reviews it, then the run is repeated with --codex-sandbox-probe';
+          this.stopReason = 'codex --version and codex sandbox --help recorded; god reviews them, then the run is repeated with --codex-sandbox-probe';
           throw new Error(this.stopReason);
         }
       }
@@ -2707,7 +2814,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
