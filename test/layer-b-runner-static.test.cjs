@@ -1137,3 +1137,41 @@ test('god (on fb5368d6): EVERY liveForbidden() path is covered by the Claude jai
   assert.match(method('proveClaudeJail()'), /denyProblems\.push\(\.\.\.liveCoverageProblems\(st\.permissions && st\.permissions\.deny, liveForbidden\(\), this\.s\.base\)\);/);
 });
 
+test('god R1 (on 18f6f9c0): the run bar FAILS on a wake-ids-exhausted row, a stall row, incomplete B1-B6 plumbing (B6 3/4) or an over-budget dry run; a clean log passes', () => {
+  const clean = [
+    { ts: 1, kind: 'wake', stage: 'settle', agentId: 'lb-codex', outcome: 'COMMITTED' },
+    { ts: 2, kind: 'wake', stage: 'wake-repend', agentId: 'lb-codex', requeued: 1, n1: ['x'] },
+    { ts: 3, kind: 'mail', stage: 'acted', agentId: 'lb-codex', ids: ['x'] }
+  ];
+  const all = { B1: true, B2: true, B3: true, B4: true, B5: true, B6: true };
+  const failed = (bar) => bar.checks.filter((c) => !c.ok).map((c) => c.label);
+  const dry = (over) => lb.runBarProblems({ rows: clean, plumbing: all, durationMs: 227_000, dryRun: true, launched: true, ...over });
+  assert.equal(lb.DRY_RUN_WALL_MS, 900_000, 'dry #5 took 227 s: ~4x headroom');
+  assert.deepEqual(failed(dry({})), [], 'a clean dry run passes');
+  const ex = dry({ rows: [...clean, { ts: 4, kind: 'wake', stage: 'wake-ids-exhausted', agentId: 'lb-codex', ids: 2, idList: ['a', 'b'], attempt: 1, retryInMs: 300000 }] });
+  assert.deepEqual(failed(ex), ['run bar: no wake-ids-exhausted row (no F4 backoff)']);
+  assert.match(ex.checks[0].detail, /lb-codex \["a","b"\] attempt 1 retry 300000 ms/);
+  const st = dry({ rows: [...clean, { ts: 5, kind: 'wake', stage: 'stall', agentId: 'lb-codex', why: 'lifecycle-active', inboxIds: 1, stalledMs: 300104 }] });
+  assert.deepEqual(failed(st), ['run bar: no wake stall row']);
+  assert.match(st.checks[1].detail, /lb-codex lifecycle-active 1 id\(s\) 300104 ms/);
+  const b6 = dry({ plumbing: { ...all, B6: false } });
+  assert.deepEqual(failed(b6), ['run bar (dry run): B1-B6 plumbing complete (every reply; acted for B1, B5 and all 4 B6 turns)']);
+  assert.match(b6.checks[2].detail, /incomplete: B6=false/);
+  assert.match(dry({ plumbing: { B1: true } }).checks[2].detail, /B2=not reached/);
+  assert.deepEqual(failed(dry({ durationMs: 1_837_000 })), ['run bar (dry run): the agent phases within 900 s'], 'dry #6 took 1837 s');
+  // REAL run: the exhausted and stall rows apply; plumbing and the dry wall budget do not.
+  const real = lb.runBarProblems({ rows: clean, plumbing: {}, durationMs: 5_000_000, dryRun: false, launched: true });
+  assert.deepEqual(real.checks.map((c) => c.label), ['run bar: no wake-ids-exhausted row (no F4 backoff)', 'run bar: no wake stall row']);
+  assert.deepEqual(failed(real), []);
+  assert.equal(failed(lb.runBarProblems({ rows: [{ kind: 'wake', stage: 'stall', agentId: 'lb-claude' }], plumbing: {}, durationMs: 1, dryRun: false, launched: true })).length, 1);
+  // A dry run stopped before any launch: plumbing and wall time are NOT RUN (no check).
+  assert.equal(lb.runBarProblems({ rows: [], plumbing: {}, durationMs: null, dryRun: true, launched: false }).checks.length, 2);
+  // Wiring: the teardown evaluates the bar; every dry fact records its plumbing; checks FAIL the run.
+  assert.match(src, /try \{ this\.assertRunBar\(\); \} catch \(e\) \{ this\.check\(false,/);
+  for (const [id, expr] of [['B1', '!!reply && !!acted'], ['B2', '!!reply'], ['B3', '!!reply'], ['B4', '!!reply'], ['B5', '!!r && !!actedT']]) {
+    assert.ok(src.includes(`this.plumbing.${id} = ${expr};`), `${id} plumbing recorded`);
+  }
+  assert.ok(src.includes('this.plumbing.B6 = replies.length === 4 && replies.every(Boolean) && acteds.length === 4 && acteds.every(Boolean);'));
+  assert.match(src, /const ok = !this\.stopReason && asserted\.every\(\(f\) => f\.status === 'PASS'\) && this\.checks\.every\(\(c\) => c\.ok\);/, 'a failed check means NOT PASSED');
+});
+

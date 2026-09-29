@@ -960,6 +960,31 @@ function logReachedAt(rows, agentId, id) {
   return out;
 }
 
+/** god's run bar (on 18f6f9c0; dry run #6 said PASS with B6 1/4, one wake-ids-exhausted and a
+ *  27-minute stall). Checks that FAIL:
+ *   - 0 wake-ids-exhausted rows (no F4 backoff) and 0 wake stall rows: BOTH modes (a real run has
+ *     no reason for either on a healthy floor, and each is a 5-minute-plus stall of real mail);
+ *   - DRY RUN only: B1-B6 plumbing complete (every reply; acted where the fact waits for it: B1,
+ *     B5, and all 4 B6 turns), and the agent phases within DRY_RUN_WALL_MS (dry #5: 227 s; 900 s is
+ *     ~4x headroom). A real run's facts decide B1-B6 themselves (PASS/FAIL/NOT-PROVEN), and its
+ *     wall time is bounded by CAPS.wallMs already.
+ *  A run stopped before any launch (`launched` false) is NOT RUN for plumbing and wall time. */
+const DRY_RUN_WALL_MS = 900_000;
+function runBarProblems({ rows, plumbing, durationMs, dryRun, launched }) {
+  const exhausted = rows.filter((r) => r && r.kind === 'wake' && r.stage === 'wake-ids-exhausted');
+  const stalls = rows.filter((r) => r && r.kind === 'wake' && r.stage === 'stall');
+  const checks = [
+    { ok: exhausted.length === 0, label: 'run bar: no wake-ids-exhausted row (no F4 backoff)', detail: exhausted.map((r) => `${r.agentId} ${JSON.stringify(r.idList)} attempt ${r.attempt} retry ${r.retryInMs} ms`).join('; ') || 'none' },
+    { ok: stalls.length === 0, label: 'run bar: no wake stall row', detail: stalls.map((r) => `${r.agentId} ${r.why} ${r.inboxIds} id(s) ${r.stalledMs} ms`).join('; ') || 'none' }
+  ];
+  if (dryRun && launched) {
+    const missing = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6'].filter((id) => plumbing[id] !== true);
+    checks.push({ ok: missing.length === 0, label: 'run bar (dry run): B1-B6 plumbing complete (every reply; acted for B1, B5 and all 4 B6 turns)', detail: missing.length ? `incomplete: ${missing.map((id) => `${id}=${plumbing[id] === undefined ? 'not reached' : plumbing[id]}`).join(', ')}` : 'all complete' });
+    checks.push({ ok: durationMs !== null && durationMs <= DRY_RUN_WALL_MS, label: `run bar (dry run): the agent phases within ${DRY_RUN_WALL_MS / 1000} s`, detail: `${durationMs === null ? 'unknown' : Math.round(durationMs / 1000)} s` });
+  }
+  return { exhausted, stalls, checks };
+}
+
 /** B7's mid-epoch bound: the acted time of the waitState result, or null (unknown). */
 function b7EpochEnd(acted) {
   return acted && Number.isFinite(acted.actedAt) ? acted.actedAt : null;
@@ -1405,6 +1430,7 @@ class LayerB {
     this.proofs = {};
     this.watchHits = [];
     this.inconclusive = [];
+    this.plumbing = {};   // dry run: B1-B6 plumbing complete? (the dry-run bar, god on 18f6f9c0)
   }
 
   fact(id, status, detail, evidence = []) {
@@ -2347,7 +2373,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     this.fact('B8', ...this.b8Verdict({ probe, prep, obsBefore, obsAfter, domBefore, domAfter, acted }));
     const kinds = this.seenHookKinds(C, id);
     const inboxCalls = this.inboxToolCalls(C, since);
-    if (this.args.dryRun) return this.fact('B1', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} acted=${!!acted} hookKinds=${kinds.join(',')}`));
+    if (this.args.dryRun) { this.plumbing.B1 = !!reply && !!acted; return this.fact('B1', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} acted=${!!acted} hookKinds=${kinds.join(',')}`)); }
     const b1ok = !!reply && kinds.includes('UserPromptSubmit') && inboxCalls.length === 0;
     this.fact('B1', b1ok ? 'PASS' : (reply ? 'FAIL' : 'NOT-PROVEN'),
       `reply quoting the nonce: ${!!reply}; surfaced via ${kinds.join(',') || 'none'}; inbox tool calls: ${inboxCalls.length ? inboxCalls.join(' | ') : 'none'}`,
@@ -2372,7 +2398,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const kinds = this.seenHookKinds(C, mid);
     const inboxCalls = this.inboxToolCalls(C, since);
     const quoted = !!reply && `${reply.m.body}`.includes(N2);
-    if (this.args.dryRun) return this.fact('B2', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} hookKinds=${kinds.join(',')}`));
+    if (this.args.dryRun) { this.plumbing.B2 = !!reply; return this.fact('B2', 'NOT-PROVEN', this.dryNote(`reply=${!!reply} hookKinds=${kinds.join(',')}`)); }
     const ok = quoted && kinds.includes('PostToolUse') && inboxCalls.length === 0;
     this.fact('B2', ok ? 'PASS' : (reply ? 'FAIL' : 'NOT-PROVEN'),
       `task reply: ${!!reply}; mid-turn nonce quoted: ${quoted}; the mid-turn mail surfaced via ${kinds.join(',') || 'none'}; inbox tool calls: ${inboxCalls.length ? inboxCalls.join(' | ') : 'none'}`,
@@ -2400,6 +2426,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const padded = (N) => '\n Background (no action needed): ' + pad(800) + '\n\n' + N + '\n\n' + pad(800);
     const nonces = [];
     const replies = [];
+    const acteds = [];
     const blocks = [];
     const turnStart = [];
     for (let turn = 1; turn <= 4; turn++) {
@@ -2415,17 +2442,19 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       let r = null;
       try { r = await this.waitReply(X, N, 6 * 60_000); } catch (e) { log(`B5/B6 turn ${turn}: ${e.message}`); }
       replies.push(r);
-      try { await this.waitState(X, id, ['acted'], 3 * 60_000); } catch (e) { log(`B5/B6 turn ${turn}: ${e.message}`); }
+      let actedT = null;
+      try { actedT = await this.waitState(X, id, ['acted'], 3 * 60_000); } catch (e) { log(`B5/B6 turn ${turn}: ${e.message}`); }
+      acteds.push(!!actedT);
       if (turn === 1) {
         const kinds = this.seenHookKinds(X, id);
         const inboxCalls = this.inboxToolCalls(X, since);
-        if (this.args.dryRun) this.fact('B5', 'NOT-PROVEN', this.dryNote(`reply=${!!r} hookKinds=${kinds.join(',')}`));
+        if (this.args.dryRun) { this.plumbing.B5 = !!r && !!actedT; this.fact('B5', 'NOT-PROVEN', this.dryNote(`reply=${!!r} acted=${!!actedT} hookKinds=${kinds.join(',')}`)); }
         else this.fact('B5', r && kinds.includes('UserPromptSubmit') && !inboxCalls.length ? 'PASS' : (r ? 'FAIL' : 'NOT-PROVEN'),
           `reply quoting the nonce: ${!!r}; surfaced via ${kinds.join(',') || 'none'}; inbox tool calls: ${inboxCalls.length ? inboxCalls.join(' | ') : 'none'}`, r ? [r.p] : []);
       }
     }
     if (this.facts.B6) return;
-    if (this.args.dryRun) return this.fact('B6', 'NOT-PROVEN', this.dryNote(`${replies.filter(Boolean).length}/4 replies`));
+    if (this.args.dryRun) { this.plumbing.B6 = replies.length === 4 && replies.every(Boolean) && acteds.length === 4 && acteds.every(Boolean); return this.fact('B6', 'NOT-PROVEN', this.dryNote(`${replies.filter(Boolean).length}/4 replies, ${acteds.filter(Boolean).length}/4 acted`)); }
     const all4 = replies.length === 4 && replies.every(Boolean);
     const t = b6Tiers(this.codexEvents(), { turnStart, nonces, blocks });
     // Tier 3: the turn-4 answer.
@@ -2477,7 +2506,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     try { await this.waitState(C, id, ['acted'], 2 * 60_000); } catch { /* reported below */ }
     const resume = this.resumeEvidence(C);
     const body = reply ? String(reply.m.body) : '';
-    if (this.args.dryRun) return this.fact('B4', 'NOT-PROVEN', this.dryNote(`relaunch+rename ok, reply=${!!reply}, resume evidence ${resume.same}`));
+    if (this.args.dryRun) { this.plumbing.B4 = !!reply; return this.fact('B4', 'NOT-PROVEN', this.dryNote(`relaunch+rename ok, reply=${!!reply}, resume evidence ${resume.same}`)); }
     const v2 = body.includes(this.markerV2); const v1 = body.includes(this.markerV1);
     const status = !reply || !resume.same ? 'NOT-PROVEN' : (v2 && !v1 ? 'PASS' : 'FAIL');
     this.fact('B4', status,
@@ -2512,7 +2541,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const hist = (this.ledgerHistory[C] || {})[id] || [];
     const reinjected = kinds.includes('SessionStart') || hist.some((h, i) => i > 0 && h.surfaceCount > hist[i - 1].surfaceCount && h.state === 'surfacing');
     const compactRows = this.rows().filter((r) => r.ts >= since && r.agentId === C && /"source":"compact"/.test(JSON.stringify(r)));
-    if (this.args.dryRun) return this.fact('B3', 'NOT-PROVEN', this.dryNote(`reply=${!!reply}`));
+    if (this.args.dryRun) { this.plumbing.B3 = !!reply; return this.fact('B3', 'NOT-PROVEN', this.dryNote(`reply=${!!reply}`)); }
     this.fact('B3', !compacted ? 'NOT-PROVEN' : (reply && reinjected ? 'PASS' : 'FAIL'),
       `compaction inside the epoch: ${compacted} (autocompact at ${this.b3Pct}%); re-injected: ${reinjected} (hookKinds ${kinds.join(',') || 'none'}; surfaceCount ${hist.map((h) => h.surfaceCount).join('>')}); compact-source rows: ${compactRows.length}; reply quoting the nonce: ${!!reply}`,
       reply ? [reply.p] : []);
@@ -2743,12 +2772,23 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only)', liveWatch.failures.join('; '));
     } catch (e) { this.check(false, 'live-location check', e.message); }
     try { this.assertNoStubLateHooks(); } catch (e) { this.check(false, 'the hive log was read for mail-hook-late rows', e.message); }
+    try { this.assertRunBar(); } catch (e) { this.check(false, 'the run bar (exhausted/stall rows, plumbing, wall time) was evaluated', e.message); }
     let evidence = null;
     try { evidence = this.collectEvidence(); } catch (e) { this.check(false, 'the evidence was collected', e.message); }
     const keep = !!this.exitUnproven || this.args.keepSandbox;
     let sandboxRemoved = false;
     if (!keep) { try { W.rm(this.s.base); sandboxRemoved = !fs.existsSync(this.s.base); } catch (e) { log(`sandbox removal: ${e.message}`); } this.check(sandboxRemoved, 'the sandbox was removed', this.s.base); }
     return { credentials, buildCleanup, liveWatch, evidence, survivors, sandboxRemoved };
+  }
+
+  /** god's bar (dry run #6 passed with B6 1/4 and an F4 retry): see runBarProblems. */
+  assertRunBar() {
+    const files = walk(this.s.hive, (p) => /log[^\\/]*\.jsonl$/.test(p) && path.dirname(p) === this.s.hive);
+    const rows = files.flatMap((p) => fs.readFileSync(p, 'utf8').split('\n')).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const durationMs = this.startedAt ? Date.now() - this.startedAt : null;
+    const bar = runBarProblems({ rows, plumbing: this.plumbing || {}, durationMs, dryRun: this.args.dryRun, launched: !!this.startedAt });
+    this.runBar = bar;
+    for (const c of bar.checks) this.check(c.ok, c.label, c.detail);
   }
 
   /** A stub hook client reads every reply (it mirrors the real shim), so ANY mail-hook-late row for
@@ -2969,7 +3009,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
