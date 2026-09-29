@@ -340,7 +340,7 @@ test('real step 1: the sandbox base lives in lb-jail/<run>, never in %TEMP% or a
   assert.match(lb.sandboxBaseProblems('C:\\Dunder\\MunderDevData\\md-layerb-x', 'C:\\Dunder\\MunderDevData', null, {}).join(' '), /overlaps MunderDevData/);
   assert.match(lb.sandboxBaseProblems(path.join(os.homedir(), '.codex', 'md-layerb-x'), path.join(os.homedir(), '.codex'), null, {}).join(' '), /overlaps the real ~\/\.codex/);
   assert.match(lb.sandboxBaseProblems('C:\\ud\\md-layerb-x', 'C:\\ud', 'C:\\ud', {}).join(' '), /overlaps the live userData/);
-  assert.match(method('preflight()'), /const baseProblems = sandboxBaseProblems\(s\.base, this\.args\.jailRoot \|\| LB_JAIL_ROOT, liveUserData\);\s*if \(baseProblems\.length\) throw/);
+  assert.match(method('preflight()'), /const baseProblems = \[\.\.\.jailRootProblems\(this\.args\.jailRoot \|\| LB_JAIL_ROOT\), \.\.\.sandboxBaseProblems\(s\.base, this\.args\.jailRoot \|\| LB_JAIL_ROOT, liveUserData\)\];\s*if \(baseProblems\.length\) throw/);
   // The sweep: both roots, a missing root is empty, any other error is fail-closed.
   assert.match(method('startupSweep(ops)'), /sweepRoots\(\[this\.args\.jailRoot \|\| LB_JAIL_ROOT, os\.tmpdir\(\)\], this\.s\.base, ops\)/);
   const jail = tmpDir(t, 'lb-jailroot-');
@@ -882,5 +882,57 @@ test('real step 1: the Claude jail denies every C:\\Dunder sibling of the path t
   assert.throws(() => lb.dunderDenyRoots(base, D, () => { throw new Error('EACCES (injected)'); }), /for the Claude jail deny rules/, 'fail-closed');
   assert.deepEqual(lb.dunderDenyRoots('C:\\elsewhere\\md-layerb-x', D, () => []), [D], 'a base outside C:\\Dunder keeps the whole-C:\\Dunder deny');
   assert.match(src, /const liveDenied = \[\.\.\.dunderDenyRoots\(s\.base\), path\.join\(home, '\.claude'\),/);
+});
+
+test('Jim K17: the Codex sandbox probe FAILS when the jail write did not succeed, even with every live write refused', () => {
+  const live = ['hive', 'codex', 'claude'];
+  const allRefused = { hive: 'refused: EPERM', codex: 'refused: EPERM', claude: 'refused: EACCES' };
+  assert.equal(lb.codexProbeVerdict({ inside: 'WROTE', ...allRefused }, live).ok, true, 'the one passing shape');
+  for (const inside of ['refused: EPERM', undefined, '']) {
+    const v = lb.codexProbeVerdict({ inside, ...allRefused }, live);
+    assert.equal(v.ok, false, `jail write ${JSON.stringify(inside)}: a sandbox that refuses everything proves nothing`);
+    assert.equal(v.positive, false);
+  }
+  assert.equal(lb.codexProbeVerdict(null, live).ok, false, 'no probe output');
+  assert.equal(lb.codexProbeVerdict({ inside: 'WROTE', hive: 'WROTE', codex: 'refused', claude: 'refused' }, live).ok, false, 'a live write succeeded');
+  assert.equal(lb.codexProbeVerdict({ inside: 'WROTE', hive: 'refused', codex: 'refused' }, live).ok, false, 'a live target not reported');
+  const probe = method('proveCodexSandbox()');
+  assert.match(probe, /const verdict = codexProbeVerdict\(res, Object\.keys\(targets\)\);/);
+  assert.match(probe, /return this\.check\(verdict\.ok,/, 'the check IS the verdict');
+});
+
+test('Jim LOW: the sandbox base is judged by its REAL path: a junction out of the jail root or into a live location is refused; --jail-root must resolve inside lb-jail', (t) => {
+  const tmp = tmpDir(t, 'lb-junction-');
+  const jroot = path.join(tmp, 'jroot');
+  const live = path.join(tmp, 'live-userdata');
+  fs.mkdirSync(jroot);
+  fs.mkdirSync(live);
+  const link = path.join(jroot, 'link');
+  fs.symlinkSync(live, link, 'junction');   // a junction INSIDE the test temp dir only
+  t.after(() => { try { fs.unlinkSync(link); } catch { try { fs.rmdirSync(link); } catch { /* gone */ } } });
+  const env = { TEMP: 'C:\\no-such-temp-dir' };
+  // Lexically inside the jail root; really inside the live userData.
+  const base = path.join(link, 'md-layerb-2026-09-29T01-00-00-000Z');
+  assert.equal(lb.realpathNearest(base).toLowerCase(), path.join(live, 'md-layerb-2026-09-29T01-00-00-000Z').toLowerCase(), 'resolved through the junction');
+  const p = lb.sandboxBaseProblems(base, jroot, live, env).join(' | ');
+  assert.match(p, /is not inside the jail root/, 'the real base left the jail root');
+  assert.match(p, /overlaps the live userData/, 'and it lands in a live location');
+  // A plain base inside the same root is fine.
+  assert.deepEqual(lb.sandboxBaseProblems(path.join(jroot, 'md-layerb-x'), jroot, live, env), []);
+  // A JAIL ROOT that is itself a junction into the live location: the base under it is refused too.
+  const p2 = lb.sandboxBaseProblems(path.join(link, 'md-layerb-y'), link, live, env).join(' | ');
+  assert.match(p2, /overlaps the live userData/);
+  // --jail-root must resolve inside the canonical lb-jail.
+  assert.deepEqual(lb.jailRootProblems(jroot, lb.realpathNearest, jroot), [], 'equal to the canonical root');
+  assert.deepEqual(lb.jailRootProblems(path.join(jroot, 'sub'), lb.realpathNearest, jroot), [], 'inside it');
+  assert.match(lb.jailRootProblems(link, lb.realpathNearest, jroot).join(' '), /resolves to .*live-userdata, outside/, 'a junction out of it');
+  assert.match(lb.jailRootProblems(tmp, lb.realpathNearest, jroot).join(' '), /outside/, 'a parent of it');
+  assert.deepEqual(lb.jailRootProblems(lb.LB_JAIL_ROOT), [], 'the default passes');
+  assert.match(lb.jailRootProblems('C:\\elsewhere\\lb').join(' '), /outside C:\\Dunder\\_work\\andy-scratch\\lb-jail/);
+  assert.match(method('preflight()'), /const baseProblems = \[\.\.\.jailRootProblems\(this\.args\.jailRoot \|\| LB_JAIL_ROOT\), \.\.\.sandboxBaseProblems\(/);
+  // The junction target is untouched after the test's own removal of the link (never deleted THROUGH it).
+  fs.writeFileSync(path.join(live, 'keep.txt'), 'x');
+  fs.unlinkSync(link);
+  assert.ok(fs.existsSync(path.join(live, 'keep.txt')), 'removing the junction left its target alone');
 });
 

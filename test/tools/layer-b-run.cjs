@@ -1120,18 +1120,55 @@ function sweepRoots(roots, currentBase, ops = {}) {
 /** The sandbox base guard (real step 1): inside the jail root, NOT under %TEMP% (codex refuses its
  *  helper binaries there), and outside the live hive, MunderDevData, the real ~/.codex and ~/.claude
  *  and the live userData (and none of those inside it). Returns the problems (empty = ok). */
-function sandboxBaseProblems(base, jailRoot, liveUserData, env = process.env) {
+function sandboxBaseProblems(base, jailRoot, liveUserData, env = process.env, realpath = realpathNearest) {
   const out = [];
   const home = os.homedir();
-  const b = path.resolve(base);
-  if (!inside(b, jailRoot) || norm(b) === norm(jailRoot)) out.push(`${b} is not inside the jail root ${jailRoot}`);
-  const tmp = path.resolve(env.TEMP || env.TMP || os.tmpdir());
-  if (inside(b, tmp)) out.push(`${b} is under %TEMP% (${tmp}): codex refuses to create its helper binaries there`);
+  // Jim (626ee708 audit): compare REAL paths (junction- and symlink-safe). A base, or a jail root,
+  // that resolves through a junction into a live location or out of the jail root is refused.
+  let b; let root;
+  try { b = realpath(base); root = realpath(jailRoot); } catch (e) { return [`cannot resolve the real path of ${base}: ${e && e.message}`]; }
+  if (!inside(b, root) || norm(b) === norm(root)) out.push(`${b} is not inside the jail root ${root}`);
+  const tmpRaw = path.resolve(env.TEMP || env.TMP || os.tmpdir());
+  let tmp = tmpRaw; try { tmp = realpath(tmpRaw); } catch { tmp = tmpRaw; }
+  if (inside(b, tmp) || inside(b, tmpRaw)) out.push(`${b} is under %TEMP% (${tmp}): codex refuses to create its helper binaries there`);
   for (const [name, live] of [['the live hive', LIVE.hive], ['MunderDevData', LIVE.devData], ['the real ~/.codex', path.join(home, '.codex')], ['the real ~/.claude', path.join(home, '.claude')], ['the live userData', liveUserData]]) {
     if (!live) continue;
-    if (inside(b, live) || inside(live, b)) out.push(`${b} overlaps ${name} (${live})`);
+    let rl = path.resolve(live); try { rl = realpath(live); } catch { rl = path.resolve(live); }
+    for (const l of [path.resolve(live), rl]) if (inside(b, l) || inside(l, b)) { out.push(`${b} overlaps ${name} (${live})`); break; }
   }
   return out;
+}
+
+/** --jail-root (Jim, 626ee708 audit): it must RESOLVE (real path) inside LB_JAIL_ROOT. */
+function jailRootProblems(jailRoot, realpath = realpathNearest, canonical = LB_JAIL_ROOT) {
+  let r; let c;
+  try { r = realpath(jailRoot); c = realpath(canonical); } catch (e) { return [`cannot resolve the real path of the jail root ${jailRoot}: ${e && e.message}`]; }
+  return inside(r, c) ? [] : [`the jail root ${jailRoot} resolves to ${r}, outside ${canonical}`];
+}
+
+/** The REAL path of `p` even when it does not exist yet: the nearest existing ancestor is resolved
+ *  (fs.realpathSync.native follows junctions and symlinks), the missing tail is appended. Any error
+ *  other than ENOENT on the way up throws (fail-closed). */
+function realpathNearest(p) {
+  let cur = path.resolve(p);
+  const tail = [];
+  for (;;) {
+    try { return path.join(fs.realpathSync.native(cur), ...tail.reverse()); } catch (e) {
+      if (!e || e.code !== 'ENOENT') throw e;
+      const up = path.dirname(cur);
+      if (up === cur) throw e;
+      tail.push(path.basename(cur));
+      cur = up;
+    }
+  }
+}
+
+/** K17 (Jim): the Codex sandbox probe PASSES only if the jail write succeeded AND every live target
+ *  was refused. `res` is the probe's output (null if none). */
+function codexProbeVerdict(res, liveKeys) {
+  const positive = !!res && res.inside === 'WROTE';
+  const refused = !!res && liveKeys.every((k) => res[k] && res[k] !== 'WROTE');
+  return { ok: positive && refused, positive, refused };
 }
 
 // ─────────────────────────────────────────────────────────────────────────── live-location watch
@@ -1347,7 +1384,7 @@ class LayerB {
     for (const [name, p] of [['userData', paths.userData], ['hive', paths.hiveRoot]]) {
       if (norm(p) === norm(liveUserData) || norm(p) === norm(LIVE.hive) || inside(p, LIVE.devData)) throw new Error(`sandbox ${name} is a live path`);
     }
-    const baseProblems = sandboxBaseProblems(s.base, this.args.jailRoot || LB_JAIL_ROOT, liveUserData);
+    const baseProblems = [...jailRootProblems(this.args.jailRoot || LB_JAIL_ROOT), ...sandboxBaseProblems(s.base, this.args.jailRoot || LB_JAIL_ROOT, liveUserData)];
     if (baseProblems.length) throw new Error(`the sandbox base is refused:\n  ${baseProblems.join('\n  ')}`);
     // R10: the Codex login source honours $CODEX_HOME and refuses one inside a live hive.
     if (!this.args.dryRun) realCredentialPaths();
@@ -1768,10 +1805,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     for (const [k, p] of Object.entries(targets)) {
       if (!before[k] && fs.existsSync(p)) { leaked.push(k); try { W.removeProbeMarker(p, marker); } catch (e) { log(`probe marker removal: ${e.message}`); } }
     }
-    const positive = !!res && res.inside === 'WROTE';
+    const verdict = codexProbeVerdict(res, Object.keys(targets));
     this.proofs = { ...(this.proofs || {}), codexSandbox: { exe, argv, status: r.status, res, leaked, stderr: String(r.stderr || '').slice(0, 600) } };
     if (leaked.length) return this.check(false, 'R1 Codex sandbox probe: NO marker reached a live location', `LEAKED into ${leaked.join(', ')} (removed); ${JSON.stringify(res)}`);
-    return this.check(positive && Object.keys(targets).every((k) => res && res[k] && res[k] !== 'WROTE'),
+    return this.check(verdict.ok,
       'R1 Codex sandbox (zero tokens, codex sandbox -c sandbox_mode=workspace-write): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
       JSON.stringify({ res, status: r.status, stderr: String(r.stderr || '').slice(0, 300) }));
   }
@@ -2814,7 +2851,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
