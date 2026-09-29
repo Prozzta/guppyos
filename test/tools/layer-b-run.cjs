@@ -636,6 +636,38 @@ function dunderDenyRoots(base, root = LIVE.dunder, readdir = (d) => fs.readdirSy
   return out;
 }
 
+/** The live roots the Claude jail's permission rules deny (626ee708): every C:\\Dunder sibling of the
+ *  path to the base (dunderDenyRoots) plus the named live paths: the real ~/.claude, ~/.codex,
+ *  ~/.claude.json, ~/.gemini, the live userData, and this repo. */
+function claudeLiveDenied(base, home = os.homedir(), appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), listDir) {
+  return [...dunderDenyRoots(base, LIVE.dunder, listDir), path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
+}
+
+/** Real step 2 (21b4d842): the Claude jail's DENY-RULE proof, pure. Every expected live root is
+ *  denied for every path tool (both the dir and dir/**), every JAIL_DENY_TOOLS tool is denied, and NO
+ *  deny rule blocks the base: a `/**` rule on the base or an ancestor of it (e.g. a blanket
+ *  C:\\Dunder), or an exact rule on the base itself. Returns the problems (empty = ok). */
+const JAIL_PATH_TOOLS = ['Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep', 'LS'];
+function claudeDenyProblems(deny, expectedRoots, base) {
+  const out = [];
+  const have = new Set((deny || []).map((d) => String(d).toLowerCase()));
+  for (const t of JAIL_DENY_TOOLS) if (!have.has(t.toLowerCase())) out.push(`tool ${t} is not denied`);
+  for (const p of expectedRoots) {
+    for (const t of JAIL_PATH_TOOLS) {
+      for (const rule of [`${t}(${claudeRulePath(p)}/**)`, `${t}(${claudeRulePath(p)})`]) if (!have.has(rule.toLowerCase())) out.push(`missing deny ${rule}`);
+    }
+  }
+  const b = claudeRulePath(base).toLowerCase();
+  for (const d of deny || []) {
+    const m = /^[A-Za-z]+\((\/\/.+?)(\/\*\*)?\)$/.exec(String(d));
+    if (!m) continue;
+    const rp = m[1].toLowerCase().replace(/\/+$/, '');
+    const blocks = m[2] ? (b === rp || b.startsWith(rp + '/')) : b === rp;
+    if (blocks) out.push(`deny rule ${d} blocks the sandbox base ${base}`);
+  }
+  return out;
+}
+
 /** The jailed ~/.codex/config.toml the product seeds each Codex agent's home from: workspace-write,
  *  writable roots = the jail only, no command network, the UNELEVATED Windows sandbox (no setup,
  *  no UAC). TOML literal strings: Windows paths need no escaping. */
@@ -1610,7 +1642,8 @@ class LayerB {
     const s = this.s;
     const home = os.homedir();
     const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
-    const liveDenied = [...dunderDenyRoots(s.base), path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin'), REPO];
+    const liveDenied = claudeLiveDenied(s.base, home, appData);
+    this.claudeDenied = liveDenied;   // the proof checks the settings against exactly this list
     const pol = readJson(this.jailPolicy, {});
     W.writeJson(path.join(s.home, '.claude', 'settings.json'), claudeJailSettings({ node: this.node, policyFile: this.jailPolicy, liveDenied, readRoots: pol.readRoots || [], writeRoots: pol.writeRoots || [], env: extraEnv }));
   }
@@ -1771,9 +1804,13 @@ class LayerB {
       const got = r.status === 2 ? 'deny' : (r.status === 0 ? 'allow' : `exit ${r.status}`);
       return { want, got, tool: p.tool_name, target: p.tool_input.file_path || p.tool_input.command || p.tool_input.path };
     });
-    const ok = results.every((x) => x.want === x.got) && (st.permissions && st.permissions.deny || []).some((d) => /^Write\(\/\/c\/Dunder\/\*\*\)$/i.test(d));
-    this.proofs = { ...(this.proofs || {}), claudeJail: results };
-    return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; deny rules present', JSON.stringify(results));
+    // Real step 2 (21b4d842): the deny RULES are proved against the list they were written from
+    // (626ee708: per-sibling C:\\Dunder denies, never a blanket one that would block the base).
+    const denyProblems = claudeDenyProblems(st.permissions && st.permissions.deny, this.claudeDenied || [], this.s.base);
+    if (!this.claudeDenied || !this.claudeDenied.length) denyProblems.push('no recorded deny list (writeClaudeSettings did not run)');
+    const ok = results.every((x) => x.want === x.got) && denyProblems.length === 0;
+    this.proofs = { ...(this.proofs || {}), claudeJail: results, claudeDenyProblems: denyProblems };
+    return this.check(ok, 'R1 Claude jail (zero tokens): the installed PreToolUse hook denies the live hive and the real ~/.claude/.codex, allows the own outbox; the deny rules cover every live root and never the sandbox base', JSON.stringify({ results, denyProblems: denyProblems.slice(0, 10) }));
   }
 
   /** God 4dd770 (2) + 57634c, fixed at real step 1: the FIRST codex binaries the real run starts are
@@ -2892,7 +2929,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

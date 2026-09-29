@@ -881,7 +881,7 @@ test('real step 1: the Claude jail denies every C:\\Dunder sibling of the path t
   assert.ok(!got.some((x) => base.toLowerCase().startsWith(x + path.sep)), 'no deny root contains the base');
   assert.throws(() => lb.dunderDenyRoots(base, D, () => { throw new Error('EACCES (injected)'); }), /for the Claude jail deny rules/, 'fail-closed');
   assert.deepEqual(lb.dunderDenyRoots('C:\\elsewhere\\md-layerb-x', D, () => []), [D], 'a base outside C:\\Dunder keeps the whole-C:\\Dunder deny');
-  assert.match(src, /const liveDenied = \[\.\.\.dunderDenyRoots\(s\.base\), path\.join\(home, '\.claude'\),/);
+  assert.match(src, /return \[\.\.\.dunderDenyRoots\(base, LIVE\.dunder, listDir\), path\.join\(home, '\.claude'\),/);
 });
 
 test('Jim K17: the Codex sandbox probe FAILS when the jail write did not succeed, even with every live write refused', () => {
@@ -1059,5 +1059,46 @@ test('Jim LOW: the emergency credential shred LOGS its error (never swallowed si
   assert.ok(!/try \{[^}]*creds\.deleteAll\(\)[^}]*\} catch \{/.test(src), 'no silent catch around deleteAll');
   const tail = src.slice(src.indexOf('if (require.main === module) {'));
   assert.equal((tail.match(/emergencyShred\(lb\)/g) || []).length, 2, 'the signal/crash path and the exit hook');
+});
+
+test('real step 2 (21b4d842): the Claude jail proof checks the NEW deny set (per-sibling C:\\Dunder denies + named live paths) and that NO rule blocks the lb-jail base', () => {
+  const D = 'C:\\Dunder';
+  const J = (...p) => path.join(D, ...p);
+  const tree = {
+    [D]: ['hive', 'MunderDevData', 'palace', '_work', 'roster.json'],
+    [J('_work')]: ['andy-zt175', 'andy-scratch'],
+    [J('_work', 'andy-scratch')]: ['lb-jail', 'flaky170'],
+    [J('_work', 'andy-scratch', 'lb-jail')]: ['md-layerb-2026-09-29T04-00-00-000Z', 'help-out.txt']
+  };
+  const listDir = (d) => { const k = Object.keys(tree).find((x) => x.toLowerCase() === path.resolve(d).toLowerCase()); if (!k) throw new Error(`ENOENT ${d}`); return tree[k]; };
+  const base = J('_work', 'andy-scratch', 'lb-jail', 'md-layerb-2026-09-29T04-00-00-000Z');
+  const home = 'C:\\Users\\x';
+  const appData = 'C:\\Users\\x\\AppData\\Roaming';
+  const live = lb.claudeLiveDenied(base, home, appData, listDir);
+  for (const p of [J('hive'), J('_work', 'andy-scratch', 'flaky170'), J('_work', 'andy-scratch', 'lb-jail', 'help-out.txt'), path.join(home, '.claude'), path.join(home, '.codex'), path.join(home, '.claude.json'), path.join(home, '.gemini'), path.join(appData, 'munder-difflin')]) {
+    assert.ok(live.some((x) => x.toLowerCase() === p.toLowerCase()), `the live list names ${p}`);
+  }
+  // The REAL settings the runner writes, then the proof's assertion.
+  const st = lb.claudeJailSettings({ node: 'C:\\n\\node.exe', policyFile: path.join(base, 'layer-b-jail-policy.json'), liveDenied: live, readRoots: [base], writeRoots: [path.join(base, 'work', 'lb-claude')] });
+  assert.deepEqual(lb.claudeDenyProblems(st.permissions.deny, live, base), [], 'the real settings pass');
+  assert.ok(!st.permissions.deny.some((d) => /^Write\(\/\/c\/Dunder\/\*\*\)$/i.test(d)), 'and carry no blanket C:\\Dunder deny');
+  // Mutant: ONE sibling's deny dropped.
+  const hive = lb.claudeJailSettings({ node: 'n', policyFile: 'p', liveDenied: live.filter((x) => x.toLowerCase() !== J('hive').toLowerCase()) }).permissions.deny;
+  assert.match(lb.claudeDenyProblems(hive, live, base).join(' | '), /missing deny Write\(\/\/c\/Dunder\/hive\/\*\*\)/);
+  // Mutant: the blanket C:\Dunder deny added back (it would block the base: a deny beats an allow).
+  const blanket = [...st.permissions.deny, 'Write(//c/Dunder/**)'];
+  assert.match(lb.claudeDenyProblems(blanket, live, base).join(' | '), /deny rule Write\(\/\/c\/Dunder\/\*\*\) blocks the sandbox base/);
+  // Any ancestor with /**, or the base itself, blocks; an EXACT rule on an ancestor dir does not.
+  assert.match(lb.claudeDenyProblems([...st.permissions.deny, 'Read(//c/Dunder/_work/andy-scratch/**)'], live, base).join(' '), /blocks the sandbox base/);
+  assert.match(lb.claudeDenyProblems([...st.permissions.deny, `Edit(${'//c/Dunder/_work/andy-scratch/lb-jail/md-layerb-2026-09-29T04-00-00-000Z'})`], live, base).join(' '), /blocks the sandbox base/);
+  assert.deepEqual(lb.claudeDenyProblems([...st.permissions.deny, 'LS(//c/Dunder)'], live, base), []);
+  // A JAIL_DENY_TOOLS tool missing is a problem too.
+  assert.match(lb.claudeDenyProblems(st.permissions.deny.filter((d) => d !== 'Bash'), live, base).join(' '), /tool Bash is not denied/);
+  // The proof uses it, against the list the settings were written from; the stale regex is gone.
+  const proof = method('proveClaudeJail()');
+  assert.match(proof, /const denyProblems = claudeDenyProblems\(st\.permissions && st\.permissions\.deny, this\.claudeDenied \|\| \[\], this\.s\.base\);/);
+  assert.match(proof, /const ok = results\.every\(\(x\) => x\.want === x\.got\) && denyProblems\.length === 0;/);
+  assert.ok(!/Write\\\(\\\/\\\/c\\\/Dunder/.test(proof), 'no blanket-deny regex left in the proof');
+  assert.match(method('writeClaudeSettings(extraEnv)'), /const liveDenied = claudeLiveDenied\(s\.base, home, appData\);\s*this\.claudeDenied = liveDenied;/);
 });
 
