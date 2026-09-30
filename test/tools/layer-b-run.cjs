@@ -760,19 +760,58 @@ function winCmdTokens(line) {
 /** Why lb-codex's spawn is not the product's --no-daemon argv ([] = it is). `procs` = the app's
  *  descendants {pid, ppid, name, cmd}; `versionRow` = the app's last codex-version spawn row for
  *  lb-codex; `supportsNoDaemon` = the PRODUCT's codexSupportsNoDaemon. */
-function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon) {
+function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon, ptyOwnerPid) {
   const p = [];
   if (typeof supportsNoDaemon !== 'function') p.push('the product gate (codexSupportsNoDaemon) is not loaded');
   if (!versionRow) p.push('no codex-version spawn row for lb-codex: the product never read its CLI version at the spawn');
   else if (typeof supportsNoDaemon === 'function' && !supportsNoDaemon(versionRow.version)) p.push(`the product gate does not grant --no-daemon for codex ${versionRow.version}`);
+  if (!Number.isInteger(ptyOwnerPid) || ptyOwnerPid <= 0) p.push('the pty-owning pid (the app main process) is unknown');
+  // Only a NODE process running the npm launcher script is a launcher (Jim B7): a shell or any
+  // other process whose command line merely mentions codex.js is not.
   const launchers = (procs || []).filter((x) => /^node(\.exe)?$/i.test(String(x.name)) && CODEX_LAUNCHER.test(String(x.cmd || '')));
   if (launchers.length !== 1) p.push(`${launchers.length} Codex launchers under the app (exactly 1 expected: lb-codex)`);
   for (const l of launchers) {
+    // Jim F1: bound to the PRODUCT spawn. PtyManager runs node-pty in MAIN (pty.ts:691), so the
+    // ConPTY child's parent is the app's main pid; a launcher an agent tool started has a
+    // codex/claude/shell parent.
+    if (l.ppid !== ptyOwnerPid) p.push(`pid ${l.pid}: its parent ${l.ppid} is not the pty owner ${ptyOwnerPid}: not the product's own spawn`);
     const t = winCmdTokens(l.cmd);
     const n = t.filter((a) => a === '--no-daemon').length;
     if (n !== 1) p.push(`pid ${l.pid}: --no-daemon appears ${n} times (exactly 1 required)`);
     if (!t.includes(CODEX_PRODUCT_MARKER)) p.push(`pid ${l.pid}: no ${CODEX_PRODUCT_MARKER}: not the argv the product builds`);
+    p.push(...codexSafetyArgvProblems(t).map((x) => `pid ${l.pid}: ${x}`));
   }
+  return p;
+}
+/** Jim F2: the confinement lb-codex really runs with. Exactly one `--sandbox workspace-write` and one
+ *  `--ask-for-approval never` (no short or `=` form, no second value), and NONE of the flags that
+ *  lift the sandbox or the approvals (the renderer appends --dangerously-bypass-approvals-and-sandbox
+ *  when autoMode is on, store/config.ts:514; `--yolo` is its clap alias; `--approve-for-me` /
+ *  `--not-so-yolo` change the approval policy, utils/cli/src/shared_options.rs:44-59), nor a `-c`
+ *  override of sandbox_mode / approval_policy. */
+/** Dry run: the stub's node process (its command line names the stub script) is exactly one, and a
+ *  direct child of the pty owner. */
+function stubPtyParentProblems(procs, stubScript, ownerPid) {
+  const want = String(stubScript).toLowerCase();
+  const mine = (procs || []).filter((x) => /^node(\.exe)?$/i.test(String(x.name)) && String(x.cmd || '').toLowerCase().includes(want));
+  if (mine.length !== 1) return [`${mine.length} stub lb-codex processes under the app (exactly 1 expected)`];
+  return mine[0].ppid === ownerPid ? [] : [`the stub's parent is ${mine[0].ppid}, not the pty owner ${ownerPid}`];
+}
+const CODEX_REFUSED_FLAGS = ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '--approve-for-me', '--not-so-yolo', '--full-auto', '--auto-review'];
+function codexSafetyArgvProblems(tokens) {
+  const t = (tokens || []).map(String);
+  const p = [];
+  const pairs = (flag, short, value) => {
+    const at = t.map((x, i) => (x === flag || x === short || x.startsWith(`${flag}=`) || (short && x.startsWith(short) && x.length > short.length) ? i : -1)).filter((i) => i >= 0);
+    if (at.length !== 1 || t[at[0]] !== flag || t[at[0] + 1] !== value) p.push(`not exactly one \`${flag} ${value}\` (found ${at.map((i) => `${t[i]} ${t[i + 1] || ''}`.trim()).join(', ') || 'none'})`);
+  };
+  pairs('--sandbox', '-s', 'workspace-write');
+  pairs('--ask-for-approval', '-a', 'never');
+  for (const f of CODEX_REFUSED_FLAGS) if (t.some((x) => x === f || x.startsWith(`${f}=`))) p.push(`REFUSED flag ${f}`);
+  t.forEach((x, i) => {
+    const v = x === '-c' || x === '--config' ? t[i + 1] : x.startsWith('--config=') ? x.slice(9) : null;
+    if (v && /^\s*(sandbox_mode|approval_policy|sandbox_workspace_write)\b/.test(v)) p.push(`REFUSED override -c ${v}`);
+  });
   return p;
 }
 /** PowerShell: the app's descendants with their command lines, as JSON (tree walk by pid). */
@@ -1513,19 +1552,119 @@ function codexProbeVerdict(res, liveKeys) {
  * live floor keeps writing its own files during the run, so a change alone is REPORTED; it FAILS
  * only when a new or changed entry's NAME carries one of this run's markers.
  */
+/**
+ * god (the packages-junction blocker): NO reparse point in the jail may lead out of it. A realpath
+ * sweep over the WHOLE sandbox base, never following a link: every junction or symlink (Node's
+ * lstat reports both as isSymbolicLink on Windows) must resolve INSIDE the base's real path; one
+ * that resolves outside, or does not resolve at all (dangling: it cannot be shown to stay inside),
+ * is a problem. A listing error other than ENOENT (a file that vanished mid-walk) is a problem too
+ * (an incomplete sweep is never "clean"), and so is a tree over the bound.
+ *
+ * Explicit exceptions (JAIL_LINK_EXCEPTIONS): none for reparse points. Hard links to FILES (nlink > 1)
+ * are allowed and listed in the evidence. The one this run makes is isolation.jailedNodeDir's
+ * %TEMP%\md-rig-node-<ver>\node.exe, a hard link to this node.exe, which lives OUTSIDE the jail (the
+ * rig keeps it out of the sandbox on purpose), so the sweep never meets it.
+ */
+const JAIL_LINK_EXCEPTIONS = Object.freeze({ reparsePointsOutside: [], hardLinkedFiles: 'allowed, listed in the evidence (md-rig-node node.exe is outside the jail)' });
+const JAIL_SCAN_MAX = 500_000;
+function jailLinkScan(base, ops = {}) {
+  const lstat = ops.lstat || ((p) => fs.lstatSync(p));
+  const readdir = ops.readdir || ((d) => fs.readdirSync(d));
+  const realpath = ops.realpath || ((p) => fs.realpathSync.native(p));
+  const readlink = ops.readlink || ((p) => fs.readlinkSync(p));
+  const max = ops.maxEntries || JAIL_SCAN_MAX;
+  const problems = []; const links = []; const hardLinks = [];
+  let count = 0;
+  let realBase;
+  try { realBase = realpath(base); } catch (e) { return { ok: false, problems: [`cannot resolve the sandbox base ${base}: ${e.message}`], links, hardLinks, count }; }
+  const stack = [base];
+  walk: while (stack.length) {
+    const d = stack.pop();
+    let names;
+    try { names = readdir(d); } catch (e) { if (e && e.code === 'ENOENT') continue; problems.push(`cannot list ${d}: ${e.message}`); continue; }
+    for (const n of names) {
+      const f = path.join(d, String(n));
+      if (++count > max) { problems.push(`more than ${max} entries under ${base}: the sweep is incomplete`); break walk; }
+      let st;
+      try { st = lstat(f); } catch (e) { if (e && e.code === 'ENOENT') continue; problems.push(`cannot inspect ${f}: ${e.message}`); continue; }
+      if (st.isSymbolicLink()) {
+        let target = null;
+        try { target = readlink(f); } catch { /* reported through realpath */ }
+        let real;
+        try { real = realpath(f); } catch (e) {
+          links.push({ file: f, target, real: null, inside: false });
+          problems.push(`${f} -> ${target}: the link does not resolve (${e.code || e.message}), so it cannot be shown to stay inside the jail`);
+          continue;
+        }
+        const ok = inside(real, realBase);
+        links.push({ file: f, target, real, inside: ok });
+        if (!ok) problems.push(`${f} is a link to ${real}, OUTSIDE the jail ${realBase}`);
+        continue;   // never descend through a link
+      }
+      if (st.isDirectory()) stack.push(f);
+      else if (st.isFile() && st.nlink > 1) hardLinks.push({ file: f, nlink: st.nlink });
+    }
+  }
+  return { ok: problems.length === 0, problems, links, hardLinks, count };
+}
+
+/** A bounded, recursive LISTING hash of a live tree (names, types, sizes, mtimes, link targets; no
+ *  content read, links never followed). A missing root is { missing: true }; an error or a tree over
+ *  the bound is { error } (the caller fails: an unproven tree is not "unchanged"). */
+const LIVE_TREE_MAX = 20_000;
+function listingHash(root, ops = {}) {
+  const lstat = ops.lstat || ((p) => fs.lstatSync(p));
+  const readdir = ops.readdir || ((d) => fs.readdirSync(d));
+  const readlink = ops.readlink || ((p) => fs.readlinkSync(p));
+  const max = ops.maxEntries || LIVE_TREE_MAX;
+  try { lstat(root); } catch (e) { if (e && e.code === 'ENOENT') return { missing: true }; return { error: `${root}: ${e.message}` }; }
+  const lines = [];
+  const stack = [root];
+  try {
+    while (stack.length) {
+      const d = stack.pop();
+      for (const n of readdir(d).map(String).sort()) {
+        const f = path.join(d, n);
+        if (lines.length >= max) return { error: `${root}: more than ${max} entries` };
+        const st = lstat(f);
+        const type = st.isSymbolicLink() ? 'link' : st.isDirectory() ? 'dir' : 'file';
+        let target = '';
+        if (type === 'link') { try { target = readlink(f); } catch (e) { target = `?${e.code || ''}`; } }
+        lines.push([path.relative(root, f), type, st.size, st.mtimeMs, target].join('\t'));
+        if (type === 'dir') stack.push(f);
+      }
+    }
+  } catch (e) { return { error: `${root}: ${e.message}` }; }
+  return { hash: crypto.createHash('sha256').update(lines.join('\n')).digest('hex'), count: lines.length };
+}
+/** Why a live tree's listing is not proven unchanged ([] = it is). Missing both times is fine. */
+function liveTreeProblems(root, before, after) {
+  const p = [];
+  for (const [when, x] of [['before', before], ['after', after]]) if (!x || x.error) p.push(`cannot list the live ${root} ${when} the run: ${x ? x.error : 'no snapshot'}`);
+  if (p.length) return p;
+  if (before.missing && after.missing) return [];
+  if (before.missing !== after.missing) return [`the live ${root} ${before.missing ? 'appeared' : 'disappeared'} during the run`];
+  if (before.hash !== after.hash) p.push(`the live ${root} listing changed during the run (${before.count} -> ${after.count} entries)`);
+  return p;
+}
+
 class LiveWatch {
-  constructor(roots, keyFiles) { this.roots = roots; this.keyFiles = keyFiles; this.before = null; }
+  constructor(roots, keyFiles, trees = []) { this.roots = roots; this.keyFiles = keyFiles; this.trees = trees; this.before = null; }
   static defaults(env = process.env) {
     const home = os.homedir();
     const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
     return new LiveWatch(
       [LIVE.hive, LIVE.devData, path.join(home, '.claude'), path.join(home, '.codex'), path.join(appData, 'munder-difflin')],
       [path.join(home, '.claude', 'settings.json'), path.join(home, '.claude.json'), path.join(home, '.codex', 'config.toml'),
-        path.join(appData, 'munder-difflin', 'config.json'), path.join(LIVE.hive, 'registry.json')]
+        path.join(appData, 'munder-difflin', 'config.json'), path.join(LIVE.hive, 'registry.json')],
+      // god (packages-junction blocker): the product would junction an agent home's `packages` to
+      // <HOME>\.codex\packages; the real one must come out of the run with the same listing.
+      [path.join(home, '.codex', 'packages')]
     );
   }
   snapshot() {
-    const snap = { entries: {}, keys: {}, errors: [] };
+    const snap = { entries: {}, keys: {}, errors: [], trees: {} };
+    for (const t of this.trees) snap.trees[t] = listingHash(t);
     for (const r of this.roots) {
       let names = [];
       try { names = fs.readdirSync(r); } catch (e) { if (e.code !== 'ENOENT') snap.errors.push(`${r}: ${e.message}`); continue; }
@@ -1552,11 +1691,17 @@ class LiveWatch {
     }
     for (const f of Object.keys(this.before.entries)) if (!after.entries[f]) changed.push({ file: f, kind: 'removed' });
     for (const e of [...this.before.errors, ...after.errors]) failures.push(`cannot stat/hash a live location, so it cannot be shown untouched: ${e}`);
+    const trees = {};
+    for (const t of this.trees) {
+      const b = (this.before.trees || {})[t]; const a = after.trees[t];
+      trees[t] = { before: b, after: a };
+      failures.push(...liveTreeProblems(t, b, a));
+    }
     const keys = Object.keys(after.keys).map((k) => ({ file: k, same: after.keys[k] === this.before.keys[k], hashed: this.before.keys[k] !== null }));
     const hashed = keys.filter((k) => k.hashed).length;
     if (hashed === 0) failures.push('no key file could be hashed before the run: the check would prove nothing');
     if (!Object.keys(this.before.entries).length) failures.push('no live entry could be listed before the run: the check would prove nothing');
-    return { ok: failures.length === 0, failures, changed, keys, hashed, entries: Object.keys(this.before.entries).length, takenAt: this.takenAt };
+    return { ok: failures.length === 0, failures, changed, keys, hashed, trees, entries: Object.keys(this.before.entries).length, takenAt: this.takenAt };
   }
 }
 
@@ -2162,6 +2307,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   async launch(exe, label) {
     // god (720598c6 finding): the app, the real agents and every token path need --full-run.
     if (!this.args.dryRun && !this.args.fullRun) throw new Error(`launch() refused: a real run needs --full-run (${label})`);
+    this.jailLinkGate(`before launch ${label}`);
     const cdpPort = await freePort();
     let inspPort = await freePort();
     while (inspPort === cdpPort) inspPort = await freePort();
@@ -2672,6 +2818,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.openTheConfig();
     await this.waitAgentsUp('phase B');
     this.checkCodexArgv('phase B');
+    this.jailLinkGate('after launch phase B');
   }
 
   /** B4 (Claude): the RESUMED session sees the NEW --append-system-prompt. R7: only a genuine resume
@@ -2861,6 +3008,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.openTheConfig();
     await this.waitAgentsUp('rollback');
     this.checkCodexArgv('rollback');
+    this.jailLinkGate('after launch rollback');
     let woke = false;
     try {
       await this.waitFor('1.1.74 re-wakes the delivered-not-acted mail', 150_000, () => {
@@ -2963,7 +3111,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     let liveWatch = null;
     try {
       liveWatch = this.liveWatch ? this.liveWatch.compare(this.markers()) : null;
-      if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only)', liveWatch.failures.join('; '));
+      if (liveWatch) this.check(liveWatch.ok, 'the live hive, MunderDevData, the real ~/.claude and ~/.codex and the live userData carry no trace of this run (stat + hash only), and the real ~/.codex/packages listing is unchanged', liveWatch.failures.join('; '));
     } catch (e) { this.check(false, 'live-location check', e.message); }
     try { this.assertNoStubLateHooks(); } catch (e) { this.check(false, 'the hive log was read for mail-hook-late rows', e.message); }
     try { this.assertRunBar(); } catch (e) { this.check(false, 'the run bar (exhausted/stall rows, plumbing, wall time) was evaluated', e.message); }
@@ -3146,6 +3294,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       await this.assertHidden('after the config opened');
       await this.waitAgentsUp('phase A');
       this.checkCodexArgv('phase A');
+      this.jailLinkGate('after launch phase A');
       this.checkCodexSeed();
       // Claude and Codex facts run side by side (separate agents, separate budgets).
       const claudeA = (async () => {
@@ -3195,20 +3344,48 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 
   /** R1: the Codex agent really runs with the jail's sandbox config (the product copied the seed). */
+  /** god (the packages-junction blocker): before every launch (so after the seed) and after every
+   *  launch, no junction or symlink under the sandbox base may lead out of it (jailLinkScan). A hit
+   *  REFUSES the launch or ABORTS the run. Both modes: it starts nothing. */
+  jailLinkGate(label) {
+    const r = jailLinkScan(this.s.base);
+    const slug = label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
+    W.writeJson(path.join(this.s.report, `jail-links-${slug}.json`), { label, ok: r.ok, count: r.count, problems: r.problems, links: r.links, hardLinks: r.hardLinks, exceptions: JAIL_LINK_EXCEPTIONS });
+    if (!this.check(r.ok, `the jail has no link out of it (${label}): every junction/symlink under the sandbox base resolves inside it`,
+      r.ok ? `${r.count} entries; ${r.links.length} link(s), all inside; ${r.hardLinks.length} hard-linked file(s) (allowed, listed)` : r.problems.slice(0, 10).join('; '))) {
+      this.stop(`a link leads out of the jail (${label})`);
+      throw new Error(`jail link sweep (${label}): ${r.problems.slice(0, 5).join('; ')}`);
+    }
+    return r;
+  }
+
   /** Real run, after every launch: lb-codex runs the PRODUCT's argv with --no-daemon, or the run FAILS
    *  (see codexSpawnArgvProblems). The dry run's lb-codex is a stub and starts no codex. */
   checkCodexArgv(label) {
-    if (this.args.dryRun) return;
-    const gate = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'main', 'codexCli.ts')).codexSupportsNoDaemon;
-    const row = this.rows().filter((r) => r.kind === 'codex-version' && r.cause === 'spawn' && r.agentId === IDS.codex).pop() || null;
+    const owner = this.app.proc.pid;
     let procs = [];
     let err = null;
-    try {
-      const r = spawnSync(PS, psArgs(PS_TREE_CMDLINES(this.app.proc.pid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
+    // `procQuery` is injectable for the tests only; the run uses the PowerShell tree query.
+    const query = this.procQuery || ((pid) => {
+      const r = spawnSync(PS, psArgs(PS_TREE_CMDLINES(pid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
       if (r.status !== 0) throw new Error(`exit ${r.status}: ${String(r.stderr || '').slice(0, 300)}`);
-      procs = JSON.parse(String(r.stdout || '[]').trim() || '[]');
-    } catch (e) { err = `the process query failed: ${e.message}`; }
-    const problems = err ? [err] : codexSpawnArgvProblems(procs, row, gate);
+      return JSON.parse(String(r.stdout || '[]').trim() || '[]');
+    });
+    try { procs = query(owner); } catch (e) { err = `the process query failed: ${e.message}`; }
+    if (this.args.dryRun) {
+      // Jim F1, confirmed where it is cheap: the stub lb-codex goes through the same PtyManager
+      // spawn, so its node process must be a DIRECT child of the app's main pid (the pty owner).
+      const problems = err ? [err] : stubPtyParentProblems(procs, path.join(this.s.stubs, `${IDS.codex}.cjs`), owner);
+      W.writeJson(path.join(this.s.report, `codex-pty-parent-${label.replace(/[^a-z0-9]+/gi, '-')}.json`), { owner, problems });
+      if (!this.check(!problems.length, `dry run: lb-codex's PTY child is a direct child of the app main process, the binding the real-run argv check relies on (${label})`, problems.join('; ') || `parent ${owner}`)) {
+        this.stop(`the pty-owner binding does not hold (${label})`);
+        throw new Error(`pty owner binding (${label}): ${problems.join('; ')}`);
+      }
+      return;
+    }
+    const gate = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'main', 'codexCli.ts')).codexSupportsNoDaemon;
+    const row = this.rows().filter((r) => r.kind === 'codex-version' && r.cause === 'spawn' && r.agentId === IDS.codex).pop() || null;
+    const problems = err ? [err] : codexSpawnArgvProblems(procs, row, gate, owner);
     const launcher = procs.find((x) => CODEX_LAUNCHER.test(String(x.cmd || '')));
     W.writeJson(path.join(this.s.report, `codex-argv-${label.replace(/[^a-z0-9]+/gi, '-')}.json`), { row, launcher: launcher ? { pid: launcher.pid, cmd: redact(launcher.cmd) } : null, problems });
     if (!this.check(!problems.length, `lb-codex runs the PRODUCT's Codex argv with --no-daemon (${label})`, problems.join('; ') || redact(launcher.cmd))) {
@@ -3231,7 +3408,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, codexSpawnArgvProblems, winCmdTokens, lbCodexCommand, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

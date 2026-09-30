@@ -118,6 +118,11 @@ async function main() {
   const commandPath = whichCodexCmd();
   const command = lb.lbCodexCommand(lb.DEFAULT_MODELS.codex);   // the runner's lb-codex registry command
   const spec = pa.assertProductCodexArgv(await pa.productCodexSpawn({ home, harnessHome, agentId: 'lb-codex', name: 'Codex-LB', cwd, command, commandPath }));
+  // The redirect is for the product build only. Our own PowerShell children (the window watch, the
+  // tree snapshots) must not inherit it: with USERPROFILE redirected, PowerShell wrote its
+  // ModuleAnalysisCache to a RELATIVE Microsoft\Windows\PowerShell under the cwd (the worktree).
+  // The codex child gets the jail profile explicitly (scrubbedEnv).
+  restoreRealProfile();
   const launch = pa.productLaunch(spec, commandPath);
   const codexHome = spec.env.CODEX_HOME;
   for (const f of [path.join(home, '.codex', 'auth.json'), path.join(codexHome, 'auth.json')]) if (fs.existsSync(f)) throw new Error(`a credential exists (${f}): refusing`);
@@ -182,12 +187,15 @@ async function main() {
 }
 
 const REAL_ENV = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+function restoreRealProfile() {
+  for (const [k, v] of Object.entries(REAL_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+}
 (async () => {
   let err = null;
   try { await main(); } catch (e) { err = e; rec.error = e.stack || e.message; }
   // The cleanup's own children (PowerShell, tasklist) must not inherit the redirected profile: the
   // first run's PowerShell recreated <home>\AppData\Roaming after the delete.
-  for (const [k, v] of Object.entries(REAL_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  restoreRealProfile();
   const rmBase = async () => { for (let i = 0; i < 8 && fs.existsSync(base); i++) { try { fs.rmSync(base, { recursive: true, force: true }); } catch { await sleep(1000); } } };
   await rmBase();
   rec.leftovers = leftovers();
