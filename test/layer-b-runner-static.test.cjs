@@ -302,14 +302,14 @@ test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confi
   // `codex --version` and `codex sandbox --help`, and the probe uses the 0.157.1 syntax.
   assert.deepEqual(lb.CODEX_HELP_ARGVS, [['--version'], ['sandbox', '--help']]);
   assert.match(method('codexSandboxHelp()'), /for \(const argv of CODEX_HELP_ARGVS\) \{\s*const r = spawnSync\(exe, argv,/);
-  assert.match(method('proveCodexSandbox()'), /const argv = codexProbeArgv\(codex\.cwd, this\.node, script\);\s*const r = spawnSync\(exe, argv,/);
+  assert.match(method('proveCodexSandbox()'), /const argv = codexProbeArgv\(this\.node, script\);\s*const r = spawnSync\(exe, argv, \{ cwd: codex\.cwd,/);
 });
 
 test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv contains "sandbox windows"', () => {
-  // Real step 2 (fb00d433) replaced `-c sandbox_mode` with `-P lbjail` (see the source-derived test below).
-  assert.deepEqual(lb.codexProbeArgv('C:\\jail\\work\\lb-codex', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs'),
-    ['sandbox', '-P', 'lbjail', '-C', 'C:\\jail\\work\\lb-codex', '--', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs']);
-  for (const argv of [...lb.CODEX_HELP_ARGVS, lb.codexProbeArgv('c', 'n', 's')]) {
+  // Jim (8c03b1a4 audit): the legacy -c sandbox_mode path the agents run, no -C, no -P (source-derived test below).
+  assert.deepEqual(lb.codexProbeArgv('C:\\node\\node.exe', 'C:\\jail\\probe.cjs'),
+    ['sandbox', '-c', 'sandbox_mode="workspace-write"', '--', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs']);
+  for (const argv of [...lb.CODEX_HELP_ARGVS, lb.codexProbeArgv('n', 's')]) {
     assert.ok(!/sandbox\s+windows/.test(argv.join(' ')), argv.join(' '));
     assert.ok(!argv.includes('windows'), argv.join(' '));
   }
@@ -1176,42 +1176,43 @@ test('god R1 (on 18f6f9c0): the run bar FAILS on a wake-ids-exhausted row, a sta
   assert.match(src, /const ok = !this\.stopReason && asserted\.every\(\(f\) => f\.status === 'PASS'\) && this\.checks\.every\(\(c\) => c\.ok\);/, 'a failed check means NOT PASSED');
 });
 
-test('real step 2 (fb00d433): EVERY codex argv the runner builds follows the codex 0.157.1 CLI SOURCE, not its help text', () => {
+test('real step 2 (Jim, 8c03b1a4 audit): the probe runs the agents\' LEGACY path, derived from the codex 0.157.1 CLI SOURCE (not its help text)', () => {
   // openai/codex tag rust-v0.157.1 (36650394c5b38c2990ccf2a3457165ca3e9d9726), andy-scratch/codex-src-157-cli:
-  //  codex-rs/cli/src/main.rs:189,464   `codex sandbox` on Windows = codex_cli::WindowsCommand
-  //  codex-rs/cli/src/lib.rs:150-189    WindowsCommand: -P/--permission-profile (:156), -C/--cd with
-  //                                     requires = "permissions_profile" (:172), trailing command (:188-189)
-  //  codex-rs/cli/src/debug_sandbox.rs:680-684  -P NAME -> default_permissions = NAME; :707 profile syntax
-  //                                     (else the read-only fallback, :714)
-  //  codex-rs/core/src/config/permissions.rs:102-110 user names never start with ':'; :213-216 extends ":workspace"
-  //  codex-rs/config/src/permissions_toml.rs:113-118 (extends, workspace_roots, network), :210, :331 (enabled)
-  //  codex-rs/config/src/types.rs:165-174 [windows] sandbox = "unelevated"
-  //  codex-rs/utils/cli/src/shared_options.rs:22 (--model), :40 (--sandbox; kebab values, sandbox_mode_cli_arg.rs:13-18)
-  //  codex-rs/tui/src/cli.rs:70 (--ask-for-approval; approval_mode_cli_arg.rs:9-16: never)
-  //  codex-rs/core/src/config/mod.rs:2553-2562 --sandbox (a sandbox_mode override) = the legacy syntax: agents need no profile
-  const argv = lb.codexProbeArgv('C:\\sb\\work\\lb-codex', 'C:\\n\\node.exe', 'C:\\sb\\probe.cjs');
-  assert.deepEqual(argv, ['sandbox', '-P', 'lbjail', '-C', 'C:\\sb\\work\\lb-codex', '--', 'C:\\n\\node.exe', 'C:\\sb\\probe.cjs']);
-  assert.ok(argv.indexOf('-P') >= 0 && argv.indexOf('-P') < argv.indexOf('-C'), '-C requires -P (lib.rs:172)');
-  assert.ok(!argv.includes('-c') && !argv.includes('--config'), 'no legacy sandbox_mode override next to a profile (mod.rs:2553-2562)');
-  assert.ok(!lb.CODEX_PROBE_PROFILE.startsWith(':'), 'a user profile name (permissions.rs:102-110)');
+  //  utils/cli/src/config_override.rs:29-35  -c/--config is a GLOBAL root flag (MultitoolCli, cli/src/main.rs:126-127),
+  //                                          prepended to the sandbox command's overrides (main.rs:1657-1660)
+  //  cli/src/lib.rs:150-189  WindowsCommand: only -C (:172) and --include-managed-config (:180) `requires` -P;
+  //                          -c has no requires, so `sandbox -c ... -- cmd` without -C/-P parses; command :188-189
+  //  cli/src/debug_sandbox.rs:691, :763-765  a `sandbox_mode` cli override keeps the legacy path (:707 returns it);
+  //                          WITHOUT it `codex sandbox` forces read-only (:707-716) -> the jail write fails -> FAIL
+  //  cli/src/debug_sandbox.rs:656 codex_home None (a fallback cwd only with one, :747-750) and
+  //  core/src/config/mod.rs:1486-1490: the cwd is the PROCESS cwd -> the runner spawns in the agent cwd
+  //  cli/src/debug_sandbox.rs:190-200 managed requirements are ignored only with -P: none here
+  //  the agents: `--sandbox workspace-write` (utils/cli/src/shared_options.rs:40) = the same legacy sandbox_mode path
+  //                          (core/src/config/mod.rs:2558), reading the same CODEX_HOME config.toml
+  const argv = lb.codexProbeArgv('C:\\n\\node.exe', 'C:\\sb\\probe.cjs');
+  assert.deepEqual(argv, ['sandbox', '-c', 'sandbox_mode="workspace-write"', '--', 'C:\\n\\node.exe', 'C:\\sb\\probe.cjs'], 'the exact argv');
+  assert.ok(!argv.includes('-C') && !argv.includes('--cd') && !argv.includes('-P') && !argv.includes('--permission-profile'), 'no -C, no -P');
   assert.equal(argv[argv.indexOf('--') + 1], 'C:\\n\\node.exe', 'the command after --');
-  // The probe config: the agents' own config + the named profile with the same semantics.
-  const toml = lb.codexProbeToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex']);
-  assert.ok(toml.startsWith(lb.codexSandboxToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex'])), 'the agents\' config is kept as it is');
-  assert.match(toml, /^\[permissions\.lbjail\]\ndescription = "[^"]+"\nextends = ":workspace"$/m);
-  assert.match(toml, /^\[permissions\.lbjail\.workspace_roots\]\n'C:\\sb\\work\\lb-codex' = true\n'C:\\sb\\devroot\\hive\\agents\\lb-codex' = true$/m);
-  assert.match(toml, /^\[permissions\.lbjail\.network\]\nenabled = false$/m);
-  assert.match(toml, /^\[windows\]\nsandbox = "unelevated"$/m);
+  const probe = method('proveCodexSandbox()');
+  // The spawn cwd IS the agent's cwd (the config cwd is the process cwd).
+  assert.match(probe, /const codex = this\.spec\.find\(\(a\) => a\.id === IDS\.codex\);/);
+  assert.match(probe, /const argv = codexProbeArgv\(this\.node, script\);\s*const r = spawnSync\(exe, argv, \{ cwd: codex\.cwd,/, 'spawn cwd == the lb-codex agent cwd');
+  // The probe config text IS the agents' seed config text (no [permissions.*] profile).
+  assert.match(probe, /W\.write\(path\.join\(probeHome, 'config\.toml'\), codexSandboxToml\(this\.codexRoots\)\);/);
+  const seed = src.slice(src.indexOf('  seed() {'), src.indexOf('  writeRoster(map) {'));
+  assert.match(seed, /codexSandboxToml\(this\.codexRoots\)/, 'the agents are seeded from the same function and roots');
+  assert.ok(!/\[permissions\./.test(lb.codexSandboxToml(['C:\\sb\\work\\lb-codex'])), 'no permissions profile in the config');
+  assert.ok(lb.codexProbeToml === undefined && lb.CODEX_PROBE_PROFILE === undefined, 'the -P profile is gone');
+  // Fail-closed on read-only: a probe whose jail write fails is a FAIL (K17).
+  assert.equal(lb.codexProbeVerdict({ inside: 'refused: EPERM', hive: 'refused', codex: 'refused', claude: 'refused' }, ['hive', 'codex', 'claude']).ok, false);
   // The other codex argvs: the step-1 help/version and the agents' command.
   assert.deepEqual(lb.CODEX_HELP_ARGVS, [['--version'], ['sandbox', '--help']]);
   assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
-  // A clap rejection is reported as such, never as a sandbox verdict.
+  // A clap rejection is still reported as such, never as a sandbox verdict.
   const stderr = 'error: the following required arguments were not provided:\n  --permission-profile <NAME>\n\nUsage: codex sandbox --permission-profile <NAME> --config <key=value> --cd <DIR> <COMMAND>...';
   assert.equal(lb.codexArgvRejection(2, stderr), 'probe argv rejected (exit 2): error: the following required arguments were not provided:');
   assert.equal(lb.codexArgvRejection(0, ''), null);
   assert.equal(lb.codexArgvRejection(1, 'some sandbox failure'), null, 'not a usage error: the verdict decides');
-  const probe = method('proveCodexSandbox()');
-  assert.match(probe, /W\.write\(path\.join\(probeHome, 'config\.toml'\), codexProbeToml\(this\.codexRoots\)\);/);
   assert.match(probe, /if \(rejected\) return this\.check\(false, `R1 Codex sandbox probe: \$\{rejected\}`/);
 });
 

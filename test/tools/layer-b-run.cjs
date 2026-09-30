@@ -730,43 +730,24 @@ function codexSandboxToml(writableRoots) {
 const CODEX_HELP_ARGVS = [['--version'], ['sandbox', '--help']];
 
 /** The probe's argv, DERIVED FROM THE CLI SOURCE (openai/codex tag rust-v0.157.1, commit
- *  36650394c5b38c2990ccf2a3457165ca3e9d9726; clone at andy-scratch/codex-src-157-cli). Real step 2 at
- *  fb00d433: `-C` alone was rejected (exit 2): the help lists `-P` as optional, but
- *  codex-rs/cli/src/lib.rs:150-189 (WindowsCommand, `codex sandbox` on Windows per
- *  cli/src/main.rs:189/464) declares `-C/--cd` with `requires = "permissions_profile"` (lib.rs:172),
- *  and so does --include-managed-config (lib.rs:180). The help text is not the contract.
- *  - `-P NAME` becomes the config override default_permissions = NAME (cli/src/debug_sandbox.rs:680-684);
- *    with it the profile syntax is used (debug_sandbox.rs:707), not the read-only fallback (:714).
- *  - NAME is a [permissions.NAME] table in CODEX_HOME/config.toml (codexProbeToml); a user name may not
- *    start with ':' (core/src/config/permissions.rs:102-110); it extends the built-in ":workspace"
- *    (permissions.rs:213-216), with workspace_roots and network (config/src/permissions_toml.rs:113-118,
- *    :210, :331).
- *  - No `-c sandbox_mode` any more: with -P the session layer selects the profile syntax
- *    (core/src/config/mod.rs:2553-2562), so a legacy sandbox_mode override would only confuse it.
- *  - `--` then the command (trailing_var_arg, lib.rs:188-189). */
-const CODEX_PROBE_PROFILE = 'lbjail';
-function codexProbeArgv(cwd, node, script) {
-  return ['sandbox', '-P', CODEX_PROBE_PROFILE, '-C', cwd, '--', node, script];
-}
-
-/** The probe's jailed CODEX_HOME/config.toml: the agents' own config (codexSandboxToml: workspace-write,
- *  jail-only writable roots, no network, [windows] sandbox = "unelevated", config/src/types.rs:165-174)
- *  PLUS the named profile -P selects, with the SAME semantics: extends ":workspace" (the cwd, and the
- *  temp dir, writable, as workspace-write), the same writable roots as workspace_roots, network off. */
-function codexProbeToml(writableRoots) {
-  return codexSandboxToml(writableRoots) + [
-    '',
-    `[permissions.${CODEX_PROBE_PROFILE}]`,
-    'description = "layer-b jail probe: workspace-write, jail-only writable roots, no network"',
-    'extends = ":workspace"',
-    '',
-    `[permissions.${CODEX_PROBE_PROFILE}.workspace_roots]`,
-    ...writableRoots.map((r) => `'${path.resolve(r)}' = true`),
-    '',
-    `[permissions.${CODEX_PROBE_PROFILE}.network]`,
-    'enabled = false',
-    ''
-  ].join('\n');
+ *  36650394c5b38c2990ccf2a3457165ca3e9d9726; clone at andy-scratch/codex-src-157-cli), and proving the
+ *  SAME path the agents run (Jim, 8c03b1a4 audit): the agents start with `--sandbox workspace-write`,
+ *  the LEGACY sandbox_mode path, so the probe must not use a permissions profile (-P), whose
+ *  materialization cannot be shown equal, and which ignores managed requirements
+ *  (cli/src/debug_sandbox.rs:190-200; without -P they are included).
+ *  - `-c sandbox_mode="workspace-write"` is a GLOBAL root flag (utils/cli/src/config_override.rs:29-35,
+ *    MultitoolCli main.rs:126-127) prepended to the sandbox command's overrides (main.rs:1657-1660); no
+ *    clap `requires` applies to it (only -C and --include-managed-config require -P, lib.rs:172/:180).
+ *  - The sandbox_mode key keeps the legacy override (debug_sandbox.rs:691, :707, :763-765); WITHOUT it
+ *    `codex sandbox` forces read-only (debug_sandbox.rs:707-716): the jail write fails, and the probe
+ *    FAILS closed (codexProbeVerdict).
+ *  - NO -C and NO -P (-C requires -P, lib.rs:172). The cwd is the PROCESS cwd: the debug config is built
+ *    with codex_home None (debug_sandbox.rs:656; a fallback cwd only with a codex_home, :747-750), so no fallback cwd, and the config cwd is the
+ *    current dir (core/src/config/mod.rs:1486-1490). The runner spawns it in the lb-codex agent cwd.
+ *  - `--` then the command (trailing_var_arg, lib.rs:188-189).
+ *  The probe's CODEX_HOME config.toml is codexSandboxToml, the text every Codex agent is seeded with. */
+function codexProbeArgv(node, script) {
+  return ['sandbox', '-c', 'sandbox_mode="workspace-write"', '--', node, script];
 }
 
 /** A clap usage error (exit 2, "error: ...") is reported as such, never as a sandbox verdict. */
@@ -1959,14 +1940,14 @@ class LayerB {
     const codex = this.spec.find((a) => a.id === IDS.codex);
     const insideMarker = path.join(codex.cwd, marker);
     const probeHome = path.join(s.jail, 'probe-codex-home');
-    W.write(path.join(probeHome, 'config.toml'), codexProbeToml(this.codexRoots));
+    W.write(path.join(probeHome, 'config.toml'), codexSandboxToml(this.codexRoots));   // IDENTICAL to the agents' seed
     const script = path.join(s.base, 'codex-sandbox-probe.cjs');
     W.write(script, `const fs = require('fs'); const out = {};
 for (const [k, p] of Object.entries(${JSON.stringify({ inside: insideMarker, ...targets })})) { try { fs.writeFileSync(p, 'layer-b probe'); out[k] = 'WROTE'; } catch (e) { out[k] = 'refused: ' + e.code; } }
 process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const env = { ...this.env, CODEX_HOME: probeHome };
     const before = Object.fromEntries(Object.entries(targets).map(([k, p]) => [k, fs.existsSync(p)]));
-    const argv = codexProbeArgv(codex.cwd, this.node, script);
+    const argv = codexProbeArgv(this.node, script);
     const r = spawnSync(exe, argv, { cwd: codex.cwd, env, encoding: 'utf8', windowsHide: true, timeout: 90_000 });
     const res = (() => { const i = (r.stdout || '').indexOf('LBPROBE'); try { return i >= 0 ? JSON.parse(r.stdout.slice(i + 7)) : null; } catch { return null; } })();
     const rejected = res ? null : codexArgvRejection(r.status, r.stderr);
@@ -1979,7 +1960,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     if (rejected) return this.check(false, `R1 Codex sandbox probe: ${rejected}`, JSON.stringify({ argv, stderr: String(r.stderr || '').slice(0, 600) }));
     if (leaked.length) return this.check(false, 'R1 Codex sandbox probe: NO marker reached a live location', `LEAKED into ${leaked.join(', ')} (removed); ${JSON.stringify(res)}`);
     return this.check(verdict.ok,
-      'R1 Codex sandbox (zero tokens, codex sandbox -P lbjail): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
+      'R1 Codex sandbox (zero tokens, codex sandbox -c sandbox_mode="workspace-write", the agents\' legacy path): writes to C:\\Dunder\\hive, the real ~/.codex and ~/.claude refused; the jail write succeeded; no marker appeared',
       JSON.stringify({ res, status: r.status, stderr: String(r.stderr || '').slice(0, 300) }));
   }
 
@@ -3047,7 +3028,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, CODEX_PROBE_PROFILE, codexProbeToml, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
