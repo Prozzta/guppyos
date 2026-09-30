@@ -138,8 +138,6 @@ test('Stage 1b: an optional registry limit applies to that agent only and the us
   const trialCfg = toml.parse(fs.readFileSync(path.join(trial.env.CODEX_HOME, 'config.toml'), 'utf8'));
   assert.equal(trialCfg.model_auto_compact_token_limit, 80000);
   assert.equal(fs.readFileSync(path.join(s.home, '.codex', 'config.toml'), 'utf8'), seed, 'the user global config is unchanged');
-  const control = await agentConfig(t, seed);
-  assert.equal(control.cfg.model_auto_compact_token_limit, 120000, 'an unset agent retains the fleet default');
   assert.equal(C.codexAutoCompactTokenLimitForAgent(undefined), 120000);
   assert.equal(C.codexAutoCompactTokenLimitForAgent(80000), 80000);
   for (const unsafe of [1000, 17999, 400000, 1e9]) {
@@ -153,6 +151,10 @@ test('Stage 1b: an optional registry limit applies to that agent only and the us
   assert.equal(toml.parse(fs.readFileSync(path.join(unsafe.env.CODEX_HOME, 'config.toml'), 'utf8')).model_auto_compact_token_limit, 120000, 'an unsafe registry value is never provisioned');
   const ignored = fs.readFileSync(path.join(s.home, 'harness', 'hive', 'log.jsonl'), 'utf8').trim().split(/\r?\n/).map(JSON.parse).filter((row) => row.kind === 'codex-compact-limit-ignored');
   assert.deepEqual(ignored.map(({ agentId, value }) => ({ agentId, value })), [{ agentId: 'trial-agent', value: 1000 }], 'one ignored-value row is emitted per spawn');
+  // CODEX-TRUST-LAYER: the control sandbox re-points HOME, so it runs LAST (the first sandbox's
+  // ~/.codex, still the cwd above, would otherwise be a foreign project layer under an unknown version).
+  const control = await agentConfig(t, seed);
+  assert.equal(control.cfg.model_auto_compact_token_limit, 120000, 'an unset agent retains the fleet default');
 });
 
 test('Route A: generated Codex config pins retain_client_developer_messages = false even when the seed enables it', async (t) => {

@@ -127,6 +127,11 @@ export interface HarnessConfig {
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
   autoDeliveryPausedAgents?: string[];
+  /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
+   *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
+   *  unreviewed (with a visible warning); anywhere else such a folder refuses the spawn. Keys are
+   *  resolved paths, ASCII-lowercased on Windows. */
+  codexLayerOptIns?: string[];
   maxTurns?: number;
   circuitBreaker?: CircuitBreakerConfig;
   /** Enterprise Knowledge Graph (multimodal context for agents). Default OFF. */

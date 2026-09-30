@@ -242,6 +242,8 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   // Note shown when the folder was auto-filled from the pasted session id.
   const [folderNote, setFolderNote] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
+  // CODEX-TRUST-LAYER: the folder key main refused this Codex spawn for (the one-click opt-in).
+  const [layerOptIn, setLayerOptIn] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
   // Which config section the left sidebar index is showing.
   const [section, setSection] = useState<SectionKey>('identity');
@@ -430,8 +432,10 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
     if (!spawnRes.ok) {
       setBusy(false);
       setError(spawnRes.error ?? 'spawn failed');
+      setLayerOptIn(spawnRes.codexLayerOptIn);
       return;
     }
+    setLayerOptIn(undefined);
     // #2 — the requested resume session id wasn't found anywhere; main fell back
     // to a fresh session. Don't block the spawn, but make it visible.
     if (resuming && spawnRes.resumeNotFound) {
@@ -1085,6 +1089,23 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                 color: 'var(--cth-ink-900)'
               }}>
                 {error}
+                {layerOptIn && (
+                  <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <button
+                      type="button"
+                      data-testid="codex-layer-allow-start"
+                      disabled={busy}
+                      onClick={() => {
+                        void window.cth.codexLayerAllow(layerOptIn).then((r) => {
+                          if (r.ok) { setLayerOptIn(undefined); setError(undefined); void submit(); }
+                          else setError(r.error ?? 'Could not allow the folder.');
+                        });
+                      }}
+                      style={{ alignSelf: 'flex-start', fontSize: 12 }}
+                    >Allow this folder and start</button>
+                    <span style={{ fontSize: 12 }}>The hooks and MCP servers in this folder will then run unreviewed in hive Codex agents (in auto mode, unsandboxed). You can withdraw it in Settings.</span>
+                  </div>
+                )}
               </div>
             )}
 
