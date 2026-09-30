@@ -181,16 +181,24 @@ async function main() {
   }
 }
 
+const REAL_ENV = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 (async () => {
   let err = null;
   try { await main(); } catch (e) { err = e; rec.error = e.stack || e.message; }
-  for (let i = 0; i < 8 && fs.existsSync(base); i++) { try { fs.rmSync(base, { recursive: true, force: true }); } catch { await sleep(1000); } }
-  rec.gone = !fs.existsSync(base);
+  // The cleanup's own children (PowerShell, tasklist) must not inherit the redirected profile: the
+  // first run's PowerShell recreated <home>\AppData\Roaming after the delete.
+  for (const [k, v] of Object.entries(REAL_ENV)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+  const rmBase = async () => { for (let i = 0; i < 8 && fs.existsSync(base); i++) { try { fs.rmSync(base, { recursive: true, force: true }); } catch { await sleep(1000); } } };
+  await rmBase();
   rec.leftovers = leftovers();
+  await sleep(1000);
+  rec.recreated = fs.existsSync(base);
+  if (rec.recreated) await rmBase();
+  rec.gone = !fs.existsSync(base);
   const text = lb.redact(strip(rec.output));
   const md = [
     '# Codex exit repro with the PRODUCT argv (zero tokens)', '',
-    `- Run dir ${base} (deleted: ${rec.gone}). codex ${rec.version || '?'} via ${rec.commandPath || '?'}.`,
+    `- Run dir ${base} (deleted and verified gone after the leftover query: ${rec.gone}; recreated after the first delete: ${rec.recreated}). codex ${rec.version || '?'} via ${rec.commandPath || '?'}.`,
     `- Product command: \`${rec.command || '?'}\``,
     `- Product launch: \`${rec.file || '?'}\` ${JSON.stringify(rec.args || [])}`,
     `- cwd ${rec.cwd || '?'}; CODEX_HOME ${rec.codexHome || '?'}; product env keys: ${(rec.envKeys || []).join(', ')}`,
