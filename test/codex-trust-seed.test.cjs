@@ -176,3 +176,38 @@ test('wiring: the seed runs AFTER the DEV sanitise and the other transforms, BEF
   assert.match(fn, /const seeded = withAgentTrust\(config, cwd\);\n\s*config = seeded\.text;/);
   assert.match(src, /configuredCompactLimit, meta\.cwd\);/, 'ensureAgent passes the agent\'s own cwd');
 });
+
+test('Jim P1: codex lowercases ASCII ONLY: non-ASCII letters keep their case in the key, and duplicate detection folds ASCII case only', () => {
+  for (const [cwd, key] of [
+    ['C:\\Users\\JÖRG\\Proj', 'c:\\users\\jÖrg\\proj'],
+    ['D:\\ÄRZTE\\Akte', 'd:\\Ärzte\\akte'],
+    ['E:\\İSTANBUL\\Kod', 'e:\\İstanbul\\kod']
+  ]) {
+    assert.equal(ts.codexProjectTrustKey(cwd, 'win32'), key, cwd);
+    const r = ts.withAgentTrust('', cwd, 'win32');
+    assert.ok(r.text.includes(`[projects.'${key}']`), cwd);
+    assert.equal(toml.parse(r.text).projects[key].trust_level, 'trusted');
+  }
+  assert.equal(ts.asciiLower('ABCÖÄİz'), 'abcÖÄİz');
+  assert.equal(ts.sameCodexProjectKey('C:\\JÖRG', 'c:\\jÖrg', 'win32'), true, 'ASCII case folds');
+  assert.equal(ts.sameCodexProjectKey('C:\\JÖRG', 'c:\\jörg', 'win32'), false, 'Ö and ö are different keys for codex');
+  // A user table in a codex-equal form (ASCII case only differs) is found: no second table.
+  assert.equal(ts.withAgentTrust("[projects.'C:\\USERS\\JÖRG\\PROJ']\ntrust_level = \"trusted\"\n", 'C:\\Users\\JÖRG\\Proj', 'win32').action, 'kept');
+  // Only the non-ASCII case differs: a different codex key, so ours is added and both parse.
+  const r = ts.withAgentTrust("[projects.'c:\\users\\jörg\\proj']\ntrust_level = \"trusted\"\n", 'C:\\Users\\JÖRG\\Proj', 'win32');
+  assert.equal(r.action, 'added');
+  assert.deepEqual(Object.keys(toml.parse(r.text).projects).sort(), ['c:\\users\\jÖrg\\proj', 'c:\\users\\jörg\\proj']);
+});
+
+test('Jim P2: a control char or DEL in the cwd is written as an escaped BASIC string (TOML forbids them raw); the value round-trips', () => {
+  for (const cwd of ['C:\\a\u007fb', 'C:\\tab\there', 'C:\\bell\u0007x', "C:\\it's\u007f"]) {
+    const r = ts.withAgentTrust('model = "x"\n', cwd, 'win32');
+    const header = r.text.split('\n').find((l) => l.startsWith('[projects.'));
+    assert.ok(header.startsWith('[projects."'), `${JSON.stringify(cwd)}: a basic string`);
+    assert.ok(!/[\u0000-\u001f\u007f]/.test(header), `${JSON.stringify(cwd)}: no raw control char or DEL`);
+    const cfg = toml.parse(r.text);
+    assert.equal(cfg.projects[ts.codexProjectTrustKey(cwd, 'win32')].trust_level, 'trusted', JSON.stringify(cwd));
+  }
+  assert.ok(ts.withAgentTrust('', 'C:\\a\u007fb', 'win32').text.includes('[projects."c:\\\\a\\u007Fb"]'), 'DEL as \\u007F');
+  assert.ok(ts.withAgentTrust('', 'C:\\plain', 'win32').text.includes("[projects.'c:\\plain']"), 'a plain path keeps the literal form');
+});

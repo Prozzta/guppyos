@@ -51,6 +51,9 @@ export interface CodexTrustSeedContext {
 }
 
 const pathApi = (platform: NodeJS.Platform) => (platform === 'win32' ? win32 : posix);
+/** Jim P1: codex lowercases ASCII ONLY (Rust to_ascii_lowercase, config_toml.rs:909-915 and
+ *  loader/mod.rs:1393-1399); JS toLowerCase would also fold Ö, Ä, İ and never match codex's key. */
+export const asciiLower = (s: string): string => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 const stripVerbatim = (p: string): string => p.replace(/^\\\\\?\\(?!UNC\\)/, '');
 const inside = (child: string, parent: string, platform: NodeJS.Platform): boolean => {
   const P = pathApi(platform);
@@ -77,12 +80,12 @@ export function shouldSeedCodexTrust(cwd: string | null | undefined, ctx: CodexT
 export function codexProjectTrustKey(cwd: string, platform: NodeJS.Platform = process.platform): string {
   const P = pathApi(platform);
   const resolved = P.resolve(stripVerbatim(cwd));
-  return platform === 'win32' ? resolved.toLowerCase() : resolved;
+  return platform === 'win32' ? asciiLower(resolved) : resolved;
 }
 
 /** Keys codex treats as the same project: case-insensitive on Windows, `\\?\` stripped. */
 export function sameCodexProjectKey(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
-  const n = (s: string): string => { const x = stripVerbatim(s); return platform === 'win32' ? x.toLowerCase() : x; };
+  const n = (s: string): string => { const x = stripVerbatim(s); return platform === 'win32' ? asciiLower(x) : x; };
   return n(a) === n(b);
 }
 
@@ -177,7 +180,9 @@ export function withAgentTrust(config: string, cwd: string, platform: NodeJS.Pla
     return { text: config, action: 'kept-unmodifiable', key };
   }
   if (inlineProjects) return { text: config, action: 'skipped-inline-projects', key };
-  const quoted = key.includes("'") || /[\r\n]/.test(key) ? JSON.stringify(key) : `'${key}'`;
+  // A literal string cannot hold ' or any control char / DEL (TOML forbids them raw; Jim P2): a basic
+  // string then, JSON's escapes plus \u007F for DEL, which JSON leaves raw (as HiveManager.tomlString).
+  const quoted = /['\u0000-\u001f\u007f]/.test(key) ? JSON.stringify(key).replace(/\u007f/g, '\\u007F') : `'${key}'`;
   const sep = config === '' || config.endsWith('\n') ? '' : '\n';
   return { text: `${config}${sep}\n# munder-hive trust-seed: the agent's own cwd is trusted (no trust screen)\n[projects.${quoted}]\ntrust_level = "trusted"\n`, action: 'added', key };
 }
