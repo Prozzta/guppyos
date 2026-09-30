@@ -34,6 +34,7 @@ import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliver
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
+import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './codexProjectLayers';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
@@ -331,6 +332,9 @@ export interface SpawnInjection {
    *  this BEFORE merging `args`/`env` and before reaching `ptyManager.spawn` — an
    *  empty injection would silently downgrade the spawn instead of refusing it. */
   refusal?: string;
+  /** CODEX-TRUST-LAYER: with a refusal for an unreviewed codex project layer, the folder key
+   *  the one-click opt-in records (HarnessConfig.codexLayerOptIns). */
+  codexLayerOptIn?: string;
 }
 
 const HOP_CAP = 12;
@@ -542,6 +546,9 @@ export class HiveManager {
   /** HOOK-BROKER: the in-process HTTP hook endpoint (HookServer), injected by main. Null in
    *  tests and until wired; every spawn then writes command hooks exactly as before. */
   private hookBroker: HookBroker | null = null;
+  /** CODEX-TRUST-LAYER: where a refused or warned Codex spawn is shown (index.ts pushes it to
+   *  the window). Null in tests and before the app wires it; the log row is written anyway. */
+  codexLayerSink: ((notice: CodexLayerNotice) => void) | null = null;
   /** LOG-STALL-AV: the kept-open, rotated append files, per hive root (see appendLog.ts). */
   private readonly appendFiles = new Map<string, AppendFile>();
   private keepAppendOpen = true;
@@ -1088,6 +1095,10 @@ export class HiveManager {
        *  one the CLI is really given (the pin, when it applies). Recorded on the registry entry;
        *  a Codex agent's config.toml carries `launch`. Absent = not recorded (older callers). */
       spawnModel?: { requested?: string; launch?: string };
+      /** CODEX-TRUST-LAYER: the codex CLI version this agent gets (null = unknown), and the
+       *  folders the Human allowed (HarnessConfig.codexLayerOptIns). */
+      codexVersion?: string | null;
+      codexLayerOptIns?: string[];
     } = {}
   ): Promise<SpawnInjection> {
     const root = this.root();
@@ -1282,9 +1293,9 @@ export class HiveManager {
               if (configuredCompactLimit !== undefined && !isCodexAutoCompactTokenLimitOverride(configuredCompactLimit)) {
                 this.appendLog({ kind: 'codex-compact-limit-ignored', agentId: meta.id, value: configuredCompactLimit });
               }
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd);
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd, { codexVersion: opts.codexVersion ?? null, optIns: opts.codexLayerOptIns });
               // F1 fail-closed: provisioning refused, so this agent must not start.
-              if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
+              if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal, ...(codex.codexLayerOptIn ? { codexLayerOptIn: codex.codexLayerOptIn } : {}) };
               env.CODEX_HOME = codex.home;
               if (codex.developerInstructions) developerInstructionsSet = true;
               // Codex refuses to run hooks from a config dir without persisted
@@ -3732,7 +3743,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3841,12 +3852,36 @@ export class HiveManager {
       // it cannot answer. One predicate decides the scope (codexTrustSeed.ts); an equal entry the
       // seed already has is never duplicated. Trust also enables <cwd>/.codex/config.toml: its
       // confinement/command keys are logged (the spawn's --sandbox/--ask-for-approval still win).
+      const configBeforeSeed = config;
       if (cwd && shouldSeedCodexTrust(cwd, { harnessHome: this.getHome() })) {
         const seeded = withAgentTrust(config, cwd);
         config = seeded.text;
         this.appendLog({ kind: 'codex-trust-seed', agentId: agentId ?? null, action: seeded.action, key: seeded.key });
         const risky = codexProjectLayerRiskKeys(cwd);
         if (risky.length) this.appendLog({ kind: 'codex-trust-project-layer', agentId: agentId ?? null, cwd, keys: risky });
+      }
+      // CODEX-TRUST-LAYER (the Human's ruling, 1.1.76): a `.codex` layer that loads ONLY because
+      // of our seed and carries code (MCP servers start with the agent, hooks run on its first
+      // turn, unreviewed: this spawn passes --dangerously-bypass-hook-trust) REFUSES the spawn,
+      // visibly, until the Human allows the folder once. Where the user's own codex trust list
+      // trusts it, or the folder is allowed, the agent starts with a visible warning. Decided
+      // BEFORE config.toml is written; anything unexpected here refuses (fail closed).
+      if (cwd) {
+        let refusal: { reason: string; optInKey: string } | null = null;
+        try {
+          const report = codexProjectLayers({ cwd, configBeforeSeed, configAfterSeed: config, codexHome: home, codexVersion: layer.codexVersion });
+          const decision = decideCodexLayers(report, layer.optIns);
+          if (decision.action !== 'start') {
+            this.appendLog({ kind: 'codex-trust-layer', agentId: agentId ?? null, action: decision.action, cwd, folder: report.projectFolder, optInKey: decision.optInKey, codexVersion: layer.codexVersion, layers: decision.layers, unknown: report.unknown, reason: decision.reason });
+            try { this.codexLayerSink?.({ agentId: agentId ?? null, action: decision.action, reason: decision.reason, optInKey: decision.optInKey, folder: report.projectFolder, at: Date.now() }); } catch { /* the log row stands */ }
+          }
+          if (decision.action === 'refuse') refusal = { reason: decision.reason, optInKey: decision.optInKey };
+        } catch (e) {
+          const reason = `Not started: the check of this agent's codex project folder failed (${e instanceof Error ? e.message : String(e)}), so it is refused rather than started unchecked.`;
+          this.appendLog({ kind: 'codex-trust-layer', agentId: agentId ?? null, action: 'refuse', cwd, error: String(e), reason });
+          refusal = { reason, optInKey: '' };
+        }
+        if (refusal) return { home, refusal: refusal.reason, ...(refusal.optInKey ? { codexLayerOptIn: refusal.optInKey } : {}) };
       }
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',

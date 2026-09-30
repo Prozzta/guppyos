@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, po
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { CodexVersionLog, codexSupportsNoDaemon, readCodexVersion } from './codexCli';
+import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn, execFile } from 'node:child_process';
@@ -3426,7 +3427,7 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  it can ALSO be invoked by the god-triggered ephemeral-worker watcher (which has
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
-async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -3591,10 +3592,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // CODEX-WAKE-161 addendum (a)+(b): log the CLI this Codex agent gets, and pin it to its
       // in-process app-server with --no-daemon when (and only when) the CLI has that flag.
       let codexNoDaemon = false;
+      let codexVersion: string | null = null;
       if (provider === 'codex') {
         const cli = await codexCliNow();
         codexVersionLog.note(cli.version, cli.path, 'spawn', opts.hive.id);
         codexNoDaemon = codexSupportsNoDaemon(cli.version);
+        codexVersion = cli.version ?? null;
       }
       const inj = await hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },
@@ -3616,7 +3619,11 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           // CODEX-BLOAT-165 fix 5: Settings' "inherit my Codex plugins" (default off).
           codexInheritPlugins: readConfig().codexInheritPlugins === true,
           // MODEL-PINBACK: recorded on the registry entry; a Codex config.toml carries `launch`.
-          spawnModel
+          spawnModel,
+          // CODEX-TRUST-LAYER: the layer model is checked against this version; the folders the
+          // Human allowed start (with a warning) instead of being refused.
+          codexVersion,
+          codexLayerOptIns: readConfig().codexLayerOptIns ?? []
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and
@@ -3625,7 +3632,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // spawn. Returning early (rather than throwing) is what makes it survive the
       // best-effort catch below — a throw would be logged there and the spawn would
       // continue on exactly the unsafe state the refusal exists to prevent.
-      if (inj.refusal) return { ok: false, error: inj.refusal };
+      if (inj.refusal) return { ok: false, error: inj.refusal, ...(inj.codexLayerOptIn ? { codexLayerOptIn: inj.codexLayerOptIn } : {}) };
       opts.args = [...(opts.args ?? []), ...inj.args];
       seedPrompt = inj.seedPrompt;
       // The `kg` CLI at the enterprise knowledge store (empty when the KG is off).
@@ -5027,6 +5034,50 @@ ipcMain.handle('control:pause', (_evt, agentId: unknown, on: unknown) => {
   if (typeof agentId !== 'string') return null;
   control.pause(agentId, on === true);
   return control.snapshot(agentId);
+});
+// CODEX-TRUST-LAYER (1.1.76): a Codex spawn refused for an unreviewed project `.codex` layer, or
+// started with a warning, is shown in the window (never a silent non-start); the Human allows a
+// refused folder with one click, and it then starts with a warning. The notices live in memory:
+// a refusal repeats at the next spawn attempt, and the log row (codex-trust-layer) is durable.
+const codexLayerNotices: CodexLayerNotice[] = [];
+function pushCodexLayerNotices(): void {
+  for (const w of allWindows) {
+    if (w.isDestroyed() || w.webContents.isDestroyed()) continue;
+    try { w.webContents.send('codexLayer:noticesPush', codexLayerNotices.slice()); } catch { /* window tearing down */ }
+  }
+}
+hive.codexLayerSink = (n) => {
+  const same = codexLayerNotices.findIndex((x) => x.agentId === n.agentId && x.optInKey === n.optInKey);
+  if (same >= 0) codexLayerNotices.splice(same, 1);
+  codexLayerNotices.push(n);
+  while (codexLayerNotices.length > 20) codexLayerNotices.shift();
+  pushCodexLayerNotices();
+};
+ipcMain.handle('codexLayer:notices', () => codexLayerNotices.slice());
+/** The one-click opt-in: only a folder a spawn was actually refused for (the key comes from
+ *  main's own notice or spawn result, never a free path). */
+ipcMain.handle('codexLayer:allow', (_evt, optInKey: unknown) => {
+  if (typeof optInKey !== 'string' || !optInKey) return { ok: false, error: 'no folder' };
+  if (!codexLayerNotices.some((n) => n.action === 'refuse' && n.optInKey === optInKey)) return { ok: false, error: 'that folder was not refused' };
+  const cur = readConfig().codexLayerOptIns ?? [];
+  writeConfig({ codexLayerOptIns: [...cur, optInKey] });
+  for (let i = codexLayerNotices.length - 1; i >= 0; i--) if (codexLayerNotices[i].action === 'refuse' && codexLayerNotices[i].optInKey === optInKey) codexLayerNotices.splice(i, 1);
+  hive.appendLog({ kind: 'codex-trust-layer-allowed', optInKey });
+  pushCodexLayerNotices();
+  return { ok: true };
+});
+ipcMain.handle('codexLayer:dismiss', (_evt, at: unknown) => {
+  const i = codexLayerNotices.findIndex((n) => n.at === at);
+  if (i >= 0) { codexLayerNotices.splice(i, 1); pushCodexLayerNotices(); }
+  return true;
+});
+/** Settings: withdraw an allowed folder (the next spawn there is refused again). */
+ipcMain.handle('codexLayer:revoke', (_evt, key: unknown) => {
+  if (typeof key !== 'string') return { ok: false };
+  const k = codexLayerOptInKey(key);
+  writeConfig({ codexLayerOptIns: (readConfig().codexLayerOptIns ?? []).filter((x) => codexLayerOptInKey(x) !== k) });
+  hive.appendLog({ kind: 'codex-trust-layer-revoked', optInKey: k });
+  return { ok: true };
 });
 ipcMain.handle('control:autoDelivery', (_evt, agentId: unknown, paused: unknown) => {
   if (typeof agentId !== 'string') return null;

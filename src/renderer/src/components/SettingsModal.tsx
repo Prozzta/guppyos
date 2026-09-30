@@ -16,6 +16,7 @@ import { PixelButton } from './PixelButton';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { CodexPluginsSetting } from './CodexPluginsSetting';
+import { CodexLayerOptInsSetting } from './CodexLayerNotice';
 import { openFirstCapacityDetail } from '../capacity/detailSelection';
 import { UpdatesSection } from './UpdatesSection';
 import { SettingsHeroCard } from './SettingsHeroCard';
@@ -1125,6 +1126,9 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       {/* CODEX-BLOAT-165 fix 5: whether hive Codex agents inherit the user's plugins */}
                       <CodexPluginsSetting />
+
+                      {/* CODEX-TRUST-LAYER: the folders allowed to run their codex project config */}
+                      <CodexLayerOptInsSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

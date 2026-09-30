@@ -17,6 +17,7 @@ import { QuitWarningModal, type ClosingTimeState } from '@/components/QuitWarnin
 import { CompletionToast } from '@/realtime/CompletionToast';
 import { UpdateToast } from '@/components/UpdateToast';
 import { RecoveryNotice } from '@/components/RecoveryNotice';
+import { CodexLayerNotice } from '@/components/CodexLayerNotice';
 import { IntegrityRepairBanner } from '@/components/IntegrityRepairBanner';
 import { CapacityStrip } from '@/components/CapacityStrip';
 import { CapacityDetailPanel } from '@/components/CapacityDetailPanel';
@@ -293,6 +294,8 @@ export function App() {
           main's updater pushes a status. */}
       <UpdateToast />
       <RecoveryNotice />
+      {/* CODEX-TRUST-LAYER: a refused (or warned) Codex spawn, with the one-click folder opt-in */}
+      <CodexLayerNotice />
       <IntegrityRepairBanner />
       {/* Title bar */}
       <div

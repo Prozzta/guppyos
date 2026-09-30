@@ -14,6 +14,7 @@ import {
 import { defaultMcpDefaults } from '../shared/mcpCatalog';
 import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
 import { isAgentUsageDisplay } from '../shared/agentUsage';
+import { codexLayerOptInKey } from './codexProjectLayers';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
@@ -300,6 +301,11 @@ export interface HarnessConfig {
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];
+  /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
+   *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
+   *  unreviewed (with a visible warning); anywhere else such a folder refuses the spawn. Keys are
+   *  resolved paths, ASCII-lowercased on Windows. */
+  codexLayerOptIns?: string[];
   /** Passed to every spawned agent as `--max-turns <n>` when set; unset = no cap
    *  (Claude Code's default). A coarse runaway guard independent of the breaker. */
   maxTurns?: number;
@@ -884,6 +890,15 @@ export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
   // as it is picked from the folder dialog. Expand `~` here so the persisted list
   // (and therefore every agent's default cwd) is ABSOLUTE; Node's fs/spawn treat
   // `~` as a literal directory name and the spawn dies with `cwd does not exist`.
+  // CODEX-TRUST-LAYER: the allowed folders, normalised to the key the spawn matches.
+  if (patch.codexLayerOptIns !== undefined) {
+    if (!Array.isArray(patch.codexLayerOptIns) || patch.codexLayerOptIns.some((k) => typeof k !== 'string' || !k.trim())) throw new Error('invalid codexLayerOptIns');
+    const seen = new Set<string>();
+    next.codexLayerOptIns = patch.codexLayerOptIns
+      .map((k) => codexLayerOptInKey(expandTilde(k)))
+      .filter((k) => !seen.has(k) && (seen.add(k), true))
+      .sort();
+  }
   if (Array.isArray(patch.registeredRepos)) {
     const seen = new Set<string>();
     next.registeredRepos = patch.registeredRepos

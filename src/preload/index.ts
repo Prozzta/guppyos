@@ -274,6 +274,9 @@ export interface HiveTerminalHandoffEvent {
   createdAt: string;
 }
 
+/** CODEX-TRUST-LAYER: a refused or warned Codex spawn (main's CodexLayerNotice). */
+export interface CodexLayerNoticeView { agentId: string | null; action: 'refuse' | 'start-warn'; reason: string; optInKey: string; folder: string; at: number }
+
 export interface SpawnPtyOptions {
   id: string;
   cwd: string;
@@ -400,6 +403,11 @@ export interface HarnessConfig {
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
   autoDeliveryPausedAgents?: string[];
+  /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
+   *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
+   *  unreviewed (with a visible warning); anywhere else such a folder refuses the spawn. Keys are
+   *  resolved paths, ASCII-lowercased on Windows. */
+  codexLayerOptIns?: string[];
   maxTurns?: number;
   circuitBreaker?: CircuitBreakerConfig;
   /** Enterprise Knowledge Graph (multimodal context for agents). Default OFF. */
@@ -703,7 +711,7 @@ const api = {
   // ─── PTY ─────────────────────────────────────────────────────────────────
   /** `cwd` in the result is the TILDE-EXPANDED absolute path main actually spawned
    *  into — the renderer stores that, not the raw `~/…` the user typed. */
-  spawnPty: (opts: SpawnPtyOptions): Promise<{ ok: boolean; error?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> =>
+  spawnPty: (opts: SpawnPtyOptions): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> =>
     ipcRenderer.invoke('pty:spawn', opts),
   /** `origin` is REQUIRED: every writer declares who is behind the bytes
    *  (`shared/inputOrigin.ts`). Main advances the PTY's human-input generation
@@ -745,6 +753,17 @@ const api = {
   /** Jim RR-164 (1): true when this page is the view main just brought back after a renderer
    *  crash; read once at load (sync IPC) so App can skip the launch-time HivePicker. */
   recovering: ((): boolean => { try { return ipcRenderer.sendSync('window:recoveringSync') === true; } catch { return false; } })(),
+  /** CODEX-TRUST-LAYER (1.1.76): Codex spawns refused for an unreviewed project `.codex` layer,
+   *  or started with a warning; the one-click opt-in of a refused folder; and its withdrawal. */
+  codexLayerNotices: (): Promise<CodexLayerNoticeView[]> => ipcRenderer.invoke('codexLayer:notices'),
+  onCodexLayerNotices: (cb: (notices: CodexLayerNoticeView[]) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, n: CodexLayerNoticeView[]) => cb(n);
+    ipcRenderer.on('codexLayer:noticesPush', listener);
+    return () => ipcRenderer.removeListener('codexLayer:noticesPush', listener);
+  },
+  codexLayerAllow: (optInKey: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('codexLayer:allow', optInKey),
+  codexLayerDismiss: (at: number): Promise<boolean> => ipcRenderer.invoke('codexLayer:dismiss', at),
+  codexLayerRevoke: (key: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('codexLayer:revoke', key),
   takeRecoveryNotice: (): Promise<{ at: number; action: 'reload' | 'recreate'; reason: string; streak: number } | null> =>
     ipcRenderer.invoke('window:takeRecoveryNotice'),
   listPtys: (): Promise<Array<{
