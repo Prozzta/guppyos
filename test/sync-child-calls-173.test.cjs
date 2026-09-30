@@ -450,7 +450,7 @@ test('WIRING: every main-process resolver caller goes through the shared async r
   assert.match(pty, /async isCommandAvailable\(command: string\): Promise<boolean>/);
   assert.match(pty, /async spawn\(opts: SpawnOptions/);
   const idx = read('src/main/index.ts');
-  assert.match(idx, /\(await resolveCommandAsync\(opts\.command\)\)\.path/, 'codex remote');
+  assert.match(idx, /const resolvedCli = await resolveCommandAsync\(opts\.command\);/, 'codex remote');
   assert.match(idx, /ipcMain\.handle\('tools:status', async /, 'the setup catalog');
   assert.match(idx, /pendingInstallRelaunch\.delete\(id\);[\s\S]{0,400}invalidateCommandCache\(\);/, 'an installer exit drops the cached misses');
   assert.match(idx, /await ptyManager\.spawn\(opts, owner\)/);
@@ -486,7 +486,7 @@ test('ONE exec primitive: a hung `where` in the app resolver gets the MODELS-173
   global.setTimeout = (fn, ms, ...a) => realSetTimeout(fn, ms === 3000 ? 5 : ms, ...a); // shrink the 3 s box
   let r;
   try { r = await R.lookupCommandAsync('claude', d); } finally { global.setTimeout = realSetTimeout; }
-  assert.deepEqual(r, { path: 'claude', found: false }, 'a timed-out lookup is a miss');
+  assert.deepEqual(r, { path: 'claude', found: false, unknown: true }, 'a timed-out lookup is UNKNOWN, not a miss (RESOLVER-TIMEOUT-MISS)');
   assert.deepEqual(calls[0], { file: 'where', args: ['claude'], timeout: 0 }, 'win32: execFile timeout 0, execP times the run');
   assert.deepEqual(calls[1], { file: 'taskkill', args: ['/PID', '4242', '/T', '/F'], timeout: R.TREE_KILL_TIMEOUT_MS });
 });
@@ -508,13 +508,16 @@ test('USER check: a miss cached by an earlier check is re-resolved, and the just
   assert.deepEqual(g.lookups, ['codex', 'codex']);
 });
 
-test('WIRING: both user spawn checks drop the cached answer right before isCommandAvailable(bin)', () => {
+test('WIRING: both user spawn checks drop the cached answer right before commandStatus(bin)', () => {
+  // RESOLVER-TIMEOUT-MISS: the checks moved from isCommandAvailable (a boolean) to commandStatus
+  // (found / missing / unknown); their handling of unknown is pinned in resolver-timeout-unknown-176.
   const idx = read('src/main/index.ts');
-  assert.match(idx, /if \(bin && !opts\.noAutoInstall\) invalidateCommandCache\(bin\);\r?\n\s+if \(bin && !opts\.noAutoInstall && !\(await ptyManager\.isCommandAvailable\(bin\)\)\) \{/,
+  assert.match(idx, /if \(bin && !opts\.noAutoInstall\) invalidateCommandCache\(bin\);[\s\S]{0,600}const binStatus = bin && !opts\.noAutoInstall \? await ptyManager\.commandStatus\(bin\) : 'found';/,
     'the agent spawn / auto-install check');
-  assert.match(idx, /invalidateCommandCache\('npm'\);\r?\n\s+invalidateCommandCache\('node'\);\r?\n\s+const npmAvailable =/, 'and the npm/node rung check under it');
-  assert.match(idx, /invalidateCommandCache\(bin\);\r?\n\s+if \(!\(await ptyManager\.isCommandAvailable\(bin\)\)\) \{ fail\(`engine CLI/, 'the engine check');
-  assert.equal((idx.match(/isCommandAvailable\(/g) || []).length, 3, 'no other isCommandAvailable caller to classify');
+  assert.match(idx, /invalidateCommandCache\('npm'\);\r?\n\s+invalidateCommandCache\('node'\);[\s\S]{0,400}const npmStatus = await ptyManager\.commandStatus\('npm'\);/, 'and the npm/node rung check under it');
+  assert.match(idx, /invalidateCommandCache\(bin\);[\s\S]{0,400}const engineStatus = await ptyManager\.commandStatus\(bin\);/, 'the engine check');
+  assert.equal((idx.match(/isCommandAvailable\(/g) || []).length, 0, 'no caller keys a missing-CLI decision on the boolean any more');
+  assert.equal((idx.match(/commandStatus\(/g) || []).length, 4, 'no other commandStatus caller to classify');
 });
 
 // ─── Jim's audit NIT: no pty spawn during the reset/changeHome await window ───────────

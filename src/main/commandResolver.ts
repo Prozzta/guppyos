@@ -16,6 +16,8 @@
  *   PATH edits live in .zshrc. CACHED, misses included:
  *     * a hit is re-validated with exists() on every use (uninstall/update -> re-probe);
  *     * a miss is trusted for MISS_TTL_MS (60 s), then re-checked;
+ *     * a lookup killed by its time box is UNKNOWN (RESOLVER-TIMEOUT-MISS): retried once, never
+ *       cached, and never treated as "not installed" by a caller;
  *     * invalidateCommandCache(command?) drops one entry or all of them. The missing-CLI
  *       auto-install calls it when its installer exits, so the relaunch sees the new binary;
  *     * concurrent callers of one name share ONE lookup; a lookup that started before an
@@ -35,7 +37,13 @@ export interface ResolverDeps {
   env: NodeJS.ProcessEnv;
   exec: ResolverExec;
   exists: (p: string) => boolean;
+  /** RESOLVER-TIMEOUT-MISS: the time box of one `where` / login-shell lookup (default
+   *  LOOKUP_TIMEOUT_MS). A seam for tests and fixtures; the app never sets it. */
+  whereTimeoutMs?: number;
 }
+
+/** How long one `where` / login-shell lookup may take before it is killed and reported UNKNOWN. */
+export const LOOKUP_TIMEOUT_MS = 3000;
 
 /** The live process: execFile (async), existsSync, and the current platform/env. */
 export function nodeResolverDeps(): ResolverDeps {
@@ -116,13 +124,13 @@ export async function resolveCliAsync(d: ResolverDeps, bin: string): Promise<str
     return null;
   };
   if (d.platform === 'win32') {
-    const r = await execP(d, 'where', [bin], 3000, 64 * 1024);
+    const r = await execP(d, 'where', [bin], lookupTimeout(d), 64 * 1024);
     if ('stdout' in r) { const p = pick(r.stdout, false); if (p) return p; }
     const la = d.env.LOCALAPPDATA ?? ''; const ad = d.env.APPDATA ?? '';
     for (const c of [`${la}\\${bin}\\bin\\${bin}.exe`, `${ad}\\npm\\${bin}.cmd`]) if (d.exists(c)) return c;
     return null;
   }
-  const r = await execP(d, d.env.SHELL || '/bin/sh', ['-lc', `command -v ${bin}`], 3000, 64 * 1024);
+  const r = await execP(d, d.env.SHELL || '/bin/sh', ['-lc', `command -v ${bin}`], lookupTimeout(d), 64 * 1024);
   if ('stdout' in r) { const p = pick(r.stdout, true); if (p) return p; }
   const home = d.env.HOME ?? '';
   for (const c of [`/opt/homebrew/bin/${bin}`, `/usr/local/bin/${bin}`, `${home}/.local/bin/${bin}`]) if (d.exists(c)) return c;
@@ -138,15 +146,32 @@ export async function resolveCliAsync(d: ResolverDeps, bin: string): Promise<str
  *  makes rc-file chatter impossible to mistake for a result. Null when the shell fails or the
  *  fence never appears. Uncached. */
 export async function captureFromLoginShellAsync(script: string, d: ResolverDeps = nodeResolverDeps()): Promise<string | null> {
+  return (await captureFenced(script, d)).out;
+}
+
+/** captureFromLoginShellAsync, plus whether the shell was killed by its time box (an UNKNOWN, not
+ *  an answer: RESOLVER-TIMEOUT-MISS). */
+async function captureFenced(script: string, d: ResolverDeps): Promise<{ out: string | null; timedOut: boolean }> {
   const mark = '__MD_SHELL_FENCE__';
-  const r = await execP(d, d.env.SHELL ?? '/bin/zsh', ['-ilc', `printf %s ${mark}; ${script}; printf %s ${mark}`], 3000, 1024 * 1024);
+  const r = await execP(d, d.env.SHELL ?? '/bin/zsh', ['-ilc', `printf %s ${mark}; ${script}; printf %s ${mark}`], lookupTimeout(d), 1024 * 1024);
   // spawnSync handed back stdout even on a non-zero exit (an rc file that fails its last
   // command); execFile's error carries it too, so a fenced result still counts.
   const out = 'stdout' in r ? r.stdout : r.out;
   const start = out.indexOf(mark);
   const end = out.lastIndexOf(mark);
-  if (start < 0 || end <= start) return null;
-  return out.slice(start + mark.length, end);
+  if (start < 0 || end <= start) return { out: null, timedOut: timedOut(r) };
+  return { out: out.slice(start + mark.length, end), timedOut: false };
+}
+
+/** The lookup time box for `d` (the whereTimeoutMs seam, else LOOKUP_TIMEOUT_MS). */
+function lookupTimeout(d: ResolverDeps): number {
+  return d.whereTimeoutMs ?? LOOKUP_TIMEOUT_MS;
+}
+
+/** Did execP end this run by its time box? (execP's own win32 box and execFile's POSIX timeout
+ *  both report `killed: true`; a real exit, e.g. `where` exit 1 for "not found", does not.) */
+function timedOut(r: { stdout: string } | { err: ExecErr; out: string }): boolean {
+  return 'err' in r && r.err.killed === true;
 }
 
 // ── The app's (spawn-grade) lookup ───────────────────────────────────────────────────────
@@ -156,6 +181,10 @@ export interface ResolvedCommand {
   path: string;
   /** Whether an existing executable was actually located — what the missing-CLI path keys on. */
   found: boolean;
+  /** RESOLVER-TIMEOUT-MISS: the lookup was killed by its time box and no install-dir candidate
+   *  matched, so nobody knows whether the CLI is installed. `found` is false, but this is NOT a
+   *  miss: it is never cached, and no caller may act on it as "not installed". */
+  unknown?: true;
 }
 
 /** One uncached lookup (the former PtyManager.resolveCommandUncached / shellEnv.resolveCommand). */
@@ -171,7 +200,7 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
     // npm shim (bare `claude`, a POSIX sh script). Skip extensionless hits and take the first
     // PATHEXT-eligible one (.CMD/.BAT/.EXE/…). No `shell:true`: `command` is proven
     // metacharacter-free above, and running where.exe directly keeps cmd.exe out of the loop.
-    const r = await execP(d, 'where', [command], 3000, 64 * 1024);
+    const r = await execP(d, 'where', [command], lookupTimeout(d), 64 * 1024);
     if ('stdout' in r) {
       const lines = r.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
       const pathExts = (d.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD')
@@ -197,10 +226,10 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
       `${home}\\.claude\\local\\${command}`
     ];
     for (const c of winCandidates) if (d.exists(c)) return { path: c, found: true };
-    return { path: command, found: false };
+    return timedOut(r) ? { path: command, found: false, unknown: true } : { path: command, found: false };
   }
   // macOS / Linux — `which` against an interactive shell so we pick up nvm/asdf/brew paths.
-  const which = await captureFromLoginShellAsync(`which ${command}`, d);
+  const { out: which, timedOut: shellTimedOut } = await captureFenced(`which ${command}`, d);
   if (which) {
     const path = which.trim().split('\n').map((l) => l.trim()).filter(Boolean).pop();
     if (path && d.exists(path)) return { path, found: true };
@@ -214,7 +243,7 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
     `${home}/.volta/bin/${command}`
   ];
   for (const c of candidates) if (d.exists(c)) return { path: c, found: true };
-  return { path: command, found: false };
+  return shellTimedOut ? { path: command, found: false, unknown: true } : { path: command, found: false };
 }
 
 // ── The cache ────────────────────────────────────────────────────────────────────────────
@@ -266,15 +295,21 @@ export class CommandResolver {
     if (running) return running;
     const gen = this.generation;
     const nameGen = this.nameGeneration.get(command) ?? 0;
-    this.lookups += 1;
-    const p = this.lookup(command, d)
-      .catch((): ResolvedCommand => ({ path: command, found: false }))
+    const once = (): Promise<ResolvedCommand> => {
+      this.lookups += 1;
+      return this.lookup(command, d).catch((): ResolvedCommand => ({ path: command, found: false }));
+    };
+    // RESOLVER-TIMEOUT-MISS: a lookup killed by its time box (a loaded machine) is UNKNOWN. It is
+    // retried ONCE at once; an answer still unknown is returned as such and NEVER cached, so the
+    // next caller looks again instead of trusting a false "not installed" for MISS_TTL_MS.
+    const p = once()
+      .then((res) => (res.unknown ? once() : res))
       .then((res) => {
         if (this.inFlight.get(command) === p) this.inFlight.delete(command);
-        if (gen === this.generation && nameGen === (this.nameGeneration.get(command) ?? 0)) {
+        if (!res.unknown && gen === this.generation && nameGen === (this.nameGeneration.get(command) ?? 0)) {
           this.cache.set(command, { ...res, at: this.now() });
         }
-        return { path: res.path, found: res.found };
+        return res.unknown ? { path: res.path, found: false, unknown: true as const } : { path: res.path, found: res.found };
       });
     this.inFlight.set(command, p);
     return p;

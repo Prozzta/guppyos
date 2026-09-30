@@ -100,6 +100,9 @@ export interface ToolStatus extends ToolSpec {
   found: boolean;
   /** Absolute path when found, or null. */
   path: string | null;
+  /** RESOLVER-TIMEOUT-MISS: the lookup timed out (machine under load), so `found: false` is not
+   *  known to be true. Reopening the panel checks again (an unknown is never cached). */
+  unknown?: boolean;
   /** Extra live context — e.g. a version string. */
   detail?: string;
   /** `install` already resolved for the running platform. */

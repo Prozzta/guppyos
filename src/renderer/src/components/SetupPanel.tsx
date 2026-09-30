@@ -36,7 +36,7 @@ function StatusChip({ tool }: { tool: ToolStatus }) {
       boxShadow: `inset 0 0 0 1px ${ready ? 'var(--cth-mint)' : 'var(--cth-ink-300)'}`,
       color: 'var(--cth-ink-900)'
     }}>
-      {ready ? 'READY' : tool.essential ? 'MISSING' : 'NOT SET UP'}
+      {ready ? 'READY' : tool.unknown ? 'NOT CHECKED' : tool.essential ? 'MISSING' : 'NOT SET UP'}
     </span>
   );
 }

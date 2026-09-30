@@ -493,6 +493,15 @@ export class PtyManager {
     return (await this.resolveCommand(command)).found;
   }
 
+  /** RESOLVER-TIMEOUT-MISS: isCommandAvailable with the third answer. 'unknown' means the lookup
+   *  was killed by its time box (twice: the resolver retries once) and no install dir matched, so
+   *  whether the CLI is installed is NOT known. Callers that act on "missing" (the installer, a
+   *  refusal that says "not installed") must use this and never act on 'unknown'. */
+  async commandStatus(command: string): Promise<'found' | 'missing' | 'unknown'> {
+    const r = await this.resolveCommand(command);
+    return r.found ? 'found' : r.unknown ? 'unknown' : 'missing';
+  }
+
   /** The absolute path a bare command resolves to for THIS user, or null when it
    *  isn't installed. Same resolution + cache as spawn(), so a caller that probes
    *  a binary (e.g. `node --version`, to decide whether it is too old to keep)
