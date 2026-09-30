@@ -45,6 +45,11 @@ function post(port, body, timeoutMs) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// LOAD-FLAKES-176: RIG_SLOW_STUB_MS makes every stub hook wait that long first (a loaded machine,
+// reproduced on purpose). Off by default; used to show a step's outcome does not depend on speed.
+const SLOW_STUB_MS = Number(process.env.RIG_SLOW_STUB_MS || 0);
+const slowed = (s) => (SLOW_STUB_MS > 0 ? { ...s, scenario: { ...(s.scenario || {}), slowStubMs: SLOW_STUB_MS } } : s);
+
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 function killTree(pid) {
   if (!pid || !pidAlive(pid)) return;
@@ -57,6 +62,7 @@ class Rig {
     this.sandbox = sandbox;
     this.rigDir = path.join(sandbox, 'rig');
     this.child = null;
+    this.agentIds = [];   // the agents setup() started (beatUntil's failure dump)
     this.port = 0;
     this.hostPids = [];
     this.log = '';
@@ -216,6 +222,8 @@ class Rig {
 
   /** god (registered, no PTY) + the given fake agents, each up and past its boot grace. */
   async setup(specs, { god = true } = {}) {
+    specs = specs.map(slowed);
+    for (const sp of specs) if (!this.agentIds.includes(sp.id)) this.agentIds.push(sp.id);
     if (god) await this.call('register', { id: 'god-1', name: 'Michael', provider: 'claude', isGod: true });
     for (const s of specs) {
       const r = await this.call('spawn', s);
@@ -254,6 +262,7 @@ class Rig {
 
   /** Spawn an agent AGAIN (a restart in place, or the tab restored after an app restart). */
   async respawn(s) {
+    s = slowed(s);
     const before = this.transcript(s.id).filter((r) => r.kind === 'start').length;
     const r = await this.call('spawn', s);
     if (!r.ok) throw new Error(`respawn ${s.id} failed: ${r.error}`);
@@ -272,16 +281,93 @@ class Rig {
    * the retry backoffs). With `settle`, it first waits for running turns to end: real turns take
    * real time, and the simulated clock must never move under one.
    */
-  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true } = {}) {
+  /**
+   * LOAD-FLAKES-176: the REAL processes have no work in progress: no wake is being typed, and every
+   * stub has read each prompt a wake committed to it and has no queued or running job. Unlike
+   * `busy` (the product's view), this holds for an agent the product still thinks is active (its
+   * hooks dead, its Stop lost), so the clock can move there too, but never under real work.
+   */
+  async stubsIdle(ids = this.agentIds) {
+    if (await this.call('inFlight')) return false;
+    const outs = await this.call('outcomes');
+    for (const id of ids) {
+      const committed = outs.filter((o) => o.agentId === id && o.outcome && o.outcome.kind === 'COMMITTED').length;
+      if (this.prompts(id).length < committed) return false;
+      let comp = null;
+      try { comp = JSON.parse(fs.readFileSync(path.join(this.stubDir(id), 'composer.json'), 'utf8')); } catch { comp = null; }
+      if (comp && comp.pending > 0) return false;
+    }
+    return true;
+  }
+
+  /** LOAD-FLAKES-176: cue a tool call and wait until the stub has FINISHED it (its hooks returned and
+   *  their context was taken). The bound outlasts the stub's own 30 s hook transport (two hooks), so a
+   *  slow hook on a loaded machine is waited for, not raced by a 20 s wait for its context. */
+  async tool(agentId, extra = {}, { timeoutMs = 75_000 } = {}) {
+    const done = () => this.transcript(agentId).filter((r) => r.kind === 'cue-done' && r.cue === 'tool').length;
+    const n = done();
+    this.cue(agentId, { cue: 'tool', ...extra });
+    await waitFor(() => done() > n, { what: `${agentId}'s tool call finished`, timeoutMs, diag: () => this.diagnose(agentId) });
+  }
+
+  /** Wait (bounded, a failure with the reason and the dump) until the stubs are idle. */
+  async waitStubsIdle({ what = 'the stubs to go idle', timeoutMs = 90_000 } = {}) {
+    await waitFor(() => this.stubsIdle(), { what, timeoutMs, intervalMs: 80, diag: () => Promise.all(this.agentIds.map((id) => this.diagnose(id))).then((d) => d.join('\n')) });
+  }
+
+  /** LOAD-FLAKES-176: how far the stubs have got (their transcript records). A hold's busy bound counts
+   *  time with NO progress, so a long but advancing real turn (F7: 16 tools under slow hooks) is waited
+   *  out, while a stuck one still fails with the reason. */
+  progress() { let n = 0; for (const id of this.agentIds) n += this.transcript(id).length; return n; }
+
+  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true, holdWhileBusy = false, holdForStubs = false, busyTimeoutMs = 90_000, diag } = {}) {
+    // Jim A2: every "never held" carries the wake state of the agents (or the caller's `diag`), so
+    // the next flake names itself. busyTimeoutMs 90 s leaves room in the 180 s test budget for a
+    // loaded run's lead-in, so the explicit reason is what fails, not the generic timeout.
+    const fail = async (msg) => {
+      let dump = '';
+      try { dump = diag ? await diag() : (await Promise.all(this.agentIds.map((id) => this.diagnose(id)))).join('\n'); } catch (e) { dump = `(diagnostics failed: ${e})`; }
+      return new Error(dump ? `${msg}\n${dump}` : msg);
+    };
     for (let i = 0; i < tries; i++) {
       if (await fn()) return true;
-      if (settle) await this.quiet();
+      // LOAD-FLAKES-176: settle's quiet() is bounded (10 s); when it runs out (a loaded machine, a slow
+      // turn) the step no longer moves the clock anyway: it holds until the real processes are idle.
+      const quietOk = settle ? await this.quiet() : true;
+      // MAIL-RIG-C1-FLAKE: with holdWhileBusy the simulated clock NEVER moves while a wake is in
+      // flight or a turn runs (a manual turn stays busy until its cue, so `settle`'s bounded
+      // quiet() cannot be used there). The step waits for the EVENT instead: `fn` holding, or the
+      // agent going quiet. Moving the clock under a real, still-starting turn raced the product's
+      // simulated-time rules (SUBMIT_CONFIRM_MS, the one-time re-announce, the retry backoff)
+      // against real process timing, so the outcome depended on machine load.
+      if (holdWhileBusy) {
+        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
+        for (;;) {
+          if (await fn()) return true;
+          if (!(await this.call('busy'))) break;
+          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
+          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under it)`);
+          await sleep(80);
+        }
+      }
+      // LOAD-FLAKES-176: with holdForStubs the clock moves only once the real processes are idle
+      // (see stubsIdle); `fn` is re-checked meanwhile.
+      if (holdForStubs || !quietOk) {
+        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
+        for (;;) {
+          if (await fn()) return true;
+          if (await this.stubsIdle()) break;
+          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
+          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under them)`);
+          await sleep(80);
+        }
+      }
       await this.call('advance', { ms: stepMs });
       await this.beat();
       await sleep(pauseMs);
     }
     if (await fn()) return true;
-    throw new Error(`beatUntil: ${what ?? 'condition'} never held`);
+    throw await fail(`beatUntil: ${what ?? 'condition'} never held`);
   }
 
   /** Wait (bounded) until no live agent has a wake in flight or a turn running. */

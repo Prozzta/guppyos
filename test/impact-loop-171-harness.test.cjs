@@ -10,7 +10,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { join } = require('node:path');
-const { runScenario } = require('./electron-harness/run.cjs');
+const { runScenario, harnessTestTimeout } = require('./electron-harness/run.cjs');
 
 function check(r, label) {
   assert.equal(r.ok, true, r.error);
@@ -27,12 +27,12 @@ function check(r, label) {
   assert.ok(peak - first < 80, `${label}: renderer private ${first} -> ${peak} MB (want flat); samples ${JSON.stringify(s)}`);
 }
 
-test('RENDERED (real App): a 100% capacity HOLD on one agent -> no re-read loop, renderer flat', { timeout: 180_000 }, async () => {
+test('RENDERED (real App): a 100% capacity HOLD on one agent -> no re-read loop, renderer flat', { timeout: harnessTestTimeout(150_000) }, async () => {
   const r = await runScenario(join(__dirname, 'electron-harness', 'scenarios', 'impact-loop-hold.tsx'), { timeoutMs: 150_000 });
   check(r, 'hold');
 });
 
-test('RENDERED (real App): the floor-wide auto-delivery PAUSE -> no re-read loop, renderer flat', { timeout: 180_000 }, async () => {
+test('RENDERED (real App): the floor-wide auto-delivery PAUSE -> no re-read loop, renderer flat', { timeout: harnessTestTimeout(150_000) }, async () => {
   const r = await runScenario(join(__dirname, 'electron-harness', 'scenarios', 'impact-loop-pause.tsx'), { timeoutMs: 150_000 });
   check(r, 'pause');
 });

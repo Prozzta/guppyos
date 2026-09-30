@@ -481,8 +481,23 @@ test('Jim X2: the creation-time skew is exactly 2 s (created 2 s before the acqu
   }
 });
 
-test('MF4 LIVE (Windows): the real hidden listing returns this node process with its CreatedMs', { skip: process.platform !== 'win32' }, async () => {
-  const rows = await probeProcesses();
+test('MF4 LIVE (Windows): the real hidden listing returns this node process with its CreatedMs', { skip: process.platform !== 'win32' }, async (t) => {
+  // LOAD-FLAKES-176: the product's own 10 s box (probeProcesses) can fire on a loaded machine; its
+  // outcome there, null = "unknown, not a miss", is the MF4 timed-out test above. This test proves
+  // the LIVE script and parser, so a null that arrives only at that box (a real failure is fast)
+  // re-runs the SAME argv (pinned to the product's) without the box. A fast null still fails.
+  const PROBE_BOX_MS = 10_000;
+  const hj = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts'), 'utf8');
+  assert.match(hj, /execFile\('powershell\.exe', \['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT\], \{ windowsHide: true, timeout: 10_000, maxBuffer: 16 \* 1024 \* 1024 \}/, 'the argv and box this test re-runs are the product\'s');
+  const t0 = performance.now();
+  let rows = await probeProcesses();
+  const ms = performance.now() - t0;
+  if (rows === null && ms >= PROBE_BOX_MS - 10) {
+    t.diagnostic(`probeProcesses hit its ${PROBE_BOX_MS} ms box after ${Math.round(ms)} ms (load); re-running the same listing unboxed`);
+    const { execFile } = require('node:child_process');
+    rows = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+      (err, out) => res(err ? null : parseProcessListing(String(out)))));
+  }
   assert.ok(Array.isArray(rows) && rows.length > 10, 'a usable listing');
   const me = rows.find((r) => r.pid === process.pid);
   assert.ok(me, 'this process is listed');

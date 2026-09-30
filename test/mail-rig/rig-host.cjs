@@ -468,6 +468,8 @@ async function main() {
       const reg = hive.registry();
       return Object.keys(reg.agents || {}).filter((a) => f.ptyForAgent(a)).some((a) => { const s = workerWake.state(a); return !!s.inFlight || s.lifecycle === 'active'; });
     },
+    // LOAD-FLAKES-176: is any wake being typed right now (the host half of Rig.stubsIdle)?
+    inFlight: () => Object.keys(hive.registry().agents || {}).some((a) => !!workerWake.state(a).inFlight),
     diags: ({ since = 0 } = {}) => rig.diags.filter((d) => d.at >= since),
     outcomes: () => rig.outcomes,
     advance: ({ ms }) => rig.clock.advance(ms),
@@ -497,7 +499,9 @@ async function main() {
     lateNextFlush: ({ id, ms }) => {
       const orig = hookServer.settleMailClaims;
       hookServer.settleMailClaims = function lateOnce(claims, receivedAt, flushedAt) {
-        if (claims.some((c) => c.agentId === id)) { hookServer.settleMailClaims = orig; return orig.call(this, claims, receivedAt - ms, flushedAt); }
+        // MAIL-RIG-C1-FLAKE: anchored at the FLUSH, so the measured latency is exactly `ms` whatever
+        // the real hook-to-flush time was on this machine (it used to be ms + that time).
+        if (claims.some((c) => c.agentId === id)) { hookServer.settleMailClaims = orig; return orig.call(this, claims, flushedAt === null ? receivedAt - ms : flushedAt - ms, flushedAt); }
         return orig.call(this, claims, receivedAt, flushedAt);
       };
       return true;
