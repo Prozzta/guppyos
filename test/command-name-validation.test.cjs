@@ -119,7 +119,7 @@ test('the shared resolver validates before which/where', () => {
   assert.doesNotMatch(src, /shell: true/);
   const guardAt = src.indexOf(guard);
   const whereAt = src.indexOf("execP(d, 'where', [command]");
-  const whichAt = src.indexOf('captureFromLoginShellAsync(`which ${command}`, d)');
+  const whichAt = src.indexOf('captureFenced(`which ${command}`, d)'); // RESOLVER-TIMEOUT-MISS: the timeout-aware capture
   assert.ok(guardAt > 0 && whereAt > guardAt, 'the guard must precede `where`');
   assert.ok(whichAt > guardAt, 'the guard must precede the `which` interpolation');
   // pty.ts no longer has a resolver of its own: it delegates to this one.
@@ -129,9 +129,10 @@ test('the shared resolver validates before which/where', () => {
 test('index.ts validates the bin at the spawn-request intake', () => {
   const src = readSrc('src/main/index.ts');
   // The spawn path rejects a bin that is neither a plain name nor an absolute path,
-  // and it does so BEFORE isCommandAvailable(bin) (which itself calls the resolver).
+  // and it does so BEFORE commandStatus(bin) (which itself calls the resolver; RESOLVER-TIMEOUT-MISS
+  // moved the check off isCommandAvailable).
   assert.match(src, /if \(!isSafeCommandName\(bin\) && !isAbsolute\(bin\)\) \{/);
   const guardAt = src.indexOf('if (!isSafeCommandName(bin) && !isAbsolute(bin)) {');
-  const availAt = src.indexOf('if (!(await ptyManager.isCommandAvailable(bin)))');
-  assert.ok(guardAt > 0 && availAt > guardAt, 'the guard must precede isCommandAvailable(bin)');
+  const availAt = src.indexOf('const engineRefusal = headlessSpawnRefusal(bin, await ptyManager.commandStatus(bin));');
+  assert.ok(guardAt > 0 && availAt > guardAt, 'the guard must precede commandStatus(bin)');
 });

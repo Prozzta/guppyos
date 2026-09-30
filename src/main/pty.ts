@@ -11,6 +11,7 @@ import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
 import { userShellPathAsync } from './shellEnv';
 import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
+import { cliStatus, lossyRouteRefusal, type ShimInterpreterProblem } from './cliLookupPolicy';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -500,6 +501,14 @@ export class PtyManager {
     return (await this.resolveCommand(command)).found;
   }
 
+  /** RESOLVER-TIMEOUT-MISS: isCommandAvailable with the third answer. 'unknown' means the lookup
+   *  was killed by its time box (twice: the resolver retries once) and no install dir matched, so
+   *  whether the CLI is installed is NOT known. Callers that act on "missing" (the installer, a
+   *  refusal that says "not installed") must use this and never act on 'unknown'. */
+  async commandStatus(command: string): Promise<'found' | 'missing' | 'unknown'> {
+    return cliStatus(await this.resolveCommand(command));
+  }
+
   /** The absolute path a bare command resolves to for THIS user, or null when it
    *  isn't installed. Same resolution + cache as spawn(), so a caller that probes
    *  a binary (e.g. `node --version`, to decide whether it is too old to keep)
@@ -535,7 +544,7 @@ export class PtyManager {
    * not installed or itself not a real .exe) degrades to exactly today's cmd.exe
    * behaviour. Never throws.
    */
-  private async resolveWindowsShimSpawn(resolved: string): Promise<{ file: string; script: string | null } | null> {
+  private async resolveWindowsShimSpawn(resolved: string, seen: { interpreter?: ShimInterpreterProblem } = {}): Promise<{ file: string; script: string | null } | null> {
     if (process.platform !== 'win32') return null;
     try {
       const lower = resolved.toLowerCase();
@@ -564,12 +573,21 @@ export class PtyManager {
       }
 
       const interp = await this.resolveCommand(target.interpreter);
-      if (!interp.found) return null;
+      // RESOLVER-TIMEOUT-MISS (Andy C3, N1): why the interpreter could not be used is reported,
+      // so spawn's lossy-route rule refuses a multi-line spawn naming the interpreter (retryable
+      // when its lookup gave no answer).
+      if (!interp.found) {
+        seen.interpreter = { bin: target.interpreter, problem: interp.unknown ? 'unknown' : 'missing' };
+        return null;
+      }
       // Must be a REAL executable: if `node` itself only resolves to a `.cmd`
       // (e.g. our own bundled-runtime shim appended to PATH), spawning it directly
       // would hit the very CreateProcess limitation we are routing around.
       const il = interp.path.toLowerCase();
-      if (!il.endsWith('.exe') && !il.endsWith('.com')) return null;
+      if (!il.endsWith('.exe') && !il.endsWith('.com')) {
+        seen.interpreter = { bin: target.interpreter, problem: 'not-exe' };
+        return null;
+      }
 
       return { file: interp.path, script: target.scriptPath };
     } catch {
@@ -590,10 +608,11 @@ export class PtyManager {
       return { ok: false, error: `cwd does not exist: ${opts.cwd}` };
     }
     // SYNC-CHILD-CALLS: resolution and the shell PATH are async (no child process blocks main).
-    const [resolved, shellPath] = await Promise.all([
-      this.resolveCommand(opts.command).then((r) => r.path),
+    const [resolution, shellPath] = await Promise.all([
+      this.resolveCommand(opts.command),
       process.platform === 'win32' ? Promise.resolve(process.env.PATH || '') : userShellPathAsync()
     ]);
+    const resolved = resolution.path;
     try {
       // Build a user-shell PATH so child can resolve subprocess deps. Cached
       // for the session (shellEnv.userShellPathAsync, fenced against rc-file noise).
@@ -613,8 +632,9 @@ export class PtyManager {
       // resolveWindowsShimSpawn). win32-only and null-on-anything-unexpected, so
       // macOS/Linux and every undecodable Windows target keep today's behaviour.
       // Skipped entirely for a shellScript spawn, which never executes `resolved`.
+      const shimSeen: { interpreter?: ShimInterpreterProblem } = {};
       const shimSpawn = needsCmd && typeof opts.shellScript !== 'string'
-        ? await this.resolveWindowsShimSpawn(resolved)
+        ? await this.resolveWindowsShimSpawn(resolved, shimSeen)
         : null;
       // The lookups above yielded: a reset/changeHome may have closed the manager, or another
       // spawn may have claimed this id, meanwhile.
@@ -672,27 +692,25 @@ export class PtyManager {
         // `cmd.exe /d /s /c "<command>"`, wrapping the WHOLE inner command in one outer
         // quote pair — cmd's /s flag strips exactly that pair and runs the remainder
         // (where the resolved path keeps its own quotes) literally. /d skips AutoRun.
+        // RESOLVER-TIMEOUT-MISS (Andy C2/C3, LOSSY-CMD-ROUTE): NOTHING reaches the lossy cmd.exe
+        // route with a multi-line argument (an unresolved name, an unknown interpreter, an
+        // undecodable .cmd/.bat): it would start looking healthy without its hive protocol.
+        // Refused before any session or process, with a reason that says which.
+        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? [], shimSeen.interpreter ?? null) : null;
+        if (lossy) {
+          console.warn(`[pty] refused: ${lossy}`);
+          return { ok: false, error: lossy };
+        }
         spawnArgs = needsCmd
           ? buildCmdCommandLine(resolved, opts.args ?? [])
           : (opts.args ?? []);
-        // The cmd.exe fallback is LOSSY and was previously SILENT, which is how a
-        // Windows agent could look perfectly healthy while never having received
-        // the hive protocol: cmd.exe cuts a multi-line argument at its first
-        // newline, and the whole protocol block rides on one such argument.
-        // resolveWindowsShimSpawn returns null for any shim shape it does not
-        // fully understand, so this path is reachable on a real machine while
-        // every unit test passes. Say so, loudly, with the two facts needed to
-        // diagnose it: which target refused to decode, and whether a multi-line
-        // argument is actually at risk in THIS spawn.
+        // The cmd.exe fallback is LOSSY: it cuts a multi-line argument at its first
+        // newline. Such a spawn was refused just above (it once only warned here, and an
+        // agent started healthy-looking without its hive protocol), so what reaches
+        // this point has single-line arguments only. Still say which target refused
+        // to decode as an npm shim.
         if (needsCmd) {
-          const multiline = (opts.args ?? []).some((a) => a.includes('\n'));
-          console.warn(
-            `[pty] Windows: "${resolved}" could not be decoded as an npm shim — falling back to cmd.exe.` +
-            (multiline
-              ? ' A MULTI-LINE ARGUMENT IS PRESENT AND WILL BE TRUNCATED AT ITS FIRST NEWLINE.' +
-                ' The agent will start and look healthy without ever receiving the hive protocol.'
-              : ' No multi-line argument in this spawn, so nothing is lost here.')
-          );
+          console.warn(`[pty] Windows: "${resolved}" could not be decoded as an npm shim — falling back to cmd.exe (single-line arguments only; nothing is lost).`);
         }
       }
       const proc = pty.spawn(file, spawnArgs, {

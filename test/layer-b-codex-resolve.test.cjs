@@ -93,6 +93,8 @@ test('REFUSES: a version other than 0.157.1 (even one that has --no-daemon)', (t
 test('REFUSES: an older CLI the PRODUCT gate refuses --no-daemon for (0.156.0): noDaemon false comes from the product, and the run stops', (t) => {
   const cli = prefix('0.156.0');
   const x = run(t, { pathDirs: [cli], cliDir: cli });
+  // LOAD-FLAKES REFUSES: found AND read, so `noDaemon: false` is the version gate, never a lookup that failed.
+  assert.deepEqual([x.r.proofs.codexResolve.found, x.r.proofs.codexResolve.unknown, x.r.proofs.codexResolve.version], [true, false, '0.156.0']);
   assert.equal(x.r.proofs.codexResolve.noDaemon, false, 'codexSupportsNoDaemon(0.156.0) is false in the product');
   assert.match(String(x.threw), /WITHOUT --no-daemon/);
 });
@@ -134,12 +136,18 @@ test('wiring: in main, right after appEnv and the first helper preflight, before
 
 test('the child runs the PRODUCT modules from src/ (not copies), and never starts codex', () => {
   assert.match(probeSrc, /const \{ PtyManager \} = loadTs\('src\/main\/pty\.ts'\);/);
-  assert.match(probeSrc, /const \{ commandResolver \} = loadTs\('src\/main\/commandResolver\.ts'\);/);
+  assert.match(probeSrc, /const \{ CommandResolver, nodeResolverDeps \} = loadTs\('src\/main\/commandResolver\.ts'\);/);
   assert.match(probeSrc, /const \{ readCodexVersion, codexSupportsNoDaemon \} = loadTs\('src\/main\/codexCli\.ts'\);/);
   assert.match(probeSrc, /await PtyManager\.prototype\.commandPath\.call\(self, 'codex'\)/);
-  assert.match(probeSrc, /self\.resolver = commandResolver;/);
+  assert.match(probeSrc, /self\.resolver = new CommandResolver\(/, 'the product resolver class and lookup (the seam is pinned below)');
   assert.doesNotMatch(probeSrc.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''), /child_process|spawn|exec/,'the probe itself starts nothing (the product resolver runs where.exe, hidden)');
   // readCodexVersion starts no process: codexCli.ts imports only node:fs and node:path.
   const cli = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'codexCli.ts'), 'utf8');
   assert.deepEqual([...cli.matchAll(/^import .* from '([^']+)';/gm)].map((m) => m[1]), ['node:fs', 'node:path']);
+});
+
+test('LOAD-FLAKES REFUSES: the probe resolves with the product resolver and lookup, through the whereTimeoutMs seam (a loaded machine cannot fire the 3 s box)', () => {
+  const probe = fs.readFileSync(path.join(__dirname, 'tools', 'codex-resolve-probe.cjs'), 'utf8');
+  assert.match(probe, /self\.resolver = new CommandResolver\(\{ deps: \(\) => \(\{ \.\.\.nodeResolverDeps\(\), whereTimeoutMs: 60_000 \}\) \}\);/);
+  assert.match(probe, /unknown: resolved\.unknown === true/);
 });

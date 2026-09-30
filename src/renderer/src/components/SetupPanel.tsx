@@ -36,7 +36,7 @@ function StatusChip({ tool }: { tool: ToolStatus }) {
       boxShadow: `inset 0 0 0 1px ${ready ? 'var(--cth-mint)' : 'var(--cth-ink-300)'}`,
       color: 'var(--cth-ink-900)'
     }}>
-      {ready ? 'READY' : tool.essential ? 'MISSING' : 'NOT SET UP'}
+      {ready ? 'READY' : tool.unknown ? 'NOT CHECKED' : tool.essential ? 'MISSING' : 'NOT SET UP'}
     </span>
   );
 }
@@ -76,8 +76,14 @@ function ToolRow({ tool }: { tool: ToolStatus }) {
         </div>
       )}
 
+      {/* RESOLVER-TIMEOUT-MISS: not checked (the lookup gave no answer) is not missing: no install
+          command, just say so; reopening the panel checks again. */}
+      {!tool.found && tool.unknown && (
+        <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>Could not check (the machine was busy). Close and reopen this panel to check again.</div>
+      )}
+
       {/* Missing WITH a scripted install: the exact command, one click to copy. */}
-      {!tool.found && tool.installCommand && (
+      {!tool.found && !tool.unknown && tool.installCommand && (
         <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
           <code style={{
             flex: 1, minWidth: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 11,
@@ -129,7 +135,7 @@ export function SetupPanel({ onDone }: { onDone?: () => void } = {}) {
   // Only ESSENTIALS are handed to Michael. Installing all eight engine CLIs
   // because they happen to be listed would be a wild overreach of one click.
   const missingEssential = useMemo(
-    () => (tools ?? []).filter((t) => !t.found && t.essential),
+    () => (tools ?? []).filter((t) => !t.found && !t.unknown && t.essential),
     [tools]
   );
   const readyCount = (tools ?? []).filter((t) => t.found).length;
