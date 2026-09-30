@@ -764,7 +764,7 @@ test('round 7 (4): CDP evaluation: main-process expressions never await a promis
   await assert.rejects(mk([Object.assign((c) => { c.contextsCreated += 2; }, { msg: 'Execution context was destroyed.' })]).c.eval('p()'), /destroyed/);
   await assert.rejects(mk(['Target closed']).c.eval('p()'), /Target closed/);
   // The runner's two main-process evaluations are the sync kind.
-  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 3, 'the userData/packaged check, the window list, the B8 hive:inbox probe');
+  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 4, 'the userData/packaged check, the window list, the B8 hive:inbox probe, the PTY capture');
   assert.ok(!/this\.mainCdp\.eval\((?![\s\S]*?\{ sync: true \})/.test(src.replace(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g, '')));
 });
 
@@ -1214,5 +1214,68 @@ test('real step 2 (Jim, 8c03b1a4 audit): the probe runs the agents\' LEGACY path
   assert.equal(lb.codexArgvRejection(0, ''), null);
   assert.equal(lb.codexArgvRejection(1, 'some sandbox failure'), null, 'not a usage error: the verdict decides');
   assert.match(probe, /if \(rejected\) return this\.check\(false, `R1 Codex sandbox probe: \$\{rejected\}`/);
+});
+
+test('the Human\'s token ruling: the caps count FRESH tokens (input + output + cache_creation) in every source; cache_read is reported, never capped', () => {
+  const C = lb.IDS.claude; const X = lb.IDS.codex;
+  // A cache-read-heavy ledger (30k fresh + 900k cache_read, cumulative samples) must NOT trip.
+  const heavy = [
+    { agent_id: C, session_id: 's1', input: 5_000, output: 5_000, cache_creation: 10_000, cache_read: 400_000, usd: 0.05 },
+    { agent_id: C, session_id: 's1', input: 10_000, output: 10_000, cache_creation: 10_000, cache_read: 900_000, usd: 0.1 }
+  ];
+  const t1 = lb.tokenAccount({ ledgerRows: heavy });
+  assert.deepEqual([t1[C].used, t1[C].cacheRead, t1[C].ledger], [30_000, 900_000, 30_000]);
+  assert.equal(lb.tokenCapBreach(t1), null, '900k cache_read never trips the 400k cap');
+  // Fresh over 400k trips (per agent), and the reason names both numbers.
+  const over = lb.tokenAccount({ ledgerRows: [{ agent_id: C, session_id: 's1', input: 300_000, output: 60_000, cache_creation: 50_000, cache_read: 2_000_000 }] });
+  assert.match(lb.tokenCapBreach(over), /^per-agent token cap: lb-claude at 410000 fresh \(cache_read 2000000, not capped\)$/);
+  // The per-agent cap is checked on its own, not only the total (Claude 401k, total 401k < 1M).
+  assert.match(lb.tokenCapBreach(lb.tokenAccount({ ledgerRows: [{ agent_id: C, session_id: 's', input: 401_000 }] })), /per-agent/);
+  assert.match(lb.tokenCapBreach(lb.tokenAccount({ ledgerRows: [{ agent_id: C, session_id: 'a', input: 390_000 }, { agent_id: X, session_id: 'b', input: 390_000 }, { agent_id: lb.IDS.god, session_id: 'c', input: 390_000 }] })), /^total token cap at 1170000 fresh$/);
+  // Claude transcripts: fresh = input + output + cache_creation, each message once; cache_read apart.
+  const msg = (id, u) => ({ message: { id, usage: u } });
+  const tc = lb.tokenAccount({ claudeEvents: [msg('m1', { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 25, cache_read_input_tokens: 300_000 }), msg('m1', { input_tokens: 100, output_tokens: 50 }), msg('m2', { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 200_000 })] });
+  assert.deepEqual([tc[C].transcript, tc[C].used, tc[C].cacheRead], [190, 190, 500_000]);
+  assert.equal(lb.tokenCapBreach(tc), null);
+  // Codex rollouts: input_tokens INCLUDES cached_input_tokens; the last total_token_usage per rollout.
+  const tok = (input, cached, output) => ({ payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output, total_tokens: input + output } } } });
+  const tx = lb.tokenAccount({ rollouts: [[tok(100_000, 90_000, 1_000), tok(950_000, 900_000, 5_000)]] });
+  assert.deepEqual([tx[X].rollout, tx[X].used, tx[X].cacheRead], [55_000, 55_000, 900_000]);
+  assert.equal(lb.tokenCapBreach(tx), null);
+  // The report shows fresh and cache_read.
+  const rep = method('report(extra)');
+  assert.match(rep, /'\| Agent \| Fresh used \(max of sources, capped\) \| Cache read \(not capped\) \| Ledger fresh \| Transcript \/ rollout fresh \| USD \(ledger\) \|'/);
+  assert.match(rep, /\$\{t\.used \?\? 0\} \| \$\{t\.cacheRead \?\? 0\} \|/);
+  assert.match(method('pollTokens()'), /this\.tokens = tokenAccount\(\{ ledgerRows, claudeEvents, rollouts \}\);\s*const breach = tokenCapBreach\(this\.tokens\);\s*if \(breach\) this\.stop\(breach\);/);
+});
+
+test('1782cab2 real run (lb-codex died with no evidence): the PTY capture keeps each terminal\'s tail and exit code (transparent), and the evidence copies the Codex home logs/sessions', () => {
+  const sent = [];
+  const wc = { send(channel, payload) { sent.push([channel, payload]); return 'sent'; } };
+  const BW = { getAllWindows: () => [{ webContents: wc }] };
+  const root = {};
+  let t = 1000;
+  const install = new Function(`return (${lb.installPtyCapture.toString()});`)();
+  const query = new Function(`return (${lb.ptyCaptureQuery.toString()});`)();
+  assert.equal(JSON.parse(install(BW, root, 10, () => t)).windows, 1);
+  assert.equal(JSON.parse(install(BW, root, 10, () => t)).windows, 0, 'idempotent: wrapped once');
+  assert.equal(wc.send('pty:data:pty-lb-codex', 'Do you trust '), 'sent', 'transparent: the send still happens');
+  wc.send('pty:data:pty-lb-codex', 'this folder?');
+  wc.send('other:channel', 'x');
+  t = 2000;
+  wc.send('pty:exit:pty-lb-codex', { exitCode: 0, signal: null });
+  assert.equal(sent.length, 4, 'every send passed through');
+  const q = JSON.parse(query(root));
+  assert.equal(q.tails['pty-lb-codex'], 'is folder?', 'the last maxChars of the stream');
+  assert.deepEqual(q.exits['pty-lb-codex'], { exitCode: 0, signal: null, at: 2000 });
+  assert.deepEqual(JSON.parse(query({})), { tails: {}, exits: {} });
+  // Wiring: installed at launch, queried before every stop, written (redacted) into the evidence,
+  // with the Codex home logs and sessions (never auth.json).
+  assert.match(method('async launch(exe, label)'), /try \{ await this\.ptyCapture\('install'\); \}/);
+  assert.match(method('async stopApp(label)'), /try \{ await this\.ptyCapture\('query', label\); \}/);
+  const ev = method('collectEvidence()');
+  assert.match(ev, /W\.write\(path\.join\(dst, 'pty-capture\.json'\), redact\(JSON\.stringify\(this\.ptyCaptures \|\| \[\], null, 2\)\)\);/);
+  assert.match(ev, /const codexHome = path\.join\(s\.hive, 'agents', IDS\.codex, '\.codex'\);/);
+  assert.match(ev, /const never = \/\(\^\|\[\\\\\/\]\)\(auth\\\.json\|\\\.credentials\\\.json\)\$\/i;/, 'credential files are never taken');
 });
 

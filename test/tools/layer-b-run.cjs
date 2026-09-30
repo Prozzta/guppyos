@@ -900,6 +900,37 @@ function inboxProbeQuery(root, agentId, afterSeq) {
   return JSON.stringify({ installed: g.installed, seq: g.seq, call, error: g.error });
 }
 
+/** MAIN process (1782cab2 real run: lb-codex exited with no PTY output kept anywhere): a TRANSPARENT
+ *  wrap of every window's webContents.send that keeps, per PTY, the last `maxChars` of its
+ *  `pty:data:<id>` stream and its `pty:exit:<id>` payload (exit code, signal), so the evidence can
+ *  show what an agent's terminal said before it died. Idempotent. Returns JSON {ok, windows}. */
+function installPtyCapture(BrowserWindow, root, maxChars, now) {
+  const g = root.__lbPtyCapture || (root.__lbPtyCapture = { tails: {}, exits: {}, wrapped: 0 });
+  let windows = 0;
+  for (const w of BrowserWindow.getAllWindows()) {
+    const wc = w && w.webContents;
+    if (!wc || wc.__lbPtyWrapped) continue;
+    const orig = wc.send;
+    wc.send = function (channel, ...args) {
+      try {
+        const m = /^pty:(data|exit):(.+)$/.exec(String(channel));
+        if (m && m[1] === 'data') g.tails[m[2]] = ((g.tails[m[2]] || '') + String(args[0])).slice(-maxChars);
+        else if (m) g.exits[m[2]] = { ...(args[0] && typeof args[0] === 'object' ? args[0] : { value: args[0] }), at: now() };
+      } catch { /* the capture never breaks a send */ }
+      return orig.call(this, channel, ...args);
+    };
+    wc.__lbPtyWrapped = true;
+    g.wrapped++;
+    windows++;
+  }
+  return JSON.stringify({ ok: true, windows, wrapped: g.wrapped });
+}
+/** MAIN process: the captured tails and exits (JSON). */
+function ptyCaptureQuery(root) {
+  const g = root.__lbPtyCapture;
+  return JSON.stringify(g ? { tails: g.tails, exits: g.exits } : { tails: {}, exits: {} });
+}
+
 /** RENDERER: a small snapshot of the detail panel. The agent's name comes from the header's
  *  "Rename <name>" button (AgentNameEditor; the visible name is upper-cased, so the aria-label is
  *  the exact one), the tab states from SidebarTabs (the active tab has the cream-100 background:
@@ -1000,6 +1031,76 @@ function runBarProblems({ rows, plumbing, durationMs, dryRun, launched }) {
     checks.push({ ok: durationMs !== null && durationMs <= DRY_RUN_WALL_MS, label: `run bar (dry run): the agent phases within ${DRY_RUN_WALL_MS / 1000} s`, detail: `${durationMs === null ? 'unknown' : Math.round(durationMs / 1000)} s` });
   }
   return { exhausted, stalls, checks };
+}
+
+/** The Human's ruling (on 1782cab2's real run, lb-claude "436795" of which most was cache reads): the
+ *  caps count FRESH tokens only = input + output + cache_creation. cache_read is REPORTED per agent,
+ *  never capped; there is no USD cap. Every source the runner maxes over follows the same rule:
+ *  - the cost ledger: per (agent, session) the largest cumulative sample; fresh = input + output +
+ *    cache_creation, cache_read apart;
+ *  - Claude transcripts: each assistant message once (by id); fresh = input_tokens + output_tokens +
+ *    cache_creation_input_tokens, cache_read = cache_read_input_tokens;
+ *  - Codex rollouts: the last total_token_usage per rollout; its input_tokens INCLUDES
+ *    cached_input_tokens, so fresh = input_tokens - cached_input_tokens + output_tokens, cache_read =
+ *    cached_input_tokens.
+ *  `used` is the max of an agent's fresh sources; `cacheRead` the max of its cache_read sources. */
+function tokenAccount({ ledgerRows = [], claudeEvents = [], rollouts = [] }) {
+  const perSession = {};
+  for (const r of ledgerRows) {
+    if (!r || !r.agent_id) continue;
+    const k = `${r.agent_id}\u0000${r.session_id}`;
+    const fresh = (r.input || 0) + (r.output || 0) + (r.cache_creation || 0);
+    const cacheRead = r.cache_read || 0;
+    const cur = perSession[k] || (perSession[k] = { agent: r.agent_id, fresh: 0, cacheRead: 0, usd: 0 });
+    cur.fresh = Math.max(cur.fresh, fresh);
+    cur.cacheRead = Math.max(cur.cacheRead, cacheRead);
+    cur.usd = Math.max(cur.usd, r.usd || 0);
+  }
+  const ledger = {};
+  for (const v of Object.values(perSession)) {
+    const l = ledger[v.agent] || (ledger[v.agent] = { fresh: 0, cacheRead: 0, usd: 0 });
+    l.fresh += v.fresh; l.cacheRead += v.cacheRead; l.usd += v.usd;
+  }
+  const seen = new Set();
+  const claude = { fresh: 0, cacheRead: 0 };
+  for (const e of claudeEvents) {
+    const u = e && e.message && e.message.usage;
+    if (!u) continue;
+    const k = e.message.id || e.uuid;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    claude.fresh += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    claude.cacheRead += u.cache_read_input_tokens || 0;
+  }
+  const codex = { fresh: 0, cacheRead: 0 };
+  for (const events of rollouts) {
+    let last = null;
+    for (const e of events) {
+      const info = e && e.payload && e.payload.type === 'token_count' && e.payload.info;
+      const tot = info && info.total_token_usage;
+      if (tot) last = tot;
+    }
+    if (!last) continue;
+    const cached = last.cached_input_tokens || 0;
+    codex.fresh += Math.max(0, (last.input_tokens || 0) - cached) + (last.output_tokens || 0);
+    codex.cacheRead += cached;
+  }
+  const L = (a) => ledger[a] || { fresh: 0, cacheRead: 0, usd: 0 };
+  const tokens = {
+    [IDS.claude]: { ledger: L(IDS.claude).fresh, transcript: claude.fresh, used: Math.max(L(IDS.claude).fresh, claude.fresh), cacheRead: Math.max(L(IDS.claude).cacheRead, claude.cacheRead), usd: L(IDS.claude).usd },
+    [IDS.codex]: { ledger: L(IDS.codex).fresh, rollout: codex.fresh, used: Math.max(L(IDS.codex).fresh, codex.fresh), cacheRead: Math.max(L(IDS.codex).cacheRead, codex.cacheRead), usd: L(IDS.codex).usd },
+    [IDS.god]: { ledger: L(IDS.god).fresh, used: L(IDS.god).fresh, cacheRead: L(IDS.god).cacheRead, usd: L(IDS.god).usd }
+  };
+  tokens.total = [IDS.claude, IDS.codex, IDS.god].reduce((n, a) => n + tokens[a].used, 0);
+  tokens.totalCacheRead = [IDS.claude, IDS.codex, IDS.god].reduce((n, a) => n + tokens[a].cacheRead, 0);
+  return tokens;
+}
+
+/** The caps on FRESH tokens: per agent (Claude, Codex) and in total. The abort reason, or null. */
+function tokenCapBreach(tokens) {
+  for (const a of [IDS.claude, IDS.codex]) if (tokens[a].used > CAPS.perAgentTokens) return `per-agent token cap: ${a} at ${tokens[a].used} fresh (cache_read ${tokens[a].cacheRead}, not capped)`;
+  if (tokens.total > CAPS.totalTokens) return `total token cap at ${tokens.total} fresh`;
+  return null;
 }
 
 /** B7's mid-epoch bound: the acted time of the waitState result, or null (unknown). */
@@ -1998,6 +2099,8 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     this.check(norm(w.userData) === norm(this.s.userData), `${label}: userData is the sandbox's`, w.userData);
     this.check(w.packaged === true && /app\.asar$/i.test(w.appPath), `${label}: runs PACKAGED from app.asar`, w.appPath);
     if (norm(w.userData) !== norm(this.s.userData)) throw new Error(`${label}: userData ${w.userData} is not the sandbox's`);
+    // Capture every PTY's output tail and exit code from now on (evidence, pty-capture.json).
+    try { await this.ptyCapture('install'); } catch (e) { this.check(false, `${label}: the PTY capture is installed`, e.message); }
     // R10: the pipe line MUST be there and must be the sandbox's.
     const pipeLine = /pipe=(\S+)/.exec(this.appOut);
     if (!this.check(!!pipeLine && pipeLine[1].toLowerCase() === this.s.pipe.toLowerCase(), `${label}: the hook pipe is the sandbox's`, pipeLine ? pipeLine[1] : 'NO pipe= line printed')) {
@@ -2117,48 +2220,12 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 
   pollTokens() {
-    // (a) The sandbox cost ledger: per (agent, session) the largest cumulative sample.
     const ledgerRows = walk(this.s.hive, (p) => /cost-ledger[^\\/]*\.jsonl$/.test(p)).flatMap((f) => this.tokenLines(f));
-    const perSession = {};
-    for (const r of ledgerRows) {
-      const k = `${r.agent_id}\u0000${r.session_id}`;
-      const t = (r.input || 0) + (r.output || 0) + (r.cache_read || 0) + (r.cache_creation || 0);
-      if (!perSession[k] || t > perSession[k].t) perSession[k] = { agent: r.agent_id, t, usd: r.usd || 0 };
-    }
-    const ledger = {};
-    for (const v of Object.values(perSession)) { ledger[v.agent] = ledger[v.agent] || { tokens: 0, usd: 0 }; ledger[v.agent].tokens += v.t; ledger[v.agent].usd += v.usd; }
-    // (b) Claude's own transcripts: every assistant message's usage, once per message id.
-    const seen = new Set();
-    let claudeT = 0;
-    for (const e of this.claudeTranscripts().flatMap((f) => this.tokenLines(f))) {
-      const u = e && e.message && e.message.usage;
-      if (!u) continue;
-      const k = e.message.id || e.uuid;
-      if (seen.has(k)) continue;
-      seen.add(k);
-      claudeT += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-    }
-    // (c) Codex rollouts: the last total_token_usage per rollout (input includes cached input).
-    let codexT = 0;
-    for (const f of this.codexRollouts()) {
-      let last = 0;
-      for (const e of this.tokenLines(f)) {
-        const info = e && e.payload && e.payload.type === 'token_count' && e.payload.info;
-        const tot = info && info.total_token_usage;
-        if (tot) last = Math.max(last, tot.total_tokens || ((tot.input_tokens || 0) + (tot.output_tokens || 0)));
-      }
-      codexT += last;
-    }
-    const used = (a, own) => Math.max(own, (ledger[a] || {}).tokens || 0);
-    this.tokens = {
-      [IDS.claude]: { ledger: (ledger[IDS.claude] || {}).tokens || 0, transcript: claudeT, used: used(IDS.claude, claudeT), usd: (ledger[IDS.claude] || {}).usd || 0 },
-      [IDS.codex]: { ledger: (ledger[IDS.codex] || {}).tokens || 0, rollout: codexT, used: used(IDS.codex, codexT), usd: (ledger[IDS.codex] || {}).usd || 0 },
-      [IDS.god]: { ledger: (ledger[IDS.god] || {}).tokens || 0, used: (ledger[IDS.god] || {}).tokens || 0, usd: (ledger[IDS.god] || {}).usd || 0 }
-    };
-    const total = Object.values(this.tokens).reduce((n, t) => n + t.used, 0);
-    this.tokens.total = total;
-    for (const a of [IDS.claude, IDS.codex]) if (this.tokens[a].used > CAPS.perAgentTokens) this.stop(`per-agent token cap: ${a} at ${this.tokens[a].used}`);
-    if (total > CAPS.totalTokens) this.stop(`total token cap at ${total}`);
+    const claudeEvents = this.claudeTranscripts().flatMap((f) => this.tokenLines(f));
+    const rollouts = this.codexRollouts().map((f) => this.tokenLines(f));
+    this.tokens = tokenAccount({ ledgerRows, claudeEvents, rollouts });
+    const breach = tokenCapBreach(this.tokens);
+    if (breach) this.stop(breach);
   }
   fits(agentId, fact) {
     this.pollTokens();
@@ -2728,7 +2795,20 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   /** Stop every process of the app. NO PROOF OF EXIT (Dwight, R3): the run is ABORTED before any
    *  relaunch or next phase, the survivors are recorded, and the teardown keeps the sandbox and the
    *  evidence. */
+  /** The PTY capture over the main-process inspector (install, or query into this.ptyCaptures). */
+  async ptyCapture(kind, label) {
+    if (!this.mainCdp) return null;
+    const expr = kind === 'install'
+      ? `(${installPtyCapture.toString()})(process.mainModule.require('electron').BrowserWindow, globalThis, 65536, Date.now)`
+      : `(${ptyCaptureQuery.toString()})(globalThis)`;
+    const out = JSON.parse(await this.mainCdp.eval(expr, undefined, { sync: true }));
+    if (kind !== 'install') this.ptyCaptures = (this.ptyCaptures || []).concat([{ label, at: new Date().toISOString(), ...out }]);
+    return out;
+  }
+
   async stopApp(label) {
+    // Before the app goes: every PTY's output tail and exit code into the evidence.
+    try { await this.ptyCapture('query', label); } catch (e) { log(`${label}: PTY capture query: ${e && e.message}`); }
     try { this.page && this.page.close(); } catch { /* gone */ }
     try { this.mainCdp && this.mainCdp.close(); } catch { /* gone */ }
     this.page = null; this.mainCdp = null;
@@ -2843,6 +2923,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     for (const f of walk(path.join(s.hive, 'agents', IDS.god, 'inbox'), (p) => p.endsWith('.json'))) take(f, path.join('god-inbox', path.relative(path.join(s.hive, 'agents', IDS.god, 'inbox'), f)));
     for (const f of this.claudeTranscripts()) take(f, path.join('claude-transcripts', path.basename(f)));
     for (const f of this.codexRollouts()) take(f, path.join('codex-rollouts', path.basename(f)));
+    // The Codex agent's own home: its TUI log and every session file (never auth.json: `never`).
+    const codexHome = path.join(s.hive, 'agents', IDS.codex, '.codex');
+    for (const f of walk(codexHome, (p) => /\.log$/i.test(p) || /[\\/]sessions[\\/]/i.test(p))) take(f, path.join('codex-home', path.relative(codexHome, f)));
+    W.write(path.join(dst, 'pty-capture.json'), redact(JSON.stringify(this.ptyCaptures || [], null, 2)));
     for (const f of walk(s.stubs, (p) => p.endsWith('.log'))) take(f, path.join('stubs', path.basename(f)));
     if (this.jailLog) take(this.jailLog, 'jail-decisions.jsonl');
     W.write(path.join(dst, 'app-output.log'), redact(this.appOut));
@@ -2884,9 +2968,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       `Models: claude ${this.args.models.claude}, codex ${this.args.models.codex}. Caps: ${CAPS.perAgentTokens} per agent, ${CAPS.totalTokens} total, ${CAPS.wallMs / 60000} min (agents), ${GLOBAL_WALL_MS / 60000} min (whole run).`, '',
       '| Fact | Status | Detail |', '|---|---|---|',
       ...facts.map((f) => `| ${f.id} | ${f.status} | ${String(f.detail).replace(/\|/g, '/').replace(/\n/g, ' ')} |`), '',
-      '## Tokens and cost', '', '| Agent | Used (max of sources) | Ledger | Transcript / rollout | USD (ledger) |', '|---|---|---|---|---|',
-      ...[IDS.claude, IDS.codex, IDS.god].map((a) => { const t = this.tokens[a] || {}; return `| ${a} | ${t.used ?? 0} | ${t.ledger ?? 0} | ${t.transcript ?? t.rollout ?? '-'} | ${(t.usd ?? 0).toFixed ? (t.usd ?? 0).toFixed(4) : t.usd} |`; }),
-      `| total | ${(this.tokens && this.tokens.total) || 0} | | | |`, '',
+      '## Tokens and cost', '', 'The caps count FRESH tokens (input + output + cache_creation); cache_read is reported, never capped.', '',
+      '| Agent | Fresh used (max of sources, capped) | Cache read (not capped) | Ledger fresh | Transcript / rollout fresh | USD (ledger) |', '|---|---|---|---|---|---|',
+      ...[IDS.claude, IDS.codex, IDS.god].map((a) => { const t = this.tokens[a] || {}; return `| ${a} | ${t.used ?? 0} | ${t.cacheRead ?? 0} | ${t.ledger ?? 0} | ${t.transcript ?? t.rollout ?? '-'} | ${(t.usd ?? 0).toFixed ? (t.usd ?? 0).toFixed(4) : t.usd} |`; }),
+      `| total | ${(this.tokens && this.tokens.total) || 0} | ${(this.tokens && this.tokens.totalCacheRead) || 0} | | | |`, '',
       '## Checks', '', ...this.checks.map((c) => `- ${c.ok ? 'PASS' : 'FAIL'} ${c.label}${c.detail ? ` — ${String(c.detail).slice(0, 300)}` : ''}`), '',
       '## Credentials', '', ...(extra.credentials || []).map(cred), '',
       '## Live locations (before/after)', '', ...(extra.liveWatch ? [
@@ -3028,7 +3113,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
