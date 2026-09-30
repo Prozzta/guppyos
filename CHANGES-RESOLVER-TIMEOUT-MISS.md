@@ -77,3 +77,5 @@ The probe can now build a `CommandResolver({ deps: () => ({ ...nodeResolverDeps(
 - **R1 (POSIX `userShellPathAsync` caches a timed-out PATH fallback):** left on the card as a follow-up, as god ruled. Windows is unaffected.
 - **N3 (from Andy):** under sustained load the one retry doubles the wait for an unknown: 3 s each, plus up to the tree-kill bound. That is accepted; a spawn waits at most about 2 × 14 s.
 - **Separate card (reported to god):** the same lossy `cmd.exe` route is reached by a FOUND target that `resolveWindowsShimSpawn` cannot decode (a hand-written `.bat`, or a non-npm shim) with a multi-line argument. That is pre-existing and outside this fix: it only warns in the console.
+
+- **Rev 2 full suite (b6bf9a1):** 3202 tests, 3186 pass, 0 fail, 16 skipped, 130 s. Mutants: 19 of 19 KILLED at named tests.
