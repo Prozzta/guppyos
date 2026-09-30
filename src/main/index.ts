@@ -1,7 +1,7 @@
 import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
-import { CodexVersionLog, codexSupportsNoDaemon, readCodexVersion } from './codexCli';
+import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { StartupTiming } from './startupTiming';
 import type { WorkerHandle } from './nativeMemory/service';
 import { spawn, execFile } from 'node:child_process';
@@ -3589,12 +3589,16 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // its PATH.
       const mem = nativeMemory.spawnEnv(opts.hive.id);
       // CODEX-WAKE-161 addendum (a)+(b): log the CLI this Codex agent gets, and pin it to its
-      // in-process app-server with --no-daemon when (and only when) the CLI has that flag.
+      // in-process app-server with --no-daemon. CODEX-NODAEMON-HARDENING: always, unless the CLI is
+      // KNOWN to predate the flag; an unreadable version (or a failed lookup) still gets it.
       let codexNoDaemon = false;
       if (provider === 'codex') {
-        const cli = await codexCliNow();
+        let cli: { path: string | null; version: string | null } = { path: null, version: null };
+        try { cli = await codexCliNow(); } catch { /* unreadable: the gate fails closed (flag on) */ }
         codexVersionLog.note(cli.version, cli.path, 'spawn', opts.hive.id);
-        codexNoDaemon = codexSupportsNoDaemon(cli.version);
+        const gate = codexNoDaemonGate(cli.version);
+        codexNoDaemon = gate.noDaemon;
+        if (gate.reason !== 'supported') hive.appendLog({ kind: 'codex-no-daemon', agentId: opts.hive.id, noDaemon: gate.noDaemon, reason: gate.reason, version: cli.version });
       }
       const inj = await hive.ensureAgent(
         { ...opts.hive, cwd: opts.cwd, provider },

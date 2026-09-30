@@ -20,10 +20,11 @@
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync, renameSync,
   readdirSync, statSync, rmSync, appendFileSync, symlinkSync, copyFileSync, chmodSync,
+  lstatSync, readlinkSync, unlinkSync,
   openSync, readSync, closeSync,
   watch, type FSWatcher
 } from 'node:fs';
-import { basename, join, dirname, isAbsolute } from 'node:path';
+import { basename, join, dirname, isAbsolute, win32, posix } from 'node:path';
 import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
@@ -1076,7 +1077,8 @@ export class HiveManager {
        *  copied into the agent's `.claude/skills/` per spawn; undefined or missing
        *  is a no-op (tolerated until Kevin populates the resource dir). */
       skillsDir?: string;
-      /** CODEX-WAKE-161 (a): the installed Codex CLI has `--no-daemon` (>= 0.157.0). */
+      /** CODEX-WAKE-161 (a): add `--no-daemon`. CODEX-NODAEMON-HARDENING: only an explicit
+       *  `false` (a CLI KNOWN to predate the flag, codexNoDaemonGate) leaves it out; absent = on. */
       codexNoDaemon?: boolean;
       /** CODEX-BLOAT-165 fix 2: HarnessConfig.codexToolOutputTokenLimit (a number, 'off', or
        *  absent = the default), written into this agent's own config.toml. */
@@ -1296,9 +1298,16 @@ export class HiveManager {
               preArgs.push('--dangerously-bypass-hook-trust');
               // CODEX-WAKE-161 (a): pin the in-process app-server each agent already runs (no
               // shared background server across agents; silences the "running without the
-              // shared background server" notice). Only for a CLI that has the flag: an older
-              // one refuses unknown flags, and the agent would not start.
-              if (opts.codexNoDaemon) preArgs.push('--no-daemon');
+              // shared background server" notice). CODEX-NODAEMON-HARDENING: fail closed. Only a
+              // caller that KNOWS the CLI predates the flag passes false (an older CLI refuses
+              // unknown flags). A daemon target spawns git with visible windows, and a resume over
+              // it skips the hook-trust bypass for the startup review (a screen nobody answers).
+              if (opts.codexNoDaemon !== false) preArgs.push('--no-daemon');
+              // CODEX-NODAEMON-HARDENING: codex's startup plugin sync (and the agent's own git) must
+              // never raise a credential prompt or a Git Credential Manager window on an unattended
+              // floor: a stored credential still works, a missing one fails visibly in the log.
+              env.GIT_TERMINAL_PROMPT = '0';
+              env.GCM_INTERACTIVE = 'never';
             }
             else if (desc.shim === 'pi') {
               // Pi (earendil-works) has a rich pi.on(event) lifecycle. We drop a
@@ -3716,6 +3725,32 @@ export class HiveManager {
    *  THIS agent's own are appended with `-c` (a -c override beats config.toml), and a cross-agent
    *  resume never silently runs under another agent's identity. Unchanged otherwise, or when this
    *  agent has none of ours (then its positional prompt still carries its identity). */
+  /**
+   * CODEX-NODAEMON-HARDENING: remove the `packages` link an earlier build made in a Codex agent's
+   * home, and ONLY that: `link` must be a symbolic link or junction whose target is `expected` (the
+   * user's ~/.codex/packages). The link entry is unlinked; its target is never opened, walked or
+   * deleted (no rmSync: a recursive remove through a junction would delete the user's install).
+   * A real directory, or a link elsewhere, is kept and reported.
+   */
+  static removeCodexPackagesLink(link: string, expected: string, fs: {
+    lstatSync: (p: string) => { isSymbolicLink(): boolean };
+    readlinkSync: (p: string) => string;
+    unlinkSync: (p: string) => void;
+  } = { lstatSync, readlinkSync, unlinkSync }, platform: NodeJS.Platform = process.platform): 'absent' | 'removed' | 'kept-not-a-link' | 'kept-foreign-link' | 'failed' {
+    let st: { isSymbolicLink(): boolean };
+    try { st = fs.lstatSync(link); } catch (e) { return (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'failed'; }
+    if (!st.isSymbolicLink()) return 'kept-not-a-link';
+    const lib = platform === 'win32' ? win32 : posix;
+    const norm = (p: string): string => {
+      const r = lib.resolve(p.replace(/^\\\\\?\\/, '')).replace(/[\\/]+$/, '');
+      return platform === 'win32' ? r.toLowerCase() : r;
+    };
+    let target: string;
+    try { target = lib.resolve(lib.dirname(link), fs.readlinkSync(link)); } catch { return 'failed'; }
+    if (norm(target) !== norm(expected)) return 'kept-foreign-link';
+    try { fs.unlinkSync(link); return 'removed'; } catch { return 'failed'; }
+  }
+
   static codexResumeArgs(args: string[], myHome: string | undefined, ownerHome: string): string[] {
     if (!myHome || ownerHome === myHome) return args;
     let own: string | null = null;
@@ -3765,16 +3800,13 @@ export class HiveManager {
         try { symlinkSync(authSrc, authDest); }
         catch { try { copyFileSync(authSrc, authDest); } catch { /* best-effort */ } }
       }
-      // The managed app-server daemon used by Codex Remote Control is launched
-      // from the standalone install rooted at $CODEX_HOME/packages. Share the
-      // user's installed binaries without duplicating them into every agent.
-      const packagesSrc = join(userHome, 'packages');
-      const packagesDest = join(home, 'packages');
-      if (existsSync(packagesSrc) && !existsSync(packagesDest)) {
-        try {
-          symlinkSync(packagesSrc, packagesDest, process.platform === 'win32' ? 'junction' : 'dir');
-        } catch { /* remote integration falls back to a local TUI if unavailable */ }
-      }
+      // CODEX-NODAEMON-HARDENING: no `packages` link into the user's real ~/.codex. $CODEX_HOME/packages
+      // is read ONLY by the managed app-server daemon and its self-updater (codex 0.157.1
+      // app-server-daemon/src/managed_install.rs), which a hive agent never runs (--no-daemon). The
+      // link let a daemon started from an agent home run, and update, the user's own install. A
+      // link an earlier build made is removed (the LINK only, never its target).
+      const unlinked = HiveManager.removeCodexPackagesLink(join(home, 'packages'), join(userHome, 'packages'));
+      if (unlinked !== 'absent') this.appendLog({ kind: 'codex-packages-link', agentId: agentId ?? null, action: unlinked });
       // Wire lifecycle hooks via config.toml `[hooks]` tables — the user-layer
       // discovery surface Codex actually scans. (A bare $CODEX_HOME/hooks.json is
       // plugin-scoped — referenced FROM a plugin manifest — and is NOT discovered

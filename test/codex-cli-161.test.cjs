@@ -98,13 +98,15 @@ function sandbox(t) {
   return { home, hive };
 }
 
-test('(a) a Codex hive spawn carries --no-daemon exactly when the caller says the CLI has it; other providers never do', async (t) => {
+test('(a) a Codex hive spawn carries --no-daemon unless the caller says the CLI predates it (CODEX-NODAEMON-HARDENING); other providers never do', async (t) => {
   const s = sandbox(t);
   const on = await s.hive.ensureAgent({ id: 'dwight-a', name: 'Dwight', provider: 'codex', cwd: s.home }, { codexNoDaemon: true });
   assert.equal(on.args.filter((a) => a === '--no-daemon').length, 1);
   assert.ok(on.args.includes('--dangerously-bypass-hook-trust'));
   const off = await s.hive.ensureAgent({ id: 'dwight-b', name: 'Dwight', provider: 'codex', cwd: s.home }, {});
-  assert.equal(off.args.includes('--no-daemon'), false, 'no version known -> no flag');
+  assert.equal(off.args.filter((a) => a === '--no-daemon').length, 1, 'CODEX-NODAEMON-HARDENING: no verdict passed -> the flag (fail closed)');
+  const old = await s.hive.ensureAgent({ id: 'dwight-o', name: 'Dwight', provider: 'codex', cwd: s.home }, { codexNoDaemon: false });
+  assert.equal(old.args.includes('--no-daemon'), false, 'only an explicit false (a CLI known to predate it) leaves it out');
   const claude = await s.hive.ensureAgent({ id: 'jim-c', name: 'Jim', provider: 'claude', cwd: s.home }, { codexNoDaemon: true });
   assert.equal(claude.args.includes('--no-daemon'), false);
 });
@@ -113,7 +115,9 @@ test('(a)+(b) wiring: a Codex spawn logs its CLI and gates the flag on that same
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   // SYNC-CHILD-CALLS: codexCliNow is async (it awaits the shared async command resolver), so the
   // spawn awaits it and the app-start row chains on it; same reading, same single note.
-  assert.match(idx, /if \(provider === 'codex'\) \{\n\s+const cli = await codexCliNow\(\);\n\s+codexVersionLog\.note\(cli\.version, cli\.path, 'spawn', opts\.hive\.id\);\n\s+codexNoDaemon = codexSupportsNoDaemon\(cli\.version\);/);
+  // CODEX-NODAEMON-HARDENING: the gate is codexNoDaemonGate (unknown -> flag on), and a failed lookup
+  // is an unknown version, never a skipped flag.
+  assert.match(idx, /if \(provider === 'codex'\) \{\n\s+let cli: \{ path: string \| null; version: string \| null \} = \{ path: null, version: null \};\n\s+try \{ cli = await codexCliNow\(\); \} catch \{[^}]*\}\n\s+codexVersionLog\.note\(cli\.version, cli\.path, 'spawn', opts\.hive\.id\);\n\s+const gate = codexNoDaemonGate\(cli\.version\);\n\s+codexNoDaemon = gate\.noDaemon;/);
   // 1.1.65 (codex-bloat fix 2) added settings after codexNoDaemon, so it may end with a comma.
   assert.match(idx, /skillsDir: skillsResourceDir\(\),\n\s+codexNoDaemon,?\n/);
   // "Off the start-up path" (Jim's audit): the app-start row is taken on an unref'd timer,
