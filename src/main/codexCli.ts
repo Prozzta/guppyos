@@ -64,9 +64,28 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
-/** Only a CLI known to have the flag gets it: an unknown version gets nothing added. */
+/** Is the CLI KNOWN to have the flag (a readable version >= 0.157.0)? The layer-b runner's strict
+ *  proof. The spawn itself uses codexNoDaemonGate, which also adds the flag for an unknown version. */
 export function codexSupportsNoDaemon(version: string | null): boolean {
   return !!version && compareVersions(version, CODEX_NO_DAEMON_SINCE) >= 0;
+}
+
+export type CodexNoDaemonReason = 'supported' | 'version-unknown' | 'version-too-old';
+
+/**
+ * CODEX-NODAEMON-HARDENING (1.1.76): the spawn gate. Every Codex hive agent gets `--no-daemon`
+ * unless its CLI is KNOWN to be older than 0.157.0. An unreadable version gets the flag too: without
+ * it codex may start (or attach to) the shared app-server daemon, whose git child processes open
+ * visible console windows (codex git_process.rs has no CREATE_NO_WINDOW), and a `codex resume` over a
+ * daemon target is a "persistent resume" that skips --dangerously-bypass-hook-trust for the startup
+ * hooks review (tui/src/lib.rs:1967-1972), i.e. a review screen nobody can answer. An old CLI that
+ * rejects the flag fails to start, visibly; that is the lesser failure.
+ */
+export function codexNoDaemonGate(version: string | null): { noDaemon: boolean; reason: CodexNoDaemonReason } {
+  if (!version) return { noDaemon: true, reason: 'version-unknown' };
+  return compareVersions(version, CODEX_NO_DAEMON_SINCE) >= 0
+    ? { noDaemon: true, reason: 'supported' }
+    : { noDaemon: false, reason: 'version-too-old' };
 }
 
 export type CodexVersionCause = 'app-start' | 'spawn';

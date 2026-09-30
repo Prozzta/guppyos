@@ -81,7 +81,11 @@ test('FULL product chain: the product-built Codex agent env (HiveManager.ensureA
   fs.writeFileSync(path.join(prefix, 'node_modules', '@openai', 'codex', 'package.json'), JSON.stringify({ name: '@openai/codex', version: '0.157.1' }));
   fs.writeFileSync(path.join(prefix, 'codex.cmd'), '@echo off');
   const spec = await pa.productCodexSpawn({ home, harnessHome: path.join(home, 'harness'), agentId: 'lb-codex', name: 'Codex-LB', cwd, command: lb.lbCodexCommand('m'), commandPath: path.join(prefix, 'codex.cmd') });
-  assert.deepEqual(Object.keys(spec.env).filter((k) => /^(GIT_|GCM_)/i.test(k)), [], 'the product agent env never sets or overrides them');
+  // CODEX-NODAEMON-HARDENING (1.1.76): the product Codex env now sets GIT_TERMINAL_PROMPT=0 and
+  // GCM_INTERACTIVE=never itself (no credential prompt / GCM window on any floor). It may only ever
+  // carry the jail's OWN values for those two, and never touches GIT_CONFIG_NOSYSTEM.
+  const gitKeys = Object.fromEntries(Object.entries(spec.env).filter(([k]) => /^(GIT_|GCM_)/i.test(k)));
+  assert.deepEqual(gitKeys, { GIT_TERMINAL_PROMPT: WANT.GIT_TERMINAL_PROMPT, GCM_INTERACTIVE: WANT.GCM_INTERACTIVE }, 'the product agent env never weakens or overrides the jail values');
   const ptyEnv = pa.productPtyEnv({ PATH: 'C:\\Windows\\System32', ...WANT }, spec.env);
   for (const [k, v] of Object.entries(WANT)) assert.equal(ptyEnv[k], v, k);
   assert.equal(ptyEnv.CODEX_HOME, spec.env.CODEX_HOME, 'the agent env is really in the chain');
