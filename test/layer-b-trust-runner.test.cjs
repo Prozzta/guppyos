@@ -99,3 +99,47 @@ test('input capture wiring: installed at every launch next to the output capture
   assert.match(m, /writes: ptyInputEvidence\(out, pidToId\)/, 'only classified rows are kept');
   assert.match(m, /process\.mainModule\.constructor\._cache/, 'the module cache: the node-pty the app really loaded');
 });
+
+test('Jim F2: exactly one [projects] entry, the PRODUCT key for the agent cwd, trusted; anything else FAILS', () => {
+  const ts = require('./load-ts.cjs')('src/main/codexTrustSeed.ts');
+  const cwd = 'C:\\Dunder\\lbj\\0a1b2c3d\\w\\lb-codex';
+  const key = ts.codexProjectTrustKey(cwd);
+  const good = ts.withAgentTrust('model = "m"\n', cwd).text + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\n';
+  assert.deepEqual(lb.codexTrustEntryProblems(good, key), []);
+  assert.deepEqual(lb.codexTrustEntryProblems(`[projects.${JSON.stringify(key)}]\ntrust_level = "trusted"\n`, key), [], 'the basic-string form too');
+  assert.match(lb.codexTrustEntryProblems('model = "m"\n', key).join(' '), /0 \[projects\] entries/);
+  assert.match(lb.codexTrustEntryProblems(`${good}\n[projects.'c:\\przedit']\ntrust_level = "trusted"\n`, key).join(' '), /2 \[projects\] entries/);
+  assert.match(lb.codexTrustEntryProblems(`projects."c:\\\\x".trust_level = "trusted"\n${good}`, key).join(' '), /2 \[projects\] entries/, 'a dotted entry counts');
+  const parent = ts.codexProjectTrustKey('C:\\Dunder\\lbj\\0a1b2c3d\\w');
+  assert.match(lb.codexTrustEntryProblems(good.split(key).join(parent), key).join(' '), /the entry is \[projects\.'c:\\dunder\\lbj\\0a1b2c3d\\w'\], not/, 'a parent is not the cwd');
+  assert.match(lb.codexTrustEntryProblems(good.split(key).join(cwd), key).join(' '), /the entry is/, 'the non-lowercased key is not the product key');
+  assert.match(lb.codexTrustEntryProblems(good.replace('trust_level = "trusted"', 'trust_level = "untrusted"'), key).join(' '), /no trust_level = "trusted"/);
+  assert.match(lb.codexTrustEntryProblems(good, '').join(' '), /no cwd/);
+});
+
+test('Jim F2 behaviour + wiring: checkCodexSeed checks the trust entry in BOTH modes (phases A and B), with the product key from src/; the rollback is N/A', () => {
+  const root = fs.mkdtempSync(path.join(JAIL, 'seed-'));
+  const cwd = path.join(root, 'w', 'lb-codex');
+  const home = path.join(root, 'd', 'hive', 'agents', 'lb-codex', '.codex');
+  fs.mkdirSync(home, { recursive: true });
+  const ts = require('./load-ts.cjs')('src/main/codexTrustSeed.ts');
+  const run = new lb.LayerB(lb.parseArgs(['--dry-run-stubs']));
+  run.s = { hive: path.join(root, 'd', 'hive') };
+  run.spec = [{ id: 'lb-codex', cwd }];
+  let stopped = null; run.stop = (why) => { stopped = why; };
+  fs.writeFileSync(path.join(home, 'config.toml'), ts.withAgentTrust('model = "m"\n', cwd).text);
+  run.checkCodexSeed('phase A');
+  assert.equal(stopped, null);
+  assert.ok(run.checks.some((c) => c.ok && /trusts EXACTLY its own cwd.*\(phase A\)/.test(c.label)), 'the dry run checks it');
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "m"\n');
+  assert.throws(() => run.checkCodexSeed('phase B'), /codex trust seed \(phase B\): 0 \[projects\] entries/);
+  assert.match(stopped, /not the product's single own-cwd entry \(phase B\)/);
+  const at = src.indexOf("  checkCodexSeed(label = 'phase A') {");
+  const m = src.slice(at, at + 1400);
+  assert.match(m, /load-ts\.cjs'\)\)\(path\.join\(REPO, 'src', 'main', 'codexTrustSeed\.ts'\)\)\.codexProjectTrustKey\(codex \? codex\.cwd : ''\)/, 'the PRODUCT key function');
+  assert.ok(m.indexOf('codexTrustEntryProblems(text, key)') < m.indexOf('if (this.args.dryRun) return;'), 'the trust check runs before the real-only sandbox check');
+  assert.match(src, /this\.checkCodexSeed\('phase A'\);/);
+  assert.match(src, /this\.jailLinkGate\('after launch phase B'\);\n\s*this\.checkCodexSeed\('phase B'\);/);
+  const rbAt = src.indexOf("await this.launch(this.exe174, '1.1.74+seams (rollback)');");
+  assert.doesNotMatch(src.slice(rbAt, rbAt + 600), /checkCodexSeed/, 'the rollback (1.1.74, rb- stubs as provider claude) is N/A');
+});

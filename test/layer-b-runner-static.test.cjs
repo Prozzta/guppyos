@@ -440,7 +440,7 @@ test('R1 confinement: Codex runs workspace-write with jail-only roots, no networ
   const main = src.slice(src.indexOf('async main() {'));
   assert.ok(main.indexOf('this.proveClaudeJail()') < main.indexOf('this.launch('));
   assert.match(main, /if \(!this\.proveClaudeJail\(\)\) throw/);
-  assert.match(src, /checkCodexSeed\(\)/);
+  assert.match(src, /checkCodexSeed\('phase A'\)/);
 });
 
 test('R4 startup sweep: a stale md-layerb-* sandbox has its credentials SHREDDED, then is removed; this run\'s and other dirs are left', (t) => {

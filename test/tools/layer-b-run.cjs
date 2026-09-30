@@ -1788,6 +1788,20 @@ function jailLinkScan(base, ops = {}) {
   return { ok: problems.length === 0, problems, links, hardLinks, count };
 }
 
+/** Jim F2: why this config text is not "exactly one [projects] entry, `key`, trusted". Independent
+ *  of the product's own parser: every line that opens or extends `projects` counts. */
+function codexTrustEntryProblems(text, key) {
+  const lines = String(text || '').split(/\r?\n/);
+  const opens = lines.map((l, i) => ({ l: l.trim(), i })).filter(({ l }) => /^\[\s*projects\b/.test(l) || /^["']?projects["']?\s*[.=]/.test(l));
+  if (!key) return ['no cwd for lb-codex'];
+  if (opens.length !== 1) return [`${opens.length} [projects] entries (exactly 1 expected: the agent's own cwd)`];
+  const want = [`[projects.'${key}']`, `[projects.${JSON.stringify(key)}]`];
+  const head = opens[0];
+  if (!want.includes(head.l.replace(/\s*#.*$/, ''))) return [`the entry is ${head.l}, not ${want[0]}`];
+  const body = [];
+  for (let i = head.i + 1; i < lines.length && !/^\s*\[/.test(lines[i]); i++) body.push(lines[i].trim());
+  return body.some((l) => /^trust_level\s*=\s*"trusted"\s*(#.*)?$/.test(l)) ? [] : ['the entry has no trust_level = "trusted"'];
+}
 /** Jim C1: the agent cwds that hold a codex project layer (.codex/config.toml, or a .codex that
  *  cannot be read). The jail cwds are the runner's own; nothing there is legitimate. */
 function jailProjectConfigProblems(cwds, fsx = fs) {
@@ -3019,6 +3033,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.waitAgentsUp('phase B');
     this.checkCodexArgv('phase B');
     this.jailLinkGate('after launch phase B');
+    this.checkCodexSeed('phase B');
   }
 
   /** B4 (Claude): the RESUMED session sees the NEW --append-system-prompt. R7: only a genuine resume
@@ -3517,7 +3532,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       await this.waitAgentsUp('phase A');
       this.checkCodexArgv('phase A');
       this.jailLinkGate('after launch phase A');
-      this.checkCodexSeed();
+      this.checkCodexSeed('phase A');
       // Claude and Codex facts run side by side (separate agents, separate budgets).
       const claudeA = (async () => {
         if (this.fits(IDS.claude, 'B1')) await this.guard(['B1', 'B8', 'B9'], () => this.factB1B8B9()); else this.fact('B1', 'NOT-PROVEN', 'budget');
@@ -3679,11 +3694,24 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     }
   }
 
-  checkCodexSeed() {
-    if (this.args.dryRun) return;
+  /** Jim F2 (god: required in BOTH modes). lb-codex's own config.toml, written by the product's
+   *  ensureAgent -> installCodexHooks (hive.ts; the dry run's stub lb-codex is a hive agent with
+   *  provider 'codex' too, so its home is seeded the same way), must hold EXACTLY ONE [projects]
+   *  entry: its own cwd, keyed by the PRODUCT's codexProjectTrustKey (src/, not a copy), trusted.
+   *  Phases A and B (each launch rewrites it). The rollback is N/A: 1.1.74 has no trust seed and its
+   *  rb- stubs run as provider 'claude' (the rollback re-seed sets it), so no codex home is written. */
+  checkCodexSeed(label = 'phase A') {
     const cfg = path.join(this.s.hive, 'agents', IDS.codex, '.codex', 'config.toml');
     let text = '';
     try { text = fs.readFileSync(cfg, 'utf8'); } catch { /* reported */ }
+    const codex = (this.spec || []).find((a) => a.id === IDS.codex);
+    const key = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'main', 'codexTrustSeed.ts')).codexProjectTrustKey(codex ? codex.cwd : '');
+    const trust = codexTrustEntryProblems(text, key);
+    if (!this.check(!trust.length, `lb-codex's own config trusts EXACTLY its own cwd: one [projects] entry, the product key, trust_level "trusted" (${label})`, trust.join('; ') || key)) {
+      this.stop(`lb-codex's trust entry is not the product's single own-cwd entry (${label})`);
+      throw new Error(`codex trust seed (${label}): ${trust.join('; ')}`);
+    }
+    if (this.args.dryRun) return;
     const ok = /sandbox_mode\s*=\s*"workspace-write"/.test(text) && /writable_roots\s*=\s*\[/.test(text) && /network_access\s*=\s*false/.test(text)
       && !/danger-full-access/.test(text) && this.codexRoots.every((r) => text.toLowerCase().includes(path.resolve(r).toLowerCase()));
     if (!this.check(ok, 'R1: the Codex agent home carries the jail sandbox config (workspace-write, jail-only writable roots, no network)', cfg)) {
@@ -3693,7 +3721,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, jailProjectConfigProblems, installPtyCapture, ptyCaptureQuery, installPtyInputCapture, ptyInputQuery, classifyPtyInput, ptyInputEvidence, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, CODEX_EXPECTED_VERSION, CODEX_RESOLVE_PROBE, codexResolveProblems, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, codexTrustEntryProblems, jailProjectConfigProblems, installPtyCapture, ptyCaptureQuery, installPtyInputCapture, ptyInputQuery, classifyPtyInput, ptyInputEvidence, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, CODEX_EXPECTED_VERSION, CODEX_RESOLVE_PROBE, codexResolveProblems, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

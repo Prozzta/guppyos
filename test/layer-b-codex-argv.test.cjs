@@ -305,7 +305,7 @@ test('runner wiring: after EVERY launch (phase A, phase B, rollback) the real ru
     assert.match(src, new RegExp(`await this\\.waitAgentsUp\\('${label}'\\);\\n\\s*this\\.checkCodexArgv\\('${label}'\\);`), label);
   }
   assert.match(src, /await this\.waitAgentsUp\('rollback'\);\n\s*this\.checkCodexArgv\('rollback', `rb-\$\{IDS\.codex\}\.cjs`\);/, 'the rollback (1.1.74 on the stubs, both modes) binds its own stub (dry #10)');
-  const m = src.slice(src.indexOf('  checkCodexArgv(label, stubBasename = null) {'), src.indexOf('  checkCodexSeed() {'));
+  const m = src.slice(src.indexOf('  checkCodexArgv(label, stubBasename = null) {'), src.indexOf("  /** Jim F2 (god: required in BOTH modes)."));
   assert.match(m, /const owner = this\.app\.proc\.pid;/);
   assert.match(m, /const pty = \(this\.agentPtys \|\| \[\]\)\.find\(\(x\) => x\.id === `pty-\$\{IDS\.codex\}`\) \|\| null;/, 'the pid the app reports');
   assert.match(m, /const stub = stubBasename \|\| \(this\.args\.dryRun \? `\$\{IDS\.codex\}\.cjs` : null\);\n    if \(stub\) \{[\s\S]*stubPtyParentProblems\(procs, stub, owner, ptyPid\)[\s\S]*processes: procEvidence\(procs\)[\s\S]*this\.stop\([\s\S]*throw new Error\(`pty owner binding[\s\S]*return;\n    \}/, 'the dry run confirms the pty-owner binding, records the raw list, and fails if it does not hold');
