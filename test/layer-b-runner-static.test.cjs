@@ -792,7 +792,7 @@ test('round 7 (4): CDP evaluation: main-process expressions never await a promis
   await assert.rejects(mk([Object.assign((c) => { c.contextsCreated += 2; }, { msg: 'Execution context was destroyed.' })]).c.eval('p()'), /destroyed/);
   await assert.rejects(mk(['Target closed']).c.eval('p()'), /Target closed/);
   // The runner's two main-process evaluations are the sync kind.
-  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 4, 'the userData/packaged check, the window list, the B8 hive:inbox probe, the PTY capture');
+  assert.equal((src.match(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g) || []).length, 5, 'the userData/packaged check, the window list, the B8 hive:inbox probe, the PTY capture, the PTY input capture');
   assert.ok(!/this\.mainCdp\.eval\((?![\s\S]*?\{ sync: true \})/.test(src.replace(/this\.mainCdp\.eval\([\s\S]*?\{ sync: true \}\)/g, '')));
 });
 

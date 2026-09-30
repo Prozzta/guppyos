@@ -1122,6 +1122,85 @@ function installPtyCapture(BrowserWindow, root, maxChars, now) {
   }
   return JSON.stringify({ ok: true, windows, wrapped: g.wrapped });
 }
+/** god (on Dwight's ZT175-TRUST-QUIT trace): every write INTO a pty, captured in MAIN. Transparent:
+ *  node-pty's Terminal.prototype.write (the ONE path every write takes: PtyManager.write,
+ *  pty.ts:753-757, from the renderer's pty:write IPC and from the main-side submit owner alike) is
+ *  wrapped, found in the module cache (the instance node-pty really loaded), so existing terminals
+ *  are covered. The pty:write IPC handler is wrapped too (a SYNC handler, index.ts:3927-3940), so a
+ *  write inside it is attributed to the renderer, with its declared origin; any other is 'main'.
+ *  Rows are raw here (the app already holds these bytes); the RUNNER classifies and redacts them
+ *  before anything is written (ptyInputEvidence). Bounded: 4 KB per write, 5000 writes. */
+function installPtyInputCapture(requireFn, moduleCache, ipcMain, root, now) {
+  const g = root.__lbPtyInput || (root.__lbPtyInput = { rows: [], dropped: 0, wrapped: false, ipcWrapped: false, ctx: null, where: null });
+  if (!g.wrapped) {
+    const cache = moduleCache || {};
+    const key = Object.keys(cache).find((k) => /node-pty[\\/]lib[\\/]terminal\.js$/i.test(k));
+    const T = key ? cache[key].exports.Terminal : requireFn('node-pty/lib/terminal').Terminal;
+    const orig = T.prototype.write;
+    T.prototype.write = function (data) {
+      try {
+        if (g.rows.length < 5000) {
+          const s = String(data);
+          g.rows.push({ at: now(), pid: this.pid, len: s.length, data: s.slice(0, 4096), source: g.ctx ? g.ctx.source : 'main', ptyId: g.ctx ? g.ctx.ptyId : null, origin: g.ctx ? g.ctx.origin : null });
+        } else g.dropped++;
+      } catch { /* the capture never breaks a write */ }
+      return orig.apply(this, arguments);
+    };
+    g.wrapped = true;
+    g.where = key || 'node-pty/lib/terminal';
+  }
+  const handlers = ipcMain && ipcMain._invokeHandlers;
+  if (!g.ipcWrapped && handlers && typeof handlers.get === 'function' && handlers.get('pty:write')) {
+    const h = handlers.get('pty:write');
+    handlers.set('pty:write', function (evt, id, data, origin) {
+      g.ctx = { source: 'renderer-ipc', ptyId: typeof id === 'string' ? id : null, origin: typeof origin === 'string' ? origin : null };
+      try { return h.apply(this, arguments); } finally { g.ctx = null; }
+    });
+    g.ipcWrapped = true;
+  }
+  return JSON.stringify({ ok: true, wrapped: g.wrapped, ipcWrapped: g.ipcWrapped, where: g.where });
+}
+/** MAIN process: the raw input rows so far (JSON). */
+function ptyInputQuery(root) {
+  const g = root.__lbPtyInput;
+  return JSON.stringify(g ? { rows: g.rows, dropped: g.dropped, ipcWrapped: g.ipcWrapped } : { rows: [], dropped: 0, ipcWrapped: false });
+}
+/** RUNNER: one write as classes. Control and escape bytes are NAMED (ESC, CR, LF, TAB, BS, DEL,
+ *  Ctrl-A..Ctrl-Z, 0xNN); printable runs are kept as short capped text, redacted. No raw control
+ *  byte and no unredacted text reaches the evidence. */
+const CTRL_NAMES = { 0x1b: 'ESC', 0x0d: 'CR', 0x0a: 'LF', 0x09: 'TAB', 0x08: 'BS', 0x7f: 'DEL', 0x00: 'NUL' };
+function classifyPtyInput(data, capPerRun = 80, capTotal = 400) {
+  const s = String(data || '');
+  const out = [];
+  let run = '';
+  let kept = 0;
+  const flush = () => {
+    if (!run) return;
+    const room = Math.max(0, capTotal - kept);
+    const text = redact(run).slice(0, Math.min(capPerRun, room));
+    kept += text.length;
+    out.push({ text, chars: run.length, ...(text.length < run.length ? { capped: true } : {}) });
+    run = '';
+  };
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (c < 0x20 || c === 0x7f) {
+      flush();
+      const name = CTRL_NAMES[c] || (c >= 1 && c <= 26 ? `Ctrl-${String.fromCharCode(64 + c)}` : `0x${c.toString(16).padStart(2, '0')}`);
+      const last = out[out.length - 1];
+      if (last && last.ctrl === name) last.n++; else out.push({ ctrl: name, n: 1 });
+    } else run += ch;
+  }
+  flush();
+  return out;
+}
+/** RUNNER: the evidence rows, with the pty id from the IPC context or the app's pid -> id map. */
+function ptyInputEvidence(q, pidToId) {
+  return (q && q.rows ? q.rows : []).map((r) => ({
+    at: new Date(r.at).toISOString(), ptyId: r.ptyId || (pidToId && pidToId[r.pid]) || null, pid: r.pid, bytes: Buffer.byteLength(String(r.data || '')), len: r.len,
+    source: r.source, origin: r.origin || null, classes: classifyPtyInput(r.data), ...(r.len > String(r.data || '').length ? { truncated: true } : {})
+  }));
+}
 /** MAIN process: the captured tails and exits (JSON). */
 function ptyCaptureQuery(root) {
   const g = root.__lbPtyCapture;
@@ -1709,6 +1788,16 @@ function jailLinkScan(base, ops = {}) {
   return { ok: problems.length === 0, problems, links, hardLinks, count };
 }
 
+/** Jim C1: the agent cwds that hold a codex project layer (.codex/config.toml, or a .codex that
+ *  cannot be read). The jail cwds are the runner's own; nothing there is legitimate. */
+function jailProjectConfigProblems(cwds, fsx = fs) {
+  const p = [];
+  for (const cwd of cwds) {
+    const f = path.join(cwd, '.codex', 'config.toml');
+    try { if (fsx.existsSync(f)) p.push(`${f} exists: trust would enable it as a project layer`); } catch (e) { p.push(`cannot check ${f}: ${e.message}`); }
+  }
+  return p;
+}
 /** A bounded, recursive LISTING hash of a live tree (names, types, sizes, mtimes, link targets; no
  *  content read, links never followed). A missing root is { missing: true }; an error or a tree over
  *  the bound is { error } (the caller fails: an unproven tree is not "unchanged"). */
@@ -2415,6 +2504,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     // god (720598c6 finding): the app, the real agents and every token path need --full-run.
     if (!this.args.dryRun && !this.args.fullRun) throw new Error(`launch() refused: a real run needs --full-run (${label})`);
     this.jailLinkGate(`before launch ${label}`);
+    this.jailProjectConfigGate(`before launch ${label}`);
     const cdpPort = await freePort();
     let inspPort = await freePort();
     while (inspPort === cdpPort) inspPort = await freePort();
@@ -2447,6 +2537,8 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     if (norm(w.userData) !== norm(this.s.userData)) throw new Error(`${label}: userData ${w.userData} is not the sandbox's`);
     // Capture every PTY's output tail and exit code from now on (evidence, pty-capture.json).
     try { await this.ptyCapture('install'); } catch (e) { this.check(false, `${label}: the PTY capture is installed`, e.message); }
+    // And every write INTO a pty (god, on Dwight's trust-quit trace): evidence/pty-input.json.
+    try { const r = await this.ptyInputCapture('install'); this.check(!!(r && r.wrapped), `${label}: the PTY input capture is installed`, JSON.stringify(r)); } catch (e) { this.check(false, `${label}: the PTY input capture is installed`, e.message); }
     // R10: the pipe line MUST be there and must be the sandbox's.
     const pipeLine = /pipe=(\S+)/.exec(this.appOut);
     if (!this.check(!!pipeLine && pipeLine[1].toLowerCase() === this.s.pipe.toLowerCase(), `${label}: the hook pipe is the sandbox's`, pipeLine ? pipeLine[1] : 'NO pipe= line printed')) {
@@ -3157,9 +3249,26 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     return out;
   }
 
+  /** The PTY INPUT capture over the main-process inspector (install, or query into this.ptyInputs,
+   *  classified and redacted here, never raw). */
+  async ptyInputCapture(kind, label) {
+    if (!this.mainCdp) return null;
+    const expr = kind === 'install'
+      ? `(${installPtyInputCapture.toString()})(process.mainModule.require.bind(process.mainModule), process.mainModule.constructor._cache, process.mainModule.require('electron').ipcMain, globalThis, Date.now)`
+      : `(${ptyInputQuery.toString()})(globalThis)`;
+    const out = JSON.parse(await this.mainCdp.eval(expr, undefined, { sync: true }));
+    if (kind === 'install') return out;
+    let ptys = this.agentPtys || [];
+    try { if (this.page) ptys = (await this.ptys()) || ptys; } catch { /* the last known list */ }
+    const pidToId = Object.fromEntries((ptys || []).map((p) => [p.pid, p.id]));
+    this.ptyInputs = (this.ptyInputs || []).concat([{ label, at: new Date().toISOString(), dropped: out.dropped, ipcWrapped: out.ipcWrapped, writes: ptyInputEvidence(out, pidToId) }]);
+    return out;
+  }
+
   async stopApp(label) {
     // Before the app goes: every PTY's output tail and exit code into the evidence.
     try { await this.ptyCapture('query', label); } catch (e) { log(`${label}: PTY capture query: ${e && e.message}`); }
+    try { await this.ptyInputCapture('query', label); } catch (e) { log(`${label}: PTY input query: ${e && e.message}`); }
     try { this.page && this.page.close(); } catch { /* gone */ }
     try { this.mainCdp && this.mainCdp.close(); } catch { /* gone */ }
     this.page = null; this.mainCdp = null;
@@ -3278,6 +3387,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const codexHome = path.join(s.hive, 'agents', IDS.codex, '.codex');
     for (const f of walk(codexHome, (p) => /\.log$/i.test(p) || /[\\/]sessions[\\/]/i.test(p))) take(f, path.join('codex-home', path.relative(codexHome, f)));
     W.write(path.join(dst, 'pty-capture.json'), redact(JSON.stringify(this.ptyCaptures || [], null, 2)));
+    W.write(path.join(dst, 'pty-input.json'), redact(JSON.stringify(this.ptyInputs || [], null, 2)));
     for (const f of walk(s.stubs, (p) => p.endsWith('.log'))) take(f, path.join('stubs', path.basename(f)));
     if (this.jailLog) take(this.jailLog, 'jail-decisions.jsonl');
     W.write(path.join(dst, 'app-output.log'), redact(this.appOut));
@@ -3502,6 +3612,18 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     return res;
   }
 
+  /** Jim C1 (TRUST-SEED-175): the product now trusts each Codex agent's own cwd, and trust ENABLES
+   *  that folder's project layer <cwd>/.codex/config.toml, which could weaken the jail (sandbox,
+   *  approval, writable roots, tools, hooks). Before every launch, both modes: no agent cwd of the
+   *  run may hold one; a hit refuses the launch. */
+  jailProjectConfigGate(label) {
+    const problems = jailProjectConfigProblems((this.spec || []).map((a) => a.cwd).filter(Boolean));
+    if (!this.check(!problems.length, `no agent cwd holds a .codex/config.toml project layer (${label})`, problems.join('; '))) {
+      this.stop(`an agent cwd holds a project config (${label})`);
+      throw new Error(`jail project config (${label}): ${problems.join('; ')}`);
+    }
+  }
+
   jailLinkGate(label) {
     const r = jailLinkScan(this.s.base);
     const slug = label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
@@ -3571,7 +3693,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, CODEX_EXPECTED_VERSION, CODEX_RESOLVE_PROBE, codexResolveProblems, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, jailProjectConfigProblems, installPtyCapture, ptyCaptureQuery, installPtyInputCapture, ptyInputQuery, classifyPtyInput, ptyInputEvidence, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, CODEX_EXPECTED_VERSION, CODEX_RESOLVE_PROBE, codexResolveProblems, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
