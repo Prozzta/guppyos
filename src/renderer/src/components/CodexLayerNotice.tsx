@@ -30,8 +30,8 @@ export function CodexLayerNotice() {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
-    void window.cth.codexLayerNotices?.().then((n) => { if (alive) setNotices(n); }).catch(() => { /* older main */ });
-    const off = window.cth.onCodexLayerNotices?.((n) => setNotices(n));
+    void window.cth.codexLayerNotices?.().then((n) => { if (alive) setNotices(Array.isArray(n) ? n : []); }).catch(() => { /* older main */ });
+    const off = window.cth.onCodexLayerNotices?.((n) => setNotices(Array.isArray(n) ? n : []));
     return () => { alive = false; off?.(); };
   }, []);
   if (!notices.length && !allowed) return null;
