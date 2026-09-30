@@ -272,10 +272,25 @@ class Rig {
    * the retry backoffs). With `settle`, it first waits for running turns to end: real turns take
    * real time, and the simulated clock must never move under one.
    */
-  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true } = {}) {
+  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true, holdWhileBusy = false, busyTimeoutMs = 120_000 } = {}) {
     for (let i = 0; i < tries; i++) {
       if (await fn()) return true;
       if (settle) await this.quiet();
+      // MAIL-RIG-C1-FLAKE: with holdWhileBusy the simulated clock NEVER moves while a wake is in
+      // flight or a turn runs (a manual turn stays busy until its cue, so `settle`'s bounded
+      // quiet() cannot be used there). The step waits for the EVENT instead: `fn` holding, or the
+      // agent going quiet. Moving the clock under a real, still-starting turn raced the product's
+      // simulated-time rules (SUBMIT_CONFIRM_MS, the one-time re-announce, the retry backoff)
+      // against real process timing, so the outcome depended on machine load.
+      if (holdWhileBusy) {
+        const until = Date.now() + busyTimeoutMs;
+        for (;;) {
+          if (await fn()) return true;
+          if (!(await this.call('busy'))) break;
+          if (Date.now() >= until) throw new Error(`beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms (the clock was not moved under it)`);
+          await sleep(80);
+        }
+      }
       await this.call('advance', { ms: stepMs });
       await this.beat();
       await sleep(pauseMs);

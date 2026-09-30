@@ -41,9 +41,13 @@ test('C1 hook-response latency past the limit (AGY pipe, the flush measured 3.2 
   await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
   const row = (await rig.rows('mail-surface-late')).find((r) => r.ids.includes(m.id));
   assert.equal(row.transport, 'pipe');
-  assert.ok(row.latencyMs >= 3_200 && row.latencyMs < 6_000, `elapsed ${row.latencyMs} ms`);
+  // MAIL-RIG-C1-FLAKE: exactly the injected lateness (lateNextFlush), never 3.2 s plus however long
+  // this machine took between the hook's arrival and its flush.
+  assert.equal(row.latencyMs, 3_200, `elapsed ${row.latencyMs} ms`);
   assert.equal((await rig.entry('ag-1', m.id)).state, 'delivered');
-  await rig.beatUntil(() => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false, stepMs: 15_000 });
+  // MAIL-RIG-C1-FLAKE: the re-wake comes from the Stop's own re-pend; the clock moves only while
+  // the agent is quiet, never under the still-starting re-wake turn (see Rig.beatUntil).
+  await rig.beatUntil(() => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
   assert.ok(rig.contexts('ag-1').filter((c) => c.ids.includes(m.id))[1].context.includes(REDELIVERED), 'with the marker');
   rig.cue('ag-1', { cue: 'stop' });
   await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once in time', diag });
@@ -69,7 +73,7 @@ test('C1b a real main-thread stall past the AGY shim\'s own 5 s give-up: the blo
   assert.equal(row.transport, 'pipe');
   assert.ok(row.latencyMs === null || row.latencyMs >= 5_000, `elapsed ${row.latencyMs} ms`);
   assert.equal((await rig.entry('ag-1', m.id)).state, 'delivered');
-  await rig.beatUntil(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 're-surfaced', settle: false, stepMs: 15_000 });
+  await rig.beatUntil(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
   assert.ok(rig.contexts('ag-1').find((c) => c.ids.includes(m.id)).context.includes(REDELIVERED), 'with the marker');
   rig.cue('ag-1', { cue: 'stop' });
   await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once', diag });
