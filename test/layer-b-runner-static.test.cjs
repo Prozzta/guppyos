@@ -411,7 +411,8 @@ test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) star
 
 test('R1 confinement: Codex runs workspace-write with jail-only roots, no network, unelevated; Claude\'s jail settings are an allowlist mirror + the hook', (t) => {
   assert.ok(!/command = `codex[^`]*dangerously/.test(src), 'Codex never gets the bypass flag');
-  assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
+  assert.match(src, /command = lbCodexCommand\(this\.args\.models\.codex\);/);
+  assert.equal(lb.lbCodexCommand('m1'), 'codex --model m1 --sandbox workspace-write --ask-for-approval never');
   assert.match(src, /command = `claude --model \$\{this\.args\.models\.claude\} --permission-mode bypassPermissions`;/, 'Claude arguments unchanged from the product');
   const toml = lb.codexSandboxToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex']);
   assert.match(toml, /^sandbox_mode = "workspace-write"$/m);
@@ -1234,7 +1235,8 @@ test('real step 2 (Jim, 8c03b1a4 audit): the probe runs the agents\' LEGACY path
   assert.equal(lb.codexProbeVerdict({ inside: 'refused: EPERM', hive: 'refused', codex: 'refused', claude: 'refused' }, ['hive', 'codex', 'claude']).ok, false);
   // The other codex argvs: the step-1 help/version and the agents' command.
   assert.deepEqual(lb.CODEX_HELP_ARGVS, [['--version'], ['sandbox', '--help']]);
-  assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
+  assert.match(src, /command = lbCodexCommand\(this\.args\.models\.codex\);/);
+  assert.equal(lb.lbCodexCommand('m1'), 'codex --model m1 --sandbox workspace-write --ask-for-approval never');
   // A clap rejection is still reported as such, never as a sandbox verdict.
   const stderr = 'error: the following required arguments were not provided:\n  --permission-profile <NAME>\n\nUsage: codex sandbox --permission-profile <NAME> --config <key=value> --cd <DIR> <COMMAND>...';
   assert.equal(lb.codexArgvRejection(2, stderr), 'probe argv rejected (exit 2): error: the following required arguments were not provided:');

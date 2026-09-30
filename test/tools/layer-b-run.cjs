@@ -736,6 +736,56 @@ function codexSandboxToml(writableRoots) {
  *  `sandbox windows --help` ran a command named "windows". Step 1 records these two instead. */
 const CODEX_HELP_ARGVS = [['--version'], ['sandbox', '--help']];
 
+/** god (on the codex git-window research, andy-scratch/codex-git-window.md): lb-codex must run as the
+ *  product runs Codex, with the argv the PRODUCT built and with --no-daemon (no detached app-server
+ *  daemon: no UNIX socket under CODEX_HOME, no git.exe console window). The proof is the OS view of
+ *  the product's own spawn: the npm launcher (node ...\@openai\codex\bin\codex.js <args>) that the
+ *  app's PtyManager started, found among the app's descendants (never by command-line text, so the
+ *  query cannot match itself). Its args must carry --no-daemon exactly once and the product's hive
+ *  marker (--dangerously-bypass-hook-trust, added only by HiveManager.ensureAgent), and the product's
+ *  OWN gate (codexCli.ts codexSupportsNoDaemon, loaded from src/) must grant the flag for the version
+ *  the app logged at that spawn. Anything else FAILS the run. */
+/** lb-codex's registry command (the request the product then builds on); the repro uses the same. */
+const lbCodexCommand = (model) => `codex --model ${model} --sandbox workspace-write --ask-for-approval never`;
+const CODEX_LAUNCHER = /[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js/i;
+const CODEX_PRODUCT_MARKER = '--dangerously-bypass-hook-trust';
+/** A Windows command line split like the CRT does for plain and double-quoted tokens. */
+function winCmdTokens(line) {
+  const out = [];
+  const re = /"((?:[^"\\]|\\.)*)"|(\S+)/g;
+  let m;
+  while ((m = re.exec(String(line || ''))) !== null) out.push(m[1] !== undefined ? m[1] : m[2]);
+  return out;
+}
+/** Why lb-codex's spawn is not the product's --no-daemon argv ([] = it is). `procs` = the app's
+ *  descendants {pid, ppid, name, cmd}; `versionRow` = the app's last codex-version spawn row for
+ *  lb-codex; `supportsNoDaemon` = the PRODUCT's codexSupportsNoDaemon. */
+function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon) {
+  const p = [];
+  if (typeof supportsNoDaemon !== 'function') p.push('the product gate (codexSupportsNoDaemon) is not loaded');
+  if (!versionRow) p.push('no codex-version spawn row for lb-codex: the product never read its CLI version at the spawn');
+  else if (typeof supportsNoDaemon === 'function' && !supportsNoDaemon(versionRow.version)) p.push(`the product gate does not grant --no-daemon for codex ${versionRow.version}`);
+  const launchers = (procs || []).filter((x) => /^node(\.exe)?$/i.test(String(x.name)) && CODEX_LAUNCHER.test(String(x.cmd || '')));
+  if (launchers.length !== 1) p.push(`${launchers.length} Codex launchers under the app (exactly 1 expected: lb-codex)`);
+  for (const l of launchers) {
+    const t = winCmdTokens(l.cmd);
+    const n = t.filter((a) => a === '--no-daemon').length;
+    if (n !== 1) p.push(`pid ${l.pid}: --no-daemon appears ${n} times (exactly 1 required)`);
+    if (!t.includes(CODEX_PRODUCT_MARKER)) p.push(`pid ${l.pid}: no ${CODEX_PRODUCT_MARKER}: not the argv the product builds`);
+  }
+  return p;
+}
+/** PowerShell: the app's descendants with their command lines, as JSON (tree walk by pid). */
+const PS_TREE_CMDLINES = (rootPid) => `
+$ErrorActionPreference = 'Stop'
+$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine)
+$ids = @(${Number(rootPid)})
+$changed = $true
+while ($changed) { $changed = $false; foreach ($p in $all) { if (($ids -contains $p.ParentProcessId) -and -not ($ids -contains $p.ProcessId)) { $ids += $p.ProcessId; $changed = $true } } }
+$out = @($all | Where-Object { ($ids -contains $_.ProcessId) -and ($_.ProcessId -ne ${Number(rootPid)}) } | ForEach-Object { @{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; cmd = $_.CommandLine } })
+ConvertTo-Json -InputObject $out -Compress -Depth 3
+`;
+
 /** The probe's argv, DERIVED FROM THE CLI SOURCE (openai/codex tag rust-v0.157.1, commit
  *  36650394c5b38c2990ccf2a3457165ca3e9d9726; clone at andy-scratch/codex-src-157-cli), and proving the
  *  SAME path the agents run (Jim, 8c03b1a4 audit): the agents start with `--sandbox workspace-write`,
@@ -1910,7 +1960,7 @@ class LayerB {
       } else {
         // R1: the product's auto flag (--dangerously-bypass-approvals-and-sandbox) is REPLACED by
         // the OS sandbox; the writable roots come from the seeded config.toml below.
-        command = `codex --model ${this.args.models.codex} --sandbox workspace-write --ask-for-approval never`;
+        command = lbCodexCommand(this.args.models.codex);
       }
       a.cwd = cwd; a.command = command; a.dir = dir;
       agents[a.id] = { id: a.id, name: a.name, provider: a.provider, cwd, isGod: a.isGod, role: a.role, capabilities: [],
@@ -2621,6 +2671,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.launch(this.exe175, '1.1.75 (phase B)');
     await this.openTheConfig();
     await this.waitAgentsUp('phase B');
+    this.checkCodexArgv('phase B');
   }
 
   /** B4 (Claude): the RESUMED session sees the NEW --append-system-prompt. R7: only a genuine resume
@@ -2809,6 +2860,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.launch(this.exe174, '1.1.74+seams (rollback)');
     await this.openTheConfig();
     await this.waitAgentsUp('rollback');
+    this.checkCodexArgv('rollback');
     let woke = false;
     try {
       await this.waitFor('1.1.74 re-wakes the delivered-not-acted mail', 150_000, () => {
@@ -3093,6 +3145,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       await this.openTheConfig();
       await this.assertHidden('after the config opened');
       await this.waitAgentsUp('phase A');
+      this.checkCodexArgv('phase A');
       this.checkCodexSeed();
       // Claude and Codex facts run side by side (separate agents, separate budgets).
       const claudeA = (async () => {
@@ -3142,6 +3195,28 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 
   /** R1: the Codex agent really runs with the jail's sandbox config (the product copied the seed). */
+  /** Real run, after every launch: lb-codex runs the PRODUCT's argv with --no-daemon, or the run FAILS
+   *  (see codexSpawnArgvProblems). The dry run's lb-codex is a stub and starts no codex. */
+  checkCodexArgv(label) {
+    if (this.args.dryRun) return;
+    const gate = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'main', 'codexCli.ts')).codexSupportsNoDaemon;
+    const row = this.rows().filter((r) => r.kind === 'codex-version' && r.cause === 'spawn' && r.agentId === IDS.codex).pop() || null;
+    let procs = [];
+    let err = null;
+    try {
+      const r = spawnSync(PS, psArgs(PS_TREE_CMDLINES(this.app.proc.pid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
+      if (r.status !== 0) throw new Error(`exit ${r.status}: ${String(r.stderr || '').slice(0, 300)}`);
+      procs = JSON.parse(String(r.stdout || '[]').trim() || '[]');
+    } catch (e) { err = `the process query failed: ${e.message}`; }
+    const problems = err ? [err] : codexSpawnArgvProblems(procs, row, gate);
+    const launcher = procs.find((x) => CODEX_LAUNCHER.test(String(x.cmd || '')));
+    W.writeJson(path.join(this.s.report, `codex-argv-${label.replace(/[^a-z0-9]+/gi, '-')}.json`), { row, launcher: launcher ? { pid: launcher.pid, cmd: redact(launcher.cmd) } : null, problems });
+    if (!this.check(!problems.length, `lb-codex runs the PRODUCT's Codex argv with --no-daemon (${label})`, problems.join('; ') || redact(launcher.cmd))) {
+      this.stop(`lb-codex is not the product's --no-daemon spawn (${label})`);
+      throw new Error(`lb-codex argv (${label}): ${problems.join('; ')}`);
+    }
+  }
+
   checkCodexSeed() {
     if (this.args.dryRun) return;
     const cfg = path.join(this.s.hive, 'agents', IDS.codex, '.codex', 'config.toml');
@@ -3156,7 +3231,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, codexSpawnArgvProblems, winCmdTokens, lbCodexCommand, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
