@@ -253,15 +253,62 @@ test('runner (Jim F1, dry run): the stub is identified by the pty pid the APP re
   assert.deepEqual(lb.procEvidence([{ pid: 1, ppid: 2, name: 'n', cmd: 'x --token sk-abcdefghijklmnopqrstuvwxyz0123456789', extra: 1 }]).map((x) => Object.keys(x)), [['pid', 'ppid', 'name', 'cmd']]);
 });
 
+// Dry #10 at 64c43a6b: phases A and B passed, then the ROLLBACK aborted with "the pty child 42584 does
+// not run lb-codex.cjs". 1.1.74 runs the stubs seeded as rb-<id>.cjs in BOTH modes, so the check must
+// bind that stub there (and the real run must not expect a codex launcher at the rollback).
+const DRY10RB = { owner: 71884, pty: 42584, stubs: 'C:\\Dunder\\lbj\\1f571487\\s' };
+const dry10RollbackProcs = () => [
+  { pid: 60996, ppid: DRY10RB.owner, name: 'conhost.exe', cmd: '\\\\?\\C:\\WINDOWS\\system32\\conhost.exe --headless' },
+  { pid: 87364, ppid: DRY10RB.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY10RB.stubs, 'god.cjs')) },
+  { pid: DRY10RB.pty, ppid: DRY10RB.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY10RB.stubs, 'rb-lb-codex.cjs')) },
+  { pid: 39908, ppid: DRY10RB.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY10RB.stubs, 'rb-lb-claude.cjs')) }
+];
+function runCheck(dryRun, stubBasename, procs) {
+  const root = fs.mkdtempSync(path.join(JAIL, 'rb-'));
+  const report = path.join(root, 'report');
+  lb.W.allowRoot(report);
+  const checks = []; const stops = [];
+  const self = {
+    args: { dryRun }, app: { proc: { pid: DRY10RB.owner } }, s: { report },
+    agentPtys: [{ id: 'pty-lb-codex', pid: DRY10RB.pty }],
+    procQuery: () => procs,
+    rows: () => [],
+    check(ok, name, detail) { checks.push({ ok, name, detail }); return ok; },
+    stop(why) { stops.push(why); }
+  };
+  let threw = null;
+  try { lb.LayerB.prototype.checkCodexArgv.call(self, 'rollback', stubBasename); } catch (e) { threw = e.message; }
+  const files = fs.existsSync(report) ? fs.readdirSync(report) : [];
+  lb.W.roots = lb.W.roots.filter((r) => r !== path.resolve(report));
+  fs.rmSync(root, { recursive: true, force: true });
+  return { checks, stops, threw, files };
+}
+
+test('dry #10 ROLLBACK: the rollback binds its own stub rb-lb-codex.cjs in BOTH modes (the real dry #10 process list passes; lb-codex.cjs there fails, as it did)', () => {
+  assert.deepEqual(lb.stubPtyParentProblems(dry10RollbackProcs(), 'rb-lb-codex.cjs', DRY10RB.owner, DRY10RB.pty), []);
+  assert.match(lb.stubPtyParentProblems(dry10RollbackProcs(), 'lb-codex.cjs', DRY10RB.owner, DRY10RB.pty).join(' '), /does not run lb-codex\.cjs/, 'the 64c43a6b wiring');
+  for (const dryRun of [true, false]) {
+    const ok = runCheck(dryRun, 'rb-lb-codex.cjs', dry10RollbackProcs());
+    assert.equal(ok.threw, null, `dryRun=${dryRun}: ${ok.threw}`);
+    assert.deepEqual(ok.checks.map((c) => c.ok), [true]);
+    assert.match(ok.checks[0].name, /lb-codex's PTY child \(rb-lb-codex\.cjs\)/);
+    assert.deepEqual(ok.files, ['codex-pty-parent-rollback.json'], 'a stub launch records the binding, never a codex argv verdict');
+    const bad = runCheck(dryRun, 'rb-lb-codex.cjs', dry10RollbackProcs().map((x) => (x.pid === DRY10RB.pty ? { ...x, ppid: 5 } : x)));
+    assert.match(String(bad.threw), /pty owner binding \(rollback\)/, `dryRun=${dryRun}: a broken binding still stops the run`);
+    assert.equal(bad.stops.length, 1);
+  }
+});
+
 test('runner wiring: after EVERY launch (phase A, phase B, rollback) the real run checks lb-codex\'s argv with the PRODUCT gate, and a failure stops the run', () => {
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
-  for (const label of ['phase A', 'phase B', 'rollback']) {
+  for (const label of ['phase A', 'phase B']) {
     assert.match(src, new RegExp(`await this\\.waitAgentsUp\\('${label}'\\);\\n\\s*this\\.checkCodexArgv\\('${label}'\\);`), label);
   }
-  const m = src.slice(src.indexOf('  checkCodexArgv(label) {'), src.indexOf('  checkCodexSeed() {'));
+  assert.match(src, /await this\.waitAgentsUp\('rollback'\);\n\s*this\.checkCodexArgv\('rollback', `rb-\$\{IDS\.codex\}\.cjs`\);/, 'the rollback (1.1.74 on the stubs, both modes) binds its own stub (dry #10)');
+  const m = src.slice(src.indexOf('  checkCodexArgv(label, stubBasename = null) {'), src.indexOf('  checkCodexSeed() {'));
   assert.match(m, /const owner = this\.app\.proc\.pid;/);
   assert.match(m, /const pty = \(this\.agentPtys \|\| \[\]\)\.find\(\(x\) => x\.id === `pty-\$\{IDS\.codex\}`\) \|\| null;/, 'the pid the app reports');
-  assert.match(m, /if \(this\.args\.dryRun\) \{[\s\S]*stubPtyParentProblems\(procs, `\$\{IDS\.codex\}\.cjs`, owner, ptyPid\)[\s\S]*processes: procEvidence\(procs\)[\s\S]*this\.stop\([\s\S]*throw new Error\(`pty owner binding[\s\S]*return;\n    \}/, 'the dry run confirms the pty-owner binding, records the raw list, and fails if it does not hold');
+  assert.match(m, /const stub = stubBasename \|\| \(this\.args\.dryRun \? `\$\{IDS\.codex\}\.cjs` : null\);\n    if \(stub\) \{[\s\S]*stubPtyParentProblems\(procs, stub, owner, ptyPid\)[\s\S]*processes: procEvidence\(procs\)[\s\S]*this\.stop\([\s\S]*throw new Error\(`pty owner binding[\s\S]*return;\n    \}/, 'the dry run confirms the pty-owner binding, records the raw list, and fails if it does not hold');
   const w = src.slice(src.indexOf('  async waitAgentsUp(label) {'), src.indexOf('  async waitAgentsUp(label) {') + 1200);
   assert.match(w, /const ptys = await this\.ptys\(\);\n    this\.agentPtys = ptys;/, 'waitAgentsUp keeps the app-reported pty pids');
   assert.match(m, /r\.agentId === IDS\.codex\)\.pop\(\)/, 'the version row is lb-codex\'s own (Jim B8)');

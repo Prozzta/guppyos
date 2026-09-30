@@ -3097,7 +3097,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     await this.launch(this.exe174, '1.1.74+seams (rollback)');
     await this.openTheConfig();
     await this.waitAgentsUp('rollback');
-    this.checkCodexArgv('rollback');
+    this.checkCodexArgv('rollback', `rb-${IDS.codex}.cjs`);
     this.jailLinkGate('after launch rollback');
     let woke = false;
     try {
@@ -3470,8 +3470,11 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 
   /** Real run, after every launch: lb-codex runs the PRODUCT's argv with --no-daemon, or the run FAILS
-   *  (see codexSpawnArgvProblems). The dry run's lb-codex is a stub and starts no codex. */
-  checkCodexArgv(label) {
+   *  (see codexSpawnArgvProblems). The dry run's lb-codex is a stub and starts no codex; so is the
+   *  rollback's in BOTH modes (`rb-lb-codex.cjs`, seeded for 1.1.74), which `stubBasename` names. A
+   *  stub launch proves the pty-owner binding on that stub instead (dry #10: the rollback's stub is
+   *  rb-lb-codex.cjs, not lb-codex.cjs). */
+  checkCodexArgv(label, stubBasename = null) {
     const owner = this.app.proc.pid;
     let procs = [];
     let err = null;
@@ -3486,12 +3489,13 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const pty = (this.agentPtys || []).find((x) => x.id === `pty-${IDS.codex}`) || null;
     const ptyPid = pty ? Number(pty.pid) : null;
     const slug = label.replace(/[^a-z0-9]+/gi, '-');
-    if (this.args.dryRun) {
+    const stub = stubBasename || (this.args.dryRun ? `${IDS.codex}.cjs` : null);
+    if (stub) {
       // Jim F1, confirmed where it is cheap: the stub lb-codex goes through the same PtyManager
       // spawn, so its node process must be a DIRECT child of the app's main pid (the pty owner).
-      const problems = err ? [err] : stubPtyParentProblems(procs, `${IDS.codex}.cjs`, owner, ptyPid);
-      W.writeJson(path.join(this.s.report, `codex-pty-parent-${slug}.json`), { owner, ptyPid, problems, codexExeChild: 'N/A: the dry run\'s stub starts no codex.exe', processes: procEvidence(procs) });
-      if (!this.check(!problems.length, `dry run: lb-codex's PTY child is a direct child of the app main process, the binding the real-run argv check relies on (${label})`, problems.join('; ') || `parent ${owner}`)) {
+      const problems = err ? [err] : stubPtyParentProblems(procs, stub, owner, ptyPid);
+      W.writeJson(path.join(this.s.report, `codex-pty-parent-${slug}.json`), { owner, ptyPid, stub, problems, codexExeChild: `N/A: lb-codex runs the stub ${stub}, which starts no codex.exe`, processes: procEvidence(procs) });
+      if (!this.check(!problems.length, `${this.args.dryRun ? 'dry run' : 'stub launch'}: lb-codex's PTY child (${stub}) is a direct child of the app main process, the binding the real-run argv check relies on (${label})`, problems.join('; ') || `parent ${owner}`)) {
         this.stop(`the pty-owner binding does not hold (${label})`);
         throw new Error(`pty owner binding (${label}): ${problems.join('; ')}`);
       }

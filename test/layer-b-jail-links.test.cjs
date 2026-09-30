@@ -111,11 +111,11 @@ test('(a) wiring: the gate runs at the top of launch() (after the seed, before t
   const gate = launch.indexOf('this.jailLinkGate(`before launch ${label}`);');
   assert.ok(gate > 0 && gate < launch.indexOf('spawn(exe'), 'before the app is spawned');
   for (const label of ['phase A', 'phase B', 'rollback']) {
-    assert.match(src, new RegExp(`this\\.checkCodexArgv\\('${label}'\\);\\n\\s*this\\.jailLinkGate\\('after launch ${label}'\\);`), label);
+    assert.match(src, new RegExp(`this\\.checkCodexArgv\\('${label}'(, \`rb-\\$\\{IDS\\.codex\\}\\.cjs\`)?\\);\\n\\s*this\\.jailLinkGate\\('after launch ${label}'\\);`), label);
   }
   const main = src.slice(src.indexOf('async main() {'));
   assert.ok(main.indexOf('this.seed();') < main.indexOf("await this.launch(this.exe175, '1.1.75 (phase A)')"), 'the seed comes first');
-  const m = src.slice(src.indexOf('  jailLinkGate(label) {'), src.indexOf('  checkCodexArgv(label) {'));
+  const m = src.slice(src.indexOf('  jailLinkGate(label) {'), src.indexOf('  checkCodexArgv(label, stubBasename = null) {'));
   assert.doesNotMatch(m, /dryRun/, 'both modes');
   assert.match(m, /this\.stop\(/);
 });
