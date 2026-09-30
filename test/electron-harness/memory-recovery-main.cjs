@@ -37,13 +37,17 @@ writeFileSync(page, `<!doctype html><meta charset="utf-8"><title>memrecovery</ti
   const { ipcRenderer } = require('electron');
   let got = 0;
   ipcRenderer.on('pty:data:t1', () => { got += 1; if (got === 3) ipcRenderer.send('page:got3'); });
-  ipcRenderer.invoke('page:mode').then(({ mode, maxMb }) => {
+  // LOAD-FLAKES-176: the hog freezes ONLY on main's 'page:hog', which main sends after it has this
+  // page's 'ready' and has started the sampler. It once froze on a 50 ms timer of its own: when
+  // main answered 'page:notice' later than that (a loaded machine), the freeze won, 'ready' was
+  // never sent and main timed out waiting for it (FROZEN, "timed out waiting for ready").
+  ipcRenderer.on('page:hog', (_e, maxMb) => {
+    // FROZEN: never yields to the event loop again (so it cannot run a reload). It grows in
+    // 2 MB steps up to maxMb, then only spins.
+    const keep = []; for (;;) { if (keep.length * 2 < maxMb) keep.push(new Array(262144).fill(keep.length)); }
+  });
+  ipcRenderer.invoke('page:mode').then(({ mode }) => {
     ipcRenderer.invoke('page:notice').then((n) => ipcRenderer.send('page:ready', { mode, notice: n }));
-    if (mode === 'hog') {
-      // FROZEN: never yields to the event loop again (so it cannot run a reload). It grows in
-      // 2 MB steps up to maxMb, then only spins.
-      setTimeout(() => { const keep = []; for (;;) { if (keep.length * 2 < maxMb) keep.push(new Array(262144).fill(keep.length)); } }, 50);
-    }
   });
 </script>`);
 
@@ -59,7 +63,13 @@ let ticks = 0;
 const notices = new Map();
 setInterval(() => { ticks += 1; if (owner && !owner.isDestroyed()) { try { owner.send('pty:data:t1', 'x'); } catch { /* gone */ } } }, 40);
 ipcMain.handle('page:mode', () => { loads += 1; return { mode: loads === 1 ? 'hog' : 'calm', maxMb: HOG_MAX_MB }; });
-ipcMain.handle('page:notice', (e) => { const n = notices.get(e.sender.id) ?? null; notices.delete(e.sender.id); return n; });
+// LOAD-FLAKES-176 seam: answer 'page:notice' this late, as a loaded machine did (the test sets it,
+// so every run takes the order that once froze the page before its 'ready').
+const NOTICE_DELAY_MS = Number(argOf('notice-delay-ms', '0'));
+ipcMain.handle('page:notice', async (e) => {
+  if (NOTICE_DELAY_MS > 0) await new Promise((r) => setTimeout(r, NOTICE_DELAY_MS));
+  const n = notices.get(e.sender.id) ?? null; notices.delete(e.sender.id); return n;
+});
 
 const waiters = [];
 // An event that arrives BEFORE its waiter is registered is kept, not lost: under a busy machine
@@ -116,6 +126,8 @@ app.whenReady().then(async () => {
     });
     const timer = setInterval(() => sampler.sample(), 300);
     const hogStart = Date.now();
+    win.webContents.send('page:hog', HOG_MAX_MB);
+    note({ phase: 'hog-sent' });
     const gone = await waitFor('gone');
     const re = await waitFor('ready', (d) => d.wcId === first.wcId && d.mode === 'calm');
     await waitFor('got3', (d) => d.wcId === first.wcId);

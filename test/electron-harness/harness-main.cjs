@@ -37,6 +37,12 @@ const scenario = argOf('scenario');
 const width = Number(argOf('width', '1280'));
 const height = Number(argOf('height', '800'));
 const timeoutMs = Number(argOf('timeout', '30000'));
+// LOAD-FLAKES-176 (Jim): `--timeout` is the SCENARIO's budget, from `__harnessRun()` on. Building,
+// loading and evaluating the bundle (the real App is ~17 MB) is SETUP, with its own generous guard
+// that names the phase it stopped in. Under a saturated CPU setup alone once ate the whole 150 s
+// scenario budget of app-recovery before the scenario started (inline map: 58 MB, eval ~1 s idle,
+// ~100 s at a 40x throttle).
+const setupTimeoutMs = Number(argOf('setup-timeout', '300000'));
 
 // Isolated before anything can resolve a default path off the package name.
 // THE SANDBOX BELONGS TO THE PARENT (run.cjs), which creates it, passes it here as
@@ -114,7 +120,10 @@ async function bundleScenario(entry) {
     globalName: 'SCENARIO',
     platform: 'browser',
     target: 'chrome120',
-    sourcemap: 'inline',
+    // LOAD-FLAKES-176: no inline map by default. It was 40 of the App bundle's 58 MB, and the
+    // renderer parses all of it before the scenario can start. HARNESS_SOURCEMAP=1 restores it for
+    // a debugging run (stack traces into the .ts sources).
+    sourcemap: process.env.HARNESS_SOURCEMAP === '1' ? 'inline' : false,
     // `@` is the renderer's own root alias (electron.vite / tsconfig.web): a scenario that
     // mounts a real COMPONENT, not only terminalPool, pulls in modules that use it.
     alias: {
@@ -131,14 +140,19 @@ async function bundleScenario(entry) {
 }
 
 app.whenReady().then(async () => {
-  const timer = setTimeout(
-    () => finish({ ok: false, error: `harness timed out after ${timeoutMs}ms` }),
-    timeoutMs
+  // LOAD-FLAKES-176: setup (bundle, load, eval) and the scenario have separate budgets.
+  let phase = 'bundle';
+  const setupStart = Date.now();
+  const setupTimer = setTimeout(
+    () => finish({ ok: false, error: `harness setup timed out after ${setupTimeoutMs}ms in phase ${phase} (the scenario never started)` }),
+    setupTimeoutMs
   );
-  timer.unref?.();
+  setupTimer.unref?.();
+  let timer = null;
 
   ipcMain.once('harness:result', (_e, payload) => {
-    clearTimeout(timer);
+    clearTimeout(setupTimer);
+    if (timer) clearTimeout(timer);
     finish(payload);
   });
 
@@ -213,10 +227,21 @@ app.whenReady().then(async () => {
       finish({ ok: false, error: `renderer process gone: ${details.reason}` });
     });
 
+    phase = 'load';
     await win.loadFile(join(__dirname, 'page.html'));
     // Executed rather than script-tagged so a bundling or syntax error surfaces here
     // as a rejected promise instead of a silent blank page.
+    phase = 'eval';
     await win.webContents.executeJavaScript(code, true);
+    // The scenario's own budget starts HERE, with the scenario.
+    clearTimeout(setupTimer);
+    const setupMs = Date.now() - setupStart;
+    process.stderr.write(`[harness] setup ${setupMs} ms (bundle ${code.length} bytes)\n`);
+    timer = setTimeout(
+      () => finish({ ok: false, error: `harness timed out after ${timeoutMs}ms (scenario; setup took ${setupMs} ms before it)` }),
+      timeoutMs
+    );
+    timer.unref?.();
     await win.webContents.executeJavaScript('window.__harnessRun()', true);
   } catch (e) {
     finish({ ok: false, error: String((e && e.stack) || e) });
