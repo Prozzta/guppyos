@@ -131,8 +131,27 @@ test('GIT PROOF wiring: main runs it right after appEnv, before the seed and bef
   const main = src.slice(src.indexOf('async main() {'));
   const at = main.indexOf('this.proveNoGitCredentialHelper();');
   assert.ok(at > main.indexOf('this.appEnv(liveUserData);') && at < main.indexOf('this.seed();') && at < main.indexOf('await this.launch('));
-  const m = src.slice(src.indexOf('  proveNoGitCredentialHelper() {'), src.indexOf('  jailLinkGate(label) {'));
+  const m = src.slice(src.indexOf("  proveNoGitCredentialHelper(label = 'after appEnv') {"), src.indexOf('  jailLinkGate(label) {'));
   assert.doesNotMatch(m, /dryRun/);
   assert.match(m, /env: this\.env, encoding: 'utf8', windowsHide: true/);
   assert.match(m, /cwd: this\.s\.jail/);
+});
+
+test('Jim K2/K3: the helper preflight runs AGAIN after the seed and the credentials (before the first launch), and every proof, dry run included, lands in the report', (t) => {
+  const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+  const main = src.slice(src.indexOf('async main() {'));
+  const second = main.indexOf("this.proveNoGitCredentialHelper('after the seed and the credentials');");
+  assert.ok(second > main.indexOf('this.installCredentials();') && second > main.indexOf('this.seed();') && second < main.indexOf('await this.launch('), 'K2 order');
+  const git = lb.agentGitExe();
+  if (!git) { t.skip('no git on this machine'); return; }
+  const base = fs.mkdtempSync(path.join(JAIL, 'k3-'));
+  const run = new lb.LayerB(lb.parseArgs(['--dry-run-stubs']));
+  run.s = { base, jail: path.join(base, 'j'), devRoot: path.join(base, 'd') };
+  run.appEnv(path.join(JAIL, 'no-live-userdata'));
+  run.proveNoGitCredentialHelper();
+  run.proveNoGitCredentialHelper('after the seed and the credentials');
+  assert.deepEqual(run.proofs.gitHelper.map((p) => [p.label, p.status, p.stdout, p.problems.length]), [['after appEnv', 1, '', 0], ['after the seed and the credentials', 1, '', 0]]);
+  assert.equal(run.proofs.gitHelper[0].git, git);
+  assert.ok(run.checks.some((c) => c.ok && /prints nothing; after the seed and the credentials\)/.test(c.label)));
+  assert.match(src, /processes: this\.killReport \|\| \[\], proofs: this\.proofs \|\| \{\}/, 'the proofs go into the report JSON');
 });

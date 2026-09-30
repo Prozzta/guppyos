@@ -121,18 +121,24 @@ const LAUNCH = 'C:\\nvm4w\\nodejs\\node_modules\\@openai\\codex\\bin\\codex.js';
 const good = `"C:\\nvm4w\\nodejs\\node.exe" "${LAUNCH}" --model gpt-5.6-luna --sandbox workspace-write --ask-for-approval never --dangerously-bypass-hook-trust --no-daemon`;
 const row = { kind: 'codex-version', version: '0.157.1', cause: 'spawn', agentId: 'lb-codex' };
 const OWNER = 10;   // the app's main pid: node-pty runs in MAIN (pty.ts:691)
-const proc = (cmd, extra = {}) => ({ pid: 11, ppid: OWNER, name: 'node.exe', cmd, ...extra });
+const PTY = 11;     // the pid the APP reports for pty-lb-codex (listPtys)
+const proc = (cmd, extra = {}) => ({ pid: PTY, ppid: OWNER, name: 'node.exe', cmd, ...extra });
+const CODEX_EXE = 'C:\\nvm4w\\nodejs\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe';
+/** codex.js passes its argv to codex.exe verbatim: the child the real launcher has. */
+const childOf = (l, extra = {}) => ({ pid: l.pid + 1000, ppid: l.pid, name: 'codex.exe', cmd: String(l.cmd).replace(/^"[^"]*node\.exe"\s+"[^"]*codex\.js"/, `"${CODEX_EXE}"`), ...extra });
+/** Each node launcher in the list gets its codex.exe child (unless the list already has one for it). */
+const withChild = (procs) => [...procs, ...procs.filter((x) => /^node/i.test(x.name) && /codex\.js/.test(x.cmd) && !procs.some((c) => c.ppid === x.pid && /^codex/i.test(c.name))).map((x) => childOf(x))];
 
 test('runner: lb-codex\'s launcher with the product argv and --no-daemon passes; the codex.exe it starts and other processes are not launchers', () => {
-  assert.deepEqual(lb.codexSpawnArgvProblems([proc(good), { pid: 12, ppid: 11, name: 'codex.exe', cmd: 'codex.exe --model x' }, { pid: 13, ppid: 10, name: 'node.exe', cmd: 'node stub.cjs' }], row, codexSupportsNoDaemon, OWNER), []);
+  assert.deepEqual(lb.codexSpawnArgvProblems(withChild([proc(good), { pid: 13, ppid: 10, name: 'node.exe', cmd: 'node stub.cjs' }]), row, codexSupportsNoDaemon, OWNER, PTY), []);
   // Jim B7: only a NODE process running the launcher script counts; a shell whose command line
   // mentions codex.js (an agent's Bash, say) is not a second launcher.
-  assert.deepEqual(lb.codexSpawnArgvProblems([proc(good), { pid: 15, ppid: 11, name: 'cmd.exe', cmd: `cmd.exe /c node "${LAUNCH}" --no-daemon` }, { pid: 16, ppid: 11, name: 'powershell.exe', cmd: `powershell -c "& node '${LAUNCH}'"` }], row, codexSupportsNoDaemon, OWNER), []);
+  assert.deepEqual(lb.codexSpawnArgvProblems(withChild([proc(good), { pid: 15, ppid: 11, name: 'cmd.exe', cmd: `cmd.exe /c node "${LAUNCH}" --no-daemon` }, { pid: 16, ppid: 11, name: 'powershell.exe', cmd: `powershell -c "& node '${LAUNCH}'"` }]), row, codexSupportsNoDaemon, OWNER, PTY), []);
   assert.deepEqual(lb.winCmdTokens(`"C:\\a b\\node.exe" "${LAUNCH}" --no-daemon`), ['C:\\a b\\node.exe', LAUNCH, '--no-daemon']);
 });
 
 test('runner MUTANTS: no --no-daemon, a hand-written argv, --no-daemon twice, no/two launchers, no version row, a version the product gate refuses: every one FAILS', () => {
-  const f = (procs, r = row, g = codexSupportsNoDaemon, o = OWNER) => lb.codexSpawnArgvProblems(procs, r, g, o).join(' ');
+  const f = (procs, r = row, g = codexSupportsNoDaemon, o = OWNER, q = PTY) => lb.codexSpawnArgvProblems(withChild(procs), r, g, o, q).join(' ');
   assert.match(f([proc(good.replace(' --no-daemon', ''))]), /--no-daemon appears 0 times/);
   assert.match(f([proc(`node "${LAUNCH}" --model gpt-5.6-luna --sandbox workspace-write --ask-for-approval never --no-daemon`)]), /not the argv the product builds/);
   assert.match(f([proc(`${good} --no-daemon`)]), /appears 2 times/);
@@ -147,10 +153,31 @@ test('runner MUTANTS: no --no-daemon, a hand-written argv, --no-daemon twice, no
   assert.match(f([proc(good, { ppid: 99 })]), /its parent 99 is not the pty owner 10/, 'an agent-started launcher with the real one gone');
   assert.match(f([proc(good), proc(good, { pid: 14, ppid: 12 })]), /2 Codex launchers/, 'an agent-started launcher next to the real one');
   assert.match(f([proc(good)], row, codexSupportsNoDaemon, null), /pty-owning pid .* unknown/);
+  // Dry #9 lesson: the launcher is the pty child the APP reports, by pid.
+  assert.match(f([proc(good, { pid: 14 })]), /pid 14: not the pty child 11/, 'a launcher that is not the reported pty child');
+  assert.match(f([proc(good)], row, codexSupportsNoDaemon, OWNER, null), /the app reported no pty pid for lb-codex/);
+  assert.match(f([proc(good, { pid: 14 })], row, codexSupportsNoDaemon, OWNER, 99), /the pty child 99 the app reports is not among the app's descendants/);
+  assert.match(f([{ pid: PTY, ppid: OWNER, name: 'cmd.exe', cmd: 'cmd.exe /d /s /c "codex.cmd ..."' }, proc(good, { pid: 14, ppid: PTY })]), /its parent 11 is not the pty owner 10.*not the pty child 11/, 'a cmd.exe fallback wrapper fails');
+  // Doubled separators (the JSON.stringify'd registry command shape) still identify the launcher.
+  assert.equal(f([proc(good.replace(/\\/g, '\\\\'))]), '');
+});
+
+test('runner (Jim, optional follow-up): the launcher has EXACTLY ONE codex.exe child carrying the same --no-daemon, marker and F2 flags (a codex.js that rewrites argv is caught)', () => {
+  const f = (procs) => lb.codexSpawnArgvProblems(procs, row, codexSupportsNoDaemon, OWNER, PTY).join(' ');
+  const L = proc(good);
+  assert.equal(f([L, childOf(L)]), '');
+  assert.equal(f([L, childOf(L), { pid: 5000, ppid: childOf(L).pid, name: 'codex.exe', cmd: `"${CODEX_EXE}" --codex-run-as-apply-patch` }]), '', 'codex.exe helper grandchildren are not the launcher\'s children');
+  assert.match(f([L]), /pid 11: 0 codex\.exe children/);
+  assert.match(f([L, childOf(L), childOf(L, { pid: 1012 })]), /pid 11: 2 codex\.exe children/);
+  assert.match(f([L, childOf(L, { cmd: `"${CODEX_EXE}" --model gpt-5.6-luna --sandbox workspace-write --ask-for-approval never --dangerously-bypass-hook-trust` })]), /codex\.exe 1011: --no-daemon appears 0 times/, 'argv rewritten: --no-daemon dropped');
+  assert.match(f([L, childOf(L, { cmd: `"${CODEX_EXE}" --model gpt-5.6-luna --sandbox workspace-write --ask-for-approval never --no-daemon` })]), /codex\.exe 1011: no --dangerously-bypass-hook-trust/);
+  assert.match(f([L, childOf(L, { cmd: `${childOf(L).cmd} --dangerously-bypass-approvals-and-sandbox` })]), /codex\.exe 1011: REFUSED flag --dangerously-bypass-approvals-and-sandbox/);
+  assert.match(f([L, childOf(L, { cmd: childOf(L).cmd.replace('--sandbox workspace-write', '--sandbox danger-full-access') })]), /codex\.exe 1011: not exactly one `--sandbox workspace-write`/);
+  assert.match(f([L, childOf(L, { name: 'node.exe' })]), /0 codex\.exe children/, 'only a codex.exe counts');
 });
 
 test('runner (Jim F2): the launcher must carry exactly --sandbox workspace-write and --ask-for-approval never, and NONE of the bypass flags or overrides', () => {
-  const f = (cmd) => lb.codexSpawnArgvProblems([proc(cmd)], row, codexSupportsNoDaemon, OWNER).join(' ');
+  const f = (cmd) => lb.codexSpawnArgvProblems(withChild([proc(cmd)]), row, codexSupportsNoDaemon, OWNER, PTY).join(' ');
   assert.equal(f(good), '');
   assert.match(f(`${good} --dangerously-bypass-approvals-and-sandbox`), /REFUSED flag --dangerously-bypass-approvals-and-sandbox/, 'the renderer autoMode flag (store/config.ts:514)');
   for (const flag of ['--yolo', '--approve-for-me', '--not-so-yolo', '--full-auto', '--auto-review']) assert.match(f(`${good} ${flag}`), new RegExp(`REFUSED flag ${flag}`), flag);
@@ -179,16 +206,51 @@ test('runner (Jim F2): the launcher must carry exactly --sandbox workspace-write
     assert.match(f(`${good} ${flag}`), re, flag);
   }
   assert.deepEqual(lb.CODEX_WIDENING_FLAGS, [['--add-dir', null], ['--cd', '-C'], ['--profile', '-p'], ['--worktree', null]]);
+  // Jim K1: a quoted TOML key, and the permissions keys.
+  const t = (...extra) => lb.codexSafetyArgvProblems([...lb.winCmdTokens(good), ...extra]).join(' ');
+  assert.match(t('-c', '"sandbox_mode"="danger-full-access"'), /REFUSED override -c "sandbox_mode"/);
+  assert.match(t('-c', "'approval_policy'=never"), /REFUSED override -c 'approval_policy'/);
+  assert.match(t('--config="sandbox_mode"=x'), /REFUSED override -c "sandbox_mode"/);
+  for (const k of ['sandbox_permissions', 'default_permissions', 'permissions']) assert.match(t('-c', `${k}=["disk-full-write-access"]`), new RegExp(`REFUSED override -c ${k}`), k);
+  assert.equal(t('-c', 'permissionsx=1'), '', 'a key that only starts with a refused name is not refused');
 });
 
-test('runner (Jim F1, dry run): the stub lb-codex must be a direct child of the pty owner, exactly once', () => {
-  const stub = 'C:\\Dunder\\lbj\\0a1b2c3d\\s\\lb-codex.cjs';
-  const n = (ppid, extra = {}) => ({ pid: 30, ppid, name: 'node.exe', cmd: `"C:\\n\\node.exe" "${stub}"`, ...extra });
-  assert.deepEqual(lb.stubPtyParentProblems([n(10)], stub, 10), []);
-  assert.match(lb.stubPtyParentProblems([n(11)], stub, 10).join(' '), /parent is 11, not the pty owner 10/);
-  assert.match(lb.stubPtyParentProblems([], stub, 10).join(' '), /0 stub lb-codex processes/);
-  assert.match(lb.stubPtyParentProblems([n(10), n(10, { pid: 31 })], stub, 10).join(' '), /2 stub lb-codex processes/);
-  assert.deepEqual(lb.stubPtyParentProblems([n(10), { pid: 32, ppid: 30, name: 'cmd.exe', cmd: `cmd /c type "${stub}"` }], stub, 10), [], 'only node processes');
+/** Dry #9's REAL shape: the registry command is `${JSON.stringify(node)} ${JSON.stringify(stub)}`
+ *  (layer-b-run.cjs seed), split by the PRODUCT's tokenizeCommand and turned into the CreateProcess
+ *  command line by node-pty's own argsToCommandLine: every backslash arrives DOUBLED. */
+function dry9CommandLine(node, stub) {
+  const { tokenizeCommand } = require('./load-ts.cjs')('src/shared/commandLine.ts');
+  const { argsToCommandLine } = require('../node_modules/node-pty/lib/windowsPtyAgent.js');
+  const [exe, ...args] = tokenizeCommand(`${JSON.stringify(node)} ${JSON.stringify(stub)}`);
+  return argsToCommandLine(exe, args);
+}
+const DRY9 = { owner: 38660, pty: 88364, node: 'C:\\Users\\FiercePC\\AppData\\Local\\Temp\\md-rig-node-v20.19.5\\node.exe', stubs: 'C:\\Dunder\\lbj\\17f434f1\\s' };
+const dry9Procs = () => [
+  { pid: 27352, ppid: DRY9.owner, name: 'Munder Difflin.exe', cmd: '"Munder Difflin.exe" --type=gpu-process' },
+  { pid: 63256, ppid: DRY9.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY9.stubs, 'god.cjs')) },
+  { pid: 43256, ppid: DRY9.owner, name: 'conhost.exe', cmd: '\\??\\C:\\Windows\\system32\\conhost.exe 0x4' },
+  { pid: 40444, ppid: DRY9.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY9.stubs, 'lb-claude.cjs')) },
+  { pid: DRY9.pty, ppid: DRY9.owner, name: 'node.exe', cmd: dry9CommandLine(DRY9.node, path.join(DRY9.stubs, 'lb-codex.cjs')) },
+  { pid: 40372, ppid: DRY9.owner, name: 'conhost.exe', cmd: '\\??\\C:\\Windows\\system32\\conhost.exe 0x4' }
+];
+
+test('dry #9 ROOT CAUSE, reproduced with the product tokenizer and node-pty: the stub command line has DOUBLED backslashes, so the stubs-path substring (68ce7c57) matched 0 processes', () => {
+  const line = dry9CommandLine(DRY9.node, path.join(DRY9.stubs, 'lb-codex.cjs'));
+  assert.ok(line.includes('C:\\\\Dunder\\\\lbj\\\\17f434f1\\\\s\\\\lb-codex.cjs'), line);
+  assert.equal(line.toLowerCase().includes(path.join(DRY9.stubs, 'lb-codex.cjs').toLowerCase()), false, 'the 68ce7c57 match could never see it');
+});
+
+test('runner (Jim F1, dry run): the stub is identified by the pty pid the APP reports; parent = the pty owner, node, running lb-codex.cjs (dry #9 shape passes)', () => {
+  assert.deepEqual(lb.stubPtyParentProblems(dry9Procs(), 'lb-codex.cjs', DRY9.owner, DRY9.pty), [], 'the real dry #9 process list');
+  const edit = (patch) => dry9Procs().map((x) => (x.pid === DRY9.pty ? { ...x, ...patch } : x));
+  assert.match(lb.stubPtyParentProblems(edit({ ppid: 5 }), 'lb-codex.cjs', DRY9.owner, DRY9.pty).join(' '), /parent is 5, not the pty owner 38660/);
+  assert.match(lb.stubPtyParentProblems(edit({ name: 'cmd.exe' }), 'lb-codex.cjs', DRY9.owner, DRY9.pty).join(' '), /is cmd\.exe, not node/);
+  assert.match(lb.stubPtyParentProblems(edit({ cmd: 'node.exe C:\\x\\lb-claude.cjs' }), 'lb-codex.cjs', DRY9.owner, DRY9.pty).join(' '), /does not run lb-codex\.cjs/);
+  assert.match(lb.stubPtyParentProblems(edit({ cmd: 'node.exe C:\\x\\not-lb-codex.cjs' }), 'lb-codex.cjs', DRY9.owner, DRY9.pty).join(' '), /does not run lb-codex\.cjs/, 'the basename, not a suffix');
+  assert.match(lb.stubPtyParentProblems(dry9Procs(), 'lb-codex.cjs', DRY9.owner, 40444).join(' '), /does not run lb-codex\.cjs/, 'the lb-claude pty pid');
+  assert.match(lb.stubPtyParentProblems(dry9Procs(), 'lb-codex.cjs', DRY9.owner, 12345).join(' '), /not among the app's descendants/);
+  assert.match(lb.stubPtyParentProblems(dry9Procs(), 'lb-codex.cjs', DRY9.owner, undefined).join(' '), /reported no pty pid/);
+  assert.deepEqual(lb.procEvidence([{ pid: 1, ppid: 2, name: 'n', cmd: 'x --token sk-abcdefghijklmnopqrstuvwxyz0123456789', extra: 1 }]).map((x) => Object.keys(x)), [['pid', 'ppid', 'name', 'cmd']]);
 });
 
 test('runner wiring: after EVERY launch (phase A, phase B, rollback) the real run checks lb-codex\'s argv with the PRODUCT gate, and a failure stops the run', () => {
@@ -198,11 +260,15 @@ test('runner wiring: after EVERY launch (phase A, phase B, rollback) the real ru
   }
   const m = src.slice(src.indexOf('  checkCodexArgv(label) {'), src.indexOf('  checkCodexSeed() {'));
   assert.match(m, /const owner = this\.app\.proc\.pid;/);
-  assert.match(m, /if \(this\.args\.dryRun\) \{[\s\S]*stubPtyParentProblems\(procs, path\.join\(this\.s\.stubs, `\$\{IDS\.codex\}\.cjs`\), owner\)[\s\S]*this\.stop\([\s\S]*throw new Error\(`pty owner binding[\s\S]*return;\n    \}/, 'the dry run confirms the pty-owner binding and fails if it does not hold');
+  assert.match(m, /const pty = \(this\.agentPtys \|\| \[\]\)\.find\(\(x\) => x\.id === `pty-\$\{IDS\.codex\}`\) \|\| null;/, 'the pid the app reports');
+  assert.match(m, /if \(this\.args\.dryRun\) \{[\s\S]*stubPtyParentProblems\(procs, `\$\{IDS\.codex\}\.cjs`, owner, ptyPid\)[\s\S]*processes: procEvidence\(procs\)[\s\S]*this\.stop\([\s\S]*throw new Error\(`pty owner binding[\s\S]*return;\n    \}/, 'the dry run confirms the pty-owner binding, records the raw list, and fails if it does not hold');
+  const w = src.slice(src.indexOf('  async waitAgentsUp(label) {'), src.indexOf('  async waitAgentsUp(label) {') + 1200);
+  assert.match(w, /const ptys = await this\.ptys\(\);\n    this\.agentPtys = ptys;/, 'waitAgentsUp keeps the app-reported pty pids');
   assert.match(m, /r\.agentId === IDS\.codex\)\.pop\(\)/, 'the version row is lb-codex\'s own (Jim B8)');
   assert.match(m, /const problems = err \? \[err\] : codexSpawnArgvProblems/, 'a failed process query is a problem by itself (Jim B13)');
   assert.match(m, /load-ts\.cjs'\)\)\(path\.join\(REPO, 'src', 'main', 'codexCli\.ts'\)\)\.codexSupportsNoDaemon;\n/,'the PRODUCT gate, loaded from src/, not a copy');
-  assert.match(m, /: codexSpawnArgvProblems\(procs, row, gate, owner\);/, 'the verdict gets that gate and the pty owner unchanged');
+  assert.match(m, /: codexSpawnArgvProblems\(procs, row, gate, owner, ptyPid\);/, 'the verdict gets that gate, the pty owner and the pty pid unchanged');
+  assert.match(m, /problems, processes: procEvidence\(procs\) \}\);\n    if \(!this\.check\(!problems\.length, `lb-codex runs the PRODUCT/, 'the real run records the raw list too');
   assert.match(m, /try \{ procs = query\(owner\); \}/);
   assert.match(m, /PS_TREE_CMDLINES\(pid\)/, 'the app\'s own descendants (never a text match that could see itself)');
   assert.match(m, /this\.stop\(/);
@@ -269,9 +335,21 @@ test('checkCodexArgv (Jim F1) behaviour: the DRY run fails and stops when the st
   };
   const stub = path.join(root, 's', 'lb-codex.cjs');
   const dry = mk(true);
+  dry.agentPtys = [{ id: 'pty-god', pid: 29 }, { id: 'pty-lb-codex', pid: 30 }];
   dry.procQuery = () => [{ pid: 30, ppid: OWNER, name: 'node.exe', cmd: `"node.exe" "${stub}"` }];
   dry.checkCodexArgv('phase A');
   assert.equal(dry.stopped, null);
+  // Dry #9 end to end: its real process list and pids pass now (on 68ce7c57 this threw '0 stub lb-codex processes').
+  const d9 = mk(true);
+  d9.app = { proc: { pid: DRY9.owner } };
+  d9.agentPtys = [{ id: 'pty-god', pid: 63256 }, { id: 'pty-lb-claude', pid: 40444 }, { id: 'pty-lb-codex', pid: DRY9.pty }];
+  d9.procQuery = () => dry9Procs();
+  d9.checkCodexArgv('phase A dry9');
+  assert.equal(d9.stopped, null);
+  const ev = JSON.parse(fs.readFileSync(path.join(report, 'codex-pty-parent-phase-A-dry9.json'), 'utf8'));
+  assert.equal(ev.ptyPid, DRY9.pty);
+  assert.equal(ev.processes.length, 6, 'the raw process list is kept');
+  assert.match(ev.codexExeChild, /^N\/A: /, 'the codex.exe child check is N/A in the dry run');
   dry.procQuery = () => [{ pid: 30, ppid: 77, name: 'node.exe', cmd: `"node.exe" "${stub}"` }];
   assert.throws(() => dry.checkCodexArgv('phase B'), /pty owner binding \(phase B\): the stub's parent is 77/);
   assert.match(dry.stopped, /pty-owner binding does not hold/);
@@ -279,11 +357,12 @@ test('checkCodexArgv (Jim F1) behaviour: the DRY run fails and stops when the st
   assert.throws(() => dry.checkCodexArgv('rollback'), /the process query failed: EPERM/);
   const real = mk(false);
   real.rows = () => [row];
-  real.procQuery = () => [proc(good, { ppid: 55 })];
+  real.agentPtys = [{ id: 'pty-lb-codex', pid: PTY }];
+  real.procQuery = () => withChild([proc(good, { ppid: 55 })]);
   assert.throws(() => real.checkCodexArgv('phase A'), /its parent 55 is not the pty owner 10/);
   assert.match(real.stopped, /not the product's --no-daemon spawn/);
   real.stopped = null;
-  real.procQuery = () => [proc(good)];
+  real.procQuery = () => withChild([proc(good)]);
   real.checkCodexArgv('phase A');
   assert.equal(real.stopped, null);
 });

@@ -786,7 +786,7 @@ function jailGitEnvChain(appEnv) {
 }
 /** lb-codex's registry command (the request the product then builds on); the repro uses the same. */
 const lbCodexCommand = (model) => `codex --model ${model} --sandbox workspace-write --ask-for-approval never`;
-const CODEX_LAUNCHER = /[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js/i;
+const CODEX_LAUNCHER = /[\\/]+@openai[\\/]+codex[\\/]+bin[\\/]+codex\.js/i;   // doubled separators too (dry #9)
 const CODEX_PRODUCT_MARKER = '--dangerously-bypass-hook-trust';
 /** A Windows command line split like the CRT does for plain and double-quoted tokens. */
 function winCmdTokens(line) {
@@ -799,12 +799,18 @@ function winCmdTokens(line) {
 /** Why lb-codex's spawn is not the product's --no-daemon argv ([] = it is). `procs` = the app's
  *  descendants {pid, ppid, name, cmd}; `versionRow` = the app's last codex-version spawn row for
  *  lb-codex; `supportsNoDaemon` = the PRODUCT's codexSupportsNoDaemon. */
-function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon, ptyOwnerPid) {
+function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon, ptyOwnerPid, ptyPid) {
   const p = [];
   if (typeof supportsNoDaemon !== 'function') p.push('the product gate (codexSupportsNoDaemon) is not loaded');
   if (!versionRow) p.push('no codex-version spawn row for lb-codex: the product never read its CLI version at the spawn');
   else if (typeof supportsNoDaemon === 'function' && !supportsNoDaemon(versionRow.version)) p.push(`the product gate does not grant --no-daemon for codex ${versionRow.version}`);
   if (!Number.isInteger(ptyOwnerPid) || ptyOwnerPid <= 0) p.push('the pty-owning pid (the app main process) is unknown');
+  // Dry #9 lesson: identity by the pid the APP reports for pty-lb-codex, not by text. The product's
+  // shim decode (pty.ts resolveWindowsShimSpawn) starts `node <codex.js> <args>` itself, so the pty
+  // child IS the launcher. A cmd.exe fallback would put a wrapper between (and cut the hive protocol,
+  // pty.ts warns), so it fails here too.
+  if (!Number.isInteger(ptyPid) || ptyPid <= 0) p.push('the app reported no pty pid for lb-codex');
+  else if (!(procs || []).some((x) => x.pid === ptyPid)) p.push(`the pty child ${ptyPid} the app reports is not among the app's descendants`);
   // Only a NODE process running the npm launcher script is a launcher (Jim B7): a shell or any
   // other process whose command line merely mentions codex.js is not.
   const launchers = (procs || []).filter((x) => /^node(\.exe)?$/i.test(String(x.name)) && CODEX_LAUNCHER.test(String(x.cmd || '')));
@@ -814,11 +820,25 @@ function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon, ptyOwnerPid
     // ConPTY child's parent is the app's main pid; a launcher an agent tool started has a
     // codex/claude/shell parent.
     if (l.ppid !== ptyOwnerPid) p.push(`pid ${l.pid}: its parent ${l.ppid} is not the pty owner ${ptyOwnerPid}: not the product's own spawn`);
+    if (l.pid !== ptyPid) p.push(`pid ${l.pid}: not the pty child ${ptyPid} the app reports for lb-codex`);
     const t = winCmdTokens(l.cmd);
     const n = t.filter((a) => a === '--no-daemon').length;
     if (n !== 1) p.push(`pid ${l.pid}: --no-daemon appears ${n} times (exactly 1 required)`);
     if (!t.includes(CODEX_PRODUCT_MARKER)) p.push(`pid ${l.pid}: no ${CODEX_PRODUCT_MARKER}: not the argv the product builds`);
     p.push(...codexSafetyArgvProblems(t).map((x) => `pid ${l.pid}: ${x}`));
+    // Jim (optional, on the F1 rebind): the launcher's ONE codex.exe child carries the same flags, so
+    // a future codex.js that rewrites argv is caught. Direct children only: codex.exe's own helper
+    // children (arg0 tools, sandbox helpers) are its descendants, not the launcher's. No race: the
+    // check runs after waitAgentsUp saw the pty's output, which codex.exe draws.
+    const kids = (procs || []).filter((x) => x.ppid === l.pid && /^codex(\.exe)?$/i.test(String(x.name)));
+    if (kids.length !== 1) p.push(`pid ${l.pid}: ${kids.length} codex.exe children (exactly 1 expected)`);
+    for (const k of kids) {
+      const kt = winCmdTokens(k.cmd);
+      const kn = kt.filter((a) => a === '--no-daemon').length;
+      if (kn !== 1) p.push(`codex.exe ${k.pid}: --no-daemon appears ${kn} times (exactly 1 required)`);
+      if (!kt.includes(CODEX_PRODUCT_MARKER)) p.push(`codex.exe ${k.pid}: no ${CODEX_PRODUCT_MARKER}`);
+      p.push(...codexSafetyArgvProblems(kt).map((x) => `codex.exe ${k.pid}: ${x}`));
+    }
   }
   return p;
 }
@@ -830,12 +850,25 @@ function codexSpawnArgvProblems(procs, versionRow, supportsNoDaemon, ptyOwnerPid
  *  override of sandbox_mode / approval_policy. */
 /** Dry run: the stub's node process (its command line names the stub script) is exactly one, and a
  *  direct child of the pty owner. */
-function stubPtyParentProblems(procs, stubScript, ownerPid) {
-  const want = String(stubScript).toLowerCase();
-  const mine = (procs || []).filter((x) => /^node(\.exe)?$/i.test(String(x.name)) && String(x.cmd || '').toLowerCase().includes(want));
-  if (mine.length !== 1) return [`${mine.length} stub lb-codex processes under the app (exactly 1 expected)`];
-  return mine[0].ppid === ownerPid ? [] : [`the stub's parent is ${mine[0].ppid}, not the pty owner ${ownerPid}`];
+/** Dry run #9 root cause: the stub's registry command is `${JSON.stringify(node)} ${JSON.stringify(stub)}`,
+ *  so its tokens (tokenizeCommand keeps what is between the quotes) carry DOUBLED backslashes, and
+ *  node-pty's argsToCommandLine passes them through: the CommandLine never contained
+ *  path.join(stubs, 'lb-codex.cjs'), so a path substring matched 0 processes. Identity is now the
+ *  pid the APP reports for the pty (listPtys), cross-checked by name, parent and the script's
+ *  basename in a separator-normalised command line. */
+const normSeps = (s) => String(s || '').replace(/[\\/]+/g, '\\').toLowerCase();
+function stubPtyParentProblems(procs, stubBasename, ownerPid, ptyPid) {
+  if (!Number.isInteger(ptyPid) || ptyPid <= 0) return ['the app reported no pty pid for lb-codex'];
+  const x = (procs || []).find((p) => p.pid === ptyPid);
+  if (!x) return [`the pty child ${ptyPid} the app reports is not among the app's descendants`];
+  const p = [];
+  if (!/^node(\.exe)?$/i.test(String(x.name))) p.push(`the pty child ${ptyPid} is ${x.name}, not node`);
+  if (!normSeps(x.cmd).includes(`\\${String(stubBasename).toLowerCase()}`)) p.push(`the pty child ${ptyPid} does not run ${stubBasename}`);
+  if (x.ppid !== ownerPid) p.push(`the stub's parent is ${x.ppid}, not the pty owner ${ownerPid}`);
+  return p;
 }
+/** The app's process list for the evidence: pid, ppid, name and a redacted, bounded command line. */
+const procEvidence = (procs) => (procs || []).map((x) => ({ pid: x.pid, ppid: x.ppid, name: x.name, cmd: redact(String(x.cmd || '')).slice(0, 600) }));
 const CODEX_REFUSED_FLAGS = ['--dangerously-bypass-approvals-and-sandbox', '--yolo', '--approve-for-me', '--not-so-yolo', '--full-auto', '--auto-review'];
 function codexSafetyArgvProblems(tokens) {
   const t = (tokens || []).map(String);
@@ -2567,6 +2600,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       return want.every((id) => (l || []).some((p) => p.id === id && p.hasOutput));
     }, 2000);
     const ptys = await this.ptys();
+    this.agentPtys = ptys;   // the pids the app itself reports (checkCodexArgv binds lb-codex by it)
     for (const p of ptys) this.procs.known.has(p.pid) || log(`pty ${p.id} pid ${p.pid}`);
     // The god must be the STUB (never the real claude the renderer's god bootstrap would default to).
     const god = ptys.find((p) => p.id === `pty-${IDS.god}`);
@@ -3338,6 +3372,8 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.proveNoGitCredentialHelper();
       this.seed();
       this.installCredentials();
+      // Jim K2: again after the seed and the credential copy, so no later step adds a helper unseen.
+      this.proveNoGitCredentialHelper('after the seed and the credentials');
       this.factN4();
       // R1 zero-token proofs, before any agent: the Claude jail (both modes); the Codex sandbox probe
       // only in the real run behind --codex-sandbox-probe (the dry run starts no codex binary).
@@ -3407,13 +3443,15 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   /** Jim (GIT PROOF), before the first launch, both modes: in the jailed app env, git (the Program
    *  Files git codex would run) has NO credential helper at any config level. Local only: `git
    *  config` reads files, it opens no connection. Hidden; cwd = the jail (not a repository). */
-  proveNoGitCredentialHelper() {
+  proveNoGitCredentialHelper(label = 'after appEnv') {
     const git = agentGitExe();
     const r = git ? spawnSync(git, GIT_HELPER_ARGV, { cwd: this.s.jail, env: this.env, encoding: 'utf8', windowsHide: true, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] })
       : { error: new Error('no git found') };
     const problems = gitCredentialHelperProblems(r);
-    this.gitHelperProof = { git, argv: GIT_HELPER_ARGV, status: r.status, stdout: String(r.stdout || ''), problems };
-    if (!this.check(!problems.length, 'the agents\' git has NO credential helper in the jailed app env (git config --show-origin --get-all credential.helper prints nothing)', problems.join('; ') || `${git}: exit ${r.status}, no output`)) {
+    this.gitHelperProof = { label, git, argv: GIT_HELPER_ARGV, status: r.status, stdout: redact(String(r.stdout || '')), problems };
+    // Jim K3: every run (the dry run included) keeps each proof in the report (proofs.gitHelper).
+    this.proofs = { ...(this.proofs || {}), gitHelper: [...((this.proofs || {}).gitHelper || []), this.gitHelperProof] };
+    if (!this.check(!problems.length, `the agents' git has NO credential helper in the jailed app env (git config --show-origin --get-all credential.helper prints nothing; ${label})`, problems.join('; ') || `${git}: exit ${r.status}, no output`)) {
       this.stop('a git credential helper is reachable from the jail');
       throw new Error(`git credential helper check: ${problems.join('; ')}`);
     }
@@ -3444,11 +3482,15 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       return JSON.parse(String(r.stdout || '[]').trim() || '[]');
     });
     try { procs = query(owner); } catch (e) { err = `the process query failed: ${e.message}`; }
+    // The pid the APP reports for pty-lb-codex (listPtys, read by waitAgentsUp just before this).
+    const pty = (this.agentPtys || []).find((x) => x.id === `pty-${IDS.codex}`) || null;
+    const ptyPid = pty ? Number(pty.pid) : null;
+    const slug = label.replace(/[^a-z0-9]+/gi, '-');
     if (this.args.dryRun) {
       // Jim F1, confirmed where it is cheap: the stub lb-codex goes through the same PtyManager
       // spawn, so its node process must be a DIRECT child of the app's main pid (the pty owner).
-      const problems = err ? [err] : stubPtyParentProblems(procs, path.join(this.s.stubs, `${IDS.codex}.cjs`), owner);
-      W.writeJson(path.join(this.s.report, `codex-pty-parent-${label.replace(/[^a-z0-9]+/gi, '-')}.json`), { owner, problems });
+      const problems = err ? [err] : stubPtyParentProblems(procs, `${IDS.codex}.cjs`, owner, ptyPid);
+      W.writeJson(path.join(this.s.report, `codex-pty-parent-${slug}.json`), { owner, ptyPid, problems, codexExeChild: 'N/A: the dry run\'s stub starts no codex.exe', processes: procEvidence(procs) });
       if (!this.check(!problems.length, `dry run: lb-codex's PTY child is a direct child of the app main process, the binding the real-run argv check relies on (${label})`, problems.join('; ') || `parent ${owner}`)) {
         this.stop(`the pty-owner binding does not hold (${label})`);
         throw new Error(`pty owner binding (${label}): ${problems.join('; ')}`);
@@ -3457,10 +3499,10 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     }
     const gate = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'main', 'codexCli.ts')).codexSupportsNoDaemon;
     const row = this.rows().filter((r) => r.kind === 'codex-version' && r.cause === 'spawn' && r.agentId === IDS.codex).pop() || null;
-    const problems = err ? [err] : codexSpawnArgvProblems(procs, row, gate, owner);
-    const launcher = procs.find((x) => CODEX_LAUNCHER.test(String(x.cmd || '')));
-    W.writeJson(path.join(this.s.report, `codex-argv-${label.replace(/[^a-z0-9]+/gi, '-')}.json`), { row, launcher: launcher ? { pid: launcher.pid, cmd: redact(launcher.cmd) } : null, problems });
-    if (!this.check(!problems.length, `lb-codex runs the PRODUCT's Codex argv with --no-daemon (${label})`, problems.join('; ') || redact(launcher.cmd))) {
+    const problems = err ? [err] : codexSpawnArgvProblems(procs, row, gate, owner, ptyPid);
+    const launcher = procs.find((x) => x.pid === ptyPid) || null;
+    W.writeJson(path.join(this.s.report, `codex-argv-${slug}.json`), { row, owner, ptyPid, launcher: launcher ? { pid: launcher.pid, cmd: redact(launcher.cmd) } : null, problems, processes: procEvidence(procs) });
+    if (!this.check(!problems.length, `lb-codex runs the PRODUCT's Codex argv with --no-daemon (${label})`, problems.join('; ') || redact(launcher ? launcher.cmd : ''))) {
       this.stop(`lb-codex is not the product's --no-daemon spawn (${label})`);
       throw new Error(`lb-codex argv (${label}): ${problems.join('; ')}`);
     }
@@ -3480,7 +3522,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
