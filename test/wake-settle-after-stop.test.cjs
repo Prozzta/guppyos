@@ -173,3 +173,49 @@ test('P1 human turn in the window (proposal): a person\'s turn runs between the 
   c.noteHook('cx', 'Stop', '', t0 + 2200);
   assert.equal(c.state('cx').lifecycle, 'idle', 'and it closes normally');
 });
+
+// ───────────────────────────── Jim's pins on 55b8673f (P5, P9, P6)
+
+test('Jim P5: the claim turn RESETS at a new claim: claim 1\'s closed turn t1 never makes claim 2\'s settle "ended" while its turn t2 runs', () => {
+  const c = new WorkerWakeWatchdog();
+  const t0 = 90_000_000;
+  const c1 = claimed(c, t0);
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 1000, undefined, 't1');
+  c.settle(c1, 'COMMITTED', t0 + 1100, true);            // the normal order: settle before its Stop
+  c.noteHook('cx', 'Stop', '', t0 + 1700, undefined, 't1');
+  assert.equal(c.state('cx').lifecycle, 'idle');
+  const c2 = claimed(c, t0 + 80_000, ['m2']);
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 81_000, undefined, 't2');
+  assert.deepEqual(c.settle(c2, 'COMMITTED', t0 + 81_100, true), { endedBeforeSettle: false }, 'a stale t1 would re-pend m2 into the running t2 (a duplicate offer)');
+  assert.equal(c.state('cx').lifecycle, 'active');
+});
+
+test('Jim P9 (Codex): a HUMAN turn T1 starts and stops in the window, then the typed T2 starts; the settle leaves the agent ACTIVE (never forces idle over a running turn)', () => {
+  const c = new WorkerWakeWatchdog();
+  const t0 = 100_000_000;
+  const claim = claimed(c, t0);
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 300, undefined, 'T1');    // the person's turn
+  c.noteHook('cx', 'Stop', '', t0 + 900, undefined, 'T1');
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 1200, undefined, 'T2');   // our typed nudge's turn
+  c.settle(claim, 'COMMITTED', t0 + 1300, true);
+  assert.equal(c.state('cx').lifecycle, 'active', 'T2 is running');
+  c.reconcile('cx', ['m9']);
+  assert.equal(c.claim(facts('cx', t0 + 1400), 'delivery', 'event', t0 + 1400), null, 'new mail waits for T2');
+  c.noteHook('cx', 'Stop', '', t0 + 2000, undefined, 'T2');
+  assert.equal(c.state('cx').lifecycle, 'idle');
+});
+
+test('Jim P6: the claim turn is the FIRST start after the claim, not the latest (bounded: the claim\'s ids are spent once, whatever turn surfaces them)', () => {
+  const c = new WorkerWakeWatchdog();
+  const t0 = 110_000_000;
+  const claim = claimed(c, t0);
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 300, undefined, 'T1');    // the first start after the claim
+  c.noteHook('cx', 'Stop', '', t0 + 900, undefined, 'T1');
+  c.noteHook('cx', 'UserPromptSubmit', '', t0 + 1200, undefined, 'T2');   // a later start
+  // T1 (the first start) has ended: the settle reports it, so the caller spends the claim's ids once
+  // (repend) even though T2 is running; wakes stay refused while T2 is active.
+  assert.deepEqual(c.settle(claim, 'COMMITTED', t0 + 1300, true), { endedBeforeSettle: true });
+  assert.equal(c.state('cx').lifecycle, 'active');
+  assert.deepEqual(c.repend('cx', ['m1'], t0 + 1310, { turnEnded: true }).requeued, ['m1'], 'spent once');
+  assert.deepEqual(c.repend('cx', ['m1'], t0 + 1320, { turnEnded: true }).requeued, [], 'never twice');
+});
