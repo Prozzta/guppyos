@@ -535,7 +535,7 @@ test('F12 hook fires but returns nothing (the UserPromptSubmit shim dies silentl
   // Its turn start is confirmed by the rollout at the next beat (the UserPromptSubmit is still
   // silent); legacy-read acts the ids the CONFIRMED wake named, at its Stop (§11.18 #19).
   await waitFor(async () => { const s2 = await rig.call('wakeState', { id: 'cx-1' }); return !s2.inFlight; }, { what: 'the wake settled' });
-  await rig.waitStubsIdle({ what: 'the respawned stub started its turn' });   // LOAD-FLAKES-176: task_started written first
+  // LOAD-FLAKES-176: no stub wait here: the read-file above is written in runTurn after task_started.
   await rig.call('advance', { ms: 15_000 });
   await rig.beat();
   await waitFor(async () => !(await rig.call('wakeState', { id: 'cx-1' })).provisional, { what: 'turn start confirmed by the rollout' });
