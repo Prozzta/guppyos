@@ -18,7 +18,7 @@
  * HookServer finish its synchronous Stop response before any submit is attempted.
  * Electron-free; every effect is injected.
  */
-import { WORKER_WAKE_IDLE_MS, type InterferenceHow, type ProviderStatus, type WakeCause, type WakeClaim, type WakeMode, type WorkerWakeFacts, type WorkerWakeWatchdog } from './workerWake';
+import { WORKER_WAKE_IDLE_MS, type TurnEndProof, type InterferenceHow, type ProviderStatus, type WakeCause, type WakeClaim, type WakeMode, type WorkerWakeFacts, type WorkerWakeWatchdog } from './workerWake';
 
 /** §11.10: this many wakes in a row, with no mail block (or no hook traffic at all), degrade. */
 export const MAIL_DEGRADE_AFTER_WAKES = 3;
@@ -32,8 +32,9 @@ export interface InboxWakeMail {
   mode(agentId: string): string;
   /** Codex (§1.1): rollout task_complete for the SAME turn id closes that turn's epoch. */
   closeTurn(agentId: string, turnId: string): void;
-  /** §1.1 submit-unconfirmed: the epochs opened since the carrying wake's claim end abnormally. */
-  abortSince(agentId: string, since: number): void;
+  /** §1.1 submit-unconfirmed: the epochs opened since the carrying wake's claim end abnormally.
+   *  `reason` names the abnormal end (default submit-unconfirmed; the stall watchdog: stuck-active). */
+  abortSince(agentId: string, since: number, reason?: string): void;
   /** §1.1 / §11.4 backstop: epochs older than 30 min end abnormally (the bridge applies the idle
    *  gate). Returns the epochs closed. */
   closeStale(agentId: string, now: number): string[];
@@ -424,6 +425,72 @@ export class InboxWakeBridge {
     }
   }
 
+  /**
+   * WAKE-WATCHDOG-RECOVERY (P1b): recover an agent stuck ACTIVE with mail waiting (the decision
+   * is workerWake.recoverStuckActive). Deterministic, zero model tokens, and it never submits
+   * anything itself: it only ends the stuck epoch, and the reconcile claim below re-offers the
+   * mail through every existing guard and the one submit owner. A human hold (paused, halted,
+   * auto-delivery paused, an INTERFERED inhibition) is a decision, never a stall.
+   *
+   * Codex (CODEX-STOP-MISSING): when the rollout's newest turn boundary is a task_complete, that
+   * is the provider's proof the turn ended; the epoch closes (to unknown) after a short hook silence,
+   * and the turn's mail epoch closes normally, as a Stop would have. Otherwise, after the long
+   * quiet window, the open mail epochs end abnormally (`stuck-active`), so their delivered ids go
+   * back to pending once (then the F4 backoff).
+   */
+  private recoverStuckActive(agentId: string, inboxIds: readonly string[]): void {
+    if (inboxIds.length === 0) return;
+    const st = this.deps.coordinator.state(agentId);
+    if (st.lifecycle !== 'active' || st.provisional) return;
+    const f = this.deps.facts(agentId);
+    if (!f || f.paused || f.halted || f.autoDeliveryPaused || f.inhibited) return;
+    let proof: TurnEndProof | null = null;
+    const probe = this.deps.codexTurnProbe?.(agentId);
+    // The provider's own record says a turn is RUNNING (newest boundary task_started): D3 holds,
+    // silence never overrides it, not even the quiet rule.
+    if (probe && probe.ok && probe.latest?.kind === 'started') return;
+    if (probe && probe.ok && probe.latest?.kind === 'complete') proof = { turnId: probe.latest.turnId, at: probe.latest.at };
+    const out = this.deps.coordinator.recoverStuckActive(agentId, f, inboxIds.length, this.deps.now(), proof);
+    if (!out) return;
+    const row = { agentId, basis: out.basis, quietMs: out.quietMs, activeSince: out.activeSince, ids: inboxIds.length };
+    if (out.kind === 'gave-up') {
+      this.deps.diag?.('stuck-active', { ...row, recovered: false, why: 'max-recoveries', recoveries: out.recoveries });
+      try { this.deps.mail?.log?.({ kind: 'wake-stuck-active', ...row, recovered: false, why: 'max-recoveries', recoveries: out.recoveries }); } catch { /* logging never breaks the beat */ }
+      return;
+    }
+    this.deps.diag?.('stuck-active', { ...row, recovered: true, recovery: out.recovery, ...(out.turnId ? { turn: out.turnId } : {}) });
+    try { this.deps.mail?.log?.({ kind: 'wake-stuck-active', ...row, recovered: true, recovery: out.recovery, ...(out.turnId ? { turn: out.turnId } : {}) }); } catch { /* logging never breaks the beat */ }
+    if (out.basis === 'rollout-complete' && out.turnId) {
+      try { this.deps.mail?.closeTurn(agentId, out.turnId); } catch { /* the ledger logs its own failures */ }
+    } else {
+      try { this.deps.mail?.abortSince(agentId, 0, 'stuck-active'); } catch { /* best effort */ }
+    }
+    this.endMailWatch(agentId);
+    this.recovered.add(agentId);
+  }
+
+  /** Agents the watchdog recovered whose mail was not re-offered yet (see reofferHeld). */
+  private readonly recovered = new Set<string>();
+
+  /**
+   * god (WWR audit ruling): before the re-offer after a recovery, a FRESH provider check. While
+   * the recovered lifecycle is `unknown`, the reconcile claim already needs 12 s of PTY quiet
+   * (claim); for Codex, the rollout is read again right before it, and a turn that STARTED since
+   * holds the re-offer this beat (the turn's own hooks then take the lifecycle back to active).
+   * Cost: one bounded rollout-tail read per beat, only for a recovered Codex agent until its
+   * re-offer (the probe re-reads only when the file changed). Returns true to hold the claim.
+   */
+  private reofferHeld(agentId: string): boolean {
+    if (!this.recovered.has(agentId)) return false;
+    if (this.deps.coordinator.state(agentId).lifecycle !== 'unknown') { this.recovered.delete(agentId); return false; }
+    const probe = this.deps.codexTurnProbe?.(agentId);
+    if (probe && probe.ok && probe.latest?.kind === 'started') {
+      this.deps.diag?.('stuck-active', { agentId, recovered: true, reoffer: 'held', why: 'rollout-running' });
+      return true;
+    }
+    return false;
+  }
+
   /** The reconciliation beat: the same path, in reconcile mode, over every live agent. */
   reconcileAll(agentIds: readonly string[]): void {
     for (const agentId of agentIds) {
@@ -435,6 +502,9 @@ export class InboxWakeBridge {
         this.deps.coordinator.reconcile(agentId, ids, this.openIds(agentId));
         try { this.closeLostCodexTurn(agentId, ids); }
         catch (e) { this.deps.diag?.('codex-rollout', { agentId, closed: false, why: 'probe-threw', error: String(e) }); }
+        // WAKE-WATCHDOG-RECOVERY: after B1 (which needs the exact turn), before the beat's edges.
+        try { this.recoverStuckActive(agentId, ids); }
+        catch (e) { this.deps.diag?.('stuck-active', { agentId, recovered: false, why: 'threw', error: String(e) }); }
         // The beat's own lifecycle edges (deferred idle, unconfirmed submit, F4 retry), after the
         // reconcile so ids that are no longer delivered are not re-pended.
         const claimedAt = this.deps.coordinator.turnFacts(agentId).claimedAt;
@@ -452,6 +522,7 @@ export class InboxWakeBridge {
             ...(edge.kind === 'wake-retry' ? { idList: edge.ids, attempt: edge.attempt } : {})
           });
         }
+        if (this.reofferHeld(agentId)) continue;   // WAKE-WATCHDOG-RECOVERY: fresh rollout check
         this.requestInboxWake(agentId, 'reconcile', 'reconcile', ids);
       } catch (e) {
         this.deps.diag?.('throw', { agentId, cause: 'reconcile', mode: 'reconcile', error: String(e) });

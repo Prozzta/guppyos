@@ -24,7 +24,7 @@ const assert = require('node:assert/strict');
 const loadTs = require('./load-ts.cjs');
 
 const W = loadTs('src/main/workerWake.ts');
-const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
+const { WorkerWakeWatchdog, inboxWakeRequestId, inboxWakeClaimId, PROVIDER_IDLE_CONFIRM_MS, STOP_SETTLE_MS, SUBMIT_CONFIRM_MS, STUCK_ACTIVE_AFTER_MS, WORKER_WAKE_IDLE_MS, WAKE_RETRY_BASE_MS, WAKE_RETRY_MAX_MS, wakeRetryDelayMs } = W;
 const { InboxWakeBridge } = loadTs('src/main/inboxWakeBridge.ts');
 const OWN = loadTs('src/main/automaticSubmit.ts');
 const { ADMISSION_REASON } = loadTs('src/main/capacityAdmission.ts');
@@ -225,10 +225,17 @@ test('CODEX (2) a confirmed turn stays active until its Stop: UserPromptSubmit h
   await dwightCommitted(hook);
   hook.bridge.onHook('dwight', 'UserPromptSubmit', undefined);
   assert.equal(hook.coordinator.state('dwight').provisional, false);
-  hook.now += 10 * SUBMIT_CONFIRM_MS;
+  // WAKE-WATCHDOG-RECOVERY (1.1.76) amends D3: silence never closes a confirmed turn INSIDE the
+  // watchdog window. After STUCK_ACTIVE_AFTER_MS with no hook and no PTY output the watchdog
+  // recovers it to `unknown` (never `idle`), with a durable row; see wake-watchdog-recovery.test.cjs.
+  hook.now += STUCK_ACTIVE_AFTER_MS - 1_000;
   hook.bridge.reconcileAll(['dwight']);
-  assert.equal(hook.coordinator.state('dwight').lifecycle, 'active', 'D3: silence never closes a confirmed turn');
+  assert.equal(hook.coordinator.state('dwight').lifecycle, 'active', 'D3: silence never closes a confirmed turn (inside the window)');
   assert.equal(hook.reqs.length, 1);
+  hook.now += 1_000;
+  hook.bridge.reconcileAll(['dwight']);
+  assert.equal(hook.coordinator.state('dwight').lifecycle, 'unknown', 'after the window: the watchdog, to unknown (never idle)');
+  assert.ok(hook.diags.some((d) => d.stage === 'stuck-active' && d.recovered === true && d.basis === 'quiet'));
 
   const probe = { current: { ok: true, latest: { kind: 'complete', turnId: '01a0dc65', at: T('06:27:56.300') } } };
   const roll = floor({ probe });
@@ -242,6 +249,11 @@ test('CODEX (2) a confirmed turn stays active until its Stop: UserPromptSubmit h
   roll.bridge.reconcileAll(['dwight']);
   assert.equal(roll.coordinator.state('dwight').lifecycle, 'active');
   assert.equal(roll.reqs.length, 1);
+  // WAKE-WATCHDOG-RECOVERY: while the rollout says a turn is RUNNING, not even its quiet rule acts.
+  roll.now += 2 * STUCK_ACTIVE_AFTER_MS;
+  roll.bridge.reconcileAll(['dwight']);
+  assert.equal(roll.coordinator.state('dwight').lifecycle, 'active');
+  assert.ok(!roll.diags.some((d) => d.stage === 'stuck-active'));
 });
 
 test('WAKE-155 C2: a genuine task_started between claim and async settle confirms the committed wake', async () => {
@@ -317,11 +329,11 @@ test('WAKE-155 CODEX: a legacy false-confirmed active epoch is made provisional 
   assert.ok(f.diags.some((d) => d.stage === 'codex-stuck-active' && d.recovered === true));
 });
 
-test('CODEX (2) a provider with no turn-start signal keeps "COMMITTED is active until Stop" (never provisional)', async () => {
+test('CODEX (2) a provider with no turn-start signal keeps "COMMITTED is active until Stop or the watchdog window" (never provisional)', async () => {
   const f = floor({ confirms: false });
   await dwightCommitted(f);
   assert.equal(f.coordinator.state('dwight').provisional, false);
-  f.now += 10 * SUBMIT_CONFIRM_MS;
+  f.now += STUCK_ACTIVE_AFTER_MS - 1_000;   // WAKE-WATCHDOG-RECOVERY: its window is the limit now
   f.bridge.reconcileAll(['dwight']);
   assert.equal(f.coordinator.state('dwight').lifecycle, 'active');
   assert.equal(f.reqs.length, 1);

@@ -200,7 +200,7 @@ test('D3 REGRESSION: a RUNNING agent plus more than 12s of PTY silence is still 
 
 // ─── the incident, and the recovery ─────────────────────────────────────────
 
-test('THE FALSE-ACTIVE STALL: a COMMITTED wake with no terminal proof NEVER submits again, however long the silence', async () => {
+test('THE FALSE-ACTIVE STALL: a COMMITTED wake with no terminal proof is recovered ONCE by the watchdog (16 min of silence), with exactly one further guarded submit', async () => {
   const f = floor({ ids: ['m1'] });
   f.coordinator.noteProviderStatus('a1', 'idle', NOW, FIXTURE_SESSION);
   f.bridge.onDelivery('a1', 'm1');
@@ -215,9 +215,14 @@ test('THE FALSE-ACTIVE STALL: a COMMITTED wake with no terminal proof NEVER subm
   f.facts.lastOutputAt = NOW;
   f.bridge.onDelivery('a1', 'm2');
   await f.flush();
-  for (let i = 0; i < 5; i++) { f.bridge.reconcileAll(['a1']); await f.flush(); }
-  assert.equal(f.owner.calls.length, 1, 'NOT ONE further submission - announce only, exactly as the incident behaved');
+  // WAKE-WATCHDOG-RECOVERY (1.1.76) replaces "never again": inside its window silence still
+  // changes nothing (D3), and past it the watchdog recovers the epoch ONCE (to unknown, not idle)
+  // and the reconcile path makes exactly one further guarded claim.
+  assert.equal(f.owner.calls.length, 1, 'the delivery alone submits nothing more');
   assert.equal(f.coordinator.whyNoClaim('a1'), 'lifecycle-active', 'and it says which guard held');
+  for (let i = 0; i < 5; i++) { f.bridge.reconcileAll(['a1']); await f.flush(); }
+  assert.equal(f.owner.calls.length, 2, 'exactly ONE further submission, through the owner');
+  assert.equal(f.diag.filter((d) => d.stage === 'stuck-active' && d.recovered === true).length, 1, 'one recovery, and it says so');
 });
 
 test('THE RECOVERY: one matching native idle closes the epoch and produces EXACTLY ONE guarded claim', async () => {
@@ -537,7 +542,7 @@ test('READ_AT: the shim stamps it, and the hook server threads it into the norma
 
 // ─── N9: god's ruling, pinned ───────────────────────────────────────────────
 
-test('N9 (superseded 2026-09-26): PreInvocation IS a coordinator active edge, and ACTIVE_EVENTS is exactly these six', () => {
+test('N9 (superseded 2026-09-26): PreInvocation IS a coordinator active edge, and ACTIVE_EVENTS is exactly these four', () => {
   // god's ruling of 2026-09-24 kept PreInvocation out because agy's Stop then fired only on
   // process EXIT, so an active edge had no guaranteed terminal. Since 1.1.52 (Y2) agy's
   // hooks load and a Stop arrives at the end of EVERY turn (Jim, WAKE-BUGS-152 (1): Phyllis
@@ -546,10 +551,15 @@ test('N9 (superseded 2026-09-26): PreInvocation IS a coordinator active edge, an
   // the Stop-settle window, and that confirms our own submit. The count is still pinned.
   const wake = src('src/main/workerWake.ts');
   const members = between(wake, 'const ACTIVE_EVENTS = new Set(', ');');
-  for (const e of ['UserPromptSubmit', 'PreInvocation', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact']) {
+  for (const e of ['UserPromptSubmit', 'PreInvocation', 'PreToolUse', 'PostToolUse']) {
     assert.ok(members.includes(`'${e}'`), `${e} is an active edge`);
   }
-  assert.equal((members.match(/'/g) ?? []).length / 2, 6, 'exactly six, so an addition fails here');
+  assert.equal((members.match(/'/g) ?? []).length / 2, 4, 'exactly four, so an addition fails here');
+  // CODEX-STOP-MISSING (1.1.76): the compaction hooks are NOT active edges any more (a
+  // compaction-only turn never gets a Stop); they are handled as COMPACT_EVENTS
+  // (wake-watchdog-recovery.test.cjs replays Dwight's turn).
+  assert.doesNotMatch(members, /Compact/);
+  assert.match(between(wake, 'const COMPACT_EVENTS = new Set(', ');'), /'PreCompact', 'PostCompact'/);
 
   // And behaviourally: PreInvocation is a turn start (active, not a retry edge).
   const f = floor();
