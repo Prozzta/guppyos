@@ -75,7 +75,7 @@ const waiters = [];
 // An event that arrives BEFORE its waiter is registered is kept, not lost: under a busy machine
 // the page can report 'got3' before the harness awaits it (that race once failed the suite).
 const early = [];
-const waitFor = (name, pred = () => true, ms = 600_000) => new Promise((resolve, reject) => {
+const waitFor = (name, pred = () => true, ms = 120_000) => new Promise((resolve, reject) => {
   const hit = early.findIndex((e) => e.name === name && pred(e.data));
   if (hit >= 0) { const [e] = early.splice(hit, 1); resolve(e.data); return; }
   const w = { name, pred, resolve };

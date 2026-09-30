@@ -315,6 +315,11 @@ class Rig {
     await waitFor(() => this.stubsIdle(), { what, timeoutMs, intervalMs: 80, diag: () => Promise.all(this.agentIds.map((id) => this.diagnose(id))).then((d) => d.join('\n')) });
   }
 
+  /** LOAD-FLAKES-176: how far the stubs have got (their transcript records). A hold's busy bound counts
+   *  time with NO progress, so a long but advancing real turn (F7: 16 tools under slow hooks) is waited
+   *  out, while a stuck one still fails with the reason. */
+  progress() { let n = 0; for (const id of this.agentIds) n += this.transcript(id).length; return n; }
+
   async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true, holdWhileBusy = false, holdForStubs = false, busyTimeoutMs = 90_000, diag } = {}) {
     // Jim A2: every "never held" carries the wake state of the agents (or the caller's `diag`), so
     // the next flake names itself. busyTimeoutMs 90 s leaves room in the 180 s test budget for a
@@ -336,22 +341,24 @@ class Rig {
       // simulated-time rules (SUBMIT_CONFIRM_MS, the one-time re-announce, the retry backoff)
       // against real process timing, so the outcome depended on machine load.
       if (holdWhileBusy) {
-        const until = Date.now() + busyTimeoutMs;
+        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
         for (;;) {
           if (await fn()) return true;
           if (!(await this.call('busy'))) break;
-          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms (the clock was not moved under it)`);
+          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
+          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under it)`);
           await sleep(80);
         }
       }
       // LOAD-FLAKES-176: with holdForStubs the clock moves only once the real processes are idle
       // (see stubsIdle); `fn` is re-checked meanwhile.
       if (holdForStubs || !quietOk) {
-        const until = Date.now() + busyTimeoutMs;
+        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
         for (;;) {
           if (await fn()) return true;
           if (await this.stubsIdle()) break;
-          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms (the clock was not moved under them)`);
+          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
+          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under them)`);
           await sleep(80);
         }
       }

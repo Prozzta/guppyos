@@ -45,7 +45,7 @@ test('holdWhileBusy: once quiet, the clock moves (one step per beat), never whil
 
 test('holdWhileBusy: an agent that stays busy fails with that reason after busyTimeoutMs, having never moved the clock', async () => {
   const { rig, calls } = scripted({ busyFor: Infinity });
-  await assert.rejects(rig.beatUntil(() => false, { what: 're-surfaced', settle: false, holdWhileBusy: true, busyTimeoutMs: 300, pauseMs: 0 }), /re-surfaced never held, and the agent stayed busy for 300 ms \(the clock was not moved under it\)/);
+  await assert.rejects(rig.beatUntil(() => false, { what: 're-surfaced', settle: false, holdWhileBusy: true, busyTimeoutMs: 300, pauseMs: 0 }), /re-surfaced never held, and the agent stayed busy for 300 ms with no stub progress \(the clock was not moved under it\)/);
   assert.equal(calls.filter((c) => c.cmd === 'advance').length, 0);
 });
 
@@ -102,7 +102,7 @@ test('settle: when quiet() runs out, the step holds for the stubs instead of mov
   await a.rig.beatUntil(() => (k += 1) > 10, { what: 'x', pauseMs: 0 });
   for (const c of a.calls.filter((x) => x.cmd === 'advance')) assert.ok(c.reads > 5, 'no advance while the stubs were busy');
   const b = stubScripted({ busyFor: Infinity, quiet: false });
-  await assert.rejects(b.rig.beatUntil(() => false, { what: 'y', pauseMs: 0, busyTimeoutMs: 200, diag: async () => 'D' }), /y never held, and the stubs stayed busy for 200 ms \(the clock was not moved under them\)\nD/);
+  await assert.rejects(b.rig.beatUntil(() => false, { what: 'y', pauseMs: 0, busyTimeoutMs: 200, diag: async () => 'D' }), /y never held, and the stubs stayed busy for 200 ms with no stub progress \(the clock was not moved under them\)\nD/);
   assert.equal(b.calls.filter((c) => c.cmd === 'advance').length, 0);
 });
 
@@ -136,4 +136,13 @@ test('no rig test cues a tool raw: every tool call goes through Rig.tool, which 
     fs.readFileSync(path.join(__dirname, f), 'utf8').split(/\r?\n/).forEach((l, n) => { if (/cue: 'tool'/.test(l)) raw.push(`${f}:${n + 1}`); });
   }
   assert.deepEqual(raw, []);
+});
+
+test('the busy bound counts time with NO stub progress: an advancing turn is waited out, a stalled one still fails', async () => {
+  const a = stubScripted({ busyFor: Infinity, quiet: false });
+  const t0 = Date.now();
+  a.rig.progress = () => Math.min(Date.now() - t0, 400);   // advances for 400 ms, then stalls
+  await assert.rejects(a.rig.beatUntil(() => false, { what: 'z', pauseMs: 0, busyTimeoutMs: 150, diag: async () => '' }), /z never held, and the stubs stayed busy for 150 ms with no stub progress/);
+  assert.ok(Date.now() - t0 >= 400 + 150, `waited while it advanced, then one bound more (${Date.now() - t0} ms)`);
+  assert.equal(a.calls.filter((c) => c.cmd === 'advance').length, 0);
 });
