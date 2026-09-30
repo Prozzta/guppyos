@@ -71,6 +71,11 @@ Rollback: 1.1.74 (reinstall).
   already trusted or distrusted there keeps your choice. When a trusted folder has its own
   `.codex/config.toml` that sets sandbox, approval, tool-server or hook settings, the app logs a
   warning; the agent's own sandbox and approval settings still apply.
+- **A resumed session keeps its old instructions (known limitation).** An agent whose session is
+  resumed after the upgrade keeps the instructions it started with until the session is replaced,
+  so it may still move its mail files the old way. Mail stays correct: the app tolerates an agent
+  that moves files, and never counts a move as handled. The only cost is some lost savings until the
+  session rotates. God broadcasts the new rule once after install. A fix is planned for 1.1.76.
 - **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
   unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
   broadcasts one reminder, "move your mail again", because agents may have noted the new rule in
