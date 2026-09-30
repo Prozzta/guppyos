@@ -39,13 +39,119 @@ const OLD = 'aaaaaaaa-0000-4000-8000-000000000001';
 const NEW = 'bbbbbbbb-0000-4000-8000-000000000002';
 const CLR = 'cccccccc-0000-4000-8000-000000000003';
 
-test('promptFingerprint hashes exactly the --append-system-prompt value', () => {
-  assert.equal(R.promptFingerprint(['--model', 'x']), null);
-  assert.equal(R.promptFingerprint(['--append-system-prompt']), null);
-  const a = R.promptFingerprint(['--x', '--append-system-prompt', 'PROMPT v1', '--model', 'm']);
-  assert.match(a, /^[0-9a-f]{16}$/);
-  assert.equal(R.promptFingerprint(['--append-system-prompt', 'PROMPT v1']), a, 'other args do not count');
-  assert.notEqual(R.promptFingerprint(['--append-system-prompt', 'PROMPT v2']), a, 'a prompt change changes it');
+// — the normaliser: one test per thing it strips, and proof that instructions still count —
+
+const { LEGACY_175_PROMPT_FP } = loadTs('src/main/sessionRotationLegacy.ts');
+
+/** A hive whose prompt inputs the test controls. */
+function promptHive(t, { maySpawn = false } = {}) {
+  const home = fs.mkdtempSync(path.join(FAKE_HOME, 'fp-'));
+  const hive = new HiveManager(() => home);
+  hive.setOrchestratorMaySpawn(maySpawn);
+  t.after(() => hive.dispose());
+  return hive;
+}
+const WORKER = { id: 'jim', name: 'Jim', provider: 'claude', cwd: 'C:/w' };
+/** The fingerprint with the given inputs, and the raw (unnormalised) prompt for contrast. */
+function fpWith(hive, meta, { mem = true, kg = false, kgPath, mode, dir = 'C:/hive/agents/jim', root = 'C:/hive' } = {}) {
+  if (mode) hive.promptMailMode = () => mode;
+  const raw = hive.injectedPrompt(meta, dir, root, mem, kg, kgPath);
+  const mailMode = hive.promptMailMode(meta);
+  const canon = hive.injectedPrompt(meta, dir, root, mem, kg, kgPath, { mailMode });
+  return { raw, fp: R.canonicalPromptFingerprint(canon) };
+}
+
+test('normaliser strips memory availability (memory line AND protocol line 1 wording)', (t) => {
+  const hive = promptHive(t);
+  const on = fpWith(hive, WORKER, { mem: true }), off = fpWith(hive, WORKER, { mem: false });
+  assert.notEqual(on.raw, off.raw, 'the raw prompt does change');
+  assert.match(on.raw, /memory search/);
+  assert.equal(on.fp, off.fp, 'a memory service down at a restart never rotates');
+  assert.equal(hive.sessionPromptFingerprint(WORKER).fp, on.fp, 'sessionPromptFingerprint is the canonical render');
+});
+
+test('normaliser strips the Knowledge Graph line and its CLI path', (t) => {
+  const hive = promptHive(t);
+  const off = fpWith(hive, WORKER), on = fpWith(hive, WORKER, { kg: true, kgPath: 'C:/kg/cli.js' }), other = fpWith(hive, WORKER, { kg: true, kgPath: 'D:/other/kg.js' });
+  assert.notEqual(on.raw, off.raw);
+  assert.equal(on.fp, off.fp);
+  assert.equal(other.fp, off.fp);
+});
+
+test('normaliser strips the RUNNING BUILD line (version, packaged/dev, app path)', (t) => {
+  const hive = promptHive(t);
+  hive.setRuntimeInfo({ version: '1.1.75', packaged: true, appPath: 'C:/A/app.asar' });
+  const a = fpWith(hive, WORKER);
+  hive.setRuntimeInfo({ version: '1.1.76', packaged: false, appPath: 'D:/dev' });
+  const b = fpWith(hive, WORKER);
+  hive.setRuntimeInfo(null);
+  const c = fpWith(hive, WORKER);
+  assert.match(a.raw, /RUNNING BUILD: Munder Difflin v1\.1\.75/);
+  assert.notEqual(a.raw, b.raw);
+  assert.equal(a.fp, b.fp);
+  assert.equal(a.fp, c.fp);
+});
+
+test('normaliser strips the agent name/id, workspace, hive root and node path (one fp per variant)', (t) => {
+  const hive = promptHive(t);
+  const jim = fpWith(hive, WORKER, { dir: 'C:\\hive\\agents\\jim', root: 'C:\\hive' });
+  const andy = fpWith(hive, { ...WORKER, id: 'andy', name: 'Andy' }, { dir: '/home/x/hive/agents/andy', root: '/home/x/hive' });
+  const orig = hive.nodeCommand.bind(hive);
+  hive.nodeCommand = () => 'Z:/elsewhere/node.exe';
+  const node = fpWith(hive, WORKER);
+  hive.nodeCommand = orig;
+  assert.notEqual(jim.raw, andy.raw);
+  assert.equal(jim.fp, andy.fp, 'separators and identities are normalised');
+  assert.equal(node.fp, jim.fp);
+});
+
+test('instructions still count: mail mode, role and the spawn-queue line change the fingerprint', (t) => {
+  const hive = promptHive(t);
+  const inject = fpWith(hive, WORKER, { mode: 'inject' }).fp;
+  assert.notEqual(fpWith(hive, WORKER, { mode: 'legacy-read' }).fp, inject, 'a mail-mode degrade rotates');
+  assert.notEqual(fpWith(hive, { ...WORKER, isGod: true }, { mode: 'inject' }).fp, inject);
+  const spawnHive = promptHive(t, { maySpawn: true });
+  assert.notEqual(fpWith(spawnHive, { ...WORKER, isGod: true }, { mode: 'inject' }).fp, fpWith(hive, { ...WORKER, isGod: true }, { mode: 'inject' }).fp);
+  assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isGod: true }).variant, 'claude|inject|god');
+  assert.equal(spawnHive.sessionPromptFingerprint({ ...WORKER, isGod: true }).variant, 'claude|inject|god+spawn');
+  assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isAssistant: true }).variant, 'claude|inject|assistant');
+});
+
+test('LEGACY_175 table: 16 variants, and 1.1.76 does not change the instruction text (nobody rotates at install)', (t) => {
+  // TRIPWIRE. If a later change edits the prompt's instructions, this fails: the install of that
+  // build will rotate every 1.1.75-era session, which is then correct. Do NOT regenerate the table
+  // (it describes what 1.1.75 sessions got); change this assertion to notEqual deliberately.
+  assert.equal(Object.keys(LEGACY_175_PROMPT_FP).length, 16);
+  for (const role of ['worker', 'assistant', 'god', 'god+spawn']) {
+    const hive = promptHive(t, { maySpawn: role === 'god+spawn' });
+    const meta = { ...WORKER, isGod: role.startsWith('god'), isAssistant: role === 'assistant' };
+    for (const mode of ['inject', 'legacy-read', 'legacy-move', 'work-order']) {
+      hive.promptMailMode = () => mode;
+      const cur = hive.sessionPromptFingerprint(meta);
+      assert.equal(cur.variant, `claude|${mode}|${role}`);
+      assert.equal(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], cur.variant);
+    }
+  }
+});
+
+test('resumeDecision: an unstamped session takes the 1.1.75 stamp of its variant, then compares as usual', () => {
+  const legacy = { 'claude|inject|worker': 'f175' };
+  assert.deepEqual(R.resumeDecision(undefined, 'claude|inject|worker', 'f175', legacy), { stale: null, stampLegacy: 'f175' }, 'unchanged text: resumes');
+  assert.deepEqual(R.resumeDecision(undefined, 'claude|inject|worker', 'f176', legacy), { stale: 'prompt-changed', stampLegacy: 'f175' }, 'changed text: rotates');
+  assert.deepEqual(R.resumeDecision(undefined, 'claude|nope|worker', 'f176', legacy), { stale: 'prompt-unrecorded', stampLegacy: null }, 'unknown variant: rotates');
+  assert.deepEqual(R.resumeDecision('f176', 'claude|inject|worker', 'f176', legacy), { stale: null, stampLegacy: null }, 'a stamp is never replaced');
+  assert.deepEqual(R.resumeDecision('fOLD', 'claude|inject|worker', 'f176', legacy), { stale: 'prompt-changed', stampLegacy: null });
+  assert.deepEqual(R.resumeDecision(undefined, 'claude|inject|worker', null, legacy), { stale: null, stampLegacy: 'f175' }, 'nothing to compare: never stale');
+  assert.equal(R.resumeDecision(undefined, 'claude|inject|worker', 'x').stampLegacy, LEGACY_175_PROMPT_FP['claude|inject|worker'], 'defaults to the build-time table');
+});
+
+test('stampSession stamps only an unstamped session', async (t) => {
+  const { hive, reg } = await oneAgent(t);
+  assert.equal(hive.stampSession('jim', OLD, 'f175'), true);
+  assert.equal(reg().sessionPrompts[OLD], 'f175');
+  assert.equal(hive.stampSession('jim', OLD, 'other'), false);
+  assert.equal(reg().sessionPrompts[OLD], 'f175');
+  assert.equal(hive.stampSession('nobody', OLD, 'f'), false);
 });
 
 test('staleReason: changed, unrecorded, equal, and nothing to compare', () => {
@@ -146,7 +252,8 @@ test('main: an automatic resume rotates a stale session; the fallback obeys the 
   const src = read('src/main/index.ts');
   const block = src.slice(src.indexOf('const explicitSid = typeof opts.resumeSessionId'), src.indexOf('opts.args = args;', src.indexOf('const explicitSid = typeof opts.resumeSessionId')));
   assert.ok(block.length > 0);
-  assert.match(block, /const promptFp = promptFingerprint\(args\);/, 'the fingerprint is taken from the args actually passed');
+  assert.match(block, /const promptInfo = hive\.enabled\(\) \? hive\.sessionPromptFingerprint\(\{ \.\.\.opts\.hive, cwd: opts\.cwd, provider \}\) : null;/, 'the normalised fingerprint of this agent');
+  assert.match(block, /const d = resumeDecision\(hive\.sessionPromptStamp\(opts\.hive!\.id, s\), promptInfo\?\.variant \?\? null, promptFp\);\s*if \(d\.stampLegacy && hive\.stampSession\(opts\.hive!\.id, s, d\.stampLegacy\)\)/, 'legacy sessions are stamped, then compared');
   assert.ok(block.indexOf('const promptFp') > block.indexOf('const explicitSid'));
   assert.match(block, /if \(sid && !explicitSid\) \{\s*const why = staleFor\(sid\);\s*if \(why\) \{[\s\S]*?kind: 'session-rotate'[\s\S]*?sid = undefined;/, 'automatic resume of a stale session starts fresh');
   assert.match(block, /else if \(sid && explicitSid && staleFor\(sid\)\) \{\s*hive\.appendLog\(\{ kind: 'session-resume-stale'/, 'a typed id is resumed, and logged');

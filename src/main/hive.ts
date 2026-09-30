@@ -68,7 +68,7 @@ const AGY_LEASE_HEARTBEAT_MS = 60 * 60 * 1000;
 import { AGY_STATUSLINE_SHIM } from './agyStatuslineShim';
 import { geminiHome } from './capacityScope';
 import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHookMcp';
-import { withSessionStamp } from './sessionRotation';
+import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -1823,6 +1823,36 @@ export class HiveManager {
     return this.registry().agents[agentId]?.sessionPrompts?.[sessionId];
   }
 
+  /**
+   * SESSION-PROMPT-ROTATION: the fingerprint of the NORMALISED prompt this agent gets now, and
+   * its variant key (provider|mail mode|role), which selects the build-time 1.1.75 stamp for a
+   * session recorded before stamps existed. The normalisation is the canonical render of
+   * injectedPrompt; what it fixes is listed on CANONICAL_PROMPT (sessionRotation.ts).
+   */
+  sessionPromptFingerprint(meta: AgentMeta): { fp: string; variant: string } {
+    const mailMode = this.promptMailMode(meta);
+    const text = this.injectedPrompt(meta, '', '', false, false, undefined, { mailMode });
+    return {
+      fp: canonicalPromptFingerprint(text),
+      variant: promptVariant(meta.provider ?? 'claude', mailMode, meta.isGod ? (this.orchestratorMaySpawn() ? 'god+spawn' : 'god') : meta.isAssistant ? 'assistant' : 'worker')
+    };
+  }
+
+  /** SESSION-PROMPT-ROTATION: stamp an UNSTAMPED session (a 1.1.75-era one, with the build-time
+   *  1.1.75 fingerprint). Never overwrites a stamp. Returns whether it wrote. */
+  stampSession(agentId: string, sessionId: string, fp: string): boolean {
+    const root = this.root();
+    if (!root || !sessionId || !fp) return false;
+    try {
+      const reg = this.registryForMutation();
+      const agent = reg.agents[agentId];
+      if (!agent || agent.sessionPrompts?.[sessionId]) return false;
+      agent.sessionPrompts = withSessionStamp(agent.sessionPrompts, sessionId, fp);
+      this.atomicWriteJson(join(root, 'registry.json'), reg);
+      return true;
+    } catch { return false; }
+  }
+
   /** SESSION-PROMPT-ROTATION: note the prompt fingerprint of the process just spawned for
    *  `agentId`, and the session it resumed (null = fresh). A null fp forgets the note. */
   noteSpawnPrompt(agentId: string, fp: string | null, resumedSid: string | null): void {
@@ -2150,8 +2180,22 @@ export class HiveManager {
     root: string,
     semanticMemory: boolean,
     knowledgeGraph: boolean,
-    kgCliPath?: string
+    kgCliPath?: string,
+    canonical?: { mailMode: MailPromptMode }
   ): string {
+    // SESSION-PROMPT-ROTATION: the mail mode is read with the REAL id (the ledger is per agent).
+    // A CANONICAL render (the rotation fingerprint's input, see sessionPromptFingerprint) fixes
+    // every volatile or per-agent input: memory on, KG off, no RUNNING BUILD line, and
+    // placeholders for name, id, workspace, hive root and the node path.
+    const mailMode = canonical ? canonical.mailMode : this.promptMailMode(meta);
+    if (canonical) {
+      meta = { ...meta, name: CANONICAL_PROMPT.name, id: CANONICAL_PROMPT.id };
+      dir = CANONICAL_PROMPT.agentDir;
+      root = CANONICAL_PROMPT.hiveRoot;
+      semanticMemory = true;
+      knowledgeGraph = false;
+      kgCliPath = undefined;
+    }
     // Native-separator path helpers — see the 🪟 note above.
     const inDir = (...parts: string[]): string => join(dir, ...parts);
     const inRoot = (...parts: string[]): string => join(root, ...parts);
@@ -2166,7 +2210,7 @@ export class HiveManager {
     // and the KG CLI are both fixed absolute paths for an install, so baking them
     // keeps the prefix prompt-cache-stable while making the command runnable in
     // cmd.exe/PowerShell as well as a POSIX shell.
-    const hiveNode = this.nodeCommand();
+    const hiveNode = canonical ? CANONICAL_PROMPT.node : this.nodeCommand();
     const kgCli = kgCliPath || (process.platform === 'win32' ? '%KG_CLI%' : '$KG_CLI');
     const knowledgeLine = knowledgeGraph
       ? `Enterprise knowledge: this organisation has a private Knowledge Graph of its own documents, policies, and business context. When a task needs that context — company-specific facts, house style, internal processes — query it instead of guessing: run \`"${hiveNode}" "${kgCli}" search "<query>"\` for ranked passages, \`"${hiveNode}" "${kgCli}" list\` to see what is available, and \`"${hiveNode}" "${kgCli}" get <id>\` for a full document. (That first path is the harness's bundled Node — use it instead of bare \`node\`, which may not be on your PATH.)`
@@ -2175,7 +2219,7 @@ export class HiveManager {
     // which KIND of build, they were running inside, so anything that varies
     // between a packaged app and a local dev run (umask being the one that bit
     // us) was invisible to every investigation.
-    const rt = this.runtimeInfo();
+    const rt = canonical ? null : this.runtimeInfo();
     const runtimeLine = rt
       ? `RUNNING BUILD: Munder Difflin v${rt.version}, ${rt.packaged ? 'packaged app' : 'local dev build'}${rt.appPath ? `, from ${rt.appPath}` : ''}. Say this version if asked which one is running, and do not assume behaviour from an older one. A local dev build inherits the launching shell's environment (umask included) where a packaged app does not, so file modes and inherited env can legitimately differ between the two. \`log.jsonl\` records an \`app-start\` event on every launch, which is how you spot a restart or a build switch (it rotates at 8 MB: search \`log*.jsonl\` for older rows).`
       : '';
@@ -2209,7 +2253,7 @@ export class HiveManager {
       // for one agent, re-sent on every later request of the job). The digest, or its tail.
       // PINNED-MEMORY: but first the standing method lessons, which the rollover never archives.
       // ZT-I1-MAIL §5 P1 (+ §11.12(c)): the mail sentence follows the agent's mail mode (§11.7).
-      protocolLineOne(this.promptMailMode(meta), semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
+      protocolLineOne(mailMode, semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
       `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
       '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
@@ -2218,7 +2262,7 @@ export class HiveManager {
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
       meta.provider === 'codex' ? CODEX_OUTPUT_HYGIENE_LINE : '',
       meta.provider === 'codex'
-        ? (this.promptMailMode(meta) === 'inject'
+        ? (mailMode === 'inject'
           ? 'Codex mail wake: the automatic inbox-check prompt is a wake sentinel. Its hook delivers your new mail into this turn as a <hive-mail> block; handle it from there.'
           : 'Codex inbox wake: the automatic inbox-check prompt is a wake sentinel. Its hook supplies current inbox facts; read your authoritative inbox and handle its current messages.')
         : '',

@@ -79,7 +79,7 @@ import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
-import { promptFingerprint, staleReason, type StaleReason } from './sessionRotation';
+import { resumeDecision, type StaleReason } from './sessionRotation';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -3728,8 +3728,18 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // SESSION-PROMPT-ROTATION: an AUTOMATIC resume never continues a session started with a
     // different system prompt (or one from before the stamps): the old prompt would stay in
     // force (B4). It starts fresh instead. A typed id or Restart & Continue is honoured.
-    const promptFp = promptFingerprint(args);
-    const staleFor = (s: string): StaleReason | null => staleReason(hive.sessionPromptStamp(opts.hive!.id, s), promptFp);
+    // The fingerprint is of the NORMALISED prompt (sessionRotation.ts CANONICAL_PROMPT): memory,
+    // KG and build/path lines never count. An unstamped (1.1.75-era) session is first stamped
+    // with the build-time 1.1.75 fingerprint of its variant, then compared as usual.
+    const promptInfo = hive.enabled() ? hive.sessionPromptFingerprint({ ...opts.hive, cwd: opts.cwd, provider }) : null;
+    const promptFp = promptInfo?.fp ?? null;
+    const staleFor = (s: string): StaleReason | null => {
+      const d = resumeDecision(hive.sessionPromptStamp(opts.hive!.id, s), promptInfo?.variant ?? null, promptFp);
+      if (d.stampLegacy && hive.stampSession(opts.hive!.id, s, d.stampLegacy)) {
+        hive.appendLog({ kind: 'session-stamp-legacy', agentId: opts.hive!.id, sessionId: s, fp: d.stampLegacy, variant: promptInfo?.variant ?? null, stale: d.stale });
+      }
+      return d.stale;
+    };
     const rotated: string[] = [];
     if (sid && !explicitSid) {
       const why = staleFor(sid);
