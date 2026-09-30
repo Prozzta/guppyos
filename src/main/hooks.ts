@@ -291,6 +291,13 @@ export class HookServer {
   private codexCapacity = new CodexRolloutCapacitySource();
   /** One delayed diagnostic per agent/session if hook traffic never produces a reading. */
   private codexNoReading = new Map<string, CodexNoReading>();
+  /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
+  private onWakeIncarnation?: (agentId: string, token: string) => void;
+
+  /** WAKE-SCREEN-GUARD R2-4: set by main once (the constructor's observer stays as it was). */
+  setWakeIncarnationObserver(fn: ((agentId: string, token: string) => void) | undefined): void {
+    this.onWakeIncarnation = fn;
+  }
 
   constructor(
     private hive: HiveManager,
@@ -308,7 +315,7 @@ export class HookServer {
      *  synchronously BEFORE this server returns its hook response. It must not submit
      *  or block: the inbox-wake bridge only records lifecycle/HITL state here and defers
      *  any retry with setImmediate, so the response (Stop included) is unchanged. */
-    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string, wakeIncarnation?: string) => void,
+    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string) => void,
     /** L0 — provider allowance observed on the status line. Optional so the server
      *  runs unchanged where no tracker is wired (tests, and any build without L0).
      *  HookServer deliberately does not hold the tracker: it hands over a
@@ -1528,8 +1535,12 @@ export class HookServer {
       // §11.9: `source` (SessionStart startup|resume|clear|compact) reaches the hook diag row.
       this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
         typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
-        typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined,
-        typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation ? p.munder_wake_incarnation.slice(0, 80) : undefined);
+        typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
+    }
+    // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
+    // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.
+    if (!fromSubagent && agentId && event === 'SessionStart' && typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation) {
+      try { this.onWakeIncarnation?.(agentId, p.munder_wake_incarnation.slice(0, 80)); } catch { /* never breaks a hook */ }
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);

@@ -762,6 +762,13 @@ control.setTransitionObserver((agentId, transition) => {
     inboxWake?.onControlRelease(agentId);
   }
 });
+// WAKE-SCREEN-GUARD R2-4 (after the HookServer below exists): a Codex SessionStart of the LIVE
+// incarnation latches it past startup - an extra proof; the screen reading is the usual one. A
+// stale token does nothing.
+function onWakeIncarnation(agentId: string, token: string): void {
+  const proven = wakeIncarnationTokens.resolve(token, agentId, { ptyForAgent: (a) => ptyForAgent(a), incarnation: (p) => ptyManager.incarnation(p) });
+  if (proven) automaticSubmit.latchPostHandoff(proven.ptyId, proven.incarnation);
+}
 const hookServer = new HookServer(
   hive,
   () => liveWebContents(),
@@ -771,16 +778,7 @@ const hookServer = new HookServer(
   standingGoalFromRoster,
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
-  (agentId, event, message, fullyIdle, turnId, source, wakeIncarnation) => {
-    if (agentId) hookSeenAt.set(agentId, Date.now());
-    // WAKE-SCREEN-GUARD R2-4: a Codex SessionStart of the LIVE incarnation latches it past
-    // startup (an extra proof; the screen reading is the usual one). A stale token does nothing.
-    if (event === 'SessionStart' && wakeIncarnation) {
-      const proven = wakeIncarnationTokens.resolve(wakeIncarnation, agentId, { ptyForAgent: (a) => ptyForAgent(a), incarnation: (p) => ptyManager.incarnation(p) });
-      if (proven) automaticSubmit.latchPostHandoff(proven.ptyId, proven.incarnation);
-    }
-    inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
-  },
+  (agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); },
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
@@ -804,6 +802,7 @@ const hookServer = new HookServer(
     liveWebContents()?.send('hive:providerStatus', { agentId, status: tick.lifecycle });
   }
 );
+hookServer.setWakeIncarnationObserver(onWakeIncarnation);
 // HEAVY-JOB-SERIALIZE: the machine's heavy-job slots (Settings "Heavy jobs at once", read live).
 // PreToolUse takes or denies a slot; a background job's slot is freed by a hidden process check
 // that runs ONLY while a slot is held; PTY exit and a TTL free the rest. Holders go to fleet.json.

@@ -619,9 +619,10 @@ test('R2-4 wiring: the spawn env names the token, the hook observer hands it on,
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /const wakeToken = provider === 'codex' && opts\.hive\?\.id \? WakeIncarnationTokens\.mint\(\) : null;\s*if \(wakeToken\) opts\.env = \{ \.\.\.\(opts\.env \?\? \{\}\), \[WAKE_INCARNATION_ENV\]: wakeToken \};\s*const res = await ptyManager\.spawn\(opts, owner\);/);
   assert.match(idx, /wakeIncarnationTokens\.register\(wakeToken, opts\.hive\.id, opts\.id, ptyManager\.incarnation\(opts\.id\)\)/);
-  assert.match(idx, /if \(event === 'SessionStart' && wakeIncarnation\) \{[\s\S]{0,300}automaticSubmit\.latchPostHandoff\(proven\.ptyId, proven\.incarnation\)/);
+  assert.match(idx, /function onWakeIncarnation\(agentId: string, token: string\): void \{\s*const proven = wakeIncarnationTokens\.resolve\(token, agentId, [^\n]+\n\s*if \(proven\) automaticSubmit\.latchPostHandoff\(proven\.ptyId, proven\.incarnation\);/);
+  assert.match(idx, /\n\);\nhookServer\.setWakeIncarnationObserver\(onWakeIncarnation\);/, 'registered right after the HookServer is built');
   const hooks = readSource('src/main/hooks.ts');
-  assert.match(hooks, /typeof p\.munder_wake_incarnation === 'string' && p\.munder_wake_incarnation \? p\.munder_wake_incarnation\.slice\(0, 80\) : undefined\);/);
+  assert.match(hooks, /if \(!fromSubagent && agentId && event === 'SessionStart' && typeof p\.munder_wake_incarnation === 'string' && p\.munder_wake_incarnation\) \{\s*try \{ this\.onWakeIncarnation\?\.\(agentId, p\.munder_wake_incarnation\.slice\(0, 80\)\); \}/, 'only the agent\'s own SessionStart hands the token on');
 });
 
 // ─── The renderer answers with the shared reader ────────────────────────────────────────
