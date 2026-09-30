@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
-## [1.1.75] — 2026-09-28
+## [1.1.75] — 2026-09-30
 
 **The app now handles the mail: agents get each message's text directly and never read or move inbox files.**
 Rollback: 1.1.74 (reinstall).
