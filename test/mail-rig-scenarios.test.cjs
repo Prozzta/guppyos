@@ -96,13 +96,13 @@ test('SCENARIO Codex stale task_complete: a replayed completion of the PREVIOUS 
   const rig = await startRig(t);
   await rig.setup([{ id: 'cx-1', flavour: 'codex', scenario: { manualTurns: true } }]);
   const m1 = await rig.call('send', { to: 'cx-1', subject: 'turn one', body: 'first' });
-  await rig.beatUntil(() => rig.contexts('cx-1').some((c) => c.ids.includes(m1.id)), { what: 'turn 1 surfaced', settle: false });
+  await rig.beatUntil(() => rig.contexts('cx-1').some((c) => c.ids.includes(m1.id)), { what: 'turn 1 surfaced', settle: false, holdWhileBusy: true });
   rig.cue('cx-1', { cue: 'stop' });
   await waitFor(() => acted(rig, 'cx-1', m1.id), { what: 'turn 1 acted' });
   const turn1 = (await waitFor(() => rig.turnEnds('cx-1')[0], { what: 'turn 1 ended' })).turn;
 
   const m2 = await rig.call('send', { to: 'cx-1', subject: 'turn two', body: 'second' });
-  await rig.beatUntil(() => rig.contexts('cx-1').some((c) => c.ids.includes(m2.id)), { what: 'turn 2 surfaced', settle: false });
+  await rig.beatUntil(() => rig.contexts('cx-1').some((c) => c.ids.includes(m2.id)), { what: 'turn 2 surfaced', settle: false, holdWhileBusy: true });
   const turn2 = rig.contexts('cx-1').find((c) => c.ids.includes(m2.id)).turn;
   assert.notEqual(turn2, turn1);
   await waitFor(async () => (await rig.entry('cx-1', m2.id)).state === 'surfaced' || (await rig.entry('cx-1', m2.id)).state === 'surfacing', { what: 'm2 surfacing' });
@@ -111,6 +111,11 @@ test('SCENARIO Codex stale task_complete: a replayed completion of the PREVIOUS 
   for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 15_000 }); await rig.beat(); await sleep(250); }
   assert.notEqual((await rig.entry('cx-1', m2.id)).state, 'acted', 'the stale completion acted nothing');
   rig.cue('cx-1', { cue: 'lost-stop' });   // #45: turn 2 completes in the rollout; its Stop hook is lost
+  // LOAD-FLAKES-176: the clock moves only once the stub has written turn 2's task_complete (an
+  // EVENT); moving it while the cue was still queued behind a slow stub raced the product's
+  // simulated-time rules against real process timing. The lost Stop keeps the agent busy, so
+  // holdWhileBusy cannot be used here: the beats that read the rollout must run.
+  await waitFor(() => rig.turnEnds('cx-1').some((r) => r.how === 'lost-stop' && r.turn === turn2), { what: 'turn 2 closed in the rollout' });
   await rig.beatUntil(() => acted(rig, 'cx-1', m2.id), { what: 'acted by the rollout close of ITS turn', stepMs: 15_000, settle: false });
   const row = (await rig.rows('mail')).find((r) => r.stage === 'acted' && r.ids.includes(m2.id));
   assert.equal(row.epoch, turn2, 'the epoch is the Codex turn_id of turn 2');

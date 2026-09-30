@@ -45,6 +45,11 @@ function post(port, body, timeoutMs) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// LOAD-FLAKES-176: RIG_SLOW_STUB_MS makes every stub hook wait that long first (a loaded machine,
+// reproduced on purpose). Off by default; used to show a step's outcome does not depend on speed.
+const SLOW_STUB_MS = Number(process.env.RIG_SLOW_STUB_MS || 0);
+const slowed = (s) => (SLOW_STUB_MS > 0 ? { ...s, scenario: { ...(s.scenario || {}), slowStubMs: SLOW_STUB_MS } } : s);
+
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 function killTree(pid) {
   if (!pid || !pidAlive(pid)) return;
@@ -216,6 +221,7 @@ class Rig {
 
   /** god (registered, no PTY) + the given fake agents, each up and past its boot grace. */
   async setup(specs, { god = true } = {}) {
+    specs = specs.map(slowed);
     if (god) await this.call('register', { id: 'god-1', name: 'Michael', provider: 'claude', isGod: true });
     for (const s of specs) {
       const r = await this.call('spawn', s);
@@ -254,6 +260,7 @@ class Rig {
 
   /** Spawn an agent AGAIN (a restart in place, or the tab restored after an app restart). */
   async respawn(s) {
+    s = slowed(s);
     const before = this.transcript(s.id).filter((r) => r.kind === 'start').length;
     const r = await this.call('spawn', s);
     if (!r.ok) throw new Error(`respawn ${s.id} failed: ${r.error}`);

@@ -282,6 +282,7 @@ class FakeAgent {
   manual() { return this.scenario.manualTurns === true; }
 
   async runTurn(prompt) {
+    if (this.scenario.slowStubMs > 0) await sleep(this.scenario.slowStubMs);   // LOAD-FLAKES-176 (see hook())
     if (this.flavour === 'custom' || this.flavour === 'cursor' || this.flavour === 'qwen') return this.hooklessTurn(prompt);
     this.turn = { id: this.flavour === 'codex' ? `turn-${uuid()}` : `t${++this.turnSeq}`, prompt, startedAt: now() };
     this.writeComposer();
@@ -534,6 +535,8 @@ class FakeAgent {
   /** Fire one hook through this flavour's real transport. Resolves {response, transport, exit}. */
   async hook(event, extra) {
     if (this.hung) return null;
+    // LOAD-FLAKES-176: a slow machine, reproduced on purpose (RIG_SLOW_STUB_MS, see driver.cjs).
+    if (this.scenario.slowStubMs > 0) await sleep(this.scenario.slowStubMs);
     const payload = this.payloadFor(event, extra);
     let r;
     if (this.hookMode === 'exit127' || (this.hookMode === 'ups-silent' && (event === 'UserPromptSubmit' || event === 'PreInvocation' || event === 'BeforeAgent'))) {
