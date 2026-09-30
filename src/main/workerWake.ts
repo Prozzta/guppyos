@@ -92,6 +92,39 @@ export const SUBMIT_CONFIRM_MS = 60_000;
  * second copy on an unsent one: the claim carries the recheck, and the owner re-presses its
  * own draft or holds the prompt for a person (F2), and verifies a Codex submit (F3).
  */
+/**
+ * WAKE-WATCHDOG-RECOVERY (1.1.76, P1b). The stall watchdog (wakeStall.ts) could only SAY that an
+ * agent was stuck. A turn whose terminal evidence never arrived (a lost Stop, the residual wedge
+ * route after P1) left the lifecycle `active` for good, and every wake was refused as
+ * lifecycle-active while its mail waited. Now the beat recovers it, deterministically and with
+ * zero model tokens: an agent that is ACTIVE on a non-provisional epoch, with mail waiting, and
+ * with neither hook traffic nor PTY output for this long, goes back to `unknown`. The normal
+ * reconcile path then re-offers its mail through every existing guard (quiescence, boot grace,
+ * cooldown, the submit owner). A live agent is never quiet this long: the provider TUIs redraw
+ * while a turn runs. Longer than WAKE_STALL_AFTER_MS, so the stall row is written first.
+ */
+export const STUCK_ACTIVE_AFTER_MS = 10 * 60_000;
+/** Recoveries in a row without a real turn end (Stop) before the watchdog gives up and only
+ *  reports (a turn that keeps wedging needs a human, not a loop). */
+export const STUCK_ACTIVE_MAX_RECOVERIES = 3;
+
+/**
+ * CODEX-STOP-MISSING (1.1.75 watch #2): a Codex compaction-only turn completed in the rollout
+ * (task_complete) with no Stop hook, and the lifecycle stayed active. When the provider's own
+ * rollout says its NEWEST turn boundary is a completion, no turn is running: after this much
+ * hook silence (a real turn writes task_started and fires hooks well within it) the watchdog
+ * ends the epoch as idle on that proof, without the PTY-quiet window.
+ */
+export const STUCK_ACTIVE_PROOF_MS = 60_000;
+
+/** A provider's own record that its newest turn has ENDED (today: Codex rollout task_complete). */
+export interface TurnEndProof { turnId: string; at: number }
+
+/** What `recoverStuckActive` did (null = nothing to do). */
+export type StuckActiveOutcome =
+  | { kind: 'recovered'; activeSince: number; quietMs: number; recovery: number; basis: 'rollout-complete' | 'quiet'; turnId?: string }
+  | { kind: 'gave-up'; activeSince: number; quietMs: number; recoveries: number; basis: 'rollout-complete' | 'quiet' };
+
 export const WAKE_RETRY_BASE_MS = 5 * 60_000;
 export const WAKE_RETRY_MAX_MS = 30 * 60_000;
 export function wakeRetryDelayMs(attempt: number): number {
@@ -138,7 +171,16 @@ export function classifyHook(event: string | undefined, message: string | undefi
  * starts supplies `UserPromptSubmit` (and then `PreToolUse`) immediately, and stays
  * unclaimable through any length of silent tool until it says `Stop`.
  */
-const ACTIVE_EVENTS = new Set(['UserPromptSubmit', 'PreInvocation', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact']);
+const ACTIVE_EVENTS = new Set(['UserPromptSubmit', 'PreInvocation', 'PreToolUse', 'PostToolUse']);
+/**
+ * CODEX-STOP-MISSING (root cause, 1.1.75 watch #2). PreCompact/PostCompact used to be ACTIVE
+ * events. A compaction-only turn (Codex CompactTask: auto-compact token limit, a post-turn
+ * threshold, a resume over it) fires ONLY PreCompact/PostCompact and then task_complete, NEVER a
+ * Stop, so the agent stayed active for good (Dwight, 17:36Z, turn 01a0f363). Now: inside a
+ * regular turn a compaction changes nothing (that turn's Stop ends it); outside one, PreCompact
+ * opens a COMPACT epoch that its own PostCompact ends as idle, with a retry edge.
+ */
+const COMPACT_EVENTS = new Set(['PreCompact', 'PostCompact']);
 
 /**
  * The canonical provider-native lifecycle, as the AGY statusline normaliser states it.
@@ -240,6 +282,15 @@ interface AgentWake {
    *  typed turn already ENDED before the owner reported COMMITTED. */
   claimTurnSeen: boolean;
   claimTurnId: string | null;
+  /** WAKE-WATCHDOG-RECOVERY: the newest hook or provider-status reading from the agent (0 = none). */
+  lastTrafficAt: number;
+  /** CODEX-STOP-MISSING: the active epoch was opened by a compaction outside any regular turn, so
+   *  its PostCompact (not a Stop, which never comes) ends it. */
+  compactEpoch: boolean;
+  /** The `activeSince` of the last epoch the watchdog acted on (one action per epoch). */
+  stuckEpoch: number;
+  /** Recoveries since the last real turn end; at STUCK_ACTIVE_MAX_RECOVERIES it gives up. */
+  stuckRecoveries: number;
 }
 
 /** What a reconcile beat changed for one agent (null = nothing). */
@@ -330,7 +381,8 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
+        lastTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
     }
@@ -348,6 +400,7 @@ export class WorkerWakeWatchdog {
   /** The lifecycle leaves `active`: every epoch-scoped fact goes with it. */
   private endEpoch(r: AgentWake, to: WakeLifecycle): void {
     r.lifecycle = to;
+    r.compactEpoch = false;
     r.provisional = false;
     r.pendingIdleAt = 0;
   }
@@ -457,6 +510,7 @@ export class WorkerWakeWatchdog {
   noteHook(agentId: string | undefined, event: string | undefined, message: string | undefined, at = Date.now(), fullyIdle?: boolean, turnId?: string): boolean {
     if (!agentId || !event) return false;
     const r = this.rec(agentId);
+    if (Number.isFinite(at)) r.lastTrafficAt = Math.max(r.lastTrafficAt, at);   // WAKE-WATCHDOG-RECOVERY
     // §11.18 #43 (Q40): StopFailure (an API error) ends the turn exactly as Stop does. Without
     // this the lifecycle stayed active until Claude's own idle Notification (~60 s), and a mail
     // wake re-pended by the abnormal close was refused as lifecycle-active until then.
@@ -466,6 +520,7 @@ export class WorkerWakeWatchdog {
       r.openTurnId = null;
       r.stoppedAt = at;
       r.invoking = false;
+      r.stuckRecoveries = 0;   // a real turn end: the watchdog's give-up budget starts over
       if (turnId && !r.closedTurns.includes(turnId)) {
         r.closedTurns.push(turnId);
         if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
@@ -490,8 +545,28 @@ export class WorkerWakeWatchdog {
     // Jim (WAKE-CONFIRM-AUDIT-153 note 1): AGY brackets every model call with Pre/PostInvocation,
     // and its running ticks can pause >5 s inside one. A deferred idle must not land there.
     if (event === 'PostInvocation') { r.invoking = false; return false; }
+    if (COMPACT_EVENTS.has(event)) {
+      // Inside a regular turn (or our own provisional wake): that turn's end still decides.
+      if (r.lifecycle === 'active' && !r.compactEpoch) return false;
+      if (event === 'PreCompact') {
+        r.lifecycle = 'active'; r.activeSince = at;
+        r.openTurnId = turnId ?? null;
+        r.compactEpoch = true;
+        return false;
+      }
+      // PostCompact with no regular turn open: the compaction-only turn is over.
+      this.endEpoch(r, 'idle');
+      r.activeSince = 0;
+      r.openTurnId = null;
+      if (turnId && !r.closedTurns.includes(turnId)) {
+        r.closedTurns.push(turnId);
+        if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
+      }
+      return true;
+    }
     if (ACTIVE_EVENTS.has(event)) {
       if (event === 'PreInvocation') r.invoking = true;
+      r.compactEpoch = false;   // a regular turn is open now: its Stop ends it
       // P1: the first turn start after the claim names the turn the claim's settle is about.
       if (!r.claimTurnSeen && r.claimedAt > 0 && at >= r.claimedAt) { r.claimTurnSeen = true; r.claimTurnId = turnId ?? null; }
       this.turnStarted(r, at);   // the provider's own turn start: confirms our submit
@@ -542,6 +617,7 @@ export class WorkerWakeWatchdog {
   noteProviderStatus(agentId: string | undefined, status: ProviderStatus, at = Date.now(), sessionId: string | null = null): boolean {
     if (!agentId) return false;
     const r = this.rec(agentId);
+    if (Number.isFinite(at)) r.lastTrafficAt = Math.max(r.lastTrafficAt, at);   // WAKE-WATCHDOG-RECOVERY
     if (sessionId) {
       if (r.providerSession !== null && r.providerSession !== sessionId) return false;
       r.providerSession = sessionId;
@@ -663,6 +739,63 @@ export class WorkerWakeWatchdog {
     r.provisional = true;
     r.openTurnId = null;
     return true;
+  }
+
+  /**
+   * WAKE-WATCHDOG-RECOVERY: recover an agent stuck ACTIVE (see STUCK_ACTIVE_AFTER_MS). Acts at
+   * most once per active epoch, and only when ALL of these hold:
+   *  - the lifecycle is active on a non-provisional epoch (a provisional one is SUBMIT_CONFIRM's);
+   *  - no claim is in flight or held (the submit owner is not mid-wake);
+   *  - mail is waiting (`pendingIds` > 0);
+   *  - the agent has a PTY, and neither a hook/status reading nor PTY output for the whole window
+   *    (STUCK_ACTIVE_AFTER_MS). With `proof` (the provider's rollout says its newest turn
+   *    COMPLETED): hook silence for STUCK_ACTIVE_PROOF_MS is enough, and the epoch ends idle;
+   *  - no human-needs prompt arrived in this epoch (the agent may be waiting on a person).
+   * Recovered on quiet alone: lifecycle `unknown`, so the reconcile path may claim once the PTY is
+   * quiescent. Recovered on proof: `idle`, and the turn is remembered as closed.
+   * After STUCK_ACTIVE_MAX_RECOVERIES in a row with no Stop between them it gives up: the
+   * lifecycle is left alone and the caller only reports. Pure bookkeeping: no I/O, no clock.
+   */
+  recoverStuckActive(agentId: string | undefined, facts: { lastOutputAt: number; ptyId?: string } | null, pendingIds: number, now = Date.now(), proof?: TurnEndProof | null): StuckActiveOutcome | null {
+    if (!agentId || !Number.isFinite(now)) return null;
+    const r = this.agents.get(agentId);
+    if (!r || r.lifecycle !== 'active' || r.provisional || !(r.activeSince > 0)) return null;
+    if (r.inFlight || r.held || pendingIds <= 0) return null;
+    if (!facts || !facts.ptyId) return null;
+    if (r.lastHumanNeedsAt >= r.activeSince) return null;
+    if (r.stuckEpoch === r.activeSince) return null;
+    // B1's rule stands: a completion of a DIFFERENT turn than a NAMED open one proves nothing (it may
+    // be another session's rollout); an unnamed open turn (Codex hooks always name theirs) takes it.
+    const hasProof = !!proof && !!proof.turnId && Number.isFinite(proof.at) && (!r.openTurnId || r.openTurnId === proof.turnId);
+    let quietMs: number;
+    if (hasProof) {
+      quietMs = now - Math.max(r.activeSince, r.lastTrafficAt);
+      if (quietMs < STUCK_ACTIVE_PROOF_MS) return null;
+    } else {
+      if (!(facts.lastOutputAt > 0)) return null;
+      quietMs = now - Math.max(r.activeSince, r.lastTrafficAt, facts.lastOutputAt);
+      if (quietMs < STUCK_ACTIVE_AFTER_MS) return null;
+    }
+    const basis = hasProof ? 'rollout-complete' as const : 'quiet' as const;
+    r.stuckEpoch = r.activeSince;
+    if (r.stuckRecoveries >= STUCK_ACTIVE_MAX_RECOVERIES) {
+      return { kind: 'gave-up', activeSince: r.activeSince, quietMs, recoveries: r.stuckRecoveries, basis };
+    }
+    r.stuckRecoveries += 1;
+    const activeSince = r.activeSince;
+    r.openTurnId = null;
+    r.invoking = false;
+    if (hasProof) {
+      this.endEpoch(r, 'idle');
+      r.activeSince = 0;
+      if (!r.closedTurns.includes(proof!.turnId)) {
+        r.closedTurns.push(proof!.turnId);
+        if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
+      }
+      return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis, turnId: proof!.turnId };
+    }
+    this.endEpoch(r, 'unknown');
+    return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis };
   }
 
   /**

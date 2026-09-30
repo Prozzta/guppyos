@@ -651,7 +651,7 @@ inboxWake = new InboxWakeBridge({
   mail: {
     mode: (agentId) => hookServer.mailChannel(agentId).mode,
     closeTurn: (agentId, turnId) => { hookServer.closeMailTurn(agentId, turnId); },
-    abortSince: (agentId, since) => { hookServer.abortMailEpochsSince(agentId, since, 'submit-unconfirmed'); },
+    abortSince: (agentId, since, reason) => { hookServer.abortMailEpochsSince(agentId, since, reason ?? 'submit-unconfirmed'); },
     closeStale: (agentId, now) => hookServer.closeStaleMailEpochs(agentId, now),
     hasOpenEpoch: (agentId) => hive.mail.openEpochs(agentId).length > 0,
     // Layer-b dry run #4: N1-due ids get one extra immediate re-offer; open (surfacing/surfaced)
