@@ -1351,6 +1351,8 @@ function buildMutant(index, mutant, source) {
   assert.notEqual(text, source);
   // The copy lives two directories away from src/main, so its one relative import moves.
   text = text.replace("from './capacityAdmission'", "from '../../src/main/capacityAdmission'");
+  // WAKE-SCREEN-GUARD (1.1.76): the owner also imports the shared Codex screen reader.
+  text = text.replace("from '../shared/codexScreen'", "from '../../src/shared/codexScreen'");
   const file = path.join(MUTANT_DIR, `m${index}.ts`);
   fs.writeFileSync(file, text, 'utf8');
   return loadTs(path.relative(path.resolve(__dirname, '..'), file));

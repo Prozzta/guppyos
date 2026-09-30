@@ -175,7 +175,22 @@ async function buildFloor() {
       if (!c) return undefined;
       if (!c.draft) { rig.humanDirty.delete(id); return { block: null }; }
       return { block: rig.humanDirty.has(id) ? 'draft' : null };
-    }
+    },
+    // WAKE-SCREEN-GUARD (1.1.76): the real PtyManager's output generation and spawn cwd.
+    outputGeneration: (id) => ptyManager.outputGeneration(id),
+    spawnCwd: (id) => ptyManager.spawnCwd(id)
+  };
+  // WAKE-SCREEN-GUARD: the renderer's Codex screen reading (terminalPool readCodexScreen). The rig's
+  // fake Codex is always past startup (its header would show its model); its composer is the stub's.
+  const readCodexScreen = async (ptyId, expectedTail) => {
+    const c = composerOf(ptyId);
+    if (!c) return null;
+    const row = c.draft.split('\n').pop();
+    return {
+      onPromptRow: false, screenCount: 0,
+      codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: c.draft ? `\u203a ${row}` : '\u203a Ask Codex to do anything', footer: [] },
+      ...(expectedTail !== undefined ? { promptTailMatches: c.draft.endsWith(expectedTail) } : {})
+    };
   };
   const readScreen = async (ptyId, needle, expectedTail) => {
     const c = composerOf(ptyId);
@@ -196,6 +211,7 @@ async function buildFloor() {
     ptyForAgent: (agentId) => ptyForAgent(agentId),
     providerForPty: (ptyId) => ptyProvider.get(ptyId),
     requestScreenReading: readScreen,
+    requestCodexScreen: readCodexScreen,
     onOutcome: (r) => { outcomes.push({ agentId: r.agentId, requestId: r.requestId, cls: r.admissionClass, outcome: r.outcome, at: r.at }); if (outcomes.length > 500) outcomes.shift(); }
   }));
 

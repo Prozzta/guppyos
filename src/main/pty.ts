@@ -81,6 +81,11 @@ interface PtySession {
    *  draft, settle). Absent = UNKNOWN, which automatic delivery refuses. Dies with the
    *  session. NOT a provenance fact and not an erase oracle - see shared/promptState.ts. */
   promptState?: TerminalPromptState;
+  /** WAKE-SCREEN-GUARD: how many output chunks this live session has accepted (one per
+   *  node-pty onData, counted before batching). A screen reading is stamped with it when it
+   *  is REQUESTED, so main can tell whether any byte arrived after the screen it describes.
+   *  Scoped to this incarnation; equality only. */
+  outputGeneration?: number;
 }
 
 /** Process-wide, never reused, so two incarnations can never compare equal. */
@@ -453,6 +458,8 @@ export class PtyManager {
     }
     session.hasOutput = true;
     session.lastOutputAt = Date.now();
+    // WAKE-SCREEN-GUARD: every accepted chunk moves the output generation.
+    session.outputGeneration = (session.outputGeneration ?? 0) + 1;
     // PROBE-REISSUE (B): the last few KB of raw output, for a diagnostic row's tail line.
     session.tail = (session.tail + data).slice(-PTY_TAIL_CHARS);
     if (session.out) session.out.push(data);
@@ -780,6 +787,19 @@ export class PtyManager {
   }
 
   /** Whether this LIVE pty has emitted its first frame; undefined when there is none. */
+  /** WAKE-SCREEN-GUARD: the live session's output generation (0 before any output), or
+   *  undefined when there is no live session. */
+  outputGeneration(id: string): number | undefined {
+    const s = this.sessions.get(id);
+    return s ? s.outputGeneration ?? 0 : undefined;
+  }
+
+  /** WAKE-SCREEN-GUARD: the cwd this live session was spawned in (Codex prints it in its
+   *  status line). */
+  spawnCwd(id: string): string | undefined {
+    return this.sessions.get(id)?.cwd;
+  }
+
   hasOutput(id: string): boolean | undefined {
     return this.sessions.get(id)?.hasOutput;
   }

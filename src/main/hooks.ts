@@ -83,6 +83,8 @@ interface HookPayload {
   /** JOB-ENV (SessionStart): the shim's env AGENT_ID when it disagrees with the --agent id from
    *  the agent's own settings file (a Claude Code background job in another agent's daemon). */
   env_agent_id?: string | null;
+  /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
+  munder_wake_incarnation?: string | null;
   session_id?: string;
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
@@ -289,6 +291,13 @@ export class HookServer {
   private codexCapacity = new CodexRolloutCapacitySource();
   /** One delayed diagnostic per agent/session if hook traffic never produces a reading. */
   private codexNoReading = new Map<string, CodexNoReading>();
+  /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
+  private onWakeIncarnation?: (agentId: string, token: string) => void;
+
+  /** WAKE-SCREEN-GUARD R2-4: set by main once (the constructor's observer stays as it was). */
+  setWakeIncarnationObserver(fn: ((agentId: string, token: string) => void) | undefined): void {
+    this.onWakeIncarnation = fn;
+  }
 
   constructor(
     private hive: HiveManager,
@@ -1527,6 +1536,11 @@ export class HookServer {
       this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
         typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
         typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
+    }
+    // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
+    // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.
+    if (!fromSubagent && agentId && event === 'SessionStart' && typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation) {
+      try { this.onWakeIncarnation?.(agentId, p.munder_wake_incarnation.slice(0, 80)); } catch { /* never breaks a hook */ }
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);

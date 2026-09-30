@@ -32,6 +32,7 @@ import {
 import type { InputOrigin } from '@shared/inputOrigin';
 import { sameInputState, type TerminalInputState } from '@shared/inputProvenance';
 import type { PromptBlock } from '@shared/promptState';
+import { extractCodexScreen, type CodexScreenFacts } from '@shared/codexScreen';
 import {
   createTerminalRecoveryState,
   normalizePtyChunk,
@@ -709,6 +710,31 @@ export function readScreenForNeedle(ptyId: string, needle: string, expectedTail?
   }
 }
 
+/**
+ * WAKE-SCREEN-GUARD: the Codex screen facts main's submit owner judges (shared/codexScreen.ts):
+ * the newest session header over the WHOLE buffer, scrollback included, the cursor's row and
+ * the footer below it. Only reads; decides nothing. Null = not evidence.
+ */
+export function readCodexScreen(ptyId: string, expectedTail?: string): { onPromptRow: boolean; screenCount: number; promptTailMatches?: boolean; codex: CodexScreenFacts } | null {
+  const entry = pool.get(ptyId);
+  if (!entry || entry.exited || !entry.opened) return null;
+  try {
+    const buf = entry.term.buffer.active;
+    const cursor = buf.baseY + buf.cursorY;
+    const codex = extractCodexScreen((i) => buf.getLine(i)?.translateToString(true), buf.length, cursor);
+    return {
+      onPromptRow: false,
+      screenCount: 0,
+      ...(typeof expectedTail === 'string' && expectedTail.length > 0 && expectedTail.length <= 8192
+        ? { promptTailMatches: composerRegionEndsWith(buf, cursor, expectedTail) }
+        : {}),
+      codex
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Answer main's screen-reading requests for terminals in THIS renderer's pool. Wired
  *  once, on the first acquire (by then the preload bridge exists); a bridge without the
  *  method (the Electron harness stub) simply never asks. */
@@ -725,8 +751,10 @@ function ensureScreenReadResponder(): void {
     // provenance self-test uses), so the reading reflects the repaint a clear provoked
     // rather than the frame before it.
     entry.term.write('', () => {
-      window.cth.answerScreenReading(req.requestId, readScreenForNeedle(req.ptyId, String(req.needle ?? ''),
-        typeof req.expectedTail === 'string' ? req.expectedTail : undefined));
+      const tail = typeof req.expectedTail === 'string' ? req.expectedTail : undefined;
+      window.cth.answerScreenReading(req.requestId, req.codex === true
+        ? readCodexScreen(req.ptyId, tail)
+        : readScreenForNeedle(req.ptyId, String(req.needle ?? ''), tail));
     });
   });
 }
