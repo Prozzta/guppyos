@@ -1829,10 +1829,19 @@ export class HiveManager {
    * session recorded before stamps existed. The normalisation is the canonical render of
    * injectedPrompt; what it fixes is listed on CANONICAL_PROMPT (sessionRotation.ts).
    */
-  sessionPromptFingerprint(meta: AgentMeta): { fp: string; variant: string } {
+  sessionPromptFingerprint(meta: AgentMeta): { fp: string; variant: string; legacyBlock: 'mail-channel-override' | 'spawn-toggle-changed' | null } {
     const mailMode = this.promptMailMode(meta);
     const text = this.injectedPrompt(meta, '', '', false, false, undefined, { mailMode });
+    // Creed R3: the build-time 1.1.75 stamp assumes the session was spawned with TODAY's variant.
+    // A mail channel override, or god's spawn toggle away from its 1.1.75 default (off), may have
+    // changed that since the 1.1.75 launch, so such a session is not legacy-stamped: it rotates.
+    let override: unknown = null;
+    try { override = this.mail.channelOverride(meta.id); } catch { override = null; }
+    const legacyBlock = override ? 'mail-channel-override' as const
+      : meta.isGod && this.orchestratorMaySpawn() ? 'spawn-toggle-changed' as const
+      : null;
     return {
+      legacyBlock,
       fp: canonicalPromptFingerprint(text),
       variant: promptVariant(meta.provider ?? 'claude', mailMode, meta.isGod ? (this.orchestratorMaySpawn() ? 'god+spawn' : 'god') : meta.isAssistant ? 'assistant' : 'worker')
     };

@@ -3734,7 +3734,10 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     const promptInfo = hive.enabled() ? hive.sessionPromptFingerprint({ ...opts.hive, cwd: opts.cwd, provider }) : null;
     const promptFp = promptInfo?.fp ?? null;
     const staleFor = (s: string): StaleReason | null => {
-      const d = resumeDecision(hive.sessionPromptStamp(opts.hive!.id, s), promptInfo?.variant ?? null, promptFp);
+      const recorded = hive.sessionPromptStamp(opts.hive!.id, s);
+      const legacyBlock = !recorded ? promptInfo?.legacyBlock ?? null : null;
+      if (legacyBlock) hive.appendLog({ kind: 'session-legacy-skip', agentId: opts.hive!.id, sessionId: s, reason: legacyBlock });
+      const d = resumeDecision(recorded, legacyBlock ? null : promptInfo?.variant ?? null, promptFp);
       if (d.stampLegacy && hive.stampSession(opts.hive!.id, s, d.stampLegacy)) {
         hive.appendLog({ kind: 'session-stamp-legacy', agentId: opts.hive!.id, sessionId: s, fp: d.stampLegacy, variant: promptInfo?.variant ?? null, stale: d.stale });
       }

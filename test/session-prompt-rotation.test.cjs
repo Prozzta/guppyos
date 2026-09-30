@@ -145,6 +145,51 @@ test('resumeDecision: an unstamped session takes the 1.1.75 stamp of its variant
   assert.equal(R.resumeDecision(undefined, 'claude|inject|worker', 'x').stampLegacy, LEGACY_175_PROMPT_FP['claude|inject|worker'], 'defaults to the build-time table');
 });
 
+test('Creed R1: a session retired by the rotation path cannot come back through a late hook', async (t) => {
+  const { hive, reg } = await oneAgent(t);
+  hive.noteSpawnPrompt('jim', 'fp-v1', null);
+  hive.recordSession('jim', OLD, 'hook');
+  // index.ts rotation: the stale key is retired, the new process starts fresh.
+  hive.retireSession('jim', OLD);
+  hive.noteSpawnPrompt('jim', 'fp-v2', null);
+  hive.recordSession('jim', NEW, 'hook');
+  assert.equal(reg().sessionId, NEW);
+  hive.recordSession('jim', OLD, 'hook');   // the straggler from the old process
+  assert.equal(reg().sessionId, NEW, 'the rotated id never becomes the resume key again');
+  assert.equal(reg().sessionPrompts[OLD], 'fp-v1', 'nor is it re-stamped with the new prompt');
+});
+
+test('Creed R2: a hook never overwrites an existing stamp (the B4 guard)', async (t) => {
+  const { hive, reg } = await oneAgent(t);
+  hive.noteSpawnPrompt('jim', 'fp-old', null);
+  hive.recordSession('jim', OLD, 'hook');
+  assert.equal(reg().sessionPrompts[OLD], 'fp-old');
+  hive.noteSpawnPrompt('jim', 'fp-new', null);   // a newer process, not resuming OLD
+  hive.recordSession('jim', OLD, 'hook');        // a hook naming OLD (neither retired nor resumed)
+  assert.equal(reg().sessionPrompts[OLD], 'fp-old', 'the stale session must not look current');
+});
+
+test('Creed O2: clearSession keeps the stamps', async (t) => {
+  const { hive, reg } = await oneAgent(t);
+  hive.noteSpawnPrompt('jim', 'fp-v1', null);
+  hive.recordSession('jim', OLD, 'hook');
+  hive.clearSession('jim', 'start-fresh');
+  assert.equal(reg().sessionPrompts[OLD], 'fp-v1');
+});
+
+test('Creed R3: no legacy stamp under a mail channel override, or with god\'s spawn toggle on (it rotates)', (t) => {
+  const hive = promptHive(t);
+  assert.equal(hive.sessionPromptFingerprint(WORKER).legacyBlock, null);
+  assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isGod: true }).legacyBlock, null, 'god at the 1.1.75 default (spawn off)');
+  hive.mail.channelOverride = () => ({ mode: 'legacy-read', reason: 'no-mail-block' });
+  assert.equal(hive.sessionPromptFingerprint(WORKER).legacyBlock, 'mail-channel-override');
+  const spawn = promptHive(t, { maySpawn: true });
+  assert.equal(spawn.sessionPromptFingerprint({ ...WORKER, isGod: true }).legacyBlock, 'spawn-toggle-changed');
+  assert.equal(spawn.sessionPromptFingerprint(WORKER).legacyBlock, null, 'the toggle only changes god\'s prompt');
+  // A blocked session gets no variant, so resumeDecision leaves it unrecorded: it rotates.
+  assert.deepEqual(R.resumeDecision(undefined, null, 'fp'), { stale: 'prompt-unrecorded', stampLegacy: null });
+});
+
 test('stampSession stamps only an unstamped session', async (t) => {
   const { hive, reg } = await oneAgent(t);
   assert.equal(hive.stampSession('jim', OLD, 'f175'), true);
@@ -253,13 +298,18 @@ test('main: an automatic resume rotates a stale session; the fallback obeys the 
   const block = src.slice(src.indexOf('const explicitSid = typeof opts.resumeSessionId'), src.indexOf('opts.args = args;', src.indexOf('const explicitSid = typeof opts.resumeSessionId')));
   assert.ok(block.length > 0);
   assert.match(block, /const promptInfo = hive\.enabled\(\) \? hive\.sessionPromptFingerprint\(\{ \.\.\.opts\.hive, cwd: opts\.cwd, provider \}\) : null;/, 'the normalised fingerprint of this agent');
-  assert.match(block, /const d = resumeDecision\(hive\.sessionPromptStamp\(opts\.hive!\.id, s\), promptInfo\?\.variant \?\? null, promptFp\);\s*if \(d\.stampLegacy && hive\.stampSession\(opts\.hive!\.id, s, d\.stampLegacy\)\)/, 'legacy sessions are stamped, then compared');
+  assert.match(block, /if \(d\.stampLegacy && hive\.stampSession\(opts\.hive!\.id, s, d\.stampLegacy\)\)/, 'legacy sessions are stamped, then compared');
   assert.ok(block.indexOf('const promptFp') > block.indexOf('const explicitSid'));
   assert.match(block, /if \(sid && !explicitSid\) \{\s*const why = staleFor\(sid\);\s*if \(why\) \{[\s\S]*?kind: 'session-rotate'[\s\S]*?sid = undefined;/, 'automatic resume of a stale session starts fresh');
   assert.match(block, /else if \(sid && explicitSid && staleFor\(sid\)\) \{\s*hive\.appendLog\(\{ kind: 'session-resume-stale'/, 'a typed id is resumed, and logged');
   assert.match(block, /chooseResumeSession\(sid, previous, seedFresh, foreign\)/, 'the previous-key fallback uses the stale-aware seed');
   assert.match(block, /if \(staleFor\(s\)\) \{ rotated\.push\(s\); return false; \}/);
   assert.match(block, /hive\.noteSpawnPrompt\(opts\.hive\.id, promptFp, resumedSid\);/);
+  // Creed R1: the rotation retires the stale key before it is dropped.
+  assert.match(block, /rotated\.push\(sid\);\s*hive\.retireSession\(opts\.hive\.id, sid\);/);
+  // Creed R3: a blocked legacy session is logged and gets no variant (so no legacy stamp).
+  assert.match(block, /const legacyBlock = !recorded \? promptInfo\?\.legacyBlock \?\? null : null;\s*if \(legacyBlock\) hive\.appendLog\(\{ kind: 'session-legacy-skip'/);
+  assert.match(block, /resumeDecision\(recorded, legacyBlock \? null : promptInfo\?\.variant \?\? null, promptFp\)/);
   assert.match(block, /let resumedSid: string \| null = null;/, 'fresh unless a resume is attached');
   assert.equal((block.match(/\n\s*resumedSid = (sid|pick\.sessionId);/g) || []).length, 2, 'set on both resume paths');
   // The rotation check runs before anything is attached, i.e. before `--resume`.
