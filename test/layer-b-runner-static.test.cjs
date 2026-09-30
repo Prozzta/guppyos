@@ -306,8 +306,9 @@ test('god 4dd770 (3) + 57634c: the REAL run refuses without --floor-paused-confi
 });
 
 test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv contains "sandbox windows"', () => {
+  // Real step 2 (fb00d433) replaced `-c sandbox_mode` with `-P lbjail` (see the source-derived test below).
   assert.deepEqual(lb.codexProbeArgv('C:\\jail\\work\\lb-codex', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs'),
-    ['sandbox', '-c', 'sandbox_mode="workspace-write"', '-C', 'C:\\jail\\work\\lb-codex', '--', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs']);
+    ['sandbox', '-P', 'lbjail', '-C', 'C:\\jail\\work\\lb-codex', '--', 'C:\\node\\node.exe', 'C:\\jail\\probe.cjs']);
   for (const argv of [...lb.CODEX_HELP_ARGVS, lb.codexProbeArgv('c', 'n', 's')]) {
     assert.ok(!/sandbox\s+windows/.test(argv.join(' ')), argv.join(' '));
     assert.ok(!argv.includes('windows'), argv.join(' '));
@@ -1173,5 +1174,44 @@ test('god R1 (on 18f6f9c0): the run bar FAILS on a wake-ids-exhausted row, a sta
   }
   assert.ok(src.includes('this.plumbing.B6 = replies.length === 4 && replies.every(Boolean) && acteds.length === 4 && acteds.every(Boolean);'));
   assert.match(src, /const ok = !this\.stopReason && asserted\.every\(\(f\) => f\.status === 'PASS'\) && this\.checks\.every\(\(c\) => c\.ok\);/, 'a failed check means NOT PASSED');
+});
+
+test('real step 2 (fb00d433): EVERY codex argv the runner builds follows the codex 0.157.1 CLI SOURCE, not its help text', () => {
+  // openai/codex tag rust-v0.157.1 (36650394c5b38c2990ccf2a3457165ca3e9d9726), andy-scratch/codex-src-157-cli:
+  //  codex-rs/cli/src/main.rs:189,464   `codex sandbox` on Windows = codex_cli::WindowsCommand
+  //  codex-rs/cli/src/lib.rs:150-189    WindowsCommand: -P/--permission-profile (:156), -C/--cd with
+  //                                     requires = "permissions_profile" (:172), trailing command (:188-189)
+  //  codex-rs/cli/src/debug_sandbox.rs:680-684  -P NAME -> default_permissions = NAME; :707 profile syntax
+  //                                     (else the read-only fallback, :714)
+  //  codex-rs/core/src/config/permissions.rs:102-110 user names never start with ':'; :213-216 extends ":workspace"
+  //  codex-rs/config/src/permissions_toml.rs:113-118 (extends, workspace_roots, network), :210, :331 (enabled)
+  //  codex-rs/config/src/types.rs:165-174 [windows] sandbox = "unelevated"
+  //  codex-rs/utils/cli/src/shared_options.rs:22 (--model), :40 (--sandbox; kebab values, sandbox_mode_cli_arg.rs:13-18)
+  //  codex-rs/tui/src/cli.rs:70 (--ask-for-approval; approval_mode_cli_arg.rs:9-16: never)
+  //  codex-rs/core/src/config/mod.rs:2553-2562 --sandbox (a sandbox_mode override) = the legacy syntax: agents need no profile
+  const argv = lb.codexProbeArgv('C:\\sb\\work\\lb-codex', 'C:\\n\\node.exe', 'C:\\sb\\probe.cjs');
+  assert.deepEqual(argv, ['sandbox', '-P', 'lbjail', '-C', 'C:\\sb\\work\\lb-codex', '--', 'C:\\n\\node.exe', 'C:\\sb\\probe.cjs']);
+  assert.ok(argv.indexOf('-P') >= 0 && argv.indexOf('-P') < argv.indexOf('-C'), '-C requires -P (lib.rs:172)');
+  assert.ok(!argv.includes('-c') && !argv.includes('--config'), 'no legacy sandbox_mode override next to a profile (mod.rs:2553-2562)');
+  assert.ok(!lb.CODEX_PROBE_PROFILE.startsWith(':'), 'a user profile name (permissions.rs:102-110)');
+  assert.equal(argv[argv.indexOf('--') + 1], 'C:\\n\\node.exe', 'the command after --');
+  // The probe config: the agents' own config + the named profile with the same semantics.
+  const toml = lb.codexProbeToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex']);
+  assert.ok(toml.startsWith(lb.codexSandboxToml(['C:\\sb\\work\\lb-codex', 'C:\\sb\\devroot\\hive\\agents\\lb-codex'])), 'the agents\' config is kept as it is');
+  assert.match(toml, /^\[permissions\.lbjail\]\ndescription = "[^"]+"\nextends = ":workspace"$/m);
+  assert.match(toml, /^\[permissions\.lbjail\.workspace_roots\]\n'C:\\sb\\work\\lb-codex' = true\n'C:\\sb\\devroot\\hive\\agents\\lb-codex' = true$/m);
+  assert.match(toml, /^\[permissions\.lbjail\.network\]\nenabled = false$/m);
+  assert.match(toml, /^\[windows\]\nsandbox = "unelevated"$/m);
+  // The other codex argvs: the step-1 help/version and the agents' command.
+  assert.deepEqual(lb.CODEX_HELP_ARGVS, [['--version'], ['sandbox', '--help']]);
+  assert.match(src, /command = `codex --model \$\{this\.args\.models\.codex\} --sandbox workspace-write --ask-for-approval never`;/);
+  // A clap rejection is reported as such, never as a sandbox verdict.
+  const stderr = 'error: the following required arguments were not provided:\n  --permission-profile <NAME>\n\nUsage: codex sandbox --permission-profile <NAME> --config <key=value> --cd <DIR> <COMMAND>...';
+  assert.equal(lb.codexArgvRejection(2, stderr), 'probe argv rejected (exit 2): error: the following required arguments were not provided:');
+  assert.equal(lb.codexArgvRejection(0, ''), null);
+  assert.equal(lb.codexArgvRejection(1, 'some sandbox failure'), null, 'not a usage error: the verdict decides');
+  const probe = method('proveCodexSandbox()');
+  assert.match(probe, /W\.write\(path\.join\(probeHome, 'config\.toml'\), codexProbeToml\(this\.codexRoots\)\);/);
+  assert.match(probe, /if \(rejected\) return this\.check\(false, `R1 Codex sandbox probe: \$\{rejected\}`/);
 });
 
