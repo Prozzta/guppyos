@@ -300,6 +300,16 @@ class Rig {
     return true;
   }
 
+  /** LOAD-FLAKES-176: cue a tool call and wait until the stub has FINISHED it (its hooks returned and
+   *  their context was taken). The bound outlasts the stub's own 30 s hook transport (two hooks), so a
+   *  slow hook on a loaded machine is waited for, not raced by a 20 s wait for its context. */
+  async tool(agentId, extra = {}, { timeoutMs = 75_000 } = {}) {
+    const done = () => this.transcript(agentId).filter((r) => r.kind === 'cue-done' && r.cue === 'tool').length;
+    const n = done();
+    this.cue(agentId, { cue: 'tool', ...extra });
+    await waitFor(() => done() > n, { what: `${agentId}'s tool call finished`, timeoutMs, diag: () => this.diagnose(agentId) });
+  }
+
   /** Wait (bounded, a failure with the reason and the dump) until the stubs are idle. */
   async waitStubsIdle({ what = 'the stubs to go idle', timeoutMs = 90_000 } = {}) {
     await waitFor(() => this.stubsIdle(), { what, timeoutMs, intervalMs: 80, diag: () => Promise.all(this.agentIds.map((id) => this.diagnose(id))).then((d) => d.join('\n')) });

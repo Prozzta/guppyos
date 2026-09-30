@@ -42,12 +42,28 @@ test('SCENARIO mid-turn PostToolUse delivery: mail that arrives during a turn is
   await rig.call('humanType', { id: 'cl-1', text: 'long task\r' });
   await waitFor(() => rig.hooks('cl-1', 'UserPromptSubmit').length === 1, { what: 'turn started' });
   const m = await rig.call('send', { to: 'cl-1', subject: 'mid-turn', body: 'change of plan' });
-  rig.cue('cl-1', { cue: 'tool' });
+  await rig.tool('cl-1');
   const c = await waitFor(() => rig.contexts('cl-1').find((x) => x.event === 'PostToolUse' && x.ids.includes(m.id)), { what: 'PostToolUse block' });
   assert.match(c.context, /arrived during this turn/);
   rig.cue('cl-1', { cue: 'stop' });
   await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted at the Stop' });
   assert.equal((await rig.call('outcomes')).length, 0, 'no wake was needed');
+});
+
+// LOAD-FLAKES-176 (gate 3/b): the mid-turn step waited 20 s for the PostToolUse context while the
+// stub's hook transport allows 30 s per hook; a loaded run lost that race. Rig.tool waits for the
+// stub to FINISH the tool call (hooks returned), so a slow hook (12 s each, 24 s for the pair) is
+// waited for; the context is then already there, no further wait.
+test('SCENARIO mid-turn with slow hooks: Rig.tool returns only once the tool\'s hooks have returned; the mail block is there at once', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { manualTurns: true } }]);
+  await rig.call('humanType', { id: 'cl-1', text: 'long task\r' });
+  await waitFor(() => rig.hooks('cl-1', 'UserPromptSubmit').length === 1, { what: 'turn started' });
+  const m = await rig.call('send', { to: 'cl-1', subject: 'mid-turn slow', body: 'change of plan' });
+  rig.cue('cl-1', { cue: 'slow-starts', ms: 12_000 });
+  await waitFor(() => rig.transcript('cl-1').some((r) => r.kind === 'cue' && r.cue?.cue === 'slow-starts'), { what: 'the stub is slow from here' });
+  await rig.tool('cl-1');
+  assert.ok(rig.contexts('cl-1').some((x) => x.event === 'PostToolUse' && x.ids.includes(m.id)), 'the PostToolUse block is there when Rig.tool returns');
 });
 
 test('SCENARIO replies tracked: act:request stays open until a reply routes; in_reply_to closes exactly one, sender_id aliases resolve', T, async (t) => {
@@ -170,7 +186,7 @@ test('SCENARIO rollback (file level): a 1.1.75-written hive keeps inbox/.done se
   await rig.call('humanType', { id: 'cl-1', text: 'next\r' });
   await waitFor(() => rig.hooks('cl-1', 'UserPromptSubmit').length === 2, { what: 'the person\'s turn started' });
   const b = await rig.call('send', { to: 'cl-1', subject: 'surfaced, not acted', body: 'b' });
-  rig.cue('cl-1', { cue: 'tool' });
+  await rig.tool('cl-1');
   await waitFor(async () => ['surfacing', 'surfaced'].includes((await rig.entry('cl-1', b.id)).state), { what: 'b surfaced mid-turn' });
   const c = await rig.call('send', { to: 'cl-1', subject: 'never shown', body: 'c' });
   await rig.call('flush');
@@ -207,7 +223,7 @@ test('SCENARIO hooks-shim stub (gemini, legacy-read at release): the <inbox-upda
   await waitFor(() => rig.hooks('gm-1', 'BeforeAgent').length === 1, { what: 'turn started' });
   const m = await rig.call('send', { to: 'gm-1', subject: 'mid', body: 'read me from the file' });
   const m2 = await rig.call('send', { to: 'gm-1', subject: 'second', body: 'also in the notice' });
-  rig.cue('gm-1', { cue: 'tool' });
+  await rig.tool('gm-1');
   const ctx = await waitFor(() => rig.contexts('gm-1').find((c) => c.event === 'AfterTool' && /<inbox-update>/.test(c.context)), { what: 'the legacy notice' });
   assert.ok(ctx.context.includes(m.id) && ctx.context.includes(m2.id), 'the notice names the files');
   assert.ok(!/\[hive-mail:/.test(ctx.context), 'no bodies for a legacy-read provider');
@@ -331,7 +347,7 @@ test('N3 a mid-turn UserPromptSubmit (the person typing into a live turn) JOINS 
   const m1 = await rig.call('send', { to: 'cl-1', subject: 'n3 one', body: 'first' });
   await rig.beat();
   await waitFor(() => rig.contexts('cl-1').some((c) => c.ids.includes(m1.id)), { what: 'm1 surfaced' });
-  rig.cue('cl-1', { cue: 'tool' });
+  await rig.tool('cl-1');
   await waitFor(async () => (await rig.entry('cl-1', m1.id)).state === 'surfaced', { what: 'confirmed' });
   const epoch = await rig.call('mailEpoch', { id: 'cl-1' });
   const m2 = await rig.call('send', { to: 'cl-1', subject: 'n3 two', body: 'second' });

@@ -262,7 +262,8 @@ class FakeAgent {
     }
     if (this.hung) return;
     // Everything else happens in order with the turn's own steps.
-    this.enqueue(() => this.runCue(cue));
+    // LOAD-FLAKES-176: cue-done marks the cue's steps FINISHED (hooks returned), the event Rig.tool waits for.
+    this.enqueue(async () => { await this.runCue(cue); this.rec('cue-done', { cue: cue.cue }); });
   }
 
   async runCue(cue) {

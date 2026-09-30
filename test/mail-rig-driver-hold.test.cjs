@@ -128,3 +128,12 @@ test('stubsIdle: not idle while a wake is in flight, while a COMMITTED prompt is
     assert.equal(await rig.stubsIdle(), true);
   } finally { fs.rmSync(box, { recursive: true, force: true }); }
 });
+
+test('no rig test cues a tool raw: every tool call goes through Rig.tool, which waits for the stub to finish it (its hooks returned)', () => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const raw = [];
+  for (const f of ['mail-rig-checks.test.cjs', 'mail-rig-faults.test.cjs', 'mail-rig-scenarios.test.cjs']) {
+    fs.readFileSync(path.join(__dirname, f), 'utf8').split(/\r?\n/).forEach((l, n) => { if (/cue: 'tool'/.test(l)) raw.push(`${f}:${n + 1}`); });
+  }
+  assert.deepEqual(raw, []);
+});

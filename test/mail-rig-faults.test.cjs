@@ -119,7 +119,7 @@ test('F1 kill the PTY between surfacing and Stop: re-surfaced ONCE with the re-d
   const m = await rig.call('send', { to: 'cl-1', subject: 'f1', body: 'kill me mid-turn' });
   await rig.beat();
   await waitFor(() => rig.contexts('cl-1').some((c) => c.ids.includes(m.id)), { what: 'the wake turn surfaces m' });
-  rig.cue('cl-1', { cue: 'tool' });   // a later hook: the transcript evidence confirms it (surfaced)
+  await rig.tool('cl-1');   // a later hook: the transcript evidence confirms it (surfaced)
   await waitFor(async () => (await rig.entry('cl-1', m.id))?.state === 'surfaced', { what: 'm surfaced (evidence)' });
 
   await rig.call('killPty', { id: 'cl-1' });   // the PTY dies before any Stop
@@ -397,7 +397,7 @@ test('F10 old-habit agent bulk-moves inbox/*.json mid-turn: unsurfaced mail is s
   const m2 = await rig.call('send', { to: 'cl-1', subject: 'f10 two', body: 'arrived mid-turn' });
   const m3 = await rig.call('send', { to: 'cl-1', subject: 'f10 three', body: 'also mid-turn' });
   rig.cue('cl-1', { cue: 'bulk-move' });   // mv inbox/*.json inbox/.done/
-  rig.cue('cl-1', { cue: 'tool' });
+  await rig.tool('cl-1');
   await waitFor(() => rig.contexts('cl-1').some((c) => c.event === 'PostToolUse' && c.ids.includes(m2.id) && c.ids.includes(m3.id)), { what: 'm2, m3 surfaced from .done at PostToolUse' });
   rig.cue('cl-1', { cue: 'stop' });
   await waitFor(async () => (await acted(rig, 'cl-1', m1.id)) && (await acted(rig, 'cl-1', m2.id)) && (await acted(rig, 'cl-1', m3.id)), { what: 'all acted' });
