@@ -409,8 +409,9 @@ export function scrubInheritedEnv(env: NodeJS.ProcessEnv): string[] {
  *     computer-use-…'`), a shared named identity / cross-talk channel with
  *     Stable's helpers — suffixed so it is DEV-distinct per agent;
  *   - every `[projects.'<path>']` / `[projects."<path>"]` trust table (the
- *     user's global folder-trust list) — dropped with its body. A DEV agent's
- *     trust gate is suppressed by the preset's CODEX_NON_INTERACTIVE anyway.
+ *     user's global folder-trust list) — dropped with its body. (CODEX_NON_INTERACTIVE does NOT
+ *     suppress codex 0.157.1's trust screen; the agent's OWN cwd is trusted after this sanitise
+ *     instead, codexTrustSeed.ts, TRUST-SEED-175.)
  * Left as-is, deliberately: NODE_REPL_TRUSTED_CODE_PATHS / NODE_REPL_TRUSTED_
  * SERVICES / NODE_REPL_NODE_PATH etc. reference the user's installed Codex
  * runtime and plugin cache — read-only inputs, documented as shared in

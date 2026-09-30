@@ -65,6 +65,12 @@ Rollback: 1.1.74 (reinstall).
 - **An agent whose hooks stop reaching the app entirely is switched to reading its files after
   about five minutes or more, not at once.** The switch waits for three wakes, and after two
   unanswered wakes the app waits five minutes before the third. This is accepted.
+- **Codex agents no longer stop at "Trust this folder?".** Each Codex agent's own settings copy now
+  trusts exactly that agent's working folder, never a parent folder, so Codex starts without the
+  question nobody can answer. Your own Codex settings file is not changed, and a folder you have
+  already trusted or distrusted there keeps your choice. When a trusted folder has its own
+  `.codex/config.toml` that sets sandbox, approval, tool-server or hook settings, the app logs a
+  warning; the agent's own sandbox and approval settings still apply.
 - **Rollback.** Reinstall 1.1.74. No messages are lost: handled mail is already in `.done`, and
   unhandled mail is still in `inbox/`. At worst, a message that was mid-turn is handled twice. God
   broadcasts one reminder, "move your mail again", because agents may have noted the new rule in

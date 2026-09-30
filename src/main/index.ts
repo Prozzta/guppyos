@@ -3847,9 +3847,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // them accepted; a dev build must not write outside DevData, so skip.
     if (!DEV_ISOLATION) { try { ensureClaudePermissionsAccepted(opts.cwd); } catch { /* never block spawn */ } }
   }
-  // Suppress first-run interactive prompts for providers that need it (e.g. Codex
-  // directory-trust gate via CODEX_NON_INTERACTIVE). Merges into any env already
-  // set on opts.
+  // Suppress first-run interactive prompts for providers that need it. (Codex 0.157.1's
+  // directory-trust screen is NOT suppressed by CODEX_NON_INTERACTIVE; the agent's own cwd is
+  // trusted in its config instead, codexTrustSeed.ts.) Merges into any env already set on opts.
   const nonInteractiveEnv = nonInteractiveEnvForProvider(provider);
   if (Object.keys(nonInteractiveEnv).length > 0) {
     opts.env = { ...(opts.env ?? {}), ...nonInteractiveEnv };

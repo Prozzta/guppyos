@@ -33,6 +33,7 @@ import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
+import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
@@ -1281,7 +1282,7 @@ export class HiveManager {
               if (configuredCompactLimit !== undefined && !isCodexAutoCompactTokenLimitOverride(configuredCompactLimit)) {
                 this.appendLog({ kind: 'codex-compact-limit-ignored', agentId: meta.id, value: configuredCompactLimit });
               }
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit);
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
@@ -3731,7 +3732,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number): { home: string; refusal?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string): { home: string; refusal?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     try {
@@ -3835,6 +3836,18 @@ export class HiveManager {
       // MODEL-PINBACK G1: with `--model <picked>` the seed's `model` line is inert; ours names the
       // model the agent really runs. Nothing picked: the seed's line stays and Codex uses it.
       config = setCodexModel(config, launchModel);
+      // TRUST-SEED-175: the agent's own exact cwd is trusted in ITS copy, AFTER the DEV sanitise
+      // above (which drops the user's [projects.*] list), so no codex agent meets the trust screen
+      // it cannot answer. One predicate decides the scope (codexTrustSeed.ts); an equal entry the
+      // seed already has is never duplicated. Trust also enables <cwd>/.codex/config.toml: its
+      // confinement/command keys are logged (the spawn's --sandbox/--ask-for-approval still win).
+      if (cwd && shouldSeedCodexTrust(cwd, { harnessHome: this.getHome() })) {
+        const seeded = withAgentTrust(config, cwd);
+        config = seeded.text;
+        this.appendLog({ kind: 'codex-trust-seed', agentId: agentId ?? null, action: seeded.action, key: seeded.key });
+        const risky = codexProjectLayerRiskKeys(cwd);
+        if (risky.length) this.appendLog({ kind: 'codex-trust-project-layer', agentId: agentId ?? null, cwd, keys: risky });
+      }
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
