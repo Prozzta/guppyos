@@ -55,9 +55,16 @@ function settleAfterCleanup(sandbox, resolve, reject, settle) {
 
 const MARKER = '__HARNESS_RESULT__';
 
+/** LOAD-FLAKES-176: building, loading and evaluating a scenario's bundle is SETUP, guarded apart
+ *  from the scenario's own `timeoutMs` (harness-main.cjs). */
+const HARNESS_SETUP_TIMEOUT_MS = 300_000;
+/** A node:test timeout for a scenario of `scenarioMs`: setup guard + scenario + teardown margin, so
+ *  a slow setup fails with the harness's own named-phase error, never node's generic timeout. */
+const harnessTestTimeout = (scenarioMs) => HARNESS_SETUP_TIMEOUT_MS + scenarioMs + 60_000;
+
 /**
  * @param {string} scenario absolute path to a `.ts` scenario entry
- * @param {{width?:number,height?:number,timeoutMs?:number}} [opts]
+ * @param {{width?:number,height?:number,timeoutMs?:number,setupTimeoutMs?:number}} [opts]
  * @returns {Promise<any>} whatever the scenario reported
  */
 function runScenario(scenario, opts = {}) {
@@ -70,7 +77,8 @@ function runScenario(scenario, opts = {}) {
     '--scenario', scenario,
     '--width', String(opts.width ?? 1280),
     '--height', String(opts.height ?? 800),
-    '--timeout', String(opts.timeoutMs ?? 30_000)
+    '--timeout', String(opts.timeoutMs ?? 30_000),
+    '--setup-timeout', String(opts.setupTimeoutMs ?? HARNESS_SETUP_TIMEOUT_MS)
   ];
 
   return new Promise((resolve, reject) => {
@@ -157,4 +165,4 @@ function runIpcOrder(opts = {}) {
   });
 }
 
-module.exports = { runScenario, runIpcOrder, createSandbox, removeSandbox };
+module.exports = { runScenario, runIpcOrder, createSandbox, removeSandbox, HARNESS_SETUP_TIMEOUT_MS, harnessTestTimeout };

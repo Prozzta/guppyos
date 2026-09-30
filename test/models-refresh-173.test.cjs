@@ -16,7 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource: read, codeOnly } = require('./read-source.cjs');
-const { runScenario } = require('./electron-harness/run.cjs');
+const { runScenario, harnessTestTimeout } = require('./electron-harness/run.cjs');
 
 const P = loadTs('src/main/providerModels.ts');
 const C = loadTs('src/renderer/src/store/config.ts');
@@ -225,7 +225,7 @@ test('WIRING: nothing is looked up at startup or picker open; only models:refres
 
 // ── the button, rendered (hidden harness) ───────────────────────────────────────────────
 
-test('RENDERED: the Settings button - floor before, one refresh per click burst, per-provider rows, pickers updated', { timeout: 150_000 }, async () => {
+test('RENDERED: the Settings button - floor before, one refresh per click burst, per-provider rows, pickers updated', { timeout: harnessTestTimeout(120_000) }, async () => {
   const r = await runScenario(path.join(__dirname, 'electron-harness', 'scenarios', 'models-refresh-button.tsx'), { timeoutMs: 120_000 });
   assert.equal(r.ok, true, r.error);
   assert.equal(r.before.refreshCalls, 0, 'mounting looks nothing up');
