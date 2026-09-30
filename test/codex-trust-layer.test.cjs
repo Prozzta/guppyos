@@ -150,6 +150,16 @@ test('3 a .codex FILE is not a layer; a .codex that IS the agent\'s CODEX_HOME i
 
 // ── 4. trust source ──────────────────────────────────────────────────────────────────────────
 
+test('the user OWN ~/.codex seen as a layer (cwd = the home) belongs to the user: start with a warning, never a refusal', (t) => {
+  const root = tmp(t); const home = path.join(root, 'home');
+  put(path.join(home, '.codex', 'config.toml'), MCP);
+  const r = L.codexProjectLayers({ cwd: home, configBeforeSeed: '', configAfterSeed: seedTs.withAgentTrust('', home).text, codexHome: path.join(root, 'agent', '.codex'), codexVersion: null, programData: path.join(root, 'programdata'), userCodexHome: path.join(home, '.codex') });
+  assert.equal(r.layers[0].trust, 'user');
+  assert.equal(L.decideCodexLayers(r, []).action, 'start-warn');
+  const other = L.codexProjectLayers({ cwd: home, configBeforeSeed: '', configAfterSeed: seedTs.withAgentTrust('', home).text, codexHome: path.join(root, 'agent', '.codex'), codexVersion: '0.157.1', programData: path.join(root, 'programdata'), userCodexHome: path.join(root, 'elsewhere', '.codex') });
+  assert.equal(L.decideCodexLayers(other, []).action, 'refuse', 'the control: a .codex anywhere else is a project layer');
+});
+
 test('4 trust source: seed-only, user at the dir, at the root; ASCII-only case folding (JÖRG) and \\\\?\\ match as codex does', (t) => {
   const root = tmp(t);
   const repo = path.join(root, 'JÖRG'); gitRepo(repo);

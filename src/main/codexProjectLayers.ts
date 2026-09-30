@@ -37,6 +37,7 @@
  * ever claimed from an entry that really matches.
  */
 import * as nodeFs from 'node:fs';
+import { homedir } from 'node:os';
 import { posix, win32 } from 'node:path';
 import { asciiLower, sameCodexProjectKey } from './codexTrustSeed';
 
@@ -306,6 +307,10 @@ export interface CodexLayerInput {
   fs?: LayerFs;
   /** Windows %ProgramData% (default: the env, then C:\ProgramData). */
   programData?: string;
+  /** The user's own codex home (default ~/.codex). An agent whose cwd is the user's home sees
+   *  it as a project layer; its content is the user's own global config (the one our agent
+   *  config is seeded from), so it counts as user-trusted (A: start with a warning), not ours. */
+  userCodexHome?: string;
 }
 
 const CONFINE_KEYS = ['sandbox_mode', 'approval_policy', 'sandbox_workspace_write', 'permissions', 'default_permissions', 'shell_environment_policy'];
@@ -473,8 +478,9 @@ export function codexProjectLayers(input: CodexLayerInput): CodexLayerReport {
     const b = decide(mapBefore, dir);
     const loadsBefore = b.level === 'trusted';
     if (!loadsAfter && st !== 'error') continue;   // disabled: codex loads nothing from it
-    const f: CodexLayerFinding = { dotCodex, trust: loadsBefore ? 'user' : 'seed', execute: [], confine: [], parse: [] };
-    if (!loadsBefore && b.level === 'untrusted' && b.key) f.userUntrustedKey = b.key;
+    const usersOwn = sameCodexProjectKey(dotCodex, P.resolve(stripVerbatim(input.userCodexHome ?? P.join(homedir(), '.codex'))), platform);
+    const f: CodexLayerFinding = { dotCodex, trust: loadsBefore || usersOwn ? 'user' : 'seed', execute: [], confine: [], parse: [] };
+    if (!loadsBefore && !usersOwn && b.level === 'untrusted' && b.key) f.userUntrustedKey = b.key;
     if (st === 'error') { f.execute.push(`${dotCodex}: could not be read (counted as code that runs)`); layers.push(f); continue; }
     if (!versionOk) f.execute.push(`codex ${input.codexVersion ?? '(unknown version)'} is not the modelled ${CODEX_LAYER_MODEL_VERSION}: this folder counts as code that runs`);
     // Own config.toml: mcp_servers, confinement keys, parse.
