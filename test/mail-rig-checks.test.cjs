@@ -112,8 +112,11 @@ test('C1 A1 proof: a re-wake whose turn start is held 5 s real: the OLD step run
   // The fix: the same held turn start, the clock never moves under it, no unconfirmed edge.
   const now = await c1UpToRepend(t);
   const b2 = await unconfirmed(now.rig);
-  await now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
+  let sawInFlight = false;   // the host's inFlight (read by Rig.stubsIdle) sees the held re-wake
+  const seen = async () => { if (await now.rig.call('inFlight')) sawInFlight = true; return resurfaced(now.rig, now.m)(); };
+  await now.rig.beatUntil(seen, { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
   assert.equal(await unconfirmed(now.rig), b2, 'holdWhileBusy: never judged unconfirmed');
+  assert.ok(sawInFlight, 'the host reported the re-wake in flight while its turn start was held');
   assert.ok(now.rig.contexts('ag-1').filter((c) => c.ids.includes(now.m.id))[1].context.includes(REDELIVERED), 'with the marker');
 });
 
