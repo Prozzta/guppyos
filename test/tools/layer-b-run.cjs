@@ -784,6 +784,24 @@ function jailGitEnvChain(appEnv) {
   const overlay = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'shared', 'agentProvider.ts')).nonInteractiveEnvForProvider('codex');
   return [...jailGitEnvProblems(appEnv, 'the app env'), ...jailGitEnvProblems(pa.productPtyEnv(appEnv, overlay), 'the product pty env of a Codex agent')];
 }
+/** god R1 (Jim's real-mode sweep): the Codex CLI the real run must resolve to. The product adds
+ *  --no-daemon only when readCodexVersion reads a version >= 0.157.0; the run is certified on this one. */
+const CODEX_EXPECTED_VERSION = '0.157.1';
+const CODEX_RESOLVE_PROBE = path.join(__dirname, 'codex-resolve-probe.cjs');
+/** Why the product's own resolution (run in the jailed app env) is not the one the real run needs. */
+function codexResolveProblems(res, expectedVersion, expectedDir) {
+  if (!res || typeof res !== 'object') return ['the resolution probe returned nothing'];
+  if (res.error) return [`the resolution probe failed: ${String(res.error).split('\n')[0]}`];
+  const p = [];
+  if (res.found !== true || !res.path) p.push('the product resolver does not find codex on the jailed app env (PATH, then %APPDATA%\\npm): the app would spawn nothing, or without --no-daemon');
+  else {
+    if (path.win32.basename(String(res.path)).toLowerCase() !== 'codex.cmd') p.push(`the product resolves codex to ${res.path}, not a codex.cmd npm shim`);
+    if (expectedDir && norm(path.win32.dirname(String(res.path))) !== norm(expectedDir)) p.push(`the product resolves codex in ${path.win32.dirname(String(res.path))}, not the CLI dir ${expectedDir}`);
+  }
+  if (res.version !== expectedVersion) p.push(`readCodexVersion reads ${JSON.stringify(res.version)}, not ${expectedVersion}`);
+  if (res.noDaemon !== true) p.push('codexSupportsNoDaemon is not true: the product would spawn codex WITHOUT --no-daemon');
+  return p;
+}
 /** lb-codex's registry command (the request the product then builds on); the repro uses the same. */
 const lbCodexCommand = (model) => `codex --model ${model} --sandbox workspace-write --ask-for-approval never`;
 const CODEX_LAUNCHER = /[\\/]+@openai[\\/]+codex[\\/]+bin[\\/]+codex\.js/i;   // doubled separators too (dry #9)
@@ -3370,6 +3388,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       this.build();
       this.appEnv(liveUserData);
       this.proveNoGitCredentialHelper();
+      this.proveCodexResolution();
       this.seed();
       this.installCredentials();
       // Jim K2: again after the seed and the credential copy, so no later step adds a helper unseen.
@@ -3457,6 +3476,32 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     }
   }
 
+  /** god R1 (Jim's real-mode sweep): ZERO-TOKEN, before the first launch. The PRODUCT's own
+   *  resolution for lb-codex's spawn (codex-resolve-probe.cjs: commandPath('codex') over the
+   *  commandResolver, readCodexVersion, codexSupportsNoDaemon) in a hidden child whose env is
+   *  this.env, the app's env exactly, and whose cwd is the app's (where.exe searches the cwd first).
+   *  Refuses the run unless it yields the CLI dir's codex.cmd, CODEX_EXPECTED_VERSION and true.
+   *  The dry run's PATH has no codex: N/A there. */
+  proveCodexResolution() {
+    if (this.args.dryRun) {
+      this.proofs = { ...(this.proofs || {}), codexResolve: 'N/A: the dry run has no codex on its PATH' };
+      this.check(true, 'real-mode Codex resolution preflight (product resolver + readCodexVersion + codexSupportsNoDaemon): N/A in the dry run (no codex on its PATH)', '');
+      return null;
+    }
+    const r = spawnSync(process.execPath, [CODEX_RESOLVE_PROBE], { cwd: this.s.base, env: this.env, encoding: 'utf8', windowsHide: true, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    let res = null;
+    try { res = JSON.parse(String(r.stdout || '').trim().split(/\r?\n/).pop()); } catch { res = { error: `exit ${r.status}: ${String(r.stderr || r.stdout || '').slice(0, 300)}` }; }
+    const expectedDir = this.cliPaths && this.cliPaths.codex ? path.dirname(this.cliPaths.codex) : null;
+    const problems = codexResolveProblems(res, CODEX_EXPECTED_VERSION, expectedDir);
+    this.proofs = { ...(this.proofs || {}), codexResolve: { ...res, expectedVersion: CODEX_EXPECTED_VERSION, expectedDir, problems } };
+    W.writeJson(path.join(this.s.report, 'codex-resolve.json'), this.proofs.codexResolve);
+    if (!this.check(!problems.length, `real-mode Codex resolution preflight: the product resolves codex.cmd in the CLI dir, reads ${CODEX_EXPECTED_VERSION}, grants --no-daemon (jailed app env, zero tokens)`, problems.join('; ') || JSON.stringify(res))) {
+      this.stop('the product would not spawn the certified codex with --no-daemon');
+      throw new Error(`codex resolution preflight: ${problems.join('; ')}`);
+    }
+    return res;
+  }
+
   jailLinkGate(label) {
     const r = jailLinkScan(this.s.base);
     const slug = label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
@@ -3526,7 +3571,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, CODEX_EXPECTED_VERSION, CODEX_RESOLVE_PROBE, codexResolveProblems, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, procEvidence, normSeps, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

@@ -131,7 +131,7 @@ test('GIT PROOF wiring: main runs it right after appEnv, before the seed and bef
   const main = src.slice(src.indexOf('async main() {'));
   const at = main.indexOf('this.proveNoGitCredentialHelper();');
   assert.ok(at > main.indexOf('this.appEnv(liveUserData);') && at < main.indexOf('this.seed();') && at < main.indexOf('await this.launch('));
-  const m = src.slice(src.indexOf("  proveNoGitCredentialHelper(label = 'after appEnv') {"), src.indexOf('  jailLinkGate(label) {'));
+  const m = src.slice(src.indexOf("  proveNoGitCredentialHelper(label = 'after appEnv') {"), src.indexOf('  proveCodexResolution() {'));
   assert.doesNotMatch(m, /dryRun/);
   assert.match(m, /env: this\.env, encoding: 'utf8', windowsHide: true/);
   assert.match(m, /cwd: this\.s\.jail/);
