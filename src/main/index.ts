@@ -3623,7 +3623,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           // CODEX-TRUST-LAYER: the layer model is checked against this version; the folders the
           // Human allowed start (with a warning) instead of being refused.
           codexVersion,
-          codexLayerOptIns: readConfig().codexLayerOptIns ?? []
+          codexLayerOptIns: (() => { const o: unknown = readConfig().codexLayerOptIns; return Array.isArray(o) ? o.filter((k): k is string => typeof k === 'string') : []; })()
         }
       );
       // F1 FAIL-CLOSED GATE. Checked here, before ANY injection state is merged and

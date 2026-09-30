@@ -98,6 +98,16 @@ test('2 markers: [] means root = cwd; a custom .hg is honoured; a .git dir witho
   assert.equal(r.layers.length, 1, 'a .git file makes top the root');
 });
 
+test('2 the PROJECT-ROOT key: a non-git root (.hg) the user trusts makes the cwd layer below it user-trusted', (t) => {
+  const root = tmp(t);
+  const top = path.join(root, 'top'); const cwd = path.join(top, 'sub');
+  put(path.join(top, '.hg', 'x'), ''); put(path.join(cwd, '.codex', 'config.toml'), MCP);
+  const r = run(root, cwd, { user: `project_root_markers = [".hg"]
+${trustLine(top)}` });
+  assert.equal(r.layers[0].trust, 'user', 'trusted through the project-root key, not our seed');
+  assert.equal(L.decideCodexLayers(r, []).action, 'start-warn');
+});
+
 test('2 markers from the SYSTEM config are honoured (J3); an unparsable system file is unknown, which refuses', (t) => {
   const root = tmp(t);
   const top = path.join(root, 'top'); const cwd = path.join(top, 'sub');
@@ -346,6 +356,14 @@ test('9 through the spawn: the same folder ALLOWED starts, trusted, with a warni
   assert.equal(logRows(s.home).filter((x) => x.kind === 'codex-trust-layer' && x.agentId === 'cx-3').length, 0);
 });
 
+test('a check that THROWS refuses the spawn (fail closed), with the reason in the refusal and the log', async (t) => {
+  const s = sandbox(t);
+  const cwd = path.join(s.home, 'work', 'clean'); fs.mkdirSync(cwd, { recursive: true });
+  const r = await s.hive.ensureAgent({ id: 'cx-9', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: 5 });
+  assert.match(r.refusal ?? '', /the check of this agent's codex project folder failed/);
+  assert.ok(logRows(s.home).some((x) => x.kind === 'codex-trust-layer' && x.agentId === 'cx-9' && x.action === 'refuse' && x.error));
+});
+
 // ── wiring pins ──────────────────────────────────────────────────────────────────────────────
 
 const src = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');
@@ -360,7 +378,7 @@ test('wiring: the decision runs after the seed and BEFORE config.toml is written
   assert.match(fn, /catch \(e\) \{\n\s+const reason = `Not started: the check of this agent's codex project folder failed/);
   const index = src('src/main/index.ts');
   assert.match(index, /codexVersion = cli\.version \?\? null;/);
-  assert.match(index, /codexLayerOptIns: readConfig\(\)\.codexLayerOptIns \?\? \[\]/);
+  assert.match(index, /codexLayerOptIns: \(\(\) => \{ const o: unknown = readConfig\(\)\.codexLayerOptIns; return Array\.isArray\(o\) \? o\.filter/, 'a hand-edited allowlist is read defensively');
   assert.match(index, /if \(inj\.refusal\) return \{ ok: false, error: inj\.refusal, \.\.\.\(inj\.codexLayerOptIn/);
 });
 
