@@ -130,7 +130,7 @@ const GLOBAL_WALL_MS = 55 * 60_000;
 const BUILD_WALL_MS = 20 * 60_000;
 /** The floor heavy-job lock's opt-in bench gate (src/main/heavyJob.ts BENCH_ENV). */
 const HEAVY_GATE = 'LAYERB_SOAK';
-const STALE_PREFIX = /^md-layerb-\d{4}-\d{2}-\d{2}T/;
+const STALE_PREFIX = /^md-layerb-\d{4}-\d{2}-\d{2}T/;   // legacy sandboxes (lb-jail, %TEMP%)
 const CREDENTIAL_NAMES = ['.credentials.json', 'auth.json'];
 /** Rough per-fact token estimates; a fact is skipped (NOT-PROVEN, "budget") when it cannot fit. */
 const FACT_EST = { B1: 40_000, B2: 70_000, B4: 45_000, B3: 190_000, B5: 45_000, B6: 150_000, B7: 160_000 };
@@ -141,7 +141,14 @@ const NUDGE_HEADS = ['You have new hive mail', 'You have new hive inbox message(
  *  every Codex home of the run (the help's, the probe's, each agent's <hive>/agents/<id>/.codex) sits
  *  inside the sandbox. So the WHOLE sandbox base moves out of %TEMP%, to <LB_JAIL_ROOT>/md-layerb-<stamp>
  *  (the simplest safe option: one root, one removal, one sweep). */
-const LB_JAIL_ROOT = 'C:\\Dunder\\_work\\andy-scratch\\lb-jail';
+const LB_JAIL_ROOT = 'C:\\Dunder\\lbj';
+/** god (on 7aebbe9a): C:\Dunder\lbj, a SHORT root (a Dunder sibling), because codex 0.157.1's
+ *  app-server daemon binds UNIX sockets under CODEX_HOME and AF_UNIX sun_path is 108 bytes: the
+ *  1782cab2 real run's lb-codex home (lb-jail\md-layerb-<stamp>\devroot\...) made a 150-char socket
+ *  path, the daemon failed ("path must be shorter than SUN_LEN") and codex exited 1. The run dir is an
+ *  8-hex-char id, the devroot is "d"; the earlier roots stay in the startup sweep as LEGACY roots. */
+const LB_LEGACY_ROOTS = ['C:\\Dunder\\_work\\andy-scratch\\lb-jail'];
+const RUN_DIR = /^[0-9a-f]{8}$/;
 
 const LIVE = {
   hive: 'C:\\Dunder\\hive',
@@ -1314,7 +1321,7 @@ function sweepStale(tmp, currentBase, ops = {}) {
     }
     return out;
   };
-  for (const n of names.filter((x) => STALE_PREFIX.test(x))) {
+  for (const n of names.filter((x) => (ops.pattern || STALE_PREFIX).test(x))) {
     const dir = path.join(tmp, n);
     if (currentBase && norm(dir) === norm(currentBase)) continue;
     let st;
@@ -1344,16 +1351,50 @@ function sweepRoots(roots, currentBase, ops = {}) {
   const lstat = ops.lstat || ((p) => fs.lstatSync(p));
   const done = [];
   let ok = true;
-  for (const root of roots) {
+  for (const entry of roots) {
+    const root = typeof entry === 'string' ? entry : entry.dir;
+    const pattern = typeof entry === 'string' ? STALE_PREFIX : entry.pattern;
     try { lstat(root); } catch (e) {
       if (e && e.code === 'ENOENT') continue;
       ok = false; done.push({ dir: root, credentials: 0, shredded: 0, removed: false, error: `cannot inspect ${root}: ${e && e.message}` }); continue;
     }
-    const r = sweepStale(root, currentBase, ops);
+    const r = sweepStale(root, currentBase, { ...ops, pattern });
     ok = ok && r.ok;
     done.push(...r.done);
   }
   return { ok, done };
+}
+
+/** Every UNIX socket codex 0.157.1 derives from CODEX_HOME (openai/codex rust-v0.157.1, 36650394):
+ *  - the app-server control socket <CODEX_HOME>\app-server-control\app-server-control.sock
+ *    (codex-rs/app-server-transport/src/transport/mod.rs:55-56, :66-72; the daemon binds/probes it,
+ *    app-server-daemon/src/lib.rs:318, transport/unix_socket.rs:97, :236);
+ *  - the daemon's manual-update socket = its update pid file with the extension "sock"
+ *    (app-server-daemon/src/lib.rs:975-977; used manual_update.rs:27, update_loop.rs:118/:276), i.e.
+ *    <CODEX_HOME>\app-server-daemon\daemon-updater.sock, or the legacy app-server-updater.sock when the
+ *    managed bin is under packages/standalone (lib.rs:48-54, :321-333). Both are listed.
+ *  (The startup lock app-server-control\app-server-startup.lock, mod.rs:57/:74-79, is a file, not a
+ *  socket.) AF_UNIX sun_path is 108 bytes, so each must be <= 107 characters. */
+const CODEX_SOCKET_MAX = 107;
+function codexSocketPaths(codexHome) {
+  const p = require('path').win32;
+  return [
+    p.join(codexHome, 'app-server-control', 'app-server-control.sock'),
+    p.join(codexHome, 'app-server-daemon', 'daemon-updater.sock'),
+    p.join(codexHome, 'app-server-daemon', 'app-server-updater.sock')
+  ];
+}
+function codexSocketProblems(codexHomes) {
+  const out = [];
+  for (const h of codexHomes) for (const sp of codexSocketPaths(h)) {
+    if (sp.length > CODEX_SOCKET_MAX) out.push(`${sp} is ${sp.length} chars (> ${CODEX_SOCKET_MAX}: codex's UNIX socket would fail, SUN_LEN)`);
+  }
+  return out;
+}
+/** Every CODEX_HOME the run gives codex: the app env's (the jail home), the step-1 help home, the
+ *  probe home, and each Codex agent's own <hive>\agents\<id>\.codex (the product's layout). */
+function runCodexHomes(s, codexAgentIds) {
+  return [path.join(s.home, '.codex'), path.join(s.jail, 'hc'), path.join(s.jail, 'pc'), ...codexAgentIds.map((id) => path.join(s.hive, 'agents', id, '.codex'))];
 }
 
 /** The sandbox base guard (real step 1): inside the jail root, NOT under %TEMP% (codex refuses its
@@ -1572,13 +1613,14 @@ class LayerB {
 
   // ── layout ────────────────────────────────────────────────────────────────
   layout() {
-    const base = path.join(this.args.jailRoot || LB_JAIL_ROOT, `md-layerb-${this.stamp}`);
+    this.runId = this.runId || hex(4);   // 8 hex chars: the short run dir (codex socket paths)
+    const base = path.join(this.args.jailRoot || LB_JAIL_ROOT, this.runId);
     const s = {
       base,
-      devRoot: path.join(base, 'devroot'),
-      jail: path.join(base, 'jail'),
-      work: path.join(base, 'work'),
-      stubs: path.join(base, 'stubs'),
+      devRoot: path.join(base, 'd'),
+      jail: path.join(base, 'j'),
+      work: path.join(base, 'w'),
+      stubs: path.join(base, 's'),
       report: this.args.reportDir || path.join(REPO, 'dist', 'layer-b-reports', this.stamp)
     };
     s.hive = path.join(s.devRoot, 'hive');
@@ -1627,7 +1669,8 @@ class LayerB {
     for (const [name, p] of [['userData', paths.userData], ['hive', paths.hiveRoot]]) {
       if (norm(p) === norm(liveUserData) || norm(p) === norm(LIVE.hive) || inside(p, LIVE.devData)) throw new Error(`sandbox ${name} is a live path`);
     }
-    const baseProblems = [...jailRootProblems(this.args.jailRoot || LB_JAIL_ROOT), ...sandboxBaseProblems(s.base, this.args.jailRoot || LB_JAIL_ROOT, liveUserData)];
+    const baseProblems = [...jailRootProblems(this.args.jailRoot || LB_JAIL_ROOT), ...sandboxBaseProblems(s.base, this.args.jailRoot || LB_JAIL_ROOT, liveUserData),
+      ...codexSocketProblems(runCodexHomes(s, [IDS.codex]))];
     if (baseProblems.length) throw new Error(`the sandbox base is refused:\n  ${baseProblems.join('\n  ')}`);
     // R10: the Codex login source honours $CODEX_HOME and refuses one inside a live hive.
     if (!this.args.dryRun) realCredentialPaths();
@@ -1640,8 +1683,8 @@ class LayerB {
    *  credential copy) unless every stale credential is provably shredded and its dir removed. */
   startupSweep(ops) {
     // Both homes a sandbox ever had: the jail root (now) and %TEMP% (before real step 1).
-    const sweep = sweepRoots([this.args.jailRoot || LB_JAIL_ROOT, os.tmpdir()], this.s.base, ops);
-    this.check(sweep.ok, 'startup sweep: every stale md-layerb-* credential shredded and its sandbox removed (lb-jail and %TEMP%)', JSON.stringify(sweep.done));
+    const sweep = sweepRoots([{ dir: this.args.jailRoot || LB_JAIL_ROOT, pattern: RUN_DIR }, ...LB_LEGACY_ROOTS.map((d) => ({ dir: d, pattern: STALE_PREFIX })), { dir: os.tmpdir(), pattern: STALE_PREFIX }], this.s.base, ops);
+    this.check(sweep.ok, 'startup sweep: every stale run dir credential shredded and its sandbox removed (lbj, and the legacy lb-jail and %TEMP%)', JSON.stringify(sweep.done));
     if (!sweep.ok) throw new Error('the startup sweep could not prove the stale credentials gone: aborting before the build');
     return sweep;
   }
@@ -2006,7 +2049,7 @@ class LayerB {
     const shim = whichOn(parentPath(), 'codex');
     const exe = shim ? codexExe(shim) : null;
     if (!exe) { this.check(false, 'codex --version / codex sandbox --help: the codex.exe was found', shim || 'codex not on PATH'); return null; }
-    const home = path.join(this.s.jail, 'help-codex-home');
+    const home = path.join(this.s.jail, 'hc');   // short: codex sockets live under CODEX_HOME
     W.mkdir(home);
     const env = buildEnv(null, { seams: false });
     env.CODEX_HOME = home;
@@ -2040,7 +2083,7 @@ class LayerB {
     const targets = { hive: path.join(LIVE.hive, marker), codex: path.join(home, '.codex', marker), claude: path.join(home, '.claude', marker) };
     const codex = this.spec.find((a) => a.id === IDS.codex);
     const insideMarker = path.join(codex.cwd, marker);
-    const probeHome = path.join(s.jail, 'probe-codex-home');
+    const probeHome = path.join(s.jail, 'pc');   // short: codex sockets live under CODEX_HOME
     W.write(path.join(probeHome, 'config.toml'), codexSandboxToml(this.codexRoots));   // IDENTICAL to the agents' seed
     const script = path.join(s.base, 'codex-sandbox-probe.cjs');
     W.write(script, `const fs = require('fs'); const out = {};
@@ -3113,7 +3156,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;

@@ -324,15 +324,17 @@ test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv 
   const main = src.slice(src.indexOf('async main() {'));
   assert.match(main, /this\.stopReason = 'codex --version and codex sandbox --help recorded;/);
   assert.match(method('codexSandboxHelp()'), /this\.check\(ver\.status === 0 && help\.status === 0 && !!version && help\.text\.length > 0,/);
-  assert.match(method('codexSandboxHelp()'), /const home = path\.join\(this\.s\.jail, 'help-codex-home'\);/);
+  assert.match(method('codexSandboxHelp()'), /const home = path\.join\(this\.s\.jail, 'hc'\);/);
 });
 
-test('real step 1: the sandbox base lives in lb-jail/<run>, never in %TEMP% or a live location; the sweep covers lb-jail/* and %TEMP%', (t) => {
-  assert.equal(lb.LB_JAIL_ROOT, 'C:\\Dunder\\_work\\andy-scratch\\lb-jail');
+test('real step 1 + god (on 7aebbe9a): the sandbox base lives in C:\\Dunder\\lbj\\<8 hex>, never in %TEMP% or a live location; the sweep covers lbj/* and the legacy lb-jail and %TEMP%', (t) => {
+  assert.equal(lb.LB_JAIL_ROOT, 'C:\\Dunder\\lbj');
+  assert.deepEqual(lb.LB_LEGACY_ROOTS, ['C:\\Dunder\\_work\\andy-scratch\\lb-jail']);
   const r = new lb.LayerB(lb.parseArgs([]));
   const s = r.layout();
   assert.equal(path.dirname(s.base), lb.LB_JAIL_ROOT);
-  assert.match(path.basename(s.base), /^md-layerb-\d{4}-\d{2}-\d{2}T/, 'the stale-sweep prefix');
+  assert.match(path.basename(s.base), lb.RUN_DIR, 'an 8-hex-char run dir (the sweep pattern for lbj)');
+  assert.deepEqual([s.devRoot, s.jail, s.work, s.stubs].map((x) => path.basename(x)), ['d', 'j', 'w', 's'], 'short inner names');
   assert.deepEqual(lb.sandboxBaseProblems(s.base, lb.LB_JAIL_ROOT, 'C:\\Users\\x\\AppData\\Roaming\\munder-difflin', { TEMP: 'C:\\Users\\x\\AppData\\Local\\Temp' }), []);
   const tmp = os.tmpdir();
   assert.match(lb.sandboxBaseProblems(path.join(tmp, 'md-layerb-x'), tmp, null, { TEMP: tmp }).join(' '), /under %TEMP%/, 'a %TEMP% base is refused');
@@ -341,9 +343,9 @@ test('real step 1: the sandbox base lives in lb-jail/<run>, never in %TEMP% or a
   assert.match(lb.sandboxBaseProblems('C:\\Dunder\\MunderDevData\\md-layerb-x', 'C:\\Dunder\\MunderDevData', null, {}).join(' '), /overlaps MunderDevData/);
   assert.match(lb.sandboxBaseProblems(path.join(os.homedir(), '.codex', 'md-layerb-x'), path.join(os.homedir(), '.codex'), null, {}).join(' '), /overlaps the real ~\/\.codex/);
   assert.match(lb.sandboxBaseProblems('C:\\ud\\md-layerb-x', 'C:\\ud', 'C:\\ud', {}).join(' '), /overlaps the live userData/);
-  assert.match(method('preflight()'), /const baseProblems = \[\.\.\.jailRootProblems\(this\.args\.jailRoot \|\| LB_JAIL_ROOT\), \.\.\.sandboxBaseProblems\(s\.base, this\.args\.jailRoot \|\| LB_JAIL_ROOT, liveUserData\)\];\s*if \(baseProblems\.length\) throw/);
-  // The sweep: both roots, a missing root is empty, any other error is fail-closed.
-  assert.match(method('startupSweep(ops)'), /sweepRoots\(\[this\.args\.jailRoot \|\| LB_JAIL_ROOT, os\.tmpdir\(\)\], this\.s\.base, ops\)/);
+  assert.match(method('preflight()'), /const baseProblems = \[\.\.\.jailRootProblems\(this\.args\.jailRoot \|\| LB_JAIL_ROOT\), \.\.\.sandboxBaseProblems\(s\.base, this\.args\.jailRoot \|\| LB_JAIL_ROOT, liveUserData\),\s*\.\.\.codexSocketProblems\(runCodexHomes\(s, \[IDS\.codex\]\)\)\];\s*if \(baseProblems\.length\) throw/);
+  // The sweep: lbj (run-id dirs) and the legacy roots (md-layerb-*); a missing root is empty, any other error is fail-closed.
+  assert.match(method('startupSweep(ops)'), /sweepRoots\(\[\{ dir: this\.args\.jailRoot \|\| LB_JAIL_ROOT, pattern: RUN_DIR \}, \.\.\.LB_LEGACY_ROOTS\.map\(\(d\) => \(\{ dir: d, pattern: STALE_PREFIX \}\)\), \{ dir: os\.tmpdir\(\), pattern: STALE_PREFIX \}\], this\.s\.base, ops\)/);
   const jail = tmpDir(t, 'lb-jailroot-');
   const legacy = tmpDir(t, 'lb-legacytmp-');
   const staleJ = path.join(jail, 'md-layerb-2026-09-29T01-00-00-000Z');
@@ -929,7 +931,7 @@ test('Jim LOW: the sandbox base is judged by its REAL path: a junction out of th
   assert.match(lb.jailRootProblems(link, lb.realpathNearest, jroot).join(' '), /resolves to .*live-userdata, outside/, 'a junction out of it');
   assert.match(lb.jailRootProblems(tmp, lb.realpathNearest, jroot).join(' '), /outside/, 'a parent of it');
   assert.deepEqual(lb.jailRootProblems(lb.LB_JAIL_ROOT), [], 'the default passes');
-  assert.match(lb.jailRootProblems('C:\\elsewhere\\lb').join(' '), /outside C:\\Dunder\\_work\\andy-scratch\\lb-jail/);
+  assert.match(lb.jailRootProblems('C:\\elsewhere\\lb').join(' '), /outside C:\\Dunder\\lbj/);
   assert.match(method('preflight()'), /const baseProblems = \[\.\.\.jailRootProblems\(this\.args\.jailRoot \|\| LB_JAIL_ROOT\), \.\.\.sandboxBaseProblems\(/);
   // The junction target is untouched after the test's own removal of the link (never deleted THROUGH it).
   fs.writeFileSync(path.join(live, 'keep.txt'), 'x');
@@ -1277,5 +1279,74 @@ test('1782cab2 real run (lb-codex died with no evidence): the PTY capture keeps 
   assert.match(ev, /W\.write\(path\.join\(dst, 'pty-capture\.json'\), redact\(JSON\.stringify\(this\.ptyCaptures \|\| \[\], null, 2\)\)\);/);
   assert.match(ev, /const codexHome = path\.join\(s\.hive, 'agents', IDS\.codex, '\.codex'\);/);
   assert.match(ev, /const never = \/\(\^\|\[\\\\\/\]\)\(auth\\\.json\|\\\.credentials\\\.json\)\$\/i;/, 'credential files are never taken');
+});
+
+test('god (on 7aebbe9a): every codex 0.157.1 UNIX socket under every run CODEX_HOME is <= 107 chars (SUN_LEN); 108 fails; the preflight enforces it', () => {
+  // openai/codex rust-v0.157.1: app-server-transport/src/transport/mod.rs:55-56, :66-72 (control socket);
+  // app-server-daemon/src/lib.rs:48-54, :321-333, :975-977 (the manual-update socket = the update pid file .sock)
+  assert.equal(lb.CODEX_SOCKET_MAX, 107);
+  const socks = lb.codexSocketPaths('C:\\h');
+  assert.deepEqual(socks, ['C:\\h\\app-server-control\\app-server-control.sock', 'C:\\h\\app-server-daemon\\daemon-updater.sock', 'C:\\h\\app-server-daemon\\app-server-updater.sock']);
+  // A home whose LONGEST socket is exactly 107 passes, 108 fails.
+  const longest = Math.max(...socks.map((x) => x.length)) - 'C:\\h'.length;   // the suffix the longest socket adds
+  const homeOf = (len) => 'C:\\' + 'x'.repeat(len - 3);
+  assert.deepEqual(lb.codexSocketProblems([homeOf(107 - longest)]), [], '107 passes');
+  const bad = lb.codexSocketProblems([homeOf(108 - longest)]);
+  assert.equal(bad.length, 1, '108 fails');
+  assert.match(bad[0], /is 108 chars \(> 107: codex's UNIX socket would fail, SUN_LEN\)/);
+  // The control socket is the longest (42 chars after the home); the updater sockets are listed too.
+  assert.ok(socks[0].length >= socks[1].length && socks[0].length >= socks[2].length, 'the control socket is the longest');
+  // The REAL layout is under the limit; the old one (1782cab2) was not.
+  const r = new lb.LayerB(lb.parseArgs([]));
+  const s = r.layout();
+  const homes = lb.runCodexHomes(s, [lb.IDS.codex]);
+  assert.deepEqual(homes.map((h) => path.relative(s.base, h)), [path.join('j', 'home', '.codex'), path.join('j', 'hc'), path.join('j', 'pc'), path.join('d', 'hive', 'agents', 'lb-codex', '.codex')]);
+  assert.deepEqual(lb.codexSocketProblems(homes), [], 'every socket of the real layout fits');
+  const worst = Math.max(...homes.flatMap((h) => lb.codexSocketPaths(h)).map((x) => x.length));
+  assert.ok(worst <= 107, `worst ${worst}`);
+  const old = { base: 'C:\\Dunder\\_work\\andy-scratch\\lb-jail\\md-layerb-2026-09-30T06-30-48-409Z' };
+  Object.assign(old, { home: path.join(old.base, 'jail', 'home'), jail: path.join(old.base, 'jail'), hive: path.join(old.base, 'devroot', 'hive') });
+  assert.ok(lb.codexSocketProblems(lb.runCodexHomes(old, [lb.IDS.codex])).some((x) => /agents\\lb-codex\\\.codex\\app-server-control/.test(x)), 'the 1782cab2 layout fails');
+  assert.match(method('codexSandboxHelp()'), /const home = path\.join\(this\.s\.jail, 'hc'\);/);
+  assert.match(method('proveCodexSandbox()'), /const probeHome = path\.join\(s\.jail, 'pc'\);/);
+});
+
+test('Jim pins on 7aebbe9a: T15 the TOTAL cap ignores cache_read, T14 a Codex rollout over 400k fresh trips, P1/P2 the capture forwards the payload unchanged, P4 a throwing capture still sends, P9 the codex-home copy never takes auth.json', () => {
+  const C = lb.IDS.claude; const X = lb.IDS.codex;
+  // T15: fresh total < 1M, fresh + cache_read > 1M -> no trip.
+  const rows = [{ agent_id: C, session_id: 'a', input: 390_000, cache_read: 800_000 }, { agent_id: X, session_id: 'b', input: 390_000, cache_read: 800_000 }, { agent_id: lb.IDS.god, session_id: 'c', input: 200_000, cache_read: 800_000 }];
+  const t15 = lb.tokenAccount({ ledgerRows: rows });
+  assert.equal(t15.total, 980_000);
+  assert.equal(lb.tokenCapBreach(t15), null, 'the total cap counts fresh only');
+  // T14: a Codex rollout over 400k fresh trips the per-agent cap.
+  const tok = (input, cached, output) => ({ payload: { type: 'token_count', info: { total_token_usage: { input_tokens: input, cached_input_tokens: cached, output_tokens: output } } } });
+  assert.match(lb.tokenCapBreach(lb.tokenAccount({ rollouts: [[tok(500_000, 90_000, 5_000)]] })), /^per-agent token cap: lb-codex at 415000 fresh \(cache_read 90000, not capped\)$/);
+  // P1/P2: the forwarded args are exactly the original ones (payload not dropped or altered).
+  const got = [];
+  const wc = { send(...a) { got.push(a); } };
+  const install = new Function(`return (${lb.installPtyCapture.toString()});`)();
+  install({ getAllWindows: () => [{ webContents: wc }] }, {}, 64, () => 1);
+  const payload = { exitCode: 3, signal: null, extra: [1, 2] };
+  wc.send('pty:exit:pty-x', payload, 'second-arg');
+  wc.send('pty:data:pty-x', 'raw \x1b[31mbytes\x1b[0m');
+  assert.deepEqual(got, [['pty:exit:pty-x', payload, 'second-arg'], ['pty:data:pty-x', 'raw \x1b[31mbytes\x1b[0m']]);
+  assert.equal(got[0][1], payload, 'the same object, not a copy');
+  // P4: a capture that throws still sends.
+  const got2 = [];
+  const wc2 = { send(...a) { got2.push(a); } };
+  const root2 = {};
+  install({ getAllWindows: () => [{ webContents: wc2 }] }, root2, 64, () => { throw new Error('clock broke'); });
+  wc2.send('pty:exit:pty-y', { exitCode: 1 });
+  assert.deepEqual(got2, [['pty:exit:pty-y', { exitCode: 1 }]], 'the send went through');
+  // P9: the codex-home copy takes *.log and sessions/**, never auth.json (the filter itself).
+  const ev = method('collectEvidence()');
+  const m = /walk\(codexHome, \(p\) => (.+?)\)\) take\(/.exec(ev);
+  assert.ok(m, 'the codex-home filter is found');
+  const filter = new Function('p', `return ${m[1]};`);
+  const H = 'C:\\h\\.codex';
+  assert.equal(filter(`${H}\\log\\codex-tui.log`), true);
+  assert.equal(filter(`${H}\\sessions\\2026\\rollout-x.jsonl`), true);
+  for (const p of [`${H}\\auth.json`, `${H}\\config.toml`, `${H}\\packages\\app-server-daemon\\current\\bin\\codex.exe`, `${H}\\.credentials.json`]) assert.equal(filter(p), false, `not ${p}`);
+  assert.match(ev, /const never = /, 'and `take` refuses credential files whatever the filter');
 });
 
