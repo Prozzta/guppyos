@@ -53,11 +53,23 @@ export function toolRowStatus(r: ResolvedCommand, bin: string, exists: (p: strin
   return { found: path !== null, path, unknown: path === null && r.unknown === true };
 }
 
-/** Andy C2: PtyManager.spawn's guard before the LOSSY cmd.exe route. An UNRESOLVED bare name (the
- *  lookup gave no answer) with a multi-line argument would start through `cmd.exe /d /s /c`, which
- *  cuts the argument at its first newline: the agent would look healthy without its hive
- *  protocol. Refuse it with the retryable reason. Null = allowed. */
-export function lossyRouteRefusal(command: string, r: ResolvedCommand, args: readonly string[]): string | null {
-  if (!r.unknown) return null;
-  return args.some((a) => a.includes('\n')) ? cliLookupUnknownReason(command) : null;
+/** The reason for a spawn refused because its launcher can only start through cmd.exe. */
+export function unsupportedLauncherReason(command: string, path: string): string {
+  return `engine CLI "${command}" is an unsupported launcher for a multi-line argument: ${path} can only start through cmd.exe, which cuts the argument at its first newline; install the CLI with npm or point it at an .exe`;
+}
+
+/** Andy C2/C3 + LOSSY-CMD-ROUTE (god, rev 3): PtyManager.spawn's ONE rule before the LOSSY
+ *  `cmd.exe /d /s /c` route. That route cuts every argument at its first newline, so the agent
+ *  would start looking healthy without its hive protocol. ANY spawn that would take it with a
+ *  multi-line argument is refused, whatever the reason, with a reason that says which:
+ *   - the command's lookup, or the npm shim's interpreter lookup, gave no answer: RETRYABLE;
+ *   - the lookup answered "not installed": not installed;
+ *   - otherwise a .cmd/.bat (or other non-.exe) that could not be decoded: UNSUPPORTED LAUNCHER.
+ *  Single-line arguments keep the cmd.exe route. Null = allowed. */
+export function lossyRouteRefusal(command: string, r: ResolvedCommand, args: readonly string[], unknownInterpreter: string | null = null): string | null {
+  if (!args.some((a) => a.includes('\n'))) return null;
+  if (r.unknown) return cliLookupUnknownReason(command);
+  if (unknownInterpreter !== null) return cliLookupUnknownReason(unknownInterpreter);
+  if (!r.found) return `engine CLI "${command}" is not installed`;
+  return unsupportedLauncherReason(command, r.path);
 }

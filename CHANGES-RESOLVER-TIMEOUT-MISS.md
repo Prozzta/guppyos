@@ -79,3 +79,22 @@ The probe can now build a `CommandResolver({ deps: () => ({ ...nodeResolverDeps(
 - **Separate card (reported to god):** the same lossy `cmd.exe` route is reached by a FOUND target that `resolveWindowsShimSpawn` cannot decode (a hand-written `.bat`, or a non-npm shim) with a multi-line argument. That is pre-existing and outside this fix: it only warns in the console.
 
 - **Rev 2 full suite (b6bf9a1):** 3202 tests, 3186 pass, 0 fail, 16 skipped, 130 s. Mutants: 19 of 19 KILLED at named tests.
+
+## Rev 3 (Andy Round 2: C3; god 1a44a1: fix the class at the root, LOSSY-CMD-ROUTE folded in)
+
+- **One rule** (`lossyRouteRefusal`, called once in `PtyManager.spawn` right before `buildCmdCommandLine`):
+  - ANY spawn that would take `cmd.exe /d /s /c` with an argument containing `\n` (so CRLF too) is refused before a session or process exists, whatever the reason.
+  - The reason says which cause it is:
+    - **retryable** (`engine CLI "<x>" could not be checked: ... retry the spawn`): the command's lookup gave no answer (C2), OR the npm shim's INTERPRETER lookup gave no answer (C3, which names `node`);
+    - **not installed**: the lookup answered "absent";
+    - **unsupported launcher** (`... is an unsupported launcher for a multi-line argument: <path> can only start through cmd.exe ...`): a FOUND `.cmd`/`.bat` that `resolveWindowsShimSpawn` cannot decode, such as a hand-written `.bat` or a shim that is not from npm (LOSSY-CMD-ROUTE). This one is not retryable.
+  - Single-line arguments keep the `cmd.exe` route unchanged.
+- **C3 plumbing:** `resolveWindowsShimSpawn(resolved, seen)` records `seen.unknownInterpreter` when the interpreter lookup is `unknown`. It still returns null on every failure, so the decode contract is unchanged, and `spawn` passes the recorded value to the rule.
+- **Warning cleanup:** the old "A MULTI-LINE ARGUMENT ... WILL BE TRUNCATED" console warning can no longer be reached. The fallback warning now says that only single-line arguments get there.
+- **Tests (PtyManager.spawn, win32, fixture npm shim and a hand-written .bat in a temp dir):**
+  - one test per cause: C2 (an unresolved name), C3 (a found npm `claude.cmd` whose `node` lookup is unknown), and LOSSY-CMD-ROUTE (a found hand-written `.bat`);
+  - a single-line control: the same `.bat` still starts through `cmd.exe`;
+  - the policy behaviour test covers all the reasons, including CRLF;
+  - one wiring pin covers the call site, and one pins the interpreter report.
+- **Andy's nit on M15:** the Setup-row assertions are now their own test, `policy: the Setup row ...`, and M15 is named there.
+- **Mutants (rev 3):** 25 of 25 KILLED at named tests (`t12/resmut3.cjs` + `resmut3-extra.cjs`; results `resmut3.txt`).

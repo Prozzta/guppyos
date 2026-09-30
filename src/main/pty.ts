@@ -537,7 +537,7 @@ export class PtyManager {
    * not installed or itself not a real .exe) degrades to exactly today's cmd.exe
    * behaviour. Never throws.
    */
-  private async resolveWindowsShimSpawn(resolved: string): Promise<{ file: string; script: string | null } | null> {
+  private async resolveWindowsShimSpawn(resolved: string, seen: { unknownInterpreter?: string } = {}): Promise<{ file: string; script: string | null } | null> {
     if (process.platform !== 'win32') return null;
     try {
       const lower = resolved.toLowerCase();
@@ -566,6 +566,9 @@ export class PtyManager {
       }
 
       const interp = await this.resolveCommand(target.interpreter);
+      // RESOLVER-TIMEOUT-MISS (Andy C3): an interpreter lookup that gave NO answer is reported,
+      // so spawn's lossy-route rule refuses a multi-line spawn with the retryable reason.
+      if (interp.unknown) seen.unknownInterpreter = target.interpreter;
       if (!interp.found) return null;
       // Must be a REAL executable: if `node` itself only resolves to a `.cmd`
       // (e.g. our own bundled-runtime shim appended to PATH), spawning it directly
@@ -616,8 +619,9 @@ export class PtyManager {
       // resolveWindowsShimSpawn). win32-only and null-on-anything-unexpected, so
       // macOS/Linux and every undecodable Windows target keep today's behaviour.
       // Skipped entirely for a shellScript spawn, which never executes `resolved`.
+      const shimSeen: { unknownInterpreter?: string } = {};
       const shimSpawn = needsCmd && typeof opts.shellScript !== 'string'
-        ? await this.resolveWindowsShimSpawn(resolved)
+        ? await this.resolveWindowsShimSpawn(resolved, shimSeen)
         : null;
       // The lookups above yielded: a reset/changeHome may have closed the manager, or another
       // spawn may have claimed this id, meanwhile.
@@ -675,10 +679,11 @@ export class PtyManager {
         // `cmd.exe /d /s /c "<command>"`, wrapping the WHOLE inner command in one outer
         // quote pair — cmd's /s flag strips exactly that pair and runs the remainder
         // (where the resolved path keeps its own quotes) literally. /d skips AutoRun.
-        // RESOLVER-TIMEOUT-MISS (Andy C2): an UNRESOLVED bare name (the lookup gave no answer)
-        // must never reach the lossy cmd.exe route with a multi-line argument: it would start
-        // looking healthy without its hive protocol. Refused, with the retryable reason.
-        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? []) : null;
+        // RESOLVER-TIMEOUT-MISS (Andy C2/C3, LOSSY-CMD-ROUTE): NOTHING reaches the lossy cmd.exe
+        // route with a multi-line argument (an unresolved name, an unknown interpreter, an
+        // undecodable .cmd/.bat): it would start looking healthy without its hive protocol.
+        // Refused before any session or process, with a reason that says which.
+        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? [], shimSeen.unknownInterpreter ?? null) : null;
         if (lossy) {
           console.warn(`[pty] refused: ${lossy}`);
           return { ok: false, error: lossy };
@@ -686,24 +691,13 @@ export class PtyManager {
         spawnArgs = needsCmd
           ? buildCmdCommandLine(resolved, opts.args ?? [])
           : (opts.args ?? []);
-        // The cmd.exe fallback is LOSSY and was previously SILENT, which is how a
-        // Windows agent could look perfectly healthy while never having received
-        // the hive protocol: cmd.exe cuts a multi-line argument at its first
-        // newline, and the whole protocol block rides on one such argument.
-        // resolveWindowsShimSpawn returns null for any shim shape it does not
-        // fully understand, so this path is reachable on a real machine while
-        // every unit test passes. Say so, loudly, with the two facts needed to
-        // diagnose it: which target refused to decode, and whether a multi-line
-        // argument is actually at risk in THIS spawn.
+        // The cmd.exe fallback is LOSSY: it cuts a multi-line argument at its first
+        // newline. Such a spawn was refused just above (it once only warned here, and an
+        // agent started healthy-looking without its hive protocol), so what reaches
+        // this point has single-line arguments only. Still say which target refused
+        // to decode as an npm shim.
         if (needsCmd) {
-          const multiline = (opts.args ?? []).some((a) => a.includes('\n'));
-          console.warn(
-            `[pty] Windows: "${resolved}" could not be decoded as an npm shim — falling back to cmd.exe.` +
-            (multiline
-              ? ' A MULTI-LINE ARGUMENT IS PRESENT AND WILL BE TRUNCATED AT ITS FIRST NEWLINE.' +
-                ' The agent will start and look healthy without ever receiving the hive protocol.'
-              : ' No multi-line argument in this spawn, so nothing is lost here.')
-          );
+          console.warn(`[pty] Windows: "${resolved}" could not be decoded as an npm shim — falling back to cmd.exe (single-line arguments only; nothing is lost).`);
         }
       }
       const proc = pty.spawn(file, spawnArgs, {

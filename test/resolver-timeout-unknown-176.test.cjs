@@ -220,32 +220,100 @@ test('policy: the headless spawn refuses an unknown with a DISTINCT, retryable r
   assert.equal(P.headlessSpawnRefusal('codex', 'found'), null);
 });
 
-test('policy: the codex daemon start never gets a bare name from an unknown lookup; the Setup row marks unknown and never counts it found', () => {
+test('policy: the codex daemon start never gets a bare name from an unknown lookup', () => {
   assert.equal(P.daemonExecutable({ path: 'codex', found: false, unknown: true }), null);
   assert.equal(P.daemonExecutable({ path: 'C:\\n\\codex.cmd', found: true }), 'C:\\n\\codex.cmd');
+});
+
+test('policy: the Setup row marks an unknown lookup NOT CHECKED and never counts it found', () => {
   const on = (p) => p === 'C:\\n\\codex.cmd';
   assert.deepEqual(P.toolRowStatus({ path: 'codex', found: false, unknown: true }, 'codex', on), { found: false, path: null, unknown: true });
   assert.deepEqual(P.toolRowStatus({ path: 'codex', found: false }, 'codex', on), { found: false, path: null, unknown: false });
   assert.deepEqual(P.toolRowStatus({ path: 'C:\\n\\codex.cmd', found: true }, 'codex', on), { found: true, path: 'C:\\n\\codex.cmd', unknown: false });
 });
 
-test('policy (C2): the lossy cmd.exe route refuses an UNRESOLVED name with a multi-line argument; a resolved one, or single-line args, pass', () => {
+test('policy (C2/C3, LOSSY-CMD-ROUTE): ANY multi-line spawn on the lossy cmd.exe route is refused, with a reason that says which; single-line args pass', () => {
+  const ML = ['--x', 'line one\nline two'];
   const U = { path: 'claude', found: false, unknown: true };
-  assert.match(P.lossyRouteRefusal('claude', U, ['--x', 'line one\nline two']), /could not be checked/);
+  const BAT = { path: 'C:\\n\\claude.bat', found: true };
+  // unknown lookups: RETRYABLE, naming the lookup that gave no answer
+  assert.match(P.lossyRouteRefusal('claude', U, ML), /^engine CLI "claude" could not be checked: .*retry the spawn$/);
+  assert.match(P.lossyRouteRefusal('claude', BAT, ML, 'node'), /^engine CLI "node" could not be checked: .*retry the spawn$/);
+  // an undecodable found launcher: UNSUPPORTED LAUNCHER (not retryable)
+  assert.match(P.lossyRouteRefusal('claude', BAT, ML), /^engine CLI "claude" is an unsupported launcher for a multi-line argument: C:\\n\\claude\.bat can only start through cmd\.exe/);
+  assert.doesNotMatch(P.lossyRouteRefusal('claude', BAT, ML), /retry/);
+  // a real miss: not installed
+  assert.equal(P.lossyRouteRefusal('claude', { path: 'claude', found: false }, ML), 'engine CLI "claude" is not installed');
+  // CRLF counts too; single-line args keep the cmd.exe route whatever the lookups said
+  assert.notEqual(P.lossyRouteRefusal('claude', BAT, ['a\r\nb']), null);
   assert.equal(P.lossyRouteRefusal('claude', U, ['--x', 'one line']), null);
-  assert.equal(P.lossyRouteRefusal('claude', { path: 'claude', found: false }, ['a\nb']), null, 'a real miss is the installer\'s business, not this guard');
-  assert.equal(P.lossyRouteRefusal('claude', { path: 'C:\\n\\claude.cmd', found: true }, ['a\nb']), null);
+  assert.equal(P.lossyRouteRefusal('claude', BAT, ['--x', 'one line'], 'node'), null);
 });
 
-test('C2 through PtyManager.spawn (win32): an unknown lookup with a multi-line argument is REFUSED before any process starts', { skip: process.platform !== 'win32' }, async () => {
+// ── the ONE rule through PtyManager.spawn (win32): one test per cause, and a single-line control ──
+const SPAWN_ML = ['--append-system-prompt', 'HIVE PROTOCOL\nline two'];
+const NPM_SHIM = ['@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"', '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*'].join('\r\n');
+const FIXTURES = [];
+test.after(() => { for (const d of FIXTURES) fs.rmSync(d, { recursive: true, force: true }); });
+function spawnFixture() {
   const os = require('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lossy-rule-'));
+  FIXTURES.push(dir);
+  fs.mkdirSync(path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'), '// stub\n');
+  fs.writeFileSync(path.join(dir, 'claude.cmd'), NPM_SHIM);
+  fs.writeFileSync(path.join(dir, 'handmade.bat'), '@echo off\r\necho hi %*\r\n');
+  return dir;
+}
+const WIN = { skip: process.platform !== 'win32' };
+
+test('SPAWN (C2): an UNRESOLVED name with a multi-line argument is refused, retryable, before any session', WIN, async () => {
   const { PtyManager } = loadTs('src/main/pty.ts');
+  const dir = spawnFixture();
   const pm = new PtyManager();
   pm.resolver = { resolve: async (c) => ({ path: c, found: false, unknown: true }) };
-  const res = await pm.spawn({ id: 'zz-c2', cwd: os.tmpdir(), command: 'claude', args: ['--append-system-prompt', 'HIVE PROTOCOL\nline two'], cols: 80, rows: 24 });
+  const res = await pm.spawn({ id: 'zz-c2', cwd: dir, command: 'claude', args: SPAWN_ML, cols: 80, rows: 24 });
   assert.equal(res.ok, false);
-  assert.match(res.error, /engine CLI "claude" could not be checked/);
+  assert.match(res.error, /^engine CLI "claude" could not be checked: .*retry the spawn$/);
   assert.equal(pm.list().length, 0, 'no session, no process');
+});
+
+test('SPAWN (C3, Andy): a FOUND npm claude.cmd whose node lookup is UNKNOWN is refused, retryable, naming node', WIN, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const dir = spawnFixture();
+  const pm = new PtyManager();
+  pm.resolver = { resolve: async (c) => (c === 'node' ? { path: 'node', found: false, unknown: true } : { path: path.join(dir, 'claude.cmd'), found: true }) };
+  const res = await pm.spawn({ id: 'zz-c3', cwd: dir, command: 'claude', args: SPAWN_ML, cols: 80, rows: 24 });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /^engine CLI "node" could not be checked: .*retry the spawn$/);
+  assert.equal(pm.list().length, 0);
+});
+
+test('SPAWN (LOSSY-CMD-ROUTE): a FOUND hand-written .bat with a multi-line argument is refused as an UNSUPPORTED LAUNCHER', WIN, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const dir = spawnFixture();
+  const pm = new PtyManager();
+  pm.resolver = { resolve: async () => ({ path: path.join(dir, 'handmade.bat'), found: true }) };
+  const res = await pm.spawn({ id: 'zz-bat', cwd: dir, command: 'handmade', args: SPAWN_ML, cols: 80, rows: 24 });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /^engine CLI "handmade" is an unsupported launcher for a multi-line argument: .*handmade\.bat can only start through cmd\.exe/);
+  assert.equal(pm.list().length, 0);
+});
+
+test('SPAWN control: the same .bat with SINGLE-LINE arguments still starts through cmd.exe', WIN, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const dir = spawnFixture();
+  const pm = new PtyManager();
+  pm.resolver = { resolve: async () => ({ path: path.join(dir, 'handmade.bat'), found: true }) };
+  const res = await pm.spawn({ id: 'zz-bat1', cwd: dir, command: 'handmade', args: ['--x', 'one line'], cols: 80, rows: 24 });
+  try {
+    assert.equal(res.ok, true, res.error);
+    assert.equal(pm.list().length, 1);
+  } finally {
+    pm.kill('zz-bat1');
+  }
 });
 
 // ─── One pin per index.ts call site (the decision itself is tested above) ────────────────
@@ -261,7 +329,8 @@ test('WIRING: each index.ts call site goes through its policy function; the inst
   assert.match(idx, /const executable = daemonExecutable\(await resolveCommandAsync\(opts\.command\)\);\r?\n\s+if \(executable === null\) \{/);
   assert.match(idx, /row = toolRowStatus\(await resolveCommandAsync\(spec\.bin\), spec\.bin, existsSync\);/);
   const pty = read('src/main/pty.ts');
-  assert.match(pty, /const lossy = needsCmd \? lossyRouteRefusal\(opts\.command, resolution, opts\.args \?\? \[\]\) : null;/);
+  assert.match(pty, /const lossy = needsCmd \? lossyRouteRefusal\(opts\.command, resolution, opts\.args \?\? \[\], shimSeen\.unknownInterpreter \?\? null\) : null;/);
+  assert.match(pty, /if \(interp\.unknown\) seen\.unknownInterpreter = target\.interpreter;\r?\n\s+if \(!interp\.found\) return null;/);
 });
 
 test('WIRING: the Setup panel says NOT CHECKED, offers no install command for an unknown row, and does not count it missing', () => {
