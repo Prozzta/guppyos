@@ -133,6 +133,6 @@ test('index.ts validates the bin at the spawn-request intake', () => {
   // moved the check off isCommandAvailable).
   assert.match(src, /if \(!isSafeCommandName\(bin\) && !isAbsolute\(bin\)\) \{/);
   const guardAt = src.indexOf('if (!isSafeCommandName(bin) && !isAbsolute(bin)) {');
-  const availAt = src.indexOf('const engineStatus = await ptyManager.commandStatus(bin);');
+  const availAt = src.indexOf('const engineRefusal = headlessSpawnRefusal(bin, await ptyManager.commandStatus(bin));');
   assert.ok(guardAt > 0 && availAt > guardAt, 'the guard must precede commandStatus(bin)');
 });

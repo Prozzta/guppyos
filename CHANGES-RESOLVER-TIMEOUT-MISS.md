@@ -57,3 +57,23 @@ Targeted (the three resolver files, plus `layer-b-codex-resolve` and `cli-instal
 
 ## For Creed's fixture (REFUSES 0.158.0)
 The probe can now build a `CommandResolver({ deps: () => ({ ...nodeResolverDeps(), whereTimeoutMs: 60_000 }) })` and set `self.resolver` to it. The box then never fires, and the retry wrapper can go.
+
+## Rev 2 (Andy's audit `RESOLVER-AUDIT.md`: C1, C2, R2, the Setup nits; god 017bc2)
+
+- **C1: "unknown" means "no answer", not only "the box fired".**
+  - **win32:** a miss is ONLY an answer from `where`: it ran (listed nothing usable), or it exited 1 ("could not find"). Everything else is `unknown`: our box, `where` exit 2, a spawn error (EAGAIN/ENOMEM), a synchronous exec throw (EMFILE), and a foreign signal (`whereAnswered`).
+  - **POSIX:** only a shell that printed both fences answered. No fence (the box, a shell that could not start, one that died) is `unknown`.
+  - **`CommandResolver`:** a THROWN lookup is `unknown` (retried once, never cached), not a miss. The lookups never throw for a bad name; they return a miss.
+- **C2: the lossy `cmd.exe` route.** `PtyManager.spawn` refuses an UNRESOLVED bare name (the lookup gave no answer) when an argument contains a newline, with the retryable reason. Such an agent would start looking healthy without its hive protocol (Andy's probe: `cmd.exe /d /s /c` kept only line one). It is the one guard at the one place, so it also covers `noAutoInstall` relaunches.
+- **R2: the decisions are a pure module.** `src/main/cliLookupPolicy.ts` holds `cliStatus`, `missingCliAction`, `npmRungDecision`, `headlessSpawnRefusal`, `daemonExecutable`, `toolRowStatus`, `lossyRouteRefusal`, and the shared reason. These are tested as behaviour. `index.ts` (five sites) and `pty.ts` call them, with one pin per call site.
+- **Setup panel nits:**
+  - an unknown row shows "Could not check (the machine was busy). Close and reopen this panel to check again." instead of the install command;
+  - it is not counted in "recommended missing" or in Michael's install seed.
+- **LOAD-FLAKES REFUSES (agreed with Creed, taken off his branch):**
+  - `test/tools/codex-resolve-probe.cjs` resolves with the product's own `CommandResolver` and lookup through `whereTimeoutMs: 60_000`, so a loaded machine cannot fire the 3 s box in the preflight fixture. The app's box is unchanged.
+  - The probe line also reports `unknown`.
+  - The 0.156.0 test now also asserts `found`, `!unknown` and `version`, which closes its vacuous pass.
+  - One pin checks the seam.
+- **R1 (POSIX `userShellPathAsync` caches a timed-out PATH fallback):** left on the card as a follow-up, as god ruled. Windows is unaffected.
+- **N3 (from Andy):** under sustained load the one retry doubles the wait for an unknown: 3 s each, plus up to the tree-kill bound. That is accepted; a spawn waits at most about 2 × 14 s.
+- **Separate card (reported to god):** the same lossy `cmd.exe` route is reached by a FOUND target that `resolveWindowsShimSpawn` cannot decode (a hand-written `.bat`, or a non-npm shim) with a multi-line argument. That is pre-existing and outside this fix: it only warns in the console.

@@ -181,7 +181,8 @@ export interface ResolvedCommand {
   path: string;
   /** Whether an existing executable was actually located — what the missing-CLI path keys on. */
   found: boolean;
-  /** RESOLVER-TIMEOUT-MISS: the lookup was killed by its time box and no install-dir candidate
+  /** RESOLVER-TIMEOUT-MISS: the lookup gave NO ANSWER (killed by its time box, or any failure
+   *  other than `where` exit 1 / a shell that ran `which`: Andy C1) and no install-dir candidate
    *  matched, so nobody knows whether the CLI is installed. `found` is false, but this is NOT a
    *  miss: it is never cached, and no caller may act on it as "not installed". */
   unknown?: true;
@@ -226,10 +227,14 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
       `${home}\\.claude\\local\\${command}`
     ];
     for (const c of winCandidates) if (d.exists(c)) return { path: c, found: true };
-    return timedOut(r) ? { path: command, found: false, unknown: true } : { path: command, found: false };
+    // Andy C1: a MISS is only an ANSWER from `where` - it ran and listed nothing usable, or it
+    // exited 1 ("could not find"). Anything else (our box, where's own error exit 2, a spawn that
+    // failed with EAGAIN/ENOMEM, a synchronous EMFILE throw, a foreign signal) says nothing about
+    // whether the CLI is installed: UNKNOWN. Those are exactly a loaded machine's failures.
+    return whereAnswered(r) ? { path: command, found: false } : { path: command, found: false, unknown: true };
   }
   // macOS / Linux — `which` against an interactive shell so we pick up nvm/asdf/brew paths.
-  const { out: which, timedOut: shellTimedOut } = await captureFenced(`which ${command}`, d);
+  const { out: which } = await captureFenced(`which ${command}`, d);
   if (which) {
     const path = which.trim().split('\n').map((l) => l.trim()).filter(Boolean).pop();
     if (path && d.exists(path)) return { path, found: true };
@@ -243,7 +248,15 @@ export async function lookupCommandAsync(command: string, d: ResolverDeps = node
     `${home}/.volta/bin/${command}`
   ];
   for (const c of candidates) if (d.exists(c)) return { path: c, found: true };
-  return shellTimedOut ? { path: command, found: false, unknown: true } : { path: command, found: false };
+  // Andy C1: only a shell that RAN the lookup (both fences printed) answered; `which` then found
+  // nothing. No fence (our box, a shell that could not start, one that died) is UNKNOWN.
+  return which !== null ? { path: command, found: false } : { path: command, found: false, unknown: true };
+}
+
+/** Andy C1 (win32): did `where` ANSWER? It ran (stdout), or it exited 1 ("could not find") on
+ *  its own. Our box, any other exit code, a spawn error and a thrown exec are not answers. */
+function whereAnswered(r: { stdout: string } | { err: ExecErr; out: string }): boolean {
+  return 'stdout' in r || (r.err.killed !== true && r.err.code === 1);
 }
 
 // ── The cache ────────────────────────────────────────────────────────────────────────────
@@ -297,7 +310,9 @@ export class CommandResolver {
     const nameGen = this.nameGeneration.get(command) ?? 0;
     const once = (): Promise<ResolvedCommand> => {
       this.lookups += 1;
-      return this.lookup(command, d).catch((): ResolvedCommand => ({ path: command, found: false }));
+      // Andy C1: a lookup that THREW gave no answer (the lookups never throw for a bad name; they
+      // return a miss), so it is UNKNOWN - retried once, never cached - not a miss.
+      return this.lookup(command, d).catch((): ResolvedCommand => ({ path: command, found: false, unknown: true }));
     };
     // RESOLVER-TIMEOUT-MISS: a lookup killed by its time box (a loaded machine) is UNKNOWN. It is
     // retried ONCE at once; an answer still unknown is returned as such and NEVER cached, so the

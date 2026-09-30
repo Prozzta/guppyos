@@ -11,6 +11,7 @@ import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
 import { userShellPathAsync } from './shellEnv';
 import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
+import { cliStatus, lossyRouteRefusal } from './cliLookupPolicy';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -498,8 +499,7 @@ export class PtyManager {
    *  whether the CLI is installed is NOT known. Callers that act on "missing" (the installer, a
    *  refusal that says "not installed") must use this and never act on 'unknown'. */
   async commandStatus(command: string): Promise<'found' | 'missing' | 'unknown'> {
-    const r = await this.resolveCommand(command);
-    return r.found ? 'found' : r.unknown ? 'unknown' : 'missing';
+    return cliStatus(await this.resolveCommand(command));
   }
 
   /** The absolute path a bare command resolves to for THIS user, or null when it
@@ -592,10 +592,11 @@ export class PtyManager {
       return { ok: false, error: `cwd does not exist: ${opts.cwd}` };
     }
     // SYNC-CHILD-CALLS: resolution and the shell PATH are async (no child process blocks main).
-    const [resolved, shellPath] = await Promise.all([
-      this.resolveCommand(opts.command).then((r) => r.path),
+    const [resolution, shellPath] = await Promise.all([
+      this.resolveCommand(opts.command),
       process.platform === 'win32' ? Promise.resolve(process.env.PATH || '') : userShellPathAsync()
     ]);
+    const resolved = resolution.path;
     try {
       // Build a user-shell PATH so child can resolve subprocess deps. Cached
       // for the session (shellEnv.userShellPathAsync, fenced against rc-file noise).
@@ -674,6 +675,14 @@ export class PtyManager {
         // `cmd.exe /d /s /c "<command>"`, wrapping the WHOLE inner command in one outer
         // quote pair — cmd's /s flag strips exactly that pair and runs the remainder
         // (where the resolved path keeps its own quotes) literally. /d skips AutoRun.
+        // RESOLVER-TIMEOUT-MISS (Andy C2): an UNRESOLVED bare name (the lookup gave no answer)
+        // must never reach the lossy cmd.exe route with a multi-line argument: it would start
+        // looking healthy without its hive protocol. Refused, with the retryable reason.
+        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? []) : null;
+        if (lossy) {
+          console.warn(`[pty] refused: ${lossy}`);
+          return { ok: false, error: lossy };
+        }
         spawnArgs = needsCmd
           ? buildCmdCommandLine(resolved, opts.args ?? [])
           : (opts.args ?? []);

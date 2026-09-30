@@ -402,7 +402,7 @@ test('resolver: paths and unsafe names never start a child and are never cached'
   assert.deepEqual(await g.r.resolve('claude;calc'), { path: 'claude;calc', found: false });
   assert.deepEqual(g.lookups, []);
   const threw = new R.CommandResolver({ lookup: async () => { throw new Error('boom'); } });
-  assert.deepEqual(await threw.resolve('claude'), { path: 'claude', found: false }, 'a failed lookup is a miss, never a throw');
+  assert.deepEqual(await threw.resolve('claude'), { path: 'claude', found: false, unknown: true }, 'a failed lookup never throws; it is UNKNOWN, not a miss (RESOLVER-TIMEOUT-MISS, Andy C1)');
 });
 
 /** A fake exec for the platform lookups: records the call, answers from `out`. */
@@ -450,7 +450,7 @@ test('WIRING: every main-process resolver caller goes through the shared async r
   assert.match(pty, /async isCommandAvailable\(command: string\): Promise<boolean>/);
   assert.match(pty, /async spawn\(opts: SpawnOptions/);
   const idx = read('src/main/index.ts');
-  assert.match(idx, /const resolvedCli = await resolveCommandAsync\(opts\.command\);/, 'codex remote');
+  assert.match(idx, /const executable = daemonExecutable\(await resolveCommandAsync\(opts\.command\)\);/, 'codex remote');
   assert.match(idx, /ipcMain\.handle\('tools:status', async /, 'the setup catalog');
   assert.match(idx, /pendingInstallRelaunch\.delete\(id\);[\s\S]{0,400}invalidateCommandCache\(\);/, 'an installer exit drops the cached misses');
   assert.match(idx, /await ptyManager\.spawn\(opts, owner\)/);
@@ -512,10 +512,10 @@ test('WIRING: both user spawn checks drop the cached answer right before command
   // RESOLVER-TIMEOUT-MISS: the checks moved from isCommandAvailable (a boolean) to commandStatus
   // (found / missing / unknown); their handling of unknown is pinned in resolver-timeout-unknown-176.
   const idx = read('src/main/index.ts');
-  assert.match(idx, /if \(bin && !opts\.noAutoInstall\) invalidateCommandCache\(bin\);[\s\S]{0,600}const binStatus = bin && !opts\.noAutoInstall \? await ptyManager\.commandStatus\(bin\) : 'found';/,
+  assert.match(idx, /if \(bin && !opts\.noAutoInstall\) invalidateCommandCache\(bin\);[\s\S]{0,600}const binAction = missingCliAction\(bin && !opts\.noAutoInstall \? await ptyManager\.commandStatus\(bin\) : 'found'\);/,
     'the agent spawn / auto-install check');
-  assert.match(idx, /invalidateCommandCache\('npm'\);\r?\n\s+invalidateCommandCache\('node'\);[\s\S]{0,400}const npmStatus = await ptyManager\.commandStatus\('npm'\);/, 'and the npm/node rung check under it');
-  assert.match(idx, /invalidateCommandCache\(bin\);[\s\S]{0,400}const engineStatus = await ptyManager\.commandStatus\(bin\);/, 'the engine check');
+  assert.match(idx, /invalidateCommandCache\('npm'\);\r?\n\s+invalidateCommandCache\('node'\);[\s\S]{0,400}const npmRung = npmRungDecision\(await ptyManager\.commandStatus\('npm'\), await ptyManager\.commandStatus\('node'\)\);/, 'and the npm/node rung check under it');
+  assert.match(idx, /invalidateCommandCache\(bin\);[\s\S]{0,400}const engineRefusal = headlessSpawnRefusal\(bin, await ptyManager\.commandStatus\(bin\)\);/, 'the engine check');
   assert.equal((idx.match(/isCommandAvailable\(/g) || []).length, 0, 'no caller keys a missing-CLI decision on the boolean any more');
   assert.equal((idx.match(/commandStatus\(/g) || []).length, 4, 'no other commandStatus caller to classify');
 });

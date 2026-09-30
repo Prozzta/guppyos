@@ -24,6 +24,7 @@ import {
 } from './devIsolation';
 import { isSafeCommandName } from './shellEnv';
 import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
+import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
@@ -342,13 +343,12 @@ async function enableCodexRemoteForSpawn(
     };
     // The shared async resolver (commandResolver.ts), the same one PtyManager spawns through;
     // the daemon just needs the best executable path.
-    const resolvedCli = await resolveCommandAsync(opts.command);
-    // RESOLVER-TIMEOUT-MISS: a lookup that timed out gives no executable to start a daemon with.
-    if (resolvedCli.unknown) {
-      console.warn('[codex-remote] the codex lookup timed out (machine under load); starting local TUI');
+    // RESOLVER-TIMEOUT-MISS: a lookup that gave no answer gives no executable to start a daemon with.
+    const executable = daemonExecutable(await resolveCommandAsync(opts.command));
+    if (executable === null) {
+      console.warn('[codex-remote] the codex lookup gave no answer (machine under load); starting local TUI');
       return false;
     }
-    const executable = resolvedCli.path;
     const started = await runCodexDaemonCommand(
       executable,
       ['app-server', 'daemon', 'start'],
@@ -3474,9 +3474,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // RESOLVER-TIMEOUT-MISS: only a KNOWN miss runs the installer. A lookup killed by its time box
     // (a loaded machine; retried once by the resolver) is 'unknown': the spawn goes ahead, and a CLI
     // that really is absent then fails visibly. It never runs `npm install -g` over an install.
-    const binStatus = bin && !opts.noAutoInstall ? await ptyManager.commandStatus(bin) : 'found';
-    if (binStatus === 'unknown') { try { hive.appendLog({ kind: 'cli-lookup-unknown', command: bin, at: 'spawn', id: opts.id }); } catch { /* best-effort */ } }
-    if (binStatus === 'missing') {
+    const binAction = missingCliAction(bin && !opts.noAutoInstall ? await ptyManager.commandStatus(bin) : 'found');
+    if (binAction === 'log-and-proceed') { try { hive.appendLog({ kind: 'cli-lookup-unknown', command: bin, at: 'spawn', id: opts.id }); } catch { /* best-effort */ } }
+    if (binAction === 'install') {
       // The installer commands are `npm install -g …`. Probe for npm the same way
       // we probe for the engine CLI, so a no-Node machine gets the node-free rung
       // (or an honest manual hint) instead of watching `npm: not found` scroll by.
@@ -3487,10 +3487,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       invalidateCommandCache('node');
       // RESOLVER-TIMEOUT-MISS: an npm or node lookup that timed out is unknown, not absent: keep the
       // plain npm rung rather than fetch and install Node over what may be a working one.
-      const npmStatus = await ptyManager.commandStatus('npm');
-      const nodeStatus = await ptyManager.commandStatus('node');
-      const npmAvailable = npmStatus !== 'missing' && (npmStatus === 'unknown' || nodeStatus === 'unknown' ||
-        nodeIsUsable(await detectNodeVersion(await ptyManager.commandPath('node'))));
+      const npmRung = npmRungDecision(await ptyManager.commandStatus('npm'), await ptyManager.commandStatus('node'));
+      const npmAvailable = npmRung === 'available'
+        || (npmRung === 'check-node-version' && nodeIsUsable(await detectNodeVersion(await ptyManager.commandPath('node'))));
       // Only reach the network when we actually need to (npm missing/too old);
       // resolveNodeInstaller is timeout-bounded and returns null offline, which
       // simply drops the ladder to the native/manual rung.
@@ -4660,15 +4659,12 @@ ipcMain.handle('tools:status', async (): Promise<ToolStatus[]> => {
   return Promise.all(toolCatalog().map(async (spec): Promise<ToolStatus> => {
     const installCommand = win ? spec.install.win32 : spec.install.posix;
     if (!spec.bin) return { ...spec, installCommand, found: false, path: null };
-    let path: string | null = null;
-    let unknown = false;
+    let row: { found: boolean; path: string | null; unknown: boolean } = { found: false, path: null, unknown: false };
     try {
       invalidateCommandCache(spec.bin);
-      const r = await resolveCommandAsync(spec.bin);
-      if (r.found && r.path !== spec.bin && existsSync(r.path)) path = r.path;
-      unknown = !!r.unknown;
+      row = toolRowStatus(await resolveCommandAsync(spec.bin), spec.bin, existsSync);
     } catch { /* a probe must never take the panel down */ }
-    return { ...spec, installCommand, found: !!path, path, ...(unknown ? { unknown: true } : {}) };
+    return { ...spec, installCommand, found: row.found, path: row.path, ...(row.unknown ? { unknown: true } : {}) };
   }));
 });
 
@@ -6066,9 +6062,8 @@ async function processSpawnRequest(filePath: string): Promise<void> {
   invalidateCommandCache(bin);
   // RESOLVER-TIMEOUT-MISS: a lookup killed by its time box (twice) is not "not installed". Refuse
   // with a reason that says so, so the requester retries instead of reporting a missing CLI.
-  const engineStatus = await ptyManager.commandStatus(bin);
-  if (engineStatus === 'unknown') { fail(`engine CLI "${bin}" could not be checked: its lookup timed out (machine under load); retry the spawn`); return; }
-  if (engineStatus === 'missing') { fail(`engine CLI "${bin}" is not installed`); return; }
+  const engineRefusal = headlessSpawnRefusal(bin, await ptyManager.commandStatus(bin));
+  if (engineRefusal) { fail(engineRefusal); return; }
 
   const isolate = raw.isolate !== false; // default true
   // Base branch the worktree will be cut from (for the ahead-of-base safety check).

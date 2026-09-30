@@ -69,12 +69,12 @@ test('win32: a timed-out `where` is rescued by an install-dir candidate (found, 
   assert.deepEqual(await R.lookupCommandAsync('codex', d), { path: 'C:\\AppData\\npm\\codex.cmd', found: true });
 });
 
-test('POSIX: a login shell killed by its box -> UNKNOWN; a shell that fails -> a plain miss', async () => {
+test('POSIX: a login shell killed by its box -> UNKNOWN; so is a shell that fails without printing its fence (Andy C1)', async () => {
   const hung = deps('darwin', 'hang', { whereTimeoutMs: 7, env: { SHELL: '/bin/zsh', HOME: '/Users/u' } });
   assert.deepEqual(await R.lookupCommandAsync('claude', hung.d), { path: 'claude', found: false, unknown: true });
   assert.equal(hung.calls[0].timeout, 7, 'POSIX: execFile gets the seam value as its timeout');
   const failed = deps('darwin', Object.assign(new Error('exit 1'), { code: 1 }), { env: { SHELL: '/bin/zsh', HOME: '/Users/u' } });
-  assert.deepEqual(await R.lookupCommandAsync('claude', failed.d), { path: 'claude', found: false });
+  assert.deepEqual(await R.lookupCommandAsync('claude', failed.d), { path: 'claude', found: false, unknown: true });
 });
 
 test('whereTimeoutMs: the seam sets the box; unset, the box is LOOKUP_TIMEOUT_MS (3000)', async () => {
@@ -120,13 +120,16 @@ test('resolver: unknown twice is returned as unknown and NEVER cached; the next 
   assert.equal(seen.length, 3);
 });
 
-test('resolver: a real miss is still cached for the TTL (unchanged), and a thrown lookup is still a miss', async () => {
+test('resolver: a real miss is still cached for the TTL (unchanged); a thrown lookup is UNKNOWN, retried once, not cached (Andy C1)', async () => {
   const { r, seen } = scripted([{ path: 'agy', found: false }]);
   assert.deepEqual(await r.resolve('agy'), { path: 'agy', found: false });
   assert.deepEqual(await r.resolve('agy'), { path: 'agy', found: false });
   assert.equal(seen.length, 1, 'a miss is not retried and is cached');
-  const threw = new R.CommandResolver({ lookup: async () => { throw new Error('boom'); } });
-  assert.deepEqual(await threw.resolve('claude'), { path: 'claude', found: false });
+  let n = 0;
+  const threw = new R.CommandResolver({ lookup: async () => { n += 1; throw new Error('boom'); } });
+  assert.deepEqual(await threw.resolve('claude'), { path: 'claude', found: false, unknown: true });
+  await threw.resolve('claude');
+  assert.equal(n, 4, 'retried once per resolve, never cached');
 });
 
 test('resolver: concurrent callers of an unknown share the ONE lookup and its one retry', async () => {
@@ -158,29 +161,112 @@ test('PtyManager.commandStatus: found / missing / unknown; commandPath stays nul
   assert.equal(await pm.commandPath('npm'), null);
 });
 
-// ─── The callers (index.ts is not loadable in a test: its wiring is pinned) ──────────
+// ─── Andy C1: only an ANSWER from where/the shell is a miss; every other failure is UNKNOWN ──
 
-test('WIRING: the missing-CLI installer runs ONLY on a known miss, never on unknown (logged)', () => {
+test('C1 win32: where exit 2, a spawn error (EAGAIN/ENOMEM), a thrown exec (EMFILE) and a foreign signal are UNKNOWN; only exit 1 and a listing are misses', async () => {
+  const U = { path: 'codex', found: false, unknown: true };
+  const M = { path: 'codex', found: false };
+  const exit = (code) => Object.assign(new Error(`exit ${code}`), { code });
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', exit(2)).d), U, 'where exit 2 (its own error)');
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' })).d), U, 'spawn EAGAIN');
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('spawn ENOMEM'), { code: 'ENOMEM' })).d), U, 'spawn ENOMEM');
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', Object.assign(new Error('killed'), { code: null, signal: 'SIGKILL' })).d), U, 'a signal that was not our box');
+  const throwing = { platform: 'win32', env: {}, exists: () => false, exec: () => { throw Object.assign(new Error('EMFILE'), { code: 'EMFILE' }); } };
+  assert.deepEqual(await R.lookupCommandAsync('codex', throwing), U, 'a synchronous EMFILE throw from exec');
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', exit(1)).d), M, 'where exit 1 IS the miss');
+  assert.deepEqual(await R.lookupCommandAsync('codex', deps('win32', 'C:\\x\\codex\r\n', { onDisk: ['C:\\x\\codex'] }).d), M, 'where listed only a non-executable hit: an answer, a miss');
+});
+
+test('C1 POSIX: a shell that could not start or died (no fence) is UNKNOWN; a shell that ran `which` and found nothing is a miss', async () => {
+  const env = { SHELL: '/bin/zsh', HOME: '/Users/u' };
+  assert.deepEqual(await R.lookupCommandAsync('claude', deps('darwin', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }), { env }).d), { path: 'claude', found: false, unknown: true });
+  assert.deepEqual(await R.lookupCommandAsync('claude', deps('darwin', '__MD_SHELL_FENCE____MD_SHELL_FENCE__', { env }).d), { path: 'claude', found: false });
+});
+
+test('C1 resolver: an EAGAIN lookup is unknown, retried once, and NOT cached (the next resolve looks again)', async () => {
+  const { d, calls } = deps('win32', Object.assign(new Error('spawn EAGAIN'), { code: 'EAGAIN' }));
+  const r = new R.CommandResolver({ deps: () => d });
+  assert.deepEqual(await r.resolve('codex'), UNKNOWN('codex'));
+  await r.resolve('codex');
+  assert.equal(calls.filter((c) => c.file === 'where').length, 4, 'two lookups per resolve, nothing cached');
+});
+
+// ─── The decisions (cliLookupPolicy.ts), as behaviour (Andy R2) ─────────────────────────
+
+const P = loadTs('src/main/cliLookupPolicy.ts');
+
+test('policy: the installer runs ONLY on a known miss; unknown goes ahead, logged', () => {
+  assert.equal(P.missingCliAction('missing'), 'install');
+  assert.equal(P.missingCliAction('unknown'), 'log-and-proceed');
+  assert.equal(P.missingCliAction('found'), 'proceed');
+  assert.equal(P.cliStatus({ path: 'x', found: false, unknown: true }), 'unknown');
+  assert.equal(P.cliStatus({ path: 'x', found: false }), 'missing');
+  assert.equal(P.cliStatus({ path: 'C:\\x.cmd', found: true }), 'found');
+});
+
+test('policy: the npm rung - a known missing npm is unavailable; an unknown npm or node keeps the npm rung; otherwise the node version decides', () => {
+  assert.equal(P.npmRungDecision('missing', 'found'), 'unavailable');
+  assert.equal(P.npmRungDecision('missing', 'unknown'), 'unavailable');
+  assert.equal(P.npmRungDecision('unknown', 'found'), 'available');
+  assert.equal(P.npmRungDecision('found', 'unknown'), 'available');
+  assert.equal(P.npmRungDecision('found', 'found'), 'check-node-version');
+  assert.equal(P.npmRungDecision('found', 'missing'), 'check-node-version');
+});
+
+test('policy: the headless spawn refuses an unknown with a DISTINCT, retryable reason; a miss says not installed; found goes on', () => {
+  assert.match(P.headlessSpawnRefusal('codex', 'unknown'), /could not be checked: its lookup timed out or failed \(machine under load\); retry the spawn/);
+  assert.doesNotMatch(P.headlessSpawnRefusal('codex', 'unknown'), /not installed/);
+  assert.equal(P.headlessSpawnRefusal('codex', 'missing'), 'engine CLI "codex" is not installed');
+  assert.equal(P.headlessSpawnRefusal('codex', 'found'), null);
+});
+
+test('policy: the codex daemon start never gets a bare name from an unknown lookup; the Setup row marks unknown and never counts it found', () => {
+  assert.equal(P.daemonExecutable({ path: 'codex', found: false, unknown: true }), null);
+  assert.equal(P.daemonExecutable({ path: 'C:\\n\\codex.cmd', found: true }), 'C:\\n\\codex.cmd');
+  const on = (p) => p === 'C:\\n\\codex.cmd';
+  assert.deepEqual(P.toolRowStatus({ path: 'codex', found: false, unknown: true }, 'codex', on), { found: false, path: null, unknown: true });
+  assert.deepEqual(P.toolRowStatus({ path: 'codex', found: false }, 'codex', on), { found: false, path: null, unknown: false });
+  assert.deepEqual(P.toolRowStatus({ path: 'C:\\n\\codex.cmd', found: true }, 'codex', on), { found: true, path: 'C:\\n\\codex.cmd', unknown: false });
+});
+
+test('policy (C2): the lossy cmd.exe route refuses an UNRESOLVED name with a multi-line argument; a resolved one, or single-line args, pass', () => {
+  const U = { path: 'claude', found: false, unknown: true };
+  assert.match(P.lossyRouteRefusal('claude', U, ['--x', 'line one\nline two']), /could not be checked/);
+  assert.equal(P.lossyRouteRefusal('claude', U, ['--x', 'one line']), null);
+  assert.equal(P.lossyRouteRefusal('claude', { path: 'claude', found: false }, ['a\nb']), null, 'a real miss is the installer\'s business, not this guard');
+  assert.equal(P.lossyRouteRefusal('claude', { path: 'C:\\n\\claude.cmd', found: true }, ['a\nb']), null);
+});
+
+test('C2 through PtyManager.spawn (win32): an unknown lookup with a multi-line argument is REFUSED before any process starts', { skip: process.platform !== 'win32' }, async () => {
+  const os = require('node:os');
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const pm = new PtyManager();
+  pm.resolver = { resolve: async (c) => ({ path: c, found: false, unknown: true }) };
+  const res = await pm.spawn({ id: 'zz-c2', cwd: os.tmpdir(), command: 'claude', args: ['--append-system-prompt', 'HIVE PROTOCOL\nline two'], cols: 80, rows: 24 });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /engine CLI "claude" could not be checked/);
+  assert.equal(pm.list().length, 0, 'no session, no process');
+});
+
+// ─── One pin per index.ts call site (the decision itself is tested above) ────────────────
+
+test('WIRING: each index.ts call site goes through its policy function; the installer script is built only on install', () => {
   const idx = read('src/main/index.ts');
-  assert.match(idx, /const binStatus = bin && !opts\.noAutoInstall \? await ptyManager\.commandStatus\(bin\) : 'found';\r?\n\s+if \(binStatus === 'unknown'\) \{ try \{ hive\.appendLog\(\{ kind: 'cli-lookup-unknown', command: bin, at: 'spawn', id: opts\.id \}\); \} catch \{ \/\* best-effort \*\/ \} \}\r?\n\s+if \(binStatus === 'missing'\) \{/);
-  const block = idx.slice(idx.indexOf("if (binStatus === 'missing') {"), idx.indexOf('pendingInstallRelaunch.set(opts.id'));
-  assert.match(block, /buildMissingCliScript\(/, 'the installer script is built only inside the known-miss branch');
+  assert.match(idx, /const binAction = missingCliAction\(bin && !opts\.noAutoInstall \? await ptyManager\.commandStatus\(bin\) : 'found'\);/);
+  const block = idx.slice(idx.indexOf("if (binAction === 'install') {"), idx.indexOf('pendingInstallRelaunch.set(opts.id'));
+  assert.match(block, /buildMissingCliScript\(/, 'the installer script is built only inside the install branch');
   assert.equal((idx.match(/buildMissingCliScript\(/g) || []).length, 1, 'and nowhere else');
+  assert.match(idx, /const npmRung = npmRungDecision\(await ptyManager\.commandStatus\('npm'\), await ptyManager\.commandStatus\('node'\)\);/);
+  assert.match(idx, /const engineRefusal = headlessSpawnRefusal\(bin, await ptyManager\.commandStatus\(bin\)\);\r?\n\s+if \(engineRefusal\) \{ fail\(engineRefusal\); return; \}/);
+  assert.match(idx, /const executable = daemonExecutable\(await resolveCommandAsync\(opts\.command\)\);\r?\n\s+if \(executable === null\) \{/);
+  assert.match(idx, /row = toolRowStatus\(await resolveCommandAsync\(spec\.bin\), spec\.bin, existsSync\);/);
+  const pty = read('src/main/pty.ts');
+  assert.match(pty, /const lossy = needsCmd \? lossyRouteRefusal\(opts\.command, resolution, opts\.args \?\? \[\]\) : null;/);
 });
 
-test('WIRING: an unknown npm or node keeps the npm rung (no Node download over a working install)', () => {
-  const idx = read('src/main/index.ts');
-  assert.match(idx, /const npmStatus = await ptyManager\.commandStatus\('npm'\);\r?\n\s+const nodeStatus = await ptyManager\.commandStatus\('node'\);\r?\n\s+const npmAvailable = npmStatus !== 'missing' && \(npmStatus === 'unknown' \|\| nodeStatus === 'unknown' \|\|\r?\n\s+nodeIsUsable\(await detectNodeVersion\(await ptyManager\.commandPath\('node'\)\)\)\);/);
-});
-
-test('WIRING: the headless spawn refuses an unknown with a DISTINCT, retryable reason, never "not installed"', () => {
-  const idx = read('src/main/index.ts');
-  assert.match(idx, /const engineStatus = await ptyManager\.commandStatus\(bin\);\r?\n\s+if \(engineStatus === 'unknown'\) \{ fail\(`engine CLI "\$\{bin\}" could not be checked: its lookup timed out \(machine under load\); retry the spawn`\); return; \}\r?\n\s+if \(engineStatus === 'missing'\) \{ fail\(`engine CLI "\$\{bin\}" is not installed`\); return; \}/);
-});
-
-test('WIRING: the codex daemon start never runs a bare name from an unknown lookup; the setup catalog marks unknown', () => {
-  const idx = read('src/main/index.ts');
-  assert.match(idx, /const resolvedCli = await resolveCommandAsync\(opts\.command\);[\s\S]{0,200}if \(resolvedCli\.unknown\) \{[\s\S]{0,160}return false;\r?\n\s+\}\r?\n\s+const executable = resolvedCli\.path;/);
-  assert.match(idx, /unknown = !!r\.unknown;[\s\S]{0,200}found: !!path, path, \.\.\.\(unknown \? \{ unknown: true \} : \{\}\) \};/);
-  assert.match(read('src/renderer/src/components/SetupPanel.tsx'), /tool\.unknown \? 'NOT CHECKED'/);
+test('WIRING: the Setup panel says NOT CHECKED, offers no install command for an unknown row, and does not count it missing', () => {
+  const panel = read('src/renderer/src/components/SetupPanel.tsx');
+  assert.match(panel, /tool\.unknown \? 'NOT CHECKED'/);
+  assert.match(panel, /\{!tool\.found && !tool\.unknown && tool\.installCommand && \(/);
+  assert.match(panel, /filter\(\(t\) => !t\.found && !t\.unknown && t\.essential\)/);
 });
