@@ -31,7 +31,7 @@ const A = 'dwight';
 const T0 = Date.parse('2026-09-30T17:35:47Z');
 
 /** The real coordinator + bridge, a committing owner, a recording mail ledger, settable facts. */
-function floor({ probe = null } = {}) {
+function floor({ probe = null, confirms = false } = {}) {
   const coordinator = new WorkerWakeWatchdog();
   const inbox = [];
   const submits = [];
@@ -50,6 +50,7 @@ function floor({ probe = null } = {}) {
     now: () => now.t,
     diag: (stage, fields) => diags.push({ stage, ...fields }),
     ...(probe !== null ? { codexTurnProbe: () => pr.current } : {}),
+    ...(confirms ? { confirmsTurnStart: () => true } : {}),
     mail: {
       mode: () => 'inject',
       closeTurn: (agentId, turnId) => mailCalls.push(['closeTurn', agentId, turnId]),
@@ -199,7 +200,7 @@ test('CODEX-STOP-MISSING: rollout task_complete is the turn end (Dwight 17:36Z, 
   f.beat(STUCK_ACTIVE_PROOF_MS - 1_000);
   assert.equal(f.coordinator.state(A).lifecycle, 'active', 'not inside the proof window');
   f.beat(1_000);
-  assert.equal(f.coordinator.state(A).lifecycle, 'idle', 'the provider says the turn ended');
+  assert.equal(f.coordinator.state(A).lifecycle, 'unknown', 'the provider says the turn ended (unknown: the re-offer still needs 12 s of PTY quiet)');
   const [row] = f.rows();
   assert.equal(row.basis, 'rollout-complete');
   assert.equal(row.turn, TURN);
@@ -241,13 +242,105 @@ test('ROOT CAUSE (Dwight 17:36Z): a compaction-only turn (PreCompact, PostCompac
   f.now.t = T0 + 40_000;
   f.bridge.onHook(A, 'PostCompact', undefined, undefined, TURN);             // it finishes; task_complete; no Stop
   assert.equal(f.coordinator.state(A).lifecycle, 'idle', 'the PostCompact ends a compaction-only turn');
+  // Jim W3/W2: late stragglers of that closed turn (tool events AND compaction events) never re-open it.
+  for (const ev of ['PostToolUse', 'PreToolUse', 'PreCompact', 'PostCompact']) {
+    f.bridge.onHook(A, ev, undefined, undefined, TURN);
+    assert.equal(f.coordinator.state(A).lifecycle, 'idle', `straggling ${ev}(${TURN}) re-opened the turn`);
+  }
   for (const id of ['m-1', 'm-2']) { f.inbox.push(id); f.coordinator.noteDelivery(A, id); }   // 17:36:43 mail
   f.beat(15_000);
   assert.equal(f.submits.length, 1, 'delivered on the next beat, no watchdog needed');
   assert.equal(f.rows().length, 0);
-  // A late straggler of that turn cannot re-open it.
-  f.bridge.onHook(A, 'PostToolUse', undefined, undefined, TURN);
-  assert.notEqual(f.coordinator.noteHook(A, 'PreToolUse', undefined, f.now.t, undefined, TURN), true);
+});
+
+test('Jim W2: a late PreCompact of a turn closed by its Stop never re-opens the lifecycle', () => {
+  const f = floor();
+  const T = '01a0f3aa-0000-7000-8000-000000000009';
+  f.bridge.onHook(A, 'UserPromptSubmit', undefined, undefined, T);
+  f.bridge.onHook(A, 'PostCompact', undefined, undefined, T);
+  f.bridge.onHook(A, 'Stop', undefined, true, T);
+  assert.equal(f.coordinator.state(A).lifecycle, 'idle');
+  f.bridge.onHook(A, 'PreCompact', undefined, undefined, T);   // the shim arrived 5-8 s late
+  assert.equal(f.coordinator.state(A).lifecycle, 'idle');
+});
+
+test('Jim W1 (a): codex pre-turn compaction (before UserPromptSubmit) longer than 60 s confirms OUR wake: no abort, no second wake', async () => {
+  const f = floor({ confirms: true });
+  const settle = () => new Promise((r) => setImmediate(r));
+  f.bridge.onHook(A, 'Stop', undefined, true, 'prev-turn');
+  f.inbox.push('m-1'); f.coordinator.noteDelivery(A, 'm-1');
+  f.now.t += 20_000;
+  f.bridge.requestInboxWake(A, 'reconcile', 'reconcile');
+  await settle();
+  assert.equal(f.submits.length, 1);
+  assert.equal(f.coordinator.state(A).provisional, true, 'our COMMITTED wake is provisional');
+  f.now.t += 1_000;
+  f.bridge.onHook(A, 'PreCompact', undefined, undefined, 'T-ours');   // turn.rs:183, before the user input
+  assert.equal(f.coordinator.state(A).provisional, false, 'the compaction confirms our submit');
+  for (let i = 0; i < 5; i++) { f.facts.lastOutputAt = f.now.t; f.beat(15_000); await settle(); }   // 75 s compacting, PTY busy
+  assert.equal(f.coordinator.state(A).lifecycle, 'active', 'not expired as submit-unconfirmed');
+  assert.ok(!f.mailCalls.some((c) => c[0] === 'abortSince'), 'no abort of our epoch');
+  f.bridge.onHook(A, 'PostCompact', undefined, undefined, 'T-ours');
+  f.bridge.onHook(A, 'UserPromptSubmit', undefined, undefined, 'T-ours');
+  f.beat(15_000); await settle();
+  assert.equal(f.submits.length, 1, 'exactly ONE wake: none typed into the starting turn');
+  assert.equal(f.coordinator.state(A).lifecycle, 'active');
+});
+
+test('Jim W1 (b): a PostCompact with no compact epoch of its own changes nothing and is no retry edge', () => {
+  const c = new WorkerWakeWatchdog();
+  assert.equal(c.noteHook(A, 'PostCompact', undefined, T0), false, 'unknown: no edge');
+  assert.equal(c.state(A).lifecycle, 'unknown');
+  c.noteHook(A, 'Stop', undefined, T0 + 1, true);
+  assert.equal(c.noteHook(A, 'PostCompact', undefined, T0 + 2), false, 'idle: no edge');
+  assert.equal(c.state(A).lifecycle, 'idle');
+  // Only the PostCompact that closes its OWN compact epoch is the edge.
+  c.noteHook(A, 'PreCompact', undefined, T0 + 3);
+  assert.equal(c.noteHook(A, 'PostCompact', undefined, T0 + 4), true);
+});
+
+test('Jim J3/J14: never with a claim in flight or held; the proof path still needs a terminal', () => {
+  const late = T0 + STUCK_ACTIVE_AFTER_MS * 2;
+  const facts = { ptyId: 'p', lastOutputAt: T0 };
+  for (const slot of ['inFlight', 'held']) {
+    const c = new WorkerWakeWatchdog();
+    c.noteHook(A, 'UserPromptSubmit', undefined, T0);
+    c.agents.get(A)[slot] = { agentId: A, requestId: 'r', ids: ['m-1'], cause: 'reconcile' };
+    assert.equal(c.recoverStuckActive(A, facts, 2, late), null, `a claim ${slot}`);
+    assert.equal(c.state(A).lifecycle, 'active');
+  }
+  const c = new WorkerWakeWatchdog();
+  c.noteHook(A, 'UserPromptSubmit', undefined, T0);
+  assert.equal(c.recoverStuckActive(A, { lastOutputAt: T0 }, 2, late, { turnId: 'x', at: T0 }), null, 'no PTY, even with proof');
+  assert.equal(c.recoverStuckActive(A, { ptyId: 'p', lastOutputAt: 0 }, 2, late, { turnId: 'x', at: T0 }).basis, 'rollout-complete', 'proof needs no PTY output clock');
+});
+
+test('Jim J22: provider statusline ticks (agy running) count as traffic: a busy agy agent with a quiet PTY is not recovered', () => {
+  const f = floor();
+  f.stuck();
+  for (let i = 0; i < 12; i++) { f.beat(60_000); f.bridge.onProviderStatus(A, 'running', null, f.now.t); }
+  assert.equal(f.coordinator.state(A).lifecycle, 'active');
+  assert.equal(f.rows().length, 0);
+});
+
+test('god ruling: the re-offer after a recovery needs 12 s of PTY quiet, and a FRESH rollout check (a turn started since holds it)', async () => {
+  const TURN = 'c0mp-0000-7000-8000-000000000002';
+  const f = floor({ probe: { ok: true, latest: { kind: 'complete', turnId: TURN, at: T0 - 1 } } });
+  f.stuck();
+  // the PTY printed 2 s before the recovery beat (the proof path itself ignores PTY output)
+  f.facts.lastOutputAt = f.now.t + STUCK_ACTIVE_PROOF_MS - 2_000;
+  f.beat(STUCK_ACTIVE_PROOF_MS);
+  assert.equal(f.coordinator.state(A).lifecycle, 'unknown', 'recovered at this beat');
+  assert.equal(f.submits.length, 0, 'no re-offer inside 12 s of PTY output');
+  // a turn starts before the PTY settles: the rollout says so, the re-offer is held
+  f.probe.current = { ok: true, latest: { kind: 'started', turnId: 'new', at: f.now.t } };
+  f.beat(20_000);
+  assert.equal(f.submits.length, 0, 'held: the rollout says a turn is running');
+  assert.ok(f.diags.some((d) => d.stage === 'stuck-active' && d.reoffer === 'held' && d.why === 'rollout-running'));
+  // the turn ends (rollout complete again), PTY quiet: the one re-offer goes out
+  f.probe.current = { ok: true, latest: { kind: 'complete', turnId: 'new', at: f.now.t } };
+  f.beat(20_000);
+  assert.equal(f.submits.length, 1);
 });
 
 test('compaction INSIDE a regular turn changes nothing: that turn\'s Stop ends it (Claude auto-compact)', () => {

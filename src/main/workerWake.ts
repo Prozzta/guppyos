@@ -113,7 +113,8 @@ export const STUCK_ACTIVE_MAX_RECOVERIES = 3;
  * (task_complete) with no Stop hook, and the lifecycle stayed active. When the provider's own
  * rollout says its NEWEST turn boundary is a completion, no turn is running: after this much
  * hook silence (a real turn writes task_started and fires hooks well within it) the watchdog
- * ends the epoch as idle on that proof, without the PTY-quiet window.
+ * ends the epoch on that proof (to `unknown`: the re-offer still needs 12 s of PTY quiet), without
+ * the 10-minute window.
  */
 export const STUCK_ACTIVE_PROOF_MS = 60_000;
 
@@ -546,7 +547,21 @@ export class WorkerWakeWatchdog {
     // and its running ticks can pause >5 s inside one. A deferred idle must not land there.
     if (event === 'PostInvocation') { r.invoking = false; return false; }
     if (COMPACT_EVENTS.has(event)) {
-      // Inside a regular turn (or our own provisional wake): that turn's end still decides.
+      // Jim W2: a straggler of a turn already closed (hook shims arrive out of order) never
+      // re-opens it, exactly as the IN_TURN_EVENTS guard above.
+      if (turnId && r.closedTurns.includes(turnId)) return false;
+      // Jim W1 (a): codex 0.157.1 runs pre-sampling compaction BEFORE UserPromptSubmit
+      // (core/src/session/turn.rs:183). Inside OUR provisional wake, a compaction is the provider
+      // working on our input: it confirms the submit as a turn start does (as in 1.1.75), so a
+      // long compaction never expires the wake into a second one.
+      if (r.lifecycle === 'active' && r.provisional && r.claimedAt > 0 && at >= r.claimedAt) {
+        if (!r.claimTurnSeen) { r.claimTurnSeen = true; r.claimTurnId = turnId ?? null; }
+        this.turnStarted(r, at);
+        r.activeSince = at;
+        if (turnId) r.openTurnId = turnId;
+        return false;
+      }
+      // Inside a regular turn: that turn's end still decides.
       if (r.lifecycle === 'active' && !r.compactEpoch) return false;
       if (event === 'PreCompact') {
         r.lifecycle = 'active'; r.activeSince = at;
@@ -554,7 +569,10 @@ export class WorkerWakeWatchdog {
         r.compactEpoch = true;
         return false;
       }
-      // PostCompact with no regular turn open: the compaction-only turn is over.
+      // Jim W1 (b): a PostCompact that closes no compact epoch of its own changes nothing and is
+      // NO retry edge (after an expired wake it would re-claim into the starting turn).
+      if (!r.compactEpoch) return false;
+      // PostCompact closing its compact epoch: the compaction-only turn is over.
       this.endEpoch(r, 'idle');
       r.activeSince = 0;
       r.openTurnId = null;
@@ -749,10 +767,10 @@ export class WorkerWakeWatchdog {
    *  - mail is waiting (`pendingIds` > 0);
    *  - the agent has a PTY, and neither a hook/status reading nor PTY output for the whole window
    *    (STUCK_ACTIVE_AFTER_MS). With `proof` (the provider's rollout says its newest turn
-   *    COMPLETED): hook silence for STUCK_ACTIVE_PROOF_MS is enough, and the epoch ends idle;
+   *    COMPLETED): hook silence for STUCK_ACTIVE_PROOF_MS is enough;
    *  - no human-needs prompt arrived in this epoch (the agent may be waiting on a person).
    * Recovered on quiet alone: lifecycle `unknown`, so the reconcile path may claim once the PTY is
-   * quiescent. Recovered on proof: `idle`, and the turn is remembered as closed.
+   * quiescent. Recovered on proof: also `unknown`, and the turn is remembered as closed.
    * After STUCK_ACTIVE_MAX_RECOVERIES in a row with no Stop between them it gives up: the
    * lifecycle is left alone and the caller only reports. Pure bookkeeping: no I/O, no clock.
    */
@@ -786,7 +804,9 @@ export class WorkerWakeWatchdog {
     r.openTurnId = null;
     r.invoking = false;
     if (hasProof) {
-      this.endEpoch(r, 'idle');
+      // god (WWR audit ruling): even on proof, `unknown`, so the re-offer still needs 12 s of PTY
+      // quiet (the reconcile claim), and the bridge re-checks the rollout right before it.
+      this.endEpoch(r, 'unknown');
       r.activeSince = 0;
       if (!r.closedTurns.includes(proof!.turnId)) {
         r.closedTurns.push(proof!.turnId);

@@ -433,7 +433,7 @@ export class InboxWakeBridge {
    * auto-delivery paused, an INTERFERED inhibition) is a decision, never a stall.
    *
    * Codex (CODEX-STOP-MISSING): when the rollout's newest turn boundary is a task_complete, that
-   * is the provider's proof the turn ended; the epoch closes as idle after a short hook silence,
+   * is the provider's proof the turn ended; the epoch closes (to unknown) after a short hook silence,
    * and the turn's mail epoch closes normally, as a Stop would have. Otherwise, after the long
    * quiet window, the open mail epochs end abnormally (`stuck-active`), so their delivered ids go
    * back to pending once (then the F4 backoff).
@@ -466,6 +466,29 @@ export class InboxWakeBridge {
       try { this.deps.mail?.abortSince(agentId, 0, 'stuck-active'); } catch { /* best effort */ }
     }
     this.endMailWatch(agentId);
+    this.recovered.add(agentId);
+  }
+
+  /** Agents the watchdog recovered whose mail was not re-offered yet (see reofferHeld). */
+  private readonly recovered = new Set<string>();
+
+  /**
+   * god (WWR audit ruling): before the re-offer after a recovery, a FRESH provider check. While
+   * the recovered lifecycle is `unknown`, the reconcile claim already needs 12 s of PTY quiet
+   * (claim); for Codex, the rollout is read again right before it, and a turn that STARTED since
+   * holds the re-offer this beat (the turn's own hooks then take the lifecycle back to active).
+   * Cost: one bounded rollout-tail read per beat, only for a recovered Codex agent until its
+   * re-offer (the probe re-reads only when the file changed). Returns true to hold the claim.
+   */
+  private reofferHeld(agentId: string): boolean {
+    if (!this.recovered.has(agentId)) return false;
+    if (this.deps.coordinator.state(agentId).lifecycle !== 'unknown') { this.recovered.delete(agentId); return false; }
+    const probe = this.deps.codexTurnProbe?.(agentId);
+    if (probe && probe.ok && probe.latest?.kind === 'started') {
+      this.deps.diag?.('stuck-active', { agentId, recovered: true, reoffer: 'held', why: 'rollout-running' });
+      return true;
+    }
+    return false;
   }
 
   /** The reconciliation beat: the same path, in reconcile mode, over every live agent. */
@@ -499,6 +522,7 @@ export class InboxWakeBridge {
             ...(edge.kind === 'wake-retry' ? { idList: edge.ids, attempt: edge.attempt } : {})
           });
         }
+        if (this.reofferHeld(agentId)) continue;   // WAKE-WATCHDOG-RECOVERY: fresh rollout check
         this.requestInboxWake(agentId, 'reconcile', 'reconcile', ids);
       } catch (e) {
         this.deps.diag?.('throw', { agentId, cause: 'reconcile', mode: 'reconcile', error: String(e) });

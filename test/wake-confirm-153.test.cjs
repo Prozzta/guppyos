@@ -234,7 +234,7 @@ test('CODEX (2) a confirmed turn stays active until its Stop: UserPromptSubmit h
   assert.equal(hook.reqs.length, 1);
   hook.now += 1_000;
   hook.bridge.reconcileAll(['dwight']);
-  assert.notEqual(hook.coordinator.state('dwight').lifecycle, 'active', 'after the window: the watchdog');
+  assert.equal(hook.coordinator.state('dwight').lifecycle, 'unknown', 'after the window: the watchdog, to unknown (never idle)');
   assert.ok(hook.diags.some((d) => d.stage === 'stuck-active' && d.recovered === true && d.basis === 'quiet'));
 
   const probe = { current: { ok: true, latest: { kind: 'complete', turnId: '01a0dc65', at: T('06:27:56.300') } } };
@@ -329,7 +329,7 @@ test('WAKE-155 CODEX: a legacy false-confirmed active epoch is made provisional 
   assert.ok(f.diags.some((d) => d.stage === 'codex-stuck-active' && d.recovered === true));
 });
 
-test('CODEX (2) a provider with no turn-start signal keeps "COMMITTED is active until Stop" (never provisional)', async () => {
+test('CODEX (2) a provider with no turn-start signal keeps "COMMITTED is active until Stop or the watchdog window" (never provisional)', async () => {
   const f = floor({ confirms: false });
   await dwightCommitted(f);
   assert.equal(f.coordinator.state('dwight').provisional, false);

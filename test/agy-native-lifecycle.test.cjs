@@ -200,7 +200,7 @@ test('D3 REGRESSION: a RUNNING agent plus more than 12s of PTY silence is still 
 
 // ─── the incident, and the recovery ─────────────────────────────────────────
 
-test('THE FALSE-ACTIVE STALL: a COMMITTED wake with no terminal proof is recovered ONCE by the watchdog after its window, never before', async () => {
+test('THE FALSE-ACTIVE STALL: a COMMITTED wake with no terminal proof is recovered ONCE by the watchdog (16 min of silence), with exactly one further guarded submit', async () => {
   const f = floor({ ids: ['m1'] });
   f.coordinator.noteProviderStatus('a1', 'idle', NOW, FIXTURE_SESSION);
   f.bridge.onDelivery('a1', 'm1');
