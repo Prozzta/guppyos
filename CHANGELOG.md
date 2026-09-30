@@ -57,6 +57,11 @@ Rollback: 1.1.74 (reinstall).
 - **A slow hook no longer switches an agent to reading its own files.** When a hook answered late,
   the app could wrongly decide the agent never got its mail and switch it to reading its files
   after three such wakes. Late answers now count only toward re-offering the message.
+- **An agent can no longer get stuck "busy" after a very short turn.** When an agent's turn
+  started and finished before the app had confirmed the prompt it typed, the app could keep the
+  agent marked busy and hold back all later mail to it (Codex usually recovered after about a
+  minute; Claude could stay stuck until its next turn). This was not new in 1.1.75 (it dates back
+  to 1.1.53, so 1.1.74 has it too); it was found while testing this release and is fixed.
 - **An agent whose hooks stop reaching the app entirely is switched to reading its files after
   about five minutes or more, not at once.** The switch waits for three wakes, and after two
   unanswered wakes the app waits five minutes before the third. This is accepted.

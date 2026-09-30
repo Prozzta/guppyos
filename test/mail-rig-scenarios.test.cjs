@@ -277,6 +277,27 @@ test('N1 BUDGET (layer-b dry run #4): an idle agent whose surfacing evidence nev
   assert.ok(!wake.some((r) => r.stage === 'wake-ids-exhausted' && (r.idList || []).includes(m.id)), 'never sent to the F4 backoff');
 });
 
+test('P1 rig (dry #6 order, ON HOLD): the owner\'s COMMITTED lands AFTER the fast turn\'s Stop; the agent is not wedged, the next mail is acted without simulated time', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cx-1', flavour: 'codex', scenario: {} }]);
+  await rig.call('delaySettle', { id: 'cx-1', ms: 4000 });   // longer than the fake agent's turn
+  const clock0 = await rig.call('advance', { ms: 0 });
+  const m1 = await rig.call('send', { to: 'cx-1', subject: 'p1-one', body: 'the wake whose turn ends before its COMMITTED' });
+  await rig.beat();
+  await waitFor(() => acted(rig, 'cx-1', m1.id), { what: 'm1 acted (its turn ran before the settle)', timeoutMs: 30_000 });
+  const committed = async () => (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED').length;
+  await waitFor(async () => (await committed()) >= 1, { what: 'the delayed COMMITTED has settled', timeoutMs: 15_000 });
+  await sleep(4500);   // the bridge's settle follows the owner's outcome by the injected delay
+  await rig.call('delaySettle', { id: 'cx-1', ms: 0 });
+  const m2 = await rig.call('send', { to: 'cx-1', subject: 'p1-two', body: 'dry #6: refused as lifecycle-active for 27 min' });
+  await rig.beat();   // at the same simulated instant
+  try { await waitFor(() => acted(rig, 'cx-1', m2.id), { what: 'm2 acted: the agent is not wedged', timeoutMs: 30_000 }); } catch (e) {
+    const why = [...new Set((await rig.call('diags', {})).filter((d) => d.agentId === 'cx-1' && d.stage === 'no-claim').map((d) => d.why))];
+    throw new Error(`${e.message}; cx-1 refusals: ${JSON.stringify(why)}; state ${JSON.stringify((await rig.call('wakeState', { id: 'cx-1' })).lifecycle)}`);
+  }
+  assert.equal(await rig.call('advance', { ms: 0 }), clock0, 'no simulated time passed (no 60 s recovery, no backoff)');
+});
+
 test('N2 hookless (custom) and proxy (qwen) work orders: acted = the confirmed PTY write, via:"work-order", never backlog', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cu-1', flavour: 'custom', scenario: {} }, { id: 'qw-1', flavour: 'qwen', scenario: {} }]);

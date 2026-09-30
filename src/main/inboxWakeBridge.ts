@@ -185,8 +185,11 @@ export class InboxWakeBridge {
           ...(typeof outcome.detail === 'string' ? { detail: outcome.detail.slice(0, 200) } : {}),
           requestId: claim.requestId
         });
-        coordinator.settle(claim, kind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
+        const settled = coordinator.settle(claim, kind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
         if (kind === 'COMMITTED') this.noteMailCommit(agentId, claim);
+        // P1: the claim's typed turn already ended before this COMMITTED. Its Stop's repend skipped
+        // the in-flight ids; they go through THE SAME repend() now (spent once, n1Due honoured).
+        if (settled && settled.endedBeforeSettle) this.onMailEpochClosed(agentId, 'normal', 'stop-before-settle');
         this.deps.log?.(`[inbox-wake] ${kind === 'COMMITTED' ? 'commit' : 'release'} ${agentId} cause=${cause} outcome=${kind}`);
       });
     return claim;
@@ -272,7 +275,7 @@ export class InboxWakeBridge {
   onMailEpochClosed(agentId: string, outcome: 'normal' | 'abnormal', reason: string, redelivered: readonly string[] = []): void {
     if (!agentId) return;
     const delivered = this.deps.inboxIds(agentId);
-    const turnEnded = reason === 'stop' || reason === 'stop-failure';
+    const turnEnded = reason === 'stop' || reason === 'stop-failure' || reason === 'stop-before-settle';
     let n1Due: string[] = [];
     try { n1Due = this.deps.mail?.n1DueIds?.(agentId) ?? []; } catch { n1Due = []; }
     const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now(), { turnEnded, n1Due });

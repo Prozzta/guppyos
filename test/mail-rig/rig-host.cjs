@@ -129,7 +129,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -279,7 +279,8 @@ async function buildFloor() {
       const out = ptyManager.lastOutputAt(ptyId) ?? 0;
       return { ptyId, lastOutputAt: out > 0 ? clock.at(out) : 0, autoDeliveryPaused: snap.autoDeliveryPaused, paused: snap.paused, halted: snap.halted, inhibited: automaticSubmit.inhibition(ptyId) !== null };
     },
-    submit: (req) => automaticSubmit.submit(req),
+    // P1 (dry #6): the driver can hold the owner's outcome back, so a fast turn's Stop lands first.
+    submit: (req) => { const p = automaticSubmit.submit(req); const d = rig.settleDelay.get(req.agentId); return d ? p.then((v) => new Promise((r) => setTimeout(() => r(v), d))) : p; },
     text: (ids, agentId) => inboxWakeTextForProvider(agentId ? hive.registry().agents[agentId]?.provider : undefined, [...ids], agentId ? wakeMailMode(agentId) : 'inject'),
     setImmediate: (fn) => { setImmediate(fn); },
     now: () => clock.now(),
@@ -472,6 +473,7 @@ async function main() {
     // writes at boot)? The driver moves the simulated clock only after it has (Rig.settleBoot).
     bootSeen: ({ id }) => { const p = f.ptyForAgent(id); return !!p && rig.bootSeen.has(p); },
     stallNextHook: ({ id, ms, event }) => { rig.stall.set(id, { ms, event }); return true; },
+    delaySettle: ({ id, ms }) => { if (ms) rig.settleDelay.set(id, ms); else rig.settleDelay.delete(id); return true; },
     // C1 (deterministic lateness): the NEXT mail-claim settle of this agent is measured as if its
     // response had flushed `ms` after the hook arrived. The response itself leaves at once, so it
     // never races the provider shim's own give-up timer (the AGY shim exits 5 s after it starts).

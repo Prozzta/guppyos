@@ -235,6 +235,11 @@ interface AgentWake {
   /** AGY's last invocation hook was PreInvocation (a model call is running): a deferred
    *  idle is not applied until PostInvocation or a Stop says it ended. */
   invoking: boolean;
+  /** P1 (layer-b dry run #6): the FIRST turn start seen after the current claim, and its provider
+   *  turn id (Codex stamps one; null = unnamed). settle() uses them to tell whether the claim's own
+   *  typed turn already ENDED before the owner reported COMMITTED. */
+  claimTurnSeen: boolean;
+  claimTurnId: string | null;
 }
 
 /** What a reconcile beat changed for one agent (null = nothing). */
@@ -325,7 +330,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null
       };
       this.agents.set(agentId, r);
     }
@@ -487,6 +492,8 @@ export class WorkerWakeWatchdog {
     if (event === 'PostInvocation') { r.invoking = false; return false; }
     if (ACTIVE_EVENTS.has(event)) {
       if (event === 'PreInvocation') r.invoking = true;
+      // P1: the first turn start after the claim names the turn the claim's settle is about.
+      if (!r.claimTurnSeen && r.claimedAt > 0 && at >= r.claimedAt) { r.claimTurnSeen = true; r.claimTurnId = turnId ?? null; }
       this.turnStarted(r, at);   // the provider's own turn start: confirms our submit
       r.lifecycle = 'active'; r.activeSince = at;
       r.openTurnId = turnId ?? null;   // no id (Claude, our own submit): the turn is unnamed
@@ -791,6 +798,8 @@ export class WorkerWakeWatchdog {
     const ids = [...r.pending].sort();
     r.pending.clear();
     r.claimedAt = now;
+    r.claimTurnSeen = false;
+    r.claimTurnId = null;
     // Every announcement of this id set is a NEW request (see inboxWakeClaimId): the owner replays
     // a remembered COMMITTED without typing, so a re-pend, an N1 back-edge, an unconfirmed submit or
     // an F4 retry must never reuse an earlier id.
@@ -812,13 +821,36 @@ export class WorkerWakeWatchdog {
    * reading - COMMITTED is active until its Stop - since waiting for a confirmation that can
    * never come would re-announce every turn.
    */
-  settle(claim: WakeClaim, outcomeKind: string, at = Date.now(), confirms = false): void {
+  settle(claim: WakeClaim, outcomeKind: string, at = Date.now(), confirms = false): { endedBeforeSettle: boolean } {
     const r = this.agents.get(claim.agentId);
-    if (!r || r.inFlight?.requestId !== claim.requestId) return;
+    if (!r || r.inFlight?.requestId !== claim.requestId) return { endedBeforeSettle: false };
     r.inFlight = null;
     if (outcomeKind === 'COMMITTED') {
       this.markCommitted(claim);
       for (const id of claim.ids) r.announced.add(id);
+      // P1 (layer-b dry run #6, the Human's approval; pre-existing since 1.1.53): the owner's
+      // COMMITTED can land AFTER the typed turn already started AND ended (the Codex submit check
+      // takes ~1.5 s; a short turn is faster). Reopening an epoch here left the agent "active" for
+      // good: the Stop that ended the turn is older than activeSince, so nothing could close it.
+      // Case A, claim-correlated: a turn START seen after the claim, and
+      //  - with a provider turn id (Codex): a Stop carrying THAT id has come (a late Stop of another
+      //    turn never counts: stoppedAt is only its arrival time);
+      //  - without one: the Stop is the latest event (stoppedAt >= the newest start, so no turn
+      //    started after it).
+      // Then the commit is recorded and the lifecycle is left as the Stop left it; the caller runs
+      // the SAME repend() for the claim's ids (its Stop skipped them: they were in flight), so an
+      // epoch is spent exactly once. Case B (a Stop with NO start seen) and C (the settle before the
+      // turn's Stop) are unchanged: provisional/active as before.
+      const startedAfterClaim = r.claimedAt > 0 && r.turnStartAt >= r.claimedAt && r.claimTurnSeen;
+      const ended = startedAfterClaim && (r.claimTurnId !== null
+        ? r.closedTurns.includes(r.claimTurnId)
+        : r.stoppedAt >= r.turnStartAt);
+      if (ended) {
+        r.commitIds = claim.ids;
+        r.provisional = false;
+        if (claim.recheck) r.recheck = null;
+        return { endedBeforeSettle: true };
+      }
       r.lifecycle = 'active';          // a turn just started; new mail waits for its Stop
       r.activeSince = at;              // and THIS is the edge terminal proof must be newer than
       r.pendingIdleAt = 0;
@@ -834,6 +866,7 @@ export class WorkerWakeWatchdog {
     } else {
       for (const id of claim.ids) if (!r.announced.has(id)) r.pending.add(id);
     }
+    return { endedBeforeSettle: false };
   }
 
   /** A human resolved the owner's INTERFERED hold. Returns true when a held claim moved. */

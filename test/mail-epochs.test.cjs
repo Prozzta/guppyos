@@ -856,3 +856,34 @@ test('Jim LOW nit: stop() unsubscribes from onAgentProvisioned: the listener cou
   b.stop();
   assert.equal(hive.provisionedListeners.size, base);
 });
+
+test('P1 floor (dry #6 order, ON HOLD): the Codex owner settles COMMITTED AFTER the stub\'s turn already started and stopped; the next mail is still woken', async (t) => {
+  const w = await world(t, { providers: { 'cx-1': 'codex' } });
+  w.fire('cx-1', 'Stop', { turn_id: 'T0', transport: 'pipe' });   // idle
+  const unsettled = [];
+  w.outcome = () => new Promise((res) => unsettled.push(() => res({ kind: 'COMMITTED' })));
+  w.now += 10_000;
+  const m1 = w.send('cx-1', { subject: 'one', body: 'b5-like' });
+  await w.flush();
+  assert.equal(unsettled.length, 1, 'the wake is claimed; its submit (the F3 check) has not settled');
+  // The typed sentinel's whole turn runs first: start, surfacing, Stop (acted).
+  w.now += 1000;
+  w.fire('cx-1', 'UserPromptSubmit', { prompt: '[hive] check inbox', turn_id: 'T1', transport: 'pipe' });
+  w.confirm('cx-1');
+  w.now += 600;
+  w.fire('cx-1', 'Stop', { turn_id: 'T1', transport: 'pipe' });
+  assert.equal(w.entry('cx-1', m1.id).state, 'acted');
+  // Only now the owner reports COMMITTED (dry #6: 48 ms after the Stop).
+  w.now += 48;
+  unsettled.shift()();
+  await w.flush();
+  // The next message must be woken, not refused as lifecycle-active.
+  w.outcome = () => ({ kind: 'COMMITTED' });
+  w.now += 10_000;
+  const reqs = w.reqs.length;
+  const m2 = w.send('cx-1', { subject: 'two', body: 'b6t2-like' });
+  await w.flush();
+  const refused = w.diags.filter((d) => d.stage === 'no-claim' && d.agentId === 'cx-1' && /lifecycle-active/.test(String(d.why)));
+  assert.equal(w.reqs.length, reqs + 1, `m2 (${m2.id}) is woken at once; refusals: ${JSON.stringify(refused.map((d) => d.why))}`);
+  assert.ok(w.reqs.at(-1).text.includes(m2.id), 'the new wake names m2');
+});
