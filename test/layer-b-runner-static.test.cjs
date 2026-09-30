@@ -359,6 +359,31 @@ test('real step 1 + god (on 7aebbe9a): the sandbox base lives in C:\\Dunder\\lbj
   assert.equal(bad.ok, false, 'a root that cannot be inspected is fail-closed');
 });
 
+test('Jim W4 pin: sweepRoots honours each root\'s own pattern; an lbj root {pattern: RUN_DIR} shreds + removes a stale 8-hex run and keeps everything else', (t) => {
+  const lbj = tmpDir(t, 'lb-lbjroot-');
+  const stale = path.join(lbj, '0a1b2c3d');
+  const mine = path.join(lbj, 'deadbeef');
+  const kept = ['abc1234', '0a1b2c3d4e5f6071', 'md-layerb-2026-09-29T01-00-00-000Z', 'notes', 'zzzzzzzz'].map((n) => path.join(lbj, n));
+  const creds = [path.join(stale, 'j', 'pc', 'auth.json'), path.join(stale, 'd', 'hive', 'agents', 'lb-codex', '.codex', 'auth.json'), path.join(stale, 'j', 'home', '.claude', '.credentials.json')];
+  for (const f of [...creds, path.join(stale, 'w', 'x.txt'), path.join(mine, 'j', 'pc', 'auth.json'), ...kept.map((d) => path.join(d, 'auth.json'))]) {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, '{"tokens":"x"}');
+  }
+  const shredded = [];
+  const ops = { shred: (f) => { shredded.push(path.resolve(f)); fs.rmSync(f); return true; } };
+  const sw = lb.sweepRoots([{ dir: lbj, pattern: lb.RUN_DIR }], mine, ops);
+  assert.equal(sw.ok, true);
+  assert.deepEqual(sw.done.map((d) => [path.basename(d.dir), d.credentials, d.shredded, d.removed]), [['0a1b2c3d', 3, 3, true]], 'exactly the stale 8-hex run is swept');
+  assert.deepEqual(shredded.sort(), creds.map((f) => path.resolve(f)).sort(), 'its credentials were SHREDDED (before the removal)');
+  assert.equal(fs.existsSync(stale), false, 'the stale run dir is removed');
+  assert.equal(fs.existsSync(path.join(mine, 'j', 'pc', 'auth.json')), true, 'this run is left');
+  for (const d of kept) assert.equal(fs.existsSync(path.join(d, 'auth.json')), true, `${path.basename(d)} does not match RUN_DIR: kept`);
+  // The pattern is per root: the same lbj swept as a legacy root (STALE_PREFIX) takes only md-layerb-*.
+  const legacy = lb.sweepRoots([{ dir: lbj, pattern: /^md-layerb-\d{4}-\d{2}-\d{2}T/ }], mine, ops);
+  assert.deepEqual(legacy.done.map((d) => path.basename(d.dir)), ['md-layerb-2026-09-29T01-00-00-000Z']);
+  assert.equal(fs.existsSync(kept[0]) && fs.existsSync(kept[1]) && fs.existsSync(mine), true);
+});
+
 test('real step 1: the late-hook check reports NOT RUN (never FAIL, never PASS) when no hive log exists', (t) => {
   const hive = tmpDir(t, 'lb-nohive-');
   const checks = [];
