@@ -164,6 +164,21 @@ test('runner (Jim F2): the launcher must carry exactly --sandbox workspace-write
   assert.match(f(`${good} -c sandbox_mode="danger-full-access"`), /REFUSED override -c sandbox_mode/);
   assert.match(f(`${good} --config approval_policy="on-request"`), /REFUSED override -c approval_policy/);
   assert.deepEqual(lb.CODEX_REFUSED_FLAGS.slice(0, 2), ['--dangerously-bypass-approvals-and-sandbox', '--yolo']);
+  // Jim H1: every clap form of -c/--config.
+  assert.match(f(`${good} --config=sandbox_mode="danger-full-access"`), /REFUSED override -c sandbox_mode/);
+  assert.match(f(`${good} -csandbox_mode="danger-full-access"`), /REFUSED override -c sandbox_mode/);
+  assert.match(f(`${good} -c=approval_policy="on-request"`), /REFUSED override -c approval_policy/);
+  assert.match(f(`${good} -capproval_policy=never`), /REFUSED override -c approval_policy/);
+  assert.match(f(`${good} -c sandbox_workspace_write.writable_roots=["C:/"]`), /REFUSED override -c sandbox_workspace_write/);
+  assert.equal(f(`${good} -c model_reasoning_effort=low`), '', 'an unrelated override is not refused');
+  // Jim H2: flags that widen the sandbox or swap the config (0.157.1 shared_options.rs:35/:67/:71/:75).
+  for (const [flag, re] of [['--add-dir C:/', /REFUSED flag --add-dir/], ['--add-dir=C:/', /REFUSED flag --add-dir/],
+    ['--cd C:/', /REFUSED flag --cd\/-C/], ['--cd=C:/', /REFUSED flag --cd\/-C/], ['-C C:/', /REFUSED flag --cd\/-C/], ['-CC:/', /REFUSED flag --cd\/-C/],
+    ['--profile wide', /REFUSED flag --profile\/-p/], ['--profile=wide', /REFUSED flag --profile\/-p/], ['-p wide', /REFUSED flag --profile\/-p/], ['-pwide', /REFUSED flag --profile\/-p/],
+    ['--worktree', /REFUSED flag --worktree/], ['--worktree=true', /REFUSED flag --worktree/]]) {
+    assert.match(f(`${good} ${flag}`), re, flag);
+  }
+  assert.deepEqual(lb.CODEX_WIDENING_FLAGS, [['--add-dir', null], ['--cd', '-C'], ['--profile', '-p'], ['--worktree', null]]);
 });
 
 test('runner (Jim F1, dry run): the stub lb-codex must be a direct child of the pty owner, exactly once', () => {

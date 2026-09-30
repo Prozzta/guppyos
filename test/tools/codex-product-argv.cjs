@@ -117,4 +117,12 @@ function productLaunch(spec, commandPath, pathEnv = process.env.PATH || '') {
   throw new Error(`productLaunch: ${t.interpreter} is not on PATH`);
 }
 
-module.exports = { productCodexSpawn, codexArgvProblems, assertProductCodexArgv, productLaunch, PRODUCT_CODEX_MARKER, NO_DAEMON };
+/** The env the product's PtyManager gives a spawned agent: src/main/ptyEnv.ts buildPtyEnv(parent env,
+ *  the user PATH, the agent env), as pty.ts:699 calls it (win32; no memory PATH prepend here). */
+function productPtyEnv(parentEnv, agentEnv = {}) {
+  const { buildPtyEnv } = loadTs('src/main/ptyEnv.ts');
+  const pk = Object.keys(parentEnv).find((k) => k.toUpperCase() === 'PATH');
+  return buildPtyEnv(parentEnv, pk ? parentEnv[pk] : '', agentEnv, 'win32', []);
+}
+
+module.exports = { productPtyEnv, productCodexSpawn, codexArgvProblems, assertProductCodexArgv, productLaunch, PRODUCT_CODEX_MARKER, NO_DAEMON };

@@ -745,6 +745,45 @@ const CODEX_HELP_ARGVS = [['--version'], ['sandbox', '--help']];
  *  marker (--dangerously-bypass-hook-trust, added only by HiveManager.ensureAgent), and the product's
  *  OWN gate (codexCli.ts codexSupportsNoDaemon, loaded from src/) must grant the flag for the version
  *  the app logged at that spawn. Anything else FAILS the run. */
+/** god ruling A (codex-junction-and-fetch.md): in the jailed app env, so that every Codex agent (and
+ *  its curated-plugins git sync) inherits them. GIT_CONFIG_NOSYSTEM: git skips the SYSTEM gitconfig
+ *  (Program Files\Git\etc\gitconfig sets credential.helper=manager-core), so no credential helper;
+ *  GCM_INTERACTIVE=never: if GCM runs anyway, no sign-in window; GIT_TERMINAL_PROMPT=0: no prompt.
+ *  Codex 0.157.1 keeps all three for that git child: startup_sync.rs:665-681 removes only
+ *  GIT_EXEC_PATH, GIT_TEMPLATE_DIR, DEVELOPER_DIR (and sets GIT_TERMINAL_PROMPT=0 itself);
+ *  git_policy.rs:7-25 + :40-49 remove an EXACT list of repository-scoped names (no prefix logic)
+ *  that holds none of them. */
+const JAIL_GIT_ENV = Object.freeze({ GIT_CONFIG_NOSYSTEM: '1', GCM_INTERACTIVE: 'never', GIT_TERMINAL_PROMPT: '0' });
+function jailGitEnvProblems(env, where) {
+  const e = env || {};
+  const get = (k) => { const key = Object.keys(e).find((x) => x.toUpperCase() === k); return key === undefined ? undefined : e[key]; };
+  return Object.entries(JAIL_GIT_ENV).filter(([k, v]) => get(k) !== v).map(([k, v]) => `${where}: ${k} is ${JSON.stringify(get(k))}, not ${JSON.stringify(v)}`);
+}
+/** Jim (GIT PROOF): `git config --show-origin --get-all credential.helper`, run in the jailed app
+ *  env, must print NOTHING. git exits 1 with no output when no config level defines the key; any
+ *  output (a helper from the system, ProgramData, global or XDG config) or any other exit status
+ *  (the check could not run) fails. */
+const GIT_HELPER_ARGV = ['config', '--show-origin', '--get-all', 'credential.helper'];
+function gitCredentialHelperProblems(r) {
+  if (!r || r.error) return [`git could not run: ${r && r.error ? r.error.message : 'no result'}`];
+  const out = String(r.stdout || '').trim();
+  if (out) return [`a credential helper is configured for the agents' git: ${out.replace(/\s+/g, ' ')}`];
+  if (r.status !== 1) return [`git config exited ${r.status} (1 = no helper expected): ${String(r.stderr || '').trim().slice(0, 300)}`];
+  return [];
+}
+/** The git the codex curated-plugins sync would run: system_executable("git"), i.e. the Program
+ *  Files install (utils/path-utils/src/system_commands.rs:14); else the first on the runner's PATH. */
+function agentGitExe() {
+  const pf = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'cmd', 'git.exe');
+  return fs.existsSync(pf) ? pf : whichOn(parentPath(), 'git');
+}
+/** The app env, then the PRODUCT's pty env for a Codex agent built from it (src/main/ptyEnv.ts
+ *  buildPtyEnv, with the product's Codex env overlay nonInteractiveEnvForProvider('codex')). */
+function jailGitEnvChain(appEnv) {
+  const pa = require('./codex-product-argv.cjs');
+  const overlay = require(path.join(REPO, 'test', 'load-ts.cjs'))(path.join(REPO, 'src', 'shared', 'agentProvider.ts')).nonInteractiveEnvForProvider('codex');
+  return [...jailGitEnvProblems(appEnv, 'the app env'), ...jailGitEnvProblems(pa.productPtyEnv(appEnv, overlay), 'the product pty env of a Codex agent')];
+}
 /** lb-codex's registry command (the request the product then builds on); the repro uses the same. */
 const lbCodexCommand = (model) => `codex --model ${model} --sandbox workspace-write --ask-for-approval never`;
 const CODEX_LAUNCHER = /[\\/]@openai[\\/]codex[\\/]bin[\\/]codex\.js/i;
@@ -808,12 +847,23 @@ function codexSafetyArgvProblems(tokens) {
   pairs('--sandbox', '-s', 'workspace-write');
   pairs('--ask-for-approval', '-a', 'never');
   for (const f of CODEX_REFUSED_FLAGS) if (t.some((x) => x === f || x.startsWith(`${f}=`))) p.push(`REFUSED flag ${f}`);
+  // Jim H2: flags that WIDEN the sandbox or swap the config, never passed by the product
+  // (0.157.1 utils/cli/src/shared_options.rs:35 -p/--profile, :67 -C/--cd, :71 --worktree,
+  // :75 --add-dir); separate, `=` and attached short forms.
+  for (const [long, short] of CODEX_WIDENING_FLAGS) {
+    if (t.some((x) => x === long || x.startsWith(`${long}=`) || (short && (x === short || (x.startsWith(short) && !x.startsWith('--')))))) p.push(`REFUSED flag ${long}${short ? `/${short}` : ''}`);
+  }
+  // Jim H1: -c/--config in every clap form: `-c k=v`, `-ck=v`, `--config k=v`, `--config=k=v`.
   t.forEach((x, i) => {
-    const v = x === '-c' || x === '--config' ? t[i + 1] : x.startsWith('--config=') ? x.slice(9) : null;
-    if (v && /^\s*(sandbox_mode|approval_policy|sandbox_workspace_write)\b/.test(v)) p.push(`REFUSED override -c ${v}`);
+    let v = null;
+    if (x === '-c' || x === '--config') v = t[i + 1];
+    else if (x.startsWith('--config=')) v = x.slice('--config='.length);
+    else if (x.startsWith('-c') && !x.startsWith('--')) v = x.slice(2).replace(/^=/, '');
+    if (v && /^\s*["']?(sandbox_mode|approval_policy|sandbox_workspace_write|sandbox_permissions|default_permissions|permissions)\b/.test(v)) p.push(`REFUSED override -c ${v}`);
   });
   return p;
 }
+const CODEX_WIDENING_FLAGS = [['--add-dir', null], ['--cd', '-C'], ['--profile', '-p'], ['--worktree', null]];
 /** PowerShell: the app's descendants with their command lines, as JSON (tree walk by pid). */
 const PS_TREE_CMDLINES = (rootPid) => `
 $ErrorActionPreference = 'Stop'
@@ -2033,7 +2083,13 @@ class LayerB {
       }
     }
     env.PATH = [...extra, nodeDir, ...isolation.systemDirs(process.env)].join(path.delimiter);
-    Object.assign(env, { MUNDER_DEV: '1', MUNDER_HIDDEN: '1', MUNDER_DEV_ROOT: s.devRoot, ELECTRON_ENABLE_LOGGING: '1' });
+    Object.assign(env, { MUNDER_DEV: '1', MUNDER_HIDDEN: '1', MUNDER_DEV_ROOT: s.devRoot, ELECTRON_ENABLE_LOGGING: '1' }, JAIL_GIT_ENV);
+    // god ruling A: the three git variables reach every Codex agent's pty through the PRODUCT's
+    // own pty env builder (proven here with that builder; the codex side is proven from its source).
+    const gitEnv = jailGitEnvChain(env);
+    if (!this.check(!gitEnv.length, 'the app env and the product\'s Codex pty env carry GIT_CONFIG_NOSYSTEM=1, GCM_INTERACTIVE=never, GIT_TERMINAL_PROMPT=0', gitEnv.join('; ') || JSON.stringify(JAIL_GIT_ENV))) {
+      throw new Error(`the jailed git env is incomplete: ${gitEnv.join('; ')}`);
+    }
 
     // (1) The rig's own guard on everything but the allowed CLI dirs.
     const probe = { ...env, PATH: [nodeDir, ...isolation.systemDirs(process.env)].join(path.delimiter) };
@@ -3279,6 +3335,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
       }
       this.build();
       this.appEnv(liveUserData);
+      this.proveNoGitCredentialHelper();
       this.seed();
       this.installCredentials();
       this.factN4();
@@ -3347,6 +3404,21 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   /** god (the packages-junction blocker): before every launch (so after the seed) and after every
    *  launch, no junction or symlink under the sandbox base may lead out of it (jailLinkScan). A hit
    *  REFUSES the launch or ABORTS the run. Both modes: it starts nothing. */
+  /** Jim (GIT PROOF), before the first launch, both modes: in the jailed app env, git (the Program
+   *  Files git codex would run) has NO credential helper at any config level. Local only: `git
+   *  config` reads files, it opens no connection. Hidden; cwd = the jail (not a repository). */
+  proveNoGitCredentialHelper() {
+    const git = agentGitExe();
+    const r = git ? spawnSync(git, GIT_HELPER_ARGV, { cwd: this.s.jail, env: this.env, encoding: 'utf8', windowsHide: true, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] })
+      : { error: new Error('no git found') };
+    const problems = gitCredentialHelperProblems(r);
+    this.gitHelperProof = { git, argv: GIT_HELPER_ARGV, status: r.status, stdout: String(r.stdout || ''), problems };
+    if (!this.check(!problems.length, 'the agents\' git has NO credential helper in the jailed app env (git config --show-origin --get-all credential.helper prints nothing)', problems.join('; ') || `${git}: exit ${r.status}, no output`)) {
+      this.stop('a git credential helper is reachable from the jail');
+      throw new Error(`git credential helper check: ${problems.join('; ')}`);
+    }
+  }
+
   jailLinkGate(label) {
     const r = jailLinkScan(this.s.base);
     const slug = label.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '');
@@ -3408,7 +3480,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
   }
 }
 
-module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
+module.exports = { Cdp, psArgs, PS_WATCH, PS_SCAN, PS_MAX_CMDLINE, readJsonStrict, walk, JAIL_DENY_TOOLS, b6Tiers, withoutMail, W, liveForbidden, inside, parseArgs, CAPS, GLOBAL_WALL_MS, Credentials, ProcTracker, WindowWatch, LiveWatch, sweepStale, buildEnv, redact, realCredentialPaths, claudeJailSettings, codexSandboxToml, stubSource, LB_LEGACY_ROOTS, RUN_DIR, CODEX_SOCKET_MAX, codexSocketPaths, codexSocketProblems, runCodexHomes, installPtyCapture, ptyCaptureQuery, tokenAccount, tokenCapBreach, codexArgvRejection, runBarProblems, DRY_RUN_WALL_MS, liveAppPaths, liveCoverageProblems, claudeLiveDenied, claudeDenyProblems, JAIL_PATH_TOOLS, emergencyShred, codexProbeVerdict, realpathNearest, jailRootProblems, dunderDenyRoots, LB_JAIL_ROOT, sweepRoots, sandboxBaseProblems, CODEX_HELP_ARGVS, codexProbeArgv, JAIL_GIT_ENV, jailGitEnvProblems, jailGitEnvChain, GIT_HELPER_ARGV, gitCredentialHelperProblems, agentGitExe, CODEX_WIDENING_FLAGS, codexSpawnArgvProblems, codexSafetyArgvProblems, CODEX_REFUSED_FLAGS, stubPtyParentProblems, winCmdTokens, lbCodexCommand, jailLinkScan, JAIL_LINK_EXCEPTIONS, listingHash, liveTreeProblems, CODEX_LAUNCHER, CODEX_PRODUCT_MARKER, PS_TREE_CMDLINES, parseCodexVersion, logReachedStates, logReachedAt, b7EpochEnd, HiveLogTail, installInboxProbe, uninstallInboxProbe, inboxProbeQuery, domPanelSnapshot, panelMatchesPoll, lateHookRows, LayerB, IDS, DEFAULT_MODELS, HEAVY_GATE };
 
 if (require.main === module) {
   let lb = null;
