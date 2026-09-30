@@ -374,6 +374,62 @@ test('a check that THROWS refuses the spawn (fail closed), with the reason in th
   assert.ok(logRows(s.home).some((x) => x.kind === 'codex-trust-layer' && x.agentId === 'cx-9' && x.action === 'refuse' && x.error));
 });
 
+// ── T1/T2 (Jim, build round): never start on a stale seed; a failure before the check refuses ──
+
+test('T1 (Jim\'s probe): a throw BEFORE the check (unreadable ~/.codex/config.toml) REFUSES, with a log row and a notice; the stale seeded config is gone', async (t) => {
+  const s = sandbox(t);
+  const cwd = path.join(s.home, 'work', 'repo'); fs.mkdirSync(cwd, { recursive: true });
+  const r1 = await s.hive.ensureAgent({ id: 'cx-f', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: [] });
+  assert.equal(r1.refusal, undefined);
+  const agentCfg = path.join(r1.env.CODEX_HOME, 'config.toml');
+  assert.match(fs.readFileSync(agentCfg, 'utf8'), /trust_level = "trusted"/, 'the first spawn wrote the seeded config');
+  put(path.join(cwd, '.codex', 'config.toml'), '[mcp_servers.x]\ncommand = "calc.exe"\n');
+  const ctl = await s.hive.ensureAgent({ id: 'cx-f', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: [] });
+  assert.ok(ctl.refusal, 'control: refused by the check');
+  assert.equal(fs.existsSync(agentCfg), false, 'a refused spawn leaves no seeded config behind');
+  fs.writeFileSync(agentCfg, 'stale = true\n[projects.\'x\']\ntrust_level = "trusted"\n');   // as an older build left it
+  fs.mkdirSync(path.join(s.home, '.codex', 'config.toml'), { recursive: true });   // EISDIR when read
+  s.notices.length = 0;
+  const r2 = await s.hive.ensureAgent({ id: 'cx-f', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: [] });
+  assert.match(r2.refusal ?? '', /failed before its project folder could be checked/);
+  assert.deepEqual(r2.args, []);
+  assert.equal(fs.existsSync(agentCfg), false, 'the stale seeded config was removed first');
+  assert.ok(logRows(s.home).some((x) => x.kind === 'codex-trust-layer' && x.agentId === 'cx-f' && x.phase === 'before-check'));
+  assert.equal(s.notices.length, 1);
+  assert.equal(s.notices[0].optInKey, '', 'no Allow button: an opt-in would not fix this');
+});
+
+test('T1: a TRANSIENT EBUSY before the check refuses that spawn; the next one, with the cause gone, starts normally', async (t) => {
+  const s = sandbox(t);
+  const cwd = path.join(s.home, 'work', 'clean'); fs.mkdirSync(cwd, { recursive: true });
+  put(path.join(s.home, '.codex', 'config.toml'), 'model = "x"\n');
+  const userCfg = path.join(s.home, '.codex', 'config.toml');
+  const orig = fs.readFileSync;
+  let fired = 0;
+  fs.readFileSync = function (p, ...rest) {
+    if (!fired && path.resolve(String(p)) === path.resolve(userCfg)) { fired++; const e = new Error(`EBUSY: resource busy or locked, open '${p}'`); e.code = 'EBUSY'; throw e; }
+    return orig.call(this, p, ...rest);
+  };
+  t.after(() => { fs.readFileSync = orig; });
+  const r1 = await s.hive.ensureAgent({ id: 'cx-b', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: [] });
+  fs.readFileSync = orig;
+  assert.equal(fired, 1, 'the EBUSY was injected');
+  assert.match(r1.refusal ?? '', /EBUSY/);
+  const r2 = await s.hive.ensureAgent({ id: 'cx-b', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: [] });
+  assert.equal(r2.refusal, undefined);
+  assert.ok(r2.args.includes('--dangerously-bypass-hook-trust'));
+});
+
+test('T2: when the check ITSELF throws, the window notice is sent too (no Allow)', async (t) => {
+  const s = sandbox(t);
+  const cwd = path.join(s.home, 'work', 'clean'); fs.mkdirSync(cwd, { recursive: true });
+  await s.hive.ensureAgent({ id: 'cx-t', name: 'Codex', provider: 'codex', cwd }, { codexVersion: '0.157.1', codexLayerOptIns: 5 });
+  assert.equal(s.notices.length, 1);
+  assert.equal(s.notices[0].action, 'refuse');
+  assert.equal(s.notices[0].optInKey, '');
+  assert.match(s.notices[0].reason, /the check of this agent's codex project folder failed/);
+});
+
 // ── wiring pins ──────────────────────────────────────────────────────────────────────────────
 
 const src = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/\r\n/g, '\n');

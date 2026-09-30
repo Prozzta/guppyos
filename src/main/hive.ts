@@ -3746,8 +3746,16 @@ export class HiveManager {
   private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
+    // CODEX-TRUST-LAYER T1 (Jim, build round): the layer check must COMPLETE before this agent may
+    // start. Until it has, any throw below (the outer best-effort catch) REFUSES a spawn with a cwd.
+    let layerChecked = false;
     try {
       mkdirSync(home, { recursive: true });
+      // T1: the previous spawn's config.toml carries the trust seed for this cwd. It goes FIRST, so
+      // no path (a throw before the check, a failed write after it) can start codex on an old trust
+      // entry; it is written again below only once the check has passed. A failed removal throws,
+      // and refuses.
+      rmSync(join(home, 'config.toml'), { force: true });
       const userHome = join(homedir(), '.codex');
       // Symlink the user's login so the isolated home authenticates as them.
       // (config.toml is NOT symlinked — we write our own below, seeded from theirs,
@@ -3879,10 +3887,13 @@ export class HiveManager {
         } catch (e) {
           const reason = `Not started: the check of this agent's codex project folder failed (${e instanceof Error ? e.message : String(e)}), so it is refused rather than started unchecked.`;
           this.appendLog({ kind: 'codex-trust-layer', agentId: agentId ?? null, action: 'refuse', cwd, error: String(e), reason });
+          // T2: shown in the window too (no Allow: there is nothing a folder opt-in would fix).
+          try { this.codexLayerSink?.({ agentId: agentId ?? null, action: 'refuse', reason, optInKey: '', folder: cwd, at: Date.now() }); } catch { /* the log row stands */ }
           refusal = { reason, optInKey: '' };
         }
         if (refusal) return { home, refusal: refusal.reason, ...(refusal.optInKey ? { codexLayerOptIn: refusal.optInKey } : {}) };
       }
+      layerChecked = true;
       if (shim) {
         const events = ['PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop',
           'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact'];
@@ -3905,7 +3916,17 @@ export class HiveManager {
         else console.warn(`[hive] ${join(home, 'config.toml')}: the seed defines developer_instructions on several lines; Codex keeps the positional prompt`);
       }
       writeFileSync(join(home, 'config.toml'), config, 'utf8');
-    } catch (e) { console.error('[hive] installCodexHooks failed:', e); devSet = false; }
+    } catch (e) {
+      console.error('[hive] installCodexHooks failed:', e); devSet = false;
+      // T1: best effort only AFTER the layer check. Before it, a Codex agent with a cwd is refused
+      // (with the reason, a log row and a window notice), never started unchecked.
+      if (cwd && !layerChecked) {
+        const reason = `Not started: preparing this Codex agent failed before its project folder could be checked (${e instanceof Error ? e.message : String(e)}), so it is refused rather than started unchecked. Start it again once the cause is gone.`;
+        try { this.appendLog({ kind: 'codex-trust-layer', agentId: agentId ?? null, action: 'refuse', cwd, error: String(e), phase: 'before-check', reason }); } catch { /* the refusal stands */ }
+        try { this.codexLayerSink?.({ agentId: agentId ?? null, action: 'refuse', reason, optInKey: '', folder: cwd, at: Date.now() }); } catch { /* the refusal stands */ }
+        return { home, refusal: reason };
+      }
+    }
     return { home, ...(devSet ? { developerInstructions: true } : {}) };
   }
 
