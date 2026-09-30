@@ -11,7 +11,7 @@ import { buildPtyEnv } from './ptyEnv';
 import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
 import { userShellPathAsync } from './shellEnv';
 import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
-import { cliStatus, lossyRouteRefusal } from './cliLookupPolicy';
+import { cliStatus, lossyRouteRefusal, type ShimInterpreterProblem } from './cliLookupPolicy';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -537,7 +537,7 @@ export class PtyManager {
    * not installed or itself not a real .exe) degrades to exactly today's cmd.exe
    * behaviour. Never throws.
    */
-  private async resolveWindowsShimSpawn(resolved: string, seen: { unknownInterpreter?: string } = {}): Promise<{ file: string; script: string | null } | null> {
+  private async resolveWindowsShimSpawn(resolved: string, seen: { interpreter?: ShimInterpreterProblem } = {}): Promise<{ file: string; script: string | null } | null> {
     if (process.platform !== 'win32') return null;
     try {
       const lower = resolved.toLowerCase();
@@ -566,15 +566,21 @@ export class PtyManager {
       }
 
       const interp = await this.resolveCommand(target.interpreter);
-      // RESOLVER-TIMEOUT-MISS (Andy C3): an interpreter lookup that gave NO answer is reported,
-      // so spawn's lossy-route rule refuses a multi-line spawn with the retryable reason.
-      if (interp.unknown) seen.unknownInterpreter = target.interpreter;
-      if (!interp.found) return null;
+      // RESOLVER-TIMEOUT-MISS (Andy C3, N1): why the interpreter could not be used is reported,
+      // so spawn's lossy-route rule refuses a multi-line spawn naming the interpreter (retryable
+      // when its lookup gave no answer).
+      if (!interp.found) {
+        seen.interpreter = { bin: target.interpreter, problem: interp.unknown ? 'unknown' : 'missing' };
+        return null;
+      }
       // Must be a REAL executable: if `node` itself only resolves to a `.cmd`
       // (e.g. our own bundled-runtime shim appended to PATH), spawning it directly
       // would hit the very CreateProcess limitation we are routing around.
       const il = interp.path.toLowerCase();
-      if (!il.endsWith('.exe') && !il.endsWith('.com')) return null;
+      if (!il.endsWith('.exe') && !il.endsWith('.com')) {
+        seen.interpreter = { bin: target.interpreter, problem: 'not-exe' };
+        return null;
+      }
 
       return { file: interp.path, script: target.scriptPath };
     } catch {
@@ -619,7 +625,7 @@ export class PtyManager {
       // resolveWindowsShimSpawn). win32-only and null-on-anything-unexpected, so
       // macOS/Linux and every undecodable Windows target keep today's behaviour.
       // Skipped entirely for a shellScript spawn, which never executes `resolved`.
-      const shimSeen: { unknownInterpreter?: string } = {};
+      const shimSeen: { interpreter?: ShimInterpreterProblem } = {};
       const shimSpawn = needsCmd && typeof opts.shellScript !== 'string'
         ? await this.resolveWindowsShimSpawn(resolved, shimSeen)
         : null;
@@ -683,7 +689,7 @@ export class PtyManager {
         // route with a multi-line argument (an unresolved name, an unknown interpreter, an
         // undecodable .cmd/.bat): it would start looking healthy without its hive protocol.
         // Refused before any session or process, with a reason that says which.
-        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? [], shimSeen.unknownInterpreter ?? null) : null;
+        const lossy = needsCmd ? lossyRouteRefusal(opts.command, resolution, opts.args ?? [], shimSeen.interpreter ?? null) : null;
         if (lossy) {
           console.warn(`[pty] refused: ${lossy}`);
           return { ok: false, error: lossy };

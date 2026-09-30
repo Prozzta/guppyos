@@ -238,7 +238,12 @@ test('policy (C2/C3, LOSSY-CMD-ROUTE): ANY multi-line spawn on the lossy cmd.exe
   const BAT = { path: 'C:\\n\\claude.bat', found: true };
   // unknown lookups: RETRYABLE, naming the lookup that gave no answer
   assert.match(P.lossyRouteRefusal('claude', U, ML), /^engine CLI "claude" could not be checked: .*retry the spawn$/);
-  assert.match(P.lossyRouteRefusal('claude', BAT, ML, 'node'), /^engine CLI "node" could not be checked: .*retry the spawn$/);
+  assert.match(P.lossyRouteRefusal('claude', BAT, ML, { bin: 'node', problem: 'unknown' }), /^engine CLI "node" could not be checked: .*retry the spawn$/);
+  // N1: a real npm shim whose interpreter is absent / only a .cmd names the INTERPRETER (not retryable)
+  const CMD = { path: 'C:\\n\\claude.cmd', found: true };
+  assert.match(P.lossyRouteRefusal('claude', CMD, ML, { bin: 'node', problem: 'missing' }), /^engine CLI "claude" needs its interpreter "node", which is not installed: install node/);
+  assert.match(P.lossyRouteRefusal('claude', CMD, ML, { bin: 'node', problem: 'not-exe' }), /^engine CLI "claude" needs its interpreter "node", which resolves only to a \.cmd\/\.bat, not a real executable/);
+  assert.doesNotMatch(P.lossyRouteRefusal('claude', CMD, ML, { bin: 'node', problem: 'missing' }), /retry|unsupported launcher/);
   // an undecodable found launcher: UNSUPPORTED LAUNCHER (not retryable)
   assert.match(P.lossyRouteRefusal('claude', BAT, ML), /^engine CLI "claude" is an unsupported launcher for a multi-line argument: C:\\n\\claude\.bat can only start through cmd\.exe/);
   assert.doesNotMatch(P.lossyRouteRefusal('claude', BAT, ML), /retry/);
@@ -247,7 +252,7 @@ test('policy (C2/C3, LOSSY-CMD-ROUTE): ANY multi-line spawn on the lossy cmd.exe
   // CRLF counts too; single-line args keep the cmd.exe route whatever the lookups said
   assert.notEqual(P.lossyRouteRefusal('claude', BAT, ['a\r\nb']), null);
   assert.equal(P.lossyRouteRefusal('claude', U, ['--x', 'one line']), null);
-  assert.equal(P.lossyRouteRefusal('claude', BAT, ['--x', 'one line'], 'node'), null);
+  assert.equal(P.lossyRouteRefusal('claude', BAT, ['--x', 'one line'], { bin: 'node', problem: 'unknown' }), null);
 });
 
 // ── the ONE rule through PtyManager.spawn (win32): one test per cause, and a single-line control ──
@@ -256,7 +261,12 @@ const NPM_SHIM = ['@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT
   'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"', '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
   'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*'].join('\r\n');
 const FIXTURES = [];
-test.after(() => { for (const d of FIXTURES) fs.rmSync(d, { recursive: true, force: true }); });
+// T1 (Andy): a dir a just-killed process still holds must not fail the FILE; each removal is retried and isolated.
+test.after(() => {
+  for (const d of FIXTURES) {
+    try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch (e) { console.warn(`# fixture not removed: ${d}: ${e.code || e.message}`); }
+  }
+});
 function spawnFixture() {
   const os = require('node:os');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lossy-rule-'));
@@ -302,17 +312,31 @@ test('SPAWN (LOSSY-CMD-ROUTE): a FOUND hand-written .bat with a multi-line argum
   assert.equal(pm.list().length, 0);
 });
 
+test('SPAWN (N1, Andy): a FOUND npm claude.cmd whose node is a KNOWN miss is refused naming node, not as an unsupported launcher', WIN, async () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const dir = spawnFixture();
+  const pm = new PtyManager();
+  pm.resolver = { resolve: async (c) => (c === 'node' ? { path: 'node', found: false } : { path: path.join(dir, 'claude.cmd'), found: true }) };
+  const res = await pm.spawn({ id: 'zz-n1', cwd: dir, command: 'claude', args: SPAWN_ML, cols: 80, rows: 24 });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /^engine CLI "claude" needs its interpreter "node", which is not installed/);
+  assert.equal(pm.list().length, 0);
+});
+
 test('SPAWN control: the same .bat with SINGLE-LINE arguments still starts through cmd.exe', WIN, async () => {
+  const os = require('node:os');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const dir = spawnFixture();
   const pm = new PtyManager();
   pm.resolver = { resolve: async () => ({ path: path.join(dir, 'handmade.bat'), found: true }) };
-  const res = await pm.spawn({ id: 'zz-bat1', cwd: dir, command: 'handmade', args: ['--x', 'one line'], cols: 80, rows: 24 });
+  // T1 (Andy): the real cmd.exe runs in os.tmpdir(), not in the fixture dir it would lock, and its
+  // exit is awaited (killAllAsync waits for every session's exit) before the test ends.
+  const res = await pm.spawn({ id: 'zz-bat1', cwd: os.tmpdir(), command: 'handmade', args: ['--x', 'one line'], cols: 80, rows: 24 });
   try {
     assert.equal(res.ok, true, res.error);
     assert.equal(pm.list().length, 1);
   } finally {
-    pm.kill('zz-bat1');
+    await pm.killAllAsync(5_000);
   }
 });
 
@@ -329,8 +353,9 @@ test('WIRING: each index.ts call site goes through its policy function; the inst
   assert.match(idx, /const executable = daemonExecutable\(await resolveCommandAsync\(opts\.command\)\);\r?\n\s+if \(executable === null\) \{/);
   assert.match(idx, /row = toolRowStatus\(await resolveCommandAsync\(spec\.bin\), spec\.bin, existsSync\);/);
   const pty = read('src/main/pty.ts');
-  assert.match(pty, /const lossy = needsCmd \? lossyRouteRefusal\(opts\.command, resolution, opts\.args \?\? \[\], shimSeen\.unknownInterpreter \?\? null\) : null;/);
-  assert.match(pty, /if \(interp\.unknown\) seen\.unknownInterpreter = target\.interpreter;\r?\n\s+if \(!interp\.found\) return null;/);
+  assert.match(pty, /const lossy = needsCmd \? lossyRouteRefusal\(opts\.command, resolution, opts\.args \?\? \[\], shimSeen\.interpreter \?\? null\) : null;/);
+  assert.match(pty, /seen\.interpreter = \{ bin: target\.interpreter, problem: interp\.unknown \? 'unknown' : 'missing' \};/);
+  assert.match(pty, /seen\.interpreter = \{ bin: target\.interpreter, problem: 'not-exe' \};/);
 });
 
 test('WIRING: the Setup panel says NOT CHECKED, offers no install command for an unknown row, and does not count it missing', () => {

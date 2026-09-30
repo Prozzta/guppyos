@@ -98,3 +98,7 @@ The probe can now build a `CommandResolver({ deps: () => ({ ...nodeResolverDeps(
   - one wiring pin covers the call site, and one pins the interpreter report.
 - **Andy's nit on M15:** the Setup-row assertions are now their own test, `policy: the Setup row ...`, and M15 is named there.
 - **Mutants (rev 3):** 25 of 25 KILLED at named tests (`t12/resmut3.cjs` + `resmut3-extra.cjs`; results `resmut3.txt`).
+
+## Rev 3.1 (Andy Round 3: product PASS; T1 + N1, god aa7240)
+- **T1 (test-only):** the SPAWN control's real `cmd.exe` now runs in `os.tmpdir()`, not in the fixture dir it locked. Its exit is awaited with `killAllAsync`. Each fixture removal is isolated and retried (`rmSync` `maxRetries`), so one EBUSY can no longer fail the file or leak later dirs. The 33 leaked `lossy-rule-*` dirs in %TEMP% are removed. Two consecutive runs: 89 of 89 pass and 0 new dirs leak.
+- **N1:** `resolveWindowsShimSpawn` now reports WHY the npm shim's interpreter could not be used (`unknown` / `missing` / `not-exe`). A real npm `claude.cmd` whose `node` is a known miss, or only a `.cmd`, now says `engine CLI "claude" needs its interpreter "node", which is not installed: install node ...`. It no longer says "unsupported launcher ... install the CLI with npm". An unknown `node` is still retryable. A new PtyManager.spawn test covers N1, and the policy test covers `missing` and `not-exe`.

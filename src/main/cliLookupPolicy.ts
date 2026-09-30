@@ -64,12 +64,24 @@ export function unsupportedLauncherReason(command: string, path: string): string
  *  multi-line argument is refused, whatever the reason, with a reason that says which:
  *   - the command's lookup, or the npm shim's interpreter lookup, gave no answer: RETRYABLE;
  *   - the lookup answered "not installed": not installed;
+ *   - a real npm shim whose interpreter is absent or only a .cmd/.bat: names the INTERPRETER (N1);
  *   - otherwise a .cmd/.bat (or other non-.exe) that could not be decoded: UNSUPPORTED LAUNCHER.
  *  Single-line arguments keep the cmd.exe route. Null = allowed. */
-export function lossyRouteRefusal(command: string, r: ResolvedCommand, args: readonly string[], unknownInterpreter: string | null = null): string | null {
+export function lossyRouteRefusal(command: string, r: ResolvedCommand, args: readonly string[], interpreter: ShimInterpreterProblem | null = null): string | null {
   if (!args.some((a) => a.includes('\n'))) return null;
   if (r.unknown) return cliLookupUnknownReason(command);
-  if (unknownInterpreter !== null) return cliLookupUnknownReason(unknownInterpreter);
+  if (interpreter?.problem === 'unknown') return cliLookupUnknownReason(interpreter.bin);
   if (!r.found) return `engine CLI "${command}" is not installed`;
+  if (interpreter) return shimInterpreterReason(command, interpreter);
   return unsupportedLauncherReason(command, r.path);
+}
+
+/** Why an npm shim's interpreter could not be spawned directly (resolveWindowsShimSpawn). */
+export type ShimInterpreterProblem = { bin: string; problem: 'unknown' | 'missing' | 'not-exe' };
+
+/** Andy N1: a real npm shim whose interpreter is absent (or only a .cmd/.bat) names the
+ *  INTERPRETER, not "an unsupported launcher". */
+export function shimInterpreterReason(command: string, i: ShimInterpreterProblem): string {
+  const what = i.problem === 'missing' ? 'is not installed' : 'resolves only to a .cmd/.bat, not a real executable';
+  return `engine CLI "${command}" needs its interpreter "${i.bin}", which ${what}: install ${i.bin} (a real ${i.bin}.exe on PATH); without it the multi-line argument would be cut by cmd.exe`;
 }
