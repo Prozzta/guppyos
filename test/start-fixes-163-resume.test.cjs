@@ -104,7 +104,10 @@ test('(1) wiring: the beat gates the sample id; the spawn resumes the previous i
   const src = read('src/main/index.ts');
   assert.match(src, /if \(sample\?\.sessionId && shouldRecordSampleSession\(hive\.lastSession\(id\), sample\.sessionId, reg\.agents\[id\]\?\.cwd\)\) \{\s*hive\.recordSession\(id, sample\.sessionId, 'sample'\);/);
   assert.doesNotMatch(src, /if \(sample\?\.sessionId\) hive\.recordSession\(id, sample\.sessionId\);/, 'the ungated copy is gone');
-  assert.match(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\), foreign\)/);
+  // SESSION-PROMPT-ROTATION (1.1.76): the fallback still seeds the transcript, through the
+  // stale-prompt check (a stale session is never resumed automatically).
+  assert.match(src, /chooseResumeSession\(sid, previous, seedFresh, foreign\)/);
+  assert.match(src, /const seedFresh = \(s: string\): boolean => \{\s*if \(staleFor\(s\)\) \{ rotated\.push\(s\); return false; \}\s*return seedSessionTranscript\(cwd, s\);/);
   assert.match(src, /kind: 'resume-miss', agentId: opts\.hive\.id, missing: sid, previous: previous \?\? null, outcome: pick\.outcome/);
 });
 

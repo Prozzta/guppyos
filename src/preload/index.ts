@@ -298,6 +298,9 @@ export interface SpawnPtyOptions {
    *  main process seeds that session's `.jsonl` into the target cwd's project dir
    *  (copying it from wherever it lives) and launches `claude --resume <id>`. */
   resumeSessionId?: string;
+  /** SESSION-PROMPT-ROTATION "Start fresh": drop the agent's recorded session and start a new
+   *  conversation with the current system prompt. Never combined with a resume. */
+  startFresh?: boolean;
 }
 
 export interface PtyExit { exitCode: number; signal?: number | undefined }

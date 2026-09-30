@@ -68,6 +68,7 @@ const AGY_LEASE_HEARTBEAT_MS = 60 * 60 * 1000;
 import { AGY_STATUSLINE_SHIM } from './agyStatuslineShim';
 import { geminiHome } from './capacityScope';
 import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHookMcp';
+import { withSessionStamp } from './sessionRotation';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -241,6 +242,10 @@ export interface RegistryAgent extends AgentMeta {
    *  last, capped). The ownership record: a restart never resumes, and a sample is
    *  never charged against, a session id another agent's hooks claim. */
   hookSessionIds?: string[];
+  /** SESSION-PROMPT-ROTATION: session id -> fingerprint of the system prompt the session was
+   *  STARTED with (newest last, capped). An automatic resume of a session whose stamp differs
+   *  from the prompt it would now get, or that has none, starts fresh (sessionRotation.ts). */
+  sessionPrompts?: Record<string, string>;
   /** The PINNED model: a live in-TUI `/model` switch (Claude status line, Codex rollout
    *  turn_context, Antigravity statusline), kept so a respawn stays on it. Per agent because a
    *  CLI's global settings cannot preserve independent choices across a hive. See
@@ -1660,6 +1665,11 @@ export class HiveManager {
       const agent = reg.agents[agentId];
       if (!agent) return; // unknown agent → no write
       const hookIds = agent.hookSessionIds ?? [];
+      if (this.retiredSessions.get(agentId)?.has(sessionId)) return; // SESSION-PROMPT-ROTATION
+      // SESSION-PROMPT-ROTATION: a session this process started (not the one it resumed) is
+      // stamped with the process's prompt fingerprint, once, from its own hook.
+      const note = this.spawnPrompt.get(agentId);
+      const stamp = source === 'hook' && note && note.resumedSid !== sessionId && !agent.sessionPrompts?.[sessionId] ? note.fp : null;
       if (source === 'sample') {
         // SESSION-CROSSWIRE: the OTel sample's agent.id label is not proof of ownership.
         // Claude Code background jobs report under the resource attributes of whichever
@@ -1669,7 +1679,7 @@ export class HiveManager {
         if (agent.sessionId === sessionId) return;
         if (agent.sessionId && agent.sessionSource === 'hook') return;
         if (sessionClaimedByOther(reg, agentId, sessionId)) return;
-      } else if (agent.sessionId === sessionId && agent.sessionSource === 'hook' && hookIds.includes(sessionId)) {
+      } else if (!stamp && agent.sessionId === sessionId && agent.sessionSource === 'hook' && hookIds.includes(sessionId)) {
         return; // unchanged and already owned → no write (the common hook case)
       }
       const changed = agent.sessionId !== sessionId;
@@ -1682,6 +1692,7 @@ export class HiveManager {
       }
       agent.sessionSource = source;
       if (source === 'hook' && !hookIds.includes(sessionId)) agent.hookSessionIds = [...hookIds, sessionId].slice(-HOOK_SESSION_IDS_CAP);
+      if (stamp) agent.sessionPrompts = withSessionStamp(agent.sessionPrompts, sessionId, stamp);
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
       if (changed) this.appendLog({ kind: 'session', agentId, sessionId, source });
@@ -1762,6 +1773,13 @@ export class HiveManager {
   /** MODEL-PINBACK user/auto: when a live model was last observed per agent (in memory; a new
    *  process starts from its launch time). */
   private modelObservedAt = new Map<string, number>();
+  /** SESSION-PROMPT-ROTATION: per agent, the prompt fingerprint of its CURRENT process and the
+   *  session that process resumed (null = it started fresh). A session this process opens other
+   *  than the resumed one was started with that prompt, so its first hook stamps it. */
+  private spawnPrompt = new Map<string, { fp: string; resumedSid: string | null }>();
+  /** Session ids retired by a Start fresh or a rotation: a late hook from the old process may
+   *  not write them back as the resume key. In memory; a restart has no old process left. */
+  private retiredSessions = new Map<string, Set<string>>();
   /** MODEL-PINBACK user/auto: when HUMAN-origin input last reached the agent's live pty (main
    *  wires this to PtyManager.lastHumanInputAt). Unset = never a human: every pin is 'auto'. */
   private humanInputAt: ((agentId: string) => number | undefined) | null = null;
@@ -1797,6 +1815,55 @@ export class HiveManager {
    *  `claude --resume <id>` spawn so a restarted agent resumes its thread. */
   lastSession(agentId: string): string | undefined {
     return this.registry().agents[agentId]?.sessionId;
+  }
+
+  /** SESSION-PROMPT-ROTATION: the prompt fingerprint session `sessionId` was started with, or
+   *  undefined (a session from before 1.1.76, or one never stamped). */
+  sessionPromptStamp(agentId: string, sessionId: string): string | undefined {
+    return this.registry().agents[agentId]?.sessionPrompts?.[sessionId];
+  }
+
+  /** SESSION-PROMPT-ROTATION: note the prompt fingerprint of the process just spawned for
+   *  `agentId`, and the session it resumed (null = fresh). A null fp forgets the note. */
+  noteSpawnPrompt(agentId: string, fp: string | null, resumedSid: string | null): void {
+    if (fp) this.spawnPrompt.set(agentId, { fp, resumedSid });
+    else this.spawnPrompt.delete(agentId);
+  }
+
+  /** SESSION-PROMPT-ROTATION: a late hook from an old process may not bring `sessionId` back. */
+  retireSession(agentId: string, sessionId: string): void {
+    if (!sessionId) return;
+    const set = this.retiredSessions.get(agentId) ?? new Set<string>();
+    set.add(sessionId);
+    this.retiredSessions.set(agentId, set);
+  }
+
+  /**
+   * SESSION-PROMPT-ROTATION "Start fresh": drop the agent's resume key so its next spawn starts
+   * a new conversation (the supported form of fresh-start-175.cjs `clear <id>`). Removes
+   * sessionId, previousSessionId and sessionSource; keeps hookSessionIds (ownership) and the
+   * stamps. The dropped ids are retired so a straggling hook cannot restore them. Identity,
+   * memory.md, inbox and mail ledger are keyed by agent id and are untouched.
+   */
+  clearSession(agentId: string, reason: string): { ok: boolean; cleared: string[]; error?: string } {
+    const root = this.root();
+    if (!root) return { ok: false, cleared: [], error: 'The hive is not enabled.' };
+    try {
+      const reg = this.registryForMutation();
+      const agent = reg.agents[agentId];
+      if (!agent) return { ok: false, cleared: [], error: `Unknown agent: ${agentId}` };
+      const cleared = [agent.sessionId, agent.previousSessionId].filter((s): s is string => typeof s === 'string' && !!s);
+      for (const s of cleared) this.retireSession(agentId, s);
+      const had = 'sessionId' in agent || 'previousSessionId' in agent || 'sessionSource' in agent;
+      delete agent.sessionId;
+      delete agent.previousSessionId;
+      delete agent.sessionSource;
+      if (had) this.atomicWriteJson(join(root, 'registry.json'), reg);
+      this.appendLog({ kind: 'session-fresh', agentId, reason, cleared });
+      return { ok: true, cleared };
+    } catch (e) {
+      return { ok: false, cleared: [], error: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   /** The session id `lastSession` replaced, or undefined. The resume fallback when

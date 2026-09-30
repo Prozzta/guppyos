@@ -79,6 +79,7 @@ import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
+import { promptFingerprint, staleReason, type StaleReason } from './sessionRotation';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
 import {
@@ -3405,7 +3406,7 @@ function findCodexHomeForSession(sessionId: string, siblingsRoot: string): strin
 
 /** Spawn options shared by the `pty:spawn` IPC handler and the god-triggered
  *  ephemeral-worker watcher. */
-type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean };
+type AgentSpawnOptions = SpawnOptions & { hive?: AgentMeta; isolate?: boolean; resume?: boolean; requireResume?: boolean; resumeSessionId?: string; provider?: AgentProvider; noAutoInstall?: boolean; startFresh?: boolean };
 
 ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
   if (!opts || typeof opts.id !== 'string' || typeof opts.cwd !== 'string' || typeof opts.command !== 'string') {
@@ -3647,6 +3648,17 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       console.error('[hive] ensureAgent failed:', e);
     }
   }
+  // SESSION-PROMPT-ROTATION "Start fresh": the human asked for a new conversation. Drop the
+  // resume key (any provider) BEFORE the resume blocks below read it, and never resume.
+  if (opts.startFresh === true && opts.hive) {
+    if (opts.requireResume === true) return { ok: false, error: 'Start fresh cannot also require a resume.' };
+    if (hive.enabled()) {
+      const cleared = hive.clearSession(opts.hive.id, 'start-fresh');
+      if (!cleared.ok) return { ok: false, error: cleared.error ?? 'Could not clear the session.' };
+    }
+    opts.resume = false;
+    opts.resumeSessionId = undefined;
+  }
   // Long-run guardrails + tiering (Lane A #6.4/#6.6). All additive to the args
   // already assembled (incl. the hive injection); an explicit choice always wins.
   // Set when an explicit Add Agent "resume session" id couldn't be located and we
@@ -3712,7 +3724,26 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // actually present (already or after the copy); otherwise fall back to a fresh
     // session rather than launching a `--resume` against a missing id.
     const explicitSid = typeof opts.resumeSessionId === 'string' ? opts.resumeSessionId.trim() : '';
-    const sid = explicitSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
+    let sid = explicitSid || (opts.resume === true ? hive.lastSession(opts.hive.id) : undefined);
+    // SESSION-PROMPT-ROTATION: an AUTOMATIC resume never continues a session started with a
+    // different system prompt (or one from before the stamps): the old prompt would stay in
+    // force (B4). It starts fresh instead. A typed id or Restart & Continue is honoured.
+    const promptFp = promptFingerprint(args);
+    const staleFor = (s: string): StaleReason | null => staleReason(hive.sessionPromptStamp(opts.hive!.id, s), promptFp);
+    const rotated: string[] = [];
+    if (sid && !explicitSid) {
+      const why = staleFor(sid);
+      if (why) {
+        rotated.push(sid);
+        hive.retireSession(opts.hive.id, sid);
+        hive.appendLog({ kind: 'session-rotate', agentId: opts.hive.id, sessionId: sid, reason: why, promptFp });
+        console.log(`[resume] ${opts.hive.id}: session ${sid} was started with another system prompt (${why}); starting fresh`);
+        sid = undefined;
+      }
+    } else if (sid && explicitSid && staleFor(sid)) {
+      hive.appendLog({ kind: 'session-resume-stale', agentId: opts.hive.id, sessionId: sid, reason: staleFor(sid), promptFp });
+    }
+    let resumedSid: string | null = null;
     // SESSION-CROSSWIRE: an automatic resume never picks up a session another agent
     // claims, whether it is the last key or the previous-key fallback. A typed id is the
     // human asking for that thread, so it is not checked.
@@ -3722,6 +3753,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       if ((explicitSid || !foreign(sid)) && seedSessionTranscript(opts.cwd, sid)) {
         args.push('--resume', sid);
         didResume = true;
+        resumedSid = sid;
       } else if (!explicitSid) {
         // START-FIXES-163 (1): the recorded key has no transcript (a phantom OTel id
         // from before the gate, or a session that never wrote a turn). Resume the id it
@@ -3729,12 +3761,18 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         // either way, so a lost context is never invisible again.
         const previous = hive.previousSession(opts.hive.id);
         const cwd = opts.cwd;
-        const pick = chooseResumeSession(sid, previous, (s) => seedSessionTranscript(cwd, s), foreign);
+        // SESSION-PROMPT-ROTATION: the previous-key fallback obeys the same prompt check.
+        const seedFresh = (s: string): boolean => {
+          if (staleFor(s)) { rotated.push(s); return false; }
+          return seedSessionTranscript(cwd, s);
+        };
+        const pick = chooseResumeSession(sid, previous, seedFresh, foreign);
         if (pick.sessionId) {
           args.push('--resume', pick.sessionId);
           didResume = true;
+          resumedSid = pick.sessionId;
         }
-        hive.appendLog({ kind: 'resume-miss', agentId: opts.hive.id, missing: sid, previous: previous ?? null, outcome: pick.outcome, ...(pick.refused ? { refusedForeign: pick.refused } : {}) });
+        hive.appendLog({ kind: 'resume-miss', agentId: opts.hive.id, missing: sid, previous: previous ?? null, outcome: pick.outcome, ...(pick.refused ? { refusedForeign: pick.refused } : {}), ...(rotated.length ? { rotated } : {}) });
         console.warn(`[resume] ${opts.hive.id}: session ${sid} ${pick.refused?.includes(sid) ? 'belongs to another agent' : 'has no transcript'}; ${pick.sessionId ? `resuming previous ${pick.sessionId}` : 'starting fresh'}`);
       } else if (explicitSid) {
         // The user typed a session id in the Add Agent dialog but it isn't in any
@@ -3745,6 +3783,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         resumeNotFound = true;
       }
     }
+    // The sessions this process opens, other than the one it resumed, carry this prompt.
+    hive.noteSpawnPrompt(opts.hive.id, promptFp, resumedSid);
     opts.args = args;
   }
   // Idempotent session resume on respawn (#6.6a) — provider-aware: Claude

@@ -289,7 +289,11 @@ test('wiring: the beat marks its write as a sample; telemetry resolves owners fr
   assert.match(src, /resolveSessionOwners: \(\(\) => \{[\s\S]{0,300}hive\.hookSessionOwners\(\)/);
   assert.match(src, /const foreign = \(s: string\): boolean => hive\.sessionClaimedByOther\(agentId, s\);/);
   assert.match(src, /if \(\(explicitSid \|\| !foreign\(sid\)\) && seedSessionTranscript\(opts\.cwd, sid\)\)/);
-  assert.match(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\), foreign\)/);
+  // SESSION-PROMPT-ROTATION (1.1.76): the fallback's seed also refuses a stale-prompt session;
+  // the foreign guard is unchanged and still passed.
+  assert.match(src, /chooseResumeSession\(sid, previous, seedFresh, foreign\)/);
+  assert.match(src, /const seedFresh = \(s: string\): boolean => \{\s*if \(staleFor\(s\)\) \{ rotated\.push\(s\); return false; \}\s*return seedSessionTranscript\(cwd, s\);/);
+  assert.doesNotMatch(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\), foreign\)/);
   const hooks = read('src/main/hooks.ts');
   assert.match(hooks, /this\.hive\.recordSession\(agentId, p\.session_id\)/, 'the hook write keeps the default source, hook');
 });
