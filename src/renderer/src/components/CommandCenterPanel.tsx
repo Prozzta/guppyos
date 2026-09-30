@@ -421,6 +421,9 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
        *  error. A model change wants the soft one: the user asked to change
        *  model, and an agent with no recorded session still has to get one. */
       resumeOptional?: boolean;
+      /** SESSION-PROMPT-ROTATION: drop the recorded session and start a new conversation
+       *  on the current system prompt (main clears the resume key after the kill). */
+      startFresh?: boolean;
     } = {}
   ) => {
     if (!a.ptyId) return;
@@ -434,7 +437,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
       // opts.provider overrides the inferred provider — used when changing GOD's engine.
       const previousProvider = inferAgentProvider(a.command, a.provider);
       const provider = opts.provider ?? previousProvider;
-      let resume = opts.resume === true && provider === previousProvider;
+      let resume = opts.resume === true && provider === previousProvider && opts.startFresh !== true;
       if (opts.resume && !resume && !opts.resumeOptional) {
         throw new Error('Cannot resume a session through a different provider.');
       }
@@ -514,7 +517,8 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
         hive,
         resume,
         resumeSessionId,
-        requireResume: resume
+        requireResume: resume,
+        ...(opts.startFresh === true ? { startFresh: true } : {})
       });
       if (!res.ok) throw new Error(res.error ?? 'Restart failed.');
       if (resume && res.resumed !== true) {
@@ -541,7 +545,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
               provider,
               model,
               status: 'idle' as const,
-              action: provider === previousProvider ? 'restarting…' : `switching to ${providerPreset(provider).label}…`
+              action: opts.startFresh === true ? 'starting fresh…' : provider === previousProvider ? 'restarting…' : `switching to ${providerPreset(provider).label}…`
             };
         updateAgent(a.id, patch);
       }
@@ -832,6 +836,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                     restart &amp; continue
                   </span>
                 </PixelButton>
+                <StartFreshButton agent={a} disabled={restarting === a.id} onStart={() => restartWithModel(a, a.model, { startFresh: true })} />
               </>}
             </div>
             )}
@@ -895,6 +900,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                     restart &amp; continue
                   </span>
                 </PixelButton>
+                <StartFreshButton agent={a} disabled={restarting === a.id} onStart={() => restartWithModel(a, a.model, { startFresh: true })} />
               </div>
             )}
           </div>
@@ -1411,5 +1417,26 @@ function Select({ value, onChange, disabled, children }: {
         minWidth: 0, maxWidth: '100%'
       }}
     >{children}</select>
+  );
+}
+
+/** SESSION-PROMPT-ROTATION: the supported "Start fresh" for one agent (the UI form of
+ *  fresh-start-175.cjs `clear <id>`). Kills the agent, drops its recorded session and starts a
+ *  new conversation on the current system prompt. Its memory.md, inbox and mail are kept. */
+function StartFreshButton({ agent, disabled, onStart }: { agent: Agent; disabled: boolean; onStart: () => void | Promise<void> }) {
+  return (
+    <PixelButton
+      variant="secondary"
+      size="sm"
+      disabled={disabled}
+      onClick={() => {
+        if (!window.confirm(`Start ${agent.name} fresh? This ends its current conversation and starts a new one with the current instructions. Its memory.md, inbox and mail are kept.`)) return;
+        void onStart();
+      }}
+    >
+      <span title="Kill and respawn this agent in a NEW conversation, so it runs on the current system prompt (a resumed conversation keeps the prompt it started with)">
+        start fresh
+      </span>
+    </PixelButton>
   );
 }
