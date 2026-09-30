@@ -507,6 +507,8 @@ export interface OwnerDeps {
   outputGeneration?: (ptyId: string) => number | undefined;
   /** WAKE-SCREEN-GUARD: the cwd the PTY was spawned in (Codex's status line shows it). */
   spawnCwd?: (ptyId: string) => string | undefined;
+  /** WAKE-SCREEN-GUARD (Jim B2): the user's home, for the status line's `~\rel` cwd form. */
+  homeDir?: () => string | undefined;
   /** WAKE-SCREEN-GUARD: told of every screen-gate evaluation. Diagnostics only. */
   onScreenGuard?: (record: ScreenGuardRecord) => void;
 }
@@ -1200,8 +1202,9 @@ export class AutomaticSubmitOwner {
     if (!r) verdict = { ok: false, reason: 'no-reading' };
     else if (r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) verdict = { ok: false, reason: 'incarnation' };
     else {
-      const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId));
-      if (past.open) this.postHandoff.set(ptyId, incarnation);
+      const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      // Jim N1: only a reading that covers real PTY output can latch (a blank terminal has none).
+      if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
       const comp = classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
       const want = phase === 'STAGE' ? 'READY' : 'READY_OWN_DRAFT';
       // A LOADING header or a resume line is refused even when latched (the live widget

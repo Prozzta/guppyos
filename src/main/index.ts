@@ -622,6 +622,7 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
   requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
   onScreenGuard: (r) => noteScreenGuard(r),
+  homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
   onEnterWrite: (r) => {
@@ -1014,6 +1015,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
   // 0) Revoke this id's broker capability (if any). Idempotent + harmless for a
   //    non-worker PTY; ensures a dead worker's token can never reach an integration.
   try { integrationBroker.revoke(id); } catch { /* best-effort */ }
+  // WAKE-SCREEN-GUARD (Jim N2): a torn-down PTY's incarnation token names nothing any more.
+  wakeIncarnationTokens.forgetPty(id);
   // 1) Archive the agent — retained + flagged; only live-PTY agents are active.
   const agentId = ptyToAgent.get(id);
   if (agentId) {
@@ -3959,6 +3962,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
     screenGuardAlerts.clear(opts.hive.id);
+    // Jim N3: a new process gets a new banner if it, too, is refused for minutes.
+    try { hive.mail.clearScreenGuardAlert(opts.hive.id); } catch { /* best-effort */ }
   }
   if (res.ok) analytics.track('agent_spawned', { provider });
   syncKeepAwake(); // arm the power-save blocker while ≥1 agent PTY is alive (#18)

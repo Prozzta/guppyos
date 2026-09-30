@@ -66,8 +66,7 @@ const cut = (s: string): string => (s.length > CODEX_ROW_MAX ? s.slice(0, CODEX_
 /** The header box's title row, `│ >_ OpenAI Codex (v…)`: anchored on the box edge, so an agent
  *  merely printing the words is not a header. */
 function isHeaderTitle(row: string): boolean {
-  const t = row.trim();
-  return t.startsWith('│') && t.slice(1).trimStart().startsWith(`${CODEX_HEADER_TITLE} (v`);
+  return row.startsWith(`│ ${CODEX_HEADER_TITLE} (v`);
 }
 
 /**
@@ -78,24 +77,27 @@ function isHeaderTitle(row: string): boolean {
 export function extractCodexScreen(line: (i: number) => string | undefined, length: number, cursorRow: number): CodexScreenFacts {
   let header: CodexHeaderState = 'NONE';
   let startingAfterHeader = false;
-  let title = -1;
-  for (let i = length - 1; i >= 0; i -= 1) {
-    if (isHeaderTitle(line(i) ?? '')) { title = i; break; }
-  }
-  if (title >= 0) {
-    header = 'UNREADABLE';
-    let boxEnd = title;
+  // Jim B1: every marker is anchored at COLUMN 0 and read untrimmed. Codex draws its session
+  // header box at column 0 (all 7 real fixtures); an agent quoting a header, or a lone
+  // "Resuming session…", is indented in its transcript and is not a marker.
+  for (let title = length - 1; title >= 0; title -= 1) {
+    if (!isHeaderTitle(line(title) ?? '')) continue;
+    let model: string | null = null;
+    let boxEnd = -1;
     for (let i = title + 1; i < Math.min(length, title + HEADER_BOX_ROWS); i += 1) {
-      const row = (line(i) ?? '').trim();
-      boxEnd = i;
-      if (row.startsWith('╰')) break;   // ╰ closes the box
-      const m = /^│\s*model:\s+(\S+)/.exec(row);
-      if (m) header = m[1] === 'loading' ? 'LOADING' : 'MODEL';
+      const row = line(i) ?? '';
+      if (row.startsWith('╰')) { boxEnd = i; break; }   // ╰ closes the box
+      const m = /^│ model:\s+(\S+)/.exec(row);
+      if (m) model = m[1];
     }
-    for (let i = boxEnd + 1; i < length; i += 1) {
-      const row = (line(i) ?? '').trim();
-      if ((CODEX_SESSION_STARTING as readonly string[]).includes(row)) { startingAfterHeader = true; break; }
-    }
+    // A titled box with no `│ model:` row (the /status card: `Model:`) is not a session header:
+    // the scan goes on to the next older box.
+    if (model === null) continue;
+    header = model === 'loading' ? 'LOADING' : 'MODEL';
+    // The startup draft prints its Resuming/Forking line on the row directly under its box.
+    const next = boxEnd >= 0 ? (line(boxEnd + 1) ?? '').trimEnd() : '';
+    startingAfterHeader = CODEX_SESSION_STARTING.some((s) => next === `  ${s}`);
+    break;
   }
   const footer: string[] = [];
   for (let i = cursorRow + 1; i < length && footer.length < CODEX_FOOTER_ROWS; i += 1) {
@@ -127,11 +129,17 @@ function samePath(a: string, b: string): boolean {
  * cwd. A narrow footer may elide the middle of the path with `…`; then the kept head and tail
  * must both match it.
  */
-export function isCodexStatusLine(row: string, spawnCwd: string | null | undefined): boolean {
+export function isCodexStatusLine(row: string, spawnCwd: string | null | undefined, home?: string | null): boolean {
   if (!spawnCwd) return false;
-  const m = /^(\S+) (\S+) · (.+)$/.exec(row.trim());
-  if (!m) return false;
-  const shown = m[3].trim();
+  // Jim B2: the LAST ` · ` segment is the cwd; before it come the model, the effort and, on a
+  // ChatGPT plan, a service tier (`<model> <effort> [<tier>] · <cwd>`).
+  const t = row.trim();
+  const at = t.lastIndexOf(' · ');
+  if (at < 0 || !/^\S+( \S+)+$/.test(t.slice(0, at))) return false;
+  let shown = t.slice(at + 3).trim();
+  // Under HOME, codex shows the cwd as `~\rel` (or `~` itself).
+  if (home && (shown === '~' || /^~[\\/]/.test(shown))) shown = home.replace(/[\\/]+$/, '') + shown.slice(1);
+  if (!shown) return false;
   if (samePath(shown, spawnCwd)) return true;
   const gap = shown.indexOf('…');
   if (gap < 0 || shown.indexOf('…', gap + 1) >= 0) return false;
@@ -144,11 +152,11 @@ export function isCodexStatusLine(row: string, spawnCwd: string | null | undefin
 export interface CodexVerdict { open: boolean; reason: string }
 
 /** CONDITION 1 (V1): is this Codex process past its startup phase? */
-export function codexPastStartup(f: CodexScreenFacts, spawnCwd: string | null | undefined): CodexVerdict {
+export function codexPastStartup(f: CodexScreenFacts, spawnCwd: string | null | undefined, home?: string | null): CodexVerdict {
   if (f.header === 'LOADING') return { open: false, reason: 'header-loading' };
   if (f.header !== 'NONE' && f.startingAfterHeader) return { open: false, reason: 'session-starting' };
   if (f.header === 'MODEL') return { open: true, reason: 'header-model' };
-  if (f.header === 'NONE' && f.footer.some((row) => isCodexStatusLine(row, spawnCwd))) return { open: true, reason: 'status-line' };
+  if (f.header === 'NONE' && f.footer.some((row) => isCodexStatusLine(row, spawnCwd, home))) return { open: true, reason: 'status-line' };
   return { open: false, reason: f.header === 'UNREADABLE' ? 'header-unreadable' : 'no-marker' };
 }
 

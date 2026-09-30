@@ -1103,6 +1103,11 @@ export class MailLedger {
     });
   }
 
+  /** WAKE-SCREEN-GUARD (Jim N3): the agent was respawned; its old process's banner goes. */
+  clearScreenGuardAlert(agentId: string): void {
+    this.notices.delete(`${agentId}|screen-guard`);
+  }
+
   // — load —
   private readDir(dir: string): DiskMessage[] {
     let names: string[];

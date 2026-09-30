@@ -95,9 +95,94 @@ test('the resume draft is refused for the loading header, and a Resuming line un
   assert.equal(draft.startingAfterHeader, true, 'the capture shows "Resuming session…" under the draft header');
   const real = fixture('2-trusted-handoff-120x40');
   const lines = [...real.lines];
-  lines.splice(real.cursorRow, 0, '  Resuming session\u2026');
+  const box = lines.findIndex((l) => l.startsWith('\u2570'));
+  lines.splice(box + 1, 0, '  Resuming session\u2026');   // directly under the box, as the draft draws it
   const f = SHARED.extractCodexScreen((i) => lines[i], lines.length, real.cursorRow + 1);
   assert.deepEqual(SHARED.codexPastStartup(f, CWD), { open: false, reason: 'session-starting' });
+});
+
+// ─── Jim B1: an agent's OWN OUTPUT is never a marker (agents in this hive quote these screens) ──
+
+/** The real post-handoff screen with `extra` rows of agent output inserted under its header. */
+function withAgentOutput(extra, S = SHARED) {
+  const real = fixture('2-trusted-handoff-120x40');
+  const box = real.lines.findIndex((l) => l.startsWith('\u2570'));
+  const lines = [...real.lines.slice(0, box + 2), ...extra, ...real.lines.slice(box + 2)];
+  return S.extractCodexScreen((i) => lines[i], lines.length, real.cursorRow + extra.length);
+}
+
+K.agentOutputIsNotAMarker = (S = SHARED) => {
+  const quote = [
+    '\u2022 The startup draft looks like this:', '',
+    '  \u256d\u2500\u2500\u2500\u2500\u256e',
+    '  \u2502 >_ OpenAI Codex (v0.157.1)                 \u2502',
+    '  \u2502 model:       loading   /model to change    \u2502',
+    '  \u2570\u2500\u2500\u2500\u2500\u256f',
+    '  Resuming session\u2026', ''
+  ];
+  const q = withAgentOutput(quote, S);
+  assert.deepEqual([q.header, q.startingAfterHeader], ['MODEL', false], 'B1: A QUOTED DRAFT HEADER IN AGENT OUTPUT IS NOT A MARKER');
+  assert.equal(S.codexPastStartup(q, CWD).open, true);
+  const lone = withAgentOutput(['\u2022 Codex prints this under the draft header:', '', '  Resuming session\u2026', ''], S);
+  assert.deepEqual([lone.header, lone.startingAfterHeader], ['MODEL', false], 'B1: A LONE RESUMING LINE IN AGENT OUTPUT IS NOT A MARKER');
+  // The /status card: a column-0 titled box whose row says `Model:`, not `model:`.
+  const status = withAgentOutput([
+    '\u256d\u2500\u2500\u2500\u2500\u256e',
+    '\u2502 >_ OpenAI Codex (v0.157.1)                          \u2502',
+    '\u2502                                                     \u2502',
+    '\u2502  Model:            loading (reasoning high)         \u2502',
+    '\u2502  Directory:        C:\\Dunder\\_work\\dir-b          \u2502',
+    '\u2570\u2500\u2500\u2500\u2500\u256f',
+    '  Resuming session\u2026'
+  ], S);
+  assert.equal(status.header, 'MODEL', 'B1: THE /status CARD IS NOT A SESSION HEADER (the real one above it still counts)');
+  assert.equal(status.startingAfterHeader, false, 'B1: THE /status CARD IS NOT A SESSION HEADER (the row under it is not a resume line)');
+};
+test('B1: a quoted draft header, a lone Resuming line and the /status card in agent output are not markers', () => K.agentOutputIsNotAMarker());
+
+test('B1: the /status card alone (no session header left) is no header; M3 decides', () => {
+  const card = ['\u256d\u2500\u256e', '\u2502 >_ OpenAI Codex (v0.157.1) \u2502', '\u2502  Model:  gpt-5.5 \u2502', '\u2570\u2500\u256f',
+    SHARED.CODEX_EMPTY_COMPOSER_ROW, '  gpt-5.5 high \u00b7 ' + CWD];
+  const f = SHARED.extractCodexScreen((i) => card[i], card.length, 4);
+  assert.equal(f.header, 'NONE');
+  assert.deepEqual(SHARED.codexPastStartup(f, CWD), { open: true, reason: 'status-line' });
+});
+
+test('B2: M3 is the LAST " · " segment: a service tier before it, and the ~ form under HOME', () => {
+  const home = 'C:\\Users\\someone';
+  assert.ok(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ' + CWD, CWD));
+  assert.ok(SHARED.isCodexStatusLine('gpt-5.5 high priority \u00b7 ' + CWD, CWD), 'a service-tier token');
+  assert.ok(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~\\proj\\a', home + '\\proj\\a', home), '~\\rel under HOME');
+  assert.ok(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~', home, home), '~ itself');
+  assert.equal(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~\\proj\\a', home + '\\proj\\a'), false, 'no HOME known: ~ is not expanded');
+  assert.equal(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~\\proj\\b', home + '\\proj\\a', home), false);
+  assert.equal(SHARED.isCodexStatusLine('\u00b7 ' + CWD, CWD), false, 'a model and an effort come first');
+  assert.equal(SHARED.isCodexStatusLine('gpt-5.5 \u00b7 ' + CWD, CWD), false);
+  const f = { header: 'NONE', startingAfterHeader: false, cursorRow: SHARED.CODEX_EMPTY_COMPOSER_ROW, footer: ['gpt-5.5 high \u00b7 ~\\proj\\a'] };
+  assert.equal(SHARED.codexPastStartup(f, home + '\\proj\\a', home).open, true, 'condition 1 takes HOME');
+});
+
+test('N1: a reading that covers no PTY output (generation 0) never latches', async () => {
+  const r = rig({ gen: 0 });
+  r.deps.write = (_id, d) => { r.writes.push(d); if (d === '\r') r.prompt = ''; else r.prompt += d; return { ok: true }; };
+  const out = await r.submit();
+  assert.equal(r.owner.postHandoffLatched('p1'), false, 'NOT LATCHED FROM A BLANK TERMINAL');
+  assert.equal(out.reason, 'SCREEN_NOT_READY');
+  assert.equal(r.writes.length, 0);
+});
+
+test('N2 + N3: a torn-down PTY forgets its token; a respawn clears the old banner', () => {
+  const idx = readSource('src/main/index.ts');
+  assert.match(idx, /function teardownPty\(id: string[^\n]*\n[\s\S]{0,1400}wakeIncarnationTokens\.forgetPty\(id\);/);
+  assert.match(idx, /screenGuardAlerts\.clear\(opts\.hive\.id\);\s*\/\/[^\n]*\n\s*try \{ hive\.mail\.clearScreenGuardAlert\(opts\.hive\.id\); \}/);
+  const { MailLedger } = loadTs('src/main/mailLedger.ts');
+  const ledger = Object.create(MailLedger.prototype);
+  ledger.notices = new Map();
+  ledger.log = () => {};
+  MailLedger.prototype.noteScreenGuardAlert.call(ledger, 'dwight', 'no-reading', 300_000, 20);
+  assert.equal(ledger.notices.has('dwight|screen-guard'), true);
+  MailLedger.prototype.clearScreenGuardAlert.call(ledger, 'dwight');
+  assert.equal(ledger.notices.has('dwight|screen-guard'), false);
 });
 
 K.newestHeaderOnly = (S = SHARED) => {
@@ -708,10 +793,18 @@ const MUTANTS = [
     edits: [['      else if (this.postHandoff.get(ptyId) !== incarnation) verdict', '      else if (!this.postHandoff.has(ptyId)) verdict']],
     killer: 'latchIsPerIncarnation', dies: /A LATCH NEVER CROSSES A PTY INCARNATION/ },
   { name: 'the reader does not see `loading`', file: 'src/shared/codexScreen.ts',
-    edits: [["header = m[1] === 'loading' ? 'LOADING' : 'MODEL';", "header = 'MODEL';"]],
+    edits: [["header = model === 'loading' ? 'LOADING' : 'MODEL';", "header = 'MODEL';"]],
     shared: true, killer: 'realDraftsRefuse', dies: /CONDITION 1 REFUSES the startup draft/ },
+  { name: 'B1: the header title read trimmed (quoted headers count again)', file: 'src/shared/codexScreen.ts',
+    edits: [["  return row.startsWith(`│ ${CODEX_HEADER_TITLE} (v`);", "  return row.trim().startsWith(`│ ${CODEX_HEADER_TITLE} (v`);"],
+      ["      const m = /^│ model:\\s+(\\S+)/.exec(row);", "      const m = /^│ model:\\s+(\\S+)/.exec(row.trim());"],
+      ["      if (row.startsWith('╰')) { boxEnd = i; break; }", "      if (row.trim().startsWith('╰')) { boxEnd = i; break; }"]],
+    shared: true, killer: 'agentOutputIsNotAMarker', dies: /A QUOTED DRAFT HEADER IN AGENT OUTPUT IS NOT A MARKER/ },
+  { name: 'B1: a box with no model row is taken as the header', file: 'src/shared/codexScreen.ts',
+    edits: [['    if (model === null) continue;\n', '']],
+    shared: true, killer: 'agentOutputIsNotAMarker', dies: /THE \/status CARD IS NOT A SESSION HEADER/ },
   { name: 'the reader takes the OLDEST header', file: 'src/shared/codexScreen.ts',
-    edits: [['  for (let i = length - 1; i >= 0; i -= 1) {\n    if (isHeaderTitle(line(i) ?? \'\')) { title = i; break; }', '  for (let i = 0; i < length; i += 1) {\n    if (isHeaderTitle(line(i) ?? \'\')) { title = i; break; }']],
+    edits: [['  for (let title = length - 1; title >= 0; title -= 1) {', '  for (let title = 0; title < length; title += 1) {']],
     shared: true, killer: 'newestHeaderOnly', dies: /ONLY THE NEWEST HEADER COUNTS/ },
 ];
 

@@ -97,7 +97,7 @@ function rig(over = {}) {
     hasOutput: () => r.session?.hasOutput,
     inputState: () => r.session?.inputState,
     promptState: () => r.session?.promptState,
-    outputGeneration: () => (r.session ? 0 : undefined),
+    outputGeneration: () => (r.session ? 1 : undefined),
     spawnCwd: () => undefined
   };
   r.deps = buildOwnerDeps({
@@ -376,7 +376,7 @@ function realPtyRig(humanInGap) {
   const procWrites = [];
   pm.sessions.set('pty-jim', {
     id: 'pty-jim', cwd: '', command: '', owner: null, lastOutputAt: 0, hasOutput: true,
-    humanInputGeneration: 0, incarnation: 7,
+    humanInputGeneration: 0, incarnation: 7, outputGeneration: 1,
     proc: { write: (d) => {
       procWrites.push(d);
       // A person types the moment our payload lands - through the REAL human ingress.
