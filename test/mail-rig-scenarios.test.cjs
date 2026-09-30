@@ -116,7 +116,7 @@ test('SCENARIO Codex stale task_complete: a replayed completion of the PREVIOUS 
   // simulated-time rules against real process timing. The lost Stop keeps the agent busy, so
   // holdWhileBusy cannot be used here: the beats that read the rollout must run.
   await waitFor(() => rig.turnEnds('cx-1').some((r) => r.how === 'lost-stop' && r.turn === turn2), { what: 'turn 2 closed in the rollout' });
-  await rig.beatUntil(() => acted(rig, 'cx-1', m2.id), { what: 'acted by the rollout close of ITS turn', stepMs: 15_000, settle: false });
+  await rig.beatUntil(() => acted(rig, 'cx-1', m2.id), { what: 'acted by the rollout close of ITS turn', stepMs: 15_000, settle: false, holdForStubs: true });
   const row = (await rig.rows('mail')).find((r) => r.stage === 'acted' && r.ids.includes(m2.id));
   assert.equal(row.epoch, turn2, 'the epoch is the Codex turn_id of turn 2');
 });
@@ -244,7 +244,7 @@ test('N1 + WAKE GENERATIONS (layer-b dry run #2): a beat DURING each unconfirmed
   const typed = () => rig.prompts('cl-1').filter((p) => String(p.text || '').includes(m.id)).length;
   const surfacing = async () => ['surfacing', 'surfaced'].includes((await rig.entry('cl-1', m.id)).state);
   for (let n = 1; n <= 3; n++) {
-    await rig.beatUntil(async () => typed() >= n && (await surfacing()), { what: `announcement ${n} typed and surfacing`, stepMs: 16_000, settle: false });
+    await rig.beatUntil(async () => typed() >= n && (await surfacing()), { what: `announcement ${n} typed and surfacing`, stepMs: 16_000, settle: false, holdForStubs: true });
     await rig.beat();                 // a reconcile while the id is surfacing (not delivered)
     await sleep(300);
     rig.cue('cl-1', { cue: 'stop' });

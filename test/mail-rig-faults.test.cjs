@@ -429,7 +429,7 @@ test('F11 Stop never arrives (AGY false-active): the 30-minute stale-epoch back-
   await rig.beat();
   await waitFor(async () => (await rig.call('diags')).some((d) => d.stage === 'mail-epoch-stale' && d.agentId === 'ag-1'), { what: 'the stale back-edge' });
   // The re-delivered mail is woken again and shown with the marker; that turn ends properly.
-  await beatUntil(rig, () => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced at the next beat', stepMs: 15_000, settle: false });
+  await beatUntil(rig, () => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced at the next beat', stepMs: 15_000, settle: false, holdForStubs: true });
   const again = rig.contexts('ag-1').filter((c) => c.ids.includes(m.id))[1];
   assert.ok(again.context.includes(REDELIVERED), 'the marker is shown');
   rig.cue('ag-1', { cue: 'stop' });
@@ -459,6 +459,8 @@ test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the t
   assert.deepEqual(before.announced, [m.id]);
   // The Codex case exactly: its UserPromptSubmit never reached the app (the shim died), and no beat
   // has read the rollout's task_started yet.
+  // LOAD-FLAKES-176: the stub records its (dead) UserPromptSubmit when IT gets there: wait for it.
+  await waitFor(() => rig.hooks('cx-1', 'UserPromptSubmit').length >= 1, { what: 'the stub tried its UserPromptSubmit' });
   const ups = rig.hooks('cx-1', 'UserPromptSubmit');
   assert.ok(ups.length >= 1 && ups.every((h) => h.transport === 'none'), 'no UserPromptSubmit reached the app');
   assert.equal((await rig.call('diags')).filter((d) => d.agentId === 'cx-1' && d.stage === 'codex-rollout' && d.confirmed).length, 0, 'no rollout confirmation before the Stop');
@@ -467,7 +469,7 @@ test('Q38 (§11.18 #41) Codex: the UserPromptSubmit hook never arrives and the t
   await waitFor(() => rig.turnEnds('cx-1').length > ends, { what: 'turn end' });
   // Re-offered: a second COMMITTED wake for the same id, on the Stop's own edge (or, if the owner
   // refused that instant, the next beat: without the re-pend nothing would ever offer it again).
-  await beatUntil(rig, async () => (await commits()) >= 2, { what: 'the mail re-offered', stepMs: 15_000, settle: false });
+  await beatUntil(rig, async () => (await commits()) >= 2, { what: 'the mail re-offered', stepMs: 15_000, settle: false, holdForStubs: true });
   const row = (await rig.rows('mail-repend')).find((r) => r.agentId === 'cx-1');
   assert.ok(row, 'a mail-repend row');
   assert.equal(row.unconfirmedStart, true);
@@ -484,13 +486,13 @@ test('F12 hook shim exits 127 (zero hook traffic): degrades after 3 wakes, mail-
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-z', flavour: 'claude', scenario: { hookMode: 'exit127' } }]);
   const m = await rig.call('send', { to: 'cl-z', subject: 'f12', body: 'hooks are dead' });
-  await beatUntil(rig, async () => (await rig.rows('mail-channel-degraded')).length > 0, { what: 'degradation', stepMs: 6 * 60_000, settle: false });
+  await beatUntil(rig, async () => (await rig.rows('mail-channel-degraded')).length > 0, { what: 'degradation', stepMs: 6 * 60_000, settle: false, holdForStubs: true });
   const row = (await rig.rows('mail-channel-degraded'))[0];
   assert.equal(row.reason, 'zero-hook-traffic');
   const commits = (await rig.call('outcomes')).filter((o) => o.agentId === 'cl-z' && o.outcome.kind === 'COMMITTED').length;
   assert.equal(commits, 3, 'after exactly 3 COMMITTED wakes');
   assert.equal((await rig.call('channelOverride', { id: 'cl-z' })).mode, 'legacy-read');
-  await beatUntil(rig, () => acted(rig, 'cl-z', m.id), { what: 'the degraded agent reads and moves it', stepMs: 6 * 60_000, settle: false });
+  await beatUntil(rig, () => acted(rig, 'cl-z', m.id), { what: 'the degraded agent reads and moves it', stepMs: 6 * 60_000, settle: false, holdForStubs: true });
   assert.ok(rig.prompts('cl-z').some((p) => /Mail channel degraded/.test(p.text) && p.text.includes(m.id)), 'the degraded nudge names the file and says to move it');
   assert.ok(rig.transcript('cl-z').some((r) => r.kind === 'read-file' && r.id === m.id), 'mail still read');
   assert.ok((await rig.rows('mail')).some((r) => r.stage === 'acted' && r.ids.includes(m.id) && r.mode === 'legacy-move'), 'acted by its own move (§11.7)');
@@ -504,9 +506,11 @@ test('F12 hook fires but returns nothing (the UserPromptSubmit shim dies silentl
   const commits = async () => (await rig.call('outcomes')).filter((o) => o.agentId === 'cx-1' && o.outcome.kind === 'COMMITTED').length;
   for (let round = 0; round < 6 && !(await rig.rows('mail-channel-degraded')).length; round++) {
     const n = await commits();
-    await beatUntil(rig, async () => (await commits()) > n, { what: `wake ${round + 1} COMMITTED`, stepMs: 6 * 60_000, settle: false });
+    await beatUntil(rig, async () => (await commits()) > n, { what: `wake ${round + 1} COMMITTED`, stepMs: 6 * 60_000, settle: false, holdForStubs: true });
     // The next 15 s beat reads the rollout: its task_started confirms the turn start (the silent
     // UserPromptSubmit never does). Then the turn ends with its Stop and no mail block.
+    // LOAD-FLAKES-176: only once the stub has started that turn (task_started written), not before.
+    await rig.waitStubsIdle({ what: `wake ${round + 1}'s turn started in the stub` });
     await rig.call('advance', { ms: 15_000 });
     await rig.beat();
     await waitFor(async () => (await rig.call('wakeState', { id: 'cx-1' })).turn.turnStartAt > 0 && !(await rig.call('wakeState', { id: 'cx-1' })).provisional, { what: 'turn start confirmed by the rollout' });
@@ -526,11 +530,12 @@ test('F12 hook fires but returns nothing (the UserPromptSubmit shim dies silentl
   for (let i = 0; i < 2; i++) { await rig.call('advance', { ms: 6 * 60_000 }); await rig.beat(); await sleep(400); }
   assert.ok(!rig.transcript('cx-1').some((r) => r.kind === 'read-file'), 'the running (inject-P1) session never reads files');
   await rig.respawn({ id: 'cx-1', flavour: 'codex', scenario: { hookMode: 'ups-silent', manualTurns: true } });
-  await beatUntil(rig, () => rig.transcript('cx-1').some((r) => r.kind === 'read-file' && r.id === m.id), { what: 'mail still read after the respawn', stepMs: 6 * 60_000, settle: false });
+  await beatUntil(rig, () => rig.transcript('cx-1').some((r) => r.kind === 'read-file' && r.id === m.id), { what: 'mail still read after the respawn', stepMs: 6 * 60_000, settle: false, holdForStubs: true });
   assert.ok(rig.prompts('cx-1').length > promptsAtDegrade);
   // Its turn start is confirmed by the rollout at the next beat (the UserPromptSubmit is still
   // silent); legacy-read acts the ids the CONFIRMED wake named, at its Stop (§11.18 #19).
   await waitFor(async () => { const s2 = await rig.call('wakeState', { id: 'cx-1' }); return !s2.inFlight; }, { what: 'the wake settled' });
+  await rig.waitStubsIdle({ what: 'the respawned stub started its turn' });   // LOAD-FLAKES-176: task_started written first
   await rig.call('advance', { ms: 15_000 });
   await rig.beat();
   await waitFor(async () => !(await rig.call('wakeState', { id: 'cx-1' })).provisional, { what: 'turn start confirmed by the rollout' });

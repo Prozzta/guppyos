@@ -64,6 +64,7 @@ class FakeAgent {
     this.inPaste = false;
     this.turn = null;           // { id, prompt, startedAt, mode }
     this.queue = Promise.resolve();
+    this.pending = 0;           // queued or running jobs (the driver's stubsIdle reads it from composer.json)
     this.hung = false;
     this.seen = new Set();      // mail ids the "model" has seen in its context
     this.sessionId = uuid();
@@ -81,7 +82,7 @@ class FakeAgent {
   writeComposer() {
     try {
       const tmp = `${this.composerFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn }));
+      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending }));
       fs.renameSync(tmp, this.composerFile);
     } catch { /* best effort */ }
   }
@@ -216,7 +217,10 @@ class FakeAgent {
   }
 
   enqueue(fn) {
-    this.queue = this.queue.then(fn).catch((e) => this.rec('error', { error: String((e && e.stack) || e) }));
+    this.pending += 1;
+    this.writeComposer();
+    this.queue = this.queue.then(fn).catch((e) => this.rec('error', { error: String((e && e.stack) || e) }))
+      .finally(() => { this.pending -= 1; this.writeComposer(); });
     return this.queue;
   }
 
@@ -251,6 +255,9 @@ class FakeAgent {
       case 'hang': this.hung = true; return;
       case 'unhang': this.hung = false; return;
       case 'interrupt': this.interrupt('cue'); return;
+      // LOAD-FLAKES-176 (Jim A1): from now on every hook and turn start waits this long first (a
+      // loaded machine, on purpose, for one phase of a test; RIG_SLOW_STUB_MS does it from spawn).
+      case 'slow-starts': this.scenario.slowStubMs = Number(cue.ms) || 0; return;
       default: break;
     }
     if (this.hung) return;

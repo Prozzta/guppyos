@@ -56,7 +56,75 @@ test('without holdWhileBusy (the old settle:false) the clock moves under a busy 
   assert.equal(calls.filter((c) => c.cmd === 'advance').length, 3);
 });
 
-test('C1 and C1b use holdWhileBusy for their re-surface step', () => {
-  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'mail-rig-checks.test.cjs'), 'utf8');
-  assert.equal((src.match(/\{ what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 \}/g) || []).length, 2);
+test('every settle:false step in the rig tests holds (holdWhileBusy or holdForStubs), except the deliberate old form in the A1 proof', () => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const offenders = [];
+  for (const f of ['mail-rig-checks.test.cjs', 'mail-rig-faults.test.cjs', 'mail-rig-scenarios.test.cjs']) {
+    const src = fs.readFileSync(path.join(__dirname, f), 'utf8').split(/\r?\n/);
+    src.forEach((line, n) => {
+      if (!/beatUntil\(/.test(line) || !/settle: false/.test(line)) return;
+      if (/holdWhileBusy: true|holdForStubs: true/.test(line)) return;
+      if (/'re-surfaced \(old form\)'/.test(line)) return;
+      offenders.push(`${f}:${n + 1}`);
+    });
+  }
+  assert.deepEqual(offenders, []);
+  const checks = fs.readFileSync(path.join(__dirname, 'mail-rig-checks.test.cjs'), 'utf8');
+  assert.equal((checks.match(/\{ what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 \}/g) || []).length, 3, 'C1, C1b and the A1 proof');
+});
+
+/** A Rig whose stubsIdle is scripted: `busyFor` not-idle readings, then idle. */
+function stubScripted({ busyFor = 0, quiet = true } = {}) {
+  const rig = new Rig('unused');
+  const calls = [];
+  let reads = 0;
+  rig.call = async (cmd, args) => { calls.push({ cmd, args, reads }); if (cmd === 'busy') return !quiet; return true; };
+  rig.stubsIdle = async () => { reads += 1; return reads > busyFor; };
+  rig.quiet = async () => quiet;
+  return { rig, calls, reads: () => reads };
+}
+
+test('holdForStubs: the clock moves only once the stubs are idle; the condition arriving meanwhile ends it with no advance', async () => {
+  const a = stubScripted({ busyFor: 6 });
+  let k = 0;
+  await a.rig.beatUntil(() => (k += 1) > 3, { what: 'x', settle: false, holdForStubs: true, pauseMs: 0 });
+  assert.equal(a.calls.filter((c) => c.cmd === 'advance').length, 0, 'it held while the stubs were busy');
+  const b = stubScripted({ busyFor: 4 });
+  let j = 0;
+  await b.rig.beatUntil(() => (j += 1) > 8, { what: 'x', settle: false, holdForStubs: true, pauseMs: 0 });
+  for (const c of b.calls.filter((x) => x.cmd === 'advance')) assert.ok(c.reads > 4, 'every advance came after the stubs went idle');
+  assert.ok(b.calls.some((c) => c.cmd === 'advance'));
+});
+
+test('settle: when quiet() runs out, the step holds for the stubs instead of moving the clock anyway', async () => {
+  const a = stubScripted({ busyFor: 5, quiet: false });
+  let k = 0;
+  await a.rig.beatUntil(() => (k += 1) > 10, { what: 'x', pauseMs: 0 });
+  for (const c of a.calls.filter((x) => x.cmd === 'advance')) assert.ok(c.reads > 5, 'no advance while the stubs were busy');
+  const b = stubScripted({ busyFor: Infinity, quiet: false });
+  await assert.rejects(b.rig.beatUntil(() => false, { what: 'y', pauseMs: 0, busyTimeoutMs: 200, diag: async () => 'D' }), /y never held, and the stubs stayed busy for 200 ms \(the clock was not moved under them\)\nD/);
+  assert.equal(b.calls.filter((c) => c.cmd === 'advance').length, 0);
+});
+
+test('stubsIdle: not idle while a wake is in flight, while a COMMITTED prompt is unread, or while a stub has a pending job', async () => {
+  const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+  const box = fs.mkdtempSync(path.join(os.tmpdir(), 'stubs-idle-'));
+  const rig = new Rig(box);
+  rig.agentIds = ['a-1'];
+  let inFlight = false; let committed = 1; let read = 1; let pending = 0;
+  rig.call = async (cmd) => {
+    if (cmd === 'inFlight') return inFlight;
+    if (cmd === 'outcomes') return Array.from({ length: committed }, () => ({ agentId: 'a-1', outcome: { kind: 'COMMITTED' } }));
+    return true;
+  };
+  rig.prompts = () => Array.from({ length: read }, () => ({ kind: 'prompt' }));
+  const setPending = () => { fs.mkdirSync(rig.stubDir('a-1'), { recursive: true }); fs.writeFileSync(path.join(rig.stubDir('a-1'), 'composer.json'), JSON.stringify({ pending })); };
+  try {
+    setPending();
+    assert.equal(await rig.stubsIdle(), true, 'idle: nothing in flight, every prompt read, no job');
+    inFlight = true; assert.equal(await rig.stubsIdle(), false, 'a wake in flight'); inFlight = false;
+    committed = 2; assert.equal(await rig.stubsIdle(), false, 'a COMMITTED prompt the stub has not read yet'); committed = 1;
+    pending = 1; setPending(); assert.equal(await rig.stubsIdle(), false, 'a queued or running job in the stub'); pending = 0; setPending();
+    assert.equal(await rig.stubsIdle(), true);
+  } finally { fs.rmSync(box, { recursive: true, force: true }); }
 });

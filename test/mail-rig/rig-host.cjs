@@ -452,6 +452,8 @@ async function main() {
       const reg = hive.registry();
       return Object.keys(reg.agents || {}).filter((a) => f.ptyForAgent(a)).some((a) => { const s = workerWake.state(a); return !!s.inFlight || s.lifecycle === 'active'; });
     },
+    // LOAD-FLAKES-176: is any wake being typed right now (the host half of Rig.stubsIdle)?
+    inFlight: () => Object.keys(hive.registry().agents || {}).some((a) => !!workerWake.state(a).inFlight),
     diags: ({ since = 0 } = {}) => rig.diags.filter((d) => d.at >= since),
     outcomes: () => rig.outcomes,
     advance: ({ ms }) => rig.clock.advance(ms),

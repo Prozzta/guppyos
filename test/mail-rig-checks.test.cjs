@@ -79,7 +79,45 @@ test('C1b a real main-thread stall past the AGY shim\'s own 5 s give-up: the blo
   await waitFor(() => acted(rig, 'ag-1', m.id), { what: 'acted once', diag });
 });
 
-// Unit test: mail-surface "C2: roster + a 10k steer + mail: nothing past the budget, nothing surfacing; …".
+// LOAD-FLAKES-176 (Jim A1): the C1 root cause, PROVEN rather than plausible, and the REAL host
+// busy() pinned. The re-wake's turn start is held 5 s real (the stub's `slow-starts` cue, a loaded
+// machine on purpose, from the re-pend on). The old re-surface step (settle:false, the clock moving
+// under the still-starting turn) runs the 60 s SUBMIT_CONFIRM_MS out and loses the re-surface;
+// holdWhileBusy keeps it. A busy() that ignored `inFlight` or `lifecycle === 'active'` loses it too.
+async function c1UpToRepend(t, diagId = 'ag-1') {
+  const rig = await startRig(t);
+  const diag = () => rig.diagnose(diagId);
+  await rig.setup([{ id: 'ag-1', flavour: 'agy', scenario: { manualTurns: true } }]);
+  const m = await rig.call('send', { to: 'ag-1', subject: 'c1-a1', body: 'answered too late' });
+  await rig.call('lateNextFlush', { id: 'ag-1', ms: 3_200 });
+  await rig.beat();
+  await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'the (late) block reached the CLI', diag });
+  rig.cue('ag-1', { cue: 'slow-starts', ms: 5_000 });
+  await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'cue' && r.cue?.cue === 'slow-starts'), { what: 'the stub is slow from here', diag });
+  rig.cue('ag-1', { cue: 'stop' });
+  await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
+  return { rig, m };
+}
+const resurfaced = (rig, m) => () => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2;
+
+test('C1 A1 proof: a re-wake whose turn start is held 5 s real: the OLD step runs the 60 s confirm window out under the starting turn (submit-unconfirmed / exhausted); holdWhileBusy never does, and re-surfaces', T, async (t) => {
+  const unconfirmed = async (rig) => (await rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'submit-unconfirmed' || d.stage === 'wake-ids-exhausted')).length;
+  // The old form: 5 steps of 15 s (75 s simulated, > SUBMIT_CONFIRM_MS) take ~1.5 s real, far less
+  // than the held 5 s turn start plus 5 s hook: the claim is judged unconfirmed while the turn is
+  // still starting. That is the C1 race, deterministic here.
+  const old = await c1UpToRepend(t);
+  const before = await unconfirmed(old.rig);
+  await old.rig.beatUntil(resurfaced(old.rig, old.m), { what: 're-surfaced (old form)', settle: false, stepMs: 15_000, tries: 5, diag: async () => '' }).catch(() => false);
+  assert.ok((await unconfirmed(old.rig)) > before, 'the old form moved the clock past the confirm window under the starting re-wake');
+  // The fix: the same held turn start, the clock never moves under it, no unconfirmed edge.
+  const now = await c1UpToRepend(t);
+  const b2 = await unconfirmed(now.rig);
+  await now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
+  assert.equal(await unconfirmed(now.rig), b2, 'holdWhileBusy: never judged unconfirmed');
+  assert.ok(now.rig.contexts('ag-1').filter((c) => c.ids.includes(now.m.id))[1].context.includes(REDELIVERED), 'with the marker');
+});
+
+// Unit test: mail-surface "C2: roster + a 10k steer + mail:nothing past the budget, nothing surfacing; …".
 test('C2 a 10k steer + mail: no block past the joined budget, nothing surfacing; a steer leaving < 1,500 gives headers only; the mail follows at the next hook', T, async (t) => {
   const rig = await startRig(t);
   await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { manualTurns: true } }]);
@@ -115,7 +153,9 @@ test('C3 a text-only wake turn with a budget overflow: what never surfaced is re
   await rig.setup([{ id: 'cl-1', flavour: 'claude', scenario: { turn: { tools: 0 } } }]);
   const ids = [];
   for (let i = 0; i < 4; i++) ids.push((await rig.call('send', { to: 'cl-1', subject: `c3 ${i}`, body: `c3 body ${i} `.padEnd(4_000, '-') })).id);
-  await rig.beatUntil(async () => { for (const id of ids) if (!(await acted(rig, 'cl-1', id))) return false; return true; }, { what: 'all acted' });
+  // LOAD-FLAKES-176: the clock moves only when the real turns are done (hog run: settle's bounded
+  // quiet() ran out, the clock raced the turns, and the ids were acted with no context recorded).
+  await rig.beatUntil(async () => { for (const id of ids) if (!(await acted(rig, 'cl-1', id))) return false; return true; }, { what: 'all acted', holdForStubs: true });
   const first = rig.contexts('cl-1')[0];
   assert.ok(first.ids.length < 4 && first.ids.length > 0, `the text-only turn showed ${first.ids.length} of 4`);
   assert.ok((await rig.call('diags')).some((d) => d.stage === 'wake-repend' && d.agentId === 'cl-1' && d.outcome === 'normal'), 'wake-repend at the Stop');
@@ -138,8 +178,10 @@ test('C4 StopFailure is an abnormal end (re-surfaced with the marker); an interr
   assert.ok((await rig.rows('mail')).some((r) => r.stage === 'redelivered' && r.reason === 'stop-failure' && r.ids.includes(m.id)));
   // §11.18 #43 (Q40): StopFailure ends the turn in the wake lifecycle too, so no idle Notification
   // (~60 s later on a real Claude) is needed before the re-pended mail is offered again.
-  await waitFor(async () => (await rig.call('wakeState', { id: 'cl-1' })).lifecycle === 'idle', { what: 'idle at the StopFailure itself' });
-  await rig.beatUntil(() => rig.contexts('cl-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false });
+  await waitFor(async () => (await rig.call('wakeState', { id: 'cl-1' })).lifecycle === 'idle', { what: 'idle at the StopFailure itself', diag: () => rig.diagnose('cl-1') });
+  // LOAD-FLAKES-176: as C1, the clock never moves under the still-starting re-wake (reproduced with
+  // RIG_SLOW_STUB_MS=5000: exhausted, retries, even mail-channel-degraded, then 're-surfaced never held').
+  await rig.beatUntil(() => rig.contexts('cl-1').filter((c) => c.ids.includes(m.id)).length >= 2, { what: 're-surfaced', settle: false, holdWhileBusy: true });
   assert.ok(rig.contexts('cl-1').filter((c) => c.ids.includes(m.id))[1].context.includes(REDELIVERED));
   rig.cue('cl-1', { cue: 'stop' });
   await waitFor(() => acted(rig, 'cl-1', m.id), { what: 'acted' });
