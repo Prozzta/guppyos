@@ -93,19 +93,19 @@ function topLevelKey(line: string, key: string): boolean {
 /**
  * Set top-level scalar keys in OUR copy: any seed line for the same key before the first table
  * is removed (TOML forbids a duplicate key), and ours go first in the file. A `null` value only
- * removes. Values are numbers or already-TOML-encoded strings.
+ * removes. Values are numbers or booleans (WAKE-SCREEN-GUARD R2-2: `check_for_update_on_startup`).
  */
-export function setCodexTopLevelKeys(config: string, entries: Record<string, number | null>): string {
+export function setCodexTopLevelKeys(config: string, entries: Record<string, number | boolean | null>): string {
   const lines = config.split(/\r?\n/);
   const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
   const topEnd = firstTable < 0 ? lines.length : firstTable;
   const keys = Object.keys(entries);
   const kept = lines.filter((l, i) => i >= topEnd || !keys.some((k) => topLevelKey(l, k)));
   const ours = keys
-    .filter((k) => typeof entries[k] === 'number' && Number.isFinite(entries[k] as number))
-    .map((k) => `${k} = ${Math.trunc(entries[k] as number)}`);
+    .filter((k) => (typeof entries[k] === 'number' && Number.isFinite(entries[k] as number)) || typeof entries[k] === 'boolean')
+    .map((k) => `${k} = ${typeof entries[k] === 'boolean' ? String(entries[k]) : Math.trunc(entries[k] as number)}`);
   if (!ours.length) return kept.join('\n');
-  return `# --- munder-hive: per-agent token limits (auto-generated; do not edit) ---\n${ours.join('\n')}\n\n${kept.join('\n')}`;
+  return `# --- munder-hive: per-agent token limits and startup settings (auto-generated; do not edit) ---\n${ours.join('\n')}\n\n${kept.join('\n')}`;
 }
 
 /**
@@ -266,7 +266,7 @@ export function setCodexRootTableKeys(
 ): string {
   // The document root has no TOML table header. Keep its established duplicate-safe writer
   // behind this shared entry point so per-agent scalar policy follows the same config path.
-  if (name === '') return setCodexTopLevelKeys(config, entries as Record<string, number | null>);
+  if (name === '') return setCodexTopLevelKeys(config, entries as Record<string, number | boolean | null>);
   const keys = Object.keys(entries);
   const header = new RegExp(`^\\s*\\[\\s*(["']?)${nameSource(name)}\\1\\s*\\]\\s*(#.*)?$`);
   const dotted = new RegExp(`^\\s*(["']?)${nameSource(name)}\\1\\s*\\.`);

@@ -96,7 +96,9 @@ function rig(over = {}) {
     lastHumanInputAt: () => r.session?.lastHumanAt,
     hasOutput: () => r.session?.hasOutput,
     inputState: () => r.session?.inputState,
-    promptState: () => r.session?.promptState
+    promptState: () => r.session?.promptState,
+    outputGeneration: () => (r.session ? 0 : undefined),
+    spawnCwd: () => undefined
   };
   r.deps = buildOwnerDeps({
     pty: r.pty, capacity: r.runtime,
@@ -106,6 +108,7 @@ function rig(over = {}) {
       if (r.oracle === 'silent') return new Promise(() => {});
       return Promise.resolve({ onPromptRow: r.prompt.includes(needle), screenCount: r.prompt.includes(needle) ? 1 : 0 });
     },
+    requestCodexScreen: (ptyId, expectedTail) => Promise.resolve(codexComposerReading(r.prompt, expectedTail)),
     now: () => r.now, setTimer
   });
   r.owner = new (over.Owner ?? AutomaticSubmitOwner)(r.deps);
@@ -127,6 +130,18 @@ function rig(over = {}) {
     throw new Error('did not settle');
   };
   return r;
+}
+
+/** WAKE-SCREEN-GUARD (1.1.76): a Codex PTY is gated on its screen. These rigs' terminal is the
+ *  post-handoff Codex composer: empty until the owner stages, then holding exactly its text.
+ *  (Their subject is capacity and interference, not the screen; test/wake-screen-guard.test.cjs
+ *  proves the gate.) */
+function codexComposerReading(prompt, expectedTail) {
+  return {
+    onPromptRow: false, screenCount: 0,
+    codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: prompt ? `\u203a ${prompt}` : '\u203a Ask Codex to do anything', footer: ['? for shortcuts'] },
+    ...(expectedTail ? { promptTailMatches: prompt.endsWith(expectedTail) } : {})
+  };
 }
 
 const wake = (r, id = 'w1') => r.owner.submit({
@@ -376,6 +391,9 @@ function realPtyRig(humanInGap) {
     ptyForAgent: (agentId) => (agentId === 'jim' ? 'pty-jim' : undefined),
     providerForPty: () => 'codex',
     requestScreenReading: () => Promise.resolve(null),
+    // WAKE-SCREEN-GUARD: the REAL manager's process, read as the Codex composer holding what
+    // it was sent (the rig's stand-in for the renderer).
+    requestCodexScreen: (ptyId, expectedTail) => Promise.resolve(codexComposerReading(procWrites.filter((d) => d !== '\r').join(''), expectedTail)),
     now: () => r.now,
     setTimer: (fn, ms) => { const t = { at: r.now + ms, seq: (r.seq += 1), fn, ms }; r.timers.push(t); return t; }
   }));

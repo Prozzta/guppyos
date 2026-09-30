@@ -33,6 +33,7 @@
  */
 import { ADMISSION_REASON, type AdmissionDecision, type AdmissionVerdict, type WorkClass } from './capacityAdmission';
 import type { PromptBlock } from '../shared/promptState';
+import { classifyCodexComposer, codexPastStartup, type CodexScreenFacts } from '../shared/codexScreen';
 
 export type { PromptBlock };
 
@@ -388,7 +389,52 @@ export interface ScreenReading {
   /** When requested, the renderer proved that the current logical composer ends in the
    * exact automatic text. It is not a generic "needle seen" answer. */
   promptTailMatches?: boolean;
+  /** WAKE-SCREEN-GUARD: the Codex screen facts, when main asked for them. */
+  codex?: CodexScreenFacts;
 }
+
+/**
+ * WAKE-SCREEN-GUARD (1.1.76): does the Codex screen gate apply to this PTY? ENFORCE for a
+ * Codex PTY (god's ruling: fail-closed for Codex only), OFF for every other provider, whose
+ * behaviour is unchanged. It applies to EVERY admission class: typing into a trust or update
+ * screen is the same harm whether a wake, a boot prompt or "send now" asked for it.
+ */
+export type ScreenGuardMode = 'ENFORCE' | 'OFF';
+
+/** One Codex screen reading, as main receives it. */
+export interface GuardReading {
+  facts: CodexScreenFacts;
+  /** Asked only after a stage write: the composer ends in the exact staged text. */
+  promptTailMatches?: boolean;
+  /** Stamped by MAIN in the same turn as the request was sent, never by the renderer: the
+   *  incarnation, and the output generation whose bytes the reading covers. */
+  incarnation: unknown;
+  outputGeneration: number;
+}
+
+export type ScreenGuardPhase = 'STAGE' | 'COMMIT' | 'REENTER';
+
+/** One screen-gate evaluation, for the diagnostic row. Never screen contents. */
+export interface ScreenGuardRecord {
+  requestId: string;
+  agentId: string;
+  ptyId: string;
+  admissionClass: AdmissionClass;
+  phase: ScreenGuardPhase;
+  ok: boolean;
+  /** `startup:<reason>`, `<class>:<reason>`, `no-reading`, `incarnation`, or `ok:<reason>`. */
+  reason: string;
+  incarnation: unknown;
+  /** The generation the reading covers, and the live one when it was judged. */
+  observedGeneration: number | null;
+  currentGeneration: number | null;
+  latched: boolean;
+}
+
+/** WAKE-SCREEN-GUARD: after a stage write, how many post-echo readings may be tried before
+ *  the staged text is held for a person, and the pause between them. */
+export const SCREEN_COMMIT_READS = 3;
+export const SCREEN_COMMIT_RETRY_MS = 250;
 
 /** The claim capacity is re-asked under. Mirrors `capacityRuntime.DeliveryClaim`. */
 export interface OwnerClaim {
@@ -453,6 +499,16 @@ export interface OwnerDeps {
    *  it before settling COMMITTED (a TUI that turned the Enter into a newline leaves it
    *  there). Absent / false = the write-level COMMITTED as before. */
   verifySubmit?: (ptyId: string) => boolean;
+  /** WAKE-SCREEN-GUARD: whether the Codex screen gate applies. Absent = OFF. */
+  screenGuard?: (ptyId: string) => ScreenGuardMode;
+  /** WAKE-SCREEN-GUARD: a FRESH Codex screen reading, stamped by main. Null = no reading. */
+  readGuardScreen?: (ptyId: string, expectedTail?: string) => Promise<GuardReading | null>;
+  /** WAKE-SCREEN-GUARD: the live output generation (undefined = no live session). */
+  outputGeneration?: (ptyId: string) => number | undefined;
+  /** WAKE-SCREEN-GUARD: the cwd the PTY was spawned in (Codex's status line shows it). */
+  spawnCwd?: (ptyId: string) => string | undefined;
+  /** WAKE-SCREEN-GUARD: told of every screen-gate evaluation. Diagnostics only. */
+  onScreenGuard?: (record: ScreenGuardRecord) => void;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -489,7 +545,11 @@ export type RefusalReason =
   | 'HUMAN_INPUT_RECENT'
   | 'HUMAN_INPUT_BEFORE_STAGE'
   | 'STAGE_WRITE_FAILED'
-  | 'PRIOR_TEXT_UNVERIFIED';
+  | 'PRIOR_TEXT_UNVERIFIED'
+  /** WAKE-SCREEN-GUARD: a Codex screen that is not proven to be the post-handoff composer. */
+  | 'SCREEN_NOT_READY'
+  /** WAKE-SCREEN-GUARD: Codex output arrived after the screen reading that admitted this. */
+  | 'SCREEN_CHANGED';
 
 export type InterferenceReason =
   | 'HUMAN_INPUT_AFTER_STAGE'
@@ -505,7 +565,10 @@ export type InterferenceReason =
   | 'PRIOR_TEXT_UNREADABLE'
   /** CODEX-WAKE-161 F3: our text was still in the composer after the Enter AND after one
    *  more Enter of our own: the TUI is not taking it. Held for a person, visibly. */
-  | 'SUBMIT_NOT_ACCEPTED';
+  | 'SUBMIT_NOT_ACCEPTED'
+  /** WAKE-SCREEN-GUARD: after our stage write, no reading proved the screen still the Codex
+   *  composer holding exactly our text with no output since. No Enter: held for a person. */
+  | 'SCREEN_NOT_VERIFIED_AFTER_STAGE';
 
 export type SubmitOutcome =
   /** The Enter went out. The one outcome a caller may acknowledge a queue item on. */
@@ -654,13 +717,19 @@ interface Staged {
   /** Null for the bypass classes: capacity was never asked, so none is re-asked. */
   decision: AdmissionDecision | null;
   humanStage: number;
+  /** WAKE-SCREEN-GUARD: the output generation of the reading that cleared this Enter.
+   *  Set = the Enter needs the live generation to still equal it. */
+  screenGen?: number;
 }
 
 type CommitVerdict =
   | { kind: 'ENTERED'; ok: boolean; error?: string }
   | { kind: 'LATE_REFUSAL'; basis: string }
   | { kind: 'INTERFERED'; reason: InterferenceReason; detail?: string }
-  | { kind: 'FAILED'; reason: 'PTY_REPLACED_AFTER_STAGE' | 'PTY_GONE_AFTER_STAGE' };
+  | { kind: 'FAILED'; reason: 'PTY_REPLACED_AFTER_STAGE' | 'PTY_GONE_AFTER_STAGE' }
+  /** WAKE-SCREEN-GUARD: output arrived after the reading that cleared this Enter. Nothing
+   *  was written. */
+  | { kind: 'SCREEN_CHANGED' };
 
 function safeWrite(deps: OwnerDeps, ptyId: string, data: string): OwnerWriteResult {
   try {
@@ -727,6 +796,9 @@ export function commitSection(s: Staged, deps: OwnerDeps): CommitVerdict {
     const now = resolveAdmission(deps.capacity.revalidate(claim), deps.unknownPolicy ?? UNKNOWN_POLICY);
     if (now.action !== 'PROCEED') return { kind: 'LATE_REFUSAL', basis: now.basis };
   }
+  // WAKE-SCREEN-GUARD: the Codex screen that cleared this Enter is still the screen: no byte
+  // of output since that reading. Synchronous, next to the write.
+  if (s.screenGen !== undefined && deps.outputGeneration?.(s.ptyId) !== s.screenGen) return { kind: 'SCREEN_CHANGED' };
   const entered = safeWrite(deps, s.ptyId, '\r');
   if (s.decision) {
     if (entered.ok) deps.capacity.confirmLaunch(s.decision);
@@ -751,8 +823,27 @@ export class AutomaticSubmitOwner {
    * Enter again only when the renderer proves that exact text still occupies the composer
    * AND no human generation advanced since we staged it. */
   private readonly ownDrafts = new Map<string, { text: string; humanStage: number; incarnation: unknown }>();
+  /** WAKE-SCREEN-GUARD condition 1: the Codex incarnation on each PTY that has been proven
+   *  past its startup phase (trust, login and update all precede the handoff, so within one
+   *  process that phase never comes back). A new incarnation starts un-latched. Never a
+   *  substitute for the fresh reading every request needs. */
+  private readonly postHandoff = new Map<string, unknown>();
 
   constructor(private readonly deps: OwnerDeps) {}
+
+  /** WAKE-SCREEN-GUARD R2-4: a Codex SessionStart whose per-incarnation token main has
+   *  matched to THIS live incarnation. An extra way to latch condition 1; never required. */
+  latchPostHandoff(ptyId: string, incarnation: unknown): boolean {
+    if (incarnation === undefined || this.deps.incarnation(ptyId) !== incarnation) return false;
+    this.postHandoff.set(ptyId, incarnation);
+    return true;
+  }
+
+  /** WAKE-SCREEN-GUARD: is this PTY's LIVE incarnation latched past startup? */
+  postHandoffLatched(ptyId: string): boolean {
+    const live = this.deps.incarnation(ptyId);
+    return live !== undefined && this.postHandoff.get(ptyId) === live;
+  }
 
   /**
    * Submit one programmatic message. Resolves with what HAPPENED; never rejects.
@@ -962,7 +1053,14 @@ export class AutomaticSubmitOwner {
           // remembers staging that text in this incarnation, and no human key arrived.
           if (seen.promptTailMatches === true && own?.text === req.priorText
             && own.incarnation === incarnation && own.humanStage === deps.humanGeneration(ptyId)) {
-            const retried = this.reenterOwnDraft(req, ptyId, incarnation, decision, own.humanStage);
+            // WAKE-SCREEN-GUARD: a Codex re-Enter needs its own fresh reading of our draft.
+            let reenterGen: number | undefined;
+            if (this.guardMode(ptyId) === 'ENFORCE') {
+              const g = await this.screenGate(req, ptyId, incarnation, 'REENTER', req.priorText);
+              if (!g.ok) return this.refuse(decision, 'SCREEN_NOT_READY', g.reason);
+              reenterGen = g.gen;
+            }
+            const retried = this.reenterOwnDraft(req, ptyId, incarnation, decision, own.humanStage, reenterGen);
             if (retried.kind === 'COMMITTED') this.ownDrafts.delete(ptyId);
             // F3 for this Enter too: the draft being re-entered is the prior text.
             if (retried.kind === 'COMMITTED' && deps.verifySubmit?.(ptyId)) {
@@ -973,6 +1071,21 @@ export class AutomaticSubmitOwner {
           return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0 }, 'PRIOR_TEXT_ON_PROMPT', undefined);
         }
       }
+    }
+
+    // ── WAKE-SCREEN-GUARD: a FRESH Codex screen reading for THIS request ────────────────
+    // Condition 1 (past startup, latched per incarnation) and condition 2 (the empty
+    // composer). Its output generation is re-checked below, in the STAGE section.
+    const guard = this.guardMode(ptyId);
+    let screenGen: number | undefined;
+    if (guard === 'ENFORCE') {
+      // A human-owned prompt is refused for what it is, before any screen IPC (it is checked
+      // again in the STAGE section below, next to the write).
+      const early = promptCondition(deps.promptBlock(ptyId));
+      if (early && gateRefuses(cls, early)) return this.refuse(decision, early);
+      const g = await this.screenGate(req, ptyId, incarnation, 'STAGE');
+      if (!g.ok) return this.refuse(decision, 'SCREEN_NOT_READY', g.reason);
+      screenGen = g.gen;
     }
 
     // ── STAGE: every guard re-read IMMEDIATELY before the write, no yield between ────
@@ -998,6 +1111,10 @@ export class AutomaticSubmitOwner {
     // is on the line yet. Side-effect-free refusal and re-admission: no residue, nothing
     // held, nothing inhibited (section 4).
     if (deps.humanGeneration(ptyId) !== humanAdmit) return this.refuse(decision, 'HUMAN_INPUT_BEFORE_STAGE');
+    // WAKE-SCREEN-GUARD: no Codex output since the reading that admitted this request.
+    if (guard === 'ENFORCE' && deps.outputGeneration?.(ptyId) !== screenGen) {
+      return this.refuse(decision, 'SCREEN_CHANGED', 'output after the screen reading');
+    }
     const wrote = safeWrite(deps, ptyId, payloadFor(req.text));
     if (!wrote.ok) return this.refuse(decision, 'STAGE_WRITE_FAILED', wrote.error);
     // POST-STAGE BASELINE, captured only after the payload write SUCCEEDED and in the same
@@ -1020,7 +1137,28 @@ export class AutomaticSubmitOwner {
     await this.sleep(deps.enterGapMs?.(ptyId, req.text.length) ?? GAP_MS);
 
     // ── COMMIT | ABORT | INTERFERED ──────────────────────────────────────────────────
-    const verdict = await Promise.resolve(commitSection(staged, deps));
+    // WAKE-SCREEN-GUARD: for Codex, a SECOND fresh reading, after the echo of our stage
+    // write, must show the composer holding exactly our text; the Enter then needs no
+    // output since that reading. Bounded; never proven = held for a person, no Enter.
+    let verdict: CommitVerdict;
+    for (let attempt = 1; ; attempt += 1) {
+      if (guard === 'ENFORCE') {
+        const g = await this.screenGate(req, ptyId, incarnation, 'COMMIT', req.text);
+        if (!g.ok) {
+          // A human key or a dead terminal explains a changed screen better than the screen does.
+          const blocked = postStageGuard(staged, deps);
+          if (blocked) { verdict = blocked; break; }
+          if (attempt >= SCREEN_COMMIT_READS) return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', g.reason);
+          await this.sleep(SCREEN_COMMIT_RETRY_MS);
+          continue;
+        }
+        staged.screenGen = g.gen;
+      }
+      verdict = await Promise.resolve(commitSection(staged, deps));
+      if (verdict.kind !== 'SCREEN_CHANGED') break;
+      if (attempt >= SCREEN_COMMIT_READS) return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', 'output after every reading');
+      await this.sleep(SCREEN_COMMIT_RETRY_MS);
+    }
     if (verdict.kind === 'ENTERED') this.reportEnterWrite(staged, verdict.ok, verdict.ok ? undefined : verdict.error, gapMs, false);
     switch (verdict.kind) {
       case 'ENTERED':
@@ -1039,7 +1177,69 @@ export class AutomaticSubmitOwner {
         return this.interfere(staged, verdict.reason, verdict.detail);
       case 'LATE_REFUSAL':
         return this.abort(staged, verdict.basis);
+      case 'SCREEN_CHANGED':
+        // Not reached (postStageGuard never answers it); held, like the loop's own exit.
+        return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', 'output after the reading');
     }
+  }
+
+  private guardMode(ptyId: string): ScreenGuardMode {
+    try { return this.deps.screenGuard?.(ptyId) === 'ENFORCE' ? 'ENFORCE' : 'OFF'; } catch { return 'ENFORCE'; }
+  }
+
+  /**
+   * WAKE-SCREEN-GUARD: one FRESH Codex screen reading, judged. STAGE needs the empty
+   * composer; COMMIT and REENTER need the composer holding exactly `expectedTail` (our own
+   * text). Both need condition 1 for this incarnation, from this reading or an earlier one,
+   * and a reading stamped with this incarnation. Returns the generation the reading covers.
+   */
+  private async screenGate(req: SubmitRequest, ptyId: string, incarnation: unknown, phase: ScreenGuardPhase, expectedTail?: string): Promise<{ ok: true; gen: number } | { ok: false; reason: string }> {
+    const deps = this.deps;
+    const r = await this.readGuard(ptyId, expectedTail);
+    let verdict: { ok: true; gen: number } | { ok: false; reason: string };
+    if (!r) verdict = { ok: false, reason: 'no-reading' };
+    else if (r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) verdict = { ok: false, reason: 'incarnation' };
+    else {
+      const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId));
+      if (past.open) this.postHandoff.set(ptyId, incarnation);
+      const comp = classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
+      const want = phase === 'STAGE' ? 'READY' : 'READY_OWN_DRAFT';
+      // A LOADING header or a resume line is refused even when latched (the live widget
+      // also shows `loading` while it reconfigures).
+      if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
+      else if (this.postHandoff.get(ptyId) !== incarnation) verdict = { ok: false, reason: `startup:${past.reason}` };
+      else if (comp.cls !== want) verdict = { ok: false, reason: `${comp.cls}:${comp.reason}` };
+      else verdict = { ok: true, gen: r.outputGeneration };
+    }
+    try {
+      const current = deps.outputGeneration?.(ptyId);
+      deps.onScreenGuard?.({
+        requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass, phase,
+        ok: verdict.ok, reason: verdict.ok ? 'ok' : verdict.reason, incarnation,
+        observedGeneration: r ? r.outputGeneration : null, currentGeneration: current ?? null,
+        latched: this.postHandoff.get(ptyId) === incarnation
+      });
+    } catch { /* diagnostics never decide */ }
+    return verdict;
+  }
+
+  /** A guard reading, or null: absent dependency, no answer in time, or malformed. */
+  private readGuard(ptyId: string, expectedTail?: string): Promise<GuardReading | null> {
+    const read = this.deps.readGuardScreen;
+    if (!read) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: GuardReading | null) => { if (!done) { done = true; resolve(v); } };
+      const limit = SCREEN_ORACLE_TIMEOUT_MS;
+      this.deps.setTimer(() => finish(null), limit);
+      let p: Promise<GuardReading | null>;
+      try { p = read(ptyId, expectedTail); } catch { finish(null); return; }
+      p.then(
+        (v) => finish(v && v.facts && typeof v.outputGeneration === 'number'
+          && (v.promptTailMatches === undefined || typeof v.promptTailMatches === 'boolean') ? v : null),
+        () => finish(null)
+      );
+    });
   }
 
   /** START-FIXES-163 (3): one diagnostics record per automatic Enter write. Never throws
@@ -1071,13 +1271,13 @@ export class AutomaticSubmitOwner {
 
   /** Re-press Enter on a composer that is positively our untouched prior write. This is
    * deliberately not STAGE: typing a second nudge would fuse it with the first. */
-  private reenterOwnDraft(req: SubmitRequest, ptyId: string, incarnation: unknown, decision: AdmissionDecision | null, humanStage: number): SubmitOutcome {
+  private reenterOwnDraft(req: SubmitRequest, ptyId: string, incarnation: unknown, decision: AdmissionDecision | null, humanStage: number, screenGen?: number): SubmitOutcome {
     const deps = this.deps;
     // The original COMMITTED already owns this message's capacity grant. The retry has
     // no new work to admit; release its speculative grant before handing the one extra
     // Enter to the SAME non-yielding critical section as every other automatic Enter.
     if (decision) deps.capacity.cancelGrant(decision);
-    const staged: Staged = { req, ptyId, incarnation, decision: null, humanStage };
+    const staged: Staged = { req, ptyId, incarnation, decision: null, humanStage, ...(screenGen === undefined ? {} : { screenGen }) };
     const verdict = commitSection(staged, deps);
     if (verdict.kind === 'ENTERED') this.reportEnterWrite(staged, verdict.ok, verdict.ok ? undefined : verdict.error, 0, true);
     switch (verdict.kind) {
@@ -1091,6 +1291,9 @@ export class AutomaticSubmitOwner {
       case 'LATE_REFUSAL':
         // No decision reaches this path, so a late admission result is impossible.
         return this.interfere(staged, 'PROVENANCE_LOST_AFTER_STAGE', verdict.basis);
+      case 'SCREEN_CHANGED':
+        // Nothing was written: our untouched draft is still there, and the next beat asks again.
+        return { kind: 'REFUSED', reason: 'SCREEN_CHANGED', detail: 'output after the re-Enter reading' };
     }
   }
 
@@ -1129,7 +1332,14 @@ export class AutomaticSubmitOwner {
     if (first !== false) return { kind: 'COMMITTED' };
     // The grant went out with the first Enter; this one carries none.
     const again: Staged = { ...s, decision: null };
+    // WAKE-SCREEN-GUARD: a Codex second Enter needs a fresh reading of our text, too.
+    if (this.guardMode(s.ptyId) === 'ENFORCE') {
+      const g = await this.screenGate(s.req, s.ptyId, s.incarnation, 'COMMIT', s.req.text);
+      if (!g.ok) return this.interfere(again, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', g.reason);
+      again.screenGen = g.gen;
+    }
     const verdict = commitSection(again, this.deps);
+    if (verdict.kind === 'SCREEN_CHANGED') return this.interfere(again, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', 'output after the reading');
     if (verdict.kind === 'FAILED') return { kind: 'FAILED', reason: verdict.reason };
     if (verdict.kind === 'INTERFERED') return this.interfere(again, verdict.reason, verdict.detail);
     if (verdict.kind !== 'ENTERED' || !verdict.ok) return this.interfere(again, 'ENTER_WRITE_FAILED', verdict.kind === 'ENTERED' ? verdict.error : verdict.basis);

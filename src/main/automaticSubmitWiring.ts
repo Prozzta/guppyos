@@ -13,7 +13,8 @@ import { automaticDeliveryEligibility, type TerminalInputState } from '../shared
 import type { TerminalPromptState } from '../shared/promptState';
 import type { AgentProvider } from '../shared/agentProvider';
 import type { AdmissionDecision, WorkClass } from './capacityAdmission';
-import type { AbortCapability, OutcomeRecord, OwnerClaim, OwnerDeps, ScreenReading } from './automaticSubmit';
+import type { AbortCapability, GuardReading, OutcomeRecord, OwnerClaim, OwnerDeps, ScreenReading } from './automaticSubmit';
+import { asCodexScreenFacts } from '../shared/codexScreen';
 
 /** The slice of `PtyManager` the owner is allowed to touch. */
 export interface OwnerPty {
@@ -24,6 +25,9 @@ export interface OwnerPty {
   hasOutput(id: string): boolean | undefined;
   inputState(id: string): TerminalInputState | undefined;
   promptState(id: string): TerminalPromptState | undefined;
+  /** WAKE-SCREEN-GUARD: optional so a PTY without them simply cannot pass the Codex gate. */
+  outputGeneration?(id: string): number | undefined;
+  spawnCwd?(id: string): string | undefined;
 }
 
 /** The slice of `CapacityRuntime` the owner is allowed to touch. Nothing here answers
@@ -46,6 +50,10 @@ export interface OwnerWiring {
   /** Ask the renderer that owns this PTY to read its rendered screen. Resolves null when
    *  there is no renderer to ask; may also simply never resolve — the owner times it out. */
   requestScreenReading: (ptyId: string, needle: string, expectedTail?: string) => Promise<ScreenReading | null>;
+  /** WAKE-SCREEN-GUARD: ask the renderer for the Codex screen facts (and, after a stage
+   *  write, whether the composer ends in `expectedTail`). Absent = the Codex gate refuses. */
+  requestCodexScreen?: (ptyId: string, expectedTail?: string) => Promise<ScreenReading | null>;
+  onScreenGuard?: OwnerDeps['onScreenGuard'];
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   onOutcome?: (record: OutcomeRecord) => void;
@@ -103,6 +111,27 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
       const provider = w.providerForPty(ptyId);
       return provider ? automaticVerifySubmit(provider) : false;
     },
+    // WAKE-SCREEN-GUARD: fail-closed for Codex only (god's ruling); every other provider is
+    // unchanged.
+    screenGuard: (ptyId) => (w.providerForPty(ptyId) === 'codex' ? 'ENFORCE' : 'OFF'),
+    // The stamp (incarnation + output generation) is taken in the SAME turn as the request is
+    // sent: the send flushes every byte main holds to the renderer ahead of the request, and
+    // the renderer reads behind them, so the reading covers exactly this generation.
+    readGuardScreen: (ptyId, expectedTail) => {
+      const incarnation = w.pty.incarnation(ptyId);
+      const outputGeneration = w.pty.outputGeneration?.(ptyId);
+      if (!w.requestCodexScreen || incarnation === undefined || outputGeneration === undefined) return Promise.resolve(null);
+      return w.requestCodexScreen(ptyId, expectedTail).then((r): GuardReading | null => {
+        const facts = r?.codex ? asCodexScreenFacts(r.codex) : null;
+        return r && facts ? {
+          facts, incarnation, outputGeneration,
+          ...(r.promptTailMatches === undefined ? {} : { promptTailMatches: r.promptTailMatches })
+        } : null;
+      });
+    },
+    outputGeneration: (ptyId) => w.pty.outputGeneration?.(ptyId),
+    spawnCwd: (ptyId) => w.pty.spawnCwd?.(ptyId),
+    onScreenGuard: w.onScreenGuard,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),
       revalidate: (claim) => w.capacity.revalidate(claim, claim.target),
@@ -132,7 +161,7 @@ export class ScreenReadingBroker {
    *             there is nobody to hand it to, which resolves null at once.
    */
   constructor(
-    private readonly send: (ptyId: string, requestId: string, needle: string, expectedTail?: string) => boolean,
+    private readonly send: (ptyId: string, requestId: string, needle: string, expectedTail?: string, codex?: boolean) => boolean,
     /** A request nobody answers is forgotten after this long, so a renderer that went
      *  away cannot grow this map. The OWNER has its own, shorter, timeout and does not
      *  depend on this one. */
@@ -144,12 +173,12 @@ export class ScreenReadingBroker {
     }
   ) {}
 
-  request(ptyId: string, needle: string, expectedTail?: string): Promise<ScreenReading | null> {
+  request(ptyId: string, needle: string, expectedTail?: string, codex?: boolean): Promise<ScreenReading | null> {
     const requestId = `scr-${(this.seq += 1)}`;
     return new Promise((resolve) => {
       this.pending.set(requestId, resolve);
       let sent = false;
-      try { sent = this.send(ptyId, requestId, needle, expectedTail); } catch { sent = false; }
+      try { sent = codex ? this.send(ptyId, requestId, needle, expectedTail, true) : this.send(ptyId, requestId, needle, expectedTail); } catch { sent = false; }
       if (!sent) this.settle(requestId, null);
       else this.setTimer(() => this.settle(requestId, null), this.forgetAfterMs);
     });
@@ -161,7 +190,8 @@ export class ScreenReadingBroker {
     if (typeof requestId !== 'string') return;
     this.settle(requestId, isScreenReading(reading) ? {
       onPromptRow: reading.onPromptRow, screenCount: reading.screenCount,
-      ...(reading.promptTailMatches === undefined ? {} : { promptTailMatches: reading.promptTailMatches })
+      ...(reading.promptTailMatches === undefined ? {} : { promptTailMatches: reading.promptTailMatches }),
+      ...(reading.codex === undefined ? {} : { codex: reading.codex })
     } : null);
   }
 
@@ -182,5 +212,7 @@ export function isScreenReading(v: unknown): v is ScreenReading {
   const r = v as Record<string, unknown>;
   return typeof r.onPromptRow === 'boolean'
     && typeof r.screenCount === 'number' && Number.isInteger(r.screenCount) && r.screenCount >= 0
-    && (r.promptTailMatches === undefined || typeof r.promptTailMatches === 'boolean');
+    && (r.promptTailMatches === undefined || typeof r.promptTailMatches === 'boolean')
+    // WAKE-SCREEN-GUARD: Codex facts, when present, must be well formed, or it is no answer.
+    && (r.codex === undefined || asCodexScreenFacts(r.codex) !== null);
 }

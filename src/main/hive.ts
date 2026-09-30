@@ -1287,6 +1287,9 @@ export class HiveManager {
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal };
               env.CODEX_HOME = codex.home;
               if (codex.developerInstructions) developerInstructionsSet = true;
+              // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
+              // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
+              preArgs.push('-c', 'check_for_update_on_startup=false');
               // Codex refuses to run hooks from a config dir without persisted
               // "hook trust" (normally an interactive gate). Our hooks.json is
               // hive-authored inside an isolated CODEX_HOME, so we bypass that gate
@@ -3821,6 +3824,9 @@ export class HiveManager {
       // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
       config = setCodexRootTableKeys(config, '', {
         model_auto_compact_token_limit: codexAutoCompactTokenLimitForAgent(autoCompactTokenLimit),
+        // WAKE-SCREEN-GUARD R2-2: Codex 0.157.1's documented root key; false suppresses the
+        // startup update prompt (an agent cannot answer it).
+        check_for_update_on_startup: false,
         // CODEX-BLOAT-165 fix 2 (Settings): the tool-output cap; Off = no key of ours.
         ...(toolOutputTokenLimit !== null ? { tool_output_token_limit: toolOutputTokenLimit } : {})
       });
@@ -4588,6 +4594,8 @@ process.stdin.on('end', () => {
   delete payload.provider_agent_id; // only this shim may set it (N3)
   if (payload.agent_id && payload.agent_id !== hiveId) payload.provider_agent_id = payload.agent_id;
   payload.agent_id = hiveId || payload.agent_id || null;
+  delete payload.munder_wake_incarnation; // WAKE-SCREEN-GUARD R2-4: only this shim may set it
+  if (process.env.MUNDER_WAKE_INCARNATION) payload.munder_wake_incarnation = process.env.MUNDER_WAKE_INCARNATION;
   const sock = process.env.HIVE_SOCK;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.

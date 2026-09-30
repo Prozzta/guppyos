@@ -43,6 +43,8 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
+import { ScreenGuardAlertWatch, WakeIncarnationTokens, WAKE_INCARNATION_ENV } from './codexScreenGuard';
+import type { ScreenGuardRecord } from './automaticSubmit';
 import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { createBootSubmitRowGate } from './bootSubmitLog';
@@ -583,14 +585,43 @@ const providerCapacity = new CapacityRuntime({
 // final check sits next to main's Enter with nothing that can yield between them. See
 // automaticSubmit.ts for the transaction and automaticSubmitWiring.ts for what each of
 // its effects means here.
-const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail) =>
-  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail }));
+const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail, codex) =>
+  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true } : {}) }));
+// WAKE-SCREEN-GUARD: R2-4's per-incarnation tokens, and the F5 watch (codexScreenGuard.ts).
+const wakeIncarnationTokens = new WakeIncarnationTokens();
+const screenGuardAlerts = new ScreenGuardAlertWatch();
+const screenGuardLastReason = new Map<string, string>();
+/** One Codex screen-gate evaluation: a refusal row when the reason CHANGES for the agent (the
+ *  wake beat repeats every refusal), and the alert when a run of refusals lasts. */
+function noteScreenGuard(r: ScreenGuardRecord): void {
+  try {
+    const key = `${r.agentId}|${r.phase}`;
+    if (!r.ok && screenGuardLastReason.get(key) !== r.reason) {
+      hive.appendLog({
+        kind: 'wake-screen-guard', agentId: r.agentId, ptyId: r.ptyId, requestId: r.requestId,
+        provider: 'codex', admissionClass: r.admissionClass, phase: r.phase, reason: r.reason,
+        incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
+        observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched
+      });
+    }
+    if (r.ok) screenGuardLastReason.delete(key); else screenGuardLastReason.set(key, r.reason);
+    // Only automatic starts are waited on; a boot prompt or send-now has its own caller.
+    if (r.admissionClass !== 'CAPACITY_GATED') return;
+    const alert = screenGuardAlerts.note(r.agentId, r.ok, r.reason, Date.now());
+    if (!alert) return;
+    console.error(`[auto-submit] SCREEN GUARD ${alert.agentId}: refused for ${Math.round(alert.refusedMs / 60000)}m (${alert.reason})`);
+    hive.mail.noteScreenGuardAlert(alert.agentId, alert.reason, alert.refusedMs, alert.refusals);
+  } catch { /* diagnostics never decide */ }
+}
 const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   pty: ptyManager,
   capacity: providerCapacity,
   ptyForAgent: (agentId) => ptyForAgent(agentId),
   providerForPty: (ptyId) => ptyProvider.get(ptyId),
   requestScreenReading: (ptyId, needle, expectedTail) => screenReadings.request(ptyId, needle, expectedTail),
+  // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
+  requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
+  onScreenGuard: (r) => noteScreenGuard(r),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
   onEnterWrite: (r) => {
@@ -740,7 +771,16 @@ const hookServer = new HookServer(
   standingGoalFromRoster,
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
-  (agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); },
+  (agentId, event, message, fullyIdle, turnId, source, wakeIncarnation) => {
+    if (agentId) hookSeenAt.set(agentId, Date.now());
+    // WAKE-SCREEN-GUARD R2-4: a Codex SessionStart of the LIVE incarnation latches it past
+    // startup (an extra proof; the screen reading is the usual one). A stale token does nothing.
+    if (event === 'SessionStart' && wakeIncarnation) {
+      const proven = wakeIncarnationTokens.resolve(wakeIncarnation, agentId, { ptyForAgent: (a) => ptyForAgent(a), incarnation: (p) => ptyManager.incarnation(p) });
+      if (proven) automaticSubmit.latchPostHandoff(proven.ptyId, proven.incarnation);
+    }
+    inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source);
+  },
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
@@ -3912,7 +3952,15 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (provider === 'codex' && opts.hive?.id) {
     await enableCodexRemoteForSpawn(opts, opts.hive.id);
   }
+  // WAKE-SCREEN-GUARD R2-4: this Codex incarnation's own token, in its spawn env (the hook
+  // shim copies it into each hook payload). Registered below once the PTY exists.
+  const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
+  if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (wakeToken && res.ok && opts.hive?.id) {
+    wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
+    screenGuardAlerts.clear(opts.hive.id);
+  }
   if (res.ok) analytics.track('agent_spawned', { provider });
   syncKeepAwake(); // arm the power-save blocker while ≥1 agent PTY is alive (#18)
   // Hand the resolved worktree path back to the renderer so it can persist it on

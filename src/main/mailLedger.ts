@@ -1086,6 +1086,23 @@ export class MailLedger {
     return true;
   }
 
+  /**
+   * WAKE-SCREEN-GUARD F5: automatic delivery to a Codex agent has been refused by the screen
+   * gate for minutes on end (its terminal is not proven to be on the chat composer). Logs
+   * `wake-screen-guard-alert` and raises a UI notice through the `hive:integrity` banner (once
+   * per agent per session; the row is per call). A person looks at the screen: nothing here
+   * types into it.
+   */
+  noteScreenGuardAlert(agentId: string, reason: string, refusedMs: number, refusals: number): void {
+    this.log({ kind: 'wake-screen-guard-alert', agentId, reason, refusedMs, refusals });
+    const key = `${agentId}|screen-guard`;
+    if (this.notices.has(key)) return;
+    this.notices.set(key, {
+      file: `state/mail/${agentId}.json`, quarantine: null, error: 'wake-screen-guard',
+      notice: `Automatic delivery to ${agentId} is on hold: its Codex terminal has not been on the chat composer for ${Math.round(refusedMs / 60000)} min (${reason}), so nothing is typed into it. Look at the agent's terminal and finish or close whatever screen it shows (see wake-screen-guard-alert in the log).`
+    });
+  }
+
   // — load —
   private readDir(dir: string): DiskMessage[] {
     let names: string[];

@@ -83,6 +83,8 @@ interface HookPayload {
   /** JOB-ENV (SessionStart): the shim's env AGENT_ID when it disagrees with the --agent id from
    *  the agent's own settings file (a Claude Code background job in another agent's daemon). */
   env_agent_id?: string | null;
+  /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
+  munder_wake_incarnation?: string | null;
   session_id?: string;
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
@@ -306,7 +308,7 @@ export class HookServer {
      *  synchronously BEFORE this server returns its hook response. It must not submit
      *  or block: the inbox-wake bridge only records lifecycle/HITL state here and defers
      *  any retry with setImmediate, so the response (Stop included) is unchanged. */
-    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string) => void,
+    private onEvent?: (agentId: string | undefined, event: string, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string, wakeIncarnation?: string) => void,
     /** L0 — provider allowance observed on the status line. Optional so the server
      *  runs unchanged where no tracker is wired (tests, and any build without L0).
      *  HookServer deliberately does not hold the tracker: it hands over a
@@ -1526,7 +1528,8 @@ export class HookServer {
       // §11.9: `source` (SessionStart startup|resume|clear|compact) reaches the hook diag row.
       this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
         typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
-        typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
+        typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined,
+        typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation ? p.munder_wake_incarnation.slice(0, 80) : undefined);
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
