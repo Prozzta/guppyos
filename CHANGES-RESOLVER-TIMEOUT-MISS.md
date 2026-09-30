@@ -53,7 +53,7 @@ Script `agents/jim-mtujpe28/t12/resmut.cjs`, results `resmut.txt`.
 - **Stated limit:** `index.ts` cannot be loaded in a test, so M10-M14 are killed by source pins, not by behaviour.
 
 ## Suite
-Targeted (the three resolver files, plus `layer-b-codex-resolve` and `cli-install-ladder`): 71 of 71 pass. Typecheck: node and web, clean. Full suite: see the reply.
+Targeted (the three resolver files, plus `layer-b-codex-resolve` and `cli-install-ladder`): 71 of 71 pass. Typecheck: node and web, clean. Full suite on a quiet machine @ f2908d6: **3178 pass, 0 fail, 16 skipped** (3194 tests, 158 s).
 
 ## For Creed's fixture (REFUSES 0.158.0)
 The probe can now build a `CommandResolver({ deps: () => ({ ...nodeResolverDeps(), whereTimeoutMs: 60_000 }) })` and set `self.resolver` to it. The box then never fires, and the retry wrapper can go.
