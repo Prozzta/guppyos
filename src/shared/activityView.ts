@@ -24,7 +24,9 @@ const BUSY_OR_NOT: ReadonlySet<string> = new Set(['idle', 'working', 'thinking',
 export function activityStatus<S extends string>(status: S, rec: LivenessV1 | null | undefined): S | 'working' | 'idle' {
   if (!rec || rec.lifecycle !== 'LIVE' || !BUSY_OR_NOT.has(status)) return status;
   if (rec.classification === 'BUSY_PROGRESSING') return status === 'thinking' ? status : 'working';
-  if (rec.classification === 'IDLE') return 'idle';
+  // Andy S1: 'success' (the turn just finished) is a kind of idle: Stop re-samples IDLE at once,
+  // and turning it into 'idle' would erase the office floor's success glyph and the card's "done".
+  if (rec.classification === 'IDLE') return status === 'success' ? status : 'idle';
   return status;
 }
 

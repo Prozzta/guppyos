@@ -427,7 +427,7 @@ export function useHive(config: HarnessConfig | null): void {
       // CARD-IDLE-WHILE-WORKING: the tool call in progress, for "using X for 7m". Tracked apart
       // from status/action, which the quiescence fallback rewrites while a long tool runs.
       if (e.event === 'PreToolUse' && e.tool) updateAgent(e.agentId, { runningTool: { name: e.tool, since: Date.now() } });
-      else if (e.event === 'PostToolUse' || e.event === 'UserPromptSubmit' || e.event === 'PreCompact'
+      else if (e.event === 'PostToolUse' || e.event === 'PostToolUseFailure' || e.event === 'UserPromptSubmit' || e.event === 'SessionStart' || e.event === 'PreCompact'
         || ((e.event === 'Stop' || e.event === 'SubagentStop') && !e.blocked)) updateAgent(e.agentId, { runningTool: undefined });
       if (e.event === 'PreCompact') {
         // #5C — agent entered /compact; show it's boxing up context, not frozen.

@@ -56,10 +56,15 @@ test('a long-running tool call with no hooks shows as WORKING (liveness BUSY_PRO
 
 K.idleFromLiveness = (A = ACT) => {
   assert.equal(A.activityStatus('working', lv('IDLE')), 'idle', 'A LIVE IDLE RECORD SHOWS IDLE even if no turn-end hook arrived');
-  assert.equal(A.activityStatus('success', lv('BUSY_PROGRESSING')), 'working');
+  assert.equal(A.activityStatus('success', lv('BUSY_PROGRESSING')), 'working', 'liveness is the newer fact in the Stop race');
   assert.equal(A.activityStatus('thinking', lv('BUSY_PROGRESSING')), 'thinking', 'thinking is a kind of working: kept');
 };
 test('busy-or-not follows the classification both ways', () => K.idleFromLiveness());
+
+K.successStaysSuccess = (A = ACT) => {
+  assert.equal(A.activityStatus('success', lv('IDLE')), 'success', 'SUCCESS + IDLE STAYS SUCCESS (the floor\'s glyph, the card\'s "done")');
+};
+test('Andy S1: success + IDLE stays success', () => K.successStaysSuccess());
 
 K.richStatusKept = (A = ACT) => {
   for (const s of ['blocked', 'waiting', 'compacting', 'looping', 'typing', 'ghost']) {
@@ -134,6 +139,7 @@ test('wiring: the store holds liveness + the running tool (never persisted); use
   const hive = readSource('src/renderer/src/hooks/useHive.ts');
   assert.match(hive, /if \(e\.event === 'PreToolUse' && e\.tool\) updateAgent\(e\.agentId, \{ runningTool: \{ name: e\.tool, since: Date\.now\(\) \} \}\);/);
   assert.match(hive, /updateAgent\(e\.agentId, \{ runningTool: undefined \}\);/);
+  assert.match(hive, /e\.event === 'PostToolUse' \|\| e\.event === 'PostToolUseFailure' \|\| e\.event === 'UserPromptSubmit' \|\| e\.event === 'SessionStart' \|\| e\.event === 'PreCompact'/, 'Andy N1: the same ends as main');
   assert.match(hive, /window\.cth\.livenessSnapshot\(\)[\s\S]{0,200}applyLiveness\(r\)/);
   assert.match(hive, /window\.cth\.onLivenessChange\(\(rec\) => \{ if \(rec && rec\.agentId\) useStore\.getState\(\)\.applyLiveness\(rec\); \}\);/);
 });
@@ -188,8 +194,11 @@ const MUTANTS = [
     edits: [["  if (rec.classification === 'BUSY_PROGRESSING') return status === 'thinking' ? status : 'working';\n", '']],
     killer: 'longToolShowsWorking', dies: /A LONG-RUNNING TOOL CALL WITH NO HOOKS SHOWS AS WORKING/ },
   { name: 'a LIVE IDLE record does not show idle', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
-    edits: [["  if (rec.classification === 'IDLE') return 'idle';\n", '']],
+    edits: [["  if (rec.classification === 'IDLE') return status === 'success' ? status : 'idle';\n", '']],
     killer: 'idleFromLiveness', dies: /A LIVE IDLE RECORD SHOWS IDLE/ },
+  { name: 'Andy S1: success erased by an IDLE record', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
+    edits: [["  if (rec.classification === 'IDLE') return status === 'success' ? status : 'idle';", "  if (rec.classification === 'IDLE') return 'idle';"]],
+    killer: 'successStaysSuccess', dies: /SUCCESS \+ IDLE STAYS SUCCESS/ },
   { name: 'liveness overrides a richer status', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
     edits: [["  if (!rec || rec.lifecycle !== 'LIVE' || !BUSY_OR_NOT.has(status)) return status;", "  if (!rec || rec.lifecycle !== 'LIVE') return status;"]],
     killer: 'richStatusKept', dies: /A RICHER STATUS IS KEPT/ },
