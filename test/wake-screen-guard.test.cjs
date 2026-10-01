@@ -156,8 +156,9 @@ test('B2: M3 is the LAST " · " segment: a service tier before it, and the ~ for
   assert.ok(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~', home, home), '~ itself');
   assert.equal(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~\\proj\\a', home + '\\proj\\a'), false, 'no HOME known: ~ is not expanded');
   assert.equal(SHARED.isCodexStatusLine('gpt-5.5 high \u00b7 ~\\proj\\b', home + '\\proj\\a', home), false);
-  assert.equal(SHARED.isCodexStatusLine('\u00b7 ' + CWD, CWD), false, 'a model and an effort come first');
-  assert.equal(SHARED.isCodexStatusLine('gpt-5.5 \u00b7 ' + CWD, CWD), false);
+  assert.equal(SHARED.isCodexStatusLine('\u00b7 ' + CWD, CWD), false, 'at least a model comes first');
+  assert.ok(SHARED.isCodexStatusLine('gpt-5.5 \u00b7 ' + CWD, CWD), 'ONE word before the cwd is enough (WSG-FOLLOWUPS: an empty effort label)');
+  assert.equal(SHARED.isCodexStatusLine(' \u00b7 ' + CWD, CWD), false, 'nothing before the separator');
   const f = { header: 'NONE', startingAfterHeader: false, cursorRow: SHARED.CODEX_EMPTY_COMPOSER_ROW, footer: ['gpt-5.5 high \u00b7 ~\\proj\\a'] };
   assert.equal(SHARED.codexPastStartup(f, home + '\\proj\\a', home).open, true, 'condition 1 takes HOME');
 });
@@ -633,12 +634,62 @@ K.lostTwiceAborted = async (Owner) => {
 };
 test('WSG LIVENESS post-Enter: two Enters proven lost: a VERIFIED erase and a release (ABORTED), not SUBMIT_NOT_ACCEPTED', () => K.lostTwiceAborted());
 
-test('WSG LIVENESS: a human key during the slow wait wins (HUMAN_INPUT_AFTER_STAGE, no Enter, no clear)', async () => {
-  const r = laggy(rig(), 8000);
+K.humanKeyDuringSlowWait = async (Owner) => {
+  const r = laggy(rig({}, Owner), 8000);
+  const t0 = r.now;
   r.timers.push({ at: r.now + 3000, seq: (r.seq += 1), fn: () => { r.human += 1; r.gen += 1; } });
   const out = await r.submit();
   assert.deepEqual(out, { kind: 'INTERFERED', reason: 'HUMAN_INPUT_AFTER_STAGE' });
   assert.deepEqual(r.writes, [TEXT]);
+  // WSG-FOLLOWUPS T-W1: honoured at the next reading, not when the echo finally lands (8 s).
+  assert.ok(r.now - t0 < 3000 + 4 * OWNER.SCREEN_COMMIT_RETRY_MS, `A HUMAN KEY DURING THE SLOW WAIT IS HONOURED AT ONCE (settled after ${r.now - t0} ms)`);
+};
+test('WSG LIVENESS: a human key during the slow wait wins (HUMAN_INPUT_AFTER_STAGE, no Enter, no clear), at once', () => K.humanKeyDuringSlowWait());
+
+// ─── WSG-FOLLOWUPS (1.1.77): the abort's own waits, and a half erase ─────────────────────────
+
+K.humanKeyDuringAbortWait = async (Owner) => {
+  // Past the budget (10 s) the abort waits to SEE our text (it lands at 12 s); a key at 11 s.
+  const r = laggy(rig({}, Owner), 12_000, 1);
+  const t0 = r.now;
+  r.timers.push({ at: r.now + 11_000, seq: (r.seq += 1), fn: () => { r.human += 1; r.gen += 1; } });
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'HUMAN_INPUT_AFTER_STAGE' });
+  assert.deepEqual(r.writes, [TEXT], 'no Ctrl-U over a human key');
+  assert.ok(r.now - t0 < 11_000 + 4 * OWNER.SCREEN_COMMIT_RETRY_MS, `A HUMAN KEY DURING THE ABORT'S WAIT IS HONOURED AT ONCE (settled after ${r.now - t0} ms)`);
+};
+test('WSG-FOLLOWUPS T-W1: a human key during the abort\'s sighting wait is honoured at once', () => K.humanKeyDuringAbortWait());
+
+K.ptyLostDuringAbortWait = async (Owner) => {
+  const r = laggy(rig({}, Owner), 12_000, 1);
+  r.timers.push({ at: r.now + 11_000, seq: (r.seq += 1), fn: () => { r.incarnation = undefined; } });
+  // A dead PTY has no screen: no reading at all from then on.
+  r.readScreenAs = () => (r.incarnation === undefined ? null : { onPromptRow: r.prompt.includes(TEXT), screenCount: r.prompt.includes(TEXT) ? 1 : 0 });
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'FAILED', reason: 'PTY_GONE_AFTER_STAGE' }, 'A PTY LOST DURING THE ABORT\'S WAIT IS FAILED (RELEASED), NOT HELD');
+  assert.deepEqual(r.writes, [TEXT]);
+};
+test('WSG-FOLLOWUPS T-W2: a PTY lost during the abort\'s sighting wait is FAILED, not held', () => K.ptyLostDuringAbortWait());
+
+K.halfEraseHeld = async (Owner) => {
+  // Past the budget, the clear leaves a FRAGMENT of our text: the needle is gone (so the
+  // erase "verifies"), but the composer is not empty and the re-offer's STAGE would refuse.
+  const r = laggy(rig({}, Owner), 12_000, 1);
+  const write = r.deps.write;
+  r.deps.write = (id, d) => (d === '\x15' ? (r.writes.push(d), r.timers.push({ at: r.now, seq: (r.seq += 1), fn: () => { r.prompt = TEXT.slice(0, 6); r.gen += 1; } }), { ok: true }) : write(id, d));
+  const out = await r.submit();
+  assert.deepEqual(r.writes, [TEXT, '\x15']);
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'ERASE_LEFT_RESIDUE', detail: '6 chars of our text left' }, 'A HALF ERASE IS HELD, NOT RELEASED INTO A STAGE THAT REFUSES FOR EVER');
+};
+test('WSG-FOLLOWUPS: a half erase (our fragment left in the composer) is held as ERASE_LEFT_RESIDUE', () => K.halfEraseHeld());
+
+test('WSG-FOLLOWUPS: codexEraseResidue is positive evidence only', () => {
+  const f = (row) => ({ ...facts(fixture('2-trusted-handoff-120x40')), cursorRow: row });
+  assert.equal(OWNER.codexEraseResidue(f(SHARED.CODEX_EMPTY_COMPOSER_ROW), TEXT), null, 'the empty composer');
+  assert.equal(OWNER.codexEraseResidue(f('› '), TEXT), null, 'an empty row');
+  assert.equal(OWNER.codexEraseResidue(f('› somebody else'), TEXT), null, 'not a piece of our text');
+  assert.equal(OWNER.codexEraseResidue(f('› [hive'), TEXT), '[hive');
+  assert.equal(OWNER.codexEraseResidue(f('• Working'), TEXT), null, 'not the composer');
 });
 
 test('a human key in the gap is still HUMAN_INPUT_AFTER_STAGE, not a screen failure', async () => {
@@ -1013,6 +1064,19 @@ const MUTANTS = [
   { name: 'POST-ENTER: two lost Enters held for a person (the old SUBMIT_NOT_ACCEPTED)', file: 'src/main/automaticSubmit.ts',
     edits: [["    if (slowAware) return this.abort(again, 'submit-not-accepted', SCREEN_ABORT_VERIFY_BUDGET_MS);\n", '']],
     killer: 'lostTwiceAborted', dies: /AN ENTER PROVEN LOST TWICE IS ERASED/ },
+  // WSG-FOLLOWUPS (Jim X1 / X4, which survived the liveness round as redundant early exits)
+  { name: 'FOLLOWUPS X1: no human-key check inside the abort\'s sighting wait', file: 'src/main/automaticSubmit.ts',
+    edits: [["      const waiting = postStageGuard(s, deps);\n", '      const waiting = null as ReturnType<typeof postStageGuard>;\n']],
+    killer: 'humanKeyDuringAbortWait', dies: /A HUMAN KEY DURING THE ABORT'S WAIT IS HONOURED AT ONCE/ },
+  { name: 'FOLLOWUPS X1 (PTY): a PTY lost during the abort\'s wait ends held, not FAILED', file: 'src/main/automaticSubmit.ts',
+    edits: [["      const waiting = postStageGuard(s, deps);\n", '      const waiting = null as ReturnType<typeof postStageGuard>;\n']],
+    killer: 'ptyLostDuringAbortWait', dies: /A PTY LOST DURING THE ABORT'S WAIT IS FAILED/ },
+  { name: 'FOLLOWUPS X4: no human-key check on a failed COMMIT reading', file: 'src/main/automaticSubmit.ts',
+    edits: [['          const blocked = postStageGuard(staged, deps);\n          if (blocked) { verdict = blocked; break; }\n', '']],
+    killer: 'humanKeyDuringSlowWait', dies: /A HUMAN KEY DURING THE SLOW WAIT IS HONOURED AT ONCE/ },
+  { name: 'FOLLOWUPS: a half erase released (residue check removed)', file: 'src/main/automaticSubmit.ts',
+    edits: [["      if (residue !== null) return this.interfere(s, 'ERASE_LEFT_RESIDUE', `${residue.length} chars of our text left`);\n", '']],
+    killer: 'halfEraseHeld', dies: /A HALF ERASE IS HELD/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

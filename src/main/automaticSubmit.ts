@@ -33,7 +33,7 @@
  */
 import { ADMISSION_REASON, type AdmissionDecision, type AdmissionVerdict, type WorkClass } from './capacityAdmission';
 import type { PromptBlock } from '../shared/promptState';
-import { classifyCodexComposer, codexPastStartup, type CodexScreenFacts } from '../shared/codexScreen';
+import { CODEX_EMPTY_COMPOSER_ROW, classifyCodexComposer, codexPastStartup, type CodexScreenFacts } from '../shared/codexScreen';
 
 export type { PromptBlock };
 
@@ -449,6 +449,16 @@ export function foreignScreenReason(reason: string): boolean {
   return reason === 'incarnation' || reason.startsWith('startup:');
 }
 
+/** WSG-FOLLOWUPS: after a verified erase, the FRAGMENT of our own text still on the Codex
+ *  composer row (a half erase), or null. Positive evidence only: the empty composer, an empty
+ *  row, or text that is not a piece of ours is not residue. */
+export function codexEraseResidue(facts: CodexScreenFacts, text: string): string | null {
+  const row = facts.cursorRow.trim();
+  if (!row.startsWith('›') || row === CODEX_EMPTY_COMPOSER_ROW) return null;
+  const rest = row.slice(1).trim();
+  return rest !== '' && text.includes(rest) ? rest : null;
+}
+
 /** The claim capacity is re-asked under. Mirrors `capacityRuntime.DeliveryClaim`. */
 export interface OwnerClaim {
   decision: AdmissionDecision;
@@ -575,6 +585,7 @@ export type InterferenceReason =
   | 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE'
   | 'CLEAR_WRITE_FAILED'
   | 'ERASE_NOT_VERIFIED'
+  | 'ERASE_LEFT_RESIDUE'
   | 'ENTER_WRITE_FAILED'
   | 'PRIOR_TEXT_ON_PROMPT'
   | 'PRIOR_TEXT_UNREADABLE'
@@ -1463,6 +1474,14 @@ export class AutomaticSubmitOwner {
     }
     if (!after || after.onPromptRow || after.screenCount >= before.screenCount) {
       return this.interfere(s, 'ERASE_NOT_VERIFIED', after ? `row=${after.onPromptRow} count=${after.screenCount}/${before.screenCount}` : 'no screen reading');
+    }
+    // WSG-FOLLOWUPS: a HALF erase (the needle gone, a fragment of our text left in the Codex
+    // composer) would be refused at the re-offer's STAGE for ever, silently. POSITIVE evidence
+    // of our own residue holds it instead, visibly; nothing more is written.
+    if (this.guardMode(s.ptyId) === 'ENFORCE') {
+      const r = await this.readGuard(s.ptyId);
+      const residue = r && r.incarnation === s.incarnation ? codexEraseResidue(r.facts, s.req.text) : null;
+      if (residue !== null) return this.interfere(s, 'ERASE_LEFT_RESIDUE', `${residue.length} chars of our text left`);
     }
     if (s.decision) deps.capacity.cancelGrant(s.decision);
     return { kind: 'ABORTED', detail: basis };
