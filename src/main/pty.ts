@@ -87,6 +87,22 @@ interface PtySession {
    *  is REQUESTED, so main can tell whether any byte arrived after the screen it describes.
    *  Scoped to this incarnation; equality only. */
   outputGeneration?: number;
+  /** ZERO-TOKEN-LIVENESS: when this incarnation was spawned (the boot-grace clock). */
+  spawnedAt?: number;
+  /** ZERO-TOKEN-LIVENESS: the harness asked for this incarnation to end (kill, window close).
+   *  Set BEFORE the kill, so the exit that follows is EXITED, never CRASHED. */
+  explicitTeardown?: boolean;
+}
+
+/** ZERO-TOKEN-LIVENESS: one PTY incarnation ended. Reported before its session is removed. */
+export interface PtyEndEvent {
+  id: string;
+  incarnation: number;
+  /** The harness requested it (kill / killByOwner); false = the process ended on its own. The
+   *  exit code is evidence only: a requested kill and a crash both exit non-zero on ConPTY. */
+  explicit: boolean;
+  exitCode: number | null;
+  at: number;
 }
 
 /** Process-wide, never reused, so two incarnations can never compare equal. */
@@ -365,6 +381,8 @@ export class PtyManager {
    *  (archive, worktree removal, map cleanup) that the explicit kill() path
    *  runs. Best-effort — set once by the main process. */
   private exitHandler: ((id: string, exitCode?: number) => void) | null = null;
+  /** ZERO-TOKEN-LIVENESS: told of every incarnation's end (requested or not). Observation only. */
+  private endObserver: ((e: PtyEndEvent) => void) | null = null;
   /** STARTUP-TIMING-162: spawn and first-output markers while the start-up recorder runs. */
   private startupHooks: PtyStartupHooks | null = null;
 
@@ -398,6 +416,7 @@ export class PtyManager {
   killByOwner(wc: WebContents): void {
     for (const [id, s] of [...this.sessions.entries()]) {
       if (s.owner === wc) {
+        s.explicitTeardown = true;   // its onExit is the harness's own close, not a crash
         try {
           const pid = s.proc.pid;
           s.proc.kill();
@@ -425,6 +444,17 @@ export class PtyManager {
 
   setExitHandler(handler: (id: string, exitCode?: number) => void): void {
     this.exitHandler = handler;
+  }
+
+  /** ZERO-TOKEN-LIVENESS: observe every incarnation's end (see PtyEndEvent). */
+  setEndObserver(observer: ((e: PtyEndEvent) => void) | null): void {
+    this.endObserver = observer;
+  }
+
+  private reportEnd(id: string, session: PtySession, exitCode: number | null | undefined): void {
+    try {
+      this.endObserver?.({ id, incarnation: session.incarnation, explicit: session.explicitTeardown === true, exitCode: typeof exitCode === 'number' ? exitCode : null, at: Date.now() });
+    } catch { /* an observer never breaks a kill or node-pty's exit callback */ }
   }
 
   /** MEMSPIKE-167: per-PTY traffic since the last takeTraffic() (output chars and chunks sent
@@ -742,7 +772,8 @@ export class PtyManager {
         hasOutput: false,
         owner,
         humanInputGeneration: 0,
-        incarnation: (incarnationSeq += 1)
+        incarnation: (incarnationSeq += 1),
+        spawnedAt: Date.now()
       };
       // Route to the session's owner window (multi-window owner routing), read at SEND
       // time. Batched: one IPC message per burst, not per ~170-byte conpty chunk.
@@ -757,6 +788,7 @@ export class PtyManager {
         if (this.sessions.get(opts.id) !== session) return;
         session.out?.flush(); // every byte before the exit notice, as before batching
         this.safeSend(`pty:exit:${opts.id}`, { exitCode, signal }, session.owner);
+        this.reportEnd(opts.id, session, exitCode);   // ZERO-TOKEN-LIVENESS: before the session goes
         this.sessions.delete(opts.id);
         // Natural exit must run the same lifecycle teardown as an explicit kill.
         // Guarded so a teardown error can never crash node-pty's exit callback.
@@ -879,10 +911,13 @@ export class PtyManager {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
     try {
+      s.explicitTeardown = true;   // ZERO-TOKEN-LIVENESS: marked BEFORE the kill
       s.out?.flush(); // what arrived before the kill still belongs on this pty's screen
       const pid = s.proc.pid;
       s.proc.kill();
       ensureKilled(pid); // verify + sweep the process group so no PID leaks
+      // kill() deletes the session now, so node-pty's later onExit is swallowed: report the end here.
+      this.reportEnd(id, s, null);
       this.sessions.delete(id);
       return { ok: true };
     } catch (e) {
@@ -904,6 +939,14 @@ export class PtyManager {
   /** PROBE-REISSUE (B): the last PTY_TAIL_CHARS of raw output, or undefined if no such PTY. */
   tail(id: string): string | undefined {
     return this.sessions.get(id)?.tail;
+  }
+
+  /** ZERO-TOKEN-LIVENESS: the live incarnation's identity and REAL output time. `lastTrafficAt` is
+   *  0 until the child's first onData: the spawn-time stamp in `lastOutputAt` is not traffic. */
+  livenessFacts(id: string): { incarnation: number; spawnedAt: number; lastTrafficAt: number } | undefined {
+    const s = this.sessions.get(id);
+    if (!s) return undefined;
+    return { incarnation: s.incarnation, spawnedAt: s.spawnedAt ?? 0, lastTrafficAt: s.hasOutput ? s.lastOutputAt : 0 };
   }
 
   /** Epoch ms of this PTY's most recent output, or undefined if no such PTY. */

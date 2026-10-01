@@ -106,6 +106,9 @@ export interface InboxWakeBridgeDeps {
   confirmsTurnStart?: (agentId: string) => boolean;
   /** ZT-I1-MAIL slice 3: the mail ledger's epochs and channel (see InboxWakeMail). */
   mail?: InboxWakeMail;
+  /** ZERO-TOKEN-LIVENESS: told (synchronously) BEFORE the WWR recovers an agent or reports that it
+   *  gave up. Observation only. Optional: absent, the WWR runs exactly as in 1.1.76. */
+  liveness?: { stuckWake(agentId: string, reason: 'wwr-recovering' | 'wwr-max-recoveries'): void };
 }
 
 export class InboxWakeBridge {
@@ -450,7 +453,16 @@ export class InboxWakeBridge {
     // silence never overrides it, not even the quiet rule.
     if (probe && probe.ok && probe.latest?.kind === 'started') return;
     if (probe && probe.ok && probe.latest?.kind === 'complete') proof = { turnId: probe.latest.turnId, at: probe.latest.at };
-    const out = this.deps.coordinator.recoverStuckActive(agentId, f, inboxIds.length, this.deps.now(), proof);
+    const now = this.deps.now();
+    // ZERO-TOKEN-LIVENESS: RECORD FIRST. The same predicate, read without changing anything; the
+    // liveness monitor persists STUCK_WAKE (one log row, synchronously) before the recovery below
+    // changes the epoch. The monitor decides nothing: the WWR stays the only recovery owner.
+    const pre = this.deps.liveness ? this.deps.coordinator.assessStuckActive(agentId, f, inboxIds.length, now, proof) : null;
+    if (pre) {
+      try { this.deps.liveness?.stuckWake(agentId, pre.kind === 'gave-up' ? 'wwr-max-recoveries' : 'wwr-recovering'); }
+      catch { /* a liveness failure never blocks the recovery */ }
+    }
+    const out = this.deps.coordinator.recoverStuckActive(agentId, f, inboxIds.length, now, proof);
     if (!out) return;
     const row = { agentId, basis: out.basis, quietMs: out.quietMs, activeSince: out.activeSince, ids: inboxIds.length };
     if (out.kind === 'gave-up') {
@@ -467,6 +479,22 @@ export class InboxWakeBridge {
     }
     this.endMailWatch(agentId);
     this.recovered.add(agentId);
+  }
+
+  /**
+   * ZERO-TOKEN-LIVENESS: a PERSON clicked "re-offer mail" on an agent the watchdog gave up on
+   * (liveness STUCK_WAKE / wwr-max-recoveries). The stuck epoch ends (to `unknown`) and its mail
+   * epochs end abnormally, exactly as a quiet recovery; the next reconcile beat re-offers through
+   * every guard (12 s PTY quiet, the fresh rollout check, the submit owner). Nothing is submitted
+   * here, and nothing but this click calls it. Returns false when there is nothing to re-offer.
+   */
+  onOperatorReoffer(agentId: string): boolean {
+    if (!agentId || !this.deps.coordinator.operatorReoffer(agentId, this.deps.inboxIds(agentId))) return false;
+    try { this.deps.mail?.abortSince(agentId, 0, 'operator-reoffer'); } catch { /* best effort */ }
+    this.endMailWatch(agentId);
+    this.recovered.add(agentId);
+    this.deps.diag?.('stuck-active', { agentId, recovered: true, why: 'operator-reoffer' });
+    return true;
   }
 
   /** Agents the watchdog recovered whose mail was not re-offered yet (see reofferHeld). */

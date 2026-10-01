@@ -1193,6 +1193,8 @@ export class HiveManager {
     // Jim LOW residual (god-approved): the registry entry (its provider above all) was just
     // (re)written by a spawn, respawn or relaunch; a reader's cached copy is stale NOW.
     for (const cb of this.provisionedListeners) { try { cb(meta.id); } catch { /* a listener never breaks a spawn */ } }
+    // ZERO-TOKEN-LIVENESS (Dwight F2): a (re)spawn of an ARCHIVED agent is a restore edge.
+    if (prev?.archived === true) this.emitArchiveChange(meta.id, false);
 
     this.appendLog({ kind: 'spawn', agentId: meta.id, name: meta.name, isGod: !!meta.isGod });
     // Q32 refinement (god 0f1672): a restore brings back mail set aside in inbox/.undelivered/.
@@ -1516,6 +1518,7 @@ export class HiveManager {
       agent.lastSeen = Date.now();
       this.atomicWriteJson(join(root, 'registry.json'), reg);
       this.appendLog({ kind: 'archive', agentId: id, archived, ...(archived ? { reason } : {}) });
+      this.emitArchiveChange(id, archived);
       if (!archived) this.restoreUndelivered(id);
       else if (reason === 'explicit') this.setAsideUndelivered(id);
     } catch { /* best-effort — never crash a lifecycle handler */ }
@@ -2434,6 +2437,17 @@ export class HiveManager {
 
   private deliveryObserver: ((delivery: InboxDelivery) => void) | null = null;
   private readonly provisionedListeners = new Set<(agentId: string) => void>();
+  /** ZERO-TOKEN-LIVENESS (Dwight F2): told after the registry's archived flag CHANGED (an archive by
+   *  any path: teardown, IPC, a realtime action, the boot orphan sweep; a restore by setArchived or a
+   *  respawn). Observation only; a listener never breaks the write. */
+  private readonly archiveListeners = new Set<(agentId: string, archived: boolean) => void>();
+  onArchiveChange(cb: (agentId: string, archived: boolean) => void): () => void {
+    this.archiveListeners.add(cb);
+    return () => { this.archiveListeners.delete(cb); };
+  }
+  private emitArchiveChange(agentId: string, archived: boolean): void {
+    for (const cb of [...this.archiveListeners]) { try { cb(agentId, archived); } catch { /* a listener never breaks the write */ } }
+  }
   /** Called with the agent id each time ensureAgent (every spawn, respawn and relaunch) has
    *  written its registry entry. Returns the unsubscribe. */
   onAgentProvisioned(cb: (agentId: string) => void): () => void {
@@ -4249,11 +4263,12 @@ export class HiveManager {
   }
 
   /** Write the live fleet snapshot Michael reads (`fleet.json`, gitignored).
-   *  Best-effort — called from a timer, must never throw. */
+   *  Best-effort — called from a timer, must never throw. ZERO-TOKEN-LIVENESS (Jim L6): atomic
+   *  (temp file + rename), so a reader (god, a CLI, ZT-I3) never sees a torn file. */
   writeFleetSnapshot(snapshot: unknown): void {
     const root = this.root();
     if (!root) return;
-    try { writeFileSync(join(root, 'fleet.json'), JSON.stringify(snapshot, null, 2), 'utf8'); } catch { /* noop */ }
+    try { this.atomicWriteJson(join(root, 'fleet.json'), snapshot); } catch { /* noop */ }
   }
 
   /** Is this agent the hive's god/orchestrator? */

@@ -38,6 +38,9 @@ import {
   type AgentProvider
 } from '@/store/config';
 import { canReceiveInbox } from '@shared/agentProvider';
+import type { LivenessV1 } from '@shared/livenessV1';
+import { applyLivenessUpdate } from '@shared/livenessView';
+import { LivenessChip, LivenessSummary } from './LivenessChip';
 
 /** Michael's control surface. Shown instead of the plain terminal/files panel
  *  when the god agent is selected: terminal + queue, the floor roster (with
@@ -390,6 +393,23 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
   const [issuesLoading, setIssuesLoading] = useState(false);
   const [issuesError, setIssuesError] = useState<string | null>(null);
 
+  // ZERO-TOKEN-LIVENESS: liveness-v1 records, DATA ONLY. The startup snapshot, every edge main
+  // pushes, and a 15 s re-read (so evidence ages stay current) only ever store records; no control
+  // is invoked from here. Older samples never replace newer ones (applyLivenessUpdate).
+  const [liveness, setLiveness] = useState<Record<string, LivenessV1>>({});
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      window.cth.livenessSnapshot()
+        .then((recs) => { if (alive && Array.isArray(recs)) setLiveness((m) => recs.reduce(applyLivenessUpdate, m)); })
+        .catch(() => { /* main not ready: the next read retries */ });
+    };
+    load();
+    const timer = setInterval(load, 15_000);
+    const off = window.cth.onLivenessChange((rec) => { if (rec && rec.agentId) setLiveness((m) => applyLivenessUpdate(m, rec)); });
+    return () => { alive = false; clearInterval(timer); if (typeof off === 'function') off(); };
+  }, []);
+
   useEffect(() => {
     window.cth.getConfig().then((c) => {
       setRepos(c.registeredRepos ?? []);
@@ -648,6 +668,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
       </Section>
 
       <Section title="AGENTS">
+        <LivenessSummary records={Object.values(liveness)} />
         {agents.map((a) => {
           const agentProvider = inferAgentProvider(a.command, a.provider);
           const agentPreset = providerPreset(agentProvider);
@@ -692,6 +713,14 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                 }}
               >{a.name}{a.isGod ? ' (god)' : ''}</button>
               <AgentImpactBadge agentId={a.id} status={armed ? 'looping' : a.status} showText />
+              {/* ZERO-TOKEN-LIVENESS: state, duration, evidence; its offers fire on a click only. */}
+              <LivenessChip
+                rec={liveness[a.id]}
+                now={Date.now()}
+                onInspect={() => select(a.id)}
+                onRestartContinue={() => restartWithModel(a, a.model, { resume: true })}
+                onReoffer={() => { void window.cth.livenessReoffer(a.id); }}
+              />
               {armed && <span title={breaker?.reason} style={{ color: 'var(--cth-coral)', fontSize: 12 }}>⚠</span>}
               <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--cth-ink-500)' }}>
                 {(toolCounts[a.id] ?? 0)} tool calls
