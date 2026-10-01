@@ -49,6 +49,8 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
   await t.test('busy + armed: metrics, stack, heap, profile, file; time-boxed; main never blocked', () => {
     const b = r.busy;
     assert.equal(b.armed, true);
+    // RPROF-LOAD (gate #4): this arm NAMES the loop; its budget is a hang guard, not the product's 5 s.
+    assert.equal(b.captureTimeoutMs, 25_000, 'the busy arm runs with the hang-guard budget');
     assert.equal(b.profile.profile, 'ok', JSON.stringify(b.profile));
     assert.ok(b.profile.metrics && b.profile.metrics.JSHeapUsedSize > 50, `Performance.getMetrics from the busy renderer: ${JSON.stringify(b.profile.metrics)}`);
     assert.ok(b.profile.stack && b.profile.stack[0].startsWith('runawayAllocator'), `paused inside the loop: ${JSON.stringify(b.profile.stack)}`);
@@ -72,6 +74,10 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     const u = r.unarmed;
     assert.equal(u.profile.profile, 'timeout', JSON.stringify(u.profile));
     assert.equal(u.profile.stage, 'arm');
+    // RPROF-LOAD: the PRODUCTION default box, load-independently: this arm passes no timeoutMs, and a
+    // stuck renderer cannot arm, so it spends the whole default (load can only make it longer).
+    assert.equal(u.captureTimeoutMs, null, 'the unarmed arm keeps the production default');
+    assert.ok(u.profile.ms >= 4_900, `the 5 s PROFILE_TIMEOUT_MS box was spent, not a shorter one: ${u.profile.ms} ms`);
     assert.equal(u.attachedAfter, false, 'never leaves a dead session attached');
     assert.ok(u.profile.ms < 30_000, `time-boxed (hang guard): ${u.profile.ms} ms`);
     assert.ok(u.worstGapMs < 30_000, `main not blocked (hang guard): worst gap ${u.worstGapMs} ms`);
@@ -79,6 +85,7 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
 
   await t.test('idle + armed: no stack (nothing to pause), a profile, and the page still answers', () => {
     const i = r.idle;
+    assert.equal(i.captureTimeoutMs, 25_000, 'the idle arm runs with the hang-guard budget');
     assert.equal(i.profile.profile, 'ok', JSON.stringify(i.profile));
     assert.equal(i.profile.stack, null);
     assert.equal(i.profile.stacks, undefined, 'no extra pauses spent on an idle renderer');
@@ -91,4 +98,17 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     assert.equal(r.foreign.got, 'continued');
     assert.equal(r.foreign.foreignResumes, 1);
   });
+});
+
+test('RPROF-LOAD pins: the production budget is 5 s, the app passes no other, and a give-up is a visible row', () => {
+  const fs = require('node:fs');
+  const loadTs = require('./load-ts.cjs');
+  assert.equal(loadTs('src/main/rendererRecovery.ts').PROFILE_TIMEOUT_MS, 5_000);
+  const idx = fs.readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  // The one production capture uses the default budget (no timeoutMs), and its row spreads the
+  // whole result: a timeout logs profile 'timeout', the stage it stopped in, error and ms.
+  assert.match(idx, /void probe\.capture\(\{ write: \(json\) => saveRendererProfile\(join\(app\.getPath\('userData'\), 'renderer-profiles'\), pid, json\) \}\)/);
+  assert.match(idx, /hive\.appendLog\(\{ kind: 'renderer-memory-profile', pid, mb: mbNow, foreignResumes: probe\.foreignResumes, \.\.\.r \}\)/);
+  const rr = fs.readFileSync(join(__dirname, '..', 'src', 'main', 'rendererRecovery.ts'), 'utf8');
+  assert.match(rr, /return \{ \.\.\.out, profile: \/\^\(pause-send\|resume\|profiler-start\|profiler-stop\)\$\/\.test\(why\) \? 'timeout' : 'failed', stage, error: why, ms: Date\.now\(\) - t0, gaveUp: true \};/);
 });
