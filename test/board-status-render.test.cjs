@@ -85,3 +85,14 @@ test('the writer folds a burst of changes into one write per interval (MBS1)', (
   w.request();
   assert.equal(reads, 2, 'once the interval passed, the next change writes');
 });
+
+test('the app-start row is read once per launch, not on every render (Jim S6)', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-board-status-s6-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const log = path.join(root, 'log.jsonl');
+  fs.writeFileSync(log, JSON.stringify({ ts: NOW, kind: 'app-start', version: '1.1.77', packaged: true }) + '\n');
+  const w = new BoardStatusWriter({ root: () => root, tasks: () => ({ tasks: [] }), taskMeta: () => ({}), flags: () => [] }, () => NOW);
+  assert.match(w.write(), /Munder Difflin 1\.1\.77/);
+  fs.writeFileSync(log, JSON.stringify({ ts: NOW + 1, kind: 'app-start', version: '9.9.9', packaged: true }) + '\n');
+  assert.match(w.write(), /Munder Difflin 1\.1\.77/, 'cached: the log is not re-read');
+});

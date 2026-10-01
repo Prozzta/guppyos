@@ -145,3 +145,31 @@ test('the flags file is not rewritten when only time passes, even as evidence ag
   assert.notEqual(monitor.flags()[0].evidence, evidence, 'the evidence text did roll');
   assert.equal(fs.readFileSync(file, 'utf8'), first, 'the published file did not');
 });
+
+test('the top-level fleet.json liveness[] (agentLiveness.fleetRecords shape) is read, keyed by agentId', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  fs.writeFileSync(path.join(r.root, 'fleet.json'), JSON.stringify({ ts: NOW, agents: [{ id: 'jim', lastActiveSecAgo: 5 }],
+    liveness: [{ agentId: 'jim', incarnation: 'j1', lifecycle: 'LIVE', classification: 'STUCK_WAKE', classifiedSince: NOW - 1000, reason: 'wake-refused', evidence: { sampledAt: NOW } }] }));
+  r.monitor.tick();
+  assert.deepEqual(r.monitor.flags().map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_STUCK']);
+});
+
+test('an in-process getLiveness wins and is consulted per agent (the app wiring)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  const asked = [];
+  const monitor = new BoardMonitor({ hive: r.hive, now: () => NOW, getLiveness: (id) => {
+    asked.push(id);
+    return id === 'jim' ? { agentId: 'jim', incarnation: 'j1', lifecycle: 'LIVE', classification: 'CRASHED', classifiedSince: NOW - 40 * 60_000, reason: 'pty-exit', evidence: { sampledAt: NOW } } : undefined;
+  } });
+  monitor.tick();
+  assert.ok(asked.includes('jim'));
+  assert.deepEqual(monitor.flags().map((f) => `${f.cardId}:${f.kind}${f.decision ? '!' : ''}`), ['A:ASSIGNEE_DOWN!']);
+});
+
+test('index.ts wires the liveness join: getLiveness into the monitor, and every liveness change ticks it', () => {
+  const { readSource, codeOnly } = require('./read-source.cjs');
+  const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  const ctor = index.slice(index.indexOf('const boardMonitor = new BoardMonitor({'), index.indexOf('});', index.indexOf('const boardMonitor = new BoardMonitor({')));
+  assert.match(ctor, /getLiveness: \(id\) => agentLiveness\.getLiveness\(id\),/);
+  assert.match(index, /agentLiveness\.onLivenessChange\(\(\) => \{ try \{ boardMonitor\.tick\(\); \}/);
+});

@@ -70,13 +70,16 @@ export class BoardMonitor {
     const fleet = new Map<string, FleetFacts>();
     const liveness = new Map<string, LivenessV1>();
     try {
-      const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { ts?: number; agents?: Array<Record<string, unknown>> };
+      const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { ts?: number; agents?: Array<Record<string, unknown>>; liveness?: unknown[] };
       const ts = typeof snap.ts === 'number' ? snap.ts : this.now();
+      // fix/177-liveness publishes the records as a TOP-LEVEL liveness[] (agentLiveness
+      // fleetRecords), keyed by agentId; agents[].liveness is read too, as a second source.
+      for (const rec of Array.isArray(snap.liveness) ? snap.liveness : []) if (isLiveness(rec)) liveness.set(rec.agentId, rec);
       for (const a of Array.isArray(snap.agents) ? snap.agents : []) {
         if (typeof a.id !== 'string') continue;
         const sec = typeof a.lastActiveSecAgo === 'number' ? a.lastActiveSecAgo : null;
         fleet.set(a.id, { lastActiveAt: sec === null ? null : ts - sec * 1000, onHold: a.onHold === true });
-        if (isLiveness(a.liveness)) liveness.set(a.id, a.liveness);
+        if (isLiveness(a.liveness) && !liveness.has(a.id)) liveness.set(a.id, a.liveness);
       }
     } catch { /* no fleet.json yet: no pre-liveness STALE, which only under-flags */ }
     return { fleet, liveness };

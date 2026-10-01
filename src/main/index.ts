@@ -418,6 +418,9 @@ const hive = new HiveManager(
  *  re-runs on every applied ledger change, and on its own 60 s tick. */
 const boardMonitor = new BoardMonitor({
   hive,
+  // The liveness join (Jim, god ab966e): the monitor reads Dwight's records in process.
+  // agentLiveness is declared below; this runs only when the monitor ticks, after start.
+  getLiveness: (id) => agentLiveness.getLiveness(id),
   cfg: () => readConfig().floorDigest ?? {},
   // A flag appeared or cleared: re-render board-status.md and re-run the digest (which wakes
   // god only for a NEW decision item, batched).
@@ -594,6 +597,8 @@ hive.onArchiveChange((agentId) => { sampleLiveness(agentId); });
 agentLiveness.onLivenessChange((rec) => {
   try { liveWebContents()?.send('liveness:changed', rec); } catch { /* window torn down */ }
 });
+// ZT-I3 §3.2: the board monitor re-runs on every liveness change (classification/lifecycle edge).
+agentLiveness.onLivenessChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
 /** Recompute every agent's liveness (the 15-second beat), over one registry read. */
 function sampleLivenessAll(): void {
   if (!hive.enabled()) return;

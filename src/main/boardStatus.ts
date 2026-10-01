@@ -11,7 +11,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById } from '../shared/taskLedger';
-import { ageText, writeTextAtomic, type DigestAgent } from './floorDigest';
+import { ageText, readFleetAgents, writeTextAtomic, type DigestAgent } from './floorDigest';
 
 export const BOARD_STATUS_FILE = 'board-status.md';
 export const BOARD_STATUS_MIN_INTERVAL_MS = 10_000;
@@ -132,6 +132,9 @@ export interface BoardStatusHost {
 export class BoardStatusWriter {
   private lastWriteAt = -Infinity;
   private pending: ReturnType<typeof setTimeout> | null = null;
+  /** Jim S6: the app-start row changes only at launch, so it is read from log.jsonl (6 MB
+   *  live) once per launch and hive root, never on every render. */
+  private appStart: { root: string; value: AppStart } | null = null;
 
   constructor(private readonly host: BoardStatusHost, private readonly now: () => number = Date.now) {}
 
@@ -139,13 +142,14 @@ export class BoardStatusWriter {
   write(): string | null {
     const root = this.host.root();
     if (!root) return null;
-    let agents: DigestAgent[] = [];
-    try {
-      const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { agents?: DigestAgent[] };
-      agents = Array.isArray(snap.agents) ? snap.agents.filter((a) => a && typeof a.id === 'string') : [];
-    } catch { /* no fleet snapshot yet */ }
+    const agents: DigestAgent[] = readFleetAgents(root);
     const now = this.now();
-    const md = renderBoardStatus({ tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(), agents, appStart: readAppStart(root), now });
+    if (this.appStart?.root !== root) {
+      const value = readAppStart(root);
+      if (value) this.appStart = { root, value };
+    }
+    const appStart = this.appStart?.root === root ? this.appStart.value : null;
+    const md = renderBoardStatus({ tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(), agents, appStart, now });
     writeTextAtomic(join(root, BOARD_STATUS_FILE), md);
     this.lastWriteAt = now;
     return md;

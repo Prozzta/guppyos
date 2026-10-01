@@ -150,6 +150,19 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   return { markdown: out.join('\n'), decisionItems: items };
 }
 
+/** fleet.json's agents, each joined with its liveness record (the top-level liveness[] that
+ *  fix/177-liveness publishes, keyed by agentId; an agents[].liveness is kept if present). */
+export function readFleetAgents(root: string): DigestAgent[] {
+  try {
+    const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { agents?: DigestAgent[]; liveness?: Array<{ agentId?: string; classification?: string; reason?: string }> };
+    const byId = new Map<string, { classification?: string; reason?: string }>();
+    for (const r of Array.isArray(snap.liveness) ? snap.liveness : []) if (r && typeof r.agentId === 'string') byId.set(r.agentId, r);
+    return (Array.isArray(snap.agents) ? snap.agents : [])
+      .filter((a) => a && typeof a.id === 'string')
+      .map((a) => (a.liveness || !byId.has(a.id) ? a : { ...a, liveness: byId.get(a.id) }));
+  } catch { return []; }
+}
+
 export interface WakeState {
   /** decision item id -> when god was woken for it. */
   woken: Record<string, number>;
@@ -190,7 +203,7 @@ export interface FloorDigestHost {
   taskMeta(): Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags(): BoardFlag[];
   ledgerIssues(): LedgerIssue[];
-  send(msg: { to: string; act: 'request'; subject: string; body: string }, from: string): void;
+  send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
 
@@ -211,12 +224,7 @@ export class FloorDigest {
     private readonly now: () => number = Date.now
   ) {}
 
-  private agents(root: string): DigestAgent[] {
-    try {
-      const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { agents?: DigestAgent[] };
-      return Array.isArray(snap.agents) ? snap.agents.filter((a) => a && typeof a.id === 'string') : [];
-    } catch { return []; }
-  }
+  private agents(root: string): DigestAgent[] { return readFleetAgents(root); }
 
   private loadState(root: string): WakeState {
     try {
@@ -244,7 +252,9 @@ export class FloorDigest {
     const before = this.loadState(root);
     const { wake, state } = decideGodWake(items, before, now, this.cfg().wakeBatchMs);
     if (wake.length > 0) {
-      this.host.send({ to: 'god', act: 'request', subject: `Floor: ${wake.length} decision(s)`, body: wakeBody(wake, join(root, FLOOR_DIGEST_FILE)) }, DIGEST_SENDER);
+      // Jim: act INFORM. A request from 'digest' left god a reply obligation nobody could
+      // close (one per wake); an inform from a non-system sender is still actionable mail.
+      this.host.send({ to: 'god', act: 'inform', subject: `Floor: ${wake.length} decision(s)`, body: wakeBody(wake, join(root, FLOOR_DIGEST_FILE)) }, DIGEST_SENDER);
       this.host.appendLog({ kind: 'floor-digest-wake', items: wake.map((i) => i.id) });
     }
     if (JSON.stringify(state) !== JSON.stringify(before)) {

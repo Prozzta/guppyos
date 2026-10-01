@@ -104,7 +104,7 @@ test('the scheduler writes floor-digest.md and sends ONE decision wake as "diges
   r.clock.now += 10 * MIN;
   r.digest.run();
   assert.equal(r.sent.length, 1);
-  assert.deepEqual([r.sent[0].to, r.sent[0].act, r.sent[0].subject, r.sent[0].from], ['god', 'request', 'Floor: 1 decision(s)', 'digest']);
+  assert.deepEqual([r.sent[0].to, r.sent[0].act, r.sent[0].subject, r.sent[0].from], ['god', 'inform', 'Floor: 1 decision(s)', 'digest']);
   assert.match(r.sent[0].body, /^- \[stale:A:2026-10-01\] A: STALE evidence - still doing\?/);
   assert.doesNotMatch(r.sent[0].body, /DOING_MANY/, 'informational flags never reach the wake');
   r.clock.now += 60 * MIN;
@@ -133,4 +133,24 @@ test('an answered-but-blocked card wakes god once per ANSWER: a new answer re-ar
   assert.equal(r.wake.length, 0, 'the same answer never wakes again, on any day');
   r = decideGodWake(decisionItems(ask(5000), [], NOW + 86_400_000), r.state, NOW + 86_400_000, 0);
   assert.deepEqual(r.wake.map((i) => i.id), ['ask_answered_idle:Q:5000']);
+});
+
+test('a digest wake is actionable for god but leaves NO reply obligation (Jim S5)', async (t) => {
+  const { HiveManager } = loadTs('src/main/hive.ts');
+  const R = loadTs('src/main/mailReaders.ts');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-digest-oblig-'));
+  const hive = new HiveManager(() => home);
+  t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
+  hive.ensureHive();
+  const root = hive.root();
+  await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
+  const clock = { now: NOW };
+  const digest = new FloorDigest({
+    root: () => root, tasks: () => ({ tasks: [] }), taskMeta: () => ({}), ledgerIssues: () => [],
+    flags: () => [flag('A', 'ASSIGNEE_STUCK', true)], send: (m, from) => { hive.send(m, from); }, appendLog: () => {}
+  }, () => ({ ...FLOOR_DIGEST_DEFAULTS, wakeBatchMs: 0 }), () => clock.now);
+  assert.equal(digest.run().length, 1);
+  const f = R.fleetMailFields(hive.mail, 'god-1');
+  assert.equal(R.actionableBacklog(hive.mail, 'god-1'), 1, 'god sees it as actionable mail');
+  assert.deepEqual([f.openRequestCount, f.awaitingReplyCount], [0, 0], 'and owes nobody a reply');
 });
