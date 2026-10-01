@@ -358,6 +358,14 @@ export interface HeavyHolder {
 /** A process created this long after its call's PostToolUse still belongs to the call (a
  *  backgrounded job's processes start as its call returns). */
 export const HEAVY_CALL_SLACK_MS = 3_000;
+/**
+ * Jim H1: a window is also bounded by its START. A heavy call's job is started by the call itself
+ * (its shell, launcher or exec process appears within moments of the PreToolUse), and everything the
+ * job spawns later is counted through ancestry. So a window never needs to stay open longer than this
+ * after its start, and an UNPAIRED call (a degraded Codex hook: its PostToolUse never reaches
+ * callDone) can no longer leave an open-ended window that claims the agent's later processes.
+ */
+export const HEAVY_CALL_SPAWN_MS = 60_000;
 
 /** One process of the listing. `createdMs` (epoch ms) is what the watcher judges by (Jim MF3). */
 export interface ProcRow { pid: number; parentPid: number; commandLine: string; createdMs?: number }
@@ -505,7 +513,8 @@ export class HeavyJobLock {
     // after the acquire counted.
     const t = this.now();
     const inWindow = (h: HeavyHolder, created: number | undefined): boolean => typeof created === 'number'
-      && h.windows.some((w) => created >= w.start - HEAVY_CREATED_SKEW_MS && created <= (w.end ?? t) + HEAVY_CALL_SLACK_MS);
+      && h.windows.some((w) => created >= w.start - HEAVY_CREATED_SKEW_MS
+        && created <= Math.min((w.end ?? t) + HEAVY_CALL_SLACK_MS, w.start + HEAVY_CALL_SPAWN_MS));
     const ofJob = (h: HeavyHolder, pid: number): boolean => {
       const seen = new Set<number>();
       let cur = byPid.get(pid);

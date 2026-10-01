@@ -141,6 +141,34 @@ test('(b) a BACKGROUND heavy call: its job (started as the call returns) keeps t
   assert.equal(x.l.snapshot().length, 0, 'the suite ended; the later tail loop does not hold the slot');
 });
 
+test('Jim H1: an UNPAIRED (degraded Codex) heavy call whose PostToolUse never comes cannot claim the agent\'s later processes', async () => {
+  // Jim's probe scenario: the suite runs 3 min and exits; 10 min later the agent runs `git status`.
+  let procs = BASE;
+  const x = lock(1, { roots: () => [{ agentId: 'dwight', pid: 10 }], probe: async () => procs });
+  x.l.acquire('dwight', H, 'node test/tools/run-tests.cjs', 'cmd:node test/tools/run-tests.cjs', true);   // unpaired = background
+  const start = x.at();
+  procs = [...BASE, { pid: 60, parentPid: 11, commandLine: 'pwsh -c node test/tools/run-tests.cjs', createdMs: start + 400 }, { pid: 61, parentPid: 60, commandLine: 'node run-tests.cjs', createdMs: start + 900 }];
+  for (let i = 0; i < 9; i++) { x.tick(HEAVY_SCAN_MS); await x.l.scan(); }   // 3 min: running
+  assert.equal(x.l.snapshot().length, 1, 'held while the suite runs');
+  procs = BASE;   // the suite exited
+  x.tick(10 * 60_000);
+  procs = [...BASE, { pid: 70, parentPid: 11, commandLine: 'pwsh -c git status', createdMs: x.at() - 1000 }];
+  for (let i = 0; i < 4; i++) { x.tick(HEAVY_SCAN_MS); await x.l.scan(); }
+  assert.equal(x.l.snapshot().length, 0, 'released: the later git status is not the job (was: held to the 60-min TTL)');
+  assert.equal(x.logs.at(-1).reason, 'process-exit');
+});
+
+test('Jim H1: the bound never cuts the job itself: a late child of a process started in the window still counts', async () => {
+  let procs = BASE;
+  const x = lock(1, { roots: () => [{ agentId: 'dwight', pid: 10 }], probe: async () => procs });
+  x.l.acquire('dwight', H, 'npm ci', 'cmd:npm ci', true);
+  const start = x.at();
+  x.tick(20 * 60_000);
+  procs = [...BASE, { pid: 80, parentPid: 11, commandLine: 'npm ci', createdMs: start + 300 }, { pid: 81, parentPid: 80, commandLine: 'node-gyp', createdMs: start + 15 * 60_000 }];
+  x.tick(HEAVY_SCAN_MS); await x.l.scan(); x.tick(HEAVY_SCAN_MS); await x.l.scan();
+  assert.equal(x.l.snapshot().length, 1);
+});
+
 test('(b) re-entry: each heavy call has its own window', async () => {
   const x = lock(1, { roots: () => [{ agentId: 'a', pid: 10 }], probe: async () => BASE });
   x.l.acquire('a', H, 'npm ci', 'c1', false);
