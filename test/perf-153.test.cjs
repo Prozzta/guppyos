@@ -248,6 +248,27 @@ test('PERF153-R1: a reply whose BODY never reaches EOF prints nothing, never a p
   assert.equal(r.out, '', 'printed only after the server\'s EOF');
 });
 
+/** Jim's P1: the 2nd `-t` read returns 142 (a timeout) without reading, so the header loop ends with
+ *  no blank line seen, on an INSTANT full reply: no clock involved. `for a in "$@"` because the script
+ *  calls `IFS= read`, so "$*" would join the words with no separator. */
+const SECOND_READ_TIMES_OUT = 'read() { local a; for a in "$@"; do if [ "$a" = -t ]; then __n=$((${__n:-0}+1)); if [ "$__n" = 2 ]; then return 142; fi; fi; done; builtin read "$@"; }; ';
+
+test('PERF153-R1: a header read that TIMES OUT (simulated, no clock) prints nothing, even when the full reply then arrives', { skip: !HAVE_BASH }, async (t) => {
+  const server = net.createServer((c) => {
+    let got = '';
+    c.on('data', (d) => { got += d; if (got.includes('\r\n\r\n')) c.end('HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nctx 45k/200k (23%)'); });
+    c.on('error', () => {});
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  const file = path.join(fs.mkdtempSync(path.join(JAIL, 'sh-')), 'claude-status.sh');
+  fs.writeFileSync(file, CLAUDE_STATUS_SH);
+  const r = await runStatusLine(SECOND_READ_TIMES_OUT + claudeStatusCommand(file.replace(/\\/g, '/'), { port: server.address().port, agentId: 'a1', token: TOK }), JSON.stringify(STATUS), { PATH: '' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '', 'the header loop timed out: nothing, never the rest of the reply with its headers');
+  assert.equal(r.err, '');
+});
+
 test('PERF153-R1: the status script still uses builtins only, and prints only after its reply loop ended at EOF', () => {
   assert.match(CLAUDE_STATUS_SH, /\[ -n "\$seen" \] \|\| \{ exec 3<&- 3>&-; return 0; \}/);
   assert.match(CLAUDE_STATUS_SH, /\[ \$rc -gt 128 \] && out=''; break; done\n  exec 3<&- 3>&-\n  printf '%s' "\$out"/);
