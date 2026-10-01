@@ -198,7 +198,6 @@ const REPLY_LINK_MUTANTS = [
 
 test('MUTANT CENSUS REPLY-LINK-GAP: reply-schema mutants apply once and die at the link guarantee', async (t) => {
   const source = readSource('src/main/hive.ts');
-  const mainDir = path.join(__dirname, '..', 'src', 'main');
   for (const [i, mutant] of REPLY_LINK_MUTANTS.entries()) {
     await t.test(`mutant: ${mutant.name}`, async (subtest) => {
       await replyLinkGapKiller(subtest, HiveManager);
@@ -207,18 +206,11 @@ test('MUTANT CENSUS REPLY-LINK-GAP: reply-schema mutants apply once and die at t
         assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
         text = text.replace(from, to);
       }
-      const file = path.join(mainDir, `.hive-reply-link-mutant-${i}.ts`);
-      fs.writeFileSync(file, text, 'utf8');
-      try {
-        const relative = path.relative(path.resolve(__dirname, '..'), file);
-        const { HiveManager: Mutant } = loadTs(relative);
-        let died = null;
-        try { await replyLinkGapKiller(subtest, Mutant); } catch (e) { died = e; }
-        assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name}`);
-        assert.match(died.message, /REPLY-LINK GAP/, `${mutant.name} died at the wrong assertion`);
-      } finally {
-        fs.rmSync(file, { force: true });
-      }
+      const { HiveManager: Mutant } = loadTs.fromText('src/main/hive.ts', text);
+      let died = null;
+      try { await replyLinkGapKiller(subtest, Mutant); } catch (e) { died = e; }
+      assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name}`);
+      assert.match(died.message, /REPLY-LINK GAP/, `${mutant.name} died at the wrong assertion`);
     });
   }
 });

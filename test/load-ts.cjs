@@ -16,10 +16,14 @@ function resolveTs(fromDir, request) {
   return null;
 }
 
-function loadFile(filename) {
-  const cached = cache.get(filename);
+function loadFile(filename, sourceOverride) {
+  // A mutation census can provide altered source while retaining the real filename
+  // for relative-import resolution. Keep that virtual module distinct from the
+  // ordinary cached module without materialising a scanner-visible .ts file.
+  const cacheKey = sourceOverride === undefined ? filename : `virtual:${filename}:${sourceOverride}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached.exports;
-  const source = fs.readFileSync(filename, 'utf8');
+  const source = sourceOverride ?? fs.readFileSync(filename, 'utf8');
   const output = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
@@ -45,7 +49,7 @@ function loadFile(filename) {
     }));
   }
   const mod = { exports: {} };
-  cache.set(filename, mod);
+  cache.set(cacheKey, mod);
   const localRequire = (request) => {
     if (request.startsWith('.') || request.startsWith('@shared/')) {
       const resolved = resolveTs(path.dirname(filename), request);
@@ -61,4 +65,9 @@ function loadFile(filename) {
 /** Load a TypeScript module and its local TypeScript imports for node:test. */
 module.exports = function loadTs(relativePath) {
   return loadFile(path.resolve(__dirname, '..', relativePath));
+};
+
+/** Load altered test-only TypeScript without writing it into the source tree. */
+module.exports.fromText = function loadTsFromText(relativePath, source) {
+  return loadFile(path.resolve(__dirname, '..', relativePath), source);
 };
