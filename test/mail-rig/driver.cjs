@@ -190,6 +190,8 @@ class Rig {
     }
     const diags = await call('diags', {});
     lines.push('wake: ' + (Array.isArray(diags) ? diags : []).filter((d) => d.agentId === agentId && !['enter', 'facts', 'schedule'].includes(d.stage)).map((d) => `${d.stage}:${d.why ?? d.outcome ?? d.event ?? ''}`).join(' '));
+    const outs = await call('outcomes', {});
+    for (const o of (Array.isArray(outs) ? outs : [])) if (o.agentId === agentId) lines.push('outcome ' + o.cls + ' ' + JSON.stringify(o.outcome));
     for (const r of this.transcript(agentId)) {
       if (r.kind === 'hook') lines.push(`stub hook ${r.event} transport=${r.transport} exit=${r.exit} ms=${r.ms ?? null} t=${r.t ?? null} response=${r.response ? JSON.stringify(r.response).slice(0, 120) : null}`);
       else if (['prompt', 'context', 'turn-end', 'cue', 'exit', 'host-gone'].includes(r.kind)) lines.push(`stub ${r.kind} ${JSON.stringify({ t: r.t, event: r.event, ids: r.ids, how: r.how, cue: r.cue?.cue })}`);

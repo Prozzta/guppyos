@@ -452,9 +452,11 @@ K.outputBeforeEnterHolds = async (Owner) => {
   r.afterRead = () => { if (r.writes.length === 1) r.gen += 1; };
   const out = await r.submit();
   assert.deepEqual(r.writes, [TEXT], 'OUTPUT AFTER THE POST-STAGE READING: NO ENTER');
-  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'SCREEN_NOT_VERIFIED_AFTER_STAGE', detail: 'output after every reading' });
+  // WSG LIVENESS: past the slow budget the abort runs; this rig's abort oracle never sees our
+  // text, so nothing is cleared and the text is held for a person.
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', detail: 'no screen reading' });
 };
-test('output after the post-stage reading, every time: no Enter, held for a person', () => K.outputBeforeEnterHolds());
+test('output after the post-stage reading, every time: no Enter; past the budget an erase that cannot see our text is held', () => K.outputBeforeEnterHolds());
 
 test('output after the post-stage reading ONCE: a fresh reading, then the Enter', async () => {
   const r = rig();
@@ -465,14 +467,119 @@ test('output after the post-stage reading ONCE: a fresh reading, then the Enter'
   assert.deepEqual(r.reads, ['empty?', 'own?', 'own?']);
 });
 
-test('the screen changes after STAGE (our text no longer the composer): no Enter, held', async () => {
+test('the screen changes after STAGE to a Codex STARTUP screen (foreign): no Enter, no slow wait; the erase cannot see our text, so held', async () => {
   const r = rig();
   r.onWrite = (d) => { if (d === TEXT) r.screen = '2-trusted-draft'; };
   const out = await r.submit();
   assert.deepEqual(r.writes, [TEXT], 'no Enter');
-  assert.equal(out.kind, 'INTERFERED');
-  assert.equal(out.reason, 'SCREEN_NOT_VERIFIED_AFTER_STAGE');
-  assert.equal(r.reads.filter((x) => x === 'own?').length, OWNER.SCREEN_COMMIT_READS, 'bounded re-reads');
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', detail: 'no screen reading' });
+  assert.equal(r.reads.filter((x) => x === 'own?').length, 1, 'foreign: one reading, then the abort');
+  assert.equal(r.guard.at(-1).reason, 'startup:header-loading');
+});
+
+// ─── WSG LIVENESS (rc/1.1.76 ISO): a SLOW echo is waited for; past the budget, a VERIFIED erase ──
+
+/** The TUI processes (and so echoes) each write `lagMs` late, IN ORDER; only the first `chunks`
+ *  writes are delayed. Ctrl-U clears the composer. The abort oracle sees our text in it. */
+function laggy(r, lagMs, chunks = Infinity) {
+  let n = 0; let last = 0;
+  r.deps.write = (_id, d) => {
+    r.writes.push(d);
+    if (r.enterOnNull && d === '\r' && r.lastGuardNull) r.violations.push('Enter after a null reading');
+    const delayed = n < chunks; if (delayed) n += 1;
+    const due = Math.max(r.now + (delayed ? lagMs : 0), last); last = due;
+    const apply = () => { if (d === '\r' || d === '\x15') r.prompt = ''; else r.prompt += d; r.gen += 1; };
+    if (due <= r.now) apply(); else r.timers.push({ at: due, seq: (r.seq += 1), fn: apply });
+    return { ok: true };
+  };
+  r.deps.readScreen = () => Promise.resolve(r.readScreenAs ? r.readScreenAs() : { onPromptRow: r.prompt.includes(TEXT), screenCount: r.prompt.includes(TEXT) ? 1 : 0 });
+  return r;
+}
+
+K.slowEchoCommits = async (Owner, lagMs = 1500) => {
+  const r = laggy(rig({}, Owner), lagMs);
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'COMMITTED' }, `A SLOW ECHO (${lagMs} ms) IS WAITED FOR, THEN ENTERED`);
+  assert.deepEqual(r.writes, [TEXT, '\r'], 'the text, then ONE Enter, no erase');
+  assert.ok(r.reads.filter((x) => x === 'own?').length > 3, 'more than the old 3 readings');
+};
+test('WSG LIVENESS: an echo 1.5 s late (Creed ISO repro) is waited for and COMMITTED', () => K.slowEchoCommits());
+test('WSG LIVENESS: an echo 5 s late is waited for and COMMITTED', () => K.slowEchoCommits(OWNER.AutomaticSubmitOwner, 5000));
+
+K.noReadingIsNeverEvidence = async (Owner) => {
+  const r = rig({ violations: [], enterOnNull: true }, Owner);
+  laggy(r, 0);
+  let nulls = 6;
+  const real = r.deps.readGuardScreen;
+  r.deps.readGuardScreen = (id, tail) => {
+    if (tail !== undefined && nulls > 0) { nulls -= 1; r.lastGuardNull = true; r.reads.push('own?'); return Promise.resolve(null); }
+    r.lastGuardNull = false;
+    return real(id, tail);
+  };
+  const out = await r.submit();
+  assert.deepEqual(r.violations, [], 'NO ENTER ON A NULL READING');
+  assert.deepEqual(out, { kind: 'COMMITTED' }, 'six missing readings, then a real one: COMMITTED');
+  assert.deepEqual(r.writes, [TEXT, '\r']);
+};
+test('WSG LIVENESS: missing readings (the oracle starved) are re-read, never taken as proof', () => K.noReadingIsNeverEvidence());
+
+K.overBudgetAborts = async (Owner) => {
+  // The FIRST write (our text) is processed 12 s late; the clear and everything after are not.
+  const r = laggy(rig({}, Owner), 12_000, 1);
+  const out = await r.submit('w1');
+  assert.deepEqual(r.writes, [TEXT, '\x15'], 'PAST THE BUDGET: A VERIFIED ERASE, NEVER AN ENTER');
+  assert.equal(out.kind, 'ABORTED', `PAST THE BUDGET: ABORTED (released for a re-offer), got ${JSON.stringify(out)}`);
+  assert.match(out.detail, /^screen-not-verified:/);
+  assert.equal(r.prompt, '', 'the composer is empty again');
+  // The re-offer, through the normal path: the same owner, a fresh request.
+  assert.deepEqual(await r.submit('w2'), { kind: 'COMMITTED' }, 'the re-offer commits');
+  assert.deepEqual(r.writes, [TEXT, '\x15', TEXT, '\r']);
+};
+test('WSG LIVENESS: an echo later than the budget gives a VERIFIED erase (ABORTED), and the re-offer COMMITS', () => K.overBudgetAborts());
+
+K.foreignAborts = async (Owner) => {
+  // After STAGE the reading comes from ANOTHER incarnation's screen: foreign, so no slow wait.
+  const r = laggy(rig({}, Owner), 0);
+  r.onWrite = undefined;
+  const realWrite = r.deps.write;
+  r.deps.write = (id, d) => { const w = realWrite(id, d); if (d === TEXT) r.stampIncarnation = 2; return w; };
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'ABORTED', detail: 'screen-foreign:incarnation' }, 'A FOREIGN SCREEN IS ERASED (VERIFIED) AT ONCE');
+  assert.deepEqual(r.writes, [TEXT, '\x15']);
+  assert.equal(r.reads.filter((x) => x === 'own?').length, 1, 'no slow re-reading for a foreign screen');
+};
+test('WSG LIVENESS: a foreign screen after STAGE is aborted (verified erase) at once, not waited for', () => K.foreignAborts());
+
+test('WSG LIVENESS: the foreign/slow split', () => {
+  for (const s of ['incarnation', 'startup:header-loading', 'startup:session-starting', 'startup:no-header']) assert.equal(OWNER.foreignScreenReason(s), true, s);
+  for (const s of ['no-reading', 'READY:empty-composer', 'UNKNOWN:not-the-empty-composer', 'UNKNOWN:transient-footer']) assert.equal(OWNER.foreignScreenReason(s), false, s);
+});
+
+K.unverifiableEraseHolds = async (Owner) => {
+  // Never echoed within the budgets, and the abort oracle never sees our text: no clear at all.
+  const never = laggy(rig({}, Owner), 60_000);
+  never.readScreenAs = () => ({ onPromptRow: false, screenCount: 0 });
+  const a = await never.submit();
+  assert.deepEqual(never.writes, [TEXT], 'NO CTRL-U BEFORE OUR TEXT IS POSITIVELY SEEN');
+  assert.deepEqual(a, { kind: 'INTERFERED', reason: 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', detail: 'not on the prompt row' });
+  const own = never.reads.filter((x) => x === 'own?').length;
+  assert.ok(own > 3 && own <= OWNER.SCREEN_COMMIT_SLOW_BUDGET_MS / OWNER.SCREEN_COMMIT_RETRY_MS + 2, `SLOW RE-READS ARE BOUNDED BY THE BUDGET, got ${own}`);
+  // Seen, cleared, but the TUI ignores the clear: the erase is never proven, so it is held.
+  const stuck = laggy(rig({}, Owner), 12_000, 1);
+  stuck.readScreenAs = () => ({ onPromptRow: stuck.prompt.includes(TEXT) || stuck.writes.includes('\x15'), screenCount: 1 });
+  const b = await stuck.submit();
+  assert.deepEqual(stuck.writes, [TEXT, '\x15']);
+  assert.equal(b.kind, 'INTERFERED', 'AN ERASE THAT IS NOT PROVEN IS HELD');
+  assert.equal(b.reason, 'ERASE_NOT_VERIFIED');
+};
+test('WSG LIVENESS: an erase that cannot be proven stays INTERFERED (held for a person)', () => K.unverifiableEraseHolds());
+
+test('WSG LIVENESS: a human key during the slow wait wins (HUMAN_INPUT_AFTER_STAGE, no Enter, no clear)', async () => {
+  const r = laggy(rig(), 8000);
+  r.timers.push({ at: r.now + 3000, seq: (r.seq += 1), fn: () => { r.human += 1; r.gen += 1; } });
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'HUMAN_INPUT_AFTER_STAGE' });
+  assert.deepEqual(r.writes, [TEXT]);
 });
 
 test('a human key in the gap is still HUMAN_INPUT_AFTER_STAGE, not a screen failure', async () => {
@@ -806,6 +913,34 @@ const MUTANTS = [
   { name: 'the reader takes the OLDEST header', file: 'src/shared/codexScreen.ts',
     edits: [['  for (let title = length - 1; title >= 0; title -= 1) {', '  for (let title = 0; title < length; title += 1) {']],
     shared: true, killer: 'newestHeaderOnly', dies: /ONLY THE NEWEST HEADER COUNTS/ },
+  // WSG LIVENESS (rc/1.1.76 ISO)
+  { name: 'LIVENESS: the slow budget ignored (the first failed reading aborts)', file: 'src/main/automaticSubmit.ts',
+    edits: [['          if (deps.now() >= slowDeadline) return this.abort(staged, `screen-not-verified:${g.reason}`', '          if (true) return this.abort(staged, `screen-not-verified:${g.reason}`']],
+    killer: 'slowEchoCommits', dies: /A SLOW ECHO \(1500 ms\) IS WAITED FOR/ },
+  { name: 'LIVENESS: SLOW treated as FOREIGN', file: 'src/main/automaticSubmit.ts',
+    edits: [["  return reason === 'incarnation' || reason.startsWith('startup:');", '  return true;']],
+    killer: 'slowEchoCommits', dies: /A SLOW ECHO \(1500 ms\) IS WAITED FOR/ },
+  { name: 'LIVENESS: FOREIGN waited for like SLOW', file: 'src/main/automaticSubmit.ts',
+    edits: [['          if (foreignScreenReason(g.reason)) return this.abort(staged, `screen-foreign:${g.reason}`);\n', '']],
+    killer: 'foreignAborts', dies: /A FOREIGN SCREEN IS ERASED \(VERIFIED\) AT ONCE/ },
+  { name: 'LIVENESS: past the budget, held for a person (the old behaviour)', file: 'src/main/automaticSubmit.ts',
+    edits: [['return this.abort(staged, `screen-not-verified:${g.reason}`, SCREEN_ABORT_VERIFY_BUDGET_MS);', "return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', g.reason);"]],
+    killer: 'overBudgetAborts', dies: /PAST THE BUDGET: A VERIFIED ERASE, NEVER AN ENTER/ },
+  { name: 'LIVENESS: released for a re-offer WITHOUT an erase', file: 'src/main/automaticSubmit.ts',
+    edits: [['return this.abort(staged, `screen-not-verified:${g.reason}`, SCREEN_ABORT_VERIFY_BUDGET_MS);', "{ if (staged.decision) deps.capacity.cancelGrant(staged.decision); return { kind: 'ABORTED', detail: `screen-not-verified:${g.reason}` }; }"]],
+    killer: 'overBudgetAborts', dies: /PAST THE BUDGET: A VERIFIED ERASE, NEVER AN ENTER/ },
+  { name: 'LIVENESS: the abort reads only once (its verify budget ignored)', file: 'src/main/automaticSubmit.ts',
+    edits: [['    const seenBy = deps.now() + verifyBudgetMs;', '    const seenBy = deps.now();']],
+    killer: 'overBudgetAborts', dies: /PAST THE BUDGET: A VERIFIED ERASE, NEVER AN ENTER/ },
+  { name: 'LIVENESS: a missing reading taken as proof (Enter on a null reading)', file: 'src/main/automaticSubmit.ts',
+    edits: [["    if (!r) verdict = { ok: false, reason: 'no-reading' };", '    if (!r) verdict = { ok: true, gen: deps.outputGeneration?.(ptyId) ?? 0 };']],
+    killer: 'noReadingIsNeverEvidence', dies: /NO ENTER ON A NULL READING/ },
+  { name: 'LIVENESS: Ctrl-U before our text is positively seen', file: 'src/main/automaticSubmit.ts',
+    edits: [["    if (!before || !before.onPromptRow || before.screenCount < 1) {\n      return this.interfere(s, 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE'", "    if (!before) {\n      return this.interfere(s, 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE'"]],
+    killer: 'unverifiableEraseHolds', dies: /NO CTRL-U BEFORE OUR TEXT IS POSITIVELY SEEN/ },
+  { name: 'LIVENESS: the erase taken on trust (gone-check dropped)', file: 'src/main/automaticSubmit.ts',
+    edits: [["    if (!after || after.onPromptRow || after.screenCount >= before.screenCount) {\n      return this.interfere(s, 'ERASE_NOT_VERIFIED'", "    if (!after) {\n      return this.interfere(s, 'ERASE_NOT_VERIFIED'"]],
+    killer: 'unverifiableEraseHolds', dies: /AN ERASE THAT IS NOT PROVEN IS HELD/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
