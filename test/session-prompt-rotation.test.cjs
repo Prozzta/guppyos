@@ -117,10 +117,17 @@ test('instructions still count: mail mode, role and the spawn-queue line change 
   assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isAssistant: true }).variant, 'claude|inject|assistant');
 });
 
-test('LEGACY_175 table: 16 variants, and 1.1.76 does not change the instruction text (nobody rotates at install)', (t) => {
+test('LEGACY_175 table: 16 variants; 1.1.77 changes the GOD instruction text only (god rotates at install, workers and the assistant do not)', (t) => {
   // TRIPWIRE. If a later change edits the prompt's instructions, this fails: the install of that
   // build will rotate every 1.1.75-era session, which is then correct. Do NOT regenerate the table
   // (it describes what 1.1.75 sessions got); change this assertion to notEqual deliberately.
+  // 1.1.77 (ZT-I3/I4) DELIBERATELY changed god's prompt: the harness keeps board-status.md and
+  // floor-digest.md and wakes god for decisions, instead of god polling fleet.json; plus the
+  // "parked" marker. So the god and god+spawn variants rotate once at the 1.1.77 install (god
+  // starts a fresh conversation; identity, memory, inbox and ledger kept). Workers and the
+  // assistant are unchanged: PROTOCOL.md is a file, not injected text.
+  // Ruling: god 2026-10-01 (dc06a9, conv-be5f29) accepted the one-time god reset; keep every
+  // other god-prompt edit of 1.1.77 inside fix/177-zt-i3-i4 so the reset happens once.
   assert.equal(Object.keys(LEGACY_175_PROMPT_FP).length, 16);
   for (const role of ['worker', 'assistant', 'god', 'god+spawn']) {
     const hive = promptHive(t, { maySpawn: role === 'god+spawn' });
@@ -129,7 +136,8 @@ test('LEGACY_175 table: 16 variants, and 1.1.76 does not change the instruction 
       hive.promptMailMode = () => mode;
       const cur = hive.sessionPromptFingerprint(meta);
       assert.equal(cur.variant, `claude|${mode}|${role}`);
-      assert.equal(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], cur.variant);
+      if (role.startsWith('god')) assert.notEqual(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], `${cur.variant} rotates at the 1.1.77 install`);
+      else assert.equal(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], cur.variant);
     }
   }
 });
