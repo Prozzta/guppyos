@@ -597,8 +597,6 @@ hive.onArchiveChange((agentId) => { sampleLiveness(agentId); });
 agentLiveness.onLivenessChange((rec) => {
   try { liveWebContents()?.send('liveness:changed', rec); } catch { /* window torn down */ }
 });
-// ZT-I3 §3.2: the board monitor re-runs on every liveness change (classification/lifecycle edge).
-agentLiveness.onLivenessChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
 /** Recompute every agent's liveness (the 15-second beat), over one registry read. */
 function sampleLivenessAll(): void {
   if (!hive.enabled()) return;
@@ -6590,6 +6588,8 @@ ipcMain.handle('workers:stop', (_evt, workerId: string): { ok: boolean; error?: 
 /** Start every hive-bound background service against the current harnessHome.
  *  Called on boot, and again to recover in place if a folder-change copy fails
  *  (config:changeHome tears these down before copying). No-op without a home. */
+/** The board monitor's liveness subscription (ZT-I3), replaced on each bootstrap. */
+let boardLivenessUnsub: (() => void) | null = null;
 function bootstrapHiveServices(): void {
   if (!hive.enabled()) return;
   hive.ensureHive();
@@ -6633,6 +6633,11 @@ function bootstrapHiveServices(): void {
   // ZT-I3: the task-ledger guard (watch only; it never writes tasks.json).
   try { hive.startLedgerGuard(); } catch (e) { console.error('[hive] startLedgerGuard:', e); }
   try { boardMonitor.start(); } catch (e) { console.error('[hive] boardMonitor.start:', e); }
+  // ZT-I3 §3.2: the board monitor (the CONSUMER) re-runs on every liveness edge. Wired here, with
+  // the consumer, so the liveness producer's own code never touches the board (Dwight's M15 pin).
+  // bootstrapHiveServices can run again (onboarding, home change): replace, never stack.
+  boardLivenessUnsub?.();
+  boardLivenessUnsub = agentLiveness.onLivenessChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
   try { floorDigest.start(); boardStatus.request(); } catch (e) { console.error('[hive] floorDigest.start:', e); }
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers
   // Phase 2: the loopback secret broker. Bind it BEFORE workers spawn so each spawn can
