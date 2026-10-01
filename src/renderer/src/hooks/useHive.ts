@@ -17,6 +17,7 @@ import type { AgentProvider } from '../../../shared/agentProvider';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
+import { toolEnded, toolStarted } from '@shared/activityView';
 import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition } from './queueDelivery';
 import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
@@ -426,9 +427,10 @@ export function useHive(config: HarnessConfig | null): void {
       // pty-stream parser only refines the on-floor action/station).
       // CARD-IDLE-WHILE-WORKING: the tool call in progress, for "using X for 7m". Tracked apart
       // from status/action, which the quiescence fallback rewrites while a long tool runs.
-      if (e.event === 'PreToolUse' && e.tool) updateAgent(e.agentId, { runningTool: { name: e.tool, since: Date.now() } });
-      else if (e.event === 'PostToolUse' || e.event === 'PostToolUseFailure' || e.event === 'UserPromptSubmit' || e.event === 'SessionStart' || e.event === 'PreCompact'
-        || ((e.event === 'Stop' || e.event === 'SubagentStop') && !e.blocked)) updateAgent(e.agentId, { runningTool: undefined });
+      if (e.event === 'PreToolUse' && e.tool) updateAgent(e.agentId, { runningTools: toolStarted(self.runningTools, e.tool, Date.now()) });
+      else if (e.event === 'PostToolUse' || e.event === 'PostToolUseFailure') updateAgent(e.agentId, { runningTools: toolEnded(self.runningTools, e.tool) });
+      else if (e.event === 'UserPromptSubmit' || e.event === 'SessionStart' || e.event === 'PreCompact'
+        || ((e.event === 'Stop' || e.event === 'SubagentStop') && !e.blocked)) updateAgent(e.agentId, { runningTools: undefined });
       if (e.event === 'PreCompact') {
         // #5C — agent entered /compact; show it's boxing up context, not frozen.
         if (!breakerArmed) updateAgent(e.agentId, { status: 'compacting', action: 'compacting context', carrying: undefined });

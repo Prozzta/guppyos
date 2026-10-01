@@ -13,7 +13,8 @@ const ACTIVITY_TICK_MS = 15_000;
  */
 export function useActivity(agentId: string | undefined, status: StatusKind): { status: StatusKind; toolText: string | null } {
   const rec = useStore((s) => (agentId ? s.liveness[agentId] : undefined));
-  const tool = useStore((s) => (agentId ? s.agents.find((a) => a.id === agentId)?.runningTool : undefined));
+  // The oldest tool still running (Jim N1: parallel tools).
+  const tool = useStore((s) => (agentId ? s.agents.find((a) => a.id === agentId)?.runningTools?.[0] : undefined));
   const [now, setNow] = useState(() => Date.now());
   const shown = activityStatus(status, rec) as StatusKind;
   const toolText = runningToolText(shown, tool, now);

@@ -58,9 +58,9 @@ export interface Agent {
   /** User-authored private note shown and edited from the roster-card hover. */
   note?: string;
   status: StatusKind;
-  /** CARD-IDLE-WHILE-WORKING (1.1.78): the tool call in progress (from PreToolUse until its
-   *  PostToolUse / the turn's end). Run-state: never persisted. */
-  runningTool?: RunningTool;
+  /** CARD-IDLE-WHILE-WORKING (1.1.78): the tool calls in progress, oldest first (from each
+   *  PreToolUse until its PostToolUse / the turn's end). Run-state: never persisted. */
+  runningTools?: RunningTool[];
   action: string;
   progress: number;
   currentStation?: StationKind;
@@ -426,8 +426,8 @@ try {
 } catch { /* not a browser context (unit tests) */ }
 
 function slimAgents(agents: Agent[]): PersistedAgent[] {
-  return agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, seedPrompt, runningTool, ...rest }) => {
-    void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit; void seedPrompt; void runningTool;
+  return agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, seedPrompt, runningTools, ...rest }) => {
+    void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit; void seedPrompt; void runningTools;
     return rest;
   });
 }
@@ -450,7 +450,7 @@ function persistAgents(agents: Agent[], selectedId: string | null): void {
 const VOLATILE_AGENT_FIELDS = new Set<keyof Agent>([
   'status', 'action', 'progress', 'currentStation', 'carrying',
   'recentAssistantText', 'recentTextTs', 'blockReason',
-  'contextTokens', 'contextLimit', 'lastPrompt', 'runningTool'
+  'contextTokens', 'contextLimit', 'lastPrompt', 'runningTools'
 ]);
 
 function touchesDurableAgentField(patch: Partial<Agent>): boolean {

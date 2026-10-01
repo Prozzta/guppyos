@@ -129,17 +129,32 @@ K.runningToolTracked = (Hook = HOOKS.HookServer) => {
 };
 test('main knows each agent\'s tool in progress from its own hooks', () => K.runningToolTracked());
 
+K.parallelToolsKept = (A = ACT, Hook = HOOKS.HookServer) => {
+  let l = A.toolStarted(undefined, 'Bash', NOW - 9 * MIN);
+  l = A.toolStarted(l, 'Grep', NOW - MIN);
+  l = A.toolEnded(l, 'Grep');
+  assert.deepEqual(l.map((t) => t.name), ['Bash'], 'A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING');
+  assert.deepEqual(A.toolEnded(l, 'Bash'), []);
+  assert.deepEqual(A.toolEnded([{ name: 'Bash', since: 1 }, { name: 'Bash', since: 2 }], 'Bash').map((t) => t.since), [2], 'one of that name, the oldest');
+  const s = hookServer(Hook);
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash' });
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Grep' });
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Grep' });
+  assert.equal(s.runningTool('andy')?.name, 'Bash', 'A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING (main)');
+};
+test('Jim N1: a parallel tool\'s PostToolUse ends that tool only', () => K.parallelToolsKept());
+
 // ─── Wiring: every display reads it ─────────────────────────────────────────────────────
 
 test('wiring: the store holds liveness + the running tool (never persisted); useHive feeds both', () => {
   const store = readSource('src/renderer/src/store/store.ts');
   assert.match(store, /applyLiveness: \(rec\) => set\(\(s\) => \{\s*const liveness = applyLivenessUpdate\(s\.liveness, rec\);/);
-  assert.match(store, /'contextTokens', 'contextLimit', 'lastPrompt', 'runningTool'\s*\]\);/, 'run-state: a running-tool patch is no durable write');
-  assert.match(store, /seedPrompt, runningTool, \.\.\.rest \}\)/, 'and never persisted');
+  assert.match(store, /'contextTokens', 'contextLimit', 'lastPrompt', 'runningTools'\s*\]\);/, 'run-state: a running-tool patch is no durable write');
+  assert.match(store, /seedPrompt, runningTools, \.\.\.rest \}\)/, 'and never persisted');
   const hive = readSource('src/renderer/src/hooks/useHive.ts');
-  assert.match(hive, /if \(e\.event === 'PreToolUse' && e\.tool\) updateAgent\(e\.agentId, \{ runningTool: \{ name: e\.tool, since: Date\.now\(\) \} \}\);/);
-  assert.match(hive, /updateAgent\(e\.agentId, \{ runningTool: undefined \}\);/);
-  assert.match(hive, /e\.event === 'PostToolUse' \|\| e\.event === 'PostToolUseFailure' \|\| e\.event === 'UserPromptSubmit' \|\| e\.event === 'SessionStart' \|\| e\.event === 'PreCompact'/, 'Andy N1: the same ends as main');
+  assert.match(hive, /if \(e\.event === 'PreToolUse' && e\.tool\) updateAgent\(e\.agentId, \{ runningTools: toolStarted\(self\.runningTools, e\.tool, Date\.now\(\)\) \}\);/);
+  assert.match(hive, /else if \(e\.event === 'PostToolUse' \|\| e\.event === 'PostToolUseFailure'\) updateAgent\(e\.agentId, \{ runningTools: toolEnded\(self\.runningTools, e\.tool\) \}\);/, 'Jim N1: one tool ends, not all');
+  assert.match(hive, /else if \(e\.event === 'UserPromptSubmit' \|\| e\.event === 'SessionStart' \|\| e\.event === 'PreCompact'\s*\|\| \(\(e\.event === 'Stop' \|\| e\.event === 'SubagentStop'\) && !e\.blocked\)\) updateAgent\(e\.agentId, \{ runningTools: undefined \}\);/, 'the turn ends: none left (Andy N1: the same ends as main)');
   assert.match(hive, /window\.cth\.livenessSnapshot\(\)[\s\S]{0,200}applyLiveness\(r\)/);
   assert.match(hive, /window\.cth\.onLivenessChange\(\(rec\) => \{ if \(rec && rec\.agentId\) useStore\.getState\(\)\.applyLiveness\(rec\); \}\);/);
 });
@@ -160,6 +175,14 @@ test('wiring: the card, the roster row, the panel, the Command Center badge and 
   assert.match(floor, /const applyState = \(hookAgent: Agent, rt: Runtime, force = false\) => \{\s*\/\/[^\n]*\n\s*const agent = shownAgent\(hookAgent\);/);
   assert.match(floor, /return a \? shownAgent\(a\) : undefined;/);
   assert.match(floor, /if \(s\.agents !== prev\.agents \|\| s\.liveness !== prev\.liveness\) syncAgents\(\);/, 'a liveness change repaints the floor');
+  const full = readSource('src/renderer/src/components/FullscreenTerminal.tsx');
+  assert.match(full, /const activity = useActivity\(agent\.id, agent\.status\);/, 'Jim C1: the fullscreen row too');
+  assert.match(full, /<PixelBadge status=\{typing \? 'typing' : activity\.status\} \/>/);
+  const composer = readSource('src/renderer/src/components/MessageQueueComposer.tsx');
+  assert.match(composer, /const shownIdle = useActivity\(agent\.id, agent\.status\)\.status === 'idle';/, 'Jim N2: the composer words the shown status');
+  assert.match(composer, /placeholder=\{shownIdle \?/);
+  assert.match(composer, /composerStatus\(\{ agentName: agent\.name, queueLength: queue\.length, idle: shownIdle,/);
+  assert.match(composer, /const block = useTerminalBlock\(agent\.ptyId, queue\.length > 0 && idle\);/, 'the poll the drain relies on keeps the hook status');
   const hook = readSource('src/renderer/src/components/useActivity.ts');
   assert.match(hook, /const shown = activityStatus\(status, rec\) as StatusKind;/);
   const idx = readSource('src/main/index.ts');
@@ -209,8 +232,11 @@ const MUTANTS = [
     edits: [["    if (agentId && !fromSubagent) this.noteRunningTool(agentId, event, p);\n", '']],
     killer: 'runningToolTracked', dies: /THE TOOL IN PROGRESS IS KNOWN/ },
   { name: 'the tool never ends at its PostToolUse', file: 'src/main/hooks.ts', real: HOOKS, pick: (m) => m.HookServer,
-    edits: [["    } else if (event === 'PostToolUse' || event === 'PostToolUseFailure' ||", "    } else if (event === 'PostToolUseFailure' ||"]],
+    edits: [["    } else if (event === 'PostToolUse' || event === 'PostToolUseFailure') {", "    } else if (event === 'PostToolUseFailure') {"]],
     killer: 'runningToolTracked', dies: /THE TOOL ENDS AT ITS PostToolUse/ },
+  { name: 'Jim N1: a PostToolUse clears every running tool', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
+    edits: [["  if (i >= 0 && l.length) l.splice(i < 0 ? 0 : i, 1);\n  return l;", '  return [];']],
+    killer: 'parallelToolsKept', dies: /A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

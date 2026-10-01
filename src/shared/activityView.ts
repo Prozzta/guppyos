@@ -33,6 +33,18 @@ export function activityStatus<S extends string>(status: S, rec: LivenessV1 | nu
 /** A tool call in progress: its name and when it started (epoch ms). */
 export interface RunningTool { name: string; since: number }
 
+/** Jim N1: tools can run in PARALLEL, so an agent has a LIST of tools in progress (oldest first).
+ *  A PreToolUse adds one; its PostToolUse removes ONE of that name (the oldest), not all. */
+export function toolStarted(list: readonly RunningTool[] | undefined, name: string, now: number): RunningTool[] {
+  return [...(list ?? []), { name, since: now }];
+}
+export function toolEnded(list: readonly RunningTool[] | undefined, name: string | undefined): RunningTool[] {
+  const l = [...(list ?? [])];
+  const i = name ? l.findIndex((t) => t.name === name) : 0;
+  if (i >= 0 && l.length) l.splice(i < 0 ? 0 : i, 1);
+  return l;
+}
+
 /** "using Bash for 7m" while the shown status is busy and a tool is running; null otherwise. */
 export function runningToolText(shown: string, tool: RunningTool | null | undefined, now: number): string | null {
   if (!tool || !tool.name || (shown !== 'working' && shown !== 'thinking')) return null;

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useActivity } from './useActivity';
 import { createPortal } from 'react-dom';
 import { PrivateNoteTextarea } from './PrivateNoteTextarea';
 import { PixelBadge } from './PixelBadge';
@@ -681,6 +682,8 @@ function SidebarRow({
   const bullets = (agent.note ?? '').split('\n').map(s => s.trim()).filter(Boolean);
 
   const typing = useHasTerminalDraft(agent.ptyId);
+  // CARD-IDLE (Jim C1): the fullscreen row shows busy-or-not from liveness, like the card.
+  const activity = useActivity(agent.id, agent.status);
 
   /** The ✎ button opens the editor beside the row — the bullets on the row are
    *  the summary, this is where you write them. EXPLICIT open only (v0.3.4):
@@ -762,7 +765,7 @@ function SidebarRow({
             {/* Your unsent text outranks the agent's own state here: an idle
                 agent with a draft on its prompt is not idle-and-free, it is
                 idle-and-held, and nothing else on screen said so. */}
-            <PixelBadge status={typing ? 'typing' : agent.status} />
+            <PixelBadge status={typing ? 'typing' : activity.status} />
             {/* Explicit note edit — a real control instead of a hover surprise.
                 A span, not a <button>: we're inside the row's button element. */}
             <span
