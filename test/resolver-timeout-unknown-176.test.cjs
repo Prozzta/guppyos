@@ -323,7 +323,7 @@ test('SPAWN (N1, Andy): a FOUND npm claude.cmd whose node is a KNOWN miss is ref
   assert.equal(pm.list().length, 0);
 });
 
-test('SPAWN control: the same .bat with SINGLE-LINE arguments still starts through cmd.exe', WIN, async () => {
+test('SPAWN control: the same .bat with SINGLE-LINE arguments still starts through cmd.exe', { ...WIN, timeout: 90_000 }, async () => {
   const os = require('node:os');
   const { PtyManager } = loadTs('src/main/pty.ts');
   const dir = spawnFixture();
@@ -335,6 +335,12 @@ test('SPAWN control: the same .bat with SINGLE-LINE arguments still starts throu
   try {
     assert.equal(res.ok, true, res.error);
     assert.equal(pm.list().length, 1);
+    // rc gate 3/b (Creed): node-pty's WindowsTerminal defers kill() (ClosePseudoConsole) until the
+    // terminal's FIRST output. Killed before it, conhost and the input pipe outlive cmd.exe and this
+    // process never exits (product card PTY-EARLY-KILL-LEAK). So the kill waits for the .bat's output.
+    const until = Date.now() + 60_000;
+    while (pm.hasOutput('zz-bat1') === false && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+    assert.notEqual(pm.hasOutput('zz-bat1'), false, 'the .bat produced output before the kill (60 s)');
   } finally {
     await pm.killAllAsync(5_000);
   }
