@@ -11,6 +11,9 @@
  *   M12 a move on every tick (not idempotent)
  *   M12b an orphan archive moves
  *   MLOG a board-flag row on every tick (not change-only)
+ *   G1   the bootstrap drops boardLivenessUnsub?.() (a re-bootstrap stacks the subscription)
+ *   N1   a wired getLiveness with no record hides the fleet.json record (no fallback)
+ *   N2   agents[].liveness overrides the top-level liveness[] (precedence differs from the digest)
  */
 
 const test = require('node:test');
@@ -184,4 +187,28 @@ test('the re-run loop is bounded: a board that keeps changing never spins the ma
   r.monitor.tickOnce = () => { const f = realCompute(); r.monitor.tick(); return f; };
   r.monitor.tick();
   assert.ok(r.log().some((l) => l.kind === 'board-monitor-rerun-limit' && l.reruns === BOARD_MONITOR_MAX_RERUNS));
+});
+
+test('G1: each bootstrap drops the previous liveness subscription before it subscribes (no stacking)', () => {
+  const { readSource, codeOnly } = require('./read-source.cjs');
+  const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  assert.match(index, /boardLivenessUnsub\?\.\(\);\s*boardLivenessUnsub = agentLiveness\.onLivenessChange\(/);
+});
+
+test('N1: a wired getLiveness with no record for an agent falls back to the fleet.json record', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  fs.writeFileSync(path.join(r.root, 'fleet.json'), JSON.stringify({ ts: NOW, agents: [{ id: 'jim', lastActiveSecAgo: 5 }],
+    liveness: [{ agentId: 'jim', incarnation: 'j1', lifecycle: 'LIVE', classification: 'STUCK_WAKE', classifiedSince: NOW - 1000, reason: 'wake-refused', evidence: { sampledAt: NOW } }] }));
+  const monitor = new BoardMonitor({ hive: r.hive, now: () => NOW, getLiveness: () => undefined });
+  monitor.tick();
+  assert.deepEqual(monitor.flags().map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_STUCK']);
+});
+
+test('N2: the top-level liveness[] wins over agents[].liveness (the same precedence as the digest)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  fs.writeFileSync(path.join(r.root, 'fleet.json'), JSON.stringify({ ts: NOW,
+    agents: [{ id: 'jim', lastActiveSecAgo: 5, liveness: { agentId: 'jim', incarnation: 'j0', lifecycle: 'LIVE', classification: 'WORKING', classifiedSince: NOW - 1000, reason: 'busy', evidence: { sampledAt: NOW } } }],
+    liveness: [{ agentId: 'jim', incarnation: 'j1', lifecycle: 'LIVE', classification: 'STUCK_WAKE', classifiedSince: NOW - 1000, reason: 'wake-refused', evidence: { sampledAt: NOW } }] }));
+  r.monitor.tick();
+  assert.deepEqual(r.monitor.flags().map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_STUCK']);
 });

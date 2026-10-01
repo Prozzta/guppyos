@@ -10,6 +10,8 @@
  *   M15b no batch window (wake on the first item at once)
  *   M25 'digest' added to SYSTEM_SENDERS (decisions silently dropped from god's actionable count)
  *   MCLR a cleared item is never forgotten (a flag that comes back never wakes again)
+ *   G2   readFleetAgents ignores the top-level liveness[] (Dwight's records never reach the digest
+ *        or board-status), or lets agents[].liveness override it (N2)
  */
 
 const test = require('node:test');
@@ -153,4 +155,16 @@ test('a digest wake is actionable for god but leaves NO reply obligation (Jim S5
   const f = R.fleetMailFields(hive.mail, 'god-1');
   assert.equal(R.actionableBacklog(hive.mail, 'god-1'), 1, 'god sees it as actionable mail');
   assert.deepEqual([f.openRequestCount, f.awaitingReplyCount], [0, 0], 'and owes nobody a reply');
+});
+
+test('G2: readFleetAgents joins the top-level liveness[] by agentId, and it wins over agents[].liveness (N2)', (t) => {
+  const { readFleetAgents } = loadTs('src/main/floorDigest.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-fleet-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'fleet.json'), JSON.stringify({
+    agents: [{ id: 'jim', name: 'Jim' }, { id: 'pam', name: 'Pam', liveness: { classification: 'WORKING' } }, { id: 'kev', name: 'Kevin' }],
+    liveness: [{ agentId: 'jim', classification: 'CRASHED', reason: 'pty-exit' }, { agentId: 'pam', classification: 'STUCK_WAKE', reason: 'wake-refused' }]
+  }));
+  const byId = Object.fromEntries(readFleetAgents(root).map((a) => [a.id, a.liveness && a.liveness.classification]));
+  assert.deepEqual(byId, { jim: 'CRASHED', pam: 'STUCK_WAKE', kev: undefined });
 });

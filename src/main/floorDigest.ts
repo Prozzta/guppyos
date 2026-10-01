@@ -150,8 +150,9 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   return { markdown: out.join('\n'), decisionItems: items };
 }
 
-/** fleet.json's agents, each joined with its liveness record (the top-level liveness[] that
- *  fix/177-liveness publishes, keyed by agentId; an agents[].liveness is kept if present). */
+/** fleet.json's agents, each joined with its liveness record: the top-level liveness[] that
+ *  fix/177-liveness publishes (keyed by agentId) wins; an agents[].liveness is the fallback.
+ *  Same precedence as BoardMonitor. */
 export function readFleetAgents(root: string): DigestAgent[] {
   try {
     const snap = JSON.parse(readFileSync(join(root, 'fleet.json'), 'utf8')) as { agents?: DigestAgent[]; liveness?: Array<{ agentId?: string; classification?: string; reason?: string }> };
@@ -159,7 +160,7 @@ export function readFleetAgents(root: string): DigestAgent[] {
     for (const r of Array.isArray(snap.liveness) ? snap.liveness : []) if (r && typeof r.agentId === 'string') byId.set(r.agentId, r);
     return (Array.isArray(snap.agents) ? snap.agents : [])
       .filter((a) => a && typeof a.id === 'string')
-      .map((a) => (a.liveness || !byId.has(a.id) ? a : { ...a, liveness: byId.get(a.id) }));
+      .map((a) => (byId.has(a.id) ? { ...a, liveness: byId.get(a.id) } : a));
   } catch { return []; }
 }
 

@@ -19,7 +19,8 @@ import { firstOccurrenceById } from '../shared/taskLedger';
 
 export const BOARD_FLAGS_FILE = 'board-flags.json';
 export const BOARD_MONITOR_TICK_MS = 60_000;
-/** At most this many re-runs per tick (one is the normal case: the auto-move's own writes). */
+/** At most this many passes per tick, so at most MAX-1 re-runs (one re-run is the normal case:
+ *  the auto-move's own writes). */
 export const BOARD_MONITOR_MAX_RERUNS = 3;
 
 /** The slice of HiveManager the monitor needs (kept narrow so tests can drive it). */
@@ -34,8 +35,8 @@ export interface BoardMonitorHive {
 
 export interface BoardMonitorOptions {
   hive: BoardMonitorHive;
-  /** Dwight's in-process getLiveness; absent until the liveness monitor lands, when
-   *  records riding in fleet.json (`agents[].liveness`) are used if present. */
+  /** Dwight's in-process getLiveness. When it is absent, or has no record for an agent, the
+   *  fleet.json records are used: the top-level liveness[] first, then agents[].liveness. */
   getLiveness?: (agentId: string) => LivenessV1 | undefined;
   cfg?: () => Partial<BoardStaleConfig>;
   now?: () => number;
@@ -94,7 +95,7 @@ export class BoardMonitor {
     const { fleet, liveness } = this.fleet(root);
     const get = this.opts.getLiveness;
     const lv = new Map<string, LivenessV1 | undefined>();
-    for (const id of new Set([...registry.keys(), ...liveness.keys()])) lv.set(id, get ? get(id) : liveness.get(id));
+    for (const id of new Set([...registry.keys(), ...liveness.keys()])) lv.set(id, get?.(id) ?? liveness.get(id));
     if (get) {
       // Assignees outside the registry may still have a record (a DELETED agent).
       const list = (tasks as { tasks?: unknown[] })?.tasks ?? [];
