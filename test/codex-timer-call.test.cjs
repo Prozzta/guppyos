@@ -49,15 +49,11 @@ test('MUTANT CENSUS CODEX-TIMER-CALL: dropped plugin override dies at the spawn 
   const source = readSource('src/main/hive.ts');
   const from = "preArgs.push('-c', 'features.plugins=false');";
   assert.equal(source.split(from).length - 1, 1, 'the mutant edit applies exactly once');
-  const file = path.join(__dirname, '..', 'src', 'main', '.codex-timer-call-mutant.ts');
-  fs.writeFileSync(file, source.replace(from, '/* mutant: drop plugin override */'), 'utf8');
-  try {
-    const { HiveManager: Mutant } = loadTs(path.relative(path.resolve(__dirname, '..'), file));
-    let died = null;
-    try { await pluginFlagKiller(t, Mutant); } catch (e) { died = e; }
-    assert.ok(died instanceof assert.AssertionError, 'SURVIVED: CODEX-TIMER-CALL dropped plugin override');
-    assert.match(died.message, /CODEX-TIMER-CALL/, 'the mutant died at the wrong guarantee');
-  } finally {
-    fs.rmSync(file, { force: true });
-  }
+  // rc/1.1.77 (PLAN-177 card note): the mutant is loaded from text, so no .ts file is ever written
+  // into src/main (a scanner or a concurrent suite could see it).
+  const { HiveManager: Mutant } = loadTs.fromText('src/main/hive.ts', source.replace(from, '/* mutant: drop plugin override */'));
+  let died = null;
+  try { await pluginFlagKiller(t, Mutant); } catch (e) { died = e; }
+  assert.ok(died instanceof assert.AssertionError, 'SURVIVED: CODEX-TIMER-CALL dropped plugin override');
+  assert.match(died.message, /CODEX-TIMER-CALL/, 'the mutant died at the wrong guarantee');
 });
