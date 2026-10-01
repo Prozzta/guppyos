@@ -37,6 +37,15 @@ async function beatUntil(rig, pred, beats) {
   return outcomes(rig);
 }
 const kinds = (o) => o.map((x) => x.kind);
+/** After a few more beats: the stub received the wake EXACTLY ONCE (no second Enter, no doubling). */
+async function assertOnePrompt(rig) {
+  for (let i = 0; i < 5; i += 1) { await rig.beat(); await sleep(1000); }
+  const prompts = rig.transcript(ID).filter((r) => r.kind === 'prompt');
+  assert.equal(prompts.length, 1, `THE STUB RECEIVES EXACTLY ONE PROMPT\n  ${JSON.stringify(prompts)}\n  ${await story(rig)}`);
+  // ...and exactly ONE Enter: a second Enter chasing a slow one would land on an empty composer.
+  const enters = rig.transcript(ID).filter((r) => r.kind === 'pty-input').reduce((n, r) => n + (String(r.data).match(/\r/g) || []).length, 0);
+  assert.equal(enters, 1, `THE STUB RECEIVES EXACTLY ONE ENTER, got ${enters}\n  ${await story(rig)}`);
+}
 
 for (const lag of [1500, 5000]) {
   test(`ISO echo lag ${lag} ms: the slow echo is waited for and COMMITTED, never held`, T, async (t) => {
@@ -47,6 +56,7 @@ for (const lag of [1500, 5000]) {
     const why = await story(rig);
     assert.ok(!kinds(o).includes('INTERFERED'), `A SLOW ECHO IS NEVER HELD FOR A PERSON\n  ${why}`);
     assert.ok(kinds(o).includes('COMMITTED'), `A SLOW ECHO IS COMMITTED\n  ${why}`);
+    await assertOnePrompt(rig);
   });
 }
 
@@ -65,4 +75,5 @@ test('ISO echo lag past the budget (12 s): a VERIFIED erase (ABORTED), then the 
   why = await story(rig);
   assert.ok(!kinds(after).includes('INTERFERED'), `NEVER HELD FOR A PERSON\n  ${why}`);
   assert.ok(kinds(after).includes('COMMITTED'), `THE RE-OFFER COMMITS\n  ${why}`);
+  await assertOnePrompt(rig);
 });
