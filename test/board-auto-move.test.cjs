@@ -127,14 +127,21 @@ test('wired as in the app, N cards of one archived agent = exactly N writes and 
   }
 });
 
-test('the flags file is not rewritten when only time passes (K14)', (t) => {
-  const clock = { now: NOW };
-  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'ghost' }]);
+test('the flags file is not rewritten when only time passes, even as evidence ages roll (K14)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  // Pre-liveness STALE: the guard stamped the card at (real) now; the monitor's clock runs
+  // 8 h later; jim last used tokens at fleet ts. Its evidence text ("inactive 8 h") rolls.
+  const t0 = Date.now();
+  fs.writeFileSync(path.join(r.root, 'fleet.json'), JSON.stringify({ ts: t0, agents: [{ id: 'jim', lastActiveSecAgo: 0 }] }));
+  const clock = { now: t0 + 8 * 3_600_000 };
   const monitor = new BoardMonitor({ hive: r.hive, now: () => clock.now });
   monitor.tick();
+  assert.deepEqual(monitor.flags().map((f) => f.kind), ['STALE']);
   const file = path.join(r.root, 'state', 'board-flags.json');
   const first = fs.readFileSync(file, 'utf8');
-  clock.now += 10 * 60_000;
+  const evidence = monitor.flags()[0].evidence;
+  clock.now += 30 * 60_000;
   monitor.tick();
-  assert.equal(fs.readFileSync(file, 'utf8'), first);
+  assert.notEqual(monitor.flags()[0].evidence, evidence, 'the evidence text did roll');
+  assert.equal(fs.readFileSync(file, 'utf8'), first, 'the published file did not');
 });
