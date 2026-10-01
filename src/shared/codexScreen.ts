@@ -135,7 +135,8 @@ export function isCodexStatusLine(row: string, spawnCwd: string | null | undefin
   // ChatGPT plan, a service tier (`<model> <effort> [<tier>] · <cwd>`).
   const t = row.trim();
   const at = t.lastIndexOf(' · ');
-  if (at < 0 || !/^\S+( \S+)+$/.test(t.slice(0, at))) return false;
+  // WSG-FOLLOWUPS (Jim nit): ONE or more words before it; the cwd anchor is what matters.
+  if (at < 0 || !/^\S+( \S+)*$/.test(t.slice(0, at))) return false;
   let shown = t.slice(at + 3).trim();
   // Under HOME, codex shows the cwd as `~\rel` (or `~` itself).
   if (home && (shown === '~' || /^~[\\/]/.test(shown))) shown = home.replace(/[\\/]+$/, '') + shown.slice(1);
