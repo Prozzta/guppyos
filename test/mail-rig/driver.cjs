@@ -66,6 +66,9 @@ class Rig {
     this.port = 0;
     this.hostPids = [];
     this.log = '';
+    /** LOAD-FLAKES-FOLLOWUPS J-LF1: the hold loops' wall clock and poll sleep (injectable, so the
+     *  stall bound is tested by logic; the real ones by default). */
+    this.clock = { now: () => Date.now(), sleep };
   }
 
   async boot(timeoutMs = 45_000) {
@@ -288,11 +291,17 @@ class Rig {
    * stub has read each prompt a wake committed to it and has no queued or running job. Unlike
    * `busy` (the product's view), this holds for an agent the product still thinks is active (its
    * hooks dead, its Stop lost), so the clock can move there too, but never under real work.
+   *
+   * LOAD-FLAKES-FOLLOWUPS J-LF2: a stub that can do NO work is skipped: one whose process is dead
+   * (killed or crashed mid-job: its composer.json keeps a stale `pending`) and one the test HUNG on
+   * purpose (it reads no prompt). Before, such an agent could never be idle, and a hold waited out
+   * its whole bound to report a misleading "the stubs stayed busy".
    */
   async stubsIdle(ids = this.agentIds) {
     if (await this.call('inFlight')) return false;
     const outs = await this.call('outcomes');
     for (const id of ids) {
+      if (this.stubGone(id)) continue;
       const committed = outs.filter((o) => o.agentId === id && o.outcome && o.outcome.kind === 'COMMITTED').length;
       if (this.prompts(id).length < committed) return false;
       let comp = null;
@@ -300,6 +309,35 @@ class Rig {
       if (comp && comp.pending > 0) return false;
     }
     return true;
+  }
+
+  /** J-LF2: this agent's stub can do no work: its recorded process is dead, or the test hung it. */
+  stubGone(agentId) {
+    let pid = 0;
+    try { pid = Number(fs.readFileSync(path.join(this.stubDir(agentId), 'pid'), 'utf8')); } catch { pid = 0; }
+    if (pid > 0 && !pidAlive(pid)) return true;
+    let comp = null;
+    try { comp = JSON.parse(fs.readFileSync(path.join(this.stubDir(agentId), 'composer.json'), 'utf8')); } catch { comp = null; }
+    return !!(comp && comp.hung === true);
+  }
+
+  /**
+   * J-LF1: hold until `free()` holds (or `fn` does), failing once the stubs have made NO progress for
+   * `busyTimeoutMs`. Progress is read at EVERY poll, so a stall is reported one bound after the last
+   * progress (it used to be checked only at each window's end: 1 to 2 bounds late, and the generic
+   * test timeout could fire first). Returns true when `fn` held, false when free.
+   */
+  async holdUntil(fn, free, busyTimeoutMs, failMsg, fail) {
+    let seen = this.progress();
+    let lastProgressAt = this.clock.now();
+    for (;;) {
+      if (await fn()) return true;
+      if (await free()) return false;
+      const p = this.progress();
+      if (p !== seen) { seen = p; lastProgressAt = this.clock.now(); }
+      if (this.clock.now() - lastProgressAt >= busyTimeoutMs) throw await fail(failMsg);
+      await this.clock.sleep(80);
+    }
   }
 
   /** LOAD-FLAKES-176: cue a tool call and wait until the stub has FINISHED it (its hooks returned and
@@ -343,26 +381,14 @@ class Rig {
       // simulated-time rules (SUBMIT_CONFIRM_MS, the one-time re-announce, the retry backoff)
       // against real process timing, so the outcome depended on machine load.
       if (holdWhileBusy) {
-        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
-        for (;;) {
-          if (await fn()) return true;
-          if (!(await this.call('busy'))) break;
-          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
-          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under it)`);
-          await sleep(80);
-        }
+        if (await this.holdUntil(fn, async () => !(await this.call('busy')), busyTimeoutMs,
+          `beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under it)`, fail)) return true;
       }
       // LOAD-FLAKES-176: with holdForStubs the clock moves only once the real processes are idle
       // (see stubsIdle); `fn` is re-checked meanwhile.
       if (holdForStubs || !quietOk) {
-        let until = Date.now() + busyTimeoutMs; let seen = this.progress();
-        for (;;) {
-          if (await fn()) return true;
-          if (await this.stubsIdle()) break;
-          if (Date.now() >= until && this.progress() !== seen) { seen = this.progress(); until = Date.now() + busyTimeoutMs; }
-          if (Date.now() >= until) throw await fail(`beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under them)`);
-          await sleep(80);
-        }
+        if (await this.holdUntil(fn, () => this.stubsIdle(), busyTimeoutMs,
+          `beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under them)`, fail)) return true;
       }
       await this.call('advance', { ms: stepMs });
       await this.beat();

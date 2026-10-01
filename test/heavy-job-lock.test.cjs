@@ -493,10 +493,20 @@ test('MF4 LIVE (Windows): the real hidden listing returns this node process with
   let rows = await probeProcesses();
   const ms = performance.now() - t0;
   if (rows === null && ms >= PROBE_BOX_MS - 10) {
-    t.diagnostic(`probeProcesses hit its ${PROBE_BOX_MS} ms box after ${Math.round(ms)} ms (load); re-running the same listing unboxed`);
+    t.diagnostic(`probeProcesses hit its ${PROBE_BOX_MS} ms box after ${Math.round(ms)} ms (load); re-running the same listing with a 60 s hang box`);
     const { execFile } = require('node:child_process');
-    rows = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
+    // LOAD-FLAKES-FOLLOWUPS J-LF3 (a): the re-run has a generous HANG box (a wedged PowerShell must
+    // fail here with this reason, not hang until the file timeout).
+    const RERUN_BOX_MS = 60_000;
+    const r0 = performance.now();
+    rows = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: RERUN_BOX_MS, maxBuffer: 16 * 1024 * 1024 },
       (err, out) => res(err ? null : parseProcessListing(String(out)))));
+    const rerunMs = Math.round(performance.now() - r0);
+    // J-LF3 (b): the re-run's duration is always reported, so a listing that has become STRUCTURALLY
+    // slower than the product's box is visible. As a failure only on a machine declared quiet
+    // (MUNDER_QUIET_TIMING_CHECKS=1): a timing bound on a loaded run is itself a flake.
+    t.diagnostic(`unboxed re-run took ${rerunMs} ms (the product box is ${PROBE_BOX_MS} ms)`);
+    if (process.env.MUNDER_QUIET_TIMING_CHECKS === '1') assert.ok(rerunMs < PROBE_BOX_MS, `on a quiet machine the listing fits the product's ${PROBE_BOX_MS} ms box: ${rerunMs} ms`);
   }
   assert.ok(Array.isArray(rows) && rows.length > 10, 'a usable listing');
   const me = rows.find((r) => r.pid === process.pid);

@@ -62,6 +62,11 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     assert.ok(b.profile.topInclusive.some((e) => e.fn.startsWith('runawayAllocator')), `and it is in the inclusive list: ${JSON.stringify(b.profile.topInclusive)}`);
     assert.ok(b.profile.samples > 0, `real samples: ${b.profile.samples}`);
     assert.ok(b.profile.ms < 30_000, `time-boxed (hang guard): ${b.profile.ms} ms`);
+    // LOAD-FLAKES-FOLLOWUPS (Andy RPROF note): the production box is 5 s; an armed busy capture that
+    // no longer fits it would show only as production timeouts. Always reported; a failure only on a
+    // machine declared quiet (MUNDER_QUIET_TIMING_CHECKS=1), since under load it is a timing flake.
+    t.diagnostic(`armed busy capture: ${b.profile.ms} ms (production box 5000 ms)`);
+    if (process.env.MUNDER_QUIET_TIMING_CHECKS === '1') assert.ok(b.profile.ms < 5_000, `on a quiet machine an armed busy capture fits the production 5 s box: ${b.profile.ms} ms`);
     assert.ok(b.fileNodes > 0, 'the .cpuprofile was written and parses');
     assert.ok(b.worstGapMs < 30_000, `main not blocked (hang guard): worst gap ${b.worstGapMs} ms`);
     // RPROF Finding 2: the ROW alone names the loop, with locations.

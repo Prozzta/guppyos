@@ -84,7 +84,7 @@ class FakeAgent {
   writeComposer() {
     try {
       const tmp = `${this.composerFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown }));
+      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown, hung: this.hung }));
       fs.renameSync(tmp, this.composerFile);
     } catch { /* best effort */ }
   }
@@ -275,8 +275,8 @@ class FakeAgent {
     this.rec('cue', { cue });
     switch (cue.cue) {
       case 'crash': this.rec('exit', { code: cue.code ?? 1 }); process.exit(cue.code ?? 1); return;
-      case 'hang': this.hung = true; return;
-      case 'unhang': this.hung = false; return;
+      case 'hang': this.hung = true; this.writeComposer(); return;   // J-LF2: the driver's stubsIdle skips a hung stub
+      case 'unhang': this.hung = false; this.writeComposer(); return;
       case 'echo-lag': this.scenario = { ...this.scenario, echoLagMs: Number(cue.ms) || 0 }; return;   // ISO seam: the load ends
       case 'interrupt': this.interrupt('cue'); return;
       // LOAD-FLAKES-176 (Jim A1): from now on every hook and turn start waits this long first (a
