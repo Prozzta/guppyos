@@ -74,7 +74,7 @@ test('the move is idempotent: a second tick changes nothing (M12)', (t) => {
 });
 
 test('a boot-sweep orphan archive raises no down flag, and a non-doing card never moves (BOOT-ORPHAN-ASSIGNEE-DOWN)', (t) => {
-  const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'orphan' }), ann: agent('ann', { archived: true, archiveReason: 'explicit' }) },
+  const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'orphan', lastSeen: NOW }), ann: agent('ann', { archived: true, archiveReason: 'explicit' }) },
     [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }, { id: 'B', title: 'B', status: 'blocked', assignee: 'ann' }]);
   const before = fs.readFileSync(path.join(r.root, 'tasks.json'));
   r.monitor.tick();
@@ -100,6 +100,15 @@ test('start re-arms its timer without forgetting flags raised by the ledger guar
   r.monitor.tick(); // bootstrap's ledger-guard tick has already raised the flag.
   r.monitor.start(60_000);
   assert.equal(r.log().filter((l) => l.kind === 'board-flag' && l.event === 'raised').length, 1);
+  r.monitor.stop();
+});
+
+test('stop then start resets flag history, so an extant flag raises once for the new monitor run (BOARDMONITOR-DOUBLE-RAISE S2)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'ghost' }]);
+  r.monitor.tick();
+  r.monitor.stop();
+  r.monitor.start(60_000);
+  assert.equal(r.log().filter((l) => l.kind === 'board-flag' && l.event === 'raised').length, 2);
   r.monitor.stop();
 });
 

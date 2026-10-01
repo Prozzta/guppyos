@@ -34,6 +34,8 @@ export interface BoardStaleConfig {
   staleAfterMs: number;
   downAfterMs: number;
   downDecisionMs: number;
+  /** An orphan archive is a boot sweep only for this bounded restore window. */
+  bootGraceMs: number;
   answeredIdleMs: number;
   maxDoing: number;
 }
@@ -42,6 +44,7 @@ export const BOARD_STALE_DEFAULTS: BoardStaleConfig = {
   staleAfterMs: 6 * 60 * 60_000,
   downAfterMs: 10 * 60_000,
   downDecisionMs: 30 * 60_000,
+  bootGraceMs: 5 * 60_000,
   answeredIdleMs: 30 * 60_000,
   maxDoing: 3
 };
@@ -107,10 +110,19 @@ function agentFlag(card: Card, agent: string, input: DetectStaleInput, cfg: Boar
     return { ...base, kind: 'ASSIGNEE_ARCHIVED', since: archivedAt ?? input.meta[card.id]?.statusSince ?? now,
       evidence: `${agent} archived (explicit)`, decision: false, ...(archivedAt !== undefined ? { archivedAt } : {}) };
   }
-  // 2. The boot sweep's orphan archive is transient before autostart restores workers: it is
-  // neither a move nor a DOWN flag. A pty-exit archive may be undone by a respawn: DOWN, never a move.
-  if ((lv?.lifecycle === 'ARCHIVED' && lv.archiveReason === 'orphan') || regArchive === 'boot') return null;
-  if ((lv?.lifecycle === 'ARCHIVED' && lv.archiveReason !== 'orphan') || regArchive === 'down') {
+  // 2. A pty exit wins over a stale boot-sweep fact from the other source: it is DOWN, never a move.
+  const lvReason = lv?.lifecycle === 'ARCHIVED' ? lv.archiveReason : undefined;
+  const regReason = reg?.archived ? reg?.archiveReason : undefined;
+  if (lvReason === 'pty-exit' || regReason === 'pty-exit') {
+    const livenessPtyExit = lvReason === 'pty-exit';
+    const since = livenessPtyExit ? (lv?.archivedAt ?? lv?.classifiedSince ?? now) : (regAt ?? now);
+    return { ...base, kind: 'ASSIGNEE_DOWN', since, evidence: `${agent} archived (pty-exit)`, decision: now - since >= cfg.downDecisionMs };
+  }
+  // The boot sweep's orphan archive is transient before autostart restores workers. Its archive
+  // time is stamped by setArchived; without that timestamp we cannot safely call it a boot sweep.
+  const orphanAt = lvReason === 'orphan' ? (lv?.archivedAt ?? regAt) : regArchive === 'boot' ? regAt : undefined;
+  if (orphanAt !== undefined && now - orphanAt < cfg.bootGraceMs) return null;
+  if (lv?.lifecycle === 'ARCHIVED' || regArchive === 'down' || regArchive === 'boot') {
     const reason = lv?.lifecycle === 'ARCHIVED' ? lv.archiveReason : reg?.archiveReason;
     const since = lv?.lifecycle === 'ARCHIVED' ? (lv.archivedAt ?? lv.classifiedSince) : (regAt ?? now);
     return { ...base, kind: 'ASSIGNEE_DOWN', since, evidence: `${agent} archived (${reason ?? 'unknown'})`, decision: now - since >= cfg.downDecisionMs };

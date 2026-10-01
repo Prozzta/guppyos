@@ -9,6 +9,7 @@
  *   M8  `>` instead of `>=` at a threshold
  *   M9  STALE without the card-edit condition
  *   M10 an orphan registry archive treated as explicit
+ *   M10b an orphan registry archive ignored forever (without a bounded boot grace)
  *   L2  a liveness ARCHIVED moves regardless of archiveReason
  *   L3  the operator-hold exclusion removed
  *   N1b the pre-liveness fallback ignores onHold (Jim nit b)
@@ -45,17 +46,30 @@ test('an explicit registry archive (or one from before 1.1.75, no reason) is ASS
 });
 
 test('a boot-sweep orphan archive is neither DOWN nor a move; pty-exit is DOWN (BOOT-ORPHAN-ASSIGNEE-DOWN)', () => {
-  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan' } } })), []);
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW } } })), []);
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'pty-exit' } } })), ['A:ASSIGNEE_DOWN']);
 });
 
-test('liveness ARCHIVED moves only when explicit; boot orphan is ignored, pty-exit flags DOWN; DELETED moves (L2)', () => {
+test('a boot orphan is quiet only inside its bounded grace, then DOWN (BOOT-ORPHAN-ASSIGNEE-DOWN)', () => {
+  const at = (age) => kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW - age } } }));
+  assert.deepEqual(at(D.bootGraceMs - 1), []);
+  assert.deepEqual(at(D.bootGraceMs), ['A:ASSIGNEE_DOWN']);
+});
+
+test('liveness ARCHIVED moves only when explicit; boot orphan is ignored briefly, pty-exit flags DOWN; DELETED moves (L2)', () => {
   const reg = { jim: live };
-  const arch = (reason) => lv('jim', 'EXITED', NOW - H, { lifecycle: 'ARCHIVED', archiveReason: reason, archivedAt: NOW - H });
+  const arch = (reason, at = NOW - H) => lv('jim', 'EXITED', at, { lifecycle: 'ARCHIVED', archiveReason: reason, archivedAt: at });
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('explicit') } })), ['A:ASSIGNEE_ARCHIVED']);
-  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('orphan') } })), []);
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('orphan', NOW - 1) } })), []);
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('pty-exit') } })), ['A:ASSIGNEE_DOWN!']);
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'gone')], liveness: { gone: lv('gone', 'EXITED', NOW - H, { lifecycle: 'DELETED' }) } })), ['A:ASSIGNEE_ARCHIVED']);
+});
+
+test('a pty-exit from either source wins over a boot-orphan record from the other (BOOT-ORPHAN-ASSIGNEE-DOWN S1)', () => {
+  const pty = lv('jim', 'EXITED', NOW - H, { lifecycle: 'ARCHIVED', archiveReason: 'pty-exit', archivedAt: NOW - H });
+  const orphan = lv('jim', 'EXITED', NOW, { lifecycle: 'ARCHIVED', archiveReason: 'orphan', archivedAt: NOW });
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW } }, liveness: { jim: pty } })), ['A:ASSIGNEE_DOWN!']);
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'pty-exit', lastSeen: NOW - H } }, liveness: { jim: orphan } })), ['A:ASSIGNEE_DOWN!']);
 });
 
 test('an assignee nobody knows is ASSIGNEE_UNKNOWN, a decision; "unassigned" is no one', () => {
