@@ -14,6 +14,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
+const { readSource } = require('./read-source.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
 const afterDebounce = () => new Promise((resolve) => setTimeout(resolve, 300));
@@ -22,7 +23,7 @@ const olderThanFreshWriteGrace = (file) => {
   fs.utimesSync(file, old, old);
 };
 
-async function floor(t) {
+async function floor(t, Manager = HiveManager) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-outbox-rejection-'));
   const priorHome = process.env.HOME;
   const priorUserProfile = process.env.USERPROFILE;
@@ -39,7 +40,7 @@ async function floor(t) {
     fs.rmSync(home, { recursive: true, force: true });
   });
   const events = [];
-  const hive = new HiveManager(() => home, (channel, payload) => { events.push({ channel, payload }); });
+  const hive = new Manager(() => home, (channel, payload) => { events.push({ channel, payload }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   return { hive, events, outbox: path.join(hive.root(), 'agents', 'jim-1', 'outbox') };
@@ -134,6 +135,84 @@ test('parseable but unroutable files are rejected once with a sender notice', as
   assert.equal(hive.routeOnce(), 0, 'archived files cannot repeatedly reject');
   assert.equal(hive.inbox('jim-1').length, cases.length);
   assert.equal(events.filter(({ channel, payload }) => channel === 'hive:message' && payload.to === 'jim-1').length, cases.length);
+});
+
+async function replyLinkGapKiller(t, Manager) {
+  const { hive, outbox } = await floor(t, Manager);
+  const replyRequest = hive.send({ to: 'jim-1', act: 'request', subject: 'build the fix', body: 'please build it' }, 'god-1');
+  const answerRequest = hive.send({ to: 'jim-1', act: 'request', subject: 'answer the question', body: 'please answer it' }, 'god-1');
+  const cases = [
+    ['reply-camel.json', { to: 'god-1', act: 'reply', subject: 'built', body: 'done', inReplyTo: replyRequest.id }],
+    ['answer-linked.json', { to: 'god-1', act: 'answer', subject: 'answered', body: 'done', in_reply_to: answerRequest.id }],
+    ['answer-unlinked.json', { to: 'god-1', act: 'answer', subject: 'status', body: 'FYI' }],
+    ['ack.json', { to: 'god-1', act: 'ack', subject: 'acknowledged', body: 'ok' }],
+    ['unknown-act.json', { to: 'god-1', act: 'sidequest', subject: 'bad', body: 'bad' }]
+  ];
+  for (const [file, payload] of cases) {
+    const outboxFile = path.join(outbox, file);
+    fs.writeFileSync(outboxFile, JSON.stringify(payload));
+    olderThanFreshWriteGrace(outboxFile);
+  }
+  assert.equal(hive.routeOnce(), 4, 'REPLY-LINK GAP: known synonyms normalise and route; only the truly unknown act rejects');
+  const delivered = hive.inbox('god-1');
+  assert.equal(delivered.find((m) => m.subject === 'built').act, 'done', 'REPLY-LINK GAP: reply with camelCase link becomes done');
+  assert.equal(delivered.find((m) => m.subject === 'built').in_reply_to, replyRequest.id, 'REPLY-LINK GAP: camelCase link is canonicalised');
+  assert.equal(delivered.find((m) => m.subject === 'answered').act, 'done', 'REPLY-LINK GAP: linked answer becomes done');
+  assert.equal(delivered.find((m) => m.subject === 'status').act, 'inform', 'REPLY-LINK GAP: unlinked answer becomes inform');
+  assert.equal(delivered.find((m) => m.subject === 'acknowledged').act, 'agree', 'REPLY-LINK GAP: ack becomes agree');
+  assert.deepEqual(hive.mail.openRequests('jim-1'), [], 'the canonicalised reply and answer close their requests');
+  assert.equal(fs.existsSync(path.join(outbox, '.sent', 'bad-unknown-act.json')), true, 'only the truly unknown act is terminally archived');
+  const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith('unknown-act.json'));
+  assert.ok(notice, 'the unknown act tells its sender what to correct');
+  assert.match(notice.subject, /act must be one of/);
+  const normalised = hive.logTail(100).filter((entry) => entry.kind === 'outbox-normalised');
+  assert.equal(normalised.length, 4, 'each known synonym produces a normalised log row without a bounce');
+}
+
+test('REPLY-LINK-GAP: normalise known reply spellings and reject only unknown acts', async (t) => {
+  await replyLinkGapKiller(t, HiveManager);
+});
+
+const REPLY_LINK_MUTANTS = [
+  {
+    name: 'RLG-M1: camelCase link is not canonicalised',
+    edits: [["if (Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {", "if (false && Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {"]]
+  },
+  {
+    name: 'RLG-M2: reply and answer are rejected instead of normalised',
+    edits: [["if (originalAct === 'reply' || originalAct === 'answer') {", "if (false && (originalAct === 'reply' || originalAct === 'answer')) {"]]
+  },
+  {
+    name: 'RLG-M3: linked reply does not become done',
+    edits: [["partial.act = partial.in_reply_to !== undefined && partial.in_reply_to !== null ? 'done' : 'inform';", "partial.act = 'inform';"]]
+  },
+  {
+    name: 'RLG-M4: ack is rejected instead of agreeing',
+    edits: [["} else if (originalAct === 'ack') {", "} else if (false && originalAct === 'ack') {"]]
+  },
+  {
+    name: 'RLG-M5: truly unknown acts are silently accepted',
+    edits: [['if (partial.act !== undefined && !isMessageAct(partial.act)) {', 'if (false && partial.act !== undefined && !isMessageAct(partial.act)) {']]
+  }
+];
+
+test('MUTANT CENSUS REPLY-LINK-GAP: reply-schema mutants apply once and die at the link guarantee', async (t) => {
+  const source = readSource('src/main/hive.ts');
+  for (const [i, mutant] of REPLY_LINK_MUTANTS.entries()) {
+    await t.test(`mutant: ${mutant.name}`, async (subtest) => {
+      await replyLinkGapKiller(subtest, HiveManager);
+      let text = source;
+      for (const [from, to] of mutant.edits) {
+        assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
+        text = text.replace(from, to);
+      }
+      const { HiveManager: Mutant } = loadTs.fromText('src/main/hive.ts', text);
+      let died = null;
+      try { await replyLinkGapKiller(subtest, Mutant); } catch (e) { died = e; }
+      assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name}`);
+      assert.match(died.message, /REPLY-LINK GAP/, `${mutant.name} died at the wrong assertion`);
+    });
+  }
 });
 
 test('a delivered message retries only its archive when .sent is temporarily unavailable', async (t) => {

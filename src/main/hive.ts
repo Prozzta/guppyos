@@ -80,6 +80,11 @@ type McpDefaultsMap = { [id: string]: { enabled: boolean } } | undefined;
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type MessageAct = 'request' | 'inform' | 'propose' | 'query' | 'agree' | 'refuse' | 'done';
+const MESSAGE_ACTS = new Set<MessageAct>(['request', 'inform', 'propose', 'query', 'agree', 'refuse', 'done']);
+
+function isMessageAct(value: unknown): value is MessageAct {
+  return typeof value === 'string' && MESSAGE_ACTS.has(value as MessageAct);
+}
 
 export interface HiveMessage {
   id: string;
@@ -3007,6 +3012,34 @@ export class HiveManager {
         try {
           if (!partial || typeof partial !== 'object') throw new Error('unroutable: message must be an object');
           if (partial.to !== undefined && typeof partial.to !== 'string') throw new Error('unroutable: to must be a string');
+          // REPLY-LINK-GAP: accept the protocol's common historical spellings, but make their
+          // canonical meaning explicit before validation and routing. Unknown acts still take
+          // the visible sender-notice path below.
+          const wire = partial as Partial<HiveMessage> & { inReplyTo?: unknown };
+          const normalised: string[] = [];
+          const originalAct = (wire as { act?: unknown }).act;
+          if (Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {
+            if (partial.in_reply_to === undefined) partial.in_reply_to = wire.inReplyTo as string | null;
+            delete wire.inReplyTo;
+            normalised.push('inReplyTo->in_reply_to');
+          }
+          if (originalAct === 'reply' || originalAct === 'answer') {
+            partial.act = partial.in_reply_to !== undefined && partial.in_reply_to !== null ? 'done' : 'inform';
+            normalised.push(`${originalAct}->${partial.act}`);
+          } else if (originalAct === 'ack') {
+            partial.act = 'agree';
+            normalised.push('ack->agree');
+          }
+          if (normalised.length) this.appendLog({ kind: 'outbox-normalised', from: id, file: f, mappings: normalised });
+          if (partial.act !== undefined && !isMessageAct(partial.act)) {
+            throw new Error(`unroutable: act must be one of ${[...MESSAGE_ACTS].join(', ')}`);
+          }
+          if (Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {
+            throw new Error('unroutable: use in_reply_to, not inReplyTo');
+          }
+          if (partial.in_reply_to !== undefined && partial.in_reply_to !== null && typeof partial.in_reply_to !== 'string') {
+            throw new Error('unroutable: in_reply_to must be a string or null');
+          }
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           this.routeMessage(msg);
