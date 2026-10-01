@@ -11,6 +11,51 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.76] — 2026-10-01
+
+**A reliability release: the floor keeps going on a busy machine, and Codex agents get safety checks.**
+Nobody is started fresh by this install, except in two cases (see Start fresh). Rollback: 1.1.75 (reinstall).
+
+### Changed
+
+- **Codex agents are only typed into when their screen is ready.** Before an automatic message is
+  typed, the app checks that Codex shows its normal empty prompt; if not, nothing is typed. After
+  typing, before Enter, it checks that the prompt holds exactly that message; if not, the text is
+  already typed but Enter is NOT pressed: it is erased (Ctrl-U, checked) and the message is offered
+  again later. On a slow machine it waits up to about 10 seconds first. It never presses Enter on a screen it
+  could not check, nor a second time just because Codex is slow. A Codex agent that refuses messages
+  for 5 minutes raises an alert. Codex agents no longer check for updates at startup.
+- **A stuck agent with mail waiting recovers by itself.** An agent left marked "working" after its
+  turn ended (10 minutes of silence, or a Codex turn its own log shows as finished) has the turn ended
+  and its mail offered again through the normal path. Never while it waits for you.
+- **Codex project settings need your OK.** A Codex agent whose project has a `.codex` folder with
+  hooks, MCP servers or rules is not started until you click **Allow this folder** (in the notice at
+  the top right, or **Allow this folder and start** in Add Agent). One OK covers the project and its
+  worktrees; Settings lists allowed folders with a **Withdraw** button. Folders you trust in your own
+  Codex settings start with a warning. With such a folder present, only Codex 0.157.1 is started.
+- **Codex safety.** Every Codex agent runs without Codex's background service (`--no-daemon`), even
+  when its version cannot be read; Codex agents cannot open git credential windows; the link from
+  the agents' Codex folders to your own Codex install is removed (only the link).
+- **Start fresh.** A new "start fresh" button next to "restart & continue" on every agent row. An
+  automatic resume of a Claude session from older instructions now starts fresh; a resume you ask for
+  is always honoured. Sessions from 1.1.75 count as current, so nobody restarts at this install,
+  with two exceptions that start fresh at their first automatic resume: god when "god may spawn
+  agents" is ON, and an agent with a mail-channel override (it reads its own mail files). Neither
+  applied on our floor at the cut (2026-10-01).
+- **A busy machine no longer reinstalls a CLI.** A CLI check that times out or fails is "could not
+  check": retried, never remembered, never an install. Setup says so; a spawn is refused with "retry".
+  An agent that could only start by losing all but the first line of its instructions is refused.
+
+### Good to know
+
+- **Install while the floor is idle.** No session-clearing script; no fresh start except the two
+  cases under Start fresh.
+- After the first start, a Codex notice may ask you to allow a project's `.codex` folder: read the
+  file list before allowing.
+- **Rollback to 1.1.75:** no mail is lost. Codex `.codex` folders load silently again, the Codex
+  screen checks and stuck-agent recovery are gone, and a busy machine can again trigger a CLI
+  reinstall. Your allowed-folder list is kept (unused) for a later upgrade.
+
 ## [1.1.75] — 2026-09-30
 
 **The app now handles the mail: agents get each message's text directly and never read or move inbox files.**
