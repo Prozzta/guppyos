@@ -74,6 +74,13 @@ function postStatus(port, id, token, body) {
  * bash, which measured 3.1-3.5 s under a saturated machine (FLAKY-XAUDIT finding 6).
  */
 const TRACE_READ_TIMEOUTS = 'read() { builtin read "$@"; local rc=$?; if [ $rc -gt 128 ]; then printf \'READ-TIMEOUT(%s) \' "$*" >&2; fi; return $rc; }; ';
+/**
+ * PERF153-R1-LOAD-FLAKE: `read` with every `-t N` REMOVED (bash builtins only). Under it a script
+ * that relied on a read timeout to finish would block until the hang guard kills it, so "it ends by
+ * the server's EOF, never by a timeout" is checked by LOGIC, not by a 2-s clock that a loaded
+ * machine overruns (asserting that a real 2-s timeout cannot fire was the flake).
+ */
+const NO_READ_TIMEOUTS = 'read() { local a skip=\'\' args=(); for a in "$@"; do if [ -n "$skip" ]; then skip=\'\'; continue; fi; if [ "$a" = -t ]; then skip=1; continue; fi; args+=("$a"); done; builtin read "${args[@]}"; }; ';
 /** A HANG guard only (counts from spawn, so it includes bash's startup): never a timing bound. */
 const HANG_GUARD_MS = 60_000;
 /** Run the statusLine command the way Claude does: a shell -c with the status JSON on stdin. */
@@ -196,16 +203,55 @@ test('R1 REAL: the script under Git bash with an EMPTY PATH (so no external prog
   fs.writeFileSync(file, CLAUDE_STATUS_SH);
   const cmd = claudeStatusCommand(file.replace(/\\/g, '/'), parts);
   // LANG is UTF-8 on purpose: the script must count BYTES for Content-Length regardless.
-  const r = await runStatusLine(TRACE_READ_TIMEOUTS + cmd, JSON.stringify(STATUS), { PATH: '', LANG: 'C.UTF-8', LC_ALL: '' });
+  const r = await runStatusLine(NO_READ_TIMEOUTS + cmd, JSON.stringify(STATUS), { PATH: '', LANG: 'C.UTF-8', LC_ALL: '' });
   t.diagnostic(`status line: ${r.ms} ms from spawning bash (not asserted)`);
-  assert.equal(r.code, 0, r.err);
-  assert.equal(r.err, '', 'nothing on stderr: every step was a builtin, and no read waited out its timeout');
+  assert.equal(r.code, 0, `${r.err} (killed by the hang guard = the script waited for a timeout, not the server's EOF)`);
+  assert.equal(r.err, '', 'nothing on stderr: every step was a builtin');
   assert.equal(r.out, 'ctx 45k/200k (23%)');
   assert.equal(rec.handled.length, 1);
   assert.equal(rec.handled[0].hook_event_name, 'Status');
   assert.equal(rec.handled[0].note, 'héllo ✓', 'UTF-8 intact (Content-Length counted in bytes)');
   assert.deepEqual(rec.models, [['a1', 'claude-opus-5-5']]);
   assert.equal(rec.capacity.length, 1);
+});
+
+/** A stub broker that sends `first` and completes the reply only AFTER the client has gone (so the
+ *  script can only ever see `first`, however loaded the machine is). */
+async function slowBroker(t, first) {
+  const server = net.createServer((c) => {
+    let got = '';
+    c.on('data', (d) => { got += d; if (got.includes('\r\n\r\n') && first !== null) { c.write(first); first = null; } });
+    c.on('end', () => { try { c.end('ctx 45k/200k (23%)'); } catch (e) { /* gone */ } });
+    c.on('error', () => {});
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => server.close());
+  return server.address().port;
+}
+
+test('PERF153-R1: a reply whose HEADERS never complete prints nothing (it used to print the late reply, headers and all)', { skip: !HAVE_BASH }, async (t) => {
+  const port = await slowBroker(t, 'HTTP/1.0 200 OK\r\nContent-Type: te');
+  const file = path.join(fs.mkdtempSync(path.join(JAIL, 'sh-')), 'claude-status.sh');
+  fs.writeFileSync(file, CLAUDE_STATUS_SH);
+  const r = await runStatusLine(claudeStatusCommand(file.replace(/\\/g, '/'), { port, agentId: 'a1', token: TOK }), JSON.stringify(STATUS), { PATH: '' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '', 'nothing: never a header line on the status line');
+  assert.equal(r.err, '');
+});
+
+test('PERF153-R1: a reply whose BODY never reaches EOF prints nothing, never a partial gauge', { skip: !HAVE_BASH }, async (t) => {
+  const port = await slowBroker(t, 'HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\nctx 45k');
+  const file = path.join(fs.mkdtempSync(path.join(JAIL, 'sh-')), 'claude-status.sh');
+  fs.writeFileSync(file, CLAUDE_STATUS_SH);
+  const r = await runStatusLine(claudeStatusCommand(file.replace(/\\/g, '/'), { port, agentId: 'a1', token: TOK }), JSON.stringify(STATUS), { PATH: '' });
+  assert.equal(r.code, 0, r.err);
+  assert.equal(r.out, '', 'printed only after the server\'s EOF');
+});
+
+test('PERF153-R1: the status script still uses builtins only, and prints only after its reply loop ended at EOF', () => {
+  assert.match(CLAUDE_STATUS_SH, /\[ -n "\$seen" \] \|\| \{ exec 3<&- 3>&-; return 0; \}/);
+  assert.match(CLAUDE_STATUS_SH, /\[ \$rc -gt 128 \] && out=''; break; done\n  exec 3<&- 3>&-\n  printf '%s' "\$out"/);
+  void TRACE_READ_TIMEOUTS;   // kept for ad-hoc tracing of a real run
 });
 
 test('R1 REAL: with the broker down the script prints nothing, exits 0, and writes nothing to stderr', { skip: !HAVE_BASH }, async () => {
@@ -219,7 +265,8 @@ test('R1 REAL: with the broker down the script prints nothing, exits 0, and writ
 test('R1 STATIC: the script uses no external command (builtins, redirections and its own function only)', () => {
   const code = CLAUDE_STATUS_SH.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
   const words = new Set((code.match(/(?:^|[;{(|&]\s*|\b(?:do|then|else)\s+)([a-z_][a-z_-]*)/gm) || []).map((m) => m.replace(/^[;{(|&\s]*|^(do|then|else)\s+/, '').trim()));
-  const BUILTIN = new Set(['local', 'while', 'read', 'do', 'done', 'exec', 'printf', 'return', 'unset', 'line', 'body', '__munder_status', 'if', 'then', 'fi', 'break']);
+  // PERF153-R1: seen / out / rc are the script's own VARIABLES (assignments), like line and body.
+  const BUILTIN = new Set(['local', 'while', 'read', 'do', 'done', 'exec', 'printf', 'return', 'unset', 'line', 'body', '__munder_status', 'if', 'then', 'fi', 'break', 'continue', 'seen', 'out', 'rc']);
   for (const w of words) assert.ok(BUILTIN.has(w) || w.startsWith('__'), `unexpected command word: ${w}`);
   assert.doesNotMatch(code, /\b(cat|curl|wget|sed|awk|grep|tr|head|tail|nc|node|cmd|powershell|findstr)\b/);
 });
