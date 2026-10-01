@@ -690,6 +690,32 @@ test('WSG-FOLLOWUPS: codexEraseResidue is positive evidence only', () => {
   assert.equal(OWNER.codexEraseResidue(f('› somebody else'), TEXT), null, 'not a piece of our text');
   assert.equal(OWNER.codexEraseResidue(f('› [hive'), TEXT), '[hive');
   assert.equal(OWNER.codexEraseResidue(f('• Working'), TEXT), null, 'not the composer');
+  // Jim N-F1: a residue is the START of our text, at least CODEX_RESIDUE_MIN_CHARS long.
+  assert.equal(OWNER.codexEraseResidue(f('› c'), TEXT), null, 'ONE CHARACTER IS NOT RESIDUE (a human keystroke)');
+  assert.equal(OWNER.codexEraseResidue(f('› [h'), TEXT), null, 'two characters are not either');
+  assert.equal(OWNER.codexEraseResidue(f('› A'), TEXT), null, 'a placeholder caught mid-redraw');
+  assert.equal(OWNER.codexEraseResidue(f('› inbox'), TEXT), null, 'A SUFFIX IS NOT RESIDUE (Ctrl-U kills backward)');
+  assert.equal(OWNER.codexEraseResidue(f('› [hi'), TEXT), '[hi');
+});
+
+K.residueNeedsTwoReadings = async (Owner) => {
+  // The first reading after the erase catches a frame mid-redraw; the second is clean.
+  const r = laggy(rig({}, Owner), 12_000, 1);
+  const write = r.deps.write;
+  r.deps.write = (id, d) => (d === '\x15' ? (r.writes.push(d), r.timers.push({ at: r.now, seq: (r.seq += 1), fn: () => { r.prompt = TEXT.slice(0, 6); r.gen += 1; r.timers.push({ at: r.now + 100, seq: (r.seq += 1), fn: () => { r.prompt = ''; r.gen += 1; } }); } }), { ok: true }) : write(id, d));
+  r.readScreenAs = () => ({ onPromptRow: r.prompt === TEXT, screenCount: r.prompt === TEXT ? 1 : 0 });
+  const out = await r.submit();
+  assert.equal(out.kind, 'ABORTED', `A RESIDUE SEEN ON ONE READING ONLY IS NOT HELD, got ${JSON.stringify(out)}`);
+};
+test('WSG-FOLLOWUPS N-F1: a residue seen on one reading only (mid-redraw) is not held', () => K.residueNeedsTwoReadings());
+
+test('WSG-FOLLOWUPS N-F1: a human key during the erase verification is HUMAN_INPUT_AFTER_STAGE, not residue', async () => {
+  const r = laggy(rig(), 12_000, 1);
+  const write = r.deps.write;
+  r.deps.write = (id, d) => (d === '\x15' ? (r.writes.push(d), r.timers.push({ at: r.now, seq: (r.seq += 1), fn: () => { r.prompt = ''; r.gen += 1; r.human += 1; r.prompt = TEXT.slice(0, 4); } }), { ok: true }) : write(id, d));
+  r.readScreenAs = () => ({ onPromptRow: r.prompt === TEXT, screenCount: r.prompt === TEXT ? 1 : 0 });
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'INTERFERED', reason: 'HUMAN_INPUT_AFTER_STAGE' });
 });
 
 test('a human key in the gap is still HUMAN_INPUT_AFTER_STAGE, not a screen failure', async () => {
@@ -1077,6 +1103,9 @@ const MUTANTS = [
   { name: 'FOLLOWUPS: a half erase released (residue check removed)', file: 'src/main/automaticSubmit.ts',
     edits: [["      if (residue !== null) return this.interfere(s, 'ERASE_LEFT_RESIDUE', `${residue.length} chars of our text left`);\n", '']],
     killer: 'halfEraseHeld', dies: /A HALF ERASE IS HELD/ },
+  { name: 'N-F1: residue on ONE reading held (no second reading)', file: 'src/main/automaticSubmit.ts',
+    edits: [['        await this.sleep(SCREEN_COMMIT_RETRY_MS);\n        const residue = await residueNow();\n', '        const residue = await residueNow();\n']],
+    killer: 'residueNeedsTwoReadings', dies: /A RESIDUE SEEN ON ONE READING ONLY IS NOT HELD/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

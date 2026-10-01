@@ -456,8 +456,12 @@ export function codexEraseResidue(facts: CodexScreenFacts, text: string): string
   const row = facts.cursorRow.trim();
   if (!row.startsWith('›') || row === CODEX_EMPTY_COMPOSER_ROW) return null;
   const rest = row.slice(1).trim();
-  return rest !== '' && text.includes(rest) ? rest : null;
+  // Jim N-F1: Ctrl-U kills BACKWARD from the cursor, so a real residue is the START of our text,
+  // and a 1-2 character row (a human's keystroke, a placeholder mid-redraw) proves nothing.
+  return rest.length >= CODEX_RESIDUE_MIN_CHARS && text.startsWith(rest) ? rest : null;
 }
+/** Jim N-F1: the shortest composer row that counts as a fragment of our text. */
+export const CODEX_RESIDUE_MIN_CHARS = 3;
 
 /** The claim capacity is re-asked under. Mirrors `capacityRuntime.DeliveryClaim`. */
 export interface OwnerClaim {
@@ -1479,9 +1483,20 @@ export class AutomaticSubmitOwner {
     // composer) would be refused at the re-offer's STAGE for ever, silently. POSITIVE evidence
     // of our own residue holds it instead, visibly; nothing more is written.
     if (this.guardMode(s.ptyId) === 'ENFORCE') {
-      const r = await this.readGuard(s.ptyId);
-      const residue = r && r.incarnation === s.incarnation ? codexEraseResidue(r.facts, s.req.text) : null;
-      if (residue !== null) return this.interfere(s, 'ERASE_LEFT_RESIDUE', `${residue.length} chars of our text left`);
+      // Jim N-F1: a human key during the erase's verification is reported as such, not as residue.
+      const blocked = postStageGuard(s, deps);
+      if (blocked?.kind === 'FAILED') { if (s.decision) deps.capacity.cancelGrant(s.decision); return { kind: 'FAILED', reason: blocked.reason }; }
+      if (blocked?.kind === 'INTERFERED') return this.interfere(s, blocked.reason, blocked.detail);
+      const residueNow = async (): Promise<string | null> => {
+        const r = await this.readGuard(s.ptyId);
+        return r && r.incarnation === s.incarnation ? codexEraseResidue(r.facts, s.req.text) : null;
+      };
+      // ...and on TWO readings, so a frame caught mid-redraw is not taken for residue.
+      if (await residueNow() !== null) {
+        await this.sleep(SCREEN_COMMIT_RETRY_MS);
+        const residue = await residueNow();
+        if (residue !== null) return this.interfere(s, 'ERASE_LEFT_RESIDUE', `${residue.length} chars of our text left`);
+      }
     }
     if (s.decision) deps.capacity.cancelGrant(s.decision);
     return { kind: 'ABORTED', detail: basis };
