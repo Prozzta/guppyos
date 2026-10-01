@@ -574,6 +574,65 @@ K.unverifiableEraseHolds = async (Owner) => {
 };
 test('WSG LIVENESS: an erase that cannot be proven stays INTERFERED (held for a person)', () => K.unverifiableEraseHolds());
 
+// ─── WSG LIVENESS, post-Enter (rc/1.1.76 final gate): the acceptance check on a slow TUI ──
+
+/** Like laggy, but the lag and the effect of each write are chosen per write (in order), and
+ *  the post-Enter acceptance check is on (verifySubmit). `enter(n)` is what the n-th Enter does:
+ *  'submit' (clears the composer), 'newline' (processed - output - but our text stays). */
+function slowTui(r, lagOf, enter = () => 'submit') {
+  laggy(r, 0);
+  let last = 0; let enters = 0;
+  r.deps.verifySubmit = () => true;
+  r.deps.write = (_id, d) => {
+    r.writes.push(d);
+    const n = d === '\r' ? (enters += 1) : 0;
+    const due = Math.max(r.now + lagOf(d), last); last = due;
+    const apply = () => {
+      if (d === '\r') { if (enter(n) === 'submit') r.prompt = ''; } else if (d === '\x15') r.prompt = ''; else r.prompt += d;
+      r.gen += 1;
+    };
+    if (due <= r.now) apply(); else r.timers.push({ at: due, seq: (r.seq += 1), fn: apply });
+    return { ok: true };
+  };
+  return r;
+}
+
+K.slowEnterCommitsOnce = async (Owner) => {
+  // Creed's gate case: the stub processes EVERY write 5 s late, the Enter included.
+  const r = slowTui(rig({}, Owner), () => 5000);
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'COMMITTED' });
+  assert.deepEqual(r.writes, [TEXT, '\r'], 'NO SECOND ENTER ON A MERELY SLOW ENTER');
+  assert.equal(r.prompt, '', 'submitted once');
+};
+test('WSG LIVENESS post-Enter: an Enter processed 5 s late is waited for: COMMITTED with ONE Enter', () => K.slowEnterCommitsOnce());
+
+K.queuedEnterNeverChased = async (Owner) => {
+  // The Enter sits unprocessed past the budget (no output at all): nothing can recall it.
+  const r = slowTui(rig({}, Owner), (d) => (d === '\r' ? 60_000 : 0));
+  const out = await r.submit();
+  assert.deepEqual(r.writes, [TEXT, '\r'], 'A QUEUED ENTER IS NEVER CHASED (no second Enter, no Ctrl-U behind it)');
+  assert.deepEqual(out, { kind: 'COMMITTED' }, 'unconfirmed: the provider confirmation judges the turn');
+};
+test('WSG LIVENESS post-Enter: an Enter still queued past the budget is never chased (COMMITTED, unconfirmed)', () => K.queuedEnterNeverChased());
+
+K.lostEnterRetried = async (Owner) => {
+  const r = slowTui(rig({}, Owner), () => 0, (n) => (n === 1 ? 'newline' : 'submit'));
+  const out = await r.submit();
+  assert.deepEqual(out, { kind: 'COMMITTED' });
+  assert.deepEqual(r.writes, [TEXT, '\r', '\r'], 'AN ENTER PROVEN LOST (OUTPUT, TEXT STAYED) IS SENT ONCE MORE');
+};
+test('WSG LIVENESS post-Enter: an Enter PROVEN lost (processed, our text stayed) gets one more Enter', () => K.lostEnterRetried());
+
+K.lostTwiceAborted = async (Owner) => {
+  const r = slowTui(rig({}, Owner), () => 0, () => 'newline');
+  const out = await r.submit();
+  assert.deepEqual(r.writes, [TEXT, '\r', '\r', '\x15'], 'AN ENTER PROVEN LOST TWICE IS ERASED (VERIFIED), NOT HELD');
+  assert.deepEqual(out, { kind: 'ABORTED', detail: 'submit-not-accepted' });
+  assert.equal(r.prompt, '');
+};
+test('WSG LIVENESS post-Enter: two Enters proven lost: a VERIFIED erase and a release (ABORTED), not SUBMIT_NOT_ACCEPTED', () => K.lostTwiceAborted());
+
 test('WSG LIVENESS: a human key during the slow wait wins (HUMAN_INPUT_AFTER_STAGE, no Enter, no clear)', async () => {
   const r = laggy(rig(), 8000);
   r.timers.push({ at: r.now + 3000, seq: (r.seq += 1), fn: () => { r.human += 1; r.gen += 1; } });
@@ -941,6 +1000,19 @@ const MUTANTS = [
   { name: 'LIVENESS: the erase taken on trust (gone-check dropped)', file: 'src/main/automaticSubmit.ts',
     edits: [["    if (!after || after.onPromptRow || after.screenCount >= before.screenCount) {\n      return this.interfere(s, 'ERASE_NOT_VERIFIED'", "    if (!after) {\n      return this.interfere(s, 'ERASE_NOT_VERIFIED'"]],
     killer: 'unverifiableEraseHolds', dies: /AN ERASE THAT IS NOT PROVEN IS HELD/ },
+  // WSG LIVENESS, post-Enter (rc/1.1.76 final gate)
+  { name: 'POST-ENTER: a merely slow Enter chased with a second one (the old window)', file: 'src/main/automaticSubmit.ts',
+    edits: [['        if (processed && now - quietSince >= SUBMIT_VERIFY_WINDOW_MS) return false;   // PROVEN lost', '        return false;']],
+    killer: 'slowEnterCommitsOnce', dies: /NO SECOND ENTER ON A MERELY SLOW ENTER/ },
+  { name: 'POST-ENTER: output since the Enter not required (processed always true)', file: 'src/main/automaticSubmit.ts',
+    edits: [['        const processed = enterGen === undefined || lastGen !== enterGen;', '        const processed = true;']],
+    killer: 'slowEnterCommitsOnce', dies: /NO SECOND ENTER ON A MERELY SLOW ENTER/ },
+  { name: 'POST-ENTER: a still-queued Enter chased at the budget', file: 'src/main/automaticSubmit.ts',
+    edits: [['        if (now - started >= SUBMIT_SLOW_BUDGET_MS) return processed ? false : null;', '        if (now - started >= SUBMIT_SLOW_BUDGET_MS) return false;']],
+    killer: 'queuedEnterNeverChased', dies: /A QUEUED ENTER IS NEVER CHASED/ },
+  { name: 'POST-ENTER: two lost Enters held for a person (the old SUBMIT_NOT_ACCEPTED)', file: 'src/main/automaticSubmit.ts',
+    edits: [["    if (slowAware) return this.abort(again, 'submit-not-accepted', SCREEN_ABORT_VERIFY_BUDGET_MS);\n", '']],
+    killer: 'lostTwiceAborted', dies: /AN ENTER PROVEN LOST TWICE IS ERASED/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

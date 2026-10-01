@@ -676,6 +676,9 @@ export const PRIOR_TEXT_UNREADABLE_HOLD_MS = 10 * 60_000;
 export const SUBMIT_VERIFY_POLL_MS = 250;
 /** CODEX-WAKE-162: 2.5 s (was 1.5 s): under load a TUI's redraw can lag the Enter. */
 export const SUBMIT_VERIFY_WINDOW_MS = 2_500;
+/** WSG LIVENESS (rc/1.1.76 final gate): how long a Codex Enter that produced NO output yet
+ *  (still queued in a slow TUI) is waited for before settling COMMITTED, unconfirmed. */
+export const SUBMIT_SLOW_BUDGET_MS = 10_000;
 /** CODEX-WAKE-162: 'gone' must be read this many times in a row before COMMITTED (one
  *  mid-redraw frame is not proof). */
 export const SUBMIT_GONE_READS = 2;
@@ -1335,21 +1338,42 @@ export class AutomaticSubmitOwner {
   private async verifySubmitted(s: Staged): Promise<SubmitOutcome> {
     const needle = needleFor(s.req.text);
     if (!needle) return { kind: 'COMMITTED' };
-    const cleared = async (): Promise<boolean | null> => {
+    // WSG LIVENESS (rc/1.1.76 final gate): for Codex, an Enter is PROVEN LOST only when the TUI
+    // produced output after it (it processed something) and our text then stayed put for a
+    // whole window. With NO output since the Enter it is merely slow: still queued in the TUI's
+    // input, where nothing we write can recall it (a second Enter or a Ctrl-U lands BEHIND it),
+    // so it is waited for, up to SUBMIT_SLOW_BUDGET_MS; still no output then = null (COMMITTED,
+    // unconfirmed: the wake coordinator's provider confirmation judges the turn, exactly as for
+    // a missing reading). Other providers keep the plain window.
+    const slowAware = this.guardMode(s.ptyId) === 'ENFORCE';
+    const cleared = async (st: Staged): Promise<boolean | null> => {
       const started = this.deps.now();
+      // The generation AT the Enter: commitSection wrote it only while output still equalled the
+      // reading's (screenGen), so that is exact; anything after it is the TUI processing input.
+      const enterGen = st.screenGen ?? this.deps.outputGeneration?.(s.ptyId);
+      let lastGen = enterGen;
+      let quietSince = started;
       let gone = 0;
       for (;;) {
         await this.sleep(SUBMIT_VERIFY_POLL_MS);
         const seen = await this.readScreen(s.ptyId, needle, s.req.text);
         if (!seen) return null;
+        const gen = this.deps.outputGeneration?.(s.ptyId);
+        if (gen !== lastGen) { lastGen = gen; quietSince = this.deps.now(); }
         if (!seen.onPromptRow && seen.promptTailMatches !== true) {
           if (++gone >= SUBMIT_GONE_READS) return true;
         } else gone = 0;
+        const now = this.deps.now();
         // At the window's end a last reading of 'gone' stands (it was not contradicted).
-        if (this.deps.now() - started >= SUBMIT_VERIFY_WINDOW_MS) return gone > 0;
+        if (!slowAware) { if (now - started >= SUBMIT_VERIFY_WINDOW_MS) return gone > 0; continue; }
+        if (now - started < SUBMIT_VERIFY_WINDOW_MS) continue;
+        if (gone > 0) return true;
+        const processed = enterGen === undefined || lastGen !== enterGen;
+        if (processed && now - quietSince >= SUBMIT_VERIFY_WINDOW_MS) return false;   // PROVEN lost
+        if (now - started >= SUBMIT_SLOW_BUDGET_MS) return processed ? false : null;
       }
     };
-    const first = await cleared();
+    const first = await cleared(s);
     if (first !== false) return { kind: 'COMMITTED' };
     // The grant went out with the first Enter; this one carries none.
     const again: Staged = { ...s, decision: null };
@@ -1364,8 +1388,13 @@ export class AutomaticSubmitOwner {
     if (verdict.kind === 'FAILED') return { kind: 'FAILED', reason: verdict.reason };
     if (verdict.kind === 'INTERFERED') return this.interfere(again, verdict.reason, verdict.detail);
     if (verdict.kind !== 'ENTERED' || !verdict.ok) return this.interfere(again, 'ENTER_WRITE_FAILED', verdict.kind === 'ENTERED' ? verdict.error : verdict.basis);
-    const second = await cleared();
+    const second = await cleared(again);
     if (second !== false) return { kind: 'COMMITTED' };
+    // WSG LIVENESS: two Enters PROVEN lost on Codex (the TUI processed both and our text
+    // stayed): erase it through the VERIFIED abort and release it for a re-offer. The abort's
+    // differential check is what keeps this single-delivery: text that moved into the
+    // transcript (a late submit) is not "fewer on screen", so it is held, never re-offered.
+    if (slowAware) return this.abort(again, 'submit-not-accepted', SCREEN_ABORT_VERIFY_BUDGET_MS);
     return this.interfere(again, 'SUBMIT_NOT_ACCEPTED', 'our text stayed in the composer after two Enters');
   }
 
