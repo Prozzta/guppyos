@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AgentCard } from './AgentCard';
+import { agentBadges, type AgentBadge, type BadgeFlag } from '@shared/agentBadges';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
@@ -54,22 +55,21 @@ export function AgentStrip({ config }: AgentStripProps) {
   // strip clips overflow and the compact cards have no room for an inline box.
   const [noteEditId, setNoteEditId] = useState<string | null>(null);
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
-  // Each worker's actively-DOING ledger tasks, polled from hive/tasks.json —
-  // rendered as a sticky note on the avatar card (click → task detail).
-  const [doingByAgent, setDoingByAgent] = useState<Record<string, string[]>>({});
+  // Each worker's actively-DOING ledger tasks (and the board monitor's flags on them),
+  // polled from hive/tasks.json — rendered as the task chip on the avatar card (click →
+  // task detail) — plus each agent's messages waiting, for the separate mail badge.
+  const [badgeByAgent, setBadgeByAgent] = useState<Record<string, AgentBadge>>({});
+  const [inboxByAgent, setInboxByAgent] = useState<Record<string, number>>({});
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
       try {
-        const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string }> } | null;
+        const [raw, extra] = await Promise.all([window.cth.hiveTasks(), window.cth.hiveCardBadges()]);
         if (cancelled) return;
-        const map: Record<string, string[]> = {};
-        for (const t of (raw && Array.isArray(raw.tasks)) ? raw.tasks : []) {
-          if (t?.status === 'doing' && typeof t.assignee === 'string' && t.assignee && typeof t.id === 'string') {
-            (map[t.assignee] = map[t.assignee] ?? []).push(t.id);
-          }
-        }
-        setDoingByAgent(map);
+        const flags = (extra && Array.isArray((extra as { flags?: unknown }).flags) ? (extra as { flags: BadgeFlag[] }).flags : []);
+        setBadgeByAgent(agentBadges(raw, flags));
+        const inbox = extra && typeof (extra as { inboxBacklog?: unknown }).inboxBacklog === 'object' ? (extra as { inboxBacklog: Record<string, number> }).inboxBacklog : {};
+        setInboxByAgent(inbox ?? {});
       } catch { /* keep last good */ }
     };
     void poll();
@@ -144,9 +144,11 @@ export function AgentStrip({ config }: AgentStripProps) {
             isGod={a.isGod}
             onClick={() => select(a.id)}
             onRename={(name) => renameAgent(a.id, name)}
-            doingCount={doingByAgent[a.id]?.length ?? 0}
+            doingCount={badgeByAgent[a.id]?.doing.length ?? 0}
+            taskFlags={badgeByAgent[a.id]?.flagged}
+            inboxBacklog={inboxByAgent[a.id] ?? 0}
             onTaskNoteClick={() => {
-              const first = doingByAgent[a.id]?.[0];
+              const first = badgeByAgent[a.id]?.doing[0];
               if (first) openTaskDetail(first);
             }}
             note={a.note}

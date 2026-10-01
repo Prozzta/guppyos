@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
+import { ageText } from '../shared/agentBadges';
 
 export interface FloorDigestConfig {
   enabled: boolean;
@@ -57,11 +58,7 @@ export interface FloorDigestInput {
 
 const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-export function ageText(ms: number): string {
-  if (ms < 60 * 60_000) return `${Math.max(0, Math.round(ms / 60_000))} min`;
-  if (ms < 48 * 60 * 60_000) return `${Math.round(ms / 360_000) / 10} h`;
-  return `${Math.round(ms / 8_640_000) / 10} d`;
-}
+export { ageText };
 
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it

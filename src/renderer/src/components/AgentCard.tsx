@@ -10,6 +10,7 @@ import { OfficeCharacterName } from '@/scene/office/cast';
 import { AgentNameEditor } from './AgentNameEditor';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
+import { MAIL_GLYPH, mailBadgeTitle, taskChipText, taskChipTitle } from '@shared/agentBadges';
 
 export interface AgentCardProps {
   /** Hive agent id: reads main's impact string for this agent (v1.1.45 unit #5). */
@@ -37,10 +38,15 @@ export interface AgentCardProps {
   onClick?: () => void;
   /** Persists an inline display-name edit; identity and hive paths stay unchanged. */
   onRename?: (name: string) => Promise<{ ok: boolean; error?: string }>;
-  /** Number of ledger tasks this agent is actively DOING — rendered as a blue
-   *  sticky note stuck to the card. Clicking it opens the first task's detail. */
+  /** Number of ledger tasks this agent is actively DOING — rendered as a labelled
+   *  task chip (clipboard + count) stuck to the card. Clicking it opens the first task.
+   *  CARD-BADGE-AMBIGUOUS: never a bare number, which read as unread mail. */
   doingCount?: number;
   onTaskNoteClick?: () => void;
+  /** ZT-I3 flags on this agent's doing cards ("stale: ZT-I1-MAIL"): the chip turns amber. */
+  taskFlags?: string[];
+  /** Messages waiting (not yet acted on, fleet inboxBacklog): a separate mail badge. */
+  inboxBacklog?: number;
   draggable?: boolean; // must sit on the <button> itself — Chromium won't start a drag on an ancestor from inside a form control
   /** Private note — rendered as the card's own row (v0.3.4) so it can never
    *  cover the context gauge. First line only; full text in the tooltip. */
@@ -60,7 +66,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 export function AgentCard({
   agentId, name, character, accent, status, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
-  doingCount = 0, onTaskNoteClick, draggable, note, onEditNote
+  doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, draggable, note, onEditNote
 }: AgentCardProps) {
   const [hover, setHover] = useState(false);
   const typing = useHasTerminalDraft(ptyId);
@@ -161,24 +167,48 @@ export function AgentCard({
         transition: 'transform 90ms steps(2, end), box-shadow 90ms steps(2, end)'
       }}
     >
-      {/* The taken note, stuck to the card like on the desk: this worker is
-          actively DOING a ledger task. Click → the task's detail overlay. */}
+      {/* The TASK chip, stuck to the card like a note on the desk: this worker is
+          actively DOING ledger tasks. Always a clipboard AND the count (also for 1),
+          so it can't be read as mail; amber with "!" when one of them is flagged
+          (stale, down, stuck). Click → the task's detail overlay. */}
       {doingCount > 0 && (
         <span
-          title={`actively working ${doingCount} task${doingCount === 1 ? '' : 's'} — click to open`}
+          data-badge="task"
+          title={taskChipTitle(doingCount, taskFlags)}
           onClick={(e) => { e.stopPropagation(); onTaskNoteClick?.(); }}
           style={{
             position: 'absolute', right: -4, bottom: -5, zIndex: 2,
-            width: 20, height: 18,
-            background: 'var(--cth-sky)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300), 1px 2px 0 rgba(26,19,32,0.18)',
+            minWidth: 26, height: 18, padding: '0 3px',
+            background: taskFlags.length ? 'var(--cth-lemon)' : 'var(--cth-sky)',
+            boxShadow: taskFlags.length
+              ? 'inset 0 0 0 2px var(--cth-coral), 1px 2px 0 rgba(26,19,32,0.18)'
+              : 'inset 0 0 0 1px var(--cth-ink-300), 1px 2px 0 rgba(26,19,32,0.18)',
             transform: 'rotate(4deg)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)',
             cursor: 'pointer'
           }}
         >
-          {doingCount > 1 ? doingCount : '✎'}
+          {taskChipText(doingCount)}{taskFlags.length ? '!' : ''}
+        </span>
+      )}
+      {/* The MAIL badge: a different shape (a round seal), colour and corner from the
+          task chip. Messages waiting = not yet acted on (ZT-I1-MAIL), not "unread". */}
+      {inboxBacklog > 0 && (
+        <span
+          data-badge="mail"
+          title={mailBadgeTitle(inboxBacklog)}
+          style={{
+            position: 'absolute', right: -5, top: -6, zIndex: 2,
+            minWidth: 18, height: 18, padding: '0 4px', borderRadius: 9,
+            background: 'var(--cth-coral)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-700), 1px 2px 0 rgba(26,19,32,0.18)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-cream-50)',
+            pointerEvents: 'none'
+          }}
+        >
+          {MAIL_GLYPH}{inboxBacklog}
         </span>
       )}
       <PixelPanel

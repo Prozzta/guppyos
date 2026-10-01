@@ -975,6 +975,12 @@ const api = {
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
   /** ZT-I3: the board monitor's flags (BoardFlag[]). */
   hiveBoardFlags: (): Promise<unknown> => ipcRenderer.invoke('hive:boardFlags'),
+  /** CARD-BADGE-AMBIGUOUS: the board flags + each agent's messages waiting, for the card badges. */
+  hiveCardBadges: (): Promise<unknown> => ipcRenderer.invoke('hive:cardBadges'),
+  /** ZT-I3: per-card status ages from the guard's sidecar (statusSince, statusSinceExact). */
+  hiveTaskMeta: (): Promise<unknown> => ipcRenderer.invoke('hive:taskMeta'),
+  /** ZT-I4: the text of hive/floor-digest.md ('' until the first digest). */
+  hiveFloorDigest: (): Promise<string> => ipcRenderer.invoke('hive:floorDigest'),
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
   /** ZT-I1-MAIL §11.8 #15: inbox/ + inbox/.done/ (bounded), each with its ledger state. */

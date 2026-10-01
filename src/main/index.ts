@@ -57,7 +57,7 @@ import {
 } from './git';
 import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
-import { FloorDigest, FLOOR_DIGEST_DEFAULTS } from './floorDigest';
+import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
@@ -4575,6 +4575,22 @@ ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
 // ZT-I3: the board monitor's current flags (stale, archived, down, stuck, ask-answered).
 ipcMain.handle('hive:boardFlags', () => boardMonitor.flags());
+// CARD-BADGE-AMBIGUOUS: what the player cards need: the flags, and each active agent's
+// messages waiting (fleet's inboxBacklog: mail not yet acted on, from the ledger).
+// ZT-I3/I4: the sidecar (status ages for the Kanban) and the floor digest text (Floor panel).
+ipcMain.handle('hive:taskMeta', () => hive.ledgerGuard.taskMeta().cards);
+ipcMain.handle('hive:floorDigest', () => {
+  const root = hive.root();
+  if (!root) return '';
+  try { return readFileSync(join(root, FLOOR_DIGEST_FILE), 'utf8'); } catch { return ''; }
+});
+ipcMain.handle('hive:cardBadges', () => {
+  const inboxBacklog: Record<string, number> = {};
+  try {
+    for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) inboxBacklog[id] = fleetMail(id).inboxBacklog;
+  } catch { /* hive unavailable: no mail badges */ }
+  return { flags: boardMonitor.flags(), inboxBacklog };
+});
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 // ZT-I1-MAIL §11.8 #15: the Threads panel reads inbox/ AND inbox/.done/ with the ledger state as a
