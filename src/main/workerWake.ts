@@ -285,6 +285,9 @@ interface AgentWake {
   claimTurnId: string | null;
   /** WAKE-WATCHDOG-RECOVERY: the newest hook or provider-status reading from the agent (0 = none). */
   lastTrafficAt: number;
+  /** ZERO-TOKEN-LIVENESS (Dwight F1): the same, MAIN session only: a SubagentStop never sets it.
+   *  The WWR keeps lastTrafficAt (any hook) unchanged. */
+  lastMainTrafficAt: number;
   /** CODEX-STOP-MISSING: the active epoch was opened by a compaction outside any regular turn, so
    *  its PostCompact (not a Stop, which never comes) ends it. */
   compactEpoch: boolean;
@@ -383,7 +386,7 @@ export class WorkerWakeWatchdog {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
         stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
-        lastTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
+        lastTrafficAt: 0, lastMainTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
     }
@@ -512,6 +515,7 @@ export class WorkerWakeWatchdog {
     if (!agentId || !event) return false;
     const r = this.rec(agentId);
     if (Number.isFinite(at)) r.lastTrafficAt = Math.max(r.lastTrafficAt, at);   // WAKE-WATCHDOG-RECOVERY
+    if (Number.isFinite(at) && event !== 'SubagentStop') r.lastMainTrafficAt = Math.max(r.lastMainTrafficAt, at);
     // §11.18 #43 (Q40): StopFailure (an API error) ends the turn exactly as Stop does. Without
     // this the lifecycle stayed active until Claude's own idle Notification (~60 s), and a mail
     // wake re-pended by the abnormal close was refused as lifecycle-active until then.
@@ -636,6 +640,7 @@ export class WorkerWakeWatchdog {
     if (!agentId) return false;
     const r = this.rec(agentId);
     if (Number.isFinite(at)) r.lastTrafficAt = Math.max(r.lastTrafficAt, at);   // WAKE-WATCHDOG-RECOVERY
+    if (Number.isFinite(at)) r.lastMainTrafficAt = Math.max(r.lastMainTrafficAt, at);   // a provider status is main-session
     if (sessionId) {
       if (r.providerSession !== null && r.providerSession !== sessionId) return false;
       r.providerSession = sessionId;
@@ -1118,7 +1123,7 @@ export class WorkerWakeWatchdog {
       openTurnId: r?.openTurnId ?? null,
       turnStartAt: r?.turnStartAt ?? 0,
       lastTurnEndAt: r?.stoppedAt ?? 0,
-      lastHookAt: r?.lastTrafficAt ?? 0,
+      lastHookAt: r?.lastMainTrafficAt ?? 0,
       lastHumanNeedsAt: r?.lastHumanNeedsAt ?? 0,
       stuckRecoveries: r?.stuckRecoveries ?? 0
     };

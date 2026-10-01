@@ -265,6 +265,21 @@ test('M1: a SubagentStop never ends the main turn (lastTurnEndAt is the main Sto
   assert.equal(classify(facts({ wake: ww.livenessFacts('a1') })).classification, 'IDLE');
 });
 
+test('Dwight F1: a SubagentStop never refreshes the main-session hook evidence (lastHookAt), so it cannot keep a stalled main turn BUSY', () => {
+  const ww = new WorkerWakeWatchdog();
+  ww.noteHook('a1', 'UserPromptSubmit', '', T0 - 10 * MIN);
+  for (let i = 1; i <= 9; i++) ww.noteHook('a1', 'SubagentStop', '', T0 - 10 * MIN + i * MIN);   // subagents keep finishing
+  const wf = ww.livenessFacts('a1');
+  assert.equal(wf.lastHookAt, T0 - 10 * MIN, 'only the main session counts');
+  const v = classify(facts({ wake: wf, pty: { lastTrafficAt: T0 - 10 * MIN } }));
+  assert.deepEqual([v.classification, v.reason], ['SUSPECT', 'no-progress']);
+  // A main-session hook and a provider status reading DO count.
+  ww.noteHook('a1', 'PostToolUse', '', T0 - 1000);
+  assert.equal(ww.livenessFacts('a1').lastHookAt, T0 - 1000);
+  ww.noteProviderStatus('a1', 'running', T0 - 500);
+  assert.equal(ww.livenessFacts('a1').lastHookAt, T0 - 500);
+});
+
 test('M4: a respawn on the same PTY id is a new incarnation; nothing of the old one carries over', () => {
   const w = world(facts({ wake: { lifecycle: 'active', activeSince: T0 - MIN }, pty: { lastTrafficAt: T0 - 1000 } }));
   w.mon.sample('a1');

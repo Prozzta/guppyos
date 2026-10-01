@@ -99,6 +99,63 @@ test('G3 (Jim P11): refusal evidence is recorded only while mail waits (and neve
   assert.equal([...fn.matchAll(/agentLiveness\.noteWakeRefusal\(/g)].length, 1, 'one call, inside the guard');
 });
 
+test('Dwight F2 (wiring): every registry archive/restore re-samples liveness at once; the listener only samples', () => {
+  assert.match(INDEX, /hive\.onArchiveChange\(\(agentId\) => \{ sampleLiveness\(agentId\); \}\);/);
+  assert.equal([...INDEX.matchAll(/hive\.onArchiveChange\(/g)].length, 1);
+});
+
+test('Dwight F2 (behaviour): an archive, a restore and a respawn-restore each emit the liveness edge immediately, with no wake or submit', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'liveness-archive-'));
+  const realHome = process.env.HOME; const realProfile = process.env.USERPROFILE;
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  let hive = null;
+  t.after(() => {
+    try { hive?.dispose(); } finally {
+      if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+      if (realProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = realProfile;
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+  assert.equal(os.homedir(), home, 'HOME redirect failed - aborting before constructing any hive');
+  const { HiveManager } = loadTs('src/main/hive.ts');
+  const { AgentLivenessMonitor } = loadTs('src/main/agentLiveness.ts');
+  hive = new HiveManager(() => home);
+  await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: home });
+  const rows = [];
+  const effects = [];
+  const mon = new AgentLivenessMonitor({
+    agents: () => Object.keys(hive.registry().agents),
+    facts: (id) => {
+      const a = hive.registry().agents[id];
+      if (!a) return null;
+      return {
+        agentId: id,
+        registry: { archived: a.archived === true, ...(a.archived && a.archiveReason ? { archiveReason: a.archiveReason } : {}), onHold: false },
+        pty: null,
+        wake: { lifecycle: 'unknown', provisional: false, activeSince: 0, openTurnId: null, turnStartAt: 0, lastTurnEndAt: 0, lastHookAt: 0, lastHumanNeedsAt: 0 },
+        control: { paused: false, halted: false, autoDeliveryPaused: false }, mailWaiting: 0
+      };
+    },
+    sink: (r) => rows.push(r),
+    now: () => Date.now()
+  });
+  mon.onLivenessChange(() => effects.push('edge'));
+  // The same wiring as index.ts: the listener only samples.
+  hive.onArchiveChange((agentId) => { mon.sample(agentId); });
+  mon.sampleAll();
+  assert.equal(rows.at(-1).lifecycle, 'LIVE');
+  hive.setArchived('a1', true, 'explicit');
+  assert.deepEqual([rows.at(-1).lifecycle, rows.at(-1).archiveReason], ['ARCHIVED', 'explicit'], 'at the edge, not the next beat');
+  hive.setArchived('a1', false);
+  assert.equal(rows.at(-1).lifecycle, 'LIVE');
+  hive.setArchived('a1', true, 'orphan');
+  assert.deepEqual([rows.at(-1).lifecycle, rows.at(-1).archiveReason], ['ARCHIVED', 'orphan']);
+  await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: home });   // a respawn restores it
+  assert.equal(rows.at(-1).lifecycle, 'LIVE');
+  assert.equal(rows.length, 5, 'one row per edge');
+  assert.deepEqual(effects, ['edge', 'edge', 'edge', 'edge', 'edge'], 'the only effect is the record (no wake, no submit exists here)');
+});
+
 test('fleet.json carries the records: every LIVE one, recent non-LIVE ones', () => {
   const fleet = between(INDEX, 'function writeFleetSnapshot(): void {', '\n}\n');
   assert.match(fleet, /liveness: agentLiveness\.fleetRecords\(now\)/);

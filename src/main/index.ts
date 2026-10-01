@@ -552,6 +552,9 @@ const agentLiveness = new AgentLivenessMonitor({
   sink: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
   now: () => Date.now()
 });
+// Dwight F2: a registry archive/restore is an evidence edge, sampled at once (not at the next beat).
+// The registry has no agent-delete path; an agent that leaves it is seen DELETED by the beat.
+hive.onArchiveChange((agentId) => { sampleLiveness(agentId); });
 agentLiveness.onLivenessChange((rec) => {
   try { liveWebContents()?.send('liveness:changed', rec); } catch { /* window torn down */ }
 });
