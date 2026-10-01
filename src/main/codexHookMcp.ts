@@ -66,6 +66,89 @@ function objectSpan(src: string, from: number): string | null {
 const EXEC_COMMAND_CALL = /\btools\s*\.\s*exec_command\s*\(\s*/;
 
 /**
+ * HEAVY-JOB-LOCK-FAILOPEN (c): Codex 0.157.1 writes the nested call's argument as a JS OBJECT
+ * LITERAL with bare keys, `tools.exec_command({cmd:"npm ci",workdir:"C:\\w",yield_time_ms:30000})`,
+ * not JSON. JSON.parse refused it, so EVERY Codex exec hook arrived DEGRADED: unclassifiable, the
+ * heavy-job lock let it through ('degraded', tool null, on every call). Accepted now: bare
+ * identifier KEYS are quoted; VALUES must still be JSON (a double-quoted string, a number, true,
+ * false, null, an array or object of those). A computed value (`{ cmd: c }`), a template or a
+ * single-quoted string still fails: not nameable honestly, as before.
+ */
+export function relaxedObjectLiteral(src: string): unknown {
+  let out = '';
+  let last = '';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== '"') { if (src[j] === '\\') j += 1; j += 1; }
+      out += src.slice(i, j + 1);
+      i = j;
+      last = '"';
+      continue;
+    }
+    if (c === "'" || c === '`') throw new Error('not a JSON-valued literal');
+    if (/[A-Za-z_$]/.test(c) && (last === '{' || last === ',')) {
+      let j = i;
+      while (j < src.length && /[A-Za-z0-9_$]/.test(src[j])) j += 1;
+      let k = j;
+      while (k < src.length && /\s/.test(src[k])) k += 1;
+      if (src[k] === ':') { out += `"${src.slice(i, j)}"`; i = j - 1; last = 'key'; continue; }
+    }
+    out += c;
+    if (!/\s/.test(c)) last = c;
+  }
+  return JSON.parse(out);
+}
+
+/**
+ * HEAVY-JOB-LOCK-FAILOPEN (c): the shell commands the CURRENT turn's pending call(s) will run, for
+ * the heavy-job classifier only, when the hook itself must stay DEGRADED (two parallel calls, an
+ * exec with several nested commands). Never used to NAME a tool for a gate. `complete` is false
+ * when a command could not be read (computed, templated): the hint is then partial.
+ */
+export function pendingExecCommands(tail: string): { commands: string[]; complete: boolean } {
+  const lines = tail.split('\n');
+  let turnSeen = false;
+  const outputs = new Set<string>();
+  const pending: Array<Record<string, unknown>> = [];
+  for (let i = lines.length - 1; i >= 0 && !turnSeen; i--) {
+    let j: { type?: unknown; payload?: Record<string, unknown> };
+    try { j = JSON.parse(lines[i]); } catch { continue; }
+    const p = j.payload;
+    if (!p || typeof p !== 'object') continue;
+    if ((j.type === 'turn_context' && typeof p.turn_id === 'string') || (j.type === 'event_msg' && p.type === 'task_started')) { turnSeen = true; continue; }
+    if (j.type !== 'response_item' || typeof p.type !== 'string') continue;
+    const callId = typeof p.call_id === 'string' ? p.call_id : '';
+    if (OUTPUT_TYPES.has(p.type) && callId) outputs.add(callId);
+    else if (CALL_TYPES.has(p.type) && callId && !outputs.has(callId)) pending.push(p);
+  }
+  const commands: string[] = [];
+  let complete = true;
+  for (const p of pending) {
+    if (p.name === 'exec' && typeof p.input === 'string') {
+      const re = new RegExp(EXEC_COMMAND_CALL.source, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(p.input))) {
+        const span = objectSpan(p.input, m.index + m[0].length);
+        let cmd: unknown;
+        try { cmd = span ? (relaxedObjectLiteral(span) as { cmd?: unknown } | null)?.cmd : undefined; } catch { cmd = undefined; }
+        if (typeof cmd === 'string') commands.push(cmd); else complete = false;
+      }
+    } else if (typeof p.arguments === 'string') {
+      let a: { cmd?: unknown; command?: unknown } | null = null;
+      try { a = JSON.parse(p.arguments); } catch { a = null; }
+      const c = a?.cmd ?? a?.command;
+      if (typeof c === 'string') commands.push(c);
+      else if (Array.isArray(c) && c.every((x) => typeof x === 'string')) commands.push(c.join(' '));
+    } else if (p.action && typeof p.action === 'object' && Array.isArray((p.action as { command?: unknown }).command)) {
+      commands.push(((p.action as { command: unknown[] }).command).map(String).join(' '));
+    }
+  }
+  return { commands, complete };
+}
+
+/**
  * A1 (Jim): Codex's `exec` tool is a JS program that calls nested tools, and Codex's COMMAND
  * hooks report each nested `tools.exec_command({cmd})` as tool_name "Bash", tool_input
  * {command: cmd}. Gates and the breaker match on that, so the rebuilt payload must too.
@@ -81,7 +164,7 @@ export function normaliseCodexExec(program: string): { toolName: 'Bash'; toolInp
   const span = objectSpan(program, argAt);
   if (!span) return null;
   let arg: unknown;
-  try { arg = JSON.parse(span); } catch { return null; }
+  try { arg = relaxedObjectLiteral(span); } catch { return null; }
   const cmd = (arg as { cmd?: unknown } | null)?.cmd;
   if (typeof cmd !== 'string') return null;
   // With the argument taken out, `tools` must appear exactly once (this call): a second nested
