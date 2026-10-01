@@ -83,10 +83,142 @@ test('the expanded file list is passed to node --test - no glob character surviv
   assert.strictEqual(calls.length, 1);
   const args = calls[0].args;
   assert.strictEqual(args[0], '--test');
-  assert.strictEqual(args.length, 3);
-  assert.ok(args.slice(1).every((a) => !a.includes('*')), `glob leaked into ${args.join(' ')}`);
-  assert.ok(args.slice(1).every((a) => a.endsWith('.test.cjs')));
-  assert.deepStrictEqual(args.slice(1).map((a) => path.basename(a)), ['a.test.cjs', 'b.test.cjs']);
+  // TEST-RUNNER-FILE-TIMEOUT: the runner's own options come first; the files are the tail.
+  const fileArgs = args.slice(-2);
+  assert.ok(args.every((a) => !a.includes('*')), `glob leaked into ${args.join(' ')}`);
+  assert.ok(fileArgs.every((a) => a.endsWith('.test.cjs')));
+  assert.strictEqual(args.filter((a) => a.endsWith('.test.cjs')).length, 2, 'exactly the selected files');
+  assert.deepStrictEqual(fileArgs.map((a) => path.basename(a)), ['a.test.cjs', 'b.test.cjs']);
+});
+
+// ── TEST-RUNNER-FILE-TIMEOUT (1.1.76): a file that never finishes is a NAMED failure ──────────
+
+test('every run carries the per-file wall-clock limit, the normal reporter, and the timeout reporter', () => {
+  const tap = fakeSpawn({ status: 0 });
+  run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: tap.spawn, log: () => {}, isTTY: false, timeoutMs: 1234, eventsFile: 'ev.jsonl', readFile: () => '', removeFile: () => {} });
+  const a = tap.calls[0].args;
+  assert.ok(a.includes(`--test-timeout=${runner.backstopMs(1234)}`), a.join(' '));
+  assert.ok(runner.backstopMs(1234) > 1234, 'node --test\'s own timeout is only the backstop, after the watchdog\'s tree kill');
+  const reporters = a.flatMap((x, i) => (x === '--test-reporter' ? [a[i + 1]] : []));
+  const dests = a.flatMap((x, i) => (x === '--test-reporter-destination' ? [a[i + 1]] : []));
+  assert.strictEqual(reporters[0], 'tap', 'off a terminal the gate logs keep TAP (node --test\'s own default)');
+  assert.strictEqual(dests[0], 'stdout');
+  assert.strictEqual(path.basename(reporters[1]), 'file-timeout-reporter.cjs');
+  assert.strictEqual(dests[1], 'ev.jsonl');
+  const tty = fakeSpawn({ status: 0 });
+  run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: tty.spawn, log: () => {}, isTTY: true, readFile: () => '', removeFile: () => {} });
+  assert.strictEqual(tty.calls[0].args[tty.calls[0].args.indexOf('--test-reporter') + 1], 'spec', 'on a terminal: spec, as before');
+});
+
+test('the limit: TEST_FILE_TIMEOUT_MS when it is a positive integer, else the generous default', () => {
+  assert.strictEqual(runner.fileTimeoutMs({}), runner.FILE_TIMEOUT_MS);
+  assert.ok(runner.FILE_TIMEOUT_MS >= 25 * 60_000, 'above the longest explicit per-test timeout in the suite (25 min)');
+  assert.strictEqual(runner.fileTimeoutMs({ TEST_FILE_TIMEOUT_MS: '90000' }), 90_000);
+  for (const bad of ['0', '-5', 'abc', '1.5', '']) assert.strictEqual(runner.fileTimeoutMs({ TEST_FILE_TIMEOUT_MS: bad }), runner.FILE_TIMEOUT_MS, bad);
+});
+
+test('a recorded file timeout is NAMED and fails the run, even when node --test itself exits 0', () => {
+  const rec = (file) => JSON.stringify({ file, message: 'timed out' });
+  // The reporter's record file (node --test's backstop) and the watchdog's (the tree kill): the
+  // runner reads both, and one file named by both is ONE timed-out file.
+  const files = { ev: `${rec('C:/r/test/hung.test.cjs')}\n{torn`, 'ev.watchdog': `${rec('C:/r/test/hung.test.cjs')}\n${rec('C:/r/test/other.test.cjs')}\n` };
+  for (const status of [0, 1]) {
+    const e = sink();
+    const removed = [];
+    let stopped = 0;
+    const code = run({ testDir: 'test', readdir: () => ['hung.test.cjs', 'other.test.cjs'], spawn: fakeSpawn({ status }).spawn, log: () => {}, err: e.write, timeoutMs: 5000, eventsFile: 'ev', readFile: (p) => files[p] ?? '', removeFile: (p) => removed.push(p), watchdog: () => ({ stop: () => { stopped += 1; } }) });
+    assert.notStrictEqual(code, 0, `status ${status}: a hung file never passes`);
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 5000 ms .*hung\.test\.cjs/);
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 5000 ms .*other\.test\.cjs/);
+    assert.match(e.lines.join('\n'), /2 test file\(s\) timed out - the run FAILS/, 'merged and de-duplicated');
+    assert.deepStrictEqual(removed.sort(), ['ev', 'ev.watchdog'], 'both record files are cleaned up');
+    assert.strictEqual(stopped, 1, 'the watchdog is stopped once the run ends');
+  }
+  const clean = sink();
+  assert.strictEqual(run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: fakeSpawn({ status: 0 }).spawn, log: () => {}, err: clean.write, readFile: () => '', removeFile: () => {} }), 0);
+  assert.doesNotMatch(clean.lines.join('\n'), /TIMED OUT/);
+});
+
+test('the timeout reporter records ONLY a file-level timeout (not a per-test timeout, not a plain failure)', async () => {
+  const reporter = require('./tools/file-timeout-reporter.cjs');
+  const F = 'C:\\r\\test\\x.test.cjs';
+  const fail = (data) => ({ type: 'test:fail', data });
+  const events = [
+    fail({ name: F, file: F, nesting: 0, details: { error: { failureType: 'testTimeoutFailure', message: 'test timed out after 5ms' } } }),
+    fail({ name: 'a slow test', file: F, nesting: 0, details: { error: { failureType: 'testTimeoutFailure' } } }),
+    fail({ name: F, file: F, nesting: 0, details: { error: { failureType: 'testCodeFailure' } } }),
+    fail({ name: F, file: F, nesting: 1, details: { error: { failureType: 'testTimeoutFailure' } } }),
+    { type: 'test:pass', data: { name: F, file: F, nesting: 0 } }
+  ];
+  async function* source() { for (const e of events) yield e; }
+  const out = [];
+  for await (const chunk of reporter(source())) out.push(chunk);
+  assert.strictEqual(out.length, 1);
+  assert.deepStrictEqual(JSON.parse(out[0]), { file: F, message: 'test timed out after 5ms' });
+});
+
+// THE rc/1.1.76 HANG, for real: a ConPTY killed before its first output (node-pty defers the kill
+// until then), so the file's process never exits and its conhost is NOT in node's kill-on-close job.
+// Plus a plain child process. After the run, nothing the hung file started may still be running.
+const NODE_PTY = path.join(REPO, 'node_modules', 'node-pty');
+const HAS_PTY = process.platform === 'win32' && fs.existsSync(NODE_PTY);
+
+function childrenOf(pid) {
+  const { execFileSync } = require('node:child_process');
+  if (process.platform !== 'win32') return [];
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | ForEach-Object { "$($_.ProcessId) $($_.Name)" }`], { encoding: 'utf8', windowsHide: true });
+  return out.split(/\r?\n/).filter(Boolean);
+}
+
+test('END TO END: a file that finishes its tests but never exits is killed at the limit with its WHOLE tree (ConPTY conhost too), NAMED, fails the run', { timeout: 120_000 }, () => {
+  const os = require('node:os');
+  const { spawnSync } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-timeout-'));
+  try {
+    const pidFile = path.join(dir, 'grandchild.pid');
+    const filePidFile = path.join(dir, 'file.pid');
+    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), [
+      "const test = require('node:test');",
+      "const fs = require('node:fs');",
+      "test('done, but a handle, a child and (win32) a ConPTY killed before its first output stay', async () => {",
+      "  const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      `  fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));`,
+      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, String(process.pid));`,
+      ...(HAS_PTY ? [
+        `  const bat = ${JSON.stringify(path.join(dir, 'silent.bat'))};`,
+        "  fs.writeFileSync(bat, '@echo off\\r\\nping -n 60 127.0.0.1 >nul\\r\\necho hi\\r\\n');",
+        `  const p = require(${JSON.stringify(NODE_PTY)}).spawn('cmd.exe', ['/c', bat], { cols: 80, rows: 24 });`,
+        '  await new Promise((r) => setTimeout(r, 300));',
+        '  p.kill();   // deferred by node-pty until the first output, which never comes',
+      ] : []),
+      '  setInterval(() => {}, 1000);',
+      '});'
+    ].join('\n'));
+    fs.writeFileSync(path.join(dir, 'b-ok.test.cjs'), "require('node:test')('ok', () => {});\n");
+    const e = sink();
+    let out = '';
+    // Captured, so the inner TAP never mixes into this file's own report.
+    const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
+    const t0 = Date.now();
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write });
+    assert.notStrictEqual(code, 0, 'a hung file fails the run');
+    assert.ok(Date.now() - t0 < 60_000, `ended at the limit, not never (${Date.now() - t0} ms)`);
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 4000 ms .*a-hung\.test\.cjs/);
+    assert.doesNotMatch(e.lines.join('\n'), /b-ok/, 'only the hung file is named');
+    assert.match(out, /^ok \d+ - ok$/m, 'the healthy file still ran and passed');
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i++) { try { process.kill(pid, 0); spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},250)']); } catch { alive = false; } }
+    if (alive) { try { process.kill(pid); } catch { /* gone */ } }
+    assert.strictEqual(alive, false, 'the hung file\'s child process was killed with it');
+    // The file's own children (the ConPTY conhost among them) are gone too, not orphaned.
+    const left = childrenOf(Number(fs.readFileSync(filePidFile, 'utf8')));
+    for (const l of left) { try { process.kill(Number(l.split(' ')[0])); } catch { /* gone */ } }
+    assert.deepStrictEqual(left, [], `the hung file's process tree outlived the run: ${left.join(', ')}`);
+    if (HAS_PTY) assert.match(e.lines.join('\n'), /FILE TIMED OUT/, 'the ConPTY case is the real one');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
 });
 
 test('it announces the count, so a reader can tell work happened', () => {
@@ -144,4 +276,39 @@ test('PIN: against the REAL test directory the runner selects this file and many
 test('PIN: the runner stays out of the shipped app - it lives under test/', () => {
   const rel = path.relative(REPO, require.resolve('./tools/run-tests.cjs')).replace(/\\/g, '/');
   assert.ok(rel.startsWith('test/'), `runner must live under test/, found at ${rel}`);
+});
+
+test('watchdog: picks ONLY a test-file process under the runner\'s node --test that is past the limit', () => {
+  const { dueFiles, fileOf } = require('./tools/file-watchdog.cjs');
+  const now = 1_000_000;
+  const P = (pid, ppid, name, cmd, age) => ({ pid, ppid, name, cmd, startedAt: now - age });
+  const procs = [
+    P(10, 1, 'node.exe', 'node run-tests.cjs', 999_999),
+    P(20, 10, 'node.exe', 'node.exe --test --test-timeout=9 a.test.cjs b.test.cjs', 900_000),
+    P(30, 20, 'node.exe', 'node.exe C:/r/test/hung.test.cjs', 6_000),      // past the 5 s limit
+    P(31, 20, 'node.exe', 'node.exe C:/r/test/young.test.cjs', 1_000),     // still within it
+    P(32, 30, 'conhost.exe', 'conhost.exe --headless', 6_000),             // a grandchild: taskkill /T takes it
+    P(40, 99, 'node.exe', 'node.exe --test other.test.cjs', 900_000),      // another runner's suite
+    P(41, 40, 'node.exe', 'node.exe C:/o/test/old.test.cjs', 900_000)
+  ];
+  assert.deepStrictEqual(dueFiles(procs, 10, 5_000, now), [{ pid: 30, file: 'C:/r/test/hung.test.cjs', ageMs: 6_000 }]);
+  assert.deepStrictEqual(dueFiles(procs, 10, 60_000, now), [], 'nothing past a longer limit');
+  assert.deepStrictEqual(dueFiles(procs, 12345, 1, now), [], 'never another runner\'s tree');
+  assert.strictEqual(fileOf('node.exe --x "C:/a b/test/q.test.cjs"'), 'C:/a b/test/q.test.cjs', 'a quoted path keeps its spaces');
+  assert.strictEqual(fileOf('node.exe C:/r/test/q.test.cjs'), 'C:/r/test/q.test.cjs');
+  assert.strictEqual(fileOf('node.exe -e 1'), null);
+});
+
+test('watchdog: parses PowerShell\'s process rows (one row or many, /Date(ms)/ start times)', () => {
+  const { parseRows } = require('./tools/file-watchdog.cjs');
+  const one = parseRows('{"ProcessId":5,"ParentProcessId":4,"Name":"node.exe","CommandLine":"node x.test.cjs","CreationDate":"/Date(1700000000000)/"}');
+  assert.deepStrictEqual(one, [{ pid: 5, ppid: 4, name: 'node.exe', cmd: 'node x.test.cjs', startedAt: 1700000000000 }]);
+  assert.strictEqual(parseRows('[{"ProcessId":1,"ParentProcessId":0,"Name":"a","CommandLine":null,"CreationDate":null},{"ProcessId":2,"ParentProcessId":1,"Name":"b","CommandLine":"c","CreationDate":"/Date(5)/"}]').length, 2);
+  assert.deepStrictEqual(parseRows('not json'), []);
+});
+
+test('watchdog timing: polls at a tenth of the limit (1-30 s); node --test\'s backstop is three polls later', () => {
+  assert.strictEqual(runner.watchdogPollMs(4_000), 1_000);
+  assert.strictEqual(runner.watchdogPollMs(30 * 60_000), 30_000);
+  assert.strictEqual(runner.backstopMs(30 * 60_000), 30 * 60_000 + 90_000);
 });
