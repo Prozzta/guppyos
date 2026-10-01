@@ -85,6 +85,20 @@ test('M14: a beat that changes no classification appends no row (edges only)', (
   assert.equal(rows[0].kind, 'liveness');
 });
 
+test('G1 (Jim P10): the ONE operator action that can lead to a turn is gated in main: STUCK_WAKE + wwr-max-recoveries only, then the bridge', () => {
+  const ipc = between(INDEX, "ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {", '\n});');
+  assert.match(ipc, /if \(typeof agentId !== 'string' \|\| !agentId\) return false;/);
+  assert.match(ipc, /const rec = agentLiveness\.getLiveness\(agentId\);\n\s+if \(!rec \|\| rec\.classification !== 'STUCK_WAKE' \|\| rec\.reason !== 'wwr-max-recoveries'\) return false;/);
+  assert.ok(ipc.indexOf("rec.reason !== 'wwr-max-recoveries') return false;") < ipc.indexOf('inboxWake?.onOperatorReoffer(agentId)'), 'gate first, then the bridge');
+  assert.equal([...INDEX.matchAll(/onOperatorReoffer\(/g)].length, 1, 'nothing else in main re-offers');
+});
+
+test('G3 (Jim P11): refusal evidence is recorded only while mail waits (and never for no-pending-ids)', () => {
+  const fn = between(INDEX, 'function noteWakeRefusal(agentId: string, why: string, inboxIds: number): void {', '\n}\n');
+  assert.match(fn, /if \(inboxIds > 0 && why !== 'no-pending-ids'\) \{\n\s+const run = wakeStalls\.watchingFor\(agentId\);\n\s+agentLiveness\.noteWakeRefusal\(agentId, Date\.now\(\), run\?\.since\);/);
+  assert.equal([...fn.matchAll(/agentLiveness\.noteWakeRefusal\(/g)].length, 1, 'one call, inside the guard');
+});
+
 test('fleet.json carries the records: every LIVE one, recent non-LIVE ones', () => {
   const fleet = between(INDEX, 'function writeFleetSnapshot(): void {', '\n}\n');
   assert.match(fleet, /liveness: agentLiveness\.fleetRecords\(now\)/);

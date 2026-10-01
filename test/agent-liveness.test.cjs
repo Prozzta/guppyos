@@ -170,6 +170,18 @@ test('idle states: a Stop is IDLE turn-ended; unknown and quiet is IDLE, or UNKN
   assert.equal(classify(moving).classification, 'BUSY_PROGRESSING');
 });
 
+test('G2 (Jim P8): the wake-refusal stall boundary: SUSPECT exactly at WAKE_STALL_AFTER_MS of the same refusal, not 1 ms before', () => {
+  const { WAKE_STALL_AFTER_MS } = loadTs('src/main/wakeStall.ts');
+  const f = facts({ mailWaiting: 1 });
+  const before = classify(f, T0, { wakeRefusalSince: T0 - WAKE_STALL_AFTER_MS + 1, lastWakeRefusalAt: T0 });
+  assert.deepEqual([before.classification, before.reason], ['IDLE', 'turn-ended']);
+  const at = classify(f, T0, { wakeRefusalSince: T0 - WAKE_STALL_AFTER_MS, lastWakeRefusalAt: T0 });
+  assert.deepEqual([at.classification, at.reason], ['SUSPECT', 'wake-refusal-stall']);
+  // No mail waiting: a long refusal run is the floor at rest, never a stall.
+  const empty = classify(facts({ mailWaiting: 0 }), T0, { wakeRefusalSince: T0 - 3 * WAKE_STALL_AFTER_MS });
+  assert.equal(empty.classification, 'IDLE');
+});
+
 test('contract: archiveReason is present IFF ARCHIVED (an archive with no recorded reason is explicit)', () => {
   const w = world(facts());
   const live = w.mon.sample('a1');
