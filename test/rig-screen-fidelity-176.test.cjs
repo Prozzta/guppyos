@@ -32,3 +32,12 @@ test('RIG FIDELITY: a screen reading never shows the stub\'s text before its ech
   assert.equal(enters, 1, `THE STUB RECEIVES EXACTLY ONE ENTER, got ${enters}\n  ${why}`);
   assert.ok((await outcomes()).some((o) => o.kind === 'COMMITTED'), `COMMITTED\n  ${why}`);
 });
+
+test('RIG FIDELITY n1: a received echo that fell out of the stub\'s window gives NO reading, never an empty composer', () => {
+  const { screenDraftOf } = require('./mail-rig/screen-draft.cjs');
+  const shown = [{ seq: 70, draft: 'a' }, { seq: 71, draft: 'ab' }];
+  assert.equal(screenDraftOf(shown, 'ab', 69), null);
+  assert.equal(screenDraftOf(shown, 'ab', 70), 'a');
+  assert.equal(screenDraftOf([{ seq: 0, draft: '' }], '', 0), '');
+  assert.equal(screenDraftOf(undefined, 'live', 5), 'live');
+});

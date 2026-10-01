@@ -75,6 +75,7 @@ require.cache[electronPath] = { id: electronPath, filename: electronPath, loaded
 
 const REPO = path.resolve(__dirname, '..', '..');
 const loadTs = require(path.join(REPO, 'test', 'load-ts.cjs'));
+const { screenDraftOf } = require('./screen-draft.cjs');
 
 // ————————————————————————————————————————————————————————————— the fake LLM (qwen proxy upstream)
 
@@ -156,13 +157,8 @@ async function buildFloor() {
   // stamped main-side), so "text visible" and "its echo arrived" are one event; reading the stub's
   // composer.json directly let the rig's screen run ahead of the output generation, and a late echo
   // of our own text then read as "the Enter was lost" (a second Enter).
-  const screenDraft = (ptyId, c) => {
-    if (!Array.isArray(c.shown)) return c.draft;   // an old stub: no echo numbers
-    const seen = rig.echoSeen.get(ptyId) || 0;
-    let best = null;
-    for (const s of c.shown) if (s.seq <= seen && (!best || s.seq > best.seq)) best = s;
-    return best ? best.draft : '';
-  };
+  // null: the newest received echo fell out of the stub's window, so NO reading (fail closed).
+  const screenDraft = (ptyId, c) => screenDraftOf(c.shown, c.draft, rig.echoSeen.get(ptyId) || 0);
   const count = (hay, needle) => { let n = 0; let i = hay.indexOf(needle); while (needle && i >= 0) { n++; i = hay.indexOf(needle, i + needle.length); } return n; };
   // The mirrors the renderer pushes into main (terminalPool / inputOrigin / the prompt mirror).
   const ownerPty = {
@@ -199,6 +195,7 @@ async function buildFloor() {
     const c = composerOf(ptyId);
     if (!c) return null;
     const draft = screenDraft(ptyId, c);
+    if (draft === null) return null;
     const row = draft.split('\n').pop();
     return {
       onPromptRow: false, screenCount: 0,
@@ -210,6 +207,7 @@ async function buildFloor() {
     const c = composerOf(ptyId);
     if (!c) return null;
     const draft = screenDraft(ptyId, c);
+    if (draft === null) return null;
     const row = draft.split('\n').pop();
     return { onPromptRow: !!needle && draft.includes(needle) && row.length > 0, screenCount: count(draft, needle), ...(expectedTail !== undefined ? { promptTailMatches: draft.endsWith(expectedTail) } : {}) };
   };
