@@ -83,6 +83,6 @@ test('the composer renders composerStatus; send-now and the hold stay queue-driv
   assert.match(src, /title=\{status\.title\}/);
   assert.match(src, />\{status\.text\}<\/span>/);
   assert.ok(!/statusHint/.test(src), 'the old inline gate is gone');
-  assert.match(src, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold \|\| !!delivery\.screenHold\?\.sendNowPasses\);/);
+  assert.match(src, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold\);/);
   assert.match(src, /headManual: !!queue\[0\]\?\.manual/);
 });

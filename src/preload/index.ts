@@ -642,7 +642,7 @@ export interface AgentControlSnapshot {
   /** v1.1.45 unit #5: main's agent-card impact string while a hold is real, else null. */
   impact?: AgentImpact | null;
   /** WSG fix 3 (1.1.78): the Codex screen check is refusing this agent's automatic deliveries. */
-  screenHold?: { reason: string; sendNowPasses: boolean } | null;
+  screenHold?: { reason: string } | null;
   autoDeliveryPaused: boolean;
   gatedTools: string[];
   pendingSteers: number;

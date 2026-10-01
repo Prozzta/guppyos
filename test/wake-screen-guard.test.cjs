@@ -1126,15 +1126,42 @@ test('fix 1 wiring: every PTY chunk feeds the scheduler; it reads through the ow
   assert.deepEqual(seen, [['p1', 1]], 'told after the generation moved; a replaced process is not reported');
 });
 
-K.sendNowPassesNoMarker = async (Owner) => {
-  const r = rig({}, Owner);
-  const purged = purgedFacts();
-  r.facts = () => withPrompt(purged, r);
-  assert.deepEqual(await r.submit('s1', 'USER_RELEASED'), { kind: 'COMMITTED' }, 'A PERSON\'S SEND NOW PASSES THE HEADER-GONE HOLD when the composer is on screen');
-  assert.deepEqual(r.writes, [TEXT, '\r']);
-  assert.equal(r.owner.postHandoffLatched('p1'), false, 'a person\'s send latches nothing (the turn end will)');
+/**
+ * Jim W1 (WSG-178 audit): the REAL pre-trust captures (ZT-175) have the cursor row EXACTLY on the
+ * empty composer; only their loading header refuses them. Codex sizes that header to the rows
+ * above the composer (startup_draft_layout.rs:50-59), so in a terminal of about 8 rows the box
+ * loses its model row and the reader sees no header: `no-marker` + READY. This strips the header
+ * box from the real capture, which is that screen.
+ */
+function headerless(name) {
+  // Every header box the capture painted (its scrollback holds more than one) loses its rows.
+  const fx = fixture(name);
+  let lines = [...fx.lines]; let cursorRow = fx.cursorRow;
+  for (;;) {
+    const title = lines.findIndex((l) => l.startsWith('\u2502 >_ OpenAI Codex (v'));
+    if (title < 0) break;
+    let top = title; while (top > 0 && !lines[top].startsWith('\u256d')) top -= 1;
+    let end = title; while (end < lines.length - 1 && !lines[end].startsWith('\u2570')) end += 1;
+    lines = [...lines.slice(0, top), ...lines.slice(end + 1)];
+    if (top < cursorRow) cursorRow -= end + 1 - top;
+  }
+  return SHARED.extractCodexScreen((i) => lines[i], lines.length, cursorRow);
+}
+
+K.sendNowNeverBypassesStartup = async (Owner) => {
+  for (const name of ['1-untrusted-trust-80x24', '1-untrusted-trust-120x40', '2-trusted-draft']) {
+    const f = headerless(name);
+    assert.deepEqual([f.header, SHARED.classifyCodexComposer(f).cls], ['NONE', 'READY'], `${name}: header gone, the draft's composer row READY`);
+    for (const cls of ['USER_RELEASED', 'CAPACITY_GATED']) {
+      const r = rig({}, Owner);
+      r.facts = () => withPrompt(f, r);
+      const out = await r.submit('s', cls);
+      assert.equal(r.writes.length, 0, `${name} ${cls}: SEND NOW NEVER TYPES INTO A HEADER-LESS STARTUP DRAFT`);
+      assert.deepEqual(out, { kind: 'REFUSED', reason: 'SCREEN_NOT_READY', detail: 'startup:no-marker' });
+    }
+  }
 };
-test('fix 3: "send now" passes a startup:no-marker hold when the chat composer is on screen', () => K.sendNowPassesNoMarker());
+test('W1: "send now" is refused startup:no-marker on the real pre-trust draft with its header gone (a small terminal): nothing typed', () => K.sendNowNeverBypassesStartup());
 
 test('fix 3: "send now" still types NOTHING into a draft, a trust screen, or a header-less screen that is not the empty composer', async () => {
   for (const screen of DRAFTS) {
@@ -1154,9 +1181,6 @@ test('fix 3: "send now" still types NOTHING into a draft, a trust screen, or a h
   r.facts = () => ({ ...purged, cursorRow: '\u203a half a human draft' });
   assert.equal((await r.submit('s', 'USER_RELEASED')).reason, 'SCREEN_NOT_READY');
   assert.equal(r.writes.length, 0, 'a human draft on a header-less screen: nothing typed');
-  assert.equal(OWNER.personPassesNoMarker('CAPACITY_GATED', 'no-marker', true), false, 'only a person');
-  assert.equal(OWNER.personPassesNoMarker('USER_RELEASED', 'header-loading', true), false, 'only no-marker');
-  assert.equal(OWNER.personPassesNoMarker('USER_RELEASED', 'no-marker', false), false, 'only on the exact composer');
 });
 
 // ─── Full path: reconcile -> requestInboxWake -> the REAL owner -> the PTY ──────────────
@@ -1230,7 +1254,7 @@ const MUTANTS = [
     edits: [["  if (s.screenGen !== undefined && deps.outputGeneration?.(s.ptyId) !== s.screenGen) return { kind: 'SCREEN_CHANGED' };\n", '']],
     killer: 'outputBeforeEnterHolds', dies: /OUTPUT AFTER THE POST-STAGE READING: NO ENTER/ },
   { name: 'the latch is per PTY, not per incarnation', file: 'src/main/automaticSubmit.ts',
-    edits: [['      else if (this.postHandoff.get(ptyId) !== incarnation && !personPassesNoMarker(', '      else if (!this.postHandoff.has(ptyId) && !personPassesNoMarker(']],
+    edits: [['      else if (this.postHandoff.get(ptyId) !== incarnation) verdict', '      else if (!this.postHandoff.has(ptyId)) verdict']],
     killer: 'latchIsPerIncarnation', dies: /A LATCH NEVER CROSSES A PTY INCARNATION/ },
   { name: 'the reader does not see `loading`', file: 'src/shared/codexScreen.ts',
     edits: [["header = model === 'loading' ? 'LOADING' : 'MODEL';", "header = 'MODEL';"]],
@@ -1313,12 +1337,12 @@ const MUTANTS = [
   { name: 'NO-MARKER 1(b) too wide: a subagent\'s Stop latches', file: 'src/main/hooks.ts', kind: 'hooks',
     edits: [["if (!fromSubagent && agentId && (event === 'SessionStart' || event === 'Stop')", "if (agentId && (event === 'SessionStart' || event === 'Stop')"]],
     killer: 'turnEndLatches', dies: /A SUBAGENT STOP LATCHES NOTHING/ },
-  { name: 'NO-MARKER 3: automatic starts pass no-marker too (no latch needed)', file: 'src/main/automaticSubmit.ts',
-    edits: [["  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;", "  return startupReason === 'no-marker' && composerExact;"]],
+  { name: 'W1: the send-now bypass restored (a person passes no-marker on an exact composer)', file: 'src/main/automaticSubmit.ts',
+    edits: [["      else if (this.postHandoff.get(ptyId) !== incarnation) verdict", "      else if (this.postHandoff.get(ptyId) !== incarnation && !(req.admissionClass === 'USER_RELEASED' && past.reason === 'no-marker' && comp.cls === want)) verdict"]],
+    killer: 'sendNowNeverBypassesStartup', dies: /SEND NOW NEVER TYPES INTO A HEADER-LESS STARTUP DRAFT/ },
+  { name: 'W1: any class passes no-marker on an exact composer', file: 'src/main/automaticSubmit.ts',
+    edits: [["      else if (this.postHandoff.get(ptyId) !== incarnation) verdict", "      else if (this.postHandoff.get(ptyId) !== incarnation && !(past.reason === 'no-marker' && comp.cls === want)) verdict"]],
     killer: 'automaticWaitsForLatch', dies: /AUTOMATIC DELIVERY STILL WAITS FOR A LATCH/ },
-  { name: 'NO-MARKER 3: no send-now pass (send now held like an automatic start, as shipped)', file: 'src/main/automaticSubmit.ts',
-    edits: [["  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;", '  return false;']],
-    killer: 'sendNowPassesNoMarker', dies: /A PERSON'S SEND NOW PASSES THE HEADER-GONE HOLD/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

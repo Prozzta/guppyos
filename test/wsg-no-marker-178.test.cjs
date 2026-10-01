@@ -109,15 +109,15 @@ test('fix 4: the screen-guard notice lifts on the first ok reading', () => K.not
 test('fix 4: the screen-guard notice lifts on a condition-1 latch', () => K.noticeLiftsOnLatch());
 test('fix 4: lifting ends the run, so a hold that comes back is a new run and alerts again', () => K.holdThatComesBackAlertsAgain());
 
-test('fix 4: a respawn lifts; a person\'s refused send never alerts; the composer hold is fresh-only and says when send-now passes', () => {
+test('fix 4: a respawn lifts; a person\'s refused send never alerts; the composer hold is fresh-only', () => {
   const { n, sink } = notices();
   for (let t = 0; t <= 10 * MIN; t += 6_000) n.reading('dwight', false, 'startup:no-marker', false, t);
   assert.equal(sink.raised.length, 0, 'only automatic starts are waited on');
   assert.equal(n.hold('dwight', 10 * MIN), null, 'a person\'s refused send is no automatic hold');
   n.reading('dwight', false, 'startup:no-marker', true, 11 * MIN);
-  assert.deepEqual(n.hold('dwight', 11 * MIN), { reason: 'startup:no-marker', sendNowPasses: true });
+  assert.deepEqual(n.hold('dwight', 11 * MIN), { reason: 'startup:no-marker' });
   n.reading('dwight', false, 'UNKNOWN:not-the-empty-composer', true, 11 * MIN + 6_000);
-  assert.deepEqual(n.hold('dwight', 11 * MIN + 6_000), { reason: 'UNKNOWN:not-the-empty-composer', sendNowPasses: false });
+  assert.deepEqual(n.hold('dwight', 11 * MIN + 6_000), { reason: 'UNKNOWN:not-the-empty-composer' });
   assert.equal(n.hold('dwight', 11 * MIN + 6_000 + GUARD.SCREEN_HOLD_FRESH_MS + 1), null, 'a stale refusal is no hold');
   n.respawned('dwight');
   assert.ok(sink.cleared.includes('dwight'));
@@ -192,26 +192,25 @@ test('fix 5: the notice is Jim\'s plain-English draft; the technical reason is o
 const base = { agentName: 'Dwight', interfered: null, paused: false, headManual: false, capacityHold: false, capacityEvidence: null };
 
 K.screenHoldWorded = (H = HOLD) => {
-  const passes = H.deliveryHoldView({ ...base, screenHold: { reason: 'startup:no-marker', sendNowPasses: true } });
-  assert.equal(passes.kind, 'SCREEN');
-  assert.equal(passes.action, 'SEND_NOW', 'WHEN A PERSON\'S SEND PASSES, "send now" IS OFFERED');
-  assert.match(passes.hint, /"send now" types it if the chat box is showing/);
-  const held = H.deliveryHoldView({ ...base, screenHold: { reason: 'UNKNOWN:not-the-empty-composer', sendNowPasses: false } });
-  assert.equal(held.action, null, 'WHEN IT DOES NOT, "send now" IS NOT OFFERED');
-  assert.match(held.hint, /"send now" is held too/, 'and the hint says so plainly');
-  assert.match(held.title, /"send now" is held by the same safety check/);
+  for (const reason of ['startup:no-marker', 'UNKNOWN:not-the-empty-composer']) {
+    const held = H.deliveryHoldView({ ...base, screenHold: { reason } });
+    assert.ok(held && held.kind === 'SCREEN', 'A SCREEN HOLD IS SAID');
+    assert.equal(held.action, null, '"send now" IS NOT OFFERED for a screen hold (W1: the same check holds it)');
+    assert.match(held.hint, /"send now" is held too/, 'and the hint says so plainly');
+    assert.match(held.title, /"send now" is held by the same safety check/);
+    assert.match(held.title, /Click Dwight's terminal and look at the bottom/, 'and names what a person can do');
+  }
 };
-test('fix 3: the composer says what the screen check holds, and whether "send now" gets through', () => K.screenHoldWorded());
+test('fix 3: the composer says plainly what the screen check holds, and that "send now" is held too', () => K.screenHoldWorded());
 
-test('fix 3: INTERFERED, the pause and capacity keep their precedence; a released head is not re-held', () => {
-  const sh = { reason: 'startup:no-marker', sendNowPasses: true };
+test('fix 3: INTERFERED, the pause and capacity keep their precedence; a released head the check holds is still said', () => {
+  const sh = { reason: 'startup:no-marker' };
   assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: sh, interfered: { requestId: 'queue:d:q', reason: 'x', at: 1 } }).kind, 'INTERFERED');
   assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: sh, paused: true }).kind, 'PAUSED');
-  assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: sh, headManual: true }), null, 'the released head goes through: nothing to say');
-  assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: { ...sh, sendNowPasses: false }, headManual: true }).action, null, 'a released head the check still holds is still said');
+  assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: sh, headManual: true }).kind, 'SCREEN', 'a "send now" head is held by the same check: still said');
   assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: null }), null);
   const composer = readSource('src/renderer/src/components/MessageQueueComposer.tsx');
-  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold \|\| !!delivery\.screenHold\?\.sendNowPasses\);/);
+  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold\);/, 'no "send now" for a screen hold');
   assert.match(composer, /screenHold: delivery\.screenHold\s*\}\);/);
 });
 
@@ -254,12 +253,12 @@ const MUTANTS = [
   { name: 'fix 4: a damaged file can be dismissed', file: 'src/shared/integrityBanner.ts', real: BANNER,
     edits: [['  return !!issue.notice || issue.repaired === true;', '  return true;']],
     killer: 'pausedIssueNeverDismissed', dies: /A DAMAGED FILE THAT PAUSES CHANGES CANNOT BE DISMISSED/ },
-  { name: 'fix 3: "send now" never offered for a screen hold', file: 'src/shared/deliveryHold.ts', real: HOLD,
-    edits: [["        action: 'SEND_NOW'\n      };\n    }\n    return {\n      kind: 'SCREEN',", "        action: null\n      };\n    }\n    return {\n      kind: 'SCREEN',"]],
-    killer: 'screenHoldWorded', dies: /WHEN A PERSON'S SEND PASSES, "send now" IS OFFERED/ },
-  { name: 'fix 3: "send now" offered where the check still holds it', file: 'src/shared/deliveryHold.ts', real: HOLD,
+  { name: 'fix 3: the screen hold is not said (as shipped)', file: 'src/shared/deliveryHold.ts', real: HOLD,
+    edits: [['  if (i.screenHold) {\n', '  if (i.screenHold && false) {\n']],
+    killer: 'screenHoldWorded', dies: /A SCREEN HOLD IS SAID/ },
+  { name: 'W1: "send now" offered for a screen hold', file: 'src/shared/deliveryHold.ts', real: HOLD,
     edits: [["        + 'Delivery resumes by itself once the chat box is showing.',\n      action: null", "        + 'Delivery resumes by itself once the chat box is showing.',\n      action: 'SEND_NOW'"]],
-    killer: 'screenHoldWorded', dies: /WHEN IT DOES NOT, "send now" IS NOT OFFERED/ },
+    killer: 'screenHoldWorded', dies: /"send now" IS NOT OFFERED for a screen hold/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

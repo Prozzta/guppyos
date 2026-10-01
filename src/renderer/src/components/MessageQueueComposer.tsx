@@ -171,9 +171,9 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   });
   // "send now" is the way out of a pause or a capacity hold. It is NOT a way out of
   // INTERFERED: main refuses every programmatic delivery to that terminal, so offering it
-  // would be offering something that cannot happen. WSG fix 3: it is a way out of a Codex
-  // screen hold only when main says a person's send passes (the header-gone case).
-  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold || !!delivery.screenHold?.sendNowPasses);
+  // would be offering something that cannot happen. The same for a Codex screen hold (WSG-178
+  // W1): main's screen check applies to "send now" too.
+  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold);
   const capacityNote = capacityStateNote(delivery.capacityEvidence);
 
   // A PERSON ends an INTERFERED hold, and says HOW (human ruling, option B): the message
@@ -461,7 +461,7 @@ interface DeliveryState {
   capacityHold: boolean;
   capacityEvidence: CapacityEvidenceName | null;
   interfered: InterferedView | null;
-  screenHold: { reason: string; sendNowPasses: boolean } | null;
+  screenHold: { reason: string } | null;
 }
 const NOT_HELD: DeliveryState = { paused: false, capacityHold: false, capacityEvidence: null, interfered: null, screenHold: null };
 

@@ -158,11 +158,9 @@ export const SCREEN_HOLD_FRESH_MS = 60_000;
 
 /** What the composer is told about a screen-check hold (main computes it; the renderer words it). */
 export interface ScreenHoldView {
-  /** The gate's reason, for example `startup:no-marker` or `UNKNOWN:not-the-empty-composer`. */
+  /** The gate's reason, for example `startup:no-marker` or `UNKNOWN:not-the-empty-composer`. A
+   *  person's "send now" goes through the same gate (WSG-178 W1), so it is held too. */
   reason: string;
-  /** Would a person's "send now" (USER_RELEASED) pass where automatic delivery does not?
-   *  Only for `startup:no-marker` (see AutomaticSubmitOwner.screenGate, fix 3). */
-  sendNowPasses: boolean;
 }
 
 /** Where the alert goes: the mail ledger's `hive:integrity` notice. */
@@ -212,7 +210,7 @@ export class ScreenGuardNotices {
   hold(agentId: string, now: number): ScreenHoldView | null {
     const r = this.lastRefusal.get(agentId);
     if (!r || now - r.at > SCREEN_HOLD_FRESH_MS) return null;
-    return { reason: r.reason, sendNowPasses: r.reason === 'startup:no-marker' };
+    return { reason: r.reason };
   }
 
   private lift(agentId: string): void {

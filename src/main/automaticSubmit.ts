@@ -449,20 +449,6 @@ export function foreignScreenReason(reason: string): boolean {
   return reason === 'incarnation' || reason.startsWith('startup:');
 }
 
-/**
- * WSG-CODEX-STARTUP-NO-MARKER fix 3: a PERSON's "send now" (USER_RELEASED) may pass condition 1
- * when its ONLY failure is `no-marker` (no session header anywhere in the buffer and no status
- * line) and the same fresh reading shows condition 2 exactly (the empty composer, or our own
- * text). Every startup screen with a marker of its own is still refused for everyone: the
- * loading header and the resume line (checked before this), and the trust, login and update
- * screens, which have no composer row. `no-marker` with the composer on screen is what Codex
- * leaves after it purges its header on a resize, the WSG-NO-MARKER-177 hold. Automatic starts
- * never pass this way: they wait for a latch.
- */
-export function personPassesNoMarker(cls: AdmissionClass, startupReason: string, composerExact: boolean): boolean {
-  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;
-}
-
 /** WSG-FOLLOWUPS: after a verified erase, the FRAGMENT of our own text still on the Codex
  *  composer row (a half erase), or null. Positive evidence only: the empty composer, an empty
  *  row, or text that is not a piece of ours is not residue. */
@@ -1286,7 +1272,11 @@ export class AutomaticSubmitOwner {
       // A LOADING header or a resume line is refused even when latched (the live widget
       // also shows `loading` while it reconfigures).
       if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
-      else if (this.postHandoff.get(ptyId) !== incarnation && !personPassesNoMarker(req.admissionClass, past.reason, comp.cls === want)) verdict = { ok: false, reason: `startup:${past.reason}` };
+      // WSG-178 W1 (Jim): NO admission class passes condition 1 without the latch. A person's "send
+      // now" too: the pre-trust startup draft's cursor row IS the empty composer, and in a terminal
+      // of about 8 rows its header loses the model row (startup_draft_layout.rs:50-59), so
+      // `no-marker` + READY is NOT proof of the post-handoff composer.
+      else if (this.postHandoff.get(ptyId) !== incarnation) verdict = { ok: false, reason: `startup:${past.reason}` };
       else if (comp.cls !== want) verdict = { ok: false, reason: `${comp.cls}:${comp.reason}` };
       else verdict = { ok: true, gen: r.outputGeneration };
     }
