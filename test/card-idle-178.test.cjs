@@ -139,10 +139,19 @@ K.parallelToolsKept = (A = ACT, Hook = HOOKS.HookServer) => {
   const s = hookServer(Hook);
   s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash' });
   s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Grep' });
+  assert.equal(s.runningTool('andy')?.name, 'Bash', 'Jim T1: THE OLDEST TOOL STILL RUNNING IS SHOWN');
   s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Grep' });
   assert.equal(s.runningTool('andy')?.name, 'Bash', 'A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING (main)');
 };
 test('Jim N1: a parallel tool\'s PostToolUse ends that tool only', () => K.parallelToolsKept());
+
+K.oldestToolShown = (Hook = HOOKS.HookServer) => {
+  const s = hookServer(Hook);
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash' });
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Grep' });
+  assert.equal(s.runningTool('andy')?.name, 'Bash', 'Jim T1: THE OLDEST TOOL STILL RUNNING IS SHOWN');
+};
+test('Jim T1: with parallel tools, main publishes the oldest still running', () => K.oldestToolShown());
 
 // ─── Wiring: every display reads it ─────────────────────────────────────────────────────
 
@@ -183,7 +192,9 @@ test('wiring: the card, the roster row, the panel, the Command Center badge and 
   assert.match(composer, /placeholder=\{shownIdle \?/);
   assert.match(composer, /composerStatus\(\{ agentName: agent\.name, queueLength: queue\.length, idle: shownIdle,/);
   assert.match(composer, /const block = useTerminalBlock\(agent\.ptyId, queue\.length > 0 && idle\);/, 'the poll the drain relies on keeps the hook status');
+  assert.match(composer, /const idle = agent\.status === 'idle';/, 'Jim T2: the raw hook status, for the drain\'s poll');
   const hook = readSource('src/renderer/src/components/useActivity.ts');
+  assert.match(hook, /\?\.runningTools\?\.\[0\] : undefined\)\);/, 'Jim T1: the card shows the oldest tool still running');
   assert.match(hook, /const shown = activityStatus\(status, rec\) as StatusKind;/);
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /runningTool: runningToolFor\(id, now\),/, 'fleet.json carries the tool in progress');
@@ -234,6 +245,9 @@ const MUTANTS = [
   { name: 'the tool never ends at its PostToolUse', file: 'src/main/hooks.ts', real: HOOKS, pick: (m) => m.HookServer,
     edits: [["    } else if (event === 'PostToolUse' || event === 'PostToolUseFailure') {", "    } else if (event === 'PostToolUseFailure') {"]],
     killer: 'runningToolTracked', dies: /THE TOOL ENDS AT ITS PostToolUse/ },
+  { name: 'Jim T1: main publishes the newest tool', file: 'src/main/hooks.ts', real: HOOKS, pick: (m) => m.HookServer,
+    edits: [['    return this.runningTools.get(agentId)?.[0];', '    return this.runningTools.get(agentId)?.at(-1);']],
+    killer: 'oldestToolShown', dies: /THE OLDEST TOOL STILL RUNNING IS SHOWN/ },
   { name: 'Jim N1: a PostToolUse clears every running tool', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
     edits: [["  if (i >= 0 && l.length) l.splice(i < 0 ? 0 : i, 1);\n  return l;", '  return [];']],
     killer: 'parallelToolsKept', dies: /A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING/ },
