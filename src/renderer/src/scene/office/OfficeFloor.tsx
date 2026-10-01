@@ -15,6 +15,7 @@ import { colors } from '@/design/tokens';
 import { loadTheme, resolveThemeMap, themeTilesetUrls } from './themeLoader';
 import { installContextLossRecovery } from './glRecovery';
 import { firstOccurrenceById, ledgerChanges } from '@shared/taskLedger';
+import { activityStatus } from '@shared/activityView';
 import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
@@ -80,6 +81,13 @@ interface Runtime {
  *  agents "celebrate" every few minutes over nothing, and the "done!" bubble
  *  reads like real work completed when none did. */
 const CHEER_MIN_BUSY_MS = 60_000;
+
+/** CARD-IDLE-WHILE-WORKING (1.1.78): an agent as the floor SHOWS it: busy-or-not from main's
+ *  liveness classification (a long tool call fires no hooks), like the cards. */
+function shownAgent(agent: Agent): Agent {
+  const status = activityStatus(agent.status, useStore.getState().liveness[agent.id]);
+  return status === agent.status ? agent : { ...agent, status };
+}
 
 /** What an avatar mutters per errand, picked at random. */
 const ERRAND_THOUGHTS: Record<ErrandKind, readonly string[]> = {
@@ -429,8 +437,10 @@ export function OfficeFloor() {
       }
       const cafeTaken: (string | null)[] = new Array(cafeSpots.length).fill(null);
 
-      const agentById = (id: string): Agent | undefined =>
-        useStore.getState().agents.find((a) => a.id === id);
+      const agentById = (id: string): Agent | undefined => {
+        const a = useStore.getState().agents.find((x) => x.id === id);
+        return a ? shownAgent(a) : undefined;
+      };
 
       // ─── The coffee economy: sideboard → machine → desk → sink → sideboard ─
       // A finite stock of mugs lives on a sideboard next to the kitchen counter.
@@ -1441,7 +1451,9 @@ export function OfficeFloor() {
       };
 
       // Map an agent's store state onto its on-floor character.
-      const applyState = (agent: Agent, rt: Runtime, force = false) => {
+      const applyState = (hookAgent: Agent, rt: Runtime, force = false) => {
+        // CARD-IDLE-WHILE-WORKING: the avatar works while liveness says it does.
+        const agent = shownAgent(hookAgent);
         const changed = force
           || rt.prevStatus !== agent.status
           || rt.prevAction !== agent.action
@@ -1584,7 +1596,7 @@ export function OfficeFloor() {
 
       let lastSelected: string | null = useStore.getState().selectedId;
       const unsubscribe = useStore.subscribe((s, prev) => {
-        if (s.agents !== prev.agents) syncAgents();
+        if (s.agents !== prev.agents || s.liveness !== prev.liveness) syncAgents();
         if (s.selectedId !== lastSelected) {
           lastSelected = s.selectedId;
           const rt = s.selectedId ? runtimes.get(s.selectedId) : undefined;

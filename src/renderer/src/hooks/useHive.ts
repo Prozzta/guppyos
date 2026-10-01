@@ -17,6 +17,7 @@ import type { AgentProvider } from '../../../shared/agentProvider';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
+import { toolEnded, toolStarted } from '@shared/activityView';
 import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery } from './queueDelivery';
 import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
@@ -424,6 +425,12 @@ export function useHive(config: HarnessConfig | null): void {
       const breakerArmed = blevel === 'constrained' || blevel === 'stopped';
       // Hook events are the authoritative status source for real agents (the
       // pty-stream parser only refines the on-floor action/station).
+      // CARD-IDLE-WHILE-WORKING: the tool call in progress, for "using X for 7m". Tracked apart
+      // from status/action, which the quiescence fallback rewrites while a long tool runs.
+      if (e.event === 'PreToolUse' && e.tool) updateAgent(e.agentId, { runningTools: toolStarted(self.runningTools, e.tool, Date.now()) });
+      else if (e.event === 'PostToolUse' || e.event === 'PostToolUseFailure') updateAgent(e.agentId, { runningTools: toolEnded(self.runningTools, e.tool) });
+      else if (e.event === 'UserPromptSubmit' || e.event === 'SessionStart' || e.event === 'PreCompact'
+        || ((e.event === 'Stop' || e.event === 'SubagentStop') && !e.blocked)) updateAgent(e.agentId, { runningTools: undefined });
       if (e.event === 'PreCompact') {
         // #5C — agent entered /compact; show it's boxing up context, not frozen.
         if (!breakerArmed) updateAgent(e.agentId, { status: 'compacting', action: 'compacting context', carrying: undefined });
@@ -608,6 +615,19 @@ export function useHive(config: HarnessConfig | null): void {
       );
     });
   }, [config?.onboardingComplete]);
+
+  // 2d) CARD-IDLE-WHILE-WORKING: main's zero-token liveness records into the store, once for the
+  //     whole window (snapshot, then every pushed change; an older sample never replaces a
+  //     newer one). Every working/idle display reads busy-or-not from them.
+  useEffect(() => {
+    let alive = true;
+    const { applyLiveness } = useStore.getState();
+    void window.cth.livenessSnapshot()
+      .then((recs) => { if (alive && Array.isArray(recs)) for (const r of recs) if (r && r.agentId) applyLiveness(r); })
+      .catch(() => { /* main not ready: the pushes fill it */ });
+    const off = window.cth.onLivenessChange((rec) => { if (rec && rec.agentId) useStore.getState().applyLiveness(rec); });
+    return () => { alive = false; off(); };
+  }, []);
 
   // 2e) PROVIDER-AGNOSTIC PTY-QUIESCENCE IDLE FALLBACK (the linchpin that makes
   //     canReceiveInbox:true safe for the live-unverified OpenCode/Crush/pi bridges).

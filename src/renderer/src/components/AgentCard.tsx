@@ -10,6 +10,7 @@ import { OfficeCharacterName } from '@/scene/office/cast';
 import { AgentNameEditor } from './AgentNameEditor';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
+import { useActivity } from './useActivity';
 import { MAIL_GLYPH, mailBadgeTitle, taskChipText, taskChipTitle } from '@shared/agentBadges';
 
 export interface AgentCardProps {
@@ -64,11 +65,14 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
  * and a slim gauge pinned to the bottom edge. Nothing overlaps anything.
  */
 export function AgentCard({
-  agentId, name, character, accent, status, ptyId, project, action, progress = 0,
+  agentId, name, character, accent, status: hookStatus, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
   doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, draggable, note, onEditNote
 }: AgentCardProps) {
   const [hover, setHover] = useState(false);
+  // CARD-IDLE-WHILE-WORKING: busy-or-not comes from main's liveness classification (a long tool
+  // call fires no hooks), and the tool in progress is named with its duration.
+  const { status, toolText } = useActivity(agentId, hookStatus);
   const typing = useHasTerminalDraft(ptyId);
   // A held agent must never read as idle (C2.11 crit 13): main's impact replaces the
   // resting badge and the context line. A working agent and a user draft are unchanged.
@@ -136,7 +140,7 @@ export function AgentCard({
     .filter(Boolean).join(', ') || 'none';
 
   // One context line: what it's DOING while working, WHERE it lives while idle.
-  const infoLine = held.impactText ?? ((status !== 'idle' && action) ? action : project);
+  const infoLine = held.impactText ?? toolText ?? ((status !== 'idle' && action && action !== 'idle') ? action : project);
   const noteFirstLine = (note ?? '').split('\n').find((l) => l.trim()) ?? '';
 
   return (

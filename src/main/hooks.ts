@@ -10,6 +10,7 @@
  *
  * Runs in the Electron main process.
  */
+import { toolEnded, toolStarted, type RunningTool } from '../shared/activityView';
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -296,6 +297,27 @@ export class HookServer {
   private codexNoReading = new Map<string, CodexNoReading>();
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
+  /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
+   *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
+  private readonly runningTools = new Map<string, RunningTool[]>();
+
+  /** The oldest tool the agent is running now, with when it started; undefined when none. */
+  runningTool(agentId: string): RunningTool | undefined {
+    return this.runningTools.get(agentId)?.[0];
+  }
+
+  private noteRunningTool(agentId: string, event: string, p: HookPayload): void {
+    const name = typeof p.tool_name === 'string' && p.tool_name ? p.tool_name.slice(0, 60) : undefined;
+    if (event === 'PreToolUse' && name) {
+      this.runningTools.set(agentId, toolStarted(this.runningTools.get(agentId), name, Date.now()));
+    } else if (event === 'PostToolUse' || event === 'PostToolUseFailure') {
+      // Jim N1: one tool ends; a parallel one may still run.
+      const left = toolEnded(this.runningTools.get(agentId), name);
+      if (left.length) this.runningTools.set(agentId, left); else this.runningTools.delete(agentId);
+    } else if (event === 'UserPromptSubmit' || event === 'SessionStart' || event === 'Stop' || event === 'StopFailure' || event === 'PreCompact') {
+      this.runningTools.delete(agentId);
+    }
+  }
 
   /** WAKE-SCREEN-GUARD R2-4: set by main once (the constructor's observer stays as it was). */
   setWakeIncarnationObserver(fn: ((agentId: string, token: string) => void) | undefined): void {
@@ -1540,6 +1562,7 @@ export class HookServer {
     if (agentId && typeof p.env_agent_id === 'string' && p.env_agent_id) this.noteIdentityMismatch(agentId, p.env_agent_id, event, p.session_id);
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
     if (agentId && !fromSubagent) this.trackTurn(agentId, event, p);
+    if (agentId && !fromSubagent) this.noteRunningTool(agentId, event, p);
     // A new response starts with no claims (a direct handle() call that nobody settled leaves none).
     this.mailClaims = [];
     if (!fromSubagent) {

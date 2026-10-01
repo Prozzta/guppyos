@@ -1,4 +1,5 @@
 import { ClipboardEvent, DragEvent, KeyboardEvent, type MouseEvent as ReactMouseEvent, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useActivity } from './useActivity';
 import { createPortal } from 'react-dom';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
@@ -67,6 +68,9 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const composerLineHeight = Math.round(composerFontSize * 1.4);
 
   const idle = agent.status === 'idle';
+  // CARD-IDLE (Jim N2): what the composer SAYS follows the shown status (liveness), like the card;
+  // `idle` above stays the hook status for the terminal-block poll the drain relies on.
+  const shownIdle = useActivity(agent.id, agent.status).status === 'idle';
 
   // Only the god/Michael agent gets the delegation toggle. Default OFF.
 
@@ -192,7 +196,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   // INTERFERED is shown even with nothing queued: a worker wake can be the held request,
   // and the terminal stays refused until a person resolves it. So is the capacity note
   // (unit #11): a limited, recovering or stale pool must not be invisible on an empty queue.
-  const status = composerStatus({ agentName: agent.name, queueLength: queue.length, idle, hold, block, capacityNote,
+  const status = composerStatus({ agentName: agent.name, queueLength: queue.length, idle: shownIdle, hold, block, capacityNote,
     capacityEvidence: delivery.capacityEvidence });
 
   return (
@@ -243,7 +247,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
             title={status.title}
             style={{
               fontSize: 12, minWidth: 0,
-              color: idle ? 'var(--cth-ink-700)' : 'var(--cth-ink-500)',
+              color: shownIdle ? 'var(--cth-ink-700)' : 'var(--cth-ink-500)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
             }}
           >{status.text}</span>
@@ -395,7 +399,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
           onKeyDown={onKey}
           onPaste={onPaste}
           rows={5}
-          placeholder={idle ? `Message ${agent.name}` : `${agent.name} is busy — queue a message`}
+          placeholder={shownIdle ? `Message ${agent.name}` : `${agent.name} is busy — queue a message`}
           style={{
             width: '100%',
             resize: 'vertical',
