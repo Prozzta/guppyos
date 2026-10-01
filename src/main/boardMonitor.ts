@@ -19,6 +19,8 @@ import { firstOccurrenceById } from '../shared/taskLedger';
 
 export const BOARD_FLAGS_FILE = 'board-flags.json';
 export const BOARD_MONITOR_TICK_MS = 60_000;
+/** At most this many re-runs per tick (one is the normal case: the auto-move's own writes). */
+export const BOARD_MONITOR_MAX_RERUNS = 3;
 
 /** The slice of HiveManager the monitor needs (kept narrow so tests can drive it). */
 export interface BoardMonitorHive {
@@ -120,7 +122,17 @@ export class BoardMonitor {
     this.running = true;
     try {
       let flags: BoardFlag[];
-      do { this.again = false; flags = this.tickOnce(); } while (this.again);
+      let runs = 0;
+      do {
+        this.again = false;
+        flags = this.tickOnce();
+        // Bounded: a re-run is only needed once (the moves' own writes). If the board keeps
+        // changing under the monitor, stop and log rather than spin the main process.
+        if (this.again && ++runs >= BOARD_MONITOR_MAX_RERUNS) {
+          this.opts.hive.appendLog({ kind: 'board-monitor-rerun-limit', reruns: runs });
+          this.again = false;
+        }
+      } while (this.again);
       return flags;
     } finally { this.running = false; }
   }

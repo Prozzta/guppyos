@@ -173,3 +173,15 @@ test('index.ts wires the liveness join: getLiveness into the monitor, and every 
   assert.match(ctor, /getLiveness: \(id\) => agentLiveness\.getLiveness\(id\),/);
   assert.match(index, /agentLiveness\.onLivenessChange\(\(\) => \{ try \{ boardMonitor\.tick\(\); \}/);
 });
+
+test('the re-run loop is bounded: a board that keeps changing never spins the main process', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }]);
+  const { BOARD_MONITOR_MAX_RERUNS } = loadTs('src/main/boardMonitor.ts');
+  let ticks = 0;
+  // Every pass makes the monitor dirty again, as a buggy feedback loop would.
+  r.hive.ledgerGuard.onChange(() => { ticks++; r.monitor.tick(); });
+  const realCompute = r.monitor.tickOnce.bind(r.monitor);
+  r.monitor.tickOnce = () => { const f = realCompute(); r.monitor.tick(); return f; };
+  r.monitor.tick();
+  assert.ok(r.log().some((l) => l.kind === 'board-monitor-rerun-limit' && l.reruns === BOARD_MONITOR_MAX_RERUNS));
+});
