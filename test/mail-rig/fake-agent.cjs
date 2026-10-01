@@ -108,7 +108,18 @@ class FakeAgent {
     this.control = setInterval(() => this.pollControl(), 40);
     if (process.stdin.isTTY) { try { process.stdin.setRawMode(true); } catch { /* not a tty */ } }
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (d) => this.onInput(d));
+    // ISO echo-lag seam (rc/1.1.76, WSG liveness): scenario.echoLagMs delays processing (and so
+    // the echo) of each stdin chunk; scenario.echoLagChunks limits the lag to the first N chunks.
+    // Always IN ORDER: a later chunk is never processed before an earlier, delayed one.
+    let lagged = 0; let lastDue = 0;
+    process.stdin.on('data', (d) => {
+      const lag = Number(this.scenario.echoLagMs) || 0;
+      const limit = this.scenario.echoLagChunks === undefined ? Infinity : Number(this.scenario.echoLagChunks);
+      const due = Math.max(Date.now() + (lag > 0 && lagged < limit ? lag : 0), lastDue);
+      if (lag > 0 && lagged < limit) lagged += 1;
+      lastDue = due;
+      if (due <= Date.now()) this.onInput(d); else setTimeout(() => this.onInput(d), due - Date.now());
+    });
     process.stdin.resume();
     this.out(`fake ${this.flavour} agent ${this.agentId}\r\n`);
     this.enqueue(() => this.onSessionStart());
@@ -250,6 +261,7 @@ class FakeAgent {
       case 'crash': this.rec('exit', { code: cue.code ?? 1 }); process.exit(cue.code ?? 1); return;
       case 'hang': this.hung = true; return;
       case 'unhang': this.hung = false; return;
+      case 'echo-lag': this.scenario = { ...this.scenario, echoLagMs: Number(cue.ms) || 0 }; return;   // ISO seam: the load ends
       case 'interrupt': this.interrupt('cue'); return;
       default: break;
     }

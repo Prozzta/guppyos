@@ -212,6 +212,7 @@ async function buildFloor() {
     providerForPty: (ptyId) => ptyProvider.get(ptyId),
     requestScreenReading: readScreen,
     requestCodexScreen: readCodexScreen,
+    onScreenGuard: (r) => { diags.push({ stage: 'screen-guard', agentId: r.agentId, why: r.phase + ':' + (r.ok ? 'ok' : 'NO') + ':' + r.reason + ':gen=' + r.observedGeneration + '/' + r.currentGeneration, at: clock.now() }); if (diags.length > 5000) diags.shift(); },
     onOutcome: (r) => { outcomes.push({ agentId: r.agentId, requestId: r.requestId, cls: r.admissionClass, outcome: r.outcome, at: r.at }); if (outcomes.length > 500) outcomes.shift(); }
   }));
 

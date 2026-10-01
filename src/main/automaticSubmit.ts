@@ -431,10 +431,23 @@ export interface ScreenGuardRecord {
   latched: boolean;
 }
 
-/** WAKE-SCREEN-GUARD: after a stage write, how many post-echo readings may be tried before
- *  the staged text is held for a person, and the pause between them. */
-export const SCREEN_COMMIT_READS = 3;
+/** WAKE-SCREEN-GUARD: the pause between post-echo readings after a stage write. */
 export const SCREEN_COMMIT_RETRY_MS = 250;
+/** WSG LIVENESS (rc/1.1.76 ISO, Creed's echo-lag repro): a post-stage reading that is merely
+ *  SLOW (no reading, the echo not painted yet, the screen still changing) is re-read until this
+ *  long after the stage write. On a loaded machine the echo can land seconds late; 3 readings
+ *  250 ms apart held a healthy agent for a person. Past the budget the staged text is ERASED
+ *  (verified) and re-offered, never Entered unverified. */
+export const SCREEN_COMMIT_SLOW_BUDGET_MS = 10_000;
+/** WSG LIVENESS: how long EACH of the screen abort's readings (our text positively seen before
+ *  the clear, gone after it) may keep re-reading. A late echo also delays the clear's echo. */
+export const SCREEN_ABORT_VERIFY_BUDGET_MS = 15_000;
+
+/** WSG LIVENESS: a failed post-stage reading that says the TERMINAL changed under us (another
+ *  incarnation, or Codex starting / resuming / reconfiguring), not that it is slow. */
+export function foreignScreenReason(reason: string): boolean {
+  return reason === 'incarnation' || reason.startsWith('startup:');
+}
 
 /** The claim capacity is re-asked under. Mirrors `capacityRuntime.DeliveryClaim`. */
 export interface OwnerClaim {
@@ -1141,16 +1154,21 @@ export class AutomaticSubmitOwner {
     // ── COMMIT | ABORT | INTERFERED ──────────────────────────────────────────────────
     // WAKE-SCREEN-GUARD: for Codex, a SECOND fresh reading, after the echo of our stage
     // write, must show the composer holding exactly our text; the Enter then needs no
-    // output since that reading. Bounded; never proven = held for a person, no Enter.
+    // output since that reading. Never proven = no Enter.
+    // WSG LIVENESS: a SLOW screen is re-read until SCREEN_COMMIT_SLOW_BUDGET_MS after the stage
+    // write; then, or at once for a FOREIGN one, the staged text is erased through the VERIFIED
+    // abort (ABORTED: released and re-offered). Only an erase that cannot be proven is held.
+    const slowDeadline = deps.now() + SCREEN_COMMIT_SLOW_BUDGET_MS;
     let verdict: CommitVerdict;
-    for (let attempt = 1; ; attempt += 1) {
+    for (;;) {
       if (guard === 'ENFORCE') {
         const g = await this.screenGate(req, ptyId, incarnation, 'COMMIT', req.text);
         if (!g.ok) {
           // A human key or a dead terminal explains a changed screen better than the screen does.
           const blocked = postStageGuard(staged, deps);
           if (blocked) { verdict = blocked; break; }
-          if (attempt >= SCREEN_COMMIT_READS) return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', g.reason);
+          if (foreignScreenReason(g.reason)) return this.abort(staged, `screen-foreign:${g.reason}`);
+          if (deps.now() >= slowDeadline) return this.abort(staged, `screen-not-verified:${g.reason}`, SCREEN_ABORT_VERIFY_BUDGET_MS);
           await this.sleep(SCREEN_COMMIT_RETRY_MS);
           continue;
         }
@@ -1158,7 +1176,7 @@ export class AutomaticSubmitOwner {
       }
       verdict = await Promise.resolve(commitSection(staged, deps));
       if (verdict.kind !== 'SCREEN_CHANGED') break;
-      if (attempt >= SCREEN_COMMIT_READS) return this.interfere(staged, 'SCREEN_NOT_VERIFIED_AFTER_STAGE', 'output after every reading');
+      if (deps.now() >= slowDeadline) return this.abort(staged, 'screen-not-verified:output after every reading', SCREEN_ABORT_VERIFY_BUDGET_MS);
       await this.sleep(SCREEN_COMMIT_RETRY_MS);
     }
     if (verdict.kind === 'ENTERED') this.reportEnterWrite(staged, verdict.ok, verdict.ok ? undefined : verdict.error, gapMs, false);
@@ -1376,13 +1394,23 @@ export class AutomaticSubmitOwner {
    * as a placeholder, or a needle that wrapped, fails the first reading and is held —
    * otherwise "not found afterwards" would verify on a screen that never showed it.
    */
-  private async abort(s: Staged, basis: string): Promise<SubmitOutcome> {
+  private async abort(s: Staged, basis: string, verifyBudgetMs = 0): Promise<SubmitOutcome> {
     const deps = this.deps;
     const cap = deps.abortCapability(s.req.agentId);
     if (cap.kind !== 'VERIFIED') return this.interfere(s, 'ABORT_CAPABILITY_UNVERIFIED', undefined);
     const needle = needleFor(s.req.text);
     if (!needle) return this.interfere(s, 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', 'no usable needle');
-    const before = await this.readScreen(s.ptyId, needle);
+    // WSG LIVENESS: a slow screen abort (verifyBudgetMs > 0) may re-read until our text is
+    // POSITIVELY seen; a missing or empty reading is never evidence. A human key still wins.
+    const seenBy = deps.now() + verifyBudgetMs;
+    let before = await this.readScreen(s.ptyId, needle);
+    while ((!before || !before.onPromptRow || before.screenCount < 1) && deps.now() < seenBy) {
+      const waiting = postStageGuard(s, deps);
+      if (waiting?.kind === 'FAILED') { if (s.decision) deps.capacity.cancelGrant(s.decision); return { kind: 'FAILED', reason: waiting.reason }; }
+      if (waiting?.kind === 'INTERFERED') return this.interfere(s, waiting.reason, waiting.detail);
+      await this.sleep(SCREEN_COMMIT_RETRY_MS);
+      before = await this.readScreen(s.ptyId, needle);
+    }
     if (!before || !before.onPromptRow || before.screenCount < 1) {
       return this.interfere(s, 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', before ? 'not on the prompt row' : 'no screen reading');
     }
@@ -1395,9 +1423,15 @@ export class AutomaticSubmitOwner {
     const cleared = safeWrite(deps, s.ptyId, cap.clearControl);
     if (!cleared.ok) return this.interfere(s, 'CLEAR_WRITE_FAILED', cleared.error);
     await this.sleep(cap.settleMs);
-    const after = await this.readScreen(s.ptyId, needle);
+    const goneBy = deps.now() + verifyBudgetMs;
+    let after = await this.readScreen(s.ptyId, needle);
     // BOTH halves, neither traded for the other: gone from the prompt row AND fewer on
     // the screen than before — so the text neither remains sendable nor merely moved.
+    // WSG LIVENESS: a slow abort re-reads (bounded) until both halves hold; never assumes them.
+    while ((!after || after.onPromptRow || after.screenCount >= before.screenCount) && deps.now() < goneBy) {
+      await this.sleep(SCREEN_COMMIT_RETRY_MS);
+      after = await this.readScreen(s.ptyId, needle);
+    }
     if (!after || after.onPromptRow || after.screenCount >= before.screenCount) {
       return this.interfere(s, 'ERASE_NOT_VERIFIED', after ? `row=${after.onPromptRow} count=${after.screenCount}/${before.screenCount}` : 'no screen reading');
     }
