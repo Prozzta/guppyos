@@ -11,6 +11,57 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.77] — 2026-10-01
+
+**A floor-overview release: god gets a written board summary, every agent row shows whether the
+agent is really working, and a few reliability fixes.** god starts fresh once, at its first
+automatic resume after this install; nobody else does. Rollback: 1.1.76 (reinstall).
+
+### Changed
+
+- **god reads a written summary of the floor.** The app now writes `board-status.md` and
+  `floor-digest.md` in the hive folder, and wakes god with "Floor: N decision(s)" when cards need a
+  ruling. A card marked `"parked": true` is held on purpose and does not wake god. Cards that sit
+  still are flagged as stale, but not before 6 hours after this install. god's instructions changed
+  to point at these files, so god starts a fresh conversation once, at its first automatic resume
+  after the install (its identity, memory, inbox and mail are kept). Workers are not affected.
+- **The hourly ops standup now ships switched off** (you can still turn it on in the Command
+  Center), and the old heartbeat is retired; an old heartbeat mission is removed from the settings
+  once.
+- **Duplicate task ids.** A board write that would add a duplicate id is refused. A duplicate made
+  by hand is reported (banner and digest), never changed, and every reader uses the first copy.
+- **A status chip on every agent row** in the Command Center: busy, idle, on hold, suspect, stuck,
+  crashed, exited or unknown, with how long. Hover it for the evidence (last terminal output, hook,
+  turn end, and so on). It is computed from what the app already sees and uses no model tokens.
+  Depending on the state it offers **inspect**, **restart & continue** (a crashed or exited agent)
+  or **re-offer mail** (an agent the stuck-agent recovery has given up on). Nothing happens without
+  your click.
+- **Codex plugins are off for hive Codex agents.** Codex could spend about a minute at startup
+  retrying a plugin sync and then call a public archive in the background; hive agents use neither.
+
+### Fixed
+
+- The agent status line no longer shows raw `HTTP/1.0 200 OK` text when the app answers slowly.
+- Stopping an agent right after it starts no longer leaves a hidden console process behind.
+- An agent whose context compaction finished out of order is no longer treated as stuck for
+  10 minutes.
+- The Codex screen check is stricter about leftover text after an erase, and a key you press
+  during that check is always treated as yours.
+- Replies written with `inReplyTo`, or with the act `reply`, `answer` or `ack`, are linked to the
+  request they answer. A message with an unknown act is returned to its sender instead of being
+  delivered unclear.
+- The machine-wide heavy-job lock (one test suite, build or install at a time) holds the slot when
+  its process check fails, counts only the job's own processes, recognises Codex commands and
+  releases after a Codex job ends.
+
+### Good to know
+
+- **Install while the floor is idle.** Only god starts fresh. No session-clearing script.
+- New files the app writes in the hive folder: `board-status.md`, `floor-digest.md`, and
+  `state/task-meta.json`, `state/board-flags.json`, `state/digest-woken.json`.
+- **Rollback to 1.1.76:** no mail is lost. The floor summary files stop updating, the status chip
+  and Codex plugin setting go, and god may start fresh once more (with the 1.1.76 instructions).
+
 ## [1.1.76] — 2026-10-01
 
 **A reliability release: the floor keeps going on a busy machine, and Codex agents get safety checks.**
