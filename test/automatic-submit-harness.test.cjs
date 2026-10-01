@@ -80,13 +80,13 @@ test('cpr round trip - the REAL xterm answers a DSR with a CPR reply, classified
 
 test('cpr - a cursor-position reply in the gap is CONTROL, not a person: no INTERFERED (paired with int)', async () => {
   const { cpr } = await result();
+  assert.deepEqual(cpr.outcome, { kind: 'COMMITTED' }, 'the CONTROL reply in the gap did not interfere (outcome first: a HUMAN one reads INTERFERED here)');
   // CPR-ARM-176: the scenario delivers xterm's own reply at a certain point (a microtask after the
   // payload write), so this ordering is the arm's construction, not a race it can lose.
   assert.ok(cpr.payloadAt >= 0 && cpr.replyAt > cpr.payloadAt && cpr.replyAt < cpr.enterAt,
     `xterm’s CPR reply really landed BETWEEN the payload and the Enter (${cpr.payloadAt} < ${cpr.replyAt} < ${cpr.enterAt}) - otherwise this arm proves nothing`);
   assert.equal(cpr.replyOrigin, 'CONTROL', 'the production classifier declared it CONTROL');
   assert.equal(cpr.generation, 0, 'so the human generation never moved');
-  assert.deepEqual(cpr.outcome, { kind: 'COMMITTED' });
   assert.deepEqual(cpr.submitted, ['cpr message three']);
 });
 
