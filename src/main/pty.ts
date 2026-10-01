@@ -108,6 +108,46 @@ export interface PtyEndEvent {
 /** Process-wide, never reused, so two incarnations can never compare equal. */
 let incarnationSeq = 0;
 
+/** The node-pty 1.1.0 WindowsTerminal internals armEarlyKill relies on (pinned by its test). */
+interface WindowsTerminalInternals {
+  _isReady?: boolean;
+  _deferreds?: unknown[];
+  _close?: () => void;
+  _agent?: { kill?: () => void };
+}
+
+/**
+ * PTY-EARLY-KILL-LEAK (Creed, rc/1.1.76 gate, inspector on the hung process). node-pty's
+ * WindowsTerminal DEFERS kill() until the terminal's first output (`_deferNoArgs`: queued until the
+ * first 'data' event). A child killed before it printed anything (an agent stopped right after spawn
+ * on a loaded machine; our ensureKilled taskkill) never produces that event, so the queued kill never
+ * runs: ClosePseudoConsole is never called, conhost lives on and the input pipe stays open.
+ *
+ * This arms ONE terminal: its kill(), while the terminal is not ready yet, runs exactly what the
+ * deferred kill would have run (`_close()`, then `_agent.kill()`: ClosePseudoConsole, the console
+ * process sweep, the conout worker dispose) at once, and drops the queued deferreds (writes and
+ * resizes for a terminal that is going away). Once ready, kill() is node-pty's own, unchanged. A
+ * signal argument keeps node-pty's behaviour (it throws on Windows). Windows only; a terminal that
+ * lacks these internals (another node-pty version) is left untouched, and the pin test fails.
+ */
+export function armEarlyKill(proc: pty.IPty, platform: NodeJS.Platform = process.platform): boolean {
+  const t = proc as unknown as WindowsTerminalInternals & { kill: (signal?: string) => void };
+  if (platform !== 'win32' || typeof t.kill !== 'function' || typeof t._close !== 'function'
+    || typeof t._agent?.kill !== 'function' || typeof t._isReady !== 'boolean' || !Array.isArray(t._deferreds)) return false;
+  const deferredKill = t.kill.bind(proc);
+  let closedEarly = false;
+  t.kill = (signal?: string): void => {
+    if (closedEarly) return;   // already closed: a second close of the pseudoconsole is not safe
+    if (signal !== undefined || t._isReady) { deferredKill(signal); return; }
+    closedEarly = true;
+    t._isReady = true;       // nothing queued may run later against a closed terminal
+    t._deferreds = [];
+    t._close!();
+    t._agent!.kill!();
+  };
+  return true;
+}
+
 export interface SpawnOptions {
   id: string;
   cwd: string;
@@ -753,6 +793,8 @@ export class PtyManager {
         // ptyEnv.ts for why the strip exists and why it is prefix-based.
         env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend)
       });
+      // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
+      armEarlyKill(proc);
 
       // Capture THIS session object so the proc's callbacks can tell whether the
       // id still belongs to them. A model change / restart does kill()+spawn()
