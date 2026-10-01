@@ -299,6 +299,34 @@ test('watchdog: picks ONLY a test-file process under the runner\'s node --test t
   assert.strictEqual(fileOf('node.exe -e 1'), null);
 });
 
+test('watchdog: a due file is RECORDED before its tree is killed, once, and named even if the kill fails', () => {
+  // The kill ends the file, node --test returns and the runner stops the watchdog at once: a record
+  // written after a slow taskkill was lost (1.1.76 final gate #4, round 3/a, a run that named no file).
+  const { killDue } = require('./tools/file-watchdog.cjs');
+  const order = [];
+  const killed = new Set();
+  const opts = { killed, record: (d) => order.push(`record ${d.file}`), kill: (pid) => { order.push(`kill ${pid}`); if (pid === 31) throw new Error('gone'); } };
+  killDue([{ pid: 30, file: 'a.test.cjs', ageMs: 6 }, { pid: 31, file: 'b.test.cjs', ageMs: 6 }], opts);
+  killDue([{ pid: 30, file: 'a.test.cjs', ageMs: 7 }], opts);
+  assert.deepStrictEqual(order, ['record a.test.cjs', 'kill 30', 'record b.test.cjs', 'kill 31']);
+});
+
+test('END TO END, the backstop alone (no watchdog): node --test\'s own file timeout is NAMED through the timeout reporter', { timeout: 120_000 }, () => {
+  const os = require('node:os');
+  const { spawnSync } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-backstop-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), "require('node:test')('done', () => { setInterval(() => {}, 1000); });\n");
+    const e = sink();
+    const spawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, watchdog: () => ({ stop: () => {} }) });
+    assert.notStrictEqual(code, 0, 'a hung file fails the run');
+    assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms .*a-hung\.test\.cjs/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('watchdog: parses PowerShell\'s process rows (one row or many, /Date(ms)/ start times)', () => {
   const { parseRows } = require('./tools/file-watchdog.cjs');
   const one = parseRows('{"ProcessId":5,"ParentProcessId":4,"Name":"node.exe","CommandLine":"node x.test.cjs","CreationDate":"/Date(1700000000000)/"}');

@@ -53,6 +53,22 @@ function dueFiles(procs, runnerPid, limitMs, now) {
   return due;
 }
 
+/**
+ * Act on the due files: RECORD each one, THEN kill its tree. The order matters: the kill ends the
+ * file, `node --test` then returns, and the runner stops this watchdog at once; a record written
+ * after a slow `taskkill` (a loaded machine) could be lost with it, leaving a failed run that names
+ * no file (the 1.1.76 final gate #4, round 3/a). A due file has overrun the limit, so it is named
+ * whether or not the kill still finds it.
+ */
+function killDue(due, { killed, record, kill }) {
+  for (const d of due) {
+    if (killed.has(d.pid)) continue;
+    killed.add(d.pid);
+    try { record(d); } catch { /* noop */ }
+    try { kill(d.pid); } catch { /* already gone */ }
+  }
+}
+
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 
 function snapshot() {
@@ -62,7 +78,7 @@ function snapshot() {
   return parseRows(out);
 }
 
-module.exports = { parseRows, fileOf, dueFiles };
+module.exports = { parseRows, fileOf, dueFiles, killDue };
 
 if (require.main === module) {
   const [runnerPid, limitMs, outFile, pollMs = '30000'] = process.argv.slice(2);
@@ -72,12 +88,11 @@ if (require.main === module) {
     if (!alive(runner)) process.exit(0);
     let procs;
     try { procs = snapshot(); } catch { return; }   // one missed poll is not fatal
-    for (const d of dueFiles(procs, runner, limit, Date.now())) {
-      if (killed.has(d.pid)) continue;
-      killed.add(d.pid);
-      try { execFileSync('taskkill', ['/T', '/F', '/PID', String(d.pid)], { stdio: 'ignore', windowsHide: true, timeout: 30_000 }); } catch { /* already gone */ }
-      try { fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `killed with its process tree after ${d.ageMs} ms (limit ${limit} ms)`, by: 'watchdog' })}\n`); } catch { /* noop */ }
-    }
+    killDue(dueFiles(procs, runner, limit, Date.now()), {
+      killed,
+      record: (d) => fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `killed with its process tree after ${d.ageMs} ms (limit ${limit} ms)`, by: 'watchdog' })}\n`),
+      kill: (pid) => execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true, timeout: 30_000 })
+    });
   };
   setInterval(tick, poll);
 }
