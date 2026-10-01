@@ -476,6 +476,13 @@ export class PtyManager {
     this.startupHooks = hooks;
   }
 
+  private outputObserver: ((id: string) => void) | null = null;
+  /** WSG-CODEX-STARTUP-NO-MARKER: told of every accepted output chunk (after its generation
+   *  moved). Must be cheap; it never sees the data and never decides delivery. */
+  setOutputObserver(fn: ((id: string) => void) | null): void {
+    this.outputObserver = fn;
+  }
+
   private startupHook(): PtyStartupHooks | null {
     const h = this.startupHooks;
     if (h && !h.recording()) this.startupHooks = null;
@@ -531,6 +538,7 @@ export class PtyManager {
     session.lastOutputAt = Date.now();
     // WAKE-SCREEN-GUARD: every accepted chunk moves the output generation.
     session.outputGeneration = (session.outputGeneration ?? 0) + 1;
+    if (this.outputObserver) { try { this.outputObserver(id); } catch { /* never breaks output */ } }
     // PROBE-REISSUE (B): the last few KB of raw output, for a diagnostic row's tail line.
     session.tail = (session.tail + data).slice(-PTY_TAIL_CHARS);
     if (session.out) session.out.push(data);

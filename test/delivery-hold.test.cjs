@@ -389,8 +389,8 @@ test('renderer: resolveInterference is called from ONE place, a click', () => {
   const hive = codeOnly(readSource('src/renderer/src/hooks/useHive.ts'));
   assert.match(hive, /if \(outcome\.kind === 'HUMAN_HANDLED'\) \{\s*delete sendFailures\[next\.id\];\s*removeQueuedMessage\(srcId, next\.id\);/,
     'the drain treats HUMAN_HANDLED as "drop this one item" - never as a delivery and never as a retry');
-  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold\);/,
-    '"send now" is offered for a pause or a capacity hold and NEVER while INTERFERED');
+  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold \|\| !!delivery\.screenHold\?\.sendNowPasses\);/,
+    '"send now" is offered for a pause, a capacity hold or (1.1.78 WSG fix 3) a screen hold a person\'s send passes, and NEVER while INTERFERED');
   assert.ok(!/useDeliveryPaused/.test(composer), 'the pause-only poll is replaced, not kept beside the new one');
   const preload = codeOnly(readSource('src/preload/index.ts'));
   assert.match(preload, /resolveInterference: \(agentId: string, how: InterferenceResolution\): Promise<boolean> =>\s*ipcRenderer\.invoke\('autoSubmit:resolveInterference', agentId, how\)/);

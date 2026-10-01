@@ -168,6 +168,12 @@ export interface IntegrityIssue {
   repaired?: boolean;
   /** ZT-I1-MAIL N1: a notice that is not a damaged file (mail-evidence-missing); nothing is paused. */
   notice?: string;
+  /** WSG-ALERT (1.1.78): the notice's own plain-words headline. */
+  title?: string;
+  /** WSG-ALERT: the technical reason, shown small. */
+  details?: string;
+  /** WSG-ALERT: when the notice was raised; a dismissal covers this raising only. */
+  raisedAt?: number;
 }
 
 /** One row of the consolidated voice read-layer directory (`hive:agentDirectory`):
@@ -635,6 +641,8 @@ export interface AgentControlSnapshot {
   halted: boolean;
   /** v1.1.45 unit #5: main's agent-card impact string while a hold is real, else null. */
   impact?: AgentImpact | null;
+  /** WSG fix 3 (1.1.78): the Codex screen check is refusing this agent's automatic deliveries. */
+  screenHold?: { reason: string; sendNowPasses: boolean } | null;
   autoDeliveryPaused: boolean;
   gatedTools: string[];
   pendingSteers: number;

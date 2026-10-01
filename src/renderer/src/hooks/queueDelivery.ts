@@ -1,3 +1,22 @@
+/**
+ * WSG-CODEX-STARTUP-NO-MARKER fix 2: which queued item the drain offers next.
+ *
+ * The head, unless the head is an AUTOMATIC item (an auto /compact from the context trigger, an
+ * inbox nudge, a work order) that main REFUSED on its last attempt and a message a PERSON typed
+ * is waiting behind it: then the person's message goes first. A refused automatic item used to
+ * hold every message behind it (WSG-NO-MARKER-177: "hello?" sat behind a refused /compact).
+ * Order among automatic items and among a person's items is unchanged, and an item released with
+ * "send now" is already at the front.
+ */
+export function pickQueuedForDelivery<T extends { id: string; human?: boolean; manual?: boolean }>(
+  queue: readonly T[] | undefined,
+  refusedAutomatic: ReadonlySet<string>
+): T | undefined {
+  const head = queue?.[0];
+  if (!head || head.human || head.manual || !refusedAutomatic.has(head.id)) return head;
+  return queue?.find((m) => m.human) ?? head;
+}
+
 /** Run one queued delivery and acknowledge it only after the sender resolves.
  * Rejections deliberately leave the queue item untouched for the next retry. */
 export async function deliverWithAcknowledgement(

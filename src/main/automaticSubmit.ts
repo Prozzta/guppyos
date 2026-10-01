@@ -449,6 +449,20 @@ export function foreignScreenReason(reason: string): boolean {
   return reason === 'incarnation' || reason.startsWith('startup:');
 }
 
+/**
+ * WSG-CODEX-STARTUP-NO-MARKER fix 3: a PERSON's "send now" (USER_RELEASED) may pass condition 1
+ * when its ONLY failure is `no-marker` (no session header anywhere in the buffer and no status
+ * line) and the same fresh reading shows condition 2 exactly (the empty composer, or our own
+ * text). Every startup screen with a marker of its own is still refused for everyone: the
+ * loading header and the resume line (checked before this), and the trust, login and update
+ * screens, which have no composer row. `no-marker` with the composer on screen is what Codex
+ * leaves after it purges its header on a resize, the WSG-NO-MARKER-177 hold. Automatic starts
+ * never pass this way: they wait for a latch.
+ */
+export function personPassesNoMarker(cls: AdmissionClass, startupReason: string, composerExact: boolean): boolean {
+  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;
+}
+
 /** WSG-FOLLOWUPS: after a verified erase, the FRAGMENT of our own text still on the Codex
  *  composer row (a half erase), or null. Positive evidence only: the empty composer, an empty
  *  row, or text that is not a piece of ours is not residue. */
@@ -878,6 +892,32 @@ export class AutomaticSubmitOwner {
     return live !== undefined && this.postHandoff.get(ptyId) === live;
   }
 
+  /** WSG-CODEX-STARTUP-NO-MARKER: would a startup reading of this PTY be useful (the screen gate
+   *  applies and its live incarnation is not latched yet)? */
+  startupProbeWanted(ptyId: string): boolean {
+    return this.guardMode(ptyId) === 'ENFORCE' && this.deps.incarnation(ptyId) !== undefined && !this.postHandoffLatched(ptyId);
+  }
+
+  /**
+   * WSG-CODEX-STARTUP-NO-MARKER fix 1(a): a Codex screen reading with NO request behind it,
+   * taken while the session header is on screen (right after spawn, and after each output
+   * burst while un-latched). It can only ADD the condition-1 latch, by the same rule as
+   * screenGate (codexPastStartup on a reading of this incarnation that covers real output). It
+   * types nothing and refuses nothing; every request still needs its own fresh reading.
+   * Without it, Codex erasing its header on a resize (ESC[3J + a capped replay) before the
+   * first request leaves the latch waiting on a turn that only a delivery could start.
+   */
+  async observeStartup(ptyId: string): Promise<boolean> {
+    const deps = this.deps;
+    if (!this.startupProbeWanted(ptyId)) return this.postHandoffLatched(ptyId);
+    const incarnation = deps.incarnation(ptyId);
+    const r = await this.readGuard(ptyId);
+    if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
+    const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
+    return false;
+  }
+
   /**
    * Submit one programmatic message. Resolves with what HAPPENED; never rejects.
    *
@@ -1246,7 +1286,7 @@ export class AutomaticSubmitOwner {
       // A LOADING header or a resume line is refused even when latched (the live widget
       // also shows `loading` while it reconfigures).
       if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
-      else if (this.postHandoff.get(ptyId) !== incarnation) verdict = { ok: false, reason: `startup:${past.reason}` };
+      else if (this.postHandoff.get(ptyId) !== incarnation && !personPassesNoMarker(req.admissionClass, past.reason, comp.cls === want)) verdict = { ok: false, reason: `startup:${past.reason}` };
       else if (comp.cls !== want) verdict = { ok: false, reason: `${comp.cls}:${comp.reason}` };
       else verdict = { ok: true, gen: r.outputGeneration };
     }

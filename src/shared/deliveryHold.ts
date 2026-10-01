@@ -81,6 +81,10 @@ export interface DeliveryHoldInput {
   headManual: boolean;
   capacityHold: boolean;
   capacityEvidence: CapacityEvidenceName | null;
+  /** WSG fix 3 (1.1.78): main's Codex screen check is refusing this agent's automatic
+   *  deliveries. `sendNowPasses`: a person's "send now" is let through (only when the refusal is
+   *  that Codex's startup header is gone and the chat box is on screen). */
+  screenHold?: { reason: string; sendNowPasses: boolean } | null;
 }
 
 export type DeliveryHoldAction = 'RESOLVE_INTERFERENCE' | 'SEND_NOW' | null;
@@ -132,7 +136,7 @@ export function interferenceChoices(interfered: InterferedView | null): Interfer
 }
 
 export interface DeliveryHoldView {
-  kind: 'INTERFERED' | 'PAUSED' | 'CAPACITY';
+  kind: 'INTERFERED' | 'PAUSED' | 'CAPACITY' | 'SCREEN';
   hint: string;
   title: string;
   /** The ONE human action that ends this hold. Never performed by anything but a click. */
@@ -190,6 +194,30 @@ export function deliveryHoldView(i: DeliveryHoldInput): DeliveryHoldView | null 
             + 'no reading is coming that could lift this hold. "send now" on a message below is the way out.',
           action: 'SEND_NOW'
         };
+  }
+  // WSG fix 3: the Codex screen check. Said plainly either way: when "send now" passes, and when
+  // it is held by the same check (then the terminal itself is the way out, never a keystroke
+  // the app makes).
+  if (i.screenHold) {
+    if (i.screenHold.sendNowPasses) {
+      return i.headManual ? null : {
+        kind: 'SCREEN',
+        hint: `held — can't confirm ${i.agentName} is on its chat box; "send now" types it if the chat box is showing`,
+        title: `Automatic delivery to ${i.agentName} is held: the app types into a Codex terminal only when it is sure it is on its normal chat box, `
+          + `and ${i.agentName}'s startup header is no longer on screen to prove it. It lifts by itself after ${i.agentName}'s next turn. `
+          + '"send now" on a message below types it now, but only if the chat box ("Ask Codex to do anything") is what the terminal shows.',
+        action: 'SEND_NOW'
+      };
+    }
+    return {
+      kind: 'SCREEN',
+      hint: `held — ${i.agentName}'s terminal is not on its chat box; "send now" is held too`,
+      title: `Automatic delivery to ${i.agentName} is held: its terminal is not showing the normal chat box, so nothing is typed into it. `
+        + '"send now" is held by the same safety check. '
+        + `Click ${i.agentName}'s terminal and look at the bottom: answer or close any question or menu (trust, login, update), or press Esc. `
+        + 'Delivery resumes by itself once the chat box is showing.',
+      action: null
+    };
   }
   return null;
 }

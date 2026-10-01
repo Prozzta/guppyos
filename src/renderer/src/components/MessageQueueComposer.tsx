@@ -138,7 +138,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
           ? `${text}\n\nAttached files:\n`
           : 'Attached files:\n') + attachments.map((a) => `- ${a.path} (${a.name})`).join('\n')
       : text;
-    enqueueMessage(agent.id, body);
+    enqueueMessage(agent.id, body, { human: true });
     setText('');
     setAttachments([]);
   };
@@ -166,12 +166,14 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
     paused: delivery.paused,
     headManual: !!queue[0]?.manual,
     capacityHold: delivery.capacityHold,
-    capacityEvidence: delivery.capacityEvidence
+    capacityEvidence: delivery.capacityEvidence,
+    screenHold: delivery.screenHold
   });
   // "send now" is the way out of a pause or a capacity hold. It is NOT a way out of
   // INTERFERED: main refuses every programmatic delivery to that terminal, so offering it
-  // would be offering something that cannot happen.
-  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold);
+  // would be offering something that cannot happen. WSG fix 3: it is a way out of a Codex
+  // screen hold only when main says a person's send passes (the header-gone case).
+  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold || !!delivery.screenHold?.sendNowPasses);
   const capacityNote = capacityStateNote(delivery.capacityEvidence);
 
   // A PERSON ends an INTERFERED hold, and says HOW (human ruling, option B): the message
@@ -459,8 +461,9 @@ interface DeliveryState {
   capacityHold: boolean;
   capacityEvidence: CapacityEvidenceName | null;
   interfered: InterferedView | null;
+  screenHold: { reason: string; sendNowPasses: boolean } | null;
 }
-const NOT_HELD: DeliveryState = { paused: false, capacityHold: false, capacityEvidence: null, interfered: null };
+const NOT_HELD: DeliveryState = { paused: false, capacityHold: false, capacityEvidence: null, interfered: null, screenHold: null };
 
 /** Poll what MAIN is holding this agent's delivery for: the floor-wide pause, provider
  * capacity, an unresolved INTERFERED. All three are computed in main and only READ here.
@@ -480,7 +483,8 @@ function useDeliveryState(agentId: string): DeliveryState & { refresh: () => voi
             paused: !!s?.autoDeliveryPaused,
             capacityHold: !!s?.capacityHold,
             capacityEvidence: s?.capacityEvidence ?? null,
-            interfered: s?.interfered ?? null
+            interfered: s?.interfered ?? null,
+            screenHold: s?.screenHold ?? null
           });
         })
         .catch(() => { /* main not ready — assume nothing is held */ });

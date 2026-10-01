@@ -1550,7 +1550,10 @@ export class HookServer {
     }
     // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
     // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.
-    if (!fromSubagent && agentId && event === 'SessionStart' && typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation) {
+    // WSG-CODEX-STARTUP-NO-MARKER fix 1(b): so does its own Stop. A turn that ended is proof the
+    // incarnation is past trust, login and update, and Codex sends SessionStart only lazily, at
+    // a session's first turn; a resumed agent whose header was erased latches on its turn end.
+    if (!fromSubagent && agentId && (event === 'SessionStart' || event === 'Stop') && typeof p.munder_wake_incarnation === 'string' && p.munder_wake_incarnation) {
       try { this.onWakeIncarnation?.(agentId, p.munder_wake_incarnation.slice(0, 80)); } catch { /* never breaks a hook */ }
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {

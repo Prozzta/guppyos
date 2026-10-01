@@ -33,6 +33,7 @@ const SHARED = loadTs('src/shared/codexScreen.ts');
 const OWNER = loadTs('src/main/automaticSubmit.ts');
 const GUARD = loadTs('src/main/codexScreenGuard.ts');
 const WIRING = loadTs('src/main/automaticSubmitWiring.ts');
+const HOOKS = loadTs('src/main/hooks.ts');
 const { ADMISSION_REASON } = loadTs('src/main/capacityAdmission.ts');
 
 const FX = path.join(__dirname, 'fixtures', 'wake-screen-guard');
@@ -175,7 +176,8 @@ test('N1: a reading that covers no PTY output (generation 0) never latches', asy
 test('N2 + N3: a torn-down PTY forgets its token; a respawn clears the old banner', () => {
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /function teardownPty\(id: string[^\n]*\n[\s\S]{0,1400}wakeIncarnationTokens\.forgetPty\(id\);/);
-  assert.match(idx, /screenGuardAlerts\.clear\(opts\.hive\.id\);\s*\/\/[^\n]*\n\s*try \{ hive\.mail\.clearScreenGuardAlert\(opts\.hive\.id\); \}/);
+  assert.match(idx, /\/\/ Jim N3: [^\n]*\n\s*screenGuardNotices\.respawned\(opts\.hive\.id\);/);
+  assert.match(idx, /clear: \(agentId\) => hive\.mail\.clearScreenGuardAlert\(agentId\)/, 'the notices coordinator clears the mail notice');
   const { MailLedger } = loadTs('src/main/mailLedger.ts');
   const ledger = Object.create(MailLedger.prototype);
   ledger.notices = new Map();
@@ -943,14 +945,14 @@ test('R2-4: the REAL hook shim copies MUNDER_WAKE_INCARNATION into the payload a
   assert.equal('munder_wake_incarnation' in without, false, 'a payload cannot bring its own token');
 });
 
-test('R2-4 wiring: the spawn env names the token, the hook observer hands it on, only SessionStart latches', () => {
+test('R2-4 wiring: the spawn env names the token, the hook observer hands it on, only SessionStart or the agent\'s own Stop latches', () => {
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /const wakeToken = provider === 'codex' && opts\.hive\?\.id \? WakeIncarnationTokens\.mint\(\) : null;\s*if \(wakeToken\) opts\.env = \{ \.\.\.\(opts\.env \?\? \{\}\), \[WAKE_INCARNATION_ENV\]: wakeToken \};\s*const res = await ptyManager\.spawn\(opts, owner\);/);
   assert.match(idx, /wakeIncarnationTokens\.register\(wakeToken, opts\.hive\.id, opts\.id, ptyManager\.incarnation\(opts\.id\)\)/);
-  assert.match(idx, /function onWakeIncarnation\(agentId: string, token: string\): void \{\s*const proven = wakeIncarnationTokens\.resolve\(token, agentId, [^\n]+\n\s*if \(proven\) automaticSubmit\.latchPostHandoff\(proven\.ptyId, proven\.incarnation\);/);
+  assert.match(idx, /function onWakeIncarnation\(agentId: string, token: string\): void \{\s*const proven = wakeIncarnationTokens\.resolve\(token, agentId, [^\n]+\n\s*if \(proven && automaticSubmit\.latchPostHandoff\(proven\.ptyId, proven\.incarnation\)\) screenGuardNotices\.latched\(agentId\);/);
   assert.match(idx, /\n\);\nhookServer\.setWakeIncarnationObserver\(onWakeIncarnation\);/, 'registered right after the HookServer is built');
   const hooks = readSource('src/main/hooks.ts');
-  assert.match(hooks, /if \(!fromSubagent && agentId && event === 'SessionStart' && typeof p\.munder_wake_incarnation === 'string' && p\.munder_wake_incarnation\) \{\s*try \{ this\.onWakeIncarnation\?\.\(agentId, p\.munder_wake_incarnation\.slice\(0, 80\)\); \}/, 'only the agent\'s own SessionStart hands the token on');
+  assert.match(hooks, /if \(!fromSubagent && agentId && \(event === 'SessionStart' \|\| event === 'Stop'\) && typeof p\.munder_wake_incarnation === 'string' && p\.munder_wake_incarnation\) \{\s*try \{ this\.onWakeIncarnation\?\.\(agentId, p\.munder_wake_incarnation\.slice\(0, 80\)\); \}/, 'only the agent\'s own SessionStart or Stop hands the token on (fix 1(b))');
 });
 
 // ─── The renderer answers with the shared reader ────────────────────────────────────────
@@ -960,6 +962,201 @@ test('renderer: a Codex request is answered by readCodexScreen over the whole bu
   assert.match(pool, /import \{ extractCodexScreen, type CodexScreenFacts \} from '@shared\/codexScreen';/);
   assert.match(pool, /const codex = extractCodexScreen\(\(i\) => buf\.getLine\(i\)\?\.translateToString\(true\), buf\.length, cursor\);/);
   assert.match(pool, /entry\.term\.write\('', \(\) => \{\s*const tail = [^\n]+\n\s*window\.cth\.answerScreenReading\(req\.requestId, req\.codex === true\s*\? readCodexScreen\(req\.ptyId, tail\)/);
+});
+
+// ─── WSG-CODEX-STARTUP-NO-MARKER (1.1.78): the latch deadlock (_work/WSG-NO-MARKER-177.md) ──
+
+/**
+ * Codex 0.157.1's resize replay. app/resize_reflow.rs:291-305 clears with
+ * custom_terminal.rs:557-568 (ESC[r ESC[0m ESC[H ESC[2J ESC[3J ESC[H; ESC[3J purges the
+ * scrollback), then replays the transcript capped to the newest rows
+ * (resize_reflow_cap.rs DEFAULT_TERMINAL_RESIZE_REFLOW_FALLBACK_MAX_ROWS = 1000, "oldest rows are
+ * dropped first"). In a long resumed session the session header is the OLDEST cell, so it is
+ * gone. This builds that buffer from the REAL resumed capture: its header box, a long
+ * transcript, its real composer and footer; then only the newest 1000 rows are kept.
+ *
+ * The footer's M3 status line (`<model> <effort> · <cwd>`) is configurable and never required;
+ * Dwight's footer did not show it (else M3 would have opened condition 1, WSG-NO-MARKER-177
+ * step 4). `statusLine: false` (the default here) removes it from the capture's footer, which is
+ * the Dwight state; `statusLine: true` keeps it.
+ */
+const REPLAY_CAP_ROWS = 1000;
+function purgedReplay(name = '4-resume-resumed-120x40', transcript = 1500, { statusLine = false } = {}) {
+  const fx = fixture(name);
+  const box = fx.lines.findIndex((l) => l.startsWith('\u2570'));
+  const rows = Array.from({ length: transcript }, (_, i) => `\u2022 transcript row ${i} of a long resumed session`);
+  const after = fx.lines.slice(box + 1);
+  const m3 = after.findIndex((l, i) => i > fx.cursorRow - box - 1 && l.includes(` \u00b7 ${CWD}`));
+  const tail = statusLine || m3 < 0 ? after : [...after.slice(0, m3), '', ...after.slice(m3 + 1)];
+  const full = [...fx.lines.slice(0, box + 1), ...rows, ...tail];
+  const drop = Math.max(0, full.length - REPLAY_CAP_ROWS);
+  return { lines: full.slice(drop), cursorRow: fx.cursorRow + rows.length - drop, hadStatusLine: m3 >= 0 };
+}
+const purgedFacts = (S = SHARED, opts = {}) => { const p = purgedReplay(undefined, undefined, opts); return S.extractCodexScreen((i) => p.lines[i], p.lines.length, p.cursorRow); };
+const withPrompt = (f, r) => (r.prompt ? { ...f, cursorRow: `\u203a ${r.prompt}` } : f);
+
+test('NO-MARKER fixture: the purged-and-replayed resumed screen has no header, condition 1 refuses it, and it IS the composer', () => {
+  const p = purgedReplay();
+  assert.equal(p.lines.length, REPLAY_CAP_ROWS, 'capped to the newest 1000 rows');
+  assert.ok(!p.lines.some((l) => l.startsWith('\u2502 >_ OpenAI Codex (v')), 'the session header box was the oldest cell: dropped');
+  const f = purgedFacts();
+  assert.equal(f.header, 'NONE');
+  assert.deepEqual(SHARED.codexPastStartup(f, CWD), { open: false, reason: 'no-marker' }, 'Dwight 19:35:47: startup:no-marker');
+  assert.equal(SHARED.classifyCodexComposer(f).cls, 'READY', 'and yet Codex is idle on its chat composer');
+  assert.equal(p.hadStatusLine, true, 'the capture footer had the M3 line; it was removed (Dwight\'s did not show one)');
+  assert.deepEqual(SHARED.codexPastStartup(purgedFacts(SHARED, { statusLine: true }), CWD), { open: true, reason: 'status-line' },
+    'with the M3 line kept, the same purge is still opened by M3 (why only footers without it were held)');
+});
+
+K.automaticWaitsForLatch = async (Owner) => {
+  const r = rig({}, Owner);
+  const purged = purgedFacts();
+  r.facts = () => withPrompt(purged, r);
+  for (const id of ['a1', 'a2', 'a3']) {
+    assert.deepEqual(await r.submit(id), { kind: 'REFUSED', reason: 'SCREEN_NOT_READY', detail: 'startup:no-marker' }, 'AUTOMATIC DELIVERY STILL WAITS FOR A LATCH on a header-less screen');
+  }
+  assert.equal(r.writes.length, 0);
+};
+test('the deadlock as shipped: a resized resumed Codex with no latch refuses every automatic delivery (nothing typed)', () => K.automaticWaitsForLatch());
+
+K.spawnReadingLatches = async (Owner) => {
+  const r = rig({ screen: '4-resume-resumed-120x40' }, Owner);
+  assert.equal(r.owner.startupProbeWanted('p1'), true, 'an un-latched Codex PTY wants a startup reading');
+  assert.equal(await r.settle(r.owner.observeStartup('p1')), true, 'THE READING RIGHT AFTER SPAWN LATCHES while the header is on screen');
+  assert.equal(r.writes.length, 0, 'a startup reading types nothing');
+  assert.equal(r.guard.length, 0, 'and is no gate evaluation (no refusal row, no alert run)');
+  assert.equal(r.owner.startupProbeWanted('p1'), false, 'latched: no more startup readings');
+  const purged = purgedFacts();
+  r.facts = () => withPrompt(purged, r);
+  assert.deepEqual(await r.submit('after-resize'), { kind: 'COMMITTED' }, 'a header seen at spawn still counts after Codex purges it');
+  r.incarnation = 2;
+  assert.equal(r.owner.startupProbeWanted('p1'), true, 'a respawn wants its own startup reading');
+};
+test('fix 1(a): a startup reading right after spawn latches condition 1; a later resize purge no longer holds delivery', () => K.spawnReadingLatches());
+
+test('fix 1(a): a startup reading latches nothing on a draft, a trust screen, a stale stamp, generation 0 or a non-Codex PTY', async () => {
+  for (const screen of DRAFTS) {
+    const r = rig({ screen });
+    assert.equal(await r.settle(r.owner.observeStartup('p1')), false, `${screen}: no latch`);
+    assert.equal(r.owner.postHandoffLatched('p1'), false);
+  }
+  const trust = rig();
+  const t = snap(TRUST_SNAPS[0]);
+  trust.facts = () => SHARED.extractCodexScreen((i) => t.lines[i], t.lines.length, t.cursorRow);
+  assert.equal(await trust.settle(trust.owner.observeStartup('p1')), false, 'the trust screen latches nothing');
+  const stale = rig({ stampIncarnation: 0 });
+  assert.equal(await stale.settle(stale.owner.observeStartup('p1')), false, 'a reading of an older incarnation latches nothing');
+  const blank = rig({ gen: 0 });
+  assert.equal(await blank.settle(blank.owner.observeStartup('p1')), false, 'N1: a reading that covers no output latches nothing');
+  const claude = rig({ provider: 'claude' });
+  assert.equal(claude.owner.startupProbeWanted('p1'), false, 'the guard is OFF for other providers: no startup readings');
+  assert.equal(await claude.settle(claude.owner.observeStartup('p1')), false);
+  assert.deepEqual(claude.reads, [], 'and no screen IPC');
+});
+
+/** A HookServer with only what the latch path needs. */
+function hookServer(Hook = HOOKS.HookServer) {
+  const hive = { sockPath: () => null, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {}, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {} };
+  const control = { shouldHalt: () => false, takeSteer: () => null, toolDecision: () => ({ deny: false }) };
+  return new Hook(hive, () => null, () => ({}), control, undefined, undefined, () => {});
+}
+
+K.turnEndLatches = async (Owner, Hook = HOOKS.HookServer) => {
+  const r = rig({}, Owner);
+  const purged = purgedFacts();
+  r.facts = () => withPrompt(purged, r);
+  assert.equal((await r.submit('before')).detail, 'startup:no-marker', 'resized before any reading: refused');
+  const tokens = new GUARD.WakeIncarnationTokens();
+  tokens.register('tok-6', 'dwight', 'p1', r.incarnation);
+  const server = hookServer(Hook);
+  server.setWakeIncarnationObserver((agentId, token) => {
+    const proven = tokens.resolve(token, agentId, { ptyForAgent: () => 'p1', incarnation: () => r.incarnation });
+    if (proven) r.owner.latchPostHandoff(proven.ptyId, proven.incarnation);
+  });
+  server.handle({ hook_event_name: 'Stop', agent_id: 'dwight', provider_agent_id: 'codex-sub-1', munder_wake_incarnation: 'tok-6' });
+  assert.equal(r.owner.postHandoffLatched('p1'), false, 'A SUBAGENT STOP LATCHES NOTHING');
+  server.handle({ hook_event_name: 'Stop', agent_id: 'dwight', munder_wake_incarnation: 'forged' });
+  assert.equal(r.owner.postHandoffLatched('p1'), false, 'an unknown token latches nothing');
+  server.handle({ hook_event_name: 'PreToolUse', agent_id: 'dwight', tool_name: 'shell', munder_wake_incarnation: 'tok-6' });
+  assert.equal(r.owner.postHandoffLatched('p1'), false, 'a tool hook is not a turn end');
+  server.handle({ hook_event_name: 'Stop', agent_id: 'dwight', turn_id: 't1', munder_wake_incarnation: 'tok-6' });
+  assert.equal(r.owner.postHandoffLatched('p1'), true, 'THE AGENT\'S OWN TURN END LATCHES ITS LIVE INCARNATION');
+  assert.deepEqual(await r.submit('after'), { kind: 'COMMITTED' }, 'and the held delivery goes through');
+};
+test('fix 1(b): the agent\'s own Stop (this incarnation\'s token) latches; a subagent Stop, a forged token or a tool hook do not', () => K.turnEndLatches());
+
+test('fix 1(a) scheduler: one reading per quiet period after output, none mid-burst, none once latched, one in flight', async () => {
+  const timers = [];
+  let wanted = true; const probes = []; let release;
+  const sp = new GUARD.StartupProbe({
+    wanted: () => wanted,
+    probe: (id) => { probes.push(id); return new Promise((res) => { release = res; }); },
+    setTimer: (fn, ms) => { const t = { fn, ms, live: true }; timers.push(t); return t; },
+    clearTimer: (t) => { t.live = false; }
+  }, 400);
+  const fire = () => { for (const t of timers.splice(0)) if (t.live) t.fn(); };
+  sp.output('p1'); sp.output('p1'); sp.output('p1');
+  assert.equal(timers.filter((t) => t.live).length, 1, 'a burst re-arms ONE settle timer');
+  assert.equal(timers.find((t) => t.live).ms, 400);
+  fire();
+  assert.deepEqual(probes, ['p1'], 'THE QUIET AFTER THE FIRST BURST TAKES A READING');
+  sp.output('p1'); fire();
+  assert.deepEqual(probes, ['p1'], 'never a second reading while one is in flight');
+  release(true); await new Promise((res) => setImmediate(res));
+  wanted = false;
+  sp.output('p1');
+  assert.equal(sp.pending, 0, 'latched (not wanted): output arms nothing');
+  wanted = true; sp.output('p2'); sp.cancel('p2');
+  assert.equal(sp.pending, 0, 'a gone PTY cancels its timer');
+});
+
+test('fix 1 wiring: every PTY chunk feeds the scheduler; it reads through the owner; latches lift the notice', () => {
+  const idx = readSource('src/main/index.ts');
+  assert.match(idx, /const startupProbe = new StartupProbe\(\{\s*wanted: \(ptyId\) => automaticSubmit\.startupProbeWanted\(ptyId\),\s*probe: \(ptyId\) => automaticSubmit\.observeStartup\(ptyId\)\.then\(\(latched\) => \{/);
+  assert.match(idx, /ptyManager\.setOutputObserver\(\(id\) => startupProbe\.output\(id\)\);/);
+  assert.match(idx, /if \(proven && automaticSubmit\.latchPostHandoff\(proven\.ptyId, proven\.incarnation\)\) screenGuardNotices\.latched\(agentId\);/);
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const pm = new PtyManager();
+  const seen = [];
+  pm.setOutputObserver((id) => seen.push([id, pm.outputGeneration(id)]));
+  const s = { id: 'p1', cwd: CWD, command: '', owner: null, lastOutputAt: 0, hasOutput: false, humanInputGeneration: 0, incarnation: 1, tail: '', proc: { write() {} } };
+  pm.sessions.set('p1', s);
+  pm.deliverData('p1', s, 'a');
+  pm.deliverData('p1', { ...s }, 'stale');
+  assert.deepEqual(seen, [['p1', 1]], 'told after the generation moved; a replaced process is not reported');
+});
+
+K.sendNowPassesNoMarker = async (Owner) => {
+  const r = rig({}, Owner);
+  const purged = purgedFacts();
+  r.facts = () => withPrompt(purged, r);
+  assert.deepEqual(await r.submit('s1', 'USER_RELEASED'), { kind: 'COMMITTED' }, 'A PERSON\'S SEND NOW PASSES THE HEADER-GONE HOLD when the composer is on screen');
+  assert.deepEqual(r.writes, [TEXT, '\r']);
+  assert.equal(r.owner.postHandoffLatched('p1'), false, 'a person\'s send latches nothing (the turn end will)');
+};
+test('fix 3: "send now" passes a startup:no-marker hold when the chat composer is on screen', () => K.sendNowPassesNoMarker());
+
+test('fix 3: "send now" still types NOTHING into a draft, a trust screen, or a header-less screen that is not the empty composer', async () => {
+  for (const screen of DRAFTS) {
+    const r = rig({ screen });
+    assert.equal((await r.submit('s', 'USER_RELEASED')).reason, 'SCREEN_NOT_READY', screen);
+    assert.equal(r.writes.length, 0, `${screen}: nothing typed`);
+  }
+  for (const file of TRUST_SNAPS) {
+    const r = rig();
+    const t = snap(file);
+    r.facts = () => SHARED.extractCodexScreen((i) => t.lines[i], t.lines.length, t.cursorRow);
+    assert.equal((await r.submit('s', 'USER_RELEASED')).reason, 'SCREEN_NOT_READY');
+    assert.equal(r.writes.length, 0, `${path.basename(file)}: SEND NOW NEVER TYPES INTO THE TRUST SCREEN`);
+  }
+  const r = rig();
+  const purged = purgedFacts();
+  r.facts = () => ({ ...purged, cursorRow: '\u203a half a human draft' });
+  assert.equal((await r.submit('s', 'USER_RELEASED')).reason, 'SCREEN_NOT_READY');
+  assert.equal(r.writes.length, 0, 'a human draft on a header-less screen: nothing typed');
+  assert.equal(OWNER.personPassesNoMarker('CAPACITY_GATED', 'no-marker', true), false, 'only a person');
+  assert.equal(OWNER.personPassesNoMarker('USER_RELEASED', 'header-loading', true), false, 'only no-marker');
+  assert.equal(OWNER.personPassesNoMarker('USER_RELEASED', 'no-marker', false), false, 'only on the exact composer');
 });
 
 // ─── Full path: reconcile -> requestInboxWake -> the REAL owner -> the PTY ──────────────
@@ -1033,7 +1230,7 @@ const MUTANTS = [
     edits: [["  if (s.screenGen !== undefined && deps.outputGeneration?.(s.ptyId) !== s.screenGen) return { kind: 'SCREEN_CHANGED' };\n", '']],
     killer: 'outputBeforeEnterHolds', dies: /OUTPUT AFTER THE POST-STAGE READING: NO ENTER/ },
   { name: 'the latch is per PTY, not per incarnation', file: 'src/main/automaticSubmit.ts',
-    edits: [['      else if (this.postHandoff.get(ptyId) !== incarnation) verdict', '      else if (!this.postHandoff.has(ptyId)) verdict']],
+    edits: [['      else if (this.postHandoff.get(ptyId) !== incarnation && !personPassesNoMarker(', '      else if (!this.postHandoff.has(ptyId) && !personPassesNoMarker(']],
     killer: 'latchIsPerIncarnation', dies: /A LATCH NEVER CROSSES A PTY INCARNATION/ },
   { name: 'the reader does not see `loading`', file: 'src/shared/codexScreen.ts',
     edits: [["header = model === 'loading' ? 'LOADING' : 'MODEL';", "header = 'MODEL';"]],
@@ -1106,6 +1303,22 @@ const MUTANTS = [
   { name: 'N-F1: residue on ONE reading held (no second reading)', file: 'src/main/automaticSubmit.ts',
     edits: [['        await this.sleep(SCREEN_COMMIT_RETRY_MS);\n        const residue = await residueNow();\n', '        const residue = await residueNow();\n']],
     killer: 'residueNeedsTwoReadings', dies: /A RESIDUE SEEN ON ONE READING ONLY IS NOT HELD/ },
+  // WSG-CODEX-STARTUP-NO-MARKER (1.1.78)
+  { name: 'NO-MARKER 1(a): the startup reading latches nothing', file: 'src/main/automaticSubmit.ts',
+    edits: [['    if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }', '    if (false) { this.postHandoff.set(ptyId, incarnation); return true; }']],
+    killer: 'spawnReadingLatches', dies: /THE READING RIGHT AFTER SPAWN LATCHES/ },
+  { name: 'NO-MARKER 1(b): only SessionStart latches (the turn end is ignored, as shipped)', file: 'src/main/hooks.ts', kind: 'hooks',
+    edits: [["(event === 'SessionStart' || event === 'Stop')", "event === 'SessionStart'"]],
+    killer: 'turnEndLatches', dies: /THE AGENT'S OWN TURN END LATCHES ITS LIVE INCARNATION/ },
+  { name: 'NO-MARKER 1(b) too wide: a subagent\'s Stop latches', file: 'src/main/hooks.ts', kind: 'hooks',
+    edits: [["if (!fromSubagent && agentId && (event === 'SessionStart' || event === 'Stop')", "if (agentId && (event === 'SessionStart' || event === 'Stop')"]],
+    killer: 'turnEndLatches', dies: /A SUBAGENT STOP LATCHES NOTHING/ },
+  { name: 'NO-MARKER 3: automatic starts pass no-marker too (no latch needed)', file: 'src/main/automaticSubmit.ts',
+    edits: [["  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;", "  return startupReason === 'no-marker' && composerExact;"]],
+    killer: 'automaticWaitsForLatch', dies: /AUTOMATIC DELIVERY STILL WAITS FOR A LATCH/ },
+  { name: 'NO-MARKER 3: no send-now pass (send now held like an automatic start, as shipped)', file: 'src/main/automaticSubmit.ts',
+    edits: [["  return cls === 'USER_RELEASED' && startupReason === 'no-marker' && composerExact;", '  return false;']],
+    killer: 'sendNowPassesNoMarker', dies: /A PERSON'S SEND NOW PASSES THE HEADER-GONE HOLD/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
@@ -1115,8 +1328,11 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async (tt) => {
         const mod = mutate(m.file, m.edits, `m${i}`);
-        const run = (arg) => (m.shared ? K[m.killer](arg) : K[m.killer](arg && arg.AutomaticSubmitOwner));
-        await run(m.shared ? SHARED : OWNER);      // the killer PASSES on the real module...
+        const kind = m.kind ?? (m.shared ? 'shared' : 'owner');
+        const run = (arg) => (kind === 'shared' ? K[m.killer](arg)
+          : kind === 'hooks' ? K[m.killer](undefined, arg && arg.HookServer)
+          : K[m.killer](arg && arg.AutomaticSubmitOwner));
+        await run(kind === 'shared' ? SHARED : kind === 'hooks' ? HOOKS : OWNER);      // the killer PASSES on the real module...
         let died = null;
         try { await run(mod); } catch (e) { died = e; }
         assert.ok(died, `SURVIVED: "${m.name}" was not killed by ${m.killer}`);

@@ -45,7 +45,7 @@ import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/in
 import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
-import { ScreenGuardAlertWatch, WakeIncarnationTokens, WAKE_INCARNATION_ENV } from './codexScreenGuard';
+import { ScreenGuardNotices, StartupProbe, WakeIncarnationTokens, WAKE_INCARNATION_ENV } from './codexScreenGuard';
 import type { ScreenGuardRecord } from './automaticSubmit';
 import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
@@ -725,7 +725,21 @@ const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expect
   ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true } : {}) }));
 // WAKE-SCREEN-GUARD: R2-4's per-incarnation tokens, and the F5 watch (codexScreenGuard.ts).
 const wakeIncarnationTokens = new WakeIncarnationTokens();
-const screenGuardAlerts = new ScreenGuardAlertWatch();
+// WSG-ALERT-NOT-DISMISSABLE: the alert is raised AND lifted here (an ok reading, a latch, a respawn).
+const screenGuardNotices = new ScreenGuardNotices({
+  raise: (a) => {
+    console.error(`[auto-submit] SCREEN GUARD ${a.agentId}: refused for ${Math.round(a.refusedMs / 60000)}m (${a.reason})`);
+    hive.mail.noteScreenGuardAlert(a.agentId, a.reason, a.refusedMs, a.refusals, agentDisplayName(a.agentId), Date.now());
+  },
+  clear: (agentId) => hive.mail.clearScreenGuardAlert(agentId)
+});
+/** The name a person knows the agent by, for the alert's wording. */
+function agentDisplayName(agentId: string): string {
+  try {
+    const name = hive.registry().agents[agentId]?.name;
+    return typeof name === 'string' && name.trim() ? name.trim() : agentId;
+  } catch { return agentId; }
+}
 const screenGuardLastReason = new Map<string, string>();
 /** One Codex screen-gate evaluation: a refusal row when the reason CHANGES for the agent (the
  *  wake beat repeats every refusal), and the alert when a run of refusals lasts. */
@@ -741,12 +755,9 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
       });
     }
     if (r.ok) screenGuardLastReason.delete(key); else screenGuardLastReason.set(key, r.reason);
-    // Only automatic starts are waited on; a boot prompt or send-now has its own caller.
-    if (r.admissionClass !== 'CAPACITY_GATED') return;
-    const alert = screenGuardAlerts.note(r.agentId, r.ok, r.reason, Date.now());
-    if (!alert) return;
-    console.error(`[auto-submit] SCREEN GUARD ${alert.agentId}: refused for ${Math.round(alert.refusedMs / 60000)}m (${alert.reason})`);
-    hive.mail.noteScreenGuardAlert(alert.agentId, alert.reason, alert.refusedMs, alert.refusals);
+    // Only automatic starts are waited on; a boot prompt or send-now has its own caller. Any
+    // admission lifts the hold and its notice.
+    screenGuardNotices.reading(r.agentId, r.ok, r.reason, r.admissionClass === 'CAPACITY_GATED', Date.now());
   } catch { /* diagnostics never decide */ }
 }
 const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
@@ -781,6 +792,19 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
     console.log(`[auto-submit] ${r.admissionClass} ${r.agentId} on ${r.ptyId ?? '-'}: ${r.outcome.kind} ${why}`);
   }
 }));
+// WSG-CODEX-STARTUP-NO-MARKER fix 1(a): read an un-latched Codex screen after each output burst
+// (the first burst draws the session header), so condition 1 latches while the header exists,
+// before a resize can erase it. Readings only add the latch; they never type or refuse.
+const startupProbe = new StartupProbe({
+  wanted: (ptyId) => automaticSubmit.startupProbeWanted(ptyId),
+  probe: (ptyId) => automaticSubmit.observeStartup(ptyId).then((latched) => {
+    const agentId = ptyToAgent.get(ptyId);
+    if (latched && agentId) screenGuardNotices.latched(agentId);
+  }),
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>)
+});
+ptyManager.setOutputObserver((id) => startupProbe.output(id));
 // Durable capacity observations (L0-TAIL). Restored BEFORE any live reading can
 // arrive, so ordering resolves naturally: every live observation is newer than the
 // one that crossed the restart and simply replaces it. `userData` is already the
@@ -908,7 +932,7 @@ control.setTransitionObserver((agentId, transition) => {
 // stale token does nothing.
 function onWakeIncarnation(agentId: string, token: string): void {
   const proven = wakeIncarnationTokens.resolve(token, agentId, { ptyForAgent: (a) => ptyForAgent(a), incarnation: (p) => ptyManager.incarnation(p) });
-  if (proven) automaticSubmit.latchPostHandoff(proven.ptyId, proven.incarnation);
+  if (proven && automaticSubmit.latchPostHandoff(proven.ptyId, proven.incarnation)) screenGuardNotices.latched(agentId);
 }
 const hookServer = new HookServer(
   hive,
@@ -4037,9 +4061,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const res = await ptyManager.spawn(opts, owner);
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
-    screenGuardAlerts.clear(opts.hive.id);
-    // Jim N3: a new process gets a new banner if it, too, is refused for minutes.
-    try { hive.mail.clearScreenGuardAlert(opts.hive.id); } catch { /* best-effort */ }
+    // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.
+    screenGuardNotices.respawned(opts.hive.id);
   }
   if (res.ok) analytics.track('agent_spawned', { provider });
   syncKeepAwake(); // arm the power-save blocker while ≥1 agent PTY is alive (#18)
@@ -5364,7 +5387,9 @@ ipcMain.handle('control:snapshot', (_evt, agentId: unknown) => {
   // Asked about once, pushed from then on (CRIT-15-PRE): the impact push serves this agent.
   impactWatched.add(agentId);
   const f = controlFactsOf(agentId);
-  return { ...f.snap, capacityHold: f.gate.holds, capacityEvidence: f.gate.evidence, interfered: f.interfered, impact: f.impact };
+  return { ...f.snap, capacityHold: f.gate.holds, capacityEvidence: f.gate.evidence, interfered: f.interfered, impact: f.impact,
+    // WSG fix 3: the Codex screen check is holding this agent's automatic deliveries.
+    screenHold: screenGuardNotices.hold(agentId, Date.now()) };
 });
 
 /** The snapshot's settled facts for one agent - the ONE computation behind both the
