@@ -56,6 +56,8 @@ import {
   type AgentProvider
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
+import { rosterActivity } from '../shared/activityView';
+import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
@@ -4405,9 +4407,15 @@ export class HiveManager {
           id: string; name?: string; role?: string; isGod?: boolean;
           breaker?: string; tokens?: number; usd?: number;
           lastTool?: string | null; lastActiveSecAgo?: number | null; inboxBacklog?: number;
-          onHold?: boolean;
+          onHold?: boolean; runningTool?: { name: string; forSec: number } | null;
         }>;
+        liveness?: LivenessV1[];
       };
+      // CARD-IDLE-WHILE-WORKING: each agent's WORKING / idle comes from its liveness record (a
+      // long tool call fires no hooks, so "active 9m ago" alone read as idle).
+      const lvById = new Map<string, LivenessV1>();
+      for (const r of Array.isArray(snap.liveness) ? snap.liveness : []) if (r && typeof r.agentId === 'string') lvById.set(r.agentId, r);
+      const nowMs = Date.now();
       const agents = Array.isArray(snap.agents) ? snap.agents : [];
       if (!agents.length) return null;
 
@@ -4424,7 +4432,8 @@ export class HiveManager {
       let anyCtx = false;
       let anyHold = false;
       const rows = shown.map((a) => {
-        const bits = [a.role ?? 'agent',
+        const state = rosterActivity(lvById.get(a.id), nowMs, a.runningTool);
+        const bits = [a.role ?? 'agent', ...(state ? [state] : []),
           typeof a.lastActiveSecAgo === 'number' ? `active ${ago(a.lastActiveSecAgo)}` : 'no activity yet'];
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);

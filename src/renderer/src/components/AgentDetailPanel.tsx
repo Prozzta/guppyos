@@ -20,6 +20,7 @@ import { AgentNameEditor } from './AgentNameEditor';
 import { useStore, type Agent } from '@/store/store';
 import { usePtyParser } from '@/hooks/usePtyParser';
 import { modelPinLabel, type ModelPinFields } from '@shared/modelPin';
+import { useActivity } from './useActivity';
 
 /** MODEL-PINBACK G3: the model main knows this agent runs (live, else launched, else pinned) and
  *  the pinned in-TUI switch, from the hive registry. Read-only; refreshed every 15 s. */
@@ -45,6 +46,8 @@ export interface AgentDetailPanelProps {
 }
 
 export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
+  // CARD-IDLE-WHILE-WORKING: busy-or-not from liveness, plus the tool in progress.
+  const activity = useActivity(agent.id, agent.status);
   const [openTerminalState, setOpenTerminalState] = useState<'idle' | 'opening' | 'ok' | 'error'>('idle');
   const [openTerminalError, setOpenTerminalError] = useState<string | undefined>();
   const [editOpen, setEditOpen] = useState(false);
@@ -185,11 +188,11 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
             display: 'flex', gap: 6, alignItems: 'center', marginTop: 1,
             minWidth: 0, overflow: 'hidden'
           }}>
-            <PixelBadge status={agent.status} />
+            <PixelBadge status={activity.status} />
             <span style={{
               fontSize: 12, color: 'var(--cth-ink-500)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-            }}>{agent.project}</span>
+            }}>{activity.toolText ?? agent.project}</span>
             {runModel.model && (
               <span
                 data-testid="agent-effective-model"

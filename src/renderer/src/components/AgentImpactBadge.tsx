@@ -7,6 +7,7 @@ import type { CSSProperties } from 'react';
 import { PixelBadge, type StatusKind } from './PixelBadge';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
+import { useActivity } from './useActivity';
 
 export function AgentImpactBadge({ agentId, status, showText = false, style }: {
   agentId: string;
@@ -14,14 +15,17 @@ export function AgentImpactBadge({ agentId, status, showText = false, style }: {
   showText?: boolean;
   style?: CSSProperties;
 }) {
-  const view = impactBadge(status, useAgentImpact(agentId));
+  // CARD-IDLE-WHILE-WORKING: busy-or-not from liveness (the breaker's 'looping' pin is kept).
+  const activity = useActivity(agentId, status);
+  const view = impactBadge(activity.status, useAgentImpact(agentId));
+  const text = view.impactText ?? activity.toolText;
   return (
     <>
       <PixelBadge status={view.status} label={view.label} style={style} />
-      {showText && view.impactText && (
+      {showText && text && (
         <span data-agent-impact="" style={{
           fontSize: 11, color: 'var(--cth-ink-700)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0
-        }}>{view.impactText}</span>
+        }}>{text}</span>
       )}
     </>
   );

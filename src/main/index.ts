@@ -2129,6 +2129,12 @@ function fleetMail(id: string): Partial<ReturnType<typeof fleetMailFields>> & { 
 /** Build + write the live fleet snapshot Michael reads (`<hive>/fleet.json`).
  *  Always-on (independent of the heartbeat) since `claude agents` can't see the
  *  hive's sibling sessions. PII-free; never throws (called from a timer). */
+/** CARD-IDLE-WHILE-WORKING: fleet.json's view of an agent's tool call in progress. */
+function runningToolFor(agentId: string, now: number): { name: string; forSec: number } | null {
+  const t = hookServer.runningTool(agentId);
+  return t ? { name: t.name, forSec: Math.max(0, Math.round((now - t.since) / 1000)) } : null;
+}
+
 function writeFleetSnapshot(): void {
   if (!hive.enabled()) return;
   try {
@@ -2161,6 +2167,8 @@ function writeFleetSnapshot(): void {
           sessionUsd,
           lastTool: spans.length ? spans[spans.length - 1].tool : null,
           lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
+          // CARD-IDLE-WHILE-WORKING: the tool call in progress (a long one fires no hooks).
+          runningTool: runningToolFor(id, now),
           // ZT-I1-MAIL §3 #6: inboxBacklog (not acted), awaitingReply[] (§4.3) and
           // openRequests[] (§11.13 option B), all from the ledger. Zero-token: data only.
           ...fleetMail(id),

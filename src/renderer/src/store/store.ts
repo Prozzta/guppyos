@@ -14,6 +14,9 @@ import {
 } from '@shared/hireQueue';
 import { DEFAULT_ORG_TRIGGER, type OrgTriggerConfig, type WebhookTrigger } from '@shared/triggers';
 import { isCompactionCommand } from '@shared/providerAutomation';
+import type { RunningTool } from '@shared/activityView';
+import type { LivenessV1 } from '@shared/livenessV1';
+import { applyLivenessUpdate } from '@shared/livenessView';
 import { preferredAgentRole } from '@shared/agentRole';
 import { isInboxNudge } from '@shared/hiveNudge';
 import { refocusAfterRemoval, focusOnLoad, restoreFocus } from './focusMode';
@@ -55,6 +58,9 @@ export interface Agent {
   /** User-authored private note shown and edited from the roster-card hover. */
   note?: string;
   status: StatusKind;
+  /** CARD-IDLE-WHILE-WORKING (1.1.78): the tool call in progress (from PreToolUse until its
+   *  PostToolUse / the turn's end). Run-state: never persisted. */
+  runningTool?: RunningTool;
   action: string;
   progress: number;
   currentStation?: StationKind;
@@ -206,6 +212,10 @@ interface State {
    *  shown in the command center (interactive sessions don't expose billed $). */
   toolCounts: Record<string, number>;
   bumpToolCount: (id: string) => void;
+  /** CARD-IDLE-WHILE-WORKING: main's zero-token liveness records, by agent. Every working/idle
+   *  display reads its busy-or-not from here (shared/activityView.ts). */
+  liveness: Record<string, LivenessV1>;
+  applyLiveness: (rec: LivenessV1) => void;
   setGodStatus: (status: GodStatus) => void;
   select: (id: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
@@ -416,8 +426,8 @@ try {
 } catch { /* not a browser context (unit tests) */ }
 
 function slimAgents(agents: Agent[]): PersistedAgent[] {
-  return agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, seedPrompt, ...rest }) => {
-    void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit; void seedPrompt;
+  return agents.map(({ recentAssistantText, recentTextTs, blockReason, contextTokens, contextLimit, seedPrompt, runningTool, ...rest }) => {
+    void recentAssistantText; void recentTextTs; void blockReason; void contextTokens; void contextLimit; void seedPrompt; void runningTool;
     return rest;
   });
 }
@@ -440,7 +450,7 @@ function persistAgents(agents: Agent[], selectedId: string | null): void {
 const VOLATILE_AGENT_FIELDS = new Set<keyof Agent>([
   'status', 'action', 'progress', 'currentStation', 'carrying',
   'recentAssistantText', 'recentTextTs', 'blockReason',
-  'contextTokens', 'contextLimit', 'lastPrompt'
+  'contextTokens', 'contextLimit', 'lastPrompt', 'runningTool'
 ]);
 
 function touchesDurableAgentField(patch: Partial<Agent>): boolean {
@@ -658,6 +668,11 @@ export const useStore = create<State>((set, get) => ({
   godStatus: 'booting',
   messageQueues: initialQueues,
   toolCounts: {},
+  liveness: {},
+  applyLiveness: (rec) => set((s) => {
+    const liveness = applyLivenessUpdate(s.liveness, rec);
+    return liveness === s.liveness ? s : { liveness };
+  }),
   bumpToolCount: (id) =>
     set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),
   setGodStatus: (status) => set({ godStatus: status }),
