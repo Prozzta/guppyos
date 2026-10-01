@@ -89,6 +89,13 @@ const broker = new ScreenReadingBroker((ptyId, requestId, needle) => {
   return true;
 });
 
+/** CPR-ARM-176: a CPR reply the real xterm sent while its PTY is in `parkCpr` is held here, with the
+ *  origin the production classifier gave it, instead of reaching the accounting. The cpr arm then
+ *  delivers it through the same entry point (window.cth.writePty) at a point it chooses. */
+const CPR_REPLY = /^\x1b\[\d+;\d+R$/;
+const parkCpr = new Set<string>();
+const parkedCpr = new Map<string, { data: string; origin: string }[]>();
+
 function installBridgeStub(): void {
   const unsub = () => () => { /* nothing subscribed */ };
   window.cth = {
@@ -96,6 +103,10 @@ function installBridgeStub(): void {
     onPtyExit: unsub(), onPtyRelaunch: unsub(),
     // `pty.ts`'s accounting, restated (see the header): HUMAN advances the generation.
     writePty: (id: string, data: string, origin: string) => {
+      if (parkCpr.has(id) && CPR_REPLY.test(data)) {
+        parkedCpr.set(id, [...(parkedCpr.get(id) ?? []), { data, origin }]);
+        return Promise.resolve({ ok: true });
+      }
       const p = pty(id);
       p.log.push({ via: 'BRIDGE', data, origin });
       if (origin === 'HUMAN') { p.generation += 1; p.lastHumanInputAt = Date.now(); }
@@ -215,14 +226,28 @@ window.__harnessRun = async () => {
     }
 
     // ── cpr: A CURSOR-POSITION REPLY IN THE GAP is the terminal talking, not a person. ─
+    // CPR-ARM-176: the ordering is made certain, not raced against renderer latency (the 1.1.76
+    // gate: under load the round trip missed the real 140 ms gap). The REAL xterm answers a DSR
+    // first, and its reply, classified by the production inputOrigin, is parked at the bridge.
+    // The payload write releases it in a MICROTASK, so it reaches the accounting after the owner's
+    // post-stage baseline (taken in the same turn as the write) and before any timer, the gap's
+    // included: payload, baseline, reply, Enter, every time. A HUMAN-classified reply delivered
+    // there would move the generation past the baseline and INTERFERE, as int's key does.
     {
       const t = await open('cpr');
-      pty('cpr').tui.onPayload = () => { setTimeout(() => pty('cpr').tui.emit('\x1b[6n'), 30); };
+      parkCpr.add('cpr');
+      pty('cpr').tui.emit('\x1b[6n');
+      const replied = await until(() => (parkedCpr.get('cpr') ?? []).length > 0, MIRROR_DEADLINE_MS);
+      parkCpr.delete('cpr');
+      const parked = (parkedCpr.get('cpr') ?? []).slice();
+      result.cprRoundTrip = { replied, replies: parked };
+      const writePty = window.cth.writePty as (id: string, data: string, origin: string) => Promise<unknown>;
+      pty('cpr').tui.onPayload = () => { queueMicrotask(() => { for (const r of parked) void writePty('cpr', r.data, r.origin); }); };
       const outcome = await submit('cpr', 'r-cpr', 'cpr message three');
       const log = pty('cpr').log;
       const payloadAt = log.findIndex((e) => e.via === 'OWNER' && e.data.includes('cpr message three'));
       const enterAt = log.findIndex((e) => e.via === 'OWNER' && e.data === '\r');
-      const replyAt = log.findIndex((e) => e.via === 'BRIDGE' && /^\x1b\[\d+;\d+R$/.test(e.data));
+      const replyAt = log.findIndex((e) => e.via === 'BRIDGE' && CPR_REPLY.test(e.data));
       result.cpr = { ready: t.ready, outcome, payloadAt, replyAt, enterAt, replyOrigin: replyAt >= 0 ? log[replyAt].origin : null,
         submitted: pty('cpr').tui.submitted, generation: pty('cpr').generation };
     }
