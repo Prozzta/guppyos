@@ -27,12 +27,64 @@ export function commandFromToolInput(input: unknown): string | null {
   return typeof v === 'string' ? v : null;
 }
 
-/** Split a command line into words, honouring simple quotes (not a full shell parser). */
+/**
+ * HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): the index just past the `)` that closes the command
+ * substitution `$(` at `i` (nested, quote-aware), or the end. A substitution is ONE opaque piece of
+ * a word: `PATH="$(echo "$PATH" | tr : '\n' | grep -v x)" node test/tools/run-tests.cjs` used to be
+ * split on the pipes inside it, and the suite after it was never seen (a full suite ran unlocked).
+ */
+function substEnd(s: string, i: number): number {
+  let depth = 0;
+  let q: string | null = null;
+  for (let j = i + 1; j < s.length; j++) {
+    const c = s[j];
+    if (q === "'") { if (c === "'") q = null; continue; }
+    if (c === '\\') { j += 1; continue; }
+    if (q === '"') {
+      if (c === '"') q = null;
+      else if (c === '$' && s[j + 1] === '(') { j = substEnd(s, j) - 1; }
+      continue;
+    }
+    if (c === '"' || c === "'") { q = c; continue; }
+    if (c === '(') depth += 1;
+    else if (c === ')' && --depth === 0) return j + 1;
+  }
+  return s.length;
+}
+
+/**
+ * Split a command line into words, honouring simple quotes (not a full shell parser). The same
+ * reading as before 1.1.77 (a word that STARTS with a quote is that quoted text; a quote inside a
+ * word is a plain character), plus one thing: a `$(...)` is opaque, spaces and quotes included.
+ */
 function words(s: string): string[] {
   const out: string[] = [];
-  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s))) out.push(m[1] ?? m[2] ?? m[3]);
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === '"') {
+      let w = '';
+      let j = i + 1;
+      while (j < s.length && s[j] !== '"') {
+        if (s[j] === '\\' && j + 1 < s.length) { w += s[j] + s[j + 1]; j += 2; continue; }
+        if (s[j] === '$' && s[j + 1] === '(') { const e = substEnd(s, j); w += s.slice(j, e); j = e; continue; }
+        w += s[j]; j++;
+      }
+      if (j < s.length) { out.push(w); i = j + 1; continue; }
+      // Unclosed: as the old regex, a plain non-space word starting AT the quote (read below).
+    }
+    if (c === "'") {
+      const j = s.indexOf("'", i + 1);
+      if (j >= 0) { out.push(s.slice(i + 1, j)); i = j + 1; continue; }
+    }
+    let w = '';
+    while (i < s.length && !/\s/.test(s[i])) {
+      if (s[i] === '$' && s[i + 1] === '(') { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
+      w += s[i]; i++;
+    }
+    out.push(w);
+  }
   return out;
 }
 
@@ -96,6 +148,8 @@ function segments(cmd: string): string[] {
   let cur = ''; let q: string | null = null;
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
+    // HEAVY-JOB-LOCK-FAILOPEN: a command substitution is opaque (its pipes and quotes are its own).
+    if (q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
     if (q) { cur += c; if (c === q && cmd[i - 1] !== '\\') q = null; continue; }
     if (c === '"' || c === "'") { q = c; cur += c; continue; }
     // HEAVY-CLASSIFIER-EDGES N2: an unquoted `#` at a word start comments out the rest of the line
@@ -116,6 +170,8 @@ function segments(cmd: string): string[] {
 }
 
 const WRAPPERS = new Set(['bash', 'sh', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bash.exe']);
+/** The binaries a wrapper script can be asked to run (`node clean-run.cjs <bin> ...`). */
+const WRAPPED_BINS = new Set(['node', 'npm', 'npx', 'pnpm', 'yarn', 'electron', 'electron-builder', 'electron-rebuild', 'node-gyp', 'vitest', 'env', 'timeout', 'nice']);
 const BENCH_SCRIPT = /(mutant|mutation|replay|bench|backfill|parity|speed|stress|soak)[^\\/]*\.(c?m?js|ts)$/i;
 export const SUITE_MANY_FILES = 20;
 /** A whole-suite runner script (heavy when run with no filter). */
@@ -206,16 +262,47 @@ function classifyWords(ws0: string[], depth: number): HeavyClass {
       const rest = args.slice(args.indexOf(script) + 1).filter((a) => !a.startsWith('-'));
       if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${script.replace(/\\/g, '/').split('/').pop()} (no filter)` };
     }
+    // HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): a wrapper SCRIPT that runs the command after it
+    // (`node clean-run.cjs node test/tools/run-tests.cjs`): that command is classified too.
+    if (script && depth < 2) {
+      const after = args.slice(args.indexOf(script) + 1);
+      const head = after[0]?.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.(exe|cmd)$/, '') ?? '';
+      if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1);
+    }
     return { heavy: false };
   }
   return { heavy: false };
 }
 
-/** Classify a command line: heavy if ANY segment it runs is heavy. */
+/** The inner text of every top-level `$(...)` outside single quotes (each one RUNS its command). */
+function substitutions(cmd: string): string[] {
+  const out: string[] = [];
+  let q: string | null = null;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (q === "'") { if (c === "'") q = null; continue; }
+    if (c === '\\') { i++; continue; }
+    if (c === '$' && cmd[i + 1] === '(' && cmd[i + 2] !== '(') { const e = substEnd(cmd, i); out.push(cmd.slice(i + 2, Math.max(i + 2, e - 1))); i = e - 1; continue; }
+    if (c === '"') q = q === '"' ? null : '"';
+    else if (c === "'" && q === null) q = "'";
+  }
+  return out;
+}
+
+/** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
 export function classifyCommand(cmd: string, depth = 0): HeavyClass {
-  for (const seg of segments(stripHeredocs(cmd))) {
+  const text = stripHeredocs(cmd);
+  for (const seg of segments(text)) {
     const c = classifyWords(stripRedirects(words(seg.replace(/\s&$/, ''))), depth);
     if (c.heavy) return c;
+  }
+  // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
+  // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite.
+  if (depth < 3) {
+    for (const inner of substitutions(text)) {
+      const c = classifyCommand(inner, depth + 1);
+      if (c.heavy) return c;
+    }
   }
   return { heavy: false };
 }
@@ -260,7 +347,17 @@ export interface HeavyHolder {
   seenRunning: boolean;
   /** pid -> createdMs of this holder's job processes seen on earlier scans (Jim: orphans stay attributed). */
   attributed: Map<number, number>;
+  /** HEAVY-JOB-LOCK-FAILOPEN (b): when each heavy CALL ran (PreToolUse to PostToolUse; end null =
+   *  still running). Only processes created inside one of these (or their descendants) are the job:
+   *  a later, unrelated call of the same agent (a wait-for-release loop) never holds the slot. */
+  windows: Array<{ callId: string; start: number; end: number | null }>;
+  /** The last process check for this holder: 'ok', or 'failed' (the listing failed; kept, fail closed). */
+  lastProbe: 'ok' | 'failed' | null;
 }
+
+/** A process created this long after its call's PostToolUse still belongs to the call (a
+ *  backgrounded job's processes start as its call returns). */
+export const HEAVY_CALL_SLACK_MS = 3_000;
 
 /** One process of the listing. `createdMs` (epoch ms) is what the watcher judges by (Jim MF3). */
 export interface ProcRow { pid: number; parentPid: number; commandLine: string; createdMs?: number }
@@ -297,10 +394,16 @@ export class HeavyJobLock {
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
   }
 
-  /** The current holders (fleet.json, the deny text, tests). Expired ones are released first. */
-  snapshot(): Array<{ agentId: string; kind: HeavyKind; command: string; since: string; background: boolean }> {
+  /** The current holders (fleet.json, the deny text, tests). Expired ones are released first.
+   *  HEAVY-JOB-LOCK-FAILOPEN: with how long each has held the slot and what keeps it (so agents read
+   *  fleet.json instead of polling the log). */
+  snapshot(): Array<{ agentId: string; kind: HeavyKind; command: string; since: string; heldMs: number; background: boolean; openCalls: number; seenRunning: boolean; lastProbe: 'ok' | 'failed' | null }> {
     this.expire();
-    return [...this.holders.values()].map((h) => ({ agentId: h.agentId, kind: h.kind, command: h.command, since: new Date(h.since).toISOString(), background: h.background }));
+    const t = this.now();
+    return [...this.holders.values()].map((h) => ({
+      agentId: h.agentId, kind: h.kind, command: h.command, since: new Date(h.since).toISOString(), heldMs: t - h.since,
+      background: h.background, openCalls: h.calls.size, seenRunning: h.seenRunning, lastProbe: h.lastProbe
+    }));
   }
 
   /** PreToolUse: a heavy call from `agentId`. Take a slot, share the agent's own, or deny. */
@@ -314,6 +417,7 @@ export class HeavyJobLock {
     if (mine) {
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
       mine.calls.add(callId); mine.background = mine.background || background; mine.touched = this.now(); mine.misses = 0;
+      mine.windows.push({ callId, start: this.now(), end: null });
       this.log({ kind: 'heavy-lock', action: 'reenter', agentId, heavyKind: cls.kind, command: command.slice(0, 200) });
       this.arm();
       return { allow: true, acquired: false };
@@ -326,7 +430,7 @@ export class HeavyJobLock {
       this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: cls.kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit });
       return { allow: false, reason, holders };
     }
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, misses: 0, seenRunning: false, attributed: new Map() });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit });
     this.arm();
     return { allow: true, acquired: true };
@@ -337,6 +441,9 @@ export class HeavyJobLock {
   callDone(agentId: string, callId: string): void {
     const h = this.holders.get(agentId);
     if (!h || !h.calls.delete(callId)) return;
+    // (b) The call's window closes now: what it started from here on is no longer this job.
+    const end = this.now();
+    for (const w of h.windows) if (w.callId === callId && w.end === null) w.end = end;
     if (h.calls.size || h.background) return;
     // Jim N2: a foreground call can return (a timeout, a detached child) while its heavy job
     // lives on. ONE quick descendant check before releasing: a heavy child keeps the slot and
@@ -346,6 +453,10 @@ export class HeavyJobLock {
         const cur = this.holders.get(agentId);
         if (!cur || cur.calls.size || cur.background) return;
         if (busy?.busy.has(agentId)) { cur.background = true; cur.seenRunning = true; this.log({ kind: 'heavy-lock', action: 'orphan-kept', agentId, heavyKind: cur.kind }); this.arm(); return; }
+        // (a) FAIL CLOSED: a failed listing says nothing about the job (most likely a TIMEOUT on a
+        // loaded machine, i.e. exactly when a second heavy job hurts most). Keep the slot as a
+        // background holder; the watcher frees it on two clean scans without it, or the TTL.
+        if (!busy) { cur.background = true; cur.lastProbe = 'failed'; this.log({ kind: 'heavy-lock', action: 'probe-failed-kept', agentId, heavyKind: cur.kind }); this.arm(); return; }
         this.release(agentId, 'posttool');
       });
       return;
@@ -368,6 +479,7 @@ export class HeavyJobLock {
     // the machine) is UNKNOWN, never "nothing running": the caller counts no miss.
     if (!procs || !procs.length || !procs.some((p) => typeof p.createdMs === 'number')) {
       this.log({ kind: 'heavy-lock', action: 'probe-failed', rows: procs ? procs.length : null });
+      for (const h of this.holders.values()) h.lastProbe = 'failed';
       return null;
     }
     const byPid = new Map(procs.map((p) => [p.pid, p]));
@@ -387,12 +499,33 @@ export class HeavyJobLock {
     const busy = new Set<string>();
     // The holders whose PTY root IS in this listing: only for them may an absence count as a miss.
     const rootsSeen = new Set<string>(procs.flatMap((p) => { const a = rootOf.get(p.pid); return a ? [a] : []; }));
+    // (b) HEAVY-JOB-LOCK-FAILOPEN: a process is the holder's JOB only when it, or an ancestor below
+    // the PTY root, was CREATED inside one of the holder's heavy-call windows. Creed's own
+    // wait-for-release loop (a later call) used to keep his slot for ~5 min: any descendant created
+    // after the acquire counted.
+    const t = this.now();
+    const inWindow = (h: HeavyHolder, created: number | undefined): boolean => typeof created === 'number'
+      && h.windows.some((w) => created >= w.start - HEAVY_CREATED_SKEW_MS && created <= (w.end ?? t) + HEAVY_CALL_SLACK_MS);
+    const ofJob = (h: HeavyHolder, pid: number): boolean => {
+      const seen = new Set<number>();
+      let cur = byPid.get(pid);
+      while (cur && !seen.has(cur.pid) && !rootOf.has(cur.pid)) {
+        if (inWindow(h, cur.createdMs)) return true;
+        seen.add(cur.pid);
+        const up = byPid.get(cur.parentPid);
+        // Jim (PID reuse): a "parent" created after its child is not its parent.
+        if (up && typeof up.createdMs === 'number' && typeof cur.createdMs === 'number' && up.createdMs > cur.createdMs) return false;
+        cur = up;
+      }
+      return false;
+    };
     for (const p of procs) {
       if (typeof p.createdMs !== 'number') continue;
       const a = ownerOf(p.pid);
       const h = a ? this.holders.get(a) : undefined;
-      if (h && p.createdMs >= h.since - HEAVY_CREATED_SKEW_MS) { busy.add(h.agentId); h.attributed.set(p.pid, p.createdMs); }
+      if (h && p.createdMs >= h.since - HEAVY_CREATED_SKEW_MS && ofJob(h, p.pid)) { busy.add(h.agentId); h.attributed.set(p.pid, p.createdMs); }
     }
+    for (const h of this.holders.values()) h.lastProbe = 'ok';
     // Jim (orphans): a job detached with & / nohup whose shell has exited loses its parent chain.
     // A pid attributed to a holder on an earlier scan still counts while it persists with the SAME
     // creation time (a reused pid has another); pids no longer listed are forgotten.

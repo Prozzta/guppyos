@@ -16,7 +16,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, rmSync, statSync } from 'node:fs';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
+import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
 import { DEV_HIDDEN } from './devIsolation';
@@ -25,7 +25,7 @@ import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
-import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, rebuildToolHook } from './codexHookMcp';
+import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, pendingExecCommands, rebuildToolHook } from './codexHookMcp';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
@@ -136,6 +136,9 @@ interface HookPayload {
   /** HOOK-BROKER P3: the rollout did not (yet) hold this tool hook's item, so tool_name /
    *  tool_input are missing. The tool gate fails closed if a gate is active; the breaker skips it. */
   payload_degraded?: boolean;
+  /** HEAVY-JOB-LOCK-FAILOPEN (c): a DEGRADED Codex PreToolUse's pending shell commands, read from the
+   *  rollout for the heavy-job classifier ONLY (never a tool name for a gate). */
+  codex_commands?: string[];
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
@@ -709,11 +712,13 @@ export class HookServer {
     const threadId = typeof meta.threadId === 'string' ? meta.threadId : '';
     const home = this.hive.codexHomeFor(agentId);
     const file = home && threadId ? this.threadRollouts.find(home, threadId) : null;
-    let rebuilt = file ? rebuildToolHook(this.threadRollouts.tail(file), event) : { degraded: true } as ReturnType<typeof rebuildToolHook>;
+    let tail = file ? this.threadRollouts.tail(file) : '';
+    let rebuilt = file ? rebuildToolHook(tail, event) : { degraded: true } as ReturnType<typeof rebuildToolHook>;
     if (rebuilt.degraded && file) {
       // The spike saw the pending call land ~25 ms before PreToolUse; allow for a slower write.
       await new Promise((r) => setTimeout(r, MCP_ROLLOUT_RETRY_MS));
-      rebuilt = rebuildToolHook(this.threadRollouts.tail(file), event);
+      tail = this.threadRollouts.tail(file);
+      rebuilt = rebuildToolHook(tail, event);
     }
     const p: HookPayload = { hook_event_name: event, agent_id: agentId };
     if (threadId) p.session_id = threadId;
@@ -723,6 +728,12 @@ export class HookServer {
     if (rebuilt.toolInput !== undefined) p.tool_input = rebuilt.toolInput;
     if (rebuilt.toolResponse !== undefined) p.tool_response = rebuilt.toolResponse;
     if (rebuilt.degraded) p.payload_degraded = true;
+    // HEAVY-JOB-LOCK-FAILOPEN (c): a still-degraded PreToolUse carries the pending shell commands,
+    // so the heavy-job lock can classify what is about to run (gates still see it as degraded).
+    if (rebuilt.degraded && event === 'PreToolUse' && tail) {
+      const hint = pendingExecCommands(tail);
+      if (hint.commands.length) p.codex_commands = hint.commands;
+    }
     // A Codex SUBAGENT runs on its own thread: a thread other than the agent's recorded main
     // session is attributed to the agent but kept out of its session/transcript/lifecycle
     // (the 9082b05c split). With no recorded session yet, it is the agent's own.
@@ -1735,15 +1746,24 @@ export class HookServer {
     if (event === 'PreToolUse' && agentId && this.heavyLock) {
       // Jim N1: a DEGRADED Codex hook (rebuilt from the rollout tail) may carry no tool input:
       // it cannot be classified, so it is allowed and logged.
+      let cls = classifyHeavy(p.tool_name, p.tool_input);
+      let command = commandFromToolInput(p.tool_input) ?? '';
+      let callId = HookServer.heavyCallId(p);
       if (p.payload_degraded === true && commandFromToolInput(p.tool_input) === null) {
-        try { this.hive.appendLog({ kind: 'heavy-lock', action: 'degraded', agentId, tool: p.tool_name ?? null }); } catch { /* best effort */ }
+        // HEAVY-JOB-LOCK-FAILOPEN (c): classify the pending commands the rollout shows (any heavy
+        // one takes the slot); only a call with nothing readable is still let through unclassified.
+        const hints = Array.isArray(p.codex_commands) ? p.codex_commands.filter((c): c is string => typeof c === 'string') : [];
+        for (const c of hints) {
+          const k = classifyCommand(c);
+          if (k.heavy) { cls = k; command = c; callId = `cmd:${c.slice(0, 500)}`; break; }
+        }
+        try { this.hive.appendLog({ kind: 'heavy-lock', action: 'degraded', agentId, tool: p.tool_name ?? null, hinted: hints.length, heavy: cls.heavy }); } catch { /* best effort */ }
       }
-      const cls = classifyHeavy(p.tool_name, p.tool_input);
       if (cls.heavy) {
         // A call whose PostToolUse may not pair back (Codex's mcp hooks can arrive degraded) is
         // freed like a background one: by the process check, PTY exit or the TTL (Jim N1).
         const unpaired = p.transport === 'mcp' || p.payload_degraded === true;
-        const d = this.heavyLock.acquire(agentId, cls, commandFromToolInput(p.tool_input) ?? '', HookServer.heavyCallId(p), isBackground(p.tool_input) || unpaired);
+        const d = this.heavyLock.acquire(agentId, cls, command, callId, isBackground(p.tool_input) || unpaired);
         if (!d.allow) {
           this.emitControl(agentId, p.tool_name, d.reason);
           this.emit(agentId, event, p);
