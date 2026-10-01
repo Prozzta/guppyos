@@ -61,6 +61,8 @@ class FakeAgent {
     // A new incarnation (respawn) starts at the END of the control file: old cues were for the old one.
     try { this.controlOffset = fs.statSync(this.controlFile).size; } catch { this.controlOffset = 0; }
     this.draft = '';
+    this.echoSeq = 0;           // RIG-DESYNC: the composer as of each echo (see onInput)
+    this.shown = [{ seq: 0, draft: '' }];
     this.inPaste = false;
     this.turn = null;           // { id, prompt, startedAt, mode }
     this.queue = Promise.resolve();
@@ -82,7 +84,7 @@ class FakeAgent {
   writeComposer() {
     try {
       const tmp = `${this.composerFile}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending }));
+      fs.writeFileSync(tmp, JSON.stringify({ draft: this.draft, t: now(), busy: !!this.turn, pending: this.pending, shown: this.shown }));
       fs.renameSync(tmp, this.composerFile);
     } catch { /* best effort */ }
   }
@@ -194,8 +196,18 @@ class FakeAgent {
       if (ch < ' ' && ch !== '\t') continue;
       this.draft += ch;
     }
+    // RIG-DESYNC (rc/1.1.76 gate #2): the composer state as of THIS echo, and the echo carries its
+    // number (an OSC 0 title, which the host's output stream sees). The rig host shows the draft
+    // of the newest echo it has RECEIVED, as a terminal shows only the bytes it has applied.
+    this.echoSeq += 1;
+    this.shown.push({ seq: this.echoSeq, draft: this.draft });
+    if (this.shown.length > 64) this.shown.shift();
     this.writeComposer();
-    this.out(`\r\x1b[K> ${this.draft.split('\n').pop()}`);
+    const echo = `\x1b]0;rig-echo-${this.echoSeq}\x07\r\x1b[K> ${this.draft.split('\n').pop()}`;
+    // RIG-DESYNC probe seam: scenario.echoGapMs puts a gap between the composer state (what the
+    // rig's screen reading sees) and the echo bytes that carry it to the host.
+    const gap = Number(this.scenario.echoGapMs) || 0;
+    if (gap > 0) setTimeout(() => this.out(echo), gap); else this.out(echo);
   }
 
   submit() {
