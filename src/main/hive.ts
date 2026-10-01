@@ -2993,10 +2993,25 @@ export class HiveManager {
         try {
           if (!partial || typeof partial !== 'object') throw new Error('unroutable: message must be an object');
           if (partial.to !== undefined && typeof partial.to !== 'string') throw new Error('unroutable: to must be a string');
-          // REPLY-LINK-GAP: do not silently deliver an unrecognised terminal act or ignore a
-          // camelCase reply key. Both used to look like a successful reply while leaving the
-          // sender's request open forever; rejection takes the existing visible sender-notice
-          // path, so the sender can correct and resend a message that actually links.
+          // REPLY-LINK-GAP: accept the protocol's common historical spellings, but make their
+          // canonical meaning explicit before validation and routing. Unknown acts still take
+          // the visible sender-notice path below.
+          const wire = partial as Partial<HiveMessage> & { inReplyTo?: unknown };
+          const normalised: string[] = [];
+          const originalAct = (wire as { act?: unknown }).act;
+          if (Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {
+            if (partial.in_reply_to === undefined) partial.in_reply_to = wire.inReplyTo as string | null;
+            delete wire.inReplyTo;
+            normalised.push('inReplyTo->in_reply_to');
+          }
+          if (originalAct === 'reply' || originalAct === 'answer') {
+            partial.act = partial.in_reply_to !== undefined && partial.in_reply_to !== null ? 'done' : 'inform';
+            normalised.push(`${originalAct}->${partial.act}`);
+          } else if (originalAct === 'ack') {
+            partial.act = 'agree';
+            normalised.push('ack->agree');
+          }
+          if (normalised.length) this.appendLog({ kind: 'outbox-normalised', from: id, file: f, mappings: normalised });
           if (partial.act !== undefined && !isMessageAct(partial.act)) {
             throw new Error(`unroutable: act must be one of ${[...MESSAGE_ACTS].join(', ')}`);
           }

@@ -139,38 +139,60 @@ test('parseable but unroutable files are rejected once with a sender notice', as
 
 async function replyLinkGapKiller(t, Manager) {
   const { hive, outbox } = await floor(t, Manager);
-  const request = hive.send({ to: 'jim-1', act: 'request', subject: 'build the fix', body: 'please build it' }, 'god-1');
+  const replyRequest = hive.send({ to: 'jim-1', act: 'request', subject: 'build the fix', body: 'please build it' }, 'god-1');
+  const answerRequest = hive.send({ to: 'jim-1', act: 'request', subject: 'answer the question', body: 'please answer it' }, 'god-1');
   const cases = [
-    ['unknown-act.json', { to: 'god-1', act: 'reply', subject: 'built', body: 'done', in_reply_to: request.id }, /act must be one of/],
-    ['camel-reply-key.json', { to: 'god-1', act: 'done', subject: 'built', body: 'done', inReplyTo: request.id }, /use in_reply_to, not inReplyTo/]
+    ['reply-camel.json', { to: 'god-1', act: 'reply', subject: 'built', body: 'done', inReplyTo: replyRequest.id }],
+    ['answer-linked.json', { to: 'god-1', act: 'answer', subject: 'answered', body: 'done', in_reply_to: answerRequest.id }],
+    ['answer-unlinked.json', { to: 'god-1', act: 'answer', subject: 'status', body: 'FYI' }],
+    ['ack.json', { to: 'god-1', act: 'ack', subject: 'acknowledged', body: 'ok' }],
+    ['unknown-act.json', { to: 'god-1', act: 'sidequest', subject: 'bad', body: 'bad' }]
   ];
-  for (const [file, payload] of cases) fs.writeFileSync(path.join(outbox, file), JSON.stringify(payload));
-  assert.equal(hive.routeOnce(), 0, 'REPLY-LINK GAP: malformed replies must not be delivered unlinked');
-  assert.equal(hive.inbox('god-1').length, 0, 'the requester receives no reply that failed to name its link');
-  assert.deepEqual(hive.mail.openRequests('jim-1').map((o) => o.entry.id), [request.id], 'the request stays honestly open until a linked reply routes');
-  for (const [file, _payload, reason] of cases) {
-    assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${file}`)), true, `${file} is terminally archived`);
-    const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith(file));
-    assert.ok(notice, `${file} tells its sender what to correct`);
-    assert.match(notice.subject, reason);
+  for (const [file, payload] of cases) {
+    const outboxFile = path.join(outbox, file);
+    fs.writeFileSync(outboxFile, JSON.stringify(payload));
+    olderThanFreshWriteGrace(outboxFile);
   }
-  fs.writeFileSync(path.join(outbox, 'corrected.json'), JSON.stringify({ to: 'god-1', act: 'done', subject: 'built', body: 'done', in_reply_to: request.id }));
-  assert.equal(hive.routeOnce(), 1, 'a corrected snake_case reply routes');
-  assert.deepEqual(hive.mail.openRequests('jim-1'), [], 'only the corrected reply closes the request');
+  assert.equal(hive.routeOnce(), 4, 'REPLY-LINK GAP: known synonyms normalise and route; only the truly unknown act rejects');
+  const delivered = hive.inbox('god-1');
+  assert.equal(delivered.find((m) => m.subject === 'built').act, 'done', 'REPLY-LINK GAP: reply with camelCase link becomes done');
+  assert.equal(delivered.find((m) => m.subject === 'built').in_reply_to, replyRequest.id, 'REPLY-LINK GAP: camelCase link is canonicalised');
+  assert.equal(delivered.find((m) => m.subject === 'answered').act, 'done', 'REPLY-LINK GAP: linked answer becomes done');
+  assert.equal(delivered.find((m) => m.subject === 'status').act, 'inform', 'REPLY-LINK GAP: unlinked answer becomes inform');
+  assert.equal(delivered.find((m) => m.subject === 'acknowledged').act, 'agree', 'REPLY-LINK GAP: ack becomes agree');
+  assert.deepEqual(hive.mail.openRequests('jim-1'), [], 'the canonicalised reply and answer close their requests');
+  assert.equal(fs.existsSync(path.join(outbox, '.sent', 'bad-unknown-act.json')), true, 'only the truly unknown act is terminally archived');
+  const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith('unknown-act.json'));
+  assert.ok(notice, 'the unknown act tells its sender what to correct');
+  assert.match(notice.subject, /act must be one of/);
+  const normalised = hive.logTail(100).filter((entry) => entry.kind === 'outbox-normalised');
+  assert.equal(normalised.length, 4, 'each known synonym produces a normalised log row without a bounce');
 }
 
-test('REPLY-LINK-GAP: reject unknown acts and camelCase reply keys with sender notices', async (t) => {
+test('REPLY-LINK-GAP: normalise known reply spellings and reject only unknown acts', async (t) => {
   await replyLinkGapKiller(t, HiveManager);
 });
 
 const REPLY_LINK_MUTANTS = [
   {
-    name: 'RLG-M1: an unknown reply act is silently accepted',
-    edits: [['if (partial.act !== undefined && !isMessageAct(partial.act)) {', 'if (false && partial.act !== undefined && !isMessageAct(partial.act)) {']]
+    name: 'RLG-M1: camelCase link is not canonicalised',
+    edits: [["if (Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {", "if (false && Object.prototype.hasOwnProperty.call(wire, 'inReplyTo')) {"]]
   },
   {
-    name: 'RLG-M2: camelCase inReplyTo is silently ignored',
-    edits: [["if (Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {", "if (false && Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {"]]
+    name: 'RLG-M2: reply and answer are rejected instead of normalised',
+    edits: [["if (originalAct === 'reply' || originalAct === 'answer') {", "if (false && (originalAct === 'reply' || originalAct === 'answer')) {"]]
+  },
+  {
+    name: 'RLG-M3: linked reply does not become done',
+    edits: [["partial.act = partial.in_reply_to !== undefined && partial.in_reply_to !== null ? 'done' : 'inform';", "partial.act = 'inform';"]]
+  },
+  {
+    name: 'RLG-M4: ack is rejected instead of agreeing',
+    edits: [["} else if (originalAct === 'ack') {", "} else if (false && originalAct === 'ack') {"]]
+  },
+  {
+    name: 'RLG-M5: truly unknown acts are silently accepted',
+    edits: [['if (partial.act !== undefined && !isMessageAct(partial.act)) {', 'if (false && partial.act !== undefined && !isMessageAct(partial.act)) {']]
   }
 ];
 
