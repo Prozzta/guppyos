@@ -775,6 +775,44 @@ export class WorkerWakeWatchdog {
    * lifecycle is left alone and the caller only reports. Pure bookkeeping: no I/O, no clock.
    */
   recoverStuckActive(agentId: string | undefined, facts: { lastOutputAt: number; ptyId?: string } | null, pendingIds: number, now = Date.now(), proof?: TurnEndProof | null): StuckActiveOutcome | null {
+    const a = this.stuckAssessment(agentId, facts, pendingIds, now, proof);
+    if (!a) return null;
+    const { r, quietMs, basis, hasProof } = a;
+    r.stuckEpoch = r.activeSince;
+    if (a.kind === 'gave-up') {
+      return { kind: 'gave-up', activeSince: r.activeSince, quietMs, recoveries: r.stuckRecoveries, basis };
+    }
+    r.stuckRecoveries += 1;
+    const activeSince = r.activeSince;
+    r.openTurnId = null;
+    r.invoking = false;
+    if (hasProof) {
+      // god (WWR audit ruling): even on proof, `unknown`, so the re-offer still needs 12 s of PTY
+      // quiet (the reconcile claim), and the bridge re-checks the rollout right before it.
+      this.endEpoch(r, 'unknown');
+      r.activeSince = 0;
+      if (!r.closedTurns.includes(proof!.turnId)) {
+        r.closedTurns.push(proof!.turnId);
+        if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
+      }
+      return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis, turnId: proof!.turnId };
+    }
+    this.endEpoch(r, 'unknown');
+    return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis };
+  }
+
+  /**
+   * ZERO-TOKEN-LIVENESS: what `recoverStuckActive` WOULD do with the same inputs, changing nothing.
+   * The bridge asks this first, so the liveness monitor records STUCK_WAKE before the recovery acts.
+   * One predicate (stuckAssessment) decides both: there is no second stuck rule.
+   */
+  assessStuckActive(agentId: string | undefined, facts: { lastOutputAt: number; ptyId?: string } | null, pendingIds: number, now = Date.now(), proof?: TurnEndProof | null): { kind: 'recover' | 'gave-up'; basis: 'rollout-complete' | 'quiet'; quietMs: number } | null {
+    const a = this.stuckAssessment(agentId, facts, pendingIds, now, proof);
+    return a ? { kind: a.kind, basis: a.basis, quietMs: a.quietMs } : null;
+  }
+
+  /** The WWR predicate (see recoverStuckActive). Pure: reads the agent's state, writes nothing. */
+  private stuckAssessment(agentId: string | undefined, facts: { lastOutputAt: number; ptyId?: string } | null, pendingIds: number, now: number, proof?: TurnEndProof | null): { r: AgentWake; kind: 'recover' | 'gave-up'; basis: 'rollout-complete' | 'quiet'; quietMs: number; hasProof: boolean } | null {
     if (!agentId || !Number.isFinite(now)) return null;
     const r = this.agents.get(agentId);
     if (!r || r.lifecycle !== 'active' || r.provisional || !(r.activeSince > 0)) return null;
@@ -795,27 +833,32 @@ export class WorkerWakeWatchdog {
       if (quietMs < STUCK_ACTIVE_AFTER_MS) return null;
     }
     const basis = hasProof ? 'rollout-complete' as const : 'quiet' as const;
-    r.stuckEpoch = r.activeSince;
-    if (r.stuckRecoveries >= STUCK_ACTIVE_MAX_RECOVERIES) {
-      return { kind: 'gave-up', activeSince: r.activeSince, quietMs, recoveries: r.stuckRecoveries, basis };
-    }
-    r.stuckRecoveries += 1;
-    const activeSince = r.activeSince;
+    return { r, kind: r.stuckRecoveries >= STUCK_ACTIVE_MAX_RECOVERIES ? 'gave-up' : 'recover', basis, quietMs, hasProof };
+  }
+
+  /**
+   * ZERO-TOKEN-LIVENESS: a person asked (a click on the liveness chip) to re-offer the mail of an
+   * agent the watchdog gave up on. Ends the stuck epoch to `unknown` and restarts the give-up budget;
+   * the NORMAL reconcile claim then re-offers, through every guard and the one submit owner. Only
+   * for an agent that is still ACTIVE on a non-provisional epoch the watchdog already acted on.
+   * `deliveredIds` (the ledger's delivered ids now) go straight back to pending: a person's decision
+   * is not made to wait out the F4 backoff the earlier automatic offers ran up.
+   */
+  operatorReoffer(agentId: string, deliveredIds: readonly string[] = []): boolean {
+    const r = this.agents.get(agentId);
+    if (!r || r.lifecycle !== 'active' || r.provisional || r.inFlight || r.held || !(r.activeSince > 0) || r.stuckEpoch !== r.activeSince) return false;
+    r.stuckRecoveries = 0;
     r.openTurnId = null;
     r.invoking = false;
-    if (hasProof) {
-      // god (WWR audit ruling): even on proof, `unknown`, so the re-offer still needs 12 s of PTY
-      // quiet (the reconcile claim), and the bridge re-checks the rollout right before it.
-      this.endEpoch(r, 'unknown');
-      r.activeSince = 0;
-      if (!r.closedTurns.includes(proof!.turnId)) {
-        r.closedTurns.push(proof!.turnId);
-        if (r.closedTurns.length > CLOSED_TURN_MEMORY) r.closedTurns.shift();
-      }
-      return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis, turnId: proof!.turnId };
-    }
     this.endEpoch(r, 'unknown');
-    return { kind: 'recovered', activeSince, quietMs, recovery: r.stuckRecoveries, basis };
+    for (const id of deliveredIds) {
+      if (typeof id !== 'string' || !id) continue;
+      r.announced.delete(id);
+      r.reannounced.delete(id);
+      r.retries.delete(id);
+      r.pending.add(id);
+    }
+    return true;
   }
 
   /**
@@ -1061,6 +1104,24 @@ export class WorkerWakeWatchdog {
   turnFacts(agentId: string): { openTurnId: string | null; activeSince: number; claimedAt: number; turnStartAt: number } {
     const r = this.agents.get(agentId);
     return { openTurnId: r?.openTurnId ?? null, activeSince: r?.activeSince ?? 0, claimedAt: r?.claimedAt ?? 0, turnStartAt: r?.turnStartAt ?? 0 };
+  }
+
+  /** ZERO-TOKEN-LIVENESS: read-only facts for the liveness monitor (no decision is exported: the
+   *  monitor never claims, recovers or closes anything). `lastTurnEndAt` is the last MAIN-session
+   *  Stop/StopFailure: a SubagentStop never sets it. Unknown agent = the neutral defaults. */
+  livenessFacts(agentId: string): { lifecycle: WakeLifecycle; provisional: boolean; activeSince: number; openTurnId: string | null; turnStartAt: number; lastTurnEndAt: number; lastHookAt: number; lastHumanNeedsAt: number; stuckRecoveries: number } {
+    const r = this.agents.get(agentId);
+    return {
+      lifecycle: r?.lifecycle ?? 'unknown',
+      provisional: r?.provisional ?? false,
+      activeSince: r?.activeSince ?? 0,
+      openTurnId: r?.openTurnId ?? null,
+      turnStartAt: r?.turnStartAt ?? 0,
+      lastTurnEndAt: r?.stoppedAt ?? 0,
+      lastHookAt: r?.lastTrafficAt ?? 0,
+      lastHumanNeedsAt: r?.lastHumanNeedsAt ?? 0,
+      stuckRecoveries: r?.stuckRecoveries ?? 0
+    };
   }
 
   /** Forget per-agent state (the agent's PTY was closed). */

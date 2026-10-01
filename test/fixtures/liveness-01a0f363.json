@@ -1,0 +1,29 @@
+{
+  "what": "CODEX-STOP-MISSING, turn 01a0f363 (Dwight, Codex 0.157.1, 2026-09-30): a compaction-only turn (CompactTask) wrote task_started and task_complete to its rollout and fired PreCompact/PostCompact, never Stop. On 1.1.75 the wake lifecycle stayed active: the 17:36:43 delivery was refused as lifecycle-active and the stall row followed at 17:41:43.",
+  "sources": {
+    "rollout": "C:/Dunder/hive/agents/dwight-mu32ztys/.codex/sessions/2026/09/30/rollout-2026-09-30T19-23-43-01a0f357-f8f5-79c1-a4bf-6878d9722363.jsonl, ordinals 127-134 (timestamps, event types and turn ids only)",
+    "hiveLog": "C:/Dunder/hive/log.jsonl rows for dwight-mu32ztys, 17:33-17:42Z (wake hook Stop, hook-transport, mail delivered, wake no-claim, wake stall)",
+    "research": "C:/Dunder/_work/phyllis/CODEX-STOP-MISSING.md"
+  },
+  "agentId": "dwight-mu32ztys",
+  "rollout": [
+    { "ts": "2026-09-30T17:33:15.340Z", "type": "task_complete", "turnId": "01a0f35d-f3b3-7da1-b9e8-294d70062be1" },
+    { "ts": "2026-09-30T17:35:47.194Z", "type": "task_started", "turnId": "01a0f363-01e7-7711-b4bd-90378f76083b" },
+    { "ts": "2026-09-30T17:36:27.780Z", "type": "task_complete", "turnId": "01a0f363-01e7-7711-b4bd-90378f76083b" }
+  ],
+  "hooks": [
+    { "ts": "2026-09-30T17:33:15.253Z", "event": "Stop", "turnId": "01a0f35d-f3b3-7da1-b9e8-294d70062be1", "basis": "wake hook Stop row, edge=true" },
+    { "ts": "2026-09-30T17:35:47.200Z", "event": "PreCompact", "turnId": "01a0f363-01e7-7711-b4bd-90378f76083b", "basis": "one pipe hook in the 17:35 hook-transport minute; the time is the rollout's task_started (compaction starts the turn)" },
+    { "ts": "2026-09-30T17:36:27.459Z", "event": "PostCompact", "turnId": "01a0f363-01e7-7711-b4bd-90378f76083b", "basis": "one pipe hook in the 17:36 hook-transport minute; the time is the rollout's compacted item" }
+  ],
+  "ptyLastOutput": "2026-09-30T17:36:27.788Z",
+  "ptyLastOutputBasis": "wake no-claim row at 17:36:43.466 reports idleMs 15678",
+  "mail": [
+    { "ts": "2026-09-30T17:36:43.461Z", "id": "2026-09-30T17-36-43-461Z-m1" },
+    { "ts": "2026-09-30T17:39:52.998Z", "id": "2026-09-30T17-39-52-998Z-m2" }
+  ],
+  "observed_1_1_75": {
+    "noClaim": { "ts": "2026-09-30T17:36:43.466Z", "why": "lifecycle-active", "inboxIds": 1 },
+    "stall": { "ts": "2026-09-30T17:41:43.534Z", "why": "lifecycle-active", "inboxIds": 2, "stalledMs": 300068 }
+  }
+}

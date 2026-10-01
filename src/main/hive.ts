@@ -4249,11 +4249,12 @@ export class HiveManager {
   }
 
   /** Write the live fleet snapshot Michael reads (`fleet.json`, gitignored).
-   *  Best-effort — called from a timer, must never throw. */
+   *  Best-effort — called from a timer, must never throw. ZERO-TOKEN-LIVENESS (Jim L6): atomic
+   *  (temp file + rename), so a reader (god, a CLI, ZT-I3) never sees a torn file. */
   writeFleetSnapshot(snapshot: unknown): void {
     const root = this.root();
     if (!root) return;
-    try { writeFileSync(join(root, 'fleet.json'), JSON.stringify(snapshot, null, 2), 'utf8'); } catch { /* noop */ }
+    try { this.atomicWriteJson(join(root, 'fleet.json'), snapshot); } catch { /* noop */ }
   }
 
   /** Is this agent the hive's god/orchestrator? */

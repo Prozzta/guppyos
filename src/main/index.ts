@@ -115,6 +115,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
+import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { HistoryService } from './historyService';
 import { geminiHome } from './capacityScope';
@@ -505,9 +506,94 @@ const wakeTelemetry = new WakeTelemetry(Date.now());
 // THE STALL WATCHDOG (god's ruling A2). Decision in wakeStall.ts; this is the voice.
 const wakeStalls = new WakeStallWatch();
 
+// ZERO-TOKEN-LIVENESS (1.1.77): the deterministic liveness monitor. It observes the facts below and
+// publishes liveness-v1 records (log rows on edges, fleet.json, getLiveness / onLivenessChange). It
+// never calls a model, types, submits, wakes, restarts or edits the board (agentLiveness.ts).
+/** The registry read once for a whole sampleAll (one file read per beat, not one per agent). */
+let livenessRegistry: ReturnType<typeof hive.registry> | null = null;
+function livenessFactsFor(agentId: string): LivenessFacts | null {
+  const reg = livenessRegistry ?? hive.registry();
+  const a = reg.agents?.[agentId];
+  if (!a) return null;
+  const ptyId = ptyForAgent(agentId);
+  const pf = ptyId ? ptyManager.livenessFacts(ptyId) : undefined;
+  const snap = control.snapshot(agentId);
+  const wake = workerWake.livenessFacts(agentId);
+  let rollout: LivenessFacts['rollout'];
+  // The rollout matters only while a turn may be open (an idle agent's Stop was recorded): the probe
+  // walks the session folders synchronously, so an idle Codex agent is not probed every beat.
+  if (pf && a.provider === 'codex' && wake.lifecycle !== 'idle') {
+    // The same mtime-cached bounded tail the WWR reads (re-read only when the file changed).
+    const home = hive.codexHomeFor(agentId);
+    const probe = home ? codexLifecycle.probe(home) : undefined;
+    rollout = probe && probe.ok ? probe.latest : undefined;
+  }
+  let mailWaiting = 0;
+  if (ptyId) { try { mailWaiting = mailPendingIds(agentId).length; } catch { mailWaiting = 0; } }
+  return {
+    agentId,
+    registry: {
+      archived: a.archived === true,
+      ...(a.archived === true && a.archiveReason ? { archiveReason: a.archiveReason } : {}),
+      // setArchived stamps lastSeen in the same write that sets the flag.
+      ...(a.archived === true && typeof a.lastSeen === 'number' ? { archivedAt: a.lastSeen } : {}),
+      onHold: !!a.onHold
+    },
+    pty: ptyId && pf ? { ptyId, incarnation: pf.incarnation, spawnedAt: pf.spawnedAt, lastTrafficAt: pf.lastTrafficAt } : null,
+    wake,
+    control: { paused: snap.paused, halted: snap.halted, autoDeliveryPaused: snap.autoDeliveryPaused },
+    mailWaiting,
+    ...(rollout !== undefined ? { rollout } : {})
+  };
+}
+const agentLiveness = new AgentLivenessMonitor({
+  agents: () => Object.keys((livenessRegistry ?? hive.registry()).agents ?? {}),
+  facts: (agentId) => livenessFactsFor(agentId),
+  sink: (row) => { try { hive.appendLog(row); } catch { /* best-effort */ } },
+  now: () => Date.now()
+});
+agentLiveness.onLivenessChange((rec) => {
+  try { liveWebContents()?.send('liveness:changed', rec); } catch { /* window torn down */ }
+});
+/** Recompute every agent's liveness (the 15-second beat), over one registry read. */
+function sampleLivenessAll(): void {
+  if (!hive.enabled()) return;
+  try {
+    livenessRegistry = hive.registry();
+    agentLiveness.sampleAll();
+  } catch (e) {
+    console.error('[liveness] sample failed:', e);
+  } finally {
+    livenessRegistry = null;
+  }
+}
+/** Hook events that are turn boundaries: each re-samples the agent at once. */
+const LIVENESS_EDGE_HOOKS = new Set(['Stop', 'StopFailure', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'SessionStart', 'SessionEnd', 'Notification']);
+/** Recompute one agent on an evidence edge (best-effort, never throws). */
+function sampleLiveness(agentId: string | undefined): void {
+  if (!agentId || !hive.enabled()) return;
+  try { agentLiveness.sample(agentId); } catch { /* best-effort */ }
+}
+/** The HookServer observer, unchanged, followed by a liveness re-sample on a turn boundary (tool
+ *  events wait for the beat). Observation only. */
+function withLivenessEdge(
+  observe: (agentId: string | undefined, event: string | undefined, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string) => void
+): typeof observe {
+  return (agentId, event, message, fullyIdle, turnId, source) => {
+    observe(agentId, event, message, fullyIdle, turnId, source);
+    if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
+  };
+}
+
 /** Fold one refusal into the stall watch and say so, once, if it is a deadlock. */
 function noteWakeRefusal(agentId: string, why: string, inboxIds: number): void {
   const stall = wakeStalls.note(agentId, why, inboxIds, Date.now());
+  // ZERO-TOKEN-LIVENESS: refusal evidence (when mail waits), and the run the stall watch is timing.
+  if (inboxIds > 0 && why !== 'no-pending-ids') {
+    const run = wakeStalls.watchingFor(agentId);
+    agentLiveness.noteWakeRefusal(agentId, Date.now(), run?.since);
+    if (!run) agentLiveness.clearWakeRefusal(agentId);
+  }
   if (!stall) return;
   // Loud, durable, and it NAMES THE GUARD — the one thing the 1.1.46 post-mortem could
   // not get out of the running app.
@@ -735,8 +821,12 @@ inboxWake = new InboxWakeBridge({
       noteWakeRefusal(String(fields.agentId ?? ''), String(fields.why ?? ''), Number(fields.inboxIds ?? 0));
     } else if (stage === 'claim') {
       wakeStalls.clear(String(fields.agentId ?? ''));   // it moved; nothing is stuck
+      agentLiveness.clearWakeRefusal(String(fields.agentId ?? ''));
     }
-  }
+  },
+  // ZERO-TOKEN-LIVENESS: the WWR tells the monitor BEFORE it recovers (or gives up), so the
+  // STUCK_WAKE row is written first. Observation only.
+  liveness: { stuckWake: (agentId, reason) => { agentLiveness.noteStuckWake(agentId, reason); } }
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
 
@@ -787,7 +877,8 @@ const hookServer = new HookServer(
   standingGoalFromRoster,
   // Observed BEFORE the hook response; the bridge defers any retry with setImmediate, so
   // the Stop reply is never blocked and no turn is manufactured inside the hook.
-  (agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); },
+  // ZERO-TOKEN-LIVENESS: after the bridge saw the hook, a turn boundary re-samples liveness.
+  withLivenessEdge((agentId, event, message, fullyIdle, turnId, source) => { if (agentId) hookSeenAt.set(agentId, Date.now()); inboxWake?.onHook(agentId, event, message, fullyIdle, turnId, source); }),
   (agentId, obs) => { providerCapacity.ingest(agentId, obs); capacityStore.scheduleSave(); },
   // AGY 1.1.48 — ONE validated statusline tick, routed to its two consumers. Capacity
   // first: the allowance pair is a provider fact and is true for the account whether or
@@ -1066,6 +1157,9 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
       // bounces mail; a process that died on its own (onExit) is 'pty-exit' and keeps its mail.
       try { hive.setArchived(agentId, true, archiveReason); } catch (e) { console.error('[hive] setArchived failed:', e); }
     }
+    // ZERO-TOKEN-LIVENESS: the registry archival edge (the exit itself was recorded by the PTY's
+    // end observer, before this teardown). Observation only: nothing is woken or moved here.
+    sampleLiveness(agentId);
   }
   // 2) Remove the isolated worktree, if any. Non-blocking; errors are logged.
   const wtPath = worktreePaths.get(id);
@@ -1187,6 +1281,14 @@ function removeWorkerScratch(workerId: string): void {
 // SAME pty/window (no user click). Provider-agnostic. Idempotent by construction: the
 // relaunch carries `noAutoInstall`, so the installer can never fire (let alone loop) a
 // second time — a binary that's somehow still missing just spawns and exits normally.
+// ZERO-TOKEN-LIVENESS: every incarnation's end, requested (kill, window close) or not, recorded
+// BEFORE its session is removed and before the teardown archives the agent.
+ptyManager.setEndObserver((e) => {
+  const agentId = ptyToAgent.get(e.id);
+  if (!agentId) return;
+  try { agentLiveness.notePtyEnd(agentId, { ptyId: e.id, incarnation: e.incarnation, explicit: e.explicit, exitCode: e.exitCode, at: e.at }); }
+  catch { /* observation never breaks a kill or an exit */ }
+});
 ptyManager.setExitHandler((id, exitCode) => {
   const pending = pendingInstallRelaunch.get(id);
   if (pending) {
@@ -2135,7 +2237,8 @@ function writeFleetSnapshot(): void {
         };
       });
     // HEAVY-JOB-SERIALIZE: who holds the heavy-job slots (god reads fleet.json every standup).
-    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot() } });
+    // ZERO-TOKEN-LIVENESS: the current liveness-v1 records (every LIVE agent, recent non-LIVE ones).
+    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot() }, liveness: agentLiveness.fleetRecords(now) });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }
@@ -4546,6 +4649,18 @@ ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
+// ZERO-TOKEN-LIVENESS: the current records (read-only), and the ONE operator action that can lead to
+// a turn: a person's click on "re-offer mail" for an agent the WWR gave up on. It ends the stuck epoch;
+// the normal reconcile beat then re-offers through every guard and the submit owner.
+ipcMain.handle('liveness:snapshot', () => agentLiveness.all());
+ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {
+  if (typeof agentId !== 'string' || !agentId) return false;
+  const rec = agentLiveness.getLiveness(agentId);
+  if (!rec || rec.classification !== 'STUCK_WAKE' || rec.reason !== 'wwr-max-recoveries') return false;
+  const ok = inboxWake?.onOperatorReoffer(agentId) ?? false;
+  try { hive.appendLog({ kind: 'liveness-operator', action: 'reoffer', agentId, ok }); } catch { /* best-effort */ }
+  return ok;
+});
 ipcMain.handle('hive:integrity', () => hive.integrityIssues());
 ipcMain.handle('config:integrity', () => configIntegrityIssue());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {
@@ -6664,6 +6779,8 @@ function runWorkerWakeBeat(): void {
     } catch { /* best effort: the next beat retries */ }
   }
   inboxWake.reconcileAll(live);
+  // ZERO-TOKEN-LIVENESS: after the WWR ran (it records its own STUCK edges first), every agent.
+  sampleLivenessAll();
 }
 
 /** (Re)arm the always-on beats (decoupled from the optional heartbeat): the live

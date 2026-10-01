@@ -7,6 +7,8 @@ import type { Eligibility, TerminalInputState } from '../shared/inputProvenance'
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
 export type { HireManifest } from '../shared/hire';
+import type { LivenessV1 } from '../shared/livenessV1';
+export type { LivenessV1 } from '../shared/livenessV1';
 import type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
 export type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
 import type { UpdateStatus } from '../shared/updateState';
@@ -946,6 +948,17 @@ const api = {
 
   // ─── Hive (multi-agent coordination) ─────────────────────────────────────
   hiveRegistry: (): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry'),
+  /** ZERO-TOKEN-LIVENESS: the current liveness-v1 records (read-only). */
+  livenessSnapshot: (): Promise<LivenessV1[]> => ipcRenderer.invoke('liveness:snapshot'),
+  /** ZERO-TOKEN-LIVENESS: a person's click only — re-offer the mail of an agent the stuck-wake
+   *  watchdog gave up on (main refuses anything that is not STUCK_WAKE / wwr-max-recoveries). */
+  livenessReoffer: (agentId: string): Promise<boolean> => ipcRenderer.invoke('liveness:reoffer', agentId),
+  /** ZERO-TOKEN-LIVENESS: a classification/lifecycle edge (data only). */
+  onLivenessChange: (cb: (rec: LivenessV1) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, rec: LivenessV1) => cb(rec);
+    ipcRenderer.on('liveness:changed', listener);
+    return () => ipcRenderer.removeListener('liveness:changed', listener);
+  },
   hiveIntegrity: (): Promise<IntegrityIssue[]> => ipcRenderer.invoke('hive:integrity'),
   configIntegrity: (): Promise<IntegrityIssue | null> => ipcRenderer.invoke('config:integrity'),
   /** Persist a hire/job role to hive registry.json + identity.md (no respawn). */
