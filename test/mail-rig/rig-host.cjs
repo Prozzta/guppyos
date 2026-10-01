@@ -129,7 +129,7 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
@@ -149,6 +149,19 @@ async function buildFloor() {
     const agentId = ptyToAgent.get(ptyId);
     if (!agentId) return null;
     try { return JSON.parse(fs.readFileSync(path.join(RIG_DIR, 'stubs', agentId, 'composer.json'), 'utf8')); } catch { return null; }
+  };
+  // RIG-DESYNC (rc/1.1.76 gate #2): what the screen shows is the stub's composer AS OF the newest
+  // echo the host has received, never a state whose echo bytes are still in flight. In the app the
+  // reading comes from xterm after the bytes it covers are applied (terminalPool term.write('', cb),
+  // stamped main-side), so "text visible" and "its echo arrived" are one event; reading the stub's
+  // composer.json directly let the rig's screen run ahead of the output generation, and a late echo
+  // of our own text then read as "the Enter was lost" (a second Enter).
+  const screenDraft = (ptyId, c) => {
+    if (!Array.isArray(c.shown)) return c.draft;   // an old stub: no echo numbers
+    const seen = rig.echoSeen.get(ptyId) || 0;
+    let best = null;
+    for (const s of c.shown) if (s.seq <= seen && (!best || s.seq > best.seq)) best = s;
+    return best ? best.draft : '';
   };
   const count = (hay, needle) => { let n = 0; let i = hay.indexOf(needle); while (needle && i >= 0) { n++; i = hay.indexOf(needle, i + needle.length); } return n; };
   // The mirrors the renderer pushes into main (terminalPool / inputOrigin / the prompt mirror).
@@ -185,18 +198,20 @@ async function buildFloor() {
   const readCodexScreen = async (ptyId, expectedTail) => {
     const c = composerOf(ptyId);
     if (!c) return null;
-    const row = c.draft.split('\n').pop();
+    const draft = screenDraft(ptyId, c);
+    const row = draft.split('\n').pop();
     return {
       onPromptRow: false, screenCount: 0,
-      codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: c.draft ? `\u203a ${row}` : '\u203a Ask Codex to do anything', footer: [] },
-      ...(expectedTail !== undefined ? { promptTailMatches: c.draft.endsWith(expectedTail) } : {})
+      codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: draft ? `\u203a ${row}` : '\u203a Ask Codex to do anything', footer: [] },
+      ...(expectedTail !== undefined ? { promptTailMatches: draft.endsWith(expectedTail) } : {})
     };
   };
   const readScreen = async (ptyId, needle, expectedTail) => {
     const c = composerOf(ptyId);
     if (!c) return null;
-    const row = c.draft.split('\n').pop();
-    return { onPromptRow: !!needle && c.draft.includes(needle) && row.length > 0, screenCount: count(c.draft, needle), ...(expectedTail !== undefined ? { promptTailMatches: c.draft.endsWith(expectedTail) } : {}) };
+    const draft = screenDraft(ptyId, c);
+    const row = draft.split('\n').pop();
+    return { onPromptRow: !!needle && draft.includes(needle) && row.length > 0, screenCount: count(draft, needle), ...(expectedTail !== undefined ? { promptTailMatches: draft.endsWith(expectedTail) } : {}) };
   };
   const decision = (verdict, reason, workClass) => ({ verdict, reason, poolKey: 'rig-pool', state: null, workClass, limitEpochAt: null, grantId: null });
   const capacity = {
@@ -349,11 +364,20 @@ async function buildFloor() {
   // The renderer's PTY data sink (there is no window): watch each stream for the stub's
   // boot-complete sentinel, escape sequences removed (ConPTY may interleave them).
   const bootBuf = new Map();
+  const echoTail = new Map();
   ptyManager.attachWebContents({
     isDestroyed: () => false,
     send: (channel, data) => {
       if (typeof channel !== 'string' || !channel.startsWith('pty:data:') || typeof data !== 'string') return;
       const id = channel.slice('pty:data:'.length);
+      // RIG-DESYNC: the newest stub echo this stream has DELIVERED (its OSC 0 rig-echo-N title;
+      // a marker split across chunks is joined through a short tail).
+      const scan = (echoTail.get(id) || '') + data;
+      for (const m of scan.matchAll(/\x1b\]0;rig-echo-(\d+)(?:\x07|\x1b\\)/g)) {
+        const n = Number(m[1]);
+        if (n > (rig.echoSeen.get(id) || 0)) rig.echoSeen.set(id, n);
+      }
+      echoTail.set(id, scan.slice(-48));
       if (rig.bootSeen.has(id)) return;
       const buf = ((bootBuf.get(id) || '') + data.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|[\r\n]/g, '')).slice(-200);
       if (buf.includes('[rig-boot-complete]')) { rig.bootSeen.add(id); bootBuf.delete(id); } else bootBuf.set(id, buf);
