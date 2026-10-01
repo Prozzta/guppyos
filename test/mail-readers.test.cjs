@@ -276,11 +276,13 @@ test('PIN #9: collectFloorState counts the ledger (actionableBacklog), not hive.
   assert.ok(!/hive\.inbox\(/.test(body));
 });
 
-test('PIN #10: isFloorQuiet reads the ledger activity; an inbox mtime only for an agent whose ledger failed', () => {
-  const body = fn('function isFloorQuiet', 'function lastCoordinationAt');
-  assert.match(body, /floorMailActivityAt\(hive\.mail, active\)/);
-  assert.match(body, /for \(const id of mail\.failed\) pushMtime\(join\(agentsDir, id, 'inbox'\)\)/);
-  assert.equal((body.match(/'inbox'/g) ?? []).length, 1, 'no other inbox mtime');
+test('PIN #10/#12/#13 (ZT-I4): the heartbeat that read them is retired; no quiet/stuck heuristic or re-engage digest remains', () => {
+  // isFloorQuiet, looksStuck, buildHeartbeatDigest, godActionableInboxCount and reengageGod were
+  // the heartbeat's; the floor digest (floorDigest.ts) replaces them and wakes god for decisions only.
+  for (const gone of ['function isFloorQuiet', 'function looksStuck', 'function buildHeartbeatDigest', 'function godActionableInboxCount', 'function reengageGod', 'function armHeartbeat']) {
+    assert.ok(!INDEX.includes(gone), `${gone} is retired`);
+  }
+  assert.match(INDEX, /if \(m\.kind === 'heartbeat'\) continue;/, 'a heartbeat mission is never armed');
 });
 
 test('PIN #11: lastCoordinationAt = acted transitions + own outbox/memory writes; no inbox or .done mtime', () => {
@@ -290,14 +292,6 @@ test('PIN #11: lastCoordinationAt = acted transitions + own outbox/memory writes
   assert.match(body, /'outbox'/);
 });
 
-test('PIN #12/#13: the digest and god\'s actionable count read the ledger', () => {
-  assert.match(fn('function buildHeartbeatDigest', 'const header'), /hasBacklog\(hive\.mail, id\)/);
-  const god = fn('function godActionableInboxCount', 'function reengageGod');
-  // Creed Q23: the re-engage gate counts delivered (not yet shown) mail only.
-  assert.match(god, /actionablePending\(hive\.mail, godId\)/);
-  assert.ok(!/actionableBacklog\(/.test(god), 'not the not-acted count');
-  assert.ok(!/hive\.inbox\(/.test(god));
-});
 
 test('PIN #6: fleet.json rows carry the ledger mail fields (backlog, awaitingReply, openRequests)', () => {
   assert.match(fn('function fleetMail(', 'function writeFleetSnapshot'), /fleetMailFields\(hive\.mail, id\)/);
@@ -318,9 +312,9 @@ test('PIN #15/#16: hive:inbox returns mailHistory (inbox + .done + state); the q
 });
 
 test('PIN: no main-process reader counts inbox/ files as "unhandled" any more (hive.inbox( only where justified)', () => {
-  // Allowed: the legacy-move / work-order fallback of the coordinator's pending source (§11.7),
-  // the ledger-failure fallback of #12, and the voice watcher's own inbox files (michael-voice,
-  // plus god's files alongside its ledger entries).
+  // Allowed: the legacy-move / work-order fallback of the coordinator's pending source (§11.7)
+  // and the voice watcher's own inbox files (michael-voice, plus god's files alongside its
+  // ledger entries). (#12's ledger-failure fallback left with the retired heartbeat, ZT-I4.)
   const calls = [...INDEX.matchAll(/hive\.inbox\(/g)].length;
-  assert.equal(calls, 4, 'a new hive.inbox( reader must read the ledger or be justified in NOTES');
+  assert.equal(calls, 3, 'a new hive.inbox( reader must read the ledger or be justified in NOTES');
 });
