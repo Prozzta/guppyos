@@ -248,6 +248,9 @@ interface AgentWake {
   /** Turns whose Stop has been recorded, newest last, bounded (FALSEACTIVE-STALL-2). A
    *  tool event that names one of these arrived after its own turn ended. */
   closedTurns: string[];
+  /** A PostCompact that arrived before its matching PreCompact. It closed no local compact
+   *  epoch, but the later PreCompact must not manufacture one. Consumed only by PreCompact. */
+  orphanPostCompacts: string[];
   /** The Codex turn the lifecycle is active FOR, when a hook named it (null otherwise).
    *  B1 closes a lost Stop only with a completion of exactly this turn. */
   openTurnId: string | null;
@@ -307,6 +310,8 @@ export type WakeBeatEdge =
 /** How many closed turn ids are remembered per agent. Only a straggler of a RECENT turn
  *  can still be in flight, so a short window is enough. */
 const CLOSED_TURN_MEMORY = 16;
+/** Like closed turns, an out-of-order hook can only be a recent straggler. */
+const ORPHAN_POST_COMPACT_MEMORY = 16;
 /** Events that can only happen INSIDE a turn. A late one from a closed turn is stale. A
  *  UserPromptSubmit is not in here: a new prompt is never a straggler of an old turn. */
 const IN_TURN_EVENTS = new Set(['PreToolUse', 'PostToolUse']);
@@ -381,7 +386,7 @@ export class WorkerWakeWatchdog {
     let r = this.agents.get(agentId);
     if (!r) {
       r = {
-        pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], openTurnId: null,
+        pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], orphanPostCompacts: [], openTurnId: null,
         stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
         lastTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
@@ -564,6 +569,19 @@ export class WorkerWakeWatchdog {
       // Inside a regular turn: that turn's end still decides.
       if (r.lifecycle === 'active' && !r.compactEpoch) return false;
       if (event === 'PreCompact') {
+        // WWR-W2: hook shims are independent processes, so PostCompact can overtake its own
+        // PreCompact. The PostCompact could not close an epoch then; consume that evidence here
+        // instead of opening a phantom active epoch that only the ten-minute watchdog can clear.
+        if (turnId) {
+          const orphan = r.orphanPostCompacts.indexOf(turnId);
+          if (orphan >= 0) {
+            r.orphanPostCompacts.splice(orphan, 1);
+            this.endEpoch(r, 'idle');
+            r.activeSince = 0;
+            r.openTurnId = null;
+            return false;
+          }
+        }
         r.lifecycle = 'active'; r.activeSince = at;
         r.openTurnId = turnId ?? null;
         r.compactEpoch = true;
@@ -571,7 +589,16 @@ export class WorkerWakeWatchdog {
       }
       // Jim W1 (b): a PostCompact that closes no compact epoch of its own changes nothing and is
       // NO retry edge (after an expired wake it would re-claim into the starting turn).
-      if (!r.compactEpoch) return false;
+      if (!r.compactEpoch) {
+        // Keep only the positive, named evidence needed for the residual ordering case.
+        // It is deliberately not a closed turn: PostCompact was not proved to close a turn and
+        // no path besides the matching PreCompact may consult it.
+        if (turnId && !r.orphanPostCompacts.includes(turnId)) {
+          r.orphanPostCompacts.push(turnId);
+          if (r.orphanPostCompacts.length > ORPHAN_POST_COMPACT_MEMORY) r.orphanPostCompacts.shift();
+        }
+        return false;
+      }
       // PostCompact closing its compact epoch: the compaction-only turn is over.
       this.endEpoch(r, 'idle');
       r.activeSince = 0;

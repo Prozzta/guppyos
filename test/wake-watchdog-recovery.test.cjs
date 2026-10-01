@@ -19,6 +19,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -297,6 +299,63 @@ test('Jim W1 (b): a PostCompact with no compact epoch of its own changes nothing
   // Only the PostCompact that closes its OWN compact epoch is the edge.
   c.noteHook(A, 'PreCompact', undefined, T0 + 3);
   assert.equal(c.noteHook(A, 'PostCompact', undefined, T0 + 4), true);
+});
+
+const WWR_W2_KILLERS = {
+  postBeforePreStaysIdleAndIsConsumed(mod) {
+    const c = new mod.WorkerWakeWatchdog();
+    const turn = 'wwr-w2-overtake';
+    assert.equal(c.noteHook(A, 'PostCompact', undefined, T0, undefined, turn), false, 'the overtaking PostCompact closes no epoch itself');
+    assert.equal(c.noteHook(A, 'PreCompact', undefined, T0 + 1, undefined, turn), false, 'the matching PreCompact consumes that terminal evidence');
+    assert.equal(c.state(A).lifecycle, 'idle', 'POST-BEFORE-PRE MUST NOT OPEN A PHANTOM COMPACT EPOCH');
+    assert.equal(c.noteHook(A, 'PreCompact', undefined, T0 + 2, undefined, turn), false, 'the terminal evidence is consumed once');
+    assert.equal(c.state(A).lifecycle, 'active', 'a later real PreCompact is still allowed to open its own epoch');
+  }
+};
+
+test('WWR-W2: PostCompact overtaking PreCompact stays idle, then consumes its one-shot evidence', () => {
+  WWR_W2_KILLERS.postBeforePreStaysIdleAndIsConsumed(W);
+});
+
+const WWR_W2_MUTANTS = [
+  {
+    name: 'W2-M1: an orphan PostCompact is forgotten before its PreCompact arrives',
+    edits: [['r.orphanPostCompacts.push(turnId);', 'if (false) r.orphanPostCompacts.push(turnId);']],
+    dies: /POST-BEFORE-PRE MUST NOT OPEN A PHANTOM COMPACT EPOCH/
+  },
+  {
+    name: 'W2-M2: the orphan PostCompact is not consumed',
+    edits: [['r.orphanPostCompacts.splice(orphan, 1);', 'r.orphanPostCompacts.splice(orphan, 0);']],
+    dies: /a later real PreCompact is still allowed/
+  }
+];
+const WWR_W2_MUTANT_DIR = path.join(__dirname, '.mutants-wwr-w2');
+
+test('MUTANT CENSUS WWR-W2: orphan PostCompact memory mutants apply once and die at named guarantees', async (t) => {
+  const source = readSource('src/main/workerWake.ts');
+  fs.rmSync(WWR_W2_MUTANT_DIR, { recursive: true, force: true });
+  fs.mkdirSync(WWR_W2_MUTANT_DIR, { recursive: true });
+  try {
+    for (const [i, mutant] of WWR_W2_MUTANTS.entries()) {
+      await t.test(`mutant: ${mutant.name}`, () => {
+        WWR_W2_KILLERS.postBeforePreStaysIdleAndIsConsumed(W);
+        let text = source;
+        for (const [from, to] of mutant.edits) {
+          assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
+          text = text.replace(from, to);
+        }
+        const file = path.join(WWR_W2_MUTANT_DIR, `m${i}.ts`);
+        fs.writeFileSync(file, text, 'utf8');
+        const mod = loadTs(path.relative(path.resolve(__dirname, '..'), file));
+        let died = null;
+        try { WWR_W2_KILLERS.postBeforePreStaysIdleAndIsConsumed(mod); } catch (e) { died = e; }
+        assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name}`);
+        assert.match(died.message, mutant.dies, `${mutant.name} died at the wrong assertion`);
+      });
+    }
+  } finally {
+    fs.rmSync(WWR_W2_MUTANT_DIR, { recursive: true, force: true });
+  }
 });
 
 test('Jim J3/J14: never with a claim in flight or held; the proof path still needs a terminal', () => {
