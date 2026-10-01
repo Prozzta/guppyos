@@ -60,3 +60,9 @@ test('the office floor and the Kanban key the ledger by the first copy (Mdup2)',
   assert.match(kanban, /return firstOccurrenceById\(list,/);
   assert.equal(firstOccurrenceById([{ id: 'a', n: 1 }, { id: 'a', n: 2 }], (x) => x.id)[0].n, 1);
 });
+
+test('an assignee-only change is a change (J6)', () => {
+  const next = poll();
+  next[1] = { ...next[1], assignee: 'jim' };
+  assert.deepEqual(ledgerChanges(poll(), next).map((c) => `${c.card.id}:${c.old.assignee}>${c.card.assignee}`), ['OTHER:andy>jim']);
+});

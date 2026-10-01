@@ -133,3 +133,34 @@ test('today\'s three stale cards, as synthetic fixtures: assignee parked, IDLE f
   const flags = run({ tasks, meta, registry: { dwight: live, andy: live, jim: live }, liveness });
   assert.deepEqual(kinds(flags), ['ZERO-TOKEN-LIVENESS:STALE!', 'ZT-I1-MAIL:STALE!', 'CARD-BADGE-AMBIGUOUS:STALE!']);
 });
+
+test('answers that are dismissed or resolvedBy god, and parked cards, are not ASK_ANSWERED_IDLE (K6, S3)', () => {
+  const answered = (extra = {}) => ({ q: 'go?', a: 'yes', answeredAt: new Date(NOW - 5 * H).toISOString(), ...extra });
+  const card = (qa, extra = {}) => ({ id: 'Q', status: 'blocked', assignee: 'jim', humanQA: qa, ...extra });
+  assert.deepEqual(kinds(run({ tasks: [card([answered({ dismissedAt: new Date(NOW).toISOString() })])], registry: { jim: live } })), []);
+  assert.deepEqual(kinds(run({ tasks: [card([answered({ resolvedBy: 'god-askme-tidy' })])], registry: { jim: live } })), []);
+  assert.deepEqual(kinds(run({ tasks: [card([answered()], { parked: true })], registry: { jim: live } })), []);
+  assert.deepEqual(kinds(run({ tasks: [card([answered()])], registry: { jim: live } })), ['Q:ASK_ANSWERED_IDLE!']);
+});
+
+test('a registry orphan archive: DOWN since its lastSeen, a decision at downDecisionMs (K9)', () => {
+  const at = (ms) => kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW - ms } } }));
+  assert.deepEqual(at(D.downDecisionMs - 1), ['A:ASSIGNEE_DOWN']);
+  assert.deepEqual(at(D.downDecisionMs), ['A:ASSIGNEE_DOWN!']);
+});
+
+test('an assignee known only to liveness (LIVE) is not UNKNOWN (K10)', () => {
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'newbie')], liveness: { newbie: lv('newbie', 'BUSY_PROGRESSING', NOW - 1) } })), []);
+});
+
+test('flag times are stable across ticks (no flag moves just because time passed)', () => {
+  const tasks = [1, 2, 3, 4].map((n) => doing(`T${n}`, 'jim'));
+  const meta = Object.fromEntries(tasks.map((c, i) => [c.id, { statusSince: NOW - (i + 1) * H, lastEditAt: NOW }]));
+  const a = run({ tasks, meta, registry: { jim: live } });
+  const b = run({ tasks, meta, registry: { jim: live }, now: NOW + 60_000 });
+  assert.deepEqual(a.map((f) => f.since), b.map((f) => f.since));
+  const arch = (now) => run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'explicit', lastSeen: NOW - H } }, now });
+  assert.equal(arch(NOW)[0].since, NOW - H);
+  assert.equal(arch(NOW)[0].archivedAt, NOW - H);
+  assert.equal(arch(NOW + 60_000)[0].since, NOW - H);
+});

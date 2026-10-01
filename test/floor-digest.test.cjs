@@ -124,3 +124,13 @@ test('no decisions: the digest is still written and god is not woken', (t) => {
   assert.equal(r.sent.length, 0);
   assert.match(fs.readFileSync(path.join(r.root, 'floor-digest.md'), 'utf8'), /## Decisions needed\n\nNone\./);
 });
+
+test('an answered-but-blocked card wakes god once per ANSWER: a new answer re-arms it (S3)', () => {
+  const ask = (since) => [{ cardId: 'Q', kind: 'ASK_ANSWERED_IDLE', agentId: 'jim', since, evidence: 'e', decision: true }];
+  let r = decideGodWake(decisionItems(ask(1000), [], NOW), empty, NOW, 0);
+  assert.deepEqual(r.wake.map((i) => i.id), ['ask_answered_idle:Q:1000']);
+  r = decideGodWake(decisionItems(ask(1000), [], NOW + 86_400_000), r.state, NOW + 86_400_000, 0);
+  assert.equal(r.wake.length, 0, 'the same answer never wakes again, on any day');
+  r = decideGodWake(decisionItems(ask(5000), [], NOW + 86_400_000), r.state, NOW + 86_400_000, 0);
+  assert.deepEqual(r.wake.map((i) => i.id), ['ask_answered_idle:Q:5000']);
+});

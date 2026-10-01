@@ -25,6 +25,9 @@ export interface BoardFlag {
   evidence: string;
   /** True when god must decide something (the digest wakes god only for these). */
   decision: boolean;
+  /** ASSIGNEE_ARCHIVED / DOWN: when the archive happened, if known (liveness archivedAt, or
+   *  the registry's lastSeen, which setArchived stamps at the archive). */
+  archivedAt?: number;
 }
 
 export interface BoardStaleConfig {
@@ -43,7 +46,7 @@ export const BOARD_STALE_DEFAULTS: BoardStaleConfig = {
   maxDoing: 3
 };
 
-export interface RegistryFacts { archived?: boolean; archiveReason?: string; onHold?: boolean }
+export interface RegistryFacts { archived?: boolean; archiveReason?: string; onHold?: boolean; lastSeen?: number }
 /** Pre-liveness facts from fleet.json: when the agent last used tokens (ms epoch, or null). */
 export interface FleetFacts { lastActiveAt: number | null; onHold?: boolean }
 export interface CardMetaFacts { statusSince: number; lastEditAt: number }
@@ -93,14 +96,17 @@ function agentFlag(card: Card, agent: string, input: DetectStaleInput, cfg: Boar
   if (lv?.lifecycle === 'DELETED') {
     return { ...base, kind: 'ASSIGNEE_ARCHIVED', since: lv.classifiedSince, evidence: `${agent} deleted`, decision: false };
   }
+  // A registry archive's time is its lastSeen (setArchived stamps it); stable across ticks.
+  const regAt = reg?.archived && typeof reg.lastSeen === 'number' ? reg.lastSeen : undefined;
   if ((lv?.lifecycle === 'ARCHIVED' && lv.archiveReason === 'explicit') || regArchive === 'explicit') {
-    const since = lv?.archivedAt ?? now;
-    return { ...base, kind: 'ASSIGNEE_ARCHIVED', since, evidence: `${agent} archived (explicit)`, decision: false };
+    const archivedAt = lv?.lifecycle === 'ARCHIVED' ? lv.archivedAt : regAt;
+    return { ...base, kind: 'ASSIGNEE_ARCHIVED', since: archivedAt ?? input.meta[card.id]?.statusSince ?? now,
+      evidence: `${agent} archived (explicit)`, decision: false, ...(archivedAt !== undefined ? { archivedAt } : {}) };
   }
   // 2. An orphan / pty-exit archive may be undone by a respawn: DOWN, never a move.
   if (lv?.lifecycle === 'ARCHIVED' || regArchive === 'down') {
     const reason = lv?.lifecycle === 'ARCHIVED' ? lv.archiveReason : reg?.archiveReason;
-    const since = lv?.archivedAt ?? lv?.classifiedSince ?? now;
+    const since = lv?.lifecycle === 'ARCHIVED' ? (lv.archivedAt ?? lv.classifiedSince) : (regAt ?? now);
     return { ...base, kind: 'ASSIGNEE_DOWN', since, evidence: `${agent} archived (${reason ?? 'unknown'})`, decision: now - since >= cfg.downDecisionMs };
   }
   // 3. Nobody by that name.
@@ -134,10 +140,13 @@ function agentFlag(card: Card, agent: string, input: DetectStaleInput, cfg: Boar
 }
 
 function answeredIdle(card: Card, now: number, cfg: BoardStaleConfig): BoardFlag | null {
+  // Jim S3: god parks a card it is deliberately holding ("parked": true); an answer god
+  // already resolved (resolvedBy) is not "answered, act on it".
+  if (card.parked === true) return null;
   const qa = Array.isArray(card.humanQA) ? card.humanQA as Array<Record<string, unknown>> : [];
   let latest: number | null = null;
   for (const e of qa) {
-    if (!e || typeof e !== 'object' || typeof e.a !== 'string' || !e.a || e.dismissedAt) continue;
+    if (!e || typeof e !== 'object' || typeof e.a !== 'string' || !e.a || e.dismissedAt || e.resolvedBy) continue;
     const t = typeof e.answeredAt === 'string' ? Date.parse(e.answeredAt) : NaN;
     if (!Number.isNaN(t) && (latest === null || t > latest)) latest = t;
   }
@@ -168,8 +177,10 @@ export function detectStale(input: DetectStaleInput): BoardFlag[] {
   }
   for (const [agent, list] of doingBy) {
     if (list.length <= cfg.maxDoing) continue;
+    // Stable across ticks: since the newest of the agent's doing cards entered doing.
+    const since = Math.max(...list.map((c) => input.meta[c.id]?.statusSince ?? input.now));
     for (const card of list) {
-      flags.push({ cardId: card.id, agentId: agent, kind: 'DOING_MANY', since: input.now,
+      flags.push({ cardId: card.id, agentId: agent, kind: 'DOING_MANY', since,
         evidence: `${agent} has ${list.length} doing cards (max ${cfg.maxDoing})`, decision: false });
     }
   }

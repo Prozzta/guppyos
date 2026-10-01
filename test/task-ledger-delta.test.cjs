@@ -74,3 +74,21 @@ test('every accepted write logs its source', (t) => {
   hive.patchTask('A', { status: 'doing' }, 'slack');
   assert.match(log(hive), /"kind":"tasks","count":1,"source":"slack"/);
 });
+
+test('a hand-made twin is never rewritten by an unrelated write; patch and delete act on the FIRST copy (S2, J17)', (t) => {
+  const hive = floor(t);
+  handWrite(hive, [card('X', { status: 'done', result: 'R1', notes: 'first' }), card('Y'), card('X', { status: 'todo' })]);
+  hive.patchTask('Y', { status: 'doing' }, 'ipc');
+  let list = hive.tasks().tasks;
+  assert.deepEqual(list[2], card('X', { status: 'todo' }), 'the twin keeps exactly its own fields');
+  hive.patchTask('X', { notes: 'patched' }, 'ipc');
+  list = hive.tasks().tasks;
+  assert.deepEqual([list[0].notes, list[2].notes], ['patched', undefined]);
+  assert.equal(hive.deleteTask('X', 'ipc'), true);
+  assert.deepEqual(hive.tasks().tasks.map((c) => `${c.id}:${c.status}`), ['Y:doing', 'X:todo'], 'only the first copy is deleted');
+});
+
+test('the voice path writes with source "voice" (J15)', () => {
+  const { readSource } = require('./read-source.cjs');
+  assert.match(readSource('src/main/index.ts'), /hiveWriteTasks: \(tasks\) => hive\.writeTasks\(tasks, 'voice'\)/);
+});

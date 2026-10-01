@@ -67,7 +67,11 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
   const items: DecisionItem[] = [];
   for (const f of flags) {
     if (!f.decision) continue;
-    const id = f.kind === 'STALE' ? `stale:${f.cardId}:${day(now)}` : `${f.kind.toLowerCase()}:${f.cardId}`;
+    // STALE re-arms daily; ASK_ANSWERED_IDLE re-arms only on a NEW answer (its since = the
+    // latest answer's time), so an old answer wakes god once, and "parked": true silences it.
+    const id = f.kind === 'STALE' ? `stale:${f.cardId}:${day(now)}`
+      : f.kind === 'ASK_ANSWERED_IDLE' ? `ask_answered_idle:${f.cardId}:${f.since}`
+        : `${f.kind.toLowerCase()}:${f.cardId}`;
     const ask: Record<string, string> = {
       STALE: 'still doing?',
       ASSIGNEE_UNKNOWN: 'reassign?',

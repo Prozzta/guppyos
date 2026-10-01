@@ -212,7 +212,8 @@ export class TaskLedgerGuard {
         change.statusChanged.push({ id, from: prior.status, to: status });
         prior.status = status;
         prior.statusSince = at;
-        prior.statusSinceExact = true;
+        // Jim S4: a change found at start happened while nobody watched: its time is bounded.
+        prior.statusSinceExact = watching;
       }
     }
     for (const id of Object.keys(meta.cards)) {

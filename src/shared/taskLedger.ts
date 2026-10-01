@@ -56,15 +56,23 @@ function idOf(value: unknown): string | null {
 export function mergeTaskLedger(existing: unknown, incoming: unknown): unknown[] {
   const incomingList = Array.isArray(incoming) ? incoming : [];
   const existingList = Array.isArray(existing) ? existing : [];
-  const byId = new Map<string, RawTask>();
+  // Pair by OCCURRENCE (Jim S2): the nth incoming card with an id merges with the nth
+  // existing card with that id, so a hand-made duplicate's twin never inherits fields from
+  // the first copy on an unrelated write. Without duplicates this is the plain by-id merge.
+  const byId = new Map<string, RawTask[]>();
   for (const entry of existingList) {
     const id = idOf(entry);
-    if (id && !byId.has(id)) byId.set(id, entry as RawTask);
+    if (!id) continue;
+    const list = byId.get(id);
+    if (list) list.push(entry as RawTask); else byId.set(id, [entry as RawTask]);
   }
+  const seen = new Map<string, number>();
   return incomingList.map((entry) => {
     const id = idOf(entry);
     if (!id) return entry;
-    const prior = byId.get(id);
+    const n = seen.get(id) ?? 0;
+    seen.set(id, n + 1);
+    const prior = byId.get(id)?.[n];
     return prior ? { ...prior, ...(entry as RawTask) } : entry;
   });
 }

@@ -110,3 +110,31 @@ test('wired as in the app (guard change -> tick), the move happens once (the nes
   assert.equal(r.card('A').notes.split('\n').length, 1);
   assert.equal(r.log().filter((l) => l.kind === 'board-auto').length, 1);
 });
+
+test('wired as in the app, N cards of one archived agent = exactly N writes and N board-auto rows (Jim R1)', (t) => {
+  const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'explicit', lastSeen: NOW - 1000 }) },
+    ['A', 'B', 'C'].map((id) => ({ id, title: id, status: 'doing', assignee: 'jim' })));
+  r.hive.ledgerGuard.onChange(() => r.monitor.tick());
+  const writes = () => r.log().filter((l) => l.kind === 'tasks').length;
+  const before = writes();
+  r.monitor.tick();
+  assert.equal(writes() - before, 3, 'one write per card');
+  assert.deepEqual(r.log().filter((l) => l.kind === 'board-auto').map((l) => l.cardId), ['A', 'B', 'C']);
+  for (const id of ['A', 'B', 'C']) {
+    assert.equal(r.card(id).status, 'todo');
+    assert.equal(r.card(id).notes.split('\n').length, 1, `${id}: one note line`);
+    assert.match(r.card(id).notes, /archived \(explicit\) at 2026-10-01T11:59:59\.000Z\. Assignee kept\.$/);
+  }
+});
+
+test('the flags file is not rewritten when only time passes (K14)', (t) => {
+  const clock = { now: NOW };
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'ghost' }]);
+  const monitor = new BoardMonitor({ hive: r.hive, now: () => clock.now });
+  monitor.tick();
+  const file = path.join(r.root, 'state', 'board-flags.json');
+  const first = fs.readFileSync(file, 'utf8');
+  clock.now += 10 * 60_000;
+  monitor.tick();
+  assert.equal(fs.readFileSync(file, 'utf8'), first);
+});

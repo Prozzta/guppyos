@@ -157,7 +157,45 @@ test('a failed API write records nothing (Jim nit a)', (t) => {
 test('integrityIssues() carries a ledger error as a non-pausing notice', (t) => {
   const { hive, file } = hiveRig(t);
   fs.writeFileSync(file, JSON.stringify({ tasks: [card('A'), card('A')] }, null, 2));
+  assert.equal(hive.integrityIssues().find((i) => i.file === 'tasks.json'), undefined,
+    'Jim S1: the banner poll returns the CACHED result; it never re-reads the 1.85 MB ledger');
+  hive.ledgerGuard.check(); // the watcher / poll / API write path
   const issue = hive.integrityIssues().find((i) => i.file === 'tasks.json');
   assert.ok(issue && issue.notice && /duplicate id A/.test(issue.notice));
   assert.equal(issue.quarantine, null);
+});
+
+test('a ledger with only warnings raises no notice, so a permanent warning never pins the banner (J11)', (t) => {
+  const r = rig(t);
+  const long = 'z'.repeat(90);
+  r.write([card('A', { description: long }), card('B', { description: long, assignee: 'ghost' })]);
+  r.guard.check();
+  assert.equal(r.guard.issues().length, 2);
+  assert.equal(r.guard.integrityNotice(), null);
+});
+
+test('the sidecar forgets removed cards and keeps at most HISTORY_KEEP status changes (J8, J9)', (t) => {
+  const { HISTORY_KEEP } = loadTs('src/main/taskLedgerGuard.ts');
+  const r = rig(t);
+  r.write([card('A'), card('GONE')]);
+  r.guard.check();
+  for (let i = 0; i < HISTORY_KEEP + 5; i++) {
+    r.clock.now += 1000;
+    r.write([card('A', { status: i % 2 ? 'todo' : 'doing' })]);
+    r.guard.check();
+  }
+  const m = r.meta();
+  assert.deepEqual(Object.keys(m.cards), ['A']);
+  assert.equal(m.cards.A.history.length, HISTORY_KEEP);
+});
+
+test('a status change found at app start is bounded, not exact (Jim S4)', (t) => {
+  const r = rig(t);
+  r.write([card('A')]);
+  r.guard.check();
+  r.write([card('A', { status: 'doing' })]); // changed while the app was closed
+  const restarted = new TaskLedgerGuard({ root: () => r.root, agentIds: () => new Set(), appendLog: () => {}, now: () => r.clock.now + 5000 });
+  restarted.check();
+  const a = restarted.taskMeta().cards.A;
+  assert.deepEqual([a.status, a.statusSinceExact], ['doing', false]);
 });

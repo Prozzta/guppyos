@@ -47,8 +47,9 @@ function isLiveness(v: unknown): v is LivenessV1 {
     && typeof r.classification === 'string' && typeof r.classifiedSince === 'number';
 }
 
-export function autoMoveNote(at: number, agentId: string, archivedAt: number): string {
-  return `${new Date(at).toISOString()} harness: doing -> todo: assignee ${agentId} archived (explicit) at ${new Date(archivedAt).toISOString()}. Assignee kept.`;
+export function autoMoveNote(at: number, agentId: string, archivedAt: number | undefined): string {
+  const when = archivedAt !== undefined ? ` at ${new Date(archivedAt).toISOString()}` : '';
+  return `${new Date(at).toISOString()} harness: doing -> todo: assignee ${agentId} archived (explicit)${when}. Assignee kept.`;
 }
 
 export class BoardMonitor {
@@ -56,6 +57,8 @@ export class BoardMonitor {
   private keys = new Set<string>();
   private lastPublished = '';
   private timer: ReturnType<typeof setInterval> | null = null;
+  private running = false;
+  private again = false;
 
   constructor(private readonly opts: BoardMonitorOptions) {}
 
@@ -100,10 +103,26 @@ export class BoardMonitor {
     return { flags, tasks };
   }
 
-  /** Run once: detect, apply the one auto-move, publish, log changes. */
-  /** Run once. The auto-move's own write notifies the guard, which runs a nested tick; that
-   *  tick reads the already-moved card (todo), so it finds nothing to move. */
+  /**
+   * Run: detect, apply the one auto-move, publish, log changes.
+   *
+   * Jim R1: NOT re-entrant. The auto-move's own write notifies the guard, whose listener
+   * calls tick() again on the same stack; that nested call only marks the run dirty and
+   * returns, and the outer tick re-runs once after its loop. Without the latch a nested
+   * tick moved the remaining cards and the outer loop re-patched them from its stale
+   * snapshot: N(N+1)/2 writes and board-auto rows for N cards.
+   */
   tick(): BoardFlag[] {
+    if (this.running) { this.again = true; return this.flags(); }
+    this.running = true;
+    try {
+      let flags: BoardFlag[];
+      do { this.again = false; flags = this.tickOnce(); } while (this.again);
+      return flags;
+    } finally { this.running = false; }
+  }
+
+  private tickOnce(): BoardFlag[] {
     const { hive } = this.opts;
     const root = hive.root();
     if (!root) return [];
@@ -119,7 +138,7 @@ export class BoardMonitor {
         // Idempotent by construction: the detector flags only DOING cards, and this list was
         // computed from the same ledger read, so a moved (todo) card is never flagged again.
         if (!card) continue;
-        const line = autoMoveNote(now, f.agentId, f.since);
+        const line = autoMoveNote(now, f.agentId, f.archivedAt);
         const notes = typeof card.notes === 'string' && card.notes ? `${card.notes}\n${line}` : line;
         try {
           if (hive.patchTask(f.cardId, { status: 'todo', notes }, 'board-auto')) {
@@ -147,7 +166,9 @@ export class BoardMonitor {
     }
     this.keys = keys;
     this.current = flags;
-    const body = JSON.stringify(flags);
+    // K14: republish only when a flag's identity, time or decision changed. The evidence
+    // text carries rolling ages ("idle 6.1 h"), which alone must not rewrite the file.
+    const body = JSON.stringify(flags.map((f) => [f.kind, f.cardId, f.agentId, f.since, f.decision]));
     if (body !== this.lastPublished) {
       this.lastPublished = body;
       try {
