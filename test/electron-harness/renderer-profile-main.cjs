@@ -68,7 +68,13 @@ async function measured(fn) {
   try { const r = await fn(); return { r, worstGapMs: Math.max(worst, Date.now() - last) }; } finally { clearInterval(tick); }
 }
 
-async function scenario(name, { arm = true, busy = false } = {}) {
+/** RPROF-LOAD (1.1.76 gate #4, god ruling): the busy and idle arms prove the probe NAMES the loop /
+ *  profiles and leaves the page answering, not that the 5 s production budget suffices under any
+ *  load (a loaded gate ran it out at profile-stop). They get a hang-guard-sized budget; the
+ *  production default (PROFILE_TIMEOUT_MS) is pinned by the unarmed arm, which keeps it. */
+const HANG_GUARD_CAPTURE_MS = 25_000;
+
+async function scenario(name, { arm = true, busy = false, timeoutMs = undefined } = {}) {
   const win = new BrowserWindow({ show: false, width: 400, height: 300, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } });
   const wc = win.webContents;
   const probe = new R.RendererProbe(wc.debugger, { devToolsOpen: () => wc.isDevToolsOpened() });
@@ -79,13 +85,13 @@ async function scenario(name, { arm = true, busy = false } = {}) {
   if (busy) { wc.send('page:busy'); await new Promise((r) => setTimeout(r, 700)); }
   const pid = wc.getOSProcessId();
   const dir = join(sandbox, 'renderer-profiles');
-  const { r, worstGapMs } = await measured(() => probe.capture({ write: (json) => R.saveRendererProfile(dir, pid, json) }));
+  const { r, worstGapMs } = await measured(() => probe.capture({ write: (json) => R.saveRendererProfile(dir, pid, json), ...(timeoutMs === undefined ? {} : { timeoutMs }) }));
   let fileNodes = null;
   if (r.file) { try { fileNodes = JSON.parse(readFileSync(r.file, 'utf8')).nodes.length; } catch { fileNodes = -1; } }
   // Not left paused: an idle page must still answer; a busy one must still be allocating (alive).
   const answers = busy ? null : await Promise.race([wc.executeJavaScript('window.ping()'), new Promise((res) => setTimeout(() => res('no-answer'), 30000))]);
   const attachedAfter = wc.debugger.isAttached();
-  const out = { name, armed, pid, profile: { ...r, file: r.file ? 'written' : null }, fileNodes, worstGapMs, answers, attachedAfter, foreignResumes: probe.foreignResumes };
+  const out = { name, armed, pid, captureTimeoutMs: timeoutMs ?? null, profile: { ...r, file: r.file ? 'written' : null }, fileNodes, worstGapMs, answers, attachedAfter, foreignResumes: probe.foreignResumes };
   probe.giveUp();
   win.destroy();
   return out;
@@ -110,9 +116,9 @@ async function foreign() {
 
 app.whenReady().then(async () => {
   try {
-    const busy = await scenario('busy', { busy: true });
-    const unarmed = await scenario('unarmed', { arm: false, busy: true });
-    const idle = await scenario('idle');
+    const busy = await scenario('busy', { busy: true, timeoutMs: HANG_GUARD_CAPTURE_MS });
+    const unarmed = await scenario('unarmed', { arm: false, busy: true });   // the production default
+    const idle = await scenario('idle', { timeoutMs: HANG_GUARD_CAPTURE_MS });
     const dbgStmt = await foreign();
     finish({ ok: true, busy, unarmed, idle, foreign: dbgStmt });
   } catch (e) {
