@@ -20,6 +20,9 @@
  *
  * Deletion deliberately still works: a card absent from the incoming list is
  * gone. Merging protects fields, never card membership.
+ *
+ * ZT-I3 adds the ledger's validity rules (`validateLedger`) and the one
+ * duplicate-id rule every reader shares: the first occurrence wins.
  */
 
 /** One raw ledger entry as it sits on disk — an object of unknown fields. */
@@ -84,4 +87,155 @@ export function patchTaskInLedger(
 ): unknown[] {
   const list = Array.isArray(rawTasks) ? rawTasks : [];
   return list.map((entry) => (idOf(entry) === id ? { ...(entry as RawTask), ...patch } : entry));
+}
+
+/**
+ * ZT-I3 / TASKS-DUP-ID-LOOP: the ONE duplicate-id rule, shared by main and the renderer.
+ * The FIRST card with an id is canonical; a later card with the same id is a duplicate,
+ * reported (`validateLedger`), never silently preferred. The office floor keyed its
+ * previous poll by the LAST copy, so a done card and its todo twin replayed todo -> done
+ * on every poll. Keying every reader by the first copy makes each poll see one card.
+ */
+export function firstOccurrenceById<T>(list: readonly T[], idOfItem: (item: T) => string | null): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of list) {
+    const id = idOfItem(item);
+    if (id !== null) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+/** One card as the office floor animates it. */
+export interface LedgerCardState { id: string; status: string; assignee?: string }
+
+/**
+ * The cards whose status or assignee changed between two polls, each with its previous
+ * state (undefined for a new card). Both polls are keyed by the FIRST occurrence of an
+ * id, so a duplicate id can never make a card look changed on every poll
+ * (TASKS-DUP-ID-LOOP: the floor replayed "filing it as done" forever).
+ */
+export function ledgerChanges<T extends LedgerCardState>(prev: readonly T[], next: readonly T[]): Array<{ card: T; old: T | undefined }> {
+  const before = new Map<string, T>();
+  for (const card of firstOccurrenceById(prev, (c) => c.id)) before.set(card.id, card);
+  const out: Array<{ card: T; old: T | undefined }> = [];
+  for (const card of firstOccurrenceById(next, (c) => c.id)) {
+    const old = before.get(card.id);
+    if (old && old.status === card.status && old.assignee === card.assignee) continue;
+    out.push({ card, old });
+  }
+  return out;
+}
+
+/** The card ids `incoming` repeats, with every index each one sits at (first included). */
+export function duplicateIds(list: unknown): Map<string, number[]> {
+  const at = new Map<string, number[]>();
+  (Array.isArray(list) ? list : []).forEach((entry, index) => {
+    const id = idOf(entry);
+    if (!id) return;
+    const where = at.get(id);
+    if (where) where.push(index); else at.set(id, [index]);
+  });
+  for (const [id, where] of [...at]) if (where.length < 2) at.delete(id);
+  return at;
+}
+
+export type LedgerIssueLevel = 'error' | 'warning';
+
+/** One finding. `key` is stable across unrelated edits (no indexes in it), so a writer can
+ *  tell an issue it would INTRODUCE from one already in the file (Jim C1). */
+export interface LedgerIssue {
+  key: string;
+  level: LedgerIssueLevel;
+  cardId: string | null;
+  message: string;
+}
+
+export const LEDGER_STATUSES: readonly string[] = ['todo', 'doing', 'blocked', 'done'];
+/** The string priorities god writes (the mapping the renderer already uses). */
+export const LEDGER_PRIORITY_WORDS: readonly string[] = ['critical', 'high', 'medium', 'low'];
+/** A copied description only counts when it is long enough to be a real copy. */
+export const DUPLICATE_DESCRIPTION_MIN = 80;
+
+function listOf(ledger: unknown): unknown[] {
+  if (Array.isArray(ledger)) return ledger;
+  if (isRawTask(ledger) && Array.isArray(ledger.tasks)) return ledger.tasks;
+  return [];
+}
+
+/**
+ * Validate the whole ledger (ZT-I3 §3.1). The rules are fitted to the ledger god actually
+ * writes: string priorities, `deps` as well as `dependsOn`, an optional `createdAt`, and
+ * `"unassigned"` meaning no assignee. Only a missing/duplicate id and an unknown status are
+ * errors; everything else is a warning, which never blocks a write.
+ *
+ * `agentIds` is the registry's agent ids; when it is omitted the assignee check is skipped.
+ */
+export function validateLedger(ledger: unknown, agentIds?: ReadonlySet<string>): LedgerIssue[] {
+  const list = listOf(ledger);
+  const issues: LedgerIssue[] = [];
+  const ids = new Set<string>();
+  for (const entry of list) { const id = idOf(entry); if (id) ids.add(id); }
+
+  for (const [id, where] of duplicateIds(list)) {
+    issues.push({ key: `dup:${id}`, level: 'error', cardId: id,
+      message: `duplicate id ${id} at cards ${where.map((i) => `#${i}`).join(', ')} (the first is canonical)` });
+  }
+  const byDescription = new Map<string, string[]>();
+  let missing = 0;
+  list.forEach((entry, index) => {
+    const id = idOf(entry);
+    if (!id) {
+      // Keyed by occurrence count, not index, so an unrelated insert above it keeps the key.
+      missing++;
+      issues.push({ key: `noid:${missing}`, level: 'error', cardId: null, message: `card #${index} has no id` });
+      return;
+    }
+    const card = entry as RawTask;
+    if (typeof card.status !== 'string' || !LEDGER_STATUSES.includes(card.status)) {
+      issues.push({ key: `status:${id}`, level: 'error', cardId: id,
+        message: `card ${id} has status ${JSON.stringify(card.status ?? null)}; expected todo, doing, blocked or done` });
+    }
+    const assignee = card.assignee;
+    if (agentIds && typeof assignee === 'string' && assignee && assignee !== 'unassigned' && !agentIds.has(assignee)) {
+      issues.push({ key: `assignee:${id}`, level: 'warning', cardId: id, message: `card ${id} is assigned to ${assignee}, who is not a registered agent` });
+    }
+    const deps = card.dependsOn ?? card.deps;
+    if (Array.isArray(deps)) {
+      for (const dep of deps) {
+        if (typeof dep === 'string' && dep && !ids.has(dep)) {
+          issues.push({ key: `dep:${id}:${dep}`, level: 'warning', cardId: id, message: `card ${id} depends on ${dep}, which is not on the board` });
+        }
+      }
+    }
+    const priority = card.priority;
+    if (priority !== undefined && priority !== null && typeof priority !== 'number'
+      && !(typeof priority === 'string' && LEDGER_PRIORITY_WORDS.includes(priority))) {
+      issues.push({ key: `priority:${id}`, level: 'warning', cardId: id, message: `card ${id} has priority ${JSON.stringify(priority)}` });
+    }
+    const created = card.createdAt;
+    if (created !== undefined && created !== null && (typeof created !== 'string' || Number.isNaN(Date.parse(created)))) {
+      issues.push({ key: `createdAt:${id}`, level: 'warning', cardId: id, message: `card ${id} has an unparseable createdAt ${JSON.stringify(created)}` });
+    }
+    if (typeof card.description === 'string' && card.description.length >= DUPLICATE_DESCRIPTION_MIN) {
+      const group = byDescription.get(card.description);
+      if (group) { if (!group.includes(id)) group.push(id); } else byDescription.set(card.description, [id]);
+    }
+  });
+  for (const group of byDescription.values()) {
+    if (group.length < 2) continue;
+    issues.push({ key: `desc:${[...group].sort().join('+')}`, level: 'warning', cardId: group[0],
+      message: `cards ${group.join(', ')} have the same description (copied?)` });
+  }
+  return issues;
+}
+
+/** The ERROR issues in `after` whose key `before` lacks: what a write would introduce (Jim C1). */
+export function introducedErrors(before: readonly LedgerIssue[], after: readonly LedgerIssue[]): LedgerIssue[] {
+  const had = new Set(before.filter((i) => i.level === 'error').map((i) => i.key));
+  return after.filter((i) => i.level === 'error' && !had.has(i.key));
 }

@@ -6,6 +6,7 @@ import { Icon } from './Icon';
 import { useStore } from '@/store/store';
 import { storedHumanQA, type HumanQAFields } from './humanQuestion';
 import { SafeMarkdown } from './HumanQuestionCard';
+import { firstOccurrenceById } from '@shared/taskLedger';
 
 /** A card on the task kanban. Mirrors HiveTask in the main/preload process —
  *  re-declared locally so the renderer doesn't reach into the preload package
@@ -76,7 +77,8 @@ export function parseTasks(raw: unknown): HiveTask[] {
   const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
     ? (raw as { tasks: unknown[] }).tasks
     : [];
-  return list
+  // TASKS-DUP-ID-LOOP: a duplicate id shows once, as its FIRST card (the shared ledger rule).
+  return firstOccurrenceById(list, (t) => (t && typeof t === 'object' && typeof (t as { id?: unknown }).id === 'string' && (t as { id: string }).id) ? (t as { id: string }).id : null)
     .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
     .map((t, i) => ({
       id: typeof t.id === 'string' && t.id

@@ -58,7 +58,8 @@ import {
 import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { preferredAgentRole } from '../shared/agentRole';
-import { mergeTaskLedger } from '../shared/taskLedger';
+import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
+import { TaskLedgerGuard, type TaskEditSource } from './taskLedgerGuard';
 import { expandTilde } from './fs';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -293,6 +294,14 @@ export interface HiveIntegrityIssue {
   repaired?: boolean;
   /** ZT-I1-MAIL N1: a notice that is not a damaged file (mail-evidence-missing); nothing is paused. */
   notice?: string;
+}
+
+/** ZT-I3: an API write refused because it would INTRODUCE a ledger error (a new duplicate id,
+ *  an unknown status). Errors already in the file never refuse a write (Jim C1). */
+export class TaskLedgerInvalidError extends Error {
+  constructor(readonly issues: LedgerIssue[]) {
+    super(`Task ledger write refused: ${issues.map((i) => i.message).join('; ')}`);
+  }
 }
 
 class HiveAuthorityCorruptError extends Error {
@@ -616,6 +625,14 @@ export class HiveManager {
   /** Sources currently known corrupt. Kept separately from the fingerprint so
    * the renderer can make the safety stop visible to the human. */
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
+  /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
+  readonly ledgerGuard = new TaskLedgerGuard({
+    root: () => this.root(),
+    agentIds: () => {
+      try { return new Set(Object.keys(this.registry().agents)); } catch { return new Set<string>(); }
+    },
+    appendLog: (row) => this.appendLog(row)
+  });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
   /** Bumped by start/stop, so a scan queued before a stop never runs after it. */
@@ -3063,7 +3080,14 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry();
     this.tasks();
-    return [...this.authorityIssues.values(), ...this.mail.integrityIssues()];
+    // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
+    // the file is not reverted, god fixes it by hand.
+    try { this.ledgerGuard.check(); } catch { /* the guard is best-effort here */ }
+    const ledgerNotice = this.ledgerGuard.integrityNotice();
+    const ledger: HiveIntegrityIssue[] = ledgerNotice
+      ? [{ file: 'tasks.json', quarantine: null, error: 'task ledger has errors', notice: ledgerNotice }]
+      : [];
+    return [...this.authorityIssues.values(), ...ledger, ...this.mail.integrityIssues()];
   }
 
   private emptyRegistry(): Registry {
@@ -3092,49 +3116,72 @@ export class HiveManager {
    *  Deleting a card still works: the incoming list IS the membership, so a card
    *  dropped from it (TasksKanban dismiss, the voice delete_task action) is
    *  gone. Merging protects fields, never card membership. */
-  writeTasks(tasks: HiveTask[]): void {
+  writeTasks(tasks: HiveTask[], source: TaskEditSource = 'ipc'): void {
     const root = this.root();
     if (!root) return;
     this.ensureHive();
     const path = join(root, 'tasks.json');
     const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path, () => ({ tasks: [] }));
     const merged = mergeTaskLedger(current?.tasks, tasks);
-    this.atomicWriteJson(path, { tasks: merged });
-    this.appendLog({ kind: 'tasks', count: merged.length });
+    // ZT-I3 (Jim C1): validate the CHANGE, not the file. Refuse only an error this write
+    // would introduce; an error a hand edit already put in the file never blocks an
+    // unrelated UI, Slack, webhook, voice or auto-move write.
+    const introduced = introducedErrors(validateLedger(current?.tasks), validateLedger(merged));
+    if (introduced.length > 0) {
+      this.appendLog({ kind: 'task-ledger-refused', source, errors: introduced.map((i) => i.key) });
+      throw new TaskLedgerInvalidError(introduced);
+    }
+    const data = { tasks: merged };
+    this.atomicWriteJson(path, data);
+    // Jim C4: recorded only after the rename succeeded (a throw above records nothing), with
+    // the exact bytes atomicWriteJson wrote, so the watcher does not re-attribute it to 'file'.
+    try { this.ledgerGuard.recordApiWrite(JSON.stringify(data, null, 2), merged, source); }
+    catch (e) { try { this.appendLog({ kind: 'task-meta-write-failed', error: String(e) }); } catch { /* noop */ } }
+    this.appendLog({ kind: 'tasks', count: merged.length, source });
   }
 
   /** Append one card against the latest on-disk ledger. Renderer callers must
    *  use this instead of re-writing a collection they read before another
    *  source (webhook, Slack, god, voice) added work. Idempotent by task id. */
-  addTask(task: HiveTask): boolean {
+  addTask(task: HiveTask, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     if (tasks.some((current) => current?.id === task.id)) return false;
-    this.writeTasks([...tasks, task]);
+    this.writeTasks([...tasks, task], source);
     return true;
   }
 
   /** Patch one card against the latest on-disk ledger, preserving unrelated
-   *  cards and fields (notably webhook.tokenHash and Slack thread metadata). */
-  patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>): boolean {
+   *  cards and fields (notably webhook.tokenHash and Slack thread metadata).
+   *  With duplicate ids the FIRST card is the one patched (the shared rule). */
+  patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const index = tasks.findIndex((task) => task?.id === id);
     if (index < 0) return false;
     const next = tasks.slice();
     next[index] = { ...tasks[index], ...patch, id };
-    this.writeTasks(next);
+    this.writeTasks(next, source);
     return true;
   }
 
   /** Delete only the named card from the latest on-disk ledger. */
-  deleteTask(id: string): boolean {
+  deleteTask(id: string, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const next = tasks.filter((task) => task?.id !== id);
     if (next.length === tasks.length) return false;
-    this.writeTasks(next);
+    this.writeTasks(next, source);
     return true;
+  }
+
+  /** ZT-I3: start watching tasks.json (the guard's first check runs at once). */
+  startLedgerGuard(): void {
+    this.ledgerGuard.reset();
+    this.ledgerGuard.start();
+  }
+  stopLedgerGuard(): void {
+    this.ledgerGuard.reset();
   }
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');

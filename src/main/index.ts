@@ -2802,7 +2802,7 @@ function dispatchWebhookWork(arg: {
     // id, so a concurrent card writer (Slack, god, voice, another webhook) can't
     // have its card lost to our stale whole-ledger overwrite. (writeTasks(...existing)
     // recreated exactly that race.) A fresh taskId never collides, so this always adds.
-    hive.addTask(card);
+    hive.addTask(card, 'webhook');
   } catch (e) {
     console.error('[webhook] could not create task card:', e instanceof Error ? e.message : e);
     return false;
@@ -4445,6 +4445,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[changeHome] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
@@ -5042,6 +5043,7 @@ function teardownAndQuit(): void {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[quit] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
@@ -5122,6 +5124,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[reset] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
@@ -6070,7 +6073,7 @@ registerRealtimeActionIpc({
   hiveEnabled: () => hive.enabled(),
   hiveSend: (partial, from) => hive.send(partial, from),
   hiveTasks: () => hive.tasks(),
-  hiveWriteTasks: (tasks) => hive.writeTasks(tasks),
+  hiveWriteTasks: (tasks) => hive.writeTasks(tasks, 'voice'),
   hiveRegistry: () => hive.registry(),
   hiveLog: (event) => hive.appendLog(event),
   controlPause: (id, on) => control.pause(id, on),
@@ -6708,6 +6711,8 @@ function bootstrapHiveServices(): void {
   try { hive.migrateMail(); } catch (e) { try { hive.appendLog({ kind: 'mail-migration-error', error: String(e).slice(0, 300) }); } catch { /* best-effort */ } }
   archiveOrphanedAgents(); // #57/#58: archive stale archived:false entries with no live PTY
   hive.startRouter();
+  // ZT-I3: the task-ledger guard (watch only; it never writes tasks.json).
+  try { hive.startLedgerGuard(); } catch (e) { console.error('[hive] startLedgerGuard:', e); }
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers
   // Phase 2: the loopback secret broker. Bind it BEFORE workers spawn so each spawn can
   // be granted a capability token + the broker URL in its env. Loopback-only, idempotent.
