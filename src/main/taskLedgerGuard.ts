@@ -98,7 +98,15 @@ export class TaskLedgerGuard {
   private debounce: ReturnType<typeof setTimeout> | null = null;
   private poll: ReturnType<typeof setInterval> | null = null;
 
+  private readonly listeners = new Set<(change: TaskLedgerChange) => void>();
+
   constructor(private readonly opts: TaskLedgerGuardOptions) {}
+
+  /** Subscribe to applied changes (the board monitor re-runs on each). Returns unsubscribe. */
+  onChange(listener: (change: TaskLedgerChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
 
   private now(): number { return (this.opts.now ?? Date.now)(); }
 
@@ -219,7 +227,9 @@ export class TaskLedgerGuard {
       } catch (error) {
         try { this.opts.appendLog({ kind: 'task-meta-write-failed', error: String(error) }); } catch { /* noop */ }
       }
-      try { this.opts.onChange?.(change); } catch { /* a listener never breaks the guard */ }
+      for (const listener of [this.opts.onChange, ...this.listeners]) {
+        try { listener?.(change); } catch { /* a listener never breaks the guard */ }
+      }
     }
     return change;
   }

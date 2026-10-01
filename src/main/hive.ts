@@ -185,6 +185,9 @@ export interface HiveTask {
    *  once and never persisted), so a GET status lookup can match by hashing the
    *  presented token. Read-only capability: it never widens routing or exposure. */
   webhook?: { tokenHash: string };
+  /** Free-text history god (and the harness's one auto-move, ZT-I3 §3.3) appends to.
+   *  Typed for Jim C8; the raw patch path keeps every other untyped field. */
+  notes?: string;
 }
 
 export interface AgentMeta {

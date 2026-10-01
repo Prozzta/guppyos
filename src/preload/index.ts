@@ -973,6 +973,8 @@ const api = {
     ipcRenderer.invoke('hive:setAgentHold', id, hold),
   hiveBoard: (): Promise<string> => ipcRenderer.invoke('hive:board'),
   hiveTasks: (): Promise<unknown> => ipcRenderer.invoke('hive:tasks'),
+  /** ZT-I3: the board monitor's flags (BoardFlag[]). */
+  hiveBoardFlags: (): Promise<unknown> => ipcRenderer.invoke('hive:boardFlags'),
   hiveLog: (n?: number): Promise<unknown[]> => ipcRenderer.invoke('hive:log', n ?? 200),
   hiveMemory: (id: string): Promise<string> => ipcRenderer.invoke('hive:memory', id),
   /** ZT-I1-MAIL §11.8 #15: inbox/ + inbox/.done/ (bounded), each with its ledger state. */

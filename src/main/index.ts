@@ -55,6 +55,7 @@ import {
   addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe,
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
+import { BoardMonitor } from './boardMonitor';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { actionableBacklog, actionablePending, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
@@ -411,6 +412,10 @@ const hive = new HiveManager(
   // else a HiveManager is constructed, the default refuses. See mayWriteGlobalConfig.
   (home) => samePath(home, readConfig().harnessHome)
 );
+/** ZT-I3 §3.2-3.3: the board monitor (stale flags + the one explicit-archive auto-move). It
+ *  re-runs on every applied ledger change, and on its own 60 s tick. */
+const boardMonitor = new BoardMonitor({ hive });
+hive.ledgerGuard.onChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
 // #7C — operator control state (pause/gate/steer/halt), read by the HookServer
 // when deciding hook returns.
 const control = new ControlRegistry();
@@ -4446,6 +4451,7 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[changeHome] boardMonitor.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
@@ -4681,6 +4687,8 @@ ipcMain.handle('hive:setAgentHold', (_evt, id: unknown, hold: unknown) => {
 });
 ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
+// ZT-I3: the board monitor's current flags (stale, archived, down, stuck, ask-answered).
+ipcMain.handle('hive:boardFlags', () => boardMonitor.flags());
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 // ZT-I1-MAIL §11.8 #15: the Threads panel reads inbox/ AND inbox/.done/ with the ledger state as a
@@ -5044,6 +5052,7 @@ function teardownAndQuit(): void {
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
@@ -5125,6 +5134,7 @@ ipcMain.handle('app:resetAll', async () => {
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
   try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
@@ -6713,6 +6723,7 @@ function bootstrapHiveServices(): void {
   hive.startRouter();
   // ZT-I3: the task-ledger guard (watch only; it never writes tasks.json).
   try { hive.startLedgerGuard(); } catch (e) { console.error('[hive] startLedgerGuard:', e); }
+  try { boardMonitor.start(); } catch (e) { console.error('[hive] boardMonitor.start:', e); }
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers
   // Phase 2: the loopback secret broker. Bind it BEFORE workers spawn so each spawn can
   // be granted a capability token + the broker URL in its env. Loopback-only, idempotent.
