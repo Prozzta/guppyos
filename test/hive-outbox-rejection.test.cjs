@@ -14,6 +14,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
+const { readSource } = require('./read-source.cjs');
 
 const { HiveManager } = loadTs('src/main/hive.ts');
 const afterDebounce = () => new Promise((resolve) => setTimeout(resolve, 300));
@@ -22,7 +23,7 @@ const olderThanFreshWriteGrace = (file) => {
   fs.utimesSync(file, old, old);
 };
 
-async function floor(t) {
+async function floor(t, Manager = HiveManager) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-outbox-rejection-'));
   const priorHome = process.env.HOME;
   const priorUserProfile = process.env.USERPROFILE;
@@ -39,7 +40,7 @@ async function floor(t) {
     fs.rmSync(home, { recursive: true, force: true });
   });
   const events = [];
-  const hive = new HiveManager(() => home, (channel, payload) => { events.push({ channel, payload }); });
+  const hive = new Manager(() => home, (channel, payload) => { events.push({ channel, payload }); });
   await hive.ensureAgent({ id: 'god-1', name: 'Michael', provider: 'claude', cwd: home, isGod: true });
   await hive.ensureAgent({ id: 'jim-1', name: 'Jim', provider: 'claude', cwd: home });
   return { hive, events, outbox: path.join(hive.root(), 'agents', 'jim-1', 'outbox') };
@@ -134,6 +135,70 @@ test('parseable but unroutable files are rejected once with a sender notice', as
   assert.equal(hive.routeOnce(), 0, 'archived files cannot repeatedly reject');
   assert.equal(hive.inbox('jim-1').length, cases.length);
   assert.equal(events.filter(({ channel, payload }) => channel === 'hive:message' && payload.to === 'jim-1').length, cases.length);
+});
+
+async function replyLinkGapKiller(t, Manager) {
+  const { hive, outbox } = await floor(t, Manager);
+  const request = hive.send({ to: 'jim-1', act: 'request', subject: 'build the fix', body: 'please build it' }, 'god-1');
+  const cases = [
+    ['unknown-act.json', { to: 'god-1', act: 'reply', subject: 'built', body: 'done', in_reply_to: request.id }, /act must be one of/],
+    ['camel-reply-key.json', { to: 'god-1', act: 'done', subject: 'built', body: 'done', inReplyTo: request.id }, /use in_reply_to, not inReplyTo/]
+  ];
+  for (const [file, payload] of cases) fs.writeFileSync(path.join(outbox, file), JSON.stringify(payload));
+  assert.equal(hive.routeOnce(), 0, 'REPLY-LINK GAP: malformed replies must not be delivered unlinked');
+  assert.equal(hive.inbox('god-1').length, 0, 'the requester receives no reply that failed to name its link');
+  assert.deepEqual(hive.mail.openRequests('jim-1').map((o) => o.entry.id), [request.id], 'the request stays honestly open until a linked reply routes');
+  for (const [file, _payload, reason] of cases) {
+    assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${file}`)), true, `${file} is terminally archived`);
+    const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith(file));
+    assert.ok(notice, `${file} tells its sender what to correct`);
+    assert.match(notice.subject, reason);
+  }
+  fs.writeFileSync(path.join(outbox, 'corrected.json'), JSON.stringify({ to: 'god-1', act: 'done', subject: 'built', body: 'done', in_reply_to: request.id }));
+  assert.equal(hive.routeOnce(), 1, 'a corrected snake_case reply routes');
+  assert.deepEqual(hive.mail.openRequests('jim-1'), [], 'only the corrected reply closes the request');
+}
+
+test('REPLY-LINK-GAP: reject unknown acts and camelCase reply keys with sender notices', async (t) => {
+  await replyLinkGapKiller(t, HiveManager);
+});
+
+const REPLY_LINK_MUTANTS = [
+  {
+    name: 'RLG-M1: an unknown reply act is silently accepted',
+    edits: [['if (partial.act !== undefined && !isMessageAct(partial.act)) {', 'if (false && partial.act !== undefined && !isMessageAct(partial.act)) {']]
+  },
+  {
+    name: 'RLG-M2: camelCase inReplyTo is silently ignored',
+    edits: [["if (Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {", "if (false && Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {"]]
+  }
+];
+
+test('MUTANT CENSUS REPLY-LINK-GAP: reply-schema mutants apply once and die at the link guarantee', async (t) => {
+  const source = readSource('src/main/hive.ts');
+  const mainDir = path.join(__dirname, '..', 'src', 'main');
+  for (const [i, mutant] of REPLY_LINK_MUTANTS.entries()) {
+    await t.test(`mutant: ${mutant.name}`, async (subtest) => {
+      await replyLinkGapKiller(subtest, HiveManager);
+      let text = source;
+      for (const [from, to] of mutant.edits) {
+        assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
+        text = text.replace(from, to);
+      }
+      const file = path.join(mainDir, `.hive-reply-link-mutant-${i}.ts`);
+      fs.writeFileSync(file, text, 'utf8');
+      try {
+        const relative = path.relative(path.resolve(__dirname, '..'), file);
+        const { HiveManager: Mutant } = loadTs(relative);
+        let died = null;
+        try { await replyLinkGapKiller(subtest, Mutant); } catch (e) { died = e; }
+        assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name}`);
+        assert.match(died.message, /REPLY-LINK GAP/, `${mutant.name} died at the wrong assertion`);
+      } finally {
+        fs.rmSync(file, { force: true });
+      }
+    });
+  }
 });
 
 test('a delivered message retries only its archive when .sent is temporarily unavailable', async (t) => {

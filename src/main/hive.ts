@@ -80,6 +80,11 @@ type McpDefaultsMap = { [id: string]: { enabled: boolean } } | undefined;
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type MessageAct = 'request' | 'inform' | 'propose' | 'query' | 'agree' | 'refuse' | 'done';
+const MESSAGE_ACTS = new Set<MessageAct>(['request', 'inform', 'propose', 'query', 'agree', 'refuse', 'done']);
+
+function isMessageAct(value: unknown): value is MessageAct {
+  return typeof value === 'string' && MESSAGE_ACTS.has(value as MessageAct);
+}
 
 export interface HiveMessage {
   id: string;
@@ -2988,6 +2993,19 @@ export class HiveManager {
         try {
           if (!partial || typeof partial !== 'object') throw new Error('unroutable: message must be an object');
           if (partial.to !== undefined && typeof partial.to !== 'string') throw new Error('unroutable: to must be a string');
+          // REPLY-LINK-GAP: do not silently deliver an unrecognised terminal act or ignore a
+          // camelCase reply key. Both used to look like a successful reply while leaving the
+          // sender's request open forever; rejection takes the existing visible sender-notice
+          // path, so the sender can correct and resend a message that actually links.
+          if (partial.act !== undefined && !isMessageAct(partial.act)) {
+            throw new Error(`unroutable: act must be one of ${[...MESSAGE_ACTS].join(', ')}`);
+          }
+          if (Object.prototype.hasOwnProperty.call(partial, 'inReplyTo')) {
+            throw new Error('unroutable: use in_reply_to, not inReplyTo');
+          }
+          if (partial.in_reply_to !== undefined && partial.in_reply_to !== null && typeof partial.in_reply_to !== 'string') {
+            throw new Error('unroutable: in_reply_to must be a string or null');
+          }
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           this.routeMessage(msg);
