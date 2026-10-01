@@ -77,10 +77,14 @@ function assigneeOf(card: Card): string {
 }
 
 /** A registry archive counts as explicit when its reason is 'explicit' or absent (archived
- *  before 1.1.75: hive.ts archivedForMail counts that as explicit too). */
-function registryArchive(r: RegistryFacts | undefined): 'explicit' | 'down' | null {
+ *  before 1.1.75: hive.ts archivedForMail counts that as explicit too). The 'orphan' reason is
+ *  the boot sweep's temporary archive, before autostart restores workers; it is not down. */
+function registryArchive(r: RegistryFacts | undefined): 'explicit' | 'down' | 'boot' | null {
   if (!r?.archived) return null;
-  return (r.archiveReason ?? 'explicit') === 'explicit' ? 'explicit' : 'down';
+  const reason = r.archiveReason ?? 'explicit';
+  if (reason === 'explicit') return 'explicit';
+  if (reason === 'orphan') return 'boot';
+  return 'down';
 }
 
 const hours = (ms: number): string => `${Math.round(ms / 360_000) / 10} h`;
@@ -103,8 +107,10 @@ function agentFlag(card: Card, agent: string, input: DetectStaleInput, cfg: Boar
     return { ...base, kind: 'ASSIGNEE_ARCHIVED', since: archivedAt ?? input.meta[card.id]?.statusSince ?? now,
       evidence: `${agent} archived (explicit)`, decision: false, ...(archivedAt !== undefined ? { archivedAt } : {}) };
   }
-  // 2. An orphan / pty-exit archive may be undone by a respawn: DOWN, never a move.
-  if (lv?.lifecycle === 'ARCHIVED' || regArchive === 'down') {
+  // 2. The boot sweep's orphan archive is transient before autostart restores workers: it is
+  // neither a move nor a DOWN flag. A pty-exit archive may be undone by a respawn: DOWN, never a move.
+  if ((lv?.lifecycle === 'ARCHIVED' && lv.archiveReason === 'orphan') || regArchive === 'boot') return null;
+  if ((lv?.lifecycle === 'ARCHIVED' && lv.archiveReason !== 'orphan') || regArchive === 'down') {
     const reason = lv?.lifecycle === 'ARCHIVED' ? lv.archiveReason : reg?.archiveReason;
     const since = lv?.lifecycle === 'ARCHIVED' ? (lv.archivedAt ?? lv.classifiedSince) : (regAt ?? now);
     return { ...base, kind: 'ASSIGNEE_DOWN', since, evidence: `${agent} archived (${reason ?? 'unknown'})`, decision: now - since >= cfg.downDecisionMs };

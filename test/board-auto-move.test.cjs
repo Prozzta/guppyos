@@ -73,13 +73,13 @@ test('the move is idempotent: a second tick changes nothing (M12)', (t) => {
   assert.equal(r.log().filter((l) => l.kind === 'board-auto').length, 1);
 });
 
-test('an orphan archive, and a non-doing card, never move (M12b)', (t) => {
+test('a boot-sweep orphan archive raises no down flag, and a non-doing card never moves (BOOT-ORPHAN-ASSIGNEE-DOWN)', (t) => {
   const r = rig(t, { jim: agent('jim', { archived: true, archiveReason: 'orphan' }), ann: agent('ann', { archived: true, archiveReason: 'explicit' }) },
     [{ id: 'A', title: 'A', status: 'doing', assignee: 'jim' }, { id: 'B', title: 'B', status: 'blocked', assignee: 'ann' }]);
   const before = fs.readFileSync(path.join(r.root, 'tasks.json'));
   r.monitor.tick();
   assert.deepEqual(fs.readFileSync(path.join(r.root, 'tasks.json')), before);
-  assert.deepEqual(r.monitor.flags().map((f) => `${f.cardId}:${f.kind}`), ['A:ASSIGNEE_DOWN']);
+  assert.deepEqual(r.monitor.flags(), []);
 });
 
 test('flags are published to state/board-flags.json and logged only when raised or cleared (MLOG)', (t) => {
@@ -93,6 +93,14 @@ test('flags are published to state/board-flags.json and logged only when raised 
   r.monitor.tick();
   const rows = r.log().filter((l) => l.kind === 'board-flag').map((l) => `${l.event}:${l.flag}`);
   assert.deepEqual(rows, ['raised:ASSIGNEE_UNKNOWN', 'cleared:ASSIGNEE_UNKNOWN']);
+});
+
+test('start re-arms its timer without forgetting flags raised by the ledger guard (BOARDMONITOR-DOUBLE-RAISE)', (t) => {
+  const r = rig(t, { jim: agent('jim') }, [{ id: 'A', title: 'A', status: 'doing', assignee: 'ghost' }]);
+  r.monitor.tick(); // bootstrap's ledger-guard tick has already raised the flag.
+  r.monitor.start(60_000);
+  assert.equal(r.log().filter((l) => l.kind === 'board-flag' && l.event === 'raised').length, 1);
+  r.monitor.stop();
 });
 
 test('liveness records riding in fleet.json are used when no in-process source is wired', (t) => {

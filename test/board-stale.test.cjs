@@ -44,17 +44,16 @@ test('an explicit registry archive (or one from before 1.1.75, no reason) is ASS
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true } } })), ['A:ASSIGNEE_ARCHIVED']);
 });
 
-test('an orphan or pty-exit registry archive is DOWN, never a move (M10)', () => {
-  for (const reason of ['orphan', 'pty-exit']) {
-    assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: reason } } })), ['A:ASSIGNEE_DOWN']);
-  }
+test('a boot-sweep orphan archive is neither DOWN nor a move; pty-exit is DOWN (BOOT-ORPHAN-ASSIGNEE-DOWN)', () => {
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan' } } })), []);
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'pty-exit' } } })), ['A:ASSIGNEE_DOWN']);
 });
 
-test('liveness ARCHIVED moves only when explicit; orphan/pty-exit flag DOWN; DELETED moves (L2)', () => {
+test('liveness ARCHIVED moves only when explicit; boot orphan is ignored, pty-exit flags DOWN; DELETED moves (L2)', () => {
   const reg = { jim: live };
   const arch = (reason) => lv('jim', 'EXITED', NOW - H, { lifecycle: 'ARCHIVED', archiveReason: reason, archivedAt: NOW - H });
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('explicit') } })), ['A:ASSIGNEE_ARCHIVED']);
-  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('orphan') } })), ['A:ASSIGNEE_DOWN!']);
+  assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('orphan') } })), []);
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'jim')], registry: reg, liveness: { jim: arch('pty-exit') } })), ['A:ASSIGNEE_DOWN!']);
   assert.deepEqual(kinds(run({ tasks: [doing('A', 'gone')], liveness: { gone: lv('gone', 'EXITED', NOW - H, { lifecycle: 'DELETED' }) } })), ['A:ASSIGNEE_ARCHIVED']);
 });
@@ -143,8 +142,8 @@ test('answers that are dismissed or resolvedBy god, and parked cards, are not AS
   assert.deepEqual(kinds(run({ tasks: [card([answered()])], registry: { jim: live } })), ['Q:ASK_ANSWERED_IDLE!']);
 });
 
-test('a registry orphan archive: DOWN since its lastSeen, a decision at downDecisionMs (K9)', () => {
-  const at = (ms) => kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW - ms } } }));
+test('a registry pty-exit archive: DOWN since its lastSeen, a decision at downDecisionMs (K9)', () => {
+  const at = (ms) => kinds(run({ tasks: [doing('A', 'jim')], registry: { jim: { archived: true, archiveReason: 'pty-exit', lastSeen: NOW - ms } } }));
   assert.deepEqual(at(D.downDecisionMs - 1), ['A:ASSIGNEE_DOWN']);
   assert.deepEqual(at(D.downDecisionMs), ['A:ASSIGNEE_DOWN!']);
 });
