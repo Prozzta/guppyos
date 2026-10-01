@@ -1306,7 +1306,8 @@ const PTY_WRITERS = {
 const NON_PTY_WRITERS = {
   'src/main/index.ts': ['stream', 'roster'],                // a download stream; the roster file
   'src/main/slack.ts': ['req'],                             // an https request body
-  'src/main/rendererRecovery.ts': ['opts']                  // RENDERER-PROFILE: the .cpuprofile file writer (saveRendererProfile), never a terminal
+  'src/main/rendererRecovery.ts': ['opts'],                 // RENDERER-PROFILE: the .cpuprofile file writer (saveRendererProfile), never a terminal
+  'src/main/boardStatus.ts': ['this']                       // ZT-I3: BoardStatusWriter.write() renders hive/board-status.md (a file), never a terminal
 };
 
 /** Parsed, not pattern-matched. A first version stripped comments with a regex and then

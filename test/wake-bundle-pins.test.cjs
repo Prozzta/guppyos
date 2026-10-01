@@ -62,9 +62,12 @@ describe('GATE-3: the built main bundle still carries the wake path', { skip: bu
     assert.match(src, /WORKER_WAKE_POLL_MS = (?:15_?000|15e3)/, 'the 15s cadence constant survived');
   });
 
-  test('the heartbeat is armed and self-reschedules', () => {
-    has('armHeartbeat', 'the heartbeat arming');
-    has('Floor heartbeat', 'the digest it sends');
+  test('the heartbeat is retired and the floor digest replaces it (ZT-I4)', () => {
+    // 1.1.77 retired the heartbeat (never armed; the harness's floor digest wakes god for
+    // decisions only). Pin that the replacement shipped and the old arming did not.
+    has('floor-digest.md', 'the floor digest file');
+    has('Floor: ', 'the decision wake subject');
+    assert.ok(!src.includes('armHeartbeat'), 'the retired heartbeat arming is gone from the bundle');
   });
 
   test('the durable breadcrumbs reach log.jsonl, not only the console', () => {

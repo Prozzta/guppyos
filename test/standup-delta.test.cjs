@@ -530,8 +530,8 @@ test('STRUCTURAL: the skip record does NOT go to log.jsonl', () => {
   // order to explain why the code stays out of it.
   const recCode = rec.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
   assert.ok(!/appendLog|log\.jsonl/.test(recCode), 'must not write through the hive log');
-  assert.match(INDEX_TS, /pushMtime\(join\(root, 'log\.jsonl'\)\);/,
-    'and isFloorQuiet still reads log.jsonl — which is exactly why we stay out of it');
+  // ZT-I4 retired the heartbeat and its isFloorQuiet (which read log.jsonl's mtime); the
+  // skip record still keeps its own file, pinned above.
 });
 
 test('STRUCTURAL: missions:save cannot erase the scheduler-owned gate fields', () => {

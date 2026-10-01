@@ -80,7 +80,9 @@ export interface ScheduledMission {
 
 /** The built-in hourly ops standup: god reviews who's doing what + whether tasks
  *  are on track and agents are running, and every terminal's context is compacted.
- *  Shipped enabled by default; users can toggle it off in the Command Center. */
+ *  ZT-I4: shipped DISABLED (opt-in). The harness's floor digest (floorDigest.ts) keeps
+ *  the same picture for zero model tokens and wakes god only for a decision; users can
+ *  still turn the standup on in the Command Center (the TE0 delta gate is unchanged). */
 export const OPS_STANDUP_MISSION: ScheduledMission = {
   id: 'ops-standup',
   label: 'Hourly ops standup',
@@ -95,7 +97,7 @@ export const OPS_STANDUP_MISSION: ScheduledMission = {
     'next step, then compact and resume from the same point — so terminal ' +
     'contexts stay bounded without losing work. The compaction is queued and ' +
     'runs when an agent is idle, so it never interrupts work mid-step.)',
-  enabled: true,
+  enabled: false,
   // TE0. A standup whose only finding is "nothing changed" still costs a full
   // model turn over god's whole session prefix, because the dispatch wakes him.
   // The gate answers that question locally instead. There is NO periodic
@@ -121,6 +123,9 @@ export const OPS_STANDUP_MISSION: ScheduledMission = {
  *  explicitly in the Command Center once they want active re-engagement.
  *  `intervalMs` is the normal-cadence base; the scheduler derives a tighter beat
  *  when an agent looks stuck and a slower one right after a re-engage. */
+/** ZT-I4: RETIRED. The floor digest replaces it: the scheduler never arms a heartbeat
+ *  mission, new installs do not get one, and an existing one is removed once at boot
+ *  (`heartbeatRetired`). Kept as the definition that migration recognises. */
 export const HEARTBEAT_MISSION: ScheduledMission = {
   id: 'heartbeat',
   label: 'Floor heartbeat',
@@ -266,6 +271,20 @@ export interface HarnessConfig {
   /** One-time guard for the built-in heartbeat mission (mirrors opsStandupSeeded
    *  so a user who deletes the heartbeat doesn't get it re-added every boot). */
   heartbeatSeeded?: boolean;
+  /** ZT-I4 one-time guard: the retired heartbeat mission was removed from `missions`. */
+  heartbeatRetired?: boolean;
+  /** ZT-I3/I4 tuning (all optional; defaults in floorDigest.ts and boardStale.ts):
+   *  the digest cadence and wake batch window, and the stale-detector thresholds. */
+  floorDigest?: {
+    enabled?: boolean;
+    digestEveryMs?: number;
+    wakeBatchMs?: number;
+    staleAfterMs?: number;
+    downAfterMs?: number;
+    downDecisionMs?: number;
+    answeredIdleMs?: number;
+    maxDoing?: number;
+  };
   /** TE0 one-time guard: has the delta gate been attached to an ALREADY-SEEDED
    *  ops standup? Without this migration the gate would reach new installs only —
    *  `opsStandupSeeded` is already true on every existing install, so the seeding

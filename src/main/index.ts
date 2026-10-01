@@ -55,8 +55,11 @@ import {
   addWorktree, removeWorktree, worktreeHasUnintegratedWork, worktreeIsGcSafe,
   getLogGraph, getCommitFiles, getFileAtRev, compareRefs, listWorktrees, checkoutRef
 } from './git';
+import { BoardMonitor } from './boardMonitor';
+import { BoardStatusWriter } from './boardStatus';
+import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
-import { actionableBacklog, actionablePending, coordinatorPendingIds, fleetMailFields, floorMailActivityAt, hasBacklog, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
+import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
@@ -411,6 +414,42 @@ const hive = new HiveManager(
   // else a HiveManager is constructed, the default refuses. See mayWriteGlobalConfig.
   (home) => samePath(home, readConfig().harnessHome)
 );
+/** ZT-I3 §3.2-3.3: the board monitor (stale flags + the one explicit-archive auto-move). It
+ *  re-runs on every applied ledger change, and on its own 60 s tick. */
+const boardMonitor = new BoardMonitor({
+  hive,
+  // The liveness join (Jim, god ab966e): the monitor reads Dwight's records in process.
+  // agentLiveness is declared below; this runs only when the monitor ticks, after start.
+  getLiveness: (id) => agentLiveness.getLiveness(id),
+  cfg: () => readConfig().floorDigest ?? {},
+  // A flag appeared or cleared: re-render board-status.md and re-run the digest (which wakes
+  // god only for a NEW decision item, batched).
+  onFlags: () => {
+    boardStatus.request();
+    try { floorDigest.run(); } catch (e) { console.error('[floor-digest]', e); }
+  }
+});
+/** ZT-I3 §3.5: hive/board-status.md, rendered (never hand-kept). */
+const boardStatus = new BoardStatusWriter({
+  root: () => hive.root(),
+  tasks: () => hive.tasks(),
+  taskMeta: () => hive.ledgerGuard.taskMeta().cards,
+  flags: () => boardMonitor.flags()
+});
+/** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
+const floorDigest = new FloorDigest({
+  root: () => hive.root(),
+  tasks: () => hive.tasks(),
+  taskMeta: () => hive.ledgerGuard.taskMeta().cards,
+  flags: () => boardMonitor.flags(),
+  ledgerIssues: () => hive.ledgerGuard.issues(),
+  send: (msg, from) => { hive.send(msg, from); },
+  appendLog: (row) => hive.appendLog(row)
+}, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
+hive.ledgerGuard.onChange(() => {
+  try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); }
+  boardStatus.request();
+});
 // #7C — operator control state (pause/gate/steer/halt), read by the HookServer
 // when deciding hook returns.
 const control = new ControlRegistry();
@@ -1447,7 +1486,8 @@ function collectFloorState(): FloorState {
  *  Its own file, deliberately NOT log.jsonl: that file's mtime is an input to
  *  isFloorQuiet(), so writing a skip there would keep the floor reading "busy"
  *  forever and silently disable the heartbeat's re-engage. The heartbeat ships
- *  disabled, which is exactly how that would have gone unnoticed. */
+ *  disabled, which is exactly how that would have gone unnoticed. (ZT-I4 retired the
+ *  heartbeat and isFloorQuiet with it; the record keeps its own file regardless.) */
 function appendStandupSkip(record: StandupSkipRecord): void {
   const root = hive.root();
   if (!root) return;
@@ -1469,15 +1509,14 @@ function syncMissions(): void {
   const missions = readConfig().missions ?? [];
   for (const m of missions) {
     if (!m.enabled) continue;
+    // ZT-I4: the heartbeat is RETIRED (the floor digest replaces it); a heartbeat mission
+    // left in an old config is never armed (and the boot migration removes it).
+    if (m.kind === 'heartbeat') continue;
     // A weekly mission (day-of-week + time) is armed below and does NOT need an
     // interval, so the interval guard has to come after that branch — it used to
     // be folded into the line above and would have rejected every one of them.
-    const weekly = m.kind === 'heartbeat' ? null : normalizeWeekly(m.weekly);
+    const weekly = normalizeWeekly(m.weekly);
     if (!weekly && !(m.intervalMs > 0)) continue;
-    // Heartbeat (Lane A #1) opts out of the fixed setInterval and self-reschedules
-    // with an adaptive cadence. Registered into the same missionTimers map so
-    // clearMissionTimers() tears it down identically on quit/reset.
-    if (m.kind === 'heartbeat') { armHeartbeat(m); continue; }
     const fire = (forced = false): void => {
       try {
         // TE0's gate state must be read FRESH, not taken from `m`. `m` is the
@@ -1742,16 +1781,15 @@ function ensureDefaultMissions(): void {
       opsStandupSeeded: true
     });
   }
-  // Seed the built-in heartbeat (Lane A #1) once. Shipped DISABLED, so it just
-  // appears in the SCHEDULES panel for the user to turn on; lastFiredAt = now so
-  // it doesn't fire on the very first launch after a user enables it.
+  // ZT-I4: the heartbeat (Lane A #1) is RETIRED; the floor digest replaces it. It is no
+  // longer seeded, and a heartbeat mission an older build seeded is removed once, so the
+  // SCHEDULES panel does not offer a switch that does nothing.
   const cfg2 = readConfig();
-  if (!cfg2.heartbeatSeeded) {
+  if (!cfg2.heartbeatRetired) {
     const missions = cfg2.missions ?? [];
-    const has = missions.some((m) => m.id === HEARTBEAT_MISSION.id);
     writeConfig({
-      missions: has ? missions : [...missions, { ...HEARTBEAT_MISSION, lastFiredAt: Date.now() }],
-      heartbeatSeeded: true
+      missions: missions.filter((m) => m.id !== HEARTBEAT_MISSION.id && m.kind !== 'heartbeat'),
+      heartbeatRetired: true
     });
   }
 
@@ -1843,38 +1881,8 @@ function ensureDefaultMissions(): void {
   }
 }
 
-// ─── Heartbeat (Lane A #1) + circuit-breaker beat (#6.6b) ────────────────────
-
-/** Is the floor quiet? Derived ONLY from signals the main process owns or can
- *  stat — log.jsonl mtime (the master signal: every routed msg/drain/spawn/task
- *  append touches it), each agent's inbox + outbox/.sent mtimes, and every live
- *  PTY's lastOutputAt (an agent printing/thinking counts as activity). Crucially
- *  NOT registry.status, which is written 'idle' once at spawn and never
- *  transitions in main — reading it would see the floor quiet forever. */
-function isFloorQuiet(thresholdMs: number): boolean {
-  const root = hive.root();
-  if (!root) return false;
-  const times: number[] = [];
-  const pushMtime = (p: string): void => { try { times.push(statSync(p).mtimeMs); } catch { /* missing */ } };
-  pushMtime(join(root, 'log.jsonl'));
-  const agentsDir = join(root, 'agents');
-  if (existsSync(agentsDir)) {
-    for (const id of readdirSync(agentsDir)) {
-      pushMtime(join(agentsDir, id, 'outbox', '.sent'));
-    }
-  }
-  // ZT-I1-MAIL §11.8 #10: mail activity is the LEDGER's last non-harness transition, not the
-  // inbox/ directory mtime, which the harness's own rename into .done moves. An agent whose
-  // ledger cannot be read falls back to its inbox mtime (louder, so never a false "quiet").
-  let active: string[] = [];
-  try { active = Object.entries(hive.registry().agents).filter(([, a]) => !a.archived).map(([id]) => id); } catch { /* none */ }
-  const mail = floorMailActivityAt(hive.mail, active);
-  if (mail.at !== null) times.push(mail.at);
-  for (const id of mail.failed) pushMtime(join(agentsDir, id, 'inbox'));
-  for (const t of ptyManager.list()) times.push(t.lastOutputAt);
-  if (times.length === 0) return false; // nothing to judge → don't fire
-  return Date.now() - Math.max(...times) > thresholdMs;
-}
+// ─── Coordination helpers. The heartbeat (Lane A #1) is retired: ZT-I4's floor digest
+// (floorDigest.ts) replaces its quiet/stuck heuristics and its re-engage message. ───
 
 /** Newest coordination time for one agent: its own outbox + outbox/.sent and memory.md mtimes,
  *  plus its last ACTED mail transition from the ledger. Deliberately excludes PTY output, so
@@ -1906,82 +1914,6 @@ hive.setHumanInputSource((agentId) => {
 function ptyForAgent(agentId: string): string | undefined {
   for (const [ptyId, a] of ptyToAgent) if (a === agentId) return ptyId;
   return undefined;
-}
-
-/** "Stuck" = some worker's PTY is actively printing (recent output) while its
- *  coordination files have gone stale — working-but-not-coordinating. Tightens
- *  the heartbeat cadence so we notice a wedged agent sooner. */
-function looksStuck(windowMs: number): boolean {
-  const reg = hive.registry();
-  const now = Date.now();
-  for (const [id, a] of Object.entries(reg.agents)) {
-    if (a.archived || id === reg.godId) continue;
-    const ptyId = ptyForAgent(id);
-    if (!ptyId) continue;
-    const idle = ptyManager.idleFor(ptyId) ?? Infinity;
-    if (idle < 15_000 && now - lastCoordinationAt(id) > windowMs) return true;
-  }
-  return false;
-}
-
-/** Bounded digest for god — paths + counts, never full files (reference-passing,
- *  #6.2). A few hundred tokens at most. */
-function buildHeartbeatDigest(quietMs: number, actionable = 0): string {
-  const reg = hive.registry();
-  const active = Object.entries(reg.agents).filter(([id, a]) => !a.archived && id !== reg.godId);
-  const names = active.map(([, a]) => a.name).join(', ') || '—';
-  const boardHead = hive.board().split('\n').slice(0, 10).join('\n').trim();
-  const log = hive.logTail(8).map((e) => { try { return JSON.stringify(e); } catch { return ''; } }).filter(Boolean).join('\n');
-  // ZT-I1-MAIL §11.8 #12: mail not yet acted, from the ledger (the harness archives at Stop).
-  const withInbox = active.filter(([id]) => { try { return hasBacklog(hive.mail, id); } catch { return hive.inbox(id).length > 0; } }).map(([, a]) => a.name);
-  // When real agent/human mail is waiting, lead with an explicit call-to-action
-  // instead of the "quiet" line — this beat fired BECAUSE of unread actionable
-  // inbox, not because the floor went quiet, and god must read it now.
-  const header = actionable > 0
-    ? `Floor heartbeat — ${actionable} actionable message(s) delivered to you and not yet handled (worker/human mail). Act on them now.`
-    : `Floor heartbeat — quiet ~${Math.round(quietMs / 60000)}m.`;
-  return [
-    header,
-    `Active agents (${active.length}): ${names}.`,
-    withInbox.length ? `Mail not yet handled: ${withInbox.join(', ')}.` : 'No mail waiting.',
-    '',
-    'Board (head):',
-    boardHead || '(empty)',
-    '',
-    'Recent log:',
-    log || '(none)',
-    '',
-    'Re-engage anyone stalled or blocked and keep the board accurate — or rest if the work is genuinely done.'
-  ].join('\n');
-}
-
-// SYSTEM_SENDERS (the scheduler's own noise: heartbeat, scheduler, breaker, system) lives in
-// mailReaders.ts, next to the ledger readers that apply it. Kept narrow so any future real
-// sender counts by default.
-
-/** Count of UNREAD actionable messages in god's inbox — real agent/human mail,
- *  excluding the scheduler's own beats. Drives an inbox-aware re-engage so a
- *  worker's reply (or a human answer) doesn't sit unread while the floor is busy:
- *  the floor-quiet gate alone misses that case — any active agent keeps the floor
- *  "loud", so god was never re-engaged until everything else went idle. */
-function godActionableInboxCount(): number {
-  try {
-    const godId = hive.registry().godId;
-    if (!godId) return 0;
-    // ZT-I1-MAIL §11.8 #13, Creed Q23: the re-engage GATE counts only mail god has not been shown
-    // yet (ledger delivered), not mail it is already looking at mid-turn; from the ledger.
-    return actionablePending(hive.mail, godId);
-  } catch { return 0; }
-}
-
-/** Re-engage a quiet floor: drop a durable digest into god's inbox. We never
- *  type directly into god's PTY here — if he's busy that would jam mid-step. The
- *  inbox message is delivered by the renderer's busy-aware inbox-wake (it nudges
- *  god to read his inbox only once he's idle), so the heartbeat defers around a
- *  working god instead of interrupting him. */
-function reengageGod(digest: string): void {
-  if (!hive.enabled()) return;
-  hive.send({ to: 'god', act: 'request', subject: 'Heartbeat', body: digest }, 'heartbeat');
 }
 
 /**
@@ -2245,45 +2177,6 @@ function writeFleetSnapshot(): void {
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }
-}
-
-/** Arm the heartbeat with an adaptive, self-rescheduling cadence (recursive
- *  setTimeout instead of a fixed setInterval). Each beat runs the cost/breaker
- *  pass, re-engages a quiet floor, stamps lastFiredAt, then re-arms: ~base on a
- *  normal beat, base/4 (min 30s) when an agent looks stuck, base*2.5 right after
- *  a re-engage. Registered into missionTimers so shutdown tears it down. */
-function armHeartbeat(m: ScheduledMission): void {
-  const base = m.intervalMs;
-  const quiet = m.quietThresholdMs ?? 300_000;
-  const beat = (): void => {
-    let next = base;
-    try {
-      // (the breaker beat + cost ledger now run on their own always-on timer)
-      // Re-engage god when the floor is quiet OR when real agent/human mail is
-      // waiting in god's inbox — the latter is independent of floor-quiet so a
-      // worker's reply doesn't sit unread while other agents keep the floor busy.
-      const actionable = godActionableInboxCount();
-      // Separates "the heartbeat timer is dead" from "it ran and its own conditions said
-      // nothing to send" — the 1.1.46 post-mortem could not tell those apart.
-      wakeDiag('heartbeat', { quiet: isFloorQuiet(quiet), actionable, baseMs: base });
-      if (isFloorQuiet(quiet) || actionable > 0) {
-        reengageGod(buildHeartbeatDigest(quiet, actionable));
-        next = Math.round(base * 2.5);            // back off after re-engaging
-      } else if (looksStuck(quiet)) {
-        next = Math.max(30_000, Math.round(base / 4)); // tighten when an agent is wedged
-      }
-      const cur = readConfig().missions ?? [];
-      writeConfig({ missions: cur.map((x) => (x.id === m.id ? { ...x, lastFiredAt: Date.now() } : x)) });
-      try { liveWebContents()?.send('missions:updated'); } catch { /* window gone */ }
-    } catch (e) {
-      console.error('[heartbeat]', e);
-    }
-    const entry = missionTimers.get(m.id) ?? {};
-    entry.timeout = setTimeout(beat, next);
-    missionTimers.set(m.id, entry);
-  };
-  const remaining = Math.max(0, base - (Date.now() - (m.lastFiredAt ?? 0)));
-  missionTimers.set(m.id, { timeout: setTimeout(beat, remaining) });
 }
 
 /** The live renderer webContents, or null if the window is gone/destroyed.
@@ -2802,7 +2695,7 @@ function dispatchWebhookWork(arg: {
     // id, so a concurrent card writer (Slack, god, voice, another webhook) can't
     // have its card lost to our stale whole-ledger overwrite. (writeTasks(...existing)
     // recreated exactly that race.) A fresh taskId never collides, so this always adds.
-    hive.addTask(card);
+    hive.addTask(card, 'webhook');
   } catch (e) {
     console.error('[webhook] could not create task card:', e instanceof Error ? e.message : e);
     return false;
@@ -4445,6 +4338,9 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[changeHome] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[changeHome] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[changeHome] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[changeHome] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[changeHome] boardMonitor.stop:', e); }
+  try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[changeHome] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[changeHome] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[changeHome] hookServer.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[changeHome] slack.stop:', e); }
@@ -4680,6 +4576,24 @@ ipcMain.handle('hive:setAgentHold', (_evt, id: unknown, hold: unknown) => {
 });
 ipcMain.handle('hive:board', () => hive.board());
 ipcMain.handle('hive:tasks', () => hive.tasks());
+// ZT-I3: the board monitor's current flags (stale, archived, down, stuck, ask-answered).
+ipcMain.handle('hive:boardFlags', () => boardMonitor.flags());
+// CARD-BADGE-AMBIGUOUS: what the player cards need: the flags, and each active agent's
+// messages waiting (fleet's inboxBacklog: mail not yet acted on, from the ledger).
+// ZT-I3/I4: the sidecar (status ages for the Kanban) and the floor digest text (Floor panel).
+ipcMain.handle('hive:taskMeta', () => hive.ledgerGuard.taskMeta().cards);
+ipcMain.handle('hive:floorDigest', () => {
+  const root = hive.root();
+  if (!root) return '';
+  try { return readFileSync(join(root, FLOOR_DIGEST_FILE), 'utf8'); } catch { return ''; }
+});
+ipcMain.handle('hive:cardBadges', () => {
+  const inboxBacklog: Record<string, number> = {};
+  try {
+    for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) inboxBacklog[id] = fleetMail(id).inboxBacklog;
+  } catch { /* hive unavailable: no mail badges */ }
+  return { flags: boardMonitor.flags(), inboxBacklog };
+});
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));
 // ZT-I1-MAIL §11.8 #15: the Threads panel reads inbox/ AND inbox/.done/ with the ledger state as a
@@ -5042,6 +4956,9 @@ function teardownAndQuit(): void {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[quit] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[quit] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[quit] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[quit] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[quit] boardMonitor.stop:', e); }
+  try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[quit] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[quit] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[quit] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
@@ -5122,6 +5039,9 @@ ipcMain.handle('app:resetAll', async () => {
   try { stopEphemeralWorkerWatcher(); } catch (e) { console.error('[reset] stopWorkerWatcher:', e); }
   try { integrationBroker.stop(); } catch (e) { console.error('[reset] broker.stop:', e); }
   try { hive.stopRouter(); } catch (e) { console.error('[reset] stopRouter:', e); }
+  try { hive.stopLedgerGuard(); } catch (e) { console.error('[reset] stopLedgerGuard:', e); }
+  try { boardMonitor.stop(); } catch (e) { console.error('[reset] boardMonitor.stop:', e); }
+  try { floorDigest.stop(); boardStatus.stop(); } catch (e) { console.error('[reset] floorDigest.stop:', e); }
   try { hive.stopAgyStatusline(); } catch (e) { console.error('[reset] stopAgyStatusline:', e); }
   try { hookServer.stop(); } catch (e) { console.error('[reset] hookServer.stop:', e); }
   try { telemetry.stop(); } catch (e) { console.error('[reset] telemetry.stop:', e); }
@@ -6070,7 +5990,7 @@ registerRealtimeActionIpc({
   hiveEnabled: () => hive.enabled(),
   hiveSend: (partial, from) => hive.send(partial, from),
   hiveTasks: () => hive.tasks(),
-  hiveWriteTasks: (tasks) => hive.writeTasks(tasks),
+  hiveWriteTasks: (tasks) => hive.writeTasks(tasks, 'voice'),
   hiveRegistry: () => hive.registry(),
   hiveLog: (event) => hive.appendLog(event),
   controlPause: (id, on) => control.pause(id, on),
@@ -6668,6 +6588,8 @@ ipcMain.handle('workers:stop', (_evt, workerId: string): { ok: boolean; error?: 
 /** Start every hive-bound background service against the current harnessHome.
  *  Called on boot, and again to recover in place if a folder-change copy fails
  *  (config:changeHome tears these down before copying). No-op without a home. */
+/** The board monitor's liveness subscription (ZT-I3), replaced on each bootstrap. */
+let boardLivenessUnsub: (() => void) | null = null;
 function bootstrapHiveServices(): void {
   if (!hive.enabled()) return;
   hive.ensureHive();
@@ -6708,6 +6630,15 @@ function bootstrapHiveServices(): void {
   try { hive.migrateMail(); } catch (e) { try { hive.appendLog({ kind: 'mail-migration-error', error: String(e).slice(0, 300) }); } catch { /* best-effort */ } }
   archiveOrphanedAgents(); // #57/#58: archive stale archived:false entries with no live PTY
   hive.startRouter();
+  // ZT-I3: the task-ledger guard (watch only; it never writes tasks.json).
+  try { hive.startLedgerGuard(); } catch (e) { console.error('[hive] startLedgerGuard:', e); }
+  try { boardMonitor.start(); } catch (e) { console.error('[hive] boardMonitor.start:', e); }
+  // ZT-I3 §3.2: the board monitor (the CONSUMER) re-runs on every liveness edge. Wired here, with
+  // the consumer, so the liveness producer's own code never touches the board (Dwight's M15 pin).
+  // bootstrapHiveServices can run again (onboarding, home change): replace, never stack.
+  boardLivenessUnsub?.();
+  boardLivenessUnsub = agentLiveness.onLivenessChange(() => { try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); } });
+  try { floorDigest.start(); boardStatus.request(); } catch (e) { console.error('[hive] floorDigest.start:', e); }
   startEphemeralWorkerWatcher(); // poll HIVE_ROOT/spawn-requests → ephemeral workers
   // Phase 2: the loopback secret broker. Bind it BEFORE workers spawn so each spawn can
   // be granted a capability token + the broker URL in its env. Loopback-only, idempotent.

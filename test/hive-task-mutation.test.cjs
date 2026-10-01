@@ -144,6 +144,9 @@ test('Windows rename retries publish after transient locks and leave no temp fil
   const renameSync = fs.renameSync;
   let attempts = 0;
   fs.renameSync = (...args) => {
+    // ZT-I3: count the ledger's own publish; the guard's sidecar (state/task-meta.json) is
+    // a second, separate atomic write after it.
+    if (path.basename(String(args[1])) !== 'tasks.json') return renameSync(...args);
     attempts++;
     if (attempts < 3) {
       const error = new Error('simulated Windows sharing violation');
@@ -196,7 +199,7 @@ test('webhook dispatch appends via atomic addTask, not a stale whole-ledger rewr
   // on-disk ledger and is idempotent by task id — never through a re-read of a
   // snapshot the caller happened to hold, which would overwrite a concurrently
   // added card (the 2026-08-15 regression this suite guards).
-  assert.match(fn, /hive\.addTask\s*\(card\)/,
+  assert.match(fn, /hive\.addTask\s*\(card, 'webhook'\)/,
     'dispatchWebhookWork must add the card via the atomic addTask');
   assert.doesNotMatch(fn, /writeTasks\s*\(\[\s*\.\.\.existing/,
     'dispatchWebhookWork must not rebuild a stale whole-ledger snapshot');

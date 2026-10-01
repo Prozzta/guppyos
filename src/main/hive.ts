@@ -58,7 +58,8 @@ import {
 import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { preferredAgentRole } from '../shared/agentRole';
-import { mergeTaskLedger } from '../shared/taskLedger';
+import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
+import { TaskLedgerGuard, type TaskEditSource } from './taskLedgerGuard';
 import { expandTilde } from './fs';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -189,6 +190,9 @@ export interface HiveTask {
    *  once and never persisted), so a GET status lookup can match by hashing the
    *  presented token. Read-only capability: it never widens routing or exposure. */
   webhook?: { tokenHash: string };
+  /** Free-text history god (and the harness's one auto-move, ZT-I3 §3.3) appends to.
+   *  Typed for Jim C8; the raw patch path keeps every other untyped field. */
+  notes?: string;
 }
 
 export interface AgentMeta {
@@ -298,6 +302,14 @@ export interface HiveIntegrityIssue {
   repaired?: boolean;
   /** ZT-I1-MAIL N1: a notice that is not a damaged file (mail-evidence-missing); nothing is paused. */
   notice?: string;
+}
+
+/** ZT-I3: an API write refused because it would INTRODUCE a ledger error (a new duplicate id,
+ *  an unknown status). Errors already in the file never refuse a write (Jim C1). */
+export class TaskLedgerInvalidError extends Error {
+  constructor(readonly issues: LedgerIssue[]) {
+    super(`Task ledger write refused: ${issues.map((i) => i.message).join('; ')}`);
+  }
 }
 
 class HiveAuthorityCorruptError extends Error {
@@ -621,6 +633,14 @@ export class HiveManager {
   /** Sources currently known corrupt. Kept separately from the fingerprint so
    * the renderer can make the safety stop visible to the human. */
   private readonly authorityIssues = new Map<string, HiveIntegrityIssue>();
+  /** ZT-I3: watches tasks.json (never writes it) and keeps the per-card sidecar. */
+  readonly ledgerGuard = new TaskLedgerGuard({
+    root: () => this.root(),
+    agentIds: () => {
+      try { return new Set(Object.keys(this.registry().agents)); } catch { return new Set<string>(); }
+    },
+    appendLog: (row) => this.appendLog(row)
+  });
   /** At most one queued scan; hints arriving in the same turn coalesce into it. */
   private routeQueued = false;
   /** Bumped by start/stop, so a scan queued before a stop never runs after it. */
@@ -2281,7 +2301,7 @@ export class HiveManager {
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; handle the mail delivered to you and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. Stay aware of who is already on the floor and delegate OPPORTUNISTICALLY: BEFORE you spawn anything, CHECK THE LIVE ROSTER (active agents in registry.json + their state in fleet.json) and prefer routing to an EXISTING agent that fits — above all when the request names one ("ask Pam to…", "have Jim…"), route to that agent instead of reflexively creating a new one. Reuse an idle or already-running agent whose role matches; only spawn a fresh agent when no existing one is a sensible fit, and say that you checked. One capable owner beats a duplicate. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
-        + ` MONITOR the floor by reading ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). You periodically receive scheduler / "Heartbeat" standup requests — on each, review every agent via fleet.json, re-engage anyone stalled, over-budget, or breaker-armed, and keep board.md and tasks.json accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+        + ` The harness keeps ${inRoot('board-status.md')} and ${inRoot('floor-digest.md')} current (in-flight work and its age, blocked and ask-me cards, stale and archived-assignee flags, the roster) and wakes you with a "Floor: N decision(s)" message only when it needs a decision: act on those, and do not poll for stalled agents. For detail read ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). The harness stamps each card's status age itself (state/task-meta.json), moves a doing card back to todo when its assignee is explicitly archived (assignee kept, a line in its notes), reminds you once of a blocked card whose human answer is waiting (set "parked": true on a card you are deliberately holding), and refuses an API write that would add a duplicate id; you keep board.md's narrative and the cards' content accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
       : meta.isAssistant
       ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
@@ -3101,7 +3121,14 @@ export class HiveManager {
   integrityIssues(): HiveIntegrityIssue[] {
     this.registry();
     this.tasks();
-    return [...this.authorityIssues.values(), ...this.mail.integrityIssues()];
+    // ZT-I3: a ledger error (duplicate id, unknown status) is a NOTICE: nothing is paused,
+    // the file is not reverted, god fixes it by hand. Jim S1: the CACHED result; the banner
+    // polls every 2 s and the guard already re-checks on watch, its poll and every API write.
+    const ledgerNotice = this.ledgerGuard.integrityNotice();
+    const ledger: HiveIntegrityIssue[] = ledgerNotice
+      ? [{ file: 'tasks.json', quarantine: null, error: 'task ledger has errors', notice: ledgerNotice }]
+      : [];
+    return [...this.authorityIssues.values(), ...ledger, ...this.mail.integrityIssues()];
   }
 
   private emptyRegistry(): Registry {
@@ -3130,49 +3157,74 @@ export class HiveManager {
    *  Deleting a card still works: the incoming list IS the membership, so a card
    *  dropped from it (TasksKanban dismiss, the voice delete_task action) is
    *  gone. Merging protects fields, never card membership. */
-  writeTasks(tasks: HiveTask[]): void {
+  writeTasks(tasks: HiveTask[], source: TaskEditSource = 'ipc'): void {
     const root = this.root();
     if (!root) return;
     this.ensureHive();
     const path = join(root, 'tasks.json');
     const current = this.readAuthoritativeJson<{ tasks?: unknown }>(path, () => ({ tasks: [] }));
     const merged = mergeTaskLedger(current?.tasks, tasks);
-    this.atomicWriteJson(path, { tasks: merged });
-    this.appendLog({ kind: 'tasks', count: merged.length });
+    // ZT-I3 (Jim C1): validate the CHANGE, not the file. Refuse only an error this write
+    // would introduce; an error a hand edit already put in the file never blocks an
+    // unrelated UI, Slack, webhook, voice or auto-move write.
+    const introduced = introducedErrors(validateLedger(current?.tasks), validateLedger(merged));
+    if (introduced.length > 0) {
+      this.appendLog({ kind: 'task-ledger-refused', source, errors: introduced.map((i) => i.key) });
+      throw new TaskLedgerInvalidError(introduced);
+    }
+    const data = { tasks: merged };
+    this.atomicWriteJson(path, data);
+    // Jim C4: recorded only after the rename succeeded (a throw above records nothing), with
+    // the exact bytes atomicWriteJson wrote, so the watcher does not re-attribute it to 'file'.
+    try { this.ledgerGuard.recordApiWrite(JSON.stringify(data, null, 2), merged, source); }
+    catch (e) { try { this.appendLog({ kind: 'task-meta-write-failed', error: String(e) }); } catch { /* noop */ } }
+    this.appendLog({ kind: 'tasks', count: merged.length, source });
   }
 
   /** Append one card against the latest on-disk ledger. Renderer callers must
    *  use this instead of re-writing a collection they read before another
    *  source (webhook, Slack, god, voice) added work. Idempotent by task id. */
-  addTask(task: HiveTask): boolean {
+  addTask(task: HiveTask, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     if (tasks.some((current) => current?.id === task.id)) return false;
-    this.writeTasks([...tasks, task]);
+    this.writeTasks([...tasks, task], source);
     return true;
   }
 
   /** Patch one card against the latest on-disk ledger, preserving unrelated
-   *  cards and fields (notably webhook.tokenHash and Slack thread metadata). */
-  patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>): boolean {
+   *  cards and fields (notably webhook.tokenHash and Slack thread metadata).
+   *  With duplicate ids the FIRST card is the one patched (the shared rule). */
+  patchTask(id: string, patch: Partial<Omit<HiveTask, 'id'>>, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
     const index = tasks.findIndex((task) => task?.id === id);
     if (index < 0) return false;
     const next = tasks.slice();
     next[index] = { ...tasks[index], ...patch, id };
-    this.writeTasks(next);
+    this.writeTasks(next, source);
     return true;
   }
 
-  /** Delete only the named card from the latest on-disk ledger. */
-  deleteTask(id: string): boolean {
+  /** Delete only the named card from the latest on-disk ledger. With duplicate ids only the
+   *  FIRST card (the one every reader shows) is deleted; a later twin stays for god (Jim S2). */
+  deleteTask(id: string, source: TaskEditSource = 'ipc'): boolean {
     const ledger = this.tasksForMutation();
     const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
-    const next = tasks.filter((task) => task?.id !== id);
+    const at = tasks.findIndex((task) => task?.id === id);
+    const next = at < 0 ? tasks : [...tasks.slice(0, at), ...tasks.slice(at + 1)];
     if (next.length === tasks.length) return false;
-    this.writeTasks(next);
+    this.writeTasks(next, source);
     return true;
+  }
+
+  /** ZT-I3: start watching tasks.json (the guard's first check runs at once). */
+  startLedgerGuard(): void {
+    this.ledgerGuard.reset();
+    this.ledgerGuard.start();
+  }
+  stopLedgerGuard(): void {
+    this.ledgerGuard.reset();
   }
   memory(id: string): string {
     const p = join(this.agentDir(id), 'memory.md');
@@ -4735,6 +4787,8 @@ There are two shared surfaces, both in the hive root:
 - \`board.md\` — the freeform narrative plan. The god agent is its sole scribe; others \`propose\` edits.
 - \`tasks.json\` — the structured task ledger (a kanban: \`todo / doing / blocked / done\`, with title,
   assignee, priority, deps). Keep the task you're working reflected in its status.
+- \`board-status.md\` and \`floor-digest.md\` — written by the harness from tasks.json, its flags
+  (stale, archived or down assignees, duplicate ids) and fleet.json. Read them; never edit them.
 
 ## Guardrails: circuit breaker & token budgets
 A circuit breaker watches every agent for runaway behavior (looping on the same tool, error storms,

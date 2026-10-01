@@ -6,6 +6,12 @@ import { Icon } from './Icon';
 import { useStore } from '@/store/store';
 import { storedHumanQA, type HumanQAFields } from './humanQuestion';
 import { SafeMarkdown } from './HumanQuestionCard';
+import { firstOccurrenceById } from '@shared/taskLedger';
+import { statusAgeText } from '@shared/agentBadges';
+import { FloorDigestPanel } from './FloorDigestPanel';
+
+/** ZT-I3: a board-monitor flag on a card (stale, down, stuck, unknown assignee, ...). */
+interface CardFlag { cardId: string; kind: string; evidence: string; decision: boolean }
 
 /** A card on the task kanban. Mirrors HiveTask in the main/preload process —
  *  re-declared locally so the renderer doesn't reach into the preload package
@@ -76,7 +82,8 @@ export function parseTasks(raw: unknown): HiveTask[] {
   const list = (raw && typeof raw === 'object' && Array.isArray((raw as { tasks?: unknown }).tasks))
     ? (raw as { tasks: unknown[] }).tasks
     : [];
-  return list
+  // TASKS-DUP-ID-LOOP: a duplicate id shows once, as its FIRST card (the shared ledger rule).
+  return firstOccurrenceById(list, (t) => (t && typeof t === 'object' && typeof (t as { id?: unknown }).id === 'string' && (t as { id: string }).id) ? (t as { id: string }).id : null)
     .filter((t): t is Record<string, unknown> => !!t && typeof t === 'object')
     .map((t, i) => ({
       id: typeof t.id === 'string' && t.id
@@ -118,9 +125,19 @@ export function TasksKanban() {
   // gets the big stage instead of the narrow side panel.
   const openTaskDetail = useStore((s) => s.openTaskDetail);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ZT-I3: the board monitor's flags and the guard's status ages, shown on the cards.
+  const [flags, setFlags] = useState<CardFlag[]>([]);
+  const [meta, setMeta] = useState<Record<string, { statusSince?: number; statusSinceExact?: boolean }>>({});
+  // ZT-I4: the Floor panel (the harness's floor digest) in place of the columns.
+  const [showFloor, setShowFloor] = useState(false);
 
   const refresh = useCallback(async () => {
     try { setTasks(parseTasks(await window.cth.hiveTasks())); } catch { /* keep last good */ }
+    try {
+      const [f, m] = await Promise.all([window.cth.hiveBoardFlags(), window.cth.hiveTaskMeta()]);
+      setFlags(Array.isArray(f) ? (f as CardFlag[]) : []);
+      setMeta(m && typeof m === 'object' ? (m as Record<string, { statusSince?: number; statusSinceExact?: boolean }>) : {});
+    } catch { /* keep last good */ }
   }, []);
 
   // Dismiss a card off the board (human-initiated). The kanban is otherwise the
@@ -167,10 +184,23 @@ export function TasksKanban() {
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--cth-ink-300)' }}>
           new work? dispatch it to Michael (monitor tab)
         </span>
+        <button
+          onClick={() => setShowFloor((v) => !v)}
+          title="the harness's floor digest: decisions needed, work in flight, flags, roster"
+          aria-pressed={showFloor}
+          style={{
+            border: 'none', cursor: 'pointer', padding: '2px 6px',
+            fontFamily: 'var(--cth-font-display)', fontSize: 9,
+            background: showFloor ? 'var(--cth-ink-900)' : 'var(--cth-cream-200)',
+            color: showFloor ? 'var(--cth-cream-50)' : 'var(--cth-ink-900)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+          }}
+        >FLOOR</button>
       </div>
+      {showFloor && <FloorDigestPanel />}
 
       {/* Columns */}
-      <div style={{
+      {!showFloor && <div style={{
         flex: 1, minHeight: 0, display: 'flex', gap: 8, padding: 10, overflowX: 'auto'
       }}>
         {COLUMNS.map((col) => {
@@ -198,6 +228,8 @@ export function TasksKanban() {
                     task={t}
                     accent={col.accent}
                     assigneeName={nameFor(t.assignee)}
+                    flags={flags.filter((f) => f.cardId === t.id)}
+                    age={t.status === 'done' ? '' : statusAgeText(meta[t.id], Date.now())}
                     onOpen={() => openTaskDetail(t.id)}
                     onDismiss={() => dismissTask(t.id)}
                   />
@@ -206,7 +238,7 @@ export function TasksKanban() {
             </div>
           );
         })}
-      </div>
+      </div>}
     </div>
   );
 }
@@ -216,10 +248,14 @@ export function TasksKanban() {
 // assignee. Everything else (the full contract, deps, controls) lives in the
 // detail view a click away: a kanban card can carry a title at most.
 
-function TaskCard({ task, accent, assigneeName, onOpen, onDismiss }: {
+function TaskCard({ task, accent, assigneeName, flags = [], age = '', onOpen, onDismiss }: {
   task: HiveTask;
   accent: string;
   assigneeName?: string;
+  /** ZT-I3: board-monitor flags on this card. */
+  flags?: CardFlag[];
+  /** ZT-I3: how long the card has been in its status (from the guard's sidecar). */
+  age?: string;
   onOpen: () => void;
   onDismiss: () => void;
 }) {
@@ -243,12 +279,20 @@ function TaskCard({ task, accent, assigneeName, onOpen, onDismiss }: {
             color: 'var(--cth-ink-900)',
             display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden'
           }}>{task.title}</span>
-          {assigneeName && (
+          {(assigneeName || age) && (
             <span style={{ fontSize: 10, color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-display)' }}>
-              {assigneeName.toUpperCase()}
+              {[assigneeName?.toUpperCase(), age].filter(Boolean).join(' · ')}
             </span>
           )}
         </span>
+        {flags.length > 0 && (
+          <span data-flag="card" title={flags.map((f) => `${f.kind}: ${f.evidence}${f.decision ? ' (god decides)' : ''}`).join('\n')} style={{
+            alignSelf: 'center', marginRight: waitsOnHuman(task) ? 4 : 18, flexShrink: 0,
+            fontFamily: 'var(--cth-font-display)', fontSize: 10, padding: '2px 5px 1px',
+            background: 'var(--cth-lemon)', color: 'var(--cth-ink-900)',
+            boxShadow: 'inset 0 0 0 2px var(--cth-coral)'
+          }}>!</span>
+        )}
         {waitsOnHuman(task) && (
           <span title="waiting on YOUR answer — see the ASK ME tab" style={{
             alignSelf: 'center', marginRight: 18, flexShrink: 0,

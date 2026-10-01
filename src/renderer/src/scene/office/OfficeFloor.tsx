@@ -14,6 +14,7 @@ import { pickSoloLine, pickExchange, type BreakSpot } from './cafeteriaLines';
 import { colors } from '@/design/tokens';
 import { loadTheme, resolveThemeMap, themeTilesetUrls } from './themeLoader';
 import { installContextLossRecovery } from './glRecovery';
+import { firstOccurrenceById, ledgerChanges } from '@shared/taskLedger';
 import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
@@ -1309,11 +1310,13 @@ export function OfficeFloor() {
         try {
           const raw = await window.cth.hiveTasks() as { tasks?: Array<{ id?: string; status?: string; assignee?: string; humanQA?: Array<{ q?: string; a?: string }> }> } | null;
           const arr = (raw && Array.isArray(raw.tasks)) ? raw.tasks : [];
-          const ledger: LedgerTask[] = arr.map((t, i) => ({
+          // TASKS-DUP-ID-LOOP: the FIRST card with an id is the card (the shared ledger rule);
+          // a later duplicate is reported by the hive's guard, never animated.
+          const ledger: LedgerTask[] = firstOccurrenceById(arr.map((t, i) => ({
             id: typeof t?.id === 'string' && t.id ? t.id : `idx-${i}`,
             status: String(t?.status ?? 'todo'),
             assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
-          }));
+          })), (t) => t.id);
           // tasks waiting on the HUMAN feed the ASK ME board's note count
           const newAsk = arr.filter((t) =>
             String(t?.status) === 'blocked'
@@ -1332,12 +1335,9 @@ export function OfficeFloor() {
             lastLedger = ledger;
             return;
           }
-          const prev = new Map(lastLedger.map((t) => [t.id, t]));
           let instant = false;
-          for (const t of ledger) {
-            const old = prev.get(t.id);
+          for (const { card: t, old } of ledgerChanges(lastLedger, ledger)) {
             const oldS = old?.status;
-            if (oldS === t.status && old?.assignee === t.assignee) continue;
             const after: BoardTask = { status: t.status, assignee: t.assignee };
             let mv: BoardMove | null = null;
             if (!old && (t.status === 'todo' || t.status === 'blocked')) {
