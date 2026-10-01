@@ -61,6 +61,64 @@ export class WakeIncarnationTokens {
   }
 }
 
+/** WSG-CODEX-STARTUP-NO-MARKER: quiet time after an output burst before the startup reading
+ *  (the header box is drawn by then; a reading mid-burst would just be taken again). */
+export const STARTUP_PROBE_SETTLE_MS = 400;
+
+export interface StartupProbeDeps {
+  /** The screen gate applies to this PTY and its live incarnation is not latched yet. */
+  wanted: (ptyId: string) => boolean;
+  /** Take one startup reading (it can only add the latch). */
+  probe: (ptyId: string) => Promise<unknown>;
+  setTimer: (fn: () => void, ms: number) => unknown;
+  clearTimer: (handle: unknown) => void;
+}
+
+/**
+ * WSG-CODEX-STARTUP-NO-MARKER fix 1(a), the scheduler: every output chunk of an un-latched
+ * Codex PTY (re)arms one settle timer; when the PTY has been quiet for STARTUP_PROBE_SETTLE_MS a
+ * reading is taken. So the header is read right after spawn (the first burst draws it), and
+ * again after each later burst until a reading or a turn latches the incarnation. A latched
+ * PTY costs one Map lookup per chunk. At most one reading per PTY is in flight.
+ */
+export class StartupProbe {
+  private readonly timers = new Map<string, unknown>();
+  private readonly inFlight = new Set<string>();
+
+  constructor(private readonly deps: StartupProbeDeps, private readonly settleMs: number = STARTUP_PROBE_SETTLE_MS) {}
+
+  output(ptyId: string): void {
+    let wanted = false;
+    try { wanted = this.deps.wanted(ptyId); } catch { wanted = false; }
+    if (!wanted) { this.cancel(ptyId); return; }
+    const prev = this.timers.get(ptyId);
+    if (prev !== undefined) this.deps.clearTimer(prev);
+    this.timers.set(ptyId, this.deps.setTimer(() => this.fire(ptyId), this.settleMs));
+  }
+
+  /** The PTY went away or was replaced. */
+  cancel(ptyId: string): void {
+    const t = this.timers.get(ptyId);
+    if (t !== undefined) { this.deps.clearTimer(t); this.timers.delete(ptyId); }
+  }
+
+  get pending(): number {
+    return this.timers.size;
+  }
+
+  private fire(ptyId: string): void {
+    this.timers.delete(ptyId);
+    if (this.inFlight.has(ptyId)) return;
+    let wanted = false;
+    try { wanted = this.deps.wanted(ptyId); } catch { wanted = false; }
+    if (!wanted) return;
+    this.inFlight.add(ptyId);
+    let p: Promise<unknown>;
+    try { p = this.deps.probe(ptyId); } catch { this.inFlight.delete(ptyId); return; }
+    Promise.resolve(p).catch(() => undefined).then(() => { this.inFlight.delete(ptyId); });
+  }
+}
+
 /** How long one agent must be refused by the screen gate, with no admission between, before
  *  it is an alert. The same as the wake stall watchdog's WAKE_STALL_AFTER_MS. */
 export const SCREEN_GUARD_ALERT_MS = 5 * 60_000;
@@ -91,5 +149,73 @@ export class ScreenGuardAlertWatch {
   /** The agent's PTY went away or was replaced: a new process starts a new run. */
   clear(agentId: string): void {
     this.runs.delete(agentId);
+  }
+}
+
+/** How long the latest automatic refusal stands as "the screen check is holding this agent"
+ *  without a newer one (the drain asks every few seconds while anything is queued). */
+export const SCREEN_HOLD_FRESH_MS = 60_000;
+
+/** What the composer is told about a screen-check hold (main computes it; the renderer words it). */
+export interface ScreenHoldView {
+  /** The gate's reason, for example `startup:no-marker` or `UNKNOWN:not-the-empty-composer`. A
+   *  person's "send now" goes through the same gate (WSG-178 W1), so it is held too. */
+  reason: string;
+}
+
+/** Where the alert goes: the mail ledger's `hive:integrity` notice. */
+export interface ScreenGuardNoticeSink {
+  raise(alert: ScreenGuardAlert): void;
+  clear(agentId: string): void;
+}
+
+/**
+ * WSG-ALERT-NOT-DISMISSABLE: the alert's whole lifecycle, in one place. Raised once per refusal
+ * run of automatic deliveries that lasts SCREEN_GUARD_ALERT_MS (the F5 watch); LIFTED the
+ * moment the hold is: the first `ok` reading for the agent, a condition-1 latch of its live
+ * incarnation (a startup reading or its own turn), or a respawn. Before 1.1.78 only a respawn
+ * cleared it, so the notice outlived the hold. Lifting also ends the run, so a hold that comes
+ * back later is a new run and alerts again.
+ */
+export class ScreenGuardNotices {
+  private readonly watch: ScreenGuardAlertWatch;
+  private readonly lastRefusal = new Map<string, { reason: string; at: number }>();
+
+  constructor(private readonly sink: ScreenGuardNoticeSink, afterMs: number = SCREEN_GUARD_ALERT_MS) {
+    this.watch = new ScreenGuardAlertWatch(afterMs);
+  }
+
+  /** Every screen-gate evaluation. Only automatic starts (`automatic`, CAPACITY_GATED) are
+   *  waited on and alerted; an admission of any class lifts the hold. */
+  reading(agentId: string, ok: boolean, reason: string, automatic: boolean, now: number): ScreenGuardAlert | null {
+    if (ok) { this.lift(agentId); return null; }
+    if (!automatic) return null;
+    this.lastRefusal.set(agentId, { reason, at: now });
+    const alert = this.watch.note(agentId, false, reason, now);
+    if (alert) this.sink.raise(alert);
+    return alert;
+  }
+
+  /** Condition 1 latched for the agent's live incarnation. */
+  latched(agentId: string): void {
+    this.lift(agentId);
+  }
+
+  /** A new process for the agent (Jim N3: it gets a new run, and a new banner if refused). */
+  respawned(agentId: string): void {
+    this.lift(agentId);
+  }
+
+  /** The screen-check hold on this agent's automatic deliveries now, or null. */
+  hold(agentId: string, now: number): ScreenHoldView | null {
+    const r = this.lastRefusal.get(agentId);
+    if (!r || now - r.at > SCREEN_HOLD_FRESH_MS) return null;
+    return { reason: r.reason };
+  }
+
+  private lift(agentId: string): void {
+    this.watch.clear(agentId);
+    this.lastRefusal.delete(agentId);
+    try { this.sink.clear(agentId); } catch { /* the notice is diagnostics; it never decides */ }
   }
 }

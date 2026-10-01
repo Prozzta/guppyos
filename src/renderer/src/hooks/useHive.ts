@@ -17,7 +17,7 @@ import type { AgentProvider } from '../../../shared/agentProvider';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
-import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition } from './queueDelivery';
+import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery } from './queueDelivery';
 import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 
@@ -732,6 +732,9 @@ export function useHive(config: HarnessConfig | null): void {
     const MAX_SEND_ATTEMPTS = 3;
     const inFlight = new Set<string>();
     const sendFailures: Record<string, number> = {};
+    // WSG fix 2: automatic items main refused on their last attempt (not a failure: they stay
+    // queued); a person's message behind one is offered first.
+    const refusedAutomatic = new Set<string>();
 
     /** How long this terminal has been silent, or null when we have no reading
      *  (never polled, PTY gone, or it has emitted nothing at all). canDeliverToAgent
@@ -752,7 +755,7 @@ export function useHive(config: HarnessConfig | null): void {
       wrap?: (m: QueuedMessage) => string
     ): Promise<{ sent: boolean; message?: QueuedMessage }> => {
       const { messageQueues, removeQueuedMessage } = useStore.getState();
-      const next = messageQueues[srcId]?.[0];
+      const next = pickQueuedForDelivery(messageQueues[srcId], refusedAutomatic);
       if (!next || !target?.ptyId) return { sent: false };
       const now = Date.now();
       // Idle, or breaker-pinned with a terminal that has genuinely gone quiet.
@@ -839,6 +842,7 @@ export function useHive(config: HarnessConfig | null): void {
         );
         if (sent) {
           delete sendFailures[next.id];
+          refusedAutomatic.delete(next.id);
           // ZT-I1-MAIL N2: a COMMITTED work order is the whole message typed into the PTY: main
           // records it acted via:"work-order". Best effort: the delivery itself already happened.
           if (next.workOrder) {
@@ -850,7 +854,10 @@ export function useHive(config: HarnessConfig | null): void {
         // declined before typing, or typed and verifiably erased. That is "not now", not
         // a failure — capacity held it, a human owns the line, the terminal cannot be
         // proven safe — so the item simply stays queued and costs no send attempt.
-        if (outcome.kind === 'REFUSED' || outcome.kind === 'ABORTED') return { sent: false };
+        if (outcome.kind === 'REFUSED' || outcome.kind === 'ABORTED') {
+          if (!next.human && !next.manual) refusedAutomatic.add(next.id);
+          return { sent: false };
+        }
         // HUMAN_HANDLED: a person resolved an INTERFERED hold on THIS message with "already
         // handled - drop". Main recorded that against the id; it is never typed again. The
         // composer normally removes the row itself - this is the backstop for a copy that

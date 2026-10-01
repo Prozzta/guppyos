@@ -68,7 +68,7 @@ test('main: control:snapshot carries the impact, built from its OWN settled fact
   assert.match(facts, /agentImpactFor\(snap\.autoDeliveryPaused, gate, interfered !== null, probed\.poolKey\)/,
     'the impact is derived from the same gate, pause and INTERFERED the snapshot reports');
   assert.match(facts, /return \{ snap, gate, interfered, impact \}/);
-  assert.match(handler, /return \{ \.\.\.f\.snap, capacityHold: f\.gate\.holds, capacityEvidence: f\.gate\.evidence, interfered: f\.interfered, impact: f\.impact \}/);
+  assert.match(handler, /return \{ \.\.\.f\.snap, capacityHold: f\.gate\.holds, capacityEvidence: f\.gate\.evidence, interfered: f\.interfered, impact: f\.impact,\s*(?:\/\/[^\n]*\n\s*)?screenHold: screenGuardNotices\.hold\(agentId, Date\.now\(\)\) \}/, '1.1.78 WSG fix 3 adds the screen hold, from main\'s own coordinator');
   const fnStart = main.indexOf('function agentImpactFor(');
   const fn = main.slice(fnStart, main.indexOf('\n}\n', fnStart));
   assert.ok(fnStart > 0);

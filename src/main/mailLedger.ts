@@ -931,6 +931,23 @@ export function validLedgerDoc(x: unknown, agentId: string): x is MailLedgerDoc 
 
 // ————————————————————————————————————————————————————————————————— the I/O shell
 
+/** WSG-ALERT (1.1.78, Jim's draft): the screen-guard notice in words a person acts on. The
+ *  technical reason is only in `details` (and the log). */
+export function screenGuardNoticeText(name: string, reason: string, refusedMs: number, refusals: number): { title: string; notice: string; details: string } {
+  const minutes = Math.max(1, Math.round(refusedMs / 60000));
+  return {
+    title: `${name} isn't getting messages right now.`,
+    notice: [
+      `For safety, the app types into ${name}'s terminal only when it is sure ${name} is on its normal chat box, and for the last ${minutes} minute${minutes === 1 ? '' : 's'} it couldn't confirm that.`,
+      `What to do: click ${name}'s terminal and look at the bottom.`,
+      `• If you see the chat box ("Ask Codex to do anything"), press Enter once (or type a short message and press Enter). That wakes ${name} up, and the waiting messages will follow.`,
+      '• If you see a question or a menu instead (trust, login, update), answer it, or press Esc.',
+      'This notice goes away by itself when messages flow again.'
+    ].join('\n'),
+    details: `Details: screen check ${reason}, ${refusals} refusal${refusals === 1 ? '' : 's'} (wake-screen-guard-alert in the log).`
+  };
+}
+
 /** Same shape as the hive's authority issues (`hive:integrity` → the repair banner). */
 export interface MailIntegrityIssue {
   file: string;
@@ -941,6 +958,14 @@ export interface MailIntegrityIssue {
   /** A notice that is not a damaged file (N1 `mail-evidence-missing`): the banner shows this
    *  text; nothing is paused. */
   notice?: string;
+  /** WSG-ALERT (1.1.78): the notice's own headline, in plain words (the banner's generic title
+   *  is used when absent). */
+  title?: string;
+  /** WSG-ALERT: the technical reason, shown small under the notice. */
+  details?: string;
+  /** WSG-ALERT: when this notice was raised. A person may dismiss a notice; a dismissal is for
+   *  THIS raising only, so a later hold (a new raisedAt) shows again. */
+  raisedAt?: number;
 }
 
 export interface MailLedgerOptions {
@@ -1093,17 +1118,15 @@ export class MailLedger {
    * per agent per session; the row is per call). A person looks at the screen: nothing here
    * types into it.
    */
-  noteScreenGuardAlert(agentId: string, reason: string, refusedMs: number, refusals: number): void {
+  noteScreenGuardAlert(agentId: string, reason: string, refusedMs: number, refusals: number, name: string = agentId, now: number = Date.now()): void {
     this.log({ kind: 'wake-screen-guard-alert', agentId, reason, refusedMs, refusals });
     const key = `${agentId}|screen-guard`;
     if (this.notices.has(key)) return;
-    this.notices.set(key, {
-      file: `state/mail/${agentId}.json`, quarantine: null, error: 'wake-screen-guard',
-      notice: `Automatic delivery to ${agentId} is on hold: its Codex terminal has not been on the chat composer for ${Math.round(refusedMs / 60000)} min (${reason}), so nothing is typed into it. Look at the agent's terminal and finish or close whatever screen it shows (see wake-screen-guard-alert in the log).`
-    });
+    this.notices.set(key, { file: `state/mail/${agentId}.json`, quarantine: null, error: 'wake-screen-guard', ...screenGuardNoticeText(name, reason, refusedMs, refusals), raisedAt: now });
   }
 
-  /** WAKE-SCREEN-GUARD (Jim N3): the agent was respawned; its old process's banner goes. */
+  /** WAKE-SCREEN-GUARD (Jim N3): the agent was respawned, or (1.1.78) the hold lifted: an ok
+   *  reading or a latch. Its banner goes. */
   clearScreenGuardAlert(agentId: string): void {
     this.notices.delete(`${agentId}|screen-guard`);
   }

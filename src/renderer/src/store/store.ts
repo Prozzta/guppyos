@@ -144,6 +144,9 @@ export interface QueuedMessage {
   /** ZT-I1-MAIL N2: this item is a terminal work order for hive message `messageId`; its
    *  confirmed (COMMITTED) write is reported to main, which records the message acted. */
   workOrder?: { messageId: string; from: string; act: string; subject: string; requiresReply: boolean };
+  /** WSG fix 2 (1.1.78): a PERSON typed this in the message box. A refused automatic item ahead
+   *  of it (an auto /compact, a nudge) no longer holds it back (queueDelivery.pickQueuedForDelivery). */
+  human?: true;
 }
 
 // 'files' retired in v0.3.4 (the per-agent IDE button superseded it) — a
@@ -288,7 +291,7 @@ interface State {
   /** Park a message for an agent. Returns nothing; the flush loop delivers it.
    *  `meta.instruction`, when set, is what gets typed into the PTY instead of
    *  `text` (UI/card surfaces still show `text`). */
-  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string }; instruction?: string; precondition?: QueuedMessage['precondition']; workOrder?: QueuedMessage['workOrder'] }) => void;
+  enqueueMessage: (agentId: string, text: string, meta?: { slack?: { channel: string; thread_ts: string }; instruction?: string; precondition?: QueuedMessage['precondition']; workOrder?: QueuedMessage['workOrder']; human?: true }) => void;
   /** Drop a single queued message (user removed it, or it was just delivered). */
   removeQueuedMessage: (agentId: string, messageId: string) => void;
   /** "Send now" while floor auto-delivery is paused: marks the message manual
@@ -892,7 +895,8 @@ export const useStore = create<State>((set, get) => ({
         ...(meta?.slack ? { slack: meta.slack } : {}),
         ...(meta?.instruction ? { instruction: meta.instruction } : {}),
         ...(meta?.precondition ? { precondition: meta.precondition } : {}),
-        ...(meta?.workOrder ? { workOrder: meta.workOrder } : {})
+        ...(meta?.workOrder ? { workOrder: meta.workOrder } : {}),
+        ...(meta?.human ? { human: true as const } : {})
       };
       const messageQueues = { ...s.messageQueues, [agentId]: [...(s.messageQueues[agentId] ?? []), msg] };
       persistQueues(messageQueues);

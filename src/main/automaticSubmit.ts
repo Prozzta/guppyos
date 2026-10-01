@@ -878,6 +878,32 @@ export class AutomaticSubmitOwner {
     return live !== undefined && this.postHandoff.get(ptyId) === live;
   }
 
+  /** WSG-CODEX-STARTUP-NO-MARKER: would a startup reading of this PTY be useful (the screen gate
+   *  applies and its live incarnation is not latched yet)? */
+  startupProbeWanted(ptyId: string): boolean {
+    return this.guardMode(ptyId) === 'ENFORCE' && this.deps.incarnation(ptyId) !== undefined && !this.postHandoffLatched(ptyId);
+  }
+
+  /**
+   * WSG-CODEX-STARTUP-NO-MARKER fix 1(a): a Codex screen reading with NO request behind it,
+   * taken while the session header is on screen (right after spawn, and after each output
+   * burst while un-latched). It can only ADD the condition-1 latch, by the same rule as
+   * screenGate (codexPastStartup on a reading of this incarnation that covers real output). It
+   * types nothing and refuses nothing; every request still needs its own fresh reading.
+   * Without it, Codex erasing its header on a resize (ESC[3J + a capped replay) before the
+   * first request leaves the latch waiting on a turn that only a delivery could start.
+   */
+  async observeStartup(ptyId: string): Promise<boolean> {
+    const deps = this.deps;
+    if (!this.startupProbeWanted(ptyId)) return this.postHandoffLatched(ptyId);
+    const incarnation = deps.incarnation(ptyId);
+    const r = await this.readGuard(ptyId);
+    if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
+    const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
+    return false;
+  }
+
   /**
    * Submit one programmatic message. Resolves with what HAPPENED; never rejects.
    *
@@ -1246,6 +1272,10 @@ export class AutomaticSubmitOwner {
       // A LOADING header or a resume line is refused even when latched (the live widget
       // also shows `loading` while it reconfigures).
       if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
+      // WSG-178 W1 (Jim): NO admission class passes condition 1 without the latch. A person's "send
+      // now" too: the pre-trust startup draft's cursor row IS the empty composer, and in a terminal
+      // of about 8 rows its header loses the model row (startup_draft_layout.rs:50-59), so
+      // `no-marker` + READY is NOT proof of the post-handoff composer.
       else if (this.postHandoff.get(ptyId) !== incarnation) verdict = { ok: false, reason: `startup:${past.reason}` };
       else if (comp.cls !== want) verdict = { ok: false, reason: `${comp.cls}:${comp.reason}` };
       else verdict = { ok: true, gen: r.outputGeneration };
