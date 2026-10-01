@@ -1308,6 +1308,11 @@ export class HiveManager {
               // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
               // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
               preArgs.push('-c', 'check_for_update_on_startup=false');
+              // CODEX-TIMER-CALL: curated-plugin startup sync falls through to an unauthenticated
+              // outbound archive request after its two 30-second retries. An argv override is
+              // higher priority than every generated or project layer, so every hive Codex spawn
+              // (including resume, which reuses these args) keeps that feature off.
+              preArgs.push('-c', 'features.plugins=false');
               // Codex refuses to run hooks from a config dir without persisted
               // "hook trust" (normally an interactive gate). Our hooks.json is
               // hive-authored inside an isolated CODEX_HOME, so we bypass that gate
