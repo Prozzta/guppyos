@@ -234,6 +234,10 @@ test('R1 HANDOFF is bounded: long files are cut with a pointer, and the whole bl
   assert.match(text, /cut at 3000 characters; read the file for the rest/);
   assert.ok(text.endsWith('</god-handoff>'));
   assert.equal(G.standingLessons('# x\n## Other\n- y'), '');
+  // The overall cap is the backstop for whatever the per-piece bounds miss (here, a long reason list).
+  const capped = G.godHandoffContext({ reasons: Array.from({ length: 2_000 }, (_, i) => `reason-${i}`), previousSession: SID, contextTokens: 1, memory: null, floorDigest: huge, boardStatus: huge });
+  assert.ok(capped.length <= G.GOD_HANDOFF_MAX, `${capped.length}`);
+  assert.ok(capped.endsWith('</god-handoff>'));
 });
 
 // ─── R2: the orientation prompt ─────────────────────────────────────────────
