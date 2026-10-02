@@ -171,7 +171,7 @@ test('R1: sessionTranscriptPath finds the transcript in the cwd\'s project dir, 
 
 const GOD_MEMORY = '# god memory\n\n## How I work (standing lessons)\n- Never read tasks.json whole.\n- Route big work to low-ctx agents.\n\n## 2026-10-01\n- an old note that is NOT a standing lesson\n';
 
-async function floor(t) {
+async function floor(t, { goal = null } = {}) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const hive = new HiveManager(() => home, () => true);
   t.after(() => { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); });
@@ -181,7 +181,7 @@ async function floor(t) {
   fs.writeFileSync(path.join(root, 'agents', 'god-1', 'memory.md'), GOD_MEMORY);
   fs.writeFileSync(path.join(root, 'floor-digest.md'), '# Floor digest\n\n## Decisions needed\n\nNone.\n');
   fs.writeFileSync(path.join(root, 'board-status.md'), '# Board status\n\n## In flight\n\n| Card | Assignee |\n');
-  const server = new HookServer(hive, () => null, () => ({ notifications: false }), undefined, undefined);
+  const server = new HookServer(hive, () => null, () => ({ notifications: false }), undefined, undefined, () => goal);
   const fire = (agent_id, hook_event_name, extra = {}) => server.handle({ agent_id, hook_event_name, session_id: 's-new', transport: 'http', ...extra });
   return { hive, root, server, fire };
 }
@@ -238,6 +238,54 @@ test('R1 HANDOFF is bounded: long files are cut with a pointer, and the whole bl
   const capped = G.godHandoffContext({ reasons: Array.from({ length: 2_000 }, (_, i) => `reason-${i}`), previousSession: SID, contextTokens: 1, memory: null, floorDigest: huge, boardStatus: huge });
   assert.ok(capped.length <= G.GOD_HANDOFF_MAX, `${capped.length}`);
   assert.ok(capped.endsWith('</god-handoff>'));
+});
+
+test('Creed B1: the handoff is built to fit ONE additionalContext with a big roster and goal (<= MAIL_JOINED_BUDGET); board-status is cut first', async (t) => {
+  const { MAIL_JOINED_BUDGET } = loadTs('src/main/mailSurface.ts');
+  const { hive, root, fire } = await floor(t, { goal: 'g'.repeat(3_000) });
+  const big = (title) => `# ${title}\n\n${'line of board text\n'.repeat(400)}`;
+  fs.writeFileSync(path.join(root, 'agents', 'god-1', 'memory.md'), `## How I work (standing lessons)\n${'- lesson\n'.repeat(600)}`);
+  fs.writeFileSync(path.join(root, 'floor-digest.md'), big('Floor digest'));
+  fs.writeFileSync(path.join(root, 'board-status.md'), big('Board status'));
+  hive.writeFleetSnapshot({ ts: Date.now(), agents: Array.from({ length: 40 }, (_, i) => ({ id: `agent-${i}-with-a-long-id`, name: `Agent ${i}`, role: 'agent', breaker: 'ok', tokens: 123_456, usd: 1.23, lastActiveSecAgo: 30, inboxBacklog: 1 })) });
+  hive.armGodHandoff('god-1', { reasons: ['context-over-limit'], previousSession: SID, contextTokens: 400_000 });
+  const c = ctx(await fire('god-1', 'SessionStart', { source: 'startup' }));
+  assert.ok(c.length <= MAIL_JOINED_BUDGET, `joined context ${c.length} > ${MAIL_JOINED_BUDGET}`);
+  assert.match(c, /<god-handoff>[\s\S]*<\/god-handoff>/);
+  assert.match(c, /LIVE ROSTER/, 'the roster is not displaced');
+  assert.match(c, /<goal>/);
+  const row = hive.logTail(50).find((r) => r.kind === 'god-handoff-delivered');
+  assert.equal(row.cut[0], 'board-status', 'cut from the end first');
+  assert.ok(row.budget < MAIL_JOINED_BUDGET && row.chars <= row.budget);
+});
+
+test('Creed B1: godHandoffFit never exceeds its budget, cuts from the end, and keeps pointers to the files', () => {
+  const huge = 'z'.repeat(20_000);
+  const input = { reasons: ['cache-expired'], previousSession: SID, contextTokens: 1, memory: `## How I work (standing lessons)\n${huge}`, floorDigest: huge, boardStatus: huge };
+  for (const budget of [9_000, 6_000, 4_000, 1_500, 700, 200, 20, 0]) {
+    const r = G.godHandoffFit(input, budget);
+    assert.ok(r.text.length <= budget, `budget ${budget}: ${r.text.length}`);
+  }
+  const mid = G.godHandoffFit(input, 6_000);
+  assert.deepEqual(mid.cut.slice(0, 1), ['board-status']);
+  assert.match(mid.text, /board-status\.md:\n[\s\S]*\[cut to fit the hook; read the file\]/);
+  assert.match(mid.text, /Your standing lessons \(memory\.md\):/);
+  const small = G.godHandoffFit(input, 1_500);
+  assert.deepEqual(small.cut, ['board-status', 'floor-digest', 'lessons']);
+  assert.ok(small.text.endsWith('</god-handoff>'));
+  assert.deepEqual(G.godHandoffFit({ ...input, memory: null, floorDigest: 'd', boardStatus: 'b' }, 9_000).cut, [], 'nothing cut when it fits');
+});
+
+test('Creed N1: a handoff armed longer ago than GOD_HANDOFF_STALE_MS is dropped, not delivered late', async (t) => {
+  const { hive, fire } = await floor(t);
+  const realNow = Date.now;
+  t.after(() => { Date.now = realNow; });
+  const t0 = realNow();
+  Date.now = () => t0;
+  hive.armGodHandoff('god-1', { reasons: ['cache-expired'], previousSession: SID, contextTokens: null });
+  Date.now = () => t0 + HiveManager.GOD_HANDOFF_STALE_MS + 1;
+  assert.doesNotMatch(ctx(await fire('god-1', 'SessionStart', { source: 'startup' })), /<god-handoff>/);
+  assert.ok(hive.logTail(50).some((r) => r.kind === 'god-handoff-dropped'));
 });
 
 // ─── R2: the orientation prompt ─────────────────────────────────────────────

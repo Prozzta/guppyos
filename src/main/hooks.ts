@@ -1855,9 +1855,6 @@ export class HookServer {
     // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
     // SessionStart (mailSurfaceEvents), so the handoff never takes budget from pending mail. Never on
     // a one-way hook, whose reply is not read (the handoff would be lost).
-    const handoff = wantsRoster && event === 'SessionStart' && p.source === 'startup' && p.transport !== 'pipe-oneway'
-      ? this.hive.takeGodHandoff?.(agentId) ?? null
-      : null;
 
     // Standing goal (hire Briefing) — durable roster field, re-read every cycle so
     // an Edit Agent save is picked up on the next SessionStart / UserPromptSubmit
@@ -1867,6 +1864,14 @@ export class HookServer {
     const goalRaw = wantsGoal ? (this.getStandingGoal?.(agentId) ?? null) : null;
     const goal = goalRaw
       ? `<goal>\n${goalRaw}\n</goal>`
+      : null;
+    // GOD-STARTUP-TOKENS R1: a god that started FRESH (instead of resuming a costly session) gets its
+    // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
+    // SessionStart (mailSurfaceEvents), so the handoff never takes budget from pending mail. Never on
+    // a one-way hook, whose reply is not read (the handoff would be lost). Creed B1: built to fit
+    // the one additionalContext with the roster, goal, steer and mid-turn mail it is joined with.
+    const handoff = wantsRoster && event === 'SessionStart' && p.source === 'startup' && p.transport !== 'pipe-oneway'
+      ? this.hive.takeGodHandoff?.(agentId, [roster, goal, steer, mail]) ?? null
       : null;
 
     // ZT-I1-MAIL §2.2: the message BODIES, from the ledger's delivered ids, on every turn start

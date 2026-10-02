@@ -193,24 +193,53 @@ const bounded = (s: string, max: number): string => (s.length > max ? `${s.slice
  * normal <hive-mail> injection (an open surfacing epoch of the old process was already put back
  * to delivered by the restart recovery), and open obligations are listed there as before.
  */
-export function godHandoffContext(input: {
+export interface GodHandoffInput {
   reasons: readonly string[];
   previousSession: string | null;
   contextTokens: number | null;
   memory: string | null;
   floorDigest: string | null;
   boardStatus: string | null;
-}): string {
+}
+
+export function godHandoffContext(input: GodHandoffInput): string {
+  return godHandoffFit(input, GOD_HANDOFF_MAX).text;
+}
+
+/**
+ * Creed B1: the handoff shares ONE hook additionalContext with the roster, goal and steer, and
+ * Claude Code shows only a 2,000-character preview of one over 10,000. So it is built to a
+ * `budget` (the caller: MAIL_JOINED_BUDGET minus the other joined parts). Over budget, the pieces
+ * are cut from the end: board-status first, then the floor digest, then the lessons, each with a
+ * pointer to its file; the header is cut last. `cut` names what was shortened.
+ */
+export function godHandoffFit(input: GodHandoffInput, budget: number): { text: string; cut: string[] } {
   const why = input.reasons.join(', ');
   const size = input.contextTokens !== null ? ` (its last request carried ${Math.round(input.contextTokens / 1000)}K tokens)` : '';
-  const parts = [
-    '<god-handoff>',
-    `You started FRESH instead of resuming your previous session${input.previousSession ? ` ${input.previousSession}` : ''}${size}, because: ${why}. Resuming it would have re-sent the whole old conversation at every step. Everything you need to carry on is below or on disk: your memory.md, the board, and your hive mail, which arrives in context as usual.`
-  ];
+  const head = `<god-handoff>\n\nYou started FRESH instead of resuming your previous session${input.previousSession ? ` ${input.previousSession}` : ''}${size}, because: ${why}. Resuming it would have re-sent the whole old conversation at every step. Everything you need to carry on is below or on disk: your memory.md, the board, and your hive mail, which arrives in context as usual.`;
+  const tail = '\n\n</god-handoff>';
   const lessons = input.memory ? standingLessons(input.memory) : '';
-  if (lessons) parts.push(`Your standing lessons (memory.md):\n${bounded(lessons, GOD_HANDOFF_LESSONS_MAX)}`);
-  if (input.floorDigest?.trim()) parts.push(`floor-digest.md:\n${bounded(input.floorDigest.trim(), GOD_HANDOFF_FILE_MAX)}`);
-  if (input.boardStatus?.trim()) parts.push(`board-status.md:\n${bounded(input.boardStatus.trim(), GOD_HANDOFF_FILE_MAX)}`);
-  const text = [...parts, '</god-handoff>'].join('\n\n');
-  return text.length <= GOD_HANDOFF_MAX ? text : `${text.slice(0, GOD_HANDOFF_MAX - 20)}\n</god-handoff>`;
+  const pieces: Array<{ name: string; label: string; body: string }> = [];
+  if (lessons) pieces.push({ name: 'lessons', label: 'Your standing lessons (memory.md):', body: bounded(lessons, GOD_HANDOFF_LESSONS_MAX) });
+  if (input.floorDigest?.trim()) pieces.push({ name: 'floor-digest', label: 'floor-digest.md:', body: bounded(input.floorDigest.trim(), GOD_HANDOFF_FILE_MAX) });
+  if (input.boardStatus?.trim()) pieces.push({ name: 'board-status', label: 'board-status.md:', body: bounded(input.boardStatus.trim(), GOD_HANDOFF_FILE_MAX) });
+  const max = Math.max(0, Math.min(budget, GOD_HANDOFF_MAX));
+  const render = (): string => head + pieces.map((p) => `\n\n${p.label}\n${p.body}`).join('') + tail;
+  const cut: string[] = [];
+  const POINTER = '[cut to fit the hook; read the file]';
+  for (let i = pieces.length - 1; i >= 0 && render().length > max; i -= 1) {
+    const over = render().length - max;
+    const p = pieces[i];
+    const keep = Math.max(0, p.body.length - over - POINTER.length - 1);
+    p.body = keep > 0 ? `${p.body.slice(0, keep)}\n${POINTER}` : POINTER;
+    cut.push(p.name);
+    if (render().length > max && keep > 0) { p.body = POINTER; }
+  }
+  let text = render();
+  if (text.length > max) {
+    // Even the pointers do not fit: keep the header (cut) and the closing tag.
+    cut.push('header');
+    text = max > tail.length ? `${(head + pieces.map((p) => `\n\n${p.label} ${POINTER}`).join('')).slice(0, max - tail.length)}${tail}` : '';
+  }
+  return { text, cut };
 }
