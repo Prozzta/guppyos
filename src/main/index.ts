@@ -120,7 +120,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
-import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
+import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { HistoryService } from './historyService';
@@ -760,7 +760,9 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
         incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
         observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched,
         // DWIGHT-HELD-INTERFERED fix 4: what a COMMIT refusal saw.
-        ...(r.screen ? { screen: r.screen } : {})
+        ...(r.screen ? { screen: r.screen } : {}),
+        // DWIGHT-INPUT-DEAD-179 F2: what a startup refusal was decided on.
+        ...(r.startupScreen ? { startupScreen: r.startupScreen } : {})
       });
     }
     if (r.ok) screenGuardLastReason.delete(key); else screenGuardLastReason.set(key, r.reason);
@@ -778,6 +780,27 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
   requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
   onScreenGuard: (r) => noteScreenGuard(r),
+  // DWIGHT-INPUT-DEAD-179 F4: Codex's own record that this incarnation's chat is configured: a
+  // `thread_settings_applied` in its newest rollout, stamped after the PTY was spawned. A resumed
+  // chat appends to its old rollout, so an older event (the previous process's) proves nothing.
+  threadConfigured: (ptyId) => {
+    const agentId = ptyToAgent.get(ptyId);
+    const home = agentId ? hive.codexHomeFor(agentId) : null;
+    const spawnedAt = ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0;
+    if (!home || spawnedAt <= 0) return false;
+    return threadSettingsAppliedSince(codexLifecycle.threadSettingsAt(home), spawnedAt);
+  },
+  // DWIGHT-INPUT-DEAD-179 F2: the startup reading's verdict and screen, once per incarnation and
+  // reason (the owner dedupes), so a startup hold is explained from the log.
+  onStartupReading: (r) => {
+    try {
+      hive.appendLog({
+        kind: 'codex-startup-reading', agentId: ptyToAgent.get(r.ptyId) ?? null, ptyId: r.ptyId,
+        incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
+        open: r.open, reason: r.reason, outputGeneration: r.outputGeneration, screen: r.screen
+      });
+    } catch { /* diagnostics never decide */ }
+  },
   // DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen.
   onInterfered: (r) => {
     try {

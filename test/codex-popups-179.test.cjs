@@ -373,7 +373,8 @@ K.holdLineWording = (V = HOLDVIEW) => {
   assert.equal(v.action, null, 'no button: the app never answers it');
   assert.match(v.hint, /Codex is asking Dwight a question/, 'THE COMPOSER SAYS WHAT CODEX IS ASKING');
   assert.match(v.title, /Codex is asking "Approaching rate limits — Switch to gpt-6-luna for lower credit usage\?"/);
-  const plain = V.deliveryHoldView({ ...base, screenHold: { reason: 'startup:no-marker' } });
+  // DWIGHT-INPUT-DEAD-179 F3: a startup hold has its own words (wsg-named-statusline-180).
+  const plain = V.deliveryHoldView({ ...base, screenHold: { reason: 'UNKNOWN:not-the-empty-composer' } });
   assert.match(plain.hint, /terminal is not on its chat box/, 'any other screen hold is worded as before');
 };
 test('P2: the message box\'s hold line says what Codex is asking', () => K.holdLineWording());

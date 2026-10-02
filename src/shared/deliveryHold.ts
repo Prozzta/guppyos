@@ -213,6 +213,21 @@ export function deliveryHoldView(i: DeliveryHoldInput): DeliveryHoldView | null 
         action: null
       };
     }
+    // DWIGHT-INPUT-DEAD-179 F3: a STARTUP hold (the app has no proof yet that Codex is past its
+    // startup screens) is lifted by one turn typed IN the terminal; there may be nothing to answer
+    // or close, and an Enter on an empty Codex chat box starts no turn.
+    if (i.screenHold.reason.startsWith('startup:')) {
+      return {
+        kind: 'SCREEN',
+        hint: `held — type a short message IN ${i.agentName}'s terminal to release it; "send now" is held too`,
+        title: `Automatic delivery to ${i.agentName} is held: the app cannot yet confirm that ${i.agentName}'s terminal is past its startup screens, so nothing is typed into it. `
+          + '"send now" is held by the same safety check, and so is this box. '
+          + `Click inside ${i.agentName}'s terminal (not this box), type a short message such as "check inbox" and press Enter. `
+          + 'If a question or menu is showing there instead, answer it or press Esc. '
+          + 'Delivery resumes by itself once the check passes.',
+        action: null
+      };
+    }
     return {
       kind: 'SCREEN',
       hint: `held — ${i.agentName}'s terminal is not on its chat box; "send now" is held too`,

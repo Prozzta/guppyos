@@ -167,16 +167,29 @@ function samePath(a: string, b: string): boolean {
  * M3: the passive status line `<model> <effort> · <cwd>`, and its cwd is the agent's SPAWN
  * cwd. A narrow footer may elide the middle of the path with `…`; then the kept head and tail
  * must both match it.
+ *
+ * DWIGHT-INPUT-DEAD-179 F1: Codex 0.157.1's DEFAULT status line is THREE items,
+ * `model-with-reasoning`, `current-dir`, `thread-name` (tui chatwidget.rs:520), joined with
+ * ` · ` (status_line_style.rs:16). A chat gets its name after its first turn, so a RESUMED
+ * Codex shows `<model> <effort> · <cwd> · <thread name>`; reading only the LAST part as the cwd
+ * refused every resumed agent (`no-marker`) until a turn ran. The first part is the model; the
+ * cwd may be ANY later part (a configured line can put other items after it, and a thread name
+ * may itself contain ` · `).
  */
 export function isCodexStatusLine(row: string, spawnCwd: string | null | undefined, home?: string | null): boolean {
   if (!spawnCwd) return false;
-  // Jim B2: the LAST ` · ` segment is the cwd; before it come the model, the effort and, on a
-  // ChatGPT plan, a service tier (`<model> <effort> [<tier>] · <cwd>`).
-  const t = row.trim();
-  const at = t.lastIndexOf(' · ');
-  // WSG-FOLLOWUPS (Jim nit): ONE or more words before it; the cwd anchor is what matters.
-  if (at < 0 || !/^\S+( \S+)*$/.test(t.slice(0, at))) return false;
-  let shown = t.slice(at + 3).trim();
+  // Jim B2: the model, the effort and, on a ChatGPT plan, a service tier come first
+  // (`<model> <effort> [<tier>] · <cwd>`).
+  const parts = row.trim().split(' · ');
+  // WSG-FOLLOWUPS (Jim nit): ONE or more words before the cwd; the cwd anchor is what matters.
+  if (parts.length < 2 || !/^\S+( \S+)*$/.test(parts[0])) return false;
+  return parts.slice(1).some((part) => isSpawnCwdShown(part, spawnCwd, home));
+}
+
+/** One status-line part, shown as the spawn cwd: exact (case- and separator-blind), `~`-relative
+ *  under HOME, or middle-elided with ONE `…` whose kept head and tail both match. */
+function isSpawnCwdShown(part: string, spawnCwd: string, home?: string | null): boolean {
+  let shown = part.trim();
   // Under HOME, codex shows the cwd as `~\rel` (or `~` itself).
   if (home && (shown === '~' || /^~[\\/]/.test(shown))) shown = home.replace(/[\\/]+$/, '') + shown.slice(1);
   if (!shown) return false;
