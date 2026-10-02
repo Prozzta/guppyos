@@ -967,6 +967,19 @@ function popupNoticeLines(name: string, asking: string): string[] {
 /** DWIGHT-HELD-INTERFERED-2028 fix 2: the notice for an automatic message held after it was
  *  interrupted (Jim's wording). `at` is when it was held; `wakeText` what was typed.
  *  CODEX-MODEL-SWITCH-PROMPT P2: `asking`, the Codex popup the latest look at the terminal saw. */
+/** GOD-STARTUP-WAITS-ENTER G2: what a person reads when a start-up prompt was typed but not sent. */
+export function bootNotSubmittedNoticeText(name: string, detail: string): { title: string; notice: string; details: string } {
+  return {
+    title: `${name}'s start-up message was typed but not sent.`,
+    notice: [
+      `The app typed ${name}'s start-up message and pressed Enter, but ${name} did not take it, so ${name} is waiting.`,
+      `What to do: click ${name}'s terminal. If the message is sitting in the chat box, press Enter once. If you already typed there yourself, finish or clear what you typed.`,
+      'This notice goes away by itself once a message is sent.'
+    ].join('\n'),
+    details: `Details: boot prompt not reported submitted (${detail}).`
+  };
+}
+
 export function heldInterferedNoticeText(name: string, messages: number, at: number, wakeText: string, reason: string, asking?: string | null): { title: string; notice: string; details: string } {
   const d = new Date(at);
   const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -1188,6 +1201,17 @@ export class MailLedger {
   /** The hold ended (released, ruled by a person, a respawn, or its ids left the inbox). */
   clearHeldInterferedAlert(agentId: string): void {
     this.notices.delete(`${agentId}|held-interfered`);
+  }
+
+  /** GOD-STARTUP-WAITS-ENTER G2: an agent's start-up prompt is typed but was not sent. A notice
+   *  (a person may dismiss it); the agent's next submitted prompt, or a respawn, lifts it. */
+  noteBootNotSubmitted(agentId: string, name: string, detail: string, now: number = Date.now()): void {
+    this.log({ kind: 'boot-not-submitted-alert', agentId, detail });
+    this.notices.set(`${agentId}|boot-not-submitted`, { file: `state/mail/${agentId}.json`, quarantine: null, error: 'boot-not-submitted', ...bootNotSubmittedNoticeText(name, detail), raisedAt: now });
+  }
+
+  clearBootNotSubmitted(agentId: string): void {
+    this.notices.delete(`${agentId}|boot-not-submitted`);
   }
 
   // — load —

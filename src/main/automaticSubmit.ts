@@ -593,6 +593,15 @@ export interface OwnerDeps {
   stageQuietMs?: (ptyId: string) => number | null | undefined;
   /** DWIGHT-HELD-INTERFERED fix 4: told of every INTERFERED hold. Diagnostics only. */
   onInterfered?: (record: InterferedRecord) => void;
+  /** GOD-STARTUP-WAITS-ENTER G1: may a BOOT_SEQUENCE prompt be typed into this PTY yet? `false` =
+   *  the provider's own "session is up" proof for the LIVE incarnation (Claude's SessionStart,
+   *  then a settle) has not arrived: refused, nothing typed, the caller asks again. `undefined`
+   *  = this provider has no such proof (the plain terminal-ready rule applies). */
+  bootReady?: (ptyId: string, agentId: string) => boolean | undefined;
+  /** GOD-STARTUP-WAITS-ENTER G2: has the provider reported a submitted prompt (Claude's
+   *  UserPromptSubmit) for this PTY's live incarnation at or after `enterAt`? `undefined` = this
+   *  provider has no such report, and a boot Enter is not verified. */
+  bootSubmitted?: (ptyId: string, agentId: string, enterAt: number) => boolean | undefined;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -656,7 +665,11 @@ export type InterferenceReason =
   | 'SCREEN_NOT_VERIFIED_AFTER_STAGE'
   /** CODEX-MODEL-SWITCH-PROMPT P3: a Codex popup was on screen when the erase would have run.
    *  The app never types into a popup (not the erase, not Esc): held for a person, visibly. */
-  | 'CODEX_POPUP_OPEN';
+  | 'CODEX_POPUP_OPEN'
+  /** GOD-STARTUP-WAITS-ENTER G2: a boot prompt's Enter (and at most one more of our own) brought
+   *  no UserPromptSubmit from the provider: the prompt sits typed but unsent. Held for a person,
+   *  visibly; never a third Enter, and none at all after a person's key. */
+  | 'BOOT_NOT_SUBMITTED';
 
 export type SubmitOutcome =
   /** The Enter went out. The one outcome a caller may acknowledge a queue item on. */
@@ -759,6 +772,10 @@ export const SUBMIT_SLOW_BUDGET_MS = 10_000;
 /** CODEX-WAKE-162: 'gone' must be read this many times in a row before COMMITTED (one
  *  mid-redraw frame is not proof). */
 export const SUBMIT_GONE_READS = 2;
+/** GOD-STARTUP-WAITS-ENTER G2: how long a boot prompt's Enter waits for the provider's own
+ *  "prompt submitted" report (Claude UserPromptSubmit) before it is judged unsent. The hook
+ *  arrives well under a second after a real submit; 5 s is the hang guard, not a bet. */
+export const BOOT_SUBMIT_CONFIRM_MS = 5_000;
 /** A human write this recent means the line is theirs, whatever the mirror says yet.
  *  Longer than the renderer's own ECHO_GRACE (1000 ms), inside which even the renderer
  *  does not trust the screen to overrule a keystroke. */
@@ -1143,6 +1160,15 @@ export class AutomaticSubmitOwner {
       if (waited >= READY_TIMEOUT_MS) return this.refuse(decision, 'TERMINAL_NOT_READY');
       await this.sleep(READY_POLL_MS);
     }
+    // GOD-STARTUP-WAITS-ENTER G1: "has output and 400 ms passed" is not proof that Claude reads
+    // its prompt yet. On 2026-10-02 the orientation and its Enter were written 0.57 s after the
+    // first output, 1.5 s BEFORE Claude's SessionStart; both sat in the input buffer, arrived as
+    // one paste, and the Enter became a newline. A boot prompt waits for the provider's own proof.
+    if (cls === 'BOOT_SEQUENCE') {
+      let up: boolean | undefined;
+      try { up = deps.bootReady?.(ptyId, req.agentId); } catch { up = false; }
+      if (up === false) return this.refuse(decision, 'TERMINAL_NOT_READY', 'boot:session-not-started');
+    }
 
     // ── PRIOR TEXT (CODEX-FALSEACTIVE-153): an earlier nudge that never became a turn may
     // still be on the prompt. Typed after it, both would go out as one prompt. Read before
@@ -1276,6 +1302,8 @@ export class AutomaticSubmitOwner {
     // abort (ABORTED: released and re-offered). Only an erase that cannot be proven is held.
     const slowDeadline = deps.now() + SCREEN_COMMIT_SLOW_BUDGET_MS;
     let verdict: CommitVerdict;
+    /** G2: when the Enter went out (a provider report from before it is not about this prompt). */
+    let enterAt = deps.now();
     for (;;) {
       if (guard === 'ENFORCE') {
         const g = await this.screenGate(req, ptyId, incarnation, 'COMMIT', req.text);
@@ -1290,6 +1318,7 @@ export class AutomaticSubmitOwner {
         }
         staged.screenGen = g.gen;
       }
+      enterAt = deps.now();
       verdict = await Promise.resolve(commitSection(staged, deps));
       if (verdict.kind !== 'SCREEN_CHANGED') break;
       if (deps.now() >= slowDeadline) return this.abort(staged, 'screen-not-verified:output after every reading', SCREEN_ABORT_VERIFY_BUDGET_MS);
@@ -1300,6 +1329,8 @@ export class AutomaticSubmitOwner {
       case 'ENTERED':
         if (verdict.ok) {
           this.ownDrafts.set(ptyId, { text: req.text, humanStage: staged.humanStage, incarnation: staged.incarnation });
+          // GOD-STARTUP-WAITS-ENTER G2: a boot prompt is COMMITTED only on the provider's report.
+          if (cls === 'BOOT_SEQUENCE' && this.bootVerifiable(ptyId, req.agentId)) return this.verifyBootSubmitted(staged, enterAt);
           if (deps.verifySubmit?.(ptyId)) return this.verifySubmitted(staged);
           return { kind: 'COMMITTED' };
         }
@@ -1570,6 +1601,53 @@ export class AutomaticSubmitOwner {
    *                           that is INTERFERED SUBMIT_NOT_ACCEPTED: visible, held for a
    *                           person, never typed over.
    */
+  /** GOD-STARTUP-WAITS-ENTER G2: does this PTY's provider report submitted prompts? */
+  private bootVerifiable(ptyId: string, agentId: string): boolean {
+    try { return this.deps.bootSubmitted?.(ptyId, agentId, this.deps.now()) !== undefined; } catch { return false; }
+  }
+
+  /** G2: wait (bounded) for the provider's report of a prompt submitted at or after `since`. */
+  private async bootConfirmed(s: Staged, since: number): Promise<boolean> {
+    const until = this.deps.now() + BOOT_SUBMIT_CONFIRM_MS;
+    for (;;) {
+      let ok: boolean | undefined;
+      try { ok = this.deps.bootSubmitted?.(s.ptyId, s.req.agentId, since); } catch { ok = undefined; }
+      if (ok === true) return true;
+      if (this.deps.now() >= until) return false;
+      await this.sleep(SUBMIT_VERIFY_POLL_MS);
+    }
+  }
+
+  /**
+   * GOD-STARTUP-WAITS-ENTER G2: a boot prompt's Enter is COMMITTED only when the provider reports
+   * the prompt submitted (Claude: UserPromptSubmit of the live incarnation). Not reported in time:
+   *  - a person typed since our stage write: held (INTERFERED), and NO Enter of ours: the prompt
+   *    may be theirs now;
+   *  - else, only if our exact text is still the composer's tail (the own-draft proof, as for a
+   *    Codex re-Enter), ONE more Enter, and the report is waited for again;
+   *  - still nothing, or no proof it is our draft: held, BOOT_NOT_SUBMITTED, for a person. Never
+   *    a third Enter.
+   */
+  private async verifyBootSubmitted(s: Staged, enterAt: number): Promise<SubmitOutcome> {
+    if (await this.bootConfirmed(s, enterAt)) return { kind: 'COMMITTED' };
+    if (this.deps.incarnation(s.ptyId) !== s.incarnation) return this.interfere(s, 'BOOT_NOT_SUBMITTED', 'the terminal was replaced');
+    if (this.deps.humanGeneration(s.ptyId) !== s.humanStage) return this.interfere(s, 'BOOT_NOT_SUBMITTED', 'a person typed after our Enter');
+    const needle = needleFor(s.req.text);
+    const seen = needle ? await this.readScreen(s.ptyId, needle, s.req.text) : null;
+    if (!seen || seen.promptTailMatches !== true) return this.interfere(s, 'BOOT_NOT_SUBMITTED', 'not reported submitted, and the prompt is not provably our draft');
+    // The read yielded: a person's key in between still wins (commitSection re-checks it too).
+    const again: Staged = { ...s, decision: null };
+    const at = this.deps.now();
+    const verdict = commitSection(again, this.deps);
+    if (verdict.kind === 'ENTERED') this.reportEnterWrite(again, verdict.ok, verdict.ok ? undefined : verdict.error, 0, true);
+    if (verdict.kind === 'FAILED') return { kind: 'FAILED', reason: verdict.reason };
+    if (verdict.kind === 'INTERFERED') return this.interfere(again, verdict.reason, verdict.detail);
+    if (verdict.kind === 'SCREEN_CHANGED') return this.interfere(again, 'BOOT_NOT_SUBMITTED', 'output after the reading');
+    if (verdict.kind !== 'ENTERED' || !verdict.ok) return this.interfere(again, 'ENTER_WRITE_FAILED', verdict.kind === 'ENTERED' ? verdict.error : verdict.basis);
+    if (await this.bootConfirmed(again, at)) return { kind: 'COMMITTED' };
+    return this.interfere(again, 'BOOT_NOT_SUBMITTED', 'not reported submitted after two Enters');
+  }
+
   private async verifySubmitted(s: Staged): Promise<SubmitOutcome> {
     const needle = needleFor(s.req.text);
     if (!needle) return { kind: 'COMMITTED' };

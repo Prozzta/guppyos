@@ -56,6 +56,9 @@ export interface OwnerWiring {
   onScreenGuard?: OwnerDeps['onScreenGuard'];
   /** DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen. */
   onInterfered?: OwnerDeps['onInterfered'];
+  /** GOD-STARTUP-WAITS-ENTER G1/G2: the provider's own boot evidence (Claude hooks). */
+  bootReady?: OwnerDeps['bootReady'];
+  bootSubmitted?: OwnerDeps['bootSubmitted'];
   /** WAKE-SCREEN-GUARD (Jim B2): the user's home (os.homedir in main). */
   homeDir?: () => string | undefined;
   now?: () => number;
@@ -143,6 +146,8 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     homeDir: w.homeDir,
     onScreenGuard: w.onScreenGuard,
     onInterfered: w.onInterfered,
+    bootReady: w.bootReady,
+    bootSubmitted: w.bootSubmitted,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),
       revalidate: (claim) => w.capacity.revalidate(claim, claim.target),
