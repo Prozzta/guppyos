@@ -28,6 +28,11 @@
  * placeholder row, and nothing transient sits in the footer; or the composer ends in the
  * owner's own staged text (the renderer's `promptTailMatches`). Allowlist only: every other
  * screen (trust, update, login, pickers, overlays, pager, anything unrecognised) is UNKNOWN.
+ *
+ * CODEX-MODEL-SWITCH-PROMPT P2 (1.1.79): a refused screen that is one of Codex's own MODAL
+ * popups (a bottom-pane list that takes every key until it is answered) is named, so the Human
+ * reads WHAT Codex is asking instead of "not the empty composer". It only relabels a refusal:
+ * the allowlist above is unchanged, and P3 holds: the app never answers a popup (no key, no Esc).
  */
 
 /** The empty composer row: prompt glyph + the fixed placeholder (codex chatwidget.rs:2104). */
@@ -42,6 +47,26 @@ export const CODEX_TRANSIENT_FOOTER = ['again to quit', 'to edit previous messag
 
 /** How many rows below the cursor are the footer, at most. */
 export const CODEX_FOOTER_ROWS = 6;
+/** P2: how many non-empty rows at the BOTTOM of the buffer are kept, at most. A popup hides the
+ *  composer and Codex parks the cursor wherever its last draw left it, so a popup is read from
+ *  the bottom of the screen, not from the cursor. The rate-limit picker is 8 such rows; the
+ *  trust screen at 40 columns is 17 (long_repository_root_40x17.snap); 24 is a small terminal. */
+export const CODEX_TAIL_ROWS = 24;
+/** P2: the longest popup question a reason carries (a title, and its question line if any). */
+export const CODEX_POPUP_TEXT_MAX = 160;
+/**
+ * P2: titles of Codex 0.157.1's modal popups, as their own snapshots draw them (rows trimmed).
+ * A popup with another title is still recognised by its shape (codexPopup); this list only
+ * picks the title row when the rows above the choices hold more than one line of text.
+ */
+export const CODEX_POPUP_TITLES = [
+  'Approaching rate limits',                        // chatwidget/rate_limits.rs (rate_limit_switch_prompt_popup.snap)
+  'Usage limit reached',                            // workspace_member_usage_limit_prompt.snap
+  'Update available',                               // update_prompt.rs (update_prompt_modal.snap: "Update available · a → b")
+  'Codex just got an upgrade',                      // model_migration.rs (model_migration_prompt.snap)
+  'Folder access',                                  // onboarding/trust_directory.rs (trust/*.snap)
+  'Would you like to run the following command?'    // approval overlay (approval_modal_exec.snap)
+] as const;
 /** No row of ours is longer than this; a longer one is cut (the facts stay small). */
 export const CODEX_ROW_MAX = 400;
 /** How far below a header title its `model:` line may sit. */
@@ -59,6 +84,9 @@ export interface CodexScreenFacts {
   cursorRow: string;
   /** The non-empty rows below the cursor, trimmed (the footer), at most CODEX_FOOTER_ROWS. */
   footer: string[];
+  /** P2: the last non-empty rows of the buffer, oldest first, right-trimmed (the indent is kept:
+   *  it tells a popup's header and choices apart), at most CODEX_TAIL_ROWS. */
+  tail?: string[];
 }
 
 const cut = (s: string): string => (s.length > CODEX_ROW_MAX ? s.slice(0, CODEX_ROW_MAX) : s);
@@ -104,7 +132,12 @@ export function extractCodexScreen(line: (i: number) => string | undefined, leng
     const row = (line(i) ?? '').trim();
     if (row) footer.push(cut(row));
   }
-  return { header, startingAfterHeader, cursorRow: cut((line(cursorRow) ?? '').trimEnd()), footer };
+  const tail: string[] = [];
+  for (let i = length - 1; i >= 0 && tail.length < CODEX_TAIL_ROWS; i -= 1) {
+    const row = (line(i) ?? '').trimEnd();
+    if (row.trim()) tail.unshift(cut(row));
+  }
+  return { header, startingAfterHeader, cursorRow: cut((line(cursorRow) ?? '').trimEnd()), footer, tail };
 }
 
 /** A well-formed facts object, or null. Main validates what crosses the IPC boundary. */
@@ -115,7 +148,13 @@ export function asCodexScreenFacts(v: unknown): CodexScreenFacts | null {
   if (typeof r.startingAfterHeader !== 'boolean' || typeof r.cursorRow !== 'string' || r.cursorRow.length > CODEX_ROW_MAX) return null;
   if (!Array.isArray(r.footer) || r.footer.length > CODEX_FOOTER_ROWS) return null;
   if (!r.footer.every((l) => typeof l === 'string' && l.length <= CODEX_ROW_MAX)) return null;
-  return { header: r.header, startingAfterHeader: r.startingAfterHeader, cursorRow: r.cursorRow, footer: [...r.footer] as string[] };
+  const facts: CodexScreenFacts = { header: r.header, startingAfterHeader: r.startingAfterHeader, cursorRow: r.cursorRow, footer: [...r.footer] as string[] };
+  if (r.tail !== undefined) {
+    if (!Array.isArray(r.tail) || r.tail.length > CODEX_TAIL_ROWS) return null;
+    if (!r.tail.every((l) => typeof l === 'string' && l.length <= CODEX_ROW_MAX)) return null;
+    facts.tail = [...r.tail] as string[];
+  }
+  return facts;
 }
 
 /** Windows paths compare case-insensitively and with either separator. */
@@ -161,16 +200,103 @@ export function codexPastStartup(f: CodexScreenFacts, spawnCwd: string | null | 
   return { open: false, reason: f.header === 'UNREADABLE' ? 'header-unreadable' : 'no-marker' };
 }
 
-export type CodexComposerClass = 'READY' | 'READY_OWN_DRAFT' | 'UNKNOWN';
+/** P2: the key hint at the bottom of every Codex popup, both styles (bottom_pane picker_hint):
+ *  `Press enter to confirm or esc to go back` and `enter select · esc back` (keys remappable:
+ *  `f3`, `ctrl+c`, `enter/esc`). A key starts with a letter and has no `.`, `:` or `\`, so the
+ *  status line `<model> <effort> · <cwd>` (a cwd with a space in it) is never a hint. */
+const POPUP_KEY = '[A-Za-z][A-Za-z0-9+/-]*';
+const POPUP_HINT = [
+  new RegExp(`^Press ${POPUP_KEY} to [a-z][a-z ]* or ${POPUP_KEY} to [a-z][a-z ]*$`),
+  new RegExp(`^${POPUP_KEY} [a-z][a-z ]* · ${POPUP_KEY} [a-z][a-z ]*$`)
+];
+/** The SELECTED choice row, drawn at column 0 (`› 1. Switch to …`), and any choice row. */
+const POPUP_SELECTED = /^› \d+\. \S/;
+const POPUP_CHOICE = /^(› | {2})\d+\. \S/;
+/** A wrapped description of a choice is indented further than the header (4+ columns). */
+const POPUP_DESCRIPTION = /^ {4,}\S/;
+
+export interface CodexPopup {
+  /** The popup's title row, trimmed. */
+  title: string;
+  /** Its question line (the row under a known title that ends in `?`), or null. */
+  question: string | null;
+  /** The title is one of CODEX_POPUP_TITLES. */
+  known: boolean;
+}
+
+/**
+ * P2: the Codex modal popup at the bottom of the screen, or null. All three, in the last rows of
+ * the buffer: the popup key hint as one of the LAST TWO rows, a SELECTED choice row above it, and
+ * a header row above the choices. A composer, its footer and the transcript never have all three.
+ */
+export function codexPopup(f: CodexScreenFacts): CodexPopup | null {
+  const rows = f.tail ?? [];
+  let hint = -1;
+  for (let i = rows.length - 1; i >= Math.max(0, rows.length - 2); i -= 1) {
+    if (POPUP_HINT.some((re) => re.test(rows[i].trim()))) { hint = i; break; }
+  }
+  if (hint < 0) return null;
+  let selected = -1;
+  for (let i = hint - 1; i >= 0; i -= 1) if (POPUP_SELECTED.test(rows[i])) { selected = i; break; }
+  if (selected < 0) return null;
+  // The choices block: walk up over choice rows and their wrapped descriptions.
+  let top = selected;
+  while (top > 0 && (POPUP_CHOICE.test(rows[top - 1]) || POPUP_DESCRIPTION.test(rows[top - 1]))) top -= 1;
+  if (top === 0) return null;                                   // no header row left in the tail
+  const header = rows.slice(0, top).map((r) => r.trim());
+  for (let i = header.length - 1; i >= 0; i -= 1) {
+    if (!CODEX_POPUP_TITLES.some((t) => header[i].startsWith(t))) continue;
+    const next = header[i + 1];
+    return { title: header[i], question: next !== undefined && next.endsWith('?') ? next : null, known: true };
+  }
+  // Jim N1: an unlisted title that is an agent's transcript bullet ("• Done.") is not a popup's
+  // header: a draft quoting a hint, or a side conversation's "Side tab to switch" footer.
+  const title = header[header.length - 1];
+  if (title.startsWith('• ')) return null;
+  return { title, question: null, known: false };
+}
+
+/** P2: the popup in one bounded line, `<title>` or `<title> — <question>`. */
+export function codexPopupText(p: CodexPopup): string {
+  const s = p.question ? `${p.title} — ${p.question}` : p.title;
+  return s.length > CODEX_POPUP_TEXT_MAX ? `${s.slice(0, CODEX_POPUP_TEXT_MAX - 1)}…` : s;
+}
+
+/** P2: the reason prefix of a popup refusal, as the gate words it: `MODAL:codex-popup:<text>`. */
+export const CODEX_POPUP_REASON = 'codex-popup:';
+
+/** P2: the popup text inside a gate or hold reason (`MODAL:codex-popup:<text>`, or the bare
+ *  `codex-popup:<text>`), or null. The notices word a popup from this. */
+export function popupInReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  const at = reason.indexOf(CODEX_POPUP_REASON);
+  if (at < 0 || (at > 0 && !reason.slice(0, at).endsWith('MODAL:'))) return null;
+  const text = reason.slice(at + CODEX_POPUP_REASON.length).trim();
+  return text || null;
+}
+
+/** P2: a plain hint for a person answering a known popup, or null. Words only: the app itself
+ *  never answers a popup (P3). */
+export function codexPopupAdvice(text: string): string | null {
+  if (text.startsWith('Approaching rate limits')) return 'To keep the current model, pick "Keep current model" (or press Esc).';
+  return null;
+}
+
+export type CodexComposerClass = 'READY' | 'READY_OWN_DRAFT' | 'MODAL' | 'UNKNOWN';
 
 /**
  * CONDITION 2: the one allowlisted screen. `ownTailMatches` is the renderer's proof that the
  * composer ends in the exact text the owner staged (asked for only after a stage write).
+ * P2: a refused screen that is a Codex popup is MODAL (`codex-popup:<text>`). MODAL is never an
+ * admission: every caller admits READY / READY_OWN_DRAFT only, and the two READY verdicts are
+ * decided exactly as before, so a popup reading can relabel a refusal and nothing else.
  */
 export function classifyCodexComposer(f: CodexScreenFacts, ownTailMatches?: boolean): { cls: CodexComposerClass; reason: string } {
   const transient = f.footer.some((row) => CODEX_TRANSIENT_FOOTER.some((t) => row.includes(t)));
+  if (!transient && ownTailMatches === true) return { cls: 'READY_OWN_DRAFT', reason: 'own-draft' };
+  if (!transient && f.cursorRow === CODEX_EMPTY_COMPOSER_ROW) return { cls: 'READY', reason: 'empty-composer' };
+  const popup = codexPopup(f);
+  if (popup) return { cls: 'MODAL', reason: `${CODEX_POPUP_REASON}${codexPopupText(popup)}` };
   if (transient) return { cls: 'UNKNOWN', reason: 'transient-footer' };
-  if (ownTailMatches === true) return { cls: 'READY_OWN_DRAFT', reason: 'own-draft' };
-  if (f.cursorRow === CODEX_EMPTY_COMPOSER_ROW) return { cls: 'READY', reason: 'empty-composer' };
   return { cls: 'UNKNOWN', reason: 'not-the-empty-composer' };
 }

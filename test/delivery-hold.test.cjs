@@ -409,7 +409,7 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
   fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
   fs.mkdirSync(MUTANT_DIR, { recursive: true });
   try {
-    for (const [i, mutant] of MUTANTS.entries()) {
+    for (const mutant of MUTANTS) {
       await t.test(`mutant: ${mutant.name}`, async () => {
         assert.ok(K[mutant.killer], `killer ${mutant.killer} exists`);
         await K[mutant.killer](REAL);
@@ -419,9 +419,9 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
           assert.equal(hits, 1, `mutant "${mutant.name}": edit target must match EXACTLY ONCE, matched ${hits}`);
           text = text.replace(from, () => to);
         }
-        const file = path.join(MUTANT_DIR, `m${i}.ts`);
-        fs.writeFileSync(file, text, 'utf8');
-        const mod = loadTs(path.relative(path.resolve(__dirname, '..'), file));
+        // 1.1.79 (P2): deliveryHold.ts imports ./codexScreen, so the mutant keeps the real filename
+        // for relative imports (load-ts fromText) instead of a copy in MUTANT_DIR.
+        const mod = loadTs.fromText(SRC, text);
         let died = null;
         try { await K[mutant.killer](mod); } catch (e) { died = e; }
         assert.ok(died, `SURVIVED: "${mutant.name}" was not killed by ${mutant.killer}`);
