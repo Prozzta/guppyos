@@ -171,7 +171,7 @@ export function latestUsableRateLimits<T>(
  * timestamp. Codex writes one `turn_context` per turn carrying the model that turn runs, so after
  * an in-TUI `/model` the next turn's line names the new model. Null when the tail holds none.
  */
-export function latestTurnContextModel(tail: string): { model: string; observedAt: number | null } | null {
+export function latestTurnContextModel(tail: string): { model: string; observedAt: number | null; effort: string | null } | null {
   const lines = tail.split('\n');
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i].trim();
@@ -185,7 +185,9 @@ export function latestTurnContextModel(tail: string): { model: string; observedA
     const model = typeof payload?.model === 'string' ? payload.model.trim() : '';
     if (!model) continue;
     const ts = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : NaN;
-    return { model, observedAt: Number.isFinite(ts) ? ts : null };
+    // AGENT-MODEL-NOT-KEPT M2: Codex writes the turn's reasoning effort next to its model.
+    const effort = typeof payload?.effort === 'string' && payload.effort.trim() ? payload.effort.trim() : null;
+    return { model, observedAt: Number.isFinite(ts) ? ts : null, effort };
   }
   return null;
 }
@@ -194,7 +196,7 @@ export function latestTurnContextModel(tail: string): { model: string; observedA
 export interface CodexRolloutRead {
   capacity: CapacityObservation | null;
   /** The newest turn_context's model, when the tail was read (the file changed) and held one. */
-  turnModel: { model: string; observedAt: number | null } | null;
+  turnModel: { model: string; observedAt: number | null; effort: string | null } | null;
 }
 
 /**

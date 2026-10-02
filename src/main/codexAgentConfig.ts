@@ -128,6 +128,37 @@ export function setCodexModel(config: string, picked: string | null | undefined)
 }
 
 /**
+ * AGENT-MODEL-NOT-KEPT M2: the reasoning effort this agent is launched with goes into OUR copy
+ * next to the model, replacing a seed's top-level `model_reasoning_effort`. Codex saves a
+ * person's `/model` choice as `model` + `model_reasoning_effort` in this same file, and the file
+ * is regenerated at every spawn, so without this the seed's effort came back after each restart
+ * (Dwight: luna-medium picked, terra-high back). Only a plain effort word is written (see
+ * normEffort); none = the text unchanged, so the seed's effort applies, as Codex itself would do.
+ */
+export function setCodexReasoningEffort(config: string, effort: string | null | undefined): string {
+  const e = (effort ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9_-]{1,32}$/.test(e)) return config;
+  const lines = config.split(/\r?\n/);
+  const firstTable = lines.findIndex((l) => ANY_TABLE.test(l));
+  const topEnd = firstTable < 0 ? lines.length : firstTable;
+  const kept = lines.filter((l, i) => i >= topEnd || !topLevelKey(l, 'model_reasoning_effort'));
+  return `# --- munder-hive: the reasoning effort this agent is launched with (auto-generated; do not edit) ---\nmodel_reasoning_effort = "${e}"\n\n${kept.join('\n')}`;
+}
+
+/** A top-level string key's value in a config.toml text (before the first table), or undefined.
+ *  Basic and literal one-line strings only; anything else reads as absent. */
+export function codexTopLevelString(config: string, key: string): string | undefined {
+  const lines = config.split(/\r?\n/);
+  for (const line of lines) {
+    if (ANY_TABLE.test(line)) return undefined;
+    if (!topLevelKey(line, key)) continue;
+    const m = /=\s*(?:"([^"\\]*)"|'([^']*)')\s*(#.*)?$/.exec(line);
+    return m ? (m[1] ?? m[2]) : undefined;
+  }
+  return undefined;
+}
+
+/**
  * MEMSPIKE-168: the [tui] keys OUR copy always carries, whatever the seed says. Measured through
  * the ConPTY the app uses (node-pty, Windows inbox conhost), Codex 0.157.1, one resize, a resumed
  * 200-turn thread:

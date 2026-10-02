@@ -24,8 +24,9 @@ import { useActivity } from './useActivity';
 
 /** MODEL-PINBACK G3: the model main knows this agent runs (live, else launched, else pinned) and
  *  the pinned in-TUI switch, from the hive registry. Read-only; refreshed every 15 s. */
-function useRegistryModel(agentId: string): ModelPinFields | undefined {
+function useRegistryModel(agentId: string): { entry: ModelPinFields | undefined; reread: () => void } {
   const [m, setM] = useState<ModelPinFields | undefined>(undefined);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     let alive = true;
     const read = (): void => {
@@ -37,8 +38,8 @@ function useRegistryModel(agentId: string): ModelPinFields | undefined {
     read();
     const t = setInterval(read, 15_000);
     return () => { alive = false; clearInterval(t); };
-  }, [agentId]);
-  return m;
+  }, [agentId, tick]);
+  return { entry: m, reread: () => setTick((n) => n + 1) };
 }
 
 export interface AgentDetailPanelProps {
@@ -113,7 +114,12 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
   const isFullscreenedHere = fullscreenAgentId === agent.id;
 
   const onPtyStream = usePtyParser(agent.id);
-  const runModel = modelPinLabel(useRegistryModel(agent.id), agent.model);
+  const registryModel = useRegistryModel(agent.id);
+  const runModel = modelPinLabel(registryModel.entry, agent.model);
+  // AGENT-MODEL-NOT-KEPT M3: a person's click makes an AUTO pin theirs (kept after a restart).
+  const keepModel = (): void => {
+    void window.cth.hiveKeepModelPin(agent.id).then(() => registryModel.reread()).catch(() => { /* main refused */ });
+  };
 
   // Michael gets the full command-center dashboard instead of the plain panel.
   if (agent.isGod) return <CommandCenterPanel agent={agent} />;
@@ -205,6 +211,18 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
                 <span style={{ marginLeft: 4, fontSize: 10, color: runModel.marker === 'auto' ? 'var(--cth-coral)' : 'var(--cth-ink-700)' }}>
                   [{runModel.marker}]
                 </span>
+              )}{runModel.marker === 'auto' && (
+                <button
+                  type="button"
+                  data-testid="agent-keep-model"
+                  onClick={keepModel}
+                  title="It was me: keep this model (and effort) after a restart"
+                  style={{
+                    marginLeft: 4, padding: '0 4px', fontSize: 10, border: 'none', cursor: 'pointer',
+                    background: 'var(--cth-cream-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
+                    color: 'var(--cth-ink-700)', fontFamily: 'var(--cth-font-ui)'
+                  }}
+                >keep</button>
               )}</span>
             )}
           </div>

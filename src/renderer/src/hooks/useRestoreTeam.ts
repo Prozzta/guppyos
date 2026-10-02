@@ -100,7 +100,7 @@ export function useRestoreTeam(config?: HarnessConfig | null): RestoreTeamState 
         // entire restore a silent no-op after the first bad agent.
         try {
           const provider = inferAgentProvider(a.command, a.provider);
-          const command = (a.command ?? '').trim() || (config ? buildSpawnCommand(config, a.model, provider) : '');
+          const command = (a.command ?? '').trim() || (config ? buildSpawnCommand(config, a.model, provider, a.effort) : '');
           if (!command || !a.cwd) {
             // No spawn recipe (an old entry persisted before `command`, with no
             // config to rebuild one). Keep it restorable and SAY why rather than

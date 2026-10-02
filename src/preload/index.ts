@@ -956,6 +956,8 @@ const api = {
 
   // ─── Hive (multi-agent coordination) ─────────────────────────────────────
   hiveRegistry: (): Promise<HiveRegistry> => ipcRenderer.invoke('hive:registry'),
+  /** AGENT-MODEL-NOT-KEPT M3: a person's click only - keep an agent's AUTO model pin as theirs. */
+  hiveKeepModelPin: (agentId: string): Promise<boolean> => ipcRenderer.invoke('hive:keepModelPin', agentId),
   /** ZERO-TOKEN-LIVENESS: the current liveness-v1 records (read-only). */
   livenessSnapshot: (): Promise<LivenessV1[]> => ipcRenderer.invoke('liveness:snapshot'),
   /** ZERO-TOKEN-LIVENESS: a person's click only — re-offer the mail of an agent the stuck-wake

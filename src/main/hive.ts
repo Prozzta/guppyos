@@ -36,8 +36,8 @@ import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurf
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
 import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './codexProjectLayers';
-import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, setCodexFeatureFlags, setCodexModel, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
-import { applyLiveModel, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
+import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
+import { applyLiveModel, CODEX_EFFORT_KEY, normEffort, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
 import { randomBytes, createHash } from 'node:crypto';
 import {
@@ -278,6 +278,15 @@ export interface RegistryAgent extends AgentMeta {
   /** MODEL-PINBACK: who made the pin: 'user' (human terminal input preceded it, kept on
    *  respawn) or 'auto' (none did: shown and logged, not kept). Absent = a pre-rule pin. */
   modelPinSource?: 'user' | 'auto';
+  /** AGENT-MODEL-NOT-KEPT M2: the reasoning effort that goes with the model (Codex), as the
+   *  pin, the picker's request, this process's launch, the last live observation, and the
+   *  no-switch default. See src/shared/modelPin.ts (EFFORT). */
+  modelEffort?: string;
+  modelPinnedFromEffort?: string;
+  requestedEffort?: string;
+  launchEffort?: string;
+  liveEffort?: string;
+  defaultEffort?: string;
   /** Whether `cwd` is actually usable for a (re)spawn — i.e. an ABSOLUTE path
    *  that exists as a directory. Computed + persisted at spawn so the roster
    *  reliably exposes each worker's environment validity. A non-absolute fragment
@@ -1127,8 +1136,11 @@ export class HiveManager {
       codexInheritPlugins?: boolean;
       /** MODEL-PINBACK: the spawn's model. `requested` is the renderer's `--model`, `launch` the
        *  one the CLI is really given (the pin, when it applies). Recorded on the registry entry;
-       *  a Codex agent's config.toml carries `launch`. Absent = not recorded (older callers). */
-      spawnModel?: { requested?: string; launch?: string };
+       *  a Codex agent's config.toml carries `launch`. Absent = not recorded (older callers).
+       *  AGENT-MODEL-NOT-KEPT M2 (Codex): `requestedEffort` is the picker's effort, `launchEffort`
+       *  the one this spawn runs (config.toml `model_reasoning_effort`), `defaultEffort` the
+       *  seed's (what runs with neither). */
+      spawnModel?: { requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string; defaultEffort?: string };
       /** CODEX-TRUST-LAYER: the codex CLI version this agent gets (null = unknown), and the
        *  folders the Human allowed (HarnessConfig.codexLayerOptIns). */
       codexVersion?: string | null;
@@ -1329,7 +1341,7 @@ export class HiveManager {
               if (configuredCompactLimit !== undefined && !isCodexAutoCompactTokenLimitOverride(configuredCompactLimit)) {
                 this.appendLog({ kind: 'codex-compact-limit-ignored', agentId: meta.id, value: configuredCompactLimit });
               }
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd, { codexVersion: opts.codexVersion ?? null, optIns: opts.codexLayerOptIns });
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd, { codexVersion: opts.codexVersion ?? null, optIns: opts.codexLayerOptIns }, opts.spawnModel?.launchEffort);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal, ...(codex.codexLayerOptIn ? { codexLayerOptIn: codex.codexLayerOptIn } : {}) };
               env.CODEX_HOME = codex.home;
@@ -1791,7 +1803,7 @@ export class HiveManager {
     agentId: string,
     provider: 'claude' | 'codex' | 'antigravity',
     model: string,
-    opts: { observedAt?: number; fallbackBaseline?: string } = {}
+    opts: { observedAt?: number; fallbackBaseline?: string; effort?: string | null } = {}
   ): void {
     const root = this.root();
     if (!root || !model.trim()) return;
@@ -1802,6 +1814,8 @@ export class HiveManager {
       if (!agent || (agent.provider ?? 'claude') !== provider) return;
       const before = agent.model;
       const beforeFrom = agent.modelPinnedFrom;
+      const beforeEffort = agent.modelEffort;
+      const fromEffort = agent.liveEffort ?? agent.launchEffort ?? null;
       // What the live model moved FROM: the last live model of this process, else its launch
       // model (for a pre-MODEL-PINBACK entry, the previous pin).
       const from = agent.liveModel ?? agent.launchModel ?? before ?? null;
@@ -1811,7 +1825,14 @@ export class HiveManager {
       const human = this.humanInputAt?.(agentId);
       const humanInputSince = typeof human === 'number' && human > since;
       const r = applyLiveModel(agent, model, { ...opts, humanInputSince });
-      if (r.action !== 'stale' && r.action !== 'unknown-launch') this.modelObservedAt.set(agentId, now);
+      // M1: the window marker is the observation's OWN time (a Codex turn_context's stamp; capped
+      // at now, since a stamp is never in the future), never the reading hook's clock, and it
+      // only moves forward. Re-reading the previous turn's turn_context at UserPromptSubmit must
+      // not move it past the person's `/model` keys.
+      if (r.action !== 'stale' && r.action !== 'unknown-launch') {
+        const at = Math.min(opts.observedAt ?? now, now);
+        if (at > (this.modelObservedAt.get(agentId) ?? -Infinity)) this.modelObservedAt.set(agentId, at);
+      }
       if (!r.changed) return;
       agent.lastSeen = now;
       this.atomicWriteJson(join(root, 'registry.json'), reg);
@@ -1820,8 +1841,10 @@ export class HiveManager {
       // pins too. Every pin and every clear is therefore logged with its source, so a pin can be
       // traced to the observation that made it. No expiry: that is the Human's decision.
       const evidence = HiveManager.MODEL_EVIDENCE[provider];
-      if (agent.model !== undefined && (agent.model !== before || agent.modelPinnedFrom !== beforeFrom)) {
-        this.appendLog({ kind: 'model-pinned', agentId, provider, source: agent.modelPinSource ?? null, from, to: agent.model, requested: agent.requestedModel ?? null, evidence });
+      // M2: the effort is on the row only when the CLI reports one.
+      const effortCols = agent.modelEffort !== undefined || fromEffort !== null ? { effort: agent.modelEffort ?? null, fromEffort } : {};
+      if (agent.model !== undefined && (agent.model !== before || agent.modelPinnedFrom !== beforeFrom || agent.modelEffort !== beforeEffort)) {
+        this.appendLog({ kind: 'model-pinned', agentId, provider, source: agent.modelPinSource ?? null, from, to: agent.model, requested: agent.requestedModel ?? null, evidence, ...effortCols });
       } else if (agent.model === undefined && before !== undefined) {
         this.appendLog({ kind: 'model-pin-cleared', agentId, provider, pinned: before, from, to: model.trim(), requested: agent.requestedModel ?? null, evidence });
       }
@@ -1852,21 +1875,63 @@ export class HiveManager {
 
   /** MODEL-PINBACK: record a spawn's requested/launch model on its (about to be written) entry.
    *  A pin that no longer applies (the picker changed the request since) is dropped here. */
-  private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string }): void {
+  private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string; defaultEffort?: string }): void {
     const requested = spawn.requested?.trim() || undefined;
     const launch = spawn.launch?.trim() || undefined;
-    const resolved = resolveSpawnModel(entry, requested);
+    const requestedEffort = normEffort(spawn.requestedEffort);
+    const launchEffort = normEffort(spawn.launchEffort);
+    const resolved = resolveSpawnModel(entry, requested, requestedEffort);
     if (resolved.dropPin) {
-      this.appendLog({ kind: 'model-pin-dropped', agentId, reason: resolved.dropReason ?? null, source: entry.modelPinSource ?? null, pinned: entry.model ?? null, from: entry.modelPinnedFrom ?? null, requested: requested ?? null });
+      this.appendLog({
+        kind: 'model-pin-dropped', agentId, reason: resolved.dropReason ?? null, source: entry.modelPinSource ?? null, pinned: entry.model ?? null, from: entry.modelPinnedFrom ?? null, requested: requested ?? null,
+        ...(entry.modelEffort !== undefined || requestedEffort !== undefined ? { pinnedEffort: entry.modelEffort ?? null, requestedEffort: requestedEffort ?? null } : {})
+      });
       delete entry.model;
       delete entry.modelPinnedFrom;
       delete entry.modelPinSource;
+      delete entry.modelEffort;
+      delete entry.modelPinnedFromEffort;
     }
     this.modelObservedAt.delete(agentId);
     if (requested) entry.requestedModel = requested; else delete entry.requestedModel;
     if (launch) entry.launchModel = launch; else delete entry.launchModel;
     delete entry.liveModel;
+    // M2: the effort side of the same record. A spawn that names no effort (a Claude or AGY agent,
+    // an older caller) leaves no effort fields behind.
+    if (requestedEffort) entry.requestedEffort = requestedEffort; else delete entry.requestedEffort;
+    if (launchEffort) entry.launchEffort = launchEffort; else delete entry.launchEffort;
+    const defaultEffort = normEffort(spawn.defaultEffort);
+    if (defaultEffort) entry.defaultEffort = defaultEffort; else delete entry.defaultEffort;
+    delete entry.liveEffort;
     entry.launchedAt = Date.now();
+  }
+
+  /**
+   * AGENT-MODEL-NOT-KEPT M3: the Human says an 'auto' pin was theirs ("keep this model"). The pin
+   * becomes a 'user' pin, so the next spawn keeps it (while the picker is unchanged). Returns
+   * false when there is no auto pin to keep. Logged as `model-pin-kept`.
+   */
+  keepModelPin(agentId: string): boolean {
+    const root = this.root();
+    if (!root) return false;
+    try {
+      const reg = this.registryForMutation();
+      const agent = reg.agents[agentId];
+      if (!agent?.model || agent.modelPinSource !== 'auto') return false;
+      agent.modelPinSource = 'user';
+      this.atomicWriteJson(join(root, 'registry.json'), reg);
+      this.appendLog({ kind: 'model-pin-kept', agentId, pinned: agent.model, effort: agent.modelEffort ?? null, requested: agent.requestedModel ?? null });
+      return true;
+    } catch { return false; }
+  }
+
+  /** M2: the reasoning effort a Codex agent gets when nothing is picked or pinned: the seed's
+   *  top-level `model_reasoning_effort` (the user's ~/.codex/config.toml, read only). */
+  codexSeedEffort(): string | undefined {
+    try {
+      const seed = join(homedir(), '.codex', 'config.toml');
+      return existsSync(seed) ? normEffort(codexTopLevelString(readFileSync(seed, 'utf8'), CODEX_EFFORT_KEY)) : undefined;
+    } catch { return undefined; }
   }
 
   /** The last known session_id for an agent, or undefined. Used to build a
@@ -4007,7 +4072,7 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }, launchEffort?: string): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean } {
     let devSet = false;
     const home = join(dir, '.codex');
     // CODEX-TRUST-LAYER T1 (Jim, build round): the layer check must COMPLETE before this agent may
@@ -4125,6 +4190,9 @@ export class HiveManager {
       // MODEL-PINBACK G1: with `--model <picked>` the seed's `model` line is inert; ours names the
       // model the agent really runs. Nothing picked: the seed's line stays and Codex uses it.
       config = setCodexModel(config, launchModel);
+      // AGENT-MODEL-NOT-KEPT M2: and the effort it runs (the pin's, else the picker's). None = the
+      // seed's line stays, as above for the model.
+      config = setCodexReasoningEffort(config, launchEffort);
       // TRUST-SEED-175: the agent's own exact cwd is trusted in ITS copy, AFTER the DEV sanitise
       // above (which drops the user's [projects.*] list), so no codex agent meets the trust screen
       // it cannot answer. One predicate decides the scope (codexTrustSeed.ts); an equal entry the
