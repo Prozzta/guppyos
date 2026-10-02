@@ -122,7 +122,7 @@ test('M1 REPLAY 2026-10-02 05:55:46: the Human\'s /model, re-read at Stop and la
   }]);
 });
 
-test('M1: an app-only switch (no human key after the previous turn started) stays AUTO, even if the person typed that turn\'s prompt', async (t) => {
+test('M1: an app-only switch (no human key after the previous turn started) stays AUTO, even though the person typed the PREVIOUS turn\'s prompt', async (t) => {
   const s = sandbox(t);
   s.clock.at = T('2026-10-02T07:00:00.000Z');
   const { inj } = await spawnDwight(s);
@@ -243,6 +243,50 @@ test('M2: with no seed effort, the first reported effort is the default (not a s
   assert.equal(e.model, undefined);
   assert.equal(e.defaultEffort, 'medium');
   assert.equal(e.liveEffort, 'medium');
+});
+
+test('M2 (Creed B1): a /model effort switch BEFORE the first turn, on the seed\'s effort, pins and comes back after a restart', async (t) => {
+  const s = sandbox(t); // seed effort high, nothing picked
+  s.clock.at = T('2026-10-02T16:00:00.000Z');
+  const { inj } = await spawnDwight(s);
+  assert.equal(entry(s.hive, DWIGHT.id).defaultEffort, 'high');
+  assert.equal(entry(s.hive, DWIGHT.id).launchEffort, undefined);
+  const srv = server(s.hive);
+  s.keys.at = T('2026-10-02T16:00:20.000Z'); // /model terra medium on the first screen
+  s.clock.at = T('2026-10-02T16:00:40.000Z');
+  rollout(inj.env.CODEX_HOME, [turnContext(TERRA, 'medium', '2026-10-02T16:00:35.000Z')]); // the first turn
+  srv.handle(hook(DWIGHT.id));
+  const e = entry(s.hive, DWIGHT.id);
+  assert.equal(e.model, TERRA);
+  assert.equal(e.modelEffort, 'medium');
+  assert.equal(e.modelPinSource, 'user');
+  s.clock.at = T('2026-10-02T17:00:00.000Z');
+  const { r } = await spawnDwight(s);
+  assert.deepEqual(r.args, ['--model', TERRA, '--dangerously-bypass-approvals-and-sandbox', '-c', 'model_reasoning_effort=medium']);
+});
+
+test('M2 (Creed B1): launched with no --model, an effort switch before the first turn still pins; the seed effort itself is not a switch but is shown', async (t) => {
+  const s = sandbox(t);
+  s.clock.at = T('2026-10-02T18:00:00.000Z');
+  const { inj } = await spawnDwight(s, ['--dangerously-bypass-approvals-and-sandbox']);
+  const srv = server(s.hive);
+  s.keys.at = T('2026-10-02T18:00:20.000Z');
+  s.clock.at = T('2026-10-02T18:00:40.000Z');
+  rollout(inj.env.CODEX_HOME, [turnContext(TERRA, 'low', '2026-10-02T18:00:35.000Z')]);
+  srv.handle(hook(DWIGHT.id));
+  assert.equal(entry(s.hive, DWIGHT.id).modelEffort, 'low');
+  assert.equal(entry(s.hive, DWIGHT.id).modelPinSource, 'user');
+
+  const s2 = sandbox(t);
+  s2.clock.at = T('2026-10-02T19:00:00.000Z');
+  const { inj: inj2 } = await spawnDwight(s2);
+  s2.clock.at = T('2026-10-02T19:00:40.000Z');
+  rollout(inj2.env.CODEX_HOME, [turnContext(TERRA, 'high', '2026-10-02T19:00:35.000Z')]);
+  server(s2.hive).handle(hook(DWIGHT.id));
+  const e2 = entry(s2.hive, DWIGHT.id);
+  assert.equal(e2.model, undefined, 'the seed effort is no switch');
+  assert.equal(e2.liveEffort, 'high');
+  assert.equal(P.modelPinLabel(e2, TERRA).model, `${TERRA} · high`);
 });
 
 // ─── M3: the picker and "keep" ──────────────────────────────────────────────

@@ -491,9 +491,12 @@ export function decodeProviderModel(value: string): {
  *  autoMode, and an optional per-agent model override. Claude keeps the user's
  *  configured `defaultCommand`; other providers use their preset binary so the
  *  app works without Claude installed. */
-/** AGENT-MODEL-NOT-KEPT M3: the reasoning efforts the Codex picker offers (Codex's own words;
- *  a model that does not support one answers with its nearest). Empty = Codex's default. */
-export const CODEX_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+/** AGENT-MODEL-NOT-KEPT M3: the reasoning efforts the Codex picker offers (Codex's own words).
+ *  Empty = Codex's default. Creed N2: Codex 0.157.1 records the CONFIGURED effort in turn_context
+ *  (core session/turn_context.rs `effort: self.reasoning_effort()`), but on a model switch it
+ *  replaces an effort the model does not support with that model's middle level; `minimal` is not
+ *  offered, so a pick is one the current models all support. */
+export const CODEX_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
 
 export function buildSpawnCommand(
   config: Pick<HarnessConfig, 'defaultCommand' | 'autoMode'>,

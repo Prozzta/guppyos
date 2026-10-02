@@ -246,23 +246,29 @@ export function applyLiveModel(
   if (opts.observedAt !== undefined && opts.observedAt < Math.floor(entry.launchedAt / 1000) * 1000) {
     return { action: 'stale', changed: false };
   }
-  // M2: the effort this process ran until now. Launched with none known (no pin, no request, no
-  // seed value), the first reported effort is the CLI's own default: a baseline, not a switch.
-  const previousEffort = normEffort(entry.liveEffort) ?? normEffort(entry.launchEffort);
+  // M2: the effort this process ran until now: the last live one, else the launch one, else the
+  // seed's (Creed B1: a /model before the first turn, on a seed effort, is a switch). Launched
+  // with none known at all, the first reported effort is the CLI's own default: a baseline.
+  const previousEffort = normEffort(entry.liveEffort) ?? normEffort(entry.launchEffort) ?? normEffort(entry.defaultEffort);
   let effortBaseline = false;
   if (liveEffort !== undefined && previousEffort === undefined) {
     entry.liveEffort = liveEffort;
     if (entry.defaultEffort === undefined && entry.requestedEffort === undefined && entry.modelEffort === undefined) entry.defaultEffort = liveEffort;
     effortBaseline = true;
   }
+  const effortSwitched = liveEffort !== undefined && previousEffort !== undefined && liveEffort !== previousEffort;
   const previous = entry.liveModel ?? entry.launchModel;
   if (previous === undefined) {
-    // Launched on the CLI's own default: the first observation is that default, not a switch.
+    // Launched on the CLI's own default: the first observation is that default, not a switch
+    // (its effort may still be one).
     entry.liveModel = live;
-    return { action: 'baseline', changed: true };
-  }
-  const effortSwitched = liveEffort !== undefined && previousEffort !== undefined && liveEffort !== previousEffort;
-  if (sameModel(previous, live) && !effortSwitched) {
+    if (!effortSwitched) {
+      if (liveEffort !== undefined) entry.liveEffort = liveEffort;
+      return { action: 'baseline', changed: true };
+    }
+  } else if (sameModel(previous, live) && !effortSwitched) {
+    // The first reported effort is recorded even when it is the expected one (the card shows it).
+    if (liveEffort !== undefined && entry.liveEffort === undefined) { entry.liveEffort = liveEffort; effortBaseline = true; }
     return effortBaseline ? { action: 'baseline', changed: true } : { action: 'unchanged', changed: false };
   }
   entry.liveModel = live;
