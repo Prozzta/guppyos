@@ -40,6 +40,7 @@ import {
 import { canReceiveInbox } from '@shared/agentProvider';
 import type { LivenessV1 } from '@shared/livenessV1';
 import { applyLivenessUpdate } from '@shared/livenessView';
+import { billedEquivalentTokens, tokenFigureTitle } from '@shared/tokenWeights';
 import { LivenessChip, LivenessSummary } from './LivenessChip';
 
 /** Michael's control surface. Shown instead of the plain terminal/files panel
@@ -750,9 +751,15 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                 : <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0 }}>budget</span>}
               {usageDisplay === 'budget' ? (
                 <>
-                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-900)', width: 56, textAlign: 'right' }}>{fmtTokens(tokens)}</span>
+                  {/* GOD-STARTUP-TOKENS R3: the figure is billed-equivalent; the raw sum (which the cap
+                      and the bar count) is in the tooltip. */}
+                  <span
+                    data-testid="agent-token-figure"
+                    title={tokenFigureTitle(sample)}
+                    style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-900)', width: 56, textAlign: 'right' }}
+                  >{fmtTokens(billedEquivalentTokens(sample))}</span>
                   <div
-                    title={`CUMULATIVE session usage: ${tokens.toLocaleString()} of ${denom.toLocaleString()} tokens${agentCap ? ' (agent limit)' : ' (floor budget)'} — not the context window`}
+                    title={`CUMULATIVE session usage, raw (what the cap counts): ${tokens.toLocaleString()} of ${denom.toLocaleString()} tokens${agentCap ? ' (agent limit)' : ' (floor budget)'} — not the context window`}
                     style={{ width: 96, height: 8, background: 'var(--cth-cream-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', flexShrink: 0 }}
                   >
                     <div style={{ width: `${pct}%`, height: '100%', background: meterColor }} />

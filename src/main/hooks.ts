@@ -1851,6 +1851,13 @@ export class HookServer {
     const roster = wantsRoster
       ? this.hive.rosterContext((id) => this.contextFor(id))
       : null;
+    // GOD-STARTUP-TOKENS R1: a god that started FRESH (instead of resuming a costly session) gets its
+    // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
+    // SessionStart (mailSurfaceEvents), so the handoff never takes budget from pending mail. Never on
+    // a one-way hook, whose reply is not read (the handoff would be lost).
+    const handoff = wantsRoster && event === 'SessionStart' && p.source === 'startup' && p.transport !== 'pipe-oneway'
+      ? this.hive.takeGodHandoff?.(agentId) ?? null
+      : null;
 
     // Standing goal (hire Briefing) — durable roster field, re-read every cycle so
     // an Edit Agent save is picked up on the next SessionStart / UserPromptSubmit
@@ -1875,10 +1882,10 @@ export class HookServer {
       && !(event === 'UserPromptSubmit' && isSlashPrompt(p.prompt));
     let mailBlock: string | null = null;
     if (surfaces && agentId) {
-      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [roster, goal, steer, mail]); } catch { mailBlock = null; }
+      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [handoff, roster, goal, steer, mail]); } catch { mailBlock = null; }
       const none = '<hive-mail>\nNo new hive mail to show for this wake.\n</hive-mail>';
       if (!mailBlock && event === 'UserPromptSubmit' && channel?.provider === 'codex' && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL
-        && mailBudgetFor([roster, goal, steer, mail]) >= none.length) {
+        && mailBudgetFor([handoff, roster, goal, steer, mail]) >= none.length) {
         mailBlock = none;
         // Q12 (god's ruling): a wake with nothing to show means the coordinator woke for mail that
         // was not pending: a coordinator bug signal.
@@ -1887,17 +1894,17 @@ export class HookServer {
     }
     // §11.5: SessionStart(compact) inside a turn re-injects what this epoch already surfaced.
     if (injecting && agentId && !fromSubagent && event === 'SessionStart' && p.source === 'compact' && p.transport !== 'pipe-oneway') {
-      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [roster, goal, steer, mail]); } catch { mailBlock = null; }
+      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, steer, mail]); } catch { mailBlock = null; }
     }
     // §11.10: a mail block reached this agent (the degradation watch counts wakes without one).
     if (mailBlock && agentId) { try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ } }
 
-    if (steer || roster || goal || mail || mailBlock) {
+    if (handoff || steer || roster || goal || mail || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n')
+          additionalContext: [handoff, roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n')
         }
       };
     }

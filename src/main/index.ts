@@ -33,7 +33,8 @@ import {
   readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
-import { effectiveModel, resolveSpawnArgs } from '../shared/modelPin';
+import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
+import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
@@ -85,7 +86,8 @@ import type { UsageProvider } from './usage';
 import { KnowledgeManager } from './knowledge';
 import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
-import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession } from './transcript';
+import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession, sessionTranscriptPath } from './transcript';
+import { godFreshStart, readClaudeVersion, type GodFreshReason } from './godStartup';
 import { resumeDecision, type StaleReason } from './sessionRotation';
 import { listIssues, listCIRuns } from './github';
 import { SlackWebhookServer, SlackReplyServer, postSlackReply, type SlackEventFile } from './slack';
@@ -2221,7 +2223,10 @@ function writeFleetSnapshot(): void {
       .map(([id, a]) => {
         const u = usageById.get(id);
         const spans = snap.spans[id] ?? [];
-        const tokens = u ? u.input + u.output + u.cacheRead + u.cacheCreation : 0;
+        // GOD-STARTUP-TOKENS R3: `tokens` is the billed-equivalent figure (cache reads x0.1, writes
+        // x1.25); the raw sum stays as `tokensRaw` (the token caps count raw).
+        const tokens = billedEquivalentTokens(u);
+        const tokensRaw = rawTokens(u);
         // `usd` is LIFETIME (reset-corrected). Until the first fold completes we
         // fall back to the session figure rather than publishing a cold $0.
         const lifetime = costTotals.usdFor(id);
@@ -2234,6 +2239,7 @@ function writeFleetSnapshot(): void {
           isGod: !!a.isGod,
           breaker: breaker.levelFor(id),
           tokens,
+          tokensRaw,
           usd: lifetime === null ? sessionUsd : Number(lifetime.toFixed(4)),
           sessionUsd,
           lastTool: spans.length ? spans[spans.length - 1].tool : null,
@@ -3894,11 +3900,36 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         rotated.push(sid);
         hive.retireSession(opts.hive.id, sid);
         hive.appendLog({ kind: 'session-rotate', agentId: opts.hive.id, sessionId: sid, reason: why, promptFp });
+        // GOD-STARTUP-TOKENS R1: a god that starts fresh for any automatic reason gets the handoff.
+        if (opts.hive.isGod) hive.armGodHandoff(opts.hive.id, { reasons: [`prompt-${why}`], previousSession: sid, contextTokens: null });
         console.log(`[resume] ${opts.hive.id}: session ${sid} was started with another system prompt (${why}); starting fresh`);
         sid = undefined;
       }
     } else if (sid && explicitSid && staleFor(sid)) {
       hive.appendLog({ kind: 'session-resume-stale', agentId: opts.hive.id, sessionId: sid, reason: staleFor(sid), promptFp });
+    }
+    // GOD-STARTUP-TOKENS R1 (godStartup.ts): an AUTOMATIC god resume whose last request was too
+    // big, is past the cache lifetime, or was made by another Claude Code version or model would
+    // re-send (and, past the cache, re-write) the whole old conversation. God starts FRESH with a
+    // handoff instead (hive.armGodHandoff; the hooks put it in context). Logged either way. A typed
+    // id (and Restart & Continue, which passes one) is honoured as before.
+    const godCurrent = opts.hive.isGod && !explicitSid && sid
+      ? { cliVersion: readClaudeVersion(await ptyManager.commandPath(opts.command.trim().split(/\s+/)[0] || opts.command)), model: modelFlagValue(args) ?? null }
+      : null;
+    const godAgentId = opts.hive.id;
+    const godCwd = opts.cwd;
+    const godFresh = (s: string): GodFreshReason[] | null => !godCurrent ? null : godFreshStart(s, {
+      agentId: godAgentId,
+      current: godCurrent,
+      transcriptPath: (id) => sessionTranscriptPath(godCwd, id),
+      now: Date.now,
+      log: (row) => hive.appendLog(row),
+      retire: (id) => hive.retireSession(godAgentId, id),
+      arm: (h) => hive.armGodHandoff(godAgentId, h)
+    });
+    if (sid && !explicitSid && godFresh(sid)) {
+      console.log(`[resume] ${opts.hive.id}: session ${sid} would re-send its whole context; starting fresh with a handoff`);
+      sid = undefined;
     }
     let resumedSid: string | null = null;
     // SESSION-CROSSWIRE: an automatic resume never picks up a session another agent
@@ -3921,6 +3952,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         // SESSION-PROMPT-ROTATION: the previous-key fallback obeys the same prompt check.
         const seedFresh = (s: string): boolean => {
           if (staleFor(s)) { rotated.push(s); return false; }
+          if (godFresh(s)) return false;                          // GOD-STARTUP-TOKENS R1: same rule
           return seedSessionTranscript(cwd, s);
         };
         const pick = chooseResumeSession(sid, previous, seedFresh, foreign);

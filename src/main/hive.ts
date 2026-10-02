@@ -74,6 +74,9 @@ import { AGY_STATUSLINE_SHIM } from './agyStatuslineShim';
 import { geminiHome } from './capacityScope';
 import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHookMcp';
 import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
+import { godHandoffContext } from './godStartup';
+import { FLOOR_DIGEST_FILE } from './floorDigest';
+import { BOARD_STATUS_FILE } from './boardStatus';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -4375,6 +4378,32 @@ export class HiveManager {
       const reg = this.registry();
       return reg.godId === agentId || !!reg.agents[agentId]?.isGod;
     } catch { return false; }
+  }
+
+  /** GOD-STARTUP-TOKENS R1: god's spawn chose a fresh start; its first answering hook gets the
+   *  handoff. In memory: a restart before that hook makes the same decision again. */
+  private godHandoff = new Map<string, { reasons: string[]; previousSession: string | null; contextTokens: number | null; at: number }>();
+  armGodHandoff(agentId: string, h: { reasons: string[]; previousSession: string | null; contextTokens: number | null }): void {
+    this.godHandoff.set(agentId, { ...h, reasons: [...h.reasons], at: Date.now() });
+    this.appendLog({ kind: 'god-handoff-armed', agentId, reasons: h.reasons, previousSession: h.previousSession });
+  }
+
+  /** R1: the armed handoff as context (and disarmed), or null. Reads god's memory.md, the floor
+   *  digest and the board status from disk now, so the handoff is current. */
+  takeGodHandoff(agentId: string): string | null {
+    const h = this.godHandoff.get(agentId);
+    if (!h) return null;
+    this.godHandoff.delete(agentId);
+    const root = this.root();
+    const read = (p: string | null): string | null => { try { return p && existsSync(p) ? readFileSync(p, 'utf8') : null; } catch { return null; } };
+    const text = godHandoffContext({
+      reasons: h.reasons, previousSession: h.previousSession, contextTokens: h.contextTokens,
+      memory: read(root ? join(this.agentDir(agentId), 'memory.md') : null),
+      floorDigest: read(root ? join(root, FLOOR_DIGEST_FILE) : null),
+      boardStatus: read(root ? join(root, BOARD_STATUS_FILE) : null)
+    });
+    this.appendLog({ kind: 'god-handoff-delivered', agentId, chars: text.length, reasons: h.reasons });
+    return text;
   }
 
   /**
