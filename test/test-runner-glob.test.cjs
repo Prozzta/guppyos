@@ -396,8 +396,56 @@ test('watchdog: parses PowerShell\'s process rows (one row or many, /Date(ms)/ s
   assert.deepStrictEqual(parseRows('not json'), []);
 });
 
-test('watchdog timing: polls at a tenth of the limit (1-30 s); node --test\'s backstop is three polls later', () => {
+test('watchdog timing: polls at a tenth of the limit (1-30 s); node --test\'s backstop is three polls later, never under 20 s', () => {
   assert.strictEqual(runner.watchdogPollMs(4_000), 1_000);
   assert.strictEqual(runner.watchdogPollMs(30 * 60_000), 30_000);
-  assert.strictEqual(runner.backstopMs(30 * 60_000), 30 * 60_000 + 90_000);
+  assert.strictEqual(runner.backstopMs(30 * 60_000), 30 * 60_000 + 90_000, 'the production margin is unchanged');
+  assert.strictEqual(runner.BACKSTOP_MIN_MARGIN_MS, 20_000);
+  for (const limit of [1_000, 4_000, 60_000, 200_000]) {
+    assert.ok(runner.backstopMs(limit) - limit >= 20_000, `GATE-178: THE BACKSTOP LEAVES A SLOW SNAPSHOT TIME (limit ${limit} ms: margin ${runner.backstopMs(limit) - limit} ms)`);
+  }
+});
+
+test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung ConPTY file before the backstop (no orphaned conhost)', { timeout: 120_000, skip: !HAS_PTY && 'needs node-pty on win32' }, () => {
+  const os = require('node:os');
+  const { spawn, spawnSync } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-late-'));
+  let failed = null;
+  let wrapper = null;
+  try {
+    const filePidFile = path.join(dir, 'file.pid');
+    fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), [
+      "const test = require('node:test');",
+      "const fs = require('node:fs');",
+      "test('a ConPTY killed before its first output, and a handle', async () => {",
+      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, String(process.pid));`,
+      `  const bat = ${JSON.stringify(path.join(dir, 'silent.bat'))};`,
+      "  fs.writeFileSync(bat, '@echo off\\r\\nping -n 60 127.0.0.1 >nul\\r\\n');",
+      `  const p = require(${JSON.stringify(NODE_PTY)}).spawn('cmd.exe', ['/c', bat], { cols: 80, rows: 24 });`,
+      '  await new Promise((r) => setTimeout(r, 300));',
+      '  p.kill();',
+      '  setInterval(() => {}, 1000);',
+      '});'
+    ].join('\n'));
+    const e = sink();
+    // The real watchdog, started 8 s late: a slow PowerShell snapshot under load (9.6 s seen), and
+    // past the old backstop (limit + 3 polls = 7 s), so only the 20 s floor lets the tree kill win.
+    const lateWatchdog = (limitMs, outFile) => {
+      const args = [runner.WATCHDOG, String(process.pid), String(limitMs), outFile, String(runner.watchdogPollMs(limitMs))];
+      wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 8000);`], { stdio: 'ignore', windowsHide: true });
+      return { stop: () => { try { spawnSync('taskkill', ['/T', '/F', '/PID', String(wrapper.pid)], { windowsHide: true }); } catch { /* gone */ } } };
+    };
+    const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
+    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, watchdog: lateWatchdog });
+    assert.notStrictEqual(code, 0, 'a hung file fails the run');
+    const left = childrenOf(Number(fs.readFileSync(filePidFile, 'utf8')));
+    for (const l of left) { try { process.kill(Number(l.split(' ')[0])); } catch { /* gone */ } }
+    assert.deepStrictEqual(left, [], `A LATE WATCHDOG STILL TREE-KILLS FIRST: the hung file's tree outlived the run: ${left.join(', ')}`);
+  } catch (err) {
+    failed = err;
+    throw err;
+  } finally {
+    const r = removeWhenFree(dir);
+    if (!r.removed && !failed) assert.fail(`the temp folder was still in use ${r.waitedMs} ms after the run (${r.code}); recent processes: ${recentProcesses()}`);
+  }
 });

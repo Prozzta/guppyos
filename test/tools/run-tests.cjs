@@ -45,9 +45,15 @@ const TIMEOUT_REPORTER = require('url').pathToFileURL(path.join(__dirname, 'file
 const WATCHDOG = path.join(__dirname, 'file-watchdog.cjs');
 
 /** How often the win32 watchdog looks (a tenth of the limit, 1 s to 30 s), and node --test's own
- *  backstop timeout: three polls later, so the watchdog's TREE kill always comes first. */
+ *  backstop timeout: three polls later, but never less than BACKSTOP_MIN_MARGIN_MS after the limit,
+ *  so the watchdog's TREE kill comes first.
+ *  GATE-178 (gate 3 round 1): each poll is one PowerShell process snapshot, and under a dual-suite
+ *  load it took 0.4-9.6 s (35 of 402 over 3 s). With a short limit (the 4 s of the END TO END test)
+ *  three polls were only 3 s, so the backstop sometimes killed the file alone and its ConPTY conhost
+ *  (outside node's kill-on-close job) was orphaned. The floor is twice the slowest snapshot seen. */
+const BACKSTOP_MIN_MARGIN_MS = 20_000;
 function watchdogPollMs(limitMs) { return Math.min(30_000, Math.max(1_000, Math.floor(limitMs / 10))); }
-function backstopMs(limitMs) { return limitMs + 3 * watchdogPollMs(limitMs); }
+function backstopMs(limitMs) { return limitMs + Math.max(3 * watchdogPollMs(limitMs), BACKSTOP_MIN_MARGIN_MS); }
 
 /** win32: start the per-file tree-kill watchdog (file-watchdog.cjs) beside the blocking run. */
 function startWatchdog(limitMs, outFile) {
@@ -166,7 +172,7 @@ function run({
   return hung.length && res.status === 0 ? 1 : res.status;
 }
 
-module.exports = { selectTestFiles, run, TEST_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs };
+module.exports = { selectTestFiles, run, TEST_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
