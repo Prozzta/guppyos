@@ -186,13 +186,15 @@ for (const [name, src, args, input] of SHIMS) {
   });
 }
 
-test('(a) a give-up with NO complete reply in the pipe still exits empty, within its bound (never prints a partial reply)', async () => {
-  const sock = process.platform === 'win32' ? `\\\\.\\pipe\\md-shim-clock-partial-${process.pid}` : path.join(JAIL, 'partial.sock');
-  const server = net.createServer((conn) => { conn.on('data', () => conn.write('{"hookSpecificOutput":{"additionalCon')); conn.on('error', () => {}); });
-  await new Promise((res) => server.listen(sock, res));
-  try {
-    const r = await runShim(AGY_HOOK_SHIM, ['PreInvocation'], { AGENT_ID: 'ag-1', HIVE_SOCK: sock }, '{}', {});
-    assert.equal(r.out, '', 'nothing printed: AGY reads any object on stdout as a decision');
-    assert.ok(r.ms >= 4_900 && r.ms < 15_000, `gave up at its 5 s bound (${r.ms} ms)`);
-  } finally { server.close(); }
-});
+for (const [name, src, args, input] of SHIMS) {
+  test(`(a) ${name}: a give-up with NO complete reply in the pipe still exits empty, within its bound (never prints a partial reply)`, async () => {
+    const sock = process.platform === 'win32' ? `\\\\.\\pipe\\md-shim-clock-partial-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(JAIL, `p-${Math.random().toString(36).slice(2)}.sock`);
+    const server = net.createServer((conn) => { conn.on('data', () => conn.write('{"hookSpecificOutput":{"additionalCon')); conn.on('error', () => {}); });
+    await new Promise((res) => server.listen(sock, res));
+    try {
+      const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock }, JSON.stringify(input), {});
+      assert.equal(r.out, '', 'nothing printed: a partial reply is no reply (AGY even reads any stdout object as a decision)');
+      assert.ok(r.ms >= 4_900 && r.ms < 15_000, `gave up at its 5 s bound (${r.ms} ms)`);
+    } finally { server.close(); }
+  });
+}
