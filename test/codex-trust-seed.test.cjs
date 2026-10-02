@@ -174,7 +174,7 @@ test('wiring: the seed runs AFTER the DEV sanitise and the other transforms, BEF
   const at = fn.indexOf('if (cwd && shouldSeedCodexTrust(cwd, { harnessHome: this.getHome() })) {');
   assert.ok(at > fn.indexOf('sanitizeCodexConfigForDev(config') && at > fn.indexOf('config = setCodexModel(config, launchModel);') && at < fn.indexOf('if (shim) {'), 'after the sanitise, before the hooks');
   assert.match(fn, /const seeded = withAgentTrust\(config, cwd\);\n\s*config = seeded\.text;/);
-  assert.match(src, /configuredCompactLimit, meta\.cwd, \{ codexVersion: opts\.codexVersion \?\? null, optIns: opts\.codexLayerOptIns \}\);/, 'ensureAgent passes the agent\'s own cwd (and, CODEX-TRUST-LAYER, the codex version and the allowlist)');
+  assert.match(src, /configuredCompactLimit, meta\.cwd, \{ codexVersion: opts\.codexVersion \?\? null, optIns: opts\.codexLayerOptIns \}, opts\.spawnModel\?\.launchEffort\);/, 'ensureAgent passes the agent\'s own cwd (and, CODEX-TRUST-LAYER, the codex version and the allowlist)');
 });
 
 test('Jim P1: codex lowercases ASCII ONLY: non-ASCII letters keep their case in the key, and duplicate detection folds ASCII case only', () => {

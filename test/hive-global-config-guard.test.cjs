@@ -217,6 +217,7 @@ test('WIRING: index.ts supplies the predicate, and it is the ONLY place that doe
   const homedirCalls = hive.split('\n')
     .filter((l) => l.includes('homedir()') && !l.trim().startsWith('//') && !l.trim().startsWith('*'));
   assert.deepEqual(homedirCalls.map((l) => l.trim()), [
+    "const seed = join(homedir(), '.codex', 'config.toml');", // codexSeedEffort (1.1.79 M2): READS the seed's effort, never writes
     "const dir = join(homedir(), '.gemini', 'config', 'agents');", // sweepAgyAgents - gated above
     "return join(homedir(), '.gemini', 'config', 'agents', HiveManager.agyAgentName(agentId));", // agyAgentDir: only installAgyAgent/removeAgyAgent, both gated above
     "const gem = join(homedir(), '.gemini');",           // installAgyHooks - gated above
