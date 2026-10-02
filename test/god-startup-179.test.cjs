@@ -266,6 +266,9 @@ test('Creed B1: godHandoffFit never exceeds its budget, cuts from the end, and k
     const r = G.godHandoffFit(input, budget);
     assert.ok(r.text.length <= budget, `budget ${budget}: ${r.text.length}`);
   }
+  // A generous budget is still capped at GOD_HANDOFF_MAX (S23).
+  const roomy = G.godHandoffFit({ ...input, reasons: Array.from({ length: 2_000 }, (_, i) => `reason-${i}`) }, 50_000);
+  assert.ok(roomy.text.length <= G.GOD_HANDOFF_MAX, `${roomy.text.length}`);
   const mid = G.godHandoffFit(input, 6_000);
   assert.deepEqual(mid.cut.slice(0, 1), ['board-status']);
   assert.match(mid.text, /board-status\.md:\n[\s\S]*\[cut to fit the hook; read the file\]/);
