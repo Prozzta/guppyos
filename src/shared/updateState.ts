@@ -56,13 +56,13 @@ export type UpdateAction = 'none' | 'check' | 'download' | 'restart' | 'open-rel
  *
  *  It is the human's own repository, and deliberately NOT the upstream project
  *  this app was forked from. The packaged app must only ever look for, fetch or
- *  offer a build from here. Prozzta/hornham-wegg publishes no GitHub releases,
- *  so the updater finds nothing and stays dormant, which is the intended safe
- *  state until a release is published there on purpose.
+ *  offer a build from here. Prozzta/guppyos publishes its releases on
+ *  purpose (from 1.1.79); while it has none newer than the running build, the
+ *  updater finds nothing to offer and stays dormant.
  *
  *  (The git remote named `upstream` is the dev-time cherry-pick library and is
  *  not a runtime path; nothing in the running app reads it.) */
-export const REPO = 'Prozzta/hornham-wegg';
+export const REPO = 'Prozzta/guppyos';
 
 /** The installer for THIS machine in the release tagged v{version}, by the
  *  names electron-builder.yml produces. Used when a status carries no

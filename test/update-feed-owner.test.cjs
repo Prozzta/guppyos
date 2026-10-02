@@ -20,7 +20,7 @@ const ts = require('typescript');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
-const OWN = 'Prozzta/hornham-wegg';
+const OWN = 'Prozzta/guppyos';
 const UPSTREAM = 'chaitanyagiri';
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 

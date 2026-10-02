@@ -25,7 +25,7 @@ declare global {
 }
 (globalThis as unknown as { __APP_VERSION__: string }).__APP_VERSION__ = '1.1.59';
 
-const REPO = 'Prozzta/hornham-wegg';
+const REPO = 'Prozzta/guppyos';
 const exe = (v: string) => `https://github.com/${REPO}/releases/download/v${v}/Munder-Difflin-${v}-win-x64-setup.exe`;
 const opt = (v: string) => ({ version: v, url: `https://github.com/${REPO}/releases/tag/v${v}`, downloadUrl: exe(v), notes: `## What's new in ${v}\n\n- only in ${v}` });
 

@@ -11,7 +11,7 @@ subscriptions you already pay for, on their hourly limits. It turns the terminal
 you already run into a clone of you, one that keeps working while you're away and
 coordinates a whole office of agents on your own machine.
 
-This is **Prozzta/hornham-wegg**, a fork of
+This is **Prozzta/guppyos**, a fork of
 [chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin).
 The product concept, the office floor, and the foundation are upstream's work; this fork
 is a **hardened, independently versioned line** built for running a floor continuously
@@ -320,8 +320,8 @@ the terminal/event plane, and [`DESIGN.md`](./DESIGN.md) for the visual system.
 ### Install & run from source
 
 ```bash
-git clone https://github.com/Prozzta/hornham-wegg.git
-cd hornham-wegg
+git clone https://github.com/Prozzta/guppyos.git
+cd guppyos
 npm install        # postinstall rebuilds node-pty against Electron's ABI
 npm run dev        # launches the Electron app with hot reload
 ```
