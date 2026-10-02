@@ -34,7 +34,7 @@ import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, t
 import {
   MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
   buildMailBlock, buildMailHeaders, isSlashPrompt, mailBudgetFor, mailChannelMode, mailEvidenceIn,
-  mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow,
+  mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
   type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
 
@@ -86,6 +86,8 @@ interface HookPayload {
   env_agent_id?: string | null;
   /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
   munder_wake_incarnation?: string | null;
+  /** MAIL-PIPE-SHIM-CLOCK: a pipe shim's own running time when it sent the request (ms). */
+  shim_elapsed_ms?: unknown;
   session_id?: string;
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
@@ -408,10 +410,17 @@ export class HookServer {
         if (nl === -1) return; // wait for the full line
         let payload: HookPayload = {};
         try { payload = JSON.parse(buf.slice(0, nl)); } catch { /* ignore */ }
+        // MAIL-PIPE-SHIM-CLOCK (1): the shim's 5 s give-up started before this read. A shim that
+        // was descheduled before sending, or a server that read the request late, used up time
+        // this side never saw; on a Windows pipe the flush also "finishes" when the shim CLOSES at
+        // its give-up, so a server-only measure confirmed a reply nobody printed (GATE-179). The
+        // on-time measure is the shim's elapsed time at send plus this side's arrival-to-flush.
+        const shimMs = shimElapsedMs(payload.shim_elapsed_ms);
+        delete payload.shim_elapsed_ms;
         let res: unknown = {};
         let claims: MailClaim[] = [];
         try { res = this.handle(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
-        this.watchMailFlush(conn, claims, receivedAt);
+        this.watchMailFlush(conn, claims, receivedAt - shimMs);
         conn.end(JSON.stringify(res ?? {}));
       });
       conn.on('error', () => { /* shim hung up — ignore */ });
