@@ -46,7 +46,12 @@ const page = (name) => {
   ipcRenderer.on('page:busy', () => setTimeout(() => runawayAllocator(${MAX_MB}), 20));
   ipcRenderer.on('page:debugger', () => setTimeout(stopsAtDebugger, 20));
   window.ping = () => 'pong';
-  ipcRenderer.send('page:ready', '${name}');
+  // GATE-179 re-gate round 1: Electron's own dev-mode security check runs on 'load', after an IPC
+  // round trip to main, and logs "Electron Security Warning". It started in the SAME millisecond as
+  // the idle capture, so under load the probe paused inside it (renderer_init logSecurityWarnings)
+  // and the "idle" page had a stack. The harness pages turn it off, and say ready only after load.
+  window.ELECTRON_DISABLE_SECURITY_WARNINGS = true;
+  window.addEventListener('load', () => setTimeout(() => ipcRenderer.send('page:ready', '${name}'), 0));
 </script>`);
   return file;
 };
@@ -78,6 +83,8 @@ async function scenario(name, { arm = true, busy = false, timeoutMs = undefined 
   const win = new BrowserWindow({ show: false, width: 400, height: 300, webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false } });
   const wc = win.webContents;
   const probe = new R.RendererProbe(wc.debugger, { devToolsOpen: () => wc.isDevToolsOpened() });
+  let securityWarnings = 0;
+  wc.on('console-message', (_e, _level, msg) => { if (/Electron Security Warning/.test(String(msg))) securityWarnings += 1; });
   const up = once(`ready:${name}`);
   win.loadFile(page(name));
   await up;
@@ -91,7 +98,7 @@ async function scenario(name, { arm = true, busy = false, timeoutMs = undefined 
   // Not left paused: an idle page must still answer; a busy one must still be allocating (alive).
   const answers = busy ? null : await Promise.race([wc.executeJavaScript('window.ping()'), new Promise((res) => setTimeout(() => res('no-answer'), 30000))]);
   const attachedAfter = wc.debugger.isAttached();
-  const out = { name, armed, pid, captureTimeoutMs: timeoutMs ?? null, profile: { ...r, file: r.file ? 'written' : null }, fileNodes, worstGapMs, answers, attachedAfter, foreignResumes: probe.foreignResumes };
+  const out = { name, armed, pid, captureTimeoutMs: timeoutMs ?? null, profile: { ...r, file: r.file ? 'written' : null }, fileNodes, worstGapMs, answers, attachedAfter, foreignResumes: probe.foreignResumes, securityWarnings };
   probe.giveUp();
   win.destroy();
   return out;
