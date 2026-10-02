@@ -74,6 +74,10 @@ import { AGY_STATUSLINE_SHIM } from './agyStatuslineShim';
 import { geminiHome } from './capacityScope';
 import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHookMcp';
 import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
+import { godHandoffFit } from './godStartup';
+import { MAIL_JOINED_BUDGET } from './mailSurface';
+import { FLOOR_DIGEST_FILE } from './floorDigest';
+import { BOARD_STATUS_FILE } from './boardStatus';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
  *  Kept as a local shape so hive.ts never imports the foundation-owned config
@@ -4444,6 +4448,44 @@ export class HiveManager {
       return reg.godId === agentId || !!reg.agents[agentId]?.isGod;
     } catch { return false; }
   }
+
+  /** GOD-STARTUP-TOKENS R1: god's spawn chose a fresh start; its first answering hook gets the
+   *  handoff. In memory: a restart before that hook makes the same decision again. */
+  private godHandoff = new Map<string, { reasons: string[]; previousSession: string | null; contextTokens: number | null; at: number }>();
+  armGodHandoff(agentId: string, h: { reasons: string[]; previousSession: string | null; contextTokens: number | null }): void {
+    this.godHandoff.set(agentId, { ...h, reasons: [...h.reasons], at: Date.now() });
+    this.appendLog({ kind: 'god-handoff-armed', agentId, reasons: h.reasons, previousSession: h.previousSession });
+  }
+
+  /** R1: the armed handoff as context (and disarmed), or null. Reads god's memory.md, the floor
+   *  digest and the board status from disk now, so the handoff is current. Creed B1: `others` are
+   *  the parts joined into the same additionalContext (roster, goal, steer, mail); the handoff is
+   *  built to fit MAIL_JOINED_BUDGET with them. Creed N1: one armed longer ago than
+   *  GOD_HANDOFF_STALE_MS (its session never started) is dropped, not delivered late. */
+  takeGodHandoff(agentId: string, others: Array<string | null | undefined> = []): string | null {
+    const h = this.godHandoff.get(agentId);
+    if (!h) return null;
+    this.godHandoff.delete(agentId);
+    if (Date.now() - h.at > HiveManager.GOD_HANDOFF_STALE_MS) {
+      this.appendLog({ kind: 'god-handoff-dropped', agentId, reasons: h.reasons, ageMs: Date.now() - h.at });
+      return null;
+    }
+    const joined = others.filter((x): x is string => typeof x === 'string' && x.length > 0);
+    const budget = MAIL_JOINED_BUDGET - (joined.length ? joined.join('\n\n').length + 2 : 0);
+    const root = this.root();
+    const read = (p: string | null): string | null => { try { return p && existsSync(p) ? readFileSync(p, 'utf8') : null; } catch { return null; } };
+    const { text, cut } = godHandoffFit({
+      reasons: h.reasons, previousSession: h.previousSession, contextTokens: h.contextTokens,
+      memory: read(root ? join(this.agentDir(agentId), 'memory.md') : null),
+      floorDigest: read(root ? join(root, FLOOR_DIGEST_FILE) : null),
+      boardStatus: read(root ? join(root, BOARD_STATUS_FILE) : null)
+    }, budget);
+    this.appendLog({ kind: 'god-handoff-delivered', agentId, chars: text.length, budget, cut, reasons: h.reasons });
+    return text || null;
+  }
+
+  /** Creed N1: an armed handoff older than this was for a session that never started. */
+  static readonly GOD_HANDOFF_STALE_MS = 10 * 60 * 1000;
 
   /**
    * A compact, one-shot LIVE ROSTER line built from `fleet.json` — injected into
