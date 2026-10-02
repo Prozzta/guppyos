@@ -14,7 +14,8 @@
  *    measurement can keep the view still);
  *  - F2 ALONE: the measured wrapper forced back to display:block, so the margins collapse out
  *    again (only overflow-anchor:none can keep the view still);
- *  - F3: a component that throws inside the History boundary, beside a sibling that must stay.
+ *  - F3: a component that throws inside the History boundary, beside a sibling that must stay;
+ *  - B1: the ROOT boundary's "Reload the window" goes through main, never location.reload().
  * A hidden window renders no frames, so a user scroll is setting scrollTop + a scroll event.
  */
 import { createRoot, type Root } from 'react-dom/client';
@@ -49,7 +50,16 @@ const historyPage = async (req: HistoryRequest): Promise<HistoryPage> => {
   return { ...head, items: file.slice(startIdx, endIdx), start: startIdx * LINE, end: endIdx * LINE, atStart: startIdx === 0 };
 };
 const reports: RendererErrorReport[] = [];
-(window as unknown as { cth: unknown }).cth = { historyPage, logRendererError: (r: RendererErrorReport) => { reports.push(r); } };
+const reloadCalls: string[] = [];
+(window as unknown as { cth: unknown }).cth = {
+  historyPage,
+  logRendererError: (r: RendererErrorReport) => { reports.push(r); },
+  reloadAfterError: (where: string) => { reloadCalls.push(where); }
+};
+// Jim B1: a bare location.reload() must never happen. Count any unload attempt and cancel it
+// (Electron cancels a navigation whose beforeunload returns a value), so the run survives a mutant.
+let unloadAttempts = 0;
+window.onbeforeunload = (e: BeforeUnloadEvent) => { unloadAttempts += 1; e.returnValue = false; return false; };
 
 const errors: string[] = [];
 const origErr = console.error;
@@ -116,6 +126,22 @@ async function boundaryTrial() {
   return out;
 }
 
+/** Jim B1: the ROOT boundary's button reloads through main (the recovery notice), never by itself. */
+async function rootReloadTrial() {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const root: Root = createRoot(host);
+  root.render(<ErrorBoundary where="The app" recover="reload"><Thrower /></ErrorBoundary>);
+  await sleep(300);
+  const button = [...host.querySelectorAll('button')].find((b) => /Reload the window/.test(b.textContent ?? ''));
+  const before = reloadCalls.length;
+  button?.click();
+  await sleep(400);
+  const out = { buttonShown: !!button, reloadCalls: reloadCalls.slice(before), unloadAttempts };
+  root.unmount(); host.remove();
+  return out;
+}
+
 window.__harnessRun = async () => {
   try {
     const short = await scrollTrial('short', '');
@@ -125,7 +151,8 @@ window.__harnessRun = async () => {
     const f2Only = await scrollTrial('real', '[data-hid]{display:block !important}');
     const f2OnlyShort = await scrollTrial('short', '[data-hid]{display:block !important}');
     const boundary = await boundaryTrial();
-    window.harness.report({ ok: true, short, real, f1Only, f1OnlyShort, f2Only, f2OnlyShort, boundary });
+    const rootReload = await rootReloadTrial();
+    window.harness.report({ ok: true, short, real, f1Only, f1OnlyShort, f2Only, f2OnlyShort, boundary, rootReload });
   } catch (e) {
     window.harness.report({ ok: false, error: String((e as Error)?.stack ?? e) });
   }

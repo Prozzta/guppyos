@@ -10,10 +10,14 @@ const defaultSend: Send = (report) => {
   (window as unknown as { cth?: { logRendererError?: Send } }).cth?.logRendererError?.(report);
 };
 
-const text = (v: unknown): string => {
+/** Jim B2: an Error's message or a string; anything else by its TYPE only (a rejected object can
+ *  carry tokens or account data, so none of its fields are sent). */
+export const text = (v: unknown): string => {
   if (v instanceof Error) return v.message || v.name;
   if (typeof v === 'string') return v;
-  try { return JSON.stringify(v) ?? String(v); } catch { return String(v); }
+  if (v === null || v === undefined) return String(v);
+  if (typeof v === 'object') return `a rejected ${(v as object).constructor?.name || 'object'} (fields not logged)`;
+  return `a rejected ${typeof v}`;
 };
 
 export function reportRendererError(report: RendererErrorReport, send: Send = defaultSend): void {

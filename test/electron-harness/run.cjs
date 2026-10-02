@@ -86,12 +86,13 @@ function runScenario(scenario, opts = {}) {
       cwd: root,
       env: {
         ...process.env,
+        // A test's own variables for this run only (HARNESS_SOURCE_OVERRIDES for a mutant census).
+        // Spread FIRST (Jim N1): they can never undo the isolation keys below.
+        ...(opts.env || {}),
         // Never let a harness run inherit the isolated-Dev identity or attach to
         // the app's own sockets: this is a throwaway process, not an instance.
         MUNDER_DEV: '',
-        ELECTRON_ENABLE_LOGGING: '1',
-        // A test's own variables for this run only (HARNESS_SOURCE_OVERRIDES for a mutant census).
-        ...(opts.env || {})
+        ELECTRON_ENABLE_LOGGING: '1'
       },
       stdio: ['ignore', 'pipe', 'pipe']
     });

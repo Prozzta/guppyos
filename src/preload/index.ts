@@ -1379,6 +1379,10 @@ const api = {
    *  unhandled rejection); main validates it and writes a renderer-error row. */
   logRendererError: (report: RendererErrorReport): void =>
     ipcRenderer.send('renderer:error', report),
+  /** HISTORY-SCROLL-FREEZE (Jim B1): reload this window THROUGH MAIN, which first sets its recovery
+   *  notice, so the page comes back on the live floor, not the HivePicker. */
+  reloadAfterError: (where: string): void =>
+    ipcRenderer.send('window:reloadAfterError', where),
   /**
    * L0-FUSION stage 5.4b - A HUMAN says the prompt that was interfered with is dealt with.
    * The only way an INTERFERED hold ends while its terminal lives. Call it from a person's

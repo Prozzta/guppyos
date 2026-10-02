@@ -38,7 +38,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, State> {
   }
 
   private readonly recover = (): void => {
-    if (this.props.recover === 'reload') { window.location.reload(); return; }
+    if (this.props.recover === 'reload') {
+      // Jim B1: through main (recovery notice first), never location.reload(): a bare reload lands
+      // on the HivePicker, whose switch path tears down the live agents.
+      (window as unknown as { cth?: { reloadAfterError?: (where: string) => void } }).cth?.reloadAfterError?.(this.props.where);
+      return;
+    }
     this.setState({ error: null });
   };
 
