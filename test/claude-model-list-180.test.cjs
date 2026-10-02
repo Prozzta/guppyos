@@ -13,7 +13,7 @@
  * Named mutants (census at the end; compiled from text): C1 signed-out accepted, C2 any request_id
  * accepted, C3 no tree kill, C4 no time box, C5 aliases kept as aliases, C6 the API key used although
  * Claude Code is installed, C7 `account` returned by the parser, C8 --verbose dropped, C9 label
- * without a version, C10 a silent exit 0 reported as "exit 0", C11 run in the caller's cwd.
+ * without a version, C10 a silent exit 0 reported as "exit 0", C11 run in the caller's cwd; after Creed's audit C12 C13 third-party users called signed out, C14 the verdict on exit not close, C15 C16 no POSIX group kill.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -249,10 +249,77 @@ test('WIRING: the app passes spawn; claude is listed by claudeAdapter; no creden
   assert.doesNotMatch(src, /spawnSync|execSync|execFileSync/);
 });
 
+// ── Creed's notes (N1-N3): an injected child, so the event order and the platform are exact ──
+
+const { EventEmitter } = require('node:events');
+/** A scripted child: `script(child)` runs once the request is written. */
+function scriptedDeps(platform, script, env = {}) {
+  const seen = { opts: null, kills: [], writes: [] };
+  const d = {
+    platform, env: { ComSpec: 'cmd.exe', ...env }, tmpDir: os.tmpdir(), exists: () => true,
+    exec: (file, args, opts, cb) => { seen.kills.push([file, ...args]); setImmediate(() => cb(null, '')); return { pid: 1 }; },
+    kill: (pid, sig) => { seen.kills.push([pid, sig]); },
+    spawn: (file, args, opts) => {
+      seen.opts = opts;
+      const c = new EventEmitter(); c.pid = 4321;
+      c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
+      c.stdin = { on: () => {}, end: () => {}, write: (s) => { seen.writes.push(s); setImmediate(() => script(c, JSON.parse(s))); } };
+      c.kill = (sig) => seen.kills.push(['child.kill', sig]);
+      return c;
+    }
+  };
+  return { d, seen };
+}
+
+async function closeChecks(R) {
+  // node may emit 'exit' before the last stderr chunk; the verdict must wait for 'close'
+  const { d } = scriptedDeps('win32', (c) => {
+    c.emit('exit', 1, null);
+    c.stderr.emit('data', 'Error: When using --print, --output-format=stream-json requires --verbose\n');
+    c.emit('close', 1, null);
+  });
+  assert.deepEqual(await R.runClaudeInit(d, 'C:\\x\\claude.exe', 3000), { reason: R.CLAUDE_REASONS.verbose }, 'C14: the final parse waits for close (stderr read)');
+  const late = scriptedDeps('win32', (c, req) => {
+    c.emit('exit', 0, null);
+    c.stdout.emit('data', reply(req.request_id, MODELS, ACCOUNT).slice(0, 40));
+    c.stdout.emit('data', reply(req.request_id, MODELS, ACCOUNT).slice(40));
+    c.emit('close', 0, null);
+  });
+  const r = await R.runClaudeInit(late.d, 'C:\\x\\claude.exe', 3000);
+  assert.deepEqual(r.init && r.init.models.map((m) => m.id), EXPECTED_IDS, 'C14: a reply that lands after exit still counts');
+}
+test('N1: the verdict waits for close: stderr or a reply arriving after exit still counts', () => closeChecks(P));
+
+async function groupKillChecks(R) {
+  const { d, seen } = scriptedDeps('linux', (c, req) => c.stdout.emit('data', reply(req.request_id, MODELS, ACCOUNT)));
+  const r = await R.runClaudeInit(d, '/usr/local/bin/claude', 3000);
+  assert.equal(r.init.models.length, 11);
+  assert.equal(seen.opts.detached, true, 'C16: on POSIX claude leads its own process group');
+  assert.deepEqual(seen.kills, [[-4321, 'SIGKILL']], 'C15: the whole group is killed (negative pid), not just the direct child');
+  const w = scriptedDeps('win32', (c, req) => c.stdout.emit('data', reply(req.request_id, MODELS, ACCOUNT)));
+  await R.runClaudeInit(w.d, 'C:\\x\\claude.exe', 3000);
+  assert.equal(w.seen.opts.detached, undefined, 'Windows: no detached (it would open a console)');
+  assert.deepEqual(w.seen.kills, [['taskkill', '/PID', '4321', '/T', '/F']]);
+}
+test('N3: POSIX kills the detached process GROUP; Windows the tree (taskkill /T)', () => groupKillChecks(P));
+
+async function thirdPartyChecks(R) {
+  assert.equal(R.parseClaudeInitialize(reply(R.CLAUDE_REQUEST_ID, MODELS, { tokenSource: 'none', apiProvider: 'bedrock' })).signedIn, null, 'C13: a Bedrock account shape is "cannot tell", not signed out');
+  for (const k of ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']) {
+    const { d } = scriptedDeps('win32', (c, req) => c.stdout.emit('data', reply(req.request_id, SIGNED_OUT_MODELS, { tokenSource: 'none', apiProvider: 'firstParty' })), { [k]: '1' });
+    d.exec = (file, args, opts, cb) => { setImmediate(() => cb(null, file === 'where' ? 'C:\\x\\claude.exe\r\n' : '')); return { pid: 1 }; };
+    const r = await R.claudeAdapter(d, noKey, noFetch)();
+    assert.equal(r.status, 'ok', `C12: ${k}=1 is never "not signed in" (${r.reason})`);
+  }
+  assert.equal(R.thirdPartyProvider({ CLAUDE_CODE_USE_BEDROCK: '0' }), false);
+  assert.equal(R.thirdPartyProvider({}), false);
+}
+test('N2: Bedrock / Vertex / Foundry users are never called "not signed in"', () => thirdPartyChecks(P));
+
 // ── Mutant census ────────────────────────────────────────────────────────────────────────
 
 const MUTANTS = [
-  ['C1 signed-out accepted', "    if (r.init.signedIn === false) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };\n", '', signedOutChecks],
+  ['C1 signed-out accepted', "    if (r.init.signedIn === false && !thirdPartyProvider(d.env)) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };\n", '', signedOutChecks],
   ['C2 any request_id accepted', ' || j.response.request_id !== requestId) continue;', ') continue;', parseChecks],
   ['C3 no tree kill', 'const killTree = (): void => {\n      if (exited) return;', 'const killTree = (): void => {\n      return;', successChecks],
   ['C4 no time box', '    timer = setTimeout(() => done({ reason: CLAUDE_REASONS.timeout }), timeout);\n', '', hangChecks],
@@ -261,11 +328,16 @@ const MUTANTS = [
   ['C7 parser returns account', 'return { models: claudeModelsFromInit(r?.models), signedIn: signedInFrom(r?.account), error: null };', 'return { models: claudeModelsFromInit(r?.models), signedIn: signedInFrom(r?.account), error: null, account: r?.account } as ClaudeInit;', parseChecks],
   ['C8 --verbose dropped', "'--output-format', 'stream-json', '--verbose'];", "'--output-format', 'stream-json'];", successChecks],
   ['C9 label without version', "const label = m.value !== 'default' && /\\d/.test(shown) ? shown : claudeLabel(id);", 'const label = shown || claudeLabel(id);', parseChecks],
-  ['C10 silent exit 0 as "exit 0"', 'code === 0 && !err.trim() ? CLAUDE_REASONS.noList : ', '', garbageChecks],
-  ['C11 caller cwd', 'cwd: d.tmpDir ?? tmpdir(),', 'cwd: process.cwd(),', successChecks]
+  ['C10 silent exit 0 as "exit 0"', 'c === 0 && !err.trim() ? CLAUDE_REASONS.noList : ', '', garbageChecks],
+  ['C11 caller cwd', 'cwd: d.tmpDir ?? tmpdir(),', 'cwd: process.cwd(),', successChecks],
+  ['C12 third-party env ignored', ' && !thirdPartyProvider(d.env)) return', ') return', thirdPartyChecks],
+  ['C13 third-party account shape ignored', "  if (has('apiProvider') && a.apiProvider !== 'firstParty') return null;\n", '', thirdPartyChecks],
+  ['C14 final parse on exit', "child.on('close', (code) => {", "child.on('exit', (code) => {", closeChecks],
+  ['C15 only the direct child killed', "(d.kill ?? process.kill)(-pid, 'SIGKILL')", "(d.kill ?? process.kill)(pid, 'SIGKILL')", groupKillChecks],
+  ['C16 not detached on POSIX', "...(d.platform === 'win32' ? {} : { detached: true }), ", '', groupKillChecks]
 ];
 
-test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C11 each apply once and die', { timeout: 300_000 }, async (t) => {
+test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C16 each apply once and die', { timeout: 300_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, '..', SRC), 'utf8').replace(/\r\n/g, '\n');
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, async () => {

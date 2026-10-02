@@ -145,11 +145,13 @@ export function claudeModelsFromInit(list: unknown): ModelEntry[] | null {
 
 /** Signed in or not, from the reply's `account`, and NOTHING else of it leaves this function: an
  *  OAuth login carries its subscription, an API key its key source; a signed-out CLI says
- *  tokenSource "none". null = cannot tell (an older CLI without `account`): not treated as an error. */
+ *  tokenSource "none". null = cannot tell (an older CLI without `account`, or Bedrock / Vertex /
+ *  Foundry, whose credentials are the cloud's): never treated as an error. */
 function signedInFrom(account: unknown): boolean | null {
   if (!account || typeof account !== 'object') return null;
   const a = account as Record<string, unknown>;
   const has = (k: string): boolean => typeof a[k] === 'string' && a[k] !== '';
+  if (has('apiProvider') && a.apiProvider !== 'firstParty') return null;
   if (has('subscriptionType') || has('email') || has('apiKeySource')) return true;
   if (a.tokenSource === 'none') return false;
   return has('tokenSource') ? true : null;
@@ -290,11 +292,12 @@ export interface ClaudeChild {
   stdin: { write: (s: string) => unknown; end: () => unknown; on: (e: 'error', cb: () => void) => unknown } | null;
   stdout: { on: (e: 'data', cb: (d: Buffer | string) => void) => unknown } | null;
   stderr: { on: (e: 'data', cb: (d: Buffer | string) => void) => unknown } | null;
-  on: (e: 'exit' | 'error', cb: (x: unknown) => void) => unknown;
+  on: (e: 'exit' | 'close' | 'error', cb: (x: unknown) => void) => unknown;
   kill: (sig?: NodeJS.Signals) => unknown;
 }
-export type ClaudeSpawn = (file: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true; windowsVerbatimArguments?: boolean; stdio: ['pipe', 'pipe', 'pipe'] }) => ClaudeChild;
-export type ClaudeDeps = CliDeps & { spawn?: ClaudeSpawn; tmpDir?: string };
+export type ClaudeSpawn = (file: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true; windowsVerbatimArguments?: boolean; detached?: boolean; stdio: ['pipe', 'pipe', 'pipe'] }) => ClaudeChild;
+/** `kill` is process.kill (a seam for the POSIX group kill in tests). */
+export type ClaudeDeps = CliDeps & { spawn?: ClaudeSpawn; tmpDir?: string; kill?: (pid: number, sig: NodeJS.Signals) => unknown };
 
 /** A failure in plain words, from claude's stderr (or a control_response error) and its exit. */
 export function claudeFailure(text: string, code?: unknown): string {
@@ -327,8 +330,9 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
       const pid = typeof child.pid === 'number' ? child.pid : null;
       if (d.platform === 'win32' && pid) {
         try { d.exec('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: TREE_KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 }, () => {}); } catch { /* best effort */ }
-      } else {
-        try { child.kill('SIGKILL'); } catch { /* gone */ }
+      } else if (pid) {
+        // POSIX: claude runs as the leader of its own process group (detached), so the group goes
+        try { (d.kill ?? process.kill)(-pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
       }
     };
     const done = (r: { init: ClaudeInit } | { reason: string; notFound?: true }): void => {
@@ -339,7 +343,7 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
       resolve(r);
     };
     try {
-      child = (d.spawn ?? (nodeSpawn as unknown as ClaudeSpawn))(file, args, { cwd: d.tmpDir ?? tmpdir(), env: d.env, windowsHide: true, ...(verbatim ? { windowsVerbatimArguments: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] });
+      child = (d.spawn ?? (nodeSpawn as unknown as ClaudeSpawn))(file, args, { cwd: d.tmpDir ?? tmpdir(), env: d.env, windowsHide: true, ...(verbatim ? { windowsVerbatimArguments: true } : {}), ...(d.platform === 'win32' ? {} : { detached: true }), stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (e) {
       resolve((e as { code?: unknown })?.code === 'ENOENT' ? { reason: CLAUDE_REASONS.notFound, notFound: true } : { reason: 'could not start claude' });
       return;
@@ -354,16 +358,25 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
       if (init) done({ init });
     });
     child.stderr?.on('data', (b) => { if (err.length < 16 * 1024) err += String(b); });
-    child.on('exit', (code) => {
+    // the final parse waits for 'close' (all output read): 'exit' can come before stderr's last chunk
+    let exitCode: unknown = null;
+    child.on('exit', (code) => { exitCode = code; });
+    child.on('close', (code) => {
       exited = true;
+      const c = code ?? exitCode;
       const init = parseClaudeInitialize(out);
-      done(init ? { init } : { reason: code === 0 && !err.trim() ? CLAUDE_REASONS.noList : claudeFailure(err, code) });
+      done(init ? { init } : { reason: c === 0 && !err.trim() ? CLAUDE_REASONS.noList : claudeFailure(err, c) });
     });
     try {
       child.stdin?.on('error', () => { /* claude exited before reading: its exit says why */ });
       child.stdin?.write(`${JSON.stringify({ type: 'control_request', request_id: CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } })}\n`);
     } catch { /* the exit or the time box reports it */ }
   });
+}
+
+/** Claude Code on Bedrock, Vertex or Foundry (CLAUDE_CODE_USE_*): no Anthropic login to look for. */
+export function thirdPartyProvider(env: NodeJS.ProcessEnv): boolean {
+  return ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'].some((k) => /^(1|true|yes|on)$/i.test(String(env[k] ?? '').trim()));
 }
 
 /**
@@ -384,7 +397,7 @@ export function claudeAdapter(d: ClaudeDeps, getKey: () => string | undefined, f
     const r = await runClaudeInit(d, exe);
     if ('reason' in r) return { status: r.notFound ? 'not-installed' : 'failed', reason: r.reason, source };
     if (r.init.error !== null) return { status: 'failed', reason: claudeFailure(r.init.error), source };
-    if (r.init.signedIn === false) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };
+    if (r.init.signedIn === false && !thirdPartyProvider(d.env)) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };
     return r.init.models ? { status: 'ok', models: r.init.models, source } : { status: 'failed', reason: CLAUDE_REASONS.noList, source };
   };
 }
