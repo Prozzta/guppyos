@@ -28,6 +28,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
+import { codexPopupAdvice, popupInReason } from '../shared/codexScreen';
 
 // ————————————————————————————————————————————————————————————————— ids (§4.1)
 
@@ -935,6 +936,10 @@ export function validLedgerDoc(x: unknown, agentId: string): x is MailLedgerDoc 
  *  technical reason is only in `details` (and the log). */
 export function screenGuardNoticeText(name: string, reason: string, refusedMs: number, refusals: number): { title: string; notice: string; details: string } {
   const minutes = Math.max(1, Math.round(refusedMs / 60000));
+  const details = `Details: screen check ${reason}, ${refusals} refusal${refusals === 1 ? '' : 's'} (wake-screen-guard-alert in the log).`;
+  // CODEX-MODEL-SWITCH-PROMPT P2: Codex is showing one of its popups; say what it asks.
+  const asking = popupInReason(reason);
+  if (asking) return { title: `Codex is asking ${name} a question.`, notice: popupNoticeLines(name, asking).join('\n'), details };
   return {
     title: `${name} isn't getting messages right now.`,
     notice: [
@@ -944,16 +949,40 @@ export function screenGuardNoticeText(name: string, reason: string, refusedMs: n
       '• If you see a question or a menu instead (trust, login, update), answer it, or press Esc.',
       'This notice goes away by itself when messages flow again.'
     ].join('\n'),
-    details: `Details: screen check ${reason}, ${refusals} refusal${refusals === 1 ? '' : 's'} (wake-screen-guard-alert in the log).`
+    details
   };
 }
 
+/** P2/P3: what a person reads when Codex is asking an agent a question. The app never answers it. */
+function popupNoticeLines(name: string, asking: string): string[] {
+  const advice = codexPopupAdvice(asking);
+  return [
+    `Codex is asking ${name}: "${asking}".`,
+    `The app never answers Codex's questions for an agent, so messages to ${name} wait until someone does.`,
+    `What to do: click ${name}'s terminal and answer it there.${advice ? ` ${advice}` : ''}`,
+    'This notice goes away by itself when messages flow again.'
+  ];
+}
+
 /** DWIGHT-HELD-INTERFERED-2028 fix 2: the notice for an automatic message held after it was
- *  interrupted (Jim's wording). `at` is when it was held; `wakeText` what was typed. */
-export function heldInterferedNoticeText(name: string, messages: number, at: number, wakeText: string, reason: string): { title: string; notice: string; details: string } {
+ *  interrupted (Jim's wording). `at` is when it was held; `wakeText` what was typed.
+ *  CODEX-MODEL-SWITCH-PROMPT P2: `asking`, the Codex popup the latest look at the terminal saw. */
+export function heldInterferedNoticeText(name: string, messages: number, at: number, wakeText: string, reason: string, asking?: string | null): { title: string; notice: string; details: string } {
   const d = new Date(at);
   const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   const shown = wakeText.split(/\r?\n/)[0].slice(0, 80);
+  if (asking) {
+    const advice = codexPopupAdvice(asking);
+    return {
+      title: `${name} hasn't received ${messages} message${messages === 1 ? '' : 's'}: Codex is asking ${name} a question.`,
+      notice: [
+        `An automatic message to ${name} was interrupted at ${hhmm}, and Codex is asking ${name}: "${asking}".`,
+        `The app never answers it for ${name}. Answer it in ${name}'s terminal${advice ? ` (${advice.replace(/\.$/, '')})` : ''}; the message is then retried by itself.`,
+        'This notice goes away by itself when the message is released.'
+      ].join('\n'),
+      details: `Details: the wake is held (${reason}; the terminal shows codex-popup:${asking}) since ${d.toISOString()} (held-interfered-alert in the log).`
+    };
+  }
   return {
     title: `${name} hasn't received ${messages} message${messages === 1 ? '' : 's'}.`,
     notice: [
@@ -1151,9 +1180,9 @@ export class MailLedger {
   /** DWIGHT-HELD-INTERFERED-2028 fix 2: an automatic wake to this agent has been held INTERFERED
    *  for minutes. Logs `held-interfered-alert` and raises the plain-words notice (a notice, so a
    *  person may dismiss it; a new hold raises it again). Nothing here types into a terminal. */
-  noteHeldInterferedAlert(agentId: string, h: { name: string; messages: number; at: number; wakeText: string; reason: string; requestId: string }, now: number = Date.now()): void {
-    this.log({ kind: 'held-interfered-alert', agentId, requestId: h.requestId, reason: h.reason, messages: h.messages, heldMs: now - h.at });
-    this.notices.set(`${agentId}|held-interfered`, { file: `state/mail/${agentId}.json`, quarantine: null, error: 'held-interfered', ...heldInterferedNoticeText(h.name, h.messages, h.at, h.wakeText, h.reason), raisedAt: now });
+  noteHeldInterferedAlert(agentId: string, h: { name: string; messages: number; at: number; wakeText: string; reason: string; requestId: string; asking?: string | null }, now: number = Date.now()): void {
+    this.log({ kind: 'held-interfered-alert', agentId, requestId: h.requestId, reason: h.reason, messages: h.messages, heldMs: now - h.at, ...(h.asking ? { popup: h.asking } : {}) });
+    this.notices.set(`${agentId}|held-interfered`, { file: `state/mail/${agentId}.json`, quarantine: null, error: 'held-interfered', ...heldInterferedNoticeText(h.name, h.messages, h.at, h.wakeText, h.reason, h.asking), raisedAt: now });
   }
 
   /** The hold ended (released, ruled by a person, a respawn, or its ids left the inbox). */

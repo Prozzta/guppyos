@@ -220,7 +220,10 @@ K.trustRefuses = (S = SHARED) => {
     const t = snap(file);
     const alone = S.extractCodexScreen((i) => t.lines[i], t.lines.length, t.cursorRow);
     assert.equal(S.codexPastStartup(alone, CWD).open, false, `${path.basename(file)}: TRUST SCREEN REFUSED (condition 1)`);
-    assert.equal(S.classifyCodexComposer(alone).cls, 'UNKNOWN', `${path.basename(file)}: TRUST SCREEN REFUSED (condition 2)`);
+    // 1.1.79 (CODEX-MODEL-SWITCH-PROMPT P2): refused, and now NAMED as Codex's popup.
+    const comp = S.classifyCodexComposer(alone);
+    assert.equal(comp.cls, 'MODAL', `${path.basename(file)}: TRUST SCREEN REFUSED (condition 2), as a Codex popup`);
+    assert.equal(comp.reason, 'codex-popup:Folder access', `${path.basename(file)}: the popup is named by its title`);
     // ZT-175's shape: the startup draft, then trust drawn below it.
     const lines = [...draft.lines, ...t.lines];
     const after = S.extractCodexScreen((i) => lines[i], lines.length, draft.lines.length + t.cursorRow);
@@ -1275,7 +1278,7 @@ const MUTANTS = [
     edits: [['          if (deps.now() >= slowDeadline) return this.abort(staged, `screen-not-verified:${g.reason}`', '          if (true) return this.abort(staged, `screen-not-verified:${g.reason}`']],
     killer: 'slowEchoCommits', dies: /A SLOW ECHO \(1500 ms\) IS WAITED FOR/ },
   { name: 'LIVENESS: SLOW treated as FOREIGN', file: 'src/main/automaticSubmit.ts',
-    edits: [["  return reason === 'incarnation' || reason.startsWith('startup:');", '  return true;']],
+    edits: [["  return reason === 'incarnation' || reason.startsWith('startup:') || reason.startsWith('MODAL:');", '  return true;']],
     killer: 'slowEchoCommits', dies: /A SLOW ECHO \(1500 ms\) IS WAITED FOR/ },
   { name: 'LIVENESS: FOREIGN waited for like SLOW', file: 'src/main/automaticSubmit.ts',
     edits: [['          if (foreignScreenReason(g.reason)) return this.abort(staged, `screen-foreign:${g.reason}`);\n', '']],

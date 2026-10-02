@@ -16,6 +16,7 @@
  * Pure: no clock, no Electron, no log. The caller supplies `now` and does the announcing.
  */
 import { randomBytes } from 'node:crypto';
+import { popupInReason } from '../shared/codexScreen';
 
 /** The spawn-env variable the hook shim copies into its payload. */
 export const WAKE_INCARNATION_ENV = 'MUNDER_WAKE_INCARNATION';
@@ -150,6 +151,12 @@ export class ScreenGuardAlertWatch {
   clear(agentId: string): void {
     this.runs.delete(agentId);
   }
+
+  /** The agent's current refusal run, if it has alerted (P2: to word its notice again). */
+  alertedRun(agentId: string): { since: number; refusals: number } | null {
+    const run = this.runs.get(agentId);
+    return run && run.alerted ? { since: run.since, refusals: run.refusals } : null;
+  }
 }
 
 /** How long the latest automatic refusal stands as "the screen check is holding this agent"
@@ -176,10 +183,14 @@ export interface ScreenGuardNoticeSink {
  * incarnation (a startup reading or its own turn), or a respawn. Before 1.1.78 only a respawn
  * cleared it, so the notice outlived the hold. Lifting also ends the run, so a hold that comes
  * back later is a new run and alerts again.
+ * CODEX-MODEL-SWITCH-PROMPT P2 (1.1.79): a raised notice names the Codex popup its refusal saw;
+ * when a later refusal of the same run sees a different popup (or none), it is worded again.
  */
 export class ScreenGuardNotices {
   private readonly watch: ScreenGuardAlertWatch;
   private readonly lastRefusal = new Map<string, { reason: string; at: number }>();
+  /** P2: per agent with a raised notice, the popup that notice names (null: none). */
+  private readonly named = new Map<string, string | null>();
 
   constructor(private readonly sink: ScreenGuardNoticeSink, afterMs: number = SCREEN_GUARD_ALERT_MS) {
     this.watch = new ScreenGuardAlertWatch(afterMs);
@@ -192,8 +203,19 @@ export class ScreenGuardNotices {
     if (!automatic) return null;
     this.lastRefusal.set(agentId, { reason, at: now });
     const alert = this.watch.note(agentId, false, reason, now);
-    if (alert) this.sink.raise(alert);
-    return alert;
+    const popup = popupInReason(reason);
+    if (alert) {
+      this.named.set(agentId, popup);
+      this.sink.raise(alert);
+      return alert;
+    }
+    const run = this.named.has(agentId) ? this.watch.alertedRun(agentId) : null;
+    if (run && this.named.get(agentId) !== popup) {
+      this.named.set(agentId, popup);
+      try { this.sink.clear(agentId); } catch { /* diagnostics */ }
+      this.sink.raise({ agentId, reason, refusedMs: now - run.since, refusals: run.refusals });
+    }
+    return null;
   }
 
   /** Condition 1 latched for the agent's live incarnation. */
@@ -216,6 +238,7 @@ export class ScreenGuardNotices {
   private lift(agentId: string): void {
     this.watch.clear(agentId);
     this.lastRefusal.delete(agentId);
+    this.named.delete(agentId);
     try { this.sink.clear(agentId); } catch { /* the notice is diagnostics; it never decides */ }
   }
 }

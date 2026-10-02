@@ -15,8 +15,12 @@
  *          (released here, by a person, by a respawn, or the ids leaving the inbox).
  *
  * The decisions are the owner's (automaticSubmit.ts); this class only schedules and reports.
+ *
+ * CODEX-MODEL-SWITCH-PROMPT P2 (1.1.79): when the latest look saw a Codex popup (the owner's
+ * `MODAL:codex-popup:<text>`), the notice names it, and is worded again when that changes.
  */
 import type { HeldRecheck } from './automaticSubmit';
+import { popupInReason } from '../shared/codexScreen';
 
 /** How often a held wake is looked at again. */
 export const HELD_RECHECK_MS = 60_000;
@@ -47,7 +51,8 @@ export interface HeldInterferenceDeps {
   recheck(h: HeldWake): Promise<HeldRecheck>;
   /** The owner released it: end the coordinator's hold as "let it retry" (SEND_AGAIN). */
   released(h: HeldWake, r: HeldRelease, now: number): void;
-  notice: { raise(h: HeldWake, now: number): void; clear(agentId: string): void };
+  /** `asking`: the Codex popup the latest look saw, or null (P2). */
+  notice: { raise(h: HeldWake, now: number, asking: string | null): void; clear(agentId: string): void };
   log(row: Record<string, unknown>): void;
   now(): number;
 }
@@ -55,6 +60,8 @@ export interface HeldInterferenceDeps {
 export class HeldInterferenceWatch {
   private readonly lastCheck = new Map<string, number>();
   private readonly lastWhy = new Map<string, string>();
+  /** P2: per hold, the Codex popup its latest look saw. */
+  private readonly asking = new Map<string, string>();
   private readonly inFlight = new Set<string>();
   /** agentId -> the request its notice was raised for. */
   private readonly raised = new Map<string, string>();
@@ -75,12 +82,12 @@ export class HeldInterferenceWatch {
     for (const [agentId, requestId] of [...this.raised]) {
       if (!keys.has(`${agentId}|${requestId}`)) this.lift(agentId);
     }
-    for (const k of [...this.lastCheck.keys()]) if (!keys.has(k)) { this.lastCheck.delete(k); this.lastWhy.delete(k); }
+    for (const k of [...this.lastCheck.keys()]) if (!keys.has(k)) { this.lastCheck.delete(k); this.lastWhy.delete(k); this.asking.delete(k); }
     for (const h of holds) {
       const key = keyOf(h);
       if (now - h.since >= this.noticeAfterMs && this.raised.get(h.agentId) !== h.requestId) {
         this.raised.set(h.agentId, h.requestId);
-        try { this.deps.notice.raise(h, now); } catch { /* the notice is diagnostics; it never decides */ }
+        try { this.deps.notice.raise(h, now, this.asking.get(key) ?? null); } catch { /* the notice is diagnostics; it never decides */ }
       }
       if (this.inFlight.has(key) || now - (this.lastCheck.get(key) ?? h.since) < this.recheckMs) continue;
       this.lastCheck.set(key, now);
@@ -102,6 +109,7 @@ export class HeldInterferenceWatch {
     if (r.kind === 'RELEASED' || r.kind === 'ERASED') {
       this.lastCheck.delete(key);
       this.lastWhy.delete(key);
+      this.asking.delete(key);
       this.lift(h.agentId);
       try { this.deps.released(h, r, now); } catch { /* reported by the caller */ }
       return;
@@ -110,6 +118,15 @@ export class HeldInterferenceWatch {
       // One row per change of reason, not one a minute.
       this.lastWhy.set(key, r.why);
       try { this.deps.log({ kind: 'held-interfered-recheck', agentId: h.agentId, requestId: h.requestId, why: r.why, heldMs: now - h.since, ...(r.screen ? { screen: r.screen } : {}) }); } catch { /* logging only */ }
+    }
+    if (r.kind === 'HELD') {
+      // P2: a popup seen (or gone) changes what the Human is told; a raised notice is worded again.
+      const popup = popupInReason(r.why);
+      if (popup === (this.asking.get(key) ?? null)) return;
+      if (popup) this.asking.set(key, popup); else this.asking.delete(key);
+      if (this.raised.get(h.agentId) === h.requestId) {
+        try { this.deps.notice.raise(h, now, popup); } catch { /* the notice is diagnostics; it never decides */ }
+      }
     }
   }
 

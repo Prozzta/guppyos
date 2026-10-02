@@ -33,7 +33,7 @@
  */
 import { ADMISSION_REASON, type AdmissionDecision, type AdmissionVerdict, type WorkClass } from './capacityAdmission';
 import type { PromptBlock } from '../shared/promptState';
-import { CODEX_EMPTY_COMPOSER_ROW, classifyCodexComposer, codexPastStartup, type CodexScreenFacts } from '../shared/codexScreen';
+import { CODEX_EMPTY_COMPOSER_ROW, classifyCodexComposer, codexPastStartup, codexPopup, codexPopupText, type CodexScreenFacts } from '../shared/codexScreen';
 
 export type { PromptBlock };
 
@@ -435,11 +435,13 @@ export interface ScreenGuardRecord {
   screen?: GuardScreenFacts;
 }
 
-/** DWIGHT-HELD-INTERFERED fix 4: the part of a guard reading the log keeps. */
-export interface GuardScreenFacts { cursorRow: string; footer: string[] }
+/** DWIGHT-HELD-INTERFERED fix 4: the part of a guard reading the log keeps. CODEX-MODEL-SWITCH-
+ *  PROMPT P2: and, when Codex shows a popup, what it asks (bounded), so the log names it. */
+export interface GuardScreenFacts { cursorRow: string; footer: string[]; popup?: string }
 
 function screenFacts(f: CodexScreenFacts): GuardScreenFacts {
-  return { cursorRow: f.cursorRow, footer: [...f.footer] };
+  const popup = codexPopup(f);
+  return { cursorRow: f.cursorRow, footer: [...f.footer], ...(popup ? { popup: codexPopupText(popup) } : {}) };
 }
 
 /** DWIGHT-HELD-INTERFERED fix 4: one INTERFERED hold, with the last screen facts the owner saw
@@ -493,7 +495,8 @@ export const SCREEN_ABORT_VERIFY_BUDGET_MS = 15_000;
 /** WSG LIVENESS: a failed post-stage reading that says the TERMINAL changed under us (another
  *  incarnation, or Codex starting / resuming / reconfiguring), not that it is slow. */
 export function foreignScreenReason(reason: string): boolean {
-  return reason === 'incarnation' || reason.startsWith('startup:');
+  // P2: a Codex popup took the screen (our text went into it unechoed, or nowhere): not a slow echo.
+  return reason === 'incarnation' || reason.startsWith('startup:') || reason.startsWith('MODAL:');
 }
 
 /** WSG-FOLLOWUPS: after a verified erase, the FRAGMENT of our own text still on the Codex
@@ -650,7 +653,10 @@ export type InterferenceReason =
   | 'SUBMIT_NOT_ACCEPTED'
   /** WAKE-SCREEN-GUARD: after our stage write, no reading proved the screen still the Codex
    *  composer holding exactly our text with no output since. No Enter: held for a person. */
-  | 'SCREEN_NOT_VERIFIED_AFTER_STAGE';
+  | 'SCREEN_NOT_VERIFIED_AFTER_STAGE'
+  /** CODEX-MODEL-SWITCH-PROMPT P3: a Codex popup was on screen when the erase would have run.
+   *  The app never types into a popup (not the erase, not Esc): held for a person, visibly. */
+  | 'CODEX_POPUP_OPEN';
 
 export type SubmitOutcome =
   /** The Enter went out. The one outcome a caller may acknowledge a queue item on. */
@@ -1335,9 +1341,12 @@ export class AutomaticSubmitOwner {
       if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
       const comp = classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
       const want = phase === 'STAGE' ? 'READY' : 'READY_OWN_DRAFT';
+      // CODEX-MODEL-SWITCH-PROMPT P2: a Codex popup (rate limits, trust, update...) is named first,
+      // so the Human reads what Codex is asking. A refusal either way; MODAL is never admitted.
+      if (comp.cls === 'MODAL') verdict = { ok: false, reason: `${comp.cls}:${comp.reason}` };
       // A LOADING header or a resume line is refused even when latched (the live widget
       // also shows `loading` while it reconfigures).
-      if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
+      else if (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting')) verdict = { ok: false, reason: `startup:${past.reason}` };
       // WSG-178 W1 (Jim): NO admission class passes condition 1 without the latch. A person's "send
       // now" too: the pre-trust startup draft's cursor row IS the empty composer, and in a terminal
       // of about 8 rows its header loses the model row (startup_draft_layout.rs:50-59), so
@@ -1480,6 +1489,10 @@ export class AutomaticSubmitOwner {
     if (!g || !seen || g.incarnation !== held.incarnation) return stay('no-reading');
     const screen = screenFacts(g.facts);
     if (deps.outputGeneration?.(ptyId) !== g.outputGeneration) return stay('screen-changed', screen);
+    // CODEX-MODEL-SWITCH-PROMPT P3: a Codex popup is NEVER answered by the app: no key at all, not
+    // the erase, not Esc. It stays held, and the notice tells the Human what Codex is asking.
+    const modal = classifyCodexComposer(g.facts);
+    if (modal.cls === 'MODAL') return stay(`${modal.cls}:${modal.reason}`, screen);
     if (seen.onPromptRow && seen.screenCount >= 1) {
       // Our own text is on the prompt: the verified erase can run now (it needed to see it first).
       this.inhibited.delete(ptyId);
@@ -1668,6 +1681,13 @@ export class AutomaticSubmitOwner {
     }
     if (!before || !before.onPromptRow || before.screenCount < 1) {
       return this.interfere(s, 'STAGED_TEXT_NOT_POSITIVELY_VISIBLE', before ? 'not on the prompt row' : 'no screen reading');
+    }
+    // CODEX-MODEL-SWITCH-PROMPT P3: never a key into a Codex popup, not even the erase: one more
+    // guard reading, and a popup on it holds the item for the Human with nothing written.
+    if (this.guardMode(s.ptyId) === 'ENFORCE') {
+      const g = await this.readGuard(s.ptyId);
+      const popup = g && g.incarnation === s.incarnation ? codexPopup(g.facts) : null;
+      if (popup) return this.interfere(s, 'CODEX_POPUP_OPEN', codexPopupText(popup));
     }
     // FRESH, and adjacent to the destructive write: no yield between this and the clear.
     const blocked = postStageGuard(s, deps);

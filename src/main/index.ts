@@ -933,8 +933,8 @@ heldInterference = new HeldInterferenceWatch({
     inboxWake?.onInterferenceResolved(h.agentId, 'SEND_AGAIN');
   },
   notice: {
-    raise: (h, now) => hive.mail.noteHeldInterferedAlert(h.agentId, {
-      name: agentDisplayName(h.agentId), messages: h.messages, at: h.since, reason: h.reason, requestId: h.requestId,
+    raise: (h, now, asking) => hive.mail.noteHeldInterferedAlert(h.agentId, {
+      name: agentDisplayName(h.agentId), messages: h.messages, at: h.since, reason: h.reason, requestId: h.requestId, asking,
       wakeText: inboxWakeTextForProvider(hive.registry().agents[h.agentId]?.provider, [], wakeMailMode(h.agentId))
     }, now),
     clear: (agentId) => hive.mail.clearHeldInterferedAlert(agentId)

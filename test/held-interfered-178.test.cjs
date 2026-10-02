@@ -442,7 +442,8 @@ test('wiring: main runs the watch, resolves a release as "let it retry", and wor
   assert.match(idx, /recheck: \(h\) => automaticSubmit\.recheckHeld\(h\.ptyId, h\.requestId\),/);
   assert.match(idx, /kind: 'interference-self-released'/);
   assert.match(idx, /inboxWake\?\.onInterferenceResolved\(h\.agentId, 'SEND_AGAIN'\);/, 'the same ruling as a person\'s "let it retry"');
-  assert.match(idx, /raise: \(h, now\) => hive\.mail\.noteHeldInterferedAlert\(/);
+  assert.match(idx, /raise: \(h, now, asking\) => hive\.mail\.noteHeldInterferedAlert\(/);
+  assert.match(idx, /requestId: h\.requestId, asking,/, '1.1.79 P2: the popup the latest look saw reaches the notice');
   assert.match(idx, /clear: \(agentId\) => hive\.mail\.clearHeldInterferedAlert\(agentId\)/);
   assert.match(idx, /heldWakes: \(\) => \(heldInterference\?\.noticed\(\) \?\? \[\]\)/, 'the digest gets the told holds');
   assert.match(idx, /kind: 'wake-interfered'/, 'fix 4: the hold row');

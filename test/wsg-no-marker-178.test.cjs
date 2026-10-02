@@ -22,7 +22,6 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 
-const ROOT = path.resolve(__dirname, '..');
 const QUEUE = loadTs('src/renderer/src/hooks/queueDelivery.ts');
 const GUARD = loadTs('src/main/codexScreenGuard.ts');
 const BANNER = loadTs('src/shared/integrityBanner.ts');
@@ -224,11 +223,9 @@ function mutate(rel, edits, tag) {
     assert.equal(hits, 1, `mutant ${tag}: edit target must match EXACTLY ONCE, matched ${hits}: ${JSON.stringify(from.slice(0, 80))}`);
     text = text.replace(from, () => to);
   }
-  // A copy in MUTANT_DIR resolves its sibling imports back to the real files.
-  text = text.replace(/from '\.\/(\w+)'/g, (_, m) => `from '${path.relative(MUTANT_DIR, path.join(ROOT, path.dirname(rel), m)).replace(/\\/g, '/')}'`);
-  const file = path.join(MUTANT_DIR, `${tag}.ts`);
-  fs.writeFileSync(file, text, 'utf8');
-  return loadTs(path.relative(ROOT, file));
+  // 1.1.79: load-ts fromText keeps the real filename, so EVERY relative import resolves to the real
+  // files (codexScreenGuard.ts now imports ../shared/codexScreen, which a copy could not reach).
+  return loadTs.fromText(rel, text);
 }
 
 const MUTANTS = [

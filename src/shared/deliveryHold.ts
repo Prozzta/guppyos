@@ -28,6 +28,8 @@
  * the button's own tooltip, and nothing anywhere guesses from an empty prompt.
  */
 
+import { codexPopupAdvice, popupInReason } from './codexScreen';
+
 export type CapacityEvidenceName =
   | 'NO_POOL' | 'FRESH_HEALTHY' | 'STALE_AFTER_HEALTHY' | 'FRESH_NOT_HEALTHY' | 'STALE_AFTER_LIMITED'
   | 'STALE_AFTER_UNHEALTHY' | 'RECOVERING' | 'NO_STATE' | 'INDETERMINATE' | 'UNCLASSIFIED'
@@ -197,6 +199,20 @@ export function deliveryHoldView(i: DeliveryHoldInput): DeliveryHoldView | null 
   // WSG fix 3: the Codex screen check, said plainly. "send now" goes through the same check (W1),
   // so it is NOT offered: the terminal itself is the way out, never a keystroke the app makes.
   if (i.screenHold) {
+    // CODEX-MODEL-SWITCH-PROMPT P2: Codex is asking a question; name it. The app never answers it (P3).
+    const asking = popupInReason(i.screenHold.reason);
+    if (asking) {
+      const advice = codexPopupAdvice(asking);
+      return {
+        kind: 'SCREEN',
+        hint: `held — Codex is asking ${i.agentName} a question; answer it in its terminal`,
+        title: `Automatic delivery to ${i.agentName} is held: Codex is asking "${asking}". `
+          + `The app never answers it for ${i.agentName}, and "send now" is held by the same safety check. `
+          + `Answer it in ${i.agentName}'s terminal.${advice ? ` ${advice}` : ''} `
+          + 'Delivery resumes by itself once the chat box is showing.',
+        action: null
+      };
+    }
     return {
       kind: 'SCREEN',
       hint: `held — ${i.agentName}'s terminal is not on its chat box; "send now" is held too`,
