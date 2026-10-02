@@ -11,6 +11,45 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.80] — 2026-10-02
+
+**A hotfix release about agents that could not be reached and lists that went stale: a resumed
+Codex agent gets its messages again, god's start-up message is really sent, and the Claude model
+list comes from Claude Code itself.** Rollback: 1.1.79 (reinstall).
+
+### Fixed
+
+- **A resumed Codex agent received nothing.** Once a Codex chat has a name (after its first
+  turn), Codex shows it at the end of the line under the chat box: `model effort · folder · chat
+  name`. The app read the last part as the folder, did not recognise it, and so never decided that
+  Codex was ready: every message waited, and so did text typed into the box under the terminal. The
+  app now finds the folder anywhere on that line. It also accepts Codex's own record that this
+  chat has started (written after any trust, login or update screen), logs what it saw when it
+  holds a message at start-up, and, when it does hold one, tells you to click the agent's terminal
+  and type a short message there.
+- **God's start-up message could sit in the chat box unsent until you pressed Enter.** The app
+  typed it while Claude Code was still loading, so the Enter became a new line. The app now waits
+  until Claude Code reports that its session has started, and counts the message as sent only when
+  Claude Code reports that it received it. If it did not, the app presses Enter once more, but only
+  if its own text is still there and you have not typed since. If that does not work either, it
+  stops and shows a notice saying what to do.
+
+### Changed
+
+- **Refresh models now lists Claude's models from Claude Code itself**, the same list `/model`
+  shows, the way Codex and Antigravity are listed. It costs nothing (no tokens), works with your
+  normal Claude login, and the app never reads your credentials or keeps any account details. If
+  Claude Code is not signed in, the row says so ("not signed in: open Claude Code and run /login").
+  The other problems are named in plain words too (not found, timed out, needs an update). A stored
+  Anthropic API key is used for the list only when Claude Code is not installed.
+
+### For maintainers
+
+- **`scripts/worktree-reaper.cjs`** lists old release, fix and audit worktrees, build folders and
+  logs in a work folder, and with `--apply` removes them. It keeps anything changed in the last
+  24 hours, the release in progress, the two newest shipped versions, unsaved or unpushed work,
+  repositories and anything in use. By default it only lists.
+
 ## [1.1.79] — 2026-10-02
 
 **A release about choices that stick and messages that cannot vanish: a model you pick for an
