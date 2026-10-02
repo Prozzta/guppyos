@@ -153,6 +153,19 @@ test('M1: a stamp in the future is capped at the hook\'s clock (a keystroke afte
   assert.equal(entry(s.hive, DWIGHT.id).modelPinSource, 'user');
 });
 
+test('M1: the window marker never moves back (an older stamp read after a newer one)', async (t) => {
+  const s = sandbox(t);
+  s.clock.at = T('2026-10-02T08:30:00.000Z');
+  await spawnDwight(s);
+  s.clock.at = T('2026-10-02T08:31:00.000Z');
+  s.hive.observeLiveModel(DWIGHT.id, 'codex', TERRA, { observedAt: T('2026-10-02T08:30:50.000Z'), effort: 'high' });
+  s.hive.observeLiveModel(DWIGHT.id, 'codex', TERRA, { observedAt: T('2026-10-02T08:30:10.000Z'), effort: 'high' });
+  s.keys.at = T('2026-10-02T08:30:30.000Z'); // after the older stamp, before the newer one
+  s.clock.at = T('2026-10-02T08:32:00.000Z');
+  s.hive.observeLiveModel(DWIGHT.id, 'codex', SOL, { observedAt: T('2026-10-02T08:31:55.000Z'), effort: 'high' });
+  assert.equal(entry(s.hive, DWIGHT.id).modelPinSource, 'auto');
+});
+
 // ─── M2: the respawn keeps model AND effort ─────────────────────────────────
 
 test('M2 RESPAWN after the replay: the argv and our config.toml carry luna + medium; the seed file is untouched', async (t) => {
@@ -247,6 +260,8 @@ test('M3: the picker\'s effort is the request: written to argv by the renderer, 
   assert.deepEqual(r.args, ['--model', TERRA, '-c', 'model_reasoning_effort=xhigh'], 'the new pick wins');
   const e = entry(s.hive, DWIGHT.id);
   assert.equal(e.model, undefined, 'the pin is dropped');
+  assert.equal(e.modelEffort, undefined, 'with its effort');
+  assert.equal(e.modelPinnedFromEffort, undefined);
   assert.equal(e.requestedEffort, 'xhigh');
   assert.equal(toml.parse(codexConfig(inj)).model_reasoning_effort, 'xhigh');
   const dropped = s.rows.find((x) => x.kind === 'model-pin-dropped');
