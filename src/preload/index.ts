@@ -3,6 +3,7 @@ import type { AgentProvider } from '../shared/agentProvider';
 import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
+import type { RendererErrorReport } from '../shared/rendererError';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
@@ -1374,6 +1375,14 @@ const api = {
   /** START-FIXES-163 (3): a boot prompt was given up on; main writes a boot-submit THREW row. */
   logBootSubmitThrew: (agentId: string, message: string): void =>
     ipcRenderer.send('autoSubmit:bootSubmitThrew', agentId, message),
+  /** HISTORY-SCROLL-FREEZE F3: a renderer error (a boundary's catch, a window error, an
+   *  unhandled rejection); main validates it and writes a renderer-error row. */
+  logRendererError: (report: RendererErrorReport): void =>
+    ipcRenderer.send('renderer:error', report),
+  /** HISTORY-SCROLL-FREEZE (Jim B1): reload this window THROUGH MAIN, which first sets its recovery
+   *  notice, so the page comes back on the live floor, not the HivePicker. */
+  reloadAfterError: (where: string): void =>
+    ipcRenderer.send('window:reloadAfterError', where),
   /**
    * L0-FUSION stage 5.4b - A HUMAN says the prompt that was interfered with is dealt with.
    * The only way an INTERFERED hold ends while its terminal lives. Call it from a person's

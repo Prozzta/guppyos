@@ -35,6 +35,8 @@ import {
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
+import { createRendererErrorGate } from '../shared/rendererError';
+import { rendererErrorRow } from './rendererErrorLog';
 import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
@@ -5640,6 +5642,15 @@ ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
   });
 });
 
+// HISTORY-SCROLL-FREEZE F3: what the renderer catches (a boundary, a window error, an unhandled
+// rejection) lands in log.jsonl as one renderer-error row: validated, redacted, cut, flood-gated.
+const rendererErrorDue = createRendererErrorGate();
+ipcMain.on('renderer:error', (_evt, raw: unknown) => {
+  const row = rendererErrorRow(raw, rendererErrorDue);
+  if (!row) return;
+  try { hive.appendLog(row); } catch { /* best-effort */ }
+});
+
 // START-FIXES-163 (3), Jim N2: REFUSED/ABORTED retries are logged on change only.
 const bootSubmitRowDue = createBootSubmitRowGate();
 
@@ -7354,6 +7365,17 @@ function confirmQuitNatively(ptyCount: number, parent: BrowserWindow | null): bo
   const choice = parent && !parent.isDestroyed() ? dialog.showMessageBoxSync(parent, opts) : dialog.showMessageBoxSync(opts);
   return choice === 0;
 }
+/** HISTORY-SCROLL-FREEZE (Jim B1): the root error boundary's "Reload the window". A plain
+ *  location.reload() would land on the launch-time HivePicker, whose switch path tears down the
+ *  live agents; going through main sets this window's recovery notice first, so the reloaded page
+ *  starts on the live floor (window:recoveringSync) and says it was restored. */
+ipcMain.on('window:reloadAfterError', (evt, where: unknown) => {
+  const wc = evt.sender;
+  if (rendererGone(wc)) return;
+  recoveryNotices.set(wc.id, { at: Date.now(), action: 'reload', reason: `a render error (${typeof where === 'string' ? where.slice(0, 80) : 'the app'})`, streak: 1 });
+  try { hive.appendLog({ kind: 'renderer-error-reload', where: typeof where === 'string' ? where.slice(0, 80) : null }); } catch { /* best-effort */ }
+  wc.reload();
+});
 ipcMain.handle('window:takeRecoveryNotice', (evt) => {
   const n = recoveryNotices.get(evt.sender.id) ?? null;
   recoveryNotices.delete(evt.sender.id);
