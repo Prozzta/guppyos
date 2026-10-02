@@ -197,7 +197,9 @@ export class BoardMonitor {
   }
 
   start(intervalMs = BOARD_MONITOR_TICK_MS): void {
-    this.stop();
+    // `start` may follow a ledger-guard tick during bootstrap. Re-arm only the timer: clearing
+    // `keys` here would make that already-raised flag appear new and log a duplicate raise.
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
     try { this.tick(); } catch (e) { try { this.opts.hive.appendLog({ kind: 'board-monitor-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }
     this.timer = setInterval(() => {
       try { this.tick(); } catch (e) { try { this.opts.hive.appendLog({ kind: 'board-monitor-error', error: String(e).slice(0, 300) }); } catch { /* noop */ } }

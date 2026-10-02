@@ -40,6 +40,7 @@ test/.mutants-pool-timer/
 test/.mutants-wwr-w2/
 test/.mutants-wsg178/
 test/.mutants-card-idle/
+test/.mutants-board178/
 
 # NATIVE-MEMORY: the bundled model is provisioned by scripts/fetch-memory-model.cjs (digest-pinned
 # in resources/models/native-memory-manifest.json); the 90 MB binaries are never committed.
