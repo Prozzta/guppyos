@@ -121,6 +121,7 @@ import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
+import { BootHookClock } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { HistoryService } from './historyService';
@@ -397,6 +398,10 @@ const ptyToAgent = new Map<string, string>();
 /** ptyId -> the provider resolved for it at spawn. The submit owner asks this for
  *  readiness and for abort capability; a PTY that is not in here is UNKNOWN to it. */
 const ptyProvider = new Map<string, AgentProvider>();
+// GOD-STARTUP-WAITS-ENTER G1/G2: when each agent's provider last reported SessionStart and
+// UserPromptSubmit (arrival time), so a boot prompt waits for, and is confirmed by, its own
+// incarnation's hooks.
+const bootHooks = new BootHookClock();
 /** PTY id → the spawn it should auto restart-and-continue into once a first-time
  *  CLI install finishes. The missing-CLI short-circuit runs the engine's installer
  *  in this PTY; when it exits cleanly the exit handler re-runs the SAME spawn (with
@@ -630,8 +635,17 @@ function withLivenessEdge(
 ): typeof observe {
   return (agentId, event, message, fullyIdle, turnId, source) => {
     observe(agentId, event, message, fullyIdle, turnId, source);
+    noteBootHook(agentId, event);
     if (event && LIVENESS_EDGE_HOOKS.has(event)) sampleLiveness(agentId);
   };
+}
+/** GOD-STARTUP-WAITS-ENTER G1/G2: record the boot evidence (SessionStart, UserPromptSubmit); a
+ *  submitted prompt lifts the boot notice. Observation only, never throws. */
+function noteBootHook(agentId: string | undefined, event: string | undefined): void {
+  try {
+    bootHooks.note(agentId, event, Date.now());
+    if (agentId && event === 'UserPromptSubmit') hive.mail.clearBootNotSubmitted(agentId);
+  } catch { /* observation only */ }
 }
 
 /** Fold one refusal into the stall watch and say so, once, if it is a deadlock. */
@@ -809,7 +823,19 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
         reason: r.reason, ...(r.detail ? { detail: r.detail.slice(0, 200) } : {}), screen: r.screen, screenAgeMs: r.screenAgeMs, needle: r.needle
       });
     } catch { /* logging only */ }
+    // GOD-STARTUP-WAITS-ENTER G2: a start-up prompt left typed but unsent is said to the Human.
+    if (r.admissionClass === 'BOOT_SEQUENCE' && r.reason === 'BOOT_NOT_SUBMITTED') {
+      try { hive.mail.noteBootNotSubmitted(r.agentId, agentDisplayName(r.agentId), r.detail ?? ''); } catch { /* notice only */ }
+    }
   },
+  // GOD-STARTUP-WAITS-ENTER G1: a Claude boot prompt waits for this incarnation's SessionStart.
+  // G2: and is COMMITTED on its UserPromptSubmit. Other providers: undefined (unchanged).
+  bootReady: (ptyId, agentId) => (ptyProvider.get(ptyId) === 'claude'
+    ? bootHooks.bootReady(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, Date.now())
+    : undefined),
+  bootSubmitted: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
+    ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
+    : undefined),
   homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
@@ -4180,6 +4206,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.
     screenGuardNotices.respawned(opts.hive.id);
   }
+  // GOD-STARTUP-WAITS-ENTER G2: a new process gets a new start-up prompt; the old notice goes.
+  if (res.ok && opts.hive?.id) { try { hive.mail.clearBootNotSubmitted(opts.hive.id); } catch { /* notice only */ } }
   if (res.ok) analytics.track('agent_spawned', { provider });
   syncKeepAwake(); // arm the power-save blocker while ≥1 agent PTY is alive (#18)
   // Hand the resolved worktree path back to the renderer so it can persist it on
