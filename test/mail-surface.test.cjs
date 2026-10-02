@@ -543,9 +543,48 @@ test('AGY: the PreInvocation injectSteps userMessage carries the <hive-mail> blo
   assert.equal(parsed.injectSteps.length, 1);
   const msg = parsed.injectSteps[0].userMessage;
   assert.ok(msg.startsWith('<hive-mail>') && msg.includes(`[hive-mail:${m.id}]`) && msg.includes('agy body'), msg);
-  for (let i = 0; i < 200 && f.entryOf('ag-1', m.id).state !== 'surfaced'; i++) await new Promise((r) => setTimeout(r, 5));
-  const e = f.entryOf('ag-1', m.id);
-  assert.deepEqual({ state: e.state, method: e.confirmMethod, hookKind: e.hookKind }, { state: 'surfaced', method: 'latency', hookKind: 'PreInvocation' });
+  // GATE-178 (round 3a, 2026-10-02): the confirmation is the product's Q8 RULE, not this machine's
+  // speed. A pipe response flushed MAIL_PIPE_LATENCY_LIMIT_MS or more after arrival is late (a
+  // `mail-hook-late` row; the entry stays surfacing and is re-surfaced with the marker); only an
+  // in-time flush confirms by latency. Under gate load the flush can be late, and that is correct.
+  agyConfirmedByTheRule(f, m.id, await settledAgy(f, m.id));
+});
+
+/** Wait until the AGY claim is settled one way or the other: confirmed, or logged late. */
+async function settledAgy(f, id) {
+  const late = () => f.logRows().find((r) => r.kind === 'mail-hook-late' && r.ids.includes(id));
+  for (let i = 0; i < 400 && f.entryOf('ag-1', id).state !== 'surfaced' && !late(); i++) await new Promise((r) => setTimeout(r, 5));
+  return late() ?? null;
+}
+
+/** Q8: surfaced by `latency` when (and only when) the flush was in time; otherwise late. */
+function agyConfirmedByTheRule(f, id, late) {
+  const e = f.entryOf('ag-1', id);
+  if (!late) {
+    assert.deepEqual({ state: e.state, method: e.confirmMethod, hookKind: e.hookKind }, { state: 'surfaced', method: 'latency', hookKind: 'PreInvocation' });
+    return;
+  }
+  assert.equal(late.transport, 'pipe');
+  assert.equal(late.limitMs, S.MAIL_PIPE_LATENCY_LIMIT_MS);
+  assert.ok(late.latencyMs === null || late.latencyMs >= late.limitMs, `a late row is late: ${late.latencyMs} >= ${late.limitMs}`);
+  assert.deepEqual({ state: e.state, method: e.confirmMethod, hookKind: e.hookKind }, { state: 'surfacing', method: undefined, hookKind: 'PreInvocation' },
+    'A LATE PIPE RESPONSE IS NOT CONFIRMED');
+}
+
+test('GATE-178: an AGY pipe response flushed past the 2.5 s limit is late, never confirmed (a main stalled between receive and flush)', async (t) => {
+  const f = await floor(t, { providers: { 'ag-1': 'antigravity' } });
+  const m = f.hive.send({ to: 'ag-1', act: 'request', subject: 'for agy', body: 'agy body' }, 'god-1');
+  f.server.start();
+  // The gate's round-3a stall, made deterministic: main is busy between the request's arrival and
+  // the response's flush for longer than the pipe's limit (and under the shim's own 5 s).
+  const stallMs = S.MAIL_PIPE_LATENCY_LIMIT_MS + 500;
+  const real = f.hive.mail.claimSurfacing.bind(f.hive.mail);
+  f.hive.mail.claimSurfacing = (...a) => { const t0 = Date.now(); while (Date.now() - t0 < stallMs) { /* stalled */ } return real(...a); };
+  await runAgyShim(f.home, f.hive.sockPath(), 'PreInvocation', 'ag-1', JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }));
+  const late = await settledAgy(f, m.id);
+  assert.ok(late, 'THE LATE BRANCH IS TAKEN: a mail-hook-late row for the id');
+  assert.ok(late.latencyMs === null || late.latencyMs >= stallMs, `the row measures the stall: ${late.latencyMs}`);
+  agyConfirmedByTheRule(f, m.id, late);
 });
 
 test('N2: a confirmed terminal work-order write records the message acted via:"work-order", out of the backlog; the renderer reports only COMMITTED work orders', async (t) => {
