@@ -112,11 +112,19 @@ test('C1 A1 proof: a re-wake whose turn start is held 5 s real: the OLD step run
   // The fix: the same held turn start, the clock never moves under it, no unconfirmed edge.
   const now = await c1UpToRepend(t);
   const b2 = await unconfirmed(now.rig);
-  let sawInFlight = false;   // the host's inFlight (read by Rig.stubsIdle) sees the held re-wake
-  const seen = async () => { if (await now.rig.call('inFlight')) sawInFlight = true; return resurfaced(now.rig, now.m)(); };
-  await now.rig.beatUntil(seen, { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
+  // GATE-178 (gate at 7ad9d756, round 1a): this used to SAMPLE the host's inFlight while beating.
+  // The re-wake is in flight only from its claim to its settle (~250 ms here: 2-3 of ~110 polls
+  // 93 ms apart, measured), and under a dual-suite load one poll gap reached 2.2 s, so the sample
+  // could miss a window that did happen. The host's own wake record is the evidence instead: a
+  // re-wake for ag-1 that was CLAIMED (in flight) SETTLED during the held phase.
+  const wakeRows = async () => (await now.rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'claim' || d.stage === 'settle'));
+  const rowsBefore = (await wakeRows()).length;
+  await now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
   assert.equal(await unconfirmed(now.rig), b2, 'holdWhileBusy: never judged unconfirmed');
-  assert.ok(sawInFlight, 'the host reported the re-wake in flight while its turn start was held');
+  const all = await wakeRows();
+  const settled = all.slice(rowsBefore).find((d) => d.stage === 'settle');
+  assert.ok(settled && all.some((d) => d.stage === 'claim' && d.requestId === settled.requestId),
+    `THE RE-WAKE WAS IN FLIGHT WHILE ITS TURN START WAS HELD: a claimed ag-1 wake settled in the held phase (${JSON.stringify(all.slice(-4))})`);
   assert.ok(now.rig.contexts('ag-1').filter((c) => c.ids.includes(now.m.id))[1].context.includes(REDELIVERED), 'with the marker');
 });
 
