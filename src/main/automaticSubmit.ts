@@ -620,6 +620,9 @@ export interface OwnerDeps {
   /** DWIGHT-INPUT-DEAD-179 F2: told of a startup reading, once per incarnation and reason.
    *  Diagnostics only. */
   onStartupReading?: (record: StartupReadingRecord) => void;
+  /** DWIGHT-INPUT-DEAD-179 F4: Codex wrote `thread_settings_applied` to this PTY's rollout after
+   *  its LIVE incarnation was spawned. Absent, throwing or false = no proof. */
+  threadConfigured?: (ptyId: string) => boolean;
   /** DWIGHT-HELD-INTERFERED fix 3: how long this PTY's output must have been quiet before the
    *  STAGE reading (see providerAutomation.automaticStageQuietMs). Absent / null / 0 = no wait. */
   stageQuietMs?: (ptyId: string) => number | null | undefined;
@@ -999,7 +1002,25 @@ export class AutomaticSubmitOwner {
     const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     this.reportStartupReading(ptyId, incarnation, past, r);
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
+    if (this.threadProof(ptyId, r)) {
+      this.postHandoff.set(ptyId, incarnation);
+      this.reportStartupReading(ptyId, incarnation, { open: true, reason: 'thread-settings' }, r);
+      return true;
+    }
     return false;
+  }
+
+  /**
+   * DWIGHT-INPUT-DEAD-179 F4: a proof of condition 1 that needs no screen marker. Codex wrote
+   * `thread_settings_applied` to its rollout AFTER this incarnation was spawned, so its chat is
+   * configured: that happens inside App::run, after the onboarding screens (trust, login). Only
+   * the LATCH is taken from it; every request still needs its own fresh reading, which refuses
+   * a popup, a `loading` header or a resume line whatever the latch says. A reading that covers
+   * no output (N1) proves nothing either way.
+   */
+  private threadProof(ptyId: string, r: GuardReading): boolean {
+    if (r.outputGeneration <= 0) return false;
+    try { return this.deps.threadConfigured?.(ptyId) === true; } catch { return false; }
   }
 
   /** DWIGHT-INPUT-DEAD-179 F2: which startup verdict reasons were already reported, per PTY, for
@@ -1392,6 +1413,8 @@ export class AutomaticSubmitOwner {
       const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
       // Jim N1: only a reading that covers real PTY output can latch (a blank terminal has none).
       if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
+      // DWIGHT-INPUT-DEAD-179 F4: Codex's own "chat configured" record, for a screen with no marker.
+      else if (this.postHandoff.get(ptyId) !== incarnation && this.threadProof(ptyId, r)) this.postHandoff.set(ptyId, incarnation);
       const comp = classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
       const want = phase === 'STAGE' ? 'READY' : 'READY_OWN_DRAFT';
       // CODEX-MODEL-SWITCH-PROMPT P2: a Codex popup (rate limits, trust, update...) is named first,

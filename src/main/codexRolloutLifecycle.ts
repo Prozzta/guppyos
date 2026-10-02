@@ -72,9 +72,37 @@ export type CodexLifecycleProbe =
   | { ok: true; latest: CodexTurnEvent | null }
   | { ok: false; why: 'no-rollout' | 'unreadable' };
 
+/**
+ * DWIGHT-INPUT-DEAD-179 F4: the timestamp (ms) of the NEWEST `thread_settings_applied` event in a
+ * rollout tail, or null. Codex 0.157.1 writes it when a thread's settings are applied: when the
+ * chat starts or is resumed (inside App::run, after the onboarding screens - trust, login - have
+ * run, tui/src/lib.rs:1306 before :2027), and on a /model change. Unparsable lines are skipped.
+ */
+export function latestThreadSettingsAt(tail: string): number | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('"thread_settings_applied"')) continue;
+    let j: { type?: unknown; timestamp?: unknown; payload?: { type?: unknown } };
+    try { j = JSON.parse(line); } catch { continue; }
+    if (j.type !== 'event_msg' || !j.payload || j.payload.type !== 'thread_settings_applied') continue;
+    const at = typeof j.timestamp === 'string' ? Date.parse(j.timestamp) : NaN;
+    if (Number.isFinite(at)) return at;
+  }
+  return null;
+}
+
+/** DWIGHT-INPUT-DEAD-179 F4: is a `thread_settings_applied` stamped at `at` this incarnation's?
+ *  A resumed chat appends to its old rollout, so an event from the previous process (older than
+ *  the spawn) proves nothing; an unknown spawn time proves nothing either. */
+export function threadSettingsAppliedSince(at: number | null, spawnedAt: number): boolean {
+  return at !== null && spawnedAt > 0 && at > spawnedAt;
+}
+
 /** Reads the newest rollout's tail, re-reading only when the file changed. */
 export class CodexRolloutLifecycleSource {
   private cache = new Map<string, { file: string; mtimeMs: number; latest: CodexTurnEvent | null }>();
+  private settings = new Map<string, { file: string; mtimeMs: number; at: number | null }>();
 
   probe(codexHome: string): CodexLifecycleProbe {
     const file = findNewestRollout(codexHome);   // rotation / a new session file: re-resolved each probe
@@ -90,7 +118,24 @@ export class CodexRolloutLifecycleSource {
     return { ok: true, latest };
   }
 
+  /** DWIGHT-INPUT-DEAD-179 F4: when Codex last applied this home's thread settings (its newest
+   *  rollout), or null. Fails CLOSED: no rollout, an unreadable file, or no such event = null. */
+  threadSettingsAt(codexHome: string): number | null {
+    const file = findNewestRollout(codexHome);
+    if (!file) return null;
+    let mtimeMs: number;
+    try { mtimeMs = statSync(file).mtimeMs; } catch { return null; }
+    const hit = this.settings.get(codexHome);
+    if (hit && hit.file === file && hit.mtimeMs === mtimeMs) return hit.at;
+    const tail = readTail(file, CODEX_LIFECYCLE_TAIL_BYTES);
+    if (!tail) return null;
+    const at = latestThreadSettingsAt(tail);
+    this.settings.set(codexHome, { file, mtimeMs, at });
+    return at;
+  }
+
   forget(codexHome: string): void {
     this.cache.delete(codexHome);
+    this.settings.delete(codexHome);
   }
 }
