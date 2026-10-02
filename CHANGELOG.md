@@ -11,6 +11,58 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.79] — 2026-10-02
+
+**A release about choices that stick and messages that cannot vanish: a model you pick for an
+agent stays picked, Codex's own questions are named and left to a person, god no longer drags a
+huge old conversation into every step, and a hook reply that never reached an agent is no longer
+counted as delivered.** Workers do not start fresh; god may (see below). Rollback: 1.1.78 (reinstall).
+
+### Fixed
+
+- **A message could be marked delivered although the agent never saw it.** On a very busy machine
+  a hook helper could give up after its 5 seconds while the app still counted the reply as on time
+  (found by the release test run). The helper now tells the app how long it had already been
+  running, so such a reply counts as late and the message is sent again with the "re-delivered"
+  marker; and a helper that gives up first takes a reply that has already arrived. This covers every
+  helper program (Antigravity, Gemini and Grok agents, Codex's hooks, Claude's first step of a
+  session). Not covered yet: Claude's other steps (the app's local web connection) and Codex's MCP
+  connection have the same weakness, but only when a reply takes over 30 seconds; that fix needs a
+  confirmation from the agent's side and is planned (MAIL-POSITIVE-RECEIPT).
+- **A model (and Codex effort) you choose for an agent now survives restarts.** A `/model` switch
+  made just before an automatic message could be recorded as the app's own automatic choice, which
+  the app may later undo. Codex's reasoning effort is now remembered with the model, can be picked in
+  Edit Agent, and shows on the card ("model · effort"); a "keep" button makes an automatic choice
+  yours.
+- **Codex's own questions are named, and never answered by the app.** When a Codex agent is
+  stopped by one of Codex's popups (rate limits, update, model migration, usage limit, approval),
+  the notice and the message box now say what Codex is asking, with a plain hint. The app never
+  types into such a question, presses Enter or Esc, or erases it: a person answers it.
+
+### Changed
+
+- **god starts fresh, with a handoff, instead of resuming a costly session.** At start, god resumes
+  its previous conversation only when that is cheap; it starts fresh when the last request carried
+  over 150,000 tokens, the prompt cache has expired (over an hour idle), the Claude CLI version
+  changed, or god's model changed. A fresh god gets its standing lessons, the floor digest and the
+  board status at once, sized to fit beside the roster and its mail. Workers are unchanged.
+- **god's start-up reading is lighter:** the floor digest and board status, not the whole board.
+- **The token figure on an agent card is now billed-equivalent:** cache reads count 0.1x and cache
+  writes 2x (1.25x when known to be 5-minute), so a cheap cache-heavy agent no longer looks like the
+  most expensive one. The tooltip says so; the bar and the caps still use raw tokens.
+
+### Good to know
+
+- **Workers do not start fresh.** god may start fresh once, with the handoff: if, when you install,
+  its conversation is past 150,000 tokens, it has been idle for over an hour, or Claude Code was
+  updated. Otherwise it resumes as usual.
+- New log rows: `god-startup-fresh`, `god-startup-resume`, `god-handoff-armed`,
+  `god-handoff-delivered`, `god-handoff-dropped`, `model-pin-kept`; Codex popups appear as
+  `codex-popup:<title>` in screen-check rows.
+- **Rollback to 1.1.78:** no mail is lost. Effort choices are no longer applied (the model stays),
+  god resumes as before, the card shows raw tokens, and the hook helpers go back to the 1.1.78
+  timing.
+
 ## [1.1.78] — 2026-10-02
 
 **A reliability release: messages to a Codex agent no longer get stuck where nobody sees them,
