@@ -940,6 +940,20 @@ export function screenGuardNoticeText(name: string, reason: string, refusedMs: n
   // CODEX-MODEL-SWITCH-PROMPT P2: Codex is showing one of its popups; say what it asks.
   const asking = popupInReason(reason);
   if (asking) return { title: `Codex is asking ${name} a question.`, notice: popupNoticeLines(name, asking).join('\n'), details };
+  // DWIGHT-INPUT-DEAD-179 F3: a STARTUP hold is lifted by one turn typed in the terminal itself. An
+  // Enter on an empty Codex chat box starts no turn, and the message box waits for the same check.
+  if (reason.startsWith('startup:')) {
+    return {
+      title: `${name} isn't getting messages right now.`,
+      notice: [
+        `For safety, the app types into ${name}'s terminal only once it is sure ${name} is past its startup screens, and for the last ${minutes} minute${minutes === 1 ? '' : 's'} it couldn't confirm that.`,
+        `What to do: click inside ${name}'s terminal (not the message box under it), type a short message such as "check inbox" and press Enter. That starts one turn, after which the waiting messages follow.`,
+        '• If you see a question or a menu there instead (trust, login, update), answer it, or press Esc.',
+        'This notice goes away by itself when messages flow again.'
+      ].join('\n'),
+      details
+    };
+  }
   return {
     title: `${name} isn't getting messages right now.`,
     notice: [

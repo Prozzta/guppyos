@@ -760,7 +760,9 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
         incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
         observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched,
         // DWIGHT-HELD-INTERFERED fix 4: what a COMMIT refusal saw.
-        ...(r.screen ? { screen: r.screen } : {})
+        ...(r.screen ? { screen: r.screen } : {}),
+        // DWIGHT-INPUT-DEAD-179 F2: what a startup refusal was decided on.
+        ...(r.startupScreen ? { startupScreen: r.startupScreen } : {})
       });
     }
     if (r.ok) screenGuardLastReason.delete(key); else screenGuardLastReason.set(key, r.reason);
@@ -778,6 +780,17 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
   requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
   onScreenGuard: (r) => noteScreenGuard(r),
+  // DWIGHT-INPUT-DEAD-179 F2: the startup reading's verdict and screen, once per incarnation and
+  // reason (the owner dedupes), so a startup hold is explained from the log.
+  onStartupReading: (r) => {
+    try {
+      hive.appendLog({
+        kind: 'codex-startup-reading', agentId: ptyToAgent.get(r.ptyId) ?? null, ptyId: r.ptyId,
+        incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
+        open: r.open, reason: r.reason, outputGeneration: r.outputGeneration, screen: r.screen
+      });
+    } catch { /* diagnostics never decide */ }
+  },
   // DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen.
   onInterfered: (r) => {
     try {

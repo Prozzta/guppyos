@@ -54,6 +54,8 @@ export interface OwnerWiring {
    *  write, whether the composer ends in `expectedTail`). Absent = the Codex gate refuses. */
   requestCodexScreen?: (ptyId: string, expectedTail?: string) => Promise<ScreenReading | null>;
   onScreenGuard?: OwnerDeps['onScreenGuard'];
+  /** DWIGHT-INPUT-DEAD-179 F2: a startup reading's verdict, once per incarnation and reason. */
+  onStartupReading?: OwnerDeps['onStartupReading'];
   /** DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen. */
   onInterfered?: OwnerDeps['onInterfered'];
   /** WAKE-SCREEN-GUARD (Jim B2): the user's home (os.homedir in main). */
@@ -142,6 +144,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     spawnCwd: (ptyId) => w.pty.spawnCwd?.(ptyId),
     homeDir: w.homeDir,
     onScreenGuard: w.onScreenGuard,
+    onStartupReading: w.onStartupReading,
     onInterfered: w.onInterfered,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),

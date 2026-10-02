@@ -520,7 +520,7 @@ const MUTANTS = [
     edits: [['        if (again) again.at = held.at;                 // still the same hold, for its notice\n', '']],
     killer: 'reholdKeepsClock', dies: /A RE-HOLD AFTER A FAILED ERASE KEEPS ITS CLOCK/ },
   { name: 'fix 4: a COMMIT refusal logs no screen facts', file: 'src/main/automaticSubmit.ts', real: OWNER,
-    edits: [["        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {})", '']],
+    edits: [["        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {}),\n", '']],
     killer: 'commitRefusalLogsScreen', dies: /A COMMIT REFUSAL LOGS WHAT THE READING SAW/ },
 ];
 

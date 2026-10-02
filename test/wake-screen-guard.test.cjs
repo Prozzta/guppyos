@@ -772,13 +772,16 @@ test('R2-4: a SessionStart latch of the LIVE incarnation opens condition 1; a re
   assert.equal(r.owner.postHandoffLatched('p1'), false);
 });
 
-test('every refusal is a diagnostic record: phase, reason, incarnation, generations - never screen text', async () => {
+test('every refusal is a diagnostic record: phase, reason, incarnation, generations - and on a startup refusal only the cursor row and footer, never the conversation', async () => {
   const r = rig({ screen: '2-trusted-draft' });
   await r.submit();
   assert.equal(r.guard.length, 1);
   const rec = r.guard[0];
-  assert.deepEqual(Object.keys(rec).sort(), ['admissionClass', 'agentId', 'currentGeneration', 'incarnation', 'latched', 'observedGeneration', 'ok', 'phase', 'ptyId', 'reason', 'requestId']);
+  // DWIGHT-INPUT-DEAD-179 F2: a startup refusal carries what condition 1 was decided on.
+  assert.deepEqual(Object.keys(rec).sort(), ['admissionClass', 'agentId', 'currentGeneration', 'incarnation', 'latched', 'observedGeneration', 'ok', 'phase', 'ptyId', 'reason', 'requestId', 'startupScreen']);
   assert.deepEqual([rec.phase, rec.ok, rec.reason, rec.incarnation, rec.observedGeneration, rec.currentGeneration, rec.latched], ['STAGE', false, 'startup:header-loading', 1, 10, 10, false]);
+  assert.deepEqual(Object.keys(rec.startupScreen).sort(), ['cursorRow', 'footer', 'header', 'startingAfterHeader'], 'no rows above the cursor');
+  assert.equal(rec.startupScreen.header, 'LOADING');
 });
 
 // ─── The per-incarnation token and the alert ────────────────────────────────────────────

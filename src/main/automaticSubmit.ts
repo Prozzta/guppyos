@@ -433,6 +433,8 @@ export interface ScreenGuardRecord {
    *  footer, each row already bounded to CODEX_ROW_MAX), so "is our text still staged?" can be
    *  answered from the log. */
   screen?: GuardScreenFacts;
+  /** DWIGHT-INPUT-DEAD-179 F2: on a `startup:` refusal, what condition 1 was decided on. */
+  startupScreen?: StartupScreenFacts;
 }
 
 /** DWIGHT-HELD-INTERFERED fix 4: the part of a guard reading the log keeps. CODEX-MODEL-SWITCH-
@@ -442,6 +444,33 @@ export interface GuardScreenFacts { cursorRow: string; footer: string[]; popup?:
 function screenFacts(f: CodexScreenFacts): GuardScreenFacts {
   const popup = codexPopup(f);
   return { cursorRow: f.cursorRow, footer: [...f.footer], ...(popup ? { popup: codexPopupText(popup) } : {}) };
+}
+
+/** DWIGHT-INPUT-DEAD-179 F2: the longest row a startup record keeps. */
+export const STARTUP_ROW_MAX = 160;
+/** DWIGHT-INPUT-DEAD-179 F2: what a startup (condition 1) verdict was decided on, small. The
+ *  10-01 and 10-02 holds could only be explained from screen text the Human pasted. The rows ABOVE
+ *  the cursor (the conversation) are never kept: the cursor row and the footer under it only. */
+export interface StartupScreenFacts { header: CodexScreenFacts['header']; startingAfterHeader: boolean; cursorRow: string; footer: string[] }
+
+function startupScreenFacts(f: CodexScreenFacts): StartupScreenFacts {
+  const cut = (row: string): string => (row.length > STARTUP_ROW_MAX ? `${row.slice(0, STARTUP_ROW_MAX - 1)}…` : row);
+  return {
+    header: f.header, startingAfterHeader: f.startingAfterHeader, cursorRow: cut(f.cursorRow),
+    footer: f.footer.map(cut)
+  };
+}
+
+/** DWIGHT-INPUT-DEAD-179 F2: one startup reading taken with no request behind it (StartupProbe),
+ *  reported once per incarnation and verdict reason. */
+export interface StartupReadingRecord {
+  ptyId: string;
+  incarnation: unknown;
+  open: boolean;
+  /** codexPastStartup's reason (`no-marker`, `status-line`, `header-model`, ...). */
+  reason: string;
+  outputGeneration: number;
+  screen: StartupScreenFacts;
 }
 
 /** DWIGHT-HELD-INTERFERED fix 4: one INTERFERED hold, with the last screen facts the owner saw
@@ -588,6 +617,9 @@ export interface OwnerDeps {
   homeDir?: () => string | undefined;
   /** WAKE-SCREEN-GUARD: told of every screen-gate evaluation. Diagnostics only. */
   onScreenGuard?: (record: ScreenGuardRecord) => void;
+  /** DWIGHT-INPUT-DEAD-179 F2: told of a startup reading, once per incarnation and reason.
+   *  Diagnostics only. */
+  onStartupReading?: (record: StartupReadingRecord) => void;
   /** DWIGHT-HELD-INTERFERED fix 3: how long this PTY's output must have been quiet before the
    *  STAGE reading (see providerAutomation.automaticStageQuietMs). Absent / null / 0 = no wait. */
   stageQuietMs?: (ptyId: string) => number | null | undefined;
@@ -965,8 +997,29 @@ export class AutomaticSubmitOwner {
     const r = await this.readGuard(ptyId);
     if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
     const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    this.reportStartupReading(ptyId, incarnation, past, r);
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
     return false;
+  }
+
+  /** DWIGHT-INPUT-DEAD-179 F2: which startup verdict reasons were already reported, per PTY, for
+   *  its current incarnation (a new incarnation starts a new set; at most one row per reason). */
+  private readonly startupReported = new Map<string, { incarnation: unknown; reasons: Set<string> }>();
+
+  private reportStartupReading(ptyId: string, incarnation: unknown, past: { open: boolean; reason: string }, r: GuardReading): void {
+    try {
+      let seen = this.startupReported.get(ptyId);
+      if (!seen || seen.incarnation !== incarnation) {
+        seen = { incarnation, reasons: new Set() };
+        this.startupReported.set(ptyId, seen);
+      }
+      if (seen.reasons.has(past.reason)) return;
+      seen.reasons.add(past.reason);
+      this.deps.onStartupReading?.({
+        ptyId, incarnation, open: past.open, reason: past.reason, outputGeneration: r.outputGeneration,
+        screen: startupScreenFacts(r.facts)
+      });
+    } catch { /* diagnostics never decide */ }
   }
 
   /**
@@ -1362,7 +1415,8 @@ export class AutomaticSubmitOwner {
         ok: verdict.ok, reason: verdict.ok ? 'ok' : verdict.reason, incarnation,
         observedGeneration: r ? r.outputGeneration : null, currentGeneration: current ?? null,
         latched: this.postHandoff.get(ptyId) === incarnation,
-        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {})
+        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {}),
+        ...(!verdict.ok && r && verdict.reason.startsWith('startup:') ? { startupScreen: startupScreenFacts(r.facts) } : {})
       });
     } catch { /* diagnostics never decide */ }
     return verdict;

@@ -164,15 +164,17 @@ test('fix 4 wiring: the banner filters through visibleIssues and offers Dismiss 
 // ─── fix 5: the words ──────────────────────────────────────────────────────────────────
 
 test('fix 5: the notice is Jim\'s plain-English draft; the technical reason is only in details', () => {
-  const w = LEDGER.screenGuardNoticeText('Dwight', 'startup:no-marker', 300_250, 51);
+  // DWIGHT-INPUT-DEAD-179 F3: a startup hold now has its own advice (wsg-named-statusline-180);
+  // this draft stays for every other screen hold.
+  const w = LEDGER.screenGuardNoticeText('Dwight', 'UNKNOWN:not-the-empty-composer', 300_250, 51);
   assert.equal(w.title, 'Dwight isn\'t getting messages right now.');
   assert.match(w.notice, /^For safety, the app types into Dwight's terminal only when it is sure Dwight is on its normal chat box, and for the last 5 minutes it couldn't confirm that\.\n/);
   assert.match(w.notice, /What to do: click Dwight's terminal and look at the bottom\./);
   assert.match(w.notice, /If you see the chat box \("Ask Codex to do anything"\), press Enter once/);
   assert.match(w.notice, /If you see a question or a menu instead \(trust, login, update\), answer it, or press Esc\./);
   assert.match(w.notice, /This notice goes away by itself when messages flow again\.$/);
-  assert.doesNotMatch(`${w.title}\n${w.notice}`, /startup:|no-marker|composer|wake-screen-guard/, 'no jargon in what a person reads first');
-  assert.match(w.details, /startup:no-marker, 51 refusals/);
+  assert.doesNotMatch(`${w.title}\n${w.notice}`, /startup:|no-marker|UNKNOWN|composer|wake-screen-guard/, 'no jargon in what a person reads first');
+  assert.match(w.details, /UNKNOWN:not-the-empty-composer, 51 refusals/);
   const one = LEDGER.screenGuardNoticeText('Pam', 'no-reading', 50_000, 1);
   assert.match(one.notice, /for the last 1 minute it/);
   const { MailLedger } = LEDGER;
@@ -197,7 +199,10 @@ K.screenHoldWorded = (H = HOLD) => {
     assert.equal(held.action, null, '"send now" IS NOT OFFERED for a screen hold (W1: the same check holds it)');
     assert.match(held.hint, /"send now" is held too/, 'and the hint says so plainly');
     assert.match(held.title, /"send now" is held by the same safety check/);
-    assert.match(held.title, /Click Dwight's terminal and look at the bottom/, 'and names what a person can do');
+    // DWIGHT-INPUT-DEAD-179 F3: a startup hold is released by typing IN the terminal.
+    assert.match(held.title, reason.startsWith('startup:')
+      ? /Click inside Dwight's terminal \(not this box\), type a short message/
+      : /Click Dwight's terminal and look at the bottom/, 'and names what a person can do');
   }
 };
 test('fix 3: the composer says plainly what the screen check holds, and that "send now" is held too', () => K.screenHoldWorded());
