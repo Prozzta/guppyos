@@ -60,6 +60,15 @@ K.missingTimestampFailsSafe = (S = STALE) => {
 };
 test('a missing archive time fails safe: flagged, never silently graced', () => K.missingTimestampFailsSafe());
 
+K.livenessOrphanUsesRegistryTime = (S = STALE) => {
+  const D = S.BOARD_STALE_DEFAULTS;
+  const at = (age) => run(S, { registry: { jim: { archived: true, archiveReason: 'orphan', lastSeen: NOW - age } },
+    liveness: { jim: lv('jim', 'EXITED', NOW, { lifecycle: 'ARCHIVED', archiveReason: 'orphan' }) } });
+  assert.deepEqual(at(D.bootGraceMs - 1), [], 'A LIVENESS ORPHAN WITH NO archivedAt TAKES THE REGISTRY ARCHIVE TIME (inside the grace: no flag)');
+  assert.deepEqual(at(D.bootGraceMs), ['A:ASSIGNEE_DOWN'], 'and is flagged once that grace is over');
+};
+test('Jim B5: a liveness orphan with no archivedAt is graced by the registry\'s archive time', () => K.livenessOrphanUsesRegistryTime());
+
 K.ptyExitWins = (S = STALE) => {
   const orphanNow = { archived: true, archiveReason: 'orphan', lastSeen: NOW };
   const ptyExit = lv('jim', 'EXITED', NOW - H, { lifecycle: 'ARCHIVED', archiveReason: 'pty-exit', archivedAt: NOW - H });
@@ -120,6 +129,9 @@ const MUTANTS = [
   { name: 'the orphan flag is never escalated (since = now)', file: 'src/shared/boardStale.ts', real: STALE,
     edits: [['    const since = lv?.lifecycle === \'ARCHIVED\' ? (lv.archivedAt ?? lv.classifiedSince) : (regAt ?? now);', '    const since = now;']],
     killer: 'orphanNeverBackFlagged', dies: /AN ORPHAN THAT NEVER COMES BACK BECOMES A DECISION/ },
+  { name: 'Jim B5: a liveness orphan ignores the registry archive time', file: 'src/shared/boardStale.ts', real: STALE,
+    edits: [["  const orphanAt = lvReason === 'orphan' ? (lv?.archivedAt ?? regAt) :", "  const orphanAt = lvReason === 'orphan' ? lv?.archivedAt :"]],
+    killer: 'livenessOrphanUsesRegistryTime', dies: /A LIVENESS ORPHAN WITH NO archivedAt TAKES THE REGISTRY ARCHIVE TIME/ },
   { name: 'S1: the pty-exit precedence removed', file: 'src/shared/boardStale.ts', real: STALE,
     edits: [["  if (lvReason === 'pty-exit' || regReason === 'pty-exit') {", '  if (false) {']],
     killer: 'ptyExitWins', dies: /A PTY EXIT WINS OVER A FRESH BOOT ORPHAN/ },
