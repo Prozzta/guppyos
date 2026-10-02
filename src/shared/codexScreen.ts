@@ -249,7 +249,11 @@ export function codexPopup(f: CodexScreenFacts): CodexPopup | null {
     const next = header[i + 1];
     return { title: header[i], question: next !== undefined && next.endsWith('?') ? next : null, known: true };
   }
-  return { title: header[header.length - 1], question: null, known: false };
+  // Jim N1: an unlisted title that is an agent's transcript bullet ("• Done.") is not a popup's
+  // header: a draft quoting a hint, or a side conversation's "Side tab to switch" footer.
+  const title = header[header.length - 1];
+  if (title.startsWith('• ')) return null;
+  return { title, question: null, known: false };
 }
 
 /** P2: the popup in one bounded line, `<title>` or `<title> — <question>`. */

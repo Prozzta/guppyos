@@ -136,6 +136,18 @@ K.notAPopup = (S = SHARED) => {
   spaced[idle.lines.length - 2] = '  gpt-5.5 high · C:\\my docs';
   spaced[idle.lines.length - 1] = '';
   assert.equal(S.classifyCodexComposer(factsOf(spaced, draftRow, S)).cls, 'UNKNOWN', 'THE STATUS LINE IS NOT A POPUP HINT');
+  // Jim N1: a numbered draft in a side conversation, whose footer is "Side tab to switch · ctrl+c
+  // to close" (codex app/side.rs:282-286), under an agent's bullet: not a popup.
+  const side = ['• Done.', '', '› 1. fix the bug', '', '  Side tab to switch · ctrl+c to close'];
+  assert.equal(S.classifyCodexComposer(factsOf(side, 2, S)).cls, 'UNKNOWN', 'A SIDE CONVERSATION UNDER A BULLET IS NOT A POPUP');
+  // Jim J2: a hint over a list with NO selected row is not a popup.
+  const rate = snapRows(path.join(POP, RATE)).map((l) => (l.startsWith('› 1. ') ? `  1. ${l.slice(5)}` : l));
+  assert.equal(S.classifyCodexComposer(factsOf(rate, 0, S)).cls, 'UNKNOWN', 'NO SELECTED CHOICE, NO POPUP');
+  // Jim J3: a tail that starts at the choices (no header row left) is not a popup.
+  const headless = snapRows(path.join(POP, RATE)).filter((l) => !/Approaching|Switch to gpt-6-luna for/.test(l) || /^› |^ {2}\d/.test(l));
+  let headlessCls;
+  try { headlessCls = S.classifyCodexComposer(factsOf(headless, 0, S)).cls; } catch (e) { headlessCls = `threw: ${e.message}`; }
+  assert.equal(headlessCls, 'UNKNOWN', 'NO HEADER, NO POPUP (and the classifier never throws)');
   // READY is decided exactly as before, whatever the tail says.
   assert.deepEqual(S.classifyCodexComposer({ ...RATE_FACTS, cursorRow: SHARED.CODEX_EMPTY_COMPOSER_ROW, footer: [] }), { cls: 'READY', reason: 'empty-composer' });
   assert.deepEqual(S.classifyCodexComposer({ ...RATE_FACTS, cursorRow: '› ours' }, true), { cls: 'READY_OWN_DRAFT', reason: 'own-draft' });
@@ -443,6 +455,15 @@ const MUTANTS = [
   { name: 'P2: a key may be any word (the status line passes)', file: 'src/shared/codexScreen.ts',
     edits: [["const POPUP_KEY = '[A-Za-z][A-Za-z0-9+/-]*';", "const POPUP_KEY = '\\\\S+';"]],
     killer: 'notAPopup', dies: /THE STATUS LINE IS NOT A POPUP HINT/ },
+  { name: 'Jim N1: an agent bullet taken for a title', file: 'src/shared/codexScreen.ts',
+    edits: [["  if (title.startsWith('• ')) return null;\n", '']],
+    killer: 'notAPopup', dies: /A SIDE CONVERSATION UNDER A BULLET IS NOT A POPUP/ },
+  { name: 'Jim J2: any choice counts as selected', file: 'src/shared/codexScreen.ts',
+    edits: [['  for (let i = hint - 1; i >= 0; i -= 1) if (POPUP_SELECTED.test(rows[i])) { selected = i; break; }', '  for (let i = hint - 1; i >= 0; i -= 1) if (POPUP_CHOICE.test(rows[i])) { selected = i; break; }']],
+    killer: 'notAPopup', dies: /NO SELECTED CHOICE, NO POPUP/ },
+  { name: 'Jim J3: no header required', file: 'src/shared/codexScreen.ts',
+    edits: [['  if (top === 0) return null;', '  if (false) return null;']],
+    killer: 'notAPopup', dies: /NO HEADER, NO POPUP/ },
   { name: 'P2: the tail trimmed (indent lost)', file: 'src/shared/codexScreen.ts',
     edits: [["    const row = (line(i) ?? '').trimEnd();\n    if (row.trim()) tail.unshift(cut(row));", "    const row = (line(i) ?? '').trim();\n    if (row.trim()) tail.unshift(cut(row));"]],
     killer: 'vendorPopupsNamed', dies: /THE POPUP IS NAMED/ },
