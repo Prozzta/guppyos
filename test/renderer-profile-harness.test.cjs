@@ -92,7 +92,10 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     const i = r.idle;
     assert.equal(i.captureTimeoutMs, 25_000, 'the idle arm runs with the hang-guard budget');
     assert.equal(i.profile.profile, 'ok', JSON.stringify(i.profile));
-    assert.equal(i.profile.stack, null);
+    // GATE-179: nothing of Electron's own runs on the idle page while it is captured (its load-time
+    // security check raced the capture under load and was the stack).
+    assert.equal(i.securityWarnings, 0, 'Electron\'s security check is off on the harness pages');
+    assert.equal(i.profile.stack, null, `an idle page has nothing to pause: ${JSON.stringify(i.profile.stack)}`);
     assert.equal(i.profile.stacks, undefined, 'no extra pauses spent on an idle renderer');
     assert.equal(i.answers, 'pong', 'not left paused');
     assert.equal(i.attachedAfter, true, 'the armed session stays for the next spike');
