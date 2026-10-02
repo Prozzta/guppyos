@@ -8,7 +8,7 @@
  * electron-facing half (the IPC handlers, the webContents send) is a few lines in
  * `index.ts` that hand this module plain functions.
  */
-import { automaticAbortCapability, automaticEnterGapMs, automaticVerifySubmit, terminalReadyToReceive } from '../shared/providerAutomation';
+import { automaticAbortCapability, automaticEnterGapMs, automaticStageQuietMs, automaticVerifySubmit, terminalReadyToReceive } from '../shared/providerAutomation';
 import { automaticDeliveryEligibility, type TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { AgentProvider } from '../shared/agentProvider';
@@ -54,6 +54,8 @@ export interface OwnerWiring {
    *  write, whether the composer ends in `expectedTail`). Absent = the Codex gate refuses. */
   requestCodexScreen?: (ptyId: string, expectedTail?: string) => Promise<ScreenReading | null>;
   onScreenGuard?: OwnerDeps['onScreenGuard'];
+  /** DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen. */
+  onInterfered?: OwnerDeps['onInterfered'];
   /** WAKE-SCREEN-GUARD (Jim B2): the user's home (os.homedir in main). */
   homeDir?: () => string | undefined;
   now?: () => number;
@@ -113,6 +115,11 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
       const provider = w.providerForPty(ptyId);
       return provider ? automaticVerifySubmit(provider) : false;
     },
+    // DWIGHT-HELD-INTERFERED fix 3: Codex is staged only after its output has been quiet.
+    stageQuietMs: (ptyId) => {
+      const provider = w.providerForPty(ptyId);
+      return provider ? automaticStageQuietMs(provider) : null;
+    },
     // WAKE-SCREEN-GUARD: fail-closed for Codex only (god's ruling); every other provider is
     // unchanged.
     screenGuard: (ptyId) => (w.providerForPty(ptyId) === 'codex' ? 'ENFORCE' : 'OFF'),
@@ -135,6 +142,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     spawnCwd: (ptyId) => w.pty.spawnCwd?.(ptyId),
     homeDir: w.homeDir,
     onScreenGuard: w.onScreenGuard,
+    onInterfered: w.onInterfered,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),
       revalidate: (claim) => w.capacity.revalidate(claim, claim.target),

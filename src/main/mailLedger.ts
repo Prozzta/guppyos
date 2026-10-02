@@ -948,6 +948,23 @@ export function screenGuardNoticeText(name: string, reason: string, refusedMs: n
   };
 }
 
+/** DWIGHT-HELD-INTERFERED-2028 fix 2: the notice for an automatic message held after it was
+ *  interrupted (Jim's wording). `at` is when it was held; `wakeText` what was typed. */
+export function heldInterferedNoticeText(name: string, messages: number, at: number, wakeText: string, reason: string): { title: string; notice: string; details: string } {
+  const d = new Date(at);
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const shown = wakeText.split(/\r?\n/)[0].slice(0, 80);
+  return {
+    title: `${name} hasn't received ${messages} message${messages === 1 ? '' : 's'}.`,
+    notice: [
+      `An automatic message to ${name} was interrupted at ${hhmm}.`,
+      `Look at ${name}'s chat box: if it shows "${shown}", press Enter; if it is empty, press "let it retry" in ${name}'s message box.`,
+      'This notice goes away by itself when the message is released.'
+    ].join('\n'),
+    details: `Details: the wake is held (${reason}) since ${d.toISOString()} (held-interfered-alert in the log).`
+  };
+}
+
 /** Same shape as the hive's authority issues (`hive:integrity` → the repair banner). */
 export interface MailIntegrityIssue {
   file: string;
@@ -1129,6 +1146,19 @@ export class MailLedger {
    *  reading or a latch. Its banner goes. */
   clearScreenGuardAlert(agentId: string): void {
     this.notices.delete(`${agentId}|screen-guard`);
+  }
+
+  /** DWIGHT-HELD-INTERFERED-2028 fix 2: an automatic wake to this agent has been held INTERFERED
+   *  for minutes. Logs `held-interfered-alert` and raises the plain-words notice (a notice, so a
+   *  person may dismiss it; a new hold raises it again). Nothing here types into a terminal. */
+  noteHeldInterferedAlert(agentId: string, h: { name: string; messages: number; at: number; wakeText: string; reason: string; requestId: string }, now: number = Date.now()): void {
+    this.log({ kind: 'held-interfered-alert', agentId, requestId: h.requestId, reason: h.reason, messages: h.messages, heldMs: now - h.at });
+    this.notices.set(`${agentId}|held-interfered`, { file: `state/mail/${agentId}.json`, quarantine: null, error: 'held-interfered', ...heldInterferedNoticeText(h.name, h.messages, h.at, h.wakeText, h.reason), raisedAt: now });
+  }
+
+  /** The hold ended (released, ruled by a person, a respawn, or its ids left the inbox). */
+  clearHeldInterferedAlert(agentId: string): void {
+    this.notices.delete(`${agentId}|held-interfered`);
   }
 
   // — load —

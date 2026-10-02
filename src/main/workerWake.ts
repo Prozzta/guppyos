@@ -1112,6 +1112,13 @@ export class WorkerWakeWatchdog {
     return true;
   }
 
+  /** DWIGHT-HELD-INTERFERED: every agent's held INTERFERED wake claim (main re-examines them). */
+  heldClaims(): Array<{ agentId: string; claim: WakeClaim }> {
+    const out: Array<{ agentId: string; claim: WakeClaim }> = [];
+    for (const [agentId, r] of this.agents) if (r.held) out.push({ agentId, claim: r.held });
+    return out;
+  }
+
   /** Agents with pending ids (bounded retries after a capacity change or at startup). */
   pendingAgents(): string[] {
     return [...this.agents].filter(([, r]) => r.pending.size > 0).map(([id]) => id).sort();

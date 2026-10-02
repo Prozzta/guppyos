@@ -362,3 +362,15 @@ export function automaticEnterGapMs(provider: AgentProvider, textLength = 0): nu
 export function automaticVerifySubmit(provider: AgentProvider): boolean {
   return provider === 'codex';
 }
+
+/**
+ * DWIGHT-HELD-INTERFERED-2028 fix 3: how long a provider's PTY output must have been quiet before
+ * an automatic message is staged. Codex: its Stop hook arrives BEFORE the turn has finished on
+ * screen (Dwight 20:27:41: `task_complete` 105 ms after the Stop, then the end-of-stream redraw),
+ * so a STAGE reading taken in a gap between those frames can pass on a composer that is about to
+ * be redrawn, and the typed text does not stay on the prompt row. null = no wait.
+ */
+export const CODEX_STAGE_QUIET_MS = 750;
+export function automaticStageQuietMs(provider: AgentProvider): number | null {
+  return provider === 'codex' ? CODEX_STAGE_QUIET_MS : null;
+}

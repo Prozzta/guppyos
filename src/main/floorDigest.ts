@@ -47,7 +47,12 @@ export interface DigestAgent {
   liveness?: { classification?: string; reason?: string } | null;
 }
 
+/** DWIGHT-HELD-INTERFERED-2028 fix 2: an automatic wake held after it was interrupted, past the
+ *  notice threshold (the Human has a banner; god gets a decision). */
+export interface DigestHeldWake { agentId: string; name?: string; messages: number; since: number }
+
 export interface FloorDigestInput {
+  heldWakes?: DigestHeldWake[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -63,8 +68,16 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
+  // One item per hold (its id carries when it began, so a new hold is a new decision).
+  for (const h of heldWakes) {
+    const who = h.name ?? h.agentId;
+    items.push({
+      id: `held-interfered:${h.agentId}:${h.since}`, cardId: null,
+      line: `${who}: ${h.messages} message(s) held for ${ageText(now - h.since)} after an interrupted automatic message - look at ${who}'s chat box (the banner says how), or rule it in ${who}'s message box`
+    });
+  }
   for (const f of flags) {
     if (!f.decision) continue;
     // STALE re-arms daily; ASK_ANSWERED_IDLE re-arms only on a NEW answer (its since = the
@@ -97,7 +110,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? []);
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -204,6 +217,8 @@ export interface FloorDigestHost {
   taskMeta(): Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags(): BoardFlag[];
   ledgerIssues(): LedgerIssue[];
+  /** DWIGHT-HELD-INTERFERED: held wakes the Human has been told about. Optional. */
+  heldWakes?(): DigestHeldWake[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -242,7 +257,8 @@ export class FloorDigest {
     const now = this.now();
     const { markdown, decisionItems: items } = buildFloorDigest({
       tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(),
-      ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now
+      ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now,
+      heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })()
     });
     // The timestamp line changes every run; rewrite the file only when the content did.
     const body = markdown.split('\n').filter((l) => !l.startsWith('_Written by the harness')).join('\n');

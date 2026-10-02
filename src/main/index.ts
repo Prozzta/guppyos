@@ -117,6 +117,7 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
+import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
 import { CodexRolloutLifecycleSource } from './codexRolloutLifecycle';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
@@ -443,9 +444,13 @@ const floorDigest = new FloorDigest({
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   flags: () => boardMonitor.flags(),
   ledgerIssues: () => hive.ledgerGuard.issues(),
+  // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
+  heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
+// DWIGHT-HELD-INTERFERED-2028: built once the wake bridge exists (below).
+let heldInterference: HeldInterferenceWatch | null = null;
 hive.ledgerGuard.onChange(() => {
   try { boardMonitor.tick(); } catch (e) { console.error('[board-monitor]', e); }
   boardStatus.request();
@@ -751,7 +756,9 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
         kind: 'wake-screen-guard', agentId: r.agentId, ptyId: r.ptyId, requestId: r.requestId,
         provider: 'codex', admissionClass: r.admissionClass, phase: r.phase, reason: r.reason,
         incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
-        observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched
+        observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched,
+        // DWIGHT-HELD-INTERFERED fix 4: what a COMMIT refusal saw.
+        ...(r.screen ? { screen: r.screen } : {})
       });
     }
     if (r.ok) screenGuardLastReason.delete(key); else screenGuardLastReason.set(key, r.reason);
@@ -769,6 +776,15 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
   requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
   onScreenGuard: (r) => noteScreenGuard(r),
+  // DWIGHT-HELD-INTERFERED fix 4: every INTERFERED hold, with the last screen facts seen.
+  onInterfered: (r) => {
+    try {
+      hive.appendLog({
+        kind: 'wake-interfered', agentId: r.agentId, ptyId: r.ptyId, requestId: r.requestId, admissionClass: r.admissionClass,
+        reason: r.reason, ...(r.detail ? { detail: r.detail.slice(0, 200) } : {}), screen: r.screen, screenAgeMs: r.screenAgeMs, needle: r.needle
+      });
+    } catch { /* logging only */ }
+  },
   homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
@@ -895,6 +911,37 @@ inboxWake = new InboxWakeBridge({
   liveness: { stuckWake: (agentId, reason) => { agentLiveness.noteStuckWake(agentId, reason); } }
 });
 wakeDiag('bridge-built', { ok: !!inboxWake });
+
+// DWIGHT-HELD-INTERFERED-2028 fixes 1 and 2 (heldInterference.ts): a held INTERFERED WAKE is looked
+// at again about once a minute (the owner decides, on positive screen evidence only), and the
+// Human is told after HELD_NOTICE_AFTER_MS. A person's queued message is never re-examined here.
+heldInterference = new HeldInterferenceWatch({
+  heldWakes: () => workerWake.heldClaims().flatMap(({ agentId, claim }) => {
+    const ptyId = ptyForAgent(agentId);
+    const inh = ptyId ? automaticSubmit.inhibition(ptyId) : null;
+    return ptyId && inh && inh.requestId === claim.requestId
+      ? [{ agentId, requestId: claim.requestId, ptyId, messages: claim.ids.length, since: inh.at, reason: inh.reason }]
+      : [];
+  }),
+  recheck: (h) => automaticSubmit.recheckHeld(h.ptyId, h.requestId),
+  released: (h, r, now) => {
+    try {
+      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
+    } catch { /* logging only */ }
+    pushAgentImpact();
+    // The same ruling as a person's "let it retry": the ids go back through every gate.
+    inboxWake?.onInterferenceResolved(h.agentId, 'SEND_AGAIN');
+  },
+  notice: {
+    raise: (h, now) => hive.mail.noteHeldInterferedAlert(h.agentId, {
+      name: agentDisplayName(h.agentId), messages: h.messages, at: h.since, reason: h.reason, requestId: h.requestId,
+      wakeText: inboxWakeTextForProvider(hive.registry().agents[h.agentId]?.provider, [], wakeMailMode(h.agentId))
+    }, now),
+    clear: (agentId) => hive.mail.clearHeldInterferedAlert(agentId)
+  },
+  log: (row) => hive.appendLog(row),
+  now: () => Date.now()
+});
 
 /** ZT-I1-MAIL §5 / §11.7: the mail mode an agent's wake text follows (mailNudgeMode). */
 function wakeMailMode(agentId: string): MailNudgeMode {
@@ -5520,8 +5567,10 @@ ipcMain.on('autoSubmit:bootSubmitThrew', (_evt, agentId: unknown, message: unkno
  * type it again. There is NO DEFAULT: a call that does not name one of the two is refused
  * and the hold stays, because the ambiguity of a bare "resolved" is exactly what produced
  * duplicate deliveries. Nothing here looks at the prompt to guess. It types nothing, clears
- * nothing and sends no Enter. There is deliberately no timer, no expiry and no main-side
- * caller: automation does not get to decide a human's text is finished.
+ * nothing and sends no Enter. There is deliberately no timer and no expiry: automation does
+ * not get to decide a human's text is finished. The one main-side caller is the held-wake
+ * watch (DWIGHT-HELD-INTERFERED): it releases an AUTOMATIC wake only when the owner's fresh
+ * look proves the prompt clean (no human key since, our text nowhere on screen).
  */
 ipcMain.handle('autoSubmit:resolveInterference', (_evt, agentId: unknown, how: unknown) => {
   if (typeof agentId !== 'string' || !agentId) return false;
@@ -6716,6 +6765,7 @@ function bootstrapHiveServices(): void {
  *  lost callback or a restart missed. Unchanged in the pre-M1 bridge. */
 const WORKER_WAKE_POLL_MS = 15_000;
 let workerWakeTimer: ReturnType<typeof setInterval> | null = null;
+let heldInterferenceTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Inbox-wake RECONCILIATION (pre-M1 bridge). Every live, non-archived agent - god
  *  included, with no exclusion - goes through the SAME `requestInboxWake` the events use,
@@ -6763,6 +6813,8 @@ function armAlwaysOnBeats(): void {
   breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
   if (workerWakeTimer) clearInterval(workerWakeTimer);
   workerWakeTimer = setInterval(() => { try { runWorkerWakeBeat(); } catch (e) { console.error('[worker-wake beat]', e); } }, WORKER_WAKE_POLL_MS);
+  if (heldInterferenceTimer) clearInterval(heldInterferenceTimer);
+  heldInterferenceTimer = setInterval(() => { try { heldInterference?.tick(Date.now()); } catch (e) { console.error('[held-interference]', e); } }, HELD_TICK_MS);
   wakeDiag('beats-armed', { cadenceMs: WORKER_WAKE_POLL_MS });
   runWorkerWakeBeat(); // catch-up on arm — power-resume re-arms and drains the backlog
 }
