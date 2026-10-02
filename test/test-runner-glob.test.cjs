@@ -170,10 +170,65 @@ function childrenOf(pid) {
   return out.split(/\r?\n/).filter(Boolean);
 }
 
+/**
+ * GATE-178 (re-gate round 3, both sides, 2026-10-02): every assertion of the END TO END test passed,
+ * then its cleanup threw EBUSY: a process of the killed tree still had the temp folder in use, and
+ * the old cleanup gave it 5 x 200 ms. Process teardown on a loaded machine can take longer than
+ * that. The folder is removed once it is FREE, waiting up to `budgetMs` (counted); only a folder
+ * still in use after that is a failure, and it names the processes still running.
+ */
+const CLEANUP_BUDGET_MS = 30_000;
+function removeWhenFree(dir, { budgetMs = CLEANUP_BUDGET_MS, rm = (d) => fs.rmSync(d, { recursive: true, force: true }), now = Date.now, pause = () => require('node:child_process').spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},250)']) } = {}) {
+  const t0 = now();
+  for (;;) {
+    try { rm(dir); return { removed: true, waitedMs: now() - t0 }; } catch (err) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(err.code)) throw err;
+      if (now() - t0 >= budgetMs) return { removed: false, waitedMs: now() - t0, code: err.code };
+    }
+    pause();
+  }
+}
+
+/** The processes started in the last `seconds` (for the message when a folder stays in use). */
+function recentProcesses(seconds = 120) {
+  try {
+    return require('node:child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -gt (Get-Date).AddSeconds(-${seconds}) } | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.Name)" }`],
+    { encoding: 'utf8', windowsHide: true }).split(/\r?\n/).filter(Boolean).join(', ');
+  } catch (e) { return `(no process list: ${e.message})`; }
+}
+
+test('GATE-178: the temp folder of a killed tree is removed once free, not after a fixed 1 s; a folder still in use past the budget fails', { timeout: 60_000 }, () => {
+  const os = require('node:os');
+  const { spawn, spawnSync } = require('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-cleanup-'));
+  // A process whose working directory IS the folder, ending 2 s from now: a slow teardown.
+  const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 2000)'], { cwd: dir, stdio: 'ignore', windowsHide: true });
+  try {
+    spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},200)']);
+    if (process.platform === 'win32') {
+      assert.throws(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }), (e) => e.code === 'EBUSY',
+        'the old cleanup (5 x 200 ms) fails on a folder that is in use for 2 s');
+    }
+    const r = removeWhenFree(dir);
+    assert.equal(r.removed, true, `A FOLDER FREED WITHIN THE BUDGET IS REMOVED (${JSON.stringify(r)})`);
+    assert.equal(fs.existsSync(dir), false);
+    // ...and one that never frees is reported, not waited on for ever.
+    let t = 0;
+    const never = removeWhenFree('x', { budgetMs: 1_000, rm: () => { const e = new Error('busy'); e.code = 'EBUSY'; throw e; }, now: () => t, pause: () => { t += 250; } });
+    assert.deepEqual(never, { removed: false, waitedMs: 1_000, code: 'EBUSY' }, 'A FOLDER STILL IN USE PAST THE BUDGET IS REPORTED');
+    assert.throws(() => removeWhenFree('x', { rm: () => { const e = new Error('nope'); e.code = 'EACCES'; throw e; } }), /nope/, 'any other error is thrown at once');
+  } finally {
+    try { holder.kill(); } catch { /* gone */ }
+    removeWhenFree(dir);
+  }
+});
+
 test('END TO END: a file that finishes its tests but never exits is killed at the limit with its WHOLE tree (ConPTY conhost too), NAMED, fails the run', { timeout: 120_000 }, () => {
   const os = require('node:os');
   const { spawnSync } = require('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-timeout-'));
+  let failed = null;
   try {
     const pidFile = path.join(dir, 'grandchild.pid');
     const filePidFile = path.join(dir, 'file.pid');
@@ -216,8 +271,14 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     for (const l of left) { try { process.kill(Number(l.split(' ')[0])); } catch { /* gone */ } }
     assert.deepStrictEqual(left, [], `the hung file's process tree outlived the run: ${left.join(', ')}`);
     if (HAS_PTY) assert.match(e.lines.join('\n'), /FILE TIMED OUT/, 'the ConPTY case is the real one');
+  } catch (err) {
+    failed = err;
+    throw err;
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    // GATE-178: removed once free; still in use after the budget = a process of the tree outlived
+    // the run. A failed assertion above is never masked by the cleanup.
+    const r = removeWhenFree(dir);
+    if (!r.removed && !failed) assert.fail(`the hung file's temp folder was still in use ${r.waitedMs} ms after the run (${r.code}); recent processes: ${recentProcesses()}`);
   }
 });
 
