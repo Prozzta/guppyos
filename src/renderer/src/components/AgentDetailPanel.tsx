@@ -11,6 +11,7 @@ import { disposeTerminal } from './terminalPool';
 import { SidebarTabs } from './SidebarTabs';
 import { ThreadsPanel } from './ThreadsPanel';
 import { HistoryView } from './HistoryView';
+import { ErrorBoundary } from './ErrorBoundary';
 import { ToolWaterfall } from './ToolWaterfall';
 import { AgentControlStrip } from './AgentControlStrip';
 import { EditAgentModal } from './EditAgentModal';
@@ -339,7 +340,10 @@ export function AgentDetailPanel({ agent }: AgentDetailPanelProps) {
         )}
 
         {sidebarTab === 'history' && (
-          <HistoryView agentId={agent.id} />
+          // HISTORY-SCROLL-FREEZE F3: a History render error stays inside the tab.
+          <ErrorBoundary key={agent.id} where="History">
+            <HistoryView agentId={agent.id} />
+          </ErrorBoundary>
         )}
 
         {sidebarTab === 'git' && (

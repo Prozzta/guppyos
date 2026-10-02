@@ -64,7 +64,7 @@ const harnessTestTimeout = (scenarioMs) => HARNESS_SETUP_TIMEOUT_MS + scenarioMs
 
 /**
  * @param {string} scenario absolute path to a `.ts` scenario entry
- * @param {{width?:number,height?:number,timeoutMs?:number,setupTimeoutMs?:number}} [opts]
+ * @param {{width?:number,height?:number,timeoutMs?:number,setupTimeoutMs?:number,env?:Record<string,string>}} [opts]
  * @returns {Promise<any>} whatever the scenario reported
  */
 function runScenario(scenario, opts = {}) {
@@ -89,7 +89,9 @@ function runScenario(scenario, opts = {}) {
         // Never let a harness run inherit the isolated-Dev identity or attach to
         // the app's own sockets: this is a throwaway process, not an instance.
         MUNDER_DEV: '',
-        ELECTRON_ENABLE_LOGGING: '1'
+        ELECTRON_ENABLE_LOGGING: '1',
+        // A test's own variables for this run only (HARNESS_SOURCE_OVERRIDES for a mutant census).
+        ...(opts.env || {})
       },
       stdio: ['ignore', 'pipe', 'pipe']
     });

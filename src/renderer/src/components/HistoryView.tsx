@@ -120,8 +120,12 @@ export function HistoryList({ win, first, last, padTop, padBottom, loading, foll
         <div style={{ padding: 16, fontSize: 13, color: 'var(--cth-ink-500)', textAlign: 'center' }}>No turns yet.</div>
       )}
       <div data-pad-top style={{ height: padTop }} />
+      {/* HISTORY-SCROLL-FREEZE F1: the measured wrapper CONTAINS its row's margins (flow-root),
+          so its offsetHeight is the row's true stride. Without it a message row's 6 px margins
+          collapse out of the wrapper, every message row is measured 6 px short, and a row crossing
+          the mount boundary changes the real height the virtual model does not see. */}
       {win.items.slice(first, last).map((item) => (
-        <div key={item.id} data-hid={item.id}><HistoryRow item={item} /></div>
+        <div key={item.id} data-hid={item.id} style={{ display: 'flow-root' }}><HistoryRow item={item} /></div>
       ))}
       <div style={{ height: padBottom }} />
       {!following && (
@@ -307,6 +311,11 @@ export function HistoryView({ agentId }: HistoryViewProps) {
       data-history-view
       style={{
         flex: 1, minWidth: 0, minHeight: 0, overflowY: 'auto', overflowX: 'hidden',
+        // HISTORY-SCROLL-FREEZE F2: this list keeps its own place (the Load-older anchor, the
+        // stick-to-bottom). The browser's scroll anchoring would move scrollTop whenever rows
+        // above the view mount or unmount, and the layout effect below feeds scrollTop back into
+        // the virtual window: the two fought in a render loop React aborts, unmounting the app.
+        overflowAnchor: 'none',
         background: 'var(--cth-paper-200)', position: 'relative'
       }}
     >

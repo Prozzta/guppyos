@@ -112,6 +112,24 @@ async function bundleScenario(entry) {
       });
     }
   };
+  // HISTORY-SCROLL-FREEZE mutant census: HARNESS_SOURCE_OVERRIDES = {"<abs source path>": "<abs file
+  // with the mutated text>"} loads the mutated text IN PLACE of that source (its own directory stays
+  // the resolve root, so its relative imports still work). Unset, the bundle is unchanged.
+  const overrides = (() => { try { return JSON.parse(process.env.HARNESS_SOURCE_OVERRIDES || '{}'); } catch { return {}; } })();
+  const norm = (p) => require('node:path').resolve(p).toLowerCase();
+  const overrideMap = new Map(Object.entries(overrides).map(([from, to]) => [norm(from), to]));
+  const sourceOverrides = {
+    name: 'source-overrides',
+    setup(build) {
+      if (!overrideMap.size) return;
+      build.onLoad({ filter: /\.(t|j)sx?$/ }, async (args) => {
+        const to = overrideMap.get(norm(args.path));
+        if (!to) return undefined;
+        const ext = args.path.split('.').pop();
+        return { contents: await require('node:fs/promises').readFile(to, 'utf8'), loader: ext, resolveDir: require('node:path').dirname(args.path) };
+      });
+    }
+  };
   const out = await esbuild.build({
     entryPoints: [entry],
     bundle: true,
@@ -133,7 +151,7 @@ async function bundleScenario(entry) {
     jsx: 'automatic',
     // What electron-vite defines for the renderer, so a scenario can mount the REAL App (RR-164).
     define: { 'import.meta.env': '{"DEV":false,"PROD":true,"MODE":"production"}', __APP_VERSION__: '"0.0.0-harness"' },
-    plugins: [viteAssets, cssAsStyleTag],
+    plugins: [sourceOverrides, viteAssets, cssAsStyleTag],
     logLevel: 'silent'
   });
   return out.outputFiles[0].text;

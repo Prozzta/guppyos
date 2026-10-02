@@ -144,7 +144,8 @@ test('wiring: a HISTORY tab beside TERMINAL, restored after restart, rendering H
   assert.match(store, /export type SidebarTab = 'terminal' \| 'history'/);
   assert.match(store, /v === 'history'/);
   const panel = readSource('src/renderer/src/components/AgentDetailPanel.tsx');
-  assert.match(panel, /sidebarTab === 'history' && \(\s*<HistoryView agentId=\{agent\.id\} \/>/);
+  // HISTORY-SCROLL-FREEZE F3: the tab renders HistoryView inside its own error boundary.
+  assert.match(panel, /sidebarTab === 'history' && \([\s\S]{0,200}?<ErrorBoundary key=\{agent\.id\} where="History">\s*<HistoryView agentId=\{agent\.id\} \/>/);
   const preload = readSource('src/preload/index.ts');
   assert.match(preload, /historyPage: \(req: HistoryRequest\): Promise<HistoryPage> =>\s*ipcRenderer\.invoke\('hive:history', req\)/);
   const main = readSource('src/main/index.ts');

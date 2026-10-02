@@ -35,6 +35,7 @@ import {
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
+import { createRendererErrorGate, normalizeRendererError } from '../shared/rendererError';
 import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
@@ -5585,6 +5586,17 @@ ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
     try { if (boot) { bootSubmitRowDue(boot.requestId, 'THREW', undefined); hive.appendLog({ ...boot, outcome: 'THREW', reason: e instanceof Error ? e.message : String(e) }); } } catch { /* logging only */ }
     throw e;
   });
+});
+
+// HISTORY-SCROLL-FREEZE F3: what the renderer catches (a boundary, a window error, an unhandled
+// rejection) lands in log.jsonl as one renderer-error row: validated, cut, and flood-gated.
+const rendererErrorDue = createRendererErrorGate();
+ipcMain.on('renderer:error', (_evt, raw: unknown) => {
+  const report = normalizeRendererError(raw);
+  if (!report) return;
+  const gate = rendererErrorDue(report);
+  if (!gate.log) return;
+  try { hive.appendLog({ kind: 'renderer-error', ...report, ...(gate.dropped ? { droppedBefore: gate.dropped } : {}) }); } catch { /* best-effort */ }
 });
 
 // START-FIXES-163 (3), Jim N2: REFUSED/ABORTED retries are logged on change only.
