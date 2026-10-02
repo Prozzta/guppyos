@@ -4111,6 +4111,12 @@ export class HiveManager {
       // ~35 KB with the reflow cap); the alternate screen answers a resize with ~3 KB.
       // CODEX_TUI_KEYS selects the set (the Human's choice). Only this generated copy changes.
       config = setCodexTuiKeys(config, CODEX_TUI_KEYS);
+      // CODEX-MODEL-SWITCH-PROMPT P1 (1.1.78): once either usage window reaches 90 %, Codex 0.157.1
+      // opens a modal "Approaching rate limits" picker at a turn's end (tui chatwidget/rate_limits.rs),
+      // and it takes every key until answered. An agent cannot answer it (Dwight, 2026-10-01 20:27Z:
+      // held 9 h). This key is Codex's own "never show again"; it is written here because this
+      // file is regenerated each spawn, and it joins the seed's [notice] table.
+      config = setCodexRootTableKeys(config, 'notice', { hide_rate_limit_model_nudge: true });
       // Route A: UserPromptSubmit additionalContext must not be retained as a
       // client developer message after compaction. This is our generated home only.
       config = setCodexFeatureFlags(config, { retain_client_developer_messages: false });
