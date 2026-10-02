@@ -4891,7 +4891,8 @@ ipcMain.handle('skills:reveal', (_evt, path: unknown) => {
 // REFRESH-MODELS: ONE models file (userData/models.json) that every picker reads. It is filled ONLY
 // by Settings -> Agents & Models -> "Refresh models" (models:refresh). models:catalog is a file
 // read: nothing is looked up at startup or when a picker opens. Every lookup is async (no sync
-// child process on main); Claude uses the Models API only with a stored Anthropic BYOK key.
+// child process on main). Claude: Claude Code's own /model list (its initialize handshake); the
+// Models API with a stored Anthropic BYOK key only when Claude Code is not installed.
 const providerModels = new ProviderModelStore({
   path: join(app.getPath('userData'), 'models.json'),
   now: () => Date.now(),
@@ -4902,7 +4903,8 @@ ipcMain.handle('models:refresh', async () => {
   const cli = {
     platform: process.platform, env: process.env, exists: existsSync,
     exec: (file: string, args: string[], opts: Parameters<typeof execFile>[2], cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string) => void) =>
-      execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? '')))
+      execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))),
+    spawn: (file: string, args: string[], opts: Parameters<typeof spawn>[2]) => spawn(file, args, opts)
   };
   const fetchJson = async (url: string, headers: Record<string, string>, timeoutMs: number) => {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });

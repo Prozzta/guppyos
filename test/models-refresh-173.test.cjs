@@ -235,7 +235,7 @@ test('RENDERED: the Settings button - floor before, one refresh per click burst,
   assert.equal(r.calls.refreshModels, 1, 'a second click while busy does nothing');
   assert.deepEqual(r.after.rows, [
     ['antigravity', 'listed', '2 models · +1 new · −1 removed: Gemini 3.5 Flash (Medium)'],
-    ['claude', 'no list', 'no list command (no Anthropic API key stored; built-in list kept)'],
+    ['claude', 'failed', 'not signed in: open Claude Code and run /login · built-in list used'],
     ['opencode', 'not installed', 'opencode not found'],
     ['codex', 'failed', 'timeout · kept the last list (1)']
   ]);
