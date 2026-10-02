@@ -218,6 +218,24 @@ K.codexQuietWindow = (P = PROVIDER) => {
 };
 test('fix 3: the quiet window is Codex\'s only (750 ms)', () => K.codexQuietWindow());
 
+K.personSendNowNotDelayed = async (M = OWNER) => {
+  for (const cls of ['USER_RELEASED', 'BOOT_SEQUENCE']) {
+    const r = rig({ quietMs: 750 }, M);
+    assert.deepEqual(await r.submit('latch'), COMMITTED);
+    r.drain();
+    r.prompt = ''; r.transcript = 0; r.writes.length = 0;
+    const start = r.now;
+    for (let t = 50; t <= 1000; t += 50) r.at(t, () => { r.gen += 1; });   // a working Codex streams
+    let stagedAt = null;
+    const write = r.deps.write;
+    r.deps.write = (id, d) => { if (d === TEXT) stagedAt = r.now; return write(id, d); };
+    const out = await r.submit(`${cls}-1`, cls);
+    assert.deepEqual(out, COMMITTED, `${cls}: A PERSON'S SEND-NOW IS NOT HELD FOR QUIET (not refused)`);
+    assert.ok(stagedAt !== null && stagedAt - start < 100, `${cls}: A PERSON'S SEND-NOW IS NOT HELD FOR QUIET (staged at +${stagedAt - start} ms)`);
+  }
+};
+test('Jim S1: the quiet window is for automatic wakes only: a person\'s send-now (and a boot prompt) to a streaming Codex is neither delayed nor refused', () => K.personSendNowNotDelayed());
+
 // ─── Fix 1: the held wake is looked at again ────────────────────────────────────────────
 
 K.selfReleaseOnCleanScreen = async (M = OWNER) => {
@@ -270,6 +288,30 @@ K.ownTextOnPromptErased = async (M = OWNER) => {
   assert.deepEqual(await r.submit('w1'), COMMITTED, 'and the id is re-offered');
 };
 test('fix 1: our own text on the prompt row lets the verified erase run', () => K.ownTextOnPromptErased());
+
+K.noReleaseWithoutLatch = async (M = OWNER) => {
+  const { r } = await heldLikeDwight({}, M);
+  r.owner.postHandoff.delete('p1');                  // condition 1 not latched for this incarnation
+  const res = await r.recheck('w1');
+  assert.equal(res.kind, 'HELD', `NO RELEASE WITHOUT THE LATCH (got ${JSON.stringify(res)})`);
+  assert.match(res.why, /^startup:/);
+  assert.ok(r.owner.inhibition('p1'));
+};
+test('Jim T1: no release without condition 1 latched for this incarnation', () => K.noReleaseWithoutLatch());
+
+K.reholdKeepsClock = async (M = OWNER) => {
+  const { r } = await heldLikeDwight({}, M);
+  const at0 = r.owner.inhibition('p1').at;
+  r.now += 120_000;
+  r.prompt = TEXT;                                   // our text on the prompt row...
+  const write = r.deps.write;
+  r.deps.write = (id, d) => (d === '\x15' ? (r.writes.push(d), r.gen += 1, { ok: true }) : write(id, d));   // ...that the erase cannot clear
+  const res = await r.recheck('w1');
+  assert.equal(res.kind, 'HELD');
+  assert.equal(res.why, 'erase:ERASE_NOT_VERIFIED');
+  assert.equal(r.owner.inhibition('p1').at, at0, 'A RE-HOLD AFTER A FAILED ERASE KEEPS ITS CLOCK (the notice is not delayed)');
+};
+test('Jim T2: a re-hold after a failed erase keeps the original hold time', () => K.reholdKeepsClock());
 
 test('fix 1: anything else stays held - a person\'s text, an unknown screen, a changing screen, no reading', async () => {
   for (const [name, set, why] of [
@@ -467,6 +509,15 @@ const MUTANTS = [
   { name: 'fix 3: Codex gets no quiet window', file: 'src/shared/providerAutomation.ts', real: PROVIDER,
     edits: [["  return provider === 'codex' ? CODEX_STAGE_QUIET_MS : null;", '  return null;']],
     killer: 'codexQuietWindow', dies: /CODEX IS STAGED AFTER 750 MS OF QUIET/ },
+  { name: 'Jim S1: the quiet window holds every admission class', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["      const quietMs = cls === 'CAPACITY_GATED' ? deps.stageQuietMs?.(ptyId) ?? 0 : 0;", '      const quietMs = deps.stageQuietMs?.(ptyId) ?? 0;']],
+    killer: 'personSendNowNotDelayed', dies: /A PERSON'S SEND-NOW IS NOT HELD FOR QUIET/ },
+  { name: 'Jim T1 (H5): release without the latch', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['    if (this.postHandoff.get(ptyId) !== held.incarnation || (!past.open', '    if ((!past.open']],
+    killer: 'noReleaseWithoutLatch', dies: /NO RELEASE WITHOUT THE LATCH/ },
+  { name: 'Jim T2 (H11): a re-hold restarts its clock', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['        if (again) again.at = held.at;                 // still the same hold, for its notice\n', '']],
+    killer: 'reholdKeepsClock', dies: /A RE-HOLD AFTER A FAILED ERASE KEEPS ITS CLOCK/ },
   { name: 'fix 4: a COMMIT refusal logs no screen facts', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [["        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {})", '']],
     killer: 'commitRefusalLogsScreen', dies: /A COMMIT REFUSAL LOGS WHAT THE READING SAW/ },

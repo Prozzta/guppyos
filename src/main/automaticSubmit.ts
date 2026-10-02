@@ -1204,7 +1204,9 @@ export class AutomaticSubmitOwner {
       if (early && gateRefuses(cls, early)) return this.refuse(decision, early);
       // DWIGHT-HELD-INTERFERED fix 3: the reading is taken only once the PTY has been quiet (a
       // Codex Stop precedes the turn's last frames). Not quiet in time = nothing typed, asked again.
-      const quietMs = deps.stageQuietMs?.(ptyId) ?? 0;
+      // AUTOMATIC starts only (Jim S1): a person's "send now" to a working Codex is never quiet and
+      // must not be delayed or refused for it; a boot prompt has its own latched-composer gate.
+      const quietMs = cls === 'CAPACITY_GATED' ? deps.stageQuietMs?.(ptyId) ?? 0 : 0;
       if (quietMs > 0 && !(await this.outputQuiet(ptyId, quietMs))) return this.refuse(decision, 'SCREEN_NOT_READY', 'output-not-quiet');
       const g = await this.screenGate(req, ptyId, incarnation, 'STAGE');
       if (!g.ok) return this.refuse(decision, 'SCREEN_NOT_READY', g.reason);
