@@ -33,6 +33,11 @@ list comes from Claude Code itself.** Rollback: 1.1.79 (reinstall).
   Claude Code reports that it received it. If it did not, the app presses Enter once more, but only
   if its own text is still there and you have not typed since. If that does not work either, it
   stops and shows a notice saying what to do.
+- **Scrolling back in History could freeze the whole window.** The list measured each message a
+  few pixels short, so scrolling made it jump back and forth until the view gave up and went
+  blank (your agents kept running). The list now measures correctly and keeps its own place. If a
+  view does hit an error, it shows "Try again" (or reloads the window and says so) instead of going
+  blank, and the error is written to the log.
 
 ### Changed
 
