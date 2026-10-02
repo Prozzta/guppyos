@@ -9,8 +9,10 @@
  *   - cache read  x0.1;
  *   - cache write x1.25 (5-minute lifetime) or x2 (1-hour lifetime);
  *   - input and output x1 (output's own price is a cost question; usd stays the cost figure).
- * The sample carries no cache lifetime (Claude Code's OTel counts one cacheCreation), so a write
- * is weighed x1.25 unless the sample says how much of it was 1-hour (`cacheCreation1h`).
+ * The sample carries no cache lifetime (Claude Code's OTel counts one cacheCreation). god's ruling
+ * (2026-10-02): a write of UNKNOWN lifetime weighs x2, because this floor's Claude Code writes
+ * 1-hour cache and understating cost is the worse error; only a part the sample says was 5-minute
+ * (`cacheCreation5m`) weighs x1.25.
  * The raw figure is kept beside it (fleet.json `tokensRaw`, the card's tooltip), and every token
  * CAP still counts raw: this changes what is shown, not when a breaker trips.
  */
@@ -24,8 +26,9 @@ export interface TokenCounts {
   output: number;
   cacheRead: number;
   cacheCreation: number;
-  /** The part of cacheCreation written with the 1-hour lifetime, when known. */
-  cacheCreation1h?: number;
+  /** The part of cacheCreation known to be written with the 5-minute lifetime (x1.25); the rest
+   *  (1-hour, or unknown) weighs x2. */
+  cacheCreation5m?: number;
 }
 
 const n = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0);
@@ -39,14 +42,14 @@ export function rawTokens(s: TokenCounts | null | undefined): number {
 export function billedEquivalentTokens(s: TokenCounts | null | undefined): number {
   if (!s) return 0;
   const write = n(s.cacheCreation);
-  const w1h = Math.min(write, n(s.cacheCreation1h));
+  const w5m = Math.min(write, n(s.cacheCreation5m));
   return Math.round(n(s.input) + n(s.output) + CACHE_READ_WEIGHT * n(s.cacheRead)
-    + CACHE_WRITE_5M_WEIGHT * (write - w1h) + CACHE_WRITE_1H_WEIGHT * w1h);
+    + CACHE_WRITE_5M_WEIGHT * w5m + CACHE_WRITE_1H_WEIGHT * (write - w5m));
 }
 
 /** R3: the tooltip line that says what the shown figure is and what the raw one was. */
 export function tokenFigureTitle(s: TokenCounts | null | undefined): string {
   const raw = rawTokens(s);
-  return `${billedEquivalentTokens(s).toLocaleString()} billed-equivalent tokens (cache reads x${CACHE_READ_WEIGHT}, cache writes x${CACHE_WRITE_5M_WEIGHT}). `
+  return `${billedEquivalentTokens(s).toLocaleString()} billed-equivalent tokens (cache reads x${CACHE_READ_WEIGHT}, cache writes x${CACHE_WRITE_1H_WEIGHT}, x${CACHE_WRITE_5M_WEIGHT} when known to be 5-minute). `
     + `Raw: ${raw.toLocaleString()} (cache read ${n(s?.cacheRead).toLocaleString()}, cache write ${n(s?.cacheCreation).toLocaleString()}); the token caps count raw.`;
 }

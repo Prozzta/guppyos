@@ -251,16 +251,17 @@ test('R2: the fresh god\'s orientation reads the digest and the board status, an
 
 // ─── R3: billed-equivalent tokens ───────────────────────────────────────────
 
-test('R3: billed-equivalent = input + output + 0.1 x cache read + 1.25 x cache write (2 x for a known 1-hour write); raw kept', () => {
+test('R3: billed-equivalent = input + output + 0.1 x cache read + 2 x cache write (god: unknown lifetime = 1-hour), 1.25 x only a known 5-minute write; raw kept', () => {
   // The 1.1.77 fresh start measured in the diagnosis: 997,845 read, 58,000 write, ~8,000 out, 28 in.
   const start = { input: 28, output: 8_000, cacheRead: 997_845, cacheCreation: 58_000 };
   assert.equal(TW.rawTokens(start), 1_063_873);
-  assert.equal(TW.billedEquivalentTokens(start), 28 + 8_000 + 99_785 + 72_500);
-  assert.equal(TW.billedEquivalentTokens({ ...start, cacheCreation1h: 58_000 }), 28 + 8_000 + 99_785 + 116_000);
-  assert.equal(TW.billedEquivalentTokens({ ...start, cacheCreation1h: 10_000 }), 28 + 8_000 + 99_785 + 60_000 + 20_000);
+  assert.equal(TW.billedEquivalentTokens(start), 28 + 8_000 + 99_785 + 116_000, 'unknown lifetime weighs x2');
+  assert.equal(TW.billedEquivalentTokens({ ...start, cacheCreation5m: 58_000 }), 28 + 8_000 + 99_785 + 72_500);
+  assert.equal(TW.billedEquivalentTokens({ ...start, cacheCreation5m: 10_000 }), 28 + 8_000 + 99_785 + 12_500 + 96_000);
+  assert.equal(TW.billedEquivalentTokens({ ...start, cacheCreation5m: 999_999 }), 28 + 8_000 + 99_785 + 72_500, 'never more 5-minute than written');
   assert.equal(TW.billedEquivalentTokens(null), 0);
   assert.equal(TW.billedEquivalentTokens({ input: -5, output: NaN, cacheRead: 10, cacheCreation: 0 }), 1);
-  assert.match(TW.tokenFigureTitle(start), /^180,313 billed-equivalent tokens \(cache reads x0\.1, cache writes x1\.25\)\. Raw: 1,063,873 \(cache read 997,845, cache write 58,000\); the token caps count raw\.$/);
+  assert.match(TW.tokenFigureTitle(start), /^223,813 billed-equivalent tokens \(cache reads x0\.1, cache writes x2, x1\.25 when known to be 5-minute\)\. Raw: 1,063,873 \(cache read 997,845, cache write 58,000\); the token caps count raw\.$/);
 });
 
 test('R3 wiring: fleet.json tokens is billed-equivalent with tokensRaw beside it; the card shows it with the raw in its tooltip; caps stay raw', () => {
