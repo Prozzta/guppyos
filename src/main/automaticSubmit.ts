@@ -429,10 +429,57 @@ export interface ScreenGuardRecord {
   observedGeneration: number | null;
   currentGeneration: number | null;
   latched: boolean;
+  /** DWIGHT-HELD-INTERFERED fix 4: on a COMMIT refusal, what the reading saw (its cursor row and
+   *  footer, each row already bounded to CODEX_ROW_MAX), so "is our text still staged?" can be
+   *  answered from the log. */
+  screen?: GuardScreenFacts;
 }
+
+/** DWIGHT-HELD-INTERFERED fix 4: the part of a guard reading the log keeps. */
+export interface GuardScreenFacts { cursorRow: string; footer: string[] }
+
+function screenFacts(f: CodexScreenFacts): GuardScreenFacts {
+  return { cursorRow: f.cursorRow, footer: [...f.footer] };
+}
+
+/** DWIGHT-HELD-INTERFERED fix 4: one INTERFERED hold, with the last screen facts the owner saw
+ *  on that PTY (and how old they are). Diagnostics only. */
+export interface InterferedRecord {
+  requestId: string;
+  agentId: string;
+  ptyId: string;
+  admissionClass: AdmissionClass;
+  reason: InterferenceReason;
+  detail?: string;
+  /** The last guard reading's facts on this PTY, or null when none was taken (not Codex). */
+  screen: GuardScreenFacts | null;
+  screenAgeMs: number | null;
+  /** The last needle reading (our text on the prompt row, and how often on screen). */
+  needle: { onPromptRow: boolean; screenCount: number; ageMs: number } | null;
+}
+
+/**
+ * DWIGHT-HELD-INTERFERED fix 1: what a fresh look at a held automatic wake found.
+ *   RELEASED  the prompt row is the plain empty composer and our text is nowhere on screen, with
+ *             no human key since the hold: nothing of ours or a person's is on the prompt. The
+ *             hold ends as "let it retry" (not delivered, re-offered through every gate).
+ *   ERASED    our text WAS on the prompt row, so the verified erase ran (and was verified).
+ *   HELD      anything else; `why` says what.
+ *   NONE      no such hold (any more).
+ */
+export type HeldRecheck =
+  | { kind: 'NONE' }
+  | { kind: 'RELEASED'; screen: GuardScreenFacts }
+  | { kind: 'ERASED'; screen: GuardScreenFacts }
+  | { kind: 'HELD'; why: string; screen: GuardScreenFacts | null };
 
 /** WAKE-SCREEN-GUARD: the pause between post-echo readings after a stage write. */
 export const SCREEN_COMMIT_RETRY_MS = 250;
+/** DWIGHT-HELD-INTERFERED fix 3: the poll while waiting for quiet output before a STAGE reading,
+ *  and how long that wait may last; past it the request is refused (nothing typed) and asked
+ *  again by the next beat. */
+export const STAGE_QUIET_POLL_MS = 100;
+export const STAGE_QUIET_BUDGET_MS = 5_000;
 /** WSG LIVENESS (rc/1.1.76 ISO, Creed's echo-lag repro): a post-stage reading that is merely
  *  SLOW (no reading, the echo not painted yet, the screen still changing) is re-read until this
  *  long after the stage write. On a loaded machine the echo can land seconds late; 3 readings
@@ -538,6 +585,11 @@ export interface OwnerDeps {
   homeDir?: () => string | undefined;
   /** WAKE-SCREEN-GUARD: told of every screen-gate evaluation. Diagnostics only. */
   onScreenGuard?: (record: ScreenGuardRecord) => void;
+  /** DWIGHT-HELD-INTERFERED fix 3: how long this PTY's output must have been quiet before the
+   *  STAGE reading (see providerAutomation.automaticStageQuietMs). Absent / null / 0 = no wait. */
+  stageQuietMs?: (ptyId: string) => number | null | undefined;
+  /** DWIGHT-HELD-INTERFERED fix 4: told of every INTERFERED hold. Diagnostics only. */
+  onInterfered?: (record: InterferedRecord) => void;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -666,6 +718,10 @@ interface HeldInterference extends Inhibition {
   admissionClass: AdmissionClass;
   binding: Binding;
   decision: AdmissionDecision | null;
+  /** DWIGHT-HELD-INTERFERED fix 1: the staged text and the human generation at STAGE, so a later
+   *  look can find our text and know whether a person has touched the terminal since. */
+  text: string;
+  humanStage: number;
 }
 
 /** The irreducible TUI interval between a paste and its Enter. */
@@ -861,6 +917,9 @@ export class AutomaticSubmitOwner {
    *  process that phase never comes back). A new incarnation starts un-latched. Never a
    *  substitute for the fresh reading every request needs. */
   private readonly postHandoff = new Map<string, unknown>();
+  /** DWIGHT-HELD-INTERFERED fix 4: the last guard facts and needle reading seen on each PTY. */
+  private readonly lastScreen = new Map<string, { facts: GuardScreenFacts; at: number }>();
+  private readonly lastNeedle = new Map<string, { onPromptRow: boolean; screenCount: number; at: number }>();
 
   constructor(private readonly deps: OwnerDeps) {}
 
@@ -972,10 +1031,11 @@ export class AutomaticSubmitOwner {
   }
 
   /** A HUMAN says the held prompt is dealt with, AND SAYS HOW (`InterferenceResolution`).
-   *  The ONLY way an inhibition ends while its terminal lives — there is no timer, because
-   *  a timer is automation deciding that a human's text no longer matters. There is no
-   *  default resolution: an answer that is not one of the two is refused and the hold
-   *  stays. Writes nothing to any terminal, whichever answer it is. */
+   *  The only way a person's hold ends while its terminal lives — there is no timer, because
+   *  a timer is automation deciding that a human's text no longer matters. (An AUTOMATIC wake's
+   *  hold may also end by `recheckHeld`, on positive screen evidence only: DWIGHT-HELD-INTERFERED.)
+   *  There is no default resolution: an answer that is not one of the two is refused and the
+   *  hold stays. Writes nothing to any terminal, whichever answer it is. */
   resolveInterference(ptyId: string, how: InterferenceResolution): boolean {
     if (!INTERFERENCE_RESOLUTIONS.includes(how)) return false;
     if (!this.inhibition(ptyId)) return false; // also retires a hold whose terminal died
@@ -1142,6 +1202,10 @@ export class AutomaticSubmitOwner {
       // again in the STAGE section below, next to the write).
       const early = promptCondition(deps.promptBlock(ptyId));
       if (early && gateRefuses(cls, early)) return this.refuse(decision, early);
+      // DWIGHT-HELD-INTERFERED fix 3: the reading is taken only once the PTY has been quiet (a
+      // Codex Stop precedes the turn's last frames). Not quiet in time = nothing typed, asked again.
+      const quietMs = deps.stageQuietMs?.(ptyId) ?? 0;
+      if (quietMs > 0 && !(await this.outputQuiet(ptyId, quietMs))) return this.refuse(decision, 'SCREEN_NOT_READY', 'output-not-quiet');
       const g = await this.screenGate(req, ptyId, incarnation, 'STAGE');
       if (!g.ok) return this.refuse(decision, 'SCREEN_NOT_READY', g.reason);
       screenGen = g.gen;
@@ -1286,7 +1350,8 @@ export class AutomaticSubmitOwner {
         requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass, phase,
         ok: verdict.ok, reason: verdict.ok ? 'ok' : verdict.reason, incarnation,
         observedGeneration: r ? r.outputGeneration : null, currentGeneration: current ?? null,
-        latched: this.postHandoff.get(ptyId) === incarnation
+        latched: this.postHandoff.get(ptyId) === incarnation,
+        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {})
       });
     } catch { /* diagnostics never decide */ }
     return verdict;
@@ -1304,8 +1369,12 @@ export class AutomaticSubmitOwner {
       let p: Promise<GuardReading | null>;
       try { p = read(ptyId, expectedTail); } catch { finish(null); return; }
       p.then(
-        (v) => finish(v && v.facts && typeof v.outputGeneration === 'number'
-          && (v.promptTailMatches === undefined || typeof v.promptTailMatches === 'boolean') ? v : null),
+        (v) => {
+          const ok = v && v.facts && typeof v.outputGeneration === 'number'
+            && (v.promptTailMatches === undefined || typeof v.promptTailMatches === 'boolean') ? v : null;
+          if (ok && !done) { try { this.lastScreen.set(ptyId, { facts: screenFacts(ok.facts), at: this.deps.now() }); } catch { /* diagnostics */ } }
+          finish(ok);
+        },
         () => finish(null)
       );
     });
@@ -1329,13 +1398,119 @@ export class AutomaticSubmitOwner {
    *  is no INTERFERED that returns a grant. */
   private interfere(s: Staged, reason: InterferenceReason, detail: string | undefined): SubmitOutcome {
     if (s.decision) this.deps.capacity.holdGrant(s.decision);
+    const now = this.deps.now();
     this.inhibited.set(s.ptyId, {
-      requestId: s.req.requestId, reason, at: this.deps.now(), incarnation: s.incarnation,
+      requestId: s.req.requestId, reason, at: now, incarnation: s.incarnation,
       agentId: s.req.agentId, admissionClass: s.req.admissionClass,
       binding: this.known.get(s.req.requestId)?.binding ?? { agentId: s.req.agentId, admissionClass: s.req.admissionClass, payload: '' },
-      decision: s.decision
+      decision: s.decision, text: s.req.text, humanStage: s.humanStage
     });
+    try {
+      const sc = this.lastScreen.get(s.ptyId);
+      const nd = this.lastNeedle.get(s.ptyId);
+      this.deps.onInterfered?.({
+        requestId: s.req.requestId, agentId: s.req.agentId, ptyId: s.ptyId, admissionClass: s.req.admissionClass,
+        reason, ...(detail === undefined ? {} : { detail }),
+        screen: sc ? sc.facts : null, screenAgeMs: sc ? now - sc.at : null,
+        needle: nd ? { onPromptRow: nd.onPromptRow, screenCount: nd.screenCount, ageMs: now - nd.at } : null
+      });
+    } catch { /* diagnostics never decide */ }
     return detail === undefined ? { kind: 'INTERFERED', reason } : { kind: 'INTERFERED', reason, detail };
+  }
+
+  /** DWIGHT-HELD-INTERFERED fix 3: true once no PTY output has arrived for `quietMs` (counted
+   *  from now at the earliest), false if that has not happened within STAGE_QUIET_BUDGET_MS. */
+  private async outputQuiet(ptyId: string, quietMs: number): Promise<boolean> {
+    const deps = this.deps;
+    const start = deps.now();
+    let last = deps.outputGeneration?.(ptyId);
+    let quietSince = start;
+    for (;;) {
+      if (deps.now() - quietSince >= quietMs) return true;
+      if (deps.now() - start >= STAGE_QUIET_BUDGET_MS) return false;
+      await this.sleep(STAGE_QUIET_POLL_MS);
+      const gen = deps.outputGeneration?.(ptyId);
+      if (gen !== last) { last = gen; quietSince = deps.now(); }
+    }
+  }
+
+  /**
+   * DWIGHT-HELD-INTERFERED-2028 fix 1: take a FRESH look at a held INTERFERED automatic wake (main
+   * calls this about once a minute while the wake coordinator holds that claim). It runs in the
+   * PTY's own submit chain, so it never overlaps a submission. Sound by the same rules as every
+   * automatic write (ZT-175, WSG): nothing is typed unless our own text is POSITIVELY on the
+   * prompt row, and then only the verified erase; a release needs positive evidence that nothing
+   * of ours or a person's is on the prompt:
+   *   - an automatic (CAPACITY_GATED) hold on a screen-guarded (Codex) PTY, same incarnation;
+   *   - NO human key since our STAGE (a person who touched it rules it; nor can anyone have pressed
+   *     Enter on our text, so "not delivered" is a fact, not a guess);
+   *   - a guard reading AND a needle reading of the same output generation (none since);
+   *   - our text on the prompt row: the verified erase (abort) runs; ABORTED = ERASED;
+   *   - else our text on screen 0 times, condition 1 latched, the plain empty composer: RELEASED.
+   * Anything else stays HELD. Either release hands the grant back and frees the id, exactly as a
+   * person's SEND_AGAIN; the caller then resolves the coordinator's hold the same way.
+   */
+  recheckHeld(ptyId: string, requestId: string): Promise<HeldRecheck> {
+    const queued = this.chains.get(ptyId) ?? Promise.resolve();
+    const result = queued.then(() => this.recheckHeldNow(ptyId, requestId))
+      .catch((e): HeldRecheck => ({ kind: 'HELD', why: `owner error: ${String(e)}`, screen: null }));
+    const tail: Promise<void> = result.then(() => undefined);
+    this.chains.set(ptyId, tail);
+    void tail.then(() => { if (this.chains.get(ptyId) === tail) this.chains.delete(ptyId); });
+    return result;
+  }
+
+  private async recheckHeldNow(ptyId: string, requestId: string): Promise<HeldRecheck> {
+    const deps = this.deps;
+    const held = this.inhibition(ptyId) ? this.inhibited.get(ptyId) : undefined;   // retires a dead terminal's hold
+    if (!held || held.requestId !== requestId) return { kind: 'NONE' };
+    const stay = (why: string, screen: GuardScreenFacts | null = null): HeldRecheck => ({ kind: 'HELD', why, screen });
+    if (held.admissionClass !== 'CAPACITY_GATED') return stay('not-automatic');
+    if (this.guardMode(ptyId) !== 'ENFORCE') return stay('no-screen-guard');
+    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');
+    const needle = needleFor(held.text);
+    if (!needle) return stay('no-needle');
+    const g = await this.readGuard(ptyId);
+    const seen = await this.readScreen(ptyId, needle);
+    // The readings yielded: everything they are judged against is read again now.
+    if (!this.inhibition(ptyId) || this.inhibited.get(ptyId) !== held) return { kind: 'NONE' };
+    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');
+    if (!g || !seen || g.incarnation !== held.incarnation) return stay('no-reading');
+    const screen = screenFacts(g.facts);
+    if (deps.outputGeneration?.(ptyId) !== g.outputGeneration) return stay('screen-changed', screen);
+    if (seen.onPromptRow && seen.screenCount >= 1) {
+      // Our own text is on the prompt: the verified erase can run now (it needed to see it first).
+      this.inhibited.delete(ptyId);
+      const s: Staged = {
+        req: { requestId, agentId: held.agentId, admissionClass: held.admissionClass, text: held.text },
+        ptyId, incarnation: held.incarnation, decision: held.decision, humanStage: held.humanStage
+      };
+      const out = await this.abort(s, 'held-recheck:own-text-on-prompt', SCREEN_ABORT_VERIFY_BUDGET_MS);
+      if (out.kind === 'ABORTED') { this.releaseHeldId(held); return { kind: 'ERASED', screen }; }
+      if (out.kind === 'INTERFERED') {
+        const again = this.inhibited.get(ptyId);
+        if (again) again.at = held.at;                 // still the same hold, for its notice
+        return stay(`erase:${out.reason}`, screen);
+      }
+      this.releaseHeldId(held);                        // FAILED: the terminal went away
+      return { kind: 'NONE' };
+    }
+    if (seen.screenCount > 0) return stay('own-text-on-screen', screen);
+    const past = codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    if (this.postHandoff.get(ptyId) !== held.incarnation || (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting'))) {
+      return stay(`startup:${past.reason}`, screen);
+    }
+    const comp = classifyCodexComposer(g.facts);
+    if (comp.cls !== 'READY') return stay(`${comp.cls}:${comp.reason}`, screen);
+    this.inhibited.delete(ptyId);
+    if (held.decision) deps.capacity.cancelGrant(held.decision);
+    this.releaseHeldId(held);
+    return { kind: 'RELEASED', screen };
+  }
+
+  /** The held id is free again (not delivered): a re-admission of it is a new attempt. */
+  private releaseHeldId(held: HeldInterference): void {
+    if (this.known.get(held.requestId)?.binding === held.binding) this.known.delete(held.requestId);
   }
 
   /** Re-press Enter on a composer that is positively our untouched prior write. This is
@@ -1449,8 +1624,12 @@ export class AutomaticSubmitOwner {
       const finish = (v: ScreenReading | null) => { if (!done) { done = true; resolve(v); } };
       this.deps.setTimer(() => finish(null), SCREEN_ORACLE_TIMEOUT_MS);
       this.deps.readScreen(ptyId, needle, expectedTail).then(
-        (v) => finish(v && typeof v.onPromptRow === 'boolean' && typeof v.screenCount === 'number'
-          && (v.promptTailMatches === undefined || typeof v.promptTailMatches === 'boolean') ? v : null),
+        (v) => {
+          const ok = v && typeof v.onPromptRow === 'boolean' && typeof v.screenCount === 'number'
+            && (v.promptTailMatches === undefined || typeof v.promptTailMatches === 'boolean') ? v : null;
+          if (ok && !done) this.lastNeedle.set(ptyId, { onPromptRow: ok.onPromptRow, screenCount: ok.screenCount, at: this.deps.now() });
+          finish(ok);
+        },
         () => finish(null)
       );
     });
