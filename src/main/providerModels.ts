@@ -10,9 +10,13 @@
  * - codex: `codex debug models`, the raw catalog as JSON (codex 0.157.1). Only
  *   `visibility: "list"` models are offered; the output is ~600 KB.
  * - opencode: `opencode models`, one `provider/model` per line (documented; not installed here).
- * - claude: NO list command. The Anthropic Models API (GET /v1/models) is used ONLY when the user
- *   stored an Anthropic BYOK key. Subscription/OAuth credentials are never read. Otherwise the
- *   curated list, reported as "no list command".
+ * - claude (CLAUDE-MODEL-LIST-STALE, 1.1.80): Claude Code's OWN list, the one /model shows, from its
+ *   initialize handshake: `claude -p --input-format stream-json --output-format stream-json --verbose`,
+ *   one control_request {subtype: initialize} on stdin, `response.response.models` from the
+ *   control_response on stdout; then stdin is ended and the process tree killed, all inside a 10 s
+ *   time box (claude 2.1.287: ~1 s, 0 tokens, works on the OAuth login). The app never reads any
+ *   credentials; the reply's `account` is reduced to "signed in or not" and nothing of it is kept.
+ *   The Anthropic Models API (a stored BYOK key) is used ONLY when Claude Code is not installed.
  * - everyone else: not installed, or no known list command -> the floor.
  *
  * Every lookup is async: executables are resolved with `where` / `command -v` through execFile,
@@ -23,6 +27,8 @@
  */
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawn as nodeSpawn } from 'node:child_process';
 import { execP, resolveCliAsync, TREE_KILL_TIMEOUT_MS, type ExecErr, type ResolverDeps, type ResolverExec } from './commandResolver';
 
 import type { ModelEntry, ProviderStatus, ProviderModels, ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
@@ -112,6 +118,62 @@ export function parseAnthropicModels(body: unknown): ModelEntry[] | null {
   return out.length ? out : null;
 }
 
+/** "claude-opus-5-5" -> "Opus 5.5", "claude-haiku-4-5-20251001" -> "Haiku 4.5"; anything else as is. */
+export function claudeLabel(id: string): string {
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(id);
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}` : id;
+}
+
+/** The picker entries from the initialize reply's `models` (what /model shows). An alias (default,
+ *  opus, sonnet, ...) becomes its resolved full id, so a saved model, the pricing and the curated
+ *  `[1m]` variants all keep matching; "default" is the picker's own "CLI default" row, so it only
+ *  adds its resolved model. Duplicates keep the first. */
+export function claudeModelsFromInit(list: unknown): ModelEntry[] | null {
+  if (!Array.isArray(list)) return null;
+  const raw: ModelEntry[] = [];
+  for (const m of list as Array<{ value?: unknown; resolvedModel?: unknown; displayName?: unknown }>) {
+    if (!m || typeof m.value !== 'string') continue;
+    const id = typeof m.resolvedModel === 'string' && m.resolvedModel.trim() ? m.resolvedModel.trim() : m.value.trim();
+    const shown = typeof m.displayName === 'string' ? m.displayName.trim() : '';
+    // a signed-out or default row says "Opus" / "Default (recommended)": the version comes from the id
+    const label = m.value !== 'default' && /\d/.test(shown) ? shown : claudeLabel(id);
+    raw.push({ id, label });
+  }
+  const out = cleanModels(raw);
+  return out.length ? out : null;
+}
+
+/** Signed in or not, from the reply's `account`, and NOTHING else of it leaves this function: an
+ *  OAuth login carries its subscription, an API key its key source; a signed-out CLI says
+ *  tokenSource "none". null = cannot tell (an older CLI without `account`): not treated as an error. */
+function signedInFrom(account: unknown): boolean | null {
+  if (!account || typeof account !== 'object') return null;
+  const a = account as Record<string, unknown>;
+  const has = (k: string): boolean => typeof a[k] === 'string' && a[k] !== '';
+  if (has('subscriptionType') || has('email') || has('apiKeySource')) return true;
+  if (a.tokenSource === 'none') return false;
+  return has('tokenSource') ? true : null;
+}
+
+export const CLAUDE_REQUEST_ID = 'models-refresh-1';
+export interface ClaudeInit { models: ModelEntry[] | null; signedIn: boolean | null; error: string | null }
+
+/** The control_response to our initialize request in claude's stdout (one JSON object per line;
+ *  any other line is skipped). Null until it has arrived. Only models and "signed in" are returned. */
+export function parseClaudeInitialize(stdout: unknown, requestId = CLAUDE_REQUEST_ID): ClaudeInit | null {
+  if (typeof stdout !== 'string') return null;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trimStart().startsWith('{')) continue;
+    let j: { type?: unknown; response?: { subtype?: unknown; request_id?: unknown; error?: unknown; response?: { models?: unknown; account?: unknown } } };
+    try { j = JSON.parse(line); } catch { continue; }
+    if (!j || j.type !== 'control_response' || !j.response || j.response.request_id !== requestId) continue;
+    if (j.response.subtype !== 'success') return { models: null, signedIn: null, error: String(j.response.error ?? 'error').slice(0, 300) };
+    const r = j.response.response;
+    return { models: claudeModelsFromInit(r?.models), signedIn: signedInFrom(r?.account), error: null };
+  }
+  return null;
+}
+
 // ── The file ─────────────────────────────────────────────────────────────────────────────
 
 /** Re-validate a models file (shape AND every entry). Null when unusable. */
@@ -187,7 +249,8 @@ export function noListAdapter(d: CliDeps, bin: string): Adapter {
     : { status: 'not-installed', reason: `${bin} not found` });
 }
 
-/** Claude: the Anthropic Models API, ONLY with a stored BYOK key (never subscription credentials). */
+/** The Anthropic Models API, ONLY with a stored BYOK key (never subscription credentials). Claude's
+ *  adapter uses it only when Claude Code itself is not installed. */
 export function anthropicAdapter(getKey: () => string | undefined, fetchJson: (url: string, headers: Record<string, string>, timeoutMs: number) => Promise<{ status: number; body: unknown }>): Adapter {
   const source = 'Anthropic Models API (your API key)';
   return async () => {
@@ -201,6 +264,128 @@ export function anthropicAdapter(getKey: () => string | undefined, fetchJson: (u
     } catch (e) {
       return { status: 'failed', reason: /abort|timeout/i.test(String((e as Error)?.name ?? e)) ? 'timeout' : 'request failed', source };
     }
+  };
+}
+
+// ── Claude: the initialize handshake ─────────────────────────────────────────────────────
+
+export const CLAUDE_LIST_TIMEOUT_MS = 10_000;
+/** All four are needed: --input-format stream-json needs -p and --output-format stream-json, and
+ *  that needs --verbose (claude exits 1 without it). */
+export const CLAUDE_LIST_ARGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+const CLAUDE_MAX_STDOUT = 4 * 1024 * 1024;
+
+export const CLAUDE_REASONS = {
+  notFound: 'claude not found',
+  notSignedIn: 'not signed in: open Claude Code and run /login',
+  timeout: `timed out after ${CLAUDE_LIST_TIMEOUT_MS / 1000} s`,
+  verbose: 'Claude Code refused --verbose: update Claude Code',
+  tooOld: 'this Claude Code cannot list its models: update Claude Code',
+  noList: 'no model list in its reply'
+} as const;
+
+/** What a stdio child looks like to the runner (node's ChildProcess; a fake in the tests). */
+export interface ClaudeChild {
+  pid?: number;
+  stdin: { write: (s: string) => unknown; end: () => unknown; on: (e: 'error', cb: () => void) => unknown } | null;
+  stdout: { on: (e: 'data', cb: (d: Buffer | string) => void) => unknown } | null;
+  stderr: { on: (e: 'data', cb: (d: Buffer | string) => void) => unknown } | null;
+  on: (e: 'exit' | 'error', cb: (x: unknown) => void) => unknown;
+  kill: (sig?: NodeJS.Signals) => unknown;
+}
+export type ClaudeSpawn = (file: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true; windowsVerbatimArguments?: boolean; stdio: ['pipe', 'pipe', 'pipe'] }) => ClaudeChild;
+export type ClaudeDeps = CliDeps & { spawn?: ClaudeSpawn; tmpDir?: string };
+
+/** A failure in plain words, from claude's stderr (or a control_response error) and its exit. */
+export function claudeFailure(text: string, code?: unknown): string {
+  if (/requires --verbose/i.test(text)) return CLAUDE_REASONS.verbose;
+  if (/not (logged|signed) in|please (log|sign) ?in|\/login|unauthori[sz]ed|authenticat|invalid (api|x-api)[- ]key|\b401\b/i.test(text)) return CLAUDE_REASONS.notSignedIn;
+  if (/unknown option|unrecognized option|unknown subtype|not supported/i.test(text)) return CLAUDE_REASONS.tooOld;
+  return typeof code === 'number' ? `exit ${code}` : 'claude failed';
+}
+
+/**
+ * Run the handshake: write ONE initialize request, read lines until its control_response, then end
+ * stdin and kill the process TREE (win32: taskkill /T /F, as execP does; the .cmd shim's cmd.exe has
+ * claude.exe below it). The whole run is time-boxed; a timeout also kills the tree. cwd is the temp
+ * dir, so the run never lands in an agent's project. Never rejects.
+ */
+export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_TIMEOUT_MS): Promise<{ init: ClaudeInit } | { reason: string; notFound?: true }> {
+  return new Promise((resolve) => {
+    let file = exe; let args = CLAUDE_LIST_ARGS;
+    let verbatim = false;
+    if (d.platform === 'win32' && /\.(cmd|bat)$/i.test(exe)) {
+      if (/["%^&|<>!\r\n]/.test(exe)) { resolve({ reason: 'unsafe-path' }); return; }
+      file = d.env.ComSpec || 'cmd.exe'; args = ['/d', '/s', '/c', `""${exe}" ${CLAUDE_LIST_ARGS.join(' ')}"`]; verbatim = true;
+    }
+    let child: ClaudeChild;
+    let out = ''; let err = ''; let settled = false; let exited = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const killTree = (): void => {
+      if (exited) return;
+      try { child.stdin?.end(); } catch { /* gone */ }
+      const pid = typeof child.pid === 'number' ? child.pid : null;
+      if (d.platform === 'win32' && pid) {
+        try { d.exec('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: TREE_KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 }, () => {}); } catch { /* best effort */ }
+      } else {
+        try { child.kill('SIGKILL'); } catch { /* gone */ }
+      }
+    };
+    const done = (r: { init: ClaudeInit } | { reason: string; notFound?: true }): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      killTree();
+      resolve(r);
+    };
+    try {
+      child = (d.spawn ?? (nodeSpawn as unknown as ClaudeSpawn))(file, args, { cwd: d.tmpDir ?? tmpdir(), env: d.env, windowsHide: true, ...(verbatim ? { windowsVerbatimArguments: true } : {}), stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve((e as { code?: unknown })?.code === 'ENOENT' ? { reason: CLAUDE_REASONS.notFound, notFound: true } : { reason: 'could not start claude' });
+      return;
+    }
+    timer = setTimeout(() => done({ reason: CLAUDE_REASONS.timeout }), timeout);
+    child.on('error', (e) => done((e as { code?: unknown })?.code === 'ENOENT' ? { reason: CLAUDE_REASONS.notFound, notFound: true } : { reason: 'could not start claude' }));
+    child.stdout?.on('data', (b) => {
+      if (settled || out.length > CLAUDE_MAX_STDOUT) return;
+      out += String(b);
+      if (!out.includes('control_response')) return;
+      const init = parseClaudeInitialize(out.slice(0, out.lastIndexOf('\n') + 1));
+      if (init) done({ init });
+    });
+    child.stderr?.on('data', (b) => { if (err.length < 16 * 1024) err += String(b); });
+    child.on('exit', (code) => {
+      exited = true;
+      const init = parseClaudeInitialize(out);
+      done(init ? { init } : { reason: code === 0 && !err.trim() ? CLAUDE_REASONS.noList : claudeFailure(err, code) });
+    });
+    try {
+      child.stdin?.on('error', () => { /* claude exited before reading: its exit says why */ });
+      child.stdin?.write(`${JSON.stringify({ type: 'control_request', request_id: CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } })}\n`);
+    } catch { /* the exit or the time box reports it */ }
+  });
+}
+
+/**
+ * Claude: Claude Code's own list. The CLI is the source of truth; the Anthropic Models API (a stored
+ * BYOK key) is used ONLY when Claude Code is not installed, and the row says so.
+ */
+export function claudeAdapter(d: ClaudeDeps, getKey: () => string | undefined, fetchJson: Parameters<typeof anthropicAdapter>[1]): Adapter {
+  const source = 'claude initialize (the /model list)';
+  return async () => {
+    const exe = await resolveCliAsync(d, 'claude');
+    if (!exe) {
+      if (!getKey()) return { status: 'not-installed', reason: CLAUDE_REASONS.notFound };
+      const api = await anthropicAdapter(getKey, fetchJson)();
+      return api.status === 'ok'
+        ? { ...api, source: 'Anthropic Models API (your API key; Claude Code not found)' }
+        : { ...api, reason: `Claude Code not found; the API key listing failed: ${api.reason}` };
+    }
+    const r = await runClaudeInit(d, exe);
+    if ('reason' in r) return { status: r.notFound ? 'not-installed' : 'failed', reason: r.reason, source };
+    if (r.init.error !== null) return { status: 'failed', reason: claudeFailure(r.init.error), source };
+    if (r.init.signedIn === false) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };
+    return r.init.models ? { status: 'ok', models: r.init.models, source } : { status: 'failed', reason: CLAUDE_REASONS.noList, source };
   };
 }
 
@@ -279,9 +464,9 @@ export class ProviderModelStore {
 }
 
 /** Which providers the button queries, and how (the app's wiring). */
-export function defaultAdapters(d: CliDeps, getAnthropicKey: () => string | undefined, fetchJson: Parameters<typeof anthropicAdapter>[1]): Record<string, Adapter> {
+export function defaultAdapters(d: ClaudeDeps, getAnthropicKey: () => string | undefined, fetchJson: Parameters<typeof anthropicAdapter>[1]): Record<string, Adapter> {
   return {
-    claude: anthropicAdapter(getAnthropicKey, fetchJson),
+    claude: claudeAdapter(d, getAnthropicKey, fetchJson),
     codex: cliAdapter(d, 'codex', ['debug', 'models'], parseCodexModels, 4 * 1024 * 1024),
     antigravity: cliAdapter(d, 'agy', ['models'], parseAgyModels),
     opencode: cliAdapter(d, 'opencode', ['models'], parseOpencodeModels, 1024 * 1024),

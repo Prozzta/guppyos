@@ -407,7 +407,7 @@ export function loadModelCatalog(): Promise<void> {
 }
 
 /** A provider's picker list from the models file, or null (use the floor). Claude keeps the
- *  curated `[1m]` context variants of the listed models (the Models API does not list them). */
+ *  curated `[1m]` context variants of the listed models (Claude Code's /model list does not include them). */
 function catalogOptions(provider: AgentProvider): ModelOption[] | null {
   const list = catalogModels(modelCatalog, provider);
   if (!list) return null;

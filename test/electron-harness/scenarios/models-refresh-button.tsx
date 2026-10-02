@@ -10,7 +10,7 @@
  *   A. before: the picker shows the FLOOR (3.8 Flash, no retired 3.5), "Not refreshed yet", no lookup
  *      at mount (refreshModels never called by mounting);
  *   B. click: the button says "Refreshing…" and is disabled; a second click is ignored (one call);
- *   C. after: one row per provider (listed / no list / not installed / failed + kept list), the
+ *   C. after: one row per provider (listed / not installed / failed with the built-in list / failed + kept list), the
  *      picker shows the refreshed list (a new model appears), and "Last refreshed" is shown.
  */
 import { createRoot } from 'react-dom/client';
@@ -33,14 +33,14 @@ const FILE = {
     antigravity: { status: 'ok', source: 'agy models', fetchedAt: 1, models: [
       { id: 'Gemini 3.9 Flash (High)', label: 'Gemini 3.9 Flash · High' },
       { id: 'Gemini 3.8 Flash (High)', label: 'Gemini 3.8 Flash · High' }] },
-    claude: { status: 'unsupported', reason: 'no list command (no Anthropic API key stored; built-in list kept)' },
+    claude: { status: 'failed', source: 'claude initialize (the /model list)', reason: 'not signed in: open Claude Code and run /login' },
     opencode: { status: 'not-installed', reason: 'opencode not found' },
     codex: { status: 'failed', reason: 'timeout', models: [{ id: 'gpt-6-astra', label: 'GPT-6 Astra' }] }
   }
 };
 const ROWS = [
   { provider: 'antigravity', status: 'ok', count: 2, added: ['Gemini 3.9 Flash (High)'], removed: ['Gemini 3.5 Flash (Medium)'], ms: 1800 },
-  { provider: 'claude', status: 'unsupported', count: 0, added: [], removed: [], reason: 'no list command (no Anthropic API key stored; built-in list kept)', ms: 1 },
+  { provider: 'claude', status: 'failed', count: 0, added: [], removed: [], reason: 'not signed in: open Claude Code and run /login', ms: 900 },
   { provider: 'opencode', status: 'not-installed', count: 0, added: [], removed: [], reason: 'opencode not found', ms: 40 },
   { provider: 'codex', status: 'failed', count: 1, added: [], removed: [], reason: 'timeout', keptLast: true, ms: 20000 }
 ];
