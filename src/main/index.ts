@@ -3706,15 +3706,21 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // src/shared/modelPin.ts). Resolved BEFORE ensureAgent, so the registry records it and a Codex
   // agent's config.toml names it (G1). Claude with no request falls back to its app default, as
   // the Claude block below always did.
-  let spawnModel: { requested?: string; launch?: string } | undefined;
+  // AGENT-MODEL-NOT-KEPT M2 (Codex): the effort travels the same way, as `-c
+  // model_reasoning_effort=<e>`; the seed's effort is the no-switch default.
+  let spawnModel: { requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string; defaultEffort?: string } | undefined;
   if (opts.hive && hive.enabled() && (provider === 'claude' || provider === 'codex' || provider === 'antigravity')) {
     try {
       const r = resolveSpawnArgs(hive.registry().agents[opts.hive.id], opts.args ?? [], {
         flag: providerPreset(provider).modelFlag ?? '--model',
-        fallback: provider === 'claude' ? modelForHiveSpawn(opts.hive, readConfig()) : undefined
+        fallback: provider === 'claude' ? modelForHiveSpawn(opts.hive, readConfig()) : undefined,
+        ...(provider === 'codex' ? { effort: 'codex' as const } : {})
       });
       opts.args = r.args;
-      spawnModel = { requested: r.requested, launch: r.launch };
+      spawnModel = {
+        requested: r.requested, launch: r.launch,
+        ...(provider === 'codex' ? { requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: hive.codexSeedEffort() } : {})
+      };
     } catch (e) { console.warn('[model-pin] spawn model resolution failed:', e); }
   }
   if (opts.hive && hive.enabled()) {
@@ -4626,6 +4632,10 @@ ipcMain.handle('roster:write', (_evt, snap: unknown) => roster.write(snap));
 
 // ─── IPC: hive (multi-agent coordination) ───────────────────────────────────
 ipcMain.handle('hive:registry', () => hive.registry());
+// AGENT-MODEL-NOT-KEPT M3: a person's click on "keep this model" for an agent's AUTO pin: it becomes
+// theirs ('user') and is kept after a restart. Main refuses anything that is not an auto pin.
+ipcMain.handle('hive:keepModelPin', (_evt, agentId: unknown) =>
+  typeof agentId === 'string' && agentId ? hive.keepModelPin(agentId) : false);
 // ZERO-TOKEN-LIVENESS: the current records (read-only), and the ONE operator action that can lead to
 // a turn: a person's click on "re-offer mail" for an agent the WWR gave up on. It ends the stuck epoch;
 // the normal reconcile beat then re-offers through every guard and the submit owner.

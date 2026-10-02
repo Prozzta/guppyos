@@ -515,7 +515,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
       } else {
         resetTerminal(a.ptyId);
       }
-      const command = buildSpawnCommand(cfg, model, provider);
+      const command = buildSpawnCommand(cfg, model, provider, provider === 'codex' ? a.effort : undefined);
       const [exe, ...args] = tokenizeCommand(command.trim());
       const hive = {
         id: a.id,

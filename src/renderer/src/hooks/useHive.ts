@@ -1213,7 +1213,7 @@ export function useHive(config: HarnessConfig | null): void {
         const provider = inferAgentProvider(a.command, a.provider);
         // Prefer the agent's exact recorded command (same model/flags); fall back to
         // a rebuilt one only if it predates the persisted `command` field.
-        const command = (a.command ?? '').trim() || buildSpawnCommand(cfg, a.model, provider);
+        const command = (a.command ?? '').trim() || buildSpawnCommand(cfg, a.model, provider, a.effort);
         const [exe, ...args] = tokenizeCommand(command);
         const hive = a.isGod
           ? { id: a.id, name: a.name, cwd, provider, isGod: true, role: roleForHiveSpawn(a) }

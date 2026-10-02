@@ -11,6 +11,7 @@ import {
   type HarnessConfig,
   AGENT_PROVIDER_PRESETS,
   buildSpawnCommand,
+  CODEX_EFFORTS,
   modelsForProvider,
   unknownModelSuffix,
   useModelCatalogVersion,
@@ -43,6 +44,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
     inferAgentProvider(agent.command, agent.provider)
   );
   const [model, setModel] = useState<string | undefined>(agent.model);
+  const [effort, setEffort] = useState<string | undefined>(agent.effort);
   const [description, setDescription] = useState(agent.description);
   const [goal, setGoal] = useState(agent.goal ?? '');
 
@@ -57,6 +59,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
     setAccent(agent.accent);
     setProvider(inferAgentProvider(agent.command, agent.provider));
     setModel(agent.model);
+    setEffort(agent.effort);
     setDescription(agent.description);
     setGoal(agent.goal ?? '');
   }, [agent.id]);
@@ -78,7 +81,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
     const trimmedDescription = description.trim() || 'a fresh harness';
     const trimmedGoal = goal.trim();
     const command = config
-      ? buildSpawnCommand(config, model, provider)
+      ? buildSpawnCommand(config, model, provider, provider === 'codex' ? effort : undefined)
       : agent.command;
 
     updateAgent(agent.id, {
@@ -87,6 +90,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
       accent,
       provider,
       model,
+      effort: provider === 'codex' ? effort : undefined,
       command,
       description: trimmedDescription,
       goal: trimmedGoal || undefined
@@ -246,6 +250,37 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                           }}
                         >
                           {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </Row>
+              )}
+
+              {/* AGENT-MODEL-NOT-KEPT M3: Codex's reasoning effort, picked with the model. */}
+              {provider === 'codex' && (
+                <Row label="Effort">
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {[undefined, ...CODEX_EFFORTS].map((e) => {
+                      const active = (effort ?? '') === (e ?? '');
+                      return (
+                        <button
+                          key={e ?? 'default'}
+                          type="button"
+                          data-testid={`edit-agent-effort-${e ?? 'default'}`}
+                          onClick={() => setEffort(e)}
+                          title={e ? `Reasoning effort ${e}` : 'Codex default effort'}
+                          style={{
+                            padding: '3px 8px 1px',
+                            background: active ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                            boxShadow: active
+                              ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                              : 'inset 0 0 0 1px var(--cth-ink-100)',
+                            fontFamily: 'var(--cth-font-ui)', fontSize: 12,
+                            color: 'var(--cth-ink-900)', cursor: 'pointer', border: 'none'
+                          }}
+                        >
+                          {e ?? 'default'}
                         </button>
                       );
                     })}

@@ -828,7 +828,7 @@ export class HookServer {
       // subagent's rollout runs the subagent's model. A line older than this process's launch
       // is a previous process's turn and is ignored inside observeLiveModel.
       if (read.turnModel && sessionId && !fromSubagent) {
-        this.hive.observeLiveModel(agentId, 'codex', read.turnModel.model, { observedAt: read.turnModel.observedAt ?? undefined });
+        this.hive.observeLiveModel(agentId, 'codex', read.turnModel.model, { observedAt: read.turnModel.observedAt ?? undefined, effort: read.turnModel.effort });
       }
       if (!this.onCapacity) return;
       const obs = read.capacity;

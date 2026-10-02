@@ -152,7 +152,7 @@ const codexHook = (id, sid, extra = {}) => ({ hook_event_name: 'PostToolUse', ag
 
 test('latestTurnContextModel: the newest turn_context model with its own time', () => {
   const tail = [turnContext(TERRA, 1000), '{"type":"event_msg","payload":{}}', turnContext(SOL, 2000), 'garbage'].join('\n');
-  assert.deepEqual(latestTurnContextModel(tail), { model: SOL, observedAt: 2000 });
+  assert.deepEqual(latestTurnContextModel(tail), { model: SOL, observedAt: 2000, effort: 'medium' }); // 1.1.79 M2: + effort
   assert.equal(latestTurnContextModel('{"type":"event_msg"}'), null);
 });
 
@@ -398,7 +398,7 @@ test('USER/AUTO: a keystroke only BEFORE the previous observation does not make 
   server.handle(codexHook('dw-1', SID));
   assert.equal(entry(s.hive, 'dw-1').modelPinSource, 'auto');
   assert.deepEqual(s.rows.find((x) => x.kind === 'model-pinned'),
-    { kind: 'model-pinned', agentId: 'dw-1', provider: 'codex', source: 'auto', from: TERRA, to: SOL, requested: TERRA, evidence: 'rollout-turn_context' });
+    { kind: 'model-pinned', agentId: 'dw-1', provider: 'codex', source: 'auto', from: TERRA, to: SOL, requested: TERRA, evidence: 'rollout-turn_context', effort: 'medium', fromEffort: 'medium' }); // 1.1.79 M2: + effort columns
 });
 
 test('USER/AUTO: a user pin logs source user, is carried on respawn, and a clear logs too', async (t) => {
@@ -475,7 +475,7 @@ test('G3 panel text: pinned (user) vs auto vs none', () => {
   assert.equal(user.tooltip, `Runs ${SOL}. Pinned: switched by you in the terminal over the picked ${TERRA}; kept after a restart. Change the model picker to override.`);
   const auto = P.modelPinLabel({ model: 'claude-sonnet-5', modelPinSource: 'auto', liveModel: 'claude-sonnet-5' }, 'claude-opus-5-5');
   assert.equal(auto.marker, 'auto');
-  assert.equal(auto.tooltip, 'Runs claude-sonnet-5. Auto: the CLI switched model on its own (e.g. a usage-limit fallback) over the picked claude-opus-5-5; not kept after a restart.');
+  assert.equal(auto.tooltip, 'Runs claude-sonnet-5. Auto: the CLI switched model on its own (e.g. a usage-limit fallback) over the picked claude-opus-5-5; not kept after a restart. If it was you, press keep.'); // 1.1.79 M3
   const none = P.modelPinLabel({ launchModel: TERRA }, TERRA);
   assert.equal(none.marker, '');
   assert.equal(none.tooltip, `Runs ${TERRA}.`);

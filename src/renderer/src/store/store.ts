@@ -85,6 +85,9 @@ export interface Agent {
   /** the model this agent runs on (e.g. 'claude-sonnet-4-6[1m]' or 'gemini-3-pro');
    *  drives the model selector + the --model arg used when (re)spawning the agent */
   model?: string;
+  /** AGENT-MODEL-NOT-KEPT M3: the reasoning effort picked for this agent (Codex), carried on its
+   *  spawn command as `-c model_reasoning_effort=<e>`. Absent = the CLI's default. */
+  effort?: string;
   /** the last prompt the user submitted to this agent in Claude Code —
    *  shown on the floor as a card above the seated avatar */
   lastPrompt?: string;

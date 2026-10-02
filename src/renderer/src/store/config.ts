@@ -491,10 +491,15 @@ export function decodeProviderModel(value: string): {
  *  autoMode, and an optional per-agent model override. Claude keeps the user's
  *  configured `defaultCommand`; other providers use their preset binary so the
  *  app works without Claude installed. */
+/** AGENT-MODEL-NOT-KEPT M3: the reasoning efforts the Codex picker offers (Codex's own words;
+ *  a model that does not support one answers with its nearest). Empty = Codex's default. */
+export const CODEX_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
+
 export function buildSpawnCommand(
   config: Pick<HarnessConfig, 'defaultCommand' | 'autoMode'>,
   model?: string,
-  provider: AgentProvider = inferAgentProvider(config.defaultCommand)
+  provider: AgentProvider = inferAgentProvider(config.defaultCommand),
+  effort?: string
 ): string {
   const preset = providerPreset(provider);
   // Claude keeps the user's configured defaultCommand; custom falls back to it
@@ -513,6 +518,10 @@ export function buildSpawnCommand(
     const m = /\s/.test(model) ? `"${model}"` : model;
     cmd = `${cmd} ${preset.modelFlag} ${m}`;
   }
+  // AGENT-MODEL-NOT-KEPT M3: a picked Codex effort is the request main reads back off the argv
+  // (requestedEffort), as `--model` is for the model. Only a plain effort word is ever written.
+  const e = (effort ?? '').trim().toLowerCase();
+  if (provider === 'codex' && /^[a-z0-9_-]{1,32}$/.test(e)) cmd = `${cmd} -c model_reasoning_effort=${e}`;
   // Auto (skip-permissions) mode appends each provider's own flag — Claude's
   // bypassPermissions, Codex's dangerous bypass, Grok's always-approve, Kimi's
   // auto, or agy's skip flag.
