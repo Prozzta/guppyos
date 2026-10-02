@@ -11,6 +11,50 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/hornham-wegg/releases).
 
+## [1.1.78] — 2026-10-02
+
+**A reliability release: messages to a Codex agent no longer get stuck where nobody sees them,
+agent cards say "working" when the agent is working, and the board stops raising false alarms
+at startup.** Nobody starts fresh. Rollback: 1.1.77 (reinstall).
+
+### Fixed
+
+- **A Codex agent could stop receiving messages after its terminal was resized.** The app types
+  into a Codex terminal only once it has confirmed Codex is past its startup screens, and a resize
+  could erase the evidence it was waiting for. It now checks the screen right after start-up and
+  also accepts the agent's own end of turn, so the hold no longer happens.
+- **A message you type is no longer stuck behind an automatic one** (such as an automatic
+  `/compact`) that the screen check is holding back.
+- **The "isn't getting messages" notice goes away by itself** as soon as messages flow again, and
+  you can dismiss it. It is now in plain words, with the technical reason on a details line.
+- **An interrupted automatic message no longer waits for ever.** If the app's message to an agent
+  was interrupted (for example by the agent finishing its turn at the same moment), the app now
+  looks at the terminal again about once a minute: if the chat box is clean it retries by itself,
+  and if its own text is still in the chat box it erases it first. It never types over anything a
+  person wrote. After 5 minutes it tells you in plain words what to do, and god gets it as a
+  decision.
+- **Codex messages wait for the end of the turn to finish drawing** (about three quarters of a
+  second of quiet) before typing, which removes the cause of those interruptions. Messages you
+  send yourself are not delayed.
+- **Codex no longer stops an agent to ask about switching models.** At 90 % of a usage limit Codex
+  opened an "Approaching rate limits" question that an agent cannot answer, and messages piled up
+  behind it (Dwight: about 9 hours). The app now turns that question off in each Codex agent's own
+  settings copy (from its next start); your `~/.codex/config.toml` is not touched.
+- **Agent cards, the side list and the message box say "working" while the agent is working.**
+  They used to show "idle" between tool steps. The card also shows the tool that has been running
+  longest.
+- **No more false "assignee down" flags at every start.** Workers are briefly archived and restored
+  when the app starts; the board now waits 5 minutes before flagging that, and still flags an
+  agent that does not come back. A flag is also no longer raised twice at start-up.
+
+### Good to know
+
+- **Nobody starts fresh.** No instructions changed. No session-clearing script.
+- New log rows: `interference-self-released`, `held-interfered-alert`, `held-interfered-recheck` and
+  `wake-interfered`; screen-check refusals now record what the screen showed.
+- **Rollback to 1.1.77:** no mail is lost. Held automatic messages then wait for a person again,
+  cards go back to showing idle between tool steps, and Codex's rate-limit question can come back.
+
 ## [1.1.77] — 2026-10-01
 
 **A floor-overview release: god gets a written board summary, every agent row shows whether the
