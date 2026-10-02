@@ -92,9 +92,11 @@ test('(a) static: the stub writes (no half-close), reads, destroys on end, caps 
   assert.match(emit, /setTimeout\(finish, 5000\)/);
   assert.match(emit, /c\.destroy\(\)/);
   const shim = readSource(path.join(__dirname, '..', 'src', 'main', 'hive.ts'));
-  assert.match(shim, /const c = net\.createConnection\(sock, \(\) => c\.write\(JSON\.stringify\(payload\) \+ '\\\\n'\)\);/);
+  // MAIL-PIPE-SHIM-CLOCK: HOOK_SHIM stamps its own running time at send, and its 5 s give-up drains
+  // a complete reply already in the pipe before it exits.
+  assert.match(shim, /const c = net\.createConnection\(sock, \(\) => \{ payload\.shim_elapsed_ms = Date\.now\(\) - t0; c\.write\(JSON\.stringify\(payload\) \+ '\\\\n'\); \}\);/);
   assert.match(shim, /c\.on\('end', \(\) => done\(0\)\);/);
-  assert.match(shim, /setTimeout\(\(\) => process\.exit\(0\), 5000\)\.unref\(\);/);
+  assert.match(shim, /setTimeout\(\(\) => giveUp\(2\), 5000\)\.unref\(\);/);
 });
 
 test('(a) lateHookRows: every mail-hook-late row is listed; the ones for a stub agent (or after allStubsSince) are flagged', () => {

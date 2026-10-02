@@ -5065,12 +5065,20 @@ process.stdin.on('end', () => {
   if (!sock) { process.exit(0); }
   let resp = '';
   const done = (code) => { if (resp) process.stdout.write(resp); process.exit(code); };
-  const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+  // MAIL-PIPE-SHIM-CLOCK (1): how long this shim had been running when it sent its request (its
+  // 5 s give-up timer starts here), so the server's on-time measure includes the time before
+  // its own read of the request (a descheduled shim, a busy server).
+  const t0 = Date.now();
+  const c = net.createConnection(sock, () => { payload.shim_elapsed_ms = Date.now() - t0; c.write(JSON.stringify(payload) + '\\n'); });
   c.setEncoding('utf8');
   c.on('data', (d) => { resp += d; });
   c.on('end', () => done(0));
   c.on('error', () => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref();
+  // MAIL-PIPE-SHIM-CLOCK (a): at the give-up, first take what is already in the pipe (two loop
+  // turns: the poll phase delivers it) and print it when it is a complete reply; else exit empty.
+  const complete = () => { try { JSON.parse(resp); return resp.length > 0; } catch (_) { return false; } };
+  const giveUp = (turns) => setImmediate(() => { if (complete()) done(0); else if (turns > 0) giveUp(turns - 1); else process.exit(0); });
+  setTimeout(() => giveUp(2), 5000).unref();
 });
 `;
 
@@ -5137,12 +5145,20 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    // MAIL-PIPE-SHIM-CLOCK (1): how long this shim had been running when it sent its request (its
+    // 5 s give-up timer starts here), so the server's on-time measure includes the time before
+    // its own read of the request (a descheduled shim, a busy server).
+    const t0 = Date.now();
+    const c = net.createConnection(sock, () => { payload.shim_elapsed_ms = Date.now() - t0; c.write(JSON.stringify(payload) + '\\n'); });
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);
     c.on('error', () => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    // MAIL-PIPE-SHIM-CLOCK (a): at the give-up, first take what is already in the pipe (two loop
+    // turns: the poll phase delivers it) and print it when it is a complete reply; else exit empty.
+    const complete = () => { try { JSON.parse(resp); return resp.length > 0; } catch (_) { return false; } };
+    const giveUp = (turns) => setImmediate(() => { if (complete()) done(); else if (turns > 0) giveUp(turns - 1); else process.exit(0); });
+    setTimeout(() => giveUp(2), 5000).unref();
   } catch (_) { process.exit(0); }
 });
 `;
@@ -5451,7 +5467,7 @@ server.listen(0, '127.0.0.1', function () {
 // Official Gemini CLI bridge. Gemini already sends snake_case payload fields;
 // normalize its event names, then translate HookServer decisions back into
 // Gemini's documented hook output contract.
-const GEMINI_HOOK_SHIM = `#!/usr/bin/env node
+export const GEMINI_HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
 const agentId = process.env.AGENT_ID || null;
@@ -5492,12 +5508,20 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    // MAIL-PIPE-SHIM-CLOCK (1): how long this shim had been running when it sent its request (its
+    // 5 s give-up timer starts here), so the server's on-time measure includes the time before
+    // its own read of the request (a descheduled shim, a busy server).
+    const t0 = Date.now();
+    const c = net.createConnection(sock, () => { payload.shim_elapsed_ms = Date.now() - t0; c.write(JSON.stringify(payload) + '\\n'); });
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);
     c.on('error', () => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    // MAIL-PIPE-SHIM-CLOCK (a): at the give-up, first take what is already in the pipe (two loop
+    // turns: the poll phase delivers it) and print it when it is a complete reply; else exit empty.
+    const complete = () => { try { JSON.parse(resp); return resp.length > 0; } catch (_) { return false; } };
+    const giveUp = (turns) => setImmediate(() => { if (complete()) done(); else if (turns > 0) giveUp(turns - 1); else process.exit(0); });
+    setTimeout(() => giveUp(2), 5000).unref();
   } catch (_) { process.exit(0); }
 });
 `;
@@ -5508,7 +5532,7 @@ process.stdin.on('end', () => {
 // HookServer and translate its Claude-style permission denial into Grok's direct
 // decision form. Scoped by AGENT_ID so the trusted global hook is inert outside
 // Munder-spawned workers.
-const GROK_HOOK_SHIM = `#!/usr/bin/env node
+export const GROK_HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
 const agentId = process.env.AGENT_ID || null;
@@ -5566,12 +5590,20 @@ process.stdin.on('end', () => {
     process.exit(0);
   };
   try {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify(payload) + '\\n'));
+    // MAIL-PIPE-SHIM-CLOCK (1): how long this shim had been running when it sent its request (its
+    // 5 s give-up timer starts here), so the server's on-time measure includes the time before
+    // its own read of the request (a descheduled shim, a busy server).
+    const t0 = Date.now();
+    const c = net.createConnection(sock, () => { payload.shim_elapsed_ms = Date.now() - t0; c.write(JSON.stringify(payload) + '\\n'); });
     c.setEncoding('utf8');
     c.on('data', (d) => { resp += d; });
     c.on('end', done);
     c.on('error', () => process.exit(0));
-    setTimeout(() => process.exit(0), 5000).unref();
+    // MAIL-PIPE-SHIM-CLOCK (a): at the give-up, first take what is already in the pipe (two loop
+    // turns: the poll phase delivers it) and print it when it is a complete reply; else exit empty.
+    const complete = () => { try { JSON.parse(resp); return resp.length > 0; } catch (_) { return false; } };
+    const giveUp = (turns) => setImmediate(() => { if (complete()) done(); else if (turns > 0) giveUp(turns - 1); else process.exit(0); });
+    setTimeout(() => giveUp(2), 5000).unref();
   } catch (_) { process.exit(0); }
 });
 `;

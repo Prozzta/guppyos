@@ -47,6 +47,12 @@ export const MAIL_PIPE_HOOK_TIMEOUT_MS = 5_000;
 export function mailLatencyLimitFor(timeoutMs: number): number {
   return timeoutMs - Math.min(5_000, timeoutMs * 0.5);
 }
+/** MAIL-PIPE-SHIM-CLOCK (1): a pipe shim's own running time at send, as the server adds it to its
+ *  arrival-to-flush measure. Not a finite non-negative number (an older shim): 0, the old measure.
+ *  Capped at the shim's own give-up: it cannot have run longer and still be sending. */
+export function shimElapsedMs(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.min(Math.round(v), MAIL_PIPE_HOOK_TIMEOUT_MS) : 0;
+}
 /** http / mcp: 30 s − 5 s = 25 s. */
 export const MAIL_HTTP_LATENCY_LIMIT_MS = mailLatencyLimitFor(MAIL_HTTP_HOOK_TIMEOUT_MS);
 /** The pipe: 5 s − 2.5 s = 2.5 s. */

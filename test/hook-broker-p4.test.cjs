@@ -68,6 +68,10 @@ test('translation parity: agyHookPayload == what AGY_HOOK_SHIM sends today', asy
     const mine = JSON.parse(JSON.stringify(agyHookPayload(ev, 'phyllis', AGY)));
     for (const k of Object.keys(fromShim)) if (fromShim[k] === undefined) delete fromShim[k];
     delete fromShim.fully_idle;   // Stop-only field, absent on these events
+    // MAIL-PIPE-SHIM-CLOCK: the shim's own clock is transport, not translation (the server strips it
+    // before handle(); the one-way broker frame has no 5 s give-up to measure).
+    assert.equal(typeof fromShim.shim_elapsed_ms, 'number', ev);
+    delete fromShim.shim_elapsed_ms;
     assert.deepEqual(mine, fromShim, ev);
   }
 });
