@@ -96,10 +96,27 @@ K.rendererDoesNotTypeItTwice = (hiveSrc = readSource('src/renderer/src/hooks/use
 };
 test('renderer: a Claude god is not typed at; any other god still is', () => K.rendererDoesNotTypeItTwice());
 
-test('the spawn result type carries orientationOnArgv in main and the preload', () => {
-  assert.match(readSource('src/main/index.ts'), /async function spawnAgentCore\([^)]*\): Promise<\{[^}]*seedPrompt\?: string; orientationOnArgv\?: boolean \}>/);
-  assert.match(readSource('src/preload/index.ts'), /spawnPty: \(opts: SpawnPtyOptions\): Promise<\{[^}]*seedPrompt\?: string; orientationOnArgv\?: boolean \}>/);
+test('the spawn result type carries orientationOnArgv and installer in main and the preload', () => {
+  assert.match(readSource('src/main/index.ts'), /async function spawnAgentCore\([^)]*\): Promise<\{[^}]*seedPrompt\?: string; orientationOnArgv\?: boolean; installer\?: boolean \}>/);
+  assert.match(readSource('src/preload/index.ts'), /spawnPty: \(opts: SpawnPtyOptions\): Promise<\{[^}]*seedPrompt\?: string; orientationOnArgv\?: boolean; installer\?: boolean \}>/);
 });
+
+// ─── the install path (god's 1.1.81 tidy): nothing is typed into an installer PTY ──────────
+
+K.installerResultIsMarked = (index = readSource('src/main/index.ts')) => {
+  const install = index.slice(index.indexOf("    if (binAction === 'install') {"), index.indexOf('  // Git isolation: when requested'));
+  assert.ok(install.includes('const res = await ptyManager.spawn('), 'found the installer branch');
+  assert.match(install, /\n      return \{ \.\.\.res, installer: true \};\n    \}\n  \}\n$/, 'MAIN MARKS THE INSTALLER RESULT');
+  assert.doesNotMatch(install, /\n      return res;\n/, 'and never returns it unmarked');
+};
+test('main: the missing-CLI installer\'s spawn result says installer:true', () => K.installerResultIsMarked());
+
+K.noBootTypingIntoInstaller = (hiveSrc = readSource('src/renderer/src/hooks/useHive.ts')) => {
+  const boot = hiveSrc.slice(hiveSrc.indexOf('const resumedGod = res.resumed === true;'), hiveSrc.indexOf('if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);'));
+  assert.ok(boot.includes('if (res.seedPrompt) await submitBootPrompt(GOD_ID, res.seedPrompt);'), 'the seed and the orientation share one guard');
+  assert.match(boot, /if \(!cancelled && !resumedGod && !res\.installer\) \{\n/, 'NOTHING IS TYPED INTO AN INSTALLER PTY');
+};
+test('renderer: on an installer result god\'s boot prompts (seed and orientation) are not typed', () => K.noBootTypingIntoInstaller());
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
@@ -131,7 +148,13 @@ const MUTANTS = [
     killer: 'mainDecidesOnThisSpawn', dies: /THE RENDERER IS TOLD/ },
   { name: 'renderer: types the orientation anyway (god oriented twice)', file: 'src/renderer/src/hooks/useHive.ts',
     edits: [['if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);', 'await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);']],
-    killer: 'rendererDoesNotTypeItTwice', dies: /THE RENDERER TYPES IT ONLY WHEN MAIN DID NOT PUT IT ON ARGV/ }
+    killer: 'rendererDoesNotTypeItTwice', dies: /THE RENDERER TYPES IT ONLY WHEN MAIN DID NOT PUT IT ON ARGV/ },
+  { name: 'main: the installer result is returned unmarked (as 1.1.80)', file: 'src/main/index.ts',
+    edits: [['      return { ...res, installer: true };\n', '      return res;\n']],
+    killer: 'installerResultIsMarked', dies: /MAIN MARKS THE INSTALLER RESULT/ },
+  { name: 'renderer: boot prompts typed into the installer PTY (as 1.1.80)', file: 'src/renderer/src/hooks/useHive.ts',
+    edits: [['if (!cancelled && !resumedGod && !res.installer) {', 'if (!cancelled && !resumedGod) {']],
+    killer: 'noBootTypingIntoInstaller', dies: /NOTHING IS TYPED INTO AN INSTALLER PTY/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

@@ -3612,7 +3612,7 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  it can ALSO be invoked by the god-triggered ephemeral-worker watcher (which has
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
-async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean }> {
+async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean; installer?: boolean }> {
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -3699,7 +3699,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         pendingInstallRelaunch.set(opts.id, { opts, owner, bin });
       }
       syncKeepAwake();
-      return res;
+      // The PTY is the INSTALLER, not the agent: the renderer must not type a boot prompt into it.
+      return { ...res, installer: true };
     }
   }
   // Git isolation: when requested and the cwd is a real repo, give this agent

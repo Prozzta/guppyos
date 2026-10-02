@@ -725,7 +725,7 @@ const api = {
   // ─── PTY ─────────────────────────────────────────────────────────────────
   /** `cwd` in the result is the TILDE-EXPANDED absolute path main actually spawned
    *  into — the renderer stores that, not the raw `~/…` the user typed. */
-  spawnPty: (opts: SpawnPtyOptions): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean }> =>
+  spawnPty: (opts: SpawnPtyOptions): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean; installer?: boolean }> =>
     ipcRenderer.invoke('pty:spawn', opts),
   /** `origin` is REQUIRED: every writer declares who is behind the bytes
    *  (`shared/inputOrigin.ts`). Main advances the PTY's human-input generation

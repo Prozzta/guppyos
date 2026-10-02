@@ -382,7 +382,9 @@ export function useHive(config: HarnessConfig | null): void {
       bootGraceUntil.current[GOD_ID] = Date.now() + BOOT_GRACE_MS;
       void (async () => {
         try {
-          if (!cancelled && !resumedGod) {
+          // An installer result: this PTY is the missing-CLI installer, not god. Nothing is typed
+          // into it; the relaunched Claude god is oriented on argv by main (1.1.81).
+          if (!cancelled && !resumedGod && !res.installer) {
             // A type-into-tui god (Crush) can't ride its hive protocol on argv, so the
             // main process hands it back as seedPrompt — type it FIRST (identity), then
             // the orientation kick. Serialized by main's submit owner so they can't jam. (ondev-b)
