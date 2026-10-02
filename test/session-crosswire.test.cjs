@@ -292,7 +292,8 @@ test('wiring: the beat marks its write as a sample; telemetry resolves owners fr
   // SESSION-PROMPT-ROTATION (1.1.76): the fallback's seed also refuses a stale-prompt session;
   // the foreign guard is unchanged and still passed.
   assert.match(src, /chooseResumeSession\(sid, previous, seedFresh, foreign\)/);
-  assert.match(src, /const seedFresh = \(s: string\): boolean => \{\s*if \(staleFor\(s\)\) \{ rotated\.push\(s\); return false; \}\s*return seedSessionTranscript\(cwd, s\);/);
+  // GOD-STARTUP-TOKENS R1 (1.1.79): the fallback also passes god's fresh-start rule (a no-op for any other agent).
+  assert.match(src, /const seedFresh = \(s: string\): boolean => \{\s*if \(staleFor\(s\)\) \{ rotated\.push\(s\); return false; \}\s*if \(godFresh\(s\)\) return false;[^\n]*\s*return seedSessionTranscript\(cwd, s\);/);
   assert.doesNotMatch(src, /chooseResumeSession\(sid, previous, \(s\) => seedSessionTranscript\(cwd, s\), foreign\)/);
   const hooks = read('src/main/hooks.ts');
   assert.match(hooks, /this\.hive\.recordSession\(agentId, p\.session_id\)/, 'the hook write keeps the default source, hook');
