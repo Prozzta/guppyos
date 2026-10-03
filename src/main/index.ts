@@ -1346,9 +1346,10 @@ const claimDelivery = createClaimDelivery({
       return claimsCountTokens;
     } catch { return null; }
   },
-  // W5 (Dwight): reconcileForTurn's text goes here (inside the 9,500 joint budget), and
-  // onTurnCompleted is told at each completed turn. Stubs until W5 is wired.
-  reconcileText: () => null,
+  // W5 (Dwight): reconcileForTurn's items go here, rendered once as the working set's T1 ⚠
+  // markers (inside the 9,500 joint budget); onTurnCompleted is told at each completed turn.
+  // Stubs until W5 is wired.
+  reconcileItems: () => [],
   onTurnCompleted: () => { /* W5 */ },
   log: (row) => hive.appendLog(row),
 });

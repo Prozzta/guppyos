@@ -178,13 +178,16 @@ test('Jim M-3: the working set fits its character cap (set + carry + mail reserv
   assert.match(w, /\+\d+ more/, 'the overflow is shown');
 });
 
-test('god (W5 slot): the reconcile text follows the working set inside the same cap; turnCompleted reaches the W5 hook', async () => {
+test('god (W5 slot, Creed S3 ruling): reconcile items render ONCE, as the T1 ⚠ markers, inside the cap; turnCompleted reaches the W5 hook', async () => {
   const told = [];
-  const x = setup({ deps: { reconcileText: (a) => `<reconcile for ${a}>\n${'r'.repeat(1500)}`, onTurnCompleted: (a) => told.push(a) } });
+  const item = (i) => ({ itemId: `r-${i}`, agent: 'a1', kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: `synthetic reconcile question ${i}`, turnsUnanswered: 0 });
+  const x = setup({ deps: { reconcileItems: () => [item(1), item(2), item(3), item(4)], onTurnCompleted: (a) => told.push(a) } });
   for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words`);
   const w = await x.delivery.workingSet('a1');
   assert.ok(w.length <= D.WORKING_SET_MAX_CHARS);
-  assert.ok(w.indexOf('<reconcile for a1>') > w.indexOf('# Memory working set'), 'after the working set');
+  for (const i of [1, 2, 3]) assert.equal(w.split(`synthetic reconcile question ${i}`).length - 1, 1, `item ${i} rendered exactly once`);
+  assert.ok(!w.includes('synthetic reconcile question 4'), 'at most 3 items (n <= 3)');
+  assert.match(w, /⚠ reconcile r-1: synthetic reconcile question 1/, 'as a T1 marker');
   x.delivery.turnCompleted('a1');
   assert.deepEqual(told, ['a1']);
 });

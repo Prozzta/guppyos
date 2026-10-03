@@ -14,7 +14,7 @@
 import { createHash } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { join, resolve } from 'node:path';
-import type { ClaimsState, KeyRegistry, LedgerLevel, LedgerRec, ReadResult, UsageRec, WorldInputs, WorldView } from '../../shared/claims';
+import type { ClaimsState, KeyRegistry, LedgerLevel, LedgerRec, ReadResult, ReconcileItem, UsageRec, WorldInputs, WorldView } from '../../shared/claims';
 import { COMPACT_CARRY_MAX } from '../compactHealth';
 import { MAIL_JOINED_BUDGET } from '../mailSurface';
 import { verifiedPrefix } from './indexSync';
@@ -86,11 +86,11 @@ export interface ClaimDeliveryDeps {
   /** The native-memory tokenizer (null: unavailable, then nothing is delivered). */
   countTokens: () => CountTokens | null;
   /**
-   * W5 (Dwight, reconcileForTurn): the reconcile text for this agent's turn, appended after the
-   * working set and counted inside WORKING_SET_MAX_CHARS (the 9,500 joint budget). None until W5
-   * is wired.
+   * THE RECONCILE SLOT (god's ruling, Creed W5 S3): W5's reconcile items for this agent's turn
+   * (ReconcileApi, n <= 3). They render ONCE, as the working set's T1 ⚠ markers (the 0.10 share),
+   * inside WORKING_SET_MAX_CHARS (the 9,500 joint budget). None until W5 is wired.
    */
-  reconcileText?: (agentId: string) => string | null;
+  reconcileItems?: (agentId: string) => ReconcileItem[];
   /** W5 (Dwight, onTurnCompleted): told at each completed turn (the Stop hook). No-op until wired. */
   onTurnCompleted?: (agentId: string) => void;
   git?: GitRunner;
@@ -149,12 +149,12 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       const snapshot = await snapshotFor(agentId, records, state, cwd);
       const usage = d.usage(agentId);
       const view = d.worldView(state, records, usage, worldInputs({ now: now().toISOString(), tasks: d.tasks(), cwd, snapshot, usage, fileExists: d.fileExists }));
-      const { buildWorkingSet } = createClaimViews(records, countTokens);
-      // THE RECONCILE SLOT (god, for W5): its text follows the working set, inside the same cap.
-      let reconcile = '';
-      try { const r = d.reconcileText?.(agentId); if (r) reconcile = `\n\n${r.slice(0, Math.floor(WORKING_SET_MAX_CHARS / 2))}`; } catch { reconcile = ''; }
+      // THE RECONCILE SLOT (god): W5's items are the T1 markers, the one channel they render in.
+      let items: ReconcileItem[] = [];
+      try { items = (d.reconcileItems?.(agentId) ?? []).slice(0, 3); } catch { items = []; }
+      const { buildWorkingSet } = createClaimViews(records, countTokens, items);
       const warning = readOnly ? `\n\n${READ_ONLY_WARNING}` : '';
-      const tail = reconcile + warning;
+      const tail = warning;
       // M-3: B8 shares at the plan's B, scaled down until the text fits the character cap.
       let budget = DEFAULT_WORKING_SET_BUDGET;
       let built = buildWorkingSet(state, view, budget);
