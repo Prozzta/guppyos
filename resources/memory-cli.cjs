@@ -13,7 +13,15 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
-const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] | wake-up [--wing W] | status} [--format json]\n';
+const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] | wake-up [--wing W] | status} [--format json]\n'
+  + '  claim ledger (when it is on for you):\n'
+  + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID]... [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
+  + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
+  + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n';
+/** CLAIM-LEDGER W1: the claim verbs; the app checks the agent's level. */
+const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile']);
+const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card' };
+const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
 
 /** Parse argv: global flags, the command, then its options and positional text. */
 function parseArgs(argv) {
@@ -45,11 +53,20 @@ function parseArgs(argv) {
     if (flag === '--results') { out.args.results = Number(val()); i += step(); continue; }
     if (flag === '--format') { out.format = val(); i += step(); continue; }
     if (flag === '--help') { out.help = true; i += 1; continue; }
+    if (flag && CLAIM_VERBS.has(out.cmd)) {
+      if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
+      if (CLAIM_VALUE_FLAGS[flag]) { out.args[CLAIM_VALUE_FLAGS[flag]] = val(); i += step(); continue; }
+      if (CLAIM_LIST_FLAGS[flag]) { const k = CLAIM_LIST_FLAGS[flag]; (out.args[k] = out.args[k] || []).push(val()); i += step(); continue; }
+    }
     if (flag) { out.rest.push(t); i += 1; continue; }
     positional.push(t);
     i += 1;
   }
   if (out.cmd === 'search') out.args.query = positional.join(' ');
+  else if (out.cmd === 'note') out.args.text = positional.join(' ');
+  else if (out.cmd === 'retract' || out.cmd === 'accept' || out.cmd === 'dismiss') out.args.ids = positional;
+  else if (out.cmd === 'used') { if (positional[0] !== undefined) out.args.id = positional[0]; out.rest.push(...positional.slice(1)); }
+  else if (out.cmd === 'reconcile') { if (positional[0] !== undefined) out.args.a = positional[0]; if (positional[1] !== undefined) out.args.b = positional[1]; out.rest.push(...positional.slice(2)); }
   else out.rest.push(...positional);
   return out;
 }
@@ -102,11 +119,11 @@ async function main(argv, env, io = STDIO) {
     return EXIT.usage;
   }
   if (p.help || !p.cmd) { io.out(USAGE); return p.cmd || p.help ? EXIT.ok : EXIT.usage; }
-  if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status') {
+  if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status' || CLAIM_VERBS.has(p.cmd)) {
     if (p.rest.length) { io.err(`memory: unsupported arguments: ${p.rest.join(' ')}\n`); return EXIT.usage; }
     return request(env, p, io);
   }
-  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically).\n`);
+  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used.\n`);
   return EXIT.usage;
 }
 

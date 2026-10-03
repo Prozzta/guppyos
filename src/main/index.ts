@@ -1,6 +1,10 @@
-import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
+import { ClaimStore } from './claims/store';
+import { FileLedgerKeyRecord, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
+import type { ClaimsEndpointDeps } from './claims/endpoint';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -1202,6 +1206,42 @@ const startupTiming = new StartupTiming({
   log: (row) => hive.appendLog(row),
   histogram: () => monitorEventLoopDelay({ resolution: 10 })
 });
+// CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
+// encrypted with safeStorage (never in a hive file or an agent's env). The verbs write only at the
+// effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).
+let claimStore: { root: string; store: ClaimStore } | null = null;
+const claimClampLogged = new Set<string>();
+function claimLevel(agentId: string): LedgerLevel {
+  const saved = readConfig().claimLedger;
+  const e = effectiveLevel(saved, undefined);
+  if (e.clamped && !claimClampLogged.has(String(saved))) {
+    claimClampLogged.add(String(saved));
+    hive.appendLog({ kind: CLAIM_LEDGER_CLAMP_ROW, saved: String(saved).slice(0, 40), implemented: IMPLEMENTED_LEVEL, effective: e.level, agentId });
+  }
+  return e.level;
+}
+function claimsEndpoint(): ClaimsEndpointDeps | null {
+  const root = hive.root();
+  if (!root) return null;
+  if (!claimStore || claimStore.root !== root) {
+    claimStore = {
+      root,
+      store: new ClaimStore({
+        hiveRoot: root,
+        keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
+        keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
+        log: (row) => hive.appendLog(row),
+        alert: (row) => {
+          const what = row.kind === CLAIMS_ALERT_KEY_MISSING
+            ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'
+            : `${String(row.agentId)}'s claim ledger failed verification (${String(row.reason)} at ${String(row.brokenAt)}) and is read-only. Nothing was repaired; the Human decides.`;
+          hive.send({ to: 'god', act: 'inform', wake: 'now', subject: `Claim ledger alert: ${String(row.kind)}`, body: `${what}\nFor god and the Human.` }, 'claims');
+        },
+      }),
+    };
+  }
+  return { store: claimStore.store, level: claimLevel };
+}
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
@@ -1218,7 +1258,8 @@ const nativeMemory = new NativeMemoryWiring({
   vecLoadablePath: () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     try { return toUnpacked((require('sqlite-vec') as { getLoadablePath(): string }).getLoadablePath()); } catch { return null; }
-  }
+  },
+  claims: claimsEndpoint
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here

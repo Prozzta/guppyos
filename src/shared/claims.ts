@@ -100,7 +100,11 @@ export const EVENT_KINDS: readonly EventKind[] = [
 export interface EventRec extends RecBase {
   t: 'event';
   ev: EventKind;
-  /** For `rekey` (C2): [the id of the last verified record]. */
+  /**
+   * For a supersede-type decision (`reconcile-answer`, `soft-supersede`, `inferred-supersede`):
+   * targets = [loser, winner] (god 2f8991; W2 reads it so). For `rekey` (C2): [the id of the last
+   * verified record].
+   */
   targets: string[];
   /** e.g. 'R4@0.92'. */
   rule?: string;
