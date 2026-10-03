@@ -64,7 +64,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDi
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
-import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
 import { CapacityStore, capacityStorePath } from './capacityPersistence';
@@ -1083,15 +1083,11 @@ const heavyLock = new HeavyJobLock({
 });
 hookServer.setHeavyLock(heavyLock);
 
-/** HEAVY-LOCK-SELF-WAIT: the "slot free" notice on both rails, as closing time does. The mail wakes an
- *  IDLE agent (sender `system` always wakes under READS-QUIET-NOREPLY; `wake: "now"` is the explicit
- *  second guarantee; inform + no reply = no obligation); the steer reaches a BUSY one at its next hook. */
+/** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
 function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
-  const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
-  const subject = `HEAVY SLOT FREE: the ${kind} you were denied can run now; the slot is reserved for you until ${at}`;
-  const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. No reply is needed.`;
-  try { hive.send({ to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' } as Partial<HiveMessage>, 'system'); } catch { /* best effort */ }
-  try { control.steer(agentId, `${subject}.`); } catch { /* best effort */ }
+  const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a

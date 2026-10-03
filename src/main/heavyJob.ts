@@ -441,12 +441,30 @@ export interface HeavyLockDeps {
 
 export const HEAVY_TTL_MS = 60 * 60_000;
 /** HEAVY-LOCK-SELF-WAIT: how long a freed slot is kept for the queued agent it was offered to.
- *  A waiter stays queued until it is offered a slot, acquires, or its PTY is gone. */
+ *  A waiter stays queued until it is offered a slot, acquires, its PTY is gone, or it was last
+ *  denied HEAVY_TTL_MS ago (Andy N2: dropped as stale). */
 export const HEAVY_RESERVE_MS = 5 * 60_000;
 export const HEAVY_SCAN_MS = 20_000;
 export const HEAVY_SCAN_MISSES = 2;
 
-export type HeavyDecision = { allow: true; acquired: boolean } | { allow: false; reason: string; holders: HeavyHolder[] };
+/**
+ * HEAVY-LOCK-SELF-WAIT: the "slot free" notice, on both rails as closing time does. The mail wakes an
+ * IDLE agent: sender `system` always wakes under READS-QUIET-NOREPLY, and `wake: "now"` is the
+ * explicit second guarantee; inform with no reply carries no obligation. The steer reaches a BUSY
+ * agent at its next hook. Pure: main sends it.
+ */
+export function heavySlotFreeNotice(agentId: string, kind: string, until: number): {
+  message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
+  from: 'system';
+  steer: string;
+} {
+  const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
+  const subject = `HEAVY SLOT FREE: the ${kind} you were denied can run now; the slot is reserved for you until ${at}`;
+  const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. No reply is needed.`;
+  return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
+}
+
+export type HeavyDecision ={ allow: true; acquired: boolean } | { allow: false; reason: string; holders: HeavyHolder[] };
 
 /**
  * HEAVY-LOCK-SELF-WAIT (1.1.81). The lock used to be deny-only: a denied agent was told to "run it
@@ -490,8 +508,9 @@ export class HeavyJobLock {
     // Off: no limit, but the heavy call is still visible (god: log 'heavy (unlimited)').
     if (limit === 'off') { this.log({ kind: 'heavy-lock', action: 'unlimited', agentId, heavyKind: cls.kind, why: cls.why ?? null }); return { allow: true, acquired: false }; }
     this.expire();
-    // A slot that is free while agents wait (the limit was raised) goes to them first.
-    if (this.waiters.length) this.grant();
+    // A slot that is free while agents wait (the limit was raised) goes to them first. Andy N3: a
+    // slot reserved here for the CALLER itself is taken at once below, so it is not notified.
+    if (this.waiters.length) this.grant(agentId);
     const mine = this.holders.get(agentId);
     if (mine) {
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
@@ -534,7 +553,8 @@ export class HeavyJobLock {
   /** Queue a denied agent once (FIFO); its 1-based position. */
   private enqueue(agentId: string, kind: HeavyKind): number {
     const i = this.waiters.findIndex((w) => w.agentId === agentId);
-    if (i >= 0) return i + 1;
+    // A re-deny keeps its place and shows the agent still wants the slot (the waiter TTL restarts).
+    if (i >= 0) { this.waiters[i].since = this.now(); return i + 1; }
     this.waiters.push({ agentId, kind, since: this.now() });
     return this.waiters.length;
   }
@@ -544,16 +564,21 @@ export class HeavyJobLock {
     if (i >= 0) this.waiters.splice(i, 1);
   }
 
-  /** Offer every free slot to the oldest live waiter: reserve it, log it, tell the agent. */
-  private grant(): void {
+  /** Offer every free slot to the oldest live waiter: reserve it, log it, tell the agent (not
+   *  `caller`, the agent whose own acquire is running and takes the slot at once; Andy N3). */
+  private grant(caller?: string): void {
     const limit = this.d.limit();
     if (limit === 'off') { this.waiters.length = 0; this.reservations.clear(); return; }
     while (this.waiters.length && this.holders.size + this.reservations.size < limit) {
       const w = this.waiters.shift()!;
       if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); continue; }
+      // Andy N2: a waiter not denied again within HEAVY_TTL_MS has most likely moved on; a slot
+      // reserved for it would sit unused for HEAVY_RESERVE_MS.
+      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); continue; }
       const until = this.now() + HEAVY_RESERVE_MS;
       this.reservations.set(w.agentId, { kind: w.kind, until });
       this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since });
+      if (w.agentId === caller) continue;
       try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }
     }
     this.arm();

@@ -195,14 +195,88 @@ test('the hook reader: a real file in a temp dir, by a Git Bash /x/ path too; a 
 
 K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/hooks.ts')) => {
   assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\)\n\}\);/);
-  assert.match(idx, /hive\.send\(\{ to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' \} as Partial<HiveMessage>, 'system'\);/, 'THE NOTICE WAKES (SYSTEM SENDER + WAKE NOW)');
-  assert.match(idx, /control\.steer\(agentId, `\$\{subject\}\.`\);/, 'AND REACHES A BUSY AGENT');
-  assert.match(idx, /const subject = `HEAVY SLOT FREE: the \$\{kind\} you were denied can run now; the slot is reserved for you until \$\{at\}`;/);
+  assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
+  assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
   assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n      let cls = classifyHeavy\(p\.tool_name, p\.tool_input, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
   assert.match(hooks, /const k = classifyCommand\(c, 0, scripts\);/);
-  assert.match(hooks, /classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyScriptCtx\(p\.cwd\)\)\.heavy\) \{/, 'AND THE SAME AT POSTTOOLUSE, SO THE SLOT IS FREED');
+  // Andy N1: Post frees by the held call id, never by classifying again.
+  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING');
+  assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 1, 'the script is read once, at PreToolUse');
 };
-test('wiring: the notice on both rails (wake-proof mail + steer); the hook classifies scripts at Pre and Post', () => K.wiring());
+test('wiring: the notice on both rails (wake-proof mail + steer); scripts read at Pre; Post frees by the held call id', () => K.wiring());
+
+// ─── Andy's notes N1-N3 (1.1.81 follow-up) ──────────────────────────────────────────────────
+
+K.postFreesWhenScriptChanged = (M = HJ) => {
+  // The Post no longer classifies, so a script deleted during its run still frees the slot.
+  const x = rig(M);
+  x.l.acquire('a', H, 'bash round.sh', 'id:t1', false);
+  x.l.callDone('a', 'id:t1');
+  assert.equal(x.l.snapshot().length, 0, 'freed by its call id');
+  x.l.callDone('a', 'id:unknown');
+  x.l.callDone('nobody', 'id:t1');
+  assert.deepEqual(x.l.snapshot(), [], 'callDone on an unheld call is a no-op');
+};
+test('N1: a call is freed by its own id; callDone on an unknown call or agent is a no-op', () => K.postFreesWhenScriptChanged());
+
+K.staleWaiterDropped = (M = HJ) => {
+  const x = rig(M);
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.tick(10 * 60_000);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.tick(M.HEAVY_TTL_MS - 10 * 60_000);       // b: denied 60 min ago; c: 50 min ago
+  x.l.acquire('a', H, 'npm run build', 'a2', false);   // re-entry keeps a's TTL fresh
+  x.l.callDone('a', 'a1'); x.l.callDone('a', 'a2');
+  assert.deepEqual(x.notes.map((n) => n.a), ['c'], 'A WAITER NOT SEEN FOR AN HOUR IS DROPPED');
+  assert.ok(x.logs.some((r) => r.action === 'queue-dropped' && r.agentId === 'b' && r.reason === 'stale'));
+};
+test('N2: a waiter last denied an hour ago is dropped as stale; the next one gets the slot', () => K.staleWaiterDropped());
+
+test('N2: a re-deny keeps the place AND restarts the waiter TTL', () => {
+  const x = rig();
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.tick(HJ.HEAVY_TTL_MS - 1000);
+  assert.match(x.l.acquire('b', H, 'npm ci', 'b2', false).reason, /position 1\)/);
+  x.tick(2000);
+  x.l.acquire('a', H, 'npm run build', 'a2', false);
+  x.l.callDone('a', 'a1'); x.l.callDone('a', 'a2');
+  assert.deepEqual(x.notes.map((n) => n.a), ['b']);
+});
+
+K.noSelfNotify = (M = HJ) => {
+  const x = rig(M);
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.setLimit(2);
+  assert.deepEqual(x.l.acquire('b', H, 'npm ci', 'b2', false), { allow: true, acquired: true });
+  assert.deepEqual(x.notes, [], 'THE CALLER IS NOT TOLD ABOUT THE SLOT IT IS TAKING');
+};
+test('N3: when the limit is raised, the first waiter calling again takes its slot without a "slot free" notice', () => K.noSelfNotify());
+
+// ─── the notice itself, and Andy's pin for the merged rc ────────────────────────────────────
+
+test('the notice: system sender, wake "now", inform with no reply, plain words, the steer repeats the subject', () => {
+  const n = HJ.heavySlotFreeNotice('jim', 'suite', Date.parse('2026-10-03T06:30:00Z'));
+  assert.equal(n.from, 'system');
+  assert.deepEqual([n.message.to, n.message.act, n.message.requires_reply, n.message.wake], ['jim', 'inform', false, 'now']);
+  assert.equal(n.message.subject, 'HEAVY SLOT FREE: the suite you were denied can run now; the slot is reserved for you until 06:30Z');
+  assert.match(n.message.body, /No reply is needed\.$/);
+  assert.equal(n.steer, `${n.message.subject}.`);
+});
+
+// READS-QUIET-NOREPLY lives on fix/181-reads-quiet; this runs once both are merged (rc/1.1.81).
+const QUIET = fs.existsSync(path.join(__dirname, '..', 'src/shared/mailWakeClass.ts'));
+test('merged rc: the notice as sent is classified WAKE (from system, wakeNow), never held quiet', { skip: QUIET ? false : 'needs READS-QUIET-NOREPLY (mailWakeClass) in this tree' }, () => {
+  const W = loadTs('src/shared/mailWakeClass.ts');
+  const n = HJ.heavySlotFreeNotice('jim', 'suite', 0);
+  const entry = { id: 'x', from: n.from, act: n.message.act, requiresReply: n.message.requires_reply, wakeNow: n.message.wake === 'now', deliveredAt: 0 };
+  assert.equal(W.mailWakeClass(entry, 'inject'), 'wake');
+  assert.equal(W.mailWakeClass({ ...entry, from: 'jim-mtujpe28' }, 'inject'), 'wake', 'wake:"now" alone wakes too');
+  assert.equal(W.mailWakeClass({ ...entry, wakeNow: false }, 'inject'), 'wake', 'the system sender alone wakes too');
+  assert.deepEqual(W.normalizeWakeField(n.message.wake), { wake: 'now' }, 'normalize keeps it');
+});
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
 
@@ -227,7 +301,7 @@ const MUTANTS = [
     edits: [['      try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }\n', '']],
     killer: 'fifoReserveNotify', dies: /THE OLDEST WAITER IS RESERVED AND NOTIFIED/ },
   { name: 'a retry queues the agent again', file: HJF, module: true,
-    edits: [['    if (i >= 0) return i + 1;\n    this.waiters.push', '    this.waiters.push']],
+    edits: [['    if (i >= 0) { this.waiters[i].since = this.now(); return i + 1; }\n    this.waiters.push', '    this.waiters.push']],
     killer: 'fifoReserveNotify', dies: /QUEUED ONCE: A RETRY KEEPS ITS PLACE/ },
   { name: 'a reservation never expires', file: HJF, module: true,
     edits: [['      if (t < r.until) continue;', '      if (t < r.until || r.until > 0) continue;']],
@@ -244,12 +318,18 @@ const MUTANTS = [
   { name: 'cd is not followed', file: HJF, module: true,
     edits: [["      here = { ...here, cd: /^([A-Za-z]:[\\\\/]|[\\\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\\\/]+$/, '')}/${to}` };\n", '']],
     killer: 'cdFollowed', dies: /CD IS FOLLOWED/ },
-  { name: 'the notice is plain worker mail (held by READS-QUIET)', file: 'src/main/index.ts',
-    edits: [["requires_reply: false, subject, body, wake: 'now' } as Partial<HiveMessage>, 'system');", "requires_reply: false, subject, body } as Partial<HiveMessage>, agentId);"]],
-    killer: 'wiring', dies: /THE NOTICE WAKES \(SYSTEM SENDER \+ WAKE NOW\)/ },
-  { name: 'PostToolUse classifies without the script reader (the slot is never freed)', file: 'src/main/hooks.ts', hooks: true,
-    edits: [['classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {', 'classifyHeavy(p.tool_name, p.tool_input).heavy) {']],
-    killer: 'wiring', dies: /AND THE SAME AT POSTTOOLUSE, SO THE SLOT IS FREED/ }
+  { name: 'the notice is sent as plain worker mail (held by READS-QUIET)', file: 'src/main/index.ts',
+    edits: [['  try { hive.send(n.message as Partial<HiveMessage>, n.from); }', '  try { hive.send({ ...n.message, wake: undefined } as Partial<HiveMessage>, agentId); }']],
+    killer: 'wiring', dies: /THE NOTICE IS SENT AS BUILT \(SYSTEM SENDER \+ WAKE NOW\)/ },
+  { name: 'Post re-classifies before freeing (as 130d276c; a changed script keeps the slot)', file: 'src/main/hooks.ts', hooks: true,
+    edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {"]],
+    killer: 'wiring', dies: /POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING/ },
+  { name: 'N2 off: a stale waiter still takes a reservation', file: HJF, module: true,
+    edits: [["      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); continue; }\n", '']],
+    killer: 'staleWaiterDropped', dies: /A WAITER NOT SEEN FOR AN HOUR IS DROPPED/ },
+  { name: 'N3 off: the caller is told about its own slot', file: HJF, module: true,
+    edits: [['      if (w.agentId === caller) continue;\n', '']],
+    killer: 'noSelfNotify', dies: /THE CALLER IS NOT TOLD ABOUT THE SLOT IT IS TAKING/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

@@ -1820,8 +1820,10 @@ export class HookServer {
       }
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
-    // its job is done (a backgrounded one, or a missed Post, is left to the watcher).
-    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {
+    // its job is done (a backgrounded one, or a missed Post, is left to the watcher). Andy N1 (1.1.81):
+    // freed by the call id the PreToolUse took, NOT by classifying again (a script that changed or
+    // was deleted during the run must not leave the slot held); callDone ignores an unheld call.
+    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
     }
 
