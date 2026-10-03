@@ -159,11 +159,11 @@ test('key-alias proposals never soft-supersede after repeated completed turns', 
 test('G5.2 API applies newest-wins only after three completed unanswered turns', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const q = new ReconcileQueue(path.join(dir, 'queue.json'));
-  q.refresh('owner', [{ itemId: 'conflict', kind: 'conflict', a: 'old', b: 'new', text: 'same slot' }]);
+  q.enqueueR5('owner', [{ a: 'new', b: 'old', cosine: 0.9, tau2: TAU2 }]);
   const appended = [];
   const api = new ReconcileApi({ queue: q, countTokens: () => 1, log: () => {}, isOwner: () => true,
     isLiveClaim: () => true,
-    newestWins: (item) => item.a === 'old' && item.b === 'new' ? ({ loser: 'old', winner: 'new' }) : null,
+    newestWins: (item) => item.a === 'new' && item.b === 'old' ? ({ loser: 'old', winner: 'new' }) : null,
     appendSoftSupersede: async (...args) => { appended.push(args); return { ok: true }; } });
   for (let n = 0; n < 2; n++) {
     const delivery = api.reconcileForTurn('owner', '2026-10-03');
@@ -172,14 +172,35 @@ test('G5.2 API applies newest-wins only after three completed unanswered turns',
   }
   const third = api.reconcileForTurn('owner', '2026-10-03');
   await api.onTurnCompleted('owner', third.turn);
-  assert.deepEqual(appended, [['owner', 'old', 'new', 'conflict']]);
+  const resolvedItemId = reconcileItemId('owner', 'conflict', 'old', 'new');
+  assert.deepEqual(appended, [['owner', 'old', 'new', resolvedItemId]]);
   assert.deepEqual(q.items('owner'), []);
+  assert.deepEqual(q.r5Candidates('owner'), [], 'soft completion removes the answered R5 pair');
   q.enqueueR5('owner', [{ a: 'other', b: 'pair', cosine: 0.95, tau2: TAU2 }]);
-  assert.deepEqual(q.beginTurn('owner').items.map((i) => i.itemId), [reconcileItemId('owner', 'conflict', 'other', 'pair')]);
-  for (let n = 0; n < 3; n++) {
-    const next = q.beginTurn('owner');
-    await api.onTurnCompleted('owner', next.turn);
-  }
+  const next = api.reconcileForTurn('owner', '2026-10-03');
+  assert.deepEqual(next.itemIds, [reconcileItemId('owner', 'conflict', 'other', 'pair')], 'the resolved R5 pair is never offered again');
+  assert.deepEqual(q.r5Candidates('owner').map((c) => [c.a, c.b]), [['other', 'pair']]);
   assert.equal(appended.filter((args) => args[1] === 'old' && args[2] === 'new').length, 1,
     'the resolved pair cannot recur through later refresh/turns');
+});
+
+test('G5.2 skips soft supersede append when newest-wins winner is no longer live', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const q = new ReconcileQueue(path.join(dir, 'queue.json'));
+  q.enqueueR5('owner', [{ a: 'new', b: 'old', cosine: 0.9, tau2: TAU2 }]);
+  let appends = 0;
+  const api = new ReconcileApi({ queue: q, countTokens: () => 1, log: () => {}, isOwner: () => true,
+    isLiveClaim: () => false, newestWins: () => ({ loser: 'old', winner: 'new' }),
+    appendSoftSupersede: async () => { appends++; return { ok: true }; } });
+  for (let i = 0; i < 3; i++) {
+    const delivery = api.reconcileForTurn('owner', '2026-10-03');
+    await api.onTurnCompleted('owner', delivery.turn);
+  }
+  assert.equal(appends, 0);
+  assert.deepEqual(q.r5Candidates('owner').map((c) => [c.a, c.b]), [['new', 'old']]);
+});
+
+test('R5 append hook gates on the extracted one-time-import predicate', () => {
+  const index = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
+  assert.match(index, /onAppend:\s*\(agentId,\s*id,\s*rec\)\s*=>\s*\{[\s\S]{0,160}if\s*\(!shouldRunR5\(rec\)\)/);
 });
