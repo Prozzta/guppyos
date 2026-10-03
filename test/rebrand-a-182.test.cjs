@@ -210,7 +210,7 @@ test('electron-builder.yml: Guppy name + exe; appId, scheme and 1.1.82 artifact 
   assert.match(y, /^ {2}shortcutName: Guppy$/m);
   assert.match(y, /^ {2}include: build\/installer\.nsh$/m);
   assert.doesNotMatch(y, /^\s*guid:/m, 'the NSIS GUID must keep deriving from appId');
-  assert.match(y, /schemes:\n\s+- munderdifflin\n/);
+  assert.match(y, /schemes:\n\s+- guppy\n\s+- munderdifflin\n/);
   for (const a of ['Munder-Difflin-${version}-mac-${arch}.${ext}', 'Munder-Difflin-${version}-win-x64-setup.exe',
     'Munder-Difflin-${version}-win-x64-portable.exe', 'Munder-Difflin-${version}-linux-x86_64.AppImage']) {
     assert.ok(y.includes(`artifactName: ${a}`), a);

@@ -51,11 +51,11 @@ test('the data folder is Guppy (1.1.81 data copied there once, never moved)', (t
   assert.equal(pkg.productName, undefined);
 });
 
-test('the munderdifflin:// scheme and the hire format id stay', () => {
+test('the munderdifflin:// scheme (an alias of guppy:// since 1.1.83) and the hire format id stay', () => {
   // Hire links people have already shared, and manifests already written.
-  assert.match(builder, /^\s+schemes:\s*\n\s+- munderdifflin\s*$/m);
-  assert.match(read('src/main/index.ts'), /setAsDefaultProtocolClient\('munderdifflin'\)/);
-  assert.match(read('src/shared/hire.ts'), /protocol !== 'munderdifflin:'/);
+  // The behaviour is tested in hire-link-scheme-183.test.cjs.
+  assert.match(builder, /^\s+schemes:\s*\n\s+- guppy\s*\n\s+- munderdifflin\s*$/m);
+  assert.match(read('src/shared/hire.ts'), /HIRE_LINK_SCHEMES = \['guppy', 'munderdifflin'\] as const;/);
   assert.match(read('src/shared/hire.ts'), /HIRE_SPEC_V1 = 'munder-difflin\/hire@1'/);
 });
 
