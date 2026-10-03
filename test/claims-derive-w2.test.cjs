@@ -8,19 +8,20 @@ const test = require('node:test');
 const ts = require('typescript');
 
 const ROOT = path.join(__dirname, '..');
-function loadTs(relative) {
+function loadTs(relative, localRequire = require) {
   const filename = path.join(ROOT, relative);
   const source = fs.readFileSync(filename, 'utf8');
   const js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const loaded = { exports: {} };
-  new Function('exports', 'require', 'module', js)(loaded.exports, require, loaded);
+  new Function('exports', 'require', 'module', js)(loaded.exports, localRequire, loaded);
   return loaded.exports;
 }
 
 const { derive } = loadTs('src/main/claims/derive.ts');
-const { worldView } = loadTs('src/main/claims/world.ts');
+const { worldView } = loadTs('src/main/claims/world.ts', (name) =>
+  name === './ttl' ? loadTs('src/main/claims/ttl.ts') : require(name));
 const registry = {
   v: 1,
   namespaces: [{ pattern: 'fact.*', cardinality: 'single' }, { pattern: 'multi.*', cardinality: 'multi' }],
