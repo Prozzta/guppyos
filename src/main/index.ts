@@ -143,7 +143,7 @@ import { inboxWakeTextForProvider } from '../shared/hiveNudge';
 import { answersOwnAsk, quietHolds, quietMailHoldMs } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
-import { parseHireDeepLink, type HireManifest } from '../shared/hire';
+import { HIRE_LINK_SCHEMES, isHireLinkArg, parseHireDeepLink, type HireManifest } from '../shared/hire';
 import { ClosingTimeController } from './closingTime';
 import {
   argsWithAutoModeFlag,
@@ -3238,7 +3238,7 @@ function floorCascade(): WindowBounds | null {
   return clampBounds({ x: b.x + OFFSET, y: b.y + OFFSET, width: b.width, height: b.height });
 }
 
-// ─── Shareable hires: munderdifflin:// deep link + file import ──────────────
+// ─── Shareable hires: guppy:// deep link + file import ──────────────────────
 // A hire manifest NEVER auto-spawns: it is validated, then handed to the
 // renderer, which pre-fills the Add-Agent modal for human review. See
 // src/shared/hire.ts for the spec + security model.
@@ -3276,19 +3276,25 @@ async function handleHireLink(link: string): Promise<void> {
   analytics.trackFeature('hire_install');
 }
 
-// Register the protocol. In dev (electron .) Windows needs the explicit
-// exe+args form or the registration points at electron.exe with no entry.
+// Register the protocols: guppy:// and the old munderdifflin:// (links already
+// shared). On Windows this call is the only registration (the installer writes
+// none). In dev (electron .) Windows needs the explicit exe+args form or the
+// registration points at electron.exe with no entry.
 // MUNDER_DEV=1 skips this entirely: the registration is a per-user registry
-// write that would re-point Stable's `munderdifflin://` links at the dev
+// write that would re-point Stable's `guppy://` links at the dev
 // electron.exe (a Stable-identity side effect the dev build must not have).
 if (DEV_ISOLATION) {
-  console.warn('[dev-isolation] not registering the munderdifflin:// protocol handler (would hijack Stable)');
-} else if (process.defaultApp) {
-  if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient('munderdifflin', process.execPath, [resolve(process.argv[1])]);
-  }
+  console.warn('[dev-isolation] not registering the guppy:// and munderdifflin:// protocol handlers (would hijack Stable)');
 } else {
-  app.setAsDefaultProtocolClient('munderdifflin');
+  for (const scheme of HIRE_LINK_SCHEMES) {
+    if (process.defaultApp) {
+      if (process.argv.length >= 2) {
+        app.setAsDefaultProtocolClient(scheme, process.execPath, [resolve(process.argv[1])]);
+      }
+    } else {
+      app.setAsDefaultProtocolClient(scheme);
+    }
+  }
 }
 
 // Deep links on Windows/Linux arrive as the argv of a SECOND process — take the
@@ -3312,7 +3318,7 @@ if (!gotInstanceLock) {
 } else {
   app.on('second-instance', (_evt, argv) => {
     surfaceWindow(mainWindow, { restore: true, focus: true });   // MUNDER_HIDDEN: never restore or focus
-    const link = argv.find((a) => a.startsWith('munderdifflin://'));
+    const link = argv.find(isHireLinkArg);
     if (link) void handleHireLink(link);
   });
 }
@@ -7248,7 +7254,7 @@ app.whenReady().then(() => {
   });
 
   // A cold-start deep link (Windows/Linux) rides in on OUR argv.
-  const startupHireLink = process.argv.find((a) => a.startsWith('munderdifflin://'));
+  const startupHireLink = process.argv.find(isHireLinkArg);
   if (startupHireLink) void handleHireLink(startupHireLink);
 
   // Hand every spawned agent the path to the Slack reply discovery file via the

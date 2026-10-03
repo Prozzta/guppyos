@@ -4,7 +4,8 @@
  * A hire manifest is a small JSON document that describes a role-configured
  * agent (name, provider, model, flags, goal, budget) so it can be shared as a
  * file or hosted in a community gallery and imported with one click via the
- * `munderdifflin://hire?src=<https-url>` deep link or an in-app file picker.
+ * `guppy://hire?src=<https-url>` deep link (old links use `munderdifflin://`)
+ * or an in-app file picker.
  *
  * SECURITY MODEL — a manifest is untrusted input:
  *   - It can NEVER auto-spawn an agent. Importing only pre-fills the Add-Agent
@@ -317,13 +318,25 @@ export function validateHireManifest(raw: unknown): HireValidation {
   };
 }
 
-/** Parse a `munderdifflin://hire?src=<https-url>` deep link. Returns the https
- *  manifest URL, or null if the link is not a well-formed hire link. */
+/** The URL schemes the app answers. `guppy` is the main one (1.1.83); `munderdifflin`
+ *  stays registered as an alias so hire links people already shared keep opening. */
+export const HIRE_LINK_SCHEMES = ['guppy', 'munderdifflin'] as const;
+
+/** True when a process argument is one of our deep links (Windows and Linux hand
+ *  them over in argv). URL schemes are case-insensitive. */
+export function isHireLinkArg(arg: string): boolean {
+  const lower = arg.toLowerCase();
+  return HIRE_LINK_SCHEMES.some((s) => lower.startsWith(`${s}://`));
+}
+
+/** Parse a `guppy://hire?src=<https-url>` deep link (or the older
+ *  `munderdifflin://` form). Returns the https manifest URL, or null if the link
+ *  is not a well-formed hire link. */
 export function parseHireDeepLink(link: string): string | null {
   let u: URL;
   try { u = new URL(link); } catch { return null; }
-  if (u.protocol !== 'munderdifflin:') return null;
-  // Both munderdifflin://hire?src= (host) and munderdifflin:hire?src= (path).
+  if (!HIRE_LINK_SCHEMES.some((s) => u.protocol === `${s}:`)) return null;
+  // Both guppy://hire?src= (host) and guppy:hire?src= (path).
   const action = (u.host || u.pathname.replace(/^\/+/, '')).toLowerCase();
   if (action !== 'hire') return null;
   const src = u.searchParams.get('src');

@@ -30,11 +30,14 @@ afterSign: build/notarize.cjs
 # blog/ and the model twice into app.asar).
 afterPack: build/afterPack-memory-prune.cjs
 
-# Register the munderdifflin:// URL scheme (shareable-hires deep link) in the
-# packaged app: CFBundleURLTypes on macOS, registry entries via NSIS on Windows.
+# Register the guppy:// URL scheme (shareable-hires deep link) and the old
+# munderdifflin:// one (links already shared) in the packaged app: CFBundleURLTypes
+# on macOS, the .desktop MimeType on Linux. On Windows the app registers both
+# itself at every start (app.setAsDefaultProtocolClient in src/main/index.ts).
 protocols:
   - name: Guppy
     schemes:
+      - guppy
       - munderdifflin
 
 # electron-vite emits the app into out/; package exactly that plus what the
