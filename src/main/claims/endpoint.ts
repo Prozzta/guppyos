@@ -123,7 +123,8 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       const r = await store.appendRecord(agentId, { t: 'claim', kind, text: args.text, retracts: [bb] }, origin);
       if (!r.ok) return done(r, '');
     }
-    return done(await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [a, bb], answer }, origin), 'answered');
+    // targets = [loser, winner] (W2's contract, god 2f8991): `A B --answer supersedes` means A wins.
+    return done(await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [bb, a], answer }, origin), 'answered');
   }
 
   // used

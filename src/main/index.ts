@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, po
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
-import { MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
+import { FileLedgerKeyRecord, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
@@ -1229,6 +1229,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
       store: new ClaimStore({
         hiveRoot: root,
         keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
+        keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         log: (row) => hive.appendLog(row),
         alert: (row) => {
           const what = row.kind === CLAIMS_ALERT_KEY_MISSING

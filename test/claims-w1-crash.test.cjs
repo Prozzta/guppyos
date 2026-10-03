@@ -28,7 +28,7 @@ test.after(() => {
 const loadTs = require('./load-ts.cjs');
 const ROOT = path.join(__dirname, '..');
 const { ClaimStore } = loadTs(path.join(ROOT, 'src/main/claims/store.ts'));
-const { SandboxKeyProvider } = loadTs(path.join(ROOT, 'src/main/claims/keyProvider.ts'));
+const { SandboxKeyProvider, FileLedgerKeyRecord } = loadTs(path.join(ROOT, 'src/main/claims/keyProvider.ts'));
 
 const N = 10_000;
 
@@ -42,6 +42,7 @@ test(`G1.1 crash safety: ${N} appends with simulated crashes; every acked record
   fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
   const rand = prng(0xC1A1);
   const keys = new SandboxKeyProvider();
+  const keyRecord = new FileLedgerKeyRecord(path.join(JAIL, 'userdata', 'claims-mac.hives.json'));
   let t = Date.parse('2026-10-03T00:00:00Z');
   const now = () => new Date(t);
   let mode = 'none';
@@ -59,7 +60,7 @@ test(`G1.1 crash safety: ${N} appends with simulated crashes; every acked record
     closeSync: (fd) => fs.closeSync(fd),
   };
   const logs = [];
-  const mk = () => new ClaimStore({ hiveRoot: root, keys, now, io, log: (r) => logs.push(r) });
+  const mk = () => new ClaimStore({ hiveRoot: root, keys, keyRecord, now, io, log: (r) => logs.push(r) });
   let store = mk();
   const acked = new Set();
   const unacked = new Set();   // complete lines whose fsync "crashed": allowed to survive, never required

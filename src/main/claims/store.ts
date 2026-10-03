@@ -51,7 +51,9 @@ import {
   type UsageRec,
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
+import type { LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
+import { normalizeTtl } from './ttl';
 import { checkKey, loadRegistry, saveRegistry } from './registry';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -65,6 +67,8 @@ export interface LedgerIo {
 export interface ClaimStoreDeps {
   hiveRoot: string;
   keys: MacKeyProvider;
+  /** Which key id this hive's ledgers are written under, kept by main in user-data (god 7dda19). */
+  keyRecord: LedgerKeyRecord;
   now?: () => Date;
   /** A log.jsonl row. */
   log?: (row: Record<string, unknown>) => void;
@@ -82,7 +86,6 @@ const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const ID_RE = /^[ce]-[0-9a-f]{12,32}$/;
 const MAIL_SOURCE_RE = /^mail:[A-Za-z0-9._:-]{1,120}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
-const TTL_RE = /^(?:\d{1,4}[dhw])$/;
 const REF_TYPES = new Set<Ref['type']>(['file', 'commit', 'task', 'msg', 'url']);
 const LIST_MAX = 20;
 const FD_IDLE_MS = 30_000;
@@ -249,14 +252,16 @@ export class ClaimStore {
   private verify(agentId: string, lines: ParsedLine[]): 'ok' | ChainBreak {
     if (lines.length === 0) return 'ok';
     // MACs are checked from the last rekey on; before it the Human accepted the prev chain (C2).
-    let macFrom = 0;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const r = lines[i].rec;
-      if (r && r.t === 'event' && r.ev === 'rekey') { macFrom = i; break; }
-    }
+    // A rekey line counts only when its OWN MAC verifies under this hive's key and it names that
+    // key: a forged rekey is an ordinary line that fails its MAC (Jim F1, god 2f8991).
     const key = this.keys();
+    let macFrom = 0;
+    for (let i = lines.length - 1; i >= 0 && key; i--) {
+      const r = lines[i].rec;
+      if (r && r.t === 'event' && r.ev === 'rekey' && r.keyId === keyIdOf(key)
+        && recordMac(key, r as unknown as Record<string, unknown>) === r.mac) { macFrom = i; break; }
+    }
     let prev = '';
-    let firstMacChecked = true;
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
       const where = l.rec?.id ?? `${i}@${l.offset}`;
@@ -269,30 +274,39 @@ export class ClaimStore {
       }
       if (i >= macFrom) {
         if (!key) return { brokenAt: where, reason: 'key-missing' };
-        if (macFrom === i && l.rec.t === 'event' && l.rec.ev === 'rekey' && l.rec.keyId !== keyIdOf(key)) {
-          return { brokenAt: where, reason: 'key-missing' };
-        }
-        if (recordMac(key, l.rec as unknown as Record<string, unknown>) !== l.rec.mac) {
-          // When NO record verifies with this key, the key is not the ledger's (another user-data
-          // folder): a lost key. When any does, this line was edited or forged.
-          const anyVerifies = !firstMacChecked || lines.slice(i + 1).some((o) => o.rec && recordMac(key, o.rec as unknown as Record<string, unknown>) === o.rec.mac);
-          return { brokenAt: where, reason: anyVerifies ? 'mac' : 'key-missing' };
-        }
-        firstMacChecked = false;
+        // keys() returns only THIS hive's ledger key (its id matches the user-data record), so a
+        // MAC failure here is always an edit or a forgery, never a wrong key (god 7dda19).
+        if (recordMac(key, l.rec as unknown as Record<string, unknown>) !== l.rec.mac) return { brokenAt: where, reason: 'mac' };
       }
       prev = sha256Hex(l.line);
     }
     return 'ok';
   }
 
-  /** The current key, or null (and the floor-wide key-missing alert when a ledger exists). */
+  /**
+   * This hive's ledger key, or null (and the floor-wide key-missing alert when a ledger exists).
+   * KEY IDENTITY (god 7dda19): a key that loads is used only when its id equals the id main
+   * recorded for this hive in user-data (keyRecord) when it created the key or the Human rekeyed.
+   * Another key (another user-data folder, a replaced key file) or no record is key-missing, never
+   * a reason to read MAC failures as forgeries or to trust them. With no ledger anywhere a loaded
+   * key is adopted (first use).
+   */
   private keys(): Uint8Array | null {
     if (this.key) return this.key;
     const k = this.d.keys.load();
-    if (k.ok) { this.keyMissing = false; this.key = k.key; return k.key; }
+    let reason: string = k.ok ? '' : k.reason;
+    if (k.ok) {
+      const expected = this.d.keyRecord.get(this.d.hiveRoot);
+      if (expected === k.keyId) { this.keyMissing = false; this.key = k.key; return k.key; }
+      if (!this.anySegmentAnywhere()) {
+        this.d.keyRecord.set(this.d.hiveRoot, k.keyId);
+        this.keyMissing = false; this.key = k.key; return k.key;
+      }
+      reason = expected ? 'the loaded key is not this ledger key' : 'no record of this ledger key';
+    }
     this.keyMissing = true;
     if (this.anySegmentAnywhere()) {
-      this.alertOnce('key-missing', { kind: CLAIMS_ALERT_KEY_MISSING, reason: k.reason, to: ['god', 'human'] });
+      this.alertOnce('key-missing', { kind: CLAIMS_ALERT_KEY_MISSING, reason, to: ['god', 'human'] });
     }
     return null;
   }
@@ -377,6 +391,7 @@ export class ClaimStore {
       const made = this.d.keys.create();
       if (!made.ok) return { ok: false, error: `no ledger key could be created (${made.reason})` };
       key = made.key;
+      this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
       this.key = made.key;
       this.keyMissing = false;
       this.log({ kind: 'claims-key-created', keyId: made.keyId });
@@ -513,9 +528,9 @@ export class ClaimStore {
       const claimed = new Date(Date.parse(draft.at)).toISOString();
       at = claimed < wt ? claimed : wt;
     }
-    if (draft.ttl !== undefined && draft.ttl !== null && (typeof draft.ttl !== 'string' || !(TTL_RE.test(draft.ttl) || (ISO_RE.test(draft.ttl) && !Number.isNaN(Date.parse(draft.ttl)))))) {
-      return { error: 'bad ttl (like 30d, 12h, 2w, or an ISO date)' };
-    }
+    // One TTL grammar (ttl.ts): input forms become task:<id> or until:<iso> at write time.
+    const ttl = normalizeTtl(draft.ttl, wt);
+    if ('error' in ttl) return { error: ttl.error };
     let refs: Ref[] | undefined;
     if (draft.refs !== undefined) {
       if (!Array.isArray(draft.refs) || draft.refs.length > LIST_MAX) return { error: `refs: a list of at most ${LIST_MAX}` };
@@ -560,7 +575,7 @@ export class ClaimStore {
       ...(refs ? { refs } : {}),
       ...(sup.ids.length ? { supersedes: sup.ids } : {}),
       ...(ret.ids.length ? { retracts: ret.ids } : {}),
-      ...(draft.ttl !== undefined ? { ttl: draft.ttl } : {}),
+      ...(draft.ttl !== undefined ? { ttl: ttl.ttl } : {}),
       ...(draft.pin ? { pin: true as const } : {}),
       ...(red.redacted ? { redacted: true as const } : {}),
       ...(draft.legacy !== undefined ? { legacy: draft.legacy } : {}),
@@ -600,7 +615,7 @@ export class ClaimStore {
       const r = this.readLedger(a);
       if (r.chain !== 'ok' && r.chain.reason !== 'key-missing') { refused.push({ agentId: a, why: `${r.chain.reason} at ${r.chain.brokenAt}` }); continue; }
       const pv = this.prevChainOnly(a);
-      if (pv) { refused.push({ agentId: a, why: pv }); continue; }
+      if (typeof pv === 'string') { refused.push({ agentId: a, why: pv }); continue; }
       eligible.push(a);
     }
     if (eligible.length === 0) {
@@ -610,15 +625,21 @@ export class ClaimStore {
     const made = this.d.keys.create();
     if (!made.ok) return { ok: false, rekeyed: [], refused: [...refused, ...eligible.map((agentId) => ({ agentId, why: `no key (${made.reason})` }))] };
     this.keyMissing = false;
+    this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
     this.key = made.key;
     this.alerted.delete('key-missing');
     const rekeyed: string[] = [];
     for (const a of eligible) {
       const done = await this.serial(a, () => {
-        this.state.delete(a);
-        const r = this.readInner(a);
-        const s = this.state.get(a) as AgentState;
-        if (r.chain !== 'ok' && r.chain.reason !== 'key-missing') return false;
+        // The new key cannot verify the old records (that is the point), so this step checks the
+        // prev chain only, as the Human's acceptance does (C2), and never raises a MAC alert.
+        const tail = this.prevChainOnly(a);
+        if (typeof tail === 'string') return false;
+        const files = this.segments(a);
+        const s: AgentState = {
+          head: tail.head, lastId: tail.lastId, known: new Map(tail.ids.map((id) => [id, { t: id.startsWith('c-') ? 'claim' as const : 'event' as const }])),
+          tailFile: files[files.length - 1] ?? null, tailSize: 0, segments: files.length, readOnly: null,
+        };
         const wt = this.now().toISOString();
         const rec: EventRec = {
           v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'rekey', at: wt, wt, agent: a,
@@ -626,7 +647,6 @@ export class ClaimStore {
         };
         rec.mac = recordMac(made.key, rec as unknown as Record<string, unknown>);
         const line = canonicalJson(rec);
-        s.readOnly = null;
         const w = this.writeLine(a, s, rec, line, Buffer.from(line + '\n', 'utf8'), null);
         this.state.delete(a);
         return w.ok;
@@ -637,20 +657,26 @@ export class ClaimStore {
     return { ok: refused.length === 0, keyId: made.keyId, rekeyed, refused };
   }
 
-  /** null when every line parses and every prev matches; else why not. */
-  private prevChainOnly(agentId: string): string | null {
+  /** The tail (head hash, last id, every id) when every line parses and every prev matches; else why not. */
+  private prevChainOnly(agentId: string): { head: string; lastId: string; ids: string[] } | string {
     let prev = '';
+    let lastId: string | null = null;
+    const ids: string[] = [];
     for (const file of this.segments(agentId)) {
       const text = nodeFs.readFileSync(file, 'utf8');
+      if (text.length && !text.endsWith('\n')) return 'a torn tail';
       for (const line of text.split('\n')) {
         if (!line) continue;
         let rec: LedgerRec;
         try { rec = JSON.parse(line) as LedgerRec; } catch { return 'an unparseable line'; }
         if (rec.prev !== prev) return `prev breaks at ${rec.id}`;
         prev = sha256Hex(line);
+        lastId = rec.id;
+        ids.push(rec.id);
       }
     }
-    return null;
+    if (!lastId) return 'an empty ledger';
+    return { head: prev, lastId, ids };
   }
 
   // ---------------------------------------------------------------- usage, backups

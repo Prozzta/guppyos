@@ -9,7 +9,7 @@
  * SandboxKeyProvider holds a key in memory, for tests and the Electron-as-Node drills (safeStorage
  * is not usable before `app` is ready).
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { MacKeyLoad, MacKeyProvider } from '../../shared/claims';
@@ -47,6 +47,47 @@ export class SafeStorageKeyProvider implements MacKeyProvider {
     writeFileSync(tmp, this.safe.encryptString(key.toString('base64')));
     renameSync(tmp, this.file);
     return { ok: true, key, keyId: keyIdOf(key) };
+  }
+}
+
+/**
+ * KEY IDENTITY (god 7dda19): which key id each hive's ledgers are written under. Main records it
+ * when it creates a key (first use) and when the Human rekeys, in user-data next to the key, never
+ * in the hive (an agent could rewrite a hive file to make a forgery read as a lost key). A MAC
+ * failure under a key with the recorded id is a forgery; any other key is key-missing.
+ */
+export interface LedgerKeyRecord {
+  get(hiveRoot: string): string | null;
+  set(hiveRoot: string, keyId: string): void;
+}
+
+export const KEY_RECORD_FILE = 'claims-mac.hives.json';
+
+/** A hive's id in the record: as the memory index names its file (mainWiring dbFileFor). */
+export function hiveIdOf(hiveRoot: string): string {
+  return createHash('sha256').update(hiveRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16);
+}
+
+export class FileLedgerKeyRecord implements LedgerKeyRecord {
+  constructor(private readonly file: string) {}
+  private read(): { v: 1; hives: Record<string, { keyId: string; at: string }> } {
+    try {
+      const j = JSON.parse(readFileSync(this.file, 'utf8'));
+      if (j && j.v === 1 && j.hives && typeof j.hives === 'object') return j;
+    } catch { /* missing or unreadable: no record */ }
+    return { v: 1, hives: {} };
+  }
+  get(hiveRoot: string): string | null {
+    const e = this.read().hives[hiveIdOf(hiveRoot)];
+    return e && typeof e.keyId === 'string' ? e.keyId : null;
+  }
+  set(hiveRoot: string, keyId: string): void {
+    const j = this.read();
+    j.hives[hiveIdOf(hiveRoot)] = { keyId, at: new Date().toISOString() };
+    mkdirSync(dirname(this.file), { recursive: true });
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(j, null, 2) + '\n');
+    renameSync(tmp, this.file);
   }
 }
 
