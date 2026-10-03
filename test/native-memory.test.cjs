@@ -585,3 +585,36 @@ test('CLI parseArgs: a dash-led token with whitespace is query text; `--` ends o
   assert.equal(parseArgs(['search', '--', '--wing']).args.wing, undefined);
   assert.deepEqual(parseArgs(['search', '--native-memory-smoke=']).rest, ['--native-memory-smoke='], 'unknown option: rejected');
 });
+
+test('CLAIM-LEDGER W3-1: a running worker follows the CURRENT Settings level: the fork carries it, and a change is pushed (claim-ledger) before the next request', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  let level = 'shadow';
+  const { w, workers } = wiring(root, { ...runtime(root), claimLedger: () => level });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = w.query('status');
+  await tick();
+  const wk = workers[0];
+  assert.equal(wk.posted[0].op, 'init');
+  assert.equal(wk.posted[0].config.claimLedger, 'shadow', 'a new worker gets the level in its config');
+  assert.equal(wk.posted[1].op, 'status', 'nothing to push: the fork carried it');
+  wk.reply({ event: 'ready' });
+  wk.reply({ id: wk.posted[1].id, ok: true, exit: 0, text: 's' });
+  await p1;
+  level = 'reader';
+  const p2 = w.query('search', { query: 'x' });
+  await tick();
+  assert.equal(wk.posted[2].op, 'claim-ledger');
+  assert.deepEqual(wk.posted[2].args, { value: 'reader' });
+  assert.equal(wk.posted.length, 3, 'the search waits for the worker to follow');
+  wk.reply({ id: wk.posted[2].id, ok: true, exit: 0, json: { changed: true } });
+  await tick(); await tick();
+  assert.equal(wk.posted[3].op, 'search');
+  wk.reply({ id: wk.posted[3].id, ok: true, exit: 0, text: 'r' });
+  await p2;
+  const p3 = w.syncClaims({ wing: 'a1', path: 'agents/a1/memory/claims', head: 'h', chunks: [] });
+  await tick();
+  assert.equal(wk.posted[4].op, 'claims-sync', 'no second push for the same level');
+  assert.equal(wk.posted[4].args.claimLedger, 'reader', 'and the sync carries the level');
+  wk.reply({ id: wk.posted[4].id, ok: true, exit: 0, json: {} });
+  await p3;
+});

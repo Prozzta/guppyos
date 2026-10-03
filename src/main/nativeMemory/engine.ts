@@ -11,7 +11,7 @@
 import { readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
-import { discoverSources, ALLOW_LIST_VERSION, sha256, type Discovery, type SourceEntry } from './sources';
+import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
 import { compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
 import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
@@ -62,7 +62,9 @@ export interface EngineDeps {
 }
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
-export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[] }
+export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
+  /** The Settings level main holds now (W3-1): a sync never acts on a stale level. */
+  claimLedger?: unknown }
 
 /** NATIVE-WAKEUP N1 (Jim, god andyn1wait): the bound on a wake-up's wait for its own wing. */
 export const WAKE_WAIT_MS = 5_000;
@@ -137,6 +139,7 @@ export class MemoryEngine {
     this.now = d.now ?? Date.now;
     this.setTimer = d.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
+    this.claimLedger = d.claimLedger;
   }
 
   // — the queue —
@@ -302,7 +305,41 @@ export class MemoryEngine {
 
   /** Discovery with the ledger levels (the setting from main, the manifest, this build). */
   private discover(): Discovery {
-    return discoverSources(this.d.hiveRoot, undefined, { claimLedger: this.d.claimLedger, ...(this.d.implementedLevel ? { implemented: this.d.implementedLevel } : {}) });
+    return discoverSources(this.d.hiveRoot, undefined, { claimLedger: this.claimLedger, ...(this.d.implementedLevel ? { implemented: this.d.implementedLevel } : {}) });
+  }
+
+  /** CLAIM-LEDGER: the Settings level as main last told this worker (W3-1: it follows changes). */
+  private claimLedger: unknown;
+
+  /**
+   * W3-1 (Jim): main tells a running worker the current Settings level. A change reconciles at
+   * once (a drop to shadow removes the claims and re-ingests memory.md; a raise swaps them), and
+   * the call resolves only after that, so the next search already sees the new level.
+   */
+  async setClaimLedger(value: unknown): Promise<{ changed: boolean; removed: number; embedded: number }> {
+    const same = this.claimLedger === value;
+    this.claimLedger = value;
+    if (same) return { changed: false, removed: 0, embedded: 0 };
+    const r = await this.reconcileNow();
+    return { changed: true, removed: r.removed, embedded: r.embedded };
+  }
+
+  /** A full reconcile now (after any running one): a level or manifest change. */
+  async reconcileNow(): Promise<{ removed: number; embedded: number }> {
+    if (this.backfilling) await this.backfilling.catch(() => undefined);
+    const r = await this.backfill();
+    return { removed: r.removed, embedded: r.embedded };
+  }
+
+  /** W3-1 (a): remove a wing's indexed sources that are no longer eligible (its markdown, once its
+   *  claims are a source), so a claim never lands beside what it replaces. */
+  private dropIneligible(wing: string, d: Discovery): number {
+    const keep = new Set(d.eligible.map((e) => e.path));
+    let n = 0;
+    for (const p of this.d.store.sourceShas().keys()) {
+      if (p.startsWith(`agents/${wing}/`) && !keep.has(p)) { this.d.store.removeSource(p); n++; }
+    }
+    return n;
   }
 
   // — CLAIM-LEDGER (W3) —
@@ -319,9 +356,12 @@ export class MemoryEngine {
     const run = prior.catch(() => undefined).then(async () => {
       // Indexed only while the agent's claims are a source (reader/writer AND a ledger exists), so a
       // claim never sits in the index beside the markdown it replaces.
+      // A sync carries main's CURRENT Settings level: follow it first (W3-1), then check.
+      if ('claimLedger' in a && this.claimLedger !== a.claimLedger) await this.setClaimLedger(a.claimLedger);
       const d = this.discover();
       if (!d.eligible.some((e) => e.kind === 'claims' && e.wing === a.wing)) throw new Error(`claims are not indexed for ${a.wing} (level ${d.ledgerLevels[a.wing] ?? 'off'})`);
-      const plan = await this.enqueue(PRIORITY.ingest, async () => this.d.store.planClaims(a.wing, a.chunks));
+      // W3-1 (a): the replaced markdown leaves in the same queue step that plans the claims.
+      const plan = await this.enqueue(PRIORITY.ingest, async () => { this.dropIneligible(a.wing, this.discover()); return this.d.store.planClaims(a.wing, a.chunks); });
       const vectors: Float32Array[] = [];
       for (let i = 0; i < plan.add.length; i += EMBED_BATCH) {
         const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => p.content);
@@ -338,6 +378,13 @@ export class MemoryEngine {
   /** R5 candidates for a just-appended claim (W3 side of R5CandidatesFn). */
   r5Candidates(wing: string, claimId: string, tau2: number): Promise<Array<{ b: string; cosine: number }>> {
     return this.enqueue(PRIORITY.search, async () => this.d.store.claimNeighbours(wing, claimId, tau2));
+  }
+
+  private manifestTimer: unknown = null;
+  /** memory-sources.json changed: a full reconcile after SOURCE_DEBOUNCE_MS (W3-1). */
+  manifestChanged(): void {
+    if (this.manifestTimer) this.clearTimer(this.manifestTimer);
+    this.manifestTimer = this.setTimer(() => { this.manifestTimer = null; void this.reconcileNow().catch(() => undefined); }, SOURCE_DEBOUNCE_MS);
   }
 
   /** A watched file changed: debounce, then ingest just that source (or remove it). */
@@ -361,6 +408,8 @@ export class MemoryEngine {
     if (!w) return;
     const on = (dir: string) => (file: string): void => {
       if (/\.md$/i.test(file)) this.sourceChanged(join(dir, file));
+      // W3-1: a manifest change (per-agent ledger levels, opt-ins) reconciles, debounced.
+      else if (dir === this.d.hiveRoot && file === SOURCES_CONFIG_FILE) this.manifestChanged();
     };
     const agentsDir = join(this.d.hiveRoot, 'agents');
     const watched = new Set<string>();
@@ -432,6 +481,7 @@ export class MemoryEngine {
   async close(): Promise<void> {
     for (const t of this.debounce.values()) this.clearTimer(t);
     this.debounce.clear();
+    if (this.manifestTimer) { this.clearTimer(this.manifestTimer); this.manifestTimer = null; }
     for (const w of this.watchers) { try { w.close(); } catch { /* gone */ } }
     this.watchers = [];
     if (this.unloadTimer) this.clearTimer(this.unloadTimer);

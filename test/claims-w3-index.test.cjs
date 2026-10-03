@@ -98,3 +98,46 @@ test('R5 candidates: same agent, live, cosine >= tau2, not the claim itself, not
   assert.deepEqual(r.keyed.map((x) => x.b).sort(), ['c-00000000000a', 'c-00000000000b'], 'c-...c shares release.window: a typed-slot match is R2, not R5');
   assert.deepEqual(r.unknown, []);
 });
+
+// — W3 audit fixes (Jim CL-W3-AUDIT 4a2c6e3c) —
+
+test('W3-1 (a): a manifest flip then a sync with NO backfill leaves 0 chunks from the three patterns; search finds only the claim', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('flipLive');
+  assert.ok(r.before >= 3);
+  assert.equal(r.after, 0);
+  assert.ok(r.hits.includes('claim:c-000000000001'));
+  assert.deepEqual(r.hits.filter((h) => /memory(-archive-.*|-ledger-export-.*)?\.md$/.test(h)), [], 'no replaced markdown beside the claim');
+  assert.ok(r.notes > 0, 'other sources untouched');
+});
+
+test('W3-1 (b): the Settings level on a running worker: raise swaps in claims, a drop to shadow brings memory.md back and hides the claims; a sync carrying the level follows it', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('settingLive');
+  assert.ok(r.atShadow.replaced >= 3);
+  assert.match(r.refused, /not indexed/);
+  assert.equal(r.raise.changed, true);
+  assert.deepEqual({ replaced: r.atReader.replaced, claims: r.atReader.claims }, { replaced: 0, claims: 1 });
+  assert.ok(r.atReader.hits.includes('claim:c-000000000001'));
+  assert.ok(!r.atReader.hits.includes('agents/a1/memory.md'));
+  assert.equal(r.drop.changed, true);
+  assert.ok(r.backToShadow.replaced >= 3, 'memory.md and the rest are back');
+  assert.equal(r.backToShadow.claims, 0, 'the claims are gone');
+  assert.ok(!r.backToShadow.hits.some((h) => h.startsWith('claim:')));
+  assert.ok(r.backToShadow.hits.includes('agents/a1/memory.md'));
+  assert.deepEqual({ replaced: r.followed.replaced, claims: r.followed.claims }, { replaced: 0, claims: 1 }, 'the sync made the engine follow writer first');
+});
+
+test('W3-1: a memory-sources.json change on disk reconciles through the watcher, with no sync and no restart', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('manifestWatch');
+  assert.equal(r.rootWatched, true);
+  assert.deepEqual(r.atReader, { replaced: 0, claims: 1 });
+  assert.ok(r.afterWatch.replaced >= 3);
+  assert.equal(r.afterWatch.claims, 0);
+});
+
+test('W3-2: no status row never returned (both branches); an unsent claim is dropped; wake-up carries no claim chunk', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('gaps');
+  for (const branch of ['fast', 'filtered', 'history']) assert.ok(!r.orphan[branch].includes('c-000000000001'), `${branch}: a claim chunk without a status row is never returned`);
+  assert.ok(r.orphan.fast.includes('c-000000000002'), 'its neighbour with a status row still is');
+  assert.equal(r.wakeHasClaim, false);
+  assert.deepEqual(r.unsent, { claims: 0, all: 0, statuses: 0 });
+});

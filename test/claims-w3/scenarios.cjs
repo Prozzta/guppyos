@@ -295,6 +295,95 @@ module.exports = async (drill) => {
     return { plain, keyed, unknown };
   }
 
+  // — W3 audit fixes (Jim CL-W3-AUDIT) —
+  const md3 = () => {
+    fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
+    write(hive, 'agents/a1/memory.md', '# Memory\n\n## 2026-09-01\n- memfact alpha zircon\n');
+    write(hive, 'agents/a1/memory-archive-2026-09-01.md', '# Archive\n\n- archfact zircon beta\n');
+    write(hive, 'agents/a1/memory-ledger-export-2026-10.md', '- exportfact zircon gamma\n');
+    write(hive, 'agents/a1/notes.md', '# Notes\n\n- notefact delta\n');
+    ledger('a1');
+  };
+  const replacedCount = (store) => store.db.prepare("SELECT count(*) AS n FROM chunks WHERE source_id IN ('agents/a1/memory.md') OR source_id LIKE 'agents/a1/memory-archive-%' OR source_id LIKE 'agents/a1/memory-ledger-export-%'").get().n;
+  const claimRows = (store) => store.db.prepare('SELECT count(*) AS n FROM claims').get().n;
+  const zircon = async (eng) => (await eng.search({ query: 'zircon', results: 10 })).json.map((h) => (h.claimId ? `claim:${h.claimId}` : h.source));
+
+  if (s === 'flipLive') {
+    // W3-1 (a): a manifest flip, then a sync with NO backfill: the replaced markdown leaves in the same step.
+    md3();
+    manifest({ a1: 'shadow' });
+    const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'writer' });
+    await eng.backfill();
+    const before = replacedCount(store);
+    manifest({ a1: 'reader' });
+    await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]);
+    const out = { before, after: replacedCount(store), hits: await zircon(eng), notes: store.db.prepare("SELECT count(*) AS n FROM chunks WHERE source_id = 'agents/a1/notes.md'").get().n };
+    await eng.close(); store.close();
+    return out;
+  }
+
+  if (s === 'settingLive') {
+    // W3-1 (b): the Settings level on a running worker: a raise swaps markdown for claims, a drop to
+    // shadow brings memory.md back and hides the claims, no restart; a sync carrying the level follows it.
+    md3();
+    manifest({});
+    const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'shadow' });
+    await eng.backfill();
+    const atShadow = { replaced: replacedCount(store), hits: await zircon(eng) };
+    let refused = 'accepted';
+    try { await eng.syncClaims({ wing: 'a1', path: 'agents/a1/memory/claims', head: 'h', chunks: withParts([chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]) }); } catch (e) { refused = String(e.message); }
+    const raise = await eng.setClaimLedger('reader');
+    await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]);
+    const atReader = { replaced: replacedCount(store), claims: claimRows(store), hits: await zircon(eng) };
+    const drop = await eng.setClaimLedger('shadow');
+    const backToShadow = { replaced: replacedCount(store), claims: claimRows(store), hits: await zircon(eng) };
+    // A sync that carries the level (main's current setting) makes the engine follow it first.
+    const follow = await eng.syncClaims({ wing: 'a1', path: 'agents/a1/memory/claims', head: 'h', claimLedger: 'writer', chunks: withParts([chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]) });
+    const followed = { replaced: replacedCount(store), claims: claimRows(store), follow };
+    await eng.close(); store.close();
+    return { atShadow, refused, raise, atReader, drop, backToShadow, followed };
+  }
+
+  if (s === 'manifestWatch') {
+    // W3-1: a memory-sources.json change on disk reconciles (the watcher), with no sync and no restart.
+    md3();
+    manifest({ a1: 'reader' });
+    const cbs = [];
+    const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'writer', watch: (dir, onChange) => { cbs.push([dir, onChange]); return { close() {} }; } });
+    await eng.backfill();
+    await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]);
+    eng.startWatching();
+    const atReader = { replaced: replacedCount(store), claims: claimRows(store) };
+    manifest({ a1: 'shadow' });
+    for (const [dir, fn] of cbs) if (path.resolve(dir) === path.resolve(hive)) fn('memory-sources.json');
+    await new Promise((r) => setTimeout(r, 3500));
+    const afterWatch = { replaced: replacedCount(store), claims: claimRows(store) };
+    await eng.close(); store.close();
+    return { atReader, afterWatch, rootWatched: cbs.some(([d]) => path.resolve(d) === path.resolve(hive)) };
+  }
+
+  if (s === 'gaps') {
+    // W3-2 (1) a claim chunk with no status row is never returned (both branches); (2) a claim main
+    // no longer sends is dropped; (3, 4) wake-up never carries claim chunks.
+    md3();
+    manifest({ a1: 'reader' });
+    const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'writer' });
+    await eng.backfill();
+    await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'orphanword quokka'), chunk('c-000000000002', 'a1', 'live', 'second wombat claim')]);
+    store.db.prepare("DELETE FROM claim_status WHERE claim_id = 'c-000000000001'").run();
+    const orphan = {
+      fast: claimHits(await eng.search({ query: 'orphanword quokka', results: 10 })).map((h) => h.claimId),
+      filtered: claimHits(await eng.search({ query: 'orphanword quokka', results: 10, wing: 'a1' })).map((h) => h.claimId),
+      history: claimHits(await eng.search({ query: 'orphanword quokka', results: 10, mode: 'history' })).map((h) => h.claimId),
+    };
+    const wake = (await eng.wakeUp('a1')).text;
+    const wakeAll = (await eng.wakeUp(null)).text;
+    await sync(eng, 'a1', []);
+    const unsent = { claims: claimRows(store), all: claimHits(await eng.search({ query: 'wombat quokka', results: 10, mode: 'all' })).length, statuses: store.db.prepare('SELECT count(*) AS n FROM claim_status').get().n };
+    await eng.close(); store.close();
+    return { orphan, wakeHasClaim: /quokka|wombat/.test(wake) || /quokka|wombat/.test(wakeAll), wakeHasNotes: /notefact/.test(wake), unsent };
+  }
+
   if (s === 'buildV2') {
     // A real v2 index (for G3.6): markdown + claims, at args.dbFile.
     fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });

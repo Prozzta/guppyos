@@ -72,7 +72,9 @@ test('G3.2: the full-corpus default-search p95 of the new build is at most 1.5x 
   copyCorpus(newHive);
   assert.ok(corpus.files > 10, `a real corpus (${corpus.files} files)`);
   const bullets = bulletsOf(newHive, corpus.agents);
-  const queries = queriesFrom(bullets);
+  // Queries are cut from LIVE bullets only (the g32-latency status rule: index % 10 < 3 is hidden), so the
+  // G3.5 proxy compares like with like; the hidden ~30% still sit in the index for the latency (W3-3).
+  const queries = queriesFrom(Object.fromEntries(Object.entries(bullets).map(([a, bs]) => [a, bs.filter((_, i) => i % 10 >= 3)])));
   assert.ok(queries.length >= 150, `${queries.length} queries`);
   // The new build: every agent with bullets at reader with a ledger; its memory markdown leaves the index.
   const claimAgents = corpus.agents.filter((a) => (bullets[a] ?? []).length);
@@ -88,7 +90,7 @@ test('G3.2: the full-corpus default-search p95 of the new build is at most 1.5x 
   assert.equal(newRes.ok, true, JSON.stringify(newRes).slice(0, 2000));
   const report = { at: new Date().toISOString(), corpus, queries: queries.length, old: oldRes, new: newRes, ratioP95: newRes.p95 / oldRes.p95, gate: '<= 1.5' };
   fs.writeFileSync(process.env.CLAIMS_G32_REPORT || path.join(JAIL, 'g32.json'), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify({ oldP95: oldRes.p95, newP95: newRes.p95, ratio: report.ratioP95, oldFound: oldRes.foundRate, newFound: newRes.foundRate, oldChunks: oldRes.counts.chunks, newChunks: newRes.counts.chunks, claims: newRes.claimCount }));
+  console.log(JSON.stringify({ oldP95: oldRes.p95, newP95: newRes.p95, ratio: report.ratioP95, oldFound: oldRes.foundRate, newFound: newRes.foundRate, oldChunks: oldRes.counts.chunks, newChunks: newRes.counts.chunks, claims: newRes.claimCount, oldMB: oldRes.indexMB, newMB: newRes.indexMB }));
   assert.ok(newRes.p95 <= 1.5 * oldRes.p95, `p95 ${newRes.p95.toFixed(1)} ms vs ${oldRes.p95.toFixed(1)} ms (x${report.ratioP95.toFixed(2)})`);
   // G3.5 automated proxy (the labelled §4 parity run is the raters'): the phrase each query was cut
   // from is found in the top 5 at least as often on claim chunks as on markdown, within 5 points.
