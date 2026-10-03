@@ -140,7 +140,8 @@ function deps(mode, { found = true, extra = {} } = {}) {
     },
     spawn: (f, a, o) => spawn(f, a, o)
   };
-  const entries = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : []);
+  // A fake killed before it wrote (or mid-line) leaves an empty or partial line: skip it, never throw.
+  const entries = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').flatMap((l) => { try { return l.trim() ? [JSON.parse(l)] : []; } catch { return []; } }) : []);
   return { d, log, tmpDir, entries };
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -160,7 +161,7 @@ async function successChecks(R) {
     assert.deepEqual(start.argv, ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'], 'C8: the four flags, --verbose included');
     assert.deepEqual(got.req, { type: 'control_request', request_id: R.CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } }, 'one initialize request');
     assert.ok(sameDir(start.cwd, f.tmpDir), `C11: claude runs in the temp dir, never an agent's project (${start.cwd})`);
-    assert.ok(await gone(start.pid), 'C3: the claude process (below the .cmd shim) is killed once it answered');
+    assert.equal(alive(start.pid), false, 'C3: the claude process (below the .cmd shim) is already gone when the call resolves');
   } finally { if (start && alive(start.pid)) try { process.kill(start.pid); } catch { /* gone */ } }
 }
 test('REAL fake claude, success: 11 models, the four flags, one initialize, temp cwd, the process TREE killed', { timeout: 30_000 }, () => successChecks(P));
@@ -185,12 +186,15 @@ test('REAL fake claude, auth error / no --verbose / empty list: plain words', { 
 async function hangChecks(R) {
   const f = deps('hang');
   const t0 = Date.now();
-  const r = await Promise.race([R.runClaudeInit(f.d, FAKE, 1500), new Promise((res) => setTimeout(() => res({ reason: 'NO TIME BOX' }), 6000))]);
+  // The box must let the fake START under suite load (node can take seconds then); 1.5 s once cut it
+  // off before it logged its pid, and the test had nothing to check (FLAKE-CLAUDE-MODEL-LIST-HANG).
+  const r = await Promise.race([R.runClaudeInit(f.d, FAKE, 5000), new Promise((res) => setTimeout(() => res({ reason: 'NO TIME BOX' }), 20_000))]);
   const pid = f.entries()[0]?.pid;
   try {
     assert.deepEqual(r, { reason: R.CLAUDE_REASONS.timeout }, 'C4: a claude that never answers is cut off by the time box');
-    assert.ok(Date.now() - t0 < 5000);
-    assert.ok(await gone(pid), 'C4: and its process tree is killed');
+    assert.ok(Date.now() - t0 < 19_000);
+    assert.ok(Number.isInteger(pid), 'the fake started and logged its pid inside the box');
+    assert.equal(alive(pid), false, 'C4: and its process tree is already gone when the call resolves');
   } finally { if (pid && alive(pid)) try { process.kill(pid); } catch { /* gone */ } }
 }
 test('REAL fake claude, hang: timed out inside the box and the tree killed', { timeout: 30_000 }, () => hangChecks(P));
@@ -252,16 +256,34 @@ test('WIRING: the app passes spawn; claude is listed by claudeAdapter; no creden
 // ── Creed's notes (N1-N3): an injected child, so the event order and the platform are exact ──
 
 const { EventEmitter } = require('node:events');
-/** A scripted child: `script(child)` runs once the request is written. */
-function scriptedDeps(platform, script, env = {}) {
-  const seen = { opts: null, kills: [], writes: [] };
+/** A scripted child: `script(child)` runs once the request is written. Like a real process, it
+ *  exits when its tree is killed (taskkill / SIGKILL to the group); a signal-0 probe of a dead
+ *  group throws ESRCH. `fail` scripts kills that do not work. */
+function scriptedDeps(platform, script, env = {}, { taskkillErrors = [], groupSurvives = false, neverExits = false } = {}) {
+  const seen = { opts: null, kills: [], writes: [], logs: [], child: null };
+  const die = () => {
+    const c = seen.child;
+    if (!c || c.dead || neverExits) return;
+    c.dead = true;
+    setImmediate(() => { c.emit('exit', null, 'SIGKILL'); c.emit('close', null, 'SIGKILL'); });
+  };
   const d = {
-    platform, env: { ComSpec: 'cmd.exe', ...env }, tmpDir: os.tmpdir(), exists: () => true,
-    exec: (file, args, opts, cb) => { seen.kills.push([file, ...args]); setImmediate(() => cb(null, '')); return { pid: 1 }; },
-    kill: (pid, sig) => { seen.kills.push([pid, sig]); },
+    platform, env: { ComSpec: 'cmd.exe', ...env }, tmpDir: os.tmpdir(), exists: () => true, exitWaitMs: 200,
+    log: (row) => seen.logs.push(row),
+    exec: (file, args, opts, cb) => {
+      seen.kills.push([file, ...args]);
+      const e = file === 'taskkill' ? taskkillErrors.shift() : undefined;
+      setImmediate(() => { if (file === 'taskkill' && !e) die(); cb(e ? Object.assign(new Error('taskkill failed'), { code: e }) : null, ''); });
+      return { pid: 1 };
+    },
+    kill: (pid, sig) => {
+      if (sig === 0) { if (seen.child?.dead) throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); return; }
+      seen.kills.push([pid, sig]);
+      if (!groupSurvives) die();
+    },
     spawn: (file, args, opts) => {
       seen.opts = opts;
-      const c = new EventEmitter(); c.pid = 4321;
+      const c = new EventEmitter(); c.pid = 4321; seen.child = c;
       c.stdout = new EventEmitter(); c.stderr = new EventEmitter();
       c.stdin = { on: () => {}, end: () => {}, write: (s) => { seen.writes.push(s); setImmediate(() => script(c, JSON.parse(s))); } };
       c.kill = (sig) => seen.kills.push(['child.kill', sig]);
@@ -321,7 +343,7 @@ test('N2: Bedrock / Vertex / Foundry users are never called "not signed in"', ()
 const MUTANTS = [
   ['C1 signed-out accepted', "    if (r.init.signedIn === false && !thirdPartyProvider(d.env)) return { status: 'failed', reason: CLAUDE_REASONS.notSignedIn, source };\n", '', signedOutChecks],
   ['C2 any request_id accepted', ' || j.response.request_id !== requestId) continue;', ') continue;', parseChecks],
-  ['C3 no tree kill', 'const killTree = (): void => {\n      if (exited) return;', 'const killTree = (): void => {\n      return;', successChecks],
+  ['C3 no tree kill', 'const killTree = async (): Promise<void> => {\n      if (exited) return;', 'const killTree = async (): Promise<void> => {\n      return;', successChecks],
   ['C4 no time box', '    timer = setTimeout(() => done({ reason: CLAUDE_REASONS.timeout }), timeout);\n', '', hangChecks],
   ['C5 aliases kept', "const id = typeof m.resolvedModel === 'string' && m.resolvedModel.trim() ? m.resolvedModel.trim() : m.value.trim();", 'const id = m.value.trim();', parseChecks],
   ['C6 API key used with Claude Code installed', "const exe = await resolveCliAsync(d, 'claude');\n    if (!exe) {", "const exe = await resolveCliAsync(d, 'claude');\n    if (!exe || getKey()) {", byokChecks],
@@ -333,11 +355,15 @@ const MUTANTS = [
   ['C12 third-party env ignored', ' && !thirdPartyProvider(d.env)) return', ') return', thirdPartyChecks],
   ['C13 third-party account shape ignored', "  if (has('apiProvider') && a.apiProvider !== 'firstParty') return null;\n", '', thirdPartyChecks],
   ['C14 final parse on exit', "child.on('close', (code) => {", "child.on('exit', (code) => {", closeChecks],
-  ['C15 only the direct child killed', "(d.kill ?? process.kill)(-pid, 'SIGKILL')", "(d.kill ?? process.kill)(pid, 'SIGKILL')", groupKillChecks],
+  ['C15 only the direct child killed', "try { kill(-pid, 'SIGKILL'); }", "try { kill(pid, 'SIGKILL'); }", groupKillChecks],
+  ['C17 resolved before the kill finished', 'void killTree().catch(() => { /* never rejects */ }).then(() => resolve(r));', 'void killTree(); resolve(r);', killOrderChecks],
+  ['C18 no retry of a failed kill', '        killed = await killOnce(pid);                                  // the one retry\n', '', killRetryChecks],
+  ['C19 a surviving tree not logged', "        try { d.log?.({ kind: 'claude-init-kill-failed', pid, platform: d.platform }); } catch { /* best effort */ }\n", '', killLogChecks],
+  ['C20 the kill result ignored', '(e) => res(!e || (e as ExecErr).code === 128));', '() => res(true));', killRetryChecks],
   ['C16 not detached on POSIX', "...(d.platform === 'win32' ? {} : { detached: true }), ", '', groupKillChecks]
 ];
 
-test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C16 each apply once and die', { timeout: 300_000 }, async (t) => {
+test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C20 each apply once and die', { timeout: 300_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, '..', SRC), 'utf8').replace(/\r\n/g, '\n');
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, async () => {
@@ -348,4 +374,80 @@ test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C16 each apply once and die', { timeou
       assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${name}${died ? ` (died of ${died.message})` : ''}`);
     });
   }
+});
+
+// ── FLAKE-CLAUDE-MODEL-LIST-HANG (1.1.82): the call resolves only after the tree kill, which is checked ──
+
+const answer = (c, req) => c.stdout.emit('data', reply(req.request_id, MODELS, ACCOUNT));
+
+async function killOrderChecks(P) {
+  const order = [];
+  const { d, seen } = scriptedDeps('win32', answer);
+  const exec = d.exec;
+  d.exec = (file, args, opts, cb) => exec(file, args, opts, (e, so) => setTimeout(() => { order.push('taskkill done'); cb(e, so); }, 150));
+  const r = await P.runClaudeInit(d, 'C:\\x\\claude.exe', 3000);
+  order.push('resolved');
+  assert.equal(r.init.models.length, 11);
+  assert.deepEqual(order, ['taskkill done', 'resolved']);
+  assert.equal(seen.child.dead, true, 'the process is gone when the call resolves');
+  assert.deepEqual(seen.logs, []);
+}
+test('KILL: the call resolves only AFTER the tree kill finished and the process reported its exit', () => killOrderChecks(P));
+
+async function killRetryChecks(P) {
+  const once = scriptedDeps('win32', answer, {}, { taskkillErrors: [1] });
+  once.d.exitWaitMs = 3000;   // a failed taskkill is retried AT ONCE (its result is read), not after the exit wait
+  const t0 = Date.now();
+  await P.runClaudeInit(once.d, 'C:\\x\\claude.exe', 3000);
+  assert.ok(Date.now() - t0 < 1500, `the retry followed the failed taskkill directly (${Date.now() - t0} ms)`);
+  assert.deepEqual(once.seen.kills, [['taskkill', '/PID', '4321', '/T', '/F'], ['taskkill', '/PID', '4321', '/T', '/F']], 'one retry');
+  assert.equal(once.seen.child.dead, true);
+  assert.deepEqual(once.seen.logs, [], 'the retry worked: nothing to report');
+  const gone128 = scriptedDeps('win32', answer, {}, { taskkillErrors: [128] });
+  gone128.d.exitWaitMs = 50;
+  const t = Date.now();
+  await P.runClaudeInit(gone128.d, 'C:\\x\\claude.exe', 3000);
+  assert.equal(gone128.seen.kills.length, 2, '128 with the process still reporting nothing: waits, then retries once');
+  assert.ok(Date.now() - t < 2000);
+}
+test('KILL: a failed taskkill is retried once; 128 (already gone) counts as done', () => killRetryChecks(P));
+
+async function killLogChecks(P) {
+  const twice = scriptedDeps('win32', answer, {}, { taskkillErrors: [1, 1] });
+  const r = await P.runClaudeInit(twice.d, 'C:\\x\\claude.exe', 3000);
+  assert.equal(r.init.models.length, 11, 'the list is still returned');
+  assert.equal(twice.seen.kills.length, 2);
+  assert.deepEqual(twice.seen.logs, [{ kind: 'claude-init-kill-failed', pid: 4321, platform: 'win32' }]);
+  // taskkill says done but the process never reports its exit: retried, then logged (bounded by exitWaitMs)
+  const stuck = scriptedDeps('win32', answer, {}, { neverExits: true });
+  const t = Date.now();
+  await P.runClaudeInit(stuck.d, 'C:\\x\\claude.exe', 3000);
+  assert.ok(Date.now() - t < 2000, 'bounded');
+  assert.equal(stuck.seen.kills.length, 2);
+  assert.deepEqual(stuck.seen.logs.map((l) => l.kind), ['claude-init-kill-failed']);
+}
+test('KILL: a tree that survives the kill and its retry is LOGGED, and the call still resolves', () => killLogChecks(P));
+
+test('KILL (POSIX): the group is probed after SIGKILL; a surviving group is retried once and logged', async () => {
+  const ok = scriptedDeps('linux', answer);
+  await P.runClaudeInit(ok.d, '/usr/local/bin/claude', 3000);
+  assert.deepEqual(ok.seen.kills, [[-4321, 'SIGKILL']]);
+  assert.deepEqual(ok.seen.logs, []);
+  const survives = scriptedDeps('linux', answer, {}, { groupSurvives: true });
+  await P.runClaudeInit(survives.d, '/usr/local/bin/claude', 3000);
+  assert.deepEqual(survives.seen.kills, [[-4321, 'SIGKILL'], [-4321, 'SIGKILL']]);
+  assert.deepEqual(survives.seen.logs, [{ kind: 'claude-init-kill-failed', pid: 4321, platform: 'linux' }]);
+});
+
+test('KILL: a process that exited by itself is not killed again', async () => {
+  const { d, seen } = scriptedDeps('win32', (c) => { c.emit('exit', 0, null); c.emit('close', 0, null); });
+  await P.runClaudeInit(d, 'C:\\x\\claude.exe', 3000);
+  assert.deepEqual(seen.kills, []);
+  assert.deepEqual(seen.logs, []);
+});
+
+test('KILL wiring: the app passes the hive log to the model-list run', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(src, /log: \(row: Record<string, unknown>\) => \{ try \{ hive\.appendLog\(row/);
+  assert.equal(P.CLAUDE_EXIT_WAIT_MS, 5_000);
 });

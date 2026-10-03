@@ -5058,7 +5058,9 @@ ipcMain.handle('models:refresh', async () => {
     platform: process.platform, env: process.env, exists: existsSync,
     exec: (file: string, args: string[], opts: Parameters<typeof execFile>[2], cb: (err: (Error & { code?: unknown; killed?: boolean }) | null, stdout: string) => void) =>
       execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))),
-    spawn: (file: string, args: string[], opts: Parameters<typeof spawn>[2]) => spawn(file, args, opts)
+    spawn: (file: string, args: string[], opts: Parameters<typeof spawn>[2]) => spawn(file, args, opts),
+    // a claude process tree the model-list run could not kill is logged, never silent
+    log: (row: Record<string, unknown>) => { try { hive.appendLog(row as Parameters<typeof hive.appendLog>[0]); } catch { /* best-effort */ } }
   };
   const fetchJson = async (url: string, headers: Record<string, string>, timeoutMs: number) => {
     const res = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
