@@ -39,7 +39,7 @@ import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, CODEX_EFFORT_KEY, normEffort, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
-import { claudePromptTrimFor } from '../shared/claudePromptTrim';
+import { claudePromptTrimFor, withSkillOverrides } from '../shared/claudePromptTrim';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   DEV_ISOLATION, sanitizeCodexConfigForDev, hookPipeId,
@@ -1570,8 +1570,7 @@ export class HiveManager {
       const settingsPath = join(dir, 'settings.json');
       // HOOK-BROKER: this spawn's HTTP hook URL (a fresh token), or null -> command hooks.
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
-      const settings = this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as Record<string, unknown>;
-      this.writeJson(settingsPath, trim.skillOverrides ? { ...settings, skillOverrides: trim.skillOverrides } : settings);
+      this.writeJson(settingsPath, withSkillOverrides(this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as object, trim));
       // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       args.push('--settings', settingsPath);

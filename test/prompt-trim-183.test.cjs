@@ -87,6 +87,9 @@ K.skills = (M = T) => {
   for (const n of ['loop', 'artifact-design']) assert.equal(god[n], undefined, `GOD KEEPS THE SKILLS IT CALLED IN FULL: ${n}`);
   assert.equal(M.claudePromptTrimFor({ isGod: true }, true, ['loop']).skillOverrides.loop, undefined, 'even if an account skill shares the name');
   assert.equal(M.claudePromptTrimFor({ isGod: true }, false, synced).skillOverrides, null);
+  const base = { hooks: { Stop: [] }, disableAgentView: true };
+  assert.deepEqual(M.withSkillOverrides(base, M.claudePromptTrimFor({ isGod: false }, true, synced)), { ...base, skillOverrides: builder }, 'THE SETTINGS KEEP EVERYTHING AND GAIN THE OVERRIDES');
+  assert.equal(M.withSkillOverrides(base, M.claudePromptTrimFor({ isGod: false }, false)), base, 'off: the settings object is unchanged');
 };
 test('skills: unused ones are listed by name only (still loadable); god keeps loop and the Artifact guides in full', () => K.skills());
 
@@ -111,7 +114,7 @@ K.wiring = (hive = readSource('src/main/hive.ts'), idx = readSource('src/main/in
   assert.ok(claude.length > 500, 'the Claude spawn block is found');
   assert.match(claude, /const trim = claudePromptTrimFor\(\{ isGod: meta\.isGod \}, opts\.claudePromptTrim !== false, syncedClaudeSkillNames\(\)\);/, 'THE TRIM IS RESOLVED PER ROLE WITH THE CONFIG SWITCH');
   assert.match(claude, /\n    Object\.assign\(env, trim\.env\);\n    if \(trim\.arg\) \{\n      args\.push\(trim\.arg\);/, 'THE FLAG AND THE ENV REACH THE SPAWN');
-  assert.match(claude, /this\.writeJson\(settingsPath, trim\.skillOverrides \? \{ \.\.\.settings, skillOverrides: trim\.skillOverrides \} : settings\);/, 'THE SKILL OVERRIDES REACH THE SETTINGS FILE');
+  assert.match(claude, /this\.writeJson\(settingsPath, withSkillOverrides\(this\.hookSettings\([^\n]*, trim\)\);/, 'THE SKILL OVERRIDES REACH THE SETTINGS FILE');
   // Only after the non-Claude early return: other CLIs are untouched.
   assert.ok(hive.indexOf('    if (!claudeProvider) return { args, env };') < hive.indexOf('const trim = claudePromptTrimFor('), 'CLAUDE SPAWNS ONLY');
   assert.match(idx, /claudePromptTrim: readConfig\(\)\.claudePromptTrim !== false,/, 'THE CONFIG SWITCH IS PASSED TO THE SPAWN');
@@ -160,7 +163,7 @@ const MUTANTS = [
     edits: [['claudePromptTrimFor({ isGod: meta.isGod }, opts.claudePromptTrim !== false, syncedClaudeSkillNames())', 'claudePromptTrimFor({ isGod: meta.isGod }, true, syncedClaudeSkillNames())']],
     killer: 'wiring', dies: /THE TRIM IS RESOLVED PER ROLE WITH THE CONFIG SWITCH/ },
   { name: 'the settings file never gets the overrides', file: 'src/main/hive.ts', hive: true,
-    edits: [['this.writeJson(settingsPath, trim.skillOverrides ? { ...settings, skillOverrides: trim.skillOverrides } : settings);', 'this.writeJson(settingsPath, settings);']],
+    edits: [[', meta.id) as object, trim));', ', meta.id));']],
     killer: 'wiring', dies: /THE SKILL OVERRIDES REACH THE SETTINGS FILE/ },
   { name: 'a skill is turned off', file: SH, module: true,
     edits: [["skillOverrides[name] = 'name-only';", "skillOverrides[name] = 'off' as 'name-only';"]], killer: 'skills', dies: /NEVER TURNED OFF/ },

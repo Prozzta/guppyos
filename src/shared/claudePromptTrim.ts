@@ -50,6 +50,11 @@ export interface PromptTrim {
   skillOverrides: Record<string, 'name-only'> | null;
 }
 
+/** The per-agent settings object with this trim's `skillOverrides` added (unchanged when none). */
+export function withSkillOverrides<T extends object>(settings: T, trim: PromptTrim): T | (T & { skillOverrides: Record<string, 'name-only'> }) {
+  return trim.skillOverrides ? { ...settings, skillOverrides: trim.skillOverrides } : settings;
+}
+
 /** The trim for one Claude agent; `enabled: false` (config claudePromptTrim) = none.
  *  `syncedSkills`: the names of the skills synced from the user's claude.ai account (no hive agent
  *  ever called one); they are listed by name only for every role. Pure. */

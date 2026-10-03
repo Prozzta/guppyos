@@ -217,6 +217,7 @@ test('WIRING: index.ts supplies the predicate, and it is the ONLY place that doe
   const homedirCalls = hive.split('\n')
     .filter((l) => l.includes('homedir()') && !l.trim().startsWith('//') && !l.trim().startsWith('*'));
   assert.deepEqual(homedirCalls.map((l) => l.trim()), [
+    'export function syncedClaudeSkillNames(home: string = homedir()): string[] {', // READS-PROMPT-TRIM (1.1.83): READS the synced skill names, never writes
     "const seed = join(homedir(), '.codex', 'config.toml');", // codexSeedEffort (1.1.79 M2): READS the seed's effort, never writes
     "const dir = join(homedir(), '.gemini', 'config', 'agents');", // sweepAgyAgents - gated above
     "return join(homedir(), '.gemini', 'config', 'agents', HiveManager.agyAgentName(agentId));", // agyAgentDir: only installAgyAgent/removeAgyAgent, both gated above
