@@ -79,6 +79,8 @@ export interface ClaimStoreDeps {
   newId?: (t: 'claim' | 'event') => string;
   /** How long an idle append handle stays open (default FD_IDLE_MS). */
   fdIdleMs?: number;
+  /** CLAIM-LEDGER W3: told after every acked append (main schedules the index sync). */
+  onAppend?: (agentId: string, id: string) => void;
 }
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
@@ -440,6 +442,7 @@ export class ClaimStore {
     try { s.tailSize = nodeFs.statSync(file).size; } catch { this.state.delete(agentId); }
     if (registryAdded) registryAdded();
     this.backupIfDue(agentId, rec.wt);
+    try { this.d.onAppend?.(agentId, rec.id); } catch { /* the append is acked; indexing catches up */ }
     return { ok: true, id: rec.id };
   }
 

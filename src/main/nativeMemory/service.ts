@@ -11,6 +11,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { WorkerConfig } from './worker';
+import { CLAIM_KINDS } from '../../shared/claims';
 
 /** CLI exit codes (section 6). */
 export const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 } as const;
@@ -41,6 +42,8 @@ export interface ServiceDeps {
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
   log?: (row: Record<string, unknown>) => void;
+  /** Told when a (re)started worker is ready (CLAIM-LEDGER: main re-sends every agent's claims). */
+  onReady?: () => void;
 }
 
 export class NativeMemoryClient {
@@ -89,7 +92,7 @@ export class NativeMemoryClient {
   private onMessage(msg: unknown): void {
     const m = msg as { id?: number; event?: string } & Reply;
     if (m && m.event) {
-      if (m.event === 'ready') this.ready = true;
+      if (m.event === 'ready') { this.ready = true; try { this.d.onReady?.(); } catch { /* best effort */ } }
       // Jim N2: the model was dropped after idle, so the next search pays a model load again:
       // it gets the COLD budget, not the warm one.
       else if (m.event === 'model-unloaded') this.warm = false;
@@ -201,8 +204,15 @@ export function validateRequest(body: MemoryRequest, callerWing: string): { op: 
       const v = a[k];
       if (v !== undefined && v !== null && (typeof v !== 'string' || !ISO.test(v) || Number.isNaN(Date.parse(v)))) return { exit: EXIT.usage, error: `--${k} must be an ISO date` };
     }
+    // CLAIM-LEDGER (A5): --history / --all (never both), --kind, --key.
+    if (a.history === true && a.all === true) return { exit: EXIT.usage, error: 'use --history or --all, not both' };
+    const mode = a.all === true ? 'all' : a.history === true ? 'history' : 'live';
+    const kind = a.kind === undefined || a.kind === null ? null : a.kind;
+    if (kind !== null && (typeof kind !== 'string' || !(CLAIM_KINDS as readonly string[]).includes(kind))) return { exit: EXIT.usage, error: `--kind is one of ${CLAIM_KINDS.join(', ')}` };
+    const key = a.key === undefined || a.key === null ? null : a.key;
+    if (key !== null && (typeof key !== 'string' || !/^[a-z0-9][a-z0-9_.-]{0,119}$/.test(key))) return { exit: EXIT.usage, error: 'bad --key' };
     // `caller` (the token's wing) is never a filter: only NATIVE-WAKEUP (b)'s backfill hint.
-    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing } };
+    return { op: 'search', args: { query: q, wing, room, results: n, since: a.since ?? null, before: a.before ?? null, caller: callerWing, mode, kind, key } };
   }
   if (cmd === 'wake-up') {
     const wing = optWing(a.wing);

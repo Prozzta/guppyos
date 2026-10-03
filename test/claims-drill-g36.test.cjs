@@ -45,7 +45,13 @@ test('G3.6: 1.1.83 reconciles its own stale index next to a v2 index, and never 
   const oldDb = path.join(memDir, `${key}.sqlite`);
   const v2File = path.join(memDir, `${key}-v2.sqlite`);
   fs.mkdirSync(memDir, { recursive: true });
-  fs.writeFileSync(v2File, crypto.randomBytes(64 * 1024));
+  // A REAL v2 index, written by THIS build's store (markdown + a claim), in its own sandbox hive.
+  const v2Hive = path.join(JAIL, 'v2-hive');
+  fs.mkdirSync(v2Hive, { recursive: true });
+  const built = await runDrill({ tree: path.join(__dirname, '..'), hive: v2Hive, home: path.join(JAIL, 'v2-home'), script: path.join(__dirname, 'claims-w3', 'scenarios.cjs'), needModel: false, args: { scenario: 'buildV2', dbFile: v2File } });
+  assert.equal(built.ok, true, JSON.stringify(built));
+  assert.ok(built.counts.chunks >= 2, 'the v2 file holds a markdown chunk and a claim chunk');
+  for (const side of ['-wal', '-shm']) fs.rmSync(`${v2File}${side}`, { force: true });
   const v2Sha = crypto.createHash('sha256').update(fs.readFileSync(v2File)).digest('hex');
 
   const res = await runDrill({

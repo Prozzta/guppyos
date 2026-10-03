@@ -1,0 +1,100 @@
+'use strict';
+/**
+ * CLAIM-LEDGER W3 gates on the real store (the app's better-sqlite3 + sqlite-vec under Electron as
+ * Node, through the C4 drill runner: sandbox hive, jailed home, allow-list env):
+ *   G3.1 no leak (random corpora x 1,000 queries, both branches)   G3.1b no leak after a change
+ *   G3.1c the cap (N >> k hidden nearest)                            G3.3 disposable
+ *   G3.4 the flip (three patterns out, claims in; and back)          append-only claims; R5 candidates
+ * It fails (never skips) when Electron is missing.
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'md-w3-'));
+test.after(() => fs.rmSync(JAIL, { recursive: true, force: true }));
+const { runDrill } = require('./claims-drill/runner.cjs');
+const TREE = path.join(__dirname, '..');
+const SCRIPT = path.join(__dirname, 'claims-w3', 'scenarios.cjs');
+
+let n = 0;
+async function scenario(name, args = {}) {
+  const dir = path.join(JAIL, `${name}-${++n}`);
+  const hive = path.join(dir, 'hive');
+  fs.mkdirSync(hive, { recursive: true });
+  const res = await runDrill({ tree: TREE, hive, home: path.join(dir, 'home'), script: SCRIPT, needModel: false, args: { scenario: name, ...args } });
+  assert.equal(res.ok, true, JSON.stringify(res, null, 2).slice(0, 3000));
+  return res;
+}
+
+test('G3.1 no leak: 3 random corpora x 1,000 queries; no superseded, retracted or purged claim by default, in either branch', { timeout: 10 * 60_000 }, async () => {
+  const r = await scenario('noleak');
+  assert.equal(r.corpora, 3);
+  assert.ok(r.queries >= 1000, `${r.queries} queries`);
+  assert.deepEqual(r.leaks, [], 'no hidden claim returned by default');
+  assert.ok(r.liveClaimHits > 100 && r.mdHits > 100, `the queries do hit (live claims ${r.liveClaimHits}, markdown ${r.mdHits})`);
+  assert.ok(r.historyHits > r.liveClaimHits, '--history shows more');
+  assert.equal(r.historyGone, 0, '--history never shows a purged claim');
+  assert.ok(r.allGoneHits > 0, '--all does');
+});
+
+test('G3.1b no leak after a change: R2, R3, R4, soft supersede and a multi-part claim are hidden at once, in both branches; never re-embedded', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('later');
+  for (const [id, b] of Object.entries(r.before)) assert.deepEqual(b, { fast: true, filtered: true }, `${id} is found while live`);
+  for (const [id, a] of Object.entries(r.after)) {
+    assert.equal(a.fast, false, `${id} (${a.cause}): not in the KNN fast path`);
+    assert.equal(a.filtered, false, `${id} (${a.cause}): not in the filtered exact scan`);
+    assert.equal(a.statusChanges, 1);
+  }
+  assert.ok(r.parts >= 2, 'the long claim really has several parts');
+  assert.equal(r.reEmbedded, 0, 'a status change never re-embeds');
+  assert.deepEqual(r.history[0], ['c-000000000001', 'superseded'], '--history still finds it first, marked');
+});
+
+test('G3.1c the cap: the 590 nearest are hidden; both branches still return k live results', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('cap');
+  assert.equal(r.fast.length, 5); assert.equal(r.filtered.length, 5);
+  assert.ok(r.fast.every((s) => s === 'live') && r.filtered.every((s) => s === 'live'), JSON.stringify(r));
+  assert.ok(r.fastLiveEpsilon >= 1, 'the live near neighbours are what comes back');
+});
+
+test('G3.3 disposable: delete the index, rebuild, identical results', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('disposable');
+  assert.equal(r.identical, true);
+  assert.deepEqual(r.a, { ...r.b, generation: r.a.generation });
+  assert.ok(r.sample.length > 0);
+});
+
+test('G3.4 the flip: at reader the three patterns have 0 chunks and claims are in; a flip back restores them and removes the claims', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('flip');
+  assert.ok(r.shadow.excluded >= 3 && r.shadow.claims === 0, `shadow: markdown in, no claims ${JSON.stringify(r.shadow)}`);
+  assert.match(r.shadowSync, /not indexed for a1 \(level shadow\)/);
+  assert.equal(r.reader.excluded, 0, 'reader: 0 chunks from memory.md, memory-archive-*.md, memory-ledger-export-*.md');
+  assert.ok(r.reader.notes > 0 && r.reader.other > 0, 'other sources and agents untouched');
+  assert.equal(r.reader.claims, 1);
+  assert.ok(r.flippedRemoved >= 3, 'the flip was a removal');
+  assert.equal(r.searchMem, 1); assert.equal(r.mdMem, 0, 'search finds the claim, not memory.md');
+  assert.ok(r.flippedBack.excluded >= 3, 'flip back: the three patterns return');
+  assert.equal(r.flippedBack.claims, 0); assert.equal(r.flippedBack.claimChunks, 0); assert.equal(r.flippedBack.statuses, 0);
+});
+
+test('claims is append-only in the index (triggers); claim_status is mutable; a resync is idempotent', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('appendOnly');
+  assert.match(r.update, /append-only/);
+  assert.match(r.delete, /append-only/);
+  assert.equal(r.statusUpdate, 'ok');
+  assert.equal(r.claims, 1);
+  assert.equal(r.schema, '2');
+  assert.deepEqual(r.again, { embedded: 0, dropped: 0, statusChanges: 1 }, 'a hand-edited status is restored from the ledger, without a re-embed');
+  assert.deepEqual(r.again2, { embedded: 0, dropped: 0, statusChanges: 0 }, 'then a resync is a no-op');
+});
+
+test('R5 candidates: same agent, live, cosine >= tau2, not the claim itself, not on the same key', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('r5');
+  assert.deepEqual(r.plain.map((x) => x.b).sort(), ['c-00000000000b', 'c-00000000000c', 'c-000000000010']);
+  assert.ok(r.plain.every((x) => x.cosine >= 0.9));
+  assert.deepEqual(r.keyed.map((x) => x.b).sort(), ['c-00000000000a', 'c-00000000000b'], 'c-...c shares release.window: a typed-slot match is R2, not R5');
+  assert.deepEqual(r.unknown, []);
+});

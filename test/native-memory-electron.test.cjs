@@ -119,7 +119,7 @@ test('WORKER: the real entry over a parent port - ready, backfill (joins the sta
   assert.ok(j.s2src.includes('agents/jim/AUDIT.md'));
   assert.match(j.wake, /^Wake-up text \(~\d+ tokens\):\n={50}\n## L0 — IDENTITY\nYou are Andy, a builder\.\n\n## L1 — ESSENTIAL STORY\n\n\[memory\]\n {2}- ## 2026-09-26 - LOG-STALL/);
   assert.equal(j.status.chunks, 3);
-  assert.equal(j.report.allowListVersion, 1);
+  assert.equal(j.report.allowListVersion, 2);
   assert.deepEqual(j.report.excludedMd, []);
   assert.deepEqual(j.expired, { id: 7, ok: false, exit: 4, error: 'expired' });
   assert.equal(j.bad.exit, 2);

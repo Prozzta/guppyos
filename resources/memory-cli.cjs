@@ -13,7 +13,7 @@ const http = require('http');
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
-const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] | wake-up [--wing W] | status} [--format json]\n'
+const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] | wake-up [--wing W] | status} [--format json]\n'
   + '  claim ledger (when it is on for you):\n'
   + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID]... [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
@@ -53,6 +53,11 @@ function parseArgs(argv) {
     if (flag === '--results') { out.args.results = Number(val()); i += step(); continue; }
     if (flag === '--format') { out.format = val(); i += step(); continue; }
     if (flag === '--help') { out.help = true; i += 1; continue; }
+    if (flag && out.cmd === 'search') {
+      // CLAIM-LEDGER read modes and claim filters (spec amendment A5).
+      if (flag === '--history' || flag === '--all') { out.args[flag.slice(2)] = true; i += 1; continue; }
+      if (flag === '--kind' || flag === '--key') { out.args[flag.slice(2)] = val(); i += step(); continue; }
+    }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
       if (CLAIM_VALUE_FLAGS[flag]) { out.args[CLAIM_VALUE_FLAGS[flag]] = val(); i += step(); continue; }

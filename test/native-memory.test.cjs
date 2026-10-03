@@ -98,7 +98,7 @@ test('ALLOW-LIST (section 1): memory.md and direct agent .md are eligible; neste
   ]);
   assert.deepEqual(d.excludedMd, ['NOTE.md', 'agents/a1/.claude/skills/s/SKILL.md', 'agents/a1/sub/NESTED.md', 'board.md']);
   assert.ok(!d.excludedMd.some((p) => p.includes('inbox')), 'mail is never walked');
-  assert.equal(d.allowListVersion, 1);
+  assert.equal(d.allowListVersion, 2);
   assert.equal(d.counts.eligible, 3);
 });
 
@@ -160,7 +160,7 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 test('VALIDATION (section 6): ranges, ISO dates, wing names; wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
-  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1' } });
+  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
     assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1').exit, EXIT.usage, JSON.stringify(bad));
   }
@@ -320,7 +320,7 @@ test('WIRING: query() serves the Memory panel / Command Center as caller `human`
   const seen = [];
   w.client.request = async (op, args) => { seen.push({ op, args }); return { ok: true, exit: 0, text: 'T\n' }; };
   assert.equal((await w.query('search', { query: 'log rotation', wing: 'jim' })).text, 'T\n');
-  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human' } });
+  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null } });
   assert.equal((await w.query('search', { query: '' })).exit, EXIT.usage);
   await w.query('wake-up', { wing: 'andy' });
   assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy' } });
@@ -337,7 +337,7 @@ test('WIRING: the vec0 path maps from inside app.asar to app.asar.unpacked (the 
 test('WIRING: the index file is keyed by the hive root (two hives / dev and stable never share one)', () => {
   assert.equal(dbFileFor('U', 'C:\\Dunder\\hive'), dbFileFor('U', 'c:/dunder/hive'));
   assert.notEqual(dbFileFor('U', 'C:/Dunder/hive'), dbFileFor('U', 'C:/Dunder/hive-dev'));
-  assert.match(dbFileFor('U', 'C:/x'), /memory[\\/][0-9a-f]{16}\.sqlite$/);
+  assert.match(dbFileFor('U', 'C:/x'), /memory[\\/][0-9a-f]{16}-v2\.sqlite$/, 'CLAIM-LEDGER F6: the v2 file, never 1.1.83 own');
 });
 
 // ── HTTP route ────────────────────────────────────────────────────────────

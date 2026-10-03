@@ -797,7 +797,7 @@ test('the memory CLI maps the claim verbs; identity flags reach the app and are 
   assert.deepEqual(cli.parseArgs(['retract', 'c-aaaaaaaaaaaa', 'c-bbbbbbbbbbbb', '--why', 'wrong']).args, { text: 'wrong', ids: ['c-aaaaaaaaaaaa', 'c-bbbbbbbbbbbb'] });
   assert.deepEqual(cli.parseArgs(['reconcile', 'c-a', 'c-b', '--answer', 'keep-both']).args, { answer: 'keep-both', a: 'c-a', b: 'c-b' });
   assert.deepEqual(cli.parseArgs(['used', 'c-a', '--op', 'hurt']).args, { op: 'hurt', id: 'c-a' });
-  assert.deepEqual(cli.parseArgs(['search', '--kind', 'x', 'q']).rest, ['--kind'], 'claim flags are not search flags');
+  assert.deepEqual(cli.parseArgs(['search', '--ref', 'x', 'q']).rest, ['--ref'], 'note-only flags are not search flags (W3 gives search --kind and --key)');
   assert.deepEqual(cli.parseArgs(['note', '--wing', 'dwight', 'x']).args.wing, 'dwight');
 });
 

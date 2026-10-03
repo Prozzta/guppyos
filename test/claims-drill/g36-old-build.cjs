@@ -27,7 +27,8 @@ module.exports = async (drill) => {
   const embedder = drill.makeEmbedder();
   const engineOn = (dbFile) => {
     const store = NativeMemoryStore.open(dbFile, drill.openOpts);
-    const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: words, mode: () => 'native', watch: null, setTimer: (fn) => setImmediate(fn), clearTimer: () => {} });
+    const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: words, mode: () => 'native', watch: null });
+    // Real timers (Creed): an immediate setTimer fires the idle model unload at once (a race).
     eng.storeOpenOptions = drill.openOpts;
     return { store, eng };
   };
@@ -36,6 +37,7 @@ module.exports = async (drill) => {
   let { store, eng } = engineOn(a.oldDb);
   const first = await eng.backfill();
   await drill.assert.modelLoaded(embedder);
+  await eng.close();
   store.close();
 
   // 2. Life goes on under the new build: sources change; the old index is now stale.
@@ -48,8 +50,8 @@ module.exports = async (drill) => {
   const found = await eng.search({ query: a.find, results: 5 });
   const gone = await eng.search({ query: a.gone, results: 5 });
   const counts = store.counts();
+  await eng.close();
   store.close();
-  await embedder.unload();
 
   const body = (r) => String(r.text ?? '').replace(/Results for: ".*"/, '');
   const sources = (r) => (Array.isArray(r.json) ? r.json.map((h) => String(h.source)) : []);

@@ -46,12 +46,18 @@ export interface WiringDeps {
   /** CLAIM-LEDGER W1: the claim verbs (note, retract, ...), or null when this build or hive has no
    *  ledger; then they answer "unsupported" as before. They do not need the index worker. */
   claims?: () => ClaimsEndpointDeps | null;
+  /** CLAIM-LEDGER W3: the Settings level (config claimLedger), passed to the worker's discovery. */
+  claimLedger?: () => unknown;
+  /** CLAIM-LEDGER W3: a (re)started worker is ready; main re-sends every flagged agent's claims (G3.3). */
+  onWorkerReady?: () => void;
 }
 
-/** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings. */
+/** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings.
+ *  CLAIM-LEDGER (F6, A4): `<key>-v2.sqlite`, SCHEMA_VERSION 2. Builds without the ledger open only
+ *  `<key>.sqlite` and never this file; this build never opens theirs (G3.6). */
 export function dbFileFor(userData: string, hiveRoot: string): string {
   const key = createHash('sha256').update(hiveRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16);
-  return join(userData, 'memory', `${key}.sqlite`);
+  return join(userData, 'memory', `${key}-v2.sqlite`);
 }
 
 /** Why memory is not available (one log row per reason per run, not one per spawn). */
@@ -64,7 +70,7 @@ export class NativeMemoryWiring {
   private loggedUnavailable = new Set<MemoryUnavailable>();
 
   constructor(private readonly d: WiringDeps) {
-    this.client = new NativeMemoryClient({ fork: () => d.fork(d.workerEntry), config: () => this.workerConfig(), log: d.log });
+    this.client = new NativeMemoryClient({ fork: () => d.fork(d.workerEntry), config: () => this.workerConfig(), log: d.log, onReady: () => d.onWorkerReady?.() });
   }
 
   private runtimeManifest(): RuntimeManifest | null {
@@ -95,7 +101,7 @@ export class NativeMemoryWiring {
     if (!vecPath) return null;
     const modelDir = join(this.d.resourcesDir, 'models', m.model.dir);
     if (!existsSync(vecPath) || !existsSync(join(modelDir, 'onnx', 'model.onnx'))) return null;
-    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256 };
+    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256, claimLedger: this.d.claimLedger?.() };
   }
 
   /** The current hive's index file (reset / home change delete it, after shutdown()). */
@@ -202,6 +208,20 @@ export class NativeMemoryWiring {
     // NATIVE-WAKEUP N1: a wake-up may wait up to WAKE_WAIT_MS for its wing on a filling index,
     // so its deadline covers that wait plus the cold budget. status keeps 2 s; search its own.
     return this.client.request(v.op, v.args, v.op === 'search' ? undefined : v.op === 'wake-up' ? WAKE_UP_DEADLINE_MS : 2_000);
+  }
+
+  /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */
+  syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[] }): Promise<Reply> {
+    const why = this.unavailable();
+    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
+    return this.client.request('claims-sync', args as unknown as Record<string, unknown>, 120_000);
+  }
+
+  /** CLAIM-LEDGER W3: R5 candidates for a just-appended claim (the W3 side of R5CandidatesFn). */
+  r5Candidates(wing: string, claimId: string, tau2: number): Promise<Reply> {
+    const why = this.unavailable();
+    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
+    return this.client.request('r5-candidates', { wing, claimId, tau2 }, 5_000);
   }
 
   shutdown(): Promise<void> {

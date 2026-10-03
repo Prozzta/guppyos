@@ -152,7 +152,7 @@ S.onnx = async () => {
   const dot = (x, y) => x.reduce((s, v, i) => s + v * y[i], 0);
   // The ONNX co-load regression: create + insert + KNN a vec0 row AFTER ONNX loaded, BigInt rowid.
   const s = NativeMemoryStore.open(path.join(scratch, 'o.sqlite'), openOpts);
-  s.db.prepare('insert into chunks_vec(rowid, embedding) values (?, ?)').run(BigInt(7), Buffer.from(a.buffer));
+  s.db.prepare("insert into chunks_vec(rowid, embedding, vis) values (?, ?, 'live')").run(BigInt(7), Buffer.from(a.buffer));
   const knn = s.db.prepare('select rowid, distance from chunks_vec where embedding match ? and k = 1').all(Buffer.from(b.buffer));
   s.close();
   const w0 = Date.now(); await emb.embed(['warm query']); const warm = Date.now() - w0;

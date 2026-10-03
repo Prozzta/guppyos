@@ -4,7 +4,10 @@ import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
 import { FileLedgerKeyRecord, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../shared/claims';
+import { ClaimsIndexSync } from './claims/indexSync';
+import { readSourcesConfig } from './nativeMemory/sources';
+import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -1210,13 +1213,40 @@ const startupTiming = new StartupTiming({
 // encrypted with safeStorage (never in a hive file or an agent's env). The verbs write only at the
 // effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).
 let claimStore: { root: string; store: ClaimStore } | null = null;
+// CLAIM-LEDGER W3: main sends each flagged agent's VERIFIED claim chunks to the memory worker after
+// an append and when the worker (re)starts. derive is W2's (claimsDerive is set at integration;
+// until then nothing is indexed and that is logged once).
+const claimsDerive: DeriveFn | null = null;
+let claimsIndex: ClaimsIndexSync | null = null;
+function claimsIndexSync(): ClaimsIndexSync | null {
+  const ep = claimsEndpoint();
+  if (!ep) return null;
+  if (!claimsIndex) {
+    claimsIndex = new ClaimsIndexSync({
+      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(a),
+      derive: () => claimsDerive,
+      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      ruleConfig: () => ({ r4: false }),
+      level: claimLevel,
+      agents: () => { const root = hive.root(); if (!root) return []; try { return readdirSync(join(root, 'agents')).filter((a) => (claimsEndpoint() as ClaimsEndpointDeps).store.segments(a).length > 0); } catch { return []; } },
+      send: (args) => nativeMemory.syncClaims(args),
+      log: (row) => hive.appendLog(row),
+    });
+  }
+  return claimsIndex;
+}
 const claimClampLogged = new Set<string>();
 function claimLevel(agentId: string): LedgerLevel {
   const saved = readConfig().claimLedger;
-  const e = effectiveLevel(saved, undefined);
-  if (e.clamped && !claimClampLogged.has(String(saved))) {
-    claimClampLogged.add(String(saved));
-    hive.appendLog({ kind: CLAIM_LEDGER_CLAMP_ROW, saved: String(saved).slice(0, 40), implemented: IMPLEMENTED_LEVEL, effective: e.level, agentId });
+  // W3: the per-agent manifest entry (memory-sources.json `ledger`) narrows the setting, as the
+  // worker's discovery does: main and the worker compute the same effective level.
+  const root = hive.root();
+  const agentEntry = root ? readSourcesConfig(root).ledger?.[agentId] : undefined;
+  const e = effectiveLevel(saved, agentEntry);
+  const clampKey = `${String(saved)}|${String(agentEntry)}`;
+  if (e.clamped && !claimClampLogged.has(clampKey)) {
+    claimClampLogged.add(clampKey);
+    hive.appendLog({ kind: CLAIM_LEDGER_CLAMP_ROW, saved: String(saved).slice(0, 40), agentEntry: String(agentEntry).slice(0, 40), implemented: IMPLEMENTED_LEVEL, effective: e.level, agentId });
   }
   return e.level;
 }
@@ -1231,6 +1261,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         log: (row) => hive.appendLog(row),
+        onAppend: (agentId) => claimsIndexSync()?.schedule(agentId),
         alert: (row) => {
           const what = row.kind === CLAIMS_ALERT_KEY_MISSING
             ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'
@@ -1259,7 +1290,9 @@ const nativeMemory = new NativeMemoryWiring({
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     try { return toUnpacked((require('sqlite-vec') as { getLoadablePath(): string }).getLoadablePath()); } catch { return null; }
   },
-  claims: claimsEndpoint
+  claims: claimsEndpoint,
+  claimLedger: () => readConfig().claimLedger,
+  onWorkerReady: () => { void claimsIndexSync()?.syncAll(); }
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here

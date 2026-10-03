@@ -35,6 +35,8 @@ export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[
   hits.forEach((h, i) => {
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
     L.push(`      Source: ${base(h.source)}`);
+    // CLAIM-LEDGER (A5): each claim hit shows [status · kind · key · date · id].
+    if (h.claim) L.push(`      Claim:  [${h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id}]`);
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
     L.push('');
     for (const line of h.content.trim().split('\n')) L.push(`      ${line}`);
