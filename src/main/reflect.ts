@@ -449,9 +449,29 @@ export class MemoryReflector {
       return { id, condensed: false, reason: verdict.reason, oldBytes, newBytes };
     }
 
+    // 4b) READS-181 A: the summary took seconds, and the file may have grown meanwhile (the
+    // agent's own note, or a `ledger` memory append). Re-read just before the swap: an
+    // APPEND-ONLY change is carried over at the end, where the newest entries live; any other
+    // change aborts this pass, and the next cycle condenses the new text. The re-read and the
+    // swap run in one synchronous stretch, so an in-process (ledger) append cannot fall between.
+    let toWrite = rebuilt;
+    let latest: string;
+    try { latest = readFileSync(mem, 'utf8'); } catch (e) {
+      this.logAbort(id, 'reread-failed', String(e), { oldBytes, newBytes });
+      return { id, condensed: false, reason: 'reread-failed', oldBytes, newBytes };
+    }
+    if (latest !== text) {
+      if (!latest.startsWith(text)) {
+        this.logAbort(id, 'changed-during-condense', undefined, { oldBytes, newBytes });
+        return { id, condensed: false, reason: 'changed-during-condense', oldBytes, newBytes };
+      }
+      const appended = latest.slice(text.length);
+      toWrite = rebuilt + (rebuilt.endsWith('\n') || appended.startsWith('\n') ? '' : '\n') + appended;
+    }
+
     // 5) ATOMIC SWAP — write a temp sibling, fsync, rename over the original.
     try {
-      atomicWrite(mem, rebuilt);
+      atomicWrite(mem, toWrite);
     } catch (e) {
       this.logAbort(id, 'swap-failed', String(e), { oldBytes, newBytes });
       return { id, condensed: false, reason: 'swap-failed', oldBytes, newBytes };

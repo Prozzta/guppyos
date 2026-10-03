@@ -63,6 +63,7 @@ import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
 import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
+import { applyLedgerOp } from './ledger';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
@@ -1178,6 +1179,26 @@ const nativeMemory = new NativeMemoryWiring({
   }
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
+// READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here
+// in main: tasks.json writes go through writeTasks (merge, validation, ZT-I3 attribution 'ledger').
+hookServer.setLedgerHandler((agentId, body) => {
+  const agentDir = hive.agentHome(agentId);
+  if (!agentDir) return { status: 404, body: { ok: false, line: `refused: ${agentId} is not a registered agent` } };
+  return applyLedgerOp(body, {
+    agentId,
+    agentDir,
+    isRecipient: (to) => to === 'god' || to === 'broadcast' || !!hive.registry().agents[to],
+    readTasks: () => {
+      const t = (hive.tasks() as { tasks?: unknown }).tasks;
+      return Array.isArray(t) ? (t as HiveTask[]) : [];
+    },
+    addTask: (task) => hive.addTask(task, 'ledger'),
+    patchTask: (id, patch) => hive.patchTask(id, patch, 'ledger'),
+    now: () => new Date()
+  });
+});
+/** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
+const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
 /** Delete a memory-engine index file and its WAL/SHM. Call only after nativeMemory.shutdown()
  *  (Jim M1); retries ride out a handle Windows releases a moment after the worker exits. */
 function deleteMemoryIndex(file: string | null): void {
@@ -3887,6 +3908,10 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         opts.env = { ...opts.env, ...mem.env };
         opts.pathPrepend = [mem.commandDir];
       }
+      // READS-181 A: the `ledger` command's dir on every hive agent's PATH (it needs the
+      // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
+      const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
+      if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex

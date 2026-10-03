@@ -71,6 +71,10 @@ extraResources:
   # scripts/fetch-memory-model.cjs; the app never downloads a model at runtime).
   - from: resources/memory-cli.cjs
     to: memory-cli.cjs
+  # READS-181 A: the `ledger` command (card + outbox message + memory note in one call), run on
+  # Electron-as-Node from <hive>/bin/ledger.
+  - from: resources/ledger-cli.cjs
+    to: ledger-cli.cjs
   - from: resources/models
     to: models
     filter:

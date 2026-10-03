@@ -117,7 +117,9 @@ test('instructions still count: mail mode, role and the spawn-queue line change 
   assert.equal(hive.sessionPromptFingerprint({ ...WORKER, isAssistant: true }).variant, 'claude|inject|assistant');
 });
 
-test('LEGACY_175 table: 16 variants; 1.1.77 changes the GOD instruction text only (god rotates at install, workers and the assistant do not)', (t) => {
+const PIN_181_WORKER_INJECT = '165feeea0094cce3';
+
+test('LEGACY_175 table: 16 variants; 1.1.81 changes EVERY variant\'s instruction text (every session rotates once at the 1.1.81 install)', (t) => {
   // TRIPWIRE. If a later change edits the prompt's instructions, this fails: the install of that
   // build will rotate every 1.1.75-era session, which is then correct. Do NOT regenerate the table
   // (it describes what 1.1.75 sessions got); change this assertion to notEqual deliberately.
@@ -128,7 +130,17 @@ test('LEGACY_175 table: 16 variants; 1.1.77 changes the GOD instruction text onl
   // assistant are unchanged: PROTOCOL.md is a file, not injected text.
   // Ruling: god 2026-10-01 (dc06a9, conv-be5f29) accepted the one-time god reset; keep every
   // other god-prompt edit of 1.1.77 inside fix/177-zt-i3-i4 so the reset happens once.
+  // 1.1.81 (READS-181 A) DELIBERATELY changes protocol step 3 for EVERY role: it names the
+  // `ledger` command (card + message + memory in one call, JSON from a file or stdin). So every
+  // variant now differs from its 1.1.75 stamp, and every agent (workers and the assistant too)
+  // starts one fresh conversation at the 1.1.81 install; identity, memory, inbox and ledger are
+  // kept. Ruling: god 2026-10-03 (bc9127, conv reads-181): "choose (b)... accept the one-time
+  // fresh start at the 1.1.81 install". Keep every other instruction edit of 1.1.81 in this
+  // release so the reset happens once.
   assert.equal(Object.keys(LEGACY_175_PROMPT_FP).length, 16);
+  // The NEW tripwire for workers: the 1.1.81 worker text, pinned. A later instruction edit fails here
+  // first; change it deliberately (it rotates every worker session at that install).
+  assert.equal(promptHive(t).sessionPromptFingerprint(WORKER).fp, PIN_181_WORKER_INJECT, 'claude|inject|worker: the 1.1.81 text');
   for (const role of ['worker', 'assistant', 'god', 'god+spawn']) {
     const hive = promptHive(t, { maySpawn: role === 'god+spawn' });
     const meta = { ...WORKER, isGod: role.startsWith('god'), isAssistant: role === 'assistant' };
@@ -136,8 +148,7 @@ test('LEGACY_175 table: 16 variants; 1.1.77 changes the GOD instruction text onl
       hive.promptMailMode = () => mode;
       const cur = hive.sessionPromptFingerprint(meta);
       assert.equal(cur.variant, `claude|${mode}|${role}`);
-      if (role.startsWith('god')) assert.notEqual(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], `${cur.variant} rotates at the 1.1.77 install`);
-      else assert.equal(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], cur.variant);
+      assert.notEqual(cur.fp, LEGACY_175_PROMPT_FP[cur.variant], `${cur.variant} rotates (god at the 1.1.77 install; every variant at the 1.1.81 install)`);
     }
   }
 });

@@ -14,11 +14,13 @@ import { toolEnded, toolStarted, type RunningTool } from '../shared/activityView
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
+import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
 import type { ControlRegistry } from './control';
 import { DEV_HIDDEN } from './devIsolation';
 import type { CircuitBreaker } from './breaker';
@@ -226,13 +228,30 @@ export function agyHookPayload(event: string, agentId: string, agy: Record<strin
 
 /** HOOK-BROKER: the largest HTTP hook body accepted (a PostToolUse tool_response can be big). */
 export const HOOK_HTTP_BODY_MAX = 8 * 1024 * 1024;
+/** READS-181 B: a saved output up to this size is read whole to condense it; a larger one is read
+ *  as its first and last CONDENSE_PART_BYTES (error lines in the middle are then not shown).
+ *  Jim N2: small, so the synchronous read never holds the main thread (hooks, UI, PTYs) long. */
+export const CONDENSE_READ_MAX = 256 * 1024;
+export const CONDENSE_PART_BYTES = 128 * 1024;
+/** N1 (god): a Read/grep of a condensed output's saved file within this many of the agent's tool
+ *  calls counts as a RE-FETCH (logged, so the caps can be tuned). */
+export const REFETCH_WINDOW_CALLS = 10;
+const REFETCH_TRACKED = 20;
+/** READS-181 B: full outputs kept under agents/<id>/tool-output are deleted after this long. */
+export const TOOL_OUTPUT_KEEP_MS = 7 * 24 * 3600_000;
+const TOOL_OUTPUT_PRUNE_EVERY_MS = 3600_000;
+
 /** HOOK-BROKER: after a listener error, re-listen on the SAME port (live agents' settings name
  *  it) with these delays; when they are exhausted (~30 s) the broker is down and new spawns get
  *  the command hooks. */
 export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 12_000];
-/** The broker's URLs: /hook/<agentId>/<32-hex token> (Claude HTTP hooks) and
- *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3). */
-const HOOK_ROUTE = /^\/(hook|mcp|status)\/([^/?#]+)\/([0-9a-f]{32})$/;
+/** The broker's URLs: /hook/<agentId>/<32-hex token> (Claude HTTP hooks),
+ *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3) and /ledger/<agentId>/<token> (the
+ *  `ledger` command, READS-181 A: the same per-spawn token, so the caller cannot be forged). */
+const HOOK_ROUTE = /^\/(hook|mcp|status|ledger)\/([^/?#]+)\/([0-9a-f]{32})$/;
+/** READS-181 A: one ledger operation (a card, a message, a memory note) is small. */
+export const LEDGER_HTTP_BODY_MAX = 256 * 1024;
+export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown };
 /** NATIVE-MEMORY: the `memory` command's endpoint. The caller is identified by its MEMORY_TOKEN
  *  alone (the handler resolves it); no agent id in the URL to trust. */
 const MEMORY_ROUTE = /^\/memory\/([0-9a-f]{32})$/;
@@ -472,6 +491,29 @@ export class HookServer {
     this.memoryHandler = h;
   }
 
+  /** READS-181 A: set by main; null = the ledger route answers 404. */
+  private ledgerHandler: LedgerHttpHandler | null = null;
+  setLedgerHandler(h: LedgerHttpHandler | null): void {
+    this.ledgerHandler = h;
+  }
+
+  /** READS-181 A: a ledger body is UTF-8 JSON (invalid UTF-8 is refused, never repaired). */
+  private onLedger(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
+    const handler = this.ledgerHandler;
+    if (!handler) { reply(404, { ok: false, line: 'refused: the ledger is not available in this build' }); return; }
+    let text: string;
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(raw); } catch {
+      reply(400, { ok: false, line: 'refused: the input is not valid UTF-8' }); return;
+    }
+    let body: unknown;
+    try { body = JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) {
+      reply(400, { ok: false, line: `refused: the input is not valid JSON (${String(e).slice(0, 120)})` }); return;
+    }
+    try { const r = handler(agentId, body); reply(r.status, r.body); } catch (e) {
+      reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
+    }
+  }
+
   /** The base URL the shim posts to (`<base>/<token>`), or null when the broker is down. */
   memoryBaseUrl(): string | null {
     return this.httpDown || !this.httpPort ? null : `http://127.0.0.1:${this.httpPort}/memory`;
@@ -632,14 +674,15 @@ export class HookServer {
     const chunks: Buffer[] = [];
     let size = 0;
     let tooBig = false;
+    const bodyMax = route === 'ledger' ? LEDGER_HTTP_BODY_MAX : HOOK_HTTP_BODY_MAX;
     req.on('data', (d: Buffer) => {
       if (tooBig) return;
       size += d.length;
-      if (size > HOOK_HTTP_BODY_MAX) {
+      if (size > bodyMax) {
         tooBig = true;
         if (!this.oversizeLogged.has(agentId)) {
           this.oversizeLogged.add(agentId);
-          console.error(`[hive] hook body over ${HOOK_HTTP_BODY_MAX} bytes from ${agentId}; refused`);
+          console.error(`[hive] ${route} body over ${bodyMax} bytes from ${agentId}; refused`);
         }
         reply(413, {});
         req.resume();
@@ -653,6 +696,7 @@ export class HookServer {
         void this.onMcp(agentId, expected, Buffer.concat(chunks).toString('utf8'), res, receivedAt);
         return;
       }
+      if (route === 'ledger') { this.onLedger(agentId, Buffer.concat(chunks), reply); return; }
       let payload: Record<string, unknown> = {};
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
@@ -1565,6 +1609,113 @@ export class HookServer {
     try { this.hive.appendLog({ kind: 'hook-identity-mismatch', agentId, envAgentId, event, sessionId: sessionId ?? null }); } catch { /* best effort */ }
   }
 
+  private toolOutputPrunedAt = new Map<string, number>();
+
+  /**
+   * READS-181 B: the replacement for a large SUCCESSFUL Bash/PowerShell result of a Claude agent,
+   * or null to leave it as it is. The full output is on disk before anything is condensed:
+   * Claude Code's own file when it saved one (over its 30k inline limit), else ours under
+   * agents/<id>/tool-output. Any failure here leaves the result untouched.
+   */
+  private condensedToolOutput(agentId: string, p: HookPayload): Record<string, unknown> | null {
+    if (p.hook_event_name !== 'PostToolUse' || (p.transport !== 'http' && p.transport !== 'pipe')) return null;
+    const provider = this.mailChannel(agentId).provider;
+    if (provider && provider !== 'claude') return null;
+    let own: unknown;
+    try { own = this.hive.registry?.().agents[agentId]?.toolOutputCap; } catch { own = undefined; }
+    // N1 (god): a read-type command (grep, sed, cat, git diff …) gets the larger read cap.
+    // god's ruling (d8e742): the orchestrator's DEFAULT is the read cap for every command (Andy's
+    // sensitivity check: at 1500 the condenser turns negative for god if follow-ups triple). A
+    // per-agent registry value still wins; 0 stays off.
+    let isGod = false;
+    try { isGod = typeof own !== 'number' && this.hive.isGod(agentId); } catch { isGod = false; }
+    const configured = effectiveCap(typeof own === 'number' ? own : this.getConfig().toolOutputCap);
+    const cap = capForCommand(commandOf(p.tool_input), isGod && configured ? Math.max(configured, TOOL_OUTPUT_CAP_READ) : configured);
+    const r = (p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : null) as BashLikeResponse | null;
+    if (!shouldCondense(p.tool_name, p.tool_input, r, cap) || !r) return null;
+    let text = outputText(r);
+    let totalChars: number | undefined;
+    let partial = false;
+    let path: string;
+    const saved = typeof r.persistedOutputPath === 'string' && r.persistedOutputPath ? r.persistedOutputPath : null;
+    if (saved) {
+      path = saved;
+      try {
+        const size = statSync(saved).size;
+        if (size <= CONDENSE_READ_MAX) {
+          text = readFileSync(saved, 'utf8');
+        } else {
+          const fd = openSync(saved, 'r');
+          try {
+            const head = Buffer.alloc(CONDENSE_PART_BYTES);
+            const tail = Buffer.alloc(CONDENSE_PART_BYTES);
+            readSync(fd, head, 0, CONDENSE_PART_BYTES, 0);
+            readSync(fd, tail, 0, CONDENSE_PART_BYTES, size - CONDENSE_PART_BYTES);
+            text = `${head.toString('utf8')}\n${tail.toString('utf8')}`;
+          } finally { closeSync(fd); }
+          partial = true;
+        }
+        totalChars = typeof r.persistedOutputSize === 'number' ? r.persistedOutputSize : size;
+      } catch { /* condense what the hook carried; the path still names the full output */ }
+    } else {
+      const dir = this.hive.toolOutputDir?.(agentId);
+      if (!dir) return null;
+      const raw = (p as { tool_use_id?: unknown }).tool_use_id;
+      const id = typeof raw === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(raw) ? raw : `${Date.now()}-${randomBytes(4).toString('hex')}`;
+      path = join(dir, `${id}.txt`);
+      // Never condense what is not safely on disk.
+      try { mkdirSync(dir, { recursive: true }); writeFileSync(path, text, 'utf8'); } catch { return null; }
+      this.pruneToolOutput(dir);
+    }
+    const stdout = condenseOutput({
+      text, cap, path, totalChars, partial,
+      interrupted: r.interrupted === true,
+      interpretation: typeof r.returnCodeInterpretation === 'string' && r.returnCodeInterpretation ? r.returnCodeInterpretation : undefined
+    });
+    const chars = totalChars ?? text.length;
+    try {
+      this.hive.appendLog({ kind: 'tool-output-condensed', agentId, tool: p.tool_name, chars, kept: stdout.length, cap, read: isReadCommand(commandOf(p.tool_input)) });
+    } catch { /* best effort */ }
+    const list = this.condensedRecent.get(agentId) ?? [];
+    list.push({ base: path.split(/[\\/]/).pop() ?? path, path, at: this.toolCalls.get(agentId) ?? 0, chars });
+    if (list.length > REFETCH_TRACKED) list.shift();
+    this.condensedRecent.set(agentId, list);
+    return { ...r, stdout, stderr: '' };
+  }
+
+  /** N1: each agent's tool calls so far, and its recently condensed outputs (for the re-fetch rate). */
+  private toolCalls = new Map<string, number>();
+  private condensedRecent = new Map<string, Array<{ base: string; path: string; at: number; chars: number }>>();
+
+  /** N1: a tool call that names a recently condensed output's saved file is a re-fetch: logged once. */
+  private noteRefetch(agentId: string, p: HookPayload): void {
+    const list = this.condensedRecent.get(agentId);
+    if (!list?.length) return;
+    const now = this.toolCalls.get(agentId) ?? 0;
+    const live = list.filter((e) => now - e.at <= REFETCH_WINDOW_CALLS);
+    let input = '';
+    try { input = JSON.stringify(p.tool_input ?? ''); } catch { input = ''; }
+    const kept = live.filter((e) => {
+      if (!input.includes(e.base)) return true;
+      try { this.hive.appendLog({ kind: 'tool-output-refetch', agentId, tool: p.tool_name, after: now - e.at, chars: e.chars, path: e.path }); } catch { /* best effort */ }
+      return false;
+    });
+    if (kept.length) this.condensedRecent.set(agentId, kept); else this.condensedRecent.delete(agentId);
+  }
+
+  /** Delete kept full outputs older than TOOL_OUTPUT_KEEP_MS, at most once an hour per folder. */
+  private pruneToolOutput(dir: string, now = Date.now()): void {
+    if (now - (this.toolOutputPrunedAt.get(dir) ?? 0) < TOOL_OUTPUT_PRUNE_EVERY_MS) return;
+    this.toolOutputPrunedAt.set(dir, now);
+    try {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.txt')) continue;
+        const fp = join(dir, f);
+        try { if (now - statSync(fp).mtimeMs > TOOL_OUTPUT_KEEP_MS) rmSync(fp, { force: true }); } catch { /* next time */ }
+      }
+    } catch { /* best effort */ }
+  }
+
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
@@ -1725,6 +1876,10 @@ export class HookServer {
       }
       return {};
     }
+
+    // READS-181 N1: count the agent's tool calls, and note a re-fetch of a condensed output.
+    if (agentId && event === 'PreToolUse') { try { this.noteRefetch(agentId, p); } catch { /* never breaks a hook */ } }
+    if (agentId && (event === 'PostToolUse' || event === 'PostToolUseFailure')) this.toolCalls.set(agentId, (this.toolCalls.get(agentId) ?? 0) + 1);
 
     // Feed the breaker its hook-derived loop signal: a tool that actually ran.
     // A repeated identical (name+input) PostToolUse is the runaway-loop tell.
@@ -1928,12 +2083,19 @@ export class HookServer {
     // §11.10: a mail block reached this agent (the degradation watch counts wakes without one).
     if (mailBlock && agentId) { try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ } }
 
+    // READS-181 B: a large successful Bash/PowerShell result is replaced by its condensed form,
+    // in the SAME hookSpecificOutput as any context below (one object per hook reply).
+    let updatedToolOutput: Record<string, unknown> | null = null;
+    if (event === 'PostToolUse' && agentId) {
+      try { updatedToolOutput = this.condensedToolOutput(agentId, p); } catch { updatedToolOutput = null; }
+    }
     if (handoff || steer || roster || goal || mail || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [handoff, roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n')
+          additionalContext: [handoff, roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n'),
+          ...(updatedToolOutput ? { updatedToolOutput } : {})
         }
       };
     }
@@ -1952,7 +2114,7 @@ export class HookServer {
 
     // Forward everything else to the renderer so avatars reflect real activity.
     this.emit(agentId, event, p);
-    return {};
+    return updatedToolOutput ? { hookSpecificOutput: { hookEventName: 'PostToolUse', updatedToolOutput } } : {};
   }
 
   /** Fire a native desktop notification — gated on the user's `notifications`

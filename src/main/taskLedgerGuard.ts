@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { atomicWriteJson } from './atomicJson';
 import { firstOccurrenceById, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 
-export type TaskEditSource = 'ipc' | 'voice' | 'webhook' | 'slack' | 'board-auto' | 'api';
+export type TaskEditSource = 'ipc' | 'voice' | 'webhook' | 'slack' | 'board-auto' | 'api' | 'ledger';
 
 export interface CardStatusChange { at: number; from: string; to: string; by: string }
 
