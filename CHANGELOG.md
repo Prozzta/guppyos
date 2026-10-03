@@ -47,8 +47,9 @@ still there).
 - **Shortcuts:** the Start menu and desktop "Munder Difflin" shortcuts are replaced by "Guppy"
   ones. If you had deleted the desktop shortcut, the update puts a Guppy one back; delete it
   again if you don't want it.
-- **Taskbar pins keep working** and stay in place; the update points them at Guppy. If a pin still
-  shows the old name, unpin it and pin Guppy again. A pin of a portable copy is not changed.
+- **Taskbar pins:** the update points a pinned app at Guppy. If Windows removed the pin during the
+  update, or it still shows the old name, pin Guppy again. A pin of a portable copy is not
+  changed.
 - **The old data folder and update cache stay on disk**, untouched
   (`%APPDATA%\munder-difflin`, `%LOCALAPPDATA%\munder-difflin-updater`). Reinstalling 1.1.81
   still finds all its data. Delete them by hand once you are happy with Guppy.
