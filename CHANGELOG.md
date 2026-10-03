@@ -11,6 +11,81 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.81] — 2026-10-03
+
+**A release about cost: agents re-read much less on every step, are woken less often, and keep
+their bookkeeping to one command. God's start-up message is sent the reliable way, and agents
+waiting for a test slot are told when it is theirs.** Rollback: 1.1.80 (reinstall).
+
+> **Every agent starts one fresh conversation after you install this.** Their names, memory,
+> inboxes and task cards are kept; only the long running chat starts over, small. This happens
+> once, because the instructions every agent gets have changed (they now name the `ledger`
+> command). At the 1.1.77 install only god started fresh; this time every agent does.
+
+### Changed
+
+- **Fewer wake-ups for messages that need no answer.** Before, every message woke the agent it
+  was for, even "for your information" notes, and each wake-up re-reads the agent's whole
+  conversation. On 2 October about half of all mail wake-ups carried only such notes. Now an
+  informational note (an `inform` or `agree` that asks for no reply) waits until the agent's next
+  turn, at most 30 minutes. Anything that needs action still wakes at once:
+  - requests and questions;
+  - results (`done`);
+  - an answer to something the agent itself asked;
+  - mail from you, the floor digest or the harness;
+  - any note marked `"wake": "now"`.
+
+  Nothing is dropped, only delayed. Settings key `quietMailHoldMin` (minutes; 0 turns it off).
+- **Long command output is trimmed before an agent reads it.** A build or test log can be tens of
+  thousands of characters, and an agent re-reads it on every later step. Now a successful command's
+  output over 1,500 characters reaches the agent as a short version, and the full output is kept on
+  disk with its path shown, so the agent can open exactly the part it needs. The short version
+  keeps the outcome, every error and warning line, the first lines and the last lines (where test
+  summaries are).
+  - Commands that read something (grep, cat, sed, head, tail, jq, git diff/show/log) get 6,000
+    characters.
+  - God gets 6,000 for everything.
+  - Failed commands are not trimmed this way.
+  - An agent can end a command with `#full` to see all of its output.
+  - Settings key `toolOutputCap` (0 turns it off; an agent's own value wins).
+- **One command for an agent's bookkeeping.** Updating a task card, sending a message and noting
+  something in memory used to take two to four steps, and each step re-read the whole
+  conversation. The new `ledger` command does all three in one step. The app checks everything
+  before writing anything, and running the same step twice never does it twice. The message is
+  given in a file or piped in, never typed into the command line, so text in a message can no
+  longer be run as a command by accident.
+- **God compacts its own conversation sooner (a pilot).** God's conversation used to grow to 300k
+  to 500k before anything shortened it, and every step re-read all of it. Claude Code now
+  summarises god's conversation by itself once it passes about 150k. Replayed on god's real
+  sessions, this would have used about 40 to 48% less. Each compaction is written to the log, so
+  the pilot can be judged. Settings key `godAutoCompactWindow` ("off" turns the pilot off). Other
+  agents are unchanged for now.
+- **Agents waiting for a test slot are told when it is theirs.** Only one heavy job (a test suite,
+  a build, an install) runs at a time. A second agent used to be told "later" and had to keep
+  checking; one even waited on its own slot for 10 minutes. Now it is put in a queue. When a slot
+  frees up, it is held for the first agent in line for 5 minutes, and that agent is told.
+- **Cards waiting for a release are not reported as stale or as load.** A task card that only
+  waits for an install no longer shows up as stale or makes its owner look busy.
+
+### Fixed
+
+- **God's start-up message is sent the reliable way.** Since 1.1.80 the app waited for Claude Code
+  before typing god's start-up message. But Claude Code shows a long typed message as "[Pasted text
+  #1]", so the app could not confirm it. The message is now handed to Claude Code when it starts
+  (on its command line), so nothing has to be typed. If god's command-line tool first has to be
+  installed, nothing is typed into the installer either.
+- **A memory note could be lost while memory was being tidied.** The app shortens a long memory
+  file in the background, which takes a few seconds. A note written during those seconds was
+  overwritten. Now a note added meanwhile is kept, and any other change stops the tidy-up for that
+  round.
+
+### For measuring
+
+- `scripts/reads-measure.cjs` reports, per agent and day, how many requests each agent made, how
+  much it re-read, its largest steps, the cost of tool output and of each compaction. It reads the
+  agents' transcripts and changes nothing. The 2 October baseline: 640M tokens re-read over 2,515
+  requests.
+
 ## [1.1.80] — 2026-10-02
 
 **A hotfix release about agents that could not be reached and lists that went stale: a resumed
