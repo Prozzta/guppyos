@@ -314,19 +314,41 @@ export function effectiveEffort(entry: ModelPinFields | undefined): string | und
 export function resolveSpawnArgs(
   entry: ModelPinFields | undefined,
   args: readonly string[],
-  opts: { flag?: string; fallback?: string; effort?: 'codex' } = {}
+  opts: { flag?: string; fallback?: string; effort?: 'codex' | 'claude' } = {}
 ): { args: string[]; requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string } {
   const flag = opts.flag ?? '--model';
   const requested = modelFlagValue(args, flag)?.trim() || undefined;
   // M2 (Codex): the picker's effort rides on the argv as `-c model_reasoning_effort=<e>`.
-  const requestedEffort = opts.effort === 'codex' ? codexEffortValue(args) : undefined;
+  const requestedEffort = opts.effort === 'codex' ? codexEffortValue(args)
+    : opts.effort === 'claude' ? flagValue(args, '--effort') : undefined;
   const resolved = resolveSpawnModel(entry, requested, requestedEffort);
   const launch = resolved.model ?? (opts.fallback?.trim() || undefined);
   let out = launch && !sameModel(launch, requested) ? withModelFlag(args, launch, flag) : [...args];
-  const launchEffort = opts.effort === 'codex' ? resolved.effort : undefined;
-  if (launchEffort && launchEffort !== requestedEffort) out = withCodexEffort(out, launchEffort);
+  const launchEffort = opts.effort === 'codex' ? resolved.effort
+    : opts.effort === 'claude' ? (resolved.effort ?? normEffort(entry?.defaultEffort)) : undefined;
+  if (opts.effort === 'codex' && launchEffort && launchEffort !== requestedEffort) out = withCodexEffort(out, launchEffort);
+  if (opts.effort === 'claude' && launchEffort && launchEffort !== requestedEffort) out = withFlag(out, '--effort', launchEffort);
   return {
     args: out, requested, launch,
-    ...(opts.effort === 'codex' ? { requestedEffort, launchEffort } : {})
+    ...(opts.effort ? { requestedEffort, launchEffort } : {})
   };
+}
+
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  let value: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && typeof args[i + 1] === 'string') value = normEffort(args[++i]);
+    else if (args[i].startsWith(`${flag}=`)) value = normEffort(args[i].slice(flag.length + 1));
+  }
+  return value;
+}
+
+function withFlag(args: readonly string[], flag: string, value: string): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === flag && i + 1 < out.length) { out[i + 1] = value; return out; }
+    if (out[i].startsWith(`${flag}=`)) { out[i] = `${flag}=${value}`; return out; }
+  }
+  out.push(flag, value);
+  return out;
 }

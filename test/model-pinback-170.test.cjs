@@ -322,7 +322,26 @@ test('G2 AGY: a Codex agent never takes an AGY model (provider gate)', async (t)
 
 // ─── Claude ─────────────────────────────────────────────────────────────────
 
-const statusTick = (id, model) => ({ hook_event_name: 'Status', agent_id: id, model: { id: model } });
+const statusTick = (id, model, effort) => ({ hook_event_name: 'Status', agent_id: id, model: { id: model }, ...(effort ? { effort: { level: effort } } : {}) });
+
+test('Claude effort switch is pinned from status-line and restored on respawn', async (t) => {
+  const s = sandbox(t);
+  const meta = { id: 'cl-effort', name: 'Jim', provider: 'claude', cwd: s.home };
+  const cfg = { defaultModel: 'claude-fable-5' };
+  const first = P.resolveSpawnArgs(undefined, ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: first.requested, launch: first.launch, requestedEffort: first.requestedEffort, launchEffort: first.launchEffort } });
+  const server = new HookServer(s.hive, () => null, () => cfg);
+  server.handle(statusTick('cl-effort', 'claude-fable-5', 'high'));
+  assert.equal(entry(s.hive, 'cl-effort').defaultEffort, 'high');
+  s.type();
+  server.handle(statusTick('cl-effort', 'claude-fable-5', 'medium'));
+  assert.equal(entry(s.hive, 'cl-effort').modelEffort, 'medium');
+  assert.equal(P.modelPinLabel(entry(s.hive, 'cl-effort')).model, 'claude-fable-5 · medium');
+  const r = P.resolveSpawnArgs(entry(s.hive, 'cl-effort'), ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  assert.deepEqual(r.args, ['--permission-mode', 'bypassPermissions', '--model', 'claude-fable-5', '--effort', 'medium']);
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch, requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: entry(s.hive, 'cl-effort').defaultEffort } });
+  assert.equal(entry(s.hive, 'cl-effort').launchEffort, 'medium');
+});
 
 test('RESPAWN-KEEPS-SWITCH Claude (no picked model): a /model switch pins and the next spawn args carry it', async (t) => {
   const s = sandbox(t);

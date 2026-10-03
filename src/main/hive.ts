@@ -1832,8 +1832,8 @@ export class HiveManager {
    * when nothing is requested, so a pre-MODEL-PINBACK entry keeps the old rule (pin a divergence
    * from the default, clear it on a return). See observeLiveModel.
    */
-  recordModel(agentId: string, model: string, appDefault: string | undefined): void {
-    this.observeLiveModel(agentId, 'claude', model, { fallbackBaseline: appDefault });
+  recordModel(agentId: string, model: string, appDefault: string | undefined, effort?: string | null): void {
+    this.observeLiveModel(agentId, 'claude', model, { fallbackBaseline: appDefault, effort });
   }
 
   /**
@@ -1939,8 +1939,8 @@ export class HiveManager {
     if (requested) entry.requestedModel = requested; else delete entry.requestedModel;
     if (launch) entry.launchModel = launch; else delete entry.launchModel;
     delete entry.liveModel;
-    // M2: the effort side of the same record. A spawn that names no effort (a Claude or AGY agent,
-    // an older caller) leaves no effort fields behind.
+    // M2: the effort side of the same record. A spawn that names no effort (AGY or an older caller)
+    // leaves no effort fields behind; Claude/Codex carry their explicit CLI effort here.
     if (requestedEffort) entry.requestedEffort = requestedEffort; else delete entry.requestedEffort;
     if (launchEffort) entry.launchEffort = launchEffort; else delete entry.launchEffort;
     const defaultEffort = normEffort(spawn.defaultEffort);
