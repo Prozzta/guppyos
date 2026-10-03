@@ -175,6 +175,13 @@ test('G6.2 idempotence: a re-import creates 0 claims; repeats are imported once 
   assert.equal(M.newLegacyDrafts(dir, asRecords(first)).length, 0);
 });
 
+test('G6.2 per-hash counts: the ledger holds one copy of a repeated entry, the files hold two, so exactly one more is imported', () => {
+  const dir = agentDir();
+  const one = M.importLegacy(dir).filter((d) => d.text === '- repeated fact').slice(0, 1);
+  const more = M.newLegacyDrafts(dir, asRecords(one));
+  assert.deepEqual(more.map((d) => d.text), ['- old fact one', '- new fact two', '- repeated fact']);
+});
+
 test('G6.2 idempotence over split parts: the parts of one entry count as one entry', () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, 'memory.md'), '- ' + 'p'.repeat(9000) + '\n- short\n');
