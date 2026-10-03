@@ -416,6 +416,26 @@ test('an explicit Claude --effort request overrides an existing effort pin', () 
   assert.equal(resolved.launchEffort, 'low');
 });
 
+test('Claude model switch to a newly selected app default uses that model’s learned effort baseline', async (t) => {
+  const s = sandbox(t);
+  const meta = { id: 'cl-new-default-baseline', name: 'Oscar', provider: 'claude', cwd: s.home };
+  const cfg = { defaultModel: 'claude-fable-5' };
+  const first = P.resolveSpawnArgs(undefined, ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: first.requested, launch: first.launch, requestedEffort: first.requestedEffort, launchEffort: first.launchEffort } });
+  const server = new HookServer(s.hive, () => null, () => cfg);
+  server.handle(statusTick(meta.id, 'claude-fable-5', 'high'));
+  assert.equal(entry(s.hive, meta.id).defaultEffortModel, 'claude-fable-5');
+
+  cfg.defaultModel = 'claude-opus-5';
+  s.type();
+  server.handle(statusTick(meta.id, 'claude-opus-5', 'xhigh'));
+  const e = entry(s.hive, meta.id);
+  assert.equal(e.model, undefined, 'the app default model is not pinned');
+  assert.equal(e.modelEffort, undefined, 'opus at its own default effort is not an effort choice');
+  assert.equal(e.modelPinSource, undefined);
+  assert.equal(P.modelPinLabel(e).marker, '');
+});
+
 test('RESPAWN-KEEPS-SWITCH Claude (no picked model): a /model switch pins and the next spawn args carry it', async (t) => {
   const s = sandbox(t);
   const meta = { id: 'cl-1', name: 'Jim', provider: 'claude', cwd: s.home };
