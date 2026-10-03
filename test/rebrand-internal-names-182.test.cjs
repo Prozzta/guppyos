@@ -43,12 +43,12 @@ test('the app is Guppy: productName and the exe name', (t) => {
 
 test('the data folder is Guppy (1.1.81 data copied there once, never moved)', (t) => {
   if (untilRebrandA(t)) return;
-  // Either a productName in package.json (Electron's app name, so userData = %APPDATA%\Guppy) or
-  // an explicit userData path ending in Guppy.
-  const index = read('src/main/index.ts');
-  const viaPackage = pkg.productName === 'Guppy';
-  const viaPath = /setPath\(\s*'userData'[^\n]*'Guppy'/.test(index);
-  assert.ok(viaPackage || viaPath, 'userData must resolve to a Guppy folder');
+  // rebrand/a's shape: one module names the folder, and main points userData at what it resolved
+  // (the copied Guppy folder, or the old one for a run whose copy failed). package.json gets no
+  // productName: that would also rename Electron's app name.
+  assert.match(read('src/main/userDataMigration.ts'), /export const USERDATA_DIR = 'Guppy';/);
+  assert.match(read('src/main/index.ts'), /app\.setPath\('userData', userDataMigration\.userData\);/);
+  assert.equal(pkg.productName, undefined);
 });
 
 test('the munderdifflin:// scheme and the hire format id stay', () => {
