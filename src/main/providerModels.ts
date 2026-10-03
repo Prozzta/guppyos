@@ -296,8 +296,12 @@ export interface ClaudeChild {
   kill: (sig?: NodeJS.Signals) => unknown;
 }
 export type ClaudeSpawn = (file: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true; windowsVerbatimArguments?: boolean; detached?: boolean; stdio: ['pipe', 'pipe', 'pipe'] }) => ClaudeChild;
-/** `kill` is process.kill (a seam for the POSIX group kill in tests). */
-export type ClaudeDeps = CliDeps & { spawn?: ClaudeSpawn; tmpDir?: string; kill?: (pid: number, sig: NodeJS.Signals) => unknown };
+/** `kill` is process.kill (a seam for the POSIX group kill in tests). `log` gets a row when the
+ *  claude process tree could not be killed (the app: the hive log). */
+export type ClaudeDeps = CliDeps & { spawn?: ClaudeSpawn; tmpDir?: string; kill?: (pid: number, sig: NodeJS.Signals | 0) => unknown; log?: (row: Record<string, unknown>) => void; exitWaitMs?: number };
+
+/** How long, after the tree kill, the runner waits for the process it started to report its exit. */
+export const CLAUDE_EXIT_WAIT_MS = 5_000;
 
 /** A failure in plain words, from claude's stderr (or a control_response error) and its exit. */
 export function claudeFailure(text: string, code?: unknown): string {
@@ -312,6 +316,13 @@ export function claudeFailure(text: string, code?: unknown): string {
  * stdin and kill the process TREE (win32: taskkill /T /F, as execP does; the .cmd shim's cmd.exe has
  * claude.exe below it). The whole run is time-boxed; a timeout also kills the tree. cwd is the temp
  * dir, so the run never lands in an agent's project. Never rejects.
+ *
+ * It resolves only AFTER the kill has finished (FLAKE-CLAUDE-MODEL-LIST-HANG, 1.1.82): the kill's
+ * result is checked (taskkill's exit; on POSIX a signal-0 probe of the group), a failed kill is
+ * retried once, and the started process must report its exit. A tree that survives that is
+ * logged (kind claude-init-kill-failed), so a claude left running is never silent. Before, the
+ * taskkill ran in the background with its result ignored: under load the call returned while
+ * claude was still alive, and a failed kill went unnoticed.
  */
 export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_TIMEOUT_MS): Promise<{ init: ClaudeInit } | { reason: string; notFound?: true }> {
   return new Promise((resolve) => {
@@ -324,23 +335,48 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
     let child: ClaudeChild;
     let out = ''; let err = ''; let settled = false; let exited = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const killTree = (): void => {
+    /** Resolves once the started process has reported its exit, or after `ms`. */
+    const exitWaiters: Array<() => void> = [];
+    const waitExit = (ms: number): Promise<boolean> => new Promise((res) => {
+      if (exited) { res(true); return; }
+      const t = setTimeout(() => res(exited), ms);
+      exitWaiters.push(() => { clearTimeout(t); res(true); });
+    });
+    const kill = d.kill ?? process.kill;
+    /** One kill of the whole tree. true = done (or nothing left to kill), false = it failed. */
+    const killOnce = (pid: number): Promise<boolean> => new Promise((res) => {
+      if (d.platform === 'win32') {
+        try {
+          d.exec('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: TREE_KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 },
+            // 128: no such process (it exited by itself meanwhile): nothing left to kill.
+            (e) => res(!e || (e as ExecErr).code === 128));
+        } catch { res(false); }
+        return;
+      }
+      // POSIX: claude runs as the leader of its own process group (detached), so the group goes
+      try { kill(-pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      try { kill(-pid, 0); res(false); } catch (e) { res((e as NodeJS.ErrnoException).code === 'ESRCH'); }
+    });
+    const killTree = async (): Promise<void> => {
       if (exited) return;
       try { child.stdin?.end(); } catch { /* gone */ }
       const pid = typeof child.pid === 'number' ? child.pid : null;
-      if (d.platform === 'win32' && pid) {
-        try { d.exec('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: TREE_KILL_TIMEOUT_MS, windowsHide: true, maxBuffer: 64 * 1024 }, () => {}); } catch { /* best effort */ }
-      } else if (pid) {
-        // POSIX: claude runs as the leader of its own process group (detached), so the group goes
-        try { (d.kill ?? process.kill)(-pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      if (!pid) return;
+      let killed = await killOnce(pid);
+      if (killed) killed = await waitExit(d.exitWaitMs ?? CLAUDE_EXIT_WAIT_MS);
+      if (!killed) {
+        killed = await killOnce(pid);                                  // the one retry
+        if (killed) killed = await waitExit(d.exitWaitMs ?? CLAUDE_EXIT_WAIT_MS);
+      }
+      if (!killed) {
+        try { d.log?.({ kind: 'claude-init-kill-failed', pid, platform: d.platform }); } catch { /* best effort */ }
       }
     };
     const done = (r: { init: ClaudeInit } | { reason: string; notFound?: true }): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
-      killTree();
-      resolve(r);
+      void killTree().catch(() => { /* never rejects */ }).then(() => resolve(r));
     };
     try {
       child = (d.spawn ?? (nodeSpawn as unknown as ClaudeSpawn))(file, args, { cwd: d.tmpDir ?? tmpdir(), env: d.env, windowsHide: true, ...(verbatim ? { windowsVerbatimArguments: true } : {}), ...(d.platform === 'win32' ? {} : { detached: true }), stdio: ['pipe', 'pipe', 'pipe'] });
@@ -360,9 +396,10 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
     child.stderr?.on('data', (b) => { if (err.length < 16 * 1024) err += String(b); });
     // the final parse waits for 'close' (all output read): 'exit' can come before stderr's last chunk
     let exitCode: unknown = null;
-    child.on('exit', (code) => { exitCode = code; });
+    child.on('exit', (code) => { exitCode = code; exited = true; for (const w of exitWaiters.splice(0)) w(); });
     child.on('close', (code) => {
       exited = true;
+      for (const w of exitWaiters.splice(0)) w();
       const c = code ?? exitCode;
       const init = parseClaudeInitialize(out);
       done(init ? { init } : { reason: c === 0 && !err.trim() ? CLAUDE_REASONS.noList : claudeFailure(err, c) });
