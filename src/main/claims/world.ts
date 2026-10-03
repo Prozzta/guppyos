@@ -1,16 +1,16 @@
 import type { ClaimRec, ClaimsState, LedgerRec, UsageRec, WorldFlag, WorldInputs, WorldView } from '../../shared/claims';
+import { parseStoredTtl } from './ttl';
 
 function later(a: string | undefined, b: string): string { return !a || b > a ? b : a; }
 
 function expired(claim: ClaimRec, world: WorldInputs): boolean {
-  if (!claim.ttl) return false;
-  if (claim.ttl.startsWith('task:')) {
-    const status = world.taskStatus(claim.ttl.slice('task:'.length));
+  const ttl = parseStoredTtl(claim.ttl);
+  if (!ttl) return false;
+  if (ttl.kind === 'task') {
+    const status = world.taskStatus(ttl.task);
     return status === 'done' || status === 'cancelled';
   }
-  const until = claim.ttl.startsWith('until:') ? claim.ttl.slice('until:'.length) : null;
-  if (!until) return false;
-  const untilMs = Date.parse(until);
+  const untilMs = Date.parse(ttl.at);
   const nowMs = Date.parse(world.now);
   return Number.isFinite(untilMs) && Number.isFinite(nowMs) && untilMs <= nowMs;
 }
