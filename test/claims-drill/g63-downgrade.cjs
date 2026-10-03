@@ -10,25 +10,19 @@
  * Before counting anything it proves the drill is real (F7): the harness started, the home is jailed,
  * and the model is loaded after the first embed. A missing piece throws, which FAILS the drill.
  *
- * args: { checklist: [{ agent, query, expect }], lessons: { <agent>: [<lesson text>] } }
- * returns: { total, found, missing, lessonsIntact, sources, rolled }
+ * args: { checklist: [{ agent, query, expect }], lessons: { <agent>: [<lesson text>] }, absent: [<token in no file>] }
+ * returns: { total, found, missing, absentFound, lessonsIntact, sources, rolled }
  */
 const fs = require('fs');
 const path = require('path');
-const { createRequire } = require('module');
 
 module.exports = async function g63(drill) {
   drill.assert.harnessStarted();
   drill.assert.homeJailed();
-  const treeRequire = createRequire(path.join(drill.tree, 'package.json'));
-  const Database = treeRequire('better-sqlite3');
-  const ort = treeRequire('onnxruntime-node');
   const { rolloverMemory } = drill.loadTs('src/main/memoryRollover.ts');
   const { discoverSources } = drill.loadTs('src/main/nativeMemory/sources.ts');
   const { NativeMemoryStore } = drill.loadTs('src/main/nativeMemory/store.ts');
   const { MemoryEngine } = drill.loadTs('src/main/nativeMemory/engine.ts');
-  const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = drill.loadTs('src/main/nativeMemory/wordpiece.ts');
-  const { OnnxEmbedder } = drill.loadTs('src/main/nativeMemory/embedder.ts');
 
   // 1. The older build's spawn-time rollover, for every agent.
   const agentsDir = path.join(drill.hive, 'agents');
@@ -43,25 +37,34 @@ module.exports = async function g63(drill) {
     lessonsIntact[id] = /^## How I work \(standing lessons\)/m.test(md) && lessons.every((l) => md.includes(l));
   }
 
-  // 2. A full index with the older build's own engine and the real model.
-  const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(fs.readFileSync(path.join(drill.modelDir, 'tokenizer.json'), 'utf8'))));
-  const embedder = new OnnxEmbedder(path.join(drill.modelDir, 'onnx', 'model.onnx'), tok, ort, { intraOpNumThreads: 2 });
-  await embedder.embed(['a first embed proves the model is loaded']);
-  drill.assert.modelLoaded(embedder);
-  const store = NativeMemoryStore.open(path.join(drill.hive, 'hive.sqlite'), { Database, vecPath: drill.vecPath, vecSha256: drill.vecSha256 });
+  // 2. A full index with the older build's own engine and the real model (its own index file, in the jailed user data).
+  const embedder = drill.makeEmbedder();
+  const memDir = path.join(drill.home, 'AppData', 'Roaming', 'drill-user-data', 'memory');
+  fs.mkdirSync(memDir, { recursive: true });
+  const store = NativeMemoryStore.open(path.join(memDir, 'hive.sqlite'), drill.openOpts);
   const words = (s) => s.split(/\s+/).filter(Boolean).length;
-  const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: words, mode: () => 'native', watch: null, setTimer: (fn) => setImmediate(fn), clearTimer: () => {} });
+  const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: words, mode: () => 'native', watch: null });
+  // the engine's default timers: a setImmediate stand-in ignores the delay, so the idle unload would drop the model between searches
   await eng.backfill();
+  await drill.assert.modelLoaded(embedder);
   const sources = discoverSources(drill.hive).eligible.length;
 
   // 3. Its own search, per checklist item.
   const missing = [];
   let found = 0;
+  // the reply echoes the query ('Results for: "<query>"'); only the hits count
+  const hits = async (query) => {
+    const r = await eng.search({ query, results: 10 });
+    return { exit: r.exit, body: String(r.text ?? '').replace(/Results for: ".*"/, '') };
+  };
   for (const item of drill.args.checklist) {
-    const r = await eng.search({ query: item.query, results: 10 });
-    if (r.exit === 0 && r.text.includes(item.expect)) found++;
+    const r = await hits(item.query);
+    if (r.exit === 0 && r.body.includes(item.expect)) found++;
     else missing.push(item);
   }
-  await eng.close();
-  return { total: drill.args.checklist.length, found, missing, lessonsIntact, sources, rolled };
+  // control: a token in no file must NOT count as found (proves the echo is not counted)
+  const absentFound = [];
+  for (const t of drill.args.absent || []) if ((await hits(t)).body.includes(t)) absentFound.push(t);
+  await eng.close();   // clears the idle-unload timer and unloads the model
+  return { total: drill.args.checklist.length, found, missing, absentFound, lessonsIntact, sources, rolled };
 };

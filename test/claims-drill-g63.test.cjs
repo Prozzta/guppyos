@@ -32,7 +32,8 @@ const E = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'exportLedger.ts'));
 const G = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'generated.ts'));
 const RUNNER = path.join(ROOT, 'test', 'claims-drill', 'runner.cjs');
 const SCRIPT = path.join(ROOT, 'test', 'claims-drill', 'g63-downgrade.cjs');
-const TREE_183 = process.env.CLAIMS_DRILL_TREE183 || 'C:/Dunder/_work/andy-cut183';
+const TREE_183 = process.env.CLAIMS_DRILL_TREE_183 || 'C:/Dunder/_work/drill-trees/v1.1.83';
+const ABSENT = ['zq9absent4x1', 'zq9absent4x2'];
 
 const LESSONS = ['- an invented standing lesson about checking the lock first', '- an invented standing lesson about base branches'];
 
@@ -115,11 +116,12 @@ for (const scenario of ['planned', 'unplanned']) {
     assert.ok(fs.existsSync(path.join(TREE_183, 'node_modules')), `the 1.1.83 tree is not ready: ${TREE_183}`);
     const { runDrill } = require(RUNNER);
     const s = sandbox(scenario);
-    const result = await runDrill({ tree: TREE_183, hive: s.hive, home: s.home, script: SCRIPT, out: path.join(s.base, 'result.json'), args: { checklist: s.checklist, lessons: scenario === 'planned' ? s.lessons : {} } });
+    const result = await runDrill({ tree: TREE_183, hive: s.hive, home: s.home, script: SCRIPT, out: path.join(s.base, 'result.json'), args: { checklist: s.checklist, lessons: scenario === 'planned' ? s.lessons : {}, absent: ABSENT } });
     assert.equal(result.ok, true, `drill failed: ${result.reason || JSON.stringify(result).slice(0, 400)}`);
     assert.ok(result.total >= 30, `a real checklist (${result.total})`);
     assert.deepEqual(result.missing, [], `not found by 1.1.83's search: ${JSON.stringify(result.missing.slice(0, 5))}`);
     assert.equal(result.found, result.total);
+    assert.deepEqual(result.absentFound, [], 'control: a token in no file is never counted as found');
     for (const [a, ok] of Object.entries(result.lessonsIntact)) assert.equal(ok, true, `How I work survived the old rollover for ${a}`);
     if (scenario === 'planned' && !process.env.CLAIMS_DRILL_SOURCE) assert.equal(result.rolled['ag-large'], true, 'the large complete export was rolled by 1.1.83');
   });
@@ -132,6 +134,7 @@ for (const scenario of ['planned', 'unplanned']) {
   test(`G6.3 ${scenario}, W6's side (no runner needed): every checklist fact is in a file 1.1.83 indexes, none of them over its 2 MiB cap`, () => {
     const s = sandbox(scenario);
     assert.ok(s.checklist.length >= 30);
+    for (const a of fs.readdirSync(path.join(s.hive, 'agents'))) for (const t of ABSENT) assert.ok(!indexedText(path.join(s.hive, 'agents', a)).includes(t), `control token ${t} is in no file`);
     for (const item of s.checklist) {
       assert.ok(indexedText(path.join(s.hive, 'agents', item.agent)).includes(item.expect), `${item.agent}: ${item.expect}`);
     }
