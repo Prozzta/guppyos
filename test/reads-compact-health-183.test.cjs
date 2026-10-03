@@ -156,7 +156,9 @@ test('watch: ok when everything came back; a card neither carried nor in the sum
   owed.w.noteCompact('god', 'C:/t.jsonl');
   owed.w.noteCarry('god', { cardsDoing: [], cardsCarried: [], obligationsOpen: 2, obligationsCarried: 1, mailOpen: [], mailReinjected: [] });
   owed.w.onStop('god');
-  assert.equal(owed.rows.find((q) => q.kind === 'compact-health').ok, false, 'one owed answer was not carried');
+  const o = owed.rows.find((q) => q.kind === 'compact-health');
+  assert.equal(o.ok, true, 'Creed n1: owed mail past the cap is not lost (ledger + reminders)');
+  assert.equal(o.obligationsTruncated, 1);
 });
 
 test('watch: two compactions in one turn pair with their carries from the end; n counts both', () => {

@@ -241,6 +241,9 @@ export class CompactHealthWatch {
           n,
           summaryChars,
           summaryTokensEst: summaryChars === null ? null : Math.round(summaryChars / SUMMARY_CHARS_PER_TOKEN),
+          // ESTIMATES (Creed n2/n3): idle runs from the last main-chain assistant record, so a long
+          // tool run before an auto-compaction also counts; the re-write cost assumes the whole
+          // pre-compaction context was cached (an upper bound).
           idleBeforeMs: idle,
           cacheRewrite,
           compactCostEst: h.preTokens === null || cacheRewrite === null ? null : Math.round(h.preTokens * (cacheRewrite ? 2 : 0.1)),
@@ -276,7 +279,10 @@ export class CompactHealthWatch {
       mailPending: pendingIds, mailMissing: missing,
       cardsDoing: carry.cardsDoing, cardsCarried: carry.cardsCarried.length, cardsNotInSummary, cardsLost,
       obligationsOpen: carry.obligationsOpen, obligationsCarried: carry.obligationsCarried,
-      ok: missing.length === 0 && cardsLost.length === 0 && carry.obligationsCarried === carry.obligationsOpen
+      // Creed n1: owed mail past the note's cap is named as "and N more" and stays in the ledger and
+      // the reminders, so it is never lost: counted here, not held against ok.
+      obligationsTruncated: Math.max(0, carry.obligationsOpen - carry.obligationsCarried),
+      ok: missing.length === 0 && cardsLost.length === 0
     };
   }
 }
