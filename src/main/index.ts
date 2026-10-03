@@ -1157,9 +1157,12 @@ function notifyHeavySlotFree(agentId: string, kind: string, until: number): void
 // READS-ROTATE-AT-SIZE pilot: a `compact-health` row per compaction (for READS-COMPACT-HEALTH).
 hookServer.setCompactHealth(new CompactHealthWatch({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  // READS-AUTOCOMPACT-ROLLOUT: every agent's compactions are logged; the window is the one its
+  // spawn got, so only a Claude agent has one (a Codex agent's rows say window null).
   windowOf: (agentId) => {
     const a = hive.registry().agents[agentId];
-    return a ? autoCompactWindowFor({ isGod: hive.isGod(agentId), autoCompactWindow: a.autoCompactWindow }, readConfig()) : null;
+    if (!a || !isClaudeProvider(a.provider ?? 'claude')) return null;
+    return autoCompactWindowFor({ isGod: hive.isGod(agentId), autoCompactWindow: a.autoCompactWindow }, readConfig());
   },
   // READS-COMPACT-HEALTH: did this turn's open mail come back after the compaction?
   mailStateOf: (agentId, id) => hive.mail?.ledger(agentId).entries[id] ?? null
@@ -4151,8 +4154,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       }
     }
     // The sessions this process opens, other than the one it resumed, carry this prompt.
-    // READS-ROTATE-AT-SIZE pilot (shared/autoCompactWindow.ts): Claude Code's own auto-compact
-    // window, per agent (god: 150k by default; config.godAutoCompactWindow "off" switches it off).
+    // READS-AUTOCOMPACT-ROLLOUT (shared/autoCompactWindow.ts): Claude Code's own auto-compact
+    // window for every Claude agent (150k by default; an agent's own registry value, god's
+    // config.godAutoCompactWindow, and config.claudeAutoCompactWindow "off" still decide).
     // An env var only: the injected prompt, and so its session fingerprint, are unchanged.
     const compactAgent = { isGod: opts.hive.isGod, autoCompactWindow: hive.registry().agents[opts.hive.id]?.autoCompactWindow };
     const compactWindow = autoCompactWindowFor(compactAgent, cfg);

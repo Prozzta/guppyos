@@ -245,7 +245,8 @@ export interface RegistryAgent extends AgentMeta {
    *  archived before 1.1.75, counted as explicit. Cleared on restore. */
   archiveReason?: ArchiveReason;
   /** READS-ROTATE-AT-SIZE pilot (1.1.81): this agent's Claude Code auto-compact window (tokens,
-   *  100k-1M) or "off"; wins over the god default (shared/autoCompactWindow.ts). Unset = default. */
+   *  100k-1M) or "off"; wins over the config settings (shared/autoCompactWindow.ts). Unset = the
+   *  config's window, 150k by default for every Claude agent (READS-AUTOCOMPACT-ROLLOUT). */
   autoCompactWindow?: number | 'off';
   /** The human has this agent 1:1 and Michael must leave it alone until they
    *  flip it back. Held agents stay ACTIVE and keep their terminal — this is
