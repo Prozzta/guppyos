@@ -16,7 +16,7 @@ import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
 import type { WorkerHandle } from './nativeMemory/service';
-import { spawn, execFile, spawnSync } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import {
   rmSync, existsSync, readFileSync, readdirSync, statSync, cpSync, writeFileSync,
   unlinkSync, mkdirSync, renameSync, createWriteStream, copyFileSync, lstatSync,
@@ -1328,16 +1328,14 @@ const claimWorkingSetForAgent = (agentId: string): string | null => {
     now: new Date().toISOString(),
     taskStatus: (id: string) => byTask.get(id)?.status ?? null,
     fileExists: (p: string) => existsSync(resolve(agentCwd, p)),
-    commitExists: (sha: string) => {
-      if (!/^[0-9a-f]{7,64}$/i.test(sha)) return false;
-      try { return spawnSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: agentCwd, stdio: 'ignore', timeout: 1500 }).status === 0; } catch { return false; }
-    },
+    // These hooks are synchronous by contract. Avoid blocking the main thread for git; until an
+    // asynchronous world snapshot is available, unresolved commit refs fail closed and file
+    // freshness uses the current filesystem mtime.
+    commitExists: (_sha: string) => false,
     fileChangedSince: (p: string, since: string) => {
-      if (!Number.isFinite(Date.parse(since))) return false;
-      try {
-        const git = spawnSync('git', ['log', `--since=${since}`, '--format=', '--name-only', '--', p], { cwd: agentCwd, encoding: 'utf8', timeout: 2000 });
-        return git.status === 0 && !!git.stdout.trim();
-      } catch { return false; }
+      const sinceMs = Date.parse(since);
+      if (!Number.isFinite(sinceMs)) return false;
+      try { return statSync(resolve(agentCwd, p)).mtimeMs > sinceMs; } catch { return false; }
     },
     cardOutcomes,
   };
