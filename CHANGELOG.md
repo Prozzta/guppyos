@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
-## [1.1.82] — unreleased
+## [1.1.82] — 2026-10-03
 
 **Munder Difflin is now called Guppy.** Only the app's name changes: your agents, their names,
 the office floor, history and settings all stay. Rollback: 1.1.81 (reinstall; your old data is
