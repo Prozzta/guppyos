@@ -69,12 +69,10 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
   const claims = {};
   for (const r of records) claims[r.id] = { id: r.id, status: 'live', sightings: 1, firstAt: r.at, lastAt: r.at, pinned: r.kind === 'lesson', reasons: [] };
   const state = { v: 1, agent, registryHash: '', ledgerHead: '', claims, conflicts: [] };
-  // EXPERIMENT (CLAIMS_DRILL_DEDUP=1): leave out legacy claims whose archive is still on disk (the old build indexes it)
-  const backed = (r) => process.env.CLAIMS_DRILL_DEDUP === '1' && r.legacy && /^memory-archive-.*\.md$/.test(r.legacy.file) && fs.existsSync(path.join(agentDir, r.legacy.file));
-  const out = records.filter((r) => !backed(r) || r.kind === 'lesson');
-  E.syncExport(agentDir, records.filter((r) => !backed(r)), state, E.standInExportLine);
+  // god 6c4d4e ruling 2: both exports leave out the legacy claims their archive still holds
+  E.syncExport(agentDir, records, state, E.standInExportLine);
   if (scenario === 'planned') {
-    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(out, agent));
+    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, agent), E.archiveBackedIds(agentDir, records));
   } else {
     // writer mode before an unplanned downgrade: memory.md is the small generated view
     fs.writeFileSync(path.join(agentDir, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# Memory - ${agent}\n\n## How I work (standing lessons)\n${LESSONS.join('\n')}\n`);
@@ -85,13 +83,13 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
 const norm = (t) => t.replace(/\s+/g, ' ').trim();
 
 /**
- * The plan's 50-fact checklist, built at run time from a snapshot (real text is never written to
- * the repo): 20 facts from the largest agent (F5: the largest is Andy today), 30 spread over the
- * others, picked at even spacing from the entries of at least 80 characters. A fact counts as found
- * when 40 characters from its middle appear in a hit; its query is its own text without the date.
- * Up to 3 standing lessons per agent are checked after the old rollover.
+ * The CANDIDATES for the plan's 50-fact checklist, built at run time from a snapshot (real text is
+ * never written to the repo): per agent, 1.6x its quota (20 for the largest agent, F5: Andy today;
+ * 30 spread over the others), picked at even spacing from the entries of at least 80 characters. A
+ * fact counts as found when 40 characters from its middle appear in a hit; its query is its own text
+ * without the date. Up to 3 standing lessons per agent are checked after the old rollover.
  */
-function snapshotChecklist(src) {
+function snapshotChecklist(src, factor = 1.6) {
   const agents = fs.readdirSync(src).filter((a) => fs.statSync(path.join(src, a)).isDirectory()).map((a) => {
     const files = fs.readdirSync(path.join(src, a)).filter((n) => /^memory(-archive-.*)?\.md$/.test(n)).sort();
     const entries = files.flatMap((f) => M.splitEntries(fs.readFileSync(path.join(src, a, f), 'utf8'), f).entries);
@@ -100,11 +98,13 @@ function snapshotChecklist(src) {
   }).sort((x, y) => y.bytes - x.bytes);
   const checklist = [];
   const lessons = {};
+  const quotas = {};
   const others = agents.length - 1;
   agents.forEach(({ a, entries }, i) => {
-    const want = i === 0 ? 20 : Math.floor(30 / others) + (i - 1 < 30 % others ? 1 : 0);
+    quotas[a] = i === 0 ? 20 : Math.floor(30 / others) + (i - 1 < 30 % others ? 1 : 0);
+    const want = Math.ceil(quotas[a] * factor);
     const facts = entries.filter((e) => !e.lesson && norm(e.text).length >= 80);
-    for (let k = 0; k < want && facts.length; k++) {
+    for (let k = 0; k < want && k < facts.length; k++) {
       const t = norm(facts[Math.floor((k + 0.5) * facts.length / want)].text);
       const mid = Math.max(0, Math.floor(t.length / 2) - 20);
       checklist.push({ agent: a, query: t.replace(/^[-*]\s*(\d{4}-\d{2}-\d{2}\S*\s*)?/, '').slice(0, 200), expect: t.slice(mid, mid + 40).trim() });
@@ -112,10 +112,38 @@ function snapshotChecklist(src) {
     const ls = entries.filter((e) => e.lesson).slice(0, 3).map((e) => e.text.split(/\r?\n/)[0].slice(0, 80));
     if (ls.length) lessons[a] = ls;
   });
-  return { checklist, lessons };
+  return { checklist, lessons, quotas, largest: agents[0].a };
 }
 
-function sandbox(scenario) {
+const POST = [0, 1, 2, 3, 4].map((k) => `pmreal${k}x`);
+
+/**
+ * god 6c4d4e ruling 1: the BASELINE is the control. 1.1.83 first runs on the UNMIGRATED snapshot; the
+ * checklist is drawn only from the candidates it finds in its top 10 (per agent, up to the quota), so
+ * 100% means no fact is lost to the migration. Its own misses are reported (counts and agents only:
+ * no real text in the output), so that gap stays visible. Run once, shared by both scenarios.
+ */
+let baselineOnce = null;
+function baseline(src) {
+  baselineOnce = baselineOnce || (async () => {
+    const cand = snapshotChecklist(src);
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-g63-baseline-'));
+    fs.mkdirSync(path.join(base, 'hive', 'agents'), { recursive: true });
+    fs.cpSync(src, path.join(base, 'hive', 'agents'), { recursive: true });
+    const { runDrill } = require(RUNNER);
+    const r = await runDrill({ tree: TREE_183, hive: path.join(base, 'hive'), home: path.join(base, 'home'), script: SCRIPT, out: path.join(base, 'result.json'), args: { checklist: cand.checklist, lessons: {}, absent: [] } });
+    if (!r.ok) return { error: `the baseline drill failed: ${r.reason}` };
+    const missed = new Set(r.missing.map((m) => m.query));
+    const checklist = [];
+    for (const [a, q] of Object.entries(cand.quotas)) checklist.push(...cand.checklist.filter((c) => c.agent === a && !missed.has(c.query)).slice(0, q));
+    const missedByAgent = {};
+    for (const m of r.missing) missedByAgent[m.agent] = (missedByAgent[m.agent] || 0) + 1;
+    return { checklist, lessons: cand.lessons, largest: cand.largest, report: { candidates: r.total, baselineFound: r.found, baselineMissedByAgent: missedByAgent, drawn: checklist.length } };
+  })();
+  return baselineOnce;
+}
+
+function sandbox(scenario, real = null) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), `claims-g63-${scenario}-`));
   const hive = path.join(base, 'hive');
   const home = path.join(base, 'home');
@@ -125,23 +153,28 @@ function sandbox(scenario) {
   const lessons = {};
   const src = process.env.CLAIMS_DRILL_SOURCE;
   if (src) {
+    real = real || (process.env.CLAIMS_DRILL_CHECKLIST ? { checklist: JSON.parse(fs.readFileSync(process.env.CLAIMS_DRILL_CHECKLIST, 'utf8')), lessons: {}, largest: null } : snapshotChecklist(src));
     for (const a of fs.readdirSync(src)) {
       if (!fs.statSync(path.join(src, a)).isDirectory()) continue;
       fs.cpSync(path.join(src, a), path.join(hive, 'agents', a), { recursive: true });
-      prepareAgent(path.join(hive, 'agents', a), a, scenario, []);
+      // the largest real agent also gets invented facts that exist only in the ledger (post-migration)
+      prepareAgent(path.join(hive, 'agents', a), a, scenario, a === real.largest ? POST : []);
     }
-    const real = process.env.CLAIMS_DRILL_CHECKLIST ? { checklist: JSON.parse(fs.readFileSync(process.env.CLAIMS_DRILL_CHECKLIST, 'utf8')), lessons: {} } : snapshotChecklist(src);
     checklist.push(...real.checklist);
+    if (real.largest) for (const t of POST) checklist.push({ agent: real.largest, query: t, expect: t });
     Object.assign(lessons, real.lessons);
   } else {
     [['ag-small', 40e3], ['ag-mid', 120e3], ['ag-large', 400e3]].forEach(([a, bytes], idx) => {
       const dir = path.join(hive, 'agents', a);
       const tokens = inventAgent(dir, idx, bytes);
       const post = [0, 1, 2, 3, 4].map((k) => `pm${idx}x${k}`);
-      prepareAgent(dir, a, scenario, post);
+      // the large agent has weeks of writer mode behind it: 600 claims written after the migration,
+      // so its complete export is over the old 32 KB rollover even without its archived entries
+      const bulk = a === 'ag-large' ? Array.from({ length: 600 }, (_, k) => `pb${idx}x${k}`) : [];
+      prepareAgent(dir, a, scenario, [...post, ...bulk]);
       const step = Math.max(1, Math.floor(tokens.length / 12));
       for (let i = 0; i < tokens.length; i += step) checklist.push({ agent: a, query: tokens[i], expect: tokens[i] });
-      for (const t of post) checklist.push({ agent: a, query: t, expect: t });
+      for (const t of [...post, ...bulk.filter((_, k) => k % 120 === 7)]) checklist.push({ agent: a, query: t, expect: t });
       lessons[a] = LESSONS;
     });
   }
@@ -149,15 +182,26 @@ function sandbox(scenario) {
 }
 
 for (const scenario of ['planned', 'unplanned']) {
-  test(`G6.3 ${scenario} downgrade to 1.1.83: the old build's own search finds 100% of the checklist`, async () => {
+  test(`G6.3 ${scenario} downgrade to 1.1.83: the old build's own search finds 100% of the checklist`, async (t) => {
     assert.ok(fs.existsSync(RUNNER), `the Electron-as-Node runner is missing (${RUNNER}; W3/C4, Andy). This gate fails until it exists; it never skips.`);
     assert.ok(fs.existsSync(path.join(TREE_183, 'node_modules')), `the 1.1.83 tree is not ready: ${TREE_183}`);
     const { runDrill } = require(RUNNER);
-    const s = sandbox(scenario);
+    const src = process.env.CLAIMS_DRILL_SOURCE;
+    let real = null;
+    if (src && !process.env.CLAIMS_DRILL_CHECKLIST) {
+      real = await baseline(src);
+      assert.ok(!real.error, real.error);
+      t.diagnostic(`baseline (1.1.83, unmigrated): ${JSON.stringify(real.report)}`);
+      assert.equal(real.checklist.length, 50, `50 facts the baseline finds (${real.checklist.length})`);
+    }
+    const s = sandbox(scenario, real);
     const result = await runDrill({ tree: TREE_183, hive: s.hive, home: s.home, script: SCRIPT, out: path.join(s.base, 'result.json'), args: { checklist: s.checklist, lessons: scenario === 'planned' ? s.lessons : {}, absent: ABSENT } });
     assert.equal(result.ok, true, `drill failed: ${result.reason || JSON.stringify(result).slice(0, 400)}`);
     assert.ok(result.total >= 30, `a real checklist (${result.total})`);
-    assert.deepEqual(result.missing, [], `not found by 1.1.83's search: ${JSON.stringify(result.missing.slice(0, 5))}`);
+    // with a real snapshot, name only the agents (no real text in the output)
+    const shown = src ? result.missing.map((m) => m.agent) : result.missing.slice(0, 5);
+    t.diagnostic(`${scenario}: ${result.found}/${result.total} found; lessons intact ${JSON.stringify(result.lessonsIntact)}`);
+    assert.deepEqual(result.missing, [], `not found by 1.1.83's search: ${JSON.stringify(shown)}`);
     assert.equal(result.found, result.total);
     assert.deepEqual(result.absentFound, [], 'control: a token in no file is never counted as found');
     for (const [a, ok] of Object.entries(result.lessonsIntact)) assert.equal(ok, true, `How I work survived the old rollover for ${a}`);
@@ -174,7 +218,7 @@ for (const scenario of ['planned', 'unplanned']) {
     assert.ok(s.checklist.length >= 30);
     for (const a of fs.readdirSync(path.join(s.hive, 'agents'))) for (const t of ABSENT) assert.ok(!indexedText(path.join(s.hive, 'agents', a)).includes(t), `control token ${t} is in no file`);
     for (const item of s.checklist) {
-      assert.ok(norm(indexedText(path.join(s.hive, "agents", item.agent))).includes(item.expect), `${item.agent}: ${item.expect}`);
+      assert.ok(norm(indexedText(path.join(s.hive, "agents", item.agent))).includes(item.expect), `${item.agent}: ${process.env.CLAIMS_DRILL_SOURCE ? "(real text withheld)" : item.expect}`);
     }
     for (const a of fs.readdirSync(path.join(s.hive, 'agents'))) {
       for (const f of fs.readdirSync(path.join(s.hive, 'agents', a)).filter((n) => /\.md$/i.test(n))) {

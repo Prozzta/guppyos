@@ -128,3 +128,69 @@ test('G6.4 upgrade round trip: the complete export re-imports as nothing; a bull
   const back = M.parseNewBullets(fs.readFileSync(path.join(d, 'memory.md'), 'utf8'), known);
   assert.deepEqual(back.map((x) => x.text), ['- 2026-10-05 a note written while on the older build']);
 });
+
+// ——— god 6c4d4e ruling 2: no second copy of an entry its archive still holds ———
+
+/** An invented agent folder: an archive (3 entries, one split into parts) + memory.md; records from the real import. */
+function archived() {
+  const d = dir();
+  const longEntry = '- 2026-09-02 an invented long entry\n' + Array.from({ length: 60 }, (_, i) => `  continued invented line ${i} ${'y'.repeat(80)}`).join('\n');
+  fs.writeFileSync(path.join(d, 'memory-archive-2026-09-20.md'), `# Memory archive - invented\n\n## 2026-09-01 invented\n- 2026-09-01 an invented archived fact alpha\n- 2026-09-01 an invented archived fact beta\n${longEntry}\n`);
+  fs.writeFileSync(path.join(d, 'memory.md'), '# Memory - invented\n\n## How I work (standing lessons)\n- an invented lesson\n\n## 2026-10-01 invented\n- 2026-10-01 an invented recent fact gamma\n');
+  const drafts = M.importLegacy(d);
+  drafts.push({ t: 'claim', kind: 'fact', text: '- 2026-10-04 an invented post-migration fact delta', source: 'self' });
+  const records = drafts.map((x, i) => ({ v: 1, id: `r${i}`, at: x.at || '2026-10-04T10:00:00.000Z', wt: '2026-10-04T10:00:00.000Z', agent: 'ag-1', prev: '', mac: '', ...x }));
+  const claims = {};
+  for (const r of records) claims[r.id] = { id: r.id, status: 'live', sightings: 1, firstAt: r.at, lastAt: r.at, pinned: r.kind === 'lesson', reasons: [] };
+  return { d, records, state: { v: 1, agent: 'ag-1', registryHash: '', ledgerHead: '', claims, conflicts: [] } };
+}
+const byFile = (records, re) => records.filter((r) => r.legacy && re.test(r.legacy.file)).map((r) => r.id);
+
+test('ruling 2: archive-backed legacy claims (content-checked by sha256) stay out of the continuous export; the rest is exported', () => {
+  const { d, records, state } = archived();
+  const arch = byFile(records, /^memory-archive-/);
+  assert.ok(arch.length >= 4, `the long entry is split into parts (${arch.length} archive records)`);
+  assert.deepEqual([...E.archiveBackedIds(d, records)].sort(), [...arch].sort());
+  E.syncExport(d, records, state, E.standInExportLine);
+  const ex = E.exportedIds(d);
+  for (const id of arch) assert.ok(!ex.has(id), `${id} is still in its archive: not exported again`);
+  for (const r of records.filter((x) => !arch.includes(x.id))) assert.ok(ex.has(r.id), `${r.id} (${r.legacy ? r.legacy.file : 'post-migration'}) is exported`);
+});
+
+test('ruling 2: re-evaluated on every sync: a changed entry, then a deleted archive, bring their claims back', () => {
+  const { d, records, state } = archived();
+  E.syncExport(d, records, state, E.standInExportLine);
+  const file = path.join(d, 'memory-archive-2026-09-20.md');
+  const alpha = records.find((r) => r.text && r.text.includes('fact alpha')).id;
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('fact alpha', 'fact alpha, edited'));
+  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 1, 'only the entry the archive no longer holds');
+  assert.ok(E.exportedIds(d).has(alpha));
+  fs.rmSync(file);
+  const rest = byFile(records, /^memory-archive-/).filter((id) => id !== alpha);
+  assert.equal(E.syncExport(d, records, state, E.standInExportLine), rest.length, 'the archive is gone: all its claims are back');
+  for (const id of rest) assert.ok(E.exportedIds(d).has(id));
+  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 0, 'idempotent');
+});
+
+test('ruling 2: a claim naming an archive that is not in the folder, or a lesson, is never left out', () => {
+  const { d, records } = archived();
+  const ghost = { ...records[0], id: 'ghost', legacy: { ...records[0].legacy, file: 'memory-archive-1999-01-01.md' } };
+  const lesson = { ...records[0], id: 'les', kind: 'lesson' };
+  const ids = E.archiveBackedIds(d, [...records, ghost, lesson]);
+  assert.ok(!ids.has('ghost'));
+  assert.ok(!ids.has('les'));
+});
+
+test('ruling 2: export --complete with the archive-backed exclude omits them and keeps How I work; without it, every record', () => {
+  const { d, records, state } = archived();
+  const arch = byFile(records, /^memory-archive-/);
+  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records));
+  const text = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
+  for (const id of arch) assert.ok(!text.includes(`[c:${id}]`), id);
+  for (const r of records.filter((x) => !arch.includes(x.id))) assert.ok(text.includes(`[c:${r.id}]`), r.id);
+  assert.match(text, /^## How I work \(standing lessons\)\n- an invented lesson/m);
+  const all = dir();
+  E.exportComplete(all, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'));
+  const full = fs.readFileSync(path.join(all, 'memory.md'), 'utf8');
+  for (const r of records) assert.ok(full.includes(`[c:${r.id}]`), `default: every record (${r.id})`);
+});

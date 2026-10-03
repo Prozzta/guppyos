@@ -19,20 +19,58 @@
  *    The caller turns the flag down only after this returns ok. A7.1: the old build will index both
  *    this file and the continuous exports, so some hits show twice there; harmless.
  *
+ * 3. NO SECOND COPY OF AN ARCHIVED ENTRY (god 6c4d4e ruling 2; spec amendment A7.1, 2026-10-03). A
+ *    legacy claim whose memory-archive-*.md is still in the folder AND still holds that entry (by its
+ *    legacy sha256; the parts of a split entry follow it) is left out of both exports: the older build
+ *    indexes that archive already, and a second copy crowds real facts out of its top 10 (bed snapshot,
+ *    1.1.83: 45/50 planned and 46/50 unplanned with a lost fact each, against 46/50 and 46/50 with none
+ *    lost once deduplicated; the baseline is 46/50). Content-checked and recomputed on every call, so
+ *    an archive that goes missing or changes brings its claims back into the next sync. Lessons are
+ *    never left out (How I work must be whole in a complete export).
+ *
  * W4 owns the renderers (RenderExportLineFn, RenderMemoryMdFn); they are injected. The stand-ins below
- * keep W6 testable until W4 lands, and are replaced by W4's functions in main's wiring.
+ * keep W6 testable until W4 lands, and are replaced by W4's functions in main's wiring. W4's
+ * 'complete' rendering takes an OPTIONAL `{ exclude }` predicate (additive; the frozen type is
+ * unchanged): default "every record"; W6 passes the archive-backed one.
  */
 import { closeSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ClaimsState, LedgerRec, RenderExportLineFn, RenderMemoryMdFn, Status, WorldView } from '../../shared/claims';
 import { GENERATED_MEMORY_PREFIX, isGeneratedMemory } from './generated';
-import { RENDERED_RE } from './migrate';
+import { RENDERED_RE, splitEntries } from './migrate';
 
 export const EXPORT_SPLIT_BYTES = 1.5 * 1024 * 1024;
 /** The older build's per-source cap (sources.ts MAX_SOURCE_BYTES): no export file may reach it. */
 export const OLD_BUILD_MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 export const EXPORT_RE = /^memory-ledger-export-(\d{4}-\d{2})(?:-(\d+))?\.md$/;
 const TAG_RE = /\[c:([^\]\s]+)\]/g;
+const ARCHIVE_RE = /^memory-archive-.*\.md$/i;
+
+/**
+ * The legacy claims an older build can already find in their own archive: claim records whose
+ * `legacy.file` is a memory-archive-*.md that exists in `agentDir` and still contains an entry with
+ * the claim's `legacy.sha256` (Jim's split, the import's hash). Never a lesson. Read fresh per call.
+ */
+export function archiveBackedIds(agentDir: string, records: LedgerRec[]): Set<string> {
+  const shas = new Map<string, Set<string> | null>();
+  const shasOf = (file: string): Set<string> | null => {
+    if (!shas.has(file)) {
+      let set: Set<string> | null = null;
+      try { set = new Set(splitEntries(readFileSync(join(agentDir, file), 'utf8'), file).entries.map((e) => e.sha256)); } catch { set = null; }
+      shas.set(file, set);
+    }
+    return shas.get(file) ?? null;
+  };
+  const out = new Set<string>();
+  for (const r of records) {
+    if (r.t !== 'claim' || r.kind === 'lesson' || !r.legacy || !ARCHIVE_RE.test(r.legacy.file) || /[\\/]/.test(r.legacy.file)) continue;
+    if (shasOf(r.legacy.file)?.has(r.legacy.sha256)) out.add(r.id);
+  }
+  return out;
+}
+
+/** W4's RenderMemoryMdFn with the optional, additive exclude predicate (ruling 2). */
+export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', opts?: { exclude?: (id: string) => boolean }) => string;
 
 const exportName = (month: string, part: number): string => `memory-ledger-export-${month}${part > 1 ? `-${part}` : ''}.md`;
 
@@ -118,23 +156,27 @@ export function exportedIds(agentDir: string): Set<string> {
   return ids;
 }
 
-/** Catch up the continuous export after a crash or at the switch to writer mode: append every record not yet in it, in order. */
-export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn): number {
+/**
+ * Catch up the continuous export after a crash or at the switch to writer mode: append every record
+ * not yet in it, in order, except the archive-backed legacy claims (recomputed on every call, so a
+ * claim whose archive is gone or changed is exported by the next sync).
+ */
+export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn, exclude: Set<string> = archiveBackedIds(agentDir, records)): number {
   const have = exportedIds(agentDir);
   let n = 0;
-  for (const r of records) if (!have.has(r.id)) { appendExport(agentDir, r, state, render); n++; }
+  for (const r of records) if (!have.has(r.id) && !exclude.has(r.id)) { appendExport(agentDir, r, state, render); n++; }
   return n;
 }
 
-export const COMPLETE_EXPORT_NOTE = 'After a downgrade, the older app indexes both this complete memory.md and the memory-ledger-export files, so some search hits appear twice there. That is harmless.';
+export const COMPLETE_EXPORT_NOTE = 'After a downgrade, the older app indexes this complete memory.md, the memory-ledger-export files and the old archives. Entries still in an archive are not exported again, so they are not doubled; a few recent ones can still show twice.';
 
 /**
  * `memory export --complete` for one agent: replace memory.md with W4's complete rendering (temp file +
  * rename). The text must not start with the generated marker (an older build has to roll it over like
  * any memory.md): a leading marker line is removed. Returns the file written and the A7.1 note.
  */
-export function exportComplete(agentDir: string, state: ClaimsState, view: WorldView, render: RenderMemoryMdFn): { file: string; bytes: number; note: string } {
-  let text = render(state, view, 'complete');
+export function exportComplete(agentDir: string, state: ClaimsState, view: WorldView, render: RenderMemoryMdFn | RenderMemoryMdWithExcludeFn, exclude?: Set<string>): { file: string; bytes: number; note: string } {
+  let text = exclude ? (render as RenderMemoryMdWithExcludeFn)(state, view, 'complete', { exclude: (id) => exclude.has(id) }) : render(state, view, 'complete');
   if (isGeneratedMemory(text)) text = text.replace(/^﻿?[^\n]*\n?/, '');
   if (text.startsWith(GENERATED_MEMORY_PREFIX)) throw new Error('export --complete: the rendering still starts with the generated marker');
   const file = join(agentDir, 'memory.md');
@@ -155,10 +197,10 @@ export const standInExportLine: RenderExportLineFn = (rec, state) => {
   return `- ${rec.at.slice(0, 10)} ${rec.kind}${key}${st === 'live' ? '' : ` [${st}]`}: ${text} [c:${rec.id}]`;
 };
 
-/** Stand-in RenderMemoryMdFn ('complete' only matters to W6): header, How I work, every claim by time. */
-export function standInCompleteMemory(records: LedgerRec[], agent: string): RenderMemoryMdFn {
-  return (state, _view, mode) => {
-    const claims = records.filter((r) => r.t === 'claim') as Array<Extract<LedgerRec, { t: 'claim' }>>;
+/** Stand-in RenderMemoryMdFn ('complete' only matters to W6): header, How I work, every claim by time (less any excluded). */
+export function standInCompleteMemory(records: LedgerRec[], agent: string): RenderMemoryMdWithExcludeFn {
+  return (state, _view, mode, opts) => {
+    const claims = (records.filter((r) => r.t === 'claim') as Array<Extract<LedgerRec, { t: 'claim' }>>).filter((c) => !opts?.exclude?.(c.id));
     const lessons = claims.filter((c) => c.kind === 'lesson' && state.claims[c.id]?.status === 'live');
     const lines = [`# Memory - ${agent}`, '', '## How I work (standing lessons)', ...lessons.map((c) => `${c.text} [c:${c.id}]`), '', '## All claims (complete export)'];
     const sorted = [...claims].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
