@@ -1076,9 +1076,23 @@ const heavyLock = new HeavyJobLock({
   limit: () => heavyLimit(readConfig().heavyJobsAtOnce),
   roots: () => ptyManager.list().flatMap((s) => { const a = ptyToAgent.get(s.id); return a && s.pid > 0 ? [{ agentId: a, pid: s.pid }] : []; }),
   probe: probeProcesses,
-  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
+  alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
+  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until)
 });
 hookServer.setHeavyLock(heavyLock);
+
+/** HEAVY-LOCK-SELF-WAIT: the "slot free" notice on both rails, as closing time does. The mail wakes an
+ *  IDLE agent (sender `system` always wakes under READS-QUIET-NOREPLY; `wake: "now"` is the explicit
+ *  second guarantee; inform + no reply = no obligation); the steer reaches a BUSY one at its next hook. */
+function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
+  const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
+  const subject = `HEAVY SLOT FREE: the ${kind} you were denied can run now; the slot is reserved for you until ${at}`;
+  const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. No reply is needed.`;
+  try { hive.send({ to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' } as Partial<HiveMessage>, 'system'); } catch { /* best effort */ }
+  try { control.steer(agentId, `${subject}.`); } catch { /* best effort */ }
+}
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a
 //    provider-confirmed turn (our own unconfirmed nudge is a new turn, not a live one);
@@ -2309,7 +2323,7 @@ function writeFleetSnapshot(): void {
       });
     // HEAVY-JOB-SERIALIZE: who holds the heavy-job slots (god reads fleet.json every standup).
     // ZERO-TOKEN-LIVENESS: the current liveness-v1 records (every LIVE agent, recent non-LIVE ones).
-    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot() }, liveness: agentLiveness.fleetRecords(now) });
+    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now) });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }

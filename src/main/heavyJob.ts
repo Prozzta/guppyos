@@ -188,7 +188,9 @@ function leading(ws: string[]): string[] {
   while (i < ws.length) {
     const w = ws[i];
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { i++; continue; }
-    if (w === 'env') { i++; while (i < ws.length && (ws[i].startsWith('-') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i]))) { if (ws[i] === '-u') i++; i++; } continue; }
+    // HEAVY-LOCK-MISSED-RUNS-177 (3rd escape): an opaque `$(...)` in env's option run expands to
+    // options (`env $(env | grep ... | sed s/^/-u /) node test/tools/run-tests.cjs`); it is not the program.
+    if (w === 'env') { i++; while (i < ws.length && (ws[i].startsWith('-') || ws[i].startsWith('$(') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i]))) { if (ws[i] === '-u') i++; i++; } continue; }
     if (w === 'timeout' || w === 'nice') { i++; while (i < ws.length && (/^-/.test(ws[i]) || /^\d+[smhd]?$/.test(ws[i]))) i++; continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
@@ -196,7 +198,26 @@ function leading(ws: string[]): string[] {
   return ws.slice(i);
 }
 
-function classifyWords(ws0: string[], depth: number): HeavyClass {
+/** HEAVY-LOCK-SCRIPT-WRAPPER: what the classifier may read besides the command line. */
+export interface ClassifyCtx {
+  /** The text of a script file the command runs (`bash suite.sh`, `./gate.sh`), resolved against the
+   *  call's cwd and size-capped by the caller; null when unreadable. Absent = scripts are not read. */
+  readScript?: (path: string, cd?: string) => string | null;
+  /** The directory an earlier `cd X` segment of the same command moved to (relative paths then resolve there). */
+  cd?: string;
+}
+
+/** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
+function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyClass {
+  if (!ctx.readScript || depth >= 2) return { heavy: false };
+  let text: string | null = null;
+  try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
+  if (!text) return { heavy: false };
+  const c = classifyCommand(text, depth + 1, ctx);
+  return c.heavy ? { ...c, why: `${c.why ?? c.kind} (in ${path.replace(/\\/g, '/').split('/').pop()})` } : { heavy: false };
+}
+
+function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const ws = leading(ws0);
   if (!ws.length) return { heavy: false };
   // An opt-in scale/bench env gate before the command (Jim MF2).
@@ -209,9 +230,13 @@ function classifyWords(ws0: string[], depth: number): HeavyClass {
   if (WRAPPERS.has(bin) && depth === 0) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
     const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
-    if (k >= 0) return classifyCommand(args.slice(k + 1).join(' '), depth + 1);
-    return { heavy: false };
+    if (k >= 0) return classifyCommand(args.slice(k + 1).join(' '), depth + 1, ctx);
+    // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
+    const script = /^(bash|sh|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
+    return script ? classifyScript(script, depth, ctx) : { heavy: false };
   }
+  // A script run directly (`./suite.sh`, `scripts/gate.sh`).
+  if (/\.(sh|bash)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
   const has = (...xs: string[]): boolean => xs.some((x) => args.includes(x));
   if (bin === 'npm' || bin === 'pnpm' || bin === 'yarn') {
     const sub = args.find((a) => !a.startsWith('-')) ?? (bin === 'yarn' ? 'install' : '');
@@ -231,7 +256,7 @@ function classifyWords(ws0: string[], depth: number): HeavyClass {
     }
     return { heavy: false };
   }
-  if (bin === 'npx') return classifyWords(args.filter((a) => !a.startsWith('-')), depth);
+  if (bin === 'npx') return classifyWords(args.filter((a) => !a.startsWith('-')), depth, ctx);
   if (bin === 'electron-rebuild' || bin === 'node-gyp') return { heavy: true, kind: 'install', why: bin };
   if (bin === 'electron-builder') return { heavy: true, kind: 'build', why: bin };
   if (bin === 'electron-vite' && has('build')) return { heavy: true, kind: 'build', why: 'electron-vite build' };
@@ -267,7 +292,7 @@ function classifyWords(ws0: string[], depth: number): HeavyClass {
     if (script && depth < 2) {
       const after = args.slice(args.indexOf(script) + 1);
       const head = after[0]?.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.(exe|cmd)$/, '') ?? '';
-      if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1);
+      if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1, ctx);
     }
     return { heavy: false };
   }
@@ -290,17 +315,25 @@ function substitutions(cmd: string): string[] {
 }
 
 /** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
-export function classifyCommand(cmd: string, depth = 0): HeavyClass {
+export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): HeavyClass {
   const text = stripHeredocs(cmd);
+  let here = ctx;
   for (const seg of segments(text)) {
-    const c = classifyWords(stripRedirects(words(seg.replace(/\s&$/, ''))), depth);
+    const ws = stripRedirects(words(seg.replace(/\s&$/, '')));
+    // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
+    if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {
+      const to = ws[1];
+      here = { ...here, cd: /^([A-Za-z]:[\\/]|[\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\/]+$/, '')}/${to}` };
+      continue;
+    }
+    const c = classifyWords(ws, depth, here);
     if (c.heavy) return c;
   }
   // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
   // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite.
   if (depth < 3) {
     for (const inner of substitutions(text)) {
-      const c = classifyCommand(inner, depth + 1);
+      const c = classifyCommand(inner, depth + 1, ctx);
       if (c.heavy) return c;
     }
   }
@@ -308,9 +341,28 @@ export function classifyCommand(cmd: string, depth = 0): HeavyClass {
 }
 
 /** Classify a tool call (any provider: the command-shaped input only). */
-export function classifyHeavy(_toolName: string | undefined, input: unknown): HeavyClass {
+export function classifyHeavy(_toolName: string | undefined, input: unknown, ctx: ClassifyCtx = {}): HeavyClass {
   const cmd = commandFromToolInput(input);
-  return cmd ? classifyCommand(cmd) : { heavy: false };
+  return cmd ? classifyCommand(cmd, 0, ctx) : { heavy: false };
+}
+
+/** HEAVY-LOCK-SCRIPT-WRAPPER: the largest script file the classifier reads. */
+export const HEAVY_SCRIPT_MAX_BYTES = 256 * 1024;
+
+/** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure. */
+export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string } | null): ClassifyCtx {
+  return {
+    readScript: (p: string, cd?: string): string | null => {
+      const raw = p.replace(/^["']|["']$/g, '');
+      if (!raw || raw.includes('$') || cd?.includes('$') || cd?.startsWith('~')) return null;
+      const isAbs = (x: string): boolean => /^([A-Za-z]:[\\/]|[\\/])/.test(x);
+      const base = cd ? (isAbs(cd) || !cwd ? cd : `${cwd.replace(/[\\/]+$/, '')}/${cd}`) : cwd;
+      const abs = isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
+      const f = read(abs);
+      if (!f || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;
+      return f.text();
+    }
+  };
 }
 
 /** Does this tool call leave the job running after the call returns? */
@@ -381,16 +433,33 @@ export interface HeavyLockDeps {
   /** A process listing (hidden; only ever called while a slot is held). null = the listing FAILED. */
   probe?: () => Promise<ProcRow[] | null>;
   log?: (row: Record<string, unknown>) => void;
+  /** HEAVY-LOCK-SELF-WAIT: tell a queued agent that a slot is RESERVED for it until `until` (ms). */
+  notify?: (agentId: string, kind: HeavyKind, until: number) => void;
+  /** Is this agent still live (a PTY)? A gone waiter is skipped. Absent = every agent is live. */
+  alive?: (agentId: string) => boolean;
 }
 
 export const HEAVY_TTL_MS = 60 * 60_000;
+/** HEAVY-LOCK-SELF-WAIT: how long a freed slot is kept for the queued agent it was offered to.
+ *  A waiter stays queued until it is offered a slot, acquires, or its PTY is gone. */
+export const HEAVY_RESERVE_MS = 5 * 60_000;
 export const HEAVY_SCAN_MS = 20_000;
 export const HEAVY_SCAN_MISSES = 2;
 
 export type HeavyDecision = { allow: true; acquired: boolean } | { allow: false; reason: string; holders: HeavyHolder[] };
 
+/**
+ * HEAVY-LOCK-SELF-WAIT (1.1.81). The lock used to be deny-only: a denied agent was told to "run it
+ * later" and never told WHEN, so agents wrote their own pollers. A poller in the same call as a
+ * suite then waited on that call's own slot (Jim, 2026-10-02: 10 min, then orphan-kept). Now a
+ * denied agent is QUEUED (FIFO, once). A freed slot is RESERVED for the oldest live waiter for
+ * HEAVY_RESERVE_MS, and that agent is NOTIFIED (deps.notify); no one else may take it meanwhile.
+ * An unused reservation passes on. A reservation counts against the limit like a holder.
+ */
 export class HeavyJobLock {
   private readonly holders = new Map<string, HeavyHolder>();
+  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number }> = [];
+  private readonly reservations = new Map<string, { kind: HeavyKind; until: number }>();
   private timer: unknown = null;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -421,6 +490,8 @@ export class HeavyJobLock {
     // Off: no limit, but the heavy call is still visible (god: log 'heavy (unlimited)').
     if (limit === 'off') { this.log({ kind: 'heavy-lock', action: 'unlimited', agentId, heavyKind: cls.kind, why: cls.why ?? null }); return { allow: true, acquired: false }; }
     this.expire();
+    // A slot that is free while agents wait (the limit was raised) goes to them first.
+    if (this.waiters.length) this.grant();
     const mine = this.holders.get(agentId);
     if (mine) {
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
@@ -430,18 +501,62 @@ export class HeavyJobLock {
       this.arm();
       return { allow: true, acquired: false };
     }
-    if (this.holders.size >= limit) {
+    // HEAVY-LOCK-SELF-WAIT: a slot reserved for THIS agent is its own; the others count as taken.
+    const reserved = this.reservations.has(agentId);
+    if (!reserved && this.holders.size + this.reservations.size >= limit) {
       const holders = [...this.holders.values()];
+      const position = this.enqueue(agentId, cls.kind);
       const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
-      const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${holders.length === 1 ? 'it is' : 'they are'} held by ${who}. Do not retry this or a variant of it now: carry on with light work (single test files, reads, edits are not limited) and run it later, once a slot is free (when that job finishes, or after ${Math.round(HEAVY_TTL_MS / 60_000)} min at most), or ask god to schedule it.`;
+      const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
+      const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
+      const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}. You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told.`;
       // Jim N3: the denied command's CLASS is logged, not the command itself.
-      this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: cls.kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit });
+      this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: cls.kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position });
       return { allow: false, reason, holders };
     }
+    if (reserved) this.reservations.delete(agentId);
+    this.dequeue(agentId);
     this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
-    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit });
+    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}) });
     this.arm();
     return { allow: true, acquired: true };
+  }
+
+  /** The queue as fleet.json shows it (oldest first), with the open reservations. */
+  queueSnapshot(): { waiters: Array<{ agentId: string; kind: HeavyKind; since: string; position: number }>; reserved: Array<{ agentId: string; kind: HeavyKind; until: string }> } {
+    this.expire();
+    return {
+      waiters: this.waiters.map((w, i) => ({ agentId: w.agentId, kind: w.kind, since: new Date(w.since).toISOString(), position: i + 1 })),
+      reserved: [...this.reservations.entries()].map(([agentId, r]) => ({ agentId, kind: r.kind, until: new Date(r.until).toISOString() }))
+    };
+  }
+
+  /** Queue a denied agent once (FIFO); its 1-based position. */
+  private enqueue(agentId: string, kind: HeavyKind): number {
+    const i = this.waiters.findIndex((w) => w.agentId === agentId);
+    if (i >= 0) return i + 1;
+    this.waiters.push({ agentId, kind, since: this.now() });
+    return this.waiters.length;
+  }
+
+  private dequeue(agentId: string): void {
+    const i = this.waiters.findIndex((w) => w.agentId === agentId);
+    if (i >= 0) this.waiters.splice(i, 1);
+  }
+
+  /** Offer every free slot to the oldest live waiter: reserve it, log it, tell the agent. */
+  private grant(): void {
+    const limit = this.d.limit();
+    if (limit === 'off') { this.waiters.length = 0; this.reservations.clear(); return; }
+    while (this.waiters.length && this.holders.size + this.reservations.size < limit) {
+      const w = this.waiters.shift()!;
+      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); continue; }
+      const until = this.now() + HEAVY_RESERVE_MS;
+      this.reservations.set(w.agentId, { kind: w.kind, until });
+      this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since });
+      try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }
+    }
+    this.arm();
   }
 
   /** PostToolUse of a heavy call: a FOREGROUND call's job is done. The slot is freed when the
@@ -549,7 +664,12 @@ export class HeavyJobLock {
 
   /** The holder's PTY exited: its jobs are gone with it. */
   agentGone(agentId: string): void {
+    // HEAVY-LOCK-SELF-WAIT: a gone agent neither waits nor keeps a reservation.
+    this.dequeue(agentId);
+    const had = this.reservations.delete(agentId);
+    if (had) this.log({ kind: 'heavy-lock', action: 'reserve-dropped', agentId, reason: 'pty-exit' });
     if (this.holders.has(agentId)) this.release(agentId, 'pty-exit');
+    else if (had) this.grant();
   }
 
   private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running'): void {
@@ -557,19 +677,30 @@ export class HeavyJobLock {
     if (!h) return;
     this.holders.delete(agentId);
     this.log({ kind: 'heavy-lock', action: 'release', agentId, heavyKind: h.kind, reason, heldMs: this.now() - h.since });
-    if (!this.holders.size && this.timer) { this.clearTimer(this.timer); this.timer = null; }
+    // HEAVY-LOCK-SELF-WAIT: the freed slot goes to the oldest waiter (reserved), not to whoever asks first.
+    this.grant();
+    if (!this.holders.size && !this.reservations.size && this.timer) { this.clearTimer(this.timer); this.timer = null; }
   }
 
   private expire(): void {
     const t = this.now();
     // Jim N5: a TTL expiry while the watcher last SAW the job running is logged distinctly.
     for (const h of [...this.holders.values()]) if (t - h.touched >= HEAVY_TTL_MS) this.release(h.agentId, h.seenRunning ? 'expired-still-running' : 'ttl');
+    // HEAVY-LOCK-SELF-WAIT: an unused reservation passes on; a waiter never offered a slot in time is dropped.
+    let passed = false;
+    for (const [agentId, r] of [...this.reservations.entries()]) {
+      if (t < r.until) continue;
+      this.reservations.delete(agentId);
+      this.log({ kind: 'heavy-lock', action: 'reserve-expired', agentId, heavyKind: r.kind });
+      passed = true;
+    }
+    if (passed) this.grant();
   }
 
-  /** The watcher runs only while a slot is held: TTL expiry for everyone, and a process check
-   *  for background holders (a hidden listing every HEAVY_SCAN_MS). */
+  /** The watcher runs only while a slot is held or reserved: TTL and reservation expiry, and a
+   *  process check for background holders (a hidden listing every HEAVY_SCAN_MS). */
   private arm(): void {
-    if (this.timer || !this.holders.size) return;
+    if (this.timer || (!this.holders.size && !this.reservations.size)) return;
     this.timer = this.setTimer(() => { this.timer = null; void this.scan().finally(() => this.arm()); }, HEAVY_SCAN_MS);
   }
 

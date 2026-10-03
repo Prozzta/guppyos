@@ -69,7 +69,9 @@ test('(a) a FAILED process check at the PostToolUse keeps the slot (fail closed)
   procs = BASE;
   await x.l.scan(); x.tick(HEAVY_SCAN_MS); await x.l.scan();
   assert.equal(x.l.snapshot().length, 0);
-  assert.equal(x.logs.at(-1).reason, 'process-exit');
+  // HEAVY-LOCK-SELF-WAIT: the denied b was queued, so the release is followed by b's reservation.
+  assert.equal(x.logs.filter((r) => r.action === 'release').at(-1).reason, 'process-exit');
+  assert.equal(x.logs.at(-1).action, 'reserve');
 });
 
 test('(a) a clean check with nothing running still frees the slot at once (posttool)', async () => {
@@ -190,7 +192,7 @@ test('(+) visibility: the snapshot (fleet.json heavyLock.holders) says how long 
   assert.deepEqual([s.agentId, s.kind, s.background, s.openCalls, s.seenRunning, s.lastProbe], ['a', 'suite', false, 1, false, null]);
   assert.equal(s.since, new Date(T0).toISOString());
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
-  assert.match(idx, /heavyLock: \{ limit: heavyLimit\(readConfig\(\)\.heavyJobsAtOnce\), holders: heavyLock\.snapshot\(\) \}/, 'the snapshot rides in fleet.json');
+  assert.match(idx, /heavyLock: \{ limit: heavyLimit\(readConfig\(\)\.heavyJobsAtOnce\), holders: heavyLock\.snapshot\(\), \.\.\.heavyLock\.queueSnapshot\(\) \}/, 'the snapshot rides in fleet.json');
 });
 
 test('(+) wrapped suites are heavy: PATH="$(... | ...)" prefixes and a wrapper script that runs a command', () => {
