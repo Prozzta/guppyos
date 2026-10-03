@@ -19,7 +19,7 @@
  *
  * The copy runs under an exclusive lock file (MIGRATION_LOCK): a second start in the same moment
  * waits for the first one's result and never clears its staging folder; a lock left by a start
- * that died is taken over after LOCK_STALE_MS.
+ * that died (older than LOCK_STALE_MS and its pid no longer running) is taken over.
  *
  * If the copy fails, this run keeps using the old folder (so the user is not dropped into
  * onboarding) and the next start tries again. An existing `Guppy` folder without the marker is
@@ -78,10 +78,16 @@ export interface MigrationOptions {
   /** Test seams for the start-race lock. */
   lockWaitMs?: number;
   lockStaleMs?: number;
+  pidAlive?: (pid: number) => boolean;
   sleep?: (ms: number) => void;
 }
 
-const sleepSync = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
+/** Is a process with this pid running? (EPERM: it exists, we may not signal it.) */
+export function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+const sleepSync =(ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); };
 
 const fold = (p: string, platform: NodeJS.Platform) => (platform === 'win32' ? p.toLowerCase() : p);
 
@@ -151,9 +157,15 @@ export function migrateUserData(appData: string, opts: MigrationOptions = {}): M
       }
     };
     if (!takeLock()) {
+      // Stale only when it is old AND its holder is gone (Jim n4): a live holder in a slow copy
+      // cannot refresh the lock during the synchronous cpSync, so age alone would let a third start
+      // clear a LIVE staging folder. A lock whose pid cannot be read falls back to age alone.
       let age = Infinity;
+      let pid: number | null = null;
       try { age = Date.now() - statSync(lockPath).mtimeMs; } catch { /* gone meanwhile */ }
-      if (age > (opts.lockStaleMs ?? LOCK_STALE_MS)) { try { unlinkSync(lockPath); } catch { /* raced */ } }
+      try { const p = JSON.parse(readFileSync(lockPath, 'utf8')).pid; if (Number.isInteger(p) && p > 0) pid = p; } catch { /* unreadable */ }
+      const holderAlive = pid !== null && (opts.pidAlive ?? pidAlive)(pid);
+      if (age > (opts.lockStaleMs ?? LOCK_STALE_MS) && !holderAlive) { try { unlinkSync(lockPath); } catch { /* raced */ } }
       if (!takeLock()) {
         const sleep = opts.sleep ?? sleepSync;
         const until = Date.now() + (opts.lockWaitMs ?? LOCK_WAIT_MS);

@@ -464,13 +464,51 @@ test('n2: a stale lock (a start that died mid-copy) is taken over; the lock is r
   fs.writeFileSync(lock, '{"pid":1}');
   const old = new Date(Date.now() - M.LOCK_STALE_MS - 60_000);
   fs.utimesSync(lock, old, old);
-  const fail = M.migrateUserData(appData, { copy: () => { throw new Error('disk full'); } });
+  const fail = M.migrateUserData(appData, { pidAlive: () => false, copy: () => { throw new Error('disk full'); } });
   assert.equal(fail.status, 'failed');
   assert.equal(fs.existsSync(lock), false, 'released after a failure');
   const ok = M.migrateUserData(appData);
   assert.equal(ok.status, 'migrated', ok.error);
   assert.equal(fs.existsSync(lock), false, 'released after success');
   assert.equal(M.LOCK_STALE_MS >= 60_000 && M.LOCK_WAIT_MS >= 10_000, true);
+});
+
+test('n4: an OLD lock whose holder is still running is never taken over; a dead holder\'s is', () => {
+  const appData = tmp('n4');
+  const from = legacyFixture(appData);
+  const before = snapshot(from);
+  const lock = path.join(appData, M.MIGRATION_LOCK);
+  const staging = path.join(appData, M.STAGING_DIR);
+  const old = new Date(Date.now() - M.LOCK_STALE_MS - 60_000);
+  const holdLock = (pid) => { fs.writeFileSync(lock, JSON.stringify({ pid, at: 0 })); fs.utimesSync(lock, old, old); };
+  // a slow first start (this very process: alive) is mid-copy, its lock older than the stale age
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(staging, 'being-copied'), 'live');
+  holdLock(process.pid);
+  const third = M.migrateUserData(appData, { lockWaitMs: 200, sleep: () => {} });   // the real pidAlive
+  assert.equal(third.status, 'busy', 'a live holder keeps its lock however old it is');
+  assert.equal(third.userData, from);
+  assert.ok(fs.existsSync(path.join(staging, 'being-copied')), 'the LIVE staging folder is not cleared');
+  assert.ok(fs.existsSync(lock));
+  // the holder died: its old lock is taken over and the copy completes
+  const dead = spawnSync(process.execPath, ['-e', '0']).pid;
+  assert.equal(M.pidAlive(dead), false, 'an exited process reads as gone');
+  assert.equal(M.pidAlive(process.pid), true);
+  holdLock(dead);
+  const r = M.migrateUserData(appData);
+  assert.equal(r.status, 'migrated', r.error);
+  assert.equal(fs.existsSync(path.join(appData, 'Guppy', 'being-copied')), false, 'the dead start\'s partial copy was cleared first');
+  assert.equal(fs.existsSync(lock), false);
+  assert.deepEqual(snapshot(from), before);
+  // a young lock is honoured even when its pid reads as gone (age is still a condition)
+  const appData2 = tmp('n4b');
+  legacyFixture(appData2);
+  fs.writeFileSync(path.join(appData2, M.MIGRATION_LOCK), JSON.stringify({ pid: dead }));
+  assert.equal(M.migrateUserData(appData2, { lockWaitMs: 200, sleep: () => {}, pidAlive: () => false }).status, 'busy');
+  // an unreadable old lock falls back to age alone
+  fs.writeFileSync(path.join(appData2, M.MIGRATION_LOCK), 'not json');
+  fs.utimesSync(path.join(appData2, M.MIGRATION_LOCK), old, old);
+  assert.equal(M.migrateUserData(appData2).status, 'migrated');
 });
 
 test('n3: the afterPack hook really calls guppyUpdaterCache, and before the prune\'s early return', () => {
