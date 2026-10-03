@@ -28,6 +28,12 @@
  * by node --test, and its non-detached descendants go with it (libuv's kill-on-close job). node
  * --test counts it "cancelled", so a second reporter (file-timeout-reporter.cjs) records it and the
  * runner NAMES it after the run and fails the run, even if node's own exit code were 0.
+ *
+ * CLAIMS-PERF-LANE: wall-clock gates (frozen bounds) measured under the parallel run measured the
+ * machine, not the code (W2's 200 ms derive gates: 203/279 ms in 2 of 3 full runs, green alone). So
+ * `test/perf/*.perf.cjs` is a SERIAL lane: after the parallel run, with --test-concurrency=1, on an
+ * otherwise idle runner. An unfiltered run (`npm test`, the full suite) always runs it, and a failure
+ * in either part fails the run. A filtered run skips it and says so. An empty perf folder is an error.
  */
 const fs = require('fs');
 const path = require('path');
@@ -35,6 +41,7 @@ const os = require('os');
 const { spawnSync, spawn: spawnAsync } = require('child_process');
 
 const TEST_SUFFIX = '.test.cjs';
+const PERF_SUFFIX = '.perf.cjs';
 /** The per-file wall-clock limit: well above the slowest file under a loaded dual-suite run (the
  *  longest explicit per-test timeout in the suite is 25 min, renderer-memory-recovery). */
 const FILE_TIMEOUT_MS = 30 * 60_000;
@@ -110,7 +117,9 @@ function run({
   removeFile = (p) => { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } },
   watchdog = startWatchdog,
   log = (line) => process.stdout.write(`${line}\n`),
-  err = (line) => process.stderr.write(`${line}\n`)
+  err = (line) => process.stderr.write(`${line}\n`),
+  // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
+  perfDir = null
 } = {}) {
   let entries;
   try {
@@ -169,16 +178,47 @@ function run({
     return 1;
   }
   // A timed-out file fails the run whatever node's own exit code says.
-  return hung.length && res.status === 0 ? 1 : res.status;
+  const mainCode = hung.length && res.status === 0 ? 1 : res.status;
+  if (!perfDir) return mainCode;
+  const perfCode = runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, log, err });
+  return mainCode !== 0 ? mainCode : perfCode;
 }
 
-module.exports = { selectTestFiles, run, TEST_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+/** CLAIMS-PERF-LANE: every *.perf.cjs, serially (--test-concurrency=1), after the parallel run. */
+function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, log, err }) {
+  if (filters.length) {
+    log(`[test-runner] perf lane SKIPPED: a filtered run (${filters.join(', ')}); run the full suite (npm test) for the wall-clock gates`);
+    return 0;
+  }
+  let entries;
+  try { entries = readdir(perfDir); } catch (e) {
+    err(`[test-runner] cannot read the perf lane ${perfDir}: ${String(e)}`);
+    return 1;
+  }
+  const files = entries.filter((n) => n.endsWith(PERF_SUFFIX)).sort();
+  if (!files.length) {
+    err(`[test-runner] no *${PERF_SUFFIX} files in ${perfDir} - refusing to report a perf lane that executed nothing`);
+    return 1;
+  }
+  log(`[test-runner] perf lane: running ${files.length} wall-clock file(s) serially (--test-concurrency=1), after the parallel suite`);
+  const rel = files.map((n) => path.join(path.relative(cwd, perfDir) || '.', n));
+  const res = spawn(['--test', '--test-concurrency=1', `--test-timeout=${backstopMs(timeoutMs)}`,
+    '--test-reporter', isTTY ? 'spec' : 'tap', '--test-reporter-destination', 'stdout', ...rel], { cwd, stdio: 'inherit', env });
+  if (res.error) { err(`[test-runner] could not start the perf lane: ${String(res.error)}`); return 1; }
+  if (typeof res.status !== 'number') { err(`[test-runner] the perf lane was terminated by signal ${res.signal ?? 'unknown'}`); return 1; }
+  if (res.status !== 0) err('[test-runner] the perf lane FAILED (a wall-clock gate, measured serially)');
+  else log('[test-runner] perf lane passed');
+  return res.status;
+}
+
+module.exports = { selectTestFiles, run, runPerfLane, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
   process.exit(run({
     testDir: path.join(repoRoot, 'test'),
     filters: process.argv.slice(2),
-    cwd: repoRoot
+    cwd: repoRoot,
+    perfDir: path.join(repoRoot, 'test', 'perf')
   }));
 }
