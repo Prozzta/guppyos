@@ -194,3 +194,36 @@ test('ruling 2: export --complete with the archive-backed exclude omits them and
   const full = fs.readFileSync(path.join(all, 'memory.md'), 'utf8');
   for (const r of records) assert.ok(full.includes(`[c:${r.id}]`), `default: every record (${r.id})`);
 });
+
+test('W6-D2 (god 909a70): excluded only while live or superseded?; a retracted or superseded archived claim exports its MARKED line', () => {
+  const { d, records, state } = archived();
+  const alpha = records.find((r) => r.text && r.text.includes('fact alpha')).id;
+  const beta = records.find((r) => r.text && r.text.includes('fact beta')).id;
+  E.syncExport(d, records, state, E.standInExportLine);
+  assert.ok(!E.exportedIds(d).has(alpha));
+  const next = JSON.parse(JSON.stringify(state));
+  next.claims[alpha].status = 'retracted';
+  next.claims[beta].status = 'superseded?';
+  assert.ok(!E.archiveBackedIds(d, records, next).has(alpha), 'retracted: no longer left out');
+  assert.ok(E.archiveBackedIds(d, records, next).has(beta), "'superseded?' is still a live view: left out");
+  assert.equal(E.syncExport(d, records, next, E.standInExportLine), 1);
+  const text = E.exportFiles(d).map((f) => fs.readFileSync(path.join(d, f), 'utf8')).join('');
+  assert.match(text, new RegExp(String.raw`\[retracted\]: [^\n]*fact alpha[^\n]*\[c:${alpha}\]`), 'the marked line, with its text');
+  next.claims[beta].status = 'superseded';
+  assert.equal(E.syncExport(d, records, next, E.standInExportLine), 1);
+  // and the complete export marks it too
+  E.exportComplete(d, next, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records, next));
+  const mem = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
+  assert.match(mem, new RegExp(String.raw`\[retracted\] [^\n]*fact alpha[^\n]*\[c:${alpha}\]`));
+  assert.match(mem, new RegExp(String.raw`\[superseded\] [^\n]*fact beta[^\n]*\[c:${beta}\]`));
+});
+
+test('W6-D3: a legacy.file with a path in it is never treated as an archive in the folder', () => {
+  const { d, records } = archived();
+  const r0 = records.find((r) => r.legacy && /^memory-archive-/.test(r.legacy.file));
+  for (const file of [`memory-archive-x/../${r0.legacy.file}`, `memory-archive-x\..\${r0.legacy.file}`]) {
+    const odd = { ...r0, id: 'odd', legacy: { ...r0.legacy, file } };
+    assert.ok(!E.archiveBackedIds(d, [odd]).has('odd'), file);
+  }
+  assert.ok(E.archiveBackedIds(d, [r0]).has(r0.id), 'the plain name still counts');
+});

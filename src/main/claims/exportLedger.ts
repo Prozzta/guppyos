@@ -26,7 +26,9 @@
  *    1.1.83: 45/50 planned and 46/50 unplanned with a lost fact each, against 46/50 and 46/50 with none
  *    lost once deduplicated; the baseline is 46/50). Content-checked and recomputed on every call, so
  *    an archive that goes missing or changes brings its claims back into the next sync. Lessons are
- *    never left out (How I work must be whole in a complete export).
+ *    never left out (How I work must be whole in a complete export). Only while the claim is 'live'
+ *    or 'superseded?' (god 909a70, W6-D2, Jim): once it is superseded or retracted its MARKED line
+ *    is exported, so a downgraded build shows the change, not only the archive's unmarked text.
  *
  * W4 owns the renderers (RenderExportLineFn, RenderMemoryMdFn); they are injected. The stand-ins below
  * keep W6 testable until W4 lands, and are replaced by W4's functions in main's wiring. W4's
@@ -49,9 +51,10 @@ const ARCHIVE_RE = /^memory-archive-.*\.md$/i;
 /**
  * The legacy claims an older build can already find in their own archive: claim records whose
  * `legacy.file` is a memory-archive-*.md that exists in `agentDir` and still contains an entry with
- * the claim's `legacy.sha256` (Jim's split, the import's hash). Never a lesson. Read fresh per call.
+ * the claim's `legacy.sha256` (Jim's split, the import's hash), while its status in `state` is 'live'
+ * or 'superseded?' (no state entry counts as live). Never a lesson. Read fresh per call.
  */
-export function archiveBackedIds(agentDir: string, records: LedgerRec[]): Set<string> {
+export function archiveBackedIds(agentDir: string, records: LedgerRec[], state: ClaimsState | null = null): Set<string> {
   const shas = new Map<string, Set<string> | null>();
   const shasOf = (file: string): Set<string> | null => {
     if (!shas.has(file)) {
@@ -64,6 +67,8 @@ export function archiveBackedIds(agentDir: string, records: LedgerRec[]): Set<st
   const out = new Set<string>();
   for (const r of records) {
     if (r.t !== 'claim' || r.kind === 'lesson' || !r.legacy || !ARCHIVE_RE.test(r.legacy.file) || /[\\/]/.test(r.legacy.file)) continue;
+    const st = state?.claims[r.id]?.status ?? 'live';
+    if (st !== 'live' && st !== 'superseded?') continue;
     if (shasOf(r.legacy.file)?.has(r.legacy.sha256)) out.add(r.id);
   }
   return out;
@@ -161,7 +166,7 @@ export function exportedIds(agentDir: string): Set<string> {
  * not yet in it, in order, except the archive-backed legacy claims (recomputed on every call, so a
  * claim whose archive is gone or changed is exported by the next sync).
  */
-export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn, exclude: Set<string> = archiveBackedIds(agentDir, records)): number {
+export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn, exclude: Set<string> = archiveBackedIds(agentDir, records, state)): number {
   const have = exportedIds(agentDir);
   let n = 0;
   for (const r of records) if (!have.has(r.id) && !exclude.has(r.id)) { appendExport(agentDir, r, state, render); n++; }

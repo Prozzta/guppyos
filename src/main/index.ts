@@ -71,7 +71,7 @@ import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
 import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
-import { applyLedgerOp, type LedgerDeps } from './ledger';
+import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
@@ -1265,7 +1265,10 @@ const nativeMemory = new NativeMemoryWiring({
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here
 // in main: tasks.json writes go through writeTasks (merge, validation, ZT-I3 attribution 'ledger').
-hookServer.setLedgerHandler((agentId, body) => {
+// W6-D1: one op at a time per agent, so a retry waits for the op in flight (its memory part may be
+// an async claim append at level 'writer').
+const ledgerQueue = perAgentQueue();
+hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
   const agentDir = hive.agentHome(agentId);
   if (!agentDir) return { status: 404, body: { ok: false, line: `refused: ${agentId} is not a registered agent` } };
   return applyLedgerOp(body, {
@@ -1281,7 +1284,7 @@ hookServer.setLedgerHandler((agentId, body) => {
     now: () => new Date(),
     memoryClaim: ledgerMemoryClaim(agentId)
   });
-});
+}));
 /** CLAIM-LEDGER W6 (G6.6): the `ledger` memory part as a claim, through the endpoint's note verb with
  *  origin 'ledger-route' (400 characters, no source or legacy); null when the ledger is not wired. */
 function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {

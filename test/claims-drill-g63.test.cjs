@@ -72,7 +72,7 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
   // god 6c4d4e ruling 2: both exports leave out the legacy claims their archive still holds
   E.syncExport(agentDir, records, state, E.standInExportLine);
   if (scenario === 'planned') {
-    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, agent), E.archiveBackedIds(agentDir, records));
+    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, agent), E.archiveBackedIds(agentDir, records, state));
   } else {
     // writer mode before an unplanned downgrade: memory.md is the small generated view
     fs.writeFileSync(path.join(agentDir, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# Memory - ${agent}\n\n## How I work (standing lessons)\n${LESSONS.join('\n')}\n`);

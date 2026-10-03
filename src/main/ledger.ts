@@ -192,6 +192,24 @@ function writeOps(file: string, ops: OpRecord[]): void {
   renameSync(tmp, file);
 }
 
+/**
+ * W6-D1 (Jim R1): one ledger op at a time per agent. At level 'writer' the memory part awaits a claim
+ * append; a retry of the same op (the CLI says to retry after its 15 s timeout) must wait for the op
+ * in flight, then find its memory part done instead of noting it again. Main's ledger handler runs
+ * every op through one of these, keyed by the caller.
+ */
+export function perAgentQueue(): <T>(agentId: string, run: () => T | Promise<T>) => Promise<T> {
+  const tails = new Map<string, Promise<unknown>>();
+  return <T>(agentId: string, run: () => T | Promise<T>): Promise<T> => {
+    const prev = tails.get(agentId) ?? Promise.resolve();
+    const next = prev.then(run, run);
+    const tail = next.catch(() => undefined);
+    tails.set(agentId, tail);
+    void tail.then(() => { if (tails.get(agentId) === tail) tails.delete(agentId); });
+    return next;
+  };
+}
+
 /** Insert lesson text at the end of the standing-lessons section (before the next `## `). */
 export function insertLesson(memory: string, text: string): string | null {
   const at = memory.indexOf(LESSONS_HEADING);
@@ -255,7 +273,14 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
 
   if (!rec) { rec = { op: op.op, at: now.toISOString(), hash }; ops.push(rec); }
   const done: string[] = [];
-  const save = (): void => { writeOps(opsFile, ops); };
+  // W6-D1 (Jim R2): re-read and merge by op name before every save, so this op's snapshot (read
+  // before an await) can never drop the record of another op that finished meanwhile.
+  const save = (): void => {
+    const cur = readOps(opsFile);
+    const i = cur.findIndex((o) => o.op === rec!.op);
+    if (i >= 0) cur[i] = rec!; else cur.push(rec!);
+    writeOps(opsFile, cur);
+  };
   const fail = (part: string, e: unknown): LedgerReply => {
     try { save(); } catch { /* the reply still says what is done */ }
     return { status: 500, body: { ok: false, line: `partial: ${done.length ? done.join(' ') + '; ' : ''}${part} failed (${String(e).slice(0, 160)}). Run the same op again to finish it.` } };

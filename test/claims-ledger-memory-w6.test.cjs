@@ -175,3 +175,70 @@ test('main wiring: the ledger handler passes the note verb with origin ledger-ro
   const hooks = fs.readFileSync(path.join(ROOT, 'src/main/hooks.ts'), 'utf8');
   assert.match(hooks, /Promise\.resolve\(handler\(agentId, body\)\)\.then/);
 });
+
+// ——— W6-D1 (Jim delta audit): the async memory part must not break the op record's idempotency ———
+
+/** A note() that answers only when released (a slow store or a busy per-agent append queue). */
+function deferredNotes(f) {
+  const pending = [];
+  const real = f.deps.memoryClaim.note;
+  f.deps.memoryClaim = { ...f.deps.memoryClaim, note: (args) => new Promise((resolve) => pending.push(() => resolve(real(args)))) };
+  return { release: async () => { while (pending.length) { pending.shift()(); await new Promise((r) => setImmediate(r)); } }, pending };
+}
+const tick = () => new Promise((r) => setTimeout(r, 20));
+
+test('D1 R1: the same op re-sent while its note is pending waits (per-agent queue) and notes ONCE', async () => {
+  const f = fixture();
+  const d = deferredNotes(f);
+  const q = L.perAgentQueue();
+  const o = op('r1', { append: '- an invented fact, retried during a slow note' });
+  const first = q('ag-1', () => L.applyLedgerOp(o, f.deps));
+  await tick();
+  const retry = q('ag-1', () => L.applyLedgerOp(o, f.deps));
+  await tick();
+  assert.equal(d.pending.length, 1, 'the retry has not started a second note');
+  await d.release();
+  const [a, b] = await Promise.all([first, retry]);
+  assert.equal(a.status, 200);
+  assert.match(b.body.line, /\(already applied\)$/);
+  assert.equal(f.claims().length, 1, 'one claim for one op');
+});
+
+test('D1 R2: an op that finishes while another awaits its note keeps its record (merge on save); its retry is a no-op', async () => {
+  const f = fixture();
+  const d = deferredNotes(f);
+  const a = L.applyLedgerOp(op('r2-a', { append: '- an invented fact noted slowly' }), f.deps);   // NOT queued: the worst case
+  await tick();
+  const bOp = { op: 'r2-b', card: { id: 'CARD-1', appendResult: 'an invented B result' } };
+  const b = await L.applyLedgerOp(bOp, f.deps);
+  assert.equal(b.status, 200);
+  await d.release();
+  assert.equal((await a).status, 200);
+  const ops = JSON.parse(fs.readFileSync(path.join(f.deps.agentDir, 'state', 'ledger-ops.json'), 'utf8')).ops.map((x) => x.op).sort();
+  assert.deepEqual(ops, ['r2-a', 'r2-b'], "A's save did not drop B's record");
+  const again = await L.applyLedgerOp(bOp, f.deps);
+  assert.match(again.body.line, /\(already applied\)$/);
+  assert.equal((f.state.tasks[0].result.match(/an invented B result/g) || []).length, 1, 'the card result is not appended twice');
+});
+
+test('D1: the queue keeps agents independent and survives a failing op', async () => {
+  const q = L.perAgentQueue();
+  const order = [];
+  let release;
+  const slow = q('a', () => new Promise((r) => { release = () => { order.push('a1'); r(); }; }));
+  const other = q('b', () => { order.push('b1'); });
+  await other;
+  assert.deepEqual(order, ['b1'], 'agent b does not wait for agent a');
+  const failing = q('a', () => { throw new Error('boom'); });
+  const after = q('a', () => { order.push('a3'); });
+  release();
+  await slow;
+  await assert.rejects(failing, /boom/);
+  await after;
+  assert.deepEqual(order, ['b1', 'a1', 'a3']);
+});
+
+test('D1 main wiring: every ledger op goes through the per-agent queue', () => {
+  const idx = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
+  assert.match(idx, /const ledgerQueue = perAgentQueue\(\);\s*hookServer\.setLedgerHandler\(\(agentId, body\) => ledgerQueue\(agentId, \(\) => \{/);
+});
