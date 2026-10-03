@@ -45,6 +45,12 @@ export function normalizeTtl(input: unknown, wtIso: string): { ttl: string | nul
 /** An ISO time that names its zone: Z or an offset. */
 const ZONED_RE = /T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
+/** A zone-less ISO date or time, refused with a hint to its Z form (a draft's `at` too, god e323d8). */
+export function zonelessHint(iso: string): string | null {
+  if (ZONED_RE.test(iso)) return null;
+  return /T/.test(iso) ? `${iso}Z` : `${iso}T00:00:00Z`;
+}
+
 /** A stored TTL, parsed; null for none or for anything not in the stored grammar. */
 export function parseStoredTtl(stored: unknown): StoredTtl | null {
   if (typeof stored !== 'string') return null;

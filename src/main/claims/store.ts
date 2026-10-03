@@ -53,7 +53,7 @@ import {
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import type { LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
-import { normalizeTtl } from './ttl';
+import { normalizeTtl, zonelessHint } from './ttl';
 import { checkKey, loadRegistry, saveRegistry } from './registry';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
@@ -524,7 +524,10 @@ export class ClaimStore {
     // at: clamped to the write time (F2).
     let at = wt;
     if (draft.at !== undefined) {
-      if (typeof draft.at !== 'string' || !ISO_RE.test(draft.at) || Number.isNaN(Date.parse(draft.at))) return { error: 'bad at (an ISO date or time)' };
+      if (typeof draft.at !== 'string' || !ISO_RE.test(draft.at) || Number.isNaN(Date.parse(draft.at))) return { error: 'bad at (an ISO time with its zone, like 2026-10-02T09:00:00Z)' };
+      // A zone-less at is refused, never read as local time (god e323d8).
+      const hint = zonelessHint(draft.at);
+      if (hint) return { error: `refused: at "${draft.at}" has no time zone; say it in UTC, like ${hint}`, didYouMean: hint };
       const claimed = new Date(Date.parse(draft.at)).toISOString();
       at = claimed < wt ? claimed : wt;
     }
