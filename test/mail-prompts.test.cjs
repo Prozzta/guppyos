@@ -85,7 +85,7 @@ test('Creed Q27: the wake nudge of a DEGRADED agent says the channel is degraded
 
 test('P1 line one, per mode, with the §11.12(c) sentence in every one', () => {
   const l = (m) => protocolLineOne(m, false, 'MEM', 'INBOX', 'DONE');
-  assert.match(l('inject'), /Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them\. You do not read, list or move inbox files\. If a message is marked re-delivered, check whether you already handled it\./);
+  assert.match(l('inject'), /Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them\. You do not read, list or move inbox files, except to read the rest of a shortened message at the path its block names\. If a message is marked re-delivered, check whether you already handled it\./);
   assert.doesNotMatch(l('inject'), /INBOX|DONE/);
   assert.match(l('legacy-read'), /read EVERY file in INBOX/);
   assert.doesNotMatch(l('legacy-read'), /move|DONE/i);

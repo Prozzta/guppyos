@@ -37,6 +37,61 @@ export const MAIL_REMINDER_MAX = 5;
 /** The most deferred ids named in the "will follow" line. */
 const DEFERRED_NAMED_MAX = 10;
 
+// ————————————————————————————————————————————————————————————— READS-MAIL-CAP (1.1.83)
+
+/** god's default per-message cap: a longer body is shown as its first ~this many characters plus
+ *  the file paths (config `godMailCapChars`; 0 = off). Other agents are uncapped unless their
+ *  registry entry sets `mailCapChars`. */
+export const GOD_MAIL_CAP_DEFAULT = 1_500;
+/** A body is capped only when that saves at least this many characters (the pointer line costs
+ *  about 250, so a body just over the cap is cheaper whole). */
+export const MAIL_CAP_MIN_SAVING = 500;
+/** The cut backs off to a line break or a space inside this many characters before the cap. */
+const MAIL_CAP_BACKOFF = 200;
+
+/** The cap in force for one agent: its own registry `mailCapChars` wins (0 = off); else god gets
+ *  the config's `godMailCapChars` (unset = GOD_MAIL_CAP_DEFAULT) and every other agent none (0). */
+export function effectiveMailCap(own: unknown, configured: unknown, isGod: boolean): number {
+  const norm = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : undefined);
+  const mine = norm(own);
+  if (mine !== undefined) return mine;
+  if (!isGod) return 0;
+  return norm(configured) ?? GOD_MAIL_CAP_DEFAULT;
+}
+
+/** Mail from these senders is never capped: the Human's words and harness mail can carry an exact
+ *  command at the end (an ephemeral worker's Slack reply line), which a cut would hide. */
+export function mailCapExempt(from: string, exemptSenders: ReadonlySet<string>): boolean {
+  return exemptSenders.has(from);
+}
+
+/** Where the cut falls in an (escaped) body under `cap`, or null when the body stays whole. */
+export function mailCapCut(body: string, cap: number | undefined): number | null {
+  if (!cap || cap <= 0 || body.length < cap + MAIL_CAP_MIN_SAVING) return null;
+  let cut = cap;
+  const nl = body.lastIndexOf('\n', cap);
+  const sp = body.lastIndexOf(' ', cap);
+  if (nl >= cap - MAIL_CAP_BACKOFF && nl > 0) cut = nl;
+  else if (sp >= cap - MAIL_CAP_BACKOFF && sp > 0) cut = sp;
+  // Never split an escape (&lt; &gt; &#58;) in two.
+  const amp = body.lastIndexOf('&', cut);
+  if (amp >= 0 && amp > cut - 5 && body.indexOf(';', amp) >= cut) cut = amp;
+  return cut;
+}
+
+/** The message file once handled: the harness archives it into inbox/.done/ when the turn ends,
+ *  so a shortened message names both places (no lost function: the rest stays readable). */
+export function handledMailPath(p: string): string | null {
+  const m = /^(.*[\\/])([^\\/]+)$/.exec(p);
+  if (!m || /[\\/]\.done[\\/]$/.test(m[1])) return null;
+  return `${m[1]}.done${m[1].slice(-1)}${m[2]}`;
+}
+
+function whereText(p: string): string {
+  const done = handledMailPath(p);
+  return done ? `${escapeMailText(p)} (after this turn: ${escapeMailText(done)})` : escapeMailText(p);
+}
+
 /** The HTTP hook timeout Claude applies (mirrors hive.ts HOOK_HTTP_TIMEOUT_S; §11.1). */
 export const MAIL_HTTP_HOOK_TIMEOUT_MS = 30_000;
 /** The command shims (HOOK_SHIM, AGY_HOOK_SHIM) give up after 5 s and print NOTHING, so on the
@@ -176,6 +231,8 @@ export interface MailBlockItem {
   body: string;
   /** The full inbox file path, named when the body is truncated. */
   path: string;
+  /** READS-MAIL-CAP: show at most about this many body characters plus the paths (0/unset = whole). */
+  cap?: number;
 }
 
 export interface MailBlockInput {
@@ -205,6 +262,8 @@ export interface MailBlock {
   /** Q22 (Creed): the subset of `truncated` shown as header + path only, because even this hook's
    *  whole budget leaves under MAIL_TRUNCATE_MIN_CHARS for the body. The caller logs `mail-truncated`. */
   pathOnly: string[];
+  /** READS-MAIL-CAP: the subset of `surfacing` shortened by its cap (not by the budget). */
+  capped: string[];
   /** Ids named by header only (no body, no marker): they stay delivered. */
   headersOnly: string[];
   /** Ids not in the block at all: they stay delivered and drip into a later hook. */
@@ -214,7 +273,7 @@ export interface MailBlock {
   blocked: string[];
 }
 
-const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], pathOnly: [], headersOnly: [], deferred: [], blocked: [] };
+const EMPTY: MailBlock = { text: null, surfacing: [], truncated: [], pathOnly: [], capped: [], headersOnly: [], deferred: [], blocked: [] };
 
 function flagsOf(e: MailEntry): string[] {
   const out: string[] = [];
@@ -236,13 +295,22 @@ function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_C
   if (e.legacy && e.surfacedAt == null) lines.push('(delivered before 1.1.75; may already have been handled)');
   const body = escapeMailText(it.body);
   if (pathOnly) {
-    lines.push('', `[body not shown: ${body.length} characters do not fit this hook. The full message is in ${escapeMailText(it.path)}; read it there]`);
+    lines.push('', `[body not shown: ${body.length} characters do not fit this hook. The full message is in ${whereText(it.path)}; read it there]`);
   } else if (truncate) {
-    lines.push('', `${body.slice(0, Math.max(0, keep))}`, `[... truncated: ${body.length} characters in total. The full message is in ${escapeMailText(it.path)}]`);
+    const cut = mailCapCut(body, it.cap);
+    const k = cut === null ? keep : Math.min(keep, cut);
+    lines.push('', `${body.slice(0, Math.max(0, k))}`, `[... truncated: ${body.length} characters in total. The full message is in ${whereText(it.path)}]`);
   } else {
-    lines.push('', body);
+    const cut = mailCapCut(body, it.cap);
+    if (cut === null) lines.push('', body);
+    else lines.push('', body.slice(0, cut), `[... shortened: ${body.length} characters in total. Read the rest in ${whereText(it.path)} when you need it]`);
   }
   return lines.join('\n');
+}
+
+/** READS-MAIL-CAP: is this item shown shortened by its cap? */
+function isCapped(it: MailBlockItem): boolean {
+  return mailCapCut(escapeMailText(it.body), it.cap) !== null;
 }
 
 function headerLine(e: MailEntry): string {
@@ -372,7 +440,7 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
   const blocked: string[] = [];
   const headersOnly = (): MailBlock => {
     const h = buildMailHeaders(everything, budget);
-    return { text: h.text, surfacing: [], truncated: [], pathOnly: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)), blocked };
+    return { text: h.text, surfacing: [], truncated: [], pathOnly: [], capped: [], headersOnly: h.ids, deferred: everything.map((e) => e.id).filter((id) => !h.ids.includes(id)), blocked };
   };
   if (!items.length) return headersOnly();
   if (budget < MAIL_HEADERS_ONLY_BELOW) return headersOnly();
@@ -458,6 +526,7 @@ export function buildMailBlock(input: MailBlockInput): MailBlock {
     surfacing: chosen.map((c) => c.it.entry.id),
     truncated: chosen.filter((c) => c.truncated).map((c) => c.it.entry.id),
     pathOnly: chosen.filter((c) => c.pathOnly).map((c) => c.it.entry.id),
+    capped: chosen.filter((c) => !c.truncated && isCapped(c.it)).map((c) => c.it.entry.id),
     headersOnly: [],
     deferred: deferred.map((e) => e.id),
     blocked

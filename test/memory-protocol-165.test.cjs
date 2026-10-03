@@ -254,7 +254,7 @@ test('Claude + semantic memory: line 1 says memory wake-up / memory search, not 
   assert.match(l1, /run `memory wake-up`/);
   assert.match(l1, /`memory search "<query>"`/);
   assert.match(l1, /do NOT read .*memory\.md whole/);
-  assert.match(l1, /Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them\. You do not read, list or move inbox files\./);
+  assert.match(l1, /Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them\. You do not read, list or move inbox files, except to read the rest of a shortened message at the path its block names\./);
   assert.doesNotMatch(l1, /EVERY file in/);
   assert.doesNotMatch(l1, /At the START of a task, read [^ ]*memory\.md and/);
 });

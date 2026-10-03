@@ -36,10 +36,11 @@ import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvi
 import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailLateDetail, type MailObligation } from './mailLedger';
 import {
   MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
-  buildMailBlock, buildMailHeaders, isSlashPrompt, mailBudgetFor, mailChannelMode, mailEvidenceIn,
-  mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
-  type MailBlockItem, type MailChannelMode, type MailEvidenceKind
+  buildMailBlock, buildMailHeaders, effectiveMailCap, isSlashPrompt, mailBudgetFor, mailCapExempt, mailChannelMode,
+  mailEvidenceIn, mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
+  type MailBlock, type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
+import { ALWAYS_WAKE_SENDERS } from '../shared/mailWakeClass';
 
 /**
  * ZT-I1-MAIL slice 3: what the mail epochs need from the wake coordinator (main wires it; tests
@@ -1331,15 +1332,44 @@ export class HookServer {
     const items: MailBlockItem[] = [];
     const more: MailEntry[] = [];
     let chars = 0;
+    const cap = this.mailCap(agentId);
     for (const e of pending) {
       if (t?.injected.has(e.id) || this.mailBodySkipped(agentId, e.id)) continue;
       if (items.length >= 50 || chars > 2 * MAIL_JOINED_BUDGET) { more.push(e); continue; }
       const got = this.readMailBody(agentId, e.id);
       if (!got) continue;
-      items.push({ entry: e, body: got.body, path: got.path });
-      chars += got.body.length;
+      items.push(this.mailItem(e, got, cap));
+      chars += cap && !mailCapExempt(e.from, ALWAYS_WAKE_SENDERS) ? Math.min(got.body.length, cap) : got.body.length;
     }
     return { items, more };
+  }
+
+  /** READS-MAIL-CAP (1.1.83): this agent's per-message body cap (0 = whole bodies). */
+  private mailCap(agentId: string): number {
+    let own: unknown;
+    try { own = this.hive.registry?.().agents[agentId]?.mailCapChars; } catch { own = undefined; }
+    let isGod = false;
+    try { isGod = this.hive.isGod(agentId); } catch { isGod = false; }
+    let configured: unknown;
+    try { configured = this.getConfig().godMailCapChars; } catch { configured = undefined; }
+    return effectiveMailCap(own, configured, isGod);
+  }
+
+  /** One block item; the Human's and the harness's mail is never capped. */
+  private mailItem(e: MailEntry, got: { body: string; path: string }, cap: number): MailBlockItem {
+    const item: MailBlockItem = { entry: e, body: got.body, path: got.path };
+    if (cap > 0 && !mailCapExempt(e.from, ALWAYS_WAKE_SENDERS)) item.cap = cap;
+    return item;
+  }
+
+  /** READS-MAIL-CAP: one `mail-capped` row per message shown shortened (the measure, and what
+   *  Creed's report counts against the re-reads of the same paths). */
+  private logCapped(agentId: string, block: MailBlock, claimed: string[], epoch: string, hookKind: string, items: MailBlockItem[]): void {
+    for (const id of block.capped) {
+      if (!claimed.includes(id)) continue;
+      const it = items.find((i) => i.entry.id === id);
+      try { this.hive.appendLog({ kind: 'mail-capped', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, cap: it?.cap ?? null }); } catch { /* noop */ }
+    }
   }
 
   /** Q13: is this body recorded as missing/unreadable, with its files unchanged since? A change
@@ -1442,6 +1472,7 @@ export class HookServer {
     }
     for (const id of claimed) t?.injected.add(id);
     this.logPathOnly(agentId, block, claimed, epoch, event, items);
+    this.logCapped(agentId, block, claimed, epoch, event, items);
     this.registerMailClaim(agentId, claimed, epoch, event, p, provider, items.map((i) => i.entry));
     return block.text;
   }
@@ -1494,9 +1525,10 @@ export class HookServer {
     } catch { return null; }
     if (!open.length) return null;
     const items: MailBlockItem[] = [];
+    const cap = this.mailCap(agentId);
     for (const e of open) {
       const got = this.readMailBody(agentId, e.id);
-      if (got) items.push({ entry: e, body: got.body, path: got.path });
+      if (got) items.push(this.mailItem(e, got, cap));
     }
     const block = buildMailBlock({ items, budget: mailBudgetFor(others), phase: 'compact' });
     const fit = block.text ? block.surfacing : [];
@@ -1514,6 +1546,7 @@ export class HookServer {
     }
     if (!claimed.length) return null;
     this.logPathOnly(agentId, block, claimed, t.epoch, 'SessionStart', items);
+    this.logCapped(agentId, block, claimed, t.epoch, 'SessionStart', items);
     this.registerMailClaim(agentId, claimed, t.epoch, 'SessionStart', p, provider, open);
     return block.text;
   }

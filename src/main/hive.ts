@@ -253,6 +253,9 @@ export interface RegistryAgent extends AgentMeta {
   onHold?: boolean;
   /** READS-181 B: this agent's tool-output cap (overrides the config's `toolOutputCap`; 0 = off). */
   toolOutputCap?: number;
+  /** READS-MAIL-CAP (1.1.83): this agent's mail body cap (overrides the config's `godMailCapChars`
+   *  for god; any agent may set one; 0 = off). */
+  mailCapChars?: number;
   /** Most recent Claude Code session_id seen for this agent (Lane A #6.6a),
    *  captured from hook payloads. Doubles as the `--resume` key (idempotent
    *  resume after a crash/restart) AND the cost accounting/dedup key on every
@@ -4841,7 +4844,7 @@ export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, m
     ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
     : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then read the LAST ~40 lines of ${memoryMd} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed).`;
   const mail = mode === 'inject'
-    ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files. If a message is marked re-delivered, check whether you already handled it.'
+    ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files, except to read the rest of a shortened message at the path its block names. If a message is marked re-delivered, check whether you already handled it.'
     : mode === 'work-order'
       // Creed Q26: the whole message is typed into this terminal; it is handled at that write.
       ? 'Messages for you are typed into this terminal as hive work orders, each one in full; the harness records them. You do not read, list or move inbox files.'
@@ -4904,8 +4907,9 @@ orchestrator routes it. This keeps every file single-writer.
 ## Receiving mail
 Messages for you arrive inside your context as a \`<hive-mail>\` block (at the start of a turn, or
 after a tool call); the harness tracks them and archives each one into \`inbox/.done/\` itself once
-the turn in which you saw it ends. You do not read, list or move inbox files. If a message is marked
-re-delivered, check whether you already handled it.
+the turn in which you saw it ends. You do not read, list or move inbox files, except to read the rest
+of a shortened message at the path its block names. If a message is marked re-delivered, check
+whether you already handled it.
 
 Exception: an agent whose CLI cannot receive the block is told how to take its mail in its own
 start-up instructions (it reads the files itself). Follow those instructions.
