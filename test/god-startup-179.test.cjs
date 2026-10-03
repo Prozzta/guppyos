@@ -294,8 +294,10 @@ test('Creed N1: a handoff armed longer ago than GOD_HANDOFF_STALE_MS is dropped,
 // ─── R2: the orientation prompt ─────────────────────────────────────────────
 
 test('R2: the fresh god\'s orientation reads the digest and the board status, and the raw board only for a named card', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/hooks/useHive.ts'), 'utf8');
-  const prompt = src.slice(src.indexOf('const INITIAL_GOD_PROMPT = ['), src.indexOf("].join('\\n');", src.indexOf('const INITIAL_GOD_PROMPT = [')));
+  // BOOT-REENTER-PASTE-PROOF (1.1.81): the text moved to shared/godOrientation.ts (main puts it on argv).
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src/shared/godOrientation.ts'), 'utf8');
+  const prompt = src.slice(src.indexOf('export const INITIAL_GOD_PROMPT = ['), src.indexOf("].join('\\n');", src.indexOf('export const INITIAL_GOD_PROMPT = [')));
+  assert.ok(prompt.length > 200, 'the orientation was found in the shared module');
   assert.match(prompt, /'2\. Read floor-digest\.md and board-status\.md \(hive root\) and the current roster of agents \(active vs archived\)\. Open board\.md or tasks\.json only for a named card, with grep or jq; never read them whole\.'/);
   assert.doesNotMatch(prompt, /Review board\.md \+ tasks\.json/);
 });

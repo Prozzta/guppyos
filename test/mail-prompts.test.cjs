@@ -185,7 +185,8 @@ test('P7-P10: god, the first god prompt, closing time and the heartbeat say "del
   assert.doesNotMatch(hive, /drain your inbox/i);
   // Jim (slices 4/4b/5 follow-up 2): neutral, true in every mail mode (updated from "pending mail is
   // delivered in your context", which is false for a legacy or degraded god).
-  const useHive = readSource('src/renderer/src/hooks/useHive.ts');
+  // BOOT-REENTER-PASTE-PROOF (1.1.81): the first god prompt's text lives in shared/godOrientation.ts.
+  const useHive = readSource('src/shared/godOrientation.ts');
   assert.match(useHive, /'1\. Read your memory\.md; then handle your pending hive mail as your start-up instructions describe\.'/);
   assert.doesNotMatch(useHive, /pending mail is delivered in your context/);
   const closing = readSource('src/main/closingTime.ts');

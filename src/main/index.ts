@@ -36,6 +36,7 @@ import {
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import { createRendererErrorGate } from '../shared/rendererError';
+import { INITIAL_GOD_PROMPT, withGodOrientationArg } from '../shared/godOrientation';
 import { rendererErrorRow } from './rendererErrorLog';
 import {
   runStandupTick, projectTasks,
@@ -3611,7 +3612,7 @@ ipcMain.handle('pty:spawn', async (evt, opts: AgentSpawnOptions) => {
  *  it can ALSO be invoked by the god-triggered ephemeral-worker watcher (which has
  *  no renderer `evt`). `owner` is the window that should receive this PTY's output
  *  (null → the primary window). Behavior-identical to the prior inline handler. */
-async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string }> {
+async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebContents | null): Promise<{ ok: boolean; error?: string; codexLayerOptIn?: string; cwd?: string; worktreePath?: string; resumeNotFound?: boolean; resumed?: boolean; seedPrompt?: string; orientationOnArgv?: boolean; installer?: boolean }> {
   // ── cwd INGESTION — expand `~` exactly once, here ───────────────────────────
   // This is the single door every agent spawn comes through (`pty:spawn` IPC and
   // the god-triggered ephemeral-worker watcher), so it is where a user-typed
@@ -3698,7 +3699,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
         pendingInstallRelaunch.set(opts.id, { opts, owner, bin });
       }
       syncKeepAwake();
-      return res;
+      // The PTY is the INSTALLER, not the agent: the renderer must not type a boot prompt into it.
+      return { ...res, installer: true };
     }
   }
   // Git isolation: when requested and the cwd is a real repo, give this agent
@@ -3874,6 +3876,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // Set when `--resume` was actually attached (explicit id or restore-on-restart),
   // so the renderer can skip re-orienting a god/assistant that resumed its thread.
   let didResume = false;
+  // Set when a fresh Claude god's orientation was put on its command line (see below).
+  let orientationOnArgv = false;
   // Claude-only — these are Claude Code flags; other CLIs carry their own flags
   // in the command string the renderer already built.
   if (opts.hive && claudeProvider) {
@@ -4032,6 +4036,15 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // The sessions this process opens, other than the one it resumed, carry this prompt.
     hive.noteSpawnPrompt(opts.hive.id, promptFp, resumedSid);
     opts.args = args;
+    // BOOT-REENTER-PASTE-PROOF (1.1.81, shared/godOrientation.ts): a FRESH Claude god gets its
+    // orientation as Claude's initial prompt, decided here by THIS spawn's resume outcome, so a
+    // respawn or relaunch that resumes is never re-oriented. The renderer no longer types it.
+    if (opts.hive.isGod) {
+      const g = withGodOrientationArg(args, !didResume);
+      opts.args = g.args;
+      orientationOnArgv = g.onArgv;
+      if (g.onArgv) hive.appendLog({ kind: 'god-orientation-argv', agentId: opts.hive.id, chars: INITIAL_GOD_PROMPT.length });
+    }
   }
   // Idempotent session resume on respawn (#6.6a) — provider-aware: Claude
   // `--resume <sid>`, Grok `--resume <sid>`, Antigravity `--conversation <id>`.
@@ -4219,7 +4232,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const worktreePath = worktreePaths.get(opts.id);
   // `cwd` echoes back the TILDE-EXPANDED absolute path so the renderer's agent
   // record matches what the registry and the PTY actually used.
-  return { ...res, cwd: opts.cwd, ...(worktreePath ? { worktreePath } : {}), ...(resumeNotFound ? { resumeNotFound: true } : {}), ...(didResume ? { resumed: true } : {}), ...(seedPrompt ? { seedPrompt } : {}) };
+  return { ...res, cwd: opts.cwd, ...(worktreePath ? { worktreePath } : {}), ...(resumeNotFound ? { resumeNotFound: true } : {}), ...(didResume ? { resumed: true } : {}), ...(seedPrompt ? { seedPrompt } : {}), ...(orientationOnArgv ? { orientationOnArgv: true } : {}) };
 }
 ipcMain.handle('pty:write', (_evt, id: string, data: string, origin: unknown) => {
   if (typeof id !== 'string' || typeof data !== 'string') return { ok: false, error: 'invalid args' };

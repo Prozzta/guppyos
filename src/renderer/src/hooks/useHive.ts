@@ -14,6 +14,7 @@ import {
 } from '../../../shared/providerAutomation';
 import { DEFAULT_CONTEXT_TRIGGER, type ContextRule } from '../../../shared/triggers';
 import type { AgentProvider } from '../../../shared/agentProvider';
+import { INITIAL_GOD_PROMPT } from '../../../shared/godOrientation';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
@@ -67,22 +68,8 @@ function withStandingGoal(agent: Agent, text: string): string {
   return `<goal>\n${goal}\n</goal>\n\n${text}`;
 }
 
-// The first thing Michael (god) is told on a fresh spawn — orient him and put
-// him to work running the floor. Kept terse and action-oriented.
-const INITIAL_GOD_PROMPT = [
-  "You're online as Michael, the orchestrator of the hive. Get oriented, then start running the floor:",
-  // ZT-I1-MAIL §5 P8: how mail reaches god depends on its mail mode (delivered in context, or read
-  // from inbox/ when legacy or degraded); the renderer does not know it, so this line is neutral
-  // and defers to the start-up instructions (P1), which are mode-specific (Jim, slices 4/4b/5).
-  '1. Read your memory.md; then handle your pending hive mail as your start-up instructions describe.',
-  // GOD-STARTUP-TOKENS R2: the harness keeps the board summarised (floor-digest.md, board-status.md, a
-  // few KB); board.md and tasks.json are megabytes, and a god that reads them whole at every start
-  // re-sends them at every later step.
-  '2. Read floor-digest.md and board-status.md (hive root) and the current roster of agents (active vs archived). Open board.md or tasks.json only for a named card, with grep or jq; never read them whole.',
-  '3. Check fleet health: read fleet.json in the hive root for every agent\'s live tokens, cost, status, breaker level, and inbox backlog (`claude agents` will NOT show your hive\'s agents). Flag anyone stalled, over-budget, or breaker-armed.',
-  '4. Skim COMMANDS.md (hive root) for the Claude Code commands you can use — and run `memory wake-up` for a memory digest (the built-in memory engine; skip it if semantic memory is off).',
-  'Then begin orchestrating: triage requests, delegate work to the team, and keep everyone unblocked. You are fully autonomous — there is no approval queue, so handle tool-permission prompts in this session yourself (the human can approve them remotely from their phone).'
-].join('\n');
+// The orientation text lives in shared/godOrientation.ts: main puts it on a fresh Claude god's
+// command line (BOOT-REENTER-PASTE-PROOF, 1.1.81); this file types it only for any other god.
 
 // L0-FUSION stage 5.3 — THE RENDERER NO LONGER TYPES PROGRAMMATICALLY AT ALL.
 //
@@ -395,12 +382,17 @@ export function useHive(config: HarnessConfig | null): void {
       bootGraceUntil.current[GOD_ID] = Date.now() + BOOT_GRACE_MS;
       void (async () => {
         try {
-          if (!cancelled && !resumedGod) {
+          // An installer result: this PTY is the missing-CLI installer, not god. Nothing is typed
+          // into it; the relaunched Claude god is oriented on argv by main (1.1.81).
+          if (!cancelled && !resumedGod && !res.installer) {
             // A type-into-tui god (Crush) can't ride its hive protocol on argv, so the
             // main process hands it back as seedPrompt — type it FIRST (identity), then
             // the orientation kick. Serialized by main's submit owner so they can't jam. (ondev-b)
             if (res.seedPrompt) await submitBootPrompt(GOD_ID, res.seedPrompt);
-            await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);
+            // BOOT-REENTER-PASTE-PROOF (1.1.81): a Claude god already got its orientation as
+            // Claude's initial prompt (main, on this spawn's fresh decision); typing it again
+            // would orient it twice. Any other god is still oriented by typing.
+            if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);
           }
         } catch (e) {
           // START-FIXES-163 (3): never swallowed again. The PTY may have died, or main

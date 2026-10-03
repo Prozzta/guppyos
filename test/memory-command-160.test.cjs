@@ -97,8 +97,9 @@ test('agent-facing text names the `memory` command (prompt line, PROTOCOL.md, th
   assert.match(proto, /\\`memory search "<query>"\\`/);
   assert.match(proto, /\\`memory wake-up\\`/);
   assert.match(read('resources/skills/capabilities/SKILL.md'), /`memory search "<query>"`/);
-  assert.match(read('src/renderer/src/hooks/useHive.ts'), /run `memory wake-up`/);
-  for (const [f, src] of [['hive.ts', HIVE], ['SKILL.md', read('resources/skills/capabilities/SKILL.md')], ['useHive.ts', read('src/renderer/src/hooks/useHive.ts')]]) {
+  // BOOT-REENTER-PASTE-PROOF (1.1.81): the orientation prompt moved to shared/godOrientation.ts.
+  assert.match(read('src/shared/godOrientation.ts'), /run `memory wake-up`/);
+  for (const [f, src] of [['hive.ts', HIVE], ['SKILL.md', read('resources/skills/capabilities/SKILL.md')], ['useHive.ts', read('src/renderer/src/hooks/useHive.ts')], ['godOrientation.ts', read('src/shared/godOrientation.ts')]]) {
     assert.doesNotMatch(src, OLD, f);
   }
 });
