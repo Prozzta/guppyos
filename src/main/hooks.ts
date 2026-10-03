@@ -325,6 +325,8 @@ export class HookServer {
   /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
   private claimWorkingSet?: (agentId: string) => string | null | Promise<string | null>;
   private preparedClaimWorkingSets = new Map<string, string | null>();
+  /** CLAIM-LEDGER W5 (god): told at each completed turn (Stop), for the reconcile lease. */
+  private claimTurnCompleted?: (agentId: string) => void;
   /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
    *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
   private readonly runningTools = new Map<string, RunningTool[]>();
@@ -354,6 +356,19 @@ export class HookServer {
 
   setClaimWorkingSetProvider(fn: ((agentId: string) => string | null | Promise<string | null>) | undefined): void {
     this.claimWorkingSet = fn;
+  }
+
+  setClaimTurnCompletedListener(fn: ((agentId: string) => void) | undefined): void {
+    this.claimTurnCompleted = fn;
+  }
+
+  /** CLAIM-LEDGER G4.4 (Jim M-3): the working set rides only on SessionStart (startup, resume,
+   *  clear, compact), never on UserPromptSubmit (and `memory wake-up` carries it on demand).
+   *  Never on a one-way hook (S-5). Not for Codex: its view is in its instruction file, once per
+   *  spawn (G4.5, god's M-4 ruling), which a compaction keeps. */
+  private claimWorkingSetEvent(p: HookPayload): boolean {
+    if (p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return false;
+    try { return this.mailChannel(p.agent_id).provider !== 'codex'; } catch { return true; }
   }
 
   constructor(
@@ -1798,7 +1813,7 @@ export class HookServer {
 
   private async handleWithClaimContext(p: HookPayload): Promise<unknown> {
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
-    if (!fromSubagent && (p.hook_event_name === 'SessionStart' || p.hook_event_name === 'UserPromptSubmit') && p.agent_id && p.transport !== 'pipe-oneway') {
+    if (!fromSubagent && this.claimWorkingSetEvent(p) && p.agent_id) {
       let claimWorkingSet: string | null = null;
       try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id) ?? null; } catch { claimWorkingSet = null; }
       this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
@@ -1843,6 +1858,10 @@ export class HookServer {
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
+    }
+    // CLAIM-LEDGER W5 hook (god): the completed-turn boundary for the claims reconcile lease.
+    if (agentId && !fromSubagent && event === 'Stop') {
+      try { this.claimTurnCompleted?.(agentId); } catch { /* never breaks a hook */ }
     }
     // READS-ROTATE-AT-SIZE pilot: one `compact-health` row per compaction (before any early return:
     // a SessionStart(compact) that re-injects mail returns with it below).
@@ -2148,14 +2167,16 @@ export class HookServer {
     const goal = goalRaw
       ? `<goal>\n${goalRaw}\n</goal>`
       : null;
-    // CLAIM-LEDGER G4.4: rebuild the view from the verified ledger at each readable boundary.
-    // A compact SessionStart is included, so this survives context compaction without persistence.
+    // CLAIM-LEDGER G4.4: rebuild the view from the verified ledger at each SessionStart (M-3: not on
+    // UserPromptSubmit). A compact SessionStart is included, so it survives compaction without
+    // persistence. It counts in every joint budget below (mail, carry, handoff).
     const hasPreparedClaimWorkingSet = !!agentId && this.preparedClaimWorkingSets.has(agentId);
     let claimWorkingSet = !fromSubagent && hasPreparedClaimWorkingSet && agentId ? this.preparedClaimWorkingSets.get(agentId) ?? null : null;
     if (agentId && hasPreparedClaimWorkingSet) this.preparedClaimWorkingSets.delete(agentId);
     // Keep the synchronous test/internal surface compatible with synchronous providers; live
     // async providers are always awaited by handleWithClaimContext before reaching this method.
-    if (!fromSubagent && !hasPreparedClaimWorkingSet && (event === 'SessionStart' || event === 'UserPromptSubmit') && agentId) {
+    // S-5: never for a one-way hook (its reply is not read), as handleWithClaimContext.
+    if (!fromSubagent && !hasPreparedClaimWorkingSet && this.claimWorkingSetEvent(p) && agentId) {
       try {
         const value = this.claimWorkingSet?.(agentId);
         if (typeof value === 'string') claimWorkingSet = value;
@@ -2168,7 +2189,7 @@ export class HookServer {
     // a one-way hook, whose reply is not read (the handoff would be lost). Creed B1: built to fit
     // the one additionalContext with the roster, goal, steer and mid-turn mail it is joined with.
     const handoff = wantsRoster && event === 'SessionStart' && p.source === 'startup' && p.transport !== 'pipe-oneway'
-      ? this.hive.takeGodHandoff?.(agentId, [roster, goal, steer, mail]) ?? null
+      ? this.hive.takeGodHandoff?.(agentId, [roster, goal, claimWorkingSet, steer, mail]) ?? null
       : null;
 
     // ZT-I1-MAIL §2.2: the message BODIES, from the ledger's delivered ids, on every turn start
@@ -2184,10 +2205,10 @@ export class HookServer {
       && !(event === 'UserPromptSubmit' && isSlashPrompt(p.prompt));
     let mailBlock: string | null = null;
     if (surfaces && agentId) {
-      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [handoff, roster, goal, steer, mail]); } catch { mailBlock = null; }
+      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [handoff, roster, goal, claimWorkingSet, steer, mail]); } catch { mailBlock = null; }
       const none = '<hive-mail>\nNo new hive mail to show for this wake.\n</hive-mail>';
       if (!mailBlock && event === 'UserPromptSubmit' && channel?.provider === 'codex' && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL
-        && mailBudgetFor([handoff, roster, goal, steer, mail]) >= none.length) {
+        && mailBudgetFor([handoff, roster, goal, claimWorkingSet, steer, mail]) >= none.length) {
         mailBlock = none;
         // Q12 (god's ruling): a wake with nothing to show means the coordinator woke for mail that
         // was not pending: a coordinator bug signal.
@@ -2203,7 +2224,7 @@ export class HookServer {
       try { c = this.compactCarry(agentId); } catch { c = null; }
       carry = c?.text ?? null;
       this.lastReinject.delete(agentId);
-      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, steer, mail, carry]); } catch { mailBlock = null; }
+      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, claimWorkingSet, steer, mail, carry]); } catch { mailBlock = null; }
       const re = this.lastReinject.get(agentId);
       this.lastReinject.delete(agentId);
       try {

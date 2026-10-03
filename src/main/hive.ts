@@ -654,6 +654,15 @@ export class HiveManager {
   private readonly routerRuntime: RouterRuntime;
   private claimLedgerLevel?: (agentId: string) => 'off' | 'shadow' | 'reader' | 'writer';
   setClaimLedgerLevelProvider(fn: ((agentId: string) => 'off' | 'shadow' | 'reader' | 'writer') | undefined): void { this.claimLedgerLevel = fn; }
+  /** CLAIM-LEDGER G4.5 (god's M-4 ruling): the claims working set (and W5's reconcile text) a Codex
+   *  agent gets in its instruction file, written once per spawn, so it is session-stable. */
+  private codexClaimContext?: (agentId: string) => Promise<string | null>;
+  setCodexClaimContextProvider(fn: ((agentId: string) => Promise<string | null>) | undefined): void { this.codexClaimContext = fn; }
+  /** G4.5: a Codex agent's developer_instructions: the protocol, then the claims view (the same
+   *  bytes `memory wake-up` appends at the same state). Never part of the prompt fingerprint. */
+  static codexDeveloperInstructions(prompt: string, claimContext: string | null): string {
+    return claimContext ? `${prompt}\n\n${claimContext}` : prompt;
+  }
   /** HOOK-BROKER: the in-process HTTP hook endpoint (HookServer), injected by main. Null in
    *  tests and until wired; every spawn then writes command hooks exactly as before. */
   private hookBroker: HookBroker | null = null;
@@ -1452,7 +1461,11 @@ export class HiveManager {
               if (configuredCompactLimit !== undefined && !isCodexAutoCompactTokenLimitOverride(configuredCompactLimit)) {
                 this.appendLog({ kind: 'codex-compact-limit-ignored', agentId: meta.id, value: configuredCompactLimit });
               }
-              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? prompt : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd, { codexVersion: opts.codexVersion ?? null, optIns: opts.codexLayerOptIns }, opts.spawnModel?.launchEffort);
+              let claimContext: string | null = null;
+              if (preset.systemPromptChannel === 'codex-developer-instructions' && this.codexClaimContext) {
+                try { claimContext = await this.codexClaimContext(meta.id); } catch { claimContext = null; }
+              }
+              const codex = this.installCodexHooks(dir, meta.id, preset.systemPromptChannel === 'codex-developer-instructions' ? HiveManager.codexDeveloperInstructions(prompt, claimContext) : null, codexToolOutputLimitForConfig(opts.codexToolOutputTokenLimit), opts.codexInheritPlugins === true, opts.spawnModel?.launch, configuredCompactLimit, meta.cwd, { codexVersion: opts.codexVersion ?? null, optIns: opts.codexLayerOptIns }, opts.spawnModel?.launchEffort);
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal, ...(codex.codexLayerOptIn ? { codexLayerOptIn: codex.codexLayerOptIn } : {}) };
               env.CODEX_HOME = codex.home;
@@ -4255,7 +4268,11 @@ export class HiveManager {
   /** A TOML basic string. JSON's escapes are valid TOML, but JSON leaves U+007F (DEL) raw, and
    *  TOML forbids it unescaped (N4, Jim). */
   static tomlString(text: string): string {
-    return JSON.stringify(text).replace(/\u007f/g, '\\u007F');
+    // Jim M-5 (CL-W4-INT): TOML allows only Unicode scalar values in a \u escape, and JSON writes
+    // a lone surrogate as \ud800. Agent-written claim text reaches developer_instructions (G4.5),
+    // so a lone surrogate becomes U+FFFD first (String.prototype.toWellFormed, spelled out for ES2022).
+    const wellFormed = text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+    return JSON.stringify(wellFormed).replace(/\u007f/g, '\\u007F');
   }
 
   /** N1 (Jim): the args of a `codex resume` whose session lives in `ownerHome`. When that is

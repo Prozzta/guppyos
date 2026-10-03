@@ -10,6 +10,7 @@ import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { enqueueR5AfterIndex, reconcileQueueForHive, shouldRunR5 } from './claims/reconcile';
+import { createClaimDelivery, type TaskRow } from './claims/delivery';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
@@ -1334,63 +1335,45 @@ const nativeMemory = new NativeMemoryWiring({
   onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); }
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
-// CLAIM-LEDGER W4: rebuild from the verified ledger at every readable boundary. The live view is
-// never persisted; only its frozen receipt is append-only on main.
+// CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
+// wake-up` and each Codex spawn (claims/delivery.ts). The live view is never persisted; only its
+// receipt is, once per distinct text, on a rotating file.
 let claimsCountTokens: ((text: string) => number) | null = null;
-const claimWorkingSetForAgent = async (agentId: string): Promise<string | null> => {
-  const endpoint = claimsEndpoint();
-  const root = hive.root();
-  if (!endpoint || !root) return null;
-  const level = claimLevel(agentId);
-  if (level === 'off' || level === 'shadow') return null;
-  const read = endpoint.store.readLedger(agentId);
-  const records = read.records;
-  const registry = loadRegistry(root);
-  const state = deriveClaims(records, registry, { r4: false });
-  const agentCwd = hive.registry().agents[agentId]?.cwd || root;
-  const worldSnapshot = await buildClaimsWorldSnapshot(records, state, agentCwd);
-  const tasks = (hive.tasks() as { tasks?: Array<{ id: string; status: string; result?: string }> }).tasks ?? [];
-  const byTask = new Map(tasks.map((t) => [t.id, t]));
-  let usage: UsageRec[] = [];
-  try { usage = readFileSync(endpoint.store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as UsageRec]; } catch { return []; } }); } catch { /* no usage yet */ }
-  const cardOutcomes: Record<string, 'helped' | 'hurt'> = {};
-  for (const row of usage) if (row.card) {
-    const task = byTask.get(row.card);
-    if (task?.status === 'done' && typeof task.result === 'string' && task.result.trim()) cardOutcomes[row.card] = 'helped';
-    else if (task?.status === 'blocked' || (task as { status?: string } | undefined)?.status === 'cancelled') cardOutcomes[row.card] = 'hurt';
-  }
-  const world = {
-    now: new Date().toISOString(),
-    taskStatus: (id: string) => byTask.get(id)?.status ?? null,
-    fileExists: (p: string) => existsSync(resolve(agentCwd, p)),
-    // Async git evidence is collected above; callback lookups stay synchronous as W2 requires.
-    // Unknown results are neutral: they must never create a stale or changed-since flag.
-    commitExists: (sha: string) => worldSnapshot.commits.get(sha) ?? true,
-    fileChangedSince: (p: string, since: string) => {
-      return worldSnapshot.changedFiles.get(`${p}\0${since}`) ?? false;
-    },
-    cardOutcomes,
-  };
-  let countTokens = claimsCountTokens;
-  if (!countTokens) {
+const claimDelivery = createClaimDelivery({
+  hiveRoot: () => hive.root(),
+  level: claimLevel,
+  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
+  derive: deriveClaims,
+  worldView: buildClaimsWorldView,
+  agentCwd: (agentId) => hive.registry().agents[agentId]?.cwd ?? null,
+  tasks: () => (hive.tasks() as { tasks?: TaskRow[] }).tasks ?? [],
+  usage: (agentId) => {
+    try { return readFileSync((claimsEndpoint() as ClaimsEndpointDeps).store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as UsageRec]; } catch { return []; } }); } catch { return []; }
+  },
+  countTokens: () => {
+    if (claimsCountTokens) return claimsCountTokens;
     try {
       const cfg = nativeMemory.workerConfig();
       if (!cfg) return null;
       const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(readFileSync(join(cfg.modelDir, 'tokenizer.json'), 'utf8'))));
-      countTokens = (text) => tok.count(text);
-      claimsCountTokens = countTokens;
+      claimsCountTokens = (text) => tok.count(text);
+      return claimsCountTokens;
     } catch { return null; }
-  }
-  const view = buildClaimsWorldView(state, records, usage, world);
-  const { buildWorkingSet } = createClaimViews(records, countTokens);
-  const built = buildWorkingSet(state, view, DEFAULT_WORKING_SET_BUDGET);
-  const warning = read.chain || level !== 'writer' ? '\n\nWarning: this agent is read-only for claims; ledger writes are disabled.' : '';
-  const memoryDir = join(root, 'agents', agentId, 'memory');
-  try { mkdirSync(memoryDir, { recursive: true }); appendFileSync(join(memoryDir, 'receipts.jsonl'), JSON.stringify(built.receipt) + '\n', 'utf8'); } catch { /* best effort */ }
-  return built.text + warning;
-};
+  },
+  // W5 (Dwight): reconcileForTurn's items go here, rendered once as the working set's T1 ⚠
+  // markers (inside the 9,500 joint budget); onTurnCompleted is told at each completed turn.
+  // Stubs until W5 is wired.
+  reconcileItems: () => [],
+  onTurnCompleted: () => { /* W5 */ },
+  log: (row) => hive.appendLog(row),
+});
+const claimWorkingSetForAgent = (agentId: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId) : Promise.resolve(null));
 hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
+hookServer.setClaimTurnCompletedListener((agentId) => claimDelivery.turnCompleted(agentId));
 nativeMemory.setClaimWakeupProvider(claimWorkingSetForAgent);
+// G4.5 (god's M-4 ruling): Codex gets the same view in its instruction file, once per spawn.
+hive.setCodexClaimContextProvider(claimWorkingSetForAgent);
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here
 // in main: tasks.json writes go through writeTasks (merge, validation, ZT-I3 attribution 'ledger').
 // W6-D1: one op at a time per agent, so a retry waits for the op in flight (its memory part may be
