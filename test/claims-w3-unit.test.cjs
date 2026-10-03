@@ -68,6 +68,7 @@ test('verifiedPrefix: all on ok; before the break on mac/prev/parse; nothing on 
   assert.deepEqual(verifiedPrefix({ records, torn: null, chain: { brokenAt: 'c-000000000003', reason: 'mac' } }).records.map((r) => r.id), ['c-000000000001', 'c-000000000002']);
   assert.deepEqual(verifiedPrefix({ records, torn: null, chain: { brokenAt: '7@123', reason: 'parse' } }).records, []);
   assert.equal(verifiedPrefix({ records, torn: null, chain: { brokenAt: 'c-000000000001', reason: 'key-missing' } }), null);
+  assert.equal(verifiedPrefix({ records, torn: null, chain: { brokenAt: 'head-anchor', reason: 'prev' } }), null, 'a head-anchor break: nothing (the index keeps its state)');
 });
 
 function syncer(over = {}) {
@@ -104,6 +105,12 @@ test('ClaimsIndexSync: sends verified chunks for reader/writer only; logs once w
   assert.equal(x.logs.filter((l) => l.kind === 'claims-index-no-derive').length, 1, 'logged once');
   x = syncer({ readLedger: () => ({ records: [rec('c-000000000001', 'a')], torn: null, chain: { brokenAt: 'c-000000000001', reason: 'key-missing' } }) });
   assert.deepEqual(await x.s.syncNow('a1'), { sent: false, why: 'key-missing' }); assert.equal(x.sent.length, 0, 'the index keeps what was verified');
+  // Jim (CLAIMS-HEAD-ANCHOR should): a cut (2 valid records left) or a deleted ledger sends nothing.
+  for (const records of [[rec('c-000000000001', 'a'), rec('c-000000000002', 'b')], []]) {
+    x = syncer({ readLedger: () => ({ records, torn: null, chain: { brokenAt: 'head-anchor', reason: 'prev' } }) });
+    assert.deepEqual(await x.s.syncNow('a1'), { sent: false, why: 'head-anchor' }); assert.equal(x.sent.length, 0, 'a cut or deleted ledger leaves the index unchanged');
+    assert.equal(x.logs.filter((l) => l.kind === 'claims-index-skipped' && l.why === 'head-anchor').length, 1);
+  }
   x = syncer({ readLedger: () => ({ records: [rec('c-000000000001', 'a'), rec('c-00000000000f', 'forged', { source: 'human' })], torn: null, chain: { brokenAt: 'c-00000000000f', reason: 'mac' } }) });
   r = await x.s.syncNow('a1');
   assert.equal(r.truncatedAt, 'c-00000000000f');

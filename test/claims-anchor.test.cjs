@@ -273,3 +273,29 @@ test('Jim A-3: the app wiring pins: the anchor file in user-data, the anchored a
   assert.match(idx, /setInterval\(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS\)\.unref\?\.\(\);/, 'and periodically');
   assert.match(idx, /try \{ claimsEndpoint\(\)\?\.store\.checkAnchored\(\); \}/);
 });
+
+test('Jim should (re-audit): a cut or deleted ledger sends NOTHING to the index (never []), so its claims stay and its markdown stays out', async () => {
+  const { ClaimsIndexSync } = loadTs(path.join(ROOT, 'src/main/claims/indexSync.ts'));
+  const x = setup();
+  const { store } = x.mk();
+  for (let i = 0; i < 4; i++) await ok(store.appendRecord('a1', note(`f${i}`), 'endpoint'));
+  for (let i = 0; i < 2; i++) await ok(store.appendRecord('a2', note(`g${i}`), 'endpoint'));
+  await ok(store.appendRecord('dwight', note('fine'), 'endpoint'));
+  store.close();
+  const f = path.join(x.claimsDir('a1'), fs.readdirSync(x.claimsDir('a1'))[0]);
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).slice(0, 2).join('\n') + '\n');   // cut: 2 valid records left
+  fs.rmSync(path.join(x.root, 'agents', 'a2'), { recursive: true });                                             // deleted
+  const m = x.mk();
+  const sent = []; const logs = [];
+  const sync = new ClaimsIndexSync({
+    readLedger: (a) => m.store.readLedger(a),
+    derive: () => (records) => ({ v: 1, agent: 'x', registryHash: '', ledgerHead: 'h', conflicts: [], claims: Object.fromEntries(records.filter((r) => r.t === 'claim').map((r) => [r.id, { id: r.id, status: 'live', sightings: 0, firstAt: '', lastAt: '', pinned: false, reasons: [] }])) }),
+    registry: () => ({ v: 1, namespaces: [], keys: {} }), ruleConfig: () => ({ r4: false }), level: () => 'reader',
+    agents: () => [...new Set([...['a1', 'dwight'], ...m.store.anchoredAgents()])],   // as index.ts: segments plus anchored
+    send: async (args) => { sent.push(args); return { ok: true }; }, log: (r) => logs.push(r),
+  });
+  const out = await sync.syncAll();
+  assert.deepEqual(sent.map((s) => s.wing), ['dwight'], 'only the intact ledger is sent');
+  assert.deepEqual(out.filter((o) => !o.sent).map((o) => o.why), ['head-anchor', 'head-anchor']);
+  assert.deepEqual(logs.filter((l) => l.kind === 'claims-index-skipped').map((l) => [l.agentId, l.why]).sort(), [['a1', 'head-anchor'], ['a2', 'head-anchor']]);
+});
