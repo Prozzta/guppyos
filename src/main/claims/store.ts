@@ -128,6 +128,16 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/** Every line parses and chains on the one before it (the MAC-free structure; Jim A-1). */
+function prevHolds(lines: Array<{ line: string; rec: LedgerRec | null }>): boolean {
+  let prev = '';
+  for (const l of lines) {
+    if (!l.rec || l.rec.prev !== prev) return false;
+    prev = sha256Hex(l.line);
+  }
+  return true;
+}
+
 function charLen(s: string): number {
   let n = 0;
   for (const _ of s) n++;
@@ -240,7 +250,15 @@ export class ClaimStore {
     const records: LedgerRec[] = [];
     for (const l of lines) if (l.rec) records.push(l.rec);
     let chain = structural ?? this.verify(agentId, lines);
-    if (chain === 'ok') chain = this.checkAnchor(agentId, lines);
+    // The anchor is structural, independent of the MAC key (Jim A-1): it is checked whenever the
+    // prev chain holds (key-missing and mac included), and a cut reports the anchor break (the
+    // Human's rekey refuses it then; a ledger a rekey left behind still shows the cut). The anchor
+    // moves up only on a fully verified chain. A MAC failure stays the reported cause unless the
+    // anchored record itself is gone (a cut): an edited last line is still `mac` at its id.
+    if (chain === 'ok' || ((chain.reason === 'key-missing' || chain.reason === 'mac') && prevHolds(lines))) {
+      const anchored = this.checkAnchor(agentId, lines, chain === 'ok');
+      if (anchored !== 'ok' && (chain === 'ok' || chain.reason === 'key-missing' || !this.anchoredIdPresent(agentId, lines))) chain = anchored;
+    }
     this.adopt(agentId, lines, files, chain);
     return { records, torn, chain };
   }
@@ -254,16 +272,40 @@ export class ClaimStore {
    * yet (first run) adopts the current head. Recovery: a restore re-anchors; resetAnchor is the
    * Human's.
    */
-  private checkAnchor(agentId: string, lines: ParsedLine[]): 'ok' | ChainBreak {
+  private checkAnchor(agentId: string, lines: Array<{ line: string; rec: LedgerRec | null }>, advance: boolean): 'ok' | ChainBreak {
     const anchors = this.d.headAnchor;
     if (!anchors) return 'ok';
-    const a = anchors.get(this.d.hiveRoot, agentId);
+    // A head written by this process but not yet flushed is the newer anchor (Jim's note: a cut
+    // inside the debounce window is caught in-process too).
+    const want = this.anchorTimers.get(agentId)?.head ?? anchors.get(this.d.hiveRoot, agentId)?.head ?? '';
     const head = lines.length ? sha256Hex(lines[lines.length - 1].line) : '';
-    if (a && a.head && a.head !== head && !lines.some((l) => sha256Hex(l.line) === a.head)) {
+    if (want && want !== head && !lines.some((l) => sha256Hex(l.line) === want)) {
       return { brokenAt: 'head-anchor', reason: 'prev' };
     }
-    if (head && (!a || a.head !== head)) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
+    if (advance && head && want !== head) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
     return 'ok';
+  }
+
+  /** The anchored record's id is still in the ledger (an edit, not a cut). */
+  private anchoredIdPresent(agentId: string, lines: Array<{ rec: LedgerRec | null }>): boolean {
+    const id = this.anchorTimers.get(agentId)?.lastId ?? this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.lastId ?? '';
+    return !!id && lines.some((l) => l.rec?.id === id);
+  }
+
+  /** The agents anchored for this hive (A-2): main checks each, segments or not. */
+  anchoredAgents(): string[] {
+    try { return (this.d.headAnchor?.agents(this.d.hiveRoot) ?? []).filter((a) => AGENT_RE.test(a)).sort(); } catch { return []; }
+  }
+
+  /**
+   * Jim A-2: read every anchored agent (claims start, a worker (re)start, the periodic check), so a
+   * deleted or cut ledger alerts even when nothing appends to or reads that agent. Returns the
+   * agents whose ledger is broken (one alert each, deduplicated by readLedger).
+   */
+  checkAnchored(): string[] {
+    const broken: string[] = [];
+    for (const a of this.anchoredAgents()) if (this.readLedger(a).chain !== 'ok') broken.push(a);
+    return broken;
   }
 
   private anchorTimers = new Map<string, { t: ReturnType<typeof setTimeout>; head: string; lastId: string }>();
@@ -745,6 +787,7 @@ export class ClaimStore {
     let prev = '';
     let lastId: string | null = null;
     const ids: string[] = [];
+    const hashes = new Set<string>();
     for (const file of this.segments(agentId)) {
       const text = nodeFs.readFileSync(file, 'utf8');
       if (text.length && !text.endsWith('\n')) return 'a torn tail';
@@ -754,11 +797,16 @@ export class ClaimStore {
         try { rec = JSON.parse(line) as LedgerRec; } catch { return 'an unparseable line'; }
         if (rec.prev !== prev) return `prev breaks at ${rec.id}`;
         prev = sha256Hex(line);
+        hashes.add(prev);
         lastId = rec.id;
         ids.push(rec.id);
       }
     }
     if (!lastId) return 'an empty ledger';
+    // Jim A-1: a rekey never accepts a ledger that no longer reaches its anchored head (a cut made
+    // while the key was lost); only the Human's resetAnchor, after review, accepts a cut.
+    const want = this.anchorTimers.get(agentId)?.head ?? this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.head ?? '';
+    if (want && !hashes.has(want)) return 'prev at head-anchor (the ledger no longer reaches its anchored head)';
     return { head: prev, lastId, ids };
   }
 

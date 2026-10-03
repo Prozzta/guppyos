@@ -150,3 +150,126 @@ test('a restore re-anchors; the Human reset re-anchors after review; a rekey kee
   assert.equal(x.anchors.get(x.root, 'andy').head, sha256Hex(x.lastLine('andy')));
   assert.equal(x.mk().store.readLedger('andy').chain, 'ok');
 });
+
+// — Jim's CLAIMS-HEAD-ANCHOR audit (A-1, A-2, A-3) —
+
+test('Jim A-1: a cut made while the key is lost is still a head-anchor break, and the Human rekey refuses it (no laundering)', async () => {
+  const x = setup();
+  const { store } = x.mk();
+  for (let i = 0; i < 4; i++) await ok(store.appendRecord('a1', note(`f${i}`), 'endpoint'));
+  await ok(store.appendRecord('dwight', note('fine'), 'endpoint'));
+  store.close();
+  const f = path.join(x.claimsDir('a1'), fs.readdirSync(x.claimsDir('a1'))[0]);
+  const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
+  fs.writeFileSync(f, lines.slice(0, 2).join('\n') + '\n');   // a valid, shorter chain
+  x.keys.drop();                                               // and the key is lost
+  const m = x.mk();
+  assert.deepEqual(m.store.readLedger('a1').chain, { brokenAt: 'head-anchor', reason: 'prev' }, 'the cut is seen under key-missing');
+  assert.equal(m.store.readLedger('dwight').chain.reason, 'key-missing', 'an uncut ledger stays key-missing');
+  // The rekey's own write step re-checks the anchor too (a cut between its read and its write).
+  assert.match(String(m.store.prevChainOnly('a1')), /head-anchor/);
+  assert.equal(typeof m.store.prevChainOnly('dwight'), 'object');
+  const rk = await m.store.rekey(true);
+  assert.ok(rk.refused.some((r) => r.agentId === 'a1' && /head-anchor/.test(r.why)), JSON.stringify(rk));
+  assert.deepEqual(rk.rekeyed, ['dwight']);
+  m.store.close();
+  assert.equal(fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).length, 2, 'no rekey line on the cut ledger');
+  assert.deepEqual(x.mk().store.readLedger('a1').chain, { brokenAt: 'head-anchor', reason: 'prev' }, 'still the anchor break after the rekey');
+  assert.equal(x.mk().store.readLedger('dwight').chain, 'ok');
+  // Only the Human's explicit reset (after review) accepts the cut.
+  const h = x.mk();
+  assert.equal(h.store.resetAnchor('a1', true), true);
+  assert.notEqual(h.store.readLedger('a1').chain.brokenAt, 'head-anchor');
+});
+
+test('Jim A-1: an edited last line (with the key) is still reported as mac at its id, not as an anchor break', async () => {
+  const x = setup();
+  const { store } = x.mk();
+  for (let i = 0; i < 2; i++) await ok(store.appendRecord('a1', note(`orig${i}`), 'endpoint'));
+  store.close();
+  const f = path.join(x.claimsDir('a1'), fs.readdirSync(x.claimsDir('a1'))[0]);
+  const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
+  const id = JSON.parse(lines[1]).id;
+  lines[1] = lines[1].replace('orig1', 'edit1');
+  fs.writeFileSync(f, lines.join('\n') + '\n');
+  assert.deepEqual(x.mk().store.readLedger('a1').chain, { brokenAt: id, reason: 'mac' });
+});
+
+test('Jim A-1: under key-missing the anchor never moves up (unverified lines are not anchored)', async () => {
+  const x = setup();
+  const { store } = x.mk();
+  await ok(store.appendRecord('a1', note('f0'), 'endpoint'));
+  store.close();
+  const before = x.anchors.get(x.root, 'a1').head;
+  // An appended line the old key would have signed, but now nothing verifies it.
+  const { store: s2 } = x.mk({ anchorDelayMs: 10_000 });
+  await ok(s2.appendRecord('a1', note('f1'), 'endpoint'));
+  s2.anchorTimers?.clear?.();
+  x.keys.drop();
+  const m = x.mk();
+  assert.equal(m.store.readLedger('a1').chain.reason, 'key-missing');
+  m.store.close();
+  assert.equal(x.anchors.get(x.root, 'a1').head, before);
+});
+
+test('Jim A-2: a deleted ledger alerts at claims start with no append and no read of that agent; every anchored agent is checked', async () => {
+  const x = setup();
+  const { store } = x.mk();
+  for (let i = 0; i < 2; i++) await ok(store.appendRecord('a2', note(`f${i}`), 'endpoint'));
+  await ok(store.appendRecord('andy', note('fine'), 'endpoint'));
+  store.close();
+  fs.rmSync(path.join(x.root, 'agents', 'a2'), { recursive: true });
+  const m = x.mk();
+  assert.deepEqual(m.store.anchoredAgents(), ['a2', 'andy']);
+  assert.deepEqual(m.store.checkAnchored(), ['a2']);
+  assert.deepEqual(m.store.checkAnchored(), ['a2'], 'the periodic check finds it again');
+  const broken = m.alerts.filter((a) => a.kind === 'claims-chain-broken');
+  assert.equal(broken.length, 1, 'one alert'); assert.equal(broken[0].agentId, 'a2'); assert.equal(broken[0].brokenAt, 'head-anchor');
+});
+
+test('Jim A-2: W3 discovery keeps an anchored agent flagged with no segment left: its markdown stays out of search', () => {
+  const { discoverSources } = loadTs(path.join(ROOT, 'src/main/nativeMemory/sources.ts'));
+  const root = path.join(JAIL, `disc-${++n}`);
+  fs.mkdirSync(path.join(root, 'agents', 'a2'), { recursive: true });
+  for (const f of ['memory.md', 'memory-archive-2026-09.md', 'notes.md']) fs.writeFileSync(path.join(root, 'agents', 'a2', f), 'x');
+  const opts = { claimLedger: 'reader', implemented: 'writer' };
+  const plain = discoverSources(root, undefined, opts).eligible.map((e) => e.path);
+  assert.ok(plain.includes('agents/a2/memory.md'), 'no ledger, no anchor: the markdown is a source');
+  const anchored = discoverSources(root, undefined, { ...opts, anchored: ['a2'] }).eligible;
+  assert.deepEqual(anchored.filter((e) => /memory(-archive-.*)?\.md$/.test(e.path)), [], 'anchored: memory.md and the archive stay out');
+  assert.ok(anchored.some((e) => e.kind === 'claims' && e.wing === 'a2'), 'and it is still a claims source');
+  assert.ok(anchored.some((e) => e.path === 'agents/a2/notes.md'), 'other files untouched');
+  const shadow = discoverSources(root, undefined, { claimLedger: 'shadow', implemented: 'writer', anchored: ['a2'] }).eligible.map((e) => e.path);
+  assert.ok(shadow.includes('agents/a2/memory.md'), 'at shadow the anchor changes nothing');
+});
+
+test('Jim A-3: anchors are keyed by hive: two hives in one user-data with the same agent id never read each other', async () => {
+  const ud = path.join(JAIL, `shared-ud-${++n}`);
+  const anchors = new FileHeadAnchorStore(path.join(ud, HEAD_ANCHOR_FILE));
+  const keys = new SandboxKeyProvider();
+  const mk = (root) => { fs.mkdirSync(path.join(root, 'agents'), { recursive: true }); const alerts = []; const s = new ClaimStore({ hiveRoot: root, keys, keyRecord: new FileLedgerKeyRecord(path.join(ud, KEY_RECORD_FILE)), headAnchor: anchors, alert: (r) => alerts.push(r) }); STORES.push(s); return { s, alerts }; };
+  const A = path.join(JAIL, `hiveA-${n}`); const B = path.join(JAIL, `hiveB-${n}`);
+  const a = mk(A); const b = mk(B);
+  for (let i = 0; i < 3; i++) await ok(a.s.appendRecord('andy', note(`a${i}`), 'endpoint'));
+  await ok(b.s.appendRecord('andy', note('b0'), 'endpoint'));
+  a.s.close(); b.s.close();
+  assert.notEqual(anchors.get(A, 'andy').head, anchors.get(B, 'andy').head);
+  const a2 = mk(A); const b2 = mk(B);
+  assert.equal(a2.s.readLedger('andy').chain, 'ok');
+  assert.equal(b2.s.readLedger('andy').chain, 'ok');
+  assert.deepEqual([...a2.alerts, ...b2.alerts], []);
+  assert.deepEqual(anchors.agents(A), ['andy']);
+  assert.equal(anchors.get(path.join(JAIL, 'hiveC'), 'andy'), null);
+});
+
+test('Jim A-3: the app wiring pins: the anchor file in user-data, the anchored agents to the worker and the index sync, the checks at start, worker start and periodically', () => {
+  assert.equal(HEAD_ANCHOR_FILE, 'claims-heads.json');
+  const idx = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(idx, /headAnchor: new FileHeadAnchorStore\(join\(app\.getPath\('userData'\), HEAD_ANCHOR_FILE\)\),/, 'in user-data, beside the key record');
+  assert.match(idx, /anchoredAgents: \(\) => claimsEndpoint\(\)\?\.store\.anchoredAgents\(\) \?\? \[\],/, 'the worker is told the anchored agents');
+  assert.match(idx, /return \[\.\.\.new Set\(\[\.\.\.withSegments, \.\.\.store\.anchoredAgents\(\)\]\)\];/, 'the index sync covers anchored agents');
+  assert.match(idx, /onWorkerReady: \(\) => \{ claimsAnchorCheck\(\); void claimsIndexSync\(\)\?\.syncAll\(\); \}/, 'a worker (re)start checks');
+  assert.match(idx, /setImmediate\(claimsAnchorCheck\);/, 'claims start checks');
+  assert.match(idx, /setInterval\(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS\)\.unref\?\.\(\);/, 'and periodically');
+  assert.match(idx, /try \{ claimsEndpoint\(\)\?\.store\.checkAnchored\(\); \}/);
+});

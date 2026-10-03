@@ -59,6 +59,8 @@ export interface EngineDeps {
   claimLedger?: unknown;
   /** CLAIM-LEDGER: this build's highest level (tests); default IMPLEMENTED_LEVEL. */
   implementedLevel?: LedgerLevel;
+  /** CLAIMS-HEAD-ANCHOR: the agents main holds an anchor for (A-2; discovery keeps them flagged). */
+  anchored?: readonly string[];
 }
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
@@ -68,6 +70,12 @@ export interface ClaimsSyncArgs { wing: string; path: string; head: string; chun
 
 /** NATIVE-WAKEUP N1 (Jim, god andyn1wait): the bound on a wake-up's wait for its own wing. */
 export const WAKE_WAIT_MS = 5_000;
+
+/** The anchored agents main sent: agent ids only, sorted, deduplicated, bounded. */
+function anchoredList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return [...new Set(v.filter((a): a is string => typeof a === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(a)))].sort().slice(0, 1000);
+}
 
 interface Task { priority: number; seq: number; run: () => Promise<void> }
 
@@ -140,6 +148,7 @@ export class MemoryEngine {
     this.setTimer = d.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
     this.claimLedger = d.claimLedger;
+    this.anchored = anchoredList(d.anchored);
   }
 
   // — the queue —
@@ -305,20 +314,24 @@ export class MemoryEngine {
 
   /** Discovery with the ledger levels (the setting from main, the manifest, this build). */
   private discover(): Discovery {
-    return discoverSources(this.d.hiveRoot, undefined, { claimLedger: this.claimLedger, ...(this.d.implementedLevel ? { implemented: this.d.implementedLevel } : {}) });
+    return discoverSources(this.d.hiveRoot, undefined, { claimLedger: this.claimLedger, anchored: this.anchored, ...(this.d.implementedLevel ? { implemented: this.d.implementedLevel } : {}) });
   }
 
   /** CLAIM-LEDGER: the Settings level as main last told this worker (W3-1: it follows changes). */
   private claimLedger: unknown;
+  /** CLAIMS-HEAD-ANCHOR: the anchored agents as main last told this worker (A-2). */
+  private anchored: string[] = [];
 
   /**
    * W3-1 (Jim): main tells a running worker the current Settings level. A change reconciles at
    * once (a drop to shadow removes the claims and re-ingests memory.md; a raise swaps them), and
    * the call resolves only after that, so the next search already sees the new level.
    */
-  async setClaimLedger(value: unknown): Promise<{ changed: boolean; removed: number; embedded: number }> {
-    const same = this.claimLedger === value;
+  async setClaimLedger(value: unknown, anchored?: unknown): Promise<{ changed: boolean; removed: number; embedded: number }> {
+    const next = anchored === undefined ? this.anchored : anchoredList(anchored);
+    const same = this.claimLedger === value && next.join(',') === this.anchored.join(',');
     this.claimLedger = value;
+    this.anchored = next;
     if (same) return { changed: false, removed: 0, embedded: 0 };
     const r = await this.reconcileNow();
     return { changed: true, removed: r.removed, embedded: r.embedded };

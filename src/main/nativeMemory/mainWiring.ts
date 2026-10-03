@@ -48,6 +48,8 @@ export interface WiringDeps {
   claims?: () => ClaimsEndpointDeps | null;
   /** CLAIM-LEDGER W3: the Settings level (config claimLedger), passed to the worker's discovery. */
   claimLedger?: () => unknown;
+  /** CLAIMS-HEAD-ANCHOR (A-2): the agents anchored for this hive, sent with the level. */
+  anchoredAgents?: () => string[];
   /** CLAIM-LEDGER W3: a (re)started worker is ready; main re-sends every flagged agent's claims (G3.3). */
   onWorkerReady?: () => void;
 }
@@ -73,7 +75,7 @@ export class NativeMemoryWiring {
     this.client = new NativeMemoryClient({
       fork: () => d.fork(d.workerEntry),
       // The config is read at fork only: the level it carries is what a new worker knows (W3-1).
-      config: () => { const c = this.workerConfig(); if (c) this.sentLedger = { v: c.claimLedger }; return c; },
+      config: () => { const c = this.workerConfig(); if (c) this.sentLedger = { v: c.claimLedger, anchored: (c.anchored ?? []).join(',') }; return c; },
       log: d.log, onReady: () => d.onWorkerReady?.()
     });
   }
@@ -106,7 +108,7 @@ export class NativeMemoryWiring {
     if (!vecPath) return null;
     const modelDir = join(this.d.resourcesDir, 'models', m.model.dir);
     if (!existsSync(vecPath) || !existsSync(join(modelDir, 'onnx', 'model.onnx'))) return null;
-    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256, claimLedger: this.d.claimLedger?.() };
+    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256, claimLedger: this.d.claimLedger?.(), anchored: this.anchored() };
   }
 
   /** The current hive's index file (reset / home change delete it, after shutdown()). */
@@ -218,7 +220,8 @@ export class NativeMemoryWiring {
   }
 
   /** The Settings level a running worker was last told (null: not forked, or not told yet). */
-  private sentLedger: { v: unknown } | null = null;
+  private sentLedger: { v: unknown; anchored: string } | null = null;
+  private anchored(): string[] { try { return [...(this.d.anchoredAgents?.() ?? [])].sort(); } catch { return []; } }
 
   /**
    * W3-1 (Jim): a running worker follows the CURRENT Settings level. Before any request, a changed
@@ -236,8 +239,11 @@ export class NativeMemoryWiring {
   private pushClaimLedger(): Promise<void> | null {
     if (!this.d.claimLedger || !this.client.forked) return null;
     const v = this.d.claimLedger();
-    if (this.sentLedger && this.sentLedger.v === v) return null;
-    return this.client.request('claim-ledger', { value: v as never }, 300_000).then((r) => { if (r.ok) this.sentLedger = { v }; });
+    // A-2: the anchored agents travel with the level (a new anchor keeps that agent flagged).
+    const anchored = this.anchored();
+    const key = anchored.join(',');
+    if (this.sentLedger && this.sentLedger.v === v && this.sentLedger.anchored === key) return null;
+    return this.client.request('claim-ledger', { value: v as never, anchored: anchored as never }, 300_000).then((r) => { if (r.ok) this.sentLedger = { v, anchored: key }; });
   }
 
   /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */

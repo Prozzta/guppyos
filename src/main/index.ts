@@ -1228,7 +1228,14 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
       ruleConfig: () => ({ r4: false }),
       level: claimLevel,
-      agents: () => { const root = hive.root(); if (!root) return []; try { return readdirSync(join(root, 'agents')).filter((a) => (claimsEndpoint() as ClaimsEndpointDeps).store.segments(a).length > 0); } catch { return []; } },
+      // Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts).
+      agents: () => {
+        const root = hive.root(); if (!root) return [];
+        const store = (claimsEndpoint() as ClaimsEndpointDeps).store;
+        let withSegments: string[] = [];
+        try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
+        return [...new Set([...withSegments, ...store.anchoredAgents()])];
+      },
       send: (args) => nativeMemory.syncClaims(args),
       log: (row) => hive.appendLog(row),
     });
@@ -1271,9 +1278,19 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         },
       }),
     };
+    // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
+    setImmediate(claimsAnchorCheck);
   }
   return { store: claimStore.store, level: claimLevel };
 }
+/** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
+ *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
+const CLAIMS_ANCHOR_CHECK_MS = 5 * 60_000;
+function claimsAnchorCheck(): void {
+  if (!hive.root()) return;
+  try { claimsEndpoint()?.store.checkAnchored(); } catch (e) { hive.appendLog({ kind: 'claims-anchor-check-failed', error: String(e).slice(0, 160) }); }
+}
+setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
@@ -1293,7 +1310,8 @@ const nativeMemory = new NativeMemoryWiring({
   },
   claims: claimsEndpoint,
   claimLedger: () => readConfig().claimLedger,
-  onWorkerReady: () => { void claimsIndexSync()?.syncAll(); }
+  anchoredAgents: () => claimsEndpoint()?.store.anchoredAgents() ?? [],
+  onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); }
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here

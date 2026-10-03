@@ -99,6 +99,8 @@ export class FileLedgerKeyRecord implements LedgerKeyRecord {
 export interface HeadAnchorStore {
   get(hiveRoot: string, agentId: string): { head: string; lastId: string } | null;
   set(hiveRoot: string, agentId: string, a: { head: string; lastId: string }): void;
+  /** Every agent anchored for this hive (Jim A-2: main checks each, even with no segment left). */
+  agents(hiveRoot: string): string[];
 }
 
 export const HEAD_ANCHOR_FILE = 'claims-heads.json';
@@ -115,6 +117,10 @@ export class FileHeadAnchorStore implements HeadAnchorStore {
   get(hiveRoot: string, agentId: string): { head: string; lastId: string } | null {
     const e = this.read().hives[hiveIdOf(hiveRoot)]?.[agentId];
     return e && typeof e.head === 'string' ? { head: e.head, lastId: String(e.lastId ?? '') } : null;
+  }
+  agents(hiveRoot: string): string[] {
+    const h = this.read().hives[hiveIdOf(hiveRoot)] ?? {};
+    return Object.keys(h).filter((a) => typeof h[a]?.head === 'string' && h[a].head !== '');
   }
   set(hiveRoot: string, agentId: string, a: { head: string; lastId: string }): void {
     const j = this.read();
