@@ -7,6 +7,7 @@ import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync } from './claims/indexSync';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
+import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
@@ -1322,7 +1323,7 @@ hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // CLAIM-LEDGER W4: rebuild from the verified ledger at every readable boundary. The live view is
 // never persisted; only its frozen receipt is append-only on main.
 let claimsCountTokens: ((text: string) => number) | null = null;
-const claimWorkingSetForAgent = (agentId: string): string | null => {
+const claimWorkingSetForAgent = async (agentId: string): Promise<string | null> => {
   const endpoint = claimsEndpoint();
   const root = hive.root();
   if (!endpoint || !root) return null;
@@ -1332,9 +1333,10 @@ const claimWorkingSetForAgent = (agentId: string): string | null => {
   const records = read.records;
   const registry = loadRegistry(root);
   const state = deriveClaims(records, registry, { r4: false });
+  const agentCwd = hive.registry().agents[agentId]?.cwd || root;
+  const worldSnapshot = await buildClaimsWorldSnapshot(records, state, agentCwd);
   const tasks = (hive.tasks() as { tasks?: Array<{ id: string; status: string; result?: string }> }).tasks ?? [];
   const byTask = new Map(tasks.map((t) => [t.id, t]));
-  const agentCwd = hive.registry().agents[agentId]?.cwd || root;
   let usage: UsageRec[] = [];
   try { usage = readFileSync(endpoint.store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as UsageRec]; } catch { return []; } }); } catch { /* no usage yet */ }
   const cardOutcomes: Record<string, 'helped' | 'hurt'> = {};
@@ -1347,14 +1349,11 @@ const claimWorkingSetForAgent = (agentId: string): string | null => {
     now: new Date().toISOString(),
     taskStatus: (id: string) => byTask.get(id)?.status ?? null,
     fileExists: (p: string) => existsSync(resolve(agentCwd, p)),
-    // These hooks are synchronous by contract. Avoid blocking the main thread for git; until an
-    // asynchronous world snapshot is available, unresolved commit refs fail closed and file
-    // freshness uses the current filesystem mtime.
-    commitExists: (_sha: string) => false,
+    // Async git evidence is collected above; callback lookups stay synchronous as W2 requires.
+    // Unknown results are neutral: they must never create a stale or changed-since flag.
+    commitExists: (sha: string) => worldSnapshot.commits.get(sha) ?? true,
     fileChangedSince: (p: string, since: string) => {
-      const sinceMs = Date.parse(since);
-      if (!Number.isFinite(sinceMs)) return false;
-      try { return statSync(resolve(agentCwd, p)).mtimeMs > sinceMs; } catch { return false; }
+      return worldSnapshot.changedFiles.get(`${p}\0${since}`) ?? false;
     },
     cardOutcomes,
   };

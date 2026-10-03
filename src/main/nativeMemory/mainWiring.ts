@@ -68,7 +68,7 @@ export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'command
 export class NativeMemoryWiring {
   readonly tokens = new MemoryTokens();
   readonly client: NativeMemoryClient;
-  private claimWakeup?: (agentId: string) => string | null;
+  private claimWakeup?: (agentId: string) => string | null | Promise<string | null>;
   private manifest: RuntimeManifest | null = null;
   private loggedUnavailable = new Set<MemoryUnavailable>();
 
@@ -82,7 +82,7 @@ export class NativeMemoryWiring {
   }
 
   /** Main-owned W4 view appended to the existing wake-up response, beside the memory resolver. */
-  setClaimWakeupProvider(fn: ((agentId: string) => string | null) | undefined): void { this.claimWakeup = fn; }
+  setClaimWakeupProvider(fn: ((agentId: string) => string | null | Promise<string | null>) | undefined): void { this.claimWakeup = fn; }
 
   private runtimeManifest(): RuntimeManifest | null {
     if (this.manifest) return this.manifest;
@@ -204,7 +204,7 @@ export class NativeMemoryWiring {
     const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
     let text = r.text;
     if (cmd === 'wake-up' && r.ok) {
-      try { const claims = this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
+      try { const claims = await this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
     }
     return { status: 200, body: { exit: r.exit, text, json: r.json, error: r.error } };
   }

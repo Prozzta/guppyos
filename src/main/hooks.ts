@@ -323,7 +323,8 @@ export class HookServer {
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
   /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
-  private claimWorkingSet?: (agentId: string) => string | null;
+  private claimWorkingSet?: (agentId: string) => string | null | Promise<string | null>;
+  private preparedClaimWorkingSets = new Map<string, string | null>();
   /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
    *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
   private readonly runningTools = new Map<string, RunningTool[]>();
@@ -351,7 +352,7 @@ export class HookServer {
     this.onWakeIncarnation = fn;
   }
 
-  setClaimWorkingSetProvider(fn: ((agentId: string) => string | null) | undefined): void {
+  setClaimWorkingSetProvider(fn: ((agentId: string) => string | null | Promise<string | null>) | undefined): void {
     this.claimWorkingSet = fn;
   }
 
@@ -448,9 +449,11 @@ export class HookServer {
         delete payload.shim_elapsed_ms;
         let res: unknown = {};
         let claims: MailClaim[] = [];
-        try { res = this.handle(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
-        this.watchMailFlush(conn, claims, receivedAt - shimMs);
-        conn.end(JSON.stringify(res ?? {}));
+        void (async () => {
+          try { res = await this.handleWithClaimContext(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
+          this.watchMailFlush(conn, claims, receivedAt - shimMs);
+          conn.end(JSON.stringify(res ?? {}));
+        })();
       });
       conn.on('error', () => { /* shim hung up — ignore */ });
     });
@@ -546,7 +549,7 @@ export class HookServer {
       if (size > MEMORY_HTTP_BODY_MAX) { tooBig = true; reply(413, {}); req.resume(); return; }
       chunks.push(d);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (tooBig) return;
       let body: unknown = null;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { body = null; }
@@ -700,7 +703,7 @@ export class HookServer {
       }
       chunks.push(d);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (tooBig) return;
       if (route === 'mcp') {
         void this.onMcp(agentId, expected, Buffer.concat(chunks).toString('utf8'), res, receivedAt);
@@ -717,13 +720,13 @@ export class HookServer {
         // AV R1: the Claude status line (claude-status.sh). Handled as the Status event the
         // command shim sent; the reply is the gauge TEXT the script prints into the TUI.
         payload.hook_event_name = 'Status';
-        try { this.handle(this.stampArrival(payload as HookPayload, 'http')); } catch { /* never break a status tick */ }
+        try { await this.handleWithClaimContext(this.stampArrival(payload as HookPayload, 'http')); } catch { /* never break a status tick */ }
         if (!res.headersSent) { res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end(statusGauge(payload)); }
         return;
       }
       let out: unknown = {};
       let claims: MailClaim[] = [];
-      try { out = this.handle(this.stampArrival(payload as HookPayload, 'http')); claims = this.takeMailClaims(); } catch { out = {}; }
+      try { out = await this.handleWithClaimContext(this.stampArrival(payload as HookPayload, 'http')); claims = this.takeMailClaims(); } catch { out = {}; }
       this.watchMailFlush(res, claims, receivedAt);
       reply(200, out);
     });
@@ -826,7 +829,7 @@ export class HookServer {
     if (threadId && own && threadId !== own) p.provider_agent_id = threadId;
     let out: unknown = {};
     let claims: MailClaim[] = [];
-    try { out = this.handle(this.stampArrival(p, 'mcp')); claims = this.takeMailClaims(); } catch { out = {}; }
+    try { out = await this.handleWithClaimContext(this.stampArrival(p, 'mcp')); claims = this.takeMailClaims(); } catch { out = {}; }
     return { result: out ?? {}, claims };
   }
 
@@ -840,12 +843,12 @@ export class HookServer {
     try {
       if (f.kind === 'hook') {
         if (!f.agentId) return;   // a user's own AGY session: not ours (the shim no-ops too)
-        this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
+        void this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
         return;
       }
       const owner = this.hive.agyStatuslineOwnerToken() ?? null;
       if (!owner || f.token !== owner || !f.bodyOk) return;
-      this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
+      void this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
     } catch { /* telemetry must never break the pipe */ }
   }
 
@@ -1793,6 +1796,16 @@ export class HookServer {
     } catch { /* best effort */ }
   }
 
+  private async handleWithClaimContext(p: HookPayload): Promise<unknown> {
+    const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
+    if (!fromSubagent && (p.hook_event_name === 'SessionStart' || p.hook_event_name === 'UserPromptSubmit') && p.agent_id && p.transport !== 'pipe-oneway') {
+      let claimWorkingSet: string | null = null;
+      try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id) ?? null; } catch { claimWorkingSet = null; }
+      this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
+    }
+    return this.handle(p);
+  }
+
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
@@ -2137,9 +2150,17 @@ export class HookServer {
       : null;
     // CLAIM-LEDGER G4.4: rebuild the view from the verified ledger at each readable boundary.
     // A compact SessionStart is included, so this survives context compaction without persistence.
-    let claimWorkingSet: string | null = null;
-    if ((event === 'SessionStart' || event === 'UserPromptSubmit') && agentId && !fromSubagent && p.transport !== 'pipe-oneway') {
-      try { claimWorkingSet = this.claimWorkingSet?.(agentId) ?? null; } catch { claimWorkingSet = null; }
+    const hasPreparedClaimWorkingSet = !!agentId && this.preparedClaimWorkingSets.has(agentId);
+    let claimWorkingSet = !fromSubagent && hasPreparedClaimWorkingSet && agentId ? this.preparedClaimWorkingSets.get(agentId) ?? null : null;
+    if (agentId && hasPreparedClaimWorkingSet) this.preparedClaimWorkingSets.delete(agentId);
+    // Keep the synchronous test/internal surface compatible with synchronous providers; live
+    // async providers are always awaited by handleWithClaimContext before reaching this method.
+    if (!fromSubagent && !hasPreparedClaimWorkingSet && (event === 'SessionStart' || event === 'UserPromptSubmit') && agentId) {
+      try {
+        const value = this.claimWorkingSet?.(agentId);
+        if (typeof value === 'string') claimWorkingSet = value;
+        else if (value && typeof (value as Promise<unknown>).catch === 'function') void (value as Promise<unknown>).catch(() => {});
+      } catch { /* optional working set */ }
     }
     // GOD-STARTUP-TOKENS R1: a god that started FRESH (instead of resuming a costly session) gets its
     // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
