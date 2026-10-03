@@ -49,7 +49,7 @@ waiting for a test slot are told when it is theirs.** Rollback: 1.1.80 (reinstal
   - An agent can end a command with `#full` to see all of its output.
   - Settings key `toolOutputCap` (0 turns it off; an agent's own value wins).
 - **One command for an agent's bookkeeping.** Updating a task card, sending a message and noting
-  something in memory used to take two to four steps, and each step re-read the whole
+  something in memory often took more than one step, and each step re-read the whole
   conversation. The new `ledger` command does all three in one step. The app checks everything
   before writing anything, and running the same step twice never does it twice. The message is
   given in a file or piped in, never typed into the command line, so text in a message can no
