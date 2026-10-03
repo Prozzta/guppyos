@@ -65,7 +65,7 @@ import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDi
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
-import { HeavyJobLock, heavyLimit, probeProcesses } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
 import { CapacityStore, capacityStorePath } from './capacityPersistence';
@@ -1077,9 +1077,19 @@ const heavyLock = new HeavyJobLock({
   limit: () => heavyLimit(readConfig().heavyJobsAtOnce),
   roots: () => ptyManager.list().flatMap((s) => { const a = ptyToAgent.get(s.id); return a && s.pid > 0 ? [{ agentId: a, pid: s.pid }] : []; }),
   probe: probeProcesses,
-  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
+  alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
+  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until)
 });
 hookServer.setHeavyLock(heavyLock);
+
+/** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
+function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
+  const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a
 //    provider-confirmed turn (our own unconfirmed nudge is a new turn, not a live one);
@@ -2310,7 +2320,7 @@ function writeFleetSnapshot(): void {
       });
     // HEAVY-JOB-SERIALIZE: who holds the heavy-job slots (god reads fleet.json every standup).
     // ZERO-TOKEN-LIVENESS: the current liveness-v1 records (every LIVE agent, recent non-LIVE ones).
-    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot() }, liveness: agentLiveness.fleetRecords(now) });
+    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now) });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }

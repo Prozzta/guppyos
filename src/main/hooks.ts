@@ -14,10 +14,10 @@ import { toolEnded, toolStarted, type RunningTool } from '../shared/activityView
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
+import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import type { ControlRegistry } from './control';
 import { DEV_HIDDEN } from './devIsolation';
@@ -1540,6 +1540,18 @@ export class HookServer {
     return `cmd:${(commandFromToolInput(p.tool_input) ?? '').slice(0, 500)}`;
   }
 
+  /** HEAVY-LOCK-SCRIPT-WRAPPER: the classifier may read a script the call runs (`bash suite.sh`),
+   *  resolved against the hook's cwd, Git Bash `/c/...` paths included, size-capped by heavyJob. */
+  static heavyScriptCtx(cwd: unknown): ClassifyCtx {
+    return scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
+      const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+      try {
+        const st = statSync(path);
+        return st.isFile() ? { size: st.size, text: () => readFileSync(path, 'utf8') } : null;
+      } catch { return null; }
+    });
+  }
+
   /** JOB-ENV (SessionStart): the hook's own id (from the agent's settings file) and its process
    *  env disagree: the session runs in a Claude Code daemon started by another agent, so
    *  anything env-based in it (OTel agent.id, the hive CLIs) speaks as that agent. The hook is
@@ -1781,7 +1793,8 @@ export class HookServer {
     if (event === 'PreToolUse' && agentId && this.heavyLock) {
       // Jim N1: a DEGRADED Codex hook (rebuilt from the rollout tail) may carry no tool input:
       // it cannot be classified, so it is allowed and logged.
-      let cls = classifyHeavy(p.tool_name, p.tool_input);
+      const scripts = HookServer.heavyScriptCtx(p.cwd);
+      let cls = classifyHeavy(p.tool_name, p.tool_input, scripts);
       let command = commandFromToolInput(p.tool_input) ?? '';
       let callId = HookServer.heavyCallId(p);
       if (p.payload_degraded === true && commandFromToolInput(p.tool_input) === null) {
@@ -1789,7 +1802,7 @@ export class HookServer {
         // one takes the slot); only a call with nothing readable is still let through unclassified.
         const hints = Array.isArray(p.codex_commands) ? p.codex_commands.filter((c): c is string => typeof c === 'string') : [];
         for (const c of hints) {
-          const k = classifyCommand(c);
+          const k = classifyCommand(c, 0, scripts);
           if (k.heavy) { cls = k; command = c; callId = `cmd:${c.slice(0, 500)}`; break; }
         }
         try { this.hive.appendLog({ kind: 'heavy-lock', action: 'degraded', agentId, tool: p.tool_name ?? null, hinted: hints.length, heavy: cls.heavy }); } catch { /* best effort */ }
@@ -1807,8 +1820,10 @@ export class HookServer {
       }
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
-    // its job is done (a backgrounded one, or a missed Post, is left to the watcher).
-    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input).heavy) {
+    // its job is done (a backgrounded one, or a missed Post, is left to the watcher). Andy N1 (1.1.81):
+    // freed by the call id the PreToolUse took, NOT by classifying again (a script that changed or
+    // was deleted during the run must not leave the slot held); callDone ignores an unheld call.
+    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
     }
 

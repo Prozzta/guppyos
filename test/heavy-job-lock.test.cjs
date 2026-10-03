@@ -138,8 +138,9 @@ test('N=1: the first heavy job takes the slot; another agent is DENIED naming th
   const d = x.l.acquire('jim', H, 'npm ci', 'j1', false);
   assert.equal(d.allow, false);
   assert.match(d.reason, /^Denied by HEAVY-JOB-LOCK: the machine allows 1 heavy job at once and it is held by andy \(suite: node --test test\/\*\.test\.cjs, since \d\d:\d\d:\d\dZ\)/);
-  // Jim N3: it says what to do instead, so agents do not retry variants.
-  assert.match(d.reason, /Do not retry this or a variant of it now: carry on with light work \(single test files, reads, edits are not limited\) and run it later, once a slot is free .* or ask god to schedule it\./);
+  // Jim N3: it says what to do instead, so agents do not retry variants. HEAVY-LOCK-SELF-WAIT: and
+  // that they are QUEUED and will be told, so they never poll.
+  assert.match(d.reason, /You are QUEUED \(position 1\): when a slot frees it is reserved for you for 5 min and you are told "HEAVY SLOT FREE"\. Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work \(single test files, reads, edits are not limited\) until you are told\./);
   const denyRow = x.logs.find((r) => r.action === 'deny');
   assert.equal(denyRow.command, undefined, 'the denied command itself is not logged');
   assert.equal(denyRow.heavyKind, 'suite');
@@ -150,7 +151,8 @@ test('N=1: the first heavy job takes the slot; another agent is DENIED naming th
   x.l.callDone('andy', 'c2');
   assert.equal(x.l.snapshot().length, 0, 'freed');
   assert.equal(x.l.acquire('jim', H, 'npm ci', 'j2', false).allow, true);
-  assert.deepEqual(x.logs.map((r) => r.action), ['acquire', 'deny', 'reenter', 'release', 'acquire']);
+  // HEAVY-LOCK-SELF-WAIT: the freed slot is RESERVED for the queued jim before he takes it.
+  assert.deepEqual(x.logs.map((r) => r.action), ['acquire', 'deny', 'reenter', 'release', 'reserve', 'acquire']);
   assert.equal(x.logs.find((r) => r.action === 'release').reason, 'posttool');
 });
 
@@ -286,7 +288,7 @@ test('WIRING: index.ts builds the lock from the LIVE setting, hands it to the Ho
   assert.match(idx, /probe: probeProcesses,/);
   assert.match(idx, /hookServer\.setHeavyLock\(heavyLock\);/);
   assert.match(idx, /if \(!\[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\)\) \{ try \{ heavyLock\.agentGone\(agentId\); \}/);
-  assert.match(idx, /heavyLock: \{ limit: heavyLimit\(readConfig\(\)\.heavyJobsAtOnce\), holders: heavyLock\.snapshot\(\) \}/);
+  assert.match(idx, /heavyLock: \{ limit: heavyLimit\(readConfig\(\)\.heavyJobsAtOnce\), holders: heavyLock\.snapshot\(\), \.\.\.heavyLock\.queueSnapshot\(\) \}/);
 });
 
 test('CONFIG + SETTINGS: default 1; the Autonomy & Budgets section offers Off and N, saved through updateConfig', () => {
