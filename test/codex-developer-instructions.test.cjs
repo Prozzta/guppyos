@@ -55,6 +55,13 @@ test('CODEX spawns without a first user turn: NO positional protocol; the protoc
   assert.ok(cfg.hooks && cfg.hooks.Stop, 'the lifecycle hooks are still wired');
 });
 
+test('CODEX spawn gets the per-agent HIVE_LEDGER_URL from its hook-broker capability URL', async (t) => {
+  const s = sandbox(t, SEED);
+  s.hive.setHookBroker({ urlFor: (id) => `http://127.0.0.1:43123/hook/${id}-secret`, revoke: () => {} });
+  const inj = await s.hive.ensureAgent({ id: 'ledger-codex', name: 'Dwight', provider: 'codex', cwd: s.home });
+  assert.equal(inj.env.HIVE_LEDGER_URL, 'http://127.0.0.1:43123/ledger/ledger-codex-secret');
+});
+
 test('CODEX: a single-line top-level developer_instructions in the user seed is REPLACED (one key, no duplicate), bare or QUOTED (N3)', async (t) => {
   for (const key of ['developer_instructions', '"developer_instructions"', "'developer_instructions'"]) {
     const s = sandbox(t, `${key} = "be terse"\nmodel = "m"\n\n[mcp_servers.x]\ncommand = "x"\n`);

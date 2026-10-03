@@ -1359,6 +1359,10 @@ export class HiveManager {
       const sock = this.sockPath();
       if (desc && sock) {
         env.HIVE_SOCK = sock;
+        // READS-181: Codex lifecycle hooks use the loopback broker too. Give its
+        // ledger helper the same per-spawn capability URL that Claude receives.
+        const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
+        if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
         try {
           if (desc.kind === 'hooks') {
             // The agy and grok bridges write GLOBAL config (~/.gemini/…/hooks.json,
