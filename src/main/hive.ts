@@ -536,7 +536,8 @@ const NODE_ROUTER_RUNTIME: RouterRuntime = {
  *  harness's own record (state/task-meta.json): the newest `to:'done'` transition, or the card's
  *  `statusSince` when it was created done; a time the guard only BOUNDED (found at start, not
  *  exact) is late by an unknown amount, so it does not count. Then the card's `doneAt`, then the
- *  newest stamp in its result (appendResult writes `[<ISO>] …`). A card not done now never counts. */
+ *  earliest stamp in its result (appendResult writes `[<ISO>] …`). A card not done now never
+ *  counts. Every fallback must be a LOWER bound: a late time closes asks that came after the done. */
 export function cardDoneAt(card: unknown, meta?: CardMeta | null): number | null {
   const c = card as { status?: unknown; doneAt?: unknown; result?: unknown } | null;
   if (!c || c.status !== 'done') return null;
@@ -548,9 +549,11 @@ export function cardDoneAt(card: unknown, meta?: CardMeta | null): number | null
   }
   if (typeof c.doneAt === 'string' && Number.isFinite(Date.parse(c.doneAt))) return Date.parse(c.doneAt);
   if (typeof c.doneAt === 'number' && Number.isFinite(c.doneAt)) return c.doneAt;
+  // The EARLIEST stamp: notes appended after the done (a later "shipped") would move a newest
+  // stamp past asks that came after the real done (Creed). Earliest can only close fewer.
   const stamps = typeof c.result === 'string' ? c.result.match(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g) ?? [] : [];
   const times = stamps.map((s) => Date.parse(s)).filter(Number.isFinite);
-  return times.length ? Math.max(...times) : null;
+  return times.length ? Math.min(...times) : null;
 }
 
 export class HiveManager {

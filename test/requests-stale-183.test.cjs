@@ -64,9 +64,13 @@ test('card rule: every named card exists and became done AFTER the ask; no done 
   assert.deepEqual(reasons(staleObligations(docs, cards, [])), { a: 'auto:card-done:ALPHA-1', c: 'auto:card-done:GAMMA-3,ALPHA-1' });
 });
 
-test('cardDoneAt: doneAt, else the newest stamp in the result, else null; never for a card not done', () => {
+test('cardDoneAt: doneAt, else the EARLIEST stamp in the result (a lower bound), else null; never for a card not done', () => {
   assert.equal(cardDoneAt({ status: 'done', doneAt: '2026-10-03T10:00:00.000Z', result: '[2026-10-03T11:00:00.000Z] x' }), Date.parse('2026-10-03T10:00:00.000Z'));
-  assert.equal(cardDoneAt({ status: 'done', result: '\n[2026-10-02T09:00:00.000Z] built\n[2026-10-03T10:50:40.697Z] verified' }), Date.parse('2026-10-03T10:50:40.697Z'));
+  assert.equal(cardDoneAt({ status: 'done', result: '\n[2026-10-02T09:00:00.000Z] built\n[2026-10-03T10:50:40.697Z] verified' }), Date.parse('2026-10-02T09:00:00.000Z'));
+  // Creed's probe: Built 08:00Z, Shipped/closed 10:00Z appended later; a follow-up at 09:00Z stays open.
+  const rebrand = { status: 'done', result: '[2026-10-03T08:00:00.000Z] Built\n[2026-10-03T10:00:00.000Z] Shipped; closed' };
+  const follow = { andy: doc('andy', entry({ id: 'pin', from: 'god', subject: 'REBRAND-GUPPY: taskbar pin still opens old exe', at: Date.parse('2026-10-03T09:00:00.000Z') })) };
+  assert.deepEqual(staleObligations(follow, new Map([['REBRAND-GUPPY', { status: 'done', doneAt: cardDoneAt(rebrand) }]]), []), []);
   assert.equal(cardDoneAt({ status: 'done', result: 'shipped, no stamp' }), null);
   assert.equal(cardDoneAt({ status: 'done' }), null);
   assert.equal(cardDoneAt({ status: 'doing', doneAt: '2026-10-03T10:00:00.000Z' }), null);
@@ -83,6 +87,8 @@ test('cardDoneAt: the harness task-meta history comes first; reopened-then-done 
   // A transition the guard found at start is only bounded: fall back to the card's own fields.
   assert.equal(cardDoneAt(card, meta({ statusSince: 900, statusSinceExact: false, history: [{ at: 900, from: 'doing', to: 'done', by: 'ledger' }] })), Date.parse(card.doneAt));
   assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 900, statusSinceExact: false, history: [{ at: 900, from: 'doing', to: 'done', by: 'ledger' }] })), null);
+  // The sidecar lags the ledger (card done again, meta still on the reopen): its old done is not used.
+  assert.equal(cardDoneAt({ status: 'done' }, meta({ status: 'doing', history: reopened.history.slice(0, 2) })), null);
   // Created done while watched: statusSince is exact. Seen at install (inexact): no proof from meta.
   assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 450 })), 450);
   assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 450, statusSinceExact: false })), null);
