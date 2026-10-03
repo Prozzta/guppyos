@@ -91,8 +91,8 @@ export interface ClaimDeliveryDeps {
    * (ReconcileApi, n <= 3). They render ONCE, as the working set's T1 ⚠ markers (the 0.10 share),
    * inside WORKING_SET_MAX_CHARS (the 9,500 joint budget). None until W5 is wired.
    */
-  reconcileCandidates?: (agentId: string, day: string) => ReconcileItem[];
-  commitReconcile?: (agentId: string, day: string, renderedIds: string[]) => void;
+  reconcileCandidates?: (agentId: string, day: string, source?: string) => ReconcileItem[];
+  commitReconcile?: (agentId: string, day: string, renderedIds: string[], source?: string) => void;
   /** W5 (Dwight, onTurnCompleted): told at each completed turn (the Stop hook). No-op until wired. */
   onTurnCompleted?: (agentId: string) => void;
   git?: GitRunner;
@@ -106,7 +106,7 @@ export interface ClaimDeliveryDeps {
 
 export interface ClaimDelivery {
   /** The working set text for this agent now, or null (level off/shadow, no tokenizer, no hive). */
-  workingSet(agentId: string): Promise<string | null>;
+  workingSet(agentId: string, source?: string): Promise<string | null>;
   /** The completed-turn boundary (HookServer's Stop): W5's reconcile lease hook. */
   turnCompleted(agentId: string): void;
 }
@@ -133,7 +133,7 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
   };
 
   return {
-    async workingSet(agentId) {
+    async workingSet(agentId, source) {
       const root = d.hiveRoot();
       if (!root) return null;
       const level = d.level(agentId);
@@ -154,7 +154,7 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       const day = now().toISOString().slice(0, 10);
       // Peek has no lease/charge/log side effects. T1 decides the set committed below.
       let items: ReconcileItem[] = [];
-      try { items = (d.reconcileCandidates?.(agentId, day) ?? []).slice(0, 3); } catch { items = []; }
+      try { items = (d.reconcileCandidates?.(agentId, day, source) ?? []).slice(0, 3); } catch { items = []; }
       const { buildWorkingSetDetailed } = createClaimViews(records, countTokens, items);
       const warning = readOnly ? `\n\n${READ_ONLY_WARNING}` : '';
       const tail = warning;
@@ -180,7 +180,7 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
         const prior = built.droppedReconcileItems.find((drop) => drop.item.itemId === item.itemId);
         d.log?.({ kind: 'claims-reconcile-dropped', agentId, itemId: item.itemId, reason: prior?.reason ?? 'character-cap' });
       }
-      try { d.commitReconcile?.(agentId, day, renderedItems.map((item) => item.itemId)); }
+      try { d.commitReconcile?.(agentId, day, renderedItems.map((item) => item.itemId), source); }
       catch (e) { d.log?.({ kind: 'claims-reconcile-commit-failed', agentId, error: String(e).slice(0, 160) }); }
       // S-3: one receipt per DISTINCT delivered text (B14), on a rotating file.
       const digest = createHash('sha256').update(text).digest('hex');

@@ -1363,13 +1363,13 @@ const claimDelivery = createClaimDelivery({
     } catch { return null; }
   },
   // Peek candidates without side effects; commit only ids confirmed rendered by T1 below.
-  reconcileCandidates: (agentId, day) => {
+  reconcileCandidates: (agentId, day, source) => {
     const root = hive.root(); if (!root) return [];
-    return reconcileApiForHive(root)?.peekForTurn(agentId, day) ?? [];
+    return reconcileApiForHive(root)?.peekForTurn(agentId, day, source) ?? [];
   },
-  commitReconcile: (agentId, day, renderedIds) => {
+  commitReconcile: (agentId, day, renderedIds, source) => {
     const root = hive.root(); if (!root) return;
-    reconcileApiForHive(root)?.commitRendered(agentId, day, renderedIds);
+    reconcileApiForHive(root)?.commitRendered(agentId, day, renderedIds, source);
   },
   onTurnCompleted: (agentId) => {
     const root = hive.root(); if (!root) return;
@@ -1389,7 +1389,7 @@ function reconcileApiForHive(root: string): ReconcileApi | null {
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
   });
 }
-const claimWorkingSetForAgent = (agentId: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId) : Promise.resolve(null));
+const claimWorkingSetForAgent = (agentId: string, source?: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId, source) : Promise.resolve(null));
 hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
 hookServer.setClaimTurnCompletedListener((agentId) => claimDelivery.turnCompleted(agentId));
 nativeMemory.setClaimWakeupProvider(claimWorkingSetForAgent);

@@ -29,11 +29,14 @@ export interface ReconcileApiDeps {
 export class ReconcileApi {
   constructor(private readonly d: ReconcileApiDeps) {}
   /** Side-effect-free delivery peek. Candidates are neither leased nor charged here. */
-  peekForTurn(agentId: string, day: string): ReconcileItem[] {
+  peekForTurn(agentId: string, day: string, source?: string): ReconcileItem[] {
     if (!this.d.isOwner(agentId)) return [];
-    const out: ReconcileItem[] = [];
-    let tokens = 0;
+    if (source === 'startup') this.d.queue.reclaimLeases(agentId);
+    const rerender = source === 'compact' || source === 'resume' ? this.d.queue.leasedItems(agentId, 3) : [];
+    const out: ReconcileItem[] = rerender.slice();
+    let tokens = rerender.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
     for (const item of this.d.queue.peek(agentId, 3)) {
+      if (out.length >= 3) break;
       const n = Math.max(0, this.d.countTokens(reconcilePromptText(item)));
       if (n > 0 && this.d.queue.dailyTokens(day) + tokens + n > 10_000) break;
       out.push(item); tokens += n;
@@ -41,22 +44,34 @@ export class ReconcileApi {
     return out;
   }
   /** Lease and charge only the candidates which the delivery build actually rendered. */
-  commitRendered(agentId: string, day: string, renderedIds: string[]): ReconcileDelivery {
-    if (!this.d.isOwner(agentId) || !renderedIds.length) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
+  commitRendered(agentId: string, day: string, renderedIds: string[], source?: string): ReconcileDelivery {
+    if (!this.d.isOwner(agentId)) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
     const wanted = new Set(renderedIds);
-    const items = this.d.queue.peek(agentId, 3).filter((item) => wanted.has(item.itemId));
+    const existing = this.d.queue.leasedItems(agentId, 3);
+    const rerendered = (source === 'compact' || source === 'resume') ? existing.filter((item) => wanted.has(item.itemId)) : [];
+    const items = [...rerendered, ...this.d.queue.peek(agentId, 3).filter((item) => wanted.has(item.itemId))].slice(0, 3);
+    if (source === 'compact' || source === 'resume') this.d.queue.releaseLeases(agentId, existing.filter((item) => !wanted.has(item.itemId)).map((item) => item.itemId));
     if (!items.length) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
-    const tokens = items.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
-    const turn = this.d.queue.leaseRendered(agentId, day, items.map((item) => item.itemId), tokens);
+    const rerenderTokens = rerendered.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
+    const turn = rerendered[0]?.leaseTurn ?? this.d.queue.leaseRendered(agentId, day,
+      items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId)).map((item) => item.itemId),
+      items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId)).reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0));
     if (!turn) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
+    if (rerenderTokens > 0) {
+      this.d.queue.recordInjectedTokens(day, rerenderTokens);
+      this.d.log({ kind: 'claims-reconcile-rerendered', agentId, turn, day, tokens: rerenderTokens, items: rerendered.map((item) => item.itemId) });
+    }
     const itemIds = items.map((item) => item.itemId);
     const text = items.map(reconcilePromptText).join('\n');
-    if (tokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn, day, tokens, items: itemIds });
+    const tokens = items.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
+    const fresh = items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId));
+    const freshTokens = fresh.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
+    if (freshTokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn, day, tokens: freshTokens, items: fresh.map((item) => item.itemId) });
     return { text, tokens, itemIds, items, turn };
   }
-  reconcileForTurn(agentId: string, day: string): ReconcileDelivery {
-    const items = this.peekForTurn(agentId, day);
-    return this.commitRendered(agentId, day, items.map((item) => item.itemId));
+  reconcileForTurn(agentId: string, day: string, source?: string): ReconcileDelivery {
+    const items = this.peekForTurn(agentId, day, source);
+    return this.commitRendered(agentId, day, items.map((item) => item.itemId), source);
   }
   async onTurnCompleted(agentId: string, turn?: string): Promise<void> {
     if (!this.d.isOwner(agentId)) return;
@@ -162,14 +177,34 @@ export class ReconcileQueue {
     return (this.state.agents[agentId]?.items ?? []).filter((item) => !item.leaseTurn)
       .slice(0, Math.max(0, Math.min(3, Math.floor(limit)))).map((item) => ({ ...item }));
   }
+  /** Items leased to the currently open turn, used only for compact/resume re-render. */
+  leasedItems(agentId: string, limit = 3): ReconcileItem[] {
+    return (this.state.agents[agentId]?.items ?? []).filter((item) => !!item.leaseTurn)
+      .slice(0, Math.max(0, Math.min(3, Math.floor(limit)))).map((item) => ({ ...item }));
+  }
+  /** A fresh startup abandons a prior process's in-flight turn without counting it unanswered. */
+  reclaimLeases(agentId: string): void {
+    const s = this.state.agents[agentId]; if (!s) return;
+    let changed = false;
+    for (const item of s.items) if (item.leaseTurn) { delete item.leaseTurn; delete item.leasedAt; changed = true; }
+    if (changed) this.save();
+  }
+  /** On compact/resume, a leased item omitted by T1 is not unanswered for this turn. */
+  releaseLeases(agentId: string, ids: string[]): void {
+    const wanted = new Set(ids); const s = this.state.agents[agentId]; if (!s || !wanted.size) return;
+    let changed = false;
+    for (const item of s.items) if (wanted.has(item.itemId) && item.leaseTurn) { delete item.leaseTurn; delete item.leasedAt; changed = true; }
+    if (changed) this.save();
+  }
+  /** Re-injected prompts consume context again and are counted even if the fresh-injection cap was hit. */
+  recordInjectedTokens(day: string, tokens: number): boolean { return this.chargeDailyTokens(day, tokens, Number.MAX_SAFE_INTEGER); }
   /** Atomically charge and lease only ids confirmed rendered by delivery. */
   leaseRendered(agentId: string, day: string, ids: string[], tokens: number, cap = 10_000): string | null {
     const s = this.agent(agentId);
     const wanted = new Set(ids);
     const selected = s.items.filter((item) => !item.leaseTurn && wanted.has(item.itemId)).slice(0, 3);
     if (!selected.length || selected.length !== wanted.size || !this.chargeDailyTokens(day, tokens, cap)) return null;
-    s.sequence += 1;
-    const turn = `${agentId}:${s.sequence}`;
+    const turn = s.items.find((item) => !!item.leaseTurn)?.leaseTurn ?? `${agentId}:${++s.sequence}`;
     const leasedAt = this.now().toISOString();
     for (const item of selected) { item.leaseTurn = turn; item.leasedAt = leasedAt; }
     this.save();

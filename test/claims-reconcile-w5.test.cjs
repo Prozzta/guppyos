@@ -134,6 +134,27 @@ test('S1 reconcileApiForHive builds an API and its live-claim state stays isolat
   assert.equal(beta.isLiveClaim('alpha-new'), false);
 });
 
+test('S-b reconcileApiForHive never soft-supersedes a conflict with a non-live loser', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-hivelive-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const records = [
+    { v: 1, t: 'claim', id: 'old', agent: 'alpha', at: '2026-01-01T00:00:00Z', wt: '2026-01-01T00:00:00Z', mac: 'm1', prev: '', kind: 'fact', key: 'fact.name', text: 'old', source: 'self' },
+    { v: 1, t: 'claim', id: 'new', agent: 'alpha', at: '2026-01-02T00:00:00Z', wt: '2026-01-02T00:00:00Z', mac: 'm2', prev: 'm1', kind: 'fact', key: 'fact.name', text: 'new', source: 'self' },
+  ];
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  queue.refresh('alpha', [{ itemId: 'conflict:nonlive-loser', kind: 'conflict', a: 'old', b: 'new', text: 'candidate' }]);
+  let appends = 0;
+  const api = reconcileApiForHive(dir, {
+    endpoint: () => ({ store: { readLedger: () => ({ chain: 'ok', records }), appendSoftSupersede: async () => { appends++; return { ok: true }; } } }),
+    queue: () => queue, countTokens: () => 1, log: () => {}, registry: () => ({ v: 1, namespaces: [{ pattern: 'fact.*', cardinality: 'single' }], keys: {} }), isOwner: () => true,
+  });
+  for (let n = 0; n < 3; n++) {
+    const delivery = api.reconcileForTurn('alpha', '2026-10-04');
+    await api.onTurnCompleted('alpha', delivery.turn);
+  }
+  assert.equal(appends, 0, 'a superseded conflict side cannot be a soft-supersede target');
+  assert.equal(queue.items('alpha').length, 0, 'the answered/non-actionable pair is removed after the third turn');
+});
+
 test('G5.5 daily token accounting prunes entries older than seven days', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const q = new ReconcileQueue(path.join(dir, 'queue.json'));

@@ -323,7 +323,7 @@ export class HookServer {
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
   /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
-  private claimWorkingSet?: (agentId: string) => string | null | Promise<string | null>;
+  private claimWorkingSet?: (agentId: string, source?: string) => string | null | Promise<string | null>;
   private preparedClaimWorkingSets = new Map<string, string | null>();
   /** CLAIM-LEDGER W5 (god): told at each completed turn (Stop), for the reconcile lease. */
   private claimTurnCompleted?: (agentId: string) => void;
@@ -354,7 +354,7 @@ export class HookServer {
     this.onWakeIncarnation = fn;
   }
 
-  setClaimWorkingSetProvider(fn: ((agentId: string) => string | null | Promise<string | null>) | undefined): void {
+  setClaimWorkingSetProvider(fn: ((agentId: string, source?: string) => string | null | Promise<string | null>) | undefined): void {
     this.claimWorkingSet = fn;
   }
 
@@ -1815,7 +1815,7 @@ export class HookServer {
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
     if (!fromSubagent && this.claimWorkingSetEvent(p) && p.agent_id) {
       let claimWorkingSet: string | null = null;
-      try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id) ?? null; } catch { claimWorkingSet = null; }
+      try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id, p.source) ?? null; } catch { claimWorkingSet = null; }
       this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
     }
     return this.handle(p);
@@ -2178,7 +2178,7 @@ export class HookServer {
     // S-5: never for a one-way hook (its reply is not read), as handleWithClaimContext.
     if (!fromSubagent && !hasPreparedClaimWorkingSet && this.claimWorkingSetEvent(p) && agentId) {
       try {
-        const value = this.claimWorkingSet?.(agentId);
+        const value = this.claimWorkingSet?.(agentId, p.source);
         if (typeof value === 'string') claimWorkingSet = value;
         else if (value && typeof (value as Promise<unknown>).catch === 'function') void (value as Promise<unknown>).catch(() => {});
       } catch { /* optional working set */ }

@@ -308,6 +308,89 @@ test('W5 integration: live hook SessionStart injects leased T1 markers; Stop com
   assert.equal(next.items[0]?.leaseTurn, 'a1:2', 'the next turn gets a fresh lease');
 });
 
+test('M2 real hook route: startup reclaims after restart; compact re-renders without a new lease and charges again', async (t) => {
+  const makeScenario = async (label) => {
+    const x = setup();
+    const file = path.join(x.root, 'claims-reconcile-queue.json');
+    const item = { itemId: `r-${label}`, kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: `${label} hook reconcile pair` };
+    let queue = new ReconcileQueue(file); queue.refresh('a1', [item]);
+    const log = []; let tight = false; const count = (text) => tight ? Math.ceil(text.length * 100) : Math.ceil(text.length / 4);
+    let delivery;
+    const buildDelivery = (q) => {
+      const api = new ReconcileApi({ queue: q, countTokens: count, log: (row) => log.push(row), appendSoftSupersede: async () => ({ ok: true }),
+        newestWins: () => null, isLiveClaim: () => true, isOwner: (agentId) => agentId === 'a1' });
+      delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
+        registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
+        countTokens: () => count, git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'), appendReceipt: () => {},
+        log: (row) => log.push(row),
+        reconcileCandidates: (agentId, day, source) => api.peekForTurn(agentId, day, source),
+        commitReconcile: (agentId, day, ids, source) => { api.commitRendered(agentId, day, ids, source); },
+        onTurnCompleted: (agentId) => { void api.onTurnCompleted(agentId); } });
+    };
+    buildDelivery(queue);
+    const hive = new HiveManager(() => x.root, () => true); HIVES.push(hive);
+    await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: x.root });
+    const server = new HookServer(hive, () => null, () => ({ notifications: false }));
+    server.setClaimWorkingSetProvider((agentId, source) => delivery.workingSet(agentId, source));
+    server.setClaimTurnCompletedListener((agentId) => delivery.turnCompleted(agentId));
+    t.after(() => server.stop());
+    return { x, item, log, server, file, setTight: () => { tight = true; }, get queue() { return queue; }, set queue(q) { queue = q; buildDelivery(q); } };
+  };
+
+  const restarted = await makeScenario('restart');
+  const firstStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const firstText = firstStart?.hookSpecificOutput?.additionalContext ?? '';
+  assert.match(firstText, /restart hook reconcile pair/);
+  const oldTurn = restarted.queue.items('a1')[0].leaseTurn;
+  restarted.queue = new ReconcileQueue(restarted.file); // process restart between SessionStart and Stop
+  const secondStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  assert.match(secondStart?.hookSpecificOutput?.additionalContext ?? '', /restart hook reconcile pair/);
+  assert.notEqual(restarted.queue.items('a1')[0].leaseTurn, oldTurn, 'startup reclaims then takes a fresh lease');
+  assert.equal(restarted.queue.items('a1')[0].turnsUnanswered, 0, 'abandoned process turn was not counted');
+  await postLiveHook(restarted.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  assert.equal(restarted.queue.peek('a1')[0].turnsUnanswered, 1, 'Stop counts only the restarted session that showed the prompt');
+
+  const compacted = await makeScenario('compact');
+  const initial = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  assert.match(initial?.hookSpecificOutput?.additionalContext ?? '', /compact hook reconcile pair/);
+  const initialTurn = compacted.queue.items('a1')[0].leaseTurn;
+  const beforeTokens = compacted.queue.dailyTokens('2026-10-03');
+  const rerender = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  assert.match(rerender?.hookSpecificOutput?.additionalContext ?? '', /compact hook reconcile pair/);
+  assert.equal(compacted.queue.items('a1')[0].leaseTurn, initialTurn, 'compact re-render does not lease again');
+  assert.equal(compacted.queue.sequence('a1'), 1, 'compact re-render preserves the open turn sequence');
+  assert.equal(compacted.queue.items('a1')[0].turnsUnanswered, 0);
+  const rerenderLog = compacted.log.find((row) => row.kind === 'claims-reconcile-rerendered');
+  assert.equal(rerenderLog?.tokens, Math.ceil(reconcilePromptText({ ...compacted.item, agent: 'a1', turnsUnanswered: 0 }).length / 4));
+  assert.equal(compacted.queue.dailyTokens('2026-10-03'), beforeTokens + rerenderLog.tokens, 're-injected marker tokens count again');
+  await postLiveHook(compacted.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  assert.equal(compacted.queue.peek('a1')[0].turnsUnanswered, 1, 'one Stop counts one unanswered turn after compact');
+
+  const dropped = await makeScenario('rerender-drop');
+  await postLiveHook(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  assert.ok(dropped.queue.items('a1').length);
+  dropped.setTight();
+  const noRoom = await postLiveHook(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  assert.doesNotMatch(noRoom?.hookSpecificOutput?.additionalContext ?? '', /rerender-drop hook reconcile pair/);
+  assert.ok(dropped.log.some((row) => row.kind === 'claims-reconcile-dropped' && row.itemId === dropped.item.itemId));
+  assert.equal(dropped.queue.items('a1').length, 0, 'a prompt dropped from compact is released, not counted unanswered');
+  await postLiveHook(dropped.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  assert.equal(dropped.queue.peek('a1')[0].turnsUnanswered, 0);
+});
+
+test('S-a rendered reconcile detection uses final text after the emergency line cut', async () => {
+  const x = setup(); let committed;
+  const oversized = { itemId: 'conflict:oversized', kind: 'conflict', a: 'a', b: 'b', text: 'x'.repeat(D.WORKING_SET_MAX_CHARS + 100) };
+  x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
+    registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
+    countTokens: () => () => 0, git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'), appendReceipt: () => {},
+    reconcileCandidates: () => [oversized], commitReconcile: (_agent, _day, ids) => { committed = ids; } });
+  const text = await x.delivery.workingSet('a1');
+  assert.ok(text.length <= D.WORKING_SET_MAX_CHARS);
+  assert.equal(text.includes('conflict:oversized'), false, 'the marker was cut off at a line boundary');
+  assert.deepEqual(committed, [], 'only the final cut body can be committed as rendered');
+});
+
 test('Jim S-2: the git evidence is cached per ledger head and HEAD: a second build runs only rev-parse', async () => {
   let head = 'HEAD1';
   const calls = [];
@@ -385,7 +468,7 @@ test('Jim M-4 / G4.5: the Codex instruction file and wake-up get the same bytes 
   assert.match(idx, /nativeMemory\.setClaimWakeupProvider\(claimWorkingSetForAgent\);/);
   assert.match(idx, /hive\.setCodexClaimContextProvider\(claimWorkingSetForAgent\);/);
   assert.match(idx, /hookServer\.setClaimWorkingSetProvider\(claimWorkingSetForAgent\);/);
-  assert.match(idx, /const claimWorkingSetForAgent = \(agentId: string\): Promise<string \| null> => \(claimsEndpoint\(\) \? claimDelivery\.workingSet\(agentId\) : Promise\.resolve\(null\)\);/);
+  assert.match(idx, /const claimWorkingSetForAgent = \(agentId: string, source\?: string\): Promise<string \| null> => \(claimsEndpoint\(\) \? claimDelivery\.workingSet\(agentId, source\) : Promise\.resolve\(null\)\);/);
   assert.match(idx, /hookServer\.setClaimTurnCompletedListener\(\(agentId\) => claimDelivery\.turnCompleted\(agentId\)\);/);
   const hive = fs.readFileSync(path.join(ROOT, 'src', 'main', 'hive.ts'), 'utf8');
   assert.match(hive, /preset\.systemPromptChannel === 'codex-developer-instructions' \? HiveManager\.codexDeveloperInstructions\(prompt, claimContext\) : null/);
