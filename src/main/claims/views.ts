@@ -3,6 +3,7 @@ import type {
   RenderExportLineFn, RenderMemoryMdFn, WorldView,
 } from '../../shared/claims';
 import { GENERATED_MEMORY_MARKER } from './generated';
+import { reconcilePromptText } from './reconcile';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
 export const WORKING_SET_TIER_SHARES = [0.40, 0.10, 0.50] as const;
@@ -22,7 +23,7 @@ const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): strin
 };
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
-export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, _reconcileItems: ReconcileItem[] = []): {
+export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
   buildWorkingSet: BuildWorkingSetFn; renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn; renderExportLine: RenderExportLineFn;
 } {
   const claims = records.filter((r): r is ClaimRec => r.t === 'claim');
@@ -68,8 +69,10 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       const id = claim.id;
       if (!add(claimLine(claim, state.claims[id].status, view.flags[id] ?? []), 0, id)) excluded.set(id, 'tier-share');
     }
-    // T1 contains working-set warning markers only; reconcile text is injected by ReconcileApi.
+    // T1 holds reconcile prompts and world warning markers. Use the exact rendered prompt text
+    // that ReconcileApi token-counted/charged, so daily accounting matches delivery byte-for-byte.
     const markers = [
+      ...reconcileItems.slice(0, 3).map(reconcilePromptText),
       ...Object.keys(view.flags).filter(id => view.flags[id].length).sort(cmp).map(id => `⚠ ${id}: ${view.flags[id].join(', ')}`),
     ];
     let markersIncluded = 0;

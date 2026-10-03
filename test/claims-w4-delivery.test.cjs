@@ -12,14 +12,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const http = require('node:http');
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'md-claims-w4-'));
 const prior = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
 process.env.HOME = JAIL; process.env.USERPROFILE = JAIL;
 assert.equal(os.homedir(), JAIL, 'HOME must be jailed before any product code loads');
 const STORES = [];
+const HIVES = [];
 test.after(() => {
   for (const s of STORES) s.close();
+  for (const h of HIVES) h.dispose();
   for (const [k, v] of Object.entries(prior)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   fs.rmSync(JAIL, { recursive: true, force: true });
 });
@@ -32,9 +35,12 @@ const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD
 const { derive } = loadTs('src/main/claims/derive.ts');
 const { worldView } = loadTs('src/main/claims/world.ts');
 const { DEFAULT_KEY_REGISTRY } = loadTs('src/main/claims/registry.ts');
+const { ReconcileQueue, ReconcileApi, reconcilePromptText } = loadTs('src/main/claims/reconcile.ts');
 const W = loadTs('src/main/claims/worldSnapshot.ts');
 const { MAIL_JOINED_BUDGET } = loadTs('src/main/mailSurface.ts');
 const { COMPACT_CARRY_MAX } = loadTs('src/main/compactHealth.ts');
+const { HookServer } = loadTs('src/main/hooks.ts');
+const { HiveManager } = loadTs('src/main/hive.ts');
 
 let n = 0;
 /** A sandbox hive with a real ClaimStore, and a delivery over it with a fake git. */
@@ -73,6 +79,18 @@ function setup(over = {}) {
   return { root, keys, ref, mkStore, delivery: D.createClaimDelivery(deps), gitCalls, receipts, levels, claimsDir: (a) => path.join(root, 'agents', a, 'memory', 'claims') };
 }
 async function note(store, agent, text, extra = {}) { const r = await store.appendRecord(agent, { t: 'claim', kind: 'fact', text, ...extra }, 'endpoint'); assert.equal(r.ok, true, JSON.stringify(r)); return r.id; }
+
+async function postLiveHook(server, agentId, payload) {
+  server.start();
+  for (let i = 0; i < 200 && server.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
+  const url = new URL(server.hookUrl(agentId));
+  const body = JSON.stringify({ session_id: `s-${agentId}`, ...payload });
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => {
+      let text = ''; res.on('data', (d) => { text += d; }); res.on('end', () => resolve(JSON.parse(text))); });
+    req.on('error', reject); req.end(body);
+  });
+}
 
 test('Jim M-1: a healthy writer gets NO read-only warning; a reader and a broken chain do', async () => {
   const x = setup({ levels: { a2: 'reader' } });
@@ -179,17 +197,61 @@ test('Jim M-3: the working set fits its character cap (set + carry + mail reserv
 });
 
 test('god (W5 slot, Creed S3 ruling): reconcile items render ONCE, as the T1 ⚠ markers, inside the cap; turnCompleted reaches the W5 hook', async () => {
-  const told = [];
+  const told = [], log = [];
   const item = (i) => ({ itemId: `r-${i}`, agent: 'a1', kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: `synthetic reconcile question ${i}`, turnsUnanswered: 0 });
-  const x = setup({ deps: { reconcileItems: () => [item(1), item(2), item(3), item(4)], onTurnCompleted: (a) => told.push(a) } });
+  const x = setup();
+  const queue = new ReconcileQueue(path.join(x.root, 'claims-reconcile-queue.json'));
+  queue.refresh('a1', [item(1), item(2), item(3), item(4)]);
+  const api = new ReconcileApi({ queue, countTokens: (text) => Math.ceil(text.length / 4), log: (row) => log.push(row),
+    appendSoftSupersede: async () => ({ ok: true }), newestWins: () => null, isLiveClaim: () => true, isOwner: (a) => a === 'a1' });
+  x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
+    registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
+    countTokens: () => (text) => Math.ceil(text.length / 4), git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'),
+    appendReceipt: () => {}, reconcileItems: (a) => api.reconcileForTurn(a, '2026-10-03').items,
+    onTurnCompleted: (a) => { told.push(a); void api.onTurnCompleted(a); } });
   for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words`);
   const w = await x.delivery.workingSet('a1');
   assert.ok(w.length <= D.WORKING_SET_MAX_CHARS);
   for (const i of [1, 2, 3]) assert.equal(w.split(`synthetic reconcile question ${i}`).length - 1, 1, `item ${i} rendered exactly once`);
   assert.ok(!w.includes('synthetic reconcile question 4'), 'at most 3 items (n <= 3)');
   assert.match(w, /⚠ reconcile r-1: synthetic reconcile question 1/, 'as a T1 marker');
+  const injected = queue.items('a1').filter((x) => log[0].items.includes(x.itemId));
+  assert.equal(log[0].tokens, injected.reduce((n, x) => n + Math.ceil(reconcilePromptText(x).length / 4), 0));
   x.delivery.turnCompleted('a1');
   assert.deepEqual(told, ['a1']);
+});
+
+test('W5 integration: live hook SessionStart injects leased T1 markers; Stop completes the turn and logs rendered token count', async (t) => {
+  const x = setup();
+  const queue = new ReconcileQueue(path.join(x.root, 'claims-reconcile-queue.json'));
+  queue.refresh('a1', [{ itemId: 'r-live', kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: 'live hook reconcile pair' }]);
+  const log = [];
+  const count = (text) => Math.ceil(text.length / 4);
+  const api = new ReconcileApi({ queue, countTokens: count, log: (row) => log.push(row), appendSoftSupersede: async () => ({ ok: true }),
+    newestWins: () => null, isLiveClaim: () => true, isOwner: (agentId) => agentId === 'a1' });
+  x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
+    registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
+    countTokens: () => count, git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'), appendReceipt: () => {},
+    reconcileItems: (agentId) => api.reconcileForTurn(agentId, '2026-10-03').items,
+    onTurnCompleted: (agentId) => { void api.onTurnCompleted(agentId); } });
+  const hive = new HiveManager(() => x.root, () => true); HIVES.push(hive);
+  await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: x.root });
+  const server = new HookServer(hive, () => null, () => ({ notifications: false }));
+  server.setClaimWorkingSetProvider((agentId) => x.delivery.workingSet(agentId));
+  server.setClaimTurnCompletedListener((agentId) => x.delivery.turnCompleted(agentId));
+  t.after(() => server.stop());
+  const start = await postLiveHook(server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const context = start?.hookSpecificOutput?.additionalContext ?? '';
+  assert.match(context, /⚠ reconcile r-live: live hook reconcile pair/);
+  assert.ok(queue.items('a1')[0]?.leaseTurn, 'the delivered item is leased to a persisted turn');
+  const injected = log.find((row) => row.kind === 'claims-reconcile-injected');
+  assert.ok(injected?.tokens > 0);
+  const marker = '⚠ reconcile r-live: live hook reconcile pair — Answer: memory reconcile c-000000000001 c-000000000002 --answer keep-both|supersedes';
+  assert.equal(injected.tokens, count(marker), 'the injection log counts the rendered marker');
+  await postLiveHook(server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  const next = queue.beginTurn('a1');
+  assert.equal(next.items[0]?.turnsUnanswered, 1, 'Stop advances the completed turn');
+  assert.equal(next.items[0]?.leaseTurn, 'a1:2', 'the next turn gets a fresh lease');
 });
 
 test('Jim S-2: the git evidence is cached per ledger head and HEAD: a second build runs only rev-parse', async () => {

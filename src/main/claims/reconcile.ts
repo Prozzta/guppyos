@@ -13,7 +13,7 @@ interface AgentQueue { sequence: number; items: ReconcileItem[]; r5?: R5Candidat
 interface QueueState { v: 1; agents: Record<string, AgentQueue>; dailyTokens?: Record<string, number> }
 export interface ReconcileCandidate { itemId: string; kind: ReconcileItem['kind']; a: string; b: string; text: string }
 export interface TurnOffer { turn: string; items: ReconcileItem[] }
-export interface ReconcileDelivery { text: string; tokens: number; itemIds: string[]; turn: string }
+export interface ReconcileDelivery { text: string; tokens: number; itemIds: string[]; items: ReconcileItem[]; turn: string }
 export interface ReconcileApiDeps {
   queue: ReconcileQueue;
   countTokens: (text: string) => number;
@@ -42,7 +42,7 @@ export class ReconcileApi {
     const tokens = injected.reduce((n, i) => n + Math.max(0, this.d.countTokens(reconcilePromptText(i))), 0);
     const itemIds = injected.map((i) => i.itemId);
     if (tokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn: offer.turn, day, tokens, items: itemIds });
-    return { text, tokens, itemIds, turn: offer.turn };
+    return { text, tokens, itemIds, items: injected, turn: offer.turn };
   }
   async onTurnCompleted(agentId: string, turn?: string): Promise<void> {
     if (!this.d.isOwner(agentId)) return;

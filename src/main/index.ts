@@ -4,17 +4,17 @@ import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
-import { ClaimsIndexSync } from './claims/indexSync';
+import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
 import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
-import { enqueueR5AfterIndex, reconcileQueueForHive, shouldRunR5 } from './claims/reconcile';
+import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, type TaskRow } from './claims/delivery';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
-import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type UsageRec } from '../shared/claims';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -1361,13 +1361,47 @@ const claimDelivery = createClaimDelivery({
       return claimsCountTokens;
     } catch { return null; }
   },
-  // W5 (Dwight): reconcileForTurn's items go here, rendered once as the working set's T1 ⚠
-  // markers (inside the 9,500 joint budget); onTurnCompleted is told at each completed turn.
-  // Stubs until W5 is wired.
-  reconcileItems: () => [],
-  onTurnCompleted: () => { /* W5 */ },
+  // W5 items flow into createClaimViews' T1 markers exactly once, already filtered/leased by
+  // ReconcileApi and token-charged against that exact rendered marker. Stop advances that lease.
+  reconcileItems: (agentId) => {
+    const root = hive.root(); if (!root) return [];
+    return reconcileApiForHive(root)?.reconcileForTurn(agentId, new Date().toISOString().slice(0, 10)).items ?? [];
+  },
+  onTurnCompleted: (agentId) => {
+    const root = hive.root(); if (!root) return;
+    void reconcileApiForHive(root)?.onTurnCompleted(agentId).catch((error) => {
+      hive.appendLog({ kind: 'claims-reconcile-completion-failed', agentId, error: String(error).slice(0, 160) });
+    });
+  },
   log: (row) => hive.appendLog(row),
 });
+let reconcileLiveClaims = new Set<string>();
+function reconcileApiForHive(root: string): ReconcileApi | null {
+  const endpoint = claimsEndpoint();
+  if (!endpoint) return null;
+  return new ReconcileApi({
+    queue: reconcileQueueForHive(root),
+    countTokens: (text) => claimsCountTokens?.(text) ?? 0,
+    log: (row) => hive.appendLog(row),
+    appendSoftSupersede: async (agentId, loser, winner, itemId) =>
+      (await claimsEndpoint())?.store.appendSoftSupersede(agentId, loser, winner, itemId) ?? Promise.resolve({ ok: false }),
+    newestWins: (item) => {
+      reconcileLiveClaims = new Set();
+      const read = endpoint.store.readLedger(item.agent);
+      const prefix = verifiedPrefix(read);
+      if (!prefix) return null;
+      const claims = prefix.records.filter((r) => r.t === 'claim');
+      const state = deriveClaims(prefix.records, loadRegistry(root), { r4: false });
+      const a = claims.find((r) => r.id === item.a), b = claims.find((r) => r.id === item.b);
+      if (!a || !b || state.claims[a.id]?.status !== 'live' || state.claims[b.id]?.status !== 'live') return null;
+      reconcileLiveClaims = new Set([a.id, b.id].filter((id) => state.claims[id]?.status === 'live'));
+      const aNewer = a.at > b.at || (a.at === b.at && a.id > b.id);
+      return aNewer ? { loser: b.id, winner: a.id } : { loser: a.id, winner: b.id };
+    },
+    isLiveClaim: (claimId) => reconcileLiveClaims.has(claimId),
+    isOwner: (agentId) => claimLevel(agentId) === 'writer',
+  });
+}
 const claimWorkingSetForAgent = (agentId: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId) : Promise.resolve(null));
 hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
 hookServer.setClaimTurnCompletedListener((agentId) => claimDelivery.turnCompleted(agentId));
