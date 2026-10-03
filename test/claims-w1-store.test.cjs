@@ -241,6 +241,13 @@ test('G1.4 injection and limits, per origin and verb', async () => {
   const past = await ok(store.appendRecord(A, note('from yesterday', { at: '2026-10-02T09:00:00Z' }), 'endpoint'));
   assert.equal(byId()[past].at, '2026-10-02T09:00:00.000Z');
   await refused(store.appendRecord(A, note('x', { at: 'tomorrow' }), 'endpoint'), /bad at/);
+  // A zone-less at is refused with the Z form as the hint; a zoned one is normalised to UTC (god e323d8).
+  for (const [zoneless, hint] of [['2026-10-02T09:00:00', '2026-10-02T09:00:00Z'], ['2026-10-02', '2026-10-02T00:00:00Z']]) {
+    const r = await refused(store.appendRecord(A, note('x', { at: zoneless }), 'endpoint'), /no time zone/);
+    assert.equal(r.didYouMean, hint);
+  }
+  const off = await ok(store.appendRecord(A, note('with an offset', { at: '2026-10-02T11:00:00+02:00' }), 'endpoint'));
+  assert.equal(byId()[off].at, '2026-10-02T09:00:00.000Z');
 
   // Text limits and provenance by origin (god's final rule; one row per entry point).
   const t400 = 'é'.repeat(400), t401 = 'é'.repeat(401), t4000 = 'a'.repeat(4000), t4001 = 'a'.repeat(4001);
