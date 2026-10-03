@@ -243,6 +243,8 @@ export interface RegistryAgent extends AgentMeta {
    *  "do not dispatch to them", not "they are gone", which is why it is its own
    *  flag rather than a reuse of `archived` or a breaker level. */
   onHold?: boolean;
+  /** READS-181 B: this agent's tool-output cap (overrides the config's `toolOutputCap`; 0 = off). */
+  toolOutputCap?: number;
   /** Most recent Claude Code session_id seen for this agent (Lane A #6.6a),
    *  captured from hook payloads. Doubles as the `--resume` key (idempotent
    *  resume after a crash/restart) AND the cost accounting/dedup key on every
@@ -800,6 +802,19 @@ export class HiveManager {
   private agentDir(id: string): string {
     return join(this.root()!, 'agents', id);
   }
+
+  /** READS-181 A: a registered agent's folder (<hive>/agents/<id>), or null. */
+  agentHome(id: string): string | null {
+    const root = this.root();
+    if (!root || !id || !this.registry().agents[id]) return null;
+    return join(root, 'agents', id);
+  }
+
+  /** READS-181 B: where an agent's condensed tool outputs are kept in full, or null (no hive). */
+  toolOutputDir(id: string): string | null {
+    const root = this.root();
+    return root && id ? join(root, 'agents', id, 'tool-output') : null;
+  }
   /** IPC endpoint the cth-hook shim talks to (Phase 1 autonomy).
    *  On POSIX this is a Unix-domain socket file under the hive root. On Windows,
    *  Node's `net` IPC uses named pipes (a flat `\\.\pipe\` namespace, not the
@@ -882,25 +897,39 @@ export class HiveManager {
    * Returns the directory, or null (no hive, or the write failed).
    */
   writeMemoryCommand(script: string): string | null {
+    return this.writeCommandDir('memory', script);
+  }
+
+  /**
+   * READS-181 A: `<root>/bin/ledger/`, the `ledger` command (one call that updates a card, writes
+   * an outbox message and appends to memory.md, through the app). Same shape and rules as
+   * writeMemoryCommand; prepended to every hive agent's PATH. Returns the directory, or null.
+   */
+  writeLedgerCommand(script: string): string | null {
+    return this.writeCommandDir('ledger', script);
+  }
+
+  /** `<root>/bin/<name>/` holding ONLY `<name>.cmd` + `<name>` (Windows) or `<name>` (POSIX). */
+  private writeCommandDir(name: string, script: string): string | null {
     const root = this.root();
     if (!root) return null;
-    const dir = join(root, 'bin', 'memory');
+    const dir = join(root, 'bin', name);
     const exe = process.execPath;
     const files: Array<[string, string, number]> = process.platform === 'win32'
       ? [
-          ['memory.cmd', `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${script}" %*\r\n`, 0o644],
-          ['memory', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, 0o755]
+          [`${name}.cmd`, `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" "${script}" %*\r\n`, 0o644],
+          [name, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe.replace(/\\/g, '/')}" "${script.replace(/\\/g, '/')}" "$@"\n`, 0o755]
         ]
-      : [['memory', `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${script}" "$@"\n`, 0o755]];
+      : [[name, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "${script}" "$@"\n`, 0o755]];
     try {
       mkdirSync(dir, { recursive: true });
-      const keep = new Set(files.map(([name]) => name));
-      for (const name of readdirSync(dir)) {
-        if (keep.has(name)) continue;
-        try { rmSync(join(dir, name), { force: true, recursive: true }); } catch { /* in use: retried at the next spawn */ }
+      const keep = new Set(files.map(([f]) => f));
+      for (const f of readdirSync(dir)) {
+        if (keep.has(f)) continue;
+        try { rmSync(join(dir, f), { force: true, recursive: true }); } catch { /* in use: retried at the next spawn */ }
       }
-      for (const [name, content, mode] of files) {
-        const p = join(dir, name);
+      for (const [f, content, mode] of files) {
+        const p = join(dir, f);
         let cur: string | null = null;
         try { cur = readFileSync(p, 'utf8'); } catch { /* not yet written */ }
         if (cur === content) continue;
@@ -911,7 +940,7 @@ export class HiveManager {
       }
       return dir;
     } catch (e) {
-      console.error('[hive] writeMemoryCommand failed:', e);
+      console.error(`[hive] write the ${name} command failed:`, e);
       return null;
     }
   }
@@ -1503,6 +1532,8 @@ export class HiveManager {
       // HOOK-BROKER: this spawn's HTTP hook URL (a fresh token), or null -> command hooks.
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
       this.writeJson(settingsPath, this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id));
+      // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
+      if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       args.push('--settings', settingsPath);
     }
     return { args, env };
@@ -4892,6 +4923,32 @@ The harness fills in \`id\`, \`from\`, \`hops\`, and timestamps.
 
 A message that answers a request its sender had already been sent a \`supersedes\` for, still
 unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes the subject.
+
+## The ledger command
+One call that updates a task card, sends one message and notes memory (each part optional),
+applied by the app: every check passes before anything is written, and the reply is one line.
+Never put the JSON in shell arguments (backticks and \`$(...)\` in a body would run); give it in
+a file or on stdin:
+
+\`\`\`bash
+ledger <<'EOF'
+{ "op": "creed-181-3",
+  "card":    { "id": "READS-181", "patch": { "status": "done" }, "appendResult": "built; Jim audits" },
+  "message": { "to": "god", "act": "done", "subject": "READS-181 built", "body": "...", "in_reply_to": "<id>" },
+  "memory":  { "append": "- 2026-10-03 READS-181 built ...", "lesson": false } }
+EOF
+\`\`\`
+
+- \`op\`: a unique name for this operation. Running the same op again finishes what is left and
+  never repeats a part, so a failed or timed-out call is safe to retry.
+- \`card\`: \`create\` (title required; refused if the id exists) or \`patch\` (refused if it does
+  not); \`appendResult\` / \`appendNote\` add a timestamped line. A patch changes only the fields it
+  names, so the assignee is kept unless you give one.
+- \`message\`: the schema above; \`to\` must be a registered agent, \`god\` or \`broadcast\`.
+- \`memory\`: \`append\` goes at the end of your memory.md; \`"lesson": true\` puts it at the end of
+  your standing lessons instead (no \`## \` headings).
+In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool and run
+\`ledger --file op.json\`.
 
 ## Rules of the road
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —

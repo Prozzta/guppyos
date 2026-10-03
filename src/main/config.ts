@@ -352,6 +352,10 @@ export interface HarnessConfig {
   circuitBreaker?: CircuitBreakerConfig;
   /** Enterprise Knowledge Graph (multimodal context for agents). Default OFF. */
   knowledgeGraph?: KnowledgeGraphConfig;
+  /** READS-181 B: the most characters of a successful Bash/PowerShell result an agent gets in
+   *  context; over it the result is condensed (outcome, error lines, head, tail, the full output's
+   *  path). 0 = off. A per-agent `toolOutputCap` in the registry overrides it. */
+  toolOutputCap?: number;
   /** Fire native desktop notifications on agent lifecycle events (idle finish / waiting for input). */
   notifications?: boolean;
   /** Opt-in "strong keep-alive": while ≥1 agent PTY is live, escalate the power
@@ -522,6 +526,7 @@ const DEFAULTS: HarnessConfig = {
   defaultWorkerTokenCap: 0, // 0 = unlimited (human directive: NO per-worker cap)
   semanticMemory: true,
   missions: [OPS_STANDUP_MISSION],
+  toolOutputCap: 1500,
   notifications: false,
   strongKeepalive: false,
   autoUpdate: true,
