@@ -556,6 +556,22 @@ export function cardDoneAt(card: unknown, meta?: CardMeta | null): number | null
   return times.length ? Math.min(...times) : null;
 }
 
+/** REQUESTS-TAB-STALE one-time cleanup (god, 2026-10-03): the stale asks the strict rules cannot
+ *  prove finished, each verified by god, closed once at the first 1.1.83 start. Mail ids only
+ *  (unique across the hive); an id already closed or absent is skipped. */
+export const CLEANUP_183_IDS: readonly string[] = [
+  '2026-10-01T19-28-20-526Z-7841c0', '2026-10-01T19-46-49-472Z-cd74b1', '2026-10-01T19-48-30-408Z-815910', // DISK-USAGE x3
+  '2026-10-03T09-23-39-167Z-5ece4b', '2026-10-03T09-29-31-135Z-b56655', // claude-init-kill AUDIT + DELTA
+  '2026-10-03T08-57-53-890Z-6ccb84', // rebrand/a DELTA
+  '2026-10-02T17-37-48-985Z-205dd1', // GUPPYOS identity-scrub
+  '2026-10-02T18-19-18-439Z-c2efc8', // CODEX-MODEL-NOT-KEPT-179 (the card tracks the work)
+  '2026-09-30T17-36-43-459Z-7e384a', // WAKE-SCREEN-GUARD round 3
+  '2026-10-01T14-10-37-572Z-b97a1b', // "END your turn"
+  '2026-10-03T10-05-00-025Z-andy-pub182-jim' // PUBLISHED v1.1.82 verify ask
+];
+export const CLEANUP_183_REASON = 'cleanup-183:god-verified';
+const CLEANUP_183_FILE = 'cleanup-183.json';
+
 export class HiveManager {
   /**
    * @param getHome  Lazily resolve harnessHome so the hive follows config changes.
@@ -3552,6 +3568,32 @@ export class HiveManager {
     }
     return staleObligations(docs, cards, this.releaseRuns(runningVersion))
       .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
+  }
+
+  /**
+   * REQUESTS-TAB-STALE: the one-time cleanup of god-verified stale asks (CLEANUP_183_IDS). Runs
+   * once per hive: `state/cleanup-183.json` marks it done, whatever it found. Each open match is
+   * closed like the Human's close (a `mail-obligation-closed` row, reason CLEANUP_183_REASON; no
+   * mail, no wake). Returns the closed `{agentId, id}`, or null when it had already run.
+   */
+  runCleanup183(ids: readonly string[] = CLEANUP_183_IDS): { agentId: string; id: string }[] | null {
+    const root = this.root();
+    if (!root) return null;
+    const marker = join(root, 'state', CLEANUP_183_FILE);
+    if (existsSync(marker)) return null;
+    const closed: { agentId: string; id: string }[] = [];
+    const agents = Object.keys(this.registry().agents ?? {});
+    for (const id of ids) {
+      for (const agentId of agents) {
+        if (!this.mail.ledger(agentId).entries[id]) continue;
+        for (const c of this.mail.autoCloseObligation(agentId, id, CLEANUP_183_REASON)) closed.push({ agentId, id: c });
+      }
+    }
+    try {
+      mkdirSync(join(root, 'state'), { recursive: true });
+      atomicWriteJsonFile(marker, { v: 1, at: Date.now(), closed });
+    } catch { /* not marked: the next beat retries, and closed ids are skipped */ }
+    return closed;
   }
 
   /**

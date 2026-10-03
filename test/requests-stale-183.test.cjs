@@ -28,7 +28,7 @@ test.after(() => {
 });
 
 const { staleObligations, isOpenObligation } = loadTs('src/main/mailLedger.ts');
-const { HiveManager, cardDoneAt } = loadTs('src/main/hive.ts');
+const { HiveManager, cardDoneAt, CLEANUP_183_IDS, CLEANUP_183_REASON } = loadTs('src/main/hive.ts');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
 const H = 3600_000;
@@ -220,12 +220,48 @@ test('hive: release runs are seeded once from packaged app-start rows, then the 
   assert.deepEqual(hive.mailObligations().flatMap((a) => a.openRequests.map((o) => o.id)).sort(), [bug.id, ran80.id].sort());
 });
 
+test('cleanup-183: god\'s 11 verified ids; with the rules, the replay floor keeps only the 4 live 1.1.83 asks', () => {
+  assert.deepEqual([...CLEANUP_183_IDS].sort(), [
+    '2026-09-30T17-36-43-459Z-7e384a', '2026-10-01T14-10-37-572Z-b97a1b', '2026-10-01T19-28-20-526Z-7841c0', '2026-10-01T19-46-49-472Z-cd74b1',
+    '2026-10-01T19-48-30-408Z-815910', '2026-10-02T17-37-48-985Z-205dd1', '2026-10-02T18-19-18-439Z-c2efc8', '2026-10-03T08-57-53-890Z-6ccb84',
+    '2026-10-03T09-23-39-167Z-5ece4b', '2026-10-03T09-29-31-135Z-b56655', '2026-10-03T10-05-00-025Z-andy-pub182-jim',
+  ]);
+  assert.equal(CLEANUP_183_REASON, 'cleanup-183:god-verified');
+  const f = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'requests-stale-183.json'), 'utf8'));
+  const gone = new Set(staleObligations(f.docs, new Map(Object.entries(f.cards)), f.releases).map((s) => s.id));
+  const left = f.expectStay.filter((k) => !CLEANUP_183_IDS.includes(k.split('/')[1]));
+  assert.deepEqual(left.sort(), ['andy/2026-10-03T10-50-21-540Z-7d3555', 'creed/2026-10-03T10-50-21-754Z-1ffd35',
+    'jim/2026-10-03T10-50-21-106Z-642691', 'jim/2026-10-03T10-58-11-180Z-fb90e1']);
+  for (const id of CLEANUP_183_IDS) assert.ok(!gone.has(id), `${id} is one the rules could not prove (else it needs no cleanup)`);
+});
+
+test('hive: cleanup-183 closes exactly its open ids once, logs each, skips closed and absent ids, writes no mail', async (t) => {
+  const { hive } = await floor(t);
+  const a = hive.send({ to: 'andy-1', act: 'request', subject: 'stale one', body: 'x' }, 'god-1');
+  const b = hive.send({ to: 'andy-1', act: 'request', subject: 'closed by the Human', body: 'x' }, 'god-1');
+  const live = hive.send({ to: 'andy-1', act: 'request', subject: 'live one', body: 'x' }, 'god-1');
+  const back = hive.send({ to: 'god-1', act: 'request', subject: 'andy asks god', body: 'x' }, 'andy-1');
+  assert.deepEqual(hive.closeMailObligation('andy-1', b.id), [b.id]);
+  const before = ['god-1', 'andy-1'].map((id) => inboxCount(hive, id));
+  const closed = hive.runCleanup183([a.id, b.id, back.id, '2026-01-01T00-00-00-000Z-absent']);
+  assert.deepEqual(closed.map((c) => [c.agentId, c.id]).sort(), [['andy-1', a.id], ['god-1', back.id]].sort());
+  assert.deepEqual(['god-1', 'andy-1'].map((id) => inboxCount(hive, id)), before, 'no mail');
+  const rows = hive.logTail(500).filter((r) => r && r.kind === 'mail-obligation-closed');
+  assert.deepEqual(rows.map((r) => [r.id, r.reason]).sort(), [[a.id, 'cleanup-183:god-verified'], [b.id, 'closed-by-human'], [back.id, 'cleanup-183:god-verified']].sort());
+  assert.deepEqual(hive.mailObligations().flatMap((x) => x.openRequests.map((o) => o.id)), [live.id]);
+  assert.ok(fs.existsSync(path.join(hive.root(), 'state', 'cleanup-183.json')), 'marked done');
+  assert.equal(hive.runCleanup183([live.id]), null, 'never runs twice');
+  assert.deepEqual(hive.mailObligations().flatMap((x) => x.openRequests.map((o) => o.id)), [live.id]);
+});
+
 test('WIRING: a packaged-only main beat runs the sweep; only hive.ts auto-closes; the Human\'s close is unchanged', () => {
   const idx = codeOnly(readSource('src/main/index.ts'), 'index.ts');
-  assert.match(idx, /function runStaleRequestsBeat\(\): void \{\s*if \(!app\.isPackaged\) return;\s*try \{ hive\.autoCloseStaleObligations\(app\.getVersion\(\)\); \}/);
+  assert.match(idx, /function runStaleRequestsBeat\(\): void \{\s*if \(!app\.isPackaged\) return;\s*try \{ hive\.runCleanup183\(\); \}[^\n]*\n\s*try \{ hive\.autoCloseStaleObligations\(app\.getVersion\(\)\); \}/);
   assert.match(idx, /function armAlwaysOnBeats\(\): void \{[\s\S]{0,900}if \(staleRequestsTimer\) clearInterval\(staleRequestsTimer\);\s*runStaleRequestsBeat\(\);\s*staleRequestsTimer = setInterval\(runStaleRequestsBeat, 60_000\);/);
   const hiveSrc = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
-  assert.equal((hiveSrc.match(/\.autoCloseObligation\(/g) || []).length, 1);
+  assert.equal((hiveSrc.match(/\.autoCloseObligation\(/g) || []).length, 2, 'the sweep and the one-time cleanup');
+  assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(s\.agentId, s\.id, s\.reason\)/);
+  assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(agentId, id, CLEANUP_183_REASON\)/);
   assert.equal((idx.match(/autoCloseObligation\(/g) || []).length, 0);
   assert.match(hiveSrc, /return this\.mail\.closeObligation\(agentId, id, 'closed-by-human'\);/);
 });

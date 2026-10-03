@@ -7060,6 +7060,7 @@ function runWorkerWakeBeat(): void {
 function runStaleRequestsBeat(): void {
   // A dev or rc build carries its next version and may run against the live hive: never close there.
   if (!app.isPackaged) return;
+  try { hive.runCleanup183(); } catch (e) { console.error('[stale requests] cleanup-183', e); }
   try { hive.autoCloseStaleObligations(app.getVersion()); } catch (e) { console.error('[stale requests]', e); }
 }
 
