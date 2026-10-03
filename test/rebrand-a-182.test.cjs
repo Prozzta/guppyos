@@ -267,7 +267,11 @@ test('build/installer.nsh: customInstall re-targets old-exe links in the pin fol
   assert.match(nsh, /\$\{AndIf\} \$3 == "\$INSTDIR\\\$\{GUPPY_OLD_EXE\}"/, 'only links aimed at the old exe in THIS install folder');
   assert.match(nsh, /CreateShortCut "\$\{DIR\}\\\$1" "\$appExe"/, 'same file name, new target');
   assert.match(nsh, /WinShell::SetLnkAUMI "\$\{DIR\}\\\$1" "\$\{APP_ID\}"/);
-  assert.doesNotMatch(nsh, /WriteReg|DeleteReg|RMDir|Delete "/, 'the macro writes no registry and deletes nothing');
+  // REBRAND-UPDATER-BASE (1.1.83) adds a cleanup macro that deletes; the re-target macro still deletes nothing.
+  const retarget = nsh.slice(nsh.indexOf('!macro guppyRetargetLinks'), nsh.indexOf('!macroend', nsh.indexOf('!macro guppyRetargetLinks')));
+  assert.ok(retarget.length > 200);
+  assert.doesNotMatch(retarget, /WriteReg|DeleteReg|RMDir|Delete "/, 'the macro writes no registry and deletes nothing');
+  assert.doesNotMatch(nsh, /WriteReg|DeleteReg/, 'the include writes no registry');
 });
 
 function nsisTools() {
