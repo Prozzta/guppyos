@@ -337,6 +337,11 @@ export interface HarnessConfig {
    *  CLAUDE_CODE_AUTO_COMPACT_WINDOW at spawn. Unset = 150000; "off" = Claude's own "auto"
    *  (the pilot's off switch). An agent's own registry `autoCompactWindow` wins (shared/autoCompactWindow.ts). */
   godAutoCompactWindow?: number | 'off';
+  /** READS-MAIL-CAP (1.1.83): the most body characters of one message god gets in context; a
+   *  longer one shows its first ~this many characters plus the file paths (the rest stays readable
+   *  there). Unset = 1500; 0 = off. Mail from the Human and the harness is never shortened. An
+   *  agent's own registry `mailCapChars` wins (src/main/mailSurface.ts effectiveMailCap). */
+  godMailCapChars?: number;
   /** Max concurrent god-triggered ephemeral Slack workers; extra spawn-requests
    *  wait in the queue (natural backpressure, a resource backstop). Default 4. */
   maxConcurrentWorkers?: number;

@@ -177,7 +177,7 @@ test('Q22 (Creed): when even a FRESH budget leaves under 1,000 characters, the m
   assert.ok(blk.truncated.includes('huge'));
   assert.ok(blk.text.length <= 1_800, `${blk.text.length}`);
   assert.ok(blk.text.includes('[hive-mail:huge]'), 'the marker: it is a surfacing');
-  assert.ok(blk.text.includes('[body not shown: 5000 characters do not fit this hook. The full message is in C:/hive/agents/a/inbox/huge.json; read it there]'));
+  assert.ok(blk.text.includes('[body not shown: 5000 characters do not fit this hook. The full message is in C:/hive/agents/a/inbox/huge.json (after this turn: C:/hive/agents/a/inbox/.done/huge.json); read it there]'));
   assert.ok(!blk.text.includes('HHHH'), 'no body at all');
   // A roomier hook gets a real truncation, not header + path.
   const roomy = S.buildMailBlock({ items: [big], budget: 9_500, phase: 'turn-start' });
@@ -362,8 +362,8 @@ test('Q22 (Creed): a hook whose whole budget leaves under 1,000 body characters 
   assert.equal(f.entryOf('jim-1', m.id).state, 'surfacing', 'claimed like any surfacing');
   const rows = f.logRows().filter((r) => r.kind === 'mail-truncated');
   assert.equal(rows.length, 1);
-  assert.deepEqual({ agentId: rows[0].agentId, id: rows[0].id, bodyChars: rows[0].bodyChars, shown: rows[0].shown, hookKind: rows[0].hookKind },
-    { agentId: 'jim-1', id: m.id, bodyChars: 5_000, shown: 'header+path', hookKind: 'UserPromptSubmit' });
+  assert.deepEqual({ agentId: rows[0].agentId, id: rows[0].id, bodyChars: rows[0].bodyChars, shown: rows[0].shown, shownChars: rows[0].shownChars, hookKind: rows[0].hookKind },
+    { agentId: 'jim-1', id: m.id, bodyChars: 5_000, shown: 'header+path', shownChars: 0, hookKind: 'UserPromptSubmit' });
 });
 
 test('drip: messages that do not fit the turn-start block follow at the next PostToolUse calls, oldest first, each once per epoch (N3)', async (t) => {

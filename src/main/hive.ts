@@ -253,6 +253,9 @@ export interface RegistryAgent extends AgentMeta {
   onHold?: boolean;
   /** READS-181 B: this agent's tool-output cap (overrides the config's `toolOutputCap`; 0 = off). */
   toolOutputCap?: number;
+  /** READS-MAIL-CAP (1.1.83): this agent's mail body cap (overrides the config's `godMailCapChars`
+   *  for god; any agent may set one; 0 = off). */
+  mailCapChars?: number;
   /** Most recent Claude Code session_id seen for this agent (Lane A #6.6a),
    *  captured from hook payloads. Doubles as the `--resume` key (idempotent
    *  resume after a crash/restart) AND the cost accounting/dedup key on every
@@ -4904,8 +4907,9 @@ orchestrator routes it. This keeps every file single-writer.
 ## Receiving mail
 Messages for you arrive inside your context as a \`<hive-mail>\` block (at the start of a turn, or
 after a tool call); the harness tracks them and archives each one into \`inbox/.done/\` itself once
-the turn in which you saw it ends. You do not read, list or move inbox files. If a message is marked
-re-delivered, check whether you already handled it.
+the turn in which you saw it ends. You do not read, list or move inbox files, except to read the rest
+of a shortened message at the path its block names. If a message is marked re-delivered, check
+whether you already handled it.
 
 Exception: an agent whose CLI cannot receive the block is told how to take its mail in its own
 start-up instructions (it reads the files itself). Follow those instructions.
