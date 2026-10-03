@@ -1267,7 +1267,7 @@ export class HiveManager {
     };
     // Q32: a restore clears the archive reason with the flag.
     delete reg.agents[meta.id].archiveReason;
-    if (opts.spawnModel) this.recordLaunchModel(reg.agents[meta.id], meta.id, opts.spawnModel);
+    if (opts.spawnModel) this.recordLaunchModel(reg.agents[meta.id], meta.id, opts.spawnModel, meta.provider);
     if (meta.isGod) reg.godId = meta.id;
     this.atomicWriteJson(join(root, 'registry.json'), reg);
     // Jim LOW residual (god-approved): the registry entry (its provider above all) was just
@@ -1867,7 +1867,7 @@ export class HiveManager {
       const since = this.modelObservedAt.get(agentId) ?? agent.launchedAt ?? 0;
       const human = this.humanInputAt?.(agentId);
       const humanInputSince = typeof human === 'number' && human > since;
-      const r = applyLiveModel(agent, model, { ...opts, humanInputSince });
+      const r = applyLiveModel(agent, model, { ...opts, independentEffortPin: provider === 'claude', humanInputSince });
       // M1: the window marker is the observation's OWN time (a Codex turn_context's stamp; capped
       // at now, since a stamp is never in the future), never the reading hook's clock, and it
       // only moves forward. Re-reading the previous turn's turn_context at UserPromptSubmit must
@@ -1918,11 +1918,13 @@ export class HiveManager {
 
   /** MODEL-PINBACK: record a spawn's requested/launch model on its (about to be written) entry.
    *  A pin that no longer applies (the picker changed the request since) is dropped here. */
-  private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string; defaultEffort?: string }): void {
+  private recordLaunchModel(entry: ModelPinFields, agentId: string, spawn: { requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string; defaultEffort?: string }, provider?: string): void {
     const requested = spawn.requested?.trim() || undefined;
     const launch = spawn.launch?.trim() || undefined;
     const requestedEffort = normEffort(spawn.requestedEffort);
     const launchEffort = normEffort(spawn.launchEffort);
+    const changedClaudeLaunch = provider === 'claude' && !!entry.launchModel && !!launch
+      && entry.launchModel.trim().toLowerCase() !== launch.toLowerCase();
     const resolved = resolveSpawnModel(entry, requested, requestedEffort);
     if (resolved.dropPin) {
       this.appendLog({
@@ -1943,7 +1945,13 @@ export class HiveManager {
     // leaves no effort fields behind; Claude/Codex carry their explicit CLI effort here.
     if (requestedEffort) entry.requestedEffort = requestedEffort; else delete entry.requestedEffort;
     if (launchEffort) entry.launchEffort = launchEffort; else delete entry.launchEffort;
-    const defaultEffort = normEffort(spawn.defaultEffort);
+    if (changedClaudeLaunch) {
+      // A learned Claude default belongs to one model; a new app default must be allowed to
+      // establish its own baseline on the first status line.
+      delete entry.defaultEffort;
+      delete entry.defaultEffortModel;
+    }
+    const defaultEffort = changedClaudeLaunch ? undefined : normEffort(spawn.defaultEffort);
     if (defaultEffort) entry.defaultEffort = defaultEffort; else delete entry.defaultEffort;
     delete entry.liveEffort;
     entry.launchedAt = Date.now();
