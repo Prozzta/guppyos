@@ -30,6 +30,7 @@ function loadTs(relative) {
 
 const { derive } = loadTs('src/main/claims/derive.ts');
 const { worldView } = loadTs('src/main/claims/world.ts');
+const { canonicalJson } = loadTs('src/main/claims/canonical.ts');
 const registry = {
   v: 1,
   namespaces: [{ pattern: 'fact.*', cardinality: 'single' }, { pattern: 'multi.*', cardinality: 'multi' }],
@@ -195,7 +196,15 @@ test('revert makes its targeted soft-supersede event inert', () => {
   const state = derive(rows, registry, { r4: false });
   assert.equal(state.claims.old.status, 'live');
   assert.equal(state.claims.old.supersededBy, undefined);
-  assert.deepEqual(state.claims, baseline.claims, 'reverting a proposal restores claim state byte-for-byte');
+  const withoutHead = ({ ledgerHead, ...rest }) => rest;
+  assert.equal(canonicalJson(withoutHead(state)), canonicalJson(withoutHead(baseline)), 'revert restores the whole derived state byte-for-byte except ledger head');
+});
+
+test('soft-supersede leaves a loser untouched when the winner is retracted', () => {
+  const rows = [claim('old'), claim('new'), claim('withdrawal', { retracts: ['new'] }), event('soft', 'soft-supersede', ['old', 'new'])];
+  const state = derive(rows, registry, { r4: false });
+  assert.equal(state.claims.old.status, 'live');
+  assert.equal(state.claims.old.supersededBy, undefined);
 });
 
 test('chain head follows append order even when the last append is backdated', () => {

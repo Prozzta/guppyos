@@ -1,7 +1,7 @@
 /** W5's durable, main-owned reconciliation queue and per-agent turn sequence. */
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { ClaimRec, ClaimsState, KeyRegistry, R5Candidate, ReconcileItem } from '../../shared/claims';
+import type { ClaimRec, ClaimsState, KeyRegistry, LedgerRec, R5Candidate, ReconcileItem } from '../../shared/claims';
 import { canonicalJson, sha256Hex } from './canonical';
 import { editDistance } from './registry';
 
@@ -21,6 +21,7 @@ export interface ReconcileApiDeps {
   appendSoftSupersede: (agentId: string, loser: string, winner: string, itemId: string) => Promise<{ ok: boolean }>;
   /** Resolves the deterministic newest-wins direction from verified claim records. */
   newestWins: (item: ReconcileItem) => { loser: string; winner: string } | null;
+  isLiveClaim: (claimId: string) => boolean;
   isOwner: (agentId: string) => boolean;
 }
 
@@ -51,9 +52,9 @@ export class ReconcileApi {
     for (const item of this.d.queue.completeTurn(agentId, active)) {
       if (item.turnsUnanswered < 3 || item.kind !== 'conflict') continue;
       const direction = this.d.newestWins(item);
-      if (!direction) continue;
+      if (!direction || !this.d.isLiveClaim(direction.winner)) continue;
       const result = await this.d.appendSoftSupersede(agentId, direction.loser, direction.winner, item.itemId);
-      if (result.ok) this.d.queue.answered(agentId, item.itemId);
+      if (result.ok) this.d.queue.answeredPair(agentId, item.a, item.b);
     }
   }
 }
@@ -168,6 +169,16 @@ export class ReconcileQueue {
   chargeDailyTokens(day: string, tokens: number, cap = 10_000): boolean {
     if (!Number.isInteger(tokens) || tokens < 0) return false;
     this.state.dailyTokens ??= {};
+    const now = Date.parse(`${day}T00:00:00.000Z`);
+    if (Number.isFinite(now)) {
+      const oldest = now - 7 * 24 * 60 * 60 * 1000;
+      let pruned = false;
+      for (const savedDay of Object.keys(this.state.dailyTokens)) {
+        const savedAt = Date.parse(`${savedDay}T00:00:00.000Z`);
+        if (Number.isFinite(savedAt) && savedAt < oldest) { delete this.state.dailyTokens[savedDay]; pruned = true; }
+      }
+      if (pruned) this.save();
+    }
     if ((this.state.dailyTokens[day] ?? 0) + tokens > cap) return false;
     this.state.dailyTokens[day] = (this.state.dailyTokens[day] ?? 0) + tokens;
     this.save();
@@ -203,6 +214,11 @@ export async function enqueueR5AfterIndex(agentId: string, claimId: string, deps
     deps.enqueue(agentId, valid);
     for (const p of valid) deps.log({ kind: 'claims-reconcile-r5-enqueued', agentId, claimId, a: p.a, b: p.b, cosine: p.cosine, tau2: TAU2 });
   } catch { /* indexing/R5 are advisory and cannot roll back an acknowledged append */ }
+}
+
+/** Exclude only the one-time W6 import; reader-watcher claims have source self and still qualify. */
+export function shouldRunR5(rec: LedgerRec): rec is ClaimRec {
+  return rec.t === 'claim' && rec.source !== 'legacy';
 }
 
 /** Stable item ids are independent of enqueue order and process lifetime. */

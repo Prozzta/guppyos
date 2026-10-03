@@ -2,7 +2,6 @@ import type {
   BuildWorkingSetFn, ClaimRec, ClaimsState, LedgerRec, Receipt, ReconcileItem,
   RenderExportLineFn, RenderMemoryMdFn, WorldView,
 } from '../../shared/claims';
-import { reconcilePromptText } from './reconcile';
 import { GENERATED_MEMORY_MARKER } from './generated';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
@@ -23,7 +22,7 @@ const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): strin
 };
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
-export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
+export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, _reconcileItems: ReconcileItem[] = []): {
   buildWorkingSet: BuildWorkingSetFn; renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn; renderExportLine: RenderExportLineFn;
 } {
   const claims = records.filter((r): r is ClaimRec => r.t === 'claim');
@@ -69,10 +68,9 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       const id = claim.id;
       if (!add(claimLine(claim, state.claims[id].status, view.flags[id] ?? []), 0, id)) excluded.set(id, 'tier-share');
     }
-    // T1 contains warning/reconcile markers only, not claim text.
+    // T1 contains working-set warning markers only; reconcile text is injected by ReconcileApi.
     const markers = [
       ...Object.keys(view.flags).filter(id => view.flags[id].length).sort(cmp).map(id => `⚠ ${id}: ${view.flags[id].join(', ')}`),
-      ...reconcileItems.map(reconcilePromptText),
     ];
     let markersIncluded = 0;
     for (const marker of markers) if (add(marker, 1)) markersIncluded++;

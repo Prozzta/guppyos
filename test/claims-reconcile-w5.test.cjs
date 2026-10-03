@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
-const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, keyAliasCandidates, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
+const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAliasCandidates, reconcileItemId, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
 
 test('G5.1 offers at most three leased items and assigns a persisted monotonic agent turn', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -68,6 +68,30 @@ test('R5 runs only after a successful index, uses tau2 and logs each enqueued co
   assert.equal(logs[0].cosine, 0.91); assert.equal(logs[0].tau2, 0.8);
 });
 
+test('R5 never queries candidates or enqueues when index is absent, unsent, failed, or throws', async () => {
+  for (const syncIndex of [
+    async () => null,
+    async () => ({ sent: false }),
+    async () => ({ sent: true, reply: { ok: false } }),
+    async () => { throw new Error('index threw'); },
+  ]) {
+    let queried = 0, enqueued = 0;
+    await enqueueR5AfterIndex('owner', 'fresh', {
+      syncIndex,
+      candidates: async () => { queried++; return []; },
+      enqueue: () => { enqueued++; }, log: () => {},
+    });
+    assert.equal(queried, 0); assert.equal(enqueued, 0);
+  }
+});
+
+test('R5 predicate excludes one-time imports but includes reader notes carrying legacy provenance', () => {
+  const claim = { t: 'claim', source: 'self', id: 'x' };
+  assert.equal(shouldRunR5({ ...claim, source: 'legacy' }), false);
+  assert.equal(shouldRunR5({ ...claim, legacy: { file: 'memory.md', line: 1, sha256: 'a'.repeat(64) } }), true);
+  assert.equal(shouldRunR5({ t: 'event', ev: 'pin' }), false);
+});
+
 test('G5.5 daily reconcile token budget is global across agents and survives restart', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'queue.json'); const q = new ReconcileQueue(file);
@@ -78,28 +102,68 @@ test('G5.5 daily reconcile token budget is global across agents and survives res
   assert.equal(restarted.chargeDailyTokens('2026-10-03', 4000), true);
 });
 
-test('G5.3 owner-only delivery and G5.5 count only injected item text plus answer ask', (t) => {
+test('G5.5 daily token accounting prunes entries older than seven days', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const q = new ReconcileQueue(path.join(dir, 'queue.json'));
+  assert.equal(q.chargeDailyTokens('2026-09-25', 20), true);
+  assert.equal(q.chargeDailyTokens('2026-10-03', 5), true);
+  assert.equal(q.dailyTokens('2026-09-25'), 0);
+  assert.equal(q.dailyTokens('2026-10-03'), 5);
+});
+
+test('G5.3 owner-only delivery with queued foreign work and G5.5 count only injected text', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const q = new ReconcileQueue(path.join(dir, 'queue.json'));
+  q.refresh('wing', [{ itemId: 'foreign', kind: 'conflict', a: 'fa', b: 'fb', text: 'private pair' }]);
   q.refresh('owner', [{ itemId: 'i', kind: 'conflict', a: 'a', b: 'b', text: 'duplicate facts' }]);
   const log = [];
   const api = new ReconcileApi({ queue: q, countTokens: (s) => s.split(/\s+/).length, log: (r) => log.push(r),
-    appendSoftSupersede: async () => ({ ok: true }), newestWins: () => null, isOwner: (a) => a === 'owner' });
+    appendSoftSupersede: async () => ({ ok: true }), newestWins: () => null, isLiveClaim: () => true, isOwner: (a) => a === 'owner' });
   const wing = api.reconcileForTurn('wing', '2026-10-03');
   assert.deepEqual(wing.itemIds, []); assert.equal(log.length, 0);
+  assert.deepEqual(q.items('wing'), [], 'the non-owner queue was not leased');
   const owner = api.reconcileForTurn('owner', '2026-10-03');
   assert.deepEqual(owner.itemIds, ['i']);
   assert.equal(owner.tokens, api.d.countTokens(reconcilePromptText(q.items('owner')[0])));
   assert.equal(log[0].tokens, owner.tokens);
 });
 
-test('G5.2/G5.4 W5 API applies newest-wins only after three completed unanswered turns', async (t) => {
+test('G5.5 three queued items charge only two that fit; the third lease is released', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const q = new ReconcileQueue(path.join(dir, 'queue.json'));
+  q.refresh('owner', Array.from({ length: 3 }, (_, i) => ({ itemId: `i${i}`, kind: 'conflict', a: `a${i}`, b: `b${i}`, text: `pair ${i}` })));
+  const api = new ReconcileApi({ queue: q, countTokens: () => 5, log: () => {}, appendSoftSupersede: async () => ({ ok: true }),
+    newestWins: () => null, isLiveClaim: () => true, isOwner: () => true });
+  q.chargeDailyTokens('2026-10-03', 9990);
+  const delivery = api.reconcileForTurn('owner', '2026-10-03');
+  assert.deepEqual(delivery.itemIds, ['i0', 'i1']);
+  assert.equal(delivery.tokens, 10);
+  assert.deepEqual(q.items('owner').map((i) => i.itemId), ['i0', 'i1']);
+  assert.equal(q.dailyTokens('2026-10-03'), 10_000);
+});
+
+test('key-alias proposals never soft-supersede after repeated completed turns', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const q = new ReconcileQueue(path.join(dir, 'queue.json'));
+  q.refresh('owner', [{ itemId: 'alias', kind: 'key-alias', a: 'a', b: 'b', text: 'near keys' }]);
+  let appends = 0;
+  const api = new ReconcileApi({ queue: q, countTokens: () => 1, log: () => {}, isOwner: () => true, isLiveClaim: () => true,
+    newestWins: () => ({ loser: 'a', winner: 'b' }), appendSoftSupersede: async () => { appends++; return { ok: true }; } });
+  for (let i = 0; i < 4; i++) {
+    const delivery = api.reconcileForTurn('owner', '2026-10-03');
+    await api.onTurnCompleted('owner', delivery.turn);
+  }
+  assert.equal(appends, 0);
+});
+
+test('G5.2 API applies newest-wins only after three completed unanswered turns', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const q = new ReconcileQueue(path.join(dir, 'queue.json'));
   q.refresh('owner', [{ itemId: 'conflict', kind: 'conflict', a: 'old', b: 'new', text: 'same slot' }]);
   const appended = [];
   const api = new ReconcileApi({ queue: q, countTokens: () => 1, log: () => {}, isOwner: () => true,
-    newestWins: () => ({ loser: 'old', winner: 'new' }),
+    isLiveClaim: () => true,
+    newestWins: (item) => item.a === 'old' && item.b === 'new' ? ({ loser: 'old', winner: 'new' }) : null,
     appendSoftSupersede: async (...args) => { appended.push(args); return { ok: true }; } });
   for (let n = 0; n < 2; n++) {
     const delivery = api.reconcileForTurn('owner', '2026-10-03');
@@ -110,4 +174,12 @@ test('G5.2/G5.4 W5 API applies newest-wins only after three completed unanswered
   await api.onTurnCompleted('owner', third.turn);
   assert.deepEqual(appended, [['owner', 'old', 'new', 'conflict']]);
   assert.deepEqual(q.items('owner'), []);
+  q.enqueueR5('owner', [{ a: 'other', b: 'pair', cosine: 0.95, tau2: TAU2 }]);
+  assert.deepEqual(q.beginTurn('owner').items.map((i) => i.itemId), [reconcileItemId('owner', 'conflict', 'other', 'pair')]);
+  for (let n = 0; n < 3; n++) {
+    const next = q.beginTurn('owner');
+    await api.onTurnCompleted('owner', next.turn);
+  }
+  assert.equal(appended.filter((args) => args[1] === 'old' && args[2] === 'new').length, 1,
+    'the resolved pair cannot recur through later refresh/turns');
 });

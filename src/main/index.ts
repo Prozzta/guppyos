@@ -9,7 +9,7 @@ import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
-import { enqueueR5AfterIndex, reconcileQueueForHive } from './claims/reconcile';
+import { enqueueR5AfterIndex, reconcileQueueForHive, shouldRunR5 } from './claims/reconcile';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
@@ -1278,7 +1278,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
         onAppend: (agentId, id, rec) => {
-          if (rec.t !== 'claim' || rec.source === 'legacy' || rec.legacy) { claimsIndexSync()?.schedule(agentId); return; }
+          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
           const root = hive.root(); if (!root) return;
           void enqueueR5AfterIndex(agentId, id, {
             syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),

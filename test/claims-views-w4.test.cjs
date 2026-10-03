@@ -39,13 +39,14 @@ test('tier 0 overflow is explicit and not promoted; mail remains excluded until 
   assert.ok(!out.receipt.included.some(x => x.id === 'pin2'));
 });
 
-test('warning and reconcile markers occupy tier 1, not claim inclusion slots', () => {
+test('warning markers occupy tier 1; reconcile items are delivered only by the reconcile API', () => {
   const records = [claim('f', 'flagged fact')];
   const item = { itemId: 'r1', agent: 'a', kind: 'conflict', a: 'f', b: 'g', text: 'choose one', turnsUnanswered: 0 };
   const views = V.createClaimViews(records, () => 1, [item]);
   const out = views.buildWorkingSet(stateFor(records), world({ f: ['stale-ref'] }), 300);
   assert.match(out.text, /⚠ f: stale-ref/);
-  assert.match(out.text, /⚠ reconcile r1: choose one/);
+  assert.doesNotMatch(out.text, /reconcile r1/);
+  assert.doesNotMatch(out.text, /reconcile r1/);
   assert.equal(out.receipt.included.find(x => x.id === 'f').tier, 2);
 });
 

@@ -776,21 +776,21 @@ test('the safeStorage key provider: load never creates; create then load; a bad 
   assert.deepEqual(p.create(), { ok: false, reason: 'unavailable' });
 });
 
-test('the W6 append: w6-internal only; R5 only when opts.r5 and acked; an N-claim import enqueues 0', async () => {
+test('the W6 append is w6-internal only and leaves R5 scheduling to the shared post-index path', async () => {
   const { makeW6Append } = loadTs(path.join(ROOT, 'src/main/claims/w6Append.ts'));
   const root = hive();
   const { store } = mkStore(root);
   const asked = []; const queued = [];
   const r5 = { candidates: async (a, id) => { asked.push(id); return [{ a: id, b: 'c-000000000000', cosine: 0.9, tau2: 0.85 }]; }, enqueue: (a, pairs) => queued.push(...pairs) };
-  const w6 = makeW6Append(store, r5);
+  const w6 = makeW6Append(store);
   for (let i = 0; i < 25; i++) await ok(w6('andy', note(`bullet ${i}`, { legacy: { file: 'memory.md', line: i, sha256: crypto.createHash('sha256').update(String(i)).digest('hex') } }), 'w6-internal', { r5: false }));
   assert.equal(asked.length, 0); assert.equal(queued.length, 0, 'the legacy import enqueues no R5 item');
   const id = await ok(w6('andy', note('a new bullet', { source: 'self' }), 'w6-internal', { r5: true }));
-  assert.deepEqual(asked, [id]); assert.equal(queued.length, 1);
+  assert.ok(id); assert.deepEqual(asked, []); assert.equal(queued.length, 0, 'W6 never invokes the direct R5 path');
   await refused(w6('andy', note('x'.repeat(4001), { source: 'self' }), 'w6-internal', { r5: true }), /4000/);
-  assert.equal(asked.length, 1, 'no R5 for a refused append');
+  assert.equal(asked.length, 0, 'no R5 for a refused append');
   await refused(w6('andy', note('x'), 'endpoint', { r5: false }), /w6-internal only/);
-  const failing = makeW6Append(store, { candidates: async () => { throw new Error('index down'); }, enqueue: () => assert.fail('never') });
+  const failing = makeW6Append(store);
   await ok(failing('andy', note('still appended', { source: 'self' }), 'w6-internal', { r5: true }));
 });
 
@@ -821,6 +821,18 @@ test('the memory CLI posts a claim verb with the token and prints the id', async
   assert.equal(out.join(''), 'noted c-0123456789ab\n');
   assert.equal(got.url, `/memory/${'a'.repeat(32)}`);
   assert.deepEqual(got.body, { cmd: 'note', args: { kind: 'lesson', text: 'Fetch before basing a branch' } });
+});
+
+test('a different agent cannot reconcile another owner’s claim ids', async () => {
+  const root = hive();
+  const { store } = mkStore(root);
+  const d = { store, level: () => 'writer' };
+  const a = await ok(store.appendRecord('agent-a', note('A'), 'endpoint'));
+  const b = await ok(store.appendRecord('agent-a', note('B'), 'endpoint'));
+  const r = await handleClaimVerb(d, 'agent-b', { cmd: 'reconcile', args: { a, b, answer: 'keep-both' } }, 'endpoint');
+  assert.equal(r.exit, 2);
+  assert.match(r.error, /unknown id/);
+  assert.equal(store.readLedger('agent-b').records.length, 0);
 });
 
 test('W5 soft supersede is main-only and uses the ordinary authenticated chain writer', async () => {
