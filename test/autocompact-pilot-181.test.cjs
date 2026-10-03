@@ -112,7 +112,12 @@ K.watchLogsAll = (M = CH) => {
   x.w.noteCompact('god', 'C:/t.jsonl');
   x.w.onStop('god');
   assert.deepEqual(x.rows.map((r) => r.preTokens), [73847, 74679, 75087], 'ONE ROW PER COMPACTION, ALL OF THEM');
-  assert.deepEqual(Object.keys(x.rows[0]).sort(), ['agentId', 'at', 'durationMs', 'firstRequest', 'kind', 'postTokens', 'preTokens', 'trigger', 'window']);
+  // READS-COMPACT-HEALTH (1.1.83) adds the count, the summary size, the idle/cache cost and the check
+  // (carry false / ok null without a SessionStart carry: test/reads-compact-health-183).
+  assert.deepEqual(Object.keys(x.rows[0]).sort(), ['agentId', 'at', 'cacheRewrite', 'carry', 'compactCostEst', 'durationMs', 'firstRequest', 'idleBeforeMs', 'kind', 'n', 'ok', 'postTokens', 'preTokens', 'summaryChars', 'summaryTokensEst', 'trigger', 'window']);
+  assert.deepEqual(x.rows.map((r) => r.n), [1, 2, 3], 'COUNTED PER AGENT');
+  assert.equal(x.rows[0].summaryChars, 'summary'.length, 'b1 has its summary record');
+  assert.equal(x.rows[1].summaryChars, null, 'b2 has none in the tail');
   assert.equal(x.rows[0].kind, 'compact-health');
   assert.equal(x.rows[0].window, 150000);
   x.w.noteCompact('god', 'C:/t.jsonl');
@@ -158,7 +163,9 @@ test('wiring: the env var on Claude spawns only; the watcher on SessionStart(com
 
 test('open mail is re-injected after a compaction (ZT-I1-MAIL 11.5), and the prompt fingerprint ignores the env', () => {
   const hooks = readSource('src/main/hooks.ts');
-  assert.match(hooks, /if \(injecting && agentId && !fromSubagent && event === 'SessionStart' && p\.source === 'compact' && p\.transport !== 'pipe-oneway'\) \{\n      try \{ mailBlock = this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, steer, mail\]\); \}/);
+  // READS-COMPACT-HEALTH (1.1.83): the carry note (cards in progress, owed mail) joins the budget first.
+  assert.match(hooks, /if \(injecting && agentId && !fromSubagent && event === 'SessionStart' && p\.source === 'compact' && p\.transport !== 'pipe-oneway'\) \{\n[\s\S]{0,400}?try \{ mailBlock = this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, steer, mail, carry\]\); \}/);
+  assert.doesNotMatch(hooks, /this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, steer, mail\]\)/, 'the old call without the carry is gone');
   // The window is an env var only: the session-prompt fingerprint reads the injected prompt text,
   // never opts.env (test/session-prompt-rotation pins the fingerprints themselves).
   const hive = readSource('src/main/hive.ts');
