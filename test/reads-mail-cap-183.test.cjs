@@ -103,7 +103,7 @@ test('builder: a capped 6,000-character body shows ~1,500 characters plus BOTH p
   assert.ok(blk.text.length < 2_200, `block ${blk.text.length}`);
   assert.ok(blk.text.includes(body.slice(0, 1_300)), 'the head of the body');
   assert.ok(!blk.text.includes(body.slice(1_600, 1_700)), 'not the rest');
-  assert.ok(blk.text.includes(`[... shortened: ${body.length} characters in total. Read the rest in ${P('big')} (after this turn: ${D('big')}) when you need it]`));
+  assert.ok(blk.text.includes(`[... shortened: ${body.length} characters in total. The rest is in ${P('big')} (after this turn: ${D('big')}); read it there when you need it]`));
   // Uncapped (no cap on the item): whole, as before.
   const whole = S.buildMailBlock({ items: [item('w', body)], budget: 9_500, phase: 'turn-start' });
   assert.deepEqual(whole.capped, []);
@@ -178,7 +178,7 @@ test('hooks: god gets an agent\'s long mail capped with both paths; the inbox fi
   assert.ok(!c.includes('THE-TAIL-MARKER'), 'the tail is not in context');
   const inbox = path.join(f.hive.root(), 'agents', 'god-1', 'inbox');
   const file = path.join(inbox, `${m.id}.json`);
-  assert.ok(c.includes(`Read the rest in ${file} (after this turn: ${path.join(inbox, '.done', `${m.id}.json`)}) when you need it]`), c.slice(-400));
+  assert.ok(c.includes(`The rest is in ${file} (after this turn: ${path.join(inbox, '.done', `${m.id}.json`)}); read it there when you need it]`), c.slice(-400));
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).body, body, 'no lost function: the whole body is on disk');
   const row = f.logRows().find((r) => r.kind === 'mail-capped' && r.id === m.id);
   assert.ok(row, 'mail-capped row');

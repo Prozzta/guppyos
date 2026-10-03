@@ -303,7 +303,7 @@ function renderItem(it: MailBlockItem, truncate: boolean, keep = MAIL_TRUNCATE_C
   } else {
     const cut = mailCapCut(body, it.cap);
     if (cut === null) lines.push('', body);
-    else lines.push('', body.slice(0, cut), `[... shortened: ${body.length} characters in total. Read the rest in ${whereText(it.path)} when you need it]`);
+    else lines.push('', body.slice(0, cut), `[... shortened: ${body.length} characters in total. The rest is in ${whereText(it.path)}; read it there when you need it]`);
   }
   return lines.join('\n');
 }
