@@ -32,6 +32,8 @@ export interface WorkerConfig {
   idleUnloadMs?: number;
   /** CLAIM-LEDGER: the Settings level (config claimLedger); discovery derives each agent's level. */
   claimLedger?: unknown;
+  /** CLAIMS-HEAD-ANCHOR: the agents main holds an anchor for (A-2). */
+  anchored?: string[];
 }
 
 export interface Port {
@@ -79,7 +81,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   };
   const embedder = new OnnxEmbedder(modelPath, tokenizer, verifiedOrt, { intraOpNumThreads: 2 });
   const engine = new MemoryEngine({
-    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger,
+    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     ...(typeof cfg.idleUnloadMs === 'number' && cfg.idleUnloadMs > 0 ? { idleUnloadMs: cfg.idleUnloadMs } : {})
@@ -113,7 +115,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
         guard(engine.backfill(), (r) => ({ exit: 0, json: { eligible: r.discovery.eligible.length, embedded: r.embedded, removed: r.removed } }));
         break;
       case 'report': {
-        const d = discoverSources(cfg.hiveRoot, undefined, { claimLedger: cfg.claimLedger });
+        const d = discoverSources(cfg.hiveRoot, undefined, { claimLedger: cfg.claimLedger, anchored: cfg.anchored });
         guard(engine.status(), (s) => ({ exit: 0, json: { allowListVersion: d.allowListVersion, counts: d.counts, excludedMd: d.excludedMd, rejectedConfig: d.rejectedConfig, failed: [...engine.failed.entries()], index: s.json } }));
         break;
       }
@@ -121,7 +123,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
         guard(engine.syncClaims(a as unknown as ClaimsSyncArgs), (r) => ({ exit: 0, json: r }));
         break;
       case 'claim-ledger':
-        guard(engine.setClaimLedger(a.value), (r) => ({ exit: 0, json: r }));
+        guard(engine.setClaimLedger(a.value, a.anchored), (r) => ({ exit: 0, json: r }));
         break;
       case 'r5-candidates':
         guard(engine.r5Candidates(String(a.wing ?? ''), String(a.claimId ?? ''), Number(a.tau2 ?? 1)), (r) => ({ exit: 0, json: r }));

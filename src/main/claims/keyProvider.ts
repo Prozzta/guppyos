@@ -91,6 +91,48 @@ export class FileLedgerKeyRecord implements LedgerKeyRecord {
   }
 }
 
+/**
+ * CLAIMS-HEAD-ANCHOR: each agent's ledger head (sha256 of its last line), kept by main in
+ * user-data next to the key record, never in the hive or an agent folder. A ledger whose chain no
+ * longer reaches its anchored head (deleted, restarted, truncated) is detected on read.
+ */
+export interface HeadAnchorStore {
+  get(hiveRoot: string, agentId: string): { head: string; lastId: string } | null;
+  set(hiveRoot: string, agentId: string, a: { head: string; lastId: string }): void;
+  /** Every agent anchored for this hive (Jim A-2: main checks each, even with no segment left). */
+  agents(hiveRoot: string): string[];
+}
+
+export const HEAD_ANCHOR_FILE = 'claims-heads.json';
+
+export class FileHeadAnchorStore implements HeadAnchorStore {
+  constructor(private readonly file: string) {}
+  private read(): { v: 1; hives: Record<string, Record<string, { head: string; lastId: string; at: string }>> } {
+    try {
+      const j = JSON.parse(readFileSync(this.file, 'utf8'));
+      if (j && j.v === 1 && j.hives && typeof j.hives === 'object') return j;
+    } catch { /* missing or unreadable: no anchors */ }
+    return { v: 1, hives: {} };
+  }
+  get(hiveRoot: string, agentId: string): { head: string; lastId: string } | null {
+    const e = this.read().hives[hiveIdOf(hiveRoot)]?.[agentId];
+    return e && typeof e.head === 'string' ? { head: e.head, lastId: String(e.lastId ?? '') } : null;
+  }
+  agents(hiveRoot: string): string[] {
+    const h = this.read().hives[hiveIdOf(hiveRoot)] ?? {};
+    return Object.keys(h).filter((a) => typeof h[a]?.head === 'string' && h[a].head !== '');
+  }
+  set(hiveRoot: string, agentId: string, a: { head: string; lastId: string }): void {
+    const j = this.read();
+    const h = (j.hives[hiveIdOf(hiveRoot)] ??= {});
+    h[agentId] = { head: a.head, lastId: a.lastId, at: new Date().toISOString() };
+    mkdirSync(dirname(this.file), { recursive: true });
+    const tmp = `${this.file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(j, null, 2));
+    renameSync(tmp, this.file);
+  }
+}
+
 export class SandboxKeyProvider implements MacKeyProvider {
   private key: Buffer | null;
   constructor(key?: Uint8Array | null) { this.key = key ? Buffer.from(key) : null; }

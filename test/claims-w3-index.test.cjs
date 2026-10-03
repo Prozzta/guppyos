@@ -142,7 +142,14 @@ test('W3-1: a memory-sources.json change on disk reconciles through the watcher,
   assert.equal(r.afterWatch.claims, 0);
 });
 
-test('Jim S-b: the claim-ledger op through runWorker\'s dispatch reaches the engine: a new level changes it, a repeat does not, another changes it again', { timeout: 5 * 60_000 }, async () => {
+test('Jim A-2 (anchor): a deleted ledger folder of an anchored agent: its markdown stays out, its claims stay, nothing is re-embedded; without the anchor it would swap back', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('anchoredDeleted');
+  assert.deepEqual(r.anchored, { replaced: 0, claims: 1, reEmbedded: 0, removed: 0 }, JSON.stringify(r));
+  assert.deepEqual(r.viaOp, { changed: true, replaced: 0, claims: 1 }, 'the anchor pushed with the level works the same');
+  assert.ok(r.plain.replaced >= 3 && r.plain.claims === 0, `the control: no anchor, the markdown swaps back ${JSON.stringify(r.plain)}`);
+});
+
+test('Jim S-b:the claim-ledger op through runWorker\'s dispatch reaches the engine: a new level changes it, a repeat does not, another changes it again', { timeout: 5 * 60_000 }, async () => {
   const r = await scenario('workerLedger');
   assert.equal(r.ready, true);
   assert.equal(r.sync.ok, false); assert.match(r.sync.error, /not indexed for a1 \(level off\)/, 'this build implements off: a real worker clamps to it');

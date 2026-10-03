@@ -9,7 +9,8 @@
  *   - Only agents at an effective level of reader or writer are sent (shadow: not indexed).
  *   - A chain break (mac, prev, parse): only the records BEFORE the break are sent, so a forged or
  *     edited line never reaches search (M9); the index drops anything after it.
- *   - A lost key: nothing is sent (the ledger cannot be verified); the index keeps what was verified.
+ *   - A lost key, or a head-anchor break (a cut or deleted ledger): nothing is sent; the index
+ *     keeps what was verified.
  *   - Syncs are debounced per agent (a burst of notes is one sync) and never overlap per agent.
  */
 import type { DeriveFn, KeyRegistry, LedgerLevel, LedgerRec, ReadResult } from '../../shared/claims';
@@ -35,13 +36,15 @@ export interface IndexSyncDeps {
 
 export type SyncOutcome =
   | { sent: true; records: number; chunks: number; truncatedAt?: string; reply: { ok: boolean; error?: string; json?: unknown } }
-  | { sent: false; why: 'level' | 'no-derive' | 'key-missing' | 'empty' };
+  | { sent: false; why: 'level' | 'no-derive' | 'key-missing' | 'head-anchor' | 'empty' };
 
 /** The records a sync may index: all of them, or those before a chain break; none on a lost key. */
 export function verifiedPrefix(r: ReadResult): { records: LedgerRec[]; truncatedAt?: string } | null {
   const chain = r.chain;
   if (chain === 'ok') return { records: r.records };
-  if (chain.reason === 'key-missing') return null;
+  // A lost key, or a ledger that no longer reaches its anchored head (cut, deleted: Jim's
+  // CLAIMS-HEAD-ANCHOR should): nothing is sent, so the index keeps its verified state.
+  if (chain.reason === 'key-missing' || chain.brokenAt === 'head-anchor') return null;
   const i = r.records.findIndex((x) => x.id === chain.brokenAt);
   return { records: i < 0 ? [] : r.records.slice(0, i), truncatedAt: chain.brokenAt };
 }
@@ -85,8 +88,13 @@ export class ClaimsIndexSync {
       if (!this.noDeriveLogged) { this.noDeriveLogged = true; this.d.log?.({ kind: 'claims-index-no-derive' }); }
       return { sent: false, why: 'no-derive' };
     }
-    const prefix = verifiedPrefix(this.d.readLedger(agentId));
-    if (!prefix) { this.d.log?.({ kind: 'claims-index-skipped', agentId, why: 'key-missing' }); return { sent: false, why: 'key-missing' }; }
+    const read = this.d.readLedger(agentId);
+    const prefix = verifiedPrefix(read);
+    if (!prefix) {
+      const why = read.chain !== 'ok' && read.chain.brokenAt === 'head-anchor' ? 'head-anchor' : 'key-missing';
+      this.d.log?.({ kind: 'claims-index-skipped', agentId, why });
+      return { sent: false, why };
+    }
     const state = derive(prefix.records, this.d.registry(), this.d.ruleConfig());
     const chunks = withParts(chunksFor(prefix.records, state));
     const head = state.ledgerHead || (prefix.records.length ? prefix.records[prefix.records.length - 1].mac : '');

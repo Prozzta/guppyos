@@ -616,7 +616,7 @@ test('CLAIM-LEDGER W3-1: a running worker follows the CURRENT Settings level: th
   const p2 = w.query('search', { query: 'x' });
   await tick();
   assert.equal(wk.posted[2].op, 'claim-ledger');
-  assert.deepEqual(wk.posted[2].args, { value: 'reader' });
+  assert.deepEqual(wk.posted[2].args, { value: 'reader', anchored: [] });
   assert.equal(wk.posted.length, 3, 'the search waits for the worker to follow');
   wk.reply({ id: wk.posted[2].id, ok: true, exit: 0, json: { changed: true } });
   await tick(); await tick();
@@ -629,4 +629,29 @@ test('CLAIM-LEDGER W3-1: a running worker follows the CURRENT Settings level: th
   assert.equal(wk.posted[4].args.claimLedger, 'reader', 'and the sync carries the level');
   wk.reply({ id: wk.posted[4].id, ok: true, exit: 0, json: {} });
   await p3;
+});
+
+test('CLAIMS-HEAD-ANCHOR A-2: the anchored agents travel to the worker: in the fork config, and pushed with the level when they change', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  let anchored = ['a1'];
+  const { w, workers } = wiring(root, { ...runtime(root), claimLedger: () => 'reader', anchoredAgents: () => anchored });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = w.query('status');
+  await tick();
+  const wk = workers[0];
+  assert.deepEqual(wk.posted[0].config.anchored, ['a1'], 'a new worker gets them in its config');
+  assert.equal(wk.posted[1].op, 'status', 'nothing to push');
+  wk.reply({ event: 'ready' });
+  wk.reply({ id: wk.posted[1].id, ok: true, exit: 0, text: 's' });
+  await p1;
+  anchored = ['a2', 'a1'];
+  const p2 = w.query('search', { query: 'x' });
+  await tick();
+  assert.equal(wk.posted[2].op, 'claim-ledger');
+  assert.deepEqual(wk.posted[2].args, { value: 'reader', anchored: ['a1', 'a2'] }, 'a new anchor is pushed (same level)');
+  wk.reply({ id: wk.posted[2].id, ok: true, exit: 0, json: { changed: true } });
+  await tick(); await tick();
+  assert.equal(wk.posted[3].op, 'search');
+  wk.reply({ id: wk.posted[3].id, ok: true, exit: 0, text: 'r' });
+  await p2;
 });

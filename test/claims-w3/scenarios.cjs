@@ -399,6 +399,39 @@ module.exports = async (drill) => {
     return { orphan, wakeHasClaim: /quokka|wombat/.test(wake) || /quokka|wombat/.test(wakeAll), wakeHasNotes: /notefact/.test(wake), unsent };
   }
 
+  if (s === 'anchoredDeleted') {
+    // Jim A-2: a1's ledger folder is deleted; main still holds its anchor. The engine keeps a1
+    // flagged: memory.md and the rest stay out, its claims stay, nothing is re-embedded. Without
+    // the anchor (the bug) the markdown swaps back in.
+    md3();
+    manifest({ a1: 'reader' });
+    const run = async (anchored) => {
+      ledger('a1');
+      const store = open(); const emb = bowEmbedder(); const eng = engine(store, emb, { claimLedger: 'writer', anchored });
+      await eng.backfill();
+      await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]);
+      fs.rmSync(path.join(hive, 'agents', 'a1', 'memory', 'claims'), { recursive: true, force: true });
+      const t0 = emb.texts;
+      const r = await eng.reconcileNow();
+      const out = { replaced: replacedCount(store), claims: claimRows(store), reEmbedded: emb.texts - t0, removed: r.removed };
+      await eng.close(); store.close();
+      return out;
+    };
+    const anchoredRun = await run(['a1']);
+    // The anchor can also arrive later, through the claim-ledger op (main pushes it with the level).
+    ledger('a1');
+    const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'writer' });
+    await eng.backfill();
+    await sync(eng, 'a1', [chunk('c-000000000001', 'a1', 'live', 'memfact alpha zircon as a claim')]);
+    const pushed = await eng.setClaimLedger('writer', ['a1']);
+    fs.rmSync(path.join(hive, 'agents', 'a1', 'memory', 'claims'), { recursive: true, force: true });
+    await eng.reconcileNow();
+    const viaOp = { changed: pushed.changed, replaced: replacedCount(store), claims: claimRows(store) };
+    await eng.close(); store.close();
+    const plain = await run([]);
+    return { anchored: anchoredRun, viaOp, plain };
+  }
+
   if (s === 'workerLedger') {
     // Jim S-b: the claim-ledger op through runWorker's dispatch (a fake port; no markdown, empty
     // syncs, so nothing is embedded). Global shadow refuses a claims-sync; after the op it is accepted.

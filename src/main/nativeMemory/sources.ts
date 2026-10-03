@@ -86,6 +86,9 @@ export interface LedgerDiscovery {
   claimLedger?: unknown;
   /** This build's highest level (tests); default IMPLEMENTED_LEVEL. */
   implemented?: LedgerLevel;
+  /** CLAIMS-HEAD-ANCHOR (Jim A-2): agents main holds an anchor for. Such an agent still has a
+   *  ledger when its segments are gone (deleted), so its markdown stays out of search. */
+  anchored?: readonly string[];
 }
 
 const rel = (root: string, abs: string): string => relative(root, abs).split(sep).join('/');
@@ -176,6 +179,8 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
     let hasLedger = false;
     if (level === 'reader' || level === 'writer') {
       try { hasLedger = readdirSync(claimsDir).some((n) => SEGMENT_FILE.test(n)); } catch { hasLedger = false; }
+      // A deleted ledger does not swap the markdown back in: main's anchor says it existed (A-2).
+      if (!hasLedger && ledgerOpts.anchored?.includes(id)) hasLedger = true;
     }
     const flagged = hasLedger;
     if (flagged) {
