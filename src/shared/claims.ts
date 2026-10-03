@@ -21,6 +21,20 @@
  * that appends a `rekey` event, chained with the new key over the last verified record. Never
  * automatic. The key comes through an injectable MacKeyProvider, so tests and the Electron-as-Node
  * drills (no safeStorage before `app` is ready) use a sandbox key.
+ *   - After a key loss no earlier MAC can be verified. A rekey therefore means the Human ACCEPTS
+ *     the records up to its targets[0] on the sha256 `prev` chain alone; records after the rekey
+ *     verify with the new key (G1.10).
+ *   - "First use" (create() without a Human) means no claims segment exists under ANY agent. A
+ *     key that is missing while any segment exists is a lost key, never a reason to make a fresh
+ *     one: a dev build with another user-data folder gets key-missing.
+ *
+ * TEXT LIMITS (god, final rule). CLAIM_TEXT_MAX (400) for everything that arrives through an
+ * external entry point: POST /memory/<token>, the /ledger route's memory part and the UI IPC.
+ * Refused, never cut. CLAIM_TEXT_MAX_LEGACY (4000) only when main calls appendRecord with the
+ * origin 'w6-internal', which only W6's importLegacy and parseNewBullets pass. Every external entry
+ * point also refuses a draft that carries `source` or `legacy`. W6 splits a block over 4000 at line
+ * boundaries into parts with the same legacy {file,line,sha256}; appendRecord still refuses over
+ * 4000 as a backstop. Dedup keys on legacy.sha256 + part index, never on file:line.
  *
  * C3, ONE RETRACT FORM. A retraction is ONLY a ClaimRec with `retracts` (R3). There is no
  * `retract` event. A reconcile answer of 'retract' is recorded as the answer event, and main writes
@@ -37,8 +51,10 @@ export const CLAIM_KINDS: readonly ClaimKind[] = ['fact', 'decision', 'lesson', 
 export type ClaimSource = 'self' | 'human' | 'god' | `mail:${string}` | 'legacy';
 export type Ref = { type: 'file' | 'commit' | 'task' | 'msg' | 'url'; value: string };
 
-/** The longest claim text, in characters. Longer text is refused, never cut. */
+/** The longest claim text, in characters, through any external entry point. Longer text is refused, never cut. */
 export const CLAIM_TEXT_MAX = 400;
+/** The longest claim text for origin 'w6-internal' only (W6 importLegacy and parseNewBullets). */
+export const CLAIM_TEXT_MAX_LEGACY = 4000;
 
 export interface RecBase {
   v: 1;
@@ -115,6 +131,16 @@ export type RecordDraft =
     };
 
 export type AppendResult = { ok: true; id: string } | { ok: false; error: string; didYouMean?: string };
+
+/**
+ * Which code path calls appendRecord. Each caller passes its own constant; nothing in a request
+ * body can choose it.
+ *   'endpoint'     POST /memory/<token>; source 'self' (or 'mail:<id>' from the verb's own flag), <= 400
+ *   'ledger-route' the /ledger route's memory part (W6); as 'endpoint'
+ *   'ui-ipc'       the Human's UI (W7); source 'human', <= 400
+ *   'w6-internal'  W6 importLegacy and parseNewBullets only; source 'legacy' or 'self', `legacy` allowed, <= 4000
+ */
+export type AppendOrigin = 'endpoint' | 'ledger-route' | 'ui-ipc' | 'w6-internal';
 
 export interface TornInfo { segment: string; offset: number; bytes: number; quarantinedTo: string; at: string }
 
@@ -202,7 +228,7 @@ export interface ReconcileItem {
 }
 
 /** The API contracts (Â§2 table). Implementations live in their streams. */
-export type AppendRecordFn = (agentId: string, draft: RecordDraft) => Promise<AppendResult>;   // W1
+export type AppendRecordFn = (agentId: string, draft: RecordDraft, origin: AppendOrigin) => Promise<AppendResult>;   // W1
 export type ReadLedgerFn = (agentId: string) => ReadResult;                                     // W1
 export type DeriveFn = (records: LedgerRec[], registry: KeyRegistry, ruleConfig: { r4: boolean }) => ClaimsState;   // W2, pure
 export type WorldViewFn = (state: ClaimsState, records: LedgerRec[], usage: UsageRec[], world: WorldInputs) => WorldView;   // W2
@@ -228,24 +254,31 @@ export interface LedgerManifest { ledger: Record<string, LedgerLevel> }
  */
 export const IMPLEMENTED_LEVEL: LedgerLevel = 'off';
 
-function rank(level: unknown): number {
+/** A name a NEWER build may use for a level: a non-empty lower-case word. */
+const NEWER_LEVEL = /^[a-z][a-z0-9-]*$/;
+
+/** The rank of a saved value: a known level, ABOVE for a newer build's level name, or null (garbled). */
+function rank(level: unknown): number | null {
   const i = LEDGER_LEVELS.indexOf(level as LedgerLevel);
-  return i < 0 ? -1 : i;
+  if (i >= 0) return i;
+  return typeof level === 'string' && NEWER_LEVEL.test(level) ? LEDGER_LEVELS.length : null;
 }
 
 /**
  * effective = min(global, agent, implemented) (F8). `clamped` is true when the saved request (global
  * and agent) is above what this build implements: the caller logs a CLAIM_LEDGER_CLAMP_ROW. A level
- * above the build is clamped DOWN to the implemented level, never to 'off'. An unknown saved value
- * (a newer build's level) counts as above every known level; a missing agent entry follows the global.
+ * above the build is clamped DOWN to the implemented level, never to 'off'.
+ * Only a non-empty lower-case word that is not a known level (a newer build's level) counts as above
+ * every known level. Anything else (null, a number, '', 'Writer', garbage) is garbled: as the global it
+ * means 'off', as an agent entry it means "follow the global"; so is a missing value (Jim, 54d96ddb).
  */
 export function effectiveLevel(
   global: unknown, agent: unknown, implemented: LedgerLevel = IMPLEMENTED_LEVEL,
 ): { level: LedgerLevel; clamped: boolean } {
-  const g = global === undefined ? 0 : rank(global) < 0 ? LEDGER_LEVELS.length : rank(global);
-  const a = agent === undefined ? g : rank(agent) < 0 ? LEDGER_LEVELS.length : rank(agent);
+  const g = rank(global) ?? 0;
+  const a = rank(agent) ?? g;
   const requested = Math.min(g, a);
-  const impl = rank(implemented);
+  const impl = Math.max(0, LEDGER_LEVELS.indexOf(implemented));
   return requested > impl
     ? { level: LEDGER_LEVELS[impl], clamped: true }
     : { level: LEDGER_LEVELS[requested], clamped: false };

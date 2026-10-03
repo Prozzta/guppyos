@@ -30,6 +30,21 @@ test('G0.1 clamp table: min(global, agent, implemented), clamped down never to o
     ['writer', undefined, 'off', 'off', true],          // a build with nothing implemented
     ['writer2', undefined, 'reader', 'reader', true],   // an unknown (newer) level clamps down, not off
     ['writer', 'writer2', 'writer', 'writer', false],
+    // Garbled values never turn the ledger on (Jim, 54d96ddb): as the global they mean off ...
+    [null, undefined, 'writer', 'off', false],
+    ['', undefined, 'writer', 'off', false],
+    [0, undefined, 'writer', 'off', false],
+    [3, undefined, 'writer', 'off', false],
+    ['Writer', undefined, 'writer', 'off', false],
+    ['WRITER', 'writer', 'writer', 'off', false],
+    [' writer', undefined, 'writer', 'off', false],
+    [{}, undefined, 'writer', 'off', false],
+    // ... and as an agent entry they follow the global.
+    ['reader', null, 'writer', 'reader', false],
+    ['reader', '', 'writer', 'reader', false],
+    ['reader', 0, 'writer', 'reader', false],
+    ['reader', 'Writer', 'writer', 'reader', false],
+    ['shadow', ['writer'], 'writer', 'shadow', false],
   ];
   for (const [g, a, impl, level, clamped] of rows) {
     assert.deepEqual(effectiveLevel(g, a, impl), { level, clamped }, `${g}/${a}/${impl}`);
@@ -64,6 +79,14 @@ test('C3: one retract form, a claim with retracts', () => {
   assert.ok(eventBranch, 'the event branch found');
   assert.doesNotMatch(eventBranch[1], /'retract'/);
   assert.match(draft[1], /retracts\?: string\[\]/);
+});
+
+test('text limits: 400 for external entry points, 4000 for the w6-internal origin only', () => {
+  assert.equal(claims.CLAIM_TEXT_MAX, 400);
+  assert.equal(claims.CLAIM_TEXT_MAX_LEGACY, 4000);
+  const origin = /export type AppendOrigin = ([^;]+);/.exec(source)[1];
+  assert.deepEqual([...origin.matchAll(/'([a-z0-9-]+)'/g)].map((m) => m[1]), ['endpoint', 'ledger-route', 'ui-ipc', 'w6-internal']);
+  assert.match(source, /export type AppendRecordFn = \(agentId: string, draft: RecordDraft, origin: AppendOrigin\)/);
 });
 
 test('the EventKind union and EVENT_KINDS agree', () => {
