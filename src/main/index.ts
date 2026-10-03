@@ -34,6 +34,8 @@ import {
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
+import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor, autoCompactWindowIgnored } from '../shared/autoCompactWindow';
+import { CompactHealthWatch } from './compactHealth';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import { createRendererErrorGate } from '../shared/rendererError';
 import { INITIAL_GOD_PROMPT, withGodOrientationArg } from '../shared/godOrientation';
@@ -1122,6 +1124,14 @@ function notifyHeavySlotFree(agentId: string, kind: string, until: number): void
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }
+// READS-ROTATE-AT-SIZE pilot: a `compact-health` row per compaction (for READS-COMPACT-HEALTH).
+hookServer.setCompactHealth(new CompactHealthWatch({
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  windowOf: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? autoCompactWindowFor({ isGod: hive.isGod(agentId), autoCompactWindow: a.autoCompactWindow }, readConfig()) : null;
+  }
+}));
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a
 //    provider-confirmed turn (our own unconfirmed nudge is a new turn, not a live one);
@@ -4100,6 +4110,18 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       }
     }
     // The sessions this process opens, other than the one it resumed, carry this prompt.
+    // READS-ROTATE-AT-SIZE pilot (shared/autoCompactWindow.ts): Claude Code's own auto-compact
+    // window, per agent (god: 150k by default; config.godAutoCompactWindow "off" switches it off).
+    // An env var only: the injected prompt, and so its session fingerprint, are unchanged.
+    const compactAgent = { isGod: opts.hive.isGod, autoCompactWindow: hive.registry().agents[opts.hive.id]?.autoCompactWindow };
+    const compactWindow = autoCompactWindowFor(compactAgent, cfg);
+    // n1 (Creed): a setting that is set but invalid is ignored; say so instead of silently.
+    const compactIgnored = autoCompactWindowIgnored(compactAgent, cfg);
+    if (compactIgnored.length) hive.appendLog({ kind: 'auto-compact-window-ignored', agentId: opts.hive.id, ignored: compactIgnored, using: compactWindow });
+    if (compactWindow !== null) {
+      opts.env = { ...(opts.env ?? {}), [AUTO_COMPACT_WINDOW_ENV]: String(compactWindow) };
+      hive.appendLog({ kind: 'auto-compact-window', agentId: opts.hive.id, window: compactWindow });
+    }
     hive.noteSpawnPrompt(opts.hive.id, promptFp, resumedSid);
     opts.args = args;
     // BOOT-REENTER-PASTE-PROOF (1.1.81, shared/godOrientation.ts): a FRESH Claude god gets its

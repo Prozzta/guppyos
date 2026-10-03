@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
+import type { CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
 import type { ControlRegistry } from './control';
@@ -1572,6 +1573,10 @@ export class HookServer {
     return confirmed;
   }
 
+  /** READS-ROTATE-AT-SIZE pilot: logs each compaction's health (main wires it; null = not logged). */
+  private compactHealth: CompactHealthWatch | null = null;
+  setCompactHealth(w: CompactHealthWatch | null): void { this.compactHealth = w; }
+
   /** HEAVY-JOB-SERIALIZE: the app-held heavy-job lock (main wires it; null in tests = no lock). */
   private heavyLock: HeavyJobLock | null = null;
   setHeavyLock(lock: HeavyJobLock | null): void { this.heavyLock = lock; }
@@ -1753,6 +1758,14 @@ export class HookServer {
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
+    }
+    // READS-ROTATE-AT-SIZE pilot: one `compact-health` row per compaction (before any early return:
+    // a SessionStart(compact) that re-injects mail returns with it below).
+    if (agentId && !fromSubagent && this.compactHealth) {
+      try {
+        if (event === 'SessionStart' && p.source === 'compact') this.compactHealth.noteCompact(agentId, p.transcript_path ?? this.transcriptPaths.get(agentId));
+        else if (event === 'Stop') this.compactHealth.onStop(agentId);
+      } catch { /* observation only: never breaks a hook */ }
     }
     // §11.1: the record of an earlier response lands after it, so every later hook of the agent
     // (Stop included) looks for the evidence while tentative ids wait.
