@@ -13,11 +13,13 @@
  *   no body text is ever parsed by a shell: MSG-COMPOSE-SHELL-INJECTION).
  * - Everything is checked before anything is written; one error refuses the whole operation.
  * - Idempotent by `op`: a part already done for this op is skipped on a retry, so a crash
- *   between parts is repaired by running the same op again.
+ *   between parts is repaired by running the same op again. The op's CONTENT is hashed: the
+ *   same op name with different content is refused, never half-applied (Jim B1).
  * - The caller is the agent the URL token names; `from` is never taken from the input.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { HiveTask } from './hive';
 
 export const LEDGER_BODY_MAX = 256 * 1024;
@@ -149,7 +151,19 @@ function checkCardFields(o: Record<string, unknown>, where: string): string | nu
 /** Text for a free-text field: the old value, then `[iso] text` on its own line (god's form). */
 const appended = (old: unknown, text: string, at: Date): string => `${typeof old === 'string' ? old : ''}\n[${at.toISOString()}] ${text}`;
 
-interface OpRecord { op: string; at: string; card?: boolean; message?: string; memory?: number; line?: string }
+interface OpRecord { op: string; at: string; hash?: string; card?: boolean; message?: string; memory?: number; line?: string }
+
+/** Canonical JSON: object keys sorted, so the same content always hashes the same. */
+const canonical = (v: unknown): string => Array.isArray(v)
+  ? `[${v.map(canonical).join(',')}]`
+  : isObj(v) ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v) ?? 'null';
+
+/** Jim B1: sha256 of the parsed op without its name (what the op DOES, not what it is called). */
+export function opContentHash(op: LedgerOp): string {
+  const { op: _name, ...content } = op;
+  void _name;
+  return createHash('sha256').update(canonical(content)).digest('hex');
+}
 
 function readOps(file: string): OpRecord[] {
   try {
@@ -188,6 +202,12 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
   const opsFile = join(deps.agentDir, 'state', 'ledger-ops.json');
   const ops = readOps(opsFile);
   let rec = ops.find((o) => o.op === op.op);
+  const hash = opContentHash(op);
+  // Jim B1: a reused name with DIFFERENT content would otherwise be answered "already applied"
+  // (or, mid-retry, finished with the new content beside the old): refused, nothing written.
+  if (rec && rec.hash !== hash) {
+    return { status: 409, body: { ok: false, line: `refused: op ${op.op} was already used for a different operation; choose a new op name` } };
+  }
   if (rec?.line) return { status: 200, body: { ok: true, line: `${rec.line} (already applied)` } };
   const now = deps.now();
 
@@ -212,7 +232,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
     if (lessonText === null) return { status: 400, body: { ok: false, line: `refused: memory.md has no "${LESSONS_HEADING}" section for a lesson` } };
   }
 
-  if (!rec) { rec = { op: op.op, at: now.toISOString() }; ops.push(rec); }
+  if (!rec) { rec = { op: op.op, at: now.toISOString(), hash }; ops.push(rec); }
   const done: string[] = [];
   const save = (): void => { writeOps(opsFile, ops); };
   const fail = (part: string, e: unknown): LedgerReply => {

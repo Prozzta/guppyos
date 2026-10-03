@@ -20,7 +20,7 @@ import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
-import { condenseOutput, effectiveCap, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
+import { capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
 import type { ControlRegistry } from './control';
 import { DEV_HIDDEN } from './devIsolation';
 import type { CircuitBreaker } from './breaker';
@@ -229,9 +229,14 @@ export function agyHookPayload(event: string, agentId: string, agy: Record<strin
 /** HOOK-BROKER: the largest HTTP hook body accepted (a PostToolUse tool_response can be big). */
 export const HOOK_HTTP_BODY_MAX = 8 * 1024 * 1024;
 /** READS-181 B: a saved output up to this size is read whole to condense it; a larger one is read
- *  as its first and last CONDENSE_PART_BYTES (error lines in the middle are then not shown). */
-export const CONDENSE_READ_MAX = 4 * 1024 * 1024;
-export const CONDENSE_PART_BYTES = 1024 * 1024;
+ *  as its first and last CONDENSE_PART_BYTES (error lines in the middle are then not shown).
+ *  Jim N2: small, so the synchronous read never holds the main thread (hooks, UI, PTYs) long. */
+export const CONDENSE_READ_MAX = 256 * 1024;
+export const CONDENSE_PART_BYTES = 128 * 1024;
+/** N1 (god): a Read/grep of a condensed output's saved file within this many of the agent's tool
+ *  calls counts as a RE-FETCH (logged, so the caps can be tuned). */
+export const REFETCH_WINDOW_CALLS = 10;
+const REFETCH_TRACKED = 20;
 /** READS-181 B: full outputs kept under agents/<id>/tool-output are deleted after this long. */
 export const TOOL_OUTPUT_KEEP_MS = 7 * 24 * 3600_000;
 const TOOL_OUTPUT_PRUNE_EVERY_MS = 3600_000;
@@ -1606,7 +1611,8 @@ export class HookServer {
     if (provider && provider !== 'claude') return null;
     let own: unknown;
     try { own = this.hive.registry?.().agents[agentId]?.toolOutputCap; } catch { own = undefined; }
-    const cap = effectiveCap(typeof own === 'number' ? own : this.getConfig().toolOutputCap);
+    // N1 (god): a read-type command (grep, sed, cat, git diff …) gets the larger read cap.
+    const cap = capForCommand(commandOf(p.tool_input), effectiveCap(typeof own === 'number' ? own : this.getConfig().toolOutputCap));
     const r = (p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : null) as BashLikeResponse | null;
     if (!shouldCondense(p.tool_name, p.tool_input, r, cap) || !r) return null;
     let text = outputText(r);
@@ -1648,7 +1654,35 @@ export class HookServer {
       interrupted: r.interrupted === true,
       interpretation: typeof r.returnCodeInterpretation === 'string' && r.returnCodeInterpretation ? r.returnCodeInterpretation : undefined
     });
+    const chars = totalChars ?? text.length;
+    try {
+      this.hive.appendLog({ kind: 'tool-output-condensed', agentId, tool: p.tool_name, chars, kept: stdout.length, cap, read: isReadCommand(commandOf(p.tool_input)) });
+    } catch { /* best effort */ }
+    const list = this.condensedRecent.get(agentId) ?? [];
+    list.push({ base: path.split(/[\\/]/).pop() ?? path, path, at: this.toolCalls.get(agentId) ?? 0, chars });
+    if (list.length > REFETCH_TRACKED) list.shift();
+    this.condensedRecent.set(agentId, list);
     return { ...r, stdout, stderr: '' };
+  }
+
+  /** N1: each agent's tool calls so far, and its recently condensed outputs (for the re-fetch rate). */
+  private toolCalls = new Map<string, number>();
+  private condensedRecent = new Map<string, Array<{ base: string; path: string; at: number; chars: number }>>();
+
+  /** N1: a tool call that names a recently condensed output's saved file is a re-fetch: logged once. */
+  private noteRefetch(agentId: string, p: HookPayload): void {
+    const list = this.condensedRecent.get(agentId);
+    if (!list?.length) return;
+    const now = this.toolCalls.get(agentId) ?? 0;
+    const live = list.filter((e) => now - e.at <= REFETCH_WINDOW_CALLS);
+    let input = '';
+    try { input = JSON.stringify(p.tool_input ?? ''); } catch { input = ''; }
+    const kept = live.filter((e) => {
+      if (!input.includes(e.base)) return true;
+      try { this.hive.appendLog({ kind: 'tool-output-refetch', agentId, tool: p.tool_name, after: now - e.at, chars: e.chars, path: e.path }); } catch { /* best effort */ }
+      return false;
+    });
+    if (kept.length) this.condensedRecent.set(agentId, kept); else this.condensedRecent.delete(agentId);
   }
 
   /** Delete kept full outputs older than TOOL_OUTPUT_KEEP_MS, at most once an hour per folder. */
@@ -1824,6 +1858,10 @@ export class HookServer {
       }
       return {};
     }
+
+    // READS-181 N1: count the agent's tool calls, and note a re-fetch of a condensed output.
+    if (agentId && event === 'PreToolUse') { try { this.noteRefetch(agentId, p); } catch { /* never breaks a hook */ } }
+    if (agentId && (event === 'PostToolUse' || event === 'PostToolUseFailure')) this.toolCalls.set(agentId, (this.toolCalls.get(agentId) ?? 0) + 1);
 
     // Feed the breaker its hook-derived loop signal: a tool that actually ran.
     // A repeated identical (name+input) PostToolUse is the runaway-loop tell.

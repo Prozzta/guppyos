@@ -106,9 +106,10 @@ function post(url, body, raw) {
 
 async function broker(t, { provider = 'claude', cap, steer = null } = {}) {
   const home = tmp('hive-');
+  const logs = [];
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\reads181-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(tmp('s-'), 's.sock');
   const hive = {
-    sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {},
+    sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: (e) => logs.push(e),
     registry: () => ({ agents: { a1: { id: 'a1', provider, ...(cap !== undefined ? { toolOutputCap: cap } : {}) } } }),
     isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {},
     toolOutputDir: (id) => path.join(home, 'agents', id, 'tool-output')
@@ -118,7 +119,7 @@ async function broker(t, { provider = 'claude', cap, steer = null } = {}) {
   s.start();
   t.after(() => s.stop());
   for (let i = 0; i < 200 && s.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
-  return { s, home, url: s.hookUrl('a1') };
+  return { s, home, logs, url: s.hookUrl('a1') };
 }
 
 const postTool = (url, over = {}) => post(url, {
@@ -167,6 +168,63 @@ test('B: the replacement rides in the SAME hookSpecificOutput as injected contex
   const r = await postTool(url);
   assert.match(r.body.hookSpecificOutput.additionalContext, /operator steer/);
   assert.ok(r.body.hookSpecificOutput.updatedToolOutput.stdout.length <= 1500);
+});
+
+test('N1 (god): read-type commands (grep, sed, cat, git diff …, last pipeline segment) get the 6000 cap; build/test logs keep 1500', () => {
+  for (const c of ['grep -n foo src/x.ts', 'rg -n "a|b" src', 'cd /x && git diff HEAD~1', 'git -C /repo show abc123', 'git --no-pager log -5', 'npm test 2>&1 | tail -40',
+    'sed -n 1,80p file.ts', 'cat a.json | jq .tasks', 'FOO=1 head -50 x', 'Get-Content x.log', '/usr/bin/grep x y', 'echo hi; cat x #full']) {
+    assert.equal(C.isReadCommand(c), true, c);
+    assert.equal(C.capForCommand(c, 1500), 6000, c);
+  }
+  for (const c of ['npm test', 'node test/tools/run-tests.cjs', 'npm ci', 'grep x f | wc -l', 'git status', 'git commit -m "diff"', 'echo "a | cat"', 'ls -la']) {
+    assert.equal(C.isReadCommand(c), false, c);
+    assert.equal(C.capForCommand(c, 1500), 1500, c);
+  }
+  assert.equal(C.capForCommand('grep x y', 0), 0, 'off stays off');
+  assert.equal(C.capForCommand('grep x y', 9000), 9000, 'a larger agent cap wins');
+});
+
+test('N1 through the hook: a 5000-char grep result passes whole; a 7000-char one is cut to 6000; an npm log is cut to 1500; each condense is logged', async (t) => {
+  const { url, logs } = await broker(t);
+  const grep5k = Array.from({ length: 60 }, (_, i) => `src/f${i}.ts:${i}: const x = ${'y'.repeat(60)}`).join('\n').slice(0, 5000);
+  assert.equal((await postTool(url, { tool_input: { command: 'grep -rn "const x" src' }, tool_response: { stdout: grep5k, stderr: '' } })).body.hookSpecificOutput, undefined);
+  const grep7k = Array.from({ length: 90 }, (_, i) => `src/f${i}.ts:${i}: const x = ${'y'.repeat(60)}`).join('\n');
+  const g = (await postTool(url, { tool_use_id: 'toolu_g7', tool_input: { command: 'grep -rn "const x" src' }, tool_response: { stdout: grep7k, stderr: '' } })).body.hookSpecificOutput.updatedToolOutput;
+  assert.ok(g.stdout.length <= 6000 && g.stdout.length > 1500, `${g.stdout.length}`);
+  const lineCount = g.stdout.split('\n').length;
+  assert.ok(lineCount >= 50, `the read cap is spent on lines: ${lineCount} lines`);
+  const n = (await postTool(url, { tool_use_id: 'toolu_n1' })).body.hookSpecificOutput.updatedToolOutput;
+  assert.ok(n.stdout.length <= 1500);
+  const rows = logs.filter((e) => e.kind === 'tool-output-condensed');
+  assert.deepEqual(rows.map((e) => [e.cap, e.read]), [[6000, true], [1500, false]]);
+});
+
+test('N1: a Read or grep of a condensed output\'s saved file within 10 tool calls is logged as a re-fetch, once; later ones are not', async (t) => {
+  const { url, logs } = await broker(t);
+  await postTool(url, { tool_use_id: 'toolu_r1' });
+  await post(url, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'C:/hive/agents/a1/tool-output/toolu_r1.txt', offset: 100 } });
+  await post(url, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'C:/hive/agents/a1/tool-output/toolu_r1.txt' } });
+  let re = logs.filter((e) => e.kind === 'tool-output-refetch');
+  assert.equal(re.length, 1, 'logged once');
+  assert.deepEqual([re[0].tool, re[0].after], ['Read', 0]);
+  await postTool(url, { tool_use_id: 'toolu_r2' });
+  for (let i = 0; i < 11; i++) await post(url, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: {}, tool_response: {} });
+  await post(url, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'grep ERR C:/x/toolu_r2.txt' } });
+  re = logs.filter((e) => e.kind === 'tool-output-refetch');
+  assert.equal(re.length, 1, 'past the 10-call window it is not a re-fetch');
+});
+
+test('N2: a saved output over 256 KB is read as head + tail parts (named "read in part"), never whole', async (t) => {
+  const { url } = await broker(t);
+  const big = path.join(tmp('cc-'), 'big.txt');
+  const middle = 'Error: in the middle only\n';
+  fs.writeFileSync(big, 'HEAD line\n' + 'x'.repeat(200 * 1024) + '\n' + middle + 'y'.repeat(200 * 1024) + '\nTAIL line\n');
+  const u = (await postTool(url, { tool_response: { stdout: 'HEAD line', stderr: '', persistedOutputPath: big, persistedOutputSize: fs.statSync(big).size } })).body.hookSpecificOutput.updatedToolOutput;
+  assert.match(u.stdout, /\(read in part\)/);
+  assert.match(u.stdout, /TAIL line/);
+  assert.doesNotMatch(u.stdout, /in the middle only/, 'the middle is not read (N2 trade-off, named in the outcome line)');
+  const H = loadTs('src/main/hooks.ts');
+  assert.equal(H.CONDENSE_READ_MAX, 256 * 1024);
 });
 
 // ── A: the ledger ───────────────────────────────────────────────────────────────────────────
@@ -279,6 +337,47 @@ test('A: idempotent by op: a repeat is a no-op, and a retry after a failed part 
   assert.equal((g.state.tasks[0].result.match(/built/g) || []).length, 1, 'the result line is not appended twice');
   assert.deepEqual(g.outbox(), ['ledger-r1.json']);
   assert.equal((g.memory().match(/- built/g) || []).length, 1);
+});
+
+test('B1 (Jim): a REUSED op name with DIFFERENT content is refused (409) and writes nothing; the same content stays "(already applied)"', () => {
+  const f = ledgerFixture();
+  const op = { op: 'done-1', message: { to: 'god', act: 'done', subject: 'first', body: 'one' }, memory: { append: '- first' } };
+  assert.equal(L.applyLedgerOp(op, f.deps).status, 200);
+  const mem1 = f.memory();
+  const other = { op: 'done-1', message: { to: 'god', act: 'done', subject: 'SECOND', body: 'two' }, memory: { append: '- second' } };
+  const r = L.applyLedgerOp(other, f.deps);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.line, 'refused: op done-1 was already used for a different operation; choose a new op name');
+  assert.equal(f.memory(), mem1);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'outbox', 'ledger-done-1.json'), 'utf8')).subject, 'first');
+  // key order does not matter: the same content is the same op
+  const same = { memory: { append: '- first' }, message: { body: 'one', subject: 'first', act: 'done', to: 'god' }, op: 'done-1' };
+  assert.match(L.applyLedgerOp(same, f.deps).body.line, /\(already applied\)$/);
+});
+
+test('B1: a partial retry with CHANGED content is refused, so an op is never half old and half new', () => {
+  const g = ledgerFixture();
+  const op = { op: 'p1', card: { id: 'READS-181', patch: { status: 'done' } }, message: { to: 'jim', act: 'request', subject: 'audit', body: 'v1' } };
+  fs.writeFileSync(path.join(g.agentDir, 'outbox'), 'blocks the outbox dir');
+  assert.equal(L.applyLedgerOp(op, g.deps).status, 500);
+  fs.rmSync(path.join(g.agentDir, 'outbox'));
+  const changed = { ...op, message: { ...op.message, body: 'v2' } };
+  assert.equal(L.applyLedgerOp(changed, g.deps).status, 409);
+  assert.deepEqual(g.outbox(), [], 'nothing written by the refused retry');
+  assert.equal(L.applyLedgerOp(op, g.deps).status, 200, 'the original content still finishes');
+});
+
+test('MUTANT B1-M1 (no content-hash check): a reused name with different content is answered "already applied" and lost', () => {
+  const file = 'src/main/ledger.ts';
+  const src = normaliseEol(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+  const from = 'if (rec && rec.hash !== hash) {';
+  assert.ok(src.includes(from));
+  const M = loadTs.fromText(file, src.replace(from, 'if (false) {'));
+  const f = ledgerFixture();
+  M.applyLedgerOp({ op: 'x1', memory: { append: '- first' } }, f.deps);
+  const r = M.applyLedgerOp({ op: 'x1', memory: { append: '- second' } }, f.deps);
+  assert.match(r.body.line, /already applied/);
+  assert.equal(f.memory().includes('- second'), false);
 });
 
 test('A: the broker route: the URL token names the caller (a wrong token is 403); invalid UTF-8 and bad JSON are refused', async (t) => {
