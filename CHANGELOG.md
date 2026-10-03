@@ -37,6 +37,13 @@ still there).
 - **New installs suggest a `~/Guppy` folder** for the app's home during setup (it was
   `~/HarnessAgents`). If you already set the app up, your folder stays exactly where it is.
 
+### Fixed
+
+- **Checking Claude's model list no longer leaves a claude process running.** The app starts
+  Claude Code briefly to read its list of models, then stops it. It used to send the stop and
+  move on without checking, so a busy machine could be left with a claude process. Now it makes
+  sure the process has ended, tries once more if not, and writes to the log if one survives.
+
 ### Good to know after updating
 
 - **The first start copies your data once**, so it may take a few seconds longer. If the copy
