@@ -303,13 +303,88 @@ async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } 
   return { hive, server: s, fire, ctx, entryOf, events, hookEvents, logRows, home };
 }
 
-test('G4.4: a claims working set is re-injected on startup, compact SessionStart, and task wake', async (t) => {
+test('G4.4: a claims working set is re-injected on startup and compact SessionStart; never on UserPromptSubmit (Jim M-3)', async (t) => {
   const seen = [];
   const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: (id) => { seen.push(id); return '# Memory working set — cl-1'; } });
   assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'startup' })), /# Memory working set — cl-1/);
   assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'compact' })), /# Memory working set — cl-1/);
-  assert.match(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /# Memory working set — cl-1/);
-  assert.deepEqual(seen, ['cl-1', 'cl-1', 'cl-1']);
+  assert.doesNotMatch(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /Memory working set/);
+  assert.deepEqual(seen, ['cl-1', 'cl-1'], 'not even built for a prompt');
+});
+
+/** POST one hook payload to the live HTTP broker (the path the app uses), as the shim does. */
+async function postHook(f, agentId, payload) {
+  f.server.start();
+  for (let i = 0; i < 200 && f.server.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
+  const url = new URL(f.server.hookUrl(agentId));
+  const body = JSON.stringify({ session_id: `s-${agentId}`, ...payload });
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve(JSON.parse(b)));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
+
+test('G4.4 live path (Jim S-1): an ASYNC provider over the HTTP broker: startup and compact carry the set; a prompt neither builds nor carries it', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { seen.push(id); await new Promise((r) => setTimeout(r, 20)); return `# Memory working set — ${id} (async)`; } });
+  const ctxOf = (out) => out?.hookSpecificOutput?.additionalContext ?? '';
+  assert.match(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'startup' })), /# Memory working set — cl-1 \(async\)/);
+  assert.match(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact' })), /# Memory working set — cl-1 \(async\)/, 'rebuilt after a compaction');
+  assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'UserPromptSubmit', prompt: 'go' })), /Memory working set/);
+  assert.deepEqual(seen, ['cl-1', 'cl-1']);
+});
+
+test('Jim S-5 / G4.5: a one-way SessionStart and a Codex SessionStart build no working set (Codex has it in its instruction file)', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude', 'cx-1': 'codex' }, claimWorkingSet: (id) => { seen.push(id); return `# Memory working set — ${id}`; } });
+  assert.doesNotMatch(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'startup', transport: 'pipe-oneway' })), /Memory working set/);
+  assert.doesNotMatch(f.ctx(f.fire('cx-1', 'SessionStart', { source: 'startup' })), /Memory working set/);
+  assert.deepEqual(seen, []);
+});
+
+test('Jim M-3 gate: a SessionStart(compact) with a FULL working set, the carry and pending mail stays within 9,500 joined; the carry is whole and the mail is there', async (t) => {
+  const { WORKING_SET_MAX_CHARS } = loadTs('src/main/claims/delivery.ts');
+  const { MAIL_JOINED_BUDGET } = S;
+  const full = `# Memory working set — cl-1\n${'- a synthetic claim line about the widget relay [c:c-000000000001]\n'.repeat(200)}`.slice(0, WORKING_SET_MAX_CHARS);
+  assert.equal(full.length, WORKING_SET_MAX_CHARS);
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: () => full });
+  f.hive.writeTasks([{ id: 'CARD-W4', title: 'A card in progress', status: 'doing', assignee: 'cl-1' }]);
+  f.server.mailReminders = () => [{ entry: { id: 'old-1', from: 'jim-1', act: 'request', subject: 'please check', state: 'acted', epoch: 'e-old' }, ageMs: 3_600_000 }];
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body '.repeat(40) }, 'god-1');
+  f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
+  const c = f.ctx(f.fire('cl-1', 'SessionStart', { source: 'compact' }));
+  assert.ok(c.length <= MAIL_JOINED_BUDGET, `joined ${c.length} > ${MAIL_JOINED_BUDGET}`);
+  assert.ok(c.includes(full), 'the working set, whole');
+  const carry = c.slice(c.indexOf('<after-compaction>'), c.indexOf('</after-compaction>') + '</after-compaction>'.length);
+  assert.ok(carry.includes('- card CARD-W4: "A card in progress" (in progress)') && carry.includes('- [old-1] from jim-1: "please check" (request)'), 'the carry, whole');
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('a pending body a pending body'), 'the mail is re-injected with its body');
+});
+
+test('Jim M-3: the working set counts in the god handoff budget too', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8');
+  assert.match(src, /takeGodHandoff\?\.\(agentId, \[roster, goal, claimWorkingSet, steer, mail\]\)/);
+  assert.match(src, /this\.surfaceMail\(agentId, event, p, channel\?\.provider, \[handoff, roster, goal, claimWorkingSet, steer, mail\]\)/);
+  assert.match(src, /this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, claimWorkingSet, steer, mail, carry\]\)/);
+});
+
+test('G4.5 (god\'s M-4 ruling): the Codex developer_instructions are the protocol, then the claims view; the prompt fingerprint never sees the view', () => {
+  assert.equal(HiveManager.codexDeveloperInstructions('PROTOCOL', null), 'PROTOCOL');
+  assert.equal(HiveManager.codexDeveloperInstructions('PROTOCOL', '# Memory working set — cx-1'), 'PROTOCOL\n\n# Memory working set — cx-1');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8');
+  const fp = src.slice(src.indexOf('sessionPromptFingerprint(meta: AgentMeta)'), src.indexOf('sessionPromptFingerprint(meta: AgentMeta)') + 800);
+  assert.ok(!fp.includes('codexClaimContext'), 'the view is not a fingerprint input');
+});
+
+test('W5 hook (god): the completed-turn boundary (Stop) tells the claims listener, never for a subagent', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const told = [];
+  f.server.setClaimTurnCompletedListener((id) => told.push(id));
+  f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
+  f.fire('cl-1', 'Stop');
+  f.fire('cl-1', 'Stop', { provider_agent_id: 'sub-1' });
+  assert.deepEqual(told, ['cl-1']);
 });
 
 test('PIN: whenever delivered ids exist, the surfacing hook of every injection provider returns a <hive-mail> block carrying their markers', async (t) => {
