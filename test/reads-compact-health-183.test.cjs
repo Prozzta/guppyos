@@ -268,7 +268,10 @@ test('hooks: SessionStart(compact) carries the cards in progress and owed mail b
   assert.equal(r.obligationsCarried, 1);
   assert.equal(r.mailOpen, 1);
   assert.equal(r.mailReinjected, 1);
-  assert.equal(r.mailBack, 1);
+  // No transcript evidence in this harness, so the Stop that closes the epoch re-pends the
+  // unconfirmed re-injection (back to delivered: it drips in again). That is pending, not missing.
+  assert.equal(r.mailBack + r.mailPending.length, 1, JSON.stringify(r));
+  assert.deepEqual(r.mailMissing, []);
   assert.equal(r.ok, true);
 });
 
