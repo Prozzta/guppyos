@@ -259,6 +259,7 @@ test('G6.5 frozen backup: a pre-existing PARTIAL folder (no manifest) is never o
   assert.deepEqual([r.written, r.partial, r.files.length], [false, true, 0]);
   assert.equal(fs.readFileSync(path.join(dest, 'memory.md'), 'utf8'), 'an earlier partial copy');
   assert.deepEqual(fs.readdirSync(dest), ['memory.md']);
+  assert.deepEqual(fs.readdirSync(path.dirname(dest)), ['backup'], 'no temp folder built or left beside it');
 });
 
 test('G6.5 frozen backup: a pre-existing target FILE at the backup path is never overwritten', () => {

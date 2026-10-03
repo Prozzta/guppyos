@@ -30,7 +30,7 @@
  * `source: 'legacy'`; a parsed memory.md entry gets `source: 'self'`; both carry `legacy` provenance.
  */
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CLAIM_TEXT_MAX_LEGACY } from '../../shared/claims';
 import type { ClaimKind, LedgerRec, RecordDraft } from '../../shared/claims';
@@ -327,7 +327,7 @@ export function frozenBackup(agentDir: string, destDir: string): BackupResult {
     return { file: f, sha256: createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
   });
   writeFileSync(join(tmp, 'manifest.json'), JSON.stringify({ v: 1, files }, null, 1), { flag: 'wx' });
-  if (existsSync(destDir)) return { written: false, files: [], partial: true };   // appeared meanwhile: leave both
+  if (existsSync(destDir)) { rmSync(tmp, { recursive: true, force: true }); return { written: false, files: [], partial: true }; }   // appeared meanwhile: leave it, drop ours
   renameSync(tmp, destDir);
   return { written: true, files };
 }
