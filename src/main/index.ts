@@ -24,6 +24,8 @@ import {
   stableForbiddenPaths, checkIsolation, devRootOverrideViolations, scrubInheritedEnv, devWindowTitle
 } from './devIsolation';
 import { isSafeCommandName } from './shellEnv';
+import { migrateUserData, LEGACY_USERDATA_DIR, USERDATA_DIR, type MigrationResult } from './userDataMigration';
+import { carryLoginItem } from './loginItemRename';
 import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
@@ -178,11 +180,16 @@ if (DEV_ISOLATION) {
   // Stable's folder. Capture it (read-only) before overriding, both to forbid it
   // and to learn Stable's harnessHome from its config.json if readable.
   const stableUserData = app.getPath('userData');
+  // REBRAND-GUPPY: from 1.1.82 Stable's data is <appData>/Guppy (userDataMigration.ts); the old
+  // folder above is still Stable's too (1.1.81 and the migration's source). Forbid both.
+  const stableGuppyUserData = join(app.getPath('appData'), USERDATA_DIR);
   let stableHome: string | null = null;
-  try {
-    const raw = JSON.parse(readFileSync(join(stableUserData, 'config.json'), 'utf8')) as { harnessHome?: unknown };
-    if (typeof raw.harnessHome === 'string') stableHome = raw.harnessHome;
-  } catch { /* no Stable config readable — the literal list still applies */ }
+  for (const dir of [stableGuppyUserData, stableUserData]) {
+    try {
+      const raw = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as { harnessHome?: unknown };
+      if (typeof raw.harnessHome === 'string') { stableHome = raw.harnessHome; break; }
+    } catch { /* no Stable config readable here — the literal list still applies */ }
+  }
   // MUNDER_DEV_ROOT (layer-b test infrastructure): the one validated relocation of the
   // whole root. A refused value EXITS here; it never falls back to the fixed root.
   const rootRes = resolveDevDataRoot({ liveUserData: stableUserData });
@@ -193,6 +200,7 @@ if (DEV_ISOLATION) {
   const root = rootRes.root;
   const paths = devPaths(root);
   devStableForbidden = stableForbiddenPaths({ defaultUserData: stableUserData, stableHarnessHome: stableHome });
+  devStableForbidden.push(stableGuppyUserData);
   // An overridden root must not collide with the FIXED dev root either (its data, its
   // pipe, its single-instance lock under its userData): forbid it from here on too, so
   // the ready-time live check below re-verifies against it.
@@ -244,6 +252,27 @@ if (memorySmokeOut || memoryBenchDir) {
   const smokeUserData = mkdtempSync(join(tmpdir(), 'munder-smoke-userdata-'));
   app.setPath('userData', smokeUserData);
   app.setPath('sessionData', smokeUserData);
+}
+
+// REBRAND-GUPPY (1.1.82): the data folder is <appData>/Guppy, no longer the <appData>/munder-difflin
+// Electron derives from package.json "name" (kept, see the survey). The first start copies the old
+// folder once and never touches it (userDataMigration.ts). Here, before the single-instance lock
+// (keyed on userData) and before anything reads userData. A dev-isolated run and the memory
+// smoke/bench have their own folders, set above.
+let userDataMigration: MigrationResult | null = null;
+if (!DEV_ISOLATION && !memorySmokeOut && !memoryBenchDir) {
+  userDataMigration = migrateUserData(app.getPath('appData'), { version: app.getVersion() });
+  app.setPath('userData', userDataMigration.userData);
+  app.setPath('sessionData', userDataMigration.userData);
+  // Electron resolves these two on its own, not from userData: point them into the same folder, so
+  // nothing of a 1.1.82 run lands in the old one (Crashpad is the name Electron gives it by default).
+  for (const [key, sub] of [['crashDumps', 'Crashpad'], ['logs', 'logs']] as const) {
+    const dir = join(userDataMigration.userData, sub);
+    try { mkdirSync(dir, { recursive: true }); app.setPath(key, dir); } catch { /* keep Electron's default */ }
+  }
+  if (userDataMigration.status === 'failed') {
+    console.error(`[userdata] copying ${LEGACY_USERDATA_DIR} to ${USERDATA_DIR} failed (${userDataMigration.error}); using the old folder this run, retrying next start`);
+  }
 }
 
 // RENDERER-RECOVERY-164 (the Human's final scope): LOCAL crash dumps, started as early as the
@@ -6906,6 +6935,18 @@ function bootstrapHiveServices(): void {
     electron: process.versions.electron,
     platform: process.platform
   });
+  // REBRAND-GUPPY: which data folder this run uses, and whether it was copied just now.
+  if (userDataMigration && userDataMigration.status !== 'already') {
+    const m = userDataMigration;
+    hive.appendLog({ kind: 'userdata-migration', status: m.status, userData: m.userData, from: m.from, files: m.files, bytes: m.bytes, rewrote: m.rewrote, error: m.error });
+  }
+  // REBRAND-GUPPY (Jim B1): a Windows "Open at login" entry made by 1.1.81 names the deleted
+  // Munder Difflin.exe; move it to this exe (loginItemRename.ts). Packaged Stable runs only.
+  if (!DEV_ISOLATION) {
+    try {
+      if (carryLoginItem(app, process.execPath, { packaged: app.isPackaged }) === 'moved') hive.appendLog({ kind: 'login-item-moved', exePath: process.execPath });
+    } catch (e) { console.warn('[login-item] could not move the old login item:', e); }
+  }
   // MODEL-DEFAULT-CLI: config load cleared a saved defaultModel once (config.ts,
   // migrateDefaultModelCliV1) before the hive existed; record what it was, once.
   const clearedDefaultModel = takeClearedDefaultModel();

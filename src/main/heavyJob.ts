@@ -265,7 +265,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     if (!files.length) return { heavy: true, kind: 'suite', why: 'vitest (all)' };
     return { heavy: false };
   }
-  if (bin === 'node' || bin === 'electron' || bin === 'munder difflin') {
+  // The app's exe run as Node (ELECTRON_RUN_AS_NODE): Guppy.exe from 1.1.82, Munder Difflin.exe before.
+  if (bin === 'node' || bin === 'electron' || bin === 'guppy' || bin === 'munder difflin') {
     if (args.some((a) => a.startsWith('--native-memory-bench'))) return { heavy: true, kind: 'bench', why: 'native-memory bench' };
     if (args.includes('--test')) {
       // Positional args only: the value of a flag that takes one is not a test file.

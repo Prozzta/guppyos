@@ -2,27 +2,24 @@
 'use strict';
 
 /**
- * Release gate: every download link we advertise must actually resolve.
+ * Release gate: the download links this app hands its users must resolve, on THIS app's own
+ * repository (src/shared/updateState.ts REPO, Prozzta/guppyos). Never the upstream project.
  *
- * WHY THIS EXISTS. RELEASE.md is published verbatim as the GitHub release body,
- * and its download table links to
- * `/releases/latest/download/Munder-Difflin-<version>-<platform>.<ext>`. That URL
- * form requires the EXACT filename present in whichever release is currently
- * "latest", and electron-builder bakes ${version} into every artifact name — so a
- * version string left behind in RELEASE.md turns all four download links into
- * hard 404s the moment the next release ships.
+ * WHY. When a status carries no downloadUrl, the app builds the installer link itself from fixed
+ * artifact names (updateState.ts installerUrl / artifactPrefix: Munder-Difflin-* up to 1.1.82,
+ * Guppy-* from 1.1.83). If electron-builder.yml's artifactName and that rule ever disagree, the
+ * manual-download link is a 404 for everyone on that path, and nothing fails or warns.
  *
- * That is not hypothetical. The table sat pinned at 0.3.2 from v0.3.4 through
- * v0.3.7, and mac DMG downloads fell from 118 and 76 on v0.3.2/v0.3.3 to single
- * digits on every release after. Nothing failed, nothing warned; the release
- * simply stopped being installable for anyone arriving through GitHub, and the
- * page even claimed the opposite ("stays correct across versions").
+ * (REBRAND-GUPPY 1.1.82: this used to check upstream's RELEASE.md, docs/index.html and
+ * docs/llms.txt against chaitanyagiri/munder-difflin's latest release. Those are upstream's website
+ * and release page, not this app's, and the live check asked the wrong repository.)
  *
  * Two modes:
- *   (default) offline — every advertised version string matches package.json.
- *             Run this BEFORE tagging, when the assets do not exist yet.
- *   --live    also HEADs each URL and requires 200. Run this AFTER publishing
- *             the release, which is the only moment the answer is meaningful.
+ *   (default) offline: electron-builder.yml's Windows/mac/Linux artifact names for package.json's
+ *             version equal the names installerUrl() builds. Run this BEFORE tagging.
+ *   --live    also requests each asset of the tagged release v<version>, plus latest.yml through
+ *             /releases/latest/download/ (the updater's path), and requires 200. Run it AFTER
+ *             publishing.
  */
 
 const fs = require('node:fs');
@@ -30,75 +27,80 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
-const releaseMd = fs.readFileSync(path.join(root, 'RELEASE.md'), 'utf8');
+const builderYml = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
+const updateState = fs.readFileSync(path.join(root, 'src', 'shared', 'updateState.ts'), 'utf8');
 
 const problems = [];
 
-// — 1. every pinned artifact name must carry the current version —
-const assetRe = /Munder-Difflin-(\d+\.\d+\.\d+)-([^\s`)]+)/g;
-const assets = new Set();
-for (const m of releaseMd.matchAll(assetRe)) {
-  if (m[1] !== version) {
-    problems.push(`RELEASE.md advertises Munder-Difflin-${m[1]}-${m[2]} but package.json says ${version}`);
-  }
-  assets.add(`Munder-Difflin-${m[1]}-${m[2]}`);
-}
-if (assets.size === 0) problems.push('RELEASE.md advertises no download assets at all — did the table move?');
+const repoM = /export const REPO = '([^']+)'/.exec(updateState);
+const fromM = /export const GUPPY_ARTIFACTS_FROM = '(\d+)\.(\d+)\.(\d+)'/.exec(updateState);
+if (!repoM) problems.push('src/shared/updateState.ts no longer exports REPO as a string literal');
+if (!fromM) problems.push('src/shared/updateState.ts no longer exports GUPPY_ARTIFACTS_FROM');
+const REPO = repoM ? repoM[1] : '';
+if (REPO && !/^Prozzta\//.test(REPO)) problems.push(`REPO is ${REPO}: the release links must be on the Prozzta repository`);
 
-// — 2. source tarball tags too; a stale tag silently ships last release's source —
-for (const m of releaseMd.matchAll(/archive\/refs\/tags\/v(\d+\.\d+\.\d+)/g)) {
-  if (m[1] !== version) {
-    problems.push(`RELEASE.md links source for tag v${m[1]} but package.json says ${version}`);
-  }
-}
-
-// — 3. the website's fallback version (used when the GitHub API call fails) —
-const indexHtml = path.join(root, 'docs/index.html');
-if (fs.existsSync(indexHtml)) {
-  const m = /var REL = '(\d+\.\d+\.\d+)'/.exec(fs.readFileSync(indexHtml, 'utf8'));
-  if (m && m[1] !== version) {
-    problems.push(`docs/index.html download fallback is ${m[1]}, package.json says ${version}`);
-  }
+/** updateState.ts artifactPrefix(), restated: Guppy from GUPPY_ARTIFACTS_FROM on. */
+function prefixFor(v) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v);
+  if (!m || !fromM) return 'Munder-Difflin';
+  const a = [m[1], m[2], m[3]].map(Number);
+  const b = [fromM[1], fromM[2], fromM[3]].map(Number);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] > b[i] ? 'Guppy' : 'Munder-Difflin';
+  return 'Guppy';
 }
 
-// — 4. llms.txt, which advertises the current version to crawlers and LLMs —
-//   Added in 0.4.3: this file sat at 0.4.1 for two releases while the checker
-//   stayed green, because nothing was watching it.
-const llms = path.join(root, 'docs/llms.txt');
-if (fs.existsSync(llms)) {
-  const m = /Current version:\s*(\d+\.\d+\.\d+)/.exec(fs.readFileSync(llms, 'utf8'));
-  if (!m) problems.push('docs/llms.txt no longer states "Current version: x.y.z" — did the line move?');
-  else if (m[1] !== version) {
-    problems.push(`docs/llms.txt says current version ${m[1]}, package.json says ${version}`);
-  }
+/** An electron-builder.yml section's artifactName, expanded for this version. */
+function artifact(section, vars) {
+  const m = new RegExp(`^${section}:\\r?\\n(?:[ \\t].*\\r?\\n|\\r?\\n)*?[ \\t]+artifactName: (\\S+)`, 'm').exec(builderYml);
+  if (!m) { problems.push(`electron-builder.yml ${section}: no artifactName`); return null; }
+  return m[1].replace(/\$\{(\w+)\}/g, (_, k) => (k in vars ? vars[k] : `\${${k}}`));
+}
+
+const p = prefixFor(version);
+const want = {
+  'win setup': [artifact('nsis', { version }), `${p}-${version}-win-x64-setup.exe`],
+  'win portable': [artifact('portable', { version }), `${p}-${version}-win-x64-portable.exe`],
+  'mac dmg (universal)': [artifact('mac', { version, arch: 'universal', ext: 'dmg' }), `${p}-${version}-mac-universal.dmg`],
+  'linux AppImage': [artifact('linux', { version }), `${p}-${version}-linux-x86_64.AppImage`]
+};
+for (const [what, [got, expected]] of Object.entries(want)) {
+  if (got !== null && got !== expected) problems.push(`${what}: electron-builder.yml makes ${got}, the app links to ${expected}`);
 }
 
 async function checkLive() {
-  const base = 'https://github.com/chaitanyagiri/munder-difflin/releases/latest/download/';
-  for (const name of [...assets, 'SHA256SUMS.txt']) {
+  const setup = want['win setup'][1];
+  const urls = [
+    ...[setup, `${setup}.blockmap`, 'latest.yml', want['win portable'][1]]
+      .map((name) => `https://github.com/${REPO}/releases/download/v${version}/${name}`),
+    `https://github.com/${REPO}/releases/latest/download/latest.yml`
+  ];
+  for (const url of urls) {
     let status = 0;
     try {
       // GitHub 302s asset downloads to a CDN, so follow it; HEAD is enough.
-      status = (await fetch(base + name, { method: 'HEAD', redirect: 'follow' })).status;
+      status = (await fetch(url, { method: 'HEAD', redirect: 'follow' })).status;
     } catch (e) {
-      problems.push(`${name} — request failed: ${e.message}`);
+      problems.push(`${url}: request failed: ${e.message}`);
       continue;
     }
-    if (status !== 200) problems.push(`${name} — HTTP ${status} (advertised but not downloadable)`);
-    else console.log(`  ok  ${name}`);
+    if (status !== 200) problems.push(`${url}: HTTP ${status} (advertised but not downloadable)`);
+    else console.log(`  ok  ${url}`);
   }
 }
 
-(async () => {
-  if (process.argv.includes('--live')) {
-    console.log(`Checking advertised downloads for v${version} against the live latest release…`);
-    await checkLive();
-  }
-  if (problems.length) {
-    console.error(`\n✗ release links are wrong (${problems.length}):`);
-    for (const p of problems) console.error(`  - ${p}`);
-    console.error('\nFix RELEASE.md / docs/index.html / docs/llms.txt to match package.json before releasing.');
-    process.exit(1);
-  }
-  console.log(`✓ release links consistent at v${version}`);
-})();
+module.exports = { prefixFor, artifact, want, problems, REPO };
+
+if (require.main === module) {
+  (async () => {
+    if (process.argv.includes('--live')) {
+      console.log(`Checking the v${version} downloads on ${REPO}…`);
+      await checkLive();
+    }
+    if (problems.length) {
+      console.error(`\n✗ release links are wrong (${problems.length}):`);
+      for (const x of problems) console.error(`  - ${x}`);
+      process.exit(1);
+    }
+    console.log(`✓ release links consistent at v${version} (${REPO}, ${p}-* artifacts)`);
+  })();
+}

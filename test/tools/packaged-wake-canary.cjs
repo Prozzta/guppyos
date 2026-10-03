@@ -41,7 +41,9 @@ const WebSocket = require('ws');
 const lock = require('./canary-lock.cjs');
 
 const REPO = resolve(__dirname, '..', '..');
-const APP_EXE = join(REPO, 'dist', 'win-unpacked', 'Munder Difflin.exe');
+// REBRAND-GUPPY: the exe is Guppy.exe from 1.1.82 (Munder Difflin.exe before).
+const APP_EXE = ['Guppy.exe', 'Munder Difflin.exe'].map((n) => join(REPO, 'dist', 'win-unpacked', n)).find((p) => require('node:fs').existsSync(p))
+  ?? join(REPO, 'dist', 'win-unpacked', 'Guppy.exe');
 // ZT-I1-MAIL §5 P4: the injection-mode nudge head, and the 1.1.74 one (still typed for no-Stop agents).
 const NUDGE_HEADS = ['You have new hive mail', 'You have new hive inbox message(s)'];
 

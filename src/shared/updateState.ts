@@ -64,14 +64,26 @@ export type UpdateAction = 'none' | 'check' | 'download' | 'restart' | 'open-rel
  *  not a runtime path; nothing in the running app reads it.) */
 export const REPO = 'Prozzta/guppyos';
 
+/** REBRAND-GUPPY: the first release whose artifacts are named Guppy-*. Up to 1.1.82 they keep
+ *  Munder-Difflin-*, because 1.1.81 (and older) build their manual-download link from those
+ *  fixed names; a build that knows this switch can follow the rename from 1.1.83 on. */
+export const GUPPY_ARTIFACTS_FROM = '1.1.83';
+
+/** The artifact-name prefix electron-builder.yml gives release v{version}. */
+export function artifactPrefix(version: string): string {
+  const v = version.replace(/^v/, '');
+  return parseVersion(v) && !isNewer(GUPPY_ARTIFACTS_FROM, v) ? 'Guppy' : 'Munder-Difflin';
+}
+
 /** The installer for THIS machine in the release tagged v{version}, by the
- *  names electron-builder.yml produces. Used when a status carries no
+ *  names electron-builder.yml produces (see artifactPrefix). Used when a status carries no
  *  `downloadUrl` of its own (the native updater path never does). */
 export function installerUrl(version: string, platform: string, arch: string): string {
   const v = version.replace(/^v/, '');
-  const file = platform === 'darwin' ? `Munder-Difflin-${v}-mac-${arch}.dmg`
-    : platform === 'win32' ? `Munder-Difflin-${v}-win-x64-setup.exe`
-    : `Munder-Difflin-${v}-linux-x86_64.AppImage`;
+  const p = artifactPrefix(v);
+  const file = platform === 'darwin' ? `${p}-${v}-mac-${arch}.dmg`
+    : platform === 'win32' ? `${p}-${v}-win-x64-setup.exe`
+    : `${p}-${v}-linux-x86_64.AppImage`;
   return `https://github.com/${REPO}/releases/download/v${v}/${file}`;
 }
 

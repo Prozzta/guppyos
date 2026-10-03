@@ -225,6 +225,8 @@ function liveForbidden(env = process.env, home = os.homedir()) {
  *  - %LOCALAPPDATA%\Programs\Munder Difflin: the per-user NSIS install dir (electron-builder.yml:155
  *    oneClick: false, :156 perMachine: false; the default per-user location);
  *  - %LOCALAPPDATA%\munder-difflin-updater: electron-updater's download cache for the app;
+ *  - REBRAND-GUPPY (1.1.82): %APPDATA%\Guppy (the userData from 1.1.82, userDataMigration.ts),
+ *    %LOCALAPPDATA%\Programs\Guppy (a fresh 1.1.82 install's folder) and %LOCALAPPDATA%\guppy-updater;
  *  - the real ~/.claude, ~/.claude.json, ~/.codex, ~/.gemini. */
 function liveAppPaths(env = process.env, home = os.homedir()) {
   const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
@@ -232,6 +234,7 @@ function liveAppPaths(env = process.env, home = os.homedir()) {
   return [
     path.join(appData, 'munder-difflin'), path.join(appData, 'Munder Difflin'),
     path.join(localAppData, 'Programs', 'Munder Difflin'), path.join(localAppData, 'munder-difflin-updater'),
+    path.join(appData, 'Guppy'), path.join(localAppData, 'Programs', 'Guppy'), path.join(localAppData, 'guppy-updater'),
     path.join(home, '.claude'), path.join(home, '.claude.json'), path.join(home, '.codex'), path.join(home, '.gemini')
   ];
 }
@@ -479,14 +482,14 @@ class ProcTracker {
     if (!snap) return this.killRootsByHandle(scanError);
     if (this.known.size && !snap.procs.length) return this.killRootsByHandle('the process scan returned no processes');
     const alive = new Map(snap.procs.map((p) => [p.pid, p]));
-    const same = (k) => alive.has(k.pid) && (k.created === null ? /munder difflin/i.test(alive.get(k.pid).name) : alive.get(k.pid).created === k.created);
+    const same = (k) => alive.has(k.pid) && (k.created === null ? /munder difflin|guppy/i.test(alive.get(k.pid).name) : alive.get(k.pid).created === k.created);
     const ours = [...this.known.values()].filter(same).sort((a, b) => b.depth - a.depth);
     for (const k of ours) spawnSync('taskkill', ['/F', '/PID', String(k.pid)], { windowsHide: true, stdio: 'ignore' });
     await sleep(1500);
     let after = null;
     try { after = await this.scan(); } catch (e) { scanError = e.message; }
     if (!after || !after.procs.length) return { ...this.killRootsByHandle(`the post-kill scan failed: ${scanError || 'no processes'}`), killed: ours.map((k) => `${k.pid}:${k.name}`) };
-    const still = after.procs.filter((p) => { const k = this.known.get(p.pid); return k && (k.created === null ? /munder difflin/i.test(p.name) : k.created === p.created); });
+    const still = after.procs.filter((p) => { const k = this.known.get(p.pid); return k && (k.created === null ? /munder difflin|guppy/i.test(p.name) : k.created === p.created); });
     return { ok: still.length === 0, scanFailed: false, killed: ours.map((k) => `${k.pid}:${k.name}`), survivors: still.map((p) => `${p.pid}:${p.name}`) };
   }
   /** The fallback when no scan can prove identity: taskkill /T /F on every root whose ChildProcess
@@ -507,7 +510,7 @@ class ProcTracker {
     try { snap = this.scanSync(); } catch { this.killRootsByHandle('emergency scan failed'); return { ok: false, why: 'scan failed' }; }   // no identity proof: only the open-handle roots
     if (this.known.size && !snap.procs.length) { this.killRootsByHandle('emergency scan empty'); return { ok: false, why: 'scan empty' }; }
     const alive = new Map(snap.procs.map((p) => [p.pid, p]));
-    const same = (k, a) => !!a && (k.created === null ? /munder difflin/i.test(a.name) : a.created === k.created);
+    const same = (k, a) => !!a && (k.created === null ? /munder difflin|guppy/i.test(a.name) : a.created === k.created);
     for (const k of [...this.known.values()].sort((a, b) => b.depth - a.depth)) {
       if (!same(k, alive.get(k.pid))) continue;
       try { spawnSync('taskkill', ['/F', '/PID', String(k.pid)], { windowsHide: true, stdio: 'ignore', timeout: 5000 }); } catch { /* gone */ }
@@ -2122,7 +2125,8 @@ class LayerB {
       run(npm, ['run', 'build'], REPO, 'build 1.1.75 (this tree, with the layer-b seams)', { env, deadline });
       run(path.join(REPO, 'node_modules', '.bin', 'electron-builder.cmd'), ['--win', '--dir', '--publish', 'never', '-c.npmRebuild=false', electronDist(REPO)], REPO, 'package 1.1.75 (--dir)', { env, deadline });
     }
-    this.exe175 = path.join(REPO, 'dist', 'win-unpacked', 'Munder Difflin.exe');
+    // REBRAND-GUPPY: this tree's exe is Guppy.exe from 1.1.82 (Munder Difflin.exe before).
+    this.exe175 = ['Guppy.exe', 'Munder Difflin.exe'].map((n) => path.join(REPO, 'dist', 'win-unpacked', n)).find((p) => fs.existsSync(p)) ?? path.join(REPO, 'dist', 'win-unpacked', 'Guppy.exe');
     if (!fs.existsSync(this.exe175)) throw new Error(`${this.exe175} not found`);
     this.assertSeamsInAsar(path.join(REPO, 'dist', 'win-unpacked', 'resources', 'app.asar'), '1.1.75');
 
