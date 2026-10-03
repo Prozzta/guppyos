@@ -257,15 +257,16 @@ test('WIRING: the app passes spawn; claude is listed by claudeAdapter; no creden
 
 const { EventEmitter } = require('node:events');
 /** A scripted child: `script(child)` runs once the request is written. Like a real process, it
- *  exits when its tree is killed (taskkill / SIGKILL to the group); a signal-0 probe of a dead
- *  group throws ESRCH. `fail` scripts kills that do not work. */
-function scriptedDeps(platform, script, env = {}, { taskkillErrors = [], groupSurvives = false, neverExits = false } = {}) {
+ *  exits when its tree is killed (taskkill / SIGKILL to the group). Like POSIX, the killed leader
+ *  is a ZOMBIE until it is reaped, which is when its exit event fires: a signal-0 probe of the
+ *  group reads alive until then, and ESRCH after (Jim N1). The options script kills that fail. */
+function scriptedDeps(platform, script, env = {}, { taskkillErrors = [], groupSurvives = false, neverExits = false, grandchildSurvives = false } = {}) {
   const seen = { opts: null, kills: [], writes: [], logs: [], child: null };
   const die = () => {
     const c = seen.child;
     if (!c || c.dead || neverExits) return;
     c.dead = true;
-    setImmediate(() => { c.emit('exit', null, 'SIGKILL'); c.emit('close', null, 'SIGKILL'); });
+    setImmediate(() => { c.reaped = true; c.emit('exit', null, 'SIGKILL'); c.emit('close', null, 'SIGKILL'); });
   };
   const d = {
     platform, env: { ComSpec: 'cmd.exe', ...env }, tmpDir: os.tmpdir(), exists: () => true, exitWaitMs: 200,
@@ -277,7 +278,7 @@ function scriptedDeps(platform, script, env = {}, { taskkillErrors = [], groupSu
       return { pid: 1 };
     },
     kill: (pid, sig) => {
-      if (sig === 0) { if (seen.child?.dead) throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); return; }
+      if (sig === 0) { if (seen.child?.reaped && !grandchildSurvives) throw Object.assign(new Error('no such process'), { code: 'ESRCH' }); return; }
       seen.kills.push([pid, sig]);
       if (!groupSurvives) die();
     },
@@ -355,15 +356,17 @@ const MUTANTS = [
   ['C12 third-party env ignored', ' && !thirdPartyProvider(d.env)) return', ') return', thirdPartyChecks],
   ['C13 third-party account shape ignored', "  if (has('apiProvider') && a.apiProvider !== 'firstParty') return null;\n", '', thirdPartyChecks],
   ['C14 final parse on exit', "child.on('close', (code) => {", "child.on('exit', (code) => {", closeChecks],
-  ['C15 only the direct child killed', "try { kill(-pid, 'SIGKILL'); }", "try { kill(pid, 'SIGKILL'); }", groupKillChecks],
+  ['C15 only the direct child killed', "kill(-pid, 'SIGKILL'); res(true)", "kill(pid, 'SIGKILL'); res(true)", groupKillChecks],
   ['C17 resolved before the kill finished', 'void killTree().catch(() => { /* never rejects */ }).then(() => resolve(r));', 'void killTree(); resolve(r);', killOrderChecks],
   ['C18 no retry of a failed kill', '        killed = await killOnce(pid);                                  // the one retry\n', '', killRetryChecks],
   ['C19 a surviving tree not logged', "        try { d.log?.({ kind: 'claude-init-kill-failed', pid, platform: d.platform }); } catch { /* best effort */ }\n", '', killLogChecks],
   ['C20 the kill result ignored', '(e) => res(!e || (e as ExecErr).code === 128));', '() => res(true));', killRetryChecks],
+  ['C21 POSIX probe straight after SIGKILL (sees the zombie)', "try { kill(-pid, 'SIGKILL'); res(true); return; } catch (e) {", "try { kill(-pid, 'SIGKILL'); try { kill(-pid, 0); res(false); } catch { res(true); } return; } catch (e) {", posixKillChecks],
+  ['C22 POSIX group not probed after the exit', "      if (d.platform === 'win32') return true;\n", "      return true;\n", posixKillChecks],
   ['C16 not detached on POSIX', "...(d.platform === 'win32' ? {} : { detached: true }), ", '', groupKillChecks]
 ];
 
-test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C20 each apply once and die', { timeout: 300_000 }, async (t) => {
+test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C22 each apply once and die', { timeout: 300_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, '..', SRC), 'utf8').replace(/\r\n/g, '\n');
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, async () => {
@@ -428,7 +431,8 @@ async function killLogChecks(P) {
 }
 test('KILL: a tree that survives the kill and its retry is LOGGED, and the call still resolves', () => killLogChecks(P));
 
-test('KILL (POSIX): the group is probed after SIGKILL; a surviving group is retried once and logged', async () => {
+async function posixKillChecks(P) {
+  // the leader is a zombie until reaped: a delivered SIGKILL plus its exit event is success, not a failure
   const ok = scriptedDeps('linux', answer);
   await P.runClaudeInit(ok.d, '/usr/local/bin/claude', 3000);
   assert.deepEqual(ok.seen.kills, [[-4321, 'SIGKILL']]);
@@ -437,7 +441,13 @@ test('KILL (POSIX): the group is probed after SIGKILL; a surviving group is retr
   await P.runClaudeInit(survives.d, '/usr/local/bin/claude', 3000);
   assert.deepEqual(survives.seen.kills, [[-4321, 'SIGKILL'], [-4321, 'SIGKILL']]);
   assert.deepEqual(survives.seen.logs, [{ kind: 'claude-init-kill-failed', pid: 4321, platform: 'linux' }]);
-});
+  // the leader exits but a grandchild of the group lives on: retried once, then logged
+  const grand = scriptedDeps('linux', answer, {}, { grandchildSurvives: true });
+  await P.runClaudeInit(grand.d, '/usr/local/bin/claude', 3000);
+  assert.deepEqual(grand.seen.kills, [[-4321, 'SIGKILL'], [-4321, 'SIGKILL']]);
+  assert.deepEqual(grand.seen.logs, [{ kind: 'claude-init-kill-failed', pid: 4321, platform: 'linux' }]);
+}
+test('KILL (POSIX): SIGKILL counts once the leader is reaped (a zombie is not "alive"); a surviving group or grandchild is retried once and logged', () => posixKillChecks(P));
 
 test('KILL: a process that exited by itself is not killed again', async () => {
   const { d, seen } = scriptedDeps('win32', (c) => { c.emit('exit', 0, null); c.emit('close', 0, null); });
