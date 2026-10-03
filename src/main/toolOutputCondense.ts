@@ -146,7 +146,7 @@ export interface CondenseArgs {
 export function condenseOutput(a: CondenseArgs): string {
   const lines = a.text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
   const chars = a.totalChars ?? a.text.length;
-  const outcome = `[condensed by Munder Difflin: the command succeeded${a.interpretation ? ` (${clip(a.interpretation, 80)})` : ''}`
+  const outcome = `[condensed by Guppy: the command succeeded${a.interpretation ? ` (${clip(a.interpretation, 80)})` : ''}`
     + `${a.interrupted ? ', interrupted' : ''}; ${chars.toLocaleString('en-US')} chars, ${lines.length.toLocaleString('en-US')} lines${a.partial ? ' (read in part)' : ''}]`;
   const footer = `[full output: ${a.path} (Read it with offset/limit, or grep it). End a command with #full to see its output uncondensed.]`;
 

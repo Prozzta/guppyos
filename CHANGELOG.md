@@ -11,6 +11,36 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.82] — unreleased
+
+**Munder Difflin is now called Guppy.** Only the app's name changes: your agents, their names,
+the office floor, history and settings all stay. Rollback: 1.1.81 (reinstall; your old data is
+still there).
+
+> **Updating from 1.1.81 works as usual, from inside the app.** The update installs over the old
+> app. Your Start menu and desktop shortcuts become "Guppy" and keep working. On its first start,
+> Guppy copies your data (settings, agents' setup, history) from the old Munder Difflin folder
+> into its own Guppy folder. The old folder is left as it was, so nothing is lost and reinstalling
+> 1.1.81 still works.
+
+### Changed
+
+- **The name.** The window, the installer, the Start menu, shortcuts, the settings card, What's
+  new, update notices, dialogs, notifications and the voice assistant's answer to "what version
+  is this" all say Guppy.
+- **Links to the original project's website are removed.** The app no longer shows the original
+  project's "Pro" announcement, its Founders' Wall offer, or links to its blog posts about open
+  models. Those advertised a product and a site that are not part of this app. The original
+  project is still credited in the README and the licence.
+- **Slack setup steps** now suggest naming your Slack app "Guppy". A Slack app you already made
+  under another name keeps working; there is nothing to redo.
+
+### Not changed
+
+- Hire links (`munderdifflin://…`) you have shared still open.
+- The download files on the releases page keep their old names in this release
+  (`Munder-Difflin-1.1.82-…`), so the download link in 1.1.81 still finds them.
+
 ## [1.1.81] — 2026-10-03
 
 **A release about cost: agents re-read much less on every step, are woken less often, and keep

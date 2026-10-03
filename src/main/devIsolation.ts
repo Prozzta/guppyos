@@ -485,8 +485,8 @@ export function sanitizeCodexConfigForDev(toml: string, opts: CodexSeedOptions):
 /** Window title for the dev build. Unchanged when isolation is off. */
 export function devWindowTitle(base: string, dev: boolean = DEV_ISOLATION): string {
   if (!dev) return base;
-  return base.includes('Munder Difflin')
-    ? base.replace('Munder Difflin', 'Munder Difflin DEV')
+  return base.includes('Guppy')
+    ? base.replace('Guppy', 'Guppy DEV')
     : `${base} [DEV]`;
 }
 

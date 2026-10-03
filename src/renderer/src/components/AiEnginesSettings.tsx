@@ -2,7 +2,6 @@ import { useState, useEffect, type CSSProperties } from 'react';
 import type { HarnessConfig, AgentProvider } from '@/store/config';
 import { PixelButton } from './PixelButton';
 import { ProviderLogo } from './ProviderLogo';
-import { OSS_BLOG_LINKS } from '@shared/ossModels';
 import { useStore } from '@/store/store';
 
 /**
@@ -56,7 +55,6 @@ const headStyle: CSSProperties = {
   fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
   color: 'var(--cth-ink-500)', textTransform: 'uppercase', marginBottom: 2
 };
-const linkStyle: CSSProperties = { color: 'var(--cth-ink-900)', textDecoration: 'underline', cursor: 'pointer' };
 
 export function AiEnginesSettings({ config }: { config: HarnessConfig }) {
   // Keep the global "OpenAI key present" signal (boolean only) live so the Talk
@@ -186,21 +184,6 @@ export function AiEnginesSettings({ config }: { config: HarnessConfig }) {
             </div>
           </div>
         ))}
-        {/* Local-setup guides (ondev-c part-3) — link the two how-to blogs. */}
-        <div style={{ fontSize: 12, color: 'var(--cth-ink-700)', lineHeight: '17px' }}>
-          Running open models? Step-by-step guides:{' '}
-          <a
-            href={OSS_BLOG_LINKS.openModels}
-            onClick={(e) => { e.preventDefault(); void window.cth.openExternal(OSS_BLOG_LINKS.openModels); }}
-            style={linkStyle}
-          >run Munder Difflin on open models</a>
-          {' '}·{' '}
-          <a
-            href={OSS_BLOG_LINKS.macMini}
-            onClick={(e) => { e.preventDefault(); void window.cth.openExternal(OSS_BLOG_LINKS.macMini); }}
-            style={linkStyle}
-          >set it up on a Mac Mini</a>.
-        </div>
       </div>
 
       {/* Unsandboxed-in-auto caveat (Pam guardrail #6) */}
