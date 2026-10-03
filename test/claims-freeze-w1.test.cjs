@@ -14,7 +14,7 @@ const loadTs = require('./load-ts.cjs');
 
 const SRC = path.join(__dirname, '..', 'src', 'shared', 'claims.ts');
 const claims = loadTs(SRC);
-const source = fs.readFileSync(SRC, 'utf8');
+const source = fs.readFileSync(SRC, 'utf8').replace(/\r\n/g, '\n');   // a CRLF checkout (core.autocrlf)
 
 test('G0.1 clamp table: min(global, agent, implemented), clamped down never to off', () => {
   const { effectiveLevel } = claims;
