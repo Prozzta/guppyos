@@ -24,7 +24,12 @@ const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): strin
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
 export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
-  buildWorkingSet: BuildWorkingSetFn; renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn; renderExportLine: RenderExportLineFn;
+  buildWorkingSet: BuildWorkingSetFn;
+  buildWorkingSetDetailed: (state: ClaimsState, view: WorldView, budget: number) => {
+    text: string; receipt: Receipt; renderedReconcileItems: ReconcileItem[];
+    droppedReconcileItems: Array<{ item: ReconcileItem; reason: string }>;
+  };
+  renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn; renderExportLine: RenderExportLineFn;
 } {
   const claims = records.filter((r): r is ClaimRec => r.t === 'claim');
   const byId = new Map(claims.map((c, i) => [c.id, { claim: c, order: i }]));
@@ -33,7 +38,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     for (const id of r.targets) acceptedMail.add(id);
   }
 
-  const buildWorkingSet: BuildWorkingSetFn = (state, view, budget) => {
+  const buildWorkingSetDetailed = (state: ClaimsState, view: WorldView, budget: number) => {
     const cap = Math.max(0, Math.floor(budget));
     const excluded = new Map<string, Receipt['excluded'][number]['reason']>();
     const eligible: Array<{ claim: ClaimRec; order: number }> = [];
@@ -76,7 +81,13 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       ...Object.keys(view.flags).filter(id => view.flags[id].length).sort(cmp).map(id => `⚠ ${id}: ${view.flags[id].join(', ')}`),
     ];
     let markersIncluded = 0;
-    for (const marker of markers) if (add(marker, 1)) markersIncluded++;
+    const droppedReconcileItems: Array<{ item: ReconcileItem; reason: string }> = [];
+    const reconcileMarkers = reconcileItems.slice(0, 3).map((item) => ({ item, text: reconcilePromptText(item) }));
+    for (const marker of markers) {
+      if (add(marker, 1)) { markersIncluded++; continue; }
+      const item = reconcileMarkers.find((candidate) => candidate.text === marker)?.item;
+      if (item) droppedReconcileItems.push({ item, reason: 'T1-space' });
+    }
     const markersOmitted = markers.length - markersIncluded;
     const t2Limit = Math.floor(cap * WORKING_SET_TIER_SHARES[2]) +
       Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
@@ -108,7 +119,11 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     const text = output.join('\n');
     const receipt: Receipt = { at: records.at(-1)?.wt ?? '', agent: state.agent, budget: cap,
       used: tokens(countTokens, text), included, excluded: excludedRows, warnings };
-    return { text, receipt };
+    return { text, receipt, renderedReconcileItems: reconcileItems.slice(0, 3).filter((item) => text.split('\n').includes(reconcilePromptText(item))), droppedReconcileItems };
+  };
+  const buildWorkingSet: BuildWorkingSetFn = (state, view, budget) => {
+    const built = buildWorkingSetDetailed(state, view, budget);
+    return { text: built.text, receipt: built.receipt };
   };
 
   const renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn = (state, view, mode, options?: RenderMemoryMdOptions) => {
@@ -148,5 +163,5 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
   const renderExportLine: RenderExportLineFn = (rec, state) => rec.t === 'event'
     ? `<!-- event:${rec.id} ${rec.ev} -->`
     : `- ${JSON.stringify(rec.text)} [status:${state.claims[rec.id]?.status ?? 'live'}] [c:${rec.id}]`;
-  return { buildWorkingSet, renderMemoryMd, renderExportLine };
+  return { buildWorkingSet, buildWorkingSetDetailed, renderMemoryMd, renderExportLine };
 }

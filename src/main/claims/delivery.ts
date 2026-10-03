@@ -19,6 +19,7 @@ import { COMPACT_CARRY_MAX } from '../compactHealth';
 import { MAIL_JOINED_BUDGET } from '../mailSurface';
 import { verifiedPrefix } from './indexSync';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET, type CountTokens } from './views';
+import { reconcilePromptText } from './reconcile';
 import { buildClaimsWorldSnapshot, runGit, WORLD_SNAPSHOT_DEADLINE_MS, type ClaimsWorldSnapshot, type GitRunner } from './worldSnapshot';
 
 /** M-3: what the mail block keeps at a SessionStart(compact) beside a full working set and the carry. */
@@ -90,7 +91,8 @@ export interface ClaimDeliveryDeps {
    * (ReconcileApi, n <= 3). They render ONCE, as the working set's T1 ⚠ markers (the 0.10 share),
    * inside WORKING_SET_MAX_CHARS (the 9,500 joint budget). None until W5 is wired.
    */
-  reconcileItems?: (agentId: string) => ReconcileItem[];
+  reconcileCandidates?: (agentId: string, day: string) => ReconcileItem[];
+  commitReconcile?: (agentId: string, day: string, renderedIds: string[]) => void;
   /** W5 (Dwight, onTurnCompleted): told at each completed turn (the Stop hook). No-op until wired. */
   onTurnCompleted?: (agentId: string) => void;
   git?: GitRunner;
@@ -149,18 +151,19 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       const snapshot = await snapshotFor(agentId, records, state, cwd);
       const usage = d.usage(agentId);
       const view = d.worldView(state, records, usage, worldInputs({ now: now().toISOString(), tasks: d.tasks(), cwd, snapshot, usage, fileExists: d.fileExists }));
-      // THE RECONCILE SLOT (god): W5's items are the T1 markers, the one channel they render in.
+      const day = now().toISOString().slice(0, 10);
+      // Peek has no lease/charge/log side effects. T1 decides the set committed below.
       let items: ReconcileItem[] = [];
-      try { items = (d.reconcileItems?.(agentId) ?? []).slice(0, 3); } catch { items = []; }
-      const { buildWorkingSet } = createClaimViews(records, countTokens, items);
+      try { items = (d.reconcileCandidates?.(agentId, day) ?? []).slice(0, 3); } catch { items = []; }
+      const { buildWorkingSetDetailed } = createClaimViews(records, countTokens, items);
       const warning = readOnly ? `\n\n${READ_ONLY_WARNING}` : '';
       const tail = warning;
       // M-3: B8 shares at the plan's B, scaled down until the text fits the character cap.
       let budget = DEFAULT_WORKING_SET_BUDGET;
-      let built = buildWorkingSet(state, view, budget);
+      let built = buildWorkingSetDetailed(state, view, budget);
       for (let i = 0; i < 6 && built.text.length + tail.length > WORKING_SET_MAX_CHARS && budget > 1; i++) {
         budget = Math.max(1, Math.floor(budget * (WORKING_SET_MAX_CHARS - tail.length) / (built.text.length + 1) * 0.95));
-        built = buildWorkingSet(state, view, budget);
+        built = buildWorkingSetDetailed(state, view, budget);
       }
       // Last resort (Jim's note): cut the working set at a LINE boundary and keep the warning whole.
       let body = built.text;
@@ -170,6 +173,15 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
         body = cut > 0 ? body.slice(0, cut) : body.slice(0, room);
       }
       const text = body + tail;
+      const bodyLines = new Set(body.split('\n'));
+      const renderedItems = items.filter((item) => bodyLines.has(reconcilePromptText(item)));
+      const renderedIds = new Set(renderedItems.map((item) => item.itemId));
+      for (const item of items) if (!renderedIds.has(item.itemId)) {
+        const prior = built.droppedReconcileItems.find((drop) => drop.item.itemId === item.itemId);
+        d.log?.({ kind: 'claims-reconcile-dropped', agentId, itemId: item.itemId, reason: prior?.reason ?? 'character-cap' });
+      }
+      try { d.commitReconcile?.(agentId, day, renderedItems.map((item) => item.itemId)); }
+      catch (e) { d.log?.({ kind: 'claims-reconcile-commit-failed', agentId, error: String(e).slice(0, 160) }); }
       // S-3: one receipt per DISTINCT delivered text (B14), on a rotating file.
       const digest = createHash('sha256').update(text).digest('hex');
       if (lastReceipt.get(agentId) !== digest) {

@@ -35,7 +35,7 @@ const { SandboxKeyProvider, FileLedgerKeyRecord, FileHeadAnchorStore, KEY_RECORD
 const { derive } = loadTs('src/main/claims/derive.ts');
 const { worldView } = loadTs('src/main/claims/world.ts');
 const { DEFAULT_KEY_REGISTRY } = loadTs('src/main/claims/registry.ts');
-const { ReconcileQueue, ReconcileApi, reconcilePromptText } = loadTs('src/main/claims/reconcile.ts');
+const { ReconcileQueue, ReconcileApi, reconcilePromptText, reconcileItemId } = loadTs('src/main/claims/reconcile.ts');
 const W = loadTs('src/main/claims/worldSnapshot.ts');
 const { MAIL_JOINED_BUDGET } = loadTs('src/main/mailSurface.ts');
 const { COMPACT_CARRY_MAX } = loadTs('src/main/compactHealth.ts');
@@ -207,7 +207,8 @@ test('god (W5 slot, Creed S3 ruling): reconcile items render ONCE, as the T1 ⚠
   x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
     registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
     countTokens: () => (text) => Math.ceil(text.length / 4), git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'),
-    appendReceipt: () => {}, reconcileItems: (a) => api.reconcileForTurn(a, '2026-10-03').items,
+    appendReceipt: () => {}, reconcileCandidates: (a, day) => api.peekForTurn(a, day),
+    commitReconcile: (a, day, ids) => { api.commitRendered(a, day, ids); },
     onTurnCompleted: (a) => { told.push(a); void api.onTurnCompleted(a); } });
   for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words`);
   const w = await x.delivery.workingSet('a1');
@@ -221,6 +222,58 @@ test('god (W5 slot, Creed S3 ruling): reconcile items render ONCE, as the T1 ⚠
   assert.deepEqual(told, ['a1']);
 });
 
+test('M1: only rendered real-id T1 prompts are charged and leased; a dropped prompt survives three Stops and later renders', async () => {
+  let room = false;
+  const count = (text) => Math.ceil(text.length / (room ? 8 : 4));
+  const x = setup();
+  const ids = [];
+  for (let i = 0; i < 120; i++) ids.push(await note(x.ref.store, 'a1', `synthetic note ${i}: the blue relay on bench ${i} hums at dusk, and the crate beside it holds spare gaskets`));
+  const candidates = [[ids[0], ids[1]], [ids[2], ids[3]], [ids[4], ids[5]]].map(([a, b]) => ({
+    itemId: reconcileItemId('a1', 'conflict', a, b), kind: 'conflict', a, b,
+    text: `R5 candidate (0.931 >= 0.90): ${a} / ${b}`,
+  }));
+  const queue = new ReconcileQueue(path.join(x.root, 'claims-reconcile-queue.json'));
+  queue.refresh('a1', candidates);
+  const log = []; const superseded = []; const pendingStops = [];
+  const api = new ReconcileApi({ queue, countTokens: count, log: (row) => log.push(row),
+    appendSoftSupersede: async (agent, loser, winner, itemId) => { superseded.push(itemId); return { ok: true }; },
+    newestWins: (item) => ({ loser: item.a, winner: item.b }), isLiveClaim: () => true, isOwner: (a) => a === 'a1' });
+  x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
+    registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
+    countTokens: () => count, git: async (cwd, args) => args[0] === 'rev-parse' ? 'HEAD1\n' : '', now: () => new Date('2026-10-03T12:00:00.000Z'),
+    appendReceipt: () => {}, reconcileCandidates: (a, day) => api.peekForTurn(a, day),
+    commitReconcile: (a, day, rendered) => { api.commitRendered(a, day, rendered); },
+    onTurnCompleted: (a) => { pendingStops.push(api.onTurnCompleted(a)); }, log: (row) => log.push(row) });
+
+  const neverShown = candidates[2].itemId;
+  for (let cycle = 0; cycle < 3; cycle++) {
+    const start = log.length;
+    const working = await x.delivery.workingSet('a1');
+    const rendered = candidates.map((item) => item.itemId).filter((id) => working.includes(`reconcile ${id}:`));
+    assert.ok(rendered.length < 3, 'M-3 leaves at least one real-length prompt outside T1');
+    const injection = log.slice(start).find((row) => row.kind === 'claims-reconcile-injected');
+    assert.deepEqual(injection?.items ?? [], rendered, 'charged/leased ids equal the rendered ids');
+    assert.equal(injection?.tokens ?? 0, candidates.filter((item) => rendered.includes(item.itemId))
+      .reduce((n, item) => n + count(reconcilePromptText({ ...item, agent: 'a1', turnsUnanswered: 0 })), 0));
+    const dropped = log.slice(start).find((row) => row.kind === 'claims-reconcile-dropped' && row.itemId === neverShown);
+    assert.equal(dropped?.reason, 'T1-space');
+    assert.equal(Object.hasOwn(dropped ?? {}, 'text'), false, 'drop telemetry contains no prompt text');
+    x.delivery.turnCompleted('a1');
+    await Promise.all(pendingStops.splice(0));
+  }
+  const waiting = queue.peek('a1', 3).find((item) => item.itemId === neverShown);
+  assert.equal(waiting?.turnsUnanswered, 0);
+  assert.equal(waiting?.leaseTurn, undefined);
+  assert.equal(superseded.includes(neverShown), false, 'an unseen prompt cannot soft-supersede');
+
+  room = true;
+  const later = await x.delivery.workingSet('a1');
+  assert.ok(later.includes(`reconcile ${neverShown}:`), 'the still-queued prompt renders when capacity allows room');
+  const laterInjected = log.filter((row) => row.kind === 'claims-reconcile-injected').at(-1);
+  assert.ok(laterInjected.items.includes(neverShown));
+  assert.ok(queue.items('a1').some((item) => item.itemId === neverShown && item.leaseTurn));
+});
+
 test('W5 integration: live hook SessionStart injects leased T1 markers; Stop completes the turn and logs rendered token count', async (t) => {
   const x = setup();
   const queue = new ReconcileQueue(path.join(x.root, 'claims-reconcile-queue.json'));
@@ -232,7 +285,8 @@ test('W5 integration: live hook SessionStart injects leased T1 markers; Stop com
   x.delivery = D.createClaimDelivery({ hiveRoot: () => x.root, level: () => 'writer', readLedger: (a) => x.ref.store.readLedger(a),
     registry: () => DEFAULT_KEY_REGISTRY, derive, worldView, agentCwd: () => x.root, tasks: () => [], usage: () => [],
     countTokens: () => count, git: async () => '', now: () => new Date('2026-10-03T12:00:00.000Z'), appendReceipt: () => {},
-    reconcileItems: (agentId) => api.reconcileForTurn(agentId, '2026-10-03').items,
+    reconcileCandidates: (agentId, day) => api.peekForTurn(agentId, day),
+    commitReconcile: (agentId, day, ids) => { api.commitRendered(agentId, day, ids); },
     onTurnCompleted: (agentId) => { void api.onTurnCompleted(agentId); } });
   const hive = new HiveManager(() => x.root, () => true); HIVES.push(hive);
   await hive.ensureAgent({ id: 'a1', name: 'a1', provider: 'claude', cwd: x.root });

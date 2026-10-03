@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAliasCandidates, reconcileItemId, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
+const { reconcileApiForHive, createReconcileLiveClaims } = loadTs(path.join(__dirname, '../src/main/claims/reconcileHive.ts'));
 
 test('G5.1 offers at most three leased items and assigns a persisted monotonic agent turn', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -100,6 +101,37 @@ test('G5.5 daily reconcile token budget is global across agents and survives res
   const restarted = new ReconcileQueue(file);
   assert.equal(restarted.dailyTokens('2026-10-03'), 6000);
   assert.equal(restarted.chargeDailyTokens('2026-10-03', 4000), true);
+});
+
+test('S1 reconcileApiForHive builds an API and its live-claim state stays isolated', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-hive-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const records = {
+    alpha: [
+      { v: 1, t: 'claim', id: 'alpha-old', agent: 'alpha', at: '2026-01-01T00:00:00Z', wt: '2026-01-01T00:00:00Z', mac: 'a1', prev: '', kind: 'fact', text: 'old', source: 'self' },
+      { v: 1, t: 'claim', id: 'alpha-new', agent: 'alpha', at: '2026-01-02T00:00:00Z', wt: '2026-01-02T00:00:00Z', mac: 'a2', prev: 'a1', kind: 'fact', text: 'new', source: 'self' },
+    ],
+    beta: [
+      { v: 1, t: 'claim', id: 'beta-old', agent: 'beta', at: '2026-01-01T00:00:00Z', wt: '2026-01-01T00:00:00Z', mac: 'b1', prev: '', kind: 'fact', text: 'old', source: 'self' },
+      { v: 1, t: 'claim', id: 'beta-new', agent: 'beta', at: '2026-01-02T00:00:00Z', wt: '2026-01-02T00:00:00Z', mac: 'b2', prev: 'b1', kind: 'fact', text: 'new', source: 'self' },
+    ],
+  };
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  const log = [];
+  const api = reconcileApiForHive(dir, {
+    endpoint: () => ({ store: { readLedger: (agent) => ({ chain: 'ok', records: records[agent] || [] }), appendSoftSupersede: async (...args) => ({ ok: true, args }) } }),
+    queue: () => queue, countTokens: () => 1, log: (row) => log.push(row), registry: () => ({ v: 1, namespaces: [], keys: {} }), isOwner: () => true,
+  });
+  assert.ok(api instanceof ReconcileApi);
+  assert.deepEqual(api.peekForTurn('alpha', '2026-10-04'), []);
+
+  const alpha = createReconcileLiveClaims(() => ({ live: new Set(['alpha-old', 'alpha-new']), direction: { loser: 'alpha-old', winner: 'alpha-new' } }));
+  const beta = createReconcileLiveClaims(() => ({ live: new Set(['beta-old', 'beta-new']), direction: { loser: 'beta-old', winner: 'beta-new' } }));
+  alpha.newestWins({ agent: 'alpha', a: 'alpha-old', b: 'alpha-new' });
+  beta.newestWins({ agent: 'beta', a: 'beta-old', b: 'beta-new' });
+  assert.equal(alpha.isLiveClaim('alpha-new'), true);
+  assert.equal(alpha.isLiveClaim('beta-new'), false);
+  assert.equal(beta.isLiveClaim('beta-new'), true);
+  assert.equal(beta.isLiveClaim('alpha-new'), false);
 });
 
 test('G5.5 daily token accounting prunes entries older than seven days', (t) => {

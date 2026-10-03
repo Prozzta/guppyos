@@ -28,21 +28,35 @@ export interface ReconcileApiDeps {
 /** Claims-owned delivery/completion API. Providers only need to call these two methods. */
 export class ReconcileApi {
   constructor(private readonly d: ReconcileApiDeps) {}
-  reconcileForTurn(agentId: string, day: string): ReconcileDelivery {
-    const offer = this.d.isOwner(agentId) ? this.d.queue.beginTurn(agentId, 3) : { turn: '', items: [] };
-    const injected: ReconcileItem[] = [];
-    for (const item of offer.items) {
-      const next = [...injected, item];
-      const tokens = next.reduce((n, i) => n + Math.max(0, this.d.countTokens(reconcilePromptText(i))), 0);
-      if (tokens > 0 && !this.d.queue.chargeDailyTokens(day, tokens - injected.reduce((n, i) => n + Math.max(0, this.d.countTokens(reconcilePromptText(i))), 0))) break;
-      injected.push(item);
+  /** Side-effect-free delivery peek. Candidates are neither leased nor charged here. */
+  peekForTurn(agentId: string, day: string): ReconcileItem[] {
+    if (!this.d.isOwner(agentId)) return [];
+    const out: ReconcileItem[] = [];
+    let tokens = 0;
+    for (const item of this.d.queue.peek(agentId, 3)) {
+      const n = Math.max(0, this.d.countTokens(reconcilePromptText(item)));
+      if (n > 0 && this.d.queue.dailyTokens(day) + tokens + n > 10_000) break;
+      out.push(item); tokens += n;
     }
-    this.d.queue.release(agentId, offer.turn, new Set(injected.map((i) => i.itemId)));
-    const text = injected.map(reconcilePromptText).join('\n');
-    const tokens = injected.reduce((n, i) => n + Math.max(0, this.d.countTokens(reconcilePromptText(i))), 0);
-    const itemIds = injected.map((i) => i.itemId);
-    if (tokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn: offer.turn, day, tokens, items: itemIds });
-    return { text, tokens, itemIds, items: injected, turn: offer.turn };
+    return out;
+  }
+  /** Lease and charge only the candidates which the delivery build actually rendered. */
+  commitRendered(agentId: string, day: string, renderedIds: string[]): ReconcileDelivery {
+    if (!this.d.isOwner(agentId) || !renderedIds.length) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
+    const wanted = new Set(renderedIds);
+    const items = this.d.queue.peek(agentId, 3).filter((item) => wanted.has(item.itemId));
+    if (!items.length) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
+    const tokens = items.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
+    const turn = this.d.queue.leaseRendered(agentId, day, items.map((item) => item.itemId), tokens);
+    if (!turn) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
+    const itemIds = items.map((item) => item.itemId);
+    const text = items.map(reconcilePromptText).join('\n');
+    if (tokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn, day, tokens, items: itemIds });
+    return { text, tokens, itemIds, items, turn };
+  }
+  reconcileForTurn(agentId: string, day: string): ReconcileDelivery {
+    const items = this.peekForTurn(agentId, day);
+    return this.commitRendered(agentId, day, items.map((item) => item.itemId));
   }
   async onTurnCompleted(agentId: string, turn?: string): Promise<void> {
     if (!this.d.isOwner(agentId)) return;
@@ -142,6 +156,24 @@ export class ReconcileQueue {
     for (const item of items) { item.leaseTurn = turn; item.leasedAt = leasedAt; }
     this.save();
     return { turn, items: items.map((i) => ({ ...i })) };
+  }
+  /** Read queued candidates without leasing, changing the sequence, or writing the queue. */
+  peek(agentId: string, limit = 3): ReconcileItem[] {
+    return (this.state.agents[agentId]?.items ?? []).filter((item) => !item.leaseTurn)
+      .slice(0, Math.max(0, Math.min(3, Math.floor(limit)))).map((item) => ({ ...item }));
+  }
+  /** Atomically charge and lease only ids confirmed rendered by delivery. */
+  leaseRendered(agentId: string, day: string, ids: string[], tokens: number, cap = 10_000): string | null {
+    const s = this.agent(agentId);
+    const wanted = new Set(ids);
+    const selected = s.items.filter((item) => !item.leaseTurn && wanted.has(item.itemId)).slice(0, 3);
+    if (!selected.length || selected.length !== wanted.size || !this.chargeDailyTokens(day, tokens, cap)) return null;
+    s.sequence += 1;
+    const turn = `${agentId}:${s.sequence}`;
+    const leasedAt = this.now().toISOString();
+    for (const item of selected) { item.leaseTurn = turn; item.leasedAt = leasedAt; }
+    this.save();
+    return turn;
   }
   /** A normal completed turn counts only still-leased items; repeated Stop is idempotent. */
   completeTurn(agentId: string, turn: string): ReconcileItem[] {

@@ -11,6 +11,7 @@ import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, type TaskRow } from './claims/delivery';
+import { reconcileApiForHive as createReconcileApiForHive } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
@@ -1361,11 +1362,14 @@ const claimDelivery = createClaimDelivery({
       return claimsCountTokens;
     } catch { return null; }
   },
-  // W5 items flow into createClaimViews' T1 markers exactly once, already filtered/leased by
-  // ReconcileApi and token-charged against that exact rendered marker. Stop advances that lease.
-  reconcileItems: (agentId) => {
+  // Peek candidates without side effects; commit only ids confirmed rendered by T1 below.
+  reconcileCandidates: (agentId, day) => {
     const root = hive.root(); if (!root) return [];
-    return reconcileApiForHive(root)?.reconcileForTurn(agentId, new Date().toISOString().slice(0, 10)).items ?? [];
+    return reconcileApiForHive(root)?.peekForTurn(agentId, day) ?? [];
+  },
+  commitReconcile: (agentId, day, renderedIds) => {
+    const root = hive.root(); if (!root) return;
+    reconcileApiForHive(root)?.commitRendered(agentId, day, renderedIds);
   },
   onTurnCompleted: (agentId) => {
     const root = hive.root(); if (!root) return;
@@ -1375,30 +1379,13 @@ const claimDelivery = createClaimDelivery({
   },
   log: (row) => hive.appendLog(row),
 });
-let reconcileLiveClaims = new Set<string>();
 function reconcileApiForHive(root: string): ReconcileApi | null {
-  const endpoint = claimsEndpoint();
-  if (!endpoint) return null;
-  return new ReconcileApi({
-    queue: reconcileQueueForHive(root),
+  return createReconcileApiForHive(root, {
+    endpoint: claimsEndpoint,
+    queue: reconcileQueueForHive,
     countTokens: (text) => claimsCountTokens?.(text) ?? 0,
     log: (row) => hive.appendLog(row),
-    appendSoftSupersede: async (agentId, loser, winner, itemId) =>
-      (await claimsEndpoint())?.store.appendSoftSupersede(agentId, loser, winner, itemId) ?? Promise.resolve({ ok: false }),
-    newestWins: (item) => {
-      reconcileLiveClaims = new Set();
-      const read = endpoint.store.readLedger(item.agent);
-      const prefix = verifiedPrefix(read);
-      if (!prefix) return null;
-      const claims = prefix.records.filter((r) => r.t === 'claim');
-      const state = deriveClaims(prefix.records, loadRegistry(root), { r4: false });
-      const a = claims.find((r) => r.id === item.a), b = claims.find((r) => r.id === item.b);
-      if (!a || !b || state.claims[a.id]?.status !== 'live' || state.claims[b.id]?.status !== 'live') return null;
-      reconcileLiveClaims = new Set([a.id, b.id].filter((id) => state.claims[id]?.status === 'live'));
-      const aNewer = a.at > b.at || (a.at === b.at && a.id > b.id);
-      return aNewer ? { loser: b.id, winner: a.id } : { loser: a.id, winner: b.id };
-    },
-    isLiveClaim: (claimId) => reconcileLiveClaims.has(claimId),
+    registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
   });
 }
