@@ -334,13 +334,25 @@ export class NativeMemoryStore {
           : this.db.prepare(`SELECT rowid AS id, distance AS d FROM chunks_vec WHERE embedding MATCH @qv AND k = @n${mode === 'all' ? '' : ` AND vis IN (${visList(mode)})`} ORDER BY distance`)
             .all({ qv, n: cand }) as Array<{ id: number; d: number }>;
       }
-      const fused = rrf(lex.map((r) => r.id), vec.map((r) => r.id)).slice(0, k);
+      const fusedAll = rrf(lex.map((r) => r.id), vec.map((r) => r.id));
       const bm = new Map(lex.map((r) => [r.id, r.s]));
       const dist = new Map(vec.map((r) => [r.id, r.d]));
       const row = this.db.prepare(`SELECT c.chunk_id, c.wing, c.room, c.source_id, c.content, c.claim_id, cs.status, cl.kind, cl.ckey, cl.at
         FROM chunks c ${joins} WHERE c.chunk_id = ?`);
-      return fused.map((f) => {
-        const r = row.get(f.id) as { chunk_id: number; wing: string; room: string; source_id: string; content: string; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
+      type Row = { chunk_id: number; wing: string; room: string; source_id: string; content: string; claim_id: string | null; status: string | null; kind: string | null; ckey: string | null; at: string | null };
+      const allowed = new Set<string>(MODE_VIS[mode]);
+      // Fail closed in BOTH branches (Jim W3-2): a claim chunk is returned only when its status row
+      // exists and its visibility is in the mode (the KNN fast path filters on the vec0 column, so
+      // this is the check that a missing or stale status row cannot slip past).
+      const rows: Array<{ f: { id: number; score: number }; r: Row }> = [];
+      for (const f of fusedAll) {
+        if (rows.length >= k) break;
+        const r = row.get(f.id) as Row | undefined;
+        if (!r) continue;
+        if (r.claim_id && mode !== 'all' && (r.status === null || !allowed.has(visOf(r.status)))) continue;
+        rows.push({ f, r });
+      }
+      return rows.map(({ f, r }) => {
         const d = dist.get(f.id);
         const b = bm.get(f.id);
         return {

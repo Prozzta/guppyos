@@ -6,7 +6,7 @@
  * Protocol (both directions structured-clone messages on the parent port):
  *   main -> worker  { id, op, args, deadline }      op: search | wake-up | status | backfill |
  *                                                        report | compact | shutdown |
- *                                                        claims-sync | r5-candidates (main only)
+ *                                                        claims-sync | r5-candidates | claim-ledger (main only)
  *   worker -> main  { id, ok, exit, text?, json?, error? }   and  { event, ...fields }
  * A request whose deadline passed while it waited in the queue is answered `expired` without
  * running: the caller already gave up on it.
@@ -119,6 +119,9 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
       }
       case 'claims-sync':
         guard(engine.syncClaims(a as unknown as ClaimsSyncArgs), (r) => ({ exit: 0, json: r }));
+        break;
+      case 'claim-ledger':
+        guard(engine.setClaimLedger(a.value), (r) => ({ exit: 0, json: r }));
         break;
       case 'r5-candidates':
         guard(engine.r5Candidates(String(a.wing ?? ''), String(a.claimId ?? ''), Number(a.tau2 ?? 1)), (r) => ({ exit: 0, json: r }));

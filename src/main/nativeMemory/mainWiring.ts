@@ -70,7 +70,12 @@ export class NativeMemoryWiring {
   private loggedUnavailable = new Set<MemoryUnavailable>();
 
   constructor(private readonly d: WiringDeps) {
-    this.client = new NativeMemoryClient({ fork: () => d.fork(d.workerEntry), config: () => this.workerConfig(), log: d.log, onReady: () => d.onWorkerReady?.() });
+    this.client = new NativeMemoryClient({
+      fork: () => d.fork(d.workerEntry),
+      // The config is read at fork only: the level it carries is what a new worker knows (W3-1).
+      config: () => { const c = this.workerConfig(); if (c) this.sentLedger = { v: c.claimLedger }; return c; },
+      log: d.log, onReady: () => d.onWorkerReady?.()
+    });
   }
 
   private runtimeManifest(): RuntimeManifest | null {
@@ -205,16 +210,43 @@ export class NativeMemoryWiring {
     if (why) return { ok: false, exit: EXIT.unavailable, error: why === 'disabled' ? 'memory is turned off in Settings' : `memory is unavailable (${why})` };
     const v = validateRequest(body, callerWing);
     if ('exit' in v) return { ok: false, exit: v.exit, error: v.error };
+    const push = this.pushClaimLedger();
+    if (push) await push;
     // NATIVE-WAKEUP N1: a wake-up may wait up to WAKE_WAIT_MS for its wing on a filling index,
     // so its deadline covers that wait plus the cold budget. status keeps 2 s; search its own.
     return this.client.request(v.op, v.args, v.op === 'search' ? undefined : v.op === 'wake-up' ? WAKE_UP_DEADLINE_MS : 2_000);
   }
 
+  /** The Settings level a running worker was last told (null: not forked, or not told yet). */
+  private sentLedger: { v: unknown } | null = null;
+
+  /**
+   * W3-1 (Jim): a running worker follows the CURRENT Settings level. Before any request, a changed
+   * level is pushed first, and the worker reconciles before answering (a drop to shadow brings
+   * memory.md back and hides the claims, with no restart). A worker not running yet gets the level
+   * in its config at fork.
+   */
+  claimLedgerChanged(): Promise<void> | null {
+    // The Settings action that changes claimLedger calls this, so a running worker follows at once
+    // (the per-request push below is the backstop).
+    return this.pushClaimLedger();
+  }
+
+  /** null when there is nothing to push (synchronous: a request then posts at once, MAIN BUDGET). */
+  private pushClaimLedger(): Promise<void> | null {
+    if (!this.d.claimLedger || !this.client.forked) return null;
+    const v = this.d.claimLedger();
+    if (this.sentLedger && this.sentLedger.v === v) return null;
+    return this.client.request('claim-ledger', { value: v as never }, 300_000).then((r) => { if (r.ok) this.sentLedger = { v }; });
+  }
+
   /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */
-  syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[] }): Promise<Reply> {
+  async syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[] }): Promise<Reply> {
     const why = this.unavailable();
-    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
-    return this.client.request('claims-sync', args as unknown as Record<string, unknown>, 120_000);
+    if (why) return { ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` };
+    const push = this.pushClaimLedger();
+    if (push) await push;
+    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, 120_000);
   }
 
   /** CLAIM-LEDGER W3: R5 candidates for a just-appended claim (the W3 side of R5CandidatesFn). */

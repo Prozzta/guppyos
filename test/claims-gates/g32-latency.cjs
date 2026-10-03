@@ -4,7 +4,8 @@
  * index the sandbox copy of the full corpus with the tree's own engine and the REAL model, then
  * time the default search (engine.search: query embed + FTS + vec + fusion), warm.
  *   args.claims = true (the new build): every flagged agent's memory.md bullets become claim chunks
- *   (one bullet = one claim, all live), as after the S0 import; its markdown memory leaves the index.
+ *   (one bullet = one claim; ~30% superseded or retracted, Jim W3-3), as after the S0 import; its
+ *   markdown memory leaves the index. The index file size (MB) is reported for the CHANGELOG.
  * Returns the latency samples' p50/p95 and the corpus counts.
  */
 const fs = require('node:fs');
@@ -28,15 +29,17 @@ module.exports = async (drill) => {
   await eng.backfill();
   await drill.assert.modelLoaded(embedder);
   let claimCount = 0;
+  let hiddenClaims = 0;
   if (a.claims) {
     const { withParts } = drill.loadTs('src/main/claims/chunks.ts');
     for (const agent of a.claimAgents) {
       const bullets = a.bullets[agent] ?? [];
       const chunks = bullets.map((text, i) => {
         const content = `fact · - · 2026-10-03\n${text}`;
-        return { claimId: `c-${crypto.createHash('sha256').update(`${agent}#${i}`).digest('hex').slice(0, 12)}`, wing: agent, kind: 'fact', ckey: null, at: '2026-10-03T10:00:00.000Z', status: 'live', content, contentSha256: crypto.createHash('sha256').update(content).digest('hex') };
+        return { claimId: `c-${crypto.createHash('sha256').update(`${agent}#${i}`).digest('hex').slice(0, 12)}`, wing: agent, kind: 'fact', ckey: null, at: '2026-10-03T10:00:00.000Z', status: i % 10 < 3 ? (i % 2 ? 'superseded' : 'retracted') : 'live', content, contentSha256: crypto.createHash('sha256').update(content).digest('hex') };
       });
       claimCount += chunks.length;
+      hiddenClaims += chunks.filter((c) => c.status !== 'live').length;
       await eng.syncClaims({ wing: agent, path: `agents/${agent}/memory/claims`, head: 'h', chunks: withParts(chunks) });
     }
   }
@@ -55,7 +58,9 @@ module.exports = async (drill) => {
   samples.sort((x, y) => x - y);
   const pct = (p) => samples[Math.min(samples.length - 1, Math.floor(p * samples.length))];
   const counts = store.counts();
+  store.checkpoint();
+  const indexBytes = store.fileBytes();
   await eng.close();
   store.close();
-  return { queries: samples.length, p50: pct(0.5), p95: pct(0.95), max: samples[samples.length - 1], counts, claimCount, buildMs, foundRate: found / samples.length };
+  return { queries: samples.length, p50: pct(0.5), p95: pct(0.95), max: samples[samples.length - 1], counts, claimCount, buildMs, foundRate: found / samples.length, indexMB: Math.round(indexBytes / 1e4) / 100, hiddenClaims };
 };
