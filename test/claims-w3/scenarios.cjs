@@ -176,12 +176,27 @@ module.exports = async (drill) => {
     const statusOf = new Map(chunks.map((c) => [c.claimId, c.status]));
     const fast = claimHits(await eng.search({ query: 'alpha beta gamma delta', results: 5 }));
     const filtered = claimHits(await eng.search({ query: 'alpha beta gamma delta', results: 5, wing: 'a1' }));
-    const out = {
+    // Jim S-a: the vector branch on its own. Every one of the k hits must come from the KNN (cosineSim
+    // set): without the in-KNN vis filter (or a stale vec0 vis) the KNN returns hidden rows, the row
+    // check drops them, and only lexical hits (cosineSim null) are left. Checked twice: vis set at
+    // insert (this store) and vis set later by a status change (all live first, then hidden).
+    const vec = async (e) => ({
+      fast: claimHits(await e.search({ query: 'alpha beta gamma delta', results: 5 })).map((h) => [statusOf.get(h.claimId), h.cosineSim !== null]),
+      filtered: claimHits(await e.search({ query: 'alpha beta gamma delta', results: 5, wing: 'a1' })).map((h) => [statusOf.get(h.claimId), h.cosineSim !== null]),
+    });
+    const vecAtInsert = await vec(eng);
+    await eng.close(); store.close();
+    const store2 = open(); const eng2 = engine(store2, bowEmbedder());
+    await eng2.backfill();
+    await sync(eng2, 'a1', chunks.map((c) => ({ ...c, status: 'live' })));
+    const changed = await sync(eng2, 'a1', chunks);
+    const vecAfterChange = await vec(eng2);
+    await eng2.close(); store2.close();
+    return {
       fast: fast.map((h) => statusOf.get(h.claimId)), filtered: filtered.map((h) => statusOf.get(h.claimId)),
       fastLiveEpsilon: fast.filter((h) => Number(h.claimId.slice(2)) >= 590 && Number(h.claimId.slice(2)) < 600).length,
+      vecAtInsert, vecAfterChange, statusChanges: changed.statusChanges, reEmbedded: changed.embedded,
     };
-    await eng.close(); store.close();
-    return out;
   }
 
   if (s === 'disposable') {
@@ -382,6 +397,34 @@ module.exports = async (drill) => {
     const unsent = { claims: claimRows(store), all: claimHits(await eng.search({ query: 'wombat quokka', results: 10, mode: 'all' })).length, statuses: store.db.prepare('SELECT count(*) AS n FROM claim_status').get().n };
     await eng.close(); store.close();
     return { orphan, wakeHasClaim: /quokka|wombat/.test(wake) || /quokka|wombat/.test(wakeAll), wakeHasNotes: /notefact/.test(wake), unsent };
+  }
+
+  if (s === 'workerLedger') {
+    // Jim S-b: the claim-ledger op through runWorker's dispatch (a fake port; no markdown, empty
+    // syncs, so nothing is embedded). Global shadow refuses a claims-sync; after the op it is accepted.
+    const { runWorker } = L('src/main/nativeMemory/worker.ts');
+    fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
+    ledger('a1');
+    manifest({});
+    const listeners = []; const events = []; const replies = new Map();
+    const port = { on: (_ev, fn) => listeners.push(fn), postMessage: (m) => (typeof m.id === 'number' ? replies.set(m.id, m) : events.push(m)) };
+    const ort = { Tensor: class {}, InferenceSession: { create: async () => { throw new Error('no model in this scenario'); } } };
+    await runWorker({ hiveRoot: hive, dbFile: path.join(dbDir, 'worker.sqlite'), modelDir: drill.modelDir, modelSha256: null, vecPath: drill.vecPath, vecSha256: drill.vecSha256, claimLedger: 'shadow' }, port, { Database: drill.openOpts.Database, ort });
+    let id = 0;
+    const call = async (op, args) => {
+      const my = ++id;
+      for (const fn of listeners) fn({ data: { id: my, op, args } });
+      for (let i = 0; i < 200 && !replies.has(my); i++) await new Promise((r) => setTimeout(r, 25));
+      return replies.get(my) ?? { timeout: true };
+    };
+    // A real worker clamps to this build's IMPLEMENTED_LEVEL ('off' until the rollout), so the op is
+    // observed through the engine's stored level: a new value changes it (and reconciles), a repeat does not.
+    const sync = await call('claims-sync', { wing: 'a1', path: 'agents/a1/memory/claims', head: 'h', chunks: [] });
+    const op = await call('claim-ledger', { value: 'reader' });
+    const again = await call('claim-ledger', { value: 'reader' });
+    const back = await call('claim-ledger', { value: 'shadow' });
+    const shutdown = await call('shutdown', {});
+    return { ready: events.some((e) => e.event === 'ready'), sync, op, again, back, shutdown };
   }
 
   if (s === 'buildV2') {
