@@ -156,12 +156,12 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   // field rendered empty — leaving the copy above promising a default the user
   // could not accept, and Finish failing with "Pick a harness home folder first."
   //
-  // Suggest the literal `~/HarnessAgents` instead. That is exactly the string
+  // Suggest the literal `~/Guppy` instead (1.1.82; it was `~/HarnessAgents`). That is exactly the string
   // #140's normalizeHiveHome()/expandTilde() were built to absorb: it is expanded
   // at the config-write boundary AND at ensureHarnessHome's mkdir, so every
   // downstream reader still sees one absolute path. No new IPC surface.
   useEffect(() => {
-    if (!home) setHome('~/HarnessAgents');
+    if (!home) setHome('~/Guppy');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -358,7 +358,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     remembers — its own settings and your agents' memory — is stored here.
                     Something like{' '}
                     <code style={{ fontFamily: 'var(--cth-font-mono)', background: 'var(--cth-paper-100)', padding: '0 4px' }}>
-                      ~/HarnessAgents
+                      ~/Guppy
                     </code>{' '}
                     works well. We'll create it for you if it doesn't exist.
                   </p>
@@ -367,7 +367,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     Pick a folder where the harness will keep its own files — agent metadata,
                     logs, and any new repos you create from here. Something like{' '}
                     <code style={{ fontFamily: 'var(--cth-font-mono)', background: 'var(--cth-paper-100)', padding: '0 4px' }}>
-                      ~/HarnessAgents
+                      ~/Guppy
                     </code>{' '}
                     is a fine default. We'll create it if it doesn't exist.
                   </p>
@@ -376,7 +376,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                   <input
                     value={home}
                     onChange={(e) => setHome(e.target.value)}
-                    placeholder="/path/to/HarnessAgents"
+                    placeholder="/path/to/Guppy"
                     style={inputStyle}
                   />
                   <PixelButton variant="secondary" size="md" onClick={pickHome}>

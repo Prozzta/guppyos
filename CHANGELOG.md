@@ -34,6 +34,27 @@ still there).
   project is still credited in the README and the licence.
 - **Slack setup steps** now suggest naming your Slack app "Guppy". A Slack app you already made
   under another name keeps working; there is nothing to redo.
+- **New installs suggest a `~/Guppy` folder** for the app's home during setup (it was
+  `~/HarnessAgents`). If you already set the app up, your folder stays exactly where it is.
+
+### Good to know after updating
+
+- **The first start copies your data once**, so it may take a few seconds longer. If the copy
+  fails, that run uses the old folder and the next start tries again; nothing is lost. Changes
+  made in Guppy afterwards are not copied back to the old folder.
+- **The program folder keeps its old name**, `Munder Difflin`, with `Guppy.exe` inside. Only new
+  installs get a `Guppy` program folder.
+- **Shortcuts:** the Start menu and desktop "Munder Difflin" shortcuts are replaced by "Guppy"
+  ones. If you had deleted the desktop shortcut, the update puts a Guppy one back; delete it
+  again if you don't want it.
+- **Taskbar pins keep working** and stay in place; the update points them at Guppy. If a pin still
+  shows the old name, unpin it and pin Guppy again. A pin of a portable copy is not changed.
+- **The old data folder and update cache stay on disk**, untouched
+  (`%APPDATA%\munder-difflin`, `%LOCALAPPDATA%\munder-difflin-updater`). Reinstalling 1.1.81
+  still finds all its data. Delete them by hand once you are happy with Guppy.
+- **Don't run an old 1.1.81 copy (such as the portable build) at the same time as Guppy.** The
+  two now use different data folders, so nothing stops both from starting, and both would drive
+  the same agents.
 
 ### Not changed
 

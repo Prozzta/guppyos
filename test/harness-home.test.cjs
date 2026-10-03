@@ -2,7 +2,7 @@
 
 /**
  * Issue #140 — the onboarding harness-home field is typed by hand as often as it
- * is picked, and `~/HarnessAgents` is the suggestion itself. Node's fs treats a
+ * is picked, and `~/Guppy` is the suggestion itself. Node's fs treats a
  * literal `~` as a directory name, so ensureHarnessHome died with ENOENT and the
  * un-expanded home would have been persisted, poisoning every path derived from
  * it.
