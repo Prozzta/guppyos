@@ -337,6 +337,10 @@ export interface HarnessConfig {
    *  CLAUDE_CODE_AUTO_COMPACT_WINDOW at spawn. Unset = 150000; "off" = Claude's own "auto"
    *  (the pilot's off switch). An agent's own registry `autoCompactWindow` wins (shared/autoCompactWindow.ts). */
   godAutoCompactWindow?: number | 'off';
+  /** READS-PROMPT-TRIM (1.1.83): unset or true = each hive Claude agent spawns without the tools,
+   *  skills and claude.ai connectors its role never uses (shared/claudePromptTrim.ts); false =
+   *  spawn with everything, as before. Reaches an agent at its next spawn. */
+  claudePromptTrim?: boolean;
   /** Max concurrent god-triggered ephemeral Slack workers; extra spawn-requests
    *  wait in the queue (natural backpressure, a resource backstop). Default 4. */
   maxConcurrentWorkers?: number;

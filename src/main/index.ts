@@ -3922,6 +3922,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
           codexToolOutputTokenLimit: readConfig().codexToolOutputTokenLimit,
           // CODEX-BLOAT-165 fix 5: Settings' "inherit my Codex plugins" (default off).
           codexInheritPlugins: readConfig().codexInheritPlugins === true,
+          // READS-PROMPT-TRIM: Settings' claudePromptTrim (default on).
+          claudePromptTrim: readConfig().claudePromptTrim !== false,
           // MODEL-PINBACK: recorded on the registry entry; a Codex config.toml carries `launch`.
           spawnModel,
           // CODEX-TRUST-LAYER: the layer model is checked against this version; the folders the

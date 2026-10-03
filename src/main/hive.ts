@@ -39,6 +39,7 @@ import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, CODEX_EFFORT_KEY, normEffort, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
+import { claudePromptTrimFor } from '../shared/claudePromptTrim';
 import { randomBytes, createHash } from 'node:crypto';
 import {
   DEV_ISOLATION, sanitizeCodexConfigForDev, hookPipeId,
@@ -531,6 +532,23 @@ const NODE_ROUTER_RUNTIME: RouterRuntime = {
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
+
+/** READS-PROMPT-TRIM: the names of the skills Claude Code synced from the user's claude.ai account
+ *  (~/.claude/skills/synced/<org_user>/manifest.json, Claude Code 2.1.288). Best-effort: none on
+ *  any error, which only leaves those skills listed in full. */
+export function syncedClaudeSkillNames(home: string = homedir()): string[] {
+  const names = new Set<string>();
+  try {
+    const root = join(home, '.claude', 'skills', 'synced');
+    for (const d of readdirSync(root)) {
+      try {
+        const m = JSON.parse(readFileSync(join(root, d, 'manifest.json'), 'utf8')) as { skills?: Array<{ name?: unknown }> };
+        for (const s of m.skills ?? []) if (typeof s?.name === 'string' && /^[\w.:-]{1,80}$/.test(s.name)) names.add(s.name);
+      } catch { /* not a synced folder */ }
+    }
+  } catch { /* no synced skills */ }
+  return [...names].sort();
+}
 
 export class HiveManager {
   /**
@@ -1175,6 +1193,9 @@ export class HiveManager {
       /** CODEX-BLOAT-165 fix 5: HarnessConfig.codexInheritPlugins. Only `true` keeps the
        *  inherited plugins; absent or false turns them off in this agent's config.toml. */
       codexInheritPlugins?: boolean;
+      /** READS-PROMPT-TRIM: HarnessConfig.claudePromptTrim. Only `false` spawns a Claude agent
+       *  with every tool and skill listing; absent or true trims what its role never uses. */
+      claudePromptTrim?: boolean;
       /** MODEL-PINBACK: the spawn's model. `requested` is the renderer's `--model`, `launch` the
        *  one the CLI is really given (the pin, when it applies). Recorded on the registry entry;
        *  a Codex agent's config.toml carries `launch`. Absent = not recorded (older callers).
@@ -1528,6 +1549,16 @@ export class HiveManager {
     // daemon)"); the per-agent settings file sets disableAgentView too.
     env.CLAUDE_CODE_DISABLE_AGENT_VIEW = '1';
 
+    // READS-PROMPT-TRIM (1.1.83, shared/claudePromptTrim.ts): leave out the tools, skills and
+    // claude.ai connectors this role never uses. Env, one argv token and the settings file below,
+    // never the injected prompt, so the session fingerprint holds.
+    const trim = claudePromptTrimFor({ isGod: meta.isGod }, opts.claudePromptTrim !== false, syncedClaudeSkillNames());
+    Object.assign(env, trim.env);
+    if (trim.arg) {
+      args.push(trim.arg);
+      this.appendLog({ kind: 'prompt-trim', agentId: meta.id, arg: trim.arg, env: Object.keys(trim.env), nameOnly: Object.keys(trim.skillOverrides ?? {}).length });
+    }
+
     args.push('--append-system-prompt', this.injectedPrompt(meta, dir, root, opts.semanticMemory ?? false, opts.knowledgeGraph ?? false, opts.kgCliPath));
 
     // Phase 1 — autonomy: attach lifecycle hooks via --settings (no edits to the
@@ -1539,7 +1570,8 @@ export class HiveManager {
       const settingsPath = join(dir, 'settings.json');
       // HOOK-BROKER: this spawn's HTTP hook URL (a fresh token), or null -> command hooks.
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
-      this.writeJson(settingsPath, this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id));
+      const settings = this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as Record<string, unknown>;
+      this.writeJson(settingsPath, trim.skillOverrides ? { ...settings, skillOverrides: trim.skillOverrides } : settings);
       // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       args.push('--settings', settingsPath);
