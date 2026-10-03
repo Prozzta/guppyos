@@ -104,7 +104,7 @@ function post(url, body, raw) {
   });
 }
 
-async function broker(t, { provider = 'claude', cap, steer = null, god = false } = {}) {
+async function broker(t, { provider = 'claude', cap, steer = null, god = false, config = {}, Server = HookServer } = {}) {
   const home = tmp('hive-');
   const logs = [];
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\reads181-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(tmp('s-'), 's.sock');
@@ -115,7 +115,7 @@ async function broker(t, { provider = 'claude', cap, steer = null, god = false }
     toolOutputDir: (id) => path.join(home, 'agents', id, 'tool-output')
   };
   const control = { shouldHalt: () => false, takeSteer: () => { const s = steer; steer = null; return s; }, toolDecision: () => ({ deny: false }) };
-  const s = new HookServer(hive, () => ({ send: () => {} }), () => ({}), control);
+  const s = new Server(hive, () => ({ send: () => {} }), () => config, control);
   s.start();
   t.after(() => s.stop());
   for (let i = 0; i < 200 && s.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
@@ -224,6 +224,24 @@ test('god (d8e742): the orchestrator\'s default cap is 6000 for EVERY command; a
   assert.ok((await postTool(w.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput.updatedToolOutput.stdout.length <= 1500, 'a worker keeps 1500');
   const own = await broker(t, { god: true, cap: 2000 });
   assert.ok((await postTool(own.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput.updatedToolOutput.stdout.length <= 2000, 'god\'s own registry cap wins');
+});
+
+test('god + the floor switched off (config toolOutputCap 0): off for god too, never 6000 (Andy\'s pin)', async (t) => {
+  const mid = Array.from({ length: 50 }, (_, i) => `ok ${i} - a passing test with a long enough title to fill the line`).join('\n');
+  const off = await broker(t, { god: true, config: { toolOutputCap: 0 } });
+  assert.equal((await postTool(off.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput, undefined, 'a 3.3k output passes whole');
+  assert.equal((await postTool(off.url)).body.hookSpecificOutput, undefined, 'a 100k output passes untouched: the condenser is off');
+});
+
+test('MUTANT G-M1 (drop "&& configured"): god\'s condenser turns ON at 6000 when the floor switched it off', async (t) => {
+  const file = 'src/main/hooks.ts';
+  const src = normaliseEol(fs.readFileSync(path.join(ROOT, file), 'utf8'));
+  const from = 'isGod && configured ? Math.max(configured, TOOL_OUTPUT_CAP_READ) : configured';
+  assert.ok(src.includes(from));
+  const M = loadTs.fromText(file, src.replace(from, 'isGod ? Math.max(configured, TOOL_OUTPUT_CAP_READ) : configured'));
+  const off = await broker(t, { god: true, config: { toolOutputCap: 0 }, Server: M.HookServer });
+  const u = (await postTool(off.url)).body.hookSpecificOutput;
+  assert.ok(u && u.updatedToolOutput.stdout.length <= 6000, 'the mutant condenses although the floor turned it off');
 });
 
 test('N2: a saved output over 256 KB is read as head + tail parts (named "read in part"), never whole', async (t) => {
