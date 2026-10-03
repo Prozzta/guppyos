@@ -2,7 +2,7 @@ import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, po
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
-import { FileLedgerKeyRecord, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
+import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync } from './claims/indexSync';
 import { readSourcesConfig } from './nativeMemory/sources';
@@ -1260,6 +1260,7 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         hiveRoot: root,
         keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
+        headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
         onAppend: (agentId) => claimsIndexSync()?.schedule(agentId),
         alert: (row) => {

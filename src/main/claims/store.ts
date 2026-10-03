@@ -51,7 +51,7 @@ import {
   type UsageRec,
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
-import type { LedgerKeyRecord } from './keyProvider';
+import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, zonelessHint } from './ttl';
 import { checkKey, loadRegistry, saveRegistry } from './registry';
@@ -81,6 +81,10 @@ export interface ClaimStoreDeps {
   fdIdleMs?: number;
   /** CLAIM-LEDGER W3: told after every acked append (main schedules the index sync). */
   onAppend?: (agentId: string, id: string) => void;
+  /** CLAIMS-HEAD-ANCHOR: each agent's ledger head, kept by main in user-data (keyProvider.ts). */
+  headAnchor?: HeadAnchorStore;
+  /** How soon after an append the anchor is written (default ANCHOR_DELAY_MS). */
+  anchorDelayMs?: number;
 }
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
@@ -91,6 +95,7 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[
 const REF_TYPES = new Set<Ref['type']>(['file', 'commit', 'task', 'msg', 'url']);
 const LIST_MAX = 20;
 const FD_IDLE_MS = 30_000;
+const ANCHOR_DELAY_MS = 1_000;
 const REF_VALUE_MAX = 500;
 
 const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'retracts', 'at', 'source', 'legacy']);
@@ -234,9 +239,69 @@ export class ClaimStore {
 
     const records: LedgerRec[] = [];
     for (const l of lines) if (l.rec) records.push(l.rec);
-    const chain = structural ?? this.verify(agentId, lines);
+    let chain = structural ?? this.verify(agentId, lines);
+    if (chain === 'ok') chain = this.checkAnchor(agentId, lines);
     this.adopt(agentId, lines, files, chain);
     return { records, torn, chain };
+  }
+
+  /**
+   * CLAIMS-HEAD-ANCHOR: main keeps each agent's ledger head (the sha256 of its last line) in
+   * user-data, outside every agent folder. The anchored head must still be a line of the chain;
+   * a ledger that no longer reaches it (deleted, restarted from '', truncated) is a `prev` break at
+   * 'head-anchor': read-only, alerted, never repaired. The anchor may lag (it is written shortly
+   * after an append), so a chain that has grown past it is fine and the anchor moves up. No anchor
+   * yet (first run) adopts the current head. Recovery: a restore re-anchors; resetAnchor is the
+   * Human's.
+   */
+  private checkAnchor(agentId: string, lines: ParsedLine[]): 'ok' | ChainBreak {
+    const anchors = this.d.headAnchor;
+    if (!anchors) return 'ok';
+    const a = anchors.get(this.d.hiveRoot, agentId);
+    const head = lines.length ? sha256Hex(lines[lines.length - 1].line) : '';
+    if (a && a.head && a.head !== head && !lines.some((l) => sha256Hex(l.line) === a.head)) {
+      return { brokenAt: 'head-anchor', reason: 'prev' };
+    }
+    if (head && (!a || a.head !== head)) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
+    return 'ok';
+  }
+
+  private anchorTimers = new Map<string, { t: ReturnType<typeof setTimeout>; head: string; lastId: string }>();
+  /** Write the anchor soon (a burst of appends is one write); close() and the timer flush it. */
+  private anchorSoon(agentId: string, head: string, lastId: string): void {
+    if (!this.d.headAnchor) return;
+    const prior = this.anchorTimers.get(agentId);
+    if (prior) clearTimeout(prior.t);
+    const t = setTimeout(() => this.flushAnchor(agentId), this.d.anchorDelayMs ?? ANCHOR_DELAY_MS);
+    t.unref?.();
+    this.anchorTimers.set(agentId, { t, head, lastId });
+  }
+  private flushAnchor(agentId: string): void {
+    const p = this.anchorTimers.get(agentId);
+    if (!p) return;
+    clearTimeout(p.t);
+    this.anchorTimers.delete(agentId);
+    try { this.d.headAnchor?.set(this.d.hiveRoot, agentId, { head: p.head, lastId: p.lastId }); }
+    catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, error: String(e).slice(0, 160) }); }
+  }
+
+  /** The Human's explicit reset of an agent's anchor to its current head (after review). */
+  resetAnchor(agentId: string, confirmedByHuman: true): boolean {
+    if (confirmedByHuman !== true || !this.d.headAnchor) return false;
+    const files = this.segments(agentId);
+    let head = '';
+    let lastId = '';
+    for (const f of files) for (const line of nodeFs.readFileSync(f, 'utf8').split('\n')) {
+      if (!line) continue;
+      head = sha256Hex(line);
+      try { lastId = (JSON.parse(line) as LedgerRec).id; } catch { /* the chain check reports it */ }
+    }
+    this.d.headAnchor.set(this.d.hiveRoot, agentId, { head, lastId });
+    this.anchorTimers.delete(agentId);
+    this.state.delete(agentId);
+    this.alerted.forEach((k) => { if (k.startsWith(`chain:${agentId}:head-anchor`)) this.alerted.delete(k); });
+    this.log({ kind: 'claims-anchor-reset', agentId, head });
+    return true;
   }
 
   /** Move a torn tail out of the newest segment (never acked: G1.1). */
@@ -442,6 +507,7 @@ export class ClaimStore {
     try { s.tailSize = nodeFs.statSync(file).size; } catch { this.state.delete(agentId); }
     if (registryAdded) registryAdded();
     this.backupIfDue(agentId, rec.wt);
+    this.anchorSoon(agentId, s.head, rec.id);
     try { this.d.onAppend?.(agentId, rec.id); } catch { /* the append is acked; indexing catches up */ }
     return { ok: true, id: rec.id };
   }
@@ -457,6 +523,7 @@ export class ClaimStore {
   /** Close every append handle (quit, hive change). Appends after it reopen. */
   close(): void {
     for (const a of [...this.fds.keys()]) this.closeFd(a);
+    for (const a of [...this.anchorTimers.keys()]) this.flushAnchor(a);
   }
 
   private newId(t: 'claim' | 'event', s: AgentState): string {
@@ -743,6 +810,8 @@ export class ClaimStore {
     for (const n of nodeFs.readdirSync(src)) if (SEGMENT_RE.test(n)) nodeFs.copyFileSync(join(src, n), join(dir, n));
     this.state.delete(agentId);
     this.log({ kind: 'claims-restore', agentId, day, aside });
+    // A restore is the Human's: the restored (shorter) ledger becomes the anchored head.
+    this.resetAnchor(agentId, true);
     return this.readLedger(agentId);
   }
 }
