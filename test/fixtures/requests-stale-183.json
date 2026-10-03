@@ -3,7 +3,7 @@
  "cards": {
   "REBRAND-GUPPY": {
    "status": "done",
-   "doneAt": 1791024568136
+   "doneAt": 1791024568195
   },
   "READS-MAIL-CAP": {
    "status": "doing",
@@ -35,7 +35,7 @@
   },
   "TASKS-DUP-ID-LOOP": {
    "status": "done",
-   "doneAt": null
+   "doneAt": 1790882656916
   },
   "CODEX-MODEL-NOT-KEPT-179": {
    "status": "todo",
@@ -51,7 +51,7 @@
   },
   "MODS-GUARD": {
    "status": "done",
-   "doneAt": 1791026328564
+   "doneAt": 1791025888915
   }
  },
  "docs": {
@@ -1878,7 +1878,6 @@
   "creed/2026-10-03T09-23-39-167Z-5ece4b",
   "creed/2026-10-03T09-29-31-135Z-b56655",
   "creed/2026-10-03T10-50-21-754Z-1ffd35",
-  "jim/2026-10-01T13-31-43-395Z-f37b66",
   "jim/2026-10-02T17-37-48-985Z-205dd1",
   "jim/2026-10-02T18-19-18-439Z-c2efc8",
   "jim/2026-10-03T10-05-00-025Z-andy-pub182-jim",
@@ -1889,6 +1888,6 @@
  ],
  "expectClosedBy": {
   "answered": 3,
-  "card-done": 3
+  "card-done": 4
  }
 }

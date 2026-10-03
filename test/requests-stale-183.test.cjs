@@ -72,6 +72,25 @@ test('cardDoneAt: doneAt, else the newest stamp in the result, else null; never 
   assert.equal(cardDoneAt({ status: 'doing', doneAt: '2026-10-03T10:00:00.000Z' }), null);
 });
 
+test('cardDoneAt: the harness task-meta history comes first; reopened-then-done takes the newest done; bounded times do not count', () => {
+  const meta = (o) => ({ status: 'done', fp: 'x', statusSince: 0, statusSinceExact: true, lastEditAt: 0, lastEditBy: 'api', history: [], ...o });
+  const card = { status: 'done', doneAt: '2026-10-03T00:00:00.000Z', result: '[2026-10-03T01:00:00.000Z] r' };
+  // Done, reopened, done again: the NEWEST done transition is the done time.
+  const reopened = meta({ statusSince: 300, history: [{ at: 100, from: 'doing', to: 'done', by: 'api' }, { at: 200, from: 'done', to: 'doing', by: 'api' }, { at: 300, from: 'doing', to: 'done', by: 'api' }] });
+  assert.equal(cardDoneAt(card, reopened), 300);
+  // Reopened and still open: not done, whatever the history says.
+  assert.equal(cardDoneAt({ ...card, status: 'doing' }, meta({ status: 'doing', history: reopened.history.slice(0, 2) })), null);
+  // A transition the guard found at start is only bounded: fall back to the card's own fields.
+  assert.equal(cardDoneAt(card, meta({ statusSince: 900, statusSinceExact: false, history: [{ at: 900, from: 'doing', to: 'done', by: 'ledger' }] })), Date.parse(card.doneAt));
+  assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 900, statusSinceExact: false, history: [{ at: 900, from: 'doing', to: 'done', by: 'ledger' }] })), null);
+  // Created done while watched: statusSince is exact. Seen at install (inexact): no proof from meta.
+  assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 450 })), 450);
+  assert.equal(cardDoneAt({ status: 'done' }, meta({ statusSince: 450, statusSinceExact: false })), null);
+  // In the rule: an ask between the first done and the reopen is answered by the second done.
+  const docs = { andy: doc('andy', entry({ id: 'between', from: 'god', subject: 'REOPEN-1: it broke', at: 150 }), entry({ id: 'after', from: 'god', subject: 'REOPEN-1: again', at: 350 })) };
+  assert.deepEqual(reasons(staleObligations(docs, new Map([['REOPEN-1', { status: 'done', doneAt: cardDoneAt(card, reopened) }]]), [])), { between: 'auto:card-done:REOPEN-1' });
+});
+
 test('conversation rule: a later answer to THIS ask, back to the requester (in_reply_to, or the latest open ask)', () => {
   const ask = (id, conv, at) => entry({ id, from: 'god', subject: 'please do it', conversation: conv, at });
   const back = (act, conv, at, o = {}) => entry({ from: o.from ?? 'andy', act, subject: 'about it', conversation: conv, at, requiresReply: false, inReplyTo: o.inReplyTo });
@@ -148,6 +167,8 @@ const inboxCount = (hive, id) => fs.readdirSync(path.join(hive.root(), 'agents',
 
 test('hive: auto-closes by card and by conversation, logs each reason, writes no mail, is idempotent', async (t) => {
   const { hive } = await floor(t);
+  hive.startLedgerGuard();
+  t.after(() => hive.stopLedgerGuard());
   hive.addTask({ id: 'SHIP-IT-1', title: 'ship', status: 'doing', dependsOn: [] });
   hive.addTask({ id: 'DONE-BEFORE-1', title: 'old', status: 'done', dependsOn: [], doneAt: new Date(Date.now() - H).toISOString() });
   const byCard = hive.send({ to: 'andy-1', act: 'request', subject: 'SHIP-IT-1: build it', body: 'go' }, 'god-1');
@@ -158,7 +179,10 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
   assert.deepEqual(hive.autoCloseStaleObligations(null), [], 'nothing finished yet; a clarifying query answers nothing');
 
   await new Promise((r) => setTimeout(r, 5));   // the done time below must be later than the ask (ms clock)
-  hive.patchTask('SHIP-IT-1', { status: 'done', doneAt: new Date().toISOString() });
+  // No doneAt on the card: the harness's own task-meta history dates the done.
+  hive.patchTask('SHIP-IT-1', { status: 'done' });
+  const hist = hive.ledgerGuard.taskMeta().cards['SHIP-IT-1'].history;
+  assert.equal(hist[hist.length - 1].to, 'done', 'the guard recorded the transition');
   hive.send({ to: 'god-1', act: 'inform', subject: 'logs are clean', body: 'done', conversation: 'conv-logs' }, 'andy-1');
   const before = ['god-1', 'andy-1'].map((id) => inboxCount(hive, id));
   const closed = hive.autoCloseStaleObligations(null);

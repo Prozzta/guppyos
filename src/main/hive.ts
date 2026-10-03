@@ -62,7 +62,7 @@ import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
-import { TaskLedgerGuard, type TaskEditSource } from './taskLedgerGuard';
+import { TaskLedgerGuard, type CardMeta, type TaskEditSource } from './taskLedgerGuard';
 import { expandTilde } from './fs';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -532,11 +532,20 @@ const NODE_ROUTER_RUNTIME: RouterRuntime = {
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
 
-/** REQUESTS-TAB-STALE: when a done card became done (ms): its `doneAt`, else the newest stamp
- *  in its result (appendResult writes `[<ISO>] …` with the outcome), else null (no proof). */
-export function cardDoneAt(card: unknown): number | null {
+/** REQUESTS-TAB-STALE: when a done card became done (ms), or null (no proof). First the
+ *  harness's own record (state/task-meta.json): the newest `to:'done'` transition, or the card's
+ *  `statusSince` when it was created done; a time the guard only BOUNDED (found at start, not
+ *  exact) is late by an unknown amount, so it does not count. Then the card's `doneAt`, then the
+ *  newest stamp in its result (appendResult writes `[<ISO>] …`). A card not done now never counts. */
+export function cardDoneAt(card: unknown, meta?: CardMeta | null): number | null {
   const c = card as { status?: unknown; doneAt?: unknown; result?: unknown } | null;
   if (!c || c.status !== 'done') return null;
+  if (meta && meta.status === 'done') {
+    const last = [...(meta.history ?? [])].reverse().find((h) => h && h.to === 'done' && Number.isFinite(h.at));
+    const bounded = (at: number): boolean => at === meta.statusSince && !meta.statusSinceExact;
+    if (last && !bounded(last.at)) return last.at;
+    if (!last && meta.statusSinceExact && Number.isFinite(meta.statusSince)) return meta.statusSince;
+  }
   if (typeof c.doneAt === 'string' && Number.isFinite(Date.parse(c.doneAt))) return Date.parse(c.doneAt);
   if (typeof c.doneAt === 'number' && Number.isFinite(c.doneAt)) return c.doneAt;
   const stamps = typeof c.result === 'string' ? c.result.match(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g) ?? [] : [];
@@ -3530,9 +3539,13 @@ export class HiveManager {
       if (Object.prototype.hasOwnProperty.call(reg.agents, id)) docs[id] = this.mail.ledger(id);
     }
     const list = (this.tasks() as { tasks?: unknown } | null)?.tasks;
+    let meta: Record<string, CardMeta> = {};
+    try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* no harness record: card fields only */ }
     const cards = new Map<string, CardEvidence>();
     for (const c of Array.isArray(list) ? list as Partial<HiveTask>[] : []) {
-      if (c && typeof c.id === 'string' && typeof c.status === 'string') cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c) });
+      if (c && typeof c.id === 'string' && typeof c.status === 'string') {
+        cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c, Object.prototype.hasOwnProperty.call(meta, c.id) ? meta[c.id] : null) });
+      }
     }
     return staleObligations(docs, cards, this.releaseRuns(runningVersion))
       .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
