@@ -242,6 +242,23 @@ test('Jim S-2: the snapshot caps its git children and stops at its deadline (the
   assert.equal(s.commits.get('beef123'), true);
 });
 
+test('Jim M-5: a claim with a lone surrogate still gives a Codex config.toml that parses (U+FFFD in its place), on the spawn and the -c resume paths', async () => {
+  const toml = require('toml');
+  const { HiveManager } = loadTs('src/main/hive.ts');
+  const x = setup();
+  await note(x.ref.store, 'a1', 'synthetic fact with a lone \ud800 surrogate and a lone \udfff one');
+  const view = await x.delivery.workingSet('a1');
+  assert.ok(view.includes('\ud800'), 'the view carries it (as Jim P4)');
+  const instructions = HiveManager.codexDeveloperInstructions('PROTOCOL', view);
+  const config = HiveManager.withCodexDeveloperInstructions('model = "x"\n', instructions);
+  const parsed = toml.parse(config);
+  assert.ok(parsed.developer_instructions.includes('a lone � surrogate and a lone � one'));
+  assert.ok(!/\\ud[89ab]/i.test(config) && !/\\ud[c-f]/i.test(config), 'no surrogate escape is written');
+  assert.equal(toml.parse(`developer_instructions = ${HiveManager.tomlString(instructions)}`).developer_instructions, parsed.developer_instructions, '-c resume path');
+  // A valid pair is kept as is.
+  assert.equal(toml.parse(`k = ${HiveManager.tomlString('pair 😀 ok')}`).k, 'pair 😀 ok');
+});
+
 test('Jim M-4 / G4.5: the Codex instruction file and wake-up get the same bytes at the same state; the app wires one provider to both', async () => {
   const x = setup();
   await note(x.ref.store, 'a1', 'synthetic fact for codex');

@@ -162,8 +162,14 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
         budget = Math.max(1, Math.floor(budget * (WORKING_SET_MAX_CHARS - tail.length) / (built.text.length + 1) * 0.95));
         built = buildWorkingSet(state, view, budget);
       }
-      let text = built.text + tail;
-      if (text.length > WORKING_SET_MAX_CHARS) text = text.slice(0, WORKING_SET_MAX_CHARS);
+      // Last resort (Jim's note): cut the working set at a LINE boundary and keep the warning whole.
+      let body = built.text;
+      if (body.length + tail.length > WORKING_SET_MAX_CHARS) {
+        const room = Math.max(0, WORKING_SET_MAX_CHARS - tail.length);
+        const cut = body.lastIndexOf('\n', room);
+        body = cut > 0 ? body.slice(0, cut) : body.slice(0, room);
+      }
+      const text = body + tail;
       // S-3: one receipt per DISTINCT delivered text (B14), on a rotating file.
       const digest = createHash('sha256').update(text).digest('hex');
       if (lastReceipt.get(agentId) !== digest) {

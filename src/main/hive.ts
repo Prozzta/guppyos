@@ -4268,7 +4268,11 @@ export class HiveManager {
   /** A TOML basic string. JSON's escapes are valid TOML, but JSON leaves U+007F (DEL) raw, and
    *  TOML forbids it unescaped (N4, Jim). */
   static tomlString(text: string): string {
-    return JSON.stringify(text).replace(/\u007f/g, '\\u007F');
+    // Jim M-5 (CL-W4-INT): TOML allows only Unicode scalar values in a \u escape, and JSON writes
+    // a lone surrogate as \ud800. Agent-written claim text reaches developer_instructions (G4.5),
+    // so a lone surrogate becomes U+FFFD first (String.prototype.toWellFormed, spelled out for ES2022).
+    const wellFormed = text.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+    return JSON.stringify(wellFormed).replace(/\u007f/g, '\\u007F');
   }
 
   /** N1 (Jim): the args of a `codex resume` whose session lives in `ownerHome`. When that is
