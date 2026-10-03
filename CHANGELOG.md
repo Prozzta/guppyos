@@ -11,6 +11,43 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.83] — 2026-10-03
+
+Smaller contexts for the hive's agents, and the last pieces of the Guppy rename. Rollback: 1.1.82
+(reinstall).
+
+### Changed
+
+- **Hive agents start lighter:** each Claude agent now leaves out the built-in tools, skills and
+  claude.ai connectors its role has never used (about 3k tokens per request for god, 7k for the
+  others). Settings: `claudePromptTrim` false turns this off.
+- **Long mail to god is shortened:** a message from another agent over about 2,000 characters
+  arrives as its first ~1,500 characters plus where the full message is. Mail from you and from
+  the app itself always arrives whole. Settings: `godMailCapChars` (0 turns it off).
+- **After a compaction, an agent is reminded of its cards in progress and the mail it still owes
+  an answer**, and the app logs whether its open mail and cards came back, so the earlier
+  compaction can be judged safely.
+- **Hire links now use guppy:// .** Links you shared with munderdifflin:// still open.
+- **Guppy.exe now shows as Guppy in Task Manager.**
+- **The release files are named Guppy-*.** Each release also carries the installer under its old
+  Munder-Difflin-* name, so the download link in 1.1.81 keeps working.
+
+### Fixed
+
+- **Updates can download only what changed again.** The installer kept the copy it compares
+  against in the old munder-difflin-updater folder, where the updater no longer looked, so every
+  update downloaded in full and each install left about 218 MB behind. It is now kept where the
+  updater looks, and the old copy is removed. (The update to 1.1.83 itself is still a full
+  download.)
+- **Requests that are already done close by themselves** on the Requests tab, when the card they
+  name is done, the agent has answered in the same conversation, or the release it names has
+  shipped; never by age alone. Old asks from before 1.1.83 that were already handled were closed
+  once.
+- **The effort level you choose for a Claude agent (/effort) is kept** after a restart, and
+  follows a new default model.
+- **Codex agents can use the one-step board update** (card, message and memory in one call): they
+  now get their own working address for it.
+
 ## [1.1.82] — 2026-10-03
 
 **Munder Difflin is now called Guppy.** Only the app's name changes: your agents, their names,
