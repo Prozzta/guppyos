@@ -80,6 +80,8 @@ export interface ModelPinFields {
   /** M2: the effort the agent gets with no pin and no request (the seed's, else the first one
    *  observed from such a launch); what a return to "no switch" is compared with. */
   defaultEffort?: string;
+  /** Claude: the model whose no-switch effort was learned. A default is never portable across models. */
+  defaultEffortModel?: string;
 }
 
 const norm = (m: string | undefined | null): string => (m ?? '').trim().toLowerCase();
@@ -172,7 +174,18 @@ export function resolveSpawnModel(
   const req = requested?.trim() || undefined;
   const reqEffort = normEffort(requestedEffort);
   const pin = entry?.model?.trim() || undefined;
-  if (!pin) return { model: req, effort: reqEffort, pinApplied: false, dropPin: false };
+  if (!pin) {
+    // Claude can switch effort without switching model. That effort choice is an independent
+    // pin: keep it across app-default model changes, but let an explicit picker effort override it.
+    const effortPin = normEffort(entry?.modelEffort);
+    const effortMatches = !!effortPin && entry?.modelPinSource !== 'auto'
+      && sameEffort(entry?.modelPinnedFromEffort, reqEffort);
+    const dropEffort = !!effortPin && !effortMatches;
+    return {
+      model: req, effort: effortMatches ? effortPin : reqEffort, pinApplied: false, dropPin: dropEffort,
+      ...(dropEffort ? { dropReason: 'picker-changed' as const } : {})
+    };
+  }
   // An automatic switch is never carried into a new process: the picker model runs again.
   if (entry?.modelPinSource === 'auto') return { model: req, effort: reqEffort, pinApplied: false, dropPin: true, dropReason: 'auto-not-kept' };
   // M2: the request a pin is valid against is the picker's model AND effort (a pin from before
@@ -196,7 +209,7 @@ export type LiveModelAction = 'stale' | 'unknown-launch' | 'baseline' | 'unchang
 export function applyLiveModel(
   entry: ModelPinFields,
   liveRaw: string,
-  opts: { observedAt?: number; fallbackBaseline?: string; humanInputSince?: boolean; effort?: string | null } = {}
+  opts: { observedAt?: number; fallbackBaseline?: string; humanInputSince?: boolean; effort?: string | null; independentEffortPin?: boolean } = {}
 ): { action: LiveModelAction; changed: boolean } {
   const source: ModelPinSource = opts.humanInputSince === true ? 'user' : 'auto';
   const live = liveRaw.trim();
@@ -210,7 +223,7 @@ export function applyLiveModel(
     && (liveEffort === undefined || baselineEffort === undefined || liveEffort === baselineEffort);
   const setPin = (): { action: LiveModelAction; changed: boolean } => {
     if (atBaseline()) {
-      if (entry.model === undefined && entry.modelPinnedFrom === undefined) return { action: 'unpin', changed: false };
+      if (entry.model === undefined && entry.modelPinnedFrom === undefined && entry.modelEffort === undefined && entry.modelPinSource === undefined) return { action: 'unpin', changed: false };
       delete entry.model;
       delete entry.modelPinnedFrom;
       delete entry.modelPinSource;
@@ -218,15 +231,23 @@ export function applyLiveModel(
       delete entry.modelPinnedFromEffort;
       return { action: 'unpin', changed: true };
     }
+    const modelIsBaseline = baseline !== undefined && sameModel(live, baseline);
     if (sameModel(entry.model, live) && sameModel(entry.modelPinnedFrom, entry.requestedModel)
       && (liveEffort === undefined || sameEffort(entry.modelEffort, liveEffort))
       && sameEffort(entry.modelPinnedFromEffort, entry.requestedEffort)) {
       return { action: 'pin', changed: false };
     }
-    entry.model = live;
+    // Claude's /effort is independent from /model. Leave the picked/default model unpinned when
+    // only effort differs; Codex retains the paired {model, effort} behavior.
+    if (opts.independentEffortPin && modelIsBaseline) {
+      delete entry.model;
+      delete entry.modelPinnedFrom;
+    } else {
+      entry.model = live;
+      if (entry.requestedModel !== undefined) entry.modelPinnedFrom = entry.requestedModel;
+      else delete entry.modelPinnedFrom;
+    }
     entry.modelPinSource = source;
-    if (entry.requestedModel !== undefined) entry.modelPinnedFrom = entry.requestedModel;
-    else delete entry.modelPinnedFrom;
     if (liveEffort !== undefined) entry.modelEffort = liveEffort;
     else delete entry.modelEffort;
     const reqEffort = normEffort(entry.requestedEffort);
@@ -253,7 +274,10 @@ export function applyLiveModel(
   let effortBaseline = false;
   if (liveEffort !== undefined && previousEffort === undefined) {
     entry.liveEffort = liveEffort;
-    if (entry.defaultEffort === undefined && entry.requestedEffort === undefined && entry.modelEffort === undefined) entry.defaultEffort = liveEffort;
+    if (entry.defaultEffort === undefined && entry.requestedEffort === undefined && entry.modelEffort === undefined) {
+      entry.defaultEffort = liveEffort;
+      if (opts.fallbackBaseline !== undefined) entry.defaultEffortModel = live;
+    }
     effortBaseline = true;
   }
   const effortSwitched = liveEffort !== undefined && previousEffort !== undefined && liveEffort !== previousEffort;
@@ -314,19 +338,40 @@ export function effectiveEffort(entry: ModelPinFields | undefined): string | und
 export function resolveSpawnArgs(
   entry: ModelPinFields | undefined,
   args: readonly string[],
-  opts: { flag?: string; fallback?: string; effort?: 'codex' } = {}
+  opts: { flag?: string; fallback?: string; effort?: 'codex' | 'claude' } = {}
 ): { args: string[]; requested?: string; launch?: string; requestedEffort?: string; launchEffort?: string } {
   const flag = opts.flag ?? '--model';
   const requested = modelFlagValue(args, flag)?.trim() || undefined;
   // M2 (Codex): the picker's effort rides on the argv as `-c model_reasoning_effort=<e>`.
-  const requestedEffort = opts.effort === 'codex' ? codexEffortValue(args) : undefined;
+  const requestedEffort = opts.effort === 'codex' ? codexEffortValue(args)
+    : opts.effort === 'claude' ? flagValue(args, '--effort') : undefined;
   const resolved = resolveSpawnModel(entry, requested, requestedEffort);
   const launch = resolved.model ?? (opts.fallback?.trim() || undefined);
   let out = launch && !sameModel(launch, requested) ? withModelFlag(args, launch, flag) : [...args];
-  const launchEffort = opts.effort === 'codex' ? resolved.effort : undefined;
-  if (launchEffort && launchEffort !== requestedEffort) out = withCodexEffort(out, launchEffort);
+  const launchEffort = opts.effort === 'codex' ? resolved.effort : opts.effort === 'claude' ? resolved.effort : undefined;
+  if (opts.effort === 'codex' && launchEffort && launchEffort !== requestedEffort) out = withCodexEffort(out, launchEffort);
+  if (opts.effort === 'claude' && launchEffort && launchEffort !== requestedEffort) out = withFlag(out, '--effort', launchEffort);
   return {
     args: out, requested, launch,
-    ...(opts.effort === 'codex' ? { requestedEffort, launchEffort } : {})
+    ...(opts.effort ? { requestedEffort, launchEffort } : {})
   };
+}
+
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  let value: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag && typeof args[i + 1] === 'string') value = normEffort(args[++i]);
+    else if (args[i].startsWith(`${flag}=`)) value = normEffort(args[i].slice(flag.length + 1));
+  }
+  return value;
+}
+
+function withFlag(args: readonly string[], flag: string, value: string): string[] {
+  const out = [...args];
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] === flag && i + 1 < out.length) { out[i + 1] = value; return out; }
+    if (out[i].startsWith(`${flag}=`)) { out[i] = `${flag}=${value}`; return out; }
+  }
+  out.push(flag, value);
+  return out;
 }

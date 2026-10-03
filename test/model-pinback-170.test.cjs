@@ -322,7 +322,75 @@ test('G2 AGY: a Codex agent never takes an AGY model (provider gate)', async (t)
 
 // ─── Claude ─────────────────────────────────────────────────────────────────
 
-const statusTick = (id, model) => ({ hook_event_name: 'Status', agent_id: id, model: { id: model } });
+const statusTick = (id, model, effort) => ({ hook_event_name: 'Status', agent_id: id, model: { id: model }, ...(effort ? { effort: { level: effort } } : {}) });
+
+test('Claude effort switch is pinned from status-line and restored on respawn', async (t) => {
+  const s = sandbox(t);
+  const meta = { id: 'cl-effort', name: 'Jim', provider: 'claude', cwd: s.home };
+  const cfg = { defaultModel: 'claude-fable-5' };
+  const first = P.resolveSpawnArgs(undefined, ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: first.requested, launch: first.launch, requestedEffort: first.requestedEffort, launchEffort: first.launchEffort } });
+  const server = new HookServer(s.hive, () => null, () => cfg);
+  server.handle(statusTick('cl-effort', 'claude-fable-5', 'high'));
+  assert.equal(entry(s.hive, 'cl-effort').defaultEffort, 'high');
+  s.type();
+  server.handle(statusTick('cl-effort', 'claude-fable-5', 'medium'));
+  assert.equal(entry(s.hive, 'cl-effort').modelEffort, 'medium');
+  assert.equal(P.modelPinLabel(entry(s.hive, 'cl-effort')).model, 'claude-fable-5 · medium');
+  const r = P.resolveSpawnArgs(entry(s.hive, 'cl-effort'), ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  assert.deepEqual(r.args, ['--permission-mode', 'bypassPermissions', '--model', 'claude-fable-5', '--effort', 'medium']);
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch, requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: entry(s.hive, 'cl-effort').defaultEffort } });
+  assert.equal(entry(s.hive, 'cl-effort').launchEffort, 'medium');
+});
+
+test('Claude learned default effort is not forced on respawn and is relearned for a new default model', async (t) => {
+  const s = sandbox(t);
+  const meta = { id: 'cl-default-effort', name: 'Pam', provider: 'claude', cwd: s.home };
+  const cfg = { defaultModel: 'claude-fable-5' };
+  const first = P.resolveSpawnArgs(undefined, ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: first.requested, launch: first.launch, requestedEffort: first.requestedEffort, launchEffort: first.launchEffort } });
+  const server = new HookServer(s.hive, () => null, () => cfg);
+  server.handle(statusTick(meta.id, cfg.defaultModel, 'high'));
+  assert.equal(entry(s.hive, meta.id).defaultEffort, 'high');
+  assert.equal(entry(s.hive, meta.id).defaultEffortModel, 'claude-fable-5');
+
+  let r = P.resolveSpawnArgs(entry(s.hive, meta.id), ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  assert.equal(r.args.includes('--effort'), false, 'the learned CLI default is not an explicit launch override');
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch, requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: entry(s.hive, meta.id).defaultEffort } });
+  assert.equal(entry(s.hive, meta.id).launchEffort, undefined);
+
+  cfg.defaultModel = 'claude-opus-5';
+  r = P.resolveSpawnArgs(entry(s.hive, meta.id), ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  assert.deepEqual(r.args, ['--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5']);
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch, requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: entry(s.hive, meta.id).defaultEffort } });
+  server.handle(statusTick(meta.id, cfg.defaultModel, 'xhigh'));
+  const e = entry(s.hive, meta.id);
+  assert.equal(e.defaultEffort, 'xhigh');
+  assert.equal(e.defaultEffortModel, 'claude-opus-5');
+  assert.equal(e.model, undefined);
+  assert.equal(e.modelEffort, undefined);
+  assert.equal(P.modelPinLabel(e).marker, '');
+});
+
+test('Claude effort-only switch pins effort independently of the model and follows a changed app default', async (t) => {
+  const s = sandbox(t);
+  const meta = { id: 'cl-effort-only', name: 'Jim', provider: 'claude', cwd: s.home };
+  const cfg = { defaultModel: 'claude-fable-5' };
+  const first = P.resolveSpawnArgs(undefined, ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: first.requested, launch: first.launch, requestedEffort: first.requestedEffort, launchEffort: first.launchEffort } });
+  const server = new HookServer(s.hive, () => null, () => cfg);
+  server.handle(statusTick(meta.id, cfg.defaultModel, 'high'));
+  s.type();
+  server.handle(statusTick(meta.id, cfg.defaultModel, 'medium'));
+  assert.equal(entry(s.hive, meta.id).model, undefined, 'an effort-only choice does not pin the model');
+  assert.equal(entry(s.hive, meta.id).modelEffort, 'medium');
+
+  cfg.defaultModel = 'claude-opus-5';
+  const r = P.resolveSpawnArgs(entry(s.hive, meta.id), ['--permission-mode', 'bypassPermissions'], { fallback: cfg.defaultModel, effort: 'claude' });
+  assert.deepEqual(r.args, ['--permission-mode', 'bypassPermissions', '--model', 'claude-opus-5', '--effort', 'medium']);
+  await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch, requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: entry(s.hive, meta.id).defaultEffort } });
+  assert.equal(entry(s.hive, meta.id).model, undefined, 'only effort remains pinned after respawn');
+});
 
 test('RESPAWN-KEEPS-SWITCH Claude (no picked model): a /model switch pins and the next spawn args carry it', async (t) => {
   const s = sandbox(t);

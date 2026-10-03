@@ -3883,12 +3883,13 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       const r = resolveSpawnArgs(hive.registry().agents[opts.hive.id], opts.args ?? [], {
         flag: providerPreset(provider).modelFlag ?? '--model',
         fallback: provider === 'claude' ? modelForHiveSpawn(opts.hive, readConfig()) : undefined,
-        ...(provider === 'codex' ? { effort: 'codex' as const } : {})
+        ...(provider === 'codex' ? { effort: 'codex' as const } : provider === 'claude' ? { effort: 'claude' as const } : {})
       });
       opts.args = r.args;
       spawnModel = {
         requested: r.requested, launch: r.launch,
-        ...(provider === 'codex' ? { requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: hive.codexSeedEffort() } : {})
+        ...(provider === 'codex' ? { requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: hive.codexSeedEffort() }
+          : provider === 'claude' ? { requestedEffort: r.requestedEffort, launchEffort: r.launchEffort, defaultEffort: hive.registry().agents[opts.hive.id]?.defaultEffort } : {})
       };
     } catch (e) { console.warn('[model-pin] spawn model resolution failed:', e); }
   }

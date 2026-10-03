@@ -347,9 +347,9 @@ test('M3 keep is wired: main exposes it to the renderer only as a person\'s clic
   assert.match(preload, /hiveKeepModelPin: \(agentId: string\): Promise<boolean> => ipcRenderer\.invoke\('hive:keepModelPin', agentId\)/);
   const panel = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/components/AgentDetailPanel.tsx'), 'utf8');
   assert.match(panel, /runModel\.marker === 'auto' && \(\s*<button[\s\S]{0,120}data-testid="agent-keep-model"\s+onClick=\{keepModel\}/);
-  // The spawn path asks for the effort on Codex only, with the seed's default.
-  assert.match(index, /\.\.\.\(provider === 'codex' \? \{ effort: 'codex' as const \} : \{\}\)/);
-  assert.match(index, /\.\.\.\(provider === 'codex' \? \{ requestedEffort: r\.requestedEffort, launchEffort: r\.launchEffort, defaultEffort: hive\.codexSeedEffort\(\) \} : \{\}\)/);
+  // Provider-specific spawn effort options are preserved for both Codex and Claude.
+  assert.match(index, /\.\.\.\(provider === 'codex' \? \{ effort: 'codex' as const \} : provider === 'claude' \? \{ effort: 'claude' as const \} : \{\}\)/);
+  assert.match(index, /provider === 'codex' \? \{ requestedEffort: r\.requestedEffort, launchEffort: r\.launchEffort, defaultEffort: hive\.codexSeedEffort\(\) \}\s*: provider === 'claude' \? \{ requestedEffort: r\.requestedEffort, launchEffort: r\.launchEffort, defaultEffort: hive\.registry\(\)\.agents\[opts\.hive\.id\]\?\.defaultEffort \}/);
 });
 
 // ─── the pieces ─────────────────────────────────────────────────────────────

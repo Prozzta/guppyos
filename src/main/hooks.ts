@@ -96,6 +96,8 @@ interface HookPayload {
   transcript_path?: string;
   /** Status-line payloads only: the session's live context accounting. */
   context_window?: { total_input_tokens?: number; context_window_size?: number };
+  /** Status-line payloads only: Claude Code's current reasoning effort. */
+  effort?: { level?: unknown };
   /** Status-line payloads only: the subscription's rolling allowance windows
    *  (`five_hour`, `seven_day`, possibly model-family windows). The shim already
    *  forwards the WHOLE status JSON, so this field has always arrived here — it was
@@ -1871,7 +1873,8 @@ export class HookServer {
         // Do not let a bridged provider's display model become a future Claude
         // argv. `recordModel` repeats this gate at the persistence boundary.
         if (agent?.provider === 'claude') {
-          this.hive.recordModel(agentId, statusModel, modelForHiveSpawn(agent, this.getConfig()));
+          const statusEffort = p.effort && typeof p.effort.level === 'string' ? p.effort.level : undefined;
+          this.hive.recordModel(agentId, statusModel, modelForHiveSpawn(agent, this.getConfig()), statusEffort);
         }
       }
       const cw = p.context_window;
