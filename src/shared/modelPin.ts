@@ -183,7 +183,7 @@ export function resolveSpawnModel(
     const dropEffort = !!effortPin && !effortMatches;
     return {
       model: req, effort: effortMatches ? effortPin : reqEffort, pinApplied: false, dropPin: dropEffort,
-      ...(dropEffort ? { dropReason: 'picker-changed' as const } : {})
+      ...(dropEffort ? { dropReason: entry?.modelPinSource === 'auto' ? 'auto-not-kept' as const : 'picker-changed' as const } : {})
     };
   }
   // An automatic switch is never carried into a new process: the picker model runs again.
@@ -218,7 +218,8 @@ export function applyLiveModel(
   const baseline = entry.requestedModel ?? opts.fallbackBaseline;
   // M2: "no switch" is the requested model at the requested (else default) effort. An effort
   // nobody knows on either side never makes a difference.
-  const baselineEffort = normEffort(entry.requestedEffort) ?? normEffort(entry.defaultEffort);
+  const learnedDefaultApplies = !entry.defaultEffortModel || !baseline || sameModel(entry.defaultEffortModel, baseline);
+  const baselineEffort = normEffort(entry.requestedEffort) ?? (learnedDefaultApplies ? normEffort(entry.defaultEffort) : undefined);
   const atBaseline = (): boolean => baseline !== undefined && sameModel(live, baseline)
     && (liveEffort === undefined || baselineEffort === undefined || liveEffort === baselineEffort);
   const setPin = (): { action: LiveModelAction; changed: boolean } => {

@@ -392,6 +392,30 @@ test('Claude effort-only switch pins effort independently of the model and follo
   assert.equal(entry(s.hive, meta.id).model, undefined, 'only effort remains pinned after respawn');
 });
 
+test('Claude automatic effort-only switches are dropped instead of carried into a new process', () => {
+  const entry = {
+    launchedAt: Date.now(), launchModel: 'claude-fable-5', launchEffort: 'high',
+    liveModel: 'claude-fable-5', liveEffort: 'high',
+    requestedEffort: undefined, defaultEffort: 'high', defaultEffortModel: 'claude-fable-5'
+  };
+  P.applyLiveModel(entry, 'claude-fable-5', { fallbackBaseline: 'claude-fable-5', effort: 'low', humanInputSince: false, independentEffortPin: true });
+  assert.equal(entry.model, undefined);
+  assert.equal(entry.modelEffort, 'low');
+  assert.equal(entry.modelPinSource, 'auto');
+  const resolved = P.resolveSpawnModel(entry, undefined);
+  assert.equal(resolved.effort, undefined);
+  assert.equal(resolved.dropPin, true);
+  assert.equal(resolved.dropReason, 'auto-not-kept');
+});
+
+test('an explicit Claude --effort request overrides an existing effort pin', () => {
+  const entry = { modelEffort: 'medium', modelPinSource: 'user', modelPinnedFromEffort: undefined };
+  const resolved = P.resolveSpawnArgs(entry, ['--permission-mode', 'bypassPermissions', '--effort', 'low'], { effort: 'claude' });
+  assert.deepEqual(resolved.args, ['--permission-mode', 'bypassPermissions', '--effort', 'low']);
+  assert.equal(resolved.requestedEffort, 'low');
+  assert.equal(resolved.launchEffort, 'low');
+});
+
 test('RESPAWN-KEEPS-SWITCH Claude (no picked model): a /model switch pins and the next spawn args carry it', async (t) => {
   const s = sandbox(t);
   const meta = { id: 'cl-1', name: 'Jim', provider: 'claude', cwd: s.home };
