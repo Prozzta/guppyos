@@ -70,7 +70,7 @@ export function renderBoardStatus(input: BoardStatusInput): string {
   const out: string[] = ['# Board status', '', `_Rendered by the harness at ${new Date(now).toISOString()} from tasks.json, its flags and fleet.json. Do not edit; board.md is the narrative._`, ''];
   out.push('## Installed / running', '');
   out.push(input.appStart
-    ? `Munder Difflin ${input.appStart.version}${input.appStart.packaged === false ? ' (dev build)' : ''}, started ${new Date(input.appStart.ts).toISOString()}.`
+    ? `Guppy ${input.appStart.version}${input.appStart.packaged === false ? ' (dev build)' : ''}, started ${new Date(input.appStart.ts).toISOString()}.`
     : 'Unknown (no app-start row in log.jsonl yet).');
   out.push('');
 

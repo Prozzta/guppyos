@@ -154,7 +154,7 @@ test('scrubInheritedEnv removes exactly the Stable identity keys and reports the
 });
 
 test('devWindowTitle: marks DEV only when isolation is on', () => {
-  assert.equal(iso.devWindowTitle('Munder Difflin', false), 'Munder Difflin');
-  assert.equal(iso.devWindowTitle('Munder Difflin', true), 'Munder Difflin DEV');
-  assert.equal(iso.devWindowTitle('Munder Difflin — Floor', true), 'Munder Difflin DEV — Floor');
+  assert.equal(iso.devWindowTitle('Guppy', false), 'Guppy');
+  assert.equal(iso.devWindowTitle('Guppy', true), 'Guppy DEV');
+  assert.equal(iso.devWindowTitle('Guppy — Floor', true), 'Guppy DEV — Floor');
 });

@@ -1,8 +1,10 @@
 <div align="center">
 
-<img src="./docs/logo.png" alt="Munder Difflin — agent harness to run an office of your clones" width="340">
+<img src="./docs/logo.png" alt="Guppy — agent harness to run an office of your clones" width="340">
 
-# Munder Difflin
+# Guppy
+
+*Formerly Munder Difflin. Renamed in 1.1.82; an installed copy updates in place and keeps its agents, history and settings.*
 
 ### Agent harness to run an office of your clones — the hardened fork
 
@@ -23,13 +25,13 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.74" src="https://img.shields.io/badge/version-1.1.74-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.82" src="https://img.shields.io/badge/version-1.1.82-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
 <br>
 
-<img src="./docs/media/og.png" alt="Munder Difflin — A hive of agents that message, route, and remember" width="1240">
+<img src="./docs/media/og.png" alt="Guppy — A hive of agents that message, route, and remember" width="1240">
 
 </div>
 
@@ -37,7 +39,7 @@ and unattended.
 
 > [!NOTE]
 > **The world's best agents. The world's worst paper company.**
-> Munder Difflin takes the terminal-agent CLIs you already run — `claude`, `agy`, `codex`,
+> Guppy takes the terminal-agent CLIs you already run — `claude`, `agy`, `codex`,
 > `grok`, and friends — and turns them into a self-coordinating team: each agent gets
 > long-term memory, a mailbox, and a desk on a 2D office floor — and **your clone**
 > (Michael) routes work between them while you watch. He's the boss of the floor; you're
@@ -246,7 +248,7 @@ internal mission ledger; this README keeps only the shape.
 
 ## How this fork is developed
 
-The floor develops itself. This fork is built by a multi-agent Munder Difflin floor —
+The floor develops itself. This fork is built by a multi-agent Guppy floor —
 an orchestrator dispatching work to builder agents, with a dedicated auditor agent
 independently verifying every change (replay probes, hand mutants, packaged canaries,
 installer verification) before it is accepted. The audit records live alongside the
@@ -256,7 +258,7 @@ as facts rather than hopes.
 
 ## What it is
 
-Munder Difflin is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
+Guppy is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
 agents, wires them into a **hive**, and puts **your clone** in charge — Michael, the one
 agent *you* talk to in order to get things done.
 

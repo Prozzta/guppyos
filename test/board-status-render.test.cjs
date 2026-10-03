@@ -46,7 +46,7 @@ function fixture() {
 test('renders every section deterministically', () => {
   const md = renderBoardStatus(fixture());
   assert.equal(md, renderBoardStatus(fixture()), 'same input, same bytes');
-  assert.match(md, /## Installed \/ running\n\nMunder Difflin 1\.1\.77, started 2026-10-01T07:00:00\.000Z\./);
+  assert.match(md, /## Installed \/ running\n\nGuppy 1\.1\.77, started 2026-10-01T07:00:00\.000Z\./);
   assert.match(md, /\| A: Build it \| jim \| 2 h \| DOING_MANY \|/);
   assert.match(md, /- Q \(ann, >= 30 min\): 1 question\(s\) for the Human/);
   assert.match(md, /## Done in the last 24 h\n\n- D \(andy\): Shipped\n\n/);
@@ -76,7 +76,7 @@ test('the writer folds a burst of changes into one write per interval (MBS1)', (
   t.after(() => w.stop());
   w.request();
   assert.equal(reads, 1, 'the first change writes at once');
-  assert.match(fs.readFileSync(path.join(root, 'board-status.md'), 'utf8'), /Munder Difflin 1\.1\.77/);
+  assert.match(fs.readFileSync(path.join(root, 'board-status.md'), 'utf8'), /Guppy 1\.1\.77/);
   w.request();
   w.request();
   assert.equal(reads, 1, 'inside the interval: deferred, not written');
@@ -92,7 +92,7 @@ test('the app-start row is read once per launch, not on every render (Jim S6)', 
   const log = path.join(root, 'log.jsonl');
   fs.writeFileSync(log, JSON.stringify({ ts: NOW, kind: 'app-start', version: '1.1.77', packaged: true }) + '\n');
   const w = new BoardStatusWriter({ root: () => root, tasks: () => ({ tasks: [] }), taskMeta: () => ({}), flags: () => [] }, () => NOW);
-  assert.match(w.write(), /Munder Difflin 1\.1\.77/);
+  assert.match(w.write(), /Guppy 1\.1\.77/);
   fs.writeFileSync(log, JSON.stringify({ ts: NOW + 1, kind: 'app-start', version: '9.9.9', packaged: true }) + '\n');
-  assert.match(w.write(), /Munder Difflin 1\.1\.77/, 'cached: the log is not re-read');
+  assert.match(w.write(), /Guppy 1\.1\.77/, 'cached: the log is not re-read');
 });

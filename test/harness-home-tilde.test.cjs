@@ -35,14 +35,14 @@ test.after(() => { fs.rmSync(userData, { recursive: true, force: true }); });
 test('readConfig serves a pre-fix config with every ~ expanded (the upgrade path)', () => {
   const home = os.homedir();
   fs.writeFileSync(path.join(userData, 'config.json'), JSON.stringify({
-    harnessHome: '~/HarnessAgents',
+    harnessHome: '~/Guppy',
     // A stale tilde entry, its already-absolute twin, and an unrelated recent.
-    recentHives: ['~/HarnessAgents', path.join(home, 'HarnessAgents'), '~/OtherHive']
+    recentHives: ['~/Guppy', path.join(home, 'Guppy'), '~/OtherHive']
   }));
   const cfg = readConfig();
-  assert.equal(cfg.harnessHome, path.join(home, 'HarnessAgents'));
+  assert.equal(cfg.harnessHome, path.join(home, 'Guppy'));
   assert.deepEqual(cfg.recentHives, [
-    path.join(home, 'HarnessAgents'), // tilde + absolute twin collapse to one
+    path.join(home, 'Guppy'), // tilde + absolute twin collapse to one
     path.join(home, 'OtherHive')
   ]);
   assert.ok(!JSON.stringify(cfg.recentHives).includes('~'), 'no consumer ever sees a ~ path');

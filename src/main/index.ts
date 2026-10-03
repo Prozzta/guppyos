@@ -3347,7 +3347,7 @@ function createWindow(opts: { floor?: boolean; partition?: string; recovery?: Re
     ...(geom && geom.x !== undefined && geom.y !== undefined ? { x: geom.x, y: geom.y } : {}),
     minWidth: MIN_WIN.width,
     minHeight: MIN_WIN.height,
-    title: devWindowTitle(isFloor ? 'Munder Difflin — Floor' : 'Munder Difflin'),
+    title: devWindowTitle(isFloor ? 'Guppy — Floor' : 'Guppy'),
     backgroundColor: '#FFF8E7',
     titleBarStyle: 'hiddenInset',
     show: false,
@@ -7164,7 +7164,7 @@ app.whenReady().then(() => {
     if (violations.length) {
       const msg = 'Refusing to start: resolved DEV paths overlap the Stable installation.\n\n' + violations.join('\n');
       console.error('[dev-isolation] ' + msg);
-      if (!DEV_HIDDEN) { try { dialog.showErrorBox('Munder Difflin DEV — isolation guard', msg); } catch { /* headless */ } }
+      if (!DEV_HIDDEN) { try { dialog.showErrorBox('Guppy DEV — isolation guard', msg); } catch { /* headless */ } }
       allowQuit = true;
       app.exit(97);
       return;
@@ -7336,9 +7336,9 @@ function watchWindowHealth(win: BrowserWindow, isFloor: boolean, recovery: { par
       // MUNDER_HIDDEN: no dialog; the row above is the record, and the agents keep running.
       if (!DEV_HIDDEN) void dialog.showMessageBox({
         type: 'error',
-        title: 'Munder Difflin',
+        title: 'Guppy',
         message: 'The app window keeps crashing, so it will not be restored again.',
-        detail: `Its view crashed ${decision.streak} times within a few minutes. Your agents are still running in the background. Quit now and reopen Munder Difflin to get the window back.`,
+        detail: `Its view crashed ${decision.streak} times within a few minutes. Your agents are still running in the background. Quit now and reopen Guppy to get the window back.`,
         buttons: ['Quit now', 'Keep agents running'],
         defaultId: 0,
         cancelId: 1
@@ -7459,8 +7459,8 @@ function confirmQuitNatively(ptyCount: number, parent: BrowserWindow | null): bo
     buttons: ['Quit and stop agents', 'Cancel'],
     defaultId: 1,
     cancelId: 1,
-    title: 'Munder Difflin',
-    message: `Quit Munder Difflin? ${ptyCount} running terminal${ptyCount === 1 ? '' : 's'} will be stopped.`,
+    title: 'Guppy',
+    message: `Quit Guppy? ${ptyCount} running terminal${ptyCount === 1 ? '' : 's'} will be stopped.`,
     detail: 'The app window is not showing (its view crashed), so this is asked here instead.'
   };
   const choice = parent && !parent.isDestroyed() ? dialog.showMessageBoxSync(parent, opts) : dialog.showMessageBoxSync(opts);

@@ -80,10 +80,10 @@ function post(env, body, timeoutMs) {
 
 async function request(env, p, io) {
   const r = await post(env, { cmd: p.cmd, args: p.args }, REQUEST_TIMEOUT_MS);
-  if (r.status === 403) { io.err('memory: unauthorized (this terminal has no valid MEMORY_TOKEN; restart the agent from Munder Difflin)\n'); return EXIT.unauthorized; }
+  if (r.status === 403) { io.err('memory: unauthorized (this terminal has no valid MEMORY_TOKEN; restart the agent from Guppy)\n'); return EXIT.unauthorized; }
   if (r.status === 0) {
     if (r.error === 'timeout') { io.err('memory: the memory engine did not answer in time; try again\n'); return EXIT.degraded; }
-    io.err('memory: Munder Difflin is not running (or its memory endpoint is down); start the app, then restart this agent from it\n');
+    io.err('memory: Guppy is not running (or its memory endpoint is down); start the app, then restart this agent from it\n');
     return EXIT.unavailable;
   }
   const j = r.json || {};

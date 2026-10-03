@@ -320,7 +320,7 @@ export function expandTilde(p: string): string {
 /**
  * Normalize the hive home and its recent-list in one place (#140).
  *
- * Onboarding SUGGESTS `~/HarnessAgents` in a free-text field, so the single most
+ * Onboarding SUGGESTS `~/Guppy` (1.1.82; before, `~/HarnessAgents`) in a free-text field, so the single most
  * common setup path — accept the default, press Finish — used to persist a literal
  * `~`. Finish immediately creates that directory, and Node's mkdir has no concept
  * of `~`: it tried to create a folder literally named "~" and died with

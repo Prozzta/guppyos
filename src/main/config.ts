@@ -939,7 +939,7 @@ export function writeConfig(patch: Partial<HarnessConfig>): HarnessConfig {
       .filter((r) => r && !seen.has(r) && (seen.add(r), true));
   }
   // The HIVE HOME needs the exact same treatment as registeredRepos above, and for
-  // years it did not get it (#140). Onboarding SUGGESTS `~/HarnessAgents` and the
+  // years it did not get it (#140). Onboarding SUGGESTS `~/Guppy` (1.1.82; before, `~/HarnessAgents`) and the
   // field is free text, so the common path — accept the default, press Finish —
   // persisted a literal `~`. The first thing the finish step does is create the
   // directory, and Node's mkdir has no idea what `~` means: it tried to make a

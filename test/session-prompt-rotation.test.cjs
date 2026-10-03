@@ -86,7 +86,7 @@ test('normaliser strips the RUNNING BUILD line (version, packaged/dev, app path)
   const b = fpWith(hive, WORKER);
   hive.setRuntimeInfo(null);
   const c = fpWith(hive, WORKER);
-  assert.match(a.raw, /RUNNING BUILD: Munder Difflin v1\.1\.75/);
+  assert.match(a.raw, /RUNNING BUILD: Guppy v1\.1\.75/);
   assert.notEqual(a.raw, b.raw);
   assert.equal(a.fp, b.fp);
   assert.equal(a.fp, c.fp);

@@ -48,7 +48,7 @@ test('B: a 100 KB result condenses to the cap with the outcome, deduped error li
   const text = bigOutput();
   const out = C.condenseOutput({ text, cap: 1500, path: 'C:/hive/agents/a/tool-output/t1.txt' });
   assert.ok(out.length <= 1500, `${out.length} chars`);
-  assert.match(out, /^\[condensed by Munder Difflin: the command succeeded; [\d,]+ chars, [\d,]+ lines\]/);
+  assert.match(out, /^\[condensed by Guppy: the command succeeded; [\d,]+ chars, [\d,]+ lines\]/);
   assert.match(out, /Error: ENOENT: no such file or directory/, 'an error line from the middle survives');
   assert.match(out, /warning: deprecated option --foo ×2/, 'a repeated warning is one line with a count');
   assert.match(out, /# fail 0/, 'the summary tail survives');

@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to Munder Difflin! -->
+<!-- Thanks for contributing to Guppy! -->
 
 ## What & why
 
@@ -15,13 +15,6 @@
 ## Screenshots / clips
 
 <!-- REQUIRED for any visual change: a screenshot or short clip (before/after). -->
-
-## Discord (optional)
-
-<!-- If you'd like the `employee of the month` role in our Discord when this merges,
-     put your handle below. Join first so we can find you: https://discord.gg/SEDzP5ZPk5 -->
-
-Discord: 
 
 ## Checklist
 
