@@ -671,6 +671,9 @@ test('F5: a rekey whose line fails for one agent records no new key id; every le
   r1.store.close();
   assert.equal(first.ok, false);
   assert.deepEqual(first.refused.map((x) => [x.agentId, x.why]), [['dwight', 'the rekey append failed']]);
+  // S2 (Jim): the SAME store must not keep the new key cached after the failed rekey.
+  for (const a of Object.keys(acked)) assert.equal(r1.store.readLedger(a).chain.reason, 'key-missing', `${a} on the rekeying store`);
+  await refused(r1.store.appendRecord('creed', note('x'), 'endpoint'), /read-only|key is missing/);
   assert.equal(recordFor(root).get(root), oldId, 'the old key id is still the record');
   const mid = mkStore(root, { keys, now });
   for (const a of Object.keys(acked)) assert.equal(mid.store.readLedger(a).chain.reason, 'key-missing', `${a} reads key-missing, not a forgery`);
