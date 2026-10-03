@@ -73,7 +73,7 @@ function jailProblem() {
     };
     const fn = require(spec.script);
     const res = (await (typeof fn === 'function' ? fn : fn.default)(drill)) ?? {};
-    const missing = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k);
+    const missing = Object.entries(checks).filter(([k, v]) => !v && !(k === 'modelLoaded' && spec.needModel === false)).map(([k]) => k);
     const ok = res.ok !== false && missing.length === 0;
     write({ ...res, ok, checks, ...(ok ? {} : { reason: res.reason ?? `F7 checks not asserted: ${missing.join(', ')}` }) });
   } catch (e) {

@@ -12,7 +12,9 @@
  *   - it FAILS, never skips, when the tree lacks Electron, the model or the vec library (F7).
  * Call it from a `node --test` file so the hive's heavy-job lock covers the run.
  *
- *   runDrill({ tree, hive, home, script, out?, args?, timeoutMs? }) -> Promise<result>
+ *   runDrill({ tree, hive, home, script, out?, args?, timeoutMs?, needModel? }) -> Promise<result>
+ *   needModel: false only for a drill that counts no facts (a ledger drill): then the tree needs no
+ *   model and modelLoaded is not required. Every fact-counting drill (G3.6, G6.3) keeps the default.
  *   node test/claims-drill/runner.cjs --tree T --hive H --home D --script S [--out O] [--args JSON]
  *
  * The result is the drill script's return value merged with { ok, checks, reason? }. `ok` needs the
@@ -58,7 +60,7 @@ function electronOf(tree) {
 }
 
 /** What the tree must hold; the first thing missing, or null. */
-function treeProblem(tree) {
+function treeProblem(tree, needModel = true) {
   if (!fs.existsSync(path.join(tree, 'package.json'))) return 'missing tree (no package.json)';
   const el = electronOf(tree);
   if (!el || !fs.existsSync(el)) return 'missing electron (node_modules/electron)';
@@ -68,8 +70,8 @@ function treeProblem(tree) {
   let manifest;
   try { manifest = JSON.parse(fs.readFileSync(mf, 'utf8')); } catch { return 'unreadable model manifest'; }
   const modelDir = path.join(tree, 'resources', 'models', manifest.model.dir);
-  if (!fs.existsSync(path.join(modelDir, 'onnx', 'model.onnx'))) return 'missing model (onnx/model.onnx)';
-  if (!fs.existsSync(path.join(modelDir, 'tokenizer.json'))) return 'missing model (tokenizer.json)';
+  if (needModel && !fs.existsSync(path.join(modelDir, 'onnx', 'model.onnx'))) return 'missing model (onnx/model.onnx)';
+  if (needModel && !fs.existsSync(path.join(modelDir, 'tokenizer.json'))) return 'missing model (tokenizer.json)';
   for (const m of ['better-sqlite3', 'sqlite-vec', 'onnxruntime-node', 'typescript']) {
     if (!fs.existsSync(path.join(tree, 'node_modules', m, 'package.json'))) return `missing ${m}`;
   }
@@ -95,11 +97,12 @@ async function runDrill(opts) {
   if (under(hive, tree) || under(home, tree)) return finish(out, { ok: false, reason: 'refused: the sandbox is inside the tree' });
   if (!fs.existsSync(hive)) return finish(out, { ok: false, reason: `missing hive ${hive} (the drill prepares it)` });
   if (!fs.existsSync(script)) return finish(out, { ok: false, reason: `missing script ${script}` });
-  const problem = treeProblem(tree);
+  const needModel = opts.needModel !== false;
+  const problem = treeProblem(tree, needModel);
   if (problem) return finish(out, { ok: false, reason: problem, tree });
   for (const d of [home, path.join(home, 'tmp'), path.join(home, 'AppData', 'Roaming'), path.join(home, 'AppData', 'Local')]) fs.mkdirSync(d, { recursive: true });
   const spec = path.join(home, 'drill-spec.json');
-  fs.writeFileSync(spec, JSON.stringify({ tree, hive, home, script, out, args: opts.args ?? {} }, null, 2));
+  fs.writeFileSync(spec, JSON.stringify({ tree, hive, home, script, out, needModel, args: opts.args ?? {} }, null, 2));
   const env = drillEnv(home);
   const leaked = Object.keys(env).filter((k) => LEAK_RE.test(k));
   if (leaked.length) return finish(out, { ok: false, reason: `env leak ${leaked.join(',')}` });
