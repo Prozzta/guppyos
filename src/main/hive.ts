@@ -1390,6 +1390,9 @@ export class HiveManager {
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal, ...(codex.codexLayerOptIn ? { codexLayerOptIn: codex.codexLayerOptIn } : {}) };
               env.CODEX_HOME = codex.home;
+              // installCodexHooks may mint a newer broker token for Codex's MCP
+              // config; prefer that same live capability for ledger requests.
+              if (codex.mcpUrl) env.HIVE_LEDGER_URL = codex.mcpUrl.replace('/mcp/', '/ledger/');
               if (codex.developerInstructions) developerInstructionsSet = true;
               // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
               // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
@@ -4120,8 +4123,9 @@ export class HiveManager {
     try { return JSON.parse(m[1].replace(/\\u007F/g, '\\u007f')) as string; } catch { return null; }
   }
 
-  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }, launchEffort?: string): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean } {
+  private installCodexHooks(dir: string, agentId?: string, developerInstructions: string | null = null, toolOutputTokenLimit: number | null = null, inheritPlugins = false, launchModel?: string, autoCompactTokenLimit?: number, cwd?: string, layer: { codexVersion: string | null; optIns?: string[] } = { codexVersion: null }, launchEffort?: string): { home: string; refusal?: string; codexLayerOptIn?: string; developerInstructions?: boolean; mcpUrl?: string } {
     let devSet = false;
+    let mcpUrl: string | undefined;
     const home = join(dir, '.codex');
     // CODEX-TRUST-LAYER T1 (Jim, build round): the layer check must COMPLETE before this agent may
     // start. Until it has, any throw below (the outer best-effort catch) REFUSES a spawn with a cwd.
@@ -4288,6 +4292,7 @@ export class HiveManager {
         // command shim, and with no endpoint everything is the command shim, as before.
         // Hook trust is not written: this spawn passes --dangerously-bypass-hook-trust.
         const mcp = agentId ? this.hookBroker?.mcpFor?.(agentId) ?? null : null;
+        if (mcp) mcpUrl = mcp.url;
         const mcpToml = mcp ? codexMcpHookToml(mcp.url, mcp.token) : null;
         config += '\n# --- munder-hive lifecycle hooks (auto-generated; do not edit) ---\n';
         if (mcpToml) config += mcpToml.server;
@@ -4313,7 +4318,7 @@ export class HiveManager {
         return { home, refusal: reason };
       }
     }
-    return { home, ...(devSet ? { developerInstructions: true } : {}) };
+    return { home, ...(devSet ? { developerInstructions: true } : {}), ...(mcpUrl ? { mcpUrl } : {}) };
   }
 
   /** Pi (earendil-works) bridge. Pi has a rich `pi.on(event, …)` lifecycle but no

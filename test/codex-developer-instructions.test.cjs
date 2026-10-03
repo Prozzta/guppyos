@@ -55,11 +55,41 @@ test('CODEX spawns without a first user turn: NO positional protocol; the protoc
   assert.ok(cfg.hooks && cfg.hooks.Stop, 'the lifecycle hooks are still wired');
 });
 
-test('CODEX spawn gets the per-agent HIVE_LEDGER_URL from its hook-broker capability URL', async (t) => {
+test('CODEX ledger URL reuses the rotating token minted for its MCP hook config', async (t) => {
   const s = sandbox(t, SEED);
-  s.hive.setHookBroker({ urlFor: (id) => `http://127.0.0.1:43123/hook/${id}-secret`, revoke: () => {} });
+  let minted = 0;
+  let currentToken;
+  s.hive.setHookBroker({
+    urlFor: () => {
+      currentToken = `rotating-${++minted}`;
+      return `http://127.0.0.1:43123/hook/${currentToken}`;
+    },
+    mcpFor: () => {
+      const url = `http://127.0.0.1:43123/mcp/${currentToken = `rotating-${++minted}`}`;
+      return { url, token: currentToken };
+    },
+    revoke: () => {}
+  });
   const inj = await s.hive.ensureAgent({ id: 'ledger-codex', name: 'Dwight', provider: 'codex', cwd: s.home });
-  assert.equal(inj.env.HIVE_LEDGER_URL, 'http://127.0.0.1:43123/ledger/ledger-codex-secret');
+  const cfg = toml.parse(fs.readFileSync(path.join(inj.env.CODEX_HOME, 'config.toml'), 'utf8'));
+  const mcpUrl = cfg.mcp_servers.munder_hooks.url;
+  assert.equal(inj.env.HIVE_LEDGER_URL, mcpUrl.replace('/mcp/', '/ledger/'));
+  assert.equal(new URL(inj.env.HIVE_LEDGER_URL).pathname.split('/').pop(), cfg.hooks.PreToolUse[0].hooks[0].input.k);
+  assert.equal(minted, 2, 'initial hook URL and MCP setup each mint, so the later MCP token must win');
+});
+
+test('CODEX command-shim hooks keep the initial ledger capability when mcpFor is null', async (t) => {
+  const s = sandbox(t, SEED);
+  let currentToken;
+  s.hive.setHookBroker({
+    urlFor: () => `http://127.0.0.1:43123/hook/${currentToken = 'command-live-token'}`,
+    mcpFor: () => null,
+    revoke: () => {}
+  });
+  const inj = await s.hive.ensureAgent({ id: 'ledger-shim', name: 'Dwight', provider: 'codex', cwd: s.home });
+  const cfg = toml.parse(fs.readFileSync(path.join(inj.env.CODEX_HOME, 'config.toml'), 'utf8'));
+  assert.equal(inj.env.HIVE_LEDGER_URL, `http://127.0.0.1:43123/ledger/${currentToken}`);
+  assert.equal(cfg.mcp_servers.munder_hooks, undefined, 'command hooks do not install the MCP endpoint');
 });
 
 test('CODEX: a single-line top-level developer_instructions in the user seed is REPLACED (one key, no duplicate), bare or QUOTED (N3)', async (t) => {
