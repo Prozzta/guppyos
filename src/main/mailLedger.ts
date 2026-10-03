@@ -778,6 +778,60 @@ export function openRequestEntries(doc: MailLedgerDoc, now: number): MailObligat
     .map((entry) => ({ entry, ageMs: Math.max(0, now - entry.deliveredAt) }));
 }
 
+/** REQUESTS-TAB-STALE (1.1.83): the acts that answer an ask when sent back in its conversation. */
+const ANSWER_ACTS = new Set(['done', 'inform', 'agree', 'refuse']);
+/** A card id as tasks.json spells them (MODS-GUARD, DWIGHT-INPUT-DEAD-179); only ids that exist count. */
+const CARD_ID_RE = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
+/** A subject that opens with the release it is for: "1.1.83: …", "rc/1.1.83 …", "v1.1.83 …". */
+const RELEASE_PREFIX_RE = /^\s*(?:rc\/)?v?(\d+)\.(\d+)\.(\d+)(?![.\d])/;
+
+export interface StaleObligation { agentId: string; id: string; reason: string }
+
+function versionParts(v: string | null | undefined): number[] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v ?? ''));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function versionAtLeast(have: number[], want: number[]): boolean {
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+  return true;
+}
+
+/**
+ * REQUESTS-TAB-STALE (1.1.83): the open obligations whose work is provably finished, so the
+ * Requests tab shows live asks only. `docs` holds every agent's ledger (the owner owes the
+ * reply; the requester's ledger shows what the owner sent back). An obligation is stale when:
+ *  1. the subject names one or more cards (ids that exist in `cards`) and every one is done;
+ *  2. the owner later sent the requester a done/inform/agree/refuse in the same conversation;
+ *  3. the subject opens with a release (`1.1.82: …`) and `shippedVersion` is that or later.
+ * Never by age alone: a dropped ask with none of this evidence stays open. Pure.
+ */
+export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, cards: ReadonlyMap<string, string>, shippedVersion: string | null): StaleObligation[] {
+  const shipped = versionParts(shippedVersion);
+  const out: StaleObligation[] = [];
+  for (const [agentId, doc] of Object.entries(docs)) {
+    for (const e of Object.values(doc.entries).sort(bySeq)) {
+      if (!isOpenObligation(e)) continue;
+      const subject = String(e.subject ?? '');
+      const named = [...new Set(subject.match(CARD_ID_RE) ?? [])].filter((id) => cards.has(id));
+      let reason: string | null = null;
+      if (named.length && named.every((id) => cards.get(id) === 'done')) reason = `auto:card-done:${named.join(',')}`;
+      if (!reason && e.conversation) {
+        const back = docs[e.from];
+        const answer = back && Object.values(back.entries).sort(bySeq).find((x) => x.from === agentId
+          && x.conversation === e.conversation && x.deliveredAt > e.deliveredAt && ANSWER_ACTS.has(x.act));
+        if (answer) reason = `auto:answered:${answer.act}:${answer.id}`;
+      }
+      const rel = RELEASE_PREFIX_RE.exec(subject);
+      if (!reason && rel && shipped && versionAtLeast(shipped, [Number(rel[1]), Number(rel[2]), Number(rel[3])])) {
+        reason = `auto:release-shipped:${rel[1]}.${rel[2]}.${rel[3]}`;
+      }
+      if (reason) out.push({ agentId, id: e.id, reason });
+    }
+  }
+  return out;
+}
+
 export interface OpenEpoch { epoch: string; since: number; ids: string[] }
 
 /** Every epoch with surfacing/surfaced ids, oldest first (`since` = its earliest surfacing). The
@@ -1519,6 +1573,15 @@ export class MailLedger {
     if (!ref || !this.hasAgent(agentId)) return [];
     const st = this.state(agentId);
     return this.commit(st, applyCloseObligation(st.doc, ref, this.now(), reason)).changed;
+  }
+
+  /** REQUESTS-TAB-STALE (1.1.83): close one open obligation, by its exact ledger id, whose work
+   *  `staleObligations` found finished. Like the Human's close: no reply, no wake, not activity.
+   *  Returns the ids closed. */
+  autoCloseObligation(agentId: string, id: string, reason: string): string[] {
+    if (!id || !this.hasAgent(agentId) || !this.docOrEmpty(agentId).entries[id]) return [];
+    const st = this.state(agentId);
+    return this.commit(st, applyCloseObligation(st.doc, id, this.now(), reason)).changed;
   }
 
   /** The agent's channel override (§11.10 degradation), or null for the provider default. */

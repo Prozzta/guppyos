@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
+import { MailLedger, freshMailId, isValidMailId, staleObligations, type MailLedgerDoc, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -3502,6 +3502,27 @@ export class HiveManager {
     const reg = this.registry();
     if (!Object.prototype.hasOwnProperty.call(reg.agents ?? {}, agentId)) return [];
     return this.mail.closeObligation(agentId, id, 'closed-by-human');
+  }
+
+  /**
+   * REQUESTS-TAB-STALE (1.1.83): close every open request whose work is provably finished (its
+   * card is done, its recipient answered in the same conversation, or the release it names has
+   * shipped: `staleObligations`). `shippedVersion` is the running app's version. Each close logs
+   * a `mail-obligation-closed` row with an `auto:` reason. Data only: nothing wakes, no mail.
+   */
+  autoCloseStaleObligations(shippedVersion: string | null): StaleObligation[] {
+    const reg = this.registry();
+    const docs: Record<string, MailLedgerDoc> = {};
+    for (const id of Object.keys(reg.agents ?? {})) {
+      if (Object.prototype.hasOwnProperty.call(reg.agents, id)) docs[id] = this.mail.ledger(id);
+    }
+    const list = (this.tasks() as { tasks?: unknown } | null)?.tasks;
+    const cards = new Map<string, string>();
+    for (const c of Array.isArray(list) ? list as Partial<HiveTask>[] : []) {
+      if (c && typeof c.id === 'string' && typeof c.status === 'string') cards.set(c.id, c.status);
+    }
+    return staleObligations(docs, cards, shippedVersion)
+      .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
   }
 
   /**
