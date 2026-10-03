@@ -89,10 +89,13 @@ test('MUNDER_* env names stay (the app and the shipped CLIs move in lockstep)', 
   assert.match(read('src/main/devIsolation.ts'), /process\.env\.MUNDER_DEV === '1'/);
 });
 
-test('1.1.82 keeps the Munder-Difflin artifact names (1.1.81 builds its download link from them)', () => {
-  // src/shared/updateState.ts installerUrl in 1.1.81 hard-codes these. Rename them only in a
-  // release after one whose installerUrl knows the new names (planned: 1.1.83).
-  for (const name of ['Munder-Difflin-${version}-win-x64-setup.exe', 'Munder-Difflin-${version}-win-x64-portable.exe', 'Munder-Difflin-${version}-mac-${arch}.${ext}', 'Munder-Difflin-${version}-linux-x86_64.AppImage']) {
+test('1.1.83 renames the artifacts to Guppy-*; the Munder-Difflin-* copies 1.1.81 links to come from afterAllArtifactBuild', () => {
+  // src/shared/updateState.ts installerUrl in 1.1.81 hard-codes Munder-Difflin-* names; 1.1.82 knows
+  // the Guppy-* names from 1.1.83 on (GUPPY_ARTIFACTS_FROM). REBRAND-ARTIFACT-NAMES: the build also
+  // writes byte-identical Munder-Difflin-* copies (test/rebrand-artifact-names-183).
+  for (const name of ['Guppy-${version}-win-x64-setup.exe', 'Guppy-${version}-win-x64-portable.exe', 'Guppy-${version}-mac-${arch}.${ext}', 'Guppy-${version}-linux-x86_64.AppImage']) {
     assert.ok(builder.includes(`artifactName: ${name}`), name);
   }
+  assert.ok(!builder.includes('artifactName: Munder-Difflin'), 'no old primary name left');
+  assert.ok(builder.includes('afterAllArtifactBuild: build/legacyArtifactNames.cjs'), 'the legacy copies are built');
 });
