@@ -308,12 +308,13 @@ test('W5 integration: live hook SessionStart injects leased T1 markers; Stop com
   assert.equal(next.items[0]?.leaseTurn, 'a1:2', 'the next turn gets a fresh lease');
 });
 
-test('M2 real hook route: startup reclaims after restart; compact re-renders without a new lease and charges again', async (t) => {
-  const makeScenario = async (label) => {
+test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear re-render', async (t) => {
+  const makeScenario = async (label, candidateCount = 1) => {
     const x = setup();
     const file = path.join(x.root, 'claims-reconcile-queue.json');
-    const item = { itemId: `r-${label}`, kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: `${label} hook reconcile pair` };
-    let queue = new ReconcileQueue(file); queue.refresh('a1', [item]);
+    const items = Array.from({ length: candidateCount }, (_, i) => ({ itemId: `r-${label}-${i}`, kind: 'conflict', a: `c-${String(i * 2 + 1).padStart(12, '0')}`, b: `c-${String(i * 2 + 2).padStart(12, '0')}`, text: `${label}-${i} hook reconcile pair` }));
+    const item = items[0];
+    let queue = new ReconcileQueue(file); queue.refresh('a1', items.slice(0, 1));
     const log = []; let tight = false; const count = (text) => tight ? Math.ceil(text.length * 100) : Math.ceil(text.length / 4);
     let delivery;
     const buildDelivery = (q) => {
@@ -334,17 +335,17 @@ test('M2 real hook route: startup reclaims after restart; compact re-renders wit
     server.setClaimWorkingSetProvider((agentId, source) => delivery.workingSet(agentId, source));
     server.setClaimTurnCompletedListener((agentId) => delivery.turnCompleted(agentId));
     t.after(() => server.stop());
-    return { x, item, log, server, file, setTight: () => { tight = true; }, get queue() { return queue; }, set queue(q) { queue = q; buildDelivery(q); } };
+    return { x, item, items, log, server, file, setTight: () => { tight = true; }, get queue() { return queue; }, set queue(q) { queue = q; buildDelivery(q); } };
   };
 
   const restarted = await makeScenario('restart');
   const firstStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   const firstText = firstStart?.hookSpecificOutput?.additionalContext ?? '';
-  assert.match(firstText, /restart hook reconcile pair/);
+  assert.match(firstText, /restart-0 hook reconcile pair/);
   const oldTurn = restarted.queue.items('a1')[0].leaseTurn;
   restarted.queue = new ReconcileQueue(restarted.file); // process restart between SessionStart and Stop
   const secondStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
-  assert.match(secondStart?.hookSpecificOutput?.additionalContext ?? '', /restart hook reconcile pair/);
+  assert.match(secondStart?.hookSpecificOutput?.additionalContext ?? '', /restart-0 hook reconcile pair/);
   assert.notEqual(restarted.queue.items('a1')[0].leaseTurn, oldTurn, 'startup reclaims then takes a fresh lease');
   assert.equal(restarted.queue.items('a1')[0].turnsUnanswered, 0, 'abandoned process turn was not counted');
   await postLiveHook(restarted.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
@@ -352,11 +353,11 @@ test('M2 real hook route: startup reclaims after restart; compact re-renders wit
 
   const compacted = await makeScenario('compact');
   const initial = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
-  assert.match(initial?.hookSpecificOutput?.additionalContext ?? '', /compact hook reconcile pair/);
+  assert.match(initial?.hookSpecificOutput?.additionalContext ?? '', /compact-0 hook reconcile pair/);
   const initialTurn = compacted.queue.items('a1')[0].leaseTurn;
   const beforeTokens = compacted.queue.dailyTokens('2026-10-03');
   const rerender = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
-  assert.match(rerender?.hookSpecificOutput?.additionalContext ?? '', /compact hook reconcile pair/);
+  assert.match(rerender?.hookSpecificOutput?.additionalContext ?? '', /compact-0 hook reconcile pair/);
   assert.equal(compacted.queue.items('a1')[0].leaseTurn, initialTurn, 'compact re-render does not lease again');
   assert.equal(compacted.queue.sequence('a1'), 1, 'compact re-render preserves the open turn sequence');
   assert.equal(compacted.queue.items('a1')[0].turnsUnanswered, 0);
@@ -371,11 +372,43 @@ test('M2 real hook route: startup reclaims after restart; compact re-renders wit
   assert.ok(dropped.queue.items('a1').length);
   dropped.setTight();
   const noRoom = await postLiveHook(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
-  assert.doesNotMatch(noRoom?.hookSpecificOutput?.additionalContext ?? '', /rerender-drop hook reconcile pair/);
+  assert.doesNotMatch(noRoom?.hookSpecificOutput?.additionalContext ?? '', /rerender-drop-0 hook reconcile pair/);
   assert.ok(dropped.log.some((row) => row.kind === 'claims-reconcile-dropped' && row.itemId === dropped.item.itemId));
   assert.equal(dropped.queue.items('a1').length, 0, 'a prompt dropped from compact is released, not counted unanswered');
   await postLiveHook(dropped.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
   assert.equal(dropped.queue.peek('a1')[0].turnsUnanswered, 0);
+
+  const mixed = await makeScenario('mixed', 3);
+  await postLiveHook(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const mixedTurn = mixed.queue.items('a1')[0].leaseTurn;
+  mixed.queue.refresh('a1', mixed.items);
+  const beforeMixedTokens = mixed.queue.dailyTokens('2026-10-03');
+  const mixedLogMark = mixed.log.length;
+  const mixedCompact = await postLiveHook(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  const mixedText = mixedCompact?.hookSpecificOutput?.additionalContext ?? '';
+  for (const item of mixed.items) assert.match(mixedText, new RegExp(`${item.itemId}:`));
+  assert.deepEqual(mixed.queue.items('a1').map((item) => item.itemId), mixed.items.map((item) => item.itemId));
+  assert.ok(mixed.queue.items('a1').every((item) => item.leaseTurn === mixedTurn));
+  assert.equal(mixed.queue.sequence('a1'), 1, 'fresh mixed items join the existing turn');
+  const mixedRows = mixed.log.slice(mixedLogMark).filter((row) => row.kind === 'claims-reconcile-injected' || row.kind === 'claims-reconcile-rerendered');
+  assert.deepEqual(mixedRows.flatMap((row) => row.items).sort(), mixed.items.map((item) => item.itemId).sort());
+  assert.equal(mixed.queue.dailyTokens('2026-10-03') - beforeMixedTokens, mixedRows.reduce((n, row) => n + row.tokens, 0));
+  await postLiveHook(mixed.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  assert.ok(mixed.queue.peek('a1').every((item) => item.turnsUnanswered === 1), 'one Stop counts each shown marker once');
+
+  const cleared = await makeScenario('clear');
+  await postLiveHook(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const clearTurn = cleared.queue.items('a1')[0].leaseTurn;
+  const beforeClearTokens = cleared.queue.dailyTokens('2026-10-03');
+  const clearHook = await postLiveHook(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'clear', agent_id: 'a1' });
+  assert.match(clearHook?.hookSpecificOutput?.additionalContext ?? '', /clear-0 hook reconcile pair/);
+  assert.equal(cleared.queue.items('a1')[0].leaseTurn, clearTurn);
+  assert.equal(cleared.queue.sequence('a1'), 1);
+  const clearRerender = cleared.log.find((row) => row.kind === 'claims-reconcile-rerendered');
+  assert.ok(clearRerender?.tokens > 0);
+  assert.equal(cleared.queue.dailyTokens('2026-10-03'), beforeClearTokens + clearRerender.tokens);
+  await postLiveHook(cleared.server, 'a1', { hook_event_name: 'Stop', agent_id: 'a1' });
+  assert.equal(cleared.queue.peek('a1')[0].turnsUnanswered, 1);
 });
 
 test('S-a rendered reconcile detection uses final text after the emergency line cut', async () => {

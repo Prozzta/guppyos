@@ -25,6 +25,10 @@ export interface ReconcileApiDeps {
   isOwner: (agentId: string) => boolean;
 }
 
+function isRerenderSource(source?: string): boolean {
+  return source === 'compact' || source === 'resume' || source === 'clear';
+}
+
 /** Claims-owned delivery/completion API. Providers only need to call these two methods. */
 export class ReconcileApi {
   constructor(private readonly d: ReconcileApiDeps) {}
@@ -32,7 +36,7 @@ export class ReconcileApi {
   peekForTurn(agentId: string, day: string, source?: string): ReconcileItem[] {
     if (!this.d.isOwner(agentId)) return [];
     if (source === 'startup') this.d.queue.reclaimLeases(agentId);
-    const rerender = source === 'compact' || source === 'resume' ? this.d.queue.leasedItems(agentId, 3) : [];
+    const rerender = isRerenderSource(source) ? this.d.queue.leasedItems(agentId, 3) : [];
     const out: ReconcileItem[] = rerender.slice();
     let tokens = rerender.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
     for (const item of this.d.queue.peek(agentId, 3)) {
@@ -48,14 +52,15 @@ export class ReconcileApi {
     if (!this.d.isOwner(agentId)) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
     const wanted = new Set(renderedIds);
     const existing = this.d.queue.leasedItems(agentId, 3);
-    const rerendered = (source === 'compact' || source === 'resume') ? existing.filter((item) => wanted.has(item.itemId)) : [];
+    const rerendered = isRerenderSource(source) ? existing.filter((item) => wanted.has(item.itemId)) : [];
     const items = [...rerendered, ...this.d.queue.peek(agentId, 3).filter((item) => wanted.has(item.itemId))].slice(0, 3);
-    if (source === 'compact' || source === 'resume') this.d.queue.releaseLeases(agentId, existing.filter((item) => !wanted.has(item.itemId)).map((item) => item.itemId));
+    if (isRerenderSource(source)) this.d.queue.releaseLeases(agentId, existing.filter((item) => !wanted.has(item.itemId)).map((item) => item.itemId));
     if (!items.length) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
     const rerenderTokens = rerendered.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
-    const turn = rerendered[0]?.leaseTurn ?? this.d.queue.leaseRendered(agentId, day,
-      items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId)).map((item) => item.itemId),
-      items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId)).reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0));
+    const fresh = items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId));
+    const freshTurn = fresh.length ? this.d.queue.leaseRendered(agentId, day, fresh.map((item) => item.itemId),
+      fresh.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0)) : null;
+    const turn = rerendered[0]?.leaseTurn ?? freshTurn;
     if (!turn) return { text: '', tokens: 0, itemIds: [], items: [], turn: '' };
     if (rerenderTokens > 0) {
       this.d.queue.recordInjectedTokens(day, rerenderTokens);
@@ -64,7 +69,6 @@ export class ReconcileApi {
     const itemIds = items.map((item) => item.itemId);
     const text = items.map(reconcilePromptText).join('\n');
     const tokens = items.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
-    const fresh = items.filter((item) => !rerendered.some((old) => old.itemId === item.itemId));
     const freshTokens = fresh.reduce((n, item) => n + Math.max(0, this.d.countTokens(reconcilePromptText(item))), 0);
     if (freshTokens > 0) this.d.log({ kind: 'claims-reconcile-injected', agentId, turn, day, tokens: freshTokens, items: fresh.map((item) => item.itemId) });
     return { text, tokens, itemIds, items, turn };
