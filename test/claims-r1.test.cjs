@@ -244,7 +244,21 @@ test('R1 (Jim J1): a derive failure never blocks the append: the claim is append
   let id;
   try { id = await append(x.store, fact('synthetic derive-failure fact')); } finally { D.derive = real; }
   assert.match(id, /^c-/, 'appended as a claim');
-  assert.ok(x.logs.some((r) => r.kind === 'claims-r1-failed' && /synthetic derive failure/.test(r.error)), JSON.stringify(x.logs));
+  assert.ok(x.logs.some((r) => r.kind === 'claims-r1-failed' && /synthetic derive failure/.test(r.reason) && r.agentId === 'a1' && /^c-/.test(r.claimId)), JSON.stringify(x.logs));
+  assert.ok(!JSON.stringify(x.logs.filter((r) => r.kind === 'claims-r1-failed')).includes('synthetic derive-failure fact'), 'the log row carries no claim text');
+  assert.equal(x.claims().length, 2);
+});
+
+test('R1 (Jim K-1): a throwing taskStatus never blocks the append: the claim is appended and the failure is logged', async () => {
+  let fail = false;
+  const x = setup({ taskStatus: () => { if (fail) throw new Error('synthetic EBUSY on tasks.json'); return 'doing'; } });
+  await append(x.store, fact('synthetic busy-task fact', { ttl: 'task:task-90' }));
+  fail = true;
+  const id = await append(x.store, fact('synthetic busy-task fact', { ttl: 'task:task-90' }));
+  assert.match(id, /^c-/, 'appended as a claim');
+  assert.ok(x.logs.some((r) => r.kind === 'claims-r1-failed' && /synthetic EBUSY/.test(r.reason) && /^c-/.test(r.claimId)), JSON.stringify(x.logs));
+  assert.ok(!JSON.stringify(x.logs).includes('synthetic busy-task fact'), 'the log row carries no claim text');
+  assert.equal(x.read().records.filter((r) => r.t === 'event').length, 0, 'a failed decision is never a sighting');
   assert.equal(x.claims().length, 2);
 });
 

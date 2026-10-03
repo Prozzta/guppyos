@@ -583,22 +583,17 @@ export class ClaimStore {
   private r1Sighting(agentId: string, s: AgentState, claim: ClaimRec, draft: RecordDraft, wt: string): EventRec | null {
     if (claim.supersedes || claim.retracts || claim.pin) return null;
     if (claim.legacy && (draft.t !== 'claim' || sha256Hex(draft.text) !== claim.legacy.sha256)) return null;
-    const candidates = s.exact.get(r1Identity(claim));
-    if (!candidates?.length) return null;
-    let state;
+    // The WHOLE decision (candidate lookup, liveness, TTL and task status) is one failure boundary
+    // (god K-1): any throw logs claims-r1-failed (ids and reason, no text) and the draft is appended
+    // as a normal claim. A failed decision is never a sighting.
+    let live: string | null;
     try {
-      let registry;
-      try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
-      state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+      live = this.r1Live(agentId, s, claim, wt);
     } catch (e) {
-      this.log({ kind: 'claims-r1-failed', agentId, error: String(e).slice(0, 160) });
-      return null;   // the claim is appended as before: R1 never blocks a write
+      this.log({ kind: 'claims-r1-failed', agentId, claimId: claim.id, reason: String(e).slice(0, 160) });
+      return null;   // R1 never blocks a write
     }
-    const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
     if (!live) return null;
-    // Jim R-2: an expired claim is not live for R1 (derive has no clock; R6 is view time). The TTL is
-    // in the identity, so the candidate's TTL is the draft's: judged at the draft's wt, as worldView does.
-    if (this.ttlEnded(claim.ttl, wt)) return null;
     const by: EventRec['by'] = claim.source === 'human' ? 'human' : claim.source.startsWith('mail:') ? 'code' : 'self';
     return {
       v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'sighting', at: claim.at, wt, agent: agentId,
@@ -608,7 +603,21 @@ export class ClaimStore {
     };
   }
 
-  /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */
+  /** R1: the newest LIVE claim with the draft's identity whose TTL has not ended at `wt`, or null. May throw. */
+  private r1Live(agentId: string, s: AgentState, claim: ClaimRec, wt: string): string | null {
+    const candidates = s.exact.get(r1Identity(claim));
+    if (!candidates?.length) return null;
+    let registry;
+    try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+    const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+    const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
+    if (!live) return null;
+    // Jim R-2: an expired claim is not live for R1 (derive has no clock; R6 is view time). The TTL is
+    // in the identity, so the candidate's TTL is the draft's: judged at the draft's wt, as worldView does.
+    if (this.ttlEnded(claim.ttl, wt)) return null;
+    return live;
+  }
+
   /** R1: whether a stored TTL has ended at `wt` (ttl.ts grammar; a task TTL by deps.taskStatus). */
   private ttlEnded(stored: unknown, wt: string): boolean {
     const ttl = parseStoredTtl(stored);
@@ -620,6 +629,7 @@ export class ClaimStore {
     return Date.parse(ttl.at) <= Date.parse(wt);
   }
 
+  /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */
   private ledgerRecords(agentId: string): LedgerRec[] {
     const out: LedgerRec[] = [];
     for (const f of this.segments(agentId)) for (const line of nodeFs.readFileSync(f, 'utf8').split('\n')) {
