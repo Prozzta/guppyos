@@ -192,21 +192,33 @@ export function importLegacy(agentDir: string): RecordDraft[] {
 }
 
 /**
- * How many entries of each hash the ledger already holds. The parts of one split entry are appended
- * together and share {file, line, sha256}, so consecutive records with the same triple count once.
+ * How many whole entries of each hash the ledger already holds. The parts of a split entry share
+ * {file, line, sha256}; they are re-assembled in ledger order until their concatenation hashes to
+ * that sha256, and only then count as one entry. So another writer's record landing between two
+ * parts changes nothing, and a lone part never counts as a whole entry.
  */
 export function ledgerEntryCounts(records: LedgerRec[]): Map<string, number> {
   const counts = new Map<string, number>();
-  let last = '';
+  // Per triple, the open candidate assemblies. A record extends every open candidate and also starts
+  // a new one, so a part orphaned by a crash (and then re-imported whole) never blocks the count.
+  const open = new Map<string, string[]>();
   for (const r of records) {
-    if (r.t !== 'claim' || !r.legacy) { last = ''; continue; }
+    if (r.t !== 'claim' || !r.legacy) continue;
     const triple = `${r.legacy.file}\u0000${r.legacy.line}\u0000${r.legacy.sha256}`;
-    if (triple === last) continue;
-    last = triple;
-    counts.set(r.legacy.sha256, (counts.get(r.legacy.sha256) ?? 0) + 1);
+    const cands = [...(open.get(triple) ?? []).map((acc) => acc + r.text), r.text];
+    const hit = cands.findIndex((acc) => sha(acc) === r.legacy!.sha256);
+    if (hit >= 0) {
+      counts.set(r.legacy.sha256, (counts.get(r.legacy.sha256) ?? 0) + 1);
+      cands.splice(hit, 1);
+    }
+    const keep = cands.filter((acc) => acc.length < LEGACY_ASSEMBLY_MAX).slice(-OPEN_ASSEMBLIES_MAX);
+    if (keep.length) open.set(triple, keep); else open.delete(triple);
   }
   return counts;
 }
+/** Bounds for ledgerEntryCounts: no legacy entry is near this long, and orphans are rare. */
+const LEGACY_ASSEMBLY_MAX = 1024 * 1024;
+const OPEN_ASSEMBLIES_MAX = 16;
 
 /** G6.2/G6.4: the legacy drafts the ledger does not hold yet. Per-hash counts, never file:line. */
 export function newLegacyDrafts(agentDir: string, records: LedgerRec[]): RecordDraft[] {
@@ -221,14 +233,14 @@ export function newLegacyDrafts(agentDir: string, records: LedgerRec[]): RecordD
   return out;
 }
 
-/** The `knownIds` for parseNewBullets: every claim id, plus `b:<sha256>` for every entry hash in the ledger. */
+/**
+ * The `knownIds` for parseNewBullets: every claim id, plus `b:<sha256>` for every WHOLE entry in the
+ * ledger (a part orphaned by a crash does not make its entry "known", so the entry is not lost).
+ */
 export function knownIdsFor(records: LedgerRec[]): Set<string> {
   const ids = new Set<string>();
-  for (const r of records) {
-    if (r.t !== 'claim') continue;
-    ids.add(r.id);
-    if (r.legacy) ids.add(`b:${r.legacy.sha256}`);
-  }
+  for (const r of records) if (r.t === 'claim') ids.add(r.id);
+  for (const h of ledgerEntryCounts(records).keys()) ids.add(`b:${h}`);
   return ids;
 }
 

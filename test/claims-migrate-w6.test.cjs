@@ -241,3 +241,18 @@ test('the module never sets a source an external caller could choose: only legac
   assert.ok(!/source:\s*'(human|god)'/.test(src));
   assert.ok(!/mail:/.test(src.replace(/\/\*[\s\S]*?\*\//g, '')));
 });
+
+test('part counting is order-proof: another record between two parts, and a part orphaned by a crash', () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'memory.md'), '- ' + 'q'.repeat(9000) + '\n');
+  const parts = M.newLegacyDrafts(dir, []);
+  assert.equal(parts.length, 3);
+  const other = { t: 'claim', kind: 'fact', text: 'a note from elsewhere', source: 'self' };
+  const interleaved = asRecords([parts[0], other, parts[1], parts[2]]);
+  assert.equal(M.newLegacyDrafts(dir, interleaved).length, 0, 'interleaved parts still count as the entry');
+  const orphan = asRecords([parts[0]]);   // a crash after the first part
+  assert.equal(M.newLegacyDrafts(dir, orphan).length, 3, 'a lone part is not the entry: it is imported again');
+  assert.ok(!M.knownIdsFor(orphan).has(`b:${parts[0].legacy.sha256}`), 'nor is it "known" to the parser');
+  const healed = asRecords([parts[0], ...parts]);
+  assert.equal(M.newLegacyDrafts(dir, healed).length, 0, 'after the re-import the orphan blocks nothing');
+});
