@@ -45,6 +45,22 @@ export function autoCompactWindowFor(
   return god ?? GOD_AUTO_COMPACT_WINDOW_DEFAULT;
 }
 
+/** n1 (Creed): the settings that were SET but are invalid and so ignored (a typo would otherwise
+ *  silently mean 150k for god, or Claude's "auto"). Only the ones that apply to this agent. */
+export function autoCompactWindowIgnored(
+  agent: { isGod?: boolean; autoCompactWindow?: unknown } | null | undefined,
+  cfg: { godAutoCompactWindow?: unknown } | null | undefined
+): Array<{ setting: 'autoCompactWindow' | 'godAutoCompactWindow'; value: string }> {
+  const out: Array<{ setting: 'autoCompactWindow' | 'godAutoCompactWindow'; value: string }> = [];
+  const shown = (v: unknown): string => String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 40);
+  const own = agent?.autoCompactWindow;
+  if (own !== undefined && normalizeAutoCompactWindow(own) === undefined) out.push({ setting: 'autoCompactWindow', value: shown(own) });
+  const ownValid = own !== undefined && normalizeAutoCompactWindow(own) !== undefined;
+  const god = cfg?.godAutoCompactWindow;
+  if (agent?.isGod === true && !ownValid && god !== undefined && normalizeAutoCompactWindow(god) === undefined) out.push({ setting: 'godAutoCompactWindow', value: shown(god) });
+  return out;
+}
+
 /** What one compaction did, from the transcript: Claude's own `compact_boundary` record and the
  *  usage of the FIRST request after it (the request that pays for the smaller context). */
 export interface CompactHealth {

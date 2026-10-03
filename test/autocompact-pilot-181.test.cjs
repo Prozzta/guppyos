@@ -69,11 +69,41 @@ test('the transcript: every compact_boundary, each with the first request after 
 
 // ─── the watcher ────────────────────────────────────────────────────────────────────────────
 
-function watch(M = CH, tails) {
-  const rows = []; let n = 0;
-  const w = new M.CompactHealthWatch({ log: (r) => rows.push(r), readTail: () => tails[Math.min(n++, tails.length - 1)], windowOf: () => 150000 });
-  return { w, rows };
+function watch(M = CH, tails, now = Date.parse('2026-10-03T07:06:00Z')) {
+  const rows = []; let n = 0; let clock = now;
+  const w = new M.CompactHealthWatch({ log: (r) => rows.push(r), readTail: () => tails[Math.min(n++, tails.length - 1)], windowOf: () => 150000, now: () => clock });
+  return { w, rows, setNow: (t) => { clock = t; } };
 }
+
+K.noRelogAfterRestart = (M = CH) => {
+  // After an app restart the in-memory set is empty; the first compaction then reads a tail that
+  // still holds b1..b3 from before the restart. Only the boundary written since its
+  // SessionStart(compact) may be logged.
+  const restartTail = [TAIL, boundary('b4', 150000, 18000, '2026-10-03T09:00:00.250Z'), req(30000, 25000, 40)].join('\n');
+  const x = watch(M, [restartTail], Date.parse('2026-10-03T09:00:00Z'));
+  x.w.noteCompact('god', 'C:/t.jsonl');
+  x.w.onStop('god');
+  assert.deepEqual(x.rows.map((r) => r.preTokens), [150000], 'AN OLDER BOUNDARY IS NOT LOGGED AGAIN AFTER A RESTART');
+  // Several compactions in one turn: the FIRST SessionStart(compact) sets the time.
+  const y = watch(M, [TAIL], Date.parse('2026-10-03T07:06:39Z'));
+  y.w.noteCompact('god', 'C:/t.jsonl');
+  y.setNow(Date.parse('2026-10-03T07:07:48Z'));
+  y.w.noteCompact('god', 'C:/t.jsonl');
+  y.w.onStop('god');
+  assert.equal(y.rows.length, 3, 'every compaction of THIS turn still counts');
+};
+test('n2: after an app restart, boundaries older than the arming SessionStart(compact) are not logged again', () => K.noRelogAfterRestart());
+
+test('n1: a set-but-invalid window is reported, only where it applies', () => {
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true }, { godAutoCompactWindow: 'big' }), [{ setting: 'godAutoCompactWindow', value: 'big' }]);
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true, autoCompactWindow: 5 }, {}), [{ setting: 'autoCompactWindow', value: '5' }]);
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true, autoCompactWindow: 120000 }, { godAutoCompactWindow: 'big' }), [], 'a valid own value makes the god setting moot');
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: false }, { godAutoCompactWindow: 'big' }), [], 'the god setting does not apply to a worker');
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true }, { godAutoCompactWindow: 'off' }), []);
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true }, {}), []);
+  const idx = readSource('src/main/index.ts');
+  assert.match(idx, /if \(compactIgnored\.length\) hive\.appendLog\(\{ kind: 'auto-compact-window-ignored', agentId: opts\.hive\.id, ignored: compactIgnored, using: compactWindow \}\);/);
+});
 
 K.watchLogsAll = (M = CH) => {
   const x = watch(M, [TAIL]);
@@ -113,7 +143,8 @@ test('watcher: the last boundary without its first request is retried, then logg
 
 K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/hooks.ts')) => {
   const claude = idx.slice(idx.indexOf('  if (opts.hive && claudeProvider) {'), idx.indexOf('  if (opts.hive && !claudeProvider) {'));
-  assert.match(claude, /const compactWindow = autoCompactWindowFor\(\{ isGod: opts\.hive\.isGod, autoCompactWindow: hive\.registry\(\)\.agents\[opts\.hive\.id\]\?\.autoCompactWindow \}, cfg\);\n    if \(compactWindow !== null\) \{\n      opts\.env = \{ \.\.\.\(opts\.env \?\? \{\}\), \[AUTO_COMPACT_WINDOW_ENV\]: String\(compactWindow\) \};/, 'THE WINDOW REACHES A CLAUDE SPAWN AS AN ENV VAR');
+  assert.match(claude, /const compactAgent = \{ isGod: opts\.hive\.isGod, autoCompactWindow: hive\.registry\(\)\.agents\[opts\.hive\.id\]\?\.autoCompactWindow \};\n    const compactWindow = autoCompactWindowFor\(compactAgent, cfg\);/);
+  assert.match(claude, /if \(compactWindow !== null\) \{\n      opts\.env = \{ \.\.\.\(opts\.env \?\? \{\}\), \[AUTO_COMPACT_WINDOW_ENV\]: String\(compactWindow\) \};/, 'THE WINDOW REACHES A CLAUDE SPAWN AS AN ENV VAR');
   assert.ok(!/AUTO_COMPACT_WINDOW_ENV|compactWindow/.test(idx.slice(idx.indexOf('  if (opts.hive && !claudeProvider) {'), idx.indexOf('  if (opts.hive && !claudeProvider) {') + 4000)), 'never for another CLI');
   assert.match(idx, /hookServer\.setCompactHealth\(new CompactHealthWatch\(\{/);
   const handle = hooks.slice(hooks.indexOf('  private handle(p: HookPayload): unknown {'));
@@ -162,6 +193,10 @@ const MUTANTS = [
     edits: [['    for (const h of all) {', '    for (const h of all.slice(-1)) {']], killer: 'watchLogsAll', dies: /ONE ROW PER COMPACTION, ALL OF THEM/ },
   { name: 'a boundary is logged again', file: 'src/main/compactHealth.ts', module: true, deps: true,
     edits: [['      if (seen.has(h.uuid)) continue;\n', '']], killer: 'watchLogsAll', dies: /EACH BOUNDARY IS LOGGED ONCE/ },
+  { name: 'n2 off: older boundaries are logged again after a restart', file: 'src/main/compactHealth.ts', module: true, deps: true,
+    edits: [['      if (Number.isFinite(t) ? t < p.since - COMPACT_SKEW_MS : h !== last) continue;\n', '']], killer: 'noRelogAfterRestart', dies: /AN OLDER BOUNDARY IS NOT LOGGED AGAIN AFTER A RESTART/ },
+  { name: 'n2: each SessionStart(compact) resets the time (a turn loses its earlier boundaries)', file: 'src/main/compactHealth.ts', module: true, deps: true,
+    edits: [['    const since = this.pending.get(agentId)?.since ?? (this.d.now ?? Date.now)();', '    const since = (this.d.now ?? Date.now)();']], killer: 'noRelogAfterRestart', dies: /every compaction of THIS turn still counts/ },
   { name: 'the env var is never set', file: 'src/main/index.ts',
     edits: [['      opts.env = { ...(opts.env ?? {}), [AUTO_COMPACT_WINDOW_ENV]: String(compactWindow) };\n', '']], killer: 'wiring', dies: /THE WINDOW REACHES A CLAUDE SPAWN AS AN ENV VAR/ },
   { name: 'the Stop never logs', file: 'src/main/hooks.ts', hooks: true,

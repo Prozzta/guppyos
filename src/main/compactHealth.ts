@@ -16,6 +16,8 @@ import { compactHealthsFromTail } from '../shared/autoCompactWindow';
 
 export const COMPACT_TAIL_BYTES = 1024 * 1024;
 export const COMPACT_HEALTH_TRIES = 3;
+/** Clock skew allowed between the app and a boundary's timestamp (n2). */
+export const COMPACT_SKEW_MS = 5_000;
 
 /** The last `bytes` of a file as text, or null. */
 export function readTail(file: string, bytes = COMPACT_TAIL_BYTES): string | null {
@@ -35,20 +37,23 @@ export function readTail(file: string, bytes = COMPACT_TAIL_BYTES): string | nul
 }
 
 export class CompactHealthWatch {
-  private readonly pending = new Map<string, { path: string; tries: number }>();
+  private readonly pending = new Map<string, { path: string; tries: number; since: number }>();
   private readonly logged = new Map<string, Set<string>>();
 
   constructor(private readonly d: {
     log: (row: Record<string, unknown>) => void;
     readTail?: (file: string) => string | null;
+    now?: () => number;
     /** The agent's configured window (tokens), when the pilot set one. */
     windowOf?: (agentId: string) => number | null;
   }) {}
 
-  /** SessionStart with source "compact". */
+  /** SessionStart with source "compact". Several in one turn keep the FIRST one's time, so every
+   *  boundary of this turn counts as new. */
   noteCompact(agentId: string, transcriptPath: string | null | undefined): void {
     if (!transcriptPath) return;
-    this.pending.set(agentId, { path: transcriptPath, tries: 0 });
+    const since = this.pending.get(agentId)?.since ?? (this.d.now ?? Date.now)();
+    this.pending.set(agentId, { path: transcriptPath, tries: 0, since });
   }
 
   /** A Stop of the agent: log every compaction not logged yet (one turn can hold several), once
@@ -70,6 +75,12 @@ export class CompactHealthWatch {
     try { window = this.d.windowOf?.(agentId) ?? null; } catch { window = null; }
     for (const h of all) {
       if (seen.has(h.uuid)) continue;
+      // n2 (Creed): the logged set lives in memory, so after an app restart an OLDER boundary still
+      // in the tail would be logged again and inflate the pilot's numbers. Only boundaries written
+      // since the SessionStart(compact) that armed this read count. Claude stamps a boundary ~250 ms
+      // after that SessionStart (probe); one without a time counts only if it is the last.
+      const t = h.at ? Date.parse(h.at) : NaN;
+      if (Number.isFinite(t) ? t < p.since - COMPACT_SKEW_MS : h !== last) continue;
       seen.add(h.uuid);
       try {
         this.d.log({

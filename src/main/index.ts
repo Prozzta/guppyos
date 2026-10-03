@@ -34,7 +34,7 @@ import {
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
-import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor } from '../shared/autoCompactWindow';
+import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor, autoCompactWindowIgnored } from '../shared/autoCompactWindow';
 import { CompactHealthWatch } from './compactHealth';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import { createRendererErrorGate } from '../shared/rendererError';
@@ -4043,7 +4043,11 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // READS-ROTATE-AT-SIZE pilot (shared/autoCompactWindow.ts): Claude Code's own auto-compact
     // window, per agent (god: 150k by default; config.godAutoCompactWindow "off" switches it off).
     // An env var only: the injected prompt, and so its session fingerprint, are unchanged.
-    const compactWindow = autoCompactWindowFor({ isGod: opts.hive.isGod, autoCompactWindow: hive.registry().agents[opts.hive.id]?.autoCompactWindow }, cfg);
+    const compactAgent = { isGod: opts.hive.isGod, autoCompactWindow: hive.registry().agents[opts.hive.id]?.autoCompactWindow };
+    const compactWindow = autoCompactWindowFor(compactAgent, cfg);
+    // n1 (Creed): a setting that is set but invalid is ignored; say so instead of silently.
+    const compactIgnored = autoCompactWindowIgnored(compactAgent, cfg);
+    if (compactIgnored.length) hive.appendLog({ kind: 'auto-compact-window-ignored', agentId: opts.hive.id, ignored: compactIgnored, using: compactWindow });
     if (compactWindow !== null) {
       opts.env = { ...(opts.env ?? {}), [AUTO_COMPACT_WINDOW_ENV]: String(compactWindow) };
       hive.appendLog({ kind: 'auto-compact-window', agentId: opts.hive.id, window: compactWindow });
