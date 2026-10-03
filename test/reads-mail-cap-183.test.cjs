@@ -185,6 +185,9 @@ test('hooks: god gets an agent\'s long mail capped with both paths; the inbox fi
   assert.equal(row.agentId, 'god-1');
   assert.equal(row.cap, 1_500);
   assert.equal(row.bodyChars, body.length);
+  // Creed n1: the characters actually shown (the cut backs off to a break), for an exact saving.
+  assert.equal(row.shownChars, S.mailCapCut(body, 1_500));
+  assert.ok(row.shownChars <= 1_500 && row.shownChars >= 1_300, String(row.shownChars));
 });
 
 test('hooks: the Human\'s and an ephemeral worker\'s long mail reaches god whole (the Slack reply line at the end survives)', async (t) => {

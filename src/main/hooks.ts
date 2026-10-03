@@ -36,7 +36,7 @@ import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvi
 import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailLateDetail, type MailObligation } from './mailLedger';
 import {
   MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
-  buildMailBlock, buildMailHeaders, effectiveMailCap, isSlashPrompt, mailBudgetFor, mailCapExempt, mailChannelMode,
+  buildMailBlock, buildMailHeaders, effectiveMailCap, escapeMailText, isSlashPrompt, mailBudgetFor, mailCapCut, mailCapExempt, mailChannelMode,
   mailEvidenceIn, mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
   type MailBlock, type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
@@ -1368,7 +1368,7 @@ export class HookServer {
     for (const id of block.capped) {
       if (!claimed.includes(id)) continue;
       const it = items.find((i) => i.entry.id === id);
-      try { this.hive.appendLog({ kind: 'mail-capped', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, cap: it?.cap ?? null }); } catch { /* noop */ }
+      try { this.hive.appendLog({ kind: 'mail-capped', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, cap: it?.cap ?? null, shownChars: it ? mailCapCut(escapeMailText(it.body), it.cap) : null }); } catch { /* noop */ }
     }
   }
 
@@ -1482,7 +1482,7 @@ export class HookServer {
     for (const id of block.pathOnly) {
       if (!claimed.includes(id)) continue;
       const it = items.find((i) => i.entry.id === id);
-      try { this.hive.appendLog({ kind: 'mail-truncated', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, shown: 'header+path' }); } catch { /* noop */ }
+      try { this.hive.appendLog({ kind: 'mail-truncated', agentId, id, epoch, hookKind, bodyChars: it?.body.length ?? null, shown: 'header+path', shownChars: 0 }); } catch { /* noop */ }
     }
   }
 
