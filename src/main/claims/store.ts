@@ -54,7 +54,9 @@ import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
 import { normalizeTtl, zonelessHint } from './ttl';
-import { checkKey, loadRegistry, saveRegistry } from './registry';
+import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
+import { derive } from './derive';
+import { R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
 export interface LedgerIo {
@@ -116,8 +118,18 @@ interface AgentState {
   tailSize: number;
   segments: number;
   readOnly: ChainBreak | null;
+  /** R1: claim ids by their exact identity (r1Identity), in ledger order. */
+  exact: Map<string, string[]>;
 }
 
+/**
+ * R1 (plan §W2, B11: exact-only): a claim's identity for duplicate detection. Same kind, the same
+ * key (or none) and the same stored text, exactly as the store writes it (after redaction). No
+ * case folding, no whitespace folding: nothing fuzzy.
+ */
+export function r1Identity(rec: Pick<ClaimRec, 'kind' | 'key' | 'text'>): string {
+  return `${rec.kind}\u0000${rec.key ?? ''}\u0000${rec.text}`;
+}
 export type ParsedLine = { offset: number; bytes: number; line: string; rec: LedgerRec | null };
 
 export function monthOf(iso: string): string {
@@ -422,11 +434,13 @@ export class ClaimStore {
 
   private adopt(agentId: string, lines: ParsedLine[], files: string[], chain: 'ok' | ChainBreak): void {
     const known = new Map<string, Known>();
+    const exact = new Map<string, string[]>();
     for (const l of lines) {
       const r = l.rec;
       if (!r) continue;
       if (r.t === 'claim') {
         known.set(r.id, { t: 'claim', source: r.source, kind: r.kind });
+        if (typeof r.text === 'string') { const k = r1Identity(r); exact.set(k, [...(exact.get(k) ?? []), r.id]); }
       } else known.set(r.id, { t: 'event' });
     }
     const last = lines.length ? lines[lines.length - 1] : null;
@@ -439,6 +453,7 @@ export class ClaimStore {
       tailSize: tailFile ? nodeFs.statSync(tailFile).size : 0,
       segments: files.length,
       readOnly: chain === 'ok' ? null : chain,
+      exact,
     });
     if (chain !== 'ok' && chain.reason === 'key-missing') {
       this.alertOnce('key-missing', { kind: CLAIMS_ALERT_KEY_MISSING, reason: 'the key does not verify the ledger', agentId, to: ['god', 'human'] });
@@ -535,12 +550,60 @@ export class ClaimStore {
     const wt = wtDate.toISOString();
     const built = this.build(agentId, draft, origin, s, wt);
     if ('error' in built) return { ok: false, error: built.error, ...(built.didYouMean ? { didYouMean: built.didYouMean } : {}) };
-    const rec = built.rec;
+    let rec: LedgerRec = built.rec;
+    // R1 (plan §W2, B11): an exact duplicate of one of this agent's LIVE claims becomes a sighting
+    // of it, never a second live claim (and, being an event, it never runs R5).
+    const sighting = rec.t === 'claim' ? this.r1Sighting(agentId, s, rec, draft, wt) : null;
+    if (sighting) rec = sighting;
     rec.prev = s.head;
     rec.mac = recordMac(key, rec as unknown as Record<string, unknown>);
     const line = canonicalJson(rec);
     const bytes = Buffer.from(line + '\n', 'utf8');
-    return this.writeLine(agentId, s, rec, line, bytes, built.registryAdded);
+    const res = this.writeLine(agentId, s, rec, line, bytes, sighting ? null : built.registryAdded);
+    if (sighting && res.ok) this.log({ kind: 'claims-r1-sighting', agentId, id: sighting.id, target: sighting.targets[0] });
+    return res;
+  }
+
+  /**
+   * R1: the sighting event for `claim` when it is an exact duplicate (r1Identity) of a claim of this
+   * agent that is LIVE now (W2's derive decides), else null. Only a plain statement qualifies: a
+   * draft that supersedes, retracts or pins acts, so it is appended as a claim. A legacy draft
+   * qualifies only as a WHOLE entry (a part of a split entry is appended as before), and its
+   * sighting names the entry hash so W6 counts it as imported.
+   */
+  private r1Sighting(agentId: string, s: AgentState, claim: ClaimRec, draft: RecordDraft, wt: string): EventRec | null {
+    if (claim.supersedes || claim.retracts || claim.pin) return null;
+    if (claim.legacy && (draft.t !== 'claim' || sha256Hex(draft.text) !== claim.legacy.sha256)) return null;
+    const candidates = s.exact.get(r1Identity(claim));
+    if (!candidates?.length) return null;
+    let state;
+    try {
+      let registry;
+      try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+      state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+    } catch (e) {
+      this.log({ kind: 'claims-r1-failed', agentId, error: String(e).slice(0, 160) });
+      return null;   // the claim is appended as before: R1 never blocks a write
+    }
+    const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
+    if (!live) return null;
+    const by: EventRec['by'] = claim.source === 'human' ? 'human' : claim.source.startsWith('mail:') ? 'code' : 'self';
+    return {
+      v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'sighting', at: claim.at, wt, agent: agentId,
+      targets: [live], by, rule: 'R1',
+      ...(claim.legacy ? { reason: R1_LEGACY_REASON(claim.legacy.sha256) } : {}),
+      prev: '', mac: '',
+    };
+  }
+
+  /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */
+  private ledgerRecords(agentId: string): LedgerRec[] {
+    const out: LedgerRec[] = [];
+    for (const f of this.segments(agentId)) for (const line of nodeFs.readFileSync(f, 'utf8').split('\n')) {
+      if (!line) continue;
+      try { out.push(JSON.parse(line) as LedgerRec); } catch { /* the chain check reports it */ }
+    }
+    return out;
   }
 
   private writeLine(agentId: string, s: AgentState, rec: LedgerRec, line: string, bytes: Buffer, registryAdded: (() => void) | null): AppendResult {
@@ -570,6 +633,7 @@ export class ClaimStore {
     s.head = sha256Hex(line);
     s.lastId = rec.id;
     s.known.set(rec.id, rec.t === 'claim' ? { t: 'claim', source: rec.source, kind: rec.kind } : { t: 'event' });
+    if (rec.t === 'claim') { const k = r1Identity(rec); s.exact.set(k, [...(s.exact.get(k) ?? []), rec.id]); }
     if (s.tailFile !== file) { s.tailFile = file; s.segments += 1; }
     try { s.tailSize = nodeFs.statSync(file).size; } catch { this.state.delete(agentId); }
     if (registryAdded) registryAdded();
@@ -779,7 +843,7 @@ export class ClaimStore {
         const files = this.segments(a);
         const s: AgentState = {
           head: tail.head, lastId: tail.lastId, known: new Map(tail.ids.map((id) => [id, { t: id.startsWith('c-') ? 'claim' as const : 'event' as const }])),
-          tailFile: files[files.length - 1] ?? null, tailSize: 0, segments: files.length, readOnly: null,
+          tailFile: files[files.length - 1] ?? null, tailSize: 0, segments: files.length, readOnly: null, exact: new Map(),
         };
         const wt = this.now().toISOString();
         const rec: EventRec = {

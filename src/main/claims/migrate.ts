@@ -211,6 +211,10 @@ export function importLegacy(agentDir: string): RecordDraft[] {
   return importLegacyDetailed(agentDir).entries.flatMap((e) => draftsFor(e, 'legacy'));
 }
 
+/** R1's reason on a sighting that stands for a whole legacy entry (store.ts), so it counts as imported. */
+export const R1_LEGACY_REASON = (sha256: string): string => `legacy ${sha256}`;
+export const R1_LEGACY_REASON_RE = /^legacy ([0-9a-f]{64})$/;
+
 /**
  * How many whole entries of each hash the ledger already holds. The parts of a split entry share
  * {file, line, sha256}; they are re-assembled in ledger order until their concatenation hashes to
@@ -223,6 +227,13 @@ export function ledgerEntryCounts(records: LedgerRec[]): Map<string, number> {
   // a new one, so a part orphaned by a crash (and then re-imported whole) never blocks the count.
   const open = new Map<string, string[]>();
   for (const r of records) {
+    // R1: an exact restatement of a whole entry became a sighting naming the entry hash; it was
+    // imported (as a sighting), so it counts, and a re-run never offers it again.
+    if (r.t === 'event' && r.ev === 'sighting' && r.rule === 'R1') {
+      const m = R1_LEGACY_REASON_RE.exec(r.reason ?? '');
+      if (m) counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+      continue;
+    }
     if (r.t !== 'claim' || !r.legacy) continue;
     const triple = `${r.legacy.file}\u0000${r.legacy.line}\u0000${r.legacy.sha256}`;
     const cands = [...(open.get(triple) ?? []).map((acc) => acc + r.text), r.text];
