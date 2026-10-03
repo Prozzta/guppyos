@@ -409,7 +409,18 @@ module.exports = async (drill) => {
     const listeners = []; const events = []; const replies = new Map();
     const port = { on: (_ev, fn) => listeners.push(fn), postMessage: (m) => (typeof m.id === 'number' ? replies.set(m.id, m) : events.push(m)) };
     const ort = { Tensor: class {}, InferenceSession: { create: async () => { throw new Error('no model in this scenario'); } } };
-    await runWorker({ hiveRoot: hive, dbFile: path.join(dbDir, 'worker.sqlite'), modelDir: drill.modelDir, modelSha256: null, vecPath: drill.vecPath, vecSha256: drill.vecSha256, claimLedger: 'shadow' }, port, { Database: drill.openOpts.Database, ort });
+    // This drill runs with needModel: false, so the tree's model (gitignored, provisioned by
+    // scripts/fetch-memory-model.cjs) may be absent, as in a fresh worktree. runWorker still reads
+    // <modelDir>/tokenizer.json at start, so the scenario brings its own minimal BERT WordPiece
+    // tokenizer; the model itself is never loaded (ort is a stub, nothing is embedded).
+    const modelDir = path.join(drill.home, 'stub-model');
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.writeFileSync(path.join(modelDir, 'tokenizer.json'), JSON.stringify({
+      normalizer: { type: 'BertNormalizer', lowercase: true, strip_accents: null, handle_chinese_chars: true, clean_text: true },
+      pre_tokenizer: { type: 'BertPreTokenizer' },
+      model: { type: 'WordPiece', unk_token: '[UNK]', continuing_subword_prefix: '##', max_input_chars_per_word: 100, vocab: { '[PAD]': 0, '[UNK]': 1, '[CLS]': 2, '[SEP]': 3 } },
+    }));
+    await runWorker({ hiveRoot: hive, dbFile: path.join(dbDir, 'worker.sqlite'), modelDir, modelSha256: null, vecPath: drill.vecPath, vecSha256: drill.vecSha256, claimLedger: 'shadow' }, port, { Database: drill.openOpts.Database, ort });
     let id = 0;
     const call = async (op, args) => {
       const my = ++id;
