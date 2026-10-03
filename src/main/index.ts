@@ -5,6 +5,7 @@ import { ClaimStore } from './claims/store';
 import { FileLedgerKeyRecord, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync } from './claims/indexSync';
+import { derive as deriveClaims } from './claims/derive';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
 import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel } from '../shared/claims';
@@ -1214,9 +1215,9 @@ const startupTiming = new StartupTiming({
 // effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).
 let claimStore: { root: string; store: ClaimStore } | null = null;
 // CLAIM-LEDGER W3: main sends each flagged agent's VERIFIED claim chunks to the memory worker after
-// an append and when the worker (re)starts. derive is W2's (claimsDerive is set at integration;
-// until then nothing is indexed and that is logged once).
-const claimsDerive: DeriveFn | null = null;
+// an append and when the worker (re)starts. Derive is pure; the ledger reader below supplies only
+// the verified prefix, and the worker never reads ledger files.
+const claimsDerive: DeriveFn | null = deriveClaims;
 let claimsIndex: ClaimsIndexSync | null = null;
 function claimsIndexSync(): ClaimsIndexSync | null {
   const ep = claimsEndpoint();

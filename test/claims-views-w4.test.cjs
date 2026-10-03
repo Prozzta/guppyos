@@ -58,10 +58,12 @@ test('complete output includes every record by default and supports W6 archive-b
   assert.ok(full.startsWith('<!-- claim-ledger: generated'));
   for (const rec of records) assert.ok(full.includes(rec.id), `missing ${rec.id}`);
   assert.match(full, /  - a literal bullet\n  continued text/);
-  const filtered = views.renderMemoryMd(state, world(), 'complete', { exclude: id => id === 'archived' });
+  const filtered = views.renderMemoryMd(state, world(), 'complete', { exclude: id => id === 'archived' || id === 'lesson' });
   assert.ok(filtered.includes('[c:lesson]'));
   assert.ok(filtered.includes('event-1'));
   assert.ok(!filtered.includes('[c:archived]'));
+  assert.equal(views.renderMemoryMd(state, world(), 'view', { exclude: id => id === 'lesson' }),
+    views.renderMemoryMd(state, world(), 'view'));
   const ids = [...full.matchAll(/\[c:([^\]\s]+)\]/g)].map(m => m[1]);
   assert.deepEqual(new Set(ids), new Set(['lesson', 'archived']));
 });

@@ -112,7 +112,6 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
   const renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn = (state, view, mode, options?: RenderMemoryMdOptions) => {
     const isExcluded = options?.exclude ?? (() => false);
     const selectedRecords = records.map((rec, index) => ({ rec, index }))
-      .filter(({ rec }) => !isExcluded(rec.id))
       .sort((a, b) => cmp(a.rec.at, b.rec.at) || cmp(a.rec.wt, b.rec.wt) || a.index - b.index)
       .map(({ rec }) => rec);
     const lines = [GENERATED_MEMORY_MARKER, `# Memory — ${state.agent}`];
@@ -120,14 +119,12 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       const working = buildWorkingSet(state, view, DEFAULT_WORKING_SET_BUDGET);
       lines.push('', '## How I work (standing lessons)');
       const includedIds = new Set(working.receipt.included.map(item => item.id));
-      for (const c of claims.filter(c => c.kind === 'lesson' && state.claims[c.id]?.status === 'live' && includedIds.has(c.id) && !isExcluded(c.id)).sort((a, b) => cmp(a.at, b.at) || cmp(a.id, b.id))) {
+      for (const c of claims.filter(c => c.kind === 'lesson' && state.claims[c.id]?.status === 'live' && includedIds.has(c.id)).sort((a, b) => cmp(a.at, b.at) || cmp(a.id, b.id))) {
         lines.push(claimLine(c, state.claims[c.id].status, view.flags[c.id] ?? []));
       }
-      const lessons = new Set(claims.filter(c => c.kind === 'lesson' && includedIds.has(c.id) && !isExcluded(c.id)).map(c => `[c:${c.id}]`));
-      const omittedIds = new Set(selectedRecords.map(rec => rec.id).filter(isExcluded));
+      const lessons = new Set(claims.filter(c => c.kind === 'lesson' && includedIds.has(c.id)).map(c => `[c:${c.id}]`));
       lines.push('', '## Working set', ...working.text.split('\n').slice(1)
-        .filter(line => ![...lessons].some(tag => line.includes(tag)))
-        .filter(line => ![...omittedIds].some(id => line.includes(`[c:${id}]`))));
+        .filter(line => ![...lessons].some(tag => line.includes(tag))));
     } else {
       lines.push('', '## How I work (standing lessons)');
       for (const rec of selectedRecords) {
@@ -138,6 +135,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       lines.push('', '## All claims (complete export)');
       for (const rec of selectedRecords) {
         if (rec.t === 'event') { lines.push(`<!-- event:${rec.id} ${rec.ev} -->`); continue; }
+        if (isExcluded(rec.id)) continue;
         const status = state.claims[rec.id]?.status ?? 'live';
         if (rec.kind === 'lesson' && status === 'live') continue;
         lines.push(claimLine(rec, status));
