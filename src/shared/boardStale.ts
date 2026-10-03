@@ -11,10 +11,11 @@
  */
 import { LIVENESS_REASON_OPERATOR_HOLD, type LivenessV1 } from './livenessV1';
 import { firstOccurrenceById } from './taskLedger';
+import { parseVersion } from './updateState';
 
 export type FlagKind =
   | 'ASSIGNEE_ARCHIVED' | 'ASSIGNEE_UNKNOWN' | 'ASSIGNEE_DOWN' | 'ASSIGNEE_STUCK'
-  | 'STALE' | 'DOING_MANY' | 'ASK_ANSWERED_IDLE';
+  | 'STALE' | 'DOING_MANY' | 'ASK_ANSWERED_IDLE' | 'SHIPPED_INSTALLED';
 
 export interface BoardFlag {
   cardId: string;
@@ -28,6 +29,8 @@ export interface BoardFlag {
   /** ASSIGNEE_ARCHIVED / DOWN: when the archive happened, if known (liveness archivedAt, or
    *  the registry's lastSeen, which setArchived stamps at the archive). */
   archivedAt?: number;
+  /** SHIPPED_INSTALLED: the card's fixVersion (the digest item's id carries it: once per version). */
+  fixVersion?: string;
 }
 
 export interface BoardStaleConfig {
@@ -62,6 +65,10 @@ export interface DetectStaleInput {
   fleet: ReadonlyMap<string, FleetFacts>;
   now: number;
   cfg?: Partial<BoardStaleConfig>;
+  /** READS-QUIET-NOREPLY (1.1.81): the version of the running app (main: app.getVersion(), the
+   *  version its app-start row records). Absent or unparseable = unknown: a card waiting for an
+   *  install keeps waiting. */
+  runningVersion?: string | null;
 }
 
 type Card = Record<string, unknown> & { id: string };
@@ -175,11 +182,38 @@ function answeredIdle(card: Card, now: number, cfg: BoardStaleConfig): BoardFlag
     evidence: `answered ${hours(now - latest)} ago, still blocked`, decision: true };
 }
 
+/**
+ * READS-QUIET-NOREPLY (1.1.81, god c95516): a card whose fix has shipped but is not installed yet
+ * carries `waitingFor: "install"` and `fixVersion: "1.1.80"`. While the running app is older (or
+ * its version unknown) the card is `waiting`: never STALE, since nobody can act on it. Once the
+ * running app reaches fixVersion it is `installed`: flagged SHIPPED_INSTALLED instead (verify and
+ * close). A card without both fields, or with a fixVersion that is not x.y.z, is an ordinary card.
+ */
+export function installWait(card: Record<string, unknown>, runningVersion: string | null | undefined): 'waiting' | 'installed' | null {
+  if (card.waitingFor !== 'install') return null;
+  const fix = typeof card.fixVersion === 'string' ? parseVersion(card.fixVersion) : null;
+  if (!fix) return null;
+  const run = typeof runningVersion === 'string' ? parseVersion(runningVersion) : null;
+  if (!run) return 'waiting';
+  for (let i = 0; i < 3; i++) if (run[i] !== fix[i]) return run[i] > fix[i] ? 'installed' : 'waiting';
+  return 'installed';
+}
+
+function installedFlag(card: Card, input: DetectStaleInput): BoardFlag {
+  const fixVersion = String(card.fixVersion).trim();
+  const meta = input.meta[card.id];
+  return { cardId: card.id, agentId: assigneeOf(card), kind: 'SHIPPED_INSTALLED', fixVersion,
+    since: meta?.lastEditAt ?? meta?.statusSince ?? input.now,
+    evidence: `fix ${fixVersion} is installed (running ${String(input.runningVersion)})`, decision: true };
+}
+
 export function detectStale(input: DetectStaleInput): BoardFlag[] {
   const cfg = { ...BOARD_STALE_DEFAULTS, ...(input.cfg ?? {}) };
   const flags: BoardFlag[] = [];
   const doingBy = new Map<string, Card[]>();
   for (const card of cards(input.tasks)) {
+    const wait = card.status === 'doing' || card.status === 'blocked' ? installWait(card, input.runningVersion) : null;
+    if (wait === 'installed') flags.push(installedFlag(card, input));
     if (card.status === 'blocked') {
       const f = answeredIdle(card, input.now, cfg);
       if (f) flags.push(f);
@@ -191,7 +225,8 @@ export function detectStale(input: DetectStaleInput): BoardFlag[] {
     const list = doingBy.get(agent);
     if (list) list.push(card); else doingBy.set(agent, [card]);
     const f = agentFlag(card, agent, input, cfg);
-    if (f) flags.push(f);
+    // A card waiting for (or just reaching) its install is never STALE: the wait is not idleness.
+    if (f && !(f.kind === 'STALE' && wait !== null)) flags.push(f);
   }
   for (const [agent, list] of doingBy) {
     if (list.length <= cfg.maxDoing) continue;

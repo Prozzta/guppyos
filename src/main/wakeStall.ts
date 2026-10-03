@@ -27,7 +27,10 @@ export const WAKE_STALL_AFTER_MS = 5 * 60_000;
  * rather than disappearing behind a silent hold.
  */
 const DELIBERATE = new Set([
-  'no-pending-ids', 'paused', 'halted', 'auto-delivery-paused', 'hitl-hold'
+  'no-pending-ids', 'paused', 'halted', 'auto-delivery-paused', 'hitl-hold',
+  // READS-QUIET-NOREPLY (1.1.81): only quiet mail waits, inside its bounded hold (the claim
+  // releases it when the hold ends): a decision, not a deadlock.
+  'quiet-held'
 ]);
 
 /** What the caller should do about this refusal. */

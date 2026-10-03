@@ -225,6 +225,10 @@ export interface WakeClaim {
    *  That nudge may still sit UNSENT in the composer, so the owner must see it absent from
    *  the prompt before typing this one (never double-typed). Absent = no such check. */
   recheck?: readonly string[];
+  /** READS-QUIET-NOREPLY (1.1.81): the held quiet ids this claim carries (a subset of `ids`), and
+   *  why: their hold ended (`max-delay`), or they ride a wake for other mail (`with-mail`).
+   *  Absent = the claim carries no held id. */
+  quietReleased?: { ids: readonly string[]; reason: 'max-delay' | 'with-mail' };
 }
 
 export type InterferenceHow = 'SEND_AGAIN' | 'ALREADY_HANDLED';
@@ -276,6 +280,10 @@ interface AgentWake {
   n1Reoffered: Set<string>;
   /** F4: ids whose re-announcement was unconfirmed too: attempt count and when to offer again. */
   retries: Map<string, { attempt: number; at: number }>;
+  /** READS-QUIET-NOREPLY (1.1.81): delivered ids that may wait for the agent's next real turn, each
+   *  with the time its hold ends (shared/mailWakeClass.ts). Never a claim on their own until one
+   *  hold ends; any claim carries them all (the hooks surface them in that turn anyway). */
+  quiet: Map<string, number>;
   /** See WakeClaim.recheck; carried until a claim that checked it COMMITS. */
   recheck: readonly string[] | null;
   /** AGY's last invocation hook was PreInvocation (a model call is running): a deferred
@@ -390,7 +398,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], orphanPostCompacts: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
         lastTrafficAt: 0, lastMainTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
@@ -473,7 +481,27 @@ export class WorkerWakeWatchdog {
   private known(r: AgentWake, id: string): boolean {
     // F4: an exhausted id waiting out its backoff is known too, or reconcile would re-pend it
     // on the very next beat and the backoff would be a tight loop.
-    return r.pending.has(id) || r.announced.has(id) || r.retries.has(id) || !!r.inFlight?.ids.includes(id) || !!r.held?.ids.includes(id);
+    return r.pending.has(id) || r.announced.has(id) || r.retries.has(id) || r.quiet.has(id) || !!r.inFlight?.ids.includes(id) || !!r.held?.ids.includes(id);
+  }
+
+  /**
+   * READS-QUIET-NOREPLY (1.1.81): move PENDING ids whose quiet hold is still running (`holds`: id
+   * -> when the hold ends, from shared/mailWakeClass.quietHolds) out of pending, so they never
+   * start a turn on their own. Only pending ids move: an announced, in-flight, held or retried id
+   * is already on its way. Returns the ids newly held.
+   */
+  hold(agentId: string, holds: ReadonlyMap<string, number>, now = Date.now()): string[] {
+    const r = this.agents.get(agentId);
+    if (!r || holds.size === 0) return [];
+    const out: string[] = [];
+    for (const id of [...r.pending].sort()) {
+      const until = holds.get(id);
+      if (until === undefined || !(until > now)) continue;
+      r.pending.delete(id);
+      r.quiet.set(id, until);
+      out.push(id);
+    }
+    return out;
   }
 
   /** Record a PTY spawn: its boot sequence is left alone, its lifecycle starts unknown, and a
@@ -980,6 +1008,8 @@ export class WorkerWakeWatchdog {
     for (const id of [...r.reannounced]) if (!keep.has(id)) r.reannounced.delete(id);
     for (const id of [...r.n1Reoffered]) if (!keep.has(id)) r.n1Reoffered.delete(id);
     for (const id of [...r.retries.keys()]) if (!keep.has(id)) r.retries.delete(id);
+    // A held quiet id that is no longer delivered was surfaced by a real turn's hook: done.
+    for (const id of [...r.quiet.keys()]) if (!current.has(id)) r.quiet.delete(id);
     if (r.held && !r.held.ids.some((id) => current.has(id))) r.held = null;
     for (const id of current) if (!this.known(r, id)) r.pending.add(id);
   }
@@ -999,7 +1029,9 @@ export class WorkerWakeWatchdog {
     const no = (why: string): null => { this.lastWhy.set(f.agentId, why); return null; };
     if (r.inFlight) return no('in-flight');
     if (r.held) return no('held-interfered');
-    if (r.pending.size === 0) return no('no-pending-ids');
+    // READS-QUIET-NOREPLY: held quiet mail alone never wakes until its oldest hold ends.
+    const quietDue = [...r.quiet.values()].some((until) => until <= now);
+    if (r.pending.size === 0 && !quietDue) return no(r.quiet.size > 0 ? 'quiet-held' : 'no-pending-ids');
     if (!f.ptyId) return no('no-pty');
     if (f.paused) return no('paused');
     if (f.halted) return no('halted');
@@ -1023,8 +1055,13 @@ export class WorkerWakeWatchdog {
       r.lastReconcileAttemptAt = now;
     }
     this.lastWhy.delete(f.agentId);
-    const ids = [...r.pending].sort();
+    // Any claim carries every held quiet id: one turn for the batch, and the hooks would surface
+    // them in that turn anyway.
+    const quietIds = [...r.quiet.keys()].sort();
+    const quietReason: 'max-delay' | 'with-mail' = r.pending.size === 0 ? 'max-delay' : 'with-mail';
+    const ids = [...new Set([...r.pending, ...quietIds])].sort();
     r.pending.clear();
+    r.quiet.clear();
     r.claimedAt = now;
     r.claimTurnSeen = false;
     r.claimTurnId = null;
@@ -1034,7 +1071,8 @@ export class WorkerWakeWatchdog {
     const requestId = inboxWakeClaimId(f.agentId, ids, this.nextGeneration(f.agentId, inboxWakeRequestId(f.agentId, ids)));
     const claim: WakeClaim = Object.freeze({
       agentId: f.agentId, requestId, ids: Object.freeze(ids), cause,
-      ...(r.recheck ? { recheck: r.recheck } : {})
+      ...(r.recheck ? { recheck: r.recheck } : {}),
+      ...(quietIds.length ? { quietReleased: Object.freeze({ ids: Object.freeze(quietIds), reason: quietReason }) } : {})
     });
     r.inFlight = claim;
     return claim;
@@ -1136,6 +1174,11 @@ export class WorkerWakeWatchdog {
       providerSession: r?.providerSession ?? null,
       provisional: r?.provisional ?? false
     };
+  }
+
+  /** READS-QUIET-NOREPLY: read-only, the held quiet ids and when each hold ends. */
+  quietHeld(agentId: string): Map<string, number> {
+    return new Map(this.agents.get(agentId)?.quiet ?? []);
   }
 
   /** Read-only: the open turn as the hooks named it, the active epoch (FALSEACTIVE-STALL-2), and

@@ -39,6 +39,8 @@ export interface BoardMonitorOptions {
    *  fleet.json records are used: the top-level liveness[] first, then agents[].liveness. */
   getLiveness?: (agentId: string) => LivenessV1 | undefined;
   cfg?: () => Partial<BoardStaleConfig>;
+  /** READS-QUIET-NOREPLY (1.1.81): the running app's version (waitingFor:"install" cards). */
+  runningVersion?: () => string | null;
   now?: () => number;
   onFlags?: (flags: BoardFlag[]) => void;
 }
@@ -105,7 +107,7 @@ export class BoardMonitor {
       }
     }
     for (const [id, rec] of [...lv]) if (rec === undefined) lv.delete(id);
-    const flags = detectStale({ tasks, meta: hive.ledgerGuard.taskMeta().cards, registry, liveness: lv, fleet, now, cfg: this.opts.cfg?.() });
+    const flags = detectStale({ tasks, meta: hive.ledgerGuard.taskMeta().cards, registry, liveness: lv, fleet, now, cfg: this.opts.cfg?.(), runningVersion: this.opts.runningVersion?.() ?? null });
     return { flags, tasks };
   }
 

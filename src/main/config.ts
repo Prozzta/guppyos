@@ -325,6 +325,11 @@ export interface HarnessConfig {
    *  unreviewed (with a visible warning); anywhere else such a folder refuses the spawn. Keys are
    *  resolved paths, ASCII-lowercased on Windows. */
   codexLayerOptIns?: string[];
+  /** READS-QUIET-NOREPLY (1.1.81): minutes an idle agent's quiet mail (an inform/agree that needs no
+   *  reply, not from the Human, the breaker, the digest or the harness) may wait for its next real
+   *  turn before one wake carries it (shared/mailWakeClass.ts). Unset = 30; 0 = off (every
+   *  delivery wakes, as before 1.1.81). */
+  quietMailHoldMin?: number;
   /** Passed to every spawned agent as `--max-turns <n>` when set; unset = no cap
    *  (Claude Code's default). A coarse runaway guard independent of the breaker. */
   maxTurns?: number;

@@ -93,9 +93,10 @@ test('G1 (Jim P10): the ONE operator action that can lead to a turn is gated in 
   assert.equal([...INDEX.matchAll(/onOperatorReoffer\(/g)].length, 1, 'nothing else in main re-offers');
 });
 
-test('G3 (Jim P11): refusal evidence is recorded only while mail waits (and never for no-pending-ids)', () => {
+test('G3 (Jim P11): refusal evidence is recorded only while mail waits (and never for no-pending-ids or quiet-held)', () => {
   const fn = between(INDEX, 'function noteWakeRefusal(agentId: string, why: string, inboxIds: number): void {', '\n}\n');
-  assert.match(fn, /if \(inboxIds > 0 && why !== 'no-pending-ids'\) \{\n\s+const run = wakeStalls\.watchingFor\(agentId\);\n\s+agentLiveness\.noteWakeRefusal\(agentId, Date\.now\(\), run\?\.since\);/);
+  // READS-QUIET-NOREPLY (1.1.81): held quiet mail is a decision, not a refusal (its hold is bounded).
+  assert.match(fn, /if \(inboxIds > 0 && why !== 'no-pending-ids' && why !== 'quiet-held'\) \{\n\s+const run = wakeStalls\.watchingFor\(agentId\);\n\s+agentLiveness\.noteWakeRefusal\(agentId, Date\.now\(\), run\?\.since\);/);
   assert.equal([...fn.matchAll(/agentLiveness\.noteWakeRefusal\(/g)].length, 1, 'one call, inside the guard');
 });
 

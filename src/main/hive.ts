@@ -59,6 +59,7 @@ import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { rosterActivity } from '../shared/activityView';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
+import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
 import { TaskLedgerGuard, type TaskEditSource } from './taskLedgerGuard';
@@ -117,6 +118,10 @@ export interface HiveMessage {
    *  sender-supplied id: the sender's original value. in_reply_to / supersedes resolve against
    *  either value. */
   sender_id?: string;
+  /** READS-QUIET-NOREPLY (1.1.81): "now" = wake the recipient at once even for an inform/agree
+   *  that would otherwise wait for its next turn (shared/mailWakeClass.ts). Any other value is
+   *  dropped. */
+  wake?: 'now';
 }
 
 /** A sender's `supersedes` (a string or an array), bounded: up to 10 non-empty ids of at most
@@ -2372,7 +2377,7 @@ export class HiveManager {
       : '';
     const godLine = meta.isGod
       ? 'You are the GOD / ORCHESTRATOR of this hive — your job is to ORCHESTRATE, not to implement: maintain live situational awareness and delegate the work. (1) AWARENESS — always know what is going on: keep an accurate picture of every agent (active vs archived/idle), the task board, and all in-flight work; handle the mail delivered to you and triage every other agent\'s requests, answering clarifications so the team runs autonomously. (2) DELEGATE — decompose work and fan it out to the hive agents via their inboxes (route messages and assign owners; do not do their jobs); do NOT take on grunt implementation yourself. Stay aware of who is already on the floor and delegate OPPORTUNISTICALLY: BEFORE you spawn anything, CHECK THE LIVE ROSTER (active agents in registry.json + their state in fleet.json) and prefer routing to an EXISTING agent that fits — above all when the request names one ("ask Pam to…", "have Jim…"), route to that agent instead of reflexively creating a new one. Reuse an idle or already-running agent whose role matches; only spawn a fresh agent when no existing one is a sensible fit, and say that you checked. One capable owner beats a duplicate. (3) OWN ONLY THE IMPORTANT, high-leverage things — task decomposition, dispatch decisions, sign-offs, conflict resolution, branch integration, and final QA — and remain the sole scribe of board.md. You are otherwise fully autonomous — there is NO separate approval queue. For the genuinely critical (destructive actions, spending real money, scope changes, unresolvable conflicts), ask the human directly in your own session and let the tool-permission prompt gate the action; the human approves natively, including remotely from their phone via /remote-control. Keep the team unblocked. When you DISPATCH a task, write it as a 4-part contract so the agent can run autonomously: (1) OBJECTIVE — the concrete goal; (2) OUTPUT — the expected deliverable/format; (3) TOOLS — what to use or avoid, and any references to read instead of re-deriving; (4) BOUNDARIES — scope limits + the definition of done. Pass references (file paths, message ids, board sections), not pasted content — keep dispatches short.'
-        + ` The harness keeps ${inRoot('board-status.md')} and ${inRoot('floor-digest.md')} current (in-flight work and its age, blocked and ask-me cards, stale and archived-assignee flags, the roster) and wakes you with a "Floor: N decision(s)" message only when it needs a decision: act on those, and do not poll for stalled agents. For detail read ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). The harness stamps each card's status age itself (state/task-meta.json), moves a doing card back to todo when its assignee is explicitly archived (assignee kept, a line in its notes), reminds you once of a blocked card whose human answer is waiting (set "parked": true on a card you are deliberately holding), and refuses an API write that would add a duplicate id; you keep board.md's narrative and the cards' content accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
+        + ` The harness keeps ${inRoot('board-status.md')} and ${inRoot('floor-digest.md')} current (in-flight work and its age, blocked and ask-me cards, stale and archived-assignee flags, the roster) and wakes you with a "Floor: N decision(s)" message only when it needs a decision: act on those, and do not poll for stalled agents. For detail read ${inRoot('fleet.json')} (live per-agent tokens, cost, status, last tool, breaker level, inbox backlog) and ${inRoot('registry.json')} — note that running 'claude agents' will NOT list your hive's sibling agents. A full Claude Code command reference is at ${inRoot('COMMANDS.md')} (slash commands act ONLY on your own session; CLI commands run in your shell and can target the fleet). The harness stamps each card's status age itself (state/task-meta.json), moves a doing card back to todo when its assignee is explicitly archived (assignee kept, a line in its notes), reminds you once of a blocked card whose human answer is waiting (set "parked": true on a card you are deliberately holding; on a card whose fix has shipped but is not installed yet, set "waitingFor": "install" and "fixVersion": "<x.y.z>": it is never flagged stale while it waits, and the digest tells you once when that version is running, so you can verify and close it), and refuses an API write that would add a duplicate id; you keep board.md's narrative and the cards' content accurate. In tasks.json, ALWAYS set each task's "assignee" to the worker's agent id the moment you dispatch it, and NEVER clear it on status changes — a done card must still say who did the work (the human reads the board by who-did-what). HUMAN FEEDBACK is first-class in the ledger: when a task can only proceed with the human's input — a QUESTION to answer OR an ACTION only the human can perform (create an account, approve a purchase, provide credentials/screenshots, test on their device) — set its status to "blocked" and append the concrete ask to the card's "humanQA" array (push {"q":"...","askedAt":"<iso>"}; write q as a short first-line headline, then a body with blank-line paragraphs and "- " bullets (markdown: **bold**, inline code, https links); when the human should pick between concrete choices add "options":[{"label":"...","detail":"..."}] (plus optional "recommended":<index> and "multi":true) — the ASK ME card shows them as buttons and still accepts a free-text note; phrase actions as clear to-dos; keep every past entry — the history documents the card's decisions). The harness surfaces open questions on the office floor's ASK ME board; the human's answer lands in the same entry ("a") AND arrives as a hive message to you — act on it and unblock the card so work continues. Do NOT park human questions in separate files (no HumanQuestion.md) and never sit waiting on the human in your own session. Steward the token budget.`
       : meta.isAssistant
       ? 'You are Michael\'s PREP ASSISTANT. You will be handed short, possibly vague instructions (each begins with "ENRICH TASK:"). For each one: (1) figure out which project it concerns and cd into the most relevant repo — you start in Michael\'s home directory; (2) gather concrete context READ-ONLY (exact file paths, current state, relevant code, conventions, active branch, gotchas) — NEVER modify, create, or delete files; (3) rewrite the instruction into ONE clear, self-contained prompt that Michael can execute autonomously, preserving the user\'s original intent without inventing scope. Then deliver it: write ONE message JSON into your outbox with "to":"god", "act":"request", a short subject, and the finished prompt as the body. Do NOT perform the task yourself — your only output is the improved prompt sent to Michael.'
       : 'For anything ambiguous, cross-cutting, or needing sign-off, address a message to "god".';
@@ -2431,7 +2436,8 @@ export class HiveManager {
       requires_reply: partial.requires_reply ?? ['request', 'query', 'propose'].includes(act),
       needs_human: partial.needs_human ?? false,
       created_at: partial.created_at ?? new Date().toISOString(),
-      ...normalizeSupersedes(partial.supersedes)
+      ...normalizeSupersedes(partial.supersedes),
+      ...normalizeWakeField(partial.wake)
     };
   }
 
@@ -4884,7 +4890,8 @@ Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
   "body": "the details",
   "conversation": "carry this across a thread (optional)",
   "in_reply_to": "<message id you're replying to> (optional)",
-  "supersedes": ["<id of an earlier message this one cancels or corrects>"] (optional)
+  "supersedes": ["<id of an earlier message this one cancels or corrects>"] (optional),
+  "wake": "now" (optional: an inform or agree that must be read at once)
 }
 \`\`\`
 
@@ -4896,6 +4903,10 @@ unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes th
 ## Rules of the road
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
+- An \`inform\` or \`agree\` that needs no reply does not wake an idle recipient: it reaches the
+  recipient with its next turn, or within 30 minutes at most. Send a result (a verdict, "merged",
+  "passed") as \`done\`, which wakes at once, and add \`"wake": "now"\` to an \`inform\` that must be
+  read at once. Mail from the human, the floor digest and the harness always wakes.
 - For anything ambiguous, cross-cutting, or needing sign-off, message \`god\` — the
   god agent clarifies answers for you so you rarely need the human directly.
 - There is NO separate human-approval queue. Human-in-the-loop is native to Claude
