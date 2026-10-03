@@ -3,9 +3,12 @@ productName: Guppy
 # REBRAND-GUPPY (1.1.82, the Human 2026-10-03): the app and its exe are Guppy. Kept on purpose, so a
 # 1.1.81 install upgrades in place: appId (the NSIS GUID derives from it: same install entry, same
 # folder, same AUMID), package.json "name" (only the default userData; the app now uses
-# <appData>/Guppy, src/main/userDataMigration.ts), the munderdifflin:// scheme and, in 1.1.82, the
-# Munder-Difflin-* artifact names (1.1.81 builds its manual-download link from them). The shortcuts
+# <appData>/Guppy, src/main/userDataMigration.ts) and the munderdifflin:// scheme. The shortcuts
 # and taskbar pins are re-aimed at Guppy.exe on update: build/installer.nsh.
+# REBRAND-ARTIFACT-NAMES (1.1.83): the release files are Guppy-*. 1.1.81 (and older) build their
+# manual-download link from fixed Munder-Difflin-* names, so afterAllArtifactBuild also writes a
+# byte-identical Munder-Difflin-* copy of each file such a link names (build/legacyArtifactNames.cjs);
+# the release uploads it, and tools/check-release-links.cjs --live requires it.
 executableName: Guppy
 copyright: Copyright © 2026 Chaitanya Giri
 
@@ -29,6 +32,8 @@ afterSign: build/notarize.cjs
 # `files` list: a platform-level `files` REPLACES the top-level list (measured: it packed docs/,
 # blog/ and the model twice into app.asar).
 afterPack: build/afterPack-memory-prune.cjs
+# REBRAND-ARTIFACT-NAMES: the Munder-Difflin-* copies 1.1.81 links to (see the header).
+afterAllArtifactBuild: build/legacyArtifactNames.cjs
 
 # Register the munderdifflin:// URL scheme (shareable-hires deep link) in the
 # packaged app: CFBundleURLTypes on macOS, registry entries via NSIS on Windows.
@@ -148,7 +153,7 @@ mac:
       arch: [universal]
     - target: zip
       arch: [universal]
-  artifactName: Munder-Difflin-${version}-mac-${arch}.${ext}
+  artifactName: Guppy-${version}-mac-${arch}.${ext}
 
 dmg:
   title: Guppy ${version}
@@ -166,13 +171,13 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  artifactName: Munder-Difflin-${version}-win-x64-setup.exe
+  artifactName: Guppy-${version}-win-x64-setup.exe
   shortcutName: Guppy
   # Re-aims taskbar pins (and renamed shortcut copies) from the old exe to Guppy.exe on update.
   include: build/installer.nsh
 
 portable:
-  artifactName: Munder-Difflin-${version}-win-x64-portable.exe
+  artifactName: Guppy-${version}-win-x64-portable.exe
 
 # ---- Linux ----
 linux:
@@ -181,4 +186,4 @@ linux:
   target:
     - target: AppImage
       arch: [x64]
-  artifactName: Munder-Difflin-${version}-linux-x86_64.AppImage
+  artifactName: Guppy-${version}-linux-x86_64.AppImage

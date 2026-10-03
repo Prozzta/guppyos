@@ -202,7 +202,7 @@ test('migration wiring (index.ts): before the single-instance lock and the crash
 
 // ── 2. the build identity ────────────────────────────────────────────────────
 
-test('electron-builder.yml: Guppy name + exe; appId, scheme and 1.1.82 artifact names kept; no nsis.guid', () => {
+test('electron-builder.yml: Guppy name + exe; appId and scheme kept; Guppy-* artifact names from 1.1.83; no nsis.guid', () => {
   const y = read('electron-builder.yml');
   assert.match(y, /^appId: in\.munderdiffl\.app$/m);
   assert.match(y, /^productName: Guppy$/m);
@@ -211,10 +211,13 @@ test('electron-builder.yml: Guppy name + exe; appId, scheme and 1.1.82 artifact 
   assert.match(y, /^ {2}include: build\/installer\.nsh$/m);
   assert.doesNotMatch(y, /^\s*guid:/m, 'the NSIS GUID must keep deriving from appId');
   assert.match(y, /schemes:\n\s+- munderdifflin\n/);
-  for (const a of ['Munder-Difflin-${version}-mac-${arch}.${ext}', 'Munder-Difflin-${version}-win-x64-setup.exe',
-    'Munder-Difflin-${version}-win-x64-portable.exe', 'Munder-Difflin-${version}-linux-x86_64.AppImage']) {
+  // REBRAND-ARTIFACT-NAMES (1.1.83): Guppy-*; the Munder-Difflin-* copies 1.1.81 links to come from
+  // afterAllArtifactBuild (test/rebrand-artifact-names-183).
+  for (const a of ['Guppy-${version}-mac-${arch}.${ext}', 'Guppy-${version}-win-x64-setup.exe',
+    'Guppy-${version}-win-x64-portable.exe', 'Guppy-${version}-linux-x86_64.AppImage']) {
     assert.ok(y.includes(`artifactName: ${a}`), a);
   }
+  assert.doesNotMatch(y, /artifactName: Munder-Difflin/);
   assert.doesNotMatch(y.replace(/^#.*$/gm, '').replace(/artifactName: .*$/gm, ''), /Munder Difflin/, 'no user-visible old name left in the builder config');
   assert.equal(JSON.parse(read('package.json')).name, 'munder-difflin', 'package name kept (Electron\'s default userData, the migration source)');
 });
@@ -352,9 +355,13 @@ test('installerUrl: Munder-Difflin-* up to 1.1.82, Guppy-* from 1.1.83', () => {
 });
 
 test('check-release-links: Prozzta/guppyos, and electron-builder.yml makes the names the app links to', () => {
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'check-release-links.cjs')], { encoding: 'utf8', windowsHide: true });
+  // REBRAND-ARTIFACT-NAMES: the Guppy-* names are right for 1.1.83 (this branch precedes the bump)
+  // and refused for 1.1.82, whose app links to Munder-Difflin-*.
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'check-release-links.cjs'), '--version', '1.1.83'], { encoding: 'utf8', windowsHide: true });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /Prozzta\/guppyos/);
+  const old = spawnSync(process.execPath, [path.join(ROOT, 'tools', 'check-release-links.cjs'), '--version', '1.1.82'], { encoding: 'utf8', windowsHide: true });
+  assert.equal(old.status, 1, old.stdout + old.stderr);
   const src = read('tools/check-release-links.cjs');
   assert.doesNotMatch(src.replace(/^\s*\*.*$/gm, ''), /chaitanyagiri/, 'no upstream repository in the code');
   const links = require('../tools/check-release-links.cjs');

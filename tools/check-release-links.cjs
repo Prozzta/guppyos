@@ -26,7 +26,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
-const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
+// `--version x.y.z` checks the names as they would be at that version (a fix branch made before the
+// bump); the release gate runs without it, at package.json's version.
+const vArg = process.argv.indexOf('--version');
+const version = vArg > 0 && /^\d+\.\d+\.\d+$/.test(process.argv[vArg + 1] || '')
+  ? process.argv[vArg + 1]
+  : JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 const builderYml = fs.readFileSync(path.join(root, 'electron-builder.yml'), 'utf8');
 const updateState = fs.readFileSync(path.join(root, 'src', 'shared', 'updateState.ts'), 'utf8');
 
@@ -67,10 +72,34 @@ for (const [what, [got, expected]] of Object.entries(want)) {
   if (got !== null && got !== expected) problems.push(`${what}: electron-builder.yml makes ${got}, the app links to ${expected}`);
 }
 
+/** REBRAND-ARTIFACT-NAMES (1.1.83): the names 1.1.81 and older link to, whatever the version
+ *  (their installerUrl, restated). From the first Guppy-* release on, the build must also write
+ *  these as copies (build/legacyArtifactNames.cjs, run as afterAllArtifactBuild). */
+const legacy = {
+  'win setup': `Munder-Difflin-${version}-win-x64-setup.exe`,
+  'mac dmg (universal)': `Munder-Difflin-${version}-mac-universal.dmg`,
+  'linux AppImage': `Munder-Difflin-${version}-linux-x86_64.AppImage`
+};
+if (p === 'Guppy') {
+  const hookM = /^afterAllArtifactBuild: (\S+)\s*$/m.exec(builderYml);
+  if (!hookM) problems.push('electron-builder.yml has no afterAllArtifactBuild: the Munder-Difflin-* copies 1.1.81 links to would not be built');
+  else {
+    let hook = null;
+    try { hook = require(path.join(root, hookM[1])); } catch (e) { problems.push(`afterAllArtifactBuild ${hookM[1]}: cannot load: ${e.message}`); }
+    if (hook && typeof hook.legacyName === 'function') {
+      for (const [what, name] of Object.entries(legacy)) {
+        const built = want[what][0];
+        const copy = built ? hook.legacyName(built) : null;
+        if (copy !== name) problems.push(`${what}: the build copies ${built} to ${copy}, 1.1.81 links to ${name}`);
+      }
+    } else if (hook) problems.push(`afterAllArtifactBuild ${hookM[1]}: no legacyName()`);
+  }
+}
+
 async function checkLive() {
   const setup = want['win setup'][1];
   const urls = [
-    ...[setup, `${setup}.blockmap`, 'latest.yml', want['win portable'][1]]
+    ...[setup, `${setup}.blockmap`, 'latest.yml', want['win portable'][1], ...(p === 'Guppy' ? [legacy['win setup']] : [])]
       .map((name) => `https://github.com/${REPO}/releases/download/v${version}/${name}`),
     `https://github.com/${REPO}/releases/latest/download/latest.yml`
   ];
@@ -88,7 +117,7 @@ async function checkLive() {
   }
 }
 
-module.exports = { prefixFor, artifact, want, problems, REPO };
+module.exports = { prefixFor, artifact, want, legacy, problems, REPO };
 
 if (require.main === module) {
   (async () => {
