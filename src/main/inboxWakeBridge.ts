@@ -51,6 +51,10 @@ export interface InboxWakeMail {
   degrade(agentId: string, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): boolean;
   /** One durable hive log row (main: hive.appendLog). Optional: absent, nothing is logged. */
   log?(row: Record<string, unknown>): void;
+  /** READS-QUIET-NOREPLY (1.1.81): of these pending ids, the quiet ones that may still wait at
+   *  `now`, each with the time its hold ends (main: shared/mailWakeClass.quietHolds over the
+   *  ledger). Optional: absent, or a throw, holds nothing (every id wakes, as before). */
+  quietUntil?(agentId: string, ids: readonly string[], now: number): ReadonlyMap<string, number>;
 }
 
 /** §11.10: per agent, the wake-by-wake evidence that the mail channel works. */
@@ -146,6 +150,7 @@ export class InboxWakeBridge {
     if (!readIds) coordinator.reconcile(agentId, ids, this.openIds(agentId));
     const f = this.deps.facts(agentId);
     const now = this.deps.now();
+    this.holdQuiet(agentId, now);
     this.deps.diag?.('facts', {
       agentId, cause, mode,
       inboxIds: ids.length,
@@ -162,6 +167,9 @@ export class InboxWakeBridge {
       return null;
     }
     this.deps.diag?.('claim', { agentId, cause, mode, ids: claim.ids.length, requestId: claim.requestId });
+    if (claim.quietReleased) {
+      this.deps.diag?.('hold-released', { agentId, reason: claim.quietReleased.reason, ids: claim.quietReleased.ids.length, idList: claim.quietReleased.ids, requestId: claim.requestId });
+    }
     this.deps.log?.(`[inbox-wake] claim ${agentId} cause=${cause} mode=${mode} ids=${claim.ids.length}`);
     let submitted: Promise<{ kind: string }>;
     try {
@@ -197,6 +205,25 @@ export class InboxWakeBridge {
         this.deps.log?.(`[inbox-wake] ${kind === 'COMMITTED' ? 'commit' : 'release'} ${agentId} cause=${cause} outcome=${kind}`);
       });
     return claim;
+  }
+
+  /**
+   * READS-QUIET-NOREPLY (1.1.81): before every claim, the pending ids that are quiet mail still
+   * inside their hold leave pending (WorkerWakeWatchdog.hold), so they cannot start a turn on their
+   * own; the claim releases them when the oldest hold ends or when other mail wakes the agent.
+   * Fails open: no ledger answer = no hold.
+   */
+  private holdQuiet(agentId: string, now: number): void {
+    const quietUntil = this.deps.mail?.quietUntil;
+    if (!quietUntil) return;
+    const pending = this.deps.coordinator.state(agentId).pending;
+    if (!pending.length) return;
+    let holds: ReadonlyMap<string, number>;
+    try { holds = quietUntil(agentId, pending, now); } catch { return; }
+    const held = this.deps.coordinator.hold(agentId, holds, now);
+    if (held.length) {
+      this.deps.diag?.('held', { agentId, ids: held.length, idList: held, until: Math.min(...held.map((id) => holds.get(id) ?? now)) });
+    }
   }
 
   /** Hive delivery observer: a durable inbox write landed. */

@@ -100,6 +100,8 @@ export interface MailMessageLike {
   supersedes?: string[];
   requires_reply?: boolean;
   sender_id?: string;
+  /** READS-QUIET-NOREPLY (1.1.81): the sender's `"wake": "now"`. */
+  wake?: unknown;
 }
 
 export interface MailEntry {
@@ -113,6 +115,9 @@ export interface MailEntry {
   conversation?: string;
   inReplyTo?: string | null;
   supersedes?: string[];
+  /** READS-QUIET-NOREPLY (1.1.81): the sender asked for `"wake": "now"`, so this entry wakes even
+   *  when shared/mailWakeClass.ts would let it wait for the next turn. Absent = not asked. */
+  wakeNow?: boolean;
   /** sha256 of the body; null for a work order confirmed after a restart (Q14: body unknown). */
   bodyHash: string | null;
   /** The §4.1 duplicate key, hash(subject + body) (§11.18 #3). Null when the body is unknown. */
@@ -269,6 +274,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     ...(typeof msg.conversation === 'string' ? { conversation: msg.conversation } : {}),
     inReplyTo: typeof msg.in_reply_to === 'string' ? msg.in_reply_to : null,
     ...(Array.isArray(msg.supersedes) && msg.supersedes.length ? { supersedes: msg.supersedes.filter((s) => typeof s === 'string').slice(0, 10) } : {}),
+    ...(msg.wake === 'now' ? { wakeNow: true } : {}),
     bodyHash: mailBodyHash(msg.body ?? ''),
     contentHash: mailContentHash(msg.subject ?? '', msg.body ?? ''),
     via,
@@ -832,7 +838,8 @@ function diskEntryMessage(f: DiskMessage): MailMessageLike {
     in_reply_to: typeof m.in_reply_to === 'string' ? m.in_reply_to : null,
     supersedes: Array.isArray(m.supersedes) ? m.supersedes : undefined,
     requires_reply: typeof m.requires_reply === 'boolean' ? m.requires_reply : undefined,
-    sender_id: typeof m.sender_id === 'string' ? m.sender_id : undefined
+    sender_id: typeof m.sender_id === 'string' ? m.sender_id : undefined,
+    wake: m.wake
   };
 }
 

@@ -135,6 +135,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
+import { answersOwnAsk, quietHolds, quietMailHoldMs } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
@@ -433,6 +434,9 @@ const boardMonitor = new BoardMonitor({
   // agentLiveness is declared below; this runs only when the monitor ticks, after start.
   getLiveness: (id) => agentLiveness.getLiveness(id),
   cfg: () => readConfig().floorDigest ?? {},
+  // READS-QUIET-NOREPLY: a waitingFor:"install" card waits until THIS build reaches its fixVersion
+  // (the version this process's app-start row records).
+  runningVersion: () => app.getVersion(),
   // A flag appeared or cleared: re-render board-status.md and re-run the digest (which wakes
   // god only for a NEW decision item, batched).
   onFlags: () => {
@@ -651,11 +655,23 @@ function noteBootHook(agentId: string | undefined, event: string | undefined): v
   } catch { /* observation only */ }
 }
 
+/** READS-QUIET-NOREPLY: config.quietMailHoldMin as ms, re-read at most once a minute (the wake
+ *  path asks on every claim attempt; readConfig reads the file). */
+let quietHoldMemo: { ms: number; at: number } | null = null;
+function quietHoldMsCached(now: number): number {
+  if (!quietHoldMemo || now - quietHoldMemo.at >= 60_000) {
+    let min: unknown;
+    try { min = readConfig().quietMailHoldMin; } catch { min = undefined; }
+    quietHoldMemo = { ms: quietMailHoldMs(min), at: now };
+  }
+  return quietHoldMemo.ms;
+}
+
 /** Fold one refusal into the stall watch and say so, once, if it is a deadlock. */
 function noteWakeRefusal(agentId: string, why: string, inboxIds: number): void {
   const stall = wakeStalls.note(agentId, why, inboxIds, Date.now());
   // ZERO-TOKEN-LIVENESS: refusal evidence (when mail waits), and the run the stall watch is timing.
-  if (inboxIds > 0 && why !== 'no-pending-ids') {
+  if (inboxIds > 0 && why !== 'no-pending-ids' && why !== 'quiet-held') {
     const run = wakeStalls.watchingFor(agentId);
     agentLiveness.noteWakeRefusal(agentId, Date.now(), run?.since);
     if (!run) agentLiveness.clearWakeRefusal(agentId);
@@ -924,7 +940,22 @@ inboxWake = new InboxWakeBridge({
     // sentinel), so its alert says to respawn it.
     degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),
     // §11.18 #41 (Q38): the `mail-repend` row of a turn end whose start was never confirmed.
-    log: (row) => hive.appendLog(row)
+    log: (row) => hive.appendLog(row),
+    // READS-QUIET-NOREPLY (1.1.81): quiet mail waits for the next real turn, at most
+    // quietMailHoldMin (default 30 min) from delivery; the classifier is shared/mailWakeClass.ts.
+    quietUntil: (agentId, ids, now) => {
+      const holdMs = quietHoldMsCached(now);
+      if (!(holdMs > 0)) return new Map();
+      const entries = hive.mail.ledger(agentId).entries;
+      // Jim B1: an answer to this agent's own ask wakes it. The original sits in the ledger of
+      // the agent that received it (the one answering now), under its id or its sender_id alias.
+      const lookup = (holder: string, id: string) => {
+        const es = hive.mail.ledger(holder).entries;
+        return es[id] ?? Object.values(es).find((x) => x.senderId === id);
+      };
+      return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
+        (e) => answersOwnAsk(e, agentId, lookup));
+    }
   },
   facts: (agentId) => {
     const ptyId = ptyForAgent(agentId);

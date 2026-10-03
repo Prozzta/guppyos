@@ -84,13 +84,16 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
     // latest answer's time), so an old answer wakes god once, and "parked": true silences it.
     const id = f.kind === 'STALE' ? `stale:${f.cardId}:${day(now)}`
       : f.kind === 'ASK_ANSWERED_IDLE' ? `ask_answered_idle:${f.cardId}:${f.since}`
-        : `${f.kind.toLowerCase()}:${f.cardId}`;
+        // READS-QUIET-NOREPLY: once per fix version (a new fixVersion is a new decision).
+        : f.kind === 'SHIPPED_INSTALLED' ? `shipped_installed:${f.cardId}:${f.fixVersion ?? ''}`
+          : `${f.kind.toLowerCase()}:${f.cardId}`;
     const ask: Record<string, string> = {
       STALE: 'still doing?',
       ASSIGNEE_UNKNOWN: 'reassign?',
       ASSIGNEE_DOWN: 'restart the agent or reassign?',
       ASSIGNEE_STUCK: 'unstick the agent or reassign?',
-      ASK_ANSWERED_IDLE: 'answered: act on it and unblock'
+      ASK_ANSWERED_IDLE: 'answered: act on it and unblock',
+      SHIPPED_INSTALLED: 'installed: verify the fix and close the card?'
     };
     items.push({ id, cardId: f.cardId, line: `${f.cardId}: ${f.evidence} - ${ask[f.kind] ?? 'decide'}` });
   }
