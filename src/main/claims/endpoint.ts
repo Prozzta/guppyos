@@ -26,6 +26,8 @@ export interface ClaimsEndpointDeps {
   store: ClaimStore;
   /** The agent's effective level (claims.ts effectiveLevel over settings, manifest and the build). */
   level: (agentId: string) => LedgerLevel;
+  /** Main-only notification after an acknowledged owner reconciliation answer. */
+  onReconcile?: (agentId: string, a: string, b: string) => void;
 }
 
 function usage(error: string): ClaimReply { return { ok: false, exit: EXIT.usage, error }; }
@@ -124,7 +126,9 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       if (!r.ok) return done(r, '');
     }
     // targets = [loser, winner] (W2's contract, god 2f8991): `A B --answer supersedes` means A wins.
-    return done(await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [bb, a], answer }, origin), 'answered');
+    const result = await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [bb, a], answer }, origin);
+    if (result.ok) d.onReconcile?.(agentId, a, bb);
+    return done(result, 'answered');
   }
 
   // used

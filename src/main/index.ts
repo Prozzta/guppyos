@@ -9,6 +9,7 @@ import { derive as deriveClaims } from './claims/derive';
 import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
+import { enqueueR5AfterIndex, reconcileQueueForHive } from './claims/reconcile';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
@@ -1276,7 +1277,19 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
-        onAppend: (agentId) => claimsIndexSync()?.schedule(agentId),
+        onAppend: (agentId, id, rec) => {
+          if (rec.t !== 'claim' || rec.source === 'legacy' || rec.legacy) { claimsIndexSync()?.schedule(agentId); return; }
+          const root = hive.root(); if (!root) return;
+          void enqueueR5AfterIndex(agentId, id, {
+            syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),
+            candidates: async (a, claimId, tau2) => {
+              const r = await nativeMemory.r5Candidates(a, claimId, tau2);
+              return r.ok && Array.isArray(r.json) ? (r.json as Array<{ b: string; cosine: number }>).map((p) => ({ a: claimId, b: p.b, cosine: p.cosine, tau2 })) : [];
+            },
+            enqueue: (a, pairs) => reconcileQueueForHive(root).enqueueR5(a, pairs),
+            log: (row) => hive.appendLog(row),
+          });
+        },
         alert: (row) => {
           const what = row.kind === CLAIMS_ALERT_KEY_MISSING
             ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'

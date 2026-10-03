@@ -2,6 +2,7 @@ import type {
   BuildWorkingSetFn, ClaimRec, ClaimsState, LedgerRec, Receipt, ReconcileItem,
   RenderExportLineFn, RenderMemoryMdFn, WorldView,
 } from '../../shared/claims';
+import { reconcilePromptText } from './reconcile';
 import { GENERATED_MEMORY_MARKER } from './generated';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
@@ -71,7 +72,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     // T1 contains warning/reconcile markers only, not claim text.
     const markers = [
       ...Object.keys(view.flags).filter(id => view.flags[id].length).sort(cmp).map(id => `⚠ ${id}: ${view.flags[id].join(', ')}`),
-      ...reconcileItems.map(item => `⚠ reconcile ${item.itemId}: ${item.text}`),
+      ...reconcileItems.map(reconcilePromptText),
     ];
     let markersIncluded = 0;
     for (const marker of markers) if (add(marker, 1)) markersIncluded++;

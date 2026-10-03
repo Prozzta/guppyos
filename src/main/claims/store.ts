@@ -80,7 +80,7 @@ export interface ClaimStoreDeps {
   /** How long an idle append handle stays open (default FD_IDLE_MS). */
   fdIdleMs?: number;
   /** CLAIM-LEDGER W3: told after every acked append (main schedules the index sync). */
-  onAppend?: (agentId: string, id: string) => void;
+  onAppend?: (agentId: string, id: string, rec: LedgerRec) => void;
   /** CLAIMS-HEAD-ANCHOR: each agent's ledger head, kept by main in user-data (keyProvider.ts). */
   headAnchor?: HeadAnchorStore;
   /** How soon after an append the anchor is written (default ANCHOR_DELAY_MS). */
@@ -497,7 +497,11 @@ export class ClaimStore {
       let s: AgentState;
       try { s = this.current(agentId); } catch { return { ok: false, error: 'the ledger could not be read' }; }
       if (s.readOnly) return { ok: false, error: `the ledger is read-only (${s.readOnly.reason} at ${s.readOnly.brokenAt}); the Human has been alerted` };
-      if (s.known.get(loser)?.t !== 'claim' || s.known.get(winner)?.t !== 'claim') return { ok: false, error: 'proposal targets must be existing claims' };
+      const loserKnown = s.known.get(loser), winnerKnown = s.known.get(winner);
+      if (loserKnown?.t !== 'claim' || winnerKnown?.t !== 'claim') return { ok: false, error: 'proposal targets must be existing claims' };
+      // R2-mail protection also applies to this automatic path: mail may lose to an owner claim,
+      // but can never be the winning side of a soft supersede over owner-authored memory.
+      if (winnerKnown.source?.startsWith('mail:') && !loserKnown.source?.startsWith('mail:')) return { ok: false, error: 'mail cannot soft-supersede an owner claim' };
       const key = this.keys();
       if (!key) return { ok: false, error: 'the ledger key is missing; the Human has been alerted' };
       const wt = this.now().toISOString();
@@ -571,7 +575,7 @@ export class ClaimStore {
     if (registryAdded) registryAdded();
     this.backupIfDue(agentId, rec.wt);
     this.anchorSoon(agentId, s.head, rec.id);
-    try { this.d.onAppend?.(agentId, rec.id); } catch { /* the append is acked; indexing catches up */ }
+    try { this.d.onAppend?.(agentId, rec.id, rec); } catch { /* the append is acked; indexing catches up */ }
     return { ok: true, id: rec.id };
   }
 

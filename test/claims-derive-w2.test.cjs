@@ -186,6 +186,7 @@ test('accept hardens a soft supersede; a later soft event never downgrades hard 
 });
 
 test('revert makes its targeted soft-supersede event inert', () => {
+  const baseline = derive([claim('old'), claim('new')], registry, { r4: false });
   const rows = [
     claim('old'), claim('new'),
     event('soft', 'soft-supersede', ['old', 'new']),
@@ -194,6 +195,7 @@ test('revert makes its targeted soft-supersede event inert', () => {
   const state = derive(rows, registry, { r4: false });
   assert.equal(state.claims.old.status, 'live');
   assert.equal(state.claims.old.supersededBy, undefined);
+  assert.deepEqual(state.claims, baseline.claims, 'reverting a proposal restores claim state byte-for-byte');
 });
 
 test('chain head follows append order even when the last append is backdated', () => {
