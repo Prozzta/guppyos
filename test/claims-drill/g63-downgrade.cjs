@@ -42,8 +42,10 @@ module.exports = async function g63(drill) {
   const memDir = path.join(drill.home, 'AppData', 'Roaming', 'drill-user-data', 'memory');
   fs.mkdirSync(memDir, { recursive: true });
   const store = NativeMemoryStore.open(path.join(memDir, 'hive.sqlite'), drill.openOpts);
-  const words = (s) => s.split(/\s+/).filter(Boolean).length;
-  const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: words, mode: () => 'native', watch: null });
+  // chunk sizes as the real app counts them (worker.ts: countTokens = the WordPiece tokenizer), not words
+  const { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } = drill.loadTs('src/main/nativeMemory/wordpiece.ts');
+  const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(fs.readFileSync(path.join(drill.modelDir, 'tokenizer.json'), 'utf8'))));
+  const eng = new MemoryEngine({ hiveRoot: drill.hive, store, embedder, countTokens: (t) => tok.count(t), mode: () => 'native', watch: null });
   // the engine's default timers: a setImmediate stand-in ignores the delay, so the idle unload would drop the model between searches
   await eng.backfill();
   await drill.assert.modelLoaded(embedder);
@@ -55,11 +57,11 @@ module.exports = async function g63(drill) {
   // the reply echoes the query ('Results for: "<query>"'); only the hits count
   const hits = async (query) => {
     const r = await eng.search({ query, results: 10 });
-    return { exit: r.exit, body: String(r.text ?? '').replace(/Results for: ".*"/, '') };
+    return { exit: r.exit, body: String(r.text ?? '').replace(/Results for: ".*"/, '').replace(/\s+/g, ' ') };
   };
   for (const item of drill.args.checklist) {
     const r = await hits(item.query);
-    if (r.exit === 0 && r.body.includes(item.expect)) found++;
+    if (r.exit === 0 && r.body.includes(item.expect.replace(/\s+/g, ' '))) found++;
     else missing.push(item);
   }
   // control: a token in no file must NOT count as found (proves the echo is not counted)

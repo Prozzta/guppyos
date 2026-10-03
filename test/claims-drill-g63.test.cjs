@@ -69,14 +69,50 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
   const claims = {};
   for (const r of records) claims[r.id] = { id: r.id, status: 'live', sightings: 1, firstAt: r.at, lastAt: r.at, pinned: r.kind === 'lesson', reasons: [] };
   const state = { v: 1, agent, registryHash: '', ledgerHead: '', claims, conflicts: [] };
-  E.syncExport(agentDir, records, state, E.standInExportLine);
+  // EXPERIMENT (CLAIMS_DRILL_DEDUP=1): leave out legacy claims whose archive is still on disk (the old build indexes it)
+  const backed = (r) => process.env.CLAIMS_DRILL_DEDUP === '1' && r.legacy && /^memory-archive-.*\.md$/.test(r.legacy.file) && fs.existsSync(path.join(agentDir, r.legacy.file));
+  const out = records.filter((r) => !backed(r) || r.kind === 'lesson');
+  E.syncExport(agentDir, records.filter((r) => !backed(r)), state, E.standInExportLine);
   if (scenario === 'planned') {
-    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, agent));
+    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(out, agent));
   } else {
     // writer mode before an unplanned downgrade: memory.md is the small generated view
     fs.writeFileSync(path.join(agentDir, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# Memory - ${agent}\n\n## How I work (standing lessons)\n${LESSONS.join('\n')}\n`);
   }
   return records.length;
+}
+
+const norm = (t) => t.replace(/\s+/g, ' ').trim();
+
+/**
+ * The plan's 50-fact checklist, built at run time from a snapshot (real text is never written to
+ * the repo): 20 facts from the largest agent (F5: the largest is Andy today), 30 spread over the
+ * others, picked at even spacing from the entries of at least 80 characters. A fact counts as found
+ * when 40 characters from its middle appear in a hit; its query is its own text without the date.
+ * Up to 3 standing lessons per agent are checked after the old rollover.
+ */
+function snapshotChecklist(src) {
+  const agents = fs.readdirSync(src).filter((a) => fs.statSync(path.join(src, a)).isDirectory()).map((a) => {
+    const files = fs.readdirSync(path.join(src, a)).filter((n) => /^memory(-archive-.*)?\.md$/.test(n)).sort();
+    const entries = files.flatMap((f) => M.splitEntries(fs.readFileSync(path.join(src, a, f), 'utf8'), f).entries);
+    const bytes = files.reduce((n, f) => n + fs.statSync(path.join(src, a, f)).size, 0);
+    return { a, entries, bytes };
+  }).sort((x, y) => y.bytes - x.bytes);
+  const checklist = [];
+  const lessons = {};
+  const others = agents.length - 1;
+  agents.forEach(({ a, entries }, i) => {
+    const want = i === 0 ? 20 : Math.floor(30 / others) + (i - 1 < 30 % others ? 1 : 0);
+    const facts = entries.filter((e) => !e.lesson && norm(e.text).length >= 80);
+    for (let k = 0; k < want && facts.length; k++) {
+      const t = norm(facts[Math.floor((k + 0.5) * facts.length / want)].text);
+      const mid = Math.max(0, Math.floor(t.length / 2) - 20);
+      checklist.push({ agent: a, query: t.replace(/^[-*]\s*(\d{4}-\d{2}-\d{2}\S*\s*)?/, '').slice(0, 200), expect: t.slice(mid, mid + 40).trim() });
+    }
+    const ls = entries.filter((e) => e.lesson).slice(0, 3).map((e) => e.text.split(/\r?\n/)[0].slice(0, 80));
+    if (ls.length) lessons[a] = ls;
+  });
+  return { checklist, lessons };
 }
 
 function sandbox(scenario) {
@@ -94,7 +130,9 @@ function sandbox(scenario) {
       fs.cpSync(path.join(src, a), path.join(hive, 'agents', a), { recursive: true });
       prepareAgent(path.join(hive, 'agents', a), a, scenario, []);
     }
-    checklist.push(...JSON.parse(fs.readFileSync(process.env.CLAIMS_DRILL_CHECKLIST, 'utf8')));
+    const real = process.env.CLAIMS_DRILL_CHECKLIST ? { checklist: JSON.parse(fs.readFileSync(process.env.CLAIMS_DRILL_CHECKLIST, 'utf8')), lessons: {} } : snapshotChecklist(src);
+    checklist.push(...real.checklist);
+    Object.assign(lessons, real.lessons);
   } else {
     [['ag-small', 40e3], ['ag-mid', 120e3], ['ag-large', 400e3]].forEach(([a, bytes], idx) => {
       const dir = path.join(hive, 'agents', a);
@@ -136,7 +174,7 @@ for (const scenario of ['planned', 'unplanned']) {
     assert.ok(s.checklist.length >= 30);
     for (const a of fs.readdirSync(path.join(s.hive, 'agents'))) for (const t of ABSENT) assert.ok(!indexedText(path.join(s.hive, 'agents', a)).includes(t), `control token ${t} is in no file`);
     for (const item of s.checklist) {
-      assert.ok(indexedText(path.join(s.hive, 'agents', item.agent)).includes(item.expect), `${item.agent}: ${item.expect}`);
+      assert.ok(norm(indexedText(path.join(s.hive, "agents", item.agent))).includes(item.expect), `${item.agent}: ${item.expect}`);
     }
     for (const a of fs.readdirSync(path.join(s.hive, 'agents'))) {
       for (const f of fs.readdirSync(path.join(s.hive, 'agents', a)).filter((n) => /\.md$/i.test(n))) {
