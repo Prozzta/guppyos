@@ -2422,7 +2422,7 @@ export class HiveManager {
       // ZT-I1-MAIL §5 P1 (+ §11.12(c)): the mail sentence follows the agent's mail mode (§11.7).
       protocolLineOne(mailMode, semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
       `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
-      `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox.`,
+      `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox. To update a card, send a message and note memory in ONE call, use the \`ledger\` command (PROTOCOL.md "The ledger command"); it takes JSON from a file or stdin, never in shell arguments.`,
       '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
       guardrailsLine,
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
