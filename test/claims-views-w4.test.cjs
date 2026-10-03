@@ -39,14 +39,19 @@ test('tier 0 overflow is explicit and not promoted; mail remains excluded until 
   assert.ok(!out.receipt.included.some(x => x.id === 'pin2'));
 });
 
-test('warning markers occupy tier 1; reconcile items are delivered only by the reconcile API', () => {
+test('reconcile prompt renders once as a T1 marker before warnings and claims within the 4,500-character cap', () => {
   const records = [claim('f', 'flagged fact')];
   const item = { itemId: 'r1', agent: 'a', kind: 'conflict', a: 'f', b: 'g', text: 'choose one', turnsUnanswered: 0 };
-  const views = V.createClaimViews(records, () => 1, [item]);
-  const out = views.buildWorkingSet(stateFor(records), world({ f: ['stale-ref'] }), 300);
+  const views = V.createClaimViews(records, s => s.length, [item]);
+  const out = views.buildWorkingSet(stateFor(records), world({ f: ['stale-ref'] }), 4500);
   assert.match(out.text, /⚠ f: stale-ref/);
-  assert.doesNotMatch(out.text, /reconcile r1/);
-  assert.doesNotMatch(out.text, /reconcile r1/);
+  const lines = out.text.split('\n');
+  assert.ok(out.text.length <= 4500);
+  assert.equal(lines.filter(line => line.includes('reconcile r1:')).length, 1);
+  assert.ok(lines[1].includes('reconcile r1:'), 'reconcile prompt occupies the first T1 marker slot');
+  assert.match(lines[2], /f: stale-ref/);
+  assert.match(lines[3], /flagged fact \[status:live\] \[c:f\]/);
+  assert.equal(out.text.match(/reconcile r1:/g)?.length, 1, 'prompt is not duplicated elsewhere in the working set');
   assert.equal(out.receipt.included.find(x => x.id === 'f').tier, 2);
 });
 
