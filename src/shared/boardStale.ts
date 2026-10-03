@@ -222,8 +222,11 @@ export function detectStale(input: DetectStaleInput): BoardFlag[] {
     if (card.status !== 'doing') continue;
     const agent = assigneeOf(card);
     if (!agent) continue;
-    const list = doingBy.get(agent);
-    if (list) list.push(card); else doingBy.set(agent, [card]);
+    // A card waiting for its install is not load (CARDS-WAITING-ON-MILESTONE): no DOING_MANY.
+    if (wait === null) {
+      const list = doingBy.get(agent);
+      if (list) list.push(card); else doingBy.set(agent, [card]);
+    }
     const f = agentFlag(card, agent, input, cfg);
     // A card waiting for (or just reaching) its install is never STALE: the wait is not idleness.
     if (f && !(f.kind === 'STALE' && wait !== null)) flags.push(f);

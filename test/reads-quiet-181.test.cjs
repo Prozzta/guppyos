@@ -345,6 +345,15 @@ K.waitingIsNotStale = (stale = real.stale) => {
 };
 test('a doing card with waitingFor:"install" is not STALE while the running app is older (or unknown)', () => K.waitingIsNotStale());
 
+K.waitingIsNotLoad = (stale = real.stale) => {
+  const wait = { waitingFor: 'install', fixVersion: '1.1.81' };
+  const tasks = [doing('A'), doing('B'), doing('C'), doing('W1', wait), doing('W2', wait)];
+  const many = staleRun(stale, tasks, '1.1.80').filter((f) => f.kind === 'DOING_MANY');
+  assert.deepEqual(many, [], 'A CARD WAITING FOR ITS INSTALL IS NOT LOAD');
+  assert.equal(staleRun(stale, [...tasks, doing('D')], '1.1.80').filter((f) => f.kind === 'DOING_MANY').length, 4, 'four real doing cards still are');
+};
+test('waiting cards do not count toward DOING_MANY (the Human: the board said Creed was busy when he was free)', () => K.waitingIsNotLoad());
+
 K.installedFlagsOnce = (stale = real.stale, digest = real.digest) => {
   const wait = { waitingFor: 'install', fixVersion: '1.1.81' };
   for (const running of ['1.1.81', '1.1.82', '1.2.0']) {
@@ -444,6 +453,8 @@ const MUTANTS = [
     edits: [['    try { holds = quietUntil(agentId, pending, now); } catch { return; }', '    try { holds = quietUntil(agentId, pending, now); } catch { holds = new Map(pending.map((id) => [id, now + 1800000])); }']], killer: 'bridgeFailsOpen', dies: /NO LEDGER ANSWER = NO HOLD: IT WAKES/ },
   { name: 'a waiting card is still STALE', file: STALE, kind: 'stale',
     edits: [["    if (f && !(f.kind === 'STALE' && wait !== null)) flags.push(f);", '    if (f) flags.push(f);']], killer: 'waitingIsNotStale', dies: /A CARD WAITING FOR ITS INSTALL IS NEVER STALE/ },
+  { name: 'a waiting card counts as load', file: STALE, kind: 'stale',
+    edits: [['    if (wait === null) {\n      const list = doingBy.get(agent);', '    if (true) {\n      const list = doingBy.get(agent);']], killer: 'waitingIsNotLoad', dies: /A CARD WAITING FOR ITS INSTALL IS NOT LOAD/ },
   { name: 'installed is never flagged', file: STALE, kind: 'stale',
     edits: [["    if (wait === 'installed') flags.push(installedFlag(card, input));\n", '']], killer: 'installedFlagsOnce', dies: /IS SHIPPED_INSTALLED, NOT STALE/ },
   { name: 'installed only when strictly newer', file: STALE, kind: 'stale',
