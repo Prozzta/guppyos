@@ -238,6 +238,9 @@ export interface RegistryAgent extends AgentMeta {
    *  mail is delivered and surfaced when the agent is restored. Absent on an archived agent =
    *  archived before 1.1.75, counted as explicit. Cleared on restore. */
   archiveReason?: ArchiveReason;
+  /** READS-ROTATE-AT-SIZE pilot (1.1.81): this agent's Claude Code auto-compact window (tokens,
+   *  100k-1M) or "off"; wins over the god default (shared/autoCompactWindow.ts). Unset = default. */
+  autoCompactWindow?: number | 'off';
   /** The human has this agent 1:1 and Michael must leave it alone until they
    *  flip it back. Held agents stay ACTIVE and keep their terminal — this is
    *  "do not dispatch to them", not "they are gone", which is why it is its own

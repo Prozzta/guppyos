@@ -328,6 +328,10 @@ export interface HarnessConfig {
   /** Passed to every spawned agent as `--max-turns <n>` when set; unset = no cap
    *  (Claude Code's default). A coarse runaway guard independent of the breaker. */
   maxTurns?: number;
+  /** READS-ROTATE-AT-SIZE pilot (1.1.81): god's Claude Code auto-compact window, passed as
+   *  CLAUDE_CODE_AUTO_COMPACT_WINDOW at spawn. Unset = 150000; "off" = Claude's own "auto"
+   *  (the pilot's off switch). An agent's own registry `autoCompactWindow` wins (shared/autoCompactWindow.ts). */
+  godAutoCompactWindow?: number | 'off';
   /** Max concurrent god-triggered ephemeral Slack workers; extra spawn-requests
    *  wait in the queue (natural backpressure, a resource backstop). Default 4. */
   maxConcurrentWorkers?: number;

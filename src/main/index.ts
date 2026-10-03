@@ -34,6 +34,8 @@ import {
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
+import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor } from '../shared/autoCompactWindow';
+import { CompactHealthWatch } from './compactHealth';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import { createRendererErrorGate } from '../shared/rendererError';
 import { rendererErrorRow } from './rendererErrorLog';
@@ -1079,6 +1081,14 @@ const heavyLock = new HeavyJobLock({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
 });
 hookServer.setHeavyLock(heavyLock);
+// READS-ROTATE-AT-SIZE pilot: a `compact-health` row per compaction (for READS-COMPACT-HEALTH).
+hookServer.setCompactHealth(new CompactHealthWatch({
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  windowOf: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? autoCompactWindowFor({ isGod: hive.isGod(agentId), autoCompactWindow: a.autoCompactWindow }, readConfig()) : null;
+  }
+}));
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a
 //    provider-confirmed turn (our own unconfirmed nudge is a new turn, not a live one);
@@ -4030,6 +4040,14 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       }
     }
     // The sessions this process opens, other than the one it resumed, carry this prompt.
+    // READS-ROTATE-AT-SIZE pilot (shared/autoCompactWindow.ts): Claude Code's own auto-compact
+    // window, per agent (god: 150k by default; config.godAutoCompactWindow "off" switches it off).
+    // An env var only: the injected prompt, and so its session fingerprint, are unchanged.
+    const compactWindow = autoCompactWindowFor({ isGod: opts.hive.isGod, autoCompactWindow: hive.registry().agents[opts.hive.id]?.autoCompactWindow }, cfg);
+    if (compactWindow !== null) {
+      opts.env = { ...(opts.env ?? {}), [AUTO_COMPACT_WINDOW_ENV]: String(compactWindow) };
+      hive.appendLog({ kind: 'auto-compact-window', agentId: opts.hive.id, window: compactWindow });
+    }
     hive.noteSpawnPrompt(opts.hive.id, promptFp, resumedSid);
     opts.args = args;
   }
