@@ -281,7 +281,7 @@ test('evidence: a Claude hook_additional_context attachment or a Codex developer
 
 // ————————————————————————————————————————————————————————————— hooks (real hive, jailed)
 
-async function floor(t, { providers = {}, steer = null, emit } = {}) {
+async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } = {}) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const events = [];
   const hive = new HiveManager(() => home, emit ?? ((ch, p) => { events.push({ ch, p }); return true; }));
@@ -294,6 +294,7 @@ async function floor(t, { providers = {}, steer = null, emit } = {}) {
   const hookEvents = [];
   const control = { takeSteer: () => steer, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined, undefined, (...a) => hookEvents.push(a));
+  if (claimWorkingSet) s.setClaimWorkingSetProvider(claimWorkingSet);
   server.current = s;
   const fire = (agent_id, hook_event_name, extra = {}) => s.handle({ agent_id, hook_event_name, session_id: `s-${agent_id}`, ...extra });
   const ctx = (res) => res?.hookSpecificOutput?.additionalContext ?? '';
@@ -301,6 +302,15 @@ async function floor(t, { providers = {}, steer = null, emit } = {}) {
   const logRows = () => { try { return fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   return { hive, server: s, fire, ctx, entryOf, events, hookEvents, logRows, home };
 }
+
+test('G4.4: a claims working set is re-injected on startup, compact SessionStart, and task wake', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: (id) => { seen.push(id); return '# Memory working set — cl-1'; } });
+  assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'startup' })), /# Memory working set — cl-1/);
+  assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'compact' })), /# Memory working set — cl-1/);
+  assert.match(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /# Memory working set — cl-1/);
+  assert.deepEqual(seen, ['cl-1', 'cl-1', 'cl-1']);
+});
 
 test('PIN: whenever delivered ids exist, the surfacing hook of every injection provider returns a <hive-mail> block carrying their markers', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude', 'cx-1': 'codex', 'ag-1': 'antigravity' } });

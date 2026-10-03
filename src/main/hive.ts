@@ -652,6 +652,8 @@ export class HiveManager {
   }
 
   private readonly routerRuntime: RouterRuntime;
+  private claimLedgerLevel?: (agentId: string) => 'off' | 'shadow' | 'reader' | 'writer';
+  setClaimLedgerLevelProvider(fn: ((agentId: string) => 'off' | 'shadow' | 'reader' | 'writer') | undefined): void { this.claimLedgerLevel = fn; }
   /** HOOK-BROKER: the in-process HTTP hook endpoint (HookServer), injected by main. Null in
    *  tests and until wired; every spawn then writes command hooks exactly as before. */
   private hookBroker: HookBroker | null = null;
@@ -2086,7 +2088,7 @@ export class HiveManager {
    */
   sessionPromptFingerprint(meta: AgentMeta): { fp: string; variant: string; legacyBlock: 'mail-channel-override' | 'spawn-toggle-changed' | null } {
     const mailMode = this.promptMailMode(meta);
-    const text = this.injectedPrompt(meta, '', '', false, false, undefined, { mailMode });
+    const text = this.injectedPrompt(meta, '', '', false, false, undefined, { mailMode, claimWriter: this.claimLedgerLevel?.(meta.id) === 'writer' });
     // Creed R3: the build-time 1.1.75 stamp assumes the session was spawned with TODAY's variant.
     // A mail channel override, or god's spawn toggle away from its 1.1.75 default (off), may have
     // changed that since the 1.1.75 launch, so such a session is not legacy-stamped: it rotates.
@@ -2445,13 +2447,14 @@ export class HiveManager {
     semanticMemory: boolean,
     knowledgeGraph: boolean,
     kgCliPath?: string,
-    canonical?: { mailMode: MailPromptMode }
+    canonical?: { mailMode: MailPromptMode; claimWriter?: boolean }
   ): string {
     // SESSION-PROMPT-ROTATION: the mail mode is read with the REAL id (the ledger is per agent).
     // A CANONICAL render (the rotation fingerprint's input, see sessionPromptFingerprint) fixes
     // every volatile or per-agent input: memory on, KG off, no RUNNING BUILD line, and
     // placeholders for name, id, workspace, hive root and the node path.
     const mailMode = canonical ? canonical.mailMode : this.promptMailMode(meta);
+    const claimWriter = canonical ? canonical.claimWriter === true : this.claimLedgerLevel?.(meta.id) === 'writer';
     if (canonical) {
       meta = { ...meta, name: CANONICAL_PROMPT.name, id: CANONICAL_PROMPT.id };
       dir = CANONICAL_PROMPT.agentDir;
@@ -2468,7 +2471,9 @@ export class HiveManager {
     // `semanticMemory` is true only when the spawn really put the app's `memory` command first
     // on the agent's PATH (Jim M2), so this line never names a command the agent cannot run.
     const memoryLine = semanticMemory
-      ? 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `memory search "<query>"`; run `memory wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
+      ? claimWriter
+        ? 'Semantic memory: the whole hive shares searchable memory. Run `memory search "<query>"` for retrieval; `memory wake-up` returns the current claim working set and standing lessons. Record durable facts and decisions with the memory claim-ledger writer; do not write them into memory.md.'
+        : 'Semantic memory: the whole hive shares a searchable memory (the built-in memory engine). To recall relevant past knowledge across the team, run `memory search "<query>"`; run `memory wake-up` at the start of a task for a memory digest. Your notes in memory.md are indexed automatically — write durable facts there.'
       : '';
     // Enterprise Knowledge Graph (opt-in). Volatile-free: the bundled-node launcher
     // and the KG CLI are both fixed absolute paths for an install, so baking them
@@ -2517,10 +2522,14 @@ export class HiveManager {
       // for one agent, re-sent on every later request of the job). The digest, or its tail.
       // PINNED-MEMORY: but first the standing method lessons, which the rollover never archives.
       // ZT-I1-MAIL §5 P1 (+ §11.12(c)): the mail sentence follows the agent's mail mode (§11.7).
-      protocolLineOne(mailMode, semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
-      `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
+      protocolLineOne(mailMode, semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done'), claimWriter),
+      claimWriter
+        ? '2. Record durable facts and decisions with the memory claim-ledger writer (the `memory note` command); do not edit memory.md for new facts. METHOD lessons use the claim kind `lesson`.'
+        : `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
       `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox. To update a card, send a message and note memory in ONE call, use the \`ledger\` command (PROTOCOL.md "The ledger command"); it takes JSON from a file or stdin, never in shell arguments.`,
-      '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
+      claimWriter
+        ? '4. At the END of a task, record durable facts and decisions with the claim-ledger writer; METHOD lessons use the lesson claim kind.'
+        : '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
       guardrailsLine,
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
       // every later request (81% of Dwight's tool-output text came from outputs over 10K chars).
@@ -5018,9 +5027,11 @@ export const MAIL_RULES_NOT_IN_MEMORY = 'Mail handling is defined by the current
  *    hook traffic): the 1.1.74 text, read AND move handled files into .done.
  * Native-separator paths (the 🪟 note on injectedPrompt).
  */
-export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, memoryMd: string, inboxDir: string, doneDir: string): string {
+export function protocolLineOne(mode: MailPromptMode, semanticMemory: boolean, memoryMd: string, inboxDir: string, doneDir: string, claimWriter = false): string {
   const memory = semanticMemory
-    ? `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
+    ? claimWriter
+      ? `1. At the START of a task, run \`memory wake-up\` for your current claim working set and standing lessons, then \`memory search "<query>"\` for anything specific. Record durable facts with the claim-ledger writer; do NOT write new facts into ${memoryMd}.`
+      : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then run \`memory wake-up\` for a digest of your memory and \`memory search "<query>"\` for anything specific; do NOT read ${memoryMd} whole (if you must open it, read only its last ~40 lines; older notes are in memory-archive-*.md and \`memory search\` covers them).`
     : `1. At the START of a task, read the \`## How I work (standing lessons)\` section at the top of ${memoryMd} (your method lessons; follow them); then read the LAST ~40 lines of ${memoryMd} (the newest notes; do NOT print the whole file; older notes are in memory-archive-*.md, search them with grep when needed).`;
   const mail = mode === 'inject'
     ? 'Messages for you arrive inside your context as a <hive-mail> block; the harness tracks them. You do not read, list or move inbox files. If a message is marked re-delivered, check whether you already handled it.'

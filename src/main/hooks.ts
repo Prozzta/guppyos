@@ -322,6 +322,8 @@ export class HookServer {
   private codexNoReading = new Map<string, CodexNoReading>();
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
+  /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
+  private claimWorkingSet?: (agentId: string) => string | null;
   /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
    *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
   private readonly runningTools = new Map<string, RunningTool[]>();
@@ -347,6 +349,10 @@ export class HookServer {
   /** WAKE-SCREEN-GUARD R2-4: set by main once (the constructor's observer stays as it was). */
   setWakeIncarnationObserver(fn: ((agentId: string, token: string) => void) | undefined): void {
     this.onWakeIncarnation = fn;
+  }
+
+  setClaimWorkingSetProvider(fn: ((agentId: string) => string | null) | undefined): void {
+    this.claimWorkingSet = fn;
   }
 
   constructor(
@@ -2129,6 +2135,12 @@ export class HookServer {
     const goal = goalRaw
       ? `<goal>\n${goalRaw}\n</goal>`
       : null;
+    // CLAIM-LEDGER G4.4: rebuild the view from the verified ledger at each readable boundary.
+    // A compact SessionStart is included, so this survives context compaction without persistence.
+    let claimWorkingSet: string | null = null;
+    if ((event === 'SessionStart' || event === 'UserPromptSubmit') && agentId && !fromSubagent && p.transport !== 'pipe-oneway') {
+      try { claimWorkingSet = this.claimWorkingSet?.(agentId) ?? null; } catch { claimWorkingSet = null; }
+    }
     // GOD-STARTUP-TOKENS R1: a god that started FRESH (instead of resuming a costly session) gets its
     // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
     // SessionStart (mailSurfaceEvents), so the handoff never takes budget from pending mail. Never on
@@ -2190,12 +2202,12 @@ export class HookServer {
     if (event === 'PostToolUse' && agentId) {
       try { updatedToolOutput = this.condensedToolOutput(agentId, p); } catch { updatedToolOutput = null; }
     }
-    if (handoff || steer || roster || goal || mail || carry || mailBlock) {
+    if (handoff || steer || roster || goal || claimWorkingSet || mail || carry || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [handoff, roster, goal, steer, mail, carry, mailBlock].filter(Boolean).join('\n\n'),
+          additionalContext: [handoff, roster, goal, claimWorkingSet, steer, mail, carry, mailBlock].filter(Boolean).join('\n\n'),
           ...(updatedToolOutput ? { updatedToolOutput } : {})
         }
       };

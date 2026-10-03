@@ -290,6 +290,18 @@ test('WIRING: every install (no mode file) gives an agent MEMORY_TOKEN, the endp
   assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), null, 'revoked with the agent');
 });
 
+test('G4.5: Codex memory wake-up appends the main claims view; ordinary search does not', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  const { w } = wiring(root, runtime(root));
+  const env = w.spawnEnv('a1');
+  w.run = async () => ({ ok: true, exit: 0, text: 'existing native-memory wake-up' });
+  w.setClaimWakeupProvider((id) => `# Memory working set — ${id}`);
+  const wake = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'wake-up' });
+  assert.match(wake.body.text, /existing native-memory wake-up[\s\S]*# Memory working set — a1/);
+  const search = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'search', args: { query: 'x' } });
+  assert.equal(search.body.text, 'existing native-memory wake-up', 'search output stays unchanged');
+});
+
 test('WIRING: a leftover mode file from an older build changes nothing: memory stays on', async () => {
   for (const mode of ['legacy', 'fallback-legacy', 'shadow', 'native']) {
     const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': JSON.stringify({ mode }) });

@@ -66,6 +66,7 @@ export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'command
 export class NativeMemoryWiring {
   readonly tokens = new MemoryTokens();
   readonly client: NativeMemoryClient;
+  private claimWakeup?: (agentId: string) => string | null;
   private manifest: RuntimeManifest | null = null;
   private loggedUnavailable = new Set<MemoryUnavailable>();
 
@@ -77,6 +78,9 @@ export class NativeMemoryWiring {
       log: d.log, onReady: () => d.onWorkerReady?.()
     });
   }
+
+  /** Main-owned W4 view appended to the existing wake-up response, beside the memory resolver. */
+  setClaimWakeupProvider(fn: ((agentId: string) => string | null) | undefined): void { this.claimWakeup = fn; }
 
   private runtimeManifest(): RuntimeManifest | null {
     if (this.manifest) return this.manifest;
@@ -196,7 +200,11 @@ export class NativeMemoryWiring {
       return { status: 200, body: { exit: c.exit, text: c.text, json: c.json, error: c.error } };
     }
     const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
-    return { status: 200, body: { exit: r.exit, text: r.text, json: r.json, error: r.error } };
+    let text = r.text;
+    if (cmd === 'wake-up' && r.ok) {
+      try { const claims = this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
+    }
+    return { status: 200, body: { exit: r.exit, text, json: r.json, error: r.error } };
   }
 
   /** Main-internal callers (the renderer IPC): the same validation and ops as an agent, as the
