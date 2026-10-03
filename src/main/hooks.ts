@@ -20,7 +20,7 @@ import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, type HeavyJobLock } from './heavyJob';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
-import { capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
+import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
 import type { ControlRegistry } from './control';
 import { DEV_HIDDEN } from './devIsolation';
 import type { CircuitBreaker } from './breaker';
@@ -1612,7 +1612,13 @@ export class HookServer {
     let own: unknown;
     try { own = this.hive.registry?.().agents[agentId]?.toolOutputCap; } catch { own = undefined; }
     // N1 (god): a read-type command (grep, sed, cat, git diff …) gets the larger read cap.
-    const cap = capForCommand(commandOf(p.tool_input), effectiveCap(typeof own === 'number' ? own : this.getConfig().toolOutputCap));
+    // god's ruling (d8e742): the orchestrator's DEFAULT is the read cap for every command (Andy's
+    // sensitivity check: at 1500 the condenser turns negative for god if follow-ups triple). A
+    // per-agent registry value still wins; 0 stays off.
+    let isGod = false;
+    try { isGod = typeof own !== 'number' && this.hive.isGod(agentId); } catch { isGod = false; }
+    const configured = effectiveCap(typeof own === 'number' ? own : this.getConfig().toolOutputCap);
+    const cap = capForCommand(commandOf(p.tool_input), isGod && configured ? Math.max(configured, TOOL_OUTPUT_CAP_READ) : configured);
     const r = (p.tool_response && typeof p.tool_response === 'object' ? p.tool_response : null) as BashLikeResponse | null;
     if (!shouldCondense(p.tool_name, p.tool_input, r, cap) || !r) return null;
     let text = outputText(r);

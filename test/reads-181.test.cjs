@@ -104,14 +104,14 @@ function post(url, body, raw) {
   });
 }
 
-async function broker(t, { provider = 'claude', cap, steer = null } = {}) {
+async function broker(t, { provider = 'claude', cap, steer = null, god = false } = {}) {
   const home = tmp('hive-');
   const logs = [];
   const sock = process.platform === 'win32' ? `\\\\.\\pipe\\reads181-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(tmp('s-'), 's.sock');
   const hive = {
     sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: (e) => logs.push(e),
     registry: () => ({ agents: { a1: { id: 'a1', provider, ...(cap !== undefined ? { toolOutputCap: cap } : {}) } } }),
-    isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {},
+    isGod: () => god, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {},
     toolOutputDir: (id) => path.join(home, 'agents', id, 'tool-output')
   };
   const control = { shouldHalt: () => false, takeSteer: () => { const s = steer; steer = null; return s; }, toolDecision: () => ({ deny: false }) };
@@ -212,6 +212,18 @@ test('N1: a Read or grep of a condensed output\'s saved file within 10 tool call
   await post(url, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'grep ERR C:/x/toolu_r2.txt' } });
   re = logs.filter((e) => e.kind === 'tool-output-refetch');
   assert.equal(re.length, 1, 'past the 10-call window it is not a re-fetch');
+});
+
+test('god (d8e742): the orchestrator\'s default cap is 6000 for EVERY command; a registry value still wins; workers keep 1500', async (t) => {
+  const mid = Array.from({ length: 50 }, (_, i) => `ok ${i} - a passing test with a long enough title to fill the line`).join('\n'); // ~3.3k chars
+  const g = await broker(t, { god: true });
+  assert.equal((await postTool(g.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput, undefined, 'an npm log of 3.3k passes whole for god');
+  const big = (await postTool(g.url, { tool_use_id: 'toolu_gb' })).body.hookSpecificOutput.updatedToolOutput;
+  assert.ok(big.stdout.length <= 6000 && big.stdout.length > 1500, `${big.stdout.length}`);
+  const w = await broker(t);
+  assert.ok((await postTool(w.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput.updatedToolOutput.stdout.length <= 1500, 'a worker keeps 1500');
+  const own = await broker(t, { god: true, cap: 2000 });
+  assert.ok((await postTool(own.url, { tool_response: { stdout: mid, stderr: '' } })).body.hookSpecificOutput.updatedToolOutput.stdout.length <= 2000, 'god\'s own registry cap wins');
 });
 
 test('N2: a saved output over 256 KB is read as head + tail parts (named "read in part"), never whole', async (t) => {
