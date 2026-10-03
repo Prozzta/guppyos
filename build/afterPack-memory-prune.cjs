@@ -14,6 +14,7 @@ exports.default = async function afterPack(context) {
   const resources = platform === 'darwin'
     ? path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources')
     : path.join(context.appOutDir, 'resources');
+  guppyUpdaterCache(resources);
   const bin = path.join(resources, 'app.asar.unpacked', 'node_modules', 'onnxruntime-node', 'bin', 'napi-v3');
   if (!fs.existsSync(bin)) return;
   let removed = 0;
@@ -29,3 +30,23 @@ exports.default = async function afterPack(context) {
   }
   console.log(`  • native-memory prune: kept onnxruntime ${platform}/${arch} CPU only (${removed} paths removed)`);
 };
+
+// REBRAND-GUPPY (1.1.82): electron-updater's download cache becomes %LOCALAPPDATA%\guppy-updater.
+// electron-builder 25.1.8 always writes app-update.yml's updaterCacheDirName as
+// `<package.json name>-updater` (appInfo.updaterCacheDirName overrides any publish setting), and
+// the package name stays munder-difflin. It writes app-update.yml in its own afterPack handler,
+// which runs BEFORE this user hook (Packager.afterPack: "user handler should be last"), so the
+// file is here to edit. The old cache folder is left alone (the running 1.1.81 downloaded this
+// very update into it).
+const GUPPY_UPDATER_CACHE = 'guppy-updater';
+function guppyUpdaterCache(resources) {
+  const yml = path.join(resources, 'app-update.yml');
+  if (!fs.existsSync(yml)) return;
+  const text = fs.readFileSync(yml, 'utf8');
+  const next = text.replace(/^updaterCacheDirName:.*$/m, `updaterCacheDirName: ${GUPPY_UPDATER_CACHE}`);
+  if (next === text && !/^updaterCacheDirName:/m.test(text)) throw new Error('app-update.yml has no updaterCacheDirName line');
+  fs.writeFileSync(yml, next);
+  console.log(`  • app-update.yml: updaterCacheDirName ${GUPPY_UPDATER_CACHE}`);
+}
+exports.guppyUpdaterCache = guppyUpdaterCache;
+exports.GUPPY_UPDATER_CACHE = GUPPY_UPDATER_CACHE;

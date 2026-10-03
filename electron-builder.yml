@@ -1,5 +1,12 @@
 appId: in.munderdiffl.app
-productName: Munder Difflin
+productName: Guppy
+# REBRAND-GUPPY (1.1.82, the Human 2026-10-03): the app and its exe are Guppy. Kept on purpose, so a
+# 1.1.81 install upgrades in place: appId (the NSIS GUID derives from it: same install entry, same
+# folder, same AUMID), package.json "name" (only the default userData; the app now uses
+# <appData>/Guppy, src/main/userDataMigration.ts), the munderdifflin:// scheme and, in 1.1.82, the
+# Munder-Difflin-* artifact names (1.1.81 builds its manual-download link from them). The shortcuts
+# and taskbar pins are re-aimed at Guppy.exe on update: build/installer.nsh.
+executableName: Guppy
 copyright: Copyright © 2026 Chaitanya Giri
 
 # Where electron-updater looks for new versions (latest*.yml + assets on GitHub
@@ -26,7 +33,7 @@ afterPack: build/afterPack-memory-prune.cjs
 # Register the munderdifflin:// URL scheme (shareable-hires deep link) in the
 # packaged app: CFBundleURLTypes on macOS, registry entries via NSIS on Windows.
 protocols:
-  - name: Munder Difflin
+  - name: Guppy
     schemes:
       - munderdifflin
 
@@ -103,15 +110,15 @@ mac:
   # the privacy prompt and, for a signed app, remembers the grant — so the user
   # is asked ONCE instead of on every agent action.
   extendInfo:
-    NSDocumentsFolderUsageDescription: "Munder Difflin runs your Claude Code agents, which read and write files in the project folders you point them at."
-    NSDesktopFolderUsageDescription: "Munder Difflin's agents may work on projects located on your Desktop."
-    NSDownloadsFolderUsageDescription: "Munder Difflin's agents may work on projects located in your Downloads."
-    NSRemovableVolumesUsageDescription: "Munder Difflin's agents may work on projects located on external volumes."
-    NSNetworkVolumesUsageDescription: "Munder Difflin's agents may work on projects located on network volumes."
+    NSDocumentsFolderUsageDescription: "Guppy runs your Claude Code agents, which read and write files in the project folders you point them at."
+    NSDesktopFolderUsageDescription: "Guppy's agents may work on projects located on your Desktop."
+    NSDownloadsFolderUsageDescription: "Guppy's agents may work on projects located in your Downloads."
+    NSRemovableVolumesUsageDescription: "Guppy's agents may work on projects located on external volumes."
+    NSNetworkVolumesUsageDescription: "Guppy's agents may work on projects located on network volumes."
     # The microphone is used by two opt-in, off-by-default voice features: Free
     # Flow dictation (Groq transcription) and Realtime Michael (live voice chat
     # with the orchestrator via OpenAI). Mic access only happens while one is on.
-    NSMicrophoneUsageDescription: "Munder Difflin uses your microphone only for its opt-in voice features: Free Flow dictation (transcribed by Groq into the message queue) and talking to Michael in real time (streamed to OpenAI). The mic is off unless you turn one of these on."
+    NSMicrophoneUsageDescription: "Guppy uses your microphone only for its opt-in voice features: Free Flow dictation (transcribed by Groq into the message queue) and talking to Michael in real time (streamed to OpenAI). The mic is off unless you turn one of these on."
   # Hardened runtime + entitlements so the spawned `claude` agents inherit this
   # app's TCC responsibility (one grant covers them all) and node-pty can load.
   hardenedRuntime: true
@@ -144,7 +151,7 @@ mac:
   artifactName: Munder-Difflin-${version}-mac-${arch}.${ext}
 
 dmg:
-  title: Munder Difflin ${version}
+  title: Guppy ${version}
 
 # ---- Windows ----
 win:
@@ -160,7 +167,9 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   artifactName: Munder-Difflin-${version}-win-x64-setup.exe
-  shortcutName: Munder Difflin
+  shortcutName: Guppy
+  # Re-aims taskbar pins (and renamed shortcut copies) from the old exe to Guppy.exe on update.
+  include: build/installer.nsh
 
 portable:
   artifactName: Munder-Difflin-${version}-win-x64-portable.exe
