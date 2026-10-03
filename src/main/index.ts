@@ -553,6 +553,7 @@ const breaker = new CircuitBreaker(() => {
 // heartbeat mission is disabled (it ships off).
 let fleetTimer: ReturnType<typeof setInterval> | null = null;
 let breakerBeatTimer: ReturnType<typeof setInterval> | null = null;
+let staleRequestsTimer: ReturnType<typeof setInterval> | null = null;
 // Feed the breaker's api_error-storm trip from Oscar's OTel api_error spans —
 // Jim's one breaker input with no on-branch source (telemetry.onApiError seam).
 telemetry.onApiError((agentId) => breaker.recordError(agentId));
@@ -7055,12 +7056,24 @@ function runWorkerWakeBeat(): void {
  *  Guarded (clear-then-set) so a re-bootstrap (changeHome recovery) OR a
  *  powerMonitor resume can't stack duplicate timers — these are setInterval
  *  handles that freeze during true system sleep and must be re-armed on wake. */
+/** REQUESTS-TAB-STALE (1.1.83): the Requests tab keeps live asks only (hive.autoCloseStaleObligations). */
+function runStaleRequestsBeat(): void {
+  // A dev or rc build carries its next version and may run against the live hive: never close there.
+  if (!app.isPackaged) return;
+  try { hive.runCleanup183(); } catch (e) { console.error('[stale requests] cleanup-183', e); }
+  try { hive.autoCloseStaleObligations(app.getVersion()); } catch (e) { console.error('[stale requests]', e); }
+}
+
 function armAlwaysOnBeats(): void {
   if (fleetTimer) clearInterval(fleetTimer);
   writeFleetSnapshot();
   fleetTimer = setInterval(writeFleetSnapshot, 8_000);
   if (breakerBeatTimer) clearInterval(breakerBeatTimer);
   breakerBeatTimer = setInterval(() => { try { runBreakerBeat(300_000); } catch (e) { console.error('[breaker beat]', e); } }, 30_000);
+  // REQUESTS-TAB-STALE (1.1.83): close the requests whose work is provably finished. Data only.
+  if (staleRequestsTimer) clearInterval(staleRequestsTimer);
+  runStaleRequestsBeat();
+  staleRequestsTimer = setInterval(runStaleRequestsBeat, 60_000);
   if (workerWakeTimer) clearInterval(workerWakeTimer);
   workerWakeTimer = setInterval(() => { try { runWorkerWakeBeat(); } catch (e) { console.error('[worker-wake beat]', e); } }, WORKER_WAKE_POLL_MS);
   if (heldInterferenceTimer) clearInterval(heldInterferenceTimer);

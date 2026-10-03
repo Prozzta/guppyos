@@ -778,6 +778,86 @@ export function openRequestEntries(doc: MailLedgerDoc, now: number): MailObligat
     .map((entry) => ({ entry, ageMs: Math.max(0, now - entry.deliveredAt) }));
 }
 
+/** REQUESTS-TAB-STALE (1.1.83): the acts that answer an ask when sent back in its conversation. */
+const ANSWER_ACTS = new Set(['done', 'inform', 'agree', 'refuse']);
+/** A card id as tasks.json spells them (MODS-GUARD, DWIGHT-INPUT-DEAD-179); only ids that exist count. */
+const CARD_ID_RE = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
+/** A subject that opens with the release it is for: "1.1.83: …", "rc/1.1.83 …", "v1.1.83 …". */
+const RELEASE_PREFIX_RE = /^\s*(?:rc\/)?v?(\d+)\.(\d+)\.(\d+)(?![.\d])/;
+
+export interface StaleObligation { agentId: string; id: string; reason: string }
+/** A card's status and when it became done (ms), or null when nothing on the card dates it. */
+export interface CardEvidence { status: string; doneAt: number | null }
+/** The first start of a packaged release on this hive (ms). */
+export interface ReleaseRun { version: string; firstRunAt: number }
+
+function versionParts(v: string | null | undefined): number[] | null {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(v ?? ''));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function versionAtLeast(have: number[], want: number[]): boolean {
+  for (let i = 0; i < 3; i++) if (have[i] !== want[i]) return have[i] > want[i];
+  return true;
+}
+
+/**
+ * REQUESTS-TAB-STALE (1.1.83): the open obligations whose work is provably finished, so the
+ * Requests tab shows live asks only. `docs` holds every agent's ledger (the owner owes the
+ * reply; the requester's ledger shows what the owner sent back). Every rule needs evidence
+ * from AFTER the ask (a new ask about finished work is a new ask). An obligation is stale when:
+ *  1. the subject names one or more cards (ids that exist in `cards`), every one is done, and
+ *     each became done after the ask arrived (no done time on the card = no proof);
+ *  2. the owner later sent the requester a done/inform/agree/refuse in the same conversation
+ *     that answers THIS ask: its in_reply_to names it, or it names nothing and this is the
+ *     latest open ask from that requester in the conversation;
+ *  3. the subject opens with a release (`1.1.82: …`) and the first start of any release at or
+ *     above it came after the ask arrived.
+ * Never by age alone: a dropped ask with none of this evidence stays open. Pure.
+ */
+export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, cards: ReadonlyMap<string, CardEvidence>, releases: readonly ReleaseRun[]): StaleObligation[] {
+  const runs = releases.map((r) => ({ v: versionParts(r.version), at: r.firstRunAt })).filter((r) => r.v && Number.isFinite(r.at));
+  const sortedBack = new Map<string, MailEntry[]>();
+  const backOf = (id: string): MailEntry[] => {
+    let list = sortedBack.get(id);
+    if (!list) { list = docs[id] ? Object.values(docs[id].entries).sort(bySeq) : []; sortedBack.set(id, list); }
+    return list;
+  };
+  const out: StaleObligation[] = [];
+  for (const [agentId, doc] of Object.entries(docs)) {
+    const open = Object.values(doc.entries).sort(bySeq).filter(isOpenObligation);
+    // The latest open ask per requester + conversation: the one an answer naming no ask answers.
+    const latest = new Map<string, string>();
+    for (const e of open) if (e.conversation) latest.set(`${e.from}\u0000${e.conversation}`, e.id);
+    for (const e of open) {
+      const subject = String(e.subject ?? '');
+      const named = [...new Set(subject.match(CARD_ID_RE) ?? [])].filter((id) => cards.has(id));
+      let reason: string | null = null;
+      if (named.length && named.every((id) => {
+        const c = cards.get(id)!;
+        return c.status === 'done' && c.doneAt !== null && c.doneAt > e.deliveredAt;
+      })) reason = `auto:card-done:${named.join(',')}`;
+      if (!reason && e.conversation) {
+        const isLatest = latest.get(`${e.from}\u0000${e.conversation}`) === e.id;
+        const answer = backOf(e.from).find((x) => x.from === agentId && x.conversation === e.conversation
+          && x.deliveredAt > e.deliveredAt && ANSWER_ACTS.has(x.act)
+          && (x.inReplyTo ? x.inReplyTo === e.id || (!!e.senderId && x.inReplyTo === e.senderId) : isLatest));
+        if (answer) reason = `auto:answered:${answer.act}:${answer.id}`;
+      }
+      const rel = RELEASE_PREFIX_RE.exec(subject);
+      if (!reason && rel) {
+        const want = [Number(rel[1]), Number(rel[2]), Number(rel[3])];
+        // The FIRST start of any release at or above it: an ask sent while it already ran is about
+        // that release (a bug in it), not for it, and a later release does not answer it.
+        const firstAt = Math.min(...runs.filter((r) => versionAtLeast(r.v!, want)).map((r) => r.at));
+        if (Number.isFinite(firstAt) && firstAt > e.deliveredAt) reason = `auto:release-shipped:${rel[1]}.${rel[2]}.${rel[3]}`;
+      }
+      if (reason) out.push({ agentId, id: e.id, reason });
+    }
+  }
+  return out;
+}
+
 export interface OpenEpoch { epoch: string; since: number; ids: string[] }
 
 /** Every epoch with surfacing/surfaced ids, oldest first (`since` = its earliest surfacing). The
@@ -1519,6 +1599,15 @@ export class MailLedger {
     if (!ref || !this.hasAgent(agentId)) return [];
     const st = this.state(agentId);
     return this.commit(st, applyCloseObligation(st.doc, ref, this.now(), reason)).changed;
+  }
+
+  /** REQUESTS-TAB-STALE (1.1.83): close one open obligation, by its exact ledger id, whose work
+   *  `staleObligations` found finished. Like the Human's close: no reply, no wake, not activity.
+   *  Returns the ids closed. */
+  autoCloseObligation(agentId: string, id: string, reason: string): string[] {
+    if (!id || !this.hasAgent(agentId) || !this.docOrEmpty(agentId).entries[id]) return [];
+    const st = this.state(agentId);
+    return this.commit(st, applyCloseObligation(st.doc, id, this.now(), reason)).changed;
   }
 
   /** The agent's channel override (§11.10 degradation), or null for the provider default. */

@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { MailLedger, freshMailId, isValidMailId } from './mailLedger';
+import { MailLedger, freshMailId, isValidMailId, staleObligations, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -62,7 +62,7 @@ import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
 import { preferredAgentRole } from '../shared/agentRole';
 import { introducedErrors, mergeTaskLedger, validateLedger, type LedgerIssue } from '../shared/taskLedger';
-import { TaskLedgerGuard, type TaskEditSource } from './taskLedgerGuard';
+import { TaskLedgerGuard, type CardMeta, type TaskEditSource } from './taskLedgerGuard';
 import { expandTilde } from './fs';
 import {
   AgyStatuslineOwner, PROCESS_STARTED_AT, buildStatuslineCommand, newOwnerToken, osLiveness,
@@ -534,6 +534,46 @@ const NODE_ROUTER_RUNTIME: RouterRuntime = {
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
+
+/** REQUESTS-TAB-STALE: when a done card became done (ms), or null (no proof). First the
+ *  harness's own record (state/task-meta.json): the newest `to:'done'` transition, or the card's
+ *  `statusSince` when it was created done; a time the guard only BOUNDED (found at start, not
+ *  exact) is late by an unknown amount, so it does not count. Then the card's `doneAt`, then the
+ *  earliest stamp in its result (appendResult writes `[<ISO>] …`). A card not done now never
+ *  counts. Every fallback must be a LOWER bound: a late time closes asks that came after the done. */
+export function cardDoneAt(card: unknown, meta?: CardMeta | null): number | null {
+  const c = card as { status?: unknown; doneAt?: unknown; result?: unknown } | null;
+  if (!c || c.status !== 'done') return null;
+  if (meta && meta.status === 'done') {
+    const last = [...(meta.history ?? [])].reverse().find((h) => h && h.to === 'done' && Number.isFinite(h.at));
+    const bounded = (at: number): boolean => at === meta.statusSince && !meta.statusSinceExact;
+    if (last && !bounded(last.at)) return last.at;
+    if (!last && meta.statusSinceExact && Number.isFinite(meta.statusSince)) return meta.statusSince;
+  }
+  if (typeof c.doneAt === 'string' && Number.isFinite(Date.parse(c.doneAt))) return Date.parse(c.doneAt);
+  if (typeof c.doneAt === 'number' && Number.isFinite(c.doneAt)) return c.doneAt;
+  // The EARLIEST stamp: notes appended after the done (a later "shipped") would move a newest
+  // stamp past asks that came after the real done (Creed). Earliest can only close fewer.
+  const stamps = typeof c.result === 'string' ? c.result.match(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g) ?? [] : [];
+  const times = stamps.map((s) => Date.parse(s)).filter(Number.isFinite);
+  return times.length ? Math.min(...times) : null;
+}
+
+/** REQUESTS-TAB-STALE one-time cleanup (god, 2026-10-03): the stale asks the strict rules cannot
+ *  prove finished, each verified by god, closed once at the first 1.1.83 start. Mail ids only
+ *  (unique across the hive); an id already closed or absent is skipped. */
+export const CLEANUP_183_IDS: readonly string[] = [
+  '2026-10-01T19-28-20-526Z-7841c0', '2026-10-01T19-46-49-472Z-cd74b1', '2026-10-01T19-48-30-408Z-815910', // DISK-USAGE x3
+  '2026-10-03T09-23-39-167Z-5ece4b', '2026-10-03T09-29-31-135Z-b56655', // claude-init-kill AUDIT + DELTA
+  '2026-10-03T08-57-53-890Z-6ccb84', // rebrand/a DELTA
+  '2026-10-02T17-37-48-985Z-205dd1', // GUPPYOS identity-scrub
+  '2026-10-02T18-19-18-439Z-c2efc8', // CODEX-MODEL-NOT-KEPT-179 (the card tracks the work)
+  '2026-09-30T17-36-43-459Z-7e384a', // WAKE-SCREEN-GUARD round 3
+  '2026-10-01T14-10-37-572Z-b97a1b', // "END your turn"
+  '2026-10-03T10-05-00-025Z-andy-pub182-jim' // PUBLISHED v1.1.82 verify ask
+];
+export const CLEANUP_183_REASON = 'cleanup-183:god-verified';
+const CLEANUP_183_FILE = 'cleanup-183.json';
 
 export class HiveManager {
   /**
@@ -3505,6 +3545,97 @@ export class HiveManager {
     const reg = this.registry();
     if (!Object.prototype.hasOwnProperty.call(reg.agents ?? {}, agentId)) return [];
     return this.mail.closeObligation(agentId, id, 'closed-by-human');
+  }
+
+  /**
+   * REQUESTS-TAB-STALE (1.1.83): close every open request whose work is provably finished (its
+   * card became done, its recipient answered it, or the release it names first started, each
+   * AFTER the ask: `staleObligations`). `runningVersion` is the packaged app's version (main runs
+   * this only when packaged). Each close logs a `mail-obligation-closed` row with an `auto:`
+   * reason. Data only: nothing wakes, no mail.
+   */
+  autoCloseStaleObligations(runningVersion: string | null): StaleObligation[] {
+    const reg = this.registry();
+    const docs: Record<string, MailLedgerDoc> = {};
+    for (const id of Object.keys(reg.agents ?? {})) {
+      if (Object.prototype.hasOwnProperty.call(reg.agents, id)) docs[id] = this.mail.ledger(id);
+    }
+    const list = (this.tasks() as { tasks?: unknown } | null)?.tasks;
+    let meta: Record<string, CardMeta> = {};
+    try { meta = this.ledgerGuard.taskMeta().cards ?? {}; } catch { /* no harness record: card fields only */ }
+    const cards = new Map<string, CardEvidence>();
+    for (const c of Array.isArray(list) ? list as Partial<HiveTask>[] : []) {
+      if (c && typeof c.id === 'string' && typeof c.status === 'string') {
+        cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c, Object.prototype.hasOwnProperty.call(meta, c.id) ? meta[c.id] : null) });
+      }
+    }
+    return staleObligations(docs, cards, this.releaseRuns(runningVersion))
+      .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
+  }
+
+  /**
+   * REQUESTS-TAB-STALE: the one-time cleanup of god-verified stale asks (CLEANUP_183_IDS). Runs
+   * once per hive: `state/cleanup-183.json` marks it done, whatever it found. Each open match is
+   * closed like the Human's close (a `mail-obligation-closed` row, reason CLEANUP_183_REASON; no
+   * mail, no wake). Returns the closed `{agentId, id}`, or null when it had already run.
+   */
+  runCleanup183(ids: readonly string[] = CLEANUP_183_IDS): { agentId: string; id: string }[] | null {
+    const root = this.root();
+    if (!root) return null;
+    const marker = join(root, 'state', CLEANUP_183_FILE);
+    if (existsSync(marker)) return null;
+    const closed: { agentId: string; id: string }[] = [];
+    const agents = Object.keys(this.registry().agents ?? {});
+    for (const id of ids) {
+      for (const agentId of agents) {
+        if (!this.mail.ledger(agentId).entries[id]) continue;
+        for (const c of this.mail.autoCloseObligation(agentId, id, CLEANUP_183_REASON)) closed.push({ agentId, id: c });
+      }
+    }
+    try {
+      mkdirSync(join(root, 'state'), { recursive: true });
+      atomicWriteJsonFile(marker, { v: 1, at: Date.now(), closed });
+    } catch { /* not marked: the next beat retries, and closed ids are skipped */ }
+    return closed;
+  }
+
+  /**
+   * REQUESTS-TAB-STALE: the first start of each packaged release on this hive, kept in
+   * `state/app-releases.json`. Seeded once from the `app-start` rows of the logs (rotated files
+   * included); the running version is added at its first sweep if no row has it.
+   */
+  private releaseRuns(runningVersion: string | null): ReleaseRun[] {
+    const root = this.root();
+    if (!root) return [];
+    const file = join(root, 'state', 'app-releases.json');
+    let first: Record<string, number> | null = null;
+    try {
+      const doc = JSON.parse(readFileSync(file, 'utf8')) as { firstRunAt?: unknown };
+      if (doc && typeof doc.firstRunAt === 'object' && doc.firstRunAt) first = { ...(doc.firstRunAt as Record<string, number>) };
+    } catch { /* absent or unreadable: seed from the logs */ }
+    let changed = false;
+    if (!first) {
+      first = {};
+      changed = true;
+      const live = join(root, 'log.jsonl');
+      for (const p of [...rotatedFiles(live).map((r) => r.path), live]) {
+        let text = '';
+        try { text = readFileSync(p, 'utf8'); } catch { continue; }
+        for (const line of text.split('\n')) {
+          if (!line.includes('"app-start"')) continue;
+          try {
+            const r = JSON.parse(line) as { kind?: unknown; packaged?: unknown; version?: unknown; ts?: unknown };
+            if (r.kind !== 'app-start' || r.packaged !== true || typeof r.version !== 'string' || typeof r.ts !== 'number') continue;
+            if (!(first[r.version] <= r.ts)) first[r.version] = r.ts;
+          } catch { /* a torn line */ }
+        }
+      }
+    }
+    if (runningVersion && typeof first[runningVersion] !== 'number') { first[runningVersion] = Date.now(); changed = true; }
+    if (changed) {
+      try { mkdirSync(join(root, 'state'), { recursive: true }); atomicWriteJsonFile(file, { v: 1, firstRunAt: first }); } catch { /* next sweep retries */ }
+    }
+    return Object.entries(first).filter(([, at]) => typeof at === 'number').map(([version, firstRunAt]) => ({ version, firstRunAt }));
   }
 
   /**
