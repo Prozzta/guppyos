@@ -18,6 +18,38 @@
 ; menu for any renamed copy of the old shortcut the stock step does not know about.
 ; The target is read with PowerShell (hidden, nsExec); if that fails, nothing is changed.
 
+; REBRAND-UPDATER-BASE (1.1.83): electron-builder 25.1.8 passes APP_INSTALLER_STORE_FILE on the
+; makensis command line as "<package name>-updater\installer.exe" (NsisTarget.js, appInfo
+; updaterCacheDirName) = "munder-difflin-updater\installer.exe", and include/installer.nsh copies the
+; running installer there ($LOCALAPPDATA) as the base for the next DIFFERENTIAL update. Since 1.1.82
+; the app's updater cache is guppy-updater (afterPack-memory-prune.cjs writes app-update.yml), and
+; electron-updater looks for the base in <cache>\installer.exe, so it never found one: every update
+; downloaded in full, and each install left ~218 MB in munder-difflin-updater. This file is included
+; BEFORE the template, so the define is replaced here, before installApplicationFiles uses it.
+!define GUPPY_UPDATER_DIR "guppy-updater"
+!define GUPPY_OLD_UPDATER_DIR "munder-difflin-updater"
+!ifdef APP_INSTALLER_STORE_FILE
+  !undef APP_INSTALLER_STORE_FILE
+  !define APP_INSTALLER_STORE_FILE "${GUPPY_UPDATER_DIR}\installer.exe"
+!endif
+!ifndef GUPPY_LOCALAPPDATA
+  !define GUPPY_LOCALAPPDATA "$LOCALAPPDATA"
+!endif
+
+; Once the new base is in place, the old one (and an update the old cache downloaded) is dropped.
+; Explicit names only; RMDir without /r removes a folder only when it is empty. A file in use (the
+; installer a 1.1.81 updater is running from pending\) cannot be deleted and simply stays.
+!macro guppyDropOldUpdaterBase
+  ${If} ${FileExists} "${GUPPY_LOCALAPPDATA}\${GUPPY_UPDATER_DIR}\installer.exe"
+    Delete "${GUPPY_LOCALAPPDATA}\${GUPPY_OLD_UPDATER_DIR}\installer.exe"
+    Delete "${GUPPY_LOCALAPPDATA}\${GUPPY_OLD_UPDATER_DIR}\pending\update-info.json"
+    Delete "${GUPPY_LOCALAPPDATA}\${GUPPY_OLD_UPDATER_DIR}\pending\*.exe"
+    RMDir "${GUPPY_LOCALAPPDATA}\${GUPPY_OLD_UPDATER_DIR}\pending"
+    RMDir "${GUPPY_LOCALAPPDATA}\${GUPPY_OLD_UPDATER_DIR}"
+    ClearErrors
+  ${EndIf}
+!macroend
+
 !define GUPPY_OLD_EXE "Munder Difflin.exe"
 !ifndef GUPPY_PIN_DIR
   !define GUPPY_PIN_DIR "$APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
@@ -59,4 +91,13 @@
   !insertmacro guppyRetargetLinks "$DESKTOP"
   !insertmacro guppyRetargetLinks "$SMPROGRAMS"
   System::Call 'Shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
+  ; REBRAND-UPDATER-BASE: the updater base lives in $LOCALAPPDATA of the user (as installer.nsh
+  ; copies it), so switch to the current user's folders for an all-users install, as it does.
+  ${if} $installMode == "all"
+    SetShellVarContext current
+  ${endif}
+  !insertmacro guppyDropOldUpdaterBase
+  ${if} $installMode == "all"
+    SetShellVarContext all
+  ${endif}
 !macroend
