@@ -21,6 +21,11 @@
  * Its re-read cost is estimated as chars/4 tokens times those requests, and --caps simulates a
  * per-result cap (chars kept) to estimate what a cap would have saved. Images count as 0 chars.
  *
+ * Compactions: each compact_boundary row (Claude Code's own record: trigger, preTokens) is counted,
+ * with an ESTIMATED cost of its summary call, which no transcript records: the context before it
+ * read once from the cache (preTokens x 0.1) plus the summary's output (the "This session is being
+ * continued" message that follows, chars/4). Jim's suggestion, READS-181 pilot.
+ *
  * Usage: node reads-measure.cjs [--day YYYY-MM-DD] [--since YYYY-MM-DD] [--agent <id>] [--top N]
  *                               [--tz <hours from UTC for the day boundary>] [--caps 1500,2000,30000]
  *                               [--dir <projects dir>] [--json] [--all]
@@ -110,15 +115,26 @@ async function readTranscript(file, { sizeHint } = {}) {
   let pending = []; // tool results since the last request
   const byReq = new Map();
   const results = []; // every tool result; `at` = the index of the first request that reads it
+  const compactions = []; // { at, preTokens, trigger, summaryChars }
   for await (const line of rl) {
     if (!line) continue;
     if (agent === null && (line.includes('/hook/') || line.includes('You are'))) agent = agentOf(line);
     let row;
     try { row = JSON.parse(line); } catch { continue; }
+    if (row && row.type === 'system' && row.subtype === 'compact_boundary' && row.isSidechain !== true) {
+      const meta = row.compactMetadata && typeof row.compactMetadata === 'object' ? row.compactMetadata : {};
+      compactions.push({ at: typeof row.timestamp === 'string' ? row.timestamp : '', preTokens: num(meta.preTokens), trigger: typeof meta.trigger === 'string' ? meta.trigger : null, summaryChars: 0 });
+      continue;
+    }
     const msg = row && row.message;
     if (!msg || typeof msg !== 'object') continue;
     const content = Array.isArray(msg.content) ? msg.content : [];
     if (row.type === 'user') {
+      const last = compactions[compactions.length - 1];
+      if (last && !last.summaryChars) {
+        const text = typeof msg.content === 'string' ? msg.content : content.map((b) => (b && typeof b.text === 'string' ? b.text : '')).join('');
+        if (text.startsWith('This session is being continued')) last.summaryChars = text.length;
+      }
       for (const b of content) {
         if (b && b.type === 'tool_result') {
           const r = { tool: toolName.get(b.tool_use_id) || '?', chars: resultChars(b), at: byReq.size };
@@ -149,7 +165,7 @@ async function readTranscript(file, { sizeHint } = {}) {
     if (i > 0 && requests[i].ctx < requests[i - 1].ctx / 2) e = i;
   }
   for (const r of results) r.reads = r.at < requests.length ? end[r.at] - r.at : 0;
-  return { agent, requests, results };
+  return { agent, requests, results, compactions };
 }
 
 const shiftDay = (at, tz) => (tz && at ? new Date(Date.parse(at) + tz * 3_600_000).toISOString().slice(0, 10) : at.slice(0, 10));
@@ -173,13 +189,20 @@ function aggregate(transcripts, o) {
       if (!inRange(day, o)) continue;
       const k = `${agent}\t${day}`;
       let a = rows.get(k);
-      if (!a) { a = { agent, day, requests: 0, subRequests: 0, sessions: new Set(), read: 0, write: 0, input: 0, output: 0, maxCtx: 0, turns: [], tools: {} }; rows.set(k, a); }
+      if (!a) { a = { compactions: 0, compactCallBE: 0, agent, day, requests: 0, subRequests: 0, sessions: new Set(), read: 0, write: 0, input: 0, output: 0, maxCtx: 0, turns: [], tools: {} }; rows.set(k, a); }
       a.requests += 1;
       if (t.sub) a.subRequests += 1;
       a.sessions.add(t.session);
       a.read += r.read; a.write += r.write; a.input += r.input; a.output += r.output;
       a.maxCtx = Math.max(a.maxCtx, r.ctx);
       a.turns.push({ at: r.at, session: t.session, sub: t.sub, ctx: r.ctx, write: r.write, cause: r.cause });
+    }
+    for (const c of t.compactions || []) {
+      if (!c.at) continue;
+      const a = rows.get(`${agent}\t${shiftDay(c.at, o.tz)}`);
+      if (!a) continue;
+      a.compactions += 1;
+      a.compactCallBE += Math.round(0.1 * c.preTokens + c.summaryChars / 4);
     }
     for (const x of t.results || []) {
       const req = t.requests[x.at];
@@ -202,7 +225,7 @@ function aggregate(transcripts, o) {
       agent: a.agent, day: a.day, requests: a.requests, subRequests: a.subRequests, sessions: a.sessions.size,
       cacheRead: a.read, cacheWrite: a.write, input: a.input, output: a.output,
       avgReadPerRequest: a.requests ? Math.round(a.read / a.requests) : 0,
-      maxContext: a.maxCtx, largestAdds: top, tools: a.tools
+      maxContext: a.maxCtx, largestAdds: top, tools: a.tools, compactions: a.compactions, compactCallBE: a.compactCallBE
     };
   });
   out.sort((x, y) => (x.day === y.day ? y.cacheRead - x.cacheRead : x.day < y.day ? -1 : 1));
@@ -212,9 +235,9 @@ function aggregate(transcripts, o) {
 const M = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
 
 function render(rows, caps = []) {
-  const lines = ['| day (UTC) | agent | requests (sub) | cache reads | avg read/request | max context | cache writes | output |', '|---|---|---|---|---|---|---|---|'];
+  const lines = ['| day (UTC) | agent | requests (sub) | cache reads | avg read/request | max context | cache writes | output | compactions (est. summary-call BE) |', '|---|---|---|---|---|---|---|---|---|'];
   for (const r of rows) {
-    lines.push(`| ${r.day} | ${r.agent} | ${r.requests} (${r.subRequests}) | ${M(r.cacheRead)} | ${M(r.avgReadPerRequest)} | ${M(r.maxContext)} | ${M(r.cacheWrite)} | ${M(r.output)} |`);
+    lines.push(`| ${r.day} | ${r.agent} | ${r.requests} (${r.subRequests}) | ${M(r.cacheRead)} | ${M(r.avgReadPerRequest)} | ${M(r.maxContext)} | ${M(r.cacheWrite)} | ${M(r.output)} | ${r.compactions} (${M(r.compactCallBE)}) |`);
   }
   lines.push('', 'Tool outputs (est. tokens = chars/4; re-read = tokens x later requests until a reset; "saved at N" = what a per-result cap of N chars would have saved; tools under 50k re-read omitted):', '',
     `| day | agent | tool | results | chars | largest | est. re-read | ${caps.map((c) => `saved at ${c}`).join(' | ')} |`,

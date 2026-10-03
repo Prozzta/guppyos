@@ -584,7 +584,9 @@ test('C: reads-measure folds a request\'s rows by requestId, names the agent fro
     { type: 'assistant', requestId: 'r1', timestamp: '2026-10-02T10:00:01Z', message: { id: 'm1', usage: u(1000, 100, 9), content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] } },
     { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'x'.repeat(4000) }] } },
     { type: 'assistant', requestId: 'r2', timestamp: '2026-10-02T10:00:02Z', message: { id: 'm2', usage: u(2000, 1000, 3), content: [{ type: 'text', text: 'done' }] } },
-    { type: 'assistant', requestId: 'r3', timestamp: '2026-10-02T10:00:03Z', message: { id: 'm3', usage: u(2100, 10, 3), content: [{ type: 'text', text: 'more' }] } }
+    { type: 'assistant', requestId: 'r3', timestamp: '2026-10-02T10:00:03Z', message: { id: 'm3', usage: u(2100, 10, 3), content: [{ type: 'text', text: 'more' }] } },
+    { type: 'system', subtype: 'compact_boundary', timestamp: '2026-10-02T10:00:04Z', compactMetadata: { trigger: 'auto', preTokens: 150000 } },
+    { type: 'user', message: { content: 'This session is being continued from a previous conversation. ' + 's'.repeat(3938) } }
   ];
   fs.writeFileSync(path.join(pdir, 's1.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n'));
   fs.writeFileSync(path.join(pdir, 'other.jsonl'), JSON.stringify({ type: 'assistant', requestId: 'z', timestamp: '2026-10-02T10:00:00Z', message: { usage: u(5, 5, 5), content: [] } }));
@@ -597,5 +599,6 @@ test('C: reads-measure folds a request\'s rows by requestId, names the agent fro
   assert.equal(row.tools.Bash.results, 1);
   assert.equal(row.tools.Bash.reread, 1000 * 2, '4000 chars = 1000 tokens, re-read by the 2 requests after it');
   assert.equal(row.tools.Bash.saved[1500], 625 * 2);
+  assert.deepEqual([row.compactions, row.compactCallBE], [1, 15000 + 1000], 'the summary call: 150000 x 0.1 + 4000 chars / 4');
   assert.equal(M.listTranscripts(dir).length, 2);
 });
