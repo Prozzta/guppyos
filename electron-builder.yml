@@ -8,6 +8,13 @@ productName: Guppy
 # and taskbar pins are re-aimed at Guppy.exe on update: build/installer.nsh.
 executableName: Guppy
 copyright: Copyright © 2026 Chaitanya Giri
+# REBRAND-FILEDESCRIPTION (1.1.83): Windows shows an exe's FileDescription as its name in Task
+# Manager (and the setup exe's), and electron-builder fills it from the package "description"
+# (winPackager.signAndEditResources, NsisTarget). So the packaged description is the app name.
+# The source package.json keeps the long one, and so does Linux (linux.description below); the
+# package "name" (munder-difflin) is untouched.
+extraMetadata:
+  description: Guppy
 
 # Where electron-updater looks for new versions (latest*.yml + assets on GitHub
 # releases). The release workflow still uploads assets itself (--publish never);
@@ -177,6 +184,8 @@ portable:
 # ---- Linux ----
 linux:
   category: Development
+  # The .desktop Comment; without it the AppImage would say just "Guppy" (see extraMetadata).
+  description: "Clones for you and your team, working 24/7 — a free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine."
   icon: build/icon.png
   target:
     - target: AppImage
