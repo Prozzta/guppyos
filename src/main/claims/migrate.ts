@@ -30,8 +30,8 @@
  * `source: 'legacy'`; a parsed memory.md entry gets `source: 'self'`; both carry `legacy` provenance.
  */
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { CLAIM_TEXT_MAX_LEGACY } from '../../shared/claims';
 import type { ClaimKind, LedgerRec, RecordDraft } from '../../shared/claims';
 
@@ -122,21 +122,29 @@ export function splitEntries(text: string, file: string): { entries: Entry[]; sk
   return { entries, skippedLines };
 }
 
-/** Split text into parts of at most `max` chars that concatenate back to it exactly (line boundaries first). */
-export function splitText(text: string, max = LEGACY_TEXT_MAX): string[] {
+/**
+ * Split text at LINE BOUNDARIES ONLY into parts of at most `max` chars that concatenate back to it
+ * exactly. A single line longer than `max` cannot be split that way: the result is null, and the
+ * caller refuses and reports the entry (god 5a86f6). Text is never cut inside a line.
+ */
+export function splitText(text: string, max = LEGACY_TEXT_MAX): string[] | null {
   if (text.length <= max) return [text];
   const parts: string[] = [];
   let cur = '';
   for (const piece of text.split(/(?<=\n)/)) {
+    if (piece.length > max) return null;
     if (cur.length + piece.length <= max) { cur += piece; continue; }
-    if (cur) { parts.push(cur); cur = ''; }
-    let p = piece;
-    while (p.length > max) { parts.push(p.slice(0, max)); p = p.slice(max); }
-    cur = p;
+    parts.push(cur);
+    cur = piece;
   }
   if (cur) parts.push(cur);
   return parts;
 }
+
+/** An entry W6 could not turn into claims: reported (import manifest, report, log row), never dropped silently. */
+export interface Refusal { file: string; line: number; chars: number; error: string }
+
+export const LINE_TOO_LONG = `a single line over ${LEGACY_TEXT_MAX} characters (split only at line boundaries)`;
 
 /** An entry's date as an ISO `at` (claims.ts: main still clamps it to the write time). */
 export function isoAt(date: string | null): string | undefined {
@@ -145,19 +153,30 @@ export function isoAt(date: string | null): string | undefined {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
-/** The drafts for one entry: one per part, all with the same legacy provenance. */
-export function draftsFor(e: Entry, source: 'legacy' | 'self'): RecordDraft[] {
+/** The drafts for one entry (one per part, all with the same legacy provenance), or its refusal. */
+export function entryDrafts(e: Entry, source: 'legacy' | 'self'): { drafts: RecordDraft[]; refusal: Refusal | null } {
+  const parts = splitText(e.text);
+  if (!parts) {
+    const longest = Math.max(...e.text.split('\n').map((l) => l.length));
+    return { drafts: [], refusal: { file: e.file, line: e.line, chars: longest, error: LINE_TOO_LONG } };
+  }
   const kind: ClaimKind = e.lesson ? 'lesson' : 'fact';
   const at = isoAt(e.date);
-  return splitText(e.text).map((text) => {
+  const drafts = parts.map((text) => {
     const d: RecordDraft = { t: 'claim', kind, text, source, legacy: { file: e.file, line: e.line, sha256: e.sha256 } };
     if (at) d.at = at;
     if (kind === 'lesson') d.pin = true;
     return d;
   });
+  return { drafts, refusal: null };
 }
 
-export interface FileManifest { file: string; bytes: number; sha256: string; entries: number; nonBlankLines: number; entryLines: number; skippedLines: number }
+/** The drafts for one entry; [] for a refused one (use entryDrafts to see the refusal). */
+export function draftsFor(e: Entry, source: 'legacy' | 'self'): RecordDraft[] {
+  return entryDrafts(e, source).drafts;
+}
+
+export interface FileManifest { file: string; bytes: number; sha256: string; entries: number; nonBlankLines: number; entryLines: number; skippedLines: number; refused: number }
 
 /** The agent's legacy files in import order: archives by name (they are dated), then memory.md. */
 export function legacyFiles(agentDir: string): string[] {
@@ -180,7 +199,8 @@ export function importLegacyDetailed(agentDir: string): { entries: Entry[]; mani
       file: f, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex'), entries: r.entries.length,
       nonBlankLines: text.replace(/\r\n/g, '\n').split('\n').filter((l) => l.trim() !== '').length,
       entryLines: r.entries.reduce((s, e) => s + e.text.split('\n').filter((l) => l.trim() !== '').length, 0),
-      skippedLines: r.skippedLines
+      skippedLines: r.skippedLines,
+      refused: r.entries.filter((e) => splitText(e.text) === null).length
     });
   }
   return { entries, manifest };
@@ -222,15 +242,24 @@ const OPEN_ASSEMBLIES_MAX = 16;
 
 /** G6.2/G6.4: the legacy drafts the ledger does not hold yet. Per-hash counts, never file:line. */
 export function newLegacyDrafts(agentDir: string, records: LedgerRec[]): RecordDraft[] {
+  return newLegacyImport(agentDir, records).drafts;
+}
+
+/** newLegacyDrafts plus the entries refused (reported every run: they never reach the ledger). */
+export function newLegacyImport(agentDir: string, records: LedgerRec[]): { drafts: RecordDraft[]; refusals: Refusal[] } {
   const have = ledgerEntryCounts(records);
   const seen = new Map<string, number>();
-  const out: RecordDraft[] = [];
+  const drafts: RecordDraft[] = [];
+  const refusals: Refusal[] = [];
   for (const e of importLegacyDetailed(agentDir).entries) {
     const n = (seen.get(e.sha256) ?? 0) + 1;
     seen.set(e.sha256, n);
-    if (n > (have.get(e.sha256) ?? 0)) out.push(...draftsFor(e, 'legacy'));
+    if (n <= (have.get(e.sha256) ?? 0)) continue;
+    const r = entryDrafts(e, 'legacy');
+    drafts.push(...r.drafts);
+    if (r.refusal) refusals.push(r.refusal);
   }
-  return out;
+  return { drafts, refusals };
 }
 
 /**
@@ -251,26 +280,54 @@ export function knownIdsFor(records: LedgerRec[]): Set<string> {
  * claim, word for word.
  */
 export function parseNewBullets(memoryMd: string, knownIds: Set<string>): RecordDraft[] {
-  return splitEntries(memoryMd, 'memory.md').entries.filter((e) => {
-    if (knownIds.has(`b:${e.sha256}`)) return false;
+  return parseNewBulletsDetailed(memoryMd, knownIds).drafts;
+}
+
+/** parseNewBullets plus the entries refused (a single line over the limit). */
+export function parseNewBulletsDetailed(memoryMd: string, knownIds: Set<string>): { drafts: RecordDraft[]; refusals: Refusal[] } {
+  const drafts: RecordDraft[] = [];
+  const refusals: Refusal[] = [];
+  for (const e of splitEntries(memoryMd, 'memory.md').entries) {
+    if (knownIds.has(`b:${e.sha256}`)) continue;
     const tag = RENDERED_RE.exec(e.text);
-    return !(tag && knownIds.has(tag[1]));
-  }).flatMap((e) => draftsFor(e, 'self'));
+    if (tag && knownIds.has(tag[1])) continue;
+    const r = entryDrafts(e, 'self');
+    drafts.push(...r.drafts);
+    if (r.refusal) refusals.push(r.refusal);
+  }
+  return { drafts, refusals };
+}
+
+export interface BackupResult {
+  /** A new backup was written now. */
+  written: boolean;
+  files: Array<{ file: string; sha256: string; bytes: number }>;
+  /** destDir exists without its completion manifest: NOTHING was written, and the caller must stop. */
+  partial?: boolean;
 }
 
 /**
  * G6.5: the frozen S0 backup of an agent's memory.md and archives, byte for byte, with a manifest.
- * Never overwrites: if a backup exists it is kept as it is (the first freeze is the one that counts).
+ * It NEVER overwrites anything (god 5a86f6):
+ *   - a complete backup (destDir with manifest.json) is kept as it is: the first freeze counts;
+ *   - destDir existing in any other form (a partial backup, a stray file) is left untouched and
+ *     reported as `partial`, so the caller stops;
+ *   - a new backup is built in a fresh sibling folder, files copied with COPYFILE_EXCL, the manifest
+ *     written last, then the folder is renamed into place, so destDir only ever appears complete.
  */
-export function frozenBackup(agentDir: string, destDir: string): { written: boolean; files: Array<{ file: string; sha256: string; bytes: number }> } {
+export function frozenBackup(agentDir: string, destDir: string): BackupResult {
   const manifestPath = join(destDir, 'manifest.json');
   if (existsSync(manifestPath)) return { written: false, files: JSON.parse(readFileSync(manifestPath, 'utf8')).files };
-  mkdirSync(destDir, { recursive: true });
+  if (existsSync(destDir)) return { written: false, files: [], partial: true };
+  mkdirSync(dirname(destDir), { recursive: true });
+  const tmp = mkdtempSync(`${destDir}.tmp-`);
   const files = legacyFiles(agentDir).map((f) => {
     const buf = readFileSync(join(agentDir, f));
-    copyFileSync(join(agentDir, f), join(destDir, f));
+    copyFileSync(join(agentDir, f), join(tmp, f), fsConstants.COPYFILE_EXCL);
     return { file: f, sha256: createHash('sha256').update(buf).digest('hex'), bytes: buf.length };
   });
-  writeFileSync(manifestPath, JSON.stringify({ v: 1, files }, null, 1));
+  writeFileSync(join(tmp, 'manifest.json'), JSON.stringify({ v: 1, files }, null, 1), { flag: 'wx' });
+  if (existsSync(destDir)) return { written: false, files: [], partial: true };   // appeared meanwhile: leave both
+  renameSync(tmp, destDir);
   return { written: true, files };
 }

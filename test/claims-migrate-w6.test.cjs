@@ -113,22 +113,44 @@ test('dates: text first, then heading, then the rolled marker, then the file nam
   assert.deepEqual([g.date, g.dateSource], ['2026-09-28', 'rolled-upper-bound']);
 });
 
-test('G6.1 limit: the W6 limit is the frozen CLAIM_TEXT_MAX_LEGACY; a long entry splits into parts that concatenate back and hash to its legacy.sha256', () => {
+/** A synthetic multi-line entry of about `chars` characters (lines of 80). */
+const longEntry = (chars, ch = 'y') => {
+  const lines = ['- 2026-10-03 a long invented entry'];
+  for (let i = 0; lines.join('\n').length < chars; i++) lines.push(`  line ${i} `.padEnd(80, ch));
+  return lines.join('\n');
+};
+
+test('G6.1 limit: the W6 limit is the frozen CLAIM_TEXT_MAX_LEGACY; a multi-line entry over it splits at line boundaries into parts that concatenate back and hash to its legacy.sha256', () => {
   assert.equal(M.LEGACY_TEXT_MAX, C.CLAIM_TEXT_MAX_LEGACY);
   assert.equal(M.LEGACY_TEXT_MAX, 4000);
-  const lines = ['- 2026-10-03 a long entry'];
-  for (let i = 0; i < 120; i++) lines.push(`  continuation line ${i} `.padEnd(60, 'x'));
-  lines.push('  ' + 'y'.repeat(9000));   // one line longer than the limit: split inside the line
-  const e = M.splitEntries(lines.join('\n'), 'memory.md').entries;
+  const e = M.splitEntries(longEntry(11000), 'memory.md').entries;
   assert.equal(e.length, 1);
   const parts = M.draftsFor(e[0], 'legacy');
-  assert.ok(parts.length >= 4);
+  assert.ok(parts.length >= 3);
   for (const p of parts) assert.ok(p.text.length <= 4000, `part of ${p.text.length}`);
   assert.equal(parts.map((p) => p.text).join(''), e[0].text, 'verbatim: nothing cut');
   assert.equal(sha(parts.map((p) => p.text).join('')), parts[0].legacy.sha256);
   assert.ok(parts.every((p) => JSON.stringify(p.legacy) === JSON.stringify(parts[0].legacy)), 'every part has the same provenance');
-  // line boundaries first: every part but the in-line splits ends on a newline
-  assert.ok(parts[0].text.endsWith('\n'));
+  for (const p of parts.slice(0, -1)) assert.ok(p.text.endsWith('\n'), 'every part but the last ends at a line boundary');
+});
+
+test('G6.1 limit: a SINGLE line over the limit is never cut: refused and reported (draft list, manifest, import plan)', () => {
+  const line = '- ' + 'y'.repeat(9000);
+  assert.equal(M.splitText(line), null);
+  const e = M.splitEntries(`${line}\n- an ordinary entry\n`, 'memory.md').entries;
+  const r = M.entryDrafts(e[0], 'legacy');
+  assert.deepEqual(r.drafts, []);
+  assert.deepEqual(r.refusal, { file: 'memory.md', line: 1, chars: 9002, error: M.LINE_TOO_LONG });
+  assert.deepEqual(M.draftsFor(e[0], 'legacy'), []);
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'memory.md'), `${line}\n- an ordinary entry\n`);
+  assert.equal(M.importLegacyDetailed(dir).manifest[0].refused, 1);
+  const plan = M.newLegacyImport(dir, []);
+  assert.deepEqual(plan.drafts.map((d) => d.text), ['- an ordinary entry']);
+  assert.equal(plan.refusals.length, 1);
+  assert.equal(M.newLegacyImport(dir, asRecords(plan.drafts)).refusals.length, 1, 'reported again on every run: it never reaches the ledger');
+  const parsed = M.parseNewBulletsDetailed(`${line}\n`, new Set());
+  assert.deepEqual([parsed.drafts.length, parsed.refusals.length], [0, 1]);
 });
 
 test('a short entry over 400 stays whole (4000 is the W6 limit, not 400)', () => {
@@ -184,7 +206,7 @@ test('G6.2 per-hash counts: the ledger holds one copy of a repeated entry, the f
 
 test('G6.2 idempotence over split parts: the parts of one entry count as one entry', () => {
   const dir = tmp();
-  fs.writeFileSync(path.join(dir, 'memory.md'), '- ' + 'p'.repeat(9000) + '\n- short\n');
+  fs.writeFileSync(path.join(dir, 'memory.md'), longEntry(11000, 'p') + '\n- short\n');
   const first = M.newLegacyDrafts(dir, []);
   assert.equal(first.length, 4);   // 3 parts + 1
   assert.equal(M.newLegacyDrafts(dir, asRecords(first)).length, 0);
@@ -228,6 +250,35 @@ test('parser + import agree: a parsed self claim is not re-imported later as leg
   assert.equal(M.newLegacyDrafts(dir, all).length, 0);
 });
 
+test('G6.5 frozen backup: a pre-existing PARTIAL folder (no manifest) is never overwritten: partial, untouched', () => {
+  const dir = agentDir();
+  const dest = path.join(tmp(), 'backup');
+  fs.mkdirSync(dest);
+  fs.writeFileSync(path.join(dest, 'memory.md'), 'an earlier partial copy');
+  const r = M.frozenBackup(dir, dest);
+  assert.deepEqual([r.written, r.partial, r.files.length], [false, true, 0]);
+  assert.equal(fs.readFileSync(path.join(dest, 'memory.md'), 'utf8'), 'an earlier partial copy');
+  assert.deepEqual(fs.readdirSync(dest), ['memory.md']);
+});
+
+test('G6.5 frozen backup: a pre-existing target FILE at the backup path is never overwritten', () => {
+  const dir = agentDir();
+  const dest = path.join(tmp(), 'backup');
+  fs.writeFileSync(dest, 'a stray file');
+  const r = M.frozenBackup(dir, dest);
+  assert.deepEqual([r.written, r.partial], [false, true]);
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'a stray file');
+});
+
+test('G6.5 frozen backup: built in a fresh folder and renamed into place; no temp folder is left', () => {
+  const dir = agentDir();
+  const parent = tmp();
+  const r = M.frozenBackup(dir, path.join(parent, 'backup'));
+  assert.equal(r.written, true);
+  assert.deepEqual(fs.readdirSync(parent), ['backup']);
+  assert.ok(fs.existsSync(path.join(parent, 'backup', 'manifest.json')));
+});
+
 test('G6.5 frozen backup: byte-identical copies plus a manifest; never overwritten', () => {
   const dir = agentDir();
   const dest = path.join(tmp(), 'backup');
@@ -251,7 +302,7 @@ test('the module never sets a source an external caller could choose: only legac
 
 test('part counting is order-proof: another record between two parts, and a part orphaned by a crash', () => {
   const dir = tmp();
-  fs.writeFileSync(path.join(dir, 'memory.md'), '- ' + 'q'.repeat(9000) + '\n');
+  fs.writeFileSync(path.join(dir, 'memory.md'), longEntry(11000, 'q') + '\n');
   const parts = M.newLegacyDrafts(dir, []);
   assert.equal(parts.length, 3);
   const other = { t: 'claim', kind: 'fact', text: 'a note from elsewhere', source: 'self' };
