@@ -74,6 +74,26 @@ export interface CompactHealth {
   at: string | null;
   /** The first request after the boundary: its context and its cost parts (tokens). */
   first: { context: number; input: number; cacheRead: number; cacheWrite: number; output: number; billedEquivalent: number } | null;
+  /** READS-COMPACT-HEALTH (1.1.83): the compaction summary Claude wrote (its `isCompactSummary`
+   *  record after the boundary), or null when it is not in the tail. */
+  summary?: string | null;
+  /** READS-COMPACT-HEALTH: ms from the agent's last request before the boundary to the boundary,
+   *  or null. Over an hour the prompt cache has expired, so that compaction re-WRITES the context
+   *  (Jim, 4eb6fec5 audit: about preTokens x 2 billed) instead of reading it. */
+  idleBeforeMs?: number | null;
+}
+
+/** READS-COMPACT-HEALTH: Jim's 4eb6fec5 audit measured summaries at about 2.5 characters per token
+ *  (chars/4 under-counts them by about 35%). */
+export const SUMMARY_CHARS_PER_TOKEN = 2.5;
+/** The prompt cache's lifetime: a compaction after a longer idle re-writes the context. */
+export const CACHE_TTL_MS = 60 * 60 * 1000;
+
+function textOf(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return null;
+  const parts = content.map((c) => (c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string' ? (c as { text: string }).text : '')).filter(Boolean);
+  return parts.length ? parts.join('\n') : null;
 }
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -103,10 +123,19 @@ export function compactHealthFromTail(tail: string): CompactHealth | null {
 function healthAt(lines: readonly string[], at: number, rec: Record<string, unknown>): CompactHealth {
   const meta = (typeof rec.compactMetadata === 'object' && rec.compactMetadata !== null ? rec.compactMetadata : {}) as Record<string, unknown>;
   let first: CompactHealth['first'] = null;
-  for (let i = at + 1; i < lines.length && !first; i += 1) {
+  let summary: string | null = null;
+  for (let i = at + 1; i < lines.length && (!first || summary === null); i += 1) {
     // The first request after THIS boundary, not one after a later boundary.
     if (lines[i].includes('"compact_boundary"')) break;
     const l = lines[i];
+    if (summary === null && l.includes('"isCompactSummary"')) {
+      try {
+        const r = JSON.parse(l) as { isCompactSummary?: unknown; isSidechain?: unknown; message?: { content?: unknown } };
+        if (r.isCompactSummary === true && r.isSidechain !== true) summary = textOf(r.message?.content) ?? '';
+      } catch { /* a torn line */ }
+      continue;
+    }
+    if (first) continue;
     if (!l.includes('"usage"')) continue;
     try {
       const r = JSON.parse(l) as { type?: unknown; isSidechain?: unknown; message?: { usage?: Record<string, unknown> } };
@@ -117,11 +146,32 @@ function healthAt(lines: readonly string[], at: number, rec: Record<string, unkn
       first = { context: input + cacheRead + cacheWrite, input, cacheRead, cacheWrite, output, billedEquivalent: Math.round(input + 0.1 * cacheRead + 2 * cacheWrite + output) };
     } catch { /* a torn line */ }
   }
+  const atText = typeof rec.timestamp === 'string' ? rec.timestamp : null;
   return {
     uuid: typeof rec.uuid === 'string' ? rec.uuid : `line-${at}`,
     trigger: typeof meta.trigger === 'string' ? meta.trigger : null,
     preTokens: num(meta.preTokens), postTokens: num(meta.postTokens), durationMs: num(meta.durationMs),
-    at: typeof rec.timestamp === 'string' ? rec.timestamp : null,
-    first
+    at: atText,
+    first,
+    summary,
+    idleBeforeMs: idleBefore(lines, at, atText)
   };
+}
+
+/** The gap from the agent's last request before line `at` (not past an earlier boundary) to `atText`. */
+function idleBefore(lines: readonly string[], at: number, atText: string | null): number | null {
+  const end = atText ? Date.parse(atText) : NaN;
+  if (!Number.isFinite(end)) return null;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const l = lines[i];
+    if (l.includes('"compact_boundary"')) return null;
+    if (!l.includes('"assistant"') || !l.includes('"timestamp"')) continue;
+    try {
+      const r = JSON.parse(l) as { type?: unknown; isSidechain?: unknown; timestamp?: unknown };
+      if (r.type !== 'assistant' || r.isSidechain === true || typeof r.timestamp !== 'string') continue;
+      const t = Date.parse(r.timestamp);
+      return Number.isFinite(t) ? Math.max(0, end - t) : null;
+    } catch { /* a torn line */ }
+  }
+  return null;
 }

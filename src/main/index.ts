@@ -1160,7 +1160,9 @@ hookServer.setCompactHealth(new CompactHealthWatch({
   windowOf: (agentId) => {
     const a = hive.registry().agents[agentId];
     return a ? autoCompactWindowFor({ isGod: hive.isGod(agentId), autoCompactWindow: a.autoCompactWindow }, readConfig()) : null;
-  }
+  },
+  // READS-COMPACT-HEALTH: did this turn's open mail come back after the compaction?
+  mailStateOf: (agentId, id) => hive.mail?.ledger(agentId).entries[id] ?? null
 }));
 // ZT-I1-MAIL slice 3: the mail epochs and the wake coordinator, both ways.
 //  - N3: a UserPromptSubmit joins the live epoch only while the lifecycle is ACTIVE on a

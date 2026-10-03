@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
 import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
-import type { CompactHealthWatch } from './compactHealth';
+import { compactCarryText, readPathOf, type CarryCard, type CarryObligation, type CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
 import type { ControlRegistry } from './control';
@@ -1513,6 +1513,35 @@ export class HookServer {
    * epoch), confirmed as in §11.1. Ids that do not fit the joined budget go back to delivered
    * with the marker and drip in at the next hooks of the same turn.
    */
+  /** READS-COMPACT-HEALTH: what the last reinjectMail found open and claimed (read at once by the caller). */
+  private lastReinject = new Map<string, { open: string[]; claimed: string[] }>();
+
+  /** READS-COMPACT-HEALTH: the carry note for a SessionStart(compact): this agent's cards in
+   *  progress (tasks.json, status doing) and the mail it still owes an answer to that this turn's
+   *  re-injection does not already carry. */
+  private compactCarry(agentId: string): { text: string | null; cards: string[]; obligations: string[]; cardsDoing: string[]; obligationsOpen: number } {
+    let cards: CarryCard[] = [];
+    try {
+      const doc = this.hive.tasks?.() as { tasks?: Array<{ id?: unknown; title?: unknown; status?: unknown; assignee?: unknown }> } | undefined;
+      cards = (doc?.tasks ?? [])
+        .filter((t) => t && t.status === 'doing' && t.assignee === agentId && typeof t.id === 'string')
+        .map((t) => ({ id: String(t.id), title: typeof t.title === 'string' ? t.title : '' }));
+    } catch { cards = []; }
+    const epoch = this.turns.get(agentId)?.epoch;
+    const seen = new Set<string>();
+    const obligations: CarryObligation[] = [];
+    for (const r of this.mailReminders(agentId)) {
+      const e = r.entry;
+      // Unseen mail comes as the block itself; this turn's open mail is re-injected whole.
+      if (seen.has(e.id) || e.state === 'delivered') continue;
+      if (epoch && e.epoch === epoch && (e.state === 'surfacing' || e.state === 'surfaced')) continue;
+      seen.add(e.id);
+      obligations.push({ id: e.id, from: e.from, subject: e.subject, what: e.act === 'request' ? 'request' : 'reply expected' });
+    }
+    const c = compactCarryText(cards, obligations);
+    return { ...c, cardsDoing: cards.map((x) => x.id), obligationsOpen: obligations.length };
+  }
+
   private reinjectMail(agentId: string, p: HookPayload, provider: AgentProvider | undefined, others: Array<string | null>): string | null {
     const mail = this.hive.mail;
     const t = this.turns.get(agentId);
@@ -1524,6 +1553,7 @@ export class HookServer {
         .sort((a, b) => a.seq - b.seq);
     } catch { return null; }
     if (!open.length) return null;
+    this.lastReinject.set(agentId, { open: open.map((e) => e.id), claimed: [] });
     const items: MailBlockItem[] = [];
     const cap = this.mailCap(agentId);
     for (const e of open) {
@@ -1545,6 +1575,7 @@ export class HookServer {
       return null;
     }
     if (!claimed.length) return null;
+    this.lastReinject.set(agentId, { open: open.map((e) => e.id), claimed });
     this.logPathOnly(agentId, block, claimed, t.epoch, 'SessionStart', items);
     this.logCapped(agentId, block, claimed, t.epoch, 'SessionStart', items);
     this.registerMailClaim(agentId, claimed, t.epoch, 'SessionStart', p, provider, open);
@@ -1798,6 +1829,11 @@ export class HookServer {
       try {
         if (event === 'SessionStart' && p.source === 'compact') this.compactHealth.noteCompact(agentId, p.transcript_path ?? this.transcriptPaths.get(agentId));
         else if (event === 'Stop') this.compactHealth.onStop(agentId);
+        else if (event === 'PostToolUse') {
+          // READS-COMPACT-HEALTH: what the agent reads again after a compaction.
+          const r = readPathOf(p.tool_name, p.tool_input);
+          if (r) this.compactHealth.noteRead(agentId, r.path, r.inbox);
+        }
       } catch { /* observation only: never breaks a hook */ }
     }
     // §11.1: the record of an earlier response lands after it, so every later hook of the agent
@@ -2123,8 +2159,24 @@ export class HookServer {
       }
     }
     // §11.5: SessionStart(compact) inside a turn re-injects what this epoch already surfaced.
+    // READS-COMPACT-HEALTH: with the cards in progress and the mail still owed an answer (headers
+    // only) ahead of it, so they come back whatever the summary kept; the Stop checks it.
+    let carry: string | null = null;
     if (injecting && agentId && !fromSubagent && event === 'SessionStart' && p.source === 'compact' && p.transport !== 'pipe-oneway') {
-      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, steer, mail]); } catch { mailBlock = null; }
+      let c: ReturnType<HookServer['compactCarry']> | null = null;
+      try { c = this.compactCarry(agentId); } catch { c = null; }
+      carry = c?.text ?? null;
+      this.lastReinject.delete(agentId);
+      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, steer, mail, carry]); } catch { mailBlock = null; }
+      const re = this.lastReinject.get(agentId);
+      this.lastReinject.delete(agentId);
+      try {
+        this.compactHealth?.noteCarry(agentId, {
+          cardsDoing: c?.cardsDoing ?? [], cardsCarried: c?.cards ?? [],
+          obligationsOpen: c?.obligationsOpen ?? 0, obligationsCarried: c?.obligations.length ?? 0,
+          mailOpen: re?.open ?? [], mailReinjected: mailBlock ? re?.claimed ?? [] : []
+        });
+      } catch { /* observation only */ }
     }
     // §11.10: a mail block reached this agent (the degradation watch counts wakes without one).
     if (mailBlock && agentId) { try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ } }
@@ -2135,12 +2187,12 @@ export class HookServer {
     if (event === 'PostToolUse' && agentId) {
       try { updatedToolOutput = this.condensedToolOutput(agentId, p); } catch { updatedToolOutput = null; }
     }
-    if (handoff || steer || roster || goal || mail || mailBlock) {
+    if (handoff || steer || roster || goal || mail || carry || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [handoff, roster, goal, steer, mail, mailBlock].filter(Boolean).join('\n\n'),
+          additionalContext: [handoff, roster, goal, steer, mail, carry, mailBlock].filter(Boolean).join('\n\n'),
           ...(updatedToolOutput ? { updatedToolOutput } : {})
         }
       };
