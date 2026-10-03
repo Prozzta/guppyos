@@ -148,7 +148,11 @@ const PASS_THROUGH = [
   // [file, the sender expression]: forwards a sender chosen elsewhere (each is covered where it
   // is chosen: the closing-time / floor-digest hosts, the renderer's hive:send IPC, the voice deps)
   ['src/main/index.ts', 'from'],
-  ['src/main/index.ts', "typeof from === 'string' ? from : 'system'"]
+  ['src/main/index.ts', "typeof from === 'string' ? from : 'system'"],
+  // rc/1.1.81 merge note (Andy, HEAVY-LOCK delta): the HEAVY SLOT FREE notice is sent as
+  // hive.send(n.message, n.from), where n is heavySlotFreeNotice's (from 'system', wake 'now'),
+  // which heavy-lock-queue-181 pins as WAKE against this classifier.
+  ['src/main/index.ts', 'n.from']
 ];
 function sendSites() {
   const files = [];
