@@ -150,7 +150,7 @@ test('ruling 2: archive-backed legacy claims (content-checked by sha256) stay ou
   const { d, records, state } = archived();
   const arch = byFile(records, /^memory-archive-/);
   assert.ok(arch.length >= 4, `the long entry is split into parts (${arch.length} archive records)`);
-  assert.deepEqual([...E.archiveBackedIds(d, records)].sort(), [...arch].sort());
+  assert.deepEqual([...E.archiveBackedIds(d, records, state)].sort(), [...arch].sort());
   E.syncExport(d, records, state, E.standInExportLine);
   const ex = E.exportedIds(d);
   for (const id of arch) assert.ok(!ex.has(id), `${id} is still in its archive: not exported again`);
@@ -173,10 +173,10 @@ test('ruling 2: re-evaluated on every sync: a changed entry, then a deleted arch
 });
 
 test('ruling 2: a claim naming an archive that is not in the folder, or a lesson, is never left out', () => {
-  const { d, records } = archived();
+  const { d, records, state } = archived();
   const ghost = { ...records[0], id: 'ghost', legacy: { ...records[0].legacy, file: 'memory-archive-1999-01-01.md' } };
   const lesson = { ...records[0], id: 'les', kind: 'lesson' };
-  const ids = E.archiveBackedIds(d, [...records, ghost, lesson]);
+  const ids = E.archiveBackedIds(d, [...records, ghost, lesson], state);
   assert.ok(!ids.has('ghost'));
   assert.ok(!ids.has('les'));
 });
@@ -184,7 +184,7 @@ test('ruling 2: a claim naming an archive that is not in the folder, or a lesson
 test('ruling 2: export --complete with the archive-backed exclude omits them and keeps How I work; without it, every record', () => {
   const { d, records, state } = archived();
   const arch = byFile(records, /^memory-archive-/);
-  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records));
+  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records, state));
   const text = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
   for (const id of arch) assert.ok(!text.includes(`[c:${id}]`), id);
   for (const r of records.filter((x) => !arch.includes(x.id))) assert.ok(text.includes(`[c:${r.id}]`), r.id);
@@ -219,11 +219,17 @@ test('W6-D2 (god 909a70): excluded only while live or superseded?; a retracted o
 });
 
 test('W6-D3: a legacy.file with a path in it is never treated as an archive in the folder', () => {
-  const { d, records } = archived();
+  const { d, records, state } = archived();
   const r0 = records.find((r) => r.legacy && /^memory-archive-/.test(r.legacy.file));
   for (const file of [`memory-archive-x/../${r0.legacy.file}`, `memory-archive-x\..\${r0.legacy.file}`]) {
     const odd = { ...r0, id: 'odd', legacy: { ...r0.legacy, file } };
-    assert.ok(!E.archiveBackedIds(d, [odd]).has('odd'), file);
+    assert.ok(!E.archiveBackedIds(d, [odd], state).has('odd'), file);
   }
-  assert.ok(E.archiveBackedIds(d, [r0]).has(r0.id), 'the plain name still counts');
+  assert.ok(E.archiveBackedIds(d, [r0], state).has(r0.id), 'the plain name still counts');
+});
+
+test("Jim's re-audit nit: archiveBackedIds without the derived state throws (it would read every claim as live)", () => {
+  const { d, records } = archived();
+  assert.throws(() => E.archiveBackedIds(d, records), /the derived state is required/);
+  assert.throws(() => E.archiveBackedIds(d, records, null), /the derived state is required/);
 });

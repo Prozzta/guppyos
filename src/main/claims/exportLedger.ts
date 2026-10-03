@@ -52,9 +52,11 @@ const ARCHIVE_RE = /^memory-archive-.*\.md$/i;
  * The legacy claims an older build can already find in their own archive: claim records whose
  * `legacy.file` is a memory-archive-*.md that exists in `agentDir` and still contains an entry with
  * the claim's `legacy.sha256` (Jim's split, the import's hash), while its status in `state` is 'live'
- * or 'superseded?' (no state entry counts as live). Never a lesson. Read fresh per call.
+ * or 'superseded?' (a claim with no state entry counts as live). Never a lesson. Read fresh per call.
+ * `state` is REQUIRED (Jim's re-audit nit): without it a superseded or retracted claim would read as live.
  */
-export function archiveBackedIds(agentDir: string, records: LedgerRec[], state: ClaimsState | null = null): Set<string> {
+export function archiveBackedIds(agentDir: string, records: LedgerRec[], state: ClaimsState): Set<string> {
+  if (!state || typeof state !== 'object' || !state.claims) throw new Error('archiveBackedIds: the derived state is required');
   const shas = new Map<string, Set<string> | null>();
   const shasOf = (file: string): Set<string> | null => {
     if (!shas.has(file)) {
@@ -67,7 +69,7 @@ export function archiveBackedIds(agentDir: string, records: LedgerRec[], state: 
   const out = new Set<string>();
   for (const r of records) {
     if (r.t !== 'claim' || r.kind === 'lesson' || !r.legacy || !ARCHIVE_RE.test(r.legacy.file) || /[\\/]/.test(r.legacy.file)) continue;
-    const st = state?.claims[r.id]?.status ?? 'live';
+    const st = state.claims[r.id]?.status ?? 'live';
     if (st !== 'live' && st !== 'superseded?') continue;
     if (shasOf(r.legacy.file)?.has(r.legacy.sha256)) out.add(r.id);
   }
