@@ -134,7 +134,7 @@ import { newBreadcrumbMemory, shouldLogBreadcrumb } from './wakeBreadcrumb';
 import { forgetWakeRows, newWakeRowState, planWakeRow, takeFolded } from './wakeRowPolicy';
 import { WakeTelemetry } from './wakeTelemetry';
 import { inboxWakeTextForProvider } from '../shared/hiveNudge';
-import { quietHolds, quietMailHoldMs } from '../shared/mailWakeClass';
+import { answersOwnAsk, quietHolds, quietMailHoldMs } from '../shared/mailWakeClass';
 import { mailNudgeMode, type MailNudgeMode } from './mailSurface';
 import { fetchHireManifest, readHireManifestFiles } from './hire';
 import { parseHireDeepLink, type HireManifest } from '../shared/hire';
@@ -946,7 +946,14 @@ inboxWake = new InboxWakeBridge({
       const holdMs = quietHoldMsCached(now);
       if (!(holdMs > 0)) return new Map();
       const entries = hive.mail.ledger(agentId).entries;
-      return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now);
+      // Jim B1: an answer to this agent's own ask wakes it. The original sits in the ledger of
+      // the agent that received it (the one answering now), under its id or its sender_id alias.
+      const lookup = (holder: string, id: string) => {
+        const es = hive.mail.ledger(holder).entries;
+        return es[id] ?? Object.values(es).find((x) => x.senderId === id);
+      };
+      return quietHolds(ids.map((id) => entries[id]).filter((e) => !!e), hookServer.mailChannel(agentId).mode, holdMs, now,
+        (e) => answersOwnAsk(e, agentId, lookup));
     }
   },
   facts: (agentId) => {

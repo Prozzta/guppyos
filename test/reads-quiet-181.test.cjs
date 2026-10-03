@@ -86,6 +86,126 @@ K.onlyInjectHolds = (cls = real.cls) => {
 };
 test('only an inject agent (Claude, Codex, AGY) is ever held: the others read mail because of the wake prompt', () => K.onlyInjectHolds());
 
+// Jim B1: the answer an idle agent is waiting for. `ledgers` = holder -> id -> the original.
+function lookupIn(ledgers) {
+  return (holder, id) => ledgers[holder]?.[id];
+}
+K.answerToOwnAskWakes = (cls = real.cls) => {
+  const ledgers = { god: {
+    'jim-design': { from: 'jim-mtujpe28', act: 'propose', requiresReply: true },
+    'jim-req': { from: 'jim-mtujpe28', act: 'request', requiresReply: true },
+    'jim-fyi': { from: 'jim-mtujpe28', act: 'inform', requiresReply: false },
+    'creed-req': { from: 'creed-mukyiphw', act: 'request', requiresReply: true }
+  } };
+  const isAnswer = (e) => cls.answersOwnAsk(e, 'jim-mtujpe28', lookupIn(ledgers));
+  const fromGod = (act, inReplyTo) => entry('a', { from: 'god', act, inReplyTo });
+  assert.equal(cls.mailWakeClass(fromGod('agree', 'jim-design'), 'inject', isAnswer), 'wake', 'AN AGREE TO MY OWN ASK WAKES ME');
+  assert.equal(cls.mailWakeClass(fromGod('inform', 'jim-req'), 'inject', isAnswer), 'wake', 'AN INFORM ANSWERING MY OWN REQUEST WAKES ME');
+  assert.equal(cls.mailWakeClass(fromGod('inform', 'jim-fyi'), 'inject', isAnswer), 'quiet', 'A REPLY TO MY OWN FYI STAYS QUIET');
+  assert.equal(cls.mailWakeClass(fromGod('inform', 'creed-req'), 'inject', isAnswer), 'quiet', 'A REPLY ON SOMEONE ELSE\'S ASK STAYS QUIET');
+  assert.equal(cls.mailWakeClass(fromGod('inform', 'unknown-id'), 'inject', isAnswer), 'quiet', 'AN UNKNOWN ORIGINAL STAYS QUIET');
+  assert.equal(cls.mailWakeClass(fromGod('inform', null), 'inject', isAnswer), 'quiet', 'NO IN_REPLY_TO STAYS QUIET');
+  // a request sent with requires_reply false (a webhook-style ask) is still an ask
+  ledgers.god['jim-req-norr'] = { from: 'jim-mtujpe28', act: 'request', requiresReply: false };
+  assert.equal(cls.mailWakeClass(fromGod('inform', 'jim-req-norr'), 'inject', isAnswer), 'wake', 'AN INFORM ANSWERING MY OWN REQUEST WAKES ME');
+  // the holds agree with the class, and a throwing lookup fails open (wakes)
+  const holds = cls.quietHolds([fromGod('agree', 'jim-design'), entry('q')], 'inject', HOLD, NOW, isAnswer);
+  assert.deepEqual([...holds.keys()], ['q'], 'AN AGREE TO MY OWN ASK WAKES ME');
+  assert.equal(cls.mailWakeClass(entry('q'), 'inject', () => { throw new Error('ledger'); }), 'wake', 'A FAILING ANSWER LOOKUP WAKES');
+};
+test('Jim B1: an agree or inform answering the recipient\'s OWN ask wakes it; FYI replies and other threads stay quiet', () => K.answerToOwnAskWakes());
+
+test('Jim B1 wiring: main looks the original up in the answering agent\'s ledger (id or sender_id)', () => {
+  const index = readSource('src/main/index.ts');
+  assert.match(index, /const lookup = \(holder: string, id: string\) => \{\n        const es = hive\.mail\.ledger\(holder\)\.entries;\n        return es\[id\] \?\? Object\.values\(es\)\.find\(\(x\) => x\.senderId === id\);\n      \};/);
+  assert.match(index, /\(e\) => answersOwnAsk\(e, agentId, lookup\)\);/);
+});
+
+test('Jim B1 behaviour on real ledgers: jim proposes to god, god agrees: the agree wakes jim', (t) => {
+  const L = loadTs('src/main/mailLedger.ts');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-reads-quiet-b1-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = path.join(home, 'hive');
+  for (const a of ['god', 'jim-1']) fs.mkdirSync(path.join(root, 'agents', a, 'inbox', '.done'), { recursive: true });
+  const ml = new L.MailLedger({ root: () => root, appendLog: () => {}, readLogRows: () => [], clock: () => NOW, setTimer: () => ({}), clearTimer: () => {} });
+  ml.markDelivered('god', { id: 'design-1', from: 'jim-1', act: 'propose', requires_reply: true, subject: 'design', body: 'b' });
+  ml.markDelivered('jim-1', { id: 'ok-1', from: 'god', act: 'agree', in_reply_to: 'design-1', subject: 'approved', body: 'b' });
+  ml.markDelivered('jim-1', { id: 'qt-1', from: 'creed-1', act: 'inform', subject: 'QUIET TIME', body: 'b' });
+  const lookup = (holder, id) => { const es = ml.ledger(holder).entries; return es[id] ?? Object.values(es).find((x) => x.senderId === id); };
+  const es = Object.values(ml.ledger('jim-1').entries);
+  const holds = real.cls.quietHolds(es, 'inject', HOLD, NOW, (e) => real.cls.answersOwnAsk(e, 'jim-1', lookup));
+  assert.deepEqual([...holds.keys()], ['qt-1'], 'the approval wakes; the quiet-time broadcast waits');
+  ml.dispose();
+});
+
+// Jim B2: a census of every harness sender. Each sender a send site passes is either one that
+// always wakes, or an agent identity on purpose (its mail follows the ordinary rules).
+const DELIBERATELY_ORDINARY = new Map([
+  ['god', 'index.ts worker dispatch: a request from god, as god'],
+  ['human', 'renderer AskMe / Threads / Command Center: the Human (also in the set)']
+]);
+const PASS_THROUGH = [
+  // [file, the sender expression]: forwards a sender chosen elsewhere (each is covered where it
+  // is chosen: the closing-time / floor-digest hosts, the renderer's hive:send IPC, the voice deps)
+  ['src/main/index.ts', 'from'],
+  ['src/main/index.ts', "typeof from === 'string' ? from : 'system'"]
+];
+function sendSites() {
+  const files = [];
+  const walk = (d) => { for (const n of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, n.name); if (n.isDirectory()) walk(p); else if (/\.tsx?$/.test(n.name)) files.push(p); } };
+  walk(path.join(__dirname, '..', 'src'));
+  const out = [];
+  const consts = {};
+  for (const f of files) {
+    const text = readSource(f);
+    for (const m of text.matchAll(/export const ([A-Z_]+) = '([a-z-]+)';/g)) consts[m[1]] = m[2];
+  }
+  for (const f of files) {
+    const rel = path.relative(path.join(__dirname, '..'), f).replace(/\\/g, '/');
+    const text = readSource(f);
+    for (const m of text.matchAll(/\b(?:hive|host|deps|cth)\.(?:send|hiveSend)\(/g)) {
+      // the call's top-level arguments (bracket counting; strings and templates skipped)
+      let i = m.index + m[0].length; let depth = 0; const args = ['']; let q = null;
+      for (; i < text.length; i++) {
+        const ch = text[i];
+        if (q) { args[args.length - 1] += ch; if (ch === '\\') { args[args.length - 1] += text[++i]; continue; } if (ch === q) q = null; continue; }
+        if (ch === "'" || ch === '"' || ch === '`') { q = ch; args[args.length - 1] += ch; continue; }
+        if ('({['.includes(ch)) depth++;
+        if (')}]'.includes(ch)) { if (depth === 0) break; depth--; }
+        if (ch === ',' && depth === 0) { args.push(''); continue; }
+        args[args.length - 1] += ch;
+      }
+      const call = text.slice(m.index, i + 1);
+      const raw = (args[1] ?? '').trim();
+      out.push({ rel, call, raw, sender: raw === '' ? 'system' : /^'([^']+)'$/.test(raw) ? raw.slice(1, -1) : consts[raw] ?? null });
+    }
+  }
+  return out;
+}
+test('Jim B2: SENDER CENSUS: every hive.send sender always wakes, is an ordinary agent identity on purpose, or forwards one', () => {
+  const sites = sendSites();
+  assert.ok(sites.length >= 15, `found the send sites (${sites.length})`);
+  const seen = new Set();
+  for (const s of sites) {
+    if (s.sender === null) {
+      assert.ok(PASS_THROUGH.some(([f, c]) => f === s.rel && s.raw === c),
+        `${s.rel}: a sender the census cannot resolve (${s.raw}): add it to the set, or to PASS_THROUGH if it forwards one`);
+      continue;
+    }
+    seen.add(s.sender);
+    assert.ok(real.cls.ALWAYS_WAKE_SENDERS.has(s.sender) || DELIBERATELY_ORDINARY.has(s.sender),
+      `${s.rel}: sender "${s.sender}" would have its inform held: add it to ALWAYS_WAKE_SENDERS or DELIBERATELY_ORDINARY with a reason`);
+  }
+  for (const s of ['michael-voice', 'ephemeral-worker', 'digest', 'scheduler', 'webhook', 'human', 'system']) assert.ok(seen.has(s), `the census saw ${s}`);
+});
+
+K.b2Senders = (cls = real.cls) => {
+  for (const from of ['michael-voice', 'ephemeral-worker']) {
+    assert.equal(cls.mailWakeClass(entry('w', { from }), 'inject'), 'wake', `MAIL FROM ${from.toUpperCase()} ALWAYS WAKES`);
+  }
+};
+test('Jim B2: the Human\'s voice ping (michael-voice) and a worker\'s terminal failure (ephemeral-worker) wake', () => K.b2Senders());
+
 test('Jim\'s HEAVY SLOT FREE notice (from system, inform, no reply, wake:now) wakes', () => {
   assert.equal(real.cls.mailWakeClass(entry('slot', { from: 'system', wakeNow: true }), 'inject'), 'wake');
   assert.equal(real.cls.mailWakeClass(entry('slot', { from: 'system' }), 'inject'), 'wake');
@@ -312,7 +432,8 @@ test('bridge: Human and breaker mail wake an idle agent at once', () => {
 
 test('main: quietUntil reads the ledger, the mail mode and the config (cached), through quietHolds', () => {
   const index = readSource('src/main/index.ts');
-  assert.match(index, /quietUntil: \(agentId, ids, now\) => \{\n      const holdMs = quietHoldMsCached\(now\);\n      if \(!\(holdMs > 0\)\) return new Map\(\);\n      const entries = hive\.mail\.ledger\(agentId\)\.entries;\n      return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now\);\n    \}/);
+  assert.match(index, /quietUntil: \(agentId, ids, now\) => \{\n      const holdMs = quietHoldMsCached\(now\);\n      if \(!\(holdMs > 0\)\) return new Map\(\);\n      const entries = hive\.mail\.ledger\(agentId\)\.entries;\n/);
+  assert.match(index, /return quietHolds\(ids\.map\(\(id\) => entries\[id\]\)\.filter\(\(e\) => !!e\), hookServer\.mailChannel\(agentId\)\.mode, holdMs, now,\n        \(e\) => answersOwnAsk\(e, agentId, lookup\)\);\n    \}/);
   assert.match(index, /quietHoldMemo = \{ ms: quietMailHoldMs\(min\), at: now \};/);
   assert.match(index, /min = readConfig\(\)\.quietMailHoldMin;/);
 });
@@ -425,6 +546,18 @@ const MUTANTS = [
     edits: [["'digest', 'breaker', 'webhook'", "'digest', 'webhook'"]], killer: 'sendersThatWake', dies: /MAIL FROM BREAKER ALWAYS WAKES/ },
   { name: 'Floor decisions (digest) are quiet', file: CLASS, kind: 'cls',
     edits: [["  'human', 'digest',", "  'human',"]], killer: 'sendersThatWake', dies: /MAIL FROM DIGEST ALWAYS WAKES/ },
+  { name: 'B1: answers to the recipient\'s own ask are held', file: CLASS, kind: 'cls',
+    edits: [['    if (answer) return \'wake\';\n', '']], killer: 'answerToOwnAskWakes', dies: /AN AGREE TO MY OWN ASK WAKES ME/ },
+  { name: 'B1: any reply wakes (the original\'s sender ignored)', file: CLASS, kind: 'cls',
+    edits: [['  return !!orig && orig.from === recipientId && (', '  return !!orig && (']], killer: 'answerToOwnAskWakes', dies: /SOMEONE ELSE'S ASK STAYS QUIET/ },
+  { name: 'B1: only requires_reply counts, not the asking act', file: CLASS, kind: 'cls',
+    edits: [['(orig.requiresReply || ASKING_ACTS.has(String(orig.act ?? \'\')))', '(orig.requiresReply)']], killer: 'answerToOwnAskWakes', dies: /ANSWERING MY OWN REQUEST WAKES ME/ },
+  { name: 'B1: a failing lookup holds', file: CLASS, kind: 'cls',
+    edits: [['    try { answer = isAnswer(e); } catch { answer = true; }', '    try { answer = isAnswer(e); } catch { answer = false; }']], killer: 'answerToOwnAskWakes', dies: /A FAILING ANSWER LOOKUP WAKES/ },
+  { name: 'B2: the Human\'s voice ping is held', file: CLASS, kind: 'cls',
+    edits: [["  'michael-voice', 'ephemeral-worker'", "  'ephemeral-worker'"]], killer: 'b2Senders', dies: /MAIL FROM MICHAEL-VOICE ALWAYS WAKES/ },
+  { name: 'B2: a worker\'s terminal failure is held', file: CLASS, kind: 'cls',
+    edits: [["  'michael-voice', 'ephemeral-worker'", "  'michael-voice'"]], killer: 'b2Senders', dies: /MAIL FROM EPHEMERAL-WORKER ALWAYS WAKES/ },
   { name: 'wake:now ignored', file: CLASS, kind: 'cls',
     edits: [["  if (e.wakeNow === true) return 'wake';\n", '']], killer: 'wakeNowWakes', dies: /WAKE:NOW ALWAYS WAKES/ },
   { name: 'legacy agents held too', file: CLASS, kind: 'cls',
