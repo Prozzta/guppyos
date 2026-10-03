@@ -17,7 +17,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
@@ -149,17 +149,29 @@ test('compiled: no new base yet: nothing is deleted; a file we do not know keeps
   assert.equal(fs.readFileSync(path.join(other, 'munder-difflin-updater', 'pending', 'notes.txt'), 'utf8'), 'unknown');
 });
 
-test('compiled: a pending installer that is in use (a 1.1.81 updater runs it) stays; the rest goes', { skip: SKIP, timeout: 120_000 }, () => {
+test('compiled: a pending installer that is in use (a 1.1.81 updater runs it) stays; the rest goes', { skip: SKIP, timeout: 120_000 }, async () => {
   const local = tmp('local');
   put(path.join(local, 'guppy-updater', 'installer.exe'), 'new base');
   put(path.join(local, 'munder-difflin-updater', 'installer.exe'), 'old base');
   const running = path.join(local, 'munder-difflin-updater', 'pending', 'Munder-Difflin-1.1.83-win-x64-setup.exe');
   put(running, 'running');
-  // Exclusive (no FILE_SHARE_DELETE), as NSIS holds its own running exe: a delete fails.
-  const fd = fs.openSync(running, fs.constants.O_RDONLY | fs.constants.UV_FS_O_EXLOCK);
+  // Held open WITHOUT FILE_SHARE_DELETE (as a running exe is) by a hidden PowerShell child: Node's own
+  // handles allow delete, so they cannot stand in for it.
+  const ctl = tmp('hold');
+  const ready = path.join(ctl, 'ready');
+  const stop = path.join(ctl, 'stop');
+  const holder = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+    "$f=[IO.File]::Open($env:F,'Open','Read','Read'); Set-Content -Path $env:R -Value 1; $n=0; while(-not (Test-Path $env:S) -and $n -lt 600){Start-Sleep -Milliseconds 100; $n++}; $f.Close()"],
+  { env: { ...process.env, F: running, R: ready, S: stop }, windowsHide: true, stdio: 'ignore' });
   try {
+    const t0 = Date.now();
+    while (!fs.existsSync(ready) && Date.now() - t0 < 30_000) spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},100)']);
+    assert.ok(fs.existsSync(ready), 'the holder opened the file');
     runHarness(local);
     assert.equal(fs.existsSync(running), true, 'in use: left alone');
     assert.equal(fs.existsSync(path.join(local, 'munder-difflin-updater', 'installer.exe')), false);
-  } finally { fs.closeSync(fd); }
+  } finally {
+    fs.writeFileSync(stop, '1');
+    await new Promise((res) => { if (holder.exitCode !== null) res(); else holder.once('exit', res); setTimeout(res, 15_000); });
+  }
 });
