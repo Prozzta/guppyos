@@ -281,7 +281,7 @@ export class CompactHealthWatch {
       obligationsOpen: carry.obligationsOpen, obligationsCarried: carry.obligationsCarried,
       // Creed n1: owed mail past the note's cap is named as "and N more" and stays in the ledger and
       // the reminders, so it is never lost: counted here, not held against ok.
-      obligationsTruncated: Math.max(0, carry.obligationsOpen - carry.obligationsCarried),
+      carryTruncated: Math.max(0, carry.obligationsOpen - carry.obligationsCarried),
       ok: missing.length === 0 && cardsLost.length === 0
     };
   }

@@ -152,13 +152,19 @@ test('watch: ok when everything came back; a card neither carried nor in the sum
   const l = lost.rows.find((q) => q.kind === 'compact-health');
   assert.deepEqual(l.cardsLost, ['C1']);
   assert.equal(l.ok, false);
+  // Creed n1 (god dcea92): a long backlog overflows the note ("- and N more"); that remainder stays in
+  // the ledger and the reminders, so it is counted (carryTruncated) and does not fail ok.
+  const backlog = Array.from({ length: 30 }, (_, i) => ({ id: `o-${i}`, from: 'jim', subject: 'x'.repeat(100), what: 'request' }));
+  const note = CH.compactCarryText([], backlog);
+  assert.ok(note.obligations.length < 30 && /- and \d+ more/.test(note.text));
   const owed = watch(tail);
   owed.w.noteCompact('god', 'C:/t.jsonl');
-  owed.w.noteCarry('god', { cardsDoing: [], cardsCarried: [], obligationsOpen: 2, obligationsCarried: 1, mailOpen: [], mailReinjected: [] });
+  owed.w.noteCarry('god', { cardsDoing: [], cardsCarried: [], obligationsOpen: 30, obligationsCarried: note.obligations.length, mailOpen: [], mailReinjected: [] });
   owed.w.onStop('god');
   const o = owed.rows.find((q) => q.kind === 'compact-health');
-  assert.equal(o.ok, true, 'Creed n1: owed mail past the cap is not lost (ledger + reminders)');
-  assert.equal(o.obligationsTruncated, 1);
+  assert.equal(o.ok, true, 'the truncated remainder is not a loss');
+  assert.equal(o.carryTruncated, 30 - note.obligations.length);
+  assert.ok(o.carryTruncated > 0);
 });
 
 test('watch: two compactions in one turn pair with their carries from the end; n counts both', () => {
