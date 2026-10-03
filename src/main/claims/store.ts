@@ -53,7 +53,7 @@ import {
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
 import { redactSecrets } from './redact';
-import { normalizeTtl, zonelessHint } from './ttl';
+import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
 import { derive } from './derive';
 import { R1_LEGACY_REASON } from './migrate';
@@ -87,6 +87,8 @@ export interface ClaimStoreDeps {
   headAnchor?: HeadAnchorStore;
   /** How soon after an append the anchor is written (default ANCHOR_DELAY_MS). */
   anchorDelayMs?: number;
+  /** R1 (Jim R-2): a hive task's status, so a claim whose task TTL has ended is not live for R1. */
+  taskStatus?: (taskId: string) => string | null;
 }
 
 const SEGMENT_RE = /^(\d{4})-(\d{2})\.jsonl$/;
@@ -125,10 +127,17 @@ interface AgentState {
 /**
  * R1 (plan §W2, B11: exact-only): a claim's identity for duplicate detection. Same kind, the same
  * key (or none) and the same stored text, exactly as the store writes it (after redaction). No
- * case folding, no whitespace folding: nothing fuzzy.
+ * case folding, no whitespace folding: nothing fuzzy. Also part of it (Jim R-1..R-3):
+ * - the source CLASS: owner (self, human, legacy) or mail. A self note never sights a mail claim,
+ *   and mail never sights an owner claim;
+ * - the stored TTL (none = ''): a restatement with another TTL is a new claim;
+ * - the refs, as a set (sorted, never deduplicated or folded): a restatement that adds or changes
+ *   refs is a new claim, so its evidence is never lost.
  */
-export function r1Identity(rec: Pick<ClaimRec, 'kind' | 'key' | 'text'>): string {
-  return `${rec.kind}\u0000${rec.key ?? ''}\u0000${rec.text}`;
+export function r1Identity(rec: Pick<ClaimRec, 'kind' | 'key' | 'text' | 'source' | 'ttl' | 'refs'>): string {
+  const cls = typeof rec.source === 'string' && rec.source.startsWith('mail:') ? 'mail' : 'owner';
+  const refs = (rec.refs ?? []).map((r) => JSON.stringify([r.type, r.value])).sort();
+  return JSON.stringify([rec.kind, rec.key ?? '', cls, rec.ttl ?? '', refs, rec.text]);
 }
 export type ParsedLine = { offset: number; bytes: number; line: string; rec: LedgerRec | null };
 
@@ -587,6 +596,9 @@ export class ClaimStore {
     }
     const live = [...candidates].reverse().find((id) => state.claims[id]?.status === 'live');
     if (!live) return null;
+    // Jim R-2: an expired claim is not live for R1 (derive has no clock; R6 is view time). The TTL is
+    // in the identity, so the candidate's TTL is the draft's: judged at the draft's wt, as worldView does.
+    if (this.ttlEnded(claim.ttl, wt)) return null;
     const by: EventRec['by'] = claim.source === 'human' ? 'human' : claim.source.startsWith('mail:') ? 'code' : 'self';
     return {
       v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'sighting', at: claim.at, wt, agent: agentId,
@@ -597,6 +609,17 @@ export class ClaimStore {
   }
 
   /** This agent's parsed records, in ledger order (the chain was verified when the state was adopted). */
+  /** R1: whether a stored TTL has ended at `wt` (ttl.ts grammar; a task TTL by deps.taskStatus). */
+  private ttlEnded(stored: unknown, wt: string): boolean {
+    const ttl = parseStoredTtl(stored);
+    if (!ttl) return false;
+    if (ttl.kind === 'task') {
+      const status = this.d.taskStatus?.(ttl.task) ?? null;
+      return status === 'done' || status === 'cancelled';
+    }
+    return Date.parse(ttl.at) <= Date.parse(wt);
+  }
+
   private ledgerRecords(agentId: string): LedgerRec[] {
     const out: LedgerRec[] = [];
     for (const f of this.segments(agentId)) for (const line of nodeFs.readFileSync(f, 'utf8').split('\n')) {
