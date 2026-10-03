@@ -342,6 +342,10 @@ export interface HarnessConfig {
    *  there). Unset = 1500; 0 = off. Mail from the Human and the harness is never shortened. An
    *  agent's own registry `mailCapChars` wins (src/main/mailSurface.ts effectiveMailCap). */
   godMailCapChars?: number;
+  /** READS-PROMPT-TRIM (1.1.83): unset or true = each hive Claude agent spawns without the tools,
+   *  skills and claude.ai connectors its role never uses (shared/claudePromptTrim.ts); false =
+   *  spawn with everything, as before. Reaches an agent at its next spawn. */
+  claudePromptTrim?: boolean;
   /** Max concurrent god-triggered ephemeral Slack workers; extra spawn-requests
    *  wait in the queue (natural backpressure, a resource backstop). Default 4. */
   maxConcurrentWorkers?: number;
