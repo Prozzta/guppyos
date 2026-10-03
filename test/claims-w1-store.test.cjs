@@ -614,7 +614,12 @@ test('F3: one TTL grammar; stored forms are task:<id> and until:<iso> only', asy
   assert.equal(await stored('30d'), 'until:2026-11-02T10:00:00.000Z');
   assert.equal(await stored('12h'), 'until:2026-10-03T22:00:00.000Z');
   assert.equal(await stored('2w'), 'until:2026-10-17T10:00:00.000Z');
-  assert.equal(await stored('2026-12-01'), 'until:2026-12-01T00:00:00.000Z');
+  assert.equal(await stored('2026-12-01T00:00:00Z'), 'until:2026-12-01T00:00:00.000Z');
+  // Zone-less input is refused with a hint to the Z form, never read as local time (god d05408).
+  for (const [zoneless, hint] of [['2026-12-01', '2026-12-01T00:00:00Z'], ['2026-11-01T08:30:00', '2026-11-01T08:30:00Z'], ['until:2026-11-01T08:30', '2026-11-01T08:30Z']]) {
+    const r = await refused(store.appendRecord('andy', note('x', { ttl: zoneless }), 'endpoint'), /no time zone/);
+    assert.equal(r.didYouMean, hint);
+  }
   assert.equal(await stored('until:2026-11-01T08:30:00+02:00'), 'until:2026-11-01T06:30:00.000Z');
   assert.equal(await stored('task:CL-W1'), 'task:CL-W1');
   assert.equal(await stored(null), null);
@@ -624,6 +629,63 @@ test('F3: one TTL grammar; stored forms are task:<id> and until:<iso> only', asy
   const { parseStoredTtl } = loadTs(path.join(ROOT, 'src/main/claims/ttl.ts'));
   for (const r of store.readLedger('andy').records) if (r.ttl) assert.ok(parseStoredTtl(r.ttl), `stored form ${r.ttl}`);
   assert.equal(parseStoredTtl('30d'), null, 'an input form is never a stored form');
+  // S1 (Jim): only canonical UTC is a stored form.
+  assert.equal(parseStoredTtl('until:2026-11-01'), null);
+  assert.equal(parseStoredTtl('until:2026-11-01T08:30:00+02:00'), null);
+  assert.equal(parseStoredTtl('until:2026-11-01T06:30:00Z'), null, 'no milliseconds: not the canonical form');
+  assert.deepEqual(parseStoredTtl('until:2026-11-01T06:30:00.000Z'), { kind: 'until', at: '2026-11-01T06:30:00.000Z' });
+  assert.deepEqual(parseStoredTtl('task:CL-W1'), { kind: 'task', task: 'CL-W1' });
+});
+
+test('F5: a rekey whose line fails for one agent records no new key id; every ledger stays key-missing; the retry heals all', async () => {
+  const root = hive();
+  const now = clock('2026-10-03T10:00:00Z');
+  const keys = new SandboxKeyProvider();
+  const acked = { andy: [], dwight: [], creed: [] };
+  const m = mkStore(root, { keys, now });
+  for (let i = 0; i < 3; i++) for (const a of Object.keys(acked)) acked[a].push(await ok(m.store.appendRecord(a, note(`${a} ${i}`), 'endpoint')));
+  m.store.close();
+  const oldId = keys.load().keyId;
+  keys.drop();
+  // The Human's rekey; dwight's rekey line tears mid-write.
+  let tore = 0;
+  const io = {
+    openSync: (p, f) => fs.openSync(p, f),
+    writeSync: (fd, buf) => {
+      const s = Buffer.from(buf).toString('utf8');
+      if (s.includes('"ev":"rekey"') && s.includes('"agent":"dwight"') && tore === 0) { tore++; fs.writeSync(fd, buf.subarray(0, 40)); throw new Error('simulated crash mid rekey'); }
+      return fs.writeSync(fd, buf);
+    },
+    fsyncSync: (fd) => fs.fsyncSync(fd), closeSync: (fd) => fs.closeSync(fd),
+  };
+  const r1 = mkStore(root, { keys, now, io });
+  now.advance(60_000);
+  const first = await r1.store.rekey(true);
+  r1.store.close();
+  assert.equal(first.ok, false);
+  assert.deepEqual(first.refused.map((x) => [x.agentId, x.why]), [['dwight', 'the rekey append failed']]);
+  assert.equal(recordFor(root).get(root), oldId, 'the old key id is still the record');
+  const mid = mkStore(root, { keys, now });
+  for (const a of Object.keys(acked)) assert.equal(mid.store.readLedger(a).chain.reason, 'key-missing', `${a} reads key-missing, not a forgery`);
+  await refused(mid.store.appendRecord('andy', note('x'), 'endpoint'), /read-only/);
+  assert.equal(mid.alerts.filter((x) => x.kind === 'claims-chain-broken').length, 0);
+  mid.store.close();
+  // The Human retries.
+  now.advance(60_000);
+  const r2 = mkStore(root, { keys, now });
+  const second = await r2.store.rekey(true);
+  assert.equal(second.ok, true, JSON.stringify(second));
+  assert.deepEqual(second.rekeyed.sort(), ['andy', 'creed', 'dwight']);
+  assert.equal(recordFor(root).get(root), keys.load().keyId);
+  const after = mkStore(root, { keys, now });
+  for (const a of Object.keys(acked)) {
+    const r = after.store.readLedger(a);
+    assert.equal(r.chain, 'ok', a);
+    const ids = new Set(r.records.map((x) => x.id));
+    for (const id of acked[a]) assert.ok(ids.has(id), `${a}: acked ${id} is present`);
+    await ok(after.store.appendRecord(a, note('after the retry'), 'endpoint'));
+  }
+  assert.equal([...r1.alerts, ...r2.alerts, ...after.alerts].filter((x) => x.kind === 'claims-chain-broken').length, 0, 'no forgery alert anywhere');
 });
 
 test('first use: a key is created only when no segment exists under any agent', async () => {
