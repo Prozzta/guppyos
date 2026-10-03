@@ -530,7 +530,7 @@ export class ClaimStore {
     }
     // One TTL grammar (ttl.ts): input forms become task:<id> or until:<iso> at write time.
     const ttl = normalizeTtl(draft.ttl, wt);
-    if ('error' in ttl) return { error: ttl.error };
+    if ('error' in ttl) return { error: ttl.error, ...(ttl.didYouMean ? { didYouMean: ttl.didYouMean } : {}) };
     let refs: Ref[] | undefined;
     if (draft.refs !== undefined) {
       if (!Array.isArray(draft.refs) || draft.refs.length > LIST_MAX) return { error: `refs: a list of at most ${LIST_MAX}` };
@@ -624,11 +624,12 @@ export class ClaimStore {
     }
     const made = this.d.keys.create();
     if (!made.ok) return { ok: false, rekeyed: [], refused: [...refused, ...eligible.map((agentId) => ({ agentId, why: `no key (${made.reason})` }))] };
-    this.keyMissing = false;
-    this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
-    this.key = made.key;
-    this.alerted.delete('key-missing');
+    // F5 (Jim, god d05408): the new key id is recorded in user-data only AFTER every eligible
+    // agent's rekey line is written and fsynced. Until then the record keeps the old id, so every
+    // ledger reads key-missing (read-only) and a retry is safe.
+    this.key = null;
     const rekeyed: string[] = [];
+    const failed: string[] = [];
     for (const a of eligible) {
       const done = await this.serial(a, () => {
         // The new key cannot verify the old records (that is the point), so this step checks the
@@ -651,9 +652,18 @@ export class ClaimStore {
         this.state.delete(a);
         return w.ok;
       });
-      if (done) rekeyed.push(a); else refused.push({ agentId: a, why: 'the rekey append failed' });
+      if (done) rekeyed.push(a); else { failed.push(a); refused.push({ agentId: a, why: 'the rekey append failed' }); }
     }
-    this.log({ kind: 'claims-rekey', keyId: made.keyId, rekeyed, refused });
+    if (failed.length === 0) {
+      this.d.keyRecord.set(this.d.hiveRoot, made.keyId);
+      this.key = made.key;
+      this.keyMissing = false;
+      this.alerted.delete('key-missing');
+    } else {
+      this.keyMissing = true;
+      for (const a of eligible) this.state.delete(a);
+    }
+    this.log({ kind: 'claims-rekey', keyId: made.keyId, recorded: failed.length === 0, rekeyed, refused });
     return { ok: refused.length === 0, keyId: made.keyId, rekeyed, refused };
   }
 
