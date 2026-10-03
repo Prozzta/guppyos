@@ -58,6 +58,14 @@ test('G3.1c the cap: the 590 nearest are hidden; both branches still return k li
   assert.equal(r.fast.length, 5); assert.equal(r.filtered.length, 5);
   assert.ok(r.fast.every((s) => s === 'live') && r.filtered.every((s) => s === 'live'), JSON.stringify(r));
   assert.ok(r.fastLiveEpsilon >= 1, 'the live near neighbours are what comes back');
+  // Jim S-a: the vector branch alone still yields k live hits (pins the in-KNN vis filter and the vec0 vis update).
+  for (const [when, v] of [['vis at insert', r.vecAtInsert], ['vis after a status change', r.vecAfterChange]]) {
+    for (const branch of ['fast', 'filtered']) {
+      assert.equal(v[branch].length, 5, `${when}, ${branch}: k hits`);
+      assert.deepEqual(v[branch].filter(([st, fromVec]) => st !== 'live' || !fromVec), [], `${when}, ${branch}: every hit is live and from the vector branch ${JSON.stringify(v[branch])}`);
+    }
+  }
+  assert.equal(r.statusChanges, 590); assert.equal(r.reEmbedded, 0);
 });
 
 test('G3.3 disposable: delete the index, rebuild, identical results', { timeout: 5 * 60_000 }, async () => {
@@ -132,6 +140,16 @@ test('W3-1: a memory-sources.json change on disk reconciles through the watcher,
   assert.deepEqual(r.atReader, { replaced: 0, claims: 1 });
   assert.ok(r.afterWatch.replaced >= 3);
   assert.equal(r.afterWatch.claims, 0);
+});
+
+test('Jim S-b: the claim-ledger op through runWorker\'s dispatch reaches the engine: a new level changes it, a repeat does not, another changes it again', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('workerLedger');
+  assert.equal(r.ready, true);
+  assert.equal(r.sync.ok, false); assert.match(r.sync.error, /not indexed for a1 \(level off\)/, 'this build implements off: a real worker clamps to it');
+  assert.equal(r.op.ok, true, JSON.stringify(r.op)); assert.equal(r.op.json.changed, true);
+  assert.equal(r.again.ok, true); assert.equal(r.again.json.changed, false, 'the engine kept the level');
+  assert.equal(r.back.ok, true); assert.equal(r.back.json.changed, true);
+  assert.equal(r.shutdown.ok, true);
 });
 
 test('W3-2: no status row never returned (both branches); an unsent claim is dropped; wake-up carries no claim chunk', { timeout: 5 * 60_000 }, async () => {
