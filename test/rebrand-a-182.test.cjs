@@ -372,3 +372,117 @@ test('packaged canaries + layer-b: the exe is Guppy.exe (old name still found); 
     "path.join(appData, 'munder-difflin')", "path.join(localAppData, 'Programs', 'Munder Difflin')"]) assert.ok(lb.includes(p), p);
   assert.equal(lb.split('/munder difflin|guppy/i.test(').length - 1, 3);
 });
+
+// ── 5. Jim's audit: B1 (Open at login), n2 (start race), n3 (afterPack call), icon title ─────
+
+const L = loadTs('src/main/loginItemRename.ts');
+const INSTALL = 'C:\\Users\\u\\AppData\\Local\\Programs\\Munder Difflin';
+const NEW_EXE = INSTALL + '\\Guppy.exe';
+const OLD_EXE = INSTALL + '\\Munder Difflin.exe';
+
+/** A stub of Electron's Windows login items: Run values by name; `get` reads ours (or, with
+ *  anyName, any value: the case of an old entry under a different value name). */
+function loginStub(values, { name = 'in.munderdiffl.app', anyName = false } = {}) {
+  const calls = [];
+  return {
+    values, calls,
+    getLoginItemSettings(o = {}) {
+      const p = o.path ?? NEW_EXE;
+      return { openAtLogin: anyName ? Object.values(values).includes(p) : values[name] === p };
+    },
+    setLoginItemSettings(o) {
+      calls.push(o);
+      const p = o.path ?? NEW_EXE;
+      if (o.openAtLogin) { values[name] = p; return; }
+      for (const [k, v] of Object.entries(values)) if (v === p && (anyName || k === name)) delete values[k];
+    }
+  };
+}
+
+test('B1: an Open-at-login entry for the old exe moves to Guppy.exe (same value name: one rewrite)', () => {
+  const app = loginStub({ 'in.munderdiffl.app': OLD_EXE });
+  assert.equal(L.carryLoginItem(app, NEW_EXE, { platform: 'win32', packaged: true }), 'moved');
+  assert.deepEqual(app.values, { 'in.munderdiffl.app': NEW_EXE });
+  assert.deepEqual(app.calls, [{ openAtLogin: true }], 'the old value is not removed separately when the name is the same');
+  assert.equal(app.getLoginItemSettings().openAtLogin, true, 'the toggle reads on again');
+  assert.equal(L.carryLoginItem(app, NEW_EXE, { platform: 'win32', packaged: true }), 'none', 'idempotent');
+});
+
+test('B1: an old entry under a different value name is turned off after ours is on', () => {
+  const app = loginStub({ 'munder-difflin': OLD_EXE }, { name: 'in.munderdiffl.app', anyName: true });
+  assert.equal(L.carryLoginItem(app, NEW_EXE, { platform: 'win32', packaged: true }), 'moved');
+  assert.deepEqual(app.values, { 'in.munderdiffl.app': NEW_EXE });
+  assert.deepEqual(app.calls, [{ openAtLogin: true }, { openAtLogin: false, path: OLD_EXE }]);
+});
+
+test('B1: nothing happens without an old entry, off Windows, unpackaged, or when still running the old exe', () => {
+  const none = loginStub({});
+  assert.equal(L.carryLoginItem(none, NEW_EXE, { platform: 'win32', packaged: true }), 'none');
+  assert.deepEqual(none.calls, []);
+  const other = loginStub({ 'in.munderdiffl.app': 'D:\\elsewhere\\Munder Difflin.exe' });
+  assert.equal(L.carryLoginItem(other, NEW_EXE, { platform: 'win32', packaged: true }), 'none', 'another folder\'s entry is not ours');
+  for (const [execPath, o] of [[NEW_EXE, { platform: 'darwin', packaged: true }], [NEW_EXE, { platform: 'win32', packaged: false }], [OLD_EXE, { platform: 'win32', packaged: true }]]) {
+    const app = loginStub({ 'in.munderdiffl.app': OLD_EXE });
+    assert.equal(L.carryLoginItem(app, execPath, o), 'skipped');
+    assert.deepEqual(app.calls, []);
+  }
+});
+
+test('B1 wiring: index.ts carries the login item on every Stable start, packaged only, and logs a move', () => {
+  const src = read('src/main/index.ts');
+  assert.match(src, /if \(!DEV_ISOLATION\) \{\n\s+try \{\n\s+if \(carryLoginItem\(app, process\.execPath, \{ packaged: app\.isPackaged \}\) === 'moved'\) hive\.appendLog\(\{ kind: 'login-item-moved'/);
+});
+
+test('n2: a second start never copies at once or clears a live staging folder: it waits and uses the result', () => {
+  const appData = tmp('race');
+  const from = legacyFixture(appData);
+  const before = snapshot(from);
+  const staging = path.join(appData, M.STAGING_DIR);
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(staging, 'being-copied'), 'by the first start');
+  fs.writeFileSync(path.join(appData, M.MIGRATION_LOCK), '{"pid":1}');          // the first start holds the lock
+  // it does not finish in time: the second falls back to the old folder, touching nothing
+  const busy = M.migrateUserData(appData, { lockWaitMs: 300, sleep: () => {} });
+  assert.equal(busy.status, 'busy');
+  assert.equal(busy.userData, from);
+  assert.ok(fs.existsSync(path.join(staging, 'being-copied')), 'the live staging folder is not cleared');
+  assert.ok(fs.existsSync(path.join(appData, M.MIGRATION_LOCK)), 'nor its lock');
+  // it finishes while we wait: the second uses its folder
+  let n = 0;
+  const waited = M.migrateUserData(appData, { lockWaitMs: 5000, sleep: () => {
+    if (++n === 3) { fs.renameSync(staging, path.join(appData, 'Guppy')); fs.writeFileSync(path.join(appData, 'Guppy', M.MIGRATION_MARKER), '{}'); fs.unlinkSync(path.join(appData, M.MIGRATION_LOCK)); }
+  } });
+  assert.equal(waited.status, 'waited');
+  assert.equal(waited.userData, path.join(appData, 'Guppy'));
+  assert.deepEqual(snapshot(from), before);
+});
+
+test('n2: a stale lock (a start that died mid-copy) is taken over; the lock is released after success and after failure', () => {
+  const appData = tmp('stale');
+  legacyFixture(appData);
+  const lock = path.join(appData, M.MIGRATION_LOCK);
+  fs.writeFileSync(lock, '{"pid":1}');
+  const old = new Date(Date.now() - M.LOCK_STALE_MS - 60_000);
+  fs.utimesSync(lock, old, old);
+  const fail = M.migrateUserData(appData, { copy: () => { throw new Error('disk full'); } });
+  assert.equal(fail.status, 'failed');
+  assert.equal(fs.existsSync(lock), false, 'released after a failure');
+  const ok = M.migrateUserData(appData);
+  assert.equal(ok.status, 'migrated', ok.error);
+  assert.equal(fs.existsSync(lock), false, 'released after success');
+  assert.equal(M.LOCK_STALE_MS >= 60_000 && M.LOCK_WAIT_MS >= 10_000, true);
+});
+
+test('n3: the afterPack hook really calls guppyUpdaterCache, and before the prune\'s early return', () => {
+  const src = read('build/afterPack-memory-prune.cjs');
+  const call = src.indexOf('  guppyUpdaterCache(resources);\n');
+  assert.ok(call > src.indexOf('exports.default = async function afterPack(context) {'), 'called inside the hook');
+  assert.ok(call < src.indexOf('if (!fs.existsSync(bin)) return;'), 'before the early return');
+});
+
+test('icon: build/icon.svg and its generator name Guppy', () => {
+  for (const f of ['build/icon.svg', 'tools/make-logo.cjs']) {
+    assert.match(read(f), /<!-- Guppy — the brand mark[\s\S]{0,300}<title>Guppy<\/title>/, f);
+  }
+  assert.doesNotMatch(read('build/icon.svg'), /Munder Difflin/);
+});

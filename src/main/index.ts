@@ -25,6 +25,7 @@ import {
 } from './devIsolation';
 import { isSafeCommandName } from './shellEnv';
 import { migrateUserData, LEGACY_USERDATA_DIR, USERDATA_DIR, type MigrationResult } from './userDataMigration';
+import { carryLoginItem } from './loginItemRename';
 import { resolveCommandAsync, invalidateCommandCache } from './commandResolver';
 import { daemonExecutable, headlessSpawnRefusal, missingCliAction, npmRungDecision, toolRowStatus } from './cliLookupPolicy';
 import { initAutoUpdater, abortPendingRestart } from './updater';
@@ -6938,6 +6939,13 @@ function bootstrapHiveServices(): void {
   if (userDataMigration && userDataMigration.status !== 'already') {
     const m = userDataMigration;
     hive.appendLog({ kind: 'userdata-migration', status: m.status, userData: m.userData, from: m.from, files: m.files, bytes: m.bytes, rewrote: m.rewrote, error: m.error });
+  }
+  // REBRAND-GUPPY (Jim B1): a Windows "Open at login" entry made by 1.1.81 names the deleted
+  // Munder Difflin.exe; move it to this exe (loginItemRename.ts). Packaged Stable runs only.
+  if (!DEV_ISOLATION) {
+    try {
+      if (carryLoginItem(app, process.execPath, { packaged: app.isPackaged }) === 'moved') hive.appendLog({ kind: 'login-item-moved', exePath: process.execPath });
+    } catch (e) { console.warn('[login-item] could not move the old login item:', e); }
   }
   // MODEL-DEFAULT-CLI: config load cleared a saved defaultModel once (config.ts,
   // migrateDefaultModelCliV1) before the hive existed; record what it was, once.
