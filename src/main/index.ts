@@ -79,7 +79,8 @@ import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
 import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
-import { applyLedgerOp } from './ledger';
+import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
+import { handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
@@ -1379,7 +1380,10 @@ hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
 nativeMemory.setClaimWakeupProvider(claimWorkingSetForAgent);
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here
 // in main: tasks.json writes go through writeTasks (merge, validation, ZT-I3 attribution 'ledger').
-hookServer.setLedgerHandler((agentId, body) => {
+// W6-D1: one op at a time per agent, so a retry waits for the op in flight (its memory part may be
+// an async claim append at level 'writer').
+const ledgerQueue = perAgentQueue();
+hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
   const agentDir = hive.agentHome(agentId);
   if (!agentDir) return { status: 404, body: { ok: false, line: `refused: ${agentId} is not a registered agent` } };
   return applyLedgerOp(body, {
@@ -1392,9 +1396,24 @@ hookServer.setLedgerHandler((agentId, body) => {
     },
     addTask: (task) => hive.addTask(task, 'ledger'),
     patchTask: (id, patch) => hive.patchTask(id, patch, 'ledger'),
-    now: () => new Date()
+    now: () => new Date(),
+    memoryClaim: ledgerMemoryClaim(agentId)
   });
-});
+}));
+/** CLAIM-LEDGER W6 (G6.6): the `ledger` memory part as a claim, through the endpoint's note verb with
+ *  origin 'ledger-route' (400 characters, no source or legacy); null when the ledger is not wired. */
+function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
+  const d = claimsEndpoint();
+  if (!d) return null;
+  return {
+    level: d.level(agentId),
+    note: async (args) => {
+      const r = await handleClaimVerb(d, agentId, { cmd: 'note', args }, 'ledger-route');
+      const id = (r.json as { id?: unknown } | undefined)?.id;
+      return { ok: r.ok, ...(typeof id === 'string' ? { id } : {}), ...(r.error ? { error: r.error } : {}) };
+    }
+  };
+}
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
 /** Delete a memory-engine index file and its WAL/SHM. Call only after nativeMemory.shutdown()

@@ -255,7 +255,7 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
 const HOOK_ROUTE = /^\/(hook|mcp|status|ledger)\/([^/?#]+)\/([0-9a-f]{32})$/;
 /** READS-181 A: one ledger operation (a card, a message, a memory note) is small. */
 export const LEDGER_HTTP_BODY_MAX = 256 * 1024;
-export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown };
+export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
 /** NATIVE-MEMORY: the `memory` command's endpoint. The caller is identified by its MEMORY_TOKEN
  *  alone (the handler resolves it); no agent id in the URL to trust. */
 const MEMORY_ROUTE = /^\/memory\/([0-9a-f]{32})$/;
@@ -522,9 +522,9 @@ export class HookServer {
     try { body = JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) {
       reply(400, { ok: false, line: `refused: the input is not valid JSON (${String(e).slice(0, 120)})` }); return;
     }
-    try { const r = handler(agentId, body); reply(r.status, r.body); } catch (e) {
-      reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
-    }
+    // CLAIM-LEDGER W6 (G6.6): at level 'writer' the memory part is an async claim append.
+    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
+    try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
   }
 
   /** The base URL the shim posts to (`<base>/<token>`), or null when the broker is down. */

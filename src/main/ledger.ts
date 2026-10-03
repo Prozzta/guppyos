@@ -16,11 +16,16 @@
  *   between parts is repaired by running the same op again. The op's CONTENT is hashed: the
  *   same op name with different content is refused, never half-applied (Jim B1).
  * - The caller is the agent the URL token names; `from` is never taken from the input.
+ * - CLAIM-LEDGER W6 (G6.6): at the claim ledger's effective level 'writer', memory.md is a generated
+ *   view, so the memory part becomes ONE claim (the endpoint's `note` verb, origin 'ledger-route':
+ *   at most 400 characters, never cut, no source or legacy) instead of a memory.md append. The
+ *   length is checked with everything else, before anything is written.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HiveTask } from './hive';
+import { CLAIM_TEXT_MAX, type LedgerLevel } from '../shared/claims';
 
 export const LEDGER_BODY_MAX = 256 * 1024;
 export const LEDGER_MEMORY_MAX = 32 * 1024;
@@ -60,7 +65,16 @@ export interface LedgerDeps {
   addTask(task: HiveTask): boolean;
   patchTask(id: string, patch: Partial<HiveTask>): boolean;
   now(): Date;
+  /**
+   * CLAIM-LEDGER W6 (G6.6): the caller's claim ledger, when it is wired. At level 'writer' the memory
+   * part is noted as a claim through `note` (main wires it to the endpoint's note verb with origin
+   * 'ledger-route'); below 'writer', or when absent, the memory part goes to memory.md as before.
+   */
+  memoryClaim?: { level: LedgerLevel; note(args: { kind: 'fact' | 'lesson'; text: string; pin?: true }): Promise<{ ok: boolean; id?: string; error?: string }> } | null;
 }
+
+/** Characters as the claim store counts them (code points). */
+const charLen = (t: string): number => { let n = 0; for (const _ of t) { void _; n++; } return n; };
 
 export interface LedgerReply { status: number; body: { ok: boolean; line: string } }
 
@@ -151,7 +165,7 @@ function checkCardFields(o: Record<string, unknown>, where: string): string | nu
 /** Text for a free-text field: the old value, then `[iso] text` on its own line (god's form). */
 const appended = (old: unknown, text: string, at: Date): string => `${typeof old === 'string' ? old : ''}\n[${at.toISOString()}] ${text}`;
 
-interface OpRecord { op: string; at: string; hash?: string; card?: boolean; message?: string; memory?: number; line?: string }
+interface OpRecord { op: string; at: string; hash?: string; card?: boolean; message?: string; memory?: number; claim?: string; line?: string }
 
 /** Canonical JSON: object keys sorted, so the same content always hashes the same. */
 const canonical = (v: unknown): string => Array.isArray(v)
@@ -178,6 +192,24 @@ function writeOps(file: string, ops: OpRecord[]): void {
   renameSync(tmp, file);
 }
 
+/**
+ * W6-D1 (Jim R1): one ledger op at a time per agent. At level 'writer' the memory part awaits a claim
+ * append; a retry of the same op (the CLI says to retry after its 15 s timeout) must wait for the op
+ * in flight, then find its memory part done instead of noting it again. Main's ledger handler runs
+ * every op through one of these, keyed by the caller.
+ */
+export function perAgentQueue(): <T>(agentId: string, run: () => T | Promise<T>) => Promise<T> {
+  const tails = new Map<string, Promise<unknown>>();
+  return <T>(agentId: string, run: () => T | Promise<T>): Promise<T> => {
+    const prev = tails.get(agentId) ?? Promise.resolve();
+    const next = prev.then(run, run);
+    const tail = next.catch(() => undefined);
+    tails.set(agentId, tail);
+    void tail.then(() => { if (tails.get(agentId) === tail) tails.delete(agentId); });
+    return next;
+  };
+}
+
 /** Insert lesson text at the end of the standing-lessons section (before the next `## `). */
 export function insertLesson(memory: string, text: string): string | null {
   const at = memory.indexOf(LESSONS_HEADING);
@@ -195,7 +227,7 @@ export function insertLesson(memory: string, text: string): string | null {
  * Apply one op for `deps.agentId`. Validates everything first; then card, message, memory, each
  * recorded as done for the op once written, so a retry of the same op finishes only what is left.
  */
-export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
+export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Promise<LedgerReply> {
   const parsed = parseLedgerOp(raw);
   if (!parsed.ok) return { status: 400, body: { ok: false, line: `refused: ${parsed.error}` } };
   const op = parsed.op;
@@ -224,8 +256,15 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
     return { status: 400, body: { ok: false, line: `refused: message.to "${op.message.to}" is not a registered agent, "god" or "broadcast"` } };
   }
   const memFile = join(deps.agentDir, 'memory.md');
+  const asClaim = !!op.memory && deps.memoryClaim?.level === 'writer';
+  if (op.memory && asClaim && !rec?.memory) {
+    const len = charLen(op.memory.append.trim());
+    if (len > CLAIM_TEXT_MAX) {
+      return { status: 400, body: { ok: false, line: `refused: memory.append is ${len} characters. Your claim ledger is on, so a memory note is one claim of at most ${CLAIM_TEXT_MAX} characters (never cut): split it into several notes` } };
+    }
+  }
   let lessonText: string | null = null;
-  if (op.memory?.lesson && !rec?.memory) {
+  if (op.memory?.lesson && !rec?.memory && !asClaim) {
     let cur = '';
     try { cur = readFileSync(memFile, 'utf8'); } catch { cur = ''; }
     lessonText = insertLesson(cur, op.memory.append);
@@ -234,7 +273,14 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
 
   if (!rec) { rec = { op: op.op, at: now.toISOString(), hash }; ops.push(rec); }
   const done: string[] = [];
-  const save = (): void => { writeOps(opsFile, ops); };
+  // W6-D1 (Jim R2): re-read and merge by op name before every save, so this op's snapshot (read
+  // before an await) can never drop the record of another op that finished meanwhile.
+  const save = (): void => {
+    const cur = readOps(opsFile);
+    const i = cur.findIndex((o) => o.op === rec!.op);
+    if (i >= 0) cur[i] = rec!; else cur.push(rec!);
+    writeOps(opsFile, cur);
+  };
   const fail = (part: string, e: unknown): LedgerReply => {
     try { save(); } catch { /* the reply still says what is done */ }
     return { status: 500, body: { ok: false, line: `partial: ${done.length ? done.join(' ') + '; ' : ''}${part} failed (${String(e).slice(0, 160)}). Run the same op again to finish it.` } };
@@ -295,9 +341,31 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
     done.push(`msg=${rec.message}`);
   }
 
+  const finish = (): LedgerReply => {
+    rec!.line = `ok op=${op.op} ${done.join(' ')}`;
+    try { save(); } catch { /* the work is done; a retry is then a no-op per part */ }
+    return { status: 200, body: { ok: true, line: rec!.line } };
+  };
+  // 4a) Memory at level 'writer': one claim (G6.6). The claim id is recorded for the op, so a retry
+  // after the ack does not note it twice.
+  if (op.memory && asClaim && !rec.memory) {
+    const m = op.memory;
+    const r0 = rec;
+    return deps.memoryClaim!.note({ kind: m.lesson ? 'lesson' : 'fact', text: m.append.trim(), ...(m.lesson ? { pin: true as const } : {}) }).then((r) => {
+      if (!r.ok) return fail('memory', `the claim was refused: ${r.error ?? 'no reason given'}`);
+      try {
+        r0.memory = Buffer.byteLength(m.append, 'utf8');
+        if (r.id) r0.claim = r.id;
+        save();
+      } catch (e) { return fail('memory', e); }
+      done.push(`memory=claim ${r0.claim ?? '?'}${m.lesson ? ' (lesson)' : ''}`);
+      return finish();
+    }, (e: unknown) => fail('memory', e));
+  }
   // 4) Memory: appended at the end, or (lesson) inserted at the end of the standing lessons.
   if (op.memory) {
-    if (!rec.memory) {
+    if (rec.claim) done.push(`memory=claim ${rec.claim}${op.memory.lesson ? ' (lesson)' : ''}`);
+    else if (!rec.memory) {
       try {
         if (lessonText !== null) {
           const tmp = `${memFile}.tmp-${process.pid}`;
@@ -312,10 +380,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply {
         save();
       } catch (e) { return fail('memory', e); }
     }
-    done.push(`memory=+${rec.memory}B${op.memory.lesson ? ' (lesson)' : ''}`);
+    if (!rec.claim) done.push(`memory=+${rec.memory}B${op.memory.lesson ? ' (lesson)' : ''}`);
   }
-
-  rec.line = `ok op=${op.op} ${done.join(' ')}`;
-  try { save(); } catch { /* the work is done; a retry is then a no-op per part */ }
-  return { status: 200, body: { ok: true, line: rec.line } };
+  return finish();
 }

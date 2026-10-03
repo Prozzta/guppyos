@@ -551,7 +551,8 @@ test('wiring: the spawn sets HIVE_LEDGER_URL from this spawn\'s hook URL; dev bu
   assert.match(hive, /const hookUrl = this\.hookBroker\?\.urlFor\(meta\.id\) \?\? null;[\s\S]{0,300}if \(hookUrl\) env\.HIVE_LEDGER_URL = hookUrl\.replace\('\/hook\/', '\/ledger\/'\);/);
   assert.match(readSource('src/main/devIsolation.ts'), /'HIVE_LEDGER_URL'/);
   const idx = codeOnly(readSource('src/main/index.ts'));
-  assert.match(idx, /hookServer\.setLedgerHandler\(\(agentId, body\) => \{[\s\S]{0,900}addTask: \(task\) => hive\.addTask\(task, 'ledger'\),\s*patchTask: \(id, patch\) => hive\.patchTask\(id, patch, 'ledger'\)/);
+  // CLAIM-LEDGER W6-D1: the handler may run each op through the per-agent queue (ledgerQueue)
+  assert.match(idx, /hookServer\.setLedgerHandler\(\(agentId, body\) => (?:ledgerQueue\(agentId, \(\) => )?\{[\s\S]{0,900}addTask: \(task\) => hive\.addTask\(task, 'ledger'\),\s*patchTask: \(id, patch\) => hive\.patchTask\(id, patch, 'ledger'\)/);
   assert.match(idx, /const ledgerDir = hive\.writeLedgerCommand\(LEDGER_CLI\);\s*if \(ledgerDir\) opts\.pathPrepend = \[\.\.\.\(opts\.pathPrepend \?\? \[\]\), ledgerDir\];/);
   assert.match(readSource('electron-builder.yml'), /- from: resources\/ledger-cli\.cjs\s+to: ledger-cli\.cjs/);
   assert.match(readSource('src/main/hive.ts'), /## The ledger command/);
