@@ -238,6 +238,17 @@ export type BuildWorkingSetFn = (state: ClaimsState, view: WorldView, budget: nu
 export type RenderMemoryMdFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete') => string;   // W4
 export type RenderExportLineFn = (rec: LedgerRec, state: ClaimsState) => string;                // W4
 export type ReconcileItemsFn = (agentId: string, n: number /* <= 3 */) => ReconcileItem[];       // W5, leased
+
+/**
+ * R5 candidates come from the embedder side, never from derive() (god 1f7b07). After main appends
+ * and indexes a claim, it asks W3 for same-agent live neighbours with cosine >= tau2 and no typed-slot
+ * match, and hands them to W5's queue, which merges them with derive's 'R2-mail' rows. Never for the
+ * legacy import (only claims appended after it), and W5 logs each enqueued pair with its cosine and
+ * tau2 so W8 can replay it (Jim, binding).
+ */
+export interface R5Candidate { a: string /* the new claim */; b: string; cosine: number; tau2: number }
+export type R5CandidatesFn = (agentId: string, claimId: string) => Promise<R5Candidate[]>;      // W3
+export type EnqueueCandidatesFn = (agentId: string, pairs: R5Candidate[]) => void;              // W5
 export type ImportLegacyFn = (agentDir: string) => RecordDraft[];                               // W6
 export type ParseNewBulletsFn = (memoryMd: string, knownIds: Set<string>) => RecordDraft[];     // W6
 

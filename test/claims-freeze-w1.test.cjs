@@ -89,6 +89,13 @@ test('text limits: 400 for external entry points, 4000 for the w6-internal origi
   assert.match(source, /export type AppendRecordFn = \(agentId: string, draft: RecordDraft, origin: AppendOrigin\)/);
 });
 
+test('R5 candidates: W3 produces them, W5 enqueues them; derive is not involved', () => {
+  assert.match(source, /export interface R5Candidate \{ a: string[^}]*; b: string; cosine: number; tau2: number \}/);
+  assert.match(source, /export type R5CandidatesFn = \(agentId: string, claimId: string\) => Promise<R5Candidate\[\]>;/);
+  assert.match(source, /export type EnqueueCandidatesFn = \(agentId: string, pairs: R5Candidate\[\]\) => void;/);
+  assert.match(source, /export type DeriveFn = \(records: LedgerRec\[\], registry: KeyRegistry, ruleConfig: \{ r4: boolean \}\) => ClaimsState;/);
+});
+
 test('the EventKind union and EVENT_KINDS agree', () => {
   const union = /export type EventKind =([\s\S]*?);/.exec(source)[1];
   const names = [...union.matchAll(/'([a-z?-]+)'/g)].map((m) => m[1]);
