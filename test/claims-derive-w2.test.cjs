@@ -237,24 +237,28 @@ test('G2.4 derive has no embedder dependency and remains deterministic with a th
   }
 });
 
-test('G2.6 10k distinct claims derive under 200ms', () => {
+// G2.6 and the hot-key R2 bound are wall-clock gates: their 200 ms timings run in the SERIAL perf
+// lane (test/perf/claims-derive-w2.perf.cjs; run-tests.cjs runs it after the parallel suite), where
+// they measure derive() and not the machine. Their correctness halves stay here.
+test('G2.6 (correctness half) 10k distinct claims all derive', () => {
   const rows = Array.from({ length: 10_000 }, (_, index) => claim(`c${String(index).padStart(5, '0')}`, { key: `fact.k${index}`, mac: `m${index}` }));
-  const start = process.hrtime.bigint();
   const state = derive(rows, registry, { r4: false });
-  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
   assert.equal(Object.keys(state.claims).length, 10_000);
-  assert.ok(elapsedMs < 200, `derive took ${elapsedMs.toFixed(1)}ms`);
 });
 
-test('R2 remains bounded for a hot single key at the 10k-claim scale', () => {
+test('R2 (correctness half) a hot single key at the 10k-claim scale keeps the newest live', () => {
   const rows = Array.from({ length: 10_000 }, (_, index) => claim(`h${String(index).padStart(5, '0')}`, {
     key: 'fact.hot', at: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(), mac: `mh${index}`,
   }));
-  const start = process.hrtime.bigint();
   const state = derive(rows, registry, { r4: false });
-  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
   assert.equal(state.claims.h09999.status, 'live');
-  assert.ok(elapsedMs < 200, `single-key derive took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test('the W2 wall-clock gates live in the serial perf lane, with their frozen 200 ms bounds', () => {
+  const perf = fs.readFileSync(path.join(__dirname, 'perf', 'claims-derive-w2.perf.cjs'), 'utf8');
+  assert.equal((perf.match(/assert\.ok\(elapsedMs < 200,/g) || []).length, 2);
+  assert.match(perf, /test\('G2\.6 10k distinct claims derive under 200ms'/);
+  assert.match(perf, /test\('R2 remains bounded for a hot single key at the 10k-claim scale'/);
 });
 
 test('R6/R7 world facts are view-time flags; counters only rank and never alter ClaimsState', () => {

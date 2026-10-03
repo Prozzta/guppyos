@@ -19,6 +19,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "node test/tools/run-tests.cjs",
     "test:focused": "node test/tools/run-tests.cjs",
     "check:links": "node tools/check-release-links.cjs",
     "dist": "npm run build && electron-builder",
