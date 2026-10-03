@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { MailLedger, freshMailId, isValidMailId, staleObligations, type MailLedgerDoc, type StaleObligation } from './mailLedger';
+import { MailLedger, freshMailId, isValidMailId, staleObligations, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -531,6 +531,18 @@ const NODE_ROUTER_RUNTIME: RouterRuntime = {
   setInterval: (fn, ms) => setInterval(fn, ms),
   clearInterval: (h) => clearInterval(h as NodeJS.Timeout)
 };
+
+/** REQUESTS-TAB-STALE: when a done card became done (ms): its `doneAt`, else the newest stamp
+ *  in its result (appendResult writes `[<ISO>] …` with the outcome), else null (no proof). */
+export function cardDoneAt(card: unknown): number | null {
+  const c = card as { status?: unknown; doneAt?: unknown; result?: unknown } | null;
+  if (!c || c.status !== 'done') return null;
+  if (typeof c.doneAt === 'string' && Number.isFinite(Date.parse(c.doneAt))) return Date.parse(c.doneAt);
+  if (typeof c.doneAt === 'number' && Number.isFinite(c.doneAt)) return c.doneAt;
+  const stamps = typeof c.result === 'string' ? c.result.match(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z/g) ?? [] : [];
+  const times = stamps.map((s) => Date.parse(s)).filter(Number.isFinite);
+  return times.length ? Math.max(...times) : null;
+}
 
 export class HiveManager {
   /**
@@ -3506,23 +3518,63 @@ export class HiveManager {
 
   /**
    * REQUESTS-TAB-STALE (1.1.83): close every open request whose work is provably finished (its
-   * card is done, its recipient answered in the same conversation, or the release it names has
-   * shipped: `staleObligations`). `shippedVersion` is the running app's version. Each close logs
-   * a `mail-obligation-closed` row with an `auto:` reason. Data only: nothing wakes, no mail.
+   * card became done, its recipient answered it, or the release it names first started, each
+   * AFTER the ask: `staleObligations`). `runningVersion` is the packaged app's version (main runs
+   * this only when packaged). Each close logs a `mail-obligation-closed` row with an `auto:`
+   * reason. Data only: nothing wakes, no mail.
    */
-  autoCloseStaleObligations(shippedVersion: string | null): StaleObligation[] {
+  autoCloseStaleObligations(runningVersion: string | null): StaleObligation[] {
     const reg = this.registry();
     const docs: Record<string, MailLedgerDoc> = {};
     for (const id of Object.keys(reg.agents ?? {})) {
       if (Object.prototype.hasOwnProperty.call(reg.agents, id)) docs[id] = this.mail.ledger(id);
     }
     const list = (this.tasks() as { tasks?: unknown } | null)?.tasks;
-    const cards = new Map<string, string>();
+    const cards = new Map<string, CardEvidence>();
     for (const c of Array.isArray(list) ? list as Partial<HiveTask>[] : []) {
-      if (c && typeof c.id === 'string' && typeof c.status === 'string') cards.set(c.id, c.status);
+      if (c && typeof c.id === 'string' && typeof c.status === 'string') cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c) });
     }
-    return staleObligations(docs, cards, shippedVersion)
+    return staleObligations(docs, cards, this.releaseRuns(runningVersion))
       .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
+  }
+
+  /**
+   * REQUESTS-TAB-STALE: the first start of each packaged release on this hive, kept in
+   * `state/app-releases.json`. Seeded once from the `app-start` rows of the logs (rotated files
+   * included); the running version is added at its first sweep if no row has it.
+   */
+  private releaseRuns(runningVersion: string | null): ReleaseRun[] {
+    const root = this.root();
+    if (!root) return [];
+    const file = join(root, 'state', 'app-releases.json');
+    let first: Record<string, number> | null = null;
+    try {
+      const doc = JSON.parse(readFileSync(file, 'utf8')) as { firstRunAt?: unknown };
+      if (doc && typeof doc.firstRunAt === 'object' && doc.firstRunAt) first = { ...(doc.firstRunAt as Record<string, number>) };
+    } catch { /* absent or unreadable: seed from the logs */ }
+    let changed = false;
+    if (!first) {
+      first = {};
+      changed = true;
+      const live = join(root, 'log.jsonl');
+      for (const p of [...rotatedFiles(live).map((r) => r.path), live]) {
+        let text = '';
+        try { text = readFileSync(p, 'utf8'); } catch { continue; }
+        for (const line of text.split('\n')) {
+          if (!line.includes('"app-start"')) continue;
+          try {
+            const r = JSON.parse(line) as { kind?: unknown; packaged?: unknown; version?: unknown; ts?: unknown };
+            if (r.kind !== 'app-start' || r.packaged !== true || typeof r.version !== 'string' || typeof r.ts !== 'number') continue;
+            if (!(first[r.version] <= r.ts)) first[r.version] = r.ts;
+          } catch { /* a torn line */ }
+        }
+      }
+    }
+    if (runningVersion && typeof first[runningVersion] !== 'number') { first[runningVersion] = Date.now(); changed = true; }
+    if (changed) {
+      try { mkdirSync(join(root, 'state'), { recursive: true }); atomicWriteJsonFile(file, { v: 1, firstRunAt: first }); } catch { /* next sweep retries */ }
+    }
+    return Object.entries(first).filter(([, at]) => typeof at === 'number').map(([version, firstRunAt]) => ({ version, firstRunAt }));
   }
 
   /**

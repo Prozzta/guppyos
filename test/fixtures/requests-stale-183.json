@@ -1,20 +1,58 @@
 {
- "note": "REQUESTS-TAB-STALE replay: the live hive ledgers on 2026-10-03 ~11:08Z, anonymised (subjects keep only the release prefix and card ids). Running version 1.1.82.",
- "shippedVersion": "1.1.82",
+ "note": "REQUESTS-TAB-STALE replay: the live hive ledgers on 2026-10-03 ~11:08Z, anonymised (subjects keep only the release prefix and card ids). cards = {status, doneAt}; releases = first packaged app-start per version.",
  "cards": {
-  "REBRAND-GUPPY": "done",
-  "READS-MAIL-CAP": "doing",
-  "READS-COMPACT-HEALTH": "doing",
-  "REBRAND-UPDATER-BASE": "todo",
-  "READS-PROMPT-TRIM": "doing",
-  "REBRAND-FILEDESCRIPTION": "doing",
-  "READS-MEASURE": "doing",
-  "WAKE-SCREEN-GUARD": "done",
-  "TASKS-DUP-ID-LOOP": "done",
-  "CODEX-MODEL-NOT-KEPT-179": "todo",
-  "REBRAND-LINK-SCHEME": "doing",
-  "REQUESTS-TAB-STALE": "doing",
-  "MODS-GUARD": "doing"
+  "REBRAND-GUPPY": {
+   "status": "done",
+   "doneAt": 1791024568136
+  },
+  "READS-MAIL-CAP": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "READS-COMPACT-HEALTH": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "REBRAND-UPDATER-BASE": {
+   "status": "todo",
+   "doneAt": null
+  },
+  "READS-PROMPT-TRIM": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "REBRAND-FILEDESCRIPTION": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "READS-MEASURE": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "WAKE-SCREEN-GUARD": {
+   "status": "done",
+   "doneAt": null
+  },
+  "TASKS-DUP-ID-LOOP": {
+   "status": "done",
+   "doneAt": null
+  },
+  "CODEX-MODEL-NOT-KEPT-179": {
+   "status": "todo",
+   "doneAt": null
+  },
+  "REBRAND-LINK-SCHEME": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "REQUESTS-TAB-STALE": {
+   "status": "doing",
+   "doneAt": null
+  },
+  "MODS-GUARD": {
+   "status": "done",
+   "doneAt": 1791026328564
+  }
  },
  "docs": {
   "andy": {
@@ -42,7 +80,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790882927259
+     "updatedAt": 1790882927259,
+     "inReplyTo": null
     },
     "2026-10-01T19-46-49-472Z-cd74b1": {
      "id": "2026-10-01T19-46-49-472Z-cd74b1",
@@ -62,7 +101,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790884659526
+     "updatedAt": 1790884659526,
+     "inReplyTo": null
     },
     "2026-10-01T19-48-30-408Z-815910": {
      "id": "2026-10-01T19-48-30-408Z-815910",
@@ -82,7 +122,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790884659526
+     "updatedAt": 1790884659526,
+     "inReplyTo": null
     },
     "2026-10-02T19-11-29-079Z-b647e0": {
      "id": "2026-10-02T19-11-29-079Z-b647e0",
@@ -102,7 +143,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790969608105
+     "updatedAt": 1790969608105,
+     "inReplyTo": null
     },
     "2026-10-03T08-11-11-450Z-74ae42": {
      "id": "2026-10-03T08-11-11-450Z-74ae42",
@@ -122,7 +164,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016553978
+     "updatedAt": 1791016553978,
+     "inReplyTo": null
     },
     "2026-10-03T10-50-21-540Z-7d3555": {
      "id": "2026-10-03T10-50-21-540Z-7d3555",
@@ -142,7 +185,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791024627512
+     "updatedAt": 1791024627512,
+     "inReplyTo": null
     },
     "2026-10-03T09-23-39-162Z-e7a89e": {
      "id": "2026-10-03T09-23-39-162Z-e7a89e",
@@ -162,7 +206,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791019719575
+     "updatedAt": 1791019719575,
+     "inReplyTo": "2026-10-03T09-22-14-912Z-andy-ck-jim"
     },
     "2026-10-03T09-29-31-129Z-af18ad": {
      "id": "2026-10-03T09-29-31-129Z-af18ad",
@@ -182,7 +227,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791019777496
+     "updatedAt": 1791019777496,
+     "inReplyTo": "2026-10-03T09-28-33-726Z-andy-ckn1b-jim"
     },
     "2026-10-03T09-53-10-033Z-c03c6e": {
      "id": "2026-10-03T09-53-10-033Z-c03c6e",
@@ -202,7 +248,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791021208472
+     "updatedAt": 1791021208472,
+     "inReplyTo": "2026-10-03T09-51-05-681Z-andy-cut182-jim"
     }
    }
   },
@@ -231,7 +278,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790886907394
+     "updatedAt": 1790886907394,
+     "inReplyTo": "2026-10-01T20-34-31-143Z-d83fb3"
     },
     "2026-10-02T17-20-55-426Z-andy1": {
      "id": "2026-10-02T17-20-55-426Z-andy1",
@@ -251,7 +299,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790961722103
+     "updatedAt": 1790961722103,
+     "inReplyTo": "2026-10-01T20-49-49-970Z-679008"
     },
     "2026-10-02T19-11-31-317Z-andy15-god": {
      "id": "2026-10-02T19-11-31-317Z-andy15-god",
@@ -271,7 +320,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790968305309
+     "updatedAt": 1790968305309,
+     "inReplyTo": "2026-10-02T19-04-34-207Z-553700"
     },
     "2026-10-02T19-16-25-341Z-andy16": {
      "id": "2026-10-02T19-16-25-341Z-andy16",
@@ -291,7 +341,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790968589009
+     "updatedAt": 1790968589009,
+     "inReplyTo": null
     },
     "2026-10-02T19-32-42-437Z-andy17": {
      "id": "2026-10-02T19-32-42-437Z-andy17",
@@ -311,7 +362,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790969576227
+     "updatedAt": 1790969576227,
+     "inReplyTo": null
     },
     "2026-10-02T19-33-18-168Z-andy18-god": {
      "id": "2026-10-02T19-33-18-168Z-andy18-god",
@@ -331,7 +383,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790969601002
+     "updatedAt": 1790969601002,
+     "inReplyTo": "2026-10-02T19-12-44-386Z-b25f30"
     },
     "2026-10-03T08-35-31-975Z-andy-rebranda-god": {
      "id": "2026-10-03T08-35-31-975Z-andy-rebranda-god",
@@ -351,7 +404,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016577326
+     "updatedAt": 1791016577326,
+     "inReplyTo": "2026-10-03T08-14-11-796Z-e31a2e"
     },
     "2026-10-03T08-51-46-687Z-andy-rebranda2-god": {
      "id": "2026-10-03T08-51-46-687Z-andy-rebranda2-god",
@@ -371,7 +425,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017520921
+     "updatedAt": 1791017520921,
+     "inReplyTo": "2026-10-03T08-41-36-680Z-01d7da"
     },
     "2026-10-03T08-57-08-982Z-andy-n4-god": {
      "id": "2026-10-03T08-57-08-982Z-andy-n4-god",
@@ -391,7 +446,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017837256
+     "updatedAt": 1791017837256,
+     "inReplyTo": "2026-10-03T08-55-43-445Z-f2cadd"
     },
     "2026-10-03T09-22-14-912Z-andy-ck-god": {
      "id": "2026-10-03T09-22-14-912Z-andy-ck-god",
@@ -411,7 +467,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791019343319
+     "updatedAt": 1791019343319,
+     "inReplyTo": "2026-10-03T09-07-09-912Z-b7189f"
     },
     "2026-10-03T07-02-37-584Z-49a47d": {
      "id": "2026-10-03T07-02-37-584Z-49a47d",
@@ -431,7 +488,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791010961908
+     "updatedAt": 1791010961908,
+     "inReplyTo": "2026-10-03T07-01-40-708Z-dfcadc"
     },
     "2026-10-03T07-20-39-802Z-5404ac": {
      "id": "2026-10-03T07-20-39-802Z-5404ac",
@@ -451,7 +509,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012042410
+     "updatedAt": 1791012042410,
+     "inReplyTo": "2026-10-03T07-20-20-300Z-e57c19"
     },
     "2026-10-03T07-23-26-563Z-2901cc": {
      "id": "2026-10-03T07-23-26-563Z-2901cc",
@@ -471,7 +530,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012208619
+     "updatedAt": 1791012208619,
+     "inReplyTo": null
     },
     "2026-10-03T07-26-27-214Z-e794a8": {
      "id": "2026-10-03T07-26-27-214Z-e794a8",
@@ -491,7 +551,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012399453
+     "updatedAt": 1791012399453,
+     "inReplyTo": null
     },
     "2026-10-03T07-26-39-686Z-001053": {
      "id": "2026-10-03T07-26-39-686Z-001053",
@@ -511,7 +572,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012406727
+     "updatedAt": 1791012406727,
+     "inReplyTo": "2026-10-03T07-20-20-300Z-e57c19"
     },
     "2026-10-03T07-31-49-675Z-bf7a3b": {
      "id": "2026-10-03T07-31-49-675Z-bf7a3b",
@@ -531,7 +593,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012711861
+     "updatedAt": 1791012711861,
+     "inReplyTo": null
     },
     "2026-10-03T07-32-40-203Z-d73c3b": {
      "id": "2026-10-03T07-32-40-203Z-d73c3b",
@@ -551,7 +614,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012773672
+     "updatedAt": 1791012773672,
+     "inReplyTo": "2026-10-03T07-32-20-610Z-af80cc"
     },
     "2026-10-03T07-49-46-158Z-ecd085": {
      "id": "2026-10-03T07-49-46-158Z-ecd085",
@@ -571,7 +635,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791013810371
+     "updatedAt": 1791013810371,
+     "inReplyTo": null
     },
     "2026-10-03T07-50-59-419Z-e46bd4": {
      "id": "2026-10-03T07-50-59-419Z-e46bd4",
@@ -591,7 +656,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791013870109
+     "updatedAt": 1791013870109,
+     "inReplyTo": "2026-10-03T07-50-05-108Z-1343d1"
     },
     "2026-10-03T07-51-12-899Z-f87463": {
      "id": "2026-10-03T07-51-12-899Z-f87463",
@@ -611,7 +677,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791013879447
+     "updatedAt": 1791013879447,
+     "inReplyTo": "2026-10-03T07-50-52-717Z-fce689"
     },
     "2026-10-03T08-11-33-820Z-193667": {
      "id": "2026-10-03T08-11-33-820Z-193667",
@@ -631,7 +698,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791015259770
+     "updatedAt": 1791015259770,
+     "inReplyTo": "2026-10-03T07-26-36-165Z-6594d2"
     },
     "2026-09-30T17-33-11-915Z-981a8e": {
      "id": "2026-09-30T17-33-11-915Z-981a8e",
@@ -651,7 +719,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790789603495
+     "updatedAt": 1790789603495,
+     "inReplyTo": "2026-09-30T17-30-15-037Z-b5611b"
     },
     "2026-10-02T17-29-52-919Z-bbcc1a": {
      "id": "2026-10-02T17-29-52-919Z-bbcc1a",
@@ -671,7 +740,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790962241244
+     "updatedAt": 1790962241244,
+     "inReplyTo": "2026-10-02T17-28-43-010Z-753f3b"
     },
     "2026-10-02T17-32-12-043Z-7f312d": {
      "id": "2026-10-02T17-32-12-043Z-7f312d",
@@ -691,7 +761,8 @@
      "requiresReply": true,
      "repliedAt": 1790962522995,
      "closedAt": null,
-     "updatedAt": 1790962528610
+     "updatedAt": 1790962528610,
+     "inReplyTo": "2026-10-02T17-30-17-042Z-e8260d"
     },
     "2026-10-02T17-46-26-435Z-2b7f29": {
      "id": "2026-10-02T17-46-26-435Z-2b7f29",
@@ -711,7 +782,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790963197182
+     "updatedAt": 1790963197182,
+     "inReplyTo": "2026-10-02T17-40-37-505Z-4f374f"
     },
     "2026-10-02T17-46-26-439Z-45c5f8": {
      "id": "2026-10-02T17-46-26-439Z-45c5f8",
@@ -731,7 +803,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790963197182
+     "updatedAt": 1790963197182,
+     "inReplyTo": null
     },
     "2026-10-02T17-57-58-431Z-0c28cc": {
      "id": "2026-10-02T17-57-58-431Z-0c28cc",
@@ -751,7 +824,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790963886856
+     "updatedAt": 1790963886856,
+     "inReplyTo": "2026-10-02T17-57-29-538Z-e69771"
     },
     "2026-10-02T18-02-58-866Z-c610e7": {
      "id": "2026-10-02T18-02-58-866Z-c610e7",
@@ -771,7 +845,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790964181947
+     "updatedAt": 1790964181947,
+     "inReplyTo": "2026-10-02T17-51-31-428Z-f40a2e"
     },
     "2026-10-02T18-02-58-872Z-50f6c2": {
      "id": "2026-10-02T18-02-58-872Z-50f6c2",
@@ -791,7 +866,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790964181947
+     "updatedAt": 1790964181947,
+     "inReplyTo": null
     },
     "2026-10-02T18-06-05-732Z-f4e048": {
      "id": "2026-10-02T18-06-05-732Z-f4e048",
@@ -811,7 +887,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790964373751
+     "updatedAt": 1790964373751,
+     "inReplyTo": "2026-10-02T17-51-31-428Z-f40a2e"
     },
     "2026-10-02T18-20-33-808Z-199910": {
      "id": "2026-10-02T18-20-33-808Z-199910",
@@ -831,7 +908,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790965241673
+     "updatedAt": 1790965241673,
+     "inReplyTo": "2026-10-02T18-20-03-735Z-8a8e34"
     },
     "2026-10-03T08-14-35-615Z-df118f": {
      "id": "2026-10-03T08-14-35-615Z-df118f",
@@ -851,7 +929,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791015332683
+     "updatedAt": 1791015332683,
+     "inReplyTo": "2026-10-03T08-14-11-811Z-a1b430"
     },
     "2026-10-03T08-22-00-310Z-3a5ce0": {
      "id": "2026-10-03T08-22-00-310Z-3a5ce0",
@@ -871,7 +950,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016223319
+     "updatedAt": 1791016223319,
+     "inReplyTo": "2026-10-03T08-19-57-837Z-11b4f0"
     },
     "2026-10-03T08-32-38-565Z-b58104": {
      "id": "2026-10-03T08-32-38-565Z-b58104",
@@ -891,7 +971,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016370873
+     "updatedAt": 1791016370873,
+     "inReplyTo": null
     },
     "2026-10-03T08-32-59-748Z-4509d0": {
      "id": "2026-10-03T08-32-59-748Z-4509d0",
@@ -911,7 +992,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016381933
+     "updatedAt": 1791016381933,
+     "inReplyTo": null
     },
     "2026-10-03T08-41-20-242Z-c2be5a": {
      "id": "2026-10-03T08-41-20-242Z-c2be5a",
@@ -931,7 +1013,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016903421
+     "updatedAt": 1791016903421,
+     "inReplyTo": "2026-10-03T08-35-41-324Z-669a57"
     },
     "2026-10-03T08-42-00-941Z-10aa3d": {
      "id": "2026-10-03T08-42-00-941Z-10aa3d",
@@ -951,7 +1034,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016922956
+     "updatedAt": 1791016922956,
+     "inReplyTo": null
     },
     "2026-10-03T08-55-34-494Z-82171c": {
      "id": "2026-10-03T08-55-34-494Z-82171c",
@@ -971,7 +1055,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017746958
+     "updatedAt": 1791017746958,
+     "inReplyTo": "2026-10-03T08-51-56-871Z-650cea"
     },
     "2026-10-03T08-57-53-893Z-05f28c": {
      "id": "2026-10-03T08-57-53-893Z-05f28c",
@@ -991,7 +1076,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017882467
+     "updatedAt": 1791017882467,
+     "inReplyTo": "2026-10-03T08-57-14-544Z-e1a0a3"
     },
     "2026-10-03T08-59-25-528Z-e51d25": {
      "id": "2026-10-03T08-59-25-528Z-e51d25",
@@ -1011,7 +1097,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017968740
+     "updatedAt": 1791017968740,
+     "inReplyTo": null
     }
    }
   },
@@ -1040,7 +1127,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791012499658
+     "updatedAt": 1791012499658,
+     "inReplyTo": "2026-10-03T07-26-39-686Z-001053"
     },
     "2026-10-03T08-57-53-890Z-6ccb84": {
      "id": "2026-10-03T08-57-53-890Z-6ccb84",
@@ -1060,7 +1148,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791017940191
+     "updatedAt": 1791017940191,
+     "inReplyTo": null
     },
     "2026-10-03T09-23-39-167Z-5ece4b": {
      "id": "2026-10-03T09-23-39-167Z-5ece4b",
@@ -1080,7 +1169,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791019450877
+     "updatedAt": 1791019450877,
+     "inReplyTo": null
     },
     "2026-10-03T09-29-31-135Z-b56655": {
      "id": "2026-10-03T09-29-31-135Z-b56655",
@@ -1100,7 +1190,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791019858413
+     "updatedAt": 1791019858413,
+     "inReplyTo": null
     },
     "2026-10-03T10-50-21-754Z-1ffd35": {
      "id": "2026-10-03T10-50-21-754Z-1ffd35",
@@ -1120,7 +1211,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791024623862
+     "updatedAt": 1791024623862,
+     "inReplyTo": null
     },
     "2026-10-01T14-01-04-207Z-753e5e": {
      "id": "2026-10-01T14-01-04-207Z-753e5e",
@@ -1140,7 +1232,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790863519150
+     "updatedAt": 1790863519150,
+     "inReplyTo": "2026-10-01T13-37-53-204Z-c72c52"
     },
     "2026-10-01T14-12-27-313Z-313267": {
      "id": "2026-10-01T14-12-27-313Z-313267",
@@ -1160,7 +1253,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790864015564
+     "updatedAt": 1790864015564,
+     "inReplyTo": "2026-10-01T14-05-03-616Z-0cdc82"
     },
     "2026-10-01T14-36-45-090Z-e1e3e0": {
      "id": "2026-10-01T14-36-45-090Z-e1e3e0",
@@ -1180,7 +1274,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790865550067
+     "updatedAt": 1790865550067,
+     "inReplyTo": "2026-10-01T14-23-45-300Z-37a1ca"
     }
    }
   },
@@ -1209,7 +1304,8 @@
      "requiresReply": true,
      "repliedAt": 1791015720307,
      "closedAt": null,
-     "updatedAt": 1791015722645
+     "updatedAt": 1791015722645,
+     "inReplyTo": null
     },
     "2026-10-03T08-32-01-189Z-8c2d7f": {
      "id": "2026-10-03T08-32-01-189Z-8c2d7f",
@@ -1229,7 +1325,8 @@
      "requiresReply": true,
      "repliedAt": 1791016358559,
      "closedAt": null,
-     "updatedAt": 1791016363092
+     "updatedAt": 1791016363092,
+     "inReplyTo": null
     },
     "2026-10-03T08-32-40-648Z-9e06d7": {
      "id": "2026-10-03T08-32-40-648Z-9e06d7",
@@ -1249,7 +1346,8 @@
      "requiresReply": true,
      "repliedAt": 1791016379745,
      "closedAt": null,
-     "updatedAt": 1791016382927
+     "updatedAt": 1791016382927,
+     "inReplyTo": null
     },
     "2026-10-03T08-37-53-411Z-61be91": {
      "id": "2026-10-03T08-37-53-411Z-61be91",
@@ -1269,7 +1367,8 @@
      "requiresReply": true,
      "repliedAt": 1791016880239,
      "closedAt": null,
-     "updatedAt": 1791016892044
+     "updatedAt": 1791016892044,
+     "inReplyTo": null
     },
     "2026-10-03T08-41-34-558Z-2d9d82": {
      "id": "2026-10-03T08-41-34-558Z-2d9d82",
@@ -1289,7 +1388,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791016902901
+     "updatedAt": 1791016902901,
+     "inReplyTo": null
     },
     "2026-10-03T08-41-48-123Z-ab10f7": {
      "id": "2026-10-03T08-41-48-123Z-ab10f7",
@@ -1309,7 +1409,8 @@
      "requiresReply": true,
      "repliedAt": 1791016920938,
      "closedAt": null,
-     "updatedAt": 1791016923230
+     "updatedAt": 1791016923230,
+     "inReplyTo": null
     },
     "2026-10-03T08-58-58-615Z-6a31c1": {
      "id": "2026-10-03T08-58-58-615Z-6a31c1",
@@ -1329,7 +1430,8 @@
      "requiresReply": true,
      "repliedAt": 1791017965525,
      "closedAt": null,
-     "updatedAt": 1791017970285
+     "updatedAt": 1791017970285,
+     "inReplyTo": null
     },
     "2026-10-03T09-30-47-354Z-fdf708": {
      "id": "2026-10-03T09-30-47-354Z-fdf708",
@@ -1349,7 +1451,8 @@
      "requiresReply": true,
      "repliedAt": 1791019869983,
      "closedAt": null,
-     "updatedAt": 1791019881815
+     "updatedAt": 1791019881815,
+     "inReplyTo": null
     },
     "2026-10-03T09-55-21-660Z-430665": {
      "id": "2026-10-03T09-55-21-660Z-430665",
@@ -1369,7 +1472,8 @@
      "requiresReply": true,
      "repliedAt": 1791021353261,
      "closedAt": null,
-     "updatedAt": 1791021354176
+     "updatedAt": 1791021354176,
+     "inReplyTo": null
     },
     "2026-10-03T09-57-56-011Z-82207a": {
      "id": "2026-10-03T09-57-56-011Z-82207a",
@@ -1389,7 +1493,8 @@
      "requiresReply": false,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791021504266
+     "updatedAt": 1791021504266,
+     "inReplyTo": "2026-10-03T09-55-53-259Z-33c440"
     },
     "2026-10-01T13-31-43-395Z-f37b66": {
      "id": "2026-10-01T13-31-43-395Z-f37b66",
@@ -1409,7 +1514,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790861664955
+     "updatedAt": 1790861664955,
+     "inReplyTo": null
     },
     "2026-10-02T17-37-48-985Z-205dd1": {
      "id": "2026-10-02T17-37-48-985Z-205dd1",
@@ -1429,7 +1535,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790963196763
+     "updatedAt": 1790963196763,
+     "inReplyTo": "2026-10-02T17-32-12-043Z-7f312d"
     },
     "2026-10-02T17-39-20-034Z-0a625d": {
      "id": "2026-10-02T17-39-20-034Z-0a625d",
@@ -1449,7 +1556,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790963196763
+     "updatedAt": 1790963196763,
+     "inReplyTo": null
     },
     "2026-10-02T18-19-18-439Z-c2efc8": {
      "id": "2026-10-02T18-19-18-439Z-c2efc8",
@@ -1469,7 +1577,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790965242926
+     "updatedAt": 1790965242926,
+     "inReplyTo": null
     },
     "2026-10-03T08-11-11-455Z-00e62d": {
      "id": "2026-10-03T08-11-11-455Z-00e62d",
@@ -1489,7 +1598,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791015089371
+     "updatedAt": 1791015089371,
+     "inReplyTo": null
     },
     "2026-10-03T10-05-00-025Z-andy-pub182-jim": {
      "id": "2026-10-03T10-05-00-025Z-andy-pub182-jim",
@@ -1509,7 +1619,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791021939538
+     "updatedAt": 1791021939538,
+     "inReplyTo": "2026-10-03T10-03-02-290Z-617718"
     },
     "2026-10-03T10-50-21-106Z-642691": {
      "id": "2026-10-03T10-50-21-106Z-642691",
@@ -1529,7 +1640,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791024655089
+     "updatedAt": 1791024655089,
+     "inReplyTo": null
     },
     "2026-10-03T10-58-11-180Z-fb90e1": {
      "id": "2026-10-03T10-58-11-180Z-fb90e1",
@@ -1549,7 +1661,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791025091182
+     "updatedAt": 1791025091182,
+     "inReplyTo": null
     },
     "2026-10-03T11-04-20-453Z-50a3f6": {
      "id": "2026-10-03T11-04-20-453Z-50a3f6",
@@ -1569,7 +1682,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1791025460458
+     "updatedAt": 1791025460458,
+     "inReplyTo": "2026-10-03T11-00-45-420Z-0dd785"
     }
    }
   },
@@ -1598,7 +1712,8 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790836131775
+     "updatedAt": 1790836131775,
+     "inReplyTo": null
     },
     "2026-10-01T14-10-37-572Z-b97a1b": {
      "id": "2026-10-01T14-10-37-572Z-b97a1b",
@@ -1618,9 +1733,162 @@
      "requiresReply": true,
      "repliedAt": null,
      "closedAt": null,
-     "updatedAt": 1790864194933
+     "updatedAt": 1790864194933,
+     "inReplyTo": null
     }
    }
   }
+ },
+ "releases": [
+  {
+   "version": "1.1.53",
+   "firstRunAt": 1790417013856
+  },
+  {
+   "version": "1.1.54",
+   "firstRunAt": 1790439965514
+  },
+  {
+   "version": "1.1.55",
+   "firstRunAt": 1790452966732
+  },
+  {
+   "version": "1.1.56",
+   "firstRunAt": 1790454895620
+  },
+  {
+   "version": "1.1.57",
+   "firstRunAt": 1790456223753
+  },
+  {
+   "version": "1.1.58",
+   "firstRunAt": 1790490637730
+  },
+  {
+   "version": "1.1.59",
+   "firstRunAt": 1790491246026
+  },
+  {
+   "version": "1.1.61",
+   "firstRunAt": 1790504458873
+  },
+  {
+   "version": "1.1.62",
+   "firstRunAt": 1790508467410
+  },
+  {
+   "version": "1.1.63",
+   "firstRunAt": 1790526354945
+  },
+  {
+   "version": "1.1.65",
+   "firstRunAt": 1790538512770
+  },
+  {
+   "version": "1.1.66",
+   "firstRunAt": 1790548414612
+  },
+  {
+   "version": "1.1.67",
+   "firstRunAt": 1790550061287
+  },
+  {
+   "version": "1.1.72",
+   "firstRunAt": 1790582269528
+  },
+  {
+   "version": "1.1.75",
+   "firstRunAt": 1790789013241
+  },
+  {
+   "version": "1.1.76",
+   "firstRunAt": 1790860363233
+  },
+  {
+   "version": "1.1.77",
+   "firstRunAt": 1790882571156
+  },
+  {
+   "version": "1.1.78",
+   "firstRunAt": 1790961554777
+  },
+  {
+   "version": "1.1.79",
+   "firstRunAt": 1790964962286
+  },
+  {
+   "version": "1.1.82",
+   "firstRunAt": 1791024474887
+  },
+  {
+   "version": "0.4.6",
+   "firstRunAt": 1788984223923
+  },
+  {
+   "version": "0.5.2",
+   "firstRunAt": 1788984472046
+  },
+  {
+   "version": "0.4.5",
+   "firstRunAt": 1788985096156
+  },
+  {
+   "version": "1.0.45",
+   "firstRunAt": 1790019938584
+  },
+  {
+   "version": "1.1.45",
+   "firstRunAt": 1790082996819
+  },
+  {
+   "version": "1.1.46",
+   "firstRunAt": 1790100490274
+  },
+  {
+   "version": "1.1.47",
+   "firstRunAt": 1790182616479
+  },
+  {
+   "version": "1.1.48",
+   "firstRunAt": 1790255330861
+  },
+  {
+   "version": "1.1.49",
+   "firstRunAt": 1790352554407
+  },
+  {
+   "version": "1.1.50",
+   "firstRunAt": 1790358968098
+  },
+  {
+   "version": "1.1.51",
+   "firstRunAt": 1790363012084
+  },
+  {
+   "version": "1.1.52",
+   "firstRunAt": 1790404048714
+  }
+ ],
+ "expectStay": [
+  "andy/2026-10-01T19-28-20-526Z-7841c0",
+  "andy/2026-10-01T19-46-49-472Z-cd74b1",
+  "andy/2026-10-01T19-48-30-408Z-815910",
+  "andy/2026-10-03T10-50-21-540Z-7d3555",
+  "creed/2026-10-03T08-57-53-890Z-6ccb84",
+  "creed/2026-10-03T09-23-39-167Z-5ece4b",
+  "creed/2026-10-03T09-29-31-135Z-b56655",
+  "creed/2026-10-03T10-50-21-754Z-1ffd35",
+  "jim/2026-10-01T13-31-43-395Z-f37b66",
+  "jim/2026-10-02T17-37-48-985Z-205dd1",
+  "jim/2026-10-02T18-19-18-439Z-c2efc8",
+  "jim/2026-10-03T10-05-00-025Z-andy-pub182-jim",
+  "jim/2026-10-03T10-50-21-106Z-642691",
+  "jim/2026-10-03T10-58-11-180Z-fb90e1",
+  "dwight/2026-09-30T17-36-43-459Z-7e384a",
+  "dwight/2026-10-01T14-10-37-572Z-b97a1b"
+ ],
+ "expectClosedBy": {
+  "answered": 3,
+  "card-done": 3
  }
 }

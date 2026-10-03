@@ -7058,6 +7058,8 @@ function runWorkerWakeBeat(): void {
  *  handles that freeze during true system sleep and must be re-armed on wake. */
 /** REQUESTS-TAB-STALE (1.1.83): the Requests tab keeps live asks only (hive.autoCloseStaleObligations). */
 function runStaleRequestsBeat(): void {
+  // A dev or rc build carries its next version and may run against the live hive: never close there.
+  if (!app.isPackaged) return;
   try { hive.autoCloseStaleObligations(app.getVersion()); } catch (e) { console.error('[stale requests]', e); }
 }
 
