@@ -263,6 +263,9 @@ export interface HarnessConfig {
   mcpDefaults?: { [id: string]: { enabled: boolean } };
   /** Semantic memory (the built-in memory engine): its master switch. Default on. */
   semanticMemory: boolean;
+  /** CLAIM-LEDGER: the ledger level (off | shadow | reader | writer); absent = off. A build clamps a
+   *  level it does not implement down to the highest it does (shared/claims.ts effectiveLevel). */
+  claimLedger?: string;
   /** Recurring auto-dispatch missions handled by the scheduler. */
   missions?: ScheduledMission[];
   /** One-time guard: has the built-in hourly ops standup been seeded into an

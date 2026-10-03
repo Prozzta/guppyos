@@ -19,6 +19,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
 import type { WorkerConfig } from './worker';
+import { CLAIM_VERBS, handleClaimVerb, type ClaimsEndpointDeps } from '../claims/endpoint';
 
 export interface RuntimeManifest {
   model: { dir: string; onnxSha256: string; tokenizerSha256: string };
@@ -42,6 +43,9 @@ export interface WiringDeps {
    *  sqlite-vec's own `getLoadablePath()` - a path lookup only; main never loads it. The
    *  packager nests the platform package under sqlite-vec, so a top-level lookup would miss it. */
   vecLoadablePath: () => string | null;
+  /** CLAIM-LEDGER W1: the claim verbs (note, retract, ...), or null when this build or hive has no
+   *  ledger; then they answer "unsupported" as before. They do not need the index worker. */
+  claims?: () => ClaimsEndpointDeps | null;
 }
 
 /** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings. */
@@ -173,6 +177,13 @@ export class NativeMemoryWiring {
   async handle(token: string, body: unknown): Promise<{ status: number; body: unknown }> {
     const agentId = this.tokens.resolve(token);
     if (!agentId) return { status: 403, body: { exit: EXIT.unauthorized, error: 'unauthorized' } };
+    const cmd = body && typeof body === 'object' ? (body as Record<string, unknown>).cmd : undefined;
+    const claims = typeof cmd === 'string' && CLAIM_VERBS.has(cmd) ? this.d.claims?.() ?? null : null;
+    if (claims) {
+      // The wing is the token's agent (G1.3); handleClaimVerb refuses a body naming one.
+      const c = await handleClaimVerb(claims, agentId, body, 'endpoint');
+      return { status: 200, body: { exit: c.exit, text: c.text, json: c.json, error: c.error } };
+    }
     const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
     return { status: 200, body: { exit: r.exit, text: r.text, json: r.json, error: r.error } };
   }
