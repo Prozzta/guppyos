@@ -54,13 +54,15 @@ test('G2.2 state retains every claim id and excludes event ids', () => {
   assert.equal(state.claims.a.sightings, 2);
 });
 
-test('G2.3 shuffled ledger arrival order derives byte-identical canonical state', () => {
+test('G2.3 shuffled input order derives the same state while preserving the append-chain tail', () => {
   const rows = [
     claim('a', { key: 'fact.name', at: '2026-01-01T00:00:00.000Z', mac: 'h1', prev: '' }),
     claim('b', { key: 'fact.alias', at: '2026-01-02T00:00:00.000Z', mac: 'h2', prev: 'h1' }),
     event('e', 'sighting', ['b'], { mac: 'h3', prev: 'h2' }),
   ];
-  assert.equal(stable(derive(rows, registry, { r4: false })), stable(derive([...rows].reverse(), registry, { r4: false })));
+  const shuffled = [rows[1], rows[0], rows[2]]; // perturb input order, not the final append record
+  assert.equal(stable(derive(rows, registry, { r4: false })), stable(derive(shuffled, registry, { r4: false })));
+  assert.equal(derive(rows, registry, { r4: false }).ledgerHead, 'h3');
 });
 
 test('R1 sightings update count and time window without storing event ids', () => {
@@ -69,6 +71,16 @@ test('R1 sightings update count and time window without storing event ids', () =
   assert.equal(state.claims.a.sightings, 2);
   assert.equal(state.claims.a.firstAt, '2026-01-01T00:00:00.000Z');
   assert.equal(state.claims.a.lastAt, '2026-01-02T00:00:00.000Z');
+});
+
+test('R2 tie-breaks equal event time by write time before id', () => {
+  const state = derive([
+    claim('new-write', { key: 'fact.name', at: '2026-01-01T00:00:00.000Z', wt: '2026-01-02T00:00:00.000Z' }),
+    claim('old-write', { key: 'fact.name', at: '2026-01-01T00:00:00.000Z', wt: '2026-01-01T00:00:00.000Z' }),
+  ], registry, { r4: false });
+  assert.equal(state.claims['old-write'].status, 'superseded');
+  assert.equal(state.claims['old-write'].supersededBy, 'new-write');
+  assert.equal(state.claims['new-write'].status, 'live');
 });
 
 test('R2 uses bitemporal order, alias cardinality, and never lets mail supersede self/human', () => {
@@ -88,6 +100,24 @@ test('R2 uses bitemporal order, alias cardinality, and never lets mail supersede
   assert.equal(state.claims['multi-b'].status, 'live');
 });
 
+test('R2 protects legacy from mail and lets a newer owner claim supersede older mail without conflict', () => {
+  const mailNew = derive([
+    claim('legacy', { key: 'fact.name', source: 'legacy' }),
+    claim('mail-new', { key: 'fact.name', source: 'mail:god', at: '2026-01-02T00:00:00.000Z' }),
+  ], registry, { r4: false });
+  assert.equal(mailNew.claims.legacy.status, 'live');
+  assert.equal(mailNew.claims['mail-new'].status, 'live');
+  assert.deepEqual(mailNew.conflicts, [{ a: 'legacy', b: 'mail-new', rule: 'R2-mail' }]);
+
+  const ownerNew = derive([
+    claim('mail-old', { key: 'fact.name', source: 'mail:m1' }),
+    claim('self-new', { key: 'fact.name', source: 'self', at: '2026-01-02T00:00:00.000Z' }),
+  ], registry, { r4: false });
+  assert.equal(ownerNew.claims['mail-old'].status, 'superseded');
+  assert.equal(ownerNew.claims['self-new'].status, 'live');
+  assert.deepEqual(ownerNew.conflicts, []);
+});
+
 test('R3 applies explicit supersedes and retracts but protects self/human from poisoned mail', () => {
   const rows = [
     claim('self'), claim('mail-source', { source: 'mail:m1', supersedes: ['self'], retracts: ['human'] }), claim('human', { source: 'human' }),
@@ -97,6 +127,72 @@ test('R3 applies explicit supersedes and retracts but protects self/human from p
   assert.equal(state.claims.self.status, 'superseded');
   assert.equal(state.claims.self.supersededBy, 'replacement');
   assert.equal(state.claims.human.status, 'live');
+});
+
+test('R3 mail supersede is blocked for legacy; reconcile answers clear pairs and apply [loser, winner]', () => {
+  const blocked = derive([
+    claim('legacy', { source: 'legacy' }),
+    claim('bad-mail', { source: 'mail:m1', supersedes: ['legacy'] }),
+  ], registry, { r4: false });
+  assert.equal(blocked.claims.legacy.status, 'live');
+
+  const rows = [
+    claim('mail', { key: 'fact.name', source: 'mail:m1', at: '2026-01-02T00:00:00.000Z' }),
+    claim('self', { key: 'fact.name' }),
+    event('answer', 'reconcile-answer', ['mail', 'self'], { answer: 'supersedes' }),
+  ];
+  const answered = derive(rows, registry, { r4: false });
+  assert.equal(answered.claims.mail.status, 'superseded');
+  assert.equal(answered.claims.mail.supersededBy, 'self');
+  assert.deepEqual(answered.conflicts, []);
+
+  const keepBoth = derive([
+    ...rows.slice(0, 2), event('keep', 'reconcile-answer', ['mail', 'self'], { answer: 'keep-both' }),
+  ], registry, { r4: false });
+  assert.equal(keepBoth.claims.mail.status, 'live');
+  assert.equal(keepBoth.claims.self.status, 'live');
+  assert.deepEqual(keepBoth.conflicts, []);
+
+  const dismissed = derive([
+    ...rows.slice(0, 2), event('dismiss', 'dismiss', ['mail', 'self']),
+  ], registry, { r4: false });
+  assert.deepEqual(dismissed.conflicts, []);
+});
+
+test('accept hardens a soft supersede; a later soft event never downgrades hard superseded', () => {
+  const accepted = derive([
+    claim('old'), claim('new'),
+    event('soft', 'soft-supersede', ['old', 'new']),
+    event('accept', 'accept', ['old', 'new'], { at: '2026-01-04T00:00:00.000Z', wt: '2026-01-04T00:00:00.000Z' }),
+  ], registry, { r4: false });
+  assert.equal(accepted.claims.old.status, 'superseded');
+  assert.equal(accepted.claims.old.supersededBy, 'new');
+
+  const hardThenSoft = derive([
+    claim('old'), claim('new'),
+    claim('explicit', { supersedes: ['old'] }),
+    event('soft', 'soft-supersede', ['old', 'new']),
+  ], registry, { r4: false });
+  assert.equal(hardThenSoft.claims.old.status, 'superseded');
+});
+
+test('revert makes its targeted soft-supersede event inert', () => {
+  const rows = [
+    claim('old'), claim('new'),
+    event('soft', 'soft-supersede', ['old', 'new']),
+    event('undo', 'revert', ['soft'], { at: '2026-01-04T00:00:00.000Z', wt: '2026-01-04T00:00:00.000Z' }),
+  ];
+  const state = derive(rows, registry, { r4: false });
+  assert.equal(state.claims.old.status, 'live');
+  assert.equal(state.claims.old.supersededBy, undefined);
+});
+
+test('chain head follows append order even when the last append is backdated', () => {
+  const rows = [
+    claim('first', { at: '2026-01-02T00:00:00.000Z', wt: '2026-01-02T00:00:00.000Z', mac: 'mac-first' }),
+    claim('last-append', { at: '2026-01-01T00:00:00.000Z', wt: '2026-01-03T00:00:00.000Z', mac: 'mac-last' }),
+  ];
+  assert.equal(derive(rows, registry, { r4: false }).ledgerHead, 'mac-last');
 });
 
 test('R4 applies inferred supersedes only when enabled; R8 purge keeps a tombstone', () => {
@@ -162,4 +258,15 @@ test('R6/R7 world facts are view-time flags; counters only rank and never alter 
   assert.deepEqual(view.counters.a, { helped: 1, hurt: 1, lastSeen: '2026-01-05T00:00:00.000Z' });
   assert.deepEqual(view.counters.b, { helped: 1, hurt: 0, lastSeen: '2026-01-06T00:00:00.000Z' });
   assert.deepEqual(state.claims.a.status, 'live');
+});
+
+test('task ttl expires only when its task is done or cancelled', () => {
+  const rows = [{ ...claim('task-ttl'), ttl: 'task:CL-17' }];
+  const state = derive(rows, registry, { r4: false });
+  const world = {
+    now: '2026-01-03T00:00:00.000Z', taskStatus: (id) => id === 'CL-17' ? 'done' : null,
+    fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
+  };
+  assert.deepEqual(worldView(state, rows, [], world).flags['task-ttl'], ['expired']);
+  assert.equal(worldView(state, rows, [], { ...world, taskStatus: () => 'doing' }).flags['task-ttl'], undefined);
 });

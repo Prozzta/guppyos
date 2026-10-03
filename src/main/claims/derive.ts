@@ -21,11 +21,8 @@ function registryHash(registry: KeyRegistry): string {
 }
 
 function chainHead(records: LedgerRec[]): string {
-  if (records.length === 0) return '';
-  const referenced = new Set(records.map((record) => record.prev).filter(Boolean));
-  const heads = records.filter((record) => !referenced.has(record.mac)).sort(recordOrder);
-  const sorted = heads.length ? heads : [...records].sort(recordOrder);
-  return sorted[sorted.length - 1]?.mac ?? '';
+  // readLedger supplies verified records in append order; `prev` hashes the previous LINE, not mac.
+  return records.at(-1)?.mac ?? '';
 }
 
 function canonicalKey(key: string, registry: KeyRegistry): string {
@@ -53,11 +50,12 @@ function cardinality(key: string, registry: KeyRegistry): 'single' | 'multi' | u
 }
 
 function protectedFromMail(source: ClaimRec, target: ClaimRec): boolean {
-  return source.source.startsWith('mail:') && (target.source === 'self' || target.source === 'human');
+  return source.source.startsWith('mail:') && (target.source === 'self' || target.source === 'human' || target.source === 'legacy');
 }
 
 function setStatus(state: MutableState | undefined, status: Status, reason: string, supersededBy?: string): void {
   if (!state || state.status === 'purged' || state.status === 'retracted') return;
+  if (status === 'superseded?' && state.status === 'superseded') return;
   state.status = status;
   if (supersededBy) state.supersededBy = supersededBy;
   else delete state.supersededBy;
@@ -109,7 +107,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
   for (const list of keyed.values()) {
     list.sort(recordOrder);
     const category = (claim: ClaimRec): 'mail' | 'protected' | 'other' => claim.source.startsWith('mail:') ? 'mail'
-      : claim.source === 'self' || claim.source === 'human' ? 'protected' : 'other';
+      : claim.source === 'self' || claim.source === 'human' || claim.source === 'legacy' ? 'protected' : 'other';
     const latest: Partial<Record<'mail' | 'protected' | 'other', ClaimRec>> = {};
     for (const claim of list) latest[category(claim)] = claim;
     const suffix: Array<Partial<Record<'mail' | 'protected' | 'other', ClaimRec>>> = new Array(list.length);
@@ -123,7 +121,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
       const candidates = suffix[i];
       const ownClass = category(older);
       const eligible = ownClass === 'protected' ? [candidates.protected, candidates.other]
-        : ownClass === 'mail' ? [candidates.mail, candidates.other]
+        : ownClass === 'mail' ? [candidates.mail, candidates.protected, candidates.other]
           : [candidates.protected, candidates.mail, candidates.other];
       const newer = eligible.filter((item): item is ClaimRec => !!item).sort(recordOrder).at(-1);
       if (newer) setStatus(state[older.id], 'superseded', `R2 by ${newer.id}`, newer.id);
@@ -132,6 +130,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
     const newestMail = latest.mail;
     const newestOther = latest.other;
     if (newestProtected && newestMail
+      && recordOrder(newestMail, newestProtected) > 0
       && (!newestOther || (recordOrder(newestProtected, newestOther) > 0 && recordOrder(newestMail, newestOther) > 0))) {
       addConflict(newestProtected.id, newestMail.id, 'R2-mail');
     }
@@ -151,6 +150,8 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
 
   // Reverts make the referenced event inert; event records remain in the ledger and in its hash chain.
   const reverted = new Set(events.filter((event) => event.ev === 'revert').flatMap((event) => event.targets));
+  const answeredPairs = new Set<string>();
+  const pairKey = (a: string, b: string): string => [a, b].sort(compare).join('\0');
   for (const event of events) {
     if (reverted.has(event.id) || event.ev === 'revert') continue;
     const [first, second] = event.targets;
@@ -161,6 +162,24 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
       }
     } else if (event.ev === 'soft-supersede' && first && second) {
       setStatus(state[first], 'superseded?', `soft-supersede by ${second}`, second);
+    } else if (event.ev === 'reconcile-answer') {
+      if (event.targets.length >= 2) {
+        const [loser, winner] = event.targets;
+        answeredPairs.add(pairKey(loser, winner));
+        if (event.answer === 'supersedes') setStatus(state[loser], 'superseded', `reconcile-answer by ${winner}`, winner);
+      }
+      // `retract` is represented only by a ClaimRec.retracts per C3. keep-both just clears the pair.
+    } else if (event.ev === 'dismiss' && event.targets.length >= 2) {
+      answeredPairs.add(pairKey(event.targets[0], event.targets[1]));
+    } else if (event.ev === 'accept') {
+      if (event.targets.length >= 2) {
+        const [loser, winner] = event.targets;
+        answeredPairs.add(pairKey(loser, winner));
+        if (state[loser]?.status === 'superseded?') setStatus(state[loser], 'superseded', `accepted soft-supersede by ${winner}`, winner);
+      } else {
+        const accepted = state[first];
+        if (accepted?.status === 'superseded?') setStatus(accepted, 'superseded', 'accepted soft-supersede', accepted.supersededBy);
+      }
     } else if (event.ev === 'inferred-supersede' && ruleConfig.r4 && first && second) {
       setStatus(state[first], 'superseded', `${event.rule ?? 'R4'} by ${second}`, second);
     } else if (event.ev === 'pin' || event.ev === 'unpin') {
@@ -173,6 +192,7 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
     const value = state[id];
     canonicalClaims[id] = { ...value, reasons: unique(value.reasons) };
   }
-  const canonicalConflicts = [...conflicts.values()].sort((a, b) => compare(a.rule, b.rule) || compare(a.a, b.a) || compare(a.b, b.b));
-  return { v: 1, agent: claims[0]?.agent ?? ordered[0]?.agent ?? '', registryHash: registryHash(registry), ledgerHead: chainHead(ordered), claims: canonicalClaims, conflicts: canonicalConflicts };
+  const canonicalConflicts = [...conflicts.values()].filter((conflict) => !answeredPairs.has(pairKey(conflict.a, conflict.b)))
+    .sort((a, b) => compare(a.rule, b.rule) || compare(a.a, b.a) || compare(a.b, b.b));
+  return { v: 1, agent: claims[0]?.agent ?? ordered[0]?.agent ?? '', registryHash: registryHash(registry), ledgerHead: chainHead(records), claims: canonicalClaims, conflicts: canonicalConflicts };
 }
