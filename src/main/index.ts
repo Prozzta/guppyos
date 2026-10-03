@@ -1279,6 +1279,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
         headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
         log: (row) => hive.appendLog(row),
+        // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
+        taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
         onAppend: (agentId, id, rec) => {
           if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
           const root = hive.root(); if (!root) return;
