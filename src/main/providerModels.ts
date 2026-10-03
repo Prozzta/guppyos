@@ -353,20 +353,37 @@ export function runClaudeInit(d: ClaudeDeps, exe: string, timeout = CLAUDE_LIST_
         } catch { res(false); }
         return;
       }
-      // POSIX: claude runs as the leader of its own process group (detached), so the group goes
-      try { kill(-pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
-      try { kill(-pid, 0); res(false); } catch (e) { res((e as NodeJS.ErrnoException).code === 'ESRCH'); }
+      // POSIX: claude runs as the leader of its own process group (detached), so the group goes.
+      // A DELIVERED SIGKILL counts as sent; whether it worked is decided after the exit event
+      // (groupGone below). Probing now would see the leader as an unreaped zombie and read "alive"
+      // on every run (Jim N1).
+      try { kill(-pid, 'SIGKILL'); res(true); return; } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'ESRCH') { res(true); return; }   // the group is already gone
+      }
+      try { child.kill('SIGKILL'); res(true); } catch { res(false); }
     });
+    /** POSIX, after the leader's exit event (it is reaped then): is anything of the group left?
+     *  Grandchildren are reparented and reaped by init, so give that a moment. Windows: taskkill /T
+     *  already answered for the whole tree. */
+    const groupGone = async (pid: number): Promise<boolean> => {
+      if (d.platform === 'win32') return true;
+      for (let i = 0; i < 20; i++) {
+        try { kill(-pid, 0); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ESRCH') return true; }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return false;
+    };
     const killTree = async (): Promise<void> => {
       if (exited) return;
       try { child.stdin?.end(); } catch { /* gone */ }
       const pid = typeof child.pid === 'number' ? child.pid : null;
       if (!pid) return;
+      const settledDead = async (): Promise<boolean> => (await waitExit(d.exitWaitMs ?? CLAUDE_EXIT_WAIT_MS)) && groupGone(pid);
       let killed = await killOnce(pid);
-      if (killed) killed = await waitExit(d.exitWaitMs ?? CLAUDE_EXIT_WAIT_MS);
+      if (killed) killed = await settledDead();
       if (!killed) {
         killed = await killOnce(pid);                                  // the one retry
-        if (killed) killed = await waitExit(d.exitWaitMs ?? CLAUDE_EXIT_WAIT_MS);
+        if (killed) killed = await settledDead();
       }
       if (!killed) {
         try { d.log?.({ kind: 'claude-init-kill-failed', pid, platform: d.platform }); } catch { /* best effort */ }
