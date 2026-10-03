@@ -8,18 +8,22 @@ import { GENERATED_MEMORY_MARKER } from './generated';
 export const WORKING_SET_TIER_SHARES = [0.40, 0.10, 0.50] as const;
 export const DEFAULT_WORKING_SET_BUDGET = 3000;
 export type CountTokens = (text: string) => number;
+export type RenderMemoryMdOptions = { exclude?: (id: string) => boolean };
+export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', options?: RenderMemoryMdOptions) => string;
 
 const cmp = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
 const tokens = (count: CountTokens, text: string): number => {
   const n = count(text); return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
 };
 const flagText = (flags: string[]): string => flags.length ? `⚠ ${flags.join(', ')} · ` : '';
-const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): string =>
-  `- ${flagText(flags)}${claim.text} [status:${status}] [c:${claim.id}]`;
+const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): string => {
+  const [first, ...rest] = claim.text.split('\n');
+  return [`- ${flagText(flags)}${first} [status:${status}] [c:${claim.id}]`, ...rest.map(line => `  ${line}`)].join('\n');
+};
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
 export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
-  buildWorkingSet: BuildWorkingSetFn; renderMemoryMd: RenderMemoryMdFn; renderExportLine: RenderExportLineFn;
+  buildWorkingSet: BuildWorkingSetFn; renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn; renderExportLine: RenderExportLineFn;
 } {
   const claims = records.filter((r): r is ClaimRec => r.t === 'claim');
   const byId = new Map(claims.map((c, i) => [c.id, { claim: c, order: i }]));
@@ -105,21 +109,38 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     return { text, receipt };
   };
 
-  const renderMemoryMd: RenderMemoryMdFn = (state, view, mode) => {
+  const renderMemoryMd: RenderMemoryMdFn & RenderMemoryMdWithExcludeFn = (state, view, mode, options?: RenderMemoryMdOptions) => {
+    const isExcluded = options?.exclude ?? (() => false);
+    const selectedRecords = records.map((rec, index) => ({ rec, index }))
+      .filter(({ rec }) => !isExcluded(rec.id))
+      .sort((a, b) => cmp(a.rec.at, b.rec.at) || cmp(a.rec.wt, b.rec.wt) || a.index - b.index)
+      .map(({ rec }) => rec);
     const lines = [GENERATED_MEMORY_MARKER, `# Memory — ${state.agent}`];
     if (mode === 'view') {
       const working = buildWorkingSet(state, view, DEFAULT_WORKING_SET_BUDGET);
       lines.push('', '## How I work (standing lessons)');
-      for (const c of claims.filter(c => c.kind === 'lesson' && state.claims[c.id]?.status === 'live').sort((a, b) => cmp(a.at, b.at) || cmp(a.id, b.id))) {
+      const includedIds = new Set(working.receipt.included.map(item => item.id));
+      for (const c of claims.filter(c => c.kind === 'lesson' && state.claims[c.id]?.status === 'live' && includedIds.has(c.id) && !isExcluded(c.id)).sort((a, b) => cmp(a.at, b.at) || cmp(a.id, b.id))) {
         lines.push(claimLine(c, state.claims[c.id].status, view.flags[c.id] ?? []));
       }
-      const lessons = new Set(claims.filter(c => c.kind === 'lesson' && state.claims[c.id]?.status === 'live').map(c => `[c:${c.id}]`));
-      lines.push('', '## Working set', ...working.text.split('\n').slice(1).filter(line => ![...lessons].some(tag => line.includes(tag))));
+      const lessons = new Set(claims.filter(c => c.kind === 'lesson' && includedIds.has(c.id) && !isExcluded(c.id)).map(c => `[c:${c.id}]`));
+      const omittedIds = new Set(selectedRecords.map(rec => rec.id).filter(isExcluded));
+      lines.push('', '## Working set', ...working.text.split('\n').slice(1)
+        .filter(line => ![...lessons].some(tag => line.includes(tag)))
+        .filter(line => ![...omittedIds].some(id => line.includes(`[c:${id}]`))));
     } else {
-      for (const rec of records) {
+      lines.push('', '## How I work (standing lessons)');
+      for (const rec of selectedRecords) {
+        if (rec.t === 'claim' && rec.kind === 'lesson' && state.claims[rec.id]?.status === 'live') {
+          lines.push(claimLine(rec, state.claims[rec.id].status));
+        }
+      }
+      lines.push('', '## All claims (complete export)');
+      for (const rec of selectedRecords) {
         if (rec.t === 'event') { lines.push(`<!-- event:${rec.id} ${rec.ev} -->`); continue; }
         const status = state.claims[rec.id]?.status ?? 'live';
-        lines.push(`- ${rec.text} [status:${status}] [c:${rec.id}]`);
+        if (rec.kind === 'lesson' && status === 'live') continue;
+        lines.push(claimLine(rec, status));
       }
     }
     return lines.join('\n') + '\n';
