@@ -8,20 +8,28 @@ const test = require('node:test');
 const ts = require('typescript');
 
 const ROOT = path.join(__dirname, '..');
-function loadTs(relative, localRequire = require) {
-  const filename = path.join(ROOT, relative);
+function loadTs(relative) {
+  const filename = path.resolve(ROOT, relative);
   const source = fs.readFileSync(filename, 'utf8');
   const js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const loaded = { exports: {} };
+  const localRequire = (specifier) => {
+    if (!specifier.startsWith('.')) return require(specifier);
+    const target = path.resolve(path.dirname(filename), specifier);
+    const tsTarget = path.extname(target) ? target : `${target}.ts`;
+    if (tsTarget.endsWith('.ts') && fs.existsSync(tsTarget)) {
+      return loadTs(path.relative(ROOT, tsTarget));
+    }
+    return require(target);
+  };
   new Function('exports', 'require', 'module', js)(loaded.exports, localRequire, loaded);
   return loaded.exports;
 }
 
 const { derive } = loadTs('src/main/claims/derive.ts');
-const { worldView } = loadTs('src/main/claims/world.ts', (name) =>
-  name === './ttl' ? loadTs('src/main/claims/ttl.ts') : require(name));
+const { worldView } = loadTs('src/main/claims/world.ts');
 const registry = {
   v: 1,
   namespaces: [{ pattern: 'fact.*', cardinality: 'single' }, { pattern: 'multi.*', cardinality: 'multi' }],
@@ -270,4 +278,14 @@ test('task ttl expires only when its task is done or cancelled', () => {
   };
   assert.deepEqual(worldView(state, rows, [], world).flags['task-ttl'], ['expired']);
   assert.equal(worldView(state, rows, [], { ...world, taskStatus: () => 'doing' }).flags['task-ttl'], undefined);
+});
+
+test('test TS loader resolves runtime relative imports from the importing source directory', () => {
+  const rows = [{ ...claim('until-ttl'), ttl: 'until:2026-01-02T00:00:00.000Z' }];
+  const state = derive(rows, registry, { r4: false });
+  const world = {
+    now: '2026-01-03T00:00:00.000Z', taskStatus: () => null,
+    fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
+  };
+  assert.deepEqual(worldView(state, rows, [], world).flags['until-ttl'], ['expired']);
 });
