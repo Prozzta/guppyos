@@ -822,3 +822,23 @@ test('the memory CLI posts a claim verb with the token and prints the id', async
   assert.equal(got.url, `/memory/${'a'.repeat(32)}`);
   assert.deepEqual(got.body, { cmd: 'note', args: { kind: 'lesson', text: 'Fetch before basing a branch' } });
 });
+
+test('W5 soft supersede is main-only and uses the ordinary authenticated chain writer', async () => {
+  const root = hive();
+  const { store, keys } = mkStore(root);
+  const loser = await ok(store.appendRecord('andy', note('older'), 'endpoint'));
+  const winner = await ok(store.appendRecord('andy', note('newer'), 'endpoint'));
+  await refused(store.appendRecord('andy', { t: 'event', ev: 'soft-supersede', targets: [loser, winner] }, 'endpoint'), /unsupported event/);
+  const id = await ok(store.appendSoftSupersede('andy', loser, winner, 'item-1'));
+  const rows = lines(root, 'andy').map((line) => JSON.parse(line));
+  const proposal = rows.at(-1);
+  assert.equal(proposal.id, id);
+  assert.equal(proposal.ev, 'soft-supersede');
+  assert.deepEqual(proposal.targets, [loser, winner]);
+  assert.equal(proposal.by, 'code');
+  assert.equal(proposal.rule, 'soft-newest-wins@3');
+  assert.match(proposal.reason, /item-1/);
+  assert.equal(proposal.mac, recordMac(keys.load().key, proposal));
+  assert.equal(store.readLedger('andy').chain, 'ok');
+  await refused(store.appendSoftSupersede('andy', loser, loser, 'item-2'), /bad soft-supersede/);
+});

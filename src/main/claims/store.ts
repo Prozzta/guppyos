@@ -489,6 +489,27 @@ export class ClaimStore {
     return this.serial(agentId, () => this.appendNow(agentId, draft, origin));
   }
 
+  /** W5 main-only writer: soft proposals are deliberately not part of RecordDraft or any endpoint. */
+  appendSoftSupersede(agentId: string, loser: string, winner: string, itemId: string): Promise<AppendResult> {
+    return this.serial(agentId, () => {
+      if (!AGENT_RE.test(agentId) || !ID_RE.test(loser) || !ID_RE.test(winner) || loser === winner ||
+          typeof itemId !== 'string' || !/^[A-Za-z0-9._:-]{1,120}$/.test(itemId)) return { ok: false, error: 'bad soft-supersede proposal' };
+      let s: AgentState;
+      try { s = this.current(agentId); } catch { return { ok: false, error: 'the ledger could not be read' }; }
+      if (s.readOnly) return { ok: false, error: `the ledger is read-only (${s.readOnly.reason} at ${s.readOnly.brokenAt}); the Human has been alerted` };
+      if (s.known.get(loser)?.t !== 'claim' || s.known.get(winner)?.t !== 'claim') return { ok: false, error: 'proposal targets must be existing claims' };
+      const key = this.keys();
+      if (!key) return { ok: false, error: 'the ledger key is missing; the Human has been alerted' };
+      const wt = this.now().toISOString();
+      const rec: EventRec = { v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'soft-supersede',
+        at: wt, wt, agent: agentId, targets: [loser, winner], by: 'code', rule: 'soft-newest-wins@3',
+        reason: `reconcile item ${itemId}`, prev: s.head, mac: '' };
+      rec.mac = recordMac(key, rec as unknown as Record<string, unknown>);
+      const line = canonicalJson(rec);
+      return this.writeLine(agentId, s, rec, line, Buffer.from(line + '\n', 'utf8'), null);
+    });
+  }
+
   private appendNow(agentId: string, draft: RecordDraft, origin: AppendOrigin): AppendResult {
     if (!AGENT_RE.test(agentId)) return { ok: false, error: 'bad agent id' };
     let s: AgentState;

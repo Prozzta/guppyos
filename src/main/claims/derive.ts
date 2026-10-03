@@ -161,7 +161,9 @@ export function derive(records: LedgerRec[], registry: KeyRegistry, ruleConfig: 
         if (target) { target.status = 'purged'; delete target.supersededBy; target.reasons.push(`R8 purge ${event.id}`); }
       }
     } else if (event.ev === 'soft-supersede' && first && second) {
-      setStatus(state[first], 'superseded?', `soft-supersede by ${second}`, second);
+      // A proposal can mark only an otherwise-live claim. Never weaken an explicit R2/R3/R4
+      // supersede decision; soft newest-wins is advisory, not authoritative.
+      if (state[first]?.status !== 'superseded') setStatus(state[first], 'superseded?', `soft-supersede by ${second}`, second);
     } else if (event.ev === 'reconcile-answer') {
       if (event.targets.length >= 2) {
         const [loser, winner] = event.targets;
