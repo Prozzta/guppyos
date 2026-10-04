@@ -217,6 +217,71 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyCla
   return c.heavy ? { ...c, why: `${c.why ?? c.kind} (in ${path.replace(/\\/g, '/').split('/').pop()})` } : { heavy: false };
 }
 
+/**
+ * HEAVY-LOCK-ADHOC-NODE: an ad-hoc node script is heavy by what it LOADS, not by its name.
+ * `node m4opt-costs.cjs` that requires onnxruntime-node and the embedder pins every core for
+ * minutes, yet only a bench-like NAME or a wrapped suite made `node <script>` heavy, so such scripts
+ * ran beside a held slot. The marker must sit in a load or spawn call on the same line (require(,
+ * import(, `from '…'`, loadTs(, spawn/exec/fork(), so a script that merely mentions a module name
+ * in a string or a comment stays light. ELECTRON_RUN_AS_NODE anywhere = it runs the app as Node.
+ */
+const JS_LOAD = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom\s+['"`]|\bloadTs\s*\(|\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\()[^\n;]*?(onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory[\\/]+(?:embedder|engine)|claims-drill|claims-bed[\\/]+run|test[\\/]+tools[\\/]+run-tests)/;
+const JS_ELECTRON_NODE = /\bELECTRON_RUN_AS_NODE\b/;
+/** A script node runs: .js/.cjs/.mjs/.ts (also .cts/.mts). */
+const JS_SCRIPT = /\.[cm]?[jt]s$/i;
+/** Relative modules a script loads (one hop each; helpers are where the embedder hides). */
+const JS_LOCAL = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom\s+)\s*(['"`])(\.{1,2}[\\/][^'"`\n]+)\1/g;
+/** At most this many files are read for one command (the script plus its local helpers). */
+export const HEAVY_JS_MAX_FILES = 8;
+
+/** `a/lib/../util.js` -> `a/util.js` (forward slashes; a leading `..` that cannot be removed stays). */
+function normPath(p: string): string {
+  const out: string[] = [];
+  for (const s of p.replace(/^["']|["']$/g, '').replace(/\\/g, '/').split('/')) {
+    if (s === '.' && out.length) continue;
+    if (s === '..' && out.length && out[out.length - 1] !== '..' && out[out.length - 1] !== '.' && !/^[A-Za-z]:$/.test(out[out.length - 1])) { out.pop(); continue; }
+    out.push(s);
+  }
+  return out.join('/');
+}
+
+function jsMarker(text: string): string | null {
+  if (JS_ELECTRON_NODE.test(text)) return 'ELECTRON_RUN_AS_NODE';
+  const m = JS_LOAD.exec(text);
+  return m ? m[1].replace(/\\/g, '/') : null;
+}
+
+/** Inline code (`node -e "…"`) or a script file (and its relative helpers, two hops deep) that loads a heavy runtime. */
+function classifyNodeCode(script: string | null, inline: string | null, ctx: ClassifyCtx): HeavyClass {
+  const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (loads ${marker})` });
+  if (inline !== null) { const m = jsMarker(inline); if (m) return hit(m, '-e'); }
+  if (!script || !ctx.readScript || !JS_SCRIPT.test(script)) return { heavy: false };
+  const name = script.replace(/\\/g, '/').split('/').pop()!;
+  const seen = new Set<string>();
+  const queue: Array<{ path: string; hop: number }> = [{ path: script.replace(/^["']|["']$/g, ''), hop: 0 }];
+  let read = 0; let tries = 0;
+  while (queue.length && read < HEAVY_JS_MAX_FILES && tries < 4 * HEAVY_JS_MAX_FILES) {
+    const { path, hop } = queue.shift()!;
+    const key = normPath(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tries++;
+    let text: string | null = null;
+    try { text = ctx.readScript(key, ctx.cd); } catch { text = null; }
+    if (!text) continue;   // unreadable: decided by the rest (as for shell scripts)
+    read++;
+    const m = jsMarker(text);
+    if (m) return hit(m, key === normPath(script) ? name : `${name} via ${key.split('/').pop()}`);
+    if (hop >= 2) continue;
+    const dir = key.includes('/') ? key.slice(0, key.lastIndexOf('/') + 1) : '';
+    for (const r of text.matchAll(JS_LOCAL)) {
+      const rel = `${dir}${r[2].replace(/\\/g, '/')}`;
+      for (const p of JS_SCRIPT.test(rel) ? [rel] : [`${rel}.cjs`, `${rel}.js`, `${rel}.mjs`, `${rel}.ts`, `${rel}/index.js`]) queue.push({ path: p, hop: hop + 1 });
+    }
+  }
+  return { heavy: false };
+}
+
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const ws = leading(ws0);
   if (!ws.length) return { heavy: false };
@@ -295,7 +360,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       const head = after[0]?.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.(exe|cmd)$/, '') ?? '';
       if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1, ctx);
     }
-    return { heavy: false };
+    // HEAVY-LOCK-ADHOC-NODE: what the script (or `-e` code) loads decides, whatever its name.
+    const e = args.findIndex((a) => /^(-e|--eval|-p|--print)$/.test(a));
+    return classifyNodeCode(e >= 0 ? null : script ?? null, e >= 0 ? args[e + 1] ?? '' : null, ctx);
   }
   return { heavy: false };
 }
