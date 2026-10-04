@@ -142,6 +142,14 @@ const JIM = [
   ['M8 npx tsx', true, 'npx tsx bench-like.ts', { 'bench-like.ts': "import ort from 'onnxruntime-node';\n" }],
   ['a --require preload', true, 'node --require ./pre.cjs light.cjs', { './pre.cjs': "require('onnxruntime-node')\n", 'light.cjs': 'console.log(1)\n' }],
   ['node --version stays light', false, 'node --version', {}],
+  // Jim's re-audit N1: the tokenizer must not lose a load after a hashbang or a path-like first line.
+  ['N1 a hashbang, then a load on line 2', true, 'node cli.cjs', { 'cli.cjs': "#!/usr/bin/env node\nrequire('onnxruntime-node');\n" }],
+  ['N1b a path-like first line, then a load', true, 'node p.cjs', { 'p.cjs': "/usr/bin/x\nrequire('onnxruntime-node');\n" }],
+  ['N1d a regex, a division, then a load whose path holds a /', true, 'node rd2.cjs', { 'rd2.cjs': "const y = /a/ / 2; const ort = require('onnxruntime-node/dist/index.js');\n" }],
+  ['N1e an unterminated / (a script mid-edit) does not eat the next line', true, 'node ut.cjs', { 'ut.cjs': "const a = [\n/\nrequire('onnxruntime-node')];\n" }],
+  ['n2 a light heredoc piped into node -', false, "cat <<'EOF' | node -\nconsole.log(1);\nEOF", {}],
+  ['n2b a heavy heredoc piped into node -', true, "cat <<'EOF' | node -\nrequire('onnxruntime-node');\nEOF", {}],
+  ['N1c a regex, then a division, then a load', true, 'node rd.cjs', { 'rd.cjs': "const r = /a/g; const x = r.lastIndex / 2 / 1; require('onnxruntime-node');\n" }],
 ];
 for (const [name, want, cmd, files] of JIM) {
   test(`audit probe: ${name} -> ${want ? 'heavy' : 'light'}`, () => {

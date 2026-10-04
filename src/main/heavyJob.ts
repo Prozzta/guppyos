@@ -237,8 +237,10 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyCla
  * Relative, `path.join(__dirname, …)` and absolute helpers are followed two hops (at most
  * HEAVY_JS_MAX_FILES files read); `--require`/`--import` preloads, `-e`/`--eval=` code and a heredoc or
  * `<` stdin script are checked the same way. Limits (documented): a helper path built at run time from
- * other variables, a spawned script named only through a computed value, and loaders other than node,
- * tsx and ts-node.
+ * other variables, a spawned script named only through a computed value, a load inside a template
+ * literal's `${…}` (those parts are skipped), a destructured child_process alias
+ * (`const { spawnSync: run } = require('child_process')`), `node` fed by a pipe with no `-`, and
+ * loaders other than node, tsx and ts-node.
  */
 const JS_MARKER = /onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory\/+(?:embedder|engine)\b|claims-drill|claims-bed\/+run\b|test\/+tools\/+run-tests/;
 const JS_SPAWN = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']);
@@ -251,7 +253,7 @@ export const HEAVY_JS_SCAN_CHARS = 256 * 1024;
 /** A call's arguments are read at most this many tokens deep (bounds a line of unclosed `require(`). */
 const JS_ARG_TOKENS = 64;
 
-type JsTok = { t: 'id' | 'str' | 'p'; v: string };
+type JsTok = { t: 'id' | 'str' | 'p' | 're'; v: string };
 
 /** A linear JS tokenizer, just enough for load calls: identifiers, string literals (a template's
  *  `${…}` parts dropped), punctuation. Comments are skipped; a regex literal is skipped whole. */
@@ -260,7 +262,9 @@ function jsTokens(src: string): JsTok[] {
   const out: JsTok[] = [];
   const idStart = (ch: number): boolean => (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 || ch === 36;
   const idPart = (ch: number): boolean => idStart(ch) || (ch >= 48 && ch <= 57);
-  let i = 0;
+  // Jim N1: a hashbang line (`#!/usr/bin/env node`) is a comment.
+  let i = s.startsWith('#!') ? Math.max(0, s.indexOf('\n')) : 0;
+  if (s.startsWith('#!') && i === 0) i = s.length;
   while (i < s.length) {
     const c = s[i]; const code = s.charCodeAt(i);
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
@@ -282,8 +286,13 @@ function jsTokens(src: string): JsTok[] {
       if (!p || (p.t === 'p' && '(,=:[!&|?{};'.includes(p.v)) || (p.t === 'id' && (p.v === 'return' || p.v === 'typeof' || p.v === 'case'))) {
         let j = i + 1; let cls = false;
         while (j < s.length && s[j] !== '\n') { if (s[j] === '\\') { j += 2; continue; } if (s[j] === '[') cls = true; else if (s[j] === ']') cls = false; else if (s[j] === '/' && !cls) break; j++; }
-        i = j + 1; while (i < s.length && idPart(s.charCodeAt(i))) i++;
-        continue;
+        // Jim N1: only a regex CLOSED on its line is one (else this '/' is punctuation), and it leaves
+        // a token, so a '/' right after it reads as division, never as another regex start.
+        if (j < s.length && s[j] === '/') {
+          i = j + 1; while (i < s.length && idPart(s.charCodeAt(i))) i++;
+          out.push({ t: 're', v: '' });
+          continue;
+        }
       }
     }
     out.push({ t: 'p', v: c }); i++;
@@ -563,6 +572,8 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       here = { ...here, cd: /^([A-Za-z]:[\\/]|[\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\/]+$/, '')}/${to}` };
       continue;
     }
+    // Jim n2: `cat <<'EOF' | node -`: the heredoc of an earlier segment is what the pipe feeds `-`.
+    if (stdin === undefined && bodies.length && raw.includes('-')) stdin = bodies.join('\n');
     const c = classifyWords(ws, depth, stdin === undefined ? here : { ...here, stdin });
     if (c.heavy) return c;
   }
