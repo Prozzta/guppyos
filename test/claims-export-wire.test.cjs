@@ -44,7 +44,7 @@ const cli = require(path.join(ROOT, 'resources', 'memory-cli.cjs'));
 
 let n = 0;
 /** A hive with the store's onAppend wired to the export, as main wires it, and the /memory endpoint. */
-function setup({ level = () => 'writer', agentDir } = {}) {
+function setup({ level = () => 'writer', agentDir, defer, readOverride } = {}) {
   const root = path.join(JAIL, `hive-${++n}`);
   for (const a of ['a1', 'a2']) fs.mkdirSync(path.join(root, 'agents', a), { recursive: true });
   const logs = [];
@@ -52,8 +52,9 @@ function setup({ level = () => 'writer', agentDir } = {}) {
   const exp = createClaimExport({
     level,
     agentDir: agentDir ?? ((a) => path.join(root, 'agents', a)),
-    readLedger: (a) => store.readLedger(a),
+    readLedger: (a) => (readOverride ? readOverride(store.readLedger(a)) : store.readLedger(a)),
     registry: () => DEFAULT_KEY_REGISTRY,
+    ...(defer ? { defer } : {}),
     derive,
     view: (_a, records, state) => worldView(state, records, [], { now: new Date().toISOString(), taskStatus: () => null, fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {} }),
     log: (row) => logs.push(row),
@@ -196,6 +197,85 @@ test('export --complete: refused below writer, without --complete, and when this
   assert.equal(none.exit, 3);
   assert.match(none.error, /not available/);
   assert.deepEqual(cli.parseArgs(['export', '--complete']).args, { complete: true });
+});
+
+// ——— Creed M-A: only W3's verifiedPrefix is ever exported ———
+
+/** Four claims, then the second one's text edited in its segment (a MAC break at that record). */
+async function tampered(x) {
+  const ids = [];
+  x.unwire();
+  for (let i = 0; i < 4; i++) ids.push((await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: `synthetic orchard line ${i}` }, 'endpoint')).id);
+  x.rewire();
+  const seg = x.store.segments('a1')[0];
+  fs.writeFileSync(seg, fs.readFileSync(seg, 'utf8').replace('synthetic orchard line 1', 'synthetic orchard line X'));
+  const read = x.store.readLedger('a1');
+  assert.notEqual(read.chain, 'ok', 'the edit breaks the chain');
+  return { ids, read };
+}
+
+test('M-A truncated: past a MAC break nothing is exported on the append and sync paths, and complete refuses (ids logged, no text)', async () => {
+  const x = setup();
+  const { ids, read } = await tampered(x);
+  const brokenAt = read.chain.brokenAt;
+  // The append path: the store refuses appends on a broken ledger, so its onAppend is driven as the store would.
+  x.exp.onAppend('a1', ids[3], read.records.find((r) => r.id === ids[3]));
+  await x.exp.drain();
+  const before = ids.slice(0, ids.indexOf(brokenAt));
+  assert.ok(before.length >= 1);
+  assert.deepEqual([...E.exportedIds(x.dir())].sort(), [...before].sort(), 'only the records before the break');
+  assert.ok(!x.exportText().includes('synthetic orchard line X'), 'never the tampered text');
+  assert.equal(x.exp.syncAll(['a1']), 0, 'the sync path adds nothing past the break');
+  assert.deepEqual([...E.exportedIds(x.dir())].sort(), [...before].sort());
+  for (const step of ['append', 'sync']) assert.ok(x.logs.some((l) => l.kind === 'claims-export-truncated' && l.step === step && l.truncatedAt === brokenAt), step);
+  fs.writeFileSync(path.join(x.dir(), 'memory.md'), '# Memory - a1\n\n- synthetic untouched body\n');
+  const r = await memory(x, 'a1', ['export', '--complete']);
+  assert.equal(r.code, 3);
+  assert.match(r.err, new RegExp(`fails verification at ${brokenAt}`));
+  assert.equal(fs.readFileSync(path.join(x.dir(), 'memory.md'), 'utf8'), '# Memory - a1\n\n- synthetic untouched body\n', 'memory.md is not changed');
+  assert.ok(x.logs.some((l) => l.kind === 'claims-export-truncated' && l.step === 'complete'));
+  assert.ok(!JSON.stringify(x.logs.filter((l) => /^claims-export-/.test(l.kind))).includes('synthetic orchard'), 'log rows carry no text');
+});
+
+test('M-A unverified (a lost key or a cut ledger): nothing at all is exported on any path, and it is logged', async () => {
+  const lost = (r) => ({ ...r, chain: { reason: 'key-missing', brokenAt: r.records[0]?.id ?? '' } });
+  const x = setup({ readOverride: lost });
+  const a = await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic unverifiable fact' }, 'endpoint');
+  assert.equal(a.ok, true);
+  await x.exp.drain();
+  assert.equal(x.exp.syncAll(['a1']), 0);
+  assert.deepEqual(E.exportFiles(x.dir()), [], 'no export file on the append or sync path');
+  fs.writeFileSync(path.join(x.dir(), 'memory.md'), '# Memory - a1\n');
+  const c = x.exp.complete('a1');
+  assert.equal(c.ok, false);
+  assert.match(c.error, /cannot be verified/);
+  assert.equal(fs.readFileSync(path.join(x.dir(), 'memory.md'), 'utf8'), '# Memory - a1\n');
+  for (const step of ['append', 'sync', 'complete']) assert.ok(x.logs.some((l) => l.kind === 'claims-export-unverified' && l.step === step && l.reason === 'key-missing'), step);
+  const y = setup({ readOverride: (r) => ({ ...r, chain: { reason: 'mac', brokenAt: 'head-anchor' } }) });
+  await y.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic cut-ledger fact' }, 'endpoint');
+  await y.exp.drain();
+  assert.deepEqual(E.exportFiles(y.dir()), [], 'a ledger cut below its anchored head exports nothing');
+});
+
+// ——— Creed M-B: markers from positional states ———
+
+test('M-B a no-yield burst: the export work runs after the whole burst, and each real status change is marked exactly once', async () => {
+  const held = [];
+  const x = setup({ defer: (fn) => { held.push(fn); } });
+  const a = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst fact' }, 'endpoint')).id;
+  const b = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst replacement', supersedes: [a] }, 'endpoint')).id;
+  const c = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst bystander' }, 'endpoint')).id;
+  const r = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst withdrawal', retracts: [c] }, 'endpoint')).id;
+  // A later record changes an EARLIER claim's status: a non-positional "before" would see it early.
+  const dd = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst second replacement', supersedes: [b] }, 'endpoint')).id;
+  // Every job runs only now, against the whole ledger (the burst had no yield to the queue).
+  while (held.length) { held.shift()(); await new Promise((res) => setImmediate(res)); }
+  await x.exp.drain();
+  const markers = x.exportText().split('\n').filter((l) => l.includes(' status of [c:'));
+  assert.deepEqual(markers.map((l) => l.replace(/^- \S+ /, '')).sort(), [`status of [c:${a}]: live -> superseded`, `status of [c:${c}]: live -> retracted`, `status of [c:${b}]: live -> superseded`].sort(), markers.join('\n'));
+  assert.equal(E.exportedIds(x.dir()).size, 5, [a, b, c, r, dd].join(','));
+  const at = (id) => x.store.readLedger('a1').records.find((rec) => rec.id === id).wt;
+  assert.ok(markers.some((l) => l.startsWith(`- ${at(b)} status of [c:${a}]`)), 'a marker carries the time of the record that caused it');
 });
 
 test('main wires all three callers (index.ts loads only under Electron, so its wiring is pinned by source)', () => {

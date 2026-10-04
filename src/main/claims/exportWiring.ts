@@ -5,25 +5,32 @@
  * - CONTINUOUS EXPORT. After each acked append of an agent at the effective level 'writer', the
  *   agent's export catches up with `syncExport` (the new record, and anything a crash left out; the
  *   archive-backed legacy claims stay out, recomputed per call), then `appendStatusMarkers` writes a
- *   marker line for every status the append changed (the state with and without that record). It
- *   runs off the append's path (setImmediate), one agent at a time, and never throws: a failure is a
- *   `claims-export-failed` log row, and the next append or start-up sync catches up.
+ *   marker line for every status that record changed: POSITIONAL states, the ledger up to but
+ *   excluding the record and up to and including it (Creed M-B), so a burst of appends with no yield
+ *   between them still marks each real change exactly once. It runs off the append's path
+ *   (setImmediate), one agent at a time, and never throws: a failure is a `claims-export-failed` log
+ *   row, and the next append or start-up sync catches up.
+ * - ONLY VERIFIED RECORDS (Creed M-A): every path reads through W3's `verifiedPrefix`. No prefix (a lost
+ *   key, a ledger cut below its anchored head): nothing is exported, and a `claims-export-unverified`
+ *   row says why. A chain or MAC break: only the records before it, and `claims-export-truncated` names
+ *   it. `complete` refuses both: a complete memory.md must be the whole verified ledger.
  * - START-UP SYNC (the switch to writer mode, a restart after a crash): `syncAll` runs `syncExport` for
  *   every writer agent with a ledger. No markers: their moment is the append.
  * - COMPLETE EXPORT (`memory export --complete`, the planned downgrade path): `complete` replaces the
  *   agent's memory.md with W4's complete rendering, without the archive-backed entries (ruling 2).
  *   The export format is exportLedger.ts's and W4's; nothing here renders.
  */
-import type { ClaimsState, DeriveFn, KeyRegistry, LedgerLevel, LedgerRec, WorldView } from '../../shared/claims';
+import type { ClaimsState, DeriveFn, KeyRegistry, LedgerLevel, LedgerRec, ReadResult, WorldView } from '../../shared/claims';
 import { appendStatusMarkers, archiveBackedIds, exportComplete, syncExport } from './exportLedger';
+import { verifiedPrefix } from './indexSync';
 import { createClaimViews } from './views';
 
 export interface ClaimExportDeps {
   level: (agentId: string) => LedgerLevel;
   /** The agent's folder (where memory.md and the export files live); null for an unknown agent. */
   agentDir: (agentId: string) => string | null;
-  /** The verified ledger (the store's readLedger). */
-  readLedger: (agentId: string) => { records: LedgerRec[] };
+  /** The store's readLedger; only its verifiedPrefix is ever exported. */
+  readLedger: (agentId: string) => ReadResult;
   registry: () => KeyRegistry;
   derive: DeriveFn;
   /** The world view for the complete rendering (statuses come from the state; flags from here). */
@@ -65,15 +72,32 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
     void next.then(() => { if (chains.get(agentId) === next) chains.delete(agentId); });
   };
 
+  /** The agent's verified records (W3's verifiedPrefix), logging a refusal or a truncation (ids only). */
+  const verified = (agentId: string, step: string): { records: LedgerRec[]; truncatedAt?: string } | null => {
+    const read = d.readLedger(agentId);
+    const prefix = verifiedPrefix(read);
+    if (!prefix) {
+      const chain = read.chain === 'ok' ? null : read.chain;
+      d.log({ kind: 'claims-export-unverified', agentId, step, reason: chain?.reason ?? 'unknown', brokenAt: chain?.brokenAt ?? null });
+      return null;
+    }
+    if (prefix.truncatedAt) d.log({ kind: 'claims-export-truncated', agentId, step, truncatedAt: prefix.truncatedAt, records: prefix.records.length });
+    return prefix;
+  };
+
   const exportAppend = (agentId: string, id: string, rec: LedgerRec): void => {
     if (d.level(agentId) !== 'writer') return;
     const dir = d.agentDir(agentId);
     if (!dir) return;
-    const records = d.readLedger(agentId).records;
-    const state = derive(records);
+    const prefix = verified(agentId, 'append');
+    if (!prefix) return;
+    const records = prefix.records;
+    // M-B: the states just before and just after THIS record, whatever was appended since.
+    const at = records.findIndex((r) => r.id === id);
+    const after = at < 0 ? null : derive(records.slice(0, at + 1));
+    const state = after && at === records.length - 1 ? after : derive(records);
     const lines = syncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine);
-    const before = derive(records.filter((r) => r.id !== id));
-    const markers = appendStatusMarkers(dir, agentId, before, state, rec.wt);
+    const markers = after ? appendStatusMarkers(dir, agentId, derive(records.slice(0, at)), after, rec.wt) : 0;
     d.log({ kind: 'claims-export-append', agentId, id, lines, markers });
   };
 
@@ -88,8 +112,9 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
           if (d.level(agentId) !== 'writer') continue;
           const dir = d.agentDir(agentId);
           if (!dir) continue;
-          const records = d.readLedger(agentId).records;
-          if (!records.length) continue;
+          const prefix = verified(agentId, 'sync');
+          if (!prefix?.records.length) continue;
+          const records = prefix.records;
           const n = syncExport(dir, records, derive(records), createClaimViews(records, NO_TOKENS).renderExportLine);
           if (n) d.log({ kind: 'claims-export-sync', agentId, lines: n });
           total += n;
@@ -102,7 +127,10 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
       try {
         const dir = d.agentDir(agentId);
         if (!dir) return { ok: false, error: `${agentId} has no agent folder` };
-        const records = d.readLedger(agentId).records;
+        const prefix = verified(agentId, 'complete');
+        if (!prefix) return { ok: false, error: 'refused: your claim ledger cannot be verified (a lost key or a cut ledger); memory.md was not changed' };
+        if (prefix.truncatedAt) return { ok: false, error: `refused: your claim ledger fails verification at ${prefix.truncatedAt}; a complete export would drop what follows, so memory.md was not changed` };
+        const records = prefix.records;
         const state = derive(records);
         const r = exportComplete(dir, state, d.view(agentId, records, state), createClaimViews(records, NO_TOKENS).renderMemoryMd, archiveBackedIds(dir, records, state));
         d.log({ kind: 'claims-export-complete', agentId, bytes: r.bytes });
