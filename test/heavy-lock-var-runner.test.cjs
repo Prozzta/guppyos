@@ -17,8 +17,15 @@ test('a variable command word delegates classification to a nameable command', (
     '$env:CR node test/tools/run-tests.cjs',
     '${CR:-} node test/tools/run-tests.cjs',
     '$(which node) test/tools/run-tests.cjs',
+    '`which node` test/tools/run-tests.cjs',
   ]) assert.equal(classifyCommand(cmd).kind, 'suite', cmd);
   assert.equal(classifyCommand('eval "$CMD"').heavy, false, 'eval policy is out of scope');
+});
+
+test('cmd /c bodies preserve heavy Node runners except the doubled-outer-quote shim form', () => {
+  assert.equal(classifyCommand('cmd /s /c "C:\\Tools\\node.exe test/tools/run-tests.cjs"').kind, 'suite');
+  assert.equal(classifyCommand('cmd /s /c "C:\\Program Files\\nodejs\\node.exe test/tools/run-tests.cjs"').kind, 'suite');
+  assert.equal(classifyCommand('C:\\WINDOWS\\system32\\cmd.exe /d /s /c ""C:\\nvm\\v20\\npm.cmd" ci"').heavy, false);
 });
 
 test('attached redirects consume a quoted target with spaces as one word', () => {

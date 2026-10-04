@@ -457,6 +457,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
   // PowerShell environment variables, and the conventional `$(which node)` form.
   if (/^\$\((?:which|command\s+-v)\s+node\)$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+  if (/^`(?:which|command\s+-v)\s+node`$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
   if (/^\$(?:[A-Za-z_][A-Za-z0-9_]*|env:[A-Za-z_][A-Za-z0-9_]*)$/.test(ws[0]) || /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=+?][^}]*)?\}$/.test(ws[0])) {
     if (ws.length > 1) {
       const next = ws[1].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
@@ -475,7 +476,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // cmd.exe /s /c uses doubled outer quotes for one opaque Win32 command string (common for npm.cmd).
   // The process watcher owns that real wrapper shape; don't reinterpret its embedded quoting here.
   const cmdBody = args.indexOf('/c');
-  if (bin === 'cmd' && args.includes('/s') && cmdBody >= 0 && args.length === cmdBody + 2 && /^[a-z]:\\.*\s/i.test(args[cmdBody + 1])) return { heavy: false };
+  if (bin === 'cmd' && args.includes('/s') && cmdBody >= 0 && args.length === cmdBody + 2) {
+    const body = args[cmdBody + 1].replace(/^"|"$/g, '');
+    const spacedExe = /^([a-z]:\\.*?\.(?:exe|cmd))\s+(.+)$/i.exec(body);
+    return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, ctx);
+  }
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
   if (WRAPPERS.has(bin) && depth === 0) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
@@ -569,6 +574,9 @@ function substitutions(cmd: string): string[] {
 
 /** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
 export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): HeavyClass {
+  if (/^\s*(?:[a-z]:\\.*\\)?cmd(?:\.exe)?\s+.*?\/s\s+\/c\s+""[a-z]:\\/i.test(cmd)) return { heavy: false };
+  const backtickNode = /^\s*`(?:which|command\s+-v)\s+node`\s+(.+)\s*$/s.exec(cmd);
+  if (backtickNode) return classifyCommand(`node ${backtickNode[1]}`, depth, ctx);
   const bodies: string[] = [];
   const text = stripHeredocs(cmd, bodies);
   let here: ClassifyCtx = { ...ctx, stdin: undefined };
