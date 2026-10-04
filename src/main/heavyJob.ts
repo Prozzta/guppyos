@@ -473,10 +473,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
   const args = ws.slice(1);
   if (hasUnclosed && WRAPPERS.has(bin)) return { heavy: false };
-  // cmd.exe /s /c uses doubled outer quotes for one opaque Win32 command string (common for npm.cmd).
-  // The process watcher owns that real wrapper shape; don't reinterpret its embedded quoting here.
+  // cmd.exe /s /c uses doubled outer quotes for one Win32 command string. Reconstruct the inner
+  // executable (including paths with spaces) before classifying; ignoring this opaque-looking
+  // shape let a wrapped install/test and every later chained segment evade the heavy-job lock.
   const cmdBody = args.indexOf('/c');
-  if (bin === 'cmd' && args.includes('/s') && cmdBody >= 0 && args.length === cmdBody + 2) {
+  if (bin === 'cmd' && cmdBody >= 0 && args.length === cmdBody + 2) {
     const body = args[cmdBody + 1].replace(/^"|"$/g, '');
     const spacedExe = /^([a-z]:\\.*?\.(?:exe|cmd))\s+(.+)$/i.exec(body);
     return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, ctx);
@@ -574,13 +575,21 @@ function substitutions(cmd: string): string[] {
 
 /** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
 export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): HeavyClass {
-  if (/^\s*(?:[a-z]:\\.*\\)?cmd(?:\.exe)?\s+.*?\/s\s+\/c\s+""[a-z]:\\/i.test(cmd)) return { heavy: false };
   const backtickNode = /^\s*`(?:which|command\s+-v)\s+node`\s+(.+)\s*$/s.exec(cmd);
   if (backtickNode) return classifyCommand(`node ${backtickNode[1]}`, depth, ctx);
   const bodies: string[] = [];
   const text = stripHeredocs(cmd, bodies);
   let here: ClassifyCtx = { ...ctx, stdin: undefined };
   for (const seg of segments(text)) {
+    // The raw doubled-quote cmd form is opaque to the shell-word tokenizer: classify its
+    // inner executable before tokenizing, but do so per segment so later chained commands
+    // are still inspected independently.
+    const doubledCmd = /^\s*(?:[a-z]:\\.*\\)?cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+""(.+?\.(?:exe|cmd))"\s*(.*?)"\s*$/i.exec(seg);
+    if (doubledCmd) {
+      const inner = classifyCommand(`"${doubledCmd[1]}" ${doubledCmd[2]}`, depth + 1, ctx);
+      if (inner.heavy) return inner;
+      continue;
+    }
     const raw = words(seg.replace(/\s&$/, ''));
     const ws = stripRedirects(raw);
     // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).

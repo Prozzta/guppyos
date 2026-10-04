@@ -383,7 +383,6 @@ const REAL_SHAPES = [
   String.raw`C:\Program Files\Git\bin\..\usr\bin\bash.exe -c "source /c/Users/x/.claude/shell-snapshots/snapshot-bash-1.sh 2>/dev/null || true && eval 'npm ci > log 2>&1' < /dev/null && pwd -P >| /tmp/cwd"`,
   String.raw`C:\Program Files\Git\bin\..\usr\bin\bash.exe -c "source /c/Users/x/.claude/shell-snapshots/snapshot-bash-1.sh && eval 'node --test test/*.test.cjs' < /dev/null"`,
   String.raw`"C:\nvm\v20\node.exe" "C:\nvm\v20\node_modules\npm\bin\npm-cli.js" ci`,
-  String.raw`C:\WINDOWS\system32\cmd.exe /d /s /c ""C:\nvm\v20\npm.cmd" ci"`,
   String.raw`"C:\nvm\v20\node.exe" "C:\wt\node_modules\electron-builder\cli.js" --win`,
   String.raw`"C:\nvm\v20\node.exe" "C:\wt\node_modules\electron-vite\bin\electron-vite.js" build`,
   String.raw`powershell.exe -NoProfile -NonInteractive -Command "$__claudeCodeScript = $env:CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT; & ([scriptblock]::Create($__claudeCodeScript))"`

@@ -22,10 +22,17 @@ test('a variable command word delegates classification to a nameable command', (
   assert.equal(classifyCommand('eval "$CMD"').heavy, false, 'eval policy is out of scope');
 });
 
-test('cmd /c bodies preserve heavy Node runners except the doubled-outer-quote shim form', () => {
+test('cmd /c bodies preserve heavy inner commands and commands chained after the wrapper', () => {
   assert.equal(classifyCommand('cmd /s /c "C:\\Tools\\node.exe test/tools/run-tests.cjs"').kind, 'suite');
   assert.equal(classifyCommand('cmd /s /c "C:\\Program Files\\nodejs\\node.exe test/tools/run-tests.cjs"').kind, 'suite');
-  assert.equal(classifyCommand('C:\\WINDOWS\\system32\\cmd.exe /d /s /c ""C:\\nvm\\v20\\npm.cmd" ci"').heavy, false);
+  assert.equal(classifyCommand('cmd /c "C:\\Program Files\\nodejs\\node.exe test/tools/run-tests.cjs"').kind, 'suite');
+  assert.equal(classifyCommand('C:\\WINDOWS\\system32\\cmd.exe /d /s /c ""C:\\nvm\\v20\\npm.cmd" ci"').kind, 'install');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\nvm\\v20\\npm.cmd" test"').kind, 'suite');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\nvm\\v20\\node.exe" test/tools/run-tests.cjs"').kind, 'suite');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\Program Files\\nodejs\\npm.cmd" test"').kind, 'suite');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\Program Files\\nodejs\\node.exe" test/tools/run-tests.cjs"').kind, 'suite');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\x\\git.exe" status" && node test/tools/run-tests.cjs').kind, 'suite');
+  assert.equal(classifyCommand('cmd /d /s /c ""C:\\x\\git.exe" status"; npm test').kind, 'suite');
 });
 
 test('attached redirects consume a quoted target with spaces as one word', () => {
