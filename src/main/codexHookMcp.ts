@@ -106,8 +106,11 @@ export function relaxedObjectLiteral(src: string): unknown {
  * the heavy-job classifier only, when the hook itself must stay DEGRADED (two parallel calls, an
  * exec with several nested commands). Never used to NAME a tool for a gate. `complete` is false
  * when a command could not be read (computed, templated): the hint is then partial.
+ * HEAVY-LOCK-UNNAMED-EXEC: `unnamed` counts the code-mode exec_command calls not read: a
+ * `tools.exec_command(` whose cmd is not a literal, plus any other `exec_command` mention (an
+ * alias `t.exec_command(`, `tools["exec_command"]`), for the heavy-job lock's log row.
  */
-export function pendingExecCommands(tail: string): { commands: string[]; complete: boolean } {
+export function pendingExecCommands(tail: string): { commands: string[]; complete: boolean; unnamed: number } {
   const lines = tail.split('\n');
   let turnSeen = false;
   const outputs = new Set<string>();
@@ -125,16 +128,21 @@ export function pendingExecCommands(tail: string): { commands: string[]; complet
   }
   const commands: string[] = [];
   let complete = true;
+  let unnamed = 0;
   for (const p of pending) {
     if (p.name === 'exec' && typeof p.input === 'string') {
       const re = new RegExp(EXEC_COMMAND_CALL.source, 'g');
       let m: RegExpExecArray | null;
+      let calls = 0;
       while ((m = re.exec(p.input))) {
+        calls += 1;
         const span = objectSpan(p.input, m.index + m[0].length);
         let cmd: unknown;
         try { cmd = span ? (relaxedObjectLiteral(span) as { cmd?: unknown } | null)?.cmd : undefined; } catch { cmd = undefined; }
-        if (typeof cmd === 'string') commands.push(cmd); else complete = false;
+        if (typeof cmd === 'string') commands.push(cmd); else { complete = false; unnamed += 1; }
       }
+      const other = (p.input.match(/\bexec_command\b/g) ?? []).length - calls;
+      if (other > 0) { complete = false; unnamed += other; }
     } else if (typeof p.arguments === 'string') {
       let a: { cmd?: unknown; command?: unknown } | null = null;
       try { a = JSON.parse(p.arguments); } catch { a = null; }
@@ -145,7 +153,7 @@ export function pendingExecCommands(tail: string): { commands: string[]; complet
       commands.push(((p.action as { command: unknown[] }).command).map(String).join(' '));
     }
   }
-  return { commands, complete };
+  return { commands, complete, unnamed };
 }
 
 /**

@@ -246,10 +246,10 @@ test('(c) rebuildToolHook names a pending 0.157.1 exec (was DEGRADED); pendingEx
   const two = EX157('echo a') + '\n' + EX157('node test/tools/run-tests.cjs');
   const tail = [L.turnContext(TURN), L.call('c1', 'exec', two)].join('\n');
   assert.equal(mcp.rebuildToolHook(tail, 'PreToolUse').degraded, true);
-  assert.deepEqual(mcp.pendingExecCommands(tail), { commands: ['echo a', 'node test/tools/run-tests.cjs'], complete: true });
+  assert.deepEqual(mcp.pendingExecCommands(tail), { commands: ['echo a', 'node test/tools/run-tests.cjs'], complete: true, unnamed: 0 });
   // Only the current turn's PENDING calls: answered ones and older turns are not.
   const old = [L.turnContext('old'), L.call('c0', 'exec', EX157('npm ci')), L.turnContext(TURN), L.call('c1', 'exec', EX157('echo a')), L.out('c1')].join('\n');
-  assert.deepEqual(mcp.pendingExecCommands(old), { commands: [], complete: true });
+  assert.deepEqual(mcp.pendingExecCommands(old), { commands: [], complete: true, unnamed: 0 });
   assert.equal(mcp.pendingExecCommands([L.turnContext(TURN), L.call('c1', 'exec', 'await tools.exec_command({ cmd: c });')].join('\n')).complete, false);
 });
 

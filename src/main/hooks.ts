@@ -148,6 +148,9 @@ interface HookPayload {
   /** HEAVY-JOB-LOCK-FAILOPEN (c): a DEGRADED Codex PreToolUse's pending shell commands, read from the
    *  rollout for the heavy-job classifier ONLY (never a tool name for a gate). */
   codex_commands?: string[];
+  /** HEAVY-LOCK-UNNAMED-EXEC: how many of those pending code-mode exec_command calls could NOT be
+   *  read (a computed cmd, an alias): logged by the heavy-job lock, never classified. */
+  codex_unnamed_exec?: number;
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
@@ -812,6 +815,7 @@ export class HookServer {
     if (rebuilt.degraded && event === 'PreToolUse' && tail) {
       const hint = pendingExecCommands(tail);
       if (hint.commands.length) p.codex_commands = hint.commands;
+      if (hint.unnamed) p.codex_unnamed_exec = hint.unnamed;
     }
     // A Codex SUBAGENT runs on its own thread: a thread other than the agent's recorded main
     // session is attributed to the agent but kept out of its session/transcript/lifecycle
@@ -2046,6 +2050,12 @@ export class HookServer {
           if (k.heavy) { cls = k; command = c; callId = `cmd:${c.slice(0, 500)}`; break; }
         }
         try { this.hive.appendLog({ kind: 'heavy-lock', action: 'degraded', agentId, tool: p.tool_name ?? null, hinted: hints.length, heavy: cls.heavy }); } catch { /* best effort */ }
+        // HEAVY-LOCK-UNNAMED-EXEC: a code-mode exec_command the rollout cannot name (computed cmd,
+        // alias) passes unclassified (fail-open, god's call for now): its own row, so it is counted.
+        const unnamed = typeof p.codex_unnamed_exec === 'number' && p.codex_unnamed_exec > 0 ? p.codex_unnamed_exec : 0;
+        if (unnamed) {
+          try { this.hive.appendLog({ kind: 'heavy-lock', action: 'unnamed-exec', agentId, unnamed, hinted: hints.length, heavy: cls.heavy }); } catch { /* best effort */ }
+        }
       }
       if (cls.heavy) {
         // A call whose PostToolUse may not pair back (Codex's mcp hooks can arrive degraded) is
