@@ -91,7 +91,7 @@ function words(s: string): string[] {
 /** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
  *  stdin (a python/node edit script, a file's text), never commands this shell runs, so a line in
  *  it must not be classified. The `<<` line itself stays; the terminator line is dropped too. */
-function stripHeredocs(cmd: string): string {
+function stripHeredocs(cmd: string, bodies?: string[]): string {
   const lines = cmd.split('\n');
   const out: string[] = [];
   let q: string | null = null;   // quote state carries across lines (a quoted string can span them)
@@ -120,7 +120,9 @@ function stripHeredocs(cmd: string): string {
     if (delims.length) q = null;   // the body starts on the next line whatever the operator line held
     for (const d of delims) {
       i++;
+      const start = i;
       while (i < lines.length && lines[i].trim() !== d) i++;
+      bodies?.push(lines.slice(start, i).join('\n'));   // HEAVY-LOCK-ADHOC-NODE: a `node <<EOF` script
     }
   }
   return out.join('\n');
@@ -205,6 +207,9 @@ export interface ClassifyCtx {
   readScript?: (path: string, cd?: string) => string | null;
   /** The directory an earlier `cd X` segment of the same command moved to (relative paths then resolve there). */
   cd?: string;
+  /** HEAVY-LOCK-ADHOC-NODE, set per segment by classifyCommand: the segment reads stdin from a heredoc
+   *  (its body) or a `< file` (its text; null when unreadable). Absent = no stdin redirect. */
+  stdin?: string | null;
 }
 
 /** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
@@ -221,44 +226,193 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyCla
  * HEAVY-LOCK-ADHOC-NODE: an ad-hoc node script is heavy by what it LOADS, not by its name.
  * `node m4opt-costs.cjs` that requires onnxruntime-node and the embedder pins every core for
  * minutes, yet only a bench-like NAME or a wrapped suite made `node <script>` heavy, so such scripts
- * ran beside a held slot. The marker must sit in a load or spawn call on the same line (require(,
- * import(, `from '…'`, loadTs(, spawn/exec/fork(), so a script that merely mentions a module name
- * in a string or a comment stays light. ELECTRON_RUN_AS_NODE anywhere = it runs the app as Node.
+ * ran beside a held slot. The script is read through the same size-capped reader as shell scripts and
+ * TOKENISED (linear: comments dropped, strings kept whole), and only the arguments of a load or spawn
+ * call count (Jim's audit: a marker in a comment, a mail body or a regex `.exec(` is not a load):
+ *   - the first argument of require( / loadTs( / import( / a createRequire()-made require, the string
+ *     of `from '…'` and of a side-effect `import '…'`;
+ *   - the arguments of child_process spawn / spawnSync / exec / execSync / execFile / execFileSync /
+ *     fork (a `.exec(` on anything but child_process is RegExp's), with simple string constants resolved;
+ *   - ELECTRON_RUN_AS_NODE only as an object key or an assignment target.
+ * Relative, `path.join(__dirname, …)` and absolute helpers are followed two hops (at most
+ * HEAVY_JS_MAX_FILES files read); `--require`/`--import` preloads, `-e`/`--eval=` code and a heredoc or
+ * `<` stdin script are checked the same way. Limits (documented): a helper path built at run time from
+ * other variables, a spawned script named only through a computed value, and loaders other than node,
+ * tsx and ts-node.
  */
-const JS_LOAD = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom\s+['"`]|\bloadTs\s*\(|\b(?:spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\s*\()[^\n;]*?(onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory[\\/]+(?:embedder|engine)|claims-drill|claims-bed[\\/]+run|test[\\/]+tools[\\/]+run-tests)/;
-const JS_ELECTRON_NODE = /\bELECTRON_RUN_AS_NODE\b/;
+const JS_MARKER = /onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory\/+(?:embedder|engine)\b|claims-drill|claims-bed\/+run\b|test\/+tools\/+run-tests/;
+const JS_SPAWN = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']);
 /** A script node runs: .js/.cjs/.mjs/.ts (also .cts/.mts). */
 const JS_SCRIPT = /\.[cm]?[jt]s$/i;
-/** Relative modules a script loads (one hop each; helpers are where the embedder hides). */
-const JS_LOCAL = /(?:\brequire\s*\(|\bimport\s*\(|\bfrom\s+)\s*(['"`])(\.{1,2}[\\/][^'"`\n]+)\1/g;
-/** At most this many files are read for one command (the script plus its local helpers). */
+/** At most this many files are read for one command (the script, its preloads and its helpers). */
 export const HEAVY_JS_MAX_FILES = 8;
+/** At most this much of one file is tokenised (Jim P1: the scan runs on the main process's hook path). */
+export const HEAVY_JS_SCAN_CHARS = 256 * 1024;
+/** A call's arguments are read at most this many tokens deep (bounds a line of unclosed `require(`). */
+const JS_ARG_TOKENS = 64;
+
+type JsTok = { t: 'id' | 'str' | 'p'; v: string };
+
+/** A linear JS tokenizer, just enough for load calls: identifiers, string literals (a template's
+ *  `${…}` parts dropped), punctuation. Comments are skipped; a regex literal is skipped whole. */
+function jsTokens(src: string): JsTok[] {
+  const s = src.length > HEAVY_JS_SCAN_CHARS ? src.slice(0, HEAVY_JS_SCAN_CHARS) : src;
+  const out: JsTok[] = [];
+  const idStart = (ch: number): boolean => (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch === 95 || ch === 36;
+  const idPart = (ch: number): boolean => idStart(ch) || (ch >= 48 && ch <= 57);
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i]; const code = s.charCodeAt(i);
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
+    if (c === '/' && s[i + 1] === '/') { const e = s.indexOf('\n', i); i = e < 0 ? s.length : e; continue; }
+    if (c === '/' && s[i + 1] === '*') { const e = s.indexOf('*/', i + 2); i = e < 0 ? s.length : e + 2; continue; }
+    if (c === '"' || c === "'" || c === '`') {
+      let v = ''; i++;
+      while (i < s.length && s[i] !== c) {
+        if (s[i] === '\\') { v += s[i + 1] ?? ''; i += 2; continue; }
+        if (c === '`' && s[i] === '$' && s[i + 1] === '{') { let d = 1; i += 2; while (i < s.length && d) { if (s[i] === '{') d++; else if (s[i] === '}') d--; i++; } continue; }
+        if (c !== '`' && s[i] === '\n') break;
+        v += s[i]; i++;
+      }
+      i++; out.push({ t: 'str', v }); continue;
+    }
+    if (idStart(code)) { let j = i + 1; while (j < s.length && idPart(s.charCodeAt(j))) j++; out.push({ t: 'id', v: s.slice(i, j) }); i = j; continue; }
+    if (c === '/') {
+      const p = out[out.length - 1];
+      if (!p || (p.t === 'p' && '(,=:[!&|?{};'.includes(p.v)) || (p.t === 'id' && (p.v === 'return' || p.v === 'typeof' || p.v === 'case'))) {
+        let j = i + 1; let cls = false;
+        while (j < s.length && s[j] !== '\n') { if (s[j] === '\\') { j += 2; continue; } if (s[j] === '[') cls = true; else if (s[j] === ']') cls = false; else if (s[j] === '/' && !cls) break; j++; }
+        i = j + 1; while (i < s.length && idPart(s.charCodeAt(i))) i++;
+        continue;
+      }
+    }
+    out.push({ t: 'p', v: c }); i++;
+  }
+  return out;
+}
 
 /** `a/lib/../util.js` -> `a/util.js` (forward slashes; a leading `..` that cannot be removed stays). */
 function normPath(p: string): string {
   const out: string[] = [];
   for (const s of p.replace(/^["']|["']$/g, '').replace(/\\/g, '/').split('/')) {
-    if (s === '.' && out.length) continue;
-    if (s === '..' && out.length && out[out.length - 1] !== '..' && out[out.length - 1] !== '.' && !/^[A-Za-z]:$/.test(out[out.length - 1])) { out.pop(); continue; }
+    if (s === '.') continue;
+    if (s === '..' && out.length && out[out.length - 1] !== '..' && out[out.length - 1] !== '' && !/^[A-Za-z]:$/.test(out[out.length - 1])) { out.pop(); continue; }
     out.push(s);
   }
-  return out.join('/');
+  return out.join('/') || '.';
 }
 
-function jsMarker(text: string): string | null {
-  if (JS_ELECTRON_NODE.test(text)) return 'ELECTRON_RUN_AS_NODE';
-  const m = JS_LOAD.exec(text);
-  return m ? m[1].replace(/\\/g, '/') : null;
+/** What a script's text loads: the first heavy marker (or null) and the helper paths to read next. */
+function scanJs(text: string): { marker: string | null; helpers: string[] } {
+  const ts = jsTokens(text);
+  const helpers: string[] = [];
+  const consts = new Map<string, string>();
+  const requires = new Set(['require', 'loadTs']);
+  // `const s = '…'` (string constants a spawn may name) and `const req = createRequire(…)`.
+  for (let k = 0; k + 3 < ts.length; k++) {
+    if (ts[k].t !== 'id' || !/^(const|let|var)$/.test(ts[k].v) || ts[k + 1].t !== 'id' || ts[k + 2].v !== '=') continue;
+    if (ts[k + 3].t === 'str' && ts[k + 4]?.v !== '+' && ts[k + 4]?.v !== '.') consts.set(ts[k + 1].v, ts[k + 3].v);
+    if (ts[k + 3].t === 'id' && ts[k + 3].v === 'createRequire') requires.add(ts[k + 1].v);
+  }
+  /** The tokens of a call's first argument and of all its arguments; ts[open] is '('. */
+  const call = (open: number): { first: JsTok[]; all: JsTok[]; end: number } => {
+    let d = 0; let j = open; let firstEnd = -1;
+    const stop = Math.min(ts.length, open + JS_ARG_TOKENS);
+    for (; j < stop; j++) {
+      const v = ts[j].t === 'p' ? ts[j].v : '';
+      if (v === '(' || v === '[' || v === '{') d++;
+      else if (v === ')' || v === ']' || v === '}') { d--; if (d === 0) break; }
+      else if (v === ',' && d === 1 && firstEnd < 0) firstEnd = j;
+    }
+    return { first: ts.slice(open + 1, firstEnd < 0 ? j : firstEnd), all: ts.slice(open + 1, j), end: j };
+  };
+  const norm = (v: string): string => v.replace(/\\/g, '/');
+  /** A marker in the argument: a string in it, or the argument's text joined (a shell may strip `-e` quotes). */
+  const markerIn = (xs: JsTok[]): string | null => {
+    for (const x of xs) { const m = x.t === 'str' ? JS_MARKER.exec(norm(x.v)) : null; if (m) return m[0]; }
+    const m = JS_MARKER.exec(norm(xs.map((x) => x.v).join('')));
+    return m ? m[0] : null;
+  };
+  const helperOf = (xs: JsTok[]): void => {
+    const strs = xs.filter((x) => x.t === 'str').map((x) => norm(x.v));
+    if (!strs.length) return;
+    if (xs.some((x) => x.t === 'id' && x.v === '__dirname')) { helpers.push(`./${strs.join('/')}`); return; }
+    if (/^\.{1,2}\//.test(strs[0])) helpers.push(strs[0]);
+    else if (/^([A-Za-z]:)?\//.test(strs[0])) helpers.push(strs[0]);
+  };
+  const load = (xs: JsTok[]): string | null => { const m = markerIn(xs); if (!m) helperOf(xs); return m; };
+  for (let k = 0; k < ts.length; k++) {
+    const x = ts[k]; const nx = ts[k + 1]; const pv = ts[k - 1];
+    const dotted = pv?.t === 'p' && pv.v === '.';
+    if (x.v === 'ELECTRON_RUN_AS_NODE' && (x.t === 'id' || x.t === 'str')) {
+      const after = x.t === 'str' && nx?.v === ']' ? 2 : 1;   // env['ELECTRON_RUN_AS_NODE'] = …
+      const op = ts[k + after]; const op2 = ts[k + after + 1];
+      if (op?.t === 'p' && (op.v === ':' || (op.v === '=' && op2?.v !== '='))) return { marker: 'ELECTRON_RUN_AS_NODE', helpers };
+      continue;
+    }
+    if (x.t !== 'id') continue;
+    if (requires.has(x.v) && !dotted && nx?.v === '(') { const m = load(call(k + 1).first); if (m) return { marker: m, helpers }; continue; }
+    if (x.v === 'import' && !dotted) {
+      if (nx?.v === '(') { const m = load(call(k + 1).first); if (m) return { marker: m, helpers }; }
+      else if (nx?.t === 'str') { const m = load([nx]); if (m) return { marker: m, helpers }; }   // import 'x' (side effects)
+      continue;
+    }
+    if (x.v === 'from' && nx?.t === 'str') { const m = load([nx]); if (m) return { marker: m, helpers }; continue; }
+    if (x.v === 'createRequire' && nx?.v === '(') {
+      const c = call(k + 1);
+      if (ts[c.end + 1]?.v === '(') { const m = load(call(c.end + 1).first); if (m) return { marker: m, helpers }; }
+      continue;
+    }
+    if (JS_SPAWN.has(x.v) && nx?.v === '(') {
+      const owner = dotted ? ts[k - 2]?.v ?? '' : '';
+      if (x.v === 'exec' && dotted && !/^(child_process|cp|childProcess)$/.test(owner)) continue;   // RegExp#exec
+      const args = call(k + 1).all.map((a) => (a.t === 'id' && consts.has(a.v) ? { t: 'str' as const, v: consts.get(a.v)! } : a));
+      for (const a of args) {
+        if (a.t !== 'str') continue;
+        const m = JS_MARKER.exec(norm(a.v)) ?? /\bELECTRON_RUN_AS_NODE=/.exec(a.v);
+        if (m) return { marker: m[0].replace(/=$/, ''), helpers };
+      }
+    }
+  }
+  return { marker: null, helpers };
 }
 
-/** Inline code (`node -e "…"`) or a script file (and its relative helpers, two hops deep) that loads a heavy runtime. */
-function classifyNodeCode(script: string | null, inline: string | null, ctx: ClassifyCtx): HeavyClass {
+/** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
+interface NodeProgram { script: string | null; preloads: string[]; inline: string | null; stdin: boolean }
+
+function nodeProgram(args: string[]): NodeProgram {
+  const p: NodeProgram = { script: null, preloads: [], inline: null, stdin: false };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = /^(--eval|--print|-e|-p)=([\s\S]*)$/.exec(a);
+    if (eq) { p.inline = eq[2]; return p; }
+    if (/^(-e|--eval|-p|--print)$/.test(a)) { p.inline = args[i + 1] ?? ''; return p; }
+    const pre = /^(--require|-r|--import)=(.+)$/.exec(a);
+    if (pre) { p.preloads.push(pre[2]); continue; }
+    if (/^(--require|-r|--import)$/.test(a)) { if (args[i + 1]) p.preloads.push(args[i + 1]); i++; continue; }
+    if (a === '-') { p.stdin = true; return p; }
+    if (a.startsWith('-')) { if (NODE_VALUE_FLAGS.has(a)) i++; continue; }
+    p.script = a; return p;
+  }
+  return p;
+}
+
+/** Inline code, stdin code, or a script file (plus preloads and helpers, two hops deep) that loads a heavy runtime. */
+function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
   const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (loads ${marker})` });
-  if (inline !== null) { const m = jsMarker(inline); if (m) return hit(m, '-e'); }
-  if (!script || !ctx.readScript || !JS_SCRIPT.test(script)) return { heavy: false };
-  const name = script.replace(/\\/g, '/').split('/').pop()!;
+  if (prog.inline !== null) { const m = scanJs(prog.inline).marker; return m ? hit(m, '-e') : { heavy: false }; }
+  // A script read from stdin: a heredoc body or a `< file` the classifier could read is checked;
+  // stdin it cannot see (`node -` from a pipe, an unreadable `< file`) is an unknown program: heavy.
+  if (!prog.script && (prog.stdin || ctx.stdin !== undefined)) {
+    if (typeof ctx.stdin === 'string') { const m = scanJs(ctx.stdin).marker; if (m) return hit(m, '(stdin script)'); }
+    else return { heavy: true, kind: 'bench', why: 'node (a stdin script the lock cannot read)' };
+  }
+  if (!ctx.readScript) return { heavy: false };
+  const roots = [...prog.preloads, ...(prog.script && JS_SCRIPT.test(prog.script) ? [prog.script] : [])];
+  if (!roots.length) return { heavy: false };
+  const name = (prog.script ?? roots[0]).replace(/\\/g, '/').split('/').pop()!;
   const seen = new Set<string>();
-  const queue: Array<{ path: string; hop: number }> = [{ path: script.replace(/^["']|["']$/g, ''), hop: 0 }];
+  const queue = roots.map((r) => ({ path: r, hop: 0 }));
   let read = 0; let tries = 0;
   while (queue.length && read < HEAVY_JS_MAX_FILES && tries < 4 * HEAVY_JS_MAX_FILES) {
     const { path, hop } = queue.shift()!;
@@ -268,14 +422,16 @@ function classifyNodeCode(script: string | null, inline: string | null, ctx: Cla
     tries++;
     let text: string | null = null;
     try { text = ctx.readScript(key, ctx.cd); } catch { text = null; }
+    // The path as written (`./pre.cjs`) when the normalised one (`pre.cjs`) did not read.
+    if (!text && path !== key) { try { text = ctx.readScript(path, ctx.cd); } catch { text = null; } }
     if (!text) continue;   // unreadable: decided by the rest (as for shell scripts)
     read++;
-    const m = jsMarker(text);
-    if (m) return hit(m, key === normPath(script) ? name : `${name} via ${key.split('/').pop()}`);
+    const s = scanJs(text);
+    if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);
     if (hop >= 2) continue;
     const dir = key.includes('/') ? key.slice(0, key.lastIndexOf('/') + 1) : '';
-    for (const r of text.matchAll(JS_LOCAL)) {
-      const rel = `${dir}${r[2].replace(/\\/g, '/')}`;
+    for (const h of s.helpers) {
+      const rel = /^([A-Za-z]:)?\//.test(h) ? h : `${dir}${h}`;
       for (const p of JS_SCRIPT.test(rel) ? [rel] : [`${rel}.cjs`, `${rel}.js`, `${rel}.mjs`, `${rel}.ts`, `${rel}/index.js`]) queue.push({ path: p, hop: hop + 1 });
     }
   }
@@ -331,7 +487,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     return { heavy: false };
   }
   // The app's exe run as Node (ELECTRON_RUN_AS_NODE): Guppy.exe from 1.1.82, Munder Difflin.exe before.
-  if (bin === 'node' || bin === 'electron' || bin === 'guppy' || bin === 'munder difflin') {
+  // tsx and ts-node run a script as node does (HEAVY-LOCK-ADHOC-NODE).
+  if (bin === 'node' || bin === 'electron' || bin === 'guppy' || bin === 'munder difflin' || bin === 'tsx' || bin === 'ts-node') {
     if (args.some((a) => a.startsWith('--native-memory-bench'))) return { heavy: true, kind: 'bench', why: 'native-memory bench' };
     if (args.includes('--test')) {
       // Positional args only: the value of a flag that takes one is not a test file.
@@ -360,9 +517,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       const head = after[0]?.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.(exe|cmd)$/, '') ?? '';
       if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1, ctx);
     }
-    // HEAVY-LOCK-ADHOC-NODE: what the script (or `-e` code) loads decides, whatever its name.
-    const e = args.findIndex((a) => /^(-e|--eval|-p|--print)$/.test(a));
-    return classifyNodeCode(e >= 0 ? null : script ?? null, e >= 0 ? args[e + 1] ?? '' : null, ctx);
+    // HEAVY-LOCK-ADHOC-NODE: what the script, its preloads, or `-e` / stdin code loads decides, whatever its name.
+    return classifyNodeCode(nodeProgram(args), ctx);
   }
   return { heavy: false };
 }
@@ -384,17 +540,30 @@ function substitutions(cmd: string): string[] {
 
 /** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
 export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): HeavyClass {
-  const text = stripHeredocs(cmd);
-  let here = ctx;
+  const bodies: string[] = [];
+  const text = stripHeredocs(cmd, bodies);
+  let here: ClassifyCtx = { ...ctx, stdin: undefined };
   for (const seg of segments(text)) {
-    const ws = stripRedirects(words(seg.replace(/\s&$/, '')));
+    const raw = words(seg.replace(/\s&$/, ''));
+    const ws = stripRedirects(raw);
+    // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).
+    let stdin: string | null | undefined;
+    for (let i = 0; i < raw.length; i++) {
+      if (/^\d*<<-?(?!<)/.test(raw[i])) { stdin = bodies.join('\n'); break; }
+      const m = /^0?<(?![<&>])(.*)$/.exec(raw[i]);
+      if (m) {
+        const f = m[1] || raw[i + 1] || '';
+        try { stdin = here.readScript && f ? here.readScript(f, here.cd) : null; } catch { stdin = null; }
+        break;
+      }
+    }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
     if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {
       const to = ws[1];
       here = { ...here, cd: /^([A-Za-z]:[\\/]|[\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\/]+$/, '')}/${to}` };
       continue;
     }
-    const c = classifyWords(ws, depth, here);
+    const c = classifyWords(ws, depth, stdin === undefined ? here : { ...here, stdin });
     if (c.heavy) return c;
   }
   // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
@@ -428,7 +597,8 @@ export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: 
       const abs = isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
       const f = read(abs);
       if (!f || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;
-      return f.text();
+      // Jim (HEAVY-LOCK-ADHOC-NODE audit): the read can race the stat (deleted, locked): no throw.
+      try { return f.text(); } catch { return null; }
     }
   };
 }

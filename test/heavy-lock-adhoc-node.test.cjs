@@ -109,3 +109,72 @@ test('through the hook\'s real script reader (files on disk, cwd-relative)', () 
     assert.equal(HJ.classifyHeavy('Bash', { command: `node ${path.join(dir, 'm4', 'net.cjs').replace(/\\/g, '/')}` }, HookServer.heavyScriptCtx(null)).heavy, true, 'an absolute path');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ——— Jim's audit of 8ca7e6f3 (F1-F5 false denies, M1-M8 misses, P1 cost, J8-J10 caps) ———
+
+const JIM = [
+  // [name, heavy?, command, files]
+  ['F1 a mail body naming require(marker)', false, 'node mail.cjs', { 'mail.cjs': "const body = 'the bench does require(\'onnxruntime-node\') then exits';\n" }],
+  ['F2 a light require with a marker in a trailing comment', false, 'node a.cjs', { 'a.cjs': "const fs = require('fs') // the onnxruntime-node notes\n" }],
+  ['F2b a commented-out require', false, 'node c.cjs', { 'c.cjs': "// const ort = require('onnxruntime-node');\n/* require('onnxruntime-node') */\nconsole.log(1);\n" }],
+  ['F3b RegExp .exec( on a string naming a marker', false, 'node scan2.cjs', { 'scan2.cjs': "const m = /a/.exec('see onnxruntime-node');\n" }],
+  ['F3c child_process.exec of the suite', true, 'node cp.cjs', { 'cp.cjs': "child_process.exec('node test/tools/run-tests.cjs');\n" }],
+  ['F3 RegExp .exec( then a marker on the line', false, 'node scan.cjs', { 'scan.cjs': "if (/x/.exec(s)) console.log('no onnxruntime-node here')\n" }],
+  ['F4 reading the bed runner as text', false, 'node r.cjs', { 'r.cjs': "const t = require('fs').readFileSync('test/claims-bed/run.cjs', 'utf8');\n" }],
+  ['F4b require.resolve of the bed runner', false, 'node rr.cjs', { 'rr.cjs': "console.log(require.resolve('C:/w/test/claims-bed/run.cjs'))\n" }],
+  ['F5 ELECTRON_RUN_AS_NODE in a comment', false, 'node b.cjs', { 'b.cjs': '// never set ELECTRON_RUN_AS_NODE here\nconsole.log(1)\n' }],
+  ['F5b ELECTRON_RUN_AS_NODE in a string, and compared', false, 'node m.cjs', { 'm.cjs': "const body = 'check ELECTRON_RUN_AS_NODE in the env';\nif (process.env.ELECTRON_RUN_AS_NODE === '1') console.log(body);\n" }],
+  ['F5c ELECTRON_RUN_AS_NODE assigned', true, 'node m2.cjs', { 'm2.cjs': "process.env.ELECTRON_RUN_AS_NODE = '1';\n" }],
+  ['F5d ELECTRON_RUN_AS_NODE as a quoted key', true, 'node m3.cjs', { 'm3.cjs': "spawn(exe, [], { env: { 'ELECTRON_RUN_AS_NODE': '1' } });\n" }],
+  ['M1 a wrapped require(', true, 'node ml.cjs', { 'ml.cjs': "const ort = require(\n  'onnxruntime-node'\n);\n" }],
+  ['M2 a helper via path.join(__dirname, …)', true, 'node j.cjs', { 'j.cjs': "const h = require(path.join(__dirname, 'h.cjs'));\n", 'h.cjs': "require('onnxruntime-node')\n" }],
+  ['M2b a helper via an absolute path', true, 'node k.cjs', { 'k.cjs': "require('C:/x/h.cjs')\n", 'C:/x/h.cjs': "require('onnxruntime-node')\n" }],
+  ['M3 an ESM side-effect import', true, 'node e.mjs', { 'e.mjs': "import 'onnxruntime-node';\n" }],
+  ['M3b a side-effect import of a helper', true, 'node s.mjs', { 's.mjs': "import './h.mjs';\n", 'h.mjs': "import 'x'; const o = await import('onnxruntime-node');\n" }],
+  ['M3c inline module code', true, `node --input-type=module -e "import 'onnxruntime-node'"`, null],
+  ['M4 --eval=code', true, "node --eval=require('onnxruntime-node')", null],
+  ['M5 node - (stdin the lock cannot see)', true, 'node -', {}],
+  ['M5b a heredoc script', true, "node <<'EOF'\nconst ort = require('onnxruntime-node');\nEOF", {}],
+  ['M5c a light heredoc script', false, "node <<'EOF'\nconsole.log(require('fs').existsSync('x'));\nEOF", {}],
+  ['M5d a < file script', true, 'node < feed.cjs', { 'feed.cjs': "require('onnxruntime-node')\n" }],
+  ['M6 createRequire', true, 'node cr.mjs', { 'cr.mjs': "const req = createRequire(import.meta.url);\nconst ort = req('onnxruntime-node');\n" }],
+  ['M7 a spawn of a script named by a constant', true, 'node sp.cjs', { 'sp.cjs': "const s = 'test/tools/run-tests.cjs';\nspawnSync(process.execPath, [s]);\n" }],
+  ['M8 npx tsx', true, 'npx tsx bench-like.ts', { 'bench-like.ts': "import ort from 'onnxruntime-node';\n" }],
+  ['a --require preload', true, 'node --require ./pre.cjs light.cjs', { './pre.cjs': "require('onnxruntime-node')\n", 'light.cjs': 'console.log(1)\n' }],
+  ['node --version stays light', false, 'node --version', {}],
+];
+for (const [name, want, cmd, files] of JIM) {
+  test(`audit probe: ${name} -> ${want ? 'heavy' : 'light'}`, () => {
+    assert.equal(HJ.classifyCommand(cmd, 0, files ? scripts(files) : {}).heavy, want);
+  });
+}
+
+test('P1: tokenising a hostile 256 KB line stays fast (linear, bounded argument reads)', () => {
+  for (const unit of ['require(', 'exec(x ', "from 'a' ", '`${', '/*']) {
+    const t = unit.repeat(Math.floor(256 * 1024 / unit.length));
+    const s = process.hrtime.bigint();
+    HJ.classifyCommand('node big.cjs', 0, scripts({ 'big.cjs': t }));
+    const ms = Number(process.hrtime.bigint() - s) / 1e6;
+    assert.ok(ms < 1500, `256 KB of "${unit}" took ${ms.toFixed(0)} ms`);
+  }
+  assert.equal(HJ.HEAVY_JS_SCAN_CHARS, 256 * 1024);
+});
+
+test('J8-J10: at most 8 files read, a throwing reader is light, a cycle is read once', () => {
+  const reads = [];
+  const fan = { readScript: (p) => { reads.push(p); return p === 'f.cjs' ? Array.from({ length: 40 }, (_, i) => `require('./h${i}.cjs')`).join('\n') : (p === 'h39.cjs' ? "require('onnxruntime-node')" : 'module.exports = 1'); } };
+  assert.equal(HJ.classifyCommand('node f.cjs', 0, fan).heavy, false, 'the 40th helper is beyond the cap');
+  assert.equal(reads.length, HJ.HEAVY_JS_MAX_FILES, 'J8: STOPS AT 8 READS');
+  let thrown = 0;
+  assert.equal(HJ.classifyCommand('node z.cjs', 0, { readScript: () => { thrown++; throw new Error('EACCES'); } }).heavy, false, 'J9: A THROW IS LIGHT');
+  assert.ok(thrown >= 1);
+  const cyc = [];
+  const loop = { readScript: (p) => { cyc.push(p); return p === 'a.cjs' ? "require('./b.cjs')" : p === 'b.cjs' ? "require('./a.cjs')" : null; } };
+  assert.equal(HJ.classifyCommand('node a.cjs', 0, loop).heavy, false);
+  assert.deepEqual(cyc, ['a.cjs', 'b.cjs'], 'J10: EACH FILE OF A CYCLE IS READ ONCE');
+});
+
+test('scriptReaderFor: a read that throws after the stat gives null (no throw into the hook)', () => {
+  const ctx = HJ.scriptReaderFor('C:/w', () => ({ size: 10, text: () => { throw new Error('EBUSY'); } }));
+  assert.equal(ctx.readScript('x.cjs'), null);
+});
