@@ -137,6 +137,8 @@ test('a message whose sender set its own id is left to the mail ledger (its §4.
   assert.equal(hive.routeOnce(), 1, 'an id-less message is not matched against id-carrying ones');
   send(outbox, 'd.json', MSG);
   assert.equal(hive.routeOnce(), 0, 'but its own repeat is suppressed');
+  send(outbox, 'e.json', { ...MSG, id: 'invented-id-3' });
+  assert.equal(hive.routeOnce(), 1, 'the same text WITH a sender id goes to the ledger admission, not this check');
 });
 
 test('PROTOCOL.md says a file gone from outbox/ was delivered, and prefers the ledger command', () => {
