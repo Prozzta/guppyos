@@ -281,7 +281,7 @@ test('M-B a no-yield burst: the export work runs after the whole burst, and each
 test('main wires all three callers (index.ts loads only under Electron, so its wiring is pinned by source)', () => {
   const idx = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(idx, /onAppend: \(agentId, id, rec\) => \{\n\s+claimExport\(\)\.onAppend\(agentId, id, rec\);\n\s+if \(!shouldRunR5\(rec\)\)/, 'every acked append, before the R5 branch returns');
-  assert.match(idx, /return \{ store: claimStore\.store, level: claimLevel, exportComplete: \(agentId\) => claimExport\(\)\.complete\(agentId\) \};/, 'memory export --complete');
+  assert.match(idx, /return \{ store: claimStore\.store, level: claimLevel, exportComplete: \(agentId\) => claimExport\(\)\.complete\(agentId\), onReconcile:/, 'memory export --complete and W5 reconcile answer callback');
   assert.match(idx, /setImmediate\(\(\) => \{ try \{ claimExport\(\)\.syncAll\(claimLedgerAgents\(\)\); \}/, 'the start-up catch-up');
   assert.match(idx, /createClaimExport\(\{[\s\S]{0,400}level: claimLevel,[\s\S]{0,200}readLedger: \(agentId\) => \(claimsEndpoint\(\) as ClaimsEndpointDeps\)\.store\.readLedger\(agentId\)/, 'the verified ledger, at the effective level');
 });

@@ -54,6 +54,43 @@ test('G2 verified census queues R2-mail and key alias exactly once across refres
   assert.deepEqual(queue.peek('owner', 10).map((i) => i.kind).sort(), ['conflict', 'key-alias']);
 });
 
+test('M-R refresh never resurrects a soft-superseded R2-mail pair or an answered alias', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  const claim = (id, key, at, source = 'self') => ({ t: 'claim', id, agent: 'owner', at, wt: at, mac: id, prev: '', kind: 'fact', key, text: `synthetic ${id}`, source });
+  const event = (id, ev, targets, answer) => ({ t: 'event', id, agent: 'owner', at: '2026-10-04T01:00:00Z', wt: '2026-10-04T01:00:00Z', mac: id, prev: '', ev, targets, by: 'self', ...(answer ? { answer } : {}) });
+  const base = [claim('a', 'fact.name', '2026-10-02T00:00:00Z', 'mail:m1'), claim('b', 'fact.name', '2026-10-01T00:00:00Z'), claim('c', 'release.name', '2026-10-03T00:00:00Z'), claim('d', 'release.na_me', '2026-10-03T00:00:00Z')];
+  let records = base;
+  const deps = { endpoint: () => ({ store: { readLedger: () => ({ chain: 'ok', records }) } }), queue: () => queue,
+    registry: () => ({ v: 1, namespaces: [{ pattern: 'fact.*', cardinality: 'single' }, { pattern: 'release.*', cardinality: 'single' }], keys: {} }), log: () => {} };
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  assert.deepEqual(queue.peek('owner', 10).map((i) => i.kind).sort(), ['conflict', 'key-alias']);
+  records = [...base, event('soft', 'soft-supersede', ['b', 'a'])];
+  queue.answeredPair('owner', 'a', 'b');
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  assert.equal(queue.peek('owner', 10).some((i) => i.kind === 'conflict' && [i.a, i.b].includes('a') && [i.a, i.b].includes('b')), false);
+  for (const [name, answerEvent] of [
+    ['dismiss', event('dismiss', 'dismiss', ['c', 'd'])],
+    ['keep-both', event('keep-both', 'reconcile-answer', ['d', 'c'], 'keep-both')],
+    ['accept', event('accept', 'accept', ['c', 'd'])],
+  ]) {
+    records = [...base, answerEvent];
+    refreshReconcileQueueForHive(dir, 'owner', deps);
+    assert.equal(queue.peek('owner', 10).some((i) => i.kind === 'key-alias' && [i.a, i.b].includes('c') && [i.a, i.b].includes('d')), false, `${name} alias must stay resolved`);
+  }
+});
+
+test('M-R census exclusion mutants are killed for both conflict and alias arms', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/claims/reconcileHive.ts'), 'utf8');
+  const conflictFilter = (text) => /state\.conflicts\.filter\(\(item\) => item\.rule === 'R2-mail' && !resolved\.has\(pairKey\(item\.a, item\.b\)\)\)/.test(text);
+  const aliasFilter = (text) => /keyAliasCandidates\(agentId, claims, state, registry\)\.filter\(\(item\) => !resolved\.has\(pairKey\(item\.a, item\.b\)\)\)/.test(text);
+  assert.equal(conflictFilter(source) && aliasFilter(source), true);
+  assert.equal(conflictFilter(source.replace(' && !resolved.has(pairKey(item.a, item.b))', '')), false, 'mutant reintroducing resolved conflicts');
+  assert.equal(aliasFilter(source.replace('keyAliasCandidates(agentId, claims, state, registry).filter((item) => !resolved.has(pairKey(item.a, item.b)))', 'keyAliasCandidates(agentId, claims, state, registry)')), false, 'mutant reintroducing answered aliases');
+  console.log('# MUTANT KILLED: M-R resolved conflict exclusion reverted');
+  console.log('# MUTANT KILLED: M-R answered alias exclusion reverted');
+});
+
 test('G5.1 offers at most three leased items and assigns a persisted monotonic agent turn', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'queue.json');

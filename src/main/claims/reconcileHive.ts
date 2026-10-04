@@ -23,14 +23,36 @@ export function refreshReconcileQueueForHive(root: string, agentId: string, deps
   const registry = deps.registry(root);
   const state = derive(prefix.records, registry, { r4: false });
   const claims = prefix.records.filter((rec): rec is Extract<LedgerRec, { t: 'claim' }> => rec.t === 'claim');
-  const conflicts = state.conflicts.filter((item) => item.rule === 'R2-mail').map((item) => ({
+  const resolved = resolvedPairKeys(prefix.records, state);
+  const conflicts = state.conflicts.filter((item) => item.rule === 'R2-mail' && !resolved.has(pairKey(item.a, item.b))).map((item) => ({
     itemId: reconcileItemId(agentId, 'conflict', item.a, item.b), kind: 'conflict' as const,
     a: item.a, b: item.b, text: `Conflicting claims: ${item.a} / ${item.b}`,
   }));
-  const candidates = [...conflicts, ...keyAliasCandidates(agentId, claims, state, registry)];
+  const aliases = keyAliasCandidates(agentId, claims, state, registry).filter((item) => !resolved.has(pairKey(item.a, item.b)));
+  const candidates = [...conflicts, ...aliases];
   deps.queue(root).refresh(agentId, candidates);
   deps.log({ kind: 'claims-reconcile-refresh', agentId, candidates: candidates.length });
   return candidates.length;
+}
+
+function pairKey(a: string, b: string): string { return [a, b].sort().join('\0'); }
+
+/** Ledger answers and completed supersedes must not be resurrected by a later census refresh. */
+function resolvedPairKeys(records: LedgerRec[], state: ClaimsState): Set<string> {
+  const events = records.filter((rec): rec is Extract<LedgerRec, { t: 'event' }> => rec.t === 'event');
+  const reverted = new Set(events.filter((event) => event.ev === 'revert').flatMap((event) => event.targets));
+  const resolved = new Set<string>();
+  for (const event of events) {
+    if (reverted.has(event.id)) continue;
+    if (event.ev !== 'soft-supersede' && event.ev !== 'reconcile-answer' && event.ev !== 'dismiss' && event.ev !== 'accept') continue;
+    const [a, b] = event.targets;
+    if (a && b) resolved.add(pairKey(a, b));
+  }
+  for (const claim of Object.values(state.claims)) {
+    if ((claim.status === 'superseded' || claim.status === 'superseded?') && claim.supersededBy)
+      resolved.add(pairKey(claim.id, claim.supersededBy));
+  }
+  return resolved;
 }
 
 type LiveDecision = { live: Set<string>; direction: { loser: string; winner: string } | null };
