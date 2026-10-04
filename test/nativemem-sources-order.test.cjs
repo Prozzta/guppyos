@@ -21,7 +21,9 @@ test('an agent\'s .md sources come out in ordinal order: case and - before _ as 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const dir = path.join(root, 'agents', 'a1');
   fs.mkdirSync(dir, { recursive: true });
-  const names = ['memory.md', 'b.md', 'alpha_notes.md', 'Zeta-REPORT.md', 'memory-archive-2026-09-27.md', 'alpha-notes.md', 'memory-archive-2026-10-03.md'];
+  // notes_b / notesa (Jim): NTFS lists by UPPER-case collation ('_' 0x5F after 'A'), the case-folded
+  // ordinal puts '_' before 'a': so the explicit sort, not the filesystem, decides.
+  const names = ['memory.md', 'b.md', 'alpha_notes.md', 'Zeta-REPORT.md', 'memory-archive-2026-09-27.md', 'alpha-notes.md', 'memory-archive-2026-10-03.md', 'notesa.md', 'notes_b.md'];
   for (const n of names) fs.writeFileSync(path.join(dir, n), 'invented\n');
   const d = discoverSources(root, { topLevel: [], include: {} });
   assert.deepEqual(d.eligible.map((e) => path.basename(e.path)), [
@@ -31,6 +33,8 @@ test('an agent\'s .md sources come out in ordinal order: case and - before _ as 
     'memory-archive-2026-09-27.md',    // archives, oldest first...
     'memory-archive-2026-10-03.md',
     'memory.md',                       // ...then the live memory ('-' < '.')
+    'notes_b.md',                      // '_' (0x5F) before 'a' (0x61), unlike NTFS's own listing
+    'notesa.md',
     'Zeta-REPORT.md'                   // case-folded: z after m (Jim S1)
   ]);
   // Jim S1: an upper-case MEMORY.md (still the memory room) stays after its archives.
