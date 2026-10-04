@@ -123,7 +123,7 @@ test('the per-agent settings put the id in every command hook (SessionStart alwa
   const withBroker = hive.hookSettings('C:/hive/bin/cth-hook.cjs', FAKE_HOME, {}, undefined, `http://127.0.0.1:60971/hook/${ANDY}/${'a'.repeat(32)}`, ANDY);
   const ss = withBroker.hooks.SessionStart[0].hooks[0];
   assert.equal(ss.type, 'command');
-  assert.match(ss.command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY}$`));
+  assert.match(ss.command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY} --part bundle$`), 'the id first; the bundle mark (CL-M4 S1) after it');
   const noBroker = hive.hookSettings('C:/hive/bin/cth-hook.cjs', FAKE_HOME, {}, undefined, null, ANDY);
   for (const [event, entries] of Object.entries(noBroker.hooks)) {
     for (const h of entries.flatMap((e) => e.hooks)) assert.match(h.command, new RegExp(`--agent ${ANDY}`), event);
@@ -139,7 +139,7 @@ test('CL-M4-BRIEFING-BUDGET C: SessionStart has a SECOND command entry, the clai
     const ss = hive.hookSettings('C:/hive/bin/cth-hook.cjs', FAKE_HOME, {}, undefined, url, ANDY).hooks.SessionStart;
     assert.equal(ss.length, 2, 'two separate entries: Claude Code gives each output its own 10,000 chars');
     assert.equal(ss[0].hooks[0].type, 'command');
-    assert.match(ss[0].hooks[0].command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY}$`), 'the bundle entry, as before');
+    assert.match(ss[0].hooks[0].command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY} --part bundle$`), 'the bundle entry says its settings carry the briefing entry (S1)');
     assert.equal(ss[1].hooks.length, 1);
     assert.equal(ss[1].hooks[0].type, 'command', 'SessionStart runs no HTTP hooks');
     assert.match(ss[1].hooks[0].command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY} --part briefing$`));
@@ -152,6 +152,10 @@ test('CL-M4-BRIEFING-BUDGET C: the shim marks --part briefing; a payload cannot 
   assert.equal(brief.agent_id, ANDY);
   const forged = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup', munder_part: 'briefing' }, { args: ['--agent', ANDY] }, t);
   assert.equal('munder_part' in forged, false, 'only the shim sets it');
+  const bundle = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' }, { args: ['--agent', ANDY, '--part', 'bundle'] }, t);
+  assert.equal(bundle.munder_part, 'bundle', 'S1: the main entry of new settings is marked');
+  const old = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' }, { args: ['--agent', ANDY] }, t);
+  assert.equal('munder_part' in old, false, 'an older settings file: no mark, so the bundle keeps the working set');
   const other = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' }, { args: ['--agent', ANDY, '--part', 'other'] }, t);
   assert.equal('munder_part' in other, false);
 });

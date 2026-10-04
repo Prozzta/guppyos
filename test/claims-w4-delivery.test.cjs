@@ -114,7 +114,8 @@ async function pipeLiveHook(server, payload) {
 /** CL-M4-BRIEFING-BUDGET C: a Claude SessionStart runs BOTH entries at once, the main bundle and the
  *  briefing (the shim's --part briefing); the model receives both outputs. */
 async function postClaudeSessionStart(server, agentId, payload) {
-  const [main, brief] = await Promise.all([postLiveHook(server, agentId, payload), pipeLiveHook(server, { session_id: `s-${agentId}`, ...payload, agent_id: agentId, munder_part: 'briefing' })]);
+  // Both are command entries over the pipe; the main one is marked 'bundle' (S1: new settings).
+  const [main, brief] = await Promise.all([pipeLiveHook(server, { session_id: `s-${agentId}`, ...payload, agent_id: agentId, munder_part: 'bundle' }), pipeLiveHook(server, { session_id: `s-${agentId}`, ...payload, agent_id: agentId, munder_part: 'briefing' })]);
   const parts = [main?.hookSpecificOutput?.additionalContext, brief?.hookSpecificOutput?.additionalContext].filter(Boolean);
   return parts.length ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: parts.join('\n\n') } } : {};
 }

@@ -321,7 +321,7 @@ test('CL-M4-BRIEFING-BUDGET C: a Claude agent gets the working set from its OWN 
   const seen = [];
   const f = await floor(t, { providers: { 'cl-1': 'claude', 'gm-1': 'gemini' }, claimWorkingSet: (id, source, part) => { seen.push([id, source, part ?? null]); return `# Memory working set — ${id} (${source})`; } });
   for (const source of ['startup', 'compact', 'resume', 'clear']) {
-    const main = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source }));
+    const main = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'bundle' }));
     assert.doesNotMatch(main, /Memory working set/, `the ${source} bundle leaves it out`);
     const brief = await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'briefing' });
     assert.equal(f.ctx(brief), `# Memory working set — cl-1 (${source})`, `the ${source} briefing carries it, and nothing else`);
@@ -376,6 +376,56 @@ async function pipeHook(f, payload) {
   });
 }
 
+test('CL-M4 S1 (Jim): settings that predate the briefing entry (an unmarked main entry) keep the working set in the bundle; new settings give exactly one copy', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: (id, source, part) => { seen.push(part ?? null); return `# Memory working set — ${id} (${source})`; } });
+  const copies = (...ctxs) => ctxs.join('\n').split('# Memory working set — cl-1').length - 1;
+  for (const source of ['startup', 'compact']) {
+    // Old settings: only the one, unmarked entry runs; there is no briefing request at all.
+    const old = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source }));
+    assert.equal(copies(old), 1, `old settings (${source}): the bundle carries it`);
+    // New settings: both entries run; the marked bundle leaves it out, the briefing has it.
+    const [main, brief] = await Promise.all([
+      handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'bundle' }),
+      handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'briefing' }),
+    ]);
+    assert.equal(copies(f.ctx(main), f.ctx(brief)), 1, `new settings (${source}): exactly one copy`);
+    assert.equal(copies(f.ctx(brief)), 1, 'and it is the briefing\'s');
+  }
+  assert.deepEqual(seen, [null, 'briefing', null, 'briefing'], 'the old bundle uses the joined (envelope) cap; the briefing the ceiling');
+});
+
+test('CL-M4 S2 (Jim): a briefing\'s flush is logged with printed chars and latency; a late one (the shim\'s 5 s give-up) and an unflushed one are logged as such', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { await new Promise((r) => setTimeout(r, 30)); return `# Memory working set — ${id}`; } });
+  const want = '# Memory working set — cl-1'.length;
+  const rowsOf = async (kind, n) => { for (let i = 0; i < 200; i++) { const r = f.logRows().filter((x) => x.kind === kind); if (r.length >= n) return r; await new Promise((res) => setTimeout(res, 10)); } return f.logRows().filter((x) => x.kind === kind); };
+  const brief = { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' };
+  await pipeHook(f, brief);
+  const [ok] = await rowsOf('claims-briefing-flush', 1);
+  assert.equal(ok.chars, want);
+  assert.equal(ok.printedChars, want, 'flushed in time: the shim prints it');
+  assert.ok(typeof ok.latencyMs === 'number' && ok.latencyMs < ok.limitMs, JSON.stringify(ok));
+  // The shim had already used 6 s before it sent: its 5 s give-up has passed, the agent started without it.
+  await pipeHook(f, { ...brief, shim_elapsed_ms: 6_000 });
+  const [late] = await rowsOf('claims-briefing-late', 1);
+  assert.equal(late.outcome, 'shim-gave-up');
+  assert.equal(late.printedChars, 0);
+  assert.equal(late.chars, want);
+  assert.ok(late.latencyMs >= late.limitMs);
+  // A connection that closes without flushing (on a Windows pipe a hang-up can still read as a
+  // flush, which the shim-clock measure above covers; this is the close-first path itself).
+  const { EventEmitter } = require('node:events');
+  const stream = new EventEmitter();
+  f.server.watchBriefingFlush(stream, brief, { hookSpecificOutput: { additionalContext: 'x'.repeat(40) } }, Date.now());
+  stream.emit('close');
+  stream.emit('finish');
+  const rows = await rowsOf('claims-briefing-late', 2);
+  assert.equal(rows[1]?.outcome, 'not-flushed', JSON.stringify(rows));
+  assert.equal(rows[1].latencyMs, null);
+  assert.equal(rows[1].chars, 40);
+  assert.equal(f.logRows().filter((x) => x.kind.startsWith('claims-briefing-') && x.kind !== 'claims-briefing').length, 3, 'settled once each');
+});
+
 test('G4.4 live path (Jim S-1): an ASYNC provider over the HTTP broker: startup and compact carry the set; a prompt neither builds nor carries it', async (t) => {
   const seen = [];
   const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { seen.push(id); await new Promise((r) => setTimeout(r, 20)); return `# Memory working set — ${id} (async)`; } });
@@ -384,8 +434,12 @@ test('G4.4 live path (Jim S-1): an ASYNC provider over the HTTP broker: startup 
   const brief = { agent_id: 'cl-1', munder_part: 'briefing' };
   assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'startup', ...brief })), /# Memory working set — cl-1 \(async\)/);
   assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', ...brief })), /# Memory working set — cl-1 \(async\)/, 'rebuilt after a compaction');
-  assert.doesNotMatch(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'cl-1' })), /Memory working set/, 'not in the bundle');
-  assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact', munder_part: 'briefing' })), /Memory working set/, 'only the command shim may mark a briefing: HTTP drops it');
+  assert.doesNotMatch(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'cl-1', munder_part: 'bundle' })), /Memory working set/, 'not in the bundle');
+  // Only the command shim may set a mark: over HTTP a 'bundle' mark is dropped, so the request reads
+  // as an unmarked (older-settings) bundle and carries the set itself (S1: never zero copies).
+  const viaHttp = ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact', munder_part: 'bundle' }));
+  assert.match(viaHttp, /# Memory working set — cl-1 \(async\)/, 'HTTP drops the mark');
+  seen.pop();
   assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'UserPromptSubmit', prompt: 'go' })), /Memory working set/);
   assert.deepEqual(seen, ['cl-1', 'cl-1']);
 });
@@ -412,7 +466,7 @@ test('Jim M-3 gate: a SessionStart(compact) with a FULL working set, the carry a
   // 10,000-char per-output spill; the joined bundle (carry, mail) keeps its 9,500 for the rest.
   const [b, main] = await Promise.all([
     f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact', munder_part: 'briefing' }),
-    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact' }),
+    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact', munder_part: 'bundle' }),
   ]);
   assert.equal(f.ctx(b), full, 'the working set, whole and alone');
   assert.ok(f.ctx(b).length < 10_000, 'under Claude Code\'s per-output spill');
