@@ -97,6 +97,12 @@ async function agyRound(t, deschedule) {
   const f = await floor(t);
   const m = f.hive.send({ to: 'ag-1', act: 'request', subject: 'for agy', body: 'agy body' }, 'god-1');
   let sentinel = '';
+  // TEST-FLAKE-GATE179-SHIM: a server whose event loop is stalled while it handles the request
+  // (what full-suite load did: the same busy-wait, made deterministic).
+  if (deschedule.stallMs) {
+    const handle = f.server.handle.bind(f.server);
+    f.server.handle = (p) => { const until = Date.now() + deschedule.stallMs; while (Date.now() < until) { /* stalled */ } return handle(p); };
+  }
   if (deschedule.untilReply) {
     sentinel = path.join(f.home, 'reply-in-pipe');
     const handle = f.server.handle.bind(f.server);
@@ -133,12 +139,36 @@ test('(1) unit: shimElapsedMs reads a finite non-negative number, capped at the 
   for (const v of [undefined, null, -5, NaN, Infinity, '3000', {}]) assert.equal(S.shimElapsedMs(v), 0, String(v));
 });
 
-test('GATE-179 (the lost message): the AGY shim descheduled 3.5 s before its request and 2 s after is LATE (its own time counted), never surfaced unprinted', async (t) => {
-  const r = await agyRound(t, { pre: 3_500, post: 2_000 });
+// TEST-FLAKE-GATE179-SHIM: this test once blocked the shim a FIXED 2 s after its request, a bet that
+// the server replies inside those 2 s. Under full-suite load the server's event loop stalled longer
+// (reproduced: a 2.5 s stall in handle() gives the exact failure), the shim's 5 s give-up found an
+// empty pipe, the flush never finished, and the late row's latency was null: the product's rule
+// held (late, re-surfaced), but this test could not see its claim (1). Now "after" means after the
+// reply is IN THE PIPE and the give-up is due (the sentinel, as Creed's case (a)): no speed bet.
+// Without (1) the server alone measures ~1.7 s (< 2.5 s) and confirms: the claim stays tested.
+test('GATE-179 (the lost message): the AGY shim descheduled 3.5 s before its request, and after it until the reply is in the pipe and its give-up is due, is LATE (its own time counted), never surfaced unprinted', async (t) => {
+  const r = await agyRound(t, { pre: 3_500, untilReply: true });
   neverSurfacedUnprinted(r, 'gate shape');
   assert.ok(r.late, `(1): a mail-hook-late row: the shim's 3.5 s before sending is counted (${JSON.stringify(r)})`);
   assert.ok(r.late.latencyMs >= 3_500 && r.late.latencyMs >= S.MAIL_PIPE_LATENCY_LIMIT_MS, `latency ${r.late.latencyMs}`);
   assert.equal(r.state, 'surfacing', 'not confirmed: it is re-surfaced with the marker');
+});
+
+test('TEST-FLAKE-GATE179-SHIM: the GATE-179 shape holds with the server stalled 3 s (no bet on its speed)', async (t) => {
+  const r = await agyRound(t, { pre: 3_500, untilReply: true, stallMs: 3_000 });
+  neverSurfacedUnprinted(r, 'gate shape, stalled server');
+  assert.ok(r.late && typeof r.late.latencyMs === 'number' && r.late.latencyMs >= 3_500, `measured, and late: ${JSON.stringify(r.late)}`);
+  assert.equal(r.state, 'surfacing');
+});
+
+test('TEST-FLAKE-GATE179-SHIM: a server stalled past the shim\'s give-up (the flake\'s cause) is LATE with no flush: re-surfaced, never surfaced unprinted', async (t) => {
+  // The shim's 3.5 s + 2 s blocks end at ~5.5 s; a 2.5 s stall puts the reply after its give-up.
+  const r = await agyRound(t, { pre: 3_500, post: 2_000, stallMs: 2_500 });
+  neverSurfacedUnprinted(r, 'stalled server');
+  assert.ok(r.late, `a mail-hook-late row (${JSON.stringify(r)})`);
+  assert.equal(r.late.latencyMs, null, 'never flushed: the shim had given up (close before finish)');
+  assert.equal(r.printed, false, 'the shim printed nothing (its give-up found an empty pipe)');
+  assert.equal(r.state, 'surfacing', 'not confirmed: it is re-surfaced at the next hook');
 });
 
 test('(a) Creed\'s case: a reply already in the pipe when the shim\'s give-up fires (0.5 s before its request; after it, held until the reply is in the pipe and the give-up is due) is PRINTED, and measured late', async (t) => {
