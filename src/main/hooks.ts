@@ -172,6 +172,13 @@ interface TurnState {
   legacyNamed: Set<string>;
 }
 
+/** A reply stream whose flush is watched (a pipe socket or an HTTP response). */
+type FlushWatchable = { once(event: 'finish' | 'close', fn: () => void): unknown; destroyed?: boolean; closed?: boolean };
+/** TEST-FLAKE-SHIMCLOCK-179: the peer is already gone, so neither 'finish' nor 'close' is still to come. */
+export function streamGone(stream: { destroyed?: boolean; closed?: boolean }): boolean {
+  return stream.destroyed === true || stream.closed === true;
+}
+
 /** An evidence scan still waiting for tentative ids of one epoch (§11.1). */
 interface EvidenceWait {
   epoch: string;
@@ -1283,9 +1290,14 @@ export class HookServer {
   }
 
   /** Settle `claims` when `stream` has flushed its response (`finish`), or as never flushed
-   *  (`close` first: the provider hung up, e.g. at its own timeout). */
-  private watchMailFlush(stream: { once(event: 'finish' | 'close', fn: () => void): unknown }, claims: MailClaim[], receivedAt: number): void {
+   *  (`close` first: the provider hung up, e.g. at its own timeout).
+   *  TEST-FLAKE-SHIMCLOCK-179: the watch is attached AFTER the hook is handled (an await), so a
+   *  provider can hang up first; its 'close' has then already fired and would never reach this
+   *  watch, leaving the claims unsettled (no late row, no latency). An already-closed stream is
+   *  settled at once as never flushed. Pipe, HTTP and MCP replies all come through here. */
+  private watchMailFlush(stream: FlushWatchable, claims: MailClaim[], receivedAt: number): void {
     if (!claims.length) return;
+    if (streamGone(stream)) { this.settleMailClaims(claims, receivedAt, null); return; }
     let settled = false;
     stream.once('finish', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, Date.now()); });
     stream.once('close', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, null); });
@@ -1297,7 +1309,7 @@ export class HookServer {
    * flushed in time is printed by the shim (printedChars = its working-set chars); one at or past
    * the limit met the shim's 5 s give-up, or never flushed, and the agent started WITHOUT it.
    */
-  private watchBriefingFlush(stream: { once(event: 'finish' | 'close', fn: () => void): unknown }, p: HookPayload, res: unknown, startedAt: number): void {
+  private watchBriefingFlush(stream: FlushWatchable, p: HookPayload, res: unknown, startedAt: number): void {
     const ctx = (res as { hookSpecificOutput?: { additionalContext?: unknown } } | null)?.hookSpecificOutput?.additionalContext;
     const chars = typeof ctx === 'string' ? ctx.length : 0;
     if (!chars || !p.agent_id) return;
@@ -1312,6 +1324,8 @@ export class HookServer {
         this.hive.appendLog({ kind: late ? 'claims-briefing-late' : 'claims-briefing-flush', agentId: p.agent_id, source: p.source ?? null, chars, printedChars: late ? 0 : chars, latencyMs, limitMs, ...(late ? { outcome: latencyMs === null ? 'not-flushed' : 'shim-gave-up' } : {}) });
       } catch { /* best effort */ }
     };
+    // TEST-FLAKE-SHIMCLOCK-179: a shim that hung up before this watch was attached (see watchMailFlush).
+    if (streamGone(stream)) { settle(null); return; }
     stream.once('finish', () => settle(Date.now()));
     stream.once('close', () => settle(null));
   }

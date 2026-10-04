@@ -133,8 +133,13 @@ test('(1) unit: shimElapsedMs reads a finite non-negative number, capped at the 
   for (const v of [undefined, null, -5, NaN, Infinity, '3000', {}]) assert.equal(S.shimElapsedMs(v), 0, String(v));
 });
 
-test('GATE-179 (the lost message): the AGY shim descheduled 3.5 s before its request and 2 s after is LATE (its own time counted), never surfaced unprinted', async (t) => {
-  const r = await agyRound(t, { pre: 3_500, post: 2_000 });
+test('GATE-179 (the lost message): the AGY shim descheduled 3.5 s before its request and after it until its reply is in the pipe (past its give-up) is LATE (its own time counted), never surfaced unprinted', async (t) => {
+  // TEST-FLAKE-SHIMCLOCK-179: "after" was a fixed 2 s. The shim then gave up and closed at about
+  // 5.5 s, and a server slowed by suite load answered after that: no flush, so the late row had
+  // latencyMs null (by design: never flushed), and this measure could not be checked. Like (a)
+  // (re-gate 2), the shim is now held until the reply IS in the pipe and its give-up has passed,
+  // so the flush is always measured, however slow the server.
+  const r = await agyRound(t, { pre: 3_500, untilReply: true });
   neverSurfacedUnprinted(r, 'gate shape');
   assert.ok(r.late, `(1): a mail-hook-late row: the shim's 3.5 s before sending is counted (${JSON.stringify(r)})`);
   assert.ok(r.late.latencyMs >= 3_500 && r.late.latencyMs >= S.MAIL_PIPE_LATENCY_LIMIT_MS, `latency ${r.late.latencyMs}`);
@@ -153,6 +158,61 @@ test('control: an undisturbed shim follows the rule: printed and confirmed by la
   // GATE-179 re-gate 2: this test once required "printed within 4 s"; under gate load the shim took
   // 5.6 s and was (correctly) measured late. It asserts the RULE, not this machine's speed.
   byTheRule(await agyRound(t, {}), 'control');
+});
+
+/**
+ * TEST-FLAKE-SHIMCLOCK-179 (P): a pipe client that hangs up BEFORE the server has handled its hook.
+ * The server's handling waits (an event, not a delay) until its own side of that connection has
+ * closed, so the flush watch is attached to a stream whose 'close' already fired.
+ */
+async function hangUpBeforeReply(f, payload) {
+  const serverSockets = [];
+  f.server.server.on('connection', (s) => serverSockets.push(s));
+  const handle = f.server.handleWithClaimContext.bind(f.server);
+  let gone;
+  const closed = new Promise((r) => { gone = r; });
+  f.server.handleWithClaimContext = async (p) => {
+    const s = serverSockets[serverSockets.length - 1];
+    if (s && !s.destroyed) await new Promise((r) => s.once('close', r));
+    gone();
+    return handle(p);
+  };
+  await new Promise((resolve) => {
+    const c = net.createConnection(f.hive.sockPath(), () => { c.write(JSON.stringify(payload) + '\n'); setImmediate(() => { c.destroy(); resolve(); }); });
+    c.on('error', resolve);
+  });
+  await closed;
+  f.server.handleWithClaimContext = handle;
+}
+const rowsWithin = async (f, pick) => { for (let i = 0; i < 300; i++) { const r = f.logRows().filter(pick); if (r.length) return r; await new Promise((res) => setTimeout(res, 10)); } return []; };
+
+test('(P) mail: a shim that hung up before the server answered still settles its claim, as never flushed (a late row, latency null), never confirmed', async (t) => {
+  const f = await floor(t);
+  const m = f.hive.send({ to: 'ag-1', act: 'request', subject: 'for agy', body: 'agy body' }, 'god-1');
+  await hangUpBeforeReply(f, { hook_event_name: 'PreInvocation', agent_id: 'ag-1', session_id: 's-ag-1' });
+  const late = await rowsWithin(f, (x) => x.kind === 'mail-hook-late' && x.ids.includes(m.id));
+  assert.equal(late.length, 1, `the claim is settled, as late (${JSON.stringify(f.logRows().map((x) => x.kind))})`);
+  assert.equal(late[0].latencyMs, null, 'never flushed');
+  assert.notEqual(f.entryOf(m.id).state, 'surfaced', 'never confirmed by latency');
+});
+
+test('(P) briefing: a briefing shim that hung up before the server answered is logged claims-briefing-late, not-flushed', async (t) => {
+  const f = await floor(t);
+  f.server.setClaimWorkingSetProvider(() => '# Memory working set — god-1 (invented)');
+  await hangUpBeforeReply(f, { hook_event_name: 'SessionStart', agent_id: 'god-1', session_id: 's-god-1', source: 'startup', munder_part: 'briefing' });
+  const late = await rowsWithin(f, (x) => x.kind === 'claims-briefing-late');
+  assert.equal(late.length, 1, `logged (${JSON.stringify(f.logRows().map((x) => x.kind))})`);
+  assert.equal(late[0].outcome, 'not-flushed');
+  assert.equal(late[0].printedChars, 0);
+  assert.equal(f.logRows().filter((x) => x.kind === 'claims-briefing-flush').length, 0);
+});
+
+test('(P) unit: streamGone reads a destroyed or closed stream; a live one is not gone', () => {
+  const { streamGone } = loadTs('src/main/hooks.ts');
+  assert.equal(streamGone({ destroyed: true }), true);
+  assert.equal(streamGone({ closed: true }), true);
+  assert.equal(streamGone({ destroyed: false, closed: false }), false);
+  assert.equal(streamGone({}), false);
 });
 
 test('(1) the server strips shim_elapsed_ms before handling, and an older shim (no field) keeps the old measure', async (t) => {
