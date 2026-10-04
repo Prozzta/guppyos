@@ -812,6 +812,9 @@ test('memory --help teaches link-not-copy and the explicit own-ledger supersedes
   assert.equal(await cli.main(['--help'], {}, { out: s => out.push(s), err: () => {} }), 0);
   assert.match(out.join(''), /A recap cites the claim id; it does not restate the value/);
   assert.match(out.join(''), /any live claim in your own ledger, even if it was not offered/);
+  // Creed N1: the help matches the reasons (and the candidate prompt): changed, corrected, or moved.
+  assert.match(out.join(''), /when the prior fact changed, was corrected, or moved \(the --reason\)/);
+  assert.doesNotMatch(out.join(''), /use only when the prior fact changed/);
 });
 
 test('golden pre-reason ledger line keeps its original canonical bytes and MAC after upgrade', () => {

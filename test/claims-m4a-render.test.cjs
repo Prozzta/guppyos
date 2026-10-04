@@ -35,18 +35,40 @@ test('M4a arm A without claim ids uses replay text mappings under the same label
     'arm A credits the product standalone pointer using the frozen topic');
 });
 
+test('W5: a text-only arm matches a MULTI-LINE entry by its first line (continuations are indented)', () => {
+  const textMap = { a1: {
+    'a1:memory.md:10': { text: 'current-invented lead\nsecond invented line\nthird invented line' },
+    'a1:memory.md:4': { text: '\nprior-invented lead\nmore invented prior text' },
+  } };
+  const full = '- CURRENT — 2026-10-04 — current-invented lead\n  second invented line\n  third invented line\n'
+    + '- PRIOR — 2026-09-01 — prior-invented lead\n  more invented prior text';
+  const working = '- current-invented lead\n  second invented line';
+  const ok = score(key, read(full, working), textMap);
+  assert.equal(ok.fullViewPass, 1, 'the multi-line current and prior are found by their first lines');
+  assert.equal(ok.workingSetPass, 1, 'the shown multi-line current counts');
+  // The labels still decide: an unlabelled multi-line prior fails clause 2, a missing current fails clause 3.
+  assert.equal(score(key, read(full.replace('- PRIOR — 2026-09-01 — prior', '- prior'), working), textMap).fullViewPass, 0);
+  assert.equal(score(key, read(full, '# Memory working set'), textMap).workingSetPass, 0);
+});
+
 test('M4a rejects every stale duplicate copy of a prior, not just its first labeled line', () => {
   const mutated = `${goodFull}\n- prior-invented shown again [status:live] [c:c-prior00000001]`;
   assert.equal(score(key, read(mutated), entryClaims).fullViewPass, 0);
 });
 
-test('M4a credits the product standalone pointer when current is budgeted out, and kills pointer/inline mutants', () => {
+test('M4a clause 3: the working set shows the current version OR a per-fact pointer (design §8)', () => {
+  // (1) The pointer alone, current budgeted out: passes.
   const standalone = '# Memory working set\n- invented-topic history: memory.md#claim-history-c-current000001';
   assert.equal(score(key, read(goodFull, standalone), entryClaims).workingSetPass, 1);
-  const noPointer = standalone.replace(/^.*history:.*$/m, '');
-  assert.equal(score(key, read(goodFull, noPointer), entryClaims).workingSetPass, 0, 'deleting pointer loop fails');
-  const inlineMutant = '# Memory working set\n- current-invented [status:current] [c:c-current000001]';
-  assert.equal(score(key, read(goodFull, inlineMutant), entryClaims).workingSetPass, 0, 'dropping the inline pointer suffix fails');
+  // (2) The current version shown with no pointer: passes (Jim W1; it scored 0 before).
+  const shownOnly = '# Memory working set\n- current-invented [status:current] [c:c-current000001]';
+  assert.equal(score(key, read(goodFull, shownOnly), entryClaims).workingSetPass, 1, 'a shown current alone satisfies clause 3');
+  // (3) Neither: fails (deleting the pointer loop with current budgeted out).
+  const neither = standalone.replace(/^.*history:.*$/m, '');
+  assert.equal(score(key, read(goodFull, neither), entryClaims).workingSetPass, 0, 'neither current nor pointer fails');
+  // A prior shown as if current is not the current version.
+  const priorOnly = '# Memory working set\n- prior-invented [status:current] [c:c-prior00000001]';
+  assert.equal(score(key, read(goodFull, priorOnly), entryClaims).workingSetPass, 0, 'the prior shown is not the current');
 });
 
 test('M4a rejects a dropped date label even when claim text itself contains an ISO date', () => {
@@ -74,4 +96,14 @@ test('memory search visibly labels superseded hits as dated prior versions', () 
     claim: { id: 'c-prior00000001', status: 'superseded', kind: 'fact', key: 'invented-topic', at: '2026-09-01T00:00:00.000Z' } }]);
   assert.match(text, /Claim:  \[prior · fact · invented-topic · 2026-09-01/);
   assert.match(text, /Version: prior \(dated 2026-09-01\)/);
+  assert.doesNotMatch(text, /prior\?|possibly replaced/);
+});
+
+test('memory search labels an UNCONFIRMED supersession (superseded?) as prior?, never as a certain prior', () => {
+  const { formatSearch } = loadTs('src/main/nativeMemory/format.ts');
+  const text = formatSearch('invented query', {}, [{ chunkId: 1, wing: 'a1', room: 'memory', source: 'claim', content: 'invented maybe-prior text', cosineSim: 0.5, bm25: -1, score: 1,
+    claim: { id: 'c-maybe0000001', status: 'superseded?', kind: 'fact', key: 'invented-topic', at: '2026-09-02T00:00:00.000Z' } }]);
+  assert.match(text, /Claim:  \[prior\? · fact · invented-topic · 2026-09-02 · c-maybe0000001\]/);
+  assert.match(text, /Version: possibly replaced \(unconfirmed, dated 2026-09-02\)/);
+  assert.doesNotMatch(text, /Version: prior \(/, 'not the confirmed wording');
 });

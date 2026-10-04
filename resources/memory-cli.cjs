@@ -16,7 +16,7 @@ const REQUEST_TIMEOUT_MS = 10000;
 const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] | wake-up [--wing W] | status} [--format json]\n'
   + '  claim ledger (when it is on for you):\n'
   + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
-  + '    --supersedes may name any live claim in your own ledger, even if it was not offered as a candidate; use only when the prior fact changed. A recap cites the claim id; it does not restate the value.\n'
+  + '    --supersedes may name any live claim in your own ledger, even if it was not offered as a candidate; use it when the prior fact changed, was corrected, or moved (the --reason). A recap cites the claim id; it does not restate the value.\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
   + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
   + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
