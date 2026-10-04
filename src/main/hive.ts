@@ -2204,6 +2204,9 @@ export class HiveManager {
     // Claude Code spills each hook output past 10,000 chars, so a separate entry gets its own room
     // beside the 9,500 joined bundle (C1). A command, as SessionStart runs no HTTP hooks.
     const briefing = { hooks: [{ type: 'command', command: this.nodeRun(shim, ...hookShimArgs(agentId), '--part', 'briefing') }] };
+    // S1 (Jim): the main SessionStart entry says "my settings carry the briefing entry", so the
+    // server decides from the settings IN FORCE: an older file (no mark) keeps it in the bundle.
+    const sessionBundle = { hooks: [{ type: 'command', command: this.nodeRun(shim, ...hookShimArgs(agentId), '--part', 'bundle') }] };
     // HOOK-BROKER: with the broker up, a hook is a POST to the in-process HookServer (0
     // processes). SessionStart stays a command (Claude does not run HTTP hooks for it), and
     // so does the status line. An event is EITHER http OR command, never both. With no URL
@@ -2260,7 +2263,7 @@ export class HiveManager {
         PostToolUseFailure: [hook('*')],
         UserPromptSubmit: [hook()],
         Notification: [hook()],
-        SessionStart: [entry(), briefing],
+        SessionStart: [sessionBundle, briefing],
         // #5C: surface mid-`/compact` so an agent boxing up its context reads as
         // 'compacting' on the floor instead of looking frozen.
         PreCompact: [hook()],
@@ -5323,10 +5326,13 @@ process.stdin.on('end', () => {
   delete payload.munder_wake_incarnation; // WAKE-SCREEN-GUARD R2-4: only this shim may set it
   if (process.env.MUNDER_WAKE_INCARNATION) payload.munder_wake_incarnation = process.env.MUNDER_WAKE_INCARNATION;
   // CL-M4-BRIEFING-BUDGET C: the second SessionStart entry (--part briefing) asks for the claims
-  // working set alone. Only this shim may set it.
+  // working set alone; the main one (--part bundle) says its settings HAVE that second entry, so
+  // the bundle leaves the working set out (S1: an older settings file has neither mark). Only
+  // this shim may set it.
   delete payload.munder_part;
   const partAt = process.argv.indexOf('--part');
-  if (partAt > 0 && process.argv[partAt + 1] === 'briefing') payload.munder_part = 'briefing';
+  const part = partAt > 0 ? process.argv[partAt + 1] : null;
+  if (part === 'briefing' || part === 'bundle') payload.munder_part = part;
   const sock = process.env.HIVE_SOCK;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.

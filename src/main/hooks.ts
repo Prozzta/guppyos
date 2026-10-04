@@ -91,7 +91,8 @@ interface HookPayload {
   /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
   munder_wake_incarnation?: string | null;
   /** CL-M4-BRIEFING-BUDGET C: 'briefing' = Claude's SECOND SessionStart entry (the shim's --part
-   *  briefing), which carries the claims working set alone. Only the shim sets it. */
+   *  briefing), which carries the claims working set alone; 'bundle' = the main entry of a settings
+   *  file that HAS that second entry (S1). Only the shim sets it. */
   munder_part?: string | null;
   /** MAIL-PIPE-SHIM-CLOCK: a pipe shim's own running time when it sent the request (ms). */
   shim_elapsed_ms?: unknown;
@@ -372,17 +373,20 @@ export class HookServer {
    *  spawn (G4.5, god's M-4 ruling), which a compaction keeps. */
   private claimWorkingSetEvent(p: HookPayload): boolean {
     if (p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return false;
-    // CL-M4-BRIEFING-BUDGET C: a Claude agent's working set rides its OWN second SessionStart entry
-    // (claimBriefing below), never the joined bundle, so the bundle keeps its 9,500 for the rest.
-    try { const provider = this.mailChannel(p.agent_id).provider; return provider !== 'codex' && provider !== 'claude'; } catch { return true; }
+    // CL-M4-BRIEFING-BUDGET C: a Claude agent whose settings carry the briefing entry (its main
+    // entry is marked 'bundle') gets the working set from that entry (claimBriefing below), never
+    // the joined bundle. S1 (Jim): settings that predate it (no mark) keep it in the bundle, so
+    // there is always exactly one copy, decided by the settings in force, not by this build.
+    try { const provider = this.mailChannel(p.agent_id).provider; return provider !== 'codex' && !(provider === 'claude' && p.munder_part === 'bundle'); } catch { return true; }
   }
 
   /**
    * CL-M4-BRIEFING-BUDGET C (the Human's choice): Claude's second SessionStart hook entry. Claude
    * Code spills each hook OUTPUT past 10,000 chars (to a 2,000-char preview), not each event; a
    * separate entry on the same event is delivered whole beside the bundle (C1, Claude Code
-   * 2.1.289: 9,500 + 9,500 at startup, compact and UserPromptSubmit). So the working set comes
-   * here alone, at the full WORKING_SET_MAX_CHARS ceiling, and does no other hook work: no
+   * 2.1.289: up to 9,500 chars in each of the two entries, at startup, compact and
+   * UserPromptSubmit). So the working set comes here alone, capped at WORKING_SET_MAX_CHARS
+   * (9,000; the 9,500 bundle cap is the other entry's), and does no other hook work: no
    * session record, turn boundary, mail or roster (the main entry does all of that).
    */
   private async claimBriefing(p: HookPayload): Promise<unknown> {
@@ -493,6 +497,7 @@ export class HookServer {
         void (async () => {
           try { res = await this.handleWithClaimContext(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
           this.watchMailFlush(conn, claims, receivedAt - shimMs);
+          if (payload.munder_part === 'briefing') this.watchBriefingFlush(conn, payload, res, receivedAt - shimMs);
           conn.end(JSON.stringify(res ?? {}));
         })();
       });
@@ -1284,6 +1289,31 @@ export class HookServer {
     let settled = false;
     stream.once('finish', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, Date.now()); });
     stream.once('close', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, null); });
+  }
+
+  /**
+   * CL-M4-BRIEFING-BUDGET S2 (Jim): a late or failed briefing is never silent. The same flush watch
+   * and on-time measure as mail (shim elapsed + arrival to flush, against the pipe limit): a reply
+   * flushed in time is printed by the shim (printedChars = its working-set chars); one at or past
+   * the limit met the shim's 5 s give-up, or never flushed, and the agent started WITHOUT it.
+   */
+  private watchBriefingFlush(stream: { once(event: 'finish' | 'close', fn: () => void): unknown }, p: HookPayload, res: unknown, startedAt: number): void {
+    const ctx = (res as { hookSpecificOutput?: { additionalContext?: unknown } } | null)?.hookSpecificOutput?.additionalContext;
+    const chars = typeof ctx === 'string' ? ctx.length : 0;
+    if (!chars || !p.agent_id) return;
+    const limitMs = mailLatencyLimitMs('pipe');
+    let settled = false;
+    const settle = (flushedAt: number | null) => {
+      if (settled) return;
+      settled = true;
+      const latencyMs = flushedAt === null ? null : Math.max(0, flushedAt - startedAt);
+      const late = latencyMs === null || latencyMs >= limitMs;
+      try {
+        this.hive.appendLog({ kind: late ? 'claims-briefing-late' : 'claims-briefing-flush', agentId: p.agent_id, source: p.source ?? null, chars, printedChars: late ? 0 : chars, latencyMs, limitMs, ...(late ? { outcome: latencyMs === null ? 'not-flushed' : 'shim-gave-up' } : {}) });
+      } catch { /* best effort */ }
+    };
+    stream.once('finish', () => settle(Date.now()));
+    stream.once('close', () => settle(null));
   }
 
   /**
