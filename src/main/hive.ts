@@ -2537,7 +2537,7 @@ export class HiveManager {
       // ZT-I1-MAIL §5 P1 (+ §11.12(c)): the mail sentence follows the agent's mail mode (§11.7).
       protocolLineOne(mailMode, semanticMemory, inDir('memory.md'), inDir('inbox'), inDir('inbox', '.done')),
       `2. Record durable facts, decisions, and context by appending to ${inDir('memory.md')}. Put METHOD lessons (how you work: sources, verification, tools, safety rules) in its \`## How I work (standing lessons)\` section instead, as bullets or \`###\` subheadings only (a \`##\` heading ends that section and what follows it gets archived); keep that section under ~6 KB, merging and shortening lessons when it grows.`,
-      `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox. A file that leaves outbox/ was delivered (it moves to outbox/.sent/): never write it again for that reason. To update a card, send a message and note memory in ONE call, use the \`ledger\` command (PROTOCOL.md "The ledger command"); it takes JSON from a file or stdin, never in shell arguments.`,
+      `3. To ask another agent for something or share information, write ONE message JSON into ${inDir('outbox')} (schema in PROTOCOL.md). NEVER write into another agent's folder — the orchestrator delivers your outbox. To update a card, send a message and note memory in ONE call, use the \`ledger\` command (PROTOCOL.md "The ledger command"); it takes JSON from a file or stdin, never in shell arguments.`,
       '4. At the END of a task, record what you learned in memory.md so future-you remembers: METHOD lessons in its `## How I work (standing lessons)` section, facts and decisions appended at the end as before.',
       guardrailsLine,
       // CODEX-BLOAT-165 fix 7: Codex keeps every tool output in the thread and re-sends it on
@@ -3322,10 +3322,13 @@ export class HiveManager {
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           // HIVE-DUP-DONE-MAIL: an exact repeat within the window is archived, not delivered. The
-          // key is taken before routeMessage, which may prefix the subject.
+          // key is taken before routeMessage, which may prefix the subject. A message whose sender
+          // set its own id is left to the mail ledger's §4.1 admission, which already drops a
+          // same-id same-content resend (mail-dedup) and reassigns a colliding id; this check covers
+          // the case §4.1 cannot see: no id, so every rewrite of the file got a fresh one.
           const dedup = this.outboxDedupEntries(root);
           const key = outboxDedupKey(id, msg);
-          const prior = dedup.get(key);
+          const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
           if (prior) {
             this.archiveDuplicateOutbox(outbox, full, id, f);
             this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt: new Date(prior.ts).toISOString() });
@@ -3333,8 +3336,10 @@ export class HiveManager {
           }
           this.routeMessage(msg);
           routed++;
-          dedup.set(key, { id: msg.id, ts: outboxDedupClock.now() });
-          this.saveOutboxDedup(root, dedup);
+          if (partial.id === undefined || partial.id === null) {
+            dedup.set(key, { id: msg.id, ts: outboxDedupClock.now() });
+            this.saveOutboxDedup(root, dedup);
+          }
         } catch (error) {
           // A parsed payload that cannot route is terminal too: keep it visible,
           // rather than retrying it forever on every watcher hint and poll.

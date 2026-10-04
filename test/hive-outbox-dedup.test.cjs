@@ -125,9 +125,24 @@ test('a router restart keeps the window: no repeat is delivered and nothing is d
   t.after(() => fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
 });
 
-test('the protocol and the prompt say a file gone from outbox/ was delivered, and prefer the ledger command', () => {
+test('a message whose sender set its own id is left to the mail ledger (its §4.1 same-id dedup)', async (t) => {
+  const { hive, outbox } = await floor(t);
+  useClock(t);
+  send(outbox, 'a.json', { ...MSG, id: 'invented-id-1' });
+  assert.equal(hive.routeOnce(), 1);
+  send(outbox, 'b.json', { ...MSG, id: 'invented-id-2' });
+  assert.equal(hive.routeOnce(), 1, 'a new sender id is a new message here');
+  assert.equal(logRows(hive, 'outbox-duplicate').length, 0);
+  send(outbox, 'c.json', MSG);
+  assert.equal(hive.routeOnce(), 1, 'an id-less message is not matched against id-carrying ones');
+  send(outbox, 'd.json', MSG);
+  assert.equal(hive.routeOnce(), 0, 'but its own repeat is suppressed');
+});
+
+test('PROTOCOL.md says a file gone from outbox/ was delivered, and prefers the ledger command', () => {
+  // The injected prompt is deliberately NOT changed: any instruction edit rotates every agent's
+  // session at that install (session-prompt-rotation tripwire). PROTOCOL.md is a file.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8');
   assert.match(src, /A file gone from \\`outbox\/\\` WAS delivered, so never write it again/);
   assert.match(src, /it sends at once and confirms with \\`ok op=/);
-  assert.match(src, /A file that leaves outbox\/ was delivered \(it moves to outbox\/\.sent\/\): never write it again for that reason\./);
 });
