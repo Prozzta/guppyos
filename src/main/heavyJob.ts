@@ -67,10 +67,12 @@ function words(s: string): string[] {
     while (i < s.length) {
       const c = s[i];
       if (!q && /\s/.test(c)) break;
+      // Unquoted shell redirections terminate the current word even without surrounding spaces:
+      // `node "suite.cjs">full.log` has a script argument then a redirect, not one path.
+      const redirectAt = /^(?:\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)/;
+      if (!q && w && redirectAt.test(s.slice(i)) && !redirectAt.test(w + s.slice(i))) break;
       if (c === '\\' && q !== "'" && i + 1 < s.length) { w += c + s[i + 1]; i += 2; continue; }
       if (c === '"' || c === "'") {
-        const attachedRedirect = /^(?:\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)/.test(w);
-        if (!q && w.length && !attachedRedirect) { w += c; i++; continue; }
         if (!q) { q = c; i++; continue; }
         if (q === c) { q = null; i++; continue; }
       }
@@ -78,6 +80,7 @@ function words(s: string): string[] {
       w += c;
       i++;
     }
+    if (q) w = `__HEAVY_UNCLOSED_QUOTE__${w}`;
     out.push(w);
   }
   return out;
@@ -446,13 +449,21 @@ function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
 }
 
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
-  const ws = leading(ws0);
+  const raw = leading(ws0);
+  const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
+  const ws = raw.map((w) => w.replace(/^__HEAVY_UNCLOSED_QUOTE__/, ''));
   if (!ws.length) return { heavy: false };
-  // HEAVY-LOCK-VAR-RUNNER: a shell variable used as the command word can name a wrapper
-  // (`$CR node ...`, `"$CR" npm test`, `${CR} node ...`). Classify only the following command;
-  // an unnameable remainder such as `run-tests.cjs` remains light.
-  if (/^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(ws[0]) && ws.length > 1) {
-    return classifyWords(ws.slice(1), depth, ctx);
+  // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
+  // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
+  // PowerShell environment variables, and the conventional `$(which node)` form.
+  if (/^\$\((?:which|command\s+-v)\s+node\)$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+  if (/^\$(?:[A-Za-z_][A-Za-z0-9_]*|env:[A-Za-z_][A-Za-z0-9_]*)$/.test(ws[0]) || /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=+?][^}]*)?\}$/.test(ws[0])) {
+    if (ws.length > 1) {
+      const next = ws[1].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
+      if (/^(?:node|npm|pnpm|yarn|npx|electron-vite|electron-builder|electron-rebuild|vitest)$/.test(next)) return classifyWords(ws.slice(1), depth, ctx);
+      return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+    }
+    return { heavy: false };
   }
   // An opt-in scale/bench env gate before the command (Jim MF2).
   const prefix = ws0.slice(0, ws0.length - ws.length);
@@ -460,6 +471,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   if (gate) return { heavy: true, kind: 'bench', why: `${gate.split('=')[0]} (an opt-in bench gate)` };
   const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
   const args = ws.slice(1);
+  if (hasUnclosed && WRAPPERS.has(bin)) return { heavy: false };
+  // cmd.exe /s /c uses doubled outer quotes for one opaque Win32 command string (common for npm.cmd).
+  // The process watcher owns that real wrapper shape; don't reinterpret its embedded quoting here.
+  const cmdBody = args.indexOf('/c');
+  if (bin === 'cmd' && args.includes('/s') && cmdBody >= 0 && args.length === cmdBody + 2 && /^[a-z]:\\.*\s/i.test(args[cmdBody + 1])) return { heavy: false };
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
   if (WRAPPERS.has(bin) && depth === 0) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
