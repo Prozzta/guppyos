@@ -7,7 +7,7 @@ import { reconcilePromptText } from './reconcile';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
 export const WORKING_SET_TIER_SHARES = [0.40, 0.10, 0.50] as const;
-export const DEFAULT_WORKING_SET_BUDGET = 3000;
+export const DEFAULT_WORKING_SET_BUDGET = 4500;
 export type CountTokens = (text: string) => number;
 export type RenderMemoryMdOptions = { exclude?: (id: string) => boolean };
 export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', options?: RenderMemoryMdOptions) => string;
@@ -21,6 +21,32 @@ const claimLine = (claim: ClaimRec, status: string, flags: string[] = []): strin
   const [first, ...rest] = claim.text.split('\n');
   return [`- ${flagText(flags)}${first} [status:${status}] [c:${claim.id}]`, ...rest.map(line => `  ${line}`)].join('\n');
 };
+
+/** Explicit supersedes and derived same-key supersededBy links form a dated history group. */
+function historyGroups(claims: ClaimRec[], state: ClaimsState): Map<string, ClaimRec[]> {
+  const byId = new Map(claims.map(c => [c.id, c]));
+  const parent = new Map(claims.map(c => [c.id, c.id]));
+  const root = (id: string): string => {
+    const p = parent.get(id) ?? id;
+    if (p === id) return id;
+    const r = root(p); parent.set(id, r); return r;
+  };
+  const join = (a: string, b: string): void => {
+    if (!byId.has(a) || !byId.has(b)) return;
+    const ra = root(a), rb = root(b); if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const c of claims) {
+    for (const id of c.supersedes ?? []) join(c.id, id);
+    const successor = state.claims[c.id]?.supersededBy;
+    if (successor) join(c.id, successor);
+  }
+  const groups = new Map<string, ClaimRec[]>();
+  for (const c of claims) { const r = root(c.id); const group = groups.get(r) ?? []; group.push(c); groups.set(r, group); }
+  return groups;
+}
+
+const claimDate = (c: ClaimRec): string => (c.at || c.wt).slice(0, 10);
+const historyAnchor = (id: string): string => `claim-history-${id}`;
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
 export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
@@ -40,6 +66,9 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
 
   const buildWorkingSetDetailed = (state: ClaimsState, view: WorldView, budget: number) => {
     const cap = Math.max(0, Math.floor(budget));
+    const histories = historyGroups(claims, state);
+    const historyFor = new Map<string, ClaimRec[]>();
+    for (const group of histories.values()) for (const c of group) historyFor.set(c.id, group);
     const excluded = new Map<string, Receipt['excluded'][number]['reason']>();
     const eligible: Array<{ claim: ClaimRec; order: number }> = [];
     for (const [id, status] of Object.entries(state.claims)) {
@@ -72,7 +101,9 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     // T0 pinned/lesson claims are first. Overflow is explicit and is not promoted to T2.
     for (const { claim, order: _order } of groups[0]) {
       const id = claim.id;
-      if (!add(claimLine(claim, state.claims[id].status, view.flags[id] ?? []), 0, id)) excluded.set(id, 'tier-share');
+      const group = historyFor.get(id);
+      const line = claimLine(claim, 'current', view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+      if (!add(line, 0, id)) excluded.set(id, 'tier-share');
     }
     // T1 holds reconcile prompts and world warning markers. Use the exact rendered prompt text
     // that ReconcileApi token-counted/charged, so daily accounting matches delivery byte-for-byte.
@@ -89,18 +120,30 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       if (item) droppedReconcileItems.push({ item, reason: 'T1-space' });
     }
     const markersOmitted = markers.length - markersIncluded;
-    const t2Limit = Math.floor(cap * WORKING_SET_TIER_SHARES[2]) +
+    const historyPointers = [...histories.values()].filter(group => group.length > 1)
+      .map(group => group.filter(c => state.claims[c.id]?.status === 'live').at(-1))
+      .filter((c): c is ClaimRec => !!c)
+      .map(c => ({ id: c.id, line: `- ${c.key ?? c.id} history: memory.md#${historyAnchor(c.id)}` }));
+    const pointerReserve = historyPointers.reduce((n, p) => n + tokens(countTokens, p.line), 0);
+    const t2Limit = Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[2]) - pointerReserve) +
       Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
       Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
     let t2Used = 0;
     const t2Cap = Math.min(cap - used, t2Limit);
     for (const { claim } of groups[2]) {
-      const id = claim.id; const line = claimLine(claim, state.claims[id].status);
+      const id = claim.id; const group = historyFor.get(id);
+      const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
       const n = tokens(countTokens, line);
       if (tokens(countTokens, [...output, line].join('\n')) <= cap && t2Used + n <= t2Cap) {
         output.push(line); used = tokens(countTokens, output.join('\n')); t2Used += n; tierUsed[2] += n;
         included.push({ id, tier: 2, tokens: n });
       } else excluded.set(id, 'budget');
+    }
+    const includedIds = new Set(included.map(x => x.id));
+    for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
+      if (tokens(countTokens, [...output, pointer.line].join('\n')) <= cap) {
+        output.push(pointer.line); used = tokens(countTokens, output.join('\n'));
+      }
     }
     const excludedRows = [...excluded].sort(([a], [b]) => cmp(a, b)).map(([id, reason]) => ({ id, reason }));
     const omitted = excludedRows.filter(x => x.reason === 'budget' || x.reason === 'tier-share').length;
@@ -149,14 +192,29 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           lines.push(claimLine(rec, state.claims[rec.id].status));
         }
       }
-      lines.push('', '## All claims (complete export)');
-      for (const rec of selectedRecords) {
-        if (rec.t === 'event') { lines.push(`<!-- event:${rec.id} ${rec.ev} -->`); continue; }
-        if (isExcluded(rec.id)) continue;
-        const status = state.claims[rec.id]?.status ?? 'live';
-        if (rec.kind === 'lesson' && status === 'live') continue;
-        lines.push(claimLine(rec, status));
+      lines.push('', '## All claims (complete export)', 'Claim histories are grouped by supersession; each value is dated and labeled current or prior.');
+      const histories = historyGroups(claims, state);
+      const ordered = [...histories.values()].map(group => group.slice().sort((a, b) => cmp(a.at || a.wt, b.at || b.wt) || cmp(a.wt, b.wt) || cmp(a.id, b.id)))
+        .sort((a, b) => cmp(a.at(-1)?.at ?? a.at(-1)?.wt ?? '', b.at(-1)?.at ?? b.at(-1)?.wt ?? ''));
+      for (const group of ordered) {
+        const kept = group.filter(rec => !isExcluded(rec.id));
+        if (!kept.length) continue;
+        if (group.length === 1) {
+          const rec = kept[0]; const status = state.claims[rec.id]?.status ?? 'live';
+          if (!(rec.kind === 'lesson' && status === 'live')) lines.push(claimLine(rec, status));
+          continue;
+        }
+        const live = kept.filter(rec => state.claims[rec.id]?.status === 'live');
+        const current = live.at(-1) ?? kept.at(-1)!;
+        lines.push('', `### Claim history: ${current.key ?? current.id}`, `<a id="${historyAnchor(current.id)}"></a>`);
+        for (const rec of kept) {
+          const status = state.claims[rec.id]?.status ?? 'live';
+          const label = rec.id === current.id ? 'CURRENT' : 'PRIOR';
+          const [first, ...rest] = rec.text.split('\n');
+          lines.push(`- ${label} — ${claimDate(rec)} — ${first} [status:${status}] [c:${rec.id}]`, ...rest.map(line => `  ${line}`));
+        }
       }
+      for (const rec of selectedRecords) if (rec.t === 'event') lines.push(`<!-- event:${rec.id} ${rec.ev} -->`);
     }
     return lines.join('\n') + '\n';
   };

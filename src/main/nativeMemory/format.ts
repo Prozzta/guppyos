@@ -36,7 +36,11 @@ export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
     L.push(`      Source: ${base(h.source)}`);
     // CLAIM-LEDGER (A5): each claim hit shows [status · kind · key · date · id].
-    if (h.claim) L.push(`      Claim:  [${h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id}]`);
+    if (h.claim) {
+      const prior = h.claim.status === 'superseded' || h.claim.status === 'superseded?';
+      L.push(`      Claim:  [${prior ? 'prior' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${h.claim.at.slice(0, 10)} · ${h.claim.id}]`);
+      if (prior) L.push(`      Version: prior (dated ${h.claim.at.slice(0, 10)}); search for the key to see its current value.`);
+    }
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
     L.push('');
     for (const line of h.content.trim().split('\n')) L.push(`      ${line}`);

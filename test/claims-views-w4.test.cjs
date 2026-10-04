@@ -50,7 +50,7 @@ test('reconcile prompt renders once as a T1 marker before warnings and claims wi
   assert.equal(lines.filter(line => line.includes('reconcile r1:')).length, 1);
   assert.ok(lines[1].includes('reconcile r1:'), 'reconcile prompt occupies the first T1 marker slot');
   assert.match(lines[2], /f: stale-ref/);
-  assert.match(lines[3], /flagged fact \[status:live\] \[c:f\]/);
+  assert.match(lines[3], /flagged fact \[status:current\] \[c:f\]/);
   assert.equal(out.text.match(/reconcile r1:/g)?.length, 1, 'prompt is not duplicated elsewhere in the working set');
   assert.equal(out.receipt.included.find(x => x.id === 'f').tier, 2);
 });
