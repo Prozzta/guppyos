@@ -58,8 +58,16 @@ test('RENDERED: an ARMED probe names the looping function of a renderer stuck in
     // LOAD-INDEPENDENT (1.1.72 gate: the full suite measured 32% where alone it is ~63%). The probe
     // must NAME the loop, not reach a share: the loop is the page's only named function, so it is the
     // top app frame whatever the CPU share. Time and main-thread gaps are hang guards only.
-    assert.ok(b.profile.topApp.length > 0 && b.profile.topApp[0].fn.startsWith('runawayAllocator'), `the profile's top APP frame is the loop: ${JSON.stringify(b.profile.topApp)}`);
-    assert.ok(b.profile.topInclusive.some((e) => e.fn.startsWith('runawayAllocator')), `and it is in the inclusive list: ${JSON.stringify(b.profile.topInclusive)}`);
+    // TEST-FLAKE-RENDERER-PROFILE: the probe NAMES the loop through the exact channel, the paused
+    // stacks. Under CPU load V8's sampler charges a JIT-compiled loop's ticks to its caller (the
+    // full suite measured 0% on the loop, all on the setTimeout arrow), so the profile's top app
+    // frame cannot carry this assertion; the product's stuckIn is taken from the stacks for that reason.
+    assert.equal(b.profile.stuckIn?.source, 'stacks', `the stuck frame comes from the paused stacks: ${JSON.stringify(b.profile.stuckIn)}`);
+    assert.ok(b.profile.stuckIn.fn.startsWith('runawayAllocator'), `the probe names the loop: ${JSON.stringify(b.profile.stuckIn)}`);
+    // The profile still samples the busy page's own code (the loop, or its caller when the sampler
+    // charges the caller); its top app frame and the disagreement flag are always printed.
+    assert.ok(b.profile.topInclusive.some((e) => /^\S+ busy\.html:\d+/.test(e.fn) && !e.fn.startsWith('(root)')), `the profile samples the busy page's own code: ${JSON.stringify(b.profile.topInclusive)}`);
+    t.diagnostic(`profile top app: ${JSON.stringify(b.profile.topApp?.[0] ?? null)}; profileDisagrees: ${!!b.profile.profileDisagrees}`);
     assert.ok(b.profile.samples > 0, `real samples: ${b.profile.samples}`);
     assert.ok(b.profile.ms < 30_000, `time-boxed (hang guard): ${b.profile.ms} ms`);
     // LOAD-FLAKES-FOLLOWUPS (Andy RPROF note): the production box is 5 s; an armed busy capture that

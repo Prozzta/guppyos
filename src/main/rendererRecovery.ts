@@ -422,8 +422,11 @@ export class RendererProbe {
       const maxBytes = opts.maxBytes ?? PROFILE_MAX_BYTES;
       let file: string | null = null;
       if (json.length <= maxBytes) { try { file = await opts.write(json); } catch { file = null; } }
+      const stackApp = stacks.length ? appFramesAcross(stacks) : [];
+      const where = stuckInOf(stacks, summary.app);
       return { ...out, profile: 'ok', ms: Date.now() - t0, sampledMs: sampleMs, samples: summary.samples, topSelf: summary.self, topInclusive: summary.inclusive, topApp: summary.app,
-        ...(stacks.length ? { stacks, stackApp: appFramesAcross(stacks) } : {}), file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
+        ...(stacks.length ? { stacks, stackApp } : {}), stuckIn: where.stuckIn, ...(where.profileDisagrees ? { profileDisagrees: true } : {}),
+        file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       this.giveUp(); // detach resumes; the next page load re-arms
@@ -444,6 +447,33 @@ export function appFramesAcross(stacks: string[][]): Array<{ fn: string; stacks:
     }
   }
   return [...n].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([fn, c]) => ({ fn, stacks: c }));
+}
+
+/**
+ * TEST-FLAKE-RENDERER-PROFILE: where a busy renderer is stuck. The paused stacks are exact (the
+ * debugger reconstructs JIT-compiled frames); the CPU profile's sampler is not: under CPU load it
+ * charges a JIT-compiled loop's ticks to its CALLER (measured: loop share ~60% quiet, ~20% beside 24
+ * CPU hogs, 0% in a loaded full suite; ~99.7% with every JIT tier off). So the stacks name the stuck
+ * function; the profile answers only when no stack was captured (an idle page). A profile whose top
+ * app frame is a different function is flagged, so the skew shows in the logged row.
+ */
+export function stuckInOf(stacks: string[][], profileApp: Array<{ fn: string; pct: number }>): {
+  stuckIn: { fn: string; source: 'stacks' | 'profile' } | null; profileDisagrees: boolean;
+} {
+  // A function is "fn file" without the position: a loop's current line moves between pauses, its
+  // callers' lines do not, so counting exact frames would favour a caller over the loop.
+  const fnOf = (frame: string) => { const [name, loc = ''] = frame.split(' '); return `${name} ${loc.replace(/:\d+(:\d+)?$/, '')}`; };
+  const count = new Map<string, { n: number; frame: string }>();
+  for (const st of stacks) {
+    const inner = st.find((fr) => isAppFrame(fr.split(' ')[0], fr)); // the innermost app frame of this pause
+    if (!inner) continue;
+    const k = fnOf(inner); const c = count.get(k);
+    if (c) c.n++; else count.set(k, { n: 1, frame: inner });
+  }
+  const best = [...count.values()].sort((a, b) => b.n - a.n)[0];
+  if (best) return { stuckIn: { fn: best.frame, source: 'stacks' }, profileDisagrees: !profileApp.length || fnOf(profileApp[0].fn) !== fnOf(best.frame) };
+  if (profileApp.length) return { stuckIn: { fn: profileApp[0].fn, source: 'profile' }, profileDisagrees: false };
+  return { stuckIn: null, profileDisagrees: false };
 }
 
 function raceMs<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
