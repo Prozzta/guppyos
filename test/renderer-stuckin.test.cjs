@@ -22,7 +22,8 @@ test('stuckIn: the paused stacks win over a profile that charged the caller (the
   const r = stuckInOf(loopStacks, []); // the profile's only frame was (anonymous), so its top app list is empty
   assert.equal(r.stuckIn.source, 'stacks');
   assert.ok(r.stuckIn.fn.startsWith('spin app.js:'), JSON.stringify(r));
-  assert.equal(r.profileDisagrees, true, 'an empty profile top app is a disagreement');
+  // Jim S3: a profile with no app frame names nothing, so it does not disagree (topApp is logged empty).
+  assert.equal(r.profileDisagrees, false, 'an empty profile top app is not a disagreement');
 });
 
 test('stuckIn: the stacks win over a profile naming a different app function, and it is flagged', () => {
@@ -56,6 +57,30 @@ test('stuckIn: vendor and React-internal frames are skipped to the innermost APP
   const stacks = [['workLoopSync app.js:900:1', 'myComponent app.js:20:3'], ['performUnitOfWork app.js:880:1', 'myComponent app.js:21:3']];
   const r = stuckInOf(stacks, []);
   assert.equal(r.stuckIn.fn.split(' ')[0], 'myComponent', JSON.stringify(r));
+});
+
+test('stuckIn: a tie on the innermost count goes to the function every pause is inside, in either pause order (Jim S1)', () => {
+  // A loop calling two helpers, paused once in each helper and once in the loop itself: 1-1-1.
+  const stacks = [
+    ['helperA app.js:2:1', 'loop app.js:9:3', '(anonymous) app.js:20:1'],
+    ['helperB app.js:5:1', 'loop app.js:10:7', '(anonymous) app.js:20:1'],
+    ['loop app.js:11:2', '(anonymous) app.js:20:1'],
+  ];
+  for (const order of [stacks, [...stacks].reverse()]) {
+    const r = stuckInOf(order, []);
+    assert.equal(r.stuckIn.fn.split(' ')[0], 'loop', JSON.stringify(r));
+  }
+});
+
+test('stuckIn: a vendor file named only by its basename in a stack string is skipped (Jim S2)', () => {
+  const stacks = [['someVendorFn react-dom.development.js:900:1', 'myComponent app.js:20:3'], ['inner scheduler.development.js:12:1', 'myComponent app.js:21:3']];
+  const r = stuckInOf(stacks, []);
+  assert.equal(r.stuckIn.fn.split(' ')[0], 'myComponent', JSON.stringify(r));
+  const { isAppFrame } = loadTs('src/main/rendererRecovery.ts');
+  assert.equal(isAppFrame('someVendorFn', 'someVendorFn react-dom.development.js:900:1'), false);
+  assert.equal(isAppFrame('render', 'http://localhost/assets/react-dom.production.min.js'), false, 'a full URL still matches');
+  assert.equal(isAppFrame('myComponent', 'myComponent app.js:20:3'), true);
+  assert.equal(isAppFrame('reactor', 'reactor reactor.js:1:1'), true, 'an app file merely starting with "react" is still app code');
 });
 
 test('stuckIn: with no stack (an idle page) the profile answers; with neither, null', () => {
