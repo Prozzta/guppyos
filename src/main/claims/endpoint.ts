@@ -11,8 +11,9 @@
  * LEVEL. The verbs write only when the agent's effective level is `writer` (claims.ts
  * effectiveLevel); below it they answer exit 3 and tell the agent to keep appending to memory.md.
  */
-import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, type RecordDraft, type Ref } from '../../shared/claims';
+import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, type RecordDraft, type Ref, type SupersedesReason } from '../../shared/claims';
 import type { ClaimStore } from './store';
+import type { CandidateResult } from './candidates';
 
 export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 
@@ -31,6 +32,12 @@ export interface ClaimsEndpointDeps {
   onReconcile?: (agentId: string, a: string, b: string) => void;
   /** CLAIM-LEDGER W6: `memory export --complete` (exportWiring.ts); absent = not wired in this build. */
   exportComplete?: (agentId: string) => { ok: true; file: string; bytes: number; note: string } | { ok: false; error: string };
+  /** CL-M4-WP: fresh candidate scan on the note path; presentation never appends. */
+  noteCandidates?: (agentId: string, text: string) => Promise<CandidateResult>;
+  /** Re-read verified derived state immediately before append; only same-owner live ids pass. */
+  validateSupersedes?: (agentId: string, ids: string[]) => boolean;
+  /** Choice-only diagnostics. Never pass note/reason text to this callback. */
+  onNoteChoice?: (agentId: string, choice: 'new' | 'replace' | 'separate' | 'cancel', ids: string[]) => void;
 }
 
 function usage(error: string): ClaimReply { return { ok: false, exit: EXIT.usage, error }; }
@@ -89,6 +96,7 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
   }
 
   if (cmd === 'note') {
+    if (typeof args.text !== 'string' || !args.text.trim()) return usage('note needs text');
     const refs = parseRefs(args.refs);
     if (typeof refs === 'string') return usage(refs);
     let source: 'self' | `mail:${string}` = 'self';
@@ -98,17 +106,58 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     }
     const sup = args.supersedes === undefined ? undefined : ids(args.supersedes);
     if (sup === null) return usage('supersedes: claim ids');
+    if (args.separate !== undefined && args.separate !== true) return usage('--separate takes no value');
+    if (args.cancel !== undefined && args.cancel !== true) return usage('--cancel takes no value');
+    if (args.separate === true && args.cancel === true) return usage('choose only one of --separate or --cancel');
+    if (sup && args.separate === true || sup && args.cancel === true) return usage('choose replace, separate, or cancel');
+    if (sup && args.reason === undefined) return usage('replacing claims needs --reason changed|corrected|moved');
+    if (!sup && args.reason !== undefined) return usage('--reason requires --supersedes');
+    if (args.reason !== undefined && !['changed', 'corrected', 'moved'].includes(String(args.reason))) return usage('--reason is changed, corrected, or moved');
+    if (args.reasonText !== undefined && typeof args.reasonText !== 'string') return usage('--reason-text is text');
+    if (args.reasonText !== undefined && args.reason === undefined) return usage('--reason-text requires --reason');
+    const supersedesReason: SupersedesReason | undefined = args.reason === undefined ? undefined : {
+      category: args.reason as SupersedesReason['category'],
+      ...(args.reasonText !== undefined ? { note: args.reasonText as string } : {}),
+    };
+    if (sup?.length && source !== 'self') return usage('a mail claim cannot supersede an existing claim');
+    let choices: CandidateResult | null = null;
+    if (origin === 'endpoint' && d.noteCandidates) {
+      try { choices = await d.noteCandidates(agentId, args.text); }
+      catch { return { ok: false, exit: EXIT.unavailable, error: 'could not verify note candidates; no claim was written' }; }
+      if (choices.excluded.some((x) => x.source === 'own' && x.reason === 'error')) {
+        return { ok: false, exit: EXIT.unavailable, error: 'could not verify your live claims; no claim was written' };
+      }
+    }
+    const candidates = choices?.candidates ?? [];
+    const references = (choices as (CandidateResult & { references?: CandidateResult['candidates'] }) | null)?.references ?? [];
+    if (!sup && choices && candidates.length) {
+      if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', []); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel', candidates, references } }; }
+      if (args.separate !== true) return {
+        ok: true, exit: EXIT.ok,
+        text: `Possible related claims (ranking: ${choices.ranking}). Choose --supersedes ID --reason changed|corrected|moved, --separate, or --cancel:\n${candidates.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}` : ''}\n`,
+        json: { choice: 'choose', candidates, references, ranking: choices.ranking }
+      };
+    }
+    if (sup?.length) {
+      if (!d.validateSupersedes?.(agentId, sup)) return usage('supersedes must name only your own currently live claims; refresh candidates and choose again');
+      d.onNoteChoice?.(agentId, 'replace', sup);
+    } else if (choices && !candidates.length) d.onNoteChoice?.(agentId, 'new', []);
+    else if (args.separate === true) d.onNoteChoice?.(agentId, 'separate', []);
+    else if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', []); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel' } }; }
     const draft: RecordDraft = {
-      t: 'claim', kind: (args.kind ?? 'fact') as ClaimKind, text: args.text as string,
+      t: 'claim', kind: (args.kind ?? 'fact') as ClaimKind, text: args.text,
       ...(args.key !== undefined ? { key: args.key as string } : {}),
       ...(refs.length ? { refs } : {}),
       ...(args.ttl !== undefined ? { ttl: args.ttl as string } : {}),
       ...(args.pin === true ? { pin: true as const } : {}),
       ...(sup ? { supersedes: sup } : {}),
+      ...(supersedesReason ? { supersedesReason } : {}),
       ...(args.at !== undefined ? { at: args.at as string } : {}),
       ...(source !== 'self' ? { source } : {}),
     };
-    return done(await store.appendRecord(agentId, draft, origin), 'noted');
+    const result = await store.appendRecord(agentId, draft, origin);
+    const choice = args.separate === true ? 'separate' : 'new';
+    return result.ok && !sup ? { ...done(result, 'noted'), text: `noted ${result.id} (${choice})\n`, json: { id: result.id, choice } } : done(result, 'noted');
   }
 
   if (cmd === 'retract') {

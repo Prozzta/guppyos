@@ -3,6 +3,7 @@ import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
 import { SearchResultLog } from './claims/searchLog';
+import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps, makeLocalScorer, type CandidateResult } from './claims/candidates';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
@@ -1336,7 +1337,18 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     // W5 startup census. Successful index syncs repeat this after each indexed append.
     setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
-  return { store: claimStore.store, level: claimLevel, exportComplete: (agentId) => claimExport().complete(agentId), onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b) };
+  return {
+    store: claimStore.store,
+    level: claimLevel,
+    exportComplete: (agentId) => claimExport().complete(agentId),
+    onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b),
+    noteCandidates: (agentId, text) => claimNoteCandidates(agentId, text),
+    validateSupersedes: (agentId, ids) => {
+      const view = claimsLedgerView(agentId);
+      return !!view && ids.length > 0 && new Set(ids).size === ids.length && ids.every((id) => view.claims.some((c) => c.id === id) && view.status(id) === 'live');
+    },
+    onNoteChoice: (agentId, choice, ids) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 3) })
+  };
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
  *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
@@ -1371,6 +1383,24 @@ const nativeMemory = new NativeMemoryWiring({
   onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); },
   searchLog: claimsSearchLog
 });
+function claimsLedgerView(agentId: string) {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return null;
+  const prefix = verifiedPrefix(ep.store.readLedger(agentId));
+  if (!prefix) return null;
+  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  const state = deriveClaims(prefix.records, reg, { r4: false });
+  const claims = prefix.records.filter((r) => r.t === 'claim');
+  return { claims, status: (id: string) => state.claims[id]?.status };
+}
+const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.registry().agents), ledger: claimsLedgerView });
+function claimNoteCandidates(agentId: string, text: string): Promise<CandidateResult> {
+  return collectNoteCandidates(ledgerCandidateDeps({
+    ledger: claimsLedgerView,
+    searchLog: claimsSearchLog,
+    score: makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus())
+  }), agentId, text, new Date());
+}
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
 // wake-up` and each Codex spawn (claims/delivery.ts). The live view is never persisted; only its

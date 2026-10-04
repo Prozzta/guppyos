@@ -89,6 +89,7 @@ test('a record is one canonical line; prev chains, mac verifies, at defaults to 
   assert.equal(r2.mac, recordMac(key, r2));
   assert.equal(r1.at, r1.wt);
   assert.equal(r1.source, 'self'); assert.equal(r1.agent, 'andy'); assert.equal(r1.v, 1);
+  assert.equal(Object.hasOwn(r1, 'supersedesReason'), false, 'a pre-reason record keeps the exact old canonical/MAC shape');
   const read = store.readLedger('andy');
   assert.equal(read.chain, 'ok');
   assert.equal(read.torn, null);
@@ -281,7 +282,7 @@ test('G1.4 injection and limits, per origin and verb', async () => {
   assert.equal(r.exit, 2); assert.match(r.error, /never cut/);
   r = await handleClaimVerb(d, A, { cmd: 'note', args: { text: 'x', legacy: lg } }, 'ledger-route');
   assert.equal(r.exit, 2); assert.match(r.error, /refused/);
-  r = await handleClaimVerb(d, A, { cmd: 'note', args: { text: 'via mail', fromMail: 'm9', supersedes: [selfId] } }, 'endpoint');
+  r = await handleClaimVerb(d, A, { cmd: 'note', args: { text: 'via mail', fromMail: 'm9', supersedes: [selfId], reason: 'changed' } }, 'endpoint');
   assert.equal(r.exit, 2); assert.match(r.error, /mail claim cannot supersede/);
   // Events: by self from an agent, by human from the UI; targets must exist.
   const ev = await ok(store.appendRecord(A, { t: 'event', ev: 'pin', targets: [selfId] }, 'endpoint'));
@@ -795,8 +796,10 @@ test('the W6 append is w6-internal only and leaves R5 scheduling to the shared p
 });
 
 test('the memory CLI maps the claim verbs; identity flags reach the app and are refused there', () => {
-  const p = cli.parseArgs(['note', '--kind', 'decision', '--key', 'release.current', '--ref', 'file:a.ts', '--ref', 'commit:abc1234', '--supersedes', 'c-aaaaaaaaaaaa', '--pin', '--ttl', '30d', '--from-mail', 'm1', 'Ship', '1.1.84']);
-  assert.deepEqual(p.args, { kind: 'decision', key: 'release.current', refs: ['file:a.ts', 'commit:abc1234'], supersedes: ['c-aaaaaaaaaaaa'], pin: true, ttl: '30d', fromMail: 'm1', text: 'Ship 1.1.84' });
+  const p = cli.parseArgs(['note', '--kind', 'decision', '--key', 'release.current', '--ref', 'file:a.ts', '--ref', 'commit:abc1234', '--supersedes', 'c-aaaaaaaaaaaa', '--reason', 'changed', '--reason-text', 'scope moved', '--pin', '--ttl', '30d', '--from-mail', 'm1', 'Ship', '1.1.84']);
+  assert.deepEqual(p.args, { kind: 'decision', key: 'release.current', refs: ['file:a.ts', 'commit:abc1234'], supersedes: ['c-aaaaaaaaaaaa'], reason: 'changed', reasonText: 'scope moved', pin: true, ttl: '30d', fromMail: 'm1', text: 'Ship 1.1.84' });
+  assert.equal(cli.parseArgs(['note', '--separate', 'x']).args.separate, true);
+  assert.equal(cli.parseArgs(['note', '--cancel', 'x']).args.cancel, true);
   assert.deepEqual(cli.parseArgs(['retract', 'c-aaaaaaaaaaaa', 'c-bbbbbbbbbbbb', '--why', 'wrong']).args, { text: 'wrong', ids: ['c-aaaaaaaaaaaa', 'c-bbbbbbbbbbbb'] });
   assert.deepEqual(cli.parseArgs(['reconcile', 'c-a', 'c-b', '--answer', 'keep-both']).args, { answer: 'keep-both', a: 'c-a', b: 'c-b' });
   assert.deepEqual(cli.parseArgs(['used', 'c-a', '--op', 'hurt']).args, { op: 'hurt', id: 'c-a' });
@@ -821,6 +824,64 @@ test('the memory CLI posts a claim verb with the token and prints the id', async
   assert.equal(out.join(''), 'noted c-0123456789ab\n');
   assert.equal(got.url, `/memory/${'a'.repeat(32)}`);
   assert.deepEqual(got.body, { cmd: 'note', args: { kind: 'lesson', text: 'Fetch before basing a branch' } });
+});
+
+test('CL-M4-WP note presents candidates without writing, then logs separate/replace/cancel/new choices', async () => {
+  const root = hive();
+  const { store } = mkStore(root);
+  const priorId = await ok(store.appendRecord('andy', note('the old release branch'), 'endpoint'));
+  const candidates = { candidates: [{ id: priorId, title: 'release', date: '2026-10-04T00:00:00.000Z', excerpt: 'the old release branch', owner: 'andy', status: 'live', sources: ['own'], rank: 1 }], references: [], excluded: [], ranking: 'recency', pool: 1 };
+  const choices = [];
+  const d = { store, level: () => 'writer', noteCandidates: async () => candidates,
+    validateSupersedes: (_a, ids) => ids.every((id) => id === priorId && store.lookup('andy', id)),
+    onNoteChoice: (_a, choice, ids) => choices.push([choice, ids]) };
+  const before = store.readLedger('andy').records.length;
+  let r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the release branch moved' } }, 'endpoint');
+  assert.equal(r.json.choice, 'choose'); assert.match(r.text, /--supersedes/);
+  assert.equal(store.readLedger('andy').records.length, before, 'presentation never appends');
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'keep both branches', separate: true } }, 'endpoint');
+  assert.equal(r.json.choice, 'separate'); assert.equal(store.readLedger('andy').records.length, before + 1);
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'branch moved', supersedes: [priorId], reason: 'moved', reasonText: 'new project' } }, 'endpoint');
+  assert.equal(r.json.id !== undefined, true); assert.equal(store.readLedger('andy').records.at(-1).supersedesReason.category, 'moved');
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'discard this', cancel: true } }, 'endpoint');
+  assert.equal(r.json.choice, 'cancel');
+  d.noteCandidates = async () => ({ ...candidates, candidates: [], references: [] });
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'a fresh fact' } }, 'endpoint');
+  assert.equal(r.json.choice, 'new');
+  assert.deepEqual(choices.map(([c]) => c), ['separate', 'replace', 'cancel', 'new']);
+  d.validateSupersedes = () => false;
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'stale target', supersedes: [priorId], reason: 'corrected' } }, 'endpoint');
+  assert.equal(r.exit, 2); assert.match(r.error, /currently live/);
+});
+
+test('supersedesReason is MAC-covered, omitted for old writes, and capped at 200 UTF-16 code units', async () => {
+  const root = hive();
+  const { store, logs, keys } = mkStore(root);
+  const prior = await ok(store.appendRecord('andy', note('prior'), 'endpoint'));
+  const noteText = '😀'.repeat(100); // 100 Unicode scalars but exactly 200 UTF-16 code units.
+  const replaced = await ok(store.appendRecord('andy', note('replacement', {
+    supersedes: [prior], supersedesReason: { category: 'changed', note: noteText },
+  }), 'endpoint'));
+  const saved = lines(root, 'andy').map(JSON.parse);
+  assert.equal(saved[0].supersedesReason, undefined);
+  assert.deepEqual(saved[1].supersedesReason, { category: 'changed', note: noteText });
+  assert.equal(saved[1].mac, recordMac(keys.load().key, saved[1]), 'the reason participates in the MAC');
+  assert.equal(JSON.stringify(logs).includes(noteText), false, 'free-text reasons never enter log rows');
+  await refused(store.appendRecord('andy', note('too long', {
+    supersedes: [replaced], supersedesReason: { category: 'moved', note: `${noteText}😀` },
+  }), 'endpoint'), /200 UTF-16 code units/);
+});
+
+test('reader fails closed when a stored supersedesReason has no supersedes target', async () => {
+  const root = hive();
+  const { store, keys } = mkStore(root);
+  await ok(store.appendRecord('andy', note('old-format'), 'endpoint'));
+  const rec = JSON.parse(lines(root, 'andy')[0]);
+  rec.supersedesReason = { category: 'changed' };
+  rec.mac = recordMac(keys.load().key, rec);
+  fs.writeFileSync(segs(root, 'andy')[0], canonicalJson(rec) + '\n');
+  const fresh = mkStore(root, { keys }).store;
+  assert.deepEqual(fresh.readLedger('andy').chain, { brokenAt: '0@0', reason: 'parse' });
 });
 
 test('a different agent cannot reconcile another owner’s claim ids', async () => {

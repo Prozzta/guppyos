@@ -23,7 +23,7 @@ export interface SearchLogHit { id: string; wing: string }
 export interface SearchLogRow { at: string; hits: SearchLogHit[] }
 
 export interface SearchLogDeps {
-  hiveRoot: () => string;
+  hiveRoot: () => string | null;
   now?: () => Date;
   retentionMs?: number;
 }
@@ -54,12 +54,14 @@ export class SearchResultLog {
     this.retentionMs = d.retentionMs ?? SEARCH_LOG_RETENTION_MS;
   }
 
-  file(agentId: string): string { return join(this.d.hiveRoot(), 'agents', agentId, 'memory', 'search-results.jsonl'); }
+  file(agentId: string): string | null { const root = this.d.hiveRoot(); return root ? join(root, 'agents', agentId, 'memory', 'search-results.jsonl') : null; }
 
   /** Rows inside the retention window ending at `at` (none after it), oldest first. A torn or foreign line is skipped. */
   private rows(agentId: string, at: number): SearchLogRow[] {
     let text: string;
-    try { text = nodeFs.readFileSync(this.file(agentId), 'utf8'); } catch { return []; }
+    const file = this.file(agentId);
+    if (!file) return [];
+    try { text = nodeFs.readFileSync(file, 'utf8'); } catch { return []; }
     const out: SearchLogRow[] = [];
     for (const line of text.split('\n')) {
       if (!line) continue;
@@ -82,11 +84,13 @@ export class SearchResultLog {
     if (!AGENT_RE.test(agentId) || agentId === 'human') return [];
     const hits = claimHitsOfSearchReply(searchJson);
     if (!hits.length) return [];
+    const root = this.d.hiveRoot();
+    if (!root) return [];
     const now = this.now();
     const kept = this.rows(agentId, now.getTime());
     kept.push({ at: now.toISOString(), hits });
-    const f = this.file(agentId);
-    nodeFs.mkdirSync(join(this.d.hiveRoot(), 'agents', agentId, 'memory'), { recursive: true });
+    const f = join(root, 'agents', agentId, 'memory', 'search-results.jsonl');
+    nodeFs.mkdirSync(join(root, 'agents', agentId, 'memory'), { recursive: true });
     const tmp = `${f}.tmp-${process.pid}`;
     nodeFs.writeFileSync(tmp, kept.map((r) => JSON.stringify(r)).join('\n') + '\n');
     nodeFs.renameSync(tmp, f);

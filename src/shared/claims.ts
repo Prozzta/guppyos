@@ -50,6 +50,8 @@ export const CLAIM_KINDS: readonly ClaimKind[] = ['fact', 'decision', 'lesson', 
 
 export type ClaimSource = 'self' | 'human' | 'god' | `mail:${string}` | 'legacy';
 export type Ref = { type: 'file' | 'commit' | 'task' | 'msg' | 'url'; value: string };
+export type SupersedesReason = { category: 'changed' | 'corrected' | 'moved'; note?: string };
+export const SUPERSEDES_REASON_NOTE_MAX = 200; // UTF-16 code units, matching JS string limits.
 
 /** The longest claim text, in characters, through any external entry point. Longer text is refused, never cut. */
 export const CLAIM_TEXT_MAX = 400;
@@ -79,6 +81,8 @@ export interface ClaimRec extends RecBase {
   refs?: Ref[];
   source: ClaimSource;
   supersedes?: string[];
+  /** Why this append-only claim replaces its predecessors; absent on older records and ordinary notes. */
+  supersedesReason?: SupersedesReason;
   /** C3: the ONLY way to retract (R3). */
   retracts?: string[];
   ttl?: string | null;
@@ -133,7 +137,7 @@ export type LedgerRec = ClaimRec | EventRec;
 export type RecordDraft =
   | {
       t: 'claim'; kind: ClaimKind; text: string; key?: string; refs?: Ref[]; ttl?: string | null; pin?: true;
-      supersedes?: string[]; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy';
+      supersedes?: string[]; supersedesReason?: SupersedesReason; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy';
       legacy?: ClaimRec['legacy']; section?: string;
     }
   | {

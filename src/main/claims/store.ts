@@ -44,11 +44,11 @@ import { randomBytes } from 'node:crypto';
 import * as nodeFs from 'node:fs';
 import { basename, join } from 'node:path';
 import {
-  CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING,
+  CLAIM_KINDS, CLAIM_TEXT_MAX, CLAIM_TEXT_MAX_LEGACY, CLAIMS_ALERT_CHAIN_BROKEN, CLAIMS_ALERT_KEY_MISSING, SUPERSEDES_REASON_NOTE_MAX,
   EVENT_KINDS, LEDGER_RECORD_VERSION,
   type AppendOrigin, type AppendResult, type ChainBreak, type ClaimKind, type ClaimRec, type ClaimSource,
   type EventRec, type LedgerRec, type MacKeyProvider, type ReadResult, type RecordDraft, type Ref, type TornInfo,
-  type UsageRec,
+  type UsageRec, type SupersedesReason,
 } from '../../shared/claims';
 import { canonicalJson, keyIdOf, recordMac, sha256Hex } from './canonical';
 import type { HeadAnchorStore, LedgerKeyRecord } from './keyProvider';
@@ -102,7 +102,14 @@ const FD_IDLE_MS = 30_000;
 const ANCHOR_DELAY_MS = 1_000;
 const REF_VALUE_MAX = 500;
 
-const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'retracts', 'at', 'source', 'legacy', 'section']);
+const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'supersedesReason', 'retracts', 'at', 'source', 'legacy', 'section']);
+const SUPERSEDES_REASON_CATEGORIES = new Set(['changed', 'corrected', 'moved']);
+
+function validSupersedesReason(value: unknown): value is SupersedesReason {
+  if (!isObj(value) || !SUPERSEDES_REASON_CATEGORIES.has(String(value.category))) return false;
+  if (Object.keys(value).some((key) => key !== 'category' && key !== 'note')) return false;
+  return value.note === undefined || (typeof value.note === 'string' && value.note.length <= SUPERSEDES_REASON_NOTE_MAX);
+}
 const EVENT_DRAFT_FIELDS = new Set(['t', 'ev', 'targets', 'answer']);
 const DRAFT_EVENTS = new Set(['accept', 'dismiss', 'reconcile-answer', 'revert', 'pin', 'unpin']);
 const ANSWERS = new Set(['keep-both', 'supersedes', 'retract']);
@@ -264,7 +271,10 @@ export class ClaimStore {
         let rec: LedgerRec | null = null;
         try {
           const v = JSON.parse(line) as unknown;
-          if (isObj(v) && typeof v.id === 'string' && (v.t === 'claim' || v.t === 'event')) rec = v as unknown as LedgerRec;
+          if (isObj(v) && typeof v.id === 'string' && (v.t === 'claim' || v.t === 'event')) {
+            if (v.t !== 'claim' || v.supersedesReason === undefined ||
+              (Array.isArray(v.supersedes) && v.supersedes.length > 0 && validSupersedesReason(v.supersedesReason))) rec = v as unknown as LedgerRec;
+          }
         } catch { rec = null; }
         lines.push({ file, offset: off, bytes: stop - off, line, rec });
         off = stop + 1;
@@ -788,6 +798,10 @@ export class ClaimStore {
     }
     const sup = this.idList(draft.supersedes, 'supersedes', s, 'claim');
     if ('error' in sup) return sup;
+    if (draft.supersedesReason !== undefined) {
+      if (!validSupersedesReason(draft.supersedesReason)) return { error: `supersedesReason needs category changed|corrected|moved and an optional note of at most ${SUPERSEDES_REASON_NOTE_MAX} UTF-16 code units` };
+      if (sup.ids.length === 0) return { error: 'supersedesReason requires non-empty supersedes' };
+    }
     const ret = this.idList(draft.retracts, 'retracts', s, 'claim');
     if ('error' in ret) return ret;
     if (mail) {
@@ -818,6 +832,7 @@ export class ClaimStore {
       ...(draft.key !== undefined ? { key: draft.key } : {}),
       ...(refs ? { refs } : {}),
       ...(sup.ids.length ? { supersedes: sup.ids } : {}),
+      ...(draft.supersedesReason !== undefined ? { supersedesReason: draft.supersedesReason } : {}),
       ...(ret.ids.length ? { retracts: ret.ids } : {}),
       ...(draft.ttl !== undefined ? { ttl: ttl.ttl } : {}),
       ...(draft.pin ? { pin: true as const } : {}),
