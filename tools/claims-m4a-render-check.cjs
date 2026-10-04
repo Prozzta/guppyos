@@ -37,10 +37,10 @@ function score(key, readView, entryClaims = {}) {
     const pointer = anchor
       ? workingLines.some(line => line.includes(anchor) && /history:/i.test(line))
       : workingLines.some(line => item.topic && line.startsWith(`- ${item.topic} history: memory.md#`));
-    // Clause 3 requires a pointer both beside a shown fact and as a standalone locator when
-    // the current version is outside the working set. Text-only arm A uses the same rule.
-    const inlinePointer = shownLine && /history:/i.test(shownLine) && (!anchor || shownLine.includes(anchor));
-    if (inlinePointer || pointer) workingPass++;
+    // Clause 3 (design §8): the working set EITHER shows the current version OR carries a per-fact
+    // history pointer (Jim's step-2 re-audit, W1). Text-only arm A uses the same rule. That the
+    // product also suffixes a shown current with its pointer is pinned by the views render tests.
+    if (shownLine || pointer) workingPass++;
   }
   return { frozenChangedFacts: items.length, fullViewPass: fullPass, workingSetPass: workingPass,
     fullViewScore: items.length ? fullPass / items.length : null, workingSetScore: items.length ? workingPass / items.length : null };

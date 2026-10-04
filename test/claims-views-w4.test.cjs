@@ -125,6 +125,43 @@ test('S1: a history group with two live members labels one CURRENT, one CONFLICT
   assert.match(working, /history: memory\.md#claim-history-live-b/);
 });
 
+test('S2: a shown current with history carries the inline [history: memory.md#claim-history-<id>] suffix, and the anchor exists', () => {
+  // A T2 fact and a T0 lesson, each with a superseded prior; ample budget, so both currents are shown.
+  const oldFact = claim('fact-old', 'invented fact before', { key: 'invented-key', at: '2026-01-01', wt: '2026-01-01' });
+  const fact = claim('fact-cur', 'invented fact after', { key: 'invented-key', at: '2026-02-01', wt: '2026-02-01', supersedes: ['fact-old'] });
+  const oldLesson = claim('lesson-old', 'invented habit before', { kind: 'lesson', at: '2026-01-01', wt: '2026-01-01' });
+  const lesson = claim('lesson-cur', 'invented habit after', { kind: 'lesson', at: '2026-02-01', wt: '2026-02-01', supersedes: ['lesson-old'] });
+  const records = [oldFact, fact, oldLesson, lesson];
+  const state = stateFor(records); state.claims['fact-old'].status = 'superseded'; state.claims['lesson-old'].status = 'superseded';
+  const views = V.createClaimViews(records, s => s.length);
+  const lines = views.buildWorkingSet(state, world(), 5000).text.split('\n');
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  for (const id of ['fact-cur', 'lesson-cur']) {
+    const shown = lines.filter(l => l.includes(`[c:${id}]`));
+    assert.equal(shown.length, 1, `${id} is shown once`);
+    assert.match(shown[0], new RegExp(`\\[status:current\\] \\[c:${id}\\] \\[history: memory\\.md#claim-history-${id}\\]$`), `${id}: the inline suffix`);
+    assert.ok(full.includes(`<a id="claim-history-${id}"></a>`), `${id}: the suffix's anchor is rendered in memory.md`);
+    // Shown inline, so no standalone pointer duplicates it.
+    assert.equal(lines.filter(l => l.includes(`memory.md#claim-history-${id}`)).length, 1, `${id}: one pointer only`);
+  }
+  // The superseded priors are never shown as current in the working set.
+  assert.ok(!lines.some(l => l.includes('[c:fact-old]') || l.includes('[c:lesson-old]')));
+});
+
+test('S2 reverse: a current WITHOUT history carries no suffix, and no pointer or anchor is invented', () => {
+  const fact = claim('solo-fact', 'invented lone fact', { key: 'lone-key' });
+  const lesson = claim('solo-lesson', 'invented lone habit', { kind: 'lesson' });
+  const records = [fact, lesson];
+  const state = stateFor(records);
+  const views = V.createClaimViews(records, s => s.length);
+  const working = views.buildWorkingSet(state, world(), 5000).text;
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  assert.match(working, /- invented lone fact \[status:current\] \[c:solo-fact\]$/m);
+  assert.match(working, /- invented lone habit \[status:current\] \[c:solo-lesson\]$/m);
+  assert.doesNotMatch(working, /history:/);
+  assert.doesNotMatch(full, /claim-history-/);
+});
+
 test('S4: a current lesson with history is rendered only once in complete mode', () => {
   const old = claim('lesson-old', 'old guidance', { kind: 'lesson', at: '2026-01-01', wt: '2026-01-01' });
   const current = claim('lesson-current', 'current guidance', { kind: 'lesson', at: '2026-02-01', wt: '2026-02-01', supersedes: ['lesson-old'] });
