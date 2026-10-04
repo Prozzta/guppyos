@@ -399,6 +399,25 @@ const OUTBOX_PARSE_RETRY_LIMIT = 3;
 const OUTBOX_PARSE_RETRY_DEBOUNCE_MS = 250;
 const OUTBOX_FRESH_WRITE_GRACE_MS = 1_000;
 
+/**
+ * HIVE-DUP-DONE-MAIL: an exact repeat of a message the same sender had delivered within this window
+ * is archived (outbox/.sent/<file>.duplicate-<ms>, kept, not listed as sent) and NOT delivered. An
+ * agent that checks "is my file still in outbox/?" sees it gone (it was delivered and moved) and
+ * writes it again; one sender did so 22 times in a month. The window survives a router restart:
+ * recent keys are kept in <root>/OUTBOX_DEDUP_FILE.
+ */
+export const OUTBOX_DEDUP_WINDOW_MS = 10 * 60_000;
+export const OUTBOX_DEDUP_FILE = 'outbox-dedup.json';
+/** A recorded delivery further than this in the future means the clock went back: it is dropped. */
+export const OUTBOX_DEDUP_CLOCK_SLACK_MS = 60_000;
+/** Tests only: the router's clock for the duplicate window. */
+export const outboxDedupClock = { now: (): number => Date.now() };
+/** Same sender, to, act, in_reply_to, subject, body, requires_reply and needs_human: an exact repeat
+ *  (an escalated resend, needs_human now true, is a new message: Jim S2). */
+export function outboxDedupKey(from: string, msg: Pick<HiveMessage, 'to' | 'act' | 'in_reply_to' | 'subject' | 'body' | 'requires_reply' | 'needs_human'>): string {
+  return createHash('sha256').update(JSON.stringify([from, msg.to, msg.act, msg.in_reply_to ?? null, msg.subject, msg.body, !!msg.requires_reply, !!msg.needs_human])).digest('hex');
+}
+
 /** First window logTail() reads off the end of log.jsonl. Sized so the default 200 rows
  *  (~170 B each on this floor) land in one read with room to spare; it quadruples from
  *  here if a caller asks for more than fits, so a large `n` still works, just not for free. */
@@ -713,6 +732,8 @@ export class HiveManager {
   private readonly outboxRejectNotices = new Map<string, string | null>();
   /** A delivered file whose normal archive failed must never be delivered twice. */
   private readonly outboxDeliveredArchives = new Map<string, string | null>();
+  /** HIVE-DUP-DONE-MAIL: recent deliveries by outboxDedupKey, loaded from the hive root's OUTBOX_DEDUP_FILE. */
+  private outboxDedup: { root: string; entries: Map<string, { id: string; ts: number }> } | null = null;
   /** A corrupt authority file is copied aside once per bad contents. Repeating a
    *  read must still fail closed, but must not fill the hive with identical copies. */
   private readonly quarantinedJsonFingerprints = new Map<string, string>();
@@ -3156,6 +3177,53 @@ export class HiveManager {
     return true;
   }
 
+  /** HIVE-DUP-DONE-MAIL: the recent-delivery keys for `root`, pruned to the window (loaded once per root). */
+  private outboxDedupEntries(root: string): Map<string, { id: string; ts: number }> {
+    if (this.outboxDedup?.root !== root) {
+      const entries = new Map<string, { id: string; ts: number }>();
+      try {
+        const raw = JSON.parse(readFileSync(join(root, OUTBOX_DEDUP_FILE), 'utf8')) as { entries?: unknown };
+        for (const e of Array.isArray(raw.entries) ? raw.entries : []) {
+          const x = e as { key?: unknown; id?: unknown; ts?: unknown };
+          if (typeof x.key === 'string' && typeof x.id === 'string' && typeof x.ts === 'number') entries.set(x.key, { id: x.id, ts: x.ts });
+        }
+      } catch { /* none yet, or unreadable: start empty (a missed suppression only delivers, as before) */ }
+      this.outboxDedup = { root, entries };
+    }
+    const entries = this.outboxDedup.entries;
+    const now = outboxDedupClock.now();
+    // Jim S1: an entry stamped well in the future (the clock went back) would suppress for longer
+    // than the window; drop it (a missed suppression only delivers, as before).
+    for (const [k, v] of entries) if (now - v.ts >= OUTBOX_DEDUP_WINDOW_MS || v.ts - now > OUTBOX_DEDUP_CLOCK_SLACK_MS) entries.delete(k);
+    return entries;
+  }
+
+  /** Persist the window at once (atomic), so a router restart cannot deliver a repeat. */
+  private saveOutboxDedup(root: string, entries: Map<string, { id: string; ts: number }>): void {
+    const file = join(root, OUTBOX_DEDUP_FILE);
+    try {
+      writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, windowMs: OUTBOX_DEDUP_WINDOW_MS, entries: [...entries].map(([key, v]) => ({ key, ...v })) }));
+      renameSync(`${file}.tmp`, file);
+    } catch (error) {
+      this.appendLog({ kind: 'outbox-dedup-save-failed', error: String(error) });
+    }
+  }
+
+  /** An exact repeat is kept (renamed aside in .sent, not a .json there) and never delivered.
+   *  Returns the kept name, or null when the rename is held. */
+  private archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): string | null {
+    const kept = `${file}.duplicate-${outboxDedupClock.now()}`;
+    try {
+      renameSync(full, join(outbox, '.sent', kept));
+      return kept;
+    } catch (error) {
+      // Held: the next scan retries only the archive (same as a delivered file whose archive failed).
+      this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
+      this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });
+      return null;
+    }
+  }
+
   /** Archive after delivery; a transient archive lock is never a route failure. */
   private archiveDeliveredOutbox(outbox: string, full: string, from: string, file: string): boolean {
     try {
@@ -3265,8 +3333,37 @@ export class HiveManager {
           }
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
+          // HIVE-DUP-DONE-MAIL: an exact repeat within the window is archived, not delivered. The
+          // key is taken before routeMessage, which may prefix the subject. A message whose sender
+          // set its own id is left to the mail ledger's §4.1 admission, which already drops a
+          // same-id same-content resend (mail-dedup) and reassigns a colliding id; this check covers
+          // the case §4.1 cannot see: no id, so every rewrite of the file got a fresh one.
+          const dedup = this.outboxDedupEntries(root);
+          const key = outboxDedupKey(id, msg);
+          const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
+          if (prior) {
+            const kept = this.archiveDuplicateOutbox(outbox, full, id, f);
+            const firstAt = new Date(prior.ts).toISOString();
+            // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
+            // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
+            const notice = this.normalize({
+              to: id,
+              act: 'inform',
+              in_reply_to: null,
+              subject: `[duplicate not delivered] ${f}`,
+              body: `The hive router did not deliver ${f}: it repeats ${prior.id} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept ?? f}. To send it again on purpose, change its text.`
+            }, 'system');
+            const notified = this.deliver(notice, id);
+            this.emitMessage(notice, notified ? [id] : []);
+            this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt, notified, noticeId: notice.id });
+            continue;
+          }
           this.routeMessage(msg);
           routed++;
+          if (partial.id === undefined || partial.id === null) {
+            dedup.set(key, { id: msg.id, ts: outboxDedupClock.now() });
+            this.saveOutboxDedup(root, dedup);
+          }
         } catch (error) {
           // A parsed payload that cannot route is terminal too: keep it visible,
           // rather than retrying it forever on every watcher hint and poll.
@@ -5116,6 +5213,12 @@ Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
 \`\`\`
 
 The harness fills in \`id\`, \`from\`, \`hops\`, and timestamps.
+
+Delivery takes about a second: the harness delivers the file and moves it to
+\`outbox/.sent/<same name>\`. A file gone from \`outbox/\` WAS delivered, so never write it again
+for that reason. An exact repeat (same \`to\`, \`act\`, \`in_reply_to\`, subject and body) within 10
+minutes is not delivered again; it is kept as \`outbox/.sent/<name>.duplicate-<time>\`. Prefer
+the ledger command below: it sends at once and confirms with \`ok op=…\`.
 
 A message that answers a request its sender had already been sent a \`supersedes\` for, still
 unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes the subject.
