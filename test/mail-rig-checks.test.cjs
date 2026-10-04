@@ -135,10 +135,20 @@ test('C1 A1 proof: a re-wake whose turn start is held until released: the OLD st
   // the Stop (wakeBase), and the held phase is the turn start the test itself holds.
   const wakeRows = async () => (await now.rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'claim' || d.stage === 'settle'));
   const holds = now.rig.busyHolds ?? 0;
-  const beating = now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
+  const stop = new AbortController();
+  const beating = now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000, signal: stop.signal });
   // Release the start only once the beat loop has found the agent busy and kept the clock still
   // (an event, not a delay). A loop that moved the clock instead never gets here: this times out.
-  await waitFor(() => (now.rig.busyHolds ?? 0) > holds, { what: 'beatUntil held the clock under the held turn start' });
+  // TEST-MAILRIG-BEAT-LOOP-LEAK (Jim): on that failure the concurrent loop is stopped and awaited,
+  // and the held start released, so nothing outlives the failed test.
+  try {
+    await waitFor(() => (now.rig.busyHolds ?? 0) > holds, { what: 'beatUntil held the clock under the held turn start' });
+  } catch (e) {
+    stop.abort();
+    now.release();
+    await beating.catch(() => {});
+    throw e;
+  }
   assert.equal(await unconfirmed(now.rig), b2, 'nothing judged unconfirmed while the start was held');
   now.release();
   await beating;
