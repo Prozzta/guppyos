@@ -92,6 +92,33 @@ async function postLiveHook(server, agentId, payload) {
   });
 }
 
+/** One payload down the hook pipe (the command shim's route; only it may mark a briefing). */
+async function pipeLiveHook(server, payload) {
+  server.start();
+  const sock = server.hive.sockPath();
+  for (let i = 0; i < 200; i++) {
+    const ok = await new Promise((r) => { const c = require('node:net').createConnection(sock, () => { c.destroy(); r(true); }); c.on('error', () => r(false)); });
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return new Promise((resolve, reject) => {
+    let b = '';
+    const c = require('node:net').createConnection(sock, () => c.write(JSON.stringify(payload) + '\n'));
+    c.setEncoding('utf8');
+    c.on('data', (d) => { b += d; });
+    c.on('end', () => resolve(JSON.parse(b || '{}')));
+    c.on('error', reject);
+  });
+}
+
+/** CL-M4-BRIEFING-BUDGET C: a Claude SessionStart runs BOTH entries at once, the main bundle and the
+ *  briefing (the shim's --part briefing); the model receives both outputs. */
+async function postClaudeSessionStart(server, agentId, payload) {
+  const [main, brief] = await Promise.all([postLiveHook(server, agentId, payload), pipeLiveHook(server, { session_id: `s-${agentId}`, ...payload, agent_id: agentId, munder_part: 'briefing' })]);
+  const parts = [main?.hookSpecificOutput?.additionalContext, brief?.hookSpecificOutput?.additionalContext].filter(Boolean);
+  return parts.length ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: parts.join('\n\n') } } : {};
+}
+
 test('Jim M-1: a healthy writer gets NO read-only warning; a reader and a broken chain do', async () => {
   const x = setup({ levels: { a2: 'reader' } });
   await note(x.ref.store, 'a1', 'synthetic writer fact');
@@ -198,6 +225,19 @@ test('Jim M-3: the 9,000-char briefing ceiling is preserved; current joined enve
   assert.match(w, /\+\d+ more/, 'the overflow is shown');
 });
 
+test('CL-M4-BRIEFING-BUDGET C: Claude\'s own briefing entry (maxChars = the ceiling) delivers past the joined room, up to 9,000 and never beyond', async () => {
+  const x = setup();
+  for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words to make it long`);
+  const joined = await x.delivery.workingSet('a1', 'startup');
+  const full = await x.delivery.workingSet('a1', 'startup', D.WORKING_SET_MAX_CHARS);
+  assert.ok(joined.length <= D.WORKING_SET_DELIVERY_MAX_CHARS, 'the default stays the joined room');
+  assert.ok(full.length > D.WORKING_SET_DELIVERY_MAX_CHARS, `${full.length}: the briefing entry uses the room the bundle could not give`);
+  assert.ok(full.length <= D.WORKING_SET_MAX_CHARS, `${full.length} > ${D.WORKING_SET_MAX_CHARS}`);
+  const over = await x.delivery.workingSet('a1', 'startup', 50_000);
+  assert.ok(over.length <= D.WORKING_SET_MAX_CHARS, 'a larger request is held to the Human\'s 9,000 ceiling');
+  assert.ok(D.WORKING_SET_MAX_CHARS < 10_000, 'under Claude Code\'s 10,000-char per-output spill');
+});
+
 test('god (W5 slot, Creed S3 ruling): reconcile items render ONCE, as the T1 ⚠ markers, inside the cap; turnCompleted reaches the W5 hook', async () => {
   const told = [], log = [];
   const item = (i) => ({ itemId: `r-${i}`, agent: 'a1', kind: 'conflict', a: 'c-000000000001', b: 'c-000000000002', text: `synthetic reconcile question ${i}`, turnsUnanswered: 0 });
@@ -296,7 +336,7 @@ test('W5 integration: live hook SessionStart injects leased T1 markers; Stop com
   server.setClaimWorkingSetProvider((agentId) => x.delivery.workingSet(agentId));
   server.setClaimTurnCompletedListener((agentId) => x.delivery.turnCompleted(agentId));
   t.after(() => server.stop());
-  const start = await postLiveHook(server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const start = await postClaudeSessionStart(server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   const context = start?.hookSpecificOutput?.additionalContext ?? '';
   assert.match(context, /⚠ reconcile r-live: live hook reconcile pair/);
   assert.ok(queue.items('a1')[0]?.leaseTurn, 'the delivered item is leased to a persisted turn');
@@ -341,12 +381,12 @@ test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear 
   };
 
   const restarted = await makeScenario('restart');
-  const firstStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const firstStart = await postClaudeSessionStart(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   const firstText = firstStart?.hookSpecificOutput?.additionalContext ?? '';
   assert.match(firstText, /restart-0 hook reconcile pair/);
   const oldTurn = restarted.queue.items('a1')[0].leaseTurn;
   restarted.queue = new ReconcileQueue(restarted.file); // process restart between SessionStart and Stop
-  const secondStart = await postLiveHook(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const secondStart = await postClaudeSessionStart(restarted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   assert.match(secondStart?.hookSpecificOutput?.additionalContext ?? '', /restart-0 hook reconcile pair/);
   assert.notEqual(restarted.queue.items('a1')[0].leaseTurn, oldTurn, 'startup reclaims then takes a fresh lease');
   assert.equal(restarted.queue.items('a1')[0].turnsUnanswered, 0, 'abandoned process turn was not counted');
@@ -354,11 +394,11 @@ test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear 
   assert.equal(restarted.queue.peek('a1')[0].turnsUnanswered, 1, 'Stop counts only the restarted session that showed the prompt');
 
   const compacted = await makeScenario('compact');
-  const initial = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  const initial = await postClaudeSessionStart(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   assert.match(initial?.hookSpecificOutput?.additionalContext ?? '', /compact-0 hook reconcile pair/);
   const initialTurn = compacted.queue.items('a1')[0].leaseTurn;
   const beforeTokens = compacted.queue.dailyTokens('2026-10-03');
-  const rerender = await postLiveHook(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  const rerender = await postClaudeSessionStart(compacted.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
   assert.match(rerender?.hookSpecificOutput?.additionalContext ?? '', /compact-0 hook reconcile pair/);
   assert.equal(compacted.queue.items('a1')[0].leaseTurn, initialTurn, 'compact re-render does not lease again');
   assert.equal(compacted.queue.sequence('a1'), 1, 'compact re-render preserves the open turn sequence');
@@ -370,10 +410,10 @@ test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear 
   assert.equal(compacted.queue.peek('a1')[0].turnsUnanswered, 1, 'one Stop counts one unanswered turn after compact');
 
   const dropped = await makeScenario('rerender-drop');
-  await postLiveHook(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  await postClaudeSessionStart(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   assert.ok(dropped.queue.items('a1').length);
   dropped.setTight();
-  const noRoom = await postLiveHook(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  const noRoom = await postClaudeSessionStart(dropped.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
   assert.doesNotMatch(noRoom?.hookSpecificOutput?.additionalContext ?? '', /rerender-drop-0 hook reconcile pair/);
   assert.ok(dropped.log.some((row) => row.kind === 'claims-reconcile-dropped' && row.itemId === dropped.item.itemId));
   assert.equal(dropped.queue.items('a1').length, 0, 'a prompt dropped from compact is released, not counted unanswered');
@@ -381,12 +421,12 @@ test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear 
   assert.equal(dropped.queue.peek('a1')[0].turnsUnanswered, 0);
 
   const mixed = await makeScenario('mixed', 3);
-  await postLiveHook(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  await postClaudeSessionStart(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   const mixedTurn = mixed.queue.items('a1')[0].leaseTurn;
   mixed.queue.refresh('a1', mixed.items);
   const beforeMixedTokens = mixed.queue.dailyTokens('2026-10-03');
   const mixedLogMark = mixed.log.length;
-  const mixedCompact = await postLiveHook(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
+  const mixedCompact = await postClaudeSessionStart(mixed.server, 'a1', { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'a1' });
   const mixedText = mixedCompact?.hookSpecificOutput?.additionalContext ?? '';
   for (const item of mixed.items) assert.match(mixedText, new RegExp(`${item.itemId}:`));
   assert.deepEqual(mixed.queue.items('a1').map((item) => item.itemId), mixed.items.map((item) => item.itemId));
@@ -399,10 +439,10 @@ test('M2/M3 real hook route: startup recovery, mixed compact leasing, and clear 
   assert.ok(mixed.queue.peek('a1').every((item) => item.turnsUnanswered === 1), 'one Stop counts each shown marker once');
 
   const cleared = await makeScenario('clear');
-  await postLiveHook(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
+  await postClaudeSessionStart(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'startup', agent_id: 'a1' });
   const clearTurn = cleared.queue.items('a1')[0].leaseTurn;
   const beforeClearTokens = cleared.queue.dailyTokens('2026-10-03');
-  const clearHook = await postLiveHook(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'clear', agent_id: 'a1' });
+  const clearHook = await postClaudeSessionStart(cleared.server, 'a1', { hook_event_name: 'SessionStart', source: 'clear', agent_id: 'a1' });
   assert.match(clearHook?.hookSpecificOutput?.additionalContext ?? '', /clear-0 hook reconcile pair/);
   assert.equal(cleared.queue.items('a1')[0].leaseTurn, clearTurn);
   assert.equal(cleared.queue.sequence('a1'), 1);
@@ -503,7 +543,8 @@ test('Jim M-4 / G4.5: the Codex instruction file and wake-up get the same bytes 
   assert.match(idx, /nativeMemory\.setClaimWakeupProvider\(claimWorkingSetForAgent\);/);
   assert.match(idx, /hive\.setCodexClaimContextProvider\(claimWorkingSetForAgent\);/);
   assert.match(idx, /hookServer\.setClaimWorkingSetProvider\(claimWorkingSetForAgent\);/);
-  assert.match(idx, /const claimWorkingSetForAgent = \(agentId: string, source\?: string\): Promise<string \| null> => \(claimsEndpoint\(\) \? claimDelivery\.workingSet\(agentId, source\) : Promise\.resolve\(null\)\);/);
+  // CL-M4-BRIEFING-BUDGET C: still one provider; only Claude's own briefing entry asks for the full ceiling.
+  assert.match(idx, /const claimWorkingSetForAgent = \(agentId: string, source\?: string, part\?: 'briefing'\): Promise<string \| null> => \(claimsEndpoint\(\) \? claimDelivery\.workingSet\(agentId, source, part === 'briefing' \? WORKING_SET_MAX_CHARS : undefined\) : Promise\.resolve\(null\)\);/);
   assert.match(idx, /hookServer\.setClaimTurnCompletedListener\(\(agentId\) => claimDelivery\.turnCompleted\(agentId\)\);/);
   const hive = fs.readFileSync(path.join(ROOT, 'src', 'main', 'hive.ts'), 'utf8');
   assert.match(hive, /preset\.systemPromptChannel === 'codex-developer-instructions' \? HiveManager\.codexDeveloperInstructions\(prompt, claimContext\) : null/);

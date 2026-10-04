@@ -6,7 +6,9 @@
  *   - M-1: the read-only warning is for a broken chain or a level below writer, never a healthy writer.
  *   - M-2: only W3's verifiedPrefix is delivered; on null (head-anchor, key-missing) no claims at all.
  *   - M-3: the briefing ceiling is 9,000 chars; actual delivery also respects the smaller current
- *     joined-context envelope after compact-carry and mail reserves.
+ *     joined-context envelope after compact-carry and mail reserves. A Claude SessionStart gets it
+ *     at the full ceiling from its own second hook entry (CL-M4-BRIEFING-BUDGET C: Claude Code
+ *     spills each hook OUTPUT past 10,000 chars, not each event, so a separate entry has its own room).
  *   - S-2: the git evidence is bounded (concurrency, a deadline) and cached per ledger head and HEAD.
  *   - S-3: a receipt is appended only when the delivered text changed, and receipts.jsonl rotates.
  * Same inputs, same bytes (G4.2): the Codex instruction file and wake-up match (G4.5).
@@ -107,8 +109,10 @@ export interface ClaimDeliveryDeps {
 }
 
 export interface ClaimDelivery {
-  /** The working set text for this agent now, or null (level off/shadow, no tokenizer, no hive). */
-  workingSet(agentId: string, source?: string): Promise<string | null>;
+  /** The working set text for this agent now, or null (level off/shadow, no tokenizer, no hive).
+   *  maxChars: the character cap (default WORKING_SET_DELIVERY_MAX_CHARS, the joined-envelope room);
+   *  Claude's own SessionStart briefing hook passes WORKING_SET_MAX_CHARS (CL-M4-BRIEFING-BUDGET C). */
+  workingSet(agentId: string, source?: string, maxChars?: number): Promise<string | null>;
   /** The completed-turn boundary (HookServer's Stop): W5's reconcile lease hook. */
   turnCompleted(agentId: string): void;
 }
@@ -135,7 +139,8 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
   };
 
   return {
-    async workingSet(agentId, source) {
+    async workingSet(agentId, source, maxChars = WORKING_SET_DELIVERY_MAX_CHARS) {
+      const cap = Math.min(WORKING_SET_MAX_CHARS, Math.max(0, maxChars));
       const root = d.hiveRoot();
       if (!root) return null;
       const level = d.level(agentId);
@@ -163,14 +168,14 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       // M-3: B8 shares at the plan's B, scaled down until the text fits the character cap.
       let budget = DEFAULT_WORKING_SET_BUDGET;
       let built = buildWorkingSetDetailed(state, view, budget);
-      for (let i = 0; i < 6 && built.text.length + tail.length > WORKING_SET_DELIVERY_MAX_CHARS && budget > 1; i++) {
-        budget = Math.max(1, Math.floor(budget * (WORKING_SET_DELIVERY_MAX_CHARS - tail.length) / (built.text.length + 1) * 0.95));
+      for (let i = 0; i < 6 && built.text.length + tail.length > cap && budget > 1; i++) {
+        budget = Math.max(1, Math.floor(budget * (cap - tail.length) / (built.text.length + 1) * 0.95));
         built = buildWorkingSetDetailed(state, view, budget);
       }
       // Last resort (Jim's note): cut the working set at a LINE boundary and keep the warning whole.
       let body = built.text;
-      if (body.length + tail.length > WORKING_SET_DELIVERY_MAX_CHARS) {
-        const room = Math.max(0, WORKING_SET_DELIVERY_MAX_CHARS - tail.length);
+      if (body.length + tail.length > cap) {
+        const room = Math.max(0, cap - tail.length);
         const cut = body.lastIndexOf('\n', room);
         body = cut > 0 ? body.slice(0, cut) : body.slice(0, room);
       }
