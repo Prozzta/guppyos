@@ -14,6 +14,20 @@
 export const GENERATED_MEMORY_PREFIX = '<!-- claim-ledger: generated';
 export const GENERATED_MEMORY_MARKER = `${GENERATED_MEMORY_PREFIX} view of this agent's claims; do not edit (use \`memory note\`) -->`;
 
+/**
+ * CL-W6-VIEW-SECTION: the headings W4 renderMemoryMd writes into a generated view (its title, then
+ * its `##` sections). They are the view's own scaffolding, not the agent's: a bullet an agent appends
+ * below one of them gets no `section` from it. A heading the agent writes itself keeps its section.
+ * A drill renders real views and checks every heading they hold matches, so the list cannot drift.
+ */
+export const GENERATED_VIEW_HEADINGS: readonly string[] = ['How I work (standing lessons)', 'Working set', 'All claims (complete export)'];
+const VIEW_TITLE = /^Memory — \S+$/;
+
+/** Whether a heading (without its `#`s) is one W4 writes into a generated view. */
+export function isGeneratedViewHeading(heading: string): boolean {
+  return GENERATED_VIEW_HEADINGS.includes(heading) || VIEW_TITLE.test(heading);
+}
+
 /** Whether a memory.md text is a generated view (its first line, after any BOM, is the marker). */
 export function isGeneratedMemory(text: string): boolean {
   return text.replace(/^﻿/, '').startsWith(GENERATED_MEMORY_PREFIX);

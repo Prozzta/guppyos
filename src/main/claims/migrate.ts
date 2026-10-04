@@ -34,6 +34,7 @@ import { constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempS
 import { dirname, join } from 'node:path';
 import { CLAIM_TEXT_MAX_LEGACY } from '../../shared/claims';
 import type { ClaimKind, LedgerRec, RecordDraft } from '../../shared/claims';
+import { isGeneratedMemory, isGeneratedViewHeading } from './generated';
 
 /** The longest text a W6 draft may carry: claims.ts CLAIM_TEXT_MAX_LEGACY, through origin 'w6-internal' only. */
 export const LEGACY_TEXT_MAX = CLAIM_TEXT_MAX_LEGACY;
@@ -317,11 +318,13 @@ export function parseNewBullets(memoryMd: string, knownIds: Set<string>): Record
 export function parseNewBulletsDetailed(memoryMd: string, knownIds: Set<string>): { drafts: RecordDraft[]; refusals: Refusal[] } {
   const drafts: RecordDraft[] = [];
   const refusals: Refusal[] = [];
+  // CL-W6-VIEW-SECTION: in a generated view, W4's own headings are scaffolding, so they yield no section.
+  const generated = isGeneratedMemory(memoryMd);
   for (const e of splitEntries(memoryMd, 'memory.md').entries) {
     if (knownIds.has(`b:${e.sha256}`)) continue;
     const tag = RENDERED_RE.exec(e.text);
     if (tag && knownIds.has(tag[1])) continue;
-    const r = entryDrafts(e, 'self');
+    const r = entryDrafts(generated && e.section !== null && isGeneratedViewHeading(e.section) ? { ...e, section: null } : e, 'self');
     drafts.push(...r.drafts);
     if (r.refusal) refusals.push(r.refusal);
   }
