@@ -223,8 +223,24 @@ const SUITE_RUNNER = /(^|[\\/])(run-?tests?|test-?runner|run-?all(-?tests)?)\.[c
 /** Jim MF2: an opt-in scale/bench gate in the env prefix (THREAD_VIEW_SCALE=1 node --test x) makes
  *  even a single test file a bench. */
 const BENCH_ENV = /^[A-Z0-9_]*(SCALE|BENCH|STRESS|SOAK)[A-Z0-9_]*=(1|true|yes|on)$/i;
-/** node flags that take their value as the NEXT argument (so that value is not a test file). */
-const NODE_VALUE_FLAGS = new Set(['--test-name-pattern', '--test-skip-pattern', '--test-reporter', '--test-reporter-destination', '--test-concurrency', '--test-timeout', '--test-shard', '--import', '--require', '-r', '--loader', '--experimental-loader', '--env-file', '--conditions', '-C', '--input-type']);
+/** node flags that take their value as the NEXT argument (so that value is not a test file).
+ *  HEAVY-LOCK-NODE-FLAGS-COMPLETE: every `=...` option of `node --help` (node 20.19.5), each
+ *  MEASURED: `node F VALUE s.cjs` runs s.cjs, so F consumed VALUE (or, for --policy-integrity,
+ *  --snapshot-blob, --build-snapshot-config and --experimental-sea-config, the separate and `=`
+ *  forms fail alike on that value). `[=...]` options (--inspect, --inspect-brk, --inspect-wait)
+ *  take a value only with `=`: measured, `node --inspect-brk s.cjs` debugs s.cjs. */
+const NODE_VALUE_FLAGS = new Set([
+  '--test-name-pattern', '--test-skip-pattern', '--test-reporter', '--test-reporter-destination', '--test-concurrency', '--test-timeout', '--test-shard',
+  '--import', '--require', '-r', '--loader', '--experimental-loader', '--env-file', '--env-file-if-exists', '--conditions', '-C', '--input-type',
+  '--allow-fs-read', '--allow-fs-write', '--build-snapshot-config', '--cpu-prof-dir', '--cpu-prof-interval', '--cpu-prof-name',
+  '--diagnostic-dir', '--disable-proto', '--disable-warning', '--dns-result-order', '--experimental-default-type', '--experimental-policy',
+  '--experimental-sea-config', '--heap-prof-dir', '--heap-prof-interval', '--heap-prof-name', '--heapsnapshot-near-heap-limit',
+  '--heapsnapshot-signal', '--icu-data-dir', '--inspect-port', '--debug-port', '--inspect-publish-uid', '--max-http-header-size',
+  '--network-family-autoselection-attempt-timeout', '--openssl-config', '--policy-integrity', '--redirect-warnings', '--report-dir',
+  '--report-directory', '--report-filename', '--report-signal', '--secure-heap', '--secure-heap-min', '--snapshot-blob', '--title',
+  '--tls-cipher-list', '--tls-keylog', '--trace-event-categories', '--trace-event-file-pattern', '--trace-require-module',
+  '--unhandled-rejections', '--use-largepages', '--v8-pool-size', '--watch-path',
+]);
 
 /** Strip the prefixes that do not change what runs: VAR=x, env [-u X]..., timeout N, nice, cd x. */
 function leading(ws: string[]): string[] {
@@ -433,6 +449,27 @@ function scanJs(text: string): { marker: string | null; helpers: string[] } {
 /** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
 interface NodeProgram { script: string | null; preloads: string[]; inline: string | null; stdin: boolean }
 
+/**
+ * HEAVY-LOCK-NODE-FLAGS-COMPLETE: every `-r`/`--require`/`--import` value up to the script. A preload
+ * runs before the program, so a suite runner or bench script preloaded is the suite or the bench.
+ * Measured: `node -e 1 -r ./pre.cjs` still preloads (options go on after -e code); `node s.cjs -r x`
+ * does not (after the script it is argv).
+ */
+function nodePreloads(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const eq = /^(--require|-r|--import)=(.+)$/.exec(a);
+    if (eq) { out.push(eq[2]); continue; }
+    if (/^(--require|-r|--import)$/.test(a)) { if (args[i + 1]) out.push(args[i + 1]); i++; continue; }
+    if (/^(-e|--eval|-p|--print)$/.test(a)) { i++; continue; }
+    if (a === '-') break;
+    if (a.startsWith('-')) { if (NODE_VALUE_FLAGS.has(a)) i++; continue; }
+    break;
+  }
+  return out;
+}
+
 /** The index of node's script argument (-1 for `-e`/`-p` code, stdin `-`, or none). */
 function nodeScriptIndex(args: string[]): number {
   for (let i = 0; i < args.length; i++) {
@@ -580,6 +617,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // tsx and ts-node run a script as node does (HEAVY-LOCK-ADHOC-NODE).
   if (bin === 'node' || bin === 'electron' || bin === 'guppy' || bin === 'munder difflin' || bin === 'tsx' || bin === 'ts-node') {
     if (args.some((a) => a.startsWith('--native-memory-bench'))) return { heavy: true, kind: 'bench', why: 'native-memory bench' };
+    for (const p of nodePreloads(args)) {
+      const base = p.replace(/\\/g, '/').split('/').pop();
+      if (SUITE_RUNNER.test(p)) return { heavy: true, kind: 'suite', why: `node -r ${base} (a suite runner preloaded)` };
+      if (BENCH_SCRIPT.test(p)) return { heavy: true, kind: 'bench', why: `node -r ${base} (a bench preloaded)` };
+    }
     if (args.includes('--test')) {
       // Positional args only: the value of a flag that takes one is not a test file.
       const files: string[] = [];
