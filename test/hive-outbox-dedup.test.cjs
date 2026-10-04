@@ -71,6 +71,36 @@ test('an exact repeat within the window is archived, not delivered, and logged w
   assert.equal(rows[0].firstId, first[0].id, 'the row names the delivered message');
   assert.ok(rows[0].duplicateId && rows[0].duplicateId !== first[0].id, 'and the repeat');
   assert.equal(rows[0].from, 'jim-1');
+  // Jim M1: never silent. The sender gets a system notice per suppressed repeat, naming the first.
+  assert.equal(rows[0].notified, true);
+  const notices = hive.inbox('jim-1').filter((m) => m.from === 'system' && /^\[duplicate not delivered\]/.test(m.subject));
+  assert.equal(notices.length, 2, 'one notice per suppressed repeat, to the sender');
+  assert.match(notices[0].body, new RegExp(`repeats ${first[0].id} \\(delivered `), 'it names the delivered message');
+  assert.match(notices[0].body, /change its text/);
+  assert.equal(notices[0].act, 'inform');
+});
+
+test('Jim S1: a recorded delivery far in the future (the clock went back) does not keep suppressing', async (t) => {
+  const { hive, outbox } = await floor(t);
+  const clock = useClock(t);
+  send(outbox, 'a.json', MSG);
+  assert.equal(hive.routeOnce(), 1);
+  clock.advance(-60 * 60_000); // the system clock is set back an hour
+  send(outbox, 'b.json', MSG);
+  assert.equal(hive.routeOnce(), 1, 'an entry an hour ahead is dropped: delivered');
+  assert.equal(hive.inbox('god-1').length, 2);
+});
+
+test('Jim S2: an escalated resend (needs_human, requires_reply) is a new message', async (t) => {
+  const { hive, outbox } = await floor(t);
+  useClock(t);
+  send(outbox, 'a.json', MSG);
+  assert.equal(hive.routeOnce(), 1);
+  send(outbox, 'b.json', { ...MSG, needs_human: true });
+  assert.equal(hive.routeOnce(), 1, 'needs_human now set: delivered');
+  send(outbox, 'c.json', { ...MSG, requires_reply: true });
+  assert.equal(hive.routeOnce(), 1, 'requires_reply now set: delivered');
+  assert.equal(hive.inbox('god-1').length, 3);
 });
 
 test('a changed body, another in_reply_to, another act or another recipient is delivered', async (t) => {

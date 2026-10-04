@@ -408,11 +408,14 @@ const OUTBOX_FRESH_WRITE_GRACE_MS = 1_000;
  */
 export const OUTBOX_DEDUP_WINDOW_MS = 10 * 60_000;
 export const OUTBOX_DEDUP_FILE = 'outbox-dedup.json';
+/** A recorded delivery further than this in the future means the clock went back: it is dropped. */
+export const OUTBOX_DEDUP_CLOCK_SLACK_MS = 60_000;
 /** Tests only: the router's clock for the duplicate window. */
 export const outboxDedupClock = { now: (): number => Date.now() };
-/** Same sender, to, act, in_reply_to, subject and body: an exact repeat. */
-export function outboxDedupKey(from: string, msg: Pick<HiveMessage, 'to' | 'act' | 'in_reply_to' | 'subject' | 'body'>): string {
-  return createHash('sha256').update(JSON.stringify([from, msg.to, msg.act, msg.in_reply_to ?? null, msg.subject, msg.body])).digest('hex');
+/** Same sender, to, act, in_reply_to, subject, body, requires_reply and needs_human: an exact repeat
+ *  (an escalated resend, needs_human now true, is a new message: Jim S2). */
+export function outboxDedupKey(from: string, msg: Pick<HiveMessage, 'to' | 'act' | 'in_reply_to' | 'subject' | 'body' | 'requires_reply' | 'needs_human'>): string {
+  return createHash('sha256').update(JSON.stringify([from, msg.to, msg.act, msg.in_reply_to ?? null, msg.subject, msg.body, !!msg.requires_reply, !!msg.needs_human])).digest('hex');
 }
 
 /** First window logTail() reads off the end of log.jsonl. Sized so the default 200 rows
@@ -3186,7 +3189,9 @@ export class HiveManager {
     }
     const entries = this.outboxDedup.entries;
     const now = outboxDedupClock.now();
-    for (const [k, v] of entries) if (now - v.ts >= OUTBOX_DEDUP_WINDOW_MS) entries.delete(k);
+    // Jim S1: an entry stamped well in the future (the clock went back) would suppress for longer
+    // than the window; drop it (a missed suppression only delivers, as before).
+    for (const [k, v] of entries) if (now - v.ts >= OUTBOX_DEDUP_WINDOW_MS || v.ts - now > OUTBOX_DEDUP_CLOCK_SLACK_MS) entries.delete(k);
     return entries;
   }
 
@@ -3201,14 +3206,18 @@ export class HiveManager {
     }
   }
 
-  /** An exact repeat is kept (renamed aside in .sent, not a .json there) and never delivered. */
-  private archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): void {
+  /** An exact repeat is kept (renamed aside in .sent, not a .json there) and never delivered.
+   *  Returns the kept name, or null when the rename is held. */
+  private archiveDuplicateOutbox(outbox: string, full: string, from: string, file: string): string | null {
+    const kept = `${file}.duplicate-${outboxDedupClock.now()}`;
     try {
-      renameSync(full, join(outbox, '.sent', `${file}.duplicate-${outboxDedupClock.now()}`));
+      renameSync(full, join(outbox, '.sent', kept));
+      return kept;
     } catch (error) {
       // Held: the next scan retries only the archive (same as a delivered file whose archive failed).
       this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
       this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });
+      return null;
     }
   }
 
@@ -3330,8 +3339,20 @@ export class HiveManager {
           const key = outboxDedupKey(id, msg);
           const prior = partial.id === undefined || partial.id === null ? dedup.get(key) : undefined;
           if (prior) {
-            this.archiveDuplicateOutbox(outbox, full, id, f);
-            this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt: new Date(prior.ts).toISOString() });
+            const kept = this.archiveDuplicateOutbox(outbox, full, id, f);
+            const firstAt = new Date(prior.ts).toISOString();
+            // Jim M1: never silent. Tell the sender, as a rejection does: an intended identical repeat
+            // must be resent with changed text, and "it vanished from outbox/" is answered at its source.
+            const notice = this.normalize({
+              to: id,
+              act: 'inform',
+              in_reply_to: null,
+              subject: `[duplicate not delivered] ${f}`,
+              body: `The hive router did not deliver ${f}: it repeats ${prior.id} (delivered ${firstAt}) exactly (same to, act, reply-to, subject and body, within ${OUTBOX_DEDUP_WINDOW_MS / 60_000} minutes). The first one WAS delivered: a file gone from outbox/ was delivered (it moves to outbox/.sent/). This repeat is kept as outbox/.sent/${kept ?? f}. To send it again on purpose, change its text.`
+            }, 'system');
+            const notified = this.deliver(notice, id);
+            this.emitMessage(notice, notified ? [id] : []);
+            this.appendLog({ kind: 'outbox-duplicate', from: id, to: msg.to, act: msg.act, file: f, firstId: prior.id, duplicateId: msg.id, firstAt, notified, noticeId: notice.id });
             continue;
           }
           this.routeMessage(msg);
