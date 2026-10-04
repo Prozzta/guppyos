@@ -221,7 +221,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           lines.push(claimLine(rec, state.claims[rec.id].status));
         }
       }
-      lines.push('', '## All claims (complete export)', 'Claim histories are grouped by supersession; each value is dated and labeled current or prior.');
+      lines.push('', '## All claims (complete export)');
       const histories = historyGroups(claims, state);
       const ordered = [...histories.values()].map(group => group.slice().sort((a, b) => cmp(a.at || a.wt, b.at || b.wt) || cmp(a.wt, b.wt) || cmp(a.id, b.id)))
         .sort((a, b) => cmp(a.at(-1)?.at ?? a.at(-1)?.wt ?? '', b.at(-1)?.at ?? b.at(-1)?.wt ?? ''));
