@@ -18,7 +18,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyCommand, classifyHeavy, commandFromToolInput, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
+import { classifyCommand, classifyHeavy, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
 import { compactCarryText, readPathOf, type CarryCard, type CarryObligation, type CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
@@ -2039,7 +2039,7 @@ export class HookServer {
       // it cannot be classified, so it is allowed and logged.
       const scripts = HookServer.heavyScriptCtx(p.cwd);
       let cls = classifyHeavy(p.tool_name, p.tool_input, scripts);
-      let command = commandFromToolInput(p.tool_input) ?? '';
+      let command = heavyCommandOf(p.tool_name, p.tool_input) ?? '';
       let callId = HookServer.heavyCallId(p);
       if (p.payload_degraded === true && commandFromToolInput(p.tool_input) === null) {
         // HEAVY-JOB-LOCK-FAILOPEN (c): classify the pending commands the rollout shows (any heavy

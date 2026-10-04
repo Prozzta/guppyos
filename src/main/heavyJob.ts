@@ -592,8 +592,21 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
 }
 
 /** Classify a tool call (any provider: the command-shaped input only). */
-export function classifyHeavy(_toolName: string | undefined, input: unknown, ctx: ClassifyCtx = {}): HeavyClass {
-  const cmd = commandFromToolInput(input);
+/**
+ * HEAVY-LOCK-UNNAMED-EXEC (god c8cd07): the shell text a tool call runs. Codex's plain
+ * `write_stdin` types `chars` into a running exec session (often a shell): that text, trailing
+ * newline trimmed, is its command; an empty or absent `chars` is a poll (nothing runs).
+ */
+export function heavyCommandOf(toolName: string | undefined, input: unknown): string | null {
+  if (toolName === 'write_stdin') {
+    const c = input && typeof input === 'object' ? (input as Record<string, unknown>).chars : undefined;
+    return typeof c === 'string' ? c.replace(/[\r\n]+$/, '') || null : null;
+  }
+  return commandFromToolInput(input);
+}
+
+export function classifyHeavy(toolName: string | undefined, input: unknown, ctx: ClassifyCtx = {}): HeavyClass {
+  const cmd = heavyCommandOf(toolName, input);
   return cmd ? classifyCommand(cmd, 0, ctx) : { heavy: false };
 }
 

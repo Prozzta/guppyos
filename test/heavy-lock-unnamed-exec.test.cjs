@@ -163,3 +163,20 @@ test('HOOK (Jim P7): a suite typed into a shell with write_stdin takes the slot 
   assert.deepEqual(l.snapshot().map((x) => [x.agentId, x.command]), [['a1', 'node test/tools/run-tests.cjs']]);
   assert.equal(rows(hive).filter((r) => r.action === 'unnamed-exec').length, 0, 'read, so not unnamed');
 });
+
+test('HOOK (god c8cd07): a suite typed over a PLAIN write_stdin call takes the slot; a poll does not', async (t) => {
+  const { classifyHeavy, heavyCommandOf } = loadTs('src/main/heavyJob.ts');
+  assert.deepEqual([classifyHeavy('write_stdin', { session_id: 3, chars: 'node test/tools/run-tests.cjs\r\n' }).heavy, heavyCommandOf('write_stdin', { session_id: 3, chars: 'npm test\n' })], [true, 'npm test']);
+  for (const poll of [{ session_id: 3, chars: '' }, { session_id: 3, chars: '\n' }, { session_id: 3 }, { session_id: 3, chars: 7 }]) {
+    assert.equal(classifyHeavy('write_stdin', poll).heavy, false, JSON.stringify(poll));
+  }
+  assert.equal(classifyHeavy('Bash', { chars: 'node test/tools/run-tests.cjs' }).heavy, false, 'chars is read for write_stdin only');
+  const { s, l } = await server(t, 1);
+  const base = { hook_event_name: 'PreToolUse', transport: 'mcp', tool_name: 'write_stdin' };
+  s.handle({ ...base, agent_id: 'a1', tool_input: { session_id: 3, chars: '' } });
+  assert.equal(l.snapshot().length, 0, 'a poll takes no slot');
+  s.handle({ ...base, agent_id: 'a1', tool_input: { session_id: 3, chars: 'node test/tools/run-tests.cjs\n' } });
+  assert.deepEqual(l.snapshot().map((x) => [x.agentId, x.command]), [['a1', 'node test/tools/run-tests.cjs']]);
+  const denied = s.handle({ ...base, agent_id: 'a2', tool_input: { session_id: 4, chars: 'npm test\n' } });
+  assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', 'a second typed suite waits');
+});
