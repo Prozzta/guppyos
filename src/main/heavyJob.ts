@@ -135,7 +135,10 @@ function stripRedirects(ws: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < ws.length; i++) {
     const w = ws[i];
-    const m = /^(\d*(?:>>?|<<?-?|<>)|&>>?)(&?)(.*)$/.exec(w);
+    // HEAVY-LOCK-CODEX-EXEC: PowerShell's all-streams redirect `*>` / `*>>` (`*>&1`, `*> x.log`)
+    // too; left behind, `*>` and its file read as a suite runner's FILTER, so Dwight's Codex
+    // `node test/tools/run-tests.cjs *> full.log` (shell powershell) ran light, unlocked.
+    const m = /^(\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)(&?)(.*)$/.exec(w);
     if (!m) { out.push(w); continue; }
     // Operator with its target attached (`>x.log`, `2>&1`, `<<EOF`): drop just this word.
     // A bare operator (`>`, `2>`, `<<`): its target is the next word; drop both.
