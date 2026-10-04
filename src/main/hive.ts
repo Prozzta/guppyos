@@ -2200,6 +2200,10 @@ export class HiveManager {
       ...(matcher ? { matcher } : {}),
       hooks: [{ type: 'command', command: cmd }]
     });
+    // CL-M4-BRIEFING-BUDGET C: a SECOND SessionStart entry carries the claims working set alone.
+    // Claude Code spills each hook output past 10,000 chars, so a separate entry gets its own room
+    // beside the 9,500 joined bundle (C1). A command, as SessionStart runs no HTTP hooks.
+    const briefing = { hooks: [{ type: 'command', command: this.nodeRun(shim, ...hookShimArgs(agentId), '--part', 'briefing') }] };
     // HOOK-BROKER: with the broker up, a hook is a POST to the in-process HookServer (0
     // processes). SessionStart stays a command (Claude does not run HTTP hooks for it), and
     // so does the status line. An event is EITHER http OR command, never both. With no URL
@@ -2256,7 +2260,7 @@ export class HiveManager {
         PostToolUseFailure: [hook('*')],
         UserPromptSubmit: [hook()],
         Notification: [hook()],
-        SessionStart: [entry()],
+        SessionStart: [entry(), briefing],
         // #5C: surface mid-`/compact` so an agent boxing up its context reads as
         // 'compacting' on the floor instead of looking frozen.
         PreCompact: [hook()],
@@ -5318,6 +5322,11 @@ process.stdin.on('end', () => {
   payload.agent_id = hiveId || payload.agent_id || null;
   delete payload.munder_wake_incarnation; // WAKE-SCREEN-GUARD R2-4: only this shim may set it
   if (process.env.MUNDER_WAKE_INCARNATION) payload.munder_wake_incarnation = process.env.MUNDER_WAKE_INCARNATION;
+  // CL-M4-BRIEFING-BUDGET C: the second SessionStart entry (--part briefing) asks for the claims
+  // working set alone. Only this shim may set it.
+  delete payload.munder_part;
+  const partAt = process.argv.indexOf('--part');
+  if (partAt > 0 && process.argv[partAt + 1] === 'briefing') payload.munder_part = 'briefing';
   const sock = process.env.HIVE_SOCK;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.

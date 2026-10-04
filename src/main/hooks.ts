@@ -90,6 +90,9 @@ interface HookPayload {
   env_agent_id?: string | null;
   /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
   munder_wake_incarnation?: string | null;
+  /** CL-M4-BRIEFING-BUDGET C: 'briefing' = Claude's SECOND SessionStart entry (the shim's --part
+   *  briefing), which carries the claims working set alone. Only the shim sets it. */
+  munder_part?: string | null;
   /** MAIL-PIPE-SHIM-CLOCK: a pipe shim's own running time when it sent the request (ms). */
   shim_elapsed_ms?: unknown;
   session_id?: string;
@@ -282,6 +285,7 @@ export const MCP_ROLLOUT_RETRY_MS = 20;
 export function applyUrlIdentity(p: Record<string, unknown>, urlAgentId: string): void {
   delete p.provider_agent_id;
   delete p.env_agent_id; // only the command shim may set it
+  delete p.munder_part; // likewise (CL-M4-BRIEFING-BUDGET C: SessionStart is never an HTTP hook)
   const own = typeof p.agent_id === 'string' && p.agent_id !== '' ? p.agent_id : null;
   if (own && own !== urlAgentId) p.provider_agent_id = own;
   p.agent_id = urlAgentId;
@@ -323,7 +327,7 @@ export class HookServer {
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
   /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
-  private claimWorkingSet?: (agentId: string, source?: string) => string | null | Promise<string | null>;
+  private claimWorkingSet?: (agentId: string, source?: string, part?: 'briefing') => string | null | Promise<string | null>;
   private preparedClaimWorkingSets = new Map<string, string | null>();
   /** CLAIM-LEDGER W5 (god): told at each completed turn (Stop), for the reconcile lease. */
   private claimTurnCompleted?: (agentId: string) => void;
@@ -354,7 +358,7 @@ export class HookServer {
     this.onWakeIncarnation = fn;
   }
 
-  setClaimWorkingSetProvider(fn: ((agentId: string, source?: string) => string | null | Promise<string | null>) | undefined): void {
+  setClaimWorkingSetProvider(fn: ((agentId: string, source?: string, part?: 'briefing') => string | null | Promise<string | null>) | undefined): void {
     this.claimWorkingSet = fn;
   }
 
@@ -368,7 +372,29 @@ export class HookServer {
    *  spawn (G4.5, god's M-4 ruling), which a compaction keeps. */
   private claimWorkingSetEvent(p: HookPayload): boolean {
     if (p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return false;
-    try { return this.mailChannel(p.agent_id).provider !== 'codex'; } catch { return true; }
+    // CL-M4-BRIEFING-BUDGET C: a Claude agent's working set rides its OWN second SessionStart entry
+    // (claimBriefing below), never the joined bundle, so the bundle keeps its 9,500 for the rest.
+    try { const provider = this.mailChannel(p.agent_id).provider; return provider !== 'codex' && provider !== 'claude'; } catch { return true; }
+  }
+
+  /**
+   * CL-M4-BRIEFING-BUDGET C (the Human's choice): Claude's second SessionStart hook entry. Claude
+   * Code spills each hook OUTPUT past 10,000 chars (to a 2,000-char preview), not each event; a
+   * separate entry on the same event is delivered whole beside the bundle (C1, Claude Code
+   * 2.1.289: 9,500 + 9,500 at startup, compact and UserPromptSubmit). So the working set comes
+   * here alone, at the full WORKING_SET_MAX_CHARS ceiling, and does no other hook work: no
+   * session record, turn boundary, mail or roster (the main entry does all of that).
+   */
+  private async claimBriefing(p: HookPayload): Promise<unknown> {
+    const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
+    if (fromSubagent || p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return {};
+    let provider: AgentProvider | undefined;
+    try { provider = this.mailChannel(p.agent_id).provider; } catch { provider = undefined; }
+    if (provider !== 'claude') return {};
+    let text: string | null = null;
+    try { text = await this.claimWorkingSet?.(p.agent_id, p.source, 'briefing') ?? null; } catch { text = null; }
+    try { this.hive.appendLog({ kind: 'claims-briefing', agentId: p.agent_id, source: p.source ?? null, chars: text?.length ?? 0 }); } catch { /* observation only */ }
+    return text ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } } : {};
   }
 
   constructor(
@@ -1812,6 +1838,7 @@ export class HookServer {
   }
 
   private async handleWithClaimContext(p: HookPayload): Promise<unknown> {
+    if (p.munder_part === 'briefing') return this.claimBriefing(p);
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
     if (!fromSubagent && this.claimWorkingSetEvent(p) && p.agent_id) {
       let claimWorkingSet: string | null = null;

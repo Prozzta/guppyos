@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
@@ -304,12 +305,42 @@ async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } 
 }
 
 test('G4.4: a claims working set is re-injected on startup and compact SessionStart; never on UserPromptSubmit (Jim M-3)', async (t) => {
+  // CL-M4-BRIEFING-BUDGET C: a non-Claude provider (no second entry) still gets it in the joined bundle.
   const seen = [];
-  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: (id) => { seen.push(id); return '# Memory working set — cl-1'; } });
-  assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'startup' })), /# Memory working set — cl-1/);
-  assert.match(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'compact' })), /# Memory working set — cl-1/);
-  assert.doesNotMatch(f.ctx(f.fire('cl-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /Memory working set/);
-  assert.deepEqual(seen, ['cl-1', 'cl-1'], 'not even built for a prompt');
+  const f = await floor(t, { providers: { 'gm-1': 'gemini' }, claimWorkingSet: (id, _source, part) => { seen.push([id, part ?? null]); return `# Memory working set — ${id}`; } });
+  assert.match(f.ctx(f.fire('gm-1', 'SessionStart', { source: 'startup' })), /# Memory working set — gm-1/);
+  assert.match(f.ctx(f.fire('gm-1', 'SessionStart', { source: 'compact' })), /# Memory working set — gm-1/);
+  assert.doesNotMatch(f.ctx(f.fire('gm-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /Memory working set/);
+  assert.deepEqual(seen, [['gm-1', null], ['gm-1', null]], 'not even built for a prompt; the joined (envelope) cap');
+});
+
+/** The HookServer's own entry for a hook (the pipe and the HTTP broker both go through it). */
+const handleLive = (f, payload) => f.server.handleWithClaimContext({ session_id: `s-${payload.agent_id}`, ...payload });
+
+test('CL-M4-BRIEFING-BUDGET C: a Claude agent gets the working set from its OWN second SessionStart entry, alone and at the full ceiling; the joined bundle no longer carries it', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude', 'gm-1': 'gemini' }, claimWorkingSet: (id, source, part) => { seen.push([id, source, part ?? null]); return `# Memory working set — ${id} (${source})`; } });
+  for (const source of ['startup', 'compact', 'resume', 'clear']) {
+    const main = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source }));
+    assert.doesNotMatch(main, /Memory working set/, `the ${source} bundle leaves it out`);
+    const brief = await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'briefing' });
+    assert.equal(f.ctx(brief), `# Memory working set — cl-1 (${source})`, `the ${source} briefing carries it, and nothing else`);
+    assert.equal(brief.hookSpecificOutput.hookEventName, 'SessionStart');
+  }
+  assert.deepEqual(seen.map((s) => s[2]), ['briefing', 'briefing', 'briefing', 'briefing'], 'built only for the briefing entry, which asks for the ceiling');
+  const rows = f.logRows().filter((r) => r.kind === 'claims-briefing');
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0].chars, '# Memory working set — cl-1 (startup)'.length);
+  // The briefing entry does no other hook work: no session record, no roster, no mail.
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body' }, 'god-1');
+  const brief = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'compact', munder_part: 'briefing' }));
+  assert.ok(!brief.includes(m.id) && !brief.includes('<roster') && !brief.includes('<after-compaction>'), 'the working set alone');
+  // Never for a subagent, a one-way hook, another event or another provider.
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', provider_agent_id: 'sub-9', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing', transport: 'pipe-oneway' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'UserPromptSubmit', prompt: 'go', munder_part: 'briefing' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'gm-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' }), {}, 'a provider with no second entry keeps the joined path');
+  assert.equal(seen.length, 5);
 });
 
 /** POST one hook payload to the live HTTP broker (the path the app uses), as the shim does. */
@@ -326,12 +357,35 @@ async function postHook(f, agentId, payload) {
   });
 }
 
+/** Send one payload down the hook pipe and read the reply, as the command shim does. */
+async function pipeHook(f, payload) {
+  f.server.start();
+  const sock = f.hive.sockPath();
+  for (let i = 0; i < 200; i++) {
+    const ok = await new Promise((r) => { const c = net.createConnection(sock, () => { c.destroy(); r(true); }); c.on('error', () => r(false)); });
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return new Promise((resolve, reject) => {
+    let b = '';
+    const c = net.createConnection(sock, () => c.write(JSON.stringify({ session_id: `s-${payload.agent_id}`, ...payload }) + '\n'));
+    c.setEncoding('utf8');
+    c.on('data', (d) => { b += d; });
+    c.on('end', () => resolve(JSON.parse(b || '{}')));
+    c.on('error', reject);
+  });
+}
+
 test('G4.4 live path (Jim S-1): an ASYNC provider over the HTTP broker: startup and compact carry the set; a prompt neither builds nor carries it', async (t) => {
   const seen = [];
   const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { seen.push(id); await new Promise((r) => setTimeout(r, 20)); return `# Memory working set — ${id} (async)`; } });
   const ctxOf = (out) => out?.hookSpecificOutput?.additionalContext ?? '';
-  assert.match(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'startup' })), /# Memory working set — cl-1 \(async\)/);
-  assert.match(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact' })), /# Memory working set — cl-1 \(async\)/, 'rebuilt after a compaction');
+  // CL-M4-BRIEFING-BUDGET C: Claude's briefing entry (a command shim, so the pipe) carries it.
+  const brief = { agent_id: 'cl-1', munder_part: 'briefing' };
+  assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'startup', ...brief })), /# Memory working set — cl-1 \(async\)/);
+  assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', ...brief })), /# Memory working set — cl-1 \(async\)/, 'rebuilt after a compaction');
+  assert.doesNotMatch(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'cl-1' })), /Memory working set/, 'not in the bundle');
+  assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact', munder_part: 'briefing' })), /Memory working set/, 'only the command shim may mark a briefing: HTTP drops it');
   assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'UserPromptSubmit', prompt: 'go' })), /Memory working set/);
   assert.deepEqual(seen, ['cl-1', 'cl-1']);
 });
@@ -354,9 +408,17 @@ test('Jim M-3 gate: a SessionStart(compact) with a FULL working set, the carry a
   f.server.mailReminders = () => [{ entry: { id: 'old-1', from: 'jim-1', act: 'request', subject: 'please check', state: 'acted', epoch: 'e-old' }, ageMs: 3_600_000 }];
   const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body '.repeat(40) }, 'god-1');
   f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
-  const c = f.ctx(f.fire('cl-1', 'SessionStart', { source: 'compact' }));
+  // CL-M4-BRIEFING-BUDGET C: the FULL 9,000 comes whole in Claude's own briefing entry, under the
+  // 10,000-char per-output spill; the joined bundle (carry, mail) keeps its 9,500 for the rest.
+  const [b, main] = await Promise.all([
+    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact', munder_part: 'briefing' }),
+    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact' }),
+  ]);
+  assert.equal(f.ctx(b), full, 'the working set, whole and alone');
+  assert.ok(f.ctx(b).length < 10_000, 'under Claude Code\'s per-output spill');
+  const c = f.ctx(main);
   assert.ok(c.length <= MAIL_JOINED_BUDGET, `joined ${c.length} > ${MAIL_JOINED_BUDGET}`);
-  assert.ok(c.includes(full), 'the working set, whole');
+  assert.ok(!c.includes('# Memory working set'), 'not joined into the bundle');
   const carry = c.slice(c.indexOf('<after-compaction>'), c.indexOf('</after-compaction>') + '</after-compaction>'.length);
   assert.ok(carry.includes('- card CARD-W4: "A card in progress" (in progress)') && carry.includes('- [old-1] from jim-1: "please check" (request)'), 'the carry, whole');
   assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('a pending body a pending body'), 'the mail is re-injected with its body');

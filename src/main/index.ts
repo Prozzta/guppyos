@@ -13,7 +13,7 @@ import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
-import { createClaimDelivery, type TaskRow } from './claims/delivery';
+import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
@@ -1458,7 +1458,9 @@ function reconcileHiveDeps(): ReconcileHiveDeps {
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
   };
 }
-const claimWorkingSetForAgent = (agentId: string, source?: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId, source) : Promise.resolve(null));
+// CL-M4-BRIEFING-BUDGET C: Claude's own briefing hook entry gets the full ceiling; every joined
+// surface (wake-up, Codex instructions, a non-Claude SessionStart) keeps the envelope's room.
+const claimWorkingSetForAgent = (agentId: string, source?: string, part?: 'briefing'): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId, source, part === 'briefing' ? WORKING_SET_MAX_CHARS : undefined) : Promise.resolve(null));
 hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
 hookServer.setClaimTurnCompletedListener((agentId) => claimDelivery.turnCompleted(agentId));
 nativeMemory.setClaimWakeupProvider(claimWorkingSetForAgent);

@@ -131,6 +131,31 @@ test('the per-agent settings put the id in every command hook (SessionStart alwa
   assert.match(noBroker.statusLine.command, new RegExp(`--agent ${ANDY} --status$`));
 });
 
+test('CL-M4-BRIEFING-BUDGET C: SessionStart has a SECOND command entry, the claims briefing (--part briefing), with or without a broker', async (t) => {
+  const harness = fs.mkdtempSync(path.join(FAKE_HOME, 'harness-'));
+  const hive = new HiveManager(() => harness);
+  t.after(() => hive.dispose());
+  for (const url of [`http://127.0.0.1:60971/hook/${ANDY}/${'a'.repeat(32)}`, null]) {
+    const ss = hive.hookSettings('C:/hive/bin/cth-hook.cjs', FAKE_HOME, {}, undefined, url, ANDY).hooks.SessionStart;
+    assert.equal(ss.length, 2, 'two separate entries: Claude Code gives each output its own 10,000 chars');
+    assert.equal(ss[0].hooks[0].type, 'command');
+    assert.match(ss[0].hooks[0].command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY}$`), 'the bundle entry, as before');
+    assert.equal(ss[1].hooks.length, 1);
+    assert.equal(ss[1].hooks[0].type, 'command', 'SessionStart runs no HTTP hooks');
+    assert.match(ss[1].hooks[0].command, new RegExp(`"C:/hive/bin/cth-hook\\.cjs" --agent ${ANDY} --part briefing$`));
+  }
+});
+
+test('CL-M4-BRIEFING-BUDGET C: the shim marks --part briefing; a payload cannot forge the mark', async (t) => {
+  const brief = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'compact' }, { args: ['--agent', ANDY, '--part', 'briefing'] }, t);
+  assert.equal(brief.munder_part, 'briefing');
+  assert.equal(brief.agent_id, ANDY);
+  const forged = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup', munder_part: 'briefing' }, { args: ['--agent', ANDY] }, t);
+  assert.equal('munder_part' in forged, false, 'only the shim sets it');
+  const other = await throughShim({ hook_event_name: 'SessionStart', session_id: 's1', source: 'startup' }, { args: ['--agent', ANDY, '--part', 'other'] }, t);
+  assert.equal('munder_part' in other, false);
+});
+
 test('an id that would need quoting is never put on the command line (env fallback)', () => {
   assert.deepEqual(hookShimArgs(ANDY), ['--agent', ANDY]);
   assert.deepEqual(hookShimArgs('a b'), []);
