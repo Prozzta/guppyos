@@ -17,9 +17,10 @@ const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [
   + '  claim ledger (when it is on for you):\n'
   + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID]... [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
-  + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n';
+  + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
+  + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
 /** CLAIM-LEDGER W1: the claim verbs; the app checks the agent's level. */
-const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile']);
+const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card' };
 const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
 
@@ -60,6 +61,7 @@ function parseArgs(argv) {
     }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
+      if (flag === '--complete' && out.cmd === 'export') { out.args.complete = true; i += 1; continue; }
       if (CLAIM_VALUE_FLAGS[flag]) { out.args[CLAIM_VALUE_FLAGS[flag]] = val(); i += step(); continue; }
       if (CLAIM_LIST_FLAGS[flag]) { const k = CLAIM_LIST_FLAGS[flag]; (out.args[k] = out.args[k] || []).push(val()); i += step(); continue; }
     }
@@ -128,7 +130,7 @@ async function main(argv, env, io = STDIO) {
     if (p.rest.length) { io.err(`memory: unsupported arguments: ${p.rest.join(' ')}\n`); return EXIT.usage; }
     return request(env, p, io);
   }
-  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used.\n`);
+  io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);
   return EXIT.usage;
 }
 

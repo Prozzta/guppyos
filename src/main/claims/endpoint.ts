@@ -1,6 +1,7 @@
 /**
  * CLAIM-LEDGER W1: the claim verbs of `POST /memory/<token>` (and, through W6, the /ledger route's
- * memory part): note, retract, accept, dismiss, used, reconcile.
+ * memory part): note, retract, accept, dismiss, used, reconcile, and `export --complete` (W6's
+ * planned-downgrade export of the agent's own memory.md; main supplies it as `exportComplete`).
  *
  * IDENTITY (G1.3). The agent is the token's agent, resolved before this runs. A body that names an
  * agent or a wing - or sets `source` or `legacy` (god cac15f) - is refused, at the top level or in
@@ -13,7 +14,7 @@
 import { LEDGER_LEVELS, type AppendOrigin, type ClaimKind, type LedgerLevel, type RecordDraft, type Ref } from '../../shared/claims';
 import type { ClaimStore } from './store';
 
-export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile']);
+export const CLAIM_VERBS: ReadonlySet<string> = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 
 export interface ClaimReply { ok: boolean; exit: number; text?: string; json?: unknown; error?: string }
 
@@ -28,6 +29,8 @@ export interface ClaimsEndpointDeps {
   level: (agentId: string) => LedgerLevel;
   /** Main-only notification after an acknowledged owner reconciliation answer. */
   onReconcile?: (agentId: string, a: string, b: string) => void;
+  /** CLAIM-LEDGER W6: `memory export --complete` (exportWiring.ts); absent = not wired in this build. */
+  exportComplete?: (agentId: string) => { ok: true; file: string; bytes: number; note: string } | { ok: false; error: string };
 }
 
 function usage(error: string): ClaimReply { return { ok: false, exit: EXIT.usage, error }; }
@@ -74,6 +77,16 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     r.ok
       ? { ok: true, exit: EXIT.ok, text: `${verb} ${r.id}\n`, json: { id: r.id } }
       : { ok: false, exit: EXIT.usage, error: r.error, ...(r.didYouMean ? { json: { didYouMean: r.didYouMean } } : {}) };
+
+  if (cmd === 'export') {
+    if (args.complete !== true) return usage('export needs --complete (a complete memory.md, before the ledger is turned down)');
+    for (const k of Object.keys(args)) if (k !== 'complete') return usage(`export takes only --complete (not "${k}")`);
+    if (!d.exportComplete) return { ok: false, exit: EXIT.unavailable, error: 'export --complete is not available in this build' };
+    const r = d.exportComplete(agentId);
+    return r.ok
+      ? { ok: true, exit: EXIT.ok, text: `exported a complete memory.md (${r.bytes} bytes)\n${r.note}\n`, json: { file: r.file, bytes: r.bytes, note: r.note } }
+      : { ok: false, exit: EXIT.unavailable, error: r.error };
+  }
 
   if (cmd === 'note') {
     const refs = parseRefs(args.refs);
