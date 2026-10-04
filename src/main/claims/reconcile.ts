@@ -87,7 +87,7 @@ export class ReconcileApi {
       if (item.rule !== 'R2-mail') {
         this.d.queue.answeredPair(agentId, item.a, item.b);
         this.d.log({ kind: 'claims-reconcile-expired', agentId, itemId: item.itemId,
-          rule: item.rule ?? 'suggestion', turnsUnanswered: item.turnsUnanswered, resolution: 'keep-both' });
+          a: item.a, b: item.b, rule: item.rule ?? 'suggestion', turnsUnanswered: item.turnsUnanswered, resolution: 'keep-both' });
         continue;
       }
       const direction = this.d.newestWins(item);

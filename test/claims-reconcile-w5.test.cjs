@@ -52,6 +52,34 @@ test('G2 verified census queues R2-mail and key alias exactly once across refres
   refreshReconcileQueueForHive(dir, 'owner', deps);
   assert.equal(queue.peek('owner', 10).length, 2);
   assert.deepEqual(queue.peek('owner', 10).map((i) => i.kind).sort(), ['conflict', 'key-alias']);
+  assert.equal(queue.peek('owner', 10).find((item) => item.kind === 'conflict').rule, 'R2-mail');
+});
+
+test('M1U refresh keeps the R2-mail rule through three completed turns and appends newest-wins', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  const records = [
+    { t: 'claim', id: 'mail-new', agent: 'owner', at: '2026-10-02T00:00:00Z', wt: '2026-10-02T00:00:00Z', mac: 'mail-new', prev: '', kind: 'fact', key: 'fact.name', text: 'synthetic mail value', source: 'mail:m1' },
+    { t: 'claim', id: 'prior', agent: 'owner', at: '2026-10-01T00:00:00Z', wt: '2026-10-01T00:00:00Z', mac: 'prior', prev: '', kind: 'fact', key: 'fact.name', text: 'synthetic prior value', source: 'self' },
+  ];
+  const appends = [];
+  const store = { readLedger: () => ({ chain: 'ok', records }), appendSoftSupersede: async (...args) => { appends.push(args); return { ok: true }; } };
+  const deps = {
+    endpoint: () => ({ store }), queue: () => queue, countTokens: () => 1, log: () => {},
+    registry: () => ({ v: 1, namespaces: [{ pattern: 'fact.*', cardinality: 'single' }], keys: {} }),
+    isOwner: () => true,
+  };
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  const [item] = queue.peek('owner', 10);
+  assert.equal(item.rule, 'R2-mail');
+  assert.deepEqual([item.a, item.b].sort(), ['mail-new', 'prior']);
+  const api = reconcileApiForHive(dir, deps);
+  assert.ok(api);
+  for (let i = 0; i < 3; i++) {
+    const delivery = api.reconcileForTurn('owner', '2026-10-04');
+    await api.onTurnCompleted('owner', delivery.turn);
+  }
+  assert.deepEqual(appends, [['owner', 'prior', 'mail-new', item.itemId]]);
 });
 
 test('M-R refresh never resurrects a soft-superseded R2-mail pair or an answered alias', (t) => {
@@ -354,15 +382,10 @@ test('M1U: unanswered non-mail suggestions expire keep-both at 3 turns and newes
   assert.equal(newestWinsCalls, 0);
   assert.deepEqual(q.items('owner'), []);
   assert.deepEqual(q.r5Candidates('owner'), []);
-  assert.deepEqual(logs.filter(row => row.kind === 'claims-reconcile-expired').map(({ rule, turnsUnanswered, resolution }) => ({ rule, turnsUnanswered, resolution })),
-    [{ rule: 'R5', turnsUnanswered: 3, resolution: 'keep-both' }]);
+  assert.deepEqual(logs.filter(row => row.kind === 'claims-reconcile-expired').map(({ a, b, rule, turnsUnanswered, resolution }) => ({ a, b, rule, turnsUnanswered, resolution })),
+    [{ a: 'new', b: 'old', rule: 'R5', turnsUnanswered: 3, resolution: 'keep-both' }]);
   q.refresh('owner', []);
   assert.deepEqual(q.items('owner'), [], 'expired R5 suggestion cannot recur on refresh');
-  const source = fs.readFileSync(path.join(__dirname, '../src/main/claims/reconcile.ts'), 'utf8');
-  const guard = "if (item.rule !== 'R2-mail')";
-  assert.ok(source.includes(guard));
-  const newestWinsMutant = source.replace(guard, "if (item.rule === 'R2-mail')");
-  assert.ok(!newestWinsMutant.includes(guard), 'mutant that lets R5 reach newest-wins is detected');
 });
 
 test('R2-mail newest-wins remains gated by a live winner', async (t) => {
