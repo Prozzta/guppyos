@@ -66,6 +66,71 @@ function objectSpan(src: string, from: number): string | null {
 const EXEC_COMMAND_CALL = /\btools\s*\.\s*exec_command\s*\(\s*/;
 
 /**
+ * HEAVY-LOCK-UNNAMED-EXEC (Jim F1, S1): the nested calls whose argument is shell input, for the
+ * heavy-job HINT only (naming for a gate keeps EXEC_COMMAND_CALL): `tools.exec_command(`,
+ * `tools?.exec_command(`, `tools["exec_command"](`, and the same for `write_stdin` (text typed
+ * into a running exec session, often a shell). Group 1 or 3 is the tool; group 1 = dotted form.
+ */
+const SHELL_INPUT_CALL = /\btools\s*(?:\?\.|\.)\s*(exec_command|write_stdin)\s*\(\s*|\btools\s*\[\s*(['"`])(exec_command|write_stdin)\2\s*\]\s*\(\s*/;
+
+/**
+ * HEAVY-LOCK-UNNAMED-EXEC (Jim S3): `src` with comment text and string/template CONTENTS blanked
+ * (same length, the quotes kept), so a tool name inside a literal command or a comment is not a
+ * call or a mention. A template's `${...}` is blanked with it; regex literals are not tracked.
+ */
+function codeMask(src: string): string {
+  let out = '';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '/' && (src[i + 1] === '/' || src[i + 1] === '*')) {
+      const e = src[i + 1] === '/' ? src.indexOf('\n', i) : src.indexOf('*/', i + 2);
+      const end = e < 0 ? src.length : src[i + 1] === '/' ? e : e + 2;
+      out += ' '.repeat(end - i);
+      i = end - 1;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) { if (src[j] === '\\') j += 1; j += 1; }
+      const end = Math.min(j, src.length);
+      out += c + ' '.repeat(end - i - 1) + (j < src.length ? c : '');
+      i = j;
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+/**
+ * HEAVY-LOCK-UNNAMED-EXEC: the value of top-level property `key` of the object literal `span`
+ * when it is ONE double-quoted (JSON) string and nothing else (`"a" + b` is not), whatever the
+ * other values are (`{session_id: r.session_id, chars: "..."}`); null when the key is plainly
+ * ABSENT (no such key, no `...spread`: a write_stdin poll); else undefined (not readable).
+ */
+function literalProp(span: string, key: string): string | null | undefined {
+  const code = codeMask(span);
+  const re = /[{,]\s*(?:([A-Za-z_$][\w$]*)|"([A-Za-z_$][\w$]*)")\s*:\s*/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(span))) {
+    if (code[m.index] !== span[m.index] || (m[1] ?? m[2]) !== key) continue;
+    const pre = code.slice(0, m.index + 1);
+    if ((pre.match(/\{/g) ?? []).length - (pre.match(/\}/g) ?? []).length !== 1) continue;
+    const i = m.index + m[0].length;
+    if (span[i] !== '"') return undefined;
+    let j = i + 1;
+    while (j < span.length && span[j] !== '"') { if (span[j] === '\\') j += 1; j += 1; }
+    let k = j + 1;
+    while (k < span.length && /\s/.test(span[k])) k += 1;
+    if (span[k] !== ',' && span[k] !== '}') return undefined;
+    try { const v: unknown = JSON.parse(span.slice(i, j + 1)); return typeof v === 'string' ? v : undefined; } catch { return undefined; }
+  }
+  // Absent only if nothing could hold it: no spread, no shorthand `{chars}`, no quoted key.
+  if (code.includes('...') || new RegExp(`\\b${key}\\b`).test(code) || new RegExp(`["'\`]${key}["'\`]\\s*:`).test(span)) return undefined;
+  return null;
+}
+
+/**
  * HEAVY-JOB-LOCK-FAILOPEN (c): Codex 0.157.1 writes the nested call's argument as a JS OBJECT
  * LITERAL with bare keys, `tools.exec_command({cmd:"npm ci",workdir:"C:\\w",yield_time_ms:30000})`,
  * not JSON. JSON.parse refused it, so EVERY Codex exec hook arrived DEGRADED: unclassifiable, the
@@ -106,9 +171,11 @@ export function relaxedObjectLiteral(src: string): unknown {
  * the heavy-job classifier only, when the hook itself must stay DEGRADED (two parallel calls, an
  * exec with several nested commands). Never used to NAME a tool for a gate. `complete` is false
  * when a command could not be read (computed, templated): the hint is then partial.
- * HEAVY-LOCK-UNNAMED-EXEC: `unnamed` counts the code-mode exec_command calls not read: a
- * `tools.exec_command(` whose cmd is not a literal, plus any other `exec_command` mention (an
- * alias `t.exec_command(`, `tools["exec_command"]`), for the heavy-job lock's log row.
+ * HEAVY-LOCK-UNNAMED-EXEC: `unnamed` counts the code-mode shell-input calls not read, for the
+ * heavy-job lock's log row: an exec_command `cmd` or write_stdin `chars` that is not a literal,
+ * any other mention of either name in code (an alias `t.exec_command(`, a destructuring), and a
+ * computed tool `tools[n](`. Literal write_stdin `chars` (trailing newline trimmed; an empty poll
+ * skipped) are hints like any command (Jim F1). Strings and comments never count (S3).
  */
 export function pendingExecCommands(tail: string): { commands: string[]; complete: boolean; unnamed: number } {
   const lines = tail.split('\n');
@@ -131,22 +198,34 @@ export function pendingExecCommands(tail: string): { commands: string[]; complet
   let unnamed = 0;
   for (const p of pending) {
     if (p.name === 'exec' && typeof p.input === 'string') {
-      const re = new RegExp(EXEC_COMMAND_CALL.source, 'g');
+      const src = p.input;
+      const code = codeMask(src);
+      const re = new RegExp(SHELL_INPUT_CALL.source, 'g');
       let m: RegExpExecArray | null;
-      let calls = 0;
-      while ((m = re.exec(p.input))) {
-        calls += 1;
-        const span = objectSpan(p.input, m.index + m[0].length);
-        let cmd: unknown;
-        try { cmd = span ? (relaxedObjectLiteral(span) as { cmd?: unknown } | null)?.cmd : undefined; } catch { cmd = undefined; }
-        if (typeof cmd === 'string') commands.push(cmd); else { complete = false; unnamed += 1; }
+      let dotted = 0;
+      while ((m = re.exec(src))) {
+        if (code[m.index] !== 't') continue; // inside a string or a comment: not a call
+        if (m[1]) dotted += 1;
+        const stdin = (m[1] ?? m[3]) === 'write_stdin';
+        const span = objectSpan(src, m.index + m[0].length);
+        const v = span ? literalProp(span, stdin ? 'chars' : 'cmd') : undefined;
+        if (v === null && stdin) continue; // a write_stdin with no chars: a poll, nothing typed
+        if (typeof v !== 'string') { complete = false; unnamed += 1; continue; }
+        const c = stdin ? v.replace(/[\r\n]+$/, '') : v;
+        if (c) commands.push(c);
       }
-      const other = (p.input.match(/\bexec_command\b/g) ?? []).length - calls;
+      // An alias or destructuring names the tool without a readable call.
+      const other = (code.match(/\b(?:exec_command|write_stdin)\b/g) ?? []).length - dotted;
       if (other > 0) { complete = false; unnamed += other; }
+      // A computed tool name: `tools[n](`, `tools["exec" + "_command"](` (a literal name is not).
+      const br = /\btools\s*\[/g;
+      while ((m = br.exec(code))) {
+        if (!/^tools\s*\[\s*(['"`])[\w$]+\1\s*\]/.test(src.slice(m.index))) { complete = false; unnamed += 1; }
+      }
     } else if (typeof p.arguments === 'string') {
-      let a: { cmd?: unknown; command?: unknown } | null = null;
+      let a: { cmd?: unknown; command?: unknown; chars?: unknown } | null = null;
       try { a = JSON.parse(p.arguments); } catch { a = null; }
-      const c = a?.cmd ?? a?.command;
+      const c = p.name === 'write_stdin' ? (typeof a?.chars === 'string' ? a.chars.replace(/[\r\n]+$/, '') || undefined : undefined) : a?.cmd ?? a?.command;
       if (typeof c === 'string') commands.push(c);
       else if (Array.isArray(c) && c.every((x) => typeof x === 'string')) commands.push(c.join(' '));
     } else if (p.action && typeof p.action === 'object' && Array.isArray((p.action as { command?: unknown }).command)) {

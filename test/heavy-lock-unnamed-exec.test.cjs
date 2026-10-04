@@ -14,6 +14,12 @@
  *   Q4 the lock never writes the row
  *   Q5 the lock writes the row for every degraded call
  *   Q6 an unnamed exec takes the slot (a policy change god has not made)
+ *   Q7 write_stdin is not read (Jim F1)           Q8 its trailing newline is kept
+ *   Q9 a function_call write_stdin is not read    Q10 an empty poll becomes a hint
+ *   Q11 `tools?.exec_command(` is not read (S1)   Q12 `tools["exec_command"](` is not read (S1)
+ *   Q13 a computed `tools[n](` is not counted (S2)
+ *   Q14 mentions are counted in strings/comments (S3)  Q15 a call inside a string is read (S3)
+ *   Q16 `cmd: "a" + b` reads as the literal "a"
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -22,7 +28,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
-const { HeavyJobLock } = loadTs('src/main/heavyJob.ts');
+const { HeavyJobLock, classifyCommand } = loadTs('src/main/heavyJob.ts');
 const mcp = loadTs('src/main/codexHookMcp.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
@@ -38,7 +44,10 @@ test('pendingExecCommands counts the code-mode exec_command calls it cannot name
     ['await tools.exec_command({ cmd: `npm ${x}` });', [], 1],
     ['await tools.exec_command(opts);', [], 1],
     ['const t = tools; await t.exec_command({cmd:"npm ci"});', [], 1],
-    ['await tools["exec_command"]({cmd:"npm ci"});', [], 1],
+    ['const {exec_command: run} = tools; await run({cmd:"npm ci"});', [], 1],
+    ['await Promise.all(xs.map((c) => tools.exec_command({cmd: c})));', [], 1],
+    ['await tools.exec_command({ cmd: "a" + "b" });', [], 1],
+    ['await tools.exec_command({cmd:"npm ci", workdir: w, yield_time_ms: 1000});', ['npm ci'], 0],
     ['await tools.exec_command({cmd:"echo a"}); await tools.exec_command({cmd: c});', ['echo a'], 1],
     ['await tools.exec_command({cmd:"echo a"}); await tools.exec_command({cmd:"echo b"});', ['echo a', 'echo b'], 0],
     ['text("no shell here");', [], 0],
@@ -50,6 +59,52 @@ test('pendingExecCommands counts the code-mode exec_command calls it cannot name
   // An answered call is not pending: nothing to count.
   const answered = tailOf('for (const c of cmds) await tools.exec_command({cmd: c});') + '\n' + line('response_item', { type: 'custom_tool_call_output', call_id: 'c1', output: 'ok' });
   assert.equal(mcp.pendingExecCommands(answered).unnamed, 0);
+});
+
+test('Jim F1: write_stdin input is a hint (literal) or unnamed (computed); an empty poll is neither', () => {
+  const SUITE = 'node test/tools/run-tests.cjs';
+  // P6: one write_stdin into a session started earlier (its session_id computed).
+  const p6 = hint('await tools.write_stdin({session_id: s.session_id, chars:"node test/tools/run-tests.cjs\\r\\n", yield_time_ms: 1000});');
+  assert.deepEqual([p6.commands, p6.unnamed], [[SUITE], 0]);
+  // P7: a shell started, then the suite typed into it: the suite is a hint next to the shell.
+  const p7 = hint('const s = await tools.exec_command({cmd:"powershell"}); await tools.write_stdin({session_id: s.session_id, chars:"node test/tools/run-tests.cjs\\n"});');
+  assert.deepEqual([p7.commands, p7.unnamed], [['powershell', SUITE], 0]);
+  assert.equal(p7.commands.some((c) => classifyCommand(c).heavy), true, 'THE TYPED SUITE IS HEAVY');
+  assert.deepEqual([hint('await tools.write_stdin({session_id: 1, chars: line});').unnamed, hint('await tools.write_stdin({session_id: 1, chars: line});').commands], [1, []]);
+  assert.deepEqual([hint('await tools.write_stdin({session_id: 1, chars: ""});').unnamed, hint('await tools.write_stdin({session_id: 1, chars: ""});').commands], [0, []], 'a poll');
+  assert.deepEqual(hint('await tools.write_stdin({session_id: 1, chars: "y\\n"});').commands, ['y'], 'an interactive reply is light');
+  // No chars key at all is a poll too; one that could hide chars (shorthand, quoted, spread) is unnamed.
+  assert.deepEqual([hint('await tools.write_stdin({session_id: s.session_id, yield_time_ms: 5000});').unnamed, hint('await tools.write_stdin({session_id: s.session_id, yield_time_ms: 5000});').commands], [0, []], 'a poll without chars');
+  for (const p of ['await tools.write_stdin({session_id: 1, chars});', "await tools.write_stdin({session_id: 1, 'chars': x});", 'await tools.write_stdin({session_id: 1, ...o});']) {
+    assert.equal(hint(p).unnamed, 1, p);
+  }
+  assert.equal(hint('await tools.exec_command({workdir: "w"});').unnamed, 1, 'an exec_command with no cmd is not a poll');
+  // Non-code mode: a pending function_call write_stdin, its JSON arguments.chars read the same way.
+  const fc = [line('turn_context', { turn_id: TURN }), line('response_item', { type: 'function_call', name: 'write_stdin', call_id: 'c1', arguments: JSON.stringify({ session_id: 7, chars: 'npm test\n' }) })].join('\n');
+  assert.deepEqual(mcp.pendingExecCommands(fc).commands, ['npm test']);
+  const poll = [line('turn_context', { turn_id: TURN }), line('response_item', { type: 'function_call', name: 'write_stdin', call_id: 'c1', arguments: JSON.stringify({ session_id: 7, chars: '' }) })].join('\n');
+  assert.deepEqual(mcp.pendingExecCommands(poll).commands, []);
+});
+
+test('Jim S1-S3: optional and bracket calls are read; computed tool names count; strings and comments never do', () => {
+  const cases = [
+    // S1: the literal behind `?.` or a literal bracket name is read (and hinted).
+    ['await tools?.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    ['await tools["exec_command"]({cmd:"npm ci"});', ['npm ci'], 0],
+    ["await tools['write_stdin']({session_id: 1, chars:\"npm ci\\n\"});", ['npm ci'], 0],
+    // S2: a computed tool name is unnamed; a literal non-shell one is not.
+    ['const n = pick(); await tools[n]({cmd:"npm ci"});', [], 1],
+    ['await tools["exec" + "_command"]({cmd:"npm ci"});', [], 1],
+    ['await tools["apply_patch"]("*** Begin Patch");', [], 0],
+    // S3: the name inside a literal command, a comment, or a string is no mention.
+    ['await tools.exec_command({cmd:"git grep exec_command"}); await tools.exec_command({cmd:"echo b"});', ['git grep exec_command', 'echo b'], 0],
+    ['// exec_command and write_stdin are the shell tools\nawait tools.exec_command({cmd:"echo a"}); /* tools.exec_command({cmd: c}) */ await tools.exec_command({cmd:"echo b"});', ['echo a', 'echo b'], 0],
+    ['text("tools.exec_command({cmd: c})");', [], 0],
+  ];
+  for (const [input, commands, unnamed] of cases) {
+    const h = hint(input);
+    assert.deepEqual([h.commands, h.unnamed], [commands, unnamed], input);
+  }
 });
 
 test('wiring: the MCP route carries the unnamed count on a degraded PreToolUse', () => {
@@ -98,4 +153,13 @@ test('HOOK: an unnamed exec gets its own heavy-lock row and is still let through
   // A non-degraded call is never counted, whatever it carries.
   s.handle({ hook_event_name: 'PreToolUse', agent_id: 'a1', transport: 'mcp', tool_name: 'Bash', tool_input: { command: 'echo a' }, codex_unnamed_exec: 3 });
   assert.equal(rows(hive).filter((r) => r.action === 'unnamed-exec').length, 2);
+});
+
+test('HOOK (Jim P7): a suite typed into a shell with write_stdin takes the slot through the hint path', async (t) => {
+  const { s, l, hive } = await server(t, 1);
+  const h = hint('const s = await tools.exec_command({cmd:"powershell"}); await tools.write_stdin({session_id: s.session_id, chars:"node test/tools/run-tests.cjs\\n"});');
+  assert.equal(h.unnamed, 0);
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'a1', payload_degraded: true, transport: 'mcp', codex_commands: h.commands });
+  assert.deepEqual(l.snapshot().map((x) => [x.agentId, x.command]), [['a1', 'node test/tools/run-tests.cjs']]);
+  assert.equal(rows(hive).filter((r) => r.action === 'unnamed-exec').length, 0, 'read, so not unnamed');
 });
