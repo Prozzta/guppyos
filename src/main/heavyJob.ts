@@ -78,6 +78,16 @@ function opensQuote(s: string, i: number, d: ShellDialect): boolean {
 }
 
 /**
+ * A-S2: does the `"` at `i` CLOSE sh's double quote? Only an ODD run of backslashes before it
+ * escapes it: `"a\\"` is the string a\ and closed (measured: bash prints a\ and runs what follows).
+ */
+function closesDouble(s: string, i: number): boolean {
+  let n = 0;
+  while (i - n - 1 >= 0 && s[i - n - 1] === '\\') n++;
+  return n % 2 === 0;
+}
+
+/**
  * Split a command line into words, honouring simple quotes (not a full shell parser). Quotes
  * concatenate with attached redirection operators (`2>"path with spaces"`); a quote opens only
  * where the dialect's opensQuote says so (`'` is literal in cmd). A `$(...)` is opaque.
@@ -129,7 +139,7 @@ function stripHeredocs(cmd: string, bodies?: string[]): string {
     const delims: string[] = [];
     for (let j = 0; j < line.length; j++) {
       const c = line[j];
-      if (q) { if (c === q && (q === "'" || line[j - 1] !== '\\')) q = null; continue; }   // A-S1
+      if (q) { if (c === q && (q === "'" || closesDouble(line, j))) q = null; continue; }   // A-S1, A-S2
       if (opensQuote(line, j, 'sh')) { q = c; continue; }
       if (c === '#' && (j === 0 || /\s/.test(line[j - 1]))) break;   // a comment: nothing after it runs
       if (c !== '<' || line[j + 1] !== '<') continue;
@@ -181,7 +191,7 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     if (d === 'sh' && q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
     // A-S1: `'` closes at the next `'` unconditionally (a backslash escapes nothing inside it), and
     // cmd has no backslash escape at all; only inside sh's "..." does `\"` stay open.
-    if (q) { cur += c; if (c === q && (q === "'" || d === 'cmd' || cmd[i - 1] !== '\\')) q = null; continue; }
+    if (q) { cur += c; if (c === q && (q === "'" || d === 'cmd' || closesDouble(cmd, i))) q = null; continue; }
     if (opensQuote(cmd, i, d)) { q = c; cur += c; continue; }
     // cmd's `^` escapes the next character (`^&` is a literal &, not a separator).
     if (d === 'cmd' && c === '^') { cur += c + (cmd[i + 1] ?? ''); i++; continue; }
@@ -423,6 +433,17 @@ function scanJs(text: string): { marker: string | null; helpers: string[] } {
 /** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
 interface NodeProgram { script: string | null; preloads: string[]; inline: string | null; stdin: boolean }
 
+/** The index of node's script argument (-1 for `-e`/`-p` code, stdin `-`, or none). */
+function nodeScriptIndex(args: string[]): number {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (/^(-e|--eval|-p|--print)(=|$)/.test(a) || a === '-') return -1;
+    if (a.startsWith('-')) { if (NODE_VALUE_FLAGS.has(a)) i++; continue; }
+    return i;
+  }
+  return -1;
+}
+
 function nodeProgram(args: string[]): NodeProgram {
   const p: NodeProgram = { script: null, preloads: [], inline: null, stdin: false };
   for (let i = 0; i < args.length; i++) {
@@ -572,17 +593,21 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
       return { heavy: false };
     }
-    const script = args.find((a) => !a.startsWith('-'));
+    // HEAVY-LOCK-PRELOAD-ESCAPE: the script is the first POSITIONAL argument, as nodeProgram reads
+    // it; the value of `--require x` / `-r x` / `--import x` is not the script (it made
+    // `node --require x test/tools/run-tests.cjs` light). `-e` code has no script.
+    const at = nodeScriptIndex(args);
+    const script = at >= 0 ? args[at] : undefined;
     if (script && BENCH_SCRIPT.test(script)) return { heavy: true, kind: 'bench', why: `node ${script.replace(/\\/g, '/').split('/').pop()}` };
     // Jim MF2: a whole-suite runner script with no filter argument is the suite.
     if (script && SUITE_RUNNER.test(script)) {
-      const rest = args.slice(args.indexOf(script) + 1).filter((a) => !a.startsWith('-'));
+      const rest = args.slice(at + 1).filter((a) => !a.startsWith('-'));
       if (!rest.length) return { heavy: true, kind: 'suite', why: `node ${script.replace(/\\/g, '/').split('/').pop()} (no filter)` };
     }
     // HEAVY-JOB-LOCK-FAILOPEN (Andy 42b671): a wrapper SCRIPT that runs the command after it
     // (`node clean-run.cjs node test/tools/run-tests.cjs`): that command is classified too.
     if (script && depth < 2) {
-      const after = args.slice(args.indexOf(script) + 1);
+      const after = args.slice(at + 1);
       const head = after[0]?.replace(/\\/g, '/').split('/').pop()?.toLowerCase().replace(/\.(exe|cmd)$/, '') ?? '';
       if (WRAPPED_BINS.has(head)) return classifyWords(after, depth + 1, ctx);
     }
