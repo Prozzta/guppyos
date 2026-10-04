@@ -53,36 +53,34 @@ function substEnd(s: string, i: number): number {
 }
 
 /**
- * Split a command line into words, honouring simple quotes (not a full shell parser). The same
- * reading as before 1.1.77 (a word that STARTS with a quote is that quoted text; a quote inside a
- * word is a plain character), plus one thing: a `$(...)` is opaque, spaces and quotes included.
+ * Split a command line into words, honouring simple quotes (not a full shell parser). Quotes
+ * concatenate with attached redirection operators (`2>"path with spaces"`); other words preserve
+ * the legacy rule that a quote is special only at the start. A `$(...)` is opaque.
  */
 function words(s: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < s.length) {
-    const c = s[i];
-    if (/\s/.test(c)) { i++; continue; }
-    if (c === '"') {
-      let w = '';
-      let j = i + 1;
-      while (j < s.length && s[j] !== '"') {
-        if (s[j] === '\\' && j + 1 < s.length) { w += s[j] + s[j + 1]; j += 2; continue; }
-        if (s[j] === '$' && s[j + 1] === '(') { const e = substEnd(s, j); w += s.slice(j, e); j = e; continue; }
-        w += s[j]; j++;
-      }
-      if (j < s.length) { out.push(w); i = j + 1; continue; }
-      // Unclosed: as the old regex, a plain non-space word starting AT the quote (read below).
-    }
-    if (c === "'") {
-      const j = s.indexOf("'", i + 1);
-      if (j >= 0) { out.push(s.slice(i + 1, j)); i = j + 1; continue; }
-    }
+    if (/\s/.test(s[i])) { i++; continue; }
     let w = '';
-    while (i < s.length && !/\s/.test(s[i])) {
-      if (s[i] === '$' && s[i + 1] === '(') { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
-      w += s[i]; i++;
+    let q: string | null = null;
+    while (i < s.length) {
+      const c = s[i];
+      if (!q && /\s/.test(c)) break;
+      // Unquoted shell redirections terminate the current word even without surrounding spaces:
+      // `node "suite.cjs">full.log` has a script argument then a redirect, not one path.
+      const redirectAt = /^(?:\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)/;
+      if (!q && w && redirectAt.test(s.slice(i)) && !redirectAt.test(w + s.slice(i))) break;
+      if (c === '\\' && q !== "'" && i + 1 < s.length) { w += c + s[i + 1]; i += 2; continue; }
+      if (c === '"' || c === "'") {
+        if (!q) { q = c; i++; continue; }
+        if (q === c) { q = null; i++; continue; }
+      }
+      if (c === '$' && s[i + 1] === '(' && q !== "'") { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
+      w += c;
+      i++;
     }
+    if (q) w = `__HEAVY_UNCLOSED_QUOTE__${w}`;
     out.push(w);
   }
   return out;
@@ -451,14 +449,39 @@ function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
 }
 
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
-  const ws = leading(ws0);
+  const raw = leading(ws0);
+  const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
+  const ws = raw.map((w) => w.replace(/^__HEAVY_UNCLOSED_QUOTE__/, ''));
   if (!ws.length) return { heavy: false };
+  // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
+  // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
+  // PowerShell environment variables, and the conventional `$(which node)` form.
+  if (/^\$\((?:which|command\s+-v)\s+node\)$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+  if (/^`(?:which|command\s+-v)\s+node`$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+  if (/^\$(?:[A-Za-z_][A-Za-z0-9_]*|env:[A-Za-z_][A-Za-z0-9_]*)$/.test(ws[0]) || /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=+?][^}]*)?\}$/.test(ws[0])) {
+    if (ws.length > 1) {
+      const next = ws[1].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
+      if (/^(?:node|npm|pnpm|yarn|npx|electron-vite|electron-builder|electron-rebuild|vitest)$/.test(next)) return classifyWords(ws.slice(1), depth, ctx);
+      return classifyWords(['node', ...ws.slice(1)], depth, ctx);
+    }
+    return { heavy: false };
+  }
   // An opt-in scale/bench env gate before the command (Jim MF2).
   const prefix = ws0.slice(0, ws0.length - ws.length);
   const gate = prefix.find((w) => BENCH_ENV.test(w));
   if (gate) return { heavy: true, kind: 'bench', why: `${gate.split('=')[0]} (an opt-in bench gate)` };
   const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
   const args = ws.slice(1);
+  if (hasUnclosed && WRAPPERS.has(bin)) return { heavy: false };
+  // cmd.exe /s /c uses doubled outer quotes for one Win32 command string. Reconstruct the inner
+  // executable (including paths with spaces) before classifying; ignoring this opaque-looking
+  // shape let a wrapped install/test and every later chained segment evade the heavy-job lock.
+  const cmdBody = args.indexOf('/c');
+  if (bin === 'cmd' && cmdBody >= 0 && args.length === cmdBody + 2) {
+    const body = args[cmdBody + 1].replace(/^"|"$/g, '');
+    const spacedExe = /^([a-z]:\\.*?\.(?:exe|cmd))\s+(.+)$/i.exec(body);
+    return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, ctx);
+  }
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
   if (WRAPPERS.has(bin) && depth === 0) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
@@ -552,10 +575,21 @@ function substitutions(cmd: string): string[] {
 
 /** Classify a command line: heavy if ANY segment it runs is heavy, a command substitution included. */
 export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): HeavyClass {
+  const backtickNode = /^\s*`(?:which|command\s+-v)\s+node`\s+(.+)\s*$/s.exec(cmd);
+  if (backtickNode) return classifyCommand(`node ${backtickNode[1]}`, depth, ctx);
   const bodies: string[] = [];
   const text = stripHeredocs(cmd, bodies);
   let here: ClassifyCtx = { ...ctx, stdin: undefined };
   for (const seg of segments(text)) {
+    // The raw doubled-quote cmd form is opaque to the shell-word tokenizer: classify its
+    // inner executable before tokenizing, but do so per segment so later chained commands
+    // are still inspected independently.
+    const doubledCmd = /^\s*(?:[a-z]:\\.*\\)?cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+""(.+?\.(?:exe|cmd))"\s*(.*?)"\s*$/i.exec(seg);
+    if (doubledCmd) {
+      const inner = classifyCommand(`"${doubledCmd[1]}" ${doubledCmd[2]}`, depth + 1, ctx);
+      if (inner.heavy) return inner;
+      continue;
+    }
     const raw = words(seg.replace(/\s&$/, ''));
     const ws = stripRedirects(raw);
     // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).
