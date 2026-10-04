@@ -869,9 +869,14 @@ test('CL-M4-WP note presents candidates without writing, then logs separate/repl
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'discard this', cancel: true } }, 'endpoint');
   assert.equal(r.json.choice, 'cancel');
   d.noteCandidates = async () => ({ ...candidates, candidates: [], references: [] });
+  const beforeCancel = store.readLedger('andy').records.length;
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'do not save this', cancel: true } }, 'endpoint');
+  assert.equal(r.json.choice, 'cancel');
+  assert.equal(store.readLedger('andy').records.length, beforeCancel, 'cancel with no candidates writes nothing');
+  assert.deepEqual(choices.at(-1), ['cancel', []], 'cancel is logged with no targets');
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'a fresh fact' } }, 'endpoint');
   assert.equal(r.json.choice, 'new');
-  assert.deepEqual(choices.map(([c]) => c), ['offered', 'separate', 'replace', 'cancel', 'new']);
+  assert.deepEqual(choices.map(([c]) => c), ['offered', 'separate', 'replace', 'cancel', 'cancel', 'new']);
   d.validateSupersedes = () => false;
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'stale target', supersedes: [priorId], reason: 'corrected' } }, 'endpoint');
   assert.equal(r.exit, 2); assert.match(r.error, /currently live/);

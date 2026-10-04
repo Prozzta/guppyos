@@ -184,14 +184,16 @@ test('Jim S-3: receipts.jsonl rotates past its size and keeps a bounded number o
   for (const f of files) assert.ok(fs.statSync(path.join(dir, f)).size <= 1000);
 });
 
-test('Jim M-3: the working set fits its character cap (set + carry + mail reserve = 9,500), at a scaled-down budget', async () => {
-  assert.equal(D.WORKING_SET_MAX_CHARS, MAIL_JOINED_BUDGET - COMPACT_CARRY_MAX - D.WORKING_SET_MAIL_RESERVE);
+test('Jim M-3: the 9,000-char briefing ceiling is preserved; current joined envelope delivers at most 4,500', async () => {
+  assert.equal(D.WORKING_SET_MAX_CHARS, 9_000);
+  assert.equal(D.WORKING_SET_DELIVERY_MAX_CHARS, MAIL_JOINED_BUDGET - COMPACT_CARRY_MAX - D.WORKING_SET_MAIL_RESERVE);
+  assert.equal(D.WORKING_SET_DELIVERY_MAX_CHARS, 4_500, '9,500 − 1,500 − 3,500 leaves 4,500 today');
   assert.equal(MAIL_JOINED_BUDGET, 9_500);
   const x = setup();
   for (let i = 0; i < 120; i++) await note(x.ref.store, 'a1', `synthetic claim ${i} about the widget relay and the crate on port ${4400 + i}, with some more words to make it long`);
   const w = await x.delivery.workingSet('a1');
-  assert.ok(w.length <= D.WORKING_SET_MAX_CHARS, `${w.length} > ${D.WORKING_SET_MAX_CHARS}`);
-  assert.ok(w.length > D.WORKING_SET_MAX_CHARS * 0.6, 'and it uses most of it');
+  assert.ok(w.length <= D.WORKING_SET_DELIVERY_MAX_CHARS, `${w.length} > ${D.WORKING_SET_DELIVERY_MAX_CHARS}`);
+  assert.ok(w.length > D.WORKING_SET_DELIVERY_MAX_CHARS * 0.6, 'uses most of the currently available joined-envelope room');
   assert.ok(x.receipts.at(-1).receipt.budget < 3000, 'B scaled down to fit');
   assert.match(w, /\+\d+ more/, 'the overflow is shown');
 });

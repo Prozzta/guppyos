@@ -7,7 +7,7 @@ import { reconcilePromptText } from './reconcile';
 
 /** B8 fixed budget shares; lower-tier unused capacity flows down only. */
 export const WORKING_SET_TIER_SHARES = [0.40, 0.10, 0.50] as const;
-export const DEFAULT_WORKING_SET_BUDGET = 4500;
+export const DEFAULT_WORKING_SET_BUDGET = 3000;
 export type CountTokens = (text: string) => number;
 export type RenderMemoryMdOptions = { exclude?: (id: string) => boolean };
 export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', options?: RenderMemoryMdOptions) => string;
@@ -43,6 +43,13 @@ function historyGroups(claims: ClaimRec[], state: ClaimsState): Map<string, Clai
   const groups = new Map<string, ClaimRec[]>();
   for (const c of claims) { const r = root(c.id); const group = groups.get(r) ?? []; group.push(c); groups.set(r, group); }
   return groups;
+}
+
+function historyCurrent(group: ClaimRec[], state: ClaimsState): ClaimRec | undefined {
+  return group.slice().sort((a, b) => {
+    const live = Number(state.claims[a.id]?.status === 'live') - Number(state.claims[b.id]?.status === 'live');
+    return live || cmp(a.at || a.wt, b.at || b.wt) || cmp(a.wt, b.wt) || cmp(a.id, b.id);
+  }).at(-1);
 }
 
 const claimDate = (c: ClaimRec): string => (c.at || c.wt).slice(0, 10);
@@ -121,24 +128,45 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     }
     const markersOmitted = markers.length - markersIncluded;
     const historyPointers = [...histories.values()].filter(group => group.length > 1)
-      .map(group => group.filter(c => state.claims[c.id]?.status === 'live').at(-1))
-      .filter((c): c is ClaimRec => !!c)
+      .map(group => historyCurrent(group, state))
+      .filter((c): c is ClaimRec => !!c && state.claims[c.id]?.status === 'live')
       .map(c => ({ id: c.id, line: `- ${c.key ?? c.id} history: memory.md#${historyAnchor(c.id)}` }));
-    const pointerReserve = historyPointers.reduce((n, p) => n + tokens(countTokens, p.line), 0);
-    const t2Limit = Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[2]) - pointerReserve) +
-      Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
-      Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
-    let t2Used = 0;
-    const t2Cap = Math.min(cap - used, t2Limit);
-    for (const { claim } of groups[2]) {
-      const id = claim.id; const group = historyFor.get(id);
-      const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
-      const n = tokens(countTokens, line);
-      if (tokens(countTokens, [...output, line].join('\n')) <= cap && t2Used + n <= t2Cap) {
-        output.push(line); used = tokens(countTokens, output.join('\n')); t2Used += n; tierUsed[2] += n;
-        included.push({ id, tier: 2, tokens: n });
-      } else excluded.set(id, 'budget');
+    const t0Included = new Set(included.map(x => x.id));
+    const selectTier2 = (pointerReserve: number) => {
+      const selected: Array<{ id: string; line: string; n: number }> = [];
+      let selectedTokens = 0;
+      const t2Limit = Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[2]) - pointerReserve) +
+        Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
+        Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
+      const t2Cap = Math.min(cap - used, t2Limit);
+      for (const { claim } of groups[2]) {
+        const id = claim.id; const group = historyFor.get(id);
+        const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+        const n = tokens(countTokens, line);
+        if (tokens(countTokens, [...output, ...selected.map(x => x.line), line].join('\n')) <= cap && selectedTokens + n <= t2Cap) {
+          selected.push({ id, line, n }); selectedTokens += n;
+        }
+      }
+      return selected;
+    };
+    const reserveFor = (selected: Array<{ id: string }>): number => {
+      const inline = new Set([...t0Included, ...selected.map(x => x.id)]);
+      return historyPointers.filter(p => !inline.has(p.id)).reduce((n, p) => n + tokens(countTokens, p.line), 0);
+    };
+    let tier2 = selectTier2(0);
+    let pointerReserve = 0;
+    for (let pass = 0; pass <= historyPointers.length; pass++) {
+      const needed = reserveFor(tier2);
+      if (needed <= pointerReserve) break;
+      pointerReserve = needed;
+      tier2 = selectTier2(pointerReserve);
     }
+    for (const { id, line, n } of tier2) {
+      output.push(line); used = tokens(countTokens, output.join('\n')); tierUsed[2] += n;
+      included.push({ id, tier: 2, tokens: n });
+    }
+    const includedNow = new Set(included.map(x => x.id));
+    for (const { claim } of groups[2]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
     const includedIds = new Set(included.map(x => x.id));
     for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
       if (tokens(countTokens, [...output, pointer.line].join('\n')) <= cap) {
@@ -187,8 +215,9 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
         .filter(line => ![...lessons].some(tag => line.includes(tag))));
     } else {
       lines.push('', '## How I work (standing lessons)');
+      const grouped = new Set([...historyGroups(claims, state).values()].filter(group => group.length > 1).flatMap(group => group.map(c => c.id)));
       for (const rec of selectedRecords) {
-        if (rec.t === 'claim' && rec.kind === 'lesson' && state.claims[rec.id]?.status === 'live') {
+        if (rec.t === 'claim' && rec.kind === 'lesson' && state.claims[rec.id]?.status === 'live' && !grouped.has(rec.id)) {
           lines.push(claimLine(rec, state.claims[rec.id].status));
         }
       }
@@ -204,12 +233,11 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
           if (!(rec.kind === 'lesson' && status === 'live')) lines.push(claimLine(rec, status));
           continue;
         }
-        const live = kept.filter(rec => state.claims[rec.id]?.status === 'live');
-        const current = live.at(-1) ?? kept.at(-1)!;
+        const current = historyCurrent(kept, state) ?? kept.at(-1)!;
         lines.push('', `### Claim history: ${current.key ?? current.id}`, `<a id="${historyAnchor(current.id)}"></a>`);
         for (const rec of kept) {
           const status = state.claims[rec.id]?.status ?? 'live';
-          const label = rec.id === current.id ? 'CURRENT' : 'PRIOR';
+          const label = rec.id === current.id ? 'CURRENT' : state.claims[rec.id]?.status === 'live' ? 'CONFLICT' : 'PRIOR';
           const [first, ...rest] = rec.text.split('\n');
           lines.push(`- ${label} — ${claimDate(rec)} — ${first} [status:${status}] [c:${rec.id}]`, ...rest.map(line => `  ${line}`));
         }

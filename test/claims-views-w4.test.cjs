@@ -13,6 +13,7 @@ const world = (flags = {}) => ({ flags, counters: {} });
 
 test('B8 shares are pinned and working-set bytes, receipt, and marker-first memory are deterministic', () => {
   assert.deepEqual(V.WORKING_SET_TIER_SHARES, [0.4, 0.1, 0.5]);
+  assert.equal(V.DEFAULT_WORKING_SET_BUDGET, 3000, 'the frozen working-set token budget remains 3k');
   const records = [claim('a', 'alpha'), claim('b', 'beta')];
   const views = V.createClaimViews(records, s => s.length);
   const state = stateFor(records);
@@ -107,4 +108,29 @@ test('accepted reconcile mail can enter; live overflow is budgeted and marked +N
   assert.ok(result.receipt.included.some(x => x.id === 'm1'));
   assert.ok(result.receipt.excluded.some(x => x.reason === 'budget'));
   assert.match(result.text, /\+\d+ more/);
+});
+
+test('S1: a history group with two live members labels one CURRENT, one CONFLICT, and anchors one real current', () => {
+  const old = claim('old', 'old version', { at: '2026-01-01', wt: '2026-01-01' });
+  const a = claim('live-a', 'earlier live successor', { at: '2026-02-01', wt: '2026-02-01', supersedes: ['old'] });
+  const b = claim('live-b', 'later live successor', { at: '2026-03-01', wt: '2026-03-01', supersedes: ['old'] });
+  const records = [old, a, b];
+  const state = stateFor(records); state.claims.old.status = 'superseded';
+  const views = V.createClaimViews(records, text => text.includes('[c:') ? 200 : 1);
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  assert.match(full, /CURRENT — 2026-03-01 — later live successor/);
+  assert.match(full, /CONFLICT — 2026-02-01 — earlier live successor/);
+  const working = views.buildWorkingSet(state, world(), 50).text;
+  assert.equal((working.match(/history: memory\.md#/g) || []).length, 1);
+  assert.match(working, /history: memory\.md#claim-history-live-b/);
+});
+
+test('S4: a current lesson with history is rendered only once in complete mode', () => {
+  const old = claim('lesson-old', 'old guidance', { kind: 'lesson', at: '2026-01-01', wt: '2026-01-01' });
+  const current = claim('lesson-current', 'current guidance', { kind: 'lesson', at: '2026-02-01', wt: '2026-02-01', supersedes: ['lesson-old'] });
+  const records = [old, current];
+  const state = stateFor(records); state.claims['lesson-old'].status = 'superseded';
+  const full = V.createClaimViews(records, s => s.length).renderMemoryMd(state, world(), 'complete');
+  assert.equal(full.split('current guidance').length - 1, 1);
+  assert.match(full, /CURRENT — 2026-02-01 — current guidance/);
 });
