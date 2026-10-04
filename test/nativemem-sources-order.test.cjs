@@ -1,0 +1,50 @@
+'use strict';
+/**
+ * NATIVEMEM-SOURCES-LOCALE-SORT (Creed, CL-W8-STREAM-ORDER audit). An agent's `.md` sources, and the
+ * wake-up's rooms, were ordered with localeCompare: ICU puts `alpha_notes` before `alpha-notes` and
+ * `alpha` before `Zeta` (case-insensitive first), and that depends on the machine's locale and Node
+ * build. They are now ordinal (UTF-16 code units, as `.sort()`), the same everywhere, with the
+ * intended `memory-archive-*.md` before `memory.md`. File names are invented.
+ */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const loadTs = require('./load-ts.cjs');
+
+const { discoverSources, ordinal } = loadTs('src/main/nativeMemory/sources.ts');
+const { formatWakeUp } = loadTs('src/main/nativeMemory/format.ts');
+
+test('an agent\'s .md sources come out in ordinal order: case and - before _ as code units, archives before memory.md', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nm-order-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dir = path.join(root, 'agents', 'a1');
+  fs.mkdirSync(dir, { recursive: true });
+  const names = ['memory.md', 'b.md', 'alpha_notes.md', 'Zeta-REPORT.md', 'memory-archive-2026-09-27.md', 'alpha-notes.md', 'memory-archive-2026-10-03.md'];
+  for (const n of names) fs.writeFileSync(path.join(dir, n), 'invented\n');
+  const d = discoverSources(root, { topLevel: [], include: {} });
+  assert.deepEqual(d.eligible.map((e) => path.basename(e.path)), [
+    'Zeta-REPORT.md',                  // 'Z' (0x5A) before every lower-case letter
+    'alpha-notes.md',                  // '-' (0x2D) before '_' (0x5F)
+    'alpha_notes.md',
+    'b.md',
+    'memory-archive-2026-09-27.md',    // archives, oldest first...
+    'memory-archive-2026-10-03.md',
+    'memory.md'                        // ...then the live memory ('-' < '.')
+  ]);
+  // The same order on every run and every locale: it is exactly the code-unit order.
+  assert.deepEqual(d.eligible.map((e) => path.basename(e.path)), [...names].sort());
+});
+
+test('ordinal: a plain code-unit comparator', () => {
+  assert.deepEqual(['b', 'B', 'a_', 'a-', 'a'].sort(ordinal), ['B', 'a', 'a-', 'a_', 'b']);
+  assert.equal(ordinal('x', 'x'), 0);
+});
+
+test('wake-up rooms: memory first, then ordinal (notes-x before notes_x)', () => {
+  const e = (room) => ({ wing: 'a1', room, source: `agents/a1/${room}.md`, content: `invented ${room}` });
+  const text = formatWakeUp(null, [e('notes_x'), e('notes-x'), e('memory'), e('b')]);
+  const order = [...text.matchAll(/^\[([^\]]+)\]$/gm)].map((m) => m[1]);
+  assert.deepEqual(order, ['memory', 'b', 'notes-x', 'notes_x']);
+});

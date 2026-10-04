@@ -97,6 +97,17 @@ function isFileWithin(abs: string, maxBytes: number): 'ok' | 'too-big' | 'unread
   }
 }
 
+/**
+ * NATIVEMEM-SOURCES-LOCALE-SORT: an ORDINAL (UTF-16 code unit) comparator, the order `.sort()`
+ * gives. `localeCompare` follows the machine's ICU locale (case-insensitive first, punctuation
+ * weighted differently), so the same files came out in a different order on another locale or
+ * Node build (Creed: 8 of 15 pairs disagreed on case and underscore names). Ordinal is the same
+ * everywhere and keeps the intended `memory-archive-*.md` before `memory.md` ('-' < '.').
+ */
+export function ordinal(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** Walk every `.md` below `dir` (for the excluded report only), skipping mail and caches. */
 function walkMd(dir: string, out: string[], depth = 0): void {
   if (depth > 8) return;
@@ -133,7 +144,7 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
     walkMd(dir, allMd);
     let files: import('node:fs').Dirent[] = [];
     try { files = readdirSync(dir, { withFileTypes: true }); } catch { unreadable++; continue; }
-    for (const f of files.filter((x) => x.isFile() && /\.md$/i.test(x.name)).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const f of files.filter((x) => x.isFile() && /\.md$/i.test(x.name)).sort((a, b) => ordinal(a.name, b.name))) {
       add(join(dir, f.name), f.name.toLowerCase() === 'memory.md' ? 'memory' : 'deliverable', id, f.name);
     }
     for (const p of config.include[id] ?? []) {
