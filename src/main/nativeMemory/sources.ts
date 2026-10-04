@@ -122,7 +122,8 @@ export function readSourcesConfig(hiveRoot: string): SourcesConfig {
 
 const AGENT_ID = /^[A-Za-z0-9._-]+$/;
 
-function roomOf(fileName: string): string {
+/** The room of an indexed Markdown file: `memory` for memory.md, else its name without .md, lowercased. */
+export function roomOf(fileName: string): string {
   return fileName.toLowerCase() === 'memory.md' ? 'memory' : fileName.replace(/\.md$/i, '').toLowerCase();
 }
 

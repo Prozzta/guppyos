@@ -79,6 +79,15 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
     // writer mode before an unplanned downgrade: memory.md is the small generated view
     fs.writeFileSync(path.join(agentDir, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# Memory - ${agent}\n\n## How I work (standing lessons)\n${LESSONS.join('\n')}\n`);
   }
+  // G3.5: the import carries each entry's heading as `section`, and neither export prints it per bullet.
+  const byId = new Map(records.map((r) => [r.id, r]));
+  assert.ok(records.some((r) => r.section), `${agent}: W6 drafts carry their heading (section)`);
+  const exported = E.exportFiles(agentDir).map((f) => fs.readFileSync(path.join(agentDir, f), 'utf8')).join('\n')
+    + (scenario === 'planned' ? `\n${fs.readFileSync(path.join(agentDir, 'memory.md'), 'utf8')}` : '');
+  for (const line of exported.split('\n')) {
+    const r = byId.get(/\[c:([^\]\s]+)\]/.exec(line)?.[1]);
+    if (r?.section && !r.text.includes(r.section)) assert.ok(!line.includes(r.section), `${agent}: an exported bullet never prints its section`);
+  }
   return records.length;
 }
 

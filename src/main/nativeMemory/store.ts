@@ -98,7 +98,9 @@ const MODE_VIS: Record<SearchMode, readonly Vis[]> = { live: ['live'], history: 
 const visList = (mode: SearchMode): string => MODE_VIS[mode].map((v) => `'${v}'`).join(', ');
 
 /** One claim chunk to index: ClaimChunk plus its part number within the claim. */
-export type ClaimPart = ClaimChunk & { part: number };
+export type ClaimPart = ClaimChunk & { part: number; room?: string };
+/** A claim chunk's room when main sent none (a sender from before G3.5). */
+export const CLAIM_ROOM_DEFAULT = 'claims';
 
 /**
  * CL-S1 M3: what a claim part EMBEDS. A claim chunk's content is its `kind · key · date` header line
@@ -124,6 +126,8 @@ export interface ClaimPlan {
   drop: string[];
   /** Status changes (no re-embed): claim id -> new status. */
   status: Array<{ claimId: string; status: string; at: string }>;
+  /** G3.5: room changes (no re-embed): claim id -> the room all its chunks move to. */
+  rooms?: Array<{ claimId: string; room: string }>;
 }
 
 const f32 = (v: Float32Array): Buffer => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
@@ -414,7 +418,15 @@ export class NativeMemoryStore {
     for (const [id, ps] of incoming) {
       if (!add.some((p) => p.claimId === id) && status.get(id) !== ps[0].status) st.push({ claimId: id, status: ps[0].status, at: ps[0].at });
     }
-    return { wing, add, drop: [...drop], status: st };
+    // G3.5: a kept claim filed in another room than main now names moves (rows only, never a re-embed).
+    const roomNow = new Map((this.db.prepare('SELECT claim_id, room FROM chunks WHERE wing = ? AND claim_id IS NOT NULL AND claim_part = 0').all(wing) as Array<{ claim_id: string; room: string }>)
+      .map((r) => [r.claim_id, r.room]));
+    const rooms: NonNullable<ClaimPlan['rooms']> = [];
+    for (const [id, ps] of incoming) {
+      const want = ps[0].room ?? CLAIM_ROOM_DEFAULT;
+      if (!add.some((p) => p.claimId === id) && roomNow.has(id) && roomNow.get(id) !== want) rooms.push({ claimId: id, room: want });
+    }
+    return { wing, add, drop: [...drop], status: st, rooms };
   }
 
   /** Apply a claim plan with the embeddings of `plan.add` (same order), atomically. */
@@ -433,7 +445,7 @@ export class NativeMemoryStore {
       const setStatus = this.db.prepare('INSERT INTO claim_status(claim_id, status, vis, at) VALUES (?, ?, ?, ?) ON CONFLICT(claim_id) DO UPDATE SET status = excluded.status, vis = excluded.vis, at = excluded.at');
       plan.add.forEach((p, i) => {
         insClaim.run(p.claimId, p.part, plan.wing, p.kind, p.ckey, p.at, p.content, p.contentSha256);
-        const info = insChunk.run(sourcePath, ord++, plan.wing, 'claims', p.content, p.contentSha256, Date.parse(p.at) || meta.nowMs, p.claimId, p.part);
+        const info = insChunk.run(sourcePath, ord++, plan.wing, p.room ?? CLAIM_ROOM_DEFAULT, p.content, p.contentSha256, Date.parse(p.at) || meta.nowMs, p.claimId, p.part);
         insVec.run(BigInt(info.lastInsertRowid), f32(embeddings[i]), visOf(p.status));
         if (p.part === 0) setStatus.run(p.claimId, p.status, visOf(p.status), p.at);
       });
@@ -445,9 +457,11 @@ export class NativeMemoryStore {
         setStatus.run(s.claimId, s.status, visOf(s.status), s.at);
         for (const r of chunksOf.all(s.claimId) as Array<{ chunk_id: number }>) setVis.run(visOf(s.status), BigInt(r.chunk_id));
       }
+      const setRoom = this.db.prepare('UPDATE chunks SET room = ? WHERE claim_id = ?');
+      for (const r of plan.rooms ?? []) setRoom.run(r.room, r.claimId);
       // The wing's vectors are now all of this recipe (in the same transaction as the re-embed).
       if (meta.embedVersion !== undefined) this.setMeta(claimEmbedVersionKey(plan.wing), String(meta.embedVersion));
-      if (plan.add.length || plan.drop.length || plan.status.length) this.bumpGeneration();
+      if (plan.add.length || plan.drop.length || plan.status.length || plan.rooms?.length) this.bumpGeneration();
     }).immediate();
   }
 

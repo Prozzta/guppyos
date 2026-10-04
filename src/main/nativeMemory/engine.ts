@@ -364,7 +364,7 @@ export class MemoryEngine {
    * update statuses in place (A4). Refused for an agent that is not reader or writer here (then its
    * claims are not a source, and the reconcile removes any that were). Serialised per agent.
    */
-  syncClaims(a: ClaimsSyncArgs): Promise<{ embedded: number; dropped: number; statusChanges: number }> {
+  syncClaims(a: ClaimsSyncArgs): Promise<{ embedded: number; dropped: number; statusChanges: number; roomChanges: number }> {
     const prior = this.claimSyncs.get(a.wing) ?? Promise.resolve();
     const run = prior.catch(() => undefined).then(async () => {
       // Indexed only while the agent's claims are a source (reader/writer AND a ledger exists), so a
@@ -387,8 +387,8 @@ export class MemoryEngine {
         vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
       }
       await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION }));
-      this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length });
-      return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length };
+      this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 });
+      return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 };
     });
     this.claimSyncs.set(a.wing, run.catch(() => undefined));
     return run;

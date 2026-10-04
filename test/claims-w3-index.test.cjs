@@ -40,6 +40,18 @@ test('G3.1 no leak: 3 random corpora x 1,000 queries; no superseded, retracted o
   assert.ok(r.allGoneHits > 0, '--all does');
 });
 
+test('G3.5 (1): a room-scoped search finds claims in their Markdown room; an older index moves its rows once, never re-embedding', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('rooms');
+  assert.deepEqual(r.before.archive, [], 'the loss Jim measured: the archive room had no native hit');
+  assert.equal(r.before.claims.length, 3);
+  assert.deepEqual(r.moved, { embedded: 0, roomChanges: 3 }, 'rows only, no re-embed');
+  assert.deepEqual(r.after.archive, ['c-0000000000r1']);
+  assert.deepEqual(r.after.memory, ['c-0000000000r2', 'c-0000000000r3'], 'memory.md entries and notes: memory');
+  assert.deepEqual(r.after.claims, []);
+  assert.equal(r.again, 0, 'once');
+  assert.deepEqual(r.fresh, { embedded: 3, roomChanges: 0, archive: ['c-0000000000r1'], memory: ['c-0000000000r2', 'c-0000000000r3'] }, 'a fresh index files each chunk in its room at insert');
+});
+
 test('CL-S1 M3: a claim part embeds its text, never its kind · key · date header; an index from before re-embeds each wing once', { timeout: 5 * 60_000 }, async () => {
   const r = await scenario('embedtext');
   assert.equal(r.firstEmbedded, 3);
@@ -116,8 +128,8 @@ test('claims is append-only in the index (triggers); claim_status is mutable; a 
   assert.equal(r.statusUpdate, 'ok');
   assert.equal(r.claims, 1);
   assert.equal(r.schema, '2');
-  assert.deepEqual(r.again, { embedded: 0, dropped: 0, statusChanges: 1 }, 'a hand-edited status is restored from the ledger, without a re-embed');
-  assert.deepEqual(r.again2, { embedded: 0, dropped: 0, statusChanges: 0 }, 'then a resync is a no-op');
+  assert.deepEqual(r.again, { embedded: 0, dropped: 0, statusChanges: 1, roomChanges: 0 }, 'a hand-edited status is restored from the ledger, without a re-embed');
+  assert.deepEqual(r.again2, { embedded: 0, dropped: 0, statusChanges: 0, roomChanges: 0 }, 'then a resync is a no-op');
 });
 
 test('R5 candidates: same agent, live, cosine >= tau2, not the claim itself, not on the same key', { timeout: 5 * 60_000 }, async () => {

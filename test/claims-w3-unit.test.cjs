@@ -42,7 +42,7 @@ test('chunksFor: one claim one chunk with the kind · key · date header; events
   const out = chunksFor(records, state(['c-000000000001']));
   assert.equal(out.length, 1);
   assert.equal(out[0].content, 'decision · release.current · 2026-10-03\nthe relay uses port 4471');
-  assert.deepEqual({ ...out[0], contentSha256: undefined }, { claimId: 'c-000000000001', wing: 'a1', kind: 'decision', ckey: 'release.current', at: '2026-10-03T10:00:00.000Z', status: 'live', content: out[0].content, contentSha256: undefined });
+  assert.deepEqual({ ...out[0], contentSha256: undefined }, { claimId: 'c-000000000001', wing: 'a1', kind: 'decision', ckey: 'release.current', at: '2026-10-03T10:00:00.000Z', status: 'live', content: out[0].content, contentSha256: undefined, room: 'memory' });
   assert.match(out[0].contentSha256, /^[0-9a-f]{64}$/);
   assert.equal(claimHeader({ kind: 'fact', at: '2026-01-02T00:00:00.000Z' }), 'fact · - · 2026-01-02');
 });
@@ -212,7 +212,9 @@ test('CL-S1 M3: claimEmbedText is a claim chunk\'s text without its kind · key 
   const parts = chunksFor([rec(long)], state(['c-0000000000a1']));
   assert.ok(parts.length >= 2);
   for (const p of parts) assert.ok(!claimEmbedText(p.content).startsWith(claimHeader(rec(long))), 'no part embeds the header');
-  assert.equal(parts.map((p) => claimEmbedText(p.content)).join(' ').replace(/\s+/g, ' '), long);
+  // G3.5: a later part starts with the claim's lead line; past it, the parts are the text in order.
+  const bodies = parts.map((p, i) => { const t = claimEmbedText(p.content); return i === 0 ? t : t.slice(t.indexOf('\n') + 1); });
+  assert.equal(bodies.join(' ').replace(/\s+/g, ' '), long);
   assert.equal(claimEmbedText('a text with no header line'), 'a text with no header line');
   assert.equal(claimEmbedText('fact · - · 2026-10-03\nline one\nline two'), 'line one\nline two', 'only the first line is the header');
   assert.equal(CLAIM_EMBED_VERSION, 2, 'bumped from the header-embedding recipe (1)');

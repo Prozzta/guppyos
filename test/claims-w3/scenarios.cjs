@@ -118,6 +118,41 @@ module.exports = async (drill) => {
     return out;
   }
 
+  if (s === 'rooms') {
+    // G3.5 (1): claim chunks are filed in their Markdown room, so a room-scoped search keeps legacy
+    // parity; an index filed before (every claim in `claims`) moves its rows once, with no re-embed.
+    fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
+    ledger('a1');
+    manifest({ a1: 'writer' });
+    const store = open(); const emb = bowEmbedder(); const eng = engine(store, emb);
+    await eng.backfill();
+    const { chunksFor } = L('src/main/claims/chunks.ts');
+    const r = (id, text, legacy) => ({ v: 1, id, t: 'claim', kind: 'fact', text, source: legacy ? 'legacy' : 'self', at: '2026-09-27T10:00:00.000Z', wt: '2026-10-04T10:00:00.000Z', agent: 'a1', prev: '', mac: '', ...(legacy ? { legacy } : {}) });
+    const recs = [
+      r('c-0000000000r1', 'zeppelin hangar archived fact', { file: 'memory-archive-2026-09-27.md', line: 4, sha256: 'a'.repeat(64) }),
+      r('c-0000000000r2', 'zeppelin hangar memory fact', { file: 'memory.md', line: 7, sha256: 'b'.repeat(64) }),
+      r('c-0000000000r3', 'zeppelin hangar note fact', null),
+    ];
+    const chunks = chunksFor(recs, { claims: Object.fromEntries(recs.map((x) => [x.id, { id: x.id, status: 'live' }])) });
+    const inRoom = async (room) => claimHits(await eng.search({ query: 'zeppelin hangar', results: 10, wing: 'a1', room })).map((h) => h.claimId).sort();
+    // An index from before G3.5: the sender named no room.
+    await sync(eng, 'a1', chunks.map(({ room, ...c }) => c));
+    const out = { before: { archive: await inRoom('memory-archive-2026-09-27'), claims: await inRoom('claims') } };
+    const moved = await sync(eng, 'a1', chunks);
+    out.moved = { embedded: moved.embedded, roomChanges: moved.roomChanges };
+    out.after = { archive: await inRoom('memory-archive-2026-09-27'), memory: await inRoom('memory'), claims: await inRoom('claims') };
+    out.again = (await sync(eng, 'a1', chunks)).roomChanges;
+    await eng.close(); store.close();
+    // A fresh index: each chunk is INSERTED in its room (no move needed).
+    const store2 = open(); const eng2 = engine(store2, bowEmbedder());
+    await eng2.backfill();
+    const first = await sync(eng2, 'a1', chunks);
+    const inRoom2 = async (room) => claimHits(await eng2.search({ query: 'zeppelin hangar', results: 10, wing: 'a1', room })).map((h) => h.claimId).sort();
+    out.fresh = { embedded: first.embedded, roomChanges: first.roomChanges, archive: await inRoom2('memory-archive-2026-09-27'), memory: await inRoom2('memory') };
+    await eng2.close(); store2.close();
+    return out;
+  }
+
   if (s === 'embedtext') {
     // CL-S1 M3: a claim part is embedded as its TEXT, never with its `kind · key · date` header, and an
     // index made under the old recipe (no claim_embed_version for the wing) re-embeds the wing once.

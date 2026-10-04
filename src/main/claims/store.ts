@@ -56,7 +56,7 @@ import { redactSecrets } from './redact';
 import { normalizeTtl, parseStoredTtl, zonelessHint } from './ttl';
 import { checkKey, DEFAULT_KEY_REGISTRY, loadRegistry, saveRegistry } from './registry';
 import { derive } from './derive';
-import { R1_LEGACY_REASON } from './migrate';
+import { clampSection, R1_LEGACY_REASON } from './migrate';
 
 /** The file operations an append uses; injectable so tests can spy on the order and simulate a crash. */
 export interface LedgerIo {
@@ -102,7 +102,7 @@ const FD_IDLE_MS = 30_000;
 const ANCHOR_DELAY_MS = 1_000;
 const REF_VALUE_MAX = 500;
 
-const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'retracts', 'at', 'source', 'legacy']);
+const CLAIM_DRAFT_FIELDS = new Set(['t', 'kind', 'text', 'key', 'refs', 'ttl', 'pin', 'supersedes', 'retracts', 'at', 'source', 'legacy', 'section']);
 const EVENT_DRAFT_FIELDS = new Set(['t', 'ev', 'targets', 'answer']);
 const DRAFT_EVENTS = new Set(['accept', 'dismiss', 'reconcile-answer', 'revert', 'pin', 'unpin']);
 const ANSWERS = new Set(['keep-both', 'supersedes', 'retract']);
@@ -133,6 +133,9 @@ interface AgentState {
  * - the stored TTL (none = ''): a restatement with another TTL is a new claim;
  * - the refs, as a set (sorted, never deduplicated or folded): a restatement that adds or changes
  *   refs is a new claim, so its evidence is never lost.
+ * NOT part of it, on purpose: `section` (G3.5, the W6 heading). It is search context, not the claim;
+ * the same entry under another heading is the same claim, so W6's whole-entry dedup (legacy.sha256,
+ * ledgerEntryCounts) and A7.2 hold. Pinned by claims-g35.test.cjs.
  */
 export function r1Identity(rec: Pick<ClaimRec, 'kind' | 'key' | 'text' | 'source' | 'ttl' | 'refs'>): string {
   const cls = typeof rec.source === 'string' && rec.source.startsWith('mail:') ? 'mail' : 'owner';
@@ -741,6 +744,10 @@ export class ClaimStore {
       source = draft.source ?? 'self';
     }
     if (external && draft.legacy !== undefined) return { error: 'refused: legacy provenance is set by the import only' };
+    // G3.5: a section (the W6 heading) comes from the import only; it is cut, never refused.
+    if (draft.section !== undefined && origin !== 'w6-internal') return { error: 'refused: a section is set by the import only' };
+    if (draft.section !== undefined && typeof draft.section !== 'string') return { error: 'section is text' };
+    const section = clampSection(draft.section);
     if (draft.legacy !== undefined) {
       const lg = draft.legacy as unknown;
       if (!isObj(lg) || typeof lg.file !== 'string' || !lg.file || lg.file.length > 300 || !Number.isInteger(lg.line) || (lg.line as number) < 0
@@ -816,6 +823,7 @@ export class ClaimStore {
       ...(draft.pin ? { pin: true as const } : {}),
       ...(red.redacted ? { redacted: true as const } : {}),
       ...(draft.legacy !== undefined ? { legacy: draft.legacy } : {}),
+      ...(section !== undefined ? { section } : {}),
     };
     return { rec, registryAdded };
   }

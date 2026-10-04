@@ -154,6 +154,23 @@ export function isoAt(date: string | null): string | undefined {
 }
 
 /** The drafts for one entry (one per part, all with the same legacy provenance), or its refusal. */
+/** G3.5: the longest section (heading) a claim carries; a longer one is cut, never refused. */
+export const SECTION_MAX = 200;
+
+/** A heading as a claim's `section`: trimmed, cut to SECTION_MAX UTF-16 units on a code-point boundary
+ *  (never a lone surrogate), deterministically; undefined for none. */
+export function clampSection(section: unknown): string | undefined {
+  if (typeof section !== 'string') return undefined;
+  let s = section.trim();
+  if (!s) return undefined;
+  if (s.length > SECTION_MAX) {
+    s = s.slice(0, SECTION_MAX);
+    if (/[\uD800-\uDBFF]$/.test(s)) s = s.slice(0, -1);
+    s = s.trimEnd();
+  }
+  return s || undefined;
+}
+
 export function entryDrafts(e: Entry, source: 'legacy' | 'self'): { drafts: RecordDraft[]; refusal: Refusal | null } {
   const parts = splitText(e.text);
   if (!parts) {
@@ -162,8 +179,10 @@ export function entryDrafts(e: Entry, source: 'legacy' | 'self'): { drafts: Reco
   }
   const kind: ClaimKind = e.lesson ? 'lesson' : 'fact';
   const at = isoAt(e.date);
+  // G3.5: the heading the entry stood under, on BOTH W6 paths (the import and parseNewBullets).
+  const section = clampSection(e.section);
   const drafts = parts.map((text) => {
-    const d: RecordDraft = { t: 'claim', kind, text, source, legacy: { file: e.file, line: e.line, sha256: e.sha256 } };
+    const d: RecordDraft = { t: 'claim', kind, text, source, legacy: { file: e.file, line: e.line, sha256: e.sha256 }, ...(section ? { section } : {}) };
     if (at) d.at = at;
     if (kind === 'lesson') d.pin = true;
     return d;

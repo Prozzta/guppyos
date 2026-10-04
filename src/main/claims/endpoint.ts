@@ -20,7 +20,7 @@ export interface ClaimReply { ok: boolean; exit: number; text?: string; json?: u
 
 const EXIT = { ok: 0, usage: 2, unavailable: 3 } as const;
 /** Field names an agent must never send: identity and provenance are main's (G1.3, god cac15f). */
-const FORBIDDEN = new Set(['agent', 'agentId', 'wing', 'source', 'legacy', 'by', 'wt', 'prev', 'mac', 'origin']);
+const FORBIDDEN = new Set(['agent', 'agentId', 'wing', 'source', 'legacy', 'section', 'by', 'wt', 'prev', 'mac', 'origin']);
 const MSG_ID_RE = /^[A-Za-z0-9._:-]{1,120}$/;
 
 export interface ClaimsEndpointDeps {

@@ -85,6 +85,13 @@ export interface ClaimRec extends RecBase {
   pin?: true;
   redacted?: true;
   legacy?: { file: string; line: number; sha256: string };
+  /**
+   * G3.5 (god's GO, all stream owners acked, plan line 64): the Markdown heading the entry stood
+   * under, set ONLY by W6 (the legacy import and the fallback parser), at most migrate.ts SECTION_MAX characters
+   * (cut, never refused). Search context only: never part of R1's identity, never printed per bullet
+   * in an export. MAC-covered like every field.
+   */
+  section?: string;
 }
 
 export type EventKind =
@@ -127,7 +134,7 @@ export type RecordDraft =
   | {
       t: 'claim'; kind: ClaimKind; text: string; key?: string; refs?: Ref[]; ttl?: string | null; pin?: true;
       supersedes?: string[]; retracts?: string[]; at?: string; source?: 'self' | 'human' | `mail:${string}` | 'legacy';
-      legacy?: ClaimRec['legacy'];
+      legacy?: ClaimRec['legacy']; section?: string;
     }
   | {
       t: 'event'; ev: 'accept' | 'dismiss' | 'reconcile-answer' | 'revert' | 'pin' | 'unpin'; targets: string[];
