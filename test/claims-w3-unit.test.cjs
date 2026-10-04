@@ -199,3 +199,21 @@ test('discovery: an empty claims folder (no segment) is not a ledger; the agent 
   const d = discoverSources(root, undefined, { claimLedger: 'writer', implemented: 'writer' });
   assert.deepEqual(d.eligible.map((e) => e.path), ['agents/a1/memory.md']);
 });
+
+test('CL-S1 M3: claimEmbedText is a claim chunk\'s text without its kind · key · date header line', () => {
+  const { claimEmbedText, CLAIM_EMBED_VERSION } = loadTs(path.join(ROOT, 'src/main/nativeMemory/store.ts'));
+  const rec = (text, extra = {}) => ({ v: 1, id: 'c-0000000000a1', t: 'claim', kind: 'decision', key: 'release.hangar.window', text, source: 'self', at: '2026-10-03T10:00:00.000Z', wt: '2026-10-03T10:00:00.000Z', agent: 'a1', prev: '', mac: 'm', ...extra });
+  const state = (ids) => ({ claims: Object.fromEntries(ids.map((id) => [id, { id, status: 'live' }])) });
+  const [one] = chunksFor([rec('the zeppelin hangar code is twelve')], state(['c-0000000000a1']));
+  assert.equal(one.content, 'decision · release.hangar.window · 2026-10-03\nthe zeppelin hangar code is twelve', 'the content keeps its header (FTS, display, sha)');
+  assert.equal(claimEmbedText(one.content), 'the zeppelin hangar code is twelve', 'the vector is the text alone');
+  // Every part of a long claim carries the header; each part embeds only its own text.
+  const long = Array.from({ length: 160 }, (_, i) => `synthetic${i % 7}`).join(' ');
+  const parts = chunksFor([rec(long)], state(['c-0000000000a1']));
+  assert.ok(parts.length >= 2);
+  for (const p of parts) assert.ok(!claimEmbedText(p.content).startsWith(claimHeader(rec(long))), 'no part embeds the header');
+  assert.equal(parts.map((p) => claimEmbedText(p.content)).join(' ').replace(/\s+/g, ' '), long);
+  assert.equal(claimEmbedText('a text with no header line'), 'a text with no header line');
+  assert.equal(claimEmbedText('fact · - · 2026-10-03\nline one\nline two'), 'line one\nline two', 'only the first line is the header');
+  assert.equal(CLAIM_EMBED_VERSION, 2, 'bumped from the header-embedding recipe (1)');
+});

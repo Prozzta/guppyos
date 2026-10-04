@@ -100,6 +100,22 @@ const visList = (mode: SearchMode): string => MODE_VIS[mode].map((v) => `'${v}'`
 /** One claim chunk to index: ClaimChunk plus its part number within the claim. */
 export type ClaimPart = ClaimChunk & { part: number };
 
+/**
+ * CL-S1 M3: what a claim part EMBEDS. A claim chunk's content is its `kind · key · date` header line
+ * (claims/chunks.ts claimHeader) and then its text. The header stays in `content` (FTS, display,
+ * contentSha256), but the vector is the text alone: MiniLM mean-pools every token, so the header's
+ * tokens pulled a claim's vector away from its own words (bed: andy:157 fell from vector #7 to #23
+ * and out of the history top 10). A content with no header line is embedded whole.
+ */
+export function claimEmbedText(content: string): string {
+  const nl = content.indexOf('\n');
+  return nl < 0 ? content : content.slice(nl + 1);
+}
+/** The claim-vector recipe. Bumped from 1 (header + text) to 2 (claimEmbedText): an index whose
+ *  wing was embedded under another version re-embeds that wing's claim parts once, at its next sync. */
+export const CLAIM_EMBED_VERSION = 2;
+export const claimEmbedVersionKey = (wing: string): string => `claim_embed_version:${wing}`;
+
 export interface ClaimPlan {
   wing: string;
   /** Parts to embed and insert. */
@@ -371,8 +387,9 @@ export class NativeMemoryStore {
 
   /** Plan the sync of one agent's claim chunks (as main sent them, verified and derived): which
    *  parts are new (to embed), which claims' text changed (a purge rewrite: drop and re-add), and
-   *  which statuses changed (rows only, never a re-embed: A4). */
-  planClaims(wing: string, parts: ClaimPart[]): ClaimPlan {
+   *  which statuses changed (rows only, never a re-embed: A4). `reembed`: the wing's vectors were made
+   *  under another CLAIM_EMBED_VERSION, so every claim it keeps is dropped and re-added (one pass). */
+  planClaims(wing: string, parts: ClaimPart[], opts: { reembed?: boolean } = {}): ClaimPlan {
     const have = new Map<string, Map<number, string>>();
     for (const r of this.db.prepare('SELECT claim_id, part, content_sha256 FROM claims WHERE wing = ?').all(wing) as Array<{ claim_id: string; part: number; content_sha256: string }>) {
       const m = have.get(r.claim_id) ?? new Map<number, string>();
@@ -389,7 +406,7 @@ export class NativeMemoryStore {
     for (const id of have.keys()) if (!incoming.has(id)) drop.add(id);
     for (const [id, ps] of incoming) {
       const h = have.get(id);
-      if (h && h.size === ps.length && ps.every((p) => h.get(p.part) === p.contentSha256)) continue;
+      if (!opts.reembed && h && h.size === ps.length && ps.every((p) => h.get(p.part) === p.contentSha256)) continue;
       if (h) drop.add(id);
       add.push(...ps);
     }
@@ -401,7 +418,7 @@ export class NativeMemoryStore {
   }
 
   /** Apply a claim plan with the embeddings of `plan.add` (same order), atomically. */
-  applyClaims(sourcePath: string, plan: ClaimPlan, embeddings: Float32Array[], meta: { head: string; nowMs: number; manifestVersion: number }): void {
+  applyClaims(sourcePath: string, plan: ClaimPlan, embeddings: Float32Array[], meta: { head: string; nowMs: number; manifestVersion: number; embedVersion?: number }): void {
     if (embeddings.length !== plan.add.length) throw new Error('applyClaims: embeddings/add length mismatch');
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO sources(source_id, path, sha256, allowed_kind, wing, room, mtime_ms, bytes, indexed_at, manifest_version)
@@ -428,6 +445,8 @@ export class NativeMemoryStore {
         setStatus.run(s.claimId, s.status, visOf(s.status), s.at);
         for (const r of chunksOf.all(s.claimId) as Array<{ chunk_id: number }>) setVis.run(visOf(s.status), BigInt(r.chunk_id));
       }
+      // The wing's vectors are now all of this recipe (in the same transaction as the re-embed).
+      if (meta.embedVersion !== undefined) this.setMeta(claimEmbedVersionKey(plan.wing), String(meta.embedVersion));
       if (plan.add.length || plan.drop.length || plan.status.length) this.bumpGeneration();
     }).immediate();
   }

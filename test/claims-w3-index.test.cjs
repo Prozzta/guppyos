@@ -40,6 +40,27 @@ test('G3.1 no leak: 3 random corpora x 1,000 queries; no superseded, retracted o
   assert.ok(r.allGoneHits > 0, '--all does');
 });
 
+test('CL-S1 M3: a claim part embeds its text, never its kind · key · date header; an index from before re-embeds each wing once', { timeout: 5 * 60_000 }, async () => {
+  const r = await scenario('embedtext');
+  assert.equal(r.firstEmbedded, 3);
+  assert.deepEqual(r.seen, [
+    'the zeppelin hangar code is twelve and the relay uses crate seven',
+    'the hangar audit tag moved to friday',
+    'a widget review lesson about the build cut',
+  ], 'the embedder gets each claim\'s text alone');
+  assert.equal(r.headerChangesVector, true, 'the header would change the vector (the check below can fail)');
+  assert.equal(r.targetIsBare, true, 'the stored vector is the text\'s');
+  assert.equal(r.targetIsHeadered, false);
+  assert.equal(r.version, '2', 'the wing is marked with the claim-vector recipe');
+  assert.equal(r.secondEmbedded, 0, 'an unchanged wing is never re-embedded');
+  assert.deepEqual({ embedded: r.upgrade.embedded, dropped: r.upgrade.dropped, version: r.upgrade.version }, { embedded: 3, dropped: 3, version: '2' }, 'an index from before the fix re-embeds the wing once');
+  assert.ok(r.upgrade.seen.every((t) => !/^[a-z]+ · /.test(t)), 'the re-embed is header-free too');
+  assert.equal(r.afterUpgradeTargetIsBare, true);
+  assert.ok(r.liveAfter.includes('c-0000000000e1') && !r.liveAfter.includes('c-0000000000e2'), `statuses survive the re-embed: the superseded claim stays hidden by default (${r.liveAfter})`);
+  assert.ok(r.historyAfter.includes('c-0000000000e2'), '--history still finds it');
+  assert.equal(r.thirdEmbedded, 0, 'once');
+});
+
 test('G3.1b no leak after a change: R2, R3, R4, soft supersede and a multi-part claim are hidden at once, in both branches; never re-embedded', { timeout: 5 * 60_000 }, async () => {
   const r = await scenario('later');
   for (const [id, b] of Object.entries(r.before)) assert.deepEqual(b, { fast: true, filtered: true }, `${id} is found while live`);

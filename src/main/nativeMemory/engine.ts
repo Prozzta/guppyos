@@ -12,7 +12,7 @@ import { readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher }
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
-import { compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
+import { CLAIM_EMBED_VERSION, claimEmbedText, claimEmbedVersionKey, compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
 import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
@@ -374,13 +374,19 @@ export class MemoryEngine {
       const d = this.discover();
       if (!d.eligible.some((e) => e.kind === 'claims' && e.wing === a.wing)) throw new Error(`claims are not indexed for ${a.wing} (level ${d.ledgerLevels[a.wing] ?? 'off'})`);
       // W3-1 (a): the replaced markdown leaves in the same queue step that plans the claims.
-      const plan = await this.enqueue(PRIORITY.ingest, async () => { this.dropIneligible(a.wing, this.discover()); return this.d.store.planClaims(a.wing, a.chunks); });
+      // CL-S1 M3: a wing embedded under an older claim-vector recipe re-embeds all its parts once.
+      const plan = await this.enqueue(PRIORITY.ingest, async () => {
+        this.dropIneligible(a.wing, this.discover());
+        const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
+        return this.d.store.planClaims(a.wing, a.chunks, { reembed });
+      });
       const vectors: Float32Array[] = [];
       for (let i = 0; i < plan.add.length; i += EMBED_BATCH) {
-        const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => p.content);
+        // The vector is the claim's text, never its `kind · key · date` header (claimEmbedText).
+        const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => claimEmbedText(p.content));
         vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
       }
-      await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION }));
+      await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION }));
       this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length });
       return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length };
     });

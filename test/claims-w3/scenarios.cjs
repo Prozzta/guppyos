@@ -2,8 +2,10 @@
 /**
  * CLAIM-LEDGER W3 gate scenarios, run through the C4 drill runner against THIS tree (Electron as
  * Node: the app's better-sqlite3 + sqlite-vec; a jailed home; a sandbox hive). The embedder is a
- * deterministic bag-of-words fake (similar words -> similar vectors; a claim's header line is
- * ignored), so nearness is controllable; the gates are about filtering, not relevance.
+ * deterministic bag-of-words fake (similar words -> similar vectors), so nearness is controllable;
+ * the gates are about filtering, not relevance. CL-S1 M3: the fake embeds EXACTLY what it is given
+ * (it used to drop a `kind · key · date` header line itself, which hid the product sending one) and
+ * records it in `seen`; the engine must send a claim's text alone (store.ts claimEmbedText).
  * drill.args.scenario picks one; each returns facts the test asserts on.
  */
 const fs = require('node:fs');
@@ -12,11 +14,11 @@ const crypto = require('node:crypto');
 
 const DIM = 384;
 function bowEmbedder() {
-  const e = { loaded: true, calls: 0, texts: 0 };
+  const e = { loaded: true, calls: 0, texts: 0, seen: [] };
   e.embed = async (texts) => {
-    e.calls++; e.texts += texts.length;
+    e.calls++; e.texts += texts.length; e.seen.push(...texts);
     return texts.map((t) => {
-      const body = /^[a-z]+ · /.test(t) ? t.slice(t.indexOf('\n') + 1) : t;
+      const body = t;
       const v = new Float32Array(DIM);
       for (const w of body.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
         const h = crypto.createHash('sha256').update(w).digest();
@@ -113,6 +115,51 @@ module.exports = async (drill) => {
       await eng.close(); store.close();
       out.corpora++;
     }
+    return out;
+  }
+
+  if (s === 'embedtext') {
+    // CL-S1 M3: a claim part is embedded as its TEXT, never with its `kind · key · date` header, and an
+    // index made under the old recipe (no claim_embed_version for the wing) re-embeds the wing once.
+    fs.rmSync(path.join(hive, 'agents'), { recursive: true, force: true });
+    ledger('a1');
+    manifest({ a1: 'writer' });
+    const store = open(); const emb = bowEmbedder(); const eng = engine(store, emb);
+    await eng.backfill();
+    const target = 'the zeppelin hangar code is twelve and the relay uses crate seven';
+    const chunks = [
+      chunk('c-0000000000e1', 'a1', 'live', target, { kind: 'decision', key: 'release.hangar.window' }),
+      chunk('c-0000000000e2', 'a1', 'superseded', 'the hangar audit tag moved to friday', { key: 'release.hangar.window' }),
+      chunk('c-0000000000e3', 'a1', 'live', 'a widget review lesson about the build cut'),
+    ];
+    const vecOf = (id) => {
+      const r = store.db.prepare('SELECT v.embedding AS e FROM chunks c JOIN chunks_vec v ON v.rowid = c.chunk_id WHERE c.claim_id = ?').get(id);
+      return new Float32Array(r.e.buffer.slice(r.e.byteOffset, r.e.byteOffset + r.e.byteLength));
+    };
+    const maxDiff = (a, b) => a.reduce((m, x, i) => Math.max(m, Math.abs(x - b[i])), 0);
+    const [bare] = await emb.embed([target]);
+    const [withHeader] = await emb.embed([chunks[0].content]);
+    emb.seen.length = 0;
+    const first = await sync(eng, 'a1', chunks);
+    const out = {
+      firstEmbedded: first.embedded,
+      seen: emb.seen.slice(),
+      version: store.meta('claim_embed_version:a1'),
+      targetIsBare: maxDiff(vecOf('c-0000000000e1'), bare) < 1e-6,
+      targetIsHeadered: maxDiff(vecOf('c-0000000000e1'), withHeader) < 1e-6,
+      headerChangesVector: maxDiff(bare, withHeader) > 1e-3,
+    };
+    out.secondEmbedded = (await sync(eng, 'a1', chunks)).embedded;
+    // An index from before the fix: its wing has no claim_embed_version row.
+    store.db.prepare('DELETE FROM index_meta WHERE key = ?').run('claim_embed_version:a1');
+    emb.seen.length = 0;
+    const up = await sync(eng, 'a1', chunks);
+    out.upgrade = { embedded: up.embedded, dropped: up.dropped, seen: emb.seen.slice(), version: store.meta('claim_embed_version:a1') };
+    out.afterUpgradeTargetIsBare = maxDiff(vecOf('c-0000000000e1'), bare) < 1e-6;
+    out.liveAfter = claimHits(await eng.search({ query: 'hangar', results: 10, wing: 'a1' })).map((h) => h.claimId).sort();
+    out.historyAfter = claimHits(await eng.search({ query: 'hangar', results: 10, wing: 'a1', mode: 'history' })).map((h) => h.claimId).sort();
+    out.thirdEmbedded = (await sync(eng, 'a1', chunks)).embedded;
+    await eng.close(); store.close();
     return out;
   }
 
