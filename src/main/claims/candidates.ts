@@ -11,7 +11,9 @@
  *                substituted by another receipt.
  * Only LIVE claims are offered (not superseded, superseded?, retracted or purged), and never the
  * new note itself. The query is the new note's text. Ranking: reciprocal-rank fusion, k = 60,
- * over a BM25 order and a vector order of the pool; ties by newest `wt`, then id; top 3.
+ * over a BM25 order (hive-wide document statistics, HiveCorpus) and a vector order of the pool;
+ * ties by newest `wt`, then id. The top 3 OWN claims are the replace candidates; another agent's
+ * claim in the overall top 3 is returned separately as a reference, never a target.
  *
  * The note CLI (Dwight, step 1) calls collectNoteCandidates; with no candidate it appends at once
  * (marked new), otherwise it shows the candidates and asks replace / separate / cancel.
@@ -133,13 +135,18 @@ export function cosineOrder(q: ArrayLike<number>, docs: Array<{ id: string; vec:
 
 export type Scorer = (query: string, pool: PoolClaim[]) => CandidateScores | Promise<CandidateScores>;
 
-/** A scorer over the pool alone: BM25 (pool corpus unless one is given) plus cosine on `embed`. */
-export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus): Scorer {
+/**
+ * BM25 plus cosine on `embed`. `corpus` gives the document statistics (Jim M1): the LIVE scorer
+ * passes the hive-wide ones (HiveCorpus); left out, the pool's own are used, which floors every term
+ * in a small pool (in a pool of 2, each term's idf is <= 0) and is for tests and studies only.
+ */
+export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus)): Scorer {
   return async (query, pool) => {
     if (!pool.length) return { lexical: [], vector: [] };
+    const stats = typeof corpus === 'function' ? corpus() : corpus;
     const vecs = await embed([query, ...pool.map((c) => c.text)]);
     return {
-      lexical: bm25Order(query, pool, corpus),
+      lexical: bm25Order(query, pool, stats),
       vector: cosineOrder(vecs[0], pool.map((c, i) => ({ id: c.id, vec: vecs[i + 1] })))
     };
   };
@@ -159,13 +166,21 @@ export interface NoteCandidate {
   status: 'live';
   sources: CandidateSource[];
   rank: number;
+  /** True: the writer's own claim, a valid `--supersedes` target. False: a REFERENCE only. */
+  replaceable: boolean;
 }
 
 /** Why a source contributed nothing: `unwired` (no reader on this path), `error` (its reader threw). */
 export interface ExcludedSource { source: CandidateSource; reason: 'unwired' | 'error' }
 
 export interface CandidateResult {
+  /** The writer's OWN claims, best first, at most `top`: the only replace targets. */
   candidates: NoteCandidate[];
+  /**
+   * Other agents' claims (from search hits) that rank within the overall top `top`: shown for
+   * reference, never a replace target (`supersedes` is own-ledger only; Jim S1), at most `top`.
+   */
+  references: NoteCandidate[];
   excluded: ExcludedSource[];
   /** `rrf` normally; `recency` when the scorer failed (then: newest wt, then id). */
   ranking: 'rrf' | 'recency';
@@ -226,12 +241,17 @@ export async function collectNoteCandidates(d: CandidateDeps, agentId: string, t
   let ranking: CandidateResult['ranking'] = 'rrf';
   let scores: CandidateScores;
   try { scores = pool.length ? await d.score(text, pool) : { lexical: [], vector: [] }; } catch { scores = { lexical: [], vector: [] }; ranking = 'recency'; }
-  const ranked = rankCandidates(pool, scores, o.top ?? CANDIDATE_TOP);
+  const top = Math.max(0, o.top ?? CANDIDATE_TOP);
+  const ranked = rankCandidates(pool, scores, pool.length);
+  const show = (c: RankedCandidate, rank: number): NoteCandidate => ({
+    id: c.id, title: titleOf(c), date: c.wt, excerpt: excerptOf(c.text), owner: c.owner, status: 'live' as const,
+    sources: (['own', 'search', 'working-set'] as const).filter((s) => sources.get(c.id)?.has(s)), rank, replaceable: c.owner === agentId
+  });
   return {
-    candidates: ranked.map((c) => ({
-      id: c.id, title: titleOf(c), date: c.wt, excerpt: excerptOf(c.text), owner: c.owner, status: 'live' as const,
-      sources: (['own', 'search', 'working-set'] as const).filter((s) => sources.get(c.id)?.has(s)), rank: c.rank
-    })),
+    // Replace targets: the writer's own claims only, best first (Jim S1).
+    candidates: ranked.filter((c) => c.owner === agentId).slice(0, top).map((c, i) => show(c, i + 1)),
+    // Another agent's claim is shown only where it ranks in the overall top, and only for reference.
+    references: ranked.slice(0, top).filter((c) => c.owner !== agentId).map((c, i) => show(c, i + 1)),
     excluded,
     ranking,
     pool: pool.length
@@ -260,10 +280,11 @@ export function ledgerCandidateDeps(i: LedgerCandidateInputs): CandidateDeps {
     id: c.id, owner: c.agent, wt: c.wt, ...(c.key ? { key: c.key } : {}), text: c.text, status: v.status(c.id) ?? 'unknown'
   });
   return {
-    ownClaims(agentId, since, at) {
+    // The window is applied once, in collectNoteCandidates (Jim S3).
+    ownClaims(agentId) {
       const v = i.ledger(agentId);
       if (!v) throw new Error('ledger not verified');
-      return v.claims.filter((c) => { const t = Date.parse(c.wt); return t >= since.getTime() && t <= at.getTime(); }).map((c) => pc(v, c));
+      return v.claims.map((c) => pc(v, c));
     },
     ...(i.searchLog ? { searchHits: (agentId: string, at: Date) => i.searchLog!.hitsSince(agentId, at) } : {}),
     resolve(hits) {
@@ -297,4 +318,39 @@ export function embedViaWorker(request: (texts: string[]) => Promise<{ ok: boole
     }
     return out;
   };
+}
+
+/**
+ * Hive-wide BM25 statistics for the live scorer (Jim M1): document frequencies over every agent's
+ * LIVE claims, as the FTS index takes them over its whole table, not over a pool of a few claims.
+ * Per-agent statistics are cached by a ledger signature, so a note re-counts only changed ledgers.
+ */
+export class HiveCorpus {
+  private readonly per = new Map<string, { sig: string; n: number; tokens: number; df: Map<string, number> }>();
+
+  constructor(private readonly d: { agents: () => string[]; ledger: (agentId: string) => LedgerView | null }) {}
+
+  corpus(): Bm25Corpus {
+    const agents = new Set(this.d.agents());
+    for (const a of [...this.per.keys()]) if (!agents.has(a)) this.per.delete(a);
+    let n = 0;
+    let tokens = 0;
+    const df = new Map<string, number>();
+    for (const a of agents) {
+      const v = this.d.ledger(a);
+      if (!v) { this.per.delete(a); continue; }
+      const live = v.claims.filter((c) => v.status(c.id) === 'live');
+      const sig = `${v.claims.length}|${v.claims[v.claims.length - 1]?.id ?? ''}|${live.map((c) => c.id).join(',')}`;
+      let s = this.per.get(a);
+      if (!s || s.sig !== sig) {
+        const c = bm25Corpus(live.map((x) => x.text));
+        s = { sig, n: c.n, tokens: c.avgdl * c.n, df: c.df };
+        this.per.set(a, s);
+      }
+      n += s.n;
+      tokens += s.tokens;
+      for (const [k, x] of s.df) df.set(k, (df.get(k) ?? 0) + x);
+    }
+    return { n, avgdl: n ? tokens / n : 0, df };
+  }
 }

@@ -128,7 +128,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
       case 'embed': {
         // CL-M4-WP step 3: vectors for main's note-candidate scorer (bounds checked in main).
         const texts = Array.isArray(a.texts) ? (a.texts as unknown[]).filter((t): t is string => typeof t === 'string').slice(0, 64) : [];
-        guard(embedder.embed(texts), (vs) => ({ exit: 0, json: vs.map((v) => Array.from(v)) }));
+        guard(engine.embedTexts(texts), (vs) => ({ exit: 0, json: vs.map((v) => Array.from(v)) }));
         break;
       }
       case 'r5-candidates':

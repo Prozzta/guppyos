@@ -394,6 +394,12 @@ export class MemoryEngine {
     return run;
   }
 
+  /** CL-M4-WP step 3: vectors for main's note-candidate scorer. Through the queue at search
+   *  priority (never beside a backfill's embedding) and the idle-unload timer (Jim S2). */
+  embedTexts(texts: string[]): Promise<Float32Array[]> {
+    return this.enqueue(PRIORITY.search, () => this.embed(texts));
+  }
+
   /** R5 candidates for a just-appended claim (W3 side of R5CandidatesFn). */
   r5Candidates(wing: string, claimId: string, tau2: number): Promise<Array<{ b: string; cosine: number }>> {
     return this.enqueue(PRIORITY.search, async () => this.d.store.claimNeighbours(wing, claimId, tau2));
