@@ -1,7 +1,7 @@
 import type { ClaimsState, KeyRegistry, LedgerRec, ReconcileItem } from '../../shared/claims';
 import { derive } from './derive';
 import { verifiedPrefix } from './indexSync';
-import { ReconcileApi, type ReconcileQueue } from './reconcile';
+import { ReconcileApi, keyAliasCandidates, reconcileItemId, type ReconcileQueue } from './reconcile';
 import type { ClaimStore } from './store';
 
 type RuntimeStore = Pick<ClaimStore, 'readLedger' | 'appendSoftSupersede'>;
@@ -12,6 +12,25 @@ export interface ReconcileHiveDeps {
   log: (row: Record<string, unknown>) => void;
   registry: (root: string) => KeyRegistry;
   isOwner: (agentId: string) => boolean;
+}
+
+/** Refresh the derived census from the verified ledger; R5 candidates are merged by queue.refresh. */
+export function refreshReconcileQueueForHive(root: string, agentId: string, deps: ReconcileHiveDeps): number {
+  const endpoint = deps.endpoint();
+  if (!endpoint) return 0;
+  const prefix = verifiedPrefix(endpoint.store.readLedger(agentId));
+  if (!prefix) return 0;
+  const registry = deps.registry(root);
+  const state = derive(prefix.records, registry, { r4: false });
+  const claims = prefix.records.filter((rec): rec is Extract<LedgerRec, { t: 'claim' }> => rec.t === 'claim');
+  const conflicts = state.conflicts.filter((item) => item.rule === 'R2-mail').map((item) => ({
+    itemId: reconcileItemId(agentId, 'conflict', item.a, item.b), kind: 'conflict' as const,
+    a: item.a, b: item.b, text: `Conflicting claims: ${item.a} / ${item.b}`,
+  }));
+  const candidates = [...conflicts, ...keyAliasCandidates(agentId, claims, state, registry)];
+  deps.queue(root).refresh(agentId, candidates);
+  deps.log({ kind: 'claims-reconcile-refresh', agentId, candidates: candidates.length });
+  return candidates.length;
 }
 
 type LiveDecision = { live: Set<string>; direction: { loser: string; winner: string } | null };

@@ -6,7 +6,45 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAliasCandidates, reconcileItemId, TAU2, reconcilePromptText } = loadTs(path.join(__dirname, '../src/main/claims/reconcile.ts'));
-const { reconcileApiForHive, createReconcileLiveClaims } = loadTs(path.join(__dirname, '../src/main/claims/reconcileHive.ts'));
+const { reconcileApiForHive, createReconcileLiveClaims, refreshReconcileQueueForHive } = loadTs(path.join(__dirname, '../src/main/claims/reconcileHive.ts'));
+const { handleClaimVerb } = loadTs(path.join(__dirname, '../src/main/claims/endpoint.ts'));
+
+test('W5 main wiring pins kill mutants that drop either production callback', () => {
+  const file = path.join(__dirname, '../src/main/index.ts');
+  const source = fs.readFileSync(file, 'utf8');
+  const wired = (text) => text.includes('onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b)')
+    && text.includes('onIndexed: (agentId) =>') && text.includes('refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps())');
+  assert.equal(wired(source), true);
+  assert.equal(wired(source.replace(/onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),?/, '')), false, 'G1 mutant: onReconcile omitted');
+  assert.equal(wired(source.replace(/onIndexed: \(agentId\) =>[^\n]+/, '')), false, 'G2 mutant: post-index refresh omitted');
+});
+
+test('G1 main endpoint answer clears its pair before three-turn completion can supersede it', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  queue.refresh('owner', [{ itemId: reconcileItemId('owner', 'conflict', 'a', 'b'), kind: 'conflict', a: 'a', b: 'b', text: 'pair' }]);
+  const store = { lookup: () => ({ kind: 'fact' }), appendRecord: async () => ({ ok: true }) };
+  const result = await handleClaimVerb({ store, level: () => 'writer', onReconcile: (agentId, a, b) => queue.answeredPair(agentId, a, b) }, 'owner', { cmd: 'reconcile', args: { a: 'a', b: 'b', answer: 'keep-both' } }, 'endpoint');
+  assert.equal(result.ok, true);
+  assert.equal(queue.items('owner').length, 0);
+  let supersedes = 0;
+  const api = new ReconcileApi({ queue, countTokens: () => 1, log: () => {}, appendSoftSupersede: async () => { supersedes++; return { ok: true }; }, newestWins: () => ({ loser: 'a', winner: 'b' }), isLiveClaim: () => true, isOwner: () => true });
+  for (let i = 0; i < 3; i++) { const turn = api.reconcileForTurn('owner', '2026-10-04'); await api.onTurnCompleted('owner', turn.turn); }
+  assert.equal(supersedes, 0, 'an answered keep-both must not be treated as unanswered');
+});
+
+test('G2 verified census queues R2-mail and key alias exactly once across refreshes', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  const claim = (id, key, source = 'self') => ({ t: 'claim', id, agent: 'owner', at: `2026-10-0${id === 'a' ? 2 : id === 'b' ? 1 : 3}T00:00:00Z`, wt: '2026-10-04T00:00:00Z', mac: id, prev: '', kind: 'fact', key, text: `synthetic ${id}`, source });
+  const records = [claim('a', 'fact.name', 'mail:m1'), claim('b', 'fact.name'), claim('c', 'release.name'), claim('d', 'release.na_me')];
+  const deps = { endpoint: () => ({ store: { readLedger: () => ({ chain: 'ok', records }) } }), queue: () => queue,
+    registry: () => ({ v: 1, namespaces: [{ pattern: 'fact.*', cardinality: 'single' }, { pattern: 'release.*', cardinality: 'single' }], keys: {} }), log: () => {} };
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  assert.equal(queue.peek('owner', 10).length, 2);
+  assert.deepEqual(queue.peek('owner', 10).map((i) => i.kind).sort(), ['conflict', 'key-alias']);
+});
 
 test('G5.1 offers at most three leased items and assigns a persisted monotonic agent turn', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

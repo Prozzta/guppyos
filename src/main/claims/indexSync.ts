@@ -29,6 +29,8 @@ export interface IndexSyncDeps {
   /** Agents that have a ledger. */
   agents: () => string[];
   send: (args: { wing: string; path: string; head: string; chunks: unknown[] }) => Promise<{ ok: boolean; error?: string; json?: unknown }>;
+  /** Called after a verified snapshot is successfully indexed. */
+  onIndexed?: (agentId: string) => void;
   log?: (row: Record<string, unknown>) => void;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (t: unknown) => void;
@@ -100,6 +102,7 @@ export class ClaimsIndexSync {
     const head = state.ledgerHead || (prefix.records.length ? prefix.records[prefix.records.length - 1].mac : '');
     const reply = await this.d.send({ wing: agentId, path: claimsSourcePath(agentId), head, chunks });
     if (!reply.ok) this.d.log?.({ kind: 'claims-index-failed', agentId, error: String(reply.error ?? '').slice(0, 160) });
+    else this.d.onIndexed?.(agentId);
     return { sent: true, records: prefix.records.length, chunks: chunks.length, ...(prefix.truncatedAt ? { truncatedAt: prefix.truncatedAt } : {}), reply };
   }
 }

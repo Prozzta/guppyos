@@ -12,7 +12,7 @@ import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, type TaskRow } from './claims/delivery';
-import { reconcileApiForHive as createReconcileApiForHive } from './claims/reconcileHive';
+import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
 import { readSourcesConfig } from './nativeMemory/sources';
 import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
@@ -1240,6 +1240,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       level: claimLevel,
       agents: claimLedgerAgents,
       send: (args) => nativeMemory.syncClaims(args),
+      onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
   }
@@ -1331,8 +1332,10 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     setImmediate(claimsAnchorCheck);
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
     setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    // W5 startup census. Successful index syncs repeat this after each indexed append.
+    setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
-  return { store: claimStore.store, level: claimLevel, exportComplete: (agentId) => claimExport().complete(agentId) };
+  return { store: claimStore.store, level: claimLevel, exportComplete: (agentId) => claimExport().complete(agentId), onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b) };
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
  *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
@@ -1409,14 +1412,17 @@ const claimDelivery = createClaimDelivery({
   log: (row) => hive.appendLog(row),
 });
 function reconcileApiForHive(root: string): ReconcileApi | null {
-  return createReconcileApiForHive(root, {
+  return createReconcileApiForHive(root, reconcileHiveDeps());
+}
+function reconcileHiveDeps(): ReconcileHiveDeps {
+  return {
     endpoint: claimsEndpoint,
     queue: reconcileQueueForHive,
     countTokens: (text) => claimsCountTokens?.(text) ?? 0,
     log: (row) => hive.appendLog(row),
     registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
     isOwner: (agentId) => claimLevel(agentId) === 'writer',
-  });
+  };
 }
 const claimWorkingSetForAgent = (agentId: string, source?: string): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId, source) : Promise.resolve(null));
 hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
