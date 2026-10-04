@@ -78,6 +78,14 @@ const SHELL_INPUT_CALL = /\btools\s*(?:\?\.|\.)\s*(exec_command|write_stdin)\s*\
  * (same length, the quotes kept), so a tool name inside a literal command or a comment is not a
  * call or a mention. A template's `${...}` is blanked with it; regex literals are not tracked.
  */
+/** S1: may a `/` after the masked code `out` open a regex literal (rather than divide)? */
+function regexMayStart(out: string): boolean {
+  const line = out.slice(out.lastIndexOf('\n') + 1);
+  if (!line.trim()) return true;
+  if (/[(,=:[!&|?{};}]\s*$/.test(out)) return true;
+  return /\b(?:return|typeof|case|yield|await|void|in|of|delete|throw|new)\s*$/.test(out);
+}
+
 function codeMask(src: string): string {
   let out = '';
   for (let i = 0; i < src.length; i++) {
@@ -88,6 +96,21 @@ function codeMask(src: string): string {
       out += ' '.repeat(end - i);
       i = end - 1;
       continue;
+    }
+    // HEAVY-LOCK-UNNAMED-SHOULDS S1 (Jim): a regex literal (`/"(.*)"/`) is not a string: its quote
+    // used to open one and blank the rest of the program, hiding every later call. A `/` opens a
+    // regex where a value is expected (after `( , = : [ ! & | ? { } ;`, `return` and the like, or at
+    // a line start); its body, classes `[...]` included, is blanked up to the closing `/`.
+    if (c === '/' && regexMayStart(out)) {
+      let j = i + 1;
+      let cls = false;
+      while (j < src.length && src[j] !== '\n') {
+        const ch = src[j];
+        if (ch === '\\') { j += 2; continue; }
+        if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true; else if (ch === '/') break;
+        j += 1;
+      }
+      if (j < src.length && src[j] === '/') { out += '/' + ' '.repeat(j - i - 1) + '/'; i = j; continue; }
     }
     if (c === '"' || c === "'" || c === '`') {
       let j = i + 1;
@@ -103,10 +126,33 @@ function codeMask(src: string): string {
 }
 
 /**
+ * HEAVY-LOCK-UNNAMED-SHOULDS S2: the body of a single-quoted or plain template literal as a JSON
+ * string literal, so it is read like a double-quoted one (`\'`, `\``, raw newlines and tabs mapped).
+ * An escape JSON lacks (`\x41`, `\0`, `\v`) makes JSON.parse throw: the value stays unnamed.
+ */
+function asJsonString(body: string): string {
+  let s = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === '\\' && i + 1 < body.length) {
+      const nx = body[i + 1];
+      s += nx === "'" || nx === '`' ? nx : `\\${nx}`;
+      i += 1;
+    } else if (ch === '"') s += '\\"';
+    else if (ch === '\n') s += '\\n';
+    else if (ch === '\r') s += '\\r';
+    else if (ch === '\t') s += '\\t';
+    else s += ch;
+  }
+  return `"${s}"`;
+}
+
+/**
  * HEAVY-LOCK-UNNAMED-EXEC: the value of top-level property `key` of the object literal `span`
- * when it is ONE double-quoted (JSON) string and nothing else (`"a" + b` is not), whatever the
- * other values are (`{session_id: r.session_id, chars: "..."}`); null when the key is plainly
- * ABSENT (no such key, no `...spread`: a write_stdin poll); else undefined (not readable).
+ * when it is ONE string literal and nothing else (`"a" + b` is not), whatever the other values
+ * are (`{session_id: r.session_id, chars: "..."}`): double-quoted, or (S2) single-quoted or a
+ * template without `${`; null when the key is plainly ABSENT (no such key, no `...spread`: a
+ * write_stdin poll); else undefined (not readable).
  */
 function literalProp(span: string, key: string): string | null | undefined {
   const code = codeMask(span);
@@ -117,13 +163,16 @@ function literalProp(span: string, key: string): string | null | undefined {
     const pre = code.slice(0, m.index + 1);
     if ((pre.match(/\{/g) ?? []).length - (pre.match(/\}/g) ?? []).length !== 1) continue;
     const i = m.index + m[0].length;
-    if (span[i] !== '"') return undefined;
+    const q = span[i];
+    if (q !== '"' && q !== "'" && q !== '`') return undefined;
     let j = i + 1;
-    while (j < span.length && span[j] !== '"') { if (span[j] === '\\') j += 1; j += 1; }
+    while (j < span.length && span[j] !== q) { if (span[j] === '\\') j += 1; j += 1; }
+    if (j >= span.length) return undefined;
     let k = j + 1;
     while (k < span.length && /\s/.test(span[k])) k += 1;
     if (span[k] !== ',' && span[k] !== '}') return undefined;
-    try { const v: unknown = JSON.parse(span.slice(i, j + 1)); return typeof v === 'string' ? v : undefined; } catch { return undefined; }
+    if (q === '`' && span.slice(i, j).includes('${')) return undefined; // a template with a substitution is computed
+    try { const v: unknown = JSON.parse(q === '"' ? span.slice(i, j + 1) : asJsonString(span.slice(i + 1, j))); return typeof v === 'string' ? v : undefined; } catch { return undefined; }
   }
   // Absent only if nothing could hold it: no spread, no shorthand `{chars}`, no quoted key.
   if (code.includes('...') || new RegExp(`\\b${key}\\b`).test(code) || new RegExp(`["'\`]${key}["'\`]\\s*:`).test(span)) return undefined;
