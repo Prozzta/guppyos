@@ -19,9 +19,12 @@ function score(key, readView, entryClaims = {}) {
     const facts = locators.map(entryId => ({ entryId, ...(map[entryId] || {}) }));
     const current = facts.find(f => f.entryId === item.current);
     const priors = facts.filter(f => f.entryId !== item.current);
+    // Jim W5: a rendered entry keeps only its FIRST line on the labelled bullet (later lines are
+    // indented continuations), so a text-only arm matches the entry's first non-empty line.
+    const lead = (text) => (typeof text === 'string' ? text.split(/\r?\n/).map(l => l.trim()).find(Boolean) : undefined);
     const taggedLines = (fact) => fact.claimId
       ? fullLines.filter(line => line.includes(`[c:${fact.claimId}]`))
-      : (fact.text ? fullLines.filter(line => line.includes(fact.text)) : []);
+      : (lead(fact.text) ? fullLines.filter(line => line.includes(lead(fact.text))) : []);
     const currentLines = current ? taggedLines(current) : [];
     const currentOk = currentLines.length === 1 && currentLabel.test(currentLines[0]);
     const priorsOk = priors.every(fact => {
@@ -32,7 +35,7 @@ function score(key, readView, entryClaims = {}) {
 
     const shownLine = current && (current.claimId
       ? workingLines.find(line => line.includes(`[c:${current.claimId}]`) && /\[status:current\]/.test(line))
-      : current.text && workingLines.find(line => line.includes(current.text)));
+      : lead(current.text) && workingLines.find(line => line.includes(lead(current.text))));
     const anchor = current?.claimId ? `memory.md#claim-history-${current.claimId}` : null;
     const pointer = anchor
       ? workingLines.some(line => line.includes(anchor) && /history:/i.test(line))

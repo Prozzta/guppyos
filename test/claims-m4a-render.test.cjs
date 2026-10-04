@@ -35,6 +35,22 @@ test('M4a arm A without claim ids uses replay text mappings under the same label
     'arm A credits the product standalone pointer using the frozen topic');
 });
 
+test('W5: a text-only arm matches a MULTI-LINE entry by its first line (continuations are indented)', () => {
+  const textMap = { a1: {
+    'a1:memory.md:10': { text: 'current-invented lead\nsecond invented line\nthird invented line' },
+    'a1:memory.md:4': { text: '\nprior-invented lead\nmore invented prior text' },
+  } };
+  const full = '- CURRENT — 2026-10-04 — current-invented lead\n  second invented line\n  third invented line\n'
+    + '- PRIOR — 2026-09-01 — prior-invented lead\n  more invented prior text';
+  const working = '- current-invented lead\n  second invented line';
+  const ok = score(key, read(full, working), textMap);
+  assert.equal(ok.fullViewPass, 1, 'the multi-line current and prior are found by their first lines');
+  assert.equal(ok.workingSetPass, 1, 'the shown multi-line current counts');
+  // The labels still decide: an unlabelled multi-line prior fails clause 2, a missing current fails clause 3.
+  assert.equal(score(key, read(full.replace('- PRIOR — 2026-09-01 — prior', '- prior'), working), textMap).fullViewPass, 0);
+  assert.equal(score(key, read(full, '# Memory working set'), textMap).workingSetPass, 0);
+});
+
 test('M4a rejects every stale duplicate copy of a prior, not just its first labeled line', () => {
   const mutated = `${goodFull}\n- prior-invented shown again [status:live] [c:c-prior00000001]`;
   assert.equal(score(key, read(mutated), entryClaims).fullViewPass, 0);

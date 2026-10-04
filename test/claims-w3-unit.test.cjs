@@ -189,7 +189,13 @@ test('search validation and the CLI: --history / --all / --kind / --key; never b
 test('search output: a claim hit shows [status · kind · key · date · id]; the v2 index file name', () => {
   const text = formatSearch('q', {}, [{ chunkId: 1, wing: 'a1', room: 'claims', source: 'agents/a1/memory/claims', content: 'fact · - · 2026-10-03\nhello', cosineSim: 0.9, bm25: 1, score: 1,
     claim: { id: 'c-000000000001', status: 'superseded', kind: 'fact', key: 'release.current', at: '2026-10-03T10:00:00.000Z' } }]);
-  assert.match(text, /Claim:  \[superseded · fact · release\.current · 2026-10-03 · c-000000000001\]/);
+  // WP step 2 (design v4.1 §90, "memory search prior labels"; 40cc9ebe): a superseded hit's status
+  // field reads `prior`, with its dated Version line. Other statuses still show as they are.
+  assert.match(text, /Claim:  \[prior · fact · release\.current · 2026-10-03 · c-000000000001\]/);
+  const live = formatSearch('q', {}, [{ chunkId: 2, wing: 'a1', room: 'claims', source: 'agents/a1/memory/claims', content: 'fact · - · 2026-10-03\nhello', cosineSim: 0.9, bm25: 1, score: 1,
+    claim: { id: 'c-000000000002', status: 'live', kind: 'fact', key: 'release.next', at: '2026-10-03T10:00:00.000Z' } }]);
+  assert.match(live, /Claim:  \[live · fact · release\.next · 2026-10-03 · c-000000000002\]/);
+  assert.doesNotMatch(live, /Version: prior/);
   assert.match(dbFileFor('U', 'C:/Dunder/hive'), /-v2\.sqlite$/);
 });
 
