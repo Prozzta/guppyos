@@ -6,6 +6,7 @@
  */
 import type { SearchHit } from './store';
 import { PINNED_SOFT_CAP_BYTES } from '../memoryRollover';
+import { ordinal } from './sources';
 
 export interface SearchFlags {
   wing?: string | null;
@@ -81,7 +82,8 @@ export function formatWakeUp(identity: string | null, entries: WakeEntry[], pinn
     const L = ['## L1 — ESSENTIAL STORY'];
     const byRoom = new Map<string, WakeEntry[]>();
     for (const e of entries) { const l = byRoom.get(e.room) ?? []; l.push(e); byRoom.set(e.room, l); }
-    const rooms = [...byRoom.keys()].sort((a, b) => (a === 'memory' ? -1 : b === 'memory' ? 1 : a.localeCompare(b)));
+    // NATIVEMEM-SOURCES-LOCALE-SORT: ordinal, not localeCompare (the same order on every locale).
+    const rooms = [...byRoom.keys()].sort((a, b) => (a === 'memory' ? -1 : b === 'memory' ? 1 : ordinal(a, b)));
     for (const room of rooms) {
       L.push('', `[${room}]`);
       for (const e of byRoom.get(room)!) {
