@@ -72,7 +72,87 @@ test('a failed replace restores an EXISTING archive to its previous bytes', (t) 
   assert.equal(fs.readFileSync(archive, 'utf8'), before);
 });
 
-test('the hive logs a failed replace as a row (not only a console warning)', () => {
+/** Every invented fact-<i> of bigMemory(n) is in memory.md or an archive: count the missing ones. */
+function missingFacts(dir, n) {
+  const all = fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  let missing = 0;
+  for (let i = 0; i < n; i++) if (!all.includes(` fact-${i}\n`)) missing++;
+  return missing;
+}
+
+test('Andy M1: when another rollover appended to the archive since ours, a failed replace leaves the archive (no note lost) and says so', (t) => {
+  const dir = tmp(t, 'rollfail-');
+  fs.writeFileSync(path.join(dir, 'memory.md'), bigMemory(90));
+  // A's replace fails; inside it, B (another process on the same dir) rolls the same memory.md over successfully.
+  let inner = null;
+  M.rolloverTestHooks.rename = () => {
+    M.rolloverTestHooks.rename = undefined;
+    inner = M.rolloverMemory(dir);
+    throw Object.assign(new Error('EPERM'), { code: 'EPERM', syscall: 'rename' });
+  };
+  t.after(() => { M.rolloverTestHooks.rename = undefined; });
+  const a = M.rolloverMemory(dir);
+  assert.equal(inner.rotated, true, 'B rolled over');
+  assert.equal(a.replaceFailed, 'EPERM');
+  assert.equal(a.undoFailed, 'archive-changed', 'A did not truncate B\'s append');
+  assert.equal(missingFacts(dir, 90), 0, 'no note is lost (a duplicate is safe, a loss is not)');
+});
+
+test('Andy S1: a failed tmp WRITE is undone and reported like a failed replace', (t) => {
+  const dir = tmp(t, 'rollfail-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  const before = fs.readFileSync(file, 'utf8');
+  fs.mkdirSync(`${file}.rollover-${process.pid}.tmp`); // a directory where the tmp file goes: the write fails
+  let r;
+  assert.doesNotThrow(() => { r = M.rolloverMemory(dir); });
+  assert.equal(r.rotated, false);
+  assert.ok(r.replaceFailed && r.replaceFailed !== 'undefined', JSON.stringify(r));
+  assert.equal(r.undoFailed, undefined);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('memory-archive-')), [], 'the new archive was undone');
+});
+
+test('Andy S2: a failed (partial) archive APPEND is undone back to the archive\'s previous bytes, not thrown', (t) => {
+  const dir = tmp(t, 'rollfail-');
+  const now = new Date(2026, 8, 27, 18, 0, 0).getTime();
+  const archive = path.join(dir, 'memory-archive-2026-09-27.md');
+  fs.writeFileSync(archive, '# Memory archive - earlier\n\ninvented older notes\n');
+  const archiveBefore = fs.readFileSync(archive, 'utf8');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  const before = fs.readFileSync(file, 'utf8');
+  M.rolloverTestHooks.append = (f, data, enc) => {
+    fs.appendFileSync(f, data.slice(0, Math.floor(data.length / 2)), enc); // half of it lands, then the disk is full
+    throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC', syscall: 'write' });
+  };
+  t.after(() => { M.rolloverTestHooks.append = undefined; });
+  let r;
+  assert.doesNotThrow(() => { r = M.rolloverMemory(dir, now); });
+  assert.equal(r.replaceFailed, 'ENOSPC');
+  assert.equal(r.undoFailed, undefined);
+  assert.equal(fs.readFileSync(archive, 'utf8'), archiveBefore, 'the partial append is gone');
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+});
+
+test('Andy S3: an undo that cannot be done is reported (undoFailed), not silent', (t) => {
+  const dir = tmp(t, 'rollfail-');
+  const now = new Date(2026, 8, 27, 18, 0, 0).getTime();
+  const archive = path.join(dir, 'memory-archive-2026-09-27.md');
+  fs.writeFileSync(archive, '# Memory archive - earlier\n\ninvented older notes\n');
+  fs.writeFileSync(path.join(dir, 'memory.md'), bigMemory(90));
+  M.rolloverTestHooks.rename = () => {
+    fs.chmodSync(archive, 0o444); // the archive can no longer be truncated back
+    throw Object.assign(new Error('EPERM'), { code: 'EPERM', syscall: 'rename' });
+  };
+  t.after(() => { M.rolloverTestHooks.rename = undefined; try { fs.chmodSync(archive, 0o644); } catch { /* gone */ } });
+  const r = M.rolloverMemory(dir, now);
+  assert.equal(r.replaceFailed, 'EPERM');
+  assert.ok(r.undoFailed && r.undoFailed !== 'archive-changed', `the undo's own error is reported: ${JSON.stringify(r)}`);
+});
+
+test('the hive logs a failed replace (and a failed undo) as a row, not only a console warning', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8');
-  assert.match(src, /else if \(r\.replaceFailed\) this\.appendLog\(\{ kind: 'memory-rollover-failed', agentId: meta\.id, bytesBefore: r\.bytesBefore, code: r\.replaceFailed \}\)/);
+  assert.match(src, /else if \(r\.replaceFailed\) this\.appendLog\(\{ kind: 'memory-rollover-failed', agentId: meta\.id, bytesBefore: r\.bytesBefore, code: r\.replaceFailed, \.\.\.\(r\.undoFailed \? \{ undoFailed: r\.undoFailed \} : \{\}\) \}\)/);
+  assert.match(src, /else if \(r\.raced\) this\.appendLog\(\{ kind: 'memory-rollover-raced', agentId: meta\.id, bytesBefore: r\.bytesBefore, \.\.\.\(r\.undoFailed \? \{ undoFailed: r\.undoFailed \} : \{\}\) \}\)/);
 });

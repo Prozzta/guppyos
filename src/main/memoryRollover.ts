@@ -198,7 +198,7 @@ export function archivePathFor(dir: string, now: number, adding: number): string
 }
 
 /** Tests only: runs after the archive and the tmp file are written, just before the re-check. */
-export const rolloverTestHooks: { beforeReplace?: (file: string) => void; beforeSeedReplace?: (file: string) => void; rename?: (from: string, to: string) => void } = {};
+export const rolloverTestHooks: { beforeReplace?: (file: string) => void; beforeSeedReplace?: (file: string) => void; rename?: (from: string, to: string) => void; append?: (file: string, data: string, enc: 'utf8') => void } = {};
 
 export interface RolloverResult {
   rotated: boolean;
@@ -211,8 +211,11 @@ export interface RolloverResult {
   pinnedBytes?: number;
   /** The pinned section is over PINNED_HARD_CAP_BYTES: memory.md was left untouched. */
   pinnedTooLarge?: boolean;
-  /** Writing or replacing failed (the error code): memory.md was left as it was and the archive append undone. */
+  /** Appending, writing or replacing failed (the error code): memory.md was left as it was and the archive append undone. */
   replaceFailed?: string;
+  /** With raced/replaceFailed: the archive append was NOT undone ('archive-changed' when another rollover
+   *  appended since, else the error code), so the next rollover may archive the same notes again. */
+  undoFailed?: string;
 }
 
 /**
@@ -240,37 +243,53 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   let archiveSizeBefore = -1;
   try { archiveSizeBefore = statSync(archive).size; } catch { /* a new archive */ }
   const archiveHead = archiveSizeBefore >= 0 ? '\n' : `# Memory archive - ${title}\n\n_Older notes rolled out of memory.md by the app. Indexed: \`memory search\` finds them._\n\n`;
-  appendFileSync(archive, eol(`${archiveHead}<!-- rolled ${new Date(now).toISOString()} -->\n${older.replace(/\n*$/, '\n')}`), 'utf8');
+  const tmp = `${file}.rollover-${process.pid}.tmp`;
+  const errCode = (e: unknown): string => String((e as NodeJS.ErrnoException)?.code ?? e);
+  // The archive's size once OUR append is complete; -1 until it is (a failed append is undone in full).
+  let archiveSizeOurs = -1;
+  // Whenever memory.md is NOT replaced, undo this archive append: the text is still in memory.md,
+  // and the next spawn's rollover must not archive it twice. Returns why the undo did not happen.
+  const undo = (): string | undefined => {
+    try { rmSync(tmp, { force: true, recursive: true }); } catch { /* best effort: an antivirus may hold it */ }
+    try {
+      // Andy M1 (02bfc587 audit): undo only OUR append. If the archive is no longer exactly the size it
+      // had after it, another rollover of this dir (another process) has appended since and may already
+      // have replaced memory.md: truncating would lose its notes. Leave it: a duplicate is safe, a loss is not.
+      if (archiveSizeOurs >= 0) {
+        let size = -1;
+        try { size = statSync(archive).size; } catch { /* gone: nothing of ours to undo */ }
+        if (size !== archiveSizeOurs) return 'archive-changed';
+      }
+      if (archiveSizeBefore < 0) rmSync(archive, { force: true });
+      else truncateSync(archive, archiveSizeBefore);
+      return undefined;
+    } catch (e) { return errCode(e); }
+  };
+  // CL-HARNESS-ROLLOVER-RENAME-CRASH: appending, writing or replacing can fail and STAY failed
+  // (Bitdefender's CMD heuristic quarantines some rollover tmp files and holds them for minutes).
+  // memory.md is then as it was, so this is an abandoned rollover like a race: undo, and report.
+  const failed = (e: unknown): RolloverResult => {
+    const undoFailed = undo();
+    return { rotated: false, bytesBefore: before, replaceFailed: errCode(e), ...(undoFailed ? { undoFailed } : {}), archive, pinnedBytes };
+  };
+  const block = eol(`${archiveHead}<!-- rolled ${new Date(now).toISOString()} -->\n${older.replace(/\n*$/, '\n')}`);
+  // Andy S2: a failed (or partial) append is undone too, back to the archive's previous bytes.
+  try { (rolloverTestHooks.append ?? appendFileSync)(archive, block, 'utf8'); } catch (e) { return failed(e); }
+  // Expected, not measured: a stat here could already include another process's append.
+  archiveSizeOurs = Math.max(archiveSizeBefore, 0) + Buffer.byteLength(block, 'utf8');
   const pointer = `${POINTER_HEAD}${archiveName} (and earlier memory-archive-*.md files); \`memory search\` finds them._\n\n`;
   // The pinned section sits between the header and the pointer (which ends it on the next lift),
   // ending in exactly one blank line, so repeated rollovers keep it byte-identical.
   const top = pinned ? pinned.replace(/\n*$/, '\n\n') : '';
   const next = `${header}${!header || header.endsWith('\n\n') ? '' : '\n'}${top}${pointer}${tail}`;
-  const tmp = `${file}.rollover-${process.pid}.tmp`;
-  // Whenever memory.md is NOT replaced, undo this archive append: the text is still in memory.md,
-  // and the next spawn's rollover must not archive it twice.
-  const undo = (): void => {
-    try { rmSync(tmp, { force: true, recursive: true }); } catch { /* best effort: an antivirus may hold it */ }
-    try {
-      if (archiveSizeBefore < 0) unlinkSync(archive);
-      else truncateSync(archive, archiveSizeBefore);
-    } catch { /* best effort: a leftover copy is only a duplicate search hit */ }
-  };
-  // CL-HARNESS-ROLLOVER-RENAME-CRASH: writing or replacing can fail and STAY failed (Bitdefender's
-  // CMD heuristic quarantines some rollover tmp files and holds them for minutes). memory.md is then
-  // as it was, so this is an abandoned rollover like a race: undo, and report instead of throwing.
-  const failed = (e: unknown): RolloverResult => {
-    undo();
-    return { rotated: false, bytesBefore: before, replaceFailed: String((e as NodeJS.ErrnoException)?.code ?? e), archive, pinnedBytes };
-  };
   try { writeFileSync(tmp, eol(next), 'utf8'); } catch (e) { return failed(e); }
   // CB-165 F2: a lingering process may have appended since the read. Replacing the file now
   // would lose that append, so abort and leave memory.md as it is.
   rolloverTestHooks.beforeReplace?.(file);
   const st1 = statSync(file);
   if (st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs) {
-    undo();
-    return { rotated: false, bytesBefore: before, raced: true, archive, pinnedBytes };
+    const undoFailed = undo();
+    return { rotated: false, bytesBefore: before, raced: true, ...(undoFailed ? { undoFailed } : {}), archive, pinnedBytes };
   }
   try { (rolloverTestHooks.rename ?? renameSync)(tmp, file); } catch (e) { return failed(e); }
   return { rotated: true, bytesBefore: before, bytesAfter: statSync(file).size, archive, pinnedBytes };

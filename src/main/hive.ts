@@ -1299,9 +1299,10 @@ export class HiveManager {
         const r = rolloverMemory(dir);
         if (r.pinnedBytes !== undefined) pinnedBytes = r.pinnedBytes;
         if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: meta.id, bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
-        else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: meta.id, bytesBefore: r.bytesBefore });
+        // undoFailed: the archive append stayed (the next rollover may archive the same notes again).
+        else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: meta.id, bytesBefore: r.bytesBefore, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
         // CL-HARNESS-ROLLOVER-RENAME-CRASH: an antivirus can hold the new file; memory.md is kept as it was.
-        else if (r.replaceFailed) this.appendLog({ kind: 'memory-rollover-failed', agentId: meta.id, bytesBefore: r.bytesBefore, code: r.replaceFailed });
+        else if (r.replaceFailed) this.appendLog({ kind: 'memory-rollover-failed', agentId: meta.id, bytesBefore: r.bytesBefore, code: r.replaceFailed, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
         else if (r.pinnedTooLarge) this.appendLog({ kind: 'memory-pinned-too-large', agentId: meta.id, pinnedBytes: r.pinnedBytes, bytesBefore: r.bytesBefore });
       } catch (e) { console.warn('[hive] memory rollover failed:', e); }
       // Over the soft cap nothing is cut; the row (once per agent per day) makes it visible.
