@@ -333,6 +333,9 @@ class Rig {
     for (;;) {
       if (await fn()) return true;
       if (await free()) return false;
+      // TEST-FLAKE-MAILRIG-C1: how many times a hold found the agents still busy and kept the clock
+      // still (a test waits on this EVENT, never on wall-clock time, before it releases a held start).
+      this.busyHolds = (this.busyHolds ?? 0) + 1;
       const p = this.progress();
       if (p !== seen) { seen = p; lastProgressAt = this.clock.now(); }
       if (this.clock.now() - lastProgressAt >= busyTimeoutMs) throw await fail(failMsg);
