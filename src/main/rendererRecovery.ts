@@ -198,7 +198,9 @@ function frameName(f: { functionName?: string; url?: string; lineNumber?: number
  * the `topApp` list only; the unfiltered lists are kept beside it.
  */
 const PSEUDO_FRAME = /^\((program|idle|root|garbage collector|anonymous)\)/;
-const VENDOR_URL = /node_modules|[\\/](react-dom|react|scheduler)[.\-]/;
+// A paused-stack frame string keeps only the file's basename (`fn react-dom.development.js:1:2`),
+// so a vendor file is also recognised at the start of a word, not only after a path separator.
+const VENDOR_URL = /node_modules|(?:^|[\\/\s])(react-dom|react|scheduler)[.\-]/;
 const REACT_INTERNAL = /^(commit[A-Z]\w*|performSyncWorkOnRoot|performConcurrentWorkOnRoot|performWorkOnRoot\w*|performUnitOfWork|workLoop\w*|beginWork\w*|completeWork\w*|completeUnitOfWork|renderWithHooks|renderRoot\w*|reconcile\w*|updateFunctionComponent|updateMemoComponent|updateSimpleMemoComponent|mountIndeterminateComponent|flush\w*|invokePassive\w*|recursivelyTraverse\w*|scheduleUpdateOnFiber|dispatchSetState|dispatchReducerAction|batchedUpdates\w*|processRootSchedule\w*|ensureRootIsScheduled|performWorkUntilDeadline|runWithFiberInDEV|callCallback\w*|invokeGuardedCallback\w*|checkIfSnapshotChanged|subscribeToStore|updateStoreInstance|mountSyncExternalStore|updateSyncExternalStore|forceStoreRerender)\b/;
 export function isAppFrame(name: string, url = ''): boolean {
   if (PSEUDO_FRAME.test(name)) return false;
@@ -422,8 +424,11 @@ export class RendererProbe {
       const maxBytes = opts.maxBytes ?? PROFILE_MAX_BYTES;
       let file: string | null = null;
       if (json.length <= maxBytes) { try { file = await opts.write(json); } catch { file = null; } }
+      const stackApp = stacks.length ? appFramesAcross(stacks) : [];
+      const where = stuckInOf(stacks, summary.app);
       return { ...out, profile: 'ok', ms: Date.now() - t0, sampledMs: sampleMs, samples: summary.samples, topSelf: summary.self, topInclusive: summary.inclusive, topApp: summary.app,
-        ...(stacks.length ? { stacks, stackApp: appFramesAcross(stacks) } : {}), file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
+        ...(stacks.length ? { stacks, stackApp } : {}), stuckIn: where.stuckIn, ...(where.profileDisagrees ? { profileDisagrees: true } : {}),
+        file, bytes: json.length, ...(json.length > maxBytes ? { truncated: true } : {}) };
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       this.giveUp(); // detach resumes; the next page load re-arms
@@ -444,6 +449,40 @@ export function appFramesAcross(stacks: string[][]): Array<{ fn: string; stacks:
     }
   }
   return [...n].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([fn, c]) => ({ fn, stacks: c }));
+}
+
+/**
+ * TEST-FLAKE-RENDERER-PROFILE: where a busy renderer is stuck. The paused stacks are exact (the
+ * debugger reconstructs JIT-compiled frames); the CPU profile's sampler is not: under CPU load it
+ * charges a JIT-compiled loop's ticks to its CALLER (measured: loop share ~60% quiet, ~20% beside 24
+ * CPU hogs, 0% in a loaded full suite; ~99.7% with every JIT tier off). So the stacks name the stuck
+ * function; the profile answers only when no stack was captured (an idle page). A profile whose top
+ * app frame is a different function is flagged, so the skew shows in the logged row.
+ */
+export function stuckInOf(stacks: string[][], profileApp: Array<{ fn: string; pct: number }>): {
+  stuckIn: { fn: string; source: 'stacks' | 'profile' } | null; profileDisagrees: boolean;
+} {
+  // A function is "fn file" without the position: a loop's current line moves between pauses, its
+  // callers' lines do not, so counting exact frames would favour a caller over the loop.
+  const fnOf = (frame: string) => { const [name, loc = ''] = frame.split(' '); return `${name} ${loc.replace(/:\d+(:\d+)?$/, '')}`; };
+  const count = new Map<string, { n: number; frame: string; k: string }>();
+  // How many pauses hold the function ANYWHERE: a tie on the innermost count (a loop calling two
+  // helpers, paused once in each and once in itself) goes to the function every pause is inside.
+  const within = new Map<string, number>();
+  for (const st of stacks) {
+    const app = st.filter((fr) => isAppFrame(fr.split(' ')[0], fr));
+    for (const k of new Set(app.map(fnOf))) within.set(k, (within.get(k) ?? 0) + 1);
+    const inner = app[0]; // the innermost app frame of this pause
+    if (!inner) continue;
+    const k = fnOf(inner); const c = count.get(k);
+    if (c) c.n++; else count.set(k, { n: 1, frame: inner, k });
+  }
+  // Array.prototype.sort is stable: a full tie keeps pause order.
+  const best = [...count.values()].sort((a, b) => b.n - a.n || (within.get(b.k) ?? 0) - (within.get(a.k) ?? 0))[0];
+  // A profile with no app frame names nothing, so it does not disagree (topApp, logged too, is empty).
+  if (best) return { stuckIn: { fn: best.frame, source: 'stacks' }, profileDisagrees: profileApp.length > 0 && fnOf(profileApp[0].fn) !== fnOf(best.frame) };
+  if (profileApp.length) return { stuckIn: { fn: profileApp[0].fn, source: 'profile' }, profileDisagrees: false };
+  return { stuckIn: null, profileDisagrees: false };
 }
 
 function raceMs<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
