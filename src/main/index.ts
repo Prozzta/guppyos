@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, po
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
 import { ClaimStore } from './claims/store';
+import { SearchResultLog } from './claims/searchLog';
 import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
 import type { ClaimsEndpointDeps } from './claims/endpoint';
 import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
@@ -1345,6 +1346,8 @@ function claimsAnchorCheck(): void {
   try { claimsEndpoint()?.store.checkAnchored(); } catch (e) { hive.appendLog({ kind: 'claims-anchor-check-failed', error: String(e).slice(0, 160) }); }
 }
 setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
+// CL-M4-WP step 3 (design §2 source 2): the claim ids each agent's own search returned, 6 h.
+const claimsSearchLog = new SearchResultLog({ hiveRoot: () => hive.root() });
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
@@ -1365,7 +1368,8 @@ const nativeMemory = new NativeMemoryWiring({
   claims: claimsEndpoint,
   claimLedger: () => readConfig().claimLedger,
   anchoredAgents: () => claimsEndpoint()?.store.anchoredAgents() ?? [],
-  onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); }
+  onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); },
+  searchLog: claimsSearchLog
 });
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
 // CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory

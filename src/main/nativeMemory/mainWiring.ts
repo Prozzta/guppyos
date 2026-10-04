@@ -52,7 +52,13 @@ export interface WiringDeps {
   anchoredAgents?: () => string[];
   /** CLAIM-LEDGER W3: a (re)started worker is ready; main re-sends every flagged agent's claims (G3.3). */
   onWorkerReady?: () => void;
+  /** CL-M4-WP step 3: logs the claim ids an agent's own `search` returned (ids only, 6 h). */
+  searchLog?: { record(agentId: string, searchJson: unknown): unknown };
 }
+
+/** CL-M4-WP step 3: the bounds of one main-internal `embed` request (a pool of note candidates + the query). */
+export const EMBED_MAX_TEXTS = 64;
+export const EMBED_MAX_CHARS = 2000;
 
 /** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings.
  *  CLAIM-LEDGER (F6, A4): `<key>-v2.sqlite`, SCHEMA_VERSION 2. Builds without the ledger open only
@@ -202,6 +208,9 @@ export class NativeMemoryWiring {
       return { status: 200, body: { exit: c.exit, text: c.text, json: c.json, error: c.error } };
     }
     const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
+    if (cmd === 'search' && r.ok) {
+      try { this.d.searchLog?.record(agentId, r.json); } catch (e) { this.d.log({ kind: 'claims-search-log-failed', agentId, error: String(e).slice(0, 160) }); }
+    }
     let text = r.text;
     if (cmd === 'wake-up' && r.ok) {
       try { const claims = await this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
@@ -268,6 +277,19 @@ export class NativeMemoryWiring {
     const why = this.unavailable();
     if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
     return this.client.request('r5-candidates', { wing, claimId, tau2 }, 5_000);
+  }
+
+  /**
+   * CL-M4-WP step 3: MiniLM vectors for note-candidate ranking (main-internal, like r5Candidates:
+   * no agent HTTP route reaches it). 1-EMBED_MAX_TEXTS texts of at most EMBED_MAX_CHARS each.
+   */
+  embed(texts: string[]): Promise<Reply> {
+    if (!Array.isArray(texts) || !texts.length || texts.length > EMBED_MAX_TEXTS || !texts.every((t) => typeof t === 'string' && t.length <= EMBED_MAX_CHARS)) {
+      return Promise.resolve({ ok: false, exit: EXIT.usage, error: `embed takes 1-${EMBED_MAX_TEXTS} texts of at most ${EMBED_MAX_CHARS} characters` });
+    }
+    const why = this.unavailable();
+    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
+    return this.client.request('embed', { texts }, 5_000);
   }
 
   shutdown(): Promise<void> {
