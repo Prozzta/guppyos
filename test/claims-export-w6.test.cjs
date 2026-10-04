@@ -22,6 +22,9 @@ const E = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'exportLedger.ts'));
 const G = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'generated.ts'));
 const M = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'migrate.ts'));
 const R = loadTs(path.join(ROOT, 'src', 'main', 'memoryRollover.ts'));
+const V = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'views.ts'));
+const renderers = (records) => V.createClaimViews(records, () => 0);
+const view = { flags: {}, counters: {} };
 
 const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claims-export-'));
 function ledger(n, { textLen = 40, month = '2026-10', kindEvery = 0 } = {}) {
@@ -39,7 +42,7 @@ function ledger(n, { textLen = 40, month = '2026-10', kindEvery = 0 } = {}) {
 test('continuous export: one tagged line per record, a header once, the month from the write time', () => {
   const d = dir();
   const { records, state } = ledger(3);
-  for (const r of records) E.appendExport(d, r, state, E.standInExportLine);
+  for (const r of records) E.appendExport(d, r, state, renderers(records).renderExportLine);
   assert.deepEqual(E.exportFiles(d), ['memory-ledger-export-2026-10.md']);
   const text = fs.readFileSync(path.join(d, 'memory-ledger-export-2026-10.md'), 'utf8');
   assert.equal(text.match(/^# Memory ledger export/gm).length, 1);
@@ -56,7 +59,7 @@ test('exportLine adds the [c:id] tag if a renderer forgot it, and always ends wi
 test('G6.8 split: a month over 1.5 MiB continues in -2, -3; no export file ever reaches the 2 MiB cap', () => {
   const d = dir();
   const { records, state } = ledger(1100, { textLen: 3900 });   // ~4.3 MB
-  for (const r of records) E.appendExport(d, r, state, E.standInExportLine);
+  for (const r of records) E.appendExport(d, r, state, renderers(records).renderExportLine);
   const files = E.exportFiles(d);
   assert.deepEqual(files, ['memory-ledger-export-2026-10.md', 'memory-ledger-export-2026-10-2.md', 'memory-ledger-export-2026-10-3.md']);
   for (const f of files) {
@@ -70,9 +73,9 @@ test('G6.8 split: a month over 1.5 MiB continues in -2, -3; no export file ever 
 test('syncExport: catches up the records a crash left out, in order, and is idempotent', () => {
   const d = dir();
   const { records, state } = ledger(10);
-  for (const r of records.slice(0, 6)) E.appendExport(d, r, state, E.standInExportLine);
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 4);
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 0);
+  for (const r of records.slice(0, 6)) E.appendExport(d, r, state, renderers(records).renderExportLine);
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 4);
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 0);
   const text = fs.readFileSync(path.join(d, 'memory-ledger-export-2026-10.md'), 'utf8');
   const order = [...text.matchAll(/\[c:(c\d+)\]/g)].map((m) => m[1]);
   assert.deepEqual(order, records.map((r) => r.id));
@@ -81,7 +84,7 @@ test('syncExport: catches up the records a crash left out, in order, and is idem
 test('status changes are appended as marker lines, never edits; markers do not count as exports', () => {
   const d = dir();
   const { records, state } = ledger(3);
-  for (const r of records) E.appendExport(d, r, state, E.standInExportLine);
+  for (const r of records) E.appendExport(d, r, state, renderers(records).renderExportLine);
   const before = fs.readFileSync(path.join(d, 'memory-ledger-export-2026-10.md'), 'utf8');
   const next = JSON.parse(JSON.stringify(state));
   next.claims.c1.status = 'superseded';
@@ -91,7 +94,7 @@ test('status changes are appended as marker lines, never edits; markers do not c
   const after = fs.readFileSync(path.join(d, 'memory-ledger-export-2026-10.md'), 'utf8');
   assert.ok(after.startsWith(before), 'append-only: the earlier bytes are unchanged');
   assert.match(after.slice(before.length), /status of \[c:c1\]: live -> superseded/);
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 0, 'the marker does not stop or fake an export');
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 0, 'the marker does not stop or fake an export');
   assert.ok(!E.exportedIds(d).has('c3'));
 });
 
@@ -99,10 +102,11 @@ test('export --complete: memory.md replaced by temp + rename, every claim tagged
   const d = dir();
   const { records, state } = ledger(5, { kindEvery: 3 });
   fs.writeFileSync(path.join(d, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# a generated view\n`);
-  const withMarker = (s, v, m) => `${G.GENERATED_MEMORY_MARKER}\n` + E.standInCompleteMemory(records, 'ag-1')(s, v, m);
-  const r = E.exportComplete(d, state, { flags: {}, counters: {} }, withMarker);
+  const realRender = renderers(records).renderMemoryMd;
+  const r = E.exportComplete(d, state, view, realRender);
   const text = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
   assert.ok(!G.isGeneratedMemory(text), 'the complete export is an ordinary memory.md');
+  assert.equal(text, realRender(state, view, 'complete').replace(`${G.GENERATED_MEMORY_MARKER}\n`, ''), 'W6 exports the real W4 complete rendering, minus its generated marker');
   for (const c of records) assert.ok(text.includes(`[c:${c.id}]`));
   assert.match(text, /^## How I work \(standing lessons\)$/m);
   assert.equal(r.note, E.COMPLETE_EXPORT_NOTE);
@@ -112,7 +116,7 @@ test('export --complete: memory.md replaced by temp + rename, every claim tagged
 test('G6.3 path: the older rollover rolls a large complete export like any memory.md (it carries no marker)', () => {
   const d = dir();
   const { records, state } = ledger(600, { kindEvery: 50 });
-  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'));
+  E.exportComplete(d, state, view, renderers(records).renderMemoryMd);
   const r = R.rolloverMemory(d, Date.parse('2026-10-04T12:00:00Z'));
   assert.equal(r.rotated, true);
   assert.ok(!r.generated);
@@ -121,7 +125,7 @@ test('G6.3 path: the older rollover rolls a large complete export like any memor
 test('G6.4 upgrade round trip: the complete export re-imports as nothing; a bullet the older build adds comes back once', () => {
   const d = dir();
   const { records, state } = ledger(20, { kindEvery: 4 });
-  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'));
+  E.exportComplete(d, state, view, renderers(records).renderMemoryMd);
   const known = M.knownIdsFor(records);
   assert.deepEqual(M.parseNewBullets(fs.readFileSync(path.join(d, 'memory.md'), 'utf8'), known), []);
   fs.appendFileSync(path.join(d, 'memory.md'), '- 2026-10-05 a note written while on the older build\n');
@@ -151,7 +155,7 @@ test('ruling 2: archive-backed legacy claims (content-checked by sha256) stay ou
   const arch = byFile(records, /^memory-archive-/);
   assert.ok(arch.length >= 4, `the long entry is split into parts (${arch.length} archive records)`);
   assert.deepEqual([...E.archiveBackedIds(d, records, state)].sort(), [...arch].sort());
-  E.syncExport(d, records, state, E.standInExportLine);
+  E.syncExport(d, records, state, renderers(records).renderExportLine);
   const ex = E.exportedIds(d);
   for (const id of arch) assert.ok(!ex.has(id), `${id} is still in its archive: not exported again`);
   for (const r of records.filter((x) => !arch.includes(x.id))) assert.ok(ex.has(r.id), `${r.id} (${r.legacy ? r.legacy.file : 'post-migration'}) is exported`);
@@ -159,17 +163,17 @@ test('ruling 2: archive-backed legacy claims (content-checked by sha256) stay ou
 
 test('ruling 2: re-evaluated on every sync: a changed entry, then a deleted archive, bring their claims back', () => {
   const { d, records, state } = archived();
-  E.syncExport(d, records, state, E.standInExportLine);
+  E.syncExport(d, records, state, renderers(records).renderExportLine);
   const file = path.join(d, 'memory-archive-2026-09-20.md');
   const alpha = records.find((r) => r.text && r.text.includes('fact alpha')).id;
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('fact alpha', 'fact alpha, edited'));
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 1, 'only the entry the archive no longer holds');
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 1, 'only the entry the archive no longer holds');
   assert.ok(E.exportedIds(d).has(alpha));
   fs.rmSync(file);
   const rest = byFile(records, /^memory-archive-/).filter((id) => id !== alpha);
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), rest.length, 'the archive is gone: all its claims are back');
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), rest.length, 'the archive is gone: all its claims are back');
   for (const id of rest) assert.ok(E.exportedIds(d).has(id));
-  assert.equal(E.syncExport(d, records, state, E.standInExportLine), 0, 'idempotent');
+  assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 0, 'idempotent');
 });
 
 test('ruling 2: a claim naming an archive that is not in the folder, or a lesson, is never left out', () => {
@@ -184,13 +188,13 @@ test('ruling 2: a claim naming an archive that is not in the folder, or a lesson
 test('ruling 2: export --complete with the archive-backed exclude omits them and keeps How I work; without it, every record', () => {
   const { d, records, state } = archived();
   const arch = byFile(records, /^memory-archive-/);
-  E.exportComplete(d, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records, state));
+  E.exportComplete(d, state, view, renderers(records).renderMemoryMd, E.archiveBackedIds(d, records, state));
   const text = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
   for (const id of arch) assert.ok(!text.includes(`[c:${id}]`), id);
   for (const r of records.filter((x) => !arch.includes(x.id))) assert.ok(text.includes(`[c:${r.id}]`), r.id);
-  assert.match(text, /^## How I work \(standing lessons\)\n- an invented lesson/m);
+  assert.match(text, /^## How I work \(standing lessons\)\n- .*an invented lesson \[status:live\] \[c:/m);
   const all = dir();
-  E.exportComplete(all, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'));
+  E.exportComplete(all, state, view, renderers(records).renderMemoryMd);
   const full = fs.readFileSync(path.join(all, 'memory.md'), 'utf8');
   for (const r of records) assert.ok(full.includes(`[c:${r.id}]`), `default: every record (${r.id})`);
 });
@@ -199,23 +203,23 @@ test('W6-D2 (god 909a70): excluded only while live or superseded?; a retracted o
   const { d, records, state } = archived();
   const alpha = records.find((r) => r.text && r.text.includes('fact alpha')).id;
   const beta = records.find((r) => r.text && r.text.includes('fact beta')).id;
-  E.syncExport(d, records, state, E.standInExportLine);
+  E.syncExport(d, records, state, renderers(records).renderExportLine);
   assert.ok(!E.exportedIds(d).has(alpha));
   const next = JSON.parse(JSON.stringify(state));
   next.claims[alpha].status = 'retracted';
   next.claims[beta].status = 'superseded?';
   assert.ok(!E.archiveBackedIds(d, records, next).has(alpha), 'retracted: no longer left out');
   assert.ok(E.archiveBackedIds(d, records, next).has(beta), "'superseded?' is still a live view: left out");
-  assert.equal(E.syncExport(d, records, next, E.standInExportLine), 1);
+  assert.equal(E.syncExport(d, records, next, renderers(records).renderExportLine), 1);
   const text = E.exportFiles(d).map((f) => fs.readFileSync(path.join(d, f), 'utf8')).join('');
-  assert.match(text, new RegExp(String.raw`\[retracted\]: [^\n]*fact alpha[^\n]*\[c:${alpha}\]`), 'the marked line, with its text');
+  assert.match(text, new RegExp(String.raw`"- 2026-09-01 an invented archived fact alpha" \[status:retracted\] \[c:${alpha}\]`), 'the real W4 rendered line carries its status and id');
   next.claims[beta].status = 'superseded';
-  assert.equal(E.syncExport(d, records, next, E.standInExportLine), 1);
+  assert.equal(E.syncExport(d, records, next, renderers(records).renderExportLine), 1);
   // and the complete export marks it too
-  E.exportComplete(d, next, { flags: {}, counters: {} }, E.standInCompleteMemory(records, 'ag-1'), E.archiveBackedIds(d, records, next));
+  E.exportComplete(d, next, view, renderers(records).renderMemoryMd, E.archiveBackedIds(d, records, next));
   const mem = fs.readFileSync(path.join(d, 'memory.md'), 'utf8');
-  assert.match(mem, new RegExp(String.raw`\[retracted\] [^\n]*fact alpha[^\n]*\[c:${alpha}\]`));
-  assert.match(mem, new RegExp(String.raw`\[superseded\] [^\n]*fact beta[^\n]*\[c:${beta}\]`));
+  assert.match(mem, new RegExp(String.raw`- 2026-09-01 an invented archived fact alpha \[status:retracted\] \[c:${alpha}\]`));
+  assert.match(mem, new RegExp(String.raw`- 2026-09-01 an invented archived fact beta \[status:superseded\] \[c:${beta}\]`));
 });
 
 test('W6-D3: a legacy.file with a path in it is never treated as an archive in the folder', () => {

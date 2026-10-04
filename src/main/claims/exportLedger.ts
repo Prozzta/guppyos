@@ -193,31 +193,6 @@ export function exportComplete(agentDir: string, state: ClaimsState, view: World
   return { file, bytes: Buffer.byteLength(text, 'utf8'), note: COMPLETE_EXPORT_NOTE };
 }
 
-// ——— Stand-ins for W4's renderers (replaced in main's wiring once W4 lands) ———
-
-/** Stand-in RenderExportLineFn: one line per record, newlines in claim text indented. */
-export const standInExportLine: RenderExportLineFn = (rec, state) => {
-  if (rec.t === 'event') return `- ${rec.at} event ${rec.ev} on ${rec.targets.join(', ')} [c:${rec.id}]`;
-  const st = state.claims[rec.id]?.status ?? 'live';
-  const key = rec.key ? ` (${rec.key})` : '';
-  const text = rec.text.replace(/\r?\n/g, '\n  ');
-  return `- ${rec.at.slice(0, 10)} ${rec.kind}${key}${st === 'live' ? '' : ` [${st}]`}: ${text} [c:${rec.id}]`;
-};
-
-/** Stand-in RenderMemoryMdFn ('complete' only matters to W6): header, How I work, every claim by time (less any excluded). */
-export function standInCompleteMemory(records: LedgerRec[], agent: string): RenderMemoryMdWithExcludeFn {
-  return (state, _view, mode, opts) => {
-    const claims = (records.filter((r) => r.t === 'claim') as Array<Extract<LedgerRec, { t: 'claim' }>>).filter((c) => !opts?.exclude?.(c.id));
-    const lessons = claims.filter((c) => c.kind === 'lesson' && state.claims[c.id]?.status === 'live');
-    const lines = [`# Memory - ${agent}`, '', '## How I work (standing lessons)', ...lessons.map((c) => `${c.text} [c:${c.id}]`), '', '## All claims (complete export)'];
-    const sorted = [...claims].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
-    for (const c of sorted) {
-      const st = state.claims[c.id]?.status ?? 'live';
-      lines.push(`- ${c.at.slice(0, 10)}${st === 'live' ? '' : ` [${st}]`} ${c.text.replace(/\r?\n/g, '\n  ')} [c:${c.id}]`);
-    }
-    return mode === 'complete' ? lines.join('\n') + '\n' : `${lines.slice(0, 4).join('\n')}\n`;
-  };
-}
 
 /** Whether every line of an export or memory text that names a record carries a parsable tag (for checks). */
 export function taggedIds(text: string): string[] {

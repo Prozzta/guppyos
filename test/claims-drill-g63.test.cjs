@@ -30,6 +30,7 @@ const ROOT = path.join(__dirname, '..');
 const M = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'migrate.ts'));
 const E = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'exportLedger.ts'));
 const G = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'generated.ts'));
+const V = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'views.ts'));
 const RUNNER = path.join(ROOT, 'test', 'claims-drill', 'runner.cjs');
 const SCRIPT = path.join(ROOT, 'test', 'claims-drill', 'g63-downgrade.cjs');
 const TREE_183 = process.env.CLAIMS_DRILL_TREE_183 || 'C:/Dunder/_work/drill-trees/v1.1.83';
@@ -70,9 +71,10 @@ function prepareAgent(agentDir, agent, scenario, postTokens) {
   for (const r of records) claims[r.id] = { id: r.id, status: 'live', sightings: 1, firstAt: r.at, lastAt: r.at, pinned: r.kind === 'lesson', reasons: [] };
   const state = { v: 1, agent, registryHash: '', ledgerHead: '', claims, conflicts: [] };
   // god 6c4d4e ruling 2: both exports leave out the legacy claims their archive still holds
-  E.syncExport(agentDir, records, state, E.standInExportLine);
+  const render = V.createClaimViews(records, () => 0);
+  E.syncExport(agentDir, records, state, render.renderExportLine);
   if (scenario === 'planned') {
-    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, E.standInCompleteMemory(records, agent), E.archiveBackedIds(agentDir, records, state));
+    E.exportComplete(agentDir, state, { flags: {}, counters: {} }, render.renderMemoryMd, E.archiveBackedIds(agentDir, records, state));
   } else {
     // writer mode before an unplanned downgrade: memory.md is the small generated view
     fs.writeFileSync(path.join(agentDir, 'memory.md'), `${G.GENERATED_MEMORY_MARKER}\n# Memory - ${agent}\n\n## How I work (standing lessons)\n${LESSONS.join('\n')}\n`);
