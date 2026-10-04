@@ -134,7 +134,7 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', []); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel', candidates, references } }; }
       if (args.separate !== true) return {
         ok: true, exit: EXIT.ok,
-        text: `Possible related claims (ranking: ${choices.ranking}). Choose --supersedes ID --reason changed|corrected|moved, --separate, or --cancel:\n${candidates.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}` : ''}\n`,
+        text: `Possible related claims (ranking: ${choices.ranking}). Choose --supersedes ID --reason changed|corrected|moved, --separate, or --cancel. --supersedes may name any live claim in your own ledger, including one not listed here. For another agent's fact, link/reference the owner's claim; do not copy it.\n${candidates.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}` : ''}\n`,
         json: { choice: 'choose', candidates, references, ranking: choices.ranking }
       };
     }

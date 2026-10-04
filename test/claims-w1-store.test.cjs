@@ -872,6 +872,20 @@ test('supersedesReason is MAC-covered, omitted for old writes, and capped at 200
   }), 'endpoint'), /200 UTF-16 code units/);
 });
 
+test('CL-M4-WP: same-tick replacements are rechecked inside the per-agent append queue', async () => {
+  const root = hive();
+  const { store } = mkStore(root);
+  const prior = await ok(store.appendRecord('andy', note('current'), 'endpoint'));
+  const replacement = (text) => store.appendRecord('andy', note(text, {
+    supersedes: [prior], supersedesReason: { category: 'changed' },
+  }), 'endpoint');
+  const results = await Promise.all([replacement('replacement one'), replacement('replacement two')]);
+  assert.equal(results.filter((r) => r.ok).length, 1);
+  assert.equal(results.filter((r) => !r.ok && /no longer live/.test(r.error)).length, 1);
+  const records = store.readLedger('andy').records;
+  assert.equal(records.filter((r) => r.t === 'claim' && r.supersedes?.includes(prior)).length, 1);
+});
+
 test('reader fails closed when a stored supersedesReason has no supersedes target', async () => {
   const root = hive();
   const { store, keys } = mkStore(root);

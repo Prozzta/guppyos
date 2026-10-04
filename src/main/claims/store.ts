@@ -570,6 +570,22 @@ export class ClaimStore {
 
     const wtDate = this.now();
     const wt = wtDate.toISOString();
+    // CL-M4-WP: candidate validation in the endpoint is necessarily stale by the time an
+    // append reaches this per-agent queue. Recheck reason-bearing (interactive note) replacements
+    // against the ledger as it exists *inside* the serialized append, so concurrent writers cannot
+    // both replace the same live claim.
+    if (draft.t === 'claim' && draft.supersedesReason !== undefined && draft.supersedes?.length) {
+      let registry;
+      try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+      const state = derive(this.ledgerRecords(agentId), registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+      for (const target of draft.supersedes) {
+        const known = s.known.get(target);
+        const targetRec = this.ledgerRecords(agentId).find((r): r is ClaimRec => r.t === 'claim' && r.id === target);
+        if (known?.t !== 'claim' || state.claims[target]?.status !== 'live' || !targetRec || this.ttlEnded(targetRec.ttl, wt)) {
+          return { ok: false, error: 'supersedes target is no longer live; refresh candidates and choose again' };
+        }
+      }
+    }
     const built = this.build(agentId, draft, origin, s, wt);
     if ('error' in built) return { ok: false, error: built.error, ...(built.didYouMean ? { didYouMean: built.didYouMean } : {}) };
     let rec: LedgerRec = built.rec;
