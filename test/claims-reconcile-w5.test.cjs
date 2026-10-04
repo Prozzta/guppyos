@@ -9,14 +9,22 @@ const { ReconcileQueue, ReconcileApi, enqueueR5AfterIndex, shouldRunR5, keyAlias
 const { reconcileApiForHive, createReconcileLiveClaims, refreshReconcileQueueForHive } = loadTs(path.join(__dirname, '../src/main/claims/reconcileHive.ts'));
 const { handleClaimVerb } = loadTs(path.join(__dirname, '../src/main/claims/endpoint.ts'));
 
-test('W5 main wiring pins kill mutants that drop either production callback', () => {
+test('W5 main wiring mutants: dropping answer, post-index refresh, or startup refresh is killed', () => {
   const file = path.join(__dirname, '../src/main/index.ts');
   const source = fs.readFileSync(file, 'utf8');
-  const wired = (text) => text.includes('onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b)')
-    && text.includes('onIndexed: (agentId) =>') && text.includes('refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps())');
-  assert.equal(wired(source), true);
-  assert.equal(wired(source.replace(/onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),?/, '')), false, 'G1 mutant: onReconcile omitted');
-  assert.equal(wired(source.replace(/onIndexed: \(agentId\) =>[^\n]+/, '')), false, 'G2 mutant: post-index refresh omitted');
+  const answerWired = (text) => text.includes('onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b)');
+  const postIndexWired = (text) => /onIndexed: \(agentId\) =>[^\n]*refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\)/.test(text);
+  const startupWired = (text) => /W5 startup census[\s\S]{0,260}refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\)/.test(text);
+  assert.equal(answerWired(source) && postIndexWired(source) && startupWired(source), true);
+  const mutants = [
+    ['G1/onReconcile omitted', source.replace(/onReconcile: \(agentId, a, b\) => reconcileQueueForHive\(root\)\.answeredPair\(agentId, a, b\),?/, ''), answerWired],
+    ['G2/post-index refresh omitted', source.replace(/onIndexed: \(agentId\) =>[^\n]+/, ''), postIndexWired],
+    ['G2/startup refresh omitted', source.replace(/setImmediate\(\(\) => \{ for \(const agentId of claimLedgerAgents\(\)\) \{ try \{ refreshReconcileQueueForHive\(root, agentId, reconcileHiveDeps\(\)\);[^\n]+/, ''), startupWired],
+  ];
+  for (const [name, mutant, pin] of mutants) {
+    assert.equal(pin(mutant), false, `${name} mutant must die`);
+    console.log(`# MUTANT KILLED: ${name}`);
+  }
 });
 
 test('G1 main endpoint answer clears its pair before three-turn completion can supersede it', async (t) => {
