@@ -19,7 +19,7 @@
  * research collapsed). The section is lifted out before the cut, kept directly under the header,
  * and never archived; the spawn seeds an empty one (seedPinnedSection).
  */
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
 /** memory.md above this many bytes is rolled over. */
@@ -198,7 +198,7 @@ export function archivePathFor(dir: string, now: number, adding: number): string
 }
 
 /** Tests only: runs after the archive and the tmp file are written, just before the re-check. */
-export const rolloverTestHooks: { beforeReplace?: (file: string) => void; beforeSeedReplace?: (file: string) => void } = {};
+export const rolloverTestHooks: { beforeReplace?: (file: string) => void; beforeSeedReplace?: (file: string) => void; rename?: (from: string, to: string) => void } = {};
 
 export interface RolloverResult {
   rotated: boolean;
@@ -211,6 +211,8 @@ export interface RolloverResult {
   pinnedBytes?: number;
   /** The pinned section is over PINNED_HARD_CAP_BYTES: memory.md was left untouched. */
   pinnedTooLarge?: boolean;
+  /** Writing or replacing failed (the error code): memory.md was left as it was and the archive append undone. */
+  replaceFailed?: string;
 }
 
 /**
@@ -245,21 +247,32 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   const top = pinned ? pinned.replace(/\n*$/, '\n\n') : '';
   const next = `${header}${!header || header.endsWith('\n\n') ? '' : '\n'}${top}${pointer}${tail}`;
   const tmp = `${file}.rollover-${process.pid}.tmp`;
-  writeFileSync(tmp, eol(next), 'utf8');
-  // CB-165 F2: a lingering process may have appended since the read. Replacing the file now
-  // would lose that append, so abort: undo this archive append (the text is still in memory.md,
-  // and the next spawn's rollover must not archive it twice) and leave memory.md as it is.
-  rolloverTestHooks.beforeReplace?.(file);
-  const st1 = statSync(file);
-  if (st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs) {
-    try { unlinkSync(tmp); } catch { /* best effort */ }
+  // Whenever memory.md is NOT replaced, undo this archive append: the text is still in memory.md,
+  // and the next spawn's rollover must not archive it twice.
+  const undo = (): void => {
+    try { rmSync(tmp, { force: true, recursive: true }); } catch { /* best effort: an antivirus may hold it */ }
     try {
       if (archiveSizeBefore < 0) unlinkSync(archive);
       else truncateSync(archive, archiveSizeBefore);
     } catch { /* best effort: a leftover copy is only a duplicate search hit */ }
+  };
+  // CL-HARNESS-ROLLOVER-RENAME-CRASH: writing or replacing can fail and STAY failed (Bitdefender's
+  // CMD heuristic quarantines some rollover tmp files and holds them for minutes). memory.md is then
+  // as it was, so this is an abandoned rollover like a race: undo, and report instead of throwing.
+  const failed = (e: unknown): RolloverResult => {
+    undo();
+    return { rotated: false, bytesBefore: before, replaceFailed: String((e as NodeJS.ErrnoException)?.code ?? e), archive, pinnedBytes };
+  };
+  try { writeFileSync(tmp, eol(next), 'utf8'); } catch (e) { return failed(e); }
+  // CB-165 F2: a lingering process may have appended since the read. Replacing the file now
+  // would lose that append, so abort and leave memory.md as it is.
+  rolloverTestHooks.beforeReplace?.(file);
+  const st1 = statSync(file);
+  if (st1.size !== st0.size || st1.mtimeMs !== st0.mtimeMs) {
+    undo();
     return { rotated: false, bytesBefore: before, raced: true, archive, pinnedBytes };
   }
-  renameSync(tmp, file);
+  try { (rolloverTestHooks.rename ?? renameSync)(tmp, file); } catch (e) { return failed(e); }
   return { rotated: true, bytesBefore: before, bytesAfter: statSync(file).size, archive, pinnedBytes };
 }
 
