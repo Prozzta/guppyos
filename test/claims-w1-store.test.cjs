@@ -32,7 +32,7 @@ const loadTs = require('./load-ts.cjs');
 const ROOT = path.join(__dirname, '..');
 const { ClaimStore } = loadTs(path.join(ROOT, 'src/main/claims/store.ts'));
 const { SandboxKeyProvider, SafeStorageKeyProvider, FileLedgerKeyRecord, KEY_RECORD_FILE } = loadTs(path.join(ROOT, 'src/main/claims/keyProvider.ts'));
-const { canonicalJson, sha256Hex, recordMac } = loadTs(path.join(ROOT, 'src/main/claims/canonical.ts'));
+const { canonicalJson, sha256Hex, recordMac, keyIdOf } = loadTs(path.join(ROOT, 'src/main/claims/canonical.ts'));
 const { redactSecrets } = loadTs(path.join(ROOT, 'src/main/claims/redact.ts'));
 const { handleClaimVerb } = loadTs(path.join(ROOT, 'src/main/claims/endpoint.ts'));
 const { NativeMemoryWiring } = loadTs(path.join(ROOT, 'src/main/nativeMemory/mainWiring.ts'));
@@ -807,6 +807,29 @@ test('the memory CLI maps the claim verbs; identity flags reach the app and are 
   assert.deepEqual(cli.parseArgs(['note', '--wing', 'dwight', 'x']).args.wing, 'dwight');
 });
 
+test('memory --help teaches link-not-copy and the explicit own-ledger supersedes rule', async () => {
+  const out = [];
+  assert.equal(await cli.main(['--help'], {}, { out: s => out.push(s), err: () => {} }), 0);
+  assert.match(out.join(''), /A recap cites the claim id; it does not restate the value/);
+  assert.match(out.join(''), /any live claim in your own ledger, even if it was not offered/);
+});
+
+test('golden pre-reason ledger line keeps its original canonical bytes and MAC after upgrade', () => {
+  const root = hive();
+  const key = Buffer.alloc(32, 7);
+  const golden = '{"agent":"andy","at":"2026-10-03T10:00:00.000Z","id":"c-0123456789ab","kind":"fact","mac":"074be6ebc6969522b3379e2bbc9de6ca113705b4c0599401d2c95eb995081e7e","prev":"","refs":[],"source":"self","t":"claim","text":"golden pre-reason claim","v":1,"wt":"2026-10-03T10:00:00.000Z"}';
+  const dir = path.join(root, 'agents', 'andy', 'memory', 'claims');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, '2026-10.jsonl'), `${golden}\n`);
+  const keys = { load: () => ({ ok: true, key, keyId: keyIdOf(key) }) };
+  const keyRecord = { get: () => keyIdOf(key), set: () => {} };
+  const { store } = mkStore(root, { keys, keyRecord });
+  const read = store.readLedger('andy');
+  assert.equal(read.chain, 'ok');
+  assert.equal(read.records[0].text, 'golden pre-reason claim');
+  assert.equal(lines(root, 'andy')[0], golden, 'upgrade reads the frozen old line byte-for-byte');
+});
+
 test('the memory CLI posts a claim verb with the token and prints the id', async () => {
   const http = require('node:http');
   let got = null;
@@ -848,7 +871,7 @@ test('CL-M4-WP note presents candidates without writing, then logs separate/repl
   d.noteCandidates = async () => ({ ...candidates, candidates: [], references: [] });
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'a fresh fact' } }, 'endpoint');
   assert.equal(r.json.choice, 'new');
-  assert.deepEqual(choices.map(([c]) => c), ['separate', 'replace', 'cancel', 'new']);
+  assert.deepEqual(choices.map(([c]) => c), ['offered', 'separate', 'replace', 'cancel', 'new']);
   d.validateSupersedes = () => false;
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'stale target', supersedes: [priorId], reason: 'corrected' } }, 'endpoint');
   assert.equal(r.exit, 2); assert.match(r.error, /currently live/);

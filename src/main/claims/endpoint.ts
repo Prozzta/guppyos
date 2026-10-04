@@ -37,7 +37,7 @@ export interface ClaimsEndpointDeps {
   /** Re-read verified derived state immediately before append; only same-owner live ids pass. */
   validateSupersedes?: (agentId: string, ids: string[]) => boolean;
   /** Choice-only diagnostics. Never pass note/reason text to this callback. */
-  onNoteChoice?: (agentId: string, choice: 'new' | 'replace' | 'separate' | 'cancel', ids: string[]) => void;
+  onNoteChoice?: (agentId: string, choice: 'offered' | 'new' | 'replace' | 'separate' | 'cancel', ids: string[]) => void;
 }
 
 function usage(error: string): ClaimReply { return { ok: false, exit: EXIT.usage, error }; }
@@ -131,18 +131,21 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     const candidates = choices?.candidates ?? [];
     const references = (choices as (CandidateResult & { references?: CandidateResult['candidates'] }) | null)?.references ?? [];
     if (!sup && choices && candidates.length) {
-      if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', []); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel', candidates, references } }; }
-      if (args.separate !== true) return {
+      if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', candidates.map(c => c.id)); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel', candidates, references } }; }
+      if (args.separate !== true) {
+        d.onNoteChoice?.(agentId, 'offered', candidates.map(c => c.id));
+        return {
         ok: true, exit: EXIT.ok,
-        text: `Possible related claims (ranking: ${choices.ranking}). Choose --supersedes ID --reason changed|corrected|moved, --separate, or --cancel. --supersedes may name any live claim in your own ledger, including one not listed here. For another agent's fact, link/reference the owner's claim; do not copy it.\n${candidates.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}` : ''}\n`,
+        text: `Possible related claims (ranking: ${choices.ranking}). Update habit: when a fact changed, replace its prior claim with --supersedes ID --reason changed|corrected|moved; choose --separate only when both claims remain true, or --cancel. --supersedes may name any live claim in your own ledger, including one not listed here. For another agent's fact, link/reference the owner's claim; do not copy it.\n${candidates.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map((c) => `  ${c.id}  ${c.date}  ${c.title} — ${c.excerpt}`).join('\n')}` : ''}\n`,
         json: { choice: 'choose', candidates, references, ranking: choices.ranking }
-      };
+        };
+      }
     }
     if (sup?.length) {
       if (!d.validateSupersedes?.(agentId, sup)) return usage('supersedes must name only your own currently live claims; refresh candidates and choose again');
       d.onNoteChoice?.(agentId, 'replace', sup);
     } else if (choices && !candidates.length) d.onNoteChoice?.(agentId, 'new', []);
-    else if (args.separate === true) d.onNoteChoice?.(agentId, 'separate', []);
+    else if (args.separate === true) d.onNoteChoice?.(agentId, 'separate', candidates.map(c => c.id));
     else if (args.cancel === true) { d.onNoteChoice?.(agentId, 'cancel', []); return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel' } }; }
     const draft: RecordDraft = {
       t: 'claim', kind: (args.kind ?? 'fact') as ClaimKind, text: args.text,
