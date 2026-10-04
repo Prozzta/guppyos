@@ -234,7 +234,7 @@ export interface Receipt {
 }
 
 export interface ReconcileItem {
-  itemId: string; agent: string; kind: 'conflict' | 'key-alias';
+  itemId: string; agent: string; kind: 'conflict' | 'key-alias'; rule?: 'R5' | 'R2-mail';
   a: string; b: string; text: string; leasedAt?: string; leaseTurn?: string; turnsUnanswered: number;
 }
 

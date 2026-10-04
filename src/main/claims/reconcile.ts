@@ -11,7 +11,7 @@ const queues = new Map<string, ReconcileQueue>();
 
 interface AgentQueue { sequence: number; items: ReconcileItem[]; r5?: R5Candidate[] }
 interface QueueState { v: 1; agents: Record<string, AgentQueue>; dailyTokens?: Record<string, number> }
-export interface ReconcileCandidate { itemId: string; kind: ReconcileItem['kind']; a: string; b: string; text: string }
+export interface ReconcileCandidate { itemId: string; kind: ReconcileItem['kind']; rule?: ReconcileItem['rule']; a: string; b: string; text: string }
 export interface TurnOffer { turn: string; items: ReconcileItem[] }
 export interface ReconcileDelivery { text: string; tokens: number; itemIds: string[]; items: ReconcileItem[]; turn: string }
 export interface ReconcileApiDeps {
@@ -84,6 +84,12 @@ export class ReconcileApi {
     if (!active) return;
     for (const item of this.d.queue.completeTurn(agentId, active)) {
       if (item.turnsUnanswered < 3 || item.kind !== 'conflict') continue;
+      if (item.rule !== 'R2-mail') {
+        this.d.queue.answeredPair(agentId, item.a, item.b);
+        this.d.log({ kind: 'claims-reconcile-expired', agentId, itemId: item.itemId,
+          rule: item.rule ?? 'suggestion', turnsUnanswered: item.turnsUnanswered, resolution: 'keep-both' });
+        continue;
+      }
       const direction = this.d.newestWins(item);
       if (!direction || !this.d.isLiveClaim(direction.winner)) continue;
       const result = await this.d.appendSoftSupersede(agentId, direction.loser, direction.winner, item.itemId);
@@ -125,6 +131,7 @@ export class ReconcileQueue {
       if (!c.itemId || c.a === c.b) continue;
       const old = byId.get(c.itemId);
       byId.set(c.itemId, { itemId: c.itemId, agent: agentId, kind: c.kind, a: c.a, b: c.b, text: c.text,
+        ...(c.rule ? { rule: c.rule } : {}),
         turnsUnanswered: old?.turnsUnanswered ?? 0, ...(old?.leasedAt ? { leasedAt: old.leasedAt } : {}), ...(old?.leaseTurn ? { leaseTurn: old.leaseTurn } : {}) });
     }
     // A derived conflict that has been answered (or an alias no longer live) leaves the queue.
@@ -151,7 +158,7 @@ export class ReconcileQueue {
     return ((this.state.agents[agentId] as AgentQueue | undefined)?.r5 ?? []).map((p) => {
       const [a, b] = [p.a, p.b].sort();
       return { itemId: reconcileItemId(agentId, 'conflict', a, b), kind: 'conflict', a, b,
-        text: `R5 candidate (${p.cosine.toFixed(3)} ≥ ${p.tau2.toFixed(2)}): ${a} / ${b}` };
+        rule: 'R5', text: `R5 candidate (${p.cosine.toFixed(3)} ≥ ${p.tau2.toFixed(2)}): ${a} / ${b}` };
     });
   }
   answeredPair(agentId: string, a: string, b: string): void {

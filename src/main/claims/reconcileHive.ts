@@ -26,7 +26,7 @@ export function refreshReconcileQueueForHive(root: string, agentId: string, deps
   const resolved = resolvedPairKeys(prefix.records, state);
   const conflicts = state.conflicts.filter((item) => item.rule === 'R2-mail' && !resolved.has(pairKey(item.a, item.b))).map((item) => ({
     itemId: reconcileItemId(agentId, 'conflict', item.a, item.b), kind: 'conflict' as const,
-    a: item.a, b: item.b, text: `Conflicting claims: ${item.a} / ${item.b}`,
+    a: item.a, b: item.b, rule: 'R2-mail' as const, text: `Conflicting claims: ${item.a} / ${item.b}`,
   }));
   const aliases = keyAliasCandidates(agentId, claims, state, registry).filter((item) => !resolved.has(pairKey(item.a, item.b)));
   const candidates = [...conflicts, ...aliases];
