@@ -80,10 +80,14 @@ const SHELL_INPUT_CALL = /\btools\s*(?:\?\.|\.)\s*(exec_command|write_stdin)\s*\
  */
 /** S1: may a `/` after the masked code `out` open a regex literal (rather than divide)? */
 function regexMayStart(out: string): boolean {
-  const line = out.slice(out.lastIndexOf('\n') + 1);
-  if (!line.trim()) return true;
+  // Creed U-M1: only at the PROGRAM start, not a line start. JS inserts no semicolon before a `/`,
+  // so `a\n/ 2` divides (the previous line's value); a regex after a newline needs a punctuator
+  // before it, which the next rule sees across the newline.
+  if (!out.trim()) return true;
   if (/[(,=:[!&|?{};}]\s*$/.test(out)) return true;
-  return /\b(?:return|typeof|case|yield|await|void|in|of|delete|throw|new)\s*$/.test(out);
+  // A keyword that expects a value, not a property (`obj.in / 2`) or a name (`in`, `of` can be
+  // variables, so they are left out: `of / 2` divides).
+  return /(?:^|[^.\w$])(?:return|typeof|case|yield|await|void|delete|throw|new)\s*$/.test(out);
 }
 
 function codeMask(src: string): string {
@@ -110,7 +114,10 @@ function codeMask(src: string): string {
         if (cls) { if (ch === ']') cls = false; } else if (ch === '[') cls = true; else if (ch === '/') break;
         j += 1;
       }
-      if (j < src.length && src[j] === '/') { out += '/' + ' '.repeat(j - i - 1) + '/'; i = j; continue; }
+      // Creed's backstop: a guessed body holding a tools call is code between two divisions, not a
+      // regex (`a / 2; await tools.exec_command(...); 1/3`): blanking it would hide the call.
+      const body = src.slice(i + 1, j);
+      if (j < src.length && src[j] === '/' && !/\btools\s*(?:\?\.|\.|\[)/.test(body)) { out += '/' + ' '.repeat(j - i - 1) + '/'; i = j; continue; }
     }
     if (c === '"' || c === "'" || c === '`') {
       let j = i + 1;

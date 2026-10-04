@@ -64,7 +64,21 @@ test('S1: a quote inside a regex literal no longer hides the calls after it; a d
     [String.raw`const r = /[/"]+/g; await tools.exec_command({cmd:"npm ci"}); await tools.exec_command({cmd: c});`, ['npm ci'], 1],
     // After return, and at a line start.
     [String.raw`function f(s) { return /"/.test(s); } await tools.exec_command({cmd:"npm ci"}); await tools.exec_command({cmd:"echo b"});`, ['npm ci', 'echo b'], 0],
-    ['const ok = s\n  /"/.test(x);\nawait tools.exec_command({cmd:"npm ci"}); await tools.exec_command({cmd:"echo b"});', ['npm ci', 'echo b'], 0],
+    ['/"/.test(x) && 1;\nawait tools.exec_command({cmd:"npm ci"}); await tools.exec_command({cmd:"echo b"});', ['npm ci', 'echo b'], 0],
+    ['const ok = 1;\n  /"/.test(x);\nawait tools.exec_command({cmd:"npm ci"}); await tools.exec_command({cmd:"echo b"});', ['npm ci', 'echo b'], 0],
+    // Creed U-M1: divisions that a looser rule took for regexes, hiding the call up to the next `/`.
+    ['const n = a\n/ 2; await tools.exec_command({cmd:"npm ci"}); const k = 1/3;', ['npm ci'], 0],   // P1: a line start continues the value
+    ['const n = obj.in / 2; await tools.exec_command({cmd:"npm ci"}); const k = 3/4;', ['npm ci'], 0], // P3: a property named in
+    ['const r = of / 2; await tools.exec_command({cmd:"npm ci"}); const k = 3/4;', ['npm ci'], 0],     // P4: a variable named of
+    // The same divisions where a misread "regex" would end inside a string ("x/"): its quote would then
+    // swallow the call, and no tools call is in the guessed body (the backstop cannot help): the rule must.
+    ['const n = a\n/ 2; const s = "x/"; await tools.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    ['const n = obj.in / 2; const s = "x/"; await tools.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    ['const r = of / 2; const s = "x/"; await tools.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    ['const n = obj.return / 2; const s = "x/"; await tools.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    ['const n = total / 2; const s = "x/"; await tools.exec_command({cmd:"npm ci"});', ['npm ci'], 0],
+    // The backstop: even after `(`, a guessed body holding a tools call is not a regex.
+    ['f(/ 2, await tools.exec_command({cmd:"npm ci"}), 3/ 4);', ['npm ci'], 0],
     // A division (after a value) is not a regex: the call with a slash in its command is read.
     [String.raw`const n = total / 2; await tools.exec_command({cmd:"npm ci /q"}); await tools.exec_command({cmd:"echo b"});`, ['npm ci /q', 'echo b'], 0],
     // A regex literal mentioning the tool is not a mention.
