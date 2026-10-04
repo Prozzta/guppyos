@@ -53,35 +53,30 @@ function substEnd(s: string, i: number): number {
 }
 
 /**
- * Split a command line into words, honouring simple quotes (not a full shell parser). The same
- * reading as before 1.1.77 (a word that STARTS with a quote is that quoted text; a quote inside a
- * word is a plain character), plus one thing: a `$(...)` is opaque, spaces and quotes included.
+ * Split a command line into words, honouring simple quotes (not a full shell parser). Quotes
+ * concatenate with attached redirection operators (`2>"path with spaces"`); other words preserve
+ * the legacy rule that a quote is special only at the start. A `$(...)` is opaque.
  */
 function words(s: string): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < s.length) {
-    const c = s[i];
-    if (/\s/.test(c)) { i++; continue; }
-    if (c === '"') {
-      let w = '';
-      let j = i + 1;
-      while (j < s.length && s[j] !== '"') {
-        if (s[j] === '\\' && j + 1 < s.length) { w += s[j] + s[j + 1]; j += 2; continue; }
-        if (s[j] === '$' && s[j + 1] === '(') { const e = substEnd(s, j); w += s.slice(j, e); j = e; continue; }
-        w += s[j]; j++;
-      }
-      if (j < s.length) { out.push(w); i = j + 1; continue; }
-      // Unclosed: as the old regex, a plain non-space word starting AT the quote (read below).
-    }
-    if (c === "'") {
-      const j = s.indexOf("'", i + 1);
-      if (j >= 0) { out.push(s.slice(i + 1, j)); i = j + 1; continue; }
-    }
+    if (/\s/.test(s[i])) { i++; continue; }
     let w = '';
-    while (i < s.length && !/\s/.test(s[i])) {
-      if (s[i] === '$' && s[i + 1] === '(') { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
-      w += s[i]; i++;
+    let q: string | null = null;
+    while (i < s.length) {
+      const c = s[i];
+      if (!q && /\s/.test(c)) break;
+      if (c === '\\' && q !== "'" && i + 1 < s.length) { w += c + s[i + 1]; i += 2; continue; }
+      if (c === '"' || c === "'") {
+        const attachedRedirect = /^(?:\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)/.test(w);
+        if (!q && w.length && !attachedRedirect) { w += c; i++; continue; }
+        if (!q) { q = c; i++; continue; }
+        if (q === c) { q = null; i++; continue; }
+      }
+      if (c === '$' && s[i + 1] === '(' && q !== "'") { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
+      w += c;
+      i++;
     }
     out.push(w);
   }
@@ -453,6 +448,12 @@ function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const ws = leading(ws0);
   if (!ws.length) return { heavy: false };
+  // HEAVY-LOCK-VAR-RUNNER: a shell variable used as the command word can name a wrapper
+  // (`$CR node ...`, `"$CR" npm test`, `${CR} node ...`). Classify only the following command;
+  // an unnameable remainder such as `run-tests.cjs` remains light.
+  if (/^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\})$/.test(ws[0]) && ws.length > 1) {
+    return classifyWords(ws.slice(1), depth, ctx);
+  }
   // An opt-in scale/bench env gate before the command (Jim MF2).
   const prefix = ws0.slice(0, ws0.length - ws.length);
   const gate = prefix.find((w) => BENCH_ENV.test(w));
