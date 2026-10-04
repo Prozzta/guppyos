@@ -124,14 +124,20 @@ test('collectNoteCandidates: three sources, live only, never self, 6 h window, e
     score: (q, pool) => ({ lexical: pool.map((c) => c.id).sort(), vector: [] })
   };
   const r = await C.collectNoteCandidates(deps, 'a1', 'invented new note', at, { excludeIds: [id(5)] });
-  assert.deepEqual(r.candidates.map((c) => [c.id, c.sources, c.owner]), [[id(1), ['own', 'search'], 'a1'], [id(3), ['search'], 'b9']]);
+  // Jim S1: another agent's claim is a REFERENCE, never a replace candidate.
+  assert.deepEqual(r.candidates.map((c) => [c.id, c.sources, c.owner, c.replaceable]), [[id(1), ['own', 'search'], 'a1', true]]);
+  assert.deepEqual(r.references.map((c) => [c.id, c.sources, c.owner, c.replaceable]), [[id(3), ['search'], 'b9', false]]);
   assert.equal(r.pool, 2, 'superseded, superseded?, self (5), older than 6 h (6) and later than the write (10) are out');
   assert.deepEqual(r.excluded, [{ source: 'working-set', reason: 'unwired' }]);
   assert.equal(r.ranking, 'rrf');
   // A source that throws is excluded as an error; the others still answer. A failed scorer falls back to recency.
   const r2 = await C.collectNoteCandidates({ ...deps, searchHits: () => { throw new Error('x'); }, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at);
   assert.deepEqual(r2.excluded, [{ source: 'search', reason: 'error' }]);
-  assert.deepEqual(r2.candidates.map((c) => [c.id, c.sources]), [[id(1), ['own']], [id(3), ['working-set']], [id(5), ['own']]]);
+  assert.deepEqual(r2.candidates.map((c) => [c.id, c.sources, c.rank]), [[id(1), ['own'], 1], [id(5), ['own'], 2]]);
+  assert.deepEqual(r2.references.map((c) => [c.id, c.sources]), [[id(3), ['working-set']]]);
+  // A reference shows only where it ranks inside the overall top: with top 1, id(3) (2nd) does not.
+  const r2b = await C.collectNoteCandidates({ ...deps, searchHits: undefined, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at, { top: 1 });
+  assert.deepEqual([r2b.candidates.map((c) => c.id), r2b.references], [[id(1)], []]);
   assert.equal(r2.ranking, 'recency');
   const r3 = await C.collectNoteCandidates({ ...deps, ownClaims: () => { throw new Error('torn'); }, searchHits: undefined }, 'a1', 'q', at);
   assert.deepEqual([r3.candidates, r3.excluded], [[], [{ source: 'own', reason: 'error' }, { source: 'search', reason: 'unwired' }, { source: 'working-set', reason: 'unwired' }]]);
@@ -154,12 +160,14 @@ test('ledgerCandidateDeps: own claims by wt from the verified ledger, search hit
     b9: { claims: [{ id: id(3), agent: 'b9', wt: new Date(T0 - 2 * H).toISOString(), text: 'invented other' }], status: () => 'superseded' }
   };
   const d = C.ledgerCandidateDeps({ ledger: (a) => views[a] ?? null, searchLog: { hitsSince: () => [{ id: id(3), wing: 'b9' }, { id: id(9), wing: 'zz' }] }, score: () => ({ lexical: [], vector: [] }) });
-  assert.deepEqual(d.ownClaims('a1', new Date(T0 - 6 * H), new Date(T0)).map((c) => [c.id, c.key, c.status]), [[id(1), 'fact.x', 'live']]);
+  // Jim S3: the window is applied once, by collectNoteCandidates (id(2), 8 h old, is filtered there).
+  assert.deepEqual(d.ownClaims('a1', new Date(T0 - 6 * H), new Date(T0)).map((c) => [c.id, c.key, c.status]), [[id(1), 'fact.x', 'live'], [id(2), undefined, 'live']]);
   assert.deepEqual(d.resolve(d.searchHits('a1', new Date(T0))).map((c) => [c.id, c.owner, c.status]), [[id(3), 'b9', 'superseded']]);
   assert.throws(() => d.ownClaims('nobody', new Date(0), new Date(T0)), /not verified/);
   assert.equal(C.ledgerCandidateDeps({ ledger: () => null, score: () => ({ lexical: [], vector: [] }) }).searchHits, undefined, 'no log: unwired');
   const r = await C.collectNoteCandidates(d, 'a1', 'q', new Date(T0));
-  assert.deepEqual(r.candidates.map((c) => c.id), [id(1)], 'the superseded search hit is not offered');
+  assert.deepEqual(r.candidates.map((c) => c.id), [id(1)], 'the 8 h old claim is out of the window');
+  assert.deepEqual(r.references, [], 'the superseded search hit is not offered, not even for reference');
 });
 
 test('embed: main-internal worker verb with bounds; embedViaWorker batches; a failure falls back to recency, exclusions intact', async (t) => {
@@ -181,7 +189,7 @@ test('embed: main-internal worker verb with bounds; embedViaWorker batches; a fa
   assert.equal((await w.embed(['ab'])).ok, false);
   // The worker answers 'embed' with its MiniLM embedder, vectors as plain arrays.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'nativeMemory', 'worker.ts'), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(src, /case 'embed': \{[\s\S]{0,400}guard\(embedder\.embed\(texts\), \(vs\) => \(\{ exit: 0, json: vs\.map\(\(v\) => Array\.from\(v\)\) \}\)\);/);
+  assert.match(src, /case 'embed': \{[\s\S]{0,400}guard\(engine\.embedTexts\(texts\), \(vs\) => \(\{ exit: 0, json: vs\.map\(\(v\) => Array\.from\(v\)\) \}\)\);/);
   // embedViaWorker: batches, and any failed or short reply throws.
   const calls = [];
   const e = C.embedViaWorker(async (texts) => { calls.push(texts.length); return { ok: true, json: texts.map(() => [1, 0]) }; }, 2);
@@ -197,4 +205,55 @@ test('embed: main-internal worker verb with bounds; embedViaWorker batches; a fa
   const ok = C.makeLocalScorer(async (texts) => texts.map((x) => (x.includes('zebra') ? [1, 0] : [0, 1])));
   const s = await ok('zebra', [claim(1, { text: 'plain' }), claim(2, { text: 'a zebra' })]);
   assert.deepEqual([s.lexical, s.vector[0]], [[id(2)], id(2)]);
+});
+
+test('Jim M1: the live scorer ranks with HIVE-WIDE document statistics; pool-only statistics would order wrongly', async () => {
+  // Hive: 'cache' is in almost every live claim, 'zebra' in one. Pool of 2: e repeats the common
+  // term, f has the rare one. In a pool of 2 every idf floors, so tf alone decides: e first (wrong).
+  const filler = [...Array(30)].map((_, i) => ({ id: id(100 + i), agent: 'b9', wt: new Date(T0 - 9 * H).toISOString(), text: `cache note ${i}` }));
+  const pool = [
+    { id: id(1), agent: 'a1', wt: new Date(T0 - H).toISOString(), text: 'cache cache cache' },
+    { id: id(2), agent: 'a1', wt: new Date(T0 - 2 * H).toISOString(), text: 'zebra' }
+  ];
+  const views = {
+    a1: { claims: pool, status: () => 'live' },
+    b9: { claims: filler.concat([{ id: id(99), agent: 'b9', wt: filler[0].wt, text: 'retired zebra cache', }]), status: (x) => (x === id(99) ? 'superseded' : 'live') }
+  };
+  const hc = new C.HiveCorpus({ agents: () => ['a1', 'b9'], ledger: (a) => views[a] ?? null });
+  const stats = hc.corpus();
+  assert.deepEqual([stats.n, stats.df.get('zebra'), stats.df.get('cache')], [32, 1, 31], 'live claims only: the superseded one is not counted');
+  // The vector order also prefers f (2). With hive df BM25 agrees: f is first on both orders. With
+  // pool df BM25 prefers e (1): one first place each, an RRF tie that recency gives to e.
+  const flat = async (texts) => texts.map((x) => (x.includes('zebra') ? [1, 0.1] : [0.1, 1]));
+  const asPool = await C.makeLocalScorer(flat)('zebra cache', pool.map((c) => ({ ...c, owner: c.agent, status: 'live' })));
+  assert.deepEqual(asPool.lexical, [id(1), id(2)], 'pool-only df: the common term repeated wins (the defect)');
+  const deps = C.ledgerCandidateDeps({ ledger: (a) => views[a] ?? null, score: C.makeLocalScorer(flat, () => hc.corpus()) });
+  const r = await C.collectNoteCandidates(deps, 'a1', 'zebra cache', new Date(T0));
+  assert.deepEqual(r.candidates.map((c) => c.id), [id(2), id(1)], 'hive-wide df: the rare term wins');
+  // Cached per agent: an unchanged ledger is not re-counted; a changed one is.
+  let reads = 0;
+  const hc2 = new C.HiveCorpus({ agents: () => ['a1'], ledger: (a) => { reads++; return views[a]; } });
+  const s1 = hc2.corpus(); views.a1 = { claims: pool.concat([{ id: id(3), agent: 'a1', wt: pool[0].wt, text: 'zebra' }]), status: () => 'live' };
+  const s2 = hc2.corpus();
+  assert.deepEqual([s1.n, s2.n, s2.df.get('zebra'), reads], [2, 3, 2, 2]);
+  // A corpus that throws makes the scorer throw: recency ranking, never silent pool statistics.
+  const bad = C.ledgerCandidateDeps({ ledger: (a) => views[a] ?? null, score: C.makeLocalScorer(flat, () => { throw new Error('no stats'); }) });
+  assert.equal((await C.collectNoteCandidates(bad, 'a1', 'zebra', new Date(T0))).ranking, 'recency');
+});
+
+test('Jim S2: the worker embed goes through the engine queue (search priority) and re-arms the idle unload', async (t) => {
+  const root = jail(); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { MemoryEngine, MODEL_IDLE_UNLOAD_MS, PRIORITY } = loadTs('src/main/nativeMemory/engine.ts');
+  const timers = [];
+  const emb = { loaded: true, embed: async (ts) => ts.map(() => new Float32Array([1, 2])), unload: async () => {} };
+  const e = new MemoryEngine({ hiveRoot: root, store: { search: () => [] }, embedder: emb, countTokens: (x) => x.split(' ').length, mode: () => 'native', watch: null,
+    setTimer: (fn, ms) => { const tm = { fn, ms }; timers.push(tm); if (ms === 0) setImmediate(fn); return tm; }, clearTimer: () => {} });
+  const prios = [];
+  const orig = e.enqueue.bind(e);
+  e.enqueue = (p, fn) => { prios.push(p); return orig(p, fn); };
+  const vs = await e.embedTexts(['a', 'b']);
+  assert.deepEqual([vs.length, prios], [2, [PRIORITY.search]]);
+  assert.equal(timers.filter((x) => x.ms === MODEL_IDLE_UNLOAD_MS).length, 1, 'the idle unload is armed');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'nativeMemory', 'worker.ts'), 'utf8');
+  assert.match(src, /guard\(engine\.embedTexts\(texts\)/, 'the worker routes embed through the engine');
 });
