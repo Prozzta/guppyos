@@ -26,6 +26,34 @@ test('B8 shares are pinned and working-set bytes, receipt, and marker-first memo
   assert.match(views.renderMemoryMd(state, world(), 'complete'), /\[c:a\]/);
 });
 
+test('current single-key value outranks a newer unrelated T2 claim, with a half-T2 reservation', () => {
+  const records = [claim('old-value', 'previous', { key: 'profile.value' }),
+    claim('old-two', 'previous two', { key: 'profile.other' }),
+    claim('current-value', 'x'.repeat(60), { key: 'profile.value', at: '2026-01-02' }),
+    claim('current-two', 'y'.repeat(60), { key: 'profile.other', at: '2026-01-02' }),
+    claim('newer-unrelated', 'new note', { at: '2026-01-03' })];
+  const state = stateFor(records);
+  state.claims['old-value'].status = 'superseded';
+  state.claims['old-value'].supersededBy = 'current-value';
+  state.claims['old-two'].status = 'superseded';
+  state.claims['old-two'].supersededBy = 'current-two';
+  state.claims['current-value'].lastAt = '2026-01-02';
+  state.claims['current-two'].lastAt = '2026-01-02';
+  state.claims['newer-unrelated'].lastAt = '2026-01-03';
+  const registry = { v: 1, namespaces: [], keys: {
+    'profile.value': { cardinality: 'single', addedAt: '2026-01-01', addedBy: 'a' },
+    'profile.other': { cardinality: 'single', addedAt: '2026-01-01', addedBy: 'a' },
+  } };
+  const views = V.createClaimViews(records, text => text.length, [], registry);
+  const out = views.buildWorkingSet(state, world(), 400);
+  const ids = out.receipt.included.map(x => x.id);
+  assert.ok(ids.indexOf('current-value') < ids.indexOf('newer-unrelated'), 'superseding current value ranks ahead of plain recency');
+  assert.ok(ids.includes('newer-unrelated'), 'current-value group leaves T2 capacity for plain recency');
+  const currentUsed = out.receipt.included.filter(x => x.id === 'current-value' || x.id === 'current-two').reduce((n, x) => n + x.tokens, 0);
+  assert.ok(currentUsed <= 100, 'current-value group uses at most half of the 200-token T2 budget');
+  assert.ok(!ids.includes('current-two'), 'the second current value does not exceed the half-T2 reservation');
+});
+
 test('tier 0 overflow is explicit and not promoted; mail remains excluded until answered; expired/status reasons persist', () => {
   const records = [claim('pin1', 'p'.repeat(230), { pin: true }), claim('pin2', 'q'.repeat(230), { pin: true }),
     claim('mail', 'private mail', { source: 'mail:sender' }), claim('old', 'old'), claim('expired', 'gone')];
