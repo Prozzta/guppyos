@@ -80,6 +80,24 @@ test('M-R refresh never resurrects a soft-superseded R2-mail pair or an answered
   }
 });
 
+test('M-R refresh re-queues an R2-mail pair after its soft-supersede is reverted', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w5-')); t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const queue = new ReconcileQueue(path.join(dir, 'queue.json'));
+  const claim = (id, at, source = 'self') => ({ t: 'claim', id, agent: 'owner', at, wt: at, mac: id, prev: '', kind: 'fact', key: 'fact.name', text: `synthetic ${id}`, source });
+  const event = (id, ev, targets) => ({ t: 'event', id, agent: 'owner', at: '2026-10-04T01:00:00Z', wt: '2026-10-04T01:00:00Z', mac: id, prev: '', ev, targets, by: 'self' });
+  const base = [claim('a', '2026-10-02T00:00:00Z', 'mail:m1'), claim('b', '2026-10-01T00:00:00Z')];
+  let records = [...base, event('soft', 'soft-supersede', ['b', 'a'])];
+  const deps = { endpoint: () => ({ store: { readLedger: () => ({ chain: 'ok', records }) } }), queue: () => queue,
+    registry: () => ({ v: 1, namespaces: [{ pattern: 'fact.*', cardinality: 'single' }], keys: {} }), log: () => {} };
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  assert.equal(queue.peek('owner', 10).some((i) => i.kind === 'conflict' && [i.a, i.b].includes('a') && [i.a, i.b].includes('b')), false,
+    'active soft-supersede should suppress the R2-mail proposal');
+  records = [...records, event('revert', 'revert', ['soft'])];
+  refreshReconcileQueueForHive(dir, 'owner', deps);
+  assert.equal(queue.peek('owner', 10).some((i) => i.kind === 'conflict' && [i.a, i.b].includes('a') && [i.a, i.b].includes('b')), true,
+    'reverting the soft-supersede should re-open the R2-mail proposal');
+});
+
 test('M-R census exclusion mutants are killed for both conflict and alias arms', () => {
   const source = fs.readFileSync(path.join(__dirname, '../src/main/claims/reconcileHive.ts'), 'utf8');
   const conflictFilter = (text) => /state\.conflicts\.filter\(\(item\) => item\.rule === 'R2-mail' && !resolved\.has\(pairKey\(item\.a, item\.b\)\)\)/.test(text);
