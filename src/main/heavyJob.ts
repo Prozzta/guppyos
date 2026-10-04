@@ -53,11 +53,36 @@ function substEnd(s: string, i: number): number {
 }
 
 /**
- * Split a command line into words, honouring simple quotes (not a full shell parser). Quotes
- * concatenate with attached redirection operators (`2>"path with spaces"`); other words preserve
- * the legacy rule that a quote is special only at the start. A `$(...)` is opaque.
+ * HEAVY-LOCK-APOSTROPHE-SWALLOW: the quoting rules a command text is read with.
+ *  - 'sh' (bash, and PowerShell, which agree here): `'` and `"` open quotes, mid-word too. That is
+ *    the shells' real rule, measured: `echo don't; node …` is a PARSE ERROR in both (nothing runs),
+ *    and `echo don't; node …; echo it's` runs only the echo (the middle is one quoted string).
+ *  - 'cmd' (the body of `cmd /c`): only `"` quotes; `'` is an ordinary character, so
+ *    `cmd /c "echo don't & npm test"` RUNS npm test; `^` escapes; `;` separates nothing; no `#`.
  */
-function words(s: string): string[] {
+export type ShellDialect = 'sh' | 'cmd';
+
+/**
+ * Does the quote character at `i` OPEN a quote (outside quotes)? Not when the dialect has no such
+ * quote (`'` in cmd), and not when it is escaped by an odd run of the escape character before it:
+ * `\'` (bash), `` `' `` (PowerShell), `^"` (cmd). Escaped, the shell runs what follows; read as an
+ * opener, the scanner swallowed it (`echo don\'t; node test/tools/run-tests.cjs` was light).
+ */
+function opensQuote(s: string, i: number, d: ShellDialect): boolean {
+  const c = s[i];
+  if (c !== '"' && (c !== "'" || d === 'cmd')) return false;
+  const esc = d === 'cmd' ? ['^'] : ['\\', '`'];
+  let n = 0;
+  while (i - n - 1 >= 0 && esc.includes(s[i - n - 1]) && s[i - n - 1] === s[i - 1]) n++;
+  return n % 2 === 0;
+}
+
+/**
+ * Split a command line into words, honouring simple quotes (not a full shell parser). Quotes
+ * concatenate with attached redirection operators (`2>"path with spaces"`); a quote opens only
+ * where the dialect's opensQuote says so (`'` is literal in cmd). A `$(...)` is opaque.
+ */
+function words(s: string, d: ShellDialect = 'sh'): string[] {
   const out: string[] = [];
   let i = 0;
   while (i < s.length) {
@@ -71,12 +96,13 @@ function words(s: string): string[] {
       // `node "suite.cjs">full.log` has a script argument then a redirect, not one path.
       const redirectAt = /^(?:\d*(?:>>?|<<?-?|<>)|&>>?|\*>>?)/;
       if (!q && w && redirectAt.test(s.slice(i)) && !redirectAt.test(w + s.slice(i))) break;
+      // A-S1: a backslash escapes nothing inside sh's '...'. In a cmd body the WORDS are the
+      // program's argv, split by the C runtime after cmd removed its carets (measured: `"p\" q`
+      // is one argument, `a^"b c"` is `ab c`, `x^ y` is two): `\"` escapes and every `"` opens.
       if (c === '\\' && q !== "'" && i + 1 < s.length) { w += c + s[i + 1]; i += 2; continue; }
-      if (c === '"' || c === "'") {
-        if (!q) { q = c; i++; continue; }
-        if (q === c) { q = null; i++; continue; }
-      }
-      if (c === '$' && s[i + 1] === '(' && q !== "'") { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
+      if (!q && (d === 'cmd' ? c === '"' : opensQuote(s, i, d))) { q = c; i++; continue; }
+      if (q && c === q) { q = null; i++; continue; }
+      if (d === 'sh' && c === '$' && s[i + 1] === '(' && q !== "'") { const e = substEnd(s, i); w += s.slice(i, e); i = e; continue; }
       w += c;
       i++;
     }
@@ -103,8 +129,8 @@ function stripHeredocs(cmd: string, bodies?: string[]): string {
     const delims: string[] = [];
     for (let j = 0; j < line.length; j++) {
       const c = line[j];
-      if (q) { if (c === q && line[j - 1] !== '\\') q = null; continue; }
-      if (c === '"' || c === "'") { q = c; continue; }
+      if (q) { if (c === q && (q === "'" || line[j - 1] !== '\\')) q = null; continue; }   // A-S1
+      if (opensQuote(line, j, 'sh')) { q = c; continue; }
       if (c === '#' && (j === 0 || /\s/.test(line[j - 1]))) break;   // a comment: nothing after it runs
       if (c !== '<' || line[j + 1] !== '<') continue;
       const before = j === 0 ? '' : line[j - 1];
@@ -146,18 +172,23 @@ function stripRedirects(ws: string[]): string[] {
 }
 
 /** The segments a shell would run: split on ; && || | and newlines, OUTSIDE quotes. */
-function segments(cmd: string): string[] {
+function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
   const out: string[] = [];
   let cur = ''; let q: string | null = null;
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
     // HEAVY-JOB-LOCK-FAILOPEN: a command substitution is opaque (its pipes and quotes are its own).
-    if (q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
-    if (q) { cur += c; if (c === q && cmd[i - 1] !== '\\') q = null; continue; }
-    if (c === '"' || c === "'") { q = c; cur += c; continue; }
+    if (d === 'sh' && q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
+    // A-S1: `'` closes at the next `'` unconditionally (a backslash escapes nothing inside it), and
+    // cmd has no backslash escape at all; only inside sh's "..." does `\"` stay open.
+    if (q) { cur += c; if (c === q && (q === "'" || d === 'cmd' || cmd[i - 1] !== '\\')) q = null; continue; }
+    if (opensQuote(cmd, i, d)) { q = c; cur += c; continue; }
+    // cmd's `^` escapes the next character (`^&` is a literal &, not a separator).
+    if (d === 'cmd' && c === '^') { cur += c + (cmd[i + 1] ?? ''); i++; continue; }
+    if (d === 'cmd' && c === ';') { cur += c; continue; }   // not a separator in cmd
     // HEAVY-CLASSIFIER-EDGES N2: an unquoted `#` at a word start comments out the rest of the line
     // (an apostrophe in a comment used to open a "quote" that swallowed the following lines).
-    if (c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
+    if (d === 'sh' && c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
     // A redirection's `&` (`2>&1`, `>&2`, `&>x`, `<&0`) is not a separator or a background `&`.
     if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>')) { cur += c; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
@@ -211,6 +242,8 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-ADHOC-NODE, set per segment by classifyCommand: the segment reads stdin from a heredoc
    *  (its body) or a `< file` (its text; null when unreadable). Absent = no stdin redirect. */
   stdin?: string | null;
+  /** HEAVY-LOCK-APOSTROPHE-SWALLOW: the quoting rules of this text ('cmd' for a `cmd /c` body). Default 'sh'. */
+  dialect?: ShellDialect;
 }
 
 /** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
@@ -480,13 +513,14 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   if (bin === 'cmd' && cmdBody >= 0 && args.length === cmdBody + 2) {
     const body = args[cmdBody + 1].replace(/^"|"$/g, '');
     const spacedExe = /^([a-z]:\\.*?\.(?:exe|cmd))\s+(.+)$/i.exec(body);
-    return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, ctx);
+    return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, { ...ctx, dialect: 'cmd' });
   }
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
   if (WRAPPERS.has(bin) && depth === 0) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
     const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
-    if (k >= 0) return classifyCommand(args.slice(k + 1).join(' '), depth + 1, ctx);
+    // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
+    if (k >= 0) return classifyCommand(args.slice(k + 1).join(' '), depth + 1, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' });
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
     const script = /^(bash|sh|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
     return script ? classifyScript(script, depth, ctx) : { heavy: false };
@@ -578,19 +612,20 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   const backtickNode = /^\s*`(?:which|command\s+-v)\s+node`\s+(.+)\s*$/s.exec(cmd);
   if (backtickNode) return classifyCommand(`node ${backtickNode[1]}`, depth, ctx);
   const bodies: string[] = [];
-  const text = stripHeredocs(cmd, bodies);
+  const d: ShellDialect = ctx.dialect ?? 'sh';
+  const text = d === 'cmd' ? cmd : stripHeredocs(cmd, bodies);   // cmd has no heredocs
   let here: ClassifyCtx = { ...ctx, stdin: undefined };
-  for (const seg of segments(text)) {
+  for (const seg of segments(text, d)) {
     // The raw doubled-quote cmd form is opaque to the shell-word tokenizer: classify its
     // inner executable before tokenizing, but do so per segment so later chained commands
     // are still inspected independently.
     const doubledCmd = /^\s*(?:[a-z]:\\.*\\)?cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+""(.+?\.(?:exe|cmd))"\s*(.*?)"\s*$/i.exec(seg);
     if (doubledCmd) {
-      const inner = classifyCommand(`"${doubledCmd[1]}" ${doubledCmd[2]}`, depth + 1, ctx);
+      const inner = classifyCommand(`"${doubledCmd[1]}" ${doubledCmd[2]}`, depth + 1, { ...ctx, dialect: 'cmd' });
       if (inner.heavy) return inner;
       continue;
     }
-    const raw = words(seg.replace(/\s&$/, ''));
+    const raw = words(seg.replace(/\s&$/, ''), d);
     const ws = stripRedirects(raw);
     // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).
     let stdin: string | null | undefined;
