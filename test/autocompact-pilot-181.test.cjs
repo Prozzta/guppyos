@@ -24,8 +24,9 @@ const K = {};
 
 K.resolve = (M = A) => {
   assert.equal(M.autoCompactWindowFor({ isGod: true }, {}), 150000, 'GOD GETS 150K BY DEFAULT');
-  assert.equal(M.autoCompactWindowFor({ isGod: false }, {}), null, 'WORKERS KEEP CLAUDE\'S OWN "AUTO"');
-  assert.equal(M.autoCompactWindowFor({}, { godAutoCompactWindow: 200000 }), null, 'the god setting is for god only');
+  // READS-AUTOCOMPACT-ROLLOUT (1.1.84): workers get the same default now (test/autocompact-rollout-184).
+  assert.equal(M.autoCompactWindowFor({ isGod: false }, {}), 150000, 'WORKERS GET THE DEFAULT TOO (ROLLOUT)');
+  assert.equal(M.autoCompactWindowFor({}, { godAutoCompactWindow: 200000 }), 150000, 'the god setting is for god only');
   assert.equal(M.autoCompactWindowFor({ isGod: true }, { godAutoCompactWindow: 'off' }), null, 'THE OFF SWITCH');
   assert.equal(M.autoCompactWindowFor({ isGod: true }, { godAutoCompactWindow: 180000 }), 180000);
   assert.equal(M.autoCompactWindowFor({ isGod: false, autoCompactWindow: 120000 }, {}), 120000, 'an agent\'s own window wins (workers, later)');
@@ -36,7 +37,7 @@ K.resolve = (M = A) => {
   assert.equal(M.normalizeAutoCompactWindow(150000.4), 150000);
   assert.equal(M.AUTO_COMPACT_WINDOW_ENV, 'CLAUDE_CODE_AUTO_COMPACT_WINDOW');
 };
-test('resolution: god 150k by default, workers unchanged, own value or "off" wins, bad values ignored', () => K.resolve());
+test('resolution: god 150k by default (workers too since the rollout), own value or "off" wins, bad values ignored', () => K.resolve());
 
 // ─── reading compactions from the transcript ────────────────────────────────────────────────
 
@@ -99,6 +100,7 @@ test('n1: a set-but-invalid window is reported, only where it applies', () => {
   assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true, autoCompactWindow: 5 }, {}), [{ setting: 'autoCompactWindow', value: '5' }]);
   assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true, autoCompactWindow: 120000 }, { godAutoCompactWindow: 'big' }), [], 'a valid own value makes the god setting moot');
   assert.deepEqual(A.autoCompactWindowIgnored({ isGod: false }, { godAutoCompactWindow: 'big' }), [], 'the god setting does not apply to a worker');
+  assert.deepEqual(A.autoCompactWindowIgnored({ isGod: false }, { claudeAutoCompactWindow: 'big' }), [{ setting: 'claudeAutoCompactWindow', value: 'big' }], 'the floor setting does (rollout)');
   assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true }, { godAutoCompactWindow: 'off' }), []);
   assert.deepEqual(A.autoCompactWindowIgnored({ isGod: true }, {}), []);
   const idx = readSource('src/main/index.ts');
@@ -187,11 +189,11 @@ function mutateText(rel, edits, tag) {
 const SH = 'src/shared/autoCompactWindow.ts';
 const MUTANTS = [
   { name: 'god gets no default window', file: SH, module: true,
-    edits: [['  return god ?? GOD_AUTO_COMPACT_WINDOW_DEFAULT;', '  return god ?? null;']], killer: 'resolve', dies: /GOD GETS 150K BY DEFAULT/ },
-  { name: 'every agent gets the god default', file: SH, module: true,
-    edits: [['  if (agent?.isGod !== true) return null;\n', '']], killer: 'resolve', dies: /WORKERS KEEP CLAUDE'S OWN "AUTO"/ },
+    edits: [['  return floor ?? AUTO_COMPACT_WINDOW_DEFAULT;', '  return floor ?? null;']], killer: 'resolve', dies: /GOD GETS 150K BY DEFAULT/ },
+  { name: 'workers are back to Claude\'s own "auto"', file: SH, module: true,
+    edits: [['  const floor = normalizeAutoCompactWindow(cfg?.claudeAutoCompactWindow);', "  if (agent.isGod !== true) return null;\n  const floor = normalizeAutoCompactWindow(cfg?.claudeAutoCompactWindow);"]], killer: 'resolve', dies: /WORKERS GET THE DEFAULT TOO \(ROLLOUT\)/ },
   { name: 'the config off switch is ignored', file: SH, module: true,
-    edits: [["  if (god === 'off') return null;\n", '']], killer: 'resolve', dies: /THE OFF SWITCH/ },
+    edits: [["    if (god !== undefined) return god === 'off' ? null : god;", '    if (god !== undefined && god !== \'off\') return god;']], killer: 'resolve', dies: /THE OFF SWITCH/ },
   { name: 'the range check is gone', file: SH, module: true,
     edits: [['  return n >= AUTO_COMPACT_WINDOW_MIN && n <= AUTO_COMPACT_WINDOW_MAX ? n : undefined;', '  return n;']], killer: 'resolve', dies: /A BAD VALUE NEVER REACHES CLAUDE/ },
   { name: 'a first request is taken from after a later boundary', file: SH, module: true,

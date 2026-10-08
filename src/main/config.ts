@@ -337,6 +337,12 @@ export interface HarnessConfig {
    *  CLAUDE_CODE_AUTO_COMPACT_WINDOW at spawn. Unset = 150000; "off" = Claude's own "auto"
    *  (the pilot's off switch). An agent's own registry `autoCompactWindow` wins (shared/autoCompactWindow.ts). */
   godAutoCompactWindow?: number | 'off';
+  /** READS-AUTOCOMPACT-ROLLOUT (1.1.84): every Claude agent's auto-compact window (tokens,
+   *  100k-1M), passed as CLAUDE_CODE_AUTO_COMPACT_WINDOW at spawn. Unset = 150000; "off" =
+   *  Claude's own "auto" for every agent without its own value. An agent's registry
+   *  `autoCompactWindow` wins, and god keeps `godAutoCompactWindow` when that is set. Codex
+   *  agents are not affected (their registry codexAutoCompactTokenLimit). */
+  claudeAutoCompactWindow?: number | 'off';
   /** READS-MAIL-CAP (1.1.83): the most body characters of one message god gets in context; a
    *  longer one shows its first ~this many characters plus the file paths (the rest stays readable
    *  there). Unset = 1500; 0 = off. Mail from the Human and the harness is never shortened. An

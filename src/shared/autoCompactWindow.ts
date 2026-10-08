@@ -10,13 +10,23 @@
  * Replayed on god's 10-02/03 session, a ~150k window saves about 40% billed-equivalent (Jim's
  * MIN-CONTEXT-TECH.md; Creed re-checked: 40-48%). The Human approved a god-only pilot (2026-10-03).
  *
- * Resolution: the agent's own `autoCompactWindow` (registry: a number or "off") wins; otherwise
- * god gets the config's `godAutoCompactWindow` (default GOD_AUTO_COMPACT_WINDOW_DEFAULT, "off"
- * switches the pilot off) and every other agent gets nothing (Claude's own "auto"). Pure.
+ * READS-AUTOCOMPACT-ROLLOUT (1.1.84): the god pilot passed (re-read per request -60%, cost per
+ * request -52%; Creed's after-run), so the window is now the default for EVERY Claude agent.
+ *
+ * Resolution, first match wins:
+ *   1. the agent's own `autoCompactWindow` (registry: a number or "off");
+ *   2. god only: the config's `godAutoCompactWindow` (the pilot's setting, kept: "off" still
+ *      switches god off);
+ *   3. the config's `claudeAutoCompactWindow` (every Claude agent; "off" = Claude's own "auto");
+ *   4. AUTO_COMPACT_WINDOW_DEFAULT.
+ * Unknown agent (no registry record): null. Only Claude spawns read this (Codex has its own
+ * auto_compact_token_limit, codexAgentConfig.ts). Pure.
  */
 
 export const AUTO_COMPACT_WINDOW_ENV = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
-export const GOD_AUTO_COMPACT_WINDOW_DEFAULT = 150_000;
+export const AUTO_COMPACT_WINDOW_DEFAULT = 150_000;
+/** The pilot's name for the same default (god got it first). */
+export const GOD_AUTO_COMPACT_WINDOW_DEFAULT = AUTO_COMPACT_WINDOW_DEFAULT;
 /** The range Claude Code accepts ("100k to 1M tokens"). */
 export const AUTO_COMPACT_WINDOW_MIN = 100_000;
 export const AUTO_COMPACT_WINDOW_MAX = 1_000_000;
@@ -33,31 +43,46 @@ export function normalizeAutoCompactWindow(v: unknown): AutoCompactSetting | und
 }
 
 /** The window (tokens) this agent's Claude Code gets, or null = leave Claude's own "auto". */
+export interface AutoCompactConfig { godAutoCompactWindow?: unknown; claudeAutoCompactWindow?: unknown }
+
 export function autoCompactWindowFor(
   agent: { isGod?: boolean; autoCompactWindow?: unknown } | null | undefined,
-  cfg: { godAutoCompactWindow?: unknown } | null | undefined
+  cfg: AutoCompactConfig | null | undefined
 ): number | null {
-  const own = normalizeAutoCompactWindow(agent?.autoCompactWindow);
+  if (!agent) return null;
+  const own = normalizeAutoCompactWindow(agent.autoCompactWindow);
   if (own !== undefined) return own === 'off' ? null : own;
-  if (agent?.isGod !== true) return null;
-  const god = normalizeAutoCompactWindow(cfg?.godAutoCompactWindow);
-  if (god === 'off') return null;
-  return god ?? GOD_AUTO_COMPACT_WINDOW_DEFAULT;
+  if (agent.isGod === true) {
+    const god = normalizeAutoCompactWindow(cfg?.godAutoCompactWindow);
+    if (god !== undefined) return god === 'off' ? null : god;
+  }
+  const floor = normalizeAutoCompactWindow(cfg?.claudeAutoCompactWindow);
+  if (floor === 'off') return null;
+  return floor ?? AUTO_COMPACT_WINDOW_DEFAULT;
 }
 
+export type AutoCompactSettingName = 'autoCompactWindow' | 'godAutoCompactWindow' | 'claudeAutoCompactWindow';
+
 /** n1 (Creed): the settings that were SET but are invalid and so ignored (a typo would otherwise
- *  silently mean 150k for god, or Claude's "auto"). Only the ones that apply to this agent. */
+ *  silently mean the 150k default, or Claude's "auto"). Only the ones that apply to this agent:
+ *  a setting is reported only when nothing valid ahead of it in the resolution order decided. */
 export function autoCompactWindowIgnored(
   agent: { isGod?: boolean; autoCompactWindow?: unknown } | null | undefined,
-  cfg: { godAutoCompactWindow?: unknown } | null | undefined
-): Array<{ setting: 'autoCompactWindow' | 'godAutoCompactWindow'; value: string }> {
-  const out: Array<{ setting: 'autoCompactWindow' | 'godAutoCompactWindow'; value: string }> = [];
+  cfg: AutoCompactConfig | null | undefined
+): Array<{ setting: AutoCompactSettingName; value: string }> {
+  const out: Array<{ setting: AutoCompactSettingName; value: string }> = [];
+  if (!agent) return out;
   const shown = (v: unknown): string => String(typeof v === 'string' ? v : JSON.stringify(v)).slice(0, 40);
-  const own = agent?.autoCompactWindow;
-  if (own !== undefined && normalizeAutoCompactWindow(own) === undefined) out.push({ setting: 'autoCompactWindow', value: shown(own) });
-  const ownValid = own !== undefined && normalizeAutoCompactWindow(own) !== undefined;
-  const god = cfg?.godAutoCompactWindow;
-  if (agent?.isGod === true && !ownValid && god !== undefined && normalizeAutoCompactWindow(god) === undefined) out.push({ setting: 'godAutoCompactWindow', value: shown(god) });
+  const steps: Array<[AutoCompactSettingName, unknown, boolean]> = [
+    ['autoCompactWindow', agent.autoCompactWindow, true],
+    ['godAutoCompactWindow', cfg?.godAutoCompactWindow, agent.isGod === true],
+    ['claudeAutoCompactWindow', cfg?.claudeAutoCompactWindow, true],
+  ];
+  for (const [setting, v, applies] of steps) {
+    if (!applies || v === undefined) continue;
+    if (normalizeAutoCompactWindow(v) !== undefined) break;   // a valid setting decides; later ones are moot
+    out.push({ setting, value: shown(v) });
+  }
   return out;
 }
 
