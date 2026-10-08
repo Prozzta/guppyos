@@ -276,9 +276,9 @@ export interface LedgerManifest { ledger: Record<string, LedgerLevel> }
 
 /**
  * The highest level THIS build implements. Each slice raises it (S0 'shadow', S1 'reader', S2 'writer').
- * Day 0 implements nothing yet.
+ * REL-184 (1.1.84) implements every level: nothing rises above off without an explicit agent entry.
  */
-export const IMPLEMENTED_LEVEL: LedgerLevel = 'off';
+export const IMPLEMENTED_LEVEL: LedgerLevel = 'writer';
 
 /** A name a NEWER build may use for a level: a non-empty lower-case word. */
 const NEWER_LEVEL = /^[a-z][a-z0-9-]*$/;
@@ -295,14 +295,16 @@ function rank(level: unknown): number | null {
  * and agent) is above what this build implements: the caller logs a CLAIM_LEDGER_CLAMP_ROW. A level
  * above the build is clamped DOWN to the implemented level, never to 'off'.
  * Only a non-empty lower-case word that is not a known level (a newer build's level) counts as above
- * every known level. Anything else (null, a number, '', 'Writer', garbage) is garbled: as the global it
- * means 'off', as an agent entry it means "follow the global"; so is a missing value (Jim, 54d96ddb).
+ * every known level. Anything else (null, a number, '', 'Writer', garbage) is garbled and means 'off',
+ * as the global or as an agent entry, and so does a missing value (Jim, 54d96ddb). The global is a
+ * ceiling only: an agent is on only with its own entry (REL-184, Jim: a missing entry no longer
+ * follows the global, so a new or unlisted agent never inherits a level).
  */
 export function effectiveLevel(
   global: unknown, agent: unknown, implemented: LedgerLevel = IMPLEMENTED_LEVEL,
 ): { level: LedgerLevel; clamped: boolean } {
   const g = rank(global) ?? 0;
-  const a = rank(agent) ?? g;
+  const a = rank(agent) ?? 0;
   const requested = Math.min(g, a);
   const impl = Math.max(0, LEDGER_LEVELS.indexOf(implemented));
   return requested > impl

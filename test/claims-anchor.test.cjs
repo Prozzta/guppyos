@@ -233,6 +233,11 @@ test('Jim A-2: W3 discovery keeps an anchored agent flagged with no segment left
   fs.mkdirSync(path.join(root, 'agents', 'a2'), { recursive: true });
   for (const f of ['memory.md', 'memory-archive-2026-09.md', 'notes.md']) fs.writeFileSync(path.join(root, 'agents', 'a2', f), 'x');
   const opts = { claimLedger: 'reader', implemented: 'writer' };
+  // REL-184 (Jim): a missing manifest entry is off, so the anchor alone flags nothing ...
+  const unlisted = discoverSources(root, undefined, { ...opts, anchored: ['a2'] }).eligible.map((e) => e.path);
+  assert.ok(unlisted.includes('agents/a2/memory.md'), 'no manifest entry: off, the markdown stays a source');
+  // ... and the agent's own entry turns it on (the global caps it at reader).
+  fs.writeFileSync(path.join(root, 'memory-sources.json'), JSON.stringify({ ledger: { a2: 'writer' } }));
   const plain = discoverSources(root, undefined, opts).eligible.map((e) => e.path);
   assert.ok(plain.includes('agents/a2/memory.md'), 'no ledger, no anchor: the markdown is a source');
   const anchored = discoverSources(root, undefined, { ...opts, anchored: ['a2'] }).eligible;

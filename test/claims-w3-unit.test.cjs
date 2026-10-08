@@ -161,8 +161,9 @@ test('discovery: at reader/writer the claims source comes in and the three patte
   for (const level of ['reader', 'writer']) {
     const d = at(level, 'writer');
     assert.deepEqual(paths(d).filter((p) => p.includes('/a1/')), ['claims:agents/a1/memory/claims', 'deliverable:agents/a1/notes.md'], level);
-    assert.ok(paths(d).includes('memory:agents/a2/memory.md'), 'a2 is at writer too (the global) but has no ledger yet: it keeps memory.md');
-    assert.equal(d.ledgerLevels.a2, 'writer');
+    // REL-184 (Jim): a2 has no manifest entry, so it is off whatever the global says; it keeps memory.md.
+    assert.ok(paths(d).includes('memory:agents/a2/memory.md'), 'a2 has no entry: off, it keeps memory.md');
+    assert.equal(d.ledgerLevels.a2, undefined);
     assert.equal(d.ledgerLevels.a1, level);
     for (const r of ['agents/a1/memory.md', 'agents/a1/memory-archive-1.md', 'agents/a1/memory-ledger-export-2026-10.md']) assert.ok(d.excludedMd.includes(r), `${r} reported as excluded`);
   }

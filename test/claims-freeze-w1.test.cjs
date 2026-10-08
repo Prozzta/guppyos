@@ -20,44 +20,52 @@ test('G0.1 clamp table: min(global, agent, implemented), clamped down never to o
   const { effectiveLevel } = claims;
   const rows = [
     // global, agent, implemented, level, clamped
-    ['writer', undefined, 'reader', 'reader', true],    // G6.3b: an S2 setting on the S1 build
+    ['writer', 'writer', 'reader', 'reader', true],     // G6.3b: an S2 setting on the S1 build
     ['writer', 'writer', 'shadow', 'shadow', true],
-    ['reader', undefined, 'reader', 'reader', false],
+    ['reader', 'reader', 'reader', 'reader', false],
     ['reader', 'shadow', 'writer', 'shadow', false],    // the agent narrows the global
-    ['shadow', 'writer', 'writer', 'shadow', false],    // the agent never widens it
+    ['shadow', 'writer', 'writer', 'shadow', false],    // the agent never widens it (the global is a ceiling)
     ['off', 'writer', 'writer', 'off', false],
+    ['writer', 'writer', 'writer', 'writer', false],
     [undefined, undefined, 'writer', 'off', false],     // the default is off
-    ['writer', undefined, 'off', 'off', true],          // a build with nothing implemented
-    ['writer2', undefined, 'reader', 'reader', true],   // an unknown (newer) level clamps down, not off
+    ['writer', 'writer', 'off', 'off', true],           // a build with nothing implemented
+    ['writer2', 'writer2', 'reader', 'reader', true],   // an unknown (newer) level clamps down, not off
     ['writer', 'writer2', 'writer', 'writer', false],
+    ['writer', 'future-level', 'writer', 'writer', false],
+    // REL-184 (Jim): a missing agent entry is off; it no longer follows the global.
+    ['writer', undefined, 'writer', 'off', false],
+    ['reader', undefined, 'writer', 'off', false],
+    ['writer2', undefined, 'reader', 'off', false],
     // Garbled values never turn the ledger on (Jim, 54d96ddb): as the global they mean off ...
-    [null, undefined, 'writer', 'off', false],
-    ['', undefined, 'writer', 'off', false],
-    [0, undefined, 'writer', 'off', false],
-    [3, undefined, 'writer', 'off', false],
-    ['Writer', undefined, 'writer', 'off', false],
+    [null, 'writer', 'writer', 'off', false],
+    ['', 'writer', 'writer', 'off', false],
+    [0, 'writer', 'writer', 'off', false],
+    [3, 'writer', 'writer', 'off', false],
+    ['Writer', 'writer', 'writer', 'off', false],
     ['WRITER', 'writer', 'writer', 'off', false],
-    [' writer', undefined, 'writer', 'off', false],
-    [{}, undefined, 'writer', 'off', false],
-    // ... and as an agent entry they follow the global.
-    ['reader', null, 'writer', 'reader', false],
-    ['reader', '', 'writer', 'reader', false],
-    ['reader', 0, 'writer', 'reader', false],
-    ['reader', 'Writer', 'writer', 'reader', false],
-    ['shadow', ['writer'], 'writer', 'shadow', false],
+    [' writer', 'writer', 'writer', 'off', false],
+    [{}, 'writer', 'writer', 'off', false],
+    // ... and as an agent entry they mean off too (REL-184; before, they followed the global).
+    ['writer', null, 'writer', 'off', false],
+    ['writer', '', 'writer', 'off', false],
+    ['writer', 0, 'writer', 'off', false],
+    ['writer', 'Writer', 'writer', 'off', false],
+    ['writer', ['writer'], 'writer', 'off', false],
   ];
   for (const [g, a, impl, level, clamped] of rows) {
     assert.deepEqual(effectiveLevel(g, a, impl), { level, clamped }, `${g}/${a}/${impl}`);
   }
   for (const g of ['shadow', 'reader', 'writer']) {
     for (const impl of ['shadow', 'reader']) {
-      assert.notEqual(effectiveLevel(g, undefined, impl).level, 'off', `${g} on ${impl} never becomes off`);
+      assert.notEqual(effectiveLevel(g, g, impl).level, 'off', `${g} on ${impl} never becomes off`);
     }
   }
 });
 
-test('the day-0 build implements nothing yet', () => {
-  assert.equal(claims.IMPLEMENTED_LEVEL, 'off');
+test('REL-184: this build implements every level; the default is still off', () => {
+  assert.equal(claims.IMPLEMENTED_LEVEL, 'writer');
+  assert.equal(claims.effectiveLevel(undefined, undefined).level, 'off');
+  assert.equal(claims.effectiveLevel('writer', undefined).level, 'off');
   assert.deepEqual([...claims.LEDGER_LEVELS], ['off', 'shadow', 'reader', 'writer']);
   assert.equal(claims.LEDGER_RECORD_VERSION, 1);
 });

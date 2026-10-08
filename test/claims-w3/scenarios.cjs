@@ -423,7 +423,7 @@ module.exports = async (drill) => {
     // W3-1 (b): the Settings level on a running worker: a raise swaps markdown for claims, a drop to
     // shadow brings memory.md back and hides the claims, no restart; a sync carrying the level follows it.
     md3();
-    manifest({});
+    manifest({ a1: 'writer' });   // REL-184: an agent is on only with its own entry; the Settings level caps it
     const store = open(); const eng = engine(store, bowEmbedder(), { claimLedger: 'shadow' });
     await eng.backfill();
     const atShadow = { replaced: replacedCount(store), hits: await zircon(eng) };
