@@ -12,6 +12,8 @@ import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
+import { importAtStart } from './claims/startupImport';
+import { makeW6Append } from './claims/w6Append';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
@@ -1244,7 +1246,7 @@ function claimsIndexSync(): ClaimsIndexSync | null {
       ruleConfig: () => ({ r4: false }),
       level: claimLevel,
       agents: claimLedgerAgents,
-      send: (args) => nativeMemory.syncClaims(args),
+      send: (args) => claimsImportReady().then(() => nativeMemory.syncClaims(args)),
       onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
       log: (row) => hive.appendLog(row),
     });
@@ -1361,6 +1363,32 @@ function claimsAnchorCheck(): void {
   try { claimsEndpoint()?.store.checkAnchored(); } catch (e) { hive.appendLog({ kind: 'claims-anchor-check-failed', error: String(e).slice(0, 160) }); }
 }
 setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
+/** REL-184 S0 (Jim option (a)): once per hive root, shadowImport every agent at shadow or higher
+ *  (claims/startupImport.ts). Every path that forks the memory worker or appends a claim waits for
+ *  it, so discovery never sees a segment without its legacy entries; the wait is capped. */
+const CLAIMS_IMPORT_WAIT_MS = 120_000;
+let claimsImport: { root: string; ready: Promise<void> } | null = null;
+function claimsImportReady(): Promise<void> {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return Promise.resolve();
+  if (!claimsImport || claimsImport.root !== root) {
+    const run = importAtStart({
+      hiveRoot: root,
+      append: makeW6Append(ep.store),
+      read: (agentId) => ep.store.readLedger(agentId),
+      log: (row) => hive.appendLog(row),
+      agents: () => [...Object.keys(hive.registry().agents), ...Object.keys(readSourcesConfig(root).ledger ?? {})],
+      level: claimLevel,
+    }).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
+    const cap = new Promise<void>((resolve) => {
+      const t = setTimeout(() => { hive.appendLog({ kind: 'claims-import-wait-capped', ms: CLAIMS_IMPORT_WAIT_MS }); resolve(); }, CLAIMS_IMPORT_WAIT_MS);
+      t.unref?.();
+      void run.then(() => { clearTimeout(t); resolve(); });
+    });
+    claimsImport = { root, ready: cap };
+  }
+  return claimsImport.ready;
+}
 // CL-M4-WP step 3 (design §2 source 2): the claim ids each agent's own search returned, 6 h.
 const claimsSearchLog = new SearchResultLog({ hiveRoot: () => hive.root() });
 const nativeMemory = new NativeMemoryWiring({
@@ -1404,7 +1432,7 @@ function claimNoteCandidates(agentId: string, text: string): Promise<CandidateRe
     score: makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus())
   }), agentId, text, new Date());
 }
-hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
+hookServer.setMemoryHandler(async (token, body) => { await claimsImportReady(); return nativeMemory.handle(token, body); });
 // CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
 // wake-up` and each Codex spawn (claims/delivery.ts). The live view is never persisted; only its
 // receipt is, once per distinct text, on a rotating file.
@@ -1499,6 +1527,7 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
   return {
     level: d.level(agentId),
     note: async (args) => {
+      await claimsImportReady();
       const r = await handleClaimVerb(d, agentId, { cmd: 'note', args }, 'ledger-route');
       const id = (r.json as { id?: unknown } | undefined)?.id;
       return { ok: r.ok, ...(typeof id === 'string' ? { id } : {}), ...(r.error ? { error: r.error } : {}) };
@@ -5407,10 +5436,13 @@ const memoryReply = (r: { exit: number; text?: string; error?: string }): { ok: 
 ipcMain.handle('hive:memoryStatus', async () => ({ enabled: readConfig().semanticMemory !== false, ...(await nativeMemory.statusReport()) }));
 ipcMain.handle('hive:searchMemory', async (_evt, query: unknown, wing: unknown) => {
   if (typeof query !== 'string' || !query.trim()) return { ok: false, output: '', error: 'empty query' };
+  await claimsImportReady();
   return memoryReply(await nativeMemory.query('search', { query, ...(typeof wing === 'string' && wing ? { wing } : {}) }));
 });
-ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) =>
-  memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {})));
+ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) => {
+  await claimsImportReady();
+  return memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {}));
+});
 // Condense memory.md on demand: an explicit id condenses that one agent (skips
 // the size trigger — a "condense now" button); no id runs a full threshold scan.
 ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>
@@ -7584,7 +7616,8 @@ app.whenReady().then(() => {
   // other mode does nothing. A first memory request before then forks it as always.
   mainWindow?.webContents.once('did-finish-load', () => {
     startupTiming.mark('window-ready');
-    const t = setTimeout(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }, NATIVE_MEMORY_PREWARM_DELAY_MS);
+    // REL-184 S0: the claims import (if any) runs first; the worker forks after it.
+    const t = setTimeout(() => { void claimsImportReady().then(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }); }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
     // start a login shell on macOS). Only when Codex is installed at all.
