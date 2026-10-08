@@ -153,7 +153,8 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       const countTokens = d.countTokens();
       if (!countTokens) return null;
       const records = prefix.records;
-      const state = d.derive(records, d.registry(root), { r4: false });
+      const registry = d.registry(root);
+      const state = d.derive(records, registry, { r4: false });
       const cwd = d.agentCwd(agentId) || root;
       const snapshot = await snapshotFor(agentId, records, state, cwd);
       const usage = d.usage(agentId);
@@ -162,7 +163,7 @@ export function createClaimDelivery(d: ClaimDeliveryDeps): ClaimDelivery {
       // Peek has no lease/charge/log side effects. T1 decides the set committed below.
       let items: ReconcileItem[] = [];
       try { items = (d.reconcileCandidates?.(agentId, day, source) ?? []).slice(0, 3); } catch { items = []; }
-      const { buildWorkingSetDetailed } = createClaimViews(records, countTokens, items);
+      const { buildWorkingSetDetailed } = createClaimViews(records, countTokens, items, registry);
       const warning = readOnly ? `\n\n${READ_ONLY_WARNING}` : '';
       const tail = warning;
       // M-3: B8 shares at the plan's B, scaled down until the text fits the character cap.

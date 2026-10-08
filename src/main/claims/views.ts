@@ -1,6 +1,6 @@
 import type {
   BuildWorkingSetFn, ClaimRec, ClaimsState, LedgerRec, Receipt, ReconcileItem,
-  RenderExportLineFn, RenderMemoryMdFn, WorldView,
+  KeyRegistry, RenderExportLineFn, RenderMemoryMdFn, WorldView,
 } from '../../shared/claims';
 import { GENERATED_MEMORY_MARKER } from './generated';
 import { reconcilePromptText } from './reconcile';
@@ -13,6 +13,25 @@ export type RenderMemoryMdOptions = { exclude?: (id: string) => boolean };
 export type RenderMemoryMdWithExcludeFn = (state: ClaimsState, view: WorldView, mode: 'view' | 'complete', options?: RenderMemoryMdOptions) => string;
 
 const cmp = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
+const canonicalKey = (key: string, registry: KeyRegistry): string => {
+  let current = key; const seen = new Set<string>();
+  while (!seen.has(current)) { seen.add(current); const alias = registry.keys[current]?.aliasOf; if (!alias) break; current = alias; }
+  return current;
+};
+const isSingleKey = (key: string, registry?: KeyRegistry): boolean => {
+  if (!registry) return false;
+  const canonical = canonicalKey(key, registry);
+  const exact = registry.keys[canonical] ?? registry.keys[key];
+  if (exact) return exact.cardinality === 'single';
+  for (const namespace of registry.namespaces) {
+    const star = namespace.pattern.indexOf('*');
+    const prefix = star < 0 ? namespace.pattern : namespace.pattern.slice(0, star);
+    const suffix = star < 0 ? '' : namespace.pattern.slice(star + 1);
+    if (canonical.startsWith(prefix) && canonical.endsWith(suffix) && canonical.length >= prefix.length + suffix.length)
+      return namespace.cardinality === 'single';
+  }
+  return false;
+};
 const tokens = (count: CountTokens, text: string): number => {
   const n = count(text); return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
 };
@@ -56,7 +75,7 @@ const claimDate = (c: ClaimRec): string => (c.at || c.wt).slice(0, 10);
 const historyAnchor = (id: string): string => `claim-history-${id}`;
 
 /** Bind an immutable append-order snapshot and the native-memory tokenizer to frozen W4 signatures. */
-export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = []): {
+export function createClaimViews(records: LedgerRec[], countTokens: CountTokens, reconcileItems: ReconcileItem[] = [], registry?: KeyRegistry): {
   buildWorkingSet: BuildWorkingSetFn;
   buildWorkingSetDetailed: (state: ClaimsState, view: WorldView, budget: number) => {
     text: string; receipt: Receipt; renderedReconcileItems: ReconcileItem[];
@@ -86,6 +105,8 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       eligible.push(found);
     }
     const tier = (c: ClaimRec): 0 | 2 => c.pin === true || c.kind === 'lesson' ? 0 : 2;
+    const supersededBy = new Set(Object.values(state.claims).map((claim) => claim.supersededBy).filter((id): id is string => !!id));
+    const currentValues = new Set(eligible.filter(({ claim }) => !!claim.key && isSingleKey(claim.key, registry) && supersededBy.has(claim.id)).map(({ claim }) => claim.id));
     const rank = (a: typeof eligible[number], b: typeof eligible[number]): number => {
       const ca = state.claims[a.claim.id]; const cb = state.claims[b.claim.id];
       const ua = view.counters[a.claim.id] ?? { helped: 0, hurt: 0 };
@@ -93,7 +114,9 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       return cmp(cb.lastAt, ca.lastAt) || cb.sightings - ca.sightings ||
         (ub.helped - ub.hurt) - (ua.helped - ua.hurt) || a.order - b.order;
     };
-    const groups = [eligible.filter(x => tier(x.claim) === 0).sort(rank), [], eligible.filter(x => tier(x.claim) === 2).sort(rank)];
+    const groups = [eligible.filter(x => tier(x.claim) === 0).sort(rank), [],
+      eligible.filter(x => tier(x.claim) === 2 && currentValues.has(x.claim.id)).sort(rank),
+      eligible.filter(x => tier(x.claim) === 2 && !currentValues.has(x.claim.id)).sort(rank)];
     const output = [`# Memory working set — ${state.agent}`];
     let used = tokens(countTokens, output.join('\n'));
     const included: Receipt['included'] = [];
@@ -139,14 +162,22 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
         Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
         Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
       const t2Cap = Math.min(cap - used, t2Limit);
-      for (const { claim } of groups[2]) {
-        const id = claim.id; const group = historyFor.get(id);
-        const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
-        const n = tokens(countTokens, line);
-        if (tokens(countTokens, [...output, ...selected.map(x => x.line), line].join('\n')) <= cap && selectedTokens + n <= t2Cap) {
-          selected.push({ id, line, n }); selectedTokens += n;
+      const addT2 = (items: typeof eligible, localCap: number): void => {
+        let localUsed = 0;
+        for (const { claim } of items) {
+          const id = claim.id; const group = historyFor.get(id);
+          const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+          const n = tokens(countTokens, line);
+          if (tokens(countTokens, [...output, ...selected.map(x => x.line), line].join('\n')) <= cap &&
+              selectedTokens + n <= t2Cap && localUsed + n <= localCap) {
+            selected.push({ id, line, n }); selectedTokens += n; localUsed += n;
+          }
         }
-      }
+      };
+      // Reserve at most half of T2's fixed B8 share for changed-key winners, leaving
+      // room for plain recency even when unused T0/T1 capacity flows down.
+      addT2(groups[2], Math.floor(cap * WORKING_SET_TIER_SHARES[2] / 2));
+      addT2(groups[3], t2Cap - selectedTokens);
       return selected;
     };
     const reserveFor = (selected: Array<{ id: string }>): number => {
@@ -166,7 +197,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       included.push({ id, tier: 2, tokens: n });
     }
     const includedNow = new Set(included.map(x => x.id));
-    for (const { claim } of groups[2]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
+    for (const { claim } of [...groups[2], ...groups[3]]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
     const includedIds = new Set(included.map(x => x.id));
     for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
       if (tokens(countTokens, [...output, pointer.line].join('\n')) <= cap) {
