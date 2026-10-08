@@ -70,6 +70,23 @@ test('normaliser strips memory availability (memory line AND protocol line 1 wor
   assert.equal(hive.sessionPromptFingerprint(WORKER).fp, on.fp, 'sessionPromptFingerprint is the canonical render');
 });
 
+test('G4.7: only the agent whose effective claims flag flips changes its prompt fingerprint', (t) => {
+  const hive = promptHive(t);
+  const levels = { jim: 'reader', pam: 'writer' };
+  hive.setClaimLedgerLevelProvider((id) => levels[id] ?? 'off');
+  const jimBefore = hive.sessionPromptFingerprint({ ...WORKER, id: 'jim' }).fp;
+  const pamBefore = hive.sessionPromptFingerprint({ ...WORKER, id: 'pam' }).fp;
+  levels.jim = 'writer';
+  const jimAfter = hive.sessionPromptFingerprint({ ...WORKER, id: 'jim' }).fp;
+  const pamAfter = hive.sessionPromptFingerprint({ ...WORKER, id: 'pam' }).fp;
+  assert.notEqual(jimAfter, jimBefore, 'writer instructions change the enabled agent prompt');
+  assert.equal(pamAfter, pamBefore, 'an unflipped writer stays byte-identical');
+  const writer = hive.injectedPrompt({ ...WORKER, id: 'jim' }, 'C:/hive/agents/jim', 'C:/hive', true, false);
+  assert.match(writer, /memory wake-up.*claim working set/s);
+  assert.match(writer, /claim-ledger writer/);
+  assert.doesNotMatch(writer, /write durable facts there/);
+});
+
 test('normaliser strips the Knowledge Graph line and its CLI path', (t) => {
   const hive = promptHive(t);
   const off = fpWith(hive, WORKER), on = fpWith(hive, WORKER, { kg: true, kgPath: 'C:/kg/cli.js' }), other = fpWith(hive, WORKER, { kg: true, kgPath: 'D:/other/kg.js' });

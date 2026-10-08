@@ -1,0 +1,173 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const loadTs = require('./load-ts.cjs');
+const V = loadTs('src/main/claims/views.ts');
+
+const claim = (id, text, extra = {}) => ({ v: 1, id, at: '2026-01-01', wt: '2026-01-01', agent: 'a', prev: '', mac: id,
+  t: 'claim', kind: 'fact', text, source: 'self', ...extra });
+const stateFor = (records) => ({ v: 1, agent: 'a', registryHash: '', ledgerHead: '', conflicts: [], claims: Object.fromEntries(
+  records.filter(r => r.t === 'claim').map(r => [r.id, { id: r.id, status: 'live', sightings: 1, firstAt: r.at, lastAt: r.at, pinned: r.pin === true, reasons: [] }])) });
+const world = (flags = {}) => ({ flags, counters: {} });
+
+test('B8 shares are pinned and working-set bytes, receipt, and marker-first memory are deterministic', () => {
+  assert.deepEqual(V.WORKING_SET_TIER_SHARES, [0.4, 0.1, 0.5]);
+  assert.equal(V.DEFAULT_WORKING_SET_BUDGET, 3000, 'the frozen working-set token budget remains 3k');
+  const records = [claim('a', 'alpha'), claim('b', 'beta')];
+  const views = V.createClaimViews(records, s => s.length);
+  const state = stateFor(records);
+  const x = views.buildWorkingSet(state, world(), 1000);
+  const y = views.buildWorkingSet(state, world(), 1000);
+  assert.deepEqual(x, y);
+  assert.equal(x.receipt.included.length, 2);
+  assert.equal(x.receipt.used, x.text.length);
+  assert.ok(views.renderMemoryMd(state, world(), 'view').startsWith('<!-- claim-ledger: generated'));
+  assert.match(views.renderMemoryMd(state, world(), 'complete'), /\[c:a\]/);
+});
+
+test('tier 0 overflow is explicit and not promoted; mail remains excluded until answered; expired/status reasons persist', () => {
+  const records = [claim('pin1', 'p'.repeat(230), { pin: true }), claim('pin2', 'q'.repeat(230), { pin: true }),
+    claim('mail', 'private mail', { source: 'mail:sender' }), claim('old', 'old'), claim('expired', 'gone')];
+  const views = V.createClaimViews(records, s => s.length);
+  const state = stateFor(records);
+  state.claims.old.status = 'superseded';
+  const out = views.buildWorkingSet(state, world({ expired: ['expired'] }), 1000);
+  assert.ok(out.receipt.excluded.some(x => x.id === 'pin2' && x.reason === 'tier-share'));
+  assert.ok(out.receipt.excluded.some(x => x.id === 'mail' && x.reason === 'status'));
+  assert.ok(out.receipt.excluded.some(x => x.id === 'old' && x.reason === 'status'));
+  assert.ok(out.receipt.excluded.some(x => x.id === 'expired' && x.reason === 'expired'));
+  assert.ok(!out.receipt.included.some(x => x.id === 'pin2'));
+});
+
+test('reconcile prompt renders once as a T1 marker before warnings and claims within the 4,500-character cap', () => {
+  const records = [claim('f', 'flagged fact')];
+  const item = { itemId: 'r1', agent: 'a', kind: 'conflict', a: 'f', b: 'g', text: 'choose one', turnsUnanswered: 0 };
+  const views = V.createClaimViews(records, s => s.length, [item]);
+  const out = views.buildWorkingSet(stateFor(records), world({ f: ['stale-ref'] }), 4500);
+  assert.match(out.text, /⚠ f: stale-ref/);
+  const lines = out.text.split('\n');
+  assert.ok(out.text.length <= 4500);
+  assert.equal(lines.filter(line => line.includes('reconcile r1:')).length, 1);
+  assert.ok(lines[1].includes('reconcile r1:'), 'reconcile prompt occupies the first T1 marker slot');
+  assert.match(lines[2], /f: stale-ref/);
+  assert.match(lines[3], /flagged fact \[status:current\] \[c:f\]/);
+  assert.equal(out.text.match(/reconcile r1:/g)?.length, 1, 'prompt is not duplicated elsewhere in the working set');
+  assert.equal(out.receipt.included.find(x => x.id === 'f').tier, 2);
+});
+
+test('complete output includes every record by default and supports W6 archive-backed exclusion', () => {
+  const records = [claim('lesson', 'Remember the rule', { kind: 'lesson', pin: true }), claim('archived', 'archive copy\n- a literal bullet\ncontinued text'),
+    { v: 1, id: 'event-1', at: '2026-01-02', wt: '2026-01-02', agent: 'a', prev: '', mac: 'e1', t: 'event', ev: 'sighting', targets: ['archived'] }];
+  const views = V.createClaimViews(records, s => s.length);
+  const state = stateFor(records);
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  assert.ok(full.startsWith('<!-- claim-ledger: generated'));
+  for (const rec of records) assert.ok(full.includes(rec.id), `missing ${rec.id}`);
+  assert.match(full, /  - a literal bullet\n  continued text/);
+  const filtered = views.renderMemoryMd(state, world(), 'complete', { exclude: id => id === 'archived' || id === 'lesson' });
+  assert.ok(filtered.includes('[c:lesson]'));
+  assert.ok(filtered.includes('event-1'));
+  assert.ok(!filtered.includes('[c:archived]'));
+  assert.equal(views.renderMemoryMd(state, world(), 'view', { exclude: id => id === 'lesson' }),
+    views.renderMemoryMd(state, world(), 'view'));
+  const ids = [...full.matchAll(/\[c:([^\]\s]+)\]/g)].map(m => m[1]);
+  assert.deepEqual(new Set(ids), new Set(['lesson', 'archived']));
+});
+
+test('pinned lessons are considered first and over-share loss is explicit in the receipt', () => {
+  const records = [claim('lesson1', 'l'.repeat(210), { kind: 'lesson', pin: true }), claim('lesson2', 'm'.repeat(210), { kind: 'lesson', pin: true })];
+  const views = V.createClaimViews(records, s => s.length);
+  const state = stateFor(records);
+  const out = views.buildWorkingSet(state, world(), 1000);
+  assert.ok(out.receipt.included.some(x => x.id === 'lesson1' && x.tier === 0));
+  assert.ok(out.receipt.excluded.some(x => x.id === 'lesson2' && x.reason === 'tier-share'));
+  assert.ok(out.receipt.warnings.some(w => /Pinned\/lesson tier/.test(w)));
+});
+
+test('working set stays within the injected tokenizer budget and receipt accounts for every live claim', () => {
+  const records = [claim('one', 'alpha beta gamma'), claim('two', 'delta epsilon zeta'), claim('three', 'eta theta iota'),
+    claim('gone', 'no longer live')];
+  const views = V.createClaimViews(records, text => text.trim().split(/\s+/).filter(Boolean).length);
+  const state = stateFor(records);
+  state.claims.gone.status = 'superseded';
+  const result = views.buildWorkingSet(state, world(), 18);
+  assert.ok(result.receipt.used <= result.receipt.budget);
+  const accounted = new Set([...result.receipt.included.map(x => x.id), ...result.receipt.excluded.map(x => x.id)]);
+  assert.deepEqual(accounted, new Set(['one', 'two', 'three', 'gone']));
+  assert.ok(result.receipt.excluded.some(x => x.id === 'gone' && x.reason === 'status'));
+});
+
+test('accepted reconcile mail can enter; live overflow is budgeted and marked +N more', () => {
+  const mail = claim('m1', 'mail fact', { source: 'mail:sender' });
+  const records = [mail, claim('long1', 'x'.repeat(150)), claim('long2', 'y'.repeat(150)),
+    { v: 1, id: 'answer', at: '2026-01-02', wt: '2026-01-02', agent: 'a', prev: '', mac: 'ans', t: 'event', ev: 'reconcile-answer', answer: 'keep-both', targets: ['m1', 'owner'] }];
+  const views = V.createClaimViews(records, s => s.length);
+  const state = stateFor(records);
+  const result = views.buildWorkingSet(state, world(), 190);
+  assert.ok(result.receipt.included.some(x => x.id === 'm1'));
+  assert.ok(result.receipt.excluded.some(x => x.reason === 'budget'));
+  assert.match(result.text, /\+\d+ more/);
+});
+
+test('S1: a history group with two live members labels one CURRENT, one CONFLICT, and anchors one real current', () => {
+  const old = claim('old', 'old version', { at: '2026-01-01', wt: '2026-01-01' });
+  const a = claim('live-a', 'earlier live successor', { at: '2026-02-01', wt: '2026-02-01', supersedes: ['old'] });
+  const b = claim('live-b', 'later live successor', { at: '2026-03-01', wt: '2026-03-01', supersedes: ['old'] });
+  const records = [old, a, b];
+  const state = stateFor(records); state.claims.old.status = 'superseded';
+  const views = V.createClaimViews(records, text => text.includes('[c:') ? 200 : 1);
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  assert.match(full, /CURRENT — 2026-03-01 — later live successor/);
+  assert.match(full, /CONFLICT — 2026-02-01 — earlier live successor/);
+  const working = views.buildWorkingSet(state, world(), 50).text;
+  assert.equal((working.match(/history: memory\.md#/g) || []).length, 1);
+  assert.match(working, /history: memory\.md#claim-history-live-b/);
+});
+
+test('S2: a shown current with history carries the inline [history: memory.md#claim-history-<id>] suffix, and the anchor exists', () => {
+  // A T2 fact and a T0 lesson, each with a superseded prior; ample budget, so both currents are shown.
+  const oldFact = claim('fact-old', 'invented fact before', { key: 'invented-key', at: '2026-01-01', wt: '2026-01-01' });
+  const fact = claim('fact-cur', 'invented fact after', { key: 'invented-key', at: '2026-02-01', wt: '2026-02-01', supersedes: ['fact-old'] });
+  const oldLesson = claim('lesson-old', 'invented habit before', { kind: 'lesson', at: '2026-01-01', wt: '2026-01-01' });
+  const lesson = claim('lesson-cur', 'invented habit after', { kind: 'lesson', at: '2026-02-01', wt: '2026-02-01', supersedes: ['lesson-old'] });
+  const records = [oldFact, fact, oldLesson, lesson];
+  const state = stateFor(records); state.claims['fact-old'].status = 'superseded'; state.claims['lesson-old'].status = 'superseded';
+  const views = V.createClaimViews(records, s => s.length);
+  const lines = views.buildWorkingSet(state, world(), 5000).text.split('\n');
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  for (const id of ['fact-cur', 'lesson-cur']) {
+    const shown = lines.filter(l => l.includes(`[c:${id}]`));
+    assert.equal(shown.length, 1, `${id} is shown once`);
+    assert.match(shown[0], new RegExp(`\\[status:current\\] \\[c:${id}\\] \\[history: memory\\.md#claim-history-${id}\\]$`), `${id}: the inline suffix`);
+    assert.ok(full.includes(`<a id="claim-history-${id}"></a>`), `${id}: the suffix's anchor is rendered in memory.md`);
+    // Shown inline, so no standalone pointer duplicates it.
+    assert.equal(lines.filter(l => l.includes(`memory.md#claim-history-${id}`)).length, 1, `${id}: one pointer only`);
+  }
+  // The superseded priors are never shown as current in the working set.
+  assert.ok(!lines.some(l => l.includes('[c:fact-old]') || l.includes('[c:lesson-old]')));
+});
+
+test('S2 reverse: a current WITHOUT history carries no suffix, and no pointer or anchor is invented', () => {
+  const fact = claim('solo-fact', 'invented lone fact', { key: 'lone-key' });
+  const lesson = claim('solo-lesson', 'invented lone habit', { kind: 'lesson' });
+  const records = [fact, lesson];
+  const state = stateFor(records);
+  const views = V.createClaimViews(records, s => s.length);
+  const working = views.buildWorkingSet(state, world(), 5000).text;
+  const full = views.renderMemoryMd(state, world(), 'complete');
+  assert.match(working, /- invented lone fact \[status:current\] \[c:solo-fact\]$/m);
+  assert.match(working, /- invented lone habit \[status:current\] \[c:solo-lesson\]$/m);
+  assert.doesNotMatch(working, /history:/);
+  assert.doesNotMatch(full, /claim-history-/);
+});
+
+test('S4: a current lesson with history is rendered only once in complete mode', () => {
+  const old = claim('lesson-old', 'old guidance', { kind: 'lesson', at: '2026-01-01', wt: '2026-01-01' });
+  const current = claim('lesson-current', 'current guidance', { kind: 'lesson', at: '2026-02-01', wt: '2026-02-01', supersedes: ['lesson-old'] });
+  const records = [old, current];
+  const state = stateFor(records); state.claims['lesson-old'].status = 'superseded';
+  const full = V.createClaimViews(records, s => s.length).renderMemoryMd(state, world(), 'complete');
+  assert.equal(full.split('current guidance').length - 1, 1);
+  assert.match(full, /CURRENT — 2026-02-01 — current guidance/);
+});

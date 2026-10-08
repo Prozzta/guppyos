@@ -80,8 +80,9 @@ test('C1b a real main-thread stall past the AGY shim\'s own 5 s give-up: the blo
 });
 
 // LOAD-FLAKES-176 (Jim A1): the C1 root cause, PROVEN rather than plausible, and the REAL host
-// busy() pinned. The re-wake's turn start is held 5 s real (the stub's `slow-starts` cue, a loaded
-// machine on purpose, from the re-pend on). The old re-surface step (settle:false, the clock moving
+// busy() pinned. The re-wake's turn start is held until the test releases it (the stub's
+// `hold-starts` / `release-starts` cues; it was 5 s of wall clock, `slow-starts`, which made the
+// proof itself load-dependent: TEST-FLAKE-MAILRIG-C1). The old re-surface step (settle:false, the clock moving
 // under the still-starting turn) runs the 60 s SUBMIT_CONFIRM_MS out and loses the re-surface;
 // holdWhileBusy keeps it. A busy() that ignored `inFlight` or `lifecycle === 'active'` loses it too.
 async function c1UpToRepend(t, diagId = 'ag-1') {
@@ -92,15 +93,25 @@ async function c1UpToRepend(t, diagId = 'ag-1') {
   await rig.call('lateNextFlush', { id: 'ag-1', ms: 3_200 });
   await rig.beat();
   await waitFor(() => rig.contexts('ag-1').some((c) => c.ids.includes(m.id)), { what: 'the (late) block reached the CLI', diag });
-  rig.cue('ag-1', { cue: 'slow-starts', ms: 5_000 });
-  await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'cue' && r.cue?.cue === 'slow-starts'), { what: 'the stub is slow from here', diag });
+  // TEST-FLAKE-MAILRIG-C1: the re-wake's turn start is HELD until the test releases it (the stub's
+  // `hold-starts`), not for 5 s of wall clock (`slow-starts`). A real-time hold raced the test's own
+  // progress: on a loaded runner the steps up to the snapshot took longer than 5 s, the whole
+  // re-wake (claim, submit, turn start, hook) was over before the test looked, and the proof failed.
+  rig.cue('ag-1', { cue: 'hold-starts' });
+  await waitFor(() => rig.transcript('ag-1').some((r) => r.kind === 'cue' && r.cue?.cue === 'hold-starts'), { what: 'turn starts are held from here', diag });
+  const held = rig.transcript('ag-1').filter((r) => r.kind === 'start-held').length;
+  // The wake record's length BEFORE the cause of the re-wake (the Stop): every claim/settle after it
+  // belongs to this re-pend, whenever the test gets to look (the record holds 5,000 rows; ~20 here).
+  const wakeBase = (await rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'claim' || d.stage === 'settle')).length;
   rig.cue('ag-1', { cue: 'stop' });
   await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
-  return { rig, m };
+  // The re-pend re-wakes ag-1: its prompt is submitted and its turn start now waits for the test.
+  await waitFor(() => rig.transcript('ag-1').filter((r) => r.kind === 'start-held').length > held, { what: 'the re-wake\'s turn start is held', diag });
+  return { rig, m, wakeBase, release: () => rig.cue('ag-1', { cue: 'release-starts' }) };
 }
 const resurfaced = (rig, m) => () => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2;
 
-test('C1 A1 proof: a re-wake whose turn start is held 5 s real: the OLD step runs the 60 s confirm window out under the starting turn (submit-unconfirmed / exhausted); holdWhileBusy never does, and re-surfaces', T, async (t) => {
+test('C1 A1 proof: a re-wake whose turn start is held until released: the OLD step runs the 60 s confirm window out under the starting turn (submit-unconfirmed / exhausted); holdWhileBusy never does, and re-surfaces', T, async (t) => {
   const unconfirmed = async (rig) => (await rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'submit-unconfirmed' || d.stage === 'wake-ids-exhausted')).length;
   // The old form: 5 steps of 15 s (75 s simulated, > SUBMIT_CONFIRM_MS) take ~1.5 s real, far less
   // than the held 5 s turn start plus 5 s hook: the claim is judged unconfirmed while the turn is
@@ -109,22 +120,48 @@ test('C1 A1 proof: a re-wake whose turn start is held 5 s real: the OLD step run
   const before = await unconfirmed(old.rig);
   await old.rig.beatUntil(resurfaced(old.rig, old.m), { what: 're-surfaced (old form)', settle: false, stepMs: 15_000, tries: 5, diag: async () => '' }).catch(() => false);
   assert.ok((await unconfirmed(old.rig)) > before, 'the old form moved the clock past the confirm window under the starting re-wake');
+  old.release();
   // The fix: the same held turn start, the clock never moves under it, no unconfirmed edge.
   const now = await c1UpToRepend(t);
   const b2 = await unconfirmed(now.rig);
   // GATE-178 (gate at 7ad9d756, round 1a): this used to SAMPLE the host's inFlight while beating.
   // The re-wake is in flight only from its claim to its settle (~250 ms here: 2-3 of ~110 polls
   // 93 ms apart, measured), and under a dual-suite load one poll gap reached 2.2 s, so the sample
-  // could miss a window that did happen. The host's own wake record is the evidence instead: a
-  // re-wake for ag-1 that was CLAIMED (in flight) SETTLED during the held phase.
+  // could miss a window that did happen. The host's own wake record is the evidence instead.
+  // TEST-FLAKE-MAILRIG-C1: that record was then counted from a snapshot taken AFTER the Stop's
+  // mail-surface-late row. The re-wake (the Stop's own, cause hook) claims and settles ~250 ms after
+  // that Stop, so on a loaded runner it was already over at the snapshot and the proof failed
+  // (reproduced: a 6 s lag before the snapshot fails it every time). The count now starts BEFORE
+  // the Stop (wakeBase), and the held phase is the turn start the test itself holds.
   const wakeRows = async () => (await now.rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'claim' || d.stage === 'settle'));
-  const rowsBefore = (await wakeRows()).length;
-  await now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 });
+  const holds = now.rig.busyHolds ?? 0;
+  const stop = new AbortController();
+  const beating = now.rig.beatUntil(resurfaced(now.rig, now.m), { what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000, signal: stop.signal });
+  // Release the start only once the beat loop has found the agent busy and kept the clock still
+  // (an event, not a delay). A loop that moved the clock instead never gets here: this times out.
+  // TEST-MAILRIG-BEAT-LOOP-LEAK (Jim): on that failure the concurrent loop is stopped and awaited,
+  // and the held start released, so nothing outlives the failed test.
+  try {
+    await waitFor(() => (now.rig.busyHolds ?? 0) > holds, { what: 'beatUntil held the clock under the held turn start' });
+  } catch (e) {
+    stop.abort();
+    now.release();
+    await beating.catch(() => {});
+    throw e;
+  }
+  assert.equal(await unconfirmed(now.rig), b2, 'nothing judged unconfirmed while the start was held');
+  now.release();
+  await beating;
   assert.equal(await unconfirmed(now.rig), b2, 'holdWhileBusy: never judged unconfirmed');
   const all = await wakeRows();
-  const settled = all.slice(rowsBefore).find((d) => d.stage === 'settle');
-  assert.ok(settled && all.some((d) => d.stage === 'claim' && d.requestId === settled.requestId),
-    `THE RE-WAKE WAS IN FLIGHT WHILE ITS TURN START WAS HELD: a claimed ag-1 wake settled in the held phase (${JSON.stringify(all.slice(-4))})`);
+  const fresh = all.slice(now.wakeBase);
+  const settled = fresh.find((d) => d.stage === 'settle' && d.outcome === 'COMMITTED');
+  assert.ok(settled && fresh.some((d) => d.stage === 'claim' && d.requestId === settled.requestId),
+    `THE RE-WAKE WAS IN FLIGHT WHILE ITS TURN START WAS HELD: the re-pend's ag-1 wake was claimed and submitted (${JSON.stringify(fresh)})`);
+  // Its turn start was held after that submit, and released only after the beat loop had held the clock.
+  const tr = now.rig.transcript('ag-1');
+  const heldAt = tr.findIndex((r) => r.kind === 'start-held');
+  assert.ok(heldAt >= 0 && tr.findIndex((r, i) => i > heldAt && r.kind === 'start-released') > heldAt, 'the submitted turn start was held, then released');
   assert.ok(now.rig.contexts('ag-1').filter((c) => c.ids.includes(now.m.id))[1].context.includes(REDELIVERED), 'with the marker');
 });
 

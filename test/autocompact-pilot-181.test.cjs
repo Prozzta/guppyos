@@ -166,7 +166,8 @@ test('wiring: the env var on Claude spawns only; the watcher on SessionStart(com
 test('open mail is re-injected after a compaction (ZT-I1-MAIL 11.5), and the prompt fingerprint ignores the env', () => {
   const hooks = readSource('src/main/hooks.ts');
   // READS-COMPACT-HEALTH (1.1.83): the carry note (cards in progress, owed mail) joins the budget first.
-  assert.match(hooks, /if \(injecting && agentId && !fromSubagent && event === 'SessionStart' && p\.source === 'compact' && p\.transport !== 'pipe-oneway'\) \{\n[\s\S]{0,400}?try \{ mailBlock = this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, steer, mail, carry\]\); \}/);
+  // CLAIM-LEDGER W4 (Jim M-3): so does the claims working set.
+  assert.match(hooks, /if \(injecting && agentId && !fromSubagent && event === 'SessionStart' && p\.source === 'compact' && p\.transport !== 'pipe-oneway'\) \{\n[\s\S]{0,400}?try \{ mailBlock = this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, claimWorkingSet, steer, mail, carry\]\); \}/);
   assert.doesNotMatch(hooks, /this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, steer, mail\]\)/, 'the old call without the carry is gone');
   // The window is an env var only: the session-prompt fingerprint reads the injected prompt text,
   // never opts.env (test/session-prompt-rotation pins the fingerprints themselves).

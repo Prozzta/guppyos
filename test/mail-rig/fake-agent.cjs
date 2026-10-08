@@ -282,6 +282,18 @@ class FakeAgent {
       // LOAD-FLAKES-176 (Jim A1): from now on every hook and turn start waits this long first (a
       // loaded machine, on purpose, for one phase of a test; RIG_SLOW_STUB_MS does it from spawn).
       case 'slow-starts': this.scenario.slowStubMs = Number(cue.ms) || 0; return;
+      // TEST-FLAKE-MAILRIG-C1: a turn start held until the DRIVER releases it, not for a real time.
+      // `slow-starts` held it N ms of wall clock, so whether the driver saw the re-wake while it was
+      // held depended on machine load. `hold-starts` holds every turn start (recorded start-held)
+      // until `release-starts`; hooks are not held.
+      case 'hold-starts': this.scenario.holdStarts = true; return;
+      case 'release-starts': {
+        this.scenario.holdStarts = false;
+        const waiters = this.startWaiters ?? [];
+        this.startWaiters = [];
+        for (const release of waiters) release();
+        return;
+      }
       default: break;
     }
     if (this.hung) return;
@@ -315,6 +327,11 @@ class FakeAgent {
 
   async runTurn(prompt) {
     if (this.scenario.slowStubMs > 0) await sleep(this.scenario.slowStubMs);   // LOAD-FLAKES-176 (see hook())
+    if (this.scenario.holdStarts) {   // TEST-FLAKE-MAILRIG-C1 (see onCue 'hold-starts')
+      this.rec('start-held', { prompt: String(prompt).slice(0, 80) });
+      await new Promise((release) => { (this.startWaiters ??= []).push(release); });
+      this.rec('start-released', {});
+    }
     if (this.flavour === 'custom' || this.flavour === 'cursor' || this.flavour === 'qwen') return this.hooklessTurn(prompt);
     this.turn = { id: this.flavour === 'codex' ? `turn-${uuid()}` : `t${++this.turnSeq}`, prompt, startedAt: now() };
     this.writeComposer();

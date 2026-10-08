@@ -21,6 +21,7 @@
  */
 import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { isGeneratedMemory } from './claims/generated';
 
 /** memory.md above this many bytes is rolled over. */
 export const MEMORY_ROLLOVER_BYTES = 32 * 1024;
@@ -202,6 +203,8 @@ export const rolloverTestHooks: { beforeReplace?: (file: string) => void; before
 
 export interface RolloverResult {
   rotated: boolean;
+  /** CLAIM-LEDGER G6.6: memory.md is a generated view of the claims ledger, so it is never rolled. */
+  generated?: boolean;
   bytesBefore?: number;
   bytesAfter?: number;
   archive?: string;
@@ -229,6 +232,7 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   const before = st0.size;
   if (before <= limit) return { rotated: false, bytesBefore: before };
   const raw = readFileSync(file, 'utf8');
+  if (isGeneratedMemory(raw)) return { rotated: false, bytesBefore: before, generated: true };
   const crlf = raw.includes('\r\n');
   const text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const { header, pinned, older, tail } = splitMemory(text, keepBytes);
@@ -302,6 +306,8 @@ export interface SeedResult {
   raced?: boolean;
   /** The existing pinned section's size (0 when none or just seeded). */
   pinnedBytes: number;
+  /** CLAIM-LEDGER G6.6: memory.md is a generated view, so nothing is seeded into it. */
+  generated?: boolean;
 }
 
 /**
@@ -317,6 +323,7 @@ export function seedPinnedSection(dir: string): SeedResult {
   if (!existsSync(file)) return { seeded: false, pinnedBytes: 0 };
   const st0 = statSync(file);
   const raw = readFileSync(file, 'utf8');
+  if (isGeneratedMemory(raw)) return { seeded: false, pinnedBytes: Buffer.byteLength(pinnedSection(raw), 'utf8'), generated: true };
   const crlf = raw.includes('\r\n');
   const text = crlf ? raw.replace(/\r\n/g, '\n') : raw;
   const lines = text.split('\n');

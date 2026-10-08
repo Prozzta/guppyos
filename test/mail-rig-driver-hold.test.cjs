@@ -49,6 +49,38 @@ test('holdWhileBusy: an agent that stays busy fails with that reason after busyT
   assert.equal(calls.filter((c) => c.cmd === 'advance').length, 0);
 });
 
+test('TEST-MAILRIG-BEAT-LOOP-LEAK: an aborted signal stops a holding loop at once (not at busyTimeoutMs), with no advance', async () => {
+  const { rig, calls } = scripted({ busyFor: Infinity });
+  const stop = new AbortController();
+  const started = Date.now();
+  const p = rig.beatUntil(() => false, { what: 're-surfaced', settle: false, holdWhileBusy: true, busyTimeoutMs: 60_000, pauseMs: 0, signal: stop.signal });
+  await new Promise((r) => setTimeout(r, 200));
+  stop.abort();
+  await assert.rejects(p, /re-surfaced aborted by the caller/);
+  assert.ok(Date.now() - started < 5_000, 'stopped by the abort, long before the 60 s busy timeout');
+  assert.equal(calls.filter((c) => c.cmd === 'advance').length, 0);
+});
+
+test('TEST-MAILRIG-BEAT-LOOP-LEAK: an aborted signal stops a clock-moving loop: no host call after the abort settles', async () => {
+  const { rig, calls } = scripted({ busyFor: 0 });
+  const stop = new AbortController();
+  const p = rig.beatUntil(() => false, { what: 'x', settle: false, stepMs: 15_000, tries: 1_000, pauseMs: 5, signal: stop.signal });
+  await new Promise((r) => setTimeout(r, 100));
+  stop.abort();
+  await assert.rejects(p, /aborted by the caller/);
+  const n = calls.length;
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(calls.length, n, 'nothing beats after the loop has stopped');
+  assert.ok(calls.filter((c) => c.cmd === 'advance').length < 1_000, 'it did not run its tries out');
+});
+
+test('TEST-MAILRIG-BEAT-LOOP-LEAK: the A1 proof stops its concurrent beat loop and releases the start when its busyHolds wait fails', () => {
+  const fs = require('node:fs'); const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'mail-rig-checks.test.cjs'), 'utf8');
+  assert.match(src, /signal: stop\.signal \}\);/);
+  assert.match(src, /\} catch \(e\) \{\s+stop\.abort\(\);\s+now\.release\(\);\s+await beating\.catch\(\(\) => \{\}\);\s+throw e;\s+\}/);
+});
+
 test('without holdWhileBusy (the old settle:false) the clock moves under a busy agent: the behaviour C1 no longer uses', async () => {
   const { rig, calls } = scripted({ busyFor: Infinity });
   let n = 0;
@@ -70,7 +102,8 @@ test('every settle:false step in the rig tests holds (holdWhileBusy or holdForSt
   }
   assert.deepEqual(offenders, []);
   const checks = fs.readFileSync(path.join(__dirname, 'mail-rig-checks.test.cjs'), 'utf8');
-  assert.equal((checks.match(/\{ what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000 \}/g) || []).length, 3, 'C1, C1b and the A1 proof');
+  // The A1 proof's call also carries its abort signal (TEST-MAILRIG-BEAT-LOOP-LEAK).
+  assert.equal((checks.match(/\{ what: 're-surfaced', settle: false, holdWhileBusy: true, stepMs: 15_000(, signal: stop\.signal)? \}/g) || []).length, 3, 'C1, C1b and the A1 proof');
 });
 
 /** A Rig whose stubsIdle is scripted: `busyFor` not-idle readings, then idle. */

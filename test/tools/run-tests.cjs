@@ -28,6 +28,12 @@
  * by node --test, and its non-detached descendants go with it (libuv's kill-on-close job). node
  * --test counts it "cancelled", so a second reporter (file-timeout-reporter.cjs) records it and the
  * runner NAMES it after the run and fails the run, even if node's own exit code were 0.
+ *
+ * CLAIMS-PERF-LANE: wall-clock gates (frozen bounds) measured under the parallel run measured the
+ * machine, not the code (W2's 200 ms derive gates: 203/279 ms in 2 of 3 full runs, green alone). So
+ * `test/perf/*.perf.cjs` is a SERIAL lane: after the parallel run, with --test-concurrency=1, on an
+ * otherwise idle runner. An unfiltered run (`npm test`, the full suite) always runs it, and a failure
+ * in either part fails the run. A filtered run skips it and says so. An empty perf folder is an error.
  */
 const fs = require('fs');
 const path = require('path');
@@ -35,6 +41,7 @@ const os = require('os');
 const { spawnSync, spawn: spawnAsync } = require('child_process');
 
 const TEST_SUFFIX = '.test.cjs';
+const PERF_SUFFIX = '.perf.cjs';
 /** The per-file wall-clock limit: well above the slowest file under a loaded dual-suite run (the
  *  longest explicit per-test timeout in the suite is 25 min, renderer-memory-recovery). */
 const FILE_TIMEOUT_MS = 30 * 60_000;
@@ -110,7 +117,9 @@ function run({
   removeFile = (p) => { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } },
   watchdog = startWatchdog,
   log = (line) => process.stdout.write(`${line}\n`),
-  err = (line) => process.stderr.write(`${line}\n`)
+  err = (line) => process.stderr.write(`${line}\n`),
+  // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
+  perfDir = null
 } = {}) {
   let entries;
   try {
@@ -135,50 +144,122 @@ function run({
 
   const rel = files.map((n) => path.join(path.relative(cwd, testDir) || '.', n));
   log(`[test-runner] running ${files.length}${filters.length ? ` of ${total}` : ''} test files via node --test (per-file limit ${timeoutMs} ms)`);
-  // The watchdog (win32) kills a file's whole tree at the limit; node --test's timeout is the
-  // backstop, a little later. Each writes its own record file (node truncates its destination).
-  const watchFile = `${eventsFile}.watchdog`;
-  const dog = watchdog(timeoutMs, watchFile);
-  const args = [
-    '--test', `--test-timeout=${backstopMs(timeoutMs)}`,
-    '--test-reporter', isTTY ? 'spec' : 'tap', '--test-reporter-destination', 'stdout',
-    '--test-reporter', TIMEOUT_REPORTER, '--test-reporter-destination', eventsFile,
-    ...rel
-  ];
   // A runner started from inside a node:test file inherits NODE_TEST_CONTEXT, which turns the
   // nested `node --test` into a reporting child (no real run, no reporters). It is a run of its own.
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, err };
+  const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
+  // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
+  if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log);
+  // A timed-out file fails the run whatever node's own exit code says.
+  const mainCode = main.hung.length && main.res.status === 0 ? 1 : main.res.status;
+  if (!perfDir) return totals(mainCode, main.counts, 'off', log);
+  const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
+  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(main.counts, lane.counts), lane.state, log);
+}
+
+/**
+ * One `node --test` run with the per-file watchdog (win32 tree kill at the limit), node's own
+ * timeout as the backstop, the normal reporter on stdout and the file-timeout reporter (which also
+ * records the run's summary counts) on `eventsFile`. Timed-out files are named on stderr.
+ */
+function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, err }) {
+  // The watchdog and node --test each write their own record file (node truncates its destination).
+  const watchFile = `${eventsFile}.watchdog`;
+  const dog = watchdog(timeoutMs, watchFile);
+  const args = [
+    '--test', ...extraArgs, `--test-timeout=${backstopMs(timeoutMs)}`,
+    '--test-reporter', isTTY ? 'spec' : 'tap', '--test-reporter-destination', 'stdout',
+    '--test-reporter', TIMEOUT_REPORTER, '--test-reporter-destination', eventsFile,
+    ...rel
+  ];
   let res;
   try { res = spawn(args, { cwd, stdio: 'inherit', env }); } finally { dog.stop(); }
+  const events = readFile(eventsFile);
   const hung = [];
-  for (const h of [...timedOutFiles(readFile(watchFile)), ...timedOutFiles(readFile(eventsFile))]) {
+  for (const h of [...timedOutFiles(readFile(watchFile)), ...timedOutFiles(events)]) {
     if (!hung.some((x) => path.resolve(x.file) === path.resolve(h.file))) hung.push(h);
   }
   removeFile(eventsFile);
   removeFile(watchFile);
-  for (const h of hung) err(`[test-runner] FILE TIMED OUT after ${timeoutMs} ms (it never finished; node --test killed it): ${h.file}`);
-  if (hung.length) err(`[test-runner] ${hung.length} test file(s) timed out - the run FAILS (node --test lists them as cancelled, not failed)`);
-  if (res.error) {
-    err(`[test-runner] could not start node --test: ${String(res.error)}`);
-    return 1;
-  }
-  // A child killed by a signal reports status null; that is a failure, not a pass.
-  if (typeof res.status !== 'number') {
-    err(`[test-runner] node --test terminated by signal ${res.signal ?? 'unknown'}`);
-    return 1;
-  }
-  // A timed-out file fails the run whatever node's own exit code says.
-  return hung.length && res.status === 0 ? 1 : res.status;
+  for (const h of hung) err(`[test-runner] ${label}FILE TIMED OUT after ${timeoutMs} ms (it never finished; node --test killed it): ${h.file}`);
+  if (hung.length) err(`[test-runner] ${label}${hung.length} test file(s) timed out - the run FAILS (node --test lists them as cancelled, not failed)`);
+  return { res, hung, counts: runCounts(events) };
 }
 
-module.exports = { selectTestFiles, run, TEST_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+/** A spawn error or a signal death: logged, and true (the run failed). */
+function spawnFailed(res, label, err) {
+  if (res.error) { err(`[test-runner] ${label}could not start node --test: ${String(res.error)}`); return true; }
+  if (typeof res.status !== 'number') { err(`[test-runner] ${label}node --test terminated by signal ${res.signal ?? 'unknown'}`); return true; }
+  return false;
+}
+
+/** CLAIMS-PERF-LANE: every *.perf.cjs, serially (--test-concurrency=1), after the parallel run. */
+function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, log, err }) {
+  const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped' };
+  if (filters.length) {
+    log(`[test-runner] perf lane SKIPPED: a filtered run (${filters.join(', ')}); run the full suite (npm test) for the wall-clock gates`);
+    return none;
+  }
+  let entries;
+  try { entries = readdir(perfDir); } catch (e) {
+    err(`[test-runner] cannot read the perf lane ${perfDir}: ${String(e)}`);
+    return { ...none, code: 1, state: 'fail' };
+  }
+  const files = entries.filter((n) => n.endsWith(PERF_SUFFIX)).sort();
+  if (!files.length) {
+    err(`[test-runner] no *${PERF_SUFFIX} files in ${perfDir} - refusing to report a perf lane that executed nothing`);
+    return { ...none, code: 1, state: 'fail' };
+  }
+  log(`[test-runner] perf lane: running ${files.length} wall-clock file(s) serially (--test-concurrency=1), after the parallel suite (per-file limit ${timeoutMs} ms)`);
+  const rel = files.map((n) => path.join(path.relative(cwd, perfDir) || '.', n));
+  const lane = runNodeTest({ rel, extraArgs: ['--test-concurrency=1'], label: 'perf lane ', spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, err });
+  if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail' };
+  const code = lane.hung.length && lane.res.status === 0 ? 1 : lane.res.status;
+  if (code !== 0) err('[test-runner] the perf lane FAILED (a wall-clock gate, measured serially)');
+  else log('[test-runner] perf lane passed');
+  return { code, counts: lane.counts, state: code === 0 ? 'pass' : 'fail' };
+}
+
+// CLAIMS-PERF-LANE totals: node --test's own summary counts ('tests N', 'pass N', ...), recorded by
+// the file-timeout reporter. The run's LAST stdout line combines the main run and the lane, so a
+// reader of the log's tail never takes the lane's own small TAP block for the suite's totals.
+const COUNT_KEYS = ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo'];
+const ZERO_COUNTS = Object.fromEntries(COUNT_KEYS.map((k) => [k, 0]));
+
+/** The summary counts in a record file; a count it never recorded is null (unknown, never 0). */
+function runCounts(text) {
+  const out = Object.fromEntries(COUNT_KEYS.map((k) => [k, null]));
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r && COUNT_KEYS.includes(r.count) && Number.isInteger(r.n)) out[r.count] = r.n;
+    } catch { /* a torn line: skip */ }
+  }
+  return out;
+}
+
+function sumCounts(a, b) {
+  return Object.fromEntries(COUNT_KEYS.map((k) => [k, a[k] === null || b[k] === null ? null : a[k] + b[k]]));
+}
+
+/** Prints the one totals line and returns `code`. Unknown counts print as '?'. */
+function totals(code, counts, laneState, log) {
+  const n = (k) => (counts[k] === null ? '?' : String(counts[k]));
+  log(`[test-runner] totals: tests ${n('tests')} pass ${n('pass')} fail ${n('fail')} cancelled ${n('cancelled')} skipped ${n('skipped')} lane ${laneState} exit ${code}`);
+  return code;
+}
+
+module.exports = { selectTestFiles, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');
   process.exit(run({
     testDir: path.join(repoRoot, 'test'),
     filters: process.argv.slice(2),
-    cwd: repoRoot
+    cwd: repoRoot,
+    perfDir: path.join(repoRoot, 'test', 'perf')
   }));
 }

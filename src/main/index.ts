@@ -1,6 +1,24 @@
-import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, screen, shell, Notification, utilityProcess } from 'electron';
+import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
+import { ClaimStore } from './claims/store';
+import { SearchResultLog } from './claims/searchLog';
+import { collectNoteCandidates, embedViaWorker, HiveCorpus, ledgerCandidateDeps, makeLocalScorer, type CandidateResult } from './claims/candidates';
+import { FileHeadAnchorStore, FileLedgerKeyRecord, HEAD_ANCHOR_FILE, KEY_RECORD_FILE, MAC_KEY_FILE, SafeStorageKeyProvider } from './claims/keyProvider';
+import type { ClaimsEndpointDeps } from './claims/endpoint';
+import { ClaimsIndexSync, verifiedPrefix } from './claims/indexSync';
+import { derive as deriveClaims } from './claims/derive';
+import { worldView as buildClaimsWorldView } from './claims/world';
+import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
+import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
+import { createClaimExport, type ClaimExport } from './claims/exportWiring';
+import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
+import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
+import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
+import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './nativeMemory/wordpiece';
+import { readSourcesConfig } from './nativeMemory/sources';
+import { DEFAULT_KEY_REGISTRY, loadRegistry } from './claims/registry';
+import { CLAIM_LEDGER_CLAMP_ROW, CLAIMS_ALERT_KEY_MISSING, effectiveLevel, IMPLEMENTED_LEVEL, type DeriveFn, type LedgerLevel, type ReconcileItem, type UsageRec } from '../shared/claims';
 import { CodexVersionLog, codexNoDaemonGate, readCodexVersion } from './codexCli';
 import { codexLayerOptInKey, type CodexLayerNotice } from './codexProjectLayers';
 import { StartupTiming } from './startupTiming';
@@ -67,7 +85,8 @@ import { BoardMonitor } from './boardMonitor';
 import { BoardStatusWriter } from './boardStatus';
 import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
-import { applyLedgerOp } from './ledger';
+import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
+import { handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
@@ -1205,6 +1224,145 @@ const startupTiming = new StartupTiming({
   log: (row) => hive.appendLog(row),
   histogram: () => monitorEventLoopDelay({ resolution: 10 })
 });
+// CLAIM-LEDGER W1: the ledger store, made on first use per hive root. Its MAC key lives in user-data,
+// encrypted with safeStorage (never in a hive file or an agent's env). The verbs write only at the
+// effective level 'writer' (settings clamped to what this build implements; a clamp is logged once).
+let claimStore: { root: string; store: ClaimStore } | null = null;
+// CLAIM-LEDGER W3: main sends each flagged agent's VERIFIED claim chunks to the memory worker after
+// an append and when the worker (re)starts. Derive is pure; the ledger reader below supplies only
+// the verified prefix, and the worker never reads ledger files.
+const claimsDerive: DeriveFn | null = deriveClaims;
+let claimsIndex: ClaimsIndexSync | null = null;
+function claimsIndexSync(): ClaimsIndexSync | null {
+  const ep = claimsEndpoint();
+  if (!ep) return null;
+  if (!claimsIndex) {
+    claimsIndex = new ClaimsIndexSync({
+      readLedger: (a) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(a),
+      derive: () => claimsDerive,
+      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      ruleConfig: () => ({ r4: false }),
+      level: claimLevel,
+      agents: claimLedgerAgents,
+      send: (args) => nativeMemory.syncClaims(args),
+      onIndexed: (agentId) => { const root = hive.root(); if (!root) return; try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } },
+      log: (row) => hive.appendLog(row),
+    });
+  }
+  return claimsIndex;
+}
+/** Agents with a segment, plus every anchored one (Jim A-2: a deleted ledger is read, so it alerts). */
+function claimLedgerAgents(): string[] {
+  const root = hive.root(); if (!root) return [];
+  const store = (claimsEndpoint() as ClaimsEndpointDeps).store;
+  let withSegments: string[] = [];
+  try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
+  return [...new Set([...withSegments, ...store.anchoredAgents()])];
+}
+// CLAIM-LEDGER W6 (S2 writer): the continuous export after every acked append of a writer agent, a
+// catch-up sync at claims start, and `memory export --complete` (claims/exportWiring.ts).
+let claimExportApi: ClaimExport | null = null;
+function claimExport(): ClaimExport {
+  if (!claimExportApi) {
+    claimExportApi = createClaimExport({
+      level: claimLevel,
+      agentDir: (agentId) => hive.agentHome(agentId),
+      readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+      registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+      derive: deriveClaims,
+      // The complete rendering marks statuses from the state; world evidence unknown here is neutral.
+      view: (_agentId, records, state) => buildClaimsWorldView(state, records, [], {
+        now: new Date().toISOString(),
+        taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        fileExists: () => true, commitExists: () => true, fileChangedSince: () => false, cardOutcomes: {},
+      }),
+      log: (row) => hive.appendLog(row),
+    });
+  }
+  return claimExportApi;
+}
+const claimClampLogged = new Set<string>();
+function claimLevel(agentId: string): LedgerLevel {
+  const saved = readConfig().claimLedger;
+  // W3: the per-agent manifest entry (memory-sources.json `ledger`) narrows the setting, as the
+  // worker's discovery does: main and the worker compute the same effective level.
+  const root = hive.root();
+  const agentEntry = root ? readSourcesConfig(root).ledger?.[agentId] : undefined;
+  const e = effectiveLevel(saved, agentEntry);
+  const clampKey = `${String(saved)}|${String(agentEntry)}`;
+  if (e.clamped && !claimClampLogged.has(clampKey)) {
+    claimClampLogged.add(clampKey);
+    hive.appendLog({ kind: CLAIM_LEDGER_CLAMP_ROW, saved: String(saved).slice(0, 40), agentEntry: String(agentEntry).slice(0, 40), implemented: IMPLEMENTED_LEVEL, effective: e.level, agentId });
+  }
+  return e.level;
+}
+hive.setClaimLedgerLevelProvider(claimLevel);
+function claimsEndpoint(): ClaimsEndpointDeps | null {
+  const root = hive.root();
+  if (!root) return null;
+  if (!claimStore || claimStore.root !== root) {
+    claimStore = {
+      root,
+      store: new ClaimStore({
+        hiveRoot: root,
+        keys: new SafeStorageKeyProvider(join(app.getPath('userData'), MAC_KEY_FILE), safeStorage),
+        keyRecord: new FileLedgerKeyRecord(join(app.getPath('userData'), KEY_RECORD_FILE)),
+        headAnchor: new FileHeadAnchorStore(join(app.getPath('userData'), HEAD_ANCHOR_FILE)),
+        log: (row) => hive.appendLog(row),
+        // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
+        taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
+        onAppend: (agentId, id, rec) => {
+          claimExport().onAppend(agentId, id, rec);
+          if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
+          const root = hive.root(); if (!root) return;
+          void enqueueR5AfterIndex(agentId, id, {
+            syncIndex: () => claimsIndexSync()?.syncNow(agentId) ?? Promise.resolve(null),
+            candidates: async (a, claimId, tau2) => {
+              const r = await nativeMemory.r5Candidates(a, claimId, tau2);
+              return r.ok && Array.isArray(r.json) ? (r.json as Array<{ b: string; cosine: number }>).map((p) => ({ a: claimId, b: p.b, cosine: p.cosine, tau2 })) : [];
+            },
+            enqueue: (a, pairs) => reconcileQueueForHive(root).enqueueR5(a, pairs),
+            log: (row) => hive.appendLog(row),
+          });
+        },
+        alert: (row) => {
+          const what = row.kind === CLAIMS_ALERT_KEY_MISSING
+            ? 'The claim ledger key is missing or cannot be decrypted: every claim ledger is read-only. Recovery is the Human rekey in Settings; nothing is fixed automatically.'
+            : `${String(row.agentId)}'s claim ledger failed verification (${String(row.reason)} at ${String(row.brokenAt)}) and is read-only. Nothing was repaired; the Human decides.`;
+          hive.send({ to: 'god', act: 'inform', wake: 'now', subject: `Claim ledger alert: ${String(row.kind)}`, body: `${what}\nFor god and the Human.` }, 'claims');
+        },
+      }),
+    };
+    // Jim A-2: claims start checks every anchored agent (a deleted or cut ledger alerts at once).
+    setImmediate(claimsAnchorCheck);
+    // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
+    setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    // W5 startup census. Successful index syncs repeat this after each indexed append.
+    setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
+  }
+  return {
+    store: claimStore.store,
+    level: claimLevel,
+    exportComplete: (agentId) => claimExport().complete(agentId),
+    onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b),
+    noteCandidates: (agentId, text) => claimNoteCandidates(agentId, text),
+    validateSupersedes: (agentId, ids) => {
+      const view = claimsLedgerView(agentId);
+      return !!view && ids.length > 0 && new Set(ids).size === ids.length && ids.every((id) => view.claims.some((c) => c.id === id) && view.status(id) === 'live');
+    },
+    onNoteChoice: (agentId, choice, ids) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 3) })
+  };
+}
+/** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
+ *  (claims start, a worker (re)start, and every CLAIMS_ANCHOR_CHECK_MS). */
+const CLAIMS_ANCHOR_CHECK_MS = 5 * 60_000;
+function claimsAnchorCheck(): void {
+  if (!hive.root()) return;
+  try { claimsEndpoint()?.store.checkAnchored(); } catch (e) { hive.appendLog({ kind: 'claims-anchor-check-failed', error: String(e).slice(0, 160) }); }
+}
+setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
+// CL-M4-WP step 3 (design §2 source 2): the claim ids each agent's own search returned, 6 h.
+const claimsSearchLog = new SearchResultLog({ hiveRoot: () => hive.root() });
 const nativeMemory = new NativeMemoryWiring({
   hiveRoot: () => hive.root(),
   enabled: () => readConfig().semanticMemory !== false,
@@ -1221,12 +1379,102 @@ const nativeMemory = new NativeMemoryWiring({
   vecLoadablePath: () => {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     try { return toUnpacked((require('sqlite-vec') as { getLoadablePath(): string }).getLoadablePath()); } catch { return null; }
-  }
+  },
+  claims: claimsEndpoint,
+  claimLedger: () => readConfig().claimLedger,
+  anchoredAgents: () => claimsEndpoint()?.store.anchoredAgents() ?? [],
+  onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); },
+  searchLog: claimsSearchLog
 });
+function claimsLedgerView(agentId: string) {
+  const root = hive.root(); const ep = claimsEndpoint();
+  if (!root || !ep) return null;
+  const prefix = verifiedPrefix(ep.store.readLedger(agentId));
+  if (!prefix) return null;
+  let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+  const state = deriveClaims(prefix.records, reg, { r4: false });
+  const claims = prefix.records.filter((r) => r.t === 'claim');
+  return { claims, status: (id: string) => state.claims[id]?.status };
+}
+const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.registry().agents), ledger: claimsLedgerView });
+function claimNoteCandidates(agentId: string, text: string): Promise<CandidateResult> {
+  return collectNoteCandidates(ledgerCandidateDeps({
+    ledger: claimsLedgerView,
+    searchLog: claimsSearchLog,
+    score: makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus())
+  }), agentId, text, new Date());
+}
 hookServer.setMemoryHandler((token, body) => nativeMemory.handle(token, body));
+// CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
+// wake-up` and each Codex spawn (claims/delivery.ts). The live view is never persisted; only its
+// receipt is, once per distinct text, on a rotating file.
+let claimsCountTokens: ((text: string) => number) | null = null;
+const claimDelivery = createClaimDelivery({
+  hiveRoot: () => hive.root(),
+  level: claimLevel,
+  readLedger: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
+  derive: deriveClaims,
+  worldView: buildClaimsWorldView,
+  agentCwd: (agentId) => hive.registry().agents[agentId]?.cwd ?? null,
+  tasks: () => (hive.tasks() as { tasks?: TaskRow[] }).tasks ?? [],
+  usage: (agentId) => {
+    try { return readFileSync((claimsEndpoint() as ClaimsEndpointDeps).store.usageFile(agentId), 'utf8').split('\n').filter(Boolean).flatMap((line) => { try { return [JSON.parse(line) as UsageRec]; } catch { return []; } }); } catch { return []; }
+  },
+  countTokens: () => {
+    if (claimsCountTokens) return claimsCountTokens;
+    try {
+      const cfg = nativeMemory.workerConfig();
+      if (!cfg) return null;
+      const tok = new WordPieceTokenizer(wordPieceConfigFromTokenizerJson(JSON.parse(readFileSync(join(cfg.modelDir, 'tokenizer.json'), 'utf8'))));
+      claimsCountTokens = (text) => tok.count(text);
+      return claimsCountTokens;
+    } catch { return null; }
+  },
+  // Peek candidates without side effects; commit only ids confirmed rendered by T1 below.
+  reconcileCandidates: (agentId, day, source) => {
+    const root = hive.root(); if (!root) return [];
+    return reconcileApiForHive(root)?.peekForTurn(agentId, day, source) ?? [];
+  },
+  commitReconcile: (agentId, day, renderedIds, source) => {
+    const root = hive.root(); if (!root) return;
+    reconcileApiForHive(root)?.commitRendered(agentId, day, renderedIds, source);
+  },
+  onTurnCompleted: (agentId) => {
+    const root = hive.root(); if (!root) return;
+    void reconcileApiForHive(root)?.onTurnCompleted(agentId).catch((error) => {
+      hive.appendLog({ kind: 'claims-reconcile-completion-failed', agentId, error: String(error).slice(0, 160) });
+    });
+  },
+  log: (row) => hive.appendLog(row),
+});
+function reconcileApiForHive(root: string): ReconcileApi | null {
+  return createReconcileApiForHive(root, reconcileHiveDeps());
+}
+function reconcileHiveDeps(): ReconcileHiveDeps {
+  return {
+    endpoint: claimsEndpoint,
+    queue: reconcileQueueForHive,
+    countTokens: (text) => claimsCountTokens?.(text) ?? 0,
+    log: (row) => hive.appendLog(row),
+    registry: (root) => { try { return loadRegistry(root); } catch { return DEFAULT_KEY_REGISTRY; } },
+    isOwner: (agentId) => claimLevel(agentId) === 'writer',
+  };
+}
+// CL-M4-BRIEFING-BUDGET C: Claude's own briefing hook entry gets the full ceiling; every joined
+// surface (wake-up, Codex instructions, a non-Claude SessionStart) keeps the envelope's room.
+const claimWorkingSetForAgent = (agentId: string, source?: string, part?: 'briefing'): Promise<string | null> => (claimsEndpoint() ? claimDelivery.workingSet(agentId, source, part === 'briefing' ? WORKING_SET_MAX_CHARS : undefined) : Promise.resolve(null));
+hookServer.setClaimWorkingSetProvider(claimWorkingSetForAgent);
+hookServer.setClaimTurnCompletedListener((agentId) => claimDelivery.turnCompleted(agentId));
+nativeMemory.setClaimWakeupProvider(claimWorkingSetForAgent);
+// G4.5 (god's M-4 ruling): Codex gets the same view in its instruction file, once per spawn.
+hive.setCodexClaimContextProvider(claimWorkingSetForAgent);
 // READS-181 A: the `ledger` command (card + outbox message + memory note in one call), applied here
 // in main: tasks.json writes go through writeTasks (merge, validation, ZT-I3 attribution 'ledger').
-hookServer.setLedgerHandler((agentId, body) => {
+// W6-D1: one op at a time per agent, so a retry waits for the op in flight (its memory part may be
+// an async claim append at level 'writer').
+const ledgerQueue = perAgentQueue();
+hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
   const agentDir = hive.agentHome(agentId);
   if (!agentDir) return { status: 404, body: { ok: false, line: `refused: ${agentId} is not a registered agent` } };
   return applyLedgerOp(body, {
@@ -1239,9 +1487,24 @@ hookServer.setLedgerHandler((agentId, body) => {
     },
     addTask: (task) => hive.addTask(task, 'ledger'),
     patchTask: (id, patch) => hive.patchTask(id, patch, 'ledger'),
-    now: () => new Date()
+    now: () => new Date(),
+    memoryClaim: ledgerMemoryClaim(agentId)
   });
-});
+}));
+/** CLAIM-LEDGER W6 (G6.6): the `ledger` memory part as a claim, through the endpoint's note verb with
+ *  origin 'ledger-route' (400 characters, no source or legacy); null when the ledger is not wired. */
+function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
+  const d = claimsEndpoint();
+  if (!d) return null;
+  return {
+    level: d.level(agentId),
+    note: async (args) => {
+      const r = await handleClaimVerb(d, agentId, { cmd: 'note', args }, 'ledger-route');
+      const id = (r.json as { id?: unknown } | undefined)?.id;
+      return { ok: r.ok, ...(typeof id === 'string' ? { id } : {}), ...(r.error ? { error: r.error } : {}) };
+    }
+  };
+}
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
 /** Delete a memory-engine index file and its WAL/SHM. Call only after nativeMemory.shutdown()

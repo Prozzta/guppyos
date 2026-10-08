@@ -26,6 +26,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { runHiddenClaude, type HiddenClaudeDiag } from './hiddenClaude';
+import { isGeneratedMemory } from './claims/generated';
 
 /** Total memory.md budget — mirrors the janitor's CONTEXT_BUDGET_BYTES (128 KB). */
 const BUDGET_BYTES = 131_072;
@@ -260,6 +261,8 @@ export class MemoryReflector {
           if (!onlyId && !this.shouldCondense(bytes, mem, settings)) continue;
           text = readFileSync(mem, 'utf8');
         } catch { continue; }
+        // CLAIM-LEDGER G6.6: a generated view of the claims ledger is never condensed, not even on demand.
+        if (isGeneratedMemory(text)) continue;
         results.push(await this.condenseToBudget(home, id, mem, text, settings));
       }
     } finally {

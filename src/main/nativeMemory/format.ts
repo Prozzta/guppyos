@@ -36,6 +36,17 @@ export function formatSearch(query: string, flags: SearchFlags, hits: SearchHit[
   hits.forEach((h, i) => {
     L.push(`  [${i + 1}] ${h.wing} / ${h.room}`);
     L.push(`      Source: ${base(h.source)}`);
+    // CLAIM-LEDGER (A5): each claim hit shows [status · kind · key · date · id].
+    if (h.claim) {
+      // A confirmed supersession is a dated `prior`; a derived, unconfirmed one (`superseded?`) is
+      // `prior?` and says so (Jim, WP step-2 re-audit): a guess is never shown as fact.
+      const prior = h.claim.status === 'superseded';
+      const maybePrior = h.claim.status === 'superseded?';
+      const date = h.claim.at.slice(0, 10);
+      L.push(`      Claim:  [${prior ? 'prior' : maybePrior ? 'prior?' : h.claim.status} · ${h.claim.kind} · ${h.claim.key ?? '-'} · ${date} · ${h.claim.id}]`);
+      if (prior) L.push(`      Version: prior (dated ${date}); search for the key to see its current value.`);
+      if (maybePrior) L.push(`      Version: possibly replaced (unconfirmed, dated ${date}); search for the key to see its current value.`);
+    }
     L.push(`      Match:  cosine_sim=${h.cosineSim === null ? '0.0' : py(h.cosineSim)}  bm25=${h.bm25 === null ? '0.0' : py(h.bm25)}`);
     L.push('');
     for (const line of h.content.trim().split('\n')) L.push(`      ${line}`);

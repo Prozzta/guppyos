@@ -11,8 +11,9 @@
 import { readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
-import { discoverSources, ALLOW_LIST_VERSION, sha256, type Discovery, type SourceEntry } from './sources';
-import { compactionDecision, NativeMemoryStore, type SearchHit } from './store';
+import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
+import { CLAIM_EMBED_VERSION, claimEmbedText, claimEmbedVersionKey, compactionDecision, NativeMemoryStore, type ClaimPart, type SearchHit } from './store';
+import type { LedgerLevel, SearchMode } from '../../shared/claims';
 import { formatSearch, formatStatus, formatWakeUp, WAKE_MAX_CHARS } from './format';
 import { pinnedSection, pinnedStatus, type PinnedStatus } from '../memoryRollover';
 
@@ -54,14 +55,33 @@ export interface EngineDeps {
   idleUnloadMs?: number;
   /** NATIVE-WAKEUP N1: how long a wake-up waits for its caller's own wing to be indexed (tests). */
   wakeWaitMs?: number;
+  /** CLAIM-LEDGER: the Settings level (config claimLedger), for discovery's per-agent effective level. */
+  claimLedger?: unknown;
+  /** CLAIM-LEDGER: this build's highest level (tests); default IMPLEMENTED_LEVEL. */
+  implementedLevel?: LedgerLevel;
+  /** CLAIMS-HEAD-ANCHOR: the agents main holds an anchor for (A-2; discovery keeps them flagged). */
+  anchored?: readonly string[];
 }
+
+/** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
+export interface ClaimsSyncArgs { wing: string; path: string; head: string; chunks: ClaimPart[];
+  /** The Settings level main holds now (W3-1): a sync never acts on a stale level. */
+  claimLedger?: unknown }
 
 /** NATIVE-WAKEUP N1 (Jim, god andyn1wait): the bound on a wake-up's wait for its own wing. */
 export const WAKE_WAIT_MS = 5_000;
 
+/** The anchored agents main sent: agent ids only, sorted, deduplicated, bounded. */
+function anchoredList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return [...new Set(v.filter((a): a is string => typeof a === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(a)))].sort().slice(0, 1000);
+}
+
 interface Task { priority: number; seq: number; run: () => Promise<void> }
 
 export interface SearchArgs { query: string; wing?: string | null; room?: string | null; results?: number; since?: string | null; before?: string | null;
+  /** CLAIM-LEDGER read modes and claim filters (A5). */
+  mode?: SearchMode; kind?: string | null; key?: string | null;
   /** The asking agent's own wing (from its MEMORY_TOKEN): never a filter, only a backfill hint. */
   caller?: string | null }
 export interface EngineReply { exit: number; text: string; json?: unknown }
@@ -127,6 +147,8 @@ export class MemoryEngine {
     this.now = d.now ?? Date.now;
     this.setTimer = d.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = d.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
+    this.claimLedger = d.claimLedger;
+    this.anchored = anchoredList(d.anchored);
   }
 
   // — the queue —
@@ -178,7 +200,7 @@ export class MemoryEngine {
       const sinceMs = a.since ? Date.parse(a.since) : null;
       const beforeMs = a.before ? Date.parse(a.before) : null;
       const [qv] = await this.embed([a.query]);
-      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5 });
+      const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
       return { exit: 0, text: formatSearch(a.query, a, hits), json: hits.map(redactHit) };
     });
   }
@@ -238,6 +260,8 @@ export class MemoryEngine {
    *  (each batch its own queue step). `priority` separates a changed-source ingest from the
    *  initial backfill. Returns the number of chunks embedded. */
   private async ingestEntry(e: SourceEntry, priority: number): Promise<number> {
+    // CLAIM-LEDGER: a claims source is filled by main's verified syncs (syncClaims), never read here.
+    if (e.kind === 'claims') return 0;
     const src = this.readSource(e);
     if (!src) return 0;
     if (this.d.store.sourceShas().get(e.path) === src.meta.sha256) return 0;
@@ -265,7 +289,7 @@ export class MemoryEngine {
     this.d.store.setMeta('chunker_version', String(CHUNKER_VERSION));
     this.d.store.setMeta('allow_list_version', String(ALLOW_LIST_VERSION));
     const run = (async () => {
-      const discovery = discoverSources(this.d.hiveRoot);
+      const discovery = this.discover();
       let embedded = 0;
       let removed = 0;
       const wanted = new Set(discovery.eligible.map((e) => e.path));
@@ -288,13 +312,113 @@ export class MemoryEngine {
     return run;
   }
 
+  /** Discovery with the ledger levels (the setting from main, the manifest, this build). */
+  private discover(): Discovery {
+    return discoverSources(this.d.hiveRoot, undefined, { claimLedger: this.claimLedger, anchored: this.anchored, ...(this.d.implementedLevel ? { implemented: this.d.implementedLevel } : {}) });
+  }
+
+  /** CLAIM-LEDGER: the Settings level as main last told this worker (W3-1: it follows changes). */
+  private claimLedger: unknown;
+  /** CLAIMS-HEAD-ANCHOR: the anchored agents as main last told this worker (A-2). */
+  private anchored: string[] = [];
+
+  /**
+   * W3-1 (Jim): main tells a running worker the current Settings level. A change reconciles at
+   * once (a drop to shadow removes the claims and re-ingests memory.md; a raise swaps them), and
+   * the call resolves only after that, so the next search already sees the new level.
+   */
+  async setClaimLedger(value: unknown, anchored?: unknown): Promise<{ changed: boolean; removed: number; embedded: number }> {
+    const next = anchored === undefined ? this.anchored : anchoredList(anchored);
+    const same = this.claimLedger === value && next.join(',') === this.anchored.join(',');
+    this.claimLedger = value;
+    this.anchored = next;
+    if (same) return { changed: false, removed: 0, embedded: 0 };
+    const r = await this.reconcileNow();
+    return { changed: true, removed: r.removed, embedded: r.embedded };
+  }
+
+  /** A full reconcile now (after any running one): a level or manifest change. */
+  async reconcileNow(): Promise<{ removed: number; embedded: number }> {
+    if (this.backfilling) await this.backfilling.catch(() => undefined);
+    const r = await this.backfill();
+    return { removed: r.removed, embedded: r.embedded };
+  }
+
+  /** W3-1 (a): remove a wing's indexed sources that are no longer eligible (its markdown, once its
+   *  claims are a source), so a claim never lands beside what it replaces. */
+  private dropIneligible(wing: string, d: Discovery): number {
+    const keep = new Set(d.eligible.map((e) => e.path));
+    let n = 0;
+    for (const p of this.d.store.sourceShas().keys()) {
+      if (p.startsWith(`agents/${wing}/`) && !keep.has(p)) { this.d.store.removeSource(p); n++; }
+    }
+    return n;
+  }
+
+  // — CLAIM-LEDGER (W3) —
+
+  private claimSyncs = new Map<string, Promise<unknown>>();
+
+  /**
+   * Index one agent's claim chunks as main sent them (verified, derived): embed only new parts,
+   * update statuses in place (A4). Refused for an agent that is not reader or writer here (then its
+   * claims are not a source, and the reconcile removes any that were). Serialised per agent.
+   */
+  syncClaims(a: ClaimsSyncArgs): Promise<{ embedded: number; dropped: number; statusChanges: number; roomChanges: number }> {
+    const prior = this.claimSyncs.get(a.wing) ?? Promise.resolve();
+    const run = prior.catch(() => undefined).then(async () => {
+      // Indexed only while the agent's claims are a source (reader/writer AND a ledger exists), so a
+      // claim never sits in the index beside the markdown it replaces.
+      // A sync carries main's CURRENT Settings level: follow it first (W3-1), then check.
+      if ('claimLedger' in a && this.claimLedger !== a.claimLedger) await this.setClaimLedger(a.claimLedger);
+      const d = this.discover();
+      if (!d.eligible.some((e) => e.kind === 'claims' && e.wing === a.wing)) throw new Error(`claims are not indexed for ${a.wing} (level ${d.ledgerLevels[a.wing] ?? 'off'})`);
+      // W3-1 (a): the replaced markdown leaves in the same queue step that plans the claims.
+      // CL-S1 M3: a wing embedded under an older claim-vector recipe re-embeds all its parts once.
+      const plan = await this.enqueue(PRIORITY.ingest, async () => {
+        this.dropIneligible(a.wing, this.discover());
+        const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
+        return this.d.store.planClaims(a.wing, a.chunks, { reembed });
+      });
+      const vectors: Float32Array[] = [];
+      for (let i = 0; i < plan.add.length; i += EMBED_BATCH) {
+        // The vector is the claim's text, never its `kind · key · date` header (claimEmbedText).
+        const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => claimEmbedText(p.content));
+        vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
+      }
+      await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION }));
+      this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 });
+      return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 };
+    });
+    this.claimSyncs.set(a.wing, run.catch(() => undefined));
+    return run;
+  }
+
+  /** CL-M4-WP step 3: vectors for main's note-candidate scorer. Through the queue at search
+   *  priority (never beside a backfill's embedding) and the idle-unload timer (Jim S2). */
+  embedTexts(texts: string[]): Promise<Float32Array[]> {
+    return this.enqueue(PRIORITY.search, () => this.embed(texts));
+  }
+
+  /** R5 candidates for a just-appended claim (W3 side of R5CandidatesFn). */
+  r5Candidates(wing: string, claimId: string, tau2: number): Promise<Array<{ b: string; cosine: number }>> {
+    return this.enqueue(PRIORITY.search, async () => this.d.store.claimNeighbours(wing, claimId, tau2));
+  }
+
+  private manifestTimer: unknown = null;
+  /** memory-sources.json changed: a full reconcile after SOURCE_DEBOUNCE_MS (W3-1). */
+  manifestChanged(): void {
+    if (this.manifestTimer) this.clearTimer(this.manifestTimer);
+    this.manifestTimer = this.setTimer(() => { this.manifestTimer = null; void this.reconcileNow().catch(() => undefined); }, SOURCE_DEBOUNCE_MS);
+  }
+
   /** A watched file changed: debounce, then ingest just that source (or remove it). */
   sourceChanged(absPath: string): void {
     const prev = this.debounce.get(absPath);
     if (prev) this.clearTimer(prev);
     this.debounce.set(absPath, this.setTimer(() => {
       this.debounce.delete(absPath);
-      const e = discoverSources(this.d.hiveRoot).eligible.find((x) => x.abs === absPath);
+      const e = this.discover().eligible.find((x) => x.abs === absPath);
       if (e) { void this.ingestEntry(e, PRIORITY.ingest); return; }
       // Not eligible (or gone): if it was indexed, remove it.
       const rel = absPath.slice(this.d.hiveRoot.length + 1).split(/[\\/]/).join('/');
@@ -309,6 +433,8 @@ export class MemoryEngine {
     if (!w) return;
     const on = (dir: string) => (file: string): void => {
       if (/\.md$/i.test(file)) this.sourceChanged(join(dir, file));
+      // W3-1: a manifest change (per-agent ledger levels, opt-ins) reconciles, debounced.
+      else if (dir === this.d.hiveRoot && file === SOURCES_CONFIG_FILE) this.manifestChanged();
     };
     const agentsDir = join(this.d.hiveRoot, 'agents');
     const watched = new Set<string>();
@@ -321,8 +447,8 @@ export class MemoryEngine {
     try {
       this.watchers.push(w(agentsDir, (name) => { if (/^[A-Za-z0-9._-]+$/.test(name)) watchAgent(join(agentsDir, name)); }));
     } catch { /* no agents dir yet */ }
-    for (const e of discoverSources(this.d.hiveRoot).eligible) {
-      if (e.kind !== 'top-level') watchAgent(join(this.d.hiveRoot, ...e.path.split('/').slice(0, 2)));
+    for (const e of this.discover().eligible) {
+      if (e.kind !== 'top-level' && e.kind !== 'claims') watchAgent(join(this.d.hiveRoot, ...e.path.split('/').slice(0, 2)));
     }
   }
 
@@ -380,6 +506,7 @@ export class MemoryEngine {
   async close(): Promise<void> {
     for (const t of this.debounce.values()) this.clearTimer(t);
     this.debounce.clear();
+    if (this.manifestTimer) { this.clearTimer(this.manifestTimer); this.manifestTimer = null; }
     for (const w of this.watchers) { try { w.close(); } catch { /* gone */ } }
     this.watchers = [];
     if (this.unloadTimer) this.clearTimer(this.unloadTimer);
@@ -393,5 +520,6 @@ function defaultWatch(dir: string, onChange: (file: string) => void): FSWatcher 
 
 /** Shadow diagnostics and JSON output carry no content: ids, sources, ranks, scores. */
 export function redactHit(h: SearchHit): Record<string, unknown> {
-  return { chunkId: h.chunkId, wing: h.wing, room: h.room, source: h.source, cosineSim: h.cosineSim, bm25: h.bm25 };
+  return { chunkId: h.chunkId, wing: h.wing, room: h.room, source: h.source, cosineSim: h.cosineSim, bm25: h.bm25,
+    ...(h.claim ? { claimId: h.claim.id, status: h.claim.status } : {}) };
 }

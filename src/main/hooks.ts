@@ -90,6 +90,10 @@ interface HookPayload {
   env_agent_id?: string | null;
   /** WAKE-SCREEN-GUARD R2-4: the spawn's MUNDER_WAKE_INCARNATION, copied by the hook shim. */
   munder_wake_incarnation?: string | null;
+  /** CL-M4-BRIEFING-BUDGET C: 'briefing' = Claude's SECOND SessionStart entry (the shim's --part
+   *  briefing), which carries the claims working set alone; 'bundle' = the main entry of a settings
+   *  file that HAS that second entry (S1). Only the shim sets it. */
+  munder_part?: string | null;
   /** MAIL-PIPE-SHIM-CLOCK: a pipe shim's own running time when it sent the request (ms). */
   shim_elapsed_ms?: unknown;
   session_id?: string;
@@ -169,6 +173,13 @@ interface TurnState {
   mailHooks: number;
   /** Legacy-read: ids the mid-turn <inbox-update> notice named in this turn (acted at its Stop). */
   legacyNamed: Set<string>;
+}
+
+/** A reply stream whose flush is watched (a pipe socket or an HTTP response). */
+type FlushWatchable = { once(event: 'finish' | 'close', fn: () => void): unknown; destroyed?: boolean; closed?: boolean };
+/** TEST-FLAKE-SHIMCLOCK-179: the peer is already gone, so neither 'finish' nor 'close' is still to come. */
+export function streamGone(stream: { destroyed?: boolean; closed?: boolean }): boolean {
+  return stream.destroyed === true || stream.closed === true;
 }
 
 /** An evidence scan still waiting for tentative ids of one epoch (§11.1). */
@@ -258,7 +269,7 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
 const HOOK_ROUTE = /^\/(hook|mcp|status|ledger)\/([^/?#]+)\/([0-9a-f]{32})$/;
 /** READS-181 A: one ledger operation (a card, a message, a memory note) is small. */
 export const LEDGER_HTTP_BODY_MAX = 256 * 1024;
-export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown };
+export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
 /** NATIVE-MEMORY: the `memory` command's endpoint. The caller is identified by its MEMORY_TOKEN
  *  alone (the handler resolves it); no agent id in the URL to trust. */
 const MEMORY_ROUTE = /^\/memory\/([0-9a-f]{32})$/;
@@ -285,6 +296,7 @@ export const MCP_ROLLOUT_RETRY_MS = 20;
 export function applyUrlIdentity(p: Record<string, unknown>, urlAgentId: string): void {
   delete p.provider_agent_id;
   delete p.env_agent_id; // only the command shim may set it
+  delete p.munder_part; // likewise (CL-M4-BRIEFING-BUDGET C: SessionStart is never an HTTP hook)
   const own = typeof p.agent_id === 'string' && p.agent_id !== '' ? p.agent_id : null;
   if (own && own !== urlAgentId) p.provider_agent_id = own;
   p.agent_id = urlAgentId;
@@ -325,6 +337,11 @@ export class HookServer {
   private codexNoReading = new Map<string, CodexNoReading>();
   /** WAKE-SCREEN-GUARD R2-4: told of an agent's SessionStart that carries its incarnation token. */
   private onWakeIncarnation?: (agentId: string, token: string) => void;
+  /** Main-owned, volatile claim working-set renderer; receipts and persistence stay in main. */
+  private claimWorkingSet?: (agentId: string, source?: string, part?: 'briefing') => string | null | Promise<string | null>;
+  private preparedClaimWorkingSets = new Map<string, string | null>();
+  /** CLAIM-LEDGER W5 (god): told at each completed turn (Stop), for the reconcile lease. */
+  private claimTurnCompleted?: (agentId: string) => void;
   /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
    *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
   private readonly runningTools = new Map<string, RunningTool[]>();
@@ -350,6 +367,48 @@ export class HookServer {
   /** WAKE-SCREEN-GUARD R2-4: set by main once (the constructor's observer stays as it was). */
   setWakeIncarnationObserver(fn: ((agentId: string, token: string) => void) | undefined): void {
     this.onWakeIncarnation = fn;
+  }
+
+  setClaimWorkingSetProvider(fn: ((agentId: string, source?: string, part?: 'briefing') => string | null | Promise<string | null>) | undefined): void {
+    this.claimWorkingSet = fn;
+  }
+
+  setClaimTurnCompletedListener(fn: ((agentId: string) => void) | undefined): void {
+    this.claimTurnCompleted = fn;
+  }
+
+  /** CLAIM-LEDGER G4.4 (Jim M-3): the working set rides only on SessionStart (startup, resume,
+   *  clear, compact), never on UserPromptSubmit (and `memory wake-up` carries it on demand).
+   *  Never on a one-way hook (S-5). Not for Codex: its view is in its instruction file, once per
+   *  spawn (G4.5, god's M-4 ruling), which a compaction keeps. */
+  private claimWorkingSetEvent(p: HookPayload): boolean {
+    if (p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return false;
+    // CL-M4-BRIEFING-BUDGET C: a Claude agent whose settings carry the briefing entry (its main
+    // entry is marked 'bundle') gets the working set from that entry (claimBriefing below), never
+    // the joined bundle. S1 (Jim): settings that predate it (no mark) keep it in the bundle, so
+    // there is always exactly one copy, decided by the settings in force, not by this build.
+    try { const provider = this.mailChannel(p.agent_id).provider; return provider !== 'codex' && !(provider === 'claude' && p.munder_part === 'bundle'); } catch { return true; }
+  }
+
+  /**
+   * CL-M4-BRIEFING-BUDGET C (the Human's choice): Claude's second SessionStart hook entry. Claude
+   * Code spills each hook OUTPUT past 10,000 chars (to a 2,000-char preview), not each event; a
+   * separate entry on the same event is delivered whole beside the bundle (C1, Claude Code
+   * 2.1.289: up to 9,500 chars in each of the two entries, at startup, compact and
+   * UserPromptSubmit). So the working set comes here alone, capped at WORKING_SET_MAX_CHARS
+   * (9,000; the 9,500 bundle cap is the other entry's), and does no other hook work: no
+   * session record, turn boundary, mail or roster (the main entry does all of that).
+   */
+  private async claimBriefing(p: HookPayload): Promise<unknown> {
+    const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
+    if (fromSubagent || p.hook_event_name !== 'SessionStart' || !p.agent_id || p.transport === 'pipe-oneway') return {};
+    let provider: AgentProvider | undefined;
+    try { provider = this.mailChannel(p.agent_id).provider; } catch { provider = undefined; }
+    if (provider !== 'claude') return {};
+    let text: string | null = null;
+    try { text = await this.claimWorkingSet?.(p.agent_id, p.source, 'briefing') ?? null; } catch { text = null; }
+    try { this.hive.appendLog({ kind: 'claims-briefing', agentId: p.agent_id, source: p.source ?? null, chars: text?.length ?? 0 }); } catch { /* observation only */ }
+    return text ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } } : {};
   }
 
   constructor(
@@ -445,9 +504,12 @@ export class HookServer {
         delete payload.shim_elapsed_ms;
         let res: unknown = {};
         let claims: MailClaim[] = [];
-        try { res = this.handle(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
-        this.watchMailFlush(conn, claims, receivedAt - shimMs);
-        conn.end(JSON.stringify(res ?? {}));
+        void (async () => {
+          try { res = await this.handleWithClaimContext(this.stampArrival(payload, 'pipe')); claims = this.takeMailClaims(); } catch { res = {}; }
+          this.watchMailFlush(conn, claims, receivedAt - shimMs);
+          if (payload.munder_part === 'briefing') this.watchBriefingFlush(conn, payload, res, receivedAt - shimMs);
+          conn.end(JSON.stringify(res ?? {}));
+        })();
       });
       conn.on('error', () => { /* shim hung up — ignore */ });
     });
@@ -516,9 +578,9 @@ export class HookServer {
     try { body = JSON.parse(text.replace(/^\uFEFF/, '')); } catch (e) {
       reply(400, { ok: false, line: `refused: the input is not valid JSON (${String(e).slice(0, 120)})` }); return;
     }
-    try { const r = handler(agentId, body); reply(r.status, r.body); } catch (e) {
-      reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
-    }
+    // CLAIM-LEDGER W6 (G6.6): at level 'writer' the memory part is an async claim append.
+    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: the ledger failed (${String(e).slice(0, 160)})` });
+    try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
   }
 
   /** The base URL the shim posts to (`<base>/<token>`), or null when the broker is down. */
@@ -543,7 +605,7 @@ export class HookServer {
       if (size > MEMORY_HTTP_BODY_MAX) { tooBig = true; reply(413, {}); req.resume(); return; }
       chunks.push(d);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (tooBig) return;
       let body: unknown = null;
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { body = null; }
@@ -697,7 +759,7 @@ export class HookServer {
       }
       chunks.push(d);
     });
-    req.on('end', () => {
+    req.on('end', async () => {
       if (tooBig) return;
       if (route === 'mcp') {
         void this.onMcp(agentId, expected, Buffer.concat(chunks).toString('utf8'), res, receivedAt);
@@ -714,13 +776,13 @@ export class HookServer {
         // AV R1: the Claude status line (claude-status.sh). Handled as the Status event the
         // command shim sent; the reply is the gauge TEXT the script prints into the TUI.
         payload.hook_event_name = 'Status';
-        try { this.handle(this.stampArrival(payload as HookPayload, 'http')); } catch { /* never break a status tick */ }
+        try { await this.handleWithClaimContext(this.stampArrival(payload as HookPayload, 'http')); } catch { /* never break a status tick */ }
         if (!res.headersSent) { res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); res.end(statusGauge(payload)); }
         return;
       }
       let out: unknown = {};
       let claims: MailClaim[] = [];
-      try { out = this.handle(this.stampArrival(payload as HookPayload, 'http')); claims = this.takeMailClaims(); } catch { out = {}; }
+      try { out = await this.handleWithClaimContext(this.stampArrival(payload as HookPayload, 'http')); claims = this.takeMailClaims(); } catch { out = {}; }
       this.watchMailFlush(res, claims, receivedAt);
       reply(200, out);
     });
@@ -824,7 +886,7 @@ export class HookServer {
     if (threadId && own && threadId !== own) p.provider_agent_id = threadId;
     let out: unknown = {};
     let claims: MailClaim[] = [];
-    try { out = this.handle(this.stampArrival(p, 'mcp')); claims = this.takeMailClaims(); } catch { out = {}; }
+    try { out = await this.handleWithClaimContext(this.stampArrival(p, 'mcp')); claims = this.takeMailClaims(); } catch { out = {}; }
     return { result: out ?? {}, claims };
   }
 
@@ -838,12 +900,12 @@ export class HookServer {
     try {
       if (f.kind === 'hook') {
         if (!f.agentId) return;   // a user's own AGY session: not ours (the shim no-ops too)
-        this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
+        void this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
         return;
       }
       const owner = this.hive.agyStatuslineOwnerToken() ?? null;
       if (!owner || f.token !== owner || !f.bodyOk) return;
-      this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
+      void this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
     } catch { /* telemetry must never break the pipe */ }
   }
 
@@ -1232,12 +1294,44 @@ export class HookServer {
   }
 
   /** Settle `claims` when `stream` has flushed its response (`finish`), or as never flushed
-   *  (`close` first: the provider hung up, e.g. at its own timeout). */
-  private watchMailFlush(stream: { once(event: 'finish' | 'close', fn: () => void): unknown }, claims: MailClaim[], receivedAt: number): void {
+   *  (`close` first: the provider hung up, e.g. at its own timeout).
+   *  TEST-FLAKE-SHIMCLOCK-179: the watch is attached AFTER the hook is handled (an await), so a
+   *  provider can hang up first; its 'close' has then already fired and would never reach this
+   *  watch, leaving the claims unsettled (no late row, no latency). An already-closed stream is
+   *  settled at once as never flushed. Pipe, HTTP and MCP replies all come through here. */
+  private watchMailFlush(stream: FlushWatchable, claims: MailClaim[], receivedAt: number): void {
     if (!claims.length) return;
+    if (streamGone(stream)) { this.settleMailClaims(claims, receivedAt, null); return; }
     let settled = false;
     stream.once('finish', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, Date.now()); });
     stream.once('close', () => { if (settled) return; settled = true; this.settleMailClaims(claims, receivedAt, null); });
+  }
+
+  /**
+   * CL-M4-BRIEFING-BUDGET S2 (Jim): a late or failed briefing is never silent. The same flush watch
+   * and on-time measure as mail (shim elapsed + arrival to flush, against the pipe limit): a reply
+   * flushed in time is printed by the shim (printedChars = its working-set chars); one at or past
+   * the limit met the shim's 5 s give-up, or never flushed, and the agent started WITHOUT it.
+   */
+  private watchBriefingFlush(stream: FlushWatchable, p: HookPayload, res: unknown, startedAt: number): void {
+    const ctx = (res as { hookSpecificOutput?: { additionalContext?: unknown } } | null)?.hookSpecificOutput?.additionalContext;
+    const chars = typeof ctx === 'string' ? ctx.length : 0;
+    if (!chars || !p.agent_id) return;
+    const limitMs = mailLatencyLimitMs('pipe');
+    let settled = false;
+    const settle = (flushedAt: number | null) => {
+      if (settled) return;
+      settled = true;
+      const latencyMs = flushedAt === null ? null : Math.max(0, flushedAt - startedAt);
+      const late = latencyMs === null || latencyMs >= limitMs;
+      try {
+        this.hive.appendLog({ kind: late ? 'claims-briefing-late' : 'claims-briefing-flush', agentId: p.agent_id, source: p.source ?? null, chars, printedChars: late ? 0 : chars, latencyMs, limitMs, ...(late ? { outcome: latencyMs === null ? 'not-flushed' : 'shim-gave-up' } : {}) });
+      } catch { /* best effort */ }
+    };
+    // TEST-FLAKE-SHIMCLOCK-179: a shim that hung up before this watch was attached (see watchMailFlush).
+    if (streamGone(stream)) { settle(null); return; }
+    stream.once('finish', () => settle(Date.now()));
+    stream.once('close', () => settle(null));
   }
 
   /**
@@ -1791,6 +1885,17 @@ export class HookServer {
     } catch { /* best effort */ }
   }
 
+  private async handleWithClaimContext(p: HookPayload): Promise<unknown> {
+    if (p.munder_part === 'briefing') return this.claimBriefing(p);
+    const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== p.agent_id;
+    if (!fromSubagent && this.claimWorkingSetEvent(p) && p.agent_id) {
+      let claimWorkingSet: string | null = null;
+      try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id, p.source) ?? null; } catch { claimWorkingSet = null; }
+      this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
+    }
+    return this.handle(p);
+  }
+
   private handle(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
@@ -1828,6 +1933,10 @@ export class HookServer {
     }
     if (agentId && !fromSubagent && typeof p.transcript_path === 'string' && p.transcript_path) {
       this.transcriptPaths.set(agentId, p.transcript_path);
+    }
+    // CLAIM-LEDGER W5 hook (god): the completed-turn boundary for the claims reconcile lease.
+    if (agentId && !fromSubagent && event === 'Stop') {
+      try { this.claimTurnCompleted?.(agentId); } catch { /* never breaks a hook */ }
     }
     // READS-ROTATE-AT-SIZE pilot: one `compact-health` row per compaction (before any early return:
     // a SessionStart(compact) that re-injects mail returns with it below).
@@ -2139,13 +2248,29 @@ export class HookServer {
     const goal = goalRaw
       ? `<goal>\n${goalRaw}\n</goal>`
       : null;
+    // CLAIM-LEDGER G4.4: rebuild the view from the verified ledger at each SessionStart (M-3: not on
+    // UserPromptSubmit). A compact SessionStart is included, so it survives compaction without
+    // persistence. It counts in every joint budget below (mail, carry, handoff).
+    const hasPreparedClaimWorkingSet = !!agentId && this.preparedClaimWorkingSets.has(agentId);
+    let claimWorkingSet = !fromSubagent && hasPreparedClaimWorkingSet && agentId ? this.preparedClaimWorkingSets.get(agentId) ?? null : null;
+    if (agentId && hasPreparedClaimWorkingSet) this.preparedClaimWorkingSets.delete(agentId);
+    // Keep the synchronous test/internal surface compatible with synchronous providers; live
+    // async providers are always awaited by handleWithClaimContext before reaching this method.
+    // S-5: never for a one-way hook (its reply is not read), as handleWithClaimContext.
+    if (!fromSubagent && !hasPreparedClaimWorkingSet && this.claimWorkingSetEvent(p) && agentId) {
+      try {
+        const value = this.claimWorkingSet?.(agentId, p.source);
+        if (typeof value === 'string') claimWorkingSet = value;
+        else if (value && typeof (value as Promise<unknown>).catch === 'function') void (value as Promise<unknown>).catch(() => {});
+      } catch { /* optional working set */ }
+    }
     // GOD-STARTUP-TOKENS R1: a god that started FRESH (instead of resuming a costly session) gets its
     // handoff once, at that session's SessionStart (source "startup"). Claude surfaces no mail at
     // SessionStart (mailSurfaceEvents), so the handoff never takes budget from pending mail. Never on
     // a one-way hook, whose reply is not read (the handoff would be lost). Creed B1: built to fit
     // the one additionalContext with the roster, goal, steer and mid-turn mail it is joined with.
     const handoff = wantsRoster && event === 'SessionStart' && p.source === 'startup' && p.transport !== 'pipe-oneway'
-      ? this.hive.takeGodHandoff?.(agentId, [roster, goal, steer, mail]) ?? null
+      ? this.hive.takeGodHandoff?.(agentId, [roster, goal, claimWorkingSet, steer, mail]) ?? null
       : null;
 
     // ZT-I1-MAIL §2.2: the message BODIES, from the ledger's delivered ids, on every turn start
@@ -2161,10 +2286,10 @@ export class HookServer {
       && !(event === 'UserPromptSubmit' && isSlashPrompt(p.prompt));
     let mailBlock: string | null = null;
     if (surfaces && agentId) {
-      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [handoff, roster, goal, steer, mail]); } catch { mailBlock = null; }
+      try { mailBlock = this.surfaceMail(agentId, event, p, channel?.provider, [handoff, roster, goal, claimWorkingSet, steer, mail]); } catch { mailBlock = null; }
       const none = '<hive-mail>\nNo new hive mail to show for this wake.\n</hive-mail>';
       if (!mailBlock && event === 'UserPromptSubmit' && channel?.provider === 'codex' && p.prompt?.trim() === CODEX_INBOX_WAKE_SENTINEL
-        && mailBudgetFor([handoff, roster, goal, steer, mail]) >= none.length) {
+        && mailBudgetFor([handoff, roster, goal, claimWorkingSet, steer, mail]) >= none.length) {
         mailBlock = none;
         // Q12 (god's ruling): a wake with nothing to show means the coordinator woke for mail that
         // was not pending: a coordinator bug signal.
@@ -2180,7 +2305,7 @@ export class HookServer {
       try { c = this.compactCarry(agentId); } catch { c = null; }
       carry = c?.text ?? null;
       this.lastReinject.delete(agentId);
-      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, steer, mail, carry]); } catch { mailBlock = null; }
+      try { mailBlock = this.reinjectMail(agentId, p, channel?.provider, [handoff, roster, goal, claimWorkingSet, steer, mail, carry]); } catch { mailBlock = null; }
       const re = this.lastReinject.get(agentId);
       this.lastReinject.delete(agentId);
       try {
@@ -2200,12 +2325,12 @@ export class HookServer {
     if (event === 'PostToolUse' && agentId) {
       try { updatedToolOutput = this.condensedToolOutput(agentId, p); } catch { updatedToolOutput = null; }
     }
-    if (handoff || steer || roster || goal || mail || carry || mailBlock) {
+    if (handoff || steer || roster || goal || claimWorkingSet || mail || carry || mailBlock) {
       this.emit(agentId, event, p);
       return {
         hookSpecificOutput: {
           hookEventName: event,
-          additionalContext: [handoff, roster, goal, steer, mail, carry, mailBlock].filter(Boolean).join('\n\n'),
+          additionalContext: [handoff, roster, goal, claimWorkingSet, steer, mail, carry, mailBlock].filter(Boolean).join('\n\n'),
           ...(updatedToolOutput ? { updatedToolOutput } : {})
         }
       };

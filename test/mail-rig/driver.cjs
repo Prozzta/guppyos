@@ -333,6 +333,9 @@ class Rig {
     for (;;) {
       if (await fn()) return true;
       if (await free()) return false;
+      // TEST-FLAKE-MAILRIG-C1: how many times a hold found the agents still busy and kept the clock
+      // still (a test waits on this EVENT, never on wall-clock time, before it releases a held start).
+      this.busyHolds = (this.busyHolds ?? 0) + 1;
       const p = this.progress();
       if (p !== seen) { seen = p; lastProgressAt = this.clock.now(); }
       if (this.clock.now() - lastProgressAt >= busyTimeoutMs) throw await fail(failMsg);
@@ -360,7 +363,11 @@ class Rig {
    *  out, while a stuck one still fails with the reason. */
   progress() { let n = 0; for (const id of this.agentIds) n += this.transcript(id).length; return n; }
 
-  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true, holdWhileBusy = false, holdForStubs = false, busyTimeoutMs = 90_000, diag } = {}) {
+  async beatUntil(fn, { what, stepMs = 70_000, tries = 40, pauseMs = 250, settle = true, holdWhileBusy = false, holdForStubs = false, busyTimeoutMs = 90_000, diag, signal } = {}) {
+    // TEST-MAILRIG-BEAT-LOOP-LEAK: a caller that runs this concurrently (and fails on its own path)
+    // aborts `signal`; the loop stops at its next check instead of beating a torn-down rig.
+    const aborted = () => { if (signal?.aborted) throw new Error(`beatUntil: ${what ?? 'condition'} aborted by the caller`); };
+    const fnLive = async () => { aborted(); return fn(); };
     // Jim A2: every "never held" carries the wake state of the agents (or the caller's `diag`), so
     // the next flake names itself. busyTimeoutMs 90 s leaves room in the 180 s test budget for a
     // loaded run's lead-in, so the explicit reason is what fails, not the generic timeout.
@@ -370,7 +377,7 @@ class Rig {
       return new Error(dump ? `${msg}\n${dump}` : msg);
     };
     for (let i = 0; i < tries; i++) {
-      if (await fn()) return true;
+      if (await fnLive()) return true;
       // LOAD-FLAKES-176: settle's quiet() is bounded (10 s); when it runs out (a loaded machine, a slow
       // turn) the step no longer moves the clock anyway: it holds until the real processes are idle.
       const quietOk = settle ? await this.quiet() : true;
@@ -381,20 +388,20 @@ class Rig {
       // simulated-time rules (SUBMIT_CONFIRM_MS, the one-time re-announce, the retry backoff)
       // against real process timing, so the outcome depended on machine load.
       if (holdWhileBusy) {
-        if (await this.holdUntil(fn, async () => !(await this.call('busy')), busyTimeoutMs,
+        if (await this.holdUntil(fnLive, async () => !(await this.call('busy')), busyTimeoutMs,
           `beatUntil: ${what ?? 'condition'} never held, and the agent stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under it)`, fail)) return true;
       }
       // LOAD-FLAKES-176: with holdForStubs the clock moves only once the real processes are idle
       // (see stubsIdle); `fn` is re-checked meanwhile.
       if (holdForStubs || !quietOk) {
-        if (await this.holdUntil(fn, () => this.stubsIdle(), busyTimeoutMs,
+        if (await this.holdUntil(fnLive, () => this.stubsIdle(), busyTimeoutMs,
           `beatUntil: ${what ?? 'condition'} never held, and the stubs stayed busy for ${busyTimeoutMs} ms with no stub progress (the clock was not moved under them)`, fail)) return true;
       }
       await this.call('advance', { ms: stepMs });
       await this.beat();
       await sleep(pauseMs);
     }
-    if (await fn()) return true;
+    if (await fnLive()) return true;
     throw await fail(`beatUntil: ${what ?? 'condition'} never held`);
   }
 

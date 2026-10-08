@@ -5,7 +5,8 @@
  *
  * Protocol (both directions structured-clone messages on the parent port):
  *   main -> worker  { id, op, args, deadline }      op: search | wake-up | status | backfill |
- *                                                        report | compact | shutdown
+ *                                                        report | compact | shutdown |
+ *                                                        claims-sync | r5-candidates | claim-ledger (main only)
  *   worker -> main  { id, ok, exit, text?, json?, error? }   and  { event, ...fields }
  * A request whose deadline passed while it waited in the queue is answered `expired` without
  * running: the caller already gave up on it.
@@ -14,7 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs
 import { constants as osConstants, setPriority } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OnnxEmbedder, type OrtLike } from './embedder';
-import { MemoryEngine } from './engine';
+import { MemoryEngine, type ClaimsSyncArgs } from './engine';
 import { NativeMemoryStore, type StoreOpenOptions } from './store';
 import { discoverSources, sha256 } from './sources';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './wordpiece';
@@ -29,6 +30,10 @@ export interface WorkerConfig {
   vecSha256: string | null;
   /** Optional idle-unload override (the speed bench only); absent = MODEL_IDLE_UNLOAD_MS. */
   idleUnloadMs?: number;
+  /** CLAIM-LEDGER: the Settings level (config claimLedger); discovery derives each agent's level. */
+  claimLedger?: unknown;
+  /** CLAIMS-HEAD-ANCHOR: the agents main holds an anchor for (A-2). */
+  anchored?: string[];
 }
 
 export interface Port {
@@ -76,7 +81,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
   };
   const embedder = new OnnxEmbedder(modelPath, tokenizer, verifiedOrt, { intraOpNumThreads: 2 });
   const engine = new MemoryEngine({
-    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t),
+    hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
     ...(typeof cfg.idleUnloadMs === 'number' && cfg.idleUnloadMs > 0 ? { idleUnloadMs: cfg.idleUnloadMs } : {})
@@ -97,7 +102,8 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     };
     switch (m.op) {
       case 'search':
-        guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
+        guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null,
+          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
         break;
       case 'wake-up':
         guard(engine.wakeUp((a.wing as string) ?? null), (r) => ({ exit: r.exit, text: r.text }));
@@ -109,10 +115,25 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
         guard(engine.backfill(), (r) => ({ exit: 0, json: { eligible: r.discovery.eligible.length, embedded: r.embedded, removed: r.removed } }));
         break;
       case 'report': {
-        const d = discoverSources(cfg.hiveRoot);
+        const d = discoverSources(cfg.hiveRoot, undefined, { claimLedger: cfg.claimLedger, anchored: cfg.anchored });
         guard(engine.status(), (s) => ({ exit: 0, json: { allowListVersion: d.allowListVersion, counts: d.counts, excludedMd: d.excludedMd, rejectedConfig: d.rejectedConfig, failed: [...engine.failed.entries()], index: s.json } }));
         break;
       }
+      case 'claims-sync':
+        guard(engine.syncClaims(a as unknown as ClaimsSyncArgs), (r) => ({ exit: 0, json: r }));
+        break;
+      case 'claim-ledger':
+        guard(engine.setClaimLedger(a.value, a.anchored), (r) => ({ exit: 0, json: r }));
+        break;
+      case 'embed': {
+        // CL-M4-WP step 3: vectors for main's note-candidate scorer (bounds checked in main).
+        const texts = Array.isArray(a.texts) ? (a.texts as unknown[]).filter((t): t is string => typeof t === 'string').slice(0, 64) : [];
+        guard(engine.embedTexts(texts), (vs) => ({ exit: 0, json: vs.map((v) => Array.from(v)) }));
+        break;
+      }
+      case 'r5-candidates':
+        guard(engine.r5Candidates(String(a.wing ?? ''), String(a.claimId ?? ''), Number(a.tau2 ?? 1)), (r) => ({ exit: 0, json: r }));
+        break;
       case 'compact':
         guard(engine.compact((f) => openOrQuarantine(f, openOpts).store, renameSync, (f) => rmSync(f, { force: true })), (r) => ({ exit: 0, json: { result: r } }));
         break;

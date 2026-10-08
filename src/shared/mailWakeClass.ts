@@ -34,7 +34,9 @@ export const ALWAYS_WAKE_SENDERS: ReadonlySet<string> = new Set([
   // Jim B2: the Human's spoken message to an agent ("Voice ping from Michael", realtimeActions
   // VOICE_ACTOR) and a worker's terminal failure to god with its Slack reply command (index
   // informGod). test/reads-quiet-181 keeps a census of every harness sender against this set.
-  'michael-voice', 'ephemeral-worker'
+  'michael-voice', 'ephemeral-worker',
+  // CLAIM-LEDGER W1: a claims-chain-broken or claims-key-missing alert to god (a ledger went read-only).
+  'claims'
 ]);
 
 /** The acts that ask the recipient for an answer (hive.normalize's requires_reply default). */

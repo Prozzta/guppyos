@@ -98,7 +98,7 @@ test('ALLOW-LIST (section 1): memory.md and direct agent .md are eligible; neste
   ]);
   assert.deepEqual(d.excludedMd, ['NOTE.md', 'agents/a1/.claude/skills/s/SKILL.md', 'agents/a1/sub/NESTED.md', 'board.md']);
   assert.ok(!d.excludedMd.some((p) => p.includes('inbox')), 'mail is never walked');
-  assert.equal(d.allowListVersion, 1);
+  assert.equal(d.allowListVersion, 2);
   assert.equal(d.counts.eligible, 3);
 });
 
@@ -160,7 +160,7 @@ test('FTS query + RRF + compaction policy (pure)', () => {
 
 test('VALIDATION (section 6): ranges, ISO dates, wing names; wake-up without --wing is the CALLER\'s', () => {
   // NATIVE-WAKEUP (b): `caller` is the token's wing as a backfill hint; `wing` (the filter) stays null.
-  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1' } });
+  assert.deepEqual(validateRequest({ cmd: 'search', args: { query: 'x', results: 3 } }, 'a1'), { op: 'search', args: { query: 'x', wing: null, room: null, results: 3, since: null, before: null, caller: 'a1', mode: 'live', kind: null, key: null } });
   for (const bad of [{ query: '' }, { query: 'x', results: 0 }, { query: 'x', results: 101 }, { query: 'x', results: 2.5 }, { query: 'x', wing: 'a b' }, { query: 'x', since: 'yesterday' }, { query: 'x'.repeat(2001) }]) {
     assert.equal(validateRequest({ cmd: 'search', args: bad }, 'a1').exit, EXIT.usage, JSON.stringify(bad));
   }
@@ -290,6 +290,18 @@ test('WIRING: every install (no mode file) gives an agent MEMORY_TOKEN, the endp
   assert.equal(w.tokens.resolve(m.env.MEMORY_TOKEN), null, 'revoked with the agent');
 });
 
+test('G4.5: Codex memory wake-up appends the main claims view; ordinary search does not', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  const { w } = wiring(root, runtime(root));
+  const env = w.spawnEnv('a1');
+  w.run = async () => ({ ok: true, exit: 0, text: 'existing native-memory wake-up' });
+  w.setClaimWakeupProvider((id) => `# Memory working set — ${id}`);
+  const wake = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'wake-up' });
+  assert.match(wake.body.text, /existing native-memory wake-up[\s\S]*# Memory working set — a1/);
+  const search = await w.handle(env.env.MEMORY_TOKEN, { cmd: 'search', args: { query: 'x' } });
+  assert.equal(search.body.text, 'existing native-memory wake-up', 'search output stays unchanged');
+});
+
 test('WIRING: a leftover mode file from an older build changes nothing: memory stays on', async () => {
   for (const mode of ['legacy', 'fallback-legacy', 'shadow', 'native']) {
     const root = hive({ 'agents/a1/memory.md': 'm', 'memory-engine.json': JSON.stringify({ mode }) });
@@ -320,7 +332,7 @@ test('WIRING: query() serves the Memory panel / Command Center as caller `human`
   const seen = [];
   w.client.request = async (op, args) => { seen.push({ op, args }); return { ok: true, exit: 0, text: 'T\n' }; };
   assert.equal((await w.query('search', { query: 'log rotation', wing: 'jim' })).text, 'T\n');
-  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human' } });
+  assert.deepEqual(seen[0], { op: 'search', args: { query: 'log rotation', wing: 'jim', room: null, results: 5, since: null, before: null, caller: 'human', mode: 'live', kind: null, key: null } });
   assert.equal((await w.query('search', { query: '' })).exit, EXIT.usage);
   await w.query('wake-up', { wing: 'andy' });
   assert.deepEqual(seen[1], { op: 'wake-up', args: { wing: 'andy' } });
@@ -337,7 +349,7 @@ test('WIRING: the vec0 path maps from inside app.asar to app.asar.unpacked (the 
 test('WIRING: the index file is keyed by the hive root (two hives / dev and stable never share one)', () => {
   assert.equal(dbFileFor('U', 'C:\\Dunder\\hive'), dbFileFor('U', 'c:/dunder/hive'));
   assert.notEqual(dbFileFor('U', 'C:/Dunder/hive'), dbFileFor('U', 'C:/Dunder/hive-dev'));
-  assert.match(dbFileFor('U', 'C:/x'), /memory[\\/][0-9a-f]{16}\.sqlite$/);
+  assert.match(dbFileFor('U', 'C:/x'), /memory[\\/][0-9a-f]{16}-v2\.sqlite$/, 'CLAIM-LEDGER F6: the v2 file, never 1.1.83 own');
 });
 
 // ── HTTP route ────────────────────────────────────────────────────────────
@@ -584,4 +596,62 @@ test('CLI parseArgs: a dash-led token with whitespace is query text; `--` ends o
   assert.equal(parseArgs(['search', '--', '--wing']).args.query, '--wing');
   assert.equal(parseArgs(['search', '--', '--wing']).args.wing, undefined);
   assert.deepEqual(parseArgs(['search', '--native-memory-smoke=']).rest, ['--native-memory-smoke='], 'unknown option: rejected');
+});
+
+test('CLAIM-LEDGER W3-1: a running worker follows the CURRENT Settings level: the fork carries it, and a change is pushed (claim-ledger) before the next request', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  let level = 'shadow';
+  const { w, workers } = wiring(root, { ...runtime(root), claimLedger: () => level });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = w.query('status');
+  await tick();
+  const wk = workers[0];
+  assert.equal(wk.posted[0].op, 'init');
+  assert.equal(wk.posted[0].config.claimLedger, 'shadow', 'a new worker gets the level in its config');
+  assert.equal(wk.posted[1].op, 'status', 'nothing to push: the fork carried it');
+  wk.reply({ event: 'ready' });
+  wk.reply({ id: wk.posted[1].id, ok: true, exit: 0, text: 's' });
+  await p1;
+  level = 'reader';
+  const p2 = w.query('search', { query: 'x' });
+  await tick();
+  assert.equal(wk.posted[2].op, 'claim-ledger');
+  assert.deepEqual(wk.posted[2].args, { value: 'reader', anchored: [] });
+  assert.equal(wk.posted.length, 3, 'the search waits for the worker to follow');
+  wk.reply({ id: wk.posted[2].id, ok: true, exit: 0, json: { changed: true } });
+  await tick(); await tick();
+  assert.equal(wk.posted[3].op, 'search');
+  wk.reply({ id: wk.posted[3].id, ok: true, exit: 0, text: 'r' });
+  await p2;
+  const p3 = w.syncClaims({ wing: 'a1', path: 'agents/a1/memory/claims', head: 'h', chunks: [] });
+  await tick();
+  assert.equal(wk.posted[4].op, 'claims-sync', 'no second push for the same level');
+  assert.equal(wk.posted[4].args.claimLedger, 'reader', 'and the sync carries the level');
+  wk.reply({ id: wk.posted[4].id, ok: true, exit: 0, json: {} });
+  await p3;
+});
+
+test('CLAIMS-HEAD-ANCHOR A-2: the anchored agents travel to the worker: in the fork config, and pushed with the level when they change', async () => {
+  const root = hive({ 'agents/a1/memory.md': 'm' });
+  let anchored = ['a1'];
+  const { w, workers } = wiring(root, { ...runtime(root), claimLedger: () => 'reader', anchoredAgents: () => anchored });
+  const tick = () => new Promise((r) => setImmediate(r));
+  const p1 = w.query('status');
+  await tick();
+  const wk = workers[0];
+  assert.deepEqual(wk.posted[0].config.anchored, ['a1'], 'a new worker gets them in its config');
+  assert.equal(wk.posted[1].op, 'status', 'nothing to push');
+  wk.reply({ event: 'ready' });
+  wk.reply({ id: wk.posted[1].id, ok: true, exit: 0, text: 's' });
+  await p1;
+  anchored = ['a2', 'a1'];
+  const p2 = w.query('search', { query: 'x' });
+  await tick();
+  assert.equal(wk.posted[2].op, 'claim-ledger');
+  assert.deepEqual(wk.posted[2].args, { value: 'reader', anchored: ['a1', 'a2'] }, 'a new anchor is pushed (same level)');
+  wk.reply({ id: wk.posted[2].id, ok: true, exit: 0, json: { changed: true } });
+  await tick(); await tick();
+  assert.equal(wk.posted[3].op, 'search');
+  wk.reply({ id: wk.posted[3].id, ok: true, exit: 0, text: 'r' });
+  await p2;
 });

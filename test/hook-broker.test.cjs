@@ -223,7 +223,10 @@ test('(10) STATIC: SessionStart is never an http hook, and the http shape is the
   const at = all.indexOf('  private hookSettings(');
   const src = all.slice(at, all.indexOf('\n  }\n', at));
   assert.ok(at > 0 && src.length > 500, 'hookSettings found');
-  assert.match(src, /SessionStart: \[entry\(\)\],/);
+  // CL-M4-BRIEFING-BUDGET C: the second SessionStart entry (the claims briefing) is a command too.
+  assert.match(src, /SessionStart: \[sessionBundle, briefing\],/);
+  assert.match(src, /const sessionBundle = \{ hooks: \[\{ type: 'command', command: this\.nodeRun\(shim, \.\.\.hookShimArgs\(agentId\), '--part', 'bundle'\) \}\] \};/);
+  assert.match(src, /const briefing = \{ hooks: \[\{ type: 'command', command: this\.nodeRun\(shim, \.\.\.hookShimArgs\(agentId\), '--part', 'briefing'\) \}\] \};/);
   assert.doesNotMatch(src, /SessionStart: \[hook\(/);
   assert.match(src, /const hook = \(matcher\?: string\) => hookUrl\s*\?/);
 });

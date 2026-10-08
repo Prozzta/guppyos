@@ -19,6 +19,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT, MemoryTokens, NativeMemoryClient, validateRequest, WAKE_UP_DEADLINE_MS, type Reply, type WorkerHandle } from './service';
 import type { WorkerConfig } from './worker';
+import { CLAIM_VERBS, handleClaimVerb, type ClaimsEndpointDeps } from '../claims/endpoint';
 
 export interface RuntimeManifest {
   model: { dir: string; onnxSha256: string; tokenizerSha256: string };
@@ -42,12 +43,29 @@ export interface WiringDeps {
    *  sqlite-vec's own `getLoadablePath()` - a path lookup only; main never loads it. The
    *  packager nests the platform package under sqlite-vec, so a top-level lookup would miss it. */
   vecLoadablePath: () => string | null;
+  /** CLAIM-LEDGER W1: the claim verbs (note, retract, ...), or null when this build or hive has no
+   *  ledger; then they answer "unsupported" as before. They do not need the index worker. */
+  claims?: () => ClaimsEndpointDeps | null;
+  /** CLAIM-LEDGER W3: the Settings level (config claimLedger), passed to the worker's discovery. */
+  claimLedger?: () => unknown;
+  /** CLAIMS-HEAD-ANCHOR (A-2): the agents anchored for this hive, sent with the level. */
+  anchoredAgents?: () => string[];
+  /** CLAIM-LEDGER W3: a (re)started worker is ready; main re-sends every flagged agent's claims (G3.3). */
+  onWorkerReady?: () => void;
+  /** CL-M4-WP step 3: logs the claim ids an agent's own `search` returned (ids only, 6 h). */
+  searchLog?: { record(agentId: string, searchJson: unknown): unknown };
 }
 
-/** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings. */
+/** CL-M4-WP step 3: the bounds of one main-internal `embed` request (a pool of note candidates + the query). */
+export const EMBED_MAX_TEXTS = 64;
+export const EMBED_MAX_CHARS = 2000;
+
+/** The DB is per hive root (Jim R7): two hives, or dev and stable, never share wings.
+ *  CLAIM-LEDGER (F6, A4): `<key>-v2.sqlite`, SCHEMA_VERSION 2. Builds without the ledger open only
+ *  `<key>.sqlite` and never this file; this build never opens theirs (G3.6). */
 export function dbFileFor(userData: string, hiveRoot: string): string {
   const key = createHash('sha256').update(hiveRoot.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16);
-  return join(userData, 'memory', `${key}.sqlite`);
+  return join(userData, 'memory', `${key}-v2.sqlite`);
 }
 
 /** Why memory is not available (one log row per reason per run, not one per spawn). */
@@ -56,12 +74,21 @@ export type MemoryUnavailable = 'disabled' | 'no-hive' | 'no-runtime' | 'command
 export class NativeMemoryWiring {
   readonly tokens = new MemoryTokens();
   readonly client: NativeMemoryClient;
+  private claimWakeup?: (agentId: string) => string | null | Promise<string | null>;
   private manifest: RuntimeManifest | null = null;
   private loggedUnavailable = new Set<MemoryUnavailable>();
 
   constructor(private readonly d: WiringDeps) {
-    this.client = new NativeMemoryClient({ fork: () => d.fork(d.workerEntry), config: () => this.workerConfig(), log: d.log });
+    this.client = new NativeMemoryClient({
+      fork: () => d.fork(d.workerEntry),
+      // The config is read at fork only: the level it carries is what a new worker knows (W3-1).
+      config: () => { const c = this.workerConfig(); if (c) this.sentLedger = { v: c.claimLedger, anchored: (c.anchored ?? []).join(',') }; return c; },
+      log: d.log, onReady: () => d.onWorkerReady?.()
+    });
   }
+
+  /** Main-owned W4 view appended to the existing wake-up response, beside the memory resolver. */
+  setClaimWakeupProvider(fn: ((agentId: string) => string | null | Promise<string | null>) | undefined): void { this.claimWakeup = fn; }
 
   private runtimeManifest(): RuntimeManifest | null {
     if (this.manifest) return this.manifest;
@@ -91,7 +118,7 @@ export class NativeMemoryWiring {
     if (!vecPath) return null;
     const modelDir = join(this.d.resourcesDir, 'models', m.model.dir);
     if (!existsSync(vecPath) || !existsSync(join(modelDir, 'onnx', 'model.onnx'))) return null;
-    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256 };
+    return { hiveRoot: root, dbFile, modelDir, modelSha256: m.model.onnxSha256, vecPath, vecSha256: v.sha256, claimLedger: this.d.claimLedger?.(), anchored: this.anchored() };
   }
 
   /** The current hive's index file (reset / home change delete it, after shutdown()). */
@@ -173,8 +200,22 @@ export class NativeMemoryWiring {
   async handle(token: string, body: unknown): Promise<{ status: number; body: unknown }> {
     const agentId = this.tokens.resolve(token);
     if (!agentId) return { status: 403, body: { exit: EXIT.unauthorized, error: 'unauthorized' } };
+    const cmd = body && typeof body === 'object' ? (body as Record<string, unknown>).cmd : undefined;
+    const claims = typeof cmd === 'string' && CLAIM_VERBS.has(cmd) ? this.d.claims?.() ?? null : null;
+    if (claims) {
+      // The wing is the token's agent (G1.3); handleClaimVerb refuses a body naming one.
+      const c = await handleClaimVerb(claims, agentId, body, 'endpoint');
+      return { status: 200, body: { exit: c.exit, text: c.text, json: c.json, error: c.error } };
+    }
     const r = await this.run((body ?? {}) as Record<string, unknown>, agentId);
-    return { status: 200, body: { exit: r.exit, text: r.text, json: r.json, error: r.error } };
+    if (cmd === 'search' && r.ok) {
+      try { this.d.searchLog?.record(agentId, r.json); } catch (e) { this.d.log({ kind: 'claims-search-log-failed', agentId, error: String(e).slice(0, 160) }); }
+    }
+    let text = r.text;
+    if (cmd === 'wake-up' && r.ok) {
+      try { const claims = await this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
+    }
+    return { status: 200, body: { exit: r.exit, text, json: r.json, error: r.error } };
   }
 
   /** Main-internal callers (the renderer IPC): the same validation and ops as an agent, as the
@@ -188,9 +229,67 @@ export class NativeMemoryWiring {
     if (why) return { ok: false, exit: EXIT.unavailable, error: why === 'disabled' ? 'memory is turned off in Settings' : `memory is unavailable (${why})` };
     const v = validateRequest(body, callerWing);
     if ('exit' in v) return { ok: false, exit: v.exit, error: v.error };
+    const push = this.pushClaimLedger();
+    if (push) await push;
     // NATIVE-WAKEUP N1: a wake-up may wait up to WAKE_WAIT_MS for its wing on a filling index,
     // so its deadline covers that wait plus the cold budget. status keeps 2 s; search its own.
     return this.client.request(v.op, v.args, v.op === 'search' ? undefined : v.op === 'wake-up' ? WAKE_UP_DEADLINE_MS : 2_000);
+  }
+
+  /** The Settings level a running worker was last told (null: not forked, or not told yet). */
+  private sentLedger: { v: unknown; anchored: string } | null = null;
+  private anchored(): string[] { try { return [...(this.d.anchoredAgents?.() ?? [])].sort(); } catch { return []; } }
+
+  /**
+   * W3-1 (Jim): a running worker follows the CURRENT Settings level. Before any request, a changed
+   * level is pushed first, and the worker reconciles before answering (a drop to shadow brings
+   * memory.md back and hides the claims, with no restart). A worker not running yet gets the level
+   * in its config at fork.
+   */
+  claimLedgerChanged(): Promise<void> | null {
+    // The Settings action that changes claimLedger calls this, so a running worker follows at once
+    // (the per-request push below is the backstop).
+    return this.pushClaimLedger();
+  }
+
+  /** null when there is nothing to push (synchronous: a request then posts at once, MAIN BUDGET). */
+  private pushClaimLedger(): Promise<void> | null {
+    if (!this.d.claimLedger || !this.client.forked) return null;
+    const v = this.d.claimLedger();
+    // A-2: the anchored agents travel with the level (a new anchor keeps that agent flagged).
+    const anchored = this.anchored();
+    const key = anchored.join(',');
+    if (this.sentLedger && this.sentLedger.v === v && this.sentLedger.anchored === key) return null;
+    return this.client.request('claim-ledger', { value: v as never, anchored: anchored as never }, 300_000).then((r) => { if (r.ok) this.sentLedger = { v, anchored: key }; });
+  }
+
+  /** CLAIM-LEDGER W3: index one agent's verified claim chunks (main only; no HTTP route). */
+  async syncClaims(args: { wing: string; path: string; head: string; chunks: unknown[] }): Promise<Reply> {
+    const why = this.unavailable();
+    if (why) return { ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` };
+    const push = this.pushClaimLedger();
+    if (push) await push;
+    return this.client.request('claims-sync', { ...args, claimLedger: this.d.claimLedger?.() } as unknown as Record<string, unknown>, 120_000);
+  }
+
+  /** CLAIM-LEDGER W3: R5 candidates for a just-appended claim (the W3 side of R5CandidatesFn). */
+  r5Candidates(wing: string, claimId: string, tau2: number): Promise<Reply> {
+    const why = this.unavailable();
+    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
+    return this.client.request('r5-candidates', { wing, claimId, tau2 }, 5_000);
+  }
+
+  /**
+   * CL-M4-WP step 3: MiniLM vectors for note-candidate ranking (main-internal, like r5Candidates:
+   * no agent HTTP route reaches it). 1-EMBED_MAX_TEXTS texts of at most EMBED_MAX_CHARS each.
+   */
+  embed(texts: string[]): Promise<Reply> {
+    if (!Array.isArray(texts) || !texts.length || texts.length > EMBED_MAX_TEXTS || !texts.every((t) => typeof t === 'string' && t.length <= EMBED_MAX_CHARS)) {
+      return Promise.resolve({ ok: false, exit: EXIT.usage, error: `embed takes 1-${EMBED_MAX_TEXTS} texts of at most ${EMBED_MAX_CHARS} characters` });
+    }
+    const why = this.unavailable();
+    if (why) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: `memory is unavailable (${why})` });
+    return this.client.request('embed', { texts }, 5_000);
   }
 
   shutdown(): Promise<void> {

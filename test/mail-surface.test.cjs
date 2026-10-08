@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
@@ -281,7 +282,7 @@ test('evidence: a Claude hook_additional_context attachment or a Codex developer
 
 // ————————————————————————————————————————————————————————————— hooks (real hive, jailed)
 
-async function floor(t, { providers = {}, steer = null, emit } = {}) {
+async function floor(t, { providers = {}, steer = null, emit, claimWorkingSet } = {}) {
   const home = fs.mkdtempSync(path.join(JAIL, 'floor-'));
   const events = [];
   const hive = new HiveManager(() => home, emit ?? ((ch, p) => { events.push({ ch, p }); return true; }));
@@ -294,6 +295,7 @@ async function floor(t, { providers = {}, steer = null, emit } = {}) {
   const hookEvents = [];
   const control = { takeSteer: () => steer, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined, undefined, (...a) => hookEvents.push(a));
+  if (claimWorkingSet) s.setClaimWorkingSetProvider(claimWorkingSet);
   server.current = s;
   const fire = (agent_id, hook_event_name, extra = {}) => s.handle({ agent_id, hook_event_name, session_id: `s-${agent_id}`, ...extra });
   const ctx = (res) => res?.hookSpecificOutput?.additionalContext ?? '';
@@ -301,6 +303,205 @@ async function floor(t, { providers = {}, steer = null, emit } = {}) {
   const logRows = () => { try { return fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   return { hive, server: s, fire, ctx, entryOf, events, hookEvents, logRows, home };
 }
+
+test('G4.4: a claims working set is re-injected on startup and compact SessionStart; never on UserPromptSubmit (Jim M-3)', async (t) => {
+  // CL-M4-BRIEFING-BUDGET C: a non-Claude provider (no second entry) still gets it in the joined bundle.
+  const seen = [];
+  const f = await floor(t, { providers: { 'gm-1': 'gemini' }, claimWorkingSet: (id, _source, part) => { seen.push([id, part ?? null]); return `# Memory working set — ${id}`; } });
+  assert.match(f.ctx(f.fire('gm-1', 'SessionStart', { source: 'startup' })), /# Memory working set — gm-1/);
+  assert.match(f.ctx(f.fire('gm-1', 'SessionStart', { source: 'compact' })), /# Memory working set — gm-1/);
+  assert.doesNotMatch(f.ctx(f.fire('gm-1', 'UserPromptSubmit', { prompt: 'memory wake-up' })), /Memory working set/);
+  assert.deepEqual(seen, [['gm-1', null], ['gm-1', null]], 'not even built for a prompt; the joined (envelope) cap');
+});
+
+/** The HookServer's own entry for a hook (the pipe and the HTTP broker both go through it). */
+const handleLive = (f, payload) => f.server.handleWithClaimContext({ session_id: `s-${payload.agent_id}`, ...payload });
+
+test('CL-M4-BRIEFING-BUDGET C: a Claude agent gets the working set from its OWN second SessionStart entry, alone and at the full ceiling; the joined bundle no longer carries it', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude', 'gm-1': 'gemini' }, claimWorkingSet: (id, source, part) => { seen.push([id, source, part ?? null]); return `# Memory working set — ${id} (${source})`; } });
+  for (const source of ['startup', 'compact', 'resume', 'clear']) {
+    const main = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'bundle' }));
+    assert.doesNotMatch(main, /Memory working set/, `the ${source} bundle leaves it out`);
+    const brief = await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'briefing' });
+    assert.equal(f.ctx(brief), `# Memory working set — cl-1 (${source})`, `the ${source} briefing carries it, and nothing else`);
+    assert.equal(brief.hookSpecificOutput.hookEventName, 'SessionStart');
+  }
+  assert.deepEqual(seen.map((s) => s[2]), ['briefing', 'briefing', 'briefing', 'briefing'], 'built only for the briefing entry, which asks for the ceiling');
+  const rows = f.logRows().filter((r) => r.kind === 'claims-briefing');
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0].chars, '# Memory working set — cl-1 (startup)'.length);
+  // The briefing entry does no other hook work: no session record, no roster, no mail.
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body' }, 'god-1');
+  const brief = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'compact', munder_part: 'briefing' }));
+  assert.ok(!brief.includes(m.id) && !brief.includes('<roster') && !brief.includes('<after-compaction>'), 'the working set alone');
+  // Never for a subagent, a one-way hook, another event or another provider.
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', provider_agent_id: 'sub-9', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing', transport: 'pipe-oneway' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'UserPromptSubmit', prompt: 'go', munder_part: 'briefing' }), {});
+  assert.deepEqual(await handleLive(f, { agent_id: 'gm-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' }), {}, 'a provider with no second entry keeps the joined path');
+  assert.equal(seen.length, 5);
+});
+
+/** POST one hook payload to the live HTTP broker (the path the app uses), as the shim does. */
+async function postHook(f, agentId, payload) {
+  f.server.start();
+  for (let i = 0; i < 200 && f.server.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
+  const url = new URL(f.server.hookUrl(agentId));
+  const body = JSON.stringify({ session_id: `s-${agentId}`, ...payload });
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: url.hostname, port: url.port, path: url.pathname, method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => {
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve(JSON.parse(b)));
+    });
+    req.on('error', reject); req.end(body);
+  });
+}
+
+/** Send one payload down the hook pipe and read the reply, as the command shim does. */
+async function pipeHook(f, payload) {
+  f.server.start();
+  const sock = f.hive.sockPath();
+  for (let i = 0; i < 200; i++) {
+    const ok = await new Promise((r) => { const c = net.createConnection(sock, () => { c.destroy(); r(true); }); c.on('error', () => r(false)); });
+    if (ok) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return new Promise((resolve, reject) => {
+    let b = '';
+    const c = net.createConnection(sock, () => c.write(JSON.stringify({ session_id: `s-${payload.agent_id}`, ...payload }) + '\n'));
+    c.setEncoding('utf8');
+    c.on('data', (d) => { b += d; });
+    c.on('end', () => resolve(JSON.parse(b || '{}')));
+    c.on('error', reject);
+  });
+}
+
+test('CL-M4 S1 (Jim): settings that predate the briefing entry (an unmarked main entry) keep the working set in the bundle; new settings give exactly one copy', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: (id, source, part) => { seen.push(part ?? null); return `# Memory working set — ${id} (${source})`; } });
+  const copies = (...ctxs) => ctxs.join('\n').split('# Memory working set — cl-1').length - 1;
+  for (const source of ['startup', 'compact']) {
+    // Old settings: only the one, unmarked entry runs; there is no briefing request at all.
+    const old = f.ctx(await handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source }));
+    assert.equal(copies(old), 1, `old settings (${source}): the bundle carries it`);
+    // New settings: both entries run; the marked bundle leaves it out, the briefing has it.
+    const [main, brief] = await Promise.all([
+      handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'bundle' }),
+      handleLive(f, { agent_id: 'cl-1', hook_event_name: 'SessionStart', source, munder_part: 'briefing' }),
+    ]);
+    assert.equal(copies(f.ctx(main), f.ctx(brief)), 1, `new settings (${source}): exactly one copy`);
+    assert.equal(copies(f.ctx(brief)), 1, 'and it is the briefing\'s');
+  }
+  assert.deepEqual(seen, [null, 'briefing', null, 'briefing'], 'the old bundle uses the joined (envelope) cap; the briefing the ceiling');
+});
+
+test('CL-M4 S2 (Jim): a briefing\'s flush is logged with printed chars and latency; a late one (the shim\'s 5 s give-up) and an unflushed one are logged as such', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { await new Promise((r) => setTimeout(r, 30)); return `# Memory working set — ${id}`; } });
+  const want = '# Memory working set — cl-1'.length;
+  const rowsOf = async (kind, n) => { for (let i = 0; i < 200; i++) { const r = f.logRows().filter((x) => x.kind === kind); if (r.length >= n) return r; await new Promise((res) => setTimeout(res, 10)); } return f.logRows().filter((x) => x.kind === kind); };
+  const brief = { agent_id: 'cl-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' };
+  await pipeHook(f, brief);
+  const [ok] = await rowsOf('claims-briefing-flush', 1);
+  assert.equal(ok.chars, want);
+  assert.equal(ok.printedChars, want, 'flushed in time: the shim prints it');
+  assert.ok(typeof ok.latencyMs === 'number' && ok.latencyMs < ok.limitMs, JSON.stringify(ok));
+  // The shim had already used 6 s before it sent: its 5 s give-up has passed, the agent started without it.
+  await pipeHook(f, { ...brief, shim_elapsed_ms: 6_000 });
+  const [late] = await rowsOf('claims-briefing-late', 1);
+  assert.equal(late.outcome, 'shim-gave-up');
+  assert.equal(late.printedChars, 0);
+  assert.equal(late.chars, want);
+  assert.ok(late.latencyMs >= late.limitMs);
+  // A connection that closes without flushing (on a Windows pipe a hang-up can still read as a
+  // flush, which the shim-clock measure above covers; this is the close-first path itself).
+  const { EventEmitter } = require('node:events');
+  const stream = new EventEmitter();
+  f.server.watchBriefingFlush(stream, brief, { hookSpecificOutput: { additionalContext: 'x'.repeat(40) } }, Date.now());
+  stream.emit('close');
+  stream.emit('finish');
+  const rows = await rowsOf('claims-briefing-late', 2);
+  assert.equal(rows[1]?.outcome, 'not-flushed', JSON.stringify(rows));
+  assert.equal(rows[1].latencyMs, null);
+  assert.equal(rows[1].chars, 40);
+  assert.equal(f.logRows().filter((x) => x.kind.startsWith('claims-briefing-') && x.kind !== 'claims-briefing').length, 3, 'settled once each');
+});
+
+test('G4.4 live path (Jim S-1): an ASYNC provider over the HTTP broker: startup and compact carry the set; a prompt neither builds nor carries it', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: async (id) => { seen.push(id); await new Promise((r) => setTimeout(r, 20)); return `# Memory working set — ${id} (async)`; } });
+  const ctxOf = (out) => out?.hookSpecificOutput?.additionalContext ?? '';
+  // CL-M4-BRIEFING-BUDGET C: Claude's briefing entry (a command shim, so the pipe) carries it.
+  const brief = { agent_id: 'cl-1', munder_part: 'briefing' };
+  assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'startup', ...brief })), /# Memory working set — cl-1 \(async\)/);
+  assert.match(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', ...brief })), /# Memory working set — cl-1 \(async\)/, 'rebuilt after a compaction');
+  assert.doesNotMatch(ctxOf(await pipeHook(f, { hook_event_name: 'SessionStart', source: 'compact', agent_id: 'cl-1', munder_part: 'bundle' })), /Memory working set/, 'not in the bundle');
+  // Only the command shim may set a mark: over HTTP a 'bundle' mark is dropped, so the request reads
+  // as an unmarked (older-settings) bundle and carries the set itself (S1: never zero copies).
+  const viaHttp = ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'SessionStart', source: 'compact', munder_part: 'bundle' }));
+  assert.match(viaHttp, /# Memory working set — cl-1 \(async\)/, 'HTTP drops the mark');
+  seen.pop();
+  assert.doesNotMatch(ctxOf(await postHook(f, 'cl-1', { hook_event_name: 'UserPromptSubmit', prompt: 'go' })), /Memory working set/);
+  assert.deepEqual(seen, ['cl-1', 'cl-1']);
+});
+
+test('Jim S-5 / G4.5: a one-way SessionStart and a Codex SessionStart build no working set (Codex has it in its instruction file)', async (t) => {
+  const seen = [];
+  const f = await floor(t, { providers: { 'cl-1': 'claude', 'cx-1': 'codex' }, claimWorkingSet: (id) => { seen.push(id); return `# Memory working set — ${id}`; } });
+  assert.doesNotMatch(f.ctx(f.fire('cl-1', 'SessionStart', { source: 'startup', transport: 'pipe-oneway' })), /Memory working set/);
+  assert.doesNotMatch(f.ctx(f.fire('cx-1', 'SessionStart', { source: 'startup' })), /Memory working set/);
+  assert.deepEqual(seen, []);
+});
+
+test('Jim M-3 gate: a SessionStart(compact) with a FULL working set, the carry and pending mail stays within 9,500 joined; the carry is whole and the mail is there', async (t) => {
+  const { WORKING_SET_MAX_CHARS } = loadTs('src/main/claims/delivery.ts');
+  const { MAIL_JOINED_BUDGET } = S;
+  const full = `# Memory working set — cl-1\n${'- a synthetic claim line about the widget relay [c:c-000000000001]\n'.repeat(200)}`.slice(0, WORKING_SET_MAX_CHARS);
+  assert.equal(full.length, WORKING_SET_MAX_CHARS);
+  const f = await floor(t, { providers: { 'cl-1': 'claude' }, claimWorkingSet: () => full });
+  f.hive.writeTasks([{ id: 'CARD-W4', title: 'A card in progress', status: 'doing', assignee: 'cl-1' }]);
+  f.server.mailReminders = () => [{ entry: { id: 'old-1', from: 'jim-1', act: 'request', subject: 'please check', state: 'acted', epoch: 'e-old' }, ageMs: 3_600_000 }];
+  const m = f.hive.send({ to: 'cl-1', act: 'inform', subject: 'live', body: 'a pending body '.repeat(40) }, 'god-1');
+  f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
+  // CL-M4-BRIEFING-BUDGET C: the FULL 9,000 comes whole in Claude's own briefing entry, under the
+  // 10,000-char per-output spill; the joined bundle (carry, mail) keeps its 9,500 for the rest.
+  const [b, main] = await Promise.all([
+    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact', munder_part: 'briefing' }),
+    f.server.handleWithClaimContext({ agent_id: 'cl-1', hook_event_name: 'SessionStart', session_id: 's-cl-1', source: 'compact', munder_part: 'bundle' }),
+  ]);
+  assert.equal(f.ctx(b), full, 'the working set, whole and alone');
+  assert.ok(f.ctx(b).length < 10_000, 'under Claude Code\'s per-output spill');
+  const c = f.ctx(main);
+  assert.ok(c.length <= MAIL_JOINED_BUDGET, `joined ${c.length} > ${MAIL_JOINED_BUDGET}`);
+  assert.ok(!c.includes('# Memory working set'), 'not joined into the bundle');
+  const carry = c.slice(c.indexOf('<after-compaction>'), c.indexOf('</after-compaction>') + '</after-compaction>'.length);
+  assert.ok(carry.includes('- card CARD-W4: "A card in progress" (in progress)') && carry.includes('- [old-1] from jim-1: "please check" (request)'), 'the carry, whole');
+  assert.ok(c.includes(`[hive-mail:${m.id}]`) && c.includes('a pending body a pending body'), 'the mail is re-injected with its body');
+});
+
+test('Jim M-3: the working set counts in the god handoff budget too', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8');
+  assert.match(src, /takeGodHandoff\?\.\(agentId, \[roster, goal, claimWorkingSet, steer, mail\]\)/);
+  assert.match(src, /this\.surfaceMail\(agentId, event, p, channel\?\.provider, \[handoff, roster, goal, claimWorkingSet, steer, mail\]\)/);
+  assert.match(src, /this\.reinjectMail\(agentId, p, channel\?\.provider, \[handoff, roster, goal, claimWorkingSet, steer, mail, carry\]\)/);
+});
+
+test('G4.5 (god\'s M-4 ruling): the Codex developer_instructions are the protocol, then the claims view; the prompt fingerprint never sees the view', () => {
+  assert.equal(HiveManager.codexDeveloperInstructions('PROTOCOL', null), 'PROTOCOL');
+  assert.equal(HiveManager.codexDeveloperInstructions('PROTOCOL', '# Memory working set — cx-1'), 'PROTOCOL\n\n# Memory working set — cx-1');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hive.ts'), 'utf8');
+  const fp = src.slice(src.indexOf('sessionPromptFingerprint(meta: AgentMeta)'), src.indexOf('sessionPromptFingerprint(meta: AgentMeta)') + 800);
+  assert.ok(!fp.includes('codexClaimContext'), 'the view is not a fingerprint input');
+});
+
+test('W5 hook (god): the completed-turn boundary (Stop) tells the claims listener, never for a subagent', async (t) => {
+  const f = await floor(t, { providers: { 'cl-1': 'claude' } });
+  const told = [];
+  f.server.setClaimTurnCompletedListener((id) => told.push(id));
+  f.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
+  f.fire('cl-1', 'Stop');
+  f.fire('cl-1', 'Stop', { provider_agent_id: 'sub-1' });
+  assert.deepEqual(told, ['cl-1']);
+});
 
 test('PIN: whenever delivered ids exist, the surfacing hook of every injection provider returns a <hive-mail> block carrying their markers', async (t) => {
   const f = await floor(t, { providers: { 'cl-1': 'claude', 'cx-1': 'codex', 'ag-1': 'antigravity' } });
