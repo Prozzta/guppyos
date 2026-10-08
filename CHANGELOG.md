@@ -11,6 +11,42 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.84] — 2026-10-08
+
+**Automatic compaction for every Claude agent, and the claims ledger, switched on for one agent
+(Jim) as a two-day trial.** Every other agent keeps its memory exactly as before. Rollback: 1.1.83
+(reinstall).
+
+### Added
+
+- **The claims ledger (trial: Jim only).** An agent at the `writer` level keeps its durable facts
+  as dated, signed claims, with a history of each fact. It also keeps a readable `memory.md`
+  export of them for rollback. `memory search` marks a replaced fact as `prior`, and one that is
+  possibly replaced as `prior?`. Claude receives its working set when a session starts. The level
+  is set per agent (`off`, `shadow`, `reader`, `writer`), and this build ships with every agent
+  `off` except Jim.
+
+### Changed
+
+- **Every Claude agent compacts at 150k tokens.** This is the god pilot from 1.1.81, rolled out to
+  all agents. Settings: `claudeAutoCompactWindow` (`"off"` gives Claude's own default). An
+  agent's own `autoCompactWindow` still wins. Codex agents are unchanged.
+- **A repeated message is delivered once.** An exact repeat within 10 minutes is archived, not
+  delivered again, and the sender is told.
+- **Memory sources and rooms sort the same way on every machine.** The order no longer depends on
+  the system locale.
+
+### Fixed
+
+- **The memory rollover undoes its archive write if the rewrite of `memory.md` fails,** and it
+  logs the failure.
+- **The heavy-job lock recognises more ways of starting a test suite or a benchmark.** This
+  covers ad-hoc node scripts, preloads, node value flags, Codex execs, PowerShell and cmd
+  quoting, and redirects. A long run can no longer slip past the queue.
+- **A stuck window is reported with the frame that was stuck.**
+- **A hook reply cut off before it reached the agent counts as not delivered,** so the mail is
+  offered again.
+
 ## [1.1.83] — 2026-10-03
 
 Smaller contexts for the hive's agents, and the last pieces of the Guppy rename. Rollback: 1.1.82
