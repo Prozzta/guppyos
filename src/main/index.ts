@@ -7614,9 +7614,9 @@ app.whenReady().then(() => {
   // lazy rule ("no earlier than 30 seconds after the first window becomes idle"), so an agent's
   // first task-start wake-up does not meet an empty index. The mode is read at fire time; any
   // other mode does nothing. A first memory request before then forks it as always.
+  // REL-184 S0: either way the claims import runs first (claimsImportReady); the worker forks after it.
   mainWindow?.webContents.once('did-finish-load', () => {
     startupTiming.mark('window-ready');
-    // REL-184 S0: the claims import (if any) runs first; the worker forks after it.
     const t = setTimeout(() => { void claimsImportReady().then(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }); }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
