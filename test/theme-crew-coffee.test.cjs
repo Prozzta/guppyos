@@ -366,3 +366,20 @@ test('coffee: nobody starts a run while walking home with a cup, even with a sho
   for (let i = 0; i < 400 && !went; i++) { crew.cool = 0; crew.tick(50); went = !!p.coffee; }
   assert.ok(went, 'free again, they go');
 });
+
+test('coffee timing: the brew takes 2.6 s; with no station to go home to, they sip 8-16 s at the spot', () => {
+  const crew = crewOf(31);
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  const p = crew.get('a');
+  for (let i = 0; i < 4000 && !(p.coffee && p.coffee.phase === 'brewing'); i++) crew.tick(50);
+  const brewed = crew.t;
+  p.seat = null; // nowhere to sit: the viewer's sip-at-the-spot branch
+  for (let i = 0; i < 200 && !p.cup; i++) crew.tick(50);
+  assert.ok(p.cup && crew.t - brewed > 2600 && crew.t - brewed <= 2650, `brewed in ${crew.t - brewed} ms`);
+  assert.equal(p.coffee.phase, 'sipping');
+  const until = p.coffee.until, sipFrom = crew.t;
+  assert.ok(until >= 8000 && until <= 16000, `sips for ${until} ms`);
+  for (let i = 0; i < 400 && p.coffee.phase === 'sipping'; i++) crew.tick(50);
+  assert.equal(p.coffee.phase, 'back');
+  assert.ok(crew.t - sipFrom > until && crew.t - sipFrom <= until + 50, `sipped ${crew.t - sipFrom} ms`);
+});

@@ -224,3 +224,13 @@ test('crew: a walker with no way to its station keeps trying and never sits away
   assert.equal(p.seated, false);
   assert.ok(tries >= 3, `retried ${tries} times`);
 });
+
+test('pack pictures decode through an image element, never fetch(): the CSP allows data: for img-src only', () => {
+  const fs = require('node:fs'), path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, '../src/renderer/src/scene/themes/themeCatalog.ts'), 'utf8');
+  const decode = src.slice(src.indexOf('async function decode('), src.indexOf('\n}\n', src.indexOf('async function decode(')));
+  assert.match(decode, /new Image\(\)[\s\S]*await img\.decode\(\)[\s\S]*createImageBitmap\(img,/);
+  assert.doesNotMatch(src.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, ''), /\bfetch\(/,'Vite inlines small pictures as data: URLs, and connect-src refuses them');
+  const csp = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8').match(/img-src ([^;]*);/);
+  assert.ok(csp && /\bdata:/.test(csp[1]) && /\bblob:/.test(csp[1]), 'img-src allows inlined and emitted pictures');
+});

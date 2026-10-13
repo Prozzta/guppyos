@@ -50,9 +50,13 @@ export function themeBuilder(id: string): BuilderSpec | null {
   return summaries().find((p) => p.id === id)?.builder ?? null;
 }
 
+/** Through an image element, never fetch(): Vite inlines small pictures as data:
+ *  URLs, which the page's CSP allows for img-src but not for connect-src. */
 async function decode(url: string): Promise<Pixels> {
-  const res = await fetch(url);
-  const bmp = await createImageBitmap(await res.blob());
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const bmp = await createImageBitmap(img, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   const cv = new OffscreenCanvas(bmp.width, bmp.height);
   const g = cv.getContext('2d');
   if (!g) throw new Error('no 2d context');
