@@ -76,7 +76,8 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
         }
       }
       for (const a of victims) archiveAgent(a.id);
-      await window.cth.updateConfig({ officeTheme: id });
+      // ThemeId is a validated string now; the config's own type opens up in PR-a.
+      await window.cth.updateConfig({ officeTheme: id as Parameters<typeof window.cth.updateConfig>[0]['officeTheme'] });
       setCurrent(id);
       setOfficeTheme(id); // → OfficeFloor rebuilds the scene on the new map/cast
       const meta = THEME_META.find((t) => t.id === id);

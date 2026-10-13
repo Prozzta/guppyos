@@ -28,16 +28,15 @@ import interiorsUrl from '@/assets/tilesets/interiors.png?url';
 // .tmj is Tiled JSON; imported as raw text and parsed by the loader.
 import officeMapRaw from '@/assets/maps/office.tmj?raw';
 import brooklyn99MapRaw from '@/assets/maps/brooklyn99.tmj?raw';
+// The office's layout data (seats, café, coffee, anchors, errands, monitor,
+// note colours, tileset metadata) as a data manifest; test/theme-office-
+// manifest.test.cjs pins it to the values this file used to hold inline.
+import officeLayoutJson from './office.layout.json';
 
-/** Theme identifiers. Only `office` exists in Phase 0; the five TV-show themes
- *  (friends, brooklyn99, siliconvalley, got, hogwarts) land in later phases. */
-export type ThemeId =
-  | 'office'
-  | 'friends'
-  | 'brooklyn99'
-  | 'siliconvalley'
-  | 'got'
-  | 'hogwarts';
+/** Theme identifiers: a validated string (lower-case letters, digits and
+ *  hyphens). Built-in themes live here; declarative packs are discovered from
+ *  theme.json files (scene/themes). `office` is always the fallback. */
+export type ThemeId = string;
 
 export interface Tile { x: number; y: number; }
 export type Facing = 'up' | 'down' | 'left' | 'right';
@@ -139,75 +138,39 @@ export interface ThemeConfig {
   cast: ThemeCast;
 }
 
-/** The existing office, expressed as a theme. Values are copied verbatim from
- *  the former in-file constants in OfficeFloor.tsx / DeskScreen.ts. */
+/** The office layout manifest's shape (office.layout.json). */
+interface OfficeLayout {
+  primarySeatNames: string[];
+  cafeSeatNames: string[];
+  cafeStands: Array<[string, 'coffee' | 'vending']>;
+  coffee: CoffeeConfig;
+  anchors: AnchorConfig;
+  errandSpots: ErrandSpot[];
+  monitor: { offTopLeftGid: number; onGids: Array<[number, number, number]> };
+  noteColors: Record<string, number>;
+  /** Tileset metadata in texture order (the URLs are bundled below). */
+  tilesets: Array<Omit<TilesetEntry, 'url'>>;
+}
+const OFFICE_LAYOUT = officeLayoutJson as unknown as OfficeLayout;
+const OFFICE_TILESET_URLS = [officeTilesetUrl, a5FloorsWallsUrl, interiorsUrl];
+
+/** The existing office, expressed as a theme. Its layout values come from
+ *  office.layout.json (byte-equivalent to the former inline constants). */
 export const OFFICE_THEME: ThemeConfig = {
   id: 'office',
   mapRaw: officeMapRaw,
-  tilesets: [
-    // office-tileset.png — embedded in the map (firstgid 1); keep the map's copy.
-    { url: officeTilesetUrl, embedded: true },
-    { url: a5FloorsWallsUrl, firstgid: 513, image: 'a5', imagewidth: 256, imageheight: 512, tilewidth: 16, tileheight: 16, columns: 16, tilecount: 512 },
-    { url: interiorsUrl, firstgid: 1025, image: 'interiors', imagewidth: 256, imageheight: 1424, tilewidth: 16, tileheight: 16, columns: 16, tilecount: 1424 },
-  ],
-  primarySeatNames: [
-    'desk-ceo',
-    'pc-1', 'pc-2', 'pc-3', 'pc-4', 'pc-5', 'pc-6',
-    'desk-chief-architect', 'desk-product-manager', 'desk-team-lead',
-    'desk-backend-engineer', 'desk-ui-ux-expert', 'desk-data-engineer',
-    'desk-project-manager', 'desk-market-researcher', 'desk-agent-organizer',
-  ],
-  cafeSeatNames: ['cafe-seat-1', 'cafe-seat-2', 'cafe-seat-3', 'cafe-seat-4'],
-  cafeStands: [
-    ['cafe-stand-coffee', 'coffee'],
-    ['cafe-stand-vending', 'vending'],
-  ],
-  coffee: {
-    trayTile: { x: 29, y: 15 },     // the sideboard (counter piece)
-    trayStand: { x: 29, y: 16 },
-    machineStand: { x: 26, y: 20 }, // below the counter machine
-    sinkTile: { x: 28, y: 18 },     // free counter top, right end
-    sinkStand: { x: 28, y: 20 },
-    maxCups: 4,
-  },
-  anchors: {
-    calendar: { x: 4, y: 1 },
-    boards: { x: 6, y: 10 },
-    clock: { x: 1, y: 1 },
-  },
-  errandSpots: [
-    // plants (droplets ride on the character via startWatering)
-    { kind: 'water', stand: { x: 2, y: 20 }, facing: 'left', fx: { x: 1, y: 20 }, duration: 4.5 },
-    { kind: 'water', stand: { x: 22, y: 20 }, facing: 'right', fx: { x: 23, y: 20 }, duration: 4.5 },
-    { kind: 'water', stand: { x: 30, y: 20 }, facing: 'right', fx: { x: 31, y: 20 }, duration: 4.5 },
-    // the CEO office is the god's domain: its plant, window, cigar. Workers
-    // never set foot in there for errands.
-    { kind: 'water', stand: { x: 6, y: 4 }, facing: 'up', fx: { x: 6, y: 3 }, duration: 4.5, godOnly: true },
-    { kind: 'smoke', stand: { x: 2, y: 3 }, facing: 'up', fx: { x: 2, y: 1 }, duration: 18, godOnly: true },
-    { kind: 'water', stand: { x: 17, y: 4 }, facing: 'up', fx: { x: 17, y: 3 }, duration: 4.5 },
-    // the two public wall windows — wind streaks drift into the room
-    { kind: 'window', stand: { x: 10, y: 3 }, facing: 'up', fx: { x: 10, y: 1 }, duration: 5 },
-    { kind: 'window', stand: { x: 15, y: 3 }, facing: 'up', fx: { x: 14, y: 1 }, duration: 5 },
-    // water dispensers (hallway + the top-right corner one)
-    { kind: 'dispenser', stand: { x: 16, y: 3 }, facing: 'down', fx: { x: 16, y: 4 }, duration: 3.5 },
-    { kind: 'dispenser', stand: { x: 32, y: 4 }, facing: 'up', fx: { x: 32, y: 3 }, duration: 3.5 },
-    // the café fridge (door light spills out) + the shelf beside it
-    { kind: 'fridge', stand: { x: 29, y: 20 }, facing: 'up', fx: { x: 29, y: 19 }, duration: 3.2 },
-    { kind: 'shelf', stand: { x: 30, y: 20 }, facing: 'up', fx: { x: 30, y: 18 }, duration: 4 },
-    // garbage bins (entrance + café) — a paper ball arcs in
-    { kind: 'bin', stand: { x: 18, y: 20 }, facing: 'left', fx: { x: 17, y: 20 }, duration: 2.6 },
-    { kind: 'bin', stand: { x: 31, y: 16 }, facing: 'right', fx: { x: 32, y: 16 }, duration: 2.6 },
-  ],
-  monitor: {
-    offTopLeftGid: 365,
-    onGids: [
-      [367, 0, 0], [368, 1, 0],
-      [383, 0, 1], [384, 1, 1],
-    ],
-  },
+  // office-tileset.png is embedded in the map (firstgid 1); the map's copy is kept.
+  tilesets: OFFICE_LAYOUT.tilesets.map((t, i) => ({ url: OFFICE_TILESET_URLS[i], ...t })),
+  primarySeatNames: OFFICE_LAYOUT.primarySeatNames,
+  cafeSeatNames: OFFICE_LAYOUT.cafeSeatNames,
+  cafeStands: OFFICE_LAYOUT.cafeStands,
+  coffee: OFFICE_LAYOUT.coffee,
+  anchors: OFFICE_LAYOUT.anchors,
+  errandSpots: OFFICE_LAYOUT.errandSpots,
+  monitor: OFFICE_LAYOUT.monitor,
   palette: {
     background: colors.ink[900],
-    noteColors: { todo: 0xf2df8a, doing: 0x9ecbf0, blocked: 0xf0a3a3, done: 0xa8e0b0 },
+    noteColors: OFFICE_LAYOUT.noteColors,
   },
   cast: {
     byName: CAST_BY_NAME as Record<string, CastMember>,
@@ -215,7 +178,6 @@ export const OFFICE_THEME: ThemeConfig = {
     defaultCharacter: DEFAULT_CHARACTER,
   },
 };
-
 /** Brooklyn Nine-Nine — the 99th precinct (TV-show offices Phase 2, structure).
  *  The map (brooklyn99.tmj) is a precinct bullpen: Captain Holt's glass office
  *  in the back corner (`desk-ceo`), an 8-desk detective bullpen (`pc-1..8`), a

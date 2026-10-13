@@ -1,13 +1,16 @@
 import { Container, Sprite, Texture, Rectangle } from 'pixi.js';
+import { FLIP_H, FLIP_V, FLIP_D } from '../themes/tiled';
 
 // Trimmed port of shahar061/the-office (office/engine/TiledMapRenderer.ts):
 // renders floor/walls/furniture tile layers and parses collision, spawn-points
 // and zones. Interactive-object / war-room / monitor-glow extraction is dropped
 // (we render every tile statically), so no tiles ever go missing.
 
-const FLIPPED_H_FLAG = 0x80000000;
-const FLIPPED_V_FLAG = 0x40000000;
-const FLIPPED_D_FLAG = 0x20000000;
+// Tiled's flip bits are shared with the theme-pack normalizer (scene/themes/tiled.ts).
+// The office keeps its own id mask (it predates hexagonal-rotation support).
+const FLIPPED_H_FLAG = FLIP_H;
+const FLIPPED_V_FLAG = FLIP_V;
+const FLIPPED_D_FLAG = FLIP_D;
 const TILE_ID_MASK = 0x1fffffff;
 
 export interface TiledMap {
