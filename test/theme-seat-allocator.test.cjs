@@ -87,3 +87,66 @@ test('a station the map does not offer is never assigned', () => {
   A.join({ id: 'g' });
   assert.deepEqual(A.snapshot(), { Speck2: 's', Chair1: 'g' });
 });
+
+test('a freed preset seat goes to a waiting agent of that preset before earlier waiting generics', () => {
+  // a full house; then a Sele waits behind three generics
+  const B = alloc();
+  for (const id of ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8']) B.join({ id });
+  B.join({ id: 'gw' });
+  B.join({ id: 'hold', presetId: 'jackov' }); // takes Speck2, g2 waits
+  B.join({ id: 'sw', presetId: 'sele' }); // takes Speck1, g1 waits
+  B.join({ id: 'sw2', presetId: 'sele' }); // Speck1 is a Sele's: sw2 waits behind gw, g2, g1
+  const ch = B.leave('sw');
+  assert.deepEqual(ch, [{ agentId: 'sw', from: 'Speck1', to: null }, { agentId: 'sw2', from: null, to: 'Speck1' }]);
+});
+
+test('a seated Sele moves up when Speck1 frees; the longest-seated first; its chair goes to the hand-out', () => {
+  const A = alloc();
+  A.join({ id: 's1', presetId: 'sele' }); // Speck1
+  A.join({ id: 'g1' }); // Speck2
+  A.join({ id: 's2', presetId: 'sele' }); // Chair1
+  A.join({ id: 's3', presetId: 'sele' }); // Chair2
+  assert.deepEqual(A.snapshot(), { Speck1: 's1', Speck2: 'g1', Chair1: 's2', Chair2: 's3' });
+  assert.deepEqual(A.leave('s1'), [
+    { agentId: 's1', from: 'Speck1', to: null },
+    { agentId: 's2', from: 'Chair1', to: 'Speck1' },
+  ]);
+  A.join({ id: 'g2' });
+  assert.equal(A.seat('g2'), 'Chair1', 'the freed chair is handed out in order');
+  // a waiting Sele still comes before a seated one
+  const B = alloc();
+  for (const id of ['s1', 's2']) B.join({ id, presetId: 'sele' }); // Speck1, Speck2
+  for (const id of ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7']) B.join({ id }); // Chair1..6 full, g7 waits
+  B.join({ id: 'sw', presetId: 'sele' }); // waits
+  const ch = B.leave('s1');
+  assert.deepEqual(ch.slice(0, 2), [{ agentId: 's1', from: 'Speck1', to: null }, { agentId: 'sw', from: null, to: 'Speck1' }]);
+  assert.equal(B.seat('s2'), 'Speck2', 'the seated Sele stays put');
+});
+
+test('fuzz: random joins and leaves keep every seat rule', () => {
+  const rng = (seed) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const order = ['Captain', 'Speck1', 'Speck2', 'Chair1', 'Chair2', 'Chair3', 'Chair4', 'Chair5', 'Chair6'];
+  const pool = [
+    { id: 'm', orchestrator: true }, { id: 's1', presetId: 'sele' }, { id: 's2', presetId: 'sele' }, { id: 's3', presetId: 'sele' },
+    { id: 'j1', presetId: 'jackov' }, { id: 'j2', presetId: 'jackov' },
+    ...Array.from({ length: 8 }, (_, i) => ({ id: 'g' + i })),
+  ];
+  for (let seed = 1; seed <= 60; seed++) {
+    const r = rng(seed), A = alloc(), here = new Map(), log = [];
+    for (let step = 0; step < 80; step++) {
+      const a = pool[Math.floor(r() * pool.length)];
+      if (here.has(a.id)) { A.leave(a.id); here.delete(a.id); log.push('-' + a.id); } else { A.join(a); here.set(a.id, a); log.push('+' + a.id); }
+      const snap = A.snapshot(), at = (id) => A.seat(id), why = `seed ${seed}: ${log.join(' ')} -> ${JSON.stringify(snap)}`;
+      const seated = [...here.keys()].filter(at);
+      assert.equal(new Set(seated.map(at)).size, seated.length, 'one agent per seat: ' + why);
+      assert.ok(Object.values(snap).every((id) => here.has(id)), 'only present agents hold seats: ' + why);
+      if (snap.Captain) assert.equal(snap.Captain, 'm', 'the captain is the orchestrator\'s: ' + why);
+      if (here.has('m')) assert.equal(at('m'), 'Captain', why);
+      const free = order.filter((s) => s !== 'Captain' && !snap[s]);
+      if (free.length) assert.ok([...here.values()].every((x) => at(x.id) || x.orchestrator), 'nobody waits while a chair is free: ' + why);
+      for (const [pid, seat] of [['sele', 'Speck1'], ['jackov', 'Speck2']]) {
+        if ([...here.values()].some((x) => x.presetId === pid)) assert.equal(here.get(snap[seat])?.presetId, pid, `${seat} is a ${pid}'s while one is aboard: ${why}`);
+      }
+    }
+  }
+});

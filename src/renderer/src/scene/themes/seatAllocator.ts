@@ -46,6 +46,9 @@ export class SeatAllocator {
   private readonly seatOf = new Map<string, string>();
   /** Agents without a station, in join order. */
   private readonly waiting: string[] = [];
+  /** agent id -> when it sat down (a counter): the longest-seated moves up first. */
+  private readonly since = new Map<string, number>();
+  private clock = 0;
 
   constructor(rules: SeatRules) {
     this.order = [...rules.order];
@@ -76,7 +79,7 @@ export class SeatAllocator {
     if (from === to) { if (!to && !this.waiting.includes(id)) this.waiting.push(id); return; }
     if (from) { this.holder.delete(from); this.seatOf.delete(id); }
     const w = this.waiting.indexOf(id);
-    if (to) { this.holder.set(to, id); this.seatOf.set(id, to); if (w >= 0) this.waiting.splice(w, 1); }
+    if (to) { this.holder.set(to, id); this.seatOf.set(id, to); this.since.set(id, ++this.clock); if (w >= 0) this.waiting.splice(w, 1); }
     else if (w < 0) this.waiting.push(id);
     out.push({ agentId: id, from, to });
   }
@@ -112,7 +115,7 @@ export class SeatAllocator {
       this.holder.delete(seat); this.seatOf.delete(cur); // vacate, then place the displaced agent after the claimant
       this.put(a.id, seat, out);
       const to = this.firstFree({ ...h, orchestrator: false });
-      if (to) { this.holder.set(to, cur); this.seatOf.set(cur, to); } else this.waiting.push(cur);
+      if (to) { this.holder.set(to, cur); this.seatOf.set(cur, to); this.since.set(cur, ++this.clock); } else this.waiting.push(cur);
       out.push({ agentId: cur, from: seat, to });
       return true;
     }
@@ -129,18 +132,31 @@ export class SeatAllocator {
     const w = this.waiting.indexOf(agentId);
     if (w >= 0) this.waiting.splice(w, 1);
     this.agents.delete(agentId);
+    this.since.delete(agentId);
     out.push({ agentId, from, to: null });
     this.refill(out);
     return out;
   }
 
-  /** Free stations go to waiting agents: affinity and captain claims first, then in join order. */
+  /** Free stations go to waiting agents: affinity and captain claims first. A
+   *  preset station still free then goes to an agent of that preset seated
+   *  elsewhere (the longest-seated moves up and walks there), and every chair
+   *  left free goes to the rest in join order. */
   private refill(out: SeatChange[]): void {
     for (const id of [...this.waiting]) {
       const a = this.agents.get(id)!;
       const aff = this.affinity(a);
       if (a.orchestrator && this.captain && !this.holder.has(this.captain)) this.put(id, this.captain, out);
       else if (aff && !this.holder.has(aff)) this.put(id, aff, out);
+    }
+    for (const seat of new Set(Object.values(this.presetSeats))) {
+      if (this.holder.has(seat)) continue;
+      let best: string | null = null;
+      for (const [id, at] of this.seatOf) {
+        if (at === seat || at === this.captain || this.affinity(this.agents.get(id)!) !== seat) continue;
+        if (best === null || this.since.get(id)! < this.since.get(best)!) best = id;
+      }
+      if (best) this.put(best, seat, out);
     }
     for (const id of [...this.waiting]) {
       const to = this.firstFree({ ...this.agents.get(id)!, orchestrator: false });

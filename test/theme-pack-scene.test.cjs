@@ -119,6 +119,43 @@ test('routes: every leg keeps the foot box clear (the seat zone excused only for
   assert.ok(path.some(([x]) => x < 32 || x > 160), JSON.stringify(path));
 });
 
+test('routes from a wall pocket: the first leg is checked too, and rerouted via a cell in clear sight', () => {
+  const S = pack().scene, G = S.grid;
+  const targets = [...S.stations.map((st) => [st.x, st.y, S.seatZones.get(st)]), [S.entrance[0], S.entrance[1], undefined]];
+  let pockets = 0, routed = 0;
+  for (let y = 0; y < G.H * G.g; y++) for (let x = 0; x < G.W * G.g; x++) {
+    const c = [Math.floor(x / G.g), Math.floor(y / G.g)];
+    if (!G.open[c[1] * G.W + c[0]]) continue;
+    const p = [x + 0.37, y + 0.61];
+    if (N.footHits(S, p[0], p[1]) || N.segClear(S, p, N.cellCentre(G, c))) continue;
+    pockets++;
+    for (const [tx, ty, Z] of targets) {
+      const path = N.route(S, p[0], p[1], tx, ty, Z, true);
+      if (!path) continue;
+      routed++;
+      let cur = p;
+      for (const q of path) { assert.ok(N.segClear(S, cur, q, Z), `from ${p} to ${tx},${ty}: ${cur} -> ${q}`); cur = q; }
+    }
+  }
+  assert.ok(pockets > 0 && routed > 0, `the fixture has wall pockets to start from (${pockets}, ${routed} routes)`);
+});
+
+test('routes with exact: the target is appended only when the foot box is clear there', () => {
+  const S = pack().scene, G = S.grid;
+  let tried = 0;
+  for (let y = 0; y < G.H * G.g && tried < 60; y += 3) for (let x = 0; x < G.W * G.g && tried < 60; x += 3) {
+    const c = [Math.floor(x / G.g), Math.floor(y / G.g)];
+    if (!G.open[c[1] * G.W + c[0]] || !N.footHits(S, x, y)) continue; // an open cell, but the foot box would touch a solid here
+    const path = N.route(S, S.entrance[0], S.entrance[1], x, y, undefined, true);
+    if (!path) continue;
+    tried++;
+    assert.notDeepEqual(path[path.length - 1], [x, y], `${x},${y}: stops on the last open cell instead`);
+    let cur = S.entrance;
+    for (const q of path) { assert.ok(N.segClear(S, cur, q), `to ${x},${y}: ${cur} -> ${q}`); cur = q; }
+  }
+  assert.ok(tried > 0, 'the fixture has blocked targets on open cells');
+});
+
 test('depth: the rail stands up from its foot; people behind it are covered, people in front are not', () => {
   const pk = pack(), S = pk.scene;
   const plan = C.buildScenePlan({ ...S, store: pk.store });
@@ -144,7 +181,10 @@ test('depth: a seated person is drawn with their chair (facing away: just behind
   const pk = pack(), plan = C.buildScenePlan({ ...pk.scene, store: pk.store });
   const alpha = pk.scene.stations[0], ch = C.chairOf(alpha, plan.sorted);
   assert.equal(ch.chair.o.name, 'chair-a');
-  const up = C.seatPose(ch, 'up', 32, null), down = C.seatPose(ch, 'down', 32, null);
+  const up = C.seatPose(ch, 'up', 32, 32, null), down = C.seatPose(ch, 'down', 32, 32, null);
+  // a side sitter's frame centre is half a frame WIDTH past the fitted left edge (it matters for non-square frames)
+  assert.equal(C.seatPose(ch, 'left', 24, 32, 5).x, ch.chair.x0 + 5 + 12);
+  assert.equal(C.seatPose(ch, 'right', 32, 48, 5).x, ch.chair.x0 + 5 + 16);
   assert.deepEqual([up.x, up.y, up.behind], [40, 32, true]);
   assert.deepEqual([down.x, down.y, down.behind], [40, 42, false]);
   const kUp = C.personKey(alpha.y, ch, up), kDown = C.personKey(alpha.y, ch, down);

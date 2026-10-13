@@ -274,12 +274,14 @@ export interface SeatPose {
 }
 
 /** Where a seated person is drawn: in the chair, by the way they face. `fit` is
- *  sideFit's result for a side-facing sitter. Offsets are the oracle's for a
- *  32 px frame, scaled to the sheet's frame height. */
-export function seatPose(chair: SortedItem, dir: Facing, fh: number, fit: number | null): SeatPose {
+ *  sideFit's result for a side-facing sitter, measured from the chair's left
+ *  edge to the frame's left edge, so the frame's centre is half a frame width
+ *  further on. The vertical offsets are the oracle's for a 32 px frame, scaled
+ *  to the sheet's frame height. */
+export function seatPose(chair: SortedItem, dir: Facing, fw: number, fh: number, fit: number | null): SeatPose {
   const c = chair.chair!, top = c.top, cx = (c.x0 + c.x1) / 2, k = fh / 32;
   if (dir === 'up') return { x: cx, y: top - 16 * k, behind: true };
-  if (dir === 'left' || dir === 'right') return { x: fit == null ? cx + (dir === 'left' ? -2 : 2) : c.x0 + fit + 16 * k, y: top - 8 * k, behind: false };
+  if (dir === 'left' || dir === 'right') return { x: fit == null ? cx + (dir === 'left' ? -2 : 2) : c.x0 + fit + fw / 2, y: top - 8 * k, behind: false };
   return { x: cx, y: top - 6 * k, behind: false };
 }
 

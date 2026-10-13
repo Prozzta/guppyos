@@ -165,7 +165,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
             if (!fits.has(key)) fits.set(key, sideFit(pack.store, ch.chair!.B, { sheet: sheetPx, sx: s.col * fw, sy: sit[dir] * fh, fw, fh }, dir));
             fit = fits.get(key)!;
           }
-          pose = seatPose(ch, dir, fh, fit);
+          pose = seatPose(ch, dir, fw, fh, fit);
         }
         const seated = !!(p.seated && p.seat);
         s.sprite.texture = frame(s.col, (seated ? sit : stand)[p.dir]);
