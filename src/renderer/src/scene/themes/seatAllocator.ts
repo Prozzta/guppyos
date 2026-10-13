@@ -84,7 +84,10 @@ export class SeatAllocator {
     out.push({ agentId: id, from, to });
   }
 
-  /** An agent arrives (or its preset/role changed): give it a station. */
+  /** An agent arrives (or its preset/role changed): give it a station. A seated
+   *  agent whose preset changes AWAY from its station keeps it: a same-preset
+   *  agent in an ordinary chair moves up only once that station frees (refill),
+   *  never by displacing a holder that is already sitting there. */
   join(a: SeatAgent): SeatChange[] {
     const out: SeatChange[] = [];
     const known = this.agents.has(a.id);

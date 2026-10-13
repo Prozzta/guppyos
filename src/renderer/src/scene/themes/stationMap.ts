@@ -381,8 +381,12 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
         const d = (cx - x) ** 2 + (cy - y) ** 2;
         if (d < hd) { hd = d; hit = d ? cellCentre(G, [cx, cy]) : p; }
       }
-      if (hit) brew.push(hit);
-      else rep.push({ level: 'warn', message: `The coffee ${n} is not on open floor reachable from the entrance; it is not used.` });
+      // A brewer stands there for seconds: never on a seat square or a chair (the seat-zone rule, as inSeatZone)
+      const fb = hit ? footBox(hit[0], hit[1]) : null;
+      const onSeat = fb && [...seatZones].find(([, rects]) => rects.some(([a, b, c, d]) => fb[0] < c && fb[2] > a && fb[1] < d && fb[3] > b));
+      if (!hit) rep.push({ level: 'warn', message: `The coffee ${n} is not on open floor reachable from the entrance; it is not used.` });
+      else if (onSeat) rep.push({ level: 'warn', message: `The coffee ${n} is inside the seat zone of "${onSeat[0].name}"; it is not used.` });
+      else brew.push(hit);
     }
     const ml = opts.coffee.mugLayer;
     const mL = ml ? roles.find((x) => x.l.kind === 'object' && eq(x.l.name, ml))?.l as ObjectLayer | undefined : undefined;

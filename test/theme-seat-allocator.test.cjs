@@ -123,6 +123,23 @@ test('a seated Sele moves up when Speck1 frees; the longest-seated first; its ch
   assert.equal(B.seat('s2'), 'Speck2', 'the seated Sele stays put');
 });
 
+test('move-up never takes the orchestrator off the captain\'s station, whatever its preset', () => {
+  const A = alloc();
+  A.join({ id: 'g1' }); // Speck1
+  A.join({ id: 'boss', orchestrator: true, presetId: 'sele' }); // Captain
+  assert.deepEqual(A.leave('g1'), [{ agentId: 'g1', from: 'Speck1', to: null }]);
+  assert.equal(A.seat('boss'), 'Captain');
+});
+
+test('move-up runs when a preset seat frees, not when its holder\'s preset changes away (documented on join)', () => {
+  const A = alloc();
+  A.join({ id: 's1', presetId: 'sele' }); // Speck1
+  A.join({ id: 's2', presetId: 'sele' }); // Speck2
+  assert.deepEqual(A.join({ id: 's1' }), []); // s1 drops the preset and keeps Speck1
+  assert.deepEqual(A.snapshot(), { Speck1: 's1', Speck2: 's2' });
+  assert.deepEqual(A.leave('s1').at(-1), { agentId: 's2', from: 'Speck2', to: 'Speck1' }); // it moves up once Speck1 frees
+});
+
 test('fuzz: random joins and leaves keep every seat rule', () => {
   const rng = (seed) => () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const order = ['Captain', 'Speck1', 'Speck2', 'Chair1', 'Chair2', 'Chair3', 'Chair4', 'Chair5', 'Chair6'];

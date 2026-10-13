@@ -206,8 +206,8 @@ test('crew clock: a negative or huge frame time never flings anyone', () => {
 test('coffee inline points: brewAt and mugs serve a map without coffee points; with both, inline mugs win per station', () => {
   const pk = pack(), an = (coffee) => N.analyseStationMap(pk.map, pk.store, { stations: pk.manifest.stations, navigation: pk.manifest.navigation, coffee });
   // inline only (the map's Coffee point and Mugs layer are not named)
-  const inl = an({ brewAt: [[168, 80], [96, 2]], mugs: { alpha: [10, 12], Nope: [1, 1] } });
-  assert.deepEqual(inl.brew, [[168, 80]]);
+  const inl = an({ brewAt: [[100, 100], [96, 2]], mugs: { alpha: [10, 12], Nope: [1, 1] } });
+  assert.deepEqual(inl.brew, [[100, 100]]);
   assert.ok(inl.diagnostics.some((d) => d.level === 'warn' && /coffee spot \(96, 2\) is not on open floor/.test(d.message)));
   assert.deepEqual([...inl.mugSpots].map(([s, p]) => [s.name, ...p]), [['Alpha', 10, 12]]);
   assert.ok(inl.diagnostics.some((d) => d.level === 'info' && /"Nope" names no station/.test(d.message)));
@@ -229,7 +229,7 @@ test('coffee inline points: brewAt and mugs serve a map without coffee points; w
   crew2.sync([{ id: 'a', status: 'idle' }]);
   let spot = null;
   run(crew2, 120000, () => { const c = crew2.get('a').coffee; if (c && !spot) spot = c.spot; });
-  assert.deepEqual(spot, [168, 80]);
+  assert.deepEqual(spot, [100, 100]);
 });
 
 test('coffee inline manifest: brewAt or brew is needed; bad points or mug entries drop the section with a warning', () => {
@@ -242,4 +242,127 @@ test('coffee inline manifest: brewAt or brew is needed; bad points or mug entrie
     assert.equal(r.manifest.coffee, undefined, JSON.stringify(bad));
     assert.ok(r.diagnostics.some((d) => d.level === 'warn' && /coffee/.test(d.message)), JSON.stringify(bad));
   }
+});
+
+const crewOn = (S, rand, opts) => new Cr.Crew(S, SA.seatRulesFrom(pack().manifest, S.seatOrder.map((s) => s.name)), rand, opts);
+const stall = (p) => Array.from({ length: 2000 }, (_, i) => [p.x + (i % 2) * 2, p.y]); // walks on the spot for 100 s
+
+test('coffee spots: an off-floor point snaps to the nearest open cell; one landing in a seat zone or on a station is dropped', () => {
+  const pk = pack(), stL = pk.map.layers.find((l) => l.name === 'Stations');
+  stL.objects.push({ ...stL.objects[0], name: 'AtBeta', x: 124, y: 60 }); // a named point on Beta's square
+  const a = N.analyseStationMap(pk.map, pk.store, { stations: pk.manifest.stations, navigation: pk.manifest.navigation, coffee: { brew: ['AtBeta'], brewAt: [[44, 66], [125, 60], [42, 140], [168, 100]] } });
+  stL.objects.pop();
+  assert.deepEqual(a.brew, [[46, 70]]); // (44, 66) is off the floor: the centre of the nearest open cell
+  for (const [what, st] of [['point "AtBeta"', 'Beta'], ['spot (125, 60)', 'Beta'], ['spot (42, 140)', 'Gamma'], ['spot (168, 100)', 'Coffee']])
+    assert.ok(a.diagnostics.some((d) => d.level === 'warn' && d.message.includes(`coffee ${what} is inside the seat zone of "${st}"`)), what);
+});
+
+test('coffee: a mug parked by a back-to-work sit is full for 60 s, then lets them go again', () => {
+  const crew = crewOf(10);
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  const p = crew.get('a');
+  for (let i = 0; i < 4000 && !(p.coffee && p.coffee.phase === 'walking'); i++) crew.tick(50);
+  p.cup = true;
+  crew.sync([{ id: 'a', status: 'working' }]);
+  for (let i = 0; i < 1000 && !p.seated; i++) crew.tick(50);
+  assert.equal(p.mug.full, crew.t + 60000, 'parked full, for 60 s');
+  const parked = crew.t;
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  p.coffeeNext = 0;
+  let went = 0;
+  run(crew, 120000, () => { if (p.coffee && !went) went = crew.t; });
+  assert.ok(went >= parked + 60000, `went ${went - parked} ms after parking`);
+});
+
+test('coffee: a busy brew spot is never shared; a second spot serves a second agent at once', () => {
+  const S = pack().scene;
+  for (const brew of [[S.brew[0]], [S.brew[0], [100, 100]]]) {
+    const crew = crewOn({ ...S, brew }, rng(21));
+    crew.sync([{ id: 'a', status: 'idle' }, { id: 'b', status: 'idle' }]);
+    let both = false;
+    run(crew, 120000, () => {
+      crew.cool = 0; // the picker runs every frame
+      const spots = crew.walkers().filter((p) => p.coffee).map((p) => p.coffee.spot);
+      assert.equal(new Set(spots).size, spots.length, 'two runs at one spot');
+      both = both || spots.length === 2;
+    });
+    assert.equal(both, brew.length === 2, `${brew.length} spot(s)`);
+  }
+});
+
+test('coffee: fetching a parked mug has the 20 s watchdog too, and a mug out of reach is never picked up', () => {
+  const crew = crewOf(14);
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  const p = crew.get('a'), gamma = crew.SM.stations.find((s) => s.name === 'Gamma');
+  const kinds = [];
+  const ev = crew.event.bind(crew);
+  crew.event = (kind, id, other) => { ev(kind, id, other); kinds.push(kind); };
+  const toFetch = () => { // from the brew spot, far from the mug parked at Gamma
+    Object.assign(p, { mug: { seat: gamma, full: 0 }, coffee: null, path: [], wait: 0, seated: false, homeSit: false, cup: false });
+    [p.x, p.y] = crew.SM.brew[0];
+    assert.ok(crew.startCoffee(p, crew.SM.brew[0]));
+    assert.equal(p.coffee.phase, 'fetch');
+  };
+  toFetch();
+  const start = crew.t;
+  p.path = stall(p);
+  for (let i = 0; i < 1000 && p.coffee; i++) crew.tick(50);
+  assert.ok(crew.t - start > 20000 && crew.t - start < 21000, `gave up after ${crew.t - start} ms`);
+  assert.equal(kinds.at(-1), 'gaveUp');
+  assert.ok(p.mug && p.mug.seat === gamma && !p.cup, 'the mug stays parked');
+  // the fetch walk ends far from the mug (it could not get closer): no pickup, no coffee
+  toFetch();
+  p.path = []; [p.x, p.y] = crew.SM.brew[0];
+  crew.tick(50);
+  assert.equal(p.coffee, null);
+  assert.equal(kinds.at(-1), 'gaveUp');
+  assert.ok(p.mug && p.mug.seat === gamma && !p.cup, 'a mug out of reach is not picked up');
+});
+
+test('chat: an idle neighbour within 40 px who is not seated; both stay quiet for 3 s after', () => {
+  const crew = crewOf(15);
+  crew.sync([{ id: 'a', status: 'idle' }, { id: 'b', status: 'idle' }]);
+  run(crew, 3000);
+  const p = crew.get('a'), q = crew.get('b');
+  let chats = 0;
+  const ev = crew.event.bind(crew);
+  crew.event = (kind, id, other) => { ev(kind, id, other); if (kind === 'chat') chats++; };
+  crew.rand = () => 0;
+  const place = (dx) => {
+    for (const w of [p, q]) { w.path = []; w.coffee = null; w.wait = 0; w.seated = false; w.talk = 0; w.idle = 0; }
+    [p.x, p.y, q.x, q.y] = [100, 100, 100 + dx, 100];
+  };
+  place(40); crew.atStop(p); assert.equal(chats, 0, 'too far');
+  place(39); q.seated = true; crew.atStop(p); assert.equal(chats, 0, 'the partner is seated');
+  place(39); crew.atStop(p); assert.equal(chats, 1);
+  assert.deepEqual([p.dir, q.dir, p.talk, q.talk], ['right', 'left', crew.t + 3000, crew.t + 3000]);
+  assert.ok(p.idle >= 3000 && q.idle >= 3000);
+  crew.atStop(p); crew.atStop(q); assert.equal(chats, 1, 'quiet for 3 s');
+  q.talk = 0; crew.atStop(p); assert.equal(chats, 1, 'the speaker is still quiet');
+  p.talk = 0; q.talk = crew.t + 1; crew.atStop(p); assert.equal(chats, 1, 'the partner is still quiet');
+  q.talk = crew.t; crew.atStop(p); assert.equal(chats, 2, 'then they talk again');
+});
+
+test('coffee picker: it looks every 6-12 s', () => {
+  const crew = crewOf(16);
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  const looks = [];
+  let last = crew.cool;
+  run(crew, 10 * 60000, () => { if (crew.cool > last) looks.push(crew.cool); last = crew.cool; });
+  assert.ok(looks.length >= 50 && looks.length <= 100, `${looks.length} looks in 10 min`);
+  for (const c of looks) assert.ok(c >= 6000 && c <= 12000, `next look in ${c} ms`);
+});
+
+test('coffee: nobody starts a run while walking home with a cup, even with a short pack cooldown', () => {
+  const crew = crewOf(17, { coffeeGap: [10000, 10000] });
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  const p = crew.get('a');
+  run(crew, 2000);
+  Object.assign(p, { homeSit: true, seated: false, coffee: null, coffeeNext: 0, mug: null, cup: true, wait: 0 });
+  p.path = stall(p);
+  for (let i = 0; i < 400; i++) { crew.cool = 0; crew.tick(50); assert.equal(p.coffee, null, 'started a run on the way home'); }
+  Object.assign(p, { homeSit: false, cup: false });
+  let went = false;
+  for (let i = 0; i < 400 && !went; i++) { crew.cool = 0; crew.tick(50); went = !!p.coffee; }
+  assert.ok(went, 'free again, they go');
 });

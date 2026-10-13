@@ -57,7 +57,7 @@ export interface StationsSpec {
 export interface CoffeeSpec {
   /** Point names in the stations layer where coffee is made (each is a brew spot, never a station). */
   brew?: string[];
-  /** Brew spots given inline, [x, y] in map pixels (snapped to the floor like named points). */
+  /** Brew spots given inline, [x, y] in map pixels (snapped to the floor like named points; a spot in a seat zone is dropped). */
   brewAt?: Array<[number, number]>;
   /** An object layer of points named after stations: where each station's mug is parked. */
   mugLayer?: string;
