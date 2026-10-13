@@ -202,3 +202,44 @@ test('crew clock: a negative or huge frame time never flings anyone', () => {
   assert.ok(Math.hypot(p.x - x, p.y - y) <= 80 * Cr.WALK_SPEED + 1e-9);
   assert.equal(crew.t, t + 80);
 });
+
+test('coffee inline points: brewAt and mugs serve a map without coffee points; with both, inline mugs win per station', () => {
+  const pk = pack(), an = (coffee) => N.analyseStationMap(pk.map, pk.store, { stations: pk.manifest.stations, navigation: pk.manifest.navigation, coffee });
+  // inline only (the map's Coffee point and Mugs layer are not named)
+  const inl = an({ brewAt: [[168, 80], [96, 2]], mugs: { alpha: [10, 12], Nope: [1, 1] } });
+  assert.deepEqual(inl.brew, [[168, 80]]);
+  assert.ok(inl.diagnostics.some((d) => d.level === 'warn' && /coffee spot \(96, 2\) is not on open floor/.test(d.message)));
+  assert.deepEqual([...inl.mugSpots].map(([s, p]) => [s.name, ...p]), [['Alpha', 10, 12]]);
+  assert.ok(inl.diagnostics.some((d) => d.level === 'info' && /"Nope" names no station/.test(d.message)));
+  // layer only, as in the fixture
+  assert.deepEqual([...pk.scene.mugSpots].map(([s]) => s.name), ['Alpha', 'Beta', 'Gamma']);
+  // both: named points first, then inline; the layer's mugs, overridden by inline ones for the stations they name
+  const both = an({ brew: ['Coffee'], brewAt: [[150, 90]], mugLayer: 'Mugs', mugs: { Beta: [1, 2] } });
+  assert.deepEqual(both.brew, [[168, 80], [150, 90]]);
+  assert.deepEqual([...both.mugSpots].map(([s, p]) => [s.name, ...p]), [['Alpha', 44, 52], ['Beta', 1, 2], ['Gamma', 52, 146]]);
+  // no usable brew spot: a diagnostic, and idle people only wander
+  const none = an({ brewAt: [[-40, -40]] });
+  assert.deepEqual(none.brew, []);
+  assert.ok(none.diagnostics.some((d) => /No usable coffee point/.test(d.message)));
+  const crew = new Cr.Crew(none, SA.seatRulesFrom(pk.manifest, none.seatOrder.map((s) => s.name)), rng(12));
+  crew.sync([{ id: 'a', status: 'idle' }]);
+  run(crew, 120000, () => assert.equal(crew.get('a').coffee, null));
+  // inline only runs coffee at the inline spot
+  const crew2 = new Cr.Crew(inl, SA.seatRulesFrom(pk.manifest, inl.seatOrder.map((s) => s.name)), rng(13));
+  crew2.sync([{ id: 'a', status: 'idle' }]);
+  let spot = null;
+  run(crew2, 120000, () => { const c = crew2.get('a').coffee; if (c && !spot) spot = c.spot; });
+  assert.deepEqual(spot, [168, 80]);
+});
+
+test('coffee inline manifest: brewAt or brew is needed; bad points or mug entries drop the section with a warning', () => {
+  const base = JSON.parse(require('node:fs').readFileSync(require('node:path').join(H.NEUTRAL, 'theme.json'), 'utf8'));
+  const check = (coffee) => Mf.validateManifest({ ...base, coffee });
+  assert.deepEqual(check({ brewAt: [[462, 366], [478, 366]], mugs: { Alpha: [474, 176] }, cooldown: [180, 300] }).manifest.coffee,
+    { brewAt: [[462, 366], [478, 366]], mugs: { Alpha: [474, 176] }, cooldown: [180, 300] });
+  for (const bad of [{ mugLayer: 'Mugs' }, { brewAt: [] }, { brewAt: [[1]] }, { brewAt: [[1, 'a']] }, { brewAt: [[1, Infinity]] }, { brewAt: [[1, 2]], mugs: { Alpha: [1] } }, { brewAt: [[1, 2]], mugs: [[1, 2]] }]) {
+    const r = check(bad);
+    assert.equal(r.manifest.coffee, undefined, JSON.stringify(bad));
+    assert.ok(r.diagnostics.some((d) => d.level === 'warn' && /coffee/.test(d.message)), JSON.stringify(bad));
+  }
+});

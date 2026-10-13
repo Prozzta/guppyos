@@ -86,9 +86,9 @@ export interface StationMap {
   reach: Uint8Array;
   zones: WorldShape[];
   wanderZone: WorldShape | null;
-  /** Brew spots (the manifest's coffee.brew points on reachable open floor). */
+  /** Brew spots (the manifest's coffee.brew points, then its brewAt ones, on reachable open floor). */
   brew: Array<[number, number]>;
-  /** Per station: where its mug is parked (the manifest's coffee.mugLayer points). */
+  /** Per station: where its mug is parked (the manifest's coffee.mugs, else its mugLayer points). */
   mugSpots: Map<Station, [number, number]>;
   rowPieceCache: Map<TileLayer, RowPieces>;
   diagnostics: Diagnostic[];
@@ -362,14 +362,18 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
   const wanderZone = wz ? zones.find((z) => eq(z.name || '', wz)) ?? null : null;
   if (wz && !wanderZone) rep.push({ level: 'warn', message: `The wander zone "${wz}" is not in the zones layer; idle people wander anywhere they can reach.` });
 
-  // Coffee: brew spots from the stations layer, mug spots from their own layer (both pack data)
+  // Coffee: brew spots from the stations layer and/or inline, mug spots from their own layer and/or inline (all pack data)
   const brew: Array<[number, number]> = [];
   const mugSpots = new Map<Station, [number, number]>();
-  if (opts.coffee && stL) {
-    for (const n of opts.coffee.brew) {
-      const o = stL.objects.find((q) => q.visible && q.name && eq(q.name, n));
-      if (!o) { rep.push({ level: 'warn', message: `The coffee point "${n}" is not in the layer "${spec.layer}".` }); continue; }
-      const p: [number, number] = [o.x + stL.ox + (o.shape === 'point' ? 0 : o.width / 2), o.y + stL.oy + (o.shape === 'point' ? 0 : o.height / 2)];
+  if (opts.coffee) {
+    const spots: Array<[string, [number, number]]> = [];
+    for (const n of opts.coffee.brew ?? []) {
+      const o = stL?.objects.find((q) => q.visible && q.name && eq(q.name, n));
+      if (!o || !stL) { rep.push({ level: 'warn', message: `The coffee point "${n}" is not in the layer "${spec.layer}".` }); continue; }
+      spots.push([`point "${n}"`, [o.x + stL.ox + (o.shape === 'point' ? 0 : o.width / 2), o.y + stL.oy + (o.shape === 'point' ? 0 : o.height / 2)]]);
+    }
+    for (const p of opts.coffee.brewAt ?? []) spots.push([`spot (${p[0]}, ${p[1]})`, [p[0], p[1]]]);
+    for (const [n, p] of spots) {
       const [x, y] = fcell(p[0], p[1]);
       let hit: [number, number] | null = null, hd = Infinity;   // the point, or the nearest open reachable cell within 3 cells
       for (let cy = y - 3; cy <= y + 3; cy++) for (let cx = x - 3; cx <= x + 3; cx++) {
@@ -378,7 +382,7 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
         if (d < hd) { hd = d; hit = d ? cellCentre(G, [cx, cy]) : p; }
       }
       if (hit) brew.push(hit);
-      else rep.push({ level: 'warn', message: `The coffee point "${n}" is not on open floor reachable from the entrance; it is not used.` });
+      else rep.push({ level: 'warn', message: `The coffee ${n} is not on open floor reachable from the entrance; it is not used.` });
     }
     const ml = opts.coffee.mugLayer;
     const mL = ml ? roles.find((x) => x.l.kind === 'object' && eq(x.l.name, ml))?.l as ObjectLayer | undefined : undefined;
@@ -387,6 +391,11 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
       const s = o.name ? names.get(o.name.trim().toLowerCase()) : undefined;
       if (s) mugSpots.set(s, [o.x + mL.ox, o.y + mL.oy]);
       else rep.push({ level: 'info', message: `The mug point "${o.name}" names no station; it is not used.` });
+    }
+    for (const [n, p] of Object.entries(opts.coffee.mugs ?? {})) {
+      const s = names.get(n.trim().toLowerCase());
+      if (s) mugSpots.set(s, [p[0], p[1]]);
+      else rep.push({ level: 'info', message: `The coffee mug spot "${n}" names no station; it is not used.` });
     }
     if (!brew.length) rep.push({ level: 'warn', message: 'No usable coffee point: idle people only wander.' });
   }

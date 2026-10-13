@@ -52,12 +52,17 @@ export interface StationsSpec {
   seats?: Record<string, StationSeatSpec>;
 }
 
-/** Idle agents' coffee runs. */
+/** Idle agents' coffee runs. The spots come from the map (named points) or,
+ *  for a map that has none, from here (map pixels). At least one brew spot. */
 export interface CoffeeSpec {
   /** Point names in the stations layer where coffee is made (each is a brew spot, never a station). */
-  brew: string[];
+  brew?: string[];
+  /** Brew spots given inline, [x, y] in map pixels (snapped to the floor like named points). */
+  brewAt?: Array<[number, number]>;
   /** An object layer of points named after stations: where each station's mug is parked. */
   mugLayer?: string;
+  /** Mug spots given inline, by station name, [x, y] in map pixels; for the stations it names, it wins over mugLayer. */
+  mugs?: Record<string, [number, number]>;
   /** Per agent: seconds from the start of one coffee run to the next, [min, max] (default [180, 300]). */
   cooldown?: [number, number];
 }
@@ -283,15 +288,20 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
   if (raw.coffee !== undefined) {
     const c = raw.coffee, cd = isObj(c) ? c.cooldown : undefined;
     const seatNames = new Set((stations?.seatOrder ?? []).map((n) => n.trim().toLowerCase()));
-    const brewOk = isObj(c) && Array.isArray(c.brew) && c.brew.length > 0 && c.brew.length <= 8 && c.brew.every((n) => isStr(n, 80));
+    const xy = (v: unknown) => Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= 1e5);
+    const list = (v: unknown, ok: (x: unknown) => boolean) => v === undefined || (Array.isArray(v) && v.length > 0 && v.length <= 8 && v.every(ok));
+    const brewOk = isObj(c) && list(c.brew, (n) => isStr(n, 80)) && list(c.brewAt, xy) && (c.brew !== undefined || c.brewAt !== undefined);
+    const mugsOk = !isObj(c) || c.mugs === undefined || (isObj(c.mugs) && Object.keys(c.mugs).length <= 64 && Object.entries(c.mugs).every(([k, v]) => isStr(k, 80) && xy(v)));
     const cdOk = cd === undefined || (Array.isArray(cd) && cd.length === 2 && cd.every((v) => typeof v === 'number' && v >= 10 && v <= 3600) && cd[0] <= cd[1]);
-    if (!isObj(c) || !brewOk || !cdOk || (c.mugLayer !== undefined && !isStr(c.mugLayer, 80))) {
-      warn('"coffee" is malformed and is ignored (expected { brew: [point names], mugLayer?, cooldown?: [min, max] seconds, 10-3600 })');
-    } else if ((c.brew as string[]).some((n) => seatNames.has(n.trim().toLowerCase()))) {
+    if (!isObj(c) || !brewOk || !mugsOk || !cdOk || (c.mugLayer !== undefined && !isStr(c.mugLayer, 80))) {
+      warn('"coffee" is malformed and is ignored (expected { brew?: [point names], brewAt?: [[x, y]], at least one of them; mugLayer?, mugs?: { station: [x, y] }, cooldown?: [min, max] seconds, 10-3600 })');
+    } else if (((c.brew ?? []) as string[]).some((n) => seatNames.has(n.trim().toLowerCase()))) {
       warn('"coffee.brew" names a station in seatOrder; a brew spot is never a seat. Coffee is ignored');
     } else coffee = {
-      brew: [...(c.brew as string[])],
+      ...(c.brew ? { brew: [...(c.brew as string[])] } : {}),
+      ...(c.brewAt ? { brewAt: (c.brewAt as number[][]).map(([x, y]) => [x, y] as [number, number]) } : {}),
       ...(c.mugLayer ? { mugLayer: c.mugLayer as string } : {}),
+      ...(c.mugs ? { mugs: Object.fromEntries(Object.entries(c.mugs as Record<string, number[]>).map(([k, [x, y]]) => [k, [x, y] as [number, number]])) } : {}),
       ...(cd ? { cooldown: [cd[0], cd[1]] as [number, number] } : {}),
     };
   }
