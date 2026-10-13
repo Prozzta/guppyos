@@ -39,7 +39,7 @@ test('TMX with external TSX: tilesets, first gids, native tile size, ordered lay
   assert.deepEqual(M.tilesets.map((t) => [t.firstgid, t.name, t.tw, t.th, t.columns]), [[1, 'tiles', 16, 16, 4], [9, 'props', 16, 16, 0]]);
   assert.deepEqual(M.layers.map((l) => [l.kind, l.name]), [
     ['image', 'reference'], ['tile', 'Floor'], ['tile', 'Walls'], ['tile', 'Rail'],
-    ['object', 'collision-shapes'], ['object', 'Props'], ['object', 'Stations'],
+    ['object', 'collision-shapes'], ['object', 'Props'], ['object', 'Stations'], ['object', 'Mugs'],
   ]);
   // the tiles atlas resolves next to its TSX; the props TSX was referenced by an absolute
   // path on another machine and resolves by its file name; its tile picture by its own path

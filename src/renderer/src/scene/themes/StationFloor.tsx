@@ -134,7 +134,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
 
-      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)));
+      const cd = pack.manifest.coffee?.cooldown;
+      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
       const sprites = new Map<string, { sprite: Sprite; col: number }>();
       const fits = new Map<string, number | null>();
       const sync = () => {

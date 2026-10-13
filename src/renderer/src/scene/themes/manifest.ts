@@ -52,6 +52,16 @@ export interface StationsSpec {
   seats?: Record<string, StationSeatSpec>;
 }
 
+/** Idle agents' coffee runs. */
+export interface CoffeeSpec {
+  /** Point names in the stations layer where coffee is made (each is a brew spot, never a station). */
+  brew: string[];
+  /** An object layer of points named after stations: where each station's mug is parked. */
+  mugLayer?: string;
+  /** Per agent: seconds from the start of one coffee run to the next, [min, max] (default [180, 300]). */
+  cooldown?: [number, number];
+}
+
 export interface NavigationSpec {
   /** Walk-grid cell size in pixels (default 4). */
   walkGrid?: number;
@@ -107,6 +117,8 @@ export interface ThemeManifest {
   uiTokens?: Record<string, string>;
   builder?: BuilderSpec;
   projectDefaults?: ProjectDefaults;
+  /** Idle agents' coffee runs; without it idle agents only wander and chat. */
+  coffee?: CoffeeSpec;
   /** Pack-relative paths of optional text files (e.g. bubble lines). */
   text?: Record<string, string>;
 }
@@ -120,7 +132,7 @@ const ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 const COLOUR_RE = /^(#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6}|[a-z0-9][a-z0-9-]{0,39})$/;
 const TOP_KEYS = new Set(['schema', 'id', 'label', 'sceneKind', 'map', 'palette', 'stations', 'navigation', 'spriteRenderer',
-  'assets', 'uiTokens', 'builder', 'projectDefaults', 'text', '$comment']);
+  'assets', 'uiTokens', 'builder', 'projectDefaults', 'coffee', 'text', '$comment']);
 const ROW_KEYS: Array<keyof SpriteRows> = ['down', 'up', 'left', 'right', 'sitDown', 'sitUp', 'sitLeft', 'sitRight'];
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -267,6 +279,23 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
     } else projectDefaults = {};
   }
 
+  let coffee: CoffeeSpec | undefined;
+  if (raw.coffee !== undefined) {
+    const c = raw.coffee, cd = isObj(c) ? c.cooldown : undefined;
+    const seatNames = new Set((stations?.seatOrder ?? []).map((n) => n.trim().toLowerCase()));
+    const brewOk = isObj(c) && Array.isArray(c.brew) && c.brew.length > 0 && c.brew.length <= 8 && c.brew.every((n) => isStr(n, 80));
+    const cdOk = cd === undefined || (Array.isArray(cd) && cd.length === 2 && cd.every((v) => typeof v === 'number' && v >= 10 && v <= 3600) && cd[0] <= cd[1]);
+    if (!isObj(c) || !brewOk || !cdOk || (c.mugLayer !== undefined && !isStr(c.mugLayer, 80))) {
+      warn('"coffee" is malformed and is ignored (expected { brew: [point names], mugLayer?, cooldown?: [min, max] seconds, 10-3600 })');
+    } else if ((c.brew as string[]).some((n) => seatNames.has(n.trim().toLowerCase()))) {
+      warn('"coffee.brew" names a station in seatOrder; a brew spot is never a seat. Coffee is ignored');
+    } else coffee = {
+      brew: [...(c.brew as string[])],
+      ...(c.mugLayer ? { mugLayer: c.mugLayer as string } : {}),
+      ...(cd ? { cooldown: [cd[0], cd[1]] as [number, number] } : {}),
+    };
+  }
+
   let uiTokens: Record<string, string> | undefined;
   if (raw.uiTokens !== undefined) {
     if (!isObj(raw.uiTokens) || !Object.values(raw.uiTokens).every((v) => isStr(v, 80))) warn('"uiTokens" must map names to strings; ignored');
@@ -293,7 +322,7 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
       rows: Object.fromEntries(ROW_KEYS.map((k) => [k, rows[k]])) as unknown as SpriteRows,
     },
     ...(assets ? { assets } : {}), ...(uiTokens ? { uiTokens } : {}), ...(builder ? { builder } : {}),
-    ...(projectDefaults ? { projectDefaults } : {}), ...(text ? { text } : {}),
+    ...(projectDefaults ? { projectDefaults } : {}), ...(coffee ? { coffee } : {}), ...(text ? { text } : {}),
   };
   return { manifest, diagnostics: diags };
 }

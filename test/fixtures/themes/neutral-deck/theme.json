@@ -30,6 +30,16 @@
   "navigation": {
     "walkGrid": 4
   },
+  "coffee": {
+    "brew": [
+      "Coffee"
+    ],
+    "mugLayer": "Mugs",
+    "cooldown": [
+      180,
+      300
+    ]
+  },
   "spriteRenderer": {
     "kind": "sheet",
     "sheet": "pictures/sheet.png",

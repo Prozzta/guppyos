@@ -616,6 +616,61 @@
      "rotation": 0,
      "visible": true,
      "point": true
+    },
+    {
+     "id": 25,
+     "name": "Coffee",
+     "x": 168,
+     "y": 80,
+     "width": 0,
+     "height": 0,
+     "rotation": 0,
+     "visible": true,
+     "point": true
+    }
+   ]
+  },
+  {
+   "id": 9,
+   "name": "Mugs",
+   "type": "objectgroup",
+   "visible": false,
+   "opacity": 1,
+   "x": 0,
+   "y": 0,
+   "objects": [
+    {
+     "id": 26,
+     "name": "Alpha",
+     "x": 44,
+     "y": 52,
+     "width": 0,
+     "height": 0,
+     "rotation": 0,
+     "visible": true,
+     "point": true
+    },
+    {
+     "id": 27,
+     "name": "Beta",
+     "x": 124,
+     "y": 52,
+     "width": 0,
+     "height": 0,
+     "rotation": 0,
+     "visible": true,
+     "point": true
+    },
+    {
+     "id": 28,
+     "name": "Gamma",
+     "x": 52,
+     "y": 146,
+     "width": 0,
+     "height": 0,
+     "rotation": 0,
+     "visible": true,
+     "point": true
     }
    ]
   }

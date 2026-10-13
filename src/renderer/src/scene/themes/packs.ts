@@ -89,7 +89,7 @@ export function finishPack(data: PackData, store: PixelStore, earlier: Diagnosti
   diags.push(...checkSheet(data, store));
   if (hasError(diags)) return { value: null, diagnostics: diags };
   let scene: StationMap;
-  try { scene = analyseStationMap(data.map, store, { stations: data.manifest.stations, navigation: data.manifest.navigation }); } catch (e) {
+  try { scene = analyseStationMap(data.map, store, { stations: data.manifest.stations, navigation: data.manifest.navigation, coffee: data.manifest.coffee }); } catch (e) {
     diags.push({ level: 'error', message: `The map could not be analysed: ${e instanceof Error ? e.message : String(e)}` });
     return { value: null, diagnostics: diags };
   }
