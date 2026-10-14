@@ -90,7 +90,7 @@ async function bundleScenario(entry) {
       const root = j(__dirname, '..', '..');
       build.onResolve({ filter: /\?(url|raw|worker)$/ }, (args) => {
         const [spec, kind] = args.path.split('?');
-        const p = spec.startsWith('@brand/') ? res(root, 'docs', spec.slice(7))
+        const p = spec.startsWith('@brand/') ? res(root, 'src', 'renderer', 'src', 'assets', 'brand', spec.slice(7))
           : spec.startsWith('@/') ? res(root, 'src', 'renderer', 'src', spec.slice(2))
             : res(dirname(args.importer), spec);
         return { path: p, namespace: `vite-${kind}` };
