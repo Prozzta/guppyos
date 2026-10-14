@@ -22,14 +22,21 @@ function npmCli(env) {
   return cli;
 }
 
+function assertTrialArtifactEntries(entries) {
+  const bad = entries
+    .filter((entry) => {
+      if (entry.name === 'win-unpacked' && entry.isDirectory()) return false;
+      if (entry.name === 'builder-debug.yml' && entry.isFile()) return false;
+      return !entry.name.includes('Trial') || /setup.*\.exe$/i.test(entry.name) || /^Munder-Difflin-/i.test(entry.name) || /^latest.*\.yml$/i.test(entry.name);
+    })
+    .map((entry) => entry.name);
+  if (bad.length) throw new Error(`Trial packaging refused: non-trial dist artifact(s): ${bad.join(', ')}`);
+}
+
 function assertTrialArtifacts(root = path.resolve(__dirname, '..')) {
   const dist = path.join(root, 'dist');
   if (!fs.existsSync(dist)) throw new Error(`Trial packaging refused: dist is missing (${dist})`);
-  const bad = fs.readdirSync(dist, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
-    .map((entry) => entry.name)
-    .filter((name) => !name.includes('Trial') || /setup.*\.exe$/i.test(name) || /^Munder-Difflin-/i.test(name) || /^latest.*\.yml$/i.test(name));
-  if (bad.length) throw new Error(`Trial packaging refused: non-trial dist artifact(s): ${bad.join(', ')}`);
+  assertTrialArtifactEntries(fs.readdirSync(dist, { withFileTypes: true }));
 }
 
 function buildTrial({ env: baseEnv = process.env, spawn = spawnSync, assertArtifacts = assertTrialArtifacts } = {}) {
@@ -47,6 +54,7 @@ function buildTrial({ env: baseEnv = process.env, spawn = spawnSync, assertArtif
 exports.trialEnv = trialEnv;
 exports.buildTrial = buildTrial;
 exports.npmCli = npmCli;
+exports.assertTrialArtifactEntries = assertTrialArtifactEntries;
 exports.assertTrialArtifacts = assertTrialArtifacts;
 
 if (require.main === module) buildTrial();

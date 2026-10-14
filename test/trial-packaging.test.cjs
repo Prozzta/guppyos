@@ -51,18 +51,28 @@ test('trial launcher never spawns a .cmd without a shell', () => {
   assert.deepEqual(calls[1].args.slice(-4), ['--win', 'portable', '--publish', 'never']);
 });
 
-test('trial post-build guard refuses every non-trial dist artifact', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-trial-artifacts-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const dist = path.join(root, 'dist');
-  fs.mkdirSync(dist);
-  const { assertTrialArtifacts } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
-  fs.writeFileSync(path.join(dist, 'Guppy-1.1.85-Trial-1.1.84-win-x64-portable.exe'), 'portable');
-  assert.doesNotThrow(() => assertTrialArtifacts(root));
-  for (const name of ['Guppy-1.1.84-win-x64-setup.exe', 'Munder-Difflin-1.1.84-win-x64-portable.exe', 'latest.yml', 'ordinary.txt']) {
-    fs.writeFileSync(path.join(dist, name), 'bad');
-    assert.throws(() => assertTrialArtifacts(root), new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    fs.unlinkSync(path.join(dist, name));
+test('trial post-build guard allows only the exact builder by-products and trial artifacts', () => {
+  const { assertTrialArtifactEntries } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
+  const file = (name) => ({ name, isFile: () => true, isDirectory: () => false });
+  const directory = (name) => ({ name, isFile: () => false, isDirectory: () => true });
+  const exactBuildListing = [
+    directory('win-unpacked'),
+    file('builder-debug.yml'),
+    file('Guppy-1.1.85-Trial-1.1.84-win-x64-portable.exe')
+  ];
+  assert.doesNotThrow(() => assertTrialArtifactEntries(exactBuildListing));
+  const rejects = [
+    [...exactBuildListing, file('Guppy-1.1.84-win-x64-setup.exe'), file('Guppy-1.1.84-win-x64-setup.exe.blockmap')],
+    [...exactBuildListing, file('latest.yml')],
+    [...exactBuildListing, file('ordinary.txt')]
+  ];
+  for (const listing of rejects) {
+    assert.throws(() => assertTrialArtifactEntries(listing), (error) => {
+      for (const entry of listing.slice(exactBuildListing.length)) {
+        assert.match(error.message, new RegExp(entry.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      }
+      return true;
+    });
   }
 });
 
