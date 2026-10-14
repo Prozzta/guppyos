@@ -90,6 +90,22 @@ test('home-map transaction only seeds blank fresh projects, migrates both maps, 
   );
 });
 
+test('an unthemed blank fresh project clears a reused folder\'s stale theme and seed; opening an existing hive keeps them', () => {
+  const { applyProjectHomeChange, resolveProjectTheme } = themeModule();
+  const seed = { name: 'Fixture Captain', appearance: { bodyId: 'fixture-body' } };
+  const c = 'c:/projects/c';
+  const d = 'c:/projects/d';
+  const stale = { officeThemeByHive: { [c]: 'friends', [d]: 'got' }, projectThemeSeedByHive: { [c]: seed, [d]: seed } };
+  // Settings' plain new hive (SettingsModal) passes no theme.
+  const blank = applyProjectHomeChange(stale, { mode: 'fresh', newHome: 'C:\\Projects\\C', blankProject: true });
+  assert.deepEqual(blank, { officeThemeByHive: { [d]: 'got' }, projectThemeSeedByHive: { [d]: seed } });
+  assert.equal(resolveProjectTheme({ officeTheme: 'office', ...blank }, c), 'office', 'the old theme does not come back');
+  // An unknown id is treated as no theme, not as a reason to keep the stale one.
+  assert.deepEqual(applyProjectHomeChange(stale, { mode: 'fresh', newHome: c, blankProject: true, theme: 'not-a-theme' }), blank);
+  // Opening a folder that already holds a hive is not a creation: its theme and seed stay.
+  assert.deepEqual(applyProjectHomeChange(stale, { mode: 'fresh', newHome: c, blankProject: false }), stale);
+});
+
 test('creation identity is fallback-only; persisted name and appearance win after creation', () => {
   const hive = read('src/renderer/src/hooks/useHive.ts');
   const main = read('src/main/index.ts');
