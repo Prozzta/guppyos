@@ -1,6 +1,12 @@
 'use strict';
 /**
- * Munder Difflin brand mark — Michael's portrait on the brand yellow tile.
+ * Guppy brand mark — Speck on the brand yellow tile.
+ *
+ * ICON-SPECK (1.1.86, the Human): the mark is Speck, the TES pack's preset in the
+ * Add Agent look builder, in place of Michael. Speck is not drawn here: the pack's
+ * own sheet (themes/tes) goes through the app's own path, validateManifest ->
+ * pickPreset('speck') -> portraitPlan -> recolorBody, and the portrait crop the
+ * builder shows is placed on the tile at an integer, nearest-neighbour scale.
  *
  * THE SVG IS THE SOURCE OF TRUTH. docs/logo.svg is authored here as pure
  * vector — every sprite pixel is a run-merged <rect>, no fonts, no gradients,
@@ -8,21 +14,14 @@
  * 16px favicon to print. Every raster below is generated from the same geometry,
  * never traced back from a PNG.
  *
- * Grown out of the PH thumbnail (tools/make-ph-thumbnail.cjs): same sprite, same
- * flat brand ground, reframed as a mark.
- *
- * Writes, from one source:
- *   docs/logo.svg          source of truth (full bleed, ink border)
- *   docs/logo.png          512  — site favicon, site header (dark), in-app
- *                                 toolbar + app favicon, README header
- *   docs/logo-light.png    512  — site header on light theme (warm border)
- *   docs/favicon-32.png     32  — native-size favicon, so browsers stop
- *                                 downsampling a 512px portrait into mush
- *   docs/apple-touch-icon.png 180
- *   build/icon.svg         design source for the app icon (margined)
+ * Writes the APP's icons only. The rest of docs/ (logo.svg, logo-light.png,
+ * favicon-32.png, apple-touch-icon.png) is upstream's website, so it is left alone.
+ *   docs/logo.png          512  — in-app toolbar + app favicon, README header
+ *   build/icon.svg         design source for the app icon
  *   build/icon.png        1024  — Linux, and the electron-builder base
  *   build/icon.ico               — Windows, full bleed, 16..256
- *   build/icon.icns              — macOS, margined + drop shadow, 16..1024
+ *   build/icon.icns              — macOS, drop shadow, 16..1024 (written here,
+ *                                 no iconutil, so it builds on any OS)
  *
  *   node tools/make-logo.cjs
  */
@@ -30,21 +29,21 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
-const { execFileSync } = require('node:child_process');
 
 // Resolve from THIS file, not a hardcoded checkout: the path below pointed at a
 // different clone entirely, so running the generator here would have read that
 // repo's sprite and written its assets.
 const ROOT = path.resolve(__dirname, '..');
 const loadTs = require(path.join(ROOT, 'test/load-ts.cjs'));
-const art = loadTs('src/renderer/src/scene/office/portraitArt.ts');
+const manifestTs = loadTs('src/renderer/src/scene/themes/manifest.ts');
+const looksTs = loadTs('src/renderer/src/scene/themes/looks.ts');
+const recolorTs = loadTs('src/renderer/src/scene/themes/recolor.ts');
 
-const SW = art.SCENE_W;
+const PACK = 'tes';
+const PRESET = 'speck';
 
 // ── palette ───────────────────────────────────────────────────────────────
 const GROUND = [241, 181, 61];    // #F1B53D — brand yellow, sampled from the shipping icon
-const WHITE  = [250, 248, 244];
-const PUPIL  = [46, 38, 42];
 
 // Two border weights, matching the pair the site already ships: near-black for
 // dark surfaces, warm brown for the light theme (sampled from logo-light.png).
@@ -59,12 +58,12 @@ const R_STROKE = 26 / 800;
 //   mark — full bleed. Site, README, favicons, in-app toolbar, Windows .ico.
 //          A transparent margin is dead space in every one of those.
 //   icon — macOS-style margined tile with a drop shadow, for the .icns.
-// Both framings are now FULL BLEED.
+// Both framings are now FULL BLEED (frame 'icon' only adds the drop shadow).
 //
 // The margined variant put a band of brand yellow between the tile edge and the
 // figure, and that gap is what made the sprite's outermost columns — the far
 // edge of the hair (rows 3-11) and the outer shoulder (rows 19-24), with the
-// face between them — read as two detached dark tabs rather than as Michael's
+// face between them — read as two detached dark tabs rather than as the (then Michael's)
 // own silhouette. At Dock size they looked like the edges of other characters.
 //
 // Full bleed fixes it without touching a single sprite pixel: the figure meets
@@ -73,53 +72,90 @@ const R_STROKE = 26 / 800;
 const FRAMES = { mark: 0, icon: 0 };
 
 // ── sprite ────────────────────────────────────────────────────────────────
-/** Eyes dead centre: a mark looks AT you. (Canon pupils sit at the inner pixel.) */
-function centreEyes(base) {
-  const sp = Uint8ClampedArray.from(base);
-  const set = (x, y, c) => {
-    const i = (y * SW + x) * 4;
-    sp[i] = c[0]; sp[i + 1] = c[1]; sp[i + 2] = c[2]; sp[i + 3] = 255;
-  };
-  for (const x of [5, 6, 10, 11]) for (const y of [9, 10]) set(x, y, WHITE);
-  set(6, 9, PUPIL);
-  set(10, 9, PUPIL);
-  return sp;
+// PNG in, RGBA out: the pack's sheet is 8-bit RGBA, non-interlaced (asserted).
+function decodePng(buf) {
+  let o = 8, w = 0, h = 0;
+  const idat = [];
+  while (o < buf.length) {
+    const len = buf.readUInt32BE(o), type = buf.toString('ascii', o + 4, o + 8), d = buf.subarray(o + 8, o + 8 + len);
+    if (type === 'IHDR') {
+      w = d.readUInt32BE(0); h = d.readUInt32BE(4);
+      if (d[8] !== 8 || d[9] !== 6 || d[12] !== 0) throw new Error('the sheet must be 8-bit RGBA, non-interlaced');
+    } else if (type === 'IDAT') idat.push(d);
+    else if (type === 'IEND') break;
+    o += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat)), stride = w * 4, out = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], src = y * (stride + 1) + 1;
+    for (let x = 0; x < stride; x++) {
+      const a = x >= 4 ? out[y * stride + x - 4] : 0, b = y ? out[(y - 1) * stride + x] : 0;
+      const c = x >= 4 && y ? out[(y - 1) * stride + x - 4] : 0;
+      let v = raw[src + x];
+      if (f === 1) v += a;
+      else if (f === 2) v += b;
+      else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) {
+        const q = a + b - c, pa = Math.abs(q - a), pb = Math.abs(q - b), pc = Math.abs(q - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      } else if (f !== 0) throw new Error(`PNG filter ${f}`);
+      out[y * stride + x] = v & 255;
+    }
+  }
+  return { width: w, height: h, data: out };
 }
 
-// Sprite rows, measured not guessed: 1-17 head and hair, 18 shoulders,
-// 19-24 tie, 25+ torso. Carrying to 28 gives the tile something to clip, so the
-// bust is cut by the frame instead of floating above the bottom edge.
-const CROP_ROWS = 28;
+/**
+ * Speck as the look builder shows him: the TES manifest validated as the app
+ * validates it, the preset picked into a draft, the portrait planned (body,
+ * colours, front frame, crop) and the body's sheet column recoloured. Returns
+ * the cropped portrait, row-major RGBA, cw x ch.
+ */
+function speckPortrait() {
+  const dir = path.join(ROOT, 'themes', PACK);
+  const res = manifestTs.validateManifest(JSON.parse(fs.readFileSync(path.join(dir, 'theme.json'), 'utf8')), PACK);
+  if (!res.manifest) throw new Error('the TES manifest does not validate: ' + JSON.stringify(res.diagnostics));
+  const { builder, spriteRenderer: sprite } = res.manifest;
+  const sheet = decodePng(fs.readFileSync(path.join(dir, sprite.sheet)));
+  const columns = Math.floor(sheet.width / sprite.frameWidth);
+  const { draft } = looksTs.pickPreset(builder, columns, looksTs.startDraft(builder, columns), PRESET);
+  const plan = looksTs.portraitPlan(PACK, { themeId: PACK, builder, sprite, columns }, { draft, character: PRESET }, { w: 1, h: 1 });
+  if (plan.kind !== 'pack') throw new Error('no pack portrait for ' + PRESET);
+  const fw = sprite.frameWidth;
+  const col = recolorTs.recolorBody(sheet, plan.body, plan.colors, { x0: plan.body.column * fw, fw, fh: sprite.frameHeight }, builder);
+  const [cx, cy, cw, ch] = plan.crop;
+  const px = new Uint8ClampedArray(cw * ch * 4);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) {
+      const i = ((plan.sy + cy + y) * col.width + (cx + x)) * 4;   // the column is fw wide: x is frame-relative
+      px.set(col.data.subarray(i, i + 4), (y * cw + x) * 4);
+    }
+  }
+  return { w: cw, h: ch, px };
+}
 
 // Framing lifted from the thumbnail, whose proportions are the ones that work:
-// the FIGURE (14 columns wide, x2..x15 — not the full 18-wide sprite box) spans
-// 58% of the frame, with 5% air above the hair. That leaves the brand yellow
-// reading as a field, which matters — at small sizes the yellow is recognised
-// before the face is. Filling the frame edge to edge kills it.
+// the figure's opaque columns span 58% of the frame, with 5% air above the hair.
+// That leaves the brand yellow reading as a field, which matters — at small
+// sizes the yellow is recognised before the face is. Speck's crop (ears and
+// arms, 18 columns) then fits whole from 32px up; at 16px the integer scale is
+// 1 and the tile shows his head.
 const R_FIGURE = 140 / 240;
 const R_HEADROOM = 12 / 240;
 
-/**
- * Sprite -> a grid of colour|null, one cell per sprite pixel.
- *
- * No contour is drawn, deliberately. The face only meets the ground at a few
- * cheek pixels — everywhere else the silhouette is dark hair and a navy suit,
- * both of which already separate hard from the yellow. A dilated outline just
- * fuses with the hair into a black mass.
- */
-function buildGrid(sprite) {
-  const gw = SW, gh = CROP_ROWS;
+/** Portrait -> a grid of colour|null, one cell per sprite pixel. No contour is drawn. */
+function buildGrid({ w, h, px }) {
   const cells = [];
-  for (let gy = 0; gy < gh; gy++) {
-    for (let gx = 0; gx < gw; gx++) {
-      const i = (gy * SW + gx) * 4;
-      if (sprite[i + 3] < 128) continue;
-      cells.push({ gx, gy, c: [sprite[i], sprite[i + 1], sprite[i + 2]] });
+  for (let gy = 0; gy < h; gy++) {
+    for (let gx = 0; gx < w; gx++) {
+      const i = (gy * w + gx) * 4;
+      if (px[i + 3] < 128) continue;
+      cells.push({ gx, gy, c: [px[i], px[i + 1], px[i + 2]] });
     }
   }
   const ys = cells.map((c) => c.gy), xs = cells.map((c) => c.gx);
   return {
-    gw, gh, cells,
+    gw: w, gh: h, cells,
     x0: Math.min(...xs), x1: Math.max(...xs) + 1,
     y0: Math.min(...ys), y1: Math.max(...ys) + 1
   };
@@ -258,6 +294,8 @@ function rasterise(N, grid, frame, border) {
   const at = new Map(grid.cells.map((c) => [c.gy * grid.gw + c.gx, c.c]));
   const spriteAt = (px, py) => {
     const gx = Math.floor((px - L.ox) / L.scale), gy = Math.floor((py - L.oy) / L.scale);
+    // Bounded: a cell key is gy * gw + gx, so an x past the grid would wrap into the next row.
+    if (gx < 0 || gx >= grid.gw || gy < 0 || gy >= grid.gh) return null;
     return at.get(gy * grid.gw + gx) ?? null;
   };
 
@@ -321,8 +359,47 @@ function buildIco(pngs) {
   return Buffer.concat([dir, ...entries, ...bodies]);
 }
 
+// ── ICNS ──────────────────────────────────────────────────────────────────
+/** icns ARGB: 'ARGB', then the A, R, G and B planes, each run-length coded
+ *  (byte n < 128: n + 1 literal bytes; n >= 128: the next byte n - 125 times). */
+function icnsRle(plane) {
+  const out = [];
+  for (let i = 0; i < plane.length;) {
+    let run = 1;
+    while (i + run < plane.length && plane[i + run] === plane[i] && run < 130) run++;
+    if (run >= 3) { out.push(run + 125, plane[i]); i += run; continue; }
+    let j = i, lit = [];
+    while (j < plane.length && lit.length < 128) {
+      if (j + 2 < plane.length && plane[j] === plane[j + 1] && plane[j] === plane[j + 2]) break;
+      lit.push(plane[j++]);
+    }
+    out.push(lit.length - 1, ...lit); i = j;
+  }
+  return Buffer.from(out);
+}
+
+function icnsArgb(png) {
+  const { width: n, data } = decodePng(png);
+  const planes = [3, 0, 1, 2].map((c) => { const p = new Uint8Array(n * n); for (let k = 0; k < n * n; k++) p[k] = data[k * 4 + c]; return icnsRle(p); });
+  return Buffer.concat([Buffer.from('ARGB', 'ascii'), ...planes]);
+}
+
+/** The .icns the previous iconutil build carried, type for type (16 and 32 as ARGB, the rest PNG). */
+function buildIcns(png) {
+  const entries = [
+    ['ic12', png(64)], ['ic07', png(128)], ['ic13', png(256)], ['ic08', png(256)], ['ic04', icnsArgb(png(16))],
+    ['ic14', png(512)], ['ic09', png(512)], ['ic05', icnsArgb(png(32))], ['ic10', png(1024)], ['ic11', png(32)]
+  ].map(([type, data]) => {
+    const head = Buffer.alloc(8); head.write(type, 0, 'ascii'); head.writeUInt32BE(data.length + 8, 4);
+    return Buffer.concat([head, data]);
+  });
+  const head = Buffer.alloc(8); head.write('icns', 0, 'ascii');
+  head.writeUInt32BE(8 + entries.reduce((n, e) => n + e.length, 0), 4);
+  return Buffer.concat([head, ...entries]);
+}
+
 // ── run ───────────────────────────────────────────────────────────────────
-const grid = buildGrid(centreEyes(art.sceneFrameBufs('michael').front[0]));
+const grid = buildGrid(speckPortrait());
 const D = (p) => path.join(ROOT, p);
 const wrote = [];
 const write = (rel, buf) => {
@@ -330,12 +407,8 @@ const write = (rel, buf) => {
   wrote.push(`${rel.padEnd(28)} ${(buf.length / 1024).toFixed(1)} KB`);
 };
 
-// Source of truth + the site/app rasters (full bleed).
-write('docs/logo.svg', Buffer.from(buildSvg(1024, grid, 'mark', BORDERS.ink)));
+// The in-app and README mark (full bleed).
 write('docs/logo.png', rasterise(512, grid, 'mark', BORDERS.ink));
-write('docs/logo-light.png', rasterise(512, grid, 'mark', BORDERS.warm));
-write('docs/favicon-32.png', rasterise(32, grid, 'mark', BORDERS.ink));
-write('docs/apple-touch-icon.png', rasterise(180, grid, 'mark', BORDERS.ink));
 
 // App icons.
 write('build/icon.svg', Buffer.from(buildSvg(1024, grid, 'icon', BORDERS.ink)));
@@ -343,20 +416,10 @@ write('build/icon.png', rasterise(1024, grid, 'icon', BORDERS.ink));
 write('build/icon.ico', buildIco([16, 32, 48, 64, 128, 256].map((size) => ({
   size, data: rasterise(size, grid, 'mark', BORDERS.ink)
 }))));
-
-// macOS .icns via iconutil, from a margined+shadowed iconset.
-const setDir = D('build/icon.iconset');
-fs.rmSync(setDir, { recursive: true, force: true });
-fs.mkdirSync(setDir, { recursive: true });
-for (const [name, size] of [
-  ['icon_16x16', 16], ['icon_16x16@2x', 32], ['icon_32x32', 32], ['icon_32x32@2x', 64],
-  ['icon_128x128', 128], ['icon_128x128@2x', 256], ['icon_256x256', 256],
-  ['icon_256x256@2x', 512], ['icon_512x512', 512], ['icon_512x512@2x', 1024]
-]) {
-  fs.writeFileSync(path.join(setDir, `${name}.png`), rasterise(size, grid, 'icon', BORDERS.ink));
-}
-execFileSync('iconutil', ['-c', 'icns', setDir, '-o', D('build/icon.icns')]);
-fs.rmSync(setDir, { recursive: true, force: true });
-wrote.push(`build/icon.icns              ${(fs.statSync(D('build/icon.icns')).size / 1024).toFixed(1)} KB`);
+const icnsPng = new Map();
+write('build/icon.icns', buildIcns((size) => {
+  if (!icnsPng.has(size)) icnsPng.set(size, rasterise(size, grid, 'icon', BORDERS.ink));
+  return icnsPng.get(size);
+}));
 
 console.log(wrote.join('\n'));
