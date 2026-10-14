@@ -18,6 +18,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { Icon } from '@/components/Icon';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /** Mirrors the `window.cth.onRealtimeCompletion` payload (preload). `summary` is the
  *  human-speakable line Michael relays; the rest is context for this toast. */
@@ -43,6 +44,7 @@ const MAX_VISIBLE = 4;
 
 export function CompletionToast(): JSX.Element | null {
   const [toasts, setToasts] = useState<ActiveToast[]>([]);
+  const orch = useOrchestratorName();
   // Stable across renders so the subscription's closures always see live timers.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -122,7 +124,7 @@ export function CompletionToast(): JSX.Element | null {
               textTransform: 'uppercase'
             }}
           >
-            <Icon name="bell" /> Michael · completed
+            <Icon name="bell" /> {orch} · completed
             <button
               type="button"
               onClick={() => dismiss(t.key)}

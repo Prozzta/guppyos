@@ -70,9 +70,9 @@ export function engineAvailabilityBadge(a: EngineAvailability): string | null {
 /** The explanation shown under the picker when the selected engine cannot boot.
  *  Written for someone who does not know what a CLI engine is: what happened,
  *  then what to do next. */
-export function engineAvailabilityMessage(a: EngineAvailability, label: string): string | null {
+export function engineAvailabilityMessage(a: EngineAvailability, label: string, orchestrator = 'Michael'): string | null {
   if (a.state !== 'not-installable') return null;
   return `${label} is not installed on this computer and the app has no installer for it, ` +
-    `so Michael could not start. Install it first, then press "check again". ` +
+    `so ${orchestrator} could not start. Install it first, then press "check again". ` +
     `Or pick Claude Code, which installs itself on first run.`;
 }

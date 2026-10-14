@@ -43,6 +43,7 @@ import type { LivenessV1 } from '@shared/livenessV1';
 import { applyLivenessUpdate } from '@shared/livenessView';
 import { billedEquivalentTokens, tokenFigureTitle } from '@shared/tokenWeights';
 import { LivenessChip, LivenessSummary } from './LivenessChip';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /** Michael's control surface. Shown instead of the plain terminal/files panel
  *  when the god agent is selected: terminal + queue, the floor roster (with
@@ -364,6 +365,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
   useModelCatalogVersion(); // REFRESH-MODELS: re-render when the models file is refreshed
   const agents = useStore((s) => s.agents);
   const godName = agents.find((a) => a.isGod)?.name ?? DEFAULT_GOD_NAME;
+  const orch = useOrchestratorName();
   const select = useStore((s) => s.select);
   const updateAgent = useStore((s) => s.updateAgent);
   const toolCounts = useStore((s) => s.toolCounts);
@@ -666,7 +668,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
 
   return (
     <Scroll>
-      <Section title="DISPATCH — VIA MICHAEL">
+      <Section title={`DISPATCH — VIA ${orch.toUpperCase()}`}>
         <DispatchBox agents={agents} seed={seed} issueSeed={issueSeed} />
       </Section>
 
@@ -1326,6 +1328,7 @@ const DispatchBox = memo(function DispatchBox({ agents, seed, issueSeed }: {
 }) {
   const [dispatchTo, setDispatchTo] = useState<string>(''); // '' = god decides
   const godName = useStore((s) => s.agents.find((a) => a.isGod)?.name) ?? DEFAULT_GOD_NAME;
+  const orch = useOrchestratorName();
   const [dispatchText, setDispatchText] = useState('');
   const [dispatchMsg, setDispatchMsg] = useState<string | null>(null);
 
@@ -1380,7 +1383,7 @@ const DispatchBox = memo(function DispatchBox({ agents, seed, issueSeed }: {
             value={dispatchText}
             onChange={(e) => setDispatchText(e.target.value)}
             rows={2}
-            placeholder="Describe the task… (Michael decomposes, writes the card, and assigns)"
+            placeholder={`Describe the task… (${orch} decomposes, writes the card, and assigns)`}
             style={textareaStyle}
           />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>

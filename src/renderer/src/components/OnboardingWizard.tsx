@@ -11,6 +11,7 @@ import {
 } from '@shared/engineAvailability';
 import type { ToolStatus } from '@shared/toolCatalog';
 import { isPackProjectTheme, projectThemes, type ProjectThemeId } from '@shared/projectTheme';
+import { orchestratorDisplayName } from '@shared/orchestratorName';
 
 export interface OnboardingWizardProps {
   onComplete: (config: HarnessConfig) => void;
@@ -30,7 +31,7 @@ interface Feature {
   tint: string;       // tile background token
   edge: string;       // tile border token
 }
-const FEATURES: Feature[] = [
+const features = (orch: string): Feature[] => [
   {
     icon: 'mcp',
     label: 'ELEVEN ENGINES, ONE OFFICE',
@@ -40,9 +41,9 @@ const FEATURES: Feature[] = [
   },
   {
     icon: 'gear',
-    label: 'MICHAEL IS YOUR CLONE',
+    label: `${orch.toUpperCase()} IS YOUR CLONE`,
     desc: 'Your clone runs the floor — triages requests, routes tasks, and escalates only what needs you.',
-    descPlain: 'Your clone, Michael, takes your requests, hands work to the right agent, and only interrupts you when it matters.',
+    descPlain: `Your clone, ${orch}, takes your requests, hands work to the right agent, and only interrupts you when it matters.`,
     tint: 'var(--cth-sky-light)', edge: 'var(--cth-sky)'
   },
   {
@@ -95,6 +96,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
   const [home, setHome] = useState<string>('');
   const [projectTheme, setProjectTheme] = useState<ProjectThemeId>('office');
+  const orch = orchestratorDisplayName(projectTheme);
   const [repos, setRepos] = useState<string[]>([]);
   const [autoMode, setAutoMode] = useState<boolean>(true);
   // Anonymous usage stats (TELEMETRY.md). Default ON (opt-out); persisted by
@@ -325,7 +327,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                  {FEATURES.map((f) => (
+                  {features(orch).map((f) => (
                     <div key={f.label} style={{
                       display: 'flex', gap: 10, alignItems: 'flex-start',
                       padding: 10,
@@ -405,11 +407,11 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
               <>
                 <p style={{ margin: 0, lineHeight: '22px' }}>
                   {plain ? (
-                    <><strong>Michael is your clone</strong> — he reads your requests, breaks
+                    <><strong>{orch} is your clone</strong> — he reads your requests, breaks
                     them into tasks, and hands them to the right agent. He's the boss of the
                     floor; you're still the boss of him. Choose which AI engine powers him.</>
                   ) : (
-                    <><strong>Michael is your clone</strong> — the boss of the floor you just
+                    <><strong>{orch} is your clone</strong> — the boss of the floor you just
                     met. He triages your requests, assigns tasks, and manages the team, while
                     escalating anything that genuinely needs you. Pick the engine and model that
                     power him; give him a longer-context, higher-capability model.</>
@@ -434,8 +436,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                       <>Each option is a <strong>CLI engine</strong> (Claude Code, Codex,
                       Antigravity/Gemini, or a local proxy like Qwen). Engines marked
                       INSTALLED are already on this machine; INSTALLS ON FIRST RUN means the app
-                      sets it up when Michael first starts.
-                      <strong> Your clone</strong> (Michael) is the engine that orchestrates the whole
+                      sets it up when {orch} first starts.
+                      <strong> Your clone</strong> ({orch}) is the engine that orchestrates the whole
                       hive. Recommended: Claude Code · Opus 4.8 · 1M. Other providers can be wired
                       per agent later.</>
                     )}
@@ -515,7 +517,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 2px var(--cth-ink-900)',
                     fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-900)'
                   }}>
-                    <span>{engineAvailabilityMessage(selectedEngine, providerPreset(godProvider).label)}</span>
+                    <span>{engineAvailabilityMessage(selectedEngine, providerPreset(godProvider).label, orch)}</span>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                       <PixelButton variant="secondary" size="sm" onClick={() => { void probeEngines(); }} disabled={probing}>
                         {probing ? 'checking...' : 'check again'}
@@ -540,7 +542,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     ))}
                   </select>
                   <div style={{ fontSize: 12, color: 'var(--cth-ink-500)' }}>
-                    This only sets Michael's engine. You can run other providers per agent later.
+                    This only sets {orch}'s engine. You can run other providers per agent later.
                   </div>
                 </div>
               </>

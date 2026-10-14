@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { PixelButton } from './PixelButton';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /**
  * WORKERS — live god-triggered ephemeral Slack workers (the Phase-1 spawn loop):
@@ -62,6 +63,7 @@ function StatusBadge({ w }: { w: WorkerSnapshot }) {
 }
 
 export function WorkersTab() {
+  const orch = useOrchestratorName();
   const [data, setData] = useState<WorkersData | null>(null);
   const [stopping, setStopping] = useState<Record<string, boolean>>({});
 
@@ -96,7 +98,7 @@ export function WorkersTab() {
           </span>
         </div>
         <p style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-700)', margin: '2px 0 8px' }}>
-          Isolated workers Michael spins up to handle Slack messages — they run to completion, reply in-thread, then tear down.
+          Isolated workers {orch} spins up to handle Slack messages — they run to completion, reply in-thread, then tear down.
         </p>
 
         {live.length === 0 ? (

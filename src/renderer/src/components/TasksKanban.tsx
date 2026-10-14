@@ -9,6 +9,7 @@ import { SafeMarkdown } from './HumanQuestionCard';
 import { firstOccurrenceById } from '@shared/taskLedger';
 import { statusAgeText } from '@shared/agentBadges';
 import { FloorDigestPanel } from './FloorDigestPanel';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /** ZT-I3: a board-monitor flag on a card (stale, down, stuck, unknown assignee, ...). */
 interface CardFlag { cardId: string; kind: string; evidence: string; decision: boolean }
@@ -117,6 +118,7 @@ export function parseTasks(raw: unknown): HiveTask[] {
  * god), never by the human inserting cards the orchestrator never heard about.
  */
 export function TasksKanban() {
+  const orch = useOrchestratorName();
   const agents = useStore((s) => s.agents);
   const [tasks, setTasks] = useState<HiveTask[]>([]);
   // Detail view: cards show just the title — clicking one opens the full
@@ -182,7 +184,7 @@ export function TasksKanban() {
           {tasks.length} task{tasks.length === 1 ? '' : 's'}
         </span>
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--cth-ink-300)' }}>
-          new work? dispatch it to Michael (monitor tab)
+          new work? dispatch it to {orch} (monitor tab)
         </span>
         <button
           onClick={() => setShowFloor((v) => !v)}

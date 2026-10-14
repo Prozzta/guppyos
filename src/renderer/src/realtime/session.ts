@@ -29,6 +29,8 @@ import { realtimeReadTools, realtimeSessionSummary } from './tools';
 import { realtimeActionTools } from './actions';
 import { resetRealtimeCost, recordRealtimeUsage, endRealtimeCost, isRealtimeIdle, getRealtimeCostSnapshot } from './costStore';
 import { personaFor, resolveGodNameFromRegistry } from '../../../shared/godIdentity';
+import { orchestratorDisplayName } from '../../../shared/orchestratorName';
+import { useStore } from '@/store/store';
 
 /**
  * Voice-loop state machine:
@@ -252,10 +254,10 @@ function teardownMedia(): void {
 }
 
 /** Make a getUserMedia failure legible. */
-function micFriendly(msg: string): string {
+function micFriendly(msg: string, orch: string): string {
   const m = msg.toLowerCase();
   if (m.includes('permission') || m.includes('notallowed') || m.includes('denied'))
-    return 'microphone permission denied — allow mic access to talk to Michael';
+    return `microphone permission denied — allow mic access to talk to ${orch}`;
   if (m.includes('notfound') || m.includes('device'))
     return 'no microphone found — check your input device';
   return msg;
@@ -471,7 +473,9 @@ export async function connect(): Promise<void> {
     teardownMedia();
     await setMicGate(false);
     const msg = e instanceof Error ? e.message : String(e);
-    setState({ status: 'off', error: micFriendly(msg), muted: false });
+    const floor = useStore.getState();
+    const orch = orchestratorDisplayName(floor.officeTheme, floor.agents.find((a) => a.isGod)?.name);
+    setState({ status: 'off', error: micFriendly(msg, orch), muted: false });
   } finally {
     connecting = false;
   }
