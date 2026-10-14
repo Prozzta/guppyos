@@ -1,0 +1,16 @@
+{
+ "type": "tileset",
+ "name": "props",
+ "tilewidth": 16,
+ "tileheight": 16,
+ "tilecount": 1,
+ "columns": 0,
+ "tiles": [
+  {
+   "id": 0,
+   "image": "pictures/chair.png",
+   "imagewidth": 16,
+   "imageheight": 16
+  }
+ ]
+}

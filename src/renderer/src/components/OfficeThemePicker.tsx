@@ -5,7 +5,7 @@ import { disposeTerminal } from './terminalPool';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
-import type { ThemeId } from '@/scene/office/themeRegistry';
+import type { BuiltinThemeId, ThemeId } from '@/scene/office/themeRegistry';
 
 // TV-show office themes (Phase 1 = the switch flow infra). Only `office` has a
 // real map+cast today; the five shows render via the loader's office fallback
@@ -74,7 +74,9 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
         }
       }
       for (const a of victims) archiveAgent(a.id);
-      await window.cth.updateConfig({ officeTheme: id });
+      // ThemeId also admits pack ids now; the config's own type widens with the
+      // project-theme resolver (Creed's stage). This picker only offers built-ins.
+      await window.cth.updateConfig({ officeTheme: id as BuiltinThemeId });
       setCurrent(id);
       setOfficeTheme(id); // → OfficeFloor rebuilds the scene on the new map/cast
       const meta = THEME_META.find((t) => t.id === id);

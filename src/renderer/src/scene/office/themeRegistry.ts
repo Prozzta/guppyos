@@ -29,15 +29,21 @@ import interiorsUrl from '@/assets/tilesets/interiors.png?url';
 import officeMapRaw from '@/assets/maps/office.tmj?raw';
 import brooklyn99MapRaw from '@/assets/maps/brooklyn99.tmj?raw';
 
-/** Theme identifiers. Only `office` exists in Phase 0; the five TV-show themes
- *  (friends, brooklyn99, siliconvalley, got, hogwarts) land in later phases. */
-export type ThemeId =
+/** The built-in theme identifiers. Only `office` exists in Phase 0; the five
+ *  TV-show themes (friends, brooklyn99, siliconvalley, got, hogwarts) land in
+ *  later phases. */
+export type BuiltinThemeId =
   | 'office'
   | 'friends'
   | 'brooklyn99'
   | 'siliconvalley'
   | 'got'
   | 'hogwarts';
+
+/** A theme identifier: a built-in above, or a declarative theme pack's id
+ *  (validated data, see scene/themes/manifest.ts). Anything that is not a
+ *  usable pack or a built-in map shows the office (getTheme, OfficeFloor). */
+export type ThemeId = BuiltinThemeId | (string & {});
 
 export interface Tile { x: number; y: number; }
 export type Facing = 'up' | 'down' | 'left' | 'right';

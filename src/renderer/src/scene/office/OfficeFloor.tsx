@@ -18,6 +18,9 @@ import { installContextLossRecovery } from './glRecovery';
 import { firstOccurrenceById, ledgerChanges } from '@shared/taskLedger';
 import { activityStatus } from '@shared/activityView';
 import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
+import { StationFloor } from '../themes/StationFloor';
+import { isStationPack, loadStationPack } from '../themes/themeCatalog';
+import type { LoadedPack } from '../themes/packs';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
 // tiles, prop anchors, monitor gids and palette all come from the active
@@ -169,7 +172,44 @@ function firstWords(prompt: string | undefined, maxWords = 6, maxChars = 42): st
   return out;
 }
 
+/** The floor: Guppy's office scene, or a stations theme pack's scene when the
+ *  active theme is one. A pack that cannot be used (invalid manifest, missing
+ *  picture, malformed map, bad sprite sheet) shows the office with a note. */
 export function OfficeFloor() {
+  const officeTheme = useStore((s) => s.officeTheme);
+  const wantsPack = isStationPack(officeTheme);
+  const [state, setState] = useState<{ id: string; pack: LoadedPack | null; problem: string | null } | null>(null);
+  useEffect(() => {
+    if (!wantsPack) { setState(null); return; }
+    let live = true;
+    setState(null);
+    loadStationPack(officeTheme).then(
+      ({ pack, diagnostics }) => {
+        if (!live) return;
+        const errors = diagnostics.filter((d) => d.level === 'error');
+        if (!pack) console.warn(`[OfficeFloor] theme "${officeTheme}" cannot be used; showing the office:\n` + errors.map((d) => '  ' + d.message).join('\n'));
+        setState({ id: officeTheme, pack, problem: pack ? null : (errors[0]?.message ?? 'unknown problem') });
+      },
+      (e) => { if (live) setState({ id: officeTheme, pack: null, problem: e instanceof Error ? e.message : String(e) }); },
+    );
+    return () => { live = false; };
+  }, [officeTheme, wantsPack]);
+  if (wantsPack && (!state || state.id !== officeTheme)) return <div style={{ width: '100%', height: '100%', background: hex(colors.ink[900]) }} />;
+  if (state?.pack) return <StationFloor pack={state.pack} />;
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <OfficeScene />
+      {state?.problem && (
+        <div role="status" style={{ position: 'absolute', left: 8, bottom: 8, right: 8, padding: '6px 10px', background: 'rgba(20,16,24,0.85)', color: '#ffd0b5', fontFamily: 'monospace', fontSize: 12, pointerEvents: 'none' }}>
+          {`Theme "${state.id}" could not be loaded, so the Office is shown. ${state.problem}`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Guppy's own office floor (unchanged; the pack dispatch above wraps it). */
+function OfficeScene() {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const appRef = useRef<Application | null>(null);
   const mountIdRef = useRef(0);
