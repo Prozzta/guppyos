@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="./docs/logo.png" alt="Guppy — agent harness to run an office of your clones" width="340">
+<img src="./.github/media/guppy-logo.png" alt="Guppy logo: Speck, from the TES theme" width="340">
 
 # Guppy
 
@@ -25,13 +25,13 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.82" src="https://img.shields.io/badge/version-1.1.82-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.86" src="https://img.shields.io/badge/version-1.1.86-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
 <br>
 
-<img src="./docs/media/og.png" alt="Guppy — A hive of agents that message, route, and remember" width="1240">
+<img src="./.github/media/guppy-og.png" alt="Guppy — Boldly code where no team has coded before. Your AI crew, on duty 24/7. Shown on the TES bridge floor" width="1240">
 
 </div>
 
@@ -275,6 +275,14 @@ agent *you* talk to in order to get things done.
   automatic condensation, so agents remember across sessions without their memory files
   growing forever.
 
+<p align="center">
+  <img src="./.github/media/tes-full-window.png" alt="Guppy with the TES theme: the bridge floor, agent stations and the side panels" width="820">
+</p>
+<p align="center">
+  <img src="./.github/media/tes-look-builder.png" alt="The Add Agent dialog with the TES look builder" width="404">
+  <img src="./.github/media/tes-memory.png" alt="An agent's memory panel in the TES theme" width="404">
+</p>
+
 ## How it works
 
 ```
@@ -435,7 +443,7 @@ the UI displays can cause or prevent a wake.
 
 The aesthetic is **Animal Crossing × Earthbound × SNES menu UI** — pixel-snapped, chunky,
 friendly. [`DESIGN.md`](./DESIGN.md) is canonical; every component derives from its
-tokens. The Munder Difflin brand layers a **Dunder-Mifflin maroon** (`#6E1423`) and
+tokens. The Guppy brand layers a **Dunder-Mifflin maroon** (`#6E1423`) and
 **gold** (`#F4D35E`) on top for logo and chrome.
 
 ## Telemetry
@@ -459,8 +467,28 @@ whose bundle is byte-identical to a keyless rebuild.
 
 The **source code** is licensed under the **MIT License** — see [`LICENSE`](./LICENSE).
 The MIT grant covers the code only; the bundled pixel art is licensed separately from
-LimeZu and is carved out in the `LICENSE` scope note. *Munder Difflin* is an affectionate
+LimeZu and is carved out in the `LICENSE` scope note, as is the TES theme artwork (below).
+*Munder Difflin* is an affectionate
 parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
+
+### Artwork licence
+
+- **Code:** the MIT License in [`LICENSE`](./LICENSE), unchanged.
+- **TES theme artwork** — [`themes/tes/art`](./themes/tes/art), [`themes/tes/map`](./themes/tes/map)
+  and the TES art shown in the [`.github/media`](./.github/media) images
+  (`guppy-og.png`, `guppy-logo.png`, `tes-full-window.png`, `tes-look-builder.png`,
+  `tes-memory.png`; the app UI around it in those images stays MIT) and the Speck icon set
+  (`build/icon.png`, `build/icon.ico`, `build/icon.icns`, `build/icon.svg`,
+  `src/renderer/src/assets/brand/logo.png`) — is
+  © 2026 Prozzta under the terms in
+  [`themes/tes/LICENSE-ARTWORK.md`](./themes/tes/LICENSE-ARTWORK.md): you may edit and use
+  it in any commercial or non-commercial project and ship it inside a project that uses
+  it, but not resell or redistribute the art itself (edited or not, e.g. as an asset pack).
+- **Credit is required:** "Artwork by Prozzta", with a link to
+  [github.com/Prozzta](https://github.com/Prozzta).
+- **Other art keeps its own terms:** the LimeZu tilesets above (credit to LimeZu
+  required) and the Office cast, which is procedural code under MIT; see the `LICENSE`
+  scope note.
 
 ## Acknowledgements
 
