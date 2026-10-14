@@ -115,6 +115,41 @@ export function frontPicker(statics: Array<{ px?: Pixels | null; x: number; y: n
   };
 }
 
+/** Which statics can draw a pixel inside a map box: those with an opaque pixel in,
+ *  or within `margin` cells of, the box's NEAR_CELL cells. A sprite rounded on its
+ *  own samples within 1.5/k + 1 map px of a device pixel's exact map position (see
+ *  NEAR_MIN_SCALE), which one cell of margin covers. Redrawn in depth order over the
+ *  cache with the people, clipped to the box's device rect, these give that rect the
+ *  full picture: per pixel the last opaque static wins, and it is among them. No
+ *  closure: nothing is drawn outside the rect. (`cell`, `margin`: for the tests.) */
+export function regionPicker(statics: Array<{ px?: Pixels | null; x: number; y: number }>, mapW: number, mapH: number, cell = NEAR_CELL, margin = 1): (box: Box) => boolean[] {
+  const C = cell, cols = Math.ceil(mapW / C) + 2, rows = Math.ceil(mapH / C) + 2;
+  const cx = (x: number) => Math.min(cols - 1, Math.max(0, Math.floor(x / C) + 1));
+  const cy = (y: number) => Math.min(rows - 1, Math.max(0, Math.floor(y / C) + 1));
+  // holders[c]: the statics with an opaque pixel within `margin` cells of cell c.
+  const holders: number[][] = Array.from({ length: cols * rows }, () => []);
+  statics.forEach((it, i) => {
+    if (!it.px) return;
+    const own = new Set<number>();
+    for (let y = 0; y < it.px.height; y++) for (let x = 0; x < it.px.width; x++) {
+      if (it.px.data[(y * it.px.width + x) * 4 + 3] !== 0) own.add(cy(it.y + y) * cols + cx(it.x + x));
+    }
+    const near = new Set<number>();
+    for (const c of own) for (let dy = -margin; dy <= margin; dy++) for (let dx = -margin; dx <= margin; dx++) {
+      const r = Math.floor(c / cols) + dy, q = (c % cols) + dx;
+      if (r >= 0 && r < rows && q >= 0 && q < cols) near.add(r * cols + q);
+    }
+    for (const c of near) holders[c].push(i);
+  });
+  return (box) => {
+    const on = statics.map(() => false);
+    for (let r = cy(box.y); r <= cy(box.y + box.h); r++) for (let q = cx(box.x); q <= cx(box.x + box.w); q++) {
+      for (const i of holders[r * cols + q]) on[i] = true;
+    }
+    return on;
+  };
+}
+
 /** Keys for the cache's picture under the world transform (scale ax, ay, then
  *  offset tx, ty, in CSS px; `r` device px per CSS px): equal keys, same picture.
  *  Pixi computes each sprite vertex in float64 (a * w + tx, as below), hands the

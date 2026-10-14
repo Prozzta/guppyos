@@ -18,7 +18,7 @@ import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
-import { cacheKeyOf, frontPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
+import { cacheKeyOf, frontPicker, regionPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 
@@ -111,11 +111,13 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
 
       // TES-GUPPY-RASTER: 'below' and the statics are drawn, by the very same sprites, into a
       // screen-sized cache once the picture they make holds still; each frame copies its reachable
-      // cells 1:1 and draws again only the statics that meet a person (staticCache.ts). While the
-      // picture changes, and for partial alpha, everything is drawn directly as before.
+      // cells 1:1, then redraws each rect around the people, clipped to it, with the statics that
+      // can draw there (staticCache.ts). While the picture changes, and for partial alpha,
+      // everything is drawn directly as before.
       const cached = staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
       const pickFront = cached ? frontPicker(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      const pickRegion = cached ? regionPicker(plan.sorted, plan.below.width, plan.below.height) : null;
       const CELL = 32;
       const cacheLayer = new Container();
       // As in the stage, the world's transform is a child's, so its vertices are made the same way
@@ -123,9 +125,17 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const cacheRoot = new Container();
       const cacheWorld = cacheRoot.addChild(new Container());
       const cells = new Map<number, Sprite>();
+      // The rects' copy of the cache: the whole of it in one quad, read back mirrored as the cells
+      // are; the scissor keeps it to the rect, so a rect never walks the cells.
+      let passCache: Sprite | null = null;
       let rt: RenderTexture | null = null;
       let cacheKey: string | null = null, lastKey: string | null = null, lastExact: string | null = null;
       const noLive: boolean[] = [];
+      // The rects redrawn around the people this frame, the statics shown in them, and what the
+      // main pass shows.
+      let passes: Box[] = [];
+      let passOn: boolean[] = [];
+      let mainFront: boolean[] | null = null, inPass = false;
       let cacheBoxes: Box[] = [];
       const cacheStatics: Array<Sprite | null> = plan.sorted.map(() => null);
       const belowDirect = new Sprite(below.texture);
@@ -148,6 +158,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
         if (!rt || rt.source.pixelWidth !== W || rt.source.pixelHeight !== H) {
           dropCells();
+          passCache?.destroy({ texture: true, textureSource: false });
+          passCache = null;
           rt?.destroy(true);
           rt = RenderTexture.create({ width: W / r, height: H / r, resolution: r, scaleMode: 'nearest' });
           const none = new Container();
@@ -180,9 +192,51 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           cells.set(id, s);
         }
         for (const [id, s] of cells) s.visible = live.has(id);
+        if (!passCache) {
+          passCache = new Sprite(new Texture({ source: rt.source, frame: new Rectangle(0, 0, W / r, H / r) }));
+          passCache.position.set(0, H / r);
+          passCache.scale.y = -1;
+          passCache.visible = false;
+          app.stage.addChildAt(passCache, app.stage.getChildIndex(cacheLayer) + 1);
+        }
       };
+      // After the frame's own render (still inside it, so before the canvas is shown or read), each
+      // rect around a person is drawn again, scissored to it: cleared, the cache, then in depth order
+      // the people and the statics that can draw in any rect. A static picked for another rect has
+      // no opaque pixel in this one, so it draws nothing here; with one set for all rects, Pixi
+      // builds the rects' instructions once and replays them per rect. Rects may overlap: each is
+      // drawn whole. Outside them the frame holds the cache (and any live statics), where no person
+      // can draw.
+      const postrender = {
+        postrender: (o: { container: unknown }) => {
+          if (inPass || o.container !== app.stage || !passes.length) return;
+          const gl = (app.renderer as any).gl as WebGL2RenderingContext;
+          const H = app.canvas.height;
+          inPass = true;
+          try {
+            for (const s of sprites.values()) s.sprite.visible = true;
+            cacheLayer.visible = false;
+            if (passCache) passCache.visible = true;
+            gl.enable(gl.SCISSOR_TEST);
+            statics.forEach((s, i) => { if (s) s.visible = passOn[i]; });
+            for (const p of passes) {
+              gl.scissor(p.x, H - p.y - p.h, p.w, p.h);
+              app.renderer.render({ container: app.stage, clear: true });
+            }
+          } finally {
+            gl.disable(gl.SCISSOR_TEST);
+            cacheLayer.visible = true;
+            if (passCache) passCache.visible = false;
+            statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
+            for (const s of sprites.values()) s.sprite.visible = false;
+            inPass = false;
+          }
+        },
+      };
+      if (cached) app.renderer.runners.postrender.add(postrender);
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
+        () => app.renderer.runners.postrender.remove(postrender),
         dropCells,
         () => rt?.destroy(true),
         () => cacheRoot.destroy({ children: true }),
@@ -294,10 +348,24 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           const useCache = key === cacheKey && world.scale.x * r >= NEAR_MIN_SCALE && world.scale.y * r >= NEAR_MIN_SCALE;
           cacheLayer.visible = useCache;
           belowDirect.visible = !useCache;
-          // Over the cache, statics are drawn again only near a person: with binary alpha, elsewhere
-          // the cache already holds the topmost opaque pixel.
-          const front = useCache ? pickFront!(people.map((q) => ({ x: q.sprite.x, y: q.sprite.y, w: fw, h: fh })), live) : null;
-          statics.forEach((s, i) => { if (s) s.visible = front ? front[i] : true; });
+          // The main pass: the cache, and over it only the live statics (and those over them); the
+          // people and the statics near them are drawn in their rects (postrender).
+          mainFront = useCache ? pickFront!([], live) : null;
+          statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
+          for (const s of sprites.values()) s.sprite.visible = !useCache;
+          passes = [];
+          if (useCache) {
+            const kx = world.scale.x, ky = world.scale.y, W = app.canvas.width, H = app.canvas.height;
+            passOn = statics.map(() => false);
+            for (const s of sprites.values()) {
+              const X0 = Math.max(0, Math.floor((s.sprite.x * kx + world.x) * r) - 1), X1 = Math.min(W, Math.ceil(((s.sprite.x + fw) * kx + world.x) * r) + 1);
+              const Y0 = Math.max(0, Math.floor((s.sprite.y * ky + world.y) * r) - 1), Y1 = Math.min(H, Math.ceil(((s.sprite.y + fh) * ky + world.y) * r) + 1);
+              if (X1 <= X0 || Y1 <= Y0) continue;
+              const rect = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
+              passes.push(rect);
+              pickRegion!({ x: (rect.x / r - world.x) / kx, y: (rect.y / r - world.y) / ky, w: rect.w / r / kx, h: rect.h / r / ky }).forEach((on, i) => { if (on) passOn[i] = true; });
+            }
+          }
         }
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}`).join('|');
