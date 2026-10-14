@@ -11,6 +11,35 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.85] — 2026-10-14
+
+**Theme packs, starting with TES: a project can have its own floor, chosen per project, and
+switching it keeps every agent.** Rollback: 1.1.84 (reinstall).
+
+### Added
+
+- **Theme packs, starting with TES.** A project can use a theme pack (its own map, stations and
+  looks) instead of the office. You choose it when you create a project, or later in the theme
+  picker. Packs are offered whether or not the TV-show offices are switched on. A new project
+  created with a pack starts with the pack's orchestrator as god.
+- **Each agent has a look per theme.** A look builder edits it, and the agent's portrait follows
+  the project's theme.
+
+### Changed
+
+- **Each project remembers its own theme, and switching it keeps every agent.** A switch changes
+  only how the floor looks: no agent, roster entry or god name is reset.
+- **The agent card always shows the agent's name.** When the name would be cut short, the status
+  chip shrinks to its colour dot. The status is in the dot's tooltip.
+- **The stations floor is capped at 30 fps,** as the office floor is.
+
+### Fixed
+
+- **Idle agents no longer loop on coffee.** After a coffee break an agent rests 3-5 minutes
+  before the café calls it again. One idle agent used to fetch about 14 coffees in 10 minutes.
+- **A project keeps its theme setting when its pack is missing from a build.** The floor shows
+  the office until the pack is back.
+
 ## [1.1.84] — 2026-10-08
 
 **Automatic compaction for every Claude agent, and the claims ledger, switched on for one agent
