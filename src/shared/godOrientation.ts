@@ -16,10 +16,14 @@
  * Pure: the text and the args transform.
  */
 
-// The first thing Michael (god) is told on a fresh spawn — orient him and put
-// him to work running the floor. Kept terse and action-oriented.
-export const INITIAL_GOD_PROMPT = [
-  "You're online as Michael, the orchestrator of the hive. Get oriented, then start running the floor:",
+import { DEFAULT_GOD_NAME } from './godIdentity';
+
+const ORIENTATION_HEAD = "You're online as ";
+const ORIENTATION_LEAD = ', the orchestrator of the hive. Get oriented, then start running the floor:';
+
+// The first thing god is told on a fresh spawn — orient it and put it to work
+// running the floor. Kept terse and action-oriented. Only the first line names god.
+const ORIENTATION_STEPS = [
   // ZT-I1-MAIL §5 P8: how mail reaches god depends on its mail mode (delivered in context, or read
   // from inbox/ when legacy or degraded); the renderer does not know it, so this line is neutral
   // and defers to the start-up instructions (P1), which are mode-specific (Jim, slices 4/4b/5).
@@ -33,18 +37,34 @@ export const INITIAL_GOD_PROMPT = [
   'Then begin orchestrating: triage requests, delegate work to the team, and keep everyone unblocked. You are fully autonomous — there is no approval queue, so handle tool-permission prompts in this session yourself (the human can approve them remotely from their phone).'
 ].join('\n');
 
+/** God's orientation under its display name (a project theme may seed one, e.g. Cpt Kerk). */
+export function godOrientationPrompt(godName: string = DEFAULT_GOD_NAME): string {
+  const name = godName.trim() || DEFAULT_GOD_NAME;
+  return `${ORIENTATION_HEAD}${name}${ORIENTATION_LEAD}\n${ORIENTATION_STEPS}`;
+}
+
+/** The default (Michael) orientation. */
+export const INITIAL_GOD_PROMPT = godOrientationPrompt(DEFAULT_GOD_NAME);
+
+/** True for an orientation under any god name (what an earlier pass may have put on argv). */
+function isGodOrientation(text: string | undefined): boolean {
+  if (typeof text !== 'string' || !text.startsWith(ORIENTATION_HEAD)) return false;
+  const nl = text.indexOf('\n');
+  return nl > 0 && text.slice(0, nl).endsWith(ORIENTATION_LEAD) && text.slice(nl + 1) === ORIENTATION_STEPS;
+}
+
 /**
  * The Claude god's args for this spawn: any orientation an earlier pass put there is removed
  * (the install relaunch re-runs the spawn with the args it already built), then, when `fresh`,
  * `--` and the orientation go LAST. Never mutates `args`.
  */
-export function withGodOrientationArg(args: readonly string[], fresh: boolean): { args: string[]; onArgv: boolean } {
+export function withGodOrientationArg(args: readonly string[], fresh: boolean, godName?: string): { args: string[]; onArgv: boolean } {
   const out = [...args];
   for (let i = out.indexOf('--'); i >= 0; i = out.indexOf('--', i)) {
-    if (out[i + 1] === INITIAL_GOD_PROMPT) out.splice(i, 2);
+    if (isGodOrientation(out[i + 1])) out.splice(i, 2);
     else i += 1;
   }
   if (!fresh) return { args: out, onArgv: false };
-  out.push('--', INITIAL_GOD_PROMPT);
+  out.push('--', godOrientationPrompt(godName));
   return { args: out, onArgv: true };
 }

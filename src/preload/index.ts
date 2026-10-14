@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
 import type { AgentProvider } from '../shared/agentProvider';
+import type { ProjectThemeId, ProjectThemeSeed } from '../shared/projectTheme';
 import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
@@ -60,6 +61,8 @@ export interface RosterSnapshot {
 export interface HiveAgentMeta {
   id: string;
   name: string;
+  /** Creation-only character declaration supplied by a project theme pack. */
+  appearance?: { bodyId: string; colors?: { skin?: string; shirt?: string; hair?: string }; presetId?: string };
   /** Which CLI this agent runs on (claude/codex/grok/antigravity/custom); defaults claude. */
   provider?: AgentProvider;
   role?: string;
@@ -428,8 +431,12 @@ export interface HarnessConfig {
   terminalTheme?: 'light' | 'dark';
   /** TV-show office themes feature flag (Settings picker + switch flow). Default OFF. */
   tvShowOffices?: boolean;
-  /** Active office map/cast theme (honored only when tvShowOffices is on). */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts';
+  /** Legacy global office theme: the fallback for a project with no entry in officeThemeByHive. */
+  officeTheme?: ProjectThemeId;
+  /** Explicit project choice keyed by normalized harness home. */
+  officeThemeByHive?: Record<string, ProjectThemeId>;
+  /** Creation-only orchestrator seed keyed by normalized harness home. */
+  projectThemeSeedByHive?: Record<string, ProjectThemeSeed>;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn. API KEYS are NOT stored here —
    *  they live write-only in the secret broker. */
@@ -853,6 +860,9 @@ const api = {
   /** Set or clear one per-agent token ceiling against main's latest config. */
   setAgentTokenCap: (agentId: string, tokenCap?: number): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setAgentTokenCap', agentId, tokenCap),
+  /** Set this project's theme, merged against main's latest config. */
+  setProjectTheme: (theme: ProjectThemeId): Promise<HarnessConfig> =>
+    ipcRenderer.invoke('config:setProjectTheme', theme),
   /** v1.1.45 CAPUI-MONITOR: persist an agent's Monitor line; 5H/Weekly also exempt it from the budget. */
   setAgentUsageDisplay: (agentId: string, display: 'budget' | 'fiveHour' | 'weekly'): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setAgentUsageDisplay', agentId, display),
@@ -876,8 +886,8 @@ const api = {
    *  into the new folder (old kept as a safety net); 'fresh' just re-points and
    *  bootstraps an empty home. On success the app relaunches (never resolves);
    *  on failure (e.g. copy error) returns { ok: false, error }. */
-  changeHome: (newHome: string, mode: 'move' | 'fresh'): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('config:changeHome', { newHome, mode }),
+  changeHome: (newHome: string, mode: 'move' | 'fresh', projectTheme?: ProjectThemeId): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('config:changeHome', { newHome, mode, projectTheme }),
 
   // ─── Filesystem (sandboxed to cwd) ───────────────────────────────────────
   listDir: (root: string, rel: string): Promise<

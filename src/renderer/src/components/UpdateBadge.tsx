@@ -82,7 +82,7 @@ export function UpdateBadge() {
   // own greys so a quiet app looks exactly like it did before.
   const chipBg =
     view.tone === 'ready' ? 'var(--cth-mint-light, #d0f0e0)'
-      : view.tone === 'warn' ? 'var(--cth-amber-light, #f6e2b3)'
+      : view.tone === 'warn' ? 'var(--cth-amber-light)'
         : 'transparent';
 
   const pending = pendingVersion(status, __APP_VERSION__);

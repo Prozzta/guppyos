@@ -10,6 +10,7 @@ import {
   classifyEngineAvailability, engineAvailabilityBadge, engineAvailabilityMessage, engineBlocksOnboarding
 } from '@shared/engineAvailability';
 import type { ToolStatus } from '@shared/toolCatalog';
+import { PROJECT_THEMES, type ProjectThemeId } from '@shared/projectTheme';
 
 export interface OnboardingWizardProps {
   onComplete: (config: HarnessConfig) => void;
@@ -93,6 +94,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const plain = audience === 'non-technical';
 
   const [home, setHome] = useState<string>('');
+  const [projectTheme, setProjectTheme] = useState<ProjectThemeId>('office');
   const [repos, setRepos] = useState<string[]>([]);
   const [autoMode, setAutoMode] = useState<boolean>(true);
   // Anonymous usage stats (TELEMETRY.md). Default ON (opt-out); persisted by
@@ -199,7 +201,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
       setBusy(false);
       return;
     }
-    const next = await window.cth.updateConfig({
+    await window.cth.updateConfig({
       onboardingComplete: true,
       audience: audience ?? 'technical',
       harnessHome, // the same trimmed value we just mkdir'd, not the raw field
@@ -209,6 +211,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
       godModel,
       telemetryEnabled: shareStats
     });
+    // Merge against main's current map so onboarding never deletes another
+    // window's project choices.
+    const next = await window.cth.setProjectTheme(projectTheme);
     setBusy(false);
     onComplete(next);
   };
@@ -218,7 +223,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
       position: 'fixed', inset: 0,
       background: 'var(--cth-cream-200)',
       backgroundImage:
-        `repeating-linear-gradient(45deg, rgba(232, 217, 160, 0.4) 0 1px, transparent 1px 8px)`,
+        `repeating-linear-gradient(45deg, var(--cth-hatch-strong) 0 1px, transparent 1px 8px)`,
       // Scroll the overlay rather than clip the wizard. Step 2 lists every
       // installed CLI engine (8 rows + a model select), which is taller than a
       // 1080p-class window once the OS chrome is subtracted — the panel was
@@ -389,6 +394,9 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                   {plain
                     ? "You won't need to open this folder day-to-day — it's just where the app keeps its notes so nothing is lost when you restart."
                     : 'Think of this as the "town hall." The harness pins agent state there so sessions can be picked back up after a restart.'}
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {PROJECT_THEMES.filter((theme) => theme.id === 'office').map((theme) => <PixelButton key={theme.id} variant={projectTheme === theme.id ? 'primary' : 'secondary'} size="sm" onClick={() => setProjectTheme(theme.id)}>{theme.label} · {theme.projectDefaults?.orchestrator?.name ?? 'Default orchestrator'}</PixelButton>)}
                 </div>
               </>
             )}

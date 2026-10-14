@@ -52,7 +52,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
+  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -60,13 +60,15 @@ import { AUTO_COMPACT_WINDOW_ENV, autoCompactWindowFor, autoCompactWindowIgnored
 import { CompactHealthWatch } from './compactHealth';
 import { billedEquivalentTokens, rawTokens } from '../shared/tokenWeights';
 import { createRendererErrorGate } from '../shared/rendererError';
-import { INITIAL_GOD_PROMPT, withGodOrientationArg } from '../shared/godOrientation';
+import { withGodOrientationArg } from '../shared/godOrientation';
 import { rendererErrorRow } from './rendererErrorLog';
 import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
 } from './standupDelta';
 import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde, samePath } from './fs';
+import { applyProjectHomeChange, isProjectThemeId } from '../shared/projectTheme';
+import { resolveGodNameFromRegistry } from '../shared/godIdentity';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
 import { isInputOrigin } from '../shared/inputOrigin';
 import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/inputProvenance';
@@ -4465,10 +4467,10 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // orientation as Claude's initial prompt, decided here by THIS spawn's resume outcome, so a
     // respawn or relaunch that resumes is never re-oriented. The renderer no longer types it.
     if (opts.hive.isGod) {
-      const g = withGodOrientationArg(args, !didResume);
+      const g = withGodOrientationArg(args, !didResume, opts.hive.name);
       opts.args = g.args;
       orientationOnArgv = g.onArgv;
-      if (g.onArgv) hive.appendLog({ kind: 'god-orientation-argv', agentId: opts.hive.id, chars: INITIAL_GOD_PROMPT.length });
+      if (g.onArgv) hive.appendLog({ kind: 'god-orientation-argv', agentId: opts.hive.id, chars: g.args[g.args.length - 1].length });
     }
   }
   // Idempotent session resume on respawn (#6.6a) — provider-aware: Claude
@@ -4881,6 +4883,13 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
 ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unknown) =>
   setAgentTokenCap(agentId, tokenCap)
 );
+/** Renderer config is a snapshot. Keep the project-map read/merge/write in main
+ *  so choices made by two windows cannot erase each other. */
+ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => {
+  const home = readConfig().harnessHome;
+  if (!home) throw new Error('no project home is configured');
+  return setProjectThemeForHome(home, theme);
+});
 // v1.1.45 unit #8: set the capacity-display threshold. Invalid input throws and changes
 // nothing. A valid one takes effect LIVE: the strip is re-projected and pushed at once
 // (a presentation-only change: no domain revision moves).
@@ -4908,7 +4917,7 @@ ipcMain.handle('config:ensureHome', (_evt, path: unknown) => {
 // re-binds against the new root. mode: 'move' copies the data (old kept as a
 // safety net), 'fresh' just re-points and bootstraps an empty home.
 ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
-  const p = (payload ?? {}) as { newHome?: unknown; mode?: unknown };
+  const p = (payload ?? {}) as { newHome?: unknown; mode?: unknown; projectTheme?: unknown };
   if (typeof p.newHome !== 'string' || !p.newHome) return { ok: false, error: 'invalid newHome' };
   // MUNDER_DEV=1: the harness home is fixed at the DEV root. This handler copies
   // hive/palace/roster to an arbitrary destination and persists it — refused
@@ -4923,6 +4932,14 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   const newHome = resolve(expandTilde(p.newHome));
   const oldRaw = readConfig().harnessHome;
   const oldHome = oldRaw ? resolve(oldRaw) : null;
+  // A themed NEW project must start in an empty folder: its theme (and the theme's
+  // orchestrator seed) is creation-only, so it never lands on an existing hive.
+  let newHomeIsBlank = false;
+  if (mode === 'fresh' && isProjectThemeId(p.projectTheme)) {
+    try { newHomeIsBlank = !existsSync(newHome) || readdirSync(newHome).length === 0; }
+    catch { return { ok: false, error: 'Could not inspect the new project folder.' }; }
+    if (!newHomeIsBlank) return { ok: false, error: 'Choose an empty folder for a new project.' };
+  }
 
   // Guard against same-folder / nested-folder (a move would self-copy forever).
   if (oldHome) {
@@ -4992,7 +5009,16 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // Repoint config and relaunch so every service re-bootstraps against newHome.
   // (Identical recovery path to resetAll — relaunch is the clean re-bind.)
   allowQuit = true;
-  writeConfig({ harnessHome: newHome });
+  // The pure transaction enforces the creation-only seed boundary and migrates
+  // both project-theme maps together on moves.
+  const maps = applyProjectHomeChange(readConfig(), {
+    mode,
+    oldHome,
+    newHome,
+    blankProject: newHomeIsBlank,
+    theme: p.projectTheme,
+  });
+  writeConfig({ harnessHome: newHome, ...maps });
   // SYNC-CHILD-CALLS: the async bulk kill (one batched taskkill, then the ConPTY exits awaited),
   // and only THEN relaunch/exit — never a per-terminal synchronous taskkill on the main thread.
   ptyManager.refuseNewSpawns('The harness home is changing and the app is restarting; agents cannot start now.');
@@ -6614,7 +6640,7 @@ const completionWatcher = initCompletionWatcher({
     }
   },
   // MUNDER_HIDDEN (dev only): no toast from a hidden run.
-  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: 'Michael', body: evt.summary }).show(); } catch { /* best-effort */ } }
+  onNotify: (evt) => { try { if (!DEV_HIDDEN && Notification.isSupported()) new Notification({ title: resolveGodNameFromRegistry(hive.registry()), body: evt.summary }).show(); } catch { /* best-effort */ } }
 });
 
 registerRealtimeActionIpc({

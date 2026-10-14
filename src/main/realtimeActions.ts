@@ -39,6 +39,7 @@ import type { HiveMessage, HiveTask, Registry } from './hive';
 import type { ScheduledMission } from './config';
 import { inferAgentProvider } from '../shared/agentProvider';
 import { clearCommandForProvider } from '../shared/providerAutomation';
+import { resolveGodNameFromRegistry } from '../shared/godIdentity';
 
 export const VOICE_ACTOR = 'michael-voice';
 
@@ -136,7 +137,6 @@ const SETTING_POLICY: Record<string, {
   // soft: cosmetic / low-blast, instantly reversible
   notifications: { tier: 'soft', type: 'boolean' },
   tvShowOffices: { tier: 'soft', type: 'boolean' },
-  officeTheme: { tier: 'soft', type: 'string', values: ['office', 'friends', 'brooklyn99', 'siliconvalley', 'got', 'hogwarts'] },
   terminalTheme: { tier: 'soft', type: 'string', values: ['light', 'dark'] },
   freeflowEnabled: { tier: 'soft', type: 'boolean' },
   strongKeepalive: { tier: 'soft', type: 'boolean' },
@@ -274,6 +274,8 @@ function attribute(deps: RealtimeActionDeps, verb: string, target: string, extra
   // moves. attribute() only runs on committed writes (soft execs + post-confirm commits),
   // so god is never notified for a merely-proposed/uncommitted destructive action.
   try {
+    const reg = deps.hiveRegistry();
+    const godName = resolveGodNameFromRegistry(reg);
     const detail =
       typeof extra.objective === 'string' ? `: ${extra.objective}`
       : typeof extra.text === 'string' ? `: ${extra.text}`
@@ -286,7 +288,7 @@ function attribute(deps: RealtimeActionDeps, verb: string, target: string, extra
         to: 'god',
         act: 'inform',
         subject: `voice action: ${verb} ${target}`,
-        body: `Michael (voice orchestrator, ${VOICE_ACTOR}) just did: ${verb} on ${target}${detail}. Heads-up so we don't duplicate — the board is the single source of truth.`
+        body: `${godName} (voice orchestrator, ${VOICE_ACTOR}) just did: ${verb} on ${target}${detail}. Heads-up so we don't duplicate — the board is the single source of truth.`
       },
       VOICE_ACTOR
     );
@@ -305,7 +307,7 @@ function execPing(deps: RealtimeActionDeps, a: Record<string, unknown>): ActionR
   const r = resolveAgent(str(a.agentId) || str(a.target) || str(a.name), reg);
   if ('error' in r) return { ok: false, spoken: r.error };
   const message = str(a.message) || str(a.text) || 'Checking in.';
-  deps.hiveSend({ to: r.id, act: 'inform', subject: 'Voice ping from Michael', body: message }, VOICE_ACTOR);
+  deps.hiveSend({ to: r.id, act: 'inform', subject: `Voice ping from ${resolveGodNameFromRegistry(reg)}`, body: message }, VOICE_ACTOR);
   attribute(deps, 'ping', r.id);
   return { ok: true, spoken: `Pinged ${r.name}.` };
 }

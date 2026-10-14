@@ -3,6 +3,7 @@ import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import type { HarnessConfig } from '@/store/config';
+import { PROJECT_THEMES, type ProjectThemeId } from '@shared/projectTheme';
 
 export interface HivePickerProps {
   config: HarnessConfig;
@@ -32,17 +33,21 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
   const recents = (config.recentHives ?? []).filter((h) => h && h !== current);
   const [busy, setBusy] = useState<string | undefined>();
   const [error, setError] = useState<string | undefined>();
+  const [newProjectPath, setNewProjectPath] = useState<string | undefined>();
 
   // Open a hive. Same folder as the current one → just enter it (no relaunch).
   // A different folder → changeHome('fresh') re-points + relaunches the process.
-  const openHive = async (path: string) => {
+  const openHive = async (path: string, projectTheme?: ProjectThemeId) => {
     if (!path) return;
-    if (current && path === current) { onOpenCurrent(); return; }
+    if (current && path === current) {
+      if (projectTheme) { setError('Choose a different empty folder for a new project.'); return; }
+      onOpenCurrent(); return;
+    }
     setError(undefined);
     setBusy(path);
     try {
       window.localStorage.setItem(SKIP_KEY, '1');
-      const res = await window.cth.changeHome(path, 'fresh');
+      const res = await window.cth.changeHome(path, 'fresh', projectTheme);
       // Success never returns (the process relaunches). A return means an error.
       if (!res.ok) {
         window.localStorage.removeItem(SKIP_KEY);
@@ -56,10 +61,13 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
     }
   };
 
-  const browse = async () => {
+  const browse = async (create = false) => {
     setError(undefined);
     const res = await window.cth.chooseFolder();
-    if (res.ok) void openHive(res.path);
+    if (res.ok) {
+      if (create) setNewProjectPath(res.path);
+      else void openHive(res.path);
+    }
     else if (res.error !== 'cancelled') setError(res.error);
   };
 
@@ -68,7 +76,7 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
       position: 'fixed', inset: 0,
       background: 'var(--cth-cream-200)',
       backgroundImage:
-        `repeating-linear-gradient(45deg, rgba(232, 217, 160, 0.4) 0 1px, transparent 1px 8px)`,
+        `repeating-linear-gradient(45deg, var(--cth-hatch-strong) 0 1px, transparent 1px 8px)`,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       zIndex: 200,
       padding: 32
@@ -165,12 +173,12 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
             {/* OPEN / CREATE — both browse to a folder; "fresh" mode re-points at it
                 (bootstrapping an empty one, or reusing existing hive data in place). */}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
-              <PixelButton variant="secondary" size="md" onClick={browse} disabled={!!busy}>
+              <PixelButton variant="secondary" size="md" onClick={() => void browse()} disabled={!!busy}>
                 <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                   <Icon name="folder" /> open existing config…
                 </span>
               </PixelButton>
-              <PixelButton variant="secondary" size="md" onClick={browse} disabled={!!busy}>
+              <PixelButton variant="secondary" size="md" onClick={() => void browse(true)} disabled={!!busy}>
                 <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                   <Icon name="plus" /> create new config…
                 </span>
@@ -179,6 +187,19 @@ export function HivePicker({ config, onOpenCurrent }: HivePickerProps) {
           </div>
         </PixelPanel>
       </div>
+      {newProjectPath && <ProjectThemeChoice path={newProjectPath} onCancel={() => setNewProjectPath(undefined)} onChoose={(theme) => void openHive(newProjectPath, theme)} />}
     </div>
   );
+}
+
+function ProjectThemeChoice({ path, onCancel, onChoose }: { path: string; onCancel: () => void; onChoose: (theme: ProjectThemeId) => void }) {
+  return <div style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(26, 19, 32, 0.7)', display: 'grid', placeItems: 'center', padding: 20 }}>
+    <div style={{ width: 520, maxWidth: '94vw' }}><PixelPanel variant="dialog" title="CHOOSE A PROJECT THEME" noPadding>
+      <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12, color: 'var(--cth-ink-700)' }}>This choice seeds a blank project only. Existing project names and memories are never changed.</div>
+        {PROJECT_THEMES.filter((theme) => theme.id === 'office').map((theme) => <button key={theme.id} onClick={() => onChoose(theme.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, border: 'none', padding: 10, textAlign: 'left', cursor: 'pointer', background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}><span style={{ width: 24, height: 24, background: theme.swatch }} /><span><strong>{theme.label}</strong><span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-500)' }}>{theme.projectDefaults?.orchestrator?.name ?? 'Default orchestrator'} starts this project</span></span></button>)}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}><PixelButton variant="secondary" size="md" onClick={onCancel}>cancel</PixelButton></div>
+      </div>
+    </PixelPanel></div>
+  </div>;
 }

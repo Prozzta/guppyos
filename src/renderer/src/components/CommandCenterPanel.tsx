@@ -38,6 +38,7 @@ import {
   type AgentProvider
 } from '@/store/config';
 import { canReceiveInbox } from '@shared/agentProvider';
+import { DEFAULT_GOD_NAME } from '@shared/godIdentity';
 import type { LivenessV1 } from '@shared/livenessV1';
 import { applyLivenessUpdate } from '@shared/livenessView';
 import { billedEquivalentTokens, tokenFigureTitle } from '@shared/tokenWeights';
@@ -191,7 +192,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
             <span style={{
               fontSize: 12, color: 'var(--cth-ink-500)',
               whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-            }}>Michael runs the floor</span>
+            }}>{agent.name || DEFAULT_GOD_NAME} runs the floor</span>
           </div>
         </div>
         {/* v0.3.4: floor-wide auto-delivery lives HERE (one switch for every
@@ -331,7 +332,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
               <MessageQueueComposer agent={agent} />
             </>
           ) : (
-            <Centered>Michael has no live terminal.</Centered>
+            <Centered>{agent.name || DEFAULT_GOD_NAME} has no live terminal.</Centered>
           )
         )}
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
@@ -362,6 +363,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
 export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
   useModelCatalogVersion(); // REFRESH-MODELS: re-render when the models file is refreshed
   const agents = useStore((s) => s.agents);
+  const godName = agents.find((a) => a.isGod)?.name ?? DEFAULT_GOD_NAME;
   const select = useStore((s) => s.select);
   const updateAgent = useStore((s) => s.updateAgent);
   const toolCounts = useStore((s) => s.toolCounts);
@@ -683,7 +685,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
           const usageDisplay: AgentUsageDisplay = usageCapable ? (agentUsageDisplay[a.id] ?? 'budget') : 'budget';
           const denom = agentCap && agentCap > 0 ? agentCap : floorCap;
           const pct = Math.min(100, Math.round((tokens / denom) * 100));
-          const meterColor = armed || pct >= 90 ? 'var(--cth-coral)' : pct >= 60 ? 'var(--cth-lemon)' : 'var(--cth-mint)';
+          const meterColor = armed || pct >= 90 ? 'var(--cth-coral)' : pct >= 60 ? 'var(--cth-warn-mark)' : 'var(--cth-mint)';
           // Sparkline only when the agent is actually burning tokens; otherwise the
           // flat baseline is just a mystery line. Label it with the live rate.
           const sparkSeries = spark[a.id] ?? [];
@@ -780,7 +782,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
               <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0 }}>ctx</span>
               {a.contextTokens !== undefined && a.contextLimit ? (() => {
                 const cpct = Math.min(100, Math.round((a.contextTokens! / a.contextLimit!) * 100));
-                const ccolor = cpct >= 88 ? 'var(--cth-coral)' : cpct >= 75 ? 'var(--cth-lemon)' : `var(--cth-${a.accent})`;
+                const ccolor = cpct >= 88 ? 'var(--cth-coral)' : cpct >= 75 ? 'var(--cth-warn-mark)' : `var(--cth-${a.accent})`;
                 return (
                   <>
                     <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-900)', width: 56, textAlign: 'right' }}>
@@ -916,7 +918,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                   onClick={async () => {
                     const currentProvider = inferAgentProvider(a.command, a.provider);
                     if (engineProvider !== currentProvider) {
-                      if (!window.confirm("This restarts Michael; a conversation on a different engine can't be resumed.")) return;
+                      if (!window.confirm(`This restarts ${godName}; a conversation on a different engine can't be resumed.`)) return;
                     }
                     await window.cth.updateConfig({ godProvider: engineProvider, godModel: engineModel });
                     await restartWithModel(a, engineModel, { provider: engineProvider, resume: false });
@@ -932,7 +934,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                   disabled={restarting === a.id}
                   onClick={() => restartWithModel(a, a.model, { resume: true })}
                 >
-                  <span title="Kill and respawn Michael, resuming the current conversation — fixes a corrupted/garbled terminal without losing context">
+                  <span title={`Kill and respawn ${godName}, resuming the current conversation — fixes a corrupted/garbled terminal without losing context`}>
                     restart &amp; continue
                   </span>
                 </PixelButton>
@@ -1322,7 +1324,8 @@ const DispatchBox = memo(function DispatchBox({ agents, seed, issueSeed }: {
   seed: { text: string; seq: number };
   issueSeed: { text: string; seq: number };
 }) {
-  const [dispatchTo, setDispatchTo] = useState<string>(''); // '' = Michael decides
+  const [dispatchTo, setDispatchTo] = useState<string>(''); // '' = god decides
+  const godName = useStore((s) => s.agents.find((a) => a.isGod)?.name) ?? DEFAULT_GOD_NAME;
   const [dispatchText, setDispatchText] = useState('');
   const [dispatchMsg, setDispatchMsg] = useState<string | null>(null);
 
@@ -1355,7 +1358,7 @@ const DispatchBox = memo(function DispatchBox({ agents, seed, issueSeed }: {
     );
     setDispatchText('');
     setDispatchMsg(res.ok
-      ? `sent to Michael${suggested ? ` (suggesting ${suggested.name})` : ''}`
+      ? `sent to ${godName}${suggested ? ` (suggesting ${suggested.name})` : ''}`
       : `failed: ${res.error ?? '?'}`);
     setTimeout(() => setDispatchMsg(null), 4000);
   };
@@ -1367,7 +1370,7 @@ const DispatchBox = memo(function DispatchBox({ agents, seed, issueSeed }: {
               SUGGESTED OWNER
             </span>
             <Select value={dispatchTo} onChange={setDispatchTo}>
-              <option value="">Michael decides</option>
+              <option value="">{godName} decides</option>
               {agents.filter((a) => !a.isGod).map((a) => (
                 <option key={a.id} value={a.id}>{a.name}</option>
               ))}

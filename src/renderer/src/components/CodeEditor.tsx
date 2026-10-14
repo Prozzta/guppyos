@@ -12,12 +12,16 @@ import { css } from '@codemirror/lang-css';
 import { yaml } from '@codemirror/lang-yaml';
 import { Icon } from './Icon';
 import { PixelButton } from './PixelButton';
+import { useUiPalette } from '@/design/uiTheme';
+import { codeMirrorPaletteColours, type UiTokenName } from '@/design/uiTokens';
 
 // ─── Theme matching CTH palette ─────────────────────────────────────────────
-const cthEditorTheme = EditorView.theme({
+// Light in both app themes, as before; ground, ink, gutter and selection come from the light UI palette, so a floor
+// theme's tokens reach the editor (rebuilt when they change).
+const cthEditorTheme = (p: Record<UiTokenName, string>) => { const c = codeMirrorPaletteColours(p); return EditorView.theme({
   '&': {
-    background: '#FCFAF0',
-    color: '#1A1320',
+    background: c.background,
+    color: c.foreground,
     height: '100%',
     fontFamily: 'VT323, "JetBrains Mono", monospace',
     fontSize: '16px'
@@ -26,16 +30,16 @@ const cthEditorTheme = EditorView.theme({
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#FF6B6B', borderLeftWidth: '2px' },
   '.cm-scroller': { fontFamily: 'inherit', overflow: 'auto' },
   '.cm-gutters': {
-    background: '#F0EAD2',
-    color: '#6B5878',
-    borderRight: '1px solid #D9CFE0'
+    background: c.gutterBackground,
+    color: c.gutterForeground,
+    borderRight: `1px solid ${c.gutterBorder}`
   },
-  '.cm-activeLineGutter': { background: '#FFEC99' },
-  '.cm-activeLine': { background: 'rgba(255, 217, 61, 0.10)' },
-  '.cm-selectionBackground, ::selection': { background: '#FFEC99 !important' },
-  '.cm-searchMatch': { background: '#A8E6E0', outline: '1px solid #1A1320' },
-  '.cm-searchMatch.cm-searchMatch-selected': { background: '#FFD93D' }
-}, { dark: false });
+  '.cm-activeLineGutter': { background: c.activeLineGutter },
+  '.cm-activeLine': { background: c.activeLine },
+  '.cm-selectionBackground, ::selection': { background: `${c.selection} !important` },
+  '.cm-searchMatch': { background: '#A8E6E0', outline: `1px solid ${c.foreground}` },
+  '.cm-searchMatch.cm-searchMatch-selected': { background: c.searchMatchSelected }
+}, { dark: false }); };
 
 const cthSyntax = HighlightStyle.define([
   { tag: tags.keyword,        color: '#B197FC' },
@@ -141,9 +145,10 @@ export function CodeEditor({
     return () => window.removeEventListener('keydown', onKey);
   }, [save]);
 
+  const palette = useUiPalette('light');
   const extensions = useMemo(
-    () => [cthEditorTheme, syntaxHighlighting(cthSyntax), ...(filePath ? extensionsFor(filePath) : [])],
-    [filePath]
+    () => [cthEditorTheme(palette), syntaxHighlighting(cthSyntax), ...(filePath ? extensionsFor(filePath) : [])],
+    [filePath, palette]
   );
 
   if (!filePath) {

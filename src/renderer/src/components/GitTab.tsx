@@ -30,7 +30,7 @@ function statusLabel(code: string): string {
 }
 
 function statusColor(code: string): string {
-  if (code === 'M') return 'var(--cth-lemon)';
+  if (code === 'M') return 'var(--cth-warn-mark)';
   if (code === 'A') return 'var(--cth-mint)';
   if (code === 'D') return 'var(--cth-coral)';
   if (code === 'R') return 'var(--cth-lilac)';

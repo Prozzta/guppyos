@@ -14,6 +14,7 @@
 
 import type { Texture } from 'pixi.js';
 import { colors } from '@/design/tokens';
+import type { UiTokenOverrides } from '@/design/uiTokens';
 import {
   CAST_BY_NAME,
   getCastFrames,
@@ -143,6 +144,9 @@ export interface ThemeConfig {
   monitor: MonitorConfig;
   palette: PaletteConfig;
   cast: ThemeCast;
+  /** Optional UI colour overrides ({light, dark} of whitelisted --cth-* colour roles; see design/uiTokens.ts),
+   *  applied app-wide while this theme is active. Office and the TV themes have none. */
+  uiTokens?: UiTokenOverrides;
 }
 
 /** The existing office, expressed as a theme. Values are copied verbatim from

@@ -68,7 +68,7 @@ export function MemoryPanel() {
           ? { dot: 'var(--cth-mint)', label: 'On · starts on first use' }
         : typeof status.index?.sources === 'number'
           ? { dot: 'var(--cth-mint)', label: `On · ${status.index.sources} notes indexed` }
-          : { dot: 'var(--cth-lemon)', label: 'On · getting ready…' };
+          : { dot: 'var(--cth-warn-mark)', label: 'On · getting ready…' };
 
   return (
     <div style={{ position: 'absolute', bottom: 12, left: 12, width: open ? 380 : 'auto', zIndex: 40 }}>

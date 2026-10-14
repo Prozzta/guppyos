@@ -18,6 +18,7 @@ import { codexLayerOptInKey } from './codexProjectLayers';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
+import { isProjectThemeId, isProjectThemeSeed, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
 import {
   DEFAULT_CONTEXT_TRIGGER,
@@ -415,14 +416,18 @@ export interface HarnessConfig {
    *  without an injected key and environments with DO_NOT_TRACK set never send
    *  regardless of this flag. (Mirrored in preload + renderer config.) */
   telemetryEnabled?: boolean;
-  /** Master flag for the TV-show office themes feature (Settings theme picker +
-   *  destructive switch flow). Default false = the picker is hidden and the
-   *  office renders as today (zero behavior change). */
+  /** Master flag for the TV-show office themes. Default false = the built-in
+   *  show maps are not offered and the office renders as today. */
   tvShowOffices?: boolean;
-  /** Which office map/cast theme the pixel office renders. Only honored when
-   *  `tvShowOffices` is on; otherwise the office theme is used. Unbuilt show
-   *  themes fall back to 'office' in the loader. */
-  officeTheme?: 'office' | 'friends' | 'brooklyn99' | 'siliconvalley' | 'got' | 'hogwarts';
+  /** Legacy global office theme: the fallback for a project with no explicit
+   *  choice in `officeThemeByHive`. The built-in show maps are only honored when
+   *  `tvShowOffices` is on; unbuilt show themes fall back to 'office' in the loader. */
+  officeTheme?: ProjectThemeId;
+  /** Explicit project choice keyed by normalized harness home. */
+  officeThemeByHive?: Record<string, ProjectThemeId>;
+  /** Immutable creation record: unlike a theme selection, this may name the
+   *  first orchestrator and declare its appearance. */
+  projectThemeSeedByHive?: Record<string, ProjectThemeSeed>;
   /** Per-CLI-provider local/self-hosted base URL (Ollama/LM Studio/vLLM, …) for the
    *  OpenCode/Crush/pi/qwen engines; applied at spawn (config-injection or proxy
    *  upstream). API KEYS are NOT stored here — they live write-only in the secret
@@ -907,7 +912,35 @@ function normalizeStoredHomes(cfg: HarnessConfig): HarnessConfig {
       .map((h) => expandTilde(h))
       .filter((h) => (seen.has(h) ? false : (seen.add(h), true)));
   }
+  if (cfg.officeThemeByHive) {
+    const normalized: Record<string, ProjectThemeId> = {};
+    for (const [home, theme] of Object.entries(cfg.officeThemeByHive)) {
+      if (home.trim() && isProjectThemeId(theme)) normalized[projectThemeHomeKey(expandTilde(home))] = theme;
+    }
+    cfg.officeThemeByHive = normalized;
+  }
+  if (cfg.projectThemeSeedByHive) {
+    const normalized: Record<string, ProjectThemeSeed> = {};
+    for (const [home, seed] of Object.entries(cfg.projectThemeSeedByHive)) {
+      if (home.trim() && isProjectThemeSeed(seed)) normalized[projectThemeHomeKey(expandTilde(home))] = seed;
+    }
+    cfg.projectThemeSeedByHive = normalized;
+  }
   return cfg;
+}
+
+/** Resolve a hive's explicit selection, retaining the legacy global fallback. */
+export function resolveProjectThemeForHome(config: HarnessConfig, harnessHome?: string): ProjectThemeId {
+  return resolveProjectTheme(config, harnessHome ? expandTilde(harnessHome) : harnessHome);
+}
+
+/** Update only one project's explicit choice, against the latest config on disk
+ *  (the renderer's config is a snapshot; see setAgentTokenCap). */
+export function setProjectThemeForHome(harnessHome: string, theme: unknown): HarnessConfig {
+  if (!isProjectThemeId(theme)) throw new Error('invalid project theme');
+  const home = projectThemeHomeKey(expandTilde(harnessHome));
+  const current = readConfig();
+  return writeConfig({ officeThemeByHive: { ...(current.officeThemeByHive ?? {}), [home]: theme } });
 }
 
 function persistConfig(next: HarnessConfig): HarnessConfig {

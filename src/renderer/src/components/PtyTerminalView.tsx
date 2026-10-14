@@ -12,6 +12,8 @@ import {
   useTerminalFontSize
 } from './terminalFontSize';
 import { useAppTheme } from '@/design/theme';
+import { uiPalette, useUiPalette } from '@/design/uiTheme';
+import { terminalPaletteColours } from '@/design/uiTokens';
 
 // Zoom lives in ./terminalFontSize so anything outside the terminal (the message
 // composer) can scale with it too; these aliases keep the call sites below short.
@@ -50,17 +52,13 @@ const zoomBtnStyle: CSSProperties = {
 // values are tuned so the colours stay recognisable and read well natively. The
 // green/yellow are kept deep enough to read as text on cream (the brighter
 // variants are the lighter shades, per terminal convention).
+// Ground, ink, selection and the yellows are not listed here: they come from the
+// UI palette (--cth-paper-100, ink-900, select, term-yellow/-bright), see xtermTheme.
 const lightTheme = {
-  background: '#FCFAF0',
-  foreground: '#1A1320',
   cursor: '#D96A62',
-  cursorAccent: '#FCFAF0',
-  selectionBackground: '#FFEC99',
-  selectionForeground: '#1A1320',
   black:        '#1A1320',
   red:          '#D1453B',
   green:        '#20904B',    // deep green → readable as text on cream
-  yellow:       '#9C6B00',    // deep amber → readable as text on cream
   blue:         '#2B6CB0',
   magenta:      '#8A5CF0',
   cyan:         '#1F9C94',
@@ -68,32 +66,24 @@ const lightTheme = {
   brightBlack:  '#6B5878',
   brightRed:    '#E0584E',
   brightGreen:  '#2E9E54',
-  brightYellow: '#B8860B',
   brightBlue:   '#3B7DC4',
   brightMagenta:'#9B72F2',
   brightCyan:   '#2BA89F',
   brightWhite:  '#1A1320'
 };
 
-// Dark theme — mirrors the app's dark surface ramp (tokens.css
+// Dark theme — sits on the app's dark surface ramp (tokens.css
 // data-cth-theme='dark'). xterm takes literal colours and cannot read CSS
-// custom properties, so these values are RE-STATED rather than referenced, and
-// drift the moment the tokens move: this set was still on the pre-readability
-// ramp (background #1D1C21, the old paper-100) after tokens.css dropped to
-// a softer ground, which would have left every terminal sitting a visible step
-// apart from the panel holding it. Muted-professional ANSI: recognizable hues, no
-// fluorescing on the dark ground; brights are one legible step up, not pastels.
+// custom properties; a re-stated copy drifted once already (it was still on the
+// pre-readability ramp after tokens.css moved), so the ground, ink, selection
+// and yellows now come from the resolved UI palette instead (xtermTheme).
+// Muted-professional ANSI: recognizable hues, no fluorescing on the dark
+// ground; brights are one legible step up, not pastels.
 const darkTheme = {
-  background: '#1A1A1F',        // = --cth-paper-100
-  foreground: '#DEDBD6',        // = --cth-ink-900
   cursor: '#E08C82',
-  cursorAccent: '#1A1A1F',
-  selectionBackground: '#37363F',
-  selectionForeground: '#DEDBD6',
   black:        '#222229',
   red:          '#E08C82',
   green:        '#74C096',
-  yellow:       '#CFAA57',
   blue:         '#6FB3C4',
   magenta:      '#A896E3',
   cyan:         '#6FB3C4',
@@ -101,7 +91,6 @@ const darkTheme = {
   brightBlack:  '#96919F',
   brightRed:    '#EBA39C',
   brightGreen:  '#96CDA9',
-  brightYellow: '#E5C87E',
   brightBlue:   '#8FC5D1',
   brightMagenta:'#C0B3EB',
   brightCyan:   '#8FC5D1',
@@ -109,6 +98,11 @@ const darkTheme = {
 };
 
 const THEMES: Record<PtyTheme, typeof lightTheme> = { light: lightTheme, dark: darkTheme };
+
+/** The xterm theme for a mode: the fixed ANSI set above plus the palette's ground, ink, selection and yellows. */
+function xtermTheme(mode: PtyTheme) {
+  return { ...THEMES[mode], ...terminalPaletteColours(uiPalette(mode)) };
+}
 
 export interface PtyTerminalViewProps {
   ptyId: string;
@@ -143,8 +137,8 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
   useEffect(() => {
     const container = hostRef.current;
     if (!container) return;
-    const entry = acquireTerminal(ptyId, THEMES[ptyThemeRef.current], fontSizeRef.current);
-    entry.term.options.theme = THEMES[ptyThemeRef.current];
+    const entry = acquireTerminal(ptyId, xtermTheme(ptyThemeRef.current), fontSizeRef.current);
+    entry.term.options.theme = xtermTheme(ptyThemeRef.current);
     entry.term.options.fontSize = fontSizeRef.current;
     attachTerminal(entry, container);
     entry.onData = (chunk) => onStreamDataRef.current?.(chunk);
@@ -271,16 +265,18 @@ export function PtyTerminalView({ ptyId, onStreamData, onUserPrompt, onToggleFul
     };
   }, [ptyId]);
 
-  // Apply app-theme changes to the pooled terminal (persistence lives in
-  // design/theme.ts — the title-bar toggle owns it).
+  // Apply app-theme and UI-token changes to the pooled terminal (persistence
+  // lives in design/theme.ts — the title-bar toggle owns it; floor-theme
+  // tokens in design/uiTheme.ts).
+  const termPalette = useUiPalette(ptyTheme);
   useEffect(() => {
-    acquireTerminal(ptyId, THEMES[ptyTheme], fontSizeRef.current).term.options.theme = THEMES[ptyTheme];
-  }, [ptyTheme, ptyId]);
+    acquireTerminal(ptyId, xtermTheme(ptyTheme), fontSizeRef.current).term.options.theme = xtermTheme(ptyTheme);
+  }, [ptyTheme, ptyId, termPalette]);
 
   // Apply font-size (zoom) changes to the pooled terminal and re-fit cols/rows.
   useEffect(() => {
     fontSizeRef.current = fontSize;
-    const entry = acquireTerminal(ptyId, THEMES[ptyThemeRef.current], fontSize);
+    const entry = acquireTerminal(ptyId, xtermTheme(ptyThemeRef.current), fontSize);
     entry.term.options.fontSize = fontSize;
     // The same guard as tryFit: never fit a host with no real size. A view mounted inside a
     // display:none tab has a 0x0 host, and fitting it proposed a phantom grid and resized the

@@ -38,6 +38,23 @@
   --cth-status-looping:    #D6903F; /* #5C — circuit-breaker armed (runaway) */
   --cth-status-typing:     #C89838; /* unsent text on the prompt — queue is held */
 
+  /* UI colour roles — colours that used to be literals in components. A floor
+     theme may override these and the colours above (never spacing, type or
+     geometry); see design/uiTokens.ts, which mirrors every colour here. */
+  --cth-lemon-strong:       #DCAB3C;   /* the accent as a mark: dots, meters, borders, accent text */
+  --cth-select:             #FFEC99;   /* editor/terminal selection, active gutter row */
+  --cth-select-strong:      #FFD93D;   /* the current search match */
+  --cth-select-line:        rgba(255, 217, 61, 0.10);   /* the editor's active-line wash */
+  --cth-hatch:              rgba(232, 217, 160, 0.20);  /* body background hatch */
+  --cth-hatch-strong:       rgba(232, 217, 160, 0.40);  /* hatch on the full-screen pickers */
+  --cth-track:              #F6F3E8;   /* the empty part of a meter or pie */
+  --cth-term-yellow:        #9C6B00;   /* terminal ANSI yellow, readable on the terminal ground */
+  --cth-term-yellow-bright: #B8860B;
+  --cth-warn:               #B8860B;   /* warnings, apart from the accent */
+  --cth-warn-light:         #F6E2B3;
+  --cth-warn-mark:          #DCAB3C;   /* a warning as a mark: near-cap meters, warning dots (Office: the accent) */
+  --cth-amber-light:        #F6E2B3;   /* update badge, warning tone */
+
   /* Spacing */
   --cth-space-0: 0px;
   --cth-space-1: 4px;
@@ -165,6 +182,14 @@
   --cth-status-compacting: #9D8BD2;
   --cth-status-looping:    #D69A55;
   --cth-status-typing:     #CBA24A;
+
+  /* UI colour roles. The editors stay light in both themes and the hatch,
+     track and warning colours never had a dark value, so only these move. */
+  --cth-lemon-strong:       #CFAA57;
+  --cth-warn-mark:          #CFAA57;
+  --cth-select:             #37363F;
+  --cth-term-yellow:        #CFAA57;
+  --cth-term-yellow-bright: #E5C87E;
 
   /* Hard shadow reads as depth, not void */
   --cth-shadow-hard: 4px 4px 0 rgba(0, 0, 0, 0.45);

@@ -210,6 +210,8 @@ export interface HiveTask {
 export interface AgentMeta {
   id: string;
   name: string;
+  /** Creation-only character declaration supplied by a project theme pack. */
+  appearance?: { bodyId: string; colors?: { skin?: string; shirt?: string; hair?: string }; presetId?: string };
   /** Which CLI this agent runs on. Defaults to 'claude' when unset (legacy). */
   provider?: AgentProvider;
   role?: string;
