@@ -34,7 +34,10 @@ test('rendered: every card name shows at least 8 glyphs (or all of a shorter one
   const r = await runScenario(path.join(__dirname, 'electron-harness', 'scenarios', 'agentcard-name-fit.tsx'), { timeoutMs: 90_000 });
   assert.equal(r.ok, true, r.error);
   assert.ok(r.font, 'the display face loaded (else glyph widths mean nothing)');
-  for (const [id, m] of Object.entries(r.atMount)) assert.equal(m.dot, null, `${id}: under the 4px stand-in every name fits, so no dot at mount`);
+  // Under the 4px stand-in MICHAEL fits beside "working", so god's card is not dotted at mount
+  // (the long names may be: they do not fit even there).
+  assert.equal(r.atMount.godMichael.dot, null, 'godMichael: no dot at mount under the 4px stand-in');
+  assert.ok(r.atMount.godMichael.badgeText, 'godMichael: the full chip at mount');
   const ids = Object.keys(r.cases);
   assert.equal(ids.length, 8);
   // Only the fonts 'loadingdone' re-measure can have dotted godMichael (checked below).
