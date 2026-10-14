@@ -14,6 +14,8 @@
  * a lone idle agent takes a few coffees per 10 minutes. The source pins check
  * that OfficeFloor starts the rest whenever a break is released, counts it
  * down every frame, and uses it for the café only (errands are unchanged).
+ * The real Pixi floor does not run under node: the coffee counts come from a
+ * replay model of its timing, and the OfficeFloor wiring is pinned by source.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -24,10 +26,16 @@ const load = require('./load-ts.cjs');
 const gap = load('src/renderer/src/scene/office/coffeeGap.ts');
 const floor = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/scene/office/OfficeFloor.tsx'), 'utf8');
 
-/** A seeded PRNG so every run replays the same floor. */
+/** A seeded PRNG (mulberry32) so every run replays the same floor. */
 function rng(seed) {
   let s = seed >>> 0;
-  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32; };
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 2 ** 32;
+  };
 }
 
 /**
