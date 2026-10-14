@@ -10,6 +10,7 @@ import { useStore, type Agent } from '@/store/store';
 import { Camera } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
+import { tileAtlas } from './atlas';
 import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
@@ -87,19 +88,35 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const world = new Container();
       app.stage.addChild(world);
       const plan = buildScenePlan({ ...SM, store: pack.store });
-      world.addChild(new Sprite(texture(plan.below)));
+      // TES-GUPPY-RASTER: every layer is drawn as its live tiles from shared atlas pages
+      // (atlas.ts): fully transparent tiles change nothing, and drawn whole they doubled the fill.
+      const gl = (app.renderer as any).gl as WebGL2RenderingContext | undefined;
+      const atlas = tileAtlas([plan.below, plan.above, ...plan.sorted.map((it) => it.px)],
+        Math.min(4096, gl?.getParameter(gl.MAX_TEXTURE_SIZE) ?? 2048));
+      const pages = atlas.pages.map(texture);
+      const tiled = (i: number, px: Pixels): Container => {
+        const c = new Container();
+        if (atlas.unpacked[i]) { c.addChild(new Sprite(texture(px))); return c; }
+        for (const p of atlas.pieces[i]) {
+          const s = new Sprite(new Texture({ source: pages[p.page].source, frame: new Rectangle(p.ax, p.ay, p.w, p.h) }));
+          s.position.set(p.x, p.y);
+          c.addChild(s);
+        }
+        return c;
+      };
+      world.addChild(tiled(0, plan.below));
       const sortLayer = new Container();
       sortLayer.sortableChildren = true;
       world.addChild(sortLayer);
-      const statics = plan.sorted.map((it) => {
+      const statics = plan.sorted.map((it, i) => {
         if (!it.px) return null;
-        const s = new Sprite(texture(it.px));
+        const s = tiled(2 + i, it.px);
         s.position.set(it.x, it.y);
         s.alpha = it.opacity;
         sortLayer.addChild(s);
         return s;
       });
-      world.addChild(new Sprite(texture(plan.above)));
+      world.addChild(tiled(1, plan.above));
 
       const sheetPx = pack.store.get(pack.sheet)!;
       const cols = Math.max(1, Math.floor(sheetPx.width / fw));
@@ -156,6 +173,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       sync();
 
       let clock = 0;
+      let lastDepth = '';
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
@@ -185,11 +203,17 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         clock += dt;
         crew.tick(dt);
         camera.update(dt / 1000);
-        const items: Array<{ foot: number; rank: number; sprite: Sprite | null }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
+        const people: Array<{ foot: number; rank: number; sprite: Sprite; id: string }> = [];
         for (const p of crew.walkers()) {
           const s = sprites.get(p.id);
-          if (s) items.push({ ...place(p, s), sprite: s.sprite });
+          if (s) people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
         }
+        // The statics never move: the depth order changes only when a person's key (or the crew) does.
+        const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}`).join('|');
+        if (depth === lastDepth) return;
+        lastDepth = depth;
+        const items: Array<{ foot: number; rank: number; sprite: Container | null }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
+        for (const q of people) items.push(q);
         items.sort(byDepth);
         items.forEach((it, i) => { if (it.sprite) it.sprite.zIndex = i; });
       };
