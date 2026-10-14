@@ -47,6 +47,9 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
   // agent is shown with now) and is saved only once it is changed here.
   const officeTheme = useStore((s) => s.officeTheme);
   const looks = useThemeLooks(officeTheme);
+  const hasThemeLookBuilder = Boolean(looks?.builder);
+  // Never flash the Office grid while an active pack is still loading.
+  const showOfficeCharacterPicker = looks !== undefined && !hasThemeLookBuilder;
   const [lookDraftState, setLookDraftState] = useState<{ key: string; draft: LookDraft } | null>(null);
   const lookKey = looks ? `${agent.id}|${looks.themeId}` : '';
   const lookDraft = looks?.builder
@@ -139,7 +142,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
               gap: 16, alignItems: 'start', minHeight: 260
             }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
-            <Section label="Identity" hint="name · character · color">
+            <Section label="Identity" hint={hasThemeLookBuilder ? 'name · look · color' : 'name · character · color'}>
               <Row label="Name">
                 <input
                   value={name}
@@ -150,8 +153,9 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                 />
               </Row>
 
-              <Row label="Character">
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {showOfficeCharacterPicker && (
+                <Row label="Character">
+                  <div data-office-character-picker style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {OFFICE_CAST.map((c) => {
                     const active = character === c.name;
                     return (
@@ -181,14 +185,16 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                       </button>
                     );
                   })}
-                </div>
-              </Row>
+                  </div>
+                </Row>
+              )}
 
               {looks && lookDraft && (
                 <ThemeLookBuilder
                   looks={looks}
                   draft={lookDraft}
                   character={character}
+                  officeCharacterVisible={showOfficeCharacterPicker}
                   onChange={(d) => setLookDraftState({ key: lookKey, draft: d })}
                 />
               )}

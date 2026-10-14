@@ -4,6 +4,7 @@ import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { ThemeLookBuilder } from './ThemeLookBuilder';
 import { useThemeLooks } from '@/scene/themes/useThemeLooks';
+import { isPackProjectTheme } from '@shared/projectTheme';
 import { draftToLook, startDraft, type LookDraft } from '@/scene/themes/looks';
 import { Icon } from './Icon';
 import { ProviderLogo } from './ProviderLogo';
@@ -188,14 +189,23 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const initialProvider = inferAgentProvider(config.defaultCommand);
   const initialModel = seedModelForProvider(config, initialProvider);
 
-  const [name, setName] = useState(pendingHire?.name ?? 'Jim');
+  // Read the theme before seeding identity defaults. A pack-based crew member
+  // must not greet a new hire with the Office's default name, but an imported
+  // name is always the user's data and remains untouched.
+  const officeTheme = useStore((s) => s.officeTheme);
+  const [name, setName] = useState(pendingHire?.name ?? (isPackProjectTheme(officeTheme) ? 'Crewmate' : 'Jim'));
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
   // The active theme pack's look builder (only when the pack declares one).
   // The draft is per theme, so a theme change mid-dialog never saves a look
   // made for another pack.
-  const officeTheme = useStore((s) => s.officeTheme);
   const looks = useThemeLooks(officeTheme);
+  const hasThemeLookBuilder = Boolean(looks?.builder);
+  // Never flash the Office grid while an active pack is still loading.
+  const showOfficeCharacterPicker = looks !== undefined && !hasThemeLookBuilder;
+  const sections = hasThemeLookBuilder
+    ? SECTIONS.map((s) => s.key === 'identity' ? { ...s, hint: 'name · look · color' } : s)
+    : SECTIONS;
   const [lookDraftState, setLookDraftState] = useState<{ themeId: string; draft: LookDraft } | null>(null);
   const lookDraft = looks?.builder
     ? (lookDraftState?.themeId === looks.themeId ? lookDraftState.draft : startDraft(looks.builder, looks.columns))
@@ -650,7 +660,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
               {/* LEFT — section index. Capabilities isn't a nav item: it isn't a
                   user field, it rides the imported hire manifest (banner above). */}
               <nav style={{ width: 168, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {SECTIONS.map((s, i) => {
+                {sections.map((s, i) => {
                   const active = section === s.key;
                   return (
                     <button
@@ -699,38 +709,41 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                       />
                     </Row>
 
-                    <Row label="Character">
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        {OFFICE_CAST.map(c => (
-                          <button
-                            key={c.name}
-                            onClick={() => { setCharacter(c.name); setName(c.displayName); }}
-                            title={c.blurb}
-                            style={{
-                              padding: 4,
-                              background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
-                              boxShadow: character === c.name
-                                ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
-                                : 'inset 0 0 0 1px var(--cth-ink-100)',
-                              cursor: 'pointer',
-                              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-                              border: 'none', width: 56
-                            }}
-                          >
-                            <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
-                              <SpritePortrait character={c.name} scale={2} />
-                            </div>
-                            <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </Row>
+                    {showOfficeCharacterPicker && (
+                      <Row label="Character">
+                        <div data-office-character-picker style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {OFFICE_CAST.map(c => (
+                            <button
+                              key={c.name}
+                              onClick={() => { setCharacter(c.name); setName(c.displayName); }}
+                              title={c.blurb}
+                              style={{
+                                padding: 4,
+                                background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                                boxShadow: character === c.name
+                                  ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                                  : 'inset 0 0 0 1px var(--cth-ink-100)',
+                                cursor: 'pointer',
+                                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                                border: 'none', width: 56
+                              }}
+                            >
+                              <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
+                                <SpritePortrait character={c.name} scale={2} />
+                              </div>
+                              <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </Row>
+                    )}
 
                     {looks && lookDraft && (
                       <ThemeLookBuilder
                         looks={looks}
                         draft={lookDraft}
                         character={character}
+                        officeCharacterVisible={showOfficeCharacterPicker}
                         onChange={(d) => setLookDraftState({ themeId: looks.themeId, draft: d })}
                         onPreset={(n) => { if (n) setName(n); }}
                       />
