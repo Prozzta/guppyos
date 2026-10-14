@@ -138,6 +138,15 @@ test('the floor frame budget is applied to the ticker', () => {
   assert.match(floor, /app\.ticker\.add\(onTick\);\s*applyFloorFrameBudget\(app\.ticker\);/);
 });
 
+// A theme pack's stations floor makes its own Pixi Application: it must carry the same cap,
+// or TES renders at the display rate (165 Hz measured) while the office draws 30.
+test('the stations floor (theme packs) applies the same frame budget to its own ticker', () => {
+  const floor = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
+  assert.match(floor, /import \{ applyFloorFrameBudget \} from '\.\.\/office\/floorFrameBudget';/);
+  assert.match(floor, /app\.ticker\.add\(onTick\);\s*applyFloorFrameBudget\(app\.ticker\);/);
+  assert.equal((floor.match(/new Application\(/g) || []).length, 1, 'one Application, and it is capped');
+});
+
 test('COST: under the REAL Pixi ticker at a 165 Hz display, the cap draws ~30 frames/s, not 165', async () => {
   const url = pathToFileURL(path.resolve(__dirname, '..', 'node_modules/pixi.js/lib/ticker/Ticker.mjs')).href;
   const { Ticker } = await import(url);

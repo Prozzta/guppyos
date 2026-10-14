@@ -9,6 +9,7 @@ import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { Camera } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
+import { applyFloorFrameBudget } from '../office/floorFrameBudget';
 import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
@@ -190,6 +191,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         items.forEach((it, i) => { if (it.sprite) it.sprite.zIndex = i; });
       };
       app.ticker.add(onTick);
+      // LAG-150, as OfficeFloor: rAF runs at the display rate (165 fps measured); the floor needs 30.
+      applyFloorFrameBudget(app.ticker);
       if (pausedRef.current) app.ticker.stop();
 
       let lastSelected: string | null = useStore.getState().selectedId;

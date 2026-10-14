@@ -262,6 +262,15 @@ app.whenReady().then(async () => {
       return r ? { privateMb: Math.round((r.memory.privateBytes || 0) / 1024), workingSetMb: Math.round(r.memory.workingSetSize / 1024) } : null;
     });
 
+    // TES-GUPPY-FPS: cumulative CPU seconds of the renderer and the GPU process (where Pixi's
+    // WebGL work lands), read from main the same way for every floor a scenario measures.
+    ipcMain.handle('harness:cpu', () => {
+      const pid = win.webContents.getOSProcessId();
+      const all = app.getAppMetrics();
+      const sec = (m) => (m && m.cpu ? m.cpu.cumulativeCPUUsage ?? null : null);
+      return { renderer: sec(all.find((x) => x.pid === pid)), gpu: sec(all.find((x) => x.type === 'GPU')) };
+    });
+
     // A REAL CLICK. `element.click()` dispatches an untrusted synthetic event from inside
     // the page; this goes through Chromium's input pipeline at window coordinates, so it
     // is hit-tested against what is actually rendered there and arrives `isTrusted`.
