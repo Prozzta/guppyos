@@ -22,5 +22,6 @@ contextBridge.exposeInMainWorld('harness', {
   // A trusted click at window coordinates, through Chromium's input pipeline.
   click: (x, y) => ipcRenderer.invoke('harness:click', { x, y }),
   // The renderer process's own private / working-set MB, read by main (IMPACT-LOOP-171).
-  metrics: () => ipcRenderer.invoke('harness:metrics')
+  metrics: () => ipcRenderer.invoke('harness:metrics'),
+  cpu: () => ipcRenderer.invoke('harness:cpu')
 });
