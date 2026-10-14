@@ -1,0 +1,27 @@
+extends: ./electron-builder.yml
+
+# The Human trial is intentionally a distinct product. Its force-dev main
+# bundle moves every mutable path to GuppyTrialData and refuses updater/login
+# item operations before any stable state can be touched.
+appId: in.munderdiffl.app.trial
+productName: Guppy 1.1.85 Trial
+executableName: Guppy-1.1.85-Trial
+artifactName: Guppy-1.1.85-Trial-${version}-win-${arch}-portable.${ext}
+# Do not inherit release-only publication aliases or the release NSIS include.
+afterAllArtifactBuild: null
+beforePack: build/assert-trial-bundle.cjs
+extraMetadata:
+  productName: Guppy 1.1.85 Trial
+  description: Guppy 1.1.85 Trial
+
+# A Human trial is hand-off-only: it is never an installer and cannot share a
+# release installer, executable, or shortcut identity.
+win:
+  target:
+    - target: portable
+      arch: [x64]
+nsis:
+  include: null
+  shortcutName: Guppy 1.1.85 Trial
+portable:
+  artifactName: Guppy-1.1.85-Trial-${version}-win-${arch}-portable.${ext}

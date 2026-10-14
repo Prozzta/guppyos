@@ -8,6 +8,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
@@ -19,6 +20,36 @@ const STABLE_USERDATA = 'C:\\Users\\FiercePC\\AppData\\Roaming\\munder-difflin';
 
 test('DEV_ISOLATION is a boolean derived from MUNDER_DEV', () => {
   assert.equal(typeof iso.DEV_ISOLATION, 'boolean');
+});
+
+test('G1 trial build compiles a force-dev gate while a normal build keeps it false', () => {
+  const vite = fs.readFileSync(path.resolve(__dirname, '../electron.vite.config.ts'), 'utf8');
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/main/devIsolation.ts'), 'utf8');
+  const trialBuilder = fs.readFileSync(path.resolve(__dirname, '../electron-builder.trial.yml'), 'utf8');
+  assert.match(vite, /__FORCE_DEV__:\s*JSON\.stringify\(process\.env\.GUPPY_TRIAL_BUILD === '1'\)/);
+  assert.match(source, /process\.env\.MUNDER_DEV === '1' \|\| FORCE_DEV_BUILD/);
+  assert.match(vite, /__LAYERB_SEAMS__:\s*JSON\.stringify\(process\.env\.GUPPY_TRIAL_BUILD !== '1' && process\.env\.MUNDER_LAYERB_SEAMS === '1'\)/);
+  assert.match(trialBuilder, /^productName: Guppy 1\.1\.85 Trial$/m);
+  assert.match(trialBuilder, /^appId: in\.munderdiffl\.app\.trial$/m);
+});
+
+test('G3 force-dev trial root is distinct from the shared MUNDER_DEV root and passes the path guard', () => {
+  const trial = 'C:\\Dunder\\GuppyTrialData';
+  assert.equal(iso.fixedDevDataRoot(WIN, true), trial);
+  assert.equal(iso.fixedDevDataRoot(WIN, false), 'C:\\Dunder\\MunderDevData');
+  const forbidden = [STABLE_HIVE, STABLE_USERDATA, 'C:\\Dunder\\MunderDevData'];
+  assert.deepEqual(iso.checkIsolation(iso.devPaths(trial, WIN), forbidden, WIN), []);
+});
+
+test('G2 updater and G4 login-item IPC explicitly refuse under DEV_ISOLATION', () => {
+  const updater = fs.readFileSync(path.resolve(__dirname, '../src/main/updater.ts'), 'utf8');
+  const index = fs.readFileSync(path.resolve(__dirname, '../src/main/index.ts'), 'utf8');
+  const loginItem = fs.readFileSync(path.resolve(__dirname, '../src/main/loginItem.ts'), 'utf8');
+  assert.match(updater, /import \{ DEV_HIDDEN, DEV_ISOLATION \} from '\.\/devIsolation';/);
+  assert.match(updater, /export function initAutoUpdater[\s\S]{0,900}if \(DEV_ISOLATION\)[\s\S]{0,900}ipcMain\.handle\('update:checkNow', refused\)[\s\S]{0,300}ipcMain\.handle\('update:download', refused\)[\s\S]{0,300}ipcMain\.handle\('update:simulate', refused\)[\s\S]{0,300}ipcMain\.handle\('update:openRelease', refused\)[\s\S]{0,300}return;/);
+  assert.match(index, /import \{ setLoginItem \} from '\.\/loginItem';/);
+  assert.match(index, /ipcMain\.handle\('app:setLoginItem',[\s\S]{0,300}return setLoginItem\(enabled\);/);
+  assert.match(loginItem, /if \(DEV_ISOLATION\) return false;[\s\S]{0,300}app\.setLoginItemSettings/);
 });
 
 test('devDataRoot is FIXED on win32 and ignores the environment (no MUNDER_DEV_DATA override)', () => {

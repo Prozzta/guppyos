@@ -38,10 +38,11 @@ import { homedir, tmpdir } from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
+import { setLoginItem } from './loginItem';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
-  DEV_ISOLATION, DEV_HIDDEN, DEV_ROOT_ENV, resolveDevDataRoot, fixedDevDataRoot, devPaths,
+  DEV_ISOLATION, DEV_HIDDEN, FORCE_DEV_BUILD, DEV_ROOT_ENV, resolveDevDataRoot, fixedDevDataRoot, devPaths,
   stableForbiddenPaths, checkIsolation, devRootOverrideViolations, scrubInheritedEnv, devWindowTitle
 } from './devIsolation';
 import { isSafeCommandName } from './shellEnv';
@@ -249,8 +250,8 @@ if (DEV_ISOLATION) {
   // dev build gets its own (Stable's packaged one is electron-builder's
   // `appId: in.munderdiffl.app`; a bare electron.exe run otherwise carries
   // Electron's default). Validation of taskbar/toast identity: Andy item.
-  app.setName('munder-difflin-dev');
-  app.setAppUserModelId('in.munderdiffl.app.dev');
+  app.setName(FORCE_DEV_BUILD ? 'Guppy 1.1.85 Trial' : 'munder-difflin-dev');
+  app.setAppUserModelId(FORCE_DEV_BUILD ? 'in.munderdiffl.app.trial' : 'in.munderdiffl.app.dev');
   app.setPath('userData', paths.userData);
   app.setPath('sessionData', paths.userData);
   app.setPath('logs', logsDir);
@@ -6294,8 +6295,7 @@ ipcMain.handle('app:openExternal', async (_evt, url: unknown) => {
 /** Toggle macOS "Open at Login" — fully programmatic, no permission prompt.
  *  Returns the resulting state so the renderer toggle reflects reality. */
 ipcMain.handle('app:setLoginItem', (_evt, enabled: unknown) => {
-  app.setLoginItemSettings({ openAtLogin: enabled === true });
-  return app.getLoginItemSettings().openAtLogin;
+  return setLoginItem(enabled);
 });
 
 // ─── IPC: Slack integration ─────────────────────────────────────────────────

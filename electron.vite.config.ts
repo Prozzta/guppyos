@@ -16,10 +16,16 @@ const defineMain = {
   ...define,
   __POSTHOG_KEY__: JSON.stringify(process.env.POSTHOG_KEY ?? ''),
   __POSTHOG_HOST__: JSON.stringify(process.env.POSTHOG_HOST ?? 'https://us.i.posthog.com'),
+  // A Human trial is a deliberately isolated build, even when it is launched
+  // by double-clicking it with no MUNDER_DEV environment. Keep this a build
+  // define (rather than an ambient runtime input) so ordinary release bundles
+  // continue to compile exactly as before.
+  __FORCE_DEV__: JSON.stringify(process.env.GUPPY_TRIAL_BUILD === '1'),
   // ZT-I1-MAIL layer (b) TEST INFRASTRUCTURE: the MUNDER_HIDDEN / MUNDER_DEV_ROOT seams exist in a
   // bundle only when it is BUILT with MUNDER_LAYERB_SEAMS=1 (test/tools/layer-b-run.cjs does that
   // for its own sandbox build). Every other build, the release included, compiles them to false.
-  __LAYERB_SEAMS__: JSON.stringify(process.env.MUNDER_LAYERB_SEAMS === '1')
+  // A trial must always retain its fixed empty root; never compile in a per-run override.
+  __LAYERB_SEAMS__: JSON.stringify(process.env.GUPPY_TRIAL_BUILD !== '1' && process.env.MUNDER_LAYERB_SEAMS === '1')
 };
 
 // Copy raw .cjs main-process sidecars into out/main after the main bundle is
