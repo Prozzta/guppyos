@@ -24,6 +24,8 @@ All notable changes to this project are documented here. The format is based on
   voice controls, schedules, trigger history, setup, settings and onboarding used to say
   "Michael"; on a theme-pack floor they now use the orchestrator's name. The Office reads exactly
   as before.
+- **On a TES floor, Add Agent and Edit Agent show only TES's look builder.** The Office
+  character picker and its identity controls are hidden there, and a new hire starts as "Crewmate".
 - **New tagline:** "Boldly code where no team has coded before. Your AI crew, on duty 24/7."
 
 ## [1.1.85] — 2026-10-14
