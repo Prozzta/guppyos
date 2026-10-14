@@ -4,13 +4,12 @@
 // seats, depth) comes from the pure modules beside it; this file only draws.
 
 import { useEffect, useRef, useState } from 'react';
-import { Application, Container, Rectangle, Sprite, Texture } from 'pixi.js';
+import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { Camera } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
-import { tileAtlas } from './atlas';
 import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
@@ -18,6 +17,7 @@ import type { LoadedPack } from './packs';
 import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
+import { cacheKeyOf, frontPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 
@@ -86,37 +86,106 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       });
 
       const world = new Container();
-      app.stage.addChild(world);
       const plan = buildScenePlan({ ...SM, store: pack.store });
-      // TES-GUPPY-RASTER: every layer is drawn as its live tiles from shared atlas pages
-      // (atlas.ts): fully transparent tiles change nothing, and drawn whole they doubled the fill.
-      const gl = (app.renderer as any).gl as WebGL2RenderingContext | undefined;
-      const atlas = tileAtlas([plan.below, plan.above, ...plan.sorted.map((it) => it.px)],
-        Math.min(4096, gl?.getParameter(gl.MAX_TEXTURE_SIZE) ?? 2048));
-      const pages = atlas.pages.map(texture);
-      const tiled = (i: number, px: Pixels): Container => {
-        const c = new Container();
-        if (atlas.unpacked[i]) { c.addChild(new Sprite(texture(px))); return c; }
-        for (const p of atlas.pieces[i]) {
-          const s = new Sprite(new Texture({ source: pages[p.page].source, frame: new Rectangle(p.ax, p.ay, p.w, p.h) }));
-          s.position.set(p.x, p.y);
-          c.addChild(s);
-        }
-        return c;
-      };
-      world.addChild(tiled(0, plan.below));
-      const sortLayer = new Container();
-      sortLayer.sortableChildren = true;
-      world.addChild(sortLayer);
-      const statics = plan.sorted.map((it, i) => {
-        if (!it.px) return null;
-        const s = tiled(2 + i, it.px);
+      // Every texture made here is destroyed on unmount.
+      const owned: Texture[] = [];
+      const own = (px: Pixels) => { const t = texture(px); owned.push(t); return t; };
+      const staticTex = plan.sorted.map((it) => (it.px ? own(it.px) : null));
+      const staticSprite = (i: number) => {
+        const it = plan.sorted[i], s = new Sprite(staticTex[i]!);
         s.position.set(it.x, it.y);
         s.alpha = it.opacity;
+        return s;
+      };
+      const staticBox = plan.sorted.map((it): Box | null => (it.px ? { x: it.x, y: it.y, w: it.px.width, h: it.px.height } : null));
+      const below = new Sprite(own(plan.below));
+      const sortLayer = new Container();
+      sortLayer.sortableChildren = true;
+      const statics = plan.sorted.map((it, i) => {
+        if (!it.px) return null;
+        const s = staticSprite(i);
         sortLayer.addChild(s);
         return s;
       });
-      world.addChild(tiled(1, plan.above));
+
+      // TES-GUPPY-RASTER: 'below' and the statics are drawn, by the very same sprites, into a
+      // screen-sized cache once the picture they make holds still; each frame copies its reachable
+      // cells 1:1 and draws again only the statics that meet a person (staticCache.ts). While the
+      // picture changes, and for partial alpha, everything is drawn directly as before.
+      const cached = staticsCacheable(plan);
+      const order = staticOrder(plan.sorted);
+      const pickFront = cached ? frontPicker(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      const CELL = 32;
+      const cacheLayer = new Container();
+      // As in the stage, the world's transform is a child's, so its vertices are made the same way
+      // (a rendered root's own transform would go to the GPU as a uniform instead).
+      const cacheRoot = new Container();
+      const cacheWorld = cacheRoot.addChild(new Container());
+      const cells = new Map<number, Sprite>();
+      let rt: RenderTexture | null = null;
+      let cacheKey: string | null = null, lastKey: string | null = null, lastExact: string | null = null;
+      const noLive: boolean[] = [];
+      let cacheBoxes: Box[] = [];
+      const cacheStatics: Array<Sprite | null> = plan.sorted.map(() => null);
+      const belowDirect = new Sprite(below.texture);
+      world.addChild(belowDirect);
+      if (cached) {
+        cacheWorld.addChild(below);
+        for (const i of order) if (staticTex[i]) cacheStatics[i] = cacheWorld.addChild(staticSprite(i));
+        cacheBoxes = [...liveBoxes(plan.below, 0, 0, CELL), ...plan.sorted.flatMap((it) => (it.px ? liveBoxes(it.px, it.x, it.y, 8) : []))];
+        app.stage.addChild(cacheLayer);
+      }
+      world.addChild(sortLayer);
+      if (!cached || hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
+      app.stage.addChild(world);
+      const dropCells = () => {
+        for (const s of cells.values()) s.destroy({ texture: true, textureSource: false });
+        cells.clear();
+      };
+      const refreshCache = (liveStatics: boolean[]) => {
+        cacheStatics.forEach((s, i) => { if (s) s.visible = !liveStatics[i]; });
+        const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
+        if (!rt || rt.source.pixelWidth !== W || rt.source.pixelHeight !== H) {
+          dropCells();
+          rt?.destroy(true);
+          rt = RenderTexture.create({ width: W / r, height: H / r, resolution: r, scaleMode: 'nearest' });
+          const none = new Container();
+          app.renderer.render({ container: none, target: rt, clear: true }); // gives it a framebuffer
+          none.destroy();
+        }
+        // The cache is drawn on the canvas itself, over the background, by the canvas's own
+        // arithmetic (a render texture's flipped projection tips a few rounding ties the other
+        // way), then copied out bottom row first; each cell reads it back mirrored. The frame's
+        // own render then draws over the canvas as always.
+        cacheWorld.position.copyFrom(world.position);
+        cacheWorld.scale.copyFrom(world.scale);
+        app.renderer.render({ container: cacheRoot, clear: true });
+        // A blit, not copyTexSubImage2D: the canvas has no alpha channel and the cache has one.
+        const targets = app.renderer.renderTarget as any;
+        const gl = (app.renderer as any).gl as WebGL2RenderingContext;
+        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, targets.getGpuRenderTarget(targets.getRenderTarget(rt)).framebuffer);
+        gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        const live = new Set<number>();
+        for (const c of screenCells(cacheBoxes, world.scale.x * r, world.x * r, world.y * r, W, H, CELL)) {
+          const id = c.y * W + c.x;
+          live.add(id);
+          if (cells.has(id)) continue;
+          const s = new Sprite(new Texture({ source: rt.source, frame: new Rectangle(c.x / r, (H - c.y - c.h) / r, c.w / r, c.h / r) }));
+          s.position.set(c.x / r, (c.y + c.h) / r);
+          s.scale.y = -1;
+          cacheLayer.addChild(s);
+          cells.set(id, s);
+        }
+        for (const [id, s] of cells) s.visible = live.has(id);
+      };
+      (app as any).__free = () => {
+        dropCells();
+        rt?.destroy(true);
+        cacheRoot.destroy({ children: true });
+        for (const t of owned) t.destroy(true);
+      };
 
       const sheetPx = pack.store.get(pack.sheet)!;
       const cols = Math.max(1, Math.floor(sheetPx.width / fw));
@@ -173,7 +242,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       sync();
 
       let clock = 0;
-      let lastDepth = '';
+      let lastDepth: string | null = null;
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
@@ -208,11 +277,31 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           const s = sprites.get(p.id);
           if (s) people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
         }
+        if (cached) {
+          const r = app.renderer.resolution;
+          const k = cacheKeyOf({ w: plan.below.width, h: plan.below.height }, staticBox, world.scale.x, world.scale.y, world.x, world.y, r);
+          const view = `${app.canvas.width}x${app.canvas.height}@${r}:`;
+          // Once the GPU's float32 input holds, even an edge on a tie rounds as it did: cache it all.
+          const exact = k.exact === null ? null : view + k.exact;
+          const settled = exact !== null && exact === lastExact;
+          lastExact = exact;
+          const key = settled ? exact! : view + k.key, live = settled ? noLive : k.live;
+          // Cache a picture once it has held for a tick; draw directly while it changes.
+          if (key !== cacheKey && key === lastKey) { refreshCache(live); cacheKey = key; }
+          lastKey = key;
+          const useCache = key === cacheKey && world.scale.x * r >= NEAR_MIN_SCALE && world.scale.y * r >= NEAR_MIN_SCALE;
+          cacheLayer.visible = useCache;
+          belowDirect.visible = !useCache;
+          // Over the cache, statics are drawn again only near a person: with binary alpha, elsewhere
+          // the cache already holds the topmost opaque pixel.
+          const front = useCache ? pickFront!(people.map((q) => ({ x: q.sprite.x, y: q.sprite.y, w: fw, h: fh })), live) : null;
+          statics.forEach((s, i) => { if (s) s.visible = front ? front[i] : true; });
+        }
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}`).join('|');
         if (depth === lastDepth) return;
         lastDepth = depth;
-        const items: Array<{ foot: number; rank: number; sprite: Container | null }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
+        const items: Array<{ foot: number; rank: number; sprite: Sprite | null }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
         for (const q of people) items.push(q);
         items.sort(byDepth);
         items.forEach((it, i) => { if (it.sprite) it.sprite.zIndex = i; });
@@ -258,6 +347,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         safeDestroy(a);
+        try { (a as any).__free?.(); } catch { /* noop */ }
       }
       appRef.current = null;
       while (host.firstChild) host.removeChild(host.firstChild);

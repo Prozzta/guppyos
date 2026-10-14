@@ -7,7 +7,8 @@
  *   it), so the ticker's deltas (and the 30 fps budget's skips) are the same on every run;
  * - after the render of each frame in SHOT_FRAMES, the canvas is read (same task, so the drawing
  *   buffer is still the frame just drawn) and reported as a PNG data URL.
- * Run on demand: node test/electron-harness/run-floor-tes-shot.cjs [--station <StationFloor.tsx>] --out <dir>
+ * The box comes from floor-tes-shot-box.ts, which the runner swaps per box (fractional zooms too).
+ * Run on demand: node test/electron-harness/run-floor-tes-shot.cjs [--station <StationFloor.tsx>] [--boxes 700x470,...] --out <dir>
  */
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -15,6 +16,7 @@ import { Application } from 'pixi.js';
 import { OfficeFloor } from '../../../src/renderer/src/scene/office/OfficeFloor';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCatalog';
+import { BOX } from './floor-tes-shot-box';
 
 declare global {
   interface Window {
@@ -34,7 +36,6 @@ declare global {
   }
 });
 
-const BOX = { w: 960, h: 640 };
 const STEP_MS = 1000 / 60;
 const SHOT_FRAMES = [1, 90, 300, 600];
 
