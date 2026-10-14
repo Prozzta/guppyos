@@ -302,11 +302,8 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   assert.match(src, /\} finally \{\s*gl\.disable\(gl\.SCISSOR_TEST\);\s*cacheLayer\.visible = true;\s*if \(passCache\) passCache\.visible = false;/);
   assert.match(src, /passCache\.position\.set\(0, H \/ r\);\s*passCache\.scale\.y = -1;\s*passCache\.visible = false;\s*app\.stage\.addChildAt\(passCache, app\.stage\.getChildIndex\(cacheLayer\) \+ 1\);/);
   assert.match(src, /if \(cached\) app\.renderer\.runners\.postrender\.add\(postrender\);/);
-  // The people are left visible after the passes, so between frames (when pointer events are
-  // dispatched) Pixi's EventBoundary does not prune them: the crew stays clickable.
-  const post = src.slice(src.indexOf('const postrender = {'), src.indexOf('if (cached) app.renderer.runners.postrender.add'));
-  assert.match(post, /for \(const s of sprites\.values\(\)\) s\.sprite\.visible = true;/);
-  assert.doesNotMatch(post, /sprite\.visible = (false|!)/);
+  // That the people stay clickable after the passes is checked by a real click in
+  // tes-floor-click-harness.test.cjs.
   assert.match(src, /const refreshCache = \(liveStatics: boolean\[\]\) => \{\s*cacheStatics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = !liveStatics\[i\]; \}\);/);
   assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
   assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*items\.sort\(byDepth\);/);

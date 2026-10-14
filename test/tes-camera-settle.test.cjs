@@ -109,6 +109,22 @@ test('settle: no landing during a nudge, and the nudge is time-based too', () =>
   assert.ok(Math.abs(a.k.currentX - b.k.currentX) < 1, `${a.k.currentX} vs ${b.k.currentX}`);
 });
 
+test('settle: a negative, NaN or infinite dt leaves the camera where it is, nudging or not', () => {
+  for (const nudge of [false, true]) {
+    const a = cam({ resolution: () => 2 });
+    for (let i = 0; i < 10; i++) a.k.update(1 / 30);
+    if (nudge) { a.k.nudgeToward(100, 100); a.k.update(1 / 30); }
+    for (const dt of [-1, -1e-9, NaN, Infinity, -Infinity]) {
+      const before = state(a);
+      a.k.update(dt);
+      assert.deepEqual(state(a), before, `nudge=${nudge} dt=${dt}`);
+      assert.ok(state(a).every(Number.isFinite));
+    }
+    a.k.update(1 / 30); // and it carries on easing afterwards
+    assert.ok(state(a).every(Number.isFinite));
+  }
+});
+
 test('the TES floor turns settle on with the renderer resolution and eases by the real dt; the office does not', () => {
   const station = fs.readFileSync(path.join(ROOT, 'src/renderer/src/scene/themes/StationFloor.tsx'), 'utf8');
   assert.match(station, /const camera = new Camera\(world, \{ resolution: \(\) => app\.renderer\.resolution \}\);/);

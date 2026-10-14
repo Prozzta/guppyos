@@ -153,6 +153,8 @@ export class Camera {
    *  per axis u' = -lam * u + a + b * s over the step, u = current - target. Then it lands on the
    *  target once what is left would move any point of the frame by under half a device pixel. */
   private settleStep(dt: number): void {
+    // A bad clock (negative, NaN or infinite) must not throw the camera off: it stands still.
+    if (!Number.isFinite(dt) || dt < 0) dt = 0;
     const lam = -EASE_HZ * Math.log(1 - LERP_SPEED);
     this.currentZoom = this.targetZoom + (this.currentZoom - this.targetZoom) * Math.exp(-lam * dt);
     let ux = this.currentX - this.targetX, uy = this.currentY - this.targetY;
