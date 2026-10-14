@@ -122,7 +122,7 @@ test('INERT: a bundle built WITHOUT the layer-b seams ignores both, even under M
   assert.equal(iso.hiddenRun(trap, true, false), false);
   assert.equal(iso.LAYERB_SEAMS_BUILT, true, 'unbundled source (no define) counts as carrying them: the unit tests');
   const cfg = codeOnly(readSource('electron.vite.config.ts'), 'x.ts');
-  assert.match(cfg, /__LAYERB_SEAMS__: JSON\.stringify\(process\.env\.MUNDER_LAYERB_SEAMS === '1'\)/, 'the define: true only for a MUNDER_LAYERB_SEAMS=1 build');
+  assert.match(cfg, /__LAYERB_SEAMS__: JSON\.stringify\(process\.env\.GUPPY_TRIAL_BUILD !== '1' && process\.env\.MUNDER_LAYERB_SEAMS === '1'\)/, 'the define: true only for a non-trial MUNDER_LAYERB_SEAMS=1 build');
   const defineMain = cfg.slice(cfg.indexOf('const defineMain'), cfg.indexOf('};', cfg.indexOf('const defineMain')));
   assert.ok(defineMain.includes('__LAYERB_SEAMS__'), 'on the MAIN bundle');
 });
@@ -177,7 +177,7 @@ test('SOURCE: no src/ file other than devIsolation.ts names either variable (one
   assert.match(src, /function resolveDevDataRoot[\s\S]*?if \(!\(opts\.dev \?\? DEV_ISOLATION\) \|\| !\(opts\.seams \?\? LAYERB_SEAMS_BUILT\)\) return \{ ok: true, root: fixed, override: false \};[\s\S]*?const env = opts\.env \?\? process\.env;/);
   assert.match(src, /function hiddenRun[^{]*\{\s*if \(!dev \|\| !seams\) return false;\s*return env\[DEV_HIDDEN_ENV\] === '1';/);
   assert.match(src, /export const LAYERB_SEAMS_BUILT: boolean = typeof __LAYERB_SEAMS__ === 'undefined' \? true : __LAYERB_SEAMS__ === true;/);
-  assert.match(src, /export const DEV_ISOLATION: boolean = process\.env\.MUNDER_DEV === '1';/);
+  assert.match(src, /export const DEV_ISOLATION: boolean = process\.env\.MUNDER_DEV === '1' \|\| FORCE_DEV_BUILD;/);
 });
 
 /**

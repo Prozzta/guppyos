@@ -1,0 +1,10 @@
+extends: ./electron-builder.yml
+
+# The Human trial is intentionally a distinct product. Its force-dev main
+# bundle moves every mutable path to GuppyTrialData and refuses updater/login
+# item operations before any stable state can be touched.
+appId: in.munderdiffl.app.trial
+productName: Guppy 1.1.85 Trial
+extraMetadata:
+  productName: Guppy 1.1.85 Trial
+  description: Guppy 1.1.85 Trial

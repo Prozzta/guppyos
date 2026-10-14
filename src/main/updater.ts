@@ -7,7 +7,7 @@ import { readConfig } from './config';
 import { DEFAULT_DROP_HTML } from '../shared/releaseDrop';
 import { reduceStatus, clampPercent, isNewer, installerUrl, releaseListFromBody, releaseOptionsFromNotes, REPO, type UpdateStatus } from '../shared/updateState';
 import { htmlToNoteText } from '../shared/releaseNotes';
-import { DEV_HIDDEN } from './devIsolation';
+import { DEV_HIDDEN, DEV_ISOLATION } from './devIsolation';
 
 /**
  * Auto-update from GitHub releases.
@@ -356,6 +356,17 @@ its first newline.
 - **Agent terminals are UTF-8.** They ran with no locale at all.`;
 
 export function initAutoUpdater(getWebContents: () => WebContents | null): void {
+  // A trial/DEV process must never poll, download, install, or load the native
+  // updater. Keep its IPC contract explicit rather than letting the renderer
+  // see a missing handler.
+  if (DEV_ISOLATION) {
+    const refused = () => ({ ok: false, error: 'dev isolation — updates are disabled' });
+    ipcMain.handle('update:restartAndInstall', refused);
+    ipcMain.handle('update:checkNow', refused);
+    ipcMain.handle('update:download', refused);
+    ipcMain.handle('update:current', () => ({ state: 'idle' }));
+    return;
+  }
   sendTo = getWebContents;
 
   // IPC surface is registered unconditionally so the renderer can always call it.

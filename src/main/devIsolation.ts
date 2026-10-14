@@ -33,8 +33,16 @@ import { realpathSync, lstatSync, readlinkSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, sep, win32, posix, dirname } from 'node:path';
 
-/** True when the process was launched with MUNDER_DEV=1. Read once at load. */
-export const DEV_ISOLATION: boolean = process.env.MUNDER_DEV === '1';
+declare const __FORCE_DEV__: boolean | undefined;
+
+/**
+ * Trial bundles compile this to true. The `typeof` guard keeps direct TypeScript
+ * loads (unit tests and tools) compatible: their source has no Vite define.
+ */
+export const FORCE_DEV_BUILD: boolean = typeof __FORCE_DEV__ !== 'undefined' && __FORCE_DEV__ === true;
+
+/** True for MUNDER_DEV launches and for a deliberately isolated trial bundle. Read once at load. */
+export const DEV_ISOLATION: boolean = process.env.MUNDER_DEV === '1' || FORCE_DEV_BUILD;
 
 /** Env vars a Stable agent terminal exports that would re-point a dev process at
  *  the live hive. Scrubbed at bootstrap when DEV_ISOLATION is on. */
@@ -100,7 +108,13 @@ const STABLE_LITERALS_WIN32 = [
  *  `MUNDER_DEV_DATA` override (relative paths allowed, honoured even without
  *  MUNDER_DEV, nothing refused) was removed at Dwight's audit of 0d1441db and
  *  stays removed: `MUNDER_DEV_DATA` is ignored. */
-export function fixedDevDataRoot(platform: NodeJS.Platform = process.platform): string {
+export function fixedDevDataRoot(
+  platform: NodeJS.Platform = process.platform,
+  forceTrial: boolean = FORCE_DEV_BUILD
+): string {
+  // Do not repurpose MunderDevData: other DEV rigs deliberately share that
+  // established root. A force-dev trial has its own initially-empty home.
+  if (forceTrial) return platform === 'win32' ? 'C:\\Dunder\\GuppyTrialData' : join(homedir(), 'GuppyTrialData');
   return platform === 'win32' ? 'C:\\Dunder\\MunderDevData' : join(homedir(), 'MunderDevData');
 }
 
