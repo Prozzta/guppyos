@@ -130,6 +130,7 @@ export function AgentStrip({ config }: AgentStripProps) {
           <AgentCard
             draggable
             agentId={a.id}
+            appearanceByTheme={a.appearanceByTheme}
             name={a.name}
             character={a.character}
             accent={a.accent}

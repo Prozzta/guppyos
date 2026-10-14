@@ -2,6 +2,9 @@ import { useEffect, useLayoutEffect, useState, type CSSProperties } from 'react'
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
+import { ThemeLookBuilder } from './ThemeLookBuilder';
+import { useThemeLooks } from '@/scene/themes/useThemeLooks';
+import { draftToLook, startDraft, type LookDraft } from '@/scene/themes/looks';
 import { Icon } from './Icon';
 import { ProviderLogo } from './ProviderLogo';
 import { useStore, type Agent } from '@/store/store';
@@ -188,6 +191,15 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const [name, setName] = useState(pendingHire?.name ?? 'Jim');
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
+  // The active theme pack's look builder (only when the pack declares one).
+  // The draft is per theme, so a theme change mid-dialog never saves a look
+  // made for another pack.
+  const officeTheme = useStore((s) => s.officeTheme);
+  const looks = useThemeLooks(officeTheme);
+  const [lookDraftState, setLookDraftState] = useState<{ themeId: string; draft: LookDraft } | null>(null);
+  const lookDraft = looks?.builder
+    ? (lookDraftState?.themeId === looks.themeId ? lookDraftState.draft : startDraft(looks.builder, looks.columns))
+    : null;
   const [cwd, setCwd] = useState<string>(config.registeredRepos[0] ?? '');
   // Local mirror of the registered projects so one added from here shows as a
   // quick-pick immediately (the `config` prop is a snapshot taken at open time).
@@ -456,6 +468,9 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
       name: name.trim(),
       character,
       accent,
+      // Saved even when untouched, on purpose: the hire looks as previewed (the
+      // pack default), not like the id-hash pick an unstyled spawn gets.
+      ...(looks && lookDraft ? { appearanceByTheme: { [looks.themeId]: draftToLook(lookDraft) } } : {}),
       description: description.trim() || 'a fresh harness',
       project: basename(projectCwd),
       tmuxTarget: '',
@@ -710,6 +725,16 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                         ))}
                       </div>
                     </Row>
+
+                    {looks && lookDraft && (
+                      <ThemeLookBuilder
+                        looks={looks}
+                        draft={lookDraft}
+                        character={character}
+                        onChange={(d) => setLookDraftState({ themeId: looks.themeId, draft: d })}
+                        onPreset={(n) => { if (n) setName(n); }}
+                      />
+                    )}
 
                     <Row label="Color">
                       <div style={{ display: 'flex', gap: 6 }}>

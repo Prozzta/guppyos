@@ -6,7 +6,8 @@
 import { OFFICE_THEME_ID, type ProjectDefaults, type BuilderSpec } from './manifest';
 import { catalogue, finishPack, readPack, type LoadedPack, type PackSummary } from './packs';
 import { bundledPacks } from './packSources';
-import type { Diagnostic } from './tiled';
+import { normPath, type Diagnostic } from './tiled';
+import type { PortraitPack } from './looks';
 import type { PixelStore, Pixels } from './raster';
 
 export interface ThemeEntry {
@@ -64,6 +65,37 @@ async function decode(url: string): Promise<Pixels> {
   bmp.close();
   const d = g.getImageData(0, 0, cv.width, cv.height);
   return { width: d.width, height: d.height, data: d.data };
+}
+
+/** What portraits and the look builder need from a pack: its builder, its
+ *  sprite metadata and its decoded character sheet (no map). */
+export interface ThemeLooks extends PortraitPack {
+  label: string;
+  sheet: Pixels;
+}
+
+const looksCache = new Map<string, Promise<ThemeLooks | null>>();
+
+/** A pack's looks, loaded once. null for the office, an unknown id, or a sheet
+ *  that cannot be decoded (portraits then show the Office character). */
+export function loadThemeLooks(id: string): Promise<ThemeLooks | null> {
+  let p = looksCache.get(id);
+  if (!p) {
+    p = (async () => {
+      const s = summaries().find((x) => x.id === id);
+      const url = s ? bundledPacks().get(s.dir)?.pictures.get(normPath(s.spriteRenderer.sheet)) : undefined;
+      if (!s || !url) return null;
+      try {
+        const sheet = await decode(url);
+        return { themeId: s.id, label: s.label, builder: s.builder, sprite: s.spriteRenderer, columns: Math.max(1, Math.floor(sheet.width / s.spriteRenderer.frameWidth)), sheet };
+      } catch (e) {
+        console.warn(`[themes] the sprite sheet of "${id}" could not be decoded:`, e);
+        return null;
+      }
+    })();
+    looksCache.set(id, p);
+  }
+  return p;
 }
 
 /** Load a stations pack ready to draw. On any problem: null with the reasons

@@ -49,9 +49,26 @@ T.rect(0, 16, 8, 32, [220, 40, 40]); T.rect(8, 16, 16, 32, [40, 40, 220]);
 // chair.png (a collection tile): backrest rows 2-5, seat rows 8-13
 const C = canvas(16, 16);
 C.rect(4, 2, 12, 6, [60, 120, 200]); C.rect(3, 8, 13, 14, [60, 120, 200]);
-// sheet.png: 2 bodies (columns) × 8 rows of 32 px frames; a body is a block, rows 4-31, cols 10-21
+// sheet.png: 2 bodies (columns) × 8 rows of 32 px frames. A body is a solid block, rows 4-31,
+// cols 10-21 of its frame, painted in parts (the look builder recolours them):
+// outline sides; hair rows 4-7; skin rows 8-13 (a shadow shade on row 13, eyes on row 10);
+// shirt rows 14-24; trousers rows 25-31. Body 0 has two brown hair shades; body 1's hair is
+// drawn in the outline colour (found by shape). Silhouette unchanged.
+const OUTLINE = [0x24, 0x22, 0x34], EYES = [255, 255, 255], SKIN = [0xfa, 0xd6, 0xb8], SKIN_SH = [0xe8, 0x6a, 0x73];
+const SHIRT = [0x28, 0x5c, 0xc4], TROUSERS = [0x33, 0x39, 0x41], HAIR = [0x71, 0x41, 0x3b], HAIR_HI = [0xbb, 0x75, 0x47];
 const S = canvas(64, 256);
-for (let row = 0; row < 8; row++) { S.rect(10, row * 32 + 4, 22, row * 32 + 32, [230, 200, 160]); S.rect(42, row * 32 + 4, 54, row * 32 + 32, [90, 60, 40]); }
+for (let row = 0; row < 8; row++) for (let b = 0; b < 2; b++) {
+  const x0 = b * 32 + 10, y = row * 32;
+  S.rect(x0, y + 4, x0 + 12, y + 8, b ? OUTLINE : HAIR);
+  if (!b) S.rect(x0 + 3, y + 5, x0 + 9, y + 6, HAIR_HI);
+  S.rect(x0, y + 8, x0 + 12, y + 13, SKIN);
+  S.rect(x0, y + 13, x0 + 12, y + 14, SKIN_SH);
+  S.rect(x0 + 3, y + 10, x0 + 4, y + 11, EYES); S.rect(x0 + 8, y + 10, x0 + 9, y + 11, EYES);
+  S.rect(x0 + 3, y + 9, x0 + 4, y + 10, OUTLINE); // a brow: outline colour beside an eye, never hair
+  S.rect(x0, y + 14, x0 + 12, y + 25, SHIRT);
+  S.rect(x0, y + 25, x0 + 12, y + 32, TROUSERS);
+  S.rect(x0, y + 8, x0 + 1, y + 32, OUTLINE); S.rect(x0 + 11, y + 8, x0 + 12, y + 32, OUTLINE);
+}
 
 const W = 12, H = 10, gidFloor = 1, gidWall = 2, gidRail = 3, gidDesk = 4, gidMark = 5, gidChair = 9, FLIP_H = 0x80000000;
 const floor = [], walls = [], rail = [];
@@ -178,8 +195,26 @@ const manifest = {
     rows: { down: 0, up: 1, left: 4, right: 6, sitDown: 2, sitUp: 3, sitLeft: 5, sitRight: 7 },
   },
   builder: {
-    bodies: [{ id: 'light', label: 'Light', column: 0 }, { id: 'dark', label: 'Dark', column: 1 }],
-    presets: [{ id: 'pilot', label: 'Pilot', bodyId: 'dark', seat: 'Beta' }],
+    outline: '#242234',
+    eyes: '#ffffff',
+    swatches: {
+      skin: { fair: '#fad6b8', deep: '#7b4d34', green: '#8fbf6a' },
+      shirt: { gold: '#a07a1c', blue: '#285cc4', red: '#c0302c' },
+      hair: { black: '#1f1d1d', brown: '#71413b', white: '#ececec' },
+    },
+    bodies: [
+      { id: 'light', label: 'Light', column: 0, parts: {
+        skin: { main: '#fad6b8', shades: ['#e86a73'] }, shirt: { main: '#285cc4' }, hair: { main: '#71413b', shades: ['#bb7547'] } },
+        portrait: { crop: [7, 4, 18, 28] } },
+      { id: 'dark', label: 'Dark', column: 1, parts: {
+        skin: { main: '#fad6b8', shades: ['#e86a73'] }, shirt: { main: '#285cc4' }, hair: { main: '#242234', byShape: true } } },
+    ],
+    presets: [
+      { id: 'pilot', label: 'Pilot', bodyId: 'dark', seat: 'Beta', colors: { skin: '#7b4d34', shirt: '#a07a1c' } },
+      { id: 'medic', label: 'Medic', bodyId: 'light', colors: { shirt: '#285cc4', hair: '#ececec' } },
+    ],
+    defaults: { bodyId: 'light', colors: { shirt: '#c0302c' } },
+    sample: { bodyId: 'light', presetId: 'medic' },
   },
   projectDefaults: { orchestrator: { name: 'Lead', appearance: { bodyId: 'light' } } },
 };

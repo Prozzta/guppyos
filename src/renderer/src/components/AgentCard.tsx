@@ -8,6 +8,7 @@ import { CostHud } from '@/realtime/CostHud';
 import { AccentColorName } from '@/design/tokens';
 import { OfficeCharacterName } from '@/scene/office/cast';
 import { AgentNameEditor } from './AgentNameEditor';
+import type { LooksByTheme } from '@/scene/themes/looks';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
 import { useActivity } from './useActivity';
@@ -16,6 +17,8 @@ import { MAIL_GLYPH, mailBadgeTitle, taskChipText, taskChipTitle } from '@shared
 export interface AgentCardProps {
   /** Hive agent id: reads main's impact string for this agent (v1.1.45 unit #5). */
   agentId?: string;
+  /** The agent's theme looks: with agentId, the portrait is that agent's look in the active theme. */
+  appearanceByTheme?: LooksByTheme;
   name: string;
   character: OfficeCharacterName;
   accent: AccentColorName;
@@ -65,7 +68,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
  * and a slim gauge pinned to the bottom edge. Nothing overlaps anything.
  */
 export function AgentCard({
-  agentId, name, character, accent, status: hookStatus, ptyId, project, action, progress = 0,
+  agentId, appearanceByTheme, name, character, accent, status: hookStatus, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
   doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, draggable, note, onEditNote
 }: AgentCardProps) {
@@ -234,7 +237,9 @@ export function AgentCard({
             display: 'flex', alignItems: 'flex-start', justifyContent: 'center', overflow: 'hidden',
             flexShrink: 0
           }}>
-            <SpritePortrait character={character} scale={2} />
+            {agentId !== undefined
+              ? <SpritePortrait agent={{ id: agentId, character, appearanceByTheme }} scale={2} />
+              : <SpritePortrait character={character} scale={2} />}
           </div>
 
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>

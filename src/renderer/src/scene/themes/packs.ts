@@ -109,6 +109,8 @@ export interface PackSummary {
   sceneKind: ThemeManifest['sceneKind'];
   /** The folder the pack came from. */
   dir: string;
+  /** The character sheet's frame size and rows (portraits need them). */
+  spriteRenderer: ThemeManifest['spriteRenderer'];
   builder?: ThemeManifest['builder'];
   projectDefaults?: ThemeManifest['projectDefaults'];
 }
@@ -128,7 +130,7 @@ export function catalogue(sources: Array<{ dir: string; files: PackFiles }>): { 
       rejected.push({ dir, diagnostics: [{ level: 'error', message: `${dir}/theme.json: the id "${m.id}" is already used by another pack.` }] });
       continue;
     }
-    packs.push({ id: m.id, label: m.label, sceneKind: m.sceneKind, dir, ...(m.builder ? { builder: m.builder } : {}), ...(m.projectDefaults ? { projectDefaults: m.projectDefaults } : {}) });
+    packs.push({ id: m.id, label: m.label, sceneKind: m.sceneKind, dir, spriteRenderer: m.spriteRenderer, ...(m.builder ? { builder: m.builder } : {}), ...(m.projectDefaults ? { projectDefaults: m.projectDefaults } : {}) });
   }
   return { packs, rejected };
 }

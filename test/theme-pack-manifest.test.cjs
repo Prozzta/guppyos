@@ -26,7 +26,14 @@ test('the neutral manifest is valid and keeps every declared section', () => {
   assert.deepEqual(errors(r), []);
   assert.equal(r.manifest.id, 'neutral-deck');
   assert.deepEqual(r.manifest.stations.seatOrder, ['Alpha', 'Beta', 'Gamma']);
-  assert.deepEqual(r.manifest.builder.presets, [{ id: 'pilot', label: 'Pilot', bodyId: 'dark', seat: 'Beta' }]);
+  assert.deepEqual(r.manifest.builder.presets, [
+    { id: 'pilot', label: 'Pilot', bodyId: 'dark', colors: { skin: '#7b4d34', shirt: '#a07a1c' }, seat: 'Beta' },
+    { id: 'medic', label: 'Medic', bodyId: 'light', colors: { shirt: '#285cc4', hair: '#ececec' } },
+  ]);
+  assert.deepEqual(r.manifest.builder.bodies[0].parts.skin, { main: '#fad6b8', shades: ['#fad6b8', '#e86a73'] });
+  assert.deepEqual(r.manifest.builder.bodies[1].parts.hair, { main: '#242234', shades: ['#242234'], byShape: true });
+  assert.deepEqual(r.manifest.builder.bodies[0].portrait, { crop: [7, 4, 18, 28] });
+  assert.deepEqual(r.manifest.builder.sample, { bodyId: 'light', presetId: 'medic' });
   assert.deepEqual(r.manifest.projectDefaults, { orchestrator: { name: 'Lead', appearance: { bodyId: 'light' } } });
 });
 
@@ -49,6 +56,17 @@ const broken = [
   ['preset seat unknown', (m) => { m.builder.presets[0].seat = 'Nowhere'; }, /seat/],
   ['preset seat is captain', (m) => { m.builder.presets[0].seat = 'Alpha'; }, /captain/],
   ['preset body unknown', (m) => { m.builder.presets[0].bodyId = 'ghost'; }, /body/],
+  ['preset colour', (m) => { m.builder.presets[0].colors.skin = 'pink'; }, /presets\[0\]\.colors\.skin/],
+  ['preset colour part', (m) => { m.builder.presets[0].colors.hat = '#000000'; }, /hat/],
+  ['swatch colour', (m) => { m.builder.swatches.hair.black = '#12'; }, /swatches\.hair/],
+  ['swatch part', (m) => { m.builder.swatches.boots = { a: '#000000' }; }, /boots/],
+  ['part main', (m) => { m.builder.bodies[0].parts.skin.main = 'skin'; }, /parts\.skin/],
+  ['byShape on skin', (m) => { m.builder.bodies[0].parts.skin.byShape = true; }, /byShape/],
+  ['byShape without outline', (m) => { delete m.builder.outline; }, /outline/],
+  ['portrait outside frame', (m) => { m.builder.bodies[0].portrait.crop = [20, 4, 18, 28]; }, /portrait/],
+  ['defaults body', (m) => { m.builder.defaults.bodyId = 'ghost'; }, /defaults\.bodyId/],
+  ['sample preset', (m) => { m.builder.sample.presetId = 'ghost'; }, /sample\.presetId/],
+  ['custom colours flag', (m) => { m.builder.customColours = 'yes'; }, /customColours/],
 ];
 for (const [name, mutate, re] of broken) {
   test(`invalid manifest is rejected: ${name}`, () => {
@@ -56,7 +74,7 @@ for (const [name, mutate, re] of broken) {
     const r = Mf.validateManifest(m);
     const errs = errors(r);
     assert.ok(errs.some((e) => re.test(e)), `${name}: ${JSON.stringify(r.diagnostics)}`);
-    if (name !== 'preset seat unknown' && name !== 'preset seat is captain' && name !== 'preset body unknown') assert.equal(r.manifest, null);
+    assert.equal(r.manifest, null, name);
   });
 }
 

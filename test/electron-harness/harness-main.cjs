@@ -24,6 +24,7 @@
  */
 const { app, BrowserWindow, ipcMain } = require('electron');
 const { isolateAppPaths } = require('./isolate-paths.cjs');
+const { viteGlobGuard } = require('./vite-glob-guard.cjs');
 const { writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 
@@ -202,7 +203,8 @@ async function bundleScenario(entry) {
     jsx: 'automatic',
     // What electron-vite defines for the renderer, so a scenario can mount the REAL App (RR-164).
     define: { 'import.meta.env': '{"DEV":false,"PROD":true,"MODE":"production"}', __APP_VERSION__: '"0.0.0-harness"' },
-    plugins: [sourceOverrides, themePackSources, viteAssets, cssAsStyleTag],
+    // viteGlobGuard runs after the packSources fake, so only an unfaked import.meta.glob user stops the build.
+    plugins: [sourceOverrides, themePackSources, viteGlobGuard(), viteAssets, cssAsStyleTag],
     logLevel: 'silent'
   });
   return out.outputFiles[0].text;

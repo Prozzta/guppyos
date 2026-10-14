@@ -5362,6 +5362,8 @@ thread. This is the ONLY spawn route you can complete on your own: a hire manife
 \`character\` and \`accent\` set how the worker looks on the office floor, and both are optional.
 Naming a worker after a cast member already gets you that avatar, so you only need \`character\` when
 the name and the face should differ. An unrecognised value falls back rather than failing the spawn.
+On a theme-pack floor, \`"appearance": { "presetId": "…" }\` (or \`bodyId\` and \`colors\` { skin, shirt, hair })
+picks the worker's look from that pack's builder; it is optional and an unknown value falls back too.
 
 **It can be switched off.** The operator controls this under Settings → Autonomy & Budgets, and it is
 OFF by default, because every worker you start spends tokens nobody approved. While it is off your

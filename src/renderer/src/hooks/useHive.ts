@@ -24,6 +24,8 @@ import { toolEnded, toolStarted } from '@shared/activityView';
 import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery } from './queueDelivery';
 import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
+import { themeBuilder } from '@/scene/themes/themeCatalog';
+import { lookFromRequest } from '@/scene/themes/looks';
 
 const GOD_ID = 'god';
 /** Accent palette for MAIN-spawned (voice-hired) agents — picked deterministically
@@ -1062,11 +1064,16 @@ export function useHive(config: HarnessConfig | null): void {
       let h = 0;
       for (const ch of rec.id) h = (h + ch.charCodeAt(0)) % SPAWN_ACCENTS.length;
       const project = (rec.cwd || '').split(/[\\/]/).filter(Boolean).pop() || 'hive';
+      // A look on a theme-pack floor (its preset or body and colours), for the
+      // theme it names or the active one. Unknown values fall back, never fail.
+      const lookTheme = rec.appearance?.theme ?? useStore.getState().officeTheme;
+      const look = rec.appearance ? lookFromRequest(themeBuilder(lookTheme) ?? undefined, rec.appearance) : null;
       const agent: Agent = {
         id: rec.id,
         name: rec.name || rec.id,
         character,
         accent: askedAccent ?? SPAWN_ACCENTS[h],
+        ...(look ? { appearanceByTheme: { [lookTheme]: look } } : {}),
         description: rec.role || 'a fresh harness',
         project,
         tmuxTarget: '',

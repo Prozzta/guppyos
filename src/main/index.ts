@@ -182,6 +182,7 @@ import { detectNodeVersion, nodeIsUsable, resolveNodeInstaller } from './nodeIns
 import { toolCatalog, type ToolStatus } from '../shared/toolCatalog';
 import { listLocalSkills, loadCatalog, installSkill, uninstallSkill, type LocalSkill } from './skills';
 import { loadHero } from './hero';
+import { spawnAppearance } from './spawnAppearance';
 import {
   CODEX_REMOTE_SOCKET_RELATIVE,
   codexRemoteAliasPath,
@@ -6784,6 +6785,9 @@ interface SpawnRequest {
   // from the worker id.
   character?: string;
   accent?: string;
+  // The look on a theme-pack floor ({ theme?, presetId?, bodyId?, colors? }). Only its
+  // shape and size are checked here; the renderer resolves it against the pack.
+  appearance?: unknown;
 }
 
 /** Polling cadence — matches the hive router. */
@@ -6971,7 +6975,8 @@ async function processSpawnRequest(filePath: string): Promise<void> {
       role: meta.role,
       worktreePath: res.worktreePath,
       character: typeof raw.character === 'string' ? raw.character : undefined,
-      accent: typeof raw.accent === 'string' ? raw.accent : undefined
+      accent: typeof raw.accent === 'string' ? raw.accent : undefined,
+      appearance: spawnAppearance(raw.appearance)
     });
   } catch { /* window torn down */ }
 
