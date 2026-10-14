@@ -161,7 +161,14 @@ export function applyProjectHomeChange(state: ProjectThemeMapState, change: Proj
     return { officeThemeByHive, projectThemeSeedByHive };
   }
 
-  if (!change.blankProject || !isProjectThemeId(change.theme)) return { officeThemeByHive, projectThemeSeedByHive };
+  if (!change.blankProject) return { officeThemeByHive, projectThemeSeedByHive };
+  // A blank fresh project with no theme (e.g. Settings' plain "new hive"): a reused
+  // folder must not inherit a stale theme or god seed from an earlier project there.
+  if (!isProjectThemeId(change.theme)) {
+    delete officeThemeByHive[newKey];
+    delete projectThemeSeedByHive[newKey];
+    return { officeThemeByHive, projectThemeSeedByHive };
+  }
   officeThemeByHive[newKey] = change.theme;
   const seed = change.seed === undefined ? projectTheme(change.theme).projectDefaults?.orchestrator : change.seed;
   if (seed && isProjectThemeSeed(seed)) projectThemeSeedByHive[newKey] = seed;
