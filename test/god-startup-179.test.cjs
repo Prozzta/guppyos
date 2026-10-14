@@ -295,8 +295,9 @@ test('Creed N1: a handoff armed longer ago than GOD_HANDOFF_STALE_MS is dropped,
 
 test('R2: the fresh god\'s orientation reads the digest and the board status, and the raw board only for a named card', () => {
   // BOOT-REENTER-PASTE-PROOF (1.1.81): the text moved to shared/godOrientation.ts (main puts it on argv).
+  // TES step 3: the steps are ORIENTATION_STEPS; only the first line (godOrientationPrompt) names god.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src/shared/godOrientation.ts'), 'utf8');
-  const prompt = src.slice(src.indexOf('export const INITIAL_GOD_PROMPT = ['), src.indexOf("].join('\\n');", src.indexOf('export const INITIAL_GOD_PROMPT = [')));
+  const prompt = src.slice(src.indexOf('const ORIENTATION_STEPS = ['), src.indexOf("].join('\\n');", src.indexOf('const ORIENTATION_STEPS = [')));
   assert.ok(prompt.length > 200, 'the orientation was found in the shared module');
   assert.match(prompt, /'2\. Read floor-digest\.md and board-status\.md \(hive root\) and the current roster of agents \(active vs archived\)\. Open board\.md or tasks\.json only for a named card, with grep or jq; never read them whole\.'/);
   assert.doesNotMatch(prompt, /Review board\.md \+ tasks\.json/);
