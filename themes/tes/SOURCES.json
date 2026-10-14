@@ -1,0 +1,79 @@
+{
+  "$comment": "Provenance of the TES pack's build inputs. Each file is a verbatim copy (never a move) of the Human's file at 'from'; sha256 is of both. Never edit the copies here: change the source and re-copy.",
+  "copied": [
+    {
+      "path": "map/ToSBridge.tmx",
+      "from": "C:/Dunder/Munderverse/ToSBridge.tmx",
+      "sha256": "09a5411f7065b6a2e3fab0a3e621816dc9dfb33df460454d635eb8422218ea26",
+      "bytes": 15789
+    },
+    {
+      "path": "map/sampleAmplied.tsx",
+      "from": "C:/Dunder/Munderverse/sampleAmplied.tsx",
+      "sha256": "32fe2c990258771f6ecc13af36912a1aae4024daddb91fac207f02806c1e5cac",
+      "bytes": 272
+    },
+    {
+      "path": "map/tileset-walls (1).tsx",
+      "from": "C:/Dunder/Munderverse/tileset-walls (1).tsx",
+      "sha256": "54bdf8024478c0144d3509df4666b8e82e3e651eccb2c78a9ca024eeac8e5842",
+      "bytes": 278
+    },
+    {
+      "path": "map/tileset-floor (1).tsx",
+      "from": "C:/Dunder/Munderverse/tileset-floor (1).tsx",
+      "sha256": "3c0ab0403489c30bdc11f7e50f8ff2ad01b6a5ce1c2c04cddb011cea1506b8d5",
+      "bytes": 279
+    },
+    {
+      "path": "map/tileset-decorative (1).tsx",
+      "from": "C:/Dunder/Munderverse/tileset-decorative (1).tsx",
+      "sha256": "c78362667f1ec739e84a772ddad6341dc22f3729c5217f03257f6a7948f9a549",
+      "bytes": 290
+    },
+    {
+      "path": "art/sampleAmplied.png",
+      "from": "C:/Dunder/_work/tos-art/tiled-work/sampleAmplied.png",
+      "sha256": "6d59b40a36e8b0e14d2fb551539f0c546c077b0cea9d86409549d879e7450e7b",
+      "bytes": 77962
+    },
+    {
+      "path": "art/tileset-walls (1).png",
+      "from": "C:/Dunder/_work/tos-art/tiled-work/tileset-walls (1).png",
+      "sha256": "d1c6f74eaa711a0eb0c16bd824acf0d6d2ea1f883bce921b4e22d3d63d74dba4",
+      "bytes": 3628
+    },
+    {
+      "path": "art/tileset-floor (1).png",
+      "from": "C:/Dunder/_work/tos-art/tiled-work/tileset-floor (1).png",
+      "sha256": "5d3222520d21ec0663e66a17eb521c8ddd63c8ecb4f9adba9dd008f26911cb65",
+      "bytes": 2261
+    },
+    {
+      "path": "art/tileset-decorative (1).png",
+      "from": "C:/Dunder/_work/tos-art/tiled-work/tileset-decorative (1).png",
+      "sha256": "a950e6f25e55882426d66b619ad0f4f6df33146179339fb3885dfc26b233c8d0",
+      "bytes": 9193
+    },
+    {
+      "path": "art/characters-sheet (1).png",
+      "from": "C:/Dunder/_work/tos-art/tiled-work/characters-sheet (1).png",
+      "sha256": "6c0c9808303f663da914969fdda0584b679f993cc069e0aa725524824ccaca0f",
+      "bytes": 3454
+    },
+    {
+      "path": "LICENSE-ARTWORK.md",
+      "from": "C:/Dunder/_work/tos-art/LICENSE-ARTWORK.md",
+      "sha256": "821f136f39c99144839c42a333b9e075ca9a607ce1585c56c786c03f97a699be",
+      "bytes": 2843
+    }
+  ],
+  "generated": [
+    {
+      "path": "lines.json",
+      "from": "C:/Dunder/_work/tos-art/tos-lines.js",
+      "sourceSha256": "1092f4415fa260f3103cf4edf84d4a948d0e85602f21dc9891bd774ed0129ed6",
+      "how": "window.TosLines dumped as JSON (data only)"
+    }
+  ]
+}

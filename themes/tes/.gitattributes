@@ -1,0 +1,4 @@
+# The Human's files are verbatim copies (SOURCES.json holds their sha256): keep their bytes exactly, line endings too.
+map/** -text
+art/** binary
+LICENSE-ARTWORK.md -text
