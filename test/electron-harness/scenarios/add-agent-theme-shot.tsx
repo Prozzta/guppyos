@@ -78,7 +78,7 @@ async function waitFor(check: () => boolean, message: string) {
 }
 
 type Dialog = 'add' | 'edit';
-type Theme = 'office' | 'tes';
+type Theme = 'office' | 'tes' | 'friends';
 type Mounted = { host: HTMLDivElement; root: Root };
 
 async function mount(dialog: Dialog, theme: Theme): Promise<Mounted> {
@@ -131,7 +131,15 @@ window.__harnessRun = async () => {
         throw new Error(`Edit TES did not retain its saved name: ${JSON.stringify(tes)}`);
       }
     }
-    window.harness.report({ ok: true, ...captures });
+    const tvShowMounted = await mount('add', 'friends');
+    await waitFor(() => visibleCensus().officePortraitButtons > 0, 'TV-show Add Office picker did not render');
+    const tvShow = visibleCensus();
+    await unmount(tvShowMounted);
+    if (!tvShow.inputValues.includes('Jim')) {
+      throw new Error(`TV-show Add did not default to Jim: ${JSON.stringify(tvShow)}`);
+    }
+
+    window.harness.report({ ok: true, ...captures, tvShow });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
   }

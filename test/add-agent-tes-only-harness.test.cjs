@@ -57,6 +57,8 @@ test('RENDERED: Add and Edit render the pack look only in TES, with the Color ro
     assert.equal(tes.colorRow, true, `${dialog}: the styled Color row renders`);
   }
   assert.ok(result['edit-tes'].census.inputValues.includes('Speck'), 'Edit retains its stored name');
+  assert.ok(result.tvShow.officePortraitButtons > 0, 'TV-show Add keeps the Office character picker');
+  assert.ok(result.tvShow.inputValues.includes('Jim'), 'TV-show Add defaults to Jim');
 });
 
 test('MUTANT: an extra Office SpritePortrait after Edit’s builder fails the TES census', { timeout: harnessTestTimeout(120_000) }, async () => {

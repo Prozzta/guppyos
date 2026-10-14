@@ -4,7 +4,7 @@ import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { ThemeLookBuilder } from './ThemeLookBuilder';
 import { useThemeLooks } from '@/scene/themes/useThemeLooks';
-import { OFFICE_THEME_ID } from '@/scene/themes/manifest';
+import { isPackProjectTheme } from '@shared/projectTheme';
 import { draftToLook, startDraft, type LookDraft } from '@/scene/themes/looks';
 import { Icon } from './Icon';
 import { ProviderLogo } from './ProviderLogo';
@@ -193,7 +193,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   // must not greet a new hire with the Office's default name, but an imported
   // name is always the user's data and remains untouched.
   const officeTheme = useStore((s) => s.officeTheme);
-  const [name, setName] = useState(pendingHire?.name ?? (officeTheme === OFFICE_THEME_ID ? 'Jim' : 'Crewmate'));
+  const [name, setName] = useState(pendingHire?.name ?? (isPackProjectTheme(officeTheme) ? 'Crewmate' : 'Jim'));
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
   // The active theme pack's look builder (only when the pack declares one).
