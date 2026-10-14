@@ -6,6 +6,11 @@ import './design/global.css';
 import { startRendererStartupTiming } from './startupTiming';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { installRendererErrorForwarder } from './rendererErrors';
+import { listThemes } from './scene/themes/themeCatalog';
+
+// The valid bundled theme packs join the project-theme catalogue (pickers, the per-project
+// theme) before first render: loading the catalogue registers them.
+listThemes();
 
 // HISTORY-SCROLL-FREEZE F3: an uncaught renderer error leaves a renderer-error row in log.jsonl.
 installRendererErrorForwarder();

@@ -1,5 +1,5 @@
 import { app } from 'electron';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
 import { dirname, join } from 'node:path';
@@ -1135,8 +1135,14 @@ export function modelForHiveSpawn(
 /** Ensure harnessHome exists on disk. Expands `~` first — the onboarding wizard
  *  lets the user type the path, and mkdir treats a literal `~` as a plain
  *  directory name (issue #140's `ENOENT: mkdir '~/HarnessAgents'`). */
-export function ensureHarnessHome(path: string): { ok: boolean; error?: string } {
+export function ensureHarnessHome(path: string): { ok: boolean; error?: string; blank?: boolean; home?: string } {
   try {
+    // MUNDER_DEV=1: the wizard's free-text folder is ignored; only the clamped
+    // dev root is ever created (so a typed `C:\Dunder` never mkdirs anything).
+    const home = DEV_ISOLATION ? devHarnessHome(devDataRoot()) : expandTilde(path);
+    // Blank = absent or empty before the mkdir: the only home a creation seed may land in.
+    let blank = false;
+    try { blank = !existsSync(home) || readdirSync(home).length === 0; } catch { blank = false; }
     // Expand HERE too, not only at the config write (#140). This runs FIRST —
     // onboarding calls it before updateConfig — so normalizing only at the write
     // boundary left the actual mkdir still receiving a literal `~`. Depending on
@@ -1145,13 +1151,51 @@ export function ensureHarnessHome(path: string): { ok: boolean; error?: string }
     // the hive then lives at a path the user cannot find. This is the
     // "defense-in-depth at the consumers" the expandTilde doc calls for: the
     // ingestion point normalizes, and the consumer refuses to trust that it did.
-    // MUNDER_DEV=1: the wizard's free-text folder is ignored; only the clamped
-    // dev root is ever created (so a typed `C:\Dunder` never mkdirs anything).
-    mkdirSync(DEV_ISOLATION ? devHarnessHome(devDataRoot()) : expandTilde(path), { recursive: true });
-    return { ok: true };
+    mkdirSync(home, { recursive: true });
+    return { ok: true, blank, home };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/** A home onboarding saw blank is still unclaimed when it holds no project yet.
+ *  Guppy's bootstrap writes a wide and growing scaffold before the first theme choice
+ *  (hive/ with its protocol files, bin/ shims, state/, ledgers, the memory engine's
+ *  files, engine configs), so this checks the PROJECT markers rather than an exact
+ *  file list: no roster at the home, and a hive (if any) with no agent folder, no
+ *  registered agent, no task and no pending spawn request. Fails closed: an
+ *  unreadable or malformed marker means "a project". */
+export function homeHasNoProject(path: string): boolean {
+  try {
+    const home = DEV_ISOLATION ? devHarnessHome(devDataRoot()) : expandTilde(path);
+    if (!existsSync(home)) return true;
+    if (existsSync(join(home, 'roster.json')) || existsSync(join(home, 'roster-backups'))) return false;
+    const hive = join(home, 'hive');
+    if (!existsSync(hive)) return true;
+    if (!statSync(hive).isDirectory()) return false;
+    const agents = join(hive, 'agents');
+    if (existsSync(agents) && readdirSync(agents).length > 0) return false;
+    const registry = join(hive, 'registry.json');
+    if (existsSync(registry)) {
+      const r = JSON.parse(readFileSync(registry, 'utf8')) as { agents?: unknown };
+      if (!r || typeof r !== 'object' || !r.agents || typeof r.agents !== 'object' || Object.keys(r.agents).length > 0) return false;
+    }
+    const tasks = join(hive, 'tasks.json');
+    if (existsSync(tasks)) {
+      const t = JSON.parse(readFileSync(tasks, 'utf8')) as { tasks?: unknown };
+      if (!Array.isArray(t?.tasks) || t.tasks.length > 0) return false;
+    }
+    const requests = join(hive, 'spawn-requests');
+    if (existsSync(requests) && !treeHasNoFiles(requests)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function treeHasNoFiles(dir: string): boolean {
+  if (!statSync(dir).isDirectory()) return false;
+  return readdirSync(dir).every((name) => treeHasNoFiles(join(dir, name)));
 }
 
 /** Idempotently pre-accept Claude Code's first-run prompts so agents spawned with

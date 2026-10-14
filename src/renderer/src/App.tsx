@@ -7,6 +7,8 @@ import { DEFAULT_ORG_TRIGGER } from '@shared/triggers';
 import { floorSceneTheme, resolveProjectTheme } from '@shared/projectTheme';
 import { getTheme, type ThemeId } from '@/scene/office/themeRegistry';
 import { applyThemeUiTokens } from '@/design/uiTheme';
+import { themeUiTokens } from '@/scene/themes/themeCatalog';
+import { useOrchestratorThemeLook } from '@/hooks/useOrchestratorThemeLook';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { useHive } from '@/hooks/useHive';
 import { MemoryPanel } from '@/components/MemoryPanel';
@@ -55,7 +57,8 @@ export function App() {
   const officeTheme = useStore(s => s.officeTheme);
   // The active floor theme's UI colour tokens, at boot and on every theme switch. Office and the TV themes carry
   // none, so for them this clears and the app looks as before.
-  useEffect(() => { applyThemeUiTokens(getTheme(officeTheme)); }, [officeTheme]);
+  // A theme pack's tokens come from its manifest (theme.json uiTokens), a built-in theme's from its ThemeConfig.
+  useEffect(() => { applyThemeUiTokens({ id: officeTheme, uiTokens: themeUiTokens(officeTheme) ?? getTheme(officeTheme).uiTokens }); }, [officeTheme]);
   const sidebarWidth = useStore(s => s.sidebarWidth);
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
   const ideOpen = useStore(s => s.ideOpen);
@@ -132,9 +135,6 @@ export function App() {
       // show the voice button disabled-with-tooltip when Free Flow is on but no
       // Groq key is set (Settings keeps this in sync on save).
       useStore.getState().setHasGroqKey(!!c.groqApiKey);
-      // Mirror this project's theme so OfficeFloor renders it. The tvShowOffices flag
-      // gates the built-in show maps only (off = the office); Settings keeps this synced.
-      useStore.getState().setOfficeTheme(floorSceneTheme(resolveProjectTheme(c, c.harnessHome), c.tvShowOffices) as ThemeId);
       // Mirror the triggers so Settings → Connections and the Command Center's
       // Triggers tab read one list, not two copies that drift — whichever surface
       // saves calls these same setters and the other repaints. No extra IPC: main
@@ -159,6 +159,12 @@ export function App() {
   // for whichever agent the user is viewing; gated on the flag, terminal-safe
   // (solo-hold threshold, aborts on any other key). See freeflow/holdOption.ts.
   useHoldOptionToTalk();
+
+  // Mirror the project's floor so OfficeFloor renders it, from every config the app
+  // holds: the first load, onboarding's result (a new pack project shows its floor at
+  // once) and any later save. The TV-show maps are gated on tvShowOffices; a pack is not.
+  const floorScene = config ? floorSceneTheme(resolveProjectTheme(config, config.harnessHome), config.tvShowOffices) : null;
+  useEffect(() => { if (floorScene) useStore.getState().setOfficeTheme(floorScene as ThemeId); }, [floorScene]);
 
   // Quit warning subscription
   useEffect(() => window.cth.onCloseRequested((info) => setQuitWarn(info)), []);
@@ -212,6 +218,7 @@ export function App() {
   // hook) so Michael doesn't boot against the current home while the user may be
   // about to switch to a different one.
   useHive(hiveOpened ? config : null);
+  useOrchestratorThemeLook();
 
   // Pre-warm a persistent terminal for every live agent so its output is
   // buffered from spawn. Switching agents then re-attaches an already-rendered

@@ -15,7 +15,7 @@ import {
 import { DEFAULT_CONTEXT_TRIGGER, type ContextRule } from '../../../shared/triggers';
 import type { AgentProvider } from '../../../shared/agentProvider';
 import { godOrientationPrompt } from '../../../shared/godOrientation';
-import { resolveGodIdentity } from '../../../shared/godIdentity';
+import { DEFAULT_GOD_NAME, resolveGodIdentity } from '../../../shared/godIdentity';
 import { projectThemeHomeKey } from '../../../shared/projectTheme';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
@@ -124,12 +124,12 @@ async function submitBootPrompt(agentId: string, text: string, settleMs?: number
 
 /** Wrap a user message as an enrich task for the assistant. The assistant's
  *  system prompt has the full instructions; this just frames the one task. */
-function enrichTaskPrompt(text: string): string {
+function enrichTaskPrompt(text: string, godName: string = DEFAULT_GOD_NAME): string {
   return [
     `ENRICH TASK: ${text}`,
     '',
     '(Identify the relevant project, cd in, gather READ-ONLY context, then send the improved,',
-    'self-contained prompt to Michael via an outbox message with "to":"god". Do not do the task yourself.)'
+    `self-contained prompt to ${godName} via an outbox message with "to":"god". Do not do the task yourself.)`
   ].join('\n');
 }
 
@@ -327,6 +327,8 @@ export function useHive(config: HarnessConfig | null): void {
       // Synchronous guard (no await between check and set) → exactly one spawn.
       if (cancelled || godSpawning.current) return;
       godSpawning.current = true;
+      // The orchestrator's looks per theme pack are roster data: keep them across the respawn.
+      const godLooks = useStore.getState().agents.find((a) => a.id === GOD_ID)?.appearanceByTheme;
       useStore.getState().removeAgent(GOD_ID); // clear any stale restored entry
 
       // God's persisted name and look win. Only a seed persisted by the blank-project
@@ -379,6 +381,7 @@ export function useHive(config: HarnessConfig | null): void {
         provider: godProvider,
         model: godModel,
         isGod: true,
+        ...(godLooks ? { appearanceByTheme: godLooks } : {}),
         recentTextTs: Date.now()
       };
       useStore.getState().addAgent(god);
