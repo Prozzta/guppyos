@@ -4,6 +4,7 @@ import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { ThemeLookBuilder } from './ThemeLookBuilder';
 import { useThemeLooks } from '@/scene/themes/useThemeLooks';
+import { OFFICE_THEME_ID } from '@/scene/themes/manifest';
 import { draftToLook, startDraft, type LookDraft } from '@/scene/themes/looks';
 import { Icon } from './Icon';
 import { ProviderLogo } from './ProviderLogo';
@@ -188,18 +189,23 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const initialProvider = inferAgentProvider(config.defaultCommand);
   const initialModel = seedModelForProvider(config, initialProvider);
 
-  // Read the theme before seeding identity defaults. TES must not greet a new
-  // crew member with the Office's default name, but an imported name is always
-  // the user's data and remains untouched.
+  // Read the theme before seeding identity defaults. A pack-based crew member
+  // must not greet a new hire with the Office's default name, but an imported
+  // name is always the user's data and remains untouched.
   const officeTheme = useStore((s) => s.officeTheme);
-  const isTesTheme = officeTheme === 'tes';
-  const [name, setName] = useState(pendingHire?.name ?? (isTesTheme ? 'Crewmate' : 'Jim'));
+  const [name, setName] = useState(pendingHire?.name ?? (officeTheme === OFFICE_THEME_ID ? 'Jim' : 'Crewmate'));
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
   // The active theme pack's look builder (only when the pack declares one).
   // The draft is per theme, so a theme change mid-dialog never saves a look
   // made for another pack.
   const looks = useThemeLooks(officeTheme);
+  const hasThemeLookBuilder = Boolean(looks?.builder);
+  // Never flash the Office grid while an active pack is still loading.
+  const showOfficeCharacterPicker = looks !== undefined && !hasThemeLookBuilder;
+  const sections = hasThemeLookBuilder
+    ? SECTIONS.map((s) => s.key === 'identity' ? { ...s, hint: 'name · look · color' } : s)
+    : SECTIONS;
   const [lookDraftState, setLookDraftState] = useState<{ themeId: string; draft: LookDraft } | null>(null);
   const lookDraft = looks?.builder
     ? (lookDraftState?.themeId === looks.themeId ? lookDraftState.draft : startDraft(looks.builder, looks.columns))
@@ -654,7 +660,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
               {/* LEFT — section index. Capabilities isn't a nav item: it isn't a
                   user field, it rides the imported hire manifest (banner above). */}
               <nav style={{ width: 168, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {SECTIONS.map((s, i) => {
+                {sections.map((s, i) => {
                   const active = section === s.key;
                   return (
                     <button
@@ -703,7 +709,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                       />
                     </Row>
 
-                    {!isTesTheme && (
+                    {showOfficeCharacterPicker && (
                       <Row label="Character">
                         <div data-office-character-picker style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {OFFICE_CAST.map(c => (
@@ -737,7 +743,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                         looks={looks}
                         draft={lookDraft}
                         character={character}
-                        officeCharacterVisible={!isTesTheme}
+                        officeCharacterVisible={showOfficeCharacterPicker}
                         onChange={(d) => setLookDraftState({ themeId: looks.themeId, draft: d })}
                         onPreset={(n) => { if (n) setName(n); }}
                       />

@@ -1,7 +1,7 @@
 'use strict';
 
 /** Writes comparable production-dialog screenshots for the Office and TES Add
- * Agent identity pickers:
+ * and Edit identity pickers:
  *   node test/electron-harness/run-add-agent-theme-shot.cjs --out <dir> */
 const { createHash } = require('node:crypto');
 const { mkdirSync, writeFileSync } = require('node:fs');
@@ -21,12 +21,12 @@ runScenario(join(__dirname, 'scenarios', 'add-agent-theme-shot.tsx'), {
 }).then((report) => {
   if (!report.ok) { console.error(report.error); process.exit(1); }
   mkdirSync(out, { recursive: true });
-  const shots = ['office', 'tes'].map((theme) => {
-    const shot = report[theme];
+  const shots = ['add-office', 'add-tes', 'edit-office', 'edit-tes'].map((kind) => {
+    const shot = report[kind];
     const bytes = Buffer.from(shot.png.slice(shot.png.indexOf(',') + 1), 'base64');
-    const file = join(out, `add-agent-${theme}.png`);
+    const file = join(out, `agent-${kind}.png`);
     writeFileSync(file, bytes);
-    return { theme, file, size: shot.size, census: shot.census, sha256: createHash('sha256').update(bytes).digest('hex') };
+    return { kind, file, size: shot.size, census: shot.census, sha256: createHash('sha256').update(bytes).digest('hex') };
   });
   console.log(JSON.stringify({ shots }, null, 2));
 }).catch((error) => { console.error(error); process.exit(1); });

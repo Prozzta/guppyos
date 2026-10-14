@@ -58,7 +58,7 @@ export function ThemeLookBuilder({ looks, draft, onChange, onPreset, character, 
       <div>
         <div style={label}>{`Look on ${looks.label}`}</div>
         <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
-          {officeCharacterVisible ? 'Only this theme uses it. The Office character above is kept.' : 'Choose this agent’s TES look.'}
+          {officeCharacterVisible ? 'Only this theme uses it. The Office character above is kept.' : `Choose this agent’s ${looks.label} look.`}
         </div>
       </div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
