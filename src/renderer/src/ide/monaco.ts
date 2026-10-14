@@ -19,6 +19,8 @@
  */
 import * as monaco from 'monaco-editor';
 import { loader } from '@monaco-editor/react';
+import { subscribeUiTokens, uiPalette } from '@/design/uiTheme';
+import { monacoPaletteColours } from '@/design/uiTokens';
 
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import JsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
@@ -51,35 +53,35 @@ import TsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 
 let themesDefined = false;
 
-/** Register the CTH light/dark Monaco themes (idempotent). */
+/** Register the CTH light/dark Monaco themes (idempotent), and re-register them when the UI tokens change. */
 function defineThemes(m: typeof monaco): void {
   if (themesDefined) return;
   themesDefined = true;
+  registerThemes(m);
+  // A floor theme's tokens changed: redefine, then re-apply so open editors repaint.
+  subscribeUiTokens(() => { registerThemes(m); m.editor.setTheme(CTH_MONACO_THEME); });
+}
+
+/** Light in both app themes, as before; ground, ink, gutter and selection come from the light UI palette. */
+function registerThemes(m: typeof monaco): void {
+  const c = monacoPaletteColours(uiPalette('light'));
   m.editor.defineTheme('cth-light', {
     base: 'vs',
     inherit: true,
     rules: [
-      { token: '', foreground: '1A1320', background: 'FCFAF0' },
-      { token: 'comment', foreground: '6B5878', fontStyle: 'italic' },
+      { token: '', foreground: c.rules.foreground, background: c.rules.background },
+      { token: 'comment', foreground: c.rules.comment, fontStyle: 'italic' },
       { token: 'keyword', foreground: '8B5CF6' },
       { token: 'string', foreground: '3FA45B' },
       { token: 'number', foreground: 'D94F4F' },
       { token: 'type', foreground: '2A9D94' },
       { token: 'function', foreground: 'C2603A' },
-      { token: 'variable', foreground: '1A1320' },
-      { token: 'delimiter', foreground: '6B5878' }
+      { token: 'variable', foreground: c.rules.foreground },
+      { token: 'delimiter', foreground: c.rules.delimiter }
     ],
     colors: {
-      'editor.background': '#FCFAF0',
-      'editor.foreground': '#1A1320',
-      'editorLineNumber.foreground': '#A899B5',
-      'editorLineNumber.activeForeground': '#3D2E4A',
-      'editor.selectionBackground': '#FFEC99',
-      'editor.lineHighlightBackground': '#FFF8E7',
+      ...c.colors,
       'editorCursor.foreground': '#FF6B6B',
-      'editorGutter.background': '#F0EAD2',
-      'editorWidget.background': '#FFF8E7',
-      'editorIndentGuide.background1': '#E8D9A0',
       'diffEditor.insertedTextBackground': '#6BCF7F33',
       'diffEditor.removedTextBackground': '#FF6B6B33',
       'diffEditor.insertedLineBackground': '#6BCF7F22',

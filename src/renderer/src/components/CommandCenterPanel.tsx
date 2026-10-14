@@ -685,7 +685,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
           const usageDisplay: AgentUsageDisplay = usageCapable ? (agentUsageDisplay[a.id] ?? 'budget') : 'budget';
           const denom = agentCap && agentCap > 0 ? agentCap : floorCap;
           const pct = Math.min(100, Math.round((tokens / denom) * 100));
-          const meterColor = armed || pct >= 90 ? 'var(--cth-coral)' : pct >= 60 ? 'var(--cth-lemon)' : 'var(--cth-mint)';
+          const meterColor = armed || pct >= 90 ? 'var(--cth-coral)' : pct >= 60 ? 'var(--cth-warn-mark)' : 'var(--cth-mint)';
           // Sparkline only when the agent is actually burning tokens; otherwise the
           // flat baseline is just a mystery line. Label it with the live rate.
           const sparkSeries = spark[a.id] ?? [];
@@ -782,7 +782,7 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
               <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0 }}>ctx</span>
               {a.contextTokens !== undefined && a.contextLimit ? (() => {
                 const cpct = Math.min(100, Math.round((a.contextTokens! / a.contextLimit!) * 100));
-                const ccolor = cpct >= 88 ? 'var(--cth-coral)' : cpct >= 75 ? 'var(--cth-lemon)' : `var(--cth-${a.accent})`;
+                const ccolor = cpct >= 88 ? 'var(--cth-coral)' : cpct >= 75 ? 'var(--cth-warn-mark)' : `var(--cth-${a.accent})`;
                 return (
                   <>
                     <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-900)', width: 56, textAlign: 'right' }}>

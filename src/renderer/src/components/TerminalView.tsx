@@ -2,23 +2,20 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { uiPalette } from '@/design/uiTheme';
+import { terminalPaletteColours } from '@/design/uiTokens';
 
 // Cream-paper light theme — kept in sync with the tuned light palette in
 // PtyTerminalView.tsx. The old palette here used the dark-theme neon colours
 // (e.g. green #6BCF7F, yellow #FFD93D) which are near-invisible as foreground on
 // the cream background; these dark/deep inks read on cream, and the terminal's
 // `minimumContrastRatio` (below) keeps coloured backgrounds legible too.
-const theme = {
-  background: '#FCFAF0',
-  foreground: '#1A1320',
+// Ground, ink, selection and the yellows come from the light UI palette.
+const ansi = {
   cursor: '#FF6B6B',
-  cursorAccent: '#FCFAF0',
-  selectionBackground: '#FFEC99',
-  selectionForeground: '#1A1320',
   black:        '#1A1320',
   red:          '#D1453B',
   green:        '#20904B',
-  yellow:       '#9C6B00',
   blue:         '#2B6CB0',
   magenta:      '#8A5CF0',
   cyan:         '#1F9C94',
@@ -26,7 +23,6 @@ const theme = {
   brightBlack:  '#6B5878',
   brightRed:    '#E0584E',
   brightGreen:  '#2E9E54',
-  brightYellow: '#B8860B',
   brightBlue:   '#3B7DC4',
   brightMagenta:'#9B72F2',
   brightCyan:   '#2BA89F',
@@ -47,7 +43,7 @@ export function TerminalView({ initialLines = [], feed = [] }: TerminalViewProps
   useEffect(() => {
     if (!hostRef.current) return;
     const term = new Terminal({
-      theme,
+      theme: { ...ansi, ...terminalPaletteColours(uiPalette('light')) },
       fontFamily: '"JetBrains Mono", "SF Mono", Menlo, monospace',
       fontSize: 13,
       lineHeight: 1.0,

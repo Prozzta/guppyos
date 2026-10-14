@@ -217,7 +217,7 @@ export function IntegrationsRegistry() {
             return (
               <button key={t.idSuggestion} type="button" onClick={() => setPicked(t.idSuggestion)} style={{
                 display: 'flex', alignItems: 'center', gap: 10, padding: 10, textAlign: 'left', cursor: 'pointer', border: 'none',
-                background: on ? 'var(--cth-lemon-light, #FFEC99)' : 'var(--cth-paper-100)',
+                background: on ? 'var(--cth-lemon-light)' : 'var(--cth-paper-100)',
                 boxShadow: `inset 0 0 0 ${on ? 2 : 1}px ${on ? 'var(--cth-ink-900)' : 'var(--cth-ink-300)'}`
               }}>
                 <Glyph mono={g.mono} bg={g.bg} />

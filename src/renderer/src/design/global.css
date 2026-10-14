@@ -19,11 +19,11 @@ html, body, #root {
 }
 
 body {
-  /* tiny diagonal cream noise — pure CSS, no images */
+  /* tiny diagonal hatch — pure CSS, no images (colour: --cth-hatch) */
   background-image:
     repeating-linear-gradient(
       45deg,
-      rgba(232, 217, 160, 0.20) 0 1px,
+      var(--cth-hatch) 0 1px,
       transparent 1px 6px
     );
 }

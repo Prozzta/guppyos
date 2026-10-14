@@ -534,7 +534,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
             {hireMeta && (
               <div style={{
                 padding: '6px 10px',
-                background: 'var(--cth-lemon-light, #fdf3cf)',
+                background: 'var(--cth-lemon-light)',
                 boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)',
                 fontSize: 12,
                 color: 'var(--cth-ink-900)',

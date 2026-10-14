@@ -5,7 +5,8 @@ import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { DEFAULT_ORG_TRIGGER } from '@shared/triggers';
 import { floorSceneTheme, resolveProjectTheme } from '@shared/projectTheme';
-import type { ThemeId } from '@/scene/office/themeRegistry';
+import { getTheme, type ThemeId } from '@/scene/office/themeRegistry';
+import { applyThemeUiTokens } from '@/design/uiTheme';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { useHive } from '@/hooks/useHive';
 import { MemoryPanel } from '@/components/MemoryPanel';
@@ -51,6 +52,10 @@ export function App() {
   const godStatus = useStore(s => s.godStatus);
   const fullscreenAgentId = useStore(s => s.fullscreenAgentId);
   const appThemeNow = useAppTheme();
+  const officeTheme = useStore(s => s.officeTheme);
+  // The active floor theme's UI colour tokens, at boot and on every theme switch. Office and the TV themes carry
+  // none, so for them this clears and the app looks as before.
+  useEffect(() => { applyThemeUiTokens(getTheme(officeTheme)); }, [officeTheme]);
   const sidebarWidth = useStore(s => s.sidebarWidth);
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
   const ideOpen = useStore(s => s.ideOpen);

@@ -101,7 +101,7 @@ export function AgentCard({
   // window fills: accent while comfortable, amber from 6/8, coral from 7/8.
   const pct = Math.min(8, Math.max(0, progress)) / 8 * 100;
   const gaugeColor = progress >= 7 ? 'var(--cth-coral)'
-    : progress >= 6 ? 'var(--cth-lemon)'
+    : progress >= 6 ? 'var(--cth-warn-mark)'
       : `var(--cth-${accent})`;
   const gaugeTitle = contextTokens !== undefined && contextLimit
     ? `Context: ${fmtK(contextTokens)} / ${fmtK(contextLimit)} tokens (${Math.round((contextTokens / contextLimit) * 100)}%)`
@@ -183,7 +183,7 @@ export function AgentCard({
           style={{
             position: 'absolute', right: -4, bottom: -5, zIndex: 2,
             minWidth: 26, height: 18, padding: '0 3px',
-            background: taskFlags.length ? 'var(--cth-lemon)' : 'var(--cth-sky)',
+            background: taskFlags.length ? 'var(--cth-warn-mark)' : 'var(--cth-sky)',
             boxShadow: taskFlags.length
               ? 'inset 0 0 0 2px var(--cth-coral), 1px 2px 0 rgba(26,19,32,0.18)'
               : 'inset 0 0 0 1px var(--cth-ink-300), 1px 2px 0 rgba(26,19,32,0.18)',
