@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Application, Container, Graphics, Ticker, Texture } from 'pixi.js';
 import { applyFloorFrameBudget } from './floorFrameBudget';
+import { breakEligible, cafeEligible, startCoffeeRest, tickCoffeeRest } from './coffeeGap';
 // PixiJS uses new Function() internally, blocked by Electron CSP — this patches it.
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
@@ -74,6 +75,8 @@ interface Runtime {
   run?: CoffeeRun;
   /** When the current busy stretch (working/thinking/compacting) began. */
   busySince?: number;
+  /** Seconds until the café may take this agent again (see coffeeGap.ts). */
+  coffeeRest?: number;
 }
 
 /** Only a busy stretch at least this long earns a cheer on finishing. Short
@@ -652,6 +655,7 @@ export function OfficeFloor() {
       // left mid-chat. Called when a break ends OR is interrupted by real work.
       const releaseBreak = (rt: Runtime): void => {
         if (!rt.brk) return;
+        startCoffeeRest(rt);              // no straight-back-to-coffee loop
         if (rt.brk.chat) {
           const p = runtimes.get(rt.brk.chat.partnerId);
           if (p?.brk) p.brk.chattingWith = undefined;
@@ -732,16 +736,11 @@ export function OfficeFloor() {
         });
       };
 
-      const breakEligible = (agent: Agent, rt: Runtime): boolean => {
-        if (agent.isGod || rt.brk || rt.err || rt.run || rt.cupCarryHome) return false;
-        if (agent.status !== 'idle' && agent.status !== 'success') return false;
-        return !rt.character.isSitting();   // already parked at a desk → leave it
-      };
-
       let cafeCooldown = 5;
       const updateCafeteria = (dt: number): void => {
         // Advance every in-progress break.
         for (const [id, rt] of runtimes) {
+          tickCoffeeRest(rt, dt);
           const b = rt.brk;
           if (!b) continue;
           if (b.phase === 'walking') {
@@ -792,7 +791,7 @@ export function OfficeFloor() {
         const candidates: Array<[Agent, Runtime]> = [];
         for (const agent of useStore.getState().agents) {
           const rt = runtimes.get(agent.id);
-          if (rt && breakEligible(agent, rt)) candidates.push([agent, rt]);
+          if (rt && cafeEligible(agent, rt)) candidates.push([agent, rt]);
         }
         if (candidates.length === 0) return;
         const [agent, rt] = candidates[Math.floor(Math.random() * candidates.length)];
