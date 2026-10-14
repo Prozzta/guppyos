@@ -28,7 +28,7 @@ test('trial packaging is cross-shell, portable-only, and cannot inherit release 
 });
 
 test('trial launcher never spawns a .cmd without a shell', () => {
-  const { buildTrial } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
+  const { buildTrial, npmCli } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
   const calls = [];
   let postBuildChecked = false;
   buildTrial({
@@ -49,10 +49,12 @@ test('trial launcher never spawns a .cmd without a shell', () => {
   assert.match(calls[0].args[0], /npm-cli\.js$/i);
   assert.deepEqual(calls[0].args.slice(1), ['run', 'build']);
   assert.deepEqual(calls[1].args.slice(-4), ['--win', 'portable', '--publish', 'never']);
+  assert.throws(() => npmCli({}), /npm-cli\.js path is available/);
+  assert.throws(() => npmCli({ npm_execpath: path.join(ROOT, 'node_modules', 'pnpm', 'bin', 'pnpm.cjs') }), /npm-cli\.js path is available/);
 });
 
 test('trial post-build guard allows only the exact builder by-products and trial artifacts', () => {
-  const { assertTrialArtifactEntries } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
+  const { assertTrialArtifactEntries, assertTrialArtifacts } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
   const file = (name) => ({ name, isFile: () => true, isDirectory: () => false });
   const directory = (name) => ({ name, isFile: () => false, isDirectory: () => true });
   const exactBuildListing = [
@@ -63,7 +65,14 @@ test('trial post-build guard allows only the exact builder by-products and trial
   assert.doesNotThrow(() => assertTrialArtifactEntries(exactBuildListing));
   const rejects = [
     [...exactBuildListing, file('Guppy-1.1.84-win-x64-setup.exe'), file('Guppy-1.1.84-win-x64-setup.exe.blockmap')],
+    [...exactBuildListing, file('Guppy-1.1.85-Trial-setup.exe')],
     [...exactBuildListing, file('latest.yml')],
+    [...exactBuildListing, file('latest-Trial.yml')],
+    [...exactBuildListing, file('Munder-Difflin-Trial.exe')],
+    [...exactBuildListing, directory('builder-debug.yml')],
+    [...exactBuildListing, file('win-unpacked')],
+    [...exactBuildListing, directory('win-ia32-unpacked')],
+    [...exactBuildListing, file('builder-debug.yml.bak')],
     [...exactBuildListing, file('ordinary.txt')]
   ];
   for (const listing of rejects) {
@@ -74,6 +83,7 @@ test('trial post-build guard allows only the exact builder by-products and trial
       return true;
     });
   }
+  assert.throws(() => assertTrialArtifacts(path.join(ROOT, 'test', 'missing-trial-dist-fixture')), /dist is missing/);
 });
 
 test('trial bundle assertion refuses a release-shaped or missing main bundle', (t) => {
@@ -90,6 +100,8 @@ test('trial bundle assertion refuses a release-shaped or missing main bundle', (
   assert.throws(() => assertTrialBundle(root), /does not prove __FORCE_DEV__ compiled true/);
   fs.writeFileSync(bundle, 'const FORCE_DEV_BUILD = __FORCE_DEV__; // GuppyTrialData');
   assert.throws(() => assertTrialBundle(root), /does not prove __FORCE_DEV__ compiled true/, 'an unsubstituted define is not proof');
+  fs.writeFileSync(bundle, 'const FORCE_DEV_BUILD = true; const unresolved = __FORCE_DEV__; // GuppyTrialData');
+  assert.throws(() => assertTrialBundle(root), /does not prove __FORCE_DEV__ compiled true/, 'a true compiled flag cannot mask a leftover define');
   fs.writeFileSync(bundle, "const FORCE_DEV_BUILD = typeof true !== 'undefined' && true === true;");
   assert.throws(() => assertTrialBundle(root), /lacks the fixed GuppyTrialData root/, 'the trial root is mandatory');
   fs.writeFileSync(bundle, "const FORCE_DEV_BUILD = typeof true !== 'undefined' && true === true; const root = 'GuppyTrialData';");
