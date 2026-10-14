@@ -45,7 +45,7 @@ test('trial launcher never spawns a .cmd without a shell', () => {
   assert.equal(calls[0].command, process.execPath);
   assert.match(calls[0].args[0], /npm-cli\.js$/i);
   assert.deepEqual(calls[0].args.slice(1), ['run', 'build']);
-  assert.deepEqual(calls[1].args.slice(-2), ['--publish', 'never']);
+  assert.deepEqual(calls[1].args.slice(-4), ['--win', 'portable', '--publish', 'never']);
 });
 
 test('trial bundle assertion refuses a release-shaped or missing main bundle', (t) => {

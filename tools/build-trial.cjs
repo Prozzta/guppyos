@@ -27,7 +27,9 @@ function buildTrial({ env: baseEnv = process.env, spawn = spawnSync } = {}) {
   // Invoke npm's JavaScript CLI through this Node instead: no .cmd launcher,
   // no shell quoting, and the same package-script environment.
   run(process.execPath, [npmCli(env), 'run', 'build'], env, spawn);
-  run(process.execPath, [path.resolve(__dirname, '..', 'node_modules', 'electron-builder', 'cli.js'), '--config', 'electron-builder.trial.yml', '--publish', 'never'], env, spawn);
+  // `extends` merges the release Windows target list, so select the sole trial
+  // target on the CLI as well as in its config: never let inherited NSIS build.
+  run(process.execPath, [path.resolve(__dirname, '..', 'node_modules', 'electron-builder', 'cli.js'), '--config', 'electron-builder.trial.yml', '--win', 'portable', '--publish', 'never'], env, spawn);
 }
 
 exports.trialEnv = trialEnv;
