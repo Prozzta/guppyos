@@ -4,6 +4,8 @@ import { loadModelCatalog } from '@/store/config';
 import { startMockLoop, stopMockLoop } from '@/store/mockEvents';
 import type { HarnessConfig } from '@/store/config';
 import { DEFAULT_ORG_TRIGGER } from '@shared/triggers';
+import { floorSceneTheme, resolveProjectTheme } from '@shared/projectTheme';
+import type { ThemeId } from '@/scene/office/themeRegistry';
 import { OfficeFloor } from '@/scene/office/OfficeFloor';
 import { useHive } from '@/hooks/useHive';
 import { MemoryPanel } from '@/components/MemoryPanel';
@@ -125,9 +127,9 @@ export function App() {
       // show the voice button disabled-with-tooltip when Free Flow is on but no
       // Groq key is set (Settings keeps this in sync on save).
       useStore.getState().setHasGroqKey(!!c.groqApiKey);
-      // Mirror the active office theme so OfficeFloor renders it (gated on the
-      // tvShowOffices flag; off = always the office). Settings keeps this synced.
-      useStore.getState().setOfficeTheme(c.tvShowOffices ? (c.officeTheme ?? 'office') : 'office');
+      // Mirror this project's theme so OfficeFloor renders it. The tvShowOffices flag
+      // gates the built-in show maps only (off = the office); Settings keeps this synced.
+      useStore.getState().setOfficeTheme(floorSceneTheme(resolveProjectTheme(c, c.harnessHome), c.tvShowOffices) as ThemeId);
       // Mirror the triggers so Settings → Connections and the Command Center's
       // Triggers tab read one list, not two copies that drift — whichever surface
       // saves calls these same setters and the other repaints. No extra IPC: main

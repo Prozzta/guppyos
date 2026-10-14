@@ -14,7 +14,9 @@ import {
 } from '../../../shared/providerAutomation';
 import { DEFAULT_CONTEXT_TRIGGER, type ContextRule } from '../../../shared/triggers';
 import type { AgentProvider } from '../../../shared/agentProvider';
-import { INITIAL_GOD_PROMPT } from '../../../shared/godOrientation';
+import { godOrientationPrompt } from '../../../shared/godOrientation';
+import { resolveGodIdentity } from '../../../shared/godIdentity';
+import { projectThemeHomeKey } from '../../../shared/projectTheme';
 import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
@@ -325,6 +327,16 @@ export function useHive(config: HarnessConfig | null): void {
       godSpawning.current = true;
       useStore.getState().removeAgent(GOD_ID); // clear any stale restored entry
 
+      // God's persisted name and look win. Only a seed persisted by the blank-project
+      // creation transaction may initialize a NEW god; a presentation selection is
+      // deliberately not consulted, so a failed registry read after a theme switch
+      // still leaves Michael.
+      const reg = await window.cth.hiveRegistry().catch(() => null);
+      const creationSeed = config.harnessHome
+        ? Object.entries(config.projectThemeSeedByHive ?? {}).find(([home]) => projectThemeHomeKey(home) === projectThemeHomeKey(config.harnessHome!))?.[1]
+        : undefined;
+      const { name: godName, appearance: godAppearance } = resolveGodIdentity(reg?.agents?.[GOD_ID], creationSeed);
+
       const godProvider = config.godProvider ?? 'claude';
       const godModel = config.godModel;
       const command = buildSpawnCommand(config, godModel, godProvider);
@@ -343,13 +355,13 @@ export function useHive(config: HarnessConfig | null): void {
         // fresh session. Without this the most important context on the floor —
         // the orchestrator's — was lost on every restart.
         resume: true,
-        hive: { id: GOD_ID, name: 'Michael', provider: godProvider, cwd: config.harnessHome!, isGod: true, role: 'orchestrator (god)' }
+        hive: { id: GOD_ID, name: godName, provider: godProvider, cwd: config.harnessHome!, isGod: true, role: 'orchestrator (god)', appearance: godAppearance }
       });
       if (cancelled) { godSpawning.current = false; return; }
       if (!res.ok) { godSpawning.current = false; useStore.getState().setGodStatus('failed'); return; }
       const god: Agent = {
         id: GOD_ID,
-        name: 'Michael',
+        name: godName,
         character: 'michael',
         accent: 'lemon',
         description: 'god — runs the floor, triages requests, escalates only critical calls to you',
@@ -392,7 +404,7 @@ export function useHive(config: HarnessConfig | null): void {
             // BOOT-REENTER-PASTE-PROOF (1.1.81): a Claude god already got its orientation as
             // Claude's initial prompt (main, on this spawn's fresh decision); typing it again
             // would orient it twice. Any other god is still oriented by typing.
-            if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);
+            if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, godOrientationPrompt(godName));
           }
         } catch (e) {
           // START-FIXES-163 (3): never swallowed again. The PTY may have died, or main

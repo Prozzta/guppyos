@@ -79,7 +79,7 @@ test('Windows: node-pty\'s CRT command line carries the "--" and the orientation
 // ─── the wiring ─────────────────────────────────────────────────────────────────────────────
 
 K.mainDecidesOnThisSpawn = (index = readSource('src/main/index.ts')) => {
-  const block = /hive\.noteSpawnPrompt\(opts\.hive\.id, promptFp, resumedSid\);\n    opts\.args = args;\n(?:    \/\/[^\n]*\n)*    if \(opts\.hive\.isGod\) \{\n      const g = withGodOrientationArg\(args, !didResume\);\n      opts\.args = g\.args;\n      orientationOnArgv = g\.onArgv;\n/;
+  const block = /hive\.noteSpawnPrompt\(opts\.hive\.id, promptFp, resumedSid\);\n    opts\.args = args;\n(?:    \/\/[^\n]*\n)*    if \(opts\.hive\.isGod\) \{\n      const g = withGodOrientationArg\(args, !didResume, opts\.hive\.name\);\n      opts\.args = g\.args;\n      orientationOnArgv = g\.onArgv;\n/;
   assert.match(index, block, 'MAIN ADDS IT AFTER THIS SPAWN\'S RESUME DECISION, FOR A FRESH GOD ONLY');
   const claudeBlock = index.slice(index.indexOf('  if (opts.hive && claudeProvider) {'), index.indexOf('  if (opts.hive && !claudeProvider) {'));
   assert.ok(claudeBlock.includes('withGodOrientationArg('), 'ONLY IN THE CLAUDE BLOCK');
@@ -89,10 +89,10 @@ K.mainDecidesOnThisSpawn = (index = readSource('src/main/index.ts')) => {
 test('main: added in spawnAgentCore\'s Claude block after the resume decision, god only, and reported back', () => K.mainDecidesOnThisSpawn());
 
 K.rendererDoesNotTypeItTwice = (hiveSrc = readSource('src/renderer/src/hooks/useHive.ts')) => {
-  assert.match(hiveSrc, /if \(!res\.orientationOnArgv\) await submitBootPrompt\(GOD_ID, INITIAL_GOD_PROMPT\);/, 'THE RENDERER TYPES IT ONLY WHEN MAIN DID NOT PUT IT ON ARGV');
-  assert.equal(hiveSrc.split('submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT)').length - 1, 1);
+  assert.match(hiveSrc, /if \(!res\.orientationOnArgv\) await submitBootPrompt\(GOD_ID, godOrientationPrompt\(godName\)\);/, 'THE RENDERER TYPES IT ONLY WHEN MAIN DID NOT PUT IT ON ARGV');
+  assert.equal(hiveSrc.split('submitBootPrompt(GOD_ID, godOrientationPrompt(godName))').length - 1, 1);
   assert.doesNotMatch(hiveSrc, /const INITIAL_GOD_PROMPT = \[/, 'one copy of the text, in shared');
-  assert.match(hiveSrc, /import \{ INITIAL_GOD_PROMPT \} from '\.\.\/\.\.\/\.\.\/shared\/godOrientation';/);
+  assert.match(hiveSrc, /import \{ godOrientationPrompt \} from '\.\.\/\.\.\/\.\.\/shared\/godOrientation';/);
 };
 test('renderer: a Claude god is not typed at; any other god still is', () => K.rendererDoesNotTypeItTwice());
 
@@ -112,7 +112,7 @@ K.installerResultIsMarked = (index = readSource('src/main/index.ts')) => {
 test('main: the missing-CLI installer\'s spawn result says installer:true', () => K.installerResultIsMarked());
 
 K.noBootTypingIntoInstaller = (hiveSrc = readSource('src/renderer/src/hooks/useHive.ts')) => {
-  const boot = hiveSrc.slice(hiveSrc.indexOf('const resumedGod = res.resumed === true;'), hiveSrc.indexOf('if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);'));
+  const boot = hiveSrc.slice(hiveSrc.indexOf('const resumedGod = res.resumed === true;'), hiveSrc.indexOf('if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, godOrientationPrompt(godName));'));
   assert.ok(boot.includes('if (res.seedPrompt) await submitBootPrompt(GOD_ID, res.seedPrompt);'), 'the seed and the orientation share one guard');
   assert.match(boot, /if \(!cancelled && !resumedGod && !res\.installer\) \{\n/, 'NOTHING IS TYPED INTO AN INSTALLER PTY');
 };
@@ -132,22 +132,22 @@ function mutateText(rel, edits, tag) {
 
 const MUTANTS = [
   { name: 'no "--": the prompt follows the flags bare', file: 'src/shared/godOrientation.ts', module: true,
-    edits: [["  out.push('--', INITIAL_GOD_PROMPT);", '  out.push(INITIAL_GOD_PROMPT);']],
+    edits: [["  out.push('--', godOrientationPrompt(godName));", '  out.push(godOrientationPrompt(godName));']],
     killer: 'freshAppendsAfterEndOfOptions', dies: /FRESH: "--" THEN THE ORIENTATION, LAST/ },
   { name: 'a resume is oriented too', file: 'src/shared/godOrientation.ts', module: true,
     edits: [['  if (!fresh) return { args: out, onArgv: false };\n', '']],
     killer: 'resumeGetsNothing', dies: /A RESUMED GOD IS NEVER RE-ORIENTED/ },
   { name: 'no strip: a relaunch stacks a second orientation', file: 'src/shared/godOrientation.ts', module: true,
-    edits: [['    if (out[i + 1] === INITIAL_GOD_PROMPT) out.splice(i, 2);\n    else i += 1;', '    i += 1;']],
+    edits: [['    if (isGodOrientation(out[i + 1])) out.splice(i, 2);\n    else i += 1;', '    i += 1;']],
     killer: 'relaunchIsIdempotent', dies: /A RELAUNCH RE-RUN CARRIES ONE ORIENTATION, NOT TWO/ },
   { name: 'main: fresh decided as "resumed"', file: 'src/main/index.ts',
-    edits: [['withGodOrientationArg(args, !didResume)', 'withGodOrientationArg(args, didResume)']],
+    edits: [['withGodOrientationArg(args, !didResume, opts.hive.name)', 'withGodOrientationArg(args, didResume, opts.hive.name)']],
     killer: 'mainDecidesOnThisSpawn', dies: /FOR A FRESH GOD ONLY/ },
   { name: 'main: the renderer is not told', file: 'src/main/index.ts',
     edits: [['...(orientationOnArgv ? { orientationOnArgv: true } : {}) };', '};']],
     killer: 'mainDecidesOnThisSpawn', dies: /THE RENDERER IS TOLD/ },
   { name: 'renderer: types the orientation anyway (god oriented twice)', file: 'src/renderer/src/hooks/useHive.ts',
-    edits: [['if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);', 'await submitBootPrompt(GOD_ID, INITIAL_GOD_PROMPT);']],
+    edits: [['if (!res.orientationOnArgv) await submitBootPrompt(GOD_ID, godOrientationPrompt(godName));', 'await submitBootPrompt(GOD_ID, godOrientationPrompt(godName));']],
     killer: 'rendererDoesNotTypeItTwice', dies: /THE RENDERER TYPES IT ONLY WHEN MAIN DID NOT PUT IT ON ARGV/ },
   { name: 'main: the installer result is returned unmarked (as 1.1.80)', file: 'src/main/index.ts',
     edits: [['      return { ...res, installer: true };\n', '      return res;\n']],

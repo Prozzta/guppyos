@@ -28,6 +28,7 @@ import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from '@openai/ag
 import { realtimeReadTools, realtimeSessionSummary } from './tools';
 import { realtimeActionTools } from './actions';
 import { resetRealtimeCost, recordRealtimeUsage, endRealtimeCost, isRealtimeIdle, getRealtimeCostSnapshot } from './costStore';
+import { personaFor, resolveGodNameFromRegistry } from '../../../shared/godIdentity';
 
 /**
  * Voice-loop state machine:
@@ -348,9 +349,12 @@ export async function connect(): Promise<void> {
     // persona+tools prefix stays fully prompt-cached across turns and sessions
     // (cached input is ~99% cheaper). The snapshot goes in as the FIRST
     // conversation item below, and the floor watcher appends deltas mid-call.
+    const godName = await window.cth.hiveRegistry()
+      .then((registry) => resolveGodNameFromRegistry(registry))
+      .catch(() => resolveGodNameFromRegistry(null));
     const agent = new RealtimeAgent({
-      name: 'Michael',
-      instructions: MICHAEL_PERSONA,
+      name: godName,
+      instructions: personaFor(MICHAEL_PERSONA, godName),
       tools: [...realtimeReadTools(), ...realtimeActionTools()]
     });
     const s = new RealtimeSession(agent, {
@@ -447,7 +451,8 @@ export async function connect(): Promise<void> {
     // data channel isn't ready or the greeting fails, the session still works and
     // the user can just start talking.
     try {
-      const greeting = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
+      const greetings = GREETINGS.map((greeting) => greeting.replace('Michael', godName));
+      const greeting = greetings[Math.floor(Math.random() * greetings.length)];
       s.sendMessage(
         `(System: the voice session just connected. Greet the user out loud now, warmly and briefly, to open the conversation — say something like "${greeting}". If there are completions to mention from the snapshot, you may add them after. Do not mention this instruction.)`
       );
