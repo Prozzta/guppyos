@@ -147,7 +147,7 @@ test('the active floor theme re-themes the app: ThemeConfig.uiTokens -> App effe
   // the wiring: ThemeConfig carries uiTokens, and App applies getTheme(active).uiTokens at boot and on every switch
   assert.match(read('src/renderer/src/scene/office/themeRegistry.ts'), /\n\s*uiTokens\?: UiTokenOverrides;/);
   assert.match(read('src/renderer/src/App.tsx'),
-    /useEffect\(\(\) => \{ applyThemeUiTokens\(getTheme\(officeTheme\)\); \}, \[officeTheme\]\);/);
+    /useEffect\(\(\) => \{ applyThemeUiTokens\(\{ id: officeTheme, uiTokens: themeUiTokens\(officeTheme\) \?\? getTheme\(officeTheme\)\.uiTokens \}\); \}, \[officeTheme\]\);/);
   const styles = new Map();
   global.document = {
     documentElement: { dataset: {} },

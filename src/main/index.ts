@@ -1,3 +1,4 @@
+import './packThemes'; // theme packs join the project-theme catalogue before any config is read
 import { app, BrowserWindow, clipboard, crashReporter, dialog, ipcMain, Menu, powerMonitor, powerSaveBlocker, safeStorage, screen, shell, Notification, utilityProcess } from 'electron';
 import { runQuitSteps, type QuitReport } from './quitTeardown';
 import { NativeMemoryWiring, toUnpacked } from './nativeMemory/mainWiring';
@@ -52,7 +53,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, ensureClaudePermissionsAccepted,
+  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -67,7 +68,7 @@ import {
   type FloorState, type StandupDecision, type StandupSkipRecord
 } from './standupDelta';
 import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde, samePath } from './fs';
-import { applyProjectHomeChange, isProjectThemeId } from '../shared/projectTheme';
+import { applyProjectHomeChange, isProjectThemeId, projectThemeHomeKey } from '../shared/projectTheme';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
 import { isInputOrigin } from '../shared/inputOrigin';
@@ -4887,10 +4888,21 @@ ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unk
 /** Renderer config is a snapshot. Keep the project-map read/merge/write in main
  *  so choices made by two windows cannot erase each other. */
 ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => {
-  const home = readConfig().harnessHome;
+  const current = readConfig(), home = current.harnessHome;
   if (!home) throw new Error('no project home is configured');
+  // Onboarding creates its home through config:ensureHome. When main saw that folder
+  // blank, the first theme choice for it is the project's creation: the same
+  // transaction as a fresh changeHome, so a pack's orchestrator seed applies.
+  // The claim is re-checked on disk when it is consumed: a home that became a
+  // project since (agents, a roster) is not created again (fail closed).
+  const key = projectThemeHomeKey(expandTilde(home));
+  if (isProjectThemeId(theme) && blankCreatedHomes.delete(key) && homeHasNoProject(home)) {
+    return writeConfig(applyProjectHomeChange(current, { mode: 'fresh', newHome: home, blankProject: true, theme }));
+  }
   return setProjectThemeForHome(home, theme);
 });
+/** Homes main itself saw blank when onboarding created them (keys); consumed by the first theme choice. */
+const blankCreatedHomes = new Set<string>();
 // v1.1.45 unit #8: set the capacity-display threshold. Invalid input throws and changes
 // nothing. A valid one takes effect LIVE: the strip is re-projected and pushed at once
 // (a presentation-only change: no domain revision moves).
@@ -4909,7 +4921,12 @@ ipcMain.handle('config:setAgentUsageDisplay', (_evt, agentId: unknown, display: 
 });
 ipcMain.handle('config:ensureHome', (_evt, path: unknown) => {
   if (typeof path !== 'string' || path.length === 0) return { ok: false, error: 'invalid path' };
-  return ensureHarnessHome(path);
+  const res = ensureHarnessHome(path);
+  // Only the latest onboarding home can be the one being created: a home onboarding
+  // abandoned (a failed finish, then another path) loses its claim here.
+  blankCreatedHomes.clear();
+  if (res.ok && res.blank && res.home) blankCreatedHomes.add(projectThemeHomeKey(res.home));
+  return { ok: res.ok, ...(res.error ? { error: res.error } : {}) };
 });
 
 // Change the harnessHome folder. Because every derived path (hive root, palace,
@@ -4925,6 +4942,8 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // outright so a dev build can never move data outside MunderDevData.
   if (DEV_ISOLATION) return { ok: false, error: 'dev build — the harness home is fixed under MUNDER_DEV=1; changeHome is disabled' };
   const mode: 'move' | 'fresh' = p.mode === 'fresh' ? 'fresh' : 'move';
+  // A home change is its own creation transaction; no onboarding claim outlives it.
+  blankCreatedHomes.clear();
   // expandTilde BEFORE resolve: both UI callers feed a folder-dialog result
   // (always absolute), but the hive picker's recents list can serve a literal
   // "~/…" persisted by a pre-#140 build — resolve() would anchor that at cwd

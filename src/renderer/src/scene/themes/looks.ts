@@ -14,7 +14,8 @@ export interface ThemeLook {
   /** The premade it was made from (seat affinity, the builder's selection). */
   presetId?: string;
   /** 'preset': still the premade's look; 'custom': chosen or changed by hand;
-   *  'captain-default': the pack's orchestrator seed for a new project. */
+   *  'captain-default': the pack's orchestrator seed look, given to any orchestrator with no stored look in
+   *  that pack (a new project's, or an existing one switched to the pack; the seed NAME stays creation-only). */
   source: 'preset' | 'custom' | 'captain-default';
   version: 1;
 }
@@ -195,6 +196,14 @@ export function lookFromRequest(builder: BuilderSpec | undefined, raw: unknown):
     if (next !== d) { d = next; used = true; }
   }
   return used ? draftToLook(d) : null;
+}
+
+/** The look an orchestrator gets on a pack floor while it has none stored there: the pack's orchestrator seed
+ *  (projectDefaults.orchestrator.appearance), marked 'captain-default'. Null when a look is stored or the seed is unusable. */
+export function orchestratorDefaultLook(builder: BuilderSpec | undefined, stored: unknown, seedAppearance: unknown): ThemeLook | null {
+  if (readLook(stored)) return null;
+  const look = lookFromRequest(builder, seedAppearance);
+  return look ? { ...look, source: 'captain-default' } : null;
 }
 
 /** The durable record of a draft. */

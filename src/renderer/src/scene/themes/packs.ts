@@ -113,6 +113,7 @@ export interface PackSummary {
   spriteRenderer: ThemeManifest['spriteRenderer'];
   builder?: ThemeManifest['builder'];
   projectDefaults?: ThemeManifest['projectDefaults'];
+  uiTokens?: ThemeManifest['uiTokens'];
 }
 
 /** The usable packs among `sources` (manifest valid, id unique and not the
@@ -130,7 +131,7 @@ export function catalogue(sources: Array<{ dir: string; files: PackFiles }>): { 
       rejected.push({ dir, diagnostics: [{ level: 'error', message: `${dir}/theme.json: the id "${m.id}" is already used by another pack.` }] });
       continue;
     }
-    packs.push({ id: m.id, label: m.label, sceneKind: m.sceneKind, dir, spriteRenderer: m.spriteRenderer, ...(m.builder ? { builder: m.builder } : {}), ...(m.projectDefaults ? { projectDefaults: m.projectDefaults } : {}) });
+    packs.push({ id: m.id, label: m.label, sceneKind: m.sceneKind, dir, spriteRenderer: m.spriteRenderer, ...(m.builder ? { builder: m.builder } : {}), ...(m.projectDefaults ? { projectDefaults: m.projectDefaults } : {}), ...(m.uiTokens ? { uiTokens: m.uiTokens } : {}) });
   }
   return { packs, rejected };
 }

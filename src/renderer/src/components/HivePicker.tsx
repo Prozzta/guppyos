@@ -3,7 +3,7 @@ import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import type { HarnessConfig } from '@/store/config';
-import { PROJECT_THEMES, type ProjectThemeId } from '@shared/projectTheme';
+import { isPackProjectTheme, projectThemes, type ProjectThemeId } from '@shared/projectTheme';
 
 export interface HivePickerProps {
   config: HarnessConfig;
@@ -197,7 +197,7 @@ function ProjectThemeChoice({ path, onCancel, onChoose }: { path: string; onCanc
     <div style={{ width: 520, maxWidth: '94vw' }}><PixelPanel variant="dialog" title="CHOOSE A PROJECT THEME" noPadding>
       <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12, color: 'var(--cth-ink-700)' }}>This choice seeds a blank project only. Existing project names and memories are never changed.</div>
-        {PROJECT_THEMES.filter((theme) => theme.id === 'office').map((theme) => <button key={theme.id} onClick={() => onChoose(theme.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, border: 'none', padding: 10, textAlign: 'left', cursor: 'pointer', background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}><span style={{ width: 24, height: 24, background: theme.swatch }} /><span><strong>{theme.label}</strong><span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-500)' }}>{theme.projectDefaults?.orchestrator?.name ?? 'Default orchestrator'} starts this project</span></span></button>)}
+        {projectThemes().filter((theme) => theme.id === 'office' || isPackProjectTheme(theme.id)).map((theme) => <button key={theme.id} onClick={() => onChoose(theme.id)} style={{ display: 'flex', alignItems: 'center', gap: 10, border: 'none', padding: 10, textAlign: 'left', cursor: 'pointer', background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}><span style={{ width: 24, height: 24, background: theme.swatch }} /><span><strong>{theme.label}</strong><span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-500)' }}>{theme.projectDefaults?.orchestrator?.name ?? 'Default orchestrator'} starts this project</span></span></button>)}
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}><PixelButton variant="secondary" size="md" onClick={onCancel}>cancel</PixelButton></div>
       </div>
     </PixelPanel></div>

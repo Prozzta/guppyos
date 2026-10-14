@@ -6,6 +6,7 @@
 // (or whose files fail to load) renders the office with a diagnostic instead.
 
 import type { Diagnostic } from './tiled';
+import { sanitizeUiTokens, type UiTokenOverrides } from '../../design/uiTokens';
 
 export const OFFICE_THEME_ID = 'office';
 
@@ -163,8 +164,8 @@ export interface ThemeManifest {
   spriteRenderer: SpriteRendererSpec;
   /** Informational: licence and provenance notes for the pack's art. */
   assets?: { license?: string; attribution?: string };
-  /** UI token values (filled by the UI-token work; validated as strings here). */
-  uiTokens?: Record<string, string>;
+  /** UI colour overrides, {light, dark} of whitelisted colour roles (design/uiTokens.ts); others are dropped. */
+  uiTokens?: UiTokenOverrides;
   builder?: BuilderSpec;
   projectDefaults?: ProjectDefaults;
   /** Idle agents' coffee runs; without it idle agents only wander and chat. */
@@ -424,10 +425,16 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
     };
   }
 
-  let uiTokens: Record<string, string> | undefined;
+  let uiTokens: UiTokenOverrides | undefined;
   if (raw.uiTokens !== undefined) {
-    if (!isObj(raw.uiTokens) || !Object.values(raw.uiTokens).every((v) => isStr(v, 80))) warn('"uiTokens" must map names to strings; ignored');
-    else uiTokens = { ...(raw.uiTokens as Record<string, string>) };
+    const clean = sanitizeUiTokens(raw.uiTokens);
+    if (!clean.light && !clean.dark) warn('"uiTokens" must be {light, dark} maps of UI colour roles to colours; ignored');
+    else {
+      uiTokens = clean;
+      const given = (['light', 'dark'] as const).reduce((n, k) => n + (isObj((raw.uiTokens as Record<string, unknown>)[k]) ? Object.keys((raw.uiTokens as Record<string, Record<string, unknown>>)[k]).length : 0), 0);
+      const kept = Object.keys(clean.light ?? {}).length + Object.keys(clean.dark ?? {}).length;
+      if (kept < given) warn(`"uiTokens": ${given - kept} entr${given - kept === 1 ? 'y is' : 'ies are'} not a UI colour role with a colour value; ignored`);
+    }
   }
   let text: Record<string, string> | undefined;
   if (raw.text !== undefined) {

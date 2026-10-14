@@ -4,6 +4,8 @@
 // and `themeProjectDefaults(id)`; applying a seed is the picker's business.
 
 import { OFFICE_THEME_ID, type ProjectDefaults, type BuilderSpec } from './manifest';
+import { registerPackThemes } from '@shared/projectTheme';
+import type { UiTokenOverrides } from '../../design/uiTokens';
 import { catalogue, finishPack, readPack, type LoadedPack, type PackSummary } from './packs';
 import { bundledPacks } from './packSources';
 import { normPath, type Diagnostic } from './tiled';
@@ -23,6 +25,7 @@ function summaries(): PackSummary[] {
     const res = catalogue([...bundledPacks().values()]);
     for (const r of res.rejected) console.warn(`[themes] pack "${r.dir}" is not usable:\n` + r.diagnostics.map((d) => `  ${d.level}: ${d.message}`).join('\n'));
     packs = res.packs;
+    registerPackThemes(packs.map((p) => ({ id: p.id, label: p.label, orchestrator: p.projectDefaults?.orchestrator })));
   }
   return packs;
 }
@@ -44,6 +47,11 @@ export function isStationPack(id: string): boolean {
  *  blank project: never apply it to a project that already has a roster. */
 export function themeProjectDefaults(id: string): ProjectDefaults | null {
   return summaries().find((p) => p.id === id)?.projectDefaults ?? null;
+}
+
+/** A theme's UI colour tokens for applyThemeUiTokens: a pack's own, else the built-in ThemeConfig's. */
+export function themeUiTokens(id: string): UiTokenOverrides | undefined {
+  return summaries().find((p) => p.id === id)?.uiTokens;
 }
 
 /** A pack's builder options (bodies, presets), or null. */
