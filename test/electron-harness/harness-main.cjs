@@ -130,6 +130,57 @@ async function bundleScenario(entry) {
       });
     }
   };
+  // Theme packs (TES foundation; upstream 90c87726's boundary): packSources.ts reads the bundled
+  // themes/ folder through Vite's import.meta.glob, which esbuild does not provide, so the module
+  // would throw at load and take every real-App scenario with it. It is faked HERE, at its own
+  // boundary: no packs (the Office), unless HARNESS_THEME_PACKS names fixture folders to bundle:
+  // [{ "dir": "<folder name>", "from": "<abs folder>", "id"?: "<theme.json id override>",
+  //    "dropPictures"?: ["<pack path>"] }]  (a dropped picture is listed but has no URL, so the
+  // pack catalogues but cannot load: the floor's invalid-pack path).
+  const themePackSources = {
+    name: 'theme-pack-sources',
+    setup(build) {
+      const fs = require('node:fs');
+      const { join: j, relative, dirname: dn } = require('node:path');
+      const { pathToFileURL } = require('node:url');
+      build.onLoad({ filter: /[\\/]scene[\\/]themes[\\/]packSources\.ts$/ }, (args) => {
+        const specs = (() => { try { return JSON.parse(process.env.HARNESS_THEME_PACKS || '[]'); } catch { return []; } })();
+        const packs = specs.map((s) => {
+          const entries = {}, pictures = [];
+          const walk = (d) => {
+            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+              const p = j(d, e.name);
+              if (e.isDirectory()) { walk(p); continue; }
+              const rel = relative(s.from, p).split('\\').join('/');
+              if (/\.(json|tmx|tsx|tmj|tsj|txt)$/.test(rel)) {
+                let text = fs.readFileSync(p, 'utf8');
+                if (rel === 'theme.json' && s.id) text = JSON.stringify({ ...JSON.parse(text), id: s.id });
+                entries[rel] = text;
+              } else if (rel.endsWith('.png')) {
+                entries[rel] = null; // listed (so map references resolve), not text
+                if (!(s.dropPictures || []).includes(rel)) pictures.push([rel, pathToFileURL(p).href]);
+              }
+            }
+          };
+          walk(s.from);
+          return { dir: s.dir, entries, pictures };
+        });
+        return {
+          contents: [
+            "import { memoryFiles } from './packs';",
+            "import { normPath } from './tiled';",
+            `const PACKS = ${JSON.stringify(packs)};`,
+            'let cache = null;',
+            'export function bundledPacks() {',
+            '  return (cache ??= new Map(PACKS.map((p) => [p.dir, { dir: p.dir, files: memoryFiles(p.entries), pictures: new Map(p.pictures.map(([k, u]) => [normPath(k), u])) }])));',
+            '}',
+          ].join('\n'),
+          loader: 'ts',
+          resolveDir: dn(args.path)
+        };
+      });
+    }
+  };
   const out = await esbuild.build({
     entryPoints: [entry],
     bundle: true,
@@ -151,7 +202,7 @@ async function bundleScenario(entry) {
     jsx: 'automatic',
     // What electron-vite defines for the renderer, so a scenario can mount the REAL App (RR-164).
     define: { 'import.meta.env': '{"DEV":false,"PROD":true,"MODE":"production"}', __APP_VERSION__: '"0.0.0-harness"' },
-    plugins: [sourceOverrides, viteAssets, cssAsStyleTag],
+    plugins: [sourceOverrides, themePackSources, viteAssets, cssAsStyleTag],
     logLevel: 'silent'
   });
   return out.outputFiles[0].text;
