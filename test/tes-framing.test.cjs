@@ -135,6 +135,34 @@ test('framedSidebarWidth: the default pane takes the TES content aspect, clamped
   assert.equal(F.framedSidebarWidth(f, 600, 900), 320);
   assert.equal(F.framedSidebarWidth(f, 4000, 300), 1200);
 });
+
+/** The real store, loaded fresh in a child process with `stored` as the saved sidebar width. */
+function storeWith(stored, steps) {
+  const script = `
+    const ls = new Map(${JSON.stringify(stored)} === null ? [] : [['cth.sidebarWidth', ${JSON.stringify(stored)}]]);
+    globalThis.window = { innerWidth: 1290, addEventListener() {}, removeEventListener() {},
+      localStorage: { getItem: (k) => (ls.has(k) ? ls.get(k) : null), setItem: (k, v) => ls.set(k, String(v)), removeItem: (k) => ls.delete(k) } };
+    globalThis.localStorage = window.localStorage;
+    const { useStore } = require(${JSON.stringify(path.join(__dirname, 'load-ts.cjs'))})('src/renderer/src/store/store.ts');
+    const seen = [];
+    const look = () => { const s = useStore.getState(); seen.push([s.sidebarWidth, s.sidebarWidthSet, ls.get('cth.sidebarWidth') ?? null]); };
+    look();
+    for (const st of ${JSON.stringify(steps)}) { if (st === 'reset') useStore.getState().resetSidebarWidth(); else useStore.getState().setSidebarWidth(st); look(); }
+    process.stdout.write(JSON.stringify(seen));`;
+  const r = require('node:child_process').spawnSync(process.execPath, ['-e', script], { cwd: ROOT, encoding: 'utf8', timeout: 120000 });
+  assert.equal(r.status, 0, r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+test('store: nothing stored is "not set" (so a fresh install gets the TES default); a stored or dragged width is set', () => {
+  // Jim's mutant: initialSidebarWidth returning 420 when nothing is stored would mark every fresh
+  // install as user-sized, and the TES default would never apply.
+  assert.deepEqual(storeWith(null, []), [[420, false, null]]);
+  for (const bad of ['', 'junk', '100', '5000']) assert.deepEqual(storeWith(bad, []), [[420, false, bad]], `stored ${JSON.stringify(bad)}`);
+  assert.deepEqual(storeWith('600', []), [[600, true, '600']]);
+  // Dragging sets it (and stores it); the splitter's double-click reset forgets it.
+  assert.deepEqual(storeWith(null, [500, 'reset']), [[420, false, null], [500, true, '500'], [420, false, null]]);
+});
 
 test('App/store wiring: a framed floor sets only the default width; a user width is kept; the office keeps 420', () => {
   const app = src('src/renderer/src/App.tsx');
