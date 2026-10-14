@@ -132,7 +132,10 @@ test('the TV-show flag gates the built-in TV maps only: a pack project shows its
   assert.match(picker, /setOfficeTheme\(floorSceneTheme\(current, next\) as ThemeId\)/);
   assert.match(picker, /setOfficeTheme\(floorSceneTheme\(id, enabled\) as ThemeId\)/);
   // the pack cards are not behind the flag: a pack is a per-project theme an existing project can pick
-  assert.match(picker, /const offered = projectThemes\(\)\.filter\(\(theme\) => enabled \|\| theme\.id === 'office' \|\| isPackProjectTheme\(theme\.id\)\);/);
+  // (the rule is shared/projectTheme's offeredProjectThemes, which voice also uses: VOICE-THEME-185)
+  assert.match(picker, /const offered = offeredProjectThemes\(enabled\);/);
+  assert.match(read('src/shared/projectTheme.ts'), /return projectThemes\(\)\.filter\(\(theme\) => tvShowOffices \|\| theme\.id === 'office' \|\| isPackProjectTheme\(theme\.id\)\);/);
+  assert.deepEqual(PT.offeredProjectThemes(false).map((t) => t.id), PT.projectThemes().filter((t) => t.id === 'office' || PT.isPackProjectTheme(t.id)).map((t) => t.id));
   assert.match(picker, /\{offered\.length > 1 && <div[^>]*>\s*\{offered\.map\(/);
   assert.doesNotMatch(picker, /\{enabled && <div/);
   assert.match(picker, /the seed NAME\) are intentionally creation-only/);
@@ -154,7 +157,8 @@ test('main reads the pack ids from the bundled manifests (validated, as the rend
   for (const f of ['HivePicker.tsx', 'OnboardingWizard.tsx']) {
     assert.match(read(`src/renderer/src/components/${f}`), /projectThemes\(\)\.filter\(\(theme\) => theme\.id === 'office' \|\| isPackProjectTheme\(theme\.id\)\)/, f);
   }
-  assert.match(read('src/renderer/src/components/OfficeThemePicker.tsx'), /projectThemes\(\)\.filter\(\(theme\) => enabled \|\| /, 'Settings: every theme with the flag on');
+  assert.match(read('src/renderer/src/components/OfficeThemePicker.tsx'), /offeredProjectThemes\(enabled\)/, 'Settings: every theme with the flag on');
+  assert.deepEqual(PT.offeredProjectThemes(true).map((t) => t.id), PT.projectThemes().map((t) => t.id), 'every theme with the flag on');
 });
 
 test('a manifest\'s uiTokens are {light, dark} colour roles; anything else is dropped with a warning', () => {
