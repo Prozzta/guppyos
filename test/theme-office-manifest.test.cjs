@@ -60,7 +60,8 @@ test('the office stays the built-in fallback: a pack can never take its id', () 
   assert.match(floor, /<OfficeScene \/>/);
   assert.match(floor, /\nfunction OfficeScene\(\) \{/, "Guppy's office floor is wrapped, not replaced");
   // and the office loader still falls back to the office for any unknown id
-  assert.match(read('src/renderer/src/scene/office/themeRegistry.ts'), /return THEMES\[id\] \?\? OFFICE_THEME;/);
+  // (own keys only, so an id like "constructor" cannot reach Object.prototype)
+  assert.match(read('src/renderer/src/scene/office/themeRegistry.ts'), /return \(Object\.hasOwn\(THEMES, id\) \? THEMES\[id\] : undefined\) \?\? OFFICE_THEME;/);
 });
 
 test('the pack floor is Guppy-native: no i18n library, no init retries, Guppy GPU wording', () => {
