@@ -1,0 +1,11 @@
+{
+ "type": "tileset",
+ "name": "tiles",
+ "tilewidth": 16,
+ "tileheight": 16,
+ "tilecount": 8,
+ "columns": 4,
+ "image": "tiles.png",
+ "imagewidth": 64,
+ "imageheight": 32
+}
