@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { useStore } from '@/store/store';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /**
  * 1:1 — "I have this agent, Michael stop sending it work."
@@ -23,6 +24,7 @@ import { useStore } from '@/store/store';
  */
 export function AgentHoldButton({ agentId }: { agentId: string }) {
   const agent = useStore((s) => s.agents.find((a) => a.id === agentId));
+  const orch = useOrchestratorName();
   const [busy, setBusy] = useState(false);
   /** Last failure, shown on the button itself. A control that silently does
    *  nothing is worse than one that says why. */
@@ -74,9 +76,9 @@ export function AgentHoldButton({ agentId }: { agentId: string }) {
       <span
         className="cth-tip cth-tip-wrap"
         data-tip={err ? err : on
-          ? `End the 1:1. Michael can hand ${agent.name} work again.`
-          : `Take ${agent.name} aside. Michael stops sending them work until you end it. Unlike the two buttons here, this does not restrain the agent: they keep running and keep answering you.`}
-        aria-label={on ? 'End the 1:1 and release this agent to Michael' : 'Take this agent aside for a 1:1'}
+          ? `End the 1:1. ${orch} can hand ${agent.name} work again.`
+          : `Take ${agent.name} aside. ${orch} stops sending them work until you end it. Unlike the two buttons here, this does not restrain the agent: they keep running and keep answering you.`}
+        aria-label={on ? `End the 1:1 and release this agent to ${orch}` : 'Take this agent aside for a 1:1'}
         style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
       >
         <Icon name={on ? 'pause' : 'play'} /> {err ? '1:1 failed' : on ? 'in 1:1' : '1:1'}

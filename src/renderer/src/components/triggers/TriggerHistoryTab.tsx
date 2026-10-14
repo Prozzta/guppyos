@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { PixelButton } from '../PixelButton';
 import type { TriggerHistoryEntry } from '@shared/triggers';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /**
  * TRIGGER HISTORY — the ledger of everything an outside party said to this hive
@@ -238,6 +239,7 @@ function ExchangeCard({
   busy: Record<string, boolean>;
   onDecide: (id: string, decision: 'approved' | 'rejected') => void;
 }) {
+  const orch = useOrchestratorName();
   const head = ex.head;
   const hasInbound = ex.msgs.some((m) => m.direction === 'inbound');
   const decision = head.decision;
@@ -249,7 +251,7 @@ function ExchangeCard({
   const tail = (() => {
     if (pending || ex.answered) return null;
     if (decision === 'rejected') return 'You turned this down. Nothing was sent to the hive.';
-    return 'No reply yet. Michael has this one.';
+    return `No reply yet. ${orch} has this one.`;
   })();
 
   return (
@@ -299,8 +301,8 @@ function ExchangeCard({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div style={{ ...uiText, fontSize: 11, lineHeight: '16px', color: 'var(--cth-ink-700)' }}>
             {pending.kind === 'directive'
-              ? 'Approve and this goes to Michael, who will put the hive to work on it. Reject and it is dropped — nothing runs.'
-              : 'Approve and Michael reads this. Reject and it is dropped — nothing runs.'}
+              ? `Approve and this goes to ${orch}, who will put the hive to work on it. Reject and it is dropped — nothing runs.`
+              : `Approve and ${orch} reads this. Reject and it is dropped — nothing runs.`}
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <PixelButton
@@ -308,7 +310,7 @@ function ExchangeCard({
               size="sm"
               disabled={!!busy[pending.id]}
               onClick={() => onDecide(pending.id, 'approved')}
-              title="Send this message through to Michael"
+              title={`Send this message through to ${orch}`}
             >
               {busy[pending.id] ? 'one sec…' : 'approve'}
             </PixelButton>
@@ -345,22 +347,24 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
-const SECTIONS: { key: Source; label: string; blurb: string }[] = [
+const sections = (orch: string): { key: Source; label: string; blurb: string }[] => [
   {
     key: 'webhook',
     label: 'Webhooks',
-    blurb: 'Everything posted to your webhook endpoints, next to what Michael sent back.'
+    blurb: `Everything posted to your webhook endpoints, next to what ${orch} sent back.`
   },
   {
     key: 'org',
     label: 'Organization',
-    blurb: 'Messages from your teammates’ clone nodes, next to what Michael sent back.'
+    blurb: `Messages from your teammates’ clone nodes, next to what ${orch} sent back.`
   }
 ];
 
 /* ──────────────────────────────── the tab ────────────────────────────────── */
 
 export function TriggerHistoryTab() {
+  const orch = useOrchestratorName();
+  const SECTIONS = sections(orch);
   const [entries, setEntries] = useState<TriggerHistoryEntry[]>([]);
   const [source, setSource] = useState<Source>('webhook');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -511,7 +515,7 @@ export function TriggerHistoryTab() {
           ) : (
             <EmptyState
               title="No webhook messages yet."
-              body={'When something posts to one of your endpoints, it lands here with Michael’s '
+              body={`When something posts to one of your endpoints, it lands here with ${orch}’s `
                 + 'reply underneath. Nothing has called in so far. Add an endpoint under Webhooks to '
                 + 'get a URL you can hand out.'}
             />

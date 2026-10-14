@@ -193,7 +193,7 @@ portable:
 linux:
   category: Development
   # The .desktop Comment; without it the AppImage would say just "Guppy" (see extraMetadata).
-  description: "Clones for you and your team, working 24/7 — a free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine."
+  description: "Boldly code where no team has coded before. Your AI crew, on duty 24/7. A free, local-first multi-agent harness that turns the CLI coding agent you already run into a clone of you, coordinating an office of agents on your machine."
   icon: build/icon.png
   target:
     - target: AppImage

@@ -7,6 +7,7 @@ import {
   type WeeklyDraft
 } from './ui';
 import { formatWeekly, nextWeeklyFireMs } from '@shared/weeklySchedule';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 /**
  * SCHEDULES — recurring auto-dispatched missions. The oldest trigger type, and
@@ -48,6 +49,7 @@ function relTime(ms: number): string {
 
 export function SchedulesSection({ onSummary }: { onSummary?: (s: string) => void }) {
   const agents = useStore((s) => s.agents);
+  const orch = useOrchestratorName();
   const [missions, setMissions] = useState<ScheduledMission[]>([]);
   const [adding, setAdding] = useState(false);
   const [mLabel, setMLabel] = useState('');
@@ -100,7 +102,7 @@ export function SchedulesSection({ onSummary }: { onSummary?: (s: string) => voi
   const whenIsUsable = !mWeekly || weeklyIsUsable(mWeekly);
 
   const targetName = (to: string) =>
-    to === 'broadcast' ? 'everyone' : to === 'god' ? 'Michael' : agents.find((a) => a.id === to)?.name ?? to;
+    to === 'broadcast' ? 'everyone' : to === 'god' ? orch : agents.find((a) => a.id === to)?.name ?? to;
 
   return (
     <>
@@ -135,7 +137,7 @@ export function SchedulesSection({ onSummary }: { onSummary?: (s: string) => voi
           <Field label="GOES TO">
             <Select value={mTo} onChange={setMTo} style={{ width: '100%' }}>
               <option value="broadcast">everyone</option>
-              <option value="god">Michael</option>
+              <option value="god">{orch}</option>
               {agents.filter((a) => !a.isGod).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </Select>
           </Field>
@@ -276,7 +278,7 @@ function MissionRow({ mission, targetName, agents, onPatch, onDelete }: {
           <Field label="GOES TO">
             <Select value={to} onChange={setTo} style={{ width: '100%' }}>
               <option value="broadcast">everyone</option>
-              <option value="god">Michael</option>
+              <option value="god">{targetName('god')}</option>
               {agents.filter((a) => !a.isGod).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </Select>
           </Field>
