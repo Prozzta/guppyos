@@ -25,7 +25,7 @@ test('Jim MUST 1: main registers the packs as its FIRST import, before normalize
   assert.ok(index.startsWith("import './packThemes';"), 'the first statement of the main entry');
   const packThemes = read('src/main/packThemes.ts');
   assert.match(packThemes, /import\.meta\.glob\('\.\.\/\.\.\/themes\/\*\/theme\.json', \{ eager: true, import: 'default' \}\)/);
-  assert.match(packThemes, /registerPackThemes\(packThemeEntries\(MANIFESTS\)\);/);
+  assert.match(packThemes, /registerPackThemes\(validatedPackThemeEntries\(MANIFESTS\)\);/);
 });
 
 test('with the neutral deck registered, main keeps its id through config normalization and the theme switch', () => {
@@ -37,14 +37,17 @@ test('with the neutral deck registered, main keeps its id through config normali
     const C = loadTs('src/main/config.ts');
     const home = path.join(tmp, 'deck-project');
     const key = PT.projectThemeHomeKey(home);
-    // Before registration an unknown id is dropped (the step-3 hazard this join closes).
+    // Before registration the pack id is kept but does not resolve: the floor falls back (Jim's join SHOULD: an
+    // unregistered pack-shaped id survives normalization; tes-join-should.test.cjs covers it).
     C.writeConfig({ harnessHome: home, officeThemeByHive: { [key]: 'neutral-deck' } });
-    assert.equal(C.readConfig().officeThemeByHive?.[key], undefined, 'unregistered: dropped');
+    assert.equal(C.readConfig().officeThemeByHive?.[key], 'neutral-deck', 'unregistered pack id: kept');
+    assert.equal(PT.resolveProjectTheme(C.readConfig(), home), 'office', 'unregistered pack id: the floor falls back');
     // What main/packThemes.ts does with the bundled manifests.
-    PT.registerPackThemes(PT.packThemeEntries({ '../../themes/neutral-deck/theme.json': MANIFEST }));
+    const { validatedPackThemeEntries } = loadTs('src/main/packThemeEntries.ts');
+    PT.registerPackThemes(validatedPackThemeEntries({ '../../themes/neutral-deck/theme.json': MANIFEST }));
     assert.equal(PT.isPackProjectTheme('neutral-deck'), true);
-    C.writeConfig({ harnessHome: home, officeThemeByHive: { [key]: 'neutral-deck', [PT.projectThemeHomeKey(path.join(tmp, 'x'))]: 'ghost-deck' } });
-    assert.deepEqual(C.readConfig().officeThemeByHive, { [key]: 'neutral-deck' }, 'registered: kept; unknown: still dropped');
+    C.writeConfig({ harnessHome: home, officeThemeByHive: { [key]: 'neutral-deck', [PT.projectThemeHomeKey(path.join(tmp, 'x'))]: 'Ghost Deck!' } });
+    assert.deepEqual(C.readConfig().officeThemeByHive, { [key]: 'neutral-deck' }, 'registered: kept; a garbage id: still dropped');
     C.setProjectThemeForHome(home, 'office');
     assert.equal(C.readConfig().officeThemeByHive?.[key], 'office');
     C.setProjectThemeForHome(home, 'neutral-deck');

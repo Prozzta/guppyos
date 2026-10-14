@@ -138,15 +138,16 @@ test('the TV-show flag gates the built-in TV maps only: a pack project shows its
   assert.match(picker, /the seed NAME\) are intentionally creation-only/);
 });
 
-test('main reads the pack ids from the bundled manifests (shape only) before any config is read', () => {
-  assert.deepEqual(PT.packThemeEntries({
+test('main reads the pack ids from the bundled manifests (validated, as the renderer does) before any config is read', () => {
+  // Shape alone is not enough: an id-and-label manifest the renderer would reject is not registered.
+  assert.deepEqual(loadTs('src/main/packThemeEntries.ts').validatedPackThemeEntries({
     'a/theme.json': { id: 'deck-one', label: 'Deck One', projectDefaults: { orchestrator: SEED } },
     'b/theme.json': { label: 'no id' },
     'c/theme.json': null
-  }), [{ id: 'deck-one', label: 'Deck One', orchestrator: SEED }]);
+  }), []);
   const main = read('src/main/packThemes.ts');
   assert.match(main, /import\.meta\.glob\('\.\.\/\.\.\/themes\/\*\/theme\.json', \{ eager: true, import: 'default' \}\)/);
-  assert.match(main, /registerPackThemes\(packThemeEntries\(MANIFESTS\)\)/);
+  assert.match(main, /registerPackThemes\(validatedPackThemeEntries\(MANIFESTS\)\)/);
   assert.match(read('src/main/index.ts'), /^import '\.\/packThemes';/, 'the first import of main');
   const renderer = read('src/renderer/src/main.tsx');
   assert.ok(renderer.indexOf('registerBundledProjectThemes();') < renderer.indexOf('createRoot('), 'registered before the first render');
