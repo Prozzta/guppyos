@@ -11,6 +11,21 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.86] — 2026-10-14
+
+**The app icon is Speck, and on a TES floor the app names TES's orchestrator.** Rollback: 1.1.85
+(reinstall).
+
+### Changed
+
+- **The app icon is Speck,** TES's look-builder preset, in place of Michael: the window, taskbar,
+  installer, toolbar logo and favicon. He is rendered from the pack's own art, pixel for pixel.
+- **On a TES floor, the app's text names TES's orchestrator.** The command center, task board,
+  voice controls, schedules, trigger history, setup, settings and onboarding used to say
+  "Michael"; on a theme-pack floor they now use the orchestrator's name. The Office reads exactly
+  as before.
+- **New tagline:** "Boldly code where no team has coded before. Your AI crew, on duty 24/7."
+
 ## [1.1.85] — 2026-10-14
 
 **Theme packs, starting with TES: a project can have its own floor, chosen per project, and

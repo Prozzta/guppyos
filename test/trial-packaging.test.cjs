@@ -60,11 +60,11 @@ test('trial post-build guard allows only the exact builder by-products and trial
   const exactBuildListing = [
     directory('win-unpacked'),
     file('builder-debug.yml'),
-    file('Guppy-1.1.85-Trial-1.1.85-win-x64-portable.exe')
+    file('Guppy-1.1.85-Trial-1.1.86-win-x64-portable.exe')
   ];
   assert.doesNotThrow(() => assertTrialArtifactEntries(exactBuildListing));
   const rejects = [
-    [...exactBuildListing, file('Guppy-1.1.85-win-x64-setup.exe'), file('Guppy-1.1.85-win-x64-setup.exe.blockmap')],
+    [...exactBuildListing, file('Guppy-1.1.86-win-x64-setup.exe'), file('Guppy-1.1.86-win-x64-setup.exe.blockmap')],
     [...exactBuildListing, file('Guppy-1.1.85-Trial-setup.exe')],
     [...exactBuildListing, file('latest.yml')],
     [...exactBuildListing, file('latest-Trial.yml')],
