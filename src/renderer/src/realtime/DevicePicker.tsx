@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { useRealtimeMichael } from './session';
+import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 
 interface AudioDevice {
   deviceId: string;
@@ -59,6 +60,7 @@ const selectStyle: React.CSSProperties = {
 
 export function RealtimeDevicePicker(): React.ReactElement {
   const { deviceId, setDeviceId, outputDeviceId, setOutputDeviceId } = useRealtimeMichael();
+  const orch = useOrchestratorName();
   const [mics, setMics] = useState<AudioDevice[]>([]);
   const [speakers, setSpeakers] = useState<AudioDevice[]>([]);
   /** True once at least one device exposes a real label ⇒ mic permission granted. */
@@ -123,7 +125,7 @@ export function RealtimeDevicePicker(): React.ReactElement {
       {!labelled && (
         <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
           Device names appear after you first start a voice session and grant mic access.
-          The microphone choice applies the next time Michael connects; the speaker switches live.
+          The microphone choice applies the next time {orch} connects; the speaker switches live.
         </span>
       )}
     </div>

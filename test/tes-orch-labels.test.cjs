@@ -53,6 +53,9 @@ const SITES = {
   'src/renderer/src/components/triggers/TriggerHistoryTab.tsx': ['`No reply yet. ${orch} has this one.`', 'next to what ${orch} sent back.', 'title={`Send this message through to ${orch}`}'],
   'src/renderer/src/components/triggers/SchedulesSection.tsx': ["to === 'god' ? orch :", '<option value="god">{orch}</option>', "<option value=\"god\">{targetName('god')}</option>"],
   'src/renderer/src/components/OnboardingWizard.tsx': ['orchestratorDisplayName(projectTheme)', '`${orch.toUpperCase()} IS YOUR CLONE`', "This only sets {orch}'s engine.", 'providerPreset(godProvider).label, orch)'],
+  'src/renderer/src/realtime/CompletionToast.tsx': ['<Icon name="bell" /> {orch} · completed'],
+  'src/renderer/src/realtime/session.ts': ['`microphone permission denied — allow mic access to talk to ${orch}`', 'micFriendly(msg, orch)', 'orchestratorDisplayName(floor.officeTheme, floor.agents.find((a) => a.isGod)?.name)'],
+  'src/renderer/src/realtime/DevicePicker.tsx': ['applies the next time {orch} connects;'],
   'src/renderer/src/components/SettingsModal.tsx': ["Triggers tab of ${orch}'s Command Center.`", '{webhookApiDoc(orch)}', '`me and ${orch}`', 'Realtime {orch}', "Reset wipes {orch}'s memories,"]
 };
 
@@ -60,12 +63,28 @@ test('every orchestrator label takes the floor\'s name; no UI text hard-codes "M
   for (const [file, needles] of Object.entries(SITES)) {
     const src = read(file);
     for (const n of needles) assert.ok(src.includes(n), `${file}: ${n}`);
-    if (file !== 'src/renderer/src/components/OnboardingWizard.tsx') assert.match(src, /useOrchestratorName\(\)/, file);
-    // Outside comments, "Michael" survives only inside identifiers (MichaelBooting, RealtimeMichael…).
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
-    const left = code.split(/\r?\n/).filter((l) => /(?<![A-Za-z])Michael(?![A-Za-z])/.test(l));
-    assert.deepEqual(left, [], file);
+    if (!/OnboardingWizard|session\.ts/.test(file)) assert.match(src, /useOrchestratorName\(\)/, file);
   }
+  // The whole renderer: outside comments, "Michael" survives only inside identifiers
+  // (MichaelBooting, RealtimeMichael…), in the Office floor's own scene (scene/office: a
+  // pack floor renders StationFloor instead), and in the voice persona and greeting, which
+  // are model text and get the god's name swapped in at connect.
+  const MODEL_TEXT = [/^"Hey there, Michael here/, /^`You are Michael — the voice of the orchestrator/, /greeting\.replace\('Michael', godName\)/];
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(d, e.name)) : /\.tsx?$/.test(e.name) ? [path.join(d, e.name)] : []);
+  const files = walk(path.join(root, 'src/renderer'));
+  assert.ok(files.length > 100, 'scanned the renderer');
+  const left = [];
+  for (const f of files) {
+    const rel = path.relative(root, f).split(path.sep).join('/');
+    if (rel.startsWith('src/renderer/src/scene/office/')) continue;
+    const code = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+    for (const l of code.split(/\r?\n/)) {
+      const t = l.trim();
+      if (/(?<![A-Za-z])Michael(?![A-Za-z])/.test(t) && !MODEL_TEXT.some((re) => re.test(t))) left.push(`${rel}: ${t.slice(0, 100)}`);
+    }
+  }
+  assert.deepEqual(left, []);
   const hook = read('src/renderer/src/hooks/useOrchestratorName.ts');
   assert.match(hook, /orchestratorDisplayName\(floor, godName\)/);
   assert.match(hook, /s\.officeTheme/);
