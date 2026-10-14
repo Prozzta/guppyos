@@ -34,7 +34,9 @@ shown in a note on the floor.
     "bodies": [{ "id": "light", "label": "Light", "column": 0 }],
     "presets": [{ "id": "pilot", "label": "Pilot", "bodyId": "light", "seat": "Helm" }]   // seat: this preset's station first
   },
-  "projectDefaults": { "orchestrator": { "name": "Lead", "appearance": { "bodyId": "light" } } }
+  "projectDefaults": { "orchestrator": { "name": "Lead", "appearance": { "bodyId": "light" } } },
+  "uiTokens": { "light": { "lemon": "#E3A91A" }, "dark": { "lemon": "#F2BE3A" } },   // optional UI colour roles
+  "text": { "lines": "lines.json" }   // optional data files (no code)
 }
 ```
 
@@ -69,3 +71,25 @@ stacking:
 
 Tile objects can override their placement with the properties
 `depth: below | above | sort` and `sortOffset`.
+
+## A pack as a project theme
+
+Every valid pack is also a project theme. The new-project chooser (hive picker and onboarding) and the theme switch
+list it beside the Office. Main reads the bundled manifests at start-up, so it accepts the pack id for the per-project
+theme.
+
+- **Seed.** A blank project created with a pack is seeded once from its `projectDefaults.orchestrator`: the name and
+  look of the first orchestrator. An existing project is never renamed.
+- **Look.** On a pack floor, an orchestrator with no stored look there gets the seed's look once, stored as
+  `appearanceByTheme[<pack id>]` with source `captain-default`. It can then be edited like any look. Looks are kept
+  across a respawn and a switch to the Office and back.
+- **Colours.** `uiTokens` holds `{light, dark}` maps of the whitelisted UI colour roles in
+  `src/renderer/src/design/uiTokens.ts`, with hex or rgb(a) values. Anything else is dropped with a warning. They
+  apply app-wide while the pack is the active theme.
+
+## Packs in this folder
+
+- `tes/`: the TES bridge, a local pack. Its map, tilesets, character sheet and licence are verbatim copies of the
+  Human's files. `SOURCES.json` records each source path and sha256, and `tes/.gitattributes` keeps their bytes. Never
+  edit the copies: change the source and copy again. The art is under the pack's `LICENSE-ARTWORK.md`. Whether this
+  pack is offered upstream is the Human's decision.

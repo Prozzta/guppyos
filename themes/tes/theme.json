@@ -1,0 +1,464 @@
+{
+  "$comment": "TES bridge theme pack (local). Data only: the Human's bridge map and art (copied verbatim, hashes in SOURCES.json), Palette A UI tokens, the builder's bodies and premades, and bubble lines.",
+  "schema": 1,
+  "id": "tes",
+  "label": "TES",
+  "sceneKind": "stations",
+  "map": "map/ToSBridge.tmx",
+  "palette": {
+    "background": "#14161b"
+  },
+  "stations": {
+    "layer": "Stuff",
+    "entrance": "Spawn",
+    "captain": "Captain",
+    "seatOrder": [
+      "Captain",
+      "Speck1",
+      "Speck2",
+      "Chair1",
+      "Chair2",
+      "Chair3",
+      "Chair4",
+      "Chair5",
+      "Chair6"
+    ],
+    "seats": {
+      "Captain": {
+        "facing": "down",
+        "role": "command"
+      },
+      "Speck1": {
+        "facing": "down",
+        "role": "helm"
+      },
+      "Speck2": {
+        "facing": "down",
+        "role": "navigation"
+      },
+      "Chair1": {
+        "facing": "up"
+      },
+      "Chair2": {
+        "facing": "up"
+      },
+      "Chair3": {
+        "facing": "left"
+      },
+      "Chair4": {
+        "facing": "left"
+      },
+      "Chair5": {
+        "facing": "right"
+      },
+      "Chair6": {
+        "facing": "right"
+      }
+    }
+  },
+  "navigation": {
+    "walkGrid": 4
+  },
+  "spriteRenderer": {
+    "kind": "sheet",
+    "sheet": "art/characters-sheet (1).png",
+    "frameWidth": 32,
+    "frameHeight": 32,
+    "rows": {
+      "down": 0,
+      "up": 1,
+      "left": 4,
+      "right": 6,
+      "sitDown": 2,
+      "sitUp": 3,
+      "sitLeft": 5,
+      "sitRight": 7
+    }
+  },
+  "assets": {
+    "license": "Prozzta Artwork Commercial License (LICENSE-ARTWORK.md in this pack): use only within Munder Difflin and its forks.",
+    "attribution": "Artwork by Prozzta"
+  },
+  "uiTokens": {
+    "light": {
+      "cream-50": "#F2F3F8",
+      "cream-100": "#E8EAF1",
+      "cream-200": "#DADDE8",
+      "cream-300": "#C5C7DD",
+      "paper-100": "#F8F9FC",
+      "paper-200": "#E3E6EE",
+      "ink-900": "#1B1A2A",
+      "ink-700": "#34374D",
+      "ink-500": "#565C72",
+      "ink-300": "#7E849A",
+      "ink-100": "#CDD1DD",
+      "on-accent": "#1B1A2A",
+      "lemon": "#E3A91A",
+      "lemon-light": "#F7E7AE",
+      "lemon-strong": "#A87406",
+      "status-idle": "#9A9FB0",
+      "status-working": "#A87A06",
+      "status-typing": "#C98F12",
+      "status-looping": "#E0761E",
+      "select": "#F9E39A",
+      "select-strong": "#E3A91A",
+      "select-line": "rgba(227, 169, 26, 0.10)",
+      "hatch": "rgba(136, 163, 188, 0.22)",
+      "hatch-strong": "rgba(136, 163, 188, 0.40)",
+      "track": "#DADDE8",
+      "term-yellow": "#8F6200",
+      "term-yellow-bright": "#A87406",
+      "warn": "#8F6200",
+      "warn-light": "#F7E7AE",
+      "warn-mark": "#8F6200",
+      "amber-light": "#F7E7AE"
+    },
+    "dark": {
+      "cream-50": "#15151E",
+      "cream-100": "#1B1B26",
+      "cream-200": "#242433",
+      "cream-300": "#2F3042",
+      "paper-100": "#181822",
+      "paper-200": "#20202D",
+      "ink-900": "#DCDEE6",
+      "ink-700": "#B2B6C3",
+      "ink-500": "#9399AA",
+      "ink-300": "#7A8094",
+      "ink-100": "#3A3C4F",
+      "on-accent": "#15151E",
+      "lemon": "#F2BE3A",
+      "lemon-light": "#3A3017",
+      "lemon-strong": "#F2BE3A",
+      "status-idle": "#6E7284",
+      "status-working": "#F2BE3A",
+      "status-typing": "#D9A52E",
+      "status-looping": "#F08A3A",
+      "select": "#3E3826",
+      "select-strong": "#F2BE3A",
+      "select-line": "rgba(242, 190, 58, 0.10)",
+      "hatch": "rgba(136, 163, 188, 0.07)",
+      "hatch-strong": "rgba(136, 163, 188, 0.12)",
+      "track": "#242433",
+      "term-yellow": "#F2BE3A",
+      "term-yellow-bright": "#FFD541",
+      "warn": "#F2BE3A",
+      "warn-light": "#3A3017",
+      "warn-mark": "#F2BE3A",
+      "amber-light": "#3A3017"
+    }
+  },
+  "builder": {
+    "outline": "#242234",
+    "eyes": "#ffffff",
+    "swatches": {
+      "skin": {
+        "porcelain": "#fbe3d3",
+        "fair": "#fad6b8",
+        "light": "#eebf93",
+        "medium": "#c98e62",
+        "tan": "#a86b44",
+        "brown": "#8a5638",
+        "deep": "#7b4d34",
+        "green": "#8fbf6a"
+      },
+      "shirt": {
+        "command gold": "#a07a1c",
+        "science blue": "#285cc4",
+        "operations red": "#c0302c"
+      },
+      "hair": {
+        "black": "#1f1d1d",
+        "brown": "#71413b",
+        "blonde": "#e3c070",
+        "red": "#b0442a",
+        "grey": "#8d8d93",
+        "white": "#ececec"
+      }
+    },
+    "customColours": true,
+    "bodies": [
+      {
+        "id": "velcan-male",
+        "label": "Velcan male",
+        "column": 0,
+        "parts": {
+          "skin": {
+            "main": "#fad6b8",
+            "shades": [
+              "#fad6b8",
+              "#f5a097",
+              "#e86a73"
+            ]
+          },
+          "shirt": {
+            "main": "#285cc4",
+            "shades": [
+              "#285cc4"
+            ]
+          },
+          "hair": {
+            "main": "#242234",
+            "byShape": true
+          }
+        },
+        "portrait": {
+          "crop": [
+            7,
+            4,
+            18,
+            28
+          ]
+        }
+      },
+      {
+        "id": "human-male",
+        "label": "Human male",
+        "column": 2,
+        "parts": {
+          "skin": {
+            "main": "#fad6b8",
+            "shades": [
+              "#fad6b8",
+              "#f5a097",
+              "#e86a73"
+            ]
+          },
+          "shirt": {
+            "main": "#285cc4",
+            "shades": [
+              "#285cc4"
+            ]
+          },
+          "hair": {
+            "main": "#71413b",
+            "shades": [
+              "#71413b",
+              "#bb7547"
+            ]
+          }
+        },
+        "portrait": {
+          "crop": [
+            7,
+            4,
+            18,
+            28
+          ]
+        }
+      },
+      {
+        "id": "human-female",
+        "label": "Human female",
+        "column": 1,
+        "parts": {
+          "skin": {
+            "main": "#fad6b8",
+            "shades": [
+              "#fad6b8",
+              "#f5a097",
+              "#e86a73"
+            ]
+          },
+          "shirt": {
+            "main": "#285cc4",
+            "shades": [
+              "#285cc4"
+            ]
+          },
+          "hair": {
+            "main": "#71413b",
+            "shades": [
+              "#71413b",
+              "#bb7547"
+            ]
+          }
+        },
+        "portrait": {
+          "crop": [
+            7,
+            1,
+            18,
+            28
+          ]
+        }
+      }
+    ],
+    "presets": [
+      {
+        "id": "cpt-kerk",
+        "label": "Cpt Kerk",
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#fad6b8",
+          "shirt": "#a07a1c",
+          "hair": "#71413b"
+        }
+      },
+      {
+        "id": "speck",
+        "label": "Speck",
+        "bodyId": "velcan-male",
+        "colors": {
+          "skin": "#fbe3d3",
+          "shirt": "#285cc4",
+          "hair": "#1f1d1d"
+        }
+      },
+      {
+        "id": "mccey",
+        "label": "McCey",
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#fad6b8",
+          "shirt": "#285cc4",
+          "hair": "#8d8d93"
+        }
+      },
+      {
+        "id": "uhera",
+        "label": "UHera",
+        "bodyId": "human-female",
+        "colors": {
+          "skin": "#7b4d34",
+          "shirt": "#c0302c",
+          "hair": "#1f1d1d"
+        }
+      },
+      {
+        "id": "jackov",
+        "label": "Jackov",
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#fbe3d3",
+          "shirt": "#a07a1c",
+          "hair": "#1f1d1d"
+        },
+        "seat": "Speck2"
+      },
+      {
+        "id": "sele",
+        "label": "Sele",
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#c98e62",
+          "shirt": "#a07a1c",
+          "hair": "#1f1d1d"
+        },
+        "seat": "Speck1"
+      },
+      {
+        "id": "scetty",
+        "label": "Scetty",
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#fad6b8",
+          "shirt": "#c0302c",
+          "hair": "#71413b"
+        }
+      },
+      {
+        "id": "nurse-chepel",
+        "label": "Nurse Chepel",
+        "bodyId": "human-female",
+        "colors": {
+          "skin": "#fbe3d3",
+          "shirt": "#285cc4",
+          "hair": "#e3c070"
+        }
+      },
+      {
+        "id": "yeoman-rend",
+        "label": "Yeoman Rend",
+        "bodyId": "human-female",
+        "colors": {
+          "skin": "#eebf93",
+          "shirt": "#a07a1c",
+          "hair": "#e3c070"
+        }
+      }
+    ],
+    "defaults": {
+      "bodyId": "human-male"
+    },
+    "sample": {
+      "bodyId": "human-male",
+      "colors": {
+        "skin": "#fad6b8",
+        "shirt": "#a07a1c",
+        "hair": "#71413b"
+      },
+      "presetId": "cpt-kerk"
+    }
+  },
+  "projectDefaults": {
+    "orchestrator": {
+      "name": "Cpt Kerk",
+      "appearance": {
+        "bodyId": "human-male",
+        "colors": {
+          "skin": "#fad6b8",
+          "shirt": "#a07a1c",
+          "hair": "#71413b"
+        },
+        "presetId": "cpt-kerk"
+      }
+    }
+  },
+  "coffee": {
+    "brewAt": [
+      [
+        462,
+        366
+      ],
+      [
+        478,
+        366
+      ]
+    ],
+    "mugs": {
+      "Captain": [
+        474,
+        176
+      ],
+      "Speck1": [
+        436,
+        233
+      ],
+      "Speck2": [
+        468,
+        233
+      ],
+      "Chair1": [
+        385,
+        123
+      ],
+      "Chair2": [
+        446,
+        110
+      ],
+      "Chair3": [
+        345,
+        180
+      ],
+      "Chair4": [
+        345,
+        259
+      ],
+      "Chair5": [
+        578,
+        186
+      ],
+      "Chair6": [
+        578,
+        263
+      ]
+    },
+    "cooldown": [
+      180,
+      300
+    ]
+  },
+  "text": {
+    "lines": "lines.json"
+  }
+}

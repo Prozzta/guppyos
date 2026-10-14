@@ -1,0 +1,482 @@
+{
+  "$comment": "Bubble lines for the TES pack, generated from tos-lines.js (see SOURCES.json). Categories as in the bridge viewer.",
+  "lines": {
+    "water": [
+      "watering the hydroponics 🌿",
+      "the hydro bay needs a drink",
+      "these ferns are Velcan",
+      "the plants respond to sensors",
+      "Sele says talk to them",
+      "hydroponics check, deck 7",
+      "growing faster than fribbles",
+      "a little water, Mr Sele?"
+    ],
+    "window": [
+      "checking the viewscreen 🍃",
+      "just watching the stars",
+      "nice nebula today",
+      "nothing on long range scans",
+      "space: the big unknown",
+      "starboard view is lovely",
+      "a bit of recycled air",
+      "warp streaks never get old"
+    ],
+    "dispenser": [
+      "getting some water 💧",
+      "hydration, Fleet regs",
+      "staying sharp for red alert",
+      "H2O, synthesized fresh",
+      "the food slot does water too",
+      "Velcans drink less, you know",
+      "refilling before my shift",
+      "a glass of Earth water"
+    ],
+    "fridge": [
+      "anything good in stores?",
+      "who took my plomak soup?",
+      "just looking…",
+      "chicken soup, again?",
+      "is this Saurean brandy?",
+      "someone labelled it Romalan",
+      "that ale is NOT regulation",
+      "the food slot ate my order"
+    ],
+    "shelf": [
+      "checking the library tapes 📚",
+      "any new star charts?",
+      "so much good data",
+      "reading up on Klangons",
+      "Fleet manual, vol. 9",
+      "three-d chess, chapter 2",
+      "computer, locate tape 47",
+      "cataloguing alien flora"
+    ],
+    "bin": [
+      "into the disposal unit 🗑️",
+      "console cleanup day",
+      "tidying up the station",
+      "recycling old data tapes",
+      "beaming out the clutter",
+      "fribble fur everywhere…",
+      "shipshape and Fleet-fit",
+      "clearing the ready room"
+    ],
+    "smoke": [
+      "the bridge runs itself 🚬",
+      "captain's break.",
+      "thinking big thoughts 🚬",
+      "Mr Speck, you have the conn",
+      "I DECLARE… shore leave",
+      "captain's log, supplemental",
+      "command is lonely, McCey",
+      "a moment on the observation deck"
+    ],
+    "suckUp": [
+      "{done} missions done, Captain!",
+      "{done} tasks logged, sir. 🥺",
+      "brilliant tactics, Captain!",
+      "I was JUST plotting that course!",
+      "love the gold tunic, Captain",
+      "all stations ready, sir! 💪",
+      "best captain in the fleet.",
+      "aye aye, sir! right away!",
+      "your log entries inspire us",
+      "we'd follow you anywhere, sir"
+    ],
+    "gossip": [
+      "has he ever read a manual?",
+      "another 'briefing' for an hour…",
+      "he beams down with EVERYONE",
+      "he took credit for MY scan",
+      "the shirt rips every mission",
+      "he monologued at a computer",
+      "third green alien this month",
+      "the redshirts never come back",
+      "he talks… in… pauses…",
+      "he cheated the no-win test"
+    ],
+    "cheer": [
+      "done! ✔",
+      "mission accomplished",
+      "that's a wrap",
+      "warp one, go 🚀",
+      "another one logged",
+      "intriguing. done.",
+      "logged and filed",
+      "shields holding, task done",
+      "engage!",
+      "beam it over",
+      "all systems green"
+    ],
+    "brewing": [
+      "brewing a fresh one ☕",
+      "food slot: coffee, black ☕",
+      "replicating a cup ☕",
+      "computer, coffee. hot. ☕",
+      "synthesizing caffeine ☕",
+      "coffee, Fleet issue ☕",
+      "one cup, warp strength ☕",
+      "requesting coffee ☕"
+    ],
+    "refill": [
+      "a quick refill ☕",
+      "top it up, food slot ☕",
+      "one more for the shift ☕",
+      "refill, same specs ☕",
+      "recharging the mug ☕",
+      "again, computer ☕",
+      "second cup, red alert ☕",
+      "refuelling ☕"
+    ],
+    "washing": [
+      "washing the mug",
+      "sonic shower for the mug",
+      "decontaminating my cup",
+      "scrubbing fribble fur off",
+      "sterilizing per regs",
+      "clean mug, clean ship",
+      "McCey says wash it twice",
+      "rinsing the crystals out"
+    ],
+    "noCleanMugs": [
+      "no clean mugs left…",
+      "all mugs in the brig…",
+      "mug supply: zero, Captain",
+      "sensors detect no mugs",
+      "who replicated all the mugs?",
+      "the mugs… are gone, Cap",
+      "mug shortage on deck 5",
+      "Scetty, I need more mugs!"
+    ],
+    "coffee": [
+      "mmm, fresh one ☕",
+      "the good beans today",
+      "just one more cup",
+      "replicator never gets it right…",
+      "intriguing. needs sugar.",
+      "it's coffee, Cap, but…",
+      "tastes like warp crystals",
+      "better than Klangon coffee",
+      "warp core for the brain",
+      "Scetty brewed this one",
+      "sensors say: still hot"
+    ],
+    "pinTask": [
+      "pinning a new task 📌",
+      "new orders from the Fleet 📌",
+      "logging a new mission 📌",
+      "posting to the duty roster",
+      "a new assignment, sir",
+      "adding it to the log",
+      "mission brief posted 📌",
+      "priority one, pinned"
+    ],
+    "takeTask": [
+      "grabbing my task",
+      "I'll take this one, sir",
+      "assignment accepted",
+      "on my way, Captain",
+      "reporting for duty",
+      "this one's mine",
+      "laying in a course",
+      "acknowledged. engaging."
+    ],
+    "archiveTask": [
+      "filing it as done ✔",
+      "logging it complete ✔",
+      "into the ship's records ✔",
+      "mission log: closed",
+      "archived, stardate today",
+      "filed with the Fleet ✔",
+      "entered in the log",
+      "records updated, sir"
+    ],
+    "blockedTask": [
+      "this one is stuck 😤",
+      "tractor beamed in place 😤",
+      "dead in the water 😤",
+      "blocked. most unlogical.",
+      "shields up: can't get in",
+      "we're caught in a web",
+      "need Fleet clearance",
+      "stuck in a time loop 😤"
+    ],
+    "working": [
+      "running the analysis",
+      "sensors scanning…",
+      "calculating, Captain",
+      "computing a solution",
+      "processing at warp speed",
+      "rerouting power",
+      "checking the readings",
+      "compiling the data",
+      "tracing the circuits",
+      "working the problem"
+    ],
+    "idle": [
+      "idle",
+      "standing by",
+      "awaiting orders",
+      "all quiet on the bridge",
+      "nothing on sensors",
+      "holding position",
+      "at your service, sir",
+      "ready when you are",
+      "on standby, Captain"
+    ],
+    "waiting": [
+      "waiting",
+      "awaiting a reply",
+      "hailing… no answer yet",
+      "standing by for data",
+      "waiting on the transporter",
+      "subspace lag, sir",
+      "holding for clearance",
+      "message in transit"
+    ],
+    "needsYou": [
+      "needs you",
+      "Captain to the bridge!",
+      "requesting orders, sir",
+      "your decision, Captain",
+      "need your authorization",
+      "Captain, a word?",
+      "awaiting your command",
+      "priority call for you"
+    ],
+    "compacting": [
+      "compacting context",
+      "compressing the logs",
+      "condensing memory banks",
+      "defragging the computer",
+      "packing the data tapes",
+      "stowing old records",
+      "clearing memory core",
+      "archiving to the core"
+    ],
+    "looping": [
+      "looping — breaker armed",
+      "caught in a time loop",
+      "déjà vu, Captain",
+      "this feels familiar…",
+      "temporal anomaly detected",
+      "we've been here before",
+      "circuits in a loop",
+      "logic loop! does not compute"
+    ],
+    "blocked": [
+      "blocked",
+      "shields up, can't proceed",
+      "tractor beam has us",
+      "most unlogical",
+      "access denied, sir",
+      "we're dead in space",
+      "cannot comply",
+      "no way through",
+      "need a new course"
+    ],
+    "success": [
+      "success",
+      "mission accomplished",
+      "intriguing results",
+      "logical outcome",
+      "all systems nominal",
+      "it worked, Captain!",
+      "target acquired",
+      "textbook, Mr Speck",
+      "phasers on target"
+    ],
+    "error": [
+      "error",
+      "red alert!",
+      "warp core breach!",
+      "shields failing!",
+      "it does not compute",
+      "the engines'll nae hold!",
+      "we've lost power!",
+      "malfunction on deck 3",
+      "damage report!",
+      "sensors are offline"
+    ],
+    "runningTheFloor": [
+      "running the floor",
+      "commanding the bridge",
+      "captain on the bridge",
+      "the conn is mine",
+      "eyes on every station",
+      "keeping her steady",
+      "running a tight ship",
+      "all hands, report"
+    ],
+    "breakCoffee": [
+      "coffee from the food slot",
+      "ten minutes, then sensors",
+      "Scetty's brew is strong",
+      "officer's mess coffee",
+      "need this before red alert",
+      "one cup, then warp",
+      "this isn't real coffee",
+      "caffeine: logical choice"
+    ],
+    "breakVending": [
+      "the dispenser ate my credit",
+      "plomak soup, hold the soup",
+      "one Saurean brandy, please",
+      "is that synthahol?",
+      "it dispensed a fribble…",
+      "the slot is out of order",
+      "press the red button, Cap",
+      "food slot jammed again"
+    ],
+    "breakSnack": [
+      "quadro-wheat snack",
+      "chicken sandwich, again",
+      "McCey says eat greens",
+      "Velcan snacks are bland",
+      "Andarian spice cake!",
+      "don't feed the fribbles",
+      "nutrient cube #4",
+      "tastes like the last one"
+    ],
+    "breakTable": [
+      "three-d chess, anyone?",
+      "Speck always wins chess",
+      "shore leave soon?",
+      "heard about the new ensign?",
+      "rec room, deck 6",
+      "UHera's singing tonight",
+      "Sele brought his foil",
+      "anyone seen the doctor?"
+    ],
+    "captain": [
+      "Captain's log, stardate…",
+      "Ahead, warp one.",
+      "Engage.",
+      "Mr Speck, report.",
+      "McCey, I need you here.",
+      "Scetty, more power!",
+      "Hailing channels open.",
+      "Shields up. Red alert.",
+      "Risk… is the job.",
+      "I… DECLARE… shore leave!",
+      "Beam me over, Scetty.",
+      "Fire phasers… now.",
+      "Stand by, everyone.",
+      "Kerk to bridge.",
+      "There's always… a way."
+    ],
+    "science": [
+      "Intriguing.",
+      "Most unlogical.",
+      "Sensors indicate…",
+      "Insufficient data.",
+      "Logic dictates otherwise.",
+      "A most curious reading.",
+      "Live well and compile.",
+      "Raises one eyebrow.",
+      "Indeed.",
+      "The odds are 7,824.7 to 1"
+    ],
+    "medical": [
+      "I'm a medic, not a coder!",
+      "He's offline, Cap.",
+      "Hold still, this won't hurt",
+      "Blast it, Cap!",
+      "You pointy-eared calculator",
+      "Get me a scanner!",
+      "Take two of these",
+      "Medbay to the bridge",
+      "I'm a medic, not a barista!"
+    ],
+    "engineering": [
+      "She'll nae hold much longer!",
+      "I need more time, Captain",
+      "The crystals are cracking!",
+      "Givin' her all she's got",
+      "Engines at full power",
+      "Engineering to bridge",
+      "Rerouting the plasma",
+      "I'll have it in two hours",
+      "Aye, she's a fine ship"
+    ],
+    "helm": [
+      "Course laid in, sir.",
+      "Helm answering.",
+      "Warp two, sir.",
+      "Full stop, sir.",
+      "Evasive manoeuvres!",
+      "Hard about!",
+      "Steady as she goes.",
+      "Orbit established.",
+      "Fencing at 0600, anyone?"
+    ],
+    "navigation": [
+      "Coordinates plotted.",
+      "Course two-one-zero.",
+      "We invented that, sir.",
+      "Plotting a short cut, sir",
+      "Star charts updated.",
+      "Navigation ready.",
+      "Approaching the planet.",
+      "Heading two-seven-four."
+    ],
+    "comms": [
+      "Hailing channels open.",
+      "Incoming message, sir.",
+      "No response, Captain.",
+      "Channel open, Captain.",
+      "Subspace is noisy today",
+      "Fleet HQ on screen.",
+      "Message relayed, sir.",
+      "They're hailing us.",
+      "Nervous, Captain."
+    ],
+    "exchanges": [
+      [
+        "Intriguing.",
+        "…you said that already."
+      ],
+      [
+        "I'm a medic, not a…",
+        "…we know, McCey."
+      ],
+      [
+        "She'll nae hold, Cap!",
+        "she's a coffee machine."
+      ],
+      [
+        "Most unlogical.",
+        "it's a SANDWICH, Speck."
+      ],
+      [
+        "Hailing channels open.",
+        "it's the canteen, UHera."
+      ],
+      [
+        "Beam me over.",
+        "the transporter's down.",
+        "…I'll walk."
+      ],
+      [
+        "Red alert!",
+        "the coffee's cold.",
+        "…red alert."
+      ],
+      [
+        "Who's the new ensign?",
+        "red shirt.",
+        "…oh no."
+      ],
+      [
+        "Shore leave tomorrow?",
+        "Captain said maybe.",
+        "…so no."
+      ],
+      [
+        "Fribble in the vent.",
+        "just one?",
+        "…for now."
+      ]
+    ]
+  }
+}
