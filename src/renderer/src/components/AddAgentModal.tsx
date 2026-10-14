@@ -188,13 +188,17 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
   const initialProvider = inferAgentProvider(config.defaultCommand);
   const initialModel = seedModelForProvider(config, initialProvider);
 
-  const [name, setName] = useState(pendingHire?.name ?? 'Jim');
+  // Read the theme before seeding identity defaults. TES must not greet a new
+  // crew member with the Office's default name, but an imported name is always
+  // the user's data and remains untouched.
+  const officeTheme = useStore((s) => s.officeTheme);
+  const isTesTheme = officeTheme === 'tes';
+  const [name, setName] = useState(pendingHire?.name ?? (isTesTheme ? 'Crewmate' : 'Jim'));
   const [character, setCharacter] = useState<OfficeCharacterName>(knownCharacter(pendingHire?.character));
   const [accent, setAccent] = useState<AccentColorName>(knownAccent(pendingHire?.accent));
   // The active theme pack's look builder (only when the pack declares one).
   // The draft is per theme, so a theme change mid-dialog never saves a look
   // made for another pack.
-  const officeTheme = useStore((s) => s.officeTheme);
   const looks = useThemeLooks(officeTheme);
   const [lookDraftState, setLookDraftState] = useState<{ themeId: string; draft: LookDraft } | null>(null);
   const lookDraft = looks?.builder
@@ -699,38 +703,41 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
                       />
                     </Row>
 
-                    <Row label="Character">
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        {OFFICE_CAST.map(c => (
-                          <button
-                            key={c.name}
-                            onClick={() => { setCharacter(c.name); setName(c.displayName); }}
-                            title={c.blurb}
-                            style={{
-                              padding: 4,
-                              background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
-                              boxShadow: character === c.name
-                                ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
-                                : 'inset 0 0 0 1px var(--cth-ink-100)',
-                              cursor: 'pointer',
-                              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
-                              border: 'none', width: 56
-                            }}
-                          >
-                            <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
-                              <SpritePortrait character={c.name} scale={2} />
-                            </div>
-                            <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </Row>
+                    {!isTesTheme && (
+                      <Row label="Character">
+                        <div data-office-character-picker style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {OFFICE_CAST.map(c => (
+                            <button
+                              key={c.name}
+                              onClick={() => { setCharacter(c.name); setName(c.displayName); }}
+                              title={c.blurb}
+                              style={{
+                                padding: 4,
+                                background: character === c.name ? `var(--cth-${accent}-light)` : 'var(--cth-cream-100)',
+                                boxShadow: character === c.name
+                                  ? 'inset 0 0 0 1.5px var(--cth-ink-500)'
+                                  : 'inset 0 0 0 1px var(--cth-ink-100)',
+                                cursor: 'pointer',
+                                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                                border: 'none', width: 56
+                              }}
+                            >
+                              <div style={{ width: 44, height: 56, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden' }}>
+                                <SpritePortrait character={c.name} scale={2} />
+                              </div>
+                              <span style={{ fontSize: 11, color: 'var(--cth-ink-700)' }}>{c.displayName}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </Row>
+                    )}
 
                     {looks && lookDraft && (
                       <ThemeLookBuilder
                         looks={looks}
                         draft={lookDraft}
                         character={character}
+                        officeCharacterVisible={!isTesTheme}
                         onChange={(d) => setLookDraftState({ themeId: looks.themeId, draft: d })}
                         onPreset={(n) => { if (n) setName(n); }}
                       />

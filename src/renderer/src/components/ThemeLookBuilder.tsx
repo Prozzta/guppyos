@@ -12,8 +12,10 @@ export interface ThemeLookBuilderProps {
   onChange: (d: LookDraft) => void;
   /** A premade was picked; `name` is its label (the caller decides whether to use it). */
   onPreset?: (name: string | undefined) => void;
-  /** The agent's Office character (kept; shown nowhere here). */
+  /** A stable Office-compatible fallback identity for the portrait API. */
   character: OfficeCharacterName;
+  /** Whether the caller also presents an Office-character picker. */
+  officeCharacterVisible?: boolean;
 }
 
 const label = { fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px', color: 'var(--cth-ink-700)', textTransform: 'uppercase' as const };
@@ -42,9 +44,8 @@ function FramePreview({ looks, draft, scale }: { looks: ThemeLooks; draft: LookD
 }
 
 /** The theme's character builder: body, colours, presets, with a live preview.
- *  Shown under the Office Character row when the active theme pack declares a
- *  builder; Add and Edit save its draft the same way. */
-export function ThemeLookBuilder({ looks, draft, onChange, onPreset, character }: ThemeLookBuilderProps) {
+ *  Add and Edit save its draft the same way. */
+export function ThemeLookBuilder({ looks, draft, onChange, onPreset, character, officeCharacterVisible = true }: ThemeLookBuilderProps) {
   const b = looks.builder, cols = looks.columns;
   const bodies = bodiesOf(b, cols);
   const body = bodies.find((x) => x.id === draft.bodyId) ?? bodies[0];
@@ -56,7 +57,9 @@ export function ThemeLookBuilder({ looks, draft, onChange, onPreset, character }
     <div data-look-builder={looks.themeId} style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 8, boxShadow: 'inset 0 0 0 1px var(--cth-ink-100)' }}>
       <div>
         <div style={label}>{`Look on ${looks.label}`}</div>
-        <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>Only this theme uses it. The Office character above is kept.</div>
+        <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>
+          {officeCharacterVisible ? 'Only this theme uses it. The Office character above is kept.' : 'Choose this agent’s TES look.'}
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }} aria-label="Preview">

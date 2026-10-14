@@ -196,21 +196,26 @@ test('census: every SpritePortrait site goes through the one route with the righ
   assert.match(sp, /return \(\) => \{ live = false; \};/);
 });
 
-test('Add and Edit: the builder sits right after the Office Character row, only when the pack has one', () => {
-  for (const [f, row, next] of [
-    // Guppy has no i18n: both dialogs use plain-English row labels.
-    ['src/renderer/src/components/AddAgentModal.tsx', '<Row label="Character">', '<Row label="Color">'],
-    ['src/renderer/src/components/EditAgentModal.tsx', '<Row label="Character">', '<Row label="Color">'],
-  ]) {
-    const s = read(f), i = s.indexOf(row), j = s.indexOf('<ThemeLookBuilder'), k = s.indexOf(next);
-    assert.ok(i > 0 && j > i && k > j, `${f}: Character row, then the builder, then Color`);
-    assert.match(s, /\{looks && lookDraft && \(\s*<ThemeLookBuilder/, `${f}: only with a pack builder`);
-    assert.match(s, /looks\?\.builder\s*\?/, `${f}: the draft exists only when the manifest declares a builder`);
-  }
-  assert.match(read('src/renderer/src/components/AddAgentModal.tsx'), /appearanceByTheme: \{ \[looks\.themeId\]: draftToLook\(lookDraft\) \}/);
+test('Add hides the Office picker only on TES; Edit keeps its Office picker and both retain pack drafts', () => {
+  const add = read('src/renderer/src/components/AddAgentModal.tsx');
+  assert.match(add, /const isTesTheme = officeTheme === 'tes';/);
+  assert.match(add, /useState\(pendingHire\?\.name \?\? \(isTesTheme \? 'Crewmate' : 'Jim'\)\)/, 'TES starts with no Office-character name');
+  assert.match(add, /\{!isTesTheme && \(\s*<Row label="Character">[\s\S]*?OFFICE_CAST\.map/, 'TES cannot render Office cast tiles');
+  assert.match(add, /data-office-character-picker/, 'the Office picker has a direct visual-census hook');
+  assert.match(add, /<ThemeLookBuilder[\s\S]*?officeCharacterVisible=\{!isTesTheme\}/, 'TES builder is the visible picker');
+  assert.match(add, /const \[character, setCharacter\] = useState<OfficeCharacterName>\(knownCharacter\(/, 'new agents retain a valid Office fallback');
+  assert.match(add, /appearanceByTheme: \{ \[looks\.themeId\]: draftToLook\(lookDraft\) \}/, 'new agents save their visible pack look');
+  assert.match(add, /looks\?\.builder\s*\?/, 'the draft exists only when the manifest declares a builder');
   const edit = read('src/renderer/src/components/EditAgentModal.tsx');
+  const i = edit.indexOf('<Row label="Character">'), j = edit.indexOf('<ThemeLookBuilder'), k = edit.indexOf('<Row label="Color">');
+  assert.ok(i > 0 && j > i && k > j, 'Edit remains Character row, then builder, then Color');
+  assert.match(edit, /\{looks && lookDraft && \(\s*<ThemeLookBuilder/, 'Edit builder only exists with a pack builder');
   assert.match(edit, /withLook\(agent\.appearanceByTheme, looks\.themeId, draftToLook\(lookDraftState\.draft\)\)/, 'Edit keeps the other themes');
   assert.doesNotMatch(edit, /onPreset/, 'Edit never renames from a preset');
+  const builder = read('src/renderer/src/components/ThemeLookBuilder.tsx');
+  assert.match(builder, /officeCharacterVisible\?: boolean/);
+  assert.match(builder, /officeCharacterVisible = true/);
+  assert.match(builder, /Choose this agent’s TES look\./, 'TES copy has no Office-character reference');
 });
 
 test('the floor uses the same looks: body, colours and preset seat from appearanceByTheme', () => {
