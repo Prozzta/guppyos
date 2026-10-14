@@ -48,8 +48,13 @@ const labelByStatus: Record<StatusKind, string> = {
   typing:     'your draft'
 };
 
+/** The chip's text: an explicit label (even an empty one), else the status's own. */
+export function badgeText(status: StatusKind, label?: string): string {
+  return label ?? labelByStatus[status] ?? status;
+}
+
 export function PixelBadge({ status, label, style }: PixelBadgeProps) {
-  const text = label ?? labelByStatus[status] ?? status;
+  const text = badgeText(status, label);
   return (
     <span
       style={{
