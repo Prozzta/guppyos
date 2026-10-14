@@ -475,7 +475,11 @@ parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 
 - **Code:** the MIT License in [`LICENSE`](./LICENSE), unchanged.
 - **TES theme artwork** — [`themes/tes/art`](./themes/tes/art), [`themes/tes/map`](./themes/tes/map)
-  and the TES screenshots and title cards in [`.github/media`](./.github/media) — is
+  and the TES art shown in the [`.github/media`](./.github/media) images
+  (`guppy-og.png`, `guppy-logo.png`, `tes-full-window.png`, `tes-look-builder.png`,
+  `tes-memory.png`; the app UI around it in those images stays MIT) and the Speck icon set
+  (`build/icon.png`, `build/icon.ico`, `build/icon.icns`, `build/icon.svg`,
+  `src/renderer/src/assets/brand/logo.png`) — is
   © 2026 Prozzta under the terms in
   [`themes/tes/LICENSE-ARTWORK.md`](./themes/tes/LICENSE-ARTWORK.md): you may edit and use
   it in any commercial or non-commercial project and ship it inside a project that uses
