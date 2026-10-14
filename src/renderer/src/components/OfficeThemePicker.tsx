@@ -5,7 +5,7 @@ import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import type { ThemeId } from '@/scene/office/themeRegistry';
-import { floorSceneTheme, isPackProjectTheme, projectTheme, projectThemes, resolveProjectTheme, type ProjectThemeId } from '@shared/projectTheme';
+import { floorSceneTheme, offeredProjectThemes, projectTheme, resolveProjectTheme, type ProjectThemeId } from '@shared/projectTheme';
 
 /** Project-scoped theme picker. Switching a populated project changes only its
  * presentation: default people (the seed NAME) are intentionally creation-only,
@@ -45,7 +45,7 @@ export function OfficeThemePicker({ config }: { config: HarnessConfig }) {
   };
 
   const selected = pending ? projectTheme(pending) : null;
-  const offered = projectThemes().filter((theme) => enabled || theme.id === 'office' || isPackProjectTheme(theme.id));
+  const offered = offeredProjectThemes(enabled);
   return <div>
     <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px', color: 'var(--cth-ink-500)', textTransform: 'uppercase', marginBottom: 10 }}>Office theme</div>
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>

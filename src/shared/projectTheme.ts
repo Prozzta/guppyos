@@ -70,6 +70,12 @@ export function projectThemes(): ProjectTheme[] {
   return [...PROJECT_THEMES, ...packThemes.values()];
 }
 
+/** The themes a project can switch to right now (the Settings picker's list, and voice's): the
+ *  Office and every pack always; the built-in TV-show themes only while tvShowOffices is on. */
+export function offeredProjectThemes(tvShowOffices: boolean | undefined): ProjectTheme[] {
+  return projectThemes().filter((theme) => tvShowOffices || theme.id === 'office' || isPackProjectTheme(theme.id));
+}
+
 export function isProjectThemeId(value: unknown): value is ProjectThemeId {
   return typeof value === 'string' && (PROJECT_THEMES.some((theme) => theme.id === value) || packThemes.has(value));
 }

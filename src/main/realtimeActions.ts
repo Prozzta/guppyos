@@ -40,7 +40,7 @@ import type { ScheduledMission } from './config';
 import { inferAgentProvider } from '../shared/agentProvider';
 import { clearCommandForProvider } from '../shared/providerAutomation';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
-import { isProjectThemeId, projectThemes } from '../shared/projectTheme';
+import { isProjectThemeId, offeredProjectThemes, projectThemes } from '../shared/projectTheme';
 
 export const VOICE_ACTOR = 'michael-voice';
 
@@ -783,12 +783,17 @@ function proposeDestructive(deps: RealtimeActionDeps, verb: string, a: Record<st
 const THEME_KEYS = new Set(['officeTheme', 'projectTheme', 'theme']);
 function setThemeByVoice(deps: RealtimeActionDeps, raw: unknown): ActionResult {
   const want = normMatch(str(raw));
-  const themes = projectThemes();
+  // Only what the Settings picker offers right now: the TV-show themes need tvShowOffices on.
+  const themes = offeredProjectThemes(deps.getConfigValue('tvShowOffices') === true);
   const names = themes.map((t) => t.label).join(', ');
   if (!want) return { ok: false, spoken: `Which theme? The choices are: ${names}.` };
   const hit = themes.find((t) => normMatch(t.id) === want || normMatch(t.label) === want);
-  if (!hit || !isProjectThemeId(hit.id)) return { ok: false, spoken: `There's no "${str(raw).trim()}" theme here. The choices are: ${names}.` };
-  const labelOf = (id: string): string => themes.find((t) => t.id === id)?.label ?? id;
+  if (!hit || !isProjectThemeId(hit.id)) {
+    const tvShow = projectThemes().find((t) => normMatch(t.id) === want || normMatch(t.label) === want);
+    if (tvShow) return { ok: false, spoken: `${tvShow.label} is a TV-show office, and TV-show offices are off in Settings. The choices are: ${names}.` };
+    return { ok: false, spoken: `There's no "${str(raw).trim()}" theme here. The choices are: ${names}.` };
+  }
+  const labelOf = (id: string): string => projectThemes().find((t) => t.id === id)?.label ?? id;
   const old = deps.getProjectTheme();
   if (old === hit.id) return { ok: true, spoken: `This project's theme is already ${hit.label} — nothing to change.` };
   deps.setProjectTheme(hit.id);
