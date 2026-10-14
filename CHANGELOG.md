@@ -32,6 +32,8 @@ switching it keeps every agent.** Rollback: 1.1.84 (reinstall).
 - **The agent card always shows the agent's name.** When the name would be cut short, the status
   chip shrinks to its colour dot. The status is in the dot's tooltip.
 - **The stations floor is capped at 30 fps,** as the office floor is.
+- **"Create new config" now asks you to choose a theme (The Office or TES) and needs an empty
+  folder.** "Open existing config" is unchanged.
 - **The TES floor redraws only what moves.** It now uses no more CPU than the Office floor, and its
   camera settles in about the same time on slow and fast machines.
 - **The TES floor is centred and framed to its own shape.** By default the floor area takes the
