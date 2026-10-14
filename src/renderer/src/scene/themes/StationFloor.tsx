@@ -17,6 +17,7 @@ import type { LoadedPack } from './packs';
 import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
+import { teardownFloor } from './teardown';
 import { cacheKeyOf, frontPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
@@ -180,12 +181,13 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         }
         for (const [id, s] of cells) s.visible = live.has(id);
       };
-      (app as any).__free = () => {
-        dropCells();
-        rt?.destroy(true);
-        cacheRoot.destroy({ children: true });
-        for (const t of owned) t.destroy(true);
-      };
+      // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
+      (app as any).__free = [
+        dropCells,
+        () => rt?.destroy(true),
+        () => cacheRoot.destroy({ children: true }),
+        () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
+      ];
 
       const sheetPx = pack.store.get(pack.sheet)!;
       const cols = Math.max(1, Math.floor(sheetPx.width / fw));
@@ -346,8 +348,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         (a as any).__glRecovery?.();
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
-        safeDestroy(a);
-        try { (a as any).__free?.(); } catch { /* noop */ }
+        teardownFloor(a, (a as any).__free ?? []);
       }
       appRef.current = null;
       while (host.firstChild) host.removeChild(host.firstChild);

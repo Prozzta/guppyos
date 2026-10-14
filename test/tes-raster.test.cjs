@@ -233,10 +233,54 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*items\.sort\(byDepth\);/);
 });
 
-test('StationFloor frees the cache target, its cells and every texture it made on unmount', () => {
+test('StationFloor frees the cache target, its cells and every texture it made on unmount, before the app is destroyed', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
-  assert.match(src, /\(app as any\)\.__free = \(\) => \{\s*dropCells\(\);\s*rt\?\.destroy\(true\);\s*cacheRoot\.destroy\(\{ children: true \}\);\s*for \(const t of owned\) t\.destroy\(true\);/);
-  assert.match(src, /safeDestroy\(a\);\s*try \{ \(a as any\)\.__free\?\.\(\); \} catch/);
+  assert.match(src, /\(app as any\)\.__free = \[\s*dropCells,\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
+  assert.match(src, /const dropCells = \(\) => \{\s*for \(const s of cells\.values\(\)\) s\.destroy\(\{ texture: true, textureSource: false \}\);\s*cells\.clear\(\);\s*\};/);
+  assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
+  assert.doesNotMatch(src, /safeDestroy\(a\)/, 'the unmount destroys the app only through teardownFloor');
   assert.match(src, /const own = \(px: Pixels\) => \{ const t = texture\(px\); owned\.push\(t\); return t; \};/);
   assert.equal((src.match(/\btexture\(/g) || []).length, 2, "texture() is defined once and called only by own()");
+});
+
+test('teardownFloor, with real pixi: frees the floor whole; the old order (free after app.destroy, one catch) did not', async () => {
+  const { pathToFileURL } = require('node:url');
+  if (typeof globalThis.navigator === 'undefined') globalThis.navigator = { userAgent: 'node' };
+  const P = await import(pathToFileURL(path.resolve(__dirname, '..', 'node_modules/pixi.js/lib/index.mjs')).href);
+  const T = loadTs('src/renderer/src/scene/themes/teardown.ts');
+  // The floor's shapes: cells over the cache target on the stage, a cache tree off it whose
+  // statics share owned textures with the world's, and the owned textures.
+  const floor = () => {
+    const stage = new P.Container(), cacheLayer = stage.addChild(new P.Container()), world = stage.addChild(new P.Container());
+    const rt = P.RenderTexture.create({ width: 64, height: 32, resolution: 2, scaleMode: 'nearest' });
+    const cells = new Map();
+    for (let i = 0; i < 4; i++) cells.set(i, cacheLayer.addChild(new P.Sprite(new P.Texture({ source: rt.source, frame: new P.Rectangle(i * 16, 0, 16, 16) }))));
+    const owned = [0, 1].map(() => new P.Texture({ source: new P.TextureSource({ width: 4, height: 4 }) }));
+    const cacheRoot = new P.Container(), cacheWorld = cacheRoot.addChild(new P.Container());
+    for (const t of owned) { cacheWorld.addChild(new P.Sprite(t)); world.addChild(new P.Sprite(t)); }
+    let stopped = false;
+    const app = { ticker: { stop: () => { stopped = true; } }, destroy: (_removeView, options) => stage.destroy(options) };
+    const dropCells = () => { for (const s of cells.values()) s.destroy({ texture: true, textureSource: false }); cells.clear(); };
+    const frees = [dropCells, () => rt.destroy(true), () => cacheRoot.destroy({ children: true }), () => { for (const t of owned) t.destroy(true); }];
+    const cellTextures = [...cells.values()].map((s) => s.texture), rtSource = rt.source;
+    const freed = () => stopped && stage.destroyed && cellTextures.every((t) => t.destroyed) && rt.destroyed && rtSource.destroyed
+      && cacheRoot.destroyed && cacheWorld.destroyed && owned.every((t) => t.destroyed && t.source === null);
+    return { app, frees, freed };
+  };
+  const now = floor();
+  T.teardownFloor(now.app, now.frees);
+  assert.equal(now.freed(), true, 'teardownFloor frees everything');
+  // 6ef1773a's order: safeDestroy, then the whole free under one catch. The cells were already
+  // destroyed with the stage; destroying them again throws, and the rest is never freed.
+  const old = floor();
+  old.app.ticker.stop();
+  old.app.destroy(true, { children: true });
+  let threw = false;
+  try { for (const f of old.frees) f(); } catch { threw = true; }
+  assert.equal(threw, true);
+  assert.equal(old.freed(), false, 'the old order leaves the cache target, its tree and the textures behind');
+  // One step throwing does not skip the rest.
+  const one = floor();
+  T.teardownFloor(one.app, [() => { throw new Error('a step'); }, ...one.frees]);
+  assert.equal(one.freed(), true);
 });
