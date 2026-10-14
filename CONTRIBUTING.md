@@ -1,4 +1,4 @@
-# Contributing to Munder Difflin
+# Contributing to Guppy
 
 Thanks for your interest! This is an early prototype, so there's a lot of surface
 area and plenty of room to help. This guide covers setup, the gotchas, and the

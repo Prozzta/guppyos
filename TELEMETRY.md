@@ -1,6 +1,6 @@
 # Telemetry
 
-Munder Difflin collects a small set of **anonymous** usage events so we can
+Guppy collects a small set of **anonymous** usage events so we can
 understand adoption (how many people launch the app, which features get used)
 and make the product better. This document is the complete, authoritative
 contract: **if an event or property is not listed here, the app does not send

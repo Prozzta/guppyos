@@ -33,3 +33,8 @@ use in commercial and non-commercial projects and REQUIRES credit to LimeZu
 drawn procedurally in src/renderer/src/scene/office/portraitArt.ts and are
 covered by this MIT License like the rest of the source. See
 src/renderer/src/assets/ATTRIBUTION.md for details.
+
+This MIT License also does NOT apply to the TES theme artwork under themes/tes
+(themes/tes/art and themes/tes/map) or to the TES screenshots and title cards in
+.github/media. That artwork is (c) 2026 Prozzta and licensed separately; see
+themes/tes/LICENSE-ARTWORK.md (credit "Artwork by Prozzta" is required).
