@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.85" src="https://img.shields.io/badge/version-1.1.85-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.86" src="https://img.shields.io/badge/version-1.1.86-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
