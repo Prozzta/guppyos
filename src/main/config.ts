@@ -18,7 +18,7 @@ import { codexLayerOptInKey } from './codexProjectLayers';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
-import { isProjectThemeId, isProjectThemeSeed, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
+import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
 import type { IntegrationRecord } from '../shared/integrations';
 import {
   DEFAULT_CONTEXT_TRIGGER,
@@ -914,8 +914,9 @@ function normalizeStoredHomes(cfg: HarnessConfig): HarnessConfig {
   }
   if (cfg.officeThemeByHive) {
     const normalized: Record<string, ProjectThemeId> = {};
+    // An unregistered pack id is kept (the pack may be renamed or dropped in this build); only garbage is dropped.
     for (const [home, theme] of Object.entries(cfg.officeThemeByHive)) {
-      if (home.trim() && isProjectThemeId(theme)) normalized[projectThemeHomeKey(expandTilde(home))] = theme;
+      if (home.trim() && isStoredProjectThemeId(theme)) normalized[projectThemeHomeKey(expandTilde(home))] = theme;
     }
     cfg.officeThemeByHive = normalized;
   }

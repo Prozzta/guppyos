@@ -35,8 +35,8 @@ export const PROJECT_THEMES: readonly ProjectTheme[] = [
   { id: 'hogwarts', label: 'Harry Potter', blurb: 'Hogwarts great hall', swatch: '#39305a', sceneTheme: 'hogwarts' },
 ];
 
-// Theme packs (themes/<dir>/theme.json) join the catalogue at start-up: main registers the bundled manifests, the
-// renderer its validated pack catalogue. A pack's projectDefaults.orchestrator is its creation seed.
+// Theme packs (themes/<dir>/theme.json) join the catalogue at start-up: main registers the bundled manifests that pass
+// the renderer's validateManifest (main/packThemeEntries.ts), the renderer its validated pack catalogue. A pack's projectDefaults.orchestrator is its creation seed.
 const PACK_THEME_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const packThemes = new Map<string, ProjectTheme>();
 
@@ -52,18 +52,6 @@ export function registerPackThemes(entries: ReadonlyArray<PackThemeEntry>): void
       ...(isProjectThemeSeed(e.orchestrator) ? { projectDefaults: { orchestrator: e.orchestrator } } : {}),
     });
   }
-}
-
-/** The pack entries among raw theme.json manifests (shape only: id, label, orchestrator seed). */
-export function packThemeEntries(manifests: Record<string, unknown>): PackThemeEntry[] {
-  const out: PackThemeEntry[] = [];
-  for (const m of Object.values(manifests)) {
-    if (!m || typeof m !== 'object') continue;
-    const o = m as { id?: unknown; label?: unknown; projectDefaults?: { orchestrator?: unknown } };
-    if (typeof o.id !== 'string') continue;
-    out.push({ id: o.id, label: typeof o.label === 'string' ? o.label : o.id, orchestrator: o.projectDefaults?.orchestrator });
-  }
-  return out;
 }
 
 /** True for a registered theme pack's id. */
@@ -84,6 +72,13 @@ export function projectThemes(): ProjectTheme[] {
 
 export function isProjectThemeId(value: unknown): value is ProjectThemeId {
   return typeof value === 'string' && (PROJECT_THEMES.some((theme) => theme.id === value) || packThemes.has(value));
+}
+
+/** True for an id a stored project-theme entry may keep: a built-in, or any pack-shaped id even if no pack of that id is
+ * registered in this build. A pack that is renamed or dropped must not wipe projects' theme entries on the next config
+ * read; resolveProjectTheme falls back at render, and the entry comes back to life if the pack returns. */
+export function isStoredProjectThemeId(value: unknown): value is ProjectThemeId {
+  return typeof value === 'string' && (PROJECT_THEMES.some((theme) => theme.id === value) || PACK_THEME_ID.test(value));
 }
 
 export function projectTheme(themeId: unknown): ProjectTheme {
