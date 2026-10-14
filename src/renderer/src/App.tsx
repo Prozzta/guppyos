@@ -34,6 +34,7 @@ import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
 import { Icon } from '@/components/Icon';
 import { SidebarSplitter } from '@/components/SidebarSplitter';
+import { framedSidebarWidth, packFrame } from '@/scene/themes/framing';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
@@ -61,6 +62,8 @@ export function App() {
   useEffect(() => { applyThemeUiTokens({ id: officeTheme, uiTokens: themeUiTokens(officeTheme) ?? getTheme(officeTheme).uiTokens }); }, [officeTheme]);
   const sidebarWidth = useStore(s => s.sidebarWidth);
   const setSidebarWidth = useStore(s => s.setSidebarWidth);
+  const sidebarWidthSet = useStore(s => s.sidebarWidthSet);
+  const resetSidebarWidth = useStore(s => s.resetSidebarWidth);
   const ideOpen = useStore(s => s.ideOpen);
   const setIdeOpen = useStore(s => s.setIdeOpen);
 
@@ -88,6 +91,20 @@ export function App() {
   const [quitWarn, setQuitWarn] = useState<{ ptyCount: number } | null>(null);
   const [closing, setClosing] = useState<ClosingTimeState | null>(null);
   const [vpWidth, setVpWidth] = useState<number>(window.innerWidth);
+  // TES-GUPPY-FRAMING: the floor pane's height, so a framed floor (a pack drawn on part of its
+  // map) can size the pane to its own proportions by default. A user-sized sidebar always wins.
+  const [floorPane, setFloorPane] = useState<HTMLDivElement | null>(null);
+  const [floorPaneHeight, setFloorPaneHeight] = useState(0);
+  useEffect(() => {
+    if (!floorPane) return;
+    const ro = new ResizeObserver((entries) => { for (const e of entries) setFloorPaneHeight(e.contentRect.height); });
+    ro.observe(floorPane);
+    return () => ro.disconnect();
+  }, [floorPane]);
+  const floorFrameNow = packFrame(officeTheme);
+  const shownSidebarWidth = !sidebarWidthSet && floorFrameNow && floorPaneHeight > 0
+    ? framedSidebarWidth(floorFrameNow, vpWidth, floorPaneHeight)
+    : sidebarWidth;
 
   // Deep link into Settings from anywhere in the tree. Settings' open state is
   // local to App, so a nested control (e.g. "set it now" beside a disabled Talk
@@ -427,7 +444,7 @@ export function App() {
         padding: 16,
         gap: 0
       }}>
-        <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative' }}>
+        <div ref={setFloorPane} style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative' }}>
           <OfficeFloor />
           <MemoryPanel />
           <CapacityDetailPanel />
@@ -458,13 +475,14 @@ export function App() {
         </div>
 
         <SidebarSplitter
-          width={sidebarWidth}
+          width={shownSidebarWidth}
           onChange={setSidebarWidth}
+          onReset={resetSidebarWidth}
           viewportWidth={vpWidth}
         />
 
         <div style={{
-          width: sidebarWidth, flexShrink: 0,
+          width: shownSidebarWidth, flexShrink: 0,
           minHeight: 0, display: 'flex', flexDirection: 'column'
         }}>
           {agent ? (

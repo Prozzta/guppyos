@@ -23,5 +23,7 @@ contextBridge.exposeInMainWorld('harness', {
   click: (x, y) => ipcRenderer.invoke('harness:click', { x, y }),
   // The renderer process's own private / working-set MB, read by main (IMPACT-LOOP-171).
   metrics: () => ipcRenderer.invoke('harness:metrics'),
-  cpu: () => ipcRenderer.invoke('harness:cpu')
+  cpu: () => ipcRenderer.invoke('harness:cpu'),
+  // A PNG of the page at a content size (TES-GUPPY-FRAMING screenshots).
+  capture: (width, height) => ipcRenderer.invoke('harness:capture', { width, height })
 });

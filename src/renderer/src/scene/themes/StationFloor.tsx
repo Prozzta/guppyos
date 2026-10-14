@@ -18,6 +18,7 @@ import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import type { ThemeLooks } from './themeCatalog';
+import { floorFrame } from './framing';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -127,6 +128,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
 
       const camera = new Camera(world);
       camera.setMapSize(SM.PW, SM.PH);
+      // TES-GUPPY-FRAMING: fit the pack's art (centred, its dead bottom band clippable), not the whole map.
+      camera.setFrame(floorFrame(pack.manifest.id, SM.PW, SM.PH));
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
 

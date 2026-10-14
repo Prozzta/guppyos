@@ -4,6 +4,10 @@ import { Container } from 'pixi.js';
 // Phase targeting is dropped (we have no project phases); kept: fit-to-screen,
 // map-edge clamping, smooth lerp, a manual focus(), and nudgeToward() used to
 // pan toward the selected agent.
+//
+// TES-GUPPY-FRAMING: an optional frame (setFrame) replaces the whole map as what is fitted,
+// centred and clamped to, and its dead bottom rows are left out of the fit. With no frame the
+// frame IS the map with no dead band, so the office's numbers are exactly as before.
 
 const LERP_SPEED = 0.08;
 
@@ -20,6 +24,8 @@ export class Camera {
   private mapWidth = 640;
   private mapHeight = 480;
   private manualOverride = false;
+  /** The fitted rectangle, in map pixels (null: the whole map), and its clippable bottom rows. */
+  private frame: { x: number; y: number; w: number; h: number; deadBottom: number } | null = null;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -36,6 +42,16 @@ export class Camera {
     this.mapHeight = height;
   }
 
+  /** Fit a part of the map instead of all of it (see TES-GUPPY-FRAMING above); null for the whole map. */
+  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number } | null): void {
+    this.frame = frame;
+    if (!this.manualOverride) this.fitToScreen();
+  }
+
+  private box(): { x: number; y: number; w: number; h: number; deadBottom: number } {
+    return this.frame ?? { x: 0, y: 0, w: this.mapWidth, h: this.mapHeight, deadBottom: 0 };
+  }
+
   setViewSize(width: number, height: number): void {
     this.viewWidth = width;
     this.viewHeight = height;
@@ -44,14 +60,16 @@ export class Camera {
 
   private getMinZoom(): number {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
-    return Math.min(this.viewWidth / this.mapWidth, this.viewHeight / this.mapHeight);
+    const b = this.box();
+    return Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
   }
 
-  /** Fit the whole map to the viewport, centered. */
+  /** Fit the whole map (or the frame, its content centred) to the viewport. */
   fitToScreen(): void {
     this.manualOverride = false;
-    this.targetX = this.mapWidth / 2;
-    this.targetY = this.mapHeight / 2;
+    const b = this.box();
+    this.targetX = b.x + b.w / 2;
+    this.targetY = b.y + (b.h - b.deadBottom) / 2;
     this.targetZoom = this.getMinZoom();
   }
 
@@ -94,17 +112,22 @@ export class Camera {
     this.container.x = this.viewWidth / 2 - this.currentX * this.currentZoom;
     this.container.y = this.viewHeight / 2 - this.currentY * this.currentZoom;
 
-    const scaledW = this.mapWidth * this.currentZoom;
-    const scaledH = this.mapHeight * this.currentZoom;
+    // Centre the frame's content when it fits (the dead band hangs below it); else keep the view
+    // inside the frame. With no frame, b is the map at 0,0 with no dead band.
+    const b = this.box();
+    const z = this.currentZoom, left = -b.x * z || 0, top = -b.y * z || 0;
+    const scaledW = b.w * z;
+    const scaledH = b.h * z;
+    const contentH = (b.h - b.deadBottom) * z;
     if (scaledW <= this.viewWidth) {
-      this.container.x = (this.viewWidth - scaledW) / 2;
+      this.container.x = left + (this.viewWidth - scaledW) / 2;
     } else {
-      this.container.x = Math.min(0, Math.max(this.viewWidth - scaledW, this.container.x));
+      this.container.x = Math.min(left, Math.max(left + this.viewWidth - scaledW, this.container.x));
     }
-    if (scaledH <= this.viewHeight) {
-      this.container.y = (this.viewHeight - scaledH) / 2;
+    if (contentH <= this.viewHeight) {
+      this.container.y = top + (this.viewHeight - contentH) / 2;
     } else {
-      this.container.y = Math.min(0, Math.max(this.viewHeight - scaledH, this.container.y));
+      this.container.y = Math.min(top, Math.max(top + this.viewHeight - scaledH, this.container.y));
     }
   }
 }
