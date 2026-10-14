@@ -1203,6 +1203,7 @@ const api = {
       id: string; name: string; provider?: string; cwd: string;
       command?: string; role?: string; worktreePath?: string;
       character?: string; accent?: string;
+      appearance?: { theme?: string; presetId?: string; bodyId?: string; colors?: { skin?: string; shirt?: string; hair?: string } };
     }) => void
   ): (() => void) => {
     const listener = (_e: IpcRendererEvent, payload: Parameters<typeof cb>[0]) => cb(payload);

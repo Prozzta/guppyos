@@ -14,6 +14,9 @@ import { Crew, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
 import type { Pixels } from './raster';
+import { presetIdOf, readLook, resolveLook } from './looks';
+import { lookColumn } from './lookArt';
+import type { ThemeLooks } from './themeCatalog';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -25,26 +28,9 @@ function texture(px: Pixels): Texture {
   return t;
 }
 
-/** A stable sheet column for an agent: its preset's body, else a hash of its id. */
-function bodyColumn(pack: LoadedPack, a: Agent, cols: number): number {
-  const b = pack.manifest.builder;
-  const preset = presetOf(a);
-  const bodyId = preset ? b?.presets?.find((p) => p.id === preset)?.bodyId : undefined;
-  const body = bodyId ? b?.bodies?.find((x) => x.id === bodyId) : undefined;
-  if (body) return body.column;
-  const list = b?.bodies?.length ? b.bodies.map((x) => x.column) : Array.from({ length: cols }, (_, i) => i);
-  let h = 0;
-  for (const c of a.id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return list[h % list.length];
-}
-
-/** The builder preset an agent was made from (set by the appearance builder, when it lands). */
-function presetOf(a: Agent): string | undefined {
-  return (a as Agent & { appearance?: { presetId?: string } }).appearance?.presetId;
-}
-
-function crewAgents(agents: Agent[]): CrewAgent[] {
-  return agents.map((a) => ({ id: a.id, status: a.status, orchestrator: !!a.isGod, presetId: presetOf(a) }));
+function crewAgents(pack: LoadedPack, agents: Agent[]): CrewAgent[] {
+  const b = pack.manifest.builder, id = pack.manifest.id;
+  return agents.map((a) => ({ id: a.id, status: a.status, orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
 }
 
 export function StationFloor({ pack }: { pack: LoadedPack }) {
@@ -114,13 +100,25 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       world.addChild(new Sprite(texture(plan.above)));
 
       const sheetPx = pack.store.get(pack.sheet)!;
-      const sheet = texture(sheetPx);
       const cols = Math.max(1, Math.floor(sheetPx.width / fw));
+      const looks: ThemeLooks = { themeId: pack.manifest.id, label: pack.manifest.label, builder: pack.manifest.builder, sprite: R, columns: cols, sheet: sheetPx };
+      // One texture per look (the body's column in the agent's colours), one frame texture per look and row.
+      const lookTex = new Map<string, Texture>();
       const frames = new Map<string, Texture>();
-      const frame = (col: number, row: number) => {
-        const k = `${col}:${row}`;
+      const lookOf = (a: Agent) => {
+        const r = resolveLook(looks.builder, cols, readLook(a.appearanceByTheme?.[looks.themeId]), a.id);
+        const key = [r.body.id, r.colors.skin, r.colors.shirt, r.colors.hair].join('|');
+        if (!lookTex.has(key)) {
+          const t = Texture.from(lookColumn(looks, r.body, r.colors));
+          t.source.scaleMode = 'nearest';
+          lookTex.set(key, t);
+        }
+        return { key, col: r.body.column };
+      };
+      const frame = (look: string, row: number) => {
+        const k = `${look}:${row}`;
         let f = frames.get(k);
-        if (!f) { f = new Texture({ source: sheet.source, frame: new Rectangle(col * fw, row * fh, fw, fh) }); frames.set(k, f); }
+        if (!f) { f = new Texture({ source: lookTex.get(look)!.source, frame: new Rectangle(0, row * fh, fw, fh) }); frames.set(k, f); }
         return f;
       };
       const stand = { down: R.rows.down, up: R.rows.up, left: R.rows.left, right: R.rows.right };
@@ -133,26 +131,28 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
 
       const cd = pack.manifest.coffee?.cooldown;
       const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
-      const sprites = new Map<string, { sprite: Sprite; col: number }>();
+      const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
       const sync = () => {
         const agents = useStore.getState().agents;
-        crew.sync(crewAgents(agents));
+        crew.sync(crewAgents(pack, agents));
         const ids = new Set(agents.map((a) => a.id));
         for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); }
-        for (const a of agents) if (!sprites.has(a.id)) {
-          const sp = new Sprite(frame(0, R.rows.down));
+        for (const a of agents) {
+          const l = lookOf(a), have = sprites.get(a.id);
+          if (have) { have.col = l.col; have.look = l.key; continue; } // a look edited in Add/Edit shows at once
+          const sp = new Sprite(frame(l.key, R.rows.down));
           sp.eventMode = 'static';
           sp.cursor = 'pointer';
           sp.on('pointertap', (ev) => { ev.stopPropagation(); useStore.getState().select(a.id); });
           sortLayer.addChild(sp);
-          sprites.set(a.id, { sprite: sp, col: bodyColumn(pack, a, cols) });
+          sprites.set(a.id, { sprite: sp, col: l.col, look: l.key });
         }
       };
       sync();
 
       let clock = 0;
-      const place = (p: Walker, s: { sprite: Sprite; col: number }): { foot: number; rank: number } => {
+      const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
         if (ch && p.seat) {
@@ -166,7 +166,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           pose = seatPose(ch, dir, fw, fh, fit);
         }
         const seated = !!(p.seated && p.seat);
-        s.sprite.texture = frame(s.col, (seated ? sit : stand)[p.dir]);
+        s.sprite.texture = frame(s.look, (seated ? sit : stand)[p.dir]);
         if (seated && pose) s.sprite.position.set(Math.round(pose.x - fw / 2), Math.round(pose.y));
         else if (seated && p.seat) s.sprite.position.set(Math.round(p.seat.x - fw / 2), Math.round(p.seat.y - fh));
         else {

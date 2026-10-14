@@ -57,16 +57,75 @@
     }
   },
   "builder": {
+    "outline": "#242234",
+    "eyes": "#ffffff",
+    "swatches": {
+      "skin": {
+        "fair": "#fad6b8",
+        "deep": "#7b4d34",
+        "green": "#8fbf6a"
+      },
+      "shirt": {
+        "gold": "#a07a1c",
+        "blue": "#285cc4",
+        "red": "#c0302c"
+      },
+      "hair": {
+        "black": "#1f1d1d",
+        "brown": "#71413b",
+        "white": "#ececec"
+      }
+    },
     "bodies": [
       {
         "id": "light",
         "label": "Light",
-        "column": 0
+        "column": 0,
+        "parts": {
+          "skin": {
+            "main": "#fad6b8",
+            "shades": [
+              "#e86a73"
+            ]
+          },
+          "shirt": {
+            "main": "#285cc4"
+          },
+          "hair": {
+            "main": "#71413b",
+            "shades": [
+              "#bb7547"
+            ]
+          }
+        },
+        "portrait": {
+          "crop": [
+            7,
+            4,
+            18,
+            28
+          ]
+        }
       },
       {
         "id": "dark",
         "label": "Dark",
-        "column": 1
+        "column": 1,
+        "parts": {
+          "skin": {
+            "main": "#fad6b8",
+            "shades": [
+              "#e86a73"
+            ]
+          },
+          "shirt": {
+            "main": "#285cc4"
+          },
+          "hair": {
+            "main": "#242234",
+            "byShape": true
+          }
+        }
       }
     ],
     "presets": [
@@ -74,9 +133,32 @@
         "id": "pilot",
         "label": "Pilot",
         "bodyId": "dark",
-        "seat": "Beta"
+        "seat": "Beta",
+        "colors": {
+          "skin": "#7b4d34",
+          "shirt": "#a07a1c"
+        }
+      },
+      {
+        "id": "medic",
+        "label": "Medic",
+        "bodyId": "light",
+        "colors": {
+          "shirt": "#285cc4",
+          "hair": "#ececec"
+        }
       }
-    ]
+    ],
+    "defaults": {
+      "bodyId": "light",
+      "colors": {
+        "shirt": "#c0302c"
+      }
+    },
+    "sample": {
+      "bodyId": "light",
+      "presetId": "medic"
+    }
   },
   "projectDefaults": {
     "orchestrator": {

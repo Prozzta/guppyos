@@ -2,6 +2,9 @@ import { useEffect, useState, type CSSProperties } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
+import { ThemeLookBuilder } from './ThemeLookBuilder';
+import { useThemeLooks } from '@/scene/themes/useThemeLooks';
+import { draftToLook, readLook, startDraft, withLook, type LookDraft } from '@/scene/themes/looks';
 import { ProviderLogo } from './ProviderLogo';
 import { useStore, type Agent } from '@/store/store';
 import { OFFICE_CAST, type OfficeCharacterName } from '@/scene/office/cast';
@@ -40,6 +43,15 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
   const [name, setName] = useState(agent.name);
   const [character, setCharacter] = useState<OfficeCharacterName>(agent.character);
   const [accent, setAccent] = useState<AccentColorName>(agent.accent);
+  // The active theme pack's look: starts from the saved look (else the one the
+  // agent is shown with now) and is saved only once it is changed here.
+  const officeTheme = useStore((s) => s.officeTheme);
+  const looks = useThemeLooks(officeTheme);
+  const [lookDraftState, setLookDraftState] = useState<{ key: string; draft: LookDraft } | null>(null);
+  const lookKey = looks ? `${agent.id}|${looks.themeId}` : '';
+  const lookDraft = looks?.builder
+    ? (lookDraftState?.key === lookKey ? lookDraftState.draft : startDraft(looks.builder, looks.columns, readLook(agent.appearanceByTheme?.[looks.themeId]), agent.id))
+    : null;
   const [provider, setProvider] = useState<AgentProvider>(
     inferAgentProvider(agent.command, agent.provider)
   );
@@ -88,6 +100,7 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
       name: trimmedName,
       character,
       accent,
+      ...(looks && lookDraftState?.key === lookKey ? { appearanceByTheme: withLook(agent.appearanceByTheme, looks.themeId, draftToLook(lookDraftState.draft)) } : {}),
       provider,
       model,
       effort: provider === 'codex' ? effort : undefined,
@@ -170,6 +183,15 @@ export function EditAgentModal({ agent, onClose }: EditAgentModalProps) {
                   })}
                 </div>
               </Row>
+
+              {looks && lookDraft && (
+                <ThemeLookBuilder
+                  looks={looks}
+                  draft={lookDraft}
+                  character={character}
+                  onChange={(d) => setLookDraftState({ key: lookKey, draft: d })}
+                />
+              )}
 
               <Row label="Color">
                 <div style={{ display: 'flex', gap: 6 }}>

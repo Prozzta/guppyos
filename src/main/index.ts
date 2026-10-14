@@ -6784,6 +6784,28 @@ interface SpawnRequest {
   // from the worker id.
   character?: string;
   accent?: string;
+  // The look on a theme-pack floor ({ theme?, presetId?, bodyId?, colors? }). Only its
+  // shape and size are checked here; the renderer resolves it against the pack.
+  appearance?: unknown;
+}
+
+/** A spawn request's appearance, passed on only as a small plain object of
+ *  short strings (anything else is dropped; the renderer validates the rest). */
+function spawnAppearance(v: unknown): Record<string, unknown> | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  try { if (JSON.stringify(v).length > 400) return undefined; } catch { return undefined; }
+  const out: Record<string, unknown> = {};
+  for (const k of ['theme', 'presetId', 'bodyId'] as const) {
+    const x = (v as Record<string, unknown>)[k];
+    if (typeof x === 'string' && x.length <= 40) out[k] = x;
+  }
+  const c = (v as Record<string, unknown>).colors;
+  if (c && typeof c === 'object' && !Array.isArray(c)) {
+    const colors: Record<string, string> = {};
+    for (const p of ['skin', 'shirt', 'hair']) { const x = (c as Record<string, unknown>)[p]; if (typeof x === 'string' && x.length <= 16) colors[p] = x; }
+    if (Object.keys(colors).length) out.colors = colors;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Polling cadence — matches the hive router. */
@@ -6971,7 +6993,8 @@ async function processSpawnRequest(filePath: string): Promise<void> {
       role: meta.role,
       worktreePath: res.worktreePath,
       character: typeof raw.character === 'string' ? raw.character : undefined,
-      accent: typeof raw.accent === 'string' ? raw.accent : undefined
+      accent: typeof raw.accent === 'string' ? raw.accent : undefined,
+      appearance: spawnAppearance(raw.appearance)
     });
   } catch { /* window torn down */ }
 

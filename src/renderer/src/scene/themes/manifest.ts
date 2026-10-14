@@ -75,19 +75,64 @@ export interface NavigationSpec {
   zonesLayer?: string;
 }
 
-export interface BuilderBody { id: string; label: string; /** sheet column */ column: number; }
+/** The recolourable parts of a body. */
+export type LookPart = 'skin' | 'shirt' | 'hair';
+export const LOOK_PARTS: readonly LookPart[] = ['skin', 'shirt', 'hair'];
+export type LookColors = Record<LookPart, string>;
+
+/** The exact sheet colours that make up one part of a body. Each shade is
+ *  recoloured from the chosen colour (the main shade becomes it), so the
+ *  sheet's shading survives. */
+export interface PartSpec {
+  main: string;
+  /** Every shade of the part, main included (#rrggbb). */
+  shades: string[];
+  /** Hair only: the hair is drawn in the outline colour, so it is found by
+   *  shape (inner outline pixels joined to the top of the head). */
+  byShape?: boolean;
+}
+
+/** A body's head-and-shoulders picture for cards: a sheet frame and a box in it. */
+export interface PortraitSpec {
+  /** Sheet row of the front-facing frame (default spriteRenderer.rows.down). */
+  row?: number;
+  /** [x, y, w, h] inside the frame. */
+  crop: [number, number, number, number];
+}
+
+export interface BuilderBody {
+  id: string;
+  label: string;
+  /** sheet column */
+  column: number;
+  parts?: Partial<Record<LookPart, PartSpec>>;
+  portrait?: PortraitSpec;
+}
 
 export interface BuilderPreset {
   id: string;
   label?: string;
   bodyId?: string;
+  colors?: Partial<LookColors>;
   /** Station this preset's agents take first (seat affinity). */
   seat?: string;
 }
 
 export interface BuilderSpec {
+  /** The sheet's line colour: never recoloured; dark shades keep contrast to it. */
+  outline?: string;
+  /** The sheet's eye colour: never part of hair found by shape. */
+  eyes?: string;
+  /** Named swatches per part, offered by the builder. */
+  swatches?: Partial<Record<LookPart, Record<string, string>>>;
+  /** Whether a colour outside the swatches may be chosen (default true). */
+  customColours?: boolean;
   bodies?: BuilderBody[];
   presets?: BuilderPreset[];
+  /** The look of an agent whose saved look is unusable. */
+  defaults?: { bodyId?: string; colors?: Partial<LookColors> };
+  /** The look shown on onboarding's sample cards. */
+  sample?: AppearanceSeed;
 }
 
 export interface AppearanceSeed {
@@ -228,17 +273,77 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
     if (!isObj(b)) err('"builder" must be an object');
     else {
       builder = {};
+      const hex = (v: unknown): v is string => typeof v === 'string' && HEX_RE.test(v);
+      const lower = (v: string) => v.toLowerCase();
+      const colorsOf = (v: unknown, at: string): Partial<LookColors> | undefined => {
+        if (!isObj(v)) { err(`"${at}" must be an object of skin, shirt and hair colours`); return undefined; }
+        const out: Partial<LookColors> = {};
+        for (const [k, c] of Object.entries(v)) {
+          if (!LOOK_PARTS.includes(k as LookPart)) err(`"${at}.${k}" is not a part (skin, shirt or hair)`);
+          else if (!hex(c)) err(`"${at}.${k}" must be a #rrggbb colour`);
+          else out[k as LookPart] = lower(c);
+        }
+        return out;
+      };
+      for (const k of ['outline', 'eyes'] as const) if (b[k] !== undefined) { if (!hex(b[k])) err(`"builder.${k}" must be a #rrggbb colour`); else builder[k] = lower(b[k] as string); }
+      if (b.customColours !== undefined) { if (typeof b.customColours !== 'boolean') err('"builder.customColours" must be true or false'); else builder.customColours = b.customColours; }
+      if (b.swatches !== undefined) {
+        if (!isObj(b.swatches)) err('"builder.swatches" must map parts to named colours');
+        else {
+          builder.swatches = {};
+          for (const [part, set] of Object.entries(b.swatches)) {
+            if (!LOOK_PARTS.includes(part as LookPart)) { err(`"builder.swatches.${part}" is not a part (skin, shirt or hair)`); continue; }
+            if (!isObj(set) || !Object.keys(set).length || !Object.entries(set).every(([n, c]) => isStr(n, 40) && hex(c))) { err(`"builder.swatches.${part}" must map names to #rrggbb colours`); continue; }
+            builder.swatches[part as LookPart] = Object.fromEntries(Object.entries(set).map(([n, c]) => [n, lower(c as string)]));
+          }
+        }
+      }
       if (b.bodies !== undefined) {
         if (!Array.isArray(b.bodies)) err('"builder.bodies" must be a list');
         else {
           const ids = new Set<string>();
           builder.bodies = [];
+          const fw = isObj(sr) && isInt(sr.frameWidth, 1, 256) ? sr.frameWidth : 0, fh = isObj(sr) && isInt(sr.frameHeight, 1, 256) ? sr.frameHeight : 0;
           for (const [i, x] of (b.bodies as unknown[]).entries()) {
             if (!isObj(x) || !isStr(x.id, 40) || !ID_RE.test(x.id) || !isStr(x.label, 40) || !isInt(x.column, 0, 255)) { err(`"builder.bodies[${i}]" needs id, label and column`); continue; }
             if (ids.has(x.id)) err(`"builder.bodies" lists "${x.id}" twice`);
             ids.add(x.id);
-            builder.bodies.push({ id: x.id, label: x.label, column: x.column });
+            const body: BuilderBody = { id: x.id, label: x.label, column: x.column };
+            if (x.parts !== undefined) {
+              if (!isObj(x.parts)) err(`"builder.bodies[${i}].parts" must map parts to { main, shades }`);
+              else {
+                body.parts = {};
+                for (const [part, p] of Object.entries(x.parts)) {
+                  const at = `builder.bodies[${i}].parts.${part}`;
+                  if (!LOOK_PARTS.includes(part as LookPart)) { err(`"${at}" is not a part (skin, shirt or hair)`); continue; }
+                  if (!isObj(p) || !hex(p.main) || (p.shades !== undefined && !(Array.isArray(p.shades) && p.shades.every(hex)))) { err(`"${at}" needs a #rrggbb main and a list of #rrggbb shades`); continue; }
+                  if (p.byShape !== undefined && (p.byShape !== true || part !== 'hair')) { err(`"${at}.byShape" is only for hair, and must be true`); continue; }
+                  if (p.byShape && !hex(b.outline)) { err(`"${at}.byShape" needs "builder.outline" (the colour the hair is drawn in)`); continue; }
+                  const shades = [...new Set([lower(p.main as string), ...((p.shades as string[] | undefined) ?? []).map(lower)])];
+                  body.parts[part as LookPart] = { main: lower(p.main as string), shades, ...(p.byShape ? { byShape: true } : {}) };
+                }
+              }
+            }
+            if (x.portrait !== undefined) {
+              const p = x.portrait, c = isObj(p) ? p.crop : undefined;
+              const cropOk = Array.isArray(c) && c.length === 4 && c.every((v) => isInt(v, 0, 256)) && c[2] > 0 && c[3] > 0
+                && (!fw || (c[0] + c[2] <= fw && c[1] + c[3] <= fh));
+              if (!isObj(p) || !cropOk || (p.row !== undefined && !isInt(p.row, 0, 63))) err(`"builder.bodies[${i}].portrait" needs crop [x, y, w, h] inside one ${fw}x${fh} frame (and an optional row)`);
+              else body.portrait = { crop: [...(c as number[])] as [number, number, number, number], ...(p.row !== undefined ? { row: p.row as number } : {}) };
+            }
+            builder.bodies.push(body);
           }
+        }
+      }
+      const bodyIds = new Set((builder.bodies ?? []).map((x) => x.id));
+      const knownBody = (v: unknown) => isStr(v, 40) && (!bodyIds.size || bodyIds.has(v));
+      if (b.defaults !== undefined) {
+        const d = b.defaults;
+        if (!isObj(d)) err('"builder.defaults" must be an object');
+        else {
+          builder.defaults = {};
+          if (d.bodyId !== undefined) { if (!knownBody(d.bodyId)) err('"builder.defaults.bodyId" is not a declared body'); else builder.defaults.bodyId = d.bodyId as string; }
+          if (d.colors !== undefined) { const c = colorsOf(d.colors, 'builder.defaults.colors'); if (c) builder.defaults.colors = c; }
         }
       }
       if (b.presets !== undefined) {
@@ -255,12 +360,25 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
             const p: BuilderPreset = { id: x.id };
             if (x.label !== undefined) { if (!isStr(x.label, 40)) err(`"builder.presets[${i}].label" must be a short string`); else p.label = x.label; }
             if (x.bodyId !== undefined) { if (!isStr(x.bodyId) || (bodies.size && !bodies.has(x.bodyId))) err(`"builder.presets[${i}].bodyId" is not a declared body`); else p.bodyId = x.bodyId; }
+            if (x.colors !== undefined) { const c = colorsOf(x.colors, `builder.presets[${i}].colors`); if (c) p.colors = c; }
             if (x.seat !== undefined) {
               if (!isStr(x.seat, 80) || !order.has(x.seat.toLowerCase())) err(`"builder.presets[${i}].seat" must be one of the names in stations.seatOrder`);
               else if (stations?.captain && x.seat.toLowerCase() === stations.captain.toLowerCase()) err(`"builder.presets[${i}].seat" cannot be the captain's station`);
               else p.seat = x.seat;
             }
             builder.presets.push(p);
+          }
+        }
+      }
+      if (b.sample !== undefined) {
+        const s = b.sample;
+        if (!isObj(s) || !knownBody(s.bodyId)) err('"builder.sample" needs the bodyId of a declared body');
+        else {
+          builder.sample = { bodyId: s.bodyId as string };
+          if (s.colors !== undefined) { const c = colorsOf(s.colors, 'builder.sample.colors'); if (c) builder.sample.colors = c; }
+          if (s.presetId !== undefined) {
+            if (!builder.presets?.some((p) => p.id === s.presetId)) err('"builder.sample.presetId" is not a declared preset');
+            else builder.sample.presetId = s.presetId as string;
           }
         }
       }
