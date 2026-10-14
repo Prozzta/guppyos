@@ -20,15 +20,25 @@
  *   tools: [...realtimeReadTools(), ...realtimeActionTools()]
  */
 import { tool } from '@openai/agents-realtime';
+import { useStore } from '@/store/store';
+import type { ThemeId } from '@/scene/office/themeRegistry';
+import { floorSceneTheme, resolveProjectTheme } from '@shared/projectTheme';
 
 const obj = (x: unknown): Record<string, unknown> =>
   x && typeof x === 'object' ? (x as Record<string, unknown>) : {};
 const str = (x: unknown): string => (typeof x === 'string' ? x : '');
 
+/** After a voice theme switch (VOICE-THEME-185): re-read the config main just wrote and
+ *  show the project's floor, as the Settings picker does after config:setProjectTheme. */
+async function showProjectTheme(): Promise<void> {
+  const c = await window.cth.getConfig();
+  useStore.getState().setOfficeTheme(floorSceneTheme(resolveProjectTheme(c, c.harnessHome), c.tvShowOffices) as ThemeId);
+}
+
 /** Forward a verb + args to the main action spine and return its spoken result.
  *  Instrumented for the rt-5 live-bug: any failure is logged to the (human-visible)
  *  renderer console with the verb + raw args so the next repro is self-diagnosing. */
-async function act(verb: string, input: unknown): Promise<string> {
+async function act(verb: string, input: unknown, onOk?: () => Promise<void>): Promise<string> {
   // Graceful guard: if the preload bridge is missing (e.g. a dev hot-reload left the
   // renderer ahead of a stale preload), say so instead of throwing an opaque error.
   if (typeof window.cth?.realtimeAction !== 'function') {
@@ -38,6 +48,7 @@ async function act(verb: string, input: unknown): Promise<string> {
   try {
     const res = await window.cth.realtimeAction({ verb, ...obj(input) });
     if (!res?.ok) console.warn('[realtime-action] verb=%s rejected: %s', verb, res?.spoken, { input });
+    else if (onOk) await onOk().catch((e) => console.warn('[realtime-action] verb=%s follow-up failed:', verb, e));
     return res?.spoken || 'Done.';
   } catch (e) {
     console.error('[realtime-action] verb=%s threw:', verb, e, { input });
@@ -360,7 +371,7 @@ export function realtimeActionTools(): ReturnType<typeof tool>[] {
     tool({
       name: 'update_setting',
       description:
-        "Change one app setting from the voice-allowed list. Cosmetic/low-risk keys (notifications, terminalTheme, freeflowEnabled, strongKeepalive, autoUpdate, tvShowOffices, realtimeIdleDisconnectMs) apply immediately; behavior-changing keys (autoMode, defaultModel, godProvider, godModel, maxConcurrentWorkers, costCapTokens, maxTurns, slackEnabled, webhookEnabled, semanticMemory, multiWindow) return an echo-back with old→new and need verbal confirmation ('setting' or 'confirm') — then call confirm_action. Secrets, folders and anything not listed are refused.",
+        "Change one app setting from the voice-allowed list. Cosmetic/low-risk keys (notifications, officeTheme, terminalTheme, freeflowEnabled, strongKeepalive, autoUpdate, tvShowOffices, realtimeIdleDisconnectMs) apply immediately; officeTheme switches THIS project's floor theme (a theme name such as The Office or TES) and keeps every agent; behavior-changing keys (autoMode, defaultModel, godProvider, godModel, maxConcurrentWorkers, costCapTokens, maxTurns, slackEnabled, webhookEnabled, semanticMemory, multiWindow) return an echo-back with old→new and need verbal confirmation ('setting' or 'confirm') — then call confirm_action. Secrets, folders and anything not listed are refused.",
       parameters: {
         type: 'object',
         properties: {
@@ -370,7 +381,8 @@ export function realtimeActionTools(): ReturnType<typeof tool>[] {
         required: ['key', 'value'],
         additionalProperties: false
       },
-      execute: (input) => act('update_setting', input)
+      // VOICE-THEME-185: main switched this project's theme; show it on the floor now, as the Settings picker does.
+      execute: (input) => act('update_setting', input, /^(officeTheme|projectTheme|theme)$/.test(String(obj(input).key ?? '')) ? showProjectTheme : undefined)
     }),
 
     // ── confirm / cancel (drive the two-phase commit) ─────────────────────

@@ -40,6 +40,7 @@ import type { ScheduledMission } from './config';
 import { inferAgentProvider } from '../shared/agentProvider';
 import { clearCommandForProvider } from '../shared/providerAutomation';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
+import { isProjectThemeId, projectThemes } from '../shared/projectTheme';
 
 export const VOICE_ACTOR = 'michael-voice';
 
@@ -86,6 +87,11 @@ export interface RealtimeActionDeps {
    *  raw patch. */
   getConfigValue(key: string): unknown;
   patchConfig(patch: Record<string, unknown>): void;
+  /** update_setting officeTheme (VOICE-THEME-185): the current project's theme, and the
+   *  per-project switch the Settings picker uses (config:setProjectTheme). Never the
+   *  legacy global officeTheme key. */
+  getProjectTheme(): string;
+  setProjectTheme(theme: string): void;
 }
 
 /** The result every action / confirm / cancel returns to the renderer tool, which
@@ -718,6 +724,7 @@ function proposeDestructive(deps: RealtimeActionDeps, verb: string, a: Record<st
   // v0.3.4: settings, through the policy table ONLY.
   if (verb === 'update_setting') {
     const key = str(a.key) || str(a.setting) || str(a.name);
+    if (THEME_KEYS.has(key)) return setThemeByVoice(deps, a.value);
     const policy = SETTING_POLICY[key];
     if (!key) return { ok: false, spoken: 'Which setting should I change?' };
     if (!policy) {
@@ -766,6 +773,27 @@ function proposeDestructive(deps: RealtimeActionDeps, verb: string, a: Record<st
   }
 
   return { ok: false, spoken: `I don't know how to ${verb}.` };
+}
+
+/** VOICE-THEME-185: "switch the theme" by voice. 1.1.84 wrote the global officeTheme;
+ *  since themes are per project, voice takes the Settings picker's path instead: the
+ *  current project's theme, validated as the picker's IPC validates it (a built-in or
+ *  a pack installed in this build). Soft, like 1.1.84: it changes only how the floor
+ *  looks, and switching keeps every agent. A theme is matched by id or by its label. */
+const THEME_KEYS = new Set(['officeTheme', 'projectTheme', 'theme']);
+function setThemeByVoice(deps: RealtimeActionDeps, raw: unknown): ActionResult {
+  const want = normMatch(str(raw));
+  const themes = projectThemes();
+  const names = themes.map((t) => t.label).join(', ');
+  if (!want) return { ok: false, spoken: `Which theme? The choices are: ${names}.` };
+  const hit = themes.find((t) => normMatch(t.id) === want || normMatch(t.label) === want);
+  if (!hit || !isProjectThemeId(hit.id)) return { ok: false, spoken: `There's no "${str(raw).trim()}" theme here. The choices are: ${names}.` };
+  const labelOf = (id: string): string => themes.find((t) => t.id === id)?.label ?? id;
+  const old = deps.getProjectTheme();
+  if (old === hit.id) return { ok: true, spoken: `This project's theme is already ${hit.label} — nothing to change.` };
+  deps.setProjectTheme(hit.id);
+  attribute(deps, 'update_setting', 'project theme', { action: `${labelOf(old)} → ${hit.label}` });
+  return { ok: true, spoken: `Done — this project's theme is now ${hit.label} (was ${labelOf(old)}). Every agent stays.` };
 }
 
 /** Top-level propose/execute for one verb. Soft writes run now; destructive ones

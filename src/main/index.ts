@@ -54,7 +54,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
+  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -4888,7 +4888,9 @@ ipcMain.handle('config:setAgentTokenCap', (_evt, agentId: unknown, tokenCap: unk
 );
 /** Renderer config is a snapshot. Keep the project-map read/merge/write in main
  *  so choices made by two windows cannot erase each other. */
-ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => {
+ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => chooseProjectTheme(theme));
+/** The current project's theme choice: the Settings picker's IPC, and voice (VOICE-THEME-185). */
+function chooseProjectTheme(theme: unknown): HarnessConfig {
   const current = readConfig(), home = current.harnessHome;
   if (!home) throw new Error('no project home is configured');
   // Onboarding creates its home through config:ensureHome. When main saw that folder
@@ -4901,7 +4903,7 @@ ipcMain.handle('config:setProjectTheme', (_evt, theme: unknown) => {
     return writeConfig(applyProjectHomeChange(current, { mode: 'fresh', newHome: home, blankProject: true, theme }));
   }
   return setProjectThemeForHome(home, theme);
-});
+}
 /** Homes main itself saw blank when onboarding created them (keys); consumed by the first theme choice. */
 const blankCreatedHomes = new Set<string>();
 // v1.1.45 unit #8: set the capacity-display threshold. Invalid input throws and changes
@@ -6726,7 +6728,9 @@ registerRealtimeActionIpc({
     try { liveWebContents()?.send('realtime:enqueue', { agentId: id, text }); } catch { /* window gone */ }
   },
   getConfigValue: (key) => (readConfig() as unknown as Record<string, unknown>)[key],
-  patchConfig: (patch) => { writeConfig(patch as Partial<HarnessConfig>); }
+  patchConfig: (patch) => { writeConfig(patch as Partial<HarnessConfig>); },
+  getProjectTheme: () => { const c = readConfig(); return resolveProjectThemeForHome(c, c.harnessHome ?? undefined); },
+  setProjectTheme: (theme) => { chooseProjectTheme(theme); }
 });
 
 // rt-12 seam: push detected completions to the live floor; bridge live-flag, queue
