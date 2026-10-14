@@ -32,6 +32,9 @@ switching it keeps every agent.** Rollback: 1.1.84 (reinstall).
 - **The agent card always shows the agent's name.** When the name would be cut short, the status
   chip shrinks to its colour dot. The status is in the dot's tooltip.
 - **The stations floor is capped at 30 fps,** as the office floor is.
+- **The TES floor is centred and framed to its own shape.** By default the floor area takes the
+  ship's proportions and the ship fills it; the empty hull below the deck may run off the bottom.
+  A sidebar width you set yourself is kept, and double-clicking the divider goes back to the default.
 
 ### Fixed
 
