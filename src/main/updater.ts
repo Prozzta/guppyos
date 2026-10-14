@@ -364,6 +364,8 @@ export function initAutoUpdater(getWebContents: () => WebContents | null): void 
     ipcMain.handle('update:restartAndInstall', refused);
     ipcMain.handle('update:checkNow', refused);
     ipcMain.handle('update:download', refused);
+    ipcMain.handle('update:simulate', refused);
+    ipcMain.handle('update:openRelease', refused);
     ipcMain.handle('update:current', () => ({ state: 'idle' }));
     return;
   }

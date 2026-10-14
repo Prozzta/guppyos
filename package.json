@@ -23,7 +23,7 @@
     "test:focused": "node test/tools/run-tests.cjs",
     "check:links": "node tools/check-release-links.cjs",
     "dist": "npm run build && electron-builder",
-    "dist:trial": "set GUPPY_TRIAL_BUILD=1&& npm run build && electron-builder --config electron-builder.trial.yml",
+    "dist:trial": "node tools/build-trial.cjs",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
     "dist:linux": "npm run build && electron-builder --linux"

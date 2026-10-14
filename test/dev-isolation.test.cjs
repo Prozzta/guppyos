@@ -44,9 +44,12 @@ test('G3 force-dev trial root is distinct from the shared MUNDER_DEV root and pa
 test('G2 updater and G4 login-item IPC explicitly refuse under DEV_ISOLATION', () => {
   const updater = fs.readFileSync(path.resolve(__dirname, '../src/main/updater.ts'), 'utf8');
   const index = fs.readFileSync(path.resolve(__dirname, '../src/main/index.ts'), 'utf8');
+  const loginItem = fs.readFileSync(path.resolve(__dirname, '../src/main/loginItem.ts'), 'utf8');
   assert.match(updater, /import \{ DEV_HIDDEN, DEV_ISOLATION \} from '\.\/devIsolation';/);
-  assert.match(updater, /export function initAutoUpdater[\s\S]{0,900}if \(DEV_ISOLATION\)[\s\S]{0,900}ipcMain\.handle\('update:checkNow', refused\)[\s\S]{0,300}ipcMain\.handle\('update:download', refused\)[\s\S]{0,300}return;/);
-  assert.match(index, /ipcMain\.handle\('app:setLoginItem',[\s\S]{0,500}if \(DEV_ISOLATION\) return false;[\s\S]{0,300}app\.setLoginItemSettings/);
+  assert.match(updater, /export function initAutoUpdater[\s\S]{0,900}if \(DEV_ISOLATION\)[\s\S]{0,900}ipcMain\.handle\('update:checkNow', refused\)[\s\S]{0,300}ipcMain\.handle\('update:download', refused\)[\s\S]{0,300}ipcMain\.handle\('update:simulate', refused\)[\s\S]{0,300}ipcMain\.handle\('update:openRelease', refused\)[\s\S]{0,300}return;/);
+  assert.match(index, /import \{ setLoginItem \} from '\.\/loginItem';/);
+  assert.match(index, /ipcMain\.handle\('app:setLoginItem',[\s\S]{0,300}return setLoginItem\(enabled\);/);
+  assert.match(loginItem, /if \(DEV_ISOLATION\) return false;[\s\S]{0,300}app\.setLoginItemSettings/);
 });
 
 test('devDataRoot is FIXED on win32 and ignores the environment (no MUNDER_DEV_DATA override)', () => {

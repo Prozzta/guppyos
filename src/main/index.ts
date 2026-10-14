@@ -37,6 +37,7 @@ import { homedir, tmpdir } from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import { runMemorySmoke, smokeTarget } from './nativeMemory/smoke';
 import { benchTarget, runMemoryBenchHost } from './nativeMemory/bench';
+import { setLoginItem } from './loginItem';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
 import {
@@ -6248,11 +6249,7 @@ ipcMain.handle('app:openExternal', async (_evt, url: unknown) => {
 /** Toggle macOS "Open at Login" — fully programmatic, no permission prompt.
  *  Returns the resulting state so the renderer toggle reflects reality. */
 ipcMain.handle('app:setLoginItem', (_evt, enabled: unknown) => {
-  // Login items are persistent OS state. A trial/DEV build must never create
-  // one that could later launch a non-Stable binary for the Human.
-  if (DEV_ISOLATION) return false;
-  app.setLoginItemSettings({ openAtLogin: enabled === true });
-  return app.getLoginItemSettings().openAtLogin;
+  return setLoginItem(enabled);
 });
 
 // ─── IPC: Slack integration ─────────────────────────────────────────────────
