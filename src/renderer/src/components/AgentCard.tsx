@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
-import { PixelBadge, StatusKind } from './PixelBadge';
+import { PixelBadge, StatusKind, badgeText } from './PixelBadge';
 import { useHasTerminalDraft } from './terminalPool';
 import { SpritePortrait } from './SpritePortrait';
 import { RealtimeMichaelToggle } from './RealtimeMichaelToggle';
@@ -142,6 +142,40 @@ export function AgentCard({
   const outerShadow = [selectionRing, dropShadow === 'none' ? '' : dropShadow]
     .filter(Boolean).join(', ') || 'none';
 
+  // The NAME outranks the badges. 220px still cut it ("M…" on god's row, where
+  // the pencil, BOSS and a status like "working" leave the name ~17px; "JAC…"
+  // beside "compacting"). The status chip's label is the widest thing on the
+  // row, so when the name would show fewer than 8 glyphs (or fewer than it has),
+  // the chip drops to its colour dot and the label moves to its tooltip. Measured
+  // before paint, once per name/status/label, so it never flickers. (MunderDev
+  // 97bda465 + c6b98de9; Guppy's label is the impact-aware `held` chip's.)
+  const badgeLabel = badgeText(held.status, held.label);
+  const nameRowRef = useRef<HTMLSpanElement>(null);
+  const fitKey = `${name}|${badgeLabel}|${isGod ? 1 : 0}|${onRename ? 1 : 0}`;
+  const [dotFor, setDotFor] = useState<string | null>(null);
+  const dotBadge = dotFor === fitKey;
+  // A card can mount before the pixel font arrives; the fallback is narrower,
+  // so measure again once fonts finish loading.
+  const [fontEpoch, setFontEpoch] = useState(0);
+  useEffect(() => {
+    const fonts = document.fonts;
+    if (!fonts) return;
+    let live = true;
+    const bump = () => { if (live) setFontEpoch((n) => n + 1); };
+    fonts.addEventListener('loadingdone', bump);
+    void fonts.ready.then(bump);
+    return () => { live = false; fonts.removeEventListener('loadingdone', bump); };
+  }, []);
+  useLayoutEffect(() => {
+    if (dotBadge || !nameRowRef.current) return;
+    const shown = name.toUpperCase();
+    const el = [...nameRowRef.current.querySelectorAll('span')]
+      .find((s) => s.childElementCount === 0 && s.textContent === shown);
+    if (!el) return;
+    const glyph = parseFloat(getComputedStyle(el).fontSize) || 8; // the display font is 1em per glyph
+    if (el.clientWidth + 0.5 < Math.min(el.scrollWidth, 8 * glyph)) setDotFor(fitKey);
+  }, [fitKey, dotBadge, name, fontEpoch]);
+
   // One context line: what it's DOING while working, WHERE it lives while idle.
   const infoLine = held.impactText ?? toolText ?? ((status !== 'idle' && action && action !== 'idle') ? action : project);
   const noteFirstLine = (note ?? '').split('\n').find((l) => l.trim()) ?? '';
@@ -245,11 +279,11 @@ export function AgentCard({
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
             {/* Identity row: name (+ BOSS tag) + status. */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'space-between', minWidth: 0 }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0, flex: 1 }}>
+              <span ref={nameRowRef} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, minWidth: 0, flex: 1 }}>
                 {onRename ? (
                   <AgentNameEditor name={name} onCommit={onRename} uppercase />
                 ) : (
-                  <span style={{
+                  <span title={name} style={{
                     fontFamily: 'var(--cth-font-display)',
                     fontSize: 'var(--cth-text-display-sm)',
                     lineHeight: 'var(--cth-lh-display-sm)',
@@ -270,7 +304,13 @@ export function AgentCard({
                   it was allowed to shrink, the browser resolved the overflow by
                   eating the NAME instead. Truncation should land on the longest,
                   most redundant thing, not on the identity. */}
-              <PixelBadge status={held.status} label={held.label} style={{ flexShrink: 0 }} />
+              {dotBadge ? (
+                <span role="img" title={badgeLabel} aria-label={badgeLabel} style={{ display: 'inline-flex', flexShrink: 0 }}>
+                  <PixelBadge status={held.status} label="" style={{ flexShrink: 0, padding: '5px 6px' }} />
+                </span>
+              ) : (
+                <PixelBadge status={held.status} label={held.label} style={{ flexShrink: 0 }} />
+              )}
             </div>
 
             {/* Context line: action while working, repo while idle. */}
