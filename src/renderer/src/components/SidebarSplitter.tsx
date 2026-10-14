@@ -7,6 +7,8 @@ export interface SidebarSplitterProps {
   onChange: (px: number) => void;
   /** Containing viewport width — used to clamp delta to a sane max. */
   viewportWidth: number;
+  /** Double-click: back to the default width. Without it, double-click sets 420. */
+  onReset?: () => void;
   min?: number;
   max?: number;
 }
@@ -16,7 +18,7 @@ export interface SidebarSplitterProps {
  * (right). Drag left → wider sidebar. Cursor + pixel-stripe affordance.
  */
 export function SidebarSplitter({
-  width, onChange, viewportWidth, min = 320, max = 1200
+  width, onChange, viewportWidth, onReset, min = 320, max = 1200
 }: SidebarSplitterProps) {
   const startRef = useRef<{ clientX: number; width: number } | null>(null);
   const [active, setActive] = useState(false);
@@ -54,7 +56,7 @@ export function SidebarSplitter({
         setActive(true);
         e.preventDefault();
       }}
-      onDoubleClick={() => onChange(420)}
+      onDoubleClick={() => (onReset ? onReset() : onChange(420))}
       title="Drag to resize · double-click to reset"
       style={{
         width: 10,

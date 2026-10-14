@@ -254,6 +254,15 @@ app.whenReady().then(async () => {
       return new Promise((resolve) => setTimeout(() => resolve({ size: win.getSize() }), 120));
     });
 
+    // TES-GUPPY-FRAMING: a screenshot of the whole (hidden) page at a given CONTENT size, so a
+    // full-window shot is the size asked for whatever the window frame is.
+    ipcMain.handle('harness:capture', async (_e, { width: w, height: h }) => {
+      win.setContentSize(Math.round(w), Math.round(h));
+      await new Promise((r) => setTimeout(r, 400));
+      const img = await win.webContents.capturePage();
+      return { size: img.getSize(), png: img.toDataURL() };
+    });
+
     // IMPACT-LOOP-171: the renderer's OWN process memory (private bytes, as the app's
     // RendererMemorySampler reads it), which a page cannot observe about itself.
     ipcMain.handle('harness:metrics', () => {

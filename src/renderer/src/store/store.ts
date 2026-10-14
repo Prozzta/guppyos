@@ -213,6 +213,9 @@ interface State {
    *  fallback for anything that genuinely has no particular agent in mind. */
   ideAgentId: string | null;
   sidebarWidth: number;
+  /** True once the user has sized the sidebar (dragged, or a stored width). Until then a
+   *  framed floor (TES-GUPPY-FRAMING) may choose the default width; the office keeps 420. */
+  sidebarWidthSet: boolean;
   sidebarTab: SidebarTab;
   godStatus: GodStatus;
   /** Per-agent outgoing message queue (agent id → messages awaiting delivery).
@@ -344,6 +347,8 @@ interface State {
   setIdeOpen: (open: boolean, agentId?: string | null) => void;
   setIdeInitialFile: (path: string | null) => void;
   setSidebarWidth: (px: number) => void;
+  /** Forget the user's width: back to the default (420, or a framed floor's own). */
+  resetSidebarWidth: () => void;
   setSidebarTab: (tab: SidebarTab) => void;
   /** Drop persisted agents whose PTY is no longer alive in the main process.
    *  Called once at startup so a renderer reload (e.g. after the laptop sleeps)
@@ -606,7 +611,7 @@ const initialSidebarWidth = (() => {
     const n = v ? parseInt(v, 10) : NaN;
     if (!Number.isNaN(n) && n >= 320 && n <= 1200) return n;
   } catch { /* noop */ }
-  return 420;
+  return null;
 })();
 const initialSidebarTab: SidebarTab = (() => {
   try {
@@ -674,7 +679,8 @@ export const useStore = create<State>((set, get) => ({
   ideInitialFile: null,
   ideOpen: false,
   ideAgentId: null,
-  sidebarWidth: initialSidebarWidth,
+  sidebarWidth: initialSidebarWidth ?? 420,
+  sidebarWidthSet: initialSidebarWidth !== null,
   sidebarTab: initialSidebarTab,
   godStatus: 'booting',
   messageQueues: initialQueues,
@@ -1019,7 +1025,11 @@ export const useStore = create<State>((set, get) => ({
   setSidebarWidth: (px) => {
     const clamped = Math.min(1200, Math.max(320, Math.round(px)));
     try { window.localStorage.setItem(LS_SIDEBAR_WIDTH, String(clamped)); } catch { /* noop */ }
-    set({ sidebarWidth: clamped });
+    set({ sidebarWidth: clamped, sidebarWidthSet: true });
+  },
+  resetSidebarWidth: () => {
+    try { window.localStorage.removeItem(LS_SIDEBAR_WIDTH); } catch { /* noop */ }
+    set({ sidebarWidth: 420, sidebarWidthSet: false });
   },
   setSidebarTab: (tab) => {
     try { window.localStorage.setItem(LS_SIDEBAR_TAB, tab); } catch { /* noop */ }
