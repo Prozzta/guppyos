@@ -214,6 +214,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           const H = app.canvas.height;
           inPass = true;
           try {
+            // The people stay visible after the passes: between frames, when pointer events are
+            // dispatched, Pixi prunes invisible sprites from hit tests (onTick hides them again
+            // before the next main pass).
             for (const s of sprites.values()) s.sprite.visible = true;
             cacheLayer.visible = false;
             if (passCache) passCache.visible = true;
@@ -228,7 +231,6 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
             cacheLayer.visible = true;
             if (passCache) passCache.visible = false;
             statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
-            for (const s of sprites.values()) s.sprite.visible = false;
             inPass = false;
           }
         },
@@ -268,7 +270,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const stand = { down: R.rows.down, up: R.rows.up, left: R.rows.left, right: R.rows.right };
       const sit = { down: R.rows.sitDown, up: R.rows.sitUp, left: R.rows.sitLeft, right: R.rows.sitRight };
 
-      const camera = new Camera(world);
+      // TES-GUPPY-SETTLE: eased by time and landed exactly, so a slow frame rate cannot keep the
+      // picture moving (and the cache off) for long.
+      const camera = new Camera(world, { resolution: () => app.renderer.resolution });
       camera.setMapSize(SM.PW, SM.PH);
       // TES-GUPPY-FRAMING: fit the pack's art (centred, its dead bottom band clippable), not the whole map.
       camera.setFrame(floorFrame(pack.manifest.id, SM.PW, SM.PH));
@@ -298,6 +302,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       sync();
 
       let clock = 0;
+      // The camera's clock: the time between this floor's own ticks (the ticker's deltaMS is capped
+      // at 100 ms, and under the frame budget it spans one display frame, not one floor tick).
+      let lastTickAt = performance.now();
       let lastDepth: string | null = null;
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
@@ -327,7 +334,11 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const dt = Math.min(80, tk.deltaMS);
         clock += dt;
         crew.tick(dt);
-        camera.update(dt / 1000);
+        // The camera eases by all the time that passed, however long the frame took: a stalled
+        // frame (the GPU busy for seconds) must not leave the camera behind.
+        const now = performance.now();
+        camera.update(Math.max(0, now - lastTickAt) / 1000);
+        lastTickAt = now;
         const people: Array<{ foot: number; rank: number; sprite: Sprite; id: string }> = [];
         for (const p of crew.walkers()) {
           const s = sprites.get(p.id);

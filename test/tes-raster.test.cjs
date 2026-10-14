@@ -238,6 +238,10 @@ test('regionPicker picks every static that samples an opaque texel at a device p
     }
   }
   assert.ok(missedShort > 0, 'a box 1 map px short misses a static that draws in the rect');
+  // With exact arithmetic margin 0 is enough (above), so no pixel test can fail it; the default
+  // margin of one cell guards the GPU's float ties at cell and box edges, and is pinned as written.
+  const cache = codeOnly(readSource('src/renderer/src/scene/themes/staticCache.ts'));
+  assert.match(cache, /export function regionPicker\([^)]*, cell = NEAR_CELL, margin = 1\): \(box: Box\) => boolean\[\]/);
 });
 
 test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above" layer is empty', () => {
@@ -298,6 +302,11 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   assert.match(src, /\} finally \{\s*gl\.disable\(gl\.SCISSOR_TEST\);\s*cacheLayer\.visible = true;\s*if \(passCache\) passCache\.visible = false;/);
   assert.match(src, /passCache\.position\.set\(0, H \/ r\);\s*passCache\.scale\.y = -1;\s*passCache\.visible = false;\s*app\.stage\.addChildAt\(passCache, app\.stage\.getChildIndex\(cacheLayer\) \+ 1\);/);
   assert.match(src, /if \(cached\) app\.renderer\.runners\.postrender\.add\(postrender\);/);
+  // The people are left visible after the passes, so between frames (when pointer events are
+  // dispatched) Pixi's EventBoundary does not prune them: the crew stays clickable.
+  const post = src.slice(src.indexOf('const postrender = {'), src.indexOf('if (cached) app.renderer.runners.postrender.add'));
+  assert.match(post, /for \(const s of sprites\.values\(\)\) s\.sprite\.visible = true;/);
+  assert.doesNotMatch(post, /sprite\.visible = (false|!)/);
   assert.match(src, /const refreshCache = \(liveStatics: boolean\[\]\) => \{\s*cacheStatics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = !liveStatics\[i\]; \}\);/);
   assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
   assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*items\.sort\(byDepth\);/);
