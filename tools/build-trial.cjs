@@ -1,6 +1,7 @@
 'use strict';
 
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 
 function trialEnv(base = process.env) {
@@ -21,7 +22,17 @@ function npmCli(env) {
   return cli;
 }
 
-function buildTrial({ env: baseEnv = process.env, spawn = spawnSync } = {}) {
+function assertTrialArtifacts(root = path.resolve(__dirname, '..')) {
+  const dist = path.join(root, 'dist');
+  if (!fs.existsSync(dist)) throw new Error(`Trial packaging refused: dist is missing (${dist})`);
+  const bad = fs.readdirSync(dist, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name)
+    .filter((name) => !name.includes('Trial') || /setup.*\.exe$/i.test(name) || /^Munder-Difflin-/i.test(name) || /^latest.*\.yml$/i.test(name));
+  if (bad.length) throw new Error(`Trial packaging refused: non-trial dist artifact(s): ${bad.join(', ')}`);
+}
+
+function buildTrial({ env: baseEnv = process.env, spawn = spawnSync, assertArtifacts = assertTrialArtifacts } = {}) {
   const env = trialEnv(baseEnv);
   // Node 20.12+ refuses spawnSync('npm.cmd', ...) without a shell (EINVAL).
   // Invoke npm's JavaScript CLI through this Node instead: no .cmd launcher,
@@ -30,10 +41,12 @@ function buildTrial({ env: baseEnv = process.env, spawn = spawnSync } = {}) {
   // `extends` merges the release Windows target list, so select the sole trial
   // target on the CLI as well as in its config: never let inherited NSIS build.
   run(process.execPath, [path.resolve(__dirname, '..', 'node_modules', 'electron-builder', 'cli.js'), '--config', 'electron-builder.trial.yml', '--win', 'portable', '--publish', 'never'], env, spawn);
+  assertArtifacts();
 }
 
 exports.trialEnv = trialEnv;
 exports.buildTrial = buildTrial;
 exports.npmCli = npmCli;
+exports.assertTrialArtifacts = assertTrialArtifacts;
 
 if (require.main === module) buildTrial();

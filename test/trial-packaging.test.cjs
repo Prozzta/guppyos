@@ -30,14 +30,17 @@ test('trial packaging is cross-shell, portable-only, and cannot inherit release 
 test('trial launcher never spawns a .cmd without a shell', () => {
   const { buildTrial } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
   const calls = [];
+  let postBuildChecked = false;
   buildTrial({
     env: { npm_execpath: path.join(ROOT, 'node_modules', 'npm', 'bin', 'npm-cli.js') },
     spawn(command, args, options) {
       calls.push({ command, args, options });
       return { status: 0 };
-    }
+    },
+    assertArtifacts() { postBuildChecked = true; }
   });
   assert.equal(calls.length, 2);
+  assert.equal(postBuildChecked, true, 'the artifact guard runs after a successful builder spawn');
   for (const call of calls) {
     assert.doesNotMatch(call.command, /\.cmd$/i, 'a Windows .cmd must not be spawned without shell:true');
     assert.equal(call.options.shell, undefined);
@@ -46,6 +49,21 @@ test('trial launcher never spawns a .cmd without a shell', () => {
   assert.match(calls[0].args[0], /npm-cli\.js$/i);
   assert.deepEqual(calls[0].args.slice(1), ['run', 'build']);
   assert.deepEqual(calls[1].args.slice(-4), ['--win', 'portable', '--publish', 'never']);
+});
+
+test('trial post-build guard refuses every non-trial dist artifact', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-trial-artifacts-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dist = path.join(root, 'dist');
+  fs.mkdirSync(dist);
+  const { assertTrialArtifacts } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
+  fs.writeFileSync(path.join(dist, 'Guppy-1.1.85-Trial-1.1.84-win-x64-portable.exe'), 'portable');
+  assert.doesNotThrow(() => assertTrialArtifacts(root));
+  for (const name of ['Guppy-1.1.84-win-x64-setup.exe', 'Munder-Difflin-1.1.84-win-x64-portable.exe', 'latest.yml', 'ordinary.txt']) {
+    fs.writeFileSync(path.join(dist, name), 'bad');
+    assert.throws(() => assertTrialArtifacts(root), new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    fs.unlinkSync(path.join(dist, name));
+  }
 });
 
 test('trial bundle assertion refuses a release-shaped or missing main bundle', (t) => {
