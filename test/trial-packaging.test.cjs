@@ -27,18 +27,46 @@ test('trial packaging is cross-shell, portable-only, and cannot inherit release 
   assert.match(builder, /^portable:\s*\r?\n\s+artifactName: Guppy-1\.1\.85-Trial-\$\{version\}-win-\$\{arch\}-portable\.\$\{ext\}$/m);
 });
 
+test('trial launcher never spawns a .cmd without a shell', () => {
+  const { buildTrial } = require(path.join(ROOT, 'tools', 'build-trial.cjs'));
+  const calls = [];
+  buildTrial({
+    env: { npm_execpath: path.join(ROOT, 'node_modules', 'npm', 'bin', 'npm-cli.js') },
+    spawn(command, args, options) {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    }
+  });
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.doesNotMatch(call.command, /\.cmd$/i, 'a Windows .cmd must not be spawned without shell:true');
+    assert.equal(call.options.shell, undefined);
+  }
+  assert.equal(calls[0].command, process.execPath);
+  assert.match(calls[0].args[0], /npm-cli\.js$/i);
+  assert.deepEqual(calls[0].args.slice(1), ['run', 'build']);
+  assert.deepEqual(calls[1].args.slice(-2), ['--publish', 'never']);
+});
+
 test('trial bundle assertion refuses a release-shaped or missing main bundle', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guppy-trial-assert-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const main = path.join(root, 'out', 'main');
-  const { assertTrialBundle } = require(path.join(ROOT, 'build', 'assert-trial-bundle.cjs'));
+  const trialAssert = require(path.join(ROOT, 'build', 'assert-trial-bundle.cjs'));
+  const { assertTrialBundle, default: beforePack } = trialAssert;
   assert.throws(() => assertTrialBundle(root), /main bundle is missing/);
+  assert.throws(() => beforePack({ packager: { info: { projectDir: root } } }), /main bundle is missing/, 'beforePack default export must enforce the assertion');
   fs.mkdirSync(main, { recursive: true });
   const bundle = path.join(main, 'index.js');
   fs.writeFileSync(bundle, 'const FORCE_DEV_BUILD = false; // GuppyTrialData');
   assert.throws(() => assertTrialBundle(root), /does not prove __FORCE_DEV__ compiled true/);
+  fs.writeFileSync(bundle, 'const FORCE_DEV_BUILD = __FORCE_DEV__; // GuppyTrialData');
+  assert.throws(() => assertTrialBundle(root), /does not prove __FORCE_DEV__ compiled true/, 'an unsubstituted define is not proof');
+  fs.writeFileSync(bundle, "const FORCE_DEV_BUILD = typeof true !== 'undefined' && true === true;");
+  assert.throws(() => assertTrialBundle(root), /lacks the fixed GuppyTrialData root/, 'the trial root is mandatory');
   fs.writeFileSync(bundle, "const FORCE_DEV_BUILD = typeof true !== 'undefined' && true === true; const root = 'GuppyTrialData';");
   assert.doesNotThrow(() => assertTrialBundle(root));
+  assert.doesNotThrow(() => beforePack({ packager: { info: { projectDir: root } } }));
 });
 
 test('G2 and G4 behave as refusals when DEV is forced under an Electron stub', () => {
