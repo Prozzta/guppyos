@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Added
+
+- TES floor: the mail envelope now flies between crew members (the office floor always had it).
+
 ### Fixed
 
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
