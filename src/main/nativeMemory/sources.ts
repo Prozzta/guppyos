@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
-import { effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../../shared/claims';
+import { CLAIMS_IMPORT_SETTLED_FILE, effectiveLevel, IMPLEMENTED_LEVEL, type LedgerLevel } from '../../shared/claims';
 
 /** Bumped whenever the rules below change: it is recorded in the index and the report. */
 export const ALLOW_LIST_VERSION = 2;
@@ -193,12 +193,15 @@ export function discoverSources(hiveRoot: string, config: SourcesConfig = readSo
     if (level !== 'off') ledgerLevels[id] = level;
     // Only an agent that HAS a ledger (a monthly segment) swaps its markdown for claims: an agent
     // with none yet (a new hire, an unimported one) keeps memory.md, so nothing it wrote vanishes.
+    // CL-READERWATCHER: and only once its S0 import has settled (CLAIMS_IMPORT_SETTLED_FILE), so a
+    // ledger that appears mid-run keeps memory.md and the archives searched until they are in it.
     const claimsDir = join(dir, 'memory', 'claims');
     let hasLedger = false;
     if (level === 'reader' || level === 'writer') {
-      try { hasLedger = readdirSync(claimsDir).some((n) => SEGMENT_FILE.test(n)); } catch { hasLedger = false; }
+      let segments = false;
+      try { segments = readdirSync(claimsDir).some((n) => SEGMENT_FILE.test(n)); } catch { segments = false; }
       // A deleted ledger does not swap the markdown back in: main's anchor says it existed (A-2).
-      if (!hasLedger && ledgerOpts.anchored?.includes(id)) hasLedger = true;
+      hasLedger = segments ? existsSync(join(dir, 'memory', CLAIMS_IMPORT_SETTLED_FILE)) : ledgerOpts.anchored?.includes(id) === true;
     }
     const flagged = hasLedger;
     if (flagged) {

@@ -15,7 +15,8 @@ import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { importAtStart } from './claims/startupImport';
 import { makeW6Append } from './claims/w6Append';
-import { READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
+import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
+import { importSettled } from './claims/ingest';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
@@ -1295,10 +1296,14 @@ function claimLedgerAgents(): string[] {
 // CL-READERWATCHER: a reader or writer agent's memory.md has left search for its ledger, so a bullet
 // written into it while the app runs reaches the ledger (and the index, through onAppend) by W6's
 // ReaderWatcher (claims/readerWatch.ts). Started only after the S0 import has settled; re-synced on
-// a timer for a new ledger, a level change or a new hive root.
+// a timer for a new ledger, a level change or a new hive root. An agent raised to reader or writer
+// mid-run (or given its first ledger) is imported first; its markdown leaves search only after that
+// (god 886ed8), when onSettled syncs its claims into the index.
 const readerWatchers = new ReaderWatchers({
   hiveRoot: () => (claimsEndpoint() ? hive.root() : null),
   agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
+  candidates: () => { const root = hive.root(); return root && claimsEndpoint() ? claimImportCandidates(root) : []; },
+  onSettled: (agentId) => { claimsIndexSync()?.schedule(agentId); },
   level: claimLevel,
   append: (agentId, draft, origin, opts) => {
     const ep = claimsEndpoint();
@@ -1364,6 +1369,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
         // R1 (Jim R-2): a claim whose task TTL has ended is not live for an exact-duplicate sighting.
         taskStatus: (id) => ((hive.tasks() as { tasks?: Array<{ id: string; status: string }> }).tasks ?? []).find((t) => t.id === id)?.status ?? null,
         onAppend: (agentId, id, rec) => {
+          // CL-READERWATCHER: a first claim of an unimported reader or writer starts its import now.
+          try { const at = hive.root(); if (at && memoryMdReplaced(claimLevel(agentId)) && !importSettled(at, agentId)) void claimsImportReady().then(() => readerWatchers.ensureImported(agentId)); } catch (e) { hive.appendLog({ kind: 'claims-watch-error', agentId, error: String(e).slice(0, 160) }); }
           claimExport().onAppend(agentId, id, rec);
           if (!shouldRunR5(rec)) { claimsIndexSync()?.schedule(agentId); return; }
           const root = hive.root(); if (!root) return;
@@ -1420,6 +1427,10 @@ setInterval(claimsAnchorCheck, CLAIMS_ANCHOR_CHECK_MS).unref?.();
  *  it, so discovery never sees a segment without its legacy entries; the wait is capped. */
 const CLAIMS_IMPORT_WAIT_MS = 120_000;
 let claimsImport: { root: string; ready: Promise<void> } | null = null;
+/** The agents that may be above off: the registry plus the memory-sources.json `ledger` (S0 and mid-run). */
+function claimImportCandidates(root: string): string[] {
+  return [...Object.keys(hive.registry().agents), ...Object.keys(readSourcesConfig(root).ledger ?? {})];
+}
 function claimsImportReady(): Promise<void> {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return Promise.resolve();
@@ -1429,7 +1440,7 @@ function claimsImportReady(): Promise<void> {
       append: makeW6Append(ep.store),
       read: (agentId) => ep.store.readLedger(agentId),
       log: (row) => hive.appendLog(row),
-      agents: () => [...Object.keys(hive.registry().agents), ...Object.keys(readSourcesConfig(root).ledger ?? {})],
+      agents: () => claimImportCandidates(root),
       level: claimLevel,
     }).then(() => undefined, (e) => { hive.appendLog({ kind: 'claims-import-failed', error: String(e).slice(0, 160) }); });
     const cap = new Promise<void>((resolve) => {

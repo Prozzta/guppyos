@@ -170,9 +170,103 @@ test('CL-READERWATCHER: stop() during a scan with a change queued behind it runs
 test('CL-READERWATCHER wiring: main starts the watchers after the S0 import, at claims start and on a timer', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /const readerWatchers = new ReaderWatchers\(\{/);
-  assert.match(src, /agents: \(\) => \(claimsEndpoint\(\) \? claimLedgerAgents\(\) : \[\]\),\n\s+level: claimLevel,/);
+  assert.match(src, /agents: \(\) => \(claimsEndpoint\(\) \? claimLedgerAgents\(\) : \[\]\),\n/);
+  // god 886ed8: the mid-run import covers the same agents as the S0 import, and its settling syncs the index.
+  assert.match(src, /candidates: \(\) => \{ const root = hive\.root\(\); return root && claimsEndpoint\(\) \? claimImportCandidates\(root\) : \[\]; \},/);
+  assert.match(src, /onSettled: \(agentId\) => \{ claimsIndexSync\(\)\?\.schedule\(agentId\); \},\n\s+level: claimLevel,/);
+  assert.match(src, /agents: \(\) => claimImportCandidates\(root\),\n\s+level: claimLevel,/, 'importAtStart uses the same candidates');
+  const onAppend = src.slice(src.indexOf('onAppend: (agentId, id, rec) => {'), src.indexOf('claimExport().onAppend(agentId, id, rec);'));
+  assert.match(onAppend, /memoryMdReplaced\(claimLevel\(agentId\)\) && !importSettled\(at, agentId\)\) void claimsImportReady\(\)\.then\(\(\) => readerWatchers\.ensureImported\(agentId\)\)/, 'a first claim starts the import');
   assert.match(src, /claimsImportReady\(\)\.then\(\(\) => readerWatchers\.sync\(\)/, 'only after the S0 import has settled');
   assert.match(src, /setInterval\(syncReaderWatchers, READER_WATCH_SYNC_MS\)/);
   const start = src.slice(src.indexOf('function claimsEndpoint('), src.indexOf('function claimsEndpoint(') + 6000);
   assert.match(start, /setImmediate\(syncReaderWatchers\)/, 'at claims start');
+});
+
+// god 886ed8: an agent raised to reader or writer mid-run, or given its first ledger.
+const settledFile = (f, a) => path.join(f.root, 'agents', a, 'memory', 'claims-import.json');
+const midrun = (f, extra = {}) => {
+  const segs = () => fs.readdirSync(path.join(f.root, 'agents')).filter((a) => f.store.segments(a).length > 0);
+  const settled = [];
+  const ws = new f.RW.ReaderWatchers({ hiveRoot: () => f.root, agents: segs, candidates: () => Object.keys(f.levels), level: (a) => f.levels[a] ?? 'off', debounceMs: 100, onSettled: (a) => settled.push(a), ...f.ingest, ...extra });
+  WATCHERS.push(ws);
+  return { ws, settled };
+};
+
+test('CL-READERWATCHER mid-run: a raised agent is imported (memory.md and archives) before its swap, then watched; a drop to shadow or off unsettles it', async () => {
+  const f = await floor({ 'ag-w': 'writer', 'ag-s': 'shadow', 'ag-x': 'off' });
+  assert.equal(fs.existsSync(settledFile(f, 'ag-w')), true, 'a writer settles at the S0 import');
+  assert.equal(fs.existsSync(settledFile(f, 'ag-s')), false, 'a shadow agent does not (its memory.md stays searched)');
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), false);
+  fs.writeFileSync(path.join(f.root, 'agents', 'ag-x', 'memory-archive-2026-09-01.md'), '# Memory\n\n## 2026-09-01\n- an invented archive note of ag-x\n');
+  const { ws, settled } = midrun(f);
+  f.levels['ag-x'] = 'writer';
+  const p1 = ws.ensureImported('ag-x');
+  assert.equal(ws.ensureImported('ag-x'), p1, 'one import at a time per agent');
+  await p1;
+  assert.deepEqual(settled, ['ag-x']);
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), true);
+  assert.deepEqual(ledgerTexts(f, 'ag-x').sort(), ['- an invented archive note of ag-x', '- an invented note of ag-x']);
+  ws.sync();
+  assert.deepEqual(ws.watching(), ['ag-w', 'ag-x']);
+  // a raise of the shadow agent goes through sync (the 60 s timer in main)
+  f.levels['ag-s'] = 'reader';
+  edit(f, 'ag-s', 'written while it was shadow');
+  ws.sync();
+  assert.ok(await waitFor(() => settled.includes('ag-s')));
+  assert.ok(ledgerTexts(f, 'ag-s').includes('- written while it was shadow'), 'what came while it was shadow is imported first');
+  assert.ok(await waitFor(() => ws.watching().includes('ag-s')));
+  // a drop: the settled file goes, so a later raise imports again before its swap
+  f.levels['ag-x'] = 'off';
+  ws.sync();
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), false);
+  assert.deepEqual(ws.watching(), ['ag-s', 'ag-w']);
+  assert.ok(f.rows.some((r) => r.kind === 'claims-import-unsettled' && r.agent === 'ag-x'));
+  edit(f, 'ag-x', 'written while it was off');
+  f.levels['ag-x'] = 'writer';
+  await ws.ensureImported('ag-x');
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), true);
+  assert.ok(ledgerTexts(f, 'ag-x').includes('- written while it was off'));
+  // an agent with nothing to import has no ledger to search: it does not settle
+  const g = await floor({ 'ag-e': 'off' }, { 'ag-e': '# Memory\n' });
+  const m = midrun(g);
+  g.levels['ag-e'] = 'writer';
+  await m.ws.ensureImported('ag-e');
+  assert.equal(fs.existsSync(settledFile(g, 'ag-e')), false);
+  assert.deepEqual(m.settled, []);
+});
+
+test('CL-READERWATCHER mid-run: a failed import leaves no settled file, is logged, and the next sync retries it', async () => {
+  const f = await floor({ 'ag-x': 'off' });
+  let fail = true;
+  const { ws, settled } = midrun(f, { read: (a) => { if (fail) throw new Error('invented ledger read failure'); return f.store.readLedger(a); } });
+  f.levels['ag-x'] = 'writer';
+  await ws.ensureImported('ag-x');
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), false);
+  assert.ok(f.rows.some((r) => r.kind === 'claims-import-failed' && r.agent === 'ag-x' && /invented ledger read failure/.test(r.error)));
+  assert.deepEqual(settled, []);
+  fail = false;
+  ws.sync();
+  assert.ok(await waitFor(() => settled.includes('ag-x')));
+  assert.equal(fs.existsSync(settledFile(f, 'ag-x')), true);
+});
+
+test('CL-READERWATCHER known limit 1: a bullet the rollover moves into an archive before the memory.md scan is still ingested; one already taken is not offered again', async () => {
+  const f = await floor({ 'ag-w': 'writer' });
+  f.watchers.sync();
+  await new Promise((r) => setTimeout(r, 300));
+  edit(f, 'ag-w', 'taken from memory.md');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- taken from memory.md')));
+  // the rollover: memory.md cut to its header, the older bullets (one never scanned) into an archive
+  const dir = path.join(f.root, 'agents', 'ag-w');
+  const body = fs.readFileSync(path.join(dir, 'memory.md'), 'utf8').replace(/\n$/, '') + '\n- moved before the scan\n';
+  fs.writeFileSync(path.join(dir, 'memory-archive-2026-10-15.md'), body);
+  fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory — ag-w\n');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- moved before the scan')), JSON.stringify(f.rows.slice(-3)));
+  await new Promise((r) => setTimeout(r, 400));
+  const texts = ledgerTexts(f, 'ag-w');
+  assert.equal(texts.filter((t) => t === '- moved before the scan').length, 1);
+  assert.equal(texts.filter((t) => t === '- taken from memory.md').length, 1, 'not again from the archive');
+  assert.equal(texts.filter((t) => t === '- an invented note of ag-w').length, 1, 'the imported note not again either');
+  assert.equal(f.store.readLedger('ag-w').records.find((r) => r.text === '- moved before the scan').legacy.file, 'memory-archive-2026-10-15.md');
 });

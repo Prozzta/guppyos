@@ -72,7 +72,9 @@ module.exports = async (drill) => {
     readLedger: (a) => store.readLedger(a), derive: () => derive, registry: () => DEFAULT_KEY_REGISTRY,
     ruleConfig: () => ({ r4: false }), level, agents: () => [A], send: (args) => eng.syncClaims(args),
   });
-  const synced = await sync.syncAll();
+  // CL-READERWATCHER: with no settled import the worker refuses the claims (memory.md stays searched).
+  let synced;
+  try { synced = (await sync.syncAll()).map((s) => s.sent); } catch (e) { synced = String(e && e.message); }
 
   const search = async (query) => {
     const r = await eng.search({ query, results: 10, wing: A });
@@ -100,7 +102,7 @@ module.exports = async (drill) => {
     firstOk: first.ok === true,
     imported: reports.map((r) => ({ agent: r.agent, appended: r.appended, refused: r.refused.length })),
     importRows: rows.filter((r) => r.kind === 'claims-import').length,
-    synced: synced.map((s) => s.sent),
+    synced,
     segments: store.segments(A).length,
     zeppelin, gizmo, widget,
     wake: {

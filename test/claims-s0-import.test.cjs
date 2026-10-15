@@ -54,13 +54,15 @@ test('S0 at start: a writer\'s legacy notes are still found by search and wake-u
   assert.equal(r.zeppelin.markdown + r.gizmo.markdown, 0, 'the markdown itself is out of search');
   assert.deepEqual(r.wake, { zeppelin: true, gizmo: true, widget: true }, 'the wake-up carries both legacy notes and the new claim');
 
-  // The control: the same run without the import is the gap Jim found.
+  // The control: the same run without the import was the gap Jim found (the notes left search).
+  // CL-READERWATCHER (god 886ed8): with no settled import the swap now waits, so nothing is lost:
+  // the worker refuses the claims and the markdown is still searched.
   const c = await drill({ skipImport: true });
   assert.equal(c.firstOk, true);
-  assert.doesNotMatch(String(c.zeppelin.top), /zeppelin/);
-  assert.doesNotMatch(String(c.gizmo.top), /gizmo/);
-  assert.equal(c.zeppelin.markdown + c.gizmo.markdown, 0);
-  assert.deepEqual(c.wake, { zeppelin: false, gizmo: false, widget: true });
+  assert.match(String(c.synced), /claims are not indexed for w1/);
+  assert.equal(c.zeppelin.top, null, 'no claim hit: the markdown is the source');
+  assert.ok(c.zeppelin.markdown > 0 && c.gizmo.markdown > 0, 'memory.md and the archive are still searched');
+  assert.deepEqual(c.wake, { zeppelin: true, gizmo: true, widget: true });
 });
 
 function sandbox() {

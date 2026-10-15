@@ -20,9 +20,9 @@
  *   - the frozen backup found a partial destination it must not overwrite (import only).
  * The report says why.
  */
-import { existsSync, readFileSync, watch, type FSWatcher } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import type { AppendResult, ReadLedgerFn, RecordDraft } from '../../shared/claims';
+import { CLAIMS_IMPORT_SETTLED_FILE, type AppendResult, type ReadLedgerFn, type RecordDraft } from '../../shared/claims';
 import { frozenBackup, knownIdsFor, newLegacyImport, parseNewBulletsDetailed, type Refusal } from './migrate';
 
 export type { Refusal } from './migrate';
@@ -53,6 +53,10 @@ export const FROZEN_BACKUP_DIR = 'claims-frozen';
 
 const agentDir = (deps: IngestDeps, agent: string): string => join(deps.hiveRoot, 'agents', agent);
 
+/** CL-READERWATCHER: the file that says this agent's S0 import has settled (discovery waits for it). */
+export const importSettledFile = (hiveRoot: string, agent: string): string => join(hiveRoot, 'agents', agent, 'memory', CLAIMS_IMPORT_SETTLED_FILE);
+export const importSettled = (hiveRoot: string, agent: string): boolean => existsSync(importSettledFile(hiveRoot, agent));
+
 function refuse(deps: IngestDeps, agent: string, report: IngestReport, refusal: Refusal, via: string): void {
   report.refused.push(refusal);
   deps.log({ kind: 'claims-import-refused', agent, via, ...refusal });
@@ -73,7 +77,7 @@ async function appendAll(deps: IngestDeps, agent: string, drafts: RecordDraft[],
  * S0: freeze the agent's memory files (G6.5, once; never over anything), then append every legacy
  * entry the ledger does not hold yet (G6.2: a re-run appends nothing), with no R5.
  */
-export async function shadowImport(deps: IngestDeps, agent: string): Promise<IngestReport> {
+export async function shadowImport(deps: IngestDeps, agent: string, opts: { settle?: boolean } = {}): Promise<IngestReport> {
   const dir = agentDir(deps, agent);
   const report: IngestReport = { agent, offered: 0, appended: 0, refused: [] };
   const b = frozenBackup(dir, join(deps.hiveRoot, 'backups', FROZEN_BACKUP_DIR, agent));
@@ -88,6 +92,18 @@ export async function shadowImport(deps: IngestDeps, agent: string): Promise<Ing
     for (const r of plan.refusals) refuse(deps, agent, report, r, 'import');
     await appendAll(deps, agent, plan.drafts, report, 'import', false);
   }
+  // CL-READERWATCHER: settled = the agent has a ledger to search AND its legacy entries are in it
+  // (or reported refused); an established ledger keeps its swap even when this run found it
+  // read-only. Written last, so discovery swaps memory.md out only after the import, never in the
+  // middle. opts.settle false (a shadow agent: its memory.md stays searched) writes no marker, so a
+  // later raise imports again first.
+  const settled = led.records.length > 0 || (!report.readOnly && report.appended > 0);
+  if (opts.settle !== false && settled && !importSettled(deps.hiveRoot, agent)) {
+    const file = importSettledFile(deps.hiveRoot, agent);
+    mkdirSync(join(dir, 'memory'), { recursive: true });
+    writeFileSync(`${file}.tmp`, JSON.stringify({ v: 1, at: new Date().toISOString(), offered: report.offered, appended: report.appended, refused: report.refused.length, readOnly: report.readOnly ?? null }) + '\n');
+    renameSync(`${file}.tmp`, file);
+  }
   deps.log({ kind: 'claims-import', agent, offered: report.offered, appended: report.appended, refused: report.refused.length, readOnly: report.readOnly ?? null, backupWritten: b.written, backupPartial: b.partial === true });
   return report;
 }
@@ -99,6 +115,7 @@ export async function shadowImport(deps: IngestDeps, agent: string): Promise<Ing
  * at spawn (`final`) takes everything. A refused entry is logged once per watcher, not on every scan.
  */
 export const READER_DEBOUNCE_MS = 2000;
+const ARCHIVE_FILE = /^memory-archive-.*\.md$/;
 
 export class ReaderWatcher {
   private fsw: FSWatcher | null = null;
@@ -106,6 +123,7 @@ export class ReaderWatcher {
   private running: Promise<IngestReport> | null = null;
   private again = false;
   private stopped = false;
+  private archives = false;
   private readonly reported = new Set<string>();
 
   constructor(private readonly deps: IngestDeps, readonly agent: string, private readonly debounceMs = READER_DEBOUNCE_MS) {}
@@ -115,7 +133,11 @@ export class ReaderWatcher {
     const first = this.scan(true);
     try {
       this.fsw = watch(agentDir(this.deps, this.agent), (_ev, name) => {
-        if (name && String(name).toLowerCase() === 'memory.md') this.schedule();
+        const n = name ? String(name).toLowerCase() : '';
+        if (n === 'memory.md') this.schedule();
+        // CL-READERWATCHER known limit 1: a rollover can move a bullet into an archive before the
+        // memory.md scan sees it; the next scan then also imports the archives (as the S0 import).
+        else if (ARCHIVE_FILE.test(n)) { this.archives = true; this.schedule(); }
       });
       this.fsw.on('error', (e) => this.deps.log({ kind: 'claims-watch-error', agent: this.agent, error: String(e) }));
     } catch (e) {
@@ -173,6 +195,14 @@ export class ReaderWatcher {
         refuse(this.deps, this.agent, report, r, via);
       }
       await appendAll(this.deps, this.agent, plan.drafts, report, via, true);
+      if (this.archives) {
+        this.archives = false;
+        // Every archive entry the ledger lacks (counted by hash, so a bullet already taken from
+        // memory.md and then rolled over is not offered again); memory.md is the scan above's.
+        const arch = newLegacyImport(agentDir(this.deps, this.agent), this.deps.read(this.agent).records);
+        const drafts = arch.drafts.filter((d) => (d as Extract<RecordDraft, { t: 'claim' }>).legacy?.file !== 'memory.md');
+        await appendAll(this.deps, this.agent, drafts, report, 'watch-archive', false);
+      }
     }
     if (report.offered || report.readOnly) {
       this.deps.log({ kind: 'claims-reader-scan', agent: this.agent, final, offered: report.offered, appended: report.appended, refused: report.refused.length, readOnly: report.readOnly ?? null });
