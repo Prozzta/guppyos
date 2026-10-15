@@ -36,6 +36,9 @@ All notable changes to this project are documented here. The format is based on
   says a short line when brewing ("brewing a fresh one", or "a quick refill" with their own mug)
   and when they sit down to sip.
 
+- **TES floor walls stay crisp after resizing.** The floor now uses whole device pixels and keeps
+  its lower hull running past the bottom edge instead of leaving a background strip.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias

@@ -20,6 +20,31 @@ export interface CameraSettle {
   resolution: () => number;
 }
 
+/** TES-WALL-RESIZE-LINES-187: call `onChange(dpr)` each time the window's device pixel ratio
+ *  changes after mount (UI zoom with Ctrl+= / Ctrl+-, or a move to a monitor with another scale),
+ *  so a whole-device-pixel camera can follow it. A `(resolution: <dpr>dppx)` query matches only
+ *  the ratio it was made for, so it is re-armed for each new one. Returns the cleanup. */
+export function watchDevicePixelRatio(
+  win: Pick<Window, 'matchMedia' | 'devicePixelRatio'>,
+  onChange: (dpr: number) => void,
+): () => void {
+  let mq: MediaQueryList | null = null;
+  const fire = (): void => {
+    mq?.removeEventListener('change', fire);
+    arm();
+    onChange(win.devicePixelRatio || 1);
+  };
+  const arm = (): void => {
+    mq = win.matchMedia(`(resolution: ${win.devicePixelRatio || 1}dppx)`);
+    mq.addEventListener('change', fire);
+  };
+  arm();
+  return () => {
+    mq?.removeEventListener('change', fire);
+    mq = null;
+  };
+}
+
 export class Camera {
   private container: Container;
   private currentX = 0;
@@ -73,7 +98,13 @@ export class Camera {
   private getMinZoom(): number {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
     const b = this.box();
-    return Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
+    const minZoom = Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
+    // A stations floor is raster art. Its scale must be a whole number of device pixels so
+    // adjoining strip sprites cannot round differently after a resize. Keep at least one device
+    // pixel per map pixel when a tiny pane would otherwise round the scale down to zero.
+    const resolution = this.settle?.resolution() ?? 0;
+    if (!Number.isFinite(resolution) || resolution <= 0) return minZoom;
+    return Math.max(1 / resolution, Math.floor(minZoom * resolution) / resolution);
   }
 
   /** Fit the whole map (or the frame, its content centred) to the viewport. */
@@ -141,9 +172,25 @@ export class Camera {
       this.container.x = Math.min(left, Math.max(left + this.viewWidth - scaledW, this.container.x));
     }
     if (contentH <= this.viewHeight) {
-      this.container.y = top + (this.viewHeight - contentH) / 2;
+      // The frame's dead-bottom rows are a hull below the playable deck. When whole-pixel
+      // scaling leaves vertical space, put it above the deck: centring would reveal background
+      // below the hull, whereas this leaves the hull continuing past the panel's bottom edge.
+      this.container.y = this.settle && b.deadBottom > 0
+        ? top + this.viewHeight - contentH
+        : top + (this.viewHeight - contentH) / 2;
     } else {
       this.container.y = Math.min(top, Math.max(top + this.viewHeight - scaledH, this.container.y));
+    }
+
+    // Once a stations camera has settled, its target scale is already a whole device pixel.
+    // Align the resulting centring/clamping offset too. Floor the vertical position so its hull
+    // cannot be rounded upward into a bottom margin; the horizontal centred offset rounds to the
+    // nearest device pixel.
+    const resolution = this.settle?.resolution() ?? 0;
+    if (!this.nudgeDuration && this.currentX === this.targetX && this.currentY === this.targetY
+      && this.currentZoom === this.targetZoom && Number.isFinite(resolution) && resolution > 0) {
+      this.container.x = Math.round(this.container.x * resolution) / resolution;
+      this.container.y = Math.floor(this.container.y * resolution) / resolution;
     }
   }
 
