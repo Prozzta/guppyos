@@ -1,14 +1,21 @@
 import { Container } from 'pixi.js';
 import { MessageEnvelope, type MessageAct } from '../office/MessageEnvelope';
 import { ThoughtBubble } from '../office/ThoughtBubble';
-import { consumeSays as consumeSayEvents, type BubbleSay, type BubbleSayCursor } from './bubbleModel';
+import { cloudShows, consumeSays as consumeSayEvents, createCloudGate, type BubbleSay, type BubbleSayCursor, type CloudGate } from './bubbleModel';
 
 export type BubbleAnchor = { id: string; x: number; y: number };
 export type BubbleSayOptions = { ttl?: number; key?: string; delay?: number };
 
+/** A status cloud: with its status the layer shows it only now and then; without one, always. */
+export type BubbleThoughtIn = { text: string; tool?: string; status?: string };
+
 type ActiveThought = {
   bubble: ThoughtBubble;
-  thought: { text: string; tool?: string } | null;
+  thought: BubbleThoughtIn | null;
+  /** When its status cloud shows (TES-BUBBLES-188 d). */
+  gate: CloudGate;
+  /** The status cloud is showing now. */
+  up: boolean;
   say: { text: string; until: number; key?: string } | null;
   shown: string | null;
 };
@@ -32,14 +39,15 @@ export class BubbleLayer {
   private readonly due: Array<{ id: string; text: string; at: number; options: BubbleSayOptions }> = [];
   private now = 0;
 
-  constructor(private readonly bounds: { width: number; height: number }) {
+  constructor(private readonly bounds: { width: number; height: number }, private readonly rand: () => number = Math.random) {
     this.container.sortableChildren = true;
     this.container.eventMode = 'none';
   }
 
-  setThought(id: string, thought: { text: string; tool?: string } | null): void {
+  setThought(id: string, thought: BubbleThoughtIn | null): void {
     const active = this.get(id);
     active.thought = thought;
+    this.gateOf(active);
     this.render(active);
   }
 
@@ -98,6 +106,7 @@ export class BubbleLayer {
     const layouts: Array<{ active: ActiveThought; x: number; y: number; w: number; h: number; dx: number; anchor: { x: number; y: number } }> = [];
     for (const [id, active] of this.thoughts) {
       if (active.say && active.say.until <= this.now) { active.say = null; this.render(active); }
+      if (this.gateOf(active)) this.render(active);
       const anchor = this.anchors.get(id);
       if (!anchor) { active.bubble.hide(); continue; }
       active.bubble.setBounds(this.bounds.width, this.bounds.height);
@@ -168,16 +177,25 @@ export class BubbleLayer {
     if (active) return active;
     const bubble = new ThoughtBubble();
     this.container.addChild(bubble.container);
-    active = { bubble, thought: null, say: null, shown: null };
+    active = { bubble, thought: null, say: null, shown: null, gate: createCloudGate(), up: false };
     this.thoughts.set(id, active);
     return active;
   }
 
+  /** Advance the cloud's gate; true when it opened or closed. */
+  private gateOf(active: ActiveThought): boolean {
+    const t = active.thought;
+    const up = !t ? false : t.status === undefined ? true : cloudShows(active.gate, this.now, { status: t.status, text: t.text }, this.rand);
+    if (up === active.up) return false;
+    active.up = up;
+    return true;
+  }
+
   private render(active: ActiveThought): void {
-    const next = active.say ? active.say.text : active.thought?.text ?? null;
+    const next = active.say ? active.say.text : active.up ? active.thought?.text ?? null : null;
     if (next === active.shown) return;
     active.shown = next;
-    if (next === null) active.bubble.hide();
+    if (next === null) active.bubble.startLinger(); // it fades, as on the office floor
     else active.bubble.show(next, active.say ? undefined : active.thought?.tool);
   }
 }

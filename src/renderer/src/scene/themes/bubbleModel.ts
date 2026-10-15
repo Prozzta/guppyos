@@ -8,6 +8,8 @@ export interface BubbleAgent {
   lastPrompt?: string;
   carrying?: string;
   isGod?: boolean;
+  /** The boot note the agent was restored or spawned with (TES-BUBBLES-188): never activity. */
+  bootAction?: { text: string };
 }
 
 export interface BubbleThought {
@@ -65,7 +67,55 @@ function firstWords(prompt: string | undefined, maxWords = 6, maxChars = 42): st
 }
 
 function liveActivity(agent: BubbleAgent, fallback = ''): string {
-  return agent.action?.trim() || firstWords(agent.lastPrompt) || fallback;
+  const action = agent.bootAction && agent.action === agent.bootAction.text ? '' : agent.action;
+  return action?.trim() || firstWords(agent.lastPrompt) || fallback;
+}
+
+// TES-BUBBLES-188 (d): a status cloud comes and goes, as on the office floor. 1.1.87 kept one over
+// every head all the time. A change shows it for CLOUD_SHOW_MS; another change inside the quiet
+// after it waits; a state that lasts shows again every CLOUD_RESURFACE_MS or so. A call to the
+// Human (waiting, compacting, looping) shows at once, and 'needs you' (blocked) stays up. An idle
+// cloud never shows: the crew's own lines speak for an idle floor.
+
+/** How long a cloud shows for a change, ms (the bubble's linger and fade follow, about 1.5 s). */
+export const CLOUD_SHOW_MS = 2600;
+/** After a cloud, how long a further change of the same kind waits, ms. */
+export const CLOUD_QUIET_MS = 30_000;
+/** A lasting state shows again after this long, ms, drawn evenly from the range. */
+export const CLOUD_RESURFACE_MS: readonly [number, number] = [20_000, 40_000];
+/** States that show at once: they ask something of the Human. */
+const CALLS: ReadonlySet<string> = new Set(['waiting', 'compacting', 'looping']);
+
+/** One person's cloud timing. */
+export interface CloudGate {
+  status: string | null;
+  text: string | null;
+  /** The cloud shows until then. */
+  until: number;
+  /** A plain change shows only from then. */
+  quiet: number;
+  /** A lasting state shows again from then. */
+  next: number;
+}
+
+export function createCloudGate(): CloudGate {
+  return { status: null, text: null, until: -Infinity, quiet: -Infinity, next: Infinity };
+}
+
+/** Whether the cloud for `thought` shows at `now` (ms); advances the gate. */
+export function cloudShows(g: CloudGate, now: number, thought: { status: string; text: string } | null, rand: () => number): boolean {
+  if (!thought) { g.status = g.text = null; g.until = -Infinity; return false; }
+  const first = g.status === null;
+  const changedStatus = !first && thought.status !== g.status, changed = changedStatus || (!first && thought.text !== g.text);
+  g.status = thought.status;
+  g.text = thought.text;
+  if (thought.status === 'blocked') return true;
+  const [lo, hi] = CLOUD_RESURFACE_MS;
+  const show = () => { g.until = now + CLOUD_SHOW_MS; g.quiet = g.until + CLOUD_QUIET_MS; g.next = g.until + lo + rand() * (hi - lo); };
+  if (first) g.next = now + rand() * hi; // what is there at first sight is no change: it surfaces in its turn
+  else if (changedStatus && CALLS.has(thought.status)) show();
+  else if (thought.status !== 'idle' && ((changed && now >= g.quiet) || now >= g.next) && now >= g.until) show();
+  return now < g.until;
 }
 
 /** The status and cloud text the floor should show, projected through liveness first.

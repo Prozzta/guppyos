@@ -26,7 +26,7 @@ export const EXCHANGE_LINE_MS = 2400;
 /** How long a wander chat holds the two still: long enough for the longest exchange. */
 export const EXCHANGE_HOLD_MS = 4 * EXCHANGE_BEAT_MS;
 /** The bridge starts a talk every this-many ms, the gap drawn evenly from the range. */
-export const BRIDGE_TALK_GAP_MS: readonly [number, number] = [12_000, 24_000];
+export const BRIDGE_TALK_GAP_MS: readonly [number, number] = [20_000, 40_000];
 /** The share of bridge talks that go to a pair whose stations the exchange names. */
 const PREFER_ROLES = 0.75;
 const MAX_LINES = 4;
@@ -97,6 +97,8 @@ export function exchangeSays(exchanges: readonly Exchange[], a: Speaker, b: Spea
 export class BridgeTalk {
   private wait: number;
   private n = 0;
+  /** Who spoke in the last talk: they sit the next one out when others can talk. */
+  private last = new Set<string>();
 
   constructor(private readonly exchanges: readonly Exchange[], private readonly held: ReadonlySet<string>, private readonly rand: () => number) {
     this.wait = this.gap();
@@ -112,11 +114,14 @@ export class BridgeTalk {
     if (!this.exchanges.length || (this.wait -= dt) > 0) return [];
     this.wait = this.gap();
     if (people.length < 2) return [];
+    const fresh = people.filter((p) => !this.last.has(p.id));
+    const who = fresh.length >= 2 ? fresh : people;
     const pairs: Array<[Speaker, Speaker]> = [];
-    for (let i = 0; i < people.length; i++) for (let j = i + 1; j < people.length; j++) pairs.push([people[i], people[j]]);
+    for (let i = 0; i < who.length; i++) for (let j = i + 1; j < who.length; j++) pairs.push([who[i], who[j]]);
     const named = pairs.filter(([a, b]) => this.exchanges.some((ex) => exchangeFit(ex, a, b, this.held) > 0 || exchangeFit(ex, b, a, this.held) > 0));
     const pool = named.length && this.rand() < PREFER_ROLES ? named : pairs;
     const [a, b] = pool[Math.floor(this.rand() * pool.length)];
+    this.last = new Set([a.id, b.id]);
     return exchangeSays(this.exchanges, a, b, this.held, `bridge:${++this.n}:${a.id}:${b.id}`) ?? [];
   }
 }

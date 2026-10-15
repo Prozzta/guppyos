@@ -28,7 +28,7 @@ test('(a) the restore shape is {status:"idle", action:"starting up"} and remembe
 
 test('(a) the first settled IDLE reading after the boot retires the note: the cloud says idle', () => {
   const before = restored();
-  assert.equal(MODEL.activityThought(before, rec('IDLE')).text, 'starting up', 'the 1.1.87 symptom, before the store settles it');
+  assert.equal(MODEL.activityThought(before, rec('IDLE')).text, 'idle', 'not even before the store settles it (d)');
   const [after] = BOOT.settleBootActions([before], rec('IDLE'));
   assert.equal(after.action, 'idle');
   assert.equal(after.bootAction, undefined);
@@ -326,14 +326,117 @@ test('(b2) a later line waits for its beat in the bubble layer', () => {
   assert.equal(made[1]?.text, 'B1', 'the answer on its beat');
 });
 
-test('(b2) the bridge talks often: a talk every 12-24 s across ten minutes, mostly by station', () => {
+test('(b2) the bridge talks often: a talk every 20-40 s across ten minutes, never the same two twice running', () => {
   const { BridgeTalk, readExchanges } = X();
   let seed = 7; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   const ex = readExchanges(require('../themes/tes/lines.json').lines.exchanges);
   const talk = new BridgeTalk(ex, HELD, rand);
   const people = [CAPTAIN, HELM, { id: 'jim', role: 'navigation' }, ANY, ANY2, { id: 'kevin', role: null }];
-  let talks = 0;
-  for (let t = 0; t < 600_000; t += 50) if (talk.tick(50, people).length) talks++;
-  assert.ok(talks >= 25 && talks <= 50, `talks in ten minutes: ${talks}`);
+  let talks = 0, prev = new Set();
+  for (let t = 0; t < 600_000; t += 50) {
+    const says = talk.tick(50, people);
+    if (!says.length) continue;
+    talks++;
+    const ids = new Set(says.map((s) => s.id));
+    assert.ok([...ids].every((id) => !prev.has(id)), 'nobody speaks in two talks running');
+    prev = ids;
+  }
+  assert.ok(talks >= 15 && talks <= 30, `talks in ten minutes: ${talks}`);
   assert.deepEqual(new BridgeTalk([], HELD, rand).tick(60_000, people), [], 'a pack without exchanges never talks');
+});
+
+// (d) Clouds come and go: a change shows one for a few seconds, a long state now and then; most of
+// the time most people show none. 'needs you' stays up. The boot note never shows at all.
+
+test('(d) the gate: a change shows a cloud for CLOUD_SHOW_MS, then quiet; a call shows at once; needs-you stays', () => {
+  const { createCloudGate, cloudShows, CLOUD_SHOW_MS, CLOUD_QUIET_MS, CLOUD_RESURFACE_MS } = MODEL;
+  assert.ok(CLOUD_SHOW_MS >= 2000 && CLOUD_SHOW_MS <= 4000, 'a few seconds');
+  assert.ok(CLOUD_RESURFACE_MS[0] >= 20_000 && CLOUD_RESURFACE_MS[1] <= 40_000 && CLOUD_QUIET_MS >= 15_000);
+  const g = createCloudGate(), r = () => 0.5;
+  const w = (text, status = 'working') => ({ status, text });
+  assert.equal(cloudShows(g, 0, w('using Bash'), r), false, 'what is there at first sight is not a change');
+  assert.equal(cloudShows(g, 1000, w('using Read'), r), true, 'a new action');
+  assert.equal(cloudShows(g, 1000 + CLOUD_SHOW_MS - 1, w('using Read'), r), true);
+  assert.equal(cloudShows(g, 1000 + CLOUD_SHOW_MS, w('using Read'), r), false, 'then it goes');
+  assert.equal(cloudShows(g, 5000, w('using Edit'), r), false, 'another action inside the quiet waits');
+  assert.equal(cloudShows(g, 6000, w('waiting', 'waiting'), r), true, 'a call to the Human shows at once');
+  assert.equal(cloudShows(g, 9000 + CLOUD_SHOW_MS, w('waiting', 'waiting'), r), false);
+  for (let t = 20_000; t < 600_000; t += 1000) assert.equal(cloudShows(g, t, w('needs you', 'blocked'), r), true, 'needs-you stays up');
+  const idle = createCloudGate();
+  cloudShows(idle, 0, w('using Bash'), r);
+  let shown = 0;
+  for (let t = 1000; t < 600_000; t += 100) shown += cloudShows(idle, t, w('idle', 'idle'), r) ? 1 : 0;
+  assert.equal(shown, 0, 'an idle cloud never shows (the crew speak for themselves)');
+  const long = createCloudGate();
+  cloudShows(long, 0, w('compiling'), r);
+  const ups = [];
+  for (let t = 0; t < 300_000; t += 100) { const on = cloudShows(long, t, w('compiling'), r); if (on && !(ups.length && ups[ups.length - 1].end === t - 100)) ups.push({ start: t, end: t }); else if (on) ups[ups.length - 1].end = t; }
+  assert.ok(ups.length >= 5 && ups.length <= 15, `a long state re-surfaces now and then (${ups.length} in 5 min)`);
+  for (let i = 1; i < ups.length; i++) assert.ok(ups[i].start - ups[i - 1].end >= CLOUD_RESURFACE_MS[0] - 100, 'never closer than the resurface gap');
+});
+
+test('(d) the boot note never shows, before or after the store settles it', () => {
+  const before = restored();
+  for (const status of ['idle', 'working', 'thinking']) {
+    const t = MODEL.activityThought({ ...before, status }, rec(status === 'idle' ? 'IDLE' : 'BUSY_PROGRESSING'));
+    assert.notEqual(t.text, 'starting up', `${status}: not the boot note`);
+  }
+  assert.equal(MODEL.activityThought({ ...before, action: 'using Bash', status: 'working' }).text, 'using Bash', 'a real action still shows');
+});
+
+function simLayer() {
+  const made = new Map();
+  class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); return c; } destroy() {} }
+  class ThoughtBubble {
+    constructor() { this.container = new Container(); this.text = null; this.linger = 0; }
+    show(text) { this.text = text; this.linger = 0; } hide() { this.text = null; this.linger = 0; }
+    startLinger() { if (this.text !== null) { this.text = null; this.linger = 1500; } }
+    setBounds() {} setZoom() {} setLift() {} setPosition() {} getLayout() { return null; } destroy() {}
+    update(dt) { this.linger = Math.max(0, this.linger - dt * 1000); }
+    up() { return this.text !== null || this.linger > 0; }
+  }
+  const out = ts.transpileModule(readSource('src/renderer/src/scene/themes/BubbleLayer.ts'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const mod = { exports: {} };
+  let last = null;
+  const Bubble = class extends ThoughtBubble { constructor() { super(); made.set(last, this); } };
+  const req = (id) => ({ 'pixi.js': { Container }, '../office/ThoughtBubble': { ThoughtBubble: Bubble }, '../office/MessageEnvelope': { MessageEnvelope: class {} }, './bubbleModel': MODEL })[id];
+  new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
+  let seed = 188; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const layer = new mod.exports.BubbleLayer({ width: 960, height: 640 }, rand);
+  return { layer, rand, upOf: (id) => made.get(id)?.up() ?? false, setThought: (id, th) => { last = id; layer.setThought(id, th); } };
+}
+
+test('(d) a floor of 7 for 30 minutes: each shows a cloud under a quarter of the time, needs-you stays up', () => {
+  const { layer, rand, upOf, setThought } = simLayer();
+  const X = loadTs('src/renderer/src/scene/themes/exchanges.ts');
+  const talk = new X.BridgeTalk(X.readExchanges(require('../themes/tes/lines.json').lines.exchanges), new Set(['captain', 'helm', 'navigation']), rand);
+  const ids = ['god', 'dwight', 'jim', 'andy', 'pam', 'kevin', 'creed'];
+  const state = Object.fromEntries(ids.map((id) => [id, { status: 'working', text: 'using Bash', next: 0 }]));
+  state.creed.status = 'blocked'; state.creed.text = 'needs you';
+  const cursor = MODEL.createSayCursor(), up = Object.fromEntries(ids.map((id) => [id, 0]));
+  const T = 30 * 60_000, DT = 50;
+  for (let t = 0; t < T; t += DT) {
+    for (const id of ids) {
+      const s = state[id];
+      if (id !== 'creed' && t >= s.next) {   // a busy agent: a new tool every 1-8 s, now and then thinking, waiting or idle
+        const roll = rand();
+        s.status = roll < 0.05 ? 'waiting' : roll < 0.15 ? 'idle' : roll < 0.35 ? 'thinking' : 'working';
+        s.text = s.status === 'thinking' ? '' : s.status === 'waiting' ? 'waiting' : s.status === 'idle' ? 'idle' : `using ${['Bash', 'Read', 'Edit', 'Grep'][Math.floor(rand() * 4)]}`;
+        s.next = t + 1000 + rand() * 7000;
+      }
+      setThought(id, { status: s.status, text: s.text });
+    }
+    layer.consumeSays(talk.tick(DT, ids.map((id) => ({ id, role: id === 'god' ? 'captain' : null }))), cursor);
+    layer.update(DT, ids.map((id, i) => ({ id, x: 40 * i, y: 100 })), 1);
+    for (const id of ids) if (upOf(id)) up[id] += DT;
+  }
+  const share = Object.fromEntries(ids.map((id) => [id, up[id] / T]));
+  for (const id of ids.filter((id) => id !== 'creed')) assert.ok(share[id] < 0.25, `${id} shows a cloud ${(share[id] * 100).toFixed(1)}% of the time`);
+  const mean = ids.filter((id) => id !== 'creed').reduce((a, id) => a + share[id], 0) / 6;
+  assert.ok(mean < 0.2, `on average ${(mean * 100).toFixed(1)}%: ${JSON.stringify(share)}`);
+  assert.ok(share.creed > 0.95, `needs-you stays up (${(share.creed * 100).toFixed(1)}%)`);
+});
+
+test('(d) the floor hands each cloud its status, so the layer can gate it', () => {
+  assert.match(readSource(FLOOR), /bubbles\.setThought\(a\.id, thought \? \{ text: thought\.text, tool: thought\.tool, status: thought\.status \} : null\);/);
 });

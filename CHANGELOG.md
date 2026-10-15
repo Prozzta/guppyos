@@ -34,6 +34,12 @@ All notable changes to this project are documented here. The format is based on
   to finish), and every 12-24 s between two of the bridge crew wherever they are. An exchange that
   names the speakers' stations is preferred, and only the Captain says the Captain's lines.
 
+- **TES status clouds come and go.** Since 1.1.87 a cloud hung over every head all the time. Now a
+  change (a new tool or action) shows one for about four seconds, then it fades; a further change
+  waits 30 s, and a state that lasts shows again every 20-40 s. Waiting, compacting and looping show
+  at once; 'needs you' stays up until it is answered; an idle cloud never shows, and the boot note
+  ('starting up') never shows at all. The crew's own lines still come as they happen.
+
 - **TES clouds sit just above the head, seated or standing, and neighbours no longer tower.** A
   cloud now hangs from the sprite as drawn, so a seated person's cloud keeps the same small gap
   over the head as a standing one; at the Speck desks 1.1.87 floated them 16-30 px higher. Two

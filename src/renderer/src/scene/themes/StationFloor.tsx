@@ -405,7 +405,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         removeDepartedSprites(sprites, ids, bubbles);
         for (const a of agents) {
           const thought = thoughts.get(a.id) ?? null;
-          bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool } : null);
+          bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool, status: thought.status } : null);
           bubbleIds.add(a.id);
           const l = lookOf(a), have = sprites.get(a.id);
           if (have) { have.col = l.col; have.look = l.key; continue; } // a look edited in Add/Edit shows at once
