@@ -325,17 +325,75 @@ test('T5 the office floor: background at the desk working, queued at the desk wa
   assert.equal(cafeEligible({ status: 'idle' }, rt), true);
 });
 
-test('T5 the cards: useActivity overlays the lock and gives its line as the tool text; the store carries the pushed view', () => {
-  const hook = readSource('src/renderer/src/components/useActivity.ts');
-  assert.match(hook, /const lock = useStore\(\(s\) => s\.heavyLock\);\s*const heavy = heavyActivity\(agentId, lock\);/);
-  assert.match(hook, /const shown = activityStatus\(status, rec, heavy\) as StatusKind;/);
-  assert.match(hook, /const toolText = runningToolText\(shown, tool, now\) \?\? \(shown !== turnStatus \? heavyText\(heavy, now\) : null\);/);
-  assert.match(hook, /const ticking = !!tool \|\| !!heavy;/, 'the age ticks while a lock line shows');
+// The real useActivity hook, run outside a renderer: 'react' and '@/store/store' point at two tiny
+// stubs (Jim's audit probe, adopted), so its logic runs on a settable store state. react-dom/server
+// does not do here: zustand's server snapshot is the INITIAL state, so no overlay would ever show.
+function loadUseActivity() {
+  const rel = 'src/renderer/src/components/useActivity.ts';
+  const src = readSource(rel)
+    .replace("from 'react'", `from ${JSON.stringify(path.join(__dirname, 'idle-187-fake-react.cjs'))}`)
+    .replace("from '@/store/store'", `from ${JSON.stringify(path.join(__dirname, 'idle-187-fake-store.cjs'))}`);
+  return loadTs.fromText(rel, src).useActivity;
+}
+const fakeStore = require('./idle-187-fake-store.cjs');
+
+test('T5 the cards: the real useActivity overlays the lock on a LIVE IDLE agent and gives the lock line as its tool text', () => {
+  const useActivity = loadUseActivity();
+  const now = Date.now();
+  const idleRec = (id) => ({ ...lv('IDLE'), agentId: id, classifiedSince: now - MIN });
+  fakeStore.setState({
+    agents: [{ id: 'tool', runningTools: [{ name: 'Bash', since: now - 2 * MIN }] }],
+    liveness: { bg: idleRec('bg'), q: idleRec('q'), r: idleRec('r'), plain: idleRec('plain'), busy: { ...lv('BUSY_PROGRESSING'), agentId: 'busy' }, tool: { ...lv('BUSY_PROGRESSING'), agentId: 'tool' }, crashed: { ...lv('CRASHED'), agentId: 'crashed' } },
+    heavyLock: {
+      holders: [{ agentId: 'bg', kind: 'suite', since: iso(now - 3 * MIN), background: true }],
+      waiters: [
+        { agentId: 'q', kind: 'suite', since: iso(now - 4 * MIN), position: 2 },
+        { agentId: 'busy', kind: 'suite', since: iso(now), position: 3 },
+        { agentId: 'tool', kind: 'suite', since: iso(now), position: 4 },
+        { agentId: 'crashed', kind: 'suite', since: iso(now), position: 5 }
+      ],
+      reserved: [{ agentId: 'r', kind: 'suite', until: '2026-10-15T06:26:00.000Z' }]
+    }
+  });
+  const bg = useActivity('bg', 'idle'), q = useActivity('q', 'idle'), r = useActivity('r', 'idle'), p = useActivity('plain', 'idle');
+  assert.deepEqual([bg.status, bg.turnStatus], ['working', 'idle']);
+  assert.match(bg.toolText, /^suite in background 3m/);
+  assert.deepEqual([q.status, q.turnStatus], ['waiting', 'idle']);
+  assert.match(q.toolText, /^queued for heavy slot #2 \(4m\)/);
+  assert.deepEqual([r.status, r.turnStatus, r.toolText], ['waiting', 'idle', 'heavy slot reserved until 06:26Z']);
+  assert.deepEqual([p.status, p.turnStatus, p.toolText], ['idle', 'idle', null]);
+  // WORKING beats the lock, and its running tool is the line; a crashed agent is never overlaid.
+  assert.deepEqual([useActivity('busy', 'idle').status, useActivity('busy', 'idle').toolText], ['working', null]);
+  assert.match(useActivity('tool', 'working').toolText, /^using Bash for 2m/);
+  assert.deepEqual([useActivity('crashed', 'idle').status, useActivity('crashed', 'idle').toolText], ['idle', null]);
+  // A tool still listed as running on an overlaid agent is named first (the hook's own fact), as for any busy card.
+  fakeStore.setState({ agents: [{ id: 'bg', runningTools: [{ name: 'Bash', since: now - MIN }] }] });
+  assert.match(useActivity('bg', 'idle').toolText, /^using Bash for 1m/);
+  fakeStore.setState({ agents: [] });
+  fakeStore.setState({ heavyLock: null });
+  assert.deepEqual([useActivity('bg', 'idle').status, useActivity('bg', 'idle').toolText], ['idle', null], 'no lock view: plain idle again');
+  // The hook's age refresh cannot run outside a renderer (useEffect is stubbed): this one stays a pin.
+  assert.match(readSource('src/renderer/src/components/useActivity.ts'), /const ticking = !!tool \|\| !!heavy;/, 'the age ticks while a lock line shows');
+});
+
+test('T5 the store takes the pushed view; a boot snapshot that lands after a push is dropped (applySnapshotUnlessPushed)', () => {
+  const { applySnapshotUnlessPushed } = loadTs('src/shared/snapshotSync.ts');
+  const run = (steps) => {
+    const shown = [];
+    const sync = applySnapshotUnlessPushed((v) => shown.push(v));
+    for (const [op, v] of steps) sync[op](v);
+    return shown;
+  };
+  assert.deepEqual(run([['snapshot', 'boot'], ['push', 'p1'], ['push', 'p2']]), ['boot', 'p1', 'p2'], 'the snapshot first, then every push');
+  assert.deepEqual(run([['push', 'p1'], ['snapshot', 'stale boot']]), ['p1'], 'a reply that lands after a push is older: dropped');
+  assert.deepEqual(run([['push', 'p1'], ['snapshot', 'stale boot'], ['push', 'p2']]), ['p1', 'p2']);
+  assert.deepEqual(run([['dispose'], ['snapshot', 'boot']]), [], 'a reply after unmount is dropped');
+  assert.deepEqual(run([]), []);
+  const hive = readSource('src/renderer/src/hooks/useHive.ts');
+  assert.match(hive, /const sync = applySnapshotUnlessPushed<HeavyLockView>\(\(view\) => useStore\.getState\(\)\.applyHeavyLock\(view\)\);\s*void window\.cth\.heavyLockSnapshot\(\)\s*\.then\(sync\.snapshot\)/);
+  assert.match(hive, /const off = window\.cth\.onHeavyLockChange\(sync\.push\);\s*return \(\) => \{ sync\.dispose\(\); off\(\); \};/);
   const store = readSource('src/renderer/src/store/store.ts');
   assert.match(store, /applyHeavyLock: \(view\) => set\(\{ heavyLock: view && typeof view === 'object' \? view : null \}\),/);
-  const hive = readSource('src/renderer/src/hooks/useHive.ts');
-  assert.match(hive, /void window\.cth\.heavyLockSnapshot\(\)/);
-  assert.match(hive, /const off = window\.cth\.onHeavyLockChange\(\(view\) => \{ pushed = true; useStore\.getState\(\)\.applyHeavyLock\(view\); \}\);/);
   const pre = readSource('src/preload/index.ts');
   assert.match(pre, /heavyLockSnapshot: \(\): Promise<HeavyLockView> => ipcRenderer\.invoke\('heavy-lock:snapshot'\),/);
   assert.match(pre, /ipcRenderer\.on\('heavy-lock:changed', listener\);\s*return \(\) => ipcRenderer\.removeListener\('heavy-lock:changed', listener\);/);
@@ -347,13 +405,25 @@ test('T6 composer send-now follows the turn, not the overlay: a background or qu
   const composer = readSource('src/renderer/src/components/MessageQueueComposer.tsx');
   assert.match(composer, /const shownIdle = useActivity\(agent\.id, agent\.status\)\.turnStatus === 'idle';/);
   assert.doesNotMatch(composer, /useActivity\([^)]*\)\.status === 'idle'/);
-  const hook = readSource('src/renderer/src/components/useActivity.ts');
-  assert.match(hook, /const turnStatus = activityStatus\(status, rec\) as StatusKind;/, 'turnStatus is the status WITHOUT the lock');
-  assert.match(hook, /return \{ status: shown, toolText, turnStatus \};/);
-  for (const h of [{ state: 'background', kind: 'suite', since: NOW }, { state: 'queued', kind: 'suite', position: 1, since: NOW }]) {
-    assert.equal(ACT.activityStatus('idle', lv('IDLE')), 'idle', `${h.state}: send-now`);
-    assert.notEqual(ACT.activityStatus('idle', lv('IDLE'), h), 'idle', `${h.state}: the card is overlaid`);
+  // By value, from the real hook: what the composer reads is idle for each place in the lock.
+  const useActivity = loadUseActivity();
+  const now = Date.now();
+  fakeStore.setState({
+    agents: [],
+    liveness: Object.fromEntries(['bg', 'q', 'r'].map((id) => [id, { ...lv('IDLE'), agentId: id }])),
+    heavyLock: {
+      holders: [{ agentId: 'bg', kind: 'suite', since: iso(now), background: true }],
+      waiters: [{ agentId: 'q', kind: 'suite', since: iso(now), position: 1 }],
+      reserved: [{ agentId: 'r', kind: 'suite', until: iso(now + MIN) }]
+    }
+  });
+  for (const id of ['bg', 'q', 'r']) {
+    const a = useActivity(id, 'idle');
+    assert.equal(a.turnStatus, 'idle', `${id}: send-now`);
+    assert.notEqual(a.status, 'idle', `${id}: the card is overlaid`);
   }
+  fakeStore.setState({ liveness: { bg: { ...lv('BUSY_PROGRESSING'), agentId: 'bg' } } });
+  assert.equal(useActivity('bg', 'working').turnStatus, 'working', 'an open turn queues, as before');
 });
 
 // ─── T7: a replay of the lock's log, 2026-10-15 05:52-06:35Z ────────────────────────────

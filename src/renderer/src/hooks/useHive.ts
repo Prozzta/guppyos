@@ -26,6 +26,8 @@ import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 import { themeBuilder } from '@/scene/themes/themeCatalog';
 import { lookFromRequest } from '@/scene/themes/looks';
+import { applySnapshotUnlessPushed } from '@shared/snapshotSync';
+import type { HeavyLockView } from '@shared/activityView';
 
 const GOD_ID = 'god';
 /** Accent palette for MAIN-spawned (voice-hired) agents — picked deterministically
@@ -646,13 +648,12 @@ export function useHive(config: HarnessConfig | null): void {
   //      A stale preload without the bridge leaves it null (today's idle).
   useEffect(() => {
     if (!window.cth.heavyLockSnapshot || !window.cth.onHeavyLockChange) return;
-    let alive = true;
-    let pushed = false;
+    const sync = applySnapshotUnlessPushed<HeavyLockView>((view) => useStore.getState().applyHeavyLock(view));
     void window.cth.heavyLockSnapshot()
-      .then((view) => { if (alive && !pushed) useStore.getState().applyHeavyLock(view); })
+      .then(sync.snapshot)
       .catch(() => { /* main not ready: the pushes fill it */ });
-    const off = window.cth.onHeavyLockChange((view) => { pushed = true; useStore.getState().applyHeavyLock(view); });
-    return () => { alive = false; off(); };
+    const off = window.cth.onHeavyLockChange(sync.push);
+    return () => { sync.dispose(); off(); };
   }, []);
 
   // 2e) PROVIDER-AGNOSTIC PTY-QUIESCENCE IDLE FALLBACK (the linchpin that makes
