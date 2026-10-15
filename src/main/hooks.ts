@@ -35,7 +35,7 @@ import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
 import { MAIL_STALE_EPOCH_MS, MAIL_UNCONFIRMED_FALLBACK_AFTER, type MailEntry, type MailLateDetail, type MailObligation } from './mailLedger';
 import {
-  MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET,
+  MAIL_EVIDENCE_SCAN_BACK_BYTES, MAIL_EVIDENCE_SCAN_MAX_BYTES, MAIL_JOINED_BUDGET, MAIL_PIPE_HOOK_TIMEOUT_MS,
   buildMailBlock, buildMailHeaders, effectiveMailCap, escapeMailText, isSlashPrompt, mailBudgetFor, mailCapCut, mailCapExempt, mailChannelMode,
   mailEvidenceIn, mailEvidenceKind, mailLatencyLimitMs, mailSurfaceEvents, readFileWindow, shimElapsedMs,
   type MailBlock, type MailBlockItem, type MailChannelMode, type MailEvidenceKind
@@ -1309,23 +1309,27 @@ export class HookServer {
 
   /**
    * CL-M4-BRIEFING-BUDGET S2 (Jim): a late or failed briefing is never silent. The same flush watch
-   * and on-time measure as mail (shim elapsed + arrival to flush, against the pipe limit): a reply
-   * flushed in time is printed by the shim (printedChars = its working-set chars); one at or past
-   * the limit met the shim's 5 s give-up, or never flushed, and the agent started WITHOUT it.
+   * and on-time measure as mail (shim elapsed + arrival to flush). A reply flushed before the shim's
+   * own give-up (MAIL_PIPE_HOOK_TIMEOUT_MS) is printed by the shim (printedChars = its working-set
+   * chars); one at or past it met the give-up, or never flushed, and the agent started WITHOUT it.
+   * CL-BRIEF-STARTUP: the outcome was judged against the 2.5 s mail margin (`limitMs`), so a briefing
+   * the shim printed at 3-4 s was logged as shim-gave-up with printedChars 0. The margin is kept as
+   * `overMargin` (slow, yet printed); `giveUpMs` is what decides printed or not.
    */
   private watchBriefingFlush(stream: FlushWatchable, p: HookPayload, res: unknown, startedAt: number): void {
     const ctx = (res as { hookSpecificOutput?: { additionalContext?: unknown } } | null)?.hookSpecificOutput?.additionalContext;
     const chars = typeof ctx === 'string' ? ctx.length : 0;
     if (!chars || !p.agent_id) return;
     const limitMs = mailLatencyLimitMs('pipe');
+    const giveUpMs = MAIL_PIPE_HOOK_TIMEOUT_MS;
     let settled = false;
     const settle = (flushedAt: number | null) => {
       if (settled) return;
       settled = true;
       const latencyMs = flushedAt === null ? null : Math.max(0, flushedAt - startedAt);
-      const late = latencyMs === null || latencyMs >= limitMs;
+      const late = latencyMs === null || latencyMs >= giveUpMs;
       try {
-        this.hive.appendLog({ kind: late ? 'claims-briefing-late' : 'claims-briefing-flush', agentId: p.agent_id, source: p.source ?? null, chars, printedChars: late ? 0 : chars, latencyMs, limitMs, ...(late ? { outcome: latencyMs === null ? 'not-flushed' : 'shim-gave-up' } : {}) });
+        this.hive.appendLog({ kind: late ? 'claims-briefing-late' : 'claims-briefing-flush', agentId: p.agent_id, source: p.source ?? null, chars, printedChars: late ? 0 : chars, latencyMs, limitMs, giveUpMs, ...(late ? { outcome: latencyMs === null ? 'not-flushed' : 'shim-gave-up' } : { overMargin: latencyMs >= limitMs }) });
       } catch { /* best effort */ }
     };
     // TEST-FLAKE-SHIMCLOCK-179: a shim that hung up before this watch was attached (see watchMailFlush).

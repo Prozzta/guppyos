@@ -232,6 +232,61 @@ test('(P) briefing: a briefing shim that hung up before the server answered is l
   assert.equal(f.logRows().filter((x) => x.kind === 'claims-briefing-flush').length, 0);
 });
 
+/** CL-BRIEF-STARTUP: one briefing through the REAL hook shim and the real pipe, with a working set that
+ *  takes `ms`; what the shim printed and the one briefing row the server logged. */
+async function briefingRound(t, ms) {
+  const f = await floor(t);
+  const text = '# Memory working set — god-1 (slow)';
+  f.server.setClaimWorkingSetProvider(async () => { await new Promise((r) => setTimeout(r, ms)); return text; });
+  const r = await runShim(HOOK_SHIM, ['--agent', 'god-1', '--part', 'briefing'], { AGENT_ID: 'god-1', HIVE_SOCK: f.hive.sockPath() },
+    JSON.stringify({ hook_event_name: 'SessionStart', session_id: 's-god-1', source: 'compact' }));
+  const rows = await rowsWithin(f, (x) => x.kind === 'claims-briefing-flush' || x.kind === 'claims-briefing-late');
+  return { printed: r.out.includes(text), ms: r.ms, text, rows };
+}
+
+test('CL-BRIEF-STARTUP cause 2: a briefing flushed past the 2.5 s mail margin but before the shim\'s 5 s give-up IS printed, and its row says so', async (t) => {
+  const r = await briefingRound(t, 3_500);
+  assert.ok(r.printed, `the real shim printed the briefing (${r.ms} ms)`);
+  assert.equal(r.rows.length, 1, JSON.stringify(r.rows));
+  const [row] = r.rows;
+  assert.equal(row.kind, 'claims-briefing-flush', `printed, so not logged late: ${JSON.stringify(row)}`);
+  assert.equal(row.printedChars, r.text.length);
+  assert.equal(row.outcome, undefined);
+  assert.ok(row.latencyMs >= S.MAIL_PIPE_LATENCY_LIMIT_MS && row.latencyMs < S.MAIL_PIPE_HOOK_TIMEOUT_MS, JSON.stringify(row));
+  assert.equal(row.overMargin, true, 'past the mail margin, said plainly');
+  assert.equal(row.limitMs, S.MAIL_PIPE_LATENCY_LIMIT_MS, 'the mail margin is unchanged');
+  assert.equal(row.giveUpMs, S.MAIL_PIPE_HOOK_TIMEOUT_MS, 'the outcome is judged at the shim\'s give-up');
+});
+
+test('CL-BRIEF-STARTUP cause 2: a briefing past the shim\'s 5 s give-up is NOT printed and is logged late with 0 printed', async (t) => {
+  const r = await briefingRound(t, 6_000);
+  assert.equal(r.printed, false, `the shim gave up empty (${r.ms} ms)`);
+  assert.equal(r.rows.length, 1, JSON.stringify(r.rows));
+  const [row] = r.rows;
+  assert.equal(row.kind, 'claims-briefing-late', JSON.stringify(row));
+  assert.equal(row.printedChars, 0);
+  assert.ok(row.outcome === 'not-flushed' || (row.outcome === 'shim-gave-up' && row.latencyMs >= S.MAIL_PIPE_HOOK_TIMEOUT_MS), JSON.stringify(row));
+});
+
+test('CL-BRIEF-STARTUP cause 2 unit: the outcome boundaries are the shim\'s give-up, not the mail margin', async (t) => {
+  const f = await floor(t);
+  const { EventEmitter } = require('node:events');
+  const res = { hookSpecificOutput: { additionalContext: 'x'.repeat(40) } };
+  const brief = { agent_id: 'god-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' };
+  const at = (ago, ev) => { const s = new EventEmitter(); f.server.watchBriefingFlush(s, brief, res, Date.now() - ago); s.emit(ev); };
+  const before = f.logRows().length;
+  at(1_000, 'finish'); at(3_800, 'finish'); at(4_900, 'finish'); at(5_000, 'finish'); at(7_000, 'finish'); at(100, 'close');
+  const rows = f.logRows().slice(before).filter((x) => x.kind.startsWith('claims-briefing-'));
+  assert.deepEqual(rows.map((x) => [x.kind, x.printedChars, x.overMargin ?? null, x.outcome ?? null]), [
+    ['claims-briefing-flush', 40, false, null],
+    ['claims-briefing-flush', 40, true, null],
+    ['claims-briefing-flush', 40, true, null],
+    ['claims-briefing-late', 0, null, 'shim-gave-up'],
+    ['claims-briefing-late', 0, null, 'shim-gave-up'],
+    ['claims-briefing-late', 0, null, 'not-flushed'],
+  ]);
+});
+
 test('(P) unit: streamGone reads a destroyed or closed stream; a live one is not gone', () => {
   const { streamGone } = loadTs('src/main/hooks.ts');
   assert.equal(streamGone({ destroyed: true }), true);
