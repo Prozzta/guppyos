@@ -155,7 +155,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   coordination closing the false-active stall), and a committed hand-mutant gate.
 - **Performance, measured** (1.1.49–1.1.51) — a log that grew forever and a whole-file
   read of it that froze the main thread (reads 460× faster, log rows −91% with every
-  wake event kept); the office floor capped at 30 fps (renderer 40% → 10% of a core
+  wake event kept); the office-theme floor capped at 30 fps (renderer 40% → 10% of a core
   idle); batched terminal output; and no more Codex transcript replays from terminal
   resizes (27 replays for 11 queued messages → 0).
 - **A floor that doesn't stall itself** (1.1.52) — hive commits
@@ -181,8 +181,9 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   agent is told about mail that arrives while it works, at its next tool call; installs,
   builds, full suites and benches take a slot (default one at a time, set in Settings), so
   agents stop loading the machine all at once; the Human reads the conversation with
-  Michael in a Talk view beside the terminal; AGY and Codex agents start idle with
-  their instructions; and wakes left unsent in a provider's input box are recovered.
+  the god agent (Michael, in the office theme) in a Talk view beside the terminal; AGY
+  and Codex agents start idle with their instructions; and wakes left unsent in a
+  provider's input box are recovered.
 - **Talk taken out of the main app** (1.1.56) — it slowed the whole
   app, most of all in the split view, so it is being rebuilt as a separate build. Everything
   else in 1.1.55 stays, and Talk's history files on disk are left untouched.
@@ -258,15 +259,16 @@ as facts rather than hopes.
 ## What it is
 
 Guppy is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
-agents, wires them into a **hive**, and puts **your clone** in charge — Michael, the one
-agent *you* talk to in order to get things done.
+agents, wires them into a **hive**, and puts **a captain** in charge — the god agent
+(Cpt Kerk on the TES bridge, Michael in the office theme), the one agent *you* talk to
+in order to get things done.
 
 - **Every terminal is an agent.** Each `claude`, `agy`, `codex`, `grok`, or custom
   session runs as a real process in a pseudo-terminal (`node-pty`), byte-for-byte
   authentic, rendered with xterm.js.
-- **Every agent is an avatar.** Sessions appear as characters on a Pixi.js office floor —
-  they walk to stations as they work, and envelopes fly desk-to-desk when they message
-  each other.
+- **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
+  bridge, or the office theme) — they walk to their stations as they work, and envelopes
+  fly station-to-station when they message each other.
 - **The hive coordinates them.** Agents read their memory and drain a mailbox; the router
   moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
   when it needs you.
@@ -287,8 +289,8 @@ agent *you* talk to in order to get things done.
 ```
             you ── talk to ──►  ┌─────────────┐
                                 │  GOD agent  │  orchestrator / supervisor
-                                │ (Michael's  │  roster · routing · adjudication
-                                │   office)   │  blackboard · task ledger
+                                │ (captain's  │  roster · routing · adjudication
+                                │   chair)    │  blackboard · task ledger
                                 └──────┬──────┘
                                        │ assigns · routes · escalates
               ┌────────────────────────┼────────────────────────┐
@@ -336,8 +338,8 @@ npm run dev        # launches the Electron app with hot reload
 ```
 
 On first launch you'll go through the onboarding wizard, then land on the floor. Use
-**Add agent** to spawn your first session — the GOD agent seats itself in Michael's
-office automatically.
+**Add agent** to spawn your first session — the GOD agent takes the captain's chair
+automatically (Michael's office, in the office theme).
 
 ### Other scripts
 
@@ -442,8 +444,8 @@ the UI displays can cause or prevent a wake.
 
 The aesthetic is **Animal Crossing × Earthbound × SNES menu UI** — pixel-snapped, chunky,
 friendly. [`DESIGN.md`](./DESIGN.md) is canonical; every component derives from its
-tokens. The Guppy brand layers a **Dunder-Mifflin maroon** (`#6E1423`) and
-**gold** (`#F4D35E`) on top for logo and chrome.
+tokens. The Guppy brand layers the **maroon** (`#6E1423`) carried over from the office
+theme and **gold** (`#F4D35E`) on top for logo and chrome.
 
 ## Telemetry
 
