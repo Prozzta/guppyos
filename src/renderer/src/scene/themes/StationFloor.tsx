@@ -269,7 +269,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const now = new Map<unknown, Drawn>();
         const rectOf = (c: Container) => (c.visible && c.renderable ? deviceRect(c.getBounds(), r, W, H) : null);
         // Everything drawn, generically: a sprite is signed by its texture and frame, world transform,
-        // alpha, tint, blend and depth; whatever else draws (a bubble's text and graphics) is
+        // alpha, tint, blend and depth (and its ancestors' look and renderable); whatever else draws (a bubble's text and graphics) is
         // drawn again every frame. A hidden subtree drops out, so its old rects are drawn again.
         const at = new Matrix();
         const visit = (c: Container, look: string) => {
@@ -282,7 +282,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
             const t = c.texture, fr = t.frame, m = c.getGlobalTransform(at);
             now.set(c, { rect: rectOf(c), sig: `${t.uid}|${fr.x},${fr.y},${fr.width},${fr.height}|${m.a},${m.b},${m.c},${m.d},${m.tx},${m.ty}|${look}|${c.alpha},${c.tint},${c.blendMode}|${c.zIndex}|${c.renderable}` });
           } else if (!c.children.length) now.set(c, { rect: rectOf(c), sig: String(painted) });
-          for (const k of c.children) visit(k, `${look}|${c.alpha},${c.tint},${c.blendMode}`);
+          for (const k of c.children) visit(k, `${look}|${c.alpha},${c.tint},${c.blendMode},${c.renderable}`);
         };
         visit(app.stage, '');
         const view = `${W}x${H}@${r}|${world.x},${world.y},${world.scale.x},${world.scale.y}|${floorK}`;

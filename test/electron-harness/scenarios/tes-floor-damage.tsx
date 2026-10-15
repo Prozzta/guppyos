@@ -17,7 +17,7 @@ import { Application } from 'pixi.js';
 import { OfficeFloor } from '../../../src/renderer/src/scene/office/OfficeFloor';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCatalog';
-import { BOX, RESIZES, SELECTS, CREW, LOSE_AT, LAST, AFTER } from './tes-floor-damage-plan';
+import { BOX, RESIZES, SELECTS, CREW, LOSE_AT, LAST, AFTER, LOOKS, LOOKS_FROM } from './tes-floor-damage-plan';
 
 declare global {
   interface Window {
@@ -63,6 +63,7 @@ const out = {
   frames: 0, whole: 0, incremental: 0, nothing: 0, passes: 0, incPx: 0, canvasPx: 0,
   diffFrames: 0, diffMax: 0, diffAt: '', diffKinds: { whole: 0, incremental: 0, nothing: 0 } as Record<string, number>,
   apps: 0, afterRebuild: 0, configs: [] as string[], lost: false,
+  looks: 0, stillFound: false, looksAt: -1,
   badFrames: [] as Array<{ at: number; kind: string; bad: number; box: number[]; rects: Rect[] | string }>,
   errors: [] as string[]
 };
@@ -71,6 +72,10 @@ let done: (() => void) | null = null;
 let hostBox: HTMLDivElement | null = null;
 let lastApp: unknown = null;
 let agentsNow: any[] = [];
+// LOOKS: a person (an interactive sprite of the shared layer) that has not moved since 'pick'.
+let picked: Array<{ s: any; x: number; y: number }> = [], still: any = null, kept: { s: any; was: object } | null = null;
+let calm = 0, looksAt = -1, lastKind = 'whole';
+let hold: (() => void) | null = null;
 const read = (gl: WebGL2RenderingContext, W: number, H: number) => {
   const px = new Uint8Array(W * H * 4);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -95,6 +100,7 @@ proto.render = function (this: any) {
       if (!out.configs.includes(cfg)) out.configs.push(cfg);
       const todo = S.lastPaint as 'full' | Rect[];
       const kind = todo === 'full' ? 'whole' : todo.length ? 'incremental' : 'nothing';
+      lastKind = kind;
       if (kind === 'whole') out.whole++;
       else if (kind === 'nothing') out.nothing++;
       else { out.incremental++; out.passes += todo.length; out.incPx += todo.reduce((s, r) => s + r.w * r.h, 0); out.canvasPx += W * H; }
@@ -127,6 +133,60 @@ proto.render = function (this: any) {
     if (cr.back) agentsNow = [...agentsNow, agents.find((a) => a.id === cr.back)!];
     if (cr.status) agentsNow = agentsNow.map((a) => (a.id === cr.status![0] ? { ...a, status: cr.status![1], action: cr.status![1] === 'working' ? 'Edit' : 'awaiting' } : a));
     useStore.setState({ agents: agentsNow } as never);
+  }
+  calm = lastKind === 'whole' || out.lost ? 0 : calm + 1; // (the check's own whole draw is not the frame's)
+  if (looksAt < 0 && renders >= LOOKS_FROM && calm >= 8) looksAt = renders;
+  const lk = looksAt < 0 ? undefined : LOOKS.find((q) => q.at === renders - looksAt);
+  const layer = this.__tesScene?.sortLayer;
+  if (lk && layer) {
+    if (lk.look === 'pick') out.looksAt = looksAt;
+    if (lk.look === 'pick') picked = layer.children.filter((c: any) => c.eventMode === 'static').map((s: any) => ({ s, x: s.x, y: s.y }));
+    else if (lk.look.startsWith('layer')) {
+      if (lk.look === 'layerAlpha') layer.alpha = 0.6;
+      else if (lk.look === 'layerHidden') layer.renderable = false;
+      else { layer.alpha = 1; layer.renderable = true; }
+      out.looks++;
+    } else {
+      const stills = () => picked.filter((p) => p.s.x === p.x && p.s.y === p.y).map((p) => p.s);
+      if (!still) { still = stills()[0] ?? null; out.stillFound = !!still; }
+      if (lk.look === 'back') {
+        if (hold) { this.ticker.remove(hold); hold = null; }
+        if (kept) Object.assign(kept.s, kept.was);
+        kept = null; out.looks++;
+      }
+      else if (lk.look === 'behind') {
+        // A still person whose move behind every prop changes the picture (one over a chair or desk)
+        // outside the rects the frame drew anyway (thought clouds are drawn every frame): each is tried
+        // with whole draws, and the canvas is left drawn whole in the state as it was.
+        const drew = this.__tesScene.lastPaint as 'full' | Rect[];
+        const anyway = (k: number) => { const X = (k / 4) % W, Y = H - 1 - Math.floor(k / 4 / W); return drew !== 'full' && drew.some((q) => X >= q.x && X < q.x + q.w && Y >= q.y && Y < q.y + q.h); };
+        const gl = this.renderer.gl as WebGL2RenderingContext, W = this.canvas.width, H = this.canvas.height;
+        const whole = () => { this.__tesScene.damage.invalidate(); this.renderer.render({ container: this.stage }); return read(gl, W, H); };
+        let deep: any = null;
+        for (const s of stills()) {
+          const z = s.zIndex;
+          s.zIndex = -1; const a = whole(); s.zIndex = z; const b = whole();
+          if (a.some((v, k) => v !== b[k] && !anyway(k - (k % 4)))) { deep = s; break; }
+        }
+        if (deep) {
+          // The floor's own depth sort (each tick a walker changes the order) sets every zIndex again,
+          // so the change is held by a tick after the floor's (priority 0) and before the render (-25);
+          // put back, the person gets the depth the floor last gave it.
+          const was = { zIndex: deep.zIndex };
+          kept = { s: deep, was };
+          hold = () => { if (deep.zIndex !== -1) was.zIndex = deep.zIndex; deep.zIndex = -1; };
+          this.ticker.add(hold, null, -10);
+          hold();
+          out.looks++;
+        }
+      } else if (still) {
+        kept = { s: still, was: { alpha: still.alpha, tint: still.tint, blendMode: still.blendMode } };
+        if (lk.look === 'alpha') still.alpha = 0.5;
+        else if (lk.look === 'tint') still.tint = 0xff6040;
+        else still.blendMode = 'add';
+        out.looks++;
+      }
+    }
   }
   if (renders === LOSE_AT) {
     const gl = this.renderer?.gl as WebGL2RenderingContext | undefined;

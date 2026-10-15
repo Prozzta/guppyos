@@ -3,13 +3,14 @@
  * PERF-FLOOR-FILL-188, RENDERED (scenarios/tes-floor-damage.tsx): the TES floor draws again only
  * what changed, and every frame so drawn is, px for px, the frame a full draw makes:
  * - at DPR 1, 1.25, 1.5, 1.75 and 2, in three panes each (576x587, 960x640, 700x470: 15 configs),
- *   with walkers, camera nudges, an agent leaving and coming back, thought clouds coming and going
- *   and a lost WebGL context (the floor rebuilds and carries on);
+ *   with walkers, camera nudges, an agent leaving and coming back, thought clouds coming and going,
+ *   a still person dimmed, tinted, blended and put behind its chair in place, the shared layer
+ *   dimmed and made unrenderable, and a lost WebGL context (the floor rebuilds and carries on);
  * - most frames are incremental, and they draw a fraction of the canvas;
  * - MUTANTS (DPR 1): a tracker that forgets a removed thing's old rect, a mover's old rect, the
- *   scissor's flip to GL's bottom-up rows, the rect's rounding margin, or the bubbles, is caught.
- *   (Dropping the clear inside the scissor is not: here every rect lies on opaque floor or wall,
- *   so the stage overdraws it whole; the clear stays for a rect over bare backdrop.)
+ *   clear inside the scissor (a rect can reach bare backdrop: 700x470@1 leaves an axis uncovered),
+ *   the scissor's flip to GL's bottom-up rows, the rect's rounding margin, the bubbles, a sprite's
+ *   own alpha/tint/blend, its depth, its ancestors' look or their renderable, is caught.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -36,6 +37,9 @@ for (const dpr of ['1', '1.25', '1.5', '1.75', '2']) {
     assert.deepEqual(r.errors, []);
     assert.equal(r.dpr, Number(dpr), 'the window has the DPR asked for');
     assert.ok(r.frames >= 600, `${r.frames} frames`);
+    assert.equal(r.stillFound, true, 'a still person was found for the in-place looks');
+    assert.equal(r.looks, 12, `every in-place look change was made (${r.looks})`);
+    assert.ok(r.looksAt >= 260 && r.looksAt + 36 < 560, `the look changes ran on a settled floor before the context loss (from render ${r.looksAt})`);
     assert.equal(r.configs.length >= 3, true, `three panes at least (${r.configs})`);
     assert.equal(r.apps, 2, 'the context was lost and the floor rebuilt');
     assert.ok(r.afterRebuild >= 50, `frames after the rebuild: ${r.afterRebuild}`);
@@ -48,8 +52,13 @@ for (const dpr of ['1', '1.25', '1.5', '1.75', '2']) {
 const MUTANTS = [
   ['removed thing: old rect dropped', DAMAGE, "    for (const [k, p] of prev) if (!now.has(k) && p.rect) dirty.push(p.rect);\n", ''],
   ['mover: old rect dropped', DAMAGE, '      if (p?.rect) dirty.push(p.rect);\n', ''],
+  ['no clear inside the scissor', FLOOR, 'realRender({ container: app.stage, clear: true });', 'realRender({ container: app.stage, clear: false });'],
   ['scissor y not flipped to GL', FLOOR, 'gl.scissor(p.x, H - p.y - p.h, p.w, p.h);', 'gl.scissor(p.x, p.y, p.w, p.h);'],
   ['no rounding margin', DAMAGE, 'Math.floor(b.minX * r) - 1), y0 = Math.max(0, Math.floor(b.minY * r) - 1);', 'Math.round(b.minX * r)), y0 = Math.max(0, Math.round(b.minY * r));'],
+  ['own alpha/tint/blend not signed', FLOOR, '|${c.alpha},${c.tint},${c.blendMode}|${c.zIndex}|', '||${c.zIndex}|'],
+  ['depth not signed', FLOOR, '|${c.zIndex}|${c.renderable}`', '||${c.renderable}`'],
+  ["ancestors' look not signed", FLOOR, 'visit(k, `${look}|${c.alpha},${c.tint},${c.blendMode},${c.renderable}`)', "visit(k, '')"],
+  ["ancestors' renderable not signed", FLOOR, '${c.blendMode},${c.renderable}`)', '${c.blendMode}`)'],
   ['bubbles not drawn again', FLOOR, 'now.set(k, { rect: rectOf(k), sig: String(painted) });', 'now.set(k, { rect: rectOf(k), sig: \'b\' });']
 ];
 test('MUTANTS (DPR 1): each is caught by the incremental == full check', { timeout: harnessTestTimeout(300_000 * MUTANTS.length) }, async (t) => {
