@@ -83,6 +83,19 @@ module.exports = async (drill) => {
     // Andy: the 2 s file-change debounce shortened for the 'backfill' mode's memory.md edit
     ...(mode === 'backfill' ? { setTimer: (fn, ms) => setTimeout(fn, Math.min(ms, 50)) } : {}) });
   await eng.backfill();
+  // Andy, Jim's SHOULD-1 (rw2): a search queued from inside the apply step runs as the very next step
+  // (search outranks ingest). The markdown must already be gone then: dropping it in a step of its own
+  // after the apply would let that search see the claims AND the markdown (a double hit).
+  const behind = [];
+  const applyClaims = idx.applyClaims.bind(idx);
+  idx.applyClaims = (...args) => {
+    const out = applyClaims(...args);
+    behind.push(eng.search({ query: 'zeppelin hangar code', results: 10, wing: A }).then((r) => {
+      const hits = Array.isArray(r.json) ? r.json : [];
+      return { md: hits.filter((h) => !h.claimId && /memory\.md$/.test(String(h.source))).length, claims: hits.filter((h) => h.claimId).length };
+    }));
+    return out;
+  };
   sync = new ClaimsIndexSync({
     readLedger: (a) => store.readLedger(a), derive: () => derive, registry: () => DEFAULT_KEY_REGISTRY,
     ruleConfig: () => ({ r4: false }), level, agents: () => [A],
@@ -231,12 +244,13 @@ module.exports = async (drill) => {
   const yakAfterP = yak();
   await yakAfterP;
   watchers.stopAll();
+  const behindApply = await Promise.all(behind);
   await eng.close(); idx.close(); store.close();
   const misses = samples.filter((s) => !s.found);
   return {
     ok: true, mode, filler: N, before, raised, settled, shadowFile, yakBefore, yakAfter: await yakAfterP, legacyClaims: recs().filter((r) => r.t === 'claim' && r.source === 'legacy').length,
     samples: samples.length, misses: misses.length, missFrom: misses[0]?.at ?? null, missTo: misses.at(-1)?.at ?? null,
     last: samples.at(-1), phases: [...new Set(misses.map((m) => m.phase))], mdAfter, claimAfter, otherIndexed, otherGone,
-    syncedDuring: samples.filter((s) => s.phase === 'during-sync').length,
+    syncedDuring: samples.filter((s) => s.phase === 'during-sync').length, behindApply,
   };
 };

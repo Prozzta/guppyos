@@ -46,6 +46,13 @@ const noGap = (r, legacy) => {
   assert.equal(r.legacyClaims, legacy, s);
   assert.ok(r.claimAfter > 0, `after the sync the note is found as a claim: ${s}`);
   assert.equal(r.mdAfter, 0, `and the markdown itself is out of search: ${s}`);
+  // Jim's SHOULD-1 (rw2): the drop is in the apply step itself. A search queued right behind that
+  // step sees the claims and never the markdown too (a drop in its own later step: a double hit).
+  assert.ok(r.behindApply.length >= 1, `a search was queued behind the apply step: ${s}`);
+  for (const b of r.behindApply) {
+    assert.ok(b.claims > 0, `behind the apply the claims are searchable: ${s}`);
+    assert.equal(b.md, 0, `behind the apply the markdown is already gone, never both: ${s}`);
+  }
 };
 
 test('MUST-1: a mid-run writer raise: every search during the first claims sync finds the legacy note', { timeout: 5 * 60_000 }, async () => {
