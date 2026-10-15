@@ -150,6 +150,14 @@ export function regionPicker(statics: Array<{ px?: Pixels | null; x: number; y: 
   };
 }
 
+/** Whether the cache's render texture must be rebuilt for a canvas of W x H device
+ *  pixels at resolution r: none yet, or made for another pixel size or another
+ *  resolution. A UI zoom changes the DPR (and so r) but often not the canvas's
+ *  pixel size; an RT kept at the old r gives its cells wrong UVs and positions. */
+export function cacheStale(rt: { source: { pixelWidth: number; pixelHeight: number; resolution: number } } | null, W: number, H: number, r: number): boolean {
+  return !rt || rt.source.pixelWidth !== W || rt.source.pixelHeight !== H || rt.source.resolution !== r;
+}
+
 /** Keys for the cache's picture under the world transform (scale ax, ay, then
  *  offset tx, ty, in CSS px; `r` device px per CSS px): equal keys, same picture.
  *  Pixi computes each sprite vertex in float64 (a * w + tx, as below), hands the

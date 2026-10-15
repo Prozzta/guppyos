@@ -364,3 +364,19 @@ test('teardownFloor, with real pixi: frees the floor whole; the old order (free 
   T.teardownFloor(one.app, [() => { throw new Error('a step'); }, ...one.frees]);
   assert.equal(one.freed(), true);
 });
+
+// 1.1.87 whole-branch audit, MUST 1: a UI zoom (Ctrl+= / Ctrl+-) changes the device pixel ratio
+// but usually not the canvas's pixel size (the CSS size shrinks as the DPR grows). The DPR watcher
+// sets renderer.resolution, so the cache RT must be rebuilt for a new resolution too, or its cells
+// keep the old one (wrong UVs and positions).
+test('cacheStale: the cache RT is rebuilt when the canvas pixel size OR the resolution changes', () => {
+  const rt = (pixelWidth, pixelHeight, resolution) => ({ source: { pixelWidth, pixelHeight, resolution } });
+  assert.equal(C.cacheStale(null, 1200, 800, 1), true, 'no RT yet');
+  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 800, 1), false, 'same pixels, same resolution');
+  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 800, 1.25), true, 'same pixels, new resolution (UI zoom)');
+  assert.equal(C.cacheStale(rt(1200, 800, 1.25), 1200, 800, 1), true, 'and back');
+  assert.equal(C.cacheStale(rt(1200, 800, 1), 1201, 800, 1), true, 'new width');
+  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 801, 1), true, 'new height');
+  const src = readSource('src/renderer/src/scene/themes/StationFloor.tsx');
+  assert.match(src, /const r = app\.renderer\.resolution, W = app\.canvas\.width, H = app\.canvas\.height;\s*if \(!rt \|\| cacheStale\(rt, W, H, r\)\) \{\s*dropCells\(\);/);
+});

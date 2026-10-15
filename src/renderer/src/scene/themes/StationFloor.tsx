@@ -20,7 +20,7 @@ import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
-import { cacheKeyOf, frontPicker, regionPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
+import { cacheKeyOf, cacheStale, frontPicker, regionPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
@@ -230,7 +230,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const refreshCache = (liveStatics: boolean[]) => {
         cacheStatics.forEach((s, i) => { if (s) s.visible = !liveStatics[i]; });
         const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
-        if (!rt || rt.source.pixelWidth !== W || rt.source.pixelHeight !== H) {
+        if (!rt || cacheStale(rt, W, H, r)) {
           dropCells();
           passCache?.destroy({ texture: true, textureSource: false });
           passCache = null;

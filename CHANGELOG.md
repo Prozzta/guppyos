@@ -27,9 +27,9 @@ All notable changes to this project are documented here. The format is based on
   across their own chair only, and gets up the same way. A theme pack can name a seat's side with
   `"approach"` in its manifest.
 
-- **TES now shows thought clouds, brief crew speech and flying hive envelopes.** The station floor
-  reuses the Office's bubbles, follows liveness-derived activity, and keeps those live overlays
-  animating even while its static map cache is settled.
+- **TES now shows thought clouds and brief crew speech.** The station floor reuses the Office's
+  bubbles, follows liveness-derived activity, and keeps those live overlays animating even while
+  its static map cache is settled.
 
 - **TES crew now visibly go for coffee.** Coffee runs always happened on the station floor, but
   nothing showed them. Now a crew member carries a mug in hand, leaves it at their station, and
@@ -37,7 +37,8 @@ All notable changes to this project are documented here. The format is based on
   and when they sit down to sip.
 
 - **TES floor walls stay crisp after resizing.** The floor now uses whole device pixels and keeps
-  its lower hull running past the bottom edge instead of leaving a background strip.
+  its lower hull running past the bottom edge instead of leaving a background strip, and it follows
+  a UI zoom or a move to another monitor.
 
 - **An agent running a heavy job in the background, or waiting for the heavy-job slot, no longer
   shows as idle.** Its card, the agent panel, the office and TES floors and the LIVE ROSTER line read
