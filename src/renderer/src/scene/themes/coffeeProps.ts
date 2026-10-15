@@ -8,6 +8,7 @@
 import type { Crew, Walker } from './crew';
 import type { Facing } from './manifest';
 import type { Pixels } from './raster';
+import type { LinePicker } from './packLines';
 
 /** The viewer's bubble lines (bridge-viewer.html LINES). */
 export const COFFEE_LINES = {
@@ -44,8 +45,8 @@ function brewStart(run: { t: number }, now: number): number {
   return at;
 }
 
-/** The coffee props for the crew as it stands now. */
-export function coffeeProps(crew: Pick<Crew, 'walkers' | 'mugAt' | 'events' | 't'>): CoffeeProp[] {
+/** The coffee props for the crew as it stands now. `line` picks from the pack's own coffee lines (TES-BUBBLES-188). */
+export function coffeeProps(crew: Pick<Crew, 'walkers' | 'mugAt' | 'events' | 't'>, line?: LinePicker): CoffeeProp[] {
   const out: CoffeeProp[] = [];
   const sipAt = new Map<string, number>();
   for (const e of crew.events) if (e.kind === 'sip') sipAt.set(e.id, e.at);
@@ -58,13 +59,13 @@ export function coffeeProps(crew: Pick<Crew, 'walkers' | 'mugAt' | 'events' | 't
     if (p.cup && !p.seated) out.push({ kind: 'cup', id: p.id, x: p.x, y: p.y, dir: p.dir });
     if (p.coffee?.phase === 'brewing') {
       const key = `brew:${p.id}:${brewStart(p.coffee, crew.t)}`;
-      out.push({ kind: 'say', id: p.id, text: pick(p.cup ? COFFEE_LINES.refill : COFFEE_LINES.brewing, p.id), key, ttl: Math.max(0, BREW_MS - p.coffee.t) });
+      out.push({ kind: 'say', id: p.id, text: line?.([p.cup ? 'refill' : 'brewing'], p.id) ?? pick(p.cup ? COFFEE_LINES.refill : COFFEE_LINES.brewing, p.id), key, ttl: Math.max(0, BREW_MS - p.coffee.t) });
       continue;
     }
     const at = sipAt.get(p.id);
     const sipping = p.coffee?.phase === 'sipping' || (p.homeSit && p.sip > 0);
     if (at !== undefined && sipping && crew.t - at < SIP_LINE_MS) {
-      out.push({ kind: 'say', id: p.id, text: pick(COFFEE_LINES.coffee, `${p.id}@${at}`), key: `sip:${p.id}:${at}`, ttl: SIP_LINE_MS - (crew.t - at) });
+      out.push({ kind: 'say', id: p.id, text: line?.(['coffee'], `${p.id}@${at}`) ?? pick(COFFEE_LINES.coffee, `${p.id}@${at}`), key: `sip:${p.id}:${at}`, ttl: SIP_LINE_MS - (crew.t - at) });
     }
   }
   return out;

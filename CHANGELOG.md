@@ -23,6 +23,11 @@ All notable changes to this project are documented here. The format is based on
   replaced it, so an agent with nothing to do said 'starting up' for minutes, and one whose
   first turn sent none of those kept saying it.
 
+- **The TES bridge crew speak their own lines.** The pack's `lines.json` (named in its manifest
+  under `"text"`) now reaches the floor: a chat is a bit of bridge gossip or a cheer, a wander stop
+  an errand or idle thought, and the coffee beats come from the pack too. 1.1.87 shipped the file
+  but nothing read it, so the bridge only said the generic lines, which stay for packs without one.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.

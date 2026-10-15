@@ -29,7 +29,7 @@ function pinSyncAndTick(source) {
     /const freshEvents = newerCrewEvents\(crew\.events, lastCrewEventAt\);/,
     'S1: tick projects only Crew events newer than its cursor');
   assert.match(source,
-    /if \(freshEvents\.length\) \{\s*bubbles\.consumeSays\(crewSays\(freshEvents\), sayCursor\);\s*lastCrewEventAt = freshEvents\[freshEvents\.length - 1\]\.at;\s*\}/,
+    /if \(freshEvents\.length\) \{\s*bubbles\.consumeSays\(crewSays\(freshEvents, packLines\), sayCursor\);\s*lastCrewEventAt = freshEvents\[freshEvents\.length - 1\]\.at;\s*\}/,
     'S3: tick advances the Crew-event cursor after consuming fresh events');
 }
 
