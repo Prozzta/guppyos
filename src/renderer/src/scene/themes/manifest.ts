@@ -16,6 +16,9 @@ export type SceneKind = typeof SCENE_KINDS[number];
 
 export type Facing = 'down' | 'up' | 'left' | 'right';
 export const FACINGS: readonly Facing[] = ['down', 'up', 'left', 'right'];
+/** The side of a chair its sitter walks in from, relative to the way they face. */
+export type Approach = 'front' | 'back' | 'left' | 'right';
+export const APPROACHES: readonly Approach[] = ['front', 'back', 'left', 'right'];
 
 /** Rows of a character sheet: a stand and a sit frame per facing. */
 export interface SpriteRows {
@@ -37,6 +40,8 @@ export interface StationSeatSpec {
   facing?: Facing;
   /** A free-form role tag (bubble lines, later PRs). */
   role?: string;
+  /** The side the sitter walks in from; else the front when it is open, then the sides, then the back. */
+  approach?: Approach;
 }
 
 export interface StationsSpec {
@@ -235,7 +240,8 @@ export function validateManifest(raw: unknown, packDir = ''): ManifestResult {
           if (!isObj(v)) { err(`"stations.seats.${name}" must be an object`); continue; }
           if (v.facing !== undefined && !FACINGS.includes(v.facing as Facing)) err(`"stations.seats.${name}.facing" must be down, up, left or right`);
           if (v.role !== undefined && !isStr(v.role, 40)) err(`"stations.seats.${name}.role" must be a short string`);
-          seats[name] = { ...(v.facing ? { facing: v.facing as Facing } : {}), ...(v.role ? { role: v.role as string } : {}) };
+          if (v.approach !== undefined && !APPROACHES.includes(v.approach as Approach)) err(`"stations.seats.${name}.approach" must be front, back, left or right`);
+          seats[name] = { ...(v.facing ? { facing: v.facing as Facing } : {}), ...(v.role ? { role: v.role as string } : {}), ...(v.approach ? { approach: v.approach as Approach } : {}) };
         }
       }
     }

@@ -9,7 +9,7 @@
 import { GID_MASK, tileFor, objBox, type Diagnostic, type MapLayer, type NormalizedMap, type ObjectLayer, type TileLayer } from './tiled';
 import { blank, drawTileLayer, drawObject, drawTile, tileCellBox, type PixelStore } from './raster';
 import { worldShape, objCorners, footShape, inside, shapePoints, type WorldShape } from './geometry';
-import { FACINGS, type CoffeeSpec, type Facing, type NavigationSpec, type StationsSpec } from './manifest';
+import { FACINGS, type Approach, type CoffeeSpec, type Facing, type NavigationSpec, type StationsSpec } from './manifest';
 import { rowPieces, type RowPieces } from './compositor';
 
 /** Layers that carry data, never drawn. */
@@ -44,6 +44,8 @@ export interface Station {
   y: number;
   facing: Facing;
   role?: string;
+  /** The manifest's approach side, when it names one. */
+  approach?: Approach;
 }
 
 export interface WalkGrid {
@@ -79,8 +81,12 @@ export interface StationMap {
   /** The stations in the manifest's seat order (only those that exist and are reachable). */
   seatOrder: Station[];
   captain: Station | null;
-  /** Per station: the rectangles where its own sitter may cross solid pixels (its square and its chair). */
+  /** Per station: its square and its chair's box. Nobody stops there to roam or brew. */
   seatZones: Map<Station, Array<[number, number, number, number]>>;
+  /** Per station: the solidName index of its own chair, the only solid its sitter may cross (on the short leg in and out). */
+  seatChair: Map<Station, number>;
+  /** Per station: the open spot on the chair's approach side, walked to before the short leg in (and back out). */
+  approach: Map<Station, [number, number]>;
   entrance: [number, number] | null;
   start: [number, number] | null;
   reach: Uint8Array;
@@ -100,17 +106,20 @@ export function footBox(x: number, y: number): [number, number, number, number] 
   return [X - 6, Y - 5, X + 6, Y + 1];
 }
 
-/** Solid pixels under the foot box at (x, y), not counting those inside `zones`
- *  (the walker's own seat). Off the map counts as solid. */
-export function footHits(S: Pick<StationMap, 'PW' | 'PH' | 'integ' | 'solid' | 'hard'>, x: number, y: number, zones?: Array<[number, number, number, number]>): number {
+/** Solid indices a walker may cross (its own chair); a collision-layer one never is. */
+export type Excuse = readonly number[];
+
+/** Solid pixels under the foot box at (x, y), not counting those of the `excuse`d
+ *  solids (the walker's own chair). Off the map counts as solid. */
+export function footHits(S: Pick<StationMap, 'PW' | 'PH' | 'integ' | 'solid' | 'hard'>, x: number, y: number, excuse?: Excuse): number {
   const [x0, y0, x1, y1] = footBox(x, y);
   if (x0 < 0 || y0 < 0 || x1 > S.PW || y1 > S.PH) return 1;
   const W1 = S.PW + 1, I = S.integ, n = I[y1 * W1 + x1] - I[y0 * W1 + x1] - I[y1 * W1 + x0] + I[y0 * W1 + x0];
-  if (!n || !zones || !zones.length) return n;
+  if (!n || !excuse || !excuse.length) return n;
   let m = 0;
   for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
     const id = S.solid[y * S.PW + x];
-    if (id && (S.hard[id] || !zones.some(([a, b, c, d]) => x >= a && x < c && y >= b && y < d))) m++;
+    if (id && (S.hard[id] || !excuse.includes(id))) m++;
   }
   return m;
 }
@@ -199,7 +208,7 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
     const ss = seatSpec(o.name), mapFacing = String(o.props.facing ?? '');
     const facing: Facing = ss?.facing ?? (FACINGS.includes(mapFacing as Facing) ? mapFacing as Facing : 'down');
     const role = ss?.role ?? (typeof o.props.role === 'string' ? o.props.role : undefined);
-    return { name: o.name, x: o.x + stL.ox, y: o.y + stL.oy, facing, ...(role ? { role } : {}) };
+    return { name: o.name, x: o.x + stL.ox, y: o.y + stL.oy, facing, ...(role ? { role } : {}), ...(ss?.approach ? { approach: ss.approach } : {}) };
   }) : [];
   const names = new Map<string, Station>();
   for (const s of stations) {
@@ -295,13 +304,16 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
   const hard = solidName.map((n) => /^collision/.test(n));
   const S = { PW, PH, integ, solid, hard };
 
-  // a seat's zone: its own square and its chair's box. Its sitter may cross solid pixels there (and only there) to sit.
+  // a seat's zone (its own square and its chair's box: nobody stops there), and its chair (the nearest furniture):
+  // the only solid its sitter may cross, on the short leg between the seat and its approach spot
   const seatZones = new Map<Station, Array<[number, number, number, number]>>();
+  const seatChair = new Map<Station, number>();
   for (const s of stations) {
     let best: FurnitureBox | null = null, bd = 16.5;
     for (const f of furniture) { const d = Math.hypot(Math.max(f.x0 - s.x, 0, s.x - f.x1), Math.max(f.y0 - s.y, 0, s.y - f.y1)); if (d < bd) { bd = d; best = f; } }
     const sq: [number, number] = [Math.floor(s.x / M.tw) * M.tw, Math.floor(s.y / M.th) * M.th];
     seatZones.set(s, [[sq[0], sq[1], sq[0] + M.tw, sq[1] + M.th], ...(best ? [[best.x0, best.y0, best.x1, best.y1] as [number, number, number, number]] : [])]);
+    if (best) seatChair.set(s, best.id);
     if ((col && tileAt(col.l, s.x, s.y)) || shapes.some((sh) => inside(sh, s.x, s.y)))
       rep.push({ level: 'error', message: `Station "${s.name}" stands inside a collision shape or tile; nobody can sit there.` });
   }
@@ -346,11 +358,16 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
       for (const [nx, ny] of neighbours(base, x, y)) { const k = ny * FW + nx; if (!reach[k]) { reach[k] = 1; q.push([nx, ny]); } }
     }
   }
+  // A seat is walked to by plain floor up to its approach spot, then one straight leg in (its own chair excused).
   const reachable = new Set<Station>();
+  const approach = new Map<Station, [number, number]>();
   for (const s of stations) {
     const [x, y] = fcell(s.x, s.y);
     if (x < 0 || y < 0 || x >= FW || y >= FH) { rep.push({ level: 'error', message: `Station "${s.name}" is outside the map.` }); continue; }
-    if (start && astar(base, start, [x, y], seatZones.get(s))) { reach[y * FW + x] = 1; reachable.add(s); }
+    const ex: Excuse = seatChair.has(s) ? [seatChair.get(s)!] : [];
+    const a = start && !footHits(S, s.x, s.y, ex) ? approachSpot({ S, G, reach }, s, ex) : null;
+    if (a && s.approach && a.side !== s.approach) rep.push({ level: 'warn', message: `Station "${s.name}": its approach side "${s.approach}" is not open floor; it is entered from the ${a.side}.` });
+    if (a) { approach.set(s, a.at); reach[y * FW + x] = 1; reachable.add(s); }
     else rep.push({ level: 'warn', message: `Station "${s.name}" cannot be reached from the entrance; it is never assigned.` });
   }
   const seatOrder = spec.seatOrder.map((n) => names.get(n.toLowerCase())).filter((s): s is Station => !!s && reachable.has(s));
@@ -406,23 +423,47 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
 
   return {
     M, roles, rowLayers, flatLayers, PW, PH, solid, solidBase, solidName, hard, integ, grid: G, stations, seatOrder, captain,
-    seatZones, entrance, start, reach, zones, wanderZone, brew, mugSpots, rowPieceCache: partial.rowPieceCache, diagnostics: rep,
+    seatZones, seatChair, approach, entrance, start, reach, zones, wanderZone, brew, mugSpots, rowPieceCache: partial.rowPieceCache, diagnostics: rep,
   };
 }
 
 // ───────────────────────── paths ─────────────────────────
 
 type Nav = { S: Pick<StationMap, 'PW' | 'PH' | 'integ' | 'solid' | 'hard'>; G: WalkGrid };
-type Zones = Array<[number, number, number, number]> | undefined;
+type Zones = Excuse | undefined;
 
-/** Walk-grid neighbours (8-way, no corner cutting). `zones`: where this walker may
- *  cross solid pixels (their own seat). */
+/** A facing as a unit step. */
+const STEP: Record<Facing, [number, number]> = { down: [0, 1], up: [0, -1], left: [-1, 0], right: [1, 0] };
+
+/** The direction of an approach side for a sitter facing `f` (left and right are the sitter's own). */
+export function sideVector(f: Facing, side: Approach): [number, number] {
+  const [x, y] = STEP[f];
+  return side === 'front' ? [x, y] : side === 'back' ? [-x, -y] : side === 'left' ? [y, -x] : [-y, x];
+}
+
+/** The spot a sitter walks to before the short leg into seat `s`: on the manifest's side, else the front, the
+ *  sides, then the back. It is the nearest point out from the seat whose foot box is clear, that the entrance
+ *  reaches by plain floor, and from which a straight leg reaches the seat crossing nothing but its own chair. */
+export function approachSpot(N: Nav & { reach: Uint8Array }, s: Station, ex: Excuse): { side: Approach; at: [number, number] } | null {
+  const G = N.G, order: Approach[] = ['front', 'left', 'right', 'back'];
+  for (const side of s.approach ? [s.approach, ...order.filter((o) => o !== s.approach)] : order) {
+    const [dx, dy] = sideVector(s.facing, side);
+    for (let k = 6; k <= 40; k += 2) {
+      const at: [number, number] = [Math.round(s.x + dx * k), Math.round(s.y + dy * k)];
+      const cx = Math.floor(at[0] / G.g), cy = Math.floor(at[1] / G.g);
+      if (cx < 0 || cy < 0 || cx >= G.W || cy >= G.H) break;
+      if (footHits(N.S, at[0], at[1]) || !N.reach[cy * G.W + cx] || !G.open[cy * G.W + cx]) continue;
+      if (segClear(N.S, at, [s.x, s.y], ex)) return { side, at };
+    }
+  }
+  return null;
+}
+
+/** Walk-grid neighbours (8-way, no corner cutting). `zones`: the solids this walker may
+ *  cross (their own chair). */
 export function neighbours(N: Nav, x: number, y: number, zones?: Zones): Array<[number, number]> {
   const G = N.G;
-  const pass = (a: number, b: number) => {
-    const cx = (a + 0.5) * G.g, cy = (b + 0.5) * G.g;
-    return zones!.some(([x0, y0, x1, y1]) => cx + 6 > x0 && cx - 6 < x1 && cy + 1 > y0 && cy - 5 < y1) && !footHits(N.S, cx, cy, zones);
-  };
+  const pass = (a: number, b: number) => !footHits(N.S, (a + 0.5) * G.g, (b + 0.5) * G.g, zones);
   const ok = (a: number, b: number) => a >= 0 && b >= 0 && a < G.W && b < G.H && (!!G.open[b * G.W + a] || (!!zones && zones.length > 0 && pass(a, b)));
   const out: Array<[number, number]> = [];
   for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
@@ -530,6 +571,19 @@ export function route(SM: StationMap, x: number, y: number, tx: number, ty: numb
     out.push(pts[j]); cur = pts[j]; i = j + 1;
   }
   return out;
+}
+
+/** A route into seat `s`: plain floor to its approach spot (crossing only `leave`, the chair the walker is getting
+ *  out of), then the straight leg in. Null when there is no way. */
+export function seatRoute(SM: StationMap, x: number, y: number, s: Station, leave?: Zones): Array<[number, number]> | null {
+  const a = SM.approach.get(s), ex: Excuse = SM.seatChair.has(s) ? [SM.seatChair.get(s)!] : [];
+  if (!a) return route(SM, x, y, s.x, s.y, ex, true);
+  const legs = route(SM, x, y, a[0], a[1], leave, true);
+  if (!legs) return null;
+  const end = legs.length ? legs[legs.length - 1] : [x, y];
+  if (end[0] !== a[0] || end[1] !== a[1]) legs.push(a);
+  legs.push([s.x, s.y]);
+  return legs;
 }
 
 /** True when (x, y) lies in any station's seat zone: roaming never stops there. */

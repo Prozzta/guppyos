@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format is based on
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.
 
+- **On the TES bridge, the crew no longer walk over the Speck console or through other chairs.**
+  Each seat is entered from its approach side: Cpt Kerk from the front of his chair, the Speck and
+  crew seats from behind. A crewmate walks plain floor to that spot, then takes one short step in
+  across their own chair only, and gets up the same way. A theme pack can name a seat's side with
+  `"approach"` in its manifest.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias
