@@ -21,11 +21,12 @@ const card = fs.readFileSync(path.join(REPO, 'src/renderer/src/components/AgentC
 
 test('source: the name has a tooltip and the status chip can fall back to its dot', () => {
   assert.match(card, /<span title=\{name\} style=\{\{/, 'the plain name carries the full name as a title');
-  assert.match(card, /label="" style=\{\{ flexShrink: 0, padding: '5px 6px' \}\}/);
+  // PANEL-BLINK-188: the dot-only chip blinks while working, as the full chip does.
+  assert.match(card, /label="" blink=\{badgeBlinks\(held\.status\)\} style=\{\{ flexShrink: 0, padding: '5px 6px' \}\}/);
   assert.match(card, /<span role="img" title=\{badgeLabel\} aria-label=\{badgeLabel\}/, 'the dot is a labelled image to assistive tech');
   // Guppy: the label is the impact-aware chip's (a held agent's verb), and the full chip keeps it.
   assert.match(card, /const badgeLabel = badgeText\(held\.status, held\.label\);/);
-  assert.match(card, /<PixelBadge status=\{held\.status\} label=\{held\.label\} style=\{\{ flexShrink: 0 \}\} \/>/);
+  assert.match(card, /<PixelBadge status=\{held\.status\} label=\{held\.label\} blink=\{badgeBlinks\(held\.status\)\} style=\{\{ flexShrink: 0 \}\} \/>/);
   assert.match(card, /title=\{taskChipTitle\(doingCount, taskFlags\)\}/, 'the task chip stays');
   assert.match(card, /title=\{mailBadgeTitle\(inboxBacklog\)\}/, 'the mail badge stays');
 });
