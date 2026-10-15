@@ -297,7 +297,7 @@ async function proveProbe() {
     check(!!found, 'the lingering-child probe actually detects a child', found ? `found decoy pid ${found}` : 'THE PROBE IS BLIND - every clear result below is meaningless');
     return !!found;
   } finally {
-    try { process.kill(decoy.pid); } catch { /* already gone */ }
+    try { decoy.kill(); } catch { /* already gone: the handle, never a pid that may have been reused */ }
     // Do not leave our own decoy behind to be found by the real check.
     await waitFor('the decoy to exit', 15_000, async () => ![...hiddenChildren()].some(([, c]) => c.includes(marker)) || null).catch(() => null);
     try { rmSync(decoyJs, { force: true }); } catch { /* ignore */ }
@@ -370,7 +370,7 @@ async function proveTreeFilter(appPid) {
       "tree filter: and the app's tree REFUSES a decoy it did not father",
       seen ? `decoy ${seen} not in the tree of app ${appPid}` : 'no decoy to test with');
   } finally {
-    try { process.kill(decoy.pid); } catch { /* already gone */ }
+    try { decoy.kill(); } catch { /* already gone: the handle, never a pid that may have been reused */ }
     await waitFor('the tree-filter decoy to exit', 15_000,
       async () => ![...hiddenChildren()].some(([, c]) => c.includes(marker)) || null).catch(() => null);
     try { rmSync(decoyJs, { force: true }); } catch { /* ignore */ }

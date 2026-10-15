@@ -4,7 +4,7 @@
  *
  * run-tests.cjs starts this beside its (blocking) `node --test`. It polls the process table, finds
  * each test-file process under that `node --test`, and when one has run past the limit it kills the
- * file's WHOLE process tree (`taskkill /T /F`, while the parent links are still intact) and records
+ * file's WHOLE process tree (own-procs.cjs: verified pids, while the parent links are still intact) and records
  * the file. node --test's own `--test-timeout` (the backstop, set a little later) kills only the
  * file's process: a ConPTY conhost is not in node's kill-on-close job, so it outlived the file (the
  * rc/1.1.76 gate hang: a PTY killed before its first output). This kills it with the file.
@@ -14,6 +14,7 @@
  */
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const own = require('./own-procs.cjs');
 
 /** Parse PowerShell's ConvertTo-Json rows ({ProcessId, ParentProcessId, Name, CommandLine, CreationDate:"/Date(ms)/"}). */
 function parseRows(json) {
@@ -40,11 +41,15 @@ function fileOf(cmd) {
  * child that run a *.test.cjs; one is due when it has run longer than `limitMs`.
  */
 function dueFiles(procs, runnerPid, limitMs, now) {
-  const kids = (pid) => procs.filter((p) => p.ppid === pid);
-  const nodeTest = kids(runnerPid).filter((p) => /node(\.exe)?$/i.test(p.name) && /--test\b/.test(p.cmd));
+  // TEST-GLOB-PID-RECYCLE: a child is created at or after its parent (a pid is reused, and an older
+  // process keeps the ParentProcessId of a parent long gone).
+  const kids = (parent) => procs.filter((p) => p.ppid === parent.pid && p.startedAt >= parent.startedAt);
+  const runner = procs.find((p) => p.pid === runnerPid);
+  if (!runner) return [];
+  const nodeTest = kids(runner).filter((p) => /node(\.exe)?$/i.test(p.name) && /--test\b/.test(p.cmd));
   const due = [];
   for (const nt of nodeTest) {
-    for (const f of kids(nt.pid)) {
+    for (const f of kids(nt)) {
       const file = fileOf(f.cmd);
       if (!file || !Number.isFinite(f.startedAt)) continue;
       if (now - f.startedAt > limitMs) due.push({ pid: f.pid, file, ageMs: now - f.startedAt });
@@ -69,6 +74,16 @@ function killDue(due, { killed, record, kill }) {
   }
 }
 
+/** The tree of a due file, from the same snapshot (each link created at or after its parent), killed
+ *  pid by pid, each one only while it still has the name and CreationDate it had in the snapshot. Not
+ *  `taskkill /T`: it follows ParentProcessId alone (TEST-GLOB-PID-RECYCLE). */
+function killTree(procs, pid, deps) {
+  const rows = procs.filter((p) => Number.isFinite(p.startedAt)).map((p) => ({ pid: p.pid, ppid: p.ppid, created: p.startedAt, name: p.name }));
+  const root = rows.find((r) => r.pid === pid);
+  if (!root) return { killed: [], skipped: [] };
+  return own.killVerified([root, ...own.treeOf(rows, root)], deps);
+}
+
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 
 function snapshot() {
@@ -78,7 +93,7 @@ function snapshot() {
   return parseRows(out);
 }
 
-module.exports = { parseRows, fileOf, dueFiles, killDue };
+module.exports = { parseRows, fileOf, dueFiles, killDue, killTree };
 
 if (require.main === module) {
   const [runnerPid, limitMs, outFile, pollMs = '30000'] = process.argv.slice(2);
@@ -91,7 +106,7 @@ if (require.main === module) {
     killDue(dueFiles(procs, runner, limit, Date.now()), {
       killed,
       record: (d) => fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `killed with its process tree after ${d.ageMs} ms (limit ${limit} ms)`, by: 'watchdog' })}\n`),
-      kill: (pid) => execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true, timeout: 30_000 })
+      kill: (pid) => killTree(procs, pid)
     });
   };
   setInterval(tick, poll);

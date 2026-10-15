@@ -14,9 +14,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const { createSandbox, removeSandbox } = require('../electron-harness/run.cjs');
 const { rigEnv } = require('./isolation.cjs');
+const own = require('../tools/own-procs.cjs');
 
 const HOST = path.join(__dirname, 'rig-host.cjs');
 const BAD_ENV = /^(HIVE_|AGENT_|MEMORY_|MUNDER_|CTH_|KG_|MD_SLACK_|CLAUDE)/i;
@@ -51,10 +52,13 @@ const SLOW_STUB_MS = Number(process.env.RIG_SLOW_STUB_MS || 0);
 const slowed = (s) => (SLOW_STUB_MS > 0 ? { ...s, scenario: { ...(s.scenario || {}), slowStubMs: SLOW_STUB_MS } } : s);
 
 function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
-function killTree(pid) {
-  if (!pid || !pidAlive(pid)) return;
-  if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore' });
-  else { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+/** Kill a process the rig started, with its tree. `rec` = { pid, bornMs }. TEST-GLOB-PID-RECYCLE: on win32 only
+ *  while the pid is still that process (birth within own-procs' slack) and only its own tree (each child
+ *  created after its parent), never `taskkill /T` on a pid that may have been reused. */
+function killTree(rec) {
+  if (!rec || !rec.pid || !pidAlive(rec.pid)) return;
+  if (process.platform === 'win32') own.killOwnTree(rec);
+  else { try { process.kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 
 class Rig {
@@ -64,7 +68,7 @@ class Rig {
     this.child = null;
     this.agentIds = [];   // the agents setup() started (beatUntil's failure dump)
     this.port = 0;
-    this.hostPids = [];
+    this.hostRecs = [];   // { pid, bornMs } of every host started
     this.log = '';
     /** LOAD-FLAKES-FOLLOWUPS J-LF1: the hold loops' wall clock and poll sleep (injectable, so the
      *  stall bound is tested by logic; the real ones by default). */
@@ -74,8 +78,9 @@ class Rig {
   async boot(timeoutMs = 45_000) {
     const env = scrubbedEnv(this.sandbox);
     this.child = spawn(process.execPath, [HOST, '--sandbox', this.sandbox, '--parent', String(process.pid)], { env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-    this.hostPids.push(this.child.pid);
     const child = this.child;
+    child.rec = { pid: child.pid, bornMs: Date.now() };
+    this.hostRecs.push(child.rec);
     this.exited = new Promise((r) => child.on('exit', (code, sig) => r({ code, sig })));
     const ready = await new Promise((resolve, reject) => {
       let out = '';
@@ -124,7 +129,7 @@ class Rig {
     if (!child) return;
     try { await this.call('shutdown', {}, 5_000); } catch { /* already gone */ }
     const r = await Promise.race([this.exited, sleep(8_000).then(() => null)]);
-    if (!r) killTree(child.pid);
+    if (!r) killTree(child.rec);
     this.child = null;
   }
 
@@ -139,22 +144,34 @@ class Rig {
     return out;
   }
 
+  /** The stubs' { pid, bornMs } (fake-agent writes both), for a verified kill. */
+  stubRecs() {
+    const dir = path.join(this.rigDir, 'stubs');
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return []; }
+    const out = [];
+    for (const n of names) {
+      try { out.push({ pid: Number(fs.readFileSync(path.join(dir, n, 'pid'), 'utf8')), bornMs: Number(fs.readFileSync(path.join(dir, n, 'born'), 'utf8')) }); } catch { /* none */ }
+    }
+    return out.filter((r) => r.pid > 0);
+  }
+
   async waitStubsGone(ms = 8_000) {
     const until = Date.now() + ms;
     while (Date.now() < until) {
       if (!this.stubPids().some(pidAlive)) return;
       await sleep(100);
     }
-    for (const pid of this.stubPids()) killTree(pid);
+    for (const rec of this.stubRecs()) killTree(rec);
   }
 
   /** Kill EVERYTHING this rig started (hosts, stubs, their trees), then remove the sandbox. */
   async destroy() {
     if (process.env.RIG_DEBUG) await this.dump().catch((e) => process.stderr.write(`dump failed: ${e}\n`));
     try { await this.stop(); } catch { /* keep going */ }
-    for (const pid of this.hostPids) killTree(pid);
+    for (const rec of this.hostRecs) killTree(rec);
     await this.waitStubsGone(4_000);
-    for (const pid of this.stubPids()) killTree(pid);
+    for (const rec of this.stubRecs()) killTree(rec);
     await removeSandbox(this.sandbox);
   }
 

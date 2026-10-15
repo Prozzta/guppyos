@@ -31,7 +31,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn, execFileSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 if (process.platform !== 'win32') {
   // Exact mirror of test/proc-kill.test.cjs: that one is inert on win32, this one off it.
@@ -56,16 +56,12 @@ const fixture = path.join(__dirname, 'fixtures', 'quit-sweep-main.cjs');
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-sweep-'));
 const pidFile = path.join(sandbox, 'pids.json');
 
-/** The image name running as `pid` right now, or null when no process has that pid. */
-function imageOf(pid) {
-  const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8' });
-  const m = out.split(/\r?\n/).map((l) => /^"([^"]*)","(\d+)"/.exec(l)).find((x) => x && Number(x[2]) === pid);
-  return m ? m[1] : null;
-}
-/** Still alive = the same image under the same pid (a reused pid of another program is not ours). */
-function isAlive(pid, image) {
-  const now = imageOf(pid);
-  return now !== null && (image == null || now === image);
+const own = require('./tools/own-procs.cjs');
+/** TEST-GLOB-PID-RECYCLE: the recorded processes still running AS THEMSELVES (same pid, name and CreationDate,
+ *  own-procs); a pid reused by another program is neither counted nor killed. */
+function stillRunning(rows) {
+  const now = own.lookupPids(rows.map((r) => r.pid));
+  return rows.filter((r) => now.some((n) => own.sameProcess(r, n)));
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -79,6 +75,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     env,
     windowsHide: true
   });
+  const childRec = { pid: child.pid, bornMs: Date.now() };
   let output = '';
   child.stdout.on('data', (d) => { output += d; });
   child.stderr.on('data', (d) => { output += d; });
@@ -86,7 +83,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const exitCode = await new Promise((resolve) => {
     const timeout = setTimeout(() => {
       // Hung fixture: reap it (and anything it spawned) so the TEST never leaks.
-      try { execFileSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { timeout: 10_000 }); } catch { /* gone */ }
+      try { own.killOwnTree(childRec); } catch { /* gone */ }
       resolve('timeout');
     }, 300_000); // a HANG guard (FLAKY-170: generous; a saturated machine stretches the fixture past a minute)
     child.on('exit', (code) => { clearTimeout(timeout); resolve(code); });
@@ -105,20 +102,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     // generous deadline instead. The leak this guards leaves `Start-Sleep 300` processes alive
     // for five minutes, so it still fails - at the deadline - and a pid reused by another
     // program is not counted as a survivor.
-    const images = new Map(recorded.pids.map((pid) => [pid, imageOf(pid)]));
     const REAP_DEADLINE_MS = 30_000;
     const reapStart = Date.now();
-    let survivors = recorded.pids.filter((pid) => isAlive(pid, images.get(pid)));
+    let survivors = stillRunning(recorded.rows);
     while (survivors.length && Date.now() - reapStart < REAP_DEADLINE_MS) {
       await sleep(250);
-      survivors = survivors.filter((pid) => isAlive(pid, images.get(pid)));
+      survivors = stillRunning(survivors);
     }
     if (survivors.length) {
-      // Clean up the leak before failing, so a red run doesn't strand processes.
-      for (const pid of survivors) {
-        try { execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { timeout: 10_000 }); } catch { /* gone */ }
-      }
-      assert.fail(`process tree survived Electron quit — leaked PIDs: ${survivors.join(',')} of ${recorded.pids.join(',')}`);
+      // Clean up the leak before failing, so a red run doesn't strand processes (verified, deepest first).
+      own.killVerified(survivors);
+      assert.fail(`process tree survived Electron quit — leaked PIDs: ${survivors.map((r) => r.pid).join(',')} of ${recorded.pids.join(',')}`);
     }
     console.log(`  ok  quit sweep reaped the whole tree inside Electron (pids: ${recorded.pids.join(',')})`);
   } catch (e) {

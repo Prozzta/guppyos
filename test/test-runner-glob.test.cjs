@@ -163,11 +163,26 @@ test('the timeout reporter records ONLY a file-level timeout (not a per-test tim
 const NODE_PTY = path.join(REPO, 'node_modules', 'node-pty');
 const HAS_PTY = process.platform === 'win32' && fs.existsSync(NODE_PTY);
 
-function childrenOf(pid) {
-  const { execFileSync } = require('node:child_process');
-  if (process.platform !== 'win32') return [];
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | ForEach-Object { "$($_.ProcessId) $($_.Name)" }`], { encoding: 'utf8', windowsHide: true });
-  return out.split(/\r?\n/).filter(Boolean);
+// TEST-GLOB-PID-RECYCLE: the hung file records its pid AND birth, and only what that process started is
+// listed or killed. ParentProcessId alone once listed the Human's HWiNFO64.EXE (an older process whose
+// long-gone parent had the same pid) and process.kill'ed it.
+const own = require('./tools/own-procs.cjs');
+const { readRec } = own;
+/** What a hung file left running: its own tree (own-procs ownTree), killed (verified) so a red run strands nothing. */
+function leftBehind(rec) {
+  const { tree } = own.ownTree(own.processTable(), rec);
+  own.killVerified(tree);
+  return tree.map((r) => `${r.pid} ${r.name}`);
+}
+/** The hung file's node child: gone, or (polled 5 s) still ours. A pid that now belongs to another process is gone. */
+function childStillRunning(rec) {
+  const { spawnSync } = require('node:child_process');
+  let alive = true;
+  for (let i = 0; i < 20 && alive; i++) { try { process.kill(rec.pid, 0); spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},250)']); } catch { alive = false; } }
+  if (!alive || process.platform !== 'win32') return alive;
+  const root = own.stillOurs(rec);
+  if (root) own.killVerified([root]);
+  return !!root;
 }
 
 /**
@@ -237,8 +252,8 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
       "const fs = require('node:fs');",
       "test('done, but a handle, a child and (win32) a ConPTY killed before its first output stay', async () => {",
       "  const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
-      `  fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));`,
-      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, String(process.pid));`,
+      `  fs.writeFileSync(${JSON.stringify(pidFile)}, c.pid + ' ' + Date.now());`,
+      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000));`,
       ...(HAS_PTY ? [
         `  const bat = ${JSON.stringify(path.join(dir, 'silent.bat'))};`,
         "  fs.writeFileSync(bat, '@echo off\\r\\nping -n 60 127.0.0.1 >nul\\r\\necho hi\\r\\n');",
@@ -261,14 +276,9 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 4000 ms .*a-hung\.test\.cjs/);
     assert.doesNotMatch(e.lines.join('\n'), /b-ok/, 'only the hung file is named');
     assert.match(out, /^ok \d+ - ok$/m, 'the healthy file still ran and passed');
-    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
-    let alive = true;
-    for (let i = 0; i < 20 && alive; i++) { try { process.kill(pid, 0); spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},250)']); } catch { alive = false; } }
-    if (alive) { try { process.kill(pid); } catch { /* gone */ } }
-    assert.strictEqual(alive, false, 'the hung file\'s child process was killed with it');
+    assert.strictEqual(childStillRunning(readRec(pidFile, 'node.exe')), false, 'the hung file\'s child process was killed with it');
     // The file's own children (the ConPTY conhost among them) are gone too, not orphaned.
-    const left = childrenOf(Number(fs.readFileSync(filePidFile, 'utf8')));
-    for (const l of left) { try { process.kill(Number(l.split(' ')[0])); } catch { /* gone */ } }
+    const left = leftBehind(readRec(filePidFile, 'node.exe'));
     assert.deepStrictEqual(left, [], `the hung file's process tree outlived the run: ${left.join(', ')}`);
     if (HAS_PTY) assert.match(e.lines.join('\n'), /FILE TIMED OUT/, 'the ConPTY case is the real one');
   } catch (err) {
@@ -348,7 +358,7 @@ test('watchdog: picks ONLY a test-file process under the runner\'s node --test t
     P(20, 10, 'node.exe', 'node.exe --test --test-timeout=9 a.test.cjs b.test.cjs', 900_000),
     P(30, 20, 'node.exe', 'node.exe C:/r/test/hung.test.cjs', 6_000),      // past the 5 s limit
     P(31, 20, 'node.exe', 'node.exe C:/r/test/young.test.cjs', 1_000),     // still within it
-    P(32, 30, 'conhost.exe', 'conhost.exe --headless', 6_000),             // a grandchild: taskkill /T takes it
+    P(32, 30, 'conhost.exe', 'conhost.exe --headless', 6_000),             // a grandchild: the tree kill takes it
     P(40, 99, 'node.exe', 'node.exe --test other.test.cjs', 900_000),      // another runner's suite
     P(41, 40, 'node.exe', 'node.exe C:/o/test/old.test.cjs', 900_000)
   ];
@@ -418,7 +428,7 @@ test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung Co
       "const test = require('node:test');",
       "const fs = require('node:fs');",
       "test('a ConPTY killed before its first output, and a handle', async () => {",
-      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, String(process.pid));`,
+      `  fs.writeFileSync(${JSON.stringify(filePidFile)}, process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000));`,
       `  const bat = ${JSON.stringify(path.join(dir, 'silent.bat'))};`,
       "  fs.writeFileSync(bat, '@echo off\\r\\nping -n 60 127.0.0.1 >nul\\r\\n');",
       `  const p = require(${JSON.stringify(NODE_PTY)}).spawn('cmd.exe', ['/c', bat], { cols: 80, rows: 24 });`,
@@ -433,13 +443,14 @@ test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung Co
     const lateWatchdog = (limitMs, outFile) => {
       const args = [runner.WATCHDOG, String(process.pid), String(limitMs), outFile, String(runner.watchdogPollMs(limitMs))];
       wrapper = spawn(process.execPath, ['-e', `setTimeout(() => { const c = require('child_process').spawn(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore', windowsHide: true }); c.on('exit', () => process.exit(0)); }, 8000);`], { stdio: 'ignore', windowsHide: true });
-      return { stop: () => { try { spawnSync('taskkill', ['/T', '/F', '/PID', String(wrapper.pid)], { windowsHide: true }); } catch { /* gone */ } } };
+      const rec = { pid: wrapper.pid, bornMs: Date.now(), name: 'node.exe' };
+      // the wrapper and the watchdog it started: its own tree, verified (not taskkill /T: TEST-GLOB-PID-RECYCLE)
+      return { stop: () => { try { own.killOwnTree(rec); } catch { /* gone */ } } };
     };
     const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
     const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, watchdog: lateWatchdog });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
-    const left = childrenOf(Number(fs.readFileSync(filePidFile, 'utf8')));
-    for (const l of left) { try { process.kill(Number(l.split(' ')[0])); } catch { /* gone */ } }
+    const left = leftBehind(readRec(filePidFile, 'node.exe'));
     assert.deepStrictEqual(left, [], `A LATE WATCHDOG STILL TREE-KILLS FIRST: the hung file's tree outlived the run: ${left.join(', ')}`);
   } catch (err) {
     failed = err;
