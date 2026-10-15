@@ -17,6 +17,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **'starting up' no longer hangs over an agent once it is up.** A restored or newly hired agent
+  carries its boot note ('starting up') only until its first settled liveness reading, which now
+  replaces the note with idle (or working). Before, only a tool call, a Stop or a compaction
+  replaced it, so an agent with nothing to do said 'starting up' for minutes, and one whose
+  first turn sent none of those kept saying it.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.

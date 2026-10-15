@@ -18,6 +18,7 @@ import { isCompactionCommand } from '@shared/providerAutomation';
 import type { RunningTool } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
 import { applyLivenessUpdate } from '@shared/livenessView';
+import { settleBootActions, type BootAction } from '@shared/bootAction';
 import type { HeavyLockView } from '@shared/activityView';
 import { preferredAgentRole } from '@shared/agentRole';
 import { isInboxNudge } from '@shared/hiveNudge';
@@ -64,6 +65,9 @@ export interface Agent {
   /** User-authored private note shown and edited from the roster-card hover. */
   note?: string;
   status: StatusKind;
+  /** TES-BUBBLES-188: the restore/spawn note `action` started with ('starting up'), until the
+   *  agent's first settled liveness reading retires it. Run-state: a boot note is not activity. */
+  bootAction?: BootAction;
   /** CARD-IDLE-WHILE-WORKING (1.1.78): the tool calls in progress, oldest first (from each
    *  PreToolUse until its PostToolUse / the turn's end). Run-state: never persisted. */
   runningTools?: RunningTool[];
@@ -695,7 +699,10 @@ export const useStore = create<State>((set, get) => ({
   liveness: {},
   applyLiveness: (rec) => set((s) => {
     const liveness = applyLivenessUpdate(s.liveness, rec);
-    return liveness === s.liveness ? s : { liveness };
+    if (liveness === s.liveness) return s;
+    // TES-BUBBLES-188: the first settled reading after a boot retires the boot note in `action`.
+    const agents = settleBootActions(s.agents, liveness[rec.agentId] ?? rec);
+    return agents === s.agents ? { liveness } : { liveness, agents };
   }),
   bumpToolCount: (id) =>
     set((s) => ({ toolCounts: { ...s.toolCounts, [id]: (s.toolCounts[id] ?? 0) + 1 } })),

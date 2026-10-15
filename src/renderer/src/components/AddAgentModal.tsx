@@ -20,6 +20,7 @@ import {
   localSlugFor,
   hasOssQuickPicks
 } from '@shared/ossModels';
+import { bootShape } from '@shared/bootAction';
 import {
   type AgentProvider,
   type HarnessConfig,
@@ -487,7 +488,7 @@ export function AddAgentModal({ onClose, config, onConfigChange }: AddAgentModal
       cwd: spawnedCwd,
       goal: goal.trim() || undefined,
       status: 'idle',
-      action: resuming && spawnRes.resumeNotFound ? 'session not found — fresh start' : 'starting up',
+      ...bootShape(resuming && spawnRes.resumeNotFound ? 'session not found — fresh start' : 'starting up'),
       progress: 0,
       currentStation: 'desk',
       ptyId,
