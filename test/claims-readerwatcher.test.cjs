@@ -211,6 +211,7 @@ test('CL-READERWATCHER mid-run: a raised agent is imported (memory.md and archiv
   assert.deepEqual(ws.watching(), ['ag-w', 'ag-x']);
   await ws.ensureImported('ag-s');
   assert.equal(fs.existsSync(settledFile(f, 'ag-s')), false, 'no import while it is shadow');
+  assert.ok(!settled.includes('ag-s'), 'and no swap signalled for it');
   // a raise of the shadow agent goes through sync (the 60 s timer in main)
   f.levels['ag-s'] = 'reader';
   edit(f, 'ag-s', 'written while it was shadow');
