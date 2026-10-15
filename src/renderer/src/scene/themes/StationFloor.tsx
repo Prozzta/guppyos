@@ -26,6 +26,7 @@ import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import type { MessageAct } from '../office/MessageEnvelope';
+import { coffeeProps, cupInHand, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -43,7 +44,8 @@ function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record
 }
 
 function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>): BubbleSay[] {
-  const lines: Record<string, string> = { chat: 'quick sync', errand: 'stepping away', brew: 'brewing coffee', sip: 'coffee break', gaveUp: 'back to work' };
+  // Coffee lines (brew, sip) come from coffeeProps, once per coffee state, in the viewer's words.
+  const lines: Record<string, string> = { chat: 'quick sync', errand: 'stepping away', gaveUp: 'back to work' };
   return events.flatMap((event) => {
     const text = lines[event.kind];
     if (!text) return [];
@@ -287,6 +289,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
             // dispatched, Pixi prunes invisible sprites from hit tests (onTick hides them again
             // before the next main pass).
             for (const s of sprites.values()) s.sprite.visible = true;
+            for (const c of cups.values()) c.sprite.visible = true;
             cacheLayer.visible = false;
             if (passCache) passCache.visible = true;
             gl.enable(gl.SCISSOR_TEST);
@@ -337,6 +340,18 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return f;
       };
       const stand = { down: R.rows.down, up: R.rows.up, left: R.rows.left, right: R.rows.right };
+      // COFFEE-NEVER-186: the viewer's mug, in the hand (anchored to the frame's hand pixels, read
+      // off the pack's sheet) and parked at a station, sorted with what it stands on.
+      const mugTex = { right: own(mugPixels(false)), left: own(mugPixels(true)) };
+      const hands = new Map<string, CupPose | null>();
+      const handOf = (col: number, dir: Walker['dir']) => {
+        const k = `${col}|${dir}`;
+        if (!hands.has(k)) hands.set(k, cupInHand(sheetPx, col * fw, stand[dir] * fh, fw, fh, dir));
+        return hands.get(k)!;
+      };
+      const cups = new Map<string, { sprite: Sprite; back: boolean }>();
+      const mugs = new Map<string, { sprite: Sprite; foot: number; rank: number }>();
+      const said = new Map<string, string>();
       const sit = { down: R.rows.sitDown, up: R.rows.sitUp, left: R.rows.sitLeft, right: R.rows.sitRight };
 
       // TES-GUPPY-SETTLE: eased by time and landed exactly, so a slow frame rate cannot keep the
@@ -431,6 +446,33 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           bubbles.consumeSays(crewSays(freshEvents), sayCursor);
           lastCrewEventAt = freshEvents[freshEvents.length - 1].at;
         }
+        const holding = new Set<string>(), parked = new Set<string>();
+        const coffee = coffeeProps(crew);
+        pruneSaid(said, crew.walkers().map((p) => p.id));
+        for (const item of freshSays(coffee, said)) bubbles.say(item.id, item.text, { ttl: item.ttl });
+        for (const item of coffee) {
+          if (item.kind === 'say') continue;
+          if (item.kind === 'cup') {
+            const s = sprites.get(item.id), pose = s ? handOf(s.col, item.dir) : null;
+            if (!s || !pose) continue;
+            let c = cups.get(item.id);
+            if (!c) { c = { sprite: sortLayer.addChild(new Sprite(mugTex.right)), back: false }; cups.set(item.id, c); }
+            c.sprite.texture = pose.left ? mugTex.left : mugTex.right;
+            c.sprite.position.set(s.sprite.x + pose.x + mugDx(pose.left), s.sprite.y + pose.y - MUG_H);
+            c.back = pose.back;
+            holding.add(item.id);
+          } else {
+            let m = mugs.get(item.owner);
+            if (!m) { m = { sprite: sortLayer.addChild(new Sprite(mugTex.right)), foot: 0, rank: 0 }; mugs.set(item.owner, m); }
+            if (m.sprite.x !== item.x + mugDx(false) || m.sprite.y !== item.y - MUG_H) {
+              m.sprite.position.set(item.x + mugDx(false), item.y - MUG_H);
+              Object.assign(m, mugDepth(item.x, item.y, plan.sorted));
+            }
+            parked.add(item.owner);
+          }
+        }
+        for (const [id, c] of cups) if (!holding.has(id)) { c.sprite.destroy(); cups.delete(id); }
+        for (const [id, m] of mugs) if (!parked.has(id)) { m.sprite.destroy(); mugs.delete(id); }
         // Keep these live even when the people/station depth is unchanged and the map is cached.
         bubbles.update(dt, anchors, world.scale.x);
         if (cached) {
@@ -449,10 +491,12 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           cacheLayer.visible = useCache;
           belowDirect.visible = !useCache;
           // The main pass: the cache, and over it only the live statics (and those over them); the
-          // people and the statics near them are drawn in their rects (postrender).
-          mainFront = useCache ? pickFront!([], live) : null;
+          // people and the statics near them are drawn in their rects (postrender). The parked mugs stay
+          // in the main pass, so the statics in front of one are redrawn over it.
+          mainFront = useCache ? pickFront!([...mugs.values()].map((m) => ({ x: m.sprite.x, y: m.sprite.y, w: MUG_W, h: MUG_H })), live) : null;
           statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
           for (const s of sprites.values()) s.sprite.visible = !useCache;
+          for (const c of cups.values()) c.sprite.visible = !useCache; // drawn with their person, in the rects
           passes = [];
           if (useCache) {
             const kx = world.scale.x, ky = world.scale.y, W = app.canvas.width, H = app.canvas.height;
@@ -468,13 +512,20 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           }
         }
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
-        const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}`).join('|');
+        const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}:${cups.get(q.id)?.back ?? '-'}`).join('|') + '#' + [...mugs].map(([id, m]) => `${id}:${m.foot}:${m.rank}`).join('|');
         if (depth === lastDepth) return;
         lastDepth = depth;
-        const items: Array<{ foot: number; rank: number; sprite: Sprite | null }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
+        const items: Array<{ foot: number; rank: number; sprite: Sprite | null; id?: string }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
         for (const q of people) items.push(q);
+        for (const m of mugs.values()) items.push(m);
         items.sort(byDepth);
-        items.forEach((it, i) => { if (it.sprite) it.sprite.zIndex = i; });
+        items.forEach((it, i) => {
+          if (!it.sprite) return;
+          it.sprite.zIndex = i;
+          // A mug in the hand: just in front of its person, or just behind when they face away.
+          const c = it.id !== undefined ? cups.get(it.id) : undefined;
+          if (c) c.sprite.zIndex = i + (c.back ? -0.5 : 0.5);
+        });
       };
       app.ticker.add(onTick);
       // LAG-150, as OfficeFloor: rAF runs at the display rate (165 fps measured); the floor needs 30.

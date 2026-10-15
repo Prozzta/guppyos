@@ -27,6 +27,11 @@ All notable changes to this project are documented here. The format is based on
   reuses the Office's bubbles, follows liveness-derived activity, and keeps those live overlays
   animating even while its static map cache is settled.
 
+- **TES crew now visibly go for coffee.** Coffee runs always happened on the station floor, but
+  nothing showed them. Now a crew member carries a mug in hand, leaves it at their station, and
+  says a short line when brewing ("brewing a fresh one", or "a quick refill" with their own mug)
+  and when they sit down to sip.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias

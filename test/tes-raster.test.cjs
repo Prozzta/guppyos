@@ -291,7 +291,8 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   assert.match(src, /if \(key !== cacheKey && key === lastKey\) \{ refreshCache\(live\); cacheKey = key; \}\s*lastKey = key;\s*const useCache = [^;]*;\s*cacheLayer\.visible = useCache;\s*belowDirect\.visible = !useCache;/);
   assert.match(src, /const pickFront = cached \? frontPicker\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
   assert.match(src, /const useCache = key === cacheKey && world\.scale\.x \* r >= NEAR_MIN_SCALE && world\.scale\.y \* r >= NEAR_MIN_SCALE;/);
-  assert.match(src, /mainFront = useCache \? pickFront!\(\[\], live\) : null;\s*statics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = mainFront \? mainFront\[i\] : true; \}\);\s*for \(const s of sprites\.values\(\)\) s\.sprite\.visible = !useCache;/);
+  // COFFEE-NEVER-186: the parked mugs stay in the main pass, so they are its boxes: a static in front of a mug is redrawn over it.
+  assert.match(src, /mainFront = useCache \? pickFront!\(\[\.\.\.mugs\.values\(\)\]\.map\(\(m\) => \(\{ x: m\.sprite\.x, y: m\.sprite\.y, w: MUG_W, h: MUG_H \}\)\), live\) : null;\s*statics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = mainFront \? mainFront\[i\] : true; \}\);\s*for \(const s of sprites\.values\(\)\) s\.sprite\.visible = !useCache;/);
   assert.match(src, /const pickRegion = cached \? regionPicker\(plan\.sorted, plan\.below\.width, plan\.below\.height\) : null;/);
   // The rects: each person's device box, 1 px out, inside the screen; one set picked for them all.
   assert.match(src, /const X0 = Math\.max\(0, Math\.floor\(\(s\.sprite\.x \* kx \+ world\.x\) \* r\) - 1\), X1 = Math\.min\(W, Math\.ceil\(\(\(s\.sprite\.x \+ fw\) \* kx \+ world\.x\) \* r\) \+ 1\);\s*const Y0 = Math\.max\(0, Math\.floor\(\(s\.sprite\.y \* ky \+ world\.y\) \* r\) - 1\), Y1 = Math\.min\(H, Math\.ceil\(\(\(s\.sprite\.y \+ fh\) \* ky \+ world\.y\) \* r\) \+ 1\);/);
@@ -306,8 +307,9 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   // That the people stay clickable after the passes is checked by a real click in
   // tes-floor-click-harness.test.cjs.
   assert.match(src, /const refreshCache = \(liveStatics: boolean\[\]\) => \{\s*cacheStatics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = !liveStatics\[i\]; \}\);/);
-  assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
-  assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*items\.sort\(byDepth\);/);
+  // COFFEE-NEVER-186: the key also holds the coffee mugs (a cup's side, a parked mug's depth).
+  assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}:\$\{cups\.get\(q\.id\)\?\.back \?\? '-'\}`\)\.join\('\|'\) \+ '#' \+ \[\.\.\.mugs\]\.map\(\(\[id, m\]\) => `\$\{id\}:\$\{m\.foot\}:\$\{m\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
+  assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*for \(const m of mugs\.values\(\)\) items\.push\(m\);\s*items\.sort\(byDepth\);/);
 });
 
 test('StationFloor frees the cache target, its cells and every texture it made on unmount, before the app is destroyed', () => {
