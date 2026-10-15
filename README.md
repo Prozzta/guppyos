@@ -6,12 +6,12 @@
 
 *Formerly Munder Difflin. Renamed in 1.1.82; an installed copy updates in place and keeps its agents, history and settings.*
 
-### Agent harness to run an office of your clones — the hardened fork
+### Agent harness to run an AI crew on your own machine — the hardened fork
 
 **Free, open source and performant** — a multi-agent harness that works with the
-subscriptions you already pay for, on their hourly limits. It turns the terminal coding CLI
-you already run into a clone of you, one that keeps working while you're away and
-coordinates a whole office of agents on your own machine.
+subscriptions you already pay for, on their hourly limits. It turns the terminal coding CLIs
+you already run into a crew that keeps working while you're away, coordinated by a
+captain on your own machine.
 
 This is **Prozzta/guppyos**, a fork of
 [chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin).
@@ -38,12 +38,11 @@ and unattended.
 ---
 
 > [!NOTE]
-> **The world's best agents. The world's worst paper company.**
+> **Boldly code where no team has coded before. Your AI crew, on duty 24/7.**
 > Guppy takes the terminal-agent CLIs you already run — `claude`, `agy`, `codex`,
-> `grok`, and friends — and turns them into a self-coordinating team: each agent gets
-> long-term memory, a mailbox, and a desk on a 2D office floor — and **your clone**
-> (Michael) routes work between them while you watch. He's the boss of the floor; you're
-> still the boss of him.
+> `grok`, and friends — and turns them into a self-coordinating crew: each agent gets
+> long-term memory, a mailbox, and a station on a 2D floor. The captain (**Cpt Kerk**,
+> the god agent) routes the work between them while you watch; you command the captain.
 
 ## Contents
 
@@ -156,7 +155,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   coordination closing the false-active stall), and a committed hand-mutant gate.
 - **Performance, measured** (1.1.49–1.1.51) — a log that grew forever and a whole-file
   read of it that froze the main thread (reads 460× faster, log rows −91% with every
-  wake event kept); the office floor capped at 30 fps (renderer 40% → 10% of a core
+  wake event kept); the office-theme floor capped at 30 fps (renderer 40% → 10% of a core
   idle); batched terminal output; and no more Codex transcript replays from terminal
   resizes (27 replays for 11 queued messages → 0).
 - **A floor that doesn't stall itself** (1.1.52) — hive commits
@@ -182,8 +181,9 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   agent is told about mail that arrives while it works, at its next tool call; installs,
   builds, full suites and benches take a slot (default one at a time, set in Settings), so
   agents stop loading the machine all at once; the Human reads the conversation with
-  Michael in a Talk view beside the terminal; AGY and Codex agents start idle with
-  their instructions; and wakes left unsent in a provider's input box are recovered.
+  the god agent (Michael, in the office theme) in a Talk view beside the terminal; AGY
+  and Codex agents start idle with their instructions; and wakes left unsent in a
+  provider's input box are recovered.
 - **Talk taken out of the main app** (1.1.56) — it slowed the whole
   app, most of all in the split view, so it is being rebuilt as a separate build. Everything
   else in 1.1.55 stays, and Talk's history files on disk are left untouched.
@@ -259,15 +259,16 @@ as facts rather than hopes.
 ## What it is
 
 Guppy is a desktop app that wraps **real terminal-agent CLIs** as fully-capable
-agents, wires them into a **hive**, and puts **your clone** in charge — Michael, the one
-agent *you* talk to in order to get things done.
+agents, wires them into a **hive**, and puts **a captain** in charge — the god agent
+(Cpt Kerk on the TES bridge, Michael in the office theme), the one agent *you* talk to
+in order to get things done.
 
 - **Every terminal is an agent.** Each `claude`, `agy`, `codex`, `grok`, or custom
   session runs as a real process in a pseudo-terminal (`node-pty`), byte-for-byte
   authentic, rendered with xterm.js.
-- **Every agent is an avatar.** Sessions appear as characters on a Pixi.js office floor —
-  they walk to stations as they work, and envelopes fly desk-to-desk when they message
-  each other.
+- **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
+  bridge, or the office theme) — they walk to their stations as they work, and envelopes
+  fly station-to-station when they message each other.
 - **The hive coordinates them.** Agents read their memory and drain a mailbox; the router
   moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
   when it needs you.
@@ -288,8 +289,8 @@ agent *you* talk to in order to get things done.
 ```
             you ── talk to ──►  ┌─────────────┐
                                 │  GOD agent  │  orchestrator / supervisor
-                                │ (Michael's  │  roster · routing · adjudication
-                                │   office)   │  blackboard · task ledger
+                                │ (captain's  │  roster · routing · adjudication
+                                │   chair)    │  blackboard · task ledger
                                 └──────┬──────┘
                                        │ assigns · routes · escalates
               ┌────────────────────────┼────────────────────────┐
@@ -337,8 +338,8 @@ npm run dev        # launches the Electron app with hot reload
 ```
 
 On first launch you'll go through the onboarding wizard, then land on the floor. Use
-**Add agent** to spawn your first session — the GOD agent seats itself in Michael's
-office automatically.
+**Add agent** to spawn your first session — the GOD agent takes the captain's chair
+automatically (Michael's office, in the office theme).
 
 ### Other scripts
 
@@ -443,8 +444,8 @@ the UI displays can cause or prevent a wake.
 
 The aesthetic is **Animal Crossing × Earthbound × SNES menu UI** — pixel-snapped, chunky,
 friendly. [`DESIGN.md`](./DESIGN.md) is canonical; every component derives from its
-tokens. The Guppy brand layers a **Dunder-Mifflin maroon** (`#6E1423`) and
-**gold** (`#F4D35E`) on top for logo and chrome.
+tokens. The Guppy brand layers the **maroon** (`#6E1423`) carried over from the office
+theme and **gold** (`#F4D35E`) on top for logo and chrome.
 
 ## Telemetry
 
@@ -473,22 +474,17 @@ parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 
 ### Artwork licence
 
-- **Code:** the MIT License in [`LICENSE`](./LICENSE), unchanged.
-- **TES theme artwork** — [`themes/tes/art`](./themes/tes/art), [`themes/tes/map`](./themes/tes/map)
-  and the TES art shown in the [`.github/media`](./.github/media) images
-  (`guppy-og.png`, `guppy-logo.png`, `tes-full-window.png`, `tes-look-builder.png`,
-  `tes-memory.png`; the app UI around it in those images stays MIT) and the Speck icon set
-  (`build/icon.png`, `build/icon.ico`, `build/icon.icns`, `build/icon.svg`,
-  `src/renderer/src/assets/brand/logo.png`) — is
-  © 2026 Prozzta under the terms in
-  [`themes/tes/LICENSE-ARTWORK.md`](./themes/tes/LICENSE-ARTWORK.md): you may edit and use
-  it in any commercial or non-commercial project and ship it inside a project that uses
-  it, but not resell or redistribute the art itself (edited or not, e.g. as an asset pack).
-- **Credit is required:** "Artwork by Prozzta", with a link to
-  [github.com/Prozzta](https://github.com/Prozzta).
-- **Other art keeps its own terms:** the LimeZu tilesets above (credit to LimeZu
-  required) and the Office cast, which is procedural code under MIT; see the `LICENSE`
-  scope note.
+> [!IMPORTANT]
+> **TES artwork.** The TES theme art (the pack art and bridge map in
+> [`themes/tes`](./themes/tes), the Speck icon set in `build/icon.*` and
+> `src/renderer/src/assets/brand/logo.png`, and the TES art shown in the
+> [`.github/media`](./.github/media) images) is **© 2026 Prozzta**, licensed under
+> [`themes/tes/LICENSE-ARTWORK.md`](./themes/tes/LICENSE-ARTWORK.md), which permits editing
+> and use in commercial and non-commercial projects but not reselling or redistributing the
+> art itself. **Credit is required:** "Artwork by Prozzta", with a link to
+> [github.com/Prozzta/guppyos](https://github.com/Prozzta/guppyos). The code, and the app UI
+> around the art in those images, stay under the MIT License; the LimeZu tilesets and the
+> Office cast keep their own terms (above).
 
 ## Acknowledgements
 

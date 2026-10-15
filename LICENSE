@@ -41,4 +41,5 @@ tes-memory.png); the app UI around that art in those images stays under this MIT
 License. Nor does it apply to the Speck icon set (build/icon.png, build/icon.ico,
 build/icon.icns, build/icon.svg and src/renderer/src/assets/brand/logo.png).
 That artwork is (c) 2026 Prozzta and licensed separately; see
-themes/tes/LICENSE-ARTWORK.md (credit "Artwork by Prozzta" is required).
+themes/tes/LICENSE-ARTWORK.md (credit "Artwork by Prozzta", with a link to
+https://github.com/Prozzta/guppyos, is required).
