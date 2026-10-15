@@ -99,12 +99,11 @@ export class Camera {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
     const b = this.box();
     const minZoom = Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
-    // A stations floor is raster art. Its scale must be a whole number of device pixels so
-    // adjoining strip sprites cannot round differently after a resize. Keep at least one device
-    // pixel per map pixel when a tiny pane would otherwise round the scale down to zero.
+    // Keep the camera's fit exact.  Raster alignment belongs to StationFloor's single cached
+    // composite, not the camera: flooring here leaves a large, visible margin at DPR 1.
     const resolution = this.settle?.resolution() ?? 0;
     if (!Number.isFinite(resolution) || resolution <= 0) return minZoom;
-    return Math.max(1 / resolution, Math.floor(minZoom * resolution) / resolution);
+    return Math.max(1 / resolution, minZoom);
   }
 
   /** Fit the whole map (or the frame, its content centred) to the viewport. */
@@ -182,16 +181,6 @@ export class Camera {
       this.container.y = Math.min(top, Math.max(top + this.viewHeight - scaledH, this.container.y));
     }
 
-    // Once a stations camera has settled, its target scale is already a whole device pixel.
-    // Align the resulting centring/clamping offset too. Floor the vertical position so its hull
-    // cannot be rounded upward into a bottom margin; the horizontal centred offset rounds to the
-    // nearest device pixel.
-    const resolution = this.settle?.resolution() ?? 0;
-    if (!this.nudgeDuration && this.currentX === this.targetX && this.currentY === this.targetY
-      && this.currentZoom === this.targetZoom && Number.isFinite(resolution) && resolution > 0) {
-      this.container.x = Math.round(this.container.x * resolution) / resolution;
-      this.container.y = Math.floor(this.container.y * resolution) / resolution;
-    }
   }
 
   /** TES-GUPPY-SETTLE: the per-tick ease as the motion it approximates, solved exactly over dt.

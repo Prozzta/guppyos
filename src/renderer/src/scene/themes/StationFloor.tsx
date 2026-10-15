@@ -20,7 +20,7 @@ import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
-import { cacheKeyOf, cacheStale, frontPicker, regionPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
+import { cacheStale, hasVisiblePixel, staticOrder, staticsCacheable, wholeSceneRaster } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
@@ -168,7 +168,6 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         s.alpha = it.opacity;
         return s;
       };
-      const staticBox = plan.sorted.map((it): Box | null => (it.px ? { x: it.x, y: it.y, w: it.px.width, h: it.px.height } : null));
       const below = new Sprite(own(plan.below));
       const sortLayer = new Container();
       sortLayer.sortableChildren = true;
@@ -179,142 +178,56 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return s;
       });
 
-      // TES-GUPPY-RASTER: 'below' and the statics are drawn, by the very same sprites, into a
-      // screen-sized cache once the picture they make holds still; each frame copies its reachable
-      // cells 1:1, then redraws each rect around the people, clipped to it, with the statics that
-      // can draw there (staticCache.ts). While the picture changes, and for partial alpha,
-      // everything is drawn directly as before.
+      // The static floor is rendered as one integer-device-scale scene and sampled once into the
+      // raw-fit viewport.  The crew and bubbles remain live above it; while the camera moves, the
+      // floor draws directly until it returns to the cached transform.
       const cached = staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
-      const pickFront = cached ? frontPicker(plan.sorted, order, plan.below.width, plan.below.height) : null;
-      const pickRegion = cached ? regionPicker(plan.sorted, plan.below.width, plan.below.height) : null;
-      const CELL = 32;
       const cacheLayer = new Container();
       // As in the stage, the world's transform is a child's, so its vertices are made the same way
       // (a rendered root's own transform would go to the GPU as a uniform instead).
       const cacheRoot = new Container();
       const cacheWorld = cacheRoot.addChild(new Container());
-      const cells = new Map<number, Sprite>();
-      // The rects' copy of the cache: the whole of it in one quad, read back mirrored as the cells
-      // are; the scissor keeps it to the rect, so a rect never walks the cells.
-      let passCache: Sprite | null = null;
+      let cacheSprite: Sprite | null = null;
       let rt: RenderTexture | null = null;
-      let cacheKey: string | null = null, lastKey: string | null = null, lastExact: string | null = null;
-      const noLive: boolean[] = [];
-      // The rects redrawn around the people this frame, the statics shown in them, and what the
-      // main pass shows.
-      let passes: Box[] = [];
-      let passOn: boolean[] = [];
-      let mainFront: boolean[] | null = null, inPass = false;
-      let cacheBoxes: Box[] = [];
+      let cacheMetrics: string | null = null, cacheTransform: string | null = null, lastTransform: string | null = null;
       const cacheStatics: Array<Sprite | null> = plan.sorted.map(() => null);
       const belowDirect = new Sprite(below.texture);
       world.addChild(belowDirect);
       if (cached) {
         cacheWorld.addChild(below);
         for (const i of order) if (staticTex[i]) cacheStatics[i] = cacheWorld.addChild(staticSprite(i));
-        cacheBoxes = [...liveBoxes(plan.below, 0, 0, CELL), ...plan.sorted.flatMap((it) => (it.px ? liveBoxes(it.px, it.x, it.y, 8) : []))];
+        // Keep every static map layer in the same composite, so crew and bubbles can remain live
+        // above one seam-free floor texture.
+        if (hasVisiblePixel(plan.above)) cacheWorld.addChild(new Sprite(own(plan.above)));
         app.stage.addChild(cacheLayer);
       }
       world.addChild(sortLayer);
-      if (!cached || hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
+      if (!cached && hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
       // The map is cacheable; its clouds and envelopes are deliberately live above the people.
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
       (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
-      const dropCells = () => {
-        for (const s of cells.values()) s.destroy({ texture: true, textureSource: false });
-        cells.clear();
-      };
-      const refreshCache = (liveStatics: boolean[]) => {
-        cacheStatics.forEach((s, i) => { if (s) s.visible = !liveStatics[i]; });
+      const refreshCache = () => {
         const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
-        if (!rt || cacheStale(rt, W, H, r)) {
-          dropCells();
-          passCache?.destroy({ texture: true, textureSource: false });
-          passCache = null;
+        const raster = wholeSceneRaster(world.scale.x, r, W, H);
+        if (!rt || cacheStale(rt, raster.pixelW, raster.pixelH, r)) {
+          cacheSprite?.destroy({ texture: false, textureSource: false });
+          cacheSprite = null;
           rt?.destroy(true);
-          rt = RenderTexture.create({ width: W / r, height: H / r, resolution: r, scaleMode: 'nearest' });
-          const none = new Container();
-          app.renderer.render({ container: none, target: rt, clear: true }); // gives it a framebuffer
-          none.destroy();
+          rt = RenderTexture.create({ width: raster.pixelW / r, height: raster.pixelH / r, resolution: r, scaleMode: 'nearest' });
+          cacheSprite = new Sprite(rt);
+          cacheSprite.scale.set(1 / raster.factor);
+          cacheLayer.addChild(cacheSprite);
         }
-        // The cache is drawn on the canvas itself, over the background, by the canvas's own
-        // arithmetic (a render texture's flipped projection tips a few rounding ties the other
-        // way), then copied out bottom row first; each cell reads it back mirrored. The frame's
-        // own render then draws over the canvas as always.
-        cacheWorld.position.copyFrom(world.position);
-        cacheWorld.scale.copyFrom(world.scale);
-        app.renderer.render({ container: cacheRoot, clear: true });
-        // A blit, not copyTexSubImage2D: the canvas has no alpha channel and the cache has one.
-        const targets = app.renderer.renderTarget as any;
-        const gl = (app.renderer as any).gl as WebGL2RenderingContext;
-        gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-        gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, targets.getGpuRenderTarget(targets.getRenderTarget(rt)).framebuffer);
-        gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT, gl.NEAREST);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        const live = new Set<number>();
-        for (const c of screenCells(cacheBoxes, world.scale.x * r, world.x * r, world.y * r, W, H, CELL)) {
-          const id = c.y * W + c.x;
-          live.add(id);
-          if (cells.has(id)) continue;
-          const s = new Sprite(new Texture({ source: rt.source, frame: new Rectangle(c.x / r, (H - c.y - c.h) / r, c.w / r, c.h / r) }));
-          s.position.set(c.x / r, (c.y + c.h) / r);
-          s.scale.y = -1;
-          cacheLayer.addChild(s);
-          cells.set(id, s);
-        }
-        for (const [id, s] of cells) s.visible = live.has(id);
-        if (!passCache) {
-          passCache = new Sprite(new Texture({ source: rt.source, frame: new Rectangle(0, 0, W / r, H / r) }));
-          passCache.position.set(0, H / r);
-          passCache.scale.y = -1;
-          passCache.visible = false;
-          app.stage.addChildAt(passCache, app.stage.getChildIndex(cacheLayer) + 1);
-        }
+        cacheWorld.position.set(world.x * raster.factor, world.y * raster.factor);
+        cacheWorld.scale.set(world.scale.x * raster.factor, world.scale.y * raster.factor);
+        app.renderer.render({ container: cacheRoot, target: rt!, clear: true });
+        (app as any).__tesStaticCacheBuilds = ((app as any).__tesStaticCacheBuilds ?? 0) + 1;
       };
-      // After the frame's own render (still inside it, so before the canvas is shown or read), each
-      // rect around a person is drawn again, scissored to it: cleared, the cache, then in depth order
-      // the people and the statics that can draw in any rect. A static picked for another rect has
-      // no opaque pixel in this one, so it draws nothing here; with one set for all rects, Pixi
-      // builds the rects' instructions once and replays them per rect. Rects may overlap: each is
-      // drawn whole. Outside them the frame holds the cache (and any live statics), where no person
-      // can draw.
-      const postrender = {
-        postrender: (o: { container: unknown }) => {
-          if (inPass || o.container !== app.stage || !passes.length) return;
-          const gl = (app.renderer as any).gl as WebGL2RenderingContext;
-          const H = app.canvas.height;
-          inPass = true;
-          try {
-            // The people stay visible after the passes: between frames, when pointer events are
-            // dispatched, Pixi prunes invisible sprites from hit tests (onTick hides them again
-            // before the next main pass).
-            for (const s of sprites.values()) s.sprite.visible = true;
-            for (const c of cups.values()) c.sprite.visible = true;
-            cacheLayer.visible = false;
-            if (passCache) passCache.visible = true;
-            gl.enable(gl.SCISSOR_TEST);
-            statics.forEach((s, i) => { if (s) s.visible = passOn[i]; });
-            for (const p of passes) {
-              gl.scissor(p.x, H - p.y - p.h, p.w, p.h);
-              app.renderer.render({ container: app.stage, clear: true });
-            }
-          } finally {
-            gl.disable(gl.SCISSOR_TEST);
-            cacheLayer.visible = true;
-            if (passCache) passCache.visible = false;
-            statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
-            inPass = false;
-          }
-        },
-      };
-      if (cached) app.renderer.runners.postrender.add(postrender);
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
-        () => app.renderer.runners.postrender.remove(postrender),
-        dropCells,
         () => rt?.destroy(true),
         () => cacheRoot.destroy({ children: true }),
         () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
@@ -481,39 +394,21 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         bubbles.update(dt, anchors, world.scale.x);
         if (cached) {
           const r = app.renderer.resolution;
-          const k = cacheKeyOf({ w: plan.below.width, h: plan.below.height }, staticBox, world.scale.x, world.scale.y, world.x, world.y, r);
-          const view = `${app.canvas.width}x${app.canvas.height}@${r}:`;
-          // Once the GPU's float32 input holds, even an edge on a tie rounds as it did: cache it all.
-          const exact = k.exact === null ? null : view + k.exact;
-          const settled = exact !== null && exact === lastExact;
-          lastExact = exact;
-          const key = settled ? exact! : view + k.key, live = settled ? noLive : k.live;
-          // Cache a picture once it has held for a tick; draw directly while it changes.
-          if (key !== cacheKey && key === lastKey) { refreshCache(live); cacheKey = key; }
-          lastKey = key;
-          const useCache = key === cacheKey && world.scale.x * r >= NEAR_MIN_SCALE && world.scale.y * r >= NEAR_MIN_SCALE;
+          const metrics = `${app.canvas.width}x${app.canvas.height}@${r}`;
+          const transform = `${world.scale.x},${world.scale.y},${world.x},${world.y}`;
+          // Rebuild the whole-scene RT only on first paint or an actual canvas/DPR change. During
+          // camera motion we draw direct; when it comes back to the stored transform the cached
+          // static floor is again one seam-free composite below the crew.
+          if (metrics !== cacheMetrics && transform === lastTransform) {
+            refreshCache();
+            cacheMetrics = metrics;
+            cacheTransform = transform;
+          }
+          lastTransform = transform;
+          const useCache = metrics === cacheMetrics && transform === cacheTransform;
           cacheLayer.visible = useCache;
           belowDirect.visible = !useCache;
-          // The main pass: the cache, and over it only the live statics (and those over them); the
-          // people and the statics near them are drawn in their rects (postrender). The parked mugs stay
-          // in the main pass, so the statics in front of one are redrawn over it.
-          mainFront = useCache ? pickFront!([...mugs.values()].map((m) => ({ x: m.sprite.x, y: m.sprite.y, w: MUG_W, h: MUG_H })), live) : null;
-          statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
-          for (const s of sprites.values()) s.sprite.visible = !useCache;
-          for (const c of cups.values()) c.sprite.visible = !useCache; // drawn with their person, in the rects
-          passes = [];
-          if (useCache) {
-            const kx = world.scale.x, ky = world.scale.y, W = app.canvas.width, H = app.canvas.height;
-            passOn = statics.map(() => false);
-            for (const s of sprites.values()) {
-              const X0 = Math.max(0, Math.floor((s.sprite.x * kx + world.x) * r) - 1), X1 = Math.min(W, Math.ceil(((s.sprite.x + fw) * kx + world.x) * r) + 1);
-              const Y0 = Math.max(0, Math.floor((s.sprite.y * ky + world.y) * r) - 1), Y1 = Math.min(H, Math.ceil(((s.sprite.y + fh) * ky + world.y) * r) + 1);
-              if (X1 <= X0 || Y1 <= Y0) continue;
-              const rect = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
-              passes.push(rect);
-              pickRegion!({ x: (rect.x / r - world.x) / kx, y: (rect.y / r - world.y) / ky, w: rect.w / r / kx, h: rect.h / r / ky }).forEach((on, i) => { if (on) passOn[i] = true; });
-            }
-          }
+          statics.forEach((s) => { if (s) s.visible = !useCache; });
         }
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}:${cups.get(q.id)?.back ?? '-'}`).join('|') + '#' + [...mugs].map(([id, m]) => `${id}:${m.foot}:${m.rank}`).join('|');

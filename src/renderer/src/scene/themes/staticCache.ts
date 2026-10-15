@@ -158,6 +158,15 @@ export function cacheStale(rt: { source: { pixelWidth: number; pixelHeight: numb
   return !rt || rt.source.pixelWidth !== W || rt.source.pixelHeight !== H || rt.source.resolution !== r;
 }
 
+/** A whole-scene raster is made on an integer map-pixel/device-pixel scale, then
+ * sampled once into the raw-fit viewport.  This prevents independently rounded
+ * map strips from leaving fractional-scale hairlines. */
+export function wholeSceneRaster(scale: number, resolution: number, canvasW: number, canvasH: number): { factor: number; pixelW: number; pixelH: number } {
+  const integerDeviceScale = Math.max(1, Math.ceil(scale * resolution - 1e-9));
+  const factor = integerDeviceScale / (scale * resolution);
+  return { factor, pixelW: Math.ceil(canvasW * factor), pixelH: Math.ceil(canvasH * factor) };
+}
+
 /** Keys for the cache's picture under the world transform (scale ax, ay, then
  *  offset tx, ty, in CSS px; `r` device px per CSS px): equal keys, same picture.
  *  Pixi computes each sprite vertex in float64 (a * w + tx, as below), hands the
