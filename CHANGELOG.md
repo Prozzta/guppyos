@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- TES floor: the mail envelope now flies between crew members (the office floor always had it).
+
 ### Fixed
 
 - **TES now shows thought clouds, brief crew speech and flying hive envelopes.** The station floor
