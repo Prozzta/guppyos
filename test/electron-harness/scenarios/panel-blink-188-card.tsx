@@ -1,7 +1,8 @@
 /**
  * SCENARIO - PANEL-BLINK-188 (b): the REAL AgentCard (the bottom dock's card) with the app's stylesheet,
  * for three agents: WORKING (hook working, liveness BUSY_PROGRESSING), IDLE (hook idle, liveness IDLE), and
- * hook-working but liveness IDLE (the liveness status wins: no blink). Each card's status dot is read
+ * hook-working but liveness IDLE (the liveness status wins: no blink), and WAITING with liveness BUSY_PROGRESSING
+ * (waiting is not the classifier's to override: steady, as on the floor's panels). Each card's status dot is read
  * (its running animation, its computed opacity) every 150 ms for 1.5 s (over a 1200 ms blink), and shot.
  */
 import { createRoot } from 'react-dom/client';
@@ -34,7 +35,8 @@ const now = Date.now();
 const CARDS = [
   { id: 'god', name: 'Michael', isGod: true, status: 'working', classification: 'BUSY_PROGRESSING' },
   { id: 'dwight', name: 'Dwight', isGod: false, status: 'idle', classification: 'IDLE' },
-  { id: 'jim', name: 'Jim', isGod: false, status: 'working', classification: 'IDLE' }
+  { id: 'jim', name: 'Jim', isGod: false, status: 'working', classification: 'IDLE' },
+  { id: 'pam', name: 'Pam', isGod: false, status: 'waiting', classification: 'BUSY_PROGRESSING' }
 ];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -53,7 +55,7 @@ window.__harnessRun = async () => {
     // each card's badge: the chip whose text is its status label; its dot is the chip's first span
     const dots = CARDS.map((c) => {
       const card = document.querySelector(`[data-card="${c.id}"]`)!;
-      const chip = [...card.querySelectorAll('span')].find((s) => /^(working|idle)$/.test((s.textContent || '').trim()) && s.firstElementChild?.tagName === 'SPAN');
+      const chip = [...card.querySelectorAll('span')].find((s) => /^(working|idle|waiting)$/.test((s.textContent || '').trim()) && s.firstElementChild?.tagName === 'SPAN');
       return { id: c.id, label: chip ? chip.textContent!.trim() : null, dot: (chip?.firstElementChild as HTMLElement | undefined) ?? null };
     });
     const cards = dots.map((d) => ({
@@ -65,7 +67,7 @@ window.__harnessRun = async () => {
     const shots: string[] = [];
     for (let i = 0; i < SAMPLES; i++) {
       dots.forEach((d, k) => cards[k].opacity.push(d.dot ? Number(getComputedStyle(d.dot).opacity) : NaN));
-      if (i < SHOTS) shots.push((await window.harness.capture(720, 110)).png);
+      if (i < SHOTS) shots.push((await window.harness.capture(960, 110)).png);
       await sleep(EVERY_MS);
     }
     await act(async () => { root.unmount(); });

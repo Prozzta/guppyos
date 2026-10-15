@@ -2,8 +2,8 @@
 
 /** PANEL-BLINK-188, rendered: the TES floor's panel lights read back from the canvas (panel-blink-188-floor.tsx)
  *  -> <out>/<label>-strip.png (the bridge, a shot per 250 ms), <out>/<label>-NN.png, <out>/<label>.json, and a
- *  verdict: a working panel cycles PANEL_GREEN (each shot one 240 ms phase), the idle agent's holds amber, an
- *  empty one is dark. A light counts when its drawn pixel is the frame's colour (a person in front covers some).
+ *  verdict: a working panel cycles PANEL_GREEN (each shot one 240 ms phase), the idle agent's holds amber, so
+ *  does the seated waiting agent's (only working/thinking blink, as on the cards), an empty one is dark. A light counts when its drawn pixel is the frame's colour (a person in front covers some).
  *  Jailed: APPDATA, LOCALAPPDATA, USERPROFILE and HOME under <out>/jail; HIVE_/AGENT_/MEMORY_/MUNDER_ scrubbed.
  *    node test/electron-harness/run-panel-blink-188.cjs --out <dir> [--label after] [--station <StationFloor.tsx>]
  *  --station draws another floor (the base, for the before shots); exit 1 when the verdict fails. */
@@ -78,13 +78,19 @@ function readPanel(state, colours, lights) {
   const idleRow = Object.entries(per).find(([, row]) => row.shots.some((x) => x.phase === 'idle' && x.state === 'idle'));
   if (!idleRow) fails.push(`no panel went idle after ${r.idleId} did`);
   for (const k of ['working', 'idle', 'empty']) if (!seen[k]) fails.push(`no steady ${k} panel was judged`);
+  // god's ruling: only working/thinking blink. The waiting agent keeps its seat, and its console holds amber.
+  const waitSeat = r.seatsOf[r.waitId];
+  const waitRow = Object.entries(per).find(([, row]) => row.seat === waitSeat);
+  const waitShots = waitRow ? waitRow[1].shots.filter((x) => x.phase === 'idle') : [];
+  if (!waitSeat || !waitRow) fails.push(`the waiting agent ${r.waitId} holds no panel seat (${waitSeat})`);
+  else if (!waitShots.every((x) => x.state === 'idle' && x.frame === 'idle' && x.rate >= MIN)) fails.push(`${waitRow[0]} (${r.waitId} waiting): ${waitShots.map((x) => `${x.state}:${x.rate}`).join(' ')}, not steady amber`);
   const report = {
-    label, seatedAt: r.seatedAt, idleAt: r.idleAt, idleId: r.idleId, crop: r.crop,
+    label, seatedAt: r.seatedAt, idleAt: r.idleAt, idleId: r.idleId, waitId: r.waitId, waitPanel: waitRow && waitRow[0], seatsOf: r.seatsOf, crop: r.crop,
     distinctShots: new Set(strip.map((b) => createHash('sha256').update(b).digest('hex'))).size,
     judged: seen, fails, panels: per
   };
   writeFileSync(join(out, `${label}.json`), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify({ label, idleId: r.idleId, idlePanel: idleRow && idleRow[0], distinctShots: report.distinctShots, judged: seen, fails }));
+  console.log(JSON.stringify({ label, idleId: r.idleId, idlePanel: idleRow && idleRow[0], waitId: r.waitId, waitPanel: waitRow && waitRow[0], distinctShots: report.distinctShots, judged: seen, fails }));
   for (const [name, row] of Object.entries(per)) console.log(`${name.padEnd(8)} ${row.seat.padEnd(8)} ${row.shots.map((x) => `${x.state[0]}${x.frame === 'idle' || x.frame === 'empty' ? '' : x.frame}:${x.rate}`).join(' ')}`);
   process.exit(fails.length ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

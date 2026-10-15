@@ -9,7 +9,7 @@ import { blank, type Pixels } from './raster';
 import { worldShape, inside, shapePoints, type WorldShape } from './geometry';
 import type { ScenePlan } from './compositor';
 import { staticOrder } from './staticCache';
-import { atDesk } from './crew';
+import { workingBlinks } from '@shared/activityView';
 import type { Station, StationMap } from './stationMap';
 
 /** The viewer's working cycle, one step per PANEL_STEP_MS, each light offset by its own phase. */
@@ -126,15 +126,16 @@ export function findPanels(SM: Pick<StationMap, 'roles' | 'stations'>, stationsL
   });
 }
 
-/** The viewer's panelStates: working when its seat's sitter is seated at the desk; idle when someone holds the
- *  seat (on the way to it), or it is the last seat of someone now idle with none; else empty. Writes into `out`. */
+/** The viewer's panelStates: working when its seat's sitter is seated and working (workingBlinks, the cards' own
+ *  rule: a seated agent waiting, compacting or looping holds amber); idle when someone holds the seat (seated
+ *  otherwise, or on the way to it), or it is the last seat of someone now idle with none; else empty. Writes into `out`. */
 export function panelStates(panels: readonly Panel[], walkers: ReadonlyArray<{ seat: Station | null; lastSeat: Station | null; seated: boolean; status: string }>, out: PanelState[] = []): PanelState[] {
   out.length = panels.length;
   for (let k = 0; k < panels.length; k++) {
     const seat = panels[k].seat;
     let st: PanelState = 'empty';
     for (const p of walkers) {
-      if (p.seat === seat && p.seated && atDesk(p.status)) { st = 'working'; break; }
+      if (p.seat === seat && p.seated && workingBlinks(p.status)) { st = 'working'; break; }
       if (p.seat === seat || (!p.seat && p.status === 'idle' && p.lastSeat === seat)) st = 'idle';
     }
     out[k] = st;

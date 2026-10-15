@@ -82,6 +82,12 @@ export function heavyFleetField(heavy: HeavyActivity | null): { state: HeavyActi
   }
 }
 
+/** PANEL-BLINK-188: the one rule for the working blink, on the floor's chair panels and the cards' status
+ *  dots alike: the shown statuses whose chip reads "working". Waiting, compacting, looping hold steady. */
+export function workingBlinks(status: string): boolean {
+  return status === 'working' || status === 'thinking';
+}
+
 /** The status to SHOW, given the hook-driven status, the agent's liveness record and (IDLE-MEANS-IDLE)
  *  its place in the heavy-job lock. Precedence: a richer status and CRASHED/EXITED/STUCK/SUSPECT, then
  *  WORKING, then a background job ('working': it stays at its desk), then queued or reserved

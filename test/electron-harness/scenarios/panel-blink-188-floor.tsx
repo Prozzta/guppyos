@@ -1,7 +1,7 @@
 /**
  * SCENARIO - PANEL-BLINK-188: the REAL OfficeFloor drawing the bundled tes pack. Seven agents WORKING
  * (hook status working, liveness BUSY_PROGRESSING) take their seats; then one is turned idle (status and
- * liveness). Every 240 ms of floor time (one panel step) the canvas is read back at every panel light
+ * liveness) and another waiting (liveness still BUSY: it stays seated; its console holds amber). Every 240 ms of floor time (one panel step) the canvas is read back at every panel light
  * (panels.ts finds them, as the floor does) and each light's drawn colour reported, with a crop of the bridge.
  * The same scenario runs on the base floor (HARNESS_SOURCE_OVERRIDES) for the before/after.
  * Run on demand: node test/electron-harness/run-panel-blink-188.cjs --out <dir>
@@ -84,7 +84,7 @@ const liveness = Object.fromEntries(ids.map((id) => [id, live(id, 'BUSY_PROGRESS
 type Shot = { phase: 'working' | 'idle'; frame: number; t: number; crop: string; panels: Array<{ name: string; seat: string; state: PanelState; colours: string[] }> };
 let panels: Panel[] = [];
 let crop = { x: 0, y: 0, w: 0, h: 0 };
-let renders = 0, seatedAt = 0, idleAt = 0, idleId = '';
+let renders = 0, seatedAt = 0, idleAt = 0, idleId = '', waitId = '';
 const shots: Shot[] = [];
 const states: PanelState[] = [];
 let done: (() => void) | null = null;
@@ -131,12 +131,13 @@ proto.render = function (this: Application) {
   if (since < 0) return;
   if (shots.length < WORKING_SHOTS) { if (since % EVERY === 0) shoot(this, world, 'working'); return; }
   if (!idleAt) {
-    // the sitter of the biggest chair console goes idle: status and liveness, as main reports it
+    // the sitter of the biggest chair console goes idle (status and liveness, as main reports it); the next one
+    // goes waiting with liveness still BUSY (waiting is not the classifier's to override): seated, steady amber
     const seats = new Set(panels.map((p) => p.seat));
-    const p = [...people].filter((w) => w.seat && seats.has(w.seat)).sort((a, b) => (panels.find((x) => x.seat === b.seat)!.lights) - (panels.find((x) => x.seat === a.seat)!.lights))[0];
-    idleId = p.id; idleAt = renders;
+    const [p, q] = [...people].filter((w) => w.seat && seats.has(w.seat)).sort((a, b) => (panels.find((x) => x.seat === b.seat)!.lights) - (panels.find((x) => x.seat === a.seat)!.lights));
+    idleId = p.id; waitId = q.id; idleAt = renders;
     useStore.setState({
-      agents: agents.map((a) => (a.id === idleId ? { ...a, status: 'idle', action: '' } : a)),
+      agents: agents.map((a) => (a.id === idleId ? { ...a, status: 'idle', action: '' } : a.id === waitId ? { ...a, status: 'waiting', action: 'waiting on god' } : a)),
       liveness: { ...liveness, [idleId]: live(idleId, 'IDLE') }
     } as never);
     return;
@@ -172,7 +173,7 @@ window.__harnessRun = async () => {
     sc.fillStyle = '#ff00ff'; sc.fillRect(0, 0, strip.width, strip.height);
     imgs.forEach((im, i) => sc.drawImage(im, i * (crop.w * ZOOM + 4), 0));
     window.harness.report(shots.length === WORKING_SHOTS + IDLE_SHOTS
-      ? { ok: true, strip: strip.toDataURL('image/png'), seatedAt, idleAt, idleId, crop, panels: panels.map((p) => ({ name: p.name, seat: p.seat.name, lights: p.groups.flatMap((g) => g.lights) })), shots }
+      ? { ok: true, strip: strip.toDataURL('image/png'), seatedAt, idleAt, idleId, waitId, seatsOf: Object.fromEntries(crew.walkers().map((w) => [w.id, w.seat?.name ?? null])), crop, panels: panels.map((p) => ({ name: p.name, seat: p.seat.name, lights: p.groups.flatMap((g) => g.lights) })), shots }
       : { ok: false, error: `${shots.length} shots in ${renders} renders (seatedAt ${seatedAt}, idleAt ${idleAt})` });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });

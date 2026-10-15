@@ -1,4 +1,5 @@
 import { CSSProperties } from 'react';
+import { workingBlinks } from '@shared/activityView';
 
 export type StatusKind =
   | 'idle' | 'thinking' | 'working' | 'waiting' | 'blocked' | 'success' | 'ghost'
@@ -19,9 +20,9 @@ export interface PixelBadgeProps {
   blink?: boolean;
 }
 
-/** PANEL-BLINK-188: the statuses whose chip reads "working" blink on the agent cards. */
+/** PANEL-BLINK-188: the statuses whose chip reads "working" blink on the agent cards (the floor's panels share the rule). */
 export function badgeBlinks(status: StatusKind): boolean {
-  return status === 'working' || status === 'thinking';
+  return workingBlinks(status);
 }
 
 /** The working dot's blink: two steps, no easing (the floor's panel lights step every 240 ms; 5 steps a cycle). */

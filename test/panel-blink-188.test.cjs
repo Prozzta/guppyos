@@ -88,6 +88,11 @@ test('(a) panelStates: working only when the seat\'s sitter is seated at the des
   assert.deepEqual(PN.panelStates(panels, [w({ lastSeat: B, status: 'idle' }), w({ lastSeat: Cc, status: 'working' })]), ['empty', 'idle', 'empty']);
   // a working sitter wins over someone idle whose last seat it was
   assert.deepEqual(PN.panelStates(panels, [w({ lastSeat: A, status: 'idle' }), w({ seat: A, seated: true })]), ['working', 'empty', 'empty']);
+  // god's ruling: the panels blink on exactly the cards' statuses; seated and waiting, compacting or looping holds amber
+  assert.deepEqual(PN.panelStates(panels, [w({ seat: A, seated: true, status: 'thinking' })]), ['working', 'empty', 'empty']);
+  for (const status of ['waiting', 'compacting', 'looping', 'blocked', 'error', 'success']) {
+    assert.deepEqual(PN.panelStates(panels, [w({ seat: A, seated: true, status })]), ['idle', 'empty', 'empty'], status);
+  }
   // the out array is reused
   const out = ['x', 'y', 'z', 'w'];
   assert.equal(PN.panelStates(panels, [], out), out);
@@ -145,6 +150,16 @@ test('(b) the card\'s status dot blinks while working (thinking reads "working" 
   assert.doesNotMatch(renderToStaticMarkup(createElement(B.PixelBadge, { status: 'working' })), /animation/);
   const card = readSource('src/renderer/src/components/AgentCard.tsx');
   assert.equal((card.match(/blink=\{badgeBlinks\(held\.status\)\}/g) || []).length, 2);
+  // one rule for both surfaces: the cards' badgeBlinks and the panels' working state both call workingBlinks
+  const ACT = loadTs('src/shared/activityView.ts');
+  for (const s of ['working', 'thinking', 'idle', 'waiting', 'compacting', 'looping', 'blocked', 'success']) {
+    assert.equal(ACT.workingBlinks(s), s === 'working' || s === 'thinking', s);
+    assert.equal(B.badgeBlinks(s), ACT.workingBlinks(s), s);
+  }
+  assert.match(readSource('src/renderer/src/components/PixelBadge.tsx'), /export function badgeBlinks\(status: StatusKind\): boolean \{\s*return workingBlinks\(status\);\s*\}/);
+  const panelsSrc = readSource('src/renderer/src/scene/themes/panels.ts');
+  assert.match(panelsSrc, /import \{ workingBlinks \} from '@shared\/activityView';/);
+  assert.match(panelsSrc, /p\.seat === seat && p\.seated && workingBlinks\(p\.status\)/);
   const css = readSource('src/renderer/src/design/global.css');
   assert.match(css, /@keyframes cth-led \{\s*0%, 49% \{ opacity: 1; \}\s*50%, 100% \{ opacity: 0\.35; \}\s*\}/);
 });
