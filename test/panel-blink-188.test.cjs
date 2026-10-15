@@ -74,6 +74,34 @@ test('(a) panelLights: a tiny panel is all light; else its small one-colour spot
   assert.deepEqual(PN.panelLights(plan(stripe), box(0, 0, 6, 6)).map((q) => q.y), [0, 0, 0, 0, 0, 0]);
 });
 
+test('(a) the panel layer is the viewer\'s: the stations layer when there is one, else the first "points" layer', () => {
+  const obj = (name, x) => ({ name, x, y: 0, width: 4, height: 4, shape: 'rect', visible: true, points: null });
+  const layer = (name, objects) => ({ kind: 'object', name, ox: 0, oy: 0, objects });
+  const stations = [{ name: 'S1', x: 2, y: 2 }, { name: 'S2', x: 50, y: 2 }];
+  const stuff = { l: layer('Stuff', [obj('aPanel', 0)]), r: 'stations' };
+  const pts = { l: layer('points', [obj('bPanel', 48)]), r: 'points' };
+  assert.deepEqual(PN.panelShapes({ roles: [pts, stuff], stations }, 'Stuff').map((p) => p.name), ['aPanel']);
+  assert.deepEqual(PN.panelShapes({ roles: [pts], stations }, 'Stuff').map((p) => [p.name, p.seat.name]), [['bPanel', 'S2']]);
+  assert.deepEqual(PN.panelShapes({ roles: [pts, stuff], stations: [] }, 'Stuff'), []);
+});
+
+test('(a) panelLights: a light\'s owner is the top of what the floor draws there; the bright cut is median + 20, exactly', () => {
+  const W = 12, Hh = 12;
+  const px = (fill) => { const d = new Uint8ClampedArray(W * Hh * 4); for (let i = 0; i < W * Hh; i++) { const v = fill(i % W, (i / W) | 0); if (v) d.set([...v, 255], i * 4); } return { width: W, height: Hh, data: d }; };
+  const box = (x, y, w, h) => ({ shape: 'rect', x, y, w, h });
+  const grey = px(() => [10, 10, 10]);
+  // the layer over everyone draws (1,1); a sorted static draws (2,2); the floor the rest
+  const above = px((x, y) => (x === 1 && y === 1 ? [200, 0, 0] : null));
+  const st = { x: 2, y: 2, foot: 5, rank: 0, opacity: 1, px: { width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 200, 255]) } };
+  const own = Object.fromEntries(PN.panelLights({ below: grey, above, sorted: [st] }, box(0, 0, 4, 4)).map((q) => [`${q.x},${q.y}`, q.owner]));
+  assert.equal(own['1,1'], 'above');
+  assert.equal(own['2,2'], 0);
+  assert.equal(own['0,0'], 'below');
+  // 36 px, no spot of 5 or fewer: 24 at lum 30, 6 at 40 (+10: not a light), 6 at 250 (the lights)
+  const cut = px((x, y) => (y === 0 ? [250, 250, 250] : y === 5 ? [40, 40, 40] : [30, 30, 30]));
+  assert.deepEqual(PN.panelLights({ below: cut, above: { width: W, height: Hh, data: new Uint8ClampedArray(W * Hh * 4) }, sorted: [] }, box(0, 0, 6, 6)).map((q) => q.y), [0, 0, 0, 0, 0, 0]);
+});
+
 const seat = (name) => ({ name });
 test('(a) panelStates: working only when the seat\'s sitter is seated at the desk; idle when held or left idle; else empty', () => {
   const A = seat('A'), B = seat('B'), Cc = seat('C');

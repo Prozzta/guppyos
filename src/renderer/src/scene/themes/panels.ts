@@ -27,13 +27,16 @@ export interface PanelLight { x: number; y: number; h: number; }
 export interface PanelGroup { owner: PanelOwner; x: number; y: number; w: number; h: number; lights: PanelLight[]; }
 export interface Panel { name: string; seat: Station; groups: PanelGroup[]; lights: number; }
 
-/** The panel shapes: visible non-point objects named ...panel (any case) in the stations layer or a "points" layer. */
+/** The panel shapes: visible non-point objects named ...panel (any case) in the stations layer, else (the viewer's
+ *  `stuff ? stuff.l : pts ? pts.l : null`) in the first "points" layer. */
 export function panelShapes(SM: Pick<StationMap, 'roles' | 'stations'>, stationsLayer: string): Array<{ name: string; shape: WorldShape; seat: Station }> {
   const want = stationsLayer.trim().toLowerCase();
-  const layers = SM.roles.filter((x) => x.l.kind === 'object' && (x.l.name.trim().toLowerCase() === want || x.r === 'points')).map((x) => x.l as ObjectLayer);
+  const objs = SM.roles.filter((x) => x.l.kind === 'object');
+  const hit = objs.find((x) => x.l.name.trim().toLowerCase() === want) ?? objs.find((x) => x.r === 'points');
   const out: Array<{ name: string; shape: WorldShape; seat: Station }> = [];
-  if (!SM.stations.length) return out;
-  for (const l of layers) for (const o of l.objects) {
+  if (!SM.stations.length || !hit) return out;
+  const l = hit.l as ObjectLayer;
+  for (const o of l.objects) {
     if (!o.visible || o.shape === 'point' || !/panel/i.test(o.name || '')) continue;
     const s = worldShape(o, 0, 0, l), [bx0, by0, bx1, by1] = shapeBox(s);
     // the viewer's rule: the seat nearest the shape's box

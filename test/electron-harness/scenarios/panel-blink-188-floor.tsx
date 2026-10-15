@@ -15,6 +15,7 @@ import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCat
 import { Crew } from '../../../src/renderer/src/scene/themes/crew';
 import { buildScenePlan } from '../../../src/renderer/src/scene/themes/compositor';
 import { findPanels, panelStates, type Panel, type PanelState } from '../../../src/renderer/src/scene/themes/panels';
+import { PanelLayer } from '../../../src/renderer/src/scene/themes/PanelLayer';
 
 declare global {
   interface Window {
@@ -70,6 +71,19 @@ let crew: Crew | null = null;
 const tick = Crew.prototype.tick;
 Crew.prototype.tick = function (this: Crew, dt: number) { crew = this; return tick.call(this, dt); };
 
+// The floor's PanelLayer (absent on the base floor): its rasters (own() calls) and the frames each overlay showed,
+// so "rastered once per group and frame" is checked on the real floor. Wrapped before its first update.
+type LayerGuts = { own: (px: unknown) => unknown; lights: Array<{ tex: Map<unknown, unknown>; shown: unknown }> };
+let layer: LayerGuts | null = null, rasters = 0;
+const shownBy: Array<Set<unknown>> = [];
+const update = PanelLayer.prototype.update;
+PanelLayer.prototype.update = function (this: PanelLayer, ...a: Parameters<PanelLayer['update']>) {
+  const g = this as unknown as LayerGuts;
+  if (!layer) { layer = g; const own = g.own; g.own = (px) => { rasters += 1; return own(px); }; }
+  update.apply(this, a);
+  g.lights.forEach((L, i) => (shownBy[i] ||= new Set()).add(L.shown));
+};
+
 const now = 1_800_000_000_000;
 const ids = ['god', 'dwight', 'jim', 'andy', 'pam', 'kevin', 'creed'];
 const agents = ids.map((id, i) => ({
@@ -83,6 +97,7 @@ const liveness = Object.fromEntries(ids.map((id) => [id, live(id, 'BUSY_PROGRESS
 
 type Shot = { phase: 'working' | 'idle'; frame: number; t: number; crop: string; panels: Array<{ name: string; seat: string; state: PanelState; colours: string[] }> };
 let panels: Panel[] = [];
+let arts: string[][] = [];
 let crop = { x: 0, y: 0, w: 0, h: 0 };
 let renders = 0, seatedAt = 0, idleAt = 0, idleId = '', waitId = '';
 const shots: Shot[] = [];
@@ -160,7 +175,15 @@ window.__harnessRun = async () => {
     // the panels on the crew's own station map (so its seats are the walkers' seats), as the floor finds them
     while (!crew) await new Promise((r) => setTimeout(r, 20));
     const SM = crew.SM;
-    panels = findPanels(SM, pack.manifest.stations.layer, buildScenePlan({ ...SM, store: pack.store }));
+    const plan = buildScenePlan({ ...SM, store: pack.store });
+    panels = findPanels(SM, pack.manifest.stations.layer, plan);
+    // each light's own art colour (its owner's pixel): what the base floor draws there when nothing is in front
+    const art = (owner: 'below' | 'above' | number, x: number, y: number) => {
+      const it = typeof owner === 'number' ? plan.sorted[owner] : null;
+      const p = it ? it.px! : owner === 'above' ? plan.above : plan.below, ox = it ? it.x : 0, oy = it ? it.y : 0;
+      return hex(p.data as Uint8ClampedArray, ((y - oy) * p.width + (x - ox)) * 4);
+    };
+    arts = panels.map((p) => p.groups.flatMap((g) => g.lights.map((q) => art(g.owner, q.x, q.y))));
     const xs = panels.flatMap((p) => p.groups.flatMap((g) => [g.x, g.x + g.w])), ys = panels.flatMap((p) => p.groups.flatMap((g) => [g.y, g.y + g.h]));
     crop = { x: Math.min(...xs) - PAD, y: Math.min(...ys) - PAD, w: Math.max(...xs) - Math.min(...xs) + 2 * PAD, h: Math.max(...ys) - Math.min(...ys) + 2 * PAD };
     await finished;
@@ -173,7 +196,8 @@ window.__harnessRun = async () => {
     sc.fillStyle = '#ff00ff'; sc.fillRect(0, 0, strip.width, strip.height);
     imgs.forEach((im, i) => sc.drawImage(im, i * (crop.w * ZOOM + 4), 0));
     window.harness.report(shots.length === WORKING_SHOTS + IDLE_SHOTS
-      ? { ok: true, strip: strip.toDataURL('image/png'), seatedAt, idleAt, idleId, waitId, seatsOf: Object.fromEntries(crew.walkers().map((w) => [w.id, w.seat?.name ?? null])), crop, panels: panels.map((p) => ({ name: p.name, seat: p.seat.name, lights: p.groups.flatMap((g) => g.lights) })), shots }
+      ? { ok: true, strip: strip.toDataURL('image/png'), seatedAt, idleAt, idleId, waitId, seatsOf: Object.fromEntries(crew.walkers().map((w) => [w.id, w.seat?.name ?? null])), crop, panels: panels.map((p, i) => ({ name: p.name, seat: p.seat.name, lights: p.groups.flatMap((g) => g.lights), art: arts[i] })), shots,
+        layer: layer ? { rasters, overlays: layer.lights.map((L, i) => ({ textures: L.tex.size, framesShown: shownBy[i].size })) } : null }
       : { ok: false, error: `${shots.length} shots in ${renders} renders (seatedAt ${seatedAt}, idleAt ${idleAt})` });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
