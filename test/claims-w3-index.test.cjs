@@ -115,7 +115,10 @@ test('G3.4 the flip: at reader the three patterns have 0 chunks and claims are i
   assert.equal(r.reader.excluded, 0, 'reader: 0 chunks from memory.md, memory-archive-*.md, memory-ledger-export-*.md');
   assert.ok(r.reader.notes > 0 && r.reader.other > 0, 'other sources and agents untouched');
   assert.equal(r.reader.claims, 1);
-  assert.ok(r.flippedRemoved >= 3, 'the flip was a removal');
+  // CL-READERWATCHER MUST-1 (Jim): the raise's reconcile keeps the markdown while the wing has no
+  // claims applied; the first claims sync removes it in the step that applies the claims.
+  assert.equal(r.flippedRemoved, 0, 'the raise alone removes nothing');
+  assert.ok(r.pending.excluded >= 3 && r.pending.claims === 0, `before the sync: markdown still in, no claims ${JSON.stringify(r.pending)}`);
   assert.equal(r.searchMem, 1); assert.equal(r.mdMem, 0, 'search finds the claim, not memory.md');
   assert.ok(r.flippedBack.excluded >= 3, 'flip back: the three patterns return');
   assert.equal(r.flippedBack.claims, 0); assert.equal(r.flippedBack.claimChunks, 0); assert.equal(r.flippedBack.statuses, 0);

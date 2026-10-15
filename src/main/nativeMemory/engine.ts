@@ -8,7 +8,7 @@
  * step and then yields), so a search that arrives mid-backfill waits for one step, not for
  * the backfill.
  */
-import { readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
 import { chunkMarkdown, CHUNKER_VERSION, type Chunk } from './chunker';
 import { discoverSources, ALLOW_LIST_VERSION, SOURCES_CONFIG_FILE, sha256, type Discovery, type SourceEntry } from './sources';
@@ -293,8 +293,9 @@ export class MemoryEngine {
       let embedded = 0;
       let removed = 0;
       const wanted = new Set(discovery.eligible.map((e) => e.path));
+      const pending = this.claimsPending(discovery);
       for (const path of this.d.store.sourceShas().keys()) {
-        if (!wanted.has(path)) { await this.enqueue(PRIORITY.backfill, async () => this.d.store.removeSource(path)); removed++; }
+        if (!wanted.has(path) && !pending(path)) { await this.enqueue(PRIORITY.backfill, async () => this.d.store.removeSource(path)); removed++; }
       }
       // (b) Before EACH source, a preferred wing (a caller that asked meanwhile) goes first.
       const remaining = this.backfillRemaining = [...discovery.eligible];
@@ -344,8 +345,18 @@ export class MemoryEngine {
     return { removed: r.removed, embedded: r.embedded };
   }
 
+  /** CL-READERWATCHER MUST-1 (Jim): a wing whose claims are a source but have never been applied
+   *  (no claims source indexed yet) keeps its replaced markdown, so a search between the swap and
+   *  the first claims sync still finds its notes. Returns a test for an indexed path. */
+  private claimsPending(d: Discovery): (path: string) => boolean {
+    const indexed = this.d.store.sourceShas();
+    const wings = d.eligible.filter((e) => e.kind === 'claims' && !indexed.has(e.path)).map((e) => `agents/${e.wing}/`);
+    return (path) => wings.some((w) => path.startsWith(w));
+  }
+
   /** W3-1 (a): remove a wing's indexed sources that are no longer eligible (its markdown, once its
-   *  claims are a source), so a claim never lands beside what it replaces. */
+   *  claims are a source), so a claim never lands beside what it replaces. MUST-1: called in the
+   *  queue step that applies the claims, so search sees the markdown or the claims, never neither. */
   private dropIneligible(wing: string, d: Discovery): number {
     const keep = new Set(d.eligible.map((e) => e.path));
     let n = 0;
@@ -373,10 +384,8 @@ export class MemoryEngine {
       if ('claimLedger' in a && this.claimLedger !== a.claimLedger) await this.setClaimLedger(a.claimLedger);
       const d = this.discover();
       if (!d.eligible.some((e) => e.kind === 'claims' && e.wing === a.wing)) throw new Error(`claims are not indexed for ${a.wing} (level ${d.ledgerLevels[a.wing] ?? 'off'})`);
-      // W3-1 (a): the replaced markdown leaves in the same queue step that plans the claims.
       // CL-S1 M3: a wing embedded under an older claim-vector recipe re-embeds all its parts once.
       const plan = await this.enqueue(PRIORITY.ingest, async () => {
-        this.dropIneligible(a.wing, this.discover());
         const reembed = this.d.store.meta(claimEmbedVersionKey(a.wing)) !== String(CLAIM_EMBED_VERSION);
         return this.d.store.planClaims(a.wing, a.chunks, { reembed });
       });
@@ -386,7 +395,12 @@ export class MemoryEngine {
         const batch = plan.add.slice(i, i + EMBED_BATCH).map((p) => claimEmbedText(p.content));
         vectors.push(...await this.enqueue(PRIORITY.ingest, () => this.embed(batch)));
       }
-      await this.enqueue(PRIORITY.ingest, async () => this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION }));
+      // W3-1 (a) + MUST-1 (Jim): the replaced markdown leaves in the same queue step that applies the
+      // claims (not at plan time: searches run between the embeds and would see neither).
+      await this.enqueue(PRIORITY.ingest, async () => {
+        this.d.store.applyClaims(a.path, plan, vectors, { head: a.head, nowMs: this.now(), manifestVersion: ALLOW_LIST_VERSION, embedVersion: CLAIM_EMBED_VERSION });
+        this.dropIneligible(a.wing, this.discover());
+      });
       this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 });
       return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 };
     });
@@ -418,10 +432,13 @@ export class MemoryEngine {
     if (prev) this.clearTimer(prev);
     this.debounce.set(absPath, this.setTimer(() => {
       this.debounce.delete(absPath);
-      const e = this.discover().eligible.find((x) => x.abs === absPath);
+      const d = this.discover();
+      const e = d.eligible.find((x) => x.abs === absPath);
       if (e) { void this.ingestEntry(e, PRIORITY.ingest); return; }
-      // Not eligible (or gone): if it was indexed, remove it.
+      // Not eligible (or gone): if it was indexed, remove it, unless its wing's claims are not
+      // applied yet (MUST-1) and the file is still there.
       const rel = absPath.slice(this.d.hiveRoot.length + 1).split(/[\\/]/).join('/');
+      if (this.claimsPending(d)(rel) && existsSync(absPath)) return;
       if (this.d.store.sourceShas().has(rel)) void this.enqueue(PRIORITY.ingest, async () => this.d.store.removeSource(rel));
     }, SOURCE_DEBOUNCE_MS));
   }

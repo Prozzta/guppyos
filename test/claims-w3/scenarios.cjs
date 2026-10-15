@@ -334,6 +334,7 @@ module.exports = async (drill) => {
     try { await sync(eng, 'a1', chunks); } catch (e) { shadowSync = String(e.message); }
     manifest({ a1: 'reader', a2: 'off' });
     const flipped = await eng.backfill();
+    const pending = count();
     await sync(eng, 'a1', chunks);
     const reader = count();
     const searchMem = claimHits(await eng.search({ query: 'memfact alpha', results: 10 })).length;
@@ -342,7 +343,7 @@ module.exports = async (drill) => {
     const back = await eng.backfill();
     const flippedBack = count();
     await eng.close(); store.close();
-    return { shadow, shadowSync, reader, flippedRemoved: flipped.removed, searchMem, mdMem, flippedBack, backRemoved: back.removed };
+    return { shadow, shadowSync, pending, reader, flippedRemoved: flipped.removed, searchMem, mdMem, flippedBack, backRemoved: back.removed };
   }
 
   if (s === 'appendOnly') {

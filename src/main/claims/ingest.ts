@@ -96,8 +96,11 @@ export async function shadowImport(deps: IngestDeps, agent: string, opts: { sett
   // (or reported refused); an established ledger keeps its swap even when this run found it
   // read-only. Written last, so discovery swaps memory.md out only after the import, never in the
   // middle. opts.settle false (a shadow agent: its memory.md stays searched) writes no marker, so a
-  // later raise imports again first.
-  const settled = led.records.length > 0 || (!report.readOnly && report.appended > 0);
+  // later raise imports again first. NIT-1 (Jim): nothing to import (no entries, none refused, not
+  // read-only) also settles, so a new hire's empty memory.md is not re-imported every 60 s forever;
+  // its watcher takes the bullets it writes later.
+  const nothingToImport = !report.readOnly && report.offered === 0 && report.refused.length === 0 && existsSync(dir);
+  const settled = led.records.length > 0 || (!report.readOnly && report.appended > 0) || nothingToImport;
   if (opts.settle !== false && settled && !importSettled(deps.hiveRoot, agent)) {
     const file = importSettledFile(deps.hiveRoot, agent);
     mkdirSync(join(dir, 'memory'), { recursive: true });
@@ -125,6 +128,7 @@ export class ReaderWatcher {
   private stopped = false;
   private archives = false;
   private readonly reported = new Set<string>();
+  private readonly archiveRefused = new Set<string>();
 
   constructor(private readonly deps: IngestDeps, readonly agent: string, private readonly debounceMs = READER_DEBOUNCE_MS) {}
 
@@ -200,8 +204,13 @@ export class ReaderWatcher {
         // Every archive entry the ledger lacks (counted by hash, so a bullet already taken from
         // memory.md and then rolled over is not offered again); memory.md is the scan above's.
         const arch = newLegacyImport(agentDir(this.deps, this.agent), this.deps.read(this.agent).records);
-        const drafts = arch.drafts.filter((d) => (d as Extract<RecordDraft, { t: 'claim' }>).legacy?.file !== 'memory.md');
+        // NIT-2 (Jim): an archive entry refused once is not offered (and logged) again at every
+        // archive change, like the memory.md scan's refusals above.
+        const keyOf = (d: RecordDraft): string => { const c = d as Extract<RecordDraft, { t: 'claim' }>; return `${c.legacy?.file ?? ''}\u0000${c.legacy?.line ?? 0}\u0000${c.text.length}`; };
+        const drafts = arch.drafts.filter((d) => (d as Extract<RecordDraft, { t: 'claim' }>).legacy?.file !== 'memory.md' && !this.archiveRefused.has(keyOf(d)));
+        const before = report.refused.length;
         await appendAll(this.deps, this.agent, drafts, report, 'watch-archive', false);
+        for (const r of report.refused.slice(before)) this.archiveRefused.add(`${r.file}\u0000${r.line}\u0000${r.chars}`);
       }
     }
     if (report.offered || report.readOnly) {

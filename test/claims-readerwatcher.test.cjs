@@ -230,13 +230,44 @@ test('CL-READERWATCHER mid-run: a raised agent is imported (memory.md and archiv
   await ws.ensureImported('ag-x');
   assert.equal(fs.existsSync(settledFile(f, 'ag-x')), true);
   assert.ok(ledgerTexts(f, 'ag-x').includes('- written while it was off'));
-  // an agent with nothing to import has no ledger to search: it does not settle
+  // NIT-1 (Jim): an agent with nothing to import settles (no segment, so nothing swaps) and is
+  // watched, instead of being re-imported at every sync; a bullet it writes later reaches its ledger.
   const g = await floor({ 'ag-e': 'off' }, { 'ag-e': '# Memory\n' });
   const m = midrun(g);
   g.levels['ag-e'] = 'writer';
   await m.ws.ensureImported('ag-e');
-  assert.equal(fs.existsSync(settledFile(g, 'ag-e')), false);
-  assert.deepEqual(m.settled, []);
+  assert.equal(fs.existsSync(settledFile(g, 'ag-e')), true);
+  assert.deepEqual(m.settled, ['ag-e']);
+  const imports = g.rows.filter((r) => r.kind === 'claims-import' && r.agent === 'ag-e').length;
+  m.ws.sync(); m.ws.sync();
+  assert.equal(g.rows.filter((r) => r.kind === 'claims-import' && r.agent === 'ag-e').length, imports, 'no re-import at later syncs');
+  assert.ok(await waitFor(() => m.ws.watching().includes('ag-e')), 'watched without a ledger');
+  edit(g, 'ag-e', 'the first note of a new hire');
+  assert.ok(await waitFor(() => ledgerTexts(g, 'ag-e').includes('- the first note of a new hire')), 'its first bullet reaches the ledger');
+  // and an id with no agent folder (a typo in memory-sources.json) is not imported, and no folder is made
+  g.levels['ag-typo'] = 'writer';
+  await m.ws.ensureImported('ag-typo');
+  assert.equal(fs.existsSync(path.join(g.root, 'agents', 'ag-typo')), false);
+  assert.ok(!g.rows.some((r) => r.agent === 'ag-typo'), 'no rows for it');
+  // nor at a start import: no settled file (so no folder) is made for it
+  await importAtStart({ hiveRoot: g.root, ...g.ingest, agents: () => ['ag-typo'], level: () => 'writer' });
+  assert.equal(fs.existsSync(path.join(g.root, 'agents', 'ag-typo')), false);
+  m.ws.stopAll();
+  // an agent whose every entry is refused has nothing in a ledger: it stays unsettled (memory.md searched)
+  const h = await floor({ 'ag-p': 'off' }, { 'ag-p': '# Memory\n\n- a poison entry\n' });
+  const p = midrun(h, { append: (a, d, ...rest) => (/poison/.test(d.text ?? '') ? Promise.resolve({ ok: false, error: 'an invented refusal' }) : h.ingest.append(a, d, ...rest)) });
+  h.levels['ag-p'] = 'writer';
+  await p.ws.ensureImported('ag-p');
+  assert.equal(fs.existsSync(settledFile(h, 'ag-p')), false);
+  p.ws.stopAll();
+  // the same when the only entry is refused before any append (one line over the legacy limit)
+  const k = await floor({ 'ag-l': 'off' }, { 'ag-l': `# Memory\n\n- ${'x'.repeat(100_000)}\n` });
+  const q = midrun(k);
+  k.levels['ag-l'] = 'writer';
+  await q.ws.ensureImported('ag-l');
+  assert.ok(k.rows.some((r) => r.kind === 'claims-import-refused' && r.agent === 'ag-l'), 'refused at parse');
+  assert.equal(fs.existsSync(settledFile(k, 'ag-l')), false);
+  q.ws.stopAll();
 });
 
 test('CL-READERWATCHER mid-run: a failed import leaves no settled file, is logged, and the next sync retries it', async () => {
@@ -281,4 +312,35 @@ test('CL-READERWATCHER known limit 1: a bullet the rollover moves into an archiv
   assert.ok(!texts.some((t) => t.startsWith('- half writ')), 'the archive scan leaves memory.md, and its unfinished line, to the memory.md scan');
   fs.appendFileSync(path.join(dir, 'memory.md'), 'ten\n');
   assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- half written' && x.source === 'self')));
+});
+
+test('CL-READERWATCHER archives: scanned only after an archive changes (Jim: "archive flag kept"), and a refused archive entry is logged once (NIT-2)', async () => {
+  const f = await floor({ 'ag-w': 'writer' });
+  let reads = 0;
+  const r5 = new Map();
+  const append = (a, d, ...rest) => (r5.set(d.text, rest[1]?.r5), /poison/.test(d.text ?? '') ? Promise.resolve({ ok: false, error: 'an invented refusal' }) : f.ingest.append(a, d, ...rest));
+  const ws = new f.RW.ReaderWatchers({ hiveRoot: () => f.root, agents: () => ['ag-w'], level: () => 'writer', debounceMs: 100, append,
+    read: (a) => { reads++; return f.store.readLedger(a); }, log: f.ingest.log });
+  WATCHERS.push(ws);
+  ws.sync();
+  await new Promise((r) => setTimeout(r, 300));
+  const dir = path.join(f.root, 'agents', 'ag-w');
+  const archive = path.join(dir, 'memory-archive-2026-10-14.md');
+  const refusedRows = () => f.rows.filter((r) => r.kind === 'claims-import-refused' && r.via === 'watch-archive').length;
+  fs.writeFileSync(archive, '# Memory\n\n## 2026-10-14\n- a poison archive note\n- a good archive note\n');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- a good archive note')));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(refusedRows(), 1);
+  assert.equal(r5.get('- a good archive note'), false, 'archive entries go in without R5, as at the S0 import (Jim: "archive scan r5 on")');
+  fs.appendFileSync(archive, '- a second good archive note\n');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- a second good archive note')));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(refusedRows(), 1, 'the refused entry is not offered and logged again at the next archive change');
+  // a memory.md change alone does not scan the archives again (one ledger read, not two)
+  const before = reads;
+  edit(f, 'ag-w', 'a plain memory.md note');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- a plain memory.md note')));
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(reads - before, 1, 'one ledger read: the memory.md scan only');
+  ws.stopAll();
 });

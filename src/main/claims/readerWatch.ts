@@ -22,7 +22,8 @@
  * the agent's claims into the index, which swaps the markdown out. An agent dropped to shadow or off
  * loses its settled file, so a later raise imports again first.
  */
-import { rmSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import type { LedgerLevel } from '../../shared/claims';
 import { importSettled, importSettledFile, ReaderWatcher, READER_DEBOUNCE_MS, shadowImport, type IngestDeps } from './ingest';
 
@@ -73,7 +74,9 @@ export class ReaderWatchers {
       }
     }
     let want: string[] = [];
-    try { want = [...new Set(this.d.agents())].filter((a) => { const l = this.levelOf(a); return l !== null && memoryMdReplaced(l) && importSettled(root as string, a); }); } catch { want = []; }
+    // NIT-1: a settled candidate with no ledger yet (nothing was importable) is watched too, so the
+    // bullets it writes later reach its ledger.
+    try { want = [...new Set([...cands, ...this.d.agents()])].filter((a) => { const l = this.levelOf(a); return l !== null && memoryMdReplaced(l) && importSettled(root as string, a); }); } catch { want = []; }
     for (const [agent, w] of this.watchers) if (!want.includes(agent)) { w.stop(); this.watchers.delete(agent); }
     for (const agent of want) {
       if (this.watchers.has(agent)) continue;
@@ -96,6 +99,9 @@ export class ReaderWatchers {
     try { root = this.d.hiveRoot(); } catch { root = null; }
     const level = this.levelOf(agent);
     if (!root || level === null || !memoryMdReplaced(level) || importSettled(root, agent)) return Promise.resolve();
+    // NIT-1: an id with no agent folder (a typo in memory-sources.json) is not imported (and no
+    // folder is made for it); it would never settle and log a claims-import row every sync.
+    if (!existsSync(join(root, 'agents', agent))) return Promise.resolve();
     const at = root;
     const run = shadowImport({ hiveRoot: at, append: this.d.append, read: this.d.read, log: this.d.log }, agent)
       .then(() => {
