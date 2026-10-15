@@ -323,23 +323,12 @@ async function proveProbe() {
  * still reachable through it.
  */
 function treeOf(root) {
-  const out = execFileSync('powershell.exe', ['-NoProfile', '-Command',
-    "Get-CimInstance Win32_Process | ForEach-Object { $_.ProcessId.ToString() + ' ' + $_.ParentProcessId.ToString() }"
-  ], { encoding: 'utf8', timeout: 30_000 });
-  const parent = new Map();
-  for (const line of out.split('\n')) {
-    const [pid, ppid] = line.trim().split(' ');
-    if (pid) parent.set(pid, ppid);
-  }
-  const tree = new Set([String(root)]);
-  // Repeat to a fixed point: Win32_Process is not ordered parents-first.
-  for (let grew = true; grew; ) {
-    grew = false;
-    for (const [pid, ppid] of parent) {
-      if (!tree.has(pid) && tree.has(ppid)) { tree.add(pid); grew = true; }
-    }
-  }
-  return tree;
+  // TEST-GLOB-PID-RECYCLE: each child created at or after its parent (own-procs); ParentProcessId alone also
+  // names an OLDER process whose long-gone parent had the pid, and would blame the app for a stranger.
+  const own = require('./own-procs.cjs');
+  const rows = own.processTable();
+  const r = rows.find((x) => x.pid === Number(root));
+  return new Set([String(root), ...(r ? own.treeOf(rows, r) : []).map((x) => String(x.pid))]);
 }
 
 /**

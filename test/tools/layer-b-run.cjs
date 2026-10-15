@@ -564,7 +564,10 @@ while ($true) {
     $kids = @{}; foreach ($p in $all) { $k = [int]$p.ParentProcessId; if (-not $kids.ContainsKey($k)) { $kids[$k] = @() }; $kids[$k] += $p }
     $tree = New-Object System.Collections.Generic.List[uint32]; $queue = New-Object System.Collections.Queue; $queue.Enqueue([int]$root)
     $names = @{}
-    while ($queue.Count) { $x = $queue.Dequeue(); if ($tree.Contains([uint32]$x)) { continue }; $tree.Add([uint32]$x); if ($kids.ContainsKey($x)) { foreach ($c in $kids[$x]) { $names[[int]$c.ProcessId] = $c.Name; $queue.Enqueue([int]$c.ProcessId) } } }
+    # TEST-GLOB-PID-RECYCLE: a child is created at or after its parent; ParentProcessId alone also names an OLDER
+    # process whose long-gone parent had the pid (a stranger's window or browser would be reported as the app's)
+    $born = @{}; foreach ($p in $all) { $born[[int]$p.ProcessId] = $p.CreationDate }
+    while ($queue.Count) { $x = $queue.Dequeue(); if ($tree.Contains([uint32]$x)) { continue }; $tree.Add([uint32]$x); if ($kids.ContainsKey($x) -and $born[$x]) { foreach ($c in $kids[$x]) { if (-not $c.CreationDate -or $c.CreationDate -lt $born[$x]) { continue }; $names[[int]$c.ProcessId] = $c.Name; $queue.Enqueue([int]$c.ProcessId) } } }
     $vis = [LbWatch]::Visible($tree.ToArray())
     $br = @($names.GetEnumerator() | Where-Object { $_.Value -match $browsers } | ForEach-Object { "$($_.Key):$($_.Value)" })
     $al = @($all | Where-Object { $_.Name -match $alerts -and $_.CreationDate -and $_.CreationDate.ToUniversalTime() -gt $since } | ForEach-Object { "$($_.ProcessId):$($_.Name)" })
@@ -922,13 +925,15 @@ function codexSafetyArgvProblems(tokens) {
   return p;
 }
 const CODEX_WIDENING_FLAGS = [['--add-dir', null], ['--cd', '-C'], ['--profile', '-p'], ['--worktree', null]];
-/** PowerShell: the app's descendants with their command lines, as JSON (tree walk by pid). */
+/** PowerShell: the app's descendants with their command lines, as JSON (tree walk by pid; each child created at
+ *  or after its parent, TEST-GLOB-PID-RECYCLE: ParentProcessId alone also names an older stranger). */
 const PS_TREE_CMDLINES = (rootPid) => `
 $ErrorActionPreference = 'Stop'
-$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine)
+$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate)
+$born = @{}; foreach ($p in $all) { $born[[int]$p.ProcessId] = $p.CreationDate }
 $ids = @(${Number(rootPid)})
 $changed = $true
-while ($changed) { $changed = $false; foreach ($p in $all) { if (($ids -contains $p.ParentProcessId) -and -not ($ids -contains $p.ProcessId)) { $ids += $p.ProcessId; $changed = $true } } }
+while ($changed) { $changed = $false; foreach ($p in $all) { $pp = [int]$p.ParentProcessId; if (($ids -contains $pp) -and -not ($ids -contains $p.ProcessId) -and $born[$pp] -and $p.CreationDate -and $p.CreationDate -ge $born[$pp]) { $ids += $p.ProcessId; $changed = $true } } }
 $out = @($all | Where-Object { ($ids -contains $_.ProcessId) -and ($_.ProcessId -ne ${Number(rootPid)}) } | ForEach-Object { @{ pid = $_.ProcessId; ppid = $_.ParentProcessId; name = $_.Name; cmd = $_.CommandLine } })
 ConvertTo-Json -InputObject $out -Compress -Depth 3
 `;
