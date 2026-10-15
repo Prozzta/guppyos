@@ -56,7 +56,7 @@ import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
 import { ProviderModelStore, defaultAdapters } from './providerModels';
 import {
-  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
+  readConfig, writeConfig, pruneRetiredConfigKeys, setAgentTokenCap, setProjectThemeForHome, resolveProjectThemeForHome, setAgentUsageDisplay, setCapacityDisplayThreshold, setGraphicsMode, resetConfig, ensureHarnessHome, homeHasNoProject, ensureClaudePermissionsAccepted,
   modelForHiveSpawn, takeClearedDefaultModel, configIntegrityIssue, OPS_STANDUP_MISSION, HEARTBEAT_MISSION, COMPACT_MAINTENANCE_MISSION, type HarnessConfig, type ScheduledMission
 } from './config';
 import { effectiveModel, modelFlagValue, resolveSpawnArgs } from '../shared/modelPin';
@@ -83,6 +83,8 @@ import { ScreenGuardNotices, StartupProbe, WakeIncarnationTokens, WAKE_INCARNATI
 import type { ScreenGuardRecord } from './automaticSubmit';
 import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
+import { applyGraphicsModeAtStartup, appliedGraphicsMode, graphicsStatus } from './graphics';
+import type { GraphicsStatusView } from '../shared/graphicsMode';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
   getBranch, getStatus, getLog, getBranches, getAheadBehind, isRepo, getDiff, mainRepoRoot,
@@ -303,6 +305,11 @@ if (!DEV_ISOLATION && !memorySmokeOut && !memoryBenchDir) {
     console.error(`[userdata] copying ${LEGACY_USERDATA_DIR} to ${USERDATA_DIR} failed (${userDataMigration.error}); using the old folder this run, retrying next start`);
   }
 }
+
+// GPU-SETTING-188: Settings → Graphics, applied HERE: after the userData path is final (the mode is in
+// its config.json) and before app ready (disableHardwareAcceleration does nothing later). A missing or
+// corrupt config.json is Auto. CPU only disables hardware acceleration for this whole run.
+const graphicsAtStartup = applyGraphicsModeAtStartup(app);
 
 // RENDERER-RECOVERY-164 (the Human's final scope): LOCAL crash dumps, started as early as the
 // userData/crashDumps paths are final (just above). uploadToServer:false, no submit URL: a
@@ -4976,6 +4983,24 @@ ipcMain.handle('config:setCapacityDisplayThreshold', (_evt, value: unknown) => {
   pushCapacityStrip();
   return next;
 });
+// GPU-SETTING-188: Settings → Graphics. The status is what is IN FORCE (the mode read before ready,
+// Chromium's GPU compositing) plus the saved mode; a saved change applies after a restart, which goes
+// through the normal teardown (the renderer has asked the user first when agents are running).
+function graphicsStatusView(): GraphicsStatusView {
+  let feature: Record<string, string> | null = null;
+  try { feature = app.getGPUFeatureStatus() as unknown as Record<string, string>; } catch { /* unknown */ }
+  return { ...graphicsStatus(readConfig(), feature), runningAgents: ptyManager.list().length };
+}
+ipcMain.handle('graphics:status', () => graphicsStatusView());
+ipcMain.handle('graphics:setMode', (_evt, mode: unknown) => {
+  setGraphicsMode(mode);
+  try { hive.appendLog({ kind: 'graphics-set', mode, applied: appliedGraphicsMode() }); } catch { /* best-effort */ }
+  return graphicsStatusView();
+});
+ipcMain.handle('graphics:restart', () => {
+  app.relaunch();
+  teardownAndQuit();
+});
 // v1.1.45 CAPUI-MONITOR: persist an agent's Monitor line. The breaker reads config live,
 // so a 5H / Weekly choice exempts the agent from the budget on the very next beat.
 ipcMain.handle('config:setAgentUsageDisplay', (_evt, agentId: unknown, display: unknown) => {
@@ -7365,6 +7390,11 @@ function bootstrapHiveServices(): void {
     electron: process.versions.electron,
     platform: process.platform
   });
+  // GPU-SETTING-188: the Graphics mode this run started with, and what Chromium made of it.
+  try {
+    const gpu = graphicsStatus(null, app.getGPUFeatureStatus() as unknown as Record<string, string>);
+    hive.appendLog({ kind: 'graphics', mode: graphicsAtStartup.mode, applied: graphicsAtStartup.applied, hardwareCompositing: gpu.hardwareCompositing });
+  } catch { /* the log is best-effort */ }
   // REBRAND-GUPPY: which data folder this run uses, and whether it was copied just now.
   if (userDataMigration && userDataMigration.status !== 'already') {
     const m = userDataMigration;

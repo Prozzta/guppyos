@@ -31,6 +31,7 @@ import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel'
 import { linePicker, type LinePicker } from './packLines';
 import type { MessageAct } from '../office/MessageEnvelope';
 import { coffeeProps, cupInHand, endedSays, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
+import { floorPowerPreference, recordFloorRenderer } from '../graphicsProbe';
 
 /** One walk step at the longest tick (onTick clamps dt to 80 ms): ownChairKey's reach toward an own approach spot. */
 const OWN_SPOT_STEP = WALK_SPEED * 80;
@@ -157,7 +158,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
     const SM = pack.scene, R = pack.manifest.spriteRenderer, fw = R.frameWidth, fh = R.frameHeight;
 
     const init = async () => {
+      // GPU-SETTING-188: Graphics = GPU asks WebGL for the high-performance GPU; Auto and CPU only ask nothing.
+      const gfx = await floorPowerPreference();
       await app.init({
+        ...gfx,
         background: pack.manifest.palette.background,
         antialias: false,
         roundPixels: true,
@@ -167,6 +171,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         height: host.clientHeight || 600,
       });
       if (mountIdRef.current !== mountId) { safeDestroy(app); return; }
+      recordFloorRenderer(app);   // GPU-SETTING-188: the renderer really in use, for Settings' indicator
       while (host.firstChild) host.removeChild(host.firstChild);
       host.appendChild(app.canvas);
       (app as any).__glRecovery = installContextLossRecovery(app.canvas, {

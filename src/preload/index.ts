@@ -5,6 +5,7 @@ import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
 import type { RendererErrorReport } from '../shared/rendererError';
+import type { GraphicsStatusView } from '../shared/graphicsMode';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
@@ -418,6 +419,8 @@ export interface HarnessConfig {
   /** v1.1.45 unit #8 (C2.8): the capacity-display threshold, an integer 1-99 (default 15).
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
+  /** GPU-SETTING-188: Settings → Graphics ('auto' default). */
+  graphicsMode?: 'auto' | 'gpu' | 'cpu';
   autoDeliveryPausedAgents?: string[];
   /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
    *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
@@ -870,6 +873,12 @@ const api = {
   /** v1.1.45 unit #8: set the capacity-display threshold (1-99). Rejects invalid input; the stored value stays. */
   setCapacityDisplayThreshold: (value: number): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setCapacityDisplayThreshold', value),
+  /** GPU-SETTING-188: the mode in force, the saved one, and Chromium's GPU compositing status. */
+  graphicsStatus: (): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:status'),
+  /** GPU-SETTING-188: save the Graphics mode (takes effect after a restart). Rejects an unknown mode. */
+  setGraphicsMode: (mode: 'auto' | 'gpu' | 'cpu'): Promise<GraphicsStatusView> => ipcRenderer.invoke('graphics:setMode', mode),
+  /** GPU-SETTING-188: restart Guppy to apply the Graphics mode (the normal teardown; running agents stop). */
+  restartForGraphics: (): Promise<void> => ipcRenderer.invoke('graphics:restart'),
   /** v1.1.45 CAPUI-MONITOR: one agent's 5h + weekly usage, on its OWN channel (not control:snapshot).
    *  Literal channel name: a test pins it to CAPACITY_AGENT_USAGE in src/shared/agentUsage.ts. */
   capacityAgentUsage: (agentId: string): Promise<AgentUsageView | null> =>
