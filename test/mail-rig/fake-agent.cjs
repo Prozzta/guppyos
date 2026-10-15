@@ -95,6 +95,8 @@ class FakeAgent {
 
   start() {
     fs.writeFileSync(path.join(this.dir, 'pid'), String(process.pid));
+    // TEST-GLOB-PID-RECYCLE: the birth too, so the driver kills this pid only while it is still this stub
+    fs.writeFileSync(path.join(this.dir, 'born'), String(Math.round(Date.now() - process.uptime() * 1000)));
     // Isolation (allowlist env, jailed PATH): the stub checks ITSELF, as the host does, and records
     // every problem (the RIG test and the negative control assert none).
     let isolation = [];

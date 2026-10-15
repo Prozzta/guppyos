@@ -22,6 +22,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
+const own = require('./tools/own-procs.cjs');
 const { readSource: read, codeOnly } = require('./read-source.cjs');
 
 const SRC = 'src/main/providerModels.ts';
@@ -104,7 +105,7 @@ fs.writeFileSync(FAKE_JS, `'use strict';
 const fs = require('fs');
 const mode = process.env.FAKE_CLAUDE_MODE; const log = process.env.FAKE_CLAUDE_LOG;
 const MODELS = ${JSON.stringify(MODELS)}; const SIGNED_OUT = ${JSON.stringify(SIGNED_OUT_MODELS)}; const ACCOUNT = ${JSON.stringify(ACCOUNT)};
-fs.writeFileSync(log, JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
+fs.writeFileSync(log, JSON.stringify({ pid: process.pid, born: Math.round(Date.now() - process.uptime() * 1000), argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 if (mode === 'noverbose') { process.stderr.write('Error: When using --print, --output-format=stream-json requires --verbose\\n'); process.exit(1); }
 let buf = '';
@@ -145,6 +146,13 @@ function deps(mode, { found = true, extra = {} } = {}) {
   return { d, log, tmpDir, entries };
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** TEST-GLOB-PID-RECYCLE: the fake is killed only while its pid is still the fake (name and birth, own-procs),
+ *  never a process that took the pid over. Not on POSIX: nothing to verify it with there. */
+function killIfOurs(e) {
+  if (!e || !e.pid || !alive(e.pid) || !WIN) return;
+  const root = own.stillOurs({ pid: e.pid, bornMs: e.born, name: 'node.exe' });
+  if (root) own.killVerified([root]);
+}
 async function gone(pid, ms = 4000) { const t = Date.now(); while (alive(pid) && Date.now() - t < ms) await new Promise((r) => setTimeout(r, 100)); return !alive(pid); }
 const sameDir = (a, b) => fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase();
 const noKey = () => undefined;
@@ -162,7 +170,7 @@ async function successChecks(R) {
     assert.deepEqual(got.req, { type: 'control_request', request_id: R.CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } }, 'one initialize request');
     assert.ok(sameDir(start.cwd, f.tmpDir), `C11: claude runs in the temp dir, never an agent's project (${start.cwd})`);
     assert.equal(alive(start.pid), false, 'C3: the claude process (below the .cmd shim) is already gone when the call resolves');
-  } finally { if (start && alive(start.pid)) try { process.kill(start.pid); } catch { /* gone */ } }
+  } finally { killIfOurs(start); }
 }
 test('REAL fake claude, success: 11 models, the four flags, one initialize, temp cwd, the process TREE killed', { timeout: 30_000 }, () => successChecks(P));
 
@@ -189,13 +197,13 @@ async function hangChecks(R) {
   // The box must let the fake START under suite load (node can take seconds then); 1.5 s once cut it
   // off before it logged its pid, and the test had nothing to check (FLAKE-CLAUDE-MODEL-LIST-HANG).
   const r = await Promise.race([R.runClaudeInit(f.d, FAKE, 5000), new Promise((res) => setTimeout(() => res({ reason: 'NO TIME BOX' }), 20_000))]);
-  const pid = f.entries()[0]?.pid;
+  const first = f.entries()[0], pid = first?.pid;
   try {
     assert.deepEqual(r, { reason: R.CLAUDE_REASONS.timeout }, 'C4: a claude that never answers is cut off by the time box');
     assert.ok(Date.now() - t0 < 19_000);
     assert.ok(Number.isInteger(pid), 'the fake started and logged its pid inside the box');
     assert.equal(alive(pid), false, 'C4: and its process tree is already gone when the call resolves');
-  } finally { if (pid && alive(pid)) try { process.kill(pid); } catch { /* gone */ } }
+  } finally { killIfOurs(first); }
 }
 test('REAL fake claude, hang: timed out inside the box and the tree killed', { timeout: 30_000 }, () => hangChecks(P));
 

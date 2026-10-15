@@ -85,8 +85,8 @@
  *    transcripts/rollouts (the larger count wins); any hit ABORTS and the report says what was
  *    proven. The sandbox config also turns the breaker ON with hard stop and the token caps.
  *  - Every process started is killed by exact PID (pid + creation time, deepest first). A failed
- *    process scan is a FAILURE, and falls back to taskkill /T on the roots whose handle is still
- *    open (so the pid cannot have been reused). Emergency order: kill, then credentials, then sandbox.
+ *    process scan is a FAILURE, and falls back to killing, through their handles, the roots whose
+ *    handle is still open (so the pid cannot have been reused). Emergency order: kill, then credentials, then sandbox.
  *  - Evidence copies are redacted (token-shaped strings, auth headers).
  *
  * USAGE (never without god's OK: it builds and LAUNCHES the app):
@@ -474,7 +474,7 @@ class ProcTracker {
   }
   /** Kill every known process that is still the same process, deepest first. A failed scan is a
    *  FAILURE (R3): nothing can be identity-checked, so only the roots whose handle is still open are
-   *  killed, with their whole tree (taskkill /T), and the result says ok:false. */
+   *  killed, through that handle, and the result says ok:false. */
   async killAll() {
     let snap = null;
     let scanError = null;
@@ -492,13 +492,15 @@ class ProcTracker {
     const still = after.procs.filter((p) => { const k = this.known.get(p.pid); return k && (k.created === null ? /munder difflin|guppy/i.test(p.name) : k.created === p.created); });
     return { ok: still.length === 0, scanFailed: false, killed: ours.map((k) => `${k.pid}:${k.name}`), survivors: still.map((p) => `${p.pid}:${p.name}`) };
   }
-  /** The fallback when no scan can prove identity: taskkill /T /F on every root whose ChildProcess
-   *  handle has not seen an exit (so its pid cannot have been reused). Always ok:false. */
+  /** The fallback when no scan can prove identity: every root whose ChildProcess handle has not seen an exit
+   *  (so its pid cannot have been reused) is killed through that handle. Not its tree: with no scan nothing
+   *  proves a child is ours, and `taskkill /T` follows ParentProcessId alone, which also matches an older
+   *  process whose long-gone parent had the pid (TEST-GLOB-PID-RECYCLE). Always ok:false. */
   killRootsByHandle(why) {
     const fallback = [];
     for (const [pid, child] of this.handles) {
       if (child.exitCode !== null || child.signalCode !== null) continue;
-      spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore', timeout: 15_000 });
+      try { child.kill('SIGKILL'); } catch { /* gone */ }
       fallback.push(pid);
     }
     return { ok: false, scanFailed: true, why, killed: [], fallback, survivors: [`UNKNOWN (${why})`] };
@@ -583,6 +585,7 @@ class WindowWatch {
   }
   start() {
     this.child = spawn(PS, psArgs(PS_WATCH(this.rootPid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.childRec = { pid: this.child.pid, bornMs: Date.now() };
     this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-2000); });
     this.child.stdout.on('data', (d) => {
       this.buf += d;
@@ -607,7 +610,8 @@ class WindowWatch {
   healthy(now = Date.now()) { return this.lines > 0 && now - this.lastAt < 15_000; }
   stop() {
     this.stopped = true;
-    if (this.child && this.child.exitCode === null) spawnSync('taskkill', ['/T', '/F', '/PID', String(this.child.pid)], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+    // its own tree, verified (own-procs), not taskkill /T (TEST-GLOB-PID-RECYCLE)
+    if (this.child && this.child.exitCode === null) { try { require('./own-procs.cjs').killOwnTree(this.childRec); } catch { /* gone */ } }
   }
 }
 
@@ -3296,7 +3300,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     const proven = r.ok === true && !r.scanFailed && r.survivors.length === 0;
     // R3: a scan failure is a FAILURE, never a vacuous "all gone".
     this.check(proven, `${label}: every process started is gone (exact PID tree)`,
-      r.scanFailed ? `SCAN FAILED (${r.why}); fell back to taskkill /T on open-handle roots ${JSON.stringify(r.fallback)}` : `killed ${r.killed.length}${r.survivors.length ? `; SURVIVORS ${r.survivors.join(',')}` : ''}`);
+      r.scanFailed ? `SCAN FAILED (${r.why}); fell back to a handle kill of the open-handle roots ${JSON.stringify(r.fallback)}` : `killed ${r.killed.length}${r.survivors.length ? `; SURVIVORS ${r.survivors.join(',')}` : ''}`);
     this.killReport = (this.killReport || []).concat([{ label, ...r }]);
     if (!proven) {
       this.exitUnproven = { label, survivors: r.survivors, fallback: r.fallback || [], why: r.why || null };

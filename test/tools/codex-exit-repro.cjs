@@ -51,20 +51,18 @@ const ps = (script) => spawnSync(PS, lb.psArgs(script), { encoding: 'utf8', wind
 
 const rec = { id, base, events: [], output: '', exit: null, aborted: null, typed: null, tree: {}, killed: [], survivors: [], leftovers: null, gone: null };
 const t0 = Date.now();
+const own = require('./own-procs.cjs');
+const rows = new Map();   // pid -> own-procs row of every tree process seen (the kill re-verifies each)
 const ev = (what) => { rec.events.push(`+${Date.now() - t0} ms ${what}`); };
 
-/** The live tree under `pid` (pid -> name), merged into rec.tree (the EXACT set we may kill). */
-function snapshotTree(pid) {
-  const r = ps(`$ErrorActionPreference='Stop'
-$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name)
-$ids = @(${Number(pid)}); $changed = $true
-while ($changed) { $changed = $false; foreach ($p in $all) { if (($ids -contains $p.ParentProcessId) -and -not ($ids -contains $p.ProcessId)) { $ids += $p.ProcessId; $changed = $true } } }
-ConvertTo-Json -Compress -InputObject @($all | Where-Object { $ids -contains $_.ProcessId } | ForEach-Object { @{ pid = $_.ProcessId; name = $_.Name } })`);
-  if (r.status !== 0) return [];
+/** The live tree of the process we spawned (`root` = { pid, bornMs }), merged into rec.tree (the EXACT set we may
+ *  kill). TEST-GLOB-PID-RECYCLE: own-procs' tree (the root only while it is still ours, each child created after
+ *  its parent), not ParentProcessId alone, which also matches an older process whose old parent had that pid. */
+function snapshotTree(root) {
   let list = [];
-  try { list = JSON.parse(String(r.stdout || '[]').trim() || '[]'); } catch { return []; }
-  for (const x of list) rec.tree[x.pid] = x.name;
-  return list;
+  try { list = own.ownTree(own.processTable(), root).tree; } catch { return []; }
+  for (const x of list) { rec.tree[x.pid] = x.name; rows.set(x.pid, x); }
+  return list.map((x) => ({ pid: x.pid, name: x.name }));
 }
 /** Processes still alive from the recorded tree (same pid AND name: a reused pid is not ours), plus
  *  any with the home's path in its command line. -EncodedCommand: the path is not in OUR command line,
@@ -83,9 +81,9 @@ ConvertTo-Json -Compress -InputObject $hit`);
 function killTree(p, why) {
   if (rec.killedAt) return;
   rec.killedAt = Date.now() - t0;
-  const list = snapshotTree(p.pid);
-  spawnSync('taskkill.exe', ['/PID', String(p.pid), '/T', '/F'], { windowsHide: true, timeout: 15_000, stdio: 'ignore' });
-  for (const x of list) spawnSync('taskkill.exe', ['/PID', String(x.pid), '/F'], { windowsHide: true, timeout: 15_000, stdio: 'ignore' });
+  const list = snapshotTree(p.root);
+  // every process of the tree seen so far, each only while it is still the same process (deepest first)
+  own.killVerified([...rows.values()]);
   try { p.kill(); } catch { /* gone */ }
   rec.killed = list;
   ev(`killed the tree (${why}): ${JSON.stringify(list)}`);
@@ -147,13 +145,14 @@ async function main() {
   let lastData = Date.now();
   try {
     p = pty.spawn(launch.file, launch.args, { name: 'xterm-256color', cols: 120, rows: 30, cwd, env });
+    p.root = { pid: p.pid, bornMs: Date.now() };
     ev(`spawned pid ${p.pid}: ${launch.file} [${launch.args.length} args]`);
     p.onData((d) => { rec.output += d; lastData = Date.now(); });
     p.onExit(({ exitCode, signal }) => { exited = { exitCode, signal, atMs: Date.now() - t0 }; ev(`EXIT code ${exitCode} signal ${signal}`); });
     const end = t0 + RUN_MS;
     let nextSnap = 0;
     while (!exited && !rec.aborted && Date.now() < end) {
-      if (Date.now() >= nextSnap) { snapshotTree(p.pid); nextSnap = Date.now() + 2000; }
+      if (Date.now() >= nextSnap) { snapshotTree(p.root); nextSnap = Date.now() + 2000; }
       const text = strip(rec.output);
       const composer = /Ask Codex|›/.test(text);
       const signIn = /Sign in|API key|Welcome to Codex|Log ?in/i.test(text);
@@ -171,7 +170,7 @@ async function main() {
     if (!exited && !rec.aborted) ev(`no exit in ${RUN_MS / 1000} s`);
   } finally {
     if (p && !exited) killTree(p, exited ? 'exited' : 'end of run');
-    else if (p) snapshotTree(p.pid);
+    else if (p) snapshotTree(p.root);
     await sleep(1500);
     rec.survivors = Object.keys(rec.tree).map(Number).filter((pid) => {
       const r = spawnSync('tasklist.exe', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });

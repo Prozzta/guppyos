@@ -15,6 +15,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
+const own = require('./tools/own-procs.cjs');
 const { readSource: read, codeOnly } = require('./read-source.cjs');
 const { runScenario, harnessTestTimeout } = require('./electron-harness/run.cjs');
 
@@ -285,19 +286,20 @@ test('REAL (Windows): a .cmd shim whose node grandchild hangs is killed WITH its
   t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ } });
   const pidFile = path.join(dir, 'grandchild.pid');
   const shim = path.join(dir, 'hang.cmd');
-  fs.writeFileSync(shim, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => {}, 1000)" "${pidFile}"\r\n`);
+  fs.writeFileSync(shim, `@"${process.execPath}" -e "require('fs').writeFileSync(process.argv[1], process.pid + ' ' + Math.round(Date.now() - process.uptime() * 1000)); setInterval(() => {}, 1000)" "${pidFile}"\r\n`);
   const d = { platform: 'win32', env: process.env, exists: fs.existsSync, exec: (file, args, opts, cb) => cp.execFile(file, args, opts, (err, stdout) => cb(err, String(stdout ?? ''))) };
   const t0 = Date.now();
   const r = await P.runCli(d, shim, ['models'], 1024, 2500);
   assert.deepEqual(r, { reason: 'timeout' });
   assert.ok(Date.now() - t0 < 15_000, 'bounded');
-  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  // TEST-GLOB-PID-RECYCLE: the grandchild's pid AND birth; a pid that is now another process's is not killed
+  const rec = own.readRec(pidFile, 'node.exe'), pid = rec.pid;
   assert.ok(pid > 0, 'the grandchild ran');
   let alive = true;
   for (let i = 0; i < 40 && alive; i++) {
     try { process.kill(pid, 0); await new Promise((res) => setTimeout(res, 100)); } catch { alive = false; }
   }
-  if (alive) { try { process.kill(pid); } catch { /* */ } }
+  if (alive) { const root = own.stillOurs(rec); alive = !!root; if (root) own.killVerified([root]); }
   assert.equal(alive, false, 'the node GRANDCHILD of the .cmd shim is gone (no orphaned tree)');
 });
 

@@ -149,11 +149,14 @@ async function idleGate() {
   console.log('[gate] idle run in', d.J);
   const p = pty.spawn(AGY, ['--model', MODEL, '--dangerously-skip-permissions', '--agent', d.agent],
     { name: 'xterm-256color', cols: 120, rows: 30, cwd: d.cwd, env: jailEnv(d) });
+  const root = { pid: p.pid, bornMs: Date.now() };
   await new Promise((r) => setTimeout(r, 20000));
   const hooks = hookCounts(d);
   // Kill the WHOLE tree: p.kill() alone left agy (and the ConPTY host) running, and the gate
   // process then never exited (AGY-166 audit item 2; one hung for minutes inside a hive terminal).
-  try { cp.execFileSync('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }); } catch { /* already gone */ }
+  // TEST-GLOB-PID-RECYCLE: its own tree only (own-procs: verified pids, each child created after its parent), not
+  // taskkill /T, which follows ParentProcessId alone and so also an older process whose old parent had the pid.
+  try { require('./own-procs.cjs').killOwnTree(root); } catch { /* already gone */ }
   try { p.kill(); } catch { /* gone */ }
   return { d, checks: { 'idle for 20 s: no hook event (no startup turn)': Object.keys(hooks).length === 0 }, detail: { hooks } };
 }

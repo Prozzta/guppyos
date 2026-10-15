@@ -30,7 +30,6 @@
  */
 const { app, BrowserWindow } = require('electron');
 const { isolateAppPaths } = require('../electron-harness/isolate-paths.cjs');
-const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -49,26 +48,14 @@ function bail(code, message) {
 }
 
 /** All live descendants of `root`, walked from one Win32_Process snapshot. */
-function descendantsOf(root) {
-  const raw = execFileSync('powershell.exe', [
-    '-NoProfile', '-Command',
-    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress'
-  ], { encoding: 'utf8', timeout: 120_000, windowsHide: true });
-  const byParent = new Map();
-  for (const row of JSON.parse(raw)) {
-    const list = byParent.get(row.ParentProcessId) ?? [];
-    list.push(row.ProcessId);
-    byParent.set(row.ParentProcessId, list);
-  }
-  const out = [];
-  const stack = [root];
-  while (stack.length) {
-    for (const child of byParent.get(stack.pop()) ?? []) {
-      out.push(child);
-      stack.push(child);
-    }
-  }
-  return out;
+/** The root and its tree, as rows { pid, ppid, created, name }. TEST-GLOB-PID-RECYCLE: each child created at
+ *  or after its parent (own-procs), not ParentProcessId alone, which also matches an older process whose
+ *  long-gone parent had the same pid; the test then judges (and kills) survivors by these rows' identity. */
+function treeRows(rootPid) {
+  const own = require('../tools/own-procs.cjs');
+  const table = own.processTable();
+  const root = table.find((r) => r.pid === rootPid);
+  return root ? [root, ...own.treeOf(table, root)] : [];
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -144,14 +131,15 @@ app.whenReady().then(async () => {
   if (!rootPid) return bail(2, 'pty spawned but reported no pid');
 
   // Wait until the grandchild exists — killing a tree of one proves nothing.
-  let pids = [];
+  let rows = [];
   const growDeadline = Date.now() + 120_000;
-  while (pids.length < 2 && Date.now() < growDeadline) {
+  while (rows.length < 2 && Date.now() < growDeadline) {
     await sleep(500);
-    pids = [rootPid, ...descendantsOf(rootPid)];
+    rows = treeRows(rootPid);
   }
+  const pids = rows.map((r) => r.pid);
   if (pids.length < 2) return bail(2, `tree never grew a descendant (root ${rootPid})`);
-  fs.writeFileSync(pidFile, JSON.stringify({ root: rootPid, pids }), 'utf8');
+  fs.writeFileSync(pidFile, JSON.stringify({ root: rootPid, pids, rows }), 'utf8');
 
   // The quit path under test, exactly as the app runs it: the renderer invokes
   // a handle (app:confirmClose), and INSIDE that pending invoke main runs
