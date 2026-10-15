@@ -1166,10 +1166,15 @@ export class HeavyJobLock {
     if (!this.holders.size && !this.reservations.size && this.timer) { this.clearTimer(this.timer); this.timer = null; }
   }
 
-  /** LOCK-WAIT-NOTICES: tell an agent it left the queue (not the one whose own call is running). */
+  /** LOCK-WAIT-NOTICES: tell an agent it left the queue: not the one whose own call is running, and
+   *  not a gone one (no PTY to tell; Dwight MUST: the stale sweep and a lapsed reservation reach here
+   *  without grant()'s gone check). */
   private lapse(agentId: string, kind: HeavyKind, why: 'stale' | 'expired'): void {
     if (agentId === this.calling) return;
-    try { this.d.notifyLapse?.(agentId, kind, why); } catch { /* best effort: the lock goes on */ }
+    try {
+      if (this.d.alive && !this.d.alive(agentId)) return;
+      this.d.notifyLapse?.(agentId, kind, why);
+    } catch { /* best effort: the lock goes on */ }
   }
 
   private expire(): void {

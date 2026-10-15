@@ -155,6 +155,62 @@ test('not told: the caller whose own call meets its lapse or its drop, and a gon
   }
 });
 
+test('Dwight MUST: a gone agent is not told at the scheduled stale sweep, nor when a reservation issued while it lived lapses', () => {
+  // A gone waiter at the scheduled sweep: still dropped on the hour (as stale), but not told.
+  {
+    let gone = false;
+    const { lock, clock, rows, lapsed } = fakeLock({ alive: (id) => !(gone && id === 'w') });
+    lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
+    lock.acquire('w', SUITE, 'npm test', 'w1', false);
+    clock.t += HEAVY_TTL_MS / 2;
+    lock.acquire('holder', SUITE, 'npm test &', 'h2', true);
+    clock.t += HEAVY_TTL_MS / 2;
+    gone = true;
+    lock.queueSnapshot();
+    assert.deepEqual(rows.at(-1), { kind: 'heavy-lock', action: 'queue-dropped', agentId: 'w', reason: 'stale' }, 'the drop itself is unchanged');
+    assert.deepEqual(lock.queueSnapshot().waiters, []);
+    assert.deepEqual(lapsed, [], 'a gone agent is not told');
+  }
+  // Reserved while alive, gone before it lapses: the slot passes on, no lapse notice for it.
+  {
+    let gone = false;
+    const { lock, clock, rows, freed, lapsed } = fakeLock({ alive: (id) => !(gone && id === 'a') });
+    lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
+    lock.acquire('a', SUITE, 'npm test', 'a1', false);
+    lock.acquire('b', SUITE, 'npm test', 'b1', false);
+    lock.release('holder', 'process-exit');
+    assert.deepEqual(freed.map((f) => f[0]), ['a'], 'reserved for a while it lived');
+    gone = true;
+    clock.t += HEAVY_RESERVE_MS;
+    lock.queueSnapshot();
+    assert.ok(rows.some((r) => r.action === 'reserve-expired' && r.agentId === 'a'));
+    assert.deepEqual(lapsed, [], 'a gone agent is not told its slot lapsed');
+    assert.deepEqual(freed.map((f) => f[0]), ['a', 'b'], 'the slot still passes on');
+  }
+  // The positive control: the same live agents are told (as in GAP 1 and GAP 2).
+  {
+    const { lock, clock, lapsed } = fakeLock({ alive: () => true });
+    lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
+    lock.acquire('a', SUITE, 'npm test', 'a1', false);
+    lock.release('holder', 'process-exit');
+    clock.t += HEAVY_RESERVE_MS;
+    lock.queueSnapshot();
+    assert.deepEqual(lapsed, [['a', 'suite', 'expired']]);
+  }
+});
+
+test('an alive check that throws never breaks the lock', () => {
+  const clock = { t: T0 };
+  const lock = new HeavyJobLock({ limit: () => 1, now: () => clock.t, setTimer: () => ({}), clearTimer: () => {}, log: () => {}, alive: (id) => { if (id === 'a' && clock.t > T0) throw new Error('registry down'); return true; }, notifyLapse: () => {} });
+  lock.acquire('holder', SUITE, 'npm test &', 'h1', true);
+  lock.acquire('a', SUITE, 'npm test', 'a1', false);
+  lock.acquire('b', SUITE, 'npm test', 'b1', false);
+  lock.release('holder', 'process-exit');
+  clock.t += HEAVY_RESERVE_MS;
+  assert.doesNotThrow(() => lock.queueSnapshot());
+  assert.deepEqual(lock.queueSnapshot().reserved.map((r) => r.agentId), ['b'], 'the slot still passes on');
+});
+
 test('a notice that throws never breaks the lock', () => {
   const clock = { t: T0 };
   const lock = new HeavyJobLock({ limit: () => 1, now: () => clock.t, setTimer: () => ({}), clearTimer: () => {}, log: () => {}, notifyLapse: () => { throw new Error('mail down'); } });
