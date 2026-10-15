@@ -102,6 +102,9 @@ export interface MailMessageLike {
   sender_id?: string;
   /** READS-QUIET-NOREPLY (1.1.81): the sender's `"wake": "now"`. */
   wake?: unknown;
+  /** REQUESTS-BADGE-84 rule A: the task card this message is about (a sender's `card`, or the
+   *  ledger op's card id). Only a well-formed card id is kept (cardIdValue). */
+  card?: unknown;
 }
 
 export interface MailEntry {
@@ -118,6 +121,9 @@ export interface MailEntry {
   /** READS-QUIET-NOREPLY (1.1.81): the sender asked for `"wake": "now"`, so this entry wakes even
    *  when shared/mailWakeClass.ts would let it wait for the next turn. Absent = not asked. */
   wakeNow?: boolean;
+  /** REQUESTS-BADGE-84 rule A: the card the ask was tied to when it was sent. The ask closes when
+   *  that card becomes done after the ask arrived (staleObligations). Absent = not tied. */
+  cardId?: string;
   /** sha256 of the body; null for a work order confirmed after a restart (Q14: body unknown). */
   bodyHash: string | null;
   /** The §4.1 duplicate key, hash(subject + body) (§11.18 #3). Null when the body is unknown. */
@@ -275,6 +281,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     inReplyTo: typeof msg.in_reply_to === 'string' ? msg.in_reply_to : null,
     ...(Array.isArray(msg.supersedes) && msg.supersedes.length ? { supersedes: msg.supersedes.filter((s) => typeof s === 'string').slice(0, 10) } : {}),
     ...(msg.wake === 'now' ? { wakeNow: true } : {}),
+    ...(cardIdValue(msg.card) ? { cardId: cardIdValue(msg.card)! } : {}),
     bodyHash: mailBodyHash(msg.body ?? ''),
     contentHash: mailContentHash(msg.subject ?? '', msg.body ?? ''),
     via,
@@ -291,7 +298,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
 }
 
 /** Is this entry an obligation the reply tracker follows (§4.3 + option B)? */
-function replyTracked(e: MailEntry): boolean {
+export function replyTracked(e: MailEntry): boolean {
   return e.requiresReply || e.act === 'request';
 }
 
@@ -780,6 +787,10 @@ export function openRequestEntries(doc: MailLedgerDoc, now: number): MailObligat
 
 /** REQUESTS-TAB-STALE (1.1.83): the acts that answer an ask when sent back in its conversation. */
 const ANSWER_ACTS = new Set(['done', 'inform', 'agree', 'refuse']);
+/** REQUESTS-BADGE-84 rule B: the acts that answer an ask with no in_reply_to (by citing it, or as the
+ *  latest open ask in its conversation), the terminal results only. An inform or agree there is often
+ *  a status ("NEXT: the audit of <id>, starting now"). */
+const CITE_ACTS = new Set(['done', 'refuse']);
 /** A card id as tasks.json spells them (MODS-GUARD, DWIGHT-INPUT-DEAD-179); only ids that exist count. */
 const CARD_ID_RE = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
 /** A subject that opens with the release it is for: "1.1.83: …", "rc/1.1.83 …", "v1.1.83 …". */
@@ -808,9 +819,10 @@ function versionAtLeast(have: number[], want: number[]): boolean {
  * from AFTER the ask (a new ask about finished work is a new ask). An obligation is stale when:
  *  1. the subject names one or more cards (ids that exist in `cards`), every one is done, and
  *     each became done after the ask arrived (no done time on the card = no proof);
- *  2. the owner later sent the requester a done/inform/agree/refuse in the same conversation
- *     that answers THIS ask: its in_reply_to names it, or it names nothing and this is the
- *     latest open ask from that requester in the conversation;
+ *  2. the owner later sent the requester an answer in the same conversation that answers THIS
+ *     ask: a done/inform/agree/refuse whose in_reply_to names it, or a done/refuse that names
+ *     nothing while this is the latest open ask from that requester in the conversation
+ *     (REQUESTS-BADGE-84: a status inform there is no answer);
  *  3. the subject opens with a release (`1.1.82: …`) and the first start of any release at or
  *     above it came after the ask arrived.
  * Never by age alone: a dropped ask with none of this evidence stays open. Pure.
@@ -832,16 +844,20 @@ export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, 
     for (const e of open) {
       const subject = String(e.subject ?? '');
       const named = [...new Set(subject.match(CARD_ID_RE) ?? [])].filter((id) => cards.has(id));
+      const doneAfter = (id: string): boolean => {
+        const c = cards.get(id);
+        return !!c && c.status === 'done' && c.doneAt !== null && c.doneAt > e.deliveredAt;
+      };
       let reason: string | null = null;
-      if (named.length && named.every((id) => {
-        const c = cards.get(id)!;
-        return c.status === 'done' && c.doneAt !== null && c.doneAt > e.deliveredAt;
-      })) reason = `auto:card-done:${named.join(',')}`;
+      // REQUESTS-BADGE-84 rule A: the card the ask was tied to at send time decides alone.
+      if (e.cardId && doneAfter(e.cardId)) reason = `auto:card-done:${e.cardId}`;
+      else if (!e.cardId && named.length && named.every(doneAfter)) reason = `auto:card-done:${named.join(',')}`;
       if (!reason && e.conversation) {
         const isLatest = latest.get(`${e.from}\u0000${e.conversation}`) === e.id;
         const answer = backOf(e.from).find((x) => x.from === agentId && x.conversation === e.conversation
-          && x.deliveredAt > e.deliveredAt && ANSWER_ACTS.has(x.act)
-          && (x.inReplyTo ? x.inReplyTo === e.id || (!!e.senderId && x.inReplyTo === e.senderId) : isLatest));
+          && x.deliveredAt > e.deliveredAt
+          && (x.inReplyTo ? ANSWER_ACTS.has(x.act) && (x.inReplyTo === e.id || (!!e.senderId && x.inReplyTo === e.senderId))
+            : isLatest && CITE_ACTS.has(x.act)));
         if (answer) reason = `auto:answered:${answer.act}:${answer.id}`;
       }
       const rel = RELEASE_PREFIX_RE.exec(subject);
@@ -856,6 +872,98 @@ export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, 
     }
   }
   return out;
+}
+
+/** REQUESTS-BADGE-84 rule A: a card id as tasks.json spells them ("READS-181", "T5b"), at most 120
+ *  chars; anything else is dropped. */
+export function cardIdValue(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/.test(s) ? s : null;
+}
+
+/** The message fields rules B and C read (a HiveMessage, or a sent file plus its id). */
+export interface RoutedMessageLike {
+  id: string;
+  act: string;
+  conversation?: string | null;
+  inReplyTo?: string | null;
+  subject?: string;
+  body?: string;
+  supersedes?: readonly string[];
+  /** When it was sent (ms): only asks that arrived before it can be answered or retracted by it. */
+  at: number;
+}
+
+/** The random tail of a mail id ("…-4f5397"), the short form agents cite; null when too short to be safe. */
+function idTail(id: string): string | null {
+  const m = /-([0-9a-z]{6,})$/i.exec(id);
+  return m ? m[1] : null;
+}
+
+/** A sender_id shorter than this is never matched in text ("1" would match almost anything). */
+const CITE_SENDER_ID_MIN = 6;
+
+/** `w` as a whole word of `text`: no letter or digit right before or after it. */
+function wordIn(text: string, w: string): boolean {
+  const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^0-9A-Za-z])${esc}($|[^0-9A-Za-z])`).test(text);
+}
+
+function cites(text: string, e: MailEntry): boolean {
+  if (text.includes(e.id)) return true;
+  if (e.senderId && e.senderId.length >= CITE_SENDER_ID_MIN && wordIn(text, e.senderId)) return true;
+  const tail = idTail(e.id);
+  return !!tail && wordIn(text, tail);
+}
+
+/**
+ * REQUESTS-BADGE-84 rule B: the open asks in `ownerDoc` (the sender's ledger) that a message the
+ * owner sent to `requester` answers, beyond the one its in_reply_to closes (applyReplied). Only a
+ * done or refuse answers (an inform is a status), and only an ask that arrived before it:
+ *  - every open ask from the requester whose id (or sender_id of 6+ chars, or its random tail, as
+ *    a whole word) the subject or body cites: `auto:answered-cited:<id>`;
+ *  - with no in_reply_to, the latest open ask from the requester in the same conversation:
+ *    `auto:answered:<act>:<id>`.
+ * Never by content similarity or age. Pure.
+ */
+export function answeredByMessage(ownerDoc: MailLedgerDoc, requester: string, m: RoutedMessageLike): StaleObligation[] {
+  if (!CITE_ACTS.has(m.act)) return [];
+  const open = Object.values(ownerDoc.entries).filter((e) => e.from === requester && isOpenObligation(e) && e.deliveredAt < m.at).sort(bySeq);
+  const text = `${m.subject ?? ''}\n${m.body ?? ''}`;
+  const out = new Map<string, string>();
+  for (const e of open) {
+    if (m.inReplyTo && (m.inReplyTo === e.id || (!!e.senderId && m.inReplyTo === e.senderId))) continue; // applyReplied's
+    if (cites(text, e)) out.set(e.id, `auto:answered-cited:${m.id}`);
+  }
+  if (!m.inReplyTo && m.conversation) {
+    const latest = open.filter((e) => e.conversation === m.conversation).pop();
+    if (latest && !out.has(latest.id)) out.set(latest.id, `auto:answered:${m.act}:${m.id}`);
+  }
+  return [...out].map(([id, reason]) => ({ agentId: ownerDoc.agentId, id, reason }));
+}
+
+/**
+ * REQUESTS-BADGE-84 rule C: the open asks in `recipientDoc` that a later message from the same
+ * requester retracts or corrects by naming them in `supersedes`: `auto:superseded:<id>`. Pure.
+ */
+export function supersededByMessage(recipientDoc: MailLedgerDoc, requester: string, m: RoutedMessageLike): StaleObligation[] {
+  const named = new Set(m.supersedes ?? []);
+  if (!named.size) return [];
+  return Object.values(recipientDoc.entries)
+    .filter((e) => e.from === requester && isOpenObligation(e) && e.deliveredAt < m.at && (named.has(e.id) || (!!e.senderId && named.has(e.senderId))))
+    .sort(bySeq)
+    .map((e) => ({ agentId: recipientDoc.agentId, id: e.id, reason: `auto:superseded:${m.id}` }));
+}
+
+/** REQUESTS-BADGE-84 rules D and E: who may close an open ask by hand, and the reason it records. */
+export type AskCloser = 'owner' | 'requester';
+export const ASK_CLOSE_REASON_MAX = 200;
+/** The recorded reason: `owner:<text>` (the agent that owes it) or `withdrawn:<text>` (the asker). */
+export function askCloseReason(by: AskCloser, text: unknown): string | null {
+  const t = typeof text === 'string' ? text.replace(/\s+/g, ' ').trim() : '';
+  if (!t) return null;
+  return `${by === 'owner' ? 'owner' : 'withdrawn'}:${t}`.slice(0, ASK_CLOSE_REASON_MAX);
 }
 
 export interface OpenEpoch { epoch: string; since: number; ids: string[] }
@@ -919,7 +1027,8 @@ function diskEntryMessage(f: DiskMessage): MailMessageLike {
     supersedes: Array.isArray(m.supersedes) ? m.supersedes : undefined,
     requires_reply: typeof m.requires_reply === 'boolean' ? m.requires_reply : undefined,
     sender_id: typeof m.sender_id === 'string' ? m.sender_id : undefined,
-    wake: m.wake
+    wake: m.wake,
+    card: m.card
   };
 }
 

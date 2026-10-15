@@ -1579,7 +1579,10 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
     addTask: (task) => hive.addTask(task, 'ledger'),
     patchTask: (id, patch) => hive.patchTask(id, patch, 'ledger'),
     now: () => new Date(),
-    memoryClaim: ledgerMemoryClaim(agentId)
+    memoryClaim: ledgerMemoryClaim(agentId),
+    // REQUESTS-BADGE-84 D/E: the owner closes, or the requester withdraws, an open ask by hand.
+    askCloser: (id) => hive.askCloser(agentId, id),
+    closeAsk: (id, by, reason) => hive.closeAsk(agentId, id, by, reason)
   });
 }));
 /** CLAIM-LEDGER W6 (G6.6): the `ledger` memory part as a claim, through the endpoint's note verb with
@@ -7489,6 +7492,7 @@ function runStaleRequestsBeat(): void {
   if (!app.isPackaged) return;
   try { hive.runCleanup183(); } catch (e) { console.error('[stale requests] cleanup-183', e); }
   try { hive.autoCloseStaleObligations(app.getVersion()); } catch (e) { console.error('[stale requests]', e); }
+  try { hive.runReplay84(); } catch (e) { console.error('[stale requests] replay-84', e); }
 }
 
 function armAlwaysOnBeats(): void {

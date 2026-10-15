@@ -244,10 +244,11 @@ test('normalizeWakeField keeps only the exact string "now"', () => {
 test('the router keeps "wake" through normalize, and the ledger records it as wakeNow', () => {
   const hive = readSource('src/main/hive.ts');
   const norm = hive.slice(hive.indexOf('  private normalize(partial: Partial<HiveMessage>, from: string): HiveMessage {'));
-  assert.match(norm.slice(0, 1500), /\.\.\.normalizeSupersedes\(partial\.supersedes\),\n      \.\.\.normalizeWakeField\(partial\.wake\)\n    \};/);
+  // REQUESTS-BADGE-84 A: the card field follows wake.
+  assert.match(norm.slice(0, 1500), /\.\.\.normalizeSupersedes\(partial\.supersedes\),\n      \.\.\.normalizeWakeField\(partial\.wake\),\n      \.\.\.\(cardIdValue\(partial\.card\) \? \{ card: cardIdValue\(partial\.card\)! \} : \{\}\)\n    \};/);
   const ledger = readSource('src/main/mailLedger.ts');
   assert.match(ledger, /\.\.\.\(msg\.wake === 'now' \? \{ wakeNow: true \} : \{\}\),/, 'entryFromMessage');
-  assert.match(ledger, /sender_id: typeof m\.sender_id === 'string' \? m\.sender_id : undefined,\n    wake: m\.wake\n  \};/, 'a ledger rebuilt from disk keeps it');
+  assert.match(ledger, /sender_id: typeof m\.sender_id === 'string' \? m\.sender_id : undefined,\n    wake: m\.wake,\n    card: m\.card\n  \};/, 'a ledger rebuilt from disk keeps it (and the card)');
 });
 
 test('behaviour: a delivered message with wake:"now" is a wakeNow ledger entry; without it, none', (t) => {
