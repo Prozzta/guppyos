@@ -7,7 +7,7 @@
 // first), with the brew and mug spots from the pack. Pure: the Pixi scene only
 // draws what this reports.
 
-import { footBox, footHits, route, wanderTarget, cellCentre, type Station, type StationMap } from './stationMap';
+import { footBox, footHits, route, seatRoute, wanderTarget, cellCentre, type Station, type StationMap } from './stationMap';
 import { SeatAllocator, type SeatChange, type SeatRules } from './seatAllocator';
 import type { Facing } from './manifest';
 
@@ -166,23 +166,49 @@ export class Crew {
     p.homeSit = false; p.sip = 0; p.rise = 0;
   }
 
-  /** Where p may cross solid pixels: the seat it heads for, and a seat its feet are still in (leaving it). */
-  walkZones(p: Walker): Array<[number, number, number, number]> {
-    const Z: Array<[number, number, number, number]> = [];
-    const fb = footBox(p.x, p.y), stuck = footHits(this.SM, p.x, p.y) > 0;
+  /** The solids p may cross now: only when its feet are in a chair, that chair (its own or last seat's, or an
+   *  untaken one), so it can get out. Everywhere else it walks plain floor. */
+  walkZones(p: Walker): number[] {
+    const Z: number[] = [];
+    if (!footHits(this.SM, p.x, p.y)) return Z;
+    const fb = footBox(p.x, p.y);
     const touch = (rects: Array<[number, number, number, number]>) => rects.some(([a, b, c, d]) => fb[0] < c && fb[2] > a && fb[1] < d && fb[3] > b);
     const taken = (s: Station) => this.walkers().some((q) => q !== p && q.seat === s);
     for (const [s, rects] of this.SM.seatZones) {
-      const mine = s === p.seat && (atDesk(p.status) || p.homeSit);
-      if (mine || ((s === p.lastSeat || s === p.seat || (stuck && !taken(s))) && touch(rects))) Z.push(...rects);
+      const id = this.SM.seatChair.get(s);
+      if (id && (s === p.lastSeat || s === p.seat || !taken(s)) && touch(rects)) Z.push(id);
     }
     return Z;
   }
 
+  /** The seat (its own, or the one it just left) p is sitting in or on the short leg of: it gets out by its approach spot. */
+  private inSeat(p: Walker): Station | null {
+    for (const s of [p.seat, p.lastSeat]) {
+      if (!s || !this.SM.approach.has(s)) continue;
+      if (Math.hypot(p.x - s.x, p.y - s.y) < this.SM.grid.g * 2) return s;
+      const id = this.SM.seatChair.get(s);
+      if (id && footHits(this.SM, p.x, p.y) > footHits(this.SM, p.x, p.y, [id])) return s;
+    }
+    return null;
+  }
+
   goTo(p: Walker, tx: number, ty: number, exact: boolean): boolean {
-    const path = route(this.SM, p.x, p.y, tx, ty, this.walkZones(p), exact);
-    if (!path) return false;
-    p.path = path;
+    const s = this.inSeat(p), a = s ? this.SM.approach.get(s)! : null;
+    const rest = a ? route(this.SM, a[0], a[1], tx, ty, undefined, exact) : route(this.SM, p.x, p.y, tx, ty, this.walkZones(p), exact);
+    if (!rest) return false;
+    p.path = a ? [a, ...rest] : rest;
+    return true;
+  }
+
+  /** To p's own seat: out of any chair it is in by that seat's approach spot, plain floor to its own seat's approach
+   *  spot, then the short leg in. */
+  goSeat(p: Walker): boolean {
+    const seat = p.seat!, s = this.inSeat(p);
+    if (s === seat) { p.path = [[seat.x, seat.y]]; return true; }
+    const a = s ? this.SM.approach.get(s)! : null;
+    const rest = a ? seatRoute(this.SM, a[0], a[1], seat) : seatRoute(this.SM, p.x, p.y, seat, this.walkZones(p));
+    if (!rest) return false;
+    p.path = a ? [a, ...rest] : rest;
     return true;
   }
 
@@ -319,7 +345,7 @@ export class Crew {
         if (p.seat && (atDesk(p.status) || p.homeSit) && !p.seated) {
           if (!p.tried) {
             p.tried = true;
-            if (!this.goTo(p, p.seat.x, p.seat.y, true)) { if (p.homeSit) p.homeSit = false; else p.idle = 2000; }
+            if (!this.goSeat(p)) { if (p.homeSit) p.homeSit = false; else p.idle = 2000; }
           } else if (Math.hypot(p.x - p.seat.x, p.y - p.seat.y) < this.SM.grid.g * 2) { p.seated = true; p.lastSeat = p.seat; p.dir = p.seat.facing; this.sitDown(p); }
           else if (p.homeSit) p.homeSit = false; // could not get home: sip standing next time
           else if ((p.idle -= dt) <= 0) { p.tried = false; p.idle = 2000; } // could not get there: try again in a while

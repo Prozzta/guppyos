@@ -30,29 +30,37 @@
       },
       "Speck1": {
         "facing": "down",
-        "role": "helm"
+        "role": "helm",
+        "approach": "back"
       },
       "Speck2": {
         "facing": "down",
-        "role": "navigation"
+        "role": "navigation",
+        "approach": "back"
       },
       "Chair1": {
-        "facing": "up"
+        "facing": "up",
+        "approach": "back"
       },
       "Chair2": {
-        "facing": "up"
+        "facing": "up",
+        "approach": "back"
       },
       "Chair3": {
-        "facing": "left"
+        "facing": "left",
+        "approach": "back"
       },
       "Chair4": {
-        "facing": "left"
+        "facing": "left",
+        "approach": "back"
       },
       "Chair5": {
-        "facing": "right"
+        "facing": "right",
+        "approach": "back"
       },
       "Chair6": {
-        "facing": "right"
+        "facing": "right",
+        "approach": "back"
       }
     }
   },

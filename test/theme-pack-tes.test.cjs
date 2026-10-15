@@ -20,6 +20,8 @@ const P = loadTs('src/renderer/src/scene/themes/packs.ts');
 const N = loadTs('src/renderer/src/scene/themes/stationMap.ts');
 const C = loadTs('src/renderer/src/scene/themes/compositor.ts');
 const L = loadTs('src/renderer/src/scene/themes/looks.ts');
+const Cr = loadTs('src/renderer/src/scene/themes/crew.ts');
+const SA = loadTs('src/renderer/src/scene/themes/seatAllocator.ts');
 const U = loadTs('src/renderer/src/design/uiTokens.ts');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'theme.json'), 'utf8'));
 
@@ -67,18 +69,79 @@ test('the bridge: 30x20 tiles of 32 px, nine stations in seat order (Captain fir
     [['Captain', 'down', 'command'], ['Speck1', 'down', 'helm'], ['Speck2', 'down', 'navigation']]);
 });
 
-test('every station is reachable from the entrance with the foot box clear, and is seat-only', () => {
+// Each station's chair on the bridge (its solid is named after the chair object).
+const CHAIR = { Captain: 'CptChair', Speck1: 'Speck1', Speck2: 'Speck2', Chair1: 'Chair1', Chair2: 'Chair2', Chair3: 'Chair3', Chair4: 'Chair4', Chair5: 'Chair5', Chair6: 'Chair6' };
+const chairId = (S, st) => S.solidName.indexOf(`"${CHAIR[st.name]}"`);
+// The side each seat is entered from: the Captain's chair faces into the bridge; every other one faces a console or wall.
+const SIDE = { Captain: 'front', Speck1: 'back', Speck2: 'back', Chair1: 'back', Chair2: 'back', Chair3: 'back', Chair4: 'back', Chair5: 'back', Chair6: 'back' };
+
+test('every station is reached by plain floor to its approach spot, then one leg in from its approach side', () => {
   const S = pack().scene;
   for (const st of S.stations) {
-    const Z = S.seatZones.get(st);
-    assert.ok(Z, `${st.name} has a seat zone`);
-    const route = N.route(S, S.entrance[0], S.entrance[1], st.x, st.y, Z, true);
-    assert.ok(route && route.length, `${st.name} is reachable`);
+    const own = chairId(S, st);
+    assert.ok(own > 0 && S.seatChair.get(st) === own, `${st.name}'s chair is ${CHAIR[st.name]}`);
+    const a = S.approach.get(st), route = N.seatRoute(S, S.entrance[0], S.entrance[1], st);
+    assert.ok(a && route && route.length >= 2, `${st.name} is reachable`);
     assert.deepEqual(route[route.length - 1], [st.x, st.y], `${st.name} ends exactly on its seat`);
+    assert.deepEqual(route[route.length - 2], a, `${st.name} steps in from its approach spot`);
     let cur = S.entrance;
-    for (const p of route) { assert.ok(N.segClear(S, cur, p, Z), `${st.name}: ${cur} -> ${p}`); cur = p; }
+    for (const p of route.slice(0, -1)) { assert.ok(N.segClear(S, cur, p), `${st.name}: ${cur} -> ${p} crosses nothing`); cur = p; }
+    assert.ok(N.segClear(S, a, [st.x, st.y], [own]), `${st.name}: the leg in crosses only its own chair`);
+    const [vx, vy] = N.sideVector(st.facing, SIDE[st.name]);
+    assert.ok((a[0] - st.x) * vx + (a[1] - st.y) * vy > 0, `${st.name} is entered from its ${SIDE[st.name]} (${a})`);
     assert.equal(N.inSeatZone(S, st.x, st.y), true, `${st.name} lies in a seat zone (nobody roams onto it)`);
   }
+  const cap = S.stations.find((s) => s.name === 'Captain');
+  assert.ok(S.approach.get(cap)[1] > cap.y, 'Cpt Kerk sits down from the front of his chair, not over its back');
+});
+
+test('getting up: the first step is back out to the approach spot, then plain floor', () => {
+  const pk = pack(), S = pk.scene;
+  const crew = new Cr.Crew(S, SA.seatRulesFrom(pk.manifest, S.seatOrder.map((s) => s.name)), rng(5));
+  const ids = S.seatOrder.map((s, i) => (i ? `a${i}` : 'god'));
+  crew.sync(ids.map((id) => ({ id, status: 'working', orchestrator: id === 'god' })));
+  for (let i = 0; i < 2400 && !crew.walkers().every((p) => p.seated); i++) crew.tick(50);
+  assert.ok(crew.walkers().every((p) => p.seated), 'everyone sat down');
+  for (const p of crew.walkers()) {
+    const a = S.approach.get(p.seat);
+    assert.ok(crew.goTo(p, 470, 300, true), `${p.id} can leave ${p.seat.name}`);
+    assert.deepEqual(p.path[0], a, `${p.id} gets out of ${p.seat.name} by its approach spot`);
+    let cur = a;
+    for (const q of p.path.slice(1)) { assert.ok(N.segClear(S, cur, q), `${p.id}: ${cur} -> ${q} crosses nothing`); cur = q; }
+  }
+});
+
+test('crew sim: nobody ever walks over the Speck console or any chair but their own', () => {
+  const pk = pack(), S = pk.scene, rand = rng(7);
+  const crew = new Cr.Crew(S, SA.seatRulesFrom(pk.manifest, S.seatOrder.map((s) => s.name)), rand);
+  const ids = S.seatOrder.map((s, i) => (i ? `a${i}` : 'god')), st = {};
+  const chairs = new Set(S.stations.map((s) => chairId(S, s)));
+  const console = S.solidName.indexOf('"Console"');
+  assert.ok(console > 0);
+  const bad = new Map();
+  for (let t = 0; t < 10 * 60000; t += 50) {
+    if (t % 15000 === 0) { for (const id of ids) st[id] = rand() < 0.5 ? 'working' : 'idle'; crew.sync(ids.map((id) => ({ id, status: st[id], orchestrator: id === 'god' }))); }
+    crew.tick(50);
+    for (const p of crew.walkers()) {
+      const own = new Set([p.seat, p.lastSeat].filter(Boolean).map((s) => chairId(S, s)));
+      const [x0, y0, x1, y1] = N.footBox(p.x, p.y);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+        const id = S.solid[y * S.PW + x];
+        if (id && (id === console || (chairs.has(id) && !own.has(id)) || (!chairs.has(id) && id !== console))) {
+          const k = `${p.id} on ${S.solidName[id]}`;
+          if (!bad.has(k)) bad.set(k, `${Math.round(p.x)},${Math.round(p.y)}`);
+        }
+      }
+    }
+  }
+  assert.deepEqual([...bad], []);
+});
+
+test('the walk mask is the audited one: the seat fix changed who may cross it, not what is solid', () => {
+  const S = pack().scene;
+  const h = (a) => crypto.createHash('sha256').update(Buffer.from(a.buffer, a.byteOffset, a.byteLength)).digest('hex');
+  assert.equal(h(S.solid), 'fd681fbfc1c14db57039c80f491bed06a3dc885c7ff2d28a241712aabb4a8598');
+  assert.equal(h(S.grid.open), '8b4a76fc6343937a8ef47a1a8f1129155e6eea9180de9827a0d390358f08eb06');
 });
 
 test('coffee, inline (the map has no Coffee point or mug layer): two reachable brew spots behind the lower wall, a parked mug per station', () => {

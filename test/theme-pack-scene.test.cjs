@@ -56,20 +56,25 @@ test('collision raster: rectangle and polygon shapes, visible walls, the floor e
 });
 
 test('seat-only stations: the owner reaches a station inside its chair; nobody else can', () => {
-  const S = pack().scene, G = S.grid, alpha = S.stations[0];
+  const S = pack().scene, G = S.grid, alpha = S.stations[0], ex = [S.seatChair.get(alpha)];
   const to = [Math.floor(alpha.x / G.g), Math.floor(alpha.y / G.g)];
+  assert.ok(ex[0], 'Alpha has a chair');
   assert.equal(N.astar({ S, G }, S.start, to), null);
-  assert.ok(N.astar({ S, G }, S.start, to, S.seatZones.get(alpha)));
+  assert.ok(N.astar({ S, G }, S.start, to, ex));
   assert.ok(N.footHits(S, alpha.x, alpha.y) > 0);
-  assert.equal(N.footHits(S, alpha.x, alpha.y, S.seatZones.get(alpha)), 0);
+  assert.equal(N.footHits(S, alpha.x, alpha.y, ex), 0);
+  assert.ok(S.approach.get(alpha), 'Alpha has an approach spot');
 });
 
-test('a seat zone excuses furniture only, never the map\'s own collision', () => {
+test('an excuse names solids by id: it covers that furniture only, never the map\'s own collision', () => {
   const S = pack().scene;
-  const all = [[0, 0, S.PW, S.PH]];
-  assert.ok(N.footHits(S, 60, 107, all) > 0, 'the rail guard (a collision shape) still blocks inside a zone');
-  assert.ok(N.footHits(S, 40, 47) > 0);
-  assert.equal(N.footHits(S, 40, 47, [[30, 40, 50, 50]]), 0, 'the desk is excused inside its zone');
+  const every = S.solidName.map((_, i) => i).filter((i) => i);
+  assert.ok(N.footHits(S, 60, 107, every) > 0, 'the rail guard (a collision shape) is never excused');
+  const [x0, y0, x1, y1] = N.footBox(40, 47), under = new Set();
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (S.solid[y * S.PW + x]) under.add(S.solid[y * S.PW + x]);
+  assert.ok(N.footHits(S, 40, 47) > 0 && under.size > 0);
+  assert.equal(N.footHits(S, 40, 47, [...under]), 0, 'the furniture there is excused by its own id');
+  assert.ok(N.footHits(S, 40, 47, every.filter((i) => !under.has(i))) > 0, 'excusing other solids does not excuse it');
 });
 
 test('segClear also checks the mixed corners of a diagonal step', () => {
@@ -104,24 +109,26 @@ test('roaming never stops on a seat zone and only on reachable open floor', () =
   }
 });
 
-test('routes: every leg keeps the foot box clear (the seat zone excused only for its owner)', () => {
+test('routes: plain floor to the approach spot, then one leg in crossing only the owner\'s chair', () => {
   const S = pack().scene;
   for (const st of S.stations) {
-    const Z = S.seatZones.get(st);
-    const path = N.route(S, S.entrance[0], S.entrance[1], st.x, st.y, Z, true);
-    assert.ok(path && path.length, st.name);
+    const Z = [S.seatChair.get(st)], a = S.approach.get(st);
+    const path = N.seatRoute(S, S.entrance[0], S.entrance[1], st);
+    assert.ok(path && path.length >= 2, st.name);
     assert.deepEqual(path[path.length - 1], [st.x, st.y], `${st.name} ends exactly on its seat`);
+    assert.deepEqual(path[path.length - 2], a, `${st.name} steps in from its approach spot`);
     let cur = S.entrance;
-    for (const p of path) { assert.ok(N.segClear(S, cur, p, Z), `${st.name}: ${cur} -> ${p}`); cur = p; }
+    for (const p of path.slice(0, -1)) { assert.ok(N.segClear(S, cur, p), `${st.name}: ${cur} -> ${p} on plain floor`); cur = p; }
+    assert.ok(N.segClear(S, cur, [st.x, st.y], Z), `${st.name}: the leg in`);
   }
   // the rail is in the way between the entrance and Alpha: the route goes round its end
-  const path = N.route(S, 96, 140, 40, 58, S.seatZones.get(S.stations[0]), true);
+  const path = N.route(S, 96, 140, 40, 58, [S.seatChair.get(S.stations[0])], true);
   assert.ok(path.some(([x]) => x < 32 || x > 160), JSON.stringify(path));
 });
 
 test('routes from a wall pocket: the first leg is checked too, and rerouted via a cell in clear sight', () => {
   const S = pack().scene, G = S.grid;
-  const targets = [...S.stations.map((st) => [st.x, st.y, S.seatZones.get(st)]), [S.entrance[0], S.entrance[1], undefined]];
+  const targets = [...S.stations.map((st) => [st.x, st.y, [S.seatChair.get(st)]]), [S.entrance[0], S.entrance[1], undefined]];
   let pockets = 0, routed = 0;
   for (let y = 0; y < G.H * G.g; y++) for (let x = 0; x < G.W * G.g; x++) {
     const c = [Math.floor(x / G.g), Math.floor(y / G.g)];
@@ -216,7 +223,7 @@ test('crew: a walker with no way to its station keeps trying and never sits away
   const pk = pack(), S = pk.scene;
   const crew = new Cr.Crew(S, SA.seatRulesFrom(pk.manifest, S.seatOrder.map((s) => s.name)), rng(5));
   let tries = 0;
-  crew.goTo = () => { tries++; return false; };
+  crew.goTo = crew.goSeat = () => { tries++; return false; };
   crew.sync([{ id: 'a', status: 'working' }]);
   for (let i = 0; i < 200; i++) crew.tick(50);
   const p = crew.get('a');
