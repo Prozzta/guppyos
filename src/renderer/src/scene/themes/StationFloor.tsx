@@ -24,6 +24,7 @@ import { cacheKeyOf, cacheStale, frontPicker, regionPicker, hasVisiblePixel, NEA
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
+import { PanelLayer } from './PanelLayer';
 import { cloudAnchor, drawnSprite } from './cloudAnchor';
 import { BridgeTalk, EXCHANGE_HOLD_MS, exchangeSays, seatRole, stationRoles, type Speaker } from './exchanges';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
@@ -235,6 +236,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       }
       world.addChild(sortLayer);
       if (!cached || hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
+      // PANEL-BLINK-188: the chair panels' lights, live over the cached map, each just in front of what draws it.
+      const panelLayer = new PanelLayer(plan, SM, pack.manifest.stations.layer, own, sortLayer, world.addChild(new Container()));
       // The map is cacheable; its clouds and envelopes are deliberately live above the people.
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
@@ -468,6 +471,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const dt = Math.min(80, tk.deltaMS);
         clock += dt;
         crew.tick(dt);
+        panelLayer.update(clock, crew.walkers());
         // The camera eases by all the time that passed, however long the frame took: a stalled
         // frame (the GPU busy for seconds) must not leave the camera behind.
         const now = performance.now();
@@ -564,6 +568,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const items: Array<{ foot: number; rank: number; sprite: Sprite | null; id?: string }> = plan.sorted.map((it, i) => ({ foot: it.foot, rank: it.rank, sprite: statics[i] }));
         for (const q of people) items.push(q);
         for (const m of mugs.values()) items.push(m);
+        for (const q of panelLayer.sorted) items.push(q);
         items.sort(byDepth);
         items.forEach((it, i) => {
           if (!it.sprite) return;
