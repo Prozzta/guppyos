@@ -64,13 +64,35 @@ test('CL-BRIEF-STARTUP cause 1: the scale-down rebuilds reuse the line counts (o
 
 test('CL-BRIEF-STARTUP cause 1: same text and receipt as before the fix (golden), and used = the count of the text', () => {
   const { records, state, view } = fixture(400);
-  const golden = { words3000: '6c2bcd34d3f37c8c', words700: 'ca396b15876583da', length9000: '771778c898deb705', length2500: '766216b8e3d25f0c' };
+  const golden = { words3000: '6c2bcd34d3f37c8c', words700: 'ca396b15876583da', length9000: '771778c898deb705', length2500: '766216b8e3d25f0c',
+    heavySep9000: '85fe9f9d2b7d50f0', heavySep6000: 'aa230efbf8595228', heavySep4000: 'd7fde4e2198a4a4e', heavySep2500: 'e9adbfb3a7e775aa' };
+  // Additive over '\n' like WordPiece, but each separator costs 51: the running sums must count them.
+  const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
   const got = {};
-  for (const [name, fn, budget] of [['words3000', wordCount, 3000], ['words700', wordCount, 700], ['length9000', (s) => s.length, 9000], ['length2500', (s) => s.length, 2500]]) {
+  for (const [name, fn, budget] of [['words3000', wordCount, 3000], ['words700', wordCount, 700], ['length9000', (s) => s.length, 9000], ['length2500', (s) => s.length, 2500],
+    ['heavySep9000', heavySep, 9000], ['heavySep6000', heavySep, 6000], ['heavySep4000', heavySep, 4000], ['heavySep2500', heavySep, 2500]]) {
     const out = V.createClaimViews(records, fn).buildWorkingSet(state, view, budget);
     assert.equal(out.receipt.used, fn(out.text), `${name}: receipt.used is the count of the delivered text`);
     assert.ok(out.receipt.used <= budget, `${name}: within the budget`);
     got[name] = digest(out);
   }
   assert.deepEqual(got, golden);
+});
+
+test('CL-BRIEF-STARTUP cause 1: separators count in T0 too, and a non-additive counter still gets used = the count of the text', () => {
+  // 120 short pins, each separator 51: T0's share is not the binding limit, the cap with separators is.
+  const pins = Array.from({ length: 120 }, (_, i) => claim(`p-${String(i).padStart(3, '0')}`, `pin ${i}`, { pin: true }));
+  const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
+  // 342 and 426 sit where one more pin fits only if its separator is left out.
+  const got = [2000, 1000, 426, 342].map((b) => digest(V.createClaimViews(pins, heavySep).buildWorkingSet(stateFor(pins), { flags: {}, counters: {} }, b)));
+  assert.deepEqual(got, ['a77b9d14d1c0d6fc', 'def666edcdb27828', '8b896c09fc55da03', 'e6684fc00661f16a'], 'same as before the fix');
+  // ceil(len/4) is not additive over '\n' (WordPiece is): the per-line sums only over-estimate, so the
+  // build stays inside the budget, and the receipt is still the count of the joined text.
+  const ceil4 = (s) => Math.ceil(s.length / 4);
+  const { records, state, view } = fixture(400);
+  for (const b of [3000, 1200]) {
+    const out = V.createClaimViews(records, ceil4).buildWorkingSet(state, view, b);
+    assert.equal(out.receipt.used, ceil4(out.text), `ceil4 ${b}`);
+    assert.ok(out.receipt.used <= b && out.receipt.used > b * 0.9, `ceil4 ${b}: ${out.receipt.used}`);
+  }
 });

@@ -215,8 +215,8 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       const pn = lineTokens(pointer.line);
       if (used + sep + pn <= cap) { output.push(pointer.line); used += sep + pn; }
     }
-    // The rest is measured on the joined text itself (a few calls, not one per line), as before.
-    used = tokens(countTokens, output.join('\n'));
+    // The overflow note, "+N more" and the receipt are measured on the joined text itself (a few
+    // calls, not one per line), as before.
     const excludedRows = [...excluded].sort(([a], [b]) => cmp(a, b)).map(([id, reason]) => ({ id, reason }));
     const omitted = excludedRows.filter(x => x.reason === 'budget' || x.reason === 'tier-share').length;
     const warnings = [
