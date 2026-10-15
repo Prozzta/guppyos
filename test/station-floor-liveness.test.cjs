@@ -22,8 +22,9 @@ function stationCrewAgents() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const mod = { exports: {} };
-  new Function('activityStatus', 'presetIdOf', 'module', 'exports', output)(
+  new Function('activityStatus', 'heavyActivity', 'presetIdOf', 'module', 'exports', output)(
     ACTIVITY.activityStatus,
+    ACTIVITY.heavyActivity,
     () => 'worker',
     mod,
     mod.exports
@@ -48,8 +49,8 @@ test('TES projects an idle agent with LIVE BUSY_PROGRESSING liveness to crew wor
 
 test('TES synchronises when only the liveness record changes', () => {
   const source = readSource(STATION_FLOOR);
-  assert.match(source, /const \{ agents, liveness \} = useStore\.getState\(\);\s*crew\.sync\(crewAgents\(pack, agents, liveness\)\);/,
+  assert.match(source, /const \{ agents, liveness, heavyLock \} = useStore\.getState\(\);\s*crew\.sync\(crewAgents\(pack, agents, liveness, heavyLock\)\);/,
     'every crew sync receives the current liveness snapshot');
-  assert.match(source, /if \(s\.agents !== prev\.agents \|\| s\.liveness !== prev\.liveness\) sync\(\);/,
+  assert.match(source, /if \(s\.agents !== prev\.agents \|\| s\.liveness !== prev\.liveness \|\| s\.heavyLock !== prev\.heavyLock\) sync\(\);/,
     'a new liveness object invokes that sync even when the agents array is unchanged');
 });

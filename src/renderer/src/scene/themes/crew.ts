@@ -68,6 +68,9 @@ export interface Walker {
   rise: number;
   /** Carrying a mug. */
   cup: boolean;
+  /** The mug in hand holds a finished brew (set at the brew's end). A mug picked up for a refill is
+   *  empty until then, so a run cut short on the way or mid-brew parks it empty (Jim, IDLE-187 S3). */
+  fresh: boolean;
   /** Their mug, parked at a station. */
   mug: Mug | null;
   coffee: CoffeeRun | null;
@@ -131,7 +134,7 @@ export class Crew {
         const [x, y] = this.entry();
         p = {
           id: a.id, x, y, dir: 'down', moving: false, path: [], seat: null, lastSeat: null, seated: false, tried: false, arrived: false, idle: 0,
-          wait: arrivals++ * 400, status: a.status, homeSit: false, sip: 0, rise: 0, cup: false, mug: null, coffee: null, coffeeNext: 0, talk: 0,
+          wait: arrivals++ * 400, status: a.status, homeSit: false, sip: 0, rise: 0, cup: false, fresh: false, mug: null, coffee: null, coffeeNext: 0, talk: 0,
         };
         this.people.set(a.id, p);
         changes.push(...this.seats.join({ id: a.id, orchestrator: a.orchestrator, presetId: a.presetId }));
@@ -242,7 +245,7 @@ export class Crew {
 
   /** Just seated: a mug in hand is parked at the station; an idle agent home with coffee sips a while. */
   private sitDown(p: Walker): void {
-    if (p.cup && p.seat) { p.cup = false; p.mug = { seat: p.seat, full: this.t + 60000 }; }
+    if (p.cup && p.seat) { p.mug = { seat: p.seat, full: p.fresh ? this.t + 60000 : 0 }; p.cup = false; p.fresh = false; }
     if (p.homeSit) { p.sip = this.t + 8000 + this.rand() * 8000; this.event('sip', p.id); }
   }
 
@@ -282,7 +285,7 @@ export class Crew {
       if (!this.goTo(p, c.spot[0], c.spot[1], true)) this.endCoffee(p);
     } else if (c.phase === 'walking') { c.phase = 'brewing'; c.t = 0; this.event('brew', p.id); }
     else if (c.phase === 'brewing' && c.t > 2600) {
-      p.cup = true;
+      p.cup = true; p.fresh = true;
       if (this.goHome(p)) return; // the seat logic walks them home and sits them down
       c.phase = 'sipping'; c.t = 0; c.until = 8000 + this.rand() * 8000; this.event('sip', p.id);
     } else if (c.phase === 'sipping' && c.t > c.until) {

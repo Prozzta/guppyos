@@ -26,6 +26,8 @@ import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 import { themeBuilder } from '@/scene/themes/themeCatalog';
 import { lookFromRequest } from '@/scene/themes/looks';
+import { applySnapshotUnlessPushed } from '@shared/snapshotSync';
+import type { HeavyLockView } from '@shared/activityView';
 
 const GOD_ID = 'god';
 /** Accent palette for MAIN-spawned (voice-hired) agents — picked deterministically
@@ -639,6 +641,19 @@ export function useHive(config: HarnessConfig | null): void {
       .catch(() => { /* main not ready: the pushes fill it */ });
     const off = window.cth.onLivenessChange((rec) => { if (rec && rec.agentId) useStore.getState().applyLiveness(rec); });
     return () => { alive = false; off(); };
+  }, []);
+
+  // 2d') IDLE-MEANS-IDLE: main's heavy-job lock view into the store (snapshot, then every pushed
+  //      change), so a background job, a queued agent and a reserved slot never read as plain idle.
+  //      A stale preload without the bridge leaves it null (today's idle).
+  useEffect(() => {
+    if (!window.cth.heavyLockSnapshot || !window.cth.onHeavyLockChange) return;
+    const sync = applySnapshotUnlessPushed<HeavyLockView>((view) => useStore.getState().applyHeavyLock(view));
+    void window.cth.heavyLockSnapshot()
+      .then(sync.snapshot)
+      .catch(() => { /* main not ready: the pushes fill it */ });
+    const off = window.cth.onHeavyLockChange(sync.push);
+    return () => { sync.dispose(); off(); };
   }, []);
 
   // 2e) PROVIDER-AGNOSTIC PTY-QUIESCENCE IDLE FALLBACK (the linchpin that makes

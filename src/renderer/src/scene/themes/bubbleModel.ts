@@ -1,4 +1,4 @@
-import { activityStatus } from '@shared/activityView';
+import { activityStatus, heavyText, type HeavyActivity } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
 
 /** The small, renderer-independent part of an agent needed by a thought cloud. */
@@ -65,9 +65,12 @@ function liveActivity(agent: BubbleAgent, fallback = ''): string {
   return agent.action?.trim() || firstWords(agent.lastPrompt) || fallback;
 }
 
-/** The status and cloud text the floor should show, projected through liveness first. */
-export function activityThought(agent: BubbleAgent, liveness?: LivenessV1): BubbleThought | null {
-  const status = activityStatus(agent.status, liveness);
+/** The status and cloud text the floor should show, projected through liveness first.
+ *  IDLE-MEANS-IDLE (1.1.87): then through the agent's place in the heavy-job lock, as the office
+ *  floor does: when the lock changes the status, the cloud says the lock's line. */
+export function activityThought(agent: BubbleAgent, liveness?: LivenessV1, heavy?: HeavyActivity | null): BubbleThought | null {
+  const status = activityStatus(agent.status, liveness, heavy);
+  if (status !== activityStatus(agent.status, liveness)) agent = { ...agent, action: heavyText(heavy) ?? agent.action };
   switch (status) {
     case 'working':
     case 'thinking': return { status, text: liveActivity(agent), tool: agent.carrying };

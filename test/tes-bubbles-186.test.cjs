@@ -7,6 +7,7 @@ const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 
 const MODEL = loadTs('src/renderer/src/scene/themes/bubbleModel.ts');
+const { heavyActivity } = loadTs('src/shared/activityView.ts');
 const FLOOR = 'src/renderer/src/scene/themes/StationFloor.tsx';
 const LIVENESS = {
   v: 1, agentId: 'dwight', incarnation: 1, lifecycle: 'LIVE', classification: 'BUSY_PROGRESSING',
@@ -22,7 +23,7 @@ function stationBubbleThoughts() {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const mod = { exports: {} };
-  new Function('activityThought', 'module', 'exports', output)(MODEL.activityThought, mod, mod.exports);
+  new Function('activityThought', 'heavyActivity', 'module', 'exports', output)(MODEL.activityThought, heavyActivity, mod, mod.exports);
   return mod.exports;
 }
 
@@ -36,7 +37,7 @@ function stationFunctions(names, fakeWindow = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
   }).outputText;
   const mod = { exports: {} };
-  new Function('activityThought', 'module', 'exports', 'window', output)(MODEL.activityThought, mod, mod.exports, fakeWindow);
+  new Function('activityThought', 'heavyActivity', 'module', 'exports', 'window', output)(MODEL.activityThought, heavyActivity, mod, mod.exports, fakeWindow);
   return mod.exports;
 }
 

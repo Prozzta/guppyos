@@ -39,6 +39,21 @@ All notable changes to this project are documented here. The format is based on
 - **TES floor walls stay crisp after resizing.** The floor now uses whole device pixels and keeps
   its lower hull running past the bottom edge instead of leaving a background strip.
 
+- **An agent running a heavy job in the background, or waiting for the heavy-job slot, no longer
+  shows as idle.** Its card, the agent panel, the office and TES floors and the LIVE ROSTER line read
+  "suite in background 3m" (working, at its desk), "queued for heavy slot #2" or "heavy slot
+  reserved until 06:26Z" (waiting, at its desk, not off on a coffee run), and fleet.json gives each
+  agent its place in the lock. Display only: messages still go to these agents at once, and they
+  are still woken when their slot frees. On the TES floor a coffee run cut short this way (or by
+  going back to work) ends at once: a mug carried for a refill is put back empty, not full, and
+  the brewing line goes with the run.
+
+- **An agent that leaves the heavy-job queue without a slot is now told.** A waiter dropped after
+  an hour without asking again, and an agent whose reserved slot lapsed unused, used to hear
+  nothing, though it had been told to wait for a notice, and the stale waiter stayed listed as
+  queued until a slot next freed. It now leaves the queue on the hour, and each gets a short
+  notice ("HEAVY QUEUE LEFT" or "HEAVY SLOT LAPSED") saying to run the job again to queue again.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias

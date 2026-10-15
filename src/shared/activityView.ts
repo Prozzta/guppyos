@@ -20,8 +20,81 @@ import type { LivenessV1 } from './livenessV1';
 /** Statuses that only say "busy or not". The liveness classification decides these. */
 const BUSY_OR_NOT: ReadonlySet<string> = new Set(['idle', 'working', 'thinking', 'success']);
 
-/** The status to SHOW, given the hook-driven status and the agent's liveness record. */
-export function activityStatus<S extends string>(status: S, rec: LivenessV1 | null | undefined): S | 'working' | 'idle' {
+/**
+ * IDLE-MEANS-IDLE (1.1.87): the heavy-job lock as the displays read it (fleet.json `heavyLock`, the
+ * `heavy-lock:changed` push). "Idle" means the agent's TURN is closed, and an agent that started a
+ * suite in the background, waits in the lock's queue or has a slot reserved has closed its turn too.
+ * The lock knows those facts; this joins them to the agent. Display only: the wake lifecycle and the
+ * liveness classes never see it, so a queued agent stays wakeable for "HEAVY SLOT FREE".
+ */
+export interface HeavyLockView {
+  holders?: ReadonlyArray<{ agentId: string; kind: string; since: string; background: boolean }>;
+  waiters?: ReadonlyArray<{ agentId: string; kind: string; since: string; position: number }>;
+  reserved?: ReadonlyArray<{ agentId: string; kind: string; until: string }>;
+}
+
+/** What the lock says an agent is doing between turns (epoch ms times). */
+export type HeavyActivity =
+  | { state: 'background'; kind: string; since: number }
+  | { state: 'queued'; kind: string; position: number; since: number }
+  | { state: 'reserved'; kind: string; until: number };
+
+/** An agent's place in the lock: a BACKGROUND holder, a waiter (QUEUED #n) or a RESERVED slot, in
+ *  that order; null otherwise. A foreground holder is null: its turn is open, so it already shows
+ *  working. The lock never has one agent in two of these (a holder is dequeued and unreserved). */
+export function heavyActivity(agentId: string | null | undefined, lock: HeavyLockView | null | undefined): HeavyActivity | null {
+  if (!agentId || !lock) return null;
+  const h = lock.holders?.find((x) => x && x.agentId === agentId);
+  if (h) return h.background ? { state: 'background', kind: h.kind, since: Date.parse(h.since) } : null;
+  const w = lock.waiters?.find((x) => x && x.agentId === agentId);
+  if (w) return { state: 'queued', kind: w.kind, position: w.position, since: Date.parse(w.since) };
+  const r = lock.reserved?.find((x) => x && x.agentId === agentId);
+  if (r) return { state: 'reserved', kind: r.kind, until: Date.parse(r.until) };
+  return null;
+}
+
+/** "06:26Z" */
+function clockZ(ms: number): string {
+  return Number.isFinite(ms) ? `${new Date(ms).toISOString().slice(11, 16)}Z` : '?';
+}
+
+/** The card line for a heavy state: "suite in background 3m", "queued for heavy slot #2 (4m)",
+ *  "heavy slot reserved until 06:26Z". With no `now` (the floor's thought cloud), no age. */
+export function heavyText(heavy: HeavyActivity | null | undefined, now?: number): string | null {
+  if (!heavy) return null;
+  const age = (since: number): string => (now === undefined ? '' : formatLivenessAge(now - since));
+  switch (heavy.state) {
+    case 'background': return now === undefined ? `${heavy.kind} in background` : `${heavy.kind} in background ${age(heavy.since)}`;
+    case 'queued': return now === undefined ? `queued for heavy slot #${heavy.position}` : `queued for heavy slot #${heavy.position} (${age(heavy.since)})`;
+    case 'reserved': return `heavy slot reserved until ${clockZ(heavy.until)}`;
+  }
+}
+
+/** fleet.json's per-agent `heavy` field: the same facts with ISO times, so god and the agents read an
+ *  agent's place in the lock without joining holders and waiters themselves. */
+export function heavyFleetField(heavy: HeavyActivity | null): { state: HeavyActivity['state']; kind: string; position?: number; since?: string; until?: string } | null {
+  if (!heavy) return null;
+  const iso = (ms: number): string | undefined => (Number.isFinite(ms) ? new Date(ms).toISOString() : undefined);
+  switch (heavy.state) {
+    case 'background': return { state: heavy.state, kind: heavy.kind, since: iso(heavy.since) };
+    case 'queued': return { state: heavy.state, kind: heavy.kind, position: heavy.position, since: iso(heavy.since) };
+    case 'reserved': return { state: heavy.state, kind: heavy.kind, until: iso(heavy.until) };
+  }
+}
+
+/** The status to SHOW, given the hook-driven status, the agent's liveness record and (IDLE-MEANS-IDLE)
+ *  its place in the heavy-job lock. Precedence: a richer status and CRASHED/EXITED/STUCK/SUSPECT, then
+ *  WORKING, then a background job ('working': it stays at its desk), then queued or reserved
+ *  ('waiting'), then idle. */
+export function activityStatus<S extends string>(status: S, rec: LivenessV1 | null | undefined, heavy?: HeavyActivity | null): S | 'working' | 'idle' | 'waiting' {
+  const base = livenessStatus(status, rec);
+  if (!heavy || (base !== 'idle' && base !== 'success')) return base;
+  // Only a LIVE agent the classifier calls idle (or one with no record yet) is overlaid.
+  if (rec && (rec.lifecycle !== 'LIVE' || rec.classification !== 'IDLE')) return base;
+  return heavy.state === 'background' ? 'working' : 'waiting';
+}
+
+function livenessStatus<S extends string>(status: S, rec: LivenessV1 | null | undefined): S | 'working' | 'idle' {
   if (!rec || rec.lifecycle !== 'LIVE' || !BUSY_OR_NOT.has(status)) return status;
   if (rec.classification === 'BUSY_PROGRESSING') return status === 'thinking' ? status : 'working';
   // Andy S1: 'success' (the turn just finished) is a kind of idle: Stop re-samples IDLE at once,
@@ -51,14 +124,20 @@ export function runningToolText(shown: string, tool: RunningTool | null | undefi
   return `using ${tool.name} for ${formatLivenessAge(now - tool.since)}`;
 }
 
-/** The one-word state the LIVE ROSTER line gives each agent, from its liveness record. */
-export function rosterActivity(rec: LivenessV1 | null | undefined, now: number, tool?: { name: string; forSec: number } | null): string | null {
+/** The one-word state the LIVE ROSTER line gives each agent, from its liveness record and
+ *  (IDLE-MEANS-IDLE) its place in the heavy-job lock: "BACKGROUND suite 3m", "QUEUED heavy #2 4m",
+ *  "RESERVED to 06:26Z" in place of idle. */
+export function rosterActivity(rec: LivenessV1 | null | undefined, now: number, tool?: { name: string; forSec: number } | null, heavy?: HeavyActivity | null): string | null {
   if (!rec || rec.lifecycle !== 'LIVE') return null;
   const age = formatLivenessAge(now - rec.classifiedSince);
   switch (rec.classification) {
     case 'BUSY_PROGRESSING':
       return tool && tool.name ? `WORKING ${age} (running ${tool.name} ${formatLivenessAge(tool.forSec * 1000)})` : `WORKING ${age}`;
-    case 'IDLE': return `idle ${age}`;
+    case 'IDLE':
+      if (heavy?.state === 'background') return `BACKGROUND ${heavy.kind} ${formatLivenessAge(now - heavy.since)}`;
+      if (heavy?.state === 'queued') return `QUEUED heavy #${heavy.position} ${formatLivenessAge(now - heavy.since)}`;
+      if (heavy?.state === 'reserved') return `RESERVED to ${clockZ(heavy.until)}`;
+      return `idle ${age}`;
     case 'SUSPECT': return `suspect ${age}`;
     case 'STUCK_WAKE': return `stuck ${age}`;
     case 'CRASHED': return `crashed ${age}`;
