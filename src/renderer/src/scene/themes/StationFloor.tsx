@@ -13,7 +13,7 @@ import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
 import { buildScenePlan, byDepth, chairOf, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
-import { Crew, sitDraw, type CrewAgent, type Walker } from './crew';
+import { Crew, sitDraw, WALK_SPEED, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
 import type { Pixels } from './raster';
@@ -27,6 +27,9 @@ import { BubbleLayer } from './BubbleLayer';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import type { MessageAct } from '../office/MessageEnvelope';
 import { coffeeProps, cupInHand, endedSays, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
+
+/** One walk step at the longest tick (onTick clamps dt to 80 ms): ownChairKey's reach toward an own approach spot. */
+const OWN_SPOT_STEP = WALK_SPEED * 80;
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -429,8 +432,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           const bob = p.moving && Math.floor(clock / 180) % 2 ? -1 : 0;
           s.sprite.position.set(Math.round(p.x - fw / 2), Math.round(p.y - fh) + bob);
         }
-        // standing in its own chair's art on the way to or from the seat step: in front of it, as the step draws it
-        return (!seat && p.seat ? ownChairKey(p.x, p.y, chairFor(p.seat)) : null) ?? personKey(p.y, ch, pose);
+        // on (or a step from, arriving at) its own side seat's approach spot in the chair's art: in front of it, as the step draws it
+        const spot = !seat && p.seat ? crew.SM.approach.get(p.seat) : undefined;
+        return (spot ? ownChairKey(p, p.seat!.facing, chairFor(p.seat!), spot, OWN_SPOT_STEP) : null) ?? personKey(p.y, ch, pose);
       };
 
       const onTick = (tk: { deltaMS: number }) => {

@@ -244,20 +244,35 @@ test('T4c the step in ends in the seat\'s pose dir, whatever way the walker face
   }
 });
 
-test('T6 (Jim SHOULD-1) standing in its own chair\'s art on the way to or from the step: sorted in front of that chair', () => {
+test('T6 (Jim SHOULD-1, narrowed) on or arriving at its own back approach spot: sorted in front of that chair; elsewhere plain depth', () => {
   const pk = pack(), S = pk.scene, plan = C.buildScenePlan({ ...S, store: pk.store });
-  // the rule itself: inside the chair's art box, just in front of the chair; outside it, nothing
-  const ch3 = C.chairOf(S.stations.find((s) => s.name === 'Chair3'), plan.sorted), c = ch3.chair;
-  assert.deepEqual(C.ownChairKey((c.x0 + c.x1) / 2, c.top + 1, ch3), { foot: ch3.foot, rank: ch3.rank + 0.5 });
-  assert.equal(C.ownChairKey(c.x0 - 1, c.top + 1, ch3), null, 'left of the art');
-  assert.equal(C.ownChairKey(c.x1 + 1, c.top + 1, ch3), null, 'right of the art');
-  assert.equal(C.ownChairKey((c.x0 + c.x1) / 2, c.top - 1, ch3), null, 'above the art');
-  assert.equal(C.ownChairKey((c.x0 + c.x1) / 2, ch3.foot + 1, ch3), null, 'below the foot line');
-  assert.equal(C.ownChairKey(c.x0, c.top, null), null, 'no chair');
-  // the back approach spots that lie in their own chair's art (Chair3/4: the backrest was drawn over the torso there)
-  const inArt = S.stations.filter((s) => { const a = S.approach.get(s); return C.ownChairKey(a[0], a[1], C.chairOf(s, plan.sorted)); }).map((s) => s.name);
-  for (const n of ['Chair3', 'Chair4']) assert.ok(inArt.includes(n), `${n}'s approach spot is in its chair's art (${inArt})`);
-  // in a sim, every standing owner with its feet in its own chair's art sorts in front of that chair
+  const STEP = 3.6; // StationFloor's OWN_SPOT_STEP: WALK_SPEED 0.045 px/ms x the 80 ms tick clamp
+  const seatOf = (n) => S.stations.find((s) => s.name === n);
+  const at = (x, y, path = []) => ({ x, y, path });
+  // the rule itself, at Chair3 (its approach spot lies in its chair's art)
+  const ch3 = C.chairOf(seatOf('Chair3'), plan.sorted), a3 = S.approach.get(seatOf('Chair3')), front = { foot: ch3.foot, rank: ch3.rank + 0.5 };
+  assert.deepEqual(C.ownChairKey(at(a3[0], a3[1]), 'left', ch3, a3, STEP), front, 'on the spot');
+  assert.deepEqual(C.ownChairKey(at(a3[0], a3[1] - 0.4), 'left', ch3, a3, STEP), front, 'on the spot (atApproach tolerance)');
+  assert.deepEqual(C.ownChairKey(at(a3[0], a3[1] - 3, [a3]), 'left', ch3, a3, STEP), front, 'a step out, arriving');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1] - STEP - 0.2, [a3]), 'left', ch3, a3, STEP), null, 'more than a step out, arriving');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1] - 1.5, [[a3[0], a3[1] - 30]]), 'left', ch3, a3, STEP), null, 'leaving upward behind the backrest');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1] - 1.5), 'left', ch3, a3, STEP), null, 'off the spot with no path');
+  assert.equal(C.ownChairKey(at(a3[0] - 6, a3[1] - 6, [[a3[0] + 30, a3[1] - 30]]), 'left', ch3, a3, STEP), null, 'walking past in the chair\'s art');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1]), 'left', null, a3, STEP), null, 'no chair');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1]), 'left', ch3, null, STEP), null, 'no spot');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1]), 'down', ch3, a3, STEP), null, 'a seat facing down');
+  assert.equal(C.ownChairKey(at(a3[0], a3[1]), 'up', ch3, a3, STEP), null, 'a seat facing up');
+  const out = [ch3.chair.x1 + 4, a3[1]];
+  assert.equal(C.ownChairKey(at(out[0], out[1]), 'left', ch3, out, STEP), null, 'a spot outside the chair\'s art (plain depth is right there)');
+  // which seats it can apply to at all: only those whose approach spot lies in their own chair's art
+  const inArt = S.stations.filter((s) => { const a = S.approach.get(s); return C.ownChairKey(at(a[0], a[1]), s.facing, C.chairOf(s, plan.sorted), a, STEP); }).map((s) => s.name);
+  for (const n of ['Chair3', 'Chair4', 'Chair5', 'Chair6']) assert.ok(inArt.includes(n), `${n}: a side seat whose approach spot is in its chair's art (${inArt})`);
+  for (const n of ['Captain', 'Speck1', 'Speck2', 'Chair1', 'Chair2']) assert.ok(!inArt.includes(n), `${n}: faces up or down (Speck1/2's spots are in the art too), so plain depth (${inArt})`);
+  // god/Jim: the Captain with its feet behind its chair, away from its front spot (474,169 going round), keeps personKey
+  const cap = seatOf('Captain'), chc = C.chairOf(cap, plan.sorted), ac = S.approach.get(cap);
+  assert.equal(C.ownChairKey(at(474, 169, [ac]), cap.facing, chc, ac, STEP), null, 'Captain at 474,169 on the way to its spot');
+  assert.equal(C.ownChairKey(at(474, 169), cap.facing, chc, ac, STEP), null, 'Captain at 474,169 standing');
+  // in a sim: every key given is in front of the owner's chair, and only on or a step from a back spot
   const crew = crewOf(pk, rng(9));
   crew.sync(S.seatOrder.map((s, i) => ({ id: i ? `a${i}` : 'god', status: 'working', orchestrator: !i })));
   const seen = new Set();
@@ -265,11 +280,12 @@ test('T6 (Jim SHOULD-1) standing in its own chair\'s art on the way to or from t
     crew.tick(30);
     for (const p of crew.walkers()) {
       if (p.seated || p.step || !p.seat) continue;
-      const ch = C.chairOf(p.seat, plan.sorted), k = C.ownChairKey(p.x, p.y, ch);
+      const ch = C.chairOf(p.seat, plan.sorted), a = S.approach.get(p.seat), k = C.ownChairKey(p, p.seat.facing, ch, a, STEP);
       if (!k) continue;
       seen.add(p.seat.name);
+      assert.ok(Math.hypot(p.x - a[0], p.y - a[1]) <= STEP, `${p.id} keyed only within a step of its spot`);
       assert.ok(C.byDepth(k, ch) > 0, `${p.id} at (${p.x.toFixed(1)},${p.y.toFixed(1)}) is drawn after (in front of) ${p.seat.name}'s chair`);
     }
   }
-  for (const n of ['Chair3', 'Chair4']) assert.ok(seen.has(n), `${n}'s sitter stood in its chair's art on the way in (${[...seen]})`);
+  for (const n of ['Chair3', 'Chair4']) assert.ok(seen.has(n), `${n}'s sitter is keyed at its back spot on the way in (${[...seen]})`);
 });
