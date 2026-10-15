@@ -266,8 +266,8 @@ test('StationFloor draws the coffee each tick: cups in hand, parked mugs, and ea
   assert.match(tick, /for \(const m of mugs\.values\(\)\) items\.push\(m\);/);
   assert.match(tick, /c\.sprite\.zIndex = i \+ \(c\.back \? -0\.5 : 0\.5\);/);
   // with the map cached, a cup is drawn with its person in the rects, as the people are
-  assert.match(tick, /for \(const c of cups\.values\(\)\) c\.sprite\.visible = !useCache;/);
-  assert.match(src, /for \(const s of sprites\.values\(\)\) s\.sprite\.visible = true;\s*for \(const c of cups\.values\(\)\) c\.sprite\.visible = true;/);
+  assert.match(tick, /statics\.forEach\(\(s\) => \{ if \(s\) s\.visible = !useCache; \}\);/);
+  assert.doesNotMatch(src, /cups\.values\(\)\) c\.sprite\.visible = !useCache/);
   // the coffee lines come from coffeeProps only: the generic crew lines carry no brew or sip
   const lines = src.match(/const lines: Record<string, string> = \{([^}]*)\}/)[1];
   assert.doesNotMatch(lines, /\b(brew|sip):/);

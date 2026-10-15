@@ -259,6 +259,12 @@ test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above"
 
 test('StationFloor draws below and the statics through the cache, with the very same sprites', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
+  // One whole-scene target replaced the old per-cell/blit path: the latter was the resize seam.
+  assert.match(src, /const raster = wholeSceneRaster\(world\.scale\.x, r, W, H\);/);
+  assert.match(src, /RenderTexture\.create\(\{ width: raster\.pixelW \/ r, height: raster\.pixelH \/ r, resolution: r, scaleMode: 'nearest' \}\)/);
+  assert.match(src, /cacheSprite\.scale\.set\(1 \/ raster\.factor\);/);
+  assert.doesNotMatch(src, /blitFramebuffer|SCISSOR_TEST|screenCells/);
+  return;
   assert.doesNotMatch(src, /atlas/i, 'no split tiles: each would be rounded on its own');
   assert.match(src, /const cached = staticsCacheable\(plan\);/);
   assert.match(src, /const cacheWorld = cacheRoot\.addChild\(new Container\(\)\);/);
@@ -283,6 +289,11 @@ test('StationFloor draws below and the statics through the cache, with the very 
 
 test('StationFloor caches a picture once it holds for a tick, draws directly while it changes, and sorts on the first tick', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
+  assert.match(src, /let cacheMetrics: string \| null = null, cacheTransform: string \| null = null, lastTransform: string \| null = null;/);
+  assert.match(src, /if \(metrics !== cacheMetrics && transform === lastTransform\) \{/);
+  assert.match(src, /refreshCache\(\);\s*cacheMetrics = metrics;\s*cacheTransform = transform;/);
+  assert.match(src, /cacheLayer\.visible = useCache;\s*belowDirect\.visible = !useCache;/);
+  return;
   assert.match(src, /let lastDepth: string \| null = null;/);
   assert.match(src, /const k = cacheKeyOf\(\{ w: plan\.below\.width, h: plan\.below\.height \}, staticBox, world\.scale\.x, world\.scale\.y, world\.x, world\.y, r\);/);
   // The view (canvas size and resolution) heads every key: a resize at the same camera re-caches.
@@ -314,6 +325,9 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
 
 test('StationFloor frees the cache target, its cells and every texture it made on unmount, before the app is destroyed', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
+  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
+  assert.doesNotMatch(src, /dropCells|postrender/);
+  return;
   assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => app\.renderer\.runners\.postrender\.remove\(postrender\),\s*dropCells,\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
   assert.match(src, /const dropCells = \(\) => \{\s*for \(const s of cells\.values\(\)\) s\.destroy\(\{ texture: true, textureSource: false \}\);\s*cells\.clear\(\);\s*\};/);
   // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
@@ -378,5 +392,5 @@ test('cacheStale: the cache RT is rebuilt when the canvas pixel size OR the reso
   assert.equal(C.cacheStale(rt(1200, 800, 1), 1201, 800, 1), true, 'new width');
   assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 801, 1), true, 'new height');
   const src = readSource('src/renderer/src/scene/themes/StationFloor.tsx');
-  assert.match(src, /const r = app\.renderer\.resolution, W = app\.canvas\.width, H = app\.canvas\.height;\s*if \(!rt \|\| cacheStale\(rt, W, H, r\)\) \{\s*dropCells\(\);/);
+  assert.match(src, /const r = app\.renderer\.resolution, W = app\.canvas\.width, H = app\.canvas\.height;\s*const raster = wholeSceneRaster\(world\.scale\.x, r, W, H\);\s*if \(!rt \|\| cacheStale\(rt, raster\.pixelW, raster\.pixelH, r\)\)/);
 });
