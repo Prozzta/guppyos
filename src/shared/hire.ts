@@ -4,7 +4,7 @@
  * A hire manifest is a small JSON document that describes a role-configured
  * agent (name, provider, model, flags, goal, budget) so it can be shared as a
  * file or hosted in a community gallery and imported with one click via the
- * `guppy://hire?src=<https-url>` deep link (old links use `munderdifflin://`)
+ * `guppy://hire?src=<https-url>` deep link (the old `munderdifflin://` links stopped in 1.1.87)
  * or an in-app file picker.
  *
  * SECURITY MODEL — a manifest is untrusted input:
@@ -318,9 +318,10 @@ export function validateHireManifest(raw: unknown): HireValidation {
   };
 }
 
-/** The URL schemes the app answers. `guppy` is the main one (1.1.83); `munderdifflin`
- *  stays registered as an alias so hire links people already shared keep opening. */
-export const HIRE_LINK_SCHEMES = ['guppy', 'munderdifflin'] as const;
+/** The URL schemes the app answers: `guppy` only. The `munderdifflin` alias (1.1.83 to 1.1.86)
+ *  was dropped in 1.1.87 (SCHEME-DROP); such links are rejected, and the installer deletes the
+ *  old Windows registration (build/installer.nsh). */
+export const HIRE_LINK_SCHEMES = ['guppy'] as const;
 
 /** True when a process argument is one of our deep links (Windows and Linux hand
  *  them over in argv). URL schemes are case-insensitive. */
@@ -329,9 +330,9 @@ export function isHireLinkArg(arg: string): boolean {
   return HIRE_LINK_SCHEMES.some((s) => lower.startsWith(`${s}://`));
 }
 
-/** Parse a `guppy://hire?src=<https-url>` deep link (or the older
- *  `munderdifflin://` form). Returns the https manifest URL, or null if the link
- *  is not a well-formed hire link. */
+/** Parse a `guppy://hire?src=<https-url>` deep link. Returns the https manifest
+ *  URL, or null if the link is not a well-formed hire link (an old `munderdifflin://`
+ *  link included). */
 export function parseHireDeepLink(link: string): string | null {
   let u: URL;
   try { u = new URL(link); } catch { return null; }

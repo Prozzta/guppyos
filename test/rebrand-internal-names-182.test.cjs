@@ -51,11 +51,12 @@ test('the data folder is Guppy (1.1.81 data copied there once, never moved)', (t
   assert.equal(pkg.productName, undefined);
 });
 
-test('the munderdifflin:// scheme (an alias of guppy:// since 1.1.83) and the hire format id stay', () => {
-  // Hire links people have already shared, and manifests already written.
-  // The behaviour is tested in hire-link-scheme-183.test.cjs.
-  assert.match(builder, /^\s+schemes:\s*\n\s+- guppy\s*\n\s+- munderdifflin\s*$/m);
-  assert.match(read('src/shared/hire.ts'), /HIRE_LINK_SCHEMES = \['guppy', 'munderdifflin'\] as const;/);
+test('the munderdifflin:// scheme is gone (SCHEME-DROP, 1.1.87); the hire format id stays', () => {
+  // The alias (1.1.83 to 1.1.86) is dropped: guppy:// only. Manifests already written keep their id.
+  // The behaviour is tested in hire-link-scheme-183.test.cjs, the installer cleanup in scheme-drop-187.
+  assert.match(builder, /^\s+schemes:\s*\n\s+- guppy\s*\n(?!\s+- )/m);
+  assert.doesNotMatch(builder, /^\s+- munderdifflin\s*$/m);
+  assert.match(read('src/shared/hire.ts'), /HIRE_LINK_SCHEMES = \['guppy'\] as const;/);
   assert.match(read('src/shared/hire.ts'), /HIRE_SPEC_V1 = 'munder-difflin\/hire@1'/);
 });
 

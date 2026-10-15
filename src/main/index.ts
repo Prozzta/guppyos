@@ -3579,15 +3579,15 @@ async function handleHireLink(link: string): Promise<void> {
   analytics.trackFeature('hire_install');
 }
 
-// Register the protocols: guppy:// and the old munderdifflin:// (links already
-// shared). On Windows this call is the only registration (the installer writes
-// none). In dev (electron .) Windows needs the explicit exe+args form or the
+// Register the protocol: guppy:// (the only scheme since 1.1.87, SCHEME-DROP; the
+// installer deletes the old munderdifflin:// key). On Windows this call is the only
+// registration (the installer writes none). In dev (electron .) Windows needs the explicit exe+args form or the
 // registration points at electron.exe with no entry.
 // MUNDER_DEV=1 skips this entirely: the registration is a per-user registry
 // write that would re-point Stable's `guppy://` links at the dev
 // electron.exe (a Stable-identity side effect the dev build must not have).
 if (DEV_ISOLATION) {
-  console.warn('[dev-isolation] not registering the guppy:// and munderdifflin:// protocol handlers (would hijack Stable)');
+  console.warn('[dev-isolation] not registering the guppy:// protocol handler (would hijack Stable)');
 } else {
   for (const scheme of HIRE_LINK_SCHEMES) {
     if (process.defaultApp) {

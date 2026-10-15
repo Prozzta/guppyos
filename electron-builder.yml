@@ -3,8 +3,9 @@ productName: Guppy
 # REBRAND-GUPPY (1.1.82, the Human 2026-10-03): the app and its exe are Guppy. Kept on purpose, so a
 # 1.1.81 install upgrades in place: appId (the NSIS GUID derives from it: same install entry, same
 # folder, same AUMID), package.json "name" (only the default userData; the app now uses
-# <appData>/Guppy, src/main/userDataMigration.ts) and the munderdifflin:// scheme. The shortcuts
-# and taskbar pins are re-aimed at Guppy.exe on update: build/installer.nsh.
+# <appData>/Guppy, src/main/userDataMigration.ts). The shortcuts and taskbar pins are re-aimed at
+# Guppy.exe on update: build/installer.nsh. The munderdifflin:// scheme was kept as an alias until
+# 1.1.86; SCHEME-DROP (1.1.87) removes it, and the installer deletes its old Windows key (below).
 # REBRAND-ARTIFACT-NAMES (1.1.83): the release files are Guppy-*. 1.1.81 (and older) build their
 # manual-download link from fixed Munder-Difflin-* names, so afterAllArtifactBuild also writes a
 # byte-identical Munder-Difflin-* copy of each file such a link names (build/legacyArtifactNames.cjs);
@@ -42,15 +43,16 @@ afterPack: build/afterPack-memory-prune.cjs
 # REBRAND-ARTIFACT-NAMES: the Munder-Difflin-* copies 1.1.81 links to (see the header).
 afterAllArtifactBuild: build/legacyArtifactNames.cjs
 
-# Register the guppy:// URL scheme (shareable-hires deep link) and the old
-# munderdifflin:// one (links already shared) in the packaged app: CFBundleURLTypes
-# on macOS, the .desktop MimeType on Linux. On Windows the app registers both
-# itself at every start (app.setAsDefaultProtocolClient in src/main/index.ts).
+# Register the guppy:// URL scheme (shareable-hires deep link) in the packaged app:
+# CFBundleURLTypes on macOS, the .desktop MimeType on Linux. On Windows the app registers
+# it itself at every start (app.setAsDefaultProtocolClient in src/main/index.ts).
+# SCHEME-DROP (1.1.87): guppy:// is the only scheme. munderdifflin:// links no longer open
+# the app; on Windows the installer and uninstaller delete the old HKCU munderdifflin key
+# when it runs a Guppy.exe (build/installer.nsh, guppyDropOldScheme).
 protocols:
   - name: Guppy
     schemes:
       - guppy
-      - munderdifflin
 
 # electron-vite emits the app into out/; package exactly that plus what the
 # runtime needs. node-pty is native, so keep it out of the asar.
