@@ -105,6 +105,7 @@ export class ReaderWatcher {
   private timer: NodeJS.Timeout | null = null;
   private running: Promise<IngestReport> | null = null;
   private again = false;
+  private stopped = false;
   private readonly reported = new Set<string>();
 
   constructor(private readonly deps: IngestDeps, readonly agent: string, private readonly debounceMs = READER_DEBOUNCE_MS) {}
@@ -124,6 +125,7 @@ export class ReaderWatcher {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.fsw?.close();
@@ -132,7 +134,14 @@ export class ReaderWatcher {
 
   private schedule(): void {
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = null; void this.scan(false); }, this.debounceMs);
+    this.timer = setTimeout(() => { this.timer = null; this.background(); }, this.debounceMs);
+  }
+
+  /** CL-READERWATCHER: a scan nobody awaits (a change, or one more after a scan) is logged on
+   *  failure, never an unhandled rejection in main; none starts after stop(). */
+  private background(): void {
+    if (this.stopped) return;
+    this.scan(false).catch((e) => this.deps.log({ kind: 'claims-watch-error', agent: this.agent, error: String(e).slice(0, 160) }));
   }
 
   /** One scan at a time; a change during a scan runs one more scan after it. */
@@ -140,7 +149,7 @@ export class ReaderWatcher {
     if (this.running) { this.again = true; return this.running; }
     this.running = this.scanOnce(final).finally(() => {
       this.running = null;
-      if (this.again) { this.again = false; void this.scan(false); }
+      if (this.again) { this.again = false; this.background(); }
     });
     return this.running;
   }

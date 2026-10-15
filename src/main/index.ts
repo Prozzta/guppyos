@@ -15,6 +15,7 @@ import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
 import { importAtStart } from './claims/startupImport';
 import { makeW6Append } from './claims/w6Append';
+import { READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
 import { enqueueR5AfterIndex, reconcileQueueForHive, ReconcileApi, shouldRunR5 } from './claims/reconcile';
 import { createClaimDelivery, WORKING_SET_MAX_CHARS, type TaskRow } from './claims/delivery';
 import { reconcileApiForHive as createReconcileApiForHive, refreshReconcileQueueForHive, type ReconcileHiveDeps } from './claims/reconcileHive';
@@ -1291,6 +1292,25 @@ function claimLedgerAgents(): string[] {
   try { withSegments = readdirSync(join(root, 'agents')).filter((a) => store.segments(a).length > 0); } catch { /* no agents */ }
   return [...new Set([...withSegments, ...store.anchoredAgents()])];
 }
+// CL-READERWATCHER: a reader or writer agent's memory.md has left search for its ledger, so a bullet
+// written into it while the app runs reaches the ledger (and the index, through onAppend) by W6's
+// ReaderWatcher (claims/readerWatch.ts). Started only after the S0 import has settled; re-synced on
+// a timer for a new ledger, a level change or a new hive root.
+const readerWatchers = new ReaderWatchers({
+  hiveRoot: () => (claimsEndpoint() ? hive.root() : null),
+  agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
+  level: claimLevel,
+  append: (agentId, draft, origin, opts) => {
+    const ep = claimsEndpoint();
+    return ep ? makeW6Append(ep.store)(agentId, draft, origin, opts) : Promise.resolve({ ok: false, error: 'no hive' });
+  },
+  read: (agentId) => (claimsEndpoint() as ClaimsEndpointDeps).store.readLedger(agentId),
+  log: (row) => hive.appendLog(row),
+});
+function syncReaderWatchers(): void {
+  void claimsImportReady().then(() => readerWatchers.sync(), (e) => { hive.appendLog({ kind: 'claims-watch-error', error: String(e).slice(0, 160) }); });
+}
+setInterval(syncReaderWatchers, READER_WATCH_SYNC_MS).unref?.();
 // CLAIM-LEDGER W6 (S2 writer): the continuous export after every acked append of a writer agent, a
 // catch-up sync at claims start, and `memory export --complete` (claims/exportWiring.ts).
 let claimExportApi: ClaimExport | null = null;
@@ -1369,6 +1389,8 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     setImmediate(claimsAnchorCheck);
     // W6: the switch to writer mode or a restart after a crash: catch every writer's export up.
     setImmediate(() => { try { claimExport().syncAll(claimLedgerAgents()); } catch (e) { hive.appendLog({ kind: 'claims-export-failed', step: 'sync', error: String(e).slice(0, 160) }); } });
+    // CL-READERWATCHER: watch memory.md for the agents whose ledger replaced it in search.
+    setImmediate(syncReaderWatchers);
     // W5 startup census. Successful index syncs repeat this after each indexed append.
     setImmediate(() => { for (const agentId of claimLedgerAgents()) { try { refreshReconcileQueueForHive(root, agentId, reconcileHiveDeps()); } catch (e) { hive.appendLog({ kind: 'claims-reconcile-refresh-failed', agentId, error: String(e).slice(0, 160) }); } } });
   }
