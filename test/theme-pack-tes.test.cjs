@@ -111,6 +111,47 @@ test('getting up: the first step is back out to the approach spot, then plain fl
   }
 });
 
+test('walkZones: a walker only crosses a chair it is stuck in that is its own, its last, or untaken', () => {
+  const pk = pack(), S = pk.scene, st = (n) => S.stations.find((s) => s.name === n);
+  const crew = new Cr.Crew(S, SA.seatRulesFrom(pk.manifest, S.seatOrder.map((s) => s.name)), rng(5));
+  // eight on duty: every seat but Chair6 is taken
+  crew.sync(S.seatOrder.slice(0, 8).map((s, i) => ({ id: i ? `a${i}` : 'god', status: 'working', orchestrator: !i })));
+  const W = crew.walkers(), a1 = W.find((p) => p.id === 'a1');
+  assert.equal(a1.seat.name, 'Speck1');
+  assert.equal(W.find((p) => p.id === 'a6').seat.name, 'Chair4');
+  assert.ok(!W.some((p) => p.seat && p.seat.name === 'Chair6'), 'Chair6 is free');
+  // the nearest foot spot by a seat whose foot box is on that seat's chair and nothing else
+  const inChair = (n) => {
+    const s = st(n), id = S.seatChair.get(s);
+    let best = null;
+    for (let dy = -16; dy <= 16; dy++) for (let dx = -16; dx <= 16; dx++) {
+      const [x0, y0, x1, y1] = N.footBox(s.x + dx, s.y + dy);
+      let hits = 0, other = false;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const v = S.solid[y * S.PW + x]; if (v === id) hits++; else if (v) other = true; }
+      if (hits && !other && (!best || Math.abs(dx) + Math.abs(dy) < best[2])) best = [s.x + dx, s.y + dy, Math.abs(dx) + Math.abs(dy)];
+    }
+    assert.ok(best, `a foot spot on ${n}'s chair`);
+    return best;
+  };
+  const at = ([x, y]) => { a1.x = x; a1.y = y; return crew.walkZones(a1); };
+  assert.deepEqual(at(S.entrance), [], 'open floor: nothing is excused, not even its own chair');
+  assert.deepEqual(at(inChair('Chair4')), [], 'stuck in a chair someone else has taken: nothing is excused');
+  assert.deepEqual(at(inChair('Chair6')), [S.seatChair.get(st('Chair6'))], 'stuck in an untaken chair: that chair, to get out');
+  assert.deepEqual(at(inChair('Speck1')), [S.seatChair.get(st('Speck1'))], 'in its own chair: that chair');
+});
+
+test('a manifest approach side that is not open floor warns and falls back (Speck1 "front" is entered from the left)', () => {
+  const files = H.readPackDir(ROOT), m = JSON.parse(files['theme.json']);
+  m.stations.seats.Speck1.approach = 'front';
+  const r = P.readPack(P.memoryFiles({ ...files, 'theme.json': JSON.stringify(m) }));
+  const f = P.finishPack(r.value, H.decodeImages(ROOT, T.normPath, r.value.images), r.diagnostics);
+  assert.deepEqual(f.diagnostics, [{ level: 'warn', message: 'Station "Speck1": its approach side "front" is not open floor; it is entered from the left.' }]);
+  const S = f.value.scene, s1 = S.stations.find((s) => s.name === 'Speck1'), a = S.approach.get(s1);
+  const [vx, vy] = N.sideVector(s1.facing, 'left');
+  assert.ok(a && (a[0] - s1.x) * vx + (a[1] - s1.y) * vy > 0, `Speck1 is entered from its left (${a})`);
+  assert.ok(N.seatRoute(S, S.entrance[0], S.entrance[1], s1), 'and is still reachable');
+});
+
 test('crew sim: nobody ever walks over the Speck console or any chair but their own', () => {
   const pk = pack(), S = pk.scene, rand = rng(7);
   const crew = new Cr.Crew(S, SA.seatRulesFrom(pk.manifest, S.seatOrder.map((s) => s.name)), rand);
