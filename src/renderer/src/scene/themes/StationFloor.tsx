@@ -7,7 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
-import { activityStatus } from '@shared/activityView';
+import { activityStatus, heavyActivity, type HeavyLockView } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
@@ -38,9 +38,12 @@ function texture(px: Pixels): Texture {
   return t;
 }
 
-function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>): CrewAgent[] {
+/** IDLE-MEANS-IDLE (1.1.87): as on the office floor, an idle agent with a heavy job in the background
+ *  works at its station, and one queued for (or holding a reservation on) the heavy slot waits there:
+ *  both are at their desks to the Crew, so neither starts a coffee run. */
+function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>, heavyLock?: HeavyLockView | null): CrewAgent[] {
   const b = pack.manifest.builder, id = pack.manifest.id;
-  return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id]), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
+  return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id], heavyActivity(a.id, heavyLock)), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
 }
 
 function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>): BubbleSay[] {
@@ -100,8 +103,8 @@ export function bindHiveBubbles(app: unknown, bubbles: Pick<BubbleLayer, 'handof
 }
 
 /** StationFloor's liveness-aware input for its shared thought-cloud layer. */
-function bubbleThoughts(agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>) {
-  return agents.map((agent) => ({ id: agent.id, thought: activityThought(agent, liveness[agent.id]) }));
+function bubbleThoughts(agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>, heavyLock?: HeavyLockView | null) {
+  return agents.map((agent) => ({ id: agent.id, thought: activityThought(agent, liveness[agent.id], heavyActivity(agent.id, heavyLock)) }));
 }
 
 export function StationFloor({ pack }: { pack: LoadedPack }) {
@@ -370,10 +373,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const sayCursor = createSayCursor();
       const bubbleIds = new Set<string>();
       const sync = () => {
-        const { agents, liveness } = useStore.getState();
-        crew.sync(crewAgents(pack, agents, liveness));
+        const { agents, liveness, heavyLock } = useStore.getState();
+        crew.sync(crewAgents(pack, agents, liveness, heavyLock));
         const ids = new Set(agents.map((a) => a.id));
-        const thoughts = new Map(bubbleThoughts(agents, liveness).map((item) => [item.id, item.thought]));
+        const thoughts = new Map(bubbleThoughts(agents, liveness, heavyLock).map((item) => [item.id, item.thought]));
         removeUnrenderedBubbles(bubbleIds, sprites, ids, bubbles);
         removeDepartedSprites(sprites, ids, bubbles);
         for (const a of agents) {
@@ -534,7 +537,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
 
       let lastSelected: string | null = useStore.getState().selectedId;
       (app as any).__unsub = useStore.subscribe((s, prev) => {
-        if (s.agents !== prev.agents || s.liveness !== prev.liveness) sync();
+        if (s.agents !== prev.agents || s.liveness !== prev.liveness || s.heavyLock !== prev.heavyLock) sync();
         if (s.selectedId !== lastSelected) {
           lastSelected = s.selectedId;
           const p = s.selectedId ? crew.get(s.selectedId) : undefined;

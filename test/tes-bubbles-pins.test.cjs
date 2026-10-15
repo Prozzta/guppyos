@@ -23,7 +23,7 @@ function pinBridgeLifecycle(source) {
 
 function pinSyncAndTick(source) {
   assert.match(source,
-    /const thoughts = new Map\(bubbleThoughts\(agents, liveness\)\.map\(\(item\) => \[item\.id, item\.thought\]\)\);\s*removeUnrenderedBubbles\(bubbleIds, sprites, ids, bubbles\);/,
+    /const thoughts = new Map\(bubbleThoughts\(agents, liveness, heavyLock\)\.map\(\(item\) => \[item\.id, item\.thought\]\)\);\s*removeUnrenderedBubbles\(bubbleIds, sprites, ids, bubbles\);/,
     'M7b: sync removes bubbles whose agents no longer render');
   assert.match(source,
     /const freshEvents = newerCrewEvents\(crew\.events, lastCrewEventAt\);/,

@@ -37,7 +37,7 @@ All notable changes to this project are documented here. The format is based on
   and when they sit down to sip.
 
 - **An agent running a heavy job in the background, or waiting for the heavy-job slot, no longer
-  shows as idle.** Its card, the agent panel, the office floor and the LIVE ROSTER line read
+  shows as idle.** Its card, the agent panel, the office and TES floors and the LIVE ROSTER line read
   "suite in background 3m" (working, at its desk), "queued for heavy slot #2" or "heavy slot
   reserved until 06:26Z" (waiting, at its desk, not off on a coffee run), and fleet.json gives each
   agent its place in the lock. Display only: messages still go to these agents at once, and they
