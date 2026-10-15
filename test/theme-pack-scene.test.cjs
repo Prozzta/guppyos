@@ -209,7 +209,7 @@ test('crew: arrivals walk from the entrance, sit at their stations and face the 
   crew.sync([{ id: 'lead', status: 'working', orchestrator: true }, { id: 'a', status: 'working' }, { id: 'b', status: 'idle' }]);
   for (let i = 0; i < 600; i++) {
     crew.tick(50);
-    for (const p of crew.walkers()) if (!p.seated) assert.equal(N.footHits(S, p.x, p.y, crew.walkZones(p)), 0, `${p.id} at ${p.x},${p.y}`);
+    for (const p of crew.walkers()) if (!p.seated && !p.step) assert.equal(N.footHits(S, p.x, p.y), 0, `${p.id} at ${p.x},${p.y}`);
   }
   for (const p of crew.walkers()) if (p.seated) assert.ok(Math.hypot(p.x - p.seat.x, p.y - p.seat.y) < 1, `${p.id} sits at ${p.x},${p.y}, not on ${p.seat.name}`);
   const at = Object.fromEntries(crew.walkers().map((p) => [p.id, [p.seat && p.seat.name, p.seated, p.dir]]));

@@ -13,7 +13,7 @@ import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
 import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
-import { Crew, type CrewAgent, type Walker } from './crew';
+import { Crew, sitDraw, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
 import type { Pixels } from './raster';
@@ -427,10 +427,11 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       let lastDepth: string | null = null;
       let lastCrewEventAt = -1;
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number; anchor: { x: number; y: number } } => {
-        const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
+        // seated or on the seat step (the only time feet are in a chair): posed and depth-sorted with that chair
+        const sd = sitDraw(p), seat = sd ? sd.seat : null, dir = seat && !p.seated ? seat.facing : p.dir;
+        const ch: SortedItem | null = seat ? chairOf(seat, plan.sorted) : null;
         let pose = null;
-        if (ch && p.seat) {
-          const dir = p.dir;
+        if (ch && seat) {
           let fit: number | null = null;
           if (dir === 'left' || dir === 'right') {
             const key = `${ch.chair!.o.gid}|${ch.chair!.B.w}x${ch.chair!.B.h}|${s.col}|${dir}`;
@@ -439,11 +440,16 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           }
           pose = seatPose(ch, dir, fw, fh, fit);
         }
-        const seated = !!(p.seated && p.seat);
-        s.sprite.texture = frame(s.look, (seated ? sit : stand)[p.dir]);
-        const drawn = drawnSprite(p, pose, fw, fh, clock);
+        s.sprite.texture = frame(s.look, (seat ? sit : stand)[dir]);
+        // in a chair the step slides from standing on the approach spot to the seated pose; else as 1.1.88 bubbles draws it
+        const slide = (st: NonNullable<typeof seat>, k: number): { x: number; y: number } => {
+          const a = crew.SM.approach.get(st) ?? [st.x, st.y];
+          const [sx, sy] = pose ? [pose.x - fw / 2, pose.y] : [st.x - fw / 2, st.y - fh], [ax, ay] = [a[0] - fw / 2, a[1] - fh];
+          return { x: Math.round(ax + (sx - ax) * k), y: Math.round(ay + (sy - ay) * k) };
+        };
+        const drawn = seat && sd ? slide(seat, sd.k) : drawnSprite(p, pose, fw, fh, clock);
         s.sprite.position.set(drawn.x, drawn.y);
-        // TES-BUBBLES-188: the cloud hangs from the sprite as drawn (the seat pose), not the walker's point.
+        // TES-BUBBLES-188: the cloud hangs from the sprite as drawn (the seat pose, or mid seat step), not the walker's point.
         return { ...personKey(p.y, ch, pose), anchor: cloudAnchor(drawn, fw, fh) };
       };
 

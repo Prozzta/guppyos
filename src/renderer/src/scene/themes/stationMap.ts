@@ -85,7 +85,8 @@ export interface StationMap {
   seatZones: Map<Station, Array<[number, number, number, number]>>;
   /** Per station: the solidName index of its own chair, the only solid its sitter may cross (on the short leg in and out). */
   seatChair: Map<Station, number>;
-  /** Per station: the open spot on the chair's approach side, walked to before the short leg in (and back out). */
+  /** Per station: the open spot on the chair's approach side, outside every chair, walked to by plain floor before
+   *  the seat step in (and stepped back to on getting up). */
   approach: Map<Station, [number, number]>;
   entrance: [number, number] | null;
   start: [number, number] | null;
@@ -305,7 +306,7 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
   const S = { PW, PH, integ, solid, hard };
 
   // a seat's zone (its own square and its chair's box: nobody stops there), and its chair (the nearest furniture):
-  // the only solid its sitter may cross, on the short leg between the seat and its approach spot
+  // solid for every walk: its sitter's feet are in it only on the seat step between its approach spot and the seat
   const seatZones = new Map<Station, Array<[number, number, number, number]>>();
   const seatChair = new Map<Station, number>();
   for (const s of stations) {
@@ -358,7 +359,7 @@ export function analyseStationMap(M: NormalizedMap, store: PixelStore, opts: Ana
       for (const [nx, ny] of neighbours(base, x, y)) { const k = ny * FW + nx; if (!reach[k]) { reach[k] = 1; q.push([nx, ny]); } }
     }
   }
-  // A seat is walked to by plain floor up to its approach spot, then one straight leg in (its own chair excused).
+  // A seat is walked to by plain floor up to its approach spot, outside every chair; then the seat step in.
   const reachable = new Set<Station>();
   const approach = new Map<Station, [number, number]>();
   for (const s of stations) {
@@ -441,9 +442,10 @@ export function sideVector(f: Facing, side: Approach): [number, number] {
   return side === 'front' ? [x, y] : side === 'back' ? [-x, -y] : side === 'left' ? [y, -x] : [-y, x];
 }
 
-/** The spot a sitter walks to before the short leg into seat `s`: on the manifest's side, else the front, the
- *  sides, then the back. It is the nearest point out from the seat whose foot box is clear, that the entrance
- *  reaches by plain floor, and from which a straight leg reaches the seat crossing nothing but its own chair. */
+/** The spot a sitter walks to before the seat step into seat `s`: on the manifest's side, else the front, the
+ *  sides, then the back. It is the nearest point out from the seat whose foot box is clear of every solid (every
+ *  chair included), that the entrance reaches by plain floor, and from which the seat step (not a walk) reaches
+ *  the seat crossing nothing but its own chair. */
 export function approachSpot(N: Nav & { reach: Uint8Array }, s: Station, ex: Excuse): { side: Approach; at: [number, number] } | null {
   const G = N.G, order: Approach[] = ['front', 'left', 'right', 'back'];
   for (const side of s.approach ? [s.approach, ...order.filter((o) => o !== s.approach)] : order) {
@@ -573,12 +575,12 @@ export function route(SM: StationMap, x: number, y: number, tx: number, ty: numb
   return out;
 }
 
-/** A route into seat `s`: plain floor to its approach spot (crossing only `leave`, the chair the walker is getting
- *  out of), then the straight leg in. Null when there is no way. */
-export function seatRoute(SM: StationMap, x: number, y: number, s: Station, leave?: Zones): Array<[number, number]> | null {
-  const a = SM.approach.get(s), ex: Excuse = SM.seatChair.has(s) ? [SM.seatChair.get(s)!] : [];
-  if (!a) return route(SM, x, y, s.x, s.y, ex, true);
-  const legs = route(SM, x, y, a[0], a[1], leave, true);
+/** A route into seat `s`: plain floor to its approach spot (every chair solid), then the seat point, reached by
+ *  the seat step, not walked. Null when there is no way (a seat with no approach spot is never assigned). */
+export function seatRoute(SM: StationMap, x: number, y: number, s: Station): Array<[number, number]> | null {
+  const a = SM.approach.get(s);
+  if (!a) return null;
+  const legs = route(SM, x, y, a[0], a[1], undefined, true);
   if (!legs) return null;
   const end = legs.length ? legs[legs.length - 1] : [x, y];
   if (end[0] !== a[0] || end[1] !== a[1]) legs.push(a);

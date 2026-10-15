@@ -214,7 +214,8 @@ test('(c) at the real Captain and Speck chairs, on the real sheet, a seated clou
 
 test('(c) the floor draws the sprite and hangs the cloud from the same drawn point', () => {
   const src = readSource(FLOOR);
-  assert.match(src, /const drawn = drawnSprite\(p, pose, fw, fh, clock\);\s+s\.sprite\.position\.set\(drawn\.x, drawn\.y\);/);
+  // int-1.1.88: with TES-CHAIRS-188 a sprite in a chair (seated or on the seat step) is drawn at the step's slide
+  assert.match(src, /const drawn = seat && sd \? slide\(seat, sd\.k\) : drawnSprite\(p, pose, fw, fh, clock\);\s+s\.sprite\.position\.set\(drawn\.x, drawn\.y\);/);
   assert.match(src, /anchor: cloudAnchor\(drawn, fw, fh\)/);
   assert.match(src, /anchors\.push\(\{ id: p\.id, \.\.\.anchor \}\);/);
   assert.doesNotMatch(src, /anchors\.push\(\{ id: p\.id, x: p\.x, y: p\.y \}\)/, 'never the walker point');

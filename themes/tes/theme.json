@@ -26,7 +26,8 @@
     "seats": {
       "Captain": {
         "facing": "down",
-        "role": "command"
+        "role": "command",
+        "approach": "front"
       },
       "Speck1": {
         "facing": "down",

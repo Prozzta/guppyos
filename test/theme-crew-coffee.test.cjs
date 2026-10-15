@@ -92,7 +92,7 @@ for (const n of [1, 5]) test(`coffee probe: ${n} idle agent(s) for 30 minutes, t
           const q = crew.get(last.with), dx = q.x - p.x, dy = q.y - p.y;
           assert.equal(p.dir, Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'), 'a chat faces the other');
         }
-        if (!p.seated && N.footHits(S, p.x, p.y, crew.walkZones(p))) solid++;
+        if (!p.seated && !p.step && N.footHits(S, p.x, p.y)) solid++; // feet in a chair only on the seat step
         was.set(p.id, { coffee: !!p.coffee, phase: p.coffee && p.coffee.phase, mug: p.mug, full: p.mug ? p.mug.full : 0 });
       }
     });
