@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.87] — 2026-10-15
+
 ### Added
 
 - TES floor: the mail envelope now flies between crew members (the office floor always had it).
