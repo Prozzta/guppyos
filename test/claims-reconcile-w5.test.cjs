@@ -407,5 +407,6 @@ test('R2-mail newest-wins remains gated by a live winner', async (t) => {
 
 test('R5 append hook gates on the extracted one-time-import predicate', () => {
   const index = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  assert.match(index, /onAppend:\s*\(agentId,\s*id,\s*rec\)\s*=>\s*\{[\s\S]{0,160}if\s*\(!shouldRunR5\(rec\)\)/);
+  // {0,560}: CL-READERWATCHER's import trigger (one comment and one line) may come first.
+  assert.match(index, /onAppend:\s*\(agentId,\s*id,\s*rec\)\s*=>\s*\{[\s\S]{0,560}if\s*\(!shouldRunR5\(rec\)\)/);
 });

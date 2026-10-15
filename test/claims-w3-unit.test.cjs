@@ -146,7 +146,7 @@ test('discovery: at reader/writer the claims source comes in and the three patte
   for (const n of ['notes.md', 'memory-notes.md', 'my-memory.md']) assert.equal(ledgerReplaced(n), false, n);
   const root = hiveWith({
     'agents/a1/memory.md': '# m', 'agents/a1/memory-archive-1.md': '# a', 'agents/a1/memory-ledger-export-2026-10.md': '- e', 'agents/a1/notes.md': '# n',
-    'agents/a1/memory/claims/2026-10.jsonl': '{}\n', 'agents/a2/memory.md': '# m2',
+    'agents/a1/memory/claims/2026-10.jsonl': '{}\n', 'agents/a1/memory/claims-import.json': '{}\n', 'agents/a2/memory.md': '# m2',
   });
   const paths = (d) => d.eligible.map((e) => `${e.kind}:${e.path}`).sort();
   const at = (a1, global = undefined) => {
@@ -171,6 +171,11 @@ test('discovery: at reader/writer the claims source comes in and the three patte
   assert.equal(at('writer', 'shadow').ledgerLevels.a1, 'shadow');
   assert.equal(discoverSources(root, undefined, { claimLedger: 'writer', implemented: 'shadow' }).eligible.some((e) => e.kind === 'claims'), false);
   assert.equal(discoverSources(root).eligible.some((e) => e.kind === 'claims'), false, 'this build ships off: nothing changes by default');
+  // CL-READERWATCHER (god 886ed8): a ledger whose S0 import has not settled keeps the markdown.
+  fs.rmSync(path.join(root, 'agents/a1/memory/claims-import.json'));
+  const unsettled = at('writer', 'writer');
+  assert.ok(paths(unsettled).includes('memory:agents/a1/memory.md'), 'no settled import: memory.md stays');
+  assert.ok(!paths(unsettled).some((p) => p.startsWith('claims:')), 'no settled import: the claims are not a source yet');
 });
 
 test('search validation and the CLI: --history / --all / --kind / --key; never both modes', () => {

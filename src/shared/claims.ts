@@ -275,6 +275,14 @@ export interface LedgerFlags { claimLedger: LedgerLevel; reconcile: boolean; r4:
 export interface LedgerManifest { ledger: Record<string, LedgerLevel> }
 
 /**
+ * CL-READERWATCHER (god 886ed8): `<hive>/agents/<id>/memory/<this>` records that the agent's S0 import
+ * (its memory.md and archives into the ledger) has SETTLED. Discovery swaps an agent's markdown out
+ * of search for its claims only once this exists, so a ledger that appears mid-run (a level raised
+ * while the app runs, a first claim) never opens a search gap before its legacy entries are in.
+ */
+export const CLAIMS_IMPORT_SETTLED_FILE = 'claims-import.json';
+
+/**
  * The highest level THIS build implements. Each slice raises it (S0 'shadow', S1 'reader', S2 'writer').
  * REL-184 (1.1.84) implements every level: nothing rises above off without an explicit agent entry.
  */

@@ -60,11 +60,13 @@ module.exports = async (drill) => {
   const open = (file) => NativeMemoryStore.open(file ?? path.join(dbDir, `i${++dbN}.sqlite`), drill.openOpts);
   const engine = (store, emb, extra = {}) => new MemoryEngine({ hiveRoot: hive, store, embedder: emb, countTokens: words, watch: null, claimLedger: 'reader', implementedLevel: 'writer', ...extra });
   const manifest = (ledger) => fs.writeFileSync(path.join(hive, 'memory-sources.json'), JSON.stringify({ topLevel: [], include: {}, ledger }));
-  /** An agent with a ledger (one segment): only such an agent swaps its markdown for claims. */
+  /** An agent with a ledger (one segment): only such an agent swaps its markdown for claims.
+   *  CL-READERWATCHER: and only once its S0 import has settled (claims-import.json; older builds ignore it). */
   const ledger = (a) => {
     const d = path.join(hive, 'agents', a, 'memory', 'claims');
     fs.mkdirSync(d, { recursive: true });
     fs.writeFileSync(path.join(d, '2026-10.jsonl'), '');
+    fs.writeFileSync(path.join(hive, 'agents', a, 'memory', 'claims-import.json'), '{"v":1}\n');
   };
   /** A claim chunk as chunksFor would make it (header line + body). */
   const chunk = (id, wing, status, text, extra = {}) => {
@@ -332,6 +334,7 @@ module.exports = async (drill) => {
     try { await sync(eng, 'a1', chunks); } catch (e) { shadowSync = String(e.message); }
     manifest({ a1: 'reader', a2: 'off' });
     const flipped = await eng.backfill();
+    const pending = count();
     await sync(eng, 'a1', chunks);
     const reader = count();
     const searchMem = claimHits(await eng.search({ query: 'memfact alpha', results: 10 })).length;
@@ -340,7 +343,7 @@ module.exports = async (drill) => {
     const back = await eng.backfill();
     const flippedBack = count();
     await eng.close(); store.close();
-    return { shadow, shadowSync, reader, flippedRemoved: flipped.removed, searchMem, mdMem, flippedBack, backRemoved: back.removed };
+    return { shadow, shadowSync, pending, reader, flippedRemoved: flipped.removed, searchMem, mdMem, flippedBack, backRemoved: back.removed };
   }
 
   if (s === 'appendOnly') {

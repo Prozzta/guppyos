@@ -30,8 +30,10 @@ export async function importAtStart(d: StartupImportDeps): Promise<IngestReport[
   try { agents = [...new Set(d.agents())]; } catch { agents = []; }
   for (const agent of agents) {
     try {
-      if (d.level(agent) === 'off') continue;
-      reports.push(await shadowImport(d, agent));
+      const level = d.level(agent);
+      if (level === 'off') continue;
+      // CL-READERWATCHER: only a reader or writer settles (its memory.md may now leave search).
+      reports.push(await shadowImport(d, agent, { settle: level === 'reader' || level === 'writer' }));
     } catch (e) {
       d.log({ kind: 'claims-import-failed', agent, error: String(e).slice(0, 160) });
     }
