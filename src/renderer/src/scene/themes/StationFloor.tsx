@@ -4,7 +4,7 @@
 // seats, depth) comes from the pure modules beside it; this file only draws.
 
 import { useEffect, useRef, useState } from 'react';
-import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
+import { Application, Container, Matrix, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { activityStatus, heavyActivity, type HeavyLockView } from '@shared/activityView';
@@ -20,7 +20,7 @@ import type { Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
-import { cacheStale, hasVisiblePixel, staticOrder, staticsCacheable, wholeSceneRaster } from './staticCache';
+import { frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
@@ -178,58 +178,85 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return s;
       });
 
-      // The static floor is rendered as one integer-device-scale scene and sampled once into the
-      // raw-fit viewport.  The crew and bubbles remain live above it; while the camera moves, the
-      // floor draws directly until it returns to the cached transform.
-      const cached = staticsCacheable(plan);
+      // TES-FLOOR-EASE-188: the floor is composed in map space at an integer scale k (texels per
+      // map px), apart from the camera, and presented by ONE nearest quad through the world's
+      // transform. So every frame, the camera easing or settled, is one uniform resample of
+      // integer-scale art: no rounding of its own for any sprite, hence no seam. In the scene:
+      // - the floor RT: 'below' and every static, rebuilt only when k changes;
+      // - over it, in depth order, the people, their cups, the parked mugs, and the statics that
+      //   can cover one of them (frontPicker), drawn again exactly where the floor RT has them;
+      // - then 'above'.
+      // The people stay on the stage, unseen there (alpha 0), for their pointer hit tests.
+      const bounds = sceneBounds(plan);
+      const cached = bounds !== null && staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
-      const cacheLayer = new Container();
-      // As in the stage, the world's transform is a child's, so its vertices are made the same way
-      // (a rendered root's own transform would go to the GPU as a uniform instead).
-      const cacheRoot = new Container();
-      const cacheWorld = cacheRoot.addChild(new Container());
-      let cacheSprite: Sprite | null = null;
-      let rt: RenderTexture | null = null;
-      let cacheMetrics: string | null = null, cacheTransform: string | null = null, lastTransform: string | null = null;
-      const cacheStatics: Array<Sprite | null> = plan.sorted.map(() => null);
+      const pickFront = cached ? frontPicker(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      // As in the stage, the floor's transform is a child's, so its vertices are made the same way.
+      const floorRoot = new Container();
+      const floorWorld = floorRoot.addChild(new Container());
+      const aboveRoot = new Container();
+      const floorView = new Sprite();
+      const sceneSprite = new Sprite();
+      let floorRT: RenderTexture | null = null, sceneRT: RenderTexture | null = null, sceneK = 0;
+      const sceneM = new Matrix();
       const belowDirect = new Sprite(below.texture);
-      world.addChild(belowDirect);
       if (cached) {
-        cacheWorld.addChild(below);
-        for (const i of order) if (staticTex[i]) cacheStatics[i] = cacheWorld.addChild(staticSprite(i));
-        // Keep every static map layer in the same composite, so crew and bubbles can remain live
-        // above one seam-free floor texture.
-        if (hasVisiblePixel(plan.above)) cacheWorld.addChild(new Sprite(own(plan.above)));
-        app.stage.addChild(cacheLayer);
-      }
+        floorWorld.addChild(below);
+        for (const i of order) if (staticTex[i]) floorWorld.addChild(staticSprite(i));
+        if (hasVisiblePixel(plan.above)) aboveRoot.addChild(new Sprite(own(plan.above)));
+        world.addChild(sceneSprite);
+        sortLayer.alpha = 0;
+      } else world.addChild(belowDirect);
       world.addChild(sortLayer);
       if (!cached && hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
-      // The map is cacheable; its clouds and envelopes are deliberately live above the people.
+      // Clouds and envelopes are live above the people, in screen space.
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
       (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
-      const refreshCache = () => {
-        const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
-        const raster = wholeSceneRaster(world.scale.x, r, W, H);
-        if (!rt || cacheStale(rt, raster.pixelW, raster.pixelH, r)) {
-          cacheSprite?.destroy({ texture: false, textureSource: false });
-          cacheSprite = null;
-          rt?.destroy(true);
-          rt = RenderTexture.create({ width: raster.pixelW / r, height: raster.pixelH / r, resolution: r, scaleMode: 'nearest' });
-          cacheSprite = new Sprite(rt);
-          cacheSprite.scale.set(1 / raster.factor);
-          cacheLayer.addChild(cacheSprite);
-        }
-        cacheWorld.position.set(world.x * raster.factor, world.y * raster.factor);
-        cacheWorld.scale.set(world.scale.x * raster.factor, world.scale.y * raster.factor);
-        app.renderer.render({ container: cacheRoot, target: rt!, clear: true });
+      const buildFloor = (k: number) => {
+        const b = bounds!;
+        floorView.texture = Texture.EMPTY;
+        sceneSprite.texture = Texture.EMPTY;
+        floorRT?.destroy(true);
+        sceneRT?.destroy(true);
+        floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
+        sceneRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
+        floorWorld.scale.set(k);
+        floorWorld.position.set(-b.x * k, -b.y * k);
+        app.renderer.render({ container: floorRoot, target: floorRT, clear: true });
+        floorView.texture = floorRT;
+        sceneSprite.texture = sceneRT;
+        sceneSprite.position.set(b.x, b.y);
+        sceneSprite.scale.set(1 / k);
+        sceneM.set(k, 0, 0, k, -b.x * k, -b.y * k);
+        sceneK = k;
         (app as any).__tesStaticCacheBuilds = ((app as any).__tesStaticCacheBuilds ?? 0) + 1;
       };
+      const compose = () => {
+        if (!cached) return;
+        const k = sceneScale(world.scale.x * app.renderer.resolution, bounds!);
+        if (k !== sceneK) buildFloor(k);
+        const near: Box[] = [];
+        for (const s of sprites.values()) near.push({ x: s.sprite.x, y: s.sprite.y, w: fw, h: fh });
+        for (const c of cups.values()) near.push({ x: c.sprite.x, y: c.sprite.y, w: MUG_W, h: MUG_H });
+        for (const m of mugs.values()) near.push({ x: m.sprite.x, y: m.sprite.y, w: MUG_W, h: MUG_H });
+        const front = pickFront!(near);
+        statics.forEach((s, i) => { if (s) s.visible = front[i]; });
+        app.renderer.render({ container: floorView, target: sceneRT!, clear: true });
+        sortLayer.alpha = 1;
+        app.renderer.render({ container: sortLayer, target: sceneRT!, clear: false, transform: sceneM });
+        sortLayer.alpha = 0;
+        if (aboveRoot.children.length) app.renderer.render({ container: aboveRoot, target: sceneRT!, clear: false, transform: sceneM });
+      };
+      // For the rendered depth test (tes-floor-ease-188): the scene and what it is made of.
+      if (cached) (app as any).__tesScene = { bounds, get k() { return sceneK; }, get rt() { return sceneRT; }, get floor() { return floorRT; }, below: below.texture, sortLayer, statics, aboveRoot, sceneSprite, world };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
-        () => rt?.destroy(true),
-        () => cacheRoot.destroy({ children: true }),
+        () => floorRT?.destroy(true),
+        () => sceneRT?.destroy(true),
+        () => floorRoot.destroy({ children: true }),
+        () => aboveRoot.destroy({ children: true }),
         () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
       ];
 
@@ -392,24 +419,6 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         for (const [id, m] of mugs) if (!parked.has(id)) { m.sprite.destroy(); mugs.delete(id); }
         // Keep these live even when the people/station depth is unchanged and the map is cached.
         bubbles.update(dt, anchors, world.scale.x);
-        if (cached) {
-          const r = app.renderer.resolution;
-          const metrics = `${app.canvas.width}x${app.canvas.height}@${r}`;
-          const transform = `${world.scale.x},${world.scale.y},${world.x},${world.y}`;
-          // Rebuild the whole-scene RT only on first paint or an actual canvas/DPR change. During
-          // camera motion we draw direct; when it comes back to the stored transform the cached
-          // static floor is again one seam-free composite below the crew.
-          if (metrics !== cacheMetrics && transform === lastTransform) {
-            refreshCache();
-            cacheMetrics = metrics;
-            cacheTransform = transform;
-          }
-          lastTransform = transform;
-          const useCache = metrics === cacheMetrics && transform === cacheTransform;
-          cacheLayer.visible = useCache;
-          belowDirect.visible = !useCache;
-          statics.forEach((s) => { if (s) s.visible = !useCache; });
-        }
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}:${cups.get(q.id)?.back ?? '-'}`).join('|') + '#' + [...mugs].map(([id, m]) => `${id}:${m.foot}:${m.rank}`).join('|');
         if (depth === lastDepth) return;
@@ -429,6 +438,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       app.ticker.add(onTick);
       // LAG-150, as OfficeFloor: rAF runs at the display rate (165 fps measured); the floor needs 30.
       applyFloorFrameBudget(app.ticker);
+      // After onTick, so the scene is composed with this tick's people and depth order.
+      app.ticker.add(compose);
       if (pausedRef.current) app.ticker.stop();
 
       let lastSelected: string | null = useStore.getState().selectedId;

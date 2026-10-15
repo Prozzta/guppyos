@@ -172,20 +172,21 @@ test('TES camera keeps the hull across the bottom edge at every supported pane a
   assert.deepEqual(bad, [], 'the dead-bottom hull band must cover the panel bottom without a margin');
 });
 
-test('whole-scene raster rounds the source scale up and composites it once', () => {
-  const { wholeSceneRaster } = loadTs('src/renderer/src/scene/themes/staticCache.ts');
-  for (const r of [1, 1.25, 1.5, 2]) {
-    const scale = 555 / 344;
-    const p = wholeSceneRaster(scale, r, 560 * r, 555 * r);
-    assert.ok(Number.isInteger(scale * r * p.factor), `${r}: source scale is device integral`);
-    assert.ok(p.pixelW >= 560 * r && p.pixelH >= 555 * r, `${r}: raster covers its output`);
+test('the scene scale k is an integer at or above the device scale, so its one resample to the screen never magnifies', () => {
+  const { sceneScale } = loadTs('src/renderer/src/scene/themes/staticCache.ts');
+  const b = { x: 336, y: 128, w: 288, h: 384 };
+  for (const r of [1, 1.25, 1.5, 1.75, 2]) for (const scale of [555 / 344, 470 / 344, 640 / 344, 0.47]) {
+    const S = scale * r, k = sceneScale(S, b);
+    assert.ok(Number.isInteger(k) && k >= 1, `${r}x${scale}: k = ${k} is a whole number of texels per map px`);
+    assert.ok(k >= S - 1e-9 && k < Math.max(1, S) + 1, `${r}x${scale}: k = ${k} is the first integer at or above ${S}`);
   }
 });
 
-test('StationFloor presents one whole-scene RT below live crew, never per-cell strips', () => {
+test('StationFloor presents one scene quad, the people unseen on the stage, never per-cell strips', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/scene/themes/StationFloor.tsx'), 'utf8');
-  assert.match(src, /const raster = wholeSceneRaster\(world\.scale\.x, r, W, H\);/);
-  assert.match(src, /cacheSprite = new Sprite\(rt\);\s*cacheSprite\.scale\.set\(1 \/ raster\.factor\);/);
+  assert.match(src, /const k = sceneScale\(world\.scale\.x \* app\.renderer\.resolution, bounds!\);/);
+  assert.match(src, /sceneSprite\.texture = sceneRT;\s*sceneSprite\.position\.set\(b\.x, b\.y\);\s*sceneSprite\.scale\.set\(1 \/ k\);/);
+  assert.match(src, /world\.addChild\(sceneSprite\);\s*sortLayer\.alpha = 0;/);
   assert.match(src, /__tesStaticCacheBuilds/);
   assert.doesNotMatch(src, /screenCells\(|gl\.blitFramebuffer|SCISSOR_TEST/);
 });
