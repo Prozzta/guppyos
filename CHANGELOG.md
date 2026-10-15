@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- **TES floor avatars now stay at their desks while a live agent is working.** The station floor
+  now projects the liveness classification before synchronising its crew, and refreshes when that
+  classification changes even if the agent roster did not.
+
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes. The fork is based on upstream
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
