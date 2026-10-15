@@ -11,6 +11,12 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Fixed
+
+- **TES floor avatars now stay at their desks while a live agent is working.** The station floor
+  now projects the liveness classification before synchronising its crew, and refreshes when that
+  classification changes even if the agent roster did not.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias

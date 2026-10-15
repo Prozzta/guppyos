@@ -7,6 +7,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
+import { activityStatus } from '@shared/activityView';
+import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
@@ -32,9 +34,9 @@ function texture(px: Pixels): Texture {
   return t;
 }
 
-function crewAgents(pack: LoadedPack, agents: Agent[]): CrewAgent[] {
+function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>): CrewAgent[] {
   const b = pack.manifest.builder, id = pack.manifest.id;
-  return agents.map((a) => ({ id: a.id, status: a.status, orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
+  return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id]), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
 }
 
 export function StationFloor({ pack }: { pack: LoadedPack }) {
@@ -284,8 +286,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
       const sync = () => {
-        const agents = useStore.getState().agents;
-        crew.sync(crewAgents(pack, agents));
+        const { agents, liveness } = useStore.getState();
+        crew.sync(crewAgents(pack, agents, liveness));
         const ids = new Set(agents.map((a) => a.id));
         for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); }
         for (const a of agents) {
@@ -394,7 +396,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
 
       let lastSelected: string | null = useStore.getState().selectedId;
       (app as any).__unsub = useStore.subscribe((s, prev) => {
-        if (s.agents !== prev.agents) sync();
+        if (s.agents !== prev.agents || s.liveness !== prev.liveness) sync();
         if (s.selectedId !== lastSelected) {
           lastSelected = s.selectedId;
           const p = s.selectedId ? crew.get(s.selectedId) : undefined;
