@@ -70,8 +70,8 @@ export function GraphicsSetting() {
   };
   const restart = async () => {
     if (!confirming) {
-      // Jim N1: count the running agents now, not when the section opened.
-      const fresh = await window.cth.graphicsStatus().catch(() => null) ?? status;
+      // Jim N1: count the running agents now, not when the section opened; a failed read confirms.
+      const fresh = await window.cth.graphicsStatus().catch(() => null);
       if (fresh) setStatus(fresh);
       if (!fresh || fresh.runningAgents > 0) { setConfirming(true); return; }
     }
