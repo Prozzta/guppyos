@@ -12,7 +12,7 @@ import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
-import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
+import { buildScenePlan, byDepth, chairOf, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, sitDraw, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
@@ -370,6 +370,11 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
+      const chairs = new Map<string, SortedItem | null>(); // seat name -> its chair in the plan
+      const chairFor = (seat: { name: string; x: number; y: number }): SortedItem | null => {
+        if (!chairs.has(seat.name)) chairs.set(seat.name, chairOf(seat, plan.sorted));
+        return chairs.get(seat.name)!;
+      };
       const sayCursor = createSayCursor();
       const bubbleIds = new Set<string>();
       const sync = () => {
@@ -404,7 +409,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         // seated or on the seat step (the only time feet are in a chair): posed and depth-sorted with that chair
         const sd = sitDraw(p), seat = sd ? sd.seat : null, dir = seat && !p.seated ? seat.facing : p.dir;
-        const ch: SortedItem | null = seat ? chairOf(seat, plan.sorted) : null;
+        const ch: SortedItem | null = seat ? chairFor(seat) : null;
         let pose = null;
         if (ch && seat) {
           let fit: number | null = null;
@@ -424,7 +429,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           const bob = p.moving && Math.floor(clock / 180) % 2 ? -1 : 0;
           s.sprite.position.set(Math.round(p.x - fw / 2), Math.round(p.y - fh) + bob);
         }
-        return personKey(p.y, ch, pose);
+        // standing in its own chair's art on the way to or from the seat step: in front of it, as the step draws it
+        return (!seat && p.seat ? ownChairKey(p.x, p.y, chairFor(p.seat)) : null) ?? personKey(p.y, ch, pose);
       };
 
       const onTick = (tk: { deltaMS: number }) => {

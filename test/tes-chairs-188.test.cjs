@@ -209,3 +209,67 @@ test('T5 depth: stepping and seated, the walker sorts with its own chair, on eve
   }
   assert.deepEqual([...seen.keys()].sort(), S.stations.map((s) => s.name).sort(), 'every seat was stepped into');
 });
+
+test('T4b stranded a few px off its approach spot (Jim SHOULD-2): no step in from there; it walks onto the spot first', () => {
+  const pk = pack(), S = pk.scene;
+  for (const name of ['Chair6', 'Captain', 'Chair3']) {
+    const crew = crewOf(pk, rng(6));
+    crew.sync(S.seatOrder.map((s, i) => ({ id: i ? `a${i}` : 'god', status: 'idle', orchestrator: !i })));
+    const p = crew.walkers().find((w) => w.seat && w.seat.name === name), a = S.approach.get(p.seat);
+    // the nearest spot 3 px off the approach spot that is off every chair
+    const off = [[3, 0], [-3, 0], [0, 3], [0, -3]].map(([dx, dy]) => [a[0] + dx, a[1] + dy]).find(([x, y]) => !chairsUnder(S, x, y).length);
+    assert.ok(off, `${name}: a spot 3 px off its approach spot is open floor`);
+    Object.assign(p, { x: off[0], y: off[1], path: [], seated: false, tried: true, step: null, chair: null, status: 'working', wait: 0, idle: 0 });
+    let stepped = false;
+    for (let i = 0; i < 3000 && !p.seated; i++) {
+      crew.tick(30);
+      if (p.step) { stepped = true; assert.deepEqual(p.step.from, a, `${name}: steps in only from its approach spot, never from ${off} (3 px off)`); }
+      assert.equal(illegal(S, p), null);
+    }
+    assert.ok(p.seated && stepped, `${name}: sat down by the step in the end`);
+  }
+});
+
+test('T4c the step in ends in the seat\'s pose dir, whatever way the walker faced on the approach spot', () => {
+  const pk = pack(), S = pk.scene;
+  const opposite = { left: 'right', right: 'left', up: 'down', down: 'up' };
+  for (const seat of S.stations) {
+    const crew = crewOf(pk, rng(7));
+    crew.sync(S.seatOrder.map((s, i) => ({ id: i ? `a${i}` : 'god', status: 'idle', orchestrator: !i })));
+    const p = crew.walkers().find((w) => w.seat === seat), a = S.approach.get(seat);
+    Object.assign(p, { x: a[0], y: a[1], path: [], seated: false, tried: true, step: null, chair: null, status: 'working', wait: 0, idle: 0, dir: opposite[seat.facing] });
+    for (let i = 0; i < 200 && !p.seated; i++) crew.tick(30);
+    assert.ok(p.seated, `${seat.name}: seated`);
+    assert.equal(p.dir, seat.facing, `${seat.name}: seated facing ${seat.facing}, not the ${opposite[seat.facing]} it walked in with`);
+  }
+});
+
+test('T6 (Jim SHOULD-1) standing in its own chair\'s art on the way to or from the step: sorted in front of that chair', () => {
+  const pk = pack(), S = pk.scene, plan = C.buildScenePlan({ ...S, store: pk.store });
+  // the rule itself: inside the chair's art box, just in front of the chair; outside it, nothing
+  const ch3 = C.chairOf(S.stations.find((s) => s.name === 'Chair3'), plan.sorted), c = ch3.chair;
+  assert.deepEqual(C.ownChairKey((c.x0 + c.x1) / 2, c.top + 1, ch3), { foot: ch3.foot, rank: ch3.rank + 0.5 });
+  assert.equal(C.ownChairKey(c.x0 - 1, c.top + 1, ch3), null, 'left of the art');
+  assert.equal(C.ownChairKey(c.x1 + 1, c.top + 1, ch3), null, 'right of the art');
+  assert.equal(C.ownChairKey((c.x0 + c.x1) / 2, c.top - 1, ch3), null, 'above the art');
+  assert.equal(C.ownChairKey((c.x0 + c.x1) / 2, ch3.foot + 1, ch3), null, 'below the foot line');
+  assert.equal(C.ownChairKey(c.x0, c.top, null), null, 'no chair');
+  // the back approach spots that lie in their own chair's art (Chair3/4: the backrest was drawn over the torso there)
+  const inArt = S.stations.filter((s) => { const a = S.approach.get(s); return C.ownChairKey(a[0], a[1], C.chairOf(s, plan.sorted)); }).map((s) => s.name);
+  for (const n of ['Chair3', 'Chair4']) assert.ok(inArt.includes(n), `${n}'s approach spot is in its chair's art (${inArt})`);
+  // in a sim, every standing owner with its feet in its own chair's art sorts in front of that chair
+  const crew = crewOf(pk, rng(9));
+  crew.sync(S.seatOrder.map((s, i) => ({ id: i ? `a${i}` : 'god', status: 'working', orchestrator: !i })));
+  const seen = new Set();
+  for (let i = 0; i < 4000 && !crew.walkers().every((p) => p.seated); i++) {
+    crew.tick(30);
+    for (const p of crew.walkers()) {
+      if (p.seated || p.step || !p.seat) continue;
+      const ch = C.chairOf(p.seat, plan.sorted), k = C.ownChairKey(p.x, p.y, ch);
+      if (!k) continue;
+      seen.add(p.seat.name);
+      assert.ok(C.byDepth(k, ch) > 0, `${p.id} at (${p.x.toFixed(1)},${p.y.toFixed(1)}) is drawn after (in front of) ${p.seat.name}'s chair`);
+    }
+  }
+  for (const n of ['Chair3', 'Chair4']) assert.ok(seen.has(n), `${n}'s sitter stood in its chair's art on the way in (${[...seen]})`);
+});
