@@ -292,12 +292,20 @@ export function personKey(y: number, chair: SortedItem | null, pose: SeatPose | 
   return chair && pose ? { foot: chair.foot, rank: chair.rank + (pose.behind ? -0.5 : 0.5) } : { foot: y, rank: 1e9 };
 }
 
-/** A person standing with their feet in their OWN seat's chair art (behind its backrest, where a back approach
- *  spot lies: TES Chair3/4/5), so on the way to or from the seat step: drawn just in front of that chair, as
- *  the step draws them, not behind the backrest for the frames before and after it. Else null. */
-export function ownChairKey(x: number, y: number, chair: SortedItem | null): { foot: number; rank: number } | null {
+/** A person at their OWN side-facing seat's approach spot where that spot lies in the chair's art (level with
+ *  the seat, behind its backrest: TES Chair3-6): drawn just in front of that chair, as the seat step draws them,
+ *  not behind the backrest for the frames before and after the step. Seats facing up or down keep plain depth
+ *  (there the spot is truly in front of or behind the chair). Only on the spot (as Crew's atApproach), or within `step` px of
+ *  it while arriving (its path ends there); anywhere else (walking past behind the chair, leaving the spot)
+ *  null, so plain depth. */
+export function ownChairKey(p: { x: number; y: number; path: ReadonlyArray<readonly [number, number]> }, facing: Facing, chair: SortedItem | null, spot: readonly [number, number] | null | undefined, step: number): { foot: number; rank: number } | null {
   const c = chair?.chair;
-  return c && x >= c.x0 && x <= c.x1 && y >= c.top && y <= chair!.foot ? { foot: chair!.foot, rank: chair!.rank + 0.5 } : null;
+  if (!c || !spot || (facing !== 'left' && facing !== 'right')) return null;
+  const [ax, ay] = spot;
+  if (!(ax >= c.x0 && ax <= c.x1 && ay >= c.top && ay <= chair!.foot)) return null;
+  const d = Math.hypot(p.x - ax, p.y - ay), end = p.path[p.path.length - 1];
+  const arriving = !!end && Math.hypot(end[0] - ax, end[1] - ay) < 0.5;
+  return d < 0.5 || (arriving && d <= step) ? { foot: chair!.foot, rank: chair!.rank + 0.5 } : null;
 }
 
 /** Draw order: foot line, then Tiled's layer order (people last on a tie). */
