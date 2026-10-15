@@ -89,19 +89,31 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
   for (const r of records) if (r.t === 'event' && r.ev === 'reconcile-answer' && (r.answer === 'keep-both' || r.answer === 'supersedes')) {
     for (const id of r.targets) acceptedMail.add(id);
   }
+  // CL-BRIEF-STARTUP: each line is counted once (shared by delivery's scale-down rebuilds), and a
+  // newline-joined text counts as its lines plus one '\n' per join. That is the count of the joined
+  // text for the counters in use: WordPiece ('\n' is whitespace: 0) and length (1). Recounting the
+  // whole output for every candidate line was quadratic: 4.1 s for a 1,023-claim ledger, on the main
+  // process, past the hook shim's 5 s give-up at startup.
+  const lineCounts = new Map<string, number>();
+  const lineTokens = (line: string): number => {
+    let n = lineCounts.get(line);
+    if (n === undefined) { n = tokens(countTokens, line); lineCounts.set(line, n); }
+    return n;
+  };
+  const sep = lineTokens('\n');
 
   const buildWorkingSetDetailed = (state: ClaimsState, view: WorldView, budget: number) => {
     const cap = Math.max(0, Math.floor(budget));
     const histories = historyGroups(claims, state);
     const historyFor = new Map<string, ClaimRec[]>();
     for (const group of histories.values()) for (const c of group) historyFor.set(c.id, group);
-    const excluded = new Map<string, Receipt['excluded'][number]['reason']>();
+    const statusExcluded = new Map<string, Receipt['excluded'][number]['reason']>();
     const eligible: Array<{ claim: ClaimRec; order: number }> = [];
     for (const [id, status] of Object.entries(state.claims)) {
       const found = byId.get(id);
-      if (status.status !== 'live' || !found) { excluded.set(id, 'status'); continue; }
-      if (view.flags[id]?.includes('expired')) { excluded.set(id, 'expired'); continue; }
-      if (found.claim.source.startsWith('mail:') && !acceptedMail.has(id)) { excluded.set(id, 'status'); continue; }
+      if (status.status !== 'live' || !found) { statusExcluded.set(id, 'status'); continue; }
+      if (view.flags[id]?.includes('expired')) { statusExcluded.set(id, 'expired'); continue; }
+      if (found.claim.source.startsWith('mail:') && !acceptedMail.has(id)) { statusExcluded.set(id, 'status'); continue; }
       eligible.push(found);
     }
     const tier = (c: ClaimRec): 0 | 2 => c.pin === true || c.kind === 'lesson' ? 0 : 2;
@@ -117,106 +129,133 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     const groups = [eligible.filter(x => tier(x.claim) === 0).sort(rank), [],
       eligible.filter(x => tier(x.claim) === 2 && currentValues.has(x.claim.id)).sort(rank),
       eligible.filter(x => tier(x.claim) === 2 && !currentValues.has(x.claim.id)).sort(rank)];
-    const output = [`# Memory working set — ${state.agent}`];
-    let used = tokens(countTokens, output.join('\n'));
-    const included: Receipt['included'] = [];
-    const tierUsed = [0, 0, 0];
-    const add = (line: string, t: number, id?: string): boolean => {
-      const n = tokens(countTokens, line);
-      if (tokens(countTokens, [...output, line].join('\n')) > cap || tierUsed[t] + n > Math.floor(cap * WORKING_SET_TIER_SHARES[t])) return false;
-      output.push(line); used = tokens(countTokens, output.join('\n')); tierUsed[t] += n;
-      if (id) included.push({ id, tier: t, tokens: n });
-      return true;
-    };
-    // T0 pinned/lesson claims are first. Overflow is explicit and is not promoted to T2.
-    for (const { claim, order: _order } of groups[0]) {
-      const id = claim.id;
-      const group = historyFor.get(id);
-      const line = claimLine(claim, 'current', view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
-      if (!add(line, 0, id)) excluded.set(id, 'tier-share');
-    }
+    const header = `# Memory working set — ${state.agent}`;
     // T1 holds reconcile prompts and world warning markers. Use the exact rendered prompt text
     // that ReconcileApi token-counted/charged, so daily accounting matches delivery byte-for-byte.
     const markers = [
       ...reconcileItems.slice(0, 3).map(reconcilePromptText),
       ...Object.keys(view.flags).filter(id => view.flags[id].length).sort(cmp).map(id => `⚠ ${id}: ${view.flags[id].join(', ')}`),
     ];
-    let markersIncluded = 0;
-    const droppedReconcileItems: Array<{ item: ReconcileItem; reason: string }> = [];
     const reconcileMarkers = reconcileItems.slice(0, 3).map((item) => ({ item, text: reconcilePromptText(item) }));
-    for (const marker of markers) {
-      if (add(marker, 1)) { markersIncluded++; continue; }
-      const item = reconcileMarkers.find((candidate) => candidate.text === marker)?.item;
-      if (item) droppedReconcileItems.push({ item, reason: 'T1-space' });
-    }
-    const markersOmitted = markers.length - markersIncluded;
     const historyPointers = [...histories.values()].filter(group => group.length > 1)
       .map(group => historyCurrent(group, state))
       .filter((c): c is ClaimRec => !!c && state.claims[c.id]?.status === 'live')
       .map(c => ({ id: c.id, line: `- ${c.key ?? c.id} history: memory.md#${historyAnchor(c.id)}` }));
-    const t0Included = new Set(included.map(x => x.id));
-    const selectTier2 = (pointerReserve: number) => {
-      const selected: Array<{ id: string; line: string; n: number }> = [];
-      let selectedTokens = 0;
-      const t2Limit = Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[2]) - pointerReserve) +
-        Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
-        Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
-      const t2Cap = Math.min(cap - used, t2Limit);
-      const addT2 = (items: typeof eligible, localCap: number): void => {
-        let localUsed = 0;
-        for (const { claim } of items) {
-          const id = claim.id; const group = historyFor.get(id);
-          const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
-          const n = tokens(countTokens, line);
-          if (tokens(countTokens, [...output, ...selected.map(x => x.line), line].join('\n')) <= cap &&
-              selectedTokens + n <= t2Cap && localUsed + n <= localCap) {
-            selected.push({ id, line, n }); selectedTokens += n; localUsed += n;
-          }
-        }
+    // CL-OVERFLOW-NOTE: one packing pass. `room` bounds the total size of the lines packed; the
+    // tier shares (and the budget named in the warnings) stay on `cap`. room == cap is the packing
+    // as it was; a smaller room keeps space free for the overflow note and "+N more".
+    const pack = (room: number) => {
+      const excluded = new Map(statusExcluded);
+      const output = [header];
+      let used = lineTokens(output[0]);
+      const included: Receipt['included'] = [];
+      const tierUsed = [0, 0, 0];
+      const add = (line: string, t: number, id?: string): boolean => {
+        const n = lineTokens(line);
+        if (used + sep + n > room || tierUsed[t] + n > Math.floor(cap * WORKING_SET_TIER_SHARES[t])) return false;
+        output.push(line); used += sep + n; tierUsed[t] += n;
+        if (id) included.push({ id, tier: t, tokens: n });
+        return true;
       };
-      // Reserve at most half of T2's fixed B8 share for changed-key winners, leaving
-      // room for plain recency even when unused T0/T1 capacity flows down.
-      addT2(groups[2], Math.floor(cap * WORKING_SET_TIER_SHARES[2] / 2));
-      addT2(groups[3], t2Cap - selectedTokens);
-      return selected;
+      // T0 pinned/lesson claims are first. Overflow is explicit and is not promoted to T2.
+      for (const { claim, order: _order } of groups[0]) {
+        const id = claim.id;
+        const group = historyFor.get(id);
+        const line = claimLine(claim, 'current', view.flags[id] ?? []) + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+        if (!add(line, 0, id)) excluded.set(id, 'tier-share');
+      }
+      let markersIncluded = 0;
+      const droppedReconcileItems: Array<{ item: ReconcileItem; reason: string }> = [];
+      for (const marker of markers) {
+        if (add(marker, 1)) { markersIncluded++; continue; }
+        const item = reconcileMarkers.find((candidate) => candidate.text === marker)?.item;
+        if (item) droppedReconcileItems.push({ item, reason: 'T1-space' });
+      }
+      const markersOmitted = markers.length - markersIncluded;
+      const t0Included = new Set(included.map(x => x.id));
+      const selectTier2 = (pointerReserve: number) => {
+        const selected: Array<{ id: string; line: string; n: number }> = [];
+        let selectedTokens = 0;
+        const t2Limit = Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[2]) - pointerReserve) +
+          Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[0]) - tierUsed[0]) +
+          Math.max(0, Math.floor(cap * WORKING_SET_TIER_SHARES[1]) - tierUsed[1]);
+        const t2Cap = Math.min(room - used, t2Limit);
+        const addT2 = (items: typeof eligible, localCap: number): void => {
+          let localUsed = 0;
+          for (const { claim } of items) {
+            const id = claim.id; const group = historyFor.get(id);
+            const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
+            const n = lineTokens(line);
+            if (used + (selected.length + 1) * sep + selectedTokens + n <= room &&
+                selectedTokens + n <= t2Cap && localUsed + n <= localCap) {
+              selected.push({ id, line, n }); selectedTokens += n; localUsed += n;
+            }
+          }
+        };
+        // Reserve at most half of T2's fixed B8 share for changed-key winners, leaving
+        // room for plain recency even when unused T0/T1 capacity flows down.
+        addT2(groups[2], Math.floor(cap * WORKING_SET_TIER_SHARES[2] / 2));
+        addT2(groups[3], t2Cap - selectedTokens);
+        return selected;
+      };
+      const reserveFor = (selected: Array<{ id: string }>): number => {
+        const inline = new Set([...t0Included, ...selected.map(x => x.id)]);
+        return historyPointers.filter(p => !inline.has(p.id)).reduce((n, p) => n + lineTokens(p.line), 0);
+      };
+      let tier2 = selectTier2(0);
+      let pointerReserve = 0;
+      for (let pass = 0; pass <= historyPointers.length; pass++) {
+        const needed = reserveFor(tier2);
+        if (needed <= pointerReserve) break;
+        pointerReserve = needed;
+        tier2 = selectTier2(pointerReserve);
+      }
+      for (const { id, line, n } of tier2) {
+        output.push(line); used += sep + n; tierUsed[2] += n;
+        included.push({ id, tier: 2, tokens: n });
+      }
+      const includedNow = new Set(included.map(x => x.id));
+      for (const { claim } of [...groups[2], ...groups[3]]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
+      const includedIds = new Set(included.map(x => x.id));
+      for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
+        const pn = lineTokens(pointer.line);
+        if (used + sep + pn <= room) { output.push(pointer.line); used += sep + pn; }
+      }
+      const excludedRows = [...excluded].sort(([a], [b]) => cmp(a, b)).map(([id, reason]) => ({ id, reason }));
+      const omitted = excludedRows.filter(x => x.reason === 'budget' || x.reason === 'tier-share').length;
+      const warnings = [
+        ...(groups[0].some(({ claim }) => excluded.get(claim.id) === 'tier-share') ? ['Pinned/lesson tier exceeded its budget share.'] : []),
+        ...(markersOmitted ? [`${markersOmitted} warning marker(s) omitted at the tier-share limit.`] : []),
+        ...(omitted ? [`Working set omitted ${omitted} claim(s) at the ${cap}-token budget.`] : []),
+      ];
+      const note = `⚠ ${warnings[warnings.length - 1]}`;
+      const more = `+${omitted} more`;
+      return { output, used, included, excludedRows, omitted, warnings, note, more, droppedReconcileItems };
     };
-    const reserveFor = (selected: Array<{ id: string }>): number => {
-      const inline = new Set([...t0Included, ...selected.map(x => x.id)]);
-      return historyPointers.filter(p => !inline.has(p.id)).reduce((n, p) => n + tokens(countTokens, p.line), 0);
-    };
-    let tier2 = selectTier2(0);
-    let pointerReserve = 0;
-    for (let pass = 0; pass <= historyPointers.length; pass++) {
-      const needed = reserveFor(tier2);
-      if (needed <= pointerReserve) break;
-      pointerReserve = needed;
-      tier2 = selectTier2(pointerReserve);
-    }
-    for (const { id, line, n } of tier2) {
-      output.push(line); used = tokens(countTokens, output.join('\n')); tierUsed[2] += n;
-      included.push({ id, tier: 2, tokens: n });
-    }
-    const includedNow = new Set(included.map(x => x.id));
-    for (const { claim } of [...groups[2], ...groups[3]]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
-    const includedIds = new Set(included.map(x => x.id));
-    for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
-      if (tokens(countTokens, [...output, pointer.line].join('\n')) <= cap) {
-        output.push(pointer.line); used = tokens(countTokens, output.join('\n'));
+    // The overflow note, "+N more" and the receipt are measured on the joined text itself (a few
+    // calls, not one per line), as before.
+    const fits = (lines: string[]): boolean => tokens(countTokens, lines.join('\n')) <= cap;
+    let packed = pack(cap);
+    // CL-OVERFLOW-NOTE: when claims are omitted and the note and "+N more" do not both fit after
+    // the full pack, repack with their cost reserved up front (each line counted alone plus one
+    // separator: exact for WordPiece and length, an over-estimate for the sub-additive NO_TOKENS
+    // ceil4), so they then fit. The omitted count (its digits) can grow as room shrinks, so
+    // re-reserve until the reserve covers the note for the count it produced. Nothing omitted:
+    // pack(cap) only, byte-identical to before.
+    if (packed.omitted && !fits([...packed.output, packed.note, packed.more])) {
+      let reserve = 0;
+      for (let pass = 0; pass < 8; pass++) {
+        const need = sep + lineTokens(packed.note) + sep + lineTokens(packed.more);
+        if (need <= reserve) break;
+        reserve = need;
+        packed = pack(Math.max(0, cap - reserve));
       }
     }
-    const excludedRows = [...excluded].sort(([a], [b]) => cmp(a, b)).map(([id, reason]) => ({ id, reason }));
-    const omitted = excludedRows.filter(x => x.reason === 'budget' || x.reason === 'tier-share').length;
-    const warnings = [
-      ...(groups[0].some(({ claim }) => excluded.get(claim.id) === 'tier-share') ? ['Pinned/lesson tier exceeded its budget share.'] : []),
-      ...(markersOmitted ? [`${markersOmitted} warning marker(s) omitted at the tier-share limit.`] : []),
-      ...(omitted ? [`Working set omitted ${omitted} claim(s) at the ${cap}-token budget.`] : []),
-    ];
+    const { output, included, excludedRows, omitted, warnings, note, more, droppedReconcileItems } = packed;
+    // Below the minimum budget (header + note + "+N more") the note goes in alone if it fits.
     if (omitted) {
-      const note = `⚠ ${warnings[warnings.length - 1]}`;
-      const n = tokens(countTokens, note);
-      if (tokens(countTokens, [...output, note].join('\n')) <= cap) { output.push(note); used = tokens(countTokens, output.join('\n')); }
-      const more = `+${omitted} more`; const mn = tokens(countTokens, more);
-      if (tokens(countTokens, [...output, more].join('\n')) <= cap) { output.push(more); used = tokens(countTokens, output.join('\n')); }
+      if (fits([...output, note])) output.push(note);
+      if (fits([...output, more])) output.push(more);
     }
     const text = output.join('\n');
     const receipt: Receipt = { at: records.at(-1)?.wt ?? '', agent: state.agent, budget: cap,
