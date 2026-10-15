@@ -480,11 +480,12 @@ parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 > `src/renderer/src/assets/brand/logo.png`, and the TES art shown in the
 > [`.github/media`](./.github/media) images) is **© 2026 Prozzta**, licensed under
 > [`themes/tes/LICENSE-ARTWORK.md`](./themes/tes/LICENSE-ARTWORK.md), which permits editing
-> and use in commercial and non-commercial projects but not reselling or redistributing the
-> art itself. **Credit is required:** "Artwork by Prozzta", with a link to
+> and use in commercial and non-commercial projects, and shipping it inside a project that
+> uses it, but not reselling or redistributing the art itself. **Credit is required:**
+> "Artwork by Prozzta", with a link to
 > [github.com/Prozzta/guppyos](https://github.com/Prozzta/guppyos). The code, and the app UI
 > around the art in those images, stay under the MIT License; the LimeZu tilesets and the
-> Office cast keep their own terms (above).
+> Office cast keep their own terms (above; the Office cast is MIT code).
 
 ## Acknowledgements
 
