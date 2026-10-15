@@ -118,10 +118,10 @@ test('B: no conversation rule with in_reply_to; its target is left to applyRepli
     { [ID('ccc333')]: 'auto:answered-cited:ans-2' }, 'in_reply_to: no same-conversation close, and its own target is skipped');
   assert.deepEqual(reasons(ML.answeredByMessage(owner, 'god', { ...base, act: 'refuse', inReplyTo: null })),
     { [ID('aaa111')]: 'auto:answered-cited:ans-2', [ID('ccc333')]: 'auto:answered-cited:ans-2', [ID('bbb222')]: 'auto:answered:refuse:ans-2' });
-  // An inform or agree that cites an ask is often a status ("NEXT: the audit of <id>, starting now"):
-  // it answers only the conversation's latest ask (the 1.1.83 rule), never the asks it names.
+  // An inform or agree is often a status ("NEXT: the audit of <id>, starting now"): it answers
+  // neither the asks it names nor the conversation's latest ask (god, conv-c110a5).
   for (const act of ['inform', 'agree']) {
-    assert.deepEqual(reasons(ML.answeredByMessage(owner, 'god', { ...base, act, inReplyTo: null })), { [ID('bbb222')]: `auto:answered:${act}:ans-2` }, act);
+    assert.deepEqual(ML.answeredByMessage(owner, 'god', { ...base, act, inReplyTo: null }), [], act);
     assert.deepEqual(ML.answeredByMessage(owner, 'god', { ...base, act, inReplyTo: ID('aaa111') }), [], `${act} with in_reply_to`);
   }
   for (const act of ['request', 'query', 'propose']) assert.deepEqual(ML.answeredByMessage(owner, 'god', { ...base, act, inReplyTo: null }), [], act);
@@ -129,6 +129,14 @@ test('B: no conversation rule with in_reply_to; its target is left to applyRepli
   assert.deepEqual(ML.answeredByMessage(owner, 'god', { ...base, act: 'done', inReplyTo: null, conversation: undefined, body: 'nothing cited' }), [], 'no conversation, no citation');
   const short = doc('andy', entry({ id: 'x-ab12', from: 'god', at: 100 }));
   assert.deepEqual(ML.answeredByMessage(short, 'god', { ...base, act: 'done', inReplyTo: null, conversation: undefined, body: 'ab12' }), [], 'a tail under 6 chars is never cited');
+  // Jim N1: a sender_id is cited only as a whole word of 6+ chars.
+  const sids = doc('andy', entry({ id: 'x-q1', from: 'god', at: 100, senderId: '1' }), entry({ id: 'x-q2', from: 'god', at: 100, senderId: 'g.f-2(a)' }));
+  const cite = (body) => Object.keys(reasons(ML.answeredByMessage(sids, 'god', { ...base, act: 'done', inReplyTo: null, conversation: undefined, body }))).sort();
+  assert.deepEqual(cite('fixed 1 thing in 1.1.88'), [], 'a short sender_id is never cited');
+  assert.deepEqual(cite('fixed xg.f-2(a)'), [], 'not inside a word');
+  assert.deepEqual(cite('fixed g.f-2(a), done'), ['x-q2'], 'a whole word, regex characters taken literally');
+  assert.deepEqual(cite('fixed g.f-2(a)b'), [], 'not followed by a letter');
+  assert.deepEqual(cite('fixed gxf-2a'), [], 'not as a pattern');
 });
 
 // ── C: superseded ────────────────────────────────────────────────────────────────────────────
@@ -211,6 +219,19 @@ test('D/E (ledger): close parse errors are refused before anything else', () => 
   const ok = L.parseLedgerOp({ op: 'c', close: [{ id: 'a', reason: ' r ' }] });
   assert.deepEqual(ok.op.close, [{ id: 'a', reason: 'r' }]);
   assert.equal(L.LEDGER_CLOSE_MAX, 50);
+});
+
+test('D/E (ledger): an ask closed already is done, also when routing closes it meanwhile (Jim N3)', async () => {
+  const f = fixture({ closers: { gone: 'closed', racy: 'owner' } });
+  f.deps.closeAsk = (id) => { f.deps.askCloser = (x) => (x === id ? 'closed' : null); return false; };
+  const r = await L.applyLedgerOp({ op: 'n3', close: [{ id: 'gone', reason: 'r' }, { id: 'racy', reason: 'r' }] }, f.deps);
+  assert.equal(r.status, 200, r.body.line);
+  assert.match(r.body.line, /closed=2/);
+  const g = fixture({ closers: { racy: 'owner' } });
+  g.deps.closeAsk = () => false;
+  const r2 = await L.applyLedgerOp({ op: 'n3b', close: [{ id: 'racy', reason: 'r' }] }, g.deps);
+  assert.equal(r2.status, 500, 'not closed and not closed already is still an error');
+  assert.match(r2.body.line, /racy was not open any more/);
 });
 
 test('D/E (ledger): the owner closes (owner:), the requester withdraws (withdrawn:); anyone else is refused, all-or-nothing', async () => {
@@ -305,12 +326,28 @@ test('hive: D/E askCloser/closeAsk: owner, requester, never a third party; the r
   assert.equal(hive.closeAsk('andy-1', a.id, 'owner', '  '), false, 'a reason is required');
   assert.equal(hive.closeAsk('andy-1', a.id, 'owner', 'owner:shipped in c04fede3'), true);
   assert.equal(hive.closeAsk('god-1', b.id, 'requester', 'withdrawn:not needed'), true);
-  assert.equal(hive.closeAsk('god-1', b.id, 'requester', 'withdrawn:again'), false, 'closed once');
-  assert.equal(hive.askCloser('andy-1', b.id), null, 'no longer open');
+  // Jim N3: an ask closed already is done (a retry after routing closed it), with no second row.
+  assert.equal(hive.askCloser('andy-1', b.id), 'closed');
+  assert.equal(hive.askCloser('god-1', b.id), 'closed');
+  assert.equal(hive.askCloser('jim-1', b.id), null, 'still not a third party\'s');
+  assert.equal(hive.closeAsk('god-1', b.id, 'requester', 'withdrawn:again'), true, 'closed already');
+  assert.equal(hive.closeAsk('god-1', b.id, 'owner', 'owner:x'), false, 'the role must still match');
   assert.deepEqual(openIds(hive), [c.id]);
   const rows = Object.fromEntries(closedRows(hive));
   assert.equal(rows[a.id], 'owner:shipped in c04fede3');
   assert.equal(rows[b.id], 'withdrawn:not needed');
+  assert.equal(closedRows(hive).filter(([id]) => id === b.id).length, 1);
+});
+
+test('hive: E on a broadcast ask closes every recipient\'s copy (Jim N2)', async (t) => {
+  const { hive } = await floor(t);
+  const bc = hive.send({ to: 'broadcast', act: 'request', subject: 'everyone', body: 'go' }, 'god-1');
+  const holders = () => ['andy-1', 'jim-1'].filter((a) => hive.askCloser(a, bc.id) === 'owner');
+  assert.deepEqual(holders(), ['andy-1', 'jim-1'], 'each recipient owes its copy');
+  assert.equal(hive.askCloser('god-1', bc.id), 'requester');
+  assert.equal(hive.closeAsk('god-1', bc.id, 'requester', 'withdrawn:not needed'), true);
+  assert.deepEqual(holders(), [], 'one withdraw closes every copy');
+  assert.deepEqual(closedRows(hive).filter(([id]) => id === bc.id).map(([, r]) => r), ['withdrawn:not needed', 'withdrawn:not needed']);
 });
 
 test('hive: the one-time replay runs B and C over every agent\'s outbox/.sent, after delivery only, once', async (t) => {
@@ -331,19 +368,30 @@ test('hive: the one-time replay runs B and C over every agent\'s outbox/.sent, a
   put('god-1', 'g-sup.json', { to: 'andy-1', act: 'inform', subject: 'new plan', body: 'b', supersedes: [y.id] });
   put('andy-1', 'a-old.json', { to: 'god', act: 'done', subject: 'old', body: `cites ${z.id}` }, Date.now() / 1000 - 3600);
   put('andy-1', 'a-query.json', { to: 'god', act: 'query', subject: 'which?', body: `${z.id}?`, conversation: 'conv-z' });
-  put('andy-1', 'a-conv.json', { to: 'human', act: 'inform', subject: 'answered', body: 'see thread', conversation: 'conv-c' });
+  put('andy-1', 'a-conv.json', { to: 'human', act: 'done', subject: 'answered', body: 'see thread', conversation: 'conv-c' });
+  put('andy-1', 'a-status.json', { to: 'god', act: 'inform', subject: 'starting', body: `on ${z.id} now`, conversation: 'conv-z' });
   put('andy-1', 'a-bcast.json', { to: 'broadcast', act: 'done', subject: 'all', body: `${z.id}` });
   put('andy-1', 'bad-x.json', { to: 'god', act: 'done', subject: 'bad', body: `${z.id}` });
   put('andy-1', 'broken.json', '{not json');
+  // Jim N4: the replay runs in time order (the conversation rule's "latest open" depends on it):
+  // the earlier answer (its file name sorts last) answers the latest ask, the later one the first.
+  const p1 = hive.send({ to: 'andy-1', act: 'request', subject: 'p one', body: 'go', conversation: 'conv-p' }, 'god-1');
+  const p2 = hive.send({ to: 'andy-1', act: 'request', subject: 'p two', body: 'go', conversation: 'conv-p' }, 'god-1');
+  put('andy-1', 'z-first.json', { to: 'god', act: 'done', subject: 'one done', body: 'b', conversation: 'conv-p' }, later);
+  put('andy-1', 'y-second.json', { to: 'god', act: 'done', subject: 'other done', body: 'b', conversation: 'conv-p' }, later + 30);
 
   const closed = hive.runReplay84();
   assert.deepEqual(closed.map((s) => [s.id, s.reason]).sort(), [
     [x.id, 'auto:answered-cited:sent:a-done.json'],
     [y.id, 'auto:superseded:sent:g-sup.json'],
-    [c.id, 'auto:answered:inform:sent:a-conv.json']].sort());
-  assert.deepEqual(openIds(hive), [z.id, j.id].sort(), 'jim\'s ask is answered only to jim; z only by a query, an older file, a broadcast or a rejected file');
+    [c.id, 'auto:answered:done:sent:a-conv.json'],
+    [p2.id, 'auto:answered:done:sent:z-first.json'],
+    [p1.id, 'auto:answered:done:sent:y-second.json']].sort());
+  assert.deepEqual(openIds(hive), [z.id, j.id].sort(), 'jim\'s ask is answered only to jim; z only by a status inform, a query, an older file, a broadcast or a rejected file');
+  // Jim N4: a self-send is no answer. Routing never puts a self-ask in a ledger, so this is pinned by source.
+  assert.match(codeOnly(readSource('src/main/hive.ts'), 'hive.ts'), /if \(to === from \|\| !agents\.includes\(to\)\) continue;/);
   const marker = JSON.parse(fs.readFileSync(path.join(hive.root(), 'state', 'replay-84.json'), 'utf8'));
-  assert.equal(marker.closed.length, 3);
+  assert.equal(marker.closed.length, 5);
   assert.equal(hive.runReplay84(), null, 'once per hive');
 });
 

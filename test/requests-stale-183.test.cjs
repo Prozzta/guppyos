@@ -106,15 +106,20 @@ test('conversation rule: a later answer to THIS ask, back to the requester (in_r
       // Creed n1: two asks in one conversation; an answer naming no ask answers only the latest.
       ask('first', 'c-two', 10), ask('second', 'c-two', 12),
       // An answer that names an ask closes that ask only, even when it is not the latest.
-      ask('named', 'c-named', 10), ask('later', 'c-named', 12)),
+      ask('named', 'c-named', 10), ask('later', 'c-named', 12),
+      // REQUESTS-BADGE-84 (god, conv-c110a5): naming no ask, only a done/refuse answers; an inform
+      // there is a status. A reply (in_reply_to) of any answer act still answers its ask.
+      ask('infrep', 'c-infrep', 10)),
     god: doc('god', back('done', 'c-done', 20), back('inform', 'c-inf', 20), back('agree', 'c-agr', 20), back('refuse', 'c-ref', 20),
       back('query', 'c-q', 20), back('request', 'c-r', 20), back('done', 'c-early', 5), back('done', 'c-other', 20, { from: 'jim' }), back('done', undefined, 20),
-      back('inform', 'c-two', 20),
-      back('done', 'c-named', 20, { inReplyTo: 'named' })),
+      back('done', 'c-two', 20),
+      back('done', 'c-named', 20, { inReplyTo: 'named' }),
+      back('inform', 'c-infrep', 20, { inReplyTo: 'infrep' })),
   };
   const got = reasons(staleObligations(docs, new Map(), []));
-  assert.deepEqual(Object.keys(got).sort(), ['agree1', 'done1', 'inform1', 'named', 'refuse1', 'second']);
+  assert.deepEqual(Object.keys(got).sort(), ['done1', 'infrep', 'named', 'refuse1', 'second']);
   assert.match(got.done1, /^auto:answered:done:m\d+$/);
+  assert.match(got.infrep, /^auto:answered:inform:m\d+$/);
 });
 
 test('release rule: the first start of that release (or a later one) came after the ask', () => {
@@ -189,7 +194,9 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
   hive.patchTask('SHIP-IT-1', { status: 'done' });
   const hist = hive.ledgerGuard.taskMeta().cards['SHIP-IT-1'].history;
   assert.equal(hist[hist.length - 1].to, 'done', 'the guard recorded the transition');
-  hive.send({ to: 'god-1', act: 'inform', subject: 'logs are clean', body: 'done', conversation: 'conv-logs' }, 'andy-1');
+  hive.send({ to: 'god-1', act: 'inform', subject: 'looking now', body: 'starting', conversation: 'conv-logs' }, 'andy-1');
+  assert.ok(hive.mailObligations().flatMap((a) => a.openRequests.map((o) => o.id)).includes(byConv.id), 'a status inform answers nothing');
+  hive.send({ to: 'god-1', act: 'done', subject: 'logs are clean', body: 'done', conversation: 'conv-logs' }, 'andy-1');
   const before = ['god-1', 'andy-1'].map((id) => inboxCount(hive, id));
   const closed = hive.autoCloseStaleObligations(null);
   // REQUESTS-BADGE-84 B: the same-conversation answer already closed byConv when it was routed.
@@ -199,7 +206,7 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
     'the live ask and the follow-up about an already-done card are left');
   const rows = hive.logTail(500).filter((r) => r && r.kind === 'mail-obligation-closed');
   assert.deepEqual(rows.map((r) => [r.id, r.reason.replace(/:[^:]*$/, '')]).sort(),
-    [[byCard.id, 'auto:card-done'], [byConv.id, 'auto:answered:inform']].sort());
+    [[byCard.id, 'auto:card-done'], [byConv.id, 'auto:answered:done']].sort());
   assert.deepEqual(hive.autoCloseStaleObligations(null), [], 'idempotent');
 });
 
@@ -231,8 +238,10 @@ test('cleanup-183: god\'s 11 verified ids; with the rules, the replay floor keep
   const f = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'requests-stale-183.json'), 'utf8'));
   const gone = new Set(staleObligations(f.docs, new Map(Object.entries(f.cards)), f.releases).map((s) => s.id));
   const left = f.expectStay.filter((k) => !CLEANUP_183_IDS.includes(k.split('/')[1]));
+  // REQUESTS-BADGE-84 (god, conv-c110a5): 0a625d was answered only by status informs naming no ask,
+  // which answer nothing now. (On the live floor the 1.1.83 sweep closed it long ago.)
   assert.deepEqual(left.sort(), ['andy/2026-10-03T10-50-21-540Z-7d3555', 'creed/2026-10-03T10-50-21-754Z-1ffd35',
-    'jim/2026-10-03T10-50-21-106Z-642691', 'jim/2026-10-03T10-58-11-180Z-fb90e1']);
+    'jim/2026-10-02T17-39-20-034Z-0a625d', 'jim/2026-10-03T10-50-21-106Z-642691', 'jim/2026-10-03T10-58-11-180Z-fb90e1']);
   for (const id of CLEANUP_183_IDS) assert.ok(!gone.has(id), `${id} is one the rules could not prove (else it needs no cleanup)`);
 });
 
@@ -262,7 +271,7 @@ test('WIRING: a packaged-only main beat runs the sweep; only hive.ts auto-closes
   const hiveSrc = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
   assert.equal((hiveSrc.match(/\.autoCloseObligation\(/g) || []).length, 5, 'the sweep, the one-time cleanup, routing and its one-time replay (REQUESTS-BADGE-84 B/C) and the ledger close (D/E)');
   assert.equal((hiveSrc.match(/this\.mail\.autoCloseObligation\(s\.agentId, s\.id, s\.reason\)/g) || []).length, 3, 'the sweep, routing and the replay');
-  assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(f\.agentId, id, reason\.slice\(0, ASK_CLOSE_REASON_MAX\)\)/);
+  assert.match(hiveSrc, /for \(const agentId of f\.open\) this\.mail\.autoCloseObligation\(agentId, id, reason\.slice\(0, ASK_CLOSE_REASON_MAX\)\)/);
   assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(agentId, id, CLEANUP_183_REASON\)/);
   assert.equal((idx.match(/autoCloseObligation\(/g) || []).length, 0);
   assert.match(hiveSrc, /return this\.mail\.closeObligation\(agentId, id, 'closed-by-human'\);/);

@@ -298,7 +298,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
 }
 
 /** Is this entry an obligation the reply tracker follows (§4.3 + option B)? */
-function replyTracked(e: MailEntry): boolean {
+export function replyTracked(e: MailEntry): boolean {
   return e.requiresReply || e.act === 'request';
 }
 
@@ -787,8 +787,9 @@ export function openRequestEntries(doc: MailLedgerDoc, now: number): MailObligat
 
 /** REQUESTS-TAB-STALE (1.1.83): the acts that answer an ask when sent back in its conversation. */
 const ANSWER_ACTS = new Set(['done', 'inform', 'agree', 'refuse']);
-/** REQUESTS-BADGE-84 rule B: the acts whose citing of an ask answers it, the terminal results only.
- *  An inform or agree that names an ask is often a status ("NEXT: the audit of <id>, starting now"). */
+/** REQUESTS-BADGE-84 rule B: the acts that answer an ask with no in_reply_to (by citing it, or as the
+ *  latest open ask in its conversation), the terminal results only. An inform or agree there is often
+ *  a status ("NEXT: the audit of <id>, starting now"). */
 const CITE_ACTS = new Set(['done', 'refuse']);
 /** A card id as tasks.json spells them (MODS-GUARD, DWIGHT-INPUT-DEAD-179); only ids that exist count. */
 const CARD_ID_RE = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
@@ -818,9 +819,10 @@ function versionAtLeast(have: number[], want: number[]): boolean {
  * from AFTER the ask (a new ask about finished work is a new ask). An obligation is stale when:
  *  1. the subject names one or more cards (ids that exist in `cards`), every one is done, and
  *     each became done after the ask arrived (no done time on the card = no proof);
- *  2. the owner later sent the requester a done/inform/agree/refuse in the same conversation
- *     that answers THIS ask: its in_reply_to names it, or it names nothing and this is the
- *     latest open ask from that requester in the conversation;
+ *  2. the owner later sent the requester an answer in the same conversation that answers THIS
+ *     ask: a done/inform/agree/refuse whose in_reply_to names it, or a done/refuse that names
+ *     nothing while this is the latest open ask from that requester in the conversation
+ *     (REQUESTS-BADGE-84: a status inform there is no answer);
  *  3. the subject opens with a release (`1.1.82: …`) and the first start of any release at or
  *     above it came after the ask arrived.
  * Never by age alone: a dropped ask with none of this evidence stays open. Pure.
@@ -853,8 +855,9 @@ export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, 
       if (!reason && e.conversation) {
         const isLatest = latest.get(`${e.from}\u0000${e.conversation}`) === e.id;
         const answer = backOf(e.from).find((x) => x.from === agentId && x.conversation === e.conversation
-          && x.deliveredAt > e.deliveredAt && ANSWER_ACTS.has(x.act)
-          && (x.inReplyTo ? x.inReplyTo === e.id || (!!e.senderId && x.inReplyTo === e.senderId) : isLatest));
+          && x.deliveredAt > e.deliveredAt
+          && (x.inReplyTo ? ANSWER_ACTS.has(x.act) && (x.inReplyTo === e.id || (!!e.senderId && x.inReplyTo === e.senderId))
+            : isLatest && CITE_ACTS.has(x.act)));
         if (answer) reason = `auto:answered:${answer.act}:${answer.id}`;
       }
       const rel = RELEASE_PREFIX_RE.exec(subject);
@@ -898,31 +901,40 @@ function idTail(id: string): string | null {
   return m ? m[1] : null;
 }
 
+/** A sender_id shorter than this is never matched in text ("1" would match almost anything). */
+const CITE_SENDER_ID_MIN = 6;
+
+/** `w` as a whole word of `text`: no letter or digit right before or after it. */
+function wordIn(text: string, w: string): boolean {
+  const esc = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^0-9A-Za-z])${esc}($|[^0-9A-Za-z])`).test(text);
+}
+
 function cites(text: string, e: MailEntry): boolean {
-  if (text.includes(e.id) || (e.senderId && text.includes(e.senderId))) return true;
-  // The tail is letters and digits only (idTail), so it needs no escaping.
+  if (text.includes(e.id)) return true;
+  if (e.senderId && e.senderId.length >= CITE_SENDER_ID_MIN && wordIn(text, e.senderId)) return true;
   const tail = idTail(e.id);
-  return !!tail && new RegExp(`(^|[^0-9A-Za-z])${tail}($|[^0-9A-Za-z])`).test(text);
+  return !!tail && wordIn(text, tail);
 }
 
 /**
  * REQUESTS-BADGE-84 rule B: the open asks in `ownerDoc` (the sender's ledger) that a message the
- * owner sent to `requester` answers, beyond the one its in_reply_to closes (applyReplied). Only an
- * answer act (done/inform/agree/refuse) answers, and only an ask that arrived before it:
- *  - for a done or refuse, every open ask from the requester whose id (or sender_id, or its random
- *    tail as a whole word) the subject or body cites: `auto:answered-cited:<id>`;
+ * owner sent to `requester` answers, beyond the one its in_reply_to closes (applyReplied). Only a
+ * done or refuse answers (an inform is a status), and only an ask that arrived before it:
+ *  - every open ask from the requester whose id (or sender_id of 6+ chars, or its random tail, as
+ *    a whole word) the subject or body cites: `auto:answered-cited:<id>`;
  *  - with no in_reply_to, the latest open ask from the requester in the same conversation:
  *    `auto:answered:<act>:<id>`.
  * Never by content similarity or age. Pure.
  */
 export function answeredByMessage(ownerDoc: MailLedgerDoc, requester: string, m: RoutedMessageLike): StaleObligation[] {
-  if (!ANSWER_ACTS.has(m.act)) return [];
+  if (!CITE_ACTS.has(m.act)) return [];
   const open = Object.values(ownerDoc.entries).filter((e) => e.from === requester && isOpenObligation(e) && e.deliveredAt < m.at).sort(bySeq);
   const text = `${m.subject ?? ''}\n${m.body ?? ''}`;
   const out = new Map<string, string>();
   for (const e of open) {
     if (m.inReplyTo && (m.inReplyTo === e.id || (!!e.senderId && m.inReplyTo === e.senderId))) continue; // applyReplied's
-    if (CITE_ACTS.has(m.act) && cites(text, e)) out.set(e.id, `auto:answered-cited:${m.id}`);
+    if (cites(text, e)) out.set(e.id, `auto:answered-cited:${m.id}`);
   }
   if (!m.inReplyTo && m.conversation) {
     const latest = open.filter((e) => e.conversation === m.conversation).pop();

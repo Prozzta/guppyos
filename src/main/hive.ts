@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
+import { ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -3739,39 +3739,52 @@ export class HiveManager {
   }
 
   /**
-   * REQUESTS-BADGE-84 rules D and E: the open ask `id` as `caller` may close it by hand. 'owner'
-   * when it is in the caller's own ledger (the caller owes it), 'requester' when it is in another
-   * registry agent's ledger with the caller as its sender; null otherwise (a third party never may).
+   * REQUESTS-BADGE-84 rules D and E: the ask `id` as `caller` may close it by hand, and the
+   * ledgers where it is still open. 'owner' when it is open in the caller's own ledger (the caller
+   * owes it); 'requester' when other registry agents' ledgers hold it with the caller as sender
+   * (every copy of a broadcast, Jim N2); an ask of either kind that is no longer open comes back
+   * with `open: []` (Jim N3); null otherwise (a third party never may).
    */
-  private findClosableAsk(caller: string, id: string): { agentId: string; by: 'owner' | 'requester' } | null {
+  private findClosableAsk(caller: string, id: string): { by: 'owner' | 'requester'; open: string[] } | null {
     if (typeof id !== 'string' || !isValidMailId(id)) return null;
-    const open = (agentId: string): MailLedgerDoc['entries'][string] | null => {
+    const ask = (agentId: string): MailLedgerDoc['entries'][string] | null => {
       try {
         if (!this.mail.hasAgent(agentId)) return null;
         const e = this.mail.ledger(agentId).entries[id];
-        return e && isOpenObligation(e) ? e : null;
+        return e && replyTracked(e) ? e : null;
       } catch { return null; }
     };
-    if (open(caller)) return { agentId: caller, by: 'owner' };
+    const own = ask(caller);
+    if (own && isOpenObligation(own)) return { by: 'owner', open: [caller] };
     const reg = this.registry();
+    let sent = false;
+    const open: string[] = [];
     for (const a of Object.keys(reg.agents ?? {})) {
       if (a === caller || !Object.prototype.hasOwnProperty.call(reg.agents, a)) continue;
-      if (open(a)?.from === caller) return { agentId: a, by: 'requester' };
+      const e = ask(a);
+      if (e?.from !== caller) continue;
+      sent = true;
+      if (isOpenObligation(e)) open.push(a);
     }
-    return null;
+    if (sent) return { by: 'requester', open };
+    return own ? { by: 'owner', open: [] } : null;
   }
 
-  /** REQUESTS-BADGE-84 D/E, for the ledger command's `close` part: who `caller` is for the open ask. */
-  askCloser(caller: string, id: string): 'owner' | 'requester' | null {
-    return this.findClosableAsk(caller, id)?.by ?? null;
+  /** REQUESTS-BADGE-84 D/E, for the ledger command's `close` part: who `caller` is for the ask,
+   *  'closed' when it was the caller's to close but is closed already (closed is done). */
+  askCloser(caller: string, id: string): 'owner' | 'requester' | 'closed' | null {
+    const f = this.findClosableAsk(caller, id);
+    return !f ? null : f.open.length ? f.by : 'closed';
   }
 
-  /** REQUESTS-BADGE-84 D/E: close it with `reason` (`owner:…` / `withdrawn:…`, a
-   *  `mail-obligation-closed` row); true when it closed. The role must still be `by`. */
+  /** REQUESTS-BADGE-84 D/E: close it, every open copy, with `reason` (`owner:…` / `withdrawn:…`,
+   *  a `mail-obligation-closed` row each); true when it is closed now (or was already). The role
+   *  must still be `by`. */
   closeAsk(caller: string, id: string, by: 'owner' | 'requester', reason: string): boolean {
     const f = this.findClosableAsk(caller, id);
     if (!f || f.by !== by || typeof reason !== 'string' || !reason.trim()) return false;
-    return this.mail.autoCloseObligation(f.agentId, id, reason.slice(0, ASK_CLOSE_REASON_MAX)).length > 0;
+    for (const agentId of f.open) this.mail.autoCloseObligation(agentId, id, reason.slice(0, ASK_CLOSE_REASON_MAX));
+    return true;
   }
 
   /** REQUESTS-BADGE-84 rules B and C for one routed message (see answeredByMessage and
@@ -5418,8 +5431,9 @@ In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool a
 \`ledger --file op.json\`.
 
 ## Rules of the road
-- An ask closes when you answer it (\`in_reply_to\` its id, or cite its id in a \`done\`/\`inform\`
-  to the asker), when its card is done, or when its sender supersedes it. FYIs go as \`inform\`.
+- An ask closes when you answer it (\`in_reply_to\` its id, or a \`done\`/\`refuse\` to the asker
+  that cites its id or is in its conversation; an \`inform\` is a status and closes nothing), when its
+  card is done, or when its sender supersedes it. FYIs go as \`inform\`.
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
 - An \`inform\` or \`agree\` that needs no reply does not wake an idle recipient: it reaches the

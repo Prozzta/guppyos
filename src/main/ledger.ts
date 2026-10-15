@@ -81,10 +81,11 @@ export interface LedgerDeps {
   /**
    * REQUESTS-BADGE-84 D/E: who the caller is for the open ask `id`: 'owner' (the caller owes it:
    * it is in the caller's own ledger), 'requester' (the caller sent it: it is in another agent's
-   * ledger with the caller as sender), or null (no open ask of the caller's). Absent = no close part.
+   * ledger with the caller as sender), 'closed' (one of those, closed already: nothing to do), or
+   * null (no ask of the caller's). Absent = no close part.
    */
-  askCloser?(id: string): 'owner' | 'requester' | null;
-  /** Close it with this exact reason (`owner:…` or `withdrawn:…`); true when it closed. */
+  askCloser?(id: string): 'owner' | 'requester' | 'closed' | null;
+  /** Close it with this exact reason (`owner:…` or `withdrawn:…`); true when it is closed. */
   closeAsk?(id: string, by: 'owner' | 'requester', reason: string): boolean;
 }
 
@@ -299,7 +300,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
     return { status: 404, body: { ok: false, line: `refused: message.card ${msgCard} is not a card` } };
   }
   // REQUESTS-BADGE-84 D/E: every ask must be one the caller owes (owner) or sent (requester).
-  const closers = new Map<string, 'owner' | 'requester'>();
+  const closers = new Map<string, 'owner' | 'requester' | 'closed'>();
   if (op.close) {
     if (!deps.askCloser || !deps.closeAsk) return { status: 400, body: { ok: false, line: 'refused: close is not available here' } };
     for (const c of op.close) {
@@ -403,7 +404,9 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
       if (closed.includes(c.id)) continue;
       const by = closers.get(c.id)!;
       try {
-        if (!deps.closeAsk!(c.id, by, `${by === 'owner' ? 'owner' : 'withdrawn'}:${c.reason}`)) throw new Error(`${c.id} was not open any more`);
+        // Jim N3: an ask closed meanwhile (routing closed it by this op's own reply) is done, not an error.
+        if (by !== 'closed' && !deps.closeAsk!(c.id, by, `${by === 'owner' ? 'owner' : 'withdrawn'}:${c.reason}`)
+          && deps.askCloser!(c.id) !== 'closed') throw new Error(`${c.id} was not open any more`);
         closed.push(c.id);
         rec.closed = closed;
         save();
