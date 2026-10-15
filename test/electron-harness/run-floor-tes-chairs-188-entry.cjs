@@ -1,8 +1,8 @@
 'use strict';
 
-/** TES-FLOOR-COLLISION-188: the Captain's and Chair6's sitter coming in and sitting down
- *  (floor-tes-chairs-188-entry.tsx), written as <out>/captain-entry.png, <out>/chair6-entry.png (4x strips)
- *  and <out>/report.json (the filmed frames: render, walker position, seated). APPDATA, LOCALAPPDATA,
+/** TES-FLOOR-COLLISION-188: the Captain's, Chair3/4/5's and Chair6's sitter coming in and sitting down
+ *  (floor-tes-chairs-188-entry.tsx), written as <out>/<seat>-entry.png and <out>/<seat>-tail.png (4x strips;
+ *  the tail is the last frames before the sit) and <out>/report.json (the filmed frames: render, walker position, seated). APPDATA, LOCALAPPDATA,
  *  USERPROFILE and HOME point into <out>/jail:
  *    node test/electron-harness/run-floor-tes-chairs-188-entry.cjs --out <dir> */
 const { mkdirSync, writeFileSync } = require('node:fs');
@@ -26,9 +26,11 @@ const TES = join(__dirname, '..', '..', 'themes', 'tes');
   });
   if (!r.ok) { console.error(r.error); process.exit(1); }
   const png = (url) => Buffer.from(url.slice(url.indexOf(',') + 1), 'base64');
-  writeFileSync(join(out, 'captain-entry.png'), png(r.shots.Captain.strip));
-  writeFileSync(join(out, 'chair6-entry.png'), png(r.shots.Chair6.strip));
-  const report = { box: r.box, frame: r.frame, t: r.t, shots: Object.fromEntries(Object.entries(r.shots).map(([k, v]) => [k, { recorded: v.recorded, frames: v.frames }])) };
+  for (const [k, v] of Object.entries(r.shots)) {
+    writeFileSync(join(out, `${k.toLowerCase()}-entry.png`), png(v.strip));
+    writeFileSync(join(out, `${k.toLowerCase()}-tail.png`), png(v.tail));
+  }
+  const report = { box: r.box, frame: r.frame, t: r.t, shots: Object.fromEntries(Object.entries(r.shots).map(([k, v]) => [k, { recorded: v.recorded, frames: v.frames, tailFrames: v.tailFrames }])) };
   writeFileSync(join(out, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 })().catch((e) => { console.error(e); process.exit(1); });

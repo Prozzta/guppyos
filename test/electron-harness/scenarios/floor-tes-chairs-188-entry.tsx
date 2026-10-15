@@ -1,8 +1,10 @@
 /**
  * SCENARIO - TES-FLOOR-COLLISION-188: the REAL OfficeFloor drawing the bundled tes pack with nine agents at work,
- * so every seat is taken. For the Captain and Chair6 it films the sitter's way in: every render while that
+ * so every seat is taken. For the Captain, Chair3/4/5 (Jim's crops) and Chair6 it films the sitter's way in: every render while that
  * walker is within REACH px of its seat (until it has sat a while) is cropped at ZOOM x around the seat; frames
- * where nothing moved are dropped and up to FRAMES are kept, laid side by side as one strip per seat.
+ * where nothing moved are dropped and up to FRAMES are kept, laid side by side as one strip per seat; and the
+ * tail, every kept frame of the last TAIL before the sit plus the first 2 seated (where a back approach spot
+ * lies in the chair's art: the SHOULD-1 frames), as a second strip.
  * Run on demand: node test/electron-harness/run-floor-tes-chairs-188-entry.cjs --out <dir>
  */
 import { createRoot } from 'react-dom/client';
@@ -34,11 +36,14 @@ declare global {
 const BOX = { w: 1000, h: 680 };
 const STEP_MS = 1000 / 60;
 const MAX_RENDERS = 9000;
-const REACH = 34, SAT = 30, FRAMES = 10, ZOOM = 4;
+const REACH = 34, SAT = 30, FRAMES = 10, TAIL = 8, ZOOM = 4;
 // world px crops: the seat with its approach spot (Captain: front, below; Chair6: back, to the left)
 const SHOTS: Record<string, { x: number; y: number; w: number; h: number }> = {
   Captain: { x: 432, y: 140, w: 64, h: 72 },
   Chair6: { x: 524, y: 226, w: 64, h: 60 },
+  Chair3: { x: 345, y: 150, w: 56, h: 56 },
+  Chair4: { x: 345, y: 229, w: 56, h: 56 },
+  Chair5: { x: 522, y: 152, w: 64, h: 56 },
 };
 
 Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
@@ -101,15 +106,21 @@ proto.render = function (this: Application) {
   }
   if ([...shots.values()].every((s) => s.done)) {
     const out: Record<string, unknown> = {};
-    for (const [name, sh] of shots) {
-      const n = sh.frames.length, pick = n <= FRAMES ? sh.frames : Array.from({ length: FRAMES }, (_, i) => sh.frames[Math.round(i * (n - 1) / (FRAMES - 1))]);
+    const stripOf = (name: string, pick: Shot['frames']): string => {
       const C = SHOTS[name], gap = 8, W = pick.length * (C.w * ZOOM + gap) - gap;
       const strip = document.createElement('canvas');
       strip.width = W; strip.height = C.h * ZOOM;
       const s2 = strip.getContext('2d')!;
       s2.fillStyle = '#ff00ff'; s2.fillRect(0, 0, W, strip.height);
       pick.forEach((f, i) => s2.drawImage(f.c, i * (C.w * ZOOM + gap), 0));
-      out[name] = { strip: strip.toDataURL('image/png'), frames: pick.map((f) => ({ render: f.render, at: f.at.map((v) => Math.round(v * 10) / 10), seated: f.seated })), recorded: n };
+      return strip.toDataURL('image/png');
+    };
+    const meta = (pick: Shot['frames']) => pick.map((f) => ({ render: f.render, at: f.at.map((v) => Math.round(v * 10) / 10), seated: f.seated }));
+    for (const [name, sh] of shots) {
+      const n = sh.frames.length, pick = n <= FRAMES ? sh.frames : Array.from({ length: FRAMES }, (_, i) => sh.frames[Math.round(i * (n - 1) / (FRAMES - 1))]);
+      const sat = sh.frames.findIndex((f) => f.seated), end = sat < 0 ? n : sat;
+      const tail = sh.frames.slice(Math.max(0, end - TAIL), end + 2);
+      out[name] = { strip: stripOf(name, pick), frames: meta(pick), tail: stripOf(name, tail), tailFrames: meta(tail), recorded: n };
     }
     result = { frame: renders, t: Math.round(crew.t), shots: out };
     if (done) { done(); done = null; }

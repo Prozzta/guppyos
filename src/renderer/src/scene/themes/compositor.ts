@@ -292,6 +292,14 @@ export function personKey(y: number, chair: SortedItem | null, pose: SeatPose | 
   return chair && pose ? { foot: chair.foot, rank: chair.rank + (pose.behind ? -0.5 : 0.5) } : { foot: y, rank: 1e9 };
 }
 
+/** A person standing with their feet in their OWN seat's chair art (behind its backrest, where a back approach
+ *  spot lies: TES Chair3/4/5), so on the way to or from the seat step: drawn just in front of that chair, as
+ *  the step draws them, not behind the backrest for the frames before and after it. Else null. */
+export function ownChairKey(x: number, y: number, chair: SortedItem | null): { foot: number; rank: number } | null {
+  const c = chair?.chair;
+  return c && x >= c.x0 && x <= c.x1 && y >= c.top && y <= chair!.foot ? { foot: chair!.foot, rank: chair!.rank + 0.5 } : null;
+}
+
 /** Draw order: foot line, then Tiled's layer order (people last on a tie). */
 export function byDepth<T extends { foot: number; rank: number }>(a: T, b: T): number {
   return a.foot - b.foot || a.rank - b.rank;
