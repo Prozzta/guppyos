@@ -266,7 +266,8 @@ test('StationFloor draws below and the statics through the cache, with the very 
   assert.match(src, /cacheWorld\.addChild\(below\);\s*for \(const i of order\) if \(staticTex\[i\]\) cacheStatics\[i\] = cacheWorld\.addChild\(staticSprite\(i\)\);/);
   assert.match(src, /const belowDirect = new Sprite\(below\.texture\);\s*world\.addChild\(belowDirect\);\s*if \(cached\) \{/);
   assert.match(src, /app\.stage\.addChild\(cacheLayer\);\s*\}\s*world\.addChild\(sortLayer\);/);
-  assert.match(src, /if \(!cached \|\| hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*app\.stage\.addChild\(world\);/);
+  // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
+  assert.match(src, /if \(!cached \|\| hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
   // The cache follows the world's transform, is drawn on the canvas by the canvas's own arithmetic
@@ -313,7 +314,8 @@ test('StationFloor frees the cache target, its cells and every texture it made o
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => app\.renderer\.runners\.postrender\.remove\(postrender\),\s*dropCells,\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
   assert.match(src, /const dropCells = \(\) => \{\s*for \(const s of cells\.values\(\)\) s\.destroy\(\{ texture: true, textureSource: false \}\);\s*cells\.clear\(\);\s*\};/);
-  assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
+  // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
+  assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__disposeHiveBubbles\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
   assert.doesNotMatch(src, /safeDestroy\(a\)/, 'the unmount destroys the app only through teardownFloor');
   assert.match(src, /const own = \(px: Pixels\) => \{ const t = texture\(px\); owned\.push\(t\); return t; \};/);
   assert.equal((src.match(/\btexture\(/g) || []).length, 2, "texture() is defined once and called only by own()");

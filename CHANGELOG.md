@@ -23,6 +23,10 @@ All notable changes to this project are documented here. The format is based on
   across their own chair only, and gets up the same way. A theme pack can name a seat's side with
   `"approach"` in its manifest.
 
+- **TES now shows thought clouds, brief crew speech and flying hive envelopes.** The station floor
+  reuses the Office's bubbles, follows liveness-derived activity, and keeps those live overlays
+  animating even while its static map cache is settled.
+
 ### Removed
 
 - **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias
