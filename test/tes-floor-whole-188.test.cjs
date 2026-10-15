@@ -42,6 +42,8 @@ for (const [dpr, ns] of [['1', [2, 1, 3]], ['1.25', [2, 3]]]) {
     assert.equal(r.texelBadMax, 0, `every device px is its map px of the depth sort (worst: ${r.texelBadAt})`);
     assert.ok(r.teethChecks >= 10 && r.teethMax > 0, `with the people over every static the picture differs (${r.teethMax} px)`);
     assert.equal(r.edgeBlank, 0, 'no blank px on the pane edges');
+    assert.ok(r.coveredFrames >= 100, `frames with an axis the art covers: ${r.coveredFrames}`);
+    assert.equal(r.marginMax, 0, `on an axis the art covers, no frame shows the frame margin (${r.marginFrames} frames, worst ${r.marginMax} at ${r.marginAt})`);
     assert.equal(r.bottomBand, 0, 'below the ship, the bottom row is hull: no band');
   });
 }

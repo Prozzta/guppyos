@@ -104,6 +104,8 @@ const out = {
   frames: 0, wholeBad: 0, nBad: 0, kBad: 0, nSeen: [] as number[], builds: 0, easing: 0,
   texelChecks: 0, texelEasing: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
   teethChecks: 0, teethMax: 0, edgeBlank: 0, bottomBand: 0, bottomChecks: 0,
+  // Every frame: on an axis the art covers, the device px of frame margin (backdrop) in the pane.
+  coveredFrames: 0, marginFrames: 0, marginMax: 0, marginAt: '',
   configs: [] as Array<{ box: string; dev: string; n: number; ox: number; oy: number; sideL: number; sideR: number; edges: Record<string, number> }>,
   badFrames: [] as Array<{ at: number; bad: number; box: number[]; samples: unknown[] }>,
   errors: [] as string[]
@@ -129,6 +131,14 @@ proto.render = function (this: any) {
       const keep = S.frame.keep;
       if (Math.round(n) !== wholeScale(keep, Wd, Hd)) out.nBad++;
       if (S.k !== Math.round(n)) out.kBad++;
+      const art = S.frame.art;
+      const cx = (art.x1 + 1 - art.x0) * n >= Wd, cy = (art.y1 + 1 - art.y0) * n >= Hd;
+      if (cx || cy) {
+        out.coveredFrames++;
+        const m = (cx ? Math.max(0, ox + art.x0 * n) + Math.max(0, Wd - (ox + (art.x1 + 1) * n)) : 0)
+          + (cy ? Math.max(0, oy + art.y0 * n) + Math.max(0, Hd - (oy + (art.y1 + 1) * n)) : 0);
+        if (m > 0) { out.marginFrames++; if (m > out.marginMax) { out.marginMax = m; out.marginAt = `${renders} ${Wd}x${Hd} n=${n} ox=${ox} oy=${oy}`; } }
+      }
       if (out.nSeen[out.nSeen.length - 1] !== Math.round(n)) out.nSeen.push(Math.round(n));
       out.builds = app.__tesStaticCacheBuilds ?? 0;
       const moved = w.x !== last.x || w.y !== last.y;

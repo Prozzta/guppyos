@@ -16,6 +16,8 @@ import { wholeScale } from '../themes/framing';
 // pixel is n x n device px on every frame. The frame's top meets the pane's top when its content
 // fits (the hull runs on past the bottom edge); else the view is centred or clamped as before.
 // The keep box always stays in view: only the hull, its rim and the upper wall are ever cut.
+// On an axis the art covers, the pane stays inside the art: the frame's margin (backdrop) shows
+// only on an axis the art does not cover, so no pan or nudge exposes it.
 
 const LERP_SPEED = 0.08;
 // TES-GUPPY-SETTLE: the rate LERP_SPEED was tuned at (the floor's 30 fps tick).
@@ -69,7 +71,7 @@ export class Camera {
   private mapHeight = 480;
   private manualOverride = false;
   /** The fitted rectangle, in map pixels (null: the whole map), and its clippable bottom rows. */
-  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep } | null = null;
+  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null = null;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -90,7 +92,7 @@ export class Camera {
   }
 
   /** Fit a part of the map instead of all of it (see TES-GUPPY-FRAMING above); null for the whole map. */
-  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep } | null): void {
+  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null): void {
     this.frame = frame;
     if (!this.manualOverride) this.fitToScreen();
   }
@@ -208,7 +210,8 @@ export class Camera {
   /** TES-FLOOR-WHOLE-188: place the map at n device px per map px, on whole device px. Each axis
    *  works as update() does (centred when the frame fits, else the eased point clamped inside the
    *  frame; vertically the frame's top at the pane's top when its content fits), then the keep
-   *  box is clamped into the pane (centred on it if it cannot fit, at n = 1). */
+   *  box is clamped into the pane (centred on it if it cannot fit, at n = 1). Before that, on an
+   *  axis the art covers, the pane is clamped inside the art (Jim: the frame's margin showed). */
   private placeWhole(n: number, r: number, keep: Keep): void {
     this.currentZoom = this.targetZoom = n / r;
     const b = this.box();
@@ -220,6 +223,9 @@ export class Camera {
     let y = (b.h - b.deadBottom) * n <= H
       ? -b.y * n
       : fit(H / 2 - this.currentY * n, H - (b.y + b.h) * n, -b.y * n);
+    const a = this.frame?.art;
+    if (a && (a.x1 + 1 - a.x0) * n >= W) x = fit(x, W - (a.x1 + 1) * n, -a.x0 * n);
+    if (a && (a.y1 + 1 - a.y0) * n >= H) y = fit(y, H - (a.y1 + 1) * n, -a.y0 * n);
     x = Math.round(fit(x, -keep.x0 * n, W - (keep.x1 + 1) * n));
     y = Math.round(fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n));
     this.container.scale.set(n / r);

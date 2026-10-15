@@ -33,6 +33,14 @@ function rest(W, H, r, opts) {
   return m.c;
 }
 const KEEP = TES.keep, KW = KEEP.x1 - KEEP.x0 + 1, KH = KEEP.y1 - KEEP.y0 + 1;
+const ART = TES.art, AW = ART.x1 - ART.x0 + 1, AH = ART.y1 - ART.y0 + 1;
+/** On an axis the art covers (art * n >= pane), the pane lies inside the art: no margin (backdrop) shows. */
+function artFailures(Wd, Hd, n, ox, oy) {
+  const bad = [];
+  if (AW * n >= Wd && (ox + ART.x0 * n > 1e-6 || ox + (ART.x1 + 1) * n < Wd - 1e-6)) bad.push(`margin shows in x: ${ox} (art ${ox + ART.x0 * n}..${ox + (ART.x1 + 1) * n} of ${Wd})`);
+  if (AH * n >= Hd && (oy + ART.y0 * n > 1e-6 || oy + (ART.y1 + 1) * n < Hd - 1e-6)) bad.push(`margin shows in y: ${oy} (art ${oy + ART.y0 * n}..${oy + (ART.y1 + 1) * n} of ${Hd})`);
+  return bad;
+}
 
 /** Every way a rested whole camera can be wrong, for a pane W x H CSS px at DPR r. */
 function wholeFailures(W, H, r, c) {
@@ -46,8 +54,11 @@ function wholeFailures(W, H, r, c) {
     if (ox + KEEP.x0 * n < -1e-6 || ox + (KEEP.x1 + 1) * n > Wd + 1e-6) bad.push(`keep cut in x: ${ox}`);
     if (oy + KEEP.y0 * n < -1e-6 || oy + (KEEP.y1 + 1) * n > Hd + 1e-6) bad.push(`keep cut in y: ${oy}`);
   }
-  // The frame's content fits: its top meets the pane's top (the hull runs past the bottom).
-  if ((TES.h - TES.deadBottom) * n <= Hd && Math.abs(oy + TES.y * n) > 1e-6) bad.push(`frame top not at the pane top: ${oy}`);
+  // The frame's content fits and the art does not cover the height: the frame's top meets the
+  // pane's top (the hull runs past the bottom). Where the art covers it, the art's top does.
+  if ((TES.h - TES.deadBottom) * n <= Hd && AH * n < Hd && Math.abs(oy + TES.y * n) > 1e-6) bad.push(`frame top not at the pane top: ${oy}`);
+  if ((TES.h - TES.deadBottom) * n <= Hd && AH * n >= Hd && Math.abs(oy + ART.y0 * n) > 1e-6) bad.push(`art top not at the pane top: ${oy}`);
+  bad.push(...artFailures(Wd, Hd, n, ox, oy));
   // The frame fits across: centred to within half a device px.
   if (TES.w * n <= Wd && Math.abs(ox + TES.x * n - (Wd - TES.w * n) / 2) > 0.5 + 1e-6) bad.push(`not centred: ${ox}`);
   return bad;
@@ -112,6 +123,37 @@ test('TES camera is whole on every frame: a resize steps n at once, a nudge ease
   assert.ok(xs.size >= 2, `the nudge moved the view (${xs.size} positions)`);
   for (let i = 0; i < 600; i++) m.k.update(1 / 30);
   assert.deepEqual({ x: m.c.x, y: m.c.y }, rested, 'back where it rested');
+});
+
+/** Nudges toward the art's corners, edges and centre in several panes: every frame's failures, and
+ *  how many frames had an axis the art covers. 576x587@1 is the 560x555 window's bled pane: n = 2
+ *  and the art exactly the pane's width. */
+function nudgeFailures(opts) {
+  const panes = [[576, 587, 1], [576, 587, 1.25], [716, 502, 1.25], [976, 672, 1.5], [720, 800, 1.25], [517, 301, 1.5], [450, 900, 2]];
+  const bad = [];
+  let covered = 0;
+  for (const [W, H, r] of panes) {
+    const m = make(W, H, r, opts);
+    for (let i = 0; i < 300; i++) m.k.update(1 / 30);
+    const Wd = Math.round(W * r), Hd = Math.round(H * r);
+    for (const [tx, ty] of [[300, 30], [620, 30], [300, 420], [620, 420], [463, 0], [463, 640], [0, 220], [960, 220], [400, 300]]) {
+      m.k.nudgeToward(tx, ty, 1000);
+      for (let i = 0; i < 80; i++) {
+        m.k.update(1 / 60);
+        const n = m.c.z * r, ox = m.c.x * r, oy = m.c.y * r;
+        if (!isInt(n) || !isInt(ox) || !isInt(oy)) bad.push(`${W}x${H}@${r} toward ${tx},${ty} frame ${i}: not whole`);
+        for (const f of artFailures(Wd, Hd, n, ox, oy)) bad.push(`${W}x${H}@${r} toward ${tx},${ty} frame ${i}: ${f}`);
+        if (AW * n >= Wd || AH * n >= Hd) covered++;
+      }
+    }
+  }
+  return { bad, covered };
+}
+
+test('TES camera nudged anywhere: on an axis the art covers, no frame of the pan shows the margin (Jim: up to 8n device px of backdrop)', () => {
+  const { bad, covered } = nudgeFailures();
+  assert.deepEqual(bad.slice(0, 5), []);
+  assert.ok(covered > 1000, `frames with a covered axis: ${covered}`);
 });
 
 test('TES camera follows a DPR change after mount: n for the new device size', () => {
@@ -200,13 +242,15 @@ test('TES whole-camera mutant census: each guard is caught', () => {
     { name: 'frame centred vertically', from: '      ? -b.y * n\n', to: '      ? (H - (b.h - b.deadBottom) * n) / 2 - b.y * n\n' },
     { name: 'n floored from the frame', from: 'return { n: wholeScale(keep, Math.round(this.viewWidth * r), Math.round(this.viewHeight * r)), r, keep };', to: 'return { n: Math.max(1, Math.floor(Math.min(this.viewWidth * r / this.box().w, this.viewHeight * r / (this.box().h - this.box().deadBottom)))), r, keep };' },
     { name: 'not whole: raw fit', from: '    if (w) { this.placeWhole(w.n, w.r, w.keep); return; }\n', to: '' },
+    { name: 'art clamp dropped (x)', from: '    if (a && (a.x1 + 1 - a.x0) * n >= W) x = fit(x, W - (a.x1 + 1) * n, -a.x0 * n);\n', to: '' },
+    { name: 'art clamp dropped (y)', from: '    if (a && (a.y1 + 1 - a.y0) * n >= H) y = fit(y, H - (a.y1 + 1) * n, -a.y0 * n);\n', to: '' },
   ];
   const norm = source.replace(/\r\n/g, '\n');
   for (const mutant of mutants) {
     const hits = norm.split(mutant.from).length - 1;
     assert.equal(hits, 1, `mutant ${mutant.name} must match exactly once`);
     const MutantCamera = loadTs.fromText('src/renderer/src/scene/office/Camera.ts', norm.replace(mutant.from, mutant.to)).Camera;
-    const failures = gridFailures({ CameraClass: MutantCamera });
+    const failures = [...gridFailures({ CameraClass: MutantCamera }), ...nudgeFailures({ CameraClass: MutantCamera }).bad];
     assert.ok(failures.length > 0, `SURVIVED: ${mutant.name}`);
   }
 });

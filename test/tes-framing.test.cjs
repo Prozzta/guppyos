@@ -121,7 +121,7 @@ test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuf
 
 test('floorFrame: TES frames its art with the margin; the office (and any other id) fits the whole map', () => {
   const t = F.floorFrame('tes', 960, 640);
-  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 } });
+  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 }, art: { x0: 320, y0: 32, x1: 607, y1: 415 } });
   assert.deepEqual(F.packFrame('tes'), t);
   for (const id of ['office', 'dunder', undefined, null, '', 'toString', '__proto__']) {
     assert.deepEqual(F.floorFrame(id, 1024, 768), { x: 0, y: 0, w: 1024, h: 768, deadBottom: 0 }, String(id));

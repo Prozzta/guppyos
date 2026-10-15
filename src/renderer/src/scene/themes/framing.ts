@@ -17,6 +17,9 @@ export interface FloorFrame {
   /** TES-FLOOR-WHOLE-188: the map px that must stay in view (inclusive), when the floor is
    *  drawn at a whole number of device px per map px; everything else may be cut by the pane. */
   keep?: { x0: number; y0: number; x1: number; y1: number };
+  /** TES-FLOOR-WHOLE-188: the art's own box (inclusive map px, no margin). On an axis the art
+   *  covers, the whole camera keeps the pane inside it, so a pan never shows the frame's margin. */
+  art?: { x0: number; y0: number; x1: number; y1: number };
 }
 
 /** Map pixels kept clear around the art on its top, left and right. */
@@ -41,7 +44,7 @@ export function packFrame(packId: string | null | undefined): FloorFrame | null 
   if (!a) return null;
   const x = Math.max(0, a.x0 - FRAME_MARGIN), y = Math.max(0, a.y0 - FRAME_MARGIN);
   const f: FloorFrame = { x, y, w: a.x1 + 1 + FRAME_MARGIN - x, h: a.y1 + 1 - y, deadBottom: a.deadBottom };
-  if (a.keep) f.keep = { ...a.keep };
+  if (a.keep) { f.keep = { ...a.keep }; f.art = { x0: a.x0, y0: a.y0, x1: a.x1, y1: a.y1 }; }
   return f;
 }
 
