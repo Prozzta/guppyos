@@ -20,6 +20,7 @@ import { activityStatus, heavyActivity, heavyText } from '@shared/activityView';
 import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
 import { StationFloor } from '../themes/StationFloor';
 import { isStationPack, loadStationPack } from '../themes/themeCatalog';
+import { floorPowerPreference, recordFloorRenderer } from '../graphicsProbe';
 import type { LoadedPack } from '../themes/packs';
 
 // The map, tileset atlases, desk-claim order, errand spots, coffee-economy
@@ -291,7 +292,10 @@ function OfficeScene() {
     const init = async () => {
       // Load the active theme bundle (falls back to 'office' on a bad/absent bundle).
       const theme = await loadTheme(officeTheme);
+      // GPU-SETTING-188: Graphics = GPU asks WebGL for the high-performance GPU; Auto and CPU only ask nothing.
+      const gfx = await floorPowerPreference();
       await app.init({
+        ...gfx,
         background: hexNum(theme.palette.background),
         antialias: false,
         roundPixels: true,
@@ -307,6 +311,7 @@ function OfficeScene() {
         height: host.clientHeight || 600,
       });
       if (mountIdRef.current !== mountId) { safeDestroy(app); return; }
+      recordFloorRenderer(app);   // GPU-SETTING-188: the renderer really in use, for Settings' indicator
       while (host.firstChild) host.removeChild(host.firstChild);
       host.appendChild(app.canvas);
 

@@ -14,6 +14,7 @@ import {
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
+import { GraphicsSetting } from './GraphicsSetting';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
 import { CodexPluginsSetting } from './CodexPluginsSetting';
 import { CodexLayerOptInsSetting } from './CodexLayerNotice';
@@ -1002,6 +1003,11 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                       {/* v1.1.45 unit #8 (C2.8): Capacity display, directly after Notifications,
                           in its own section with its own save lifecycle. */}
                       <CapacityDisplaySetting onOpenDetails={() => { if (openFirstCapacityDetail()) onClose(); }} />
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      {/* GPU-SETTING-188: Graphics (Auto / GPU / CPU only) and what is really rendering. */}
+                      <GraphicsSetting />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

@@ -16,6 +16,7 @@ import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
 import { isAgentUsageDisplay } from '../shared/agentUsage';
 import { codexLayerOptInKey } from './codexProjectLayers';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
+import { parseGraphicsMode, type GraphicsMode } from '../shared/graphicsMode';
 import { CODEX_TOOL_OUTPUT_LIMIT_DEFAULT, normalizeCodexToolOutputLimit } from '../shared/codexToolOutputLimit';
 import { expandTilde, normalizeHiveHome } from './fs';
 import { isProjectThemeId, isProjectThemeSeed, isStoredProjectThemeId, projectThemeHomeKey, resolveProjectTheme, type ProjectThemeId, type ProjectThemeSeed } from '../shared/projectTheme';
@@ -321,6 +322,9 @@ export interface HarnessConfig {
   /** v1.1.45 unit #8 (C2.8): the capacity-display threshold, an integer 1-99 (default 15).
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
+  /** GPU-SETTING-188: Settings → Graphics, 'auto' (default) | 'gpu' | 'cpu'. Read once at startup, before
+   *  app ready (src/main/graphics.ts); a change takes effect after a restart. */
+  graphicsMode?: GraphicsMode;
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];
@@ -1063,6 +1067,14 @@ export function setCapacityDisplayThreshold(value: unknown): HarnessConfig {
   const t = parseCapacityDisplayThreshold(value);
   if (t === null) throw new Error('invalid capacity display threshold');
   return persistConfig({ ...readConfig(), capacityWeeklyDisplayThreshold: t });
+}
+
+/** GPU-SETTING-188: save the Graphics mode. Anything but 'auto' | 'gpu' | 'cpu' is REFUSED and the
+ *  stored value stays. It takes effect at the next start (main applies it before app ready). */
+export function setGraphicsMode(value: unknown): HarnessConfig {
+  const mode = parseGraphicsMode(value);
+  if (mode === null) throw new Error('invalid graphics mode');
+  return persistConfig({ ...readConfig(), graphicsMode: mode });
 }
 
 /** Wipe the persisted config back to first-run defaults so the app boots into

@@ -127,6 +127,8 @@ export interface HarnessConfig {
   /** v1.1.45 unit #8 (C2.8): the capacity-display threshold, an integer 1-99 (default 15).
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
+  /** GPU-SETTING-188: Settings → Graphics ('auto' default). */
+  graphicsMode?: 'auto' | 'gpu' | 'cpu';
   autoDeliveryPausedAgents?: string[];
   /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
    *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
