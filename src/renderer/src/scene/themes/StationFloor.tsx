@@ -138,7 +138,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         background: pack.manifest.palette.background,
         antialias: false,
         roundPixels: true,
-        resolution: Math.max(window.devicePixelRatio || 1, 2),
+        resolution: window.devicePixelRatio || 1,
         autoDensity: true,
         width: host.clientWidth || 800,
         height: host.clientHeight || 600,

@@ -14,15 +14,15 @@ const { Camera } = loadTs('src/renderer/src/scene/office/Camera.ts');
 const ROOT = path.join(__dirname, '..');
 
 const FRAME = { x: 40, y: 30, w: 880, h: 560, deadBottom: 48 };
-function cam(settle, frame = FRAME) {
+function cam(settle, frame = FRAME, CameraClass = Camera, finalWidth = 960, finalHeight = 640) {
   const c = { x: 0, y: 0, z: 1, scale: { set(v) { c.z = v; } } };
-  const k = new Camera(c, settle);
+  const k = new CameraClass(c, settle);
   k.setMapSize(960, 640);
   if (frame) k.setFrame(frame);
   k.setViewSize(200, 150); // the size a pane has before its first resize
   k.fitToScreen();
   k.update(1 / 30);
-  k.setViewSize(960, 640);
+  k.setViewSize(finalWidth, finalHeight);
   return { c, k };
 }
 const state = ({ c }) => [c.x, c.y, c.z];
@@ -54,11 +54,14 @@ test('office: no settle option eases per tick, whatever the dt, exactly as the 0
   }
 });
 
-test('settle: at 30 fps it eases as the office does, until it lands', () => {
-  const a = cam(null), b = cam({ resolution: () => 2 });
+test('settle: with the same fit target it eases as the office does, until it lands', () => {
+  // Infinity deliberately leaves the fit target unquantised, so this keeps the old settle
+  // integration comparison while the ordinary finite-resolution TES path uses whole pixels.
+  const a = cam(null), b = cam({ resolution: () => Infinity });
   for (let i = 0; i < 60; i++) {
     a.k.update(1 / 30); b.k.update(1 / 30);
-    assert.ok(moved(state(a), state(b), 2) < 1e-6, `tick ${i}`);
+    const delta = [a.k.currentX - b.k.currentX, a.k.currentY - b.k.currentY, a.k.currentZoom - b.k.currentZoom];
+    assert.ok(delta.every((n) => Math.abs(n) < 1e-8), `tick ${i}: ${delta}`);
   }
 });
 
@@ -82,10 +85,15 @@ test('settle: frame-rate independent, and lands on the target in about 4 s at an
 });
 
 test('settle: the landing step moves the picture by under half a device pixel', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'src/renderer/src/scene/office/Camera.ts'), 'utf8');
+  const noLanding = loadTs.fromText('src/renderer/src/scene/office/Camera.ts', source.replace(
+    'if (left * this.settle.resolution() < 0.5) {', 'if (false) {'
+  )).Camera;
   for (const r of [1, 2, 3]) {
-    // One camera lands, its twin (infinite resolution) never does; at the landing they differ by
+    // One camera lands, its otherwise identical twin cannot; at the landing they differ by
     // exactly what the landing skipped.
-    const a = cam({ resolution: () => r }), b = cam({ resolution: () => Infinity });
+    const a = cam({ resolution: () => r }, FRAME, Camera, 2000, 1200);
+    const b = cam({ resolution: () => r }, FRAME, noLanding, 2000, 1200);
     let landedAt = -1;
     for (let i = 0; i < 400 && landedAt < 0; i++) {
       a.k.update(1 / 30); b.k.update(1 / 30);
@@ -128,6 +136,8 @@ test('settle: a negative, NaN or infinite dt leaves the camera where it is, nudg
 test('the TES floor turns settle on with the renderer resolution and eases by the real dt; the office does not', () => {
   const station = fs.readFileSync(path.join(ROOT, 'src/renderer/src/scene/themes/StationFloor.tsx'), 'utf8');
   assert.match(station, /const camera = new Camera\(world, \{ resolution: \(\) => app\.renderer\.resolution \}\);/);
+  assert.match(station, /resolution: window\.devicePixelRatio \|\| 1,/);
+  assert.doesNotMatch(station, /resolution: Math\.max\(window\.devicePixelRatio/);
   // By the time between the floor's own ticks, not the ticker's capped, per-display-frame deltaMS.
   assert.match(station, /let lastTickAt = performance\.now\(\);/);
   assert.match(station, /const now = performance\.now\(\);\s*camera\.update\(Math\.max\(0, now - lastTickAt\) \/ 1000\);\s*lastTickAt = now;/);

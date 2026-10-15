@@ -13,6 +13,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **TES floor walls stay crisp after resizing.** The floor now uses whole device pixels and keeps
+  its lower hull running past the bottom edge instead of leaving a background strip.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.
