@@ -209,6 +209,8 @@ test('CL-READERWATCHER mid-run: a raised agent is imported (memory.md and archiv
   assert.deepEqual(ledgerTexts(f, 'ag-x').sort(), ['- an invented archive note of ag-x', '- an invented note of ag-x']);
   ws.sync();
   assert.deepEqual(ws.watching(), ['ag-w', 'ag-x']);
+  await ws.ensureImported('ag-s');
+  assert.equal(fs.existsSync(settledFile(f, 'ag-s')), false, 'no import while it is shadow');
   // a raise of the shadow agent goes through sync (the 60 s timer in main)
   f.levels['ag-s'] = 'reader';
   edit(f, 'ag-s', 'written while it was shadow');
@@ -241,10 +243,15 @@ test('CL-READERWATCHER mid-run: a failed import leaves no settled file, is logge
   let fail = true;
   const { ws, settled } = midrun(f, { read: (a) => { if (fail) throw new Error('invented ledger read failure'); return f.store.readLedger(a); } });
   f.levels['ag-x'] = 'writer';
+  // its first claim made a ledger: still no watcher while its import has not settled
+  assert.equal((await f.store.appendRecord('ag-x', { t: 'claim', kind: 'fact', text: 'a first claim of ag-x' }, 'endpoint')).ok, true);
   await ws.ensureImported('ag-x');
   assert.equal(fs.existsSync(settledFile(f, 'ag-x')), false);
   assert.ok(f.rows.some((r) => r.kind === 'claims-import-failed' && r.agent === 'ag-x' && /invented ledger read failure/.test(r.error)));
   assert.deepEqual(settled, []);
+  ws.sync();
+  assert.deepEqual(ws.watching(), [], 'an unsettled agent is not watched');
+  await new Promise((r) => setTimeout(r, 50));
   fail = false;
   ws.sync();
   assert.ok(await waitFor(() => settled.includes('ag-x')));
@@ -260,8 +267,9 @@ test('CL-READERWATCHER known limit 1: a bullet the rollover moves into an archiv
   // the rollover: memory.md cut to its header, the older bullets (one never scanned) into an archive
   const dir = path.join(f.root, 'agents', 'ag-w');
   const body = fs.readFileSync(path.join(dir, 'memory.md'), 'utf8').replace(/\n$/, '') + '\n- moved before the scan\n';
+  // memory.md is cut to its header, and the agent is mid-way through a new bullet (no newline yet)
+  fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory — ag-w\n- half writ');
   fs.writeFileSync(path.join(dir, 'memory-archive-2026-10-15.md'), body);
-  fs.writeFileSync(path.join(dir, 'memory.md'), '# Memory — ag-w\n');
   assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- moved before the scan')), JSON.stringify(f.rows.slice(-3)));
   await new Promise((r) => setTimeout(r, 400));
   const texts = ledgerTexts(f, 'ag-w');
@@ -269,4 +277,7 @@ test('CL-READERWATCHER known limit 1: a bullet the rollover moves into an archiv
   assert.equal(texts.filter((t) => t === '- taken from memory.md').length, 1, 'not again from the archive');
   assert.equal(texts.filter((t) => t === '- an invented note of ag-w').length, 1, 'the imported note not again either');
   assert.equal(f.store.readLedger('ag-w').records.find((r) => r.text === '- moved before the scan').legacy.file, 'memory-archive-2026-10-15.md');
+  assert.ok(!texts.some((t) => t.startsWith('- half writ')), 'the archive scan leaves memory.md, and its unfinished line, to the memory.md scan');
+  fs.appendFileSync(path.join(dir, 'memory.md'), 'ten\n');
+  assert.ok(await waitFor(() => f.appended.some((x) => x.text === '- half written' && x.source === 'self')));
 });
