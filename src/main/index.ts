@@ -95,7 +95,8 @@ import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
+import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
 import { CapacityStore, capacityStorePath } from './capacityPersistence';
@@ -1170,13 +1171,37 @@ const heavyLock = new HeavyJobLock({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
-  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until)
+  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
+  notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
+
+/** IDLE-MEANS-IDLE: the lock as the displays read it (who holds, waits for, or has a slot reserved). */
+function heavyLockView(): HeavyLockView {
+  return { holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() };
+}
+// IDLE-MEANS-IDLE: an agent running a heavy job in the background, queued for the lock or holding a
+// reservation has ended its turn, so liveness says IDLE; the renderer overlays the lock's view on it.
+// One push per burst of changes (a release and the reserve it grants come together), read after the
+// lock's call has returned. Display only: the wake lifecycle and the liveness classes never see it.
+let heavyLockPush: ReturnType<typeof setTimeout> | null = null;
+heavyLock.onChange(() => {
+  if (heavyLockPush) return;
+  heavyLockPush = setTimeout(() => {
+    heavyLockPush = null;
+    try { liveWebContents()?.send('heavy-lock:changed', heavyLockView()); } catch { /* window torn down */ }
+  }, 0);
+});
 
 /** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
 function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
   const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
+/** LOCK-WAIT-NOTICES: an agent left the heavy queue without a slot (stale, or its reservation lapsed). */
+function notifyHeavyWaitLapsed(agentId: string, kind: string, why: 'stale' | 'expired'): void {
+  const n = heavyWaitLapsedNotice(agentId, kind, why);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }
@@ -2674,6 +2699,7 @@ function writeFleetSnapshot(): void {
     // Async + incremental; returns immediately and never throws into the timer.
     const hiveRoot = hive.root();
     if (hiveRoot) void costTotals.refresh(join(hiveRoot, 'cost-ledger.jsonl'));
+    const lockView = heavyLockView();
     const agents = Object.entries(reg.agents)
       .filter(([, a]) => !a.archived)
       .map(([id, a]) => {
@@ -2702,6 +2728,8 @@ function writeFleetSnapshot(): void {
           lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
           // CARD-IDLE-WHILE-WORKING: the tool call in progress (a long one fires no hooks).
           runningTool: runningToolFor(id, now),
+          // IDLE-MEANS-IDLE: its place in the heavy-job lock (background / queued / reserved), or null.
+          heavy: heavyFleetField(heavyActivity(id, lockView)),
           // ZT-I1-MAIL §3 #6: inboxBacklog (not acted), awaitingReply[] (§4.3) and
           // openRequests[] (§11.13 option B), all from the ledger. Zero-token: data only.
           ...fleetMail(id),
@@ -5212,6 +5240,8 @@ ipcMain.handle('hive:keepModelPin', (_evt, agentId: unknown) =>
 // a turn: a person's click on "re-offer mail" for an agent the WWR gave up on. It ends the stuck epoch;
 // the normal reconcile beat then re-offers through every guard and the submit owner.
 ipcMain.handle('liveness:snapshot', () => agentLiveness.all());
+// IDLE-MEANS-IDLE: the heavy-job lock's view at boot (heavy-lock:changed pushes the rest).
+ipcMain.handle('heavy-lock:snapshot', () => heavyLockView());
 ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {
   if (typeof agentId !== 'string' || !agentId) return false;
   const rec = agentLiveness.getLiveness(agentId);

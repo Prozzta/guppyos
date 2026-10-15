@@ -18,6 +18,7 @@ import { isCompactionCommand } from '@shared/providerAutomation';
 import type { RunningTool } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
 import { applyLivenessUpdate } from '@shared/livenessView';
+import type { HeavyLockView } from '@shared/activityView';
 import { preferredAgentRole } from '@shared/agentRole';
 import { isInboxNudge } from '@shared/hiveNudge';
 import { refocusAfterRemoval, focusOnLoad, restoreFocus } from './focusMode';
@@ -230,6 +231,10 @@ interface State {
    *  display reads its busy-or-not from here (shared/activityView.ts). */
   liveness: Record<string, LivenessV1>;
   applyLiveness: (rec: LivenessV1) => void;
+  /** IDLE-MEANS-IDLE: main's heavy-job lock view (who runs a heavy job in the background, who is
+   *  queued for the lock, who has a slot reserved). Displays overlay it on an idle agent. */
+  heavyLock: HeavyLockView | null;
+  applyHeavyLock: (view: HeavyLockView | null) => void;
   setGodStatus: (status: GodStatus) => void;
   select: (id: string) => void;
   updateAgent: (id: string, patch: Partial<Agent>) => void;
@@ -685,6 +690,8 @@ export const useStore = create<State>((set, get) => ({
   godStatus: 'booting',
   messageQueues: initialQueues,
   toolCounts: {},
+  heavyLock: null,
+  applyHeavyLock: (view) => set({ heavyLock: view && typeof view === 'object' ? view : null }),
   liveness: {},
   applyLiveness: (rec) => set((s) => {
     const liveness = applyLivenessUpdate(s.liveness, rec);

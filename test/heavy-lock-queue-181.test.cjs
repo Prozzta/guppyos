@@ -194,7 +194,7 @@ test('the hook reader: a real file in a temp dir, by a Git Bash /x/ path too; a 
 // ─── the wiring ──────────────────────────────────────────────────────────────────────────────
 
 K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/hooks.ts')) => {
-  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\)\n\}\);/);
+  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
   assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
   assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
   assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n      let cls = classifyHeavy\(p\.tool_name, p\.tool_input, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
@@ -307,7 +307,7 @@ const MUTANTS = [
     edits: [['      if (t < r.until) continue;', '      if (t < r.until || r.until > 0) continue;']],
     killer: 'reservationExpires', dies: /AN UNUSED RESERVATION PASSES ON/ },
   { name: 'a gone waiter is reserved anyway', file: HJF, module: true,
-    edits: [["      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); continue; }\n", '']],
+    edits: [["      if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }\n", '']],
     killer: 'goneWaiterSkipped', dies: /A GONE WAITER IS SKIPPED/ },
   { name: 'env $(...) ends the option run (as 1.1.80)', file: HJF, module: true,
     edits: [["(ws[i].startsWith('-') || ws[i].startsWith('$(') || /^", "(ws[i].startsWith('-') || /^"]],
@@ -319,13 +319,16 @@ const MUTANTS = [
     edits: [["      here = { ...here, cd: /^([A-Za-z]:[\\\\/]|[\\\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\\\/]+$/, '')}/${to}` };\n", '']],
     killer: 'cdFollowed', dies: /CD IS FOLLOWED/ },
   { name: 'the notice is sent as plain worker mail (held by READS-QUIET)', file: 'src/main/index.ts',
-    edits: [['  try { hive.send(n.message as Partial<HiveMessage>, n.from); }', '  try { hive.send({ ...n.message, wake: undefined } as Partial<HiveMessage>, agentId); }']],
+    edits: [['  const n = heavySlotFreeNotice(agentId, kind, until);\n  try { hive.send(n.message as Partial<HiveMessage>, n.from); }', '  const n = heavySlotFreeNotice(agentId, kind, until);\n  try { hive.send({ ...n.message, wake: undefined } as Partial<HiveMessage>, agentId); }']],
     killer: 'wiring', dies: /THE NOTICE IS SENT AS BUILT \(SYSTEM SENDER \+ WAKE NOW\)/ },
   { name: 'Post re-classifies before freeing (as 130d276c; a changed script keeps the slot)', file: 'src/main/hooks.ts', hooks: true,
     edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {"]],
     killer: 'wiring', dies: /POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING/ },
   { name: 'N2 off: a stale waiter still takes a reservation', file: HJF, module: true,
-    edits: [["      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); continue; }\n", '']],
+    edits: [["      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }\n", ''],
+      // LOCK-WAIT-NOTICES: the drop is made in two places (expire's sweep on schedule, grant's check when
+      // a slot frees); one alone still drops, so both go (each is pinned in lock-wait-notices-187).
+      ['      if (t - w.since < HEAVY_TTL_MS) continue;\n', '      continue;\n']],
     killer: 'staleWaiterDropped', dies: /A WAITER NOT SEEN FOR AN HOUR IS DROPPED/ },
   { name: 'N3 off: the caller is told about its own slot', file: HJF, module: true,
     edits: [['      if (w.agentId === caller) continue;\n', '']],

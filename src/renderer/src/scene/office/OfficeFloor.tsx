@@ -16,7 +16,7 @@ import { colors } from '@/design/tokens';
 import { loadTheme, resolveThemeMap, themeTilesetUrls } from './themeLoader';
 import { installContextLossRecovery } from './glRecovery';
 import { firstOccurrenceById, ledgerChanges } from '@shared/taskLedger';
-import { activityStatus } from '@shared/activityView';
+import { activityStatus, heavyActivity, heavyText } from '@shared/activityView';
 import type { Tile, Facing, ErrandKind, ErrandSpot } from './themeRegistry';
 import { StationFloor } from '../themes/StationFloor';
 import { isStationPack, loadStationPack } from '../themes/themeCatalog';
@@ -89,9 +89,17 @@ interface Runtime {
 const CHEER_MIN_BUSY_MS = 60_000;
 
 /** CARD-IDLE-WHILE-WORKING (1.1.78): an agent as the floor SHOWS it: busy-or-not from main's
- *  liveness classification (a long tool call fires no hooks), like the cards. */
+ *  liveness classification (a long tool call fires no hooks), like the cards.
+ *  IDLE-MEANS-IDLE (1.1.87): an idle agent with a heavy job in the background shows working (at its
+ *  desk), one queued for or holding a reservation on the heavy lock shows waiting (at its desk, not
+ *  on a coffee run or an errand), and its thought is the lock's line. */
 function shownAgent(agent: Agent): Agent {
-  const status = activityStatus(agent.status, useStore.getState().liveness[agent.id]);
+  const { liveness, heavyLock } = useStore.getState();
+  const rec = liveness[agent.id];
+  const turn = activityStatus(agent.status, rec);
+  const heavy = heavyActivity(agent.id, heavyLock);
+  const status = activityStatus(agent.status, rec, heavy);
+  if (status !== turn) return { ...agent, status, action: heavyText(heavy) ?? agent.action };
   return status === agent.status ? agent : { ...agent, status };
 }
 
@@ -831,7 +839,7 @@ function OfficeScene() {
         const candidates: Array<[Agent, Runtime]> = [];
         for (const agent of useStore.getState().agents) {
           const rt = runtimes.get(agent.id);
-          if (rt && cafeEligible(agent, rt)) candidates.push([agent, rt]);
+          if (rt && cafeEligible(shownAgent(agent), rt)) candidates.push([agent, rt]);
         }
         if (candidates.length === 0) return;
         const [agent, rt] = candidates[Math.floor(Math.random() * candidates.length)];
@@ -944,7 +952,8 @@ function OfficeScene() {
         let agent: Agent | undefined;
         let rt: Runtime | undefined;
         if (spot.godOnly) {
-          const god = useStore.getState().agents.find((a) => a.isGod);
+          const godHook = useStore.getState().agents.find((a) => a.isGod);
+          const god = godHook ? shownAgent(godHook) : undefined;
           const grt = god ? runtimes.get(god.id) : undefined;
           if (!god || !grt || grt.err || grt.brk
             || (god.status !== 'idle' && god.status !== 'success')
@@ -954,7 +963,7 @@ function OfficeScene() {
           const candidates: Array<[Agent, Runtime]> = [];
           for (const a of useStore.getState().agents) {
             const r = runtimes.get(a.id);
-            if (r && breakEligible(a, r)) candidates.push([a, r]);
+            if (r && breakEligible(shownAgent(a), r)) candidates.push([a, r]);
           }
           if (candidates.length === 0) return;
           [agent, rt] = candidates[Math.floor(Math.random() * candidates.length)];
@@ -1635,7 +1644,7 @@ function OfficeScene() {
 
       let lastSelected: string | null = useStore.getState().selectedId;
       const unsubscribe = useStore.subscribe((s, prev) => {
-        if (s.agents !== prev.agents || s.liveness !== prev.liveness) syncAgents();
+        if (s.agents !== prev.agents || s.liveness !== prev.liveness || s.heavyLock !== prev.heavyLock) syncAgents();
         if (s.selectedId !== lastSelected) {
           lastSelected = s.selectedId;
           const rt = s.selectedId ? runtimes.get(s.selectedId) : undefined;
