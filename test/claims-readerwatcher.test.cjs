@@ -145,6 +145,28 @@ test('CL-READERWATCHER: a failing background scan is logged, not an unhandled re
   } finally { w.stop(); process.off('unhandledRejection', on); }
 });
 
+test('CL-READERWATCHER: stop() during a scan with a change queued behind it runs no further scan', async () => {
+  const root = path.join(JAIL, `hive-${++n}`); const dir = path.join(root, 'agents', 'ag-1');
+  fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'memory.md'), memory('ag-1'));
+  let reads = 0; let release = null;
+  const gate = () => new Promise((r) => { release = r; });
+  const deps = { hiveRoot: root, read: () => { reads++; return { chain: 'ok', records: [] }; }, log: () => {},
+    append: async () => { await gate(); return { ok: true, id: 'x' }; } };
+  const w = new I.ReaderWatcher(deps, 'ag-1', 30);
+  try {
+    const first = w.start();                      // the spawn scan: its append waits at the gate
+    assert.ok(await waitFor(() => release !== null));
+    fs.appendFileSync(path.join(dir, 'memory.md'), '- queued behind the running scan\n');
+    await new Promise((r) => setTimeout(r, 300)); // the debounced scan finds one running: one more is queued
+    w.stop();
+    const after = reads;
+    for (let i = 0; i < 5; i++) { release?.(); release = null; await new Promise((r) => setTimeout(r, 50)); }
+    await first;
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(reads, after, 'the queued scan did not run after stop');
+  } finally { w.stop(); for (let i = 0; i < 5; i++) release?.(); }
+});
+
 test('CL-READERWATCHER wiring: main starts the watchers after the S0 import, at claims start and on a timer', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /const readerWatchers = new ReaderWatchers\(\{/);
