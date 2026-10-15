@@ -92,7 +92,7 @@ window.__harnessRun = async () => {
     await act(async () => { useStore.setState({ officeTheme: 'tes', agents, messageQueues: {} } as never); root.render(<OfficeFloor />); });
     await finished;
     await act(async () => { root.unmount(); });
-    window.harness.report({ ok: true, box: BOX, stepMs: STEP_MS, shots });
+    window.harness.report({ ok: true, box: BOX, dpr: window.devicePixelRatio, stepMs: STEP_MS, shots });
   } catch (e) {
     window.harness.report({ ok: false, error: e instanceof Error ? `${e.message}\n${e.stack}` : String(e) });
   }
