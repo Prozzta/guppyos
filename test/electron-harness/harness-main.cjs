@@ -58,7 +58,8 @@ if (!sandboxRoot) {
   process.exit(2);
 }
 // Test-only device scale sweep.  Applied before ready so the renderer sees the same DPR it would
-// on a differently scaled monitor, while still using the throwaway harness profile.
+// on a differently scaled monitor, while still using the throwaway harness profile. The switch
+// alone sets it: a zoomFactor on top would square it (1.25 -> 1.5625).
 const forcedDpr = Number(process.env.HARNESS_DPR || '');
 if (Number.isFinite(forcedDpr) && forcedDpr > 0) app.commandLine.appendSwitch('force-device-scale-factor', String(forcedDpr));
 // HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
@@ -246,8 +247,7 @@ app.whenReady().then(async () => {
         nodeIntegration: false,
         // Offscreen windows are throttled, which would make a scenario that waits
         // on a frame or a timer flaky for a reason that has nothing to do with it.
-        backgroundThrottling: false,
-        ...(Number.isFinite(forcedDpr) && forcedDpr > 0 ? { zoomFactor: forcedDpr } : {})
+        backgroundThrottling: false
       }
     });
 
