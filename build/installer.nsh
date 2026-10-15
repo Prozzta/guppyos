@@ -50,6 +50,75 @@
   ${EndIf}
 !macroend
 
+; SCHEME-DROP (1.1.87, the Human 2026-10-15): guppy:// is the only link scheme. Up to 1.1.86 the app
+; also answered munderdifflin://, and registered it itself at every start: on Windows
+; app.setAsDefaultProtocolClient writes HKCU\Software\Classes\munderdifflin with
+; shell\open\command = "<exe>" "%1". 1.1.87 no longer does, so the installer (customInstall) and the
+; uninstaller (customUnInstall) delete that key, but ONLY when its command runs a Guppy.exe. A key
+; that names another program (or a dev electron.exe) is left alone. HKCU only: this is all the app
+; ever wrote. The tests override the key path (they never run the drop on the real registry).
+!ifndef GUPPY_OLD_SCHEME_KEY
+  !define GUPPY_OLD_SCHEME_KEY "Software\Classes\munderdifflin"
+!endif
+
+; OUT = "1" when CMD runs a Guppy.exe, else "0". The program is the quoted first token
+; ("C:\...\Guppy.exe" "%1", Electron's form) or, unquoted, everything up to the first space; it must
+; end in \Guppy.exe (any case: NSIS compares strings case-insensitively). An unterminated quote, a
+; bare "Guppy.exe" or "Guppy.exe.bak" is not a match. OUT must not be $R0-$R4.
+!macro guppyIsGuppyCommand CMD OUT
+  Push $R0
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  StrCpy $R0 "${CMD}"
+  StrCpy $R1 "0"
+  StrCpy $R2 $R0 1
+  ${If} $R2 == '"'
+    StrCpy $R0 $R0 "" 1
+  ${Else}
+    StrCpy $R2 " "
+  ${EndIf}
+  StrCpy $R3 0
+  ${Do}
+    StrCpy $R4 $R0 1 $R3
+    ${If} $R4 == ""
+      ${IfThen} $R2 == '"' ${|} StrCpy $R3 -1 ${|}
+      ${ExitDo}
+    ${EndIf}
+    ${IfThen} $R4 == $R2 ${|} ${ExitDo} ${|}
+    IntOp $R3 $R3 + 1
+  ${Loop}
+  ${If} $R3 >= 10
+    StrCpy $R0 $R0 $R3
+    StrCpy $R4 $R0 "" -10
+    ${IfThen} $R4 == "\Guppy.exe" ${|} StrCpy $R1 "1" ${|}
+  ${EndIf}
+  StrCpy ${OUT} $R1
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+!macroend
+
+!macro guppyDropOldScheme
+  Push $0
+  Push $1
+  ClearErrors
+  ReadRegStr $0 HKCU "${GUPPY_OLD_SCHEME_KEY}\shell\open\command" ""
+  ${IfNot} ${Errors}
+    !insertmacro guppyIsGuppyCommand $0 $1
+    ${If} $1 == "1"
+      DeleteRegKey HKCU "${GUPPY_OLD_SCHEME_KEY}"
+      DetailPrint "Guppy: removed the old munderdifflin:// link handler"
+    ${EndIf}
+  ${EndIf}
+  ClearErrors
+  Pop $1
+  Pop $0
+!macroend
+
 !define GUPPY_OLD_EXE "Munder Difflin.exe"
 !ifndef GUPPY_PIN_DIR
   !define GUPPY_PIN_DIR "$APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
@@ -100,4 +169,11 @@
   ${if} $installMode == "all"
     SetShellVarContext all
   ${endif}
+  ; SCHEME-DROP: the old munderdifflin:// handler, when it is ours.
+  !insertmacro guppyDropOldScheme
+!macroend
+
+!macro customUnInstall
+  ; SCHEME-DROP: the same check on uninstall (a 1.1.86 or older run may have re-registered it).
+  !insertmacro guppyDropOldScheme
 !macroend

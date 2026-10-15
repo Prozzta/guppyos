@@ -202,7 +202,7 @@ test('migration wiring (index.ts): before the single-instance lock and the crash
 
 // ── 2. the build identity ────────────────────────────────────────────────────
 
-test('electron-builder.yml: Guppy name + exe; appId and scheme kept; Guppy-* artifact names from 1.1.83; no nsis.guid', () => {
+test('electron-builder.yml: Guppy name + exe; appId kept; guppy:// only (1.1.87); Guppy-* artifact names from 1.1.83; no nsis.guid', () => {
   const y = read('electron-builder.yml');
   assert.match(y, /^appId: in\.munderdiffl\.app$/m);
   assert.match(y, /^productName: Guppy$/m);
@@ -210,7 +210,7 @@ test('electron-builder.yml: Guppy name + exe; appId and scheme kept; Guppy-* art
   assert.match(y, /^ {2}shortcutName: Guppy$/m);
   assert.match(y, /^ {2}include: build\/installer\.nsh$/m);
   assert.doesNotMatch(y, /^\s*guid:/m, 'the NSIS GUID must keep deriving from appId');
-  assert.match(y, /schemes:\n\s+- guppy\n\s+- munderdifflin\n/);
+  assert.match(y, /schemes:\n\s+- guppy\n(?!\s+- )/, 'SCHEME-DROP (1.1.87): munderdifflin:// is no longer registered');
   // REBRAND-ARTIFACT-NAMES (1.1.83): Guppy-*; the Munder-Difflin-* copies 1.1.81 links to come from
   // afterAllArtifactBuild (test/rebrand-artifact-names-183).
   for (const a of ['Guppy-${version}-mac-${arch}.${ext}', 'Guppy-${version}-win-x64-setup.exe',
@@ -274,7 +274,9 @@ test('build/installer.nsh: customInstall re-targets old-exe links in the pin fol
   const retarget = nsh.slice(nsh.indexOf('!macro guppyRetargetLinks'), nsh.indexOf('!macroend', nsh.indexOf('!macro guppyRetargetLinks')));
   assert.ok(retarget.length > 200);
   assert.doesNotMatch(retarget, /WriteReg|DeleteReg|RMDir|Delete "/, 'the macro writes no registry and deletes nothing');
-  assert.doesNotMatch(nsh, /WriteReg|DeleteReg/, 'the include writes no registry');
+  assert.doesNotMatch(nsh, /WriteReg/, 'the include writes no registry');
+  // SCHEME-DROP (1.1.87): the one registry change is the old munderdifflin:// key (scheme-drop-187).
+  assert.deepEqual(nsh.match(/DeleteReg\w+ .*/g), ['DeleteRegKey HKCU "${GUPPY_OLD_SCHEME_KEY}"']);
 });
 
 function nsisTools() {

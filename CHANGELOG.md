@@ -11,6 +11,12 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Removed
+
+- **munderdifflin:// links no longer open Guppy; use guppy://.** The old scheme was an alias
+  from 1.1.83 to 1.1.86. On Windows the installer and the uninstaller delete its old link
+  handler, but only when it opens a Guppy.exe.
+
 ## [1.1.86] — 2026-10-14
 
 **The app icon is Speck, and on a TES floor the app names TES's orchestrator.** Rollback: 1.1.85
