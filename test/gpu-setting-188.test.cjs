@@ -199,5 +199,5 @@ test('Settings: the Graphics section renders in General with the three modes, Au
   const comp = codeOnly(readSource('src/renderer/src/components/GraphicsSetting.tsx'), 'g.tsx');
   assert.equal(ui.GRAPHICS_REFRESH_MS, 10_000);
   assert.match(comp, /const timer = window\.setInterval\(refresh, GRAPHICS_REFRESH_MS\);\s*return \(\) => window\.clearInterval\(timer\);/);
-  assert.match(comp, /const restart = async \(\) => \{\s*if \(!confirming\) \{\s*const fresh = await window\.cth\.graphicsStatus\(\)\.catch\(\(\) => null\) \?\? status;\s*if \(fresh\) setStatus\(fresh\);\s*if \(!fresh \|\| fresh\.runningAgents > 0\) \{ setConfirming\(true\); return; \}/);
+  assert.match(comp, /const restart = async \(\) => \{\s*if \(!confirming\) \{\s*const fresh = await window\.cth\.graphicsStatus\(\)\.catch\(\(\) => null\);\s*if \(fresh\) setStatus\(fresh\);\s*if \(!fresh \|\| fresh\.runningAgents > 0\) \{ setConfirming\(true\); return; \}/);
 });
