@@ -57,7 +57,8 @@ let frozen = false;
   window.cancelAnimationFrame = (id: number) => { queue.delete(id); };
 }
 
-// The cache passes are the only scissored draws, so a scissor in the last frame means it was cached.
+// The damage passes (damage.ts) are the only scissored draws, so a scissor in the last frame means
+// it drew only what changed.
 let scissors = 0;
 const realScissor = WebGL2RenderingContext.prototype.scissor;
 WebGL2RenderingContext.prototype.scissor = function (this: WebGL2RenderingContext, ...a: [number, number, number, number]) {

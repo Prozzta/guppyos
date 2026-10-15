@@ -4,7 +4,7 @@
 // seats, depth) comes from the pure modules beside it; this file only draws.
 
 import { useEffect, useRef, useState } from 'react';
-import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
+import { Application, Container, Matrix, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { activityStatus, heavyActivity, type HeavyLockView } from '@shared/activityView';
@@ -22,6 +22,7 @@ import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
 import { exactPicker, frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
+import { DamageTracker, deviceRect, type Drawn } from './damage';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame, FRAME_MARGIN } from './framing';
 import { BubbleLayer } from './BubbleLayer';
@@ -143,6 +144,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       await app.init({
         background: pack.manifest.palette.background,
         antialias: false,
+        // PERF-FLOOR-FILL-188: the canvas keeps the last frame, so a frame redraws only what changed.
+        preserveDrawingBuffer: true,
         roundPixels: true,
         resolution: window.devicePixelRatio || 1,
         autoDensity: true,
@@ -253,8 +256,52 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const front = pickFront!(near);
         statics.forEach((s, i) => { if (s) s.visible = front[i]; });
       };
+      // PERF-FLOOR-FILL-188 (damage.ts): each frame draws again only the rects that the people, cups,
+      // mugs, statics drawn again and bubbles left or entered; a change of view draws it all.
+      const damage = new DamageTracker();
+      let painted = 0, lastPaint: ReturnType<DamageTracker['frame']> = 'full';
+      // The stage's own render (Pixi's tick, or anyone's app.render()) goes through paint; a render
+      // to a texture or of another container is passed straight on.
+      const realRender = app.renderer.render.bind(app.renderer) as (o: any) => void;
+      const paint = () => {
+        const r = app.renderer.resolution, W = app.canvas.width, H = app.canvas.height;
+        painted += 1;
+        const now = new Map<unknown, Drawn>();
+        const rectOf = (c: Container) => (c.visible && c.renderable ? deviceRect(c.getBounds(), r, W, H) : null);
+        // Everything drawn, generically: a sprite is signed by its texture and frame, world transform,
+        // alpha, tint, blend and depth; whatever else draws (a bubble's text and graphics) is
+        // drawn again every frame. A hidden subtree drops out, so its old rects are drawn again.
+        const at = new Matrix();
+        const visit = (c: Container, look: string) => {
+          if (!c.visible) return;
+          if (c === bubbles.container) {
+            for (const k of c.children) if (k.visible) now.set(k, { rect: rectOf(k), sig: String(painted) });
+            return;
+          }
+          if (c instanceof Sprite) {
+            const t = c.texture, fr = t.frame, m = c.getGlobalTransform(at);
+            now.set(c, { rect: rectOf(c), sig: `${t.uid}|${fr.x},${fr.y},${fr.width},${fr.height}|${m.a},${m.b},${m.c},${m.d},${m.tx},${m.ty}|${look}|${c.alpha},${c.tint},${c.blendMode}|${c.zIndex}|${c.renderable}` });
+          } else if (!c.children.length) now.set(c, { rect: rectOf(c), sig: String(painted) });
+          for (const k of c.children) visit(k, `${look}|${c.alpha},${c.tint},${c.blendMode}`);
+        };
+        visit(app.stage, '');
+        const view = `${W}x${H}@${r}|${world.x},${world.y},${world.scale.x},${world.scale.y}|${floorK}`;
+        const todo = cached ? damage.frame(view, now, [], W, H) : 'full';
+        lastPaint = todo;
+        if (todo === 'full') { realRender({ container: app.stage }); return; }
+        if (!todo.length) return; // nothing changed: the canvas still holds the frame
+        const gl = (app.renderer as any).gl as WebGL2RenderingContext;
+        gl.enable(gl.SCISSOR_TEST);
+        try {
+          for (const p of todo) {
+            gl.scissor(p.x, H - p.y - p.h, p.w, p.h);
+            realRender({ container: app.stage, clear: true });
+          }
+        } finally { gl.disable(gl.SCISSOR_TEST); }
+      };
+      (app.renderer as any).render = (o: any) => ((o === app.stage || (o?.container === app.stage && !o.target)) ? paint() : realRender(o));
       // For the rendered tests (tes-floor-whole-188): the floor and what it is made of.
-      if (cached) (app as any).__tesScene = { bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, hull, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
+      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, hull, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
         () => floorRT?.destroy(true),

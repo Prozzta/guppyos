@@ -229,7 +229,9 @@ test('StationFloor draws the floor texture straight in the world: no scene textu
   assert.match(src, /floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);/);
   assert.match(src, /world\.addChild\(floorView\);\s*\} else world\.addChild\(new Sprite\(below\.texture\)\);\s*world\.addChild\(sortLayer\);/);
   assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
-  assert.doesNotMatch(src, /sceneRT|sceneSprite|sortLayer\.alpha|screenCells\(|gl\.blitFramebuffer|SCISSOR_TEST/);
+  assert.doesNotMatch(src, /sceneRT|sceneSprite|sortLayer\.alpha|screenCells\(|gl\.blitFramebuffer/);
+  // PERF-FLOOR-FILL-188: the only scissor is paint()'s changed rects (pinned in tes-raster).
+  assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2);
   assert.match(src, /camera\.setFrame\(frame0\);/);
 });
 

@@ -289,7 +289,11 @@ test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above"
 test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; the hull over it; no scene texture', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.doesNotMatch(src, /atlas/i, 'no split tiles: each would be rounded on its own');
-  assert.doesNotMatch(src, /blitFramebuffer|SCISSOR_TEST|screenCells|regionPicker|cacheKeyOf|wholeSceneRaster|NEAR_MIN_SCALE/);
+  assert.doesNotMatch(src, /blitFramebuffer|screenCells|regionPicker|cacheKeyOf|wholeSceneRaster|NEAR_MIN_SCALE/);
+  // PERF-FLOOR-FILL-188: the one scissor is paint()'s, each changed rect drawn again whole
+  // (tes-floor-damage-188 proves every such frame equals a full draw).
+  assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2, 'enabled and disabled once, in paint()');
+  assert.match(src, /gl\.enable\(gl\.SCISSOR_TEST\);\s*try \{\s*for \(const p of todo\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*realRender\(\{ container: app\.stage, clear: true \}\);\s*\}\s*\} finally \{ gl\.disable\(gl\.SCISSOR_TEST\); \}/);
   // TES-FLOOR-WHOLE-188: the camera puts every frame on whole device px, so nothing is composed per frame.
   assert.doesNotMatch(src, /sceneRT|sceneSprite|sceneM\b|aboveRoot|sortLayer\.alpha/);
   assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
