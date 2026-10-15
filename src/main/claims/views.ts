@@ -89,6 +89,18 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
   for (const r of records) if (r.t === 'event' && r.ev === 'reconcile-answer' && (r.answer === 'keep-both' || r.answer === 'supersedes')) {
     for (const id of r.targets) acceptedMail.add(id);
   }
+  // CL-BRIEF-STARTUP: each line is counted once (shared by delivery's scale-down rebuilds), and a
+  // newline-joined text counts as its lines plus one '\n' per join. That is the count of the joined
+  // text for the counters in use: WordPiece ('\n' is whitespace: 0) and length (1). Recounting the
+  // whole output for every candidate line was quadratic: 4.1 s for a 1,023-claim ledger, on the main
+  // process, past the hook shim's 5 s give-up at startup.
+  const lineCounts = new Map<string, number>();
+  const lineTokens = (line: string): number => {
+    let n = lineCounts.get(line);
+    if (n === undefined) { n = tokens(countTokens, line); lineCounts.set(line, n); }
+    return n;
+  };
+  const sep = lineTokens('\n');
 
   const buildWorkingSetDetailed = (state: ClaimsState, view: WorldView, budget: number) => {
     const cap = Math.max(0, Math.floor(budget));
@@ -118,13 +130,13 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       eligible.filter(x => tier(x.claim) === 2 && currentValues.has(x.claim.id)).sort(rank),
       eligible.filter(x => tier(x.claim) === 2 && !currentValues.has(x.claim.id)).sort(rank)];
     const output = [`# Memory working set — ${state.agent}`];
-    let used = tokens(countTokens, output.join('\n'));
+    let used = lineTokens(output[0]);
     const included: Receipt['included'] = [];
     const tierUsed = [0, 0, 0];
     const add = (line: string, t: number, id?: string): boolean => {
-      const n = tokens(countTokens, line);
-      if (tokens(countTokens, [...output, line].join('\n')) > cap || tierUsed[t] + n > Math.floor(cap * WORKING_SET_TIER_SHARES[t])) return false;
-      output.push(line); used = tokens(countTokens, output.join('\n')); tierUsed[t] += n;
+      const n = lineTokens(line);
+      if (used + sep + n > cap || tierUsed[t] + n > Math.floor(cap * WORKING_SET_TIER_SHARES[t])) return false;
+      output.push(line); used += sep + n; tierUsed[t] += n;
       if (id) included.push({ id, tier: t, tokens: n });
       return true;
     };
@@ -167,8 +179,8 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
         for (const { claim } of items) {
           const id = claim.id; const group = historyFor.get(id);
           const line = claimLine(claim, 'current') + (group && group.length > 1 ? ` [history: memory.md#${historyAnchor(id)}]` : '');
-          const n = tokens(countTokens, line);
-          if (tokens(countTokens, [...output, ...selected.map(x => x.line), line].join('\n')) <= cap &&
+          const n = lineTokens(line);
+          if (used + (selected.length + 1) * sep + selectedTokens + n <= cap &&
               selectedTokens + n <= t2Cap && localUsed + n <= localCap) {
             selected.push({ id, line, n }); selectedTokens += n; localUsed += n;
           }
@@ -182,7 +194,7 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     };
     const reserveFor = (selected: Array<{ id: string }>): number => {
       const inline = new Set([...t0Included, ...selected.map(x => x.id)]);
-      return historyPointers.filter(p => !inline.has(p.id)).reduce((n, p) => n + tokens(countTokens, p.line), 0);
+      return historyPointers.filter(p => !inline.has(p.id)).reduce((n, p) => n + lineTokens(p.line), 0);
     };
     let tier2 = selectTier2(0);
     let pointerReserve = 0;
@@ -193,17 +205,18 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       tier2 = selectTier2(pointerReserve);
     }
     for (const { id, line, n } of tier2) {
-      output.push(line); used = tokens(countTokens, output.join('\n')); tierUsed[2] += n;
+      output.push(line); used += sep + n; tierUsed[2] += n;
       included.push({ id, tier: 2, tokens: n });
     }
     const includedNow = new Set(included.map(x => x.id));
     for (const { claim } of [...groups[2], ...groups[3]]) if (!includedNow.has(claim.id)) excluded.set(claim.id, 'budget');
     const includedIds = new Set(included.map(x => x.id));
     for (const pointer of historyPointers) if (!includedIds.has(pointer.id)) {
-      if (tokens(countTokens, [...output, pointer.line].join('\n')) <= cap) {
-        output.push(pointer.line); used = tokens(countTokens, output.join('\n'));
-      }
+      const pn = lineTokens(pointer.line);
+      if (used + sep + pn <= cap) { output.push(pointer.line); used += sep + pn; }
     }
+    // The rest is measured on the joined text itself (a few calls, not one per line), as before.
+    used = tokens(countTokens, output.join('\n'));
     const excludedRows = [...excluded].sort(([a], [b]) => cmp(a, b)).map(([id, reason]) => ({ id, reason }));
     const omitted = excludedRows.filter(x => x.reason === 'budget' || x.reason === 'tier-share').length;
     const warnings = [
@@ -213,9 +226,8 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
     ];
     if (omitted) {
       const note = `⚠ ${warnings[warnings.length - 1]}`;
-      const n = tokens(countTokens, note);
       if (tokens(countTokens, [...output, note].join('\n')) <= cap) { output.push(note); used = tokens(countTokens, output.join('\n')); }
-      const more = `+${omitted} more`; const mn = tokens(countTokens, more);
+      const more = `+${omitted} more`;
       if (tokens(countTokens, [...output, more].join('\n')) <= cap) { output.push(more); used = tokens(countTokens, output.join('\n')); }
     }
     const text = output.join('\n');
