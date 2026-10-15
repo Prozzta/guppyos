@@ -22,6 +22,8 @@ const TEXT_COLOR = '#3d2e4a';           // ink-700
 const FONT_SIZE = 12;
 const RENDER_SCALE = 0.5;               // render at 2x, scale down for crispness
 const OFFSET_Y = -38;                   // a touch higher than the tool bubble
+const TAIL_BASE = 0.32;                 // the tail leaves the cloud this far along its width
+const TAIL_EDGE = 8;                    // a slid tail stays this far inside the cloud (inner px)
 const FADE_IN_DURATION = 0.15;
 const FADE_OUT_DURATION = 0.3;
 const LINGER_DURATION = 1.2;            // only used when hide() is requested
@@ -158,11 +160,13 @@ export class ThoughtBubble {
     this.boundsH = h;
   }
 
-  setPosition(px: number, py: number): void {
+  /** `slide` moves the cloud aside by that many px (a scene's overlap pass) while its tail
+   *  keeps pointing down at the head under `px`. */
+  setPosition(px: number, py: number, slide = 0): void {
     const comp = this.compensation();
     const w = this.bgW * RENDER_SCALE * comp;
     const h = this.bgH * RENDER_SCALE * comp;
-    let x = px - w / 2;
+    let x = px + slide - w / 2;
     let y = py + OFFSET_Y - h - this.extraLift;
     if (this.boundsW > 0) {
       // Clamp into the world, tooltip-style: slide horizontally, and a cloud
@@ -173,6 +177,8 @@ export class ThoughtBubble {
     }
     this.container.x = Math.round(x);
     this.container.y = Math.round(y);
+    const base = this.bgW * TAIL_BASE;
+    this.tail.x = Math.min(Math.max(base - slide / (RENDER_SCALE * comp), TAIL_EDGE), Math.max(TAIL_EDGE, this.bgW - TAIL_EDGE)) - base;
   }
 
   /** Extra upward shift (px), set by the scene's bubble-overlap pass. */
@@ -267,7 +273,7 @@ export class ThoughtBubble {
     // Thought-cloud tail: two shrinking puffs trailing down from the bubble's
     // lower-left toward the head below — the cue that says "thinking", not "speech".
     this.tail.clear();
-    const baseX = this.bgW * 0.32;
+    const baseX = this.bgW * TAIL_BASE;
     const puff = (cx: number, cy: number, r: number) => {
       this.tail.circle(cx, cy, r).fill({ color: FILL_COLOR }).stroke({ color: OUTLINE_COLOR, width: 1 });
     };

@@ -28,6 +28,12 @@ All notable changes to this project are documented here. The format is based on
   an errand or idle thought, and the coffee beats come from the pack too. 1.1.87 shipped the file
   but nothing read it, so the bridge only said the generic lines, which stay for packs without one.
 
+- **TES clouds sit just above the head, seated or standing, and neighbours no longer tower.** A
+  cloud now hangs from the sprite as drawn, so a seated person's cloud keeps the same small gap
+  over the head as a standing one; at the Speck desks 1.1.87 floated them 16-30 px higher. Two
+  clouds that would overlap now slide apart sideways first, each still over its own head with its
+  tail pointing down at it, and only what that cannot part is lifted.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.

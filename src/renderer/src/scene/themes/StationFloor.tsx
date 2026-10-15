@@ -24,6 +24,7 @@ import { cacheKeyOf, cacheStale, frontPicker, regionPicker, hasVisiblePixel, NEA
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
+import { cloudAnchor, drawnSprite } from './cloudAnchor';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import { linePicker, type LinePicker } from './packLines';
 import type { MessageAct } from '../office/MessageEnvelope';
@@ -410,7 +411,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       let lastTickAt = performance.now();
       let lastDepth: string | null = null;
       let lastCrewEventAt = -1;
-      const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
+      const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number; anchor: { x: number; y: number } } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
         if (ch && p.seat) {
@@ -425,13 +426,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         }
         const seated = !!(p.seated && p.seat);
         s.sprite.texture = frame(s.look, (seated ? sit : stand)[p.dir]);
-        if (seated && pose) s.sprite.position.set(Math.round(pose.x - fw / 2), Math.round(pose.y));
-        else if (seated && p.seat) s.sprite.position.set(Math.round(p.seat.x - fw / 2), Math.round(p.seat.y - fh));
-        else {
-          const bob = p.moving && Math.floor(clock / 180) % 2 ? -1 : 0;
-          s.sprite.position.set(Math.round(p.x - fw / 2), Math.round(p.y - fh) + bob);
-        }
-        return personKey(p.y, ch, pose);
+        const drawn = drawnSprite(p, pose, fw, fh, clock);
+        s.sprite.position.set(drawn.x, drawn.y);
+        // TES-BUBBLES-188: the cloud hangs from the sprite as drawn (the seat pose), not the walker's point.
+        return { ...personKey(p.y, ch, pose), anchor: cloudAnchor(drawn, fw, fh) };
       };
 
       const onTick = (tk: { deltaMS: number }) => {
@@ -448,8 +446,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         for (const p of crew.walkers()) {
           const s = sprites.get(p.id);
           if (s) {
-            people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
-            anchors.push({ id: p.id, x: p.x, y: p.y });
+            const { foot, rank, anchor } = place(p, s);
+            people.push({ foot, rank, sprite: s.sprite, id: p.id });
+            anchors.push({ id: p.id, ...anchor });
           }
         }
         if (SM.entrance) anchors.push({ id: '__human__', x: SM.entrance[0], y: SM.entrance[1] });

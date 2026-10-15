@@ -163,3 +163,85 @@ test('(b) the floor hands the pack lines to the crew and coffee speech', () => {
   assert.match(src, /bubbles\.consumeSays\(crewSays\(freshEvents, packLines\), sayCursor\);/);
   assert.match(src, /const coffee = coffeeProps\(crew, packLines\);/);
 });
+
+// (c) The cloud hangs from the sprite as drawn, and neighbours part sideways before anyone towers.
+const OFFSET_Y = -38; // ThoughtBubble: the cloud's bottom sits this far above its anchor
+const FW = 32, FH = 32;
+
+test('(c) a seated cloud keeps the standing gap above the drawn head, in every seat pose', () => {
+  const A = loadTs('src/renderer/src/scene/themes/cloudAnchor.ts');
+  const K = loadTs('src/renderer/src/scene/themes/compositor.ts');
+  const gapOf = (drawn) => drawn.y - (A.cloudAnchor(drawn, FW, FH).y + OFFSET_Y);
+  const standing = A.drawnSprite({ x: 464, y: 226, seated: false }, null, FW, FH, 0);
+  const want = gapOf(standing);
+  assert.equal(want, 6, 'standing: the cloud bottom is 6 px above the head');
+  // The Speck desks: a chair whose drawn sitter is 16-30 px off the walker's point in 1.1.87.
+  const chair = { chair: { top: 216, x0: 432, x1: 464 } };
+  for (const dir of ['down', 'up', 'left', 'right']) {
+    const pose = K.seatPose(chair, dir, FW, FH, null);
+    const p = { x: 448, y: 226, seated: true, seat: { x: 448, y: 226 } };
+    const drawn = A.drawnSprite(p, pose, FW, FH, 0);
+    assert.deepEqual(drawn, { x: Math.round(pose.x - FW / 2), y: Math.round(pose.y) }, `${dir}: drawn at the seat pose`);
+    assert.equal(gapOf(drawn), want, `${dir}: the same gap as standing`);
+    assert.equal(A.cloudAnchor(drawn, FW, FH).x, drawn.x + FW / 2, `${dir}: centred on the drawn frame`);
+    assert.notEqual(A.cloudAnchor(drawn, FW, FH).y, p.y, `${dir}: not the walker's point`);
+  }
+});
+
+test('(c) the floor draws the sprite and hangs the cloud from the same drawn point', () => {
+  const src = readSource(FLOOR);
+  assert.match(src, /const drawn = drawnSprite\(p, pose, fw, fh, clock\);\s+s\.sprite\.position\.set\(drawn\.x, drawn\.y\);/);
+  assert.match(src, /anchor: cloudAnchor\(drawn, fw, fh\)/);
+  assert.match(src, /anchors\.push\(\{ id: p\.id, \.\.\.anchor \}\);/);
+  assert.doesNotMatch(src, /anchors\.push\(\{ id: p\.id, x: p\.x, y: p\.y \}\)/, 'never the walker point');
+});
+
+function bubbleLayerWith(widths) {
+  const made = [];
+  class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); return c; } destroy() {} }
+  class ThoughtBubble {
+    constructor() { this.container = new Container(); this.text = null; this.lift = 0; this.pos = null; made.push(this); }
+    show(text) { this.text = text; } hide() { this.text = null; } startLinger() { this.text = null; }
+    setBounds() {} setZoom() {} update() {} destroy() {}
+    setLift(px) { this.lift = px; }
+    setPosition(px, py, slide = 0) { this.pos = [px + slide, py]; this.slide = slide; }
+    getLayout(px, py) { if (this.text === null) return null; const w = widths[this.text], h = 16; return { x: px - w / 2, y: py + OFFSET_Y - h, w, h }; }
+    rect() { const w = widths[this.text], h = 16; return { x: this.pos[0] - w / 2, y: this.pos[1] + OFFSET_Y - h - this.lift, w, h }; }
+  }
+  const out = ts.transpileModule(readSource('src/renderer/src/scene/themes/BubbleLayer.ts'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const mod = { exports: {} };
+  const req = (id) => {
+    if (id === 'pixi.js') return { Container };
+    if (id === '../office/ThoughtBubble') return { ThoughtBubble };
+    if (id === '../office/MessageEnvelope') return { MessageEnvelope: class {} };
+    if (id === './bubbleModel') return MODEL;
+    throw new Error(`unexpected module ${id}`);
+  };
+  new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
+  return { layer: new mod.exports.BubbleLayer({ width: 960, height: 640 }), made };
+}
+
+const apart = (a, b) => a.x + a.w + 4 <= b.x || b.x + b.w + 4 <= a.x || a.y + a.h + 4 <= b.y || b.y + b.h + 4 <= a.y;
+
+test('(c) the Speck1/Speck2/Captain clouds part sideways, none towers, each stays over its head', () => {
+  // The 1.1.87 render: the Captain (god) and both Speck desks, anchors at the drawn sprites' foot lines.
+  const { layer, made } = bubbleLayerWith({ 'captain log': 58, 'Speck one': 68, 'Speck two': 58 });
+  const seats = [['god', 'captain log', 464, 192], ['dwight', 'Speck one', 448, 242], ['jim', 'Speck two', 480, 242]];
+  for (const [id, text] of seats) layer.setThought(id, { text });
+  layer.update(16, seats.map(([id, , x, y]) => ({ id, x, y })), 1);
+  const rects = made.map((b) => b.rect());
+  made.forEach((b, i) => assert.equal(b.lift, 0, `${seats[i][0]}: not lifted`));
+  for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) assert.ok(apart(rects[i], rects[j]), `${seats[i][0]}/${seats[j][0]} do not overlap`);
+  rects.forEach((r, i) => assert.ok(r.x + 6 <= seats[i][2] && seats[i][2] <= r.x + r.w - 6, `${seats[i][0]}: still over its head`));
+  assert.ok(made.some((b) => b.slide !== 0), 'the slide is handed to the cloud, so its tail can keep to the head');
+});
+
+test('(c) what sliding cannot part is still lifted clear', () => {
+  const { layer, made } = bubbleLayerWith({ one: 60, two: 60 });
+  layer.setThought('a', { text: 'one' });
+  layer.setThought('b', { text: 'two' });
+  layer.update(16, [{ id: 'a', x: 300, y: 300 }, { id: 'b', x: 302, y: 300 }], 1);
+  const [ra, rb] = made.map((b) => b.rect());
+  assert.ok(apart(ra, rb), 'the pair never overlaps');
+  assert.ok(made.some((b) => b.lift > 0), 'one is lifted');
+});

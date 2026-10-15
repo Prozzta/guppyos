@@ -15,6 +15,12 @@ type ActiveThought = {
 
 const DEFAULT_SAY_MS = 2600;
 const MAX_ENVELOPES = 20;
+/** The clear gap kept between two clouds, px. */
+const CLOUD_GAP = 4;
+/** How far of its own half width a cloud keeps over its head when it slides aside, px. */
+const SLIDE_KEEP = 6;
+/** Rounds of sideways pushing before the leftover overlap is lifted. */
+const SLIDE_ROUNDS = 8;
 
 /** Shared world-space bubble overlay for station themes. */
 export class BubbleLayer {
@@ -79,7 +85,7 @@ export class BubbleLayer {
     this.anchors.clear();
     for (const anchor of anchors) this.anchors.set(anchor.id, anchor);
 
-    const layouts: Array<{ active: ActiveThought; x: number; y: number; w: number; h: number; anchor: { x: number; y: number } }> = [];
+    const layouts: Array<{ active: ActiveThought; x: number; y: number; w: number; h: number; dx: number; anchor: { x: number; y: number } }> = [];
     for (const [id, active] of this.thoughts) {
       if (active.say && active.say.until <= this.now) { active.say = null; this.render(active); }
       const anchor = this.anchors.get(id);
@@ -89,7 +95,28 @@ export class BubbleLayer {
       active.bubble.setLift(0);
       active.bubble.setPosition(anchor.x, anchor.y);
       const layout = active.bubble.getLayout(anchor.x, anchor.y);
-      if (layout) layouts.push({ active, anchor, ...layout });
+      if (layout) layouts.push({ active, anchor, ...layout, dx: 0 });
+    }
+
+    // TES-BUBBLES-188: neighbours first push apart sideways, each only so far that it still hangs
+    // over its own head; only what that cannot part is lifted. 1.1.87 lifted at once, so the clouds
+    // of adjacent seats (Speck1/Speck2) towered over each other.
+    for (let round = 0, moved = true; moved && round < SLIDE_ROUNDS; round++) {
+      moved = false;
+      for (let i = 0; i < layouts.length; i++) {
+        for (let j = i + 1; j < layouts.length; j++) {
+          const a = layouts[i], b = layouts[j];
+          if (!(a.y < b.y + b.h + CLOUD_GAP && a.y + a.h + CLOUD_GAP > b.y)) continue;
+          const [l, r] = a.x + a.dx + a.w / 2 <= b.x + b.dx + b.w / 2 ? [a, b] : [b, a];
+          const need = l.x + l.dx + l.w + CLOUD_GAP - (r.x + r.dx);
+          if (need <= 0) continue;
+          const roomL = Math.max(0, l.w / 2 - SLIDE_KEEP + l.dx), roomR = Math.max(0, r.w / 2 - SLIDE_KEEP - r.dx);
+          let toR = Math.min(need / 2, roomR);
+          const toL = Math.min(need - toR, roomL);
+          toR = Math.min(need - toL, roomR);
+          if (toL > 0 || toR > 0) { l.dx -= toL; r.dx += toR; moved = true; }
+        }
+      }
     }
 
     layouts.sort((a, b) => (b.y + b.h) - (a.y + a.h) || a.x - b.x);
@@ -99,14 +126,14 @@ export class BubbleLayer {
       for (let moved = true, guard = 0; moved && guard++ < 12;) {
         moved = false;
         for (const prior of placed) {
-          const overlapX = item.x < prior.x + prior.w + 4 && item.x + item.w + 4 > prior.x;
-          const overlapY = y < prior.y + prior.h + 4 && y + item.h + 4 > prior.y;
-          if (overlapX && overlapY) { y = prior.y - item.h - 4; moved = true; }
+          const overlapX = item.x + item.dx < prior.x + prior.w + CLOUD_GAP && item.x + item.dx + item.w + CLOUD_GAP > prior.x;
+          const overlapY = y < prior.y + prior.h + CLOUD_GAP && y + item.h + CLOUD_GAP > prior.y;
+          if (overlapX && overlapY) { y = prior.y - item.h - CLOUD_GAP; moved = true; }
         }
       }
       item.active.bubble.setLift(item.y - y);
-      item.active.bubble.setPosition(item.anchor.x, item.anchor.y);
-      placed.push({ x: item.x, y, w: item.w, h: item.h });
+      item.active.bubble.setPosition(item.anchor.x, item.anchor.y, item.dx);
+      placed.push({ x: item.x + item.dx, y, w: item.w, h: item.h });
     }
 
     for (const active of this.thoughts.values()) active.bubble.update(dt / 1000);
