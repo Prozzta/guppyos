@@ -290,7 +290,8 @@ test('A: one op patches the card (assignee kept), writes one outbox message and 
   assert.equal(f.state.tasks[0].assignee, 'creed', 'the assignee is kept');
   assert.equal(f.state.tasks[0].result, '\n[2026-10-03T08:00:00.000Z] design approved');
   const msg = JSON.parse(fs.readFileSync(path.join(f.agentDir, 'outbox', 'ledger-creed-181-1.json'), 'utf8'));
-  assert.deepEqual(msg, { to: 'god', act: 'inform', subject: 'started', body: BODY, conversation: 'reads-181', in_reply_to: 'm1' });
+  // REQUESTS-BADGE-84 A: the op's card rides on the message.
+  assert.deepEqual(msg, { to: 'god', act: 'inform', subject: 'started', body: BODY, conversation: 'reads-181', in_reply_to: 'm1', card: 'READS-181' });
   assert.equal(msg.from, undefined, 'from is the router\'s (the folder), never the input\'s');
   assert.ok(f.memory().endsWith('- old note\n- 2026-10-03 started READS-181\n'));
 });

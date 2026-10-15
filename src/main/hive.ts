@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { MailLedger, freshMailId, isValidMailId, staleObligations, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
+import { ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -123,6 +123,9 @@ export interface HiveMessage {
    *  that would otherwise wait for its next turn (shared/mailWakeClass.ts). Any other value is
    *  dropped. */
   wake?: 'now';
+  /** REQUESTS-BADGE-84 rule A: the task card this message is about (a sender's `card`, or the
+   *  ledger op's card id); kept only when well-formed (cardIdValue). */
+  card?: string;
 }
 
 /** A sender's `supersedes` (a string or an array), bounded: up to 10 non-empty ids of at most
@@ -597,6 +600,10 @@ export const CLEANUP_183_IDS: readonly string[] = [
 ];
 export const CLEANUP_183_REASON = 'cleanup-183:god-verified';
 const CLEANUP_183_FILE = 'cleanup-183.json';
+/** REQUESTS-BADGE-84: marks the one-time replay of rules B and C over the sent mail as done. */
+const REPLAY_84_FILE = 'replay-84.json';
+/** The largest sent file the replay reads (a message body is at most 64 KB). */
+const REPLAY_84_MAX_BYTES = 1_000_000;
 
 /** READS-PROMPT-TRIM: the names of the skills Claude Code synced from the user's claude.ai account
  *  (~/.claude/skills/synced/<org_user>/manifest.json, Claude Code 2.1.288). Best-effort: none on
@@ -2616,7 +2623,8 @@ export class HiveManager {
       needs_human: partial.needs_human ?? false,
       created_at: partial.created_at ?? new Date().toISOString(),
       ...normalizeSupersedes(partial.supersedes),
-      ...normalizeWakeField(partial.wake)
+      ...normalizeWakeField(partial.wake),
+      ...(cardIdValue(partial.card) ? { card: cardIdValue(partial.card)! } : {})
     };
   }
 
@@ -2798,6 +2806,11 @@ export class HiveManager {
         try { this.appendLog({ kind: 'mail-ledger-error', agentId: msg.from, id: msg.id, op: 'replied', error: String(e) }); } catch { /* noop */ }
       }
     }
+    // REQUESTS-BADGE-84 rules B and C, at routing time (the requester's copy of an answer is
+    // pruned after 7 days, so a later sweep cannot see it): an answer that cites more asks, or
+    // answers the latest one in its conversation, closes them in the sender's ledger; a
+    // `supersedes` closes the named asks in the recipient's. Zero-token: tracking only.
+    if (msg.to !== 'broadcast') this.closeAnsweredAsks(msg, resolveTo(msg.to));
     const targets = msg.to === 'broadcast'
       // The roster for fan-out is the ACTIVE registry: skip the send-only prep
       // assistant and any archived agent (closed tab). Hookless providers are
@@ -3726,6 +3739,58 @@ export class HiveManager {
   }
 
   /**
+   * REQUESTS-BADGE-84 rules D and E: the open ask `id` as `caller` may close it by hand. 'owner'
+   * when it is in the caller's own ledger (the caller owes it), 'requester' when it is in another
+   * registry agent's ledger with the caller as its sender; null otherwise (a third party never may).
+   */
+  private findClosableAsk(caller: string, id: string): { agentId: string; by: 'owner' | 'requester' } | null {
+    if (typeof id !== 'string' || !isValidMailId(id)) return null;
+    const open = (agentId: string): MailLedgerDoc['entries'][string] | null => {
+      try {
+        if (!this.mail.hasAgent(agentId)) return null;
+        const e = this.mail.ledger(agentId).entries[id];
+        return e && isOpenObligation(e) ? e : null;
+      } catch { return null; }
+    };
+    if (open(caller)) return { agentId: caller, by: 'owner' };
+    const reg = this.registry();
+    for (const a of Object.keys(reg.agents ?? {})) {
+      if (a === caller || !Object.prototype.hasOwnProperty.call(reg.agents, a)) continue;
+      if (open(a)?.from === caller) return { agentId: a, by: 'requester' };
+    }
+    return null;
+  }
+
+  /** REQUESTS-BADGE-84 D/E, for the ledger command's `close` part: who `caller` is for the open ask. */
+  askCloser(caller: string, id: string): 'owner' | 'requester' | null {
+    return this.findClosableAsk(caller, id)?.by ?? null;
+  }
+
+  /** REQUESTS-BADGE-84 D/E: close it with `reason` (`owner:…` / `withdrawn:…`, a
+   *  `mail-obligation-closed` row); true when it closed. The role must still be `by`. */
+  closeAsk(caller: string, id: string, by: 'owner' | 'requester', reason: string): boolean {
+    const f = this.findClosableAsk(caller, id);
+    if (!f || f.by !== by || typeof reason !== 'string' || !reason.trim()) return false;
+    return this.mail.autoCloseObligation(f.agentId, id, reason.slice(0, ASK_CLOSE_REASON_MAX)).length > 0;
+  }
+
+  /** REQUESTS-BADGE-84 rules B and C for one routed message (see answeredByMessage and
+   *  supersededByMessage); each close logs a `mail-obligation-closed` row with its auto: reason. */
+  private closeAnsweredAsks(msg: Pick<HiveMessage, 'id' | 'from' | 'act' | 'conversation' | 'in_reply_to' | 'subject' | 'body' | 'supersedes' | 'created_at'>, to: string): void {
+    const at = Date.parse(msg.created_at);
+    const m = {
+      id: msg.id, act: msg.act, conversation: msg.conversation, inReplyTo: msg.in_reply_to, subject: msg.subject,
+      body: typeof msg.body === 'string' ? msg.body : '', supersedes: msg.supersedes, at: Number.isFinite(at) ? at : Date.now()
+    };
+    try {
+      const found = [...answeredByMessage(this.mail.ledger(msg.from), to, m), ...supersededByMessage(this.mail.ledger(to), msg.from, m)];
+      for (const s of found) this.mail.autoCloseObligation(s.agentId, s.id, s.reason);
+    } catch (e) {
+      try { this.appendLog({ kind: 'mail-ledger-error', agentId: msg.from, id: msg.id, op: 'answered', error: String(e) }); } catch { /* noop */ }
+    }
+  }
+
+  /**
    * REQUESTS-TAB-STALE (1.1.83): close every open request whose work is provably finished (its
    * card became done, its recipient answered it, or the release it names first started, each
    * AFTER the ask: `staleObligations`). `runningVersion` is the packaged app's version (main runs
@@ -3774,6 +3839,63 @@ export class HiveManager {
       mkdirSync(join(root, 'state'), { recursive: true });
       atomicWriteJsonFile(marker, { v: 1, at: Date.now(), closed });
     } catch { /* not marked: the next beat retries, and closed ids are skipped */ }
+    return closed;
+  }
+
+  /**
+   * REQUESTS-BADGE-84: rules B and C run at routing time only, so the asks already open when they
+   * shipped get the same rules once, over the durable evidence: every registry agent's
+   * `outbox/.sent` (the messages it sent, oldest first, at their file time). Runs once per hive
+   * (`state/replay-84.json`); each close is a `mail-obligation-closed` row whose reason names
+   * the sent file (`auto:answered-cited:sent:<file>`, `auto:superseded:sent:<file>`). No mail, no
+   * wake. Returns the closed asks, or null when it had already run.
+   */
+  runReplay84(): StaleObligation[] | null {
+    const root = this.root();
+    if (!root) return null;
+    const marker = join(root, 'state', REPLAY_84_FILE);
+    if (existsSync(marker)) return null;
+    const reg = this.registry();
+    const godId = reg.godId ?? 'god';
+    const agents = Object.keys(reg.agents ?? {}).filter((id) => Object.prototype.hasOwnProperty.call(reg.agents, id));
+    const sent: { from: string; to: string; m: Parameters<typeof answeredByMessage>[2] }[] = [];
+    for (const from of agents) {
+      const dir = join(root, 'agents', from, 'outbox', '.sent');
+      let files: string[];
+      try { files = readdirSync(dir).filter((f) => f.endsWith('.json') && !f.startsWith('bad-')); } catch { continue; }
+      for (const file of files) {
+        try {
+          const full = join(dir, file);
+          const st = statSync(full);
+          if (!st.isFile() || st.size > REPLAY_84_MAX_BYTES) continue;
+          const raw = JSON.parse(readFileSync(full, 'utf8')) as Partial<HiveMessage>;
+          if (typeof raw?.to !== 'string' || typeof raw.act !== 'string') continue;
+          const to = raw.to === 'human' || raw.to === 'god' ? godId : raw.to;
+          if (to === from || !agents.includes(to)) continue;   // 'broadcast' is no agent
+          sent.push({ from, to, m: {
+            id: `sent:${file}`, act: raw.act,
+            conversation: typeof raw.conversation === 'string' ? raw.conversation : null,
+            inReplyTo: typeof raw.in_reply_to === 'string' ? raw.in_reply_to : null,
+            subject: typeof raw.subject === 'string' ? raw.subject : '', body: typeof raw.body === 'string' ? raw.body : '',
+            supersedes: normalizeSupersedes(raw.supersedes).supersedes, at: st.mtimeMs
+          } });
+        } catch { /* an unreadable file is no evidence */ }
+      }
+    }
+    sent.sort((a, b) => a.m.at - b.m.at);
+    const closed: StaleObligation[] = [];
+    for (const { from, to, m } of sent) {
+      try {
+        const found = [...answeredByMessage(this.mail.ledger(from), to, m), ...supersededByMessage(this.mail.ledger(to), from, m)];
+        for (const s of found) if (this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length) closed.push(s);
+      } catch (e) {
+        try { this.appendLog({ kind: 'mail-ledger-error', agentId: from, id: m.id, op: 'replay-84', error: String(e) }); } catch { /* noop */ }
+      }
+    }
+    try {
+      mkdirSync(join(root, 'state'), { recursive: true });
+      atomicWriteJsonFile(marker, { v: 1, at: Date.now(), files: sent.length, closed: closed.map((s) => ({ agentId: s.agentId, id: s.id })) });
+    } catch { /* not marked: the next beat retries, and closed asks are no longer open */ }
     return closed;
   }
 
@@ -5248,6 +5370,7 @@ Write one JSON file into \`outbox/\` (any filename ending in \`.json\`):
   "conversation": "carry this across a thread (optional)",
   "in_reply_to": "<message id you're replying to> (optional)",
   "supersedes": ["<id of an earlier message this one cancels or corrects>"] (optional),
+  "card": "<the task card id this message is about, e.g. READS-181> (optional)",
   "wake": "now" (optional: an inform or agree that must be read at once)
 }
 \`\`\`
@@ -5284,12 +5407,19 @@ EOF
   not); \`appendResult\` / \`appendNote\` add a timestamped line. A patch changes only the fields it
   names, so the assignee is kept unless you give one.
 - \`message\`: the schema above; \`to\` must be a registered agent, \`god\` or \`broadcast\`.
+  A \`request\` must name its card (\`message.card\`, or the op's \`card\`): the ask closes when that
+  card is done. Information that needs no answer goes as \`inform\`, never as \`request\`.
+- \`close\`: \`[{ "id": "<ask message id>", "reason": "why it is no longer open" }]\` closes open
+  asks by hand: one you owe (recorded \`owner:<reason>\`) or one you sent and withdraw
+  (\`withdrawn:<reason>\`). A reason is required; nobody else's asks.
 - \`memory\`: \`append\` goes at the end of your memory.md; \`"lesson": true\` puts it at the end of
   your standing lessons instead (no \`## \` headings).
 In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool and run
 \`ledger --file op.json\`.
 
 ## Rules of the road
+- An ask closes when you answer it (\`in_reply_to\` its id, or cite its id in a \`done\`/\`inform\`
+  to the asker), when its card is done, or when its sender supersedes it. FYIs go as \`inform\`.
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
 - An \`inform\` or \`agree\` that needs no reply does not wake an idle recipient: it reaches the

@@ -33,11 +33,16 @@ export const LEDGER_TEXT_MAX = 200 * 1024;
 const OP_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const STATUSES = ['todo', 'doing', 'blocked', 'done'] as const;
 const ACTS = ['request', 'inform', 'propose', 'query', 'agree', 'refuse', 'done'] as const;
-const TOP_KEYS = new Set(['op', 'card', 'message', 'memory']);
+const TOP_KEYS = new Set(['op', 'card', 'message', 'close', 'memory']);
 const CARD_KEYS = new Set(['id', 'create', 'patch', 'appendResult', 'appendNote']);
 const CREATE_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
 const PATCH_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
-const MESSAGE_KEYS = new Set(['to', 'act', 'subject', 'body', 'conversation', 'in_reply_to', 'supersedes']);
+const MESSAGE_KEYS = new Set(['to', 'act', 'subject', 'body', 'conversation', 'in_reply_to', 'supersedes', 'card']);
+const CLOSE_KEYS = new Set(['id', 'reason']);
+/** REQUESTS-BADGE-84 D/E: at most this many asks closed by one op. */
+export const LEDGER_CLOSE_MAX = 50;
+/** A card id as tasks.json spells them ("READS-181", "T5b"; the shape mailLedger.cardIdValue keeps). */
+const CARD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
 const MEMORY_KEYS = new Set(['append', 'lesson']);
 /** Where `lesson: true` text goes: the pinned section every agent's memory.md starts with. */
 const LESSONS_HEADING = '## How I work (standing lessons)';
@@ -50,8 +55,10 @@ export interface LedgerCard {
   appendResult?: string;
   appendNote?: string;
 }
-export interface LedgerMessage { to: string; act: string; subject: string; body: string; conversation?: string; in_reply_to?: string | null; supersedes?: string[] }
-export interface LedgerOp { op: string; card?: LedgerCard; message?: LedgerMessage; memory?: { append: string; lesson?: boolean } }
+export interface LedgerMessage { to: string; act: string; subject: string; body: string; conversation?: string; in_reply_to?: string | null; supersedes?: string[]; card?: string }
+/** REQUESTS-BADGE-84 D/E: close an open ask by hand, with the reason it records. */
+export interface LedgerClose { id: string; reason: string }
+export interface LedgerOp { op: string; card?: LedgerCard; message?: LedgerMessage; close?: LedgerClose[]; memory?: { append: string; lesson?: boolean } }
 
 export interface LedgerDeps {
   /** The caller (from the authenticated URL). */
@@ -71,6 +78,14 @@ export interface LedgerDeps {
    * 'ledger-route'); below 'writer', or when absent, the memory part goes to memory.md as before.
    */
   memoryClaim?: { level: LedgerLevel; note(args: { kind: 'fact' | 'lesson'; text: string; pin?: true }): Promise<{ ok: boolean; id?: string; error?: string }> } | null;
+  /**
+   * REQUESTS-BADGE-84 D/E: who the caller is for the open ask `id`: 'owner' (the caller owes it:
+   * it is in the caller's own ledger), 'requester' (the caller sent it: it is in another agent's
+   * ledger with the caller as sender), or null (no open ask of the caller's). Absent = no close part.
+   */
+  askCloser?(id: string): 'owner' | 'requester' | null;
+  /** Close it with this exact reason (`owner:…` or `withdrawn:…`); true when it closed. */
+  closeAsk?(id: string, by: 'owner' | 'requester', reason: string): boolean;
 }
 
 /** Characters as the claim store counts them (code points). */
@@ -86,9 +101,9 @@ const str = (v: unknown, max: number): v is string => typeof v === 'string' && v
 export function parseLedgerOp(raw: unknown): { ok: true; op: LedgerOp } | { ok: false; error: string } {
   if (!isObj(raw)) return { ok: false, error: 'the input must be one JSON object' };
   const extra = unknownKeys(raw, TOP_KEYS);
-  if (extra.length) return { ok: false, error: `unknown field(s): ${extra.join(', ')} (allowed: op, card, message, memory)` };
+  if (extra.length) return { ok: false, error: `unknown field(s): ${extra.join(', ')} (allowed: op, card, message, close, memory)` };
   if (typeof raw.op !== 'string' || !OP_RE.test(raw.op)) return { ok: false, error: 'op: required, 1-80 of A-Z a-z 0-9 . _ - (a unique name for this operation, e.g. "creed-181-3")' };
-  if (raw.card === undefined && raw.message === undefined && raw.memory === undefined) return { ok: false, error: 'nothing to do: give card, message and/or memory' };
+  if (raw.card === undefined && raw.message === undefined && raw.close === undefined && raw.memory === undefined) return { ok: false, error: 'nothing to do: give card, message, close and/or memory' };
   const op: LedgerOp = { op: raw.op };
   if (raw.card !== undefined) {
     const c = raw.card;
@@ -137,7 +152,30 @@ export function parseLedgerOp(raw: unknown): { ok: true; op: LedgerOp } | { ok: 
     if (m.supersedes !== undefined && (!Array.isArray(m.supersedes) || m.supersedes.length > 10 || !m.supersedes.every((s) => str(s, 200)))) {
       return { ok: false, error: 'message.supersedes: up to 10 message ids' };
     }
-    op.message = m as unknown as LedgerMessage;
+    if (m.card !== undefined && (typeof m.card !== 'string' || !CARD_ID_RE.test(m.card))) return { ok: false, error: 'message.card: a card id, e.g. "READS-181"' };
+    // REQUESTS-BADGE-84 A: the op's card is the message's card unless the message names one.
+    const card = (m.card as string | undefined) ?? op.card?.id;
+    // A request is tied to its card at send time, so closing the card closes the ask. Information
+    // that needs no answer goes as inform (or done), which never counts as an open ask.
+    if (m.act === 'request' && !card) return { ok: false, error: 'message: a request must name its card (give card, or message.card). Information that needs no answer goes as act "inform"' };
+    op.message = { ...(m as unknown as LedgerMessage), ...(card ? { card } : {}) };
+  }
+  if (raw.close !== undefined) {
+    const list = raw.close;
+    if (!Array.isArray(list) || list.length === 0 || list.length > LEDGER_CLOSE_MAX) return { ok: false, error: `close: a list of 1-${LEDGER_CLOSE_MAX} { "id", "reason" } items` };
+    const seen = new Set<string>();
+    const items: LedgerClose[] = [];
+    for (const [i, c] of list.entries()) {
+      if (!isObj(c)) return { ok: false, error: `close[${i}]: must be an object` };
+      const x = unknownKeys(c, CLOSE_KEYS);
+      if (x.length) return { ok: false, error: `close[${i}]: unknown field(s): ${x.join(', ')}` };
+      if (!str(c.id, 200)) return { ok: false, error: `close[${i}].id: the message id of the ask` };
+      if (typeof c.reason !== 'string' || !c.reason.trim() || c.reason.length > 180) return { ok: false, error: `close[${i}].reason: required, why it is no longer open (at most 180 chars)` };
+      if (seen.has(c.id)) return { ok: false, error: `close[${i}].id: ${c.id} is listed twice` };
+      seen.add(c.id);
+      items.push({ id: c.id, reason: c.reason.trim() });
+    }
+    op.close = items;
   }
   if (raw.memory !== undefined) {
     const m = raw.memory;
@@ -165,7 +203,7 @@ function checkCardFields(o: Record<string, unknown>, where: string): string | nu
 /** Text for a free-text field: the old value, then `[iso] text` on its own line (god's form). */
 const appended = (old: unknown, text: string, at: Date): string => `${typeof old === 'string' ? old : ''}\n[${at.toISOString()}] ${text}`;
 
-interface OpRecord { op: string; at: string; hash?: string; card?: boolean; message?: string; memory?: number; claim?: string; line?: string }
+interface OpRecord { op: string; at: string; hash?: string; card?: boolean; message?: string; closed?: string[]; memory?: number; claim?: string; line?: string }
 
 /** Canonical JSON: object keys sorted, so the same content always hashes the same. */
 const canonical = (v: unknown): string => Array.isArray(v)
@@ -255,6 +293,22 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
   if (op.message && !rec?.message && !deps.isRecipient(op.message.to)) {
     return { status: 400, body: { ok: false, line: `refused: message.to "${op.message.to}" is not a registered agent, "god" or "broadcast"` } };
   }
+  // REQUESTS-BADGE-84 A: a message's card must exist (the op's own card is checked above).
+  const msgCard = op.message?.card;
+  if (op.message && msgCard && !rec?.message && msgCard !== card?.id && !tasks.some((t) => t?.id === msgCard)) {
+    return { status: 404, body: { ok: false, line: `refused: message.card ${msgCard} is not a card` } };
+  }
+  // REQUESTS-BADGE-84 D/E: every ask must be one the caller owes (owner) or sent (requester).
+  const closers = new Map<string, 'owner' | 'requester'>();
+  if (op.close) {
+    if (!deps.askCloser || !deps.closeAsk) return { status: 400, body: { ok: false, line: 'refused: close is not available here' } };
+    for (const c of op.close) {
+      if (rec?.closed?.includes(c.id)) continue;
+      const by = deps.askCloser(c.id);
+      if (!by) return { status: 404, body: { ok: false, line: `refused: ${c.id} is not an open ask you owe or sent` } };
+      closers.set(c.id, by);
+    }
+  }
   const memFile = join(deps.agentDir, 'memory.md');
   const asClaim = !!op.memory && deps.memoryClaim?.level === 'writer';
   if (op.memory && asClaim && !rec?.memory) {
@@ -329,7 +383,8 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
           to: m.to, act: m.act, subject: m.subject, body: m.body,
           ...(m.conversation !== undefined ? { conversation: m.conversation } : {}),
           ...(m.in_reply_to !== undefined ? { in_reply_to: m.in_reply_to } : {}),
-          ...(m.supersedes !== undefined ? { supersedes: m.supersedes } : {})
+          ...(m.supersedes !== undefined ? { supersedes: m.supersedes } : {}),
+          ...(m.card !== undefined ? { card: m.card } : {})
         };
         const tmp = join(outbox, `${file}.tmp-${process.pid}`);
         writeFileSync(tmp, JSON.stringify(msg, null, 2), 'utf8');
@@ -339,6 +394,22 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
       } catch (e) { return fail('message', e); }
     }
     done.push(`msg=${rec.message}`);
+  }
+
+  // 3b) REQUESTS-BADGE-84 D/E: the asks closed by hand, each with its recorded reason.
+  if (op.close) {
+    const closed = rec.closed ?? [];
+    for (const c of op.close) {
+      if (closed.includes(c.id)) continue;
+      const by = closers.get(c.id)!;
+      try {
+        if (!deps.closeAsk!(c.id, by, `${by === 'owner' ? 'owner' : 'withdrawn'}:${c.reason}`)) throw new Error(`${c.id} was not open any more`);
+        closed.push(c.id);
+        rec.closed = closed;
+        save();
+      } catch (e) { return fail(`close ${c.id}`, e); }
+    }
+    done.push(`closed=${closed.length}`);
   }
 
   const finish = (): LedgerReply => {

@@ -192,7 +192,8 @@ test('hive: auto-closes by card and by conversation, logs each reason, writes no
   hive.send({ to: 'god-1', act: 'inform', subject: 'logs are clean', body: 'done', conversation: 'conv-logs' }, 'andy-1');
   const before = ['god-1', 'andy-1'].map((id) => inboxCount(hive, id));
   const closed = hive.autoCloseStaleObligations(null);
-  assert.deepEqual(closed.map((s) => s.id).sort(), [byCard.id, byConv.id].sort());
+  // REQUESTS-BADGE-84 B: the same-conversation answer already closed byConv when it was routed.
+  assert.deepEqual(closed.map((s) => s.id).sort(), [byCard.id]);
   assert.deepEqual(['god-1', 'andy-1'].map((id) => inboxCount(hive, id)), before, 'closing sends nothing to anyone');
   assert.deepEqual(hive.mailObligations().flatMap((a) => a.openRequests.map((o) => o.id)).sort(), [followUp.id, live.id].sort(),
     'the live ask and the follow-up about an already-done card are left');
@@ -259,8 +260,9 @@ test('WIRING: a packaged-only main beat runs the sweep; only hive.ts auto-closes
   assert.match(idx, /function runStaleRequestsBeat\(\): void \{\s*if \(!app\.isPackaged\) return;\s*try \{ hive\.runCleanup183\(\); \}[^\n]*\n\s*try \{ hive\.autoCloseStaleObligations\(app\.getVersion\(\)\); \}/);
   assert.match(idx, /function armAlwaysOnBeats\(\): void \{[\s\S]{0,900}if \(staleRequestsTimer\) clearInterval\(staleRequestsTimer\);\s*runStaleRequestsBeat\(\);\s*staleRequestsTimer = setInterval\(runStaleRequestsBeat, 60_000\);/);
   const hiveSrc = codeOnly(readSource('src/main/hive.ts'), 'hive.ts');
-  assert.equal((hiveSrc.match(/\.autoCloseObligation\(/g) || []).length, 2, 'the sweep and the one-time cleanup');
-  assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(s\.agentId, s\.id, s\.reason\)/);
+  assert.equal((hiveSrc.match(/\.autoCloseObligation\(/g) || []).length, 5, 'the sweep, the one-time cleanup, routing and its one-time replay (REQUESTS-BADGE-84 B/C) and the ledger close (D/E)');
+  assert.equal((hiveSrc.match(/this\.mail\.autoCloseObligation\(s\.agentId, s\.id, s\.reason\)/g) || []).length, 3, 'the sweep, routing and the replay');
+  assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(f\.agentId, id, reason\.slice\(0, ASK_CLOSE_REASON_MAX\)\)/);
   assert.match(hiveSrc, /this\.mail\.autoCloseObligation\(agentId, id, CLEANUP_183_REASON\)/);
   assert.equal((idx.match(/autoCloseObligation\(/g) || []).length, 0);
   assert.match(hiveSrc, /return this\.mail\.closeObligation\(agentId, id, 'closed-by-human'\);/);
