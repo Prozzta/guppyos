@@ -93,11 +93,13 @@ export interface GraphicsStatusView extends GraphicsStatus {
 
 /**
  * The indicator line, from what is ACTUALLY in use: the WebGL renderer a floor got (null before
- * any floor has drawn) and main's status. Software when hardware acceleration is off or the
- * renderer is a software rasterizer; a GPU mode that fell back says so.
+ * any floor has drawn) and main's status. Software when hardware acceleration is off, the
+ * renderer is a software rasterizer, or Chromium composites in software: that last one is read
+ * fresh from main and wins over a renderer a floor recorded earlier, so a GPU-process fallback
+ * mid-run shows here (Jim S1); it errs safe. A GPU mode that fell back says so.
  */
 export function renderingLabel(webglRenderer: string | null, status: Pick<GraphicsStatus, 'applied' | 'hardwareDisabled' | 'hardwareCompositing'>): string {
-  const software = status.hardwareDisabled || isSoftwareRenderer(webglRenderer) || (webglRenderer === null && status.hardwareCompositing === false);
+  const software = status.hardwareDisabled || isSoftwareRenderer(webglRenderer) || status.hardwareCompositing === false;
   if (software) {
     const why = status.applied === 'cpu' ? '' : status.applied === 'gpu' ? ': no usable GPU, fell back to the CPU' : ': no usable GPU';
     return `Rendering: software (CPU)${why}`;

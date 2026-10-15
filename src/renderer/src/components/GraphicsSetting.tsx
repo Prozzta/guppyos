@@ -36,6 +36,9 @@ export const GRAPHICS_COPY = {
   failed: 'The Graphics setting could not be saved. The current one is unchanged.'
 };
 
+/** How often the open section re-reads main's status (one IPC call, no WebGL context). */
+export const GRAPHICS_REFRESH_MS = 10_000;
+
 /** Pure: whether the saved mode waits for a restart (it differs from the one this run started with). */
 export function restartPending(s: Pick<GraphicsStatusView, 'applied' | 'stored'> | null): boolean {
   return !!s && s.applied !== s.stored;
@@ -48,8 +51,13 @@ export function GraphicsSetting() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    void window.cth.graphicsStatus().then(setStatus).catch(() => { /* indicator stays unknown */ });
+    // main's status now and again while the section is open: Chromium's compositing is read fresh
+    // each time, so a GPU-process fallback mid-run shows (Jim S1). The renderer is read once.
+    const refresh = () => { void window.cth.graphicsStatus().then(setStatus).catch(() => { /* indicator stays as it is */ }); };
+    refresh();
     setRenderer(currentRendererName());
+    const timer = window.setInterval(refresh, GRAPHICS_REFRESH_MS);
+    return () => window.clearInterval(timer);
   }, []);
 
   const stored = status?.stored ?? DEFAULT_GRAPHICS_MODE;
@@ -60,8 +68,13 @@ export function GraphicsSetting() {
     setConfirming(false);
     void window.cth.setGraphicsMode(mode).then(setStatus).catch(() => setError(GRAPHICS_COPY.failed));
   };
-  const restart = () => {
-    if (status && status.runningAgents > 0 && !confirming) { setConfirming(true); return; }
+  const restart = async () => {
+    if (!confirming) {
+      // Jim N1: count the running agents now, not when the section opened.
+      const fresh = await window.cth.graphicsStatus().catch(() => null) ?? status;
+      if (fresh) setStatus(fresh);
+      if (!fresh || fresh.runningAgents > 0) { setConfirming(true); return; }
+    }
     void window.cth.restartForGraphics();
   };
 

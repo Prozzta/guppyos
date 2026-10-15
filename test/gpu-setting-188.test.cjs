@@ -162,6 +162,11 @@ test('the indicator says what is REALLY in use', () => {
   assert.equal(g.renderingLabel(null, st('auto', false)), 'Rendering: software (CPU): no usable GPU');
   assert.equal(g.renderingLabel(null, st('auto', true)), 'Rendering: GPU');
   assert.equal(g.renderingLabel(null, { applied: 'auto', hardwareDisabled: false, hardwareCompositing: null }), 'Rendering: unknown');
+  // Jim S1: a floor recorded the GPU at init, then the GPU process fell back mid-run: main's fresh
+  // compositing status wins over the recorded renderer.
+  assert.equal(g.renderingLabel(NV, st('auto', false)), 'Rendering: software (CPU): no usable GPU');
+  assert.equal(g.renderingLabel(NV, st('gpu', false)), 'Rendering: software (CPU): no usable GPU, fell back to the CPU');
+  assert.equal(g.renderingLabel(NV, { applied: 'auto', hardwareDisabled: false, hardwareCompositing: null }), 'Rendering: NVIDIA GeForce RTX 4080 SUPER (GPU)', 'unknown compositing keeps the renderer');
   assert.equal(g.hardwareCompositing({ gpu_compositing: 'enabled' }), true);
   assert.equal(g.hardwareCompositing({ gpu_compositing: 'enabled_on' }), true);
   assert.equal(g.hardwareCompositing({ gpu_compositing: 'disabled_software' }), false);
@@ -190,4 +195,9 @@ test('Settings: the Graphics section renders in General with the three modes, Au
   const general = modal.indexOf("{activeSection === 'General' && (");
   const at = modal.indexOf('<GraphicsSetting />');
   assert.ok(general > 0 && at > general && at < modal.indexOf("{activeSection === 'Prerequisites'"), 'in General');
+  // Jim S1: main's status is re-read while the section is open; N1: Restart counts agents at click time.
+  const comp = codeOnly(readSource('src/renderer/src/components/GraphicsSetting.tsx'), 'g.tsx');
+  assert.equal(ui.GRAPHICS_REFRESH_MS, 10_000);
+  assert.match(comp, /const timer = window\.setInterval\(refresh, GRAPHICS_REFRESH_MS\);\s*return \(\) => window\.clearInterval\(timer\);/);
+  assert.match(comp, /const restart = async \(\) => \{\s*if \(!confirming\) \{\s*const fresh = await window\.cth\.graphicsStatus\(\)\.catch\(\(\) => null\) \?\? status;\s*if \(fresh\) setStatus\(fresh\);\s*if \(!fresh \|\| fresh\.runningAgents > 0\) \{ setConfirming\(true\); return; \}/);
 });
