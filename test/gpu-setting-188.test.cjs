@@ -176,6 +176,11 @@ test('Settings: the Graphics section renders in General with the three modes, Au
   for (const m of ['auto', 'gpu', 'cpu']) assert.match(html, new RegExp(`<option value="${m}"`));
   assert.match(html, /<option value="auto" selected="">Auto \(graphics card when available\)<\/option>/);
   assert.match(html, /data-graphics-indicator/);
+  // god ed8398: CPU only disables hardware acceleration for the whole app, so the copy says app-wide.
+  assert.match(html, /Guppy draws with/);
+  assert.doesNotMatch(html, /Draw the floor/);
+  assert.match(ui.GRAPHICS_COPY.help, /all of Guppy \(terminals, office and floor\)/);
+  assert.match(ui.GRAPHICS_COPY.help, /CPU only turns the graphics card off for the whole app/);
   assert.equal(ui.restartPending({ applied: 'auto', stored: 'cpu' }), true);
   assert.equal(ui.restartPending({ applied: 'cpu', stored: 'cpu' }), false);
   assert.equal(ui.restartPending(null), false);

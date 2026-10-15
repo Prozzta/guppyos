@@ -18,15 +18,16 @@ import { currentRendererName } from '../scene/graphicsProbe';
 
 export const GRAPHICS_COPY = {
   heading: 'Graphics',
-  label: 'Draw the floor with',
+  label: 'Guppy draws with',
   options: {
     auto: 'Auto (graphics card when available)',
     gpu: 'GPU (prefer the graphics card)',
     cpu: 'CPU only (no graphics card)'
   } as Record<GraphicsMode, string>,
-  help: 'Auto uses the graphics card when one is available and falls back to the CPU. GPU prefers the faster '
-    + 'graphics card on a PC that has two; if it is missing or unsupported, Guppy still falls back to the CPU and '
-    + 'says so here. CPU only never uses the graphics card: for a PC without one, or a graphics driver that misbehaves.',
+  help: 'This applies to all of Guppy (terminals, office and floor), from the next start. Auto uses the graphics '
+    + 'card when one is available and falls back to the CPU. GPU also asks for the faster graphics card on a PC '
+    + 'that has two; if it is missing or unsupported, Guppy still falls back to the CPU and says so here. CPU only '
+    + 'turns the graphics card off for the whole app: for a PC without one, or a graphics driver that misbehaves.',
   restartNeeded: (mode: GraphicsMode) => `Saved. "${GRAPHICS_COPY.options[mode]}" takes effect after a restart.`,
   restartNow: 'restart now',
   confirm: (n: number) => `Restarting stops ${n} running agent${n === 1 ? '' : 's'}. Restart now?`,
