@@ -58,14 +58,17 @@ test('CL-BRIEF-STARTUP cause 1: the scale-down rebuilds reuse the line counts (o
   views.buildWorkingSet(state, view, 3000);
   const first = count.calls;
   for (const b of [2400, 1900, 1500, 1200, 1000, 800]) views.buildWorkingSet(state, view, b);
-  // Each rebuild measures only its joined text, overflow note and "+N more" again (a few calls).
-  assert.ok(count.calls - first <= 6 * 6, `six rebuilds made ${count.calls - first} new tokenizer calls`);
+  // Each rebuild measures only its joined text, overflow note and "+N more" again (a few calls; one
+  // or two more when the note's room is reserved and the omitted count changes its digits).
+  assert.ok(count.calls - first <= 6 * 8, `six rebuilds made ${count.calls - first} new tokenizer calls`);
 });
 
 test('CL-BRIEF-STARTUP cause 1: same text and receipt as before the fix (golden), and used = the count of the text', () => {
   const { records, state, view } = fixture(400);
-  const golden = { words3000: '6c2bcd34d3f37c8c', words700: 'ca396b15876583da', length9000: '771778c898deb705', length2500: '766216b8e3d25f0c',
-    heavySep9000: '85fe9f9d2b7d50f0', heavySep6000: 'aa230efbf8595228', heavySep4000: 'd7fde4e2198a4a4e', heavySep2500: 'e9adbfb3a7e775aa' };
+  // CL-OVERFLOW-NOTE: all eight overflow, and in all eight 50d18f14 left the overflow note out; the
+  // goldens moved once, to the packs that reserve room for the note and "+N more".
+  const golden = { words3000: '7b016f13a5c8e98a', words700: 'a60ceca2370330fe', length9000: '911140b22bf48b3a', length2500: '17668b1c1a853d6b',
+    heavySep9000: 'bb87869429961215', heavySep6000: '755d107e075bde6e', heavySep4000: '05c315f3a1617b99', heavySep2500: '1f1f2a9256503fe4' };
   // Additive over '\n' like WordPiece, but each separator costs 51: the running sums must count them.
   const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
   const got = {};
@@ -85,7 +88,8 @@ test('CL-BRIEF-STARTUP cause 1: separators count in T0 too, and a non-additive c
   const heavySep = (s) => s.length + 50 * (s.split('\n').length - 1);
   // 342 and 426 sit where one more pin fits only if its separator is left out.
   const got = [2000, 1000, 426, 342].map((b) => digest(V.createClaimViews(pins, heavySep).buildWorkingSet(stateFor(pins), { flags: {}, counters: {} }, b)));
-  assert.deepEqual(got, ['a77b9d14d1c0d6fc', 'def666edcdb27828', '8b896c09fc55da03', 'e6684fc00661f16a'], 'same as before the fix');
+  // CL-OVERFLOW-NOTE: all four overflow without the note at 50d18f14; these are the packs with it.
+  assert.deepEqual(got, ['ee06f0737d376b6c', '124903369d8f7f35', 'b1279077463c4ed9', '67736da889316968'], 'same as before the fix, plus the overflow note');
   // ceil(len/4) is not additive over '\n' (WordPiece is): the per-line sums only over-estimate, so the
   // build stays inside the budget, and the receipt is still the count of the joined text.
   const ceil4 = (s) => Math.ceil(s.length / 4);
@@ -113,7 +117,9 @@ test('CL-BRIEF-STARTUP (Jim NIT): no budget lets a history pointer (or any line)
   for (let b = 300; b <= 4000; b++) {
     const out = views.buildWorkingSet(state, view, b);
     assert.ok(out.receipt.used <= b, `budget ${b}: used ${out.receipt.used}`);
-    if (out.receipt.used === b && / history: memory\.md#/.test(out.text.split('\n').at(-1))) pointersAtCap++;
+    // CL-OVERFLOW-NOTE: an overflowing briefing ends with the note and "+N more"; the packed lines end before them.
+    const packed = out.text.split('\n').filter((l) => !l.startsWith('⚠ Working set omitted') && !/^\+\d+ more$/.test(l));
+    if (out.receipt.used === b && / history: memory\.md#/.test(packed.at(-1))) pointersAtCap++;
   }
   assert.ok(pointersAtCap > 0, 'some budget ends exactly at the cap on a history pointer (the boundary is exercised)');
 });
