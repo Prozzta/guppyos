@@ -26,7 +26,7 @@ import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import type { MessageAct } from '../office/MessageEnvelope';
-import { coffeeProps, cupInHand, freshSays, mugDepth, mugDx, mugPixels, MUG_H, type CupPose } from './coffeeProps';
+import { coffeeProps, cupInHand, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -448,6 +448,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         }
         const holding = new Set<string>(), parked = new Set<string>();
         const coffee = coffeeProps(crew);
+        pruneSaid(said, crew.walkers().map((p) => p.id));
         for (const item of freshSays(coffee, said)) bubbles.say(item.id, item.text, { ttl: item.ttl });
         for (const item of coffee) {
           if (item.kind === 'say') continue;
@@ -490,8 +491,9 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           cacheLayer.visible = useCache;
           belowDirect.visible = !useCache;
           // The main pass: the cache, and over it only the live statics (and those over them); the
-          // people and the statics near them are drawn in their rects (postrender).
-          mainFront = useCache ? pickFront!([], live) : null;
+          // people and the statics near them are drawn in their rects (postrender). The parked mugs stay
+          // in the main pass, so the statics in front of one are redrawn over it.
+          mainFront = useCache ? pickFront!([...mugs.values()].map((m) => ({ x: m.sprite.x, y: m.sprite.y, w: MUG_W, h: MUG_H })), live) : null;
           statics.forEach((s, i) => { if (s) s.visible = mainFront ? mainFront[i] : true; });
           for (const s of sprites.values()) s.sprite.visible = !useCache;
           for (const c of cups.values()) c.sprite.visible = !useCache; // drawn with their person, in the rects

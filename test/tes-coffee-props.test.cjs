@@ -49,6 +49,16 @@ test('brewing says the viewer\'s line: a fresh one, or a refill when they brough
   assert.deepEqual(C.coffeeProps(fake([walker({ coffee: brewing, cup: true })], ev)),
     [{ kind: 'cup', id: 'a', x: 50, y: 60, dir: 'down' }, { kind: 'say', id: 'a', text: 'a quick refill ☕', key: 'brew:a:400', ttl: 2000 }]);
   assert.equal(C.BREW_MS, 2600);
+  // The key is the coffee run (its brew start), not the brew event: it holds once the event has
+  // scrolled out of crew.events, stays put as the clocks drift, and differs for the next run.
+  const run = { spot: [1, 1], phase: 'brewing', t: 600, until: 0 };
+  assert.equal(C.coffeeProps(fake([walker({ coffee: run })]))[0].key, 'brew:a:400', 'no brew event');
+  run.t = 600.4;
+  assert.equal(C.coffeeProps(fake([walker({ coffee: run })], { t: 1000.9 }))[0].key, 'brew:a:400', 'the same run on a later frame');
+  const odd = { spot: [1, 1], phase: 'brewing', t: 600.25, until: 0 };
+  assert.equal(C.coffeeProps(fake([walker({ coffee: odd })], { t: 1000.5 }))[0].key, 'brew:a:400', 'whole ms');
+  const next = { spot: [1, 1], phase: 'brewing', t: 0, until: 0 };
+  assert.equal(C.coffeeProps(fake([walker({ coffee: next })], { t: 9000 }))[0].key, 'brew:a:9000', 'the next run');
   for (const phase of ['fetch', 'walking', 'back']) {
     assert.deepEqual(C.coffeeProps(fake([walker({ coffee: { spot: [1, 1], phase, t: 0, until: 0 } })])), [], phase);
   }
@@ -188,9 +198,24 @@ test('the mug in the hand is found on every TES body and facing, inside the fram
     assert.equal(c.back, dir === 'up', `${dir}: behind the body only facing away`);
     assert.equal(c.left, dir === 'right', `${dir}: the handle side`);
   }
+  // One body exactly (the first, velcan-male): the hand's anchor pixel per facing, as the viewer finds it.
+  const col0 = cols[0], pose = (dir) => C.cupInHand(sheet, col0 * fw, R.rows[dir] * fh, fw, fh, dir);
+  assert.equal(pk.manifest.builder.bodies[0].id, 'velcan-male');
+  assert.deepEqual(pose('down'), { x: 15, y: 27, left: false, back: false });
+  assert.deepEqual(pose('up'), { x: 6, y: 27, left: false, back: true });
+  assert.deepEqual(pose('left'), { x: 9, y: 27, left: false, back: false });
+  assert.deepEqual(pose('right'), { x: 18, y: 27, left: true, back: false });
   // A frame with no skin low on the body has no hand: no mug drawn.
   const blank = { width: fw, height: fh, data: new Uint8ClampedArray(fw * fh * 4) };
   assert.equal(C.cupInHand(blank, 0, 0, fw, fh, 'down'), null);
+});
+
+test('pruneSaid forgets the agents who left the floor, and only them', () => {
+  const said = new Map([['a', 'brew:a:400'], ['b', 'sip:b:900'], ['c', 'brew:c:10']]);
+  C.pruneSaid(said, ['a', 'c', 'z']);
+  assert.deepEqual([...said], [['a', 'brew:a:400'], ['c', 'brew:c:10']]);
+  C.pruneSaid(said, []);
+  assert.equal(said.size, 0);
 });
 
 test('handsOf finds 4-connected skin blobs below the neck', () => {
@@ -200,8 +225,10 @@ test('handsOf finds 4-connected skin blobs below the neck', () => {
   set(12, 8, [220, 170, 140]); // skin in the face rows
   for (const [x, y] of [[5, 22], [6, 22], [6, 23], [25, 24]]) set(x, y, [220, 170, 140]);
   set(15, 22, [40, 40, 200]); // not skin
+  set(20, 18, [220, 170, 140]); // the neck row (top + 18): not a hand
+  set(28, 19, [220, 170, 140]); // the first hand row (top + 19), as the viewer
   const h = C.handsOf({ width: W, height: W, data }, 0, 0, W, W);
-  assert.deepEqual(h.map((q) => [q.x0, q.x1, q.y0, q.y1, q.n]).sort((a, b) => a[0] - b[0]), [[5, 6, 22, 23, 3], [25, 25, 24, 24, 1]]);
+  assert.deepEqual(h.map((q) => [q.x0, q.x1, q.y0, q.y1, q.n]).sort((a, b) => a[0] - b[0]), [[5, 6, 22, 23, 3], [25, 25, 24, 24, 1], [28, 28, 19, 19, 1]]);
 });
 
 test('a parked mug sorts just after what it stands on; on flat art, by its own base line', () => {
@@ -227,7 +254,7 @@ test('StationFloor draws the coffee each tick: cups in hand, parked mugs, and ea
   const tick = src.slice(src.indexOf('const onTick ='), src.indexOf('app.ticker.add(onTick)'));
   assert.ok(tick.length > 0);
   assert.match(tick, /const coffee = coffeeProps\(crew\);/);
-  assert.match(tick, /for \(const item of freshSays\(coffee, said\)\) bubbles\.say\(item\.id, item\.text, \{ ttl: item\.ttl \}\);/);
+  assert.match(tick, /pruneSaid\(said, crew\.walkers\(\)\.map\(\(p\) => p\.id\)\);\s*for \(const item of freshSays\(coffee, said\)\) bubbles\.say\(item\.id, item\.text, \{ ttl: item\.ttl \}\);/);
   // the cup: at the hand of the person's frame, the viewer's mug, kept with that person
   assert.match(tick, /item\.kind === 'cup'[\s\S]*handOf\(s\.col, item\.dir\)[\s\S]*c\.sprite\.position\.set\(s\.sprite\.x \+ pose\.x \+ mugDx\(pose\.left\), s\.sprite\.y \+ pose\.y - MUG_H\);[\s\S]*holding\.add\(item\.id\);/);
   assert.match(src, /cupInHand\(sheetPx, col \* fw, stand\[dir\] \* fh, fw, fh, dir\)/);

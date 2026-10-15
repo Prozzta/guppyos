@@ -36,14 +36,19 @@ function pick(lines: readonly string[], key: string): string {
   return lines[Math.abs(h) % lines.length];
 }
 
+/** Each coffee run's brew start (ms, crew clock), fixed when first seen: one brew line per run even once its brew event has scrolled out of crew.events. */
+const brewStarts = new WeakMap<object, number>();
+function brewStart(run: { t: number }, now: number): number {
+  let at = brewStarts.get(run);
+  if (at === undefined) brewStarts.set(run, (at = Math.round(now - run.t)));
+  return at;
+}
+
 /** The coffee props for the crew as it stands now. */
 export function coffeeProps(crew: Pick<Crew, 'walkers' | 'mugAt' | 'events' | 't'>): CoffeeProp[] {
   const out: CoffeeProp[] = [];
-  const sipAt = new Map<string, number>(), brewAt = new Map<string, number>();
-  for (const e of crew.events) {
-    if (e.kind === 'sip') sipAt.set(e.id, e.at);
-    else if (e.kind === 'brew') brewAt.set(e.id, e.at);
-  }
+  const sipAt = new Map<string, number>();
+  for (const e of crew.events) if (e.kind === 'sip') sipAt.set(e.id, e.at);
   for (const p of crew.walkers() as Walker[]) {
     if (p.mug) {
       const [x, y] = crew.mugAt(p.mug);
@@ -52,7 +57,7 @@ export function coffeeProps(crew: Pick<Crew, 'walkers' | 'mugAt' | 'events' | 't
     // Seated, a mug in hand is parked at once (crew.sitDown); a sitter holds none.
     if (p.cup && !p.seated) out.push({ kind: 'cup', id: p.id, x: p.x, y: p.y, dir: p.dir });
     if (p.coffee?.phase === 'brewing') {
-      const key = `brew:${p.id}:${brewAt.get(p.id) ?? 'run'}`;
+      const key = `brew:${p.id}:${brewStart(p.coffee, crew.t)}`;
       out.push({ kind: 'say', id: p.id, text: pick(p.cup ? COFFEE_LINES.refill : COFFEE_LINES.brewing, p.id), key, ttl: Math.max(0, BREW_MS - p.coffee.t) });
       continue;
     }
@@ -70,6 +75,12 @@ export function freshSays(props: readonly CoffeeProp[], said: Map<string, string
   const out: Array<Extract<CoffeeProp, { kind: 'say' }>> = [];
   for (const p of props) if (p.kind === 'say' && said.get(p.id) !== p.key) { said.set(p.id, p.key); out.push(p); }
   return out;
+}
+
+/** Forget what was said for agents no longer on the floor (`said` as freshSays keeps it). */
+export function pruneSaid(said: Map<string, string>, present: Iterable<string>): void {
+  const here = new Set(present);
+  for (const id of said.keys()) if (!here.has(id)) said.delete(id);
 }
 
 // ---- drawing (bridge-viewer.html paintCup, cupInHand, handsOf, and the parked mug's depth) ----
