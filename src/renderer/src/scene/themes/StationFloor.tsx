@@ -23,6 +23,9 @@ import { teardownFloor } from './teardown';
 import { cacheKeyOf, frontPicker, regionPicker, hasVisiblePixel, NEAR_MIN_SCALE, liveBoxes, screenCells, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
+import { BubbleLayer } from './BubbleLayer';
+import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
+import type { MessageAct } from '../office/MessageEnvelope';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -37,6 +40,23 @@ function texture(px: Pixels): Texture {
 function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>): CrewAgent[] {
   const b = pack.manifest.builder, id = pack.manifest.id;
   return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id]), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
+}
+
+function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>): BubbleSay[] {
+  const lines: Record<string, string> = { chat: 'quick sync', errand: 'stepping away', brew: 'brewing coffee', sip: 'coffee break', gaveUp: 'back to work' };
+  return events.flatMap((event) => {
+    const text = lines[event.kind];
+    if (!text) return [];
+    const key = `${event.kind}:${event.id}:${event.at}`;
+    const own: BubbleSay = { key, id: event.id, text, ttl: event.kind === 'sip' ? 3000 : 2600 };
+    if (event.kind !== 'chat' || !event.with) return [own];
+    return [own, { ...own, key: `${key}:${event.with}`, id: event.with }];
+  });
+}
+
+/** StationFloor's liveness-aware input for its shared thought-cloud layer. */
+function bubbleThoughts(agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>) {
+  return agents.map((agent) => ({ id: agent.id, thought: activityThought(agent, liveness[agent.id]) }));
 }
 
 export function StationFloor({ pack }: { pack: LoadedPack }) {
@@ -150,6 +170,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       }
       world.addChild(sortLayer);
       if (!cached || hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
+      // The map is cacheable; its clouds and envelopes are deliberately live above the people.
+      const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
+      world.addChild(bubbles.container);
+      (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
       const dropCells = () => {
         for (const s of cells.values()) s.destroy({ texture: true, textureSource: false });
@@ -285,12 +309,16 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
+      const sayCursor = createSayCursor();
       const sync = () => {
         const { agents, liveness } = useStore.getState();
         crew.sync(crewAgents(pack, agents, liveness));
         const ids = new Set(agents.map((a) => a.id));
-        for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); }
+        const thoughts = new Map(bubbleThoughts(agents, liveness).map((item) => [item.id, item.thought]));
+        for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); bubbles.remove(id); }
         for (const a of agents) {
+          const thought = thoughts.get(a.id) ?? null;
+          bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool } : null);
           const l = lookOf(a), have = sprites.get(a.id);
           if (have) { have.col = l.col; have.look = l.key; continue; } // a look edited in Add/Edit shows at once
           const sp = new Sprite(frame(l.key, R.rows.down));
@@ -342,10 +370,18 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         camera.update(Math.max(0, now - lastTickAt) / 1000);
         lastTickAt = now;
         const people: Array<{ foot: number; rank: number; sprite: Sprite; id: string }> = [];
+        const anchors: Array<{ id: string; x: number; y: number }> = [];
         for (const p of crew.walkers()) {
           const s = sprites.get(p.id);
-          if (s) people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
+          if (s) {
+            people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
+            anchors.push({ id: p.id, x: p.x, y: p.y });
+          }
         }
+        if (SM.entrance) anchors.push({ id: '__human__', x: SM.entrance[0], y: SM.entrance[1] });
+        bubbles.consumeSays(crewSays(crew.events), sayCursor);
+        // Keep these live even when the people/station depth is unchanged and the map is cached.
+        bubbles.update(dt, anchors, world.scale.x);
         if (cached) {
           const r = app.renderer.resolution;
           const k = cacheKeyOf({ w: plan.below.width, h: plan.below.height }, staticBox, world.scale.x, world.scale.y, world.x, world.y, r);
@@ -403,6 +439,14 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           if (p) camera.nudgeToward(p.x, p.y);
         }
       });
+      const offMessage = window.cth.onHiveMessage
+        ? window.cth.onHiveMessage((event) => {
+            for (const target of event.targets) {
+              bubbles.handoff(event.from, target === 'human' ? '__human__' : target, event.act as MessageAct, event.needsHuman);
+            }
+          })
+        : () => { /* A stale preload bridge simply disables handoff animation. */ };
+      (app as any).__offMessage = offMessage;
       const resize = new ResizeObserver((entries) => {
         for (const e of entries) {
           const { width, height } = e.contentRect;
@@ -429,6 +473,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         (a as any).__glRecovery?.();
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
+        try { (a as any).__offMessage?.(); } catch { /* noop */ }
+        try { (a as any).__bubbleLayer?.destroy?.(); } catch { /* noop */ }
         teardownFloor(a, (a as any).__free ?? []);
       }
       appRef.current = null;

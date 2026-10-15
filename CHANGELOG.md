@@ -8,6 +8,10 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **TES now shows thought clouds, brief crew speech and flying hive envelopes.** The station floor
+  reuses the Office's bubbles, follows liveness-derived activity, and keeps those live overlays
+  animating even while its static map cache is settled.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.
