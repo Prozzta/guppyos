@@ -185,7 +185,8 @@ export class BubbleLayer {
   /** Advance the cloud's gate; true when it opened or closed. */
   private gateOf(active: ActiveThought): boolean {
     const t = active.thought;
-    const up = !t ? false : t.status === undefined ? true : cloudShows(active.gate, this.now, { status: t.status, text: t.text }, this.rand);
+    // The thought itself is the gate's input (it has a status here): nothing is allocated per frame.
+    const up = !t ? false : t.status === undefined ? true : cloudShows(active.gate, this.now, t as { status: string; text: string }, this.rand);
     if (up === active.up) return false;
     active.up = up;
     return true;

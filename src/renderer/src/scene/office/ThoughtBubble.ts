@@ -177,8 +177,11 @@ export class ThoughtBubble {
     }
     this.container.x = Math.round(x);
     this.container.y = Math.round(y);
+    // Unslid (the office floor, every unparted cloud) the tail stays where 1.1.87 drew it: the clamp
+    // would nudge a narrow cloud's tail (the '.' of the thinking dots).
     const base = this.bgW * TAIL_BASE;
-    this.tail.x = Math.min(Math.max(base - slide / (RENDER_SCALE * comp), TAIL_EDGE), Math.max(TAIL_EDGE, this.bgW - TAIL_EDGE)) - base;
+    if (slide === 0) this.tail.x = 0;
+    else this.tail.x = Math.min(Math.max(base - slide / (RENDER_SCALE * comp), TAIL_EDGE), Math.max(TAIL_EDGE, this.bgW - TAIL_EDGE)) - base;
   }
 
   /** Extra upward shift (px), set by the scene's bubble-overlap pass. */

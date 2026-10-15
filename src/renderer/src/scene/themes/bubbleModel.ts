@@ -1,5 +1,5 @@
 import { activityStatus, heavyText, type HeavyActivity } from '@shared/activityView';
-import type { LivenessV1 } from '@shared/livenessV1';
+import type { LivenessClassification, LivenessV1 } from '@shared/livenessV1';
 
 /** The small, renderer-independent part of an agent needed by a thought cloud. */
 export interface BubbleAgent {
@@ -73,9 +73,10 @@ function liveActivity(agent: BubbleAgent, fallback = ''): string {
 
 // TES-BUBBLES-188 (d): a status cloud comes and goes, as on the office floor. 1.1.87 kept one over
 // every head all the time. A change shows it for CLOUD_SHOW_MS; another change inside the quiet
-// after it waits; a state that lasts shows again every CLOUD_RESURFACE_MS or so. A call to the
-// Human (waiting, compacting, looping) shows at once, and 'needs you' (blocked) stays up. An idle
-// cloud never shows: the crew's own lines speak for an idle floor.
+// after it waits; a state that lasts shows again every CLOUD_RESURFACE_MS or so. A compaction or
+// a loop shows at once; 'needs you' (blocked), crashed and stuck stay up. An idle cloud never
+// shows: the crew's own lines speak for an idle floor. 'waiting' is a place in the heavy-job
+// queue (activityView), not a call for the Human, so it comes and goes like work.
 
 /** How long a cloud shows for a change, ms (the bubble's linger and fade follow, about 1.5 s). */
 export const CLOUD_SHOW_MS = 2600;
@@ -83,8 +84,12 @@ export const CLOUD_SHOW_MS = 2600;
 export const CLOUD_QUIET_MS = 30_000;
 /** A lasting state shows again after this long, ms, drawn evenly from the range. */
 export const CLOUD_RESURFACE_MS: readonly [number, number] = [20_000, 40_000];
-/** States that show at once: they ask something of the Human. */
-const CALLS: ReadonlySet<string> = new Set(['waiting', 'compacting', 'looping']);
+/** States that show at once. */
+const CALLS: ReadonlySet<string> = new Set(['compacting', 'looping']);
+/** States that stay up: they need the Human. */
+const STICKY: ReadonlySet<string> = new Set(['blocked', 'crashed', 'stuck']);
+/** Liveness readings the cloud says over any hook status, as the card's chip does. */
+const ALARMS: Partial<Record<LivenessClassification, string>> = { CRASHED: 'crashed', STUCK_WAKE: 'stuck' };
 
 /** One person's cloud timing. */
 export interface CloudGate {
@@ -109,12 +114,16 @@ export function cloudShows(g: CloudGate, now: number, thought: { status: string;
   const changedStatus = !first && thought.status !== g.status, changed = changedStatus || (!first && thought.text !== g.text);
   g.status = thought.status;
   g.text = thought.text;
-  if (thought.status === 'blocked') return true;
-  const [lo, hi] = CLOUD_RESURFACE_MS;
-  const show = () => { g.until = now + CLOUD_SHOW_MS; g.quiet = g.until + CLOUD_QUIET_MS; g.next = g.until + lo + rand() * (hi - lo); };
+  if (STICKY.has(thought.status)) return true;
+  // Runs per person per frame: no closures or arrays here.
+  const lo = CLOUD_RESURFACE_MS[0], hi = CLOUD_RESURFACE_MS[1];
   if (first) g.next = now + rand() * hi; // what is there at first sight is no change: it surfaces in its turn
-  else if (changedStatus && CALLS.has(thought.status)) show();
-  else if (thought.status !== 'idle' && ((changed && now >= g.quiet) || now >= g.next) && now >= g.until) show();
+  else if ((changedStatus && CALLS.has(thought.status))
+    || (thought.status !== 'idle' && ((changed && now >= g.quiet) || now >= g.next) && now >= g.until)) {
+    g.until = now + CLOUD_SHOW_MS;
+    g.quiet = g.until + CLOUD_QUIET_MS;
+    g.next = g.until + lo + rand() * (hi - lo);
+  }
   return now < g.until;
 }
 
@@ -122,6 +131,8 @@ export function cloudShows(g: CloudGate, now: number, thought: { status: string;
  *  IDLE-MEANS-IDLE (1.1.87): then through the agent's place in the heavy-job lock, as the office
  *  floor does: when the lock changes the status, the cloud says the lock's line. */
 export function activityThought(agent: BubbleAgent, liveness?: LivenessV1, heavy?: HeavyActivity | null): BubbleThought | null {
+  const alarm = liveness ? ALARMS[liveness.classification] : undefined;
+  if (alarm) return { status: alarm, text: alarm };
   const status = activityStatus(agent.status, liveness, heavy);
   if (status !== activityStatus(agent.status, liveness)) agent = { ...agent, action: heavyText(heavy) ?? agent.action };
   switch (status) {

@@ -395,6 +395,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const speakerOf = (id: string): Speaker => { const p = crew.walkers().find((w) => w.id === id); return p ? speaker(p) : { id, role: null }; };
       const talk = exchanges.length ? (id: string, other: string, key: string) => exchangeSays(exchanges, speakerOf(id), speakerOf(other), held, key) : undefined;
       const bridgeTalk = new BridgeTalk(exchanges, held, Math.random);
+      const bridgeSpeakers = () => crew.walkers().filter((p) => !p.coffee).map(speaker);
       const bubbleIds = new Set<string>();
       const sync = () => {
         const { agents, liveness, heavyLock } = useStore.getState();
@@ -471,7 +472,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           bubbles.consumeSays(crewSays(freshEvents, packLines, talk), sayCursor);
           lastCrewEventAt = freshEvents[freshEvents.length - 1].at;
         }
-        const bridgeSays = bridgeTalk.tick(dt, crew.walkers().filter((p) => !p.coffee).map(speaker));
+        const bridgeSays = bridgeTalk.tick(dt, bridgeSpeakers); // the speakers are built only when a talk is due
         if (bridgeSays.length) bubbles.consumeSays(bridgeSays, sayCursor);
         const holding = new Set<string>(), parked = new Set<string>();
         const coffee = coffeeProps(crew, packLines);

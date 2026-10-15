@@ -85,6 +85,7 @@ const TES_DIR = path.join(__dirname, '..', 'themes', 'tes');
 const TES_LINES = require('../themes/tes/lines.json').lines;
 const plain = (k) => TES_LINES[k].filter((s) => typeof s === 'string' && !s.includes('{'));
 const FLOOR = 'src/renderer/src/scene/themes/StationFloor.tsx';
+const BUBBLE = 'src/renderer/src/scene/office/ThoughtBubble.ts';
 
 function crewSaysFn() {
   const source = readSource(FLOOR);
@@ -168,23 +169,46 @@ test('(b) the floor hands the pack lines to the crew and coffee speech', () => {
 const OFFSET_Y = -38; // ThoughtBubble: the cloud's bottom sits this far above its anchor
 const FW = 32, FH = 32;
 
-test('(c) a seated cloud keeps the standing gap above the drawn head, in every seat pose', () => {
+test('(c) at the real Captain and Speck chairs, on the real sheet, a seated cloud clears the opaque head by the standing gap', () => {
   const A = loadTs('src/renderer/src/scene/themes/cloudAnchor.ts');
   const K = loadTs('src/renderer/src/scene/themes/compositor.ts');
-  const gapOf = (drawn) => drawn.y - (A.cloudAnchor(drawn, FW, FH).y + OFFSET_Y);
-  const standing = A.drawnSprite({ x: 464, y: 226, seated: false }, null, FW, FH, 0);
-  const want = gapOf(standing);
-  assert.equal(want, 6, 'standing: the cloud bottom is 6 px above the head');
-  // The Speck desks: a chair whose drawn sitter is 16-30 px off the walker's point in 1.1.87.
-  const chair = { chair: { top: 216, x0: 432, x1: 464 } };
-  for (const dir of ['down', 'up', 'left', 'right']) {
-    const pose = K.seatPose(chair, dir, FW, FH, null);
-    const p = { x: 448, y: 226, seated: true, seat: { x: 448, y: 226 } };
-    const drawn = A.drawnSprite(p, pose, FW, FH, 0);
-    assert.deepEqual(drawn, { x: Math.round(pose.x - FW / 2), y: Math.round(pose.y) }, `${dir}: drawn at the seat pose`);
-    assert.equal(gapOf(drawn), want, `${dir}: the same gap as standing`);
-    assert.equal(A.cloudAnchor(drawn, FW, FH).x, drawn.x + FW / 2, `${dir}: centred on the drawn frame`);
-    assert.notEqual(A.cloudAnchor(drawn, FW, FH).y, p.y, `${dir}: not the walker's point`);
+  const T = loadTs('src/renderer/src/scene/themes/tiled.ts');
+  assert.equal(Number(/const OFFSET_Y = (-?\d+);/.exec(readSource(BUBBLE))[1]), OFFSET_Y, 'the cloud offset this test assumes');
+  const r = P.readPack(P.memoryFiles(H.readPackDir(TES_DIR)));
+  const pk = P.finishPack(r.value, H.decodeImages(TES_DIR, T.normPath, r.value.images), r.diagnostics).value;
+  const R = pk.manifest.spriteRenderer, fw = R.frameWidth, fh = R.frameHeight, sheet = pk.store.get(pk.sheet);
+  assert.deepEqual([sheet.width, sheet.height, fw, fh], [96, 256, FW, FH], 'themes/tes/art/characters-sheet (1).png');
+  // The topmost opaque pixel row of a frame: where the drawn head really starts.
+  const headTop = (col, row) => {
+    for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) if (sheet.data[((row * fh + y) * sheet.width + col * fw + x) * 4 + 3] > 0) return y;
+    return null;
+  };
+  const stand = { down: R.rows.down, up: R.rows.up, left: R.rows.left, right: R.rows.right };
+  const sit = { down: R.rows.sitDown, up: R.rows.sitUp, left: R.rows.sitLeft, right: R.rows.sitRight };
+  const cols = sheet.width / fw;
+  assert.deepEqual([stand.down, stand.up, sit.down, sit.up].map((row) => [0, 1, 2].map((c) => headTop(c, row))), [[4, 1, 5], [4, 1, 5], [4, 1, 5], [4, 1, 5]]);
+  assert.deepEqual([stand.left, stand.right, sit.left, sit.right].map((row) => [0, 1, 2].map((c) => headTop(c, row))), [[4, 2, 5], [4, 2, 5], [4, 2, 5], [4, 2, 5]]);
+  // The gap from the cloud's bottom (ThoughtBubble: OFFSET_Y above the anchor) down to the opaque head.
+  const gapOf = (drawn, top) => drawn.y + top - (A.cloudAnchor(drawn, fw, fh).y + OFFSET_Y);
+  const plan = K.buildScenePlan({ ...pk.scene, store: pk.store });
+  for (const name of ['Captain', 'Speck1', 'Speck2']) {
+    const seat = pk.scene.seatOrder.find((s) => s.name === name);
+    const ch = K.chairOf(seat, plan.sorted);
+    assert.ok(ch && ch.chair, `${name}: the floor finds its chair`);
+    for (const dir of ['down', 'up', 'left', 'right']) {
+      for (let col = 0; col < cols; col++) {
+        const fit = dir === 'left' || dir === 'right' ? K.sideFit(pk.store, ch.chair.B, { sheet, sx: col * fw, sy: sit[dir] * fh, fw, fh }, dir) : null;
+        const pose = K.seatPose(ch, dir, fw, fh, fit);
+        const drawn = A.drawnSprite({ x: seat.x, y: seat.y, seated: true, seat }, pose, fw, fh, 0);
+        const standing = A.drawnSprite({ x: seat.x, y: seat.y, seated: false }, null, fw, fh, 0);
+        const what = `${name} ${dir} col ${col}`;
+        assert.deepEqual(drawn, { x: Math.round(pose.x - fw / 2), y: Math.round(pose.y) }, `${what}: drawn at the seat pose`);
+        const seated = gapOf(drawn, headTop(col, sit[dir])), upright = gapOf(standing, headTop(col, stand[dir]));
+        assert.equal(seated, upright, `${what}: the same gap above the head as standing`);
+        assert.ok(seated >= 6 && seated <= 11, `${what}: just clear of the head (${seated} px), neither on it nor floating`);
+        assert.equal(A.cloudAnchor(drawn, fw, fh).x, drawn.x + fw / 2, `${what}: centred on the drawn frame`);
+      }
+    }
   }
 });
 
@@ -244,6 +268,56 @@ test('(c) what sliding cannot part is still lifted clear', () => {
   const [ra, rb] = made.map((b) => b.rect());
   assert.ok(apart(ra, rb), 'the pair never overlaps');
   assert.ok(made.some((b) => b.lift > 0), 'one is lifted');
+  assert.ok(ra.x + 6 <= 300 && 300 <= ra.x + ra.w - 6, `a keeps 6 px of itself over its head (${ra.x}..${ra.x + ra.w})`);
+  assert.ok(rb.x + 6 <= 302 && 302 <= rb.x + rb.w - 6, `b keeps 6 px of itself over its head (${rb.x}..${rb.x + rb.w})`);
+});
+
+// The real ThoughtBubble on a stand-in pixi: a label measures 7 px a character, 14 px high.
+function realBubble() {
+  class Container {
+    constructor() { this.x = 0; this.y = 0; this.alpha = 1; this.visible = true; this.children = []; this.scale = { set: () => {} }; }
+    addChild(...c) { this.children.push(...c); return c[0]; } destroy() {}
+  }
+  class Graphics extends Container { clear() { return this; } roundRect() { return this; } fill() { return this; } stroke() { return this; } circle() { return this; } }
+  class Text extends Container { constructor(o) { super(); this.text = o.text; } get width() { return this.text.length * 7; } get height() { return 14; } }
+  const out = ts.transpileModule(readSource(BUBBLE), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const mod = { exports: {} };
+  const shade = new Proxy({}, { get: () => '#000000' });
+  const req = (id) => ({ 'pixi.js': { Container, Graphics, Text }, '@/design/tokens': { colors: new Proxy({}, { get: () => shade }) }, './ToolBubble': { toolIcon: () => '*' } })[id];
+  new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
+  const b = new mod.exports.ThoughtBubble();
+  b.setBounds(960, 640);
+  b.setZoom(1);
+  const base = () => b.bgW * 0.32;
+  // Where the tail leaves the cloud, in world px (the inner layer draws at half scale).
+  return { b, tailX: () => b.container.x + (base() + b.tail.x) * 0.5, tailIn: () => base() + b.tail.x };
+}
+
+test('(c) a slid cloud\'s tail stays over the head; it never leaves the cloud', () => {
+  const { b, tailX, tailIn } = realBubble();
+  b.show('hello there');
+  b.setPosition(300, 200);
+  const home = tailX();
+  for (const slide of [-20, -10, -4, 4, 10]) {
+    b.setPosition(300, 200, slide);
+    assert.ok(Math.abs(tailX() - home) <= 0.5, `slide ${slide}: the tail stays at ${home} (it is at ${tailX()})`);
+  }
+  for (const slide of [-60, 60]) {
+    b.setPosition(300, 200, slide);
+    assert.ok(tailIn() >= 8 && tailIn() <= b.bgW - 8, `slide ${slide}: the tail keeps inside the cloud`);
+  }
+});
+
+test('(c) unslid, the tail is where 1.1.87 drew it, even on the narrow thinking dots', () => {
+  const { b } = realBubble();
+  b.show('');   // the thinking '.', a cloud 19 inner px wide: the clamp would move its tail
+  b.setPosition(300, 200, 12);
+  assert.notEqual(b.tail.x, 0);
+  b.setPosition(300, 200);
+  assert.equal(b.tail.x, 0, 'no slide: the tail is not touched');
+  b.show('a longer line of work');
+  b.setPosition(300, 200, 0);
+  assert.equal(b.tail.x, 0);
 });
 
 // (b2) Exchanges: both forms read, played in turns between the two, by station, and often.
@@ -312,7 +386,8 @@ test('(b2) a chat plays an exchange through crewSays, and the floor wires chat, 
   const src = readSource(FLOOR);
   assert.match(src, /bubbles\.consumeSays\(crewSays\(freshEvents, packLines, talk\), sayCursor\);/);
   assert.match(src, /chatHold: EXCHANGE_HOLD_MS/);
-  assert.match(src, /const bridgeSays = bridgeTalk\.tick\(dt, crew\.walkers\(\)[^\n]*\n\s*if \(bridgeSays\.length\) bubbles\.consumeSays\(bridgeSays, sayCursor\);/);
+  assert.match(src, /const bridgeSpeakers = \(\) => crew\.walkers\(\)\.filter\(\(p\) => !p\.coffee\)\.map\(speaker\);/);
+  assert.match(src, /const bridgeSays = bridgeTalk\.tick\(dt, bridgeSpeakers\);[^\n]*\n\s*if \(bridgeSays\.length\) bubbles\.consumeSays\(bridgeSays, sayCursor\);/);
   assert.match(readSource('src/renderer/src/scene/themes/crew.ts'), /p\.talk = q\.talk = this\.t \+ this\.chatHold;/);
 });
 
@@ -345,6 +420,19 @@ test('(b2) the bridge talks often: a talk every 20-40 s across ten minutes, neve
   assert.deepEqual(new BridgeTalk([], HELD, rand).tick(60_000, people), [], 'a pack without exchanges never talks');
 });
 
+test('(b2) the bridge builds its speakers only when a talk is due, not every frame', () => {
+  const { BridgeTalk, readExchanges } = X();
+  let seed = 9; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const talk = new BridgeTalk(readExchanges(require('../themes/tes/lines.json').lines.exchanges), HELD, rand);
+  let built = 0, talks = 0;
+  const people = () => { built++; return [CAPTAIN, HELM, ANY, ANY2]; };
+  for (let t = 0; t < 600_000; t += 16) if (talk.tick(16, people).length) talks++;
+  assert.ok(talks >= 15, `it still talks (${talks})`);
+  assert.equal(built, talks, 'one build per talk');
+  const quiet = talk.tick(16, people), again = talk.tick(16, people);
+  assert.equal(quiet, again, 'a quiet frame returns the one shared empty list');
+});
+
 // (d) Clouds come and go: a change shows one for a few seconds, a long state now and then; most of
 // the time most people show none. 'needs you' stays up. The boot note never shows at all.
 
@@ -359,9 +447,21 @@ test('(d) the gate: a change shows a cloud for CLOUD_SHOW_MS, then quiet; a call
   assert.equal(cloudShows(g, 1000 + CLOUD_SHOW_MS - 1, w('using Read'), r), true);
   assert.equal(cloudShows(g, 1000 + CLOUD_SHOW_MS, w('using Read'), r), false, 'then it goes');
   assert.equal(cloudShows(g, 5000, w('using Edit'), r), false, 'another action inside the quiet waits');
-  assert.equal(cloudShows(g, 6000, w('waiting', 'waiting'), r), true, 'a call to the Human shows at once');
-  assert.equal(cloudShows(g, 9000 + CLOUD_SHOW_MS, w('waiting', 'waiting'), r), false);
+  assert.equal(cloudShows(g, 6000, w('compacting context', 'compacting'), r), true, 'a compaction shows at once');
+  assert.equal(cloudShows(g, 9000 + CLOUD_SHOW_MS, w('compacting context', 'compacting'), r), false);
   for (let t = 20_000; t < 600_000; t += 1000) assert.equal(cloudShows(g, t, w('needs you', 'blocked'), r), true, 'needs-you stays up');
+  for (const status of ['crashed', 'stuck']) {
+    const s = createCloudGate();
+    cloudShows(s, 0, w('using Bash'), r);
+    for (let t = 1000; t < 300_000; t += 1000) assert.equal(cloudShows(s, t, w(status, status), r), true, `${status} stays up`);
+  }
+  const queued = createCloudGate();
+  cloudShows(queued, 0, w('using Bash'), r);
+  assert.equal(cloudShows(queued, 1000, w('using Read'), r), true);
+  assert.equal(cloudShows(queued, 2000, w('waiting', 'waiting'), r), true, 'still the action\'s show');
+  assert.equal(cloudShows(queued, 1000 + CLOUD_SHOW_MS, w('waiting', 'waiting'), r), false, 'a place in the heavy queue is no call: it does not show again at once');
+  const sight = createCloudGate();
+  for (let t = 0; t < 10_000; t += 16) assert.equal(cloudShows(sight, t, w('using Bash'), r), false, `first sight does not pop up a frame later (${t} ms)`);
   const idle = createCloudGate();
   cloudShows(idle, 0, w('using Bash'), r);
   let shown = 0;
@@ -373,6 +473,15 @@ test('(d) the gate: a change shows a cloud for CLOUD_SHOW_MS, then quiet; a call
   for (let t = 0; t < 300_000; t += 100) { const on = cloudShows(long, t, w('compiling'), r); if (on && !(ups.length && ups[ups.length - 1].end === t - 100)) ups.push({ start: t, end: t }); else if (on) ups[ups.length - 1].end = t; }
   assert.ok(ups.length >= 5 && ups.length <= 15, `a long state re-surfaces now and then (${ups.length} in 5 min)`);
   for (let i = 1; i < ups.length; i++) assert.ok(ups[i].start - ups[i - 1].end >= CLOUD_RESURFACE_MS[0] - 100, 'never closer than the resurface gap');
+  const mid = CLOUD_RESURFACE_MS[0] + 0.5 * (CLOUD_RESURFACE_MS[1] - CLOUD_RESURFACE_MS[0]);
+  for (let i = 1; i < ups.length; i++) assert.ok(Math.abs(ups[i].start - ups[i - 1].end - mid) <= 200, `the gap is counted from the end of the last show (${ups[i].start - ups[i - 1].end} ms, rand 0.5: ${mid})`);
+});
+
+test('(d) crashed and stuck (liveness) say so over any hook status', () => {
+  const agent = { status: 'working', action: 'using Bash' };
+  assert.deepEqual(MODEL.activityThought(agent, rec('CRASHED')), { status: 'crashed', text: 'crashed' });
+  assert.deepEqual(MODEL.activityThought(agent, rec('STUCK_WAKE')), { status: 'stuck', text: 'stuck' });
+  assert.equal(MODEL.activityThought(agent, rec('BUSY_PROGRESSING')).text, 'using Bash');
 });
 
 test('(d) the boot note never shows, before or after the store settles it', () => {
@@ -405,6 +514,58 @@ function simLayer() {
   const layer = new mod.exports.BubbleLayer({ width: 960, height: 640 }, rand);
   return { layer, rand, upOf: (id) => made.get(id)?.up() ?? false, setThought: (id, th) => { last = id; layer.setThought(id, th); } };
 }
+
+/** The layer on stand-in bubbles that log every call, with the time it came at. */
+function loggedLayer() {
+  class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); return c; } destroy() {} }
+  let now = 0;
+  class ThoughtBubble {
+    constructor() { this.container = new Container(); this.text = null; this.log = []; }
+    show(text) { this.text = text; this.log.push(['show', text, now]); }
+    hide() { this.text = null; this.log.push(['hide', null, now]); }
+    startLinger() { this.text = null; this.log.push(['linger', null, now]); }
+    setBounds() {} setZoom() {} setLift() {} setPosition() {} getLayout() { return null; } update() {} destroy() {}
+  }
+  const out = ts.transpileModule(readSource('src/renderer/src/scene/themes/BubbleLayer.ts'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const mod = { exports: {} };
+  const req = (id) => ({ 'pixi.js': { Container }, '../office/ThoughtBubble': { ThoughtBubble }, '../office/MessageEnvelope': { MessageEnvelope: class {} }, './bubbleModel': MODEL })[id];
+  new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
+  const layer = new mod.exports.BubbleLayer({ width: 960, height: 640 }, () => 0.5);
+  const anchors = [{ id: 'a', x: 100, y: 100 }, { id: 'b', x: 300, y: 100 }];
+  const run = (ms) => { for (let t = 0; t < ms; t += 16) { now += 16; layer.update(16, anchors, 1); } };
+  return { layer, run, bubble: (id) => layer.thoughts.get(id)?.bubble, now: () => now };
+}
+
+test("(d) in the layer, a quiet agent's cloud goes after CLOUD_SHOW_MS and comes back, with no new thought", () => {
+  const { CLOUD_SHOW_MS, CLOUD_RESURFACE_MS } = MODEL;
+  const { layer, run, bubble, now } = loggedLayer();
+  layer.setThought('a', { status: 'working', text: 'using Bash' });
+  run(1000);
+  assert.deepEqual(bubble('a').log, [], 'what is there at first sight waits its turn');
+  layer.setThought('a', { status: 'working', text: 'using Read' });
+  const shownAt = now();
+  assert.deepEqual(bubble('a').log, [['show', 'using Read', shownAt]], 'a new action shows');
+  run(CLOUD_SHOW_MS + 100);   // the agent goes quiet: only the per-frame gate can take it down
+  assert.deepEqual(bubble('a').log.slice(1).map(([kind]) => kind), ['linger'], 'it lingers and fades as on the office floor, never cut off');
+  const goneAt = bubble('a').log[1][2];
+  assert.ok(goneAt - shownAt >= CLOUD_SHOW_MS && goneAt - shownAt <= CLOUD_SHOW_MS + 16, `it goes after CLOUD_SHOW_MS (${goneAt - shownAt} ms)`);
+  run(CLOUD_RESURFACE_MS[1] + 1000);
+  const back = bubble('a').log.slice(2);
+  assert.equal(back[0] && back[0][0], 'show', 'the lasting state comes back by itself');
+  assert.ok(back[0][2] - goneAt >= CLOUD_RESURFACE_MS[0], 'not before the resurface gap');
+  assert.ok(bubble('a').log.every(([kind]) => kind !== 'hide'), 'never hidden outright');
+});
+
+test("(d) a removed agent's queued line never brings its cloud back", () => {
+  const { layer, run, bubble } = loggedLayer();
+  layer.setThought('b', { status: 'working', text: 'using Bash' });
+  layer.say('b', 'Aye, Captain.', { delay: 500 });
+  layer.say('a', 'Make it so.', { delay: 500 });
+  layer.remove('b');
+  run(1500);
+  assert.equal(bubble('b'), undefined, 'no bubble for the departed');
+  assert.equal(bubble('a').log[0][1], 'Make it so.', 'the other line still plays');
+});
 
 test('(d) a floor of 7 for 30 minutes: each shows a cloud under a quarter of the time, needs-you stays up', () => {
   const { layer, rand, upOf, setThought } = simLayer();

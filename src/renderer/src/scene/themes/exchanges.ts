@@ -94,6 +94,8 @@ export function exchangeSays(exchanges: readonly Exchange[], a: Speaker, b: Spea
 
 /** The bridge's own talk: every BRIDGE_TALK_GAP_MS or so, two of the people present play an
  *  exchange, wherever they are. */
+const NO_SAYS: readonly BubbleSay[] = Object.freeze([]);
+
 export class BridgeTalk {
   private wait: number;
   private n = 0;
@@ -109,11 +111,13 @@ export class BridgeTalk {
     return lo + this.rand() * (hi - lo);
   }
 
-  /** The says of a talk that starts in this tick, if one does. */
-  tick(dt: number, people: readonly Speaker[]): BubbleSay[] {
-    if (!this.exchanges.length || (this.wait -= dt) > 0) return [];
+  /** The says of a talk that starts in this tick, if one does. It runs every frame, so `speakers`
+   *  may be a function: it is called only when a talk is due. */
+  tick(dt: number, speakers: readonly Speaker[] | (() => readonly Speaker[])): readonly BubbleSay[] {
+    if (!this.exchanges.length || (this.wait -= dt) > 0) return NO_SAYS;
     this.wait = this.gap();
-    if (people.length < 2) return [];
+    const people = typeof speakers === 'function' ? speakers() : speakers;
+    if (people.length < 2) return NO_SAYS;
     const fresh = people.filter((p) => !this.last.has(p.id));
     const who = fresh.length >= 2 ? fresh : people;
     const pairs: Array<[Speaker, Speaker]> = [];
