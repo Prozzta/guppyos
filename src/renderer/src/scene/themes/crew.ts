@@ -1,18 +1,31 @@
 // The people of a stations scene: who holds which station, who walks where,
 // who sits. Ported from the bridge viewer's crew behaviour (spawn at the
-// entrance, goTo, walkZones, the tick's seat/wander logic), with stations
+// entrance, goTo, the tick's seat/wander logic), with stations
 // handed out by the manifest-driven SeatAllocator. Idle agents wander, chat
 // with an idle neighbour at a stop, and now and then go for coffee: the
 // viewer's fixed coffee run (a per-agent cooldown, a full parked mug is drunk
 // first), with the brew and mug spots from the pack. Pure: the Pixi scene only
 // draws what this reports.
 
-import { footBox, footHits, route, seatRoute, wanderTarget, cellCentre, type Station, type StationMap } from './stationMap';
+import { route, seatRoute, wanderTarget, cellCentre, type Station, type StationMap } from './stationMap';
 import { SeatAllocator, type SeatChange, type SeatRules } from './seatAllocator';
 import type { Facing } from './manifest';
 
 /** Walking speed in map pixels per millisecond (the viewer's). */
 export const WALK_SPEED = 0.045;
+
+/** ms of the seat step: approach spot to seat point (sitting down) or back (getting up). Chairs are solid for
+ *  every walk; the step is the only time feet are in a chair, and it is drawn seated, sorted with the chair. */
+export const SEAT_STEP_MS = 220;
+
+/** A seat step in progress: from -> to over `ms`; `sit` is the step in (it ends seated). */
+export interface SeatStep {
+  from: [number, number];
+  to: [number, number];
+  t: number;
+  ms: number;
+  sit: boolean;
+}
 
 /** Per agent: ms from the start of one coffee run to the next, when the pack sets none (the viewer's 3-5 min). */
 export const COFFEE_GAP: [number, number] = [180000, 300000];
@@ -78,6 +91,18 @@ export interface Walker {
   coffeeNext: number;
   /** Clock time a chat ends. */
   talk: number;
+  /** The seat whose chair p is in (seated, or stepping in or out of it); null on the floor. */
+  chair: Station | null;
+  step: SeatStep | null;
+}
+
+/** How to draw p with a chair: the seat it is in (seated or mid step) and how far in it is (1 seated, 0 at the
+ *  approach spot); null standing on the floor. The scene sorts and poses p with that seat's chair. */
+export function sitDraw(p: Walker): { seat: Station; k: number } | null {
+  const c = p.chair ?? (p.seated ? p.seat : null);
+  if (!c) return null;
+  const s = p.step, f = s ? Math.min(1, s.t / (s.ms || 1)) : 1;
+  return { seat: c, k: p.seated ? 1 : s ? (s.sit ? f : 1 - f) : 1 };
 }
 
 export interface CrewOptions {
@@ -135,6 +160,7 @@ export class Crew {
         p = {
           id: a.id, x, y, dir: 'down', moving: false, path: [], seat: null, lastSeat: null, seated: false, tried: false, arrived: false, idle: 0,
           wait: arrivals++ * 400, status: a.status, homeSit: false, sip: 0, rise: 0, cup: false, fresh: false, mug: null, coffee: null, coffeeNext: 0, talk: 0,
+          chair: null, step: null,
         };
         this.people.set(a.id, p);
         changes.push(...this.seats.join({ id: a.id, orchestrator: a.orchestrator, presetId: a.presetId }));
@@ -161,58 +187,59 @@ export class Crew {
     p.seat = to;
     p.seated = false; p.tried = false; p.path = [];
     p.homeSit = false; p.sip = 0; p.rise = 0;
+    if (p.chair) this.stepOut(p);
   }
 
   private standUp(p: Walker): void {
     if (p.seated) p.lastSeat = p.seat;
     p.seated = false; p.tried = false; p.path = []; p.idle = 0;
     p.homeSit = false; p.sip = 0; p.rise = 0;
+    if (p.chair) this.stepOut(p);
   }
 
-  /** The solids p may cross now: only when its feet are in a chair, that chair (its own or last seat's, or an
-   *  untaken one), so it can get out. Everywhere else it walks plain floor. */
-  walkZones(p: Walker): number[] {
-    const Z: number[] = [];
-    if (!footHits(this.SM, p.x, p.y)) return Z;
-    const fb = footBox(p.x, p.y);
-    const touch = (rects: Array<[number, number, number, number]>) => rects.some(([a, b, c, d]) => fb[0] < c && fb[2] > a && fb[1] < d && fb[3] > b);
-    const taken = (s: Station) => this.walkers().some((q) => q !== p && q.seat === s);
-    for (const [s, rects] of this.SM.seatZones) {
-      const id = this.SM.seatChair.get(s);
-      if (id && (s === p.lastSeat || s === p.seat || !taken(s)) && touch(rects)) Z.push(id);
-    }
-    return Z;
+  /** The seat step out of the chair p is in, from where it is to that seat's approach spot (a part-way step
+   *  takes part of the time). */
+  private stepOut(p: Walker): void {
+    const c = p.chair!, a = this.SM.approach.get(c)!, L = Math.hypot(a[0] - c.x, a[1] - c.y) || 1;
+    p.seated = false; p.moving = false;
+    p.step = { from: [p.x, p.y], to: a, t: 0, ms: SEAT_STEP_MS * Math.max(0.2, Math.min(1, Math.hypot(a[0] - p.x, a[1] - p.y) / L)), sit: false };
   }
 
-  /** The seat (its own, or the one it just left) p is sitting in or on the short leg of: it gets out by its approach spot. */
-  private inSeat(p: Walker): Station | null {
-    for (const s of [p.seat, p.lastSeat]) {
-      if (!s || !this.SM.approach.has(s)) continue;
-      if (Math.hypot(p.x - s.x, p.y - s.y) < this.SM.grid.g * 2) return s;
-      const id = this.SM.seatChair.get(s);
-      if (id && footHits(this.SM, p.x, p.y) > footHits(this.SM, p.x, p.y, [id])) return s;
-    }
-    return null;
+  /** The seat step into p's own seat, from where it is (its approach spot, or part-way out). */
+  private stepIn(p: Walker): void {
+    const s = p.seat!, a = this.SM.approach.get(s)!, L = Math.hypot(a[0] - s.x, a[1] - s.y) || 1;
+    p.chair = s; p.path = []; p.moving = false;
+    p.step = { from: [p.x, p.y], to: [s.x, s.y], t: 0, ms: SEAT_STEP_MS * Math.max(0.2, Math.min(1, Math.hypot(s.x - p.x, s.y - p.y) / L)), sit: true };
   }
 
+  /** Plain floor to (tx, ty); in a chair, the seat step out to its approach spot first. Chairs are solid for
+   *  every walk, the walker's own included. */
   goTo(p: Walker, tx: number, ty: number, exact: boolean): boolean {
-    const s = this.inSeat(p), a = s ? this.SM.approach.get(s)! : null;
-    const rest = a ? route(this.SM, a[0], a[1], tx, ty, undefined, exact) : route(this.SM, p.x, p.y, tx, ty, this.walkZones(p), exact);
+    const c = p.chair, a = c ? this.SM.approach.get(c)! : null;
+    const rest = route(this.SM, a ? a[0] : p.x, a ? a[1] : p.y, tx, ty, undefined, exact);
     if (!rest) return false;
-    p.path = a ? [a, ...rest] : rest;
+    if (c) this.stepOut(p);
+    p.path = rest;
     return true;
   }
 
-  /** To p's own seat: out of any chair it is in by that seat's approach spot, plain floor to its own seat's approach
-   *  spot, then the short leg in. */
+  /** To p's own seat: out of any other chair by its seat step, plain floor to its own seat's approach spot, then
+   *  (from the tick, on arrival) the seat step in. In its own chair (part-way out): straight back in. */
   goSeat(p: Walker): boolean {
-    const seat = p.seat!, s = this.inSeat(p);
-    if (s === seat) { p.path = [[seat.x, seat.y]]; return true; }
-    const a = s ? this.SM.approach.get(s)! : null;
-    const rest = a ? seatRoute(this.SM, a[0], a[1], seat) : seatRoute(this.SM, p.x, p.y, seat, this.walkZones(p));
+    const seat = p.seat!, c = p.chair;
+    if (c === seat) { this.stepIn(p); return true; }
+    const a = c ? this.SM.approach.get(c)! : null;
+    const rest = seatRoute(this.SM, a ? a[0] : p.x, a ? a[1] : p.y, seat);
     if (!rest) return false;
-    p.path = a ? [a, ...rest] : rest;
+    if (c) this.stepOut(p);
+    p.path = rest.slice(0, -1); // to the approach spot: the last leg is the seat step
     return true;
+  }
+
+  /** p stands on its own seat's approach spot. */
+  private atApproach(p: Walker): boolean {
+    const a = p.seat ? this.SM.approach.get(p.seat) : undefined;
+    return !!a && Math.hypot(p.x - a[0], p.y - a[1]) < 0.5;
   }
 
   // ---- coffee and errands ----
@@ -333,6 +360,17 @@ export class Crew {
     for (const p of this.people.values()) {
       if (p.wait > 0) { p.wait -= dt; continue; }
       if (p.coffee) { p.coffee.t += dt; if ((p.coffee.phase === 'walking' || p.coffee.phase === 'fetch') && p.coffee.t > 20000) this.endCoffee(p); }
+      if (p.step) { // a seat step: nothing else moves p until it ends
+        const s = p.step, f = Math.min(1, (s.t += dt) / (s.ms || 1));
+        p.x = s.from[0] + (s.to[0] - s.from[0]) * f; p.y = s.from[1] + (s.to[1] - s.from[1]) * f;
+        p.moving = false;
+        if (f >= 1) {
+          p.step = null;
+          if (s.sit) { p.seated = true; p.lastSeat = p.seat; p.dir = p.seat!.facing; this.sitDown(p); }
+          else p.chair = null;
+        }
+        continue;
+      }
       if (!p.path.length) {
         p.moving = false;
         const arrived = p.arrived;
@@ -349,7 +387,7 @@ export class Crew {
           if (!p.tried) {
             p.tried = true;
             if (!this.goSeat(p)) { if (p.homeSit) p.homeSit = false; else p.idle = 2000; }
-          } else if (Math.hypot(p.x - p.seat.x, p.y - p.seat.y) < this.SM.grid.g * 2) { p.seated = true; p.lastSeat = p.seat; p.dir = p.seat.facing; this.sitDown(p); }
+          } else if (!p.chair && this.atApproach(p)) this.stepIn(p); // only from its own approach spot
           else if (p.homeSit) p.homeSit = false; // could not get home: sip standing next time
           else if ((p.idle -= dt) <= 0) { p.tried = false; p.idle = 2000; } // could not get there: try again in a while
         } else if (!p.seated) {
