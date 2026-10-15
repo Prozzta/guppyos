@@ -8,18 +8,18 @@
  * Every Electron path (userData, sessionData, crashDumps, logs) is inside <jail>; no window is shown.
  */
 const { app, BrowserWindow } = require('electron');
-const { mkdirSync, writeFileSync } = require('node:fs');
-const { join } = require('node:path');
+const { writeFileSync } = require('node:fs');
 const loadTs = require('../load-ts.cjs');
+const { isolateAppPaths } = require('./isolate-paths.cjs');
 
 const [jail, outFile] = process.argv.slice(-2);
 if (!jail || !outFile || !outFile.endsWith('.json')) { process.stderr.write('usage: gpu-mode-main.cjs <jail> <out.json>\n'); process.exit(2); }
-for (const [name, dir] of [['appData', join(jail, 'appData')], ['userData', jail], ['sessionData', jail], ['crashDumps', join(jail, 'crashDumps')], ['logs', join(jail, 'logs')]]) {
-  mkdirSync(dir, { recursive: true });
-  app.setPath(name, dir);
-}
-// The same keep-scheduled switches as the other harness mains, WITHOUT disable-gpu.
-for (const sw of ['disable-renderer-backgrounding', 'disable-background-timer-throttling', 'disable-backgrounding-occluded-windows']) app.commandLine.appendSwitch(sw);
+// HARNESS-CRASHPAD: every path and a local-only crash reporter inside <jail>, like every harness main.
+isolateAppPaths(app, jail);
+// The helper also adds disable-gpu (a hidden harness window needs no GPU); this run is ABOUT the GPU,
+// so take it back out before ready. The keep-scheduled switches stay.
+app.commandLine.removeSwitch('disable-gpu');
+if (app.commandLine.hasSwitch('disable-gpu')) { process.stderr.write('gpu-mode-main: disable-gpu could not be removed\n'); process.exit(2); }
 
 // THE PRODUCT STEP, before ready, exactly as src/main/index.ts runs it.
 const graphics = loadTs('src/main/graphics.ts');
