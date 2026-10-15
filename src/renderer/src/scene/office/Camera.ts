@@ -20,6 +20,31 @@ export interface CameraSettle {
   resolution: () => number;
 }
 
+/** TES-WALL-RESIZE-LINES-187: call `onChange(dpr)` each time the window's device pixel ratio
+ *  changes after mount (UI zoom with Ctrl+= / Ctrl+-, or a move to a monitor with another scale),
+ *  so a whole-device-pixel camera can follow it. A `(resolution: <dpr>dppx)` query matches only
+ *  the ratio it was made for, so it is re-armed for each new one. Returns the cleanup. */
+export function watchDevicePixelRatio(
+  win: Pick<Window, 'matchMedia' | 'devicePixelRatio'>,
+  onChange: (dpr: number) => void,
+): () => void {
+  let mq: MediaQueryList | null = null;
+  const fire = (): void => {
+    mq?.removeEventListener('change', fire);
+    arm();
+    onChange(win.devicePixelRatio || 1);
+  };
+  const arm = (): void => {
+    mq = win.matchMedia(`(resolution: ${win.devicePixelRatio || 1}dppx)`);
+    mq.addEventListener('change', fire);
+  };
+  arm();
+  return () => {
+    mq?.removeEventListener('change', fire);
+    mq = null;
+  };
+}
+
 export class Camera {
   private container: Container;
   private currentX = 0;

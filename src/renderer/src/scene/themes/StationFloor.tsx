@@ -9,7 +9,7 @@ import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { activityStatus } from '@shared/activityView';
 import type { LivenessV1 } from '@shared/livenessV1';
-import { Camera } from '../office/Camera';
+import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
 import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
@@ -501,6 +501,16 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       });
       resize.observe(host);
       (app as any).__resize = resize;
+      // TES-WALL-RESIZE-LINES-187: the camera snaps to the renderer's device-pixel grid, so the
+      // renderer follows a DPR change after mount (UI zoom, a monitor move), then the camera.
+      (app as any).__dpr = watchDevicePixelRatio(window, (dpr) => {
+        if (!app.renderer) return;
+        app.renderer.resolution = dpr;
+        const width = host.clientWidth, height = host.clientHeight;
+        if (width === 0 || height === 0) return;
+        app.renderer.resize(width, height);
+        camera.setViewSize(width, height);
+      });
     };
 
     // Guppy's floors do not retry a failed init (OfficeFloor does the same).
@@ -516,6 +526,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       if (a) {
         (a as any).__glRecovery?.();
         (a as any).__resize?.disconnect?.();
+        try { (a as any).__dpr?.(); } catch { /* noop */ }
         try { (a as any).__unsub?.(); } catch { /* noop */ }
         try { (a as any).__disposeHiveBubbles?.(); } catch { /* noop */ }
         teardownFloor(a, (a as any).__free ?? []);
