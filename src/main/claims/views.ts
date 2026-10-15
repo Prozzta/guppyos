@@ -246,13 +246,15 @@ export function createClaimViews(records: LedgerRec[], countTokens: CountTokens,
       let reserve = 0;
       for (let pass = 0; pass < 8; pass++) {
         const need = sep + lineTokens(packed.note) + sep + lineTokens(packed.more);
-        if (need <= reserve) break;
+        if (need <= reserve) break; // the break only saves repacks: the same reserve packs the same again
         reserve = need;
         packed = pack(Math.max(0, cap - reserve));
       }
     }
     const { output, included, excludedRows, omitted, warnings, note, more, droppedReconcileItems } = packed;
     // Below the minimum budget (header + note + "+N more") the note goes in alone if it fits.
+    // used <= budget holds at every budget of at least the header: the header is always emitted,
+    // so a budget below its own size goes over (as before; delivery budgets are thousands).
     if (omitted) {
       if (fits([...output, note])) output.push(note);
       if (fits([...output, more])) output.push(more);

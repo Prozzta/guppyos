@@ -74,7 +74,7 @@ function sweep(n, fn, budgets) {
 const range = (from, to, step = 1) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
 
 for (const [name, fn] of Object.entries(COUNTERS)) {
-  test(`CL-OVERFLOW-NOTE: at every budget where claims are dropped, the note and "+N more" are present and within budget (${name})`, () => {
+  test(`CL-OVERFLOW-NOTE: at every budget of at least the minimum where claims are dropped, the note and "+N more" are present and within budget (${name})`, () => {
     const small = sweep(120, fn, range(150, 4000));
     const large = sweep(400, fn, range(500, 12000, 13));
     assert.ok(small.overflow > 1000 && large.overflow > 500, `the sweeps overflow: ${JSON.stringify({ small, large })}`);
@@ -82,7 +82,7 @@ for (const [name, fn] of Object.entries(COUNTERS)) {
   });
 }
 
-test('CL-OVERFLOW-NOTE: below the minimum budget the note goes in alone if it fits, and nothing goes past the budget', () => {
+test('CL-OVERFLOW-NOTE: below the minimum budget the note goes in alone if it fits, and at every budget of at least the header nothing goes past the budget', () => {
   const fn = COUNTERS.length;
   const { records, state, view } = fixture(60);
   const views = V.createClaimViews(records, fn);
