@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
-import { PixelBadge, StatusKind, badgeText } from './PixelBadge';
+import { PixelBadge, StatusKind, badgeBlinks, badgeText } from './PixelBadge';
 import { useHasTerminalDraft } from './terminalPool';
 import { SpritePortrait } from './SpritePortrait';
 import { RealtimeMichaelToggle } from './RealtimeMichaelToggle';
@@ -306,10 +306,10 @@ export function AgentCard({
                   most redundant thing, not on the identity. */}
               {dotBadge ? (
                 <span role="img" title={badgeLabel} aria-label={badgeLabel} style={{ display: 'inline-flex', flexShrink: 0 }}>
-                  <PixelBadge status={held.status} label="" style={{ flexShrink: 0, padding: '5px 6px' }} />
+                  <PixelBadge status={held.status} label="" blink={badgeBlinks(held.status)} style={{ flexShrink: 0, padding: '5px 6px' }} />
                 </span>
               ) : (
-                <PixelBadge status={held.status} label={held.label} style={{ flexShrink: 0 }} />
+                <PixelBadge status={held.status} label={held.label} blink={badgeBlinks(held.status)} style={{ flexShrink: 0 }} />
               )}
             </div>
 

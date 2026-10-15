@@ -1,4 +1,5 @@
 import { CSSProperties } from 'react';
+import { workingBlinks } from '@shared/activityView';
 
 export type StatusKind =
   | 'idle' | 'thinking' | 'working' | 'waiting' | 'blocked' | 'success' | 'ghost'
@@ -15,7 +16,17 @@ export interface PixelBadgeProps {
   status: StatusKind;
   label?: string;
   style?: CSSProperties;
+  /** PANEL-BLINK-188: the dot blinks (a stepped CSS opacity keyframe; steady under reduced motion, global.css). */
+  blink?: boolean;
 }
+
+/** PANEL-BLINK-188: the statuses whose chip reads "working" blink on the agent cards (the floor's panels share the rule). */
+export function badgeBlinks(status: StatusKind): boolean {
+  return workingBlinks(status);
+}
+
+/** The working dot's blink: two steps, no easing (the floor's panel lights step every 240 ms; 5 steps a cycle). */
+export const BADGE_BLINK = 'cth-led 1200ms steps(1, end) infinite';
 
 const colorByStatus: Record<StatusKind, string> = {
   idle:     'var(--cth-status-idle)',
@@ -53,7 +64,7 @@ export function badgeText(status: StatusKind, label?: string): string {
   return label ?? labelByStatus[status] ?? status;
 }
 
-export function PixelBadge({ status, label, style }: PixelBadgeProps) {
+export function PixelBadge({ status, label, style, blink }: PixelBadgeProps) {
   const text = badgeText(status, label);
   return (
     <span
@@ -80,7 +91,8 @@ export function PixelBadge({ status, label, style }: PixelBadgeProps) {
           width: 8,
           height: 8,
           background: colorByStatus[status],
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)'
+          boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+          ...(blink ? { animation: BADGE_BLINK } : {})
         }}
       />
       {text}

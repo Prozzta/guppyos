@@ -267,7 +267,7 @@ test('StationFloor draws below and the statics through the cache, with the very 
   assert.match(src, /const belowDirect = new Sprite\(below\.texture\);\s*world\.addChild\(belowDirect\);\s*if \(cached\) \{/);
   assert.match(src, /app\.stage\.addChild\(cacheLayer\);\s*\}\s*world\.addChild\(sortLayer\);/);
   // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
-  assert.match(src, /if \(!cached \|\| hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
+  assert.match(src, /if \(!cached \|\| hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
   // The cache follows the world's transform, is drawn on the canvas by the canvas's own arithmetic
@@ -309,7 +309,7 @@ test('StationFloor caches a picture once it holds for a tick, draws directly whi
   assert.match(src, /const refreshCache = \(liveStatics: boolean\[\]\) => \{\s*cacheStatics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = !liveStatics\[i\]; \}\);/);
   // COFFEE-NEVER-186: the key also holds the coffee mugs (a cup's side, a parked mug's depth).
   assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}:\$\{cups\.get\(q\.id\)\?\.back \?\? '-'\}`\)\.join\('\|'\) \+ '#' \+ \[\.\.\.mugs\]\.map\(\(\[id, m\]\) => `\$\{id\}:\$\{m\.foot\}:\$\{m\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
-  assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*for \(const m of mugs\.values\(\)\) items\.push\(m\);\s*items\.sort\(byDepth\);/);
+  assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*for \(const m of mugs\.values\(\)\) items\.push\(m\);\s*for \(const q of panelLayer\.sorted\) items\.push\(q\);\s*items\.sort\(byDepth\);/);
 });
 
 test('StationFloor frees the cache target, its cells and every texture it made on unmount, before the app is destroyed', () => {
