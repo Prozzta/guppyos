@@ -26,6 +26,53 @@ function stationBubbleThoughts() {
   return mod.exports;
 }
 
+function stationFunctions(names, fakeWindow = {}) {
+  const source = readSource(FLOOR);
+  const file = ts.createSourceFile(FLOOR, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const wanted = new Set(names);
+  const declarations = file.statements.filter((s) => ts.isFunctionDeclaration(s) && s.name && wanted.has(s.name.text));
+  assert.equal(declarations.length, names.length, 'all StationFloor functions are present');
+  const output = ts.transpileModule(`${declarations.map((s) => s.getText(file)).join('\n')}\nmodule.exports = { ${names.join(', ')} };`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }
+  }).outputText;
+  const mod = { exports: {} };
+  new Function('activityThought', 'module', 'exports', 'window', output)(MODEL.activityThought, mod, mod.exports, fakeWindow);
+  return mod.exports;
+}
+
+function loadBubbleLayer() {
+  const thoughts = [], envelopes = [];
+  class Container {
+    constructor() { this.children = []; this.destroyed = 0; }
+    addChild(child) { this.children.push(child); return child; }
+    destroy() { this.destroyed++; }
+  }
+  class ThoughtBubble {
+    constructor() { this.container = new Container(); this.destroyed = 0; thoughts.push(this); }
+    show() {} hide() {} setBounds() {} setZoom() {} setLift() {} setPosition() {}
+    getLayout() { return null; }
+    update() {}
+    destroy() { this.destroyed++; }
+  }
+  class MessageEnvelope {
+    constructor(...args) { this.args = args; this.container = new Container(); this.destroyed = 0; envelopes.push(this); }
+    update() { return true; }
+    destroy() { this.destroyed++; }
+  }
+  const source = readSource('src/renderer/src/scene/themes/BubbleLayer.ts');
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const mod = { exports: {} };
+  const localRequire = (id) => {
+    if (id === 'pixi.js') return { Container };
+    if (id === '../office/ThoughtBubble') return { ThoughtBubble };
+    if (id === '../office/MessageEnvelope') return { MessageEnvelope };
+    if (id === './bubbleModel') return MODEL;
+    throw new Error(`unexpected module ${id}`);
+  };
+  new Function('require', 'module', 'exports', output)(localRequire, mod, mod.exports);
+  return { BubbleLayer: mod.exports.BubbleLayer, thoughts, envelopes };
+}
+
 test('1. StationFloor updates an idle cloud to working when only its liveness changes', () => {
   const bubbleThoughts = stationBubbleThoughts();
   const agent = { id: 'dwight', status: 'idle', action: 'wire the bubble layer' };
@@ -54,18 +101,59 @@ test('3. a replayed Crew/coffee say stream is consumed exactly once by its curso
   assert.deepEqual(said, [{ id: 'andy', text: 'brewing coffee', options: { ttl: 2600 } }]);
 });
 
-test('4. the shared overlay reuses the Office ThoughtBubble and MessageEnvelope primitives', () => {
-  const source = readSource('src/renderer/src/scene/themes/BubbleLayer.ts');
-  assert.match(source, /import \{ MessageEnvelope, type MessageAct \} from '\.\.\/office\/MessageEnvelope';/);
-  assert.match(source, /import \{ ThoughtBubble \} from '\.\.\/office\/ThoughtBubble';/);
-  assert.match(source, /say\(id: string, text: string, options: BubbleSayOptions = \{\}\)/);
-  assert.match(source, /new MessageEnvelope\(from, to, act, needsHuman\)/);
+test('4. BubbleLayer destroys removed thoughts and expired envelopes with Pixi stubbed', () => {
+  const { BubbleLayer, thoughts, envelopes } = loadBubbleLayer();
+  const bubbles = new BubbleLayer({ width: 320, height: 180 });
+  bubbles.setThought('gone', { text: 'leaving' });
+  bubbles.remove('gone');
+  assert.equal(thoughts[0].destroyed, 1, 'remove frees a thought that may not have a sprite');
+  bubbles.update(0, [{ id: 'from', x: 1, y: 2 }, { id: 'to', x: 3, y: 4 }], 1);
+  bubbles.handoff('from', 'to', 'request', true);
+  assert.deepEqual(envelopes[0].args, [{ id: 'from', x: 1, y: 2 }, { id: 'to', x: 3, y: 4 }, 'request', true]);
+  bubbles.update(16, [], 1);
+  assert.equal(envelopes[0].destroyed, 1, 'a finished envelope is freed rather than retained forever');
 });
 
-test('5. StationFloor keeps the live overlay above people and ticks it before a depth no-op', () => {
-  const source = readSource(FLOOR);
-  assert.match(source, /world\.addChild\(sortLayer\);[\s\S]*world\.addChild\(bubbles\.container\);/);
-  assert.match(source, /bubbles\.update\(dt, anchors, world\.scale\.x\);[\s\S]*if \(depth === lastDepth\) return;/);
-  assert.match(source, /window\.cth\.onHiveMessage[\s\S]*bubbles\.handoff/);
-  assert.match(source, /bubbles\.consumeSays\(crewSays\(crew\.events\), sayCursor\);/);
+test('5. Station bridge subscribes, maps human targets, and cleans up the same listener and layer', () => {
+  let listener, subscribes = 0, unsubscribes = 0;
+  const fakeWindow = { cth: { onHiveMessage(fn) { subscribes++; listener = fn; return () => { unsubscribes++; }; } } };
+  const { bindHiveBubbles } = stationFunctions(['bindHiveBubbles'], fakeWindow);
+  const calls = [], app = {};
+  let destroys = 0;
+  const cleanup = bindHiveBubbles(app, { handoff: (...args) => calls.push(args), destroy: () => { destroys++; } });
+  assert.equal(subscribes, 1);
+  assert.equal(typeof app.__offMessage, 'function', 'the unsubscriber is retained for this mount');
+  listener({ from: 'dwight', targets: ['andy', 'human'], act: 'request', needsHuman: true });
+  assert.deepEqual(calls, [
+    ['dwight', 'andy', 'request', true],
+    ['dwight', '__human__', 'request', true]
+  ]);
+  cleanup();
+  assert.equal(unsubscribes, 1);
+  assert.equal(destroys, 1);
+});
+
+test('6. departures free rendered and unrendered bubbles, while repeated Crew events are fresh', () => {
+  const { crewSays, newerCrewEvents, removeDepartedSprites, removeUnrenderedBubbles } = stationFunctions([
+    'crewSays', 'newerCrewEvents', 'removeDepartedSprites', 'removeUnrenderedBubbles'
+  ]);
+  const removed = [], sprites = new Map([['rendered', { sprite: { destroyed: 0, destroy() { this.destroyed++; } } }]]);
+  removeDepartedSprites(sprites, new Set(), { remove: (id) => removed.push(id) });
+  const bubbleIds = new Set(['unrendered']);
+  removeUnrenderedBubbles(bubbleIds, new Map(), new Set(), { remove: (id) => removed.push(id) });
+  assert.deepEqual(removed, ['rendered', 'unrendered']);
+  assert.equal(sprites.size, 0);
+  assert.equal(bubbleIds.size, 0);
+  const events = [
+    { kind: 'brew', id: 'andy', at: 10 },
+    { kind: 'brew', id: 'andy', at: 11 },
+    { kind: 'chat', id: 'andy', with: 'dwight', at: 12 }
+  ];
+  assert.deepEqual(newerCrewEvents(events, 10), events.slice(1));
+  const said = [];
+  MODEL.consumeSays(crewSays(events), MODEL.createSayCursor(), (id, text) => said.push({ id, text }));
+  assert.deepEqual(said, [
+    { id: 'andy', text: 'brewing coffee' }, { id: 'andy', text: 'brewing coffee' },
+    { id: 'andy', text: 'quick sync' }, { id: 'dwight', text: 'quick sync' }
+  ]);
 });

@@ -314,7 +314,8 @@ test('StationFloor frees the cache target, its cells and every texture it made o
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => app\.renderer\.runners\.postrender\.remove\(postrender\),\s*dropCells,\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
   assert.match(src, /const dropCells = \(\) => \{\s*for \(const s of cells\.values\(\)\) s\.destroy\(\{ texture: true, textureSource: false \}\);\s*cells\.clear\(\);\s*\};/);
-  assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__offMessage\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__bubbleLayer\?\.destroy\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
+  // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
+  assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__disposeHiveBubbles\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
   assert.doesNotMatch(src, /safeDestroy\(a\)/, 'the unmount destroys the app only through teardownFloor');
   assert.match(src, /const own = \(px: Pixels\) => \{ const t = texture\(px\); owned\.push\(t\); return t; \};/);
   assert.equal((src.match(/\btexture\(/g) || []).length, 2, "texture() is defined once and called only by own()");

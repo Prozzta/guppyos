@@ -54,6 +54,49 @@ function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: strin
   });
 }
 
+/** The Crew keeps a bounded, append-only event list. Do not re-project its old entries per frame. */
+export function newerCrewEvents<T extends { at: number }>(events: readonly T[], lastAt: number): readonly T[] {
+  const first = events.findIndex((event) => event.at > lastAt);
+  return first < 0 ? [] : events.slice(first);
+}
+
+/** Remove a rendered person and its bubble together. Kept separate so departure is testable. */
+export function removeDepartedSprites(
+  sprites: Map<string, { sprite: { destroy(): void } }>,
+  ids: ReadonlySet<string>,
+  bubbles: Pick<BubbleLayer, 'remove'>
+): void {
+  for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); bubbles.remove(id); }
+}
+
+/** A thought can exist before (or without) a sprite, so it still needs its own departure path. */
+export function removeUnrenderedBubbles(
+  bubbleIds: Set<string>,
+  sprites: ReadonlyMap<string, unknown>,
+  ids: ReadonlySet<string>,
+  bubbles: Pick<BubbleLayer, 'remove'>
+): void {
+  for (const id of bubbleIds) if (!ids.has(id) && !sprites.has(id)) { bubbles.remove(id); bubbleIds.delete(id); }
+}
+
+/** Wire the preload bridge once and return the matching unmount cleanup. */
+export function bindHiveBubbles(app: unknown, bubbles: Pick<BubbleLayer, 'handoff' | 'destroy'>): () => void {
+  const offMessage = window.cth.onHiveMessage
+        ? window.cth.onHiveMessage((event) => {
+        for (const target of event.targets) {
+          bubbles.handoff(event.from, target === 'human' ? '__human__' : target, event.act as MessageAct, event.needsHuman);
+        }
+      })
+    : () => { /* A stale preload bridge simply disables handoff animation. */ };
+  (app as any).__offMessage = offMessage;
+  (app as any).__bubbleLayer = bubbles;
+  return () => {
+    const a = app;
+    try { (a as any).__offMessage?.(); } catch { /* noop */ }
+    try { (a as any).__bubbleLayer?.destroy?.(); } catch { /* noop */ }
+  };
+}
+
 /** StationFloor's liveness-aware input for its shared thought-cloud layer. */
 function bubbleThoughts(agents: Agent[], liveness: Readonly<Record<string, LivenessV1 | undefined>>) {
   return agents.map((agent) => ({ id: agent.id, thought: activityThought(agent, liveness[agent.id]) }));
@@ -310,15 +353,18 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
       const sayCursor = createSayCursor();
+      const bubbleIds = new Set<string>();
       const sync = () => {
         const { agents, liveness } = useStore.getState();
         crew.sync(crewAgents(pack, agents, liveness));
         const ids = new Set(agents.map((a) => a.id));
         const thoughts = new Map(bubbleThoughts(agents, liveness).map((item) => [item.id, item.thought]));
-        for (const [id, s] of sprites) if (!ids.has(id)) { s.sprite.destroy(); sprites.delete(id); bubbles.remove(id); }
+        removeUnrenderedBubbles(bubbleIds, sprites, ids, bubbles);
+        removeDepartedSprites(sprites, ids, bubbles);
         for (const a of agents) {
           const thought = thoughts.get(a.id) ?? null;
           bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool } : null);
+          bubbleIds.add(a.id);
           const l = lookOf(a), have = sprites.get(a.id);
           if (have) { have.col = l.col; have.look = l.key; continue; } // a look edited in Add/Edit shows at once
           const sp = new Sprite(frame(l.key, R.rows.down));
@@ -336,6 +382,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       // at 100 ms, and under the frame budget it spans one display frame, not one floor tick).
       let lastTickAt = performance.now();
       let lastDepth: string | null = null;
+      let lastCrewEventAt = -1;
       const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
@@ -379,7 +426,11 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           }
         }
         if (SM.entrance) anchors.push({ id: '__human__', x: SM.entrance[0], y: SM.entrance[1] });
-        bubbles.consumeSays(crewSays(crew.events), sayCursor);
+        const freshEvents = newerCrewEvents(crew.events, lastCrewEventAt);
+        if (freshEvents.length) {
+          bubbles.consumeSays(crewSays(freshEvents), sayCursor);
+          lastCrewEventAt = freshEvents[freshEvents.length - 1].at;
+        }
         // Keep these live even when the people/station depth is unchanged and the map is cached.
         bubbles.update(dt, anchors, world.scale.x);
         if (cached) {
@@ -439,14 +490,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
           if (p) camera.nudgeToward(p.x, p.y);
         }
       });
-      const offMessage = window.cth.onHiveMessage
-        ? window.cth.onHiveMessage((event) => {
-            for (const target of event.targets) {
-              bubbles.handoff(event.from, target === 'human' ? '__human__' : target, event.act as MessageAct, event.needsHuman);
-            }
-          })
-        : () => { /* A stale preload bridge simply disables handoff animation. */ };
-      (app as any).__offMessage = offMessage;
+      (app as any).__disposeHiveBubbles = bindHiveBubbles(app, bubbles);
       const resize = new ResizeObserver((entries) => {
         for (const e of entries) {
           const { width, height } = e.contentRect;
@@ -473,8 +517,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         (a as any).__glRecovery?.();
         (a as any).__resize?.disconnect?.();
         try { (a as any).__unsub?.(); } catch { /* noop */ }
-        try { (a as any).__offMessage?.(); } catch { /* noop */ }
-        try { (a as any).__bubbleLayer?.destroy?.(); } catch { /* noop */ }
+        try { (a as any).__disposeHiveBubbles?.(); } catch { /* noop */ }
         teardownFloor(a, (a as any).__free ?? []);
       }
       appRef.current = null;
