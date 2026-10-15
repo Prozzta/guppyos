@@ -145,15 +145,17 @@ test('6. departures free rendered and unrendered bubbles, while repeated Crew ev
   assert.equal(sprites.size, 0);
   assert.equal(bubbleIds.size, 0);
   const events = [
-    { kind: 'brew', id: 'andy', at: 10 },
-    { kind: 'brew', id: 'andy', at: 11 },
+    { kind: 'errand', id: 'andy', at: 10 },
+    { kind: 'errand', id: 'andy', at: 11 },
     { kind: 'chat', id: 'andy', with: 'dwight', at: 12 }
   ];
   assert.deepEqual(newerCrewEvents(events, 10), events.slice(1));
   const said = [];
   MODEL.consumeSays(crewSays(events), MODEL.createSayCursor(), (id, text) => said.push({ id, text }));
   assert.deepEqual(said, [
-    { id: 'andy', text: 'brewing coffee' }, { id: 'andy', text: 'brewing coffee' },
+    { id: 'andy', text: 'stepping away' }, { id: 'andy', text: 'stepping away' },
     { id: 'andy', text: 'quick sync' }, { id: 'dwight', text: 'quick sync' }
   ]);
+  // COFFEE-NEVER-186: coffee lines (brew, sip) come from coffeeProps, once per coffee state, not from here.
+  assert.deepEqual(crewSays([{ kind: 'brew', id: 'andy', at: 13 }, { kind: 'sip', id: 'andy', at: 14 }]), []);
 });

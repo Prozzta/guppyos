@@ -16,6 +16,11 @@ All notable changes to this project are documented here. The format is based on
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.
 
+- **TES crew now visibly go for coffee.** Coffee runs always happened on the station floor, but
+  nothing showed them. Now a crew member carries a mug in hand, leaves it at their station, and
+  says a short line when brewing ("brewing a fresh one", or "a quick refill" with their own mug)
+  and when they sit down to sip.
+
 > **The fork line.** From here up, entries are this fork's (Prozzta/guppyos) independently
 > versioned 1.1.x releases, taken from their GitHub release notes. The fork is based on upstream
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
