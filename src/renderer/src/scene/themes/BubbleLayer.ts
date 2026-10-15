@@ -4,7 +4,7 @@ import { ThoughtBubble } from '../office/ThoughtBubble';
 import { consumeSays as consumeSayEvents, type BubbleSay, type BubbleSayCursor } from './bubbleModel';
 
 export type BubbleAnchor = { id: string; x: number; y: number };
-export type BubbleSayOptions = { ttl?: number; key?: string };
+export type BubbleSayOptions = { ttl?: number; key?: string; delay?: number };
 
 type ActiveThought = {
   bubble: ThoughtBubble;
@@ -28,6 +28,8 @@ export class BubbleLayer {
   private readonly thoughts = new Map<string, ActiveThought>();
   private readonly anchors = new Map<string, { x: number; y: number }>();
   private readonly envelopes: MessageEnvelope[] = [];
+  /** Lines due later (an exchange's next beats), in the order given. */
+  private readonly due: Array<{ id: string; text: string; at: number; options: BubbleSayOptions }> = [];
   private now = 0;
 
   constructor(private readonly bounds: { width: number; height: number }) {
@@ -43,6 +45,7 @@ export class BubbleLayer {
 
   /** Public prop API: show one temporary speech line, then restore the thought. */
   say(id: string, text: string, options: BubbleSayOptions = {}): void {
+    if ((options.delay ?? 0) > 0) { this.due.push({ id, text, at: this.now + options.delay!, options: { ...options, delay: 0 } }); return; }
     const active = this.get(id);
     active.say = { text, until: this.now + Math.max(0, options.ttl ?? DEFAULT_SAY_MS), key: options.key };
     this.render(active);
@@ -63,6 +66,7 @@ export class BubbleLayer {
 
   remove(id: string): void {
     const active = this.thoughts.get(id);
+    for (let i = this.due.length - 1; i >= 0; i--) if (this.due[i].id === id) this.due.splice(i, 1);
     if (!active) return;
     active.bubble.destroy();
     this.thoughts.delete(id);
@@ -82,6 +86,12 @@ export class BubbleLayer {
   /** Update positions and lifetimes. Must run even when station depth did not change. */
   update(dt: number, anchors: readonly BubbleAnchor[], zoom: number): void {
     this.now += dt;
+    for (let i = 0; i < this.due.length;) {
+      const line = this.due[i];
+      if (line.at > this.now) { i++; continue; }
+      this.due.splice(i, 1);
+      this.say(line.id, line.text, line.options);
+    }
     this.anchors.clear();
     for (const anchor of anchors) this.anchors.set(anchor.id, anchor);
 

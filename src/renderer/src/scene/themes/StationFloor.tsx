@@ -25,6 +25,7 @@ import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { cloudAnchor, drawnSprite } from './cloudAnchor';
+import { BridgeTalk, EXCHANGE_HOLD_MS, exchangeSays, seatRole, stationRoles, type Speaker } from './exchanges';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import { linePicker, type LinePicker } from './packLines';
 import type { MessageAct } from '../office/MessageEnvelope';
@@ -48,13 +49,17 @@ function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record
   return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id], heavyActivity(a.id, heavyLock)), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
 }
 
-function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>, line?: LinePicker): BubbleSay[] {
+function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>, line?: LinePicker,
+  talk?: (id: string, other: string, key: string) => BubbleSay[] | null): BubbleSay[] {
   // Coffee lines (brew, sip) come from coffeeProps, once per coffee state, in the viewer's words.
   // TES-BUBBLES-188: with the pack's own lines, a chat is the viewer's gossip or cheer (said by the
   // one who started it) and an errand stop its errand or idle thought; these are the fallback.
   const lines: Record<string, string> = { chat: 'quick sync', errand: 'stepping away', gaveUp: 'back to work' };
   return events.flatMap((event) => {
     const key = `${event.kind}:${event.id}:${event.at}`;
+    // TES-BUBBLES-188 b2: a chat plays one of the pack's exchanges, the two taking turns.
+    const played = event.kind === 'chat' && event.with ? talk?.(event.id, event.with, key) : null;
+    if (played) return played;
     // The viewer's errand thoughts, its idle thought one time in four (2 of 8), its gossip or cheer.
     const kinds = event.kind === 'chat' ? ['gossip', 'cheer']
       : event.kind === 'errand' ? ['water', 'window', 'dispenser', 'fridge', 'shelf', 'bin', 'idle', 'idle'] : null;
@@ -376,11 +381,20 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       camera.fitToScreen();
 
       const cd = pack.manifest.coffee?.cooldown;
-      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
+      const exchanges = pack.exchanges ?? [];
+      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, {
+        ...(cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] as [number, number] } : {}), ...(exchanges.length ? { chatHold: EXCHANGE_HOLD_MS } : {})
+      });
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
       const sayCursor = createSayCursor();
       const packLines = linePicker(pack.lines);
+      // TES-BUBBLES-188 b2: the crew's exchanges, by station (the role of the seat they hold or last held).
+      const held = stationRoles(pack.manifest.stations);
+      const speaker = (p: Walker): Speaker => ({ id: p.id, role: seatRole(pack.manifest.stations, (p.seat ?? p.lastSeat)?.name) });
+      const speakerOf = (id: string): Speaker => { const p = crew.walkers().find((w) => w.id === id); return p ? speaker(p) : { id, role: null }; };
+      const talk = exchanges.length ? (id: string, other: string, key: string) => exchangeSays(exchanges, speakerOf(id), speakerOf(other), held, key) : undefined;
+      const bridgeTalk = new BridgeTalk(exchanges, held, Math.random);
       const bubbleIds = new Set<string>();
       const sync = () => {
         const { agents, liveness, heavyLock } = useStore.getState();
@@ -454,9 +468,11 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         if (SM.entrance) anchors.push({ id: '__human__', x: SM.entrance[0], y: SM.entrance[1] });
         const freshEvents = newerCrewEvents(crew.events, lastCrewEventAt);
         if (freshEvents.length) {
-          bubbles.consumeSays(crewSays(freshEvents, packLines), sayCursor);
+          bubbles.consumeSays(crewSays(freshEvents, packLines, talk), sayCursor);
           lastCrewEventAt = freshEvents[freshEvents.length - 1].at;
         }
+        const bridgeSays = bridgeTalk.tick(dt, crew.walkers().filter((p) => !p.coffee).map(speaker));
+        if (bridgeSays.length) bubbles.consumeSays(bridgeSays, sayCursor);
         const holding = new Set<string>(), parked = new Set<string>();
         const coffee = coffeeProps(crew, packLines);
         pruneSaid(said, crew.walkers().map((p) => p.id));

@@ -6,6 +6,7 @@
 
 import { normPath, resolveAsset, type Diagnostic, type PackFiles } from './tiled';
 import type { ThemeManifest } from './manifest';
+import { readExchanges, type Exchange } from './exchanges';
 
 /** Category -> lines. Only plain strings; a line with a {placeholder} needs counts the floor has not got. */
 export type PackLines = Readonly<Record<string, readonly string[]>>;
@@ -14,10 +15,10 @@ export type PackLines = Readonly<Record<string, readonly string[]>>;
 export type LinePicker = (kinds: readonly string[], key: string) => string | null;
 
 /** The pack's lines file, if its manifest names one. A missing or malformed file is a warning, never an error. */
-export function readPackLines(files: PackFiles, manifest: Pick<ThemeManifest, 'text'>): { lines: PackLines | null; diagnostics: Diagnostic[] } {
+export function readPackLines(files: PackFiles, manifest: Pick<ThemeManifest, 'text'>): { lines: PackLines | null; exchanges: Exchange[]; diagnostics: Diagnostic[] } {
   const name = manifest.text?.lines;
-  if (!name) return { lines: null, diagnostics: [] };
-  const warn = (message: string) => ({ lines: null, diagnostics: [{ level: 'warn' as const, message }] });
+  if (!name) return { lines: null, exchanges: [], diagnostics: [] };
+  const warn = (message: string) => ({ lines: null, exchanges: [], diagnostics: [{ level: 'warn' as const, message }] });
   const path = resolveAsset(files, '', name);
   const src = path && normPath(path) === normPath(name) ? files.text(path) : null;
   if (src == null) return warn(`The lines file "${name}" is not in the pack; the generic lines are used.`);
@@ -31,7 +32,7 @@ export function readPackLines(files: PackFiles, manifest: Pick<ThemeManifest, 't
     const plain = v.filter((s): s is string => typeof s === 'string' && s.trim() !== '' && !s.includes('{'));
     if (plain.length) lines[k] = plain;
   }
-  return { lines, diagnostics: [] };
+  return { lines, exchanges: readExchanges((cats as { exchanges?: unknown }).exchanges), diagnostics: [] };
 }
 
 function hash(key: string): number {

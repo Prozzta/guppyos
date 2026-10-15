@@ -160,7 +160,7 @@ test('(b) the coffee beats speak the pack coffee lines when it has them', () => 
 test('(b) the floor hands the pack lines to the crew and coffee speech', () => {
   const src = readSource(FLOOR);
   assert.match(src, /const packLines = linePicker\(pack\.lines\);/);
-  assert.match(src, /bubbles\.consumeSays\(crewSays\(freshEvents, packLines\), sayCursor\);/);
+  assert.match(src, /bubbles\.consumeSays\(crewSays\(freshEvents, packLines(, talk)?\), sayCursor\);/);
   assert.match(src, /const coffee = coffeeProps\(crew, packLines\);/);
 });
 
@@ -244,4 +244,96 @@ test('(c) what sliding cannot part is still lifted clear', () => {
   const [ra, rb] = made.map((b) => b.rect());
   assert.ok(apart(ra, rb), 'the pair never overlaps');
   assert.ok(made.some((b) => b.lift > 0), 'one is lifted');
+});
+
+// (b2) Exchanges: both forms read, played in turns between the two, by station, and often.
+const X = () => loadTs('src/renderer/src/scene/themes/exchanges.ts');
+const CAPTAIN = { id: 'god', role: 'captain' }, HELM = { id: 'dwight', role: 'helm' }, ANY = { id: 'andy', role: null }, ANY2 = { id: 'pam', role: null };
+const HELD = new Set(['captain', 'helm', 'navigation']);
+
+test('(b2) the exchange reader takes the viewer\'s arrays and {lines, roles} objects, and skips the malformed', () => {
+  const ex = X().readExchanges([
+    ['Intriguing.', '…you said that already.'],
+    { lines: ['Mr Speck, status?', 'All green.', '…check it again.'], roles: ['Captain', 'science', 'captain'] },
+    { lines: ['one', 'two'], roles: ['captain'] },            // roles of the wrong length: dropped, lines kept
+    ['only one'], ['a {placeholder}', 'b'], { lines: 'nope' }, 7, ['1', '2', '3', '4', '5']
+  ]);
+  assert.deepEqual(ex, [
+    { lines: ['Intriguing.', '…you said that already.'] },
+    { lines: ['Mr Speck, status?', 'All green.', '…check it again.'], roles: ['captain', 'science', 'captain'] },
+    { lines: ['one', 'two'] }
+  ]);
+  assert.deepEqual(X().readExchanges(undefined), []);
+});
+
+test('(b2) the TES pack carries its exchanges, and lines still holds only plain categories', () => {
+  const r = P.readPack(P.memoryFiles(H.readPackDir(TES_DIR)));
+  const raw = require('../themes/tes/lines.json').lines.exchanges;
+  assert.equal(r.value.exchanges.length, raw.length);
+  assert.ok(r.value.exchanges.every((e) => e.lines.length >= 2 && e.lines.length <= 4));
+  assert.equal('exchanges' in r.value.lines, false);
+});
+
+test('(b2) an exchange alternates between the two, a beat apart, the same one for the same key', () => {
+  const { exchangeSays, EXCHANGE_BEAT_MS } = X();
+  const ex = [{ lines: ['A1', 'B1', 'A2', 'B2'] }];
+  const says = exchangeSays(ex, ANY, ANY2, HELD, 'k');
+  assert.deepEqual(says.map((s) => [s.id, s.text, s.delay]), [['andy', 'A1', 0], ['pam', 'B1', EXCHANGE_BEAT_MS], ['andy', 'A2', 2 * EXCHANGE_BEAT_MS], ['pam', 'B2', 3 * EXCHANGE_BEAT_MS]]);
+  assert.equal(new Set(says.map((s) => s.key)).size, 4, 'each line its own key');
+  const many = X().readExchanges(require('../themes/tes/lines.json').lines.exchanges);
+  assert.deepEqual(exchangeSays(many, ANY, ANY2, HELD, 'x'), exchangeSays(many, ANY, ANY2, HELD, 'x'));
+});
+
+test('(b2) roles: the captain\'s lines only from the Captain, a station\'s own lines preferred, the other order tried', () => {
+  const { exchangeSays, exchangeFit } = X();
+  const ex = [
+    { lines: ['Status?', 'Green.'], roles: ['captain', 'helm'] },
+    { lines: ['Coffee?', 'Always.'], roles: ['crew', 'crew'] },
+    { lines: ['Scan it.', 'Scanning.', 'Well?'], roles: ['science', 'crew', 'science'] }
+  ];
+  assert.equal(exchangeFit(ex[0], ANY, ANY2, HELD), -1, 'a crewman never says the captain\'s line');
+  assert.equal(exchangeFit(ex[2], ANY, ANY2, HELD), 0, 'a crewman may play an unheld station throughout');
+  assert.equal(exchangeFit({ lines: ['a', 'b', 'c'], roles: ['science', 'crew', 'medical'] }, ANY, ANY2, HELD), -1, 'but one station only');
+  let named = 0;
+  for (let i = 0; i < 200; i++) {
+    const says = exchangeSays(ex, HELM, CAPTAIN, HELD, `k${i}`);   // the helm opened the chat: the Captain still opens 'Status?'
+    if (says[0].text === 'Status?') { named++; assert.deepEqual(says.map((s) => s.id), ['god', 'dwight']); }
+    else assert.equal(says[0].text, 'Coffee?');
+  }
+  assert.ok(named > 120, `the exchange naming their stations is preferred (${named}/200)`);
+  assert.equal(exchangeSays([ex[0]], ANY, ANY2, HELD, 'k'), null, 'none fits: the caller keeps its own line');
+});
+
+test('(b2) a chat plays an exchange through crewSays, and the floor wires chat, hold and bridge talk', () => {
+  const crewSays = crewSaysFn();
+  const played = [{ key: 'k#0', id: 'a', text: 'A1', ttl: 2400, delay: 0 }, { key: 'k#1', id: 'b', text: 'B1', ttl: 2400, delay: 2400 }];
+  assert.deepEqual(crewSays([{ kind: 'chat', id: 'a', with: 'b', at: 1 }], undefined, () => played), played);
+  assert.deepEqual(crewSays([{ kind: 'chat', id: 'a', with: 'b', at: 1 }], undefined, () => null).map((s) => s.text), ['quick sync', 'quick sync'], 'no exchange fits: the old line');
+  const src = readSource(FLOOR);
+  assert.match(src, /bubbles\.consumeSays\(crewSays\(freshEvents, packLines, talk\), sayCursor\);/);
+  assert.match(src, /chatHold: EXCHANGE_HOLD_MS/);
+  assert.match(src, /const bridgeSays = bridgeTalk\.tick\(dt, crew\.walkers\(\)[^\n]*\n\s*if \(bridgeSays\.length\) bubbles\.consumeSays\(bridgeSays, sayCursor\);/);
+  assert.match(readSource('src/renderer/src/scene/themes/crew.ts'), /p\.talk = q\.talk = this\.t \+ this\.chatHold;/);
+});
+
+test('(b2) a later line waits for its beat in the bubble layer', () => {
+  const { layer, made } = bubbleLayerWith({ A1: 40, B1: 40 });
+  layer.consumeSays([{ key: 'k#0', id: 'a', text: 'A1', ttl: 2400, delay: 0 }, { key: 'k#1', id: 'b', text: 'B1', ttl: 2400, delay: 2400 }], MODEL.createSayCursor());
+  const anchors = [{ id: 'a', x: 100, y: 100 }, { id: 'b', x: 300, y: 100 }];
+  layer.update(16, anchors, 1);
+  assert.deepEqual(made.map((b) => b.text), ['A1'], 'only the opener so far');
+  for (let t = 0; t < 2400; t += 100) layer.update(100, anchors, 1);
+  assert.equal(made[1]?.text, 'B1', 'the answer on its beat');
+});
+
+test('(b2) the bridge talks often: a talk every 12-24 s across ten minutes, mostly by station', () => {
+  const { BridgeTalk, readExchanges } = X();
+  let seed = 7; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const ex = readExchanges(require('../themes/tes/lines.json').lines.exchanges);
+  const talk = new BridgeTalk(ex, HELD, rand);
+  const people = [CAPTAIN, HELM, { id: 'jim', role: 'navigation' }, ANY, ANY2, { id: 'kevin', role: null }];
+  let talks = 0;
+  for (let t = 0; t < 600_000; t += 50) if (talk.tick(50, people).length) talks++;
+  assert.ok(talks >= 25 && talks <= 50, `talks in ten minutes: ${talks}`);
+  assert.deepEqual(new BridgeTalk([], HELD, rand).tick(60_000, people), [], 'a pack without exchanges never talks');
 });

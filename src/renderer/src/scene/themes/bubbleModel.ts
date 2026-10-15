@@ -23,6 +23,8 @@ export interface BubbleSay {
   id: string;
   text: string;
   ttl?: number;
+  /** Show it this many ms after it is consumed (the later lines of an exchange). */
+  delay?: number;
 }
 
 /** A replay-safe cursor for bounded event arrays such as Crew.events. */
@@ -41,14 +43,15 @@ export function createSayCursor(): BubbleSayCursor {
 export function consumeSays(
   events: readonly BubbleSay[],
   cursor: BubbleSayCursor,
-  say: (id: string, text: string, options?: { ttl?: number }) => void
+  say: (id: string, text: string, options?: { ttl?: number; delay?: number }) => void
 ): void {
   for (const event of events) {
     if (cursor.seen.has(event.key)) continue;
     cursor.seen.add(event.key);
     cursor.order.push(event.key);
     if (cursor.order.length > MAX_CURSOR_KEYS) cursor.seen.delete(cursor.order.shift()!);
-    say(event.id, event.text, event.ttl === undefined ? undefined : { ttl: event.ttl });
+    say(event.id, event.text, event.ttl === undefined && event.delay === undefined ? undefined
+      : { ...(event.ttl === undefined ? {} : { ttl: event.ttl }), ...(event.delay === undefined ? {} : { delay: event.delay }) });
   }
 }
 
