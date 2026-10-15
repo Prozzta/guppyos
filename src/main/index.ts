@@ -95,7 +95,7 @@ import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, probeProcesses } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
@@ -1171,7 +1171,8 @@ const heavyLock = new HeavyJobLock({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
-  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until)
+  notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
+  notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
 
@@ -1195,6 +1196,12 @@ heavyLock.onChange(() => {
 /** HEAVY-LOCK-SELF-WAIT: send the "slot free" notice (heavyJob.heavySlotFreeNotice) on both rails. */
 function notifyHeavySlotFree(agentId: string, kind: string, until: number): void {
   const n = heavySlotFreeNotice(agentId, kind, until);
+  try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
+  try { control.steer(agentId, n.steer); } catch { /* best effort */ }
+}
+/** LOCK-WAIT-NOTICES: an agent left the heavy queue without a slot (stale, or its reservation lapsed). */
+function notifyHeavyWaitLapsed(agentId: string, kind: string, why: 'stale' | 'expired'): void {
+  const n = heavyWaitLapsedNotice(agentId, kind, why);
   try { hive.send(n.message as Partial<HiveMessage>, n.from); } catch { /* best effort */ }
   try { control.steer(agentId, n.steer); } catch { /* best effort */ }
 }

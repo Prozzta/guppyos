@@ -19,6 +19,11 @@ All notable changes to this project are documented here. The format is based on
   reserved until 06:26Z" (waiting, at its desk, not off on a coffee run), and fleet.json gives each
   agent its place in the lock. Display only: messages still go to these agents at once, and they
   are still woken when their slot frees.
+- **An agent that leaves the heavy-job queue without a slot is now told.** A waiter dropped after
+  an hour without asking again, and an agent whose reserved slot lapsed unused, used to hear
+  nothing, though it had been told to wait for a notice, and the stale waiter stayed listed as
+  queued until a slot next freed. It now leaves the queue on the hour, and each gets a short
+  notice ("HEAVY QUEUE LEFT" or "HEAVY SLOT LAPSED") saying to run the job again to queue again.
 
 ## [1.1.86] — 2026-10-14
 
