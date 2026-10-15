@@ -17,6 +17,37 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **'starting up' no longer hangs over an agent once it is up.** A restored or newly hired agent
+  carries its boot note ('starting up') only until its first settled liveness reading, which now
+  replaces the note with idle (or working). Before, only a tool call, a Stop or a compaction
+  replaced it, so an agent with nothing to do said 'starting up' for minutes, and one whose
+  first turn sent none of those kept saying it.
+
+- **The TES bridge crew speak their own lines.** The pack's `lines.json` (named in its manifest
+  under `"text"`) now reaches the floor: a chat is a bit of bridge gossip or a cheer, a wander stop
+  an errand or idle thought, and the coffee beats come from the pack too. 1.1.87 shipped the file
+  but nothing read it, so the bridge only said the generic lines, which stay for packs without one.
+
+- **The TES bridge crew talk to each other.** The pack's exchanges (two to four lines, as plain
+  arrays or `{lines, roles}` naming the station that says each line) now play as alternating clouds
+  between the two people, a beat apart: when two idle crew stop to chat (they now stand long enough
+  to finish), and every 20-40 s between two of the bridge crew wherever they are. An exchange that
+  names the speakers' stations is preferred, and only the Captain says the Captain's lines.
+
+- **TES status clouds come and go.** Since 1.1.87 a cloud hung over every head all the time. Now a
+  change (a new tool or action) shows one for about four seconds, then it fades; a further change
+  waits 30 s, and a state that lasts shows again every 20-40 s. Compacting and looping show at
+  once; 'needs you', crashed and stuck stay up until they clear; a place in the heavy-job queue
+  comes and goes like work; an idle cloud never shows, and the boot note ('starting up') never
+  shows at all. The crew's own lines still come as they happen. Off the station floors nothing
+  changed: the office floor draws its clouds byte for byte as 1.1.87 did.
+
+- **TES clouds sit just above the head, seated or standing, and neighbours no longer tower.** A
+  cloud now hangs from the sprite as drawn, so a seated person's cloud keeps the same small gap
+  over the head as a standing one; at the Speck desks 1.1.87 floated them 16-30 px higher. Two
+  clouds that would overlap now slide apart sideways first, each still over its own head with its
+  tail pointing down at it, and only what that cannot part is lifted.
+
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
   classification changes even if the agent roster did not.

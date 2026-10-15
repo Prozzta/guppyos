@@ -24,7 +24,10 @@ import { cacheKeyOf, cacheStale, frontPicker, regionPicker, hasVisiblePixel, NEA
 import type { ThemeLooks } from './themeCatalog';
 import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
+import { cloudAnchor, drawnSprite } from './cloudAnchor';
+import { BridgeTalk, EXCHANGE_HOLD_MS, exchangeSays, seatRole, stationRoles, type Speaker } from './exchanges';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
+import { linePicker, type LinePicker } from './packLines';
 import type { MessageAct } from '../office/MessageEnvelope';
 import { coffeeProps, cupInHand, endedSays, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
 
@@ -46,13 +49,24 @@ function crewAgents(pack: LoadedPack, agents: Agent[], liveness: Readonly<Record
   return agents.map((a) => ({ id: a.id, status: activityStatus(a.status, liveness[a.id], heavyActivity(a.id, heavyLock)), orchestrator: !!a.isGod, presetId: presetIdOf(b, a, id) }));
 }
 
-function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>): BubbleSay[] {
+function crewSays(events: ReadonlyArray<{ kind: string; id: string; with?: string; at: number }>, line?: LinePicker,
+  talk?: (id: string, other: string, key: string) => BubbleSay[] | null): BubbleSay[] {
   // Coffee lines (brew, sip) come from coffeeProps, once per coffee state, in the viewer's words.
+  // TES-BUBBLES-188: with the pack's own lines, a chat is the viewer's gossip or cheer (said by the
+  // one who started it) and an errand stop its errand or idle thought; these are the fallback.
   const lines: Record<string, string> = { chat: 'quick sync', errand: 'stepping away', gaveUp: 'back to work' };
   return events.flatMap((event) => {
+    const key = `${event.kind}:${event.id}:${event.at}`;
+    // TES-BUBBLES-188 b2: a chat plays one of the pack's exchanges, the two taking turns.
+    const played = event.kind === 'chat' && event.with ? talk?.(event.id, event.with, key) : null;
+    if (played) return played;
+    // The viewer's errand thoughts, its idle thought one time in four (2 of 8), its gossip or cheer.
+    const kinds = event.kind === 'chat' ? ['gossip', 'cheer']
+      : event.kind === 'errand' ? ['water', 'window', 'dispenser', 'fridge', 'shelf', 'bin', 'idle', 'idle'] : null;
+    const packed = kinds && line?.(kinds, key);
+    if (packed) return [{ key, id: event.id, text: packed, ttl: 2600 }];
     const text = lines[event.kind];
     if (!text) return [];
-    const key = `${event.kind}:${event.id}:${event.at}`;
     const own: BubbleSay = { key, id: event.id, text, ttl: event.kind === 'sip' ? 3000 : 2600 };
     if (event.kind !== 'chat' || !event.with) return [own];
     return [own, { ...own, key: `${key}:${event.with}`, id: event.with }];
@@ -367,10 +381,21 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       camera.fitToScreen();
 
       const cd = pack.manifest.coffee?.cooldown;
-      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] } : {});
+      const exchanges = pack.exchanges ?? [];
+      const crew = new Crew(SM, seatRulesFrom(pack.manifest, SM.seatOrder.map((s) => s.name)), Math.random, {
+        ...(cd ? { coffeeGap: [cd[0] * 1000, cd[1] * 1000] as [number, number] } : {}), ...(exchanges.length ? { chatHold: EXCHANGE_HOLD_MS } : {})
+      });
       const sprites = new Map<string, { sprite: Sprite; col: number; look: string }>();
       const fits = new Map<string, number | null>();
       const sayCursor = createSayCursor();
+      const packLines = linePicker(pack.lines);
+      // TES-BUBBLES-188 b2: the crew's exchanges, by station (the role of the seat they hold or last held).
+      const held = stationRoles(pack.manifest.stations);
+      const speaker = (p: Walker): Speaker => ({ id: p.id, role: seatRole(pack.manifest.stations, (p.seat ?? p.lastSeat)?.name) });
+      const speakerOf = (id: string): Speaker => { const p = crew.walkers().find((w) => w.id === id); return p ? speaker(p) : { id, role: null }; };
+      const talk = exchanges.length ? (id: string, other: string, key: string) => exchangeSays(exchanges, speakerOf(id), speakerOf(other), held, key) : undefined;
+      const bridgeTalk = new BridgeTalk(exchanges, held, Math.random);
+      const bridgeSpeakers = () => crew.walkers().filter((p) => !p.coffee).map(speaker);
       const bubbleIds = new Set<string>();
       const sync = () => {
         const { agents, liveness, heavyLock } = useStore.getState();
@@ -381,7 +406,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         removeDepartedSprites(sprites, ids, bubbles);
         for (const a of agents) {
           const thought = thoughts.get(a.id) ?? null;
-          bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool } : null);
+          bubbles.setThought(a.id, thought ? { text: thought.text, tool: thought.tool, status: thought.status } : null);
           bubbleIds.add(a.id);
           const l = lookOf(a), have = sprites.get(a.id);
           if (have) { have.col = l.col; have.look = l.key; continue; } // a look edited in Add/Edit shows at once
@@ -401,7 +426,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       let lastTickAt = performance.now();
       let lastDepth: string | null = null;
       let lastCrewEventAt = -1;
-      const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number } => {
+      const place = (p: Walker, s: { sprite: Sprite; col: number; look: string }): { foot: number; rank: number; anchor: { x: number; y: number } } => {
         const ch: SortedItem | null = p.seated && p.seat ? chairOf(p.seat, plan.sorted) : null;
         let pose = null;
         if (ch && p.seat) {
@@ -416,13 +441,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         }
         const seated = !!(p.seated && p.seat);
         s.sprite.texture = frame(s.look, (seated ? sit : stand)[p.dir]);
-        if (seated && pose) s.sprite.position.set(Math.round(pose.x - fw / 2), Math.round(pose.y));
-        else if (seated && p.seat) s.sprite.position.set(Math.round(p.seat.x - fw / 2), Math.round(p.seat.y - fh));
-        else {
-          const bob = p.moving && Math.floor(clock / 180) % 2 ? -1 : 0;
-          s.sprite.position.set(Math.round(p.x - fw / 2), Math.round(p.y - fh) + bob);
-        }
-        return personKey(p.y, ch, pose);
+        const drawn = drawnSprite(p, pose, fw, fh, clock);
+        s.sprite.position.set(drawn.x, drawn.y);
+        // TES-BUBBLES-188: the cloud hangs from the sprite as drawn (the seat pose), not the walker's point.
+        return { ...personKey(p.y, ch, pose), anchor: cloudAnchor(drawn, fw, fh) };
       };
 
       const onTick = (tk: { deltaMS: number }) => {
@@ -439,18 +461,21 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         for (const p of crew.walkers()) {
           const s = sprites.get(p.id);
           if (s) {
-            people.push({ ...place(p, s), sprite: s.sprite, id: p.id });
-            anchors.push({ id: p.id, x: p.x, y: p.y });
+            const { foot, rank, anchor } = place(p, s);
+            people.push({ foot, rank, sprite: s.sprite, id: p.id });
+            anchors.push({ id: p.id, ...anchor });
           }
         }
         if (SM.entrance) anchors.push({ id: '__human__', x: SM.entrance[0], y: SM.entrance[1] });
         const freshEvents = newerCrewEvents(crew.events, lastCrewEventAt);
         if (freshEvents.length) {
-          bubbles.consumeSays(crewSays(freshEvents), sayCursor);
+          bubbles.consumeSays(crewSays(freshEvents, packLines, talk), sayCursor);
           lastCrewEventAt = freshEvents[freshEvents.length - 1].at;
         }
+        const bridgeSays = bridgeTalk.tick(dt, bridgeSpeakers); // the speakers are built only when a talk is due
+        if (bridgeSays.length) bubbles.consumeSays(bridgeSays, sayCursor);
         const holding = new Set<string>(), parked = new Set<string>();
-        const coffee = coffeeProps(crew);
+        const coffee = coffeeProps(crew, packLines);
         pruneSaid(said, crew.walkers().map((p) => p.id));
         for (const item of freshSays(coffee, said)) bubbles.say(item.id, item.text, { ttl: item.ttl, key: item.key });
         for (const [id, key] of endedSays(coffee, said)) bubbles.unsay(id, key);

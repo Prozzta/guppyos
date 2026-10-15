@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { useStore, type Agent } from '@/store/store';
 import { buildSpawnCommand, inferAgentProvider, tokenizeCommand, type HarnessConfig } from '@/store/config';
 import { roleForHiveSpawn } from '@shared/agentRole';
+import { bootShape } from '@shared/bootAction';
 
 /** "Restore team" — respawn every worker from the previous session.
  *
@@ -158,7 +159,7 @@ export function useRestoreTeam(config?: HarnessConfig | null): RestoreTeamState 
                 archived: false,
                 status: 'idle',
                 // Surface the worktree fallback on the floor card; otherwise normal.
-                action: worktreeGone ? 'worktree gone — using base repo' : 'starting up',
+                ...bootShape(worktreeGone ? 'worktree gone — using base repo' : 'starting up'),
                 // The worktree is no longer on disk — drop it so this agent is treated
                 // as a plain base-cwd agent going forward (a future restore won't keep
                 // re-probing a dead path).

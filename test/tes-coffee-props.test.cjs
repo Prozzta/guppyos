@@ -253,7 +253,7 @@ test('StationFloor draws the coffee each tick: cups in hand, parked mugs, and ea
   const src = require('node:fs').readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'src', 'scene', 'themes', 'StationFloor.tsx'), 'utf8');
   const tick = src.slice(src.indexOf('const onTick ='), src.indexOf('app.ticker.add(onTick)'));
   assert.ok(tick.length > 0);
-  assert.match(tick, /const coffee = coffeeProps\(crew\);/);
+  assert.match(tick, /const coffee = coffeeProps\(crew, packLines\);/);
   assert.match(tick, /pruneSaid\(said, crew\.walkers\(\)\.map\(\(p\) => p\.id\)\);\s*for \(const item of freshSays\(coffee, said\)\) bubbles\.say\(item\.id, item\.text, \{ ttl: item\.ttl, key: item\.key \}\);/);
   // the cup: at the hand of the person's frame, the viewer's mug, kept with that person
   assert.match(tick, /item\.kind === 'cup'[\s\S]*handOf\(s\.col, item\.dir\)[\s\S]*c\.sprite\.position\.set\(s\.sprite\.x \+ pose\.x \+ mugDx\(pose\.left\), s\.sprite\.y \+ pose\.y - MUG_H\);[\s\S]*holding\.add\(item\.id\);/);

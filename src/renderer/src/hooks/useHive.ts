@@ -28,6 +28,7 @@ import { themeBuilder } from '@/scene/themes/themeCatalog';
 import { lookFromRequest } from '@/scene/themes/looks';
 import { applySnapshotUnlessPushed } from '@shared/snapshotSync';
 import type { HeavyLockView } from '@shared/activityView';
+import { bootShape } from '@shared/bootAction';
 
 const GOD_ID = 'god';
 /** Accent palette for MAIN-spawned (voice-hired) agents — picked deterministically
@@ -1097,7 +1098,7 @@ export function useHive(config: HarnessConfig | null): void {
         tmuxTarget: '',
         cwd: rec.cwd,
         status: 'idle',
-        action: 'starting up',
+        ...bootShape('starting up'),
         progress: 0,
         currentStation: 'desk',
         ptyId: rec.id,

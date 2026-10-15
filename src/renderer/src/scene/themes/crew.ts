@@ -83,6 +83,8 @@ export interface Walker {
 export interface CrewOptions {
   /** Per agent: ms from one coffee run's start to the next, [min, max]. */
   coffeeGap?: [number, number];
+  /** Ms a wander chat holds the two still (long enough for the pack's exchanges). */
+  chatHold?: number;
 }
 
 export class Crew {
@@ -92,6 +94,7 @@ export class Crew {
   private readonly people = new Map<string, Walker>();
   private readonly rand: () => number;
   private readonly gap: [number, number];
+  private readonly chatHold: number;
   /** The floor's coffee picker: ms to its next look. */
   private cool = 5000;
   /** The crew clock, ms. */
@@ -105,6 +108,7 @@ export class Crew {
     this.SM = SM;
     this.rand = rand;
     this.gap = opts.coffeeGap ?? COFFEE_GAP;
+    this.chatHold = opts.chatHold ?? 3000;
     for (const s of SM.seatOrder) this.byName.set(s.name, s);
     this.seats = new SeatAllocator({ ...rules, order: rules.order.filter((n) => this.byName.has(n)) });
   }
@@ -319,8 +323,8 @@ export class Crew {
     const q = this.walkers().find((q) => q !== p && free(q) && Math.hypot(q.x - p.x, q.y - p.y) < 40);
     if (q && this.t >= p.talk && this.rand() < 0.6) {
       this.face(p, q); this.face(q, p);
-      p.talk = q.talk = this.t + 3000;
-      p.idle = Math.max(p.idle, 3000); q.idle = Math.max(q.idle, 3000);
+      p.talk = q.talk = this.t + this.chatHold;
+      p.idle = Math.max(p.idle, this.chatHold); q.idle = Math.max(q.idle, this.chatHold);
       this.event('chat', p.id, q.id);
       return;
     }

@@ -9,6 +9,8 @@ import { normPath, parseMap, resolveAsset, type Diagnostic, type NormalizedMap, 
 import { OFFICE_THEME_ID, validateManifest, type ThemeManifest } from './manifest';
 import { analyseStationMap, type StationMap } from './stationMap';
 import type { PixelStore } from './raster';
+import { readPackLines, type PackLines } from './packLines';
+import type { Exchange } from './exchanges';
 
 /** A pack whose manifest and map parsed, with the pictures still to decode. */
 export interface PackData {
@@ -18,6 +20,10 @@ export interface PackData {
   images: string[];
   /** Pack path of the sprite sheet. */
   sheet: string;
+  /** The pack's own bubble lines (manifest "text": {"lines": ...}), when it has them. */
+  lines?: PackLines;
+  /** The pack's crew exchanges (lines.exchanges), when it has them. */
+  exchanges?: Exchange[];
 }
 
 export interface PackResult<T> { value: T | null; diagnostics: Diagnostic[]; }
@@ -57,7 +63,9 @@ export function readPack(files: PackFiles): PackResult<PackData> {
   }
   if (sheet) images.add(sheet);
   if (hasError(diags)) return { value: null, diagnostics: diags };
-  return { value: { manifest, map, images: [...images], sheet: sheet! }, diagnostics: diags };
+  const read = readPackLines(files, manifest);
+  diags.push(...read.diagnostics);
+  return { value: { manifest, map, images: [...images], sheet: sheet!, ...(read.lines ? { lines: read.lines } : {}), ...(read.exchanges.length ? { exchanges: read.exchanges } : {}) }, diagnostics: diags };
 }
 
 /** The decoded sprite sheet must hold every row and frame the manifest names. */

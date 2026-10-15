@@ -255,6 +255,9 @@ test('lines.json is plain data: categories of lines (or exchanges of lines)', ()
   for (const [k, v] of cats) {
     assert.ok(Array.isArray(v) && v.length, k);
     const line = (s) => typeof s === 'string' && s.trim().length > 0;
-    assert.ok(v.every((s) => line(s) || (Array.isArray(s) && s.length >= 2 && s.every(line))), k);   // a line, or an exchange of lines
+    const lines = (s) => Array.isArray(s) && s.length >= 2 && s.every(line);
+    const roles = (o) => o.roles === undefined || (Array.isArray(o.roles) && o.roles.length === o.lines.length && o.roles.every(line));
+    // a line, or an exchange of lines (an array, or {lines, roles?} as TES-EXCHANGES-188 added)
+    assert.ok(v.every((s) => line(s) || lines(s) || (s && typeof s === 'object' && lines(s.lines) && roles(s))), k);
   }
 });
