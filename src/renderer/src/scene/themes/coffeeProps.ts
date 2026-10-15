@@ -77,6 +77,17 @@ export function freshSays(props: readonly CoffeeProp[], said: Map<string, string
   return out;
 }
 
+/** The coffee lines whose run has ended: said (in `said`) but no longer a say prop, as [id, key];
+ *  they are forgotten in `said`. The floor takes them off at once, so a run cut short (back to work,
+ *  or the heavy lock) does not keep "brewing…" over the cloud for the rest of its ttl (Jim NIT 1). */
+export function endedSays(props: readonly CoffeeProp[], said: Map<string, string>): Array<[string, string]> {
+  const live = new Set<string>();
+  for (const p of props) if (p.kind === 'say') live.add(p.key);
+  const out: Array<[string, string]> = [];
+  for (const [id, key] of said) if (!live.has(key)) { said.delete(id); out.push([id, key]); }
+  return out;
+}
+
 /** Forget what was said for agents no longer on the floor (`said` as freshSays keeps it). */
 export function pruneSaid(said: Map<string, string>, present: Iterable<string>): void {
   const here = new Set(present);

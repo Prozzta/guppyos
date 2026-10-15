@@ -262,7 +262,7 @@ test('coffee: a mug parked by a back-to-work sit is full for 60 s, then lets the
   crew.sync([{ id: 'a', status: 'idle' }]);
   const p = crew.get('a');
   for (let i = 0; i < 4000 && !(p.coffee && p.coffee.phase === 'walking'); i++) crew.tick(50);
-  p.cup = true;
+  p.cup = true; p.fresh = true; // a finished brew in hand (an empty refill mug parks empty: tes-idle-means-idle-187)
   crew.sync([{ id: 'a', status: 'working' }]);
   for (let i = 0; i < 1000 && !p.seated; i++) crew.tick(50);
   assert.equal(p.mug.full, crew.t + 60000, 'parked full, for 60 s');

@@ -41,7 +41,9 @@ All notable changes to this project are documented here. The format is based on
   "suite in background 3m" (working, at its desk), "queued for heavy slot #2" or "heavy slot
   reserved until 06:26Z" (waiting, at its desk, not off on a coffee run), and fleet.json gives each
   agent its place in the lock. Display only: messages still go to these agents at once, and they
-  are still woken when their slot frees.
+  are still woken when their slot frees. On the TES floor a coffee run cut short this way (or by
+  going back to work) ends at once: a mug carried for a refill is put back empty, not full, and
+  the brewing line goes with the run.
 
 - **An agent that leaves the heavy-job queue without a slot is now told.** A waiter dropped after
   an hour without asking again, and an agent whose reserved slot lapsed unused, used to hear

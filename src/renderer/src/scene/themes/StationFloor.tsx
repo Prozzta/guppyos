@@ -26,7 +26,7 @@ import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import type { MessageAct } from '../office/MessageEnvelope';
-import { coffeeProps, cupInHand, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
+import { coffeeProps, cupInHand, endedSays, freshSays, mugDepth, mugDx, mugPixels, pruneSaid, MUG_H, MUG_W, type CupPose } from './coffeeProps';
 
 function texture(px: Pixels): Texture {
   const cv = document.createElement('canvas');
@@ -452,7 +452,8 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const holding = new Set<string>(), parked = new Set<string>();
         const coffee = coffeeProps(crew);
         pruneSaid(said, crew.walkers().map((p) => p.id));
-        for (const item of freshSays(coffee, said)) bubbles.say(item.id, item.text, { ttl: item.ttl });
+        for (const item of freshSays(coffee, said)) bubbles.say(item.id, item.text, { ttl: item.ttl, key: item.key });
+        for (const [id, key] of endedSays(coffee, said)) bubbles.unsay(id, key);
         for (const item of coffee) {
           if (item.kind === 'say') continue;
           if (item.kind === 'cup') {

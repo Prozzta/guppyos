@@ -4,12 +4,12 @@ import { ThoughtBubble } from '../office/ThoughtBubble';
 import { consumeSays as consumeSayEvents, type BubbleSay, type BubbleSayCursor } from './bubbleModel';
 
 export type BubbleAnchor = { id: string; x: number; y: number };
-export type BubbleSayOptions = { ttl?: number };
+export type BubbleSayOptions = { ttl?: number; key?: string };
 
 type ActiveThought = {
   bubble: ThoughtBubble;
   thought: { text: string; tool?: string } | null;
-  say: { text: string; until: number } | null;
+  say: { text: string; until: number; key?: string } | null;
   shown: string | null;
 };
 
@@ -38,7 +38,15 @@ export class BubbleLayer {
   /** Public prop API: show one temporary speech line, then restore the thought. */
   say(id: string, text: string, options: BubbleSayOptions = {}): void {
     const active = this.get(id);
-    active.say = { text, until: this.now + Math.max(0, options.ttl ?? DEFAULT_SAY_MS) };
+    active.say = { text, until: this.now + Math.max(0, options.ttl ?? DEFAULT_SAY_MS), key: options.key };
+    this.render(active);
+  }
+
+  /** Take a keyed speech line off early (its prop ended); any other line is left alone. */
+  unsay(id: string, key: string): void {
+    const active = this.thoughts.get(id);
+    if (!active || !active.say || active.say.key !== key) return;
+    active.say = null;
     this.render(active);
   }
 
