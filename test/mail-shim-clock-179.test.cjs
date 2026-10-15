@@ -287,6 +287,23 @@ test('CL-BRIEF-STARTUP cause 2 unit: the outcome boundaries are the shim\'s give
   ]);
 });
 
+test('CL-BRIEF-STARTUP cause 2 unit (Jim NIT): exactly at the 2.5 s margin is overMargin; 1 ms under is not', async (t) => {
+  const f = await floor(t);
+  const { EventEmitter } = require('node:events');
+  const res = { hookSpecificOutput: { additionalContext: 'x'.repeat(40) } };
+  const brief = { agent_id: 'god-1', hook_event_name: 'SessionStart', source: 'startup', munder_part: 'briefing' };
+  const real = Date.now; const T = real();
+  Date.now = () => T;   // the latency is exactly what the test says, never a tick more
+  const before = f.logRows().length;
+  try {
+    for (const ago of [S.MAIL_PIPE_LATENCY_LIMIT_MS - 1, S.MAIL_PIPE_LATENCY_LIMIT_MS]) {
+      const s = new EventEmitter(); f.server.watchBriefingFlush(s, brief, res, T - ago); s.emit('finish');
+    }
+  } finally { Date.now = real; }
+  const rows = f.logRows().slice(before).filter((x) => x.kind.startsWith('claims-briefing-'));
+  assert.deepEqual(rows.map((x) => [x.latencyMs, x.overMargin]), [[S.MAIL_PIPE_LATENCY_LIMIT_MS - 1, false], [S.MAIL_PIPE_LATENCY_LIMIT_MS, true]]);
+});
+
 test('(P) unit: streamGone reads a destroyed or closed stream; a live one is not gone', () => {
   const { streamGone } = loadTs('src/main/hooks.ts');
   assert.equal(streamGone({ destroyed: true }), true);

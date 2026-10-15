@@ -96,3 +96,24 @@ test('CL-BRIEF-STARTUP cause 1: separators count in T0 too, and a non-additive c
     assert.ok(out.receipt.used <= b && out.receipt.used > b * 0.9, `ceil4 ${b}: ${out.receipt.used}`);
   }
 });
+
+test('CL-BRIEF-STARTUP (Jim NIT): receipt.used is the count of the text with a non-additive counter even when nothing overflows', () => {
+  // With no overflow note the running sum is never re-measured, so only the receipt's own count is right.
+  const ceil4 = (s) => Math.ceil(s.length / 4);
+  const { records, state, view } = fixture(60);
+  const out = V.createClaimViews(records, ceil4).buildWorkingSet(state, view, 100_000);
+  assert.equal(out.receipt.excluded.filter((x) => x.reason === 'budget' || x.reason === 'tier-share').length, 0, 'nothing overflows');
+  assert.equal(out.receipt.used, ceil4(out.text));
+});
+
+test('CL-BRIEF-STARTUP (Jim NIT): no budget lets a history pointer (or any line) take the text one token past the cap', () => {
+  const { records, state, view } = fixture(120);
+  const views = V.createClaimViews(records, (s) => s.length);
+  let pointersAtCap = 0;
+  for (let b = 300; b <= 4000; b++) {
+    const out = views.buildWorkingSet(state, view, b);
+    assert.ok(out.receipt.used <= b, `budget ${b}: used ${out.receipt.used}`);
+    if (out.receipt.used === b && / history: memory\.md#/.test(out.text.split('\n').at(-1))) pointersAtCap++;
+  }
+  assert.ok(pointersAtCap > 0, 'some budget ends exactly at the cap on a history pointer (the boundary is exercised)');
+});
