@@ -168,9 +168,10 @@ const HAS_PTY = process.platform === 'win32' && fs.existsSync(NODE_PTY);
 // long-gone parent had the same pid) and process.kill'ed it.
 const own = require('./tools/own-procs.cjs');
 const { readRec } = own;
-/** What a hung file left running: its own tree (own-procs ownTree), killed (verified) so a red run strands nothing. */
+/** What a hung file left running: its own tree (own-procs ownTree), killed (verified) so a red run strands nothing.
+ *  A record that cannot be right (an OLDER process under the pid) throws: never an empty, vacuous list. */
 function leftBehind(rec) {
-  const { tree } = own.ownTree(own.processTable(), rec);
+  const { tree } = own.ownTreeOrThrow(own.processTable(), rec);
   own.killVerified(tree);
   return tree.map((r) => `${r.pid} ${r.name}`);
 }
@@ -180,7 +181,7 @@ function childStillRunning(rec) {
   let alive = true;
   for (let i = 0; i < 20 && alive; i++) { try { process.kill(rec.pid, 0); spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},250)']); } catch { alive = false; } }
   if (!alive || process.platform !== 'win32') return alive;
-  const root = own.stillOurs(rec);
+  const { root } = own.ownTreeOrThrow(own.processTable(), rec);
   if (root) own.killVerified([root]);
   return !!root;
 }

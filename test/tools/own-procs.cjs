@@ -8,16 +8,26 @@
  * survived only because it runs elevated. `taskkill /T` walks the same links, so it is not used
  * here. The rules:
  * - a child is one created at or after its parent (CreationDate);
- * - a pid recorded by a test is ours only while it still has the name and the birth it was
- *   recorded with (a birth taken in node, `Date.now() - process.uptime() * 1000`, is an estimate:
- *   it is matched within `slackMs`);
+ * - a pid recorded by a test is ours only while it still has the name it was recorded with and was
+ *   created AT OR BEFORE the recorded birth. The birth `bornMs` is any time taken while ours was
+ *   known to be alive: `Date.now()` right after the spawn, or bornNow() inside the process (both are
+ *   always LATER than the CreationDate, by 8-37 ms and 62-317 ms measured). Exact, one-sided, no
+ *   slack: a process created before bornMs that is alive now held that pid at bornMs, when ours did,
+ *   which is impossible; so a LIVE row under the pid created after bornMs is a reuse (a stranger),
+ *   and one created before it with another name means the record itself is wrong (`older`: callers
+ *   that check a run fail loudly on it, it is a bug, not a stranger);
  * - just before a kill, the pid must still have the name and CreationDate it was found with.
  * Not on win32: no process table, so nothing can be verified and nothing is killed.
  */
 const { execFileSync } = require('node:child_process');
 
-/** How far a birth measured in node may be from the process's CreationDate. */
-const BIRTH_SLACK_MS = 2_000;
+/**
+ * ONLY for the orphans of a root that is gone: how far before `bornMs` a child of ours may have been
+ * created (clock rounding; ours was created at most this long before bornMs). Never used for the root.
+ */
+const ORPHAN_LEAD_MS = 1_000;
+/** @deprecated the old two-sided slack; kept so callers that import it still load. Same as ORPHAN_LEAD_MS. */
+const BIRTH_SLACK_MS = ORPHAN_LEAD_MS;
 
 /** The birth of the calling process, for a test that records its own pid. */
 const bornNow = () => Math.round(Date.now() - process.uptime() * 1000);
@@ -55,40 +65,61 @@ function treeOf(rows, parent) {
 }
 
 /**
- * PURE: what of a recorded process is ours. `rec` = { pid, bornMs, name? } (the pid and birth a test
- * wrote down). The row under that pid is ours when its name matches and it was created within
- * `slackMs` of the birth; then it and its tree are ours. When no row has that pid (it is gone), its
- * orphans still are: the processes that name it as parent and were created after its birth. When the
- * pid now belongs to ANOTHER process, nothing is ours: its tree is not the test's.
+ * PURE: what of a recorded process is ours. `rec` = { pid, bornMs, name?, goneBy? } (the pid and
+ * birth a test wrote down; `goneBy`, optional: a time by which ours was known to be gone).
+ * - A live row under the pid created at or before bornMs, with the name: ours, with its tree.
+ * - Created AFTER bornMs: the pid was reused, a `stranger`; nothing is ours, not its tree either.
+ * - Created at or before bornMs with ANOTHER name: impossible for a stranger, so the record is wrong:
+ *   `stranger` and `older: true`. Callers that judge a run must fail on it (a bug, never "nothing left").
+ * - No row (ours is gone): its orphans still are, the rows that name it as parent, created no earlier
+ *   than ORPHAN_LEAD_MS before bornMs and, when `goneBy` is known, no later than it (a later process
+ *   that took the pid after ours died can only have had its children after that).
  */
-function ownTree(rows, rec, slackMs = BIRTH_SLACK_MS) {
+function ownTree(rows, rec, leadMs = ORPHAN_LEAD_MS) {
   const r = rows.find((x) => x.pid === rec.pid);
   if (r) {
-    const ours = Math.abs(r.created - rec.bornMs) <= slackMs && (!rec.name || r.name.toLowerCase() === String(rec.name).toLowerCase());
-    return ours ? { root: r, tree: [r, ...treeOf(rows, r)] } : { root: null, tree: [], stranger: r };
+    if (r.created > rec.bornMs) return { root: null, tree: [], stranger: r, older: false };
+    if (rec.name && r.name.toLowerCase() !== String(rec.name).toLowerCase()) return { root: null, tree: [], stranger: r, older: true };
+    return { root: r, tree: [r, ...treeOf(rows, r)] };
   }
-  return { root: null, tree: treeOf(rows, { pid: rec.pid, created: rec.bornMs - slackMs }) };
+  const tree = treeOf(rows, { pid: rec.pid, created: rec.bornMs - leadMs });
+  return { root: null, tree: Number.isFinite(rec.goneBy) ? cutAfter(tree, rec.goneBy) : tree };
+}
+
+/** The tree without the rows created after `t` (in a treeOf tree a child is never older than its parent, so
+ *  what is below a cut row is cut too). */
+function cutAfter(tree, t) {
+  return tree.filter((r) => r.created <= t);
+}
+
+/** ownTree, but an `older` stranger (a wrong record) throws: for a check that must not pass vacuously. */
+function ownTreeOrThrow(rows, rec) {
+  const t = ownTree(rows, rec);
+  if (t.older) throw new Error(`own-procs: pid ${rec.pid} is ${t.stranger.name}, created at ${t.stranger.created}, BEFORE the recorded birth ${rec.bornMs} of ${rec.name}: the record is wrong`);
+  return t;
 }
 
 /**
  * Kill each of `targets` (rows) that is STILL the same process. `lookup(pids)` returns their rows
  * now; `kill(rows)` kills those (the real one checks the name and CreationDate once more, in the
- * same PowerShell that stops them). Returns { killed, skipped } (rows).
+ * same PowerShell that stops them). Returns { attempted, skipped } (rows): `attempted` were handed to
+ * the kill, which may still fail (Stop-Process on an elevated process fails silently). `killed` is the
+ * same list under its old name, for older callers.
  */
 function killVerified(targets, { lookup = lookupPids, kill = stopIfSame } = {}) {
-  if (!targets.length) return { killed: [], skipped: [] };
+  if (!targets.length) return { attempted: [], killed: [], skipped: [] };
   const now = new Map(lookup(targets.map((t) => t.pid)).map((r) => [r.pid, r]));
   const same = targets.filter((t) => sameProcess(t, now.get(t.pid)));
   const skipped = targets.filter((t) => !same.includes(t));
   // Deepest first, the root last (targets come parent first): a killed root ends the run that then stops
   // the killer (the file watchdog), and a tree kill cut off there orphaned the ConPTY conhost.
   if (same.length) kill(same.slice().reverse());
-  return { killed: same, skipped };
+  return { attempted: same, killed: same, skipped };
 }
 
 /** The recorded process's row while it still runs as ours; null when it is gone or its pid is another's. */
-function stillOurs(rec, { table = processTable, slackMs = BIRTH_SLACK_MS } = {}) {
-  return ownTree(table(), rec, slackMs).root;
+function stillOurs(rec, { table = processTable } = {}) {
+  return ownTree(table(), rec).root;
 }
 
 /** "pid born" as a test wrote it (born: `Date.now()` right after a spawn, or bornNow() in the process). */
@@ -97,9 +128,9 @@ function readRec(file, name) {
   return { pid, bornMs, name };
 }
 
-/** Kill what of `rec` is ours (ownTree), verified. Returns { killed, skipped, stranger }. */
-function killOwnTree(rec, { table = processTable, lookup = lookupPids, kill = stopIfSame, slackMs = BIRTH_SLACK_MS } = {}) {
-  const t = ownTree(table(), rec, slackMs);
+/** Kill what of `rec` is ours (ownTree), verified. Returns { attempted, killed, skipped, stranger }. */
+function killOwnTree(rec, { table = processTable, lookup = lookupPids, kill = stopIfSame } = {}) {
+  const t = ownTree(table(), rec);
   return { ...killVerified(t.tree, { lookup, kill }), stranger: t.stranger || null };
 }
 
@@ -122,16 +153,21 @@ function lookupPids(pids) {
   return ids.length ? processTable(ids.map((p) => `ProcessId=${p}`).join(' OR ')) : [];
 }
 
-/** Stop each row's pid, but only if it still has that name and CreationDate (checked here, again). */
-function stopIfSame(rows) {
-  if (process.platform !== 'win32' || !rows.length) return;
+/** The PowerShell that stops each row's pid only if it still has that name and CreationDate. */
+function stopScript(rows) {
   const json = JSON.stringify(rows.map((r) => ({ pid: r.pid, created: r.created, name: r.name }))).replace(/'/g, "''");
   // assigned first: PowerShell 5.1 passes ConvertFrom-Json's array down a pipeline as ONE object
-  powershell(`$list = '${json}' | ConvertFrom-Json
+  return `$list = '${json}' | ConvertFrom-Json
 foreach ($t in $list) {
   $q = Get-CimInstance Win32_Process -Filter "ProcessId=$($t.pid)"
   if ($q -and $q.Name -eq $t.name -and ([DateTimeOffset]$q.CreationDate).ToUnixTimeMilliseconds() -eq $t.created) { Stop-Process -Id $t.pid -Force -ErrorAction SilentlyContinue }
-}`);
+}`;
 }
 
-module.exports = { BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopIfSame };
+/** Stop each row's pid, but only if it still has that name and CreationDate (checked here, again). `run` is for tests. */
+function stopIfSame(rows, run = powershell) {
+  if (process.platform !== 'win32' || !rows.length) return;
+  run(stopScript(rows));
+}
+
+module.exports = { ORPHAN_LEAD_MS, BIRTH_SLACK_MS, bornNow, parseRows, sameProcess, childrenOf, treeOf, ownTree, ownTreeOrThrow, cutAfter, stillOurs, readRec, killVerified, killOwnTree, processTable, lookupPids, stopScript, stopIfSame };
