@@ -1,5 +1,5 @@
 {
-  "$comment": "Bubble lines for the TES pack, generated from tos-lines.js (see SOURCES.json). Categories as in the bridge viewer.",
+  "$comment": "Bubble lines for the TES pack, generated from tos-lines.js (see SOURCES.json). Categories as in the bridge viewer. The exchanges after the viewer's first ten are {lines, roles} objects from TES-EXCHANGES-188 (roles[j]: the station that says lines[j]; crew = any).",
   "lines": {
     "water": [
       "watering the hydroponics 🌿",
@@ -476,7 +476,813 @@
         "Fribble in the vent.",
         "just one?",
         "…for now."
-      ]
+      ],
+      {
+        "lines": [
+          "Mr Speck, status?",
+          "The board is all green.",
+          "…check it again."
+        ],
+        "roles": [
+          "captain",
+          "science",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Scetty, how long to compact?",
+          "Two hours, Captain.",
+          "You have two minutes.",
+          "…aye."
+        ],
+        "roles": [
+          "captain",
+          "engineering",
+          "captain",
+          "engineering"
+        ]
+      },
+      {
+        "lines": [
+          "Away team to code review.",
+          "Who's wearing red?",
+          "…the new ensign.",
+          "Of course."
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Audit report, Mr Speck?",
+          "Zero MUSTs, Captain.",
+          "Run it again."
+        ],
+        "roles": [
+          "captain",
+          "science",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Incoming hail, Captain.",
+          "On screen.",
+          "It's a merge conflict."
+        ],
+        "roles": [
+          "comms",
+          "captain",
+          "comms"
+        ]
+      },
+      {
+        "lines": [
+          "This coffee is Velcan-strong.",
+          "Meaning?",
+          "No feelings left."
+        ],
+        "roles": [
+          "crew",
+          "crew",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Klangons off the bow!",
+          "Are they hostile?",
+          "They want our coffee."
+        ],
+        "roles": [
+          "helm",
+          "captain",
+          "helm"
+        ]
+      },
+      {
+        "lines": [
+          "Sensors detect a typo.",
+          "Where?",
+          "Deck 4. Line 32."
+        ],
+        "roles": [
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Heading two-one-zero.",
+          "Why that way?",
+          "The canteen, sir."
+        ],
+        "roles": [
+          "navigation",
+          "captain",
+          "navigation"
+        ]
+      },
+      {
+        "lines": [
+          "Cap, the tests are green!",
+          "All of them?",
+          "…sixteen skipped."
+        ],
+        "roles": [
+          "crew",
+          "captain",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Medbay, I need a doctor!",
+          "What's wrong?",
+          "Paper cut. From a ticket."
+        ],
+        "roles": [
+          "crew",
+          "medical",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "I'm a medic, not a linter!",
+          "Lint it anyway, McCey."
+        ],
+        "roles": [
+          "medical",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Romalan ship decloaking!",
+          "Shields up!",
+          "…it's the cleaning bot."
+        ],
+        "roles": [
+          "helm",
+          "captain",
+          "helm"
+        ]
+      },
+      {
+        "lines": [
+          "All hands, red alert!",
+          "Why?",
+          "Someone moved my mug."
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Fribbles on the task board.",
+          "How many?",
+          "Ninety-two and rising."
+        ],
+        "roles": [
+          "crew",
+          "science",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Engage!",
+          "Engage what, sir?",
+          "…the coffee machine."
+        ],
+        "roles": [
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Long range scans, Mr Sele?",
+          "A meeting. Dead ahead.",
+          "Evasive manoeuvres!"
+        ],
+        "roles": [
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Logic says ship it.",
+          "McCey says rest it.",
+          "The Captain says…",
+          "…more coffee."
+        ],
+        "roles": [
+          "science",
+          "medical",
+          "science",
+          "medical"
+        ]
+      },
+      {
+        "lines": [
+          "Channel open to the Fleet.",
+          "What do they want?",
+          "A status report. Again."
+        ],
+        "roles": [
+          "comms",
+          "captain",
+          "comms"
+        ]
+      },
+      {
+        "lines": [
+          "The warp core is humming.",
+          "That's the fridge, Scetty."
+        ],
+        "roles": [
+          "engineering",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Who left plomak in the slot?",
+          "Not logical to ask.",
+          "…it was Speck."
+        ],
+        "roles": [
+          "crew",
+          "science",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Shore leave approved!",
+          "Really?",
+          "After the audit."
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "She cannae take more tasks!",
+          "How many, Scetty?",
+          "…one more, Captain."
+        ],
+        "roles": [
+          "engineering",
+          "captain",
+          "engineering"
+        ]
+      },
+      {
+        "lines": [
+          "Captain's log: Tuesday.",
+          "It's Thursday, sir.",
+          "Log it supplemental."
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Sensors read zero bugs.",
+          "Impossible.",
+          "Sensors are offline."
+        ],
+        "roles": [
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Plot a course for lunch.",
+          "Warp or impulse?",
+          "Warp. It's soup day."
+        ],
+        "roles": [
+          "captain",
+          "navigation",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "UHera, any messages?",
+          "Fourteen. All \"urgent\".",
+          "Mark them read."
+        ],
+        "roles": [
+          "captain",
+          "comms",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Fencing at lunch, anyone?",
+          "With a foil, Sele?",
+          "With a coffee stirrer."
+        ],
+        "roles": [
+          "helm",
+          "crew",
+          "helm"
+        ]
+      },
+      {
+        "lines": [
+          "Highly unlogical.",
+          "What is?",
+          "Meetings about meetings."
+        ],
+        "roles": [
+          "science",
+          "crew",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Doctor, I feel compacted.",
+          "Lie down. Forget a bit.",
+          "…who are you?"
+        ],
+        "roles": [
+          "crew",
+          "medical",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Hull breach on deck 5!",
+          "How bad?",
+          "A sticky note fell off."
+        ],
+        "roles": [
+          "engineering",
+          "captain",
+          "engineering"
+        ]
+      },
+      {
+        "lines": [
+          "The Klangons are hailing.",
+          "What do they say?",
+          "\"Your build is weak.\""
+        ],
+        "roles": [
+          "comms",
+          "captain",
+          "comms"
+        ]
+      },
+      {
+        "lines": [
+          "Raise shields!",
+          "They're up, sir.",
+          "Raise them MORE."
+        ],
+        "roles": [
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Navigation, ETA?",
+          "Five minutes.",
+          "In stardates?",
+          "…also five."
+        ],
+        "roles": [
+          "captain",
+          "navigation",
+          "captain",
+          "navigation"
+        ]
+      },
+      {
+        "lines": [
+          "Away team: code review.",
+          "Phasers?",
+          "Set to \"nitpick\"."
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Doctor, the build is sick.",
+          "Blast it, I'm not a CI!",
+          "Try off and on again."
+        ],
+        "roles": [
+          "captain",
+          "medical",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Speck, what are the odds?",
+          "Of what?",
+          "A calm Friday deploy.",
+          "I would rather not say."
+        ],
+        "roles": [
+          "captain",
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Engineering to bridge.",
+          "Go ahead, Scetty.",
+          "The kettle's ready."
+        ],
+        "roles": [
+          "engineering",
+          "captain",
+          "engineering"
+        ]
+      },
+      {
+        "lines": [
+          "Queued for the heavy lock.",
+          "Again?",
+          "Heavy jobs, sir. Heavy."
+        ],
+        "roles": [
+          "crew",
+          "captain",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Who pinned this task?",
+          "The Captain.",
+          "…it's a coffee order."
+        ],
+        "roles": [
+          "crew",
+          "crew",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Fribble on the console!",
+          "Don't feed it!",
+          "…I fed it.",
+          "There are six now."
+        ],
+        "roles": [
+          "crew",
+          "crew",
+          "crew",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Live well and compile.",
+          "And you, Speck.",
+          "…no warnings."
+        ],
+        "roles": [
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Velcans don't nap, right?",
+          "Correct.",
+          "Your eyes are closed.",
+          "Meditation."
+        ],
+        "roles": [
+          "crew",
+          "science",
+          "crew",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Plot a course home.",
+          "We are home, sir.",
+          "Then plot coffee."
+        ],
+        "roles": [
+          "captain",
+          "navigation",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "McCey, he's not responding!",
+          "He's idle, Cap.",
+          "…just idle?",
+          "Idle means idle."
+        ],
+        "roles": [
+          "captain",
+          "medical",
+          "captain",
+          "medical"
+        ]
+      },
+      {
+        "lines": [
+          "The audit found a NIT.",
+          "Sound the red alert!",
+          "It's a typo, sir.",
+          "…yellow alert."
+        ],
+        "roles": [
+          "science",
+          "captain",
+          "science",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Comms, broadcast to all.",
+          "Saying what, sir?",
+          "Who took my stapler?"
+        ],
+        "roles": [
+          "captain",
+          "comms",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Full speed, Mr Sele!",
+          "We're docked, sir.",
+          "Full speed docked."
+        ],
+        "roles": [
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Who's on the night shift?",
+          "Nobody, sir.",
+          "Then who's typing?"
+        ],
+        "roles": [
+          "captain",
+          "crew",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Sensors detect coffee.",
+          "Where?",
+          "My mug. Empty now."
+        ],
+        "roles": [
+          "science",
+          "crew",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "The food slot made soup.",
+          "I ordered toast.",
+          "It's toast soup."
+        ],
+        "roles": [
+          "crew",
+          "crew",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "UHera, sing us a song?",
+          "Only after the merge.",
+          "…we'll be here a while."
+        ],
+        "roles": [
+          "crew",
+          "comms",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Damage report!",
+          "One mug, chipped.",
+          "…all hands, mourn."
+        ],
+        "roles": [
+          "captain",
+          "engineering",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "New ensign on the bridge.",
+          "Red shirt?",
+          "Blue. Lucky one."
+        ],
+        "roles": [
+          "crew",
+          "captain",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Diagnosis, McCey?",
+          "Too many tabs open.",
+          "Prognosis?",
+          "Close forty."
+        ],
+        "roles": [
+          "captain",
+          "medical",
+          "captain",
+          "medical"
+        ]
+      },
+      {
+        "lines": [
+          "Helm, evasive pattern!",
+          "From what, sir?",
+          "The weekly sync."
+        ],
+        "roles": [
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Fleet wants an update.",
+          "Tell them: fine.",
+          "Everything is fine?",
+          "…tell them: fine."
+        ],
+        "roles": [
+          "comms",
+          "captain",
+          "comms",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "The hydro ferns wilted.",
+          "Did you water them?",
+          "With coffee."
+        ],
+        "roles": [
+          "crew",
+          "science",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Course laid in, sir.",
+          "To where?",
+          "The task board.",
+          "…engage."
+        ],
+        "roles": [
+          "helm",
+          "captain",
+          "helm",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Give me warp nine!",
+          "She's at warp two!",
+          "Then coffee nine."
+        ],
+        "roles": [
+          "captain",
+          "engineering",
+          "captain"
+        ]
+      },
+      {
+        "lines": [
+          "Mr Speck, tell a joke.",
+          "A NIT walks into a bar.",
+          "And?",
+          "It was not blocking."
+        ],
+        "roles": [
+          "captain",
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Scanning the backlog.",
+          "How deep?",
+          "Twelve decks of tickets."
+        ],
+        "roles": [
+          "science",
+          "captain",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Romalan ale on the bridge?",
+          "Not regulation.",
+          "It's for science.",
+          "…carry on."
+        ],
+        "roles": [
+          "crew",
+          "science",
+          "crew",
+          "science"
+        ]
+      },
+      {
+        "lines": [
+          "Who compacted my notes?",
+          "The ship did.",
+          "…what was I saying?"
+        ],
+        "roles": [
+          "crew",
+          "crew",
+          "crew"
+        ]
+      },
+      {
+        "lines": [
+          "Course plotted to the mess.",
+          "Shortest route?",
+          "Past the food slot.",
+          "Logical."
+        ],
+        "roles": [
+          "navigation",
+          "science",
+          "navigation",
+          "science"
+        ]
+      }
     ]
   }
 }

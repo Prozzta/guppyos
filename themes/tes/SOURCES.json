@@ -73,7 +73,7 @@
       "path": "lines.json",
       "from": "C:/Dunder/_work/tos-art/tos-lines.js",
       "sourceSha256": "1092f4415fa260f3103cf4edf84d4a948d0e85602f21dc9891bd774ed0129ed6",
-      "how": "window.TosLines dumped as JSON (data only)"
+      "how": "window.TosLines dumped as JSON (data only); lines.exchanges extended with the {lines, roles} exchanges of TES-EXCHANGES-188 (C:/Dunder/_work/jim/tes-exchanges-188.json)"
     }
   ]
 }
