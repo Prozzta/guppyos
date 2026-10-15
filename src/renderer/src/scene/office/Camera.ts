@@ -1,4 +1,5 @@
 import { Container } from 'pixi.js';
+import { wholeScale } from '../themes/framing';
 
 // Simplified port of shahar061/the-office (office/engine/camera.ts).
 // Phase targeting is dropped (we have no project phases); kept: fit-to-screen,
@@ -8,6 +9,13 @@ import { Container } from 'pixi.js';
 // TES-GUPPY-FRAMING: an optional frame (setFrame) replaces the whole map as what is fitted,
 // centred and clamped to, and its dead bottom rows are left out of the fit. With no frame the
 // frame IS the map with no dead band, so the office's numbers are exactly as before.
+//
+// TES-FLOOR-WHOLE-188: a frame with a keep box (and a settle) is drawn at a whole number n of
+// device px per map px, the largest at which the keep box fits the pane: the zoom is n / DPR, set
+// at once and never eased, and the map's origin always sits on a whole device px. So every art
+// pixel is n x n device px on every frame. The frame's top meets the pane's top when its content
+// fits (the hull runs on past the bottom edge); else the view is centred or clamped as before.
+// The keep box always stays in view: only the hull, its rim and the upper wall are ever cut.
 
 const LERP_SPEED = 0.08;
 // TES-GUPPY-SETTLE: the rate LERP_SPEED was tuned at (the floor's 30 fps tick).
@@ -45,6 +53,8 @@ export function watchDevicePixelRatio(
   };
 }
 
+type Keep = { x0: number; y0: number; x1: number; y1: number };
+
 export class Camera {
   private container: Container;
   private currentX = 0;
@@ -59,7 +69,7 @@ export class Camera {
   private mapHeight = 480;
   private manualOverride = false;
   /** The fitted rectangle, in map pixels (null: the whole map), and its clippable bottom rows. */
-  private frame: { x: number; y: number; w: number; h: number; deadBottom: number } | null = null;
+  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep } | null = null;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -80,7 +90,7 @@ export class Camera {
   }
 
   /** Fit a part of the map instead of all of it (see TES-GUPPY-FRAMING above); null for the whole map. */
-  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number } | null): void {
+  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep } | null): void {
     this.frame = frame;
     if (!this.manualOverride) this.fitToScreen();
   }
@@ -95,8 +105,17 @@ export class Camera {
     if (!this.manualOverride) this.fitToScreen();
   }
 
+  /** TES-FLOOR-WHOLE-188: the whole device scale n and the resolution, or null when not whole. */
+  private whole(): { n: number; r: number; keep: Keep } | null {
+    const keep = this.frame?.keep, r = this.settle?.resolution() ?? 0;
+    if (!keep || !Number.isFinite(r) || r <= 0) return null;
+    return { n: wholeScale(keep, Math.round(this.viewWidth * r), Math.round(this.viewHeight * r)), r, keep };
+  }
+
   private getMinZoom(): number {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
+    const w = this.whole();
+    if (w) return w.n / w.r;
     const b = this.box();
     const minZoom = Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
     // Keep the camera's fit exact.  Raster alignment belongs to StationFloor's single cached
@@ -154,6 +173,9 @@ export class Camera {
       }
     }
 
+    const w = this.whole();
+    if (w) { this.placeWhole(w.n, w.r, w.keep); return; }
+
     this.container.scale.set(this.currentZoom);
     this.container.x = this.viewWidth / 2 - this.currentX * this.currentZoom;
     this.container.y = this.viewHeight / 2 - this.currentY * this.currentZoom;
@@ -181,6 +203,28 @@ export class Camera {
       this.container.y = Math.min(top, Math.max(top + this.viewHeight - scaledH, this.container.y));
     }
 
+  }
+
+  /** TES-FLOOR-WHOLE-188: place the map at n device px per map px, on whole device px. Each axis
+   *  works as update() does (centred when the frame fits, else the eased point clamped inside the
+   *  frame; vertically the frame's top at the pane's top when its content fits), then the keep
+   *  box is clamped into the pane (centred on it if it cannot fit, at n = 1). */
+  private placeWhole(n: number, r: number, keep: Keep): void {
+    this.currentZoom = this.targetZoom = n / r;
+    const b = this.box();
+    const W = Math.round(this.viewWidth * r), H = Math.round(this.viewHeight * r);
+    const fit = (o: number, lo: number, hi: number) => (lo <= hi ? Math.min(hi, Math.max(lo, o)) : (lo + hi) / 2);
+    let x = b.w * n <= W
+      ? (W - b.w * n) / 2 - b.x * n
+      : fit(W / 2 - this.currentX * n, W - (b.x + b.w) * n, -b.x * n);
+    let y = (b.h - b.deadBottom) * n <= H
+      ? -b.y * n
+      : fit(H / 2 - this.currentY * n, H - (b.y + b.h) * n, -b.y * n);
+    x = Math.round(fit(x, -keep.x0 * n, W - (keep.x1 + 1) * n));
+    y = Math.round(fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n));
+    this.container.scale.set(n / r);
+    this.container.x = x / r;
+    this.container.y = y / r;
   }
 
   /** TES-GUPPY-SETTLE: the per-tick ease as the motion it approximates, solved exactly over dt.

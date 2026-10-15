@@ -99,6 +99,53 @@ export function frontPicker(statics: Array<{ px?: Pixels | null; x: number; y: n
   };
 }
 
+/** TES-FLOOR-WHOLE-188: frontPicker for a floor drawn at a whole number of device px per map px
+ *  on whole device px (Camera's whole mode), where a static drawn again lands exactly on its
+ *  pixels in the floor texture: no rounding to allow for, so no margin. Those with an opaque pixel
+ *  inside a person's (cup's, mug's) box and, closed in draw order, every later static sharing an
+ *  opaque pixel with one of those (drawing one again covers nothing else). frontPicker's cells
+ *  and their neighbours chained most of TES's rim and rails to every person: 56 of 187 statics
+ *  drawn again per person on average, a draw call per 16 textures, and the fill of each. */
+export function exactPicker(statics: Array<{ px?: Pixels | null; x: number; y: number }>, order: number[], mapW: number, mapH: number): (people: Box[]) => boolean[] {
+  // Each static's opaque pixels as map px indices, and its box (statics sit on whole map px).
+  const pts: Int32Array[] = statics.map((it) => {
+    const out: number[] = [];
+    if (it.px) {
+      const ox = Math.round(it.x), oy = Math.round(it.y);
+      for (let y = 0; y < it.px.height; y++) for (let x = 0; x < it.px.width; x++) {
+        const mx = ox + x, my = oy + y;
+        if (it.px.data[(y * it.px.width + x) * 4 + 3] !== 0 && mx >= 0 && my >= 0 && mx < mapW && my < mapH) out.push(my * mapW + mx);
+      }
+    }
+    return Int32Array.from(out);
+  });
+  const box = statics.map((it) => (it.px ? { x0: Math.round(it.x), y0: Math.round(it.y), x1: Math.round(it.x) + it.px.width, y1: Math.round(it.y) + it.px.height } : null));
+  const rank = new Int32Array(statics.length);
+  order.forEach((i, k) => { rank[i] = k; });
+  // later[i]: the statics after i in draw order sharing an opaque pixel with it.
+  const holders = new Map<number, number[]>();
+  pts.forEach((p, i) => { for (const q of p) { let h = holders.get(q); if (!h) holders.set(q, (h = [])); h.push(i); } });
+  const later: Set<number>[] = statics.map(() => new Set<number>());
+  for (const h of holders.values()) if (h.length > 1) for (const i of h) for (const j of h) if (rank[j] > rank[i]) later[i].add(j);
+  const hit = (i: number, q: Box) => {
+    const b = box[i]!;
+    const x0 = Math.max(b.x0, Math.floor(q.x)), y0 = Math.max(b.y0, Math.floor(q.y));
+    const x1 = Math.min(b.x1, Math.ceil(q.x + q.w)), y1 = Math.min(b.y1, Math.ceil(q.y + q.h));
+    if (x0 >= x1 || y0 >= y1) return false;
+    const px = statics[i].px!;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (px.data[((y - b.y0) * px.width + (x - b.x0)) * 4 + 3] !== 0) return true;
+    return false;
+  };
+  return (people) => {
+    const on = statics.map(() => false);
+    for (const i of order) {
+      if (!on[i] && box[i] && people.some((q) => hit(i, q))) on[i] = true;
+      if (on[i]) for (const j of later[i]) on[j] = true;
+    }
+    return on;
+  };
+}
+
 /** The map-px box holding every opaque pixel of 'below', 'above' and the statics (null: none).
  *  The floor scene is composed over just this box: TES's art is 288x384 of its 960x640 map. */
 export function sceneBounds(plan: { below: Pixels; above: Pixels; sorted: Array<{ px?: Pixels | null; x: number; y: number }> }): Box | null {

@@ -4,7 +4,7 @@
 // seats, depth) comes from the pure modules beside it; this file only draws.
 
 import { useEffect, useRef, useState } from 'react';
-import { Application, Container, Matrix, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
+import { Application, Container, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 import 'pixi.js/unsafe-eval';
 import { useStore, type Agent } from '@/store/store';
 import { activityStatus, heavyActivity, type HeavyLockView } from '@shared/activityView';
@@ -12,17 +12,18 @@ import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
-import { buildScenePlan, byDepth, chairOf, personKey, seatPose, sideFit, type SortedItem } from './compositor';
+import { buildScenePlan, byDepth, chairOf, compose as composePx, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
-import type { Pixels } from './raster';
+import { blank, type Pixels } from './raster';
+import { hullSkirt, HULL_STRIP_ROWS } from './hull';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
-import { frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
+import { exactPicker, frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
 import type { ThemeLooks } from './themeCatalog';
-import { floorFrame } from './framing';
+import { floorFrame, FRAME_MARGIN } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { activityThought, createSayCursor, type BubbleSay } from './bubbleModel';
 import type { MessageAct } from '../office/MessageEnvelope';
@@ -178,37 +179,49 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return s;
       });
 
-      // TES-FLOOR-EASE-188: the floor is composed in map space at an integer scale k (texels per
-      // map px), apart from the camera, and presented by ONE nearest quad through the world's
-      // transform. So every frame, the camera easing or settled, is one uniform resample of
-      // integer-scale art: no rounding of its own for any sprite, hence no seam. In the scene:
-      // - the floor RT: 'below' and every static, rebuilt only when k changes;
+      // TES-FLOOR-WHOLE-188: a framed floor is drawn at a whole number n of device px per map px
+      // with its origin on a whole device px (the camera sees to both), so every sprite drawn
+      // straight in the world is n x n device px per art px: no resample, no seam, nothing to
+      // compose per frame. (TES-FLOOR-EASE-188 composed a scene texture every tick instead, to
+      // survive a fractional scale: that cost the GPU process 4x when settled.) The world holds:
+      // - the floor texture: 'below' and every static, at an integer scale k, rebuilt only when k
+      //   changes (a whole-n floor has k = n: one texel per device px);
       // - over it, in depth order, the people, their cups, the parked mugs, and the statics that
-      //   can cover one of them (frontPicker), drawn again exactly where the floor RT has them;
-      // - then 'above'.
-      // The people stay on the stage, unseen there (alpha 0), for their pointer hit tests.
+      //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker:
+      //   at a whole n they land on their own pixels, so only those touching a person are picked);
+      // - the hull continued past the art (hull.ts), then 'above', then the bubbles.
       const bounds = sceneBounds(plan);
       const cached = bounds !== null && staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
-      const pickFront = cached ? frontPicker(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      const frame0 = floorFrame(pack.manifest.id, SM.PW, SM.PH);
+      const pickFront = cached ? (frame0.keep ? exactPicker : frontPicker)(plan.sorted, order, plan.below.width, plan.below.height) : null;
       // As in the stage, the floor's transform is a child's, so its vertices are made the same way.
       const floorRoot = new Container();
       const floorWorld = floorRoot.addChild(new Container());
-      const aboveRoot = new Container();
       const floorView = new Sprite();
-      const sceneSprite = new Sprite();
-      let floorRT: RenderTexture | null = null, sceneRT: RenderTexture | null = null, sceneK = 0;
-      const sceneM = new Matrix();
-      const belowDirect = new Sprite(below.texture);
+      let floorRT: RenderTexture | null = null, floorK = 0;
       if (cached) {
         floorWorld.addChild(below);
         for (const i of order) if (staticTex[i]) floorWorld.addChild(staticSprite(i));
-        if (hasVisiblePixel(plan.above)) aboveRoot.addChild(new Sprite(own(plan.above)));
-        world.addChild(sceneSprite);
-        sortLayer.alpha = 0;
-      } else world.addChild(belowDirect);
+        world.addChild(floorView);
+      } else world.addChild(new Sprite(below.texture));
       world.addChild(sortLayer);
-      if (!cached && hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
+      const hull = new Container();
+      if (frame0.deadBottom > 0) {
+        const art = blank(SM.PW, SM.PH);
+        composePx(art, plan.below, 0, 0);
+        for (const it of plan.sorted) if (it.px) composePx(art, it.px, Math.round(it.x), Math.round(it.y), it.opacity);
+        const sk = hullSkirt(art, frame0.x + FRAME_MARGIN, frame0.x + frame0.w - FRAME_MARGIN - 1, frame0.y + frame0.h - 1);
+        if (sk) {
+          const cover = hull.addChild(new Sprite(own(sk.cover)));
+          cover.position.set(sk.x, sk.y);
+          const strip = hull.addChild(new Sprite(own(sk.strip)));
+          strip.position.set(sk.x, frame0.y + frame0.h);
+          strip.height = HULL_STRIP_ROWS;
+        }
+      }
+      world.addChild(hull);
+      if (hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
       // Clouds and envelopes are live above the people, in screen space.
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
@@ -217,46 +230,35 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const buildFloor = (k: number) => {
         const b = bounds!;
         floorView.texture = Texture.EMPTY;
-        sceneSprite.texture = Texture.EMPTY;
         floorRT?.destroy(true);
-        sceneRT?.destroy(true);
         floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
-        sceneRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
         floorWorld.scale.set(k);
         floorWorld.position.set(-b.x * k, -b.y * k);
         app.renderer.render({ container: floorRoot, target: floorRT, clear: true });
         floorView.texture = floorRT;
-        sceneSprite.texture = sceneRT;
-        sceneSprite.position.set(b.x, b.y);
-        sceneSprite.scale.set(1 / k);
-        sceneM.set(k, 0, 0, k, -b.x * k, -b.y * k);
-        sceneK = k;
+        floorView.position.set(b.x, b.y);
+        floorView.scale.set(1 / k);
+        floorK = k;
         (app as any).__tesStaticCacheBuilds = ((app as any).__tesStaticCacheBuilds ?? 0) + 1;
       };
+      // Per tick, after onTick: the floor texture's scale, and which statics are drawn again.
       const compose = () => {
         if (!cached) return;
         const k = sceneScale(world.scale.x * app.renderer.resolution, bounds!);
-        if (k !== sceneK) buildFloor(k);
+        if (k !== floorK) buildFloor(k);
         const near: Box[] = [];
         for (const s of sprites.values()) near.push({ x: s.sprite.x, y: s.sprite.y, w: fw, h: fh });
         for (const c of cups.values()) near.push({ x: c.sprite.x, y: c.sprite.y, w: MUG_W, h: MUG_H });
         for (const m of mugs.values()) near.push({ x: m.sprite.x, y: m.sprite.y, w: MUG_W, h: MUG_H });
         const front = pickFront!(near);
         statics.forEach((s, i) => { if (s) s.visible = front[i]; });
-        app.renderer.render({ container: floorView, target: sceneRT!, clear: true });
-        sortLayer.alpha = 1;
-        app.renderer.render({ container: sortLayer, target: sceneRT!, clear: false, transform: sceneM });
-        sortLayer.alpha = 0;
-        if (aboveRoot.children.length) app.renderer.render({ container: aboveRoot, target: sceneRT!, clear: false, transform: sceneM });
       };
-      // For the rendered depth test (tes-floor-ease-188): the scene and what it is made of.
-      if (cached) (app as any).__tesScene = { bounds, get k() { return sceneK; }, get rt() { return sceneRT; }, get floor() { return floorRT; }, below: below.texture, sortLayer, statics, aboveRoot, sceneSprite, world };
+      // For the rendered tests (tes-floor-whole-188): the floor and what it is made of.
+      if (cached) (app as any).__tesScene = { bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, hull, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
         () => floorRT?.destroy(true),
-        () => sceneRT?.destroy(true),
         () => floorRoot.destroy({ children: true }),
-        () => aboveRoot.destroy({ children: true }),
         () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
       ];
 
@@ -302,7 +304,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       const camera = new Camera(world, { resolution: () => app.renderer.resolution });
       camera.setMapSize(SM.PW, SM.PH);
       // TES-GUPPY-FRAMING: fit the pack's art (centred, its dead bottom band clippable), not the whole map.
-      camera.setFrame(floorFrame(pack.manifest.id, SM.PW, SM.PH));
+      camera.setFrame(frame0);
       camera.setViewSize(app.screen.width, app.screen.height);
       camera.fitToScreen();
 
