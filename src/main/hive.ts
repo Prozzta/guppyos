@@ -57,7 +57,7 @@ import {
   type AgentProvider
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
-import { rosterActivity } from '../shared/activityView';
+import { heavyActivity, rosterActivity, type HeavyLockView } from '../shared/activityView';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
@@ -4884,6 +4884,7 @@ export class HiveManager {
           onHold?: boolean; runningTool?: { name: string; forSec: number } | null;
         }>;
         liveness?: LivenessV1[];
+        heavyLock?: HeavyLockView;
       };
       // CARD-IDLE-WHILE-WORKING: each agent's WORKING / idle comes from its liveness record (a
       // long tool call fires no hooks, so "active 9m ago" alone read as idle).
@@ -4906,7 +4907,8 @@ export class HiveManager {
       let anyCtx = false;
       let anyHold = false;
       const rows = shown.map((a) => {
-        const state = rosterActivity(lvById.get(a.id), nowMs, a.runningTool);
+        // IDLE-MEANS-IDLE: an idle agent's place in the heavy-job lock (BACKGROUND / QUEUED / RESERVED).
+        const state = rosterActivity(lvById.get(a.id), nowMs, a.runningTool, heavyActivity(a.id, snap.heavyLock));
         const bits = [a.role ?? 'agent', ...(state ? [state] : []),
           typeof a.lastActiveSecAgo === 'number' ? `active ${ago(a.lastActiveSecAgo)}` : 'no activity yet'];
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);

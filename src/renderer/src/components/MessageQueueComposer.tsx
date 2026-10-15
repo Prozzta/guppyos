@@ -70,7 +70,9 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   const idle = agent.status === 'idle';
   // CARD-IDLE (Jim N2): what the composer SAYS follows the shown status (liveness), like the card;
   // `idle` above stays the hook status for the terminal-block poll the drain relies on.
-  const shownIdle = useActivity(agent.id, agent.status).status === 'idle';
+  // IDLE-MEANS-IDLE: send-now follows the agent's TURN (turnStatus), not the heavy-lock overlay, so
+  // an agent running a suite in the background or queued for the lock still takes a message at once.
+  const shownIdle = useActivity(agent.id, agent.status).turnStatus === 'idle';
 
   // Only the god/Michael agent gets the delegation toggle. Default OFF.
 

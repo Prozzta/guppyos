@@ -119,7 +119,7 @@ test('OfficeFloor wires the rest into the café director', () => {
   assert.match(src, /\/\/ Advance every in-progress break\.\n\s+for \(const \[id, rt\] of runtimes\) \{\n\s+tickCoffeeRest\(rt, dt\);/,
     'every runtime counts its rest down each frame');
   const cafe = src.slice(src.indexOf('const updateCafeteria'), src.indexOf('startBreak(agent.id, rt);'));
-  assert.match(cafe, /if \(rt && cafeEligible\(agent, rt\)\) candidates\.push/, 'the café picks from rested agents');
-  assert.match(src, /if \(r && breakEligible\(a, r\)\) candidates\.push/, 'errands keep the plain rule');
+  assert.match(cafe, /if \(rt && cafeEligible\(shownAgent\(agent\), rt\)\) candidates\.push/, 'the café picks from rested agents (IDLE-MEANS-IDLE: as shown, so a queued agent stays at its desk)');
+  assert.match(src, /if \(r && breakEligible\(shownAgent\(a\), r\)\) candidates\.push/, 'errands keep the plain rule');
   assert.doesNotMatch(src, /const breakEligible = /, 'one eligibility rule, in coffeeGap.ts');
 });

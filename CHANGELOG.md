@@ -11,6 +11,15 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+### Fixed
+
+- **An agent running a heavy job in the background, or waiting for the heavy-job slot, no longer
+  shows as idle.** Its card, the agent panel, the office floor and the LIVE ROSTER line read
+  "suite in background 3m" (working, at its desk), "queued for heavy slot #2" or "heavy slot
+  reserved until 06:26Z" (waiting, at its desk, not off on a coffee run), and fleet.json gives each
+  agent its place in the lock. Display only: messages still go to these agents at once, and they
+  are still woken when their slot frees.
+
 ## [1.1.86] — 2026-10-14
 
 **The app icon is Speck, and on a TES floor the app names TES's orchestrator.** Rollback: 1.1.85

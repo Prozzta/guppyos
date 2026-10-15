@@ -641,6 +641,20 @@ export function useHive(config: HarnessConfig | null): void {
     return () => { alive = false; off(); };
   }, []);
 
+  // 2d') IDLE-MEANS-IDLE: main's heavy-job lock view into the store (snapshot, then every pushed
+  //      change), so a background job, a queued agent and a reserved slot never read as plain idle.
+  //      A stale preload without the bridge leaves it null (today's idle).
+  useEffect(() => {
+    if (!window.cth.heavyLockSnapshot || !window.cth.onHeavyLockChange) return;
+    let alive = true;
+    let pushed = false;
+    void window.cth.heavyLockSnapshot()
+      .then((view) => { if (alive && !pushed) useStore.getState().applyHeavyLock(view); })
+      .catch(() => { /* main not ready: the pushes fill it */ });
+    const off = window.cth.onHeavyLockChange((view) => { pushed = true; useStore.getState().applyHeavyLock(view); });
+    return () => { alive = false; off(); };
+  }, []);
+
   // 2e) PROVIDER-AGNOSTIC PTY-QUIESCENCE IDLE FALLBACK (the linchpin that makes
   //     canReceiveInbox:true safe for the live-unverified OpenCode/Crush/pi bridges).
   //     Hook events are the authoritative status source, but a bridge whose turn-end

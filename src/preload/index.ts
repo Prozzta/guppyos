@@ -10,6 +10,7 @@ import type { TerminalPromptState } from '../shared/promptState';
 import type { HireManifest } from '../shared/hire';
 export type { HireManifest } from '../shared/hire';
 import type { LivenessV1 } from '../shared/livenessV1';
+import type { HeavyLockView } from '../shared/activityView';
 export type { LivenessV1 } from '../shared/livenessV1';
 import type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
 export type { IntegrationRecord, IntegrationTemplate } from '../shared/integrations';
@@ -979,6 +980,14 @@ const api = {
     const listener = (_e: IpcRendererEvent, rec: LivenessV1) => cb(rec);
     ipcRenderer.on('liveness:changed', listener);
     return () => ipcRenderer.removeListener('liveness:changed', listener);
+  },
+  /** IDLE-MEANS-IDLE: the heavy-job lock's holders, waiters and reservations (display only). */
+  heavyLockSnapshot: (): Promise<HeavyLockView> => ipcRenderer.invoke('heavy-lock:snapshot'),
+  /** IDLE-MEANS-IDLE: the lock changed (an acquire, deny, reserve, release, expiry or drop). */
+  onHeavyLockChange: (cb: (view: HeavyLockView) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, view: HeavyLockView) => cb(view);
+    ipcRenderer.on('heavy-lock:changed', listener);
+    return () => ipcRenderer.removeListener('heavy-lock:changed', listener);
   },
   hiveIntegrity: (): Promise<IntegrityIssue[]> => ipcRenderer.invoke('hive:integrity'),
   configIntegrity: (): Promise<IntegrityIssue | null> => ipcRenderer.invoke('config:integrity'),
