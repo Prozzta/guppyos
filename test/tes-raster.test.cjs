@@ -149,6 +149,24 @@ test('exactPicker: statics with an opaque pixel inside a person, closed in draw 
   assert.deepEqual(C.exactPicker(statics, [1, 0, 2, 3, 4], 64, 64)([{ x: 8, y: 8, w: 3, h: 3 }]), [true, false, false, false, false]);
 });
 
+test('exactPicker: a static is under a box exactly when a scan of the box finds an opaque pixel (no closure)', () => {
+  // The per-tick test reads a summed-area table; this scans every px the box touches instead.
+  let picked = 0;
+  for (let run = 0; run < 400; run++) {
+    const w = 1 + int(24), h = 1 + int(24), sx = int(40), sy = int(40), p = [0, 0.02, 0.3, 1][run % 4];
+    const it = { x: sx, y: sy, px: picture(w, h, () => (rnd() < p ? [1, 1, 1, 1 + int(255)] : null)) };
+    const q = { x: sx - 8 + rnd() * (w + 10), y: sy - 8 + rnd() * (h + 10), w: rnd() * 12, h: rnd() * 12 };
+    let want = false;
+    for (let y = Math.floor(q.y); y < Math.ceil(q.y + q.h); y++) for (let x = Math.floor(q.x); x < Math.ceil(q.x + q.w); x++) {
+      const u = x - sx, v = y - sy;
+      if (u >= 0 && v >= 0 && u < w && v < h && it.px.data[(v * w + u) * 4 + 3] !== 0) want = true;
+    }
+    picked += want;
+    assert.equal(C.exactPicker([it], [0], 64, 64)([q])[0], want, `run ${run}`);
+  }
+  assert.ok(picked > 40 && picked < 360, `both outcomes exercised (${picked} of 400 picked)`);
+});
+
 test('model: at a whole scale, the floor texture, then by depth the people and the statics exactPicker picks, is the full depth sort', () => {
   // TES-FLOOR-WHOLE-188: the world at n device px per map px on whole device px; statics on whole
   // map px land exactly on their pixels in the floor texture, people anywhere (the quad rounds).

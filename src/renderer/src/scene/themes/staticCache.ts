@@ -127,14 +127,29 @@ export function exactPicker(statics: Array<{ px?: Pixels | null; x: number; y: n
   pts.forEach((p, i) => { for (const q of p) { let h = holders.get(q); if (!h) holders.set(q, (h = [])); h.push(i); } });
   const later: Set<number>[] = statics.map(() => new Set<number>());
   for (const h of holders.values()) if (h.length > 1) for (const i of h) for (const j of h) if (rank[j] > rank[i]) later[i].add(j);
+  // Each static's opaque pixels counted over every rect from its corner (a summed-area table), so
+  // a person's box is asked in four reads per static, every tick: scanning the box instead cost the
+  // renderer about 1 point of CPU at DPR 1 (a person in a large, mostly clear static read it whole).
+  const sat: Array<Int32Array | null> = statics.map((it) => {
+    if (!it.px) return null;
+    const w = it.px.width, h = it.px.height, t = new Int32Array((w + 1) * (h + 1));
+    for (let y = 0; y < h; y++) {
+      let row = 0;
+      for (let x = 0; x < w; x++) {
+        if (it.px.data[(y * w + x) * 4 + 3] !== 0) row++;
+        t[(y + 1) * (w + 1) + x + 1] = t[y * (w + 1) + x + 1] + row;
+      }
+    }
+    return t;
+  });
   const hit = (i: number, q: Box) => {
     const b = box[i]!;
     const x0 = Math.max(b.x0, Math.floor(q.x)), y0 = Math.max(b.y0, Math.floor(q.y));
     const x1 = Math.min(b.x1, Math.ceil(q.x + q.w)), y1 = Math.min(b.y1, Math.ceil(q.y + q.h));
     if (x0 >= x1 || y0 >= y1) return false;
-    const px = statics[i].px!;
-    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) if (px.data[((y - b.y0) * px.width + (x - b.x0)) * 4 + 3] !== 0) return true;
-    return false;
+    const t = sat[i]!, W = b.x1 - b.x0 + 1;
+    const ax = x0 - b.x0, ay = y0 - b.y0, bx = x1 - b.x0, by = y1 - b.y0;
+    return t[by * W + bx] - t[ay * W + bx] - t[by * W + ax] + t[ay * W + ax] > 0;
   };
   return (people) => {
     const on = statics.map(() => false);
