@@ -60,11 +60,13 @@ module.exports = async (drill) => {
   const open = (file) => NativeMemoryStore.open(file ?? path.join(dbDir, `i${++dbN}.sqlite`), drill.openOpts);
   const engine = (store, emb, extra = {}) => new MemoryEngine({ hiveRoot: hive, store, embedder: emb, countTokens: words, watch: null, claimLedger: 'reader', implementedLevel: 'writer', ...extra });
   const manifest = (ledger) => fs.writeFileSync(path.join(hive, 'memory-sources.json'), JSON.stringify({ topLevel: [], include: {}, ledger }));
-  /** An agent with a ledger (one segment): only such an agent swaps its markdown for claims. */
+  /** An agent with a ledger (one segment): only such an agent swaps its markdown for claims.
+   *  CL-READERWATCHER: and only once its S0 import has settled (claims-import.json; older builds ignore it). */
   const ledger = (a) => {
     const d = path.join(hive, 'agents', a, 'memory', 'claims');
     fs.mkdirSync(d, { recursive: true });
     fs.writeFileSync(path.join(d, '2026-10.jsonl'), '');
+    fs.writeFileSync(path.join(hive, 'agents', a, 'memory', 'claims-import.json'), '{"v":1}\n');
   };
   /** A claim chunk as chunksFor would make it (header line + body). */
   const chunk = (id, wing, status, text, extra = {}) => {
