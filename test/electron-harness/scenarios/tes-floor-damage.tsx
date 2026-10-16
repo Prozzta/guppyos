@@ -208,8 +208,10 @@ proto.render = function (this: any) {
   // straddles the art's top edge, held 3 frames by a tick after the floor's, then put back. On the
   // frame it goes back, its old rect over the backdrop is drawn again with nothing in it: only the
   // clear inside the scissor takes its px away.
-  // (The canvas takes a resize a few frames late: the step waits for the last pane to be drawn.)
-  if (out.edgeAt < 0 && renders >= EDGE_FROM && calm >= 8 && looksAt >= 0 && out.configs.length === RESIZES.length + 1) out.edgeAt = renders;
+  // (The canvas takes a resize a few frames late: the step waits for the last pane to be drawn. It
+  // also waits for the LOOKS to end, so the two never hold the same person.)
+  const looksEnd = looksAt + LOOKS[LOOKS.length - 1].at;
+  if (out.edgeAt < 0 && renders >= EDGE_FROM && calm >= 8 && looksAt >= 0 && renders > looksEnd && out.configs.length === RESIZES.length + 1) out.edgeAt = renders;
   const S2 = this.__tesScene;
   if (out.edgeAt >= 0 && layer && S2?.bounds) {
     if (renders === out.edgeAt) {
