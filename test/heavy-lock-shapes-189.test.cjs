@@ -32,7 +32,7 @@ function fixture(t) {
   w('light.sh', 'echo hi\n');
   w('run', "#!/usr/bin/env node\nrequire('child_process').spawnSync('node', ['test/tools/run-tests.cjs']);\n");
   w('lightrun', '#!/usr/bin/env node\nconsole.log(1);\n');
-  w('tool', 'MZ\0\0binary');
+  w('tool', 'MZ\0\0\nnpm ci\n');   // a binary whose bytes happen to spell a heavy command
   w('s.ps1', `${SUITE}\n`);
   w('s.bat', `@echo off\r\n${SUITE}\r\n`);
   w('ok.test.cjs', "require('node:test')('x', () => {});\n");
