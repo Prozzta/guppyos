@@ -97,14 +97,27 @@ test('W5 the worker\'s exit clears warm (a degraded row after it says warm false
   assert.equal(row.warm, false);
 });
 
-/** A fake embedder whose model loads on the first embed, like OnnxEmbedder. */
+test('W6 a search pending when the worker exits gets a worker-exit row that says the warm budget it had (Jim S1)', async () => {
+  const r = rig();
+  await r.answer('search', { query: 'x' });
+  const p = r.client.request('search', { query: 'y' });
+  assert.equal(r.last().deadline - r.now, SEARCH_DEADLINE_WARM_MS);
+  r.w().exit(1);
+  await p;
+  const row = r.rows.find((x) => x.kind === 'native-memory-degraded' && x.reason === 'worker-exit');
+  assert.ok(row, 'the pending search is logged as degraded by the exit');
+  assert.equal(row.warm, true, 'the row is written before the exit clears warm');
+  assert.equal(row.budgetMs, SEARCH_DEADLINE_WARM_MS);
+  assert.equal(r.nextSearchBudget(), SEARCH_DEADLINE_COLD_MS, 'and the next worker starts cold');
+});
+
+/** A fake embedder whose model loads on the first non-empty embed, like OnnxEmbedder (an empty list returns early). */
 function lazyEmbedder() {
-  const e = { loaded: false, loads: 0, embed: async (t) => { if (!e.loaded) { e.loaded = true; e.loads++; } return t.map(() => new Float32Array(384)); }, unload: async () => { e.loaded = false; } };
+  const e = { loaded: false, loads: 0, embed: async (t) => { if (t.length === 0) return []; if (!e.loaded) { e.loaded = true; e.loads++; } return t.map(() => new Float32Array(384)); }, unload: async () => { e.loaded = false; } };
   return e;
 }
-function engineRig() {
+function engineRig(emb = lazyEmbedder()) {
   const timers = [];
-  const emb = lazyEmbedder();
   const told = [];
   const e = new MemoryEngine({
     hiveRoot: fs.mkdtempSync(path.join(JAIL, 'h-')), store: { search: () => [], counts: () => ({ chunks: 0 }), fileBytes: () => 0, db: { prepare: () => ({ all: () => [] }) } }, embedder: emb, countTokens: (t) => t.split(/\s+/).length, mode: () => 'native', watch: null,
@@ -134,6 +147,26 @@ test('E2 a status with nothing embedded says nothing (the model is still unloade
   await e.status();
   assert.equal(emb.loaded, false);
   assert.deepEqual(told, []);
+});
+
+test('E3 a model load that fails announces nothing; the next good load does (Jim N2)', async () => {
+  const emb = lazyEmbedder();
+  const good = emb.embed;
+  emb.embed = async () => { emb.embed = good; throw new Error('load failed'); };
+  const { e, told } = engineRig(emb);
+  await assert.rejects(e.embedTexts(['a']), /load failed/);
+  assert.deepEqual(told, [], 'announced only after the embed returns');
+  await e.embedTexts(['b']);
+  assert.deepEqual(told, ['loaded']);
+});
+
+test('E4 embedding an empty list loads no model, so it announces nothing (Jim N3)', async () => {
+  const { e, emb, told } = engineRig();
+  await e.embedTexts([]);
+  assert.equal(emb.loaded, false);
+  assert.deepEqual(told, []);
+  await e.embedTexts(['a']);
+  assert.deepEqual(told, ['loaded']);
 });
 
 test('worker.ts posts model-loaded from the engine hook; service.ts no longer warms on any ok reply', () => {

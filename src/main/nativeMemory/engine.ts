@@ -227,7 +227,8 @@ export class MemoryEngine {
     const v = await this.d.embedder.embed(texts);
     this.stats.embedded += texts.length;
     this.stats.embedMs += this.now() - t0;
-    if (!this.modelAnnounced) { this.modelAnnounced = true; this.d.onModelLoaded?.(); }
+    // Jim N3: an empty list returns early without loading the model, so it announces nothing.
+    if (texts.length > 0 && !this.modelAnnounced) { this.modelAnnounced = true; this.d.onModelLoaded?.(); }
     if (this.unloadTimer) this.clearTimer(this.unloadTimer);
     this.unloadTimer = this.setTimer(() => { this.unloadTimer = null; this.modelAnnounced = false; void this.d.embedder.unload(); this.d.onModelUnload?.(); }, this.d.idleUnloadMs ?? MODEL_IDLE_UNLOAD_MS);
     return v;
