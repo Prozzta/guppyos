@@ -158,6 +158,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
+import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { BootHookClock } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
@@ -531,6 +532,8 @@ const floorDigest = new FloorDigest({
   ledgerIssues: () => hive.ledgerGuard.issues(),
   // DWIGHT-HELD-INTERFERED fix 2: a held wake the Human was told about is a decision for god.
   heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
+  // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
+  silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
@@ -845,6 +848,23 @@ const screenGuardNotices = new ScreenGuardNotices({
   },
   clear: (agentId) => hive.mail.clearScreenGuardAlert(agentId)
 });
+/** FLEET-LIVENESS-BLIND: each live agent's turn, hook clock and open tool call, for the digest's
+ *  silent-turn decision. The clock is hook traffic only (hookSeenAt), never PTY output. */
+function silentTurnFacts(): SilentTurnFacts[] {
+  const reg = hive.registry();
+  return Object.entries(reg.agents ?? {}).map(([agentId, a]) => {
+    const wake = workerWake.livenessFacts(agentId);
+    const ptyId = ptyForAgent(agentId);
+    let mailWaiting = 0;
+    if (ptyId) { try { mailWaiting = mailPendingIds(agentId).length; } catch { mailWaiting = 0; } }
+    const tool = hookServer.runningTool(agentId);
+    return {
+      agentId, name: agentDisplayName(agentId), lifecycle: wake.lifecycle, activeSince: wake.activeSince, turnStartAt: wake.turnStartAt,
+      lastHookAt: hookSeenAt.get(agentId) ?? 0, runningTool: tool ? { name: tool.name, since: tool.since } : null,
+      mailWaiting, hasPty: !!ptyId, archived: a.archived === true, onHold: !!a.onHold, halted: control.snapshot(agentId).halted
+    };
+  });
+}
 /** The name a person knows the agent by, for the alert's wording. */
 function agentDisplayName(agentId: string): string {
   try {

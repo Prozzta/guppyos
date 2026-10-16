@@ -19,6 +19,7 @@ import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
 import { ageText } from '../shared/agentBadges';
+import type { SilentTurn } from './silentTurn';
 
 export interface FloorDigestConfig {
   enabled: boolean;
@@ -53,6 +54,7 @@ export interface DigestHeldWake { agentId: string; name?: string; messages: numb
 
 export interface FloorDigestInput {
   heldWakes?: DigestHeldWake[];
+  silentTurns?: SilentTurn[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -68,8 +70,19 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = []): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
+  // FLEET-LIVENESS-BLIND: shown working, no hook or tool call (silentTurn.ts). The id carries when
+  // the silence began, so one silence wakes god once and a later one is a new decision.
+  for (const s of silentTurns) {
+    const who = s.name ?? s.agentId;
+    const unread = s.mailWaiting > 0 ? `, ${s.mailWaiting} unread` : '';
+    items.push(s.kind === 'silent'
+      ? { id: `silent-turn:${s.agentId}:${s.since}`, cardId: null,
+        line: `${who} is shown working but has made no hook or tool call for ${ageText(now - s.since)}${unread} - the turn may be hung; look at ${who}'s terminal (nothing was stopped or restarted)` }
+      : { id: `tool-open-long:${s.agentId}:${s.since}`, cardId: null,
+        line: `${who} has had one tool call (${s.tool ?? 'unknown'}) open for ${ageText(now - s.since)}${unread} - it may be hung or its end was lost; look at ${who}'s terminal (nothing was stopped or restarted)` });
+  }
   // One item per hold (its id carries when it began, so a new hold is a new decision).
   for (const h of heldWakes) {
     const who = h.name ?? h.agentId;
@@ -113,7 +126,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? []);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? []);
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -222,6 +235,8 @@ export interface FloorDigestHost {
   ledgerIssues(): LedgerIssue[];
   /** DWIGHT-HELD-INTERFERED: held wakes the Human has been told about. Optional. */
   heldWakes?(): DigestHeldWake[];
+  /** FLEET-LIVENESS-BLIND: agents shown working with no hook or tool call. Optional. */
+  silentTurns?(): SilentTurn[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -261,7 +276,8 @@ export class FloorDigest {
     const { markdown, decisionItems: items } = buildFloorDigest({
       tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(),
       ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now,
-      heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })()
+      heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })(),
+      silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })()
     });
     // The timestamp line changes every run; rewrite the file only when the content did.
     const body = markdown.split('\n').filter((l) => !l.startsWith('_Written by the harness')).join('\n');

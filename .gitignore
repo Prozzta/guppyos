@@ -42,6 +42,7 @@ test/.mutants-wsg178/
 test/.mutants-card-idle/
 test/.mutants-board178/
 test/.mutants-held178/
+test/.mutants-fleet189/
 
 # NATIVE-MEMORY: the bundled model is provisioned by scripts/fetch-memory-model.cjs (digest-pinned
 # in resources/models/native-memory-manifest.json); the 90 MB binaries are never committed.
