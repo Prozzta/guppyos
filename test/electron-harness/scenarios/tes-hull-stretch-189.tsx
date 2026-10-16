@@ -1,7 +1,8 @@
 /**
  * RENDERED regression: the TES hull ends at the pack art's real bottom.  A tall pane must not
  * turn its last hull row into a wall merely because there is unused vertical viewport below it.
- * It also returns the three jailed renders for release evidence.
+ * The declared back-wall-to-front-lip / outer-lip box must instead use the largest uniform fit
+ * and sit at the pane's centre. It returns jailed renders for release evidence.
  */
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
@@ -24,6 +25,8 @@ declare global {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const aspects = [
   { name: 'tall', w: 360, h: 760 },
+  { name: 'screenshot', w: 458, h: 587 },
+  { name: 'human', w: 575, h: 612 },
   { name: 'square', w: 640, h: 640 },
   { name: 'wide', w: 960, h: 500 },
 ];
@@ -57,29 +60,39 @@ const agents = [
   { id: 'dwight', name: 'Dwight', character: 'dwight', accent: 'mint', status: 'idle' },
 ].map((a) => ({ description: '', project: 'Harness', tmuxTarget: '', cwd: 'C:/harness-test-home', action: 'awaiting', progress: 0, provider: 'claude', command: 'claude', ptyId: `pty-${a.id}`, ...a }));
 
-function extraHullRows() {
+function placement() {
   const S = app?.__tesScene;
   if (!S) throw new Error('TES scene was not mounted');
-  const r = app.renderer, world = S.world, n = Math.round(world.scale.x * r.resolution);
+  const fit = S.frame.fit;
+  if (!fit) throw new Error('TES frame has no visual fit box');
+  const r = app.renderer, world = S.world;
   const W = app.canvas.width, H = app.canvas.height;
   const rt = RenderTexture.create({ width: W, height: H, resolution: 1, scaleMode: 'nearest' });
   const bg = r.background.color.toArray();
   r.render({ container: app.stage, target: rt, clear: true, clearColor: bg });
   const px = r.extract.pixels({ target: rt }).pixels as Uint8ClampedArray;
   rt.destroy(true);
+  const sx = world.scale.x * r.resolution, sy = world.scale.y * r.resolution;
+  const box = {
+    x0: (world.x + fit.x0 * world.scale.x) * r.resolution,
+    x1: (world.x + (fit.x1 + 1) * world.scale.x) * r.resolution,
+    y0: (world.y + fit.y0 * world.scale.y) * r.resolution,
+    y1: (world.y + (fit.y1 + 1) * world.scale.y) * r.resolution,
+  };
   const x0 = Math.max(0, Math.ceil((world.x + PACK_ART.tes.x0 * world.scale.x) * r.resolution));
   const x1 = Math.min(W, Math.floor((world.x + (PACK_ART.tes.x1 + 1) * world.scale.x) * r.resolution));
   const y0 = Math.max(0, Math.ceil((world.y + (PACK_ART.tes.y1 + 1) * world.scale.y) * r.resolution));
-  let rows = 0;
+  let syntheticPixels = 0;
   for (let y = y0; y < H; y++) {
-    let painted = 0;
     for (let x = x0; x < x1; x++) {
       const i = (y * W + x) * 4;
-      if (px[i] !== Math.round(bg[0] * 255) || px[i + 1] !== Math.round(bg[1] * 255) || px[i + 2] !== Math.round(bg[2] * 255)) painted++;
+      if (px[i] !== Math.round(bg[0] * 255) || px[i + 1] !== Math.round(bg[1] * 255) || px[i + 2] !== Math.round(bg[2] * 255)) syntheticPixels++;
     }
-    if (painted > (x1 - x0) * 0.8) rows++;
   }
-  return { n, naturalBottom: y0, extraHullRows: rows };
+  return {
+    fit, box, scaleX: sx, scaleY: sy, expectedScale: Math.min(W / (fit.x1 - fit.x0 + 1), H / (fit.y1 - fit.y0 + 1)),
+    cacheScale: S.k, naturalBottom: y0, syntheticPixels,
+  };
 }
 
 window.__harnessRun = async () => {
@@ -98,7 +111,7 @@ window.__harnessRun = async () => {
       box.style.width = `${aspect.w}px`; box.style.height = `${aspect.h}px`;
       for (let i = 0; i < 12 && !app; i++) await wait(100);
       await wait(250);
-      const metric = extraHullRows();
+      const metric = placement();
       const shot = await window.harness.capture(aspect.w, aspect.h);
       out.push({ ...aspect, ...metric, size: shot.size, png: shot.png });
     }

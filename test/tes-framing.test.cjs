@@ -74,6 +74,9 @@ test('PACK_ART.tes is re-measured from the pack: the art box, and a 48-row dead 
   // The dead band is exactly the art's rows below the content: drawn (the hull face), holding nothing.
   assert.equal(a.deadBottom, a.y1 - contentBottom, 'deadBottom = art bottom - content bottom');
   assert.equal(a.deadBottom, 48);
+  assert.deepEqual({ left: a.leftLip, right: a.rightLip, back: a.backWallTop, front: a.frontLip },
+    { left: a.x0, right: a.x1, back: a.y0, front: contentBottom },
+    'the semantic fit is outer lip-to-lip and back-wall top through the deck front lip');
 });
 
 test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuff objects, a person on every reachable cell', () => {
@@ -121,7 +124,7 @@ test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuf
 
 test('floorFrame: TES frames its art with the margin; the office (and any other id) fits the whole map', () => {
   const t = F.floorFrame('tes', 960, 640);
-  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 }, art: { x0: 320, y0: 32, x1: 607, y1: 415 } });
+  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 }, art: { x0: 320, y0: 32, x1: 607, y1: 415 }, fit: { x0: 320, y0: 32, x1: 607, y1: 367 } });
   assert.deepEqual(F.packFrame('tes'), t);
   for (const id of ['office', 'dunder', undefined, null, '', 'toString', '__proto__']) {
     assert.deepEqual(F.floorFrame(id, 1024, 768), { x: 0, y: 0, w: 1024, h: 768, deadBottom: 0 }, String(id));
@@ -132,25 +135,24 @@ test('floorFrame: TES frames its art with the margin; the office (and any other 
   assert.deepEqual(F.floorFrame('tes', 960, 400), { x: 0, y: 0, w: 960, h: 400, deadBottom: 0 });
 });
 
-test('Camera, TES: the content is centred both ways, never clipped, and only dead-band rows leave the pane', () => {
+test('Camera, TES: the measured outer-lip / wall-lip box is the largest uniform centred fit', () => {
   const f = F.floorFrame('tes', 960, 640);
-  const content = { x0: f.x, y0: f.y, x1: f.x + f.w, y1: f.y + f.h - f.deadBottom };
+  const content = f.fit;
   for (const [vw, vh] of VIEWS) {
     const c = settled(960, 640, f, vw, vh);
-    const z = Math.min(vw / f.w, vh / (f.h - f.deadBottom));
+    const z = Math.min(vw / (content.x1 - content.x0 + 1), vh / (content.y1 - content.y0 + 1));
     assert.ok(Math.abs(c.z - z) < 1e-9, `${vw}x${vh}: zoom fits the content (${c.z} vs ${z})`);
     const s = shown(c, vw, vh);
-    assert.ok(s.x0 <= content.x0 + EPS && s.x1 >= content.x1 - EPS, `${vw}x${vh}: content not clipped left/right ${JSON.stringify(s)}`);
-    assert.ok(s.y0 <= content.y0 + EPS && s.y1 >= content.y1 - EPS, `${vw}x${vh}: content not clipped top/bottom ${JSON.stringify(s)}`);
-    // Centred: the content's centre is the pane's centre.
-    assert.ok(Math.abs((content.x0 + content.x1) / 2 * c.z + c.x - vw / 2) < 1e-6, `${vw}x${vh}: centred horizontally`);
-    assert.ok(Math.abs((content.y0 + content.y1) / 2 * c.z + c.y - vh / 2) < 1e-6, `${vw}x${vh}: centred vertically`);
+    assert.ok(s.x0 <= content.x0 + EPS && s.x1 >= content.x1 + 1 - EPS, `${vw}x${vh}: content not clipped left/right ${JSON.stringify(s)}`);
+    assert.ok(s.y0 <= content.y0 + EPS && s.y1 >= content.y1 + 1 - EPS, `${vw}x${vh}: content not clipped top/bottom ${JSON.stringify(s)}`);
+    assert.ok(Math.min(Math.abs((content.x1 - content.x0 + 1) * c.z - vw), Math.abs((content.y1 - content.y0 + 1) * c.z - vh)) < 1e-6, `${vw}x${vh}: limiting axis fills`);
+    assert.ok(Math.abs((content.x0 + content.x1 + 1) / 2 * c.z + c.x - vw / 2) < 1e-6, `${vw}x${vh}: centred horizontally`);
+    assert.ok(Math.abs((content.y0 + content.y1 + 1) / 2 * c.z + c.y - vh / 2) < 1e-6, `${vw}x${vh}: centred vertically`);
   }
-  // At the TES default aspect the content fills the pane exactly and the whole dead band is below it.
+  // At the TES default aspect the semantic visual box fills the pane exactly; genuine hull remains outside it.
   const vh = 430, vw = Math.round(vh * F.frameAspect(f));
   const c = settled(960, 640, f, vw, vh), s = shown(c, vw, vh);
-  assert.ok(Math.abs(s.y1 - content.y1) < 0.01 && Math.abs(s.y0 - content.y0) < 0.01, `framed top ${s.y0} and bottom ${s.y1}`);
-  assert.ok(s.y1 < f.y + f.h, 'the dead band runs off the bottom');
+  assert.ok(Math.abs(s.y1 - (content.y1 + 1)) < 0.01 && Math.abs(s.y0 - content.y0) < 0.01, `framed top ${s.y0} and bottom ${s.y1}`);
 });
 
 test('Camera, office: no frame gives exactly the old fit (whole map, centred)', () => {
@@ -168,14 +170,14 @@ test('Camera, office: no frame gives exactly the old fit (whole map, centred)', 
 
 test('framedSidebarWidth: the default pane takes the TES content aspect, clamped as the splitter clamps', () => {
   const f = F.packFrame('tes');
-  assert.ok(Math.abs(F.frameAspect(f) - 304 / 344) < 1e-12);
+  assert.ok(Math.abs(F.frameAspect(f) - 288 / 336) < 1e-12);
   assert.equal(F.FLOOR_ROW_CHROME, 42);
   // TES-FLOOR-WHOLE-188: the framed pane takes the row's left padding, so only the right padding
   // and the splitter lie beside it.
   assert.equal(F.FLOOR_PANE_BLEED, 16);
-  // The screenshot windows: pane heights 430 and 640 give panes 380 and 566 wide.
-  assert.equal(F.framedSidebarWidth(f, 960, 430), 960 - 26 - 380);
-  assert.equal(F.framedSidebarWidth(f, 1290, 640), 1290 - 26 - 566);
+  // The visual fit at pane heights 430 and 640 gives panes 369 and 549 wide.
+  assert.equal(F.framedSidebarWidth(f, 960, 430), 960 - 26 - 369);
+  assert.equal(F.framedSidebarWidth(f, 1290, 640), 1290 - 26 - 549);
   // Clamps: never under 320, never over 1200 nor viewport - 360.
   assert.equal(F.framedSidebarWidth(f, 700, 260), 340, '700 wide: viewport - 360');
   assert.equal(F.framedSidebarWidth(f, 600, 900), 320);

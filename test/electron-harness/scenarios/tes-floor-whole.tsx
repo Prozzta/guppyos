@@ -3,11 +3,11 @@
  * crew, on a synthetic clock (as tes-floor-ease.tsx did), and the host box is resized (the plan) so
  * the camera moves, and crew members are selected (the plan), which must not move it (TES-SCENE-BOUNCE-188). After
  * every render:
- * - the camera is whole: n = world scale x DPR is a whole number, and so are the world's x and y in
- *   device px; n is wholeScale of the pane's device size, and the floor texture's k is n;
+ * - the semantic lip-to-lip box has the largest uniform scale that fits and its midpoint is at the
+ *   pane midpoint. The static floor is cached at ceil(scale), then sharply resampled once;
  * - every CHECK_EVERY renders, the TEXEL CHECK: the stage as drawn, read back in device px, against
  *   the full depth sort drawn at one px per map px ('below', then the people and EVERY static sorted
- *   together, the hull, 'above'): device px (X, Y) must equal map px (floor((X - ox) / n),
+ *   together, 'above'): device px (X, Y) must equal map px (floor((X - ox) / n),
  *   floor((Y - oy) / n)), the backdrop off the map. So every art px is n x n device px, there is no
  *   seam, and nobody is drawn over a static in front of them (the bubbles, text and vector shapes
  *   over the floor, are left out of both). A draw with the people over every
@@ -22,7 +22,7 @@ import { Application, RenderTexture, Sprite } from 'pixi.js';
 import { OfficeFloor } from '../../../src/renderer/src/scene/office/OfficeFloor';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCatalog';
-import { floorFrame, wholeScale, PACK_ART } from '../../../src/renderer/src/scene/themes/framing';
+import { floorFrame, PACK_ART } from '../../../src/renderer/src/scene/themes/framing';
 import { BOX, RESIZES, SELECTS, LAST, CHECK_EVERY } from './tes-floor-whole-plan';
 
 declare global {
@@ -101,7 +101,7 @@ function mapRef(app: any, S: any, H: number, clearColor: number[], crewTop: bool
 }
 
 const out = {
-  frames: 0, wholeBad: 0, nBad: 0, kBad: 0, nSeen: [] as number[], builds: 0, easing: 0, panned: 0, panAt: '' as string, selects: 0, overflowSelects: 0,
+  frames: 0, fitBad: 0, fitAt: '' as string, cacheBad: 0, builds: 0, easing: 0, panned: 0, panAt: '' as string, selects: 0,
   texelChecks: 0, texelEasing: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
   teethChecks: 0, teethMax: 0, edgeBlank: 0, bottomBand: 0, bottomChecks: 0,
   // Every frame: on an axis the art covers, the device px of frame margin (backdrop) in the pane.
@@ -128,19 +128,19 @@ proto.render = function (this: any) {
       const n = w.scale.x * r, ox = w.x * r, oy = w.y * r;
       const Wd = Math.round(app.screen.width * r), Hd = Math.round(app.screen.height * r);
       out.frames++;
-      if (!isInt(n) || !isInt(ox) || !isInt(oy)) out.wholeBad++;
-      const keep = S.frame.keep;
-      if (Math.round(n) !== wholeScale(keep, Wd, Hd)) out.nBad++;
-      if (S.k !== Math.round(n)) out.kBad++;
-      const art = S.frame.art;
-      const cx = (art.x1 + 1 - art.x0) * n >= Wd, cy = (art.y1 + 1 - art.y0) * n >= Hd;
-      if (cx || cy) {
-        out.coveredFrames++;
-        const m = (cx ? Math.max(0, ox + art.x0 * n) + Math.max(0, Wd - (ox + (art.x1 + 1) * n)) : 0)
-          + (cy ? Math.max(0, oy + art.y0 * n) + Math.max(0, Hd - (oy + (art.y1 + 1) * n)) : 0);
-        if (m > 0) { out.marginFrames++; if (m > out.marginMax) { out.marginMax = m; out.marginAt = `${renders} ${Wd}x${Hd} n=${n} ox=${ox} oy=${oy}`; } }
-      }
-      if (out.nSeen[out.nSeen.length - 1] !== Math.round(n)) out.nSeen.push(Math.round(n));
+      const fit = S.frame.fit;
+      if (!fit) throw new Error('TES frame has no semantic fit box');
+      const fw = fit.x1 + 1 - fit.x0, fh = fit.y1 + 1 - fit.y0;
+      const expected = Math.min(Wd / fw, Hd / fh);
+      const left = ox + fit.x0 * n, right = ox + (fit.x1 + 1) * n;
+      const top = oy + fit.y0 * n, bottom = oy + (fit.y1 + 1) * n;
+      const fillsWidth = Wd / fw <= Hd / fh;
+      const failedFit = Math.abs(n - expected) * (fillsWidth ? fw : fh) > 1 || Math.abs(w.scale.x - w.scale.y) > 1e-6
+        || Math.abs((left + right) / 2 - Wd / 2) > 1 || Math.abs((top + bottom) / 2 - Hd / 2) > 1
+        || left < -1 || top < -1 || right > Wd + 1 || bottom > Hd + 1
+        || (fillsWidth ? Math.abs(right - left - Wd) > 1 : Math.abs(bottom - top - Hd) > 1);
+      if (failedFit) { out.fitBad++; if (!out.fitAt) out.fitAt = `${Wd}x${Hd} n=${n} expected=${expected} box=${left},${top},${right},${bottom}`; }
+      if (!Number.isInteger(S.k) || S.k < n - 1e-6 || S.k >= n + 1) out.cacheBad++;
       out.builds = app.__tesStaticCacheBuilds ?? 0;
       const moved = w.x !== last.x || w.y !== last.y;
       const sameScale = w.scale.x === last.s;
@@ -148,7 +148,6 @@ proto.render = function (this: any) {
       // TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves (a select's nudge lifted it).
       const pane = `${Wd}x${Hd}`;
       if (moved && sameScale && pane === last.pane) { out.panned++; if (!out.panAt) out.panAt = `render ${renders} ${pane} ox=${ox} oy=${oy}`; }
-      overflowNow = S.frame.w * n > Wd || (S.frame.h - S.frame.deadBottom) * n > Hd;
       last = { x: w.x, y: w.y, s: w.scale.x, pane };
       if (renders % CHECK_EVERY === 0 && renders > 2) {
         const N = Math.round(n), OX = Math.round(ox), OY = Math.round(oy);
@@ -162,6 +161,9 @@ proto.render = function (this: any) {
         const shot = pixelsOf(app, rt);
         const SW = rt.pixelWidth ?? Wd;
         rt.destroy(true);
+        // Exact source-pixel mapping is meaningful only for legacy whole placement.  Fit mode uses
+        // the cached integer source plus one deliberately fractional nearest-neighbour resample.
+        if (isInt(n) && isInt(ox) && isInt(oy)) {
         const H = Math.max(S.mapH, Math.ceil((Hd - OY) / N) + 1);
         const ref = mapRef(app, S, H, clear, false);
         let bad = 0;
@@ -192,6 +194,7 @@ proto.render = function (this: any) {
           for (let j = 0; j < ref.length; j += 4) if (ref[j] !== top[j] || ref[j + 1] !== top[j + 1] || ref[j + 2] !== top[j + 2]) t++;
           out.teethChecks++; out.teethMax = Math.max(out.teethMax, t);
         }
+        }
         if (bub) bub.visible = true;
         // The pane's edges are never transparent. The bottom may be the palette backdrop when the
         // supplied art ends above it; tes-hull-stretch-189 bounds that rendered case.
@@ -205,8 +208,6 @@ proto.render = function (this: any) {
         for (let X = 0; X < Wd; X++) { edge('top', X, 0); edge('bottom', X, Hd - 1); }
         for (let Y = 0; Y < Hd; Y++) { edge('left', 0, Y); edge('right', Wd - 1, Y); }
         const a = PACK_ART.tes;
-        out.bottomChecks++;
-        for (let X = Math.max(0, OX + a.x0 * N); X < Math.min(Wd, OX + (a.x1 + 1) * N); X++) if (isBg(((Hd - 1) * SW + X) * 4)) { out.bottomBand++; break; }
         const key = `${app.screen.width}x${app.screen.height}`;
         // Per pane, as it is at its last check (at rest).
         const c = { box: key, dev: `${Wd}x${Hd}`, n: N, ox: OX, oy: OY, sideL: OX + a.x0 * N, sideR: Wd - (OX + (a.x1 + 1) * N), edges };

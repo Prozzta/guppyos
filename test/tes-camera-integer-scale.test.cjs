@@ -14,7 +14,11 @@ const { Camera } = loadTs('src/renderer/src/scene/office/Camera.ts');
 const { floorFrame, wholeScale } = loadTs('src/renderer/src/scene/themes/framing.ts');
 
 const isInt = (v) => Math.abs(v - Math.round(v)) < 1e-6;
-const TES = floorFrame('tes', 960, 640);
+// Camera's whole-device-pixel invariants still cover the generic keep-box path. TES itself now
+// opts into its semantic visual fit, which uses the sharp single-resample path and is covered by
+// tes-hull-stretch-189 and tes-framing below.
+const FIT = floorFrame('tes', 960, 640);
+const TES = (() => { const f = { ...FIT }; delete f.fit; return f; })();
 const RAW = (() => { const f = { ...TES }; delete f.keep; return f; })();
 
 function make(W, H, r, { CameraClass = Camera, frame = TES } = {}) {
