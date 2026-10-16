@@ -4,6 +4,7 @@ import type { ProjectThemeId, ProjectThemeSeed } from '../shared/projectTheme';
 import type { ModelsCatalog, ModelsRefreshRow } from '../shared/modelCatalog';
 import type { ModelPinFields } from '../shared/modelPin';
 import type { InputOrigin } from '../shared/inputOrigin';
+import type { LedgerUiAgentView, LedgerUiResult, LedgerUiSummary } from '../shared/claimsUi';
 import type { RendererErrorReport } from '../shared/rendererError';
 import type { GraphicsStatusView } from '../shared/graphicsMode';
 import type { Eligibility, TerminalInputState } from '../shared/inputProvenance';
@@ -854,6 +855,18 @@ const api = {
    *  convenience. */
   readClipboardSync: (): string => {
     try { return ipcRenderer.sendSync('app:readClipboardSync') ?? ''; } catch { return ''; }
+  },
+
+  // ─── Claim ledger (W7: the Human's ledger UI in Settings) ────────────────
+  /** Main owns every write; revert, purge, export and a level drop from writer also need main's own confirm. */
+  claimsUi: {
+    summary: (): Promise<LedgerUiSummary> => ipcRenderer.invoke('claims-ui:summary'),
+    view: (agentId: string): Promise<LedgerUiAgentView | { error: string }> => ipcRenderer.invoke('claims-ui:view', agentId),
+    addPreference: (agentId: string, text: string, key?: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:preference', agentId, text, key),
+    revert: (agentId: string, eventId: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:revert', agentId, eventId),
+    purge: (agentId: string, ids: string[], typed: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:purge', agentId, ids, typed),
+    setLevel: (level: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:set-level', level),
+    exportNow: (agentId: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:export', agentId),
   },
 
   // ─── Config ──────────────────────────────────────────────────────────────
