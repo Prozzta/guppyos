@@ -56,6 +56,8 @@ const ROWS = [
   ['2 ./run', './run', 'heavy:bench'],                                          // light
   ['2 ./lightrun', './lightrun', 'light'],                                      // light
   ['2 ./missing', './missing', 'provisional'],                                  // light
+  ['2 node <a name that does not read>', 'node eval 9333', 'light'],            // light (replay: `$E eval`, `"$T" --hide-layer Stuff`)
+  ['2 a runner variable', 'T="/c/Program Files/Tiled/x.exe"; "$T" --hide-layer Stuff a.tmx', 'light'], // light
   ['2 a binary', './tool --x', 'light'],                                        // light
   ['2 /usr/bin/env', '/usr/bin/env FOO=1', 'light'],                            // light
   ['3 depth-2', `bash -c "bash -c 'bash s.sh'"`, 'heavy:suite'],                // light
@@ -70,6 +72,7 @@ const ROWS = [
   ['5 x.bat', 's.bat', 'heavy:suite'],                                          // light
   ['6 node --test missing', 'node --test missing.test.cjs', 'provisional'],     // light
   ['6 node --test present', 'node --test ok.test.cjs', 'light'],                // light
+  ['6 a loop of single files', 'for f in a b; do node --test test/$f.test.cjs; done', 'light'], // light
   ['7 $TEMP', 'bash $TEMP/s.sh', 'heavy:suite'],                                // provisional
   ['7 ${HOME}', 'bash ${HOME}/s.sh', 'heavy:suite'],                            // provisional
   ['7 ~', 'bash ~/s.sh', 'heavy:suite'],                                        // provisional

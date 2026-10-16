@@ -530,21 +530,15 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false)
   const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (loads ${marker})` });
   // HEAVY-LOCK-SHAPES-189: node runs an extensionless script as node resolves it (`node run`: the
   // file run, else run.js, else run/index.js); a shebang script (`./run`, anyName) is the file itself.
+  // One that does not read stays as before (not judged): the replay showed the name is mostly not a
+  // script at all (`"$T" --hide-layer Stuff`, `$E eval 9333` read as `node Stuff` / `node eval`).
   let prog = prog0;
-  if (prog.script && !JS_SCRIPT.test(prog.script) && ctx.readScript) {
+  if (prog.script && !anyName && !JS_SCRIPT.test(prog.script) && ctx.readScript && !prog.script.replace(/\\/g, '/').split('/').pop()!.includes('.')) {
     const s = prog.script;
-    const base = s.replace(/\\/g, '/').split('/').pop()!;
-    if (anyName) prog = { ...prog, script: s };
-    else if (!base.includes('.')) {
-      let found: string | null = null;
-      for (const p of [s, `${s}.js`, `${s.replace(/[\\/]+$/, '')}/index.js`]) {
-        let t: string | null = null;
-        try { t = ctx.readScript(p, ctx.cd); } catch { t = null; }
-        if (t !== null) { found = p; break; }
-      }
-      if (found === null) return unreadable(s);
-      prog = { ...prog, script: found };
-      anyName = true;
+    for (const p of [s, `${s}.js`, `${s.replace(/[\\/]+$/, '')}/index.js`]) {
+      let t: string | null = null;
+      try { t = ctx.readScript(p, ctx.cd); } catch { t = null; }
+      if (t !== null) { prog = { ...prog, script: p }; anyName = true; break; }
     }
   }
   if (prog.inline !== null) { const m = scanJs(prog.inline).marker; return m ? hit(m, '-e') : { heavy: false }; }
@@ -710,10 +704,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
       if (files.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
-      // HEAVY-LOCK-SHAPES-189: a named test file the lock cannot read (made later in the call, a
-      // computed path) is unknown, as an unreadable script is: heavy, provisional.
+      // HEAVY-LOCK-SHAPES-189: a named test file the lock cannot read (made later in the call) is
+      // unknown, as an unreadable script is: heavy, provisional. A computed name (`for f in ...; do
+      // node --test test/$f.test.cjs`) stays as before: the replay showed it is a loop of single files.
       if (ctx.readScript) {
-        for (const f of files) {
+        for (const f of files.filter((x) => !x.includes('$'))) {
           let t: string | null = null;
           try { t = ctx.readScript(f, ctx.cd); } catch { t = null; }
           if (t === null) return unreadable(f);
