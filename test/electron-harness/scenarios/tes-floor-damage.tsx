@@ -78,7 +78,7 @@ let agentsNow: any[] = [];
 let picked: Array<{ s: any; x: number; y: number }> = [], still: any = null, kept: { s: any; was: object } | null = null;
 let calm = 0, looksAt = -1, lastKind = 'whole';
 let hold: (() => void) | null = null;
-let edgeHold: (() => void) | null = null, edgeP: { s: any; y: number } | null = null, edgeRect: number[] | null = null;
+let edgeHold: (() => void) | null = null, edgeP: { s: any; x: number } | null = null, edgeRect: number[] | null = null;
 const read = (gl: WebGL2RenderingContext, W: number, H: number) => {
   const px = new Uint8Array(W * H * 4);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -204,8 +204,8 @@ proto.render = function (this: any) {
       }
     }
   }
-  // EDGE (at 700x470@1, n = 1, the vertical axis uncovered): a still person is lifted so its sprite
-  // straddles the art's top edge, held 3 frames by a tick after the floor's, then put back. On the
+  // EDGE (at 700x470@1, n = 1, the horizontal axis is uncovered): a still person is moved so its sprite
+  // straddles the outer left lip, held 3 frames by a tick after the floor's, then put back. On the
   // frame it goes back, its old rect over the backdrop is drawn again with nothing in it: only the
   // clear inside the scissor takes its px away.
   // (The canvas takes a resize a few frames late: the step waits for the last pane to be drawn. It
@@ -217,10 +217,10 @@ proto.render = function (this: any) {
     if (renders === out.edgeAt) {
       const s = picked.filter((p) => p.s.x === p.x && p.s.y === p.y).map((p) => p.s)[0];
       if (s) {
-        const b = s.getBounds(), top = layer.toGlobal({ x: 0, y: S2.bounds.y }).y;
-        const y = s.y, to = y + (top - b.height / 2 - b.y) / layer.worldTransform.d;
-        edgeP = { s, y };
-        edgeHold = () => { s.y = to; };
+        const b = s.getBounds(), left = layer.toGlobal({ x: S2.frame.fit.x0, y: 0 }).x;
+        const x = s.x, to = x + (left - b.width / 2 - b.x) / layer.worldTransform.a;
+        edgeP = { s, x };
+        edgeHold = () => { s.x = to; };
         this.ticker.add(edgeHold, null, -10);
         edgeHold();
       }
@@ -228,7 +228,7 @@ proto.render = function (this: any) {
       const b = edgeP.s.getBounds(), r = this.renderer.resolution;
       edgeRect = [Math.floor(b.x * r), Math.floor(b.y * r), Math.ceil((b.x + b.width) * r), Math.ceil((b.y + b.height) * r)];
       if (edgeHold) { this.ticker.remove(edgeHold); edgeHold = null; }
-      edgeP.s.y = edgeP.y; edgeP = null;
+      edgeP.s.x = edgeP.x; edgeP = null;
       out.edgeCheckAt = renders + 1;
     }
   }

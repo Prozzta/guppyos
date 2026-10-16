@@ -286,7 +286,7 @@ test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above"
   assert.equal(C.hasVisiblePixel(plan.above), false);
 });
 
-test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; the hull over it; no scene texture', () => {
+test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; no scene texture', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.doesNotMatch(src, /atlas/i, 'no split tiles: each would be rounded on its own');
   assert.doesNotMatch(src, /blitFramebuffer|screenCells|regionPicker|cacheKeyOf|wholeSceneRaster|NEAR_MIN_SCALE/);
@@ -294,28 +294,29 @@ test('StationFloor draws the floor straight in the world: the floor texture hold
   // (tes-floor-damage-188 proves every such frame equals a full draw).
   assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2, 'enabled and disabled once, in paint()');
   assert.match(src, /gl\.enable\(gl\.SCISSOR_TEST\);\s*try \{\s*for \(const p of todo\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*realRender\(\{ container: app\.stage, clear: true \}\);\s*\}\s*\} finally \{ gl\.disable\(gl\.SCISSOR_TEST\); \}/);
-  // TES-FLOOR-WHOLE-188: the camera puts every frame on whole device px, so nothing is composed per frame.
+  // The semantic-fit camera has one cached static source; nothing is composed per frame.
   assert.doesNotMatch(src, /sceneRT|sceneSprite|sceneM\b|aboveRoot|sortLayer\.alpha/);
-  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
-  assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.keep \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
+  // TES-HULL M2: and the front statics' linear textures, built with it (tes-camera-integer-scale pins where).
+  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 2, 'two render calls: the floor texture build and the front statics\' textures');
+  assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.fit \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
   assert.match(src, /const floorRoot = new Container\(\);\s*const floorWorld = floorRoot\.addChild\(new Container\(\)\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
   // Cached: the floor texture's tree holds below and every static by staticOrder, and the world
   // shows it. Not cached: below itself. Then the sort layer (people, and statics drawn again), the
-  // hull, 'above' and the bubbles.
+  // 'above' and the bubbles.
   assert.match(src, /if \(cached\) \{\s*floorWorld\.addChild\(below\);\s*for \(const i of order\) if \(staticTex\[i\]\) floorWorld\.addChild\(staticSprite\(i\)\);\s*world\.addChild\(floorView\);\s*\} else world\.addChild\(new Sprite\(below\.texture\)\);\s*world\.addChild\(sortLayer\);/);
-  // The hull is made once, from the composited art, below the deck and over the hull's own
-  // statics: no person is ever under it (tes-hull).
-  assert.match(src, /const hull = new Container\(\);\s*if \(frame0\.deadBottom > 0\) \{\s*const art = blank\(SM\.PW, SM\.PH\);\s*composePx\(art, plan\.below, 0, 0\);\s*for \(const it of plan\.sorted\) if \(it\.px\) composePx\(art, it\.px, Math\.round\(it\.x\), Math\.round\(it\.y\), it\.opacity\);\s*const sk = hullSkirt\(art, frame0\.x \+ FRAME_MARGIN, frame0\.x \+ frame0\.w - FRAME_MARGIN - 1, frame0\.y \+ frame0\.h - 1\);/);
-  assert.match(src, /strip\.position\.set\(sk\.x, frame0\.y \+ frame0\.h\);\s*strip\.height = HULL_STRIP_ROWS;/);
+  // The supplied map art owns the hull's height.  A generated one-row strip cannot silently
+  // turn unused viewport height into more ship (tes-hull-stretch-189 renders the proof).
+  assert.doesNotMatch(src, /hullSkirt|HULL_STRIP_ROWS|strip\.height/);
   // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
   // PANEL-BLINK-188: the chair panels' layer right after 'above', before the bubbles.
-  assert.match(src, /world\.addChild\(hull\);\s*if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
+  assert.match(src, /if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
   assert.equal((src.match(/own\(plan\.above\)/g) || []).length, 1, "'above' is made once");
-  // The floor texture: the bounds at k texels per map px, 1:1, nearest; the old one freed first.
+  // The floor texture: the bounds at k texels per map px. Semantic fit uses one linear
+  // downscale; ordinary floors retain nearest. The old texture is freed first.
   // Its tree is scaled by k and moved to the bounds; the sprite is the bounds in map px.
-  assert.match(src, /const buildFloor = \(k: number\) => \{\s*const b = bounds!;\s*floorView\.texture = Texture\.EMPTY;\s*floorRT\?\.destroy\(true\);\s*floorRT = RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: 'nearest' \}\);\s*floorWorld\.scale\.set\(k\);\s*floorWorld\.position\.set\(-b\.x \* k, -b\.y \* k\);\s*app\.renderer\.render\(\{ container: floorRoot, target: floorRT, clear: true \}\);\s*floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);\s*floorK = k;/);
+  assert.match(src, /const buildFloor = \(k: number\) => \{\s*const b = bounds!;\s*floorView\.texture = Texture\.EMPTY;\s*floorRT\?\.destroy\(true\);\s*floorRT = RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: frame0\.fit \? 'linear' : 'nearest' \}\);\s*floorWorld\.scale\.set\(k\);\s*floorWorld\.position\.set\(-b\.x \* k, -b\.y \* k\);\s*app\.renderer\.render\(\{ container: floorRoot, target: floorRT, clear: true \}\);\s*floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);\s*floorK = k;/);
 });
 
 test('StationFloor picks after each tick: the floor rebuilt on a new k, the statics near a person drawn again; and sorts on a depth change', () => {
@@ -334,7 +335,7 @@ test('StationFloor picks after each tick: the floor rebuilt on a new k, the stat
 
 test('StationFloor frees the floor texture, its tree and every texture it made on unmount, before the app is destroyed', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
-  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => floorRT\?\.destroy\(true\),\s*\(\) => floorRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
+  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => floorRT\?\.destroy\(true\),\s*\(\) => \{ for \(const t of frontTex\) t\?\.destroy\(false\); for \(const t of frontRTs\) t\?\.destroy\(true\); \},\s*\(\) => floorRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
   assert.doesNotMatch(src, /dropCells|postrender/);
   // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
   assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__disposeHiveBubbles\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);

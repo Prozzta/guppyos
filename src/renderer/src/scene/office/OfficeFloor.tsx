@@ -344,6 +344,14 @@ function OfficeScene() {
 
       const world = new Container();
       app.stage.addChild(world);
+      // TES-BUBBLE-TAIL-SHARP-189: thought clouds hang over the world in an unscaled layer, placed
+      // through the world's transform. In the world they were resampled by the camera's zoom, which
+      // eases continuously (fit, follow, wheel), so their text was off 1:1 at almost every frame.
+      const thoughtLayer = new Container();
+      thoughtLayer.eventMode = 'none';
+      app.stage.addChild(thoughtLayer);
+      // For the rendered test (bubble-tail-sharp-189): the clouds' layer and whom they hang over.
+      (app as any).__officeThoughts = { layer: thoughtLayer, world, runtimes };
 
       const mapRenderer = new TiledMapRenderer(resolveThemeMap(theme), tilesetTextures);
       world.addChild(mapRenderer.getContainer());
@@ -1461,7 +1469,7 @@ function OfficeScene() {
           glowColor: hexNum(colors.accent[agent.accent]) ?? hexToNumber(member.shirt),
           onClick: (id) => useStore.getState().select(id),
         });
-        character.show(charLayer);
+        character.show(charLayer, thoughtLayer);
         const rt: Runtime = { character, seatIndex, waitTile, charName };
         // Standard desks paint the 2×2 PC monitor two rows above the seat —
         // give those a DeskScreen (lights up while seated) and a cup spot
@@ -1740,11 +1748,10 @@ function OfficeScene() {
       const onTick = (ticker: Ticker) => {
         const dt = ticker.deltaMS / 1000;
         camera.update(dt);
-        // Thought clouds counter-scale against the camera so their text never
-        // renders below 1:1 screen size when the window/world shrinks.
-        const zoom = world.scale.x;
+        // Thought clouds are placed through the world's transform as the camera left it this frame.
+        const view = { scale: world.scale.x, x: world.x, y: world.y, resolution: app.renderer.resolution };
         for (const rt of runtimes.values()) {
-          rt.character.setBubbleZoom(zoom);
+          rt.character.setBubbleView(view);
           rt.character.update(dt);
         }
         updateCafeteria(dt);

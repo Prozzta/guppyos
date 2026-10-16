@@ -12,19 +12,18 @@ import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
-import { buildScenePlan, byDepth, chairOf, compose as composePx, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
+import { buildScenePlan, byDepth, chairOf, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, sitDraw, WALK_SPEED, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
-import { blank, type Pixels } from './raster';
-import { hullSkirt, HULL_STRIP_ROWS } from './hull';
+import { type Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
 import { exactPicker, frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
 import { DamageTracker, deviceRect, type Drawn } from './damage';
 import type { ThemeLooks } from './themeCatalog';
-import { floorFrame, FRAME_MARGIN } from './framing';
+import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { PanelLayer } from './PanelLayer';
 import { cloudAnchor, drawnSprite } from './cloudAnchor';
@@ -205,22 +204,20 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return s;
       });
 
-      // TES-FLOOR-WHOLE-188: a framed floor is drawn at a whole number n of device px per map px
-      // with its origin on a whole device px (the camera sees to both), so every sprite drawn
-      // straight in the world is n x n device px per art px: no resample, no seam, nothing to
-      // compose per frame. (TES-FLOOR-EASE-188 composed a scene texture every tick instead, to
-      // survive a fractional scale: that cost the GPU process 4x when settled.) The world holds:
+      // TES-FLOOR-WHOLE-188: the world has one cached static floor rather than composing a scene
+      // texture every tick. TES's semantic fit displays that whole-pixel source through one linear
+      // downscale; live people and only their possible front statics stay in depth order above it.
       // - the floor texture: 'below' and every static, at an integer scale k, rebuilt only when k
-      //   changes (a whole-n floor has k = n: one texel per device px);
+      //   changes; a semantic fit linearly downsamples it once at display size;
       // - over it, in depth order, the people, their cups, the parked mugs, and the statics that
-      //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker:
-      //   at a whole n they land on their own pixels, so only those touching a person are picked);
-      // - the hull continued past the art (hull.ts), then 'above', then the bubbles.
+      //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker
+      //   limits that redraw to statics that can overlap a person);
+      // - 'above', then the bubbles.
       const bounds = sceneBounds(plan);
       const cached = bounds !== null && staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
       const frame0 = floorFrame(pack.manifest.id, SM.PW, SM.PH);
-      const pickFront = cached ? (frame0.keep ? exactPicker : frontPicker)(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      const pickFront = cached ? (frame0.fit ? exactPicker : frontPicker)(plan.sorted, order, plan.below.width, plan.below.height) : null;
       // As in the stage, the floor's transform is a child's, so its vertices are made the same way.
       const floorRoot = new Container();
       const floorWorld = floorRoot.addChild(new Container());
@@ -232,34 +229,74 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         world.addChild(floorView);
       } else world.addChild(new Sprite(below.texture));
       world.addChild(sortLayer);
-      const hull = new Container();
-      if (frame0.deadBottom > 0) {
-        const art = blank(SM.PW, SM.PH);
-        composePx(art, plan.below, 0, 0);
-        for (const it of plan.sorted) if (it.px) composePx(art, it.px, Math.round(it.x), Math.round(it.y), it.opacity);
-        const sk = hullSkirt(art, frame0.x + FRAME_MARGIN, frame0.x + frame0.w - FRAME_MARGIN - 1, frame0.y + frame0.h - 1);
-        if (sk) {
-          const cover = hull.addChild(new Sprite(own(sk.cover)));
-          cover.position.set(sk.x, sk.y);
-          const strip = hull.addChild(new Sprite(own(sk.strip)));
-          strip.position.set(sk.x, frame0.y + frame0.h);
-          strip.height = HULL_STRIP_ROWS;
-        }
-      }
-      world.addChild(hull);
       if (hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
       // PANEL-BLINK-188: the chair panels' lights, live over the cached map, each just in front of what draws it.
       const panelLayer = new PanelLayer(plan, SM, pack.manifest.stations.layer, own, sortLayer, world.addChild(new Container()));
-      // Clouds and envelopes are live above the people, in screen space.
+      // Envelopes fly live above the people, in the world; the clouds hang over the world in an
+      // unscaled layer on the stage, so their text is sharp at any fit (TES-BUBBLE-TAIL-SHARP-189).
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
       (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
+      app.stage.addChild(bubbles.screen);
+      // TES-HULL M2: in a semantic fit, a static drawn again over a person is the floor texture's own
+      // sampling of it, so it looks the same whether or not someone walks behind it (a nearest sprite
+      // at the fractional scale was sharp over its own soft copy):
+      // - its texels: drawn at the same integer k into a linear texture, with one transparent texel of
+      //   margin, so its edge blends as in the floor;
+      // - its texel grid: roundPixels moves every quad corner to a whole device px, the floor's too, so
+      //   a quad of its own would sit up to half a device px off the floor's grid. Its quad is instead
+      //   placed on whole device px, and its frame is read off the floor's rounded quad: each device px
+      //   then samples the same point as the floor (outside the texture, clamped to the clear margin).
+      let frontRTs: Array<RenderTexture | null> = [];
+      let frontTex: Array<Texture | null> = [];
+      let frontAt = '';
+      const placeFront = (root: boolean) => {
+        const b = bounds!, k = floorK, r = app.renderer.resolution, n = world.scale.x * r;
+        const ox = world.x * r, oy = world.y * r;
+        frontAt = `${ox},${oy},${n},${k},${root}`;
+        // As the vertex shader rounds: x to the nearest px; y in the target's own direction (the
+        // canvas is flipped), which differs only at an exact half.
+        const rx = (x: number) => Math.floor(x + 0.5);
+        const ry = (y: number) => (root ? Math.ceil(y - 0.5) : Math.floor(y + 0.5));
+        const L = rx(ox + b.x * n), R = rx(ox + (b.x + b.w) * n), T = ry(oy + b.y * n), B = ry(oy + (b.y + b.h) * n);
+        const ux = (R - L) / (b.w * k), uy = (B - T) / (b.h * k); // device px per floor texel
+        for (const t of frontTex) t?.destroy(false);
+        frontTex = statics.map((s, i) => {
+          const rt = frontRTs[i];
+          if (!s || !rt) return null;
+          const it = plan.sorted[i], tx = (it.x - b.x) * k - 1, ty = (it.y - b.y) * k - 1;
+          const X0 = Math.floor(L + tx * ux), X1 = Math.ceil(L + (tx + rt.width) * ux);
+          const Y0 = Math.floor(T + ty * uy), Y1 = Math.ceil(T + (ty + rt.height) * uy);
+          const fx = (X0 - L) / ux - tx, fy = (Y0 - T) / uy - ty;
+          const t = new Texture({ source: rt.source, frame: new Rectangle(fx, fy, (X1 - X0) / ux, (Y1 - Y0) / uy) });
+          s.texture = t;
+          s.scale.set(ux / n, uy / n);
+          s.position.set((X0 - ox) / n, (Y0 - oy) / n);
+          return t;
+        });
+      };
+      const buildFrontStatics = (k: number) => {
+        for (const t of frontTex) t?.destroy(false);
+        frontTex = [];
+        for (const t of frontRTs) t?.destroy(true);
+        frontRTs = statics.map((s, i) => {
+          if (!s) return null;
+          const tex = staticTex[i]!;
+          const rt = RenderTexture.create({ width: tex.width * k + 2, height: tex.height * k + 2, resolution: 1, scaleMode: 'linear' });
+          const root = new Container(), one = root.addChild(new Sprite(tex));
+          one.scale.set(k); one.position.set(1, 1);
+          app.renderer.render({ container: root, target: rt, clear: true });
+          root.destroy({ children: true });
+          return rt;
+        });
+        frontAt = '';
+      };
       const buildFloor = (k: number) => {
         const b = bounds!;
         floorView.texture = Texture.EMPTY;
         floorRT?.destroy(true);
-        floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
+        floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: frame0.fit ? 'linear' : 'nearest' });
         floorWorld.scale.set(k);
         floorWorld.position.set(-b.x * k, -b.y * k);
         app.renderer.render({ container: floorRoot, target: floorRT, clear: true });
@@ -267,6 +304,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         floorView.position.set(b.x, b.y);
         floorView.scale.set(1 / k);
         floorK = k;
+        if (frame0.fit) buildFrontStatics(k);
         (app as any).__tesStaticCacheBuilds = ((app as any).__tesStaticCacheBuilds ?? 0) + 1;
       };
       // Per tick, after onTick: the floor texture's scale, and which statics are drawn again.
@@ -274,6 +312,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         if (!cached) return;
         const k = sceneScale(world.scale.x * app.renderer.resolution, bounds!);
         if (k !== floorK) buildFloor(k);
+        if (frame0.fit) {
+          const r = app.renderer.resolution;
+          if (frontAt !== `${world.x * r},${world.y * r},${world.scale.x * r},${floorK},true`) placeFront(true);
+        }
         const near: Box[] = [];
         for (const s of sprites.values()) near.push({ x: s.sprite.x, y: s.sprite.y, w: fw, h: fh });
         for (const c of cups.values()) near.push({ x: c.sprite.x, y: c.sprite.y, w: MUG_W, h: MUG_H });
@@ -299,7 +341,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const at = new Matrix();
         const visit = (c: Container, look: string) => {
           if (!c.visible) return;
-          if (c === bubbles.container) {
+          if (c === bubbles.container || c === bubbles.screen) {
             for (const k of c.children) if (k.visible) now.set(k, { rect: rectOf(k), sig: String(painted) });
             return;
           }
@@ -326,10 +368,15 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       };
       (app.renderer as any).render = (o: any) => ((o === app.stage || (o?.container === app.stage && !o.target)) ? paint() : realRender(o));
       // For the rendered tests (tes-floor-whole-188): the floor and what it is made of.
-      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, hull, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
+      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, world, frame: frame0, mapW: SM.PW, mapH: SM.PH,
+        get people() { return [...sprites.values(), ...cups.values(), ...mugs.values()].map((e) => e.sprite); },
+        // TES-HULL M2: the statics' own textures and places; placeFront(root) places the front statics
+        // for the canvas (true, as compose does) or for a render texture (false).
+        staticTex, sortedAt: plan.sorted.map((it) => ({ x: it.x, y: it.y })), placeFront };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
         () => floorRT?.destroy(true),
+        () => { for (const t of frontTex) t?.destroy(false); for (const t of frontRTs) t?.destroy(true); },
         () => floorRoot.destroy({ children: true }),
         () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
       ];
@@ -518,7 +565,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         for (const [id, c] of cups) if (!holding.has(id)) { c.sprite.destroy(); cups.delete(id); }
         for (const [id, m] of mugs) if (!parked.has(id)) { m.sprite.destroy(); mugs.delete(id); }
         // Keep these live even when the people/station depth is unchanged and the map is cached.
-        bubbles.update(dt, anchors, world.scale.x);
+        bubbles.update(dt, anchors, { scale: world.scale.x, x: world.x, y: world.y, resolution: app.renderer.resolution });
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}:${cups.get(q.id)?.back ?? '-'}`).join('|') + '#' + [...mugs].map(([id, m]) => `${id}:${m.foot}:${m.rank}`).join('|');
         if (depth === lastDepth) return;

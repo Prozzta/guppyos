@@ -2,7 +2,7 @@ import { Container, Graphics, Texture } from 'pixi.js';
 import { CharacterSprite, type Direction, type AnimState } from './CharacterSprite';
 import { findPath } from './pathfinding';
 import type { TiledMapRenderer } from './TiledMapRenderer';
-import { ThoughtBubble } from './ThoughtBubble';
+import { ThoughtBubble, type BubbleView } from './ThoughtBubble';
 
 // Adapted from shahar061/the-office (office/characters/Character.ts).
 // Differences: keyed by our dynamic agentId (not a fixed role); seat tile +
@@ -362,10 +362,15 @@ export class Character {
     this.thoughtBubble.setLift(px);
   }
 
-  /** Forward the camera zoom so the thought cloud can counter-scale and keep
-   *  its on-screen text size when the window (and thus the world) shrinks. */
-  setBubbleZoom(z: number): void {
-    this.thoughtBubble.setZoom(z);
+  /** Forward the world's transform: the thought cloud hangs in an unscaled layer over the world and
+   *  is placed through it, so its text is one texel per device px at any camera zoom. */
+  setBubbleView(view: BubbleView): void {
+    this.thoughtBubble.setView(view);
+  }
+
+  /** The thought cloud itself (rendered tests read where it and its tail are drawn). */
+  get thought(): ThoughtBubble {
+    return this.thoughtBubble;
   }
 
   setStatusGlyph(glyph: StatusGlyph): void {
@@ -496,7 +501,9 @@ export class Character {
     });
   }
 
-  show(parent: Container): void {
+  /** `thoughtParent` is the unscaled layer over the world the thought cloud hangs in (the world's
+   *  transform reaches it through setBubbleView). */
+  show(parent: Container, thoughtParent: Container = parent): void {
     if (this.hideTimer) { clearTimeout(this.hideTimer); this.hideTimer = null; }
     this.isVisible = true;
     this.sprite.setAlpha(0);
@@ -505,7 +512,7 @@ export class Character {
     this.sprite.container.addChild(this.overlay);
     this.sprite.container.addChild(this.fx);
     parent.addChild(this.deskCup);
-    parent.addChild(this.thoughtBubble.container);
+    thoughtParent.addChild(this.thoughtBubble.container);
     this.enableClick();
     this.fadeDirection = 'in';
     this.fadeDuration = 0.5;

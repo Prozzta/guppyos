@@ -204,7 +204,7 @@ function bubbleLayer() {
   class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); return c; } destroy() {} }
   class ThoughtBubble {
     constructor() { this.container = new Container(); }
-    show(text) { shown.push(text); } hide() { shown.push(null); } setBounds() {} setZoom() {} setLift() {} setPosition() {}
+    show(text) { shown.push(text); } hide() { shown.push(null); } setBounds() {} setView() {} setLift() {} setPosition() {}
     getLayout() { return null; } update() {} destroy() {}
   }
   const out = ts.transpileModule(readSource('src/renderer/src/scene/themes/BubbleLayer.ts'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

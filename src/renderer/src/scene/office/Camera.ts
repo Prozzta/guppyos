@@ -1,5 +1,4 @@
 import { Container } from 'pixi.js';
-import { wholeScale } from '../themes/framing';
 
 // Simplified port of shahar061/the-office (office/engine/camera.ts).
 // Phase targeting is dropped (we have no project phases); kept: fit-to-screen,
@@ -10,16 +9,10 @@ import { wholeScale } from '../themes/framing';
 // centred and clamped to, and its dead bottom rows are left out of the fit. With no frame the
 // frame IS the map with no dead band, so the office's numbers are exactly as before.
 //
-// TES-FLOOR-WHOLE-188: a frame with a keep box (and a settle) is drawn at a whole number n of
-// device px per map px, the largest at which the keep box fits the pane: the zoom is n / DPR, set
-// at once and never eased, and the map's origin always sits on a whole device px. So every art
-// pixel is n x n device px on every frame. The frame's top meets the pane's top when its content
-// fits (the hull runs on past the bottom edge); else the view is centred or clamped as before.
-// The keep box always stays in view: only the hull, its rim and the upper wall are ever cut.
-// On an axis the art covers, the pane stays inside the art: the frame's margin (backdrop) shows
-// only on an axis the art does not cover, so no pan or nudge exposes it.
-// TES-SCENE-BOUNCE-188: the whole camera never eases or pans: where the map sits depends on the
-// pane alone, so selecting an agent no longer moves the scene.
+// TES-HULL-STRETCH-188: a semantic fit box is drawn at its largest exact uniform scale, set at
+// once and never eased. Its origin is device-pixel aligned. The static floor cache is prescaled
+// to an integer source and linearly downsampled once, preserving sharp edges without fractional
+// texel shimmer. The camera depends on the pane alone, so selection cannot bounce the scene.
 
 const LERP_SPEED = 0.08;
 // TES-GUPPY-SETTLE: the rate LERP_SPEED was tuned at (the floor's 30 fps tick).
@@ -57,7 +50,7 @@ export function watchDevicePixelRatio(
   };
 }
 
-type Keep = { x0: number; y0: number; x1: number; y1: number };
+type Fit = { x0: number; y0: number; x1: number; y1: number };
 
 export class Camera {
   private container: Container;
@@ -73,7 +66,7 @@ export class Camera {
   private mapHeight = 480;
   private manualOverride = false;
   /** The fitted rectangle, in map pixels (null: the whole map), and its clippable bottom rows. */
-  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null = null;
+  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; fit?: Fit } | null = null;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -94,7 +87,7 @@ export class Camera {
   }
 
   /** Fit a part of the map instead of all of it (see TES-GUPPY-FRAMING above); null for the whole map. */
-  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null): void {
+  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; fit?: Fit } | null): void {
     this.frame = frame;
     if (!this.manualOverride) this.fitToScreen();
   }
@@ -109,17 +102,10 @@ export class Camera {
     if (!this.manualOverride) this.fitToScreen();
   }
 
-  /** TES-FLOOR-WHOLE-188: the whole device scale n and the resolution, or null when not whole. */
-  private whole(): { n: number; r: number; keep: Keep } | null {
-    const keep = this.frame?.keep, r = this.settle?.resolution() ?? 0;
-    if (!keep || !Number.isFinite(r) || r <= 0) return null;
-    return { n: wholeScale(keep, Math.round(this.viewWidth * r), Math.round(this.viewHeight * r)), r, keep };
-  }
-
   private getMinZoom(): number {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
-    const w = this.whole();
-    if (w) return w.n / w.r;
+    const fitted = this.frame?.fit;
+    if (fitted) return Math.min(this.viewWidth / (fitted.x1 - fitted.x0 + 1), this.viewHeight / (fitted.y1 - fitted.y0 + 1));
     const b = this.box();
     const minZoom = Math.min(this.viewWidth / b.w, this.viewHeight / (b.h - b.deadBottom));
     // Keep the camera's fit exact.  Raster alignment belongs to StationFloor's single cached
@@ -132,6 +118,13 @@ export class Camera {
   /** Fit the whole map (or the frame, its content centred) to the viewport. */
   fitToScreen(): void {
     this.manualOverride = false;
+    const fitted = this.frame?.fit;
+    if (fitted) {
+      this.targetX = (fitted.x0 + fitted.x1 + 1) / 2;
+      this.targetY = (fitted.y0 + fitted.y1 + 1) / 2;
+      this.targetZoom = this.getMinZoom();
+      return;
+    }
     const b = this.box();
     this.targetX = b.x + b.w / 2;
     this.targetY = b.y + (b.h - b.deadBottom) / 2;
@@ -146,8 +139,8 @@ export class Camera {
     this.targetZoom = Math.max(this.getMinZoom(), Math.min(4, zoom ?? this.currentZoom));
   }
 
-  /** A gentle, decaying pan toward a world point without taking manual control. A whole camera
-   *  is placed on its target (placeWhole), so there it moves nothing (TES-SCENE-BOUNCE-188). */
+  /** A gentle, decaying pan toward a world point without taking manual control. A semantic-fit
+   *  camera is placed on its target, so a roster selection cannot move its framing. */
   nudgeToward(worldX: number, worldY: number, duration = 1200): void {
     if (this.manualOverride) return;
     this.nudgeOffsetX = (worldX - this.targetX) * this.nudgeStrength;
@@ -178,8 +171,8 @@ export class Camera {
       }
     }
 
-    const w = this.whole();
-    if (w) { this.placeWhole(w.n, w.r, w.keep); return; }
+    const fitted = this.frame?.fit;
+    if (fitted) { this.placeFit(fitted); return; }
 
     this.container.scale.set(this.currentZoom);
     this.container.x = this.viewWidth / 2 - this.currentX * this.currentZoom;
@@ -210,36 +203,22 @@ export class Camera {
 
   }
 
-  /** TES-FLOOR-WHOLE-188: place the map at n device px per map px, on whole device px. Each axis
-   *  works as update() does (centred when the frame fits, else the target point clamped inside the
-   *  frame; vertically the frame's top at the pane's top when its content fits), then the keep
-   *  box is clamped into the pane (centred on it if it cannot fit, at n = 1). Before that, on an
-   *  axis the art covers, the pane is clamped inside the art (Jim: the frame's margin showed).
-   *  TES-SCENE-BOUNCE-188: the target, not the eased point, so the scene stands still: the place is
-   *  a function of the pane alone, from the first frame. Where the frame overflows the pane at
-   *  its n, the eased point moved it: a select's nudge lifted the whole scene up to 44 device px and back
-   *  (1.1.87's fit clamped the same nudge to 0), and the mount slid it in from the map's origin. */
-  private placeWhole(n: number, r: number, keep: Keep): void {
-    this.currentZoom = this.targetZoom = n / r;
-    this.currentX = this.targetX;
-    this.currentY = this.targetY;
-    const b = this.box();
-    const W = Math.round(this.viewWidth * r), H = Math.round(this.viewHeight * r);
-    const fit = (o: number, lo: number, hi: number) => (lo <= hi ? Math.min(hi, Math.max(lo, o)) : (lo + hi) / 2);
-    let x = b.w * n <= W
-      ? (W - b.w * n) / 2 - b.x * n
-      : fit(W / 2 - this.currentX * n, W - (b.x + b.w) * n, -b.x * n);
-    let y = (b.h - b.deadBottom) * n <= H
-      ? -b.y * n
-      : fit(H / 2 - this.currentY * n, H - (b.y + b.h) * n, -b.y * n);
-    const a = this.frame?.art;
-    if (a && (a.x1 + 1 - a.x0) * n >= W) x = fit(x, W - (a.x1 + 1) * n, -a.x0 * n);
-    if (a && (a.y1 + 1 - a.y0) * n >= H) y = fit(y, H - (a.y1 + 1) * n, -a.y0 * n);
-    x = Math.round(fit(x, -keep.x0 * n, W - (keep.x1 + 1) * n));
-    y = Math.round(fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n));
-    this.container.scale.set(n / r);
-    this.container.x = x / r;
-    this.container.y = y / r;
+  /** Place the declared visual fit box at its exact maximum uniform scale. The static floor
+   * cache is built at ceil(scale * DPR), then linearly downsampled once to the pane: source
+   * pixels stay crisp with at most a one-device-pixel blended edge, with
+   * no per-frame composition or synthetic art. It is target-stable: a
+   * roster nudge cannot make a centred box bounce. */
+  private placeFit(fit: Fit): void {
+    const z = this.getMinZoom();
+    this.currentZoom = this.targetZoom = z;
+    this.currentX = (fit.x0 + fit.x1 + 1) / 2;
+    this.currentY = (fit.y0 + fit.y1 + 1) / 2;
+    this.container.scale.set(z);
+    const r = this.settle?.resolution() ?? 1;
+    // A cache texel is sampled through this origin.  Align it once per resize so the true-fit
+    // linear downscale cannot acquire a phase shift at an outline (notably the right hull lip).
+    this.container.x = Math.round((this.viewWidth / 2 - (fit.x0 + fit.x1 + 1) / 2 * z) * r) / r;
+    this.container.y = Math.round((this.viewHeight / 2 - (fit.y0 + fit.y1 + 1) / 2 * z) * r) / r;
   }
 
   /** TES-GUPPY-SETTLE: the per-tick ease as the motion it approximates, solved exactly over dt.

@@ -1,6 +1,6 @@
 import { Container } from 'pixi.js';
 import { MessageEnvelope, type MessageAct } from '../office/MessageEnvelope';
-import { ThoughtBubble } from '../office/ThoughtBubble';
+import { ThoughtBubble, type BubbleView } from '../office/ThoughtBubble';
 import { cloudShows, consumeSays as consumeSayEvents, createCloudGate, type BubbleSay, type BubbleSayCursor, type CloudGate } from './bubbleModel';
 
 export type BubbleAnchor = { id: string; x: number; y: number };
@@ -29,9 +29,12 @@ const SLIDE_KEEP = 6;
 /** Rounds of sideways pushing before the leftover overlap is lifted. */
 const SLIDE_ROUNDS = 8;
 
-/** Shared world-space bubble overlay for station themes. */
+/** Shared bubble overlay for station themes: the envelopes fly in the world (`container`); the clouds
+ *  hang in `screen`, an unscaled layer the floor puts on the stage over the world, so their text is one
+ *  texel per device px at any fit (TES-BUBBLE-TAIL-SHARP-189). */
 export class BubbleLayer {
   readonly container = new Container();
+  readonly screen = new Container();
   private readonly thoughts = new Map<string, ActiveThought>();
   private readonly anchors = new Map<string, { x: number; y: number }>();
   private readonly envelopes: MessageEnvelope[] = [];
@@ -42,6 +45,7 @@ export class BubbleLayer {
   constructor(private readonly bounds: { width: number; height: number }, private readonly rand: () => number = Math.random) {
     this.container.sortableChildren = true;
     this.container.eventMode = 'none';
+    this.screen.eventMode = 'none';
   }
 
   setThought(id: string, thought: BubbleThoughtIn | null): void {
@@ -91,8 +95,9 @@ export class BubbleLayer {
     this.envelopes.push(envelope);
   }
 
-  /** Update positions and lifetimes. Must run even when station depth did not change. */
-  update(dt: number, anchors: readonly BubbleAnchor[], zoom: number): void {
+  /** Update positions and lifetimes. Must run even when station depth did not change. `view` is the
+   *  world's transform on the stage this frame; anchors and the overlap pass stay in world px. */
+  update(dt: number, anchors: readonly BubbleAnchor[], view: BubbleView): void {
     this.now += dt;
     for (let i = 0; i < this.due.length;) {
       const line = this.due[i];
@@ -110,7 +115,7 @@ export class BubbleLayer {
       const anchor = this.anchors.get(id);
       if (!anchor) { active.bubble.hide(); continue; }
       active.bubble.setBounds(this.bounds.width, this.bounds.height);
-      active.bubble.setZoom(zoom);
+      active.bubble.setView(view);
       active.bubble.setLift(0);
       active.bubble.setPosition(anchor.x, anchor.y);
       const layout = active.bubble.getLayout(anchor.x, anchor.y);
@@ -170,13 +175,14 @@ export class BubbleLayer {
     this.thoughts.clear();
     this.envelopes.length = 0;
     this.container.destroy({ children: true });
+    this.screen.destroy({ children: true });
   }
 
   private get(id: string): ActiveThought {
     let active = this.thoughts.get(id);
     if (active) return active;
     const bubble = new ThoughtBubble();
-    this.container.addChild(bubble.container);
+    this.screen.addChild(bubble.container);
     active = { bubble, thought: null, say: null, shown: null, gate: createCloudGate(), up: false };
     this.thoughts.set(id, active);
     return active;
