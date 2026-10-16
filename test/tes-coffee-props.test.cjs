@@ -265,9 +265,10 @@ test('StationFloor draws the coffee each tick: cups in hand, parked mugs, and ea
   // depth: mugs sort with the map, a cup just in front of (or, facing away, behind) its person
   assert.match(tick, /for \(const m of mugs\.values\(\)\) items\.push\(m\);/);
   assert.match(tick, /c\.sprite\.zIndex = i \+ \(c\.back \? -0\.5 : 0\.5\);/);
-  // with the map cached, a cup is drawn with its person in the rects, as the people are
-  assert.match(tick, /for \(const c of cups\.values\(\)\) c\.sprite\.visible = !useCache;/);
-  assert.match(src, /for \(const s of sprites\.values\(\)\) s\.sprite\.visible = true;\s*for \(const c of cups\.values\(\)\) c\.sprite\.visible = true;/);
+  // with the map cached, the cups in hand and the parked mugs are boxes for frontPicker, as the
+  // people are: a static in front of one is drawn again over it in the scene
+  assert.match(src, /for \(const c of cups\.values\(\)\) near\.push\(\{ x: c\.sprite\.x, y: c\.sprite\.y, w: MUG_W, h: MUG_H \}\);\s*for \(const m of mugs\.values\(\)\) near\.push\(\{ x: m\.sprite\.x, y: m\.sprite\.y, w: MUG_W, h: MUG_H \}\);/);
+  assert.doesNotMatch(src, /\.visible = !useCache/);
   // the coffee lines come from coffeeProps only: the generic crew lines carry no brew or sip
   const lines = src.match(/const lines: Record<string, string> = \{([^}]*)\}/)[1];
   assert.doesNotMatch(lines, /\b(brew|sip):/);

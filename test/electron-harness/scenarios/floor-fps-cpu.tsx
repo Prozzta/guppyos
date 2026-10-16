@@ -76,9 +76,14 @@ const agents = [
 
 let renders = 0;
 let lastStage: unknown = null;
+let renderDurations: number[] = [];
 const proto = Application.prototype as unknown as { render: () => void };
 const realRender = proto.render;
-proto.render = function (this: { stage: unknown }) { renders += 1; lastStage = this.stage; return realRender.call(this); };
+proto.render = function (this: { stage: unknown }) {
+  const started = performance.now();
+  try { return realRender.call(this); }
+  finally { renders += 1; lastStage = this.stage; renderDurations.push(performance.now() - started); }
+};
 
 // TES-GUPPY-RASTER: what each frame asks of GL, counted the same way for both floors.
 const GL_CALLS = ['drawElements', 'drawArrays', 'bindTexture', 'texImage2D', 'texSubImage2D', 'bufferData', 'bufferSubData', 'useProgram'] as const;
@@ -133,10 +138,12 @@ async function measure({ theme, hide }: FloorRun) {
   const raf = () => { rafs += 1; if (live) requestAnimationFrame(raf); };
   requestAnimationFrame(raf);
   const g0 = { ...gl };
-  const c0 = await window.harness.cpu(); const r0 = renders; const t0 = performance.now();
+  const c0 = await window.harness.cpu(); const r0 = renders; renderDurations = []; const t0 = performance.now();
   await sleep(WINDOW_MS);
   const c1 = await window.harness.cpu(); const r1 = renders; const t1 = performance.now();
   const frames = Math.max(1, r1 - r0);
+  const sortedDurations = [...renderDurations].sort((a, b) => a - b);
+  const percentile = (p: number) => sortedDurations.length ? sortedDurations[Math.min(sortedDurations.length - 1, Math.floor((sortedDurations.length - 1) * p))] : 0;
   const perFrame = Object.fromEntries(GL_CALLS.map((n) => [n, Math.round(((gl[n] - g0[n]) / frames) * 10) / 10]));
   live = false;
   const s = (t1 - t0) / 1000;
@@ -147,6 +154,7 @@ async function measure({ theme, hide }: FloorRun) {
     rafHz: Math.round((rafs / s) * 10) / 10,
     rendererCpuPct: pct(c0.renderer, c1.renderer),
     gpuCpuPct: pct(c0.gpu, c1.gpu),
+    renderMs: { samples: sortedDurations.length, p50: Math.round(percentile(.5) * 100) / 100, p95: Math.round(percentile(.95) * 100) / 100 },
     ...(theme === 'idle' ? {} : { perFrame, scene: census(lastStage) }),
   };
   await act(async () => { root.unmount(); });

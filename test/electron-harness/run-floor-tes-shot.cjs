@@ -16,6 +16,7 @@ const out = argOf('out');
 if (!out) { console.error('--out <dir> is required'); process.exit(2); }
 const boxes = (argAt('boxes') || '700x470,960x640,1290x850').split(',').map((b) => b.split('x').map(Number));
 const TES = join(__dirname, '..', '..', 'themes', 'tes');
+const dpr = argAt('dpr');
 
 (async () => {
   const report = [];
@@ -28,7 +29,7 @@ const TES = join(__dirname, '..', '..', 'themes', 'tes');
     if (argOf('station')) overrides[join(__dirname, '..', '..', 'src', 'renderer', 'src', 'scene', 'themes', 'StationFloor.tsx')] = argOf('station');
     const r = await runScenario(join(__dirname, 'scenarios', 'floor-tes-shot.tsx'), {
       width: w + 40, height: h + 40, timeoutMs: 600_000,
-      env: { HARNESS_THEME_PACKS: JSON.stringify([{ dir: 'tes', from: TES }]), HARNESS_SOURCE_OVERRIDES: JSON.stringify(overrides) }
+      env: { HARNESS_THEME_PACKS: JSON.stringify([{ dir: 'tes', from: TES }]), HARNESS_SOURCE_OVERRIDES: JSON.stringify(overrides), ...(dpr ? { HARNESS_DPR: dpr } : {}) }
     });
     if (!r.ok) { console.error(`${w}x${h}: ${r.error}`); process.exit(1); }
     const shots = r.shots.map(({ frame, png }) => {

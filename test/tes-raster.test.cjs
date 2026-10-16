@@ -1,13 +1,13 @@
 'use strict';
 
-// TES-GUPPY-RASTER: drawn whole every frame, TES's 'below' and statics cost about twice the
-// office's raster time (480x300, software GL). StationFloor now draws them, with the very same
-// sprites, into a screen-sized cache when the camera or the view changes, copies the cache's
-// reachable cells 1:1 each frame, and draws again only the statics that meet a person
-// (src/renderer/src/scene/themes/staticCache.ts). 8d84cece's atlas tiles were rounded one by one
-// and seamed at fractional zoom; nothing here splits a sprite. These tests pin the pieces the
-// picture's sameness rests on, model the compositing to show it is the same picture, and pin the
-// wiring.
+// TES-GUPPY-RASTER, TES-FLOOR-EASE-188: drawn whole every frame, TES's 'below' and statics cost
+// about twice the office's raster time, and at a fractional zoom each sprite rounded on its own
+// and seamed. StationFloor composes the scene in map space at an integer scale k instead: a floor
+// texture with 'below' and every static (the very same sprites), then by depth the people and the
+// statics near them (frontPicker), then 'above'; one quad shows it through the camera
+// (src/renderer/src/scene/themes/staticCache.ts). These tests pin the pieces the picture's
+// sameness rests on, model the compositing to show it is the same picture, and pin the wiring;
+// tes-floor-ease-188.test.cjs checks the rendered scene against the full depth sort.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -72,83 +72,20 @@ test('frontPicker: statics with an opaque pixel near a person, closed in draw or
   assert.deepEqual(C.frontPicker(statics, [2, 0, 1, 3], 80 * u, 48 * u)([{ x: 0, y: 10 * u, w: 4 * u, h: 4 * u }]), [true, false, false, false]);
 });
 
-test('cacheKeyOf: the same key exactly when every cached edge rounds alike; a static near a tie is live, or keyed by its float32 once settled', () => {
-  const map = { w: 40, h: 20 }, boxes = [{ x: 0, y: 0, w: 10, h: 5 }, null, { x: 17, y: 3, w: 20, h: 6 }];
-  const K = (k, dx, dy, r = 1) => C.cacheKeyOf(map, boxes, k, k, dx, dy, r);
-  assert.equal(K(1.46, 3.2, 7.1).key, K(1.46, 3.21, 7.09).key, 'a sub-pixel drift that rounds alike');
-  assert.notEqual(K(1.46, 3.2, 7.1).key, K(1.46, 3.8, 7.1).key, 'an edge that rounds elsewhere');
-  assert.equal(K(1.46, 3.2, 7.1).exact, K(1.46, 3.2, 7.1).key, 'with no tie, the settled key is the same key');
-  // Pixi's float64 vertex: a * w + (a * x + tx); the GPU gets its float32.
-  const near = C.cacheKeyOf(map, [{ x: 8, y: 0, w: 2, h: 2 }], 0.46875, 0.46875, 15.0000002, 0.1, 2);
-  assert.deepEqual(near.live, [true], 'x = 8 at 15/16 device px (r = 2), offset 30: on a tie, live');
-  assert.equal(near.key.split(',')[1], 'live');
-  assert.equal(near.exact.split(',')[1], `f ${[0.46875 * 8 + 15.0000002, 0.46875 * 2 + (0.46875 * 8 + 15.0000002), 0.1, 0.46875 * 2 + 0.1].map(Math.fround).join(' ')}`);
-  assert.equal(C.cacheKeyOf(map, [{ x: 8, y: 0, w: 2, h: 2 }], 0.46875, 0.46875, 15.00000021, 0.1, 2).exact, near.exact, 'a drift inside one float32 step: settled alike');
-  assert.notEqual(C.cacheKeyOf(map, [{ x: 8, y: 0, w: 2, h: 2 }], 0.46875, 0.46875, 15.00001, 0.1, 2).exact, near.exact, 'a float32 step: a new key');
-  assert.match(C.cacheKeyOf(map, [], 1, 1, 0.5003, 0, 1).key, /^f /, "'below' near a tie: its float32 edges");
-  for (let run = 0; run < 200; run++) {
-    const k = 0.5 + rnd() * 3, dx = rnd() * 99, dy = rnd() * 99, r = [1, 1.25, 2][run % 3];
-    const { key, live } = C.cacheKeyOf(map, boxes, k, k, dx, dy, r);
-    const parts = key.split(',');
-    boxes.forEach((b, i) => {
-      if (!b) return assert.equal(live[i], false);
-      const L = k * b.x + dx, T = k * b.y + dy, e = [L, k * b.w + L, T, k * b.h + T].map((v) => v * r);
-      assert.equal(live[i], e.some((v) => Math.abs(v - Math.floor(v) - 0.5) < 2e-3));
-      if (!live[i]) assert.ok(parts.includes(e.map(Math.round).join(' ')), `static ${i} keyed by its rounded edges`);
-    });
-  }
-});
-
-test('overlaps is strict: boxes that only touch do not meet (their rounded quads cannot share a pixel)', () => {
-  assert.equal(C.overlaps({ x: 0, y: 0, w: 4, h: 4 }, { x: 4, y: 0, w: 4, h: 4 }), false);
-  assert.equal(C.overlaps({ x: 0, y: 0, w: 4, h: 4 }, { x: 0, y: 4, w: 4, h: 4 }), false);
-  assert.equal(C.overlaps({ x: 0, y: 0, w: 4, h: 4 }, { x: 3.5, y: 3, w: 4, h: 4 }), true);
-});
-
-test('screenCells covers every device pixel a live map pixel can round onto, at fractional zooms', () => {
-  const px = picture(41, 23, () => (rnd() < 0.05 ? [1, 2, 3, 255] : null));
-  const boxes = C.liveBoxes(px, 5, 9, 8);
-  for (const b of boxes) assert.ok(b.w <= 8 && b.h <= 8);
-  for (let run = 0; run < 40; run++) {
-    const k = 0.6 + rnd() * 3, dx = rnd() * 50 - 20, dy = rnd() * 50 - 20, W = 200, Hh = 120, T = run % 2 ? 32 : 1;
-    const cells = C.screenCells(boxes, k, dx, dy, W, Hh, T);
-    const inCell = (x, y) => cells.some((c) => x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h);
-    // As Pixi draws it: the sprite's quad rounds as a whole, and each device pixel samples the texel
-    // under its centre, which can land a texel a pixel before its exact position (tile 1 shows it).
-    const X0 = Math.floor(5 * k + dx + 0.5), X1 = Math.floor((5 + px.width) * k + dx + 0.5);
-    const Y0 = Math.floor(9 * k + dy + 0.5), Y1 = Math.floor((9 + px.height) * k + dy + 0.5);
-    for (let Y = Math.max(0, Y0); Y < Math.min(Hh, Y1); Y++) for (let X = Math.max(0, X0); X < Math.min(W, X1); X++) {
-      const x = Math.floor((X + 0.5 - X0) / (X1 - X0) * px.width), y = Math.floor((Y + 0.5 - Y0) / (Y1 - Y0) * px.height);
-      if (px.data[(y * px.width + x) * 4 + 3]) assert.ok(inCell(X, Y), `pixel (${x},${y}) at device (${X},${Y}), k=${k}`);
-    }
-    for (const c of cells) assert.ok(c.x % T === 0 && c.y % T === 0 && c.x + c.w <= W && c.y + c.h <= Hh);
-  }
-  // In exact arithmetic a texel never lands outside [floor(start), floor(end)] (the quad's edges
-  // move by under half a pixel), so the model above cannot need the 1 px margin; it is there for the
-  // GPU's fixed-point edges at exact ties, and is pinned in the source instead.
-  const src = codeOnly(readSource('src/renderer/src/scene/themes/staticCache.ts'));
-  assert.match(src, /Math\.floor\(\(b\.x \* k \+ dx - 1\) \/ tile\)\), x1 = Math\.min\(cols - 1, Math\.floor\(\(\(b\.x \+ b\.w\) \* k \+ dx \+ 1\) \/ tile\)\)/);
-  assert.match(src, /Math\.floor\(\(b\.y \* k \+ dy - 1\) \/ tile\)\), y1 = Math\.min\(rows - 1, Math\.floor\(\(\(b\.y \+ b\.h\) \* k \+ dy \+ 1\) \/ tile\)\)/);
-});
-
-test('model: rasterised as Pixi does (each sprite rounded on its own, nearest texels), the cache, live statics and the scissored rects around the people make the full picture', () => {
-  // Each sprite's quad edges round to the device grid on their own; a device pixel samples the texel
-  // under its centre on that rounded quad. Statics are big, mostly transparent boxes with thin
-  // strokes (as TES's rails); people have soft alpha. The full picture draws below, then statics
-  // and people by depth. The floor's frame:
-  // - main pass: the cache (below + the statics that are not live, by staticOrder), then the
-  //   statics frontPicker picks with no people (the live ones and, closed in draw order, those
-  //   over them);
-  // - per rect (each person's device box, 1 px out, inside the screen; rects may overlap): cleared
-  //   to the cache, then by depth the people and the statics regionPicker picks for any rect's map
-  //   box (one set for all rects), clipped to it.
-  // The map is 160x120 so a 12 px cell and its one-cell margin matter. Scales from NEAR_MIN_SCALE.
+test('model: at an integer scale k, the floor texture, then by depth the people and the statics frontPicker picks, is the full depth sort', () => {
+  // A sprite's quad edges round to the texel grid; a texel samples the sprite texel under its
+  // centre on that rounded quad. At an integer k every static sits on whole texels, so drawn
+  // again over the floor texture it lands exactly where the texture has it; a person may stand
+  // between texels, and rounds the same in both pictures. Statics are big, mostly transparent
+  // boxes with thin strokes (as TES's rails); people have soft alpha. The full picture draws
+  // below, then statics and people by depth. The scene: the floor texture (below, then every
+  // static by staticOrder), then by depth the people and the statics frontPicker picks for them.
+  // The map is 160x120 so a 12 px cell and its one-cell margin matter.
   const over = (dst, c, a) => (a === 255 ? c : a === 0 ? dst : dst.map((d, k) => Math.round((c[k] * a + d * (255 - a)) / 255)));
   const MW = 160, MH = 120;
-  let indexOrderFails = 0;
-  for (let run = 0; run < 60; run++) {
-    const k = run < 6 ? 1 : C.NEAR_MIN_SCALE + rnd() * 2.5, dx = run < 6 ? 0 : rnd() * 9, dy = run < 6 ? 0 : rnd() * 9;
-    const W = Math.ceil(MW * k + dx) + 2, Hh = Math.ceil(MH * k + dy) + 2;
+  let indexOrderFails = 0, crewTopFails = 0;
+  for (let run = 0; run < 48; run++) {
+    const k = 1 + (run % 4), W = MW * k, Hh = MH * k;
     const below = picture(MW, MH, (x, y) => ((x + y) % 3 ? [x, y, 1, 255] : null));
     const sorted = Array.from({ length: 60 }, (_, n) => {
       const w = 2 + int(40), h = 2 + int(24), a = int(3), b = int(5);
@@ -156,14 +93,12 @@ test('model: rasterised as Pixi does (each sprite rounded on its own, nearest te
       return { x: int(MW - w), y: int(MH - h), foot: int(60), rank: int(2), opacity: 1, px: picture(w, h, stroke) };
     });
     const people = Array.from({ length: 8 }, (_, n) => (
-      { x: int(MW - 5), y: int(MH - 7), foot: int(60), rank: int(2), px: picture(5, 7, () => [200, n * 30, 90, [0, 128, 255][int(3)]]) }
+      { x: rnd() * (MW - 5), y: rnd() * (MH - 7), foot: int(60), rank: int(2), px: picture(5, 7, () => [200, n * 30, 90, [0, 128, 255][int(3)]]) }
     ));
-    const live = sorted.map(() => rnd() < 0.1);
-    const quad = (it) => [Math.floor(it.x * k + dx + 0.5), Math.floor((it.x + it.px.width) * k + dx + 0.5), Math.floor(it.y * k + dy + 0.5), Math.floor((it.y + it.px.height) * k + dy + 0.5)];
-    const draw = (img, it, clip) => {
+    const quad = (it) => [Math.floor(it.x * k + 0.5), Math.floor((it.x + it.px.width) * k + 0.5), Math.floor(it.y * k + 0.5), Math.floor((it.y + it.px.height) * k + 0.5)];
+    const draw = (img, it) => {
       const [X0, X1, Y0, Y1] = quad(it);
-      for (let Y = Y0; Y < Y1; Y++) for (let X = X0; X < X1; X++) {
-        if (clip && (X < clip.x || X >= clip.x + clip.w || Y < clip.y || Y >= clip.y + clip.h)) continue;
+      for (let Y = Math.max(0, Y0); Y < Math.min(Hh, Y1); Y++) for (let X = Math.max(0, X0); X < Math.min(W, X1); X++) {
         const u = Math.floor((X + 0.5 - X0) / (X1 - X0) * it.px.width), v = Math.floor((Y + 0.5 - Y0) / (Y1 - Y0) * it.px.height);
         const s = (v * it.px.width + u) * 4, d = Y * W + X;
         img[d] = over(img[d], Array.from(it.px.data.slice(s, s + 3)), it.px.data[s + 3]);
@@ -174,74 +109,168 @@ test('model: rasterised as Pixi does (each sprite rounded on its own, nearest te
     draw(full, { x: 0, y: 0, px: below });
     [...sorted, ...people].sort(byDepth).forEach((it) => draw(full, it));
     const order = C.staticOrder(sorted);
-    const cache = base();
-    draw(cache, { x: 0, y: 0, px: below });
-    for (const i of order) if (!live[i]) draw(cache, sorted[i]);
-    const frame = (closureOrder, regionCell, regionMargin) => {
-      const img = cache.map((c) => c.slice());
-      const main = C.frontPicker(sorted, closureOrder, MW, MH)([], live);
-      sorted.filter((_, i) => main[i]).sort(byDepth).forEach((it) => draw(img, it));
-      const pick = C.regionPicker(sorted, MW, MH, regionCell, regionMargin);
-      const rects = [], on = sorted.map(() => false);
-      for (const p of people) {
-        const X0 = Math.max(0, Math.floor(p.x * k + dx) - 1), X1 = Math.min(W, Math.ceil((p.x + p.px.width) * k + dx) + 1);
-        const Y0 = Math.max(0, Math.floor(p.y * k + dy) - 1), Y1 = Math.min(Hh, Math.ceil((p.y + p.px.height) * k + dy) + 1);
-        if (X1 <= X0 || Y1 <= Y0) continue;
-        const rect = { x: X0, y: Y0, w: X1 - X0, h: Y1 - Y0 };
-        rects.push(rect);
-        pick({ x: (rect.x - dx) / k, y: (rect.y - dy) / k, w: rect.w / k, h: rect.h / k }).forEach((o, i) => { if (o) on[i] = true; });
-      }
-      for (const rect of rects) {
-        for (let Y = rect.y; Y < rect.y + rect.h; Y++) for (let X = rect.x; X < rect.x + rect.w; X++) img[Y * W + X] = cache[Y * W + X].slice();
-        [...sorted.filter((_, i) => on[i]), ...people].sort(byDepth).forEach((it) => draw(img, it, rect));
-      }
+    const floor = base();
+    draw(floor, { x: 0, y: 0, px: below });
+    for (const i of order) draw(floor, sorted[i]);
+    const boxes = people.map((q) => ({ x: q.x, y: q.y, w: q.px.width, h: q.px.height }));
+    const scene = (closureOrder) => {
+      const img = floor.map((c) => c.slice());
+      const on = closureOrder ? C.frontPicker(sorted, closureOrder, MW, MH)(boxes) : sorted.map(() => false);
+      [...sorted.filter((_, i) => on[i]), ...people].sort(byDepth).forEach((it) => draw(img, it));
       return img;
     };
-    assert.deepEqual(frame(order, C.NEAR_CELL, 1), full, `run ${run}, k=${k}`);
-    // Closed in index order rather than draw order must fail somewhere, or this model could not tell.
-    if (JSON.stringify(frame(sorted.map((_, i) => i), C.NEAR_CELL, 1)) !== JSON.stringify(full)) indexOrderFails += 1;
+    assert.deepEqual(scene(order), full, `run ${run}, k=${k}`);
+    // Closed in index order rather than draw order, or with no statics drawn again (the people
+    // over every static, as 3164805f), it must fail somewhere, or this model could not tell.
+    if (JSON.stringify(scene(sorted.map((_, i) => i))) !== JSON.stringify(full)) indexOrderFails += 1;
+    if (JSON.stringify(scene(null)) !== JSON.stringify(full)) crewTopFails += 1;
   }
   assert.ok(indexOrderFails > 0, 'a closure walked in index order is caught');
+  assert.ok(crewTopFails > 0, 'the people drawn over every static are caught');
 });
 
-test('regionPicker picks every static that samples an opaque texel at a device pixel of the rect, down to NEAR_MIN_SCALE', () => {
-  // The rects' requirement itself, pixel by pixel. A static's quad edges round by at most half a
-  // device px, so the texel a device pixel samples is within 0.5/k map px of the pixel centre's map
-  // position, which is itself 0.5/k inside the rect's map box: the box's own cells hold every texel
-  // the rect samples. The one-cell margin is for float ties at the box's edges only, so a picker
-  // with no margin passes here too; one picking for a box 1 map px short at each side must not.
-  const MW = 160, MH = 120;
-  let missedShort = 0;
-  for (let run = 0; run < 40; run++) {
-    const k = C.NEAR_MIN_SCALE + rnd() * (run % 2 ? 0.3 : 2.5), dx = rnd() * 9, dy = rnd() * 9;
-    const statics = Array.from({ length: 40 }, () => {
-      const w = 2 + int(40), h = 2 + int(24);
-      return { x: int(MW - w), y: int(MH - h), px: picture(w, h, () => (rnd() < 0.05 ? [1, 1, 1, 255] : null)) };
-    });
-    const pick = C.regionPicker(statics, MW, MH), bare = C.regionPicker(statics, MW, MH, 1, 0);
-    for (let n = 0; n < 6; n++) {
-      const rect = { x: int(Math.ceil(MW * k)), y: int(Math.ceil(MH * k)), w: 1 + int(40), h: 1 + int(40) };
-      const box = { x: (rect.x - dx) / k, y: (rect.y - dy) / k, w: rect.w / k, h: rect.h / k };
-      const on = pick(box), onBare = bare(box), onShort = bare({ x: box.x + 1, y: box.y + 1, w: box.w - 2, h: box.h - 2 });
-      let shortMissed = false;
-      statics.forEach((it, i) => {
-        const X0 = Math.floor(it.x * k + dx + 0.5), X1 = Math.floor((it.x + it.px.width) * k + dx + 0.5);
-        const Y0 = Math.floor(it.y * k + dy + 0.5), Y1 = Math.floor((it.y + it.px.height) * k + dy + 0.5);
-        for (let Y = Math.max(Y0, rect.y); Y < Math.min(Y1, rect.y + rect.h); Y++) for (let X = Math.max(X0, rect.x); X < Math.min(X1, rect.x + rect.w); X++) {
-          const u = Math.floor((X + 0.5 - X0) / (X1 - X0) * it.px.width), v = Math.floor((Y + 0.5 - Y0) / (Y1 - Y0) * it.px.height);
-          if (!it.px.data[(v * it.px.width + u) * 4 + 3]) continue;
-          assert.ok(on[i] && onBare[i], `run ${run}: static ${i} draws at (${X}, ${Y}) in the rect, k=${k}`);
-          if (!onShort[i]) shortMissed = true;
-        }
-      });
-      if (shortMissed) missedShort += 1;
+test('exactPicker: statics with an opaque pixel inside a person, closed in draw order over shared opaque pixels only', () => {
+  const dot = (w, h, pts) => picture(w, h, (x, y) => (pts.some(([a, b]) => a === x && b === y) ? [1, 1, 1, 255] : null));
+  const statics = [
+    { x: 10, y: 10, px: dot(10, 10, [[0, 0], [9, 9]]) }, // opaque at (10,10) and (19,19)
+    { x: 19, y: 19, px: dot(4, 4, [[0, 0]]) }, // shares (19,19) with the first
+    { x: 20, y: 19, px: dot(4, 4, [[0, 0]]) }, // (20,19): next to the first, no shared pixel
+    { x: 0, y: 0, px: null },
+    { x: 30, y: 30, px: dot(4, 4, [[3, 3]]) }, // (33,33)
+  ];
+  const pick = C.exactPicker(statics, [0, 1, 2, 3, 4], 64, 64);
+  assert.deepEqual(pick([{ x: 8, y: 8, w: 3, h: 3 }]), [true, true, false, false, false], 'the one under the person, and the later one sharing a pixel with it');
+  assert.deepEqual(pick([{ x: 11, y: 11, w: 8, h: 8 }]), [false, false, false, false, false], 'a box over only transparent pixels picks nothing');
+  assert.deepEqual(pick([{ x: 32.5, y: 32.5, w: 0.6, h: 0.6 }]), [false, false, false, false, true], 'a box between px reaches every px it touches');
+  assert.deepEqual(pick([{ x: 33.5, y: 33.5, w: 2, h: 2 }]), [false, false, false, false, true]);
+  assert.deepEqual(pick([{ x: 34, y: 34, w: 2, h: 2 }]), [false, false, false, false, false]);
+  assert.deepEqual(pick([]), [false, false, false, false, false]);
+  // Draw order matters: an earlier static sharing a pixel is under the picked one in the floor already.
+  assert.deepEqual(C.exactPicker(statics, [1, 0, 2, 3, 4], 64, 64)([{ x: 8, y: 8, w: 3, h: 3 }]), [true, false, false, false, false]);
+});
+
+test('exactPicker: a static is under a box exactly when a scan of the box finds an opaque pixel (no closure)', () => {
+  // The per-tick test reads a summed-area table; this scans every px the box touches instead.
+  let picked = 0;
+  for (let run = 0; run < 400; run++) {
+    const w = 1 + int(24), h = 1 + int(24), sx = int(40), sy = int(40), p = [0, 0.02, 0.3, 1][run % 4];
+    const it = { x: sx, y: sy, px: picture(w, h, () => (rnd() < p ? [1, 1, 1, 1 + int(255)] : null)) };
+    const q = { x: sx - 8 + rnd() * (w + 10), y: sy - 8 + rnd() * (h + 10), w: rnd() * 12, h: rnd() * 12 };
+    let want = false;
+    for (let y = Math.floor(q.y); y < Math.ceil(q.y + q.h); y++) for (let x = Math.floor(q.x); x < Math.ceil(q.x + q.w); x++) {
+      const u = x - sx, v = y - sy;
+      if (u >= 0 && v >= 0 && u < w && v < h && it.px.data[(v * w + u) * 4 + 3] !== 0) want = true;
     }
+    picked += want;
+    assert.equal(C.exactPicker([it], [0], 64, 64)([q])[0], want, `run ${run}`);
   }
-  assert.ok(missedShort > 0, 'a box 1 map px short misses a static that draws in the rect');
-  // With exact arithmetic margin 0 is enough (above), so no pixel test can fail it; the default
-  // margin of one cell guards the GPU's float ties at cell and box edges, and is pinned as written.
-  const cache = codeOnly(readSource('src/renderer/src/scene/themes/staticCache.ts'));
-  assert.match(cache, /export function regionPicker\([^)]*, cell = NEAR_CELL, margin = 1\): \(box: Box\) => boolean\[\]/);
+  assert.ok(picked > 40 && picked < 360, `both outcomes exercised (${picked} of 400 picked)`);
+});
+
+test('model: at a whole scale, the floor texture, then by depth the people and the statics exactPicker picks, is the full depth sort', () => {
+  // TES-FLOOR-WHOLE-188: the world at n device px per map px on whole device px; statics on whole
+  // map px land exactly on their pixels in the floor texture, people anywhere (the quad rounds).
+  const over = (dst, c, a) => (a === 255 ? c : a === 0 ? dst : dst.map((d, k) => Math.round((c[k] * a + d * (255 - a)) / 255)));
+  const MW = 120, MH = 90;
+  let indexOrderFails = 0, noClosureFails = 0, crewTopFails = 0;
+  for (let run = 0; run < 48; run++) {
+    const n = 1 + (run % 3), W = MW * n, Hh = MH * n;
+    const below = picture(MW, MH, (x, y) => ((x + y) % 3 ? [x, y, 1, 255] : null));
+    const sorted = Array.from({ length: 50 }, (_, i) => {
+      const w = 2 + int(30), h = 2 + int(20), a = int(3), b = int(5);
+      const stroke = (x, y) => (Math.abs(x - y * a - b) < 1 || rnd() < 0.02 ? [i * 5, int(255), 7, 255] : null);
+      return { x: int(MW - w), y: int(MH - h), foot: int(60), rank: int(2), opacity: 1, px: picture(w, h, stroke) };
+    });
+    const people = Array.from({ length: 8 }, (_, i) => (
+      { x: rnd() * (MW - 5), y: rnd() * (MH - 7), foot: int(60), rank: int(2), px: picture(5, 7, () => [200, i * 30, 90, [0, 128, 255][int(3)]]) }
+    ));
+    const quad = (it) => [Math.floor(it.x * n + 0.5), Math.floor((it.x + it.px.width) * n + 0.5), Math.floor(it.y * n + 0.5), Math.floor((it.y + it.px.height) * n + 0.5)];
+    const draw = (img, it) => {
+      const [X0, X1, Y0, Y1] = quad(it);
+      for (let Y = Math.max(0, Y0); Y < Math.min(Hh, Y1); Y++) for (let X = Math.max(0, X0); X < Math.min(W, X1); X++) {
+        const u = Math.floor((X + 0.5 - X0) / (X1 - X0) * it.px.width), v = Math.floor((Y + 0.5 - Y0) / (Y1 - Y0) * it.px.height);
+        const s = (v * it.px.width + u) * 4, d = Y * W + X;
+        img[d] = over(img[d], Array.from(it.px.data.slice(s, s + 3)), it.px.data[s + 3]);
+      }
+    };
+    const base = () => Array.from({ length: W * Hh }, () => [0, 0, 0]);
+    const full = base();
+    draw(full, { x: 0, y: 0, px: below });
+    [...sorted, ...people].sort(byDepth).forEach((it) => draw(full, it));
+    const order = C.staticOrder(sorted);
+    const floor = base();
+    draw(floor, { x: 0, y: 0, px: below });
+    for (const i of order) draw(floor, sorted[i]);
+    const boxes = people.map((q) => ({ x: q.x, y: q.y, w: q.px.width, h: q.px.height }));
+    const scene = (on) => {
+      const img = floor.map((c) => c.slice());
+      [...sorted.filter((_, i) => on[i]), ...people].sort(byDepth).forEach((it) => draw(img, it));
+      return JSON.stringify(img);
+    };
+    const want = JSON.stringify(full);
+    assert.equal(scene(C.exactPicker(sorted, order, MW, MH)(boxes)), want, `run ${run}, n=${n}`);
+    if (scene(C.exactPicker(sorted, sorted.map((_, i) => i), MW, MH)(boxes)) !== want) indexOrderFails += 1;
+    // No closure: only the statics under a person.
+    const direct = sorted.map((it) => C.exactPicker([it], [0], MW, MH)(boxes)[0]);
+    if (scene(direct) !== want) noClosureFails += 1;
+    if (scene(sorted.map(() => false)) !== want) crewTopFails += 1;
+  }
+  assert.ok(indexOrderFails > 0, 'a closure walked in index order is caught');
+  assert.ok(noClosureFails > 0, 'no closure is caught');
+  assert.ok(crewTopFails > 0, 'the people drawn over every static are caught');
+});
+
+test('exactPicker on the TES pack: a person on any reachable cell has few statics drawn again (frontPicker chained 56 on average)', () => {
+  const T = loadTs('src/renderer/src/scene/themes/tiled.ts');
+  const P = loadTs('src/renderer/src/scene/themes/packs.ts');
+  const CO = loadTs('src/renderer/src/scene/themes/compositor.ts');
+  const dir = path.join(__dirname, '..', 'themes', 'tes');
+  const r = P.readPack(P.memoryFiles(H.readPackDir(dir)));
+  const f = P.finishPack(r.value, H.decodeImages(dir, T.normPath, r.value.images), r.diagnostics).value;
+  const SM = f.scene;
+  const plan = CO.buildScenePlan({ ...SM, store: f.store });
+  const order = C.staticOrder(plan.sorted);
+  const exact = C.exactPicker(plan.sorted, order, plan.below.width, plan.below.height);
+  const near = C.frontPicker(plan.sorted, order, plan.below.width, plan.below.height);
+  const g = SM.grid.g;
+  let cells = 0, sumE = 0, maxE = 0, sumN = 0;
+  for (let i = 0; i < SM.reach.length; i++) if (SM.reach[i]) {
+    const box = [{ x: Math.round((i % SM.grid.W) * g + 2 - 16), y: Math.round(Math.floor(i / SM.grid.W) * g + 2 - 32), w: 32, h: 32 }];
+    const e = exact(box), nb = near(box);
+    const ne = e.filter(Boolean).length;
+    cells++; sumE += ne; maxE = Math.max(maxE, ne); sumN += nb.filter(Boolean).length;
+    e.forEach((on, j) => { if (on) assert.ok(nb[j], `cell ${i}: static ${j} picked by exactPicker only`); });
+  }
+  assert.ok(cells > 1000);
+  assert.ok(sumE / cells < 8 && maxE <= 40, `mean ${(sumE / cells).toFixed(1)}, max ${maxE} statics per person`);
+  assert.ok(sumN / cells > 4 * (sumE / cells), 'far fewer than frontPicker');
+});
+
+test('sceneBounds: the box of every opaque pixel of below, above and the statics; null when there is none', () => {
+  const dot = (w, h, at) => picture(w, h, (x, y) => (x === at[0] && y === at[1] ? [1, 2, 3, 255] : null));
+  const empty = R.blank(40, 30);
+  assert.deepEqual(C.sceneBounds({ below: dot(40, 30, [5, 7]), above: empty, sorted: [] }), { x: 5, y: 7, w: 1, h: 1 });
+  assert.deepEqual(C.sceneBounds({ below: dot(40, 30, [5, 7]), above: dot(40, 30, [20, 2]), sorted: [{ x: 30, y: 20, px: dot(4, 4, [3, 3]) }, { x: 0, y: 0, px: null }] }), { x: 5, y: 2, w: 29, h: 22 });
+  // Transparent pixels do not count, however wide the sprite.
+  assert.deepEqual(C.sceneBounds({ below: empty, above: empty, sorted: [{ x: 1, y: 1, px: picture(30, 20, (x, y) => (x === 2 && y === 3 ? [9, 9, 9, 1] : null)) }] }), { x: 3, y: 4, w: 1, h: 1 });
+  assert.equal(C.sceneBounds({ below: empty, above: empty, sorted: [] }), null);
+});
+
+// 1.1.87 whole-branch audit, MUST 1: a UI zoom (Ctrl+= / Ctrl+-) changes the device pixel ratio
+// but usually not the canvas's pixel size. k is taken from the world's scale times the
+// renderer's resolution, so a new resolution gives a new k, and a new k rebuilds the floor.
+test('sceneScale: the smallest integer at or above the device scale, at least 1, within the texel limit', () => {
+  const b = { x: 0, y: 0, w: 288, h: 384 };
+  assert.equal(C.sceneScale(1, b), 1);
+  assert.equal(C.sceneScale(1.0000000001, b), 1, 'a float a hair over an integer is that integer');
+  assert.equal(C.sceneScale(1.001, b), 2);
+  assert.equal(C.sceneScale(2, b), 2);
+  assert.equal(C.sceneScale(2.0166, b), 3, 'DPR 1.25 at 560x555');
+  assert.equal(C.sceneScale(0.47, b), 1, 'never below 1: a tiny pane still has one texel per map px');
+  assert.equal(C.sceneScale(12, b), 10, '4096 / 384 = 10.67: the RT stays within SCENE_MAX_TEXELS');
+  assert.equal(C.sceneScale(12, b, 768), 2);
+  assert.equal(C.sceneScale(5, { x: 0, y: 0, w: 9000, h: 10 }), 1, 'at least 1 even past the limit');
+  assert.equal(C.SCENE_MAX_TEXELS, 4096);
 });
 
 test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above" layer is empty', () => {
@@ -257,65 +286,56 @@ test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above"
   assert.equal(C.hasVisiblePixel(plan.above), false);
 });
 
-test('StationFloor draws below and the statics through the cache, with the very same sprites', () => {
+test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; the hull over it; no scene texture', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.doesNotMatch(src, /atlas/i, 'no split tiles: each would be rounded on its own');
-  assert.match(src, /const cached = staticsCacheable\(plan\);/);
-  assert.match(src, /const cacheWorld = cacheRoot\.addChild\(new Container\(\)\);/);
-  assert.match(src, /const order = staticOrder\(plan\.sorted\);/);
-  assert.match(src, /cacheWorld\.addChild\(below\);\s*for \(const i of order\) if \(staticTex\[i\]\) cacheStatics\[i\] = cacheWorld\.addChild\(staticSprite\(i\)\);/);
-  assert.match(src, /const belowDirect = new Sprite\(below\.texture\);\s*world\.addChild\(belowDirect\);\s*if \(cached\) \{/);
-  assert.match(src, /app\.stage\.addChild\(cacheLayer\);\s*\}\s*world\.addChild\(sortLayer\);/);
-  // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
-  assert.match(src, /if \(!cached \|\| hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
+  assert.doesNotMatch(src, /blitFramebuffer|screenCells|regionPicker|cacheKeyOf|wholeSceneRaster|NEAR_MIN_SCALE/);
+  // PERF-FLOOR-FILL-188: the one scissor is paint()'s, each changed rect drawn again whole
+  // (tes-floor-damage-188 proves every such frame equals a full draw).
+  assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2, 'enabled and disabled once, in paint()');
+  assert.match(src, /gl\.enable\(gl\.SCISSOR_TEST\);\s*try \{\s*for \(const p of todo\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*realRender\(\{ container: app\.stage, clear: true \}\);\s*\}\s*\} finally \{ gl\.disable\(gl\.SCISSOR_TEST\); \}/);
+  // TES-FLOOR-WHOLE-188: the camera puts every frame on whole device px, so nothing is composed per frame.
+  assert.doesNotMatch(src, /sceneRT|sceneSprite|sceneM\b|aboveRoot|sortLayer\.alpha/);
+  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
+  assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.keep \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
+  assert.match(src, /const floorRoot = new Container\(\);\s*const floorWorld = floorRoot\.addChild\(new Container\(\)\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
-  // The cache follows the world's transform, is drawn on the canvas by the canvas's own arithmetic
-  // (a render texture's flipped projection tipped rounding ties) and blitted out, bottom row first;
-  // cells copy it 1:1, mirrored back.
-  assert.match(src, /cacheWorld\.position\.copyFrom\(world\.position\);\s*cacheWorld\.scale\.copyFrom\(world\.scale\);\s*app\.renderer\.render\(\{ container: cacheRoot, clear: true \}\);/);
-  assert.match(src, /gl\.bindFramebuffer\(gl\.READ_FRAMEBUFFER, null\);\s*gl\.bindFramebuffer\(gl\.DRAW_FRAMEBUFFER, targets\.getGpuRenderTarget\(targets\.getRenderTarget\(rt\)\)\.framebuffer\);\s*gl\.blitFramebuffer\(0, 0, W, H, 0, 0, W, H, gl\.COLOR_BUFFER_BIT, gl\.NEAREST\);\s*gl\.bindFramebuffer\(gl\.FRAMEBUFFER, null\);/);
-  assert.match(src, /const r = app\.renderer\.resolution, W = app\.canvas\.width, H = app\.canvas\.height;/);
-  assert.match(src, /RenderTexture\.create\(\{ width: W \/ r, height: H \/ r, resolution: r, scaleMode: 'nearest' \}\);\s*const none = new Container\(\);\s*app\.renderer\.render\(\{ container: none, target: rt, clear: true \}\);[^\n]*\n\s*none\.destroy\(\);/);
-  assert.match(src, /new Rectangle\(c\.x \/ r, \(H - c\.y - c\.h\) \/ r, c\.w \/ r, c\.h \/ r\)/);
-  assert.match(src, /s\.position\.set\(c\.x \/ r, \(c\.y \+ c\.h\) \/ r\);\s*s\.scale\.y = -1;/);
+  // Cached: the floor texture's tree holds below and every static by staticOrder, and the world
+  // shows it. Not cached: below itself. Then the sort layer (people, and statics drawn again), the
+  // hull, 'above' and the bubbles.
+  assert.match(src, /if \(cached\) \{\s*floorWorld\.addChild\(below\);\s*for \(const i of order\) if \(staticTex\[i\]\) floorWorld\.addChild\(staticSprite\(i\)\);\s*world\.addChild\(floorView\);\s*\} else world\.addChild\(new Sprite\(below\.texture\)\);\s*world\.addChild\(sortLayer\);/);
+  // The hull is made once, from the composited art, below the deck and over the hull's own
+  // statics: no person is ever under it (tes-hull).
+  assert.match(src, /const hull = new Container\(\);\s*if \(frame0\.deadBottom > 0\) \{\s*const art = blank\(SM\.PW, SM\.PH\);\s*composePx\(art, plan\.below, 0, 0\);\s*for \(const it of plan\.sorted\) if \(it\.px\) composePx\(art, it\.px, Math\.round\(it\.x\), Math\.round\(it\.y\), it\.opacity\);\s*const sk = hullSkirt\(art, frame0\.x \+ FRAME_MARGIN, frame0\.x \+ frame0\.w - FRAME_MARGIN - 1, frame0\.y \+ frame0\.h - 1\);/);
+  assert.match(src, /strip\.position\.set\(sk\.x, frame0\.y \+ frame0\.h\);\s*strip\.height = HULL_STRIP_ROWS;/);
+  // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
+  // PANEL-BLINK-188: the chair panels' layer right after 'above', before the bubbles.
+  assert.match(src, /world\.addChild\(hull\);\s*if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
+  assert.equal((src.match(/own\(plan\.above\)/g) || []).length, 1, "'above' is made once");
+  // The floor texture: the bounds at k texels per map px, 1:1, nearest; the old one freed first.
+  // Its tree is scaled by k and moved to the bounds; the sprite is the bounds in map px.
+  assert.match(src, /const buildFloor = \(k: number\) => \{\s*const b = bounds!;\s*floorView\.texture = Texture\.EMPTY;\s*floorRT\?\.destroy\(true\);\s*floorRT = RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: 'nearest' \}\);\s*floorWorld\.scale\.set\(k\);\s*floorWorld\.position\.set\(-b\.x \* k, -b\.y \* k\);\s*app\.renderer\.render\(\{ container: floorRoot, target: floorRT, clear: true \}\);\s*floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);\s*floorK = k;/);
 });
 
-test('StationFloor caches a picture once it holds for a tick, draws directly while it changes, and sorts on the first tick', () => {
+test('StationFloor picks after each tick: the floor rebuilt on a new k, the statics near a person drawn again; and sorts on a depth change', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
+  // NIT-2 (Jim): the floor depends on k alone, so it is rebuilt exactly when k changes, at once.
+  assert.match(src, /const compose = \(\) => \{\s*if \(!cached\) return;\s*const k = sceneScale\(world\.scale\.x \* app\.renderer\.resolution, bounds!\);\s*if \(k !== floorK\) buildFloor\(k\);/);
+  // COFFEE-NEVER-186: the cups in hand and the parked mugs are boxes too: a static in front of a mug is drawn again over it.
+  assert.match(src, /const near: Box\[\] = \[\];\s*for \(const s of sprites\.values\(\)\) near\.push\(\{ x: s\.sprite\.x, y: s\.sprite\.y, w: fw, h: fh \}\);\s*for \(const c of cups\.values\(\)\) near\.push\(\{ x: c\.sprite\.x, y: c\.sprite\.y, w: MUG_W, h: MUG_H \}\);\s*for \(const m of mugs\.values\(\)\) near\.push\(\{ x: m\.sprite\.x, y: m\.sprite\.y, w: MUG_W, h: MUG_H \}\);\s*const front = pickFront!\(near\);\s*statics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = front\[i\]; \}\);\s*\};/);
+  // After onTick, so the pick has this tick's people and depth order.
+  assert.match(src, /app\.ticker\.add\(onTick\);\s*(?:\/\/[^\n]*\n\s*)*applyFloorFrameBudget\(app\.ticker\);\s*(?:\/\/[^\n]*\n\s*)*app\.ticker\.add\(compose\);/);
   assert.match(src, /let lastDepth: string \| null = null;/);
-  assert.match(src, /const k = cacheKeyOf\(\{ w: plan\.below\.width, h: plan\.below\.height \}, staticBox, world\.scale\.x, world\.scale\.y, world\.x, world\.y, r\);/);
-  // The view (canvas size and resolution) heads every key: a resize at the same camera re-caches.
-  assert.match(src, /const view = `\$\{app\.canvas\.width\}x\$\{app\.canvas\.height\}@\$\{r\}:`;/);
-  assert.match(src, /const exact = k\.exact === null \? null : view \+ k\.exact;\s*const settled = exact !== null && exact === lastExact;\s*lastExact = exact;\s*const key = settled \? exact! : view \+ k\.key, live = settled \? noLive : k\.live;/);
-  assert.match(src, /if \(key !== cacheKey && key === lastKey\) \{ refreshCache\(live\); cacheKey = key; \}\s*lastKey = key;\s*const useCache = [^;]*;\s*cacheLayer\.visible = useCache;\s*belowDirect\.visible = !useCache;/);
-  assert.match(src, /const pickFront = cached \? frontPicker\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
-  assert.match(src, /const useCache = key === cacheKey && world\.scale\.x \* r >= NEAR_MIN_SCALE && world\.scale\.y \* r >= NEAR_MIN_SCALE;/);
-  // COFFEE-NEVER-186: the parked mugs stay in the main pass, so they are its boxes: a static in front of a mug is redrawn over it.
-  assert.match(src, /mainFront = useCache \? pickFront!\(\[\.\.\.mugs\.values\(\)\]\.map\(\(m\) => \(\{ x: m\.sprite\.x, y: m\.sprite\.y, w: MUG_W, h: MUG_H \}\)\), live\) : null;\s*statics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = mainFront \? mainFront\[i\] : true; \}\);\s*for \(const s of sprites\.values\(\)\) s\.sprite\.visible = !useCache;/);
-  assert.match(src, /const pickRegion = cached \? regionPicker\(plan\.sorted, plan\.below\.width, plan\.below\.height\) : null;/);
-  // The rects: each person's device box, 1 px out, inside the screen; one set picked for them all.
-  assert.match(src, /const X0 = Math\.max\(0, Math\.floor\(\(s\.sprite\.x \* kx \+ world\.x\) \* r\) - 1\), X1 = Math\.min\(W, Math\.ceil\(\(\(s\.sprite\.x \+ fw\) \* kx \+ world\.x\) \* r\) \+ 1\);\s*const Y0 = Math\.max\(0, Math\.floor\(\(s\.sprite\.y \* ky \+ world\.y\) \* r\) - 1\), Y1 = Math\.min\(H, Math\.ceil\(\(\(s\.sprite\.y \+ fh\) \* ky \+ world\.y\) \* r\) \+ 1\);/);
-  assert.match(src, /passes\.push\(rect\);\s*pickRegion!\(\{ x: \(rect\.x \/ r - world\.x\) \/ kx, y: \(rect\.y \/ r - world\.y\) \/ ky, w: rect\.w \/ r \/ kx, h: rect\.h \/ r \/ ky \}\)\.forEach\(\(on, i\) => \{ if \(on\) passOn\[i\] = true; \}\);/);
-  // The rects are drawn inside the frame's own render, after it, scissored, each cleared to the
-  // whole-cache quad first.
-  assert.match(src, /if \(inPass \|\| o\.container !== app\.stage \|\| !passes\.length\) return;/);
-  assert.match(src, /cacheLayer\.visible = false;\s*if \(passCache\) passCache\.visible = true;\s*gl\.enable\(gl\.SCISSOR_TEST\);\s*statics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = passOn\[i\]; \}\);\s*for \(const p of passes\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*app\.renderer\.render\(\{ container: app\.stage, clear: true \}\);\s*\}/);
-  assert.match(src, /\} finally \{\s*gl\.disable\(gl\.SCISSOR_TEST\);\s*cacheLayer\.visible = true;\s*if \(passCache\) passCache\.visible = false;/);
-  assert.match(src, /passCache\.position\.set\(0, H \/ r\);\s*passCache\.scale\.y = -1;\s*passCache\.visible = false;\s*app\.stage\.addChildAt\(passCache, app\.stage\.getChildIndex\(cacheLayer\) \+ 1\);/);
-  assert.match(src, /if \(cached\) app\.renderer\.runners\.postrender\.add\(postrender\);/);
-  // That the people stay clickable after the passes is checked by a real click in
-  // tes-floor-click-harness.test.cjs.
-  assert.match(src, /const refreshCache = \(liveStatics: boolean\[\]\) => \{\s*cacheStatics\.forEach\(\(s, i\) => \{ if \(s\) s\.visible = !liveStatics\[i\]; \}\);/);
   // COFFEE-NEVER-186: the key also holds the coffee mugs (a cup's side, a parked mug's depth).
   assert.match(src, /const depth = people\.map\(\(q\) => `\$\{q\.id\}:\$\{q\.foot\}:\$\{q\.rank\}:\$\{cups\.get\(q\.id\)\?\.back \?\? '-'\}`\)\.join\('\|'\) \+ '#' \+ \[\.\.\.mugs\]\.map\(\(\[id, m\]\) => `\$\{id\}:\$\{m\.foot\}:\$\{m\.rank\}`\)\.join\('\|'\);\s*if \(depth === lastDepth\) return;\s*lastDepth = depth;/);
   assert.match(src, /plan\.sorted\.map\(\(it, i\) => \(\{ foot: it\.foot, rank: it\.rank, sprite: statics\[i\] \}\)\);\s*for \(const q of people\) items\.push\(q\);\s*for \(const m of mugs\.values\(\)\) items\.push\(m\);\s*for \(const q of panelLayer\.sorted\) items\.push\(q\);\s*items\.sort\(byDepth\);/);
 });
 
-test('StationFloor frees the cache target, its cells and every texture it made on unmount, before the app is destroyed', () => {
+test('StationFloor frees the floor texture, its tree and every texture it made on unmount, before the app is destroyed', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
-  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => app\.renderer\.runners\.postrender\.remove\(postrender\),\s*dropCells,\s*\(\) => rt\?\.destroy\(true\),\s*\(\) => cacheRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
-  assert.match(src, /const dropCells = \(\) => \{\s*for \(const s of cells\.values\(\)\) s\.destroy\(\{ texture: true, textureSource: false \}\);\s*cells\.clear\(\);\s*\};/);
+  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => floorRT\?\.destroy\(true\),\s*\(\) => floorRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
+  assert.doesNotMatch(src, /dropCells|postrender/);
   // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
   assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__disposeHiveBubbles\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);
   assert.doesNotMatch(src, /safeDestroy\(a\)/, 'the unmount destroys the app only through teardownFloor');
@@ -363,20 +383,4 @@ test('teardownFloor, with real pixi: frees the floor whole; the old order (free 
   const one = floor();
   T.teardownFloor(one.app, [() => { throw new Error('a step'); }, ...one.frees]);
   assert.equal(one.freed(), true);
-});
-
-// 1.1.87 whole-branch audit, MUST 1: a UI zoom (Ctrl+= / Ctrl+-) changes the device pixel ratio
-// but usually not the canvas's pixel size (the CSS size shrinks as the DPR grows). The DPR watcher
-// sets renderer.resolution, so the cache RT must be rebuilt for a new resolution too, or its cells
-// keep the old one (wrong UVs and positions).
-test('cacheStale: the cache RT is rebuilt when the canvas pixel size OR the resolution changes', () => {
-  const rt = (pixelWidth, pixelHeight, resolution) => ({ source: { pixelWidth, pixelHeight, resolution } });
-  assert.equal(C.cacheStale(null, 1200, 800, 1), true, 'no RT yet');
-  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 800, 1), false, 'same pixels, same resolution');
-  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 800, 1.25), true, 'same pixels, new resolution (UI zoom)');
-  assert.equal(C.cacheStale(rt(1200, 800, 1.25), 1200, 800, 1), true, 'and back');
-  assert.equal(C.cacheStale(rt(1200, 800, 1), 1201, 800, 1), true, 'new width');
-  assert.equal(C.cacheStale(rt(1200, 800, 1), 1200, 801, 1), true, 'new height');
-  const src = readSource('src/renderer/src/scene/themes/StationFloor.tsx');
-  assert.match(src, /const r = app\.renderer\.resolution, W = app\.canvas\.width, H = app\.canvas\.height;\s*if \(!rt \|\| cacheStale\(rt, W, H, r\)\) \{\s*dropCells\(\);/);
 });

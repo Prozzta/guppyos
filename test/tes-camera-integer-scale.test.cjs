@@ -1,8 +1,9 @@
 'use strict';
 
-// TES-WALL-RESIZE-LINES-187: at rest, the TES floor camera puts every art
-// pixel and frame edge on the device-pixel grid, so per-foot raster strips
-// cannot form resize-dependent seams.
+// TES-FLOOR-WHOLE-188 (was TES-WALL-RESIZE-LINES-187): a framed floor with a keep box is drawn at
+// a whole number n of device px per map px, the largest at which its keep box fits, with the
+// map's origin on a whole device px: every art pixel is n x n device px on every frame, easing
+// included. A frame without a keep box (and the office) keeps the raw fit, as before.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -10,140 +11,173 @@ const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const { Camera } = loadTs('src/renderer/src/scene/office/Camera.ts');
-const { floorFrame } = loadTs('src/renderer/src/scene/themes/framing.ts');
+const { floorFrame, wholeScale } = loadTs('src/renderer/src/scene/themes/framing.ts');
 
 const isInt = (v) => Math.abs(v - Math.round(v)) < 1e-6;
+const TES = floorFrame('tes', 960, 640);
+const RAW = (() => { const f = { ...TES }; delete f.keep; return f; })();
 
-function rest(W, H, r, CameraClass = Camera) {
+function make(W, H, r, { CameraClass = Camera, frame = TES } = {}) {
   const c = { x: 0, y: 0, z: 1, scale: { set(v) { c.z = v; } } };
-  const k = new CameraClass(c, { resolution: () => r });
+  const rr = typeof r === 'function' ? r : () => r;
+  const k = new CameraClass(c, { resolution: rr });
   k.setMapSize(960, 640);
-  k.setFrame(floorFrame('tes', 960, 640));
+  k.setFrame(frame);
   k.setViewSize(W, H);
   k.fitToScreen();
-  for (let i = 0; i < 600; i++) k.update(1 / 30);
-  return c;
+  return { c, k };
+}
+function rest(W, H, r, opts) {
+  const m = make(W, H, r, opts);
+  for (let i = 0; i < 600; i++) m.k.update(1 / 30);
+  return m.c;
+}
+const KEEP = TES.keep, KW = KEEP.x1 - KEEP.x0 + 1, KH = KEEP.y1 - KEEP.y0 + 1;
+const ART = TES.art, AW = ART.x1 - ART.x0 + 1, AH = ART.y1 - ART.y0 + 1;
+/** On an axis the art covers (art * n >= pane), the pane lies inside the art: no margin (backdrop) shows. */
+function artFailures(Wd, Hd, n, ox, oy) {
+  const bad = [];
+  if (AW * n >= Wd && (ox + ART.x0 * n > 1e-6 || ox + (ART.x1 + 1) * n < Wd - 1e-6)) bad.push(`margin shows in x: ${ox} (art ${ox + ART.x0 * n}..${ox + (ART.x1 + 1) * n} of ${Wd})`);
+  if (AH * n >= Hd && (oy + ART.y0 * n > 1e-6 || oy + (ART.y1 + 1) * n < Hd - 1e-6)) bad.push(`margin shows in y: ${oy} (art ${oy + ART.y0 * n}..${oy + (ART.y1 + 1) * n} of ${Hd})`);
+  return bad;
 }
 
-// Fractional and whole device scales, and odd heights, so H * r (and the bottom-anchored y) is
-// often not a whole device pixel before the snap.
+/** Every way a rested whole camera can be wrong, for a pane W x H CSS px at DPR r. */
+function wholeFailures(W, H, r, c) {
+  const bad = [], Wd = Math.round(W * r), Hd = Math.round(H * r), n = c.z * r;
+  const ox = c.x * r, oy = c.y * r;
+  if (!isInt(n) || !isInt(ox) || !isInt(oy)) bad.push(`not whole: n=${n} x=${ox} y=${oy}`);
+  const want = Math.max(1, Math.floor(Math.min(Wd / KW, Hd / KH)));
+  if (Math.round(n) !== want) bad.push(`n=${n}, want ${want}`);
+  const fits = KW * n <= Wd && KH * n <= Hd;
+  if (fits) {
+    if (ox + KEEP.x0 * n < -1e-6 || ox + (KEEP.x1 + 1) * n > Wd + 1e-6) bad.push(`keep cut in x: ${ox}`);
+    if (oy + KEEP.y0 * n < -1e-6 || oy + (KEEP.y1 + 1) * n > Hd + 1e-6) bad.push(`keep cut in y: ${oy}`);
+  }
+  // The frame's content fits and the art does not cover the height: the frame's top meets the
+  // pane's top (the hull runs past the bottom). Where the art covers it, the art's top does.
+  if ((TES.h - TES.deadBottom) * n <= Hd && AH * n < Hd && Math.abs(oy + TES.y * n) > 1e-6) bad.push(`frame top not at the pane top: ${oy}`);
+  if ((TES.h - TES.deadBottom) * n <= Hd && AH * n >= Hd && Math.abs(oy + ART.y0 * n) > 1e-6) bad.push(`art top not at the pane top: ${oy}`);
+  bad.push(...artFailures(Wd, Hd, n, ox, oy));
+  // The frame fits across: centred to within half a device px.
+  if (TES.w * n <= Wd && Math.abs(ox + TES.x * n - (Wd - TES.w * n) / 2) > 0.5 + 1e-6) bad.push(`not centred: ${ox}`);
+  return bad;
+}
 const GRID_R = [1, 1.25, 1.5, 1.75, 2, 3];
-const GRID_H = [301, 470, 517, 899];
-
-function gridFailures(CameraClass = Camera) {
+const GRID_H = [201, 301, 470, 517, 555, 640, 899];
+function gridFailures(opts) {
   const bad = [];
-  for (const r of GRID_R) for (let W = 400; W <= 900; W += 7) for (const H of GRID_H) {
-    const c = rest(W, H, r, CameraClass);
-    if (!isInt(c.z * r) || !isInt(c.x * r) || !isInt(c.y * r)) bad.push(`${W}x${H}@${r}: z*r=${(c.z * r).toFixed(4)} x*r=${(c.x * r).toFixed(3)} y*r=${(c.y * r).toFixed(3)}`);
+  for (const r of GRID_R) for (let W = 400; W <= 960; W += 7) for (const H of GRID_H) {
+    for (const f of wholeFailures(W, H, r, rest(W, H, r, opts))) bad.push(`${W}x${H}@${r}: ${f}`);
   }
   return bad;
 }
 
-/** Where the whole deck fits, its bottom row ends inside the panel: y is floored to the grid,
- *  never rounded down past the edge (the hull below it still crosses the bottom). */
-function deckFailures(CameraClass = Camera) {
-  const frame = floorFrame('tes', 960, 640);
-  const bad = [];
-  let fits = 0, raised = 0;
-  for (const r of GRID_R) for (let W = 400; W <= 900; W += 7) for (const H of GRID_H) {
-    const c = rest(W, H, r, CameraClass);
-    const deckTop = c.y + frame.y * c.z, deckBottom = c.y + (frame.y + frame.h - frame.deadBottom) * c.z;
-    if (deckTop < 0) continue; // cropped: below 304x344 device px the deck is held at 1 device px
-    fits++;
-    if (deckBottom > H + 1e-6) bad.push(`${W}x${H}@${r}: deck bottom ${deckBottom.toFixed(3)} > ${H}`);
-    else if (deckBottom < H - 1e-6) raised++;
-  }
-  return { bad, fits, raised };
-}
+test('wholeScale: the largest whole n at which the keep box fits, at least 1', () => {
+  assert.deepEqual(KEEP, { x0: 335, y0: 84, x1: 591, y1: 367 });
+  assert.equal(wholeScale(KEEP, 560, 555), 1, 'the bare 560x555 pane: 2 x 284 = 568 rows > 555');
+  assert.equal(wholeScale(KEEP, 576, 587), 2, 'the same pane with its row padding');
+  assert.equal(wholeScale(KEEP, 1680, 1120), 3);
+  assert.equal(wholeScale(KEEP, 2 * 257 - 1, 10000), 1);
+  assert.equal(wholeScale(KEEP, 2 * 257, 2 * 284), 2);
+  for (const [w, h] of [[0, 0], [10, 10], [NaN, 5], [-5, 100]]) assert.equal(wholeScale(KEEP, w, h), 1, `${w}x${h}`);
+});
 
-function bottomFailures(CameraClass = Camera) {
-  const frame = floorFrame('tes', 960, 640);
-  const bad = [];
-  for (const [W, H] of [[500, 300], [650, 300], [742, 284]]) for (const r of [1, 1.25, 1.5, 2]) {
-    const c = rest(W, H, r, CameraClass);
-    const hullBottom = c.y + (frame.y + frame.h) * c.z;
-    if (hullBottom < H - 1e-6) bad.push(`${W}x${H}@${r}: hull=${hullBottom.toFixed(3)} panel=${H}`);
-  }
-  return bad;
-}
-
-test('TES camera at rest: zoom*resolution is a whole number and the offsets are whole device px', () => {
+test('TES camera at rest: whole n, whole-device-px origin, keep box in view, frame top at the pane top, centred', () => {
   const bad = gridFailures();
-  assert.deepEqual(bad.slice(0, 6), [], `${bad.length} sizes off the device grid`);
+  assert.deepEqual(bad.slice(0, 8), [], `${bad.length} panes`);
 });
 
-test('TES camera: where the deck fits, its last row is inside the panel (y floored, not rounded)', () => {
-  const { bad, fits, raised } = deckFailures();
-  assert.ok(fits > 500, `${fits} panes fit the whole deck`);
-  assert.ok(raised > 0, 'some panes need the floor (H * r not whole)');
-  assert.deepEqual(bad.slice(0, 6), [], `${bad.length} panes clip the deck's bottom row`);
-});
-
-test('TES camera in a tiny pane keeps one device px per map px, never zoom 0, and the hull crosses the bottom', () => {
-  const frame = floorFrame('tes', 960, 640);
+test('TES camera in a tiny pane: n = 1, never zoom 0, the keep box centred when it cannot fit', () => {
   for (const [W, H] of [[200, 150], [61, 50], [150, 1200]]) for (const r of [1, 1.25, 2]) {
     const c = rest(W, H, r);
-    assert.ok(c.z * r >= 1 - 1e-9, `${W}x${H}@${r}: z*r=${c.z * r}`);
-    assert.ok(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r), `${W}x${H}@${r}: on the device grid`);
-    assert.ok(c.y + (frame.y + frame.h) * c.z > H, `${W}x${H}@${r}: the hull crosses the bottom`);
+    assert.ok(Math.abs(c.z * r - 1) < 1e-9, `${W}x${H}@${r}: z*r=${c.z * r}`);
+    assert.ok(isInt(c.x * r) && isInt(c.y * r), `${W}x${H}@${r}: whole origin`);
+    const Wd = Math.round(W * r);
+    if (KW > Wd) assert.ok(Math.abs(c.x * r + (KEEP.x0 + KEEP.x1 + 1) / 2 - Wd / 2) <= 0.5 + 1e-9, `${W}x${H}@${r}: keep centred across`);
   }
 });
 
-test('TES camera snaps only once settled: not while the zoom eases after a resize, nor during a nudge', () => {
-  const r = 1.5, frame = floorFrame('tes', 960, 640);
-  const make = (W, H) => {
-    const c = { x: 0, y: 0, z: 1, scale: { set(v) { c.z = v; } } };
-    const k = new Camera(c, { resolution: () => r });
-    k.setMapSize(960, 640);
-    k.setFrame(frame);
-    k.setViewSize(W, H);
-    k.fitToScreen();
-    for (let i = 0; i < 600; i++) k.update(1 / 30);
-    return { c, k };
-  };
-  // A resize: only the zoom eases (the frame centre is the target before and after), so the
-  // offsets follow the easing zoom exactly, off the grid, until it lands.
-  const { c, k } = make(1201, 901);
-  k.setViewSize(517, 301);
-  let off = 0, frames = 0;
-  do {
-    k.update(1 / 60);
-    frames++;
-    if (!isInt(c.z * r) && (!isInt(c.x * r) || !isInt(c.y * r))) off++;
-  } while (frames < 600 && !isInt(c.z * r));
-  assert.ok(frames > 5, `the zoom eases over ${frames} frames`);
-  assert.ok(off > 0, 'mid-ease offsets are not snapped');
+test('TES camera is whole on every frame: a resize steps n at once, a nudge eases on whole device px', () => {
+  const r = 1.5;
+  const { c, k } = make(1201, 901, r);
   for (let i = 0; i < 600; i++) k.update(1 / 30);
-  assert.ok(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r), 'snapped once settled');
-  // A nudge toward the target itself moves nothing, but while it runs the camera is not settled:
-  // the offsets are the raw centring (this pane's is off the grid), snapped again once it ends.
-  const n = make(433, 501);
-  const raw = { x: n.c.x, y: n.c.y };
-  n.k.nudgeToward(n.k.targetX, n.k.targetY, 1000);
-  n.k.update(1 / 60);
-  const mid = { x: n.c.x * r, y: n.c.y * r };
-  assert.ok(!isInt(mid.x) || !isInt(mid.y), `mid-nudge offsets are raw: x*r=${mid.x} y*r=${mid.y}`);
-  for (let i = 0; i < 120; i++) n.k.update(1 / 30);
-  assert.ok(isInt(n.c.x * r) && isInt(n.c.y * r), 'snapped after the nudge');
-  assert.deepEqual({ x: n.c.x, y: n.c.y }, raw, 'back where it rested');
+  k.setViewSize(517, 301);
+  k.update(1 / 60);
+  assert.equal(Math.round(c.z * r), wholeScale(KEEP, Math.round(517 * r), Math.round(301 * r)), 'the new n on the first frame: the zoom is never eased');
+  for (let i = 0; i < 300; i++) {
+    k.update(1 / 60);
+    assert.ok(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r), `frame ${i}: z*r=${c.z * r} x*r=${c.x * r} y*r=${c.y * r}`);
+  }
+  // A pane narrower than the frame at its n: the nudge pans it, on whole device px each frame.
+  const m = make(720, 800, 1.25);
+  for (let i = 0; i < 600; i++) m.k.update(1 / 30);
+  const rested = { x: m.c.x, y: m.c.y };
+  m.k.nudgeToward(472, 200, 1000); // a small pan: the frame is only 12 device px wider than the pane
+  const xs = new Set();
+  for (let i = 0; i < 90; i++) {
+    m.k.update(1 / 60);
+    assert.ok(isInt(m.c.z * 1.25) && isInt(m.c.x * 1.25) && isInt(m.c.y * 1.25), `nudge frame ${i}`);
+    xs.add(m.c.x);
+  }
+  assert.ok(xs.size >= 2, `the nudge moved the view (${xs.size} positions)`);
+  for (let i = 0; i < 600; i++) m.k.update(1 / 30);
+  assert.deepEqual({ x: m.c.x, y: m.c.y }, rested, 'back where it rested');
 });
 
-test('TES camera follows a DPR change after mount: setViewSize again re-snaps to the new grid', () => {
+/** Nudges toward the art's corners, edges and centre in several panes: every frame's failures, and
+ *  how many frames had an axis the art covers. 576x587@1 is the 560x555 window's bled pane: n = 2
+ *  and the art exactly the pane's width. */
+function nudgeFailures(opts) {
+  const panes = [[576, 587, 1], [576, 587, 1.25], [716, 502, 1.25], [976, 672, 1.5], [720, 800, 1.25], [517, 301, 1.5], [450, 900, 2]];
+  const bad = [];
+  let covered = 0;
+  for (const [W, H, r] of panes) {
+    const m = make(W, H, r, opts);
+    for (let i = 0; i < 300; i++) m.k.update(1 / 30);
+    const Wd = Math.round(W * r), Hd = Math.round(H * r);
+    for (const [tx, ty] of [[300, 30], [620, 30], [300, 420], [620, 420], [463, 0], [463, 640], [0, 220], [960, 220], [400, 300]]) {
+      m.k.nudgeToward(tx, ty, 1000);
+      for (let i = 0; i < 80; i++) {
+        m.k.update(1 / 60);
+        const n = m.c.z * r, ox = m.c.x * r, oy = m.c.y * r;
+        if (!isInt(n) || !isInt(ox) || !isInt(oy)) bad.push(`${W}x${H}@${r} toward ${tx},${ty} frame ${i}: not whole`);
+        for (const f of artFailures(Wd, Hd, n, ox, oy)) bad.push(`${W}x${H}@${r} toward ${tx},${ty} frame ${i}: ${f}`);
+        if (AW * n >= Wd || AH * n >= Hd) covered++;
+      }
+    }
+  }
+  return { bad, covered };
+}
+
+test('TES camera nudged anywhere: on an axis the art covers, no frame of the pan shows the margin (Jim: up to 8n device px of backdrop)', () => {
+  const { bad, covered } = nudgeFailures();
+  assert.deepEqual(bad.slice(0, 5), []);
+  assert.ok(covered > 1000, `frames with a covered axis: ${covered}`);
+});
+
+test('TES camera follows a DPR change after mount: n for the new device size', () => {
   let r = 1;
-  const c = { x: 0, y: 0, z: 1, scale: { set(v) { c.z = v; } } };
-  const k = new Camera(c, { resolution: () => r });
-  k.setMapSize(960, 640);
-  k.setFrame(floorFrame('tes', 960, 640));
-  k.setViewSize(701, 517);
-  k.fitToScreen();
+  const { c, k } = make(576, 587, () => r);
   for (let i = 0; i < 600; i++) k.update(1 / 30);
-  assert.ok(isInt(c.z) && isInt(c.x) && isInt(c.y));
-  r = 1.25; // UI zoom (Ctrl+=) or a move to a 125% monitor
+  assert.equal(c.z * r, 2);
+  r = 1.5; // UI zoom (Ctrl+=) or a move to a 150% monitor
+  k.setViewSize(576, 587); // what StationFloor's DPR watcher does after renderer.resize
   for (let i = 0; i < 600; i++) k.update(1 / 30);
-  assert.ok(!(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r)), 'without a re-fit, the old grid is off the new one');
-  k.setViewSize(701, 517); // what StationFloor's DPR watcher does after renderer.resize
-  for (let i = 0; i < 600; i++) k.update(1 / 30);
-  assert.ok(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r), `on the 1.25 grid: z*r=${c.z * r} x*r=${c.x * r} y*r=${c.y * r}`);
+  assert.equal(Math.round(c.z * r), 3);
+  assert.deepEqual(wholeFailures(576, 587, r, c), []);
+});
+
+test('a frame without a keep box keeps the raw fit (the office path): fractional, the hull across the bottom', () => {
+  const bad = [];
+  for (const r of GRID_R) for (let W = 400; W <= 900; W += 7) for (const H of [301, 470, 517, 899]) {
+    const c = rest(W, H, r, { frame: RAW });
+    const expected = Math.max(1 / r, Math.min(W / 304, H / 344));
+    if (Math.abs(c.z - expected) > 1e-8) bad.push(`${W}x${H}@${r}: got ${c.z}, expected ${expected}`);
+    if (c.y + (RAW.y + RAW.h) * c.z < H - 1e-6) bad.push(`${W}x${H}@${r}: hull above the bottom`);
+  }
+  assert.deepEqual(bad.slice(0, 6), [], `${bad.length} panes`);
+  assert.ok(!isInt(rest(560, 555, 1, { frame: RAW }).z), 'the ordinary DPR-1 pane is fractional there');
 });
 
 test('watchDevicePixelRatio: one query for the current DPR, re-armed for each new one, removed on cleanup', () => {
@@ -179,22 +213,46 @@ test('StationFloor wires the DPR watcher: renderer resolution, resize, camera; c
   assert.match(src, /\(a as any\)\.__resize\?\.disconnect\?\.\(\);\s*try \{ \(a as any\)\.__dpr\?\.\(\); \} catch \{/);
 });
 
-test('TES camera keeps the hull across the bottom edge at every supported pane and device scale', () => {
-  const bad = bottomFailures();
-  assert.deepEqual(bad, [], 'the dead-bottom hull band must cover the panel bottom without a margin');
+test('the scene scale k is an integer at or above the device scale, so its one resample to the screen never magnifies', () => {
+  const { sceneScale } = loadTs('src/renderer/src/scene/themes/staticCache.ts');
+  const b = { x: 336, y: 128, w: 288, h: 384 };
+  for (const r of [1, 1.25, 1.5, 1.75, 2]) for (const scale of [555 / 344, 470 / 344, 640 / 344, 0.47]) {
+    const S = scale * r, k = sceneScale(S, b);
+    assert.ok(Number.isInteger(k) && k >= 1, `${r}x${scale}: k = ${k} is a whole number of texels per map px`);
+    assert.ok(k >= S - 1e-9 && k < Math.max(1, S) + 1, `${r}x${scale}: k = ${k} is the first integer at or above ${S}`);
+  }
 });
 
-test('TES whole-pixel mutant census: removing scale quantisation or bottom anchoring is caught', () => {
+test('StationFloor draws the floor texture straight in the world: no scene texture, no per-frame render', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/scene/themes/StationFloor.tsx'), 'utf8');
+  assert.match(src, /const k = sceneScale\(world\.scale\.x \* app\.renderer\.resolution, bounds!\);\s*if \(k !== floorK\) buildFloor\(k\);/);
+  assert.match(src, /floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);/);
+  assert.match(src, /world\.addChild\(floorView\);\s*\} else world\.addChild\(new Sprite\(below\.texture\)\);\s*world\.addChild\(sortLayer\);/);
+  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
+  assert.doesNotMatch(src, /sceneRT|sceneSprite|sortLayer\.alpha|screenCells\(|gl\.blitFramebuffer/);
+  // PERF-FLOOR-FILL-188: the only scissor is paint()'s changed rects (pinned in tes-raster).
+  assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2);
+  assert.match(src, /camera\.setFrame\(frame0\);/);
+});
+
+test('TES whole-camera mutant census: each guard is caught', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/scene/office/Camera.ts'), 'utf8');
   const mutants = [
-    { name: 'raw fractional zoom', from: 'Math.floor(minZoom * resolution) / resolution', to: 'minZoom' },
-    { name: 'vertical centring exposes background below the hull', from: '? top + this.viewHeight - contentH', to: '? top + (this.viewHeight - contentH) / 2' },
+    { name: 'origin not rounded (x)', from: 'x = Math.round(fit(x, -keep.x0 * n, W - (keep.x1 + 1) * n));', to: 'x = fit(x, -keep.x0 * n, W - (keep.x1 + 1) * n);' },
+    { name: 'origin not rounded (y)', from: 'y = Math.round(fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n));', to: 'y = fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n);' },
+    { name: 'keep not clamped', from: 'y = Math.round(fit(y, -keep.y0 * n, H - (keep.y1 + 1) * n));', to: 'y = Math.round(y);' },
+    { name: 'frame centred vertically', from: '      ? -b.y * n\n', to: '      ? (H - (b.h - b.deadBottom) * n) / 2 - b.y * n\n' },
+    { name: 'n floored from the frame', from: 'return { n: wholeScale(keep, Math.round(this.viewWidth * r), Math.round(this.viewHeight * r)), r, keep };', to: 'return { n: Math.max(1, Math.floor(Math.min(this.viewWidth * r / this.box().w, this.viewHeight * r / (this.box().h - this.box().deadBottom)))), r, keep };' },
+    { name: 'not whole: raw fit', from: '    if (w) { this.placeWhole(w.n, w.r, w.keep); return; }\n', to: '' },
+    { name: 'art clamp dropped (x)', from: '    if (a && (a.x1 + 1 - a.x0) * n >= W) x = fit(x, W - (a.x1 + 1) * n, -a.x0 * n);\n', to: '' },
+    { name: 'art clamp dropped (y)', from: '    if (a && (a.y1 + 1 - a.y0) * n >= H) y = fit(y, H - (a.y1 + 1) * n, -a.y0 * n);\n', to: '' },
   ];
+  const norm = source.replace(/\r\n/g, '\n');
   for (const mutant of mutants) {
-    const hits = source.split(mutant.from).length - 1;
+    const hits = norm.split(mutant.from).length - 1;
     assert.equal(hits, 1, `mutant ${mutant.name} must match exactly once`);
-    const MutantCamera = loadTs.fromText('src/renderer/src/scene/office/Camera.ts', source.replace(mutant.from, mutant.to)).Camera;
-    const failures = mutant.name === 'raw fractional zoom' ? gridFailures(MutantCamera) : bottomFailures(MutantCamera);
+    const MutantCamera = loadTs.fromText('src/renderer/src/scene/office/Camera.ts', norm.replace(mutant.from, mutant.to)).Camera;
+    const failures = [...gridFailures({ CameraClass: MutantCamera }), ...nudgeFailures({ CameraClass: MutantCamera }).bad];
     assert.ok(failures.length > 0, `SURVIVED: ${mutant.name}`);
   }
 });

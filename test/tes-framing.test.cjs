@@ -76,9 +76,52 @@ test('PACK_ART.tes is re-measured from the pack: the art box, and a 48-row dead 
   assert.equal(a.deadBottom, 48);
 });
 
+test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuff objects, a person on every reachable cell', () => {
+  const TL = loadTs('src/renderer/src/scene/themes/tiled.ts');
+  const P = loadTs('src/renderer/src/scene/themes/packs.ts');
+  const dir = path.join(ROOT, 'themes', 'tes');
+  const r = P.readPack(P.memoryFiles(H.readPackDir(dir)));
+  const f = P.finishPack(r.value, H.decodeImages(dir, TL.normPath, r.value.images), r.diagnostics).value;
+  const SM = f.scene, M = SM.M, L = (n) => M.layers.find((l) => l.name === n);
+  const e = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  const add = (x, y) => { e.x0 = Math.min(e.x0, x); e.y0 = Math.min(e.y0, y); e.x1 = Math.max(e.x1, x); e.y1 = Math.max(e.y1, y); };
+  const tilePx = (rt, ox, oy) => {
+    const px = f.store.get(rt.image.path);
+    for (let y = 0; y < rt.sh; y++) for (let x = 0; x < rt.sw; x++) {
+      const sx = rt.h ? rt.sw - 1 - x : x, sy = rt.v ? rt.sh - 1 - y : y;
+      if (px.data[((rt.sy + sy) * px.width + rt.sx + sx) * 4 + 3]) add(ox + x, oy + y);
+    }
+  };
+  const chairs = L('Chairs').objects;
+  assert.ok(chairs.length >= 9, 'the chairs are read');
+  for (const o of chairs) { const b = TL.objBox(M, o); tilePx(b.T, b.x, b.y); }
+  const con = L('Console');
+  con.data.forEach((g, i) => { if (g) tilePx(TL.tileFor(M, g), (i % con.w) * M.tw, Math.floor(i / con.w) * M.th); });
+  for (const o of L('Stuff').objects) { add(o.x, o.y); add(o.x + Math.max(0, (o.width || 0) - 1), o.y + Math.max(0, (o.height || 0) - 1)); }
+  // A person: the frame's opaque box (over every frame of the sheet), drawn at round(x - fw/2),
+  // round(y - fh), one px higher mid-step (the bob), standing anywhere on a reachable cell.
+  const R = f.manifest.spriteRenderer, fw = R.frameWidth, fh = R.frameHeight, sh = f.store.get(f.sheet);
+  const o = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity };
+  for (let y = 0; y < sh.height; y++) for (let x = 0; x < sh.width; x++) if (sh.data[(y * sh.width + x) * 4 + 3]) {
+    o.x0 = Math.min(o.x0, x % fw); o.x1 = Math.max(o.x1, x % fw); o.y0 = Math.min(o.y0, y % fh); o.y1 = Math.max(o.y1, y % fh);
+  }
+  const g = SM.grid.g;
+  for (let i = 0; i < SM.reach.length; i++) if (SM.reach[i]) {
+    const cx = (i % SM.grid.W) * g, cy = Math.floor(i / SM.grid.W) * g;
+    add(cx, cy); add(cx + g - 1, cy + g - 1); // the floor stood on
+    add(cx - fw / 2 + o.x0, cy - fh + o.y0 - 1);
+    add(cx + g - 1 - fw / 2 + o.x1, cy + g - 1 - fh + o.y1);
+  }
+  for (const s of SM.seatOrder) add(s.x - fw / 2 + o.x0, s.y - fh + o.y0);
+  assert.deepEqual(e, F.PACK_ART.tes.keep);
+  // Outside it the art holds only the rim, the upper wall and the hull: the keep box sits inside the art.
+  const a = F.PACK_ART.tes;
+  assert.ok(a.x0 < e.x0 && e.x1 < a.x1 && a.y0 < e.y0 && e.y1 < a.y1);
+});
+
 test('floorFrame: TES frames its art with the margin; the office (and any other id) fits the whole map', () => {
   const t = F.floorFrame('tes', 960, 640);
-  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48 });
+  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 }, art: { x0: 320, y0: 32, x1: 607, y1: 415 } });
   assert.deepEqual(F.packFrame('tes'), t);
   for (const id of ['office', 'dunder', undefined, null, '', 'toString', '__proto__']) {
     assert.deepEqual(F.floorFrame(id, 1024, 768), { x: 0, y: 0, w: 1024, h: 768, deadBottom: 0 }, String(id));
@@ -127,9 +170,12 @@ test('framedSidebarWidth: the default pane takes the TES content aspect, clamped
   const f = F.packFrame('tes');
   assert.ok(Math.abs(F.frameAspect(f) - 304 / 344) < 1e-12);
   assert.equal(F.FLOOR_ROW_CHROME, 42);
+  // TES-FLOOR-WHOLE-188: the framed pane takes the row's left padding, so only the right padding
+  // and the splitter lie beside it.
+  assert.equal(F.FLOOR_PANE_BLEED, 16);
   // The screenshot windows: pane heights 430 and 640 give panes 380 and 566 wide.
-  assert.equal(F.framedSidebarWidth(f, 960, 430), 960 - 42 - 380);
-  assert.equal(F.framedSidebarWidth(f, 1290, 640), 1290 - 42 - 566);
+  assert.equal(F.framedSidebarWidth(f, 960, 430), 960 - 26 - 380);
+  assert.equal(F.framedSidebarWidth(f, 1290, 640), 1290 - 26 - 566);
   // Clamps: never under 320, never over 1200 nor viewport - 360.
   assert.equal(F.framedSidebarWidth(f, 700, 260), 340, '700 wide: viewport - 360');
   assert.equal(F.framedSidebarWidth(f, 600, 900), 320);
@@ -180,7 +226,10 @@ test('App/store wiring: a framed floor sets only the default width; a user width
   const splitter = src('src/renderer/src/components/SidebarSplitter.tsx');
   assert.match(splitter, /onDoubleClick=\{\(\) => \(onReset \? onReset\(\) : onChange\(420\)\)\}/);
   const floor = src('src/renderer/src/scene/themes/StationFloor.tsx');
-  assert.match(floor, /camera\.setFrame\(floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\)\);\r?\n\s+camera\.setViewSize/);
+  assert.match(floor, /const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);/);
+  assert.match(floor, /camera\.setFrame\(frame0\);\r?\n\s+camera\.setViewSize/);
+  // TES-FLOOR-WHOLE-188: a framed floor pane takes the row's padding on the top, left and bottom.
+  assert.match(app, /<div ref=\{setFloorPane\} style=\{\{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative', \.\.\.\(floorFrameNow \? \{ margin: `-\$\{FLOOR_PANE_BLEED\}px 0 -\$\{FLOOR_PANE_BLEED\}px -\$\{FLOOR_PANE_BLEED\}px` \} : null\) \}\}>/);
   // The office floor sets no frame.
   assert.doesNotMatch(src('src/renderer/src/scene/office/OfficeFloor.tsx'), /setFrame\(/);
 });

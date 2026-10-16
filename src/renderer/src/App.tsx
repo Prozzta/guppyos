@@ -34,7 +34,7 @@ import { PixelPanel } from '@/components/PixelPanel';
 import { PixelButton } from '@/components/PixelButton';
 import { Icon } from '@/components/Icon';
 import { SidebarSplitter } from '@/components/SidebarSplitter';
-import { framedSidebarWidth, packFrame } from '@/scene/themes/framing';
+import { FLOOR_PANE_BLEED, framedSidebarWidth, packFrame } from '@/scene/themes/framing';
 import { acquireTerminal, notifyThemeChangeAll } from '@/components/terminalPool';
 import { FullscreenTerminal } from '@/components/FullscreenTerminal';
 import { TaskDetailOverlay } from '@/components/TaskDetailOverlay';
@@ -446,7 +446,8 @@ export function App() {
         padding: 16,
         gap: 0
       }}>
-        <div ref={setFloorPane} style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative' }}>
+        {/* TES-FLOOR-WHOLE-188: a framed floor takes the row's padding (top, left, bottom). */}
+        <div ref={setFloorPane} style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative', ...(floorFrameNow ? { margin: `-${FLOOR_PANE_BLEED}px 0 -${FLOOR_PANE_BLEED}px -${FLOOR_PANE_BLEED}px` } : null) }}>
           <OfficeFloor />
           <MemoryPanel />
           <CapacityDetailPanel />

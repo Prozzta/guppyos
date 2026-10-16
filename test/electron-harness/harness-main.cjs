@@ -57,6 +57,11 @@ if (!sandboxRoot) {
   process.stderr.write('harness: refusing to run without --sandbox <dir>; the parent (run.cjs) owns the sandbox lifecycle\n');
   process.exit(2);
 }
+// Test-only device scale sweep.  Applied before ready so the renderer sees the same DPR it would
+// on a differently scaled monitor, while still using the throwaway harness profile. The switch
+// alone sets it: a zoomFactor on top would square it (1.25 -> 1.5625).
+const forcedDpr = Number(process.env.HARNESS_DPR || '');
+if (Number.isFinite(forcedDpr) && forcedDpr > 0) app.commandLine.appendSwitch('force-device-scale-factor', String(forcedDpr));
 // HARNESS-CRASHPAD: every path, crashDumps included, inside the sandbox (asserted).
 isolateAppPaths(app, sandboxRoot);
 
