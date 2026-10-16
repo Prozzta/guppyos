@@ -12,8 +12,8 @@
  *   seam, and nobody is drawn over a static in front of them (the bubbles, text and vector shapes
  *   over the floor, are left out of both). A draw with the people over every
  *   static differs (the check has teeth);
- * - the pane's edges: no blank px; across the ship's columns the bottom row shows the ship or its
- *   hull, never the backdrop (no band below the ship).
+ * - the pane's edges have no transparent pixels. A tall pane may show the pack backdrop below the
+ *   supplied hull; it must never manufacture more hull to cover that viewport space.
  * Run by test/tes-floor-whole-188.test.cjs (HARNESS_DPR per case).
  */
 import { createRoot } from 'react-dom/client';
@@ -193,7 +193,8 @@ proto.render = function (this: any) {
           out.teethChecks++; out.teethMax = Math.max(out.teethMax, t);
         }
         if (bub) bub.visible = true;
-        // The pane's edges: never blank; across the ship's columns the bottom row is never the backdrop.
+        // The pane's edges are never transparent. The bottom may be the palette backdrop when the
+        // supplied art ends above it; tes-hull-stretch-189 bounds that rendered case.
         const isBg = (i: number) => shot[i] === bg[0] && shot[i + 1] === bg[1] && shot[i + 2] === bg[2];
         const edges: Record<string, number> = { top: 0, bottom: 0, left: 0, right: 0 };
         const edge = (name: string, X: number, Y: number) => {

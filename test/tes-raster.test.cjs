@@ -286,7 +286,7 @@ test('the real TES pack is cacheable: binary alpha at opacity 1, and its "above"
   assert.equal(C.hasVisiblePixel(plan.above), false);
 });
 
-test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; the hull over it; no scene texture', () => {
+test('StationFloor draws the floor straight in the world: the floor texture holds below and every static, the very same sprites; no scene texture', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
   assert.doesNotMatch(src, /atlas/i, 'no split tiles: each would be rounded on its own');
   assert.doesNotMatch(src, /blitFramebuffer|screenCells|regionPicker|cacheKeyOf|wholeSceneRaster|NEAR_MIN_SCALE/);
@@ -303,15 +303,14 @@ test('StationFloor draws the floor straight in the world: the floor texture hold
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
   // Cached: the floor texture's tree holds below and every static by staticOrder, and the world
   // shows it. Not cached: below itself. Then the sort layer (people, and statics drawn again), the
-  // hull, 'above' and the bubbles.
+  // 'above' and the bubbles.
   assert.match(src, /if \(cached\) \{\s*floorWorld\.addChild\(below\);\s*for \(const i of order\) if \(staticTex\[i\]\) floorWorld\.addChild\(staticSprite\(i\)\);\s*world\.addChild\(floorView\);\s*\} else world\.addChild\(new Sprite\(below\.texture\)\);\s*world\.addChild\(sortLayer\);/);
-  // The hull is made once, from the composited art, below the deck and over the hull's own
-  // statics: no person is ever under it (tes-hull).
-  assert.match(src, /const hull = new Container\(\);\s*if \(frame0\.deadBottom > 0\) \{\s*const art = blank\(SM\.PW, SM\.PH\);\s*composePx\(art, plan\.below, 0, 0\);\s*for \(const it of plan\.sorted\) if \(it\.px\) composePx\(art, it\.px, Math\.round\(it\.x\), Math\.round\(it\.y\), it\.opacity\);\s*const sk = hullSkirt\(art, frame0\.x \+ FRAME_MARGIN, frame0\.x \+ frame0\.w - FRAME_MARGIN - 1, frame0\.y \+ frame0\.h - 1\);/);
-  assert.match(src, /strip\.position\.set\(sk\.x, frame0\.y \+ frame0\.h\);\s*strip\.height = HULL_STRIP_ROWS;/);
+  // The supplied map art owns the hull's height.  A generated one-row strip cannot silently
+  // turn unused viewport height into more ship (tes-hull-stretch-189 renders the proof).
+  assert.doesNotMatch(src, /hullSkirt|HULL_STRIP_ROWS|strip\.height/);
   // The live bubble layer belongs above the map's above plane, but below the world's stage mount.
   // PANEL-BLINK-188: the chair panels' layer right after 'above', before the bubbles.
-  assert.match(src, /world\.addChild\(hull\);\s*if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
+  assert.match(src, /if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
   assert.equal((src.match(/own\(plan\.above\)/g) || []).length, 1, "'above' is made once");
   // The floor texture: the bounds at k texels per map px, 1:1, nearest; the old one freed first.
   // Its tree is scaled by k and moved to the bounds; the sprite is the bounds in map px.
