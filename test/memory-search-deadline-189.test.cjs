@@ -70,6 +70,8 @@ test('T1 (A): a search that times out writes ONE degraded row; its late reply wr
   assert.deepEqual(degradedRows(r), [{ kind: 'native-memory-degraded', op: 'search', reason: 'deadline', budgetMs: 250, warm: true, indexing: false, elapsedMs: 250 }]);
   r.now += 40;
   r.w().reply({ id: req.id, ok: true, exit: 0, text: 'T', timing: { waitMs: 230, runMs: 60, inFlight: 'ingest' } });
+  // Past the rate cap (Jim S2): a second late row would be written, so 'once' is the code's doing.
+  r.now += DEGRADED_LOG_EVERY_MS;
   r.w().reply({ id: req.id, ok: true, exit: 0, text: 'T' });
   assert.deepEqual(r.rows.filter((x) => x.kind === 'native-memory-late-reply'),
     [{ kind: 'native-memory-late-reply', op: 'search', budgetMs: 250, lateByMs: 40, ok: true, waitMs: 230, runMs: 60, inFlight: 'ingest' }]);
@@ -115,6 +117,8 @@ test('T1 (A): expired, error, worker-exit and unavailable each write a row with 
   p = r.client.request('search', { query: 'f' });
   r.w().reply({ id: r.last().id, ok: false, exit: 4, error: 'SQLITE_BUSY' });
   await p;
+  // Past the rate cap (Jim S2): an 'error' row for the usage reply would be written.
+  r.now += DEGRADED_LOG_EVERY_MS;
   p = r.client.request('nope', {}, 2_000);
   r.w().reply({ id: r.last().id, ok: false, exit: 2, error: 'unknown op nope' });
   assert.equal((await p).exit, 2);
@@ -138,6 +142,34 @@ test('T1 (A): at most one row per reason per DEGRADED_LOG_EVERY_MS; the next row
   assert.deepEqual(degradedRows(r).map((x) => x.suppressed ?? 0), [0, 2]);
 });
 
+test('T1 (B, Jim N2): a worker that exits while indexing leaves no indexing behind (its worker-exit row says indexing false)', async () => {
+  const r = rig();
+  await r.warmUp();
+  r.w().reply({ event: 'indexing', on: true, kind: 'backfill' });
+  const p = r.client.request('status', {}, 2_000);
+  r.w().exit(1);
+  assert.equal((await p).error, 'memory worker exited');
+  assert.deepEqual(degradedRows(r).map((x) => [x.reason, x.op, x.indexing]), [['worker-exit', 'status', false]]);
+});
+
+test('T1 (A, Jim N3): main remembers at most 64 timed-out requests for late-reply rows; the oldest is forgotten first', async () => {
+  const r = rig();
+  await r.warmUp();
+  const ids = [];
+  for (let i = 0; i < 65; i++) {
+    const p = r.client.request('search', { query: `t${i}` });
+    ids.push(r.last().id);
+    r.fire(r.now + SEARCH_DEADLINE_WARM_MS);
+    await p;
+  }
+  const late = () => r.rows.filter((x) => x.kind === 'native-memory-late-reply').length;
+  r.now += DEGRADED_LOG_EVERY_MS;
+  r.w().reply({ id: ids[0], ok: true, exit: 0, text: 'T' });
+  assert.equal(late(), 0, 'the 65th timeout dropped the first one');
+  r.w().reply({ id: ids[1], ok: true, exit: 0, text: 'T' });
+  assert.equal(late(), 1, 'the second one is still remembered');
+});
+
 // ── T2: the engine queue ────────────────────────────────────────────────────────────
 
 const words = (t) => t.split(/\s+/).filter(Boolean).length;
@@ -159,12 +191,16 @@ test('T2 (C): a search whose deadline passed while it was queued is answered Que
   const s1 = e.engine.search({ query: 'first' }, { deadline: 5000, timing: (t) => t1.push(t) });
   await e.tick();
   const s2 = e.engine.search({ query: 'second' }, { deadline: 1100 });
+  // Two expired in a row (Jim N3): every expired task at the head is skipped, not only the first.
+  const s2b = e.engine.search({ query: 'second-b' }, { deadline: 1150 });
   const s3 = e.engine.search({ query: 'third' }, { deadline: 5000 });
   e.now = 1200;
   e.gates.shift()();
   assert.equal((await s1).exit, 0);
   assert.deepEqual(t1, [{ waitMs: 0, runMs: 200, inFlight: null }]);
   await assert.rejects(s2, (err) => err instanceof QueueExpired && err.message === 'expired' && err.timing.waitMs === 200 && err.timing.runMs === 0 && err.timing.inFlight === 'search');
+  const s2bOut = await Promise.race([s2b.then(() => 'ran', (err) => err), e.tick().then(() => 'still queued or running')]);
+  assert.ok(s2bOut instanceof QueueExpired && s2bOut.timing.runMs === 0, `the second expired search too: ${s2bOut}`);
   for (let i = 0; i < 5 && !e.gates.length; i++) await e.tick();
   e.gates.shift()();
   assert.equal((await s3).exit, 0, 'the queue goes on after an expired request');
@@ -241,6 +277,22 @@ test('T3: searches DURING a claims sync on a loaded machine all answer, with hit
   assert.ok(r.events.includes('on:claims-sync') && r.events.at(-1).startsWith('off:'), JSON.stringify(r.events));
   assert.deepEqual(r.rows.filter((x) => x.kind === 'native-memory-degraded'), []);
   console.log(`# during the sync: ${r.during.length} searches, slowest ${slowest} ms; after: exit ${r.after.exit} in ${r.after.ms} ms`);
+});
+
+test('T3 (C, worker wiring): the worker passes each search deadline to the engine: one that expires behind a held step is answered expired with timing and never run; ok replies carry timing', async () => {
+  const r = await drill('queue');
+  assert.equal(r.cold.exit, 0, JSON.stringify(r.cold));
+  const half = r.holdMs / 2;
+  assert.deepEqual([r.held.ok, r.held.exit], [true, 0], JSON.stringify(r.held));
+  assert.ok(r.held.hits > 0);
+  assert.ok(r.held.timing && r.held.timing.runMs >= half && r.held.timing.inFlight === null, `an ok reply carries its timing: ${JSON.stringify(r.held.timing)}`);
+  assert.deepEqual([r.expired.ok, r.expired.exit, r.expired.error], [false, EXIT.degraded, 'expired'], JSON.stringify(r.expired));
+  assert.ok(r.expired.timing, 'the expired reply carries its timing');
+  assert.deepEqual([r.expired.timing.runMs, r.expired.timing.inFlight], [0, 'search'], JSON.stringify(r.expired.timing));
+  assert.ok(r.expired.timing.waitMs >= half, JSON.stringify(r.expired.timing));
+  assert.deepEqual([r.after.ok, r.after.exit], [true, 0], JSON.stringify(r.after));
+  assert.ok(r.after.timing && r.after.timing.waitMs >= half, `the one behind it waited and says so: ${JSON.stringify(r.after.timing)}`);
+  assert.equal(r.stepRuns, 2, 'the model ran for the held search and the last one, never for the expired one');
 });
 
 test('T3: a wedged worker during a claims sync: each timed-out search writes a degraded row (deadline, indexing, 1000 ms)', async () => {

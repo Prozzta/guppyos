@@ -12,6 +12,10 @@
  *   leg 'index': agent w1 is raised (its claims replace its markdown); a claims sync runs while
  *                one search at a time (wing w2, plain markdown) is sent, every 50 ms.
  *   leg 'hang':  the model stops answering; a claims sync starts; 3 searches time out.
+ *   leg 'queue': the worker's own wiring of fix C (Jim S1). A step is held; three searches are
+ *                sent to the worker directly (its protocol, not the client) behind it; the middle
+ *                one's deadline passes while it waits. Its reply and the host's run count say
+ *                whether the worker passed the deadline on, and whether ok replies carry timing.
  * Invented text only.
  */
 const fs = require('node:fs');
@@ -20,6 +24,9 @@ const { fork } = require('node:child_process');
 
 const STEP_MS = 200;
 const PARTS = 40;
+/** Raw protocol ids for leg 'queue', far above the client's own. */
+const RAW_ID = 9_000;
+const HOLD_MS = 600;
 
 function write(root, rel, text) {
   const p = path.join(root, ...rel.split('/'));
@@ -60,12 +67,15 @@ module.exports = async (drill) => {
   };
   const rows = [];
   const events = [];
+  /** Leg 'queue': the worker's own replies to raw protocol requests (ids from RAW_ID up). */
+  const raw = new Map();
   let fatal = null;
   let hostRuns = null;
   child.on('message', (m) => {
     if (m && m.event === 'indexing') events.push(`${m.on ? 'on' : 'off'}:${m.kind}`);
     if (m && m.event === 'fatal') fatal = m.error;
     if (m && typeof m.hostRuns === 'number') hostRuns = m.hostRuns;
+    if (m && typeof m.id === 'number' && m.id >= RAW_ID) raw.set(m.id, m);
   });
   const pause = (ms) => new Promise((r) => setTimeout(r, ms));
   try {
@@ -108,6 +118,23 @@ module.exports = async (drill) => {
       const timedOut = [];
       for (let i = 0; i < 3; i++) { timedOut.push(await search()); await pause(150); }
       return { ok: true, bf: bf.exit, cold, timedOut, rows, events };
+    }
+    if (leg === 'queue') {
+      const args = { query: 'zeppelin hangar code', wing: 'w2', results: 3, caller: 'w2', mode: 'live' };
+      const runsBefore = await runsNow();
+      child.send({ host: 'hold' });
+      const t0 = Date.now();
+      const send = (id, deadline) => handle.postMessage({ id, op: 'search', args, deadline });
+      send(RAW_ID + 1, t0 + 30_000);
+      await pause(50);
+      send(RAW_ID + 2, t0 + HOLD_MS / 2);
+      send(RAW_ID + 3, t0 + 30_000);
+      await pause(HOLD_MS);
+      child.send({ host: 'release' });
+      for (let i = 0; i < 1_000 && raw.size < 3; i++) await pause(10);
+      const stepRuns = (await runsNow()) - runsBefore;
+      const strip = (m) => (m ? { ok: m.ok, exit: m.exit, error: m.error ?? null, hits: Array.isArray(m.json) ? m.json.length : 0, timing: m.timing ?? null } : null);
+      return { ok: true, bf: bf.exit, cold, held: strip(raw.get(RAW_ID + 1)), expired: strip(raw.get(RAW_ID + 2)), after: strip(raw.get(RAW_ID + 3)), stepRuns, holdMs: HOLD_MS };
     }
     return { ok: false, reason: `unknown leg ${leg}` };
   } finally {
