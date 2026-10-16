@@ -124,6 +124,16 @@ test('T7 a row that cannot be written (append throws, status throws) never throw
   assert.deepEqual(rows, [{ kind: 'graphics', mode: 'cpu', applied: true, hardwareCompositing: false, gpuCompositing: null }]);
 });
 
+test('the default 10 s timer is unref-ed: a GPU process that never reports cannot hold quit open (Jim N2)', () => {
+  const app = start('gpu');
+  const realSet = global.setTimeout; let handle = null;
+  global.setTimeout = (fn, ms) => { handle = realSet(fn, ms); return handle; };
+  try { main.logGraphicsWhenKnown(app, { mode: 'gpu', applied: true }, () => {}); } finally { global.setTimeout = realSet; }
+  assert.ok(handle, 'a default timer was set');
+  assert.equal(handle.hasRef(), false);
+  clearTimeout(handle);
+});
+
 test('index.ts: the watch starts at module load; the bootstrap row goes through logGraphicsWhenKnown, never read at ready', () => {
   const src = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const watch = src.indexOf('\nwatchGpuReports(app);');

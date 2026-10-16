@@ -7398,6 +7398,7 @@ function bootstrapHiveServices(): void {
   });
   // GPU-SETTING-188: the Graphics mode this run started with, and what Chromium made of it, written
   // once Chromium knows (GPU-COMPOSITING-INSTALLED-189: at ready it still reads software in every mode).
+  // One row per bootstrap, like app-start: the data-move recovery re-bootstraps and writes a second.
   logGraphicsWhenKnown(app, graphicsAtStartup, (row) => hive.appendLog(row));
   // REBRAND-GUPPY: which data folder this run uses, and whether it was copied just now.
   if (userDataMigration && userDataMigration.status !== 'already') {
