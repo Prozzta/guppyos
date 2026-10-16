@@ -865,7 +865,11 @@ test('CL-M4-WP note presents candidates without writing, then logs separate/repl
   let r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the release branch moved' } }, 'endpoint');
   assert.equal(r.json.choice, 'choose'); assert.match(r.text, /--supersedes/);
   assert.equal(store.readLedger('andy').records.length, before, 'presentation never appends');
+  // CL-M4-FORWARD-PATH: a bare --separate is sent back to the offer; it must name the ids it keeps apart.
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'keep both branches', separate: true } }, 'endpoint');
+  assert.equal(r.json.choice, 'choose'); assert.match(r.text, /bare --separate/); assert.equal(store.readLedger('andy').records.length, before);
+  choices.pop();
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'keep both branches', separate: priorId } }, 'endpoint');
   assert.equal(r.json.choice, 'separate'); assert.equal(store.readLedger('andy').records.length, before + 1);
   r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'branch moved', supersedes: [priorId], reason: 'moved', reasonText: 'new project' } }, 'endpoint');
   assert.equal(r.json.id !== undefined, true); assert.equal(store.readLedger('andy').records.at(-1).supersedesReason.category, 'moved');

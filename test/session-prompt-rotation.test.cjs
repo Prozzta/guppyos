@@ -84,6 +84,9 @@ test('G4.7: only the agent whose effective claims flag flips changes its prompt 
   const writer = hive.injectedPrompt({ ...WORKER, id: 'jim' }, 'C:/hive/agents/jim', 'C:/hive', true, false);
   assert.match(writer, /memory wake-up.*claim working set/s);
   assert.match(writer, /claim-ledger writer/);
+  // CL-M4-FORWARD-PATH: the briefing says to replace a changed fact, and to key card notes by card id.
+  assert.match(writer, /--supersedes ID --reason changed\|corrected\|moved/);
+  assert.match(writer, /--key card\.<card-id>/);
   assert.doesNotMatch(writer, /write durable facts there/);
 });
 

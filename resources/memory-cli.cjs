@@ -15,8 +15,9 @@ const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
 const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] | wake-up [--wing W] | status} [--format json]\n'
   + '  claim ledger (when it is on for you):\n'
-  + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
+  + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate ID[,ID]|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
   + '    --supersedes may name any live claim in your own ledger, even if it was not offered as a candidate; use it when the prior fact changed, was corrected, or moved (the --reason). A recap cites the claim id; it does not restate the value.\n'
+  + '    When related claims exist, the note is not written until you choose: --supersedes (replace), --separate ID[,ID] (name the listed claims that stay true beside it), or --cancel. A claim with the same --key is listed first; key a card\'s notes by its card id (--key card.cl-m4-forward-path).\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
   + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
   + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
@@ -24,6 +25,8 @@ const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [
 const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card', '--reason': 'reason', '--reason-text': 'reasonText' };
 const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
+/** A `--separate` value: claim ids, comma-separated (anything else is the note's text). */
+const SEPARATE_IDS_RE = /^c-[0-9A-Za-z]+(,c-[0-9A-Za-z]+)*$/;
 
 /** Parse argv: global flags, the command, then its options and positional text. */
 function parseArgs(argv) {
@@ -62,7 +65,14 @@ function parseArgs(argv) {
     }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
-      if (out.cmd === 'note' && (flag === '--separate' || flag === '--cancel')) { out.args[flag.slice(2)] = true; i += 1; continue; }
+      // CL-M4-FORWARD-PATH: --separate names the claims it keeps apart (--separate c-a,c-b or
+      // --separate=c-a,c-b); bare, it still parses, and the app answers with the offer.
+      if (out.cmd === 'note' && flag === '--separate') {
+        const next = eq > 0 ? t.slice(eq + 1) : a[i + 1];
+        if (eq > 0 || (typeof next === 'string' && SEPARATE_IDS_RE.test(next))) { out.args.separate = next; i += step(); continue; }
+        out.args.separate = true; i += 1; continue;
+      }
+      if (out.cmd === 'note' && flag === '--cancel') { out.args.cancel = true; i += 1; continue; }
       if (flag === '--complete' && out.cmd === 'export') { out.args.complete = true; i += 1; continue; }
       if (CLAIM_VALUE_FLAGS[flag]) { out.args[CLAIM_VALUE_FLAGS[flag]] = val(); i += step(); continue; }
       if (CLAIM_LIST_FLAGS[flag]) { const k = CLAIM_LIST_FLAGS[flag]; (out.args[k] = out.args[k] || []).push(val()); i += step(); continue; }
