@@ -50,7 +50,7 @@ function loadBubbleLayer() {
   }
   class ThoughtBubble {
     constructor() { this.container = new Container(); this.destroyed = 0; thoughts.push(this); }
-    show() {} hide() {} setBounds() {} setZoom() {} setLift() {} setPosition() {}
+    show() {} hide() {} setBounds() {} setView() {} setLift() {} setPosition() {}
     getLayout() { return null; }
     update() {}
     destroy() { this.destroyed++; }
@@ -108,10 +108,10 @@ test('4. BubbleLayer destroys removed thoughts and expired envelopes with Pixi s
   bubbles.setThought('gone', { text: 'leaving' });
   bubbles.remove('gone');
   assert.equal(thoughts[0].destroyed, 1, 'remove frees a thought that may not have a sprite');
-  bubbles.update(0, [{ id: 'from', x: 1, y: 2 }, { id: 'to', x: 3, y: 4 }], 1);
+  bubbles.update(0, [{ id: 'from', x: 1, y: 2 }, { id: 'to', x: 3, y: 4 }], { scale: 1, x: 0, y: 0, resolution: 1 });
   bubbles.handoff('from', 'to', 'request', true);
   assert.deepEqual(envelopes[0].args, [{ id: 'from', x: 1, y: 2 }, { id: 'to', x: 3, y: 4 }, 'request', true]);
-  bubbles.update(16, [], 1);
+  bubbles.update(16, [], { scale: 1, x: 0, y: 0, resolution: 1 });
   assert.equal(envelopes[0].destroyed, 1, 'a finished envelope is freed rather than retained forever');
 });
 

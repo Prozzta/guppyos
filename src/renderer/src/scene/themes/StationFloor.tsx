@@ -232,11 +232,13 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       if (hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
       // PANEL-BLINK-188: the chair panels' lights, live over the cached map, each just in front of what draws it.
       const panelLayer = new PanelLayer(plan, SM, pack.manifest.stations.layer, own, sortLayer, world.addChild(new Container()));
-      // Clouds and envelopes are live above the people, in screen space.
+      // Envelopes fly live above the people, in the world; the clouds hang over the world in an
+      // unscaled layer on the stage, so their text is sharp at any fit (TES-BUBBLE-TAIL-SHARP-189).
       const bubbles = new BubbleLayer({ width: SM.PW, height: SM.PH });
       world.addChild(bubbles.container);
       (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
+      app.stage.addChild(bubbles.screen);
       // TES-HULL M2: in a semantic fit, a static drawn again over a person is the floor texture's own
       // sampling of it, so it looks the same whether or not someone walks behind it (a nearest sprite
       // at the fractional scale was sharp over its own soft copy):
@@ -339,7 +341,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const at = new Matrix();
         const visit = (c: Container, look: string) => {
           if (!c.visible) return;
-          if (c === bubbles.container) {
+          if (c === bubbles.container || c === bubbles.screen) {
             for (const k of c.children) if (k.visible) now.set(k, { rect: rectOf(k), sig: String(painted) });
             return;
           }
@@ -563,7 +565,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         for (const [id, c] of cups) if (!holding.has(id)) { c.sprite.destroy(); cups.delete(id); }
         for (const [id, m] of mugs) if (!parked.has(id)) { m.sprite.destroy(); mugs.delete(id); }
         // Keep these live even when the people/station depth is unchanged and the map is cached.
-        bubbles.update(dt, anchors, world.scale.x);
+        bubbles.update(dt, anchors, { scale: world.scale.x, x: world.x, y: world.y, resolution: app.renderer.resolution });
         // The statics never move: the depth order changes only when a person's key (or the crew) does.
         const depth = people.map((q) => `${q.id}:${q.foot}:${q.rank}:${cups.get(q.id)?.back ?? '-'}`).join('|') + '#' + [...mugs].map(([id, m]) => `${id}:${m.foot}:${m.rank}`).join('|');
         if (depth === lastDepth) return;

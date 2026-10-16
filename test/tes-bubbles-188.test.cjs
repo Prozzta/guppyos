@@ -221,13 +221,16 @@ test('(c) the floor draws the sprite and hangs the cloud from the same drawn poi
   assert.doesNotMatch(src, /anchors\.push\(\{ id: p\.id, x: p\.x, y: p\.y \}\)/, 'never the walker point');
 });
 
+// The world's transform the layer is handed each frame (here world and screen are the same).
+const VIEW = { scale: 1, x: 0, y: 0, resolution: 1 };
+
 function bubbleLayerWith(widths) {
   const made = [];
   class Container { constructor() { this.children = []; } addChild(c) { this.children.push(c); return c; } destroy() {} }
   class ThoughtBubble {
     constructor() { this.container = new Container(); this.text = null; this.lift = 0; this.pos = null; made.push(this); }
     show(text) { this.text = text; } hide() { this.text = null; } startLinger() { this.text = null; }
-    setBounds() {} setZoom() {} update() {} destroy() {}
+    setBounds() {} setView() {} update() {} destroy() {}
     setLift(px) { this.lift = px; }
     setPosition(px, py, slide = 0) { this.pos = [px + slide, py]; this.slide = slide; }
     getLayout(px, py) { if (this.text === null) return null; const w = widths[this.text], h = 16; return { x: px - w / 2, y: py + OFFSET_Y - h, w, h }; }
@@ -253,7 +256,7 @@ test('(c) the Speck1/Speck2/Captain clouds part sideways, none towers, each stay
   const { layer, made } = bubbleLayerWith({ 'captain log': 58, 'Speck one': 68, 'Speck two': 58 });
   const seats = [['god', 'captain log', 464, 192], ['dwight', 'Speck one', 448, 242], ['jim', 'Speck two', 480, 242]];
   for (const [id, text] of seats) layer.setThought(id, { text });
-  layer.update(16, seats.map(([id, , x, y]) => ({ id, x, y })), 1);
+  layer.update(16, seats.map(([id, , x, y]) => ({ id, x, y })), VIEW);
   const rects = made.map((b) => b.rect());
   made.forEach((b, i) => assert.equal(b.lift, 0, `${seats[i][0]}: not lifted`));
   for (let i = 0; i < rects.length; i++) for (let j = i + 1; j < rects.length; j++) assert.ok(apart(rects[i], rects[j]), `${seats[i][0]}/${seats[j][0]} do not overlap`);
@@ -265,7 +268,7 @@ test('(c) what sliding cannot part is still lifted clear', () => {
   const { layer, made } = bubbleLayerWith({ one: 60, two: 60 });
   layer.setThought('a', { text: 'one' });
   layer.setThought('b', { text: 'two' });
-  layer.update(16, [{ id: 'a', x: 300, y: 300 }, { id: 'b', x: 302, y: 300 }], 1);
+  layer.update(16, [{ id: 'a', x: 300, y: 300 }, { id: 'b', x: 302, y: 300 }], VIEW);
   const [ra, rb] = made.map((b) => b.rect());
   assert.ok(apart(ra, rb), 'the pair never overlaps');
   assert.ok(made.some((b) => b.lift > 0), 'one is lifted');
@@ -279,7 +282,11 @@ function realBubble() {
     constructor() { this.x = 0; this.y = 0; this.alpha = 1; this.visible = true; this.children = []; this.scale = { set: () => {} }; }
     addChild(...c) { this.children.push(...c); return c[0]; } destroy() {}
   }
-  class Graphics extends Container { clear() { return this; } roundRect() { return this; } fill() { return this; } stroke() { return this; } circle() { return this; } }
+  class Graphics extends Container {
+    constructor() { super(); this.circles = []; }
+    clear() { this.circles = []; return this; } roundRect() { return this; } fill() { return this; } stroke() { return this; }
+    circle(x, y, r) { this.circles.push({ x, y, r }); return this; }
+  }
   class Text extends Container { constructor(o) { super(); this.text = o.text; } get width() { return this.text.length * 7; } get height() { return 14; } }
   const out = ts.transpileModule(readSource(BUBBLE), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = { exports: {} };
@@ -288,10 +295,9 @@ function realBubble() {
   new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
   const b = new mod.exports.ThoughtBubble();
   b.setBounds(960, 640);
-  b.setZoom(1);
-  const base = () => b.bgW * 0.32;
-  // Where the tail leaves the cloud, in world px (the inner layer draws at half scale).
-  return { b, tailX: () => b.container.x + (base() + b.tail.x) * 0.5, tailIn: () => base() + b.tail.x };
+  b.setView(VIEW);
+  // Where the tail leaves the cloud and where its tip is, in world px (world and screen are the same here).
+  return { b, tailX: () => b.container.x + b.tip.circles[0].x, tailIn: () => b.tail.circles[0].x };
 }
 
 test('(c) a slid cloud\'s tail stays over the head; it never leaves the cloud', () => {
@@ -309,16 +315,16 @@ test('(c) a slid cloud\'s tail stays over the head; it never leaves the cloud', 
   }
 });
 
-test('(c) unslid, the tail is where 1.1.87 drew it, even on the narrow thinking dots', () => {
-  const { b } = realBubble();
-  b.show('');   // the thinking '.', a cloud 19 inner px wide: the clamp would move its tail
-  b.setPosition(300, 200, 12);
-  assert.notEqual(b.tail.x, 0);
-  b.setPosition(300, 200);
-  assert.equal(b.tail.x, 0, 'no slide: the tail is not touched');
-  b.show('a longer line of work');
-  b.setPosition(300, 200, 0);
-  assert.equal(b.tail.x, 0);
+test('(c) unslid, the tail points at the head too, even on the narrow thinking dots (TES-BUBBLE-TAIL-SHARP-189)', () => {
+  const { b, tailX, tailIn } = realBubble();
+  for (const line of ['', 'a longer line of work']) {
+    b.show(line);
+    for (const slide of [0, 12]) {
+      b.setPosition(300, 200, slide);
+      assert.ok(Math.abs(tailX() - 300) <= 0.5, `'${line}' slide ${slide}: the tip is over the head (${tailX()})`);
+      assert.ok(tailIn() >= 0 && tailIn() <= b.bgW, `'${line}' slide ${slide}: the tail leaves from under the cloud`);
+    }
+  }
 });
 
 // (b2) Exchanges: both forms read, played in turns between the two, by station, and often.
@@ -396,9 +402,9 @@ test('(b2) a later line waits for its beat in the bubble layer', () => {
   const { layer, made } = bubbleLayerWith({ A1: 40, B1: 40 });
   layer.consumeSays([{ key: 'k#0', id: 'a', text: 'A1', ttl: 2400, delay: 0 }, { key: 'k#1', id: 'b', text: 'B1', ttl: 2400, delay: 2400 }], MODEL.createSayCursor());
   const anchors = [{ id: 'a', x: 100, y: 100 }, { id: 'b', x: 300, y: 100 }];
-  layer.update(16, anchors, 1);
+  layer.update(16, anchors, VIEW);
   assert.deepEqual(made.map((b) => b.text), ['A1'], 'only the opener so far');
-  for (let t = 0; t < 2400; t += 100) layer.update(100, anchors, 1);
+  for (let t = 0; t < 2400; t += 100) layer.update(100, anchors, VIEW);
   assert.equal(made[1]?.text, 'B1', 'the answer on its beat');
 });
 
@@ -501,7 +507,7 @@ function simLayer() {
     constructor() { this.container = new Container(); this.text = null; this.linger = 0; }
     show(text) { this.text = text; this.linger = 0; } hide() { this.text = null; this.linger = 0; }
     startLinger() { if (this.text !== null) { this.text = null; this.linger = 1500; } }
-    setBounds() {} setZoom() {} setLift() {} setPosition() {} getLayout() { return null; } destroy() {}
+    setBounds() {} setView() {} setLift() {} setPosition() {} getLayout() { return null; } destroy() {}
     update(dt) { this.linger = Math.max(0, this.linger - dt * 1000); }
     up() { return this.text !== null || this.linger > 0; }
   }
@@ -525,7 +531,7 @@ function loggedLayer() {
     show(text) { this.text = text; this.log.push(['show', text, now]); }
     hide() { this.text = null; this.log.push(['hide', null, now]); }
     startLinger() { this.text = null; this.log.push(['linger', null, now]); }
-    setBounds() {} setZoom() {} setLift() {} setPosition() {} getLayout() { return null; } update() {} destroy() {}
+    setBounds() {} setView() {} setLift() {} setPosition() {} getLayout() { return null; } update() {} destroy() {}
   }
   const out = ts.transpileModule(readSource('src/renderer/src/scene/themes/BubbleLayer.ts'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const mod = { exports: {} };
@@ -533,7 +539,7 @@ function loggedLayer() {
   new Function('require', 'module', 'exports', out)(req, mod, mod.exports);
   const layer = new mod.exports.BubbleLayer({ width: 960, height: 640 }, () => 0.5);
   const anchors = [{ id: 'a', x: 100, y: 100 }, { id: 'b', x: 300, y: 100 }];
-  const run = (ms) => { for (let t = 0; t < ms; t += 16) { now += 16; layer.update(16, anchors, 1); } };
+  const run = (ms) => { for (let t = 0; t < ms; t += 16) { now += 16; layer.update(16, anchors, VIEW); } };
   return { layer, run, bubble: (id) => layer.thoughts.get(id)?.bubble, now: () => now };
 }
 
@@ -589,7 +595,7 @@ test('(d) a floor of 7 for 30 minutes: each shows a cloud under a quarter of the
       setThought(id, { status: s.status, text: s.text });
     }
     layer.consumeSays(talk.tick(DT, ids.map((id) => ({ id, role: id === 'god' ? 'captain' : null }))), cursor);
-    layer.update(DT, ids.map((id, i) => ({ id, x: 40 * i, y: 100 })), 1);
+    layer.update(DT, ids.map((id, i) => ({ id, x: 40 * i, y: 100 })), VIEW);
     for (const id of ids) if (upOf(id)) up[id] += DT;
   }
   const share = Object.fromEntries(ids.map((id) => [id, up[id] / T]));

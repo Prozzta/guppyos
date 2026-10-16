@@ -54,13 +54,13 @@ window.__harnessRun = async () => {
     app.ticker.stop();
 
     const anchors = [{ id: 'god', x: 84, y: 96 }, { id: 'andy', x: 236, y: 172 }, { id: '__human__', x: loaded.pack.scene.entrance![0], y: loaded.pack.scene.entrance![1] }];
-    bubbles.update(0, anchors, 1);
+    bubbles.update(0, anchors, { scale: 1, x: 0, y: 0, resolution: 1 });
     const count0 = bubbles.envelopes.length;
     listener({ from: 'god', targets: ['andy'], act: 'request' });
     const andyEnvelope = bubbles.envelopes.at(-1);
     if (bubbles.envelopes.length !== count0 + 1) throw new Error('mail between mounted crew anchors did not create exactly one envelope');
     const between = { sx: andyEnvelope.sx, sy: andyEnvelope.sy, ex: andyEnvelope.ex, ey: andyEnvelope.ey };
-    for (let elapsed = 0; elapsed < 2500; elapsed += 100) bubbles.update(100, anchors, 1);
+    for (let elapsed = 0; elapsed < 2500; elapsed += 100) bubbles.update(100, anchors, { scale: 1, x: 0, y: 0, resolution: 1 });
     const goneAfter2500 = bubbles.envelopes.length === count0;
 
     listener({ from: 'god', targets: ['human'], act: 'inform', needsHuman: true });

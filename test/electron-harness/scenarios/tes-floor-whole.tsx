@@ -276,8 +276,9 @@ proto.render = function (this: any) {
         const clear = app.renderer.background.color.toArray();
         const bg = clear.map((v: number) => Math.round(v * 255));
         // The bubbles (thought clouds: text and vector shapes over the floor, not pixel art) are left out of both.
-        const bub = app.__bubbleLayer?.container;
-        if (bub) bub.visible = false;
+        // The envelopes fly in the world and the clouds hang in the screen layer over it (TES-BUBBLE-TAIL-SHARP-189).
+        const bub = [app.__bubbleLayer?.container, app.__bubbleLayer?.screen].filter(Boolean);
+        for (const b of bub) b.visible = false;
         // Every shot below is of a render texture: the front statics placed for its rounding.
         S.placeFront(false);
         const rt = RenderTexture.create({ width: app.screen.width, height: app.screen.height, resolution: r, scaleMode: 'nearest' });
@@ -335,7 +336,7 @@ proto.render = function (this: any) {
           out.frontLog.push([renders, N, f.statics, f.covered, f.diff, f.teeth]);
         }
         }
-        if (bub) bub.visible = true;
+        for (const b of bub) b.visible = true;
         S.placeFront(true);
         // The pane's edges are never transparent. The bottom may be the palette backdrop when the
         // supplied art ends above it; tes-hull-stretch-189 bounds that rendered case.

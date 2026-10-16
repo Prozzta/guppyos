@@ -12,26 +12,33 @@ import { toolIcon } from './ToolBubble';
 // consistently; the differences are the look (cloud + tail, light fill) and that
 // it stays put until the action changes (no auto-linger while the agent works).
 
+// TES-BUBBLE-TAIL-SHARP-189: the cloud is drawn in SCREEN px, in an unscaled layer the floor puts on
+// the stage over its world, and placed through the world's transform (setView). Its text is then one
+// texel per device px at any world scale (1.1.88 drew it in the world at half scale: sharp only when
+// the world scale was exactly 2, resampled at every other zoom and on the TES smooth fit). Where it
+// hangs (OFFSET_Y, the lift, the bounds, the layout the floors part clouds with) stays in world px.
 const PADDING_X = 6;
 const PADDING_Y = 3;
 const CORNER_RADIUS = 5;
-const MAX_WIDTH = 150;
+const MAX_WIDTH = 300;                  // screen px: the widest cloud (1.1.88's at a world scale of 2)
 const FILL_COLOR = colors.cream[50];   // light cloud
 const OUTLINE_COLOR = colors.ink[900];
 const TEXT_COLOR = '#3d2e4a';           // ink-700
 const FONT_SIZE = 12;
-const RENDER_SCALE = 0.5;               // render at 2x, scale down for crispness
-const OFFSET_Y = -38;                   // a touch higher than the tool bubble
-const TAIL_BASE = 0.32;                 // the tail leaves the cloud this far along its width
-const TAIL_EDGE = 8;                    // a slid tail stays this far inside the cloud (inner px)
+const OFFSET_Y = -38;                   // world px: a touch higher than the tool bubble
+const TAIL_EDGE = 8;                    // the tail leaves the cloud at least this far inside it (screen px)
+// The two puffs under the cloud, in world px so they fit the gap down to the head at any scale
+// (1.1.88's at a world scale of 2: 4 and 9 px down, radius 3 and 2).
+const TAIL_ROOT_DY = 2, TAIL_ROOT_R = 1.5, TAIL_TIP_DY = 4.5, TAIL_TIP_R = 1;
 const FADE_IN_DURATION = 0.15;
 const FADE_OUT_DURATION = 0.3;
 const LINGER_DURATION = 1.2;            // only used when hide() is requested
 const DOTS_CYCLE_SPEED = 0.45;
-// Word-wrap width in the inner (unscaled) space — the inner container renders at
-// RENDER_SCALE, so the on-screen cap is MAX_WIDTH. breakWords splits unbroken
-// tokens (long paths/hashes) that would otherwise still spill past the cloud.
-const WRAP_WIDTH = MAX_WIDTH / RENDER_SCALE - PADDING_X * 2;
+// breakWords splits unbroken tokens (long paths/hashes) that would otherwise still spill past the cloud.
+const WRAP_WIDTH = MAX_WIDTH - PADDING_X * 2;
+
+/** The world's transform on the stage (its x, y and scale) and the renderer's resolution. */
+export interface BubbleView { scale: number; x: number; y: number; resolution: number }
 // Hard cap on raw characters so a pathological action string wraps to a few
 // lines instead of a runaway-tall cloud (~4 lines at this width).
 const MAX_CHARS = 160;
@@ -42,7 +49,10 @@ export class ThoughtBubble {
   readonly container: Container;
   private inner: Container;
   private bg: Graphics;
+  /** The tail's two puffs: `tail` hangs from the cloud, `tip` is over the head. */
   private tail: Graphics;
+  private tip: Graphics;
+  private tailKey = '';
   private label: Text;
   private state: BubbleState = 'hidden';
   private fadeElapsed = 0;
@@ -55,12 +65,9 @@ export class ThoughtBubble {
   // Extra upward shift (px) applied on top of OFFSET_Y so two nearby bubbles can
   // stack instead of overlapping. Set each frame by the scene's overlap pass.
   private extraLift = 0;
-  // Current camera zoom. The bubble lives inside the zoomed world container, so
-  // when the window shrinks (fit-to-screen zoom < 1) the text used to scale
-  // down with the map and turn into ragged mush. Counter-scale so the bubble
-  // never renders below its designed 1:1 screen size; at zoom ≥ 1 it keeps
-  // scaling with the world as before.
-  private zoom = 1;
+  // The world's transform: the cloud's world rect is drawn at view.x + x * view.scale, on whole
+  // device px. Until a floor sets it, world and screen are the same.
+  private view: BubbleView = { scale: 1, x: 0, y: 0, resolution: 1 };
   // World bounds (map size in px). An avatar near the map edge — Michael's CEO
   // room sits in the top-left corner — would otherwise push its cloud out of
   // the visible world. setPosition clamps the rect back inside, tooltip-style.
@@ -75,13 +82,15 @@ export class ThoughtBubble {
     this.container.visible = false;
 
     this.inner = new Container();
-    this.inner.scale.set(RENDER_SCALE);
     this.container.addChild(this.inner);
 
     this.tail = new Graphics();
+    this.tip = new Graphics();
     this.bg = new Graphics();
     this.label = new Text({
       text: '',
+      // Drawn texel for device px (the layer is unscaled and the origin whole): never blended.
+      textureStyle: { scaleMode: 'nearest' },
       style: {
         fontSize: FONT_SIZE,
         fontWeight: 'bold',
@@ -97,7 +106,7 @@ export class ThoughtBubble {
     this.label.y = PADDING_Y;
 
     // tail first so it sits behind the body
-    this.inner.addChild(this.tail, this.bg, this.label);
+    this.inner.addChild(this.tail, this.tip, this.bg, this.label);
   }
 
   /** Show the current activity. Empty text → an animated "…" (model thinking).
@@ -141,17 +150,21 @@ export class ThoughtBubble {
     this.lingerElapsed = 0;
   }
 
-  /** Update for the camera zoom: keep the bubble's SCREEN size from dropping
-   *  below 1:1 by counter-scaling while the world is zoomed out. */
-  setZoom(z: number): void {
-    if (!(z > 0) || z === this.zoom) return;
-    this.zoom = z;
-    this.container.scale.set(this.compensation());
+  /** The world's transform on the stage, each frame before setPosition (the camera moves it). */
+  setView(view: BubbleView): void {
+    if (!(view.scale > 0) || !(view.resolution > 0)) return;
+    this.view = view;
   }
 
-  /** World-units multiplier that cancels a < 1 camera zoom (1 at zoom ≥ 1). */
-  private compensation(): number {
-    return 1 / Math.min(this.zoom, 1);
+  /** The cloud's size in world px: it is bgW x bgH screen px at any world scale. */
+  private worldSize(): { w: number; h: number } {
+    return { w: this.bgW / this.view.scale, h: this.bgH / this.view.scale };
+  }
+
+  /** A screen px value on the nearest whole device px. */
+  private snap(v: number): number {
+    const r = this.view.resolution;
+    return Math.round(v * r) / r;
   }
 
   /** The world rect the bubble must stay inside (the map size, in px). */
@@ -160,12 +173,10 @@ export class ThoughtBubble {
     this.boundsH = h;
   }
 
-  /** `slide` moves the cloud aside by that many px (a scene's overlap pass) while its tail
-   *  keeps pointing down at the head under `px`. */
+  /** Hang the cloud over the head at world (`px`, `py`). `slide` moves it aside by that many world
+   *  px (a scene's overlap pass); the tail still points down at the head under `px`. */
   setPosition(px: number, py: number, slide = 0): void {
-    const comp = this.compensation();
-    const w = this.bgW * RENDER_SCALE * comp;
-    const h = this.bgH * RENDER_SCALE * comp;
+    const { w, h } = this.worldSize();
     let x = px + slide - w / 2;
     let y = py + OFFSET_Y - h - this.extraLift;
     if (this.boundsW > 0) {
@@ -175,13 +186,29 @@ export class ThoughtBubble {
       x = Math.min(Math.max(x, 1), Math.max(1, this.boundsW - w - 1));
       y = Math.min(Math.max(y, 1), Math.max(1, this.boundsH - h - 1));
     }
-    this.container.x = Math.round(x);
-    this.container.y = Math.round(y);
-    // Unslid (the office floor, every unparted cloud) the tail stays where 1.1.87 drew it: the clamp
-    // would nudge a narrow cloud's tail (the '.' of the thinking dots).
-    const base = this.bgW * TAIL_BASE;
-    if (slide === 0) this.tail.x = 0;
-    else this.tail.x = Math.min(Math.max(base - slide / (RENDER_SCALE * comp), TAIL_EDGE), Math.max(TAIL_EDGE, this.bgW - TAIL_EDGE)) - base;
+    const v = this.view;
+    this.container.x = this.snap(v.x + x * v.scale);
+    this.container.y = this.snap(v.y + y * v.scale);
+    this.label.x = this.snap(PADDING_X);
+    this.label.y = this.snap(PADDING_Y);
+    this.aimTail(v.x + px * v.scale - this.container.x);
+  }
+
+  /** Point the tail at the head, `headX` screen px from the cloud's left edge: it leaves from under
+   *  the cloud as near the head as the cloud's edge allows, and its tip is over the head. (1.1.88 drew
+   *  it at 0.32 of the width and stepped it left, under a cloud centred on the head: always left of it.) */
+  private aimTail(headX: number): void {
+    const s = this.view.scale;
+    const root = this.snap(Math.min(Math.max(headX, TAIL_EDGE), Math.max(TAIL_EDGE, this.bgW - TAIL_EDGE)));
+    // The tip is always over the head, even when the floor slid a narrow cloud past it.
+    const tip = this.snap(headX);
+    const key = `${root}|${tip}|${s}|${this.bgW}|${this.bgH}`;
+    if (key === this.tailKey) return;
+    this.tailKey = key;
+    this.tail.clear();
+    this.tail.circle(root, this.snap(this.bgH + TAIL_ROOT_DY * s), TAIL_ROOT_R * s).fill({ color: FILL_COLOR }).stroke({ color: OUTLINE_COLOR, width: 1 });
+    this.tip.clear();
+    this.tip.circle(tip, this.snap(this.bgH + TAIL_TIP_DY * s), TAIL_TIP_R * s).fill({ color: FILL_COLOR }).stroke({ color: OUTLINE_COLOR, width: 1 });
   }
 
   /** Extra upward shift (px), set by the scene's bubble-overlap pass. */
@@ -193,9 +220,7 @@ export class ThoughtBubble {
    *  null when hidden. Used by the scene to detect and resolve overlaps. */
   getLayout(px: number, py: number): { x: number; y: number; w: number; h: number } | null {
     if (this.state === 'hidden') return null;
-    const comp = this.compensation();
-    const w = this.bgW * RENDER_SCALE * comp;
-    const h = this.bgH * RENDER_SCALE * comp;
+    const { w, h } = this.worldSize();
     let x = px - w / 2;
     let y = py + OFFSET_Y - h;
     if (this.boundsW > 0) {
@@ -273,14 +298,8 @@ export class ThoughtBubble {
     this.bg.fill({ color: FILL_COLOR });
     this.bg.stroke({ color: OUTLINE_COLOR, width: 1 });
 
-    // Thought-cloud tail: two shrinking puffs trailing down from the bubble's
-    // lower-left toward the head below — the cue that says "thinking", not "speech".
-    this.tail.clear();
-    const baseX = this.bgW * TAIL_BASE;
-    const puff = (cx: number, cy: number, r: number) => {
-      this.tail.circle(cx, cy, r).fill({ color: FILL_COLOR }).stroke({ color: OUTLINE_COLOR, width: 1 });
-    };
-    puff(baseX, this.bgH + 4, 3);
-    puff(baseX - 5, this.bgH + 9, 2);
+    // Thought-cloud tail: two shrinking puffs from the cloud down to the head — the cue that says
+    // "thinking", not "speech". Drawn by setPosition, which knows where the head is.
+    this.tailKey = '';
   }
 }
