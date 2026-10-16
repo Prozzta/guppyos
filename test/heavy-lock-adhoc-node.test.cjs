@@ -60,7 +60,8 @@ test('light scripts stay light: a mention in a string or comment, one test file 
   assert.equal(HJ.classifyCommand('node mk-mail.cjs', 0, ctx).heavy, false, 'A MENTION IS NOT A LOAD');
   assert.equal(HJ.classifyCommand('node one.cjs', 0, ctx).heavy, false, 'one test file stays light');
   assert.equal(HJ.classifyCommand('node counts.cjs', 0, ctx).heavy, false, 'reading the bed is not a bed run');
-  assert.equal(HJ.classifyCommand('node missing.cjs', 0, ctx).heavy, false, 'unreadable: as for shell scripts');
+  // HEAVY-LOCK-BG-LAPSE-189: unreadable is an unknown program: heavy (provisional), as for shell scripts.
+  assert.equal(HJ.classifyCommand('node missing.cjs', 0, ctx).provisional, true, 'unreadable: fails closed, as for shell scripts');
   assert.equal(HJ.classifyCommand('node data.json', 0, scripts({ 'data.json': ORT })).heavy, false, 'not a script');
 });
 
@@ -92,7 +93,7 @@ test('`node -e` code, ELECTRON_RUN_AS_NODE, and an earlier `cd X`', () => {
   });
   assert.equal(HJ.classifyCommand('node app.cjs', 0, ctx).why, 'node app.cjs (loads ELECTRON_RUN_AS_NODE)');
   assert.equal(HJ.classifyCommand('cd C:/Dunder/_work/x && node costs.cjs', 0, ctx).heavy, true, 'CD IS FOLLOWED');
-  assert.equal(HJ.classifyCommand('node costs.cjs', 0, ctx).heavy, false);
+  assert.equal(HJ.classifyCommand('node costs.cjs', 0, ctx).provisional, true, 'without the cd it is not read (fails closed), not the load');
 });
 
 test('through the hook\'s real script reader (files on disk, cwd-relative)', () => {
@@ -168,13 +169,14 @@ test('P1: tokenising a hostile 256 KB line stays fast (linear, bounded argument 
   assert.equal(HJ.HEAVY_JS_SCAN_CHARS, 256 * 1024);
 });
 
-test('J8-J10: at most 8 files read, a throwing reader is light, a cycle is read once', () => {
+test('J8-J10: at most 8 files read, a throwing reader never throws into the hook (unreadable: heavy), a cycle is read once', () => {
   const reads = [];
   const fan = { readScript: (p) => { reads.push(p); return p === 'f.cjs' ? Array.from({ length: 40 }, (_, i) => `require('./h${i}.cjs')`).join('\n') : (p === 'h39.cjs' ? "require('onnxruntime-node')" : 'module.exports = 1'); } };
   assert.equal(HJ.classifyCommand('node f.cjs', 0, fan).heavy, false, 'the 40th helper is beyond the cap');
   assert.equal(reads.length, HJ.HEAVY_JS_MAX_FILES, 'J8: STOPS AT 8 READS');
   let thrown = 0;
-  assert.equal(HJ.classifyCommand('node z.cjs', 0, { readScript: () => { thrown++; throw new Error('EACCES'); } }).heavy, false, 'J9: A THROW IS LIGHT');
+  // HEAVY-LOCK-BG-LAPSE-189: a throw is an unreadable script: heavy (provisional), not light.
+  assert.equal(HJ.classifyCommand('node z.cjs', 0, { readScript: () => { thrown++; throw new Error('EACCES'); } }).provisional, true, 'J9: A THROW IS UNREADABLE');
   assert.ok(thrown >= 1);
   const cyc = [];
   const loop = { readScript: (p) => { cyc.push(p); return p === 'a.cjs' ? "require('./b.cjs')" : p === 'b.cjs' ? "require('./a.cjs')" : null; } };

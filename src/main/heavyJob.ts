@@ -15,7 +15,10 @@
 import { execFile } from 'node:child_process';
 
 export type HeavyKind = 'install' | 'build' | 'suite' | 'bench';
-export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string }
+/** `provisional`: HEAVY-LOCK-BG-LAPSE-189, heavy only because a script the command runs could not be
+ *  read at PreToolUse (it does not exist yet, it is too big, its path is computed): the lock fails
+ *  closed on it, and may let it go once the script reads as light (HeavyJobLock.settle). */
+export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; provisional?: boolean }
 
 /** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). */
 export function commandFromToolInput(input: unknown): string | null {
@@ -272,12 +275,19 @@ export interface ClassifyCtx {
   dialect?: ShellDialect;
 }
 
+/** HEAVY-LOCK-BG-LAPSE-189: the class of a script the lock cannot read at PreToolUse. */
+function unreadable(path: string): HeavyClass {
+  return { heavy: true, kind: 'bench', why: `${path.replace(/\\/g, '/').split('/').pop()} (a script the lock cannot read yet)`, provisional: true };
+}
+
 /** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
 function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyClass {
   if (!ctx.readScript || depth >= 2) return { heavy: false };
   let text: string | null = null;
   try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
-  if (!text) return { heavy: false };
+  // HEAVY-LOCK-BG-LAPSE-189: a script the lock cannot read (not created yet, too big, a computed
+  // path) is an unknown program: heavy, as an unreadable stdin script already is (FAILOPEN).
+  if (text === null) return unreadable(path);
   const c = classifyCommand(text, depth + 1, ctx);
   return c.heavy ? { ...c, why: `${c.why ?? c.kind} (in ${path.replace(/\\/g, '/').split('/').pop()})` } : { heavy: false };
 }
@@ -524,8 +534,11 @@ function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
     let text: string | null = null;
     try { text = ctx.readScript(key, ctx.cd); } catch { text = null; }
     // The path as written (`./pre.cjs`) when the normalised one (`pre.cjs`) did not read.
-    if (!text && path !== key) { try { text = ctx.readScript(path, ctx.cd); } catch { text = null; } }
-    if (!text) continue;   // unreadable: decided by the rest (as for shell scripts)
+    if (text === null && path !== key) { try { text = ctx.readScript(path, ctx.cd); } catch { text = null; } }
+    // HEAVY-LOCK-BG-LAPSE-189: the script itself (or a preload named by a file path) unreadable is
+    // an unknown program: heavy. A helper (hop >= 1) is a guess among extensions: the rest decides.
+    if (text === null && hop === 0 && (path === prog.script || /^(\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])/.test(path))) return unreadable(path);
+    if (!text) continue;   // unreadable helper, or an empty file: decided by the rest
     read++;
     const s = scanJs(text);
     if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);
@@ -574,7 +587,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, { ...ctx, dialect: 'cmd' });
   }
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
-  if (WRAPPERS.has(bin) && depth === 0) {
+  // HEAVY-LOCK-BG-LAPSE-189: the script form is read below depth 0 too (`X="$(bash run.sh)"`,
+  // `bash -c "bash run.sh"`); classifyScript stops at depth 2.
+  if (WRAPPERS.has(bin) && (depth === 0 || !args.some((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a)))) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
     const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
@@ -681,8 +696,34 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   const bodies: string[] = [];
   const d: ShellDialect = ctx.dialect ?? 'sh';
   const text = d === 'cmd' ? cmd : stripHeredocs(cmd, bodies);   // cmd has no heredocs
-  let here: ClassifyCtx = { ...ctx, stdin: undefined };
-  for (const seg of segments(text, d)) {
+  // HEAVY-LOCK-BG-LAPSE-189: a file an earlier segment writes from a heredoc (`cat > run.sh <<'EOF'`,
+  // `cat <<EOF >> f`, `tee f <<EOF`) is read from that body, so a script made and run in one call is
+  // classified by its text, not as unreadable. Only when every heredoc operator of the segments pairs
+  // with a body stripHeredocs found (the two scans agree); otherwise nothing is virtual (fail closed).
+  const segs = segments(text, d);
+  const ops = segs.map((g) => words(g.replace(/\s&$/, ''), d).filter((w) => HEREDOC_OP.test(w)).length);
+  const virtual = new Map<string, string>();
+  const paired = d !== 'cmd' && ops.reduce((a, b) => a + b, 0) === bodies.length;
+  const vkey = (p: string, cd?: string): string => {
+    const raw = p.replace(/^["']|["']$/g, '');
+    const abs = /^([A-Za-z]:[\\/]|[\\/]|~)/.test(raw) || !cd ? raw : `${cd.replace(/[\\/]+$/, '')}/${raw}`;
+    return normPath(abs).replace(/^\/([A-Za-z])\//, '$1:/').toLowerCase();
+  };
+  // HEAVY-LOCK-BG-LAPSE-189: the floor's `S=/c/.../scratchpad; cd $S; node run.cjs`: a variable a plain
+  // assignment segment of this command set to a literal is substituted before a path is read (the
+  // reader refuses a `$` path, which would otherwise make every such script unreadable).
+  const vars = new Map<string, string>();
+  const expand = (v: string): string => v.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, n: string) => vars.get(n) ?? m);
+  const key = (p: string, cd?: string): string => vkey(expand(p), cd === undefined ? cd : expand(cd));
+  const base = ctx.readScript;
+  const readScript = base ? (p: string, cd?: string): string | null => virtual.get(key(p, cd)) ?? base(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  let here: ClassifyCtx = { ...ctx, stdin: undefined, ...(readScript ? { readScript } : {}) };
+  let body = 0;
+  let maybe: HeavyClass | null = null;
+  for (let si = 0; si < segs.length; si++) {
+    const seg = segs[si];
+    const mine = paired ? bodies.slice(body, body + ops[si]) : [];
+    body += ops[si];
     // The raw doubled-quote cmd form is opaque to the shell-word tokenizer: classify its
     // inner executable before tokenizing, but do so per segment so later chained commands
     // are still inspected independently.
@@ -705,6 +746,15 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
         break;
       }
     }
+    const assigns = ws[0] === 'export' ? ws.slice(1) : ws;
+    if (assigns.length && assigns.every((w) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(w))) {
+      for (const w of assigns) {
+        // A computed value (`$(mktemp -d)`) is kept as written: a path through it never reads (the
+        // reader refuses `$`), so it stays unreadable, yet still names the same heredoc-written file.
+        const at = w.indexOf('=');
+        vars.set(w.slice(0, at), expand(w.slice(at + 1).replace(/^["']|["']$/g, '')));
+      }
+    }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
     if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {
       const to = ws[1];
@@ -714,17 +764,44 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     // Jim n2: `cat <<'EOF' | node -`: the heredoc of an earlier segment is what the pipe feeds `-`.
     if (stdin === undefined && bodies.length && raw.includes('-')) stdin = bodies.join('\n');
     const c = classifyWords(ws, depth, stdin === undefined ? here : { ...here, stdin });
-    if (c.heavy) return c;
+    if (c.heavy && !c.provisional) return c;
+    if (c.heavy && !maybe) maybe = c;
+    if (mine.length === 1) heredocWrite(raw, ws, mine[0], here, virtual, key);
   }
   // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
   // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite.
   if (depth < 3) {
     for (const inner of substitutions(text)) {
       const c = classifyCommand(inner, depth + 1, ctx);
-      if (c.heavy) return c;
+      if (c.heavy && !c.provisional) return c;
+      if (c.heavy && !maybe) maybe = c;
     }
   }
-  return { heavy: false };
+  return maybe ?? { heavy: false };
+}
+
+const HEREDOC_OP = /^\d*<<-?(?!<)/;
+
+/** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
+function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string>, vkey: (p: string, cd?: string) => string): void {
+  const bin = (ws[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+  const text = `${body}\n`;
+  const put = (f: string, append: boolean): void => {
+    const k = vkey(f, here.cd);
+    let old: string | null = null;
+    if (append) { try { old = here.readScript ? here.readScript(f, here.cd) : null; } catch { old = null; } }
+    virtual.set(k, append ? `${old ?? ''}${text}` : text);
+  };
+  if (bin === 'cat') {
+    if (ws.slice(1).some((a) => a !== '-')) return;   // `cat a.txt > f`: f is not the heredoc
+    for (let i = 0; i < raw.length; i++) {
+      const m = /^1?(>>?)(?![&>])(.*)$/.exec(raw[i]);
+      if (m) { const f = m[2] || raw[i + 1]; if (f) put(f, m[1] === '>>'); }
+    }
+  } else if (bin === 'tee') {
+    const flags = ws.slice(1).filter((a) => a.startsWith('-'));
+    for (const f of ws.slice(1).filter((a) => !a.startsWith('-'))) put(f, flags.some((a) => /^-[a-z]*a|^--append$/.test(a)));
+  }
 }
 
 /** Classify a tool call (any provider: the command-shaped input only). */
@@ -794,6 +871,10 @@ export interface HeavyHolder {
   calls: Set<string>;
   /** A backgrounded job: released by its processes exiting (the watcher), the PTY, or the TTL. */
   background: boolean;
+  /** HEAVY-LOCK-BG-LAPSE-189: the calls held only because a script was unreadable at PreToolUse,
+   *  and whether any call of this holder was heavy outright (then none of them is settled early). */
+  provisional: Set<string>;
+  definite: boolean;
   /** Consecutive watcher scans that found no heavy process of this holder. */
   misses: number;
   /** The last watcher scan saw a heavy process of this holder (for a TTL expiry's log). */
@@ -962,6 +1043,7 @@ export class HeavyJobLock {
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
       const flipped = background && !mine.background;
       mine.calls.add(callId); mine.background = mine.background || background; mine.touched = this.now(); mine.misses = 0;
+      if (cls.provisional) mine.provisional.add(callId); else mine.definite = true;
       mine.windows.push({ callId, start: this.now(), end: null });
       this.log({ kind: 'heavy-lock', action: 'reenter', agentId, heavyKind: cls.kind, command: command.slice(0, 200) });
       if (flipped) this.changed();
@@ -984,7 +1066,7 @@ export class HeavyJobLock {
     }
     if (reserved) this.reservations.delete(agentId);
     this.dequeue(agentId);
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}) });
     this.changed();
     this.arm();
@@ -1038,6 +1120,23 @@ export class HeavyJobLock {
       try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }
     }
     this.arm();
+  }
+
+  /** HEAVY-LOCK-BG-LAPSE-189 (early release): PostToolUse of a call held only because its script was
+   *  unreadable at PreToolUse. `reclassify` runs the classifier again now that the call has run (the
+   *  script exists): light, and nothing else of the holder heavy, frees the slot at once instead of
+   *  holding a backgrounded light job until it exits. Still unreadable, or heavy, keeps it. Only ever
+   *  for such a call: a definite heavy call is freed by its call id alone (Andy N1). Only for a
+   *  background holder: a foreground one is freed by callDone, after its orphan check (Jim N2). */
+  settle(agentId: string, callId: string, reclassify: () => HeavyClass): void {
+    const h = this.holders.get(agentId);
+    if (!h || !h.background || h.definite || !h.provisional.has(callId) || h.provisional.size !== 1) return;
+    let c: HeavyClass;
+    try { c = reclassify(); } catch { return; }
+    if (c.heavy) return;
+    this.log({ kind: 'heavy-lock', action: 'settled-light', agentId, heavyKind: h.kind });
+    h.calls.clear();
+    this.release(agentId, 'settled-light');
   }
 
   /** PostToolUse of a heavy call: a FOREGROUND call's job is done. The slot is freed when the
@@ -1155,7 +1254,7 @@ export class HeavyJobLock {
     else if (had) this.grant();
   }
 
-  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running'): void {
+  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running' | 'settled-light'): void {
     const h = this.holders.get(agentId);
     if (!h) return;
     this.holders.delete(agentId);
