@@ -44,6 +44,12 @@ export interface HumanQuestionCardProps {
   onOpenLink?: (href: string) => void;
   /** For deterministic stamps in tests. */
   now?: Date;
+  /** CARDS-TAB-190: a review card, never answered here. Options render as a plain list (no
+   *  radio, no button), and an open entry carries an OPEN tag pointing at ASK ME. */
+  readOnly?: boolean;
+  /** With readOnly: the OPEN tag becomes a link that opens ASK ME. Omit it for an ask that is
+   *  not on ASK ME (a dismissed one): the tag then reads NOT ANSWERED. */
+  onOpenAskMe?: () => void;
 }
 
 /** The markdown subset a question may use; everything else is unwrapped to its text. */
@@ -126,7 +132,7 @@ function Tag({ children, bg }: { children: ReactNode; bg: string }) {
 }
 
 export function HumanQuestionCard({
-  entry, draft, onDraftChange, onAnswer, sending = false, onOpenLink, now
+  entry, draft, onDraftChange, onAnswer, sending = false, onOpenLink, now, readOnly = false, onOpenAskMe
 }: HumanQuestionCardProps) {
   const [localDraft, setLocalDraft] = useState('');
   const note = draft ?? localDraft;
@@ -139,7 +145,7 @@ export function HumanQuestionCard({
   const { headline, body } = splitHeadline(entry.q);
   const chosen = answered ? (entry.chosen ?? []) : picked;
   const answer = composeAnswer(entry.options, picked, note);
-  const interactive = !answered && !!onAnswer;
+  const interactive = !answered && !!onAnswer && !readOnly;
 
   const toggle = (i: number) => {
     if (!interactive || sending) return;
@@ -159,6 +165,14 @@ export function HumanQuestionCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         <Tag bg={KIND_COLOR[kind]}>{KIND_LABEL[kind]}{entry.multi && options.length ? ' · ANY' : ''}</Tag>
         {asked && <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)' }}>asked {asked}</span>}
+        {readOnly && !answered && (onOpenAskMe
+          ? (
+            <button
+              type="button" className="cth-hq-open" onClick={onOpenAskMe} title="answer it on the ASK ME tab"
+              style={{ border: 'none', padding: 0, background: 'transparent', cursor: 'pointer' }}
+            ><Tag bg="var(--cth-coral-light, #f7d6cf)">OPEN · <u>ANSWER ON ASK ME</u></Tag></button>
+          )
+          : <span className="cth-hq-open"><Tag bg="var(--cth-paper-200)">NOT ANSWERED</Tag></span>)}
       </div>
 
       {headline && (
@@ -168,8 +182,33 @@ export function HumanQuestionCard({
       )}
       {body && <SafeMarkdown source={body} onOpenLink={onOpenLink} />}
 
-      {/* options */}
-      {options.length > 0 && (
+      {/* options: read-only, a plain list (no radio, nothing to press); the chosen ones marked */}
+      {options.length > 0 && readOnly && (
+        <ul className="cth-hq-options-ro" style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {options.map((o, i) => {
+            const on = answered && chosen.includes(i);
+            return (
+              <li key={i} data-option={i} data-chosen={on || undefined} style={{
+                padding: '5px 9px', color: 'var(--cth-ink-900)',
+                background: on ? 'var(--cth-mint-light)' : 'transparent',
+                boxShadow: on ? 'inset 0 0 0 2px var(--cth-mint)' : 'inset 2px 0 0 var(--cth-ink-100)',
+                opacity: answered && !on ? 0.6 : 1
+              }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span style={{ ...prose, fontWeight: 700 }}>{on ? '✓ ' : ''}{o.label}</span>
+                  {entry.recommended === i && <Tag bg="var(--cth-lemon-light)">RECOMMENDED</Tag>}
+                </span>
+                {o.detail && (
+                  <span style={{ ...prose, fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-700)' }}>
+                    <SafeMarkdown source={o.detail} onOpenLink={onOpenLink} />
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {options.length > 0 && !readOnly && (
         <div role={entry.multi ? 'group' : 'radiogroup'} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {options.map((o, i) => {
             const on = chosen.includes(i);

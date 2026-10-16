@@ -9,6 +9,7 @@ import { PtyTerminalView } from './PtyTerminalView';
 import { MessageQueueComposer } from './MessageQueueComposer';
 import { TasksKanban } from './TasksKanban';
 import { AskMeTab } from './AskMeTab';
+import { CardsTab } from './CardsTab';
 import { TriggersTab } from './triggers/TriggersTab';
 import { TriggerHistoryTab } from './triggers/TriggerHistoryTab';
 import { WorkersTab } from './WorkersTab';
@@ -53,7 +54,7 @@ import { useOrchestratorName } from '@/hooks/useOrchestratorName';
 // Both the AskMe (#human) tab and the Triggers tab live here. Triggers replaced
 // the old Schedules tab: schedules are now one of four trigger types, and the
 // whole surface lives in ./triggers (see src/shared/triggers.ts for the contract).
-type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'requests' | 'triggers' | 'trigger-history'
+type CCTab = 'terminal' | 'floor' | 'tasks' | 'human' | 'cards' | 'requests' | 'triggers' | 'trigger-history'
   | 'memory' | 'graph' | 'activity' | 'skills' | 'workers';
 
 /** Fallback denominator for the per-agent token meter when no floor token budget
@@ -71,12 +72,19 @@ interface GHIssue {
   assignees: string[];
 }
 
+/** CARDS-TAB-190 (the Human): the Requests tab and its badge are hidden, not deleted. The
+ *  component, its poll and the once-only undelivered banner stay wired, so showing it again is
+ *  removing it from this set. */
+export const HIDDEN_TABS: ReadonlySet<CCTab> = new Set<CCTab>(['requests']);
+
 /** Canonical tab order. Not every entry is always shown — see `visibleTabs`. */
 const TABS: { key: CCTab; label: string; icon: Parameters<typeof Icon>[0]['name'] }[] = [
   { key: 'terminal', label: 'terminal', icon: 'terminal' },
   { key: 'floor', label: 'monitor', icon: 'mcp' },
   { key: 'tasks', label: 'tasks', icon: 'check' },
   { key: 'human', label: 'ask me', icon: 'bell' },
+  // CARDS-TAB-190: the Human's read-only review of every tasks.json card.
+  { key: 'cards', label: 'cards', icon: 'check' },
   // ZT-I1-MAIL §4.3 / §11.13 option B: open requests awaiting a reply (badge = how many).
   { key: 'requests', label: 'requests', icon: 'ledger' },
   { key: 'triggers', label: 'triggers', icon: 'clock' },
@@ -105,7 +113,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
   useEffect(() => {
     if (!showHistory && tab === 'trigger-history') setTab('terminal');
   }, [showHistory, tab]);
-  const visibleTabs = TABS.filter((t) => t.key !== 'trigger-history' || showHistory);
+  const visibleTabs = TABS.filter((t) => !HIDDEN_TABS.has(t.key) && (t.key !== 'trigger-history' || showHistory));
   // ZT-I1-MAIL: one poll feeds the requests badge, the requests tab and the once-only
   // undelivered-mail banner (§7.1 step 2). Data only; nothing here wakes an agent.
   const mailObligations = useMailObligations();
@@ -118,7 +126,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
   useEffect(() => {
     if (!ccTabRequest) return;
     const key = ccTabRequest.tab as CCTab;
-    if (!TABS.some((t) => t.key === key)) return;
+    if (!TABS.some((t) => t.key === key) || HIDDEN_TABS.has(key)) return;
     // Read the gate live rather than depending on it — as a dependency it would
     // re-fire a stale request the moment the tab appeared.
     if (key === 'trigger-history' && !triggerHistoryVisible(useStore.getState())) return;
@@ -339,6 +347,7 @@ export function CommandCenterPanel({ agent, fullscreen = false }: { agent: Agent
         {tab === 'floor' && <FloorTab seed={dispatchSeed} />}
         {tab === 'tasks' && <TasksKanban />}
         {tab === 'human' && <AskMeTab />}
+        {tab === 'cards' && <CardsTab />}
         {tab === 'requests' && <OpenRequestsTab snap={mailObligations.snap} refresh={mailObligations.refresh} />}
         {tab === 'triggers' && <TriggersTab />}
         {tab === 'trigger-history' && <TriggerHistoryTab />}
