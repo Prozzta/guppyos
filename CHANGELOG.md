@@ -25,6 +25,14 @@ All notable changes to this project are documented here. The format is based on
   It is written once Chromium has heard from the GPU process (CPU only at once), and says unknown,
   never software, when no report comes within 10 s. It also carries Chromium's raw status.
 
+- **A memory search while the memory engine indexes no longer times out on a busy machine, and a
+  failed memory request is now logged.** While it indexes (a claims sync after a ledger raise, a
+  backfill, a changed note), a search gets 1 s instead of 250 ms. A search whose caller has already
+  given up is not run. Every degraded memory reply (timed out, expired, worker exited,
+  unavailable) writes a `native-memory-degraded` row to log.jsonl, at most one a second per
+  reason, and a reply that comes too late writes a `native-memory-late-reply` row saying where the
+  time went.
+
 ## [1.1.88] — 2026-10-16
 
 **A Graphics setting, a Requests badge that counts what is open, and a TES bridge that blinks,

@@ -8,14 +8,16 @@
  *                                                        report | compact | shutdown |
  *                                                        claims-sync | r5-candidates | claim-ledger (main only)
  *   worker -> main  { id, ok, exit, text?, json?, error? }   and  { event, ...fields }
- * A request whose deadline passed while it waited in the queue is answered `expired` without
- * running: the caller already gave up on it.
+ * A search whose deadline passed while it waited in the queue is answered `expired` without
+ * running: the caller already gave up on it. Any request that finishes past its deadline is
+ * answered `expired` too. A search reply carries `timing` { waitMs, runMs, inFlight }.
+ *   worker -> main  { event: 'indexing', on, kind }: indexing started (on) / the last one ended.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { constants as osConstants, setPriority } from 'node:os';
 import { dirname, join } from 'node:path';
 import { OnnxEmbedder, type OrtLike } from './embedder';
-import { MemoryEngine, type ClaimsSyncArgs } from './engine';
+import { MemoryEngine, QueueExpired, type ClaimsSyncArgs, type QueueTiming } from './engine';
 import { NativeMemoryStore, type StoreOpenOptions } from './store';
 import { discoverSources, sha256 } from './sources';
 import { WordPieceTokenizer, wordPieceConfigFromTokenizerJson } from './wordpiece';
@@ -84,6 +86,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
+    onIndexing: (on, kind) => port.postMessage({ event: 'indexing', on, kind }),
     ...(typeof cfg.idleUnloadMs === 'number' && cfg.idleUnloadMs > 0 ? { idleUnloadMs: cfg.idleUnloadMs } : {})
   });
   engine.storeOpenOptions = openOpts;
@@ -96,14 +99,22 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     if (!m || typeof m.id !== 'number' || typeof m.op !== 'string') return;
     const a = m.args ?? {};
     const expired = (): boolean => typeof m.deadline === 'number' && Date.now() > m.deadline;
+    // MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189: a search reply carries where its time went (timing),
+    // so main can log a degraded or late one.
+    let timing: QueueTiming | undefined;
+    const withTiming = (): Record<string, unknown> => (timing ? { timing } : {});
     const guard = <T>(p: Promise<T>, map: (v: T) => Record<string, unknown>): void => {
-      p.then((v) => reply(m.id, expired() ? { ok: false, exit: 4, error: 'expired' } : { ok: true, ...map(v) }),
-        (err) => reply(m.id, { ok: false, exit: 4, error: String((err as Error)?.message ?? err) }));
+      p.then((v) => reply(m.id, expired() ? { ok: false, exit: 4, error: 'expired', ...withTiming() } : { ok: true, ...map(v), ...withTiming() }),
+        (err) => {
+          if (err instanceof QueueExpired) timing = err.timing;
+          reply(m.id, { ok: false, exit: 4, error: String((err as Error)?.message ?? err), ...withTiming() });
+        });
     };
     switch (m.op) {
       case 'search':
         guard(engine.search({ query: String(a.query ?? ''), wing: (a.wing as string) ?? null, room: (a.room as string) ?? null, results: Number(a.results ?? 5), since: (a.since as string) ?? null, before: (a.before as string) ?? null, caller: (a.caller as string) ?? null,
-          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
+          mode: a.mode === 'history' || a.mode === 'all' ? a.mode : 'live', kind: (a.kind as string) ?? null, key: (a.key as string) ?? null },
+        { deadline: m.deadline, timing: (t) => { timing = t; } }), (r) => ({ exit: r.exit, text: r.text, json: r.json }));
         break;
       case 'wake-up':
         guard(engine.wakeUp((a.wing as string) ?? null), (r) => ({ exit: r.exit, text: r.text }));
