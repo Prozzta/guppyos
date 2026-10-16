@@ -12,19 +12,18 @@ import type { LivenessV1 } from '@shared/livenessV1';
 import { Camera, watchDevicePixelRatio } from '../office/Camera';
 import { installContextLossRecovery } from '../office/glRecovery';
 import { applyFloorFrameBudget } from '../office/floorFrameBudget';
-import { buildScenePlan, byDepth, chairOf, compose as composePx, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
+import { buildScenePlan, byDepth, chairOf, ownChairKey, personKey, seatPose, sideFit, type SortedItem } from './compositor';
 import { Crew, sitDraw, WALK_SPEED, type CrewAgent, type Walker } from './crew';
 import { seatRulesFrom } from './seatAllocator';
 import type { LoadedPack } from './packs';
-import { blank, type Pixels } from './raster';
-import { hullSkirt, HULL_STRIP_ROWS } from './hull';
+import { type Pixels } from './raster';
 import { presetIdOf, readLook, resolveLook } from './looks';
 import { lookColumn } from './lookArt';
 import { teardownFloor } from './teardown';
 import { exactPicker, frontPicker, hasVisiblePixel, sceneBounds, sceneScale, staticOrder, staticsCacheable, type Box } from './staticCache';
 import { DamageTracker, deviceRect, type Drawn } from './damage';
 import type { ThemeLooks } from './themeCatalog';
-import { floorFrame, FRAME_MARGIN } from './framing';
+import { floorFrame } from './framing';
 import { BubbleLayer } from './BubbleLayer';
 import { PanelLayer } from './PanelLayer';
 import { cloudAnchor, drawnSprite } from './cloudAnchor';
@@ -215,7 +214,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       // - over it, in depth order, the people, their cups, the parked mugs, and the statics that
       //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker:
       //   at a whole n they land on their own pixels, so only those touching a person are picked);
-      // - the hull continued past the art (hull.ts), then 'above', then the bubbles.
+      // - 'above', then the bubbles.
       const bounds = sceneBounds(plan);
       const cached = bounds !== null && staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
@@ -232,21 +231,6 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         world.addChild(floorView);
       } else world.addChild(new Sprite(below.texture));
       world.addChild(sortLayer);
-      const hull = new Container();
-      if (frame0.deadBottom > 0) {
-        const art = blank(SM.PW, SM.PH);
-        composePx(art, plan.below, 0, 0);
-        for (const it of plan.sorted) if (it.px) composePx(art, it.px, Math.round(it.x), Math.round(it.y), it.opacity);
-        const sk = hullSkirt(art, frame0.x + FRAME_MARGIN, frame0.x + frame0.w - FRAME_MARGIN - 1, frame0.y + frame0.h - 1);
-        if (sk) {
-          const cover = hull.addChild(new Sprite(own(sk.cover)));
-          cover.position.set(sk.x, sk.y);
-          const strip = hull.addChild(new Sprite(own(sk.strip)));
-          strip.position.set(sk.x, frame0.y + frame0.h);
-          strip.height = HULL_STRIP_ROWS;
-        }
-      }
-      world.addChild(hull);
       if (hasVisiblePixel(plan.above)) world.addChild(new Sprite(own(plan.above)));
       // PANEL-BLINK-188: the chair panels' lights, live over the cached map, each just in front of what draws it.
       const panelLayer = new PanelLayer(plan, SM, pack.manifest.stations.layer, own, sortLayer, world.addChild(new Container()));
@@ -326,7 +310,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       };
       (app.renderer as any).render = (o: any) => ((o === app.stage || (o?.container === app.stage && !o.target)) ? paint() : realRender(o));
       // For the rendered tests (tes-floor-whole-188): the floor and what it is made of.
-      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, hull, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
+      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
         () => floorRT?.destroy(true),
