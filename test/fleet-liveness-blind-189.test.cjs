@@ -190,6 +190,88 @@ test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the ca
   assert.doesNotMatch(badge, /onClick/, 'display only');
 });
 
+// ─── Creed N1/N2 (third commit): the open-tool bookkeeping this card relies on ───────────────
+
+const HOOKS = loadTs('src/main/hooks.ts');
+const A = loadTs('src/shared/activityView.ts');
+
+/** A HookServer on stubs; `deny` = the heavy lock refuses every heavy call, `gate` = the HITL gate refuses `gate`. */
+function hookServer(Hook, { deny = false, gate = null } = {}) {
+  const hive = { sockPath: () => null, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {}, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {} };
+  const control = { shouldHalt: () => false, takeSteer: () => null, toolDecision: (_a, tool) => (tool === gate ? { deny: true, reason: 'gated' } : { deny: false }) };
+  const s = new Hook(hive, () => null, () => ({}), control, undefined, undefined, () => {});
+  if (deny) s.setHeavyLock({ acquire: () => ({ allow: false, reason: 'slot busy' }), callDone: () => {} });
+  return s;
+}
+const SUITE = { command: 'node test/tools/run-tests.cjs' };
+/** The facts findSilentTurns reads, with the server's open tool and a last hook at `lastHookAt`. */
+const rowOf = (s, lastHookAt) => {
+  const t = s.runningTool('andy');
+  return agent('andy', { activeSince: T0, turnStartAt: T0, lastHookAt, runningTool: t ? { name: t.name, since: t.since } : null });
+};
+
+/** Creed N1 (gaps.cjs G1): a heavy call the lock DENIES gets no PostToolUse; the turn then runs a
+ *  Bash call (Pre + Post) and hangs. The denied call must leave nothing open, so the hang reads
+ *  SILENT at 15 min, not TOOL OPEN ~1 h after it. */
+K.deniedCallLeavesNothingOpen = ({ HOOKS: H = HOOKS }) => {
+  const s = hookServer(H.HookServer, { deny: true });
+  const out = s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'den-1', tool_input: SUITE });
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny', 'fixture: the lock denies the suite');
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'ok-1', tool_input: { command: 'git status' } });
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'ok-1', tool_input: { command: 'git status' } });
+  const hang = T0 + 30 * MIN;
+  assert.deepEqual(ST.findSilentTurns([rowOf(s, hang)], T0 + 45 * MIN).map((x) => x.kind), ['silent'],
+    'N1: A DENIED CALL LEAVES NO TOOL OPEN (a hang at +30 reads SILENT at +45)');
+  // The HITL gate's deny too (it answers before the lock).
+  const g = hookServer(H.HookServer, { gate: 'Bash' });
+  g.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'g-1', tool_input: { command: 'ls' } });
+  assert.equal(g.runningTool('andy'), undefined, 'N1: A DENIED CALL LEAVES NO TOOL OPEN (HITL gate)');
+  // An allowed call is still open until its Post.
+  const a = hookServer(H.HookServer);
+  a.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'a-1', tool_input: SUITE });
+  assert.equal(a.runningTool('andy')?.name, 'Bash', 'an allowed call stays open');
+};
+
+/** Creed N1, second half: overlapping same-name calls end by their own id, so the one still running
+ *  keeps its own start time (the oldest-by-name rule gave it the later call's). */
+K.overlappingCallsEndById = ({ HOOKS: H = HOOKS, A: act = A }) => {
+  const two = [{ name: 'Bash', since: 1, id: 'long' }, { name: 'Bash', since: 2, id: 'short' }];
+  assert.deepEqual(act.toolEnded(two, 'Bash', 'short'), [two[0]], 'N1: OVERLAPPING SAME-NAME CALLS END BY THEIR OWN ID (toolEnded)');
+  const s = hookServer(H.HookServer);
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'long', tool_input: { command: 'sleep 999' } });
+  const longSince = s.runningTool('andy').since;
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'short', tool_input: { command: 'ls' } });
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'short', tool_input: { command: 'ls' } });
+  assert.equal(s.runningTool('andy')?.id, 'long', 'N1: OVERLAPPING SAME-NAME CALLS END BY THEIR OWN ID');
+  assert.equal(s.runningTool('andy').since, longSince);
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'long', tool_input: { command: 'sleep 999' } });
+  assert.equal(s.runningTool('andy'), undefined);
+};
+
+/** Creed N2 (gaps.cjs G2): a degraded Codex mcp PreToolUse names no tool; a tool IS running, so an
+ *  'unknown' entry opens (no SILENT at +20), and its Post closes it, degraded or named. */
+K.degradedPreOpensUnknown = ({ HOOKS: H = HOOKS, A: act = A }) => {
+  const pre = { hook_event_name: 'PreToolUse', agent_id: 'andy', transport: 'mcp', payload_degraded: true };
+  const s = hookServer(H.HookServer);
+  s.handle({ ...pre });
+  assert.equal(s.runningTool('andy')?.name, 'unknown', 'N2: A DEGRADED PRE OPENS AN UNKNOWN TOOL');
+  assert.deepEqual(ST.findSilentTurns([rowOf(s, T0)], T0 + 20 * MIN), [], 'N2: A DEGRADED PRE OPENS AN UNKNOWN TOOL (no SILENT at +20)');
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', transport: 'mcp', payload_degraded: true });
+  assert.equal(s.runningTool('andy'), undefined, 'N2: ITS POST CLOSES IT (degraded Post)');
+  s.handle({ ...pre });
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', transport: 'mcp', tool_name: 'exec_command' });
+  assert.equal(s.runningTool('andy'), undefined, 'N2: ITS POST CLOSES IT (named Post)');
+  // The same rule, on the shared helper the renderer uses too.
+  assert.deepEqual(act.toolEnded([{ name: 'unknown', since: 1 }], 'exec_command'), [], 'N2: ITS POST CLOSES IT (toolEnded)');
+  assert.deepEqual(act.toolEnded([{ name: 'Bash', since: 1 }], 'Grep'), [{ name: 'Bash', since: 1 }], 'a Post of another named tool closes nothing');
+};
+
+test('Creed N1: a call the hook DENIES leaves no tool open, and same-name calls end by id', () => {
+  K.deniedCallLeavesNothingOpen({});
+  K.overlappingCallsEndById({});
+});
+test('Creed N2: a degraded Codex PreToolUse opens an unknown tool that its Post closes', () => K.degradedPreOpensUnknown({}));
+
 test('FLEET-LIVENESS-BLIND: main wires the hook clock and the open tool into the digest (never PTY output)', () => {
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /silentTurns: \(\) => findSilentTurns\(silentTurnFacts\(\), Date\.now\(\)\),/);
@@ -248,9 +330,22 @@ const MUTANTS = [
     killer: 'rosterSaysSilent', dies: /A SILENT WORKING TURN IS NAMED ON THE LIVE ROSTER/ },
   { name: 'the display calls an open tool silence', file: 'src/shared/agentBadges.ts',
     edits: [["  return s.kind === 'silent'\n    ? `SILENT", "  return true\n    ? `SILENT"]],
-    killer: 'displayWords', dies: /AN OPEN TOOL READS AS ONE, NOT AS SILENCE/ }
+    killer: 'displayWords', dies: /AN OPEN TOOL READS AS ONE, NOT AS SILENCE/ },
+  { name: 'Creed N1: a denied call keeps its open entry', file: 'src/main/hooks.ts',
+    edits: [["    if (opened && decision === 'deny') {", '    if (false) {']],
+    killer: 'deniedCallLeavesNothingOpen', dies: /N1: A DENIED CALL LEAVES NO TOOL OPEN \(a hang at \+30 reads SILENT at \+45\)/ },
+  { name: 'Creed N1: a Post ends the oldest of its name, not its own call', file: 'src/shared/activityView.ts',
+    edits: [['  let i = id ? l.findIndex((t) => t.id === id) : -1;', '  let i = -1;'],
+      ['  if (i < 0 && name) i = l.findIndex((t) => t.name === name && (!id || !t.id));', '  if (i < 0 && name) i = l.findIndex((t) => t.name === name);']],
+    killer: 'overlappingCallsEndById', dies: /N1: OVERLAPPING SAME-NAME CALLS END BY THEIR OWN ID/ },
+  { name: 'Creed N2: a degraded Pre opens nothing', file: 'src/main/hooks.ts',
+    edits: [["    if (event === 'PreToolUse' && (name || p.payload_degraded === true)) {", "    if (event === 'PreToolUse' && name) {"]],
+    killer: 'degradedPreOpensUnknown', dies: /N2: A DEGRADED PRE OPENS AN UNKNOWN TOOL/ },
+  { name: 'Creed N2: a named Post never closes an unknown entry', file: 'src/shared/activityView.ts',
+    edits: [['  if (i < 0) i = l.findIndex((t) => t.name === UNKNOWN_TOOL);\n', '']],
+    killer: 'degradedPreOpensUnknown', dies: /N2: ITS POST CLOSES IT/ }
 ];
-const MOD_KEY = { [STF]: 'ST', [DGF]: 'D', 'src/main/hive.ts': 'HIVE', 'src/shared/agentBadges.ts': 'B' };
+const MOD_KEY = { [STF]: 'ST', [DGF]: 'D', 'src/main/hive.ts': 'HIVE', 'src/shared/agentBadges.ts': 'B', 'src/main/hooks.ts': 'HOOKS', 'src/shared/activityView.ts': 'A' };
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
   fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
@@ -259,7 +354,7 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
         const mod = mutate(m.file, m.edits, `m${i}`);
-        const real = { ST, D, B, HIVE };
+        const real = { ST, D, B, HIVE, HOOKS, A };
         const mods = { ...real, [MOD_KEY[m.file]]: mod };
         await K[m.killer](real);                       // the killer PASSES on the real modules...
         let died = null;

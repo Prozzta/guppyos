@@ -10,7 +10,7 @@
  *
  * Runs in the Electron main process.
  */
-import { toolEnded, toolStarted, type RunningTool } from '../shared/activityView';
+import { toolEnded, toolStarted, UNKNOWN_TOOL, type RunningTool } from '../shared/activityView';
 import { createServer, type Server } from 'node:net';
 import { createServer as createHttpServer, type Server as HttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -351,13 +351,21 @@ export class HookServer {
     return this.runningTools.get(agentId)?.[0];
   }
 
+  /** FLEET-LIVENESS-BLIND N1 (Creed): the entry this hook's PreToolUse opened, until handle() returns. */
+  private openedTool: { agentId: string; tool: RunningTool } | null = null;
+
   private noteRunningTool(agentId: string, event: string, p: HookPayload): void {
     const name = typeof p.tool_name === 'string' && p.tool_name ? p.tool_name.slice(0, 60) : undefined;
-    if (event === 'PreToolUse' && name) {
-      this.runningTools.set(agentId, toolStarted(this.runningTools.get(agentId), name, Date.now()));
+    const rawId = (p as { tool_use_id?: unknown }).tool_use_id;
+    const id = typeof rawId === 'string' && rawId ? rawId.slice(0, 120) : undefined;
+    // Creed N2: a degraded Codex PreToolUse names no tool, but a tool IS starting.
+    if (event === 'PreToolUse' && (name || p.payload_degraded === true)) {
+      const list = toolStarted(this.runningTools.get(agentId), name ?? UNKNOWN_TOOL, Date.now(), id);
+      this.runningTools.set(agentId, list);
+      this.openedTool = { agentId, tool: list[list.length - 1] };
     } else if (event === 'PostToolUse' || event === 'PostToolUseFailure') {
       // Jim N1: one tool ends; a parallel one may still run.
-      const left = toolEnded(this.runningTools.get(agentId), name);
+      const left = toolEnded(this.runningTools.get(agentId), name, id);
       if (left.length) this.runningTools.set(agentId, left); else this.runningTools.delete(agentId);
     } else if (event === 'UserPromptSubmit' || event === 'SessionStart' || event === 'Stop' || event === 'StopFailure' || event === 'PreCompact') {
       this.runningTools.delete(agentId);
@@ -1901,6 +1909,22 @@ export class HookServer {
   }
 
   private handle(p: HookPayload): unknown {
+    this.openedTool = null;
+    const out = this.handleHook(p);
+    // FLEET-LIVENESS-BLIND N1 (Creed): a PreToolUse this hook DENIES (heavy lock, HITL gate) never
+    // runs and gets no PostToolUse, so the entry it opened would stay open and make a later hang
+    // read as a long tool call (~+89 min) instead of a silent turn (15 min).
+    const opened = this.openedTool as { agentId: string; tool: RunningTool } | null; // set inside handleHook
+    this.openedTool = null;
+    const decision = (out as { hookSpecificOutput?: { permissionDecision?: unknown } } | null)?.hookSpecificOutput?.permissionDecision;
+    if (opened && decision === 'deny') {
+      const left = (this.runningTools.get(opened.agentId) ?? []).filter((t) => t !== opened.tool);
+      if (left.length) this.runningTools.set(opened.agentId, left); else this.runningTools.delete(opened.agentId);
+    }
+    return out;
+  }
+
+  private handleHook(p: HookPayload): unknown {
     const agentId = p.agent_id ?? undefined;
     const event = p.hook_event_name ?? 'Unknown';
     // AGY statusline telemetry is not a hook boundary, and it is handled BEFORE

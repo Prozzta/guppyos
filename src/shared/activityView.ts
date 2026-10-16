@@ -109,18 +109,27 @@ function livenessStatus<S extends string>(status: S, rec: LivenessV1 | null | un
   return status;
 }
 
-/** A tool call in progress: its name and when it started (epoch ms). */
-export interface RunningTool { name: string; since: number }
+/** A tool call in progress: its name, when it started (epoch ms) and, when the hook carries one,
+ *  the call's own id (Claude's tool_use_id). */
+export interface RunningTool { name: string; since: number; id?: string }
+
+/** FLEET-LIVENESS-BLIND N2 (Creed): the name of a call whose degraded Codex PreToolUse named no tool. */
+export const UNKNOWN_TOOL = 'unknown';
 
 /** Jim N1: tools can run in PARALLEL, so an agent has a LIST of tools in progress (oldest first).
- *  A PreToolUse adds one; its PostToolUse removes ONE of that name (the oldest), not all. */
-export function toolStarted(list: readonly RunningTool[] | undefined, name: string, now: number): RunningTool[] {
-  return [...(list ?? []), { name, since: now }];
+ *  A PreToolUse adds one; its PostToolUse removes ONE: the call with its id when both carry one
+ *  (Creed N1: overlapping same-name calls end the right entry), else the oldest of that name, else
+ *  (Creed N2) the oldest unknown one; a Post naming no tool removes the oldest unknown, else the oldest. */
+export function toolStarted(list: readonly RunningTool[] | undefined, name: string, now: number, id?: string): RunningTool[] {
+  return [...(list ?? []), id ? { name, since: now, id } : { name, since: now }];
 }
-export function toolEnded(list: readonly RunningTool[] | undefined, name: string | undefined): RunningTool[] {
+export function toolEnded(list: readonly RunningTool[] | undefined, name: string | undefined, id?: string): RunningTool[] {
   const l = [...(list ?? [])];
-  const i = name ? l.findIndex((t) => t.name === name) : 0;
-  if (i >= 0 && l.length) l.splice(i < 0 ? 0 : i, 1);
+  let i = id ? l.findIndex((t) => t.id === id) : -1;
+  if (i < 0 && name) i = l.findIndex((t) => t.name === name && (!id || !t.id));
+  if (i < 0) i = l.findIndex((t) => t.name === UNKNOWN_TOOL);
+  if (i < 0 && !name) i = 0;
+  if (i >= 0 && l.length) l.splice(i, 1);
   return l;
 }
 

@@ -249,7 +249,7 @@ const MUTANTS = [
     edits: [['    return this.runningTools.get(agentId)?.[0];', '    return this.runningTools.get(agentId)?.at(-1);']],
     killer: 'oldestToolShown', dies: /THE OLDEST TOOL STILL RUNNING IS SHOWN/ },
   { name: 'Jim N1: a PostToolUse clears every running tool', file: 'src/shared/activityView.ts', real: ACT, pick: (m) => m,
-    edits: [["  if (i >= 0 && l.length) l.splice(i < 0 ? 0 : i, 1);\n  return l;", '  return [];']],
+    edits: [["  if (i >= 0 && l.length) l.splice(i, 1);\n  return l;", '  return [];']],
     killer: 'parallelToolsKept', dies: /A PARALLEL TOOL ENDING LEAVES THE OTHER RUNNING/ },
 ];
 
