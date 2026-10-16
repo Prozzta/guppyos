@@ -651,6 +651,11 @@ function launchedWords(args: string[]): string[] {
  *  sajb, and the call operator &. */
 const PS_BLOCK_BIN = /^([a-z]+-[a-z]+|%|foreach|icm|sajb|&)$/;
 
+/** Jim delta SHOULD: the cmdlets whose -FilePath (or -LiteralPath / -PSPath) names a script they
+ *  RUN, and that parameter in any unambiguous prefix PowerShell accepts. */
+const PS_FILE_RUNNERS = new Set(['start-job', 'sajb', 'start-threadjob', 'invoke-command', 'icm']);
+const PS_FILE_PARAM = /^-(f(i(l(e(p(a(t(h)?)?)?)?)?)?)?|li(t(e(r(a(l(p(a(t(h)?)?)?)?)?)?)?)?)?|pspath|lp)$/i;
+
 /** The text inside the first { } of these words (balanced across words), '' for an empty block, or
  *  null when there is no block. */
 function scriptBlock(words: string[]): string | null {
@@ -753,8 +758,23 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   }
   // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): Invoke-Expression / iex run their string argument.
   if (bin === 'invoke-expression' || bin === 'iex') {
-    const code = args.filter((a) => !/^-command$/i.test(a)).join(' ');
+    const words = args.filter((a) => !/^-command$/i.test(a));
+    // Jim delta NIT: computed code (`iex (Get-Content suite.ps1 -Raw)`, `iex $code`) cannot be read,
+    // so it is unknown: heavy, provisional, as an undecodable -EncodedCommand is.
+    // KNOWN GAP (god, conv-f14fb5): `$sb = [scriptblock]::Create('npm test'); & $sb` reads light;
+    // code built at run time is beyond a command-text classifier.
+    if (words.length && /^[($]/.test(words[0])) {
+      return { heavy: true, kind: 'bench', why: `${bin} ${words[0]} (code the lock cannot read)`, provisional: true };
+    }
+    const code = words.join(' ');
     return code ? nested(code, depth, ctx, bin) : { heavy: false };
+  }
+  // Jim delta SHOULD: the script-FILE twin of a script block. `Start-Job -FilePath suite.ps1` and
+  // `Invoke-Command -FilePath suite.ps1` run the file, as `./suite.ps1` does. Only the cmdlets that
+  // run it: Out-File -FilePath writes one.
+  if (PS_FILE_RUNNERS.has(bin)) {
+    const f = args.findIndex((a) => PS_FILE_PARAM.test(a));
+    if (f >= 0 && args[f + 1]) return classifyScript(args[f + 1], depth, ctx);
   }
   // A { } script block runs: PowerShell's `Start-Job { npm test }`, `Invoke-Command -ScriptBlock {...}`,
   // `... | ForEach-Object { npm test }`, `& { ... }`, and sh's group `{ npm test; }`.

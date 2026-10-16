@@ -154,6 +154,19 @@ const ROWS = [
   ['FP Invoke-Expression light', "Invoke-Expression 'Get-Date'", 'light'],        // light
   ['FP time light', 'time git status', 'light'],                                  // light
   ['FP nohup light', 'nohup git fetch &', 'light'],                               // light
+  // Jim delta SHOULD (4b3ed248): a script FILE run by a job cmdlet.
+  ['D Start-Job -FilePath', 'Start-Job -FilePath s.ps1', 'heavy:suite'],          // light
+  ['D Invoke-Command -FilePath', 'Invoke-Command -FilePath s.ps1', 'heavy:suite'], // light
+  ['D icm -fi (a prefix)', 'icm -fi s.ps1', 'heavy:suite'],                       // light
+  ['D Start-ThreadJob -FilePath UTF-16', 'Start-ThreadJob -FilePath s16.ps1', 'heavy:suite'], // light
+  ['D Start-Job -LiteralPath', '$j = Start-Job -LiteralPath ./s.ps1', 'heavy:suite'], // light
+  ['D -FilePath missing', 'Start-Job -FilePath nope.ps1', 'provisional'],         // light
+  ['D control: -FilePath light', 'Start-Job -FilePath l16.ps1', 'light'],         // light
+  ['D control: Out-File -FilePath writes', 'Get-Date | Out-File -FilePath s.ps1', 'light'], // light
+  // Jim delta NIT: computed code for iex is unreadable.
+  ['D iex (Get-Content)', 'iex (Get-Content s.ps1 -Raw)', 'provisional'],         // light
+  ['D Invoke-Expression $code', 'Invoke-Expression $code', 'provisional'],        // light
+  ['D control: iex a string with a variable', 'iex "Write-Host $x"', 'light'],    // light
 ];
 
 test('HEAVY-LOCK-SHAPES-189: every card shape is classified by what it runs (after; before in the comments)', (t) => {
