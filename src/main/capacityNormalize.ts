@@ -351,9 +351,10 @@ export const AGY_QUOTA_KEYS = ['3p-5h', '3p-weekly', 'gemini-5h', 'gemini-weekly
  * agy 1.4.0 added `gemini-argon-wtu-weekly` beside the four (measured 2026-10-16, a
  * live TUI tick). The grammar is the four keys' own grammar with a scope in the middle,
  * so the family and the duration are read from the key, never guessed. Any other key
- * is still drift: `3p-monthly`, a third family, or a bucket nobody can place.
+ * is still drift: `3p-monthly`, a third family, or a bucket nobody can place. A duration
+ * is never a scope segment (`gemini-5h-weekly` would label as "Weekly (5h)").
  */
-const AGY_SCOPED_QUOTA_KEY = /^(3p|gemini)-([a-z0-9]+(?:-[a-z0-9]+)*)-(5h|weekly)$/;
+const AGY_SCOPED_QUOTA_KEY = /^(3p|gemini)-((?!(?:5h|weekly)(?:-|$))[a-z0-9]+(?:-(?!(?:5h|weekly)(?:-|$))[a-z0-9]+)*)-(5h|weekly)$/;
 
 /** At most this many scoped buckets per tick, so a pool stays well under maxWindowsPerPool. */
 export const AGY_MAX_SCOPED_QUOTA_KEYS = 8;

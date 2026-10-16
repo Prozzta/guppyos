@@ -102,20 +102,31 @@ test('still strict: keys outside the grammar, a missing base bucket, too many sc
     ['an uppercase scope', (p) => { p.quota['gemini-Argon-weekly'] = b(); }],
     ['a trailing dash', (p) => { p.quota['gemini-argon--weekly'] = b(); }],
     ['a base bucket missing beside a scoped one', (p) => { delete p.quota['gemini-weekly']; }],
-    ['too many scoped buckets', (p) => {
-      for (let i = 0; i < AGY_MAX_SCOPED_QUOTA_KEYS; i++) p.quota[`gemini-s${i}-weekly`] = b();
-    }]
+    // Jim NIT 1: literal counts, so the cap's VALUE is pinned (a cap of 99 used to pass).
+    ['9 scoped buckets (the real one plus 8)', (p) => {
+      for (let i = 0; i < 8; i++) p.quota[`gemini-s${i}-weekly`] = b();
+    }],
+    // Jim NIT 2: a duration is never a scope ("Weekly (5h)" would be nonsense).
+    ['5h as the scope', (p) => { p.quota['gemini-5h-weekly'] = b(); }],
+    ['weekly as the scope', (p) => { p.quota['gemini-weekly-5h'] = b(); }],
+    ['5h as one scope segment', (p) => { p.quota['3p-argon-5h-weekly'] = b(); }],
+    ['weekly as the first scope segment', (p) => { p.quota['3p-weekly-argon-5h'] = b(); }]
   ];
   for (const [name, fn] of cases) {
     const c = run(idle(fn));
     assert.equal(c.ok, false, `${name}: must refuse`);
     assert.equal(c.driftCode, 'quota-keys', name);
   }
-  // The cap itself is allowed: the real one plus seven more.
+  // The cap itself is allowed: 8 scoped buckets, the real one plus seven more.
+  assert.equal(AGY_MAX_SCOPED_QUOTA_KEYS, 8);
   const atCap = run(idle((p) => {
-    for (let i = 0; i < AGY_MAX_SCOPED_QUOTA_KEYS - 1; i++) p.quota[`gemini-s${i}-weekly`] = b();
+    for (let i = 0; i < 7; i++) p.quota[`gemini-s${i}-weekly`] = b();
   }));
   assert.equal(atCap.ok, true);
+  assert.equal(atCap.tick.observations[1].windows.length, 2 + 8, 'the two Gemini base windows and 8 scoped ones');
+  // A scope that merely CONTAINS a duration's letters is a scope (only whole segments are refused).
+  const near = run(idle((p) => { p.quota['gemini-weekly5h-weekly'] = b(); p.quota['3p-x5h-5h'] = b(); }));
+  assert.equal(near.ok, true);
 });
 
 test('a scoped bucket is checked like the base ones: one fault refuses the whole tick', () => {
