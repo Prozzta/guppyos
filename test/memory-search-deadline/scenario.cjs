@@ -110,14 +110,15 @@ module.exports = async (drill) => {
       const synced = await sync;
       const after = await search();
       const stepRuns = (await runsNow()) - runsBefore;
-      return { ok: true, bf: bf.exit, cold, synced: { ok: synced.ok, json: synced.json, error: synced.error ?? null }, during, after, rows, events, stepRuns };
+      return { ok: true, bf: bf.exit, cold, synced: { ok: synced.ok, json: synced.json, error: synced.error ?? null }, during, after, rows: [...rows], events: [...events], stepRuns };
     }
     if (leg === 'hang') {
       child.send({ host: 'hang' });
       void client.request('claims-sync', syncArgs, 120_000);
       const timedOut = [];
       for (let i = 0; i < 3; i++) { timedOut.push(await search()); await pause(150); }
-      return { ok: true, bf: bf.exit, cold, timedOut, rows, events };
+      // A snapshot: the teardown's worker exit (the claims sync still pending) is not this leg's.
+      return { ok: true, bf: bf.exit, cold, timedOut, rows: [...rows], events: [...events] };
     }
     if (leg === 'queue') {
       const args = { query: 'zeppelin hangar code', wing: 'w2', results: 3, caller: 'w2', mode: 'live' };
@@ -138,6 +139,11 @@ module.exports = async (drill) => {
     }
     return { ok: false, reason: `unknown leg ${leg}` };
   } finally {
-    child.kill();
+    // Wait for the worker to be gone (bounded): on Windows its open db file blocks the jail's removal.
+    if (child.exitCode === null && child.signalCode === null) {
+      const gone = new Promise((r) => child.once('exit', r));
+      child.kill();
+      await Promise.race([gone, pause(5_000)]);
+    }
   }
 };
