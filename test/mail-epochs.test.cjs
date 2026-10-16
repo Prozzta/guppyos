@@ -496,7 +496,7 @@ test('§1.1 / §11.4 last backstop: an epoch open 30 min with no Stop closes as 
 
 // ————————————————————————————————————————————————— degradation (§11.10)
 
-test('§11.10: 3 COMMITTED wakes with zero hook traffic from the agent: legacy-read, mail-channel-degraded, a UI alert', async (t) => {
+test('§11.10: 3 COMMITTED wakes whose confirm windows end with zero hook traffic from the agent: legacy-read, mail-channel-degraded, a UI alert', async (t) => {
   const w = await world(t, { providers: { 'cl-1': 'claude' } });
   w.fire('cl-1', 'Stop');
   w.send('cl-1', { subject: 'w1' });
@@ -509,6 +509,12 @@ test('§11.10: 3 COMMITTED wakes with zero hook traffic from the agent: legacy-r
     await w.flush();
     assert.equal(w.reqs.length, k, `wake ${k}`);
   }
+  // MAIL-CHANNEL-STUCK-DEGRADED: a wake counts when its confirm window ends with no hook, not
+  // when it is typed: the third wake is judged at the next beat.
+  assert.equal(w.hive.mail.channelOverride('cl-1'), null, 'not at the commit of the third wake');
+  w.now += SUBMIT_CONFIRM_MS + 1_000;
+  w.bridge.reconcileAll(['cl-1']);
+  await w.flush();
   assert.deepEqual(w.hive.mail.channelOverride('cl-1')?.mode, 'legacy-read');
   const row = w.rows('mail-channel-degraded')[0];
   assert.deepEqual({ agentId: row.agentId, reason: row.reason, wakes: row.wakes }, { agentId: 'cl-1', reason: 'zero-hook-traffic', wakes: MAIL_DEGRADE_AFTER_WAKES });

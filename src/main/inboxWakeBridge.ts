@@ -49,6 +49,10 @@ export interface InboxWakeMail {
   openIds?(agentId: string): string[];
   /** §11.10: switch to legacy-read, log `mail-channel-degraded`, raise the UI alert. */
   degrade(agentId: string, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): boolean;
+  /** MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): a lifecycle hook from the agent proves its hook channel
+   *  works: undo a zero-hook-traffic degrade (clear the override, log `mail-channel-restored`, drop
+   *  the alert). True when one was undone. Optional: absent, a degrade lasts (as before). */
+  restore?(agentId: string, proof: 'hook', detail: Record<string, unknown>): boolean;
   /** One durable hive log row (main: hive.appendLog). Optional: absent, nothing is logged. */
   log?(row: Record<string, unknown>): void;
   /** READS-QUIET-NOREPLY (1.1.81): of these pending ids, the quiet ones that may still wait at
@@ -59,8 +63,13 @@ export interface InboxWakeMail {
 
 /** §11.10: per agent, the wake-by-wake evidence that the mail channel works. */
 interface DegradeWatch {
-  /** COMMITTED wakes since the last hook traffic from the agent (trigger B). */
+  /** Wakes since the last hook traffic from the agent whose confirm window ended with no hook at
+   *  all (trigger B). MAIL-CHANNEL-STUCK-DEGRADED: counted when that window ends, not when the wake
+   *  is typed, so a wake that turns out to bring hooks never counts. */
   quiet: number;
+  /** When the COMMITTED wake trigger B has yet to judge was settled (0 = none): any hook clears it;
+   *  the beat's submit-unconfirmed, wake-ids-exhausted or deferred-idle edge counts it. */
+  unjudged: number;
   /** Consecutive confirmed wake turns that returned no mail block while their ids waited (A). */
   streak: number;
   /** The wake whose turn is being watched. */
@@ -167,6 +176,11 @@ export class InboxWakeBridge {
       return null;
     }
     this.deps.diag?.('claim', { agentId, cause, mode, ids: claim.ids.length, requestId: claim.requestId });
+    // MAIL-CHANNEL-STUCK-DEGRADED: hook traffic since the degrade restores the channel HERE, at a
+    // claim (the agent is between turns), so this wake's text and its turn are injection again and
+    // no turn is switched halfway (its legacy-named mail closes as legacy at its own Stop).
+    const proof = this.hookProof.get(agentId);
+    if (proof !== undefined) { this.hookProof.delete(agentId); this.restoreOnHook(agentId, proof); }
     if (claim.quietReleased) {
       this.deps.diag?.('hold-released', { agentId, reason: claim.quietReleased.reason, ids: claim.quietReleased.ids.length, idList: claim.quietReleased.ids, requestId: claim.requestId });
     }
@@ -236,7 +250,11 @@ export class InboxWakeBridge {
   /** HookServer observation (before its response): record lifecycle, retry after the turn. */
   onHook(agentId: string | undefined, event: string | undefined, message: string | undefined, fullyIdle?: boolean, turnId?: string, source?: string): void {
     // §11.10 trigger B: any hook from the agent is hook traffic (the status line is not a hook).
-    if (agentId && event && event !== 'Status') { const w = this.degradeWatch.get(agentId); if (w) w.quiet = 0; }
+    if (agentId && event && event !== 'Status') {
+      const w = this.degradeWatch.get(agentId);
+      if (w) { w.quiet = 0; w.unjudged = 0; }
+      this.hookProof.set(agentId, event);
+    }
     const edge = this.deps.coordinator.noteHook(agentId, event, message, this.deps.now(), fullyIdle, turnId);
     // §11.10 trigger A: the Stop ends the watched wake's turn.
     if (agentId && event === 'Stop' && fullyIdle !== false) this.endMailWatch(agentId);
@@ -333,19 +351,22 @@ export class InboxWakeBridge {
     // and however late its response flushed (late is N1's business, never the degrade's), proves
     // the channel reaches the agent: the no-mail-block streak starts over.
     let w = this.degradeWatch.get(agentId);
-    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
+    if (!w) { w = { quiet: 0, unjudged: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
     w.lastBlockAt = this.deps.now();
     w.streak = 0;
     if (w.open) w.open.blocks += 1;
   }
 
   private readonly degradeWatch = new Map<string, DegradeWatch>();
+  /** MAIL-CHANNEL-STUCK-DEGRADED: agents with hook traffic (the last such event) since their last
+   *  claim or degrade: the proof a zero-hook-traffic degrade is undone with at the next claim. */
+  private readonly hookProof = new Map<string, string>();
 
   private degradeFor(agentId: string): DegradeWatch | null {
     const mail = this.deps.mail;
     if (!mail) return null;
     let w = this.degradeWatch.get(agentId);
-    if (!w) { w = { quiet: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
+    if (!w) { w = { quiet: 0, unjudged: 0, streak: 0, open: null, degraded: false, lastBlockAt: 0 }; this.degradeWatch.set(agentId, w); }
     if (w.degraded) return null;
     let mode = '';
     try { mode = mail.mode(agentId); } catch { mode = ''; }
@@ -369,20 +390,60 @@ export class InboxWakeBridge {
     if (w.streak >= MAIL_DEGRADE_AFTER_WAKES) this.degrade(agentId, w, 'no-mail-block', { wakes: w.streak });
   }
 
-  /** §11.10: a wake COMMITTED for this agent. Trigger B counts it; trigger A starts watching it. */
+  /** §11.10: a wake COMMITTED for this agent. Trigger B waits to judge it; trigger A starts watching it. */
   private noteMailCommit(agentId: string, claim: WakeClaim): void {
     const w = this.degradeFor(agentId);
     if (!w) return;
+    // Jim S1: trigger B first. A wake with no hook at all had no mail block either; zero hook
+    // traffic is the narrower diagnosis (and the one whose archive needs no Stop, index.ts noStop).
+    if (w.unjudged) this.judgeWake(agentId, 'next-commit');
     this.endMailWatch(agentId);
     if (w.degraded) return;
-    w.quiet += 1;
+    // MAIL-CHANNEL-STUCK-DEGRADED: not counted here. Jim's 2026-10-02 degrade counted its third
+    // wake at the moment it was typed, 40 ms before that wake's own hooks arrived. A wake is
+    // judged by what follows it: a hook clears it (onHook), a confirm window that ends with no
+    // hook counts it (judgeWake). Jim S1: so does the NEXT commit, when the previous wake is still
+    // unjudged (judged first, above): its turn ended off the beat (a provider status idle closes it in the coordinator)
+    // and no hook came since, or onHook would have cleared it.
+    w.unjudged = this.deps.now();
     w.open = { claimedAt: this.deps.coordinator.turnFacts(agentId).claimedAt, ids: claim.ids, blocks: 0 };
-    if (w.quiet >= MAIL_DEGRADE_AFTER_WAKES) this.degrade(agentId, w, 'zero-hook-traffic', { wakes: w.quiet });
+  }
+
+  /** §11.10 trigger B: the beat ended the unjudged wake's turn with no hook from the agent (its
+   *  start was never confirmed, or the provider's own status went idle first): it counts. */
+  private judgeWake(agentId: string, edge: string): void {
+    const w = this.degradeWatch.get(agentId);
+    if (!w || !w.unjudged) return;
+    const committedAt = w.unjudged;
+    w.unjudged = 0;
+    if (this.degradeFor(agentId) !== w) return;
+    w.quiet += 1;
+    if (w.quiet >= MAIL_DEGRADE_AFTER_WAKES) this.degrade(agentId, w, 'zero-hook-traffic', { wakes: w.quiet, edge, committedAt });
+  }
+
+  /**
+   * MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): a hook from a degraded agent is the proof the degrade
+   * lacked (applied at the next claim, see requestInboxWake). Before, nothing ever undid one: the override is persisted, and degradeFor() stops
+   * watching any agent that is not in inject mode. The ledger undoes only a zero-hook-traffic
+   * degrade (a hook says nothing about mail blocks); the watch starts over, so a channel that
+   * really fails degrades again after 3 more wakes with no hook.
+   */
+  private restoreOnHook(agentId: string, event: string): void {
+    const mail = this.deps.mail;
+    if (!mail?.restore) return;
+    let restored = false;
+    try { restored = mail.restore(agentId, 'hook', { event }); } catch { restored = false; }
+    if (!restored) return;
+    const w = this.degradeWatch.get(agentId);
+    if (w) { w.degraded = false; w.quiet = 0; w.unjudged = 0; w.streak = 0; w.open = null; }
+    this.deps.diag?.('mail-channel-restored', { agentId, proof: 'hook', event });
   }
 
   private degrade(agentId: string, w: DegradeWatch, reason: 'no-mail-block' | 'zero-hook-traffic', detail: Record<string, unknown>): void {
     w.degraded = true;
     w.open = null;
+    w.unjudged = 0;
+    this.hookProof.delete(agentId);   // only traffic AFTER the degrade proves the channel back
     let changed = false;
     try { changed = this.deps.mail?.degrade(agentId, reason, detail) ?? false; } catch { changed = false; }
     this.deps.diag?.('mail-channel-degraded', { agentId, reason, changed, ...detail });
@@ -568,6 +629,7 @@ export class InboxWakeBridge {
           // §1.1: submit-unconfirmed ends the carrying wake's epoch abnormally.
           try { this.deps.mail?.abortSince(agentId, claimedAt); } catch { /* best effort */ }
         }
+        if (edge && (edge.kind === 'submit-unconfirmed' || edge.kind === 'wake-ids-exhausted' || edge.kind === 'deferred-idle')) this.judgeWake(agentId, edge.kind);
         try { this.closeStaleMail(agentId); } catch { /* best effort */ }
         if (edge) {
           this.deps.diag?.(edge.kind, {

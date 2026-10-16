@@ -197,6 +197,9 @@ export interface MailChannelOverride {
   mode: 'legacy-read';
   reason: string;
   since: number;
+  /** MAIL-CHANNEL-STUCK-DEGRADED: when a spawn first carried it to a session whose wake cannot
+   *  carry it (Codex: the fixed sentinel). That spawn applies it; the next one restores. */
+  applied?: number;
 }
 
 export interface MailEvent {
@@ -699,7 +702,7 @@ export function applyPrune(doc: MailLedgerDoc, now: number, retentionMs = MAIL_A
  *  logs the reason, e.g. `mail-channel-degraded`). A harness change: not activity. */
 export function applyChannelOverride(doc: MailLedgerDoc, override: MailChannelOverride | null): MailStep {
   const cur = doc.channel ?? null;
-  if ((cur === null && override === null) || (cur && override && cur.mode === override.mode && cur.reason === override.reason)) return unchanged(doc);
+  if ((cur === null && override === null) || (cur && override && cur.mode === override.mode && cur.reason === override.reason && cur.applied === override.applied)) return unchanged(doc);
   const next: MailLedgerDoc = { ...doc, channel: override };
   // `changed` names no entry; a sentinel keeps the shell's "anything changed?" test honest.
   return { doc: next, changed: ['#channel'], logs: [], events: [], archive: [] };
@@ -1377,6 +1380,33 @@ export class MailLedger {
       file: `state/mail/${agentId}.json`, quarantine: null, error: 'mail-channel-degraded',
       notice: `Mail for ${agentId} is no longer reaching it through its hooks (${reason === 'zero-hook-traffic' ? 'no hook traffic across 3 wakes' : '3 wakes started a turn with no mail block'}); it now reads its inbox files instead (legacy-read)${opts.respawnToRestore ? `, but its running session keeps its old instructions: respawn to restore mail delivery` : ''}. Check the agent's hook setup (see mail-channel-degraded in the log).`
     });
+    return true;
+  }
+
+  /**
+   * MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): undo `degradeChannel`. The override is persisted, so
+   * before this a degrade outlived every restart and respawn. `proof` is what shows the channel
+   * works again:
+   *  - `hook`: a lifecycle hook from the agent. It proves hook traffic, not mail blocks, so it
+   *    undoes a zero-hook-traffic degrade only;
+   *  - `respawn`: a new session, spawned with the provider's own channel, for either reason. With
+   *    `applyFirst` (Codex: its running session is never told of a degrade, so the spawn its alert
+   *    asks for is what APPLIES it, §11.18 #42), the first spawn after the degrade keeps it and
+   *    marks it applied, and the next one restores.
+   * Clears the override, logs `mail-channel-restored` and drops the alert. True when it cleared one.
+   */
+  restoreChannel(agentId: string, proof: 'hook' | 'respawn', detail: Record<string, unknown> = {}, opts: { applyFirst?: boolean } = {}): boolean {
+    if (!this.hasAgent(agentId)) return false;
+    const cur = this.channelOverride(agentId);
+    if (!cur) return false;
+    if (proof === 'hook' && cur.reason !== 'zero-hook-traffic') return false;
+    if (proof === 'respawn' && opts.applyFirst && !cur.applied) {
+      this.setChannelOverride(agentId, { ...cur, applied: this.now() });
+      return false;
+    }
+    if (!this.setChannelOverride(agentId, null)) return false;
+    this.notices.delete(`${agentId}|degraded`);
+    this.log({ kind: 'mail-channel-restored', agentId, proof, reason: cur.reason, degradedSince: cur.since, degradedMs: this.now() - cur.since, ...detail });
     return true;
   }
 
