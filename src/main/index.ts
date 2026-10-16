@@ -83,7 +83,7 @@ import { ScreenGuardNotices, StartupProbe, WakeIncarnationTokens, WAKE_INCARNATI
 import type { ScreenGuardRecord } from './automaticSubmit';
 import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
-import { applyGraphicsModeAtStartup, appliedGraphicsMode, graphicsStatus } from './graphics';
+import { applyGraphicsModeAtStartup, appliedGraphicsMode, graphicsStatus, logGraphicsWhenKnown, watchGpuReports } from './graphics';
 import type { GraphicsStatusView } from '../shared/graphicsMode';
 import { createBootSubmitRowGate } from './bootSubmitLog';
 import {
@@ -310,6 +310,9 @@ if (!DEV_ISOLATION && !memorySmokeOut && !memoryBenchDir) {
 // its config.json) and before app ready (disableHardwareAcceleration does nothing later). A missing or
 // corrupt config.json is Auto. CPU only disables hardware acceleration for this whole run.
 const graphicsAtStartup = applyGraphicsModeAtStartup(app);
+// GPU-COMPOSITING-INSTALLED-189: note the GPU process's first report (before ready, so none is missed);
+// the startup 'graphics' row waits for it, since the status reads software until then.
+watchGpuReports(app);
 
 // RENDERER-RECOVERY-164 (the Human's final scope): LOCAL crash dumps, started as early as the
 // userData/crashDumps paths are final (just above). uploadToServer:false, no submit URL: a
@@ -7395,11 +7398,10 @@ function bootstrapHiveServices(): void {
     electron: process.versions.electron,
     platform: process.platform
   });
-  // GPU-SETTING-188: the Graphics mode this run started with, and what Chromium made of it.
-  try {
-    const gpu = graphicsStatus(null, app.getGPUFeatureStatus() as unknown as Record<string, string>);
-    hive.appendLog({ kind: 'graphics', mode: graphicsAtStartup.mode, applied: graphicsAtStartup.applied, hardwareCompositing: gpu.hardwareCompositing });
-  } catch { /* the log is best-effort */ }
+  // GPU-SETTING-188: the Graphics mode this run started with, and what Chromium made of it, written
+  // once Chromium knows (GPU-COMPOSITING-INSTALLED-189: at ready it still reads software in every mode).
+  // One row per bootstrap, like app-start: the data-move recovery re-bootstraps and writes a second.
+  logGraphicsWhenKnown(app, graphicsAtStartup, (row) => hive.appendLog(row));
   // REBRAND-GUPPY: which data folder this run uses, and whether it was copied just now.
   if (userDataMigration && userDataMigration.status !== 'already') {
     const m = userDataMigration;
