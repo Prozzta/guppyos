@@ -37,6 +37,8 @@ export interface ClaimsEndpointDeps {
   noteCandidates?: (agentId: string, text: string, o?: { key?: string }) => Promise<CandidateResult>;
   /** Re-read verified derived state immediately before append; only same-owner live ids pass. */
   validateSupersedes?: (agentId: string, ids: string[]) => boolean;
+  /** S3: the agent's own LIVE claims with this key, newest first (verified state). */
+  liveByKey?: (agentId: string, key: string) => string[];
   /** Choice-only diagnostics. Never pass note/reason text to this callback. */
   onNoteChoice?: (agentId: string, choice: NoteChoice, ids: string[], detail?: NoteChoiceDetail) => void;
 }
@@ -60,6 +62,10 @@ export interface NoteChoiceDetail {
   inOffer?: number;
   /** replace: a named id is a same-key candidate. */
   sameKeyChosen?: boolean;
+  /** offered: --separate named only ids outside this call's offer, so it was sent back to the offer (S2). */
+  offOfferSeparate?: true;
+  /** offered (ledger route): a card.* note met a live same-key claim and was refused until it chooses (S3). */
+  cardKeyRefused?: true;
   /** offered: a bare --separate was sent back to the offer. */
   bareSeparate?: boolean;
 }
@@ -86,6 +92,25 @@ function parseRefs(v: unknown): Ref[] | string {
     else return 'bad ref';
   }
   return out;
+}
+
+/**
+ * CL-M4-FORWARD-PATH S3 (god's call, option a): the `ledger` command's memory part cannot show an
+ * offer, so a note keyed `card.*` is refused while a live own claim has that key, unless it says
+ * what it does to it (supersedes, or separate ids). The text names the ids and the exact fields to
+ * add. Null when the note may be written. Nothing is ever superseded here.
+ */
+export function cardKeyRefusal(d: Pick<ClaimsEndpointDeps, 'liveByKey'>, agentId: string, args: Record<string, unknown>): { text: string; ids: string[] } | null {
+  const key = args.key;
+  if (typeof key !== 'string' || !key.startsWith('card.')) return null;
+  if (args.supersedes !== undefined || (args.separate !== undefined && args.separate !== true)) return null;
+  const live = d.liveByKey?.(agentId, key) ?? [];
+  if (!live.length) return null;
+  const list = live.slice(0, 5);
+  return {
+    ids: list,
+    text: `your live claim${list.length > 1 ? 's' : ''} ${list.join(', ')} already ${list.length > 1 ? 'have' : 'has'} key ${key}. Say what this note does to ${list.length > 1 ? 'them' : 'it'}, then send the op again: add "supersedes": ["${list[0]}"], "reason": "changed" (or "corrected" / "moved") to the memory part when it replaces ${list.length > 1 ? 'one' : 'it'}; add "separate": ["${list.join('", "')}"] when both stay true. Nothing was written`,
+  };
 }
 
 export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, body: unknown, origin: Extract<AppendOrigin, 'endpoint' | 'ledger-route'>): Promise<ClaimReply> {
@@ -153,6 +178,13 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
     if (args.reasonText !== undefined && args.reason === undefined) return usage('--reason-text requires --reason');
     if (args.key !== undefined && typeof args.key !== 'string') return usage('--key is text');
     const key = args.key as string | undefined;
+    if (origin === 'ledger-route') {
+      const refused = cardKeyRefusal(d, agentId, args);
+      if (refused) {
+        d.onNoteChoice?.(agentId, 'offered', refused.ids, { origin, shown: refused.ids.length, sameKey: refused.ids.length, sameCard: 0, keyed: true, cardKeyRefused: true });
+        return usage(refused.text);
+      }
+    }
     if (args.cancel === true) {
       d.onNoteChoice?.(agentId, 'cancel', [], { origin, shown: 0, sameKey: 0, sameCard: 0, keyed: key !== undefined });
       return { ok: true, exit: EXIT.ok, text: 'cancelled; no claim was written\n', json: { choice: 'cancel' } };
@@ -177,12 +209,16 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       origin, shown: candidates.length, sameKey: candidates.filter((c) => c.why === 'same key').length,
       sameCard: candidates.filter((c) => c.why === 'same card').length, keyed: key !== undefined, ...extra,
     });
-    if (!sup && choices && candidates.length && !apart) {
-      d.onNoteChoice?.(agentId, 'offered', candidates.map(c => c.id), detail(separate ? { bareSeparate: true } : {}));
+    // S2 (Jim): the ids kept apart are checked first (own and live, as a replace target would be);
+    // then, if none of them is in this call's offer, the offer comes back instead of a write.
+    if (apart && !d.validateSupersedes?.(agentId, apart)) return usage('--separate must name only your own currently live claims; refresh candidates and choose again');
+    const offOffer = !!apart && !apart.some((x) => offerIds.has(x));
+    if (!sup && choices && candidates.length && (!apart || offOffer)) {
+      d.onNoteChoice?.(agentId, 'offered', candidates.map(c => c.id), detail(apart ? { offOfferSeparate: true } : separate ? { bareSeparate: true } : {}));
       const line = (c: CandidateResult['candidates'][number]): string => `  ${c.id}  ${c.date}  ${c.why ? `[${c.why}] ` : ''}${c.title} — ${c.excerpt}`;
       return {
         ok: true, exit: EXIT.ok,
-        text: `${separate ? 'A bare --separate does not skip this offer: name the claims you keep apart, --separate ID[,ID].\n' : ''}Possible related claims (ranking: ${choices.ranking}). Update habit: when a fact changed, corrected, or moved, replace its prior claim with --supersedes ID --reason changed|corrected|moved; choose --separate ID[,ID] (the listed claims that stay true beside the new one) only when both claims remain true, or --cancel. A [same key] claim is listed first: it is usually the one to replace, but nothing is replaced unless you choose it. --supersedes may name any live claim in your own ledger, including one not listed here. For another agent's fact, link/reference the owner's claim; do not copy it.\n${candidates.map(line).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map(line).join('\n')}` : ''}\n`,
+        text: `${apart ? 'None of the ids after --separate is in this offer: choose from it (--separate ID[,ID] names listed claims that stay true).\n' : separate ? 'A bare --separate does not skip this offer: name the claims you keep apart, --separate ID[,ID].\n' : ''}Possible related claims (ranking: ${choices.ranking}). Update habit: when a fact changed, corrected, or moved, replace its prior claim with --supersedes ID --reason changed|corrected|moved; choose --separate ID[,ID] (the listed claims that stay true beside the new one) only when both claims remain true, or --cancel. A [same key] claim is listed first: it is usually the one to replace, but nothing is replaced unless you choose it. --supersedes may name any live claim in your own ledger, including one not listed here. For another agent's fact, link/reference the owner's claim; do not copy it.\n${candidates.map(line).join('\n')}${references.length ? `\nReference only (cannot replace):\n${references.map(line).join('\n')}` : ''}\n`,
         json: { choice: 'choose', candidates, references, ranking: choices.ranking }
       };
     }
@@ -191,8 +227,6 @@ export async function handleClaimVerb(d: ClaimsEndpointDeps, agentId: string, bo
       const sameKeyIds = new Set(candidates.filter((c) => c.why === 'same key').map((c) => c.id));
       d.onNoteChoice?.(agentId, 'replace', sup, detail({ inOffer: sup.filter((x) => offerIds.has(x)).length, sameKeyChosen: sup.some((x) => sameKeyIds.has(x)) }));
     } else if (apart) {
-      // The ids kept apart are claims that stay true: own and live, as a replace target would be.
-      if (!d.validateSupersedes?.(agentId, apart)) return usage('--separate must name only your own currently live claims; refresh candidates and choose again');
       d.onNoteChoice?.(agentId, 'separate', apart, detail({ inOffer: apart.filter((x) => offerIds.has(x)).length }));
     } else if (choices && !candidates.length) d.onNoteChoice?.(agentId, 'new', [], detail());
     else if (!choices && origin === 'ledger-route') d.onNoteChoice?.(agentId, 'unoffered', [], detail());

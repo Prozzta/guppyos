@@ -133,6 +133,7 @@ function wire(store, rows, scoreFn) {
     noteCandidates: (agentId, text, o = {}) => C.collectNoteCandidates(C.ledgerCandidateDeps({ ledger: view, score }), agentId, text, new Date(T0 + H), o.key !== undefined ? { key: o.key } : {}),
     validateSupersedes: (agentId, ids) => { const v = view(agentId); return !!v && ids.length > 0 && new Set(ids).size === ids.length && ids.every((x) => v.claims.some((c) => c.id === x) && v.status(x) === 'live'); },
     onNoteChoice: (agentId, choice, ids, detail) => rows.push({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) }),
+    liveByKey: (agentId, key) => { const v = view(agentId); return v ? v.claims.filter((c) => c.key === key && v.status(c.id) === 'live').sort((x, y) => Date.parse(y.wt) - Date.parse(x.wt)).map((c) => c.id) : []; },
     view,
   };
 }
@@ -262,4 +263,173 @@ test('registry: card.<id> keys are multi (no rule supersede), never refused as n
   assert.deepEqual([st.claims['c-000000000001'].status, st.claims['c-000000000002'].status], ['live', 'live']);
   const single = derive(recsIn.map((r) => ({ ...r, key: 'release.current' })), reg, { r4: false });
   assert.equal(single.claims['c-000000000001'].status, 'superseded', 'control: a single key does supersede by rule');
+});
+
+// ---------------------------------------------------------------- Jim's audit of bbdcfd9c: S1-S3, nits 1, 2, 5
+
+test('S1: only a bounded set gets a vector (BM25 top, newest, same key / card); a cold 1,390-claim ledger embeds about 100 texts', async () => {
+  const pool = Array.from({ length: 1390 }, (_, i) => claim(i + 1, { text: `zebra invented note ${i + 1}` }));
+  const lexical = pool.map((c) => c.id).reverse();   // BM25 likes the oldest best here
+  const focus = new Set([id(700), id(9999)]);
+  const vp = C.vectorPool(pool, lexical, focus);
+  const ids = new Set(vp.map((c) => c.id));
+  assert.equal(vp.length, C.VECTOR_LEXICAL + C.VECTOR_RECENT + 1);
+  for (const x of lexical.slice(0, C.VECTOR_LEXICAL)) assert.ok(ids.has(x), 'the BM25 top');
+  for (let n = 1; n <= C.VECTOR_RECENT; n++) assert.ok(ids.has(id(n)), 'the newest');
+  assert.ok(ids.has(id(700)), 'a focus claim'); assert.ok(!ids.has(id(9999)), 'a focus id outside the pool is ignored');
+  assert.deepEqual(vp.map((c) => c.id), pool.filter((c) => ids.has(c.id)).map((c) => c.id), 'pool order kept');
+  // The live scorer: the cold first note embeds the query plus that set, not the ledger.
+  const sizes = [];
+  const s = C.makeLocalScorer(async (texts) => { sizes.push(texts.length); return texts.map((t) => [t.length % 7, 1]); });
+  const out = await s('zebra moved', pool, focus);
+  assert.equal(sizes.length, 1); assert.equal(sizes[0], 1 + out.vector.length, 'the query plus the vector set, once');
+  assert.ok(out.vector.length >= C.VECTOR_LEXICAL && out.vector.length <= C.VECTOR_LEXICAL + C.VECTOR_RECENT + 1, String(out.vector.length));
+  assert.equal(out.lexical.length, 1390, 'BM25 still ranks the whole pool');
+  assert.deepEqual(new Set(out.vector), new Set(C.vectorPool(pool, out.lexical, focus).map((c) => c.id)));
+  // collect hands the scorer the note's own same-key and same-card claims as focus.
+  let seen = null;
+  const own = [claim(1, { key: 'card.x-y' }), claim(2, { text: 'X-Y-189 done' }), claim(3), claim(4, { owner: 'b9', key: 'card.x-y' })];
+  await C.collectNoteCandidates({ ownClaims: () => own, resolve: () => [], score: (q, p, f) => { seen = f; return { lexical: [], vector: [] }; } }, 'a1', 'X-Y moved', new Date(T0), { key: 'card.x-y' });
+  assert.deepEqual([...seen].sort(), [id(1), id(2)]);
+});
+
+test('nit 1: the vector cache evicts oldest-inserted first, never below the current set', async () => {
+  const calls = [];
+  const s = C.makeLocalScorer(async (texts) => { calls.push(texts.slice(1)); return texts.map(() => [1, 0]); }, undefined, 2);
+  await s('q', [claim(1)]); await s('q', [claim(2)]); await s('q', [claim(3)]);   // cache: 2, 3 (1 evicted)
+  await s('q', [claim(2)]); await s('q', [claim(1)]);
+  assert.deepEqual(calls, [['invented note 1'], ['invented note 2'], ['invented note 3'], [], ['invented note 1']]);
+  // A set larger than the cap is kept whole for that call.
+  calls.length = 0;
+  const big = [claim(5), claim(6), claim(7)];
+  await s('q', big); await s('q', big);
+  assert.deepEqual(calls, [['invented note 5', 'invented note 6', 'invented note 7'], []]);
+});
+
+test('S2 + nit 2: --separate is validated first; naming no listed claim brings the offer back; inOffer counts only listed ids', async () => {
+  const store = mkStore();
+  const rows = [];
+  const d = wire(store, rows);
+  const outside = await ok(store.appendRecord('andy', { t: 'claim', kind: 'fact', text: 'zzz unrelated old fact' }, 'endpoint'));
+  for (let i = 0; i < 6; i++) await ok(store.appendRecord('andy', { t: 'claim', kind: 'fact', text: `the cache fact ${i}` }, 'endpoint'));
+  const jims = await ok(store.appendRecord('jim', { t: 'claim', kind: 'fact', text: 'the cache fact jim' }, 'endpoint'));
+  const before = recs(store).length;
+  let r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the cache moved' } }, 'endpoint');
+  const offer = r.json.candidates.map((c) => c.id);
+  assert.equal(offer.length, 5); assert.ok(!offer.includes(outside), 'the unrelated claim is outside the offer');
+  // An own live id outside the offer: the offer comes back, nothing written.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the cache moved', separate: outside } }, 'endpoint');
+  assert.equal(r.json.choice, 'choose');
+  assert.match(r.text, /^None of the ids after --separate is in this offer: choose from it/);
+  assert.equal(recs(store).length, before);
+  assert.equal(rows.at(-1).choice, 'offered'); assert.equal(rows.at(-1).offOfferSeparate, true); assert.equal(rows.at(-1).bareSeparate, undefined);
+  // Validation comes first: another agent's id is refused (exit 2), not answered with the offer.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the cache moved', separate: jims } }, 'endpoint');
+  assert.equal(r.exit, 2); assert.match(r.error, /--separate must name only your own currently live claims/);
+  // One listed id with one unlisted: written; inOffer is 1, not 2.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the cache moved', separate: `${offer[0]},${outside}` } }, 'endpoint');
+  assert.equal(r.ok, true); assert.equal(r.json.choice, 'separate');
+  assert.equal(rows.at(-1).choice, 'separate'); assert.equal(rows.at(-1).inOffer, 1);
+  assert.equal(d.view('andy').status(outside), 'live'); assert.equal(d.view('andy').status(offer[0]), 'live');
+  // With nothing to offer, an own live id is written as before (the ledger route: no offer at all).
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'via the ledger', separate: outside } }, 'ledger-route');
+  assert.equal(r.ok, true);
+});
+
+test('S3 (option a): a card.* note on the ledger route meeting a live same-key claim is refused until it chooses', async () => {
+  const store = mkStore();
+  const rows = [];
+  const d = wire(store, rows);
+  const old = await ok(store.appendRecord('andy', { t: 'claim', kind: 'fact', key: 'card.rel-189', text: 'the release ships Friday' }, 'endpoint'));
+  const before = recs(store).length;
+  let r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the release ships Monday', key: 'card.rel-189' } }, 'ledger-route');
+  assert.equal(r.ok, false); assert.equal(r.exit, 2);
+  assert.equal(r.error, `your live claim ${old} already has key card.rel-189. Say what this note does to it, then send the op again: add "supersedes": ["${old}"], "reason": "changed" (or "corrected" / "moved") to the memory part when it replaces it; add "separate": ["${old}"] when both stay true. Nothing was written`);
+  assert.equal(recs(store).length, before);
+  assert.deepEqual(rows.at(-1), { kind: 'claims-note-choice', agentId: 'andy', choice: 'offered', targets: [old], origin: 'ledger-route', shown: 1, sameKey: 1, sameCard: 0, keyed: true, cardKeyRefused: true });
+  // A bare separate does not count as a choice.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'x', key: 'card.rel-189', separate: true } }, 'ledger-route');
+  assert.equal(r.exit, 2);
+  // Other keys: written as before (unoffered).
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'a list fact', key: 'list.rel' } }, 'ledger-route');
+  assert.equal(r.ok, true);
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'a second list fact', key: 'list.rel' } }, 'ledger-route');
+  assert.equal(r.ok, true, 'a live same-key claim under another namespace does not refuse');
+  // Separate: written, the old one stays live.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'release notes are drafted', key: 'card.rel-189', separate: [old] } }, 'ledger-route');
+  assert.equal(r.ok, true); assert.equal(d.view('andy').status(old), 'live');
+  const kept = r.json.id;
+  // Two live: both named, newest first.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'y', key: 'card.rel-189' } }, 'ledger-route');
+  assert.match(r.error, new RegExp(`^your live claims ${kept}, ${old} already have key card\\.rel-189\\..*"separate": \\["${kept}", "${old}"\\]`));
+  // Supersedes: written, the old one superseded by this choice only.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the release ships Monday', key: 'card.rel-189', supersedes: [old], reason: 'changed' } }, 'ledger-route');
+  assert.equal(r.ok, true); assert.equal(d.view('andy').status(old), 'superseded'); assert.equal(d.view('andy').status(kept), 'live');
+  // The CLI (endpoint) path is unchanged: it offers, it does not refuse.
+  r = await handleClaimVerb(d, 'andy', { cmd: 'note', args: { text: 'the release ships Tuesday', key: 'card.rel-189' } }, 'endpoint');
+  assert.equal(r.ok, true); assert.equal(r.json.choice, 'choose');
+});
+
+test('S3 through the ledger command: refused before anything is written; key / supersedes / separate reach the claim', async () => {
+  const L = loadTs(path.join(ROOT, 'src/main/ledger.ts'));
+  const { cardKeyRefusal } = loadTs(path.join(ROOT, 'src/main/claims/endpoint.ts'));
+  const store = mkStore();
+  const rows = [];
+  const d = wire(store, rows);
+  const agentDir = path.join(JAIL, `ledger-agent-${hiveN}`);
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(path.join(agentDir, 'memory.md'), '# m\n');
+  const tasks = [{ id: 'CARD-1', title: 'invented', status: 'todo', dependsOn: [], priority: 1, createdAt: 'x' }];
+  let patches = 0;
+  const deps = (level = 'writer') => ({
+    agentId: 'andy', agentDir, isRecipient: (to) => to === 'god', readTasks: () => tasks.map((t) => ({ ...t })), addTask: () => false,
+    patchTask: () => { patches += 1; return true; }, now: () => new Date(T0),
+    memoryClaim: {
+      level,
+      note: async (args) => { const r = await handleClaimVerb(d, 'andy', { cmd: 'note', args }, 'ledger-route'); return { ok: r.ok, ...(r.json && r.json.id ? { id: r.json.id } : {}), ...(r.error ? { error: r.error } : {}) }; },
+      precheck: (args) => cardKeyRefusal(d, 'andy', args)?.text ?? null,
+    },
+  });
+  const outbox = () => { try { return fs.readdirSync(path.join(agentDir, 'outbox')); } catch { return []; } };
+  const op = (name, memory) => ({ op: name, card: { id: 'CARD-1', patch: { status: 'doing' } }, message: { to: 'god', act: 'inform', subject: 's', body: 'b' }, memory });
+  const old = await ok(store.appendRecord('andy', { t: 'claim', kind: 'fact', key: 'card.card-1', text: 'card one is half done' }, 'endpoint'));
+  const before = recs(store).length;
+  let r = await L.applyLedgerOp(op('s3-1', { append: 'card one is done', key: 'card.card-1' }), deps());
+  assert.equal(r.status, 409); assert.match(r.body.line, new RegExp(`^refused: your live claim ${old} already has key card\\.card-1\\.`));
+  assert.equal(recs(store).length, before); assert.equal(patches, 0, 'the card is not patched'); assert.deepEqual(outbox(), [], 'no message sent');
+  // The same op name, now with a choice: applied (a refused op was never recorded).
+  r = await L.applyLedgerOp(op('s3-1', { append: 'card one is done', key: 'card.card-1', supersedes: [old], reason: 'changed' }), deps());
+  assert.equal(r.status, 200, r.body.line);
+  const c = recs(store).at(-1);
+  assert.deepEqual([c.key, c.supersedes, c.supersedesReason], ['card.card-1', [old], { category: 'changed' }]);
+  assert.equal(d.view('andy').status(old), 'superseded');
+  r = await L.applyLedgerOp(op('s3-2', { append: 'card one has a follow-up', key: 'card.card-1', separate: [c.id] }), deps());
+  assert.equal(r.status, 200, r.body.line); assert.equal(d.view('andy').status(c.id), 'live');
+  // Field checks, before anything.
+  for (const [m, re] of [
+    [{ append: 'x', supersedes: [old] }, /needs "reason"/], [{ append: 'x', reason: 'changed' }, /goes with memory.supersedes/],
+    [{ append: 'x', supersedes: [old], separate: [old], reason: 'changed' }, /not both/], [{ append: 'x', separate: ['nope'] }, /memory.separate/],
+    [{ append: 'x', supersedes: [old, old], reason: 'moved' }, /memory.supersedes/], [{ append: 'x', key: 7 }, /memory.key/],
+  ]) { const x = await L.applyLedgerOp(op('s3-bad', m), deps()); assert.equal(x.status, 400, JSON.stringify(m)); assert.match(x.body.line, re); }
+  // Below writer: memory.md as before; the key is not checked (memory.md has no keys).
+  r = await L.applyLedgerOp({ op: 's3-3', memory: { append: '- a plain note', key: 'card.card-1' } }, deps('reader'));
+  assert.equal(r.status, 200, r.body.line);
+  assert.match(fs.readFileSync(path.join(agentDir, 'memory.md'), 'utf8'), /- a plain note/);
+  // main wires the same precheck.
+  const idx = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
+  assert.match(idx, /precheck: \(args\) => cardKeyRefusal\(d, agentId, args\)\?\.text \?\? null/);
+  assert.match(idx, /liveByKey: \(agentId, key\) =>/);
+});
+
+test('nit 5: a leading kind word sets the kind (and says so); --kind wins; a lone word stays text', async () => {
+  assert.deepEqual(cli.parseArgs(['note', 'lesson', 'always', 'resolve', 'by', 'hash']).args, { kind: 'lesson', text: 'always resolve by hash' });
+  assert.deepEqual(cli.parseArgs(['note', 'decision use option a']).args, { kind: 'decision', text: 'use option a' });
+  assert.deepEqual(cli.parseArgs(['note', '--kind', 'fact', 'lesson', 'learned']).args, { kind: 'fact', text: 'lesson learned' });
+  assert.deepEqual(cli.parseArgs(['note', 'lesson']).args, { text: 'lesson' });
+  assert.deepEqual(cli.parseArgs(['note', 'decision:', 'x']).args, { text: 'decision: x' });
+  assert.deepEqual(cli.parseArgs(['note', 'Lesson', 'x']).args, { text: 'Lesson x' });
+  assert.deepEqual(cli.parseArgs(['search', 'lesson', 'x']).args, { query: 'lesson x' });
+  const err = [];
+  await cli.main(['note', 'todo', 'ship', 'it'], {}, { out: () => {}, err: (s) => err.push(s) });
+  assert.match(err[0], /^memory: noted as kind todo \(the first word\); use --kind fact to keep the word as text/);
 });

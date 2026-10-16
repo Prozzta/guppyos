@@ -17,6 +17,11 @@
  * ties by newest `wt`, then id. The top 5 OWN claims are the replace candidates; another agent's
  * claim in the overall top 5 is returned separately as a reference, never a target.
  *
+ * CL-M4-FORWARD-PATH S1 (Jim's audit): BM25 still ranks the whole pool, but only a bounded set gets
+ * a vector: the BM25 top VECTOR_LEXICAL, the newest VECTOR_RECENT, and the note's same-key and
+ * same-card claims (`focus`). A cold first note after an app start then embeds at most about 100
+ * texts, not a whole ledger (1,390 claims: about 36 s, past the CLI's 10 s).
+ *
  * CL-M4-FORWARD-PATH (Jim's calibration, section 4). Two signals list claims AROUND the fusion: a live
  * own claim with the note's `--key` is always listed first, marked `same key`; after the top 5, up to
  * CARD_EXTRA newest own claims sharing a card id with the note (its text or key) are added, marked
@@ -33,6 +38,11 @@ export const CANDIDATE_TOP = 5;
 export const CARD_EXTRA = 3;
 /** Claim vectors the live scorer keeps between notes (by text). */
 export const EMBED_CACHE_MAX = 5000;
+/** S1: the vector order covers the BM25 top this many ... */
+export const VECTOR_LEXICAL = 80;
+/** ... the newest this many (a paraphrase shares no term) ... */
+export const VECTOR_RECENT = 20;
+/** ... and the note's same-key / same-card claims; everything else is ranked by BM25 alone. */
 export const RRF_K = 60;
 export const EXCERPT_CHARS = 80;
 
@@ -144,7 +154,21 @@ export function cosineOrder(q: ArrayLike<number>, docs: Array<{ id: string; vec:
     .map((x) => x.id);
 }
 
-export type Scorer = (query: string, pool: PoolClaim[]) => CandidateScores | Promise<CandidateScores>;
+/** `focus`: pool ids that must get a vector whatever their BM25 rank (the note's same-key and same-card claims). */
+export type Scorer = (query: string, pool: PoolClaim[], focus?: ReadonlySet<string>) => CandidateScores | Promise<CandidateScores>;
+
+/**
+ * S1: the pool claims that get a vector: the BM25 top `lexicalN` (in `lexical` order), the newest
+ * `recentN` (wt, then id), and every `focus` id in the pool. Pure; never more than lexicalN + recentN + focus.
+ */
+export function vectorPool(pool: PoolClaim[], lexical: string[], focus: ReadonlySet<string> = new Set(), lexicalN = VECTOR_LEXICAL, recentN = VECTOR_RECENT): PoolClaim[] {
+  const byId = new Map(pool.map((c) => [c.id, c]));
+  const keep = new Set<string>(lexical.filter((id) => byId.has(id)).slice(0, Math.max(0, lexicalN)));
+  const newest = pool.slice().sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const c of newest.slice(0, Math.max(0, recentN))) keep.add(c.id);
+  for (const id of focus) if (byId.has(id)) keep.add(id);
+  return pool.filter((c) => keep.has(c.id));
+}
 
 /**
  * BM25 plus cosine on `embed`. `corpus` gives the document statistics (Jim M1): the LIVE scorer
@@ -154,18 +178,19 @@ export type Scorer = (query: string, pool: PoolClaim[]) => CandidateScores | Pro
 export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus), cacheMax = EMBED_CACHE_MAX): Scorer {
   // CL-M4-FORWARD-PATH: the own pool is the whole ledger, so claim vectors are kept by text (a claim's
   // text never changes; a purged one is not live, so never pooled). The query is embedded every time.
+  // S1: only vectorPool's claims are embedded (BM25 ranks the whole pool), so a cold cache costs at
+  // most about VECTOR_LEXICAL + VECTOR_RECENT + focus texts. Eviction is oldest-inserted first.
   const cache = new Map<string, ArrayLike<number>>();
-  return async (query, pool) => {
+  return async (query, pool, focus) => {
     if (!pool.length) return { lexical: [], vector: [] };
     const stats = typeof corpus === 'function' ? corpus() : corpus;
-    const missing = [...new Set(pool.map((c) => c.text).filter((t) => !cache.has(t)))];
+    const lexical = bm25Order(query, pool, stats);
+    const vpool = vectorPool(pool, lexical, focus);
+    const missing = [...new Set(vpool.map((c) => c.text).filter((t) => !cache.has(t)))];
     const vecs = await embed([query, ...missing]);
     missing.forEach((t, i) => cache.set(t, vecs[i + 1]));
-    const out = {
-      lexical: bm25Order(query, pool, stats),
-      vector: cosineOrder(vecs[0], pool.map((c) => ({ id: c.id, vec: cache.get(c.text)! })))
-    };
-    while (cache.size > Math.max(cacheMax, pool.length)) cache.delete(cache.keys().next().value as string);
+    const out = { lexical, vector: cosineOrder(vecs[0], vpool.map((c) => ({ id: c.id, vec: cache.get(c.text)! }))) };
+    while (cache.size > Math.max(cacheMax, vpool.length)) cache.delete(cache.keys().next().value as string);
     return out;
   };
 }
@@ -272,9 +297,12 @@ export async function collectNoteCandidates(d: CandidateDeps, agentId: string, t
   }
   const skip = new Set(o.excludeIds ?? []);
   const pool = [...claims.values()].filter((c) => c.status === 'live' && !skip.has(c.id) && Date.parse(c.wt) <= at.getTime());
+  const cards = new Set(cardIds(text, o.key));
+  // S1: the note's own same-key and same-card claims always get a vector.
+  const focus = new Set(pool.filter((c) => c.owner === agentId && ((o.key !== undefined && c.key === o.key) || cardIds(c.text, c.key).some((x) => cards.has(x)))).map((c) => c.id));
   let ranking: CandidateResult['ranking'] = 'rrf';
   let scores: CandidateScores;
-  try { scores = pool.length ? await d.score(text, pool) : { lexical: [], vector: [] }; } catch { scores = { lexical: [], vector: [] }; ranking = 'recency'; }
+  try { scores = pool.length ? await d.score(text, pool, focus) : { lexical: [], vector: [] }; } catch { scores = { lexical: [], vector: [] }; ranking = 'recency'; }
   const top = Math.max(0, o.top ?? CANDIDATE_TOP);
   const ranked = rankCandidates(pool, scores, pool.length);
   const show = (c: RankedCandidate, rank: number, why?: NoteCandidate['why']): NoteCandidate => ({
@@ -289,7 +317,6 @@ export async function collectNoteCandidates(d: CandidateDeps, agentId: string, t
   const listed = new Set(sameKey.map((c) => c.id));
   const fused = own.filter((c) => !listed.has(c.id)).slice(0, top);
   for (const c of fused) listed.add(c.id);
-  const cards = new Set(cardIds(text, o.key));
   const sameCard = cards.size
     ? own.filter((c) => !listed.has(c.id) && cardIds(c.text, c.key).some((x) => cards.has(x))).sort(newest).slice(0, Math.max(0, o.cardExtra ?? CARD_EXTRA))
     : [];

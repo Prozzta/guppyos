@@ -22,6 +22,7 @@ const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [
   + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
   + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
 /** CLAIM-LEDGER W1: the claim verbs; the app checks the agent's level. */
+const NOTE_KINDS = new Set(['fact', 'decision', 'lesson', 'preference', 'procedure', 'pointer', 'todo']);
 const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card', '--reason': 'reason', '--reason-text': 'reasonText' };
 const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
@@ -82,7 +83,14 @@ function parseArgs(argv) {
     i += 1;
   }
   if (out.cmd === 'search') out.args.query = positional.join(' ');
-  else if (out.cmd === 'note') out.args.text = positional.join(' ');
+  else if (out.cmd === 'note') {
+    // CL-M4-FORWARD-PATH nit 5 (Jim): `memory note lesson TEXT` sets the kind (it used to be stored as
+    // the text of a fact). Only an exact kind word with text after it, and only without --kind.
+    const text = positional.join(' ');
+    const m = /^(\S+)\s+(\S[\s\S]*)$/.exec(text);
+    if (out.args.kind === undefined && m && NOTE_KINDS.has(m[1])) { out.args.kind = m[1]; out.args.text = m[2]; out.kindWord = m[1]; }
+    else out.args.text = text;
+  }
   else if (out.cmd === 'retract' || out.cmd === 'accept' || out.cmd === 'dismiss') out.args.ids = positional;
   else if (out.cmd === 'used') { if (positional[0] !== undefined) out.args.id = positional[0]; out.rest.push(...positional.slice(1)); }
   else if (out.cmd === 'reconcile') { if (positional[0] !== undefined) out.args.a = positional[0]; if (positional[1] !== undefined) out.args.b = positional[1]; out.rest.push(...positional.slice(2)); }
@@ -140,6 +148,7 @@ async function main(argv, env, io = STDIO) {
   if (p.help || !p.cmd) { io.out(USAGE); return p.cmd || p.help ? EXIT.ok : EXIT.usage; }
   if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status' || CLAIM_VERBS.has(p.cmd)) {
     if (p.rest.length) { io.err(`memory: unsupported arguments: ${p.rest.join(' ')}\n`); return EXIT.usage; }
+    if (p.kindWord) io.err(`memory: noted as kind ${p.kindWord} (the first word); use --kind fact to keep the word as text\n`);
     return request(env, p, io);
   }
   io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);
