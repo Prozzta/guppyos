@@ -3,7 +3,7 @@
  * PERF-FLOOR-FILL-188, RENDERED (scenarios/tes-floor-damage.tsx): the TES floor draws again only
  * what changed, and every frame so drawn is, px for px, the frame a full draw makes:
  * - at DPR 1, 1.25, 1.5, 1.75 and 2, in three panes each (576x587, 960x640, 700x470: 15 configs),
- *   with walkers, camera nudges, an agent leaving and coming back, thought clouds coming and going,
+ *   with walkers, selects, an agent leaving and coming back, thought clouds coming and going,
  *   a still person dimmed, tinted, blended and put behind its chair in place, the shared layer
  *   dimmed and made unrenderable, and a lost WebGL context (the floor rebuilds and carries on);
  * - most frames are incremental, and they draw a fraction of the canvas;

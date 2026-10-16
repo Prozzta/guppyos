@@ -18,6 +18,8 @@ import { wholeScale } from '../themes/framing';
 // The keep box always stays in view: only the hull, its rim and the upper wall are ever cut.
 // On an axis the art covers, the pane stays inside the art: the frame's margin (backdrop) shows
 // only on an axis the art does not cover, so no pan or nudge exposes it.
+// TES-SCENE-BOUNCE-188: the whole camera never eases or pans: where the map sits depends on the
+// pane alone, so selecting an agent no longer moves the scene.
 
 const LERP_SPEED = 0.08;
 // TES-GUPPY-SETTLE: the rate LERP_SPEED was tuned at (the floor's 30 fps tick).
@@ -144,7 +146,8 @@ export class Camera {
     this.targetZoom = Math.max(this.getMinZoom(), Math.min(4, zoom ?? this.currentZoom));
   }
 
-  /** A gentle, decaying pan toward a world point without taking manual control. */
+  /** A gentle, decaying pan toward a world point without taking manual control. A whole camera
+   *  is placed on its target (placeWhole), so there it moves nothing (TES-SCENE-BOUNCE-188). */
   nudgeToward(worldX: number, worldY: number, duration = 1200): void {
     if (this.manualOverride) return;
     this.nudgeOffsetX = (worldX - this.targetX) * this.nudgeStrength;
@@ -208,12 +211,18 @@ export class Camera {
   }
 
   /** TES-FLOOR-WHOLE-188: place the map at n device px per map px, on whole device px. Each axis
-   *  works as update() does (centred when the frame fits, else the eased point clamped inside the
+   *  works as update() does (centred when the frame fits, else the target point clamped inside the
    *  frame; vertically the frame's top at the pane's top when its content fits), then the keep
    *  box is clamped into the pane (centred on it if it cannot fit, at n = 1). Before that, on an
-   *  axis the art covers, the pane is clamped inside the art (Jim: the frame's margin showed). */
+   *  axis the art covers, the pane is clamped inside the art (Jim: the frame's margin showed).
+   *  TES-SCENE-BOUNCE-188: the target, not the eased point, so the scene stands still: the place is
+   *  a function of the pane alone, from the first frame. Where the frame overflows the pane at
+   *  its n, the eased point moved it: a select's nudge lifted the whole scene up to 44 device px and back
+   *  (1.1.87's fit clamped the same nudge to 0), and the mount slid it in from the map's origin. */
   private placeWhole(n: number, r: number, keep: Keep): void {
     this.currentZoom = this.targetZoom = n / r;
+    this.currentX = this.targetX;
+    this.currentY = this.targetY;
     const b = this.box();
     const W = Math.round(this.viewWidth * r), H = Math.round(this.viewHeight * r);
     const fit = (o: number, lo: number, hi: number) => (lo <= hi ? Math.min(hi, Math.max(lo, o)) : (lo + hi) / 2);

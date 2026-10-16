@@ -2,7 +2,7 @@
  * SCENARIO - PERF-FLOOR-FILL-188, RENDERED: the TES floor draws again only the rects that changed
  * (damage.ts); this proves a frame so drawn is the frame a full draw makes, on EVERY frame.
  * The real OfficeFloor draws the bundled tes pack with a crew on a synthetic clock while the plan
- * resizes the host box, selects crew (camera nudges), takes an agent away and back, flips statuses
+ * resizes the host box, selects crew (a nudge, a no-op for the whole camera), takes an agent away and back, flips statuses
  * (thought clouds come and go) and loses the WebGL context (the floor rebuilds). After every render:
  * the canvas as drawn (its kept buffer) is read, then the same state is drawn whole onto the canvas
  * and read again: the two must not differ by a single px, bubbles included. (By induction this

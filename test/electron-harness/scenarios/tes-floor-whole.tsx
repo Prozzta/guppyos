@@ -1,7 +1,7 @@
 /**
  * SCENARIO - TES-FLOOR-WHOLE-188, RENDERED: the real OfficeFloor draws the bundled tes pack with a
  * crew, on a synthetic clock (as tes-floor-ease.tsx did), and the host box is resized (the plan) so
- * the camera moves, and crew members are selected (the plan) so the camera eases toward them. After
+ * the camera moves, and crew members are selected (the plan), which must not move it (TES-SCENE-BOUNCE-188). After
  * every render:
  * - the camera is whole: n = world scale x DPR is a whole number, and so are the world's x and y in
  *   device px; n is wholeScale of the pane's device size, and the floor texture's k is n;
@@ -101,7 +101,7 @@ function mapRef(app: any, S: any, H: number, clearColor: number[], crewTop: bool
 }
 
 const out = {
-  frames: 0, wholeBad: 0, nBad: 0, kBad: 0, nSeen: [] as number[], builds: 0, easing: 0,
+  frames: 0, wholeBad: 0, nBad: 0, kBad: 0, nSeen: [] as number[], builds: 0, easing: 0, panned: 0, panAt: '' as string, selects: 0, overflowSelects: 0,
   texelChecks: 0, texelEasing: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
   teethChecks: 0, teethMax: 0, edgeBlank: 0, bottomBand: 0, bottomChecks: 0,
   // Every frame: on an axis the art covers, the device px of frame margin (backdrop) in the pane.
@@ -113,7 +113,8 @@ const out = {
 let renders = 0;
 let done: (() => void) | null = null;
 let hostBox: HTMLDivElement | null = null;
-let last = { x: NaN, y: NaN, s: NaN };
+let last = { x: NaN, y: NaN, s: NaN, pane: '' };
+let overflowNow = false;
 let sawConfig = '';
 const proto = Application.prototype as unknown as { render: () => void };
 const realRender = proto.render;
@@ -144,7 +145,11 @@ proto.render = function (this: any) {
       const moved = w.x !== last.x || w.y !== last.y;
       const sameScale = w.scale.x === last.s;
       if (moved && sameScale) out.easing++;
-      last = { x: w.x, y: w.y, s: w.scale.x };
+      // TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves (a select's nudge lifted it).
+      const pane = `${Wd}x${Hd}`;
+      if (moved && sameScale && pane === last.pane) { out.panned++; if (!out.panAt) out.panAt = `render ${renders} ${pane} ox=${ox} oy=${oy}`; }
+      overflowNow = S.frame.w * n > Wd || (S.frame.h - S.frame.deadBottom) * n > Hd;
+      last = { x: w.x, y: w.y, s: w.scale.x, pane };
       if (renders % CHECK_EVERY === 0 && renders > 2) {
         const N = Math.round(n), OX = Math.round(ox), OY = Math.round(oy);
         const clear = app.renderer.background.color.toArray();
@@ -211,7 +216,7 @@ proto.render = function (this: any) {
   const rz = RESIZES.find((q) => q.at === renders);
   if (rz && hostBox) { hostBox.style.width = rz.w + 'px'; hostBox.style.height = rz.h + 'px'; }
   const sel = SELECTS.find((q) => q.at === renders);
-  if (sel) useStore.setState({ selectedId: sel.id } as never);
+  if (sel) { out.selects++; if (sel.id && overflowNow) out.overflowSelects++; useStore.setState({ selectedId: sel.id } as never); }
   if (renders >= LAST && done) { done(); done = null; }
 };
 

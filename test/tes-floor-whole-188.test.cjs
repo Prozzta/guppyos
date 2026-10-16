@@ -2,9 +2,10 @@
 /**
  * TES-FLOOR-WHOLE-188, RENDERED (a hidden Electron window, the real OfficeFloor, the bundled tes pack
  * with a crew): the floor is drawn at a whole number n of device px per map px, on whole device px,
- * on every frame, the camera easing after a resize or settled. Over the run
- * (scenarios/tes-floor-whole.tsx: 576x587, the Human's pane with its padding, then 960x640, 700x470
- * and 1200x900, with crew members selected so the camera eases), at DPR 1 and 1.25:
+ * on every frame. Over the run (scenarios/tes-floor-whole.tsx: 576x587, the Human's pane with its
+ * padding, then 960x640, 700x470 and 1200x900, with crew members selected), at DPR 1 and 1.25:
+ * - TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves: a select's nudge lifted it
+ *   (this test used to require that motion, as texelEasing >= 5);
  * - every frame: n, and the world's origin in device px, are whole; n is wholeScale of the pane;
  *   the floor texture's k is n, built once per n;
  * - every frame, the texel check: device px (X, Y) is map px (floor((X - ox) / n),
@@ -37,8 +38,11 @@ for (const [dpr, ns] of [['1', [2, 1, 3]], ['1.25', [2, 3]]]) {
     assert.equal(r.builds, ns.length, 'one floor build per n');
     assert.equal(r.configs.length, 4, 'the four panes were checked');
     assert.ok(r.texelChecks >= r.frames - 3, `the texel check ran on every frame (${r.texelChecks} of ${r.frames})`);
-    // The keep box pins the view: a nudge pans at most the frame's overhang (a few dozen device px).
-    assert.ok(r.texelEasing >= 5, `of them ${r.texelEasing} while the camera eased`);
+    // TES-SCENE-BOUNCE-188: the selects nudge nothing, in a pane the frame overflows too (at DPR 1 the
+    // first pane is n = 2 with 688 content rows in 587, where the old camera lifted the scene).
+    assert.equal(r.selects, 12, `every select ran (${r.selects})`);
+    if (dpr === '1') assert.ok(r.overflowSelects >= 2, `selects in a pane the frame overflows: ${r.overflowSelects}`);
+    assert.equal(r.panned, 0, `the scene never moved in an unchanged pane (first: ${r.panAt})`);
     assert.equal(r.texelBadMax, 0, `every device px is its map px of the depth sort (worst: ${r.texelBadAt})`);
     assert.ok(r.teethChecks >= 10 && r.teethMax > 0, `with the people over every static the picture differs (${r.teethMax} px)`);
     assert.equal(r.edgeBlank, 0, 'no blank px on the pane edges');

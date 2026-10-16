@@ -98,7 +98,7 @@ test('TES camera in a tiny pane: n = 1, never zoom 0, the keep box centred when 
   }
 });
 
-test('TES camera is whole on every frame: a resize steps n at once, a nudge eases on whole device px', () => {
+test('TES camera is whole on every frame: a resize steps n at once, on whole device px', () => {
   const r = 1.5;
   const { c, k } = make(1201, 901, r);
   for (let i = 0; i < 600; i++) k.update(1 / 30);
@@ -109,20 +109,61 @@ test('TES camera is whole on every frame: a resize steps n at once, a nudge ease
     k.update(1 / 60);
     assert.ok(isInt(c.z * r) && isInt(c.x * r) && isInt(c.y * r), `frame ${i}: z*r=${c.z * r} x*r=${c.x * r} y*r=${c.y * r}`);
   }
-  // A pane narrower than the frame at its n: the nudge pans it, on whole device px each frame.
-  const m = make(720, 800, 1.25);
-  for (let i = 0; i < 600; i++) m.k.update(1 / 30);
-  const rested = { x: m.c.x, y: m.c.y };
-  m.k.nudgeToward(472, 200, 1000); // a small pan: the frame is only 12 device px wider than the pane
-  const xs = new Set();
-  for (let i = 0; i < 90; i++) {
+});
+
+/** TES-SCENE-BOUNCE-188: a pane the frame overflows at its n (575x612@1: n = 2, 688 content rows in
+ *  612) used to follow a select's nudge, lifting the whole scene up to 44 device px and back. */
+const STILL_PANES = [[575, 612, 1], [555, 612, 1], [470, 520, 1.25], [720, 800, 1.25], [576, 587, 1], [716, 502, 1.25], [517, 301, 1.5], [450, 900, 2]];
+const TOWARD = [[300, 30], [620, 30], [300, 420], [620, 420], [463, 0], [463, 640], [0, 220], [960, 220], [400, 300], [520, 360]];
+
+/** Every frame on which a whole camera moved in an unchanged pane: from its first frame to its rest
+ *  (a slide in), and across a nudge toward each point (a select). And how many panes it overflows. */
+function stillFailures(opts) {
+  const bad = [];
+  let overflow = 0;
+  const at = (c) => ({ x: c.x, y: c.y, z: c.z });
+  const same = (a, b) => a.x === b.x && a.y === b.y && a.z === b.z;
+  for (const [W, H, r] of STILL_PANES) {
+    const m = make(W, H, r, opts);
     m.k.update(1 / 60);
-    assert.ok(isInt(m.c.z * 1.25) && isInt(m.c.x * 1.25) && isInt(m.c.y * 1.25), `nudge frame ${i}`);
-    xs.add(m.c.x);
+    const first = at(m.c);
+    for (let i = 0; i < 300; i++) m.k.update(1 / 30);
+    const rested = at(m.c);
+    if (!same(first, rested)) bad.push(`${W}x${H}@${r}: slid in from ${JSON.stringify(first)} to ${JSON.stringify(rested)}`);
+    if ((TES.h - TES.deadBottom) * rested.z * r > Math.round(H * r) || TES.w * rested.z * r > Math.round(W * r)) overflow++;
+    for (const [tx, ty] of TOWARD) {
+      m.k.nudgeToward(tx, ty, 1200);
+      for (let i = 0; i < 80; i++) {
+        m.k.update(1 / 60);
+        if (!same(at(m.c), rested)) bad.push(`${W}x${H}@${r} toward ${tx},${ty} frame ${i}: ${JSON.stringify(at(m.c))}, rested ${JSON.stringify(rested)}`);
+      }
+    }
   }
-  assert.ok(xs.size >= 2, `the nudge moved the view (${xs.size} positions)`);
-  for (let i = 0; i < 600; i++) m.k.update(1 / 30);
-  assert.deepEqual({ x: m.c.x, y: m.c.y }, rested, 'back where it rested');
+  return { bad, overflow };
+}
+
+/** TES-SCENE-BOUNCE-188: the TES frame is centred on its art across, so at rest (the camera stands
+ *  on its target) the art's x clamp binds nowhere (measured: 0 of 93,149 panes); only the old nudge
+ *  reached it. A frame off-centre on the same art (24 more px of margin on the left) needs it. */
+const OFF_CENTRE = { ...TES, x: TES.x - 24, w: TES.w + 24 };
+function offCentreFailures(opts) {
+  const bad = [];
+  for (const r of [1, 1.25, 1.5, 2]) for (let W = 300; W <= 1300; W += 9) for (const H of [301, 612, 900]) {
+    const c = rest(W, H, r, { ...opts, frame: OFF_CENTRE });
+    for (const f of artFailures(Math.round(W * r), Math.round(H * r), c.z * r, c.x * r, c.y * r)) bad.push(`${W}x${H}@${r}: ${f}`);
+  }
+  return bad;
+}
+
+test('TES camera, a frame off-centre on its art: at rest the margin never shows on an axis the art covers', () => {
+  const bad = offCentreFailures();
+  assert.deepEqual(bad.slice(0, 5), [], `${bad.length} panes`);
+});
+
+test('TES camera: a select\'s nudge leaves the whole scene where it rests, on every frame, and it never slides in (TES-SCENE-BOUNCE-188)', () => {
+  const { bad, overflow } = stillFailures();
+  assert.deepEqual(bad.slice(0, 5), [], `${bad.length} moved frames`);
+  assert.ok(overflow >= 5, `panes the frame overflows (where the old camera panned): ${overflow}`);
 });
 
 /** Nudges toward the art's corners, edges and centre in several panes: every frame's failures, and
@@ -246,13 +287,16 @@ test('TES whole-camera mutant census: each guard is caught', () => {
     { name: 'not whole: raw fit', from: '    if (w) { this.placeWhole(w.n, w.r, w.keep); return; }\n', to: '' },
     { name: 'art clamp dropped (x)', from: '    if (a && (a.x1 + 1 - a.x0) * n >= W) x = fit(x, W - (a.x1 + 1) * n, -a.x0 * n);\n', to: '' },
     { name: 'art clamp dropped (y)', from: '    if (a && (a.y1 + 1 - a.y0) * n >= H) y = fit(y, H - (a.y1 + 1) * n, -a.y0 * n);\n', to: '' },
+    // TES-SCENE-BOUNCE-188: a whole camera placed on its eased point (a select's nudge, the mount's slide).
+    { name: 'whole camera placed on the eased point', from: '    this.currentX = this.targetX;\n    this.currentY = this.targetY;\n', to: '' },
+    { name: 'whole camera placed on the eased point (y only)', from: '    this.currentX = this.targetX;\n    this.currentY = this.targetY;\n', to: '    this.currentX = this.targetX;\n' },
   ];
   const norm = source.replace(/\r\n/g, '\n');
   for (const mutant of mutants) {
     const hits = norm.split(mutant.from).length - 1;
     assert.equal(hits, 1, `mutant ${mutant.name} must match exactly once`);
     const MutantCamera = loadTs.fromText('src/renderer/src/scene/office/Camera.ts', norm.replace(mutant.from, mutant.to)).Camera;
-    const failures = [...gridFailures({ CameraClass: MutantCamera }), ...nudgeFailures({ CameraClass: MutantCamera }).bad];
+    const failures = [...gridFailures({ CameraClass: MutantCamera }), ...nudgeFailures({ CameraClass: MutantCamera }).bad, ...stillFailures({ CameraClass: MutantCamera }).bad, ...offCentreFailures({ CameraClass: MutantCamera })];
     assert.ok(failures.length > 0, `SURVIVED: ${mutant.name}`);
   }
 });
