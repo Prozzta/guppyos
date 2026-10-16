@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { PixelButton } from './PixelButton';
-import { chainTitle, claimHistory, duplicateChains, readOnlyText, statusBadge, UI_STATUSES, type DupChain, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
+import { CHAIN_TICK_MAX, chainTitle, claimHistory, defaultTicked, duplicateChains, readOnlyText, statusBadge, UI_STATUSES, type DupChain, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
 import type { Status } from '@shared/claims';
 
 const LEVELS = ['off', 'shadow', 'reader', 'writer'] as const;
@@ -211,14 +211,14 @@ function DupChainCard({ chain, view, busy, onKeepOne, onKeepAll }: {
   chain: DupChain; view: LedgerUiAgentView; busy: boolean;
   onKeepOne: (keep: string, retire: string[]) => void; onKeepAll: () => void;
 }) {
-  const [left, setLeft] = useState<Set<string>>(new Set());
+  const [left, setLeft] = useState<Set<string>>(() => { const on = new Set(defaultTicked(chain.members)); return new Set(chain.members.filter((id) => !on.has(id))); });
   const byId = useMemo(() => new Map(view.claims.map((c) => [c.id, c])), [view]);
   const picked = chain.members.filter((id) => !left.has(id));
   return (
     <div data-testid="claim-ledger-chain" data-chain={chain.id} style={{ border: '1px solid var(--cth-ink-300)', padding: 6, background: 'var(--cth-cream-50, #fff)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-        <span style={{ ...label, flex: 1, minWidth: 0 }}>{chainTitle(chain)} <span style={hint}>· {chain.members.length} notes</span></span>
-        <PixelButton size="sm" variant="secondary" disabled={busy} title="They all stay; this group leaves the list until a newer note joins it"
+        <span style={{ ...label, flex: 1, minWidth: 0 }}>{chainTitle(chain)} <span style={hint}>· {chain.members.length} notes{chain.members.length > CHAIN_TICK_MAX ? ', tick the ones to set aside' : ''}</span></span>
+        <PixelButton size="sm" variant={busy ? 'ghost' : 'secondary'} disabled={busy} title="They all stay; this group leaves the list until a newer note joins it"
           onClick={onKeepAll}>keep all</PixelButton>
       </div>
       {chain.members.map((id, i) => {
@@ -227,7 +227,7 @@ function DupChainCard({ chain, view, busy, onKeepOne, onKeepAll }: {
         return (
           <div key={id} data-claim={id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', borderTop: '1px solid var(--cth-ink-200, var(--cth-ink-300))', padding: '4px 0' }}>
             <input type="checkbox" aria-label="part of this choice" checked={!left.has(id)} disabled={busy}
-              title="Untick a note to leave it as it is when you keep another one"
+              title="A ticked note is set aside when you keep another one; an unticked one stays as it is"
               onChange={() => { const n = new Set(left); if (n.has(id)) n.delete(id); else n.add(id); setLeft(n); }} style={{ marginTop: 2 }} />
             <span style={{ ...hint, flex: 'none', width: 92 }}>{(c?.wt ?? '').slice(0, 10)}{i === 0 ? ' · newest' : ''}</span>
             <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-900)', flex: 1, minWidth: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>

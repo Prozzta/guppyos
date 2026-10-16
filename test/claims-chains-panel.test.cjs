@@ -32,7 +32,9 @@ const { derive } = loadTs(path.join(ROOT, 'src/main/claims/derive.ts'));
 const { verifiedPrefix } = loadTs(path.join(ROOT, 'src/main/claims/indexSync.ts'));
 const { DEFAULT_KEY_REGISTRY } = loadTs(path.join(ROOT, 'src/main/claims/registry.ts'));
 const { createLedgerUi } = loadTs(path.join(ROOT, 'src/main/claims/ledgerUi.ts'));
-const { claimCardIds, duplicateChains, chainTitle, settledPairs } = loadTs(path.join(ROOT, 'src/shared/claimsUi.ts'));
+const { duplicateChains, chainTitle, settledPairs, defaultTicked, CHAIN_TICK_MAX } = loadTs(path.join(ROOT, 'src/shared/claimsUi.ts'));
+const { cardIds } = loadTs(path.join(ROOT, 'src/shared/cardIds.ts'));
+const FWD = loadTs(path.join(ROOT, 'src/main/claims/candidates.ts'));
 
 let n = 0;
 function mkStore() {
@@ -65,10 +67,10 @@ function ui(store, over = {}) {
   return { api: createLedgerUi(deps), calls, answer: (a) => { answer = a; } };
 }
 
-/** andy: three notes about one card (two builds), a pair under one label, and an unrelated note. */
+/** andy: three notes about one card, a pair under one label, and an unrelated note. */
 async function seeded(store) {
   const w1 = await ok(store.appendRecord('andy', note('CL-W7 shipped the purge dialog'), 'endpoint'));
-  const w2 = await ok(store.appendRecord('andy', note('CL-W7-189 fix round merged at int a8db887e'), 'endpoint'));
+  const w2 = await ok(store.appendRecord('andy', note('CL-W7 fix round merged at int a8db887e'), 'endpoint'));
   const k1 = await ok(store.appendRecord('andy', note('use the jailed harness for shots', { key: 'list.shots' }), 'endpoint'));
   const other = await ok(store.appendRecord('andy', note('nothing to do with anything'), 'endpoint'));
   const k2 = await ok(store.appendRecord('andy', note('shots at DPR 1, 1280x800', { key: 'list.shots' }), 'endpoint'));
@@ -80,11 +82,39 @@ const stateOf = (store) => derive(verifiedPrefix(store.readLedger('andy')).recor
 
 // ------------------------------------------------------------------ the pure grouping
 
-test('card ids: Jim\'s rule (hyphenated upper-case tokens, a trailing build number dropped, a card.* key counts)', () => {
-  assert.deepEqual(claimCardIds('CL-W7-189 and TES-BUBBLE-NITS-189, not ABC or ok-ish or 1.1.89'), ['CL-W7', 'TES-BUBBLE-NITS']);
-  assert.deepEqual(claimCardIds('the fix for CL-M4-FORWARD-PATH and CL-M4-FORWARD-PATH again'), ['CL-M4-FORWARD-PATH']);
-  assert.deepEqual(claimCardIds('no card here', 'card.cl-w7'), ['CL-W7']);
-  assert.deepEqual(claimCardIds('X-189 is only a build number'), ['X-189'.replace(/-\d+$/, '')].filter((t) => t.includes('-')));
+test('card ids: one shared rule; the panel groups on the full token, FORWARD drops the build number', () => {
+  assert.deepEqual(cardIds('CL-W7-189 and TES-BUBBLE-NITS-189, not ABC or ok-ish or 1.1.89'), ['CL-W7-189', 'TES-BUBBLE-NITS-189']);
+  assert.deepEqual(cardIds('the fix for CL-M4-FORWARD-PATH and CL-M4-FORWARD-PATH again'), ['CL-M4-FORWARD-PATH']);
+  assert.deepEqual(cardIds('no card here', 'card.cl-w7'), ['CL-W7']);
+  // NAME-NNN cards count (Jim, SHOULD 2); a one-word name with a short number, or a standard's name, does not.
+  assert.deepEqual(cardIds('WAKE-155 and START-175 and POST-INSTALL-188; GATE-4, RC-1, SHA-256, UTF-16, ISO-8601, X-189'), ['WAKE-155', 'START-175', 'POST-INSTALL-188']);
+  assert.deepEqual(cardIds('PROMOTE-RUNBOOK-1 and ZT-I3'), ['PROMOTE-RUNBOOK-1', 'ZT-I3']);
+  // FORWARD keeps its rule (no behaviour change there), through the same helper.
+  const fwd = 'CL-W7-189 and TES-BUBBLE-NITS-189 and WAKE-155 (UTF-16)';
+  assert.deepEqual(cardIds(fwd, undefined, { dropBuild: true }), ['CL-W7', 'TES-BUBBLE-NITS']);
+  assert.deepEqual(FWD.cardIds(fwd), cardIds(fwd, undefined, { dropBuild: true }));
+  assert.deepEqual(FWD.cardIds('x', 'card.heavy-lock-shapes-189'), ['HEAVY-LOCK-SHAPES']);
+});
+
+test('duplicateChains: one group per release card (POST-INSTALL-188 is not POST-INSTALL-189); NAME-NNN cards group', () => {
+  const claims = [
+    C('c-01', 'POST-INSTALL-188 ok', '2026-10-01'), C('c-02', 'POST-INSTALL-188 again', '2026-10-02'),
+    C('c-03', 'POST-INSTALL-189 ok', '2026-10-03'), C('c-04', 'WAKE-155 open', '2026-10-04'), C('c-05', 'WAKE-155 done', '2026-10-05'),
+    C('c-06', 'GATE-4 passed', '2026-10-06'), C('c-07', 'GATE-4 failed on another plan', '2026-10-07'),
+  ];
+  assert.deepEqual(duplicateChains({ claims, events: [] }).map((c) => [c.id, c.members]), [['card:WAKE-155', ['c-05', 'c-04']], ['card:POST-INSTALL-188', ['c-02', 'c-01']]]);
+});
+
+test('duplicateChains: a soft-superseded note (superseded?) is not grouped; only live notes are', () => {
+  const claims = [C('c-01', 'CL-W7 a', '2026-10-01', { status: 'superseded?' }), C('c-02', 'CL-W7 b', '2026-10-02'), C('c-03', 'CL-W7 c', '2026-10-03')];
+  assert.deepEqual(duplicateChains({ claims, events: [] })[0].members, ['c-03', 'c-02']);
+  assert.equal(duplicateChains({ claims: claims.slice(0, 2), events: [] }).length, 0);
+});
+
+test('ticks: a group of up to 3 notes starts all ticked; a larger one starts with none', () => {
+  assert.equal(CHAIN_TICK_MAX, 3);
+  assert.deepEqual(defaultTicked(['a', 'b', 'c']), ['a', 'b', 'c']);
+  assert.deepEqual(defaultTicked(['a', 'b', 'c', 'd']), []);
 });
 
 const C = (id, text, wt, o = {}) => ({ id, kind: 'fact', text, source: 'self', at: wt, wt, status: 'live', sightings: 0, pinned: false, reasons: [], ...o });
@@ -92,7 +122,7 @@ const E = (id, ev, targets, o = {}) => ({ id, ev, targets, by: 'human', at: '202
 
 test('duplicateChains: live claims only, newest first, groups of two or more, the newest group first, shared sets merged', () => {
   const claims = [
-    C('c-01', 'CL-W7 a', '2026-10-01'), C('c-02', 'CL-W7-189 b', '2026-10-02'), C('c-03', 'x', '2026-10-03', { key: 'list.a' }),
+    C('c-01', 'CL-W7 a', '2026-10-01'), C('c-02', 'CL-W7 b', '2026-10-02'), C('c-03', 'x', '2026-10-03', { key: 'list.a' }),
     C('c-04', 'y', '2026-10-05', { key: 'list.a' }), C('c-05', 'CL-W7 old', '2026-09-01', { status: 'superseded' }),
     C('c-06', 'alone ONE-CARD', '2026-10-06'), C('c-07', 'P-Q and R-S', '2026-10-04'), C('c-08', 'P-Q and R-S again', '2026-10-03'),
   ];
@@ -263,6 +293,8 @@ test('the panel: plain words and no automatic choice (the renderer source)', () 
   assert.ok(/onClick=\{\(\) => onKeepOne\(id, others\)\}/.test(card), 'keep one only on a click');
   assert.ok(/onClick=\{onKeepAll\}/.test(card), 'keep all only on a click');
   assert.ok(!/useEffect/.test(card), 'the group card does nothing by itself');
+  assert.ok(/useState<Set<string>>\(\(\) => \{ const on = new Set\(defaultTicked\(chain\.members\)\)/.test(card), 'the first ticks come from defaultTicked');
+  assert.ok(/variant=\{busy \? 'ghost' : 'secondary'\} disabled=\{busy\}[^>]*>keep all</.test(card), 'a disabled keep all is not drawn highlighted');
   const visible = (card.match(/>[^<>{}]+</g) ?? []).join(' ') + (card.match(/title=\{?[`'"][^`'"]*/g) ?? []).join(' ');
   assert.ok(!/supersed|reconcile|claim/i.test(visible), `plain words: ${visible}`);
 });
