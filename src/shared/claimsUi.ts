@@ -4,6 +4,7 @@
  * purge, which only the Human can start and confirm (G7.2); main owns every write.
  */
 import type { ClaimKind, EventKind, LedgerLevel, Ref, Status } from './claims';
+import { cardIds } from './cardIds';
 
 export const UI_STATUSES: readonly Status[] = ['live', 'superseded?', 'superseded', 'retracted', 'purged'];
 
@@ -153,14 +154,12 @@ export interface DupChain {
   members: string[];
 }
 
-/**
- * Card ids in a note (Jim's calibration rule): upper-case hyphenated tokens like CL-M4-FORWARD-PATH,
- * a trailing build number dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS). A `card.<id>` key names its card too.
- */
-export function claimCardIds(text: string, key?: string): string[] {
-  const fromKey = key?.startsWith('card.') ? key.slice(5).toUpperCase() : '';
-  const toks = `${text} ${fromKey}`.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? [];
-  return [...new Set(toks.map((t) => t.replace(/-\d+$/, '')).filter((t) => t.includes('-')))];
+/** Above this many notes a group starts with nothing ticked, so one click cannot set many notes aside (Jim, SHOULD 3). */
+export const CHAIN_TICK_MAX = 3;
+
+/** The notes ticked when a group is first shown: every note of a small group, none of a larger one. */
+export function defaultTicked(members: string[]): string[] {
+  return members.length <= CHAIN_TICK_MAX ? members.slice() : [];
 }
 
 const pairOf = (a: string, b: string): string => (a < b ? `${a} ${b}` : `${b} ${a}`);
@@ -194,7 +193,7 @@ export function duplicateChains(view: Pick<LedgerUiAgentView, 'claims' | 'events
   for (const c of view.claims) {
     if (c.status !== 'live') continue;
     if (c.key) add('key', c.key, c);
-    for (const card of claimCardIds(c.text, c.key)) add('card', card, c);
+    for (const card of cardIds(c.text, c.key)) add('card', card, c);
   }
   const settled = settledPairs(view.events);
   const bySet = new Map<string, DupChain & { top: LedgerUiClaim }>();

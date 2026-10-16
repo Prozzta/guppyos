@@ -30,6 +30,7 @@
  * The note CLI (Dwight, step 1) calls collectNoteCandidates; with no candidate it appends at once
  * (marked new), otherwise it shows the candidates and asks replace / separate / cancel.
  */
+import { cardIds as sharedCardIds } from '../../shared/cardIds';
 
 export type CandidateSource = 'own' | 'search' | 'working-set';
 export const CANDIDATE_WINDOW_MS = 6 * 3600_000;
@@ -234,14 +235,11 @@ export interface CandidateResult {
 }
 
 /**
- * The card ids in a text (Jim's calibration rule): upper-case hyphenated tokens like CL-M4-FORWARD-PATH,
- * a trailing build number dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS). A card key
- * (card.cl-m4-forward-path, registry.ts) names its card too.
+ * The card ids in a text, as FORWARD retrieves with them: the shared rule (shared/cardIds.ts) with a
+ * trailing build number dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS). A card key names its card too.
  */
 export function cardIds(text: string, key?: string): string[] {
-  const fromKey = key?.startsWith('card.') ? key.slice(5).toUpperCase() : '';
-  const toks = `${text} ${fromKey}`.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? [];
-  return [...new Set(toks.map((t) => t.replace(/-\d+$/, '')).filter((t) => t.includes('-')))];
+  return sharedCardIds(text, key, { dropBuild: true });
 }
 
 export interface CandidateDeps {
