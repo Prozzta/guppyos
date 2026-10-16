@@ -702,7 +702,12 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // with a body stripHeredocs found (the two scans agree); otherwise nothing is virtual (fail closed).
   const segs = segments(text, d);
   const ops = segs.map((g) => words(g.replace(/\s&$/, ''), d).filter((w) => HEREDOC_OP.test(w)).length);
-  const virtual = new Map<string, string>();
+  // A null entry: a heredoc-made file that a later segment rewrote by other means (cp, mv, sed -i,
+  // a `>` that is not a heredoc's), so its text at run time is unknown and it reads as unreadable
+  // (S1). A file on disk edited that way is still read as it is now (HEAVY-LOCK-SHAPES-189).
+  const virtual = new Map<string, string | null>();
+  /** Every file a segment so far rewrote by other means (an append to one of them is unknown too). */
+  const rewritten = new Set<string>();
   const paired = d !== 'cmd' && ops.reduce((a, b) => a + b, 0) === bodies.length;
   const vkey = (p: string, cd?: string): string => {
     const raw = p.replace(/^["']|["']$/g, '');
@@ -716,7 +721,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   const expand = (v: string): string => v.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, n: string) => vars.get(n) ?? m);
   const key = (p: string, cd?: string): string => vkey(expand(p), cd === undefined ? cd : expand(cd));
   const base = ctx.readScript;
-  const readScript = base ? (p: string, cd?: string): string | null => virtual.get(key(p, cd)) ?? base(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  const readScript = base ? (p: string, cd?: string): string | null => {
+    const k = key(p, cd);
+    return virtual.has(k) ? virtual.get(k)! : base(expand(p), cd === undefined ? cd : expand(cd));
+  } : undefined;
   let here: ClassifyCtx = { ...ctx, stdin: undefined, ...(readScript ? { readScript } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
@@ -724,6 +732,16 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const seg = segs[si];
     const mine = paired ? bodies.slice(body, body + ops[si]) : [];
     body += ops[si];
+    // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
+    // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite. B1: classified where it runs,
+    // with this point's cd and variables (`J=/x; X="$(bash $J/light.sh)"` reads /x/light.sh).
+    if (depth < 3) {
+      for (const inner of substitutions(seg)) {
+        const c = classifyCommand(inner, depth + 1, here);
+        if (c.heavy && !c.provisional) return c;
+        if (c.heavy && !maybe) maybe = c;
+      }
+    }
     // The raw doubled-quote cmd form is opaque to the shell-word tokenizer: classify its
     // inner executable before tokenizing, but do so per segment so later chained commands
     // are still inspected independently.
@@ -757,7 +775,7 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
     if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {
-      const to = ws[1];
+      const to = expand(ws[1]);   // B1: `cd X; S=/abs; cd $S` moves to /abs, not X/$S
       here = { ...here, cd: /^([A-Za-z]:[\\/]|[\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\/]+$/, '')}/${to}` };
       continue;
     }
@@ -766,15 +784,12 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const c = classifyWords(ws, depth, stdin === undefined ? here : { ...here, stdin });
     if (c.heavy && !c.provisional) return c;
     if (c.heavy && !maybe) maybe = c;
-    if (mine.length === 1) heredocWrite(raw, ws, mine[0], here, virtual, key);
-  }
-  // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
-  // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite.
-  if (depth < 3) {
-    for (const inner of substitutions(text)) {
-      const c = classifyCommand(inner, depth + 1, ctx);
-      if (c.heavy && !c.provisional) return c;
-      if (c.heavy && !maybe) maybe = c;
+    const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : new Set<string>();
+    for (const f of writeTargets(raw, ws)) {
+      const k = key(f, here.cd);
+      if (wrote.has(k)) continue;
+      rewritten.add(k);
+      if (virtual.has(k)) virtual.set(k, null);
     }
   }
   return maybe ?? { heavy: false };
@@ -783,17 +798,22 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
 const HEREDOC_OP = /^\d*<<-?(?!<)/;
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
-function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string>, vkey: (p: string, cd?: string) => string): void {
+function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
   const bin = (ws[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
   const text = `${body}\n`;
+  const wrote = new Set<string>();
   const put = (f: string, append: boolean): void => {
     const k = vkey(f, here.cd);
+    wrote.add(k);
     let old: string | null = null;
     if (append) { try { old = here.readScript ? here.readScript(f, here.cd) : null; } catch { old = null; } }
+    // S1: appending to a file rewritten by other means earlier in the command: its text is unknown
+    // (the disk still holds the old one), so the result is unknown too.
+    if (append && (virtual.get(k) === null || (!virtual.has(k) && rewritten.has(k)))) { virtual.set(k, null); return; }
     virtual.set(k, append ? `${old ?? ''}${text}` : text);
   };
   if (bin === 'cat') {
-    if (ws.slice(1).some((a) => a !== '-')) return;   // `cat a.txt > f`: f is not the heredoc
+    if (ws.slice(1).some((a) => a !== '-')) return wrote;   // `cat a.txt > f`: f is not the heredoc
     for (let i = 0; i < raw.length; i++) {
       const m = /^1?(>>?)(?![&>])(.*)$/.exec(raw[i]);
       if (m) { const f = m[2] || raw[i + 1]; if (f) put(f, m[1] === '>>'); }
@@ -802,6 +822,44 @@ function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyC
     const flags = ws.slice(1).filter((a) => a.startsWith('-'));
     for (const f of ws.slice(1).filter((a) => !a.startsWith('-'))) put(f, flags.some((a) => /^-[a-z]*a|^--append$/.test(a)));
   }
+  return wrote;
+}
+
+/** HEAVY-LOCK-BG-LAPSE-189 S1: the files a segment writes by means other than a heredoc body: a `>` /
+ *  `>>` / `&>` / `>|` target, the destination of cp / mv / install (and mv's sources, now gone), the
+ *  files of sed -i / perl -i, and tee's files. A heredoc writer's own targets (heredocWrite's
+ *  keys) are not poisoned, so `cat > f <<EOF` stays readable. */
+function writeTargets(raw: string[], ws: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const m = /^(?:\d*|&)(>>?|>\|)(?![&>])(.*)$/.exec(raw[i]);
+    if (m) { const f = m[2] || raw[i + 1]; if (f && !/^\/dev\//.test(f)) out.push(f); }
+  }
+  const lead = leading(ws);
+  const bin = (lead[0] ?? '').replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.exe$/, '');
+  const args = lead.slice(1);
+  const pos = args.filter((a) => !a.startsWith('-'));
+  if ((bin === 'cp' || bin === 'mv' || bin === 'install') && pos.length >= 2) {
+    const dest = pos[pos.length - 1];
+    out.push(dest);
+    // The destination may be a directory: each source lands under it by its own name.
+    for (const s of pos.slice(0, -1)) out.push(`${dest.replace(/[\\/]+$/, '')}/${s.replace(/\\/g, '/').split('/').pop()}`);
+    if (bin === 'mv') out.push(...pos.slice(0, -1));
+  } else if (bin === 'tee') {
+    out.push(...pos);
+  } else if ((bin === 'sed' || bin === 'perl') && args.some((a) => /^-[a-zA-Z]*i/.test(a) || a.startsWith('--in-place'))) {
+    // The program is the first positional unless -e / -f gave it (their value is the next word).
+    const files: string[] = [];
+    let prog = false;
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '-e' || a === '-f' || a === '--expression' || a === '--file') { prog = true; i++; continue; }
+      if (a.startsWith('-')) continue;
+      files.push(a);
+    }
+    out.push(...(prog ? files : files.slice(1)));
+  }
+  return out;
 }
 
 /** Classify a tool call (any provider: the command-shaped input only). */

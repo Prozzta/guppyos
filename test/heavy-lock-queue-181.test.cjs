@@ -205,7 +205,7 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   // Andy N1: Post frees by the held call id, never by classifying again.
   // HEAVY-LOCK-BG-LAPSE-189: a call held only for an unreadable script is classified again
   // (settle), every other one is freed by its call id alone.
-  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyScriptCtx\(p\.cwd\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING');
+  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyScriptCtx\(p\.cwd\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL');
   assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 2, 'the script is read at PreToolUse, and at Post only by settle');
 };
 test('wiring: the notice on both rails (wake-proof mail + steer); scripts read at Pre; Post frees by the held call id', () => K.wiring());
@@ -328,7 +328,7 @@ const MUTANTS = [
     killer: 'wiring', dies: /THE NOTICE IS SENT AS BUILT \(SYSTEM SENDER \+ WAKE NOW\)/ },
   { name: 'Post re-classifies before freeing (as 130d276c; a changed script keeps the slot)', file: 'src/main/hooks.ts', hooks: true,
     edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {"]],
-    killer: 'wiring', dies: /POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING/ },
+    killer: 'wiring', dies: /POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL/ },
   { name: 'N2 off: a stale waiter still takes a reservation', file: HJF, module: true,
     edits: [["      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }\n", ''],
       // LOCK-WAIT-NOTICES: the drop is made in two places (expire's sweep on schedule, grant's check when

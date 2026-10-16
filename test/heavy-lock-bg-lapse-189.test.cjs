@@ -204,3 +204,71 @@ test('HOOK EARLY RELEASE: never for a holder that is also heavy outright, nor fo
     assert.equal(l.snapshot().length, 1, 'a definite heavy call is freed by its job exiting, not by reclassifying');
   }
 });
+
+// ─── Andy's audit of d2f20abf ───────────────────────────────────────────────────────────
+
+test('CLASSIFIER B1: a `cd $S` target and the variables reach the path, in $(...) and bash -c too (Andy\'s repros)', (t) => {
+  const d = dir(t).split(path.sep).join('/');
+  fs.writeFileSync(path.join(d, 'light.sh'), 'echo hi\n');
+  fs.writeFileSync(path.join(d, 'suite.sh'), `${SUITE}\n`);
+  fs.writeFileSync(path.join(d, 'ok.cjs'), 'console.log(1)\n');
+  const ctx = HookServer.heavyScriptCtx(os.tmpdir());
+  // (a) the cd target is expanded: not the glued X/$S
+  assert.deepEqual(classifyCommand(`cd ${os.tmpdir().split(path.sep).join('/')}; S=${d}; cd $S; bash light.sh`, 0, ctx), { heavy: false }, 'B1a: cd $S');
+  // (b) the substitution is classified with this point's variables and cd
+  assert.deepEqual(classifyCommand(`J=${d}; X="$(bash $J/light.sh)"`, 0, ctx), { heavy: false }, 'B1b: $J inside $(...)');
+  assert.deepEqual(classifyCommand(`J=${d}; for f in a b; do echo $(node $J/ok.cjs); done`, 0, ctx), { heavy: false }, 'B1b: $J inside $(...) in a loop');
+  assert.deepEqual(classifyCommand(`cd ${d}; X="$(bash light.sh)"`, 0, ctx), { heavy: false }, 'B1b: the cd reaches $(...)');
+  assert.deepEqual(classifyCommand(`J=${d}; bash -c "cd $J; bash light.sh"`, 0, ctx), { heavy: false }, 'B1b: $J inside bash -c');
+  // ...and a heavy script found the same way is a DEFINITE suite, not provisional
+  for (const cmd of [`J=${d}; X="$(bash $J/suite.sh)"`, `cd ${d}; X="$(bash suite.sh)"`, `J=${d}; bash -c "cd $J; bash suite.sh"`, `S=${d}; cd /; cd $S; bash suite.sh`]) {
+    const c = classifyCommand(cmd, 0, ctx);
+    assert.equal(c.kind, 'suite', cmd);
+    assert.equal(c.provisional, undefined, cmd);
+  }
+});
+
+test('CLASSIFIER S1: a later write by other means (>>, cp, mv, sed -i, tee) makes a heredoc-made file unknown: provisional, not light', (t) => {
+  const d = dir(t).split(path.sep).join('/');
+  fs.writeFileSync(path.join(d, 'suite.sh'), `${SUITE}\n`);
+  fs.writeFileSync(path.join(d, 'light.sh'), 'echo hi\n');
+  const ctx = HookServer.heavyScriptCtx(d);
+  const H = made('run.sh', 'echo hi', '');
+  for (const w of [`echo '${SUITE}' >> run.sh`, 'cp suite.sh run.sh', 'mv suite.sh run.sh', "sed -i 's/hi/x/' run.sh", "perl -pi -e 's/hi/x/' run.sh", 'echo x | tee run.sh', `echo '${SUITE}' > run.sh`]) {
+    assert.equal(classifyCommand(`${H}${w}\nbash run.sh`, 0, ctx).provisional, true, `S1: ${w}`);
+  }
+  // A poisoned file that also exists on disk is NOT read from disk (the disk holds the old text).
+  assert.equal(classifyCommand(`${made('light.sh', 'echo hi', '')}cp suite.sh light.sh\nbash light.sh`, 0, ctx).provisional, true, 'S1: not the disk copy');
+  // cp into a directory: the copy lands under its own name.
+  const HD = made('d/run.sh', 'echo hi', '');
+  assert.equal(classifyCommand(`${HD}cp x/run.sh d/\nbash d/run.sh`, 0, ctx).provisional, true, 'S1: cp x/run.sh d/ rewrites d/run.sh');
+  assert.deepEqual(classifyCommand(`${HD}cp x/other.sh d/\nbash d/run.sh`, 0, ctx), { heavy: false }, 'cp x/other.sh d/ leaves d/run.sh as written');
+  // Out of scope (HEAVY-LOCK-SHAPES-189): a file on DISK edited earlier in the command is read as it is now.
+  assert.deepEqual(classifyCommand("sed -i 's/hi/x/' light.sh && bash light.sh", 0, ctx), { heavy: false });
+  // Unchanged: a heredoc writer's own target, an append to a known file, and writes to other files.
+  assert.deepEqual(classifyCommand(`${H}bash run.sh`, 0, ctx), { heavy: false });
+  assert.equal(classifyCommand(`cat <<'EOF' >> light.sh\n${SUITE}\nEOF\nbash light.sh`, 0, ctx).kind, 'suite', 'a heredoc append adds to the file\'s text');
+  assert.deepEqual(classifyCommand('bash light.sh > out.log 2>&1; cp light.sh copy.sh; bash light.sh', 0, ctx), { heavy: false });
+  // An append to a file that is already unknown stays unknown.
+  assert.equal(classifyCommand(`cp suite.sh run.sh; cat <<'EOF' >> run.sh\necho hi\nEOF\nbash run.sh`, 0, ctx).provisional, true);
+});
+
+test('LOCK S2: with two provisional calls open, settling one of them light keeps the slot (the other is still unknown)', () => {
+  const rows = [];
+  const l = new HeavyJobLock({ limit: () => 1, setTimer: () => ({}), clearTimer: () => {}, log: (r) => rows.push(r) });
+  const P = { heavy: true, kind: 'bench', why: 'x.sh (a script the lock cannot read yet)', provisional: true };
+  assert.equal(l.acquire('a1', P, 'bash a.sh', 'j1', true).allow, true);
+  assert.equal(l.acquire('a1', P, 'bash b.sh', 'j2', true).allow, true);
+  l.settle('a1', 'j1', () => ({ heavy: false }));
+  assert.equal(l.snapshot().length, 1, 'S2: j2 is still an unknown job, so the slot is kept');
+  assert.equal(rows.some((r) => r.action === 'settled-light'), false);
+});
+
+test('LOCK N-a: a reclassify that throws keeps the hold', () => {
+  const l = new HeavyJobLock({ limit: () => 1, setTimer: () => ({}), clearTimer: () => {}, log: () => {} });
+  l.acquire('a1', { heavy: true, kind: 'bench', why: 'x', provisional: true }, 'bash a.sh', 'j1', true);
+  l.settle('a1', 'j1', () => { throw new Error('reader broke'); });
+  assert.equal(l.snapshot().length, 1, 'N-a: a throw is not a light verdict');
+  l.settle('a1', 'j1', () => ({ heavy: false }));
+  assert.equal(l.snapshot().length, 0, 'and the same call settles once it reads light');
+});
