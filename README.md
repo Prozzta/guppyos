@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.88" src="https://img.shields.io/badge/version-1.1.88-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.89" src="https://img.shields.io/badge/version-1.1.89-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -273,9 +273,12 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **A TES crew that behaves** (1.1.87) — crew stay at their desks while they work, no longer
   walk over the console or through other chairs, show thought clouds and go for coffee, and the walls
   stay crisp after a resize.
-- **A Graphics setting and a bridge that talks** (1.1.88, the current release) — Settings
+- **A Graphics setting and a bridge that talks** (1.1.88) — Settings
   chooses Auto, GPU or CPU only; the Requests badge counts only open asks; the TES crew speak
   the pack's own lines to each other, and the floor fills its pane at whole device pixels.
+- **The claim ledger in Settings** (1.1.89, the current release) — Settings shows and edits
+  each agent's claims, a working agent that goes silent is flagged, and the TES station keeps its
+  proportions with thought clouds that point at the head.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.

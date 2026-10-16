@@ -11,9 +11,39 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
-## [1.1.89] — unreleased
+## [1.1.89] — 2026-10-16
+
+**The claim ledger in Settings, a warning when a working agent goes silent, and a sharper, steadier
+TES bridge.** Rollback: 1.1.88 (reinstall).
+
+### Added
+
+- **The claim ledger panel (Settings > Memory & Knowledge).** It sets the ledger level, shows each
+  agent's claims with status badges, filters and search, explains why a claim is believed from its
+  history, reverts a step, takes your own preferences (400 characters at most) and exports an
+  agent's ledger. Every change is an appended event, except the purge: a Human-only step behind a
+  typed word and a confirmation dialog that removes a claim from the ledger and its backups. An
+  interrupted purge is finished or dropped the next time the ledger is read.
+
+- **A working agent that goes silent is now flagged.** When an agent's turn is open but no hook has
+  arrived for 15 minutes and no tool call is in progress, god gets one decision item, and the live
+  roster, fleet.json and the agent's card show "silent" with how long. A tool call open for more
+  than an hour shows as "tool open". Nothing is stopped, woken or restarted.
 
 ### Fixed
+
+- **The heavy-job lock no longer lets a heavy job through when its script is written in the same
+  call.** A script the lock cannot read yet is treated as heavy until it can be read, a script made
+  from a heredoc earlier in the command is judged by that text, and a background job held only for
+  such a script is released once it reads light.
+
+- **The TES station keeps its proportions and stays sharp.** The scene is fitted to the hull's own
+  frame without stretching, and a desk or console drawn in front of someone walking behind it no
+  longer turns sharp against the rest of the floor.
+
+- **Thought clouds point at the head, and their text is sharp on both floors.** The tail now ends
+  over the agent's head (in 1.1.88 it was up to 41 px to the left), and the text is drawn at its
+  real size on the screen instead of being scaled with the room.
 
 - **A mail channel degrade no longer lasts for good.** When it was for missing hooks, the agent's
   own hooks bring it back at its next wake; a respawn restores it in every case (Codex: the spawn
