@@ -74,14 +74,16 @@ module.exports = async (drill) => {
     child.send({ host: 'start', tree: drill.tree, cfg, stepMs: STEP_MS });
     const runsNow = async () => { hostRuns = null; child.send({ host: 'runs' }); for (let i = 0; i < 100 && hostRuns === null; i++) await pause(10); return hostRuns; };
 
-    const search = async () => {
+    const search = async (deadlineMs) => {
       const t0 = Date.now();
-      const r = await client.request('search', { query: 'zeppelin hangar code', wing: 'w2', results: 3, caller: 'w2', mode: 'live' });
+      const r = await client.request('search', { query: 'zeppelin hangar code', wing: 'w2', results: 3, caller: 'w2', mode: 'live' }, deadlineMs);
       return { exit: r.exit, ms: Date.now() - t0, hits: Array.isArray(r.json) ? r.json.length : 0, error: r.error ?? null };
     };
-    // The startup backfill (joined) and one cold search: the client is warm from here.
+    // The startup backfill (joined) and one first search that loads the model: the client is
+    // warm from here. The backfill's ok reply already marks the client warm, so this setup search
+    // would get the quiet 250 ms budget; give it an explicit one (the suite's load once took 262 ms).
     const bf = await client.request('backfill', {}, 60_000);
-    const cold = await search();
+    const cold = await search(30_000);
     if (fatal) return { ok: false, reason: 'the worker failed', error: fatal };
     const chunks = withParts(Array.from({ length: PARTS }, (_, i) => {
       const content = `fact · - · 2026-10-16\nclaim ${i}: the quartz pallet sits in aisle four, row ${i}`;
