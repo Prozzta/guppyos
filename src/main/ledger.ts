@@ -43,7 +43,11 @@ const CLOSE_KEYS = new Set(['id', 'reason']);
 export const LEDGER_CLOSE_MAX = 50;
 /** A card id as tasks.json spells them ("READS-181", "T5b"; the shape mailLedger.cardIdValue keeps). */
 const CARD_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
-const MEMORY_KEYS = new Set(['append', 'lesson']);
+// CL-M4-FORWARD-PATH S3: key / supersedes / separate / reason reach the claim (level writer only;
+// memory.md has no keys, so below writer they are ignored).
+const MEMORY_KEYS = new Set(['append', 'lesson', 'key', 'supersedes', 'separate', 'reason']);
+const MEMORY_CLAIM_ID_RE = /^c-[0-9a-f]{12,32}$/;
+const MEMORY_REASONS = new Set(['changed', 'corrected', 'moved']);
 /** Where `lesson: true` text goes: the pinned section every agent's memory.md starts with. */
 const LESSONS_HEADING = '## How I work (standing lessons)';
 const OPS_KEPT = 200;
@@ -58,7 +62,17 @@ export interface LedgerCard {
 export interface LedgerMessage { to: string; act: string; subject: string; body: string; conversation?: string; in_reply_to?: string | null; supersedes?: string[]; card?: string }
 /** REQUESTS-BADGE-84 D/E: close an open ask by hand, with the reason it records. */
 export interface LedgerClose { id: string; reason: string }
-export interface LedgerOp { op: string; card?: LedgerCard; message?: LedgerMessage; close?: LedgerClose[]; memory?: { append: string; lesson?: boolean } }
+export interface LedgerMemory { append: string; lesson?: boolean; key?: string; supersedes?: string[]; separate?: string[]; reason?: 'changed' | 'corrected' | 'moved' }
+export interface LedgerOp { op: string; card?: LedgerCard; message?: LedgerMessage; close?: LedgerClose[]; memory?: LedgerMemory }
+/** The note verb's args for a memory part (the claim route). */
+export type MemoryNoteArgs = { kind: 'fact' | 'lesson'; text: string; pin?: true; key?: string; supersedes?: string[]; separate?: string[]; reason?: string };
+export function memoryNoteArgs(m: LedgerMemory): MemoryNoteArgs {
+  return {
+    kind: m.lesson ? 'lesson' : 'fact', text: m.append.trim(), ...(m.lesson ? { pin: true as const } : {}),
+    ...(m.key !== undefined ? { key: m.key } : {}), ...(m.supersedes ? { supersedes: m.supersedes } : {}),
+    ...(m.separate ? { separate: m.separate } : {}), ...(m.reason ? { reason: m.reason } : {}),
+  };
+}
 
 export interface LedgerDeps {
   /** The caller (from the authenticated URL). */
@@ -77,7 +91,12 @@ export interface LedgerDeps {
    * part is noted as a claim through `note` (main wires it to the endpoint's note verb with origin
    * 'ledger-route'); below 'writer', or when absent, the memory part goes to memory.md as before.
    */
-  memoryClaim?: { level: LedgerLevel; note(args: { kind: 'fact' | 'lesson'; text: string; pin?: true }): Promise<{ ok: boolean; id?: string; error?: string }> } | null;
+  memoryClaim?: {
+    level: LedgerLevel;
+    note(args: MemoryNoteArgs): Promise<{ ok: boolean; id?: string; error?: string }>;
+    /** S3: the endpoint's card-key refusal, checked with everything else before anything is written; null = ok. */
+    precheck?(args: MemoryNoteArgs): string | null;
+  } | null;
   /**
    * REQUESTS-BADGE-84 D/E: who the caller is for the open ask `id`: 'owner' (the caller owes it:
    * it is in the caller's own ledger), 'requester' (the caller sent it: it is in another agent's
@@ -186,7 +205,18 @@ export function parseLedgerOp(raw: unknown): { ok: true; op: LedgerOp } | { ok: 
     if (typeof m.append !== 'string' || !m.append.trim() || m.append.length > LEDGER_MEMORY_MAX) return { ok: false, error: `memory.append: non-empty text of at most ${LEDGER_MEMORY_MAX} chars` };
     if (m.lesson !== undefined && typeof m.lesson !== 'boolean') return { ok: false, error: 'memory.lesson: true or false' };
     if (m.lesson === true && /^##\s/m.test(m.append)) return { ok: false, error: 'memory.append: a lesson may not contain a "## " heading (it would end the standing-lessons section); use ### or bullets' };
-    op.memory = { append: m.append, ...(m.lesson === true ? { lesson: true } : {}) };
+    if (m.key !== undefined && (typeof m.key !== 'string' || !m.key || m.key.length > 200)) return { ok: false, error: 'memory.key: a key of at most 200 chars' };
+    const claimIds = (v: unknown): v is string[] => Array.isArray(v) && v.length > 0 && v.length <= 10 && v.every((s) => typeof s === 'string' && MEMORY_CLAIM_ID_RE.test(s)) && new Set(v).size === v.length;
+    if (m.supersedes !== undefined && !claimIds(m.supersedes)) return { ok: false, error: 'memory.supersedes: 1 to 10 of your claim ids (c-...)' };
+    if (m.separate !== undefined && !claimIds(m.separate)) return { ok: false, error: 'memory.separate: 1 to 10 of your claim ids (c-...)' };
+    if (m.supersedes !== undefined && m.separate !== undefined) return { ok: false, error: 'memory: choose supersedes or separate, not both' };
+    if (m.supersedes !== undefined && (typeof m.reason !== 'string' || !MEMORY_REASONS.has(m.reason))) return { ok: false, error: 'memory.supersedes needs "reason": "changed", "corrected" or "moved"' };
+    if (m.supersedes === undefined && m.reason !== undefined) return { ok: false, error: 'memory.reason goes with memory.supersedes' };
+    op.memory = {
+      append: m.append, ...(m.lesson === true ? { lesson: true } : {}), ...(m.key !== undefined ? { key: m.key as string } : {}),
+      ...(m.supersedes !== undefined ? { supersedes: m.supersedes as string[] } : {}), ...(m.separate !== undefined ? { separate: m.separate as string[] } : {}),
+      ...(m.reason !== undefined ? { reason: m.reason as LedgerMemory['reason'] } : {}),
+    };
   }
   return { ok: true, op };
 }
@@ -317,6 +347,9 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
     if (len > CLAIM_TEXT_MAX) {
       return { status: 400, body: { ok: false, line: `refused: memory.append is ${len} characters. Your claim ledger is on, so a memory note is one claim of at most ${CLAIM_TEXT_MAX} characters (never cut): split it into several notes` } };
     }
+    // S3: a card.* note meeting a live same-key claim must choose first; the whole op is refused.
+    const why = deps.memoryClaim!.precheck?.(memoryNoteArgs(op.memory)) ?? null;
+    if (why) return { status: 409, body: { ok: false, line: `refused: ${why}` } };
   }
   let lessonText: string | null = null;
   if (op.memory?.lesson && !rec?.memory && !asClaim) {
@@ -425,7 +458,7 @@ export function applyLedgerOp(raw: unknown, deps: LedgerDeps): LedgerReply | Pro
   if (op.memory && asClaim && !rec.memory) {
     const m = op.memory;
     const r0 = rec;
-    return deps.memoryClaim!.note({ kind: m.lesson ? 'lesson' : 'fact', text: m.append.trim(), ...(m.lesson ? { pin: true as const } : {}) }).then((r) => {
+    return deps.memoryClaim!.note(memoryNoteArgs(m)).then((r) => {
       if (!r.ok) return fail('memory', `the claim was refused: ${r.error ?? 'no reason given'}`);
       try {
         r0.memory = Buffer.byteLength(m.append, 'utf8');

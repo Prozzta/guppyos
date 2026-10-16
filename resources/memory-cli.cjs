@@ -15,15 +15,19 @@ const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized: 5 };
 const REQUEST_TIMEOUT_MS = 10000;
 const USAGE = 'usage: memory {search QUERY [--wing W] [--room R] [--results N] [--since ISO] [--before ISO] [--history|--all] [--kind K] [--key K] | wake-up [--wing W] | status} [--format json]\n'
   + '  claim ledger (when it is on for you):\n'
-  + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
+  + '  memory note [--kind fact|decision|lesson|preference|procedure|pointer|todo] [--key K] [--ref TYPE:VALUE]... [--ttl 30d] [--supersedes ID --reason changed|corrected|moved [--reason-text TEXT]]... [--separate ID[,ID]|--cancel] [--pin] [--at ISO] [--from-mail MSGID] TEXT\n'
   + '    --supersedes may name any live claim in your own ledger, even if it was not offered as a candidate; use it when the prior fact changed, was corrected, or moved (the --reason). A recap cites the claim id; it does not restate the value.\n'
+  + '    When related claims exist, the note is not written until you choose: --supersedes (replace), --separate ID[,ID] (name the listed claims that stay true beside it), or --cancel. A claim with the same --key is listed first; key a card\'s notes by its card id (--key card.cl-m4-forward-path).\n'
   + '  memory retract ID... --why TEXT | memory accept ID... | memory dismiss ID...\n'
   + '  memory reconcile A B --answer keep-both|supersedes|retract [--why TEXT] | memory used ID [--op helped|hurt|hit|view] [--card CARD]\n'
   + '  memory export --complete   (a complete memory.md from your ledger, before the ledger is turned down)\n';
 /** CLAIM-LEDGER W1: the claim verbs; the app checks the agent's level. */
+const NOTE_KINDS = new Set(['fact', 'decision', 'lesson', 'preference', 'procedure', 'pointer', 'todo']);
 const CLAIM_VERBS = new Set(['note', 'retract', 'accept', 'dismiss', 'used', 'reconcile', 'export']);
 const CLAIM_VALUE_FLAGS = { '--kind': 'kind', '--key': 'key', '--ttl': 'ttl', '--at': 'at', '--from-mail': 'fromMail', '--why': 'text', '--answer': 'answer', '--op': 'op', '--card': 'card', '--reason': 'reason', '--reason-text': 'reasonText' };
 const CLAIM_LIST_FLAGS = { '--ref': 'refs', '--supersedes': 'supersedes' };
+/** A `--separate` value: claim ids, comma-separated (anything else is the note's text). */
+const SEPARATE_IDS_RE = /^c-[0-9A-Za-z]+(,c-[0-9A-Za-z]+)*$/;
 
 /** Parse argv: global flags, the command, then its options and positional text. */
 function parseArgs(argv) {
@@ -62,7 +66,14 @@ function parseArgs(argv) {
     }
     if (flag && CLAIM_VERBS.has(out.cmd)) {
       if (flag === '--pin') { out.args.pin = true; i += 1; continue; }
-      if (out.cmd === 'note' && (flag === '--separate' || flag === '--cancel')) { out.args[flag.slice(2)] = true; i += 1; continue; }
+      // CL-M4-FORWARD-PATH: --separate names the claims it keeps apart (--separate c-a,c-b or
+      // --separate=c-a,c-b); bare, it still parses, and the app answers with the offer.
+      if (out.cmd === 'note' && flag === '--separate') {
+        const next = eq > 0 ? t.slice(eq + 1) : a[i + 1];
+        if (eq > 0 || (typeof next === 'string' && SEPARATE_IDS_RE.test(next))) { out.args.separate = next; i += step(); continue; }
+        out.args.separate = true; i += 1; continue;
+      }
+      if (out.cmd === 'note' && flag === '--cancel') { out.args.cancel = true; i += 1; continue; }
       if (flag === '--complete' && out.cmd === 'export') { out.args.complete = true; i += 1; continue; }
       if (CLAIM_VALUE_FLAGS[flag]) { out.args[CLAIM_VALUE_FLAGS[flag]] = val(); i += step(); continue; }
       if (CLAIM_LIST_FLAGS[flag]) { const k = CLAIM_LIST_FLAGS[flag]; (out.args[k] = out.args[k] || []).push(val()); i += step(); continue; }
@@ -72,7 +83,14 @@ function parseArgs(argv) {
     i += 1;
   }
   if (out.cmd === 'search') out.args.query = positional.join(' ');
-  else if (out.cmd === 'note') out.args.text = positional.join(' ');
+  else if (out.cmd === 'note') {
+    // CL-M4-FORWARD-PATH nit 5 (Jim): `memory note lesson TEXT` sets the kind (it used to be stored as
+    // the text of a fact). Only an exact kind word with text after it, and only without --kind.
+    const text = positional.join(' ');
+    const m = /^(\S+)\s+(\S[\s\S]*)$/.exec(text);
+    if (out.args.kind === undefined && m && NOTE_KINDS.has(m[1])) { out.args.kind = m[1]; out.args.text = m[2]; out.kindWord = m[1]; }
+    else out.args.text = text;
+  }
   else if (out.cmd === 'retract' || out.cmd === 'accept' || out.cmd === 'dismiss') out.args.ids = positional;
   else if (out.cmd === 'used') { if (positional[0] !== undefined) out.args.id = positional[0]; out.rest.push(...positional.slice(1)); }
   else if (out.cmd === 'reconcile') { if (positional[0] !== undefined) out.args.a = positional[0]; if (positional[1] !== undefined) out.args.b = positional[1]; out.rest.push(...positional.slice(2)); }
@@ -130,6 +148,7 @@ async function main(argv, env, io = STDIO) {
   if (p.help || !p.cmd) { io.out(USAGE); return p.cmd || p.help ? EXIT.ok : EXIT.usage; }
   if (p.cmd === 'search' || p.cmd === 'wake-up' || p.cmd === 'status' || CLAIM_VERBS.has(p.cmd)) {
     if (p.rest.length) { io.err(`memory: unsupported arguments: ${p.rest.join(' ')}\n`); return EXIT.usage; }
+    if (p.kindWord) io.err(`memory: noted as kind ${p.kindWord} (the first word); use --kind fact to keep the word as text\n`);
     return request(env, p, io);
   }
   io.err(`memory: unknown command "${p.cmd}"; use search, wake-up or status (memory.md and your notes are indexed automatically), or a claim verb: note, retract, accept, dismiss, reconcile, used, export --complete.\n`);

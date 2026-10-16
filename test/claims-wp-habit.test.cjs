@@ -17,6 +17,7 @@ test('W8 measures candidate offers and explicit update/separate decisions withou
   assert.deepEqual(summarizeWriteHabit(rows), {
     offered: 2, replace: 1, separate: 1, separateWithCandidate: 1, cancel: 1, new: 1,
     explicitResolution: 3, replaceShare: 1 / 3,
+    unoffered: 0, bareSeparate: 0, offeredSameKey: 0, replaceSameKey: 0, writes: 3, replaceOfWrites: 1 / 3,
   });
   assert.equal(summarizeWriteHabit([]).replaceShare, null);
 });

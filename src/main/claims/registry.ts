@@ -10,6 +10,10 @@
  *   - Otherwise a new key under a namespace is added (with the namespace's cardinality) and logged.
  *   - A key under no namespace is refused.
  * `agent.<id>.*` matches only the writing agent's own id.
+ * CL-M4-FORWARD-PATH: `card.<card id>` keys a card's notes (card.cl-m4-forward-path). It is MULTI, so
+ * a newer note never supersedes an older one by rule (Jim's calibration: a same-card or same-key rule
+ * removes true facts); the note offer lists same-key claims first and the writer chooses. Card ids are
+ * distinct names (CL-W7 and CL-W8), so a new card key is never refused as a near miss.
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,12 +30,15 @@ export const DEFAULT_KEY_REGISTRY: KeyRegistry = {
     { pattern: 'project.*', cardinality: 'single' },
     { pattern: 'pref.*', cardinality: 'single' },
     { pattern: 'list.*', cardinality: 'multi' },
+    { pattern: 'card.*', cardinality: 'multi' },
   ],
   keys: {},
 };
 
 const KEY_RE = /^[a-z0-9][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*){1,7}$/;
 export const KEY_MAX = 120;
+/** CL-M4-FORWARD-PATH: the namespace of card keys. */
+export const CARD_KEY_PREFIX = 'card.';
 
 export type KeyCheck =
   | { ok: true; cardinality: 'single' | 'multi'; added: boolean }
@@ -49,6 +56,10 @@ export function loadRegistry(hiveRoot: string): KeyRegistry {
   const raw = JSON.parse(readFileSync(p, 'utf8').replace(/^﻿/, '')) as KeyRegistry;
   if (!raw || raw.v !== 1 || !Array.isArray(raw.namespaces) || typeof raw.keys !== 'object' || raw.keys === null) {
     throw new Error(`${KEY_REGISTRY_FILE} is not a v1 key registry`);
+  }
+  // A registry saved before a built-in namespace existed gains it (additive: such keys were refused).
+  for (const ns of DEFAULT_KEY_REGISTRY.namespaces) {
+    if (!raw.namespaces.some((n) => n.pattern === ns.pattern)) raw.namespaces.push({ ...ns });
   }
   return raw;
 }
@@ -112,7 +123,7 @@ export function checkKey(reg: KeyRegistry, key: string, agentId: string, nowIso:
   }
   const known = reg.keys[key];
   if (known) return { ok: true, cardinality: known.cardinality, added: false };
-  const near = nearMiss(reg, key);
+  const near = key.startsWith(CARD_KEY_PREFIX) ? null : nearMiss(reg, key);
   if (near) return { ok: false, error: `unknown key "${key}"; did you mean "${near}"?`, didYouMean: near };
   const ns = namespaceFor(reg, key, agentId);
   if (!ns) {

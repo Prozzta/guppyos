@@ -1,9 +1,11 @@
 /**
  * CL-M4-WP step 3 (design §2): deterministic replacement candidates for a new note.
  *
- * Pool, exactly the three product sources, each bounded to the window before the write (6 h):
- *   own          this agent's own claims with `wt` in the window (its ledger);
- *   search       claim ids this agent's own `memory search` returned in the window (searchLog.ts);
+ * Pool, exactly the three product sources:
+ *   own          this agent's own claims written before the note, its WHOLE ledger (CL-M4-FORWARD-PATH:
+ *                Jim's calibration found the true earlier version mostly outside a 6 h window; a caller
+ *                may still pass `windowMs` to bound it);
+ *   search       claim ids this agent's own `memory search` returned in the 6 h before (searchLog.ts);
  *   working-set  ids in the working-set receipt at that time. The note path does not read a
  *                receipt today (claims/delivery.ts writes receipts.jsonl; nothing on the note path
  *                reads it, and a receipt's `at` is its ledger's last wt, not the delivery time),
@@ -12,8 +14,18 @@
  * Only LIVE claims are offered (not superseded, superseded?, retracted or purged), and never the
  * new note itself. The query is the new note's text. Ranking: reciprocal-rank fusion, k = 60,
  * over a BM25 order (hive-wide document statistics, HiveCorpus) and a vector order of the pool;
- * ties by newest `wt`, then id. The top 3 OWN claims are the replace candidates; another agent's
- * claim in the overall top 3 is returned separately as a reference, never a target.
+ * ties by newest `wt`, then id. The top 5 OWN claims are the replace candidates; another agent's
+ * claim in the overall top 5 is returned separately as a reference, never a target.
+ *
+ * CL-M4-FORWARD-PATH S1 (Jim's audit): BM25 still ranks the whole pool, but only a bounded set gets
+ * a vector: the BM25 top VECTOR_LEXICAL, the newest VECTOR_RECENT, and the note's same-key and
+ * same-card claims (`focus`). A cold first note after an app start then embeds at most about 100
+ * texts, not a whole ledger (1,390 claims: about 36 s, past the CLI's 10 s).
+ *
+ * CL-M4-FORWARD-PATH (Jim's calibration, section 4). Two signals list claims AROUND the fusion: a live
+ * own claim with the note's `--key` is always listed first, marked `same key`; after the top 5, up to
+ * CARD_EXTRA newest own claims sharing a card id with the note (its text or key) are added, marked
+ * `same card`. Both are OFFERS: nothing here supersedes anything.
  *
  * The note CLI (Dwight, step 1) calls collectNoteCandidates; with no candidate it appends at once
  * (marked new), otherwise it shows the candidates and asks replace / separate / cancel.
@@ -21,7 +33,16 @@
 
 export type CandidateSource = 'own' | 'search' | 'working-set';
 export const CANDIDATE_WINDOW_MS = 6 * 3600_000;
-export const CANDIDATE_TOP = 3;
+export const CANDIDATE_TOP = 5;
+/** Same-card claims listed after the top (newest first), when the fusion did not already show them. */
+export const CARD_EXTRA = 3;
+/** Claim vectors the live scorer keeps between notes (by text). */
+export const EMBED_CACHE_MAX = 5000;
+/** S1: the vector order covers the BM25 top this many ... */
+export const VECTOR_LEXICAL = 80;
+/** ... the newest this many (a paraphrase shares no term) ... */
+export const VECTOR_RECENT = 20;
+/** ... and the note's same-key / same-card claims; everything else is ranked by BM25 alone. */
 export const RRF_K = 60;
 export const EXCERPT_CHARS = 80;
 
@@ -133,22 +154,44 @@ export function cosineOrder(q: ArrayLike<number>, docs: Array<{ id: string; vec:
     .map((x) => x.id);
 }
 
-export type Scorer = (query: string, pool: PoolClaim[]) => CandidateScores | Promise<CandidateScores>;
+/** `focus`: pool ids that must get a vector whatever their BM25 rank (the note's same-key and same-card claims). */
+export type Scorer = (query: string, pool: PoolClaim[], focus?: ReadonlySet<string>) => CandidateScores | Promise<CandidateScores>;
+
+/**
+ * S1: the pool claims that get a vector: the BM25 top `lexicalN` (in `lexical` order), the newest
+ * `recentN` (wt, then id), and every `focus` id in the pool. Pure; never more than lexicalN + recentN + focus.
+ */
+export function vectorPool(pool: PoolClaim[], lexical: string[], focus: ReadonlySet<string> = new Set(), lexicalN = VECTOR_LEXICAL, recentN = VECTOR_RECENT): PoolClaim[] {
+  const byId = new Map(pool.map((c) => [c.id, c]));
+  const keep = new Set<string>(lexical.filter((id) => byId.has(id)).slice(0, Math.max(0, lexicalN)));
+  const newest = pool.slice().sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const c of newest.slice(0, Math.max(0, recentN))) keep.add(c.id);
+  for (const id of focus) if (byId.has(id)) keep.add(id);
+  return pool.filter((c) => keep.has(c.id));
+}
 
 /**
  * BM25 plus cosine on `embed`. `corpus` gives the document statistics (Jim M1): the LIVE scorer
  * passes the hive-wide ones (HiveCorpus); left out, the pool's own are used, which floors every term
  * in a small pool (in a pool of 2, each term's idf is <= 0) and is for tests and studies only.
  */
-export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus)): Scorer {
-  return async (query, pool) => {
+export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus), cacheMax = EMBED_CACHE_MAX): Scorer {
+  // CL-M4-FORWARD-PATH: the own pool is the whole ledger, so claim vectors are kept by text (a claim's
+  // text never changes; a purged one is not live, so never pooled). The query is embedded every time.
+  // S1: only vectorPool's claims are embedded (BM25 ranks the whole pool), so a cold cache costs at
+  // most about VECTOR_LEXICAL + VECTOR_RECENT + focus texts. Eviction is oldest-inserted first.
+  const cache = new Map<string, ArrayLike<number>>();
+  return async (query, pool, focus) => {
     if (!pool.length) return { lexical: [], vector: [] };
     const stats = typeof corpus === 'function' ? corpus() : corpus;
-    const vecs = await embed([query, ...pool.map((c) => c.text)]);
-    return {
-      lexical: bm25Order(query, pool, stats),
-      vector: cosineOrder(vecs[0], pool.map((c, i) => ({ id: c.id, vec: vecs[i + 1] })))
-    };
+    const lexical = bm25Order(query, pool, stats);
+    const vpool = vectorPool(pool, lexical, focus);
+    const missing = [...new Set(vpool.map((c) => c.text).filter((t) => !cache.has(t)))];
+    const vecs = await embed([query, ...missing]);
+    missing.forEach((t, i) => cache.set(t, vecs[i + 1]));
+    const out = { lexical, vector: cosineOrder(vecs[0], vpool.map((c) => ({ id: c.id, vec: cache.get(c.text)! }))) };
+    while (cache.size > Math.max(cacheMax, vpool.length)) cache.delete(cache.keys().next().value as string);
+    return out;
   };
 }
 
@@ -168,6 +211,8 @@ export interface NoteCandidate {
   rank: number;
   /** True: the writer's own claim, a valid `--supersedes` target. False: a REFERENCE only. */
   replaceable: boolean;
+  /** CL-M4-FORWARD-PATH: why it is listed outside the fusion order (an offer, never a supersede). */
+  why?: 'same key' | 'same card';
 }
 
 /** Why a source contributed nothing: `unwired` (no reader on this path), `error` (its reader threw). */
@@ -188,6 +233,17 @@ export interface CandidateResult {
   pool: number;
 }
 
+/**
+ * The card ids in a text (Jim's calibration rule): upper-case hyphenated tokens like CL-M4-FORWARD-PATH,
+ * a trailing build number dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS). A card key
+ * (card.cl-m4-forward-path, registry.ts) names its card too.
+ */
+export function cardIds(text: string, key?: string): string[] {
+  const fromKey = key?.startsWith('card.') ? key.slice(5).toUpperCase() : '';
+  const toks = `${text} ${fromKey}`.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? [];
+  return [...new Set(toks.map((t) => t.replace(/-\d+$/, '')).filter((t) => t.includes('-')))];
+}
+
 export interface CandidateDeps {
   /** This agent's own claims written in [since, at] (ledger), with derived status. */
   ownClaims(agentId: string, since: Date, at: Date): PoolClaim[];
@@ -203,8 +259,12 @@ export interface CandidateDeps {
 export interface CollectOptions {
   /** Ids never offered (the new note's own id, a draft's). */
   excludeIds?: string[];
+  /** Bound the OWN pool to this window before the write; absent = the whole ledger. */
   windowMs?: number;
   top?: number;
+  /** The new note's `--key`: a live own claim with the same key is listed first. */
+  key?: string;
+  cardExtra?: number;
 }
 
 /** A one-line excerpt of at most `n` characters. */
@@ -219,8 +279,7 @@ export function titleOf(c: Pick<PoolClaim, 'key' | 'text'>): string {
 }
 
 export async function collectNoteCandidates(d: CandidateDeps, agentId: string, text: string, at: Date, o: CollectOptions = {}): Promise<CandidateResult> {
-  const windowMs = o.windowMs ?? CANDIDATE_WINDOW_MS;
-  const since = new Date(at.getTime() - windowMs);
+  const since = new Date(o.windowMs === undefined ? 0 : at.getTime() - o.windowMs);
   const excluded: ExcludedSource[] = [];
   const sources = new Map<string, Set<CandidateSource>>();
   const claims = new Map<string, PoolClaim>();
@@ -238,18 +297,38 @@ export async function collectNoteCandidates(d: CandidateDeps, agentId: string, t
   }
   const skip = new Set(o.excludeIds ?? []);
   const pool = [...claims.values()].filter((c) => c.status === 'live' && !skip.has(c.id) && Date.parse(c.wt) <= at.getTime());
+  const cards = new Set(cardIds(text, o.key));
+  // S1: the note's own same-key and same-card claims always get a vector.
+  const focus = new Set(pool.filter((c) => c.owner === agentId && ((o.key !== undefined && c.key === o.key) || cardIds(c.text, c.key).some((x) => cards.has(x)))).map((c) => c.id));
   let ranking: CandidateResult['ranking'] = 'rrf';
   let scores: CandidateScores;
-  try { scores = pool.length ? await d.score(text, pool) : { lexical: [], vector: [] }; } catch { scores = { lexical: [], vector: [] }; ranking = 'recency'; }
+  try { scores = pool.length ? await d.score(text, pool, focus) : { lexical: [], vector: [] }; } catch { scores = { lexical: [], vector: [] }; ranking = 'recency'; }
   const top = Math.max(0, o.top ?? CANDIDATE_TOP);
   const ranked = rankCandidates(pool, scores, pool.length);
-  const show = (c: RankedCandidate, rank: number): NoteCandidate => ({
+  const show = (c: RankedCandidate, rank: number, why?: NoteCandidate['why']): NoteCandidate => ({
     id: c.id, title: titleOf(c), date: c.wt, excerpt: excerptOf(c.text), owner: c.owner, status: 'live' as const,
-    sources: (['own', 'search', 'working-set'] as const).filter((s) => sources.get(c.id)?.has(s)), rank, replaceable: c.owner === agentId
+    sources: (['own', 'search', 'working-set'] as const).filter((s) => sources.get(c.id)?.has(s)), rank, replaceable: c.owner === agentId,
+    ...(why ? { why } : {})
   });
+  const own = ranked.filter((c) => c.owner === agentId);
+  const newest = (a: RankedCandidate, b: RankedCandidate): number => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  // Same key first (an offer: the writer still chooses), then the fusion's top, then same-card extras.
+  const sameKey = o.key ? own.filter((c) => c.key === o.key).sort(newest).slice(0, Math.max(1, top)) : [];
+  const listed = new Set(sameKey.map((c) => c.id));
+  const fused = own.filter((c) => !listed.has(c.id)).slice(0, top);
+  for (const c of fused) listed.add(c.id);
+  const sameCard = cards.size
+    ? own.filter((c) => !listed.has(c.id) && cardIds(c.text, c.key).some((x) => cards.has(x))).sort(newest).slice(0, Math.max(0, o.cardExtra ?? CARD_EXTRA))
+    : [];
+  type Pick = [RankedCandidate, NoteCandidate['why']];
+  const picked: Pick[] = [
+    ...sameKey.map((c): Pick => [c, 'same key']),
+    ...fused.map((c): Pick => [c, undefined]),
+    ...sameCard.map((c): Pick => [c, 'same card'])
+  ];
   return {
-    // Replace targets: the writer's own claims only, best first (Jim S1).
-    candidates: ranked.filter((c) => c.owner === agentId).slice(0, top).map((c, i) => show(c, i + 1)),
+    // Replace targets: the writer's own claims only (Jim S1).
+    candidates: picked.map(([c, why], i) => show(c, i + 1, why)),
     // Another agent's claim is shown only where it ranks in the overall top, and only for reference.
     references: ranked.slice(0, top).filter((c) => c.owner !== agentId).map((c, i) => show(c, i + 1)),
     excluded,

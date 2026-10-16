@@ -79,7 +79,7 @@ const claim = (n, o = {}) => ({ id: id(n), owner: 'a1', wt: new Date(T0 - n * 60
 test('rankCandidates: RRF k = 60 over the two orders; ties by newest wt, then id; top 3', () => {
   const pool = [claim(1), claim(2), claim(3), claim(4), claim(5)];
   // 3: lex #1 + vec #2; 1: lex #2 + vec #1; 4: vec #3 only; 2, 5: nowhere.
-  const r = C.rankCandidates(pool, { lexical: [id(3), id(1), 'c-ffffffffffff', id(3)], vector: [id(1), id(3), id(4)] });
+  const r = C.rankCandidates(pool, { lexical: [id(3), id(1), 'c-ffffffffffff', id(3)], vector: [id(1), id(3), id(4)] }, 3);
   assert.deepEqual(r.map((c) => c.id), [id(1), id(3), id(4)], '1 and 3 tie on score; 1 is newer');
   assert.equal(r[0].score, 1 / 61 + 1 / 62);
   assert.equal(r[2].score, 1 / 63, 'an id outside the pool and a repeat do not take a rank');
@@ -123,7 +123,7 @@ test('collectNoteCandidates: three sources, live only, never self, 6 h window, e
     resolve: (hits) => hits.map((h) => all.get(h.id)).filter(Boolean),
     score: (q, pool) => ({ lexical: pool.map((c) => c.id).sort(), vector: [] })
   };
-  const r = await C.collectNoteCandidates(deps, 'a1', 'invented new note', at, { excludeIds: [id(5)] });
+  const r = await C.collectNoteCandidates(deps, 'a1', 'invented new note', at, { excludeIds: [id(5)], windowMs: 6 * H });
   // Jim S1: another agent's claim is a REFERENCE, never a replace candidate.
   assert.deepEqual(r.candidates.map((c) => [c.id, c.sources, c.owner, c.replaceable]), [[id(1), ['own', 'search'], 'a1', true]]);
   assert.deepEqual(r.references.map((c) => [c.id, c.sources, c.owner, c.replaceable]), [[id(3), ['search'], 'b9', false]]);
@@ -131,12 +131,12 @@ test('collectNoteCandidates: three sources, live only, never self, 6 h window, e
   assert.deepEqual(r.excluded, [{ source: 'working-set', reason: 'unwired' }]);
   assert.equal(r.ranking, 'rrf');
   // A source that throws is excluded as an error; the others still answer. A failed scorer falls back to recency.
-  const r2 = await C.collectNoteCandidates({ ...deps, searchHits: () => { throw new Error('x'); }, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at);
+  const r2 = await C.collectNoteCandidates({ ...deps, searchHits: () => { throw new Error('x'); }, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at, { windowMs: 6 * H, top: 3 });
   assert.deepEqual(r2.excluded, [{ source: 'search', reason: 'error' }]);
   assert.deepEqual(r2.candidates.map((c) => [c.id, c.sources, c.rank]), [[id(1), ['own'], 1], [id(5), ['own'], 2]]);
   assert.deepEqual(r2.references.map((c) => [c.id, c.sources]), [[id(3), ['working-set']]]);
   // A reference shows only where it ranks inside the overall top: with top 1, id(3) (2nd) does not.
-  const r2b = await C.collectNoteCandidates({ ...deps, searchHits: undefined, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at, { top: 1 });
+  const r2b = await C.collectNoteCandidates({ ...deps, searchHits: undefined, workingSetIds: () => [{ id: id(3), wing: 'b9' }], score: () => { throw new Error('y'); } }, 'a1', 'q', at, { top: 1, windowMs: 6 * H });
   assert.deepEqual([r2b.candidates.map((c) => c.id), r2b.references], [[id(1)], []]);
   assert.equal(r2.ranking, 'recency');
   const r3 = await C.collectNoteCandidates({ ...deps, ownClaims: () => { throw new Error('torn'); }, searchHits: undefined }, 'a1', 'q', at);
@@ -165,8 +165,10 @@ test('ledgerCandidateDeps: own claims by wt from the verified ledger, search hit
   assert.deepEqual(d.resolve(d.searchHits('a1', new Date(T0))).map((c) => [c.id, c.owner, c.status]), [[id(3), 'b9', 'superseded']]);
   assert.throws(() => d.ownClaims('nobody', new Date(0), new Date(T0)), /not verified/);
   assert.equal(C.ledgerCandidateDeps({ ledger: () => null, score: () => ({ lexical: [], vector: [] }) }).searchHits, undefined, 'no log: unwired');
-  const r = await C.collectNoteCandidates(d, 'a1', 'q', new Date(T0));
-  assert.deepEqual(r.candidates.map((c) => c.id), [id(1)], 'the 8 h old claim is out of the window');
+  const r = await C.collectNoteCandidates(d, 'a1', 'q', new Date(T0), { windowMs: 6 * H });
+  assert.deepEqual(r.candidates.map((c) => c.id), [id(1)], 'the 8 h old claim is out of a 6 h window');
+  // CL-M4-FORWARD-PATH: by default the own pool is the whole ledger.
+  assert.deepEqual((await C.collectNoteCandidates(d, 'a1', 'q', new Date(T0))).candidates.map((c) => c.id), [id(1), id(2)]);
   assert.deepEqual(r.references, [], 'the superseded search hit is not offered, not even for reference');
 });
 

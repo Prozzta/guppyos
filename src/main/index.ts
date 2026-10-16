@@ -98,7 +98,7 @@ import { BoardStatusWriter } from './boardStatus';
 import { FloorDigest, FLOOR_DIGEST_DEFAULTS, FLOOR_DIGEST_FILE } from './floorDigest';
 import { HiveManager, archivedForMail, type AgentMeta, type ArchiveReason, type HiveMessage, type HiveTask } from './hive';
 import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
-import { handleClaimVerb } from './claims/endpoint';
+import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
@@ -1447,12 +1447,19 @@ function claimsEndpoint(): ClaimsEndpointDeps | null {
     level: claimLevel,
     exportComplete: (agentId) => claimExport().complete(agentId),
     onReconcile: (agentId, a, b) => reconcileQueueForHive(root).answeredPair(agentId, a, b),
-    noteCandidates: (agentId, text) => claimNoteCandidates(agentId, text),
+    noteCandidates: (agentId, text, o) => claimNoteCandidates(agentId, text, o),
     validateSupersedes: (agentId, ids) => {
       const view = claimsLedgerView(agentId);
       return !!view && ids.length > 0 && new Set(ids).size === ids.length && ids.every((id) => view.claims.some((c) => c.id === id) && view.status(id) === 'live');
     },
-    onNoteChoice: (agentId, choice, ids) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 3) })
+    liveByKey: (agentId, key) => {
+      const view = claimsLedgerView(agentId);
+      if (!view) return [];
+      return view.claims.filter((c) => c.key === key && view.status(c.id) === 'live')
+        .sort((a, b) => Date.parse(b.wt) - Date.parse(a.wt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).map((c) => c.id);
+    },
+    // CL-M4-FORWARD-PATH: counts and flags only (detail), never note or reason text.
+    onNoteChoice: (agentId, choice, ids, detail) => hive.appendLog({ kind: 'claims-note-choice', agentId, choice, targets: ids.slice(0, 10), ...(detail ?? {}) })
   };
 }
 /** CLAIMS-HEAD-ANCHOR (Jim A-2): read every anchored agent of this hive; a break alerts once
@@ -1575,12 +1582,15 @@ function claimsLedgerView(agentId: string) {
   return { claims, status: (id: string) => state.claims[id]?.status };
 }
 const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.registry().agents), ledger: claimsLedgerView });
-function claimNoteCandidates(agentId: string, text: string): Promise<CandidateResult> {
+// CL-M4-FORWARD-PATH: one scorer for the app, so its claim-vector cache outlives a note (the own pool
+// is the whole ledger now).
+const claimCandidateScorer = makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus());
+function claimNoteCandidates(agentId: string, text: string, o: { key?: string } = {}): Promise<CandidateResult> {
   return collectNoteCandidates(ledgerCandidateDeps({
     ledger: claimsLedgerView,
     searchLog: claimsSearchLog,
-    score: makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus())
-  }), agentId, text, new Date());
+    score: claimCandidateScorer
+  }), agentId, text, new Date(), o.key !== undefined ? { key: o.key } : {});
 }
 hookServer.setMemoryHandler(async (token, body) => { await claimsImportReady(); return nativeMemory.handle(token, body); });
 // CLAIM-LEDGER W4: rebuild from the verified ledger at SessionStart (every source), `memory
@@ -1684,7 +1694,8 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
       const r = await handleClaimVerb(d, agentId, { cmd: 'note', args }, 'ledger-route');
       const id = (r.json as { id?: unknown } | undefined)?.id;
       return { ok: r.ok, ...(typeof id === 'string' ? { id } : {}), ...(r.error ? { error: r.error } : {}) };
-    }
+    },
+    precheck: (args) => cardKeyRefusal(d, agentId, args)?.text ?? null,
   };
 }
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
