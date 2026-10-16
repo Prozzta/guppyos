@@ -159,6 +159,7 @@ import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
+import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { BootHookClock } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
@@ -864,6 +865,12 @@ function silentTurnFacts(): SilentTurnFacts[] {
       mailWaiting, hasPty: !!ptyId, archived: a.archived === true, onHold: !!a.onHold, halted: control.snapshot(agentId).halted
     };
   });
+}
+/** The same findings by agent, for fleet.json, the LIVE ROSTER and the card badge (display only). */
+function silentTurnsById(now: number): Record<string, SilentTurnView> {
+  const out: Record<string, SilentTurnView> = {};
+  for (const s of findSilentTurns(silentTurnFacts(), now)) out[s.agentId] = { kind: s.kind, since: s.since, ...(s.tool ? { tool: s.tool } : {}) };
+  return out;
 }
 /** The name a person knows the agent by, for the alert's wording. */
 function agentDisplayName(agentId: string): string {
@@ -2768,6 +2775,8 @@ function writeFleetSnapshot(): void {
     const hiveRoot = hive.root();
     if (hiveRoot) void costTotals.refresh(join(hiveRoot, 'cost-ledger.jsonl'));
     const lockView = heavyLockView();
+    // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (display only).
+    const silent = silentTurnsById(now);
     const agents = Object.entries(reg.agents)
       .filter(([, a]) => !a.archived)
       .map(([id, a]) => {
@@ -2796,6 +2805,7 @@ function writeFleetSnapshot(): void {
           lastActiveSecAgo: u ? Math.round((now - u.ts) / 1000) : null,
           // CARD-IDLE-WHILE-WORKING: the tool call in progress (a long one fires no hooks).
           runningTool: runningToolFor(id, now),
+          silentTurn: silent[id] ?? null,
           // IDLE-MEANS-IDLE: its place in the heavy-job lock (background / queued / reserved), or null.
           heavy: heavyFleetField(heavyActivity(id, lockView)),
           // ZT-I1-MAIL §3 #6: inboxBacklog (not acted), awaitingReply[] (§4.3) and
@@ -5368,7 +5378,9 @@ ipcMain.handle('hive:cardBadges', () => {
   try {
     for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) inboxBacklog[id] = fleetMail(id).inboxBacklog;
   } catch { /* hive unavailable: no mail badges */ }
-  return { flags: boardMonitor.flags(), inboxBacklog };
+  let silentTurns: Record<string, SilentTurnView> = {};
+  try { silentTurns = silentTurnsById(Date.now()); } catch { /* no silent badges */ }
+  return { flags: boardMonitor.flags(), inboxBacklog, silentTurns };
 });
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));

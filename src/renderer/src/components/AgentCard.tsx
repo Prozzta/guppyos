@@ -12,7 +12,7 @@ import type { LooksByTheme } from '@/scene/themes/looks';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
 import { useActivity } from './useActivity';
-import { MAIL_GLYPH, mailBadgeTitle, taskChipText, taskChipTitle } from '@shared/agentBadges';
+import { MAIL_GLYPH, mailBadgeTitle, silentBadgeText, silentBadgeTitle, taskChipText, taskChipTitle, type SilentTurnView } from '@shared/agentBadges';
 
 export interface AgentCardProps {
   /** Hive agent id: reads main's impact string for this agent (v1.1.45 unit #5). */
@@ -51,6 +51,8 @@ export interface AgentCardProps {
   taskFlags?: string[];
   /** Messages waiting (not yet acted on, fleet inboxBacklog): a separate mail badge. */
   inboxBacklog?: number;
+  /** FLEET-LIVENESS-BLIND: shown working, yet no hook or tool call (main's finding; display only). */
+  silentTurn?: SilentTurnView;
   draggable?: boolean; // must sit on the <button> itself — Chromium won't start a drag on an ancestor from inside a form control
   /** Private note — rendered as the card's own row (v0.3.4) so it can never
    *  cover the context gauge. First line only; full text in the tooltip. */
@@ -70,7 +72,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 export function AgentCard({
   agentId, appearanceByTheme, name, character, accent, status: hookStatus, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
-  doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, draggable, note, onEditNote
+  doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, silentTurn, draggable, note, onEditNote
 }: AgentCardProps) {
   const [hover, setHover] = useState(false);
   // CARD-IDLE-WHILE-WORKING: busy-or-not comes from main's liveness classification (a long tool
@@ -250,6 +252,25 @@ export function AgentCard({
           }}
         >
           {MAIL_GLYPH}{inboxBacklog}
+        </span>
+      )}
+      {/* FLEET-LIVENESS-BLIND: the SILENT badge, top-left (the other two use the right corners).
+          Shown working, yet no hook or tool call: the turn may be hung. Display only. */}
+      {silentTurn && (
+        <span
+          data-badge="silent"
+          title={silentBadgeTitle(silentTurn, Date.now())}
+          style={{
+            position: 'absolute', left: -5, top: -6, zIndex: 2,
+            height: 16, padding: '0 4px',
+            background: 'var(--cth-warn-mark)',
+            boxShadow: 'inset 0 0 0 2px var(--cth-coral), 1px 2px 0 rgba(26,19,32,0.18)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-700)',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {silentBadgeText(silentTurn, Date.now())}
         </span>
       )}
       <PixelPanel

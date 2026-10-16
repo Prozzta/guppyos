@@ -76,3 +76,26 @@ export function taskChipTitle(count: number, flagged: readonly string[]): string
 export function mailBadgeTitle(count: number): string {
   return `${count} message${count === 1 ? '' : 's'} waiting`;
 }
+
+/** FLEET-LIVENESS-BLIND: an agent shown working whose turn has gone silent (main's silentTurn.ts):
+ *  no hook and no tool call in progress, or one tool call open past the hour. Display only. */
+export interface SilentTurnView { kind: 'silent' | 'tool-open-long'; since: number; tool?: string }
+
+/** The LIVE ROSTER's words: "SILENT 25 min (no hook, no tool call)" / "TOOL OPEN Bash 1.2 h". */
+export function silentTurnText(s: SilentTurnView, now: number): string {
+  return s.kind === 'silent'
+    ? `SILENT ${ageText(now - s.since)} (no hook, no tool call)`
+    : `TOOL OPEN ${s.tool ?? 'unknown'} ${ageText(now - s.since)}`;
+}
+
+/** The card badge: short, so it fits the corner. */
+export function silentBadgeText(s: SilentTurnView, now: number): string {
+  return `${s.kind === 'silent' ? 'silent' : 'tool'} ${ageText(now - s.since)}`;
+}
+
+export function silentBadgeTitle(s: SilentTurnView, now: number): string {
+  const what = s.kind === 'silent'
+    ? `Shown working, but no hook or tool call for ${ageText(now - s.since)}`
+    : `One tool call (${s.tool ?? 'unknown'}) open for ${ageText(now - s.since)}`;
+  return `${what}: the turn may be hung. Look at its terminal. God was told; nothing was stopped or restarted.`;
+}

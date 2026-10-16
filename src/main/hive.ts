@@ -58,6 +58,7 @@ import {
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { heavyActivity, rosterActivity, type HeavyLockView } from '../shared/activityView';
+import { silentTurnText, type SilentTurnView } from '../shared/agentBadges';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
@@ -5024,6 +5025,7 @@ export class HiveManager {
           breaker?: string; tokens?: number; usd?: number;
           lastTool?: string | null; lastActiveSecAgo?: number | null; inboxBacklog?: number;
           onHold?: boolean; runningTool?: { name: string; forSec: number } | null;
+          silentTurn?: SilentTurnView | null;
         }>;
         liveness?: LivenessV1[];
         heavyLock?: HeavyLockView;
@@ -5051,7 +5053,9 @@ export class HiveManager {
       const rows = shown.map((a) => {
         // IDLE-MEANS-IDLE: an idle agent's place in the heavy-job lock (BACKGROUND / QUEUED / RESERVED).
         const state = rosterActivity(lvById.get(a.id), nowMs, a.runningTool, heavyActivity(a.id, snap.heavyLock));
-        const bits = [a.role ?? 'agent', ...(state ? [state] : []),
+        // FLEET-LIVENESS-BLIND: shown working, yet no hook or tool call (display only).
+        const silent = a.silentTurn && typeof a.silentTurn.since === 'number' ? silentTurnText(a.silentTurn, nowMs) : null;
+        const bits = [a.role ?? 'agent', ...(state ? [state] : []), ...(silent ? [silent] : []),
           typeof a.lastActiveSecAgo === 'number' ? `active ${ago(a.lastActiveSecAgo)}` : 'no activity yet'];
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);

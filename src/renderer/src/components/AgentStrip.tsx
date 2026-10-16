@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AgentCard } from './AgentCard';
-import { agentBadges, type AgentBadge, type BadgeFlag } from '@shared/agentBadges';
+import { agentBadges, type AgentBadge, type BadgeFlag, type SilentTurnView } from '@shared/agentBadges';
 import { PixelButton } from './PixelButton';
 import { Icon } from './Icon';
 import { useStore, type Agent } from '@/store/store';
@@ -60,6 +60,8 @@ export function AgentStrip({ config }: AgentStripProps) {
   // task detail) — plus each agent's messages waiting, for the separate mail badge.
   const [badgeByAgent, setBadgeByAgent] = useState<Record<string, AgentBadge>>({});
   const [inboxByAgent, setInboxByAgent] = useState<Record<string, number>>({});
+  // FLEET-LIVENESS-BLIND: agents shown working whose turn went silent (display only).
+  const [silentByAgent, setSilentByAgent] = useState<Record<string, SilentTurnView>>({});
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -70,6 +72,8 @@ export function AgentStrip({ config }: AgentStripProps) {
         setBadgeByAgent(agentBadges(raw, flags));
         const inbox = extra && typeof (extra as { inboxBacklog?: unknown }).inboxBacklog === 'object' ? (extra as { inboxBacklog: Record<string, number> }).inboxBacklog : {};
         setInboxByAgent(inbox ?? {});
+        const silent = extra && typeof (extra as { silentTurns?: unknown }).silentTurns === 'object' ? (extra as { silentTurns: Record<string, SilentTurnView> }).silentTurns : {};
+        setSilentByAgent(silent ?? {});
       } catch { /* keep last good */ }
     };
     void poll();
@@ -148,6 +152,7 @@ export function AgentStrip({ config }: AgentStripProps) {
             doingCount={badgeByAgent[a.id]?.doing.length ?? 0}
             taskFlags={badgeByAgent[a.id]?.flagged}
             inboxBacklog={inboxByAgent[a.id] ?? 0}
+            silentTurn={silentByAgent[a.id]}
             onTaskNoteClick={() => {
               const first = badgeByAgent[a.id]?.doing[0];
               if (first) openTaskDetail(first);

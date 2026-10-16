@@ -122,7 +122,73 @@ const K = {
   }
 };
 
-for (const [name, fn] of Object.entries(K)) test(`FLEET-LIVENESS-BLIND: ${name}`, () => fn({ ST, D }));
+// ─── Display (second commit): fleet.json's silentTurn, the LIVE ROSTER bit, the card badge ────
+
+// hive.ts pulls electron in; outside Electron seed the surface it touches (as card-idle-178 does).
+const electron = require.resolve('electron');
+require.cache[electron] = {
+  id: electron, filename: electron, loaded: true,
+  exports: { Notification: class { show() {} static isSupported() { return false; } } }
+};
+const B = loadTs('src/shared/agentBadges.ts');
+const HIVE = loadTs('src/main/hive.ts');
+
+/** The words, shared by the roster line and the card badge. */
+K.displayWords = ({ B: b = B }) => {
+  const now = T0 + 25 * MIN;
+  const silent = { kind: 'silent', since: T0 };
+  const tool = { kind: 'tool-open-long', since: T0 - 47 * MIN, tool: 'Bash' };
+  assert.equal(b.silentTurnText(silent, now), 'SILENT 25 min (no hook, no tool call)');
+  assert.equal(b.silentTurnText(tool, now), 'TOOL OPEN Bash 1.2 h', 'DISPLAY: AN OPEN TOOL READS AS ONE, NOT AS SILENCE');
+  assert.equal(b.silentBadgeText(silent, now), 'silent 25 min');
+  assert.equal(b.silentBadgeText(tool, now), 'tool 1.2 h');
+  assert.match(b.silentBadgeTitle(silent, now), /^Shown working, but no hook or tool call for 25 min: the turn may be hung\. .*nothing was stopped or restarted\.$/);
+  assert.match(b.silentBadgeTitle(tool, now), /^One tool call \(Bash\) open for 1\.2 h: /);
+};
+
+/** The LIVE ROSTER line god reads names the silence, from fleet.json's silentTurn. */
+K.rosterSaysSilent = async ({ HIVE: H = HIVE }) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-fleet-blind-roster-'));
+  const hive = new H.HiveManager(() => home);
+  try {
+    await hive.ensureAgent({ id: 'dwight', name: 'Dwight', provider: 'codex', cwd: home });
+    await hive.ensureAgent({ id: 'andy', name: 'Andy', provider: 'claude', cwd: home });
+    const now = Date.now();
+    const busy = (agentId) => ({ v: 1, agentId, incarnation: 1, lifecycle: 'LIVE', classification: 'BUSY_PROGRESSING', classifiedSince: now - 230 * MIN, reason: 'pty-traffic', evidence: { sampledAt: now } });
+    hive.writeFleetSnapshot({
+      ts: now,
+      agents: [
+        { id: 'dwight', name: 'Dwight', role: 'agent', lastActiveSecAgo: 13800, inboxBacklog: 5, silentTurn: { kind: 'silent', since: now - 230 * MIN } },
+        { id: 'andy', name: 'Andy', role: 'agent', lastActiveSecAgo: 600, runningTool: { name: 'Bash', forSec: 600 }, silentTurn: null }
+      ],
+      liveness: [busy('dwight'), busy('andy')]
+    });
+    const line = hive.rosterContext();
+    assert.match(line, /dwight "Dwight" \(agent, WORKING [^,]+, SILENT 3\.8 h \(no hook, no tool call\), active /, 'ROSTER: A SILENT WORKING TURN IS NAMED ON THE LIVE ROSTER');
+    assert.doesNotMatch(line.slice(line.indexOf('andy "Andy"')), /^[^\n]*SILENT/, 'a long tool call is not named silent');
+  } finally { hive.dispose(); fs.rmSync(home, { recursive: true, force: true }); }
+};
+
+for (const [name, fn] of Object.entries(K)) test(`FLEET-LIVENESS-BLIND: ${name}`, () => fn({ ST, D, B, HIVE }));
+
+test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the card carry the flag (display only)', () => {
+  const idx = readSource('src/main/index.ts');
+  const snap = idx.slice(idx.indexOf('function writeFleetSnapshot(): void {'));
+  assert.match(snap.slice(0, snap.indexOf('\n}\n')), /const silent = silentTurnsById\(now\);[^]*silentTurn: silent\[id\] \?\? null,/);
+  assert.match(idx, /for \(const s of findSilentTurns\(silentTurnFacts\(\), now\)\) out\[s\.agentId\] = \{ kind: s\.kind, since: s\.since,/);
+  assert.match(idx, /try \{ silentTurns = silentTurnsById\(Date\.now\(\)\); \} catch/);
+  assert.match(idx, /return \{ flags: boardMonitor\.flags\(\), inboxBacklog, silentTurns \};/);
+  const strip = readSource('src/renderer/src/components/AgentStrip.tsx');
+  assert.match(strip, /setSilentByAgent\(silent \?\? \{\}\);/);
+  assert.match(strip, /silentTurn=\{silentByAgent\[a\.id\]\}/);
+  const card = readSource('src/renderer/src/components/AgentCard.tsx');
+  const badge = card.slice(card.indexOf('data-badge="silent"'), card.indexOf('</span>', card.indexOf('data-badge="silent"')));
+  assert.match(card, /\{silentTurn && \(\s*<span\s+data-badge="silent"/);
+  assert.match(badge, /title=\{silentBadgeTitle\(silentTurn, Date\.now\(\)\)\}/);
+  assert.match(badge, /\{silentBadgeText\(silentTurn, Date\.now\(\)\)\}/);
+  assert.match(badge, /left: -5, top: -6/, 'its own corner (task: bottom right, mail: top right)');
+  assert.doesNotMatch(badge, /onClick/, 'display only');
+});
 
 test('FLEET-LIVENESS-BLIND: main wires the hook clock and the open tool into the digest (never PTY output)', () => {
   const idx = readSource('src/main/index.ts');
@@ -176,8 +242,15 @@ const MUTANTS = [
     killer: 'clockAndThreshold', dies: /^not before 15 min/ },
   { name: 'the digest drops silent turns', file: DGF,
     edits: [['  for (const s of silentTurns) {', '  for (const s of silentTurns.slice(0, 0)) {']],
-    killer: 'digestListsIt', dies: /A SILENT TURN IS A DECISION FOR GOD/ }
+    killer: 'digestListsIt', dies: /A SILENT TURN IS A DECISION FOR GOD/ },
+  { name: 'the LIVE ROSTER leaves the silence out', file: 'src/main/hive.ts',
+    edits: [['...(state ? [state] : []), ...(silent ? [silent] : []),', '...(state ? [state] : []),']],
+    killer: 'rosterSaysSilent', dies: /A SILENT WORKING TURN IS NAMED ON THE LIVE ROSTER/ },
+  { name: 'the display calls an open tool silence', file: 'src/shared/agentBadges.ts',
+    edits: [["  return s.kind === 'silent'\n    ? `SILENT", "  return true\n    ? `SILENT"]],
+    killer: 'displayWords', dies: /AN OPEN TOOL READS AS ONE, NOT AS SILENCE/ }
 ];
+const MOD_KEY = { [STF]: 'ST', [DGF]: 'D', 'src/main/hive.ts': 'HIVE', 'src/shared/agentBadges.ts': 'B' };
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
   fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
@@ -186,8 +259,9 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
         const mod = mutate(m.file, m.edits, `m${i}`);
-        const mods = m.file === STF ? { ST: mod, D } : { ST, D: mod };
-        await K[m.killer]({ ST, D });                  // the killer PASSES on the real modules...
+        const real = { ST, D, B, HIVE };
+        const mods = { ...real, [MOD_KEY[m.file]]: mod };
+        await K[m.killer](real);                       // the killer PASSES on the real modules...
         let died = null;
         try { await K[m.killer](mods); } catch (e) { died = e; }
         assert.ok(died, `SURVIVED: "${m.name}" was not killed by ${m.killer}`);
