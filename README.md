@@ -240,8 +240,41 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   limit recovers after the reset on its own, and new agents start on each CLI's own default model.
 - **No waiting on helper programs** (1.1.73) — reset, moving the home folder and
   importing PDFs never freeze the window, and "Refresh models" updates every model picker.
-- **Files that are never silently wiped** (1.1.74, the current release) — a damaged task board,
+- **Files that are never silently wiped** (1.1.74) — a damaged task board,
   agent list or settings file is kept and named in a banner instead of being overwritten.
+- **The app handles the mail** (1.1.75) — agents get each message's text in their context and
+  never read or move inbox files; the app files handled mail itself and lists open requests.
+- **A floor that keeps going under load** (1.1.76) — the floor keeps moving on a busy machine,
+  and Codex agents get safety checks.
+- **A floor overview** (1.1.77) — god gets a written board summary, and every agent row shows
+  whether the agent is really working.
+- **Codex mail that is seen** (1.1.78) — messages to a Codex agent no longer get stuck where
+  nobody sees them, agent cards say "working" when the agent is, and the board stops raising
+  false alarms at start-up.
+- **Choices that stick** (1.1.79) — a model picked for an agent stays picked, Codex's own
+  questions are left to a person, and a hook reply that never reached an agent is no longer
+  counted as delivered.
+- **Agents that can be reached** (1.1.80) — a resumed Codex agent gets its messages again,
+  god's start-up message is really sent, and the Claude model list comes from Claude Code itself.
+- **Cheaper steps** (1.1.81) — agents re-read much less on every step, are woken less often and
+  keep their bookkeeping to one command (`ledger`); an agent waiting for a test slot is told
+  when it is theirs.
+- **Munder Difflin becomes Guppy** (1.1.82) — only the name changes: agents, history and
+  settings are copied into the new Guppy folder, and the old folder is left as it was.
+- **Smaller contexts** (1.1.83) — the hive's agents carry smaller contexts, and the last pieces
+  of the rename are done.
+- **Automatic compaction** (1.1.84) — every Claude agent compacts its conversation
+  automatically, and the claims ledger starts as a trial with one agent.
+- **Theme packs** (1.1.85) — a project can have its own floor, chosen per project, starting
+  with TES; switching it keeps every agent.
+- **Speck** (1.1.86) — the app icon is Speck, and on a TES floor the app names TES's
+  orchestrator.
+- **A TES crew that behaves** (1.1.87) — crew stay at their desks while they work, no longer
+  walk over the console or through chairs, show thought clouds and go for coffee, and the walls
+  stay crisp after a resize.
+- **A Graphics setting and a bridge that talks** (1.1.88, the current release) — Settings
+  chooses Auto, GPU or CPU only; the Requests badge counts only open asks; the TES crew speak
+  the pack's own lines to each other, and the floor fills its pane at whole device pixels.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
@@ -269,8 +302,8 @@ in order to get things done.
 - **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
   bridge, or the office theme) — they walk to their stations as they work, and envelopes
   fly station-to-station when they message each other.
-- **The hive coordinates them.** Agents read their memory and drain a mailbox; the router
-  moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
+- **The hive coordinates them.** Agents read their memory and get their mail in context; the
+  router moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
   when it needs you.
 - **Memory that persists.** A markdown-first memory layer with semantic recall and
   automatic condensation, so agents remember across sessions without their memory files
@@ -365,7 +398,7 @@ Two data planes feed one renderer:
 - **Hive / event plane.** `hive.ts` is the on-disk multi-agent layer; `hooks.ts` runs the
   hook server that provider bridges deliver lifecycle payloads to. `reflect.ts` owns memory
   condensation. The router delivers messages, drains provider outboxes, the GOD agent
-  adjudicates, and idle/inbox wakeups keep workers draining mail — with the wake
+  adjudicates, and idle/inbox wakeups deliver workers' mail — with the wake
   coordinator as the single authority on when an agent may be prompted.
 - **Hook transports.** Each provider reaches the hook server the cheapest way it supports:
   - **Claude** posts to a loopback HTTP route (`/hook/<id>/<token>`), authenticated by a
@@ -421,10 +454,13 @@ Two data planes feed one renderer:
     delete it: removing it, and the CLI itself, is a one-time manual clean-up.
   - **An early `wake-up`** (since 1.1.55) does not meet an empty index: each agent's own
     notes are indexed first, and a wake-up waits up to 5 s for them.
-- **Mid-turn mail** (since 1.1.55). The hook server tracks each agent's turn and, at its next
-  tool call, adds an `<inbox-update>` notice for inbox files that arrived since the turn
-  began (each announced once, at most five listed, sender text escaped). A message may carry
-  `supersedes`, and the router marks the older one `superseded_by`.
+- **Mail in context** (since 1.1.75; mid-turn since 1.1.55). The hook server tracks each
+  agent's turn and puts each new message's text into the agent's context as a `<hive-mail>`
+  block, at the start of its next turn or, while it works, at its next tool call; the app files
+  handled mail into `inbox/.done` itself. Providers that still read their own files (gemini,
+  grok, opencode, pi, cursor) get the 1.1.55 `<inbox-update>` notice instead (each announced
+  once, at most five listed, sender text escaped). A message may carry `supersedes`, and the
+  router marks the older one `superseded_by`.
 - **The heavy-job lock** (since 1.1.55). A `PreToolUse` classifier recognises installs,
   builds, packaging, full suites and benches (through `bash -c`, `cmd /c` and PowerShell
   wrappers) and takes one of N slots (Settings → **Heavy jobs at once**, read live). Over the
