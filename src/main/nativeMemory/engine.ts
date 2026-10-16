@@ -179,7 +179,8 @@ export class MemoryEngine {
       this.queue.push({
         priority, seq: this.seq++, label: PRIORITY_LABEL[priority] ?? String(priority), deadline: o.deadline,
         run: () => { const start = this.now(); return fn().then((v) => { o.timing?.(timing(start)); resolve(v); }, reject); },
-        expire: () => reject(new QueueExpired(timing(this.now())))
+        // Never ran: runMs is 0 by definition (one clock read; two could differ by a tick).
+        expire: () => reject(new QueueExpired({ waitMs: this.now() - at, runMs: 0, inFlight }))
       });
       this.queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
       this.pump();
