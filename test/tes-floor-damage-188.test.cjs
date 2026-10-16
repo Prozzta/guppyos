@@ -63,7 +63,7 @@ const MUTANTS = [
   ['mover: old rect dropped', DAMAGE, '      if (p?.rect) dirty.push(p.rect);\n', ''],
   ['no clear inside the scissor', FLOOR, 'realRender({ container: app.stage, clear: true });', 'realRender({ container: app.stage, clear: false });'],
   ['scissor y not flipped to GL', FLOOR, 'gl.scissor(p.x, H - p.y - p.h, p.w, p.h);', 'gl.scissor(p.x, p.y, p.w, p.h);'],
-  ['no rounding margin', DAMAGE, 'Math.floor(b.minX * r) - 1), y0 = Math.max(0, Math.floor(b.minY * r) - 1);', 'Math.round(b.minX * r)), y0 = Math.max(0, Math.round(b.minY * r));'],
+  ['rounding guard shrunk inside a dirty rect', DAMAGE, 'Math.floor(b.minX * r) - 1), y0 = Math.max(0, Math.floor(b.minY * r) - 1);', 'Math.ceil(b.minX * r) + 1), y0 = Math.max(0, Math.ceil(b.minY * r) + 1);'],
   ['own alpha/tint/blend not signed', FLOOR, '|${c.alpha},${c.tint},${c.blendMode}|${c.zIndex}|', '||${c.zIndex}|'],
   ['depth not signed', FLOOR, '|${c.zIndex}|${c.renderable}`', '||${c.renderable}`'],
   ["ancestors' look not signed", FLOOR, 'visit(k, `${look}|${c.alpha},${c.tint},${c.blendMode},${c.renderable}`)', "visit(k, '')"],

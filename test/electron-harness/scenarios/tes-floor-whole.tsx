@@ -101,9 +101,9 @@ function mapRef(app: any, S: any, H: number, clearColor: number[], crewTop: bool
 }
 
 const out = {
-  frames: 0, fitBad: 0, fitAt: '' as string, cacheBad: 0, builds: 0, easing: 0, panned: 0, panAt: '' as string, selects: 0,
-  texelChecks: 0, texelEasing: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
-  teethChecks: 0, teethMax: 0, edgeBlank: 0, bottomBand: 0, bottomChecks: 0,
+  frames: 0, fitBad: 0, fitAt: '' as string, cacheBad: 0, builds: 0, panned: 0, panAt: '' as string, selects: 0,
+  texelChecks: 0, texelBadMax: 0, texelBadAt: '' as string, offMap: 0,
+  teethChecks: 0, teethMax: 0, edgeBlank: 0,
   // Every frame: on an axis the art covers, the device px of frame margin (backdrop) in the pane.
   coveredFrames: 0, marginFrames: 0, marginMax: 0, marginAt: '',
   configs: [] as Array<{ box: string; dev: string; n: number; ox: number; oy: number; sideL: number; sideR: number; edges: Record<string, number> }>,
@@ -144,7 +144,6 @@ proto.render = function (this: any) {
       out.builds = app.__tesStaticCacheBuilds ?? 0;
       const moved = w.x !== last.x || w.y !== last.y;
       const sameScale = w.scale.x === last.s;
-      if (moved && sameScale) out.easing++;
       // TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves (a select's nudge lifted it).
       const pane = `${Wd}x${Hd}`;
       if (moved && sameScale && pane === last.pane) { out.panned++; if (!out.panAt) out.panAt = `render ${renders} ${pane} ox=${ox} oy=${oy}`; }
@@ -186,7 +185,6 @@ proto.render = function (this: any) {
         }
         out.texelChecks++;
         if (bad && out.badFrames.length < 60) out.badFrames.push({ at: renders, bad, box: bb, samples });
-        if (moved && sameScale) out.texelEasing++;
         if (bad > out.texelBadMax) { out.texelBadMax = bad; out.texelBadAt = `render ${renders}, n ${N}, ${Wd}x${Hd}`; }
         if (renders % TEETH_EVERY === 0) {
           const top = mapRef(app, S, H, clear, true);

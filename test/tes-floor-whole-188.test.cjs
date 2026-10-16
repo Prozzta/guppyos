@@ -5,8 +5,8 @@
  * on every frame. Its floor uses a cached ceil(scale) source then one sharp nearest resample. Over
  * the run (scenarios/tes-floor-whole.tsx: 576x587, the Human's pane with its
  * padding, then 960x640, 700x470 and 1200x900, with crew members selected), at DPR 1 and 1.25:
- * - TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves: a select's nudge lifted it
- *   (this test used to require that motion, as texelEasing >= 5);
+ * - TES-SCENE-BOUNCE-188: in an unchanged pane the scene never moves: a select's nudge used to
+ *   lift it;
  * - every frame: the box fills its limiting axis, fits its other axis and is centred within one
  *   device px; cache scale is integral and is the one sharp-resample source scale;
  * - the pane's edges are never blank; when a pane is taller than the supplied art, its palette

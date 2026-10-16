@@ -109,7 +109,9 @@ window.__harnessRun = async () => {
     await act(async () => { useStore.setState({ officeTheme: 'tes', agents, messageQueues: {} } as never); root.render(<OfficeFloor />); });
     for (const aspect of aspects) {
       box.style.width = `${aspect.w}px`; box.style.height = `${aspect.h}px`;
-      for (let i = 0; i < 12 && !app; i++) await wait(100);
+      // Parallel full-suite Electron runs can take longer than the interactive mount; do not turn
+      // scheduler pressure into a spurious "scene was not mounted" result.
+      for (let i = 0; i < 40 && !app; i++) await wait(100);
       await wait(250);
       const metric = placement();
       const shot = await window.harness.capture(aspect.w, aspect.h);

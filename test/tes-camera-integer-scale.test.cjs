@@ -170,9 +170,9 @@ test('TES camera: a select\'s nudge leaves the whole scene where it rests, on ev
   assert.ok(overflow >= 5, `panes the frame overflows (where the old camera panned): ${overflow}`);
 });
 
-/** Nudges toward the art's corners, edges and centre in several panes: every frame's failures, and
- *  how many frames had an axis the art covers. 576x587@1 is the 560x555 window's bled pane: n = 2
- *  and the art exactly the pane's width. */
+/** Requests nudges toward the art's corners, edges and centre in several panes. Whole placement
+ *  must remain locked, while its art-coverage clamp is still exercised. 576x587@1 is the 560x555
+ *  window's bled pane: n = 2 and the art exactly the pane's width. */
 function nudgeFailures(opts) {
   const panes = [[576, 587, 1], [576, 587, 1.25], [716, 502, 1.25], [976, 672, 1.5], [720, 800, 1.25], [517, 301, 1.5], [450, 900, 2]];
   const bad = [];
@@ -195,7 +195,7 @@ function nudgeFailures(opts) {
   return { bad, covered };
 }
 
-test('TES camera nudged anywhere: on an axis the art covers, no frame of the pan shows the margin (Jim: up to 8n device px of backdrop)', () => {
+test('TES camera ignores nudges while preserving the covered-art clamp (Jim: no backdrop leak)', () => {
   const { bad, covered } = nudgeFailures();
   assert.deepEqual(bad.slice(0, 5), []);
   assert.ok(covered > 1000, `frames with a covered axis: ${covered}`);
