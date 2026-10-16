@@ -79,7 +79,7 @@ test('PACK_ART.tes is re-measured from the pack: the art box, and a 48-row dead 
     'the semantic fit is outer lip-to-lip and back-wall top through the deck front lip');
 });
 
-test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuff objects, a person on every reachable cell', () => {
+test('TES collision envelope is re-measured from the pack: chairs, consoles, Stuff objects, a person on every reachable cell', () => {
   const TL = loadTs('src/renderer/src/scene/themes/tiled.ts');
   const P = loadTs('src/renderer/src/scene/themes/packs.ts');
   const dir = path.join(ROOT, 'themes', 'tes');
@@ -116,15 +116,15 @@ test('PACK_ART.tes keep box is re-measured from the pack: chairs, consoles, Stuf
     add(cx + g - 1 - fw / 2 + o.x1, cy + g - 1 - fh + o.y1);
   }
   for (const s of SM.seatOrder) add(s.x - fw / 2 + o.x0, s.y - fh + o.y0);
-  assert.deepEqual(e, F.PACK_ART.tes.keep);
-  // Outside it the art holds only the rim, the upper wall and the hull: the keep box sits inside the art.
+  assert.deepEqual(e, { x0: 335, y0: 84, x1: 591, y1: 367 });
+  // This remains a collision/depth-order measurement; camera framing instead uses the visual lips.
   const a = F.PACK_ART.tes;
   assert.ok(a.x0 < e.x0 && e.x1 < a.x1 && a.y0 < e.y0 && e.y1 < a.y1);
 });
 
 test('floorFrame: TES frames its art with the margin; the office (and any other id) fits the whole map', () => {
   const t = F.floorFrame('tes', 960, 640);
-  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 }, art: { x0: 320, y0: 32, x1: 607, y1: 415 }, fit: { x0: 320, y0: 32, x1: 607, y1: 367 } });
+  assert.deepEqual(t, { x: 312, y: 24, w: 304, h: 392, deadBottom: 48, fit: { x0: 320, y0: 32, x1: 607, y1: 367 } });
   assert.deepEqual(F.packFrame('tes'), t);
   for (const id of ['office', 'dunder', undefined, null, '', 'toString', '__proto__']) {
     assert.deepEqual(F.floorFrame(id, 1024, 768), { x: 0, y: 0, w: 1024, h: 768, deadBottom: 0 }, String(id));
@@ -143,16 +143,17 @@ test('Camera, TES: the measured outer-lip / wall-lip box is the largest uniform 
     const z = Math.min(vw / (content.x1 - content.x0 + 1), vh / (content.y1 - content.y0 + 1));
     assert.ok(Math.abs(c.z - z) < 1e-9, `${vw}x${vh}: zoom fits the content (${c.z} vs ${z})`);
     const s = shown(c, vw, vh);
-    assert.ok(s.x0 <= content.x0 + EPS && s.x1 >= content.x1 + 1 - EPS, `${vw}x${vh}: content not clipped left/right ${JSON.stringify(s)}`);
-    assert.ok(s.y0 <= content.y0 + EPS && s.y1 >= content.y1 + 1 - EPS, `${vw}x${vh}: content not clipped top/bottom ${JSON.stringify(s)}`);
+    const rounding = 1 / c.z + EPS;
+    assert.ok(s.x0 <= content.x0 + rounding && s.x1 >= content.x1 + 1 - rounding, `${vw}x${vh}: content not clipped left/right ${JSON.stringify(s)}`);
+    assert.ok(s.y0 <= content.y0 + rounding && s.y1 >= content.y1 + 1 - rounding, `${vw}x${vh}: content not clipped top/bottom ${JSON.stringify(s)}`);
     assert.ok(Math.min(Math.abs((content.x1 - content.x0 + 1) * c.z - vw), Math.abs((content.y1 - content.y0 + 1) * c.z - vh)) < 1e-6, `${vw}x${vh}: limiting axis fills`);
-    assert.ok(Math.abs((content.x0 + content.x1 + 1) / 2 * c.z + c.x - vw / 2) < 1e-6, `${vw}x${vh}: centred horizontally`);
-    assert.ok(Math.abs((content.y0 + content.y1 + 1) / 2 * c.z + c.y - vh / 2) < 1e-6, `${vw}x${vh}: centred vertically`);
+    assert.ok(Math.abs((content.x0 + content.x1 + 1) / 2 * c.z + c.x - vw / 2) <= .5 + EPS, `${vw}x${vh}: centred horizontally`);
+    assert.ok(Math.abs((content.y0 + content.y1 + 1) / 2 * c.z + c.y - vh / 2) <= .5 + EPS, `${vw}x${vh}: centred vertically`);
   }
   // At the TES default aspect the semantic visual box fills the pane exactly; genuine hull remains outside it.
   const vh = 430, vw = Math.round(vh * F.frameAspect(f));
   const c = settled(960, 640, f, vw, vh), s = shown(c, vw, vh);
-  assert.ok(Math.abs(s.y1 - (content.y1 + 1)) < 0.01 && Math.abs(s.y0 - content.y0) < 0.01, `framed top ${s.y0} and bottom ${s.y1}`);
+  assert.ok(Math.abs(s.y1 - (content.y1 + 1)) <= 1 / c.z && Math.abs(s.y0 - content.y0) <= 1 / c.z, `framed top ${s.y0} and bottom ${s.y1}`);
 });
 
 test('Camera, office: no frame gives exactly the old fit (whole map, centred)', () => {

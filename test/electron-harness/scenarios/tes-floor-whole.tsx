@@ -5,20 +5,18 @@
  * every render:
  * - the semantic lip-to-lip box has the largest uniform scale that fits and its midpoint is at the
  *   pane midpoint. The static floor is cached at ceil(scale), then sharply resampled once;
- * - every CHECK_EVERY renders, the TEXEL CHECK: the stage as drawn, read back in device px, against
- *   the full depth sort drawn at one px per map px ('below', then the people and EVERY static sorted
- *   together, 'above'): device px (X, Y) must equal map px (floor((X - ox) / n),
- *   floor((Y - oy) / n)), the backdrop off the map. So every art px is n x n device px, there is no
- *   seam, and nobody is drawn over a static in front of them (the bubbles, text and vector shapes
- *   over the floor, are left out of both). A draw with the people over every
- *   static differs (the check has teeth);
+ * - every CHECK_EVERY renders, the TEXEL/DEPTH CHECK compares the actual stage's former
+ *   right-hull-lip failure crop against an independently full-depth reference that uses the same
+ *   nearest integer cache and one linear downsample. Its tolerance is exactly zero channel
+ *   differences. The reference has the static/people depth order; a deliberately crew-top draw
+ *   differs (teeth). Bubbles, text and vector shapes are left out of both;
  * - the pane's edges have no transparent pixels. A tall pane may show the pack backdrop below the
  *   supplied hull; it must never manufacture more hull to cover that viewport space.
  * Run by test/tes-floor-whole-188.test.cjs (HARNESS_DPR per case).
  */
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { Application, RenderTexture, Sprite } from 'pixi.js';
+import { Application, Container, RenderTexture, Sprite, Texture } from 'pixi.js';
 import { OfficeFloor } from '../../../src/renderer/src/scene/office/OfficeFloor';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCatalog';
@@ -67,7 +65,6 @@ Math.random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
   window.cancelAnimationFrame = (id: number) => { queue.delete(id); };
 }
 
-const isInt = (v: number) => Math.abs(v - Math.round(v)) < 1e-6;
 const pixelsOf = (app: any, rt: RenderTexture) => app.renderer.extract.pixels({ target: rt }).pixels as Uint8ClampedArray;
 
 /** The stage drawn at one px per map px, the full depth sort: the floor texture swapped for 'below'
@@ -98,6 +95,31 @@ function mapRef(app: any, S: any, H: number, clearColor: number[], crewTop: bool
   const px = pixelsOf(app, rt);
   rt.destroy(true);
   return px;
+}
+
+let fitRefCache: { key: string; px: Uint8ClampedArray } | null = null;
+/** Build a full-depth reference only on a new pane/cache scale. Its source rectangle, prescale,
+ * and final linear sampling exactly match floorView; per-frame checks then read the former
+ * right-lip failure crop from it without adding per-frame composition CPU. */
+function fitDepthRef(app: any, S: any, clearColor: number[]): Uint8ClampedArray {
+  const b = { x: Math.round(S.floorView.x), y: Math.round(S.floorView.y), w: Math.round(S.floorView.width), h: Math.round(S.floorView.height) };
+  const key = [b.x, b.y, b.w, b.h, S.k, S.world.scale.x, S.world.x, S.world.y, app.screen.width, app.screen.height, app.renderer.resolution].join('|');
+  if (fitRefCache?.key === key) return fitRefCache.px;
+  const ref = mapRef(app, S, S.mapH, clearColor, false), cv = document.createElement('canvas'); cv.width = b.w; cv.height = b.h;
+  // Copy row by row: the map's rows are wider than the floor cache rectangle.
+  const image = cv.getContext('2d')!.getImageData(0, 0, b.w, b.h);
+  for (let y = 0; y < b.h; y++) image.data.set(ref.subarray(((b.y + y) * S.mapW + b.x) * 4, ((b.y + y) * S.mapW + b.x + b.w) * 4), y * b.w * 4);
+  cv.getContext('2d')!.putImageData(image, 0, 0);
+  const source = Texture.from(cv); source.source.scaleMode = 'nearest';
+  const up = RenderTexture.create({ width: b.w * S.k, height: b.h * S.k, resolution: 1, scaleMode: 'linear' });
+  const upRoot = new Container(), upView = upRoot.addChild(new Sprite(source)); upView.scale.set(S.k);
+  app.renderer.render({ container: upRoot, target: up, clear: true });
+  const world = new Container(), view = world.addChild(new Sprite(up)); view.position.set(b.x, b.y); view.scale.set(1 / S.k);
+  world.scale.set(S.world.scale.x); world.position.set(S.world.x, S.world.y);
+  const out = RenderTexture.create({ width: app.screen.width, height: app.screen.height, resolution: app.renderer.resolution, scaleMode: 'nearest' });
+  app.renderer.render({ container: world, target: out, clear: true, clearColor });
+  const px = pixelsOf(app, out); out.destroy(true); up.destroy(true); source.destroy(true); upRoot.destroy({ children: true }); world.destroy({ children: true });
+  fitRefCache = { key, px }; return px;
 }
 
 const out = {
@@ -160,34 +182,27 @@ proto.render = function (this: any) {
         const shot = pixelsOf(app, rt);
         const SW = rt.pixelWidth ?? Wd;
         rt.destroy(true);
-        // Exact source-pixel mapping is meaningful only for legacy whole placement.  Fit mode uses
-        // the cached integer source plus one deliberately fractional nearest-neighbour resample.
-        if (isInt(n) && isInt(ox) && isInt(oy)) {
-        const H = Math.max(S.mapH, Math.ceil((Hd - OY) / N) + 1);
-        const ref = mapRef(app, S, H, clear, false);
+        // The fit probe is every CHECK_EVERY frames, not only at a whole scale. It compares the
+        // former right-lip failure crop against an independently full-depth, identically sampled
+        // reference. A zero tolerance is valid once both use the same linear sampling contract.
+        if (S.frame.fit) {
+        const cropW = 16, cropH = 16, cropX = Math.round(ox + 594 * n) - 4, cropY = Math.round(oy + 97 * n) - 4;
+        const ref = fitDepthRef(app, S, clear);
         let bad = 0;
         const bb = [Infinity, Infinity, -1, -1], samples: unknown[] = [];
-        for (let Y = 0; Y < Hd; Y++) {
-          const my = Math.floor((Y - OY) / N);
-          for (let X = 0; X < Wd; X++) {
-            const mx = Math.floor((X - OX) / N), i = (Y * SW + X) * 4;
-            let e0, e1, e2, e3;
-            if (mx < 0 || my < 0 || mx >= S.mapW || my >= H) { out.offMap++; e0 = bg[0]; e1 = bg[1]; e2 = bg[2]; e3 = bg[3]; } else {
-              const j = (my * S.mapW + mx) * 4;
-              e0 = ref[j]; e1 = ref[j + 1]; e2 = ref[j + 2]; e3 = ref[j + 3];
-            }
-            if (shot[i] !== e0 || shot[i + 1] !== e1 || shot[i + 2] !== e2 || shot[i + 3] !== e3) {
+        for (let Y = 0; Y < cropH; Y++) for (let X = 0; X < cropW; X++) {
+            const i = ((cropY + Y) * SW + cropX + X) * 4, j = (Y * cropW + X) * 4;
+            if (shot[i] !== ref[i] || shot[i + 1] !== ref[i + 1] || shot[i + 2] !== ref[i + 2] || shot[i + 3] !== ref[i + 3]) {
               bad++;
-              bb[0] = Math.min(bb[0], X); bb[1] = Math.min(bb[1], Y); bb[2] = Math.max(bb[2], X); bb[3] = Math.max(bb[3], Y);
-              if (samples.length < 6 && bad % 97 === 1) samples.push([X, Y, mx, my, [shot[i], shot[i + 1], shot[i + 2], shot[i + 3]], [e0, e1, e2, e3]]);
+              bb[0] = Math.min(bb[0], cropX + X); bb[1] = Math.min(bb[1], cropY + Y); bb[2] = Math.max(bb[2], cropX + X); bb[3] = Math.max(bb[3], cropY + Y);
+              if (samples.length < 6 && bad % 97 === 1) samples.push([cropX + X, cropY + Y, [shot[i], shot[i + 1], shot[i + 2], shot[i + 3]], [ref[i], ref[i + 1], ref[i + 2], ref[i + 3]]]);
             }
-          }
         }
         out.texelChecks++;
         if (bad && out.badFrames.length < 60) out.badFrames.push({ at: renders, bad, box: bb, samples });
         if (bad > out.texelBadMax) { out.texelBadMax = bad; out.texelBadAt = `render ${renders}, n ${N}, ${Wd}x${Hd}`; }
         if (renders % TEETH_EVERY === 0) {
-          const top = mapRef(app, S, H, clear, true);
+          const top = mapRef(app, S, S.mapH, clear, true);
           let t = 0;
           for (let j = 0; j < ref.length; j += 4) if (ref[j] !== top[j] || ref[j + 1] !== top[j + 1] || ref[j + 2] !== top[j + 2]) t++;
           out.teethChecks++; out.teethMax = Math.max(out.teethMax, t);

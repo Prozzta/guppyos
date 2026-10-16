@@ -204,22 +204,20 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         return s;
       });
 
-      // TES-FLOOR-WHOLE-188: a framed floor is drawn at a whole number n of device px per map px
-      // with its origin on a whole device px (the camera sees to both), so every sprite drawn
-      // straight in the world is n x n device px per art px: no resample, no seam, nothing to
-      // compose per frame. (TES-FLOOR-EASE-188 composed a scene texture every tick instead, to
-      // survive a fractional scale: that cost the GPU process 4x when settled.) The world holds:
+      // TES-FLOOR-WHOLE-188: the world has one cached static floor rather than composing a scene
+      // texture every tick. TES's semantic fit displays that whole-pixel source through one linear
+      // downscale; live people and only their possible front statics stay in depth order above it.
       // - the floor texture: 'below' and every static, at an integer scale k, rebuilt only when k
-      //   changes (a whole-n floor has k = n: one texel per device px);
+      //   changes; a semantic fit linearly downsamples it once at display size;
       // - over it, in depth order, the people, their cups, the parked mugs, and the statics that
-      //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker:
-      //   at a whole n they land on their own pixels, so only those touching a person are picked);
+      //   can cover one of them, drawn again exactly where the floor texture has them (exactPicker
+      //   limits that redraw to statics that can overlap a person);
       // - 'above', then the bubbles.
       const bounds = sceneBounds(plan);
       const cached = bounds !== null && staticsCacheable(plan);
       const order = staticOrder(plan.sorted);
       const frame0 = floorFrame(pack.manifest.id, SM.PW, SM.PH);
-      const pickFront = cached ? (frame0.keep ? exactPicker : frontPicker)(plan.sorted, order, plan.below.width, plan.below.height) : null;
+      const pickFront = cached ? (frame0.fit ? exactPicker : frontPicker)(plan.sorted, order, plan.below.width, plan.below.height) : null;
       // As in the stage, the floor's transform is a child's, so its vertices are made the same way.
       const floorRoot = new Container();
       const floorWorld = floorRoot.addChild(new Container());
@@ -243,7 +241,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         const b = bounds!;
         floorView.texture = Texture.EMPTY;
         floorRT?.destroy(true);
-        floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: 'nearest' });
+        floorRT = RenderTexture.create({ width: b.w * k, height: b.h * k, resolution: 1, scaleMode: frame0.fit ? 'linear' : 'nearest' });
         floorWorld.scale.set(k);
         floorWorld.position.set(-b.x * k, -b.y * k);
         app.renderer.render({ container: floorRoot, target: floorRT, clear: true });
