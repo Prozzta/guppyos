@@ -89,7 +89,11 @@ class FakeAgent {
     } catch { /* best effort */ }
   }
 
-  out(text) { if (!this.hung) { try { process.stdout.write(text); } catch { /* pty gone */ } } }
+  out(text) {
+    if (this.hung) return;
+    if (this.held) { this.held.push(text); return; }   // RIG-176-LOAD-FLAKE: behind a gapped echo
+    try { process.stdout.write(text); } catch { /* pty gone */ }
+  }
 
   // ————————————————————————————————————————————————————————————— start-up
 
@@ -182,6 +186,13 @@ class FakeAgent {
   onInput(d) {
     this.rec('pty-input', { data: d });
     if (this.hung) return;
+    // RIG-176-LOAD-FLAKE (1.1.91): with echoGapMs, EVERYTHING this input makes the stub print
+    // (the Enter's \r\n, a turn's output) goes out in ONE write with its echo, and later output
+    // queues behind it, as a TUI draws one frame. Before, the \r\n went out at once and the
+    // cleared composer a gap later: a new output generation with our text still shown, which
+    // a starved stub stretched past SUBMIT_VERIFY_WINDOW_MS into a false "Enter lost" proof.
+    const gap = Number(this.scenario.echoGapMs) || 0;
+    if (gap > 0 && !this.held) this.held = [];
     let s = d;
     while (s.length) {
       if (s.startsWith('\x1b[200~')) { this.inPaste = true; s = s.slice(6); continue; }
@@ -208,8 +219,16 @@ class FakeAgent {
     const echo = `\x1b]0;rig-echo-${this.echoSeq}\x07\r\x1b[K> ${this.draft.split('\n').pop()}`;
     // RIG-DESYNC probe seam: scenario.echoGapMs puts a gap between the composer state (what the
     // rig's screen reading sees) and the echo bytes that carry it to the host.
-    const gap = Number(this.scenario.echoGapMs) || 0;
-    if (gap > 0) setTimeout(() => this.out(echo), gap); else this.out(echo);
+    if (gap > 0 && this.held) {
+      this.held.push(echo);
+      if (!this.heldTimer) {
+        this.heldTimer = setTimeout(() => {
+          const all = (this.held || []).join('');
+          this.held = null; this.heldTimer = null;
+          this.out(all);
+        }, gap);
+      }
+    } else this.out(echo);
   }
 
   submit() {

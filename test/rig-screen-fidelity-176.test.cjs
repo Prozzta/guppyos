@@ -19,9 +19,9 @@ const { startRig, sleep } = require('./mail-rig/driver.cjs');
 
 const ID = 'cx-1';
 
-test('RIG FIDELITY: a screen reading never shows the stub\'s text before its echo reached the host (one Enter, never a chase)', { timeout: 180_000 }, async (t) => {
+const oneEnter = (echoGapMs) => async (t) => {
   const rig = await startRig(t);
-  await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: 5000, echoGapMs: 1000 } }]);
+  await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: 5000, echoGapMs } }]);
   await rig.call('send', { to: ID, subject: 'gap', body: 'hello' });
   const outcomes = async () => (await rig.call('outcomes')).filter((o) => o.agentId === ID).map((o) => o.outcome);
   for (let i = 0; i < 40 && !(await outcomes()).length; i += 1) { await rig.beat(); await sleep(1000); }
@@ -31,7 +31,15 @@ test('RIG FIDELITY: a screen reading never shows the stub\'s text before its ech
   const enters = rig.transcript(ID).filter((r) => r.kind === 'pty-input').reduce((n, r) => n + (String(r.data).match(/\r/g) || []).length, 0);
   assert.equal(enters, 1, `THE STUB RECEIVES EXACTLY ONE ENTER, got ${enters}\n  ${why}`);
   assert.ok((await outcomes()).some((o) => o.kind === 'COMMITTED'), `COMMITTED\n  ${why}`);
-});
+};
+
+test('RIG FIDELITY: a screen reading never shows the stub\'s text before its echo reached the host (one Enter, never a chase)', { timeout: 180_000 }, oneEnter(1000));
+
+// RIG-176-LOAD-FLAKE (1.1.91): a starved stub stretched the 1 s gap past SUBMIT_VERIFY_WINDOW_MS
+// (2.5 s). The stub then printed the Enter's \r\n at once and the cleared composer a gap later,
+// a split no TUI makes, and WSG read the quiet as "Enter lost" and sent a second one. A 4 s
+// gap is that load, made certain: 5/5 runs got 2 Enters before the stub drew one frame per input.
+test('RIG FIDELITY load: an echo gap longer than the verify window (a starved stub) still gets ONE Enter: the stub draws the Enter and its cleared composer in one frame', { timeout: 180_000 }, oneEnter(4000));
 
 test('RIG FIDELITY n1: a received echo that fell out of the stub\'s window gives NO reading, never an empty composer', () => {
   const { screenDraftOf } = require('./mail-rig/screen-draft.cjs');
