@@ -138,6 +138,22 @@ const ROWS = [
   ['M2 UTF-16BE BOM', 'powershell -File s16be.ps1', 'heavy:suite'],             // light
   ['M2 UTF-16LE no BOM', 'powershell -File s16nb.ps1', 'heavy:suite'],          // light
   ['M2 control: UTF-16 light', 'powershell -File l16.ps1', 'light'],            // light
+  // Jim's false-positive probe (msg 7ec187, shapes-probe-fp.cjs): light before, light after.
+  // ('1..3 | ForEach-Object { $_ * 2 }' is the property-block control above.)
+  ['FP a string that names a suite', '$c = "npm test"', 'light'],                 // light
+  ['FP an env assignment', "$env:FOO='1'", 'light'],                              // light
+  ['FP Select-String for a suite', "Select-String -Path x.log -Pattern 'npm test'", 'light'], // light
+  ['FP call :label', 'call :label', 'light'],                                     // light
+  ['FP git checkout --', 'git checkout -- src/a.ts', 'light'],                    // light
+  ['FP curl -sSLo', 'curl -sSLo out.json https://example.com/a.json', 'light'],   // light
+  ['FP where.exe', 'where.exe node', 'light'],                                    // light
+  ['FP start-process code', 'start-process code', 'light'],                       // light
+  ['FP echo a suite', 'echo npm test', 'light'],                                  // light
+  ['FP grep for a suite', 'grep -rn "npm test" docs', 'light'],                   // light
+  ['FP Start-Job light block', 'Start-Job -ScriptBlock { Get-Date }', 'light'],   // light
+  ['FP Invoke-Expression light', "Invoke-Expression 'Get-Date'", 'light'],        // light
+  ['FP time light', 'time git status', 'light'],                                  // light
+  ['FP nohup light', 'nohup git fetch &', 'light'],                               // light
 ];
 
 test('HEAVY-LOCK-SHAPES-189: every card shape is classified by what it runs (after; before in the comments)', (t) => {
