@@ -89,10 +89,15 @@ test('card ids: one shared rule; the panel groups on the full token, FORWARD dro
   // NAME-NNN cards count (Jim, SHOULD 2); a one-word name with a short number, or a standard's name, does not.
   assert.deepEqual(cardIds('WAKE-155 and START-175 and POST-INSTALL-188; GATE-4, RC-1, SHA-256, UTF-16, ISO-8601, X-189'), ['WAKE-155', 'START-175', 'POST-INSTALL-188']);
   assert.deepEqual(cardIds('PROMOTE-RUNBOOK-1 and ZT-I3'), ['PROMOTE-RUNBOOK-1', 'ZT-I3']);
-  // FORWARD keeps its rule (no behaviour change there), through the same helper.
+  // FORWARD drops the build number through the same helper, so release families still merge; a NAME-NNN card,
+  // which dropping would leave without a hyphen, stays whole (CL-M4-FWD-NAMENNN). Standards and short numbers stay out.
   const fwd = 'CL-W7-189 and TES-BUBBLE-NITS-189 and WAKE-155 (UTF-16)';
-  assert.deepEqual(cardIds(fwd, undefined, { dropBuild: true }), ['CL-W7', 'TES-BUBBLE-NITS']);
+  assert.deepEqual(cardIds(fwd, undefined, { dropBuild: true }), ['CL-W7', 'TES-BUBBLE-NITS', 'WAKE-155']);
   assert.deepEqual(FWD.cardIds(fwd), cardIds(fwd, undefined, { dropBuild: true }));
+  assert.deepEqual(FWD.cardIds('WAKE-155 and START-175; SHA-256, GATE-4, RC-1, X-189, ISO-8601'), ['WAKE-155', 'START-175']);
+  assert.deepEqual(FWD.cardIds('TES-BUBBLE-NITS-189'), FWD.cardIds('TES-BUBBLE-NITS-188'));
+  assert.deepEqual(FWD.cardIds('POST-INSTALL-188 and POST-INSTALL-189'), ['POST-INSTALL']);
+  assert.deepEqual(FWD.cardIds('x', 'card.wake-155'), ['WAKE-155']);
   assert.deepEqual(FWD.cardIds('x', 'card.heavy-lock-shapes-189'), ['HEAVY-LOCK-SHAPES']);
 });
 

@@ -9,16 +9,25 @@
  *   (SHA-256, UTF-16): GATE-4, RC-1 and SHA-256 grouped unrelated notes on the real ledgers.
  *   The CHAINS panel groups on this.
  * - `dropBuild`: a trailing build number is dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS) and a
- *   token left without a hyphen is not a card (Jim's calibration rule, as FORWARD retrieves with it).
+ *   token left without a hyphen is not a card (Jim's calibration rule, as FORWARD retrieves with it),
+ *   unless the whole token is a NAME-NNN card by the full rule: WAKE-155 stays WAKE-155 (CL-M4-FWD-NAMENNN).
  */
 const STANDARDS = new Set(['SHA', 'UTF', 'ISO', 'RFC', 'CVE', 'IEC', 'IEEE', 'MD', 'AES', 'RSA', 'TLS', 'HTTP', 'IPV', 'WIN', 'X']);
+
+/** The full-mode rule for one token: a NAME-N token is a card only with a 3-digit build number and a non-standard name. */
+function isCard(t: string): boolean {
+  const m = /^([A-Z][A-Z0-9]*)-(\d+)$/.exec(t);
+  return !m || (/^\d{3}$/.test(m[2]) && !STANDARDS.has(m[1]));
+}
 
 export function cardIds(text: string, key?: string, o: { dropBuild?: boolean } = {}): string[] {
   const fromKey = key?.startsWith('card.') ? key.slice(5).toUpperCase() : '';
   const toks = `${text} ${fromKey}`.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? [];
-  if (o.dropBuild) return [...new Set(toks.map((t) => t.replace(/-\d+$/, '')).filter((t) => t.includes('-')))];
-  return [...new Set(toks.filter((t) => {
-    const m = /^([A-Z][A-Z0-9]*)-(\d+)$/.exec(t);
-    return !m || (/^\d{3}$/.test(m[2]) && !STANDARDS.has(m[1]));
-  }))];
+  if (o.dropBuild) {
+    return [...new Set(toks.map((t) => {
+      const d = t.replace(/-\d+$/, '');
+      return d.includes('-') ? d : isCard(t) ? t : '';
+    }).filter(Boolean))];
+  }
+  return [...new Set(toks.filter(isCard))];
 }
