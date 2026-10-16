@@ -275,7 +275,15 @@ export interface ClassifyCtx {
   stdin?: string | null;
   /** HEAVY-LOCK-APOSTROPHE-SWALLOW: the quoting rules of this text ('cmd' for a `cmd /c` body). Default 'sh'. */
   dialect?: ShellDialect;
+  /** HEAVY-LOCK-SHAPES-189: the agent's spawn env for the variables a script path is commonly built
+   *  from (HOME, USERPROFILE, TEMP, TMP, ...): `bash $TEMP/x.sh`, `bash ~/x.sh` read that file. A
+   *  variable the command itself assigns wins. Absent = such a path stays unreadable (fail closed). */
+  env?: Readonly<Record<string, string>>;
 }
+
+/** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
+ *  script that runs a script); deeper is light, so a script that runs itself still ends. */
+const MAX_DEPTH = 4;
 
 /** HEAVY-LOCK-BG-LAPSE-189: the class of a script the lock cannot read at PreToolUse. */
 function unreadable(path: string): HeavyClass {
@@ -283,14 +291,21 @@ function unreadable(path: string): HeavyClass {
 }
 
 /** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
-function classifyScript(path: string, depth: number, ctx: ClassifyCtx): HeavyClass {
-  if (!ctx.readScript || depth >= 2) return { heavy: false };
+function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: ShellDialect = 'sh'): HeavyClass {
+  if (!ctx.readScript || depth >= MAX_DEPTH) return { heavy: false };
   let text: string | null = null;
   try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
   // HEAVY-LOCK-BG-LAPSE-189: a script the lock cannot read (not created yet, too big, a computed
   // path) is an unknown program: heavy, as an unreadable stdin script already is (FAILOPEN).
   if (text === null) return unreadable(path);
-  const c = classifyCommand(text, depth + 1, ctx);
+  // HEAVY-LOCK-SHAPES-189: a binary (an extensionless `./tool` that is an executable) is not a script.
+  if (text.includes('\0')) return { heavy: false };
+  // An extensionless script run directly (`./run`) runs by its shebang: node code is node's to judge.
+  if (/^#![^\n]*\b(node|tsx|ts-node)\b/.test(text)) {
+    const c = classifyNodeCode({ script: path, preloads: [], inline: null, stdin: false }, ctx, true);
+    return c.heavy ? c : { heavy: false };
+  }
+  const c = classifyCommand(text, depth + 1, { ...ctx, dialect });
   return c.heavy ? { ...c, why: `${c.why ?? c.kind} (in ${path.replace(/\\/g, '/').split('/').pop()})` } : { heavy: false };
 }
 
@@ -511,8 +526,27 @@ function nodeProgram(args: string[]): NodeProgram {
 }
 
 /** Inline code, stdin code, or a script file (plus preloads and helpers, two hops deep) that loads a heavy runtime. */
-function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
+function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false): HeavyClass {
   const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (loads ${marker})` });
+  // HEAVY-LOCK-SHAPES-189: node runs an extensionless script as node resolves it (`node run`: the
+  // file run, else run.js, else run/index.js); a shebang script (`./run`, anyName) is the file itself.
+  let prog = prog0;
+  if (prog.script && !JS_SCRIPT.test(prog.script) && ctx.readScript) {
+    const s = prog.script;
+    const base = s.replace(/\\/g, '/').split('/').pop()!;
+    if (anyName) prog = { ...prog, script: s };
+    else if (!base.includes('.')) {
+      let found: string | null = null;
+      for (const p of [s, `${s}.js`, `${s.replace(/[\\/]+$/, '')}/index.js`]) {
+        let t: string | null = null;
+        try { t = ctx.readScript(p, ctx.cd); } catch { t = null; }
+        if (t !== null) { found = p; break; }
+      }
+      if (found === null) return unreadable(s);
+      prog = { ...prog, script: found };
+      anyName = true;
+    }
+  }
   if (prog.inline !== null) { const m = scanJs(prog.inline).marker; return m ? hit(m, '-e') : { heavy: false }; }
   // A script read from stdin: a heredoc body or a `< file` the classifier could read is checked;
   // stdin it cannot see (`node -` from a pipe, an unreadable `< file`) is an unknown program: heavy.
@@ -521,7 +555,7 @@ function classifyNodeCode(prog: NodeProgram, ctx: ClassifyCtx): HeavyClass {
     else return { heavy: true, kind: 'bench', why: 'node (a stdin script the lock cannot read)' };
   }
   if (!ctx.readScript) return { heavy: false };
-  const roots = [...prog.preloads, ...(prog.script && JS_SCRIPT.test(prog.script) ? [prog.script] : [])];
+  const roots = [...prog.preloads, ...(prog.script && (anyName || JS_SCRIPT.test(prog.script)) ? [prog.script] : [])];
   if (!roots.length) return { heavy: false };
   const name = (prog.script ?? roots[0]).replace(/\\/g, '/').split('/').pop()!;
   const seen = new Set<string>();
@@ -591,17 +625,41 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // One level of a shell wrapper: bash -c "...", cmd /c ..., powershell -Command ...
   // HEAVY-LOCK-BG-LAPSE-189: the script form is read below depth 0 too (`X="$(bash run.sh)"`,
   // `bash -c "bash run.sh"`); classifyScript stops at depth 2.
-  if (WRAPPERS.has(bin) && (depth === 0 || !args.some((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a)))) {
+  if (WRAPPERS.has(bin)) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
     const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
-    if (k >= 0) return classifyCommand(args.slice(k + 1).join(' '), depth + 1, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' });
+    // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
+    // was read one level deep only).
+    if (k >= 0) return depth + 1 >= MAX_DEPTH ? { heavy: false } : classifyCommand(args.slice(k + 1).join(' '), depth + 1, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' });
+    // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
+    if (/^(powershell|pwsh)$/.test(bin)) {
+      const f = args.findIndex((a) => /^-(f|file)$/i.test(a));
+      return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, ctx) : { heavy: false };
+    }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
     const script = /^(bash|sh|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
     return script ? classifyScript(script, depth, ctx) : { heavy: false };
   }
-  // A script run directly (`./suite.sh`, `scripts/gate.sh`).
-  if (/\.(sh|bash)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
+  // A script run directly (`./suite.sh`, `scripts/gate.sh`; HEAVY-LOCK-SHAPES-189: `./x.ps1`).
+  if (/\.(sh|bash|ps1)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
+  // HEAVY-LOCK-SHAPES-189: `source x.sh` / `. x.sh` run the script in this shell.
+  if ((bin === 'source' || ws[0] === '.') && args[0]) return classifyScript(args[0], depth, ctx);
+  // HEAVY-LOCK-SHAPES-189: a batch file (`cmd /c x.bat`, `call x.cmd`, `x.bat`) runs its text as cmd.
+  if (bin === 'call' && args.length) return classifyWords(args, depth, ctx);
+  if (/\.(bat|cmd)$/i.test(ws[0]) && !/^(npm|npx|pnpm|yarn|node|electron|electron-builder|electron-rebuild|electron-vite|node-gyp|vitest|tsx|ts-node)$/.test(bin)) {
+    return classifyScript(ws[0], depth, ctx, 'cmd');
+  }
+  // HEAVY-LOCK-SHAPES-189: an extensionless script run by its path (`./run`, `scripts/gate`): its
+  // shebang decides. Only a ./ or ../ path that does not read is unknown (heavy, provisional); another
+  // unreadable path (`/usr/bin/env`, a Windows tool) is a program the lock cannot see into: light.
+  // Its name is judged first (`./node_modules/.bin/vitest` is the suite by name, whatever its shim reads).
+  if (/[\\/]/.test(ws[0]) && !ws[0].replace(/\\/g, '/').split('/').pop()!.includes('.')) {
+    const named = classifyWords([bin, ...args], depth, ctx);
+    if (named.heavy) return named;
+    const c = classifyScript(ws[0], depth, ctx);
+    return c.provisional && !/^\.{1,2}[\\/]/.test(ws[0]) ? { heavy: false } : c;
+  }
   const has = (...xs: string[]): boolean => xs.some((x) => args.includes(x));
   if (bin === 'npm' || bin === 'pnpm' || bin === 'yarn') {
     const sub = args.find((a) => !a.startsWith('-')) ?? (bin === 'yarn' ? 'install' : '');
@@ -634,6 +692,8 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // tsx and ts-node run a script as node does (HEAVY-LOCK-ADHOC-NODE).
   if (bin === 'node' || bin === 'electron' || bin === 'guppy' || bin === 'munder difflin' || bin === 'tsx' || bin === 'ts-node') {
     if (args.some((a) => a.startsWith('--native-memory-bench'))) return { heavy: true, kind: 'bench', why: 'native-memory bench' };
+    // HEAVY-LOCK-SHAPES-189: `node --check x` (or -c) only parses x: nothing runs.
+    if (bin === 'node' && args.some((a) => a === '--check' || a === '-c')) return { heavy: false };
     for (const p of nodePreloads(args)) {
       const base = p.replace(/\\/g, '/').split('/').pop();
       if (SUITE_RUNNER.test(p)) return { heavy: true, kind: 'suite', why: `node -r ${base} (a suite runner preloaded)` };
@@ -650,6 +710,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
       if (files.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
+      // HEAVY-LOCK-SHAPES-189: a named test file the lock cannot read (made later in the call, a
+      // computed path) is unknown, as an unreadable script is: heavy, provisional.
+      if (ctx.readScript) {
+        for (const f of files) {
+          let t: string | null = null;
+          try { t = ctx.readScript(f, ctx.cd); } catch { t = null; }
+          if (t === null) return unreadable(f);
+        }
+      }
       return { heavy: false };
     }
     // HEAVY-LOCK-PRELOAD-ESCAPE: the script is the first POSITIONAL argument, as nodeProgram reads
@@ -720,7 +789,15 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // assignment segment of this command set to a literal is substituted before a path is read (the
   // reader refuses a `$` path, which would otherwise make every such script unreadable).
   const vars = new Map<string, string>();
-  const expand = (v: string): string => v.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, n: string) => vars.get(n) ?? m);
+  // HEAVY-LOCK-SHAPES-189 (N-d): a variable this command did not set falls back to the spawn env the
+  // caller passed (`$TEMP`, `${HOME}`, PowerShell's `$env:TEMP`), and a leading `~` to its HOME.
+  const env = ctx.env ?? {};
+  const envGet = (n: string): string | undefined => env[n] ?? env[Object.keys(env).find((k) => k.toLowerCase() === n.toLowerCase()) ?? ''];
+  const expand = (v: string): string => {
+    const s = v.replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, p: string | undefined, n: string | undefined) =>
+      p ? envGet(p) ?? m : vars.get(n!) ?? env[n!] ?? m);
+    return env.HOME && /^~(?=[\\/]|$)/.test(s) ? `${env.HOME.replace(/[\\/]+$/, '')}${s.slice(1)}` : s;
+  };
   const key = (p: string, cd?: string): string => vkey(expand(p), cd === undefined ? cd : expand(cd));
   const base = ctx.readScript;
   const readScript = base ? (p: string, cd?: string): string | null => {
@@ -860,6 +937,40 @@ function writeTargets(raw: string[], ws: string[]): string[] {
       files.push(a);
     }
     out.push(...(prog ? files : files.slice(1)));
+  } else if (bin === 'curl') {
+    // HEAVY-LOCK-SHAPES-189: `curl -o f URL` / `--output f` / `--output=f` / `-of`.
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === '--output' || /^-[a-zA-Z]*o$/.test(a)) { if (args[i + 1]) out.push(args[++i]); }
+      else if (a.startsWith('--output=')) out.push(a.slice(9));
+      else if (/^-[a-zA-Z]*o./.test(a) && !a.startsWith('--')) out.push(a.slice(a.indexOf('o') + 1));
+    }
+  } else if (bin === 'git') {
+    // HEAVY-LOCK-SHAPES-189: `git checkout [rev] -- f` and `git restore [--source x] f` rewrite f.
+    let k = 0;
+    while (k < args.length && args[k].startsWith('-')) k += /^-[Cc]$/.test(args[k]) ? 2 : 1;
+    const sub = args[k], rest = args.slice(k + 1);
+    if (sub === 'checkout' && rest.includes('--')) out.push(...rest.slice(rest.indexOf('--') + 1));
+    else if (sub === 'restore') {
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === '--source' || rest[i] === '-s') { i++; continue; }
+        if (rest[i] !== '--' && !rest[i].startsWith('-')) out.push(rest[i]);
+      }
+    }
+  } else if (bin === 'ln') {
+    // HEAVY-LOCK-SHAPES-189: `ln -sf target link` makes link (one operand: a link by its name, here).
+    const pos2 = args.filter((a) => !a.startsWith('-'));
+    if (pos2.length >= 2) out.push(pos2[pos2.length - 1]);
+    else if (pos2.length === 1) out.push(pos2[0].replace(/\\/g, '/').split('/').pop()!);
+  } else if (bin === 'dd') {
+    for (const a of args) if (a.startsWith('of=')) out.push(a.slice(3));   // HEAVY-LOCK-SHAPES-189
+  } else if (bin === 'node') {
+    // HEAVY-LOCK-SHAPES-189: `node -e "fs.writeFileSync('f', ...)"`: a literal first argument of a
+    // write / append / copy-destination call is a file the program writes.
+    const e = args.findIndex((a) => a === '-e' || a === '--eval' || a === '-p' || a === '--print');
+    const code = e >= 0 ? args[e + 1] ?? '' : '';
+    for (const m of code.matchAll(/\b(?:writeFileSync|appendFileSync|writeFile|appendFile|createWriteStream)\s*\(\s*(['"`])([^'"`$]+)\1/g)) out.push(m[2]);
+    for (const m of code.matchAll(/\b(?:copyFileSync|copyFile|renameSync|rename)\s*\(\s*(['"`])[^'"`]*\1\s*,\s*(['"`])([^'"`$]+)\2/g)) out.push(m[3]);
   }
   return out;
 }
