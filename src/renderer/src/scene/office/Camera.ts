@@ -73,7 +73,7 @@ export class Camera {
   private mapHeight = 480;
   private manualOverride = false;
   /** The fitted rectangle, in map pixels (null: the whole map), and its clippable bottom rows. */
-  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null = null;
+  private frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep; fit?: Keep } | null = null;
 
   private nudgeOffsetX = 0;
   private nudgeOffsetY = 0;
@@ -94,7 +94,7 @@ export class Camera {
   }
 
   /** Fit a part of the map instead of all of it (see TES-GUPPY-FRAMING above); null for the whole map. */
-  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep } | null): void {
+  setFrame(frame: { x: number; y: number; w: number; h: number; deadBottom: number; keep?: Keep; art?: Keep; fit?: Keep } | null): void {
     this.frame = frame;
     if (!this.manualOverride) this.fitToScreen();
   }
@@ -112,12 +112,16 @@ export class Camera {
   /** TES-FLOOR-WHOLE-188: the whole device scale n and the resolution, or null when not whole. */
   private whole(): { n: number; r: number; keep: Keep } | null {
     const keep = this.frame?.keep, r = this.settle?.resolution() ?? 0;
-    if (!keep || !Number.isFinite(r) || r <= 0) return null;
+    // A visual fit box must use its exact (often fractional) fit. StationFloor caches at the
+    // first whole source scale above it, then this one nearest resample reaches the pane.
+    if (this.frame?.fit || !keep || !Number.isFinite(r) || r <= 0) return null;
     return { n: wholeScale(keep, Math.round(this.viewWidth * r), Math.round(this.viewHeight * r)), r, keep };
   }
 
   private getMinZoom(): number {
     if (this.viewWidth === 0 || this.viewHeight === 0) return 1;
+    const fitted = this.frame?.fit;
+    if (fitted) return Math.min(this.viewWidth / (fitted.x1 - fitted.x0 + 1), this.viewHeight / (fitted.y1 - fitted.y0 + 1));
     const w = this.whole();
     if (w) return w.n / w.r;
     const b = this.box();
@@ -132,6 +136,13 @@ export class Camera {
   /** Fit the whole map (or the frame, its content centred) to the viewport. */
   fitToScreen(): void {
     this.manualOverride = false;
+    const fitted = this.frame?.fit;
+    if (fitted) {
+      this.targetX = (fitted.x0 + fitted.x1 + 1) / 2;
+      this.targetY = (fitted.y0 + fitted.y1 + 1) / 2;
+      this.targetZoom = this.getMinZoom();
+      return;
+    }
     const b = this.box();
     this.targetX = b.x + b.w / 2;
     this.targetY = b.y + (b.h - b.deadBottom) / 2;
@@ -178,6 +189,8 @@ export class Camera {
       }
     }
 
+    const fitted = this.frame?.fit;
+    if (fitted) { this.placeFit(fitted); return; }
     const w = this.whole();
     if (w) { this.placeWhole(w.n, w.r, w.keep); return; }
 
@@ -208,6 +221,20 @@ export class Camera {
       this.container.y = Math.min(top, Math.max(top + this.viewHeight - scaledH, this.container.y));
     }
 
+  }
+
+  /** Place the declared visual fit box at its exact maximum uniform scale. The static floor
+   * cache is built at ceil(scale * DPR), so this is the one nearest resample to the pane, with
+   * no per-frame composition or synthetic art. Like the whole camera, it is target-stable: a
+   * roster nudge cannot make a centred box bounce. */
+  private placeFit(fit: Keep): void {
+    const z = this.getMinZoom();
+    this.currentZoom = this.targetZoom = z;
+    this.currentX = (fit.x0 + fit.x1 + 1) / 2;
+    this.currentY = (fit.y0 + fit.y1 + 1) / 2;
+    this.container.scale.set(z);
+    this.container.x = this.viewWidth / 2 - (fit.x0 + fit.x1 + 1) / 2 * z;
+    this.container.y = this.viewHeight / 2 - (fit.y0 + fit.y1 + 1) / 2 * z;
   }
 
   /** TES-FLOOR-WHOLE-188: place the map at n device px per map px, on whole device px. Each axis

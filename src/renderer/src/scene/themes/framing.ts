@@ -20,6 +20,9 @@ export interface FloorFrame {
   /** TES-FLOOR-WHOLE-188: the art's own box (inclusive map px, no margin). On an axis the art
    *  covers, the whole camera keeps the pane inside it, so a pan never shows the frame's margin. */
   art?: { x0: number; y0: number; x1: number; y1: number };
+  /** The visual box that is fitted exactly: the back-wall top through the front-wall lip,
+   * and the two outer lips.  Art beyond it (including the outer hull) remains real art. */
+  fit?: { x0: number; y0: number; x1: number; y1: number };
 }
 
 /** Map pixels kept clear around the art on its top, left and right. */
@@ -34,8 +37,11 @@ export const FRAME_MARGIN = 8;
  * object (stations, wall panels, the entrance) and the opaque box of a person on every reachable
  * cell; outside it lie only the hull's rim, the upper wall above its consoles and the hull face.
  */
-export const PACK_ART: Readonly<Record<string, { x0: number; y0: number; x1: number; y1: number; deadBottom: number; keep?: { x0: number; y0: number; x1: number; y1: number } }>> = {
-  tes: { x0: 320, y0: 32, x1: 607, y1: 415, deadBottom: 48, keep: { x0: 335, y0: 84, x1: 591, y1: 367 } },
+export const PACK_ART: Readonly<Record<string, { x0: number; y0: number; x1: number; y1: number; deadBottom: number; backWallTop: number; frontLip: number; leftLip: number; rightLip: number; keep?: { x0: number; y0: number; x1: number; y1: number } }>> = {
+  // The fit landmarks are measured pack pixels: the art bounds are the two outer lips and the
+  // back-wall top; the reachable deck's final row is the front-wall lip.  The hull continues
+  // below frontLip through y1, but never participates in the fit.
+  tes: { x0: 320, y0: 32, x1: 607, y1: 415, deadBottom: 48, backWallTop: 32, frontLip: 367, leftLip: 320, rightLip: 607, keep: { x0: 335, y0: 84, x1: 591, y1: 367 } },
 };
 
 /** A pack's art frame (its art with the margin), or null for a floor that fits its whole map. */
@@ -44,7 +50,11 @@ export function packFrame(packId: string | null | undefined): FloorFrame | null 
   if (!a) return null;
   const x = Math.max(0, a.x0 - FRAME_MARGIN), y = Math.max(0, a.y0 - FRAME_MARGIN);
   const f: FloorFrame = { x, y, w: a.x1 + 1 + FRAME_MARGIN - x, h: a.y1 + 1 - y, deadBottom: a.deadBottom };
-  if (a.keep) { f.keep = { ...a.keep }; f.art = { x0: a.x0, y0: a.y0, x1: a.x1, y1: a.y1 }; }
+  if (a.keep) {
+    f.keep = { ...a.keep };
+    f.art = { x0: a.x0, y0: a.y0, x1: a.x1, y1: a.y1 };
+    f.fit = { x0: a.leftLip, y0: a.backWallTop, x1: a.rightLip, y1: a.frontLip };
+  }
   return f;
 }
 
@@ -64,7 +74,7 @@ export function floorFrame(packId: string | null | undefined, mapW: number, mapH
 
 /** The pane aspect (width / height) that the frame fills exactly: its content, the dead band left out. */
 export function frameAspect(f: FloorFrame): number {
-  return f.w / (f.h - f.deadBottom);
+  return f.fit ? (f.fit.x1 - f.fit.x0 + 1) / (f.fit.y1 - f.fit.y0 + 1) : f.w / (f.h - f.deadBottom);
 }
 
 /** The App row around the floor: 16 px padding on each side and the 10 px splitter. */
