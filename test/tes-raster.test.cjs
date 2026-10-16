@@ -294,10 +294,10 @@ test('StationFloor draws the floor straight in the world: the floor texture hold
   // (tes-floor-damage-188 proves every such frame equals a full draw).
   assert.equal((src.match(/SCISSOR_TEST/g) || []).length, 2, 'enabled and disabled once, in paint()');
   assert.match(src, /gl\.enable\(gl\.SCISSOR_TEST\);\s*try \{\s*for \(const p of todo\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*realRender\(\{ container: app\.stage, clear: true \}\);\s*\}\s*\} finally \{ gl\.disable\(gl\.SCISSOR_TEST\); \}/);
-  // TES-FLOOR-WHOLE-188: the camera puts every frame on whole device px, so nothing is composed per frame.
+  // The semantic-fit camera has one cached static source; nothing is composed per frame.
   assert.doesNotMatch(src, /sceneRT|sceneSprite|sceneM\b|aboveRoot|sortLayer\.alpha/);
   assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
-  assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.keep \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
+  assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.fit \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
   assert.match(src, /const floorRoot = new Container\(\);\s*const floorWorld = floorRoot\.addChild\(new Container\(\)\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
   assert.match(src, /s\.position\.set\(it\.x, it\.y\);\s*s\.alpha = it\.opacity;/);
@@ -312,9 +312,10 @@ test('StationFloor draws the floor straight in the world: the floor texture hold
   // PANEL-BLINK-188: the chair panels' layer right after 'above', before the bubbles.
   assert.match(src, /if \(hasVisiblePixel\(plan\.above\)\) world\.addChild\(new Sprite\(own\(plan\.above\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const panelLayer = new PanelLayer\(plan, SM, pack\.manifest\.stations\.layer, own, sortLayer, world\.addChild\(new Container\(\)\)\);\s*(?:\/\/[^\n]*\n\s*)*const bubbles = new BubbleLayer\(\{ width: SM\.PW, height: SM\.PH \}\);\s*world\.addChild\(bubbles\.container\);\s*\(app as any\)\.__bubbleLayer = bubbles;\s*app\.stage\.addChild\(world\);/);
   assert.equal((src.match(/own\(plan\.above\)/g) || []).length, 1, "'above' is made once");
-  // The floor texture: the bounds at k texels per map px, 1:1, nearest; the old one freed first.
+  // The floor texture: the bounds at k texels per map px. Semantic fit uses one linear
+  // downscale; ordinary floors retain nearest. The old texture is freed first.
   // Its tree is scaled by k and moved to the bounds; the sprite is the bounds in map px.
-  assert.match(src, /const buildFloor = \(k: number\) => \{\s*const b = bounds!;\s*floorView\.texture = Texture\.EMPTY;\s*floorRT\?\.destroy\(true\);\s*floorRT = RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: 'nearest' \}\);\s*floorWorld\.scale\.set\(k\);\s*floorWorld\.position\.set\(-b\.x \* k, -b\.y \* k\);\s*app\.renderer\.render\(\{ container: floorRoot, target: floorRT, clear: true \}\);\s*floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);\s*floorK = k;/);
+  assert.match(src, /const buildFloor = \(k: number\) => \{\s*const b = bounds!;\s*floorView\.texture = Texture\.EMPTY;\s*floorRT\?\.destroy\(true\);\s*floorRT = RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: frame0\.fit \? 'linear' : 'nearest' \}\);\s*floorWorld\.scale\.set\(k\);\s*floorWorld\.position\.set\(-b\.x \* k, -b\.y \* k\);\s*app\.renderer\.render\(\{ container: floorRoot, target: floorRT, clear: true \}\);\s*floorView\.texture = floorRT;\s*floorView\.position\.set\(b\.x, b\.y\);\s*floorView\.scale\.set\(1 \/ k\);\s*floorK = k;/);
 });
 
 test('StationFloor picks after each tick: the floor rebuilt on a new k, the statics near a person drawn again; and sorts on a depth change', () => {
