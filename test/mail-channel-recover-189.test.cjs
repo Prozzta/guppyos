@@ -10,7 +10,9 @@
  *      fails degrades again. A status reading is not a hook. A hook says nothing about mail blocks,
  *      so it never undoes a no-mail-block degrade;
  *  (b) the override is persisted (it survives an app restart) and every spawn, respawn and relaunch
- *      (HiveManager.ensureAgent) undoes it, for either reason, before the prompt reads it.
+ *      (HiveManager.ensureAgent) undoes it, for either reason, before the prompt reads it. Codex
+ *      (its running session is never told of a degrade): the first spawn applies it, the next one
+ *      undoes it, so the spawn its alert asks for still delivers mail (mail-rig-faults F12).
  * MUTANTS: counting a wake at its commit, no restore on a hook, no restore at a spawn: each caught.
  * Zero model tokens: a real (jailed) hive, a real HookServer, the real coordinator and bridge,
  * wired as src/main/index.ts wires them, with a fake clock on the bridge.
@@ -230,6 +232,20 @@ test('(b) the override survives an app restart (persisted), and the next spawn u
   }
 });
 
+test('(b) Codex: the first spawn after a degrade applies it (the legacy prompt reaches the session), the next one undoes it', async (t) => {
+  const w = await world(t);
+  await w.hive.ensureAgent({ id: 'cx-1', name: 'cx-1', provider: 'codex', cwd: w.home });
+  w.hive.mail.degradeChannel('cx-1', 'no-mail-block', {});
+  await w.hive.ensureAgent({ id: 'cx-1', name: 'cx-1', provider: 'codex', cwd: w.home });
+  const o = w.hive.mail.channelOverride('cx-1');
+  assert.equal(o?.reason, 'no-mail-block', 'kept by the spawn that applies it');
+  assert.ok(o.applied > 0, 'marked applied');
+  assert.deepEqual(w.rows('mail-channel-restored'), []);
+  await w.hive.ensureAgent({ id: 'cx-1', name: 'cx-1', provider: 'codex', cwd: w.home });
+  assert.equal(w.hive.mail.channelOverride('cx-1'), null, 'undone by the next spawn');
+  assert.equal(w.rows('mail-channel-restored')[0]?.proof, 'respawn');
+});
+
 // ————————————————————————————————————————————————————————————— mutants
 
 const MUTANTS = [
@@ -266,7 +282,7 @@ const MUTANTS = [
   },
   {
     name: '(b) no restore at a spawn', file: HIVE,
-    from: "    try { this.mail.restoreChannel(meta.id, 'respawn'); } catch (e) { console.warn('[hive] mail channel restore failed:', e); }\n", to: '',
+    from: "    try { this.mail.restoreChannel(meta.id, 'respawn', {}, { applyFirst: normalizeAgentProvider(meta.provider) === 'codex' }); } catch (e) { console.warn('[hive] mail channel restore failed:', e); }\n", to: '',
     run: async (t, m) => {
       const w = await world(t, m);
       w.hive.mail.degradeChannel('cl-1', 'zero-hook-traffic', {});
