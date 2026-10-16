@@ -203,13 +203,65 @@ test('(a) degrade, then the agent\'s own hooks: restored at the next wake claim 
   assert.equal(w.rows('mail-channel-degraded').length, 2);
 });
 
-test('(a) a hook never undoes a no-mail-block degrade (hooks were never the problem there)', async (t) => {
+test('(a) a hook never undoes a no-mail-block degrade (hooks were never the problem there), not even at the next claim', async (t) => {
   const w = await world(t);
   w.hive.mail.degradeChannel('cl-1', 'no-mail-block', {});
   w.fire('cl-1', 'UserPromptSubmit', { prompt: 'go' });
   w.fire('cl-1', 'Stop');
+  const reqs = w.reqs.length;
+  w.send('after the hooks'); w.now += STEP; await w.flush();
+  assert.equal(w.reqs.length, reqs + 1, 'a claim (the restore point) was reached');
   assert.equal(w.override()?.reason, 'no-mail-block');
   assert.deepEqual(w.rows('mail-channel-restored'), []);
+});
+
+test('(a) Jim S2-J: status readings alone (hook-path Status and provider status ticks) never restore, even at a claim: no flapping on telemetry', async (t) => {
+  const w = await world(t);
+  w.fire('cl-1', 'Stop');
+  await w.hookless(MAIL_DEGRADE_AFTER_WAKES);
+  assert.equal(w.override()?.reason, 'zero-hook-traffic');
+  w.fire('cl-1', 'Status', {});
+  w.bridge.onProviderStatus('cl-1', 'running', null, w.now);
+  w.now += 6_000;
+  w.bridge.onProviderStatus('cl-1', 'idle', null, w.now);
+  const reqs = w.reqs.length;
+  w.send('after the ticks'); w.now += STEP; await w.flush();
+  w.bridge.reconcileAll(['cl-1']); await w.flush();
+  assert.ok(w.reqs.length > reqs, 'a claim (the restore point) was reached');
+  assert.equal(w.override()?.reason, 'zero-hook-traffic', 'still degraded');
+  assert.deepEqual(w.rows('mail-channel-restored'), []);
+});
+
+/**
+ * Jim S1: a dead hook channel seen only through provider status (Antigravity): no hook ever; each
+ * wake's turn shows `running`, then `idle` after `turnMs`. Returns the world after `wakes` wakes.
+ */
+async function statusOnly(t, m, turnMs, wakes = 5) {
+  const w = await world(t, m);
+  w.bridge.onProviderStatus('cl-1', 'idle', null, w.now);
+  await w.flush();
+  for (let k = 0; k < wakes && !w.override(); k++) {
+    w.send(`s${k}`);
+    w.now += STEP; await w.flush(); w.bridge.reconcileAll(['cl-1']); await w.flush();
+    w.now += 500; w.bridge.onProviderStatus('cl-1', 'running', null, w.now); await w.flush();
+    w.now += turnMs; w.bridge.onProviderStatus('cl-1', 'idle', null, w.now); await w.flush();
+    w.now += STEP; w.bridge.reconcileAll(['cl-1']); await w.flush();
+  }
+  return w;
+}
+
+test('(d) Jim S1: status-only dead channel, 10 s turns (the status idle closes each turn off the beat): zero-hook-traffic, judged at the next commit', async (t) => {
+  const w = await statusOnly(t, undefined, 10_000);
+  const row = w.rows('mail-channel-degraded')[0];
+  assert.ok(row, 'degraded');
+  assert.deepEqual({ reason: row.reason, edge: row.edge }, { reason: 'zero-hook-traffic', edge: 'next-commit' });
+});
+
+test('(d) Jim S1/S2-G: status-only dead channel, 2 s turns (the idle lands in the grace: the deferred-idle of the beat): zero-hook-traffic, judged at that edge', async (t) => {
+  const w = await statusOnly(t, undefined, 2_000);
+  const row = w.rows('mail-channel-degraded')[0];
+  assert.ok(row, 'degraded');
+  assert.deepEqual({ reason: row.reason, edge: row.edge }, { reason: 'zero-hook-traffic', edge: 'deferred-idle' });
 });
 
 // ————————————————————————————————————————————————————————————— (b) persistence and respawn
@@ -289,6 +341,29 @@ const MUTANTS = [
       await w.hive.ensureAgent({ id: 'cl-1', name: 'cl-1', provider: 'claude', cwd: w.home });
       return w.override() === null;
     }
+  },
+  {
+    name: 'Jim S2-J: a Status reading counts as hook proof', file: BRIDGE,
+    from: "    if (agentId && event && event !== 'Status') {\n", to: '    if (agentId && event) {\n',
+    run: async (t, m) => {
+      const w = await world(t, m);
+      w.fire('cl-1', 'Stop');
+      await w.hookless(MAIL_DEGRADE_AFTER_WAKES);
+      w.fire('cl-1', 'Status', {});
+      w.send('after the tick'); w.now += STEP; await w.flush();
+      w.bridge.reconcileAll(['cl-1']); await w.flush();
+      return w.override()?.reason === 'zero-hook-traffic';
+    }
+  },
+  {
+    name: 'Jim S2-G: deferred-idle not judged', file: BRIDGE,
+    from: " || edge.kind === 'deferred-idle')) this.judgeWake", to: ')) this.judgeWake',
+    run: async (t, m) => { const w = await statusOnly(t, m, 2_000); return w.rows('mail-channel-degraded')[0]?.edge === 'deferred-idle'; }
+  },
+  {
+    name: 'Jim S1: an unjudged wake dropped at the next commit', file: BRIDGE,
+    from: "    if (w.unjudged) this.judgeWake(agentId, 'next-commit');\n", to: '',
+    run: async (t, m) => { const w = await statusOnly(t, m, 10_000); return w.rows('mail-channel-degraded')[0]?.reason === 'zero-hook-traffic'; }
   }
 ];
 

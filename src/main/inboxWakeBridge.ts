@@ -394,12 +394,17 @@ export class InboxWakeBridge {
   private noteMailCommit(agentId: string, claim: WakeClaim): void {
     const w = this.degradeFor(agentId);
     if (!w) return;
+    // Jim S1: trigger B first. A wake with no hook at all had no mail block either; zero hook
+    // traffic is the narrower diagnosis (and the one whose archive needs no Stop, index.ts noStop).
+    if (w.unjudged) this.judgeWake(agentId, 'next-commit');
     this.endMailWatch(agentId);
     if (w.degraded) return;
     // MAIL-CHANNEL-STUCK-DEGRADED: not counted here. Jim's 2026-10-02 degrade counted its third
     // wake at the moment it was typed, 40 ms before that wake's own hooks arrived. A wake is
     // judged by what follows it: a hook clears it (onHook), a confirm window that ends with no
-    // hook counts it (judgeWake). A wake still unjudged when the next commits proves nothing.
+    // hook counts it (judgeWake). Jim S1: so does the NEXT commit, when the previous wake is still
+    // unjudged (judged first, above): its turn ended off the beat (a provider status idle closes it in the coordinator)
+    // and no hook came since, or onHook would have cleared it.
     w.unjudged = this.deps.now();
     w.open = { claimedAt: this.deps.coordinator.turnFacts(agentId).claimedAt, ids: claim.ids, blocks: 0 };
   }
