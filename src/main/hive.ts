@@ -1301,6 +1301,11 @@ export class HiveManager {
     const dir = this.agentDir(meta.id);
     mkdirSync(join(dir, 'inbox', '.done'), { recursive: true });
     mkdirSync(join(dir, 'outbox', '.sent'), { recursive: true });
+    // MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): every spawn, respawn and relaunch starts on the
+    // provider's own mail channel. A degrade (§11.10) is persisted in the ledger and used to outlive
+    // them all; it is undone here, BEFORE the prompt's mail mode and the session fingerprint read it.
+    // A channel that really fails degrades again after 3 more wakes. Best-effort: never blocks a spawn.
+    try { this.mail.restoreChannel(meta.id, 'respawn'); } catch (e) { console.warn('[hive] mail channel restore failed:', e); }
     // A newly hired agent's outbox is watched at once, not at the next reconciliation.
     if (this.routerTimer) this.refreshOutboxWatchers();
 

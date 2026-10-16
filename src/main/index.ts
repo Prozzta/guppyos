@@ -1008,6 +1008,8 @@ inboxWake = new InboxWakeBridge({
     // §11.18 #42 (Q39): a Codex agent's running session cannot be told (its wake is the fixed
     // sentinel), so its alert says to respawn it.
     degrade: (agentId, reason, detail) => hive.mail.degradeChannel(agentId, reason, detail, { respawnToRestore: hive.registry().agents[agentId]?.provider === 'codex' }),
+    // MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): the agent's own hook undoes a zero-hook-traffic degrade.
+    restore: (agentId, proof, detail) => hive.mail.restoreChannel(agentId, proof, detail),
     // §11.18 #41 (Q38): the `mail-repend` row of a turn end whose start was never confirmed.
     log: (row) => hive.appendLog(row),
     // READS-QUIET-NOREPLY (1.1.81): quiet mail waits for the next real turn, at most

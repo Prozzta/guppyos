@@ -1381,6 +1381,26 @@ export class MailLedger {
   }
 
   /**
+   * MAIL-CHANNEL-STUCK-DEGRADED (1.1.89): undo `degradeChannel`. The override is persisted, so
+   * before this a degrade outlived every restart and respawn. `proof` is what shows the channel
+   * works again:
+   *  - `hook`: a lifecycle hook from the agent. It proves hook traffic, not mail blocks, so it
+   *    undoes a zero-hook-traffic degrade only;
+   *  - `respawn`: a new session, spawned with the provider's own channel, for either reason.
+   * Clears the override, logs `mail-channel-restored` and drops the alert. True when it cleared one.
+   */
+  restoreChannel(agentId: string, proof: 'hook' | 'respawn', detail: Record<string, unknown> = {}): boolean {
+    if (!this.hasAgent(agentId)) return false;
+    const cur = this.channelOverride(agentId);
+    if (!cur) return false;
+    if (proof === 'hook' && cur.reason !== 'zero-hook-traffic') return false;
+    if (!this.setChannelOverride(agentId, null)) return false;
+    this.notices.delete(`${agentId}|degraded`);
+    this.log({ kind: 'mail-channel-restored', agentId, proof, reason: cur.reason, degradedSince: cur.since, degradedMs: this.now() - cur.since, ...detail });
+    return true;
+  }
+
+  /**
    * WAKE-SCREEN-GUARD F5: automatic delivery to a Codex agent has been refused by the screen
    * gate for minutes on end (its terminal is not proven to be on the chat composer). Logs
    * `wake-screen-guard-alert` and raises a UI notice through the `hive:integrity` banner (once
