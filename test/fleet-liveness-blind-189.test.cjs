@@ -232,6 +232,23 @@ K.deniedCallLeavesNothingOpen = ({ HOOKS: H = HOOKS }) => {
   assert.equal(a.runningTool('andy')?.name, 'Bash', 'an allowed call stays open');
 };
 
+/** Creed f0ea31a1 audit (gaps-server.cjs 'identity'): a deny drops ONLY the entry its own Pre opened.
+ *  A long Bash is open; a heavy Bash (lock) and a Grep (HITL gate) are denied; the long Bash keeps
+ *  its id and start, and its own Post then closes it. */
+K.denyDropsOnlyItsOwnEntry = ({ HOOKS: H = HOOKS }) => {
+  const s = hookServer(H.HookServer, { deny: true, gate: 'Grep' });
+  s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'long', tool_input: { command: 'sleep 999' } });
+  const longSince = s.runningTool('andy').since;
+  const d1 = s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'den-1', tool_input: SUITE });
+  assert.equal(d1.hookSpecificOutput.permissionDecision, 'deny', 'fixture: the lock denies the suite');
+  const d2 = s.handle({ hook_event_name: 'PreToolUse', agent_id: 'andy', tool_name: 'Grep', tool_use_id: 'g-1', tool_input: { pattern: 'x' } });
+  assert.equal(d2.hookSpecificOutput.permissionDecision, 'deny', 'fixture: the gate denies Grep');
+  const t = s.runningTool('andy');
+  assert.deepEqual(t && [t.id, t.since], ['long', longSince], 'N1: A DENY DROPS ONLY ITS OWN ENTRY (the open long Bash survives)');
+  s.handle({ hook_event_name: 'PostToolUse', agent_id: 'andy', tool_name: 'Bash', tool_use_id: 'long', tool_input: { command: 'sleep 999' } });
+  assert.equal(s.runningTool('andy'), undefined, 'its own Post then closes it');
+};
+
 /** Creed N1, second half: overlapping same-name calls end by their own id, so the one still running
  *  keeps its own start time (the oldest-by-name rule gave it the later call's). */
 K.overlappingCallsEndById = ({ HOOKS: H = HOOKS, A: act = A }) => {
@@ -268,6 +285,7 @@ K.degradedPreOpensUnknown = ({ HOOKS: H = HOOKS, A: act = A }) => {
 
 test('Creed N1: a call the hook DENIES leaves no tool open, and same-name calls end by id', () => {
   K.deniedCallLeavesNothingOpen({});
+  K.denyDropsOnlyItsOwnEntry({});
   K.overlappingCallsEndById({});
 });
 test('Creed N2: a degraded Codex PreToolUse opens an unknown tool that its Post closes', () => K.degradedPreOpensUnknown({}));
@@ -334,6 +352,12 @@ const MUTANTS = [
   { name: 'Creed N1: a denied call keeps its open entry', file: 'src/main/hooks.ts',
     edits: [["    if (opened && decision === 'deny') {", '    if (false) {']],
     killer: 'deniedCallLeavesNothingOpen', dies: /N1: A DENIED CALL LEAVES NO TOOL OPEN \(a hang at \+30 reads SILENT at \+45\)/ },
+  { name: 'Creed N1: a deny drops every entry of its name', file: 'src/main/hooks.ts',
+    edits: [['.filter((t) => t !== opened.tool);', '.filter((t) => t.name !== opened.tool.name);']],
+    killer: 'denyDropsOnlyItsOwnEntry', dies: /N1: A DENY DROPS ONLY ITS OWN ENTRY/ },
+  { name: 'Creed N1: a deny drops the oldest entry', file: 'src/main/hooks.ts',
+    edits: [['.filter((t) => t !== opened.tool);', '.filter((_t, k) => k !== 0);']],
+    killer: 'denyDropsOnlyItsOwnEntry', dies: /N1: A DENY DROPS ONLY ITS OWN ENTRY/ },
   { name: 'Creed N1: a Post ends the oldest of its name, not its own call', file: 'src/shared/activityView.ts',
     edits: [['  let i = id ? l.findIndex((t) => t.id === id) : -1;', '  let i = -1;'],
       ['  if (i < 0 && name) i = l.findIndex((t) => t.name === name && (!id || !t.id));', '  if (i < 0 && name) i = l.findIndex((t) => t.name === name);']],
