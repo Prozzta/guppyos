@@ -1,5 +1,5 @@
 /** The run tes-floor-damage.tsx makes, by render count: the host box and its resizes, the
- *  selections (each nudges the camera), the crew's changes (an agent leaves and comes back, a
+ *  selections (a nudge, which no longer moves the whole camera: TES-SCENE-BOUNCE-188), the crew's changes (an agent leaves and comes back, a
  *  status flips, which brings or drops a thought cloud), and a lost WebGL context. A runner may
  *  swap this module (a mutant run swaps the sources instead). */
 export const BOX = { w: 576, h: 587 };
