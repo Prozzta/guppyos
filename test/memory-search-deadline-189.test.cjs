@@ -207,6 +207,19 @@ test('T2 (C): a search whose deadline passed while it was queued is answered Que
   assert.deepEqual(e.embedded, ['first', 'third'], 'the expired search was never embedded');
 });
 
+test('T2 (C, Jim N1): an expired search reports runMs 0 even when the clock ticks between reads', async () => {
+  let clock = 1000;
+  const e = engineRig({ now: () => clock++ });
+  const s1 = e.engine.search({ query: 'first' }, { deadline: 1e9 });
+  await e.tick();
+  const s2 = e.engine.search({ query: 'second' }, { deadline: clock + 1 });
+  clock += 100;
+  e.gates.shift()();
+  assert.equal((await s1).exit, 0);
+  await assert.rejects(s2, (err) => err instanceof QueueExpired && err.timing.runMs === 0 && err.timing.waitMs > 0);
+  assert.deepEqual(e.embedded, ['first']);
+});
+
 test('T2 (B): the engine reports indexing on and off around a backfill, a claims sync and a changed-source ingest, also when they throw; nested jobs give one pair', async () => {
   const e = engineRig();
   await e.engine.backfill();

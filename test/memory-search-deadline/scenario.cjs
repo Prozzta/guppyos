@@ -124,10 +124,11 @@ module.exports = async (drill) => {
       const args = { query: 'zeppelin hangar code', wing: 'w2', results: 3, caller: 'w2', mode: 'live' };
       const runsBefore = await runsNow();
       child.send({ host: 'hold' });
-      const t0 = Date.now();
       const send = (id, deadline) => handle.postMessage({ id, op: 'search', args, deadline });
-      send(RAW_ID + 1, t0 + 30_000);
-      await pause(50);
+      send(RAW_ID + 1, Date.now() + 30_000);
+      // Jim N2: the first search's model step has started (and is held) before the others go.
+      for (let i = 0; i < 1_000 && (await runsNow()) <= runsBefore; i++) await pause(10);
+      const t0 = Date.now();
       send(RAW_ID + 2, t0 + HOLD_MS / 2);
       send(RAW_ID + 3, t0 + 30_000);
       await pause(HOLD_MS);
