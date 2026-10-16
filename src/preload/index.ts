@@ -867,6 +867,9 @@ const api = {
     purge: (agentId: string, ids: string[], typed: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:purge', agentId, ids, typed),
     setLevel: (level: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:set-level', level),
     exportNow: (agentId: string): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:export', agentId),
+    /** CL-M4-CHAINS-PANEL: possible duplicates. Keep one (the others set aside) or keep all; main confirms. */
+    keepOne: (agentId: string, keep: string, retire: string[]): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:keep-one', agentId, keep, retire),
+    keepAll: (agentId: string, ids: string[]): Promise<LedgerUiResult> => ipcRenderer.invoke('claims-ui:keep-all', agentId, ids),
   },
 
   // ─── Config ──────────────────────────────────────────────────────────────

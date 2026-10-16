@@ -595,8 +595,9 @@ test('UI: a read-only ledger shows why and accepts no revert or purge', async ()
 test('G7.1: every UI write goes through appendRecord with origin ui-ipc, except the one purge call', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/main/claims/ledgerUi.ts'), 'utf8');
   const writes = [...src.matchAll(/store\.(\w+)\(/g)].map((m) => m[1]).filter((m) => m !== 'readLedger');
-  assert.deepEqual(writes.sort(), ['appendRecord', 'appendRecord', 'purge']);
-  assert.equal([...src.matchAll(/appendRecord\([^)]*'ui-ipc'\)/g)].length, 2);
+  // Preference, revert, and CL-M4-CHAINS-PANEL's keep one / keep all are appends; then the purge.
+  assert.deepEqual(writes.sort(), ['appendRecord', 'appendRecord', 'appendRecord', 'appendRecord', 'purge']);
+  assert.equal([...src.matchAll(/appendRecord\([^)]*'ui-ipc'\)/g)].length, 4);
   assert.equal([...REVERTIBLE_EVENTS].includes('purge'), false);
   assert.equal([...REVERTIBLE_EVENTS].includes('revert'), false);
 });
@@ -604,7 +605,7 @@ test('G7.1: every UI write goes through appendRecord with origin ui-ipc, except 
 test('G7.2: the purge is reachable only from the app window\'s Settings IPC', () => {
   const idx = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
   const handlers = idx.split('\n').filter((l) => l.includes("ipcMain.handle('claims-ui:"));
-  assert.equal(handlers.length, 7);
+  assert.equal(handlers.length, 9);   // W7's 7, and CL-M4-CHAINS-PANEL's keep-one / keep-all
   for (const h of handlers) assert.match(h, /\(ledgerUiSender\(evt\) \?/, h);
   assert.match(idx, /function ledgerUiSender[^]*?BrowserWindow\.fromWebContents\(evt\.sender\) && evt\.senderFrame === evt\.sender\.mainFrame/);
   assert.match(idx, /if \(DEV_HIDDEN\) return false;/, 'a hidden harness run never confirms');

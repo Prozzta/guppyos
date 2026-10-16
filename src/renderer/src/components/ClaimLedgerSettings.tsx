@@ -5,12 +5,15 @@
  *     drop below writer, exports every writer agent's memory.md first);
  *   - per agent: the export button, Human-authored preferences, the claims with their status badges,
  *     and for one claim its history ("why does it believe this") with a revert per revertible step;
- *   - the purge, last and Human-only: the word typed here, then main's own confirm dialog.
+ *   - the purge, last and Human-only: the word typed here, then main's own confirm dialog;
+ *   - CL-M4-CHAINS-PANEL: "possible duplicates", the agent's live notes that name the same card or
+ *     share a label, newest first; the Human keeps one (the others set aside) or keeps all. Nothing
+ *     is chosen for them, and main confirms each choice.
  * Every write is main's (window.cth.claimsUi); this component only asks.
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { PixelButton } from './PixelButton';
-import { claimHistory, readOnlyText, statusBadge, UI_STATUSES, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
+import { chainTitle, claimHistory, duplicateChains, readOnlyText, statusBadge, UI_STATUSES, type DupChain, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
 import type { Status } from '@shared/claims';
 
 const LEVELS = ['off', 'shadow', 'reader', 'writer'] as const;
@@ -109,6 +112,7 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
   const [pref, setPref] = useState('');
   const [prefKey, setPrefKey] = useState('');
   const [busy, setBusy] = useState(false);
+  const [dupes, setDupes] = useState(false);
 
   const load = useCallback(async () => {
     const v = await api.view(agentId);
@@ -128,6 +132,7 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
       .filter((c) => (filter === 'all' || c.status === filter) && (!q || c.text.toLowerCase().includes(q) || c.id.includes(q) || (c.key ?? '').toLowerCase().includes(q)))
       .slice().reverse();
   }, [view, filter, query]);
+  const chains = useMemo(() => (view ? duplicateChains(view) : []), [view]);
 
   if (error) return <div style={{ ...box, marginTop: 10 }}><div style={{ ...hint, color: 'var(--cth-status-blocked)' }}>{error}</div></div>;
   if (!view) return <div style={{ ...box, marginTop: 10 }}><div style={hint}>Reading {agentId}'s ledger...</div></div>;
@@ -160,15 +165,33 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
         {(['all', ...UI_STATUSES] as const).map((s) => (
-          <PixelButton key={s} size="sm" variant={filter === s ? 'primary' : 'ghost'} onClick={() => setFilter(s)}>
+          <PixelButton key={s} size="sm" variant={!dupes && filter === s ? 'primary' : 'ghost'} onClick={() => { setDupes(false); setFilter(s); }}>
             {s} {s === 'all' ? view.claims.length : view.counts[s]}
           </PixelButton>
         ))}
-        <input aria-label="Search claims" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="search" style={{ ...input, width: 140, marginLeft: 'auto' }} />
+        <PixelButton size="sm" variant={dupes ? 'primary' : 'ghost'}
+          title="Notes that name the same card or share a label: you choose which stays" onClick={() => setDupes(!dupes)}>
+          possible duplicates {chains.length}
+        </PixelButton>
+        {!dupes && <input aria-label="Search claims" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="search" style={{ ...input, width: 140, marginLeft: 'auto' }} />}
       </div>
       <Message result={msg} />
 
-      <div role="list" style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 320, overflowY: 'auto' }}>
+      {dupes ? (
+        <div data-testid="claim-ledger-dupes" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
+          <div style={hint}>
+            Notes that name the same card or share a label, newest first. If only one is still true, keep that one: the others
+            are set aside, not deleted. If they say different things, keep all. Nothing changes until you choose, and "revert"
+            in a note's history undoes a choice.
+          </div>
+          {chains.length === 0 && <div style={hint}>No possible duplicates right now.</div>}
+          {chains.map((ch) => (
+            <DupChainCard key={`${ch.id}:${ch.members.join(',')}`} chain={ch} view={view} busy={busy || readOnly}
+              onKeepOne={(keep, retire) => void act(() => api.keepOne(agentId, keep, retire), 'Done.')}
+              onKeepAll={() => void act(() => api.keepAll(agentId, ch.members), 'Done.')} />
+          ))}
+        </div>
+      ) : <div role="list" style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 320, overflowY: 'auto' }}>
         {shown.length === 0 && <div style={hint}>No {filter === 'all' ? '' : `${filter} `}claims.</div>}
         {shown.slice(0, LIST_MAX).map((c) => (
           <ClaimRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)}>
@@ -178,7 +201,44 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
           </ClaimRow>
         ))}
         {shown.length > LIST_MAX && <div style={hint}>Showing the newest {LIST_MAX} of {shown.length}; search to narrow.</div>}
+      </div>}
+    </div>
+  );
+}
+
+/** One group of possible duplicates: newest first, each with a tick (part of the choice) and "keep this one". */
+function DupChainCard({ chain, view, busy, onKeepOne, onKeepAll }: {
+  chain: DupChain; view: LedgerUiAgentView; busy: boolean;
+  onKeepOne: (keep: string, retire: string[]) => void; onKeepAll: () => void;
+}) {
+  const [left, setLeft] = useState<Set<string>>(new Set());
+  const byId = useMemo(() => new Map(view.claims.map((c) => [c.id, c])), [view]);
+  const picked = chain.members.filter((id) => !left.has(id));
+  return (
+    <div data-testid="claim-ledger-chain" data-chain={chain.id} style={{ border: '1px solid var(--cth-ink-300)', padding: 6, background: 'var(--cth-cream-50, #fff)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <span style={{ ...label, flex: 1, minWidth: 0 }}>{chainTitle(chain)} <span style={hint}>· {chain.members.length} notes</span></span>
+        <PixelButton size="sm" variant="secondary" disabled={busy} title="They all stay; this group leaves the list until a newer note joins it"
+          onClick={onKeepAll}>keep all</PixelButton>
       </div>
+      {chain.members.map((id, i) => {
+        const c = byId.get(id);
+        const others = picked.filter((x) => x !== id);
+        return (
+          <div key={id} data-claim={id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start', borderTop: '1px solid var(--cth-ink-200, var(--cth-ink-300))', padding: '4px 0' }}>
+            <input type="checkbox" aria-label="part of this choice" checked={!left.has(id)} disabled={busy}
+              title="Untick a note to leave it as it is when you keep another one"
+              onChange={() => { const n = new Set(left); if (n.has(id)) n.delete(id); else n.add(id); setLeft(n); }} style={{ marginTop: 2 }} />
+            <span style={{ ...hint, flex: 'none', width: 92 }}>{(c?.wt ?? '').slice(0, 10)}{i === 0 ? ' · newest' : ''}</span>
+            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-900)', flex: 1, minWidth: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+              {c?.text ?? id}{c?.key ? <span style={hint}> · label {c.key}</span> : null}
+            </span>
+            <PixelButton size="sm" variant="ghost" disabled={busy || left.has(id) || others.length === 0}
+              title={others.length ? `Keep this one; set aside the other ${others.length} ticked` : 'Tick at least one other note'}
+              onClick={() => onKeepOne(id, others)}>keep this one</PixelButton>
+          </div>
+        );
+      })}
     </div>
   );
 }

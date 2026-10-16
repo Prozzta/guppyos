@@ -13,12 +13,16 @@
  *     Lowering it below 'writer' first runs the complete export for every writer agent (the planned
  *     downgrade path: the caller turns the flag down only after that is ok), and refuses otherwise.
  * Revert, purge and a level drop from writer each need main's confirm; a cancel writes nothing.
+ *
+ * CL-M4-CHAINS-PANEL: the "possible duplicates" choices. Keep one (the others become `reconcile-answer
+ * supersedes` [other, kept]) or keep all (`keep-both` [other, newest]); both by the Human, each one an
+ * append that "Revert" in the history undoes, after main's confirm. Nothing is ever chosen for the Human.
  */
 import {
   LEDGER_LEVELS, effectiveLevel,
   type ClaimRec, type ClaimsState, type EventRec, type KeyRegistry, type LedgerLevel, type LedgerRec, type ReadResult, type Status,
 } from '../../shared/claims';
-import { REVERTIBLE_EVENTS, UI_STATUSES, type LedgerUiAgentView, type LedgerUiResult, type LedgerUiSummary } from '../../shared/claimsUi';
+import { REVERTIBLE_EVENTS, UI_STATUSES, duplicateChains, settledPairs, type DupChain, type LedgerUiAgentView, type LedgerUiResult, type LedgerUiSummary } from '../../shared/claimsUi';
 import type { PurgeResult } from './store';
 import type { AppendResult, AppendOrigin, RecordDraft } from '../../shared/claims';
 
@@ -49,6 +53,8 @@ export interface LedgerUiDeps {
   scrubExport: (agentId: string, ids: string[]) => number;
   confirm: ConfirmFn;
   log: (row: Record<string, unknown>) => void;
+  /** A pair the Human answered leaves the hive's reconcile queue (as the endpoint's reconcile does). */
+  onReconcile?: (agentId: string, a: string, b: string) => void;
 }
 
 /** The word the Human types in the purge dialog. */
@@ -57,6 +63,8 @@ export const PURGE_WORD = 'purge';
 export const PURGE_KEEPS = 'Not removed by a purge: the text may remain in memory.md (written by the agent while the ledger is below writer), the memory archives, the torn-tail file (claims.torn.jsonl), the search and usage logs, mail, and the index database until it is rebuilt or compacted (not automatic yet).';
 const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const ID_RE = /^[ce]-[0-9a-f]{12,32}$/;
+const CLAIM_ID_RE = /^c-[0-9a-f]{12,32}$/;
+const quoted = (t: string): string => `"${t.length > 90 ? `${t.slice(0, 89)}…` : t}"`;
 
 export function createLedgerUi(d: LedgerUiDeps) {
   const fail = (error: string): LedgerUiResult => ({ ok: false, error });
@@ -95,6 +103,24 @@ export function createLedgerUi(d: LedgerUiDeps) {
       readOnly: chain === 'ok' ? null : `${chain.reason} at ${chain.brokenAt}`,
       ...(prefix?.truncatedAt ? { truncatedAt: prefix.truncatedAt } : {}),
     };
+  }
+
+  /**
+   * The chain the Human acted on, re-read now: every id a distinct live claim of one current group
+   * (the list may be stale; a claim that moved on since is refused, nothing written).
+   */
+  function chainOf(agentId: string, ids: unknown[]): { v: LedgerUiAgentView; chain: DupChain } | { error: string } {
+    if (ids.some((x) => typeof x !== 'string' || !CLAIM_ID_RE.test(x))) return { error: 'bad claim ids' };
+    if (new Set(ids).size !== ids.length) return { error: 'a claim is named twice' };
+    const v = view(agentId);
+    if ('error' in v) return v;
+    if (v.readOnly) return { error: `the ledger is read-only (${v.readOnly}); nothing can be changed` };
+    const live = new Set(v.claims.filter((c) => c.status === 'live').map((c) => c.id));
+    const gone = (ids as string[]).filter((id) => !live.has(id));
+    if (gone.length) return { error: `no longer a live note of ${agentId}: ${gone.join(', ')} (refresh the list)` };
+    const chain = duplicateChains(v).find((ch) => (ids as string[]).every((id) => ch.members.includes(id)));
+    if (!chain) return { error: 'these notes are not one group of possible duplicates any more (refresh the list)' };
+    return { v, chain };
   }
 
   return {
@@ -186,6 +212,71 @@ export function createLedgerUi(d: LedgerUiDeps) {
         ? ` NOT rewritten (the text may still be there): ${r.failedCopies.join(', ')}. Purge this claim again to retry them.`
         : '';
       return { ok: true, ...(r.id ? { id: r.id } : {}), note: `${r.copies} backup file(s) and ${scrubbed} export line(s) rewritten.${failed}` };
+    },
+
+    /**
+     * Possible duplicates, keep one: `keep` stays live and each of `retire` is marked replaced by it
+     * (a reconcile answer by the Human, one per note, each revertible). After main's confirm.
+     */
+    async keepOne(agentId: string, keep: unknown, retire: unknown): Promise<LedgerUiResult> {
+      const store = d.store();
+      if (!store) return fail('the claim ledger is not available');
+      if (!AGENT_RE.test(agentId)) return fail('bad agent id');
+      if (typeof keep !== 'string') return fail('bad claim ids');
+      if (!Array.isArray(retire) || retire.length === 0) return fail('pick at least one other note to set aside');
+      const c = chainOf(agentId, [keep, ...retire]);
+      if ('error' in c) return fail(c.error);
+      const text = (id: string): string => c.v.claims.find((x) => x.id === id)?.text ?? id;
+      const losers = retire as string[];
+      const ok = await d.confirm({
+        title: 'Keep one note?', ok: 'Keep this one',
+        message: `Keep ${quoted(text(keep))} and set aside ${losers.length === 1 ? 'the other note' : `the other ${losers.length} notes`}?`,
+        detail: `${losers.map((id) => `• ${quoted(text(id))}`).join('\n')}\n\nThey are marked as replaced by the one you keep, so ${agentId} stops being told them. Nothing is deleted: each step shows in the note's history, where "Revert" undoes it.`,
+      });
+      if (!ok) return cancelled();
+      const done: string[] = [];
+      for (const loser of losers) {
+        const r = await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [loser, keep], answer: 'supersedes' }, 'ui-ipc');
+        d.log({ kind: 'claims-ui-keep-one', agentId, chain: c.chain.id, keep, target: loser, ok: r.ok, ...(r.ok ? { id: r.id } : { error: r.error.slice(0, 120) }) });
+        if (!r.ok) return fail(`${done.length} of ${losers.length} set aside, then: ${r.error}`);
+        done.push(r.id);
+        try { d.onReconcile?.(agentId, keep, loser); } catch { /* the queue tidies itself on its next census */ }
+      }
+      return { ok: true, id: done[done.length - 1], note: `Kept 1 note; ${done.length} set aside.` };
+    },
+
+    /**
+     * Possible duplicates, keep all: every note of the group stays live, and each older one is
+     * marked as standing beside the newest (keep-both), so the group leaves the list until a newer
+     * note joins it. After main's confirm.
+     */
+    async keepAll(agentId: string, ids: unknown): Promise<LedgerUiResult> {
+      const store = d.store();
+      if (!store) return fail('the claim ledger is not available');
+      if (!AGENT_RE.test(agentId)) return fail('bad agent id');
+      if (!Array.isArray(ids) || ids.length < 2) return fail('a group needs at least two notes');
+      const c = chainOf(agentId, ids);
+      if ('error' in c) return fail(c.error);
+      if (c.chain.members.length !== ids.length) return fail('the group changed since it was shown (refresh the list)');
+      const [newest, ...older] = c.chain.members;
+      const settled = settledPairs(c.v.events);
+      const pairKey = (a: string, b: string): string => (a < b ? `${a} ${b}` : `${b} ${a}`);
+      const open = older.filter((id) => !settled.has(pairKey(id, newest)));
+      const ok = await d.confirm({
+        title: 'Keep all of them?', ok: 'Keep all',
+        message: `Keep all ${c.chain.members.length} notes? They all stay true for ${agentId}.`,
+        detail: 'The group leaves the possible-duplicates list until a newer note joins it. The notes themselves do not change. Each step shows in the history, where "Revert" undoes it.',
+      });
+      if (!ok) return cancelled();
+      const done: string[] = [];
+      for (const other of open) {
+        const r = await store.appendRecord(agentId, { t: 'event', ev: 'reconcile-answer', targets: [other, newest], answer: 'keep-both' }, 'ui-ipc');
+        d.log({ kind: 'claims-ui-keep-all', agentId, chain: c.chain.id, newest, target: other, ok: r.ok, ...(r.ok ? { id: r.id } : { error: r.error.slice(0, 120) }) });
+        if (!r.ok) return fail(`${done.length} of ${open.length} recorded, then: ${r.error}`);
+        done.push(r.id);
+        try { d.onReconcile?.(agentId, newest, other); } catch { /* the queue tidies itself on its next census */ }
+      }
+      return { ok: true, id: done[done.length - 1], note: `Kept all ${c.chain.members.length} notes.` };
     },
 
     /** The Settings level; a drop below writer exports every writer agent completely first. */

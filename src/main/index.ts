@@ -1558,6 +1558,7 @@ const ledgerUi = createLedgerUi({
     return r.response === 0;
   },
   log: (row) => hive.appendLog(row),
+  onReconcile: (agentId, a, b) => { const root = hive.root(); if (root) reconcileQueueForHive(root).answeredPair(agentId, a, b); },
 });
 /** W7: only a top frame of one of the app's own windows may call the ledger UI. */
 function ledgerUiSender(evt: Electron.IpcMainInvokeEvent): boolean {
@@ -1571,6 +1572,8 @@ ipcMain.handle('claims-ui:revert', (evt, agentId: unknown, eventId: unknown) => 
 ipcMain.handle('claims-ui:purge', (evt, agentId: unknown, ids: unknown, typed: unknown) => (ledgerUiSender(evt) ? ledgerUi.purge(String(agentId), ids, typed) : NOT_HERE));
 ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(evt) ? ledgerUi.setLevel(level) : NOT_HERE));
 ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
+ipcMain.handle('claims-ui:keep-one', (evt, agentId: unknown, keep: unknown, retire: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepOne(String(agentId), keep, retire) : NOT_HERE));
+ipcMain.handle('claims-ui:keep-all', (evt, agentId: unknown, ids: unknown) => (ledgerUiSender(evt) ? ledgerUi.keepAll(String(agentId), ids) : NOT_HERE));
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;

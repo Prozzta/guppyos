@@ -138,3 +138,84 @@ export function readOnlyText(readOnly: string): string {
   return `This ledger is locked because ${why}. Nothing is written to it until it is fixed. `
     + 'The way out: ask god to review it; the fix is restoring a backup day, or your anchor reset after that review (neither is a button in Settings yet).';
 }
+
+/**
+ * CL-M4-CHAINS-PANEL (Jim's CL-M4 backlog prefilter, option a; the Human's choice): "possible
+ * duplicates". Live claims of one ledger that share a label (key) or name the same card, grouped,
+ * newest first, for the Human or the owner to pick which stays live. 0 tokens and nothing automatic:
+ * this only lists; each choice is a Human reconcile answer (revertible) that main writes.
+ */
+export interface DupChain {
+  /** Stable id of the group: `key:<key>` or `card:<CARD>` (joined with `+` when the same claims share several). */
+  id: string;
+  reasons: Array<{ kind: 'key' | 'card'; value: string }>;
+  /** The live claims, newest first (by write time, then id). */
+  members: string[];
+}
+
+/**
+ * Card ids in a note (Jim's calibration rule): upper-case hyphenated tokens like CL-M4-FORWARD-PATH,
+ * a trailing build number dropped (TES-BUBBLE-NITS-189 -> TES-BUBBLE-NITS). A `card.<id>` key names its card too.
+ */
+export function claimCardIds(text: string, key?: string): string[] {
+  const fromKey = key?.startsWith('card.') ? key.slice(5).toUpperCase() : '';
+  const toks = `${text} ${fromKey}`.match(/\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g) ?? [];
+  return [...new Set(toks.map((t) => t.replace(/-\d+$/, '')).filter((t) => t.includes('-')))];
+}
+
+const pairOf = (a: string, b: string): string => (a < b ? `${a} ${b}` : `${b} ${a}`);
+
+/** Pairs already said to both stand (a keep-both answer, or a dismissed pair) and not reverted. */
+export function settledPairs(events: LedgerUiEvent[]): Set<string> {
+  const out = new Set<string>();
+  for (const e of events) {
+    if (e.reverted || e.targets.length < 2) continue;
+    if ((e.ev === 'reconcile-answer' && e.answer === 'keep-both') || e.ev === 'dismiss') out.add(pairOf(e.targets[0], e.targets[1]));
+  }
+  return out;
+}
+
+const newestFirst = (a: LedgerUiClaim, b: LedgerUiClaim): number =>
+  a.wt < b.wt ? 1 : a.wt > b.wt ? -1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+
+/**
+ * The groups of 2+ live claims sharing a key or a card id, the group with the newest claim first.
+ * A group is left out once every older member was said to stand beside the newest (keep-both);
+ * a newer claim joining it brings it back.
+ */
+export function duplicateChains(view: Pick<LedgerUiAgentView, 'claims' | 'events'>): DupChain[] {
+  const groups = new Map<string, { kind: 'key' | 'card'; value: string; members: LedgerUiClaim[] }>();
+  const add = (kind: 'key' | 'card', value: string, c: LedgerUiClaim): void => {
+    const gid = `${kind}:${value}`;
+    let g = groups.get(gid);
+    if (!g) groups.set(gid, (g = { kind, value, members: [] }));
+    g.members.push(c);
+  };
+  for (const c of view.claims) {
+    if (c.status !== 'live') continue;
+    if (c.key) add('key', c.key, c);
+    for (const card of claimCardIds(c.text, c.key)) add('card', card, c);
+  }
+  const settled = settledPairs(view.events);
+  const bySet = new Map<string, DupChain & { top: LedgerUiClaim }>();
+  for (const gid of [...groups.keys()].sort()) {
+    const g = groups.get(gid)!;
+    if (g.members.length < 2) continue;
+    const members = g.members.slice().sort(newestFirst);
+    const [top, ...older] = members;
+    if (older.every((c) => settled.has(pairOf(c.id, top.id)))) continue;
+    const ids = members.map((c) => c.id);
+    const have = bySet.get(ids.join(','));
+    if (have) { have.id = `${have.id}+${gid}`; have.reasons.push({ kind: g.kind, value: g.value }); continue; }
+    bySet.set(ids.join(','), { id: gid, reasons: [{ kind: g.kind, value: g.value }], members: ids, top });
+  }
+  return [...bySet.values()]
+    .sort((a, b) => newestFirst(a.top, b.top) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .map(({ id, reasons, members }) => ({ id, reasons, members }));
+}
+
+/** The plain heading of a group for the Human. */
+export function chainTitle(ch: Pick<DupChain, 'reasons'>): string {
+  const parts = ch.reasons.map((r) => (r.kind === 'card' ? `about card ${r.value}` : `filed under the label "${r.value}"`));
+  return `Notes ${parts.join(', and ')}`;
+}
