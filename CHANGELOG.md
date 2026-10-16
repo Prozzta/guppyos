@@ -11,9 +11,21 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.88] — 2026-10-16
+
+**A Graphics setting, a Requests badge that counts what is open, and a TES bridge that blinks,
+talks and sits properly.** Rollback: 1.1.87 (reinstall).
+
 ### Added
 
-- TES floor: the mail envelope now flies between crew members (the office floor always had it).
+- **Graphics setting (Settings > General): Auto, GPU or CPU only.** Auto uses the GPU when one is
+  available and falls back to the CPU; GPU asks for it; CPU only draws in software. The choice
+  applies app-wide from the next start, and a "Rendering:" line shows what the app is really using,
+  a software fallback included. Restart asks first when agents are running and says how many.
+
+- **The TES bridge panels and the bottom agent cards blink while agents work.** The chair consoles
+  light up green and cycle while their agent works at the desk, glow amber when idle and go dark
+  when the seat is empty, as the bridge viewer does; a card's status dot blinks on the same rule.
 
 ### Fixed
 
@@ -47,6 +59,38 @@ All notable changes to this project are documented here. The format is based on
   over the head as a standing one; at the Speck desks 1.1.87 floated them 16-30 px higher. Two
   clouds that would overlap now slide apart sideways first, each still over its own head with its
   tail pointing down at it, and only what that cannot part is lifted.
+
+- **The Requests badge counts only asks that are still open.** An ask now closes on a reply to it,
+  on a done or refuse that cites it or answers in its conversation, when its card is done, or when
+  a later ask supersedes it; agents can also close or withdraw an ask by hand. A request must now
+  name its card. On the first start the app replays sent mail once, so the asks handled long ago
+  leave the badge (84 on one floor).
+
+- **On the TES bridge, chairs are solid for every walk.** A crewmate walks plain floor to the seat's
+  approach spot, then a short seat step takes them into the chair, and getting up is the same step
+  back. Before, sitters walked straight through their own chair, so some seemed to sit from behind.
+
+- **The TES floor is drawn at a whole number of device pixels and fills its pane.** Every art pixel
+  is an even block at any size or zoom, easing included; the hull runs on to the pane's edges and
+  panning never shows the backdrop past the art. The floor also draws again only what changed
+  between frames, which cuts the GPU process's work on software rendering.
+
+- **The claims briefing at startup is fast again.** With a large ledger it took over 4 s (each line
+  was counted again for every line added), past the hook's 5 s limit once startup load was added,
+  so it was not printed. The note that some claims were left out now always shows, and a briefing
+  that arrives before the hook gives up is no longer logged as missed.
+
+- **A hand edit to memory.md stays searchable while the app runs.** For an agent whose claims
+  ledger replaced memory.md in search, new bullets are now taken into the ledger as they are
+  written, not only at the next start.
+
+## [1.1.87] — 2026-10-15
+
+### Added
+
+- TES floor: the mail envelope now flies between crew members (the office floor always had it).
+
+### Fixed
 
 - **TES floor avatars now stay at their desks while a live agent is working.** The station floor
   now projects the liveness classification before synchronising its crew, and refreshes when that
