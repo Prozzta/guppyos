@@ -2211,6 +2211,9 @@ export class HookServer {
     // freed by the call id the PreToolUse took, NOT by classifying again (a script that changed or
     // was deleted during the run must not leave the slot held); callDone ignores an unheld call.
     if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {
+      // HEAVY-LOCK-BG-LAPSE-189: a call held only because its script was unreadable at PreToolUse is
+      // classified again now that the script exists, and freed at once if it is light.
+      this.heavyLock.settle(agentId, HookServer.heavyCallId(p), () => classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)));
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
     }
 

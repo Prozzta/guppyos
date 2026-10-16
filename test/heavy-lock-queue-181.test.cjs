@@ -142,14 +142,15 @@ function scripts(files) {
 }
 
 K.scriptWrapper = (M = HJ) => {
-  const ctx = scripts({ 'suite.sh': '#!/bin/bash\nset -e\nfor v in $(env | grep -oE x); do unset $v; done\nnode test/tools/run-tests.cjs > log 2>&1\n', 'light.sh': 'echo hi\nnode test/one.test.cjs\n', './gate.sh': 'npm ci\n' });
+  const ctx = scripts({ 'suite.sh': '#!/bin/bash\nset -e\nfor v in $(env | grep -oE x); do unset $v; done\nnode test/tools/run-tests.cjs > log 2>&1\n', 'light.sh': 'echo hi\nnode test/one.test.cjs\n', 'test/one.test.cjs': "require('node:test');\n", './gate.sh': 'npm ci\n' });
   const c = M.classifyCommand('bash suite.sh', 0, ctx);
   assert.equal(c.heavy, true, 'A SUITE IN A SCRIPT FILE IS SEEN');
   assert.match(c.why, /\(in suite\.sh\)$/);
   assert.equal(M.classifyCommand('sh -x ./gate.sh', 0, ctx).kind, 'install');
   assert.equal(M.classifyCommand('./gate.sh', 0, ctx).kind, 'install', 'a script run directly');
   assert.equal(M.classifyCommand('bash light.sh', 0, ctx).heavy, false);
-  assert.equal(M.classifyCommand('bash missing.sh', 0, ctx).heavy, false, 'unreadable: not heavy');
+  // HEAVY-LOCK-BG-LAPSE-189: unreadable fails closed (heavy, provisional).
+  assert.equal(M.classifyCommand('bash missing.sh', 0, ctx).provisional, true, 'unreadable: heavy until it reads');
   assert.equal(M.classifyCommand('bash suite.sh').heavy, false, 'no reader: the pure default is unchanged');
   assert.equal(M.classifyHeavy('Bash', { command: 'bash suite.sh' }, ctx).heavy, true);
 };
@@ -157,8 +158,10 @@ test('SCRIPT-WRAPPER: `bash suite.sh`, `sh -x ./gate.sh` and `./gate.sh` are cla
 
 K.cdFollowed = (M = HJ) => {
   const ctx = scripts({ 'C:/Dunder/_work/x|suite.sh': 'node test/tools/run-tests.cjs\n' });
-  assert.equal(M.classifyCommand('cd C:/Dunder/_work/x && bash suite.sh', 0, ctx).heavy, true, 'CD IS FOLLOWED');
-  assert.equal(M.classifyCommand('bash suite.sh', 0, ctx).heavy, false);
+  // HEAVY-LOCK-BG-LAPSE-189: not followed, it would be unreadable (heavy, provisional); read, it is the suite.
+  const c = M.classifyCommand('cd C:/Dunder/_work/x && bash suite.sh', 0, ctx);
+  assert.deepEqual([c.heavy, c.kind, c.provisional], [true, 'suite', undefined], 'CD IS FOLLOWED');
+  assert.equal(M.classifyCommand('bash suite.sh', 0, ctx).provisional, true, 'without the cd it is not read: fails closed');
 };
 test('`cd X && bash suite.sh` reads X/suite.sh', () => K.cdFollowed());
 
@@ -200,8 +203,10 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n      let cls = classifyHeavy\(p\.tool_name, p\.tool_input, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
   assert.match(hooks, /const k = classifyCommand\(c, 0, scripts\);/);
   // Andy N1: Post frees by the held call id, never by classifying again.
-  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING');
-  assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 1, 'the script is read once, at PreToolUse');
+  // HEAVY-LOCK-BG-LAPSE-189: a call held only for an unreadable script is classified again
+  // (settle), every other one is freed by its call id alone.
+  assert.match(hooks, /if \(\(event === 'PostToolUse' \|\| event === 'PostToolUseFailure'\) && agentId && this\.heavyLock\) \{\n(?:      \/\/.*\n)*      this\.heavyLock\.settle\(agentId, HookServer\.heavyCallId\(p\), \(\) => classifyHeavy\(p\.tool_name, p\.tool_input, HookServer\.heavyScriptCtx\(p\.cwd\)\)\);\n      this\.heavyLock\.callDone\(agentId, HookServer\.heavyCallId\(p\)\);/, 'POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL');
+  assert.equal(hooks.split('heavyScriptCtx(p.cwd)').length - 1, 2, 'the script is read at PreToolUse, and at Post only by settle');
 };
 test('wiring: the notice on both rails (wake-proof mail + steer); scripts read at Pre; Post frees by the held call id', () => K.wiring());
 
@@ -323,7 +328,7 @@ const MUTANTS = [
     killer: 'wiring', dies: /THE NOTICE IS SENT AS BUILT \(SYSTEM SENDER \+ WAKE NOW\)/ },
   { name: 'Post re-classifies before freeing (as 130d276c; a changed script keeps the slot)', file: 'src/main/hooks.ts', hooks: true,
     edits: [["if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock) {", "if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId && this.heavyLock && classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)).heavy) {"]],
-    killer: 'wiring', dies: /POST FREES BY THE HELD CALL, WITHOUT RE-CLASSIFYING/ },
+    killer: 'wiring', dies: /POST SETTLES A PROVISIONAL CALL, THEN FREES BY THE HELD CALL/ },
   { name: 'N2 off: a stale waiter still takes a reservation', file: HJF, module: true,
     edits: [["      if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }\n", ''],
       // LOCK-WAIT-NOTICES: the drop is made in two places (expire's sweep on schedule, grant's check when
