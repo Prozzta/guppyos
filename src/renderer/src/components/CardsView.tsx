@@ -163,8 +163,8 @@ export const ReviewCardView = memo(function ReviewCardView({ card, assigneeName,
             <SectionLabel>ASKED THE HUMAN · {card.humanQA.length}</SectionLabel>
             {card.humanQA.map((e, i) => (
               <div key={i} style={{ paddingLeft: 8, boxShadow: 'inset 2px 0 0 var(--cth-lilac, #b9a3d6)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {/* readOnly: no radio, no controls; an open ask says to answer it on ASK ME */}
-                <HumanQuestionCard entry={e} now={now} onOpenLink={onOpenLink} readOnly onOpenAskMe={e.dismissedAt ? undefined : onOpenAskMe} />
+                {/* readOnly: no radio, no controls; only the ask ASK ME shows links there */}
+                <HumanQuestionCard entry={e} now={now} onOpenLink={onOpenLink} readOnly onOpenAskMe={e.onAskMe ? onOpenAskMe : undefined} />
                 {e.dismissedAt && !e.a && <span style={small}>dismissed {formatStamp(e.dismissedAt, now) ?? e.dismissedAt}</span>}
               </div>
             ))}

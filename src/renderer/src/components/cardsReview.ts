@@ -38,7 +38,7 @@ export interface ReviewCard {
   /** Notes and results, newest first; undated entries after the dated ones, in written order. */
   timeline: TimelineEntry[];
   /** The full humanQA history, oldest first, each validated as ASK ME validates it. */
-  humanQA: (HumanQAFields & { dismissedAt?: string })[];
+  humanQA: (HumanQAFields & { dismissedAt?: string; onAskMe?: true })[];
   parked?: boolean;
   waitingFor?: string;
   fixVersion?: string;
@@ -99,11 +99,22 @@ export function reviewCardOf(task: HiveTask, raw: Record<string, unknown> | unde
   // The latest result: the newest dated one, else the last one written.
   const datedResults = results.filter((e) => e.ms !== null).sort((a, b) => b.ms! - a.ms!);
   const result = (datedResults[0] ?? results[results.length - 1])?.text ?? null;
-  const humanQA = (Array.isArray(r.humanQA) ? r.humanQA : []).flatMap((e) => {
+  const rawQA: unknown[] = Array.isArray(r.humanQA) ? r.humanQA : [];
+  // The one ask ASK ME shows for this card (TasksKanban's waitsOnHuman + openQuestion, the same
+  // rule on the same raw entries): the newest unanswered, undismissed one, on a BLOCKED card only.
+  // Only that entry may say "answer on ASK ME" (Jim: 4 real open asks sit on done cards).
+  let askMeEntry: unknown;
+  if (task.status === 'blocked') {
+    for (let i = rawQA.length - 1; i >= 0; i--) {
+      const e = rawQA[i] as { q?: unknown; a?: unknown; dismissedAt?: unknown } | null;
+      if (e && typeof e.q === 'string' && !e.a && !e.dismissedAt) { askMeEntry = e; break; }
+    }
+  }
+  const humanQA = rawQA.flatMap((e) => {
     const n = normalizeHumanQA(e);
     if (!n) return [];
     const d = e && typeof e === 'object' ? str((e as { dismissedAt?: unknown }).dismissedAt) : undefined;
-    return [d ? { ...n, dismissedAt: d } : n];
+    return [{ ...n, ...(d ? { dismissedAt: d } : {}), ...(e === askMeEntry ? { onAskMe: true as const } : {}) }];
   });
   const p = r.priority ?? r.prio;
   const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((d): d is string => typeof d === 'string' && !!d.trim()) : []);

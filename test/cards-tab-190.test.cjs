@@ -230,6 +230,35 @@ test('MUST 1: an open ask in CARDS is read-only: no radio, no button, an OPEN ta
   assert.match(cv, /<HumanQuestionCard [^>]*readOnly /);
 });
 
+test('Jim delta SHOULD: ANSWER ON ASK ME only on the ask ASK ME shows (a blocked card, its newest open entry)', () => {
+  const qa = [{ ...OPEN_ASK, q: 'Older open ask' }, { ...OPEN_ASK, q: 'Newest open ask' }, { q: 'Answered', a: 'ok', askedAt: '2026-10-16T18:10:00Z' }];
+  const of = (status) => M.reviewCardOf({ id: 'S-1', title: 's', status, createdAt: '2026-10-16T17:00:00Z', dependsOn: [] }, { humanQA: qa }, undefined);
+  const links = (html) => (html.match(/ANSWER ON ASK ME/g) || []).length;
+  // an open ask on a DONE card (4 on the real ledger): ASK ME never lists it, so no link
+  for (const status of ['done', 'doing', 'todo']) {
+    const card = of(status);
+    assert.equal(card.humanQA.filter((e) => e.onAskMe).length, 0, status);
+    const html = view(card, { onOpenAskMe: () => {} });
+    assert.equal(links(html), 0, `${status}: no link`);
+    assert.equal((html.match(/NOT ANSWERED/g) || []).length, 2, `${status}: both open asks read NOT ANSWERED`);
+  }
+  // blocked: only the newest open entry (openQuestion) links; the older one reads NOT ANSWERED
+  const blocked = of('blocked');
+  assert.deepEqual(blocked.humanQA.map((e) => !!e.onAskMe), [false, true, false]);
+  const html = view(blocked, { onOpenAskMe: () => {} });
+  assert.equal(links(html), 1);
+  // each tag sits above its question: NOT ANSWERED, the older ask, the link, the newest ask
+  const at = ['NOT ANSWERED', 'Older open ask', 'ANSWER ON ASK ME', 'Newest open ask'].map((s) => html.indexOf(s));
+  assert.ok(at.every((v, i) => v >= 0 && (i === 0 || v > at[i - 1])), `order ${at}`);
+  // parity: the model's rule is TasksKanban's openQuestion + waitsOnHuman
+  const kb = codeOnly(readSource('src/renderer/src/components/TasksKanban.tsx'), 'TasksKanban.tsx');
+  assert.match(kb, /if \(e && typeof e\.q === 'string' && !e\.a && !e\.dismissedAt\) return e;/);
+  assert.match(kb, /return t\.status === 'blocked' && !!openQuestion\(t\);/);
+  const mr = codeOnly(readSource('src/renderer/src/components/cardsReview.ts'), 'cardsReview.ts');
+  assert.match(mr, /if \(task\.status === 'blocked'\) \{\s*for \(let i = rawQA\.length - 1; i >= 0; i--\)/);
+  assert.match(mr, /if \(e && typeof e\.q === 'string' && !e\.a && !e\.dismissedAt\) \{ askMeEntry = e; break; \}/);
+});
+
 // A realistic card: 6 dated notes, a linked result, a humanQA entry with options (Jim measured
 // ~2.6 ms per real card through renderToStaticMarkup).
 const bigLedger = (n) => ({
