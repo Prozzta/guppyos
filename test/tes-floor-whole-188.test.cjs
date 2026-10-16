@@ -30,6 +30,7 @@ for (const dpr of ['1', '1.25']) {
     assert.equal(r.ok, true, r.error);
     t.diagnostic(JSON.stringify({ frames: r.frames, fitBad: r.fitBad, fitAt: r.fitAt, cacheBad: r.cacheBad, builds: r.builds, blank: r.edgeBlank, texelBadMax: r.texelBadMax, badFrames: r.badFrames?.slice(0, 2), configs: r.configs }));
     t.diagnostic(JSON.stringify({ depthChecks: r.depthChecks, depthBadMax: r.depthBadMax, depthBadAt: r.depthBadAt, depthArea: r.depthArea, depthPixels: r.depthPixels, depthSamples: r.depthSamples, teethChecks: r.teethChecks, teethMax: r.teethMax }));
+    t.diagnostic(JSON.stringify({ frames: r.frames, frontPlaced: r.frontPlaced, frontStale: r.frontStale, frontMovedSameK: r.frontMovedSameK }));
     t.diagnostic(JSON.stringify({ frontChecks: r.frontChecks, frontStatics: r.frontStatics, frontCovered: r.frontCovered, frontDiff: r.frontDiff, frontMaxDelta: r.frontMaxDelta, frontTeeth: r.frontTeeth, frontSamples: r.frontSamples, frontLog: r.frontLog }));
     assert.deepEqual(r.errors, []);
     assert.equal(r.dpr, Number(dpr), 'the window has the DPR asked for');
@@ -51,6 +52,10 @@ for (const dpr of ['1', '1.25']) {
     assert.ok(r.frontMaxDelta <= 1, `a static drawn again is the floor's own linear sampling of it, on every px (max ${r.frontMaxDelta}, ${r.frontDiff} px off by 1: ${JSON.stringify(r.frontSamples)})`);
     assert.ok(r.frontDiff * 100 < r.frontCovered, `few px off by 1 (${r.frontDiff} of ${r.frontCovered})`);
     assert.ok(r.frontTeeth > 1000, `teeth: the old nearest front sprite differs from the floor's copy by more than 1 (${r.frontTeeth} px)`);
+    // Jim S1 (mutant F): compose re-places the front statics for every view, a same-k one too.
+    assert.equal(r.frontPlaced, r.frames, `the placement was compared on every frame (${r.frontPlaced} of ${r.frames})`);
+    assert.equal(r.frontStale, 0, `COMPOSE PLACED THE FRONT STATICS FOR THE VIEW ON SCREEN (${r.frontStale} stale frames, first: ${r.frontStaleAt})`);
+    assert.ok(r.frontMovedSameK >= 1, `a pane or camera change kept k, so the re-place was exercised (${r.frontMovedSameK} frames)`);
     assert.ok(r.builds >= 1 && r.builds <= r.configs.length, `bounded cache builds: ${r.builds}`);
     assert.equal(r.configs.length, 4, 'the four panes were checked');
     // TES-SCENE-BOUNCE-188: selects do not move a settled semantic-fit frame.
