@@ -204,6 +204,8 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     if (d === 'sh' && c === '#' && (i === 0 || /\s/.test(cmd[i - 1]))) { while (i + 1 < cmd.length && cmd[i + 1] !== '\n') i++; continue; }
     // A redirection's `&` (`2>&1`, `>&2`, `&>x`, `<&0`) is not a separator or a background `&`.
     if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>')) { cur += c; continue; }
+    // sh's clobber redirect `>|` (and `2>|`) is one operator, not a `>` then a pipe.
+    if (d === 'sh' && c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&') { cur += ' &'; out.push(cur); cur = ''; continue; } // a lone & = background
       out.push(cur); cur = '';
@@ -832,7 +834,7 @@ function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyC
 function writeTargets(raw: string[], ws: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < raw.length; i++) {
-    const m = /^(?:\d*|&)(>>?|>\|)(?![&>])(.*)$/.exec(raw[i]);
+    const m = /^(?:\d*|&)(>\||>>?)(?![&>])(.*)$/.exec(raw[i]);   // `>|` first: else `>` matches and the target reads as "|"
     if (m) { const f = m[2] || raw[i + 1]; if (f && !/^\/dev\//.test(f)) out.push(f); }
   }
   const lead = leading(ws);

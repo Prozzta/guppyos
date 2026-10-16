@@ -234,8 +234,15 @@ test('CLASSIFIER S1: a later write by other means (>>, cp, mv, sed -i, tee) make
   fs.writeFileSync(path.join(d, 'light.sh'), 'echo hi\n');
   const ctx = HookServer.heavyScriptCtx(d);
   const H = made('run.sh', 'echo hi', '');
-  for (const w of [`echo '${SUITE}' >> run.sh`, 'cp suite.sh run.sh', 'mv suite.sh run.sh', "sed -i 's/hi/x/' run.sh", "perl -pi -e 's/hi/x/' run.sh", 'echo x | tee run.sh', `echo '${SUITE}' > run.sh`]) {
+  for (const w of [`echo '${SUITE}' >> run.sh`, 'cp suite.sh run.sh', 'mv suite.sh run.sh', "sed -i 's/hi/x/' run.sh", "perl -pi -e 's/hi/x/' run.sh", 'echo x | tee run.sh', `echo '${SUITE}' > run.sh`,
+    `printf '${SUITE}\\n' >| run.sh`, `echo '${SUITE}' &> run.sh`, `echo '${SUITE}' &>> run.sh`, `echo '${SUITE}' 1>| run.sh`]) {
     assert.equal(classifyCommand(`${H}${w}\nbash run.sh`, 0, ctx).provisional, true, `S1: ${w}`);
+  }
+  // Andy's repro (dc4d5e69 SHOULD 1): a clobber redirect `>|` is a write to its file, not to "|".
+  assert.equal(classifyCommand(`cat > run.sh <<EOF\necho hi\nEOF\nprintf 'node test/tools/run-tests.cjs\\n' >| run.sh; bash run.sh`, 0, ctx).provisional, true, 'S1: >| run.sh');
+  // ... and to that file only: a clobber, &> or &>> of another file leaves run.sh as written.
+  for (const w of ['echo x >| other.txt', 'echo x &> other.log', 'echo x &>> other.log']) {
+    assert.deepEqual(classifyCommand(`${H}${w}\nbash run.sh`, 0, ctx), { heavy: false }, w);
   }
   // A poisoned file that also exists on disk is NOT read from disk (the disk holds the old text).
   assert.equal(classifyCommand(`${made('light.sh', 'echo hi', '')}cp suite.sh light.sh\nbash light.sh`, 0, ctx).provisional, true, 'S1: not the disk copy');
