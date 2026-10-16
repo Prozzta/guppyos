@@ -157,6 +157,8 @@ export function cosineOrder(q: ArrayLike<number>, docs: Array<{ id: string; vec:
 
 /** `focus`: pool ids that must get a vector whatever their BM25 rank (the note's same-key and same-card claims). */
 export type Scorer = (query: string, pool: PoolClaim[], focus?: ReadonlySet<string>) => CandidateScores | Promise<CandidateScores>;
+/** A live scorer can fill its bounded cache off the note path after start-up. */
+export type WarmingScorer = Scorer & { warm(pool: PoolClaim[]): Promise<void> };
 
 /**
  * S1: the pool claims that get a vector: the BM25 top `lexicalN` (in `lexical` order), the newest
@@ -176,24 +178,39 @@ export function vectorPool(pool: PoolClaim[], lexical: string[], focus: Readonly
  * passes the hive-wide ones (HiveCorpus); left out, the pool's own are used, which floors every term
  * in a small pool (in a pool of 2, each term's idf is <= 0) and is for tests and studies only.
  */
-export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus), cacheMax = EMBED_CACHE_MAX): Scorer {
+export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<number>[]>, corpus?: Bm25Corpus | (() => Bm25Corpus), cacheMax = EMBED_CACHE_MAX): WarmingScorer {
   // CL-M4-FORWARD-PATH: the own pool is the whole ledger, so claim vectors are kept by text (a claim's
   // text never changes; a purged one is not live, so never pooled). The query is embedded every time.
   // S1: only vectorPool's claims are embedded (BM25 ranks the whole pool), so a cold cache costs at
   // most about VECTOR_LEXICAL + VECTOR_RECENT + focus texts. Eviction is oldest-inserted first.
   const cache = new Map<string, ArrayLike<number>>();
-  return async (query, pool, focus) => {
+  const trim = (minimum = 0): void => {
+    while (cache.size > Math.max(cacheMax, minimum)) cache.delete(cache.keys().next().value as string);
+  };
+  const warm = async (pool: PoolClaim[]): Promise<void> => {
+    const missing = [...new Set(pool.map((c) => c.text).filter((t) => !cache.has(t)))];
+    if (missing.length) {
+      const vecs = await embed(missing);
+      missing.forEach((t, i) => cache.set(t, vecs[i]));
+      trim();
+    }
+  };
+  const score: WarmingScorer = async (query, pool, focus) => {
     if (!pool.length) return { lexical: [], vector: [] };
     const stats = typeof corpus === 'function' ? corpus() : corpus;
     const lexical = bm25Order(query, pool, stats);
-    const vpool = vectorPool(pool, lexical, focus);
+    // S1: before startup warming completes, bound work for the first note. Once the complete
+    // current pool is cached, cosine covers it all and therefore matches whole-pool ranking.
+    const vpool = pool.every((c) => cache.has(c.text)) ? pool : vectorPool(pool, lexical, focus);
     const missing = [...new Set(vpool.map((c) => c.text).filter((t) => !cache.has(t)))];
     const vecs = await embed([query, ...missing]);
     missing.forEach((t, i) => cache.set(t, vecs[i + 1]));
     const out = { lexical, vector: cosineOrder(vecs[0], vpool.map((c) => ({ id: c.id, vec: cache.get(c.text)! }))) };
-    while (cache.size > Math.max(cacheMax, vpool.length)) cache.delete(cache.keys().next().value as string);
+    trim(vpool.length);
     return out;
   };
+  score.warm = warm;
+  return score;
 }
 
 // ---------------------------------------------------------------- collection
