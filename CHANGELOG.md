@@ -19,6 +19,8 @@ All notable changes to this project are documented here. The format is based on
   own hooks bring it back at its next wake; a respawn restores it in every case (Codex: the spawn
   after the one that applies it). A restored agent's next automatic resume starts a fresh session.
 
+- **Selecting an agent no longer makes the station scene jump up and settle back.**
+
 ## [1.1.88] — 2026-10-16
 
 **A Graphics setting, a Requests badge that counts what is open, and a TES bridge that blinks,
