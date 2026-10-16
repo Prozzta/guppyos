@@ -73,6 +73,7 @@ const ROWS = [
   ['6 node --test missing', 'node --test missing.test.cjs', 'provisional'],     // light
   ['6 node --test present', 'node --test ok.test.cjs', 'light'],                // light
   ['6 a loop of single files', 'for f in a b; do node --test test/$f.test.cjs; done', 'light'], // light
+  ['6 a computed name', 'node --test test/$f.test.cjs', 'light'],              // light
   ['7 $TEMP', 'bash $TEMP/s.sh', 'heavy:suite'],                                // provisional
   ['7 ${HOME}', 'bash ${HOME}/s.sh', 'heavy:suite'],                            // provisional
   ['7 ~', 'bash ~/s.sh', 'heavy:suite'],                                        // provisional
