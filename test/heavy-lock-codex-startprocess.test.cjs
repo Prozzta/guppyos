@@ -13,6 +13,7 @@
  * Named mutants, each must fail this file:
  *   S1 launchers are not followed       S2 `@(` read as a computed subexpression
  *   S3 `$x=cmd` is not an assignment    S4 `$x = cmd` is not an assignment
+ *   S5 an npx option value (`--prefix ../wt`) is read as the program
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -65,6 +66,12 @@ test('launchers run their program: Start-Process, saps, start (before: all light
     `Start-Process node -ArgumentList '--test','test/one.test.cjs'`,
     `start https://example.invalid`,
   ]) assert.equal(HJ.classifyCommand(c).heavy, false, `LIGHT: ${c}`);
+});
+
+test('npx: an option value is not the program (replay FP: `npx --prefix ../wt asar ...`)', () => {
+  const k = HJ.classifyCommand('npx --prefix ../wt-x asar extract-file a.asar package.json', 0, { readScript: () => null });
+  assert.equal(k.heavy, false, 'NPX PREFIX VALUE IS NOT A PROGRAM'); // before: provisional
+  assert.equal(HJ.classifyCommand('npx --prefix ../wt-x electron-builder --win').kind, 'build');
 });
 
 test('a PowerShell assignment runs its right-hand side (before: light)', () => {

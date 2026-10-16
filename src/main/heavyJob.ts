@@ -724,7 +724,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     }
     return { heavy: false };
   }
-  if (bin === 'npx') return classifyWords(args.filter((a) => !a.startsWith('-')), depth, ctx);
+  // npx's own options; one that takes a value drops it too (`npx --prefix ../wt asar ...` runs asar,
+  // not `../wt`, which the extensionless-path rule then read as an unknown program).
+  if (bin === 'npx') return classifyWords(args.filter((a, i) => !a.startsWith('-') && !/^(--prefix|--cache|--userconfig|-p|--package|-w|--workspace)$/.test(args[i - 1] ?? '')), depth, ctx);
   if (bin === 'electron-rebuild' || bin === 'node-gyp') return { heavy: true, kind: 'install', why: bin };
   if (bin === 'electron-builder') return { heavy: true, kind: 'build', why: bin };
   if (bin === 'electron-vite' && has('build')) return { heavy: true, kind: 'build', why: 'electron-vite build' };
