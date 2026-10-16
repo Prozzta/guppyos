@@ -112,6 +112,9 @@ function words(s: string, d: ShellDialect = 'sh'): string[] {
       // A-S1: a backslash escapes nothing inside sh's '...'. In a cmd body the WORDS are the
       // program's argv, split by the C runtime after cmd removed its carets (measured: `"p\" q`
       // is one argument, `a^"b c"` is `ab c`, `x^ y` is two): `\"` escapes and every `"` opens.
+      // HEAVY-LOCK-SHAPES-189 (Jim NIT 1): inside sh's "...", `\"` `\\` `\$` and `` \` `` lose the
+      // backslash, as bash removes it; kept, a `bash -c "bash -c '... \"...\"'"` body split on a `\"`.
+      if (c === '\\' && q === '"' && d === 'sh' && /["\\$`]/.test(s[i + 1] ?? '')) { w += s[i + 1]; i += 2; continue; }
       if (c === '\\' && q !== "'" && i + 1 < s.length) { w += c + s[i + 1]; i += 2; continue; }
       if (!q && (d === 'cmd' ? c === '"' : opensQuote(s, i, d))) { q = c; i++; continue; }
       if (q && c === q) { q = null; i++; continue; }
@@ -257,6 +260,8 @@ function leading(ws: string[]): string[] {
     // options (`env $(env | grep ... | sed s/^/-u /) node test/tools/run-tests.cjs`); it is not the program.
     if (w === 'env') { i++; while (i < ws.length && (ws[i].startsWith('-') || ws[i].startsWith('$(') || /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i]))) { if (ws[i] === '-u') i++; i++; } continue; }
     if (w === 'timeout' || w === 'nice') { i++; while (i < ws.length && (/^-/.test(ws[i]) || /^\d+[smhd]?$/.test(ws[i]))) i++; continue; }
+    // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): `nohup npm test &`, `time npm test`, `setsid npm test` run what follows.
+    if (w === 'nohup' || w === 'time' || w === 'setsid') { i++; while (i < ws.length && /^-/.test(ws[i])) i++; continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
   }
@@ -290,14 +295,34 @@ function unreadable(path: string): HeavyClass {
   return { heavy: true, kind: 'bench', why: `${path.replace(/\\/g, '/').split('/').pop()} (a script the lock cannot read yet)`, provisional: true };
 }
 
+/** HEAVY-LOCK-SHAPES-189 (Jim NIT 1): nesting past MAX_DEPTH is not followed, so it is unknown:
+ *  heavy, provisional (it read as light, so the depth cap failed open). */
+function capped(what: string): HeavyClass {
+  return { heavy: true, kind: 'bench', why: `${what} (nested deeper than the lock follows)`, provisional: true };
+}
+
+/** Classify a command one level down, or `capped` at MAX_DEPTH. */
+function nested(cmd: string, depth: number, ctx: ClassifyCtx, what: string): HeavyClass {
+  return depth + 1 >= MAX_DEPTH ? capped(what) : classifyCommand(cmd, depth + 1, ctx);
+}
+
+/** A UTF-16 BOM as a UTF-8 read sees it (FF FE / FE FF are two invalid bytes) or as a decoder keeps it. */
+const UTF16_BOM = /^(��|﻿)/;
+
 /** A script file run by a shell (`bash x.sh`, `./x.sh`) is heavy when its TEXT runs a heavy command. */
 function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: ShellDialect = 'sh'): HeavyClass {
-  if (!ctx.readScript || depth >= MAX_DEPTH) return { heavy: false };
+  const name = path.replace(/\\/g, '/').split('/').pop()!;
+  if (!ctx.readScript) return { heavy: false };
+  if (depth >= MAX_DEPTH) return capped(name);
   let text: string | null = null;
   try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
   // HEAVY-LOCK-BG-LAPSE-189: a script the lock cannot read (not created yet, too big, a computed
   // path) is an unknown program: heavy, as an unreadable stdin script already is (FAILOPEN).
   if (text === null) return unreadable(path);
+  // HEAVY-LOCK-SHAPES-189 (Jim MUST 2): PowerShell 5.1's Out-File and `>` write UTF-16LE with a BOM,
+  // so a .ps1 holds a NUL beside every ASCII character. Decoded first (a command is ASCII, so the
+  // NULs go), and a named script (x.ps1, x.sh, x.bat) with NULs and no BOM is UTF-16 too.
+  if (text.includes('\0') && (UTF16_BOM.test(text) || name.includes('.'))) text = text.replace(UTF16_BOM, '').replace(/\0/g, '');
   // HEAVY-LOCK-SHAPES-189: a binary (an extensionless `./tool` that is an executable) is not a script.
   if (text.includes('\0')) return { heavy: false };
   // An extensionless script run directly (`./run`) runs by its shebang: node code is node's to judge.
@@ -621,6 +646,36 @@ function launchedWords(args: string[]): string[] {
   return [file.replace(/^['"]|['"]$/g, ''), ...rest];
 }
 
+/** HEAVY-LOCK-SHAPES-189 (Jim MUST 1): a command whose { } argument is a script block it runs: any
+ *  Verb-Noun cmdlet (Start-Job, Invoke-Command, ForEach-Object ...), the aliases %, foreach, icm,
+ *  sajb, and the call operator &. */
+const PS_BLOCK_BIN = /^([a-z]+-[a-z]+|%|foreach|icm|sajb|&)$/;
+
+/** The text inside the first { } of these words (balanced across words), '' for an empty block, or
+ *  null when there is no block. */
+function scriptBlock(words: string[]): string | null {
+  const at = words.findIndex((w) => w.startsWith('{'));
+  if (at < 0) return null;
+  let depth = 0; const out: string[] = [];
+  for (let i = at; i < words.length; i++) {
+    out.push(words[i]);
+    for (const ch of words[i]) depth += ch === '{' ? 1 : ch === '}' ? -1 : 0;
+    if (depth <= 0) break;
+  }
+  return out.join(' ').replace(/^\{/, '').replace(/\}$/, '').trim();
+}
+
+/** HEAVY-LOCK-SHAPES-189 (Jim MUST 1): PowerShell's -EncodedCommand value (base64 of UTF-16LE), or
+ *  null when it is not that. */
+function decodePsEncoded(value: string | undefined): string | null {
+  const s = (value ?? '').replace(/^['"]|['"]$/g, '');
+  if (!s || s.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(s)) return null;
+  const buf = Buffer.from(s, 'base64');
+  if (buf.length < 2 || buf.length % 2 !== 0) return null;
+  const code = buf.toString('utf16le');
+  return /[\0-\x08\x0e-\x1f�]/.test(code) ? null : code;
+}
+
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const raw = leading(ws0);
   const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
@@ -669,9 +724,18 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
     // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
     // was read one level deep only).
-    if (k >= 0) return depth + 1 >= MAX_DEPTH ? { heavy: false } : classifyCommand(args.slice(k + 1).join(' '), depth + 1, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' });
+    if (k >= 0) return nested(args.slice(k + 1).join(' '), depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
     if (/^(powershell|pwsh)$/.test(bin)) {
+      // Jim MUST 1: -EncodedCommand (-e, -ec, -enc ...) is base64 of UTF-16LE code; code that does not
+      // decode is unknown (heavy, provisional).
+      const e = args.findIndex((a) => /^-ec$/i.test(a) || (/^-e[a-z]*$/i.test(a) && '-encodedcommand'.startsWith(a.toLowerCase())));
+      if (e >= 0) {
+        const code = decodePsEncoded(args[e + 1]);
+        return code === null
+          ? { heavy: true, kind: 'bench', why: `${bin} ${args[e]} (code the lock cannot decode)`, provisional: true }
+          : nested(code, depth, ctx, `${bin} ${args[e]}`);
+      }
       const f = args.findIndex((a) => /^-(f|file)$/i.test(a));
       return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, ctx) : { heavy: false };
     }
@@ -682,10 +746,20 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // HEAVY-LOCK-SHAPES-189 (god conv-cbab35, Dwight 18:18:34Z): a launcher runs its program, so the
   // program decides. `Start-Process -FilePath npm.cmd -ArgumentList 'test'` (and `saps`, PowerShell's
   // `start`, cmd's `start "" /b npm test`) started a full suite that the lock read as light.
-  if ((bin === 'start-process' || bin === 'saps' || bin === 'start') && args.length && depth + 1 < MAX_DEPTH) {
+  if ((bin === 'start-process' || bin === 'saps' || bin === 'start') && args.length) {
     const launched = launchedWords(args);
-    return launched.length ? classifyWords(launched, depth + 1, ctx) : { heavy: false };
+    if (!launched.length) return { heavy: false };
+    return depth + 1 >= MAX_DEPTH ? capped(bin) : classifyWords(launched, depth + 1, ctx);
   }
+  // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): Invoke-Expression / iex run their string argument.
+  if (bin === 'invoke-expression' || bin === 'iex') {
+    const code = args.filter((a) => !/^-command$/i.test(a)).join(' ');
+    return code ? nested(code, depth, ctx, bin) : { heavy: false };
+  }
+  // A { } script block runs: PowerShell's `Start-Job { npm test }`, `Invoke-Command -ScriptBlock {...}`,
+  // `... | ForEach-Object { npm test }`, `& { ... }`, and sh's group `{ npm test; }`.
+  const block = ws[0].startsWith('{') ? scriptBlock(ws) : PS_BLOCK_BIN.test(bin) ? scriptBlock(args) : null;
+  if (block !== null) return block ? nested(block, depth, ctx, `${bin} { }`) : { heavy: false };
   // A script run directly (`./suite.sh`, `scripts/gate.sh`; HEAVY-LOCK-SHAPES-189: `./x.ps1`).
   if (/\.(sh|bash|ps1)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
   // HEAVY-LOCK-SHAPES-189: `source x.sh` / `. x.sh` run the script in this shell.

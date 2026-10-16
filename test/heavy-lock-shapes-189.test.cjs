@@ -22,6 +22,8 @@ const { classifyCommand } = loadTs('src/main/heavyJob.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 
 const SUITE = 'node test/tools/run-tests.cjs';
+/** PowerShell's -EncodedCommand form of a command: base64 of its UTF-16LE bytes. */
+const ENC = (s) => Buffer.from(s, 'utf16le').toString('base64');
 const lightBody = (f, run) => `cat > ${f} <<'EOF'\necho hi\nEOF\n${run}`;
 
 function fixture(t) {
@@ -38,6 +40,13 @@ function fixture(t) {
   w('ok.test.cjs', "require('node:test')('x', () => {});\n");
   w('heavy.cjs', "require('child_process').spawnSync('node', ['test/tools/run-tests.cjs']);\n");
   w('loop.sh', 'bash loop.sh\n');
+  w('deep.sh', `bash -c "bash -c 'bash -c \\"npm test\\"'"\n`);
+  // PowerShell 5.1's Out-File / `>` encoding: UTF-16LE with a BOM (and the BE and BOM-less forms).
+  const u16 = (s, bom) => Buffer.concat([Buffer.from(bom), Buffer.from(s, 'utf16le')]);
+  w('s16.ps1', u16('npm test\r\n', [0xff, 0xfe]));
+  w('s16be.ps1', Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('npm test\r\n', 'utf16le').swap16()]));
+  w('s16nb.ps1', u16('npm test\r\n', []));
+  w('l16.ps1', u16('Get-ChildItem\r\n', [0xff, 0xfe]));
   // npm's cmd-shim text for a .bin entry (as in this repo's node_modules/.bin).
   const shim = (b) => `#!/bin/sh\nbasedir=$(dirname "$(echo "$0" | sed -e 's,\\\\,/,g')")\n\ncase \`uname\` in\n    *CYGWIN*|*MINGW*|*MSYS*)\n        if command -v cygpath > /dev/null 2>&1; then\n            basedir=\`cygpath -w "$basedir"\`\n        fi\n    ;;\nesac\n\nif [ -x "$basedir/node" ]; then\n  exec "$basedir/node"  "$basedir/../${b}/bin/${b}.js" "$@"\nelse \n  exec node  "$basedir/../${b}/bin/${b}.js" "$@"\nfi\n`;
   for (const b of ['vitest', 'electron-vite', 'eslint']) w(`node_modules/.bin/${b}`, shim(b));
@@ -62,7 +71,10 @@ const ROWS = [
   ['2 /usr/bin/env', '/usr/bin/env FOO=1', 'light'],                            // light
   ['3 depth-2', `bash -c "bash -c 'bash s.sh'"`, 'heavy:suite'],                // light
   ['3 depth-2 npm ci', `bash -c "bash -c 'npm ci'"`, 'heavy:install'],          // light
-  ['3 a script that runs itself ends', 'bash loop.sh', 'light'],                // light
+  // Jim NIT 1: the depth cap is unknown, not light (it ends either way).
+  ['3 a script that runs itself ends', 'bash loop.sh', 'provisional'],          // light
+  ['3 a script nesting past the cap', 'bash deep.sh', 'provisional'],           // light
+  ['3 depth-4 inline', `bash -c "bash -c 'bash -c \\"bash -c npm\\\\ test\\"'"`, 'provisional'], // light
   ['4 powershell -File', 'powershell -File s.ps1', 'heavy:suite'],              // light
   ['4 pwsh -f', 'pwsh -f s.ps1', 'heavy:suite'],                                // light
   ['4 ./s.ps1', './s.ps1', 'heavy:suite'],                                      // light
@@ -100,6 +112,32 @@ const ROWS = [
   ['names: vitest shim', './node_modules/.bin/vitest run', 'heavy:suite'],      // heavy:suite
   ['names: electron-vite shim', './node_modules/.bin/electron-vite build', 'heavy:build'], // heavy:build
   ['names: eslint shim', 'node_modules/.bin/eslint src', 'light'],              // light
+  // Jim MUST 1 (light at 83ee9c23): launchers of the Start-Process class.
+  ['M1 Start-Job block', 'Start-Job -ScriptBlock { npm test }', 'heavy:suite'],  // light
+  ['M1 $job = Start-Job', '$job = Start-Job { npm test }', 'heavy:suite'],      // light
+  ['M1 Invoke-Command', 'Invoke-Command -ScriptBlock { npm test }', 'heavy:suite'], // light
+  ['M1 ForEach-Object', '1..1 | ForEach-Object { npm test }', 'heavy:suite'],   // light
+  ['M1 % alias', '1..1 | % { npm ci }', 'heavy:install'],                       // light
+  ['M1 sh group', '{ npm test; }', 'heavy:suite'],                              // light
+  ['M1 Invoke-Expression', "Invoke-Expression 'npm test'", 'heavy:suite'],      // light
+  ['M1 iex', "iex 'npm run build'", 'heavy:build'],                             // light
+  ['M1 -EncodedCommand', `powershell -EncodedCommand ${ENC('npm test')}`, 'heavy:suite'], // light
+  ['M1 -enc', `pwsh -enc ${ENC('npm ci')}`, 'heavy:install'],                  // light
+  ['M1 -ec undecodable', 'powershell -ec not-base64!', 'provisional'],          // light
+  ['M1 nohup', 'nohup npm test &', 'heavy:suite'],                              // light
+  ['M1 time', 'time npm test', 'heavy:suite'],                                  // light
+  ['M1 setsid', 'setsid -f npm test', 'heavy:suite'],                           // light
+  ['M1 nice -n', 'nice -n 5 npm test', 'heavy:suite'],                          // heavy:suite
+  ['M1 control: a filter block', "Get-ChildItem | Where-Object { $_.Name -match 'test' }", 'light'], // light
+  ['M1 control: a property block', '1..3 | ForEach-Object { $_ * 2 }', 'light'], // light
+  ['M1 control: iex light', "iex 'git status'", 'light'],                       // light
+  ['M1 control: -enc light', `powershell -enc ${ENC('Get-ChildItem')}`, 'light'], // light
+  // Jim MUST 2 (light at 83ee9c23): PowerShell 5.1 writes UTF-16LE; a NUL is not a binary in a named script.
+  ['M2 -File UTF-16LE BOM', 'powershell -File s16.ps1', 'heavy:suite'],         // light
+  ['M2 ./ UTF-16LE BOM', './s16.ps1', 'heavy:suite'],                           // light
+  ['M2 UTF-16BE BOM', 'powershell -File s16be.ps1', 'heavy:suite'],             // light
+  ['M2 UTF-16LE no BOM', 'powershell -File s16nb.ps1', 'heavy:suite'],          // light
+  ['M2 control: UTF-16 light', 'powershell -File l16.ps1', 'light'],            // light
 ];
 
 test('HEAVY-LOCK-SHAPES-189: every card shape is classified by what it runs (after; before in the comments)', (t) => {
