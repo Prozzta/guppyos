@@ -17,7 +17,7 @@ import { Application } from 'pixi.js';
 import { OfficeFloor } from '../../../src/renderer/src/scene/office/OfficeFloor';
 import { useStore } from '../../../src/renderer/src/store/store';
 import { loadStationPack } from '../../../src/renderer/src/scene/themes/themeCatalog';
-import { BOX, RESIZES, SELECTS, CREW, LOSE_AT, LAST, AFTER, LOOKS, LOOKS_FROM } from './tes-floor-damage-plan';
+import { BOX, RESIZES, SELECTS, CREW, LOSE_AT, LAST, AFTER, LOOKS, LOOKS_FROM, EDGE_FROM } from './tes-floor-damage-plan';
 
 declare global {
   interface Window {
@@ -64,6 +64,8 @@ const out = {
   diffFrames: 0, diffMax: 0, diffAt: '', diffKinds: { whole: 0, incremental: 0, nothing: 0 } as Record<string, number>,
   apps: 0, afterRebuild: 0, configs: [] as string[], lost: false,
   looks: 0, stillFound: false, looksAt: -1,
+  // EDGE: a still person lifted half over the backdrop above the art, then put back (the clear's pin).
+  edgeAt: -1, edgeCheckAt: -1, edgeCfg: '', edgeKind: '', edgeBackdropPx: -1, edgeDiff: 0,
   badFrames: [] as Array<{ at: number; kind: string; bad: number; box: number[]; rects: Rect[] | string }>,
   errors: [] as string[]
 };
@@ -76,6 +78,7 @@ let agentsNow: any[] = [];
 let picked: Array<{ s: any; x: number; y: number }> = [], still: any = null, kept: { s: any; was: object } | null = null;
 let calm = 0, looksAt = -1, lastKind = 'whole';
 let hold: (() => void) | null = null;
+let edgeHold: (() => void) | null = null, edgeP: { s: any; y: number } | null = null, edgeRect: number[] | null = null;
 const read = (gl: WebGL2RenderingContext, W: number, H: number) => {
   const px = new Uint8Array(W * H * 4);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -120,6 +123,19 @@ proto.render = function (this: any) {
         out.diffKinds[kind]++;
         if (out.badFrames.length < 20) out.badFrames.push({ at: renders, kind, bad, box: bb, rects: todo === 'full' ? 'full' : todo });
         if (bad > out.diffMax) { out.diffMax = bad; out.diffAt = `render ${renders}, ${cfg}, ${kind}`; }
+        if (renders === out.edgeCheckAt) out.edgeDiff = bad;
+      }
+      if (renders === out.edgeCheckAt && edgeRect) {
+        // The vacuity guard: with the person back, its lifted rect must hold backdrop px in a whole
+        // draw, or an art or framing change has left the clear nothing to clear here.
+        const bg = app.renderer.background.color.toArray().map((v: number) => Math.round(v * 255));
+        const [x0, y0, x1, y1] = edgeRect;
+        let c = 0;
+        for (let Y = Math.max(0, y0); Y < Math.min(H, y1); Y++) for (let X = Math.max(0, x0); X < Math.min(W, x1); X++) {
+          const i = ((H - 1 - Y) * W + X) * 4;
+          if (whole[i] === bg[0] && whole[i + 1] === bg[1] && whole[i + 2] === bg[2]) c++;
+        }
+        out.edgeBackdropPx = c; out.edgeCfg = cfg; out.edgeKind = kind; edgeRect = null;
       }
     }
   } catch (e) { out.errors.push(e instanceof Error ? e.message : String(e)); }
@@ -186,6 +202,32 @@ proto.render = function (this: any) {
         else still.blendMode = 'add';
         out.looks++;
       }
+    }
+  }
+  // EDGE (at 700x470@1, n = 1, the vertical axis uncovered): a still person is lifted so its sprite
+  // straddles the art's top edge, held 3 frames by a tick after the floor's, then put back. On the
+  // frame it goes back, its old rect over the backdrop is drawn again with nothing in it: only the
+  // clear inside the scissor takes its px away.
+  // (The canvas takes a resize a few frames late: the step waits for the last pane to be drawn.)
+  if (out.edgeAt < 0 && renders >= EDGE_FROM && calm >= 8 && looksAt >= 0 && out.configs.length === RESIZES.length + 1) out.edgeAt = renders;
+  const S2 = this.__tesScene;
+  if (out.edgeAt >= 0 && layer && S2?.bounds) {
+    if (renders === out.edgeAt) {
+      const s = picked.filter((p) => p.s.x === p.x && p.s.y === p.y).map((p) => p.s)[0];
+      if (s) {
+        const b = s.getBounds(), top = layer.toGlobal({ x: 0, y: S2.bounds.y }).y;
+        const y = s.y, to = y + (top - b.height / 2 - b.y) / layer.worldTransform.d;
+        edgeP = { s, y };
+        edgeHold = () => { s.y = to; };
+        this.ticker.add(edgeHold, null, -10);
+        edgeHold();
+      }
+    } else if (renders === out.edgeAt + 3 && edgeP) {
+      const b = edgeP.s.getBounds(), r = this.renderer.resolution;
+      edgeRect = [Math.floor(b.x * r), Math.floor(b.y * r), Math.ceil((b.x + b.width) * r), Math.ceil((b.y + b.height) * r)];
+      if (edgeHold) { this.ticker.remove(edgeHold); edgeHold = null; }
+      edgeP.s.y = edgeP.y; edgeP = null;
+      out.edgeCheckAt = renders + 1;
     }
   }
   if (renders === LOSE_AT) {

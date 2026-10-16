@@ -8,7 +8,9 @@
  *   dimmed and made unrenderable, and a lost WebGL context (the floor rebuilds and carries on);
  * - most frames are incremental, and they draw a fraction of the canvas;
  * - MUTANTS (DPR 1): a tracker that forgets a removed thing's old rect, a mover's old rect, the
- *   clear inside the scissor (a rect can reach bare backdrop: 700x470@1 leaves an axis uncovered),
+ *   clear inside the scissor (pinned by the edge step: at 700x470@1, which leaves the vertical axis
+ *   uncovered, a still person lifted half over the backdrop is put back; a vacuity guard asserts
+ *   its old rect then holds backdrop px),
  *   the scissor's flip to GL's bottom-up rows, the rect's rounding margin, the bubbles, a sprite's
  *   own alpha/tint/blend, its depth, its ancestors' look or their renderable, is caught.
  */
@@ -46,6 +48,13 @@ for (const dpr of ['1', '1.25', '1.5', '1.75', '2']) {
     assert.ok(r.incremental >= r.frames / 2, `most frames incremental (${r.incremental} of ${r.frames}; whole ${r.whole})`);
     assert.ok(r.incPx < 0.5 * r.canvasPx, `an incremental frame draws a fraction of the canvas (${(r.incPx / r.canvasPx).toFixed(3)})`);
     assert.equal(r.diffFrames, 0, `every frame equals a full draw (worst ${r.diffMax} px at ${r.diffAt})`);
+    t.diagnostic(JSON.stringify({ edgeAt: r.edgeAt, edgeCheckAt: r.edgeCheckAt, edgeCfg: r.edgeCfg, edgeKind: r.edgeKind, edgeBackdropPx: r.edgeBackdropPx }));
+    if (dpr === '1') {
+      // The clear's pin is not vacuous: the person put back leaves backdrop px in its old rect, at n = 1.
+      assert.equal(r.edgeCfg, '700x470@1', `the edge step ran in the 700x470 pane (${r.edgeCfg})`);
+      assert.equal(r.edgeKind, 'incremental', `the edge's move back was drawn incrementally (${r.edgeKind})`);
+      assert.ok(r.edgeBackdropPx > 0, `the person's lifted rect holds backdrop px once it is back (${r.edgeBackdropPx})`);
+    }
   });
 }
 
@@ -72,6 +81,7 @@ test('MUTANTS (DPR 1): each is caught by the incremental == full check', { timeo
       const r = await run({ HARNESS_DPR: '1', HARNESS_SOURCE_OVERRIDES: JSON.stringify({ [file]: mut }) });
       t.diagnostic(`${name}: ok ${r.ok}, diff frames ${r.diffFrames}, worst ${r.diffMax} at ${r.diffAt}`);
       assert.ok(!r.ok || r.diffFrames > 0, `${name} is caught`);
+      if (name === 'no clear inside the scissor') assert.ok(r.edgeDiff > 0, `${name} is caught on the edge step (render ${r.edgeCheckAt})`);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

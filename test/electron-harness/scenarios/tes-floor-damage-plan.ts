@@ -20,6 +20,9 @@ export const LOOKS: Array<{ at: number; look: 'pick' | 'alpha' | 'tint' | 'blend
   { at: 17, look: 'blend' }, { at: 21, look: 'back' }, { at: 24, look: 'behind' }, { at: 28, look: 'back' },
   { at: 30, look: 'layerAlpha' }, { at: 32, look: 'layerBack' }, { at: 34, look: 'layerHidden' }, { at: 36, look: 'layerBack' }
 ];
+/** The edge step (the clear's pin) starts at the first render at or after EDGE_FROM that follows 8
+ *  frames none of which was drawn whole: in the 700x470 pane, before the selection at 470. */
+export const EDGE_FROM = 420;
 export const LOSE_AT = 560;
 export const LAST = 700;
 /** Frames the rebuilt floor draws before the run ends. */
