@@ -6,6 +6,7 @@
  *   03-all-statuses     the 'all' filter: every status badge
  *   04-history          one claim open: "Why it believes this", a revert per step, a reverted step
  *   05-purge-typed      the purge row with the word typed (main's own dialog comes after)
+ *   05b-rescrub-note    a purged claim: "scrub copies again", and the note naming a backup day it could not rewrite
  *   06-preference       a preference being written, and one over 400 characters (refused, not cut)
  *   07-read-only        a read-only ledger (a chain break): nothing can be written
  *   08-level-applied    the level changed, with main's answer
@@ -75,8 +76,9 @@ let saved = 'writer';
 const summary = (): LedgerUiSummary => ({
   saved, effective: saved as LedgerUiSummary['effective'],
   agents: [
-    { agentId: 'andy-mtuk4y4x', level: 'writer', claims: andy.claims.length, readOnly: false },
-    { agentId: 'jim-mtujpe28', level: 'writer', claims: jim.claims.length, readOnly: true },
+    // Jim's G7.3 nit 2: the stub follows the saved level, as main's effective level does.
+    { agentId: 'andy-mtuk4y4x', level: saved as LedgerUiSummary['effective'], claims: andy.claims.length, readOnly: false },
+    { agentId: 'jim-mtujpe28', level: saved as LedgerUiSummary['effective'], claims: jim.claims.length, readOnly: true },
   ],
 });
 const calls: string[] = [];
@@ -85,7 +87,12 @@ const claimsUi = {
   view: async (id: string) => (id === 'jim-mtujpe28' ? jim : andy),
   addPreference: async () => { calls.push('addPreference'); return { ok: true, id: 'c-ffffffffffff' }; },
   revert: async () => { calls.push('revert'); return { ok: false, error: 'cancelled: nothing was written', cancelled: true }; },
-  purge: async () => { calls.push('purge'); return { ok: false, error: 'cancelled: nothing was written', cancelled: true }; },
+  purge: async (_a: string, ids: string[]) => {
+    calls.push('purge');
+    // CL-W7 S3: the purged claim's copies scrubbed again, one backup day still failing.
+    if (ids[0] === 'c-708192a3b4c5') return { ok: true, note: '2 backup file(s) and 0 export line(s) rewritten. NOT rewritten (the text may still be there): 2026-10-14. Purge this claim again to retry them.' };
+    return { ok: false, error: 'cancelled: nothing was written', cancelled: true };
+  },
   setLevel: async (l: string) => { calls.push(`setLevel:${l}`); saved = l; return { ok: true, note: 'Exported 2 memory.md file(s) first.' }; },
   exportNow: async () => { calls.push('exportNow'); return { ok: true, note: '18234 bytes written.' }; },
 };
@@ -157,6 +164,15 @@ window.__harnessRun = async () => {
     await capture('05-purge-typed');
 
     await click(byText(panel, 'button', 'cancel'));
+    await click(document.querySelector<HTMLElement>('[data-claim="c-6f708192a3b4"] button')!);
+    await click(document.querySelector<HTMLElement>('[data-claim="c-708192a3b4c5"] button')!);
+    await click(byText(panel, 'button', 'scrub copies again...'));
+    await type(document.querySelector<HTMLInputElement>('input[aria-label="Type purge to confirm"]')!, 'purge');
+    await click(byText(panel, 'button', 'scrub'));
+    await act(async () => { await sleep(200); });
+    await scrollTo(document.querySelector('[data-testid="claim-ledger-agent"]'));
+    await capture('05b-rescrub-note');
+    await click(document.querySelector<HTMLElement>('[data-claim="c-708192a3b4c5"] button')!);
     const pref = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Preference"]')!;
     await type(pref, 'Ask me before deleting any branch, even a merged one.');
     await type(document.querySelector<HTMLInputElement>('input[aria-label="Preference key"]')!, 'pref.git.branches');
@@ -166,14 +182,14 @@ window.__harnessRun = async () => {
     await capture('06b-preference-too-long');
     await type(pref, '');
 
-    await click(byText(panel, 'button', 'close'));
+    await click(byText(panel, 'button', 'hide'));
     const opens = [...panel.querySelectorAll<HTMLElement>('button')].filter((b) => b.textContent?.trim() === 'open');
     await click(opens[1]);
     await act(async () => { await sleep(200); });
     await scrollTo(panel);
     await capture('07-read-only');
 
-    await click(byText(panel, 'button', 'close'));
+    await click(byText(panel, 'button', 'hide'));
     await click(byText(panel, 'button', 'reader'));
     await act(async () => { await sleep(200); });
     await scrollTo(panel);

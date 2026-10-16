@@ -10,7 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { PixelButton } from './PixelButton';
-import { claimHistory, statusBadge, UI_STATUSES, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
+import { claimHistory, readOnlyText, statusBadge, UI_STATUSES, type LedgerUiAgentView, type LedgerUiClaim, type LedgerUiResult, type LedgerUiSummary } from '@shared/claimsUi';
 import type { Status } from '@shared/claims';
 
 const LEVELS = ['off', 'shadow', 'reader', 'writer'] as const;
@@ -87,7 +87,7 @@ export function ClaimLedgerSettings() {
                 <span style={hint}>{a.level} · {a.claims} claims</span>
                 {a.readOnly && <span style={{ ...hint, color: 'var(--cth-status-blocked)' }}>read-only</span>}
                 <PixelButton size="sm" variant={agentId === a.agentId ? 'primary' : 'secondary'} onClick={() => setAgentId(agentId === a.agentId ? null : a.agentId)}>
-                  {agentId === a.agentId ? 'close' : 'open'}
+                  {agentId === a.agentId ? 'hide' : 'open'}
                 </PixelButton>
               </div>
             ))}
@@ -142,7 +142,7 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
           title={view.level === 'writer' ? 'Replace memory.md with a complete export of this ledger' : 'Only a writer agent has an export'}
           onClick={() => void act(() => api.exportNow(agentId), 'memory.md exported.')}>export memory.md</PixelButton>
       </div>
-      {readOnly && <div style={{ ...hint, color: 'var(--cth-status-blocked)' }}>This ledger is read-only ({view.readOnly}). Nothing can be written until the Human resolves it.</div>}
+      {readOnly && <div data-testid="claim-ledger-locked" style={{ ...hint, color: 'var(--cth-status-blocked)' }}>{readOnlyText(view.readOnly as string)}</div>}
 
       {!readOnly && <div>
         <div style={{ ...hint, marginBottom: 4 }}>Add a preference (yours, kept as a Human claim in {agentId}'s ledger)</div>
@@ -174,7 +174,7 @@ function AgentLedger({ agentId, onChanged }: { agentId: string; onChanged: () =>
           <ClaimRow key={c.id} c={c} open={open === c.id} onToggle={() => setOpen(open === c.id ? null : c.id)}>
             {open === c.id && <ClaimDetail view={view} claim={c} busy={busy} readOnly={readOnly}
               onRevert={(eventId) => void act(() => api.revert(agentId, eventId), 'Reverted.')}
-              onPurge={(typed) => act(() => api.purge(agentId, [c.id], typed), 'Purged.')} />}
+              onPurge={(typed) => act(() => api.purge(agentId, [c.id], typed), c.status === 'purged' ? 'Copies scrubbed again.' : 'Purged.')} />}
           </ClaimRow>
         ))}
         {shown.length > LIST_MAX && <div style={hint}>Showing the newest {LIST_MAX} of {shown.length}; search to narrow.</div>}
@@ -206,6 +206,8 @@ function ClaimDetail({ view, claim, busy, readOnly, onRevert, onPurge }: {
   const h = useMemo(() => claimHistory(view, claim.id), [view, claim.id]);
   const [purging, setPurging] = useState(false);
   const [typed, setTyped] = useState('');
+  // CL-W7 S3: a purged claim's copies can be scrubbed again (a backup a failed step left behind).
+  const again = claim.status === 'purged';
   return (
     <div data-testid="claim-detail" style={{ margin: '6px 0 4px 8px', paddingLeft: 8, borderLeft: '2px solid var(--cth-ink-300)', display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={hint}>
@@ -227,14 +229,14 @@ function ClaimDetail({ view, claim, busy, readOnly, onRevert, onPurge }: {
         </ol>
         {h.reasons.length > 0 && <div style={{ ...hint, marginTop: 2 }}>Status now: {h.status}, because {h.reasons.join('; ')}.</div>}
       </div>
-      {claim.status !== 'purged' && !readOnly && (
+      {!readOnly && (
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
           {!purging
-            ? <PixelButton size="sm" variant="destructive" disabled={busy} onClick={() => setPurging(true)}>purge...</PixelButton>
+            ? <PixelButton size="sm" variant="destructive" disabled={busy} onClick={() => setPurging(true)}>{again ? 'scrub copies again...' : 'purge...'}</PixelButton>
             : (<>
-                <span style={{ ...hint, color: 'var(--cth-status-blocked)' }}>Erase this claim's text for good? Type <b>{PURGE_WORD}</b>:</span>
+                <span style={{ ...hint, color: 'var(--cth-status-blocked)' }}>{again ? 'Rewrite its backups, restore copies and export again?' : "Erase this claim's text for good?"} Type <b>{PURGE_WORD}</b>:</span>
                 <input aria-label="Type purge to confirm" value={typed} onChange={(e) => setTyped(e.target.value)} style={{ ...input, width: 90 }} autoFocus />
-                <PixelButton size="sm" variant="destructive" disabled={busy || typed !== PURGE_WORD} onClick={() => void onPurge(typed).then((r) => { if (r.ok || r.cancelled) { setPurging(false); setTyped(''); } })}>purge</PixelButton>
+                <PixelButton size="sm" variant="destructive" disabled={busy || typed !== PURGE_WORD} onClick={() => void onPurge(typed).then((r) => { if (r.ok || r.cancelled) { setPurging(false); setTyped(''); } })}>{again ? 'scrub' : 'purge'}</PixelButton>
                 <PixelButton size="sm" variant="ghost" onClick={() => { setPurging(false); setTyped(''); }}>cancel</PixelButton>
               </>)}
         </div>

@@ -47,10 +47,12 @@ export type LedgerUiResult = { ok: true; id?: string; note?: string } | { ok: fa
 /**
  * The events a Human revert undoes. derive() makes a reverted event inert, so reverting one of these
  * restores the state before it (G5.4). Never: a revert (derive ignores a revert of a revert), a
- * purge (its content is gone), a rekey or a key-alias (key material), a status-mark (export only).
+ * purge (its content is gone), a rekey or a key-alias (key material), a status-mark (export only),
+ * a sighting (CL-W7 S1: derive counts sightings without consulting reverts, so a revert would
+ * change nothing).
  */
 export const REVERTIBLE_EVENTS: ReadonlySet<EventKind> = new Set<EventKind>([
-  'accept', 'dismiss', 'reconcile-answer', 'soft-supersede', 'inferred-supersede', 'pin', 'unpin', 'sighting',
+  'accept', 'dismiss', 'reconcile-answer', 'soft-supersede', 'inferred-supersede', 'pin', 'unpin',
 ]);
 
 export interface HistoryItem {
@@ -116,4 +118,23 @@ export function statusBadge(s: Status): { label: string; tone: 'ok' | 'warn' | '
     case 'retracted': return { label: 'retracted', tone: 'muted' };
     case 'purged': return { label: 'purged', tone: 'danger' };
   }
+}
+
+/**
+ * Jim's G7.3 SHOULD 1: why a ledger is read-only, in plain words, and the way out (view.readOnly is
+ * "<reason> at <where>"). There is no rekey or restore button in Settings yet, so it names who acts.
+ */
+export function readOnlyText(readOnly: string): string {
+  const m = /^(\S+) at (.*)$/.exec(readOnly);
+  const reason = m ? m[1] : '';
+  const raw = m ? m[2] : readOnly;
+  const where = raw.replace(/\\/g, '/').split('/').pop() ?? raw;
+  const why = reason === 'mac' ? `its integrity check failed at ${where}: a record was changed after it was written`
+    : reason === 'prev' && where === 'head-anchor' ? 'records are missing from its end: the ledger was cut or replaced'
+    : reason === 'prev' ? `its chain of records breaks at ${where}: a record was removed, added or reordered`
+    : reason === 'parse' ? `a line at ${where} cannot be read`
+    : reason === 'key-missing' ? "this machine's ledger key is missing, so its records cannot be checked"
+    : `its check failed (${readOnly})`;
+  return `This ledger is locked because ${why}. Nothing is written to it until it is fixed. `
+    + 'The way out: ask god to review it; the fix is restoring a backup day, or your anchor reset after that review (neither is a button in Settings yet).';
 }

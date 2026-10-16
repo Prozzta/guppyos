@@ -53,6 +53,8 @@ export interface LedgerUiDeps {
 
 /** The word the Human types in the purge dialog. */
 export const PURGE_WORD = 'purge';
+/** What a purge does NOT remove (Andy's W7 audit, SHOULD 4): named in the dialog, whatever the scope. */
+export const PURGE_KEEPS = 'Not removed by a purge: the text may remain in memory.md (written by the agent while the ledger is below writer), the memory archives, the torn-tail file (claims.torn.jsonl), the search and usage logs, mail, and the index database until it is rebuilt or compacted (not automatic yet).';
 const AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const ID_RE = /^[ce]-[0-9a-f]{12,32}$/;
 
@@ -156,23 +158,34 @@ export function createLedgerUi(d: LedgerUiDeps) {
       const v = view(agentId);
       if ('error' in v) return fail(v.error);
       if (v.readOnly) return fail(`the ledger is read-only (${v.readOnly}); nothing can be purged`);
+      let again = true;
       for (const id of ids as string[]) {
         const c = v.claims.find((x) => x.id === id);
         if (!c) return fail(`${id} is not a claim of ${agentId}`);
-        if (c.status === 'purged') return fail(`${id} is already purged`);
+        if (c.status !== 'purged') again = false;
       }
-      const ok = await d.confirm({
+      const what = ids.length === 1 ? (ids as string[])[0] : `${ids.length} claims`;
+      // CL-W7 S3: claims purged already: their backups, restore asides and export are scrubbed again
+      // (a copy a failed step left behind); the ledger is not touched and no event is written.
+      const ok = await d.confirm(again ? {
+        title: 'Scrub the copies again?', ok: 'Scrub', danger: true,
+        message: `Rewrite the backups, restore copies and export of ${what} in ${agentId}'s claim ledger?`,
+        detail: `The ledger already holds only the tombstone. ${PURGE_KEEPS}`,
+      } : {
         title: 'Purge for good?', ok: 'Purge', danger: true,
-        message: `Erase the text of ${ids.length === 1 ? (ids as string[])[0] : `${ids.length} claims`} from ${agentId}'s claim ledger?`,
-        detail: 'This cannot be undone. The text is removed from the ledger, its backups and its export; the claim stays as a purged tombstone and a purge event is recorded.',
+        message: `Erase the text of ${what} from ${agentId}'s claim ledger?`,
+        detail: `This cannot be undone. The text is removed from the ledger, its backups, its restore copies and its export; the claim stays as a purged tombstone and a purge event is recorded. ${PURGE_KEEPS}`,
       });
       if (!ok) return cancelled();
       const r = await store.purge(agentId, ids as string[], true);
       if (!r.ok) { d.log({ kind: 'claims-ui-purge', agentId, targets: ids, ok: false, error: r.error.slice(0, 120) }); return fail(r.error); }
       let scrubbed = 0;
       try { scrubbed = d.scrubExport(agentId, ids as string[]); } catch (e) { d.log({ kind: 'claims-ui-purge-scrub-failed', agentId, error: String(e).slice(0, 160) }); }
-      d.log({ kind: 'claims-ui-purge', agentId, targets: ids, ok: true, id: r.id, copies: r.copies, exportLines: scrubbed });
-      return { ok: true, id: r.id, note: `${r.copies} backup file(s) and ${scrubbed} export line(s) rewritten.` };
+      d.log({ kind: 'claims-ui-purge', agentId, targets: ids, ok: true, id: r.id, copies: r.copies, failedCopies: r.failedCopies, exportLines: scrubbed });
+      const failed = r.failedCopies.length
+        ? ` NOT rewritten (the text may still be there): ${r.failedCopies.join(', ')}. Purge this claim again to retry them.`
+        : '';
+      return { ok: true, ...(r.id ? { id: r.id } : {}), note: `${r.copies} backup file(s) and ${scrubbed} export line(s) rewritten.${failed}` };
     },
 
     /** The Settings level; a drop below writer exports every writer agent completely first. */
