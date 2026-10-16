@@ -77,14 +77,15 @@ export interface GraphicsRowApp {
   once(event: 'gpu-info-update', fn: () => void): unknown;
   removeListener(event: 'gpu-info-update', fn: () => void): unknown;
 }
-export interface GraphicsRow {
+/** A type, not an interface: hive.appendLog takes a Record<string, unknown>. */
+export type GraphicsRow = {
   kind: 'graphics';
   mode: GraphicsMode;
   applied: boolean;
   hardwareCompositing: boolean | null;
   /** Chromium's raw gpu_compositing string, so a fallback is told apart from a missing status. */
   gpuCompositing: string | null;
-}
+};
 export const GRAPHICS_ROW_TIMEOUT_MS = 10_000;
 
 let gpuReported = false;
