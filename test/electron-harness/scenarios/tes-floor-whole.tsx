@@ -227,6 +227,9 @@ const out = {
   teethChecks: 0, teethMax: 0, edgeBlank: 0,
   depthChecks: 0, depthBadMax: 0, depthBadAt: '' as string, depthPixels: 0, depthArea: 0, depthSamples: [] as unknown[],
   frontChecks: 0, frontStatics: 0, frontCovered: 0, frontDiff: 0, frontMaxDelta: 0, frontTeeth: 0, frontSamples: [] as unknown[], frontLog: [] as number[][],
+  // Jim S1 (mutant F): every frame, the front statics as compose left them against a fresh canvas
+  // placement for this view; and how many frames moved the view at an unchanged k.
+  frontPlaced: 0, frontStale: 0, frontStaleAt: '', frontMovedSameK: 0,
   // Every frame: on an axis the art covers, the device px of frame margin (backdrop) in the pane.
   coveredFrames: 0, marginFrames: 0, marginMax: 0, marginAt: '',
   configs: [] as Array<{ box: string; dev: string; n: number; ox: number; oy: number; sideL: number; sideR: number; edges: Record<string, number> }>,
@@ -238,6 +241,7 @@ let done: (() => void) | null = null;
 let hostBox: HTMLDivElement | null = null;
 let last = { x: NaN, y: NaN, s: NaN, pane: '' };
 let overflowNow = false;
+let frontLast = { view: '', k: NaN };
 let sawConfig = '';
 const proto = Application.prototype as unknown as { render: () => void };
 const realRender = proto.render;
@@ -251,6 +255,22 @@ proto.render = function (this: any) {
       const n = w.scale.x * r, ox = w.x * r, oy = w.y * r;
       const Wd = Math.round(app.screen.width * r), Hd = Math.round(app.screen.height * r);
       out.frames++;
+      // Jim S1: compose has placed the front statics for THIS view (canvas rounding) before anything
+      // below re-places them, also after a pane or camera change that keeps k (no floor rebuild).
+      if (S.frame.fit) {
+        const fronts = () => (S.statics as any[]).map((s) => {
+          if (!s) return '';
+          const f = s.texture.frame;
+          return `${s.position.x},${s.position.y},${s.scale.x},${s.scale.y},${f.x},${f.y},${f.width},${f.height}`;
+        }).join('|');
+        const view = `${ox},${oy},${n}`;
+        const composed = fronts();
+        S.placeFront(true);
+        out.frontPlaced++;
+        if (fronts() !== composed) { out.frontStale++; if (!out.frontStaleAt) out.frontStaleAt = `render ${renders} ${Wd}x${Hd} view ${view} k ${S.k}`; }
+        if (frontLast.k === S.k && frontLast.view !== view) out.frontMovedSameK++;
+        frontLast = { view, k: S.k };
+      }
       const fit = S.frame.fit;
       if (!fit) throw new Error('TES frame has no semantic fit box');
       const fw = fit.x1 + 1 - fit.x0, fh = fit.y1 + 1 - fit.y0;
