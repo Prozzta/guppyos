@@ -71,9 +71,9 @@ talks and sits properly.** Rollback: 1.1.87 (reinstall).
   back. Before, sitters walked straight through their own chair, so some seemed to sit from behind.
 
 - **The TES floor is drawn at a whole number of device pixels and fills its pane.** Every art pixel
-  is an even block at any size or zoom, easing included; the hull runs on to the pane's edges and
-  panning never shows the backdrop past the art. The floor also draws again only what changed
-  between frames, which cuts the GPU process's work on software rendering.
+  is an even block at any size or zoom, easing included; the hull runs on to the pane's edges, and
+  on any axis the art fills, panning never shows the backdrop past it. The floor also draws again
+  only what changed between frames, which cuts the GPU process's work on software rendering.
 
 - **The claims briefing at startup is fast again.** With a large ledger it took over 4 s (each line
   was counted again for every line added), past the hook's 5 s limit once startup load was added,
