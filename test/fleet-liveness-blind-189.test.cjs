@@ -200,7 +200,7 @@ function hookServer(Hook, { deny = false, gate = null } = {}) {
   const hive = { sockPath: () => null, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {}, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {} };
   const control = { shouldHalt: () => false, takeSteer: () => null, toolDecision: (_a, tool) => (tool === gate ? { deny: true, reason: 'gated' } : { deny: false }) };
   const s = new Hook(hive, () => null, () => ({}), control, undefined, undefined, () => {});
-  if (deny) s.setHeavyLock({ acquire: () => ({ allow: false, reason: 'slot busy' }), callDone: () => {} });
+  if (deny) s.setHeavyLock({ acquire: () => ({ allow: false, reason: 'slot busy' }), settle: () => {}, callDone: () => {} });
   return s;
 }
 const SUITE = { command: 'node test/tools/run-tests.cjs' };
