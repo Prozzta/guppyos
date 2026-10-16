@@ -343,9 +343,20 @@ export function normalizeCodexRateLimits(input: {
 
 // ─── Antigravity statusline (1.1.48) ─────────────────────────────────────────
 
-/** The four quota buckets, and nothing else. Two families x two windows. */
+/** The four quota buckets every tick must carry. Two families x two windows. */
 export const AGY_QUOTA_KEYS = ['3p-5h', '3p-weekly', 'gemini-5h', 'gemini-weekly'] as const;
-type AgyQuotaKey = (typeof AGY_QUOTA_KEYS)[number];
+
+/**
+ * A SCOPED bucket: a further limit inside one family, `<family>-<scope>-<5h|weekly>`.
+ * agy 1.4.0 added `gemini-argon-wtu-weekly` beside the four (measured 2026-10-16, a
+ * live TUI tick). The grammar is the four keys' own grammar with a scope in the middle,
+ * so the family and the duration are read from the key, never guessed. Any other key
+ * is still drift: `3p-monthly`, a third family, or a bucket nobody can place.
+ */
+const AGY_SCOPED_QUOTA_KEY = /^(3p|gemini)-([a-z0-9]+(?:-[a-z0-9]+)*)-(5h|weekly)$/;
+
+/** At most this many scoped buckets per tick, so a pool stays well under maxWindowsPerPool. */
+export const AGY_MAX_SCOPED_QUOTA_KEYS = 8;
 
 /** The fields a bucket carries, and nothing else. */
 const AGY_BUCKET_KEYS = ['remaining_fraction', 'reset_time', 'reset_in_seconds'] as const;
@@ -452,7 +463,9 @@ export function agyFamilyOfModel(modelId: string): AgyFamily {
  * publishing the valid half of a malformed tick - the half that parsed is exactly as
  * suspect as the half that did not, because we cannot know which part the provider
  * changed. Unknown TOP-LEVEL properties are ignored, so a new display-only field is not
- * by itself drift; unknown keys inside `quota` or inside a bucket are.
+ * by itself drift; unknown keys inside `quota` or inside a bucket are - except a
+ * SCOPED bucket (`AGY_SCOPED_QUOTA_KEY`), which is checked like the four and joins its
+ * family's observation as a further window.
  */
 export function classifyAgyStatusLine(input: {
   payload: unknown;
@@ -494,10 +507,19 @@ export function classifyAgyStatusLine(input: {
 
   const quota = p.quota;
   if (!isDict(quota)) return drift('quota-missing');
-  if (!exactKeys(quota, AGY_QUOTA_KEYS)) return drift('quota-keys');
+  if (!AGY_QUOTA_KEYS.every((k) => Object.prototype.hasOwnProperty.call(quota, k))) return drift('quota-keys');
+  // The four first, in their fixed order, then the scoped ones sorted: the strip shows the
+  // FIRST 5h and weekly window of a pool, so a scoped bucket never takes a base one's row.
+  const scoped = Object.keys(quota).filter((k) => !(AGY_QUOTA_KEYS as readonly string[]).includes(k)).sort();
+  if (scoped.length > AGY_MAX_SCOPED_QUOTA_KEYS || !scoped.every((k) => AGY_SCOPED_QUOTA_KEY.test(k))) {
+    return drift('quota-keys');
+  }
 
-  const windows = {} as Record<AgyQuotaKey, CapacityWindow>;
-  for (const key of AGY_QUOTA_KEYS) {
+  const windows: Record<AgyFamily, CapacityWindow[]> = { '3p': [], gemini: [] };
+  for (const key of [...AGY_QUOTA_KEYS, ...scoped]) {
+    const m = AGY_SCOPED_QUOTA_KEY.exec(key);
+    const family = (m ? m[1] : key.slice(0, key.indexOf('-'))) as AgyFamily;
+    const scope = m ? m[2] : null;
     const b = quota[key];
     if (!isDict(b) || !exactKeys(b, AGY_BUCKET_KEYS)) return drift('bucket-keys');
     const f = b.remaining_fraction;
@@ -516,20 +538,24 @@ export function classifyAgyStatusLine(input: {
     const kind = fiveHour ? 'FIVE_HOUR' : 'SEVEN_DAY';
     const minutes = fiveHour ? FIVE_HOUR_MINUTES : SEVEN_DAY_MINUTES;
     const remaining = f * 100;
-    windows[key] = {
+    windows[family].push({
       // The family stays IN the window id as well as the limit id. Redundant on
       // purpose: a log line, a fixture or a drift report names the window without
       // anyone having to reconstruct which pool it came from.
       windowId: key,
       kind,
+      // A scoped bucket is a real limit of this family with a known duration, so it
+      // applies: when it runs out the pool is exhausted, even if the model in use draws
+      // from another scope. Conservative on purpose - the key does not say which models
+      // it covers, and reading that from the model's display name would be a guess.
       applicability: 'APPLICABLE',
-      label: windowLabel(kind, minutes),
+      label: scope ? `${windowLabel(kind, minutes)} (${scope})` : windowLabel(kind, minutes),
       windowMinutes: minutes,
       // From the SAME number, so the pair always sums to exactly 100.
       usedPercent: 100 - remaining,
       remainingPercent: remaining,
       resetsAt
-    };
+    });
   }
 
   const sid = [p.session_id, p.conversation_id].find((v): v is string => typeof v === 'string' && v.length > 0);
@@ -545,7 +571,7 @@ export function classifyAgyStatusLine(input: {
     // The payload has no authoritative observation time of its own.
     observedAt: input.receivedAt,
     receivedAt: input.receivedAt,
-    windows: [windows[`${family}-5h`], windows[`${family}-weekly`]],
+    windows: windows[family],
     // A zero remainder is NUMERICAL exhaustion only: the tracker derives it into
     // `numericallyExhaustedWindowIds` and RESERVE_ONLY. Antigravity states no refusal
     // and names no limiting window, so nothing here may claim it did (C2.4).

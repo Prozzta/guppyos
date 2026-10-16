@@ -51,6 +51,7 @@ const SHIMT = 'test/agy-statusline-shim.test.cjs';
 const TWOPOOL = 'test/agy-two-pool-ui.test.cjs';
 const LIFECYCLE = 'test/agy-native-lifecycle.test.cjs';
 const GUARD = 'test/hive-global-config-guard.test.cjs';
+const KEYS190 = 'test/agy-quota-keys-190.test.cjs';
 
 /**
  * The fifteen the design REQUIRES (D-1..D-15), then the ones the audits added (N-*).
@@ -74,17 +75,30 @@ const TABLE = [
   { id: 'D-3', file: NORM, tests: [SCHEMA],
     what: 'numerical zero becomes a PROVIDER-ATTRIBUTED limit (claims a refusal agy never made)',
     from: "    providerReachedType: null,\n    ordinaryUsageAllowed: null,\n    planType: null\n  });",
-    to: "    providerReachedType: (windows[`${family}-5h`].remainingPercent === 0 ? 'LIMIT' : null) as null,\n    ordinaryUsageAllowed: null,\n    planType: null\n  });",
+    to: "    providerReachedType: (windows[family][0].remainingPercent === 0 ? 'LIMIT' : null) as null,\n    ordinaryUsageAllowed: null,\n    planType: null\n  });",
     expect: /zero|RESERVE_ONLY|numerical/i },
   { id: 'D-4a', file: NORM, tests: [SCHEMA],
-    what: 'accept an unknown FIFTH quota key',
-    from: "  if (!exactKeys(quota, AGY_QUOTA_KEYS)) return drift('quota-keys');",
-    to: "  if (!AGY_QUOTA_KEYS.every((k) => k in quota)) return drift('quota-keys');",
+    what: 'accept an unknown FIFTH quota key (one outside the scoped grammar, AGY-QUOTA-KEYS-190)',
+    from: " || !scoped.every((k) => AGY_SCOPED_QUOTA_KEY.test(k))) {",
+    to: ") {",
     expect: /quota|ALL-OR-NOTHING|key/i },
   { id: 'D-4b', file: NORM, tests: [SCHEMA],
     what: 'accept a MISSING family (publish half a reading)',
-    from: "  if (!exactKeys(quota, AGY_QUOTA_KEYS)) return drift('quota-keys');", to: "",
+    from: "  if (!AGY_QUOTA_KEYS.every((k) => Object.prototype.hasOwnProperty.call(quota, k))) return drift('quota-keys');", to: "",
     expect: /quota|ALL-OR-NOTHING|key/i },
+  { id: 'D-4c', file: NORM, tests: [KEYS190],
+    what: 'no cap on scoped buckets (a pool could pass maxWindowsPerPool)',
+    from: "scoped.length > AGY_MAX_SCOPED_QUOTA_KEYS || ", to: "",
+    expect: /too many scoped|strict/i },
+  { id: 'D-4d', file: NORM, tests: [KEYS190],
+    what: 'a scoped bucket sorts before the base ones (it would take a base row in the strip)',
+    from: "  for (const key of [...AGY_QUOTA_KEYS, ...scoped]) {", to: "  for (const key of [...scoped, ...AGY_QUOTA_KEYS]) {",
+    expect: /scoped bucket joins|ordered/i },
+  { id: 'D-4e', file: NORM, tests: [KEYS190],
+    what: 'a scoped bucket goes to the wrong family (always Gemini)',
+    from: "    const family = (m ? m[1] : key.slice(0, key.indexOf('-'))) as AgyFamily;",
+    to: "    const family = (m ? 'gemini' : key.slice(0, key.indexOf('-'))) as AgyFamily;",
+    expect: /3P family joins|3P observation/i },
   { id: 'D-5', file: SCOPE, tests: [SCHEMA],
     what: 'derive the account scope from the EMAIL instead of the home path',
     from: 'export function agyAccountScope(', to: 'export function agyAccountScope_unused(',
