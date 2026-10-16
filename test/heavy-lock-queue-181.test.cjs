@@ -318,7 +318,7 @@ const MUTANTS = [
     edits: [["(ws[i].startsWith('-') || ws[i].startsWith('$(') || /^", "(ws[i].startsWith('-') || /^"]],
     killer: 'envSubstitution', dies: /ENV \$\(\.\.\.\) OPTIONS DO NOT HIDE THE SUITE/ },
   { name: 'script files are not read (as 1.1.80)', file: HJF, module: true,
-    edits: [['  if (!ctx.readScript || depth >= 2) return { heavy: false };', '  if (ctx || depth >= 0) return { heavy: false };']],
+    edits: [['  if (depth >= MAX_DEPTH) return capped(name);', '  if (ctx || depth >= 0) return { heavy: false };']],
     killer: 'scriptWrapper', dies: /A SUITE IN A SCRIPT FILE IS SEEN/ },
   { name: 'cd is not followed', file: HJF, module: true,
     edits: [["      here = { ...here, cd: /^([A-Za-z]:[\\\\/]|[\\\\/]|~)/.test(to) || !here.cd ? to : `${here.cd.replace(/[\\\\/]+$/, '')}/${to}` };\n", '']],

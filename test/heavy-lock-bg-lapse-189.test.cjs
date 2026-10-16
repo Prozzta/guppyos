@@ -107,8 +107,9 @@ test('CLASSIFIER: the floor\'s `S=/c/...; cd $S; node x.cjs` reads x.cjs (a lite
     assert.equal(classifyCommand(`export S=${S} && bash $S/s.sh`, 0, ctx).kind, 'suite', `${S}: read, and the suite`);
     assert.equal(classifyCommand(`R=${S}\nS=$R; cd $S && bash ./s.sh &`, 0, ctx).kind, 'suite', 'a variable set from another one');
   }
-  // Not a literal, or never set in this command: the path stays unreadable (fails closed).
-  for (const cmd of [`S=$(mktemp -d); node $S/ok.cjs`, `S=\`pwd\`; bash $S/s.sh`, 'node $TEMP/ok.cjs', `S=${d} node $S/ok.cjs`]) assert.equal(classifyCommand(cmd, 0, ctx).provisional, true, cmd);
+  // Not a literal, or never set in this command (nor a spawn-env path variable: HEAVY-LOCK-SHAPES-189
+  // reads $TEMP from the env): the path stays unreadable (fails closed).
+  for (const cmd of [`S=$(mktemp -d); node $S/ok.cjs`, `S=\`pwd\`; bash $S/s.sh`, 'node $NOT_SET_189/ok.cjs', `S=${d} node $S/ok.cjs`]) assert.equal(classifyCommand(cmd, 0, ctx).provisional, true, cmd);
 });
 
 test('CLASSIFIER: a script run inside $(...) or bash -c is read too (it was never read below depth 0)', (t) => {
@@ -117,7 +118,8 @@ test('CLASSIFIER: a script run inside $(...) or bash -c is read too (it was neve
   const ctx = HookServer.heavyScriptCtx(d);
   for (const cmd of ['X="$(bash s.sh)"', 'bash -c "bash s.sh"', 'out=$(sh ./s.sh 2>&1)']) assert.equal(classifyCommand(cmd, 0, ctx).kind, 'suite', cmd);
   for (const cmd of ['X="$(bash run.sh)"', 'bash -c "bash run.sh"']) assert.equal(classifyCommand(cmd, 0, ctx).provisional, true, cmd);
-  assert.equal(classifyCommand('bash -c "bash -c \'npm ci\'"', 0, ctx).heavy, false, 'a -c body is still read one level deep only (unchanged)');
+  // HEAVY-LOCK-SHAPES-189: a nested -c body is read too (it was read one level deep only).
+  assert.equal(classifyCommand('bash -c "bash -c \'npm ci\'"', 0, ctx).kind, 'install', 'a -c body inside a -c body is read');
 });
 
 async function server(t, limit) {

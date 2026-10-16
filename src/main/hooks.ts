@@ -1768,13 +1768,28 @@ export class HookServer {
   /** HEAVY-LOCK-SCRIPT-WRAPPER: the classifier may read a script the call runs (`bash suite.sh`),
    *  resolved against the hook's cwd, Git Bash `/c/...` paths included, size-capped by heavyJob. */
   static heavyScriptCtx(cwd: unknown): ClassifyCtx {
-    return scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
-      const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
-      try {
-        const st = statSync(path);
-        return st.isFile() ? { size: st.size, text: () => readFileSync(path, 'utf8') } : null;
-      } catch { return null; }
-    });
+    return {
+      ...scriptReaderFor(typeof cwd === 'string' ? cwd : null, (abs) => {
+        const path = abs.replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+        try {
+          const st = statSync(path);
+          return st.isFile() ? { size: st.size, text: () => readFileSync(path, 'utf8') } : null;
+        } catch { return null; }
+      }),
+      env: HookServer.heavyEnv(),
+    };
+  }
+
+  /** HEAVY-LOCK-SHAPES-189 (N-d): the path variables an agent's shell inherits from main (the spawn
+   *  env overrides none of them), so `$TEMP/x.sh` and `~/x.sh` read as the files they name. */
+  static heavyEnv(src: NodeJS.ProcessEnv = process.env): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const k of ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA']) {
+      const v = src[k];
+      if (typeof v === 'string' && v) env[k] = v;
+    }
+    if (!env.HOME && env.USERPROFILE) env.HOME = env.USERPROFILE;
+    return env;
   }
 
   /** JOB-ENV (SessionStart): the hook's own id (from the agent's settings file) and its process

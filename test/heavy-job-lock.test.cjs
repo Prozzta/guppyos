@@ -264,7 +264,9 @@ test('HOOK: a heavy PreToolUse beyond the limit is DENIED with the Claude-shaped
     assert.equal(r.hookSpecificOutput.permissionDecision, 'deny', transport);
     assert.match(r.hookSpecificOutput.permissionDecisionReason, /HEAVY-JOB-LOCK: .* held by a1 \(install: npm ci/);
   }
-  assert.equal(fire('a2', 'PreToolUse', 'node --test test/one.test.cjs', { transport: 'http' }).hookSpecificOutput?.permissionDecision, undefined, 'light: never gated');
+  // HEAVY-LOCK-SHAPES-189: a named test file must read (an unreadable one is unknown: provisional).
+  assert.equal(fire('a2', 'PreToolUse', 'node --test test/heavy-job-lock.test.cjs', { transport: 'http', cwd: path.join(__dirname, '..') }).hookSpecificOutput?.permissionDecision, undefined, 'light: never gated');
+  assert.equal(fire('a2', 'PreToolUse', 'node --test test/no-such-189.test.cjs', { transport: 'http', cwd: path.join(__dirname, '..') }).hookSpecificOutput?.permissionDecision, 'deny', 'an unreadable test file is unknown: held off while the slot is taken');
   fire('a1', 'PostToolUse', 'npm ci', { transport: 'http', tool_use_id: 'u1' });
   assert.equal(l.snapshot().length, 0, 'freed by the same call\'s PostToolUse');
   assert.equal(fire('a2', 'PreToolUse', 'npm run build', { transport: 'http' }).hookSpecificOutput?.permissionDecision, undefined);
