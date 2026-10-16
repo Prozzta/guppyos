@@ -11,6 +11,14 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.89] — unreleased
+
+### Fixed
+
+- **The startup graphics log row no longer reports software compositing before the GPU has reported.**
+  It is written once Chromium has heard from the GPU process (CPU only at once), and says unknown,
+  never software, when no report comes within 10 s. It also carries Chromium's raw status.
+
 ## [1.1.88] — 2026-10-16
 
 **A Graphics setting, a Requests badge that counts what is open, and a TES bridge that blinks,
