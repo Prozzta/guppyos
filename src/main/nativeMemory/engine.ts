@@ -4,9 +4,11 @@
  * and the write queue. Electron main never does any of that (Jim R1-R3).
  *
  * ONE serialized queue, by priority: search > wake-up/status > changed-source ingest > initial
- * backfill > compaction. Long work is cut into steps (a backfill embeds at most 8 chunks per
+ * backfill > compaction. Long work is cut into steps (a backfill embeds EMBED_BATCH chunks per
  * step and then yields), so a search that arrives mid-backfill waits for one step, not for
- * the backfill.
+ * the backfill. MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189: onIndexing tells main while any indexing
+ * runs (main then gives a search a longer budget), and a search whose deadline passed while it
+ * was queued is answered expired without running.
  */
 import { existsSync, readdirSync, readFileSync, statSync, watch as fsWatch, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
@@ -61,6 +63,10 @@ export interface EngineDeps {
   implementedLevel?: LedgerLevel;
   /** CLAIMS-HEAD-ANCHOR: the agents main holds an anchor for (A-2; discovery keeps them flagged). */
   anchored?: readonly string[];
+  /** MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189: told when indexing starts (the first claims sync,
+   *  backfill or changed-source ingest) and when the last one ends, so main can give a search
+   *  the indexing budget meanwhile. */
+  onIndexing?: (on: boolean, kind: string) => void;
 }
 
 /** CLAIM-LEDGER: one agent's verified claim chunks, sent by main after an append (A6). */
@@ -77,7 +83,17 @@ function anchoredList(v: unknown): string[] {
   return [...new Set(v.filter((a): a is string => typeof a === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(a)))].sort().slice(0, 1000);
 }
 
-interface Task { priority: number; seq: number; run: () => Promise<void> }
+interface Task { priority: number; seq: number; label: string; deadline?: number; run: () => Promise<void>; expire: () => void }
+
+/** The step names a request's timing reports (indexed by priority). */
+const PRIORITY_LABEL = ['search', 'wake-up/status', 'ingest', 'backfill', 'compact'];
+/** Where a request's time went inside the worker: queued, running, and the step that was
+ *  running when it was queued (main logs it on a degraded or late reply). */
+export interface QueueTiming { waitMs: number; runMs: number; inFlight: string | null }
+/** A request whose deadline passed while it was queued: answered, never run. */
+export class QueueExpired extends Error {
+  constructor(readonly timing: QueueTiming) { super('expired'); }
+}
 
 export interface SearchArgs { query: string; wing?: string | null; room?: string | null; results?: number; since?: string | null; before?: string | null;
   /** CLAIM-LEDGER read modes and claim filters (A5). */
@@ -89,7 +105,9 @@ export interface EngineReply { exit: number; text: string; json?: unknown }
 export class MemoryEngine {
   private queue: Task[] = [];
   private seq = 0;
-  private running = false;
+  private current: Task | null = null;
+  /** Claims syncs, backfills and changed-source ingests running now (onIndexing). */
+  private indexingN = 0;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (t: unknown) => void;
@@ -153,24 +171,42 @@ export class MemoryEngine {
 
   // — the queue —
 
-  private enqueue<T>(priority: number, fn: () => Promise<T>): Promise<T> {
+  private enqueue<T>(priority: number, fn: () => Promise<T>, o: { deadline?: number; timing?: (t: QueueTiming) => void } = {}): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ priority, seq: this.seq++, run: () => fn().then(resolve, reject) });
+      const at = this.now();
+      const inFlight = this.current?.label ?? null;
+      const timing = (start: number): QueueTiming => ({ waitMs: start - at, runMs: this.now() - start, inFlight });
+      this.queue.push({
+        priority, seq: this.seq++, label: PRIORITY_LABEL[priority] ?? String(priority), deadline: o.deadline,
+        run: () => { const start = this.now(); return fn().then((v) => { o.timing?.(timing(start)); resolve(v); }, reject); },
+        expire: () => reject(new QueueExpired(timing(this.now())))
+      });
       this.queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
       this.pump();
     });
   }
 
   private pump(): void {
-    if (this.running) return;
-    const t = this.queue.shift();
+    if (this.current) return;
+    let t = this.queue.shift();
+    // MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189 (C): a request whose caller already gave up (its
+    // deadline passed while it was queued) is answered expired, never run, so it costs the
+    // requests behind it nothing.
+    while (t && t.deadline !== undefined && this.now() > t.deadline) { t.expire(); t = this.queue.shift(); }
     if (!t) return;
-    this.running = true;
+    this.current = t;
     void t.run().finally(() => {
-      this.running = false;
+      this.current = null;
       // Yield to the event loop between steps: incoming messages (a search) are queued first.
       this.setTimer(() => this.pump(), 0);
     });
+  }
+
+  /** Run one indexing job, telling onIndexing when the first starts and the last ends (also
+   *  when it throws). */
+  private async indexing<T>(kind: string, fn: () => Promise<T>): Promise<T> {
+    if (this.indexingN++ === 0) this.d.onIndexing?.(true, kind);
+    try { return await fn(); } finally { if (--this.indexingN === 0) this.d.onIndexing?.(false, kind); }
   }
 
   /** Pending tasks by priority (diagnostics, tests). */
@@ -192,7 +228,9 @@ export class MemoryEngine {
 
   // — requests —
 
-  search(a: SearchArgs): Promise<EngineReply> {
+  /** `deadline` (epoch ms): past it, the queued search is answered QueueExpired and not run.
+   *  `timing` is told where the search's time went once it has run. */
+  search(a: SearchArgs, o: { deadline?: number; timing?: (t: QueueTiming) => void } = {}): Promise<EngineReply> {
     // (b) The wing searched, else the caller's own, is wanted: index it first.
     this.preferWing(a.wing ?? a.caller ?? null);
     return this.enqueue(PRIORITY.search, async () => {
@@ -202,7 +240,7 @@ export class MemoryEngine {
       const [qv] = await this.embed([a.query]);
       const hits = this.d.store.search({ query: a.query, queryVec: qv, wing: a.wing ?? null, room: a.room ?? null, sinceMs, beforeMs, k: a.results ?? 5, mode: a.mode ?? 'live', kind: a.kind ?? null, key: a.key ?? null });
       return { exit: 0, text: formatSearch(a.query, a, hits), json: hits.map(redactHit) };
-    });
+    }, o);
   }
 
   async wakeUp(wing: string | null): Promise<EngineReply> {
@@ -288,7 +326,7 @@ export class MemoryEngine {
     this.lastReconcileAt = this.now();
     this.d.store.setMeta('chunker_version', String(CHUNKER_VERSION));
     this.d.store.setMeta('allow_list_version', String(ALLOW_LIST_VERSION));
-    const run = (async () => {
+    const run = this.indexing('backfill', async () => {
       const discovery = this.discover();
       let embedded = 0;
       let removed = 0;
@@ -308,7 +346,7 @@ export class MemoryEngine {
       }
       this.d.log?.({ kind: 'native-memory-backfill', eligible: discovery.eligible.length, embedded, removed, failed: this.failed.size });
       return { discovery, embedded, removed };
-    })().finally(() => { this.backfilling = null; });
+    }).finally(() => { this.backfilling = null; });
     this.backfilling = run;
     return run;
   }
@@ -377,7 +415,7 @@ export class MemoryEngine {
    */
   syncClaims(a: ClaimsSyncArgs): Promise<{ embedded: number; dropped: number; statusChanges: number; roomChanges: number }> {
     const prior = this.claimSyncs.get(a.wing) ?? Promise.resolve();
-    const run = prior.catch(() => undefined).then(async () => {
+    const run = prior.catch(() => undefined).then(() => this.indexing('claims-sync', async () => {
       // Indexed only while the agent's claims are a source (reader/writer AND a ledger exists), so a
       // claim never sits in the index beside the markdown it replaces.
       // A sync carries main's CURRENT Settings level: follow it first (W3-1), then check.
@@ -403,7 +441,7 @@ export class MemoryEngine {
       });
       this.d.log?.({ kind: 'claims-indexed', wing: a.wing, embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 });
       return { embedded: plan.add.length, dropped: plan.drop.length, statusChanges: plan.status.length, roomChanges: plan.rooms?.length ?? 0 };
-    });
+    }));
     this.claimSyncs.set(a.wing, run.catch(() => undefined));
     return run;
   }
@@ -434,7 +472,7 @@ export class MemoryEngine {
       this.debounce.delete(absPath);
       const d = this.discover();
       const e = d.eligible.find((x) => x.abs === absPath);
-      if (e) { void this.ingestEntry(e, PRIORITY.ingest); return; }
+      if (e) { void this.indexing('ingest', () => this.ingestEntry(e, PRIORITY.ingest)); return; }
       // Not eligible (or gone): if it was indexed, remove it, unless its wing's claims are not
       // applied yet (MUST-1) and the file is still there.
       const rel = absPath.slice(this.d.hiveRoot.length + 1).split(/[\\/]/).join('/');

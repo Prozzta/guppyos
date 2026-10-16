@@ -18,6 +18,19 @@ export const EXIT = { ok: 0, usage: 2, unavailable: 3, degraded: 4, unauthorized
 
 export const SEARCH_DEADLINE_WARM_MS = 250;
 export const SEARCH_DEADLINE_COLD_MS = 2_000;
+/** MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189: a warm search while the worker reports indexing. It
+ *  waits for one index step besides its own work, on a machine the index is loading (Jim saw 1 of
+ *  84 searches cross 250 ms during a 1757-part claims sync). Under the cold budget and the CLI's
+ *  10 s. */
+export const SEARCH_DEADLINE_INDEXING_MS = 1_000;
+/** At most one log row per reason this often (a wedged worker must not flood log.jsonl); the next
+ *  row carries how many were suppressed. */
+export const DEGRADED_LOG_EVERY_MS = 1_000;
+/** Timed-out requests remembered for their late reply (bounded). */
+const LATE_MAX = 64;
+/** Requests that index: while one is outstanding the worker is indexing, before its own
+ *  `indexing` event can arrive (a search sent right after a claims sync). */
+const INDEX_OPS = new Set(['claims-sync', 'backfill', 'claim-ledger']);
 /** NATIVE-WAKEUP N1: a wake-up may first wait (engine WAKE_WAIT_MS = 5 s) for its caller's wing on
  *  a filling index; its deadline covers that wait + the cold budget + a margin. (Main must not
  *  import the engine, so the pairing is pinned by a test.) */
@@ -50,8 +63,12 @@ export class NativeMemoryClient {
   private worker: WorkerHandle | null = null;
   private ready = false;
   private warm = false;
+  /** The worker said it is indexing (its `indexing` event). */
+  private indexing = false;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (r: Reply) => void; timer: unknown }>();
+  private pending = new Map<number, { resolve: (r: Reply) => void; timer: unknown; op: string; budget: number; at: number }>();
+  private timedOut = new Map<number, { op: string; budget: number; at: number }>();
+  private logCaps = new Map<string, { at: number; suppressed: number }>();
   private restarts: number[] = [];
   private down = false;
   private readonly now: () => number;
@@ -83,6 +100,7 @@ export class NativeMemoryClient {
     this.worker = w;
     this.ready = false;
     this.warm = false;
+    this.indexing = false;
     w.on('message', (msg) => this.onMessage(msg));
     w.on('exit', (code) => this.onExit(w, code));
     w.postMessage({ op: 'init', config: cfg });
@@ -96,23 +114,60 @@ export class NativeMemoryClient {
       // Jim N2: the model was dropped after idle, so the next search pays a model load again:
       // it gets the COLD budget, not the warm one.
       else if (m.event === 'model-unloaded') this.warm = false;
+      // State, not a log row: a search meanwhile gets SEARCH_DEADLINE_INDEXING_MS.
+      else if (m.event === 'indexing') this.indexing = (m as { on?: unknown }).on === true;
       else this.d.log?.({ ...(m as unknown as Record<string, unknown>) });
       return;
     }
     if (!m || typeof m.id !== 'number') return;
+    const timing = (m as { timing?: Record<string, unknown> }).timing;
     const p = this.pending.get(m.id);
-    if (!p) return;
+    if (!p) {
+      // The reply came after its deadline: the caller already got exit 4. Say where the time went.
+      const t = this.timedOut.get(m.id);
+      if (!t) return;
+      this.timedOut.delete(m.id);
+      this.logCapped('late', { kind: 'native-memory-late-reply', op: t.op, budgetMs: t.budget, lateByMs: this.now() - t.at - t.budget, ok: !!m.ok, ...(timing ?? {}) });
+      return;
+    }
     this.pending.delete(m.id);
     this.clearTimer(p.timer);
     if (m.ok) this.warm = true;
-    p.resolve({ ok: !!m.ok, exit: typeof m.exit === 'number' ? m.exit : m.ok ? EXIT.ok : EXIT.degraded, text: m.text, json: m.json, error: m.error });
+    const exit = typeof m.exit === 'number' ? m.exit : m.ok ? EXIT.ok : EXIT.degraded;
+    if (!m.ok && exit === EXIT.degraded) this.degraded(m.error === 'expired' ? 'expired' : 'error', p, { error: String(m.error ?? '').slice(0, 200), ...(timing ?? {}) });
+    p.resolve({ ok: !!m.ok, exit, text: m.text, json: m.json, error: m.error });
+  }
+
+  /** MEMORY-SEARCH-TIMEOUT-DURING-INDEX-189 (A): every degraded reply writes one row (capped). */
+  private degraded(reason: string, p: { op: string; budget?: number; at?: number }, extra: Record<string, unknown> = {}): void {
+    this.logCapped(`degraded:${reason}`, {
+      kind: 'native-memory-degraded', op: p.op, reason, ...(p.budget !== undefined ? { budgetMs: p.budget } : {}),
+      warm: this.warm, indexing: this.indexingNow(), ...(p.at !== undefined ? { elapsedMs: this.now() - p.at } : {}), ...extra
+    });
+  }
+
+  /** The worker said so, or main has an indexing request outstanding. */
+  private indexingNow(): boolean {
+    if (this.indexing) return true;
+    for (const p of this.pending.values()) if (INDEX_OPS.has(p.op)) return true;
+    return false;
+  }
+
+  private logCapped(key: string, row: Record<string, unknown>): void {
+    const t = this.now();
+    const c = this.logCaps.get(key);
+    if (c && t - c.at < DEGRADED_LOG_EVERY_MS) { c.suppressed++; return; }
+    this.logCaps.set(key, { at: t, suppressed: 0 });
+    this.d.log?.({ ...row, ...(c?.suppressed ? { suppressed: c.suppressed } : {}) });
   }
 
   private onExit(w: WorkerHandle, code: number): void {
     if (this.worker !== w) return;
     this.worker = null;
     this.ready = false;
-    for (const [id, p] of this.pending) { this.clearTimer(p.timer); p.resolve({ ok: false, exit: EXIT.degraded, error: 'memory worker exited' }); this.pending.delete(id); }
+    this.indexing = false;
+    for (const [id, p] of this.pending) { this.clearTimer(p.timer); this.degraded('worker-exit', p); p.resolve({ ok: false, exit: EXIT.degraded, error: 'memory worker exited' }); this.pending.delete(id); }
+    this.timedOut.clear();
     const t = this.now();
     this.restarts = this.restarts.filter((x) => t - x < RESTART_WINDOW_MS);
     this.restarts.push(t);
@@ -124,16 +179,26 @@ export class NativeMemoryClient {
    *  gets a named degraded reply (exit 4) and the worker drops the stale request itself. */
   request(op: string, args: Record<string, unknown>, deadlineMs?: number): Promise<Reply> {
     const w = this.ensureWorker();
-    if (!w) return Promise.resolve({ ok: false, exit: EXIT.unavailable, error: this.down ? 'memory worker is down (crashed repeatedly)' : 'native memory is not configured' });
-    const budget = deadlineMs ?? (this.warm ? SEARCH_DEADLINE_WARM_MS : SEARCH_DEADLINE_COLD_MS);
+    if (!w) {
+      const error = this.down ? 'memory worker is down (crashed repeatedly)' : 'native memory is not configured';
+      this.degraded('unavailable', { op }, { error });
+      return Promise.resolve({ ok: false, exit: EXIT.unavailable, error });
+    }
+    const budget = deadlineMs ?? (!this.warm ? SEARCH_DEADLINE_COLD_MS : this.indexingNow() ? SEARCH_DEADLINE_INDEXING_MS : SEARCH_DEADLINE_WARM_MS);
     const id = this.nextId++;
+    const at = this.now();
     return new Promise<Reply>((resolve) => {
       const timer = this.setTimer(() => {
-        if (!this.pending.delete(id)) return;
+        const p = this.pending.get(id);
+        if (!p) return;
+        this.pending.delete(id);
+        this.degraded('deadline', p);
+        this.timedOut.set(id, { op, budget, at });
+        if (this.timedOut.size > LATE_MAX) this.timedOut.delete(this.timedOut.keys().next().value as number);
         resolve({ ok: false, exit: EXIT.degraded, error: `memory ${op} timed out after ${budget} ms` });
       }, budget);
-      this.pending.set(id, { resolve, timer });
-      w.postMessage({ id, op, args, deadline: this.now() + budget });
+      this.pending.set(id, { resolve, timer, op, budget, at });
+      w.postMessage({ id, op, args, deadline: at + budget });
     });
   }
 
