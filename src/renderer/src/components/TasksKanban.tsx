@@ -117,30 +117,52 @@ export function parseTasks(raw: unknown): HiveTask[] {
  * is the ledger's writer: new work enters via the dispatch box (mailed to the
  * god), never by the human inserting cards the orchestrator never heard about.
  */
+/** The guard's status-age sidecar entry for one card (state/task-meta.json `cards[id]`). */
+export type TaskMetaEntry = { statusSince?: number; statusSinceExact?: boolean; lastEditAt?: number };
+
+/**
+ * The kanban's data: tasks.json (typed by parseTasks, plus the RAW payload for views that read
+ * fields the kanban does not type), the board monitor's flags and the status-age sidecar, polled
+ * every 5 s. CARDS-TAB-190: shared by the kanban and the CARDS review tab, so there is one
+ * reader of the ledger in the renderer, not a second store.
+ */
+export function useHiveTasks() {
+  const [tasks, setTasks] = useState<HiveTask[]>([]);
+  const [raw, setRaw] = useState<unknown>(null);
+  // ZT-I3: the board monitor's flags and the guard's status ages, shown on the cards.
+  const [flags, setFlags] = useState<CardFlag[]>([]);
+  const [meta, setMeta] = useState<Record<string, TaskMetaEntry>>({});
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refresh = useCallback(async () => {
+    try { const r = await window.cth.hiveTasks(); setTasks(parseTasks(r)); setRaw(r); } catch { /* keep last good */ }
+    try {
+      const [f, m] = await Promise.all([window.cth.hiveBoardFlags(), window.cth.hiveTaskMeta()]);
+      setFlags(Array.isArray(f) ? (f as CardFlag[]) : []);
+      setMeta(m && typeof m === 'object' ? (m as Record<string, TaskMetaEntry>) : {});
+    } catch { /* keep last good */ }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+    timer.current = setInterval(refresh, POLL_MS);
+    return () => { if (timer.current) clearInterval(timer.current); };
+  }, [refresh]);
+
+  return { tasks, setTasks, raw, flags, meta, refresh };
+}
+
 export function TasksKanban() {
   const orch = useOrchestratorName();
   const agents = useStore((s) => s.agents);
-  const [tasks, setTasks] = useState<HiveTask[]>([]);
   // Detail view: cards show just the title — clicking one opens the full
   // breakdown as an APP-WIDE overlay over the office floor (see
   // TaskDetailOverlay) — the content grows (contracts, deps, human Q&A), so it
   // gets the big stage instead of the narrow side panel.
   const openTaskDetail = useStore((s) => s.openTaskDetail);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
-  // ZT-I3: the board monitor's flags and the guard's status ages, shown on the cards.
-  const [flags, setFlags] = useState<CardFlag[]>([]);
-  const [meta, setMeta] = useState<Record<string, { statusSince?: number; statusSinceExact?: boolean }>>({});
+  const { tasks, setTasks, flags, meta, refresh } = useHiveTasks();
   // ZT-I4: the Floor panel (the harness's floor digest) in place of the columns.
   const [showFloor, setShowFloor] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try { setTasks(parseTasks(await window.cth.hiveTasks())); } catch { /* keep last good */ }
-    try {
-      const [f, m] = await Promise.all([window.cth.hiveBoardFlags(), window.cth.hiveTaskMeta()]);
-      setFlags(Array.isArray(f) ? (f as CardFlag[]) : []);
-      setMeta(m && typeof m === 'object' ? (m as Record<string, { statusSince?: number; statusSinceExact?: boolean }>) : {});
-    } catch { /* keep last good */ }
-  }, []);
 
   // Dismiss a card off the board (human-initiated). The kanban is otherwise the
   // god's to write, but a person can clear a card they no longer want tracked.
@@ -152,13 +174,7 @@ export function TasksKanban() {
       const result = await window.cth.hiveDeleteTask(id);
       if (!result.ok) void refresh();
     } catch { /* keep last good; the next poll re-syncs from disk */ }
-  }, [refresh]);
-
-  useEffect(() => {
-    refresh();
-    timer.current = setInterval(refresh, POLL_MS);
-    return () => { if (timer.current) clearInterval(timer.current); };
-  }, [refresh]);
+  }, [refresh, setTasks]);
 
   const restorableAgents = useStore((s) => s.restorableAgents);
   /** Resolve an assignee id to a display name — falls back to the restorable
