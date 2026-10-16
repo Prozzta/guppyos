@@ -42,6 +42,8 @@ export interface ReviewCard {
   parked?: boolean;
   waitingFor?: string;
   fixVersion?: string;
+  /** The card ids this one depends on (`dependsOn`, or a hand-written `deps`), as written. */
+  deps: string[];
   createdAt: string;
   doneAt?: string;
   meta?: CardMeta;
@@ -52,8 +54,10 @@ export interface ReviewCard {
 const STAMP = /^\s*\[(\d{4}-\d{2}-\d{2}T[^\]\s]*)\]\s?(.*)$/;
 
 /** `[iso] text` lines -> entries. A line without a stamp continues the entry above it (or opens
- *  an undated one at the top). Empty entries are dropped. */
+ *  an undated one at the top). Empty entries are dropped. Some cards store notes as an ARRAY of
+ *  strings (16 on the real ledger): each string is parsed on its own, so each is its own line. */
 export function parseTimeline(text: unknown, source: TimelineEntry['source']): TimelineEntry[] {
+  if (Array.isArray(text)) return text.flatMap((t) => parseTimeline(t, source));
   if (typeof text !== 'string' || !text.trim()) return [];
   const out: TimelineEntry[] = [];
   let cur: TimelineEntry | null = null;
@@ -102,6 +106,8 @@ export function reviewCardOf(task: HiveTask, raw: Record<string, unknown> | unde
     return [d ? { ...n, dismissedAt: d } : n];
   });
   const p = r.priority ?? r.prio;
+  const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((d): d is string => typeof d === 'string' && !!d.trim()) : []);
+  const deps = [...new Set([...strs(task.dependsOn), ...strs(r.dependsOn), ...strs(r.deps)])];
   const stamps = [
     ms(task.createdAt), ms(r.doneAt), ms(r.updatedAt), ms(r.startedAt),
     meta?.statusSince ?? null, meta?.lastEditAt ?? null,
@@ -121,6 +127,7 @@ export function reviewCardOf(task: HiveTask, raw: Record<string, unknown> | unde
     ...(r.parked === true ? { parked: true } : {}),
     ...(str(r.waitingFor) ? { waitingFor: str(r.waitingFor) } : {}),
     ...(str(r.fixVersion) ? { fixVersion: str(r.fixVersion) } : {}),
+    deps,
     createdAt: task.createdAt,
     ...(str(r.doneAt) ? { doneAt: str(r.doneAt) } : {}),
     ...(meta ? { meta } : {}),

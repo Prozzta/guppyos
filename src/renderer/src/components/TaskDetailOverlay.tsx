@@ -14,6 +14,8 @@ const POLL_MS = 5000;
 export function TaskDetailOverlay() {
   const taskDetailId = useStore((s) => s.taskDetailId);
   const closeTaskDetail = useStore((s) => s.closeTaskDetail);
+  // CARDS-TAB-190: opened from CARDS (read-only), the detail gets no move or assign.
+  const readOnly = useStore((s) => s.taskDetailReadOnly);
   const agents = useStore((s) => s.agents);
   const restorable = useStore((s) => s.restorableAgents);
   const [tasks, setTasks] = useState<HiveTask[]>([]);
@@ -72,8 +74,7 @@ export function TaskDetailOverlay() {
       task={task}
       all={tasks}
       assigneeName={nameFor(task.assignee)}
-      onMove={(s) => void move(s)}
-      onAssign={assign}
+      {...(readOnly ? {} : { onMove: (s: HiveTask['status']) => void move(s), onAssign: assign })}
       onClose={closeTaskDetail}
     />
   );

@@ -51,11 +51,13 @@ const LEDGER = {
         {
           q: 'Fresh installs: which theme first?\n\nThe Office is the **default today**; TES is the newer pack.',
           options: [{ label: 'Office', detail: 'what every install has shown so far', recommended: true }, { label: 'TES', detail: 'the newer pack' }],
-          askedAt: iso(1900), a: 'Office', answeredAt: iso(1800)
+          askedAt: iso(1900), a: 'Office', chosen: [0], answeredAt: iso(1800)
         },
         { q: 'Should the theme picker show on first run?', options: [{ label: 'Yes' }, { label: 'No' }], askedAt: iso(240) }
       ],
-      notes: `\n[${iso(1950)}] Dwight: two asks for the Human (theme, picker).\n[${iso(1800)}] Human answered the theme ask: Office.`
+      // notes as an ARRAY of strings (16 real cards store them so): one timeline line each
+      notes: [`[${iso(1950)}] Dwight: two asks for the Human (theme, picker).`, `[${iso(1800)}] Human answered the theme ask: Office.`],
+      dependsOn: ['RELEASE-1.1.89']
     },
     { id: 'DOCS-SWEEP-9', title: 'Docs sweep: stale screenshots in the README', status: 'todo', assignee: 'oscar-1', createdAt: iso(4000) }
   ]

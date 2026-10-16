@@ -267,7 +267,9 @@ interface State {
   /** The task whose detail overlay is open (rendered app-wide over the office
    *  floor — the card content grows: contracts, deps, the human Q&A trail). */
   taskDetailId: string | null;
-  openTaskDetail: (id: string) => void;
+  /** CARDS-TAB-190: the open detail has no move or assign controls (opened from CARDS). */
+  taskDetailReadOnly: boolean;
+  openTaskDetail: (id: string, opts?: { readOnly?: boolean }) => void;
   closeTaskDetail: () => void;
   /** One-shot prefill for the Command Center's dispatch box (a task detail's
    *  "assign" from anywhere in the app). seq-keyed like ccTabRequest. */
@@ -876,8 +878,9 @@ export const useStore = create<State>((set, get) => ({
       return { agents };
     }),
   taskDetailId: null,
-  openTaskDetail: (id) => set({ taskDetailId: id }),
-  closeTaskDetail: () => set({ taskDetailId: null }),
+  taskDetailReadOnly: false,
+  openTaskDetail: (id, opts) => set({ taskDetailId: id, taskDetailReadOnly: opts?.readOnly === true }),
+  closeTaskDetail: () => set({ taskDetailId: null, taskDetailReadOnly: false }),
   dispatchSeedRequest: null,
   requestDispatchSeed: (text) =>
     set((s) => ({ dispatchSeedRequest: { text, seq: (s.dispatchSeedRequest?.seq ?? 0) + 1 } })),

@@ -26,7 +26,8 @@ const { CardsView, ReviewCardView } = loadTs('src/renderer/src/components/CardsV
 // The typed tasks as parseTasks hands them over (TasksKanban pulls in the store, so not loaded here):
 // the first record of an id, with the core fields the model reads.
 const parseTasks = (raw) => firstOccurrenceById(raw.tasks, (t) => t.id).map((t) => ({
-  id: t.id, title: t.title, status: t.status, assignee: t.assignee, createdAt: t.createdAt, description: t.description
+  id: t.id, title: t.title, status: t.status, assignee: t.assignee, createdAt: t.createdAt, description: t.description,
+  dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d) => typeof d === 'string') : []
 }));
 
 const NOW = new Date('2026-10-16T20:00:00Z');
@@ -190,11 +191,119 @@ test('wiring: CARDS next to ask me; Requests hidden, not deleted; the tab is rea
   assert.match(cc, /useMailObligations\(\)/);
   const tab = codeOnly(readSource('src/renderer/src/components/CardsTab.tsx'), 'CardsTab.tsx')
     + codeOnly(readSource('src/renderer/src/components/CardsView.tsx'), 'CardsView.tsx');
-  assert.match(tab, /const \{ tasks, raw, meta \} = useHiveTasks\(\);/, 'the kanban data hook, no new store');
-  assert.match(tab, /reviewCards\(tasks, rawById\(raw\), meta\)/);
+  assert.match(tab, /const \{ raw, meta \} = useHiveTasks\(\);/, 'the kanban data hook, no new store');
+  assert.match(tab, /useMemo\(\(\) => reviewCards\(parseTasks\(raw\), rawById\(raw\), meta\), \[raw, meta\]\)/, 'the model is memoised on the raw ledger');
   assert.doesNotMatch(tab, /hive(Write|Delete|Update|Answer|Send)|window\.cth\.|create\(/, 'no write path');
   assert.doesNotMatch(tab, /onAnswer=/, 'the humanQA card is read-only');
   const kb = codeOnly(readSource('src/renderer/src/components/TasksKanban.tsx'), 'TasksKanban.tsx');
   assert.match(kb, /export function useHiveTasks\(\)/);
   assert.match(kb, /const \{ tasks, setTasks, flags, meta, refresh \} = useHiveTasks\(\);/);
+});
+
+// ---- Jim's audit of 953f6fec (CHANGES 2/2/2) ----
+
+const { HumanQuestionCard } = loadTs('src/renderer/src/components/HumanQuestionCard.tsx');
+const OPEN_ASK = { q: 'Which theme?', options: [{ label: 'Yes' }, { label: 'No' }], askedAt: '2026-10-16T18:00:00Z' };
+
+test('MUST 1: an open ask in CARDS is read-only: no radio, no button, an OPEN tag that links to ASK ME', () => {
+  const card = M.reviewCardOf(
+    { id: 'ASK-1', title: 'asks', status: 'blocked', createdAt: '2026-10-16T17:00:00Z', dependsOn: [] },
+    { humanQA: [OPEN_ASK, { ...OPEN_ASK, q: 'Gone ask', dismissedAt: '2026-10-16T18:30:00Z' }, { ...OPEN_ASK, q: 'Done ask', a: 'No', chosen: [1], answeredAt: '2026-10-16T19:00:00Z' }] },
+    undefined
+  );
+  const html = view(card, { onOpenAskMe: () => {} });
+  assert.doesNotMatch(html, /role="(radio|checkbox|radiogroup)"/, 'no radio anywhere on the card');
+  assert.doesNotMatch(html, /<button[^>]*data-option/, 'options are not buttons');
+  assert.match(html, /<li[^>]*data-option="0"[\s\S]*Yes/, 'options render as a plain list');
+  assert.equal((html.match(/OPEN · <u>ANSWER ON ASK ME<\/u>/g) || []).length, 1, 'the open ask (only) carries the ASK ME link');
+  assert.match(html, /<button[^>]*class="cth-hq-open"/, 'the tag is a link (a button calling onOpenAskMe)');
+  assert.ok(html.includes('NOT ANSWERED'), 'a dismissed ask is not on ASK ME: no link, it reads NOT ANSWERED');
+  assert.match(html, /data-option="1" data-chosen="true"[\s\S]*✓ No/, 'an answered ask marks the chosen option');
+  // ASK ME's own card (no readOnly) is unchanged: open options stay choice buttons.
+  const askme = renderToStaticMarkup(React.createElement(HumanQuestionCard, { entry: OPEN_ASK, now: NOW, onAnswer: () => {} }));
+  assert.match(askme, /role="radio"/);
+  assert.doesNotMatch(askme, /ANSWER ON ASK ME/);
+  // and the click goes to the ASK ME tab, nowhere else
+  const ct = codeOnly(readSource('src/renderer/src/components/CardsTab.tsx'), 'CardsTab.tsx');
+  assert.match(ct, /onOpenAskMe = useCallback\(\(\) => requestCommandCenterTab\('human'\)/);
+  const cv = codeOnly(readSource('src/renderer/src/components/CardsView.tsx'), 'CardsView.tsx');
+  assert.match(cv, /<HumanQuestionCard [^>]*readOnly /);
+});
+
+// A realistic card: 6 dated notes, a linked result, a humanQA entry with options (Jim measured
+// ~2.6 ms per real card through renderToStaticMarkup).
+const bigLedger = (n) => ({
+  tasks: Array.from({ length: n }, (_, i) => ({
+    id: `PERF-${i}`, title: `Perf card ${i} with a **title**`, status: i % 5 === 0 ? 'doing' : 'done', assignee: `agent-${i % 7}`,
+    priority: i % 4, createdAt: new Date(Date.UTC(2026, 8, 1) + i * 60e3).toISOString(), dependsOn: i ? [`PERF-${i - 1}`] : [],
+    notes: Array.from({ length: 6 }, (_, k) => `[${new Date(Date.UTC(2026, 9, 15, 12) + i * 60e3 + k * 1e3).toISOString()}] note ${k}: did **a thing** with \`code\` and https://example.com/${i}/${k}`).join('\n'),
+    result: `[2026-10-15T10:00:00Z] released https://example.com/rel/${i}\n- a\n- b`,
+    humanQA: [{ q: `Pick one for ${i}?`, options: [{ label: 'A', detail: 'the *first*' }, { label: 'B' }], askedAt: '2026-10-14T10:00:00Z', a: 'A', chosen: [0], answeredAt: '2026-10-14T11:00:00Z' }]
+  }))
+});
+
+test('MUST 2: 900 cards with done on: the model builds once, the list renders the first 50 with SHOW MORE, in time', () => {
+  const raw = bigLedger(900);
+  const t0 = performance.now();
+  const many = M.reviewCards(parseTasks(raw), M.rawById(raw), {});
+  const t1 = performance.now();
+  const html = renderToStaticMarkup(React.createElement(CardsView, { cards: many, nameFor, now: NOW, initialFilter: { ...M.DEFAULT_FILTER, showDone: true } }));
+  const t2 = performance.now();
+  assert.equal(many.length, 900);
+  assert.equal((html.match(/class="cth-card-review"/g) || []).length, 50, 'only the first page is rendered');
+  assert.ok(html.includes('900 of 900 cards'));
+  assert.ok(html.includes('SHOW 50 MORE · 850 NOT SHOWN'));
+  assert.ok(html.includes('data-card="PERF-899"'), 'the newest first');
+  // 953f6fec rendered every card: ~1.95 s for 738. A page of 50 is ~0.15 s; the bound leaves
+  // room for a loaded suite run and still fails a list that renders them all.
+  console.log(`# 900 cards: model ${(t1 - t0).toFixed(0)} ms, render ${(t2 - t1).toFixed(0)} ms, html ${(html.length / 1024).toFixed(0)} KB`);
+  assert.ok(t2 - t1 < 1000, `render took ${(t2 - t1).toFixed(0)} ms`);
+  assert.ok(t1 - t0 < 500, `model took ${(t1 - t0).toFixed(0)} ms`);
+});
+
+test('MUST 2: memoised cards, a memoised model, unchanged polls keep identity, a debounced search', () => {
+  assert.equal(ReviewCardView.$$typeof, Symbol.for('react.memo'), 'React.memo on the card');
+  const { PAGE_SIZE, SEARCH_DEBOUNCE_MS } = loadTs('src/renderer/src/components/CardsView.tsx');
+  assert.equal(PAGE_SIZE, 50);
+  assert.equal(SEARCH_DEBOUNCE_MS, 150);
+  const cv = codeOnly(readSource('src/renderer/src/components/CardsView.tsx'), 'CardsView.tsx');
+  assert.match(cv, /value=\{typed\}[^>]*onChange=\{\(e\) => setTyped\(e\.target\.value\)\}/, 'keystrokes go to the box, not the filter');
+  assert.match(cv, /setTimeout\(\(\) => setF\(\(cur\) => \(\{ \.\.\.cur, text: typed \}\)\), SEARCH_DEBOUNCE_MS\)/);
+  assert.match(cv, /useMemo\(\(\) => filterCards\(cards, f, nameFor\), \[cards, f, nameFor\]\)/);
+  assert.match(cv, /shown\.slice\(0, limit\)\.map/);
+  const kb = codeOnly(readSource('src/renderer/src/components/TasksKanban.tsx'), 'TasksKanban.tsx');
+  assert.match(kb, /if \(j !== seen\.current\.raw\) \{ seen\.current\.raw = j; setRaw\(r\); \}/, 'an unchanged poll keeps raw');
+  assert.match(kb, /if \(j !== seen\.current\.meta\) \{ seen\.current\.meta = j; setMeta\(nextMeta\); \}/, 'an unchanged poll keeps meta');
+  const ct = codeOnly(readSource('src/renderer/src/components/CardsTab.tsx'), 'CardsTab.tsx');
+  assert.match(ct, /useStore\(\(s\) => nameKey\(s\.agents\)\)/, 'names by value: a status tick does not rebuild nameFor');
+});
+
+test('SHOULD 1: from CARDS the detail opens read-only: no move, no assign', () => {
+  const ct = codeOnly(readSource('src/renderer/src/components/CardsTab.tsx'), 'CardsTab.tsx');
+  assert.match(ct, /openTaskDetail\(id, \{ readOnly: true \}\)/);
+  const st = codeOnly(readSource('src/renderer/src/store/store.ts'), 'store.ts');
+  assert.match(st, /openTaskDetail: \(id, opts\) => set\(\{ taskDetailId: id, taskDetailReadOnly: opts\?\.readOnly === true \}\)/);
+  assert.match(st, /closeTaskDetail: \(\) => set\(\{ taskDetailId: null, taskDetailReadOnly: false \}\)/);
+  const ov = codeOnly(readSource('src/renderer/src/components/TaskDetailOverlay.tsx'), 'TaskDetailOverlay.tsx');
+  assert.match(ov, /\{\.\.\.\(readOnly \? \{\} : \{ onMove: /, 'read-only passes neither handler');
+  const kb = codeOnly(readSource('src/renderer/src/components/TasksKanban.tsx'), 'TasksKanban.tsx');
+  assert.match(kb, /\{onMove && \(\s*<select/, 'no status select without onMove');
+  assert.match(kb, /\{onAssign && \(\s*<PixelButton variant="secondary" size="sm" onClick=\{onAssign\}>/, 'no assign without onAssign');
+});
+
+test('SHOULD 2 + NIT 1: notes stored as an array are a timeline line each; deps are shown', () => {
+  assert.deepEqual(M.parseTimeline(['[2026-10-01T00:00:00Z] one', 'two\nlines', 7, '', null, '[2026-10-02T00:00:00Z] three'], 'note').map((e) => [e.at, e.text]), [
+    ['2026-10-01T00:00:00Z', 'one'], [null, 'two\nlines'], ['2026-10-02T00:00:00Z', 'three']
+  ], 'each string on its own (an undated string does not join the entry above it)');
+  const card = M.reviewCardOf(
+    { id: 'ARR-1', title: 'array notes', status: 'doing', createdAt: '2026-10-01T00:00:00Z', dependsOn: ['A-1'] },
+    { notes: ['[2026-10-03T00:00:00Z] newest', 'undated text'], deps: ['B-2', 'A-1'] },
+    undefined
+  );
+  assert.deepEqual(card.timeline.map((e) => e.text), ['newest', 'undated text']);
+  assert.deepEqual(card.deps, ['A-1', 'B-2'], 'dependsOn and a hand-written deps, once each');
+  const html = view(card);
+  assert.ok(html.includes('TIMELINE · 2'));
+  assert.match(html, /DEPENDS ON <span[^>]*>A-1, B-2<\/span>/);
+  assert.doesNotMatch(view(byId('DONE-1')), /DEPENDS ON/, 'no deps row on a card without deps');
 });

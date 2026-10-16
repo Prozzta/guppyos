@@ -13,7 +13,7 @@
  * This file is presentational and store-free (renderer tests render it); CardsTab.tsx feeds it
  * the kanban's own data (useHiveTasks): no new store, no second ledger reader.
  */
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { memo, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
 import { HumanQuestionCard, SafeMarkdown } from './HumanQuestionCard';
 import { formatStamp } from './humanQuestion';
 import { statusAgeText } from '@shared/agentBadges';
@@ -88,12 +88,16 @@ function Timeline({ entries, now, onOpenLink }: { entries: TimelineEntry[]; now:
   );
 }
 
-export function ReviewCardView({ card, assigneeName, now, onOpen, onOpenLink }: {
+/** Memoised (Jim MUST 2): a poll that changed nothing, a keystroke or "show more" re-renders no
+ *  card whose props are the same objects; the model is memoised upstream so they are. */
+export const ReviewCardView = memo(function ReviewCardView({ card, assigneeName, now, onOpen, onOpenLink, onOpenAskMe }: {
   card: ReviewCard;
   assigneeName?: string;
   now: Date;
   onOpen?: (id: string) => void;
   onOpenLink?: (href: string) => void;
+  /** Opens ASK ME, where an open ask is answered (it is never answered here). */
+  onOpenAskMe?: () => void;
 }) {
   const age = statusAgeText(card.meta, now.getTime());
   return (
@@ -129,6 +133,11 @@ export function ReviewCardView({ card, assigneeName, now, onOpen, onOpenLink }: 
           {age && <span style={small} title="time in this status">{card.status} {age}</span>}
           {card.doneAt && <span style={small}>done {formatStamp(card.doneAt, now) ?? card.doneAt}</span>}
         </div>
+        {card.deps.length > 0 && (
+          <div className="cth-card-deps" style={{ ...small, overflowWrap: 'anywhere' }}>
+            DEPENDS ON <span style={{ fontFamily: 'var(--cth-font-mono)', color: 'var(--cth-ink-700)' }}>{card.deps.join(', ')}</span>
+          </div>
+        )}
 
         {card.result && (
           <div className="cth-card-result" style={{
@@ -154,8 +163,8 @@ export function ReviewCardView({ card, assigneeName, now, onOpen, onOpenLink }: 
             <SectionLabel>ASKED THE HUMAN · {card.humanQA.length}</SectionLabel>
             {card.humanQA.map((e, i) => (
               <div key={i} style={{ paddingLeft: 8, boxShadow: 'inset 2px 0 0 var(--cth-lilac, #b9a3d6)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {/* read-only: no onAnswer, so the shared card renders no controls */}
-                <HumanQuestionCard entry={e} now={now} onOpenLink={onOpenLink} />
+                {/* readOnly: no radio, no controls; an open ask says to answer it on ASK ME */}
+                <HumanQuestionCard entry={e} now={now} onOpenLink={onOpenLink} readOnly onOpenAskMe={e.dismissedAt ? undefined : onOpenAskMe} />
                 {e.dismissedAt && !e.a && <span style={small}>dismissed {formatStamp(e.dismissedAt, now) ?? e.dismissedAt}</span>}
               </div>
             ))}
@@ -164,27 +173,56 @@ export function ReviewCardView({ card, assigneeName, now, onOpen, onOpenLink }: 
       </div>
     </div>
   );
-}
+});
+
+/** Cards rendered before "show N more" (Jim MUST 2: 738 cards with done on took ~2 s). */
+export const PAGE_SIZE = 50;
+/** The search box filters this long after the last keystroke. */
+export const SEARCH_DEBOUNCE_MS = 150;
+const noName = (): string | undefined => undefined;
 
 /** The list with its filters. Presentational: the cards come in, nothing goes out but a click. */
-export function CardsView({ cards, nameFor = () => undefined, now = new Date(), initialFilter = DEFAULT_FILTER, onOpen, onOpenLink }: {
+export function CardsView({ cards, nameFor = noName, now: nowProp, initialFilter = DEFAULT_FILTER, onOpen, onOpenLink, onOpenAskMe }: {
   cards: ReviewCard[];
   nameFor?: (id?: string) => string | undefined;
+  /** Fixed clock for tests; live, it ticks once a minute (one stable Date between ticks, so the
+   *  memoised cards are not all re-rendered by a fresh Date on every render). */
   now?: Date;
   initialFilter?: CardFilter;
   onOpen?: (id: string) => void;
   onOpenLink?: (href: string) => void;
+  onOpenAskMe?: () => void;
 }) {
   const [f, setF] = useState<CardFilter>(initialFilter);
-  const shown = filterCards(cards, f, nameFor);
-  const assignees = [...new Set(cards.map((c) => c.assignee ?? ''))].sort((a, b) => (nameFor(a) ?? a).localeCompare(nameFor(b) ?? b));
-  const doneCount = cards.filter((c) => c.status === 'done').length;
+  // The box shows every keystroke at once; the filter takes the text SEARCH_DEBOUNCE_MS later.
+  const [typed, setTyped] = useState(initialFilter.text);
+  useEffect(() => {
+    if (typed === f.text) return;
+    const t = setTimeout(() => setF((cur) => ({ ...cur, text: typed })), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [typed, f.text]);
+  const [tick, setTick] = useState(() => new Date());
+  useEffect(() => {
+    if (nowProp) return;
+    const t = setInterval(() => setTick(new Date()), 60_000);
+    return () => clearInterval(t);
+  }, [nowProp]);
+  const now = nowProp ?? tick;
+  const [limit, setLimit] = useState(PAGE_SIZE);
+  useEffect(() => { setLimit(PAGE_SIZE); }, [f]); // a new filter starts at the first page again
+  const shown = useMemo(() => filterCards(cards, f, nameFor), [cards, f, nameFor]);
+  const assignees = useMemo(
+    () => [...new Set(cards.map((c) => c.assignee ?? ''))].sort((a, b) => (nameFor(a) ?? a).localeCompare(nameFor(b) ?? b)),
+    [cards, nameFor]
+  );
+  const doneCount = useMemo(() => cards.filter((c) => c.status === 'done').length, [cards]);
+  const rest = shown.length - limit;
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: 'var(--cth-paper-200)', padding: 10, display: 'flex', flexDirection: 'column', gap: 10, fontFamily: 'var(--cth-font-mono)' }}>
       <div className="cth-cards-filters" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
-          type="search" value={f.text} placeholder="search cards…" aria-label="search cards"
-          onChange={(e) => setF({ ...f, text: e.target.value })}
+          type="search" value={typed} placeholder="search cards…" aria-label="search cards"
+          onChange={(e) => setTyped(e.target.value)}
           style={{ ...control, flex: '1 1 160px' }}
         />
         <select aria-label="status" value={f.status} onChange={(e) => setF({ ...f, status: e.target.value as CardFilter['status'] })} style={control}>
@@ -209,9 +247,14 @@ export function CardsView({ cards, nameFor = () => undefined, now = new Date(), 
           No card matches.{!f.showDone && f.status === 'all' && doneCount > 0 ? ' Done cards are hidden: tick "done" to include them.' : ''}
         </div>
       )}
-      {shown.map((c) => (
-        <ReviewCardView key={c.id} card={c} assigneeName={nameFor(c.assignee)} now={now} onOpen={onOpen} onOpenLink={onOpenLink} />
+      {shown.slice(0, limit).map((c) => (
+        <ReviewCardView key={c.id} card={c} assigneeName={nameFor(c.assignee)} now={now} onOpen={onOpen} onOpenLink={onOpenLink} onOpenAskMe={onOpenAskMe} />
       ))}
+      {rest > 0 && (
+        <button type="button" className="cth-cards-more" style={{ ...linkBtn, alignSelf: 'center', fontSize: 11, padding: '6px 0' }} onClick={() => setLimit(limit + PAGE_SIZE)}>
+          SHOW {Math.min(rest, PAGE_SIZE)} MORE · {rest} NOT SHOWN
+        </button>
+      )}
     </div>
   );
 }

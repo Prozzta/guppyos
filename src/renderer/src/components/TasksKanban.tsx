@@ -133,13 +133,24 @@ export function useHiveTasks() {
   const [flags, setFlags] = useState<CardFlag[]>([]);
   const [meta, setMeta] = useState<Record<string, TaskMetaEntry>>({});
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // CARDS-TAB-190 (Jim MUST 2): raw and meta keep their identity across a poll that brought the
+  // same content, so the CARDS model (memoised on them) is not rebuilt every 5 s. tasks is still
+  // set every poll: a failed optimistic dismiss relies on refresh() to put the card back.
+  const seen = useRef<{ raw?: string; meta?: string }>({});
 
   const refresh = useCallback(async () => {
-    try { const r = await window.cth.hiveTasks(); setTasks(parseTasks(r)); setRaw(r); } catch { /* keep last good */ }
+    try {
+      const r = await window.cth.hiveTasks();
+      setTasks(parseTasks(r));
+      const j = JSON.stringify(r);
+      if (j !== seen.current.raw) { seen.current.raw = j; setRaw(r); }
+    } catch { /* keep last good */ }
     try {
       const [f, m] = await Promise.all([window.cth.hiveBoardFlags(), window.cth.hiveTaskMeta()]);
       setFlags(Array.isArray(f) ? (f as CardFlag[]) : []);
-      setMeta(m && typeof m === 'object' ? (m as Record<string, TaskMetaEntry>) : {});
+      const nextMeta = m && typeof m === 'object' ? (m as Record<string, TaskMetaEntry>) : {};
+      const j = JSON.stringify(nextMeta);
+      if (j !== seen.current.meta) { seen.current.meta = j; setMeta(nextMeta); }
     } catch { /* keep last good */ }
   }, []);
 
@@ -351,8 +362,9 @@ export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose 
   task: HiveTask;
   all: HiveTask[];
   assigneeName?: string;
-  onMove: (s: Status) => void;
-  onAssign: () => void;
+  /** Omitted (with onAssign) for a read-only detail (opened from CARDS): no controls but close. */
+  onMove?: (s: Status) => void;
+  onAssign?: () => void;
   onClose: () => void;
 }) {
   const col = COLUMNS.find((c) => c.key === task.status) ?? COLUMNS[0];
@@ -465,6 +477,7 @@ export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose 
 
             {/* Controls */}
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {onMove && (
               <select
                 value={task.status}
                 onChange={(e) => onMove(e.target.value as Status)}
@@ -476,11 +489,15 @@ export function TaskDetail({ task, all, assigneeName, onMove, onAssign, onClose 
               >
                 {COLUMNS.map((c) => (<option key={c.key} value={c.key}>{c.label.toLowerCase()}</option>))}
               </select>
+              )}
+              {onAssign && (
               <PixelButton variant="secondary" size="sm" onClick={onAssign}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                   <Icon name="arrow-right" /> assign
                 </span>
               </PixelButton>
+              )}
+              {!onMove && !onAssign && <span style={{ flex: 1, fontSize: 11, color: 'var(--cth-ink-500)' }}>read-only</span>}
               <PixelButton variant="ghost" size="sm" onClick={onClose}>close</PixelButton>
             </div>
           </div>
