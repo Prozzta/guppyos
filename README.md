@@ -242,8 +242,8 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   importing PDFs never freeze the window, and "Refresh models" updates every model picker.
 - **Files that are never silently wiped** (1.1.74) — a damaged task board,
   agent list or settings file is kept and named in a banner instead of being overwritten.
-- **The app handles the mail** (1.1.75) — agents get each message's text in their context and
-  never read or move inbox files; the app files handled mail itself and lists open requests.
+- **The app handles the mail** (1.1.75) — Claude, Codex and Antigravity agents get each
+  message's text in their context; the app files handled mail itself and lists open requests.
 - **A floor that keeps going under load** (1.1.76) — the floor keeps moving on a busy machine,
   and Codex agents get safety checks.
 - **A floor overview** (1.1.77) — god gets a written board summary, and every agent row shows
@@ -252,10 +252,11 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   nobody sees them, agent cards say "working" when the agent is, and the board stops raising
   false alarms at start-up.
 - **Choices that stick** (1.1.79) — a model picked for an agent stays picked, Codex's own
-  questions are left to a person, and a hook reply that never reached an agent is no longer
-  counted as delivered.
+  questions are left to a person, and on most hook paths a reply that never reached an agent is
+  no longer counted as delivered.
 - **Agents that can be reached** (1.1.80) — a resumed Codex agent gets its messages again,
-  god's start-up message is really sent, and the Claude model list comes from Claude Code itself.
+  god's start-up message waits for Claude Code to be ready, and the Claude model list comes from
+  Claude Code itself.
 - **Cheaper steps** (1.1.81) — agents re-read much less on every step, are woken less often and
   keep their bookkeeping to one command (`ledger`); an agent waiting for a test slot is told
   when it is theirs.
@@ -270,7 +271,7 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **Speck** (1.1.86) — the app icon is Speck, and on a TES floor the app names TES's
   orchestrator.
 - **A TES crew that behaves** (1.1.87) — crew stay at their desks while they work, no longer
-  walk over the console or through chairs, show thought clouds and go for coffee, and the walls
+  walk over the console or through other chairs, show thought clouds and go for coffee, and the walls
   stay crisp after a resize.
 - **A Graphics setting and a bridge that talks** (1.1.88, the current release) — Settings
   chooses Auto, GPU or CPU only; the Requests badge counts only open asks; the TES crew speak
@@ -302,7 +303,7 @@ in order to get things done.
 - **Every agent is an avatar.** Sessions appear as crew on a Pixi.js floor (the TES
   bridge, or the office theme) — they walk to their stations as they work, and envelopes
   fly station-to-station when they message each other.
-- **The hive coordinates them.** Agents read their memory and get their mail in context; the
+- **The hive coordinates them.** Agents read their memory and get their mail from the app; the
   router moves messages between inboxes; the GOD agent adjudicates, assigns, and escalates only
   when it needs you.
 - **Memory that persists.** A markdown-first memory layer with semantic recall and
@@ -459,7 +460,9 @@ Two data planes feed one renderer:
   block, at the start of its next turn or, while it works, at its next tool call; the app files
   handled mail into `inbox/.done` itself. Providers that still read their own files (gemini,
   grok, opencode, pi, cursor) get the 1.1.55 `<inbox-update>` notice instead (each announced
-  once, at most five listed, sender text escaped). A message may carry `supersedes`, and the
+  once, at most five listed, sender text escaped). An agent whose mail stops reaching it through
+  its hooks (3 wakes) is switched to that notice too, with an alert; with no hook traffic at all,
+  it moves its own files. A message may carry `supersedes`, and the
   router marks the older one `superseded_by`.
 - **The heavy-job lock** (since 1.1.55). A `PreToolUse` classifier recognises installs,
   builds, packaging, full suites and benches (through `bash -c`, `cmd /c` and PowerShell
