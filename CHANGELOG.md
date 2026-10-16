@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format is based on
   reason, and a reply that comes too late writes a `native-memory-late-reply` row saying where the
   time went.
 
+- **The first memory search after a quiet spell no longer times out loading the model.** A search
+  gets the short warm budget only once the embedding model is really loaded: after a search, or
+  when the memory engine says it loaded the model. A status, wake-up or backfill reply no longer
+  counts, and an idle unload or a restarted memory worker makes the next search cold again.
+
 ## [1.1.88] — 2026-10-16
 
 **A Graphics setting, a Requests badge that counts what is open, and a TES bridge that blinks,

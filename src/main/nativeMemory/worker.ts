@@ -12,6 +12,8 @@
  * running: the caller already gave up on it. Any request that finishes past its deadline is
  * answered `expired` too. A search reply carries `timing` { waitMs, runMs, inFlight }.
  *   worker -> main  { event: 'indexing', on, kind }: indexing started (on) / the last one ended.
+ *   worker -> main  { event: 'model-loaded' } / { event: 'model-unloaded' }: the embedding model was
+ *                   loaded (first embed after start or an idle unload) / dropped after idle.
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { constants as osConstants, setPriority } from 'node:os';
@@ -86,6 +88,7 @@ export async function runWorker(cfg: WorkerConfig, port: Port, deps: { Database:
     hiveRoot: cfg.hiveRoot, store, embedder, countTokens: (t) => tokenizer.count(t), claimLedger: cfg.claimLedger, anchored: cfg.anchored,
     log: (row) => port.postMessage({ event: 'log', ...row }),
     onModelUnload: () => port.postMessage({ event: 'model-unloaded' }),
+    onModelLoaded: () => port.postMessage({ event: 'model-loaded' }),
     onIndexing: (on, kind) => port.postMessage({ event: 'indexing', on, kind }),
     ...(typeof cfg.idleUnloadMs === 'number' && cfg.idleUnloadMs > 0 ? { idleUnloadMs: cfg.idleUnloadMs } : {})
   });

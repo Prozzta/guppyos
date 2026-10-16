@@ -114,6 +114,8 @@ export class NativeMemoryClient {
       // Jim N2: the model was dropped after idle, so the next search pays a model load again:
       // it gets the COLD budget, not the warm one.
       else if (m.event === 'model-unloaded') this.warm = false;
+      // WARM-MEANS-MODEL-LOADED-189: whatever op loaded the model (a backfill, an embed), searches are warm now.
+      else if (m.event === 'model-loaded') this.warm = true;
       // State, not a log row: a search meanwhile gets SEARCH_DEADLINE_INDEXING_MS.
       else if (m.event === 'indexing') this.indexing = (m as { on?: unknown }).on === true;
       else this.d.log?.({ ...(m as unknown as Record<string, unknown>) });
@@ -132,7 +134,10 @@ export class NativeMemoryClient {
     }
     this.pending.delete(m.id);
     this.clearTimer(p.timer);
-    if (m.ok) this.warm = true;
+    // WARM-MEANS-MODEL-LOADED-189 (Jim S3): only a search proves the model is loaded (it embeds its
+    // query); a status, wake-up or backfill with nothing to embed does not, and its ok reply used to
+    // mark the client warm, so the next search paid the model load on the warm budget (exit 4).
+    if (m.ok && p.op === 'search') this.warm = true;
     const exit = typeof m.exit === 'number' ? m.exit : m.ok ? EXIT.ok : EXIT.degraded;
     if (!m.ok && exit === EXIT.degraded) this.degraded(m.error === 'expired' ? 'expired' : 'error', p, { error: String(m.error ?? '').slice(0, 200), ...(timing ?? {}) });
     p.resolve({ ok: !!m.ok, exit, text: m.text, json: m.json, error: m.error });
@@ -167,6 +172,8 @@ export class NativeMemoryClient {
     this.ready = false;
     this.indexing = false;
     for (const [id, p] of this.pending) { this.clearTimer(p.timer); this.degraded('worker-exit', p); p.resolve({ ok: false, exit: EXIT.degraded, error: 'memory worker exited' }); this.pending.delete(id); }
+    // The model died with the worker (after the rows above, which say the budget each request had).
+    this.warm = false;
     this.timedOut.clear();
     const t = this.now();
     this.restarts = this.restarts.filter((x) => t - x < RESTART_WINDOW_MS);

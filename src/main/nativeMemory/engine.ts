@@ -52,6 +52,9 @@ export interface EngineDeps {
   log?: (row: Record<string, unknown>) => void;
   /** Told when the idle timer drops the model (Jim N2: main then treats the next search as cold). */
   onModelUnload?: () => void;
+  /** WARM-MEANS-MODEL-LOADED-189: told once per model load, at the first embed after start or after an
+   *  idle unload (main then gives searches the warm budget, whatever op loaded it). */
+  onModelLoaded?: () => void;
   /** Idle time before the model is dropped (default MODEL_IDLE_UNLOAD_MS; the speed bench
    *  shortens it to measure model-cold). */
   idleUnloadMs?: number;
@@ -114,6 +117,8 @@ export class MemoryEngine {
   private debounce = new Map<string, unknown>();
   private watchers: Array<{ close(): void }> = [];
   private unloadTimer: unknown = null;
+  /** onModelLoaded has been told about the model loaded now. */
+  private modelAnnounced = false;
   private lastReconcileAt = 0;
   /** The backfill in progress (one at a time; a second caller waits for the same one). */
   private backfilling: Promise<{ discovery: Discovery; embedded: number; removed: number }> | null = null;
@@ -222,8 +227,9 @@ export class MemoryEngine {
     const v = await this.d.embedder.embed(texts);
     this.stats.embedded += texts.length;
     this.stats.embedMs += this.now() - t0;
+    if (!this.modelAnnounced) { this.modelAnnounced = true; this.d.onModelLoaded?.(); }
     if (this.unloadTimer) this.clearTimer(this.unloadTimer);
-    this.unloadTimer = this.setTimer(() => { this.unloadTimer = null; void this.d.embedder.unload(); this.d.onModelUnload?.(); }, this.d.idleUnloadMs ?? MODEL_IDLE_UNLOAD_MS);
+    this.unloadTimer = this.setTimer(() => { this.unloadTimer = null; this.modelAnnounced = false; void this.d.embedder.unload(); this.d.onModelUnload?.(); }, this.d.idleUnloadMs ?? MODEL_IDLE_UNLOAD_MS);
     return v;
   }
 
@@ -566,6 +572,7 @@ export class MemoryEngine {
     for (const w of this.watchers) { try { w.close(); } catch { /* gone */ } }
     this.watchers = [];
     if (this.unloadTimer) this.clearTimer(this.unloadTimer);
+    this.modelAnnounced = false;
     await this.d.embedder.unload();
   }
 }
