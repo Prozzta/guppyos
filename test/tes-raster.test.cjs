@@ -296,7 +296,8 @@ test('StationFloor draws the floor straight in the world: the floor texture hold
   assert.match(src, /gl\.enable\(gl\.SCISSOR_TEST\);\s*try \{\s*for \(const p of todo\) \{\s*gl\.scissor\(p\.x, H - p\.y - p\.h, p\.w, p\.h\);\s*realRender\(\{ container: app\.stage, clear: true \}\);\s*\}\s*\} finally \{ gl\.disable\(gl\.SCISSOR_TEST\); \}/);
   // The semantic-fit camera has one cached static source; nothing is composed per frame.
   assert.doesNotMatch(src, /sceneRT|sceneSprite|sceneM\b|aboveRoot|sortLayer\.alpha/);
-  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'one render call: the floor texture build');
+  // TES-HULL M2: and the front statics' linear textures, built with it (tes-camera-integer-scale pins where).
+  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 2, 'two render calls: the floor texture build and the front statics\' textures');
   assert.match(src, /const bounds = sceneBounds\(plan\);\s*const cached = bounds !== null && staticsCacheable\(plan\);\s*const order = staticOrder\(plan\.sorted\);\s*const frame0 = floorFrame\(pack\.manifest\.id, SM\.PW, SM\.PH\);\s*const pickFront = cached \? \(frame0\.fit \? exactPicker : frontPicker\)\(plan\.sorted, order, plan\.below\.width, plan\.below\.height\) : null;/);
   assert.match(src, /const floorRoot = new Container\(\);\s*const floorWorld = floorRoot\.addChild\(new Container\(\)\);/);
   // Placement and opacity as d267443e: a static's sprite sits at the plan's (x, y) at its opacity.
@@ -334,7 +335,7 @@ test('StationFloor picks after each tick: the floor rebuilt on a new k, the stat
 
 test('StationFloor frees the floor texture, its tree and every texture it made on unmount, before the app is destroyed', () => {
   const src = codeOnly(readSource('src/renderer/src/scene/themes/StationFloor.tsx'));
-  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => floorRT\?\.destroy\(true\),\s*\(\) => floorRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
+  assert.match(src, /\(app as any\)\.__free = \[\s*\(\) => floorRT\?\.destroy\(true\),\s*\(\) => \{ for \(const t of frontTex\) t\?\.destroy\(false\); for \(const t of frontRTs\) t\?\.destroy\(true\); \},\s*\(\) => floorRoot\.destroy\(\{ children: true \}\),\s*\(\) => \{ for \(const t of owned\) t\.destroy\(true\); \},\s*\];/);
   assert.doesNotMatch(src, /dropCells|postrender/);
   // The behavioral bubble test owns bridge disposal; this pin keeps it before cache/app teardown.
   assert.match(src, /\(a as any\)\.__unsub\?\.\(\); \} catch \{\s*\}\s*try \{ \(a as any\)\.__disposeHiveBubbles\?\.\(\); \} catch \{\s*\}\s*teardownFloor\(a, \(a as any\)\.__free \?\? \[\]\);\s*\}/);

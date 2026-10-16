@@ -237,6 +237,59 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       world.addChild(bubbles.container);
       (app as any).__bubbleLayer = bubbles;
       app.stage.addChild(world);
+      // TES-HULL M2: in a semantic fit, a static drawn again over a person is the floor texture's own
+      // sampling of it, so it looks the same whether or not someone walks behind it (a nearest sprite
+      // at the fractional scale was sharp over its own soft copy):
+      // - its texels: drawn at the same integer k into a linear texture, with one transparent texel of
+      //   margin, so its edge blends as in the floor;
+      // - its texel grid: roundPixels moves every quad corner to a whole device px, the floor's too, so
+      //   a quad of its own would sit up to half a device px off the floor's grid. Its quad is instead
+      //   placed on whole device px, and its frame is read off the floor's rounded quad: each device px
+      //   then samples the same point as the floor (outside the texture, clamped to the clear margin).
+      let frontRTs: Array<RenderTexture | null> = [];
+      let frontTex: Array<Texture | null> = [];
+      let frontAt = '';
+      const placeFront = (root: boolean) => {
+        const b = bounds!, k = floorK, r = app.renderer.resolution, n = world.scale.x * r;
+        const ox = world.x * r, oy = world.y * r;
+        frontAt = `${ox},${oy},${n},${k},${root}`;
+        // As the vertex shader rounds: x to the nearest px; y in the target's own direction (the
+        // canvas is flipped), which differs only at an exact half.
+        const rx = (x: number) => Math.floor(x + 0.5);
+        const ry = (y: number) => (root ? Math.ceil(y - 0.5) : Math.floor(y + 0.5));
+        const L = rx(ox + b.x * n), R = rx(ox + (b.x + b.w) * n), T = ry(oy + b.y * n), B = ry(oy + (b.y + b.h) * n);
+        const ux = (R - L) / (b.w * k), uy = (B - T) / (b.h * k); // device px per floor texel
+        for (const t of frontTex) t?.destroy(false);
+        frontTex = statics.map((s, i) => {
+          const rt = frontRTs[i];
+          if (!s || !rt) return null;
+          const it = plan.sorted[i], tx = (it.x - b.x) * k - 1, ty = (it.y - b.y) * k - 1;
+          const X0 = Math.floor(L + tx * ux), X1 = Math.ceil(L + (tx + rt.width) * ux);
+          const Y0 = Math.floor(T + ty * uy), Y1 = Math.ceil(T + (ty + rt.height) * uy);
+          const fx = (X0 - L) / ux - tx, fy = (Y0 - T) / uy - ty;
+          const t = new Texture({ source: rt.source, frame: new Rectangle(fx, fy, (X1 - X0) / ux, (Y1 - Y0) / uy) });
+          s.texture = t;
+          s.scale.set(ux / n, uy / n);
+          s.position.set((X0 - ox) / n, (Y0 - oy) / n);
+          return t;
+        });
+      };
+      const buildFrontStatics = (k: number) => {
+        for (const t of frontTex) t?.destroy(false);
+        frontTex = [];
+        for (const t of frontRTs) t?.destroy(true);
+        frontRTs = statics.map((s, i) => {
+          if (!s) return null;
+          const tex = staticTex[i]!;
+          const rt = RenderTexture.create({ width: tex.width * k + 2, height: tex.height * k + 2, resolution: 1, scaleMode: 'linear' });
+          const root = new Container(), one = root.addChild(new Sprite(tex));
+          one.scale.set(k); one.position.set(1, 1);
+          app.renderer.render({ container: root, target: rt, clear: true });
+          root.destroy({ children: true });
+          return rt;
+        });
+        frontAt = '';
+      };
       const buildFloor = (k: number) => {
         const b = bounds!;
         floorView.texture = Texture.EMPTY;
@@ -249,6 +302,7 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         floorView.position.set(b.x, b.y);
         floorView.scale.set(1 / k);
         floorK = k;
+        if (frame0.fit) buildFrontStatics(k);
         (app as any).__tesStaticCacheBuilds = ((app as any).__tesStaticCacheBuilds ?? 0) + 1;
       };
       // Per tick, after onTick: the floor texture's scale, and which statics are drawn again.
@@ -256,6 +310,10 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
         if (!cached) return;
         const k = sceneScale(world.scale.x * app.renderer.resolution, bounds!);
         if (k !== floorK) buildFloor(k);
+        if (frame0.fit) {
+          const r = app.renderer.resolution;
+          if (frontAt !== `${world.x * r},${world.y * r},${world.scale.x * r},${floorK},true`) placeFront(true);
+        }
         const near: Box[] = [];
         for (const s of sprites.values()) near.push({ x: s.sprite.x, y: s.sprite.y, w: fw, h: fh });
         for (const c of cups.values()) near.push({ x: c.sprite.x, y: c.sprite.y, w: MUG_W, h: MUG_H });
@@ -308,10 +366,15 @@ export function StationFloor({ pack }: { pack: LoadedPack }) {
       };
       (app.renderer as any).render = (o: any) => ((o === app.stage || (o?.container === app.stage && !o.target)) ? paint() : realRender(o));
       // For the rendered tests (tes-floor-whole-188): the floor and what it is made of.
-      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, world, frame: frame0, mapW: SM.PW, mapH: SM.PH };
+      if (cached) (app as any).__tesScene = { damage, get lastPaint() { return lastPaint; }, bounds, get k() { return floorK; }, get floor() { return floorRT; }, below: below.texture, floorRoot, floorView, sortLayer, statics, world, frame: frame0, mapW: SM.PW, mapH: SM.PH,
+        get people() { return [...sprites.values(), ...cups.values(), ...mugs.values()].map((e) => e.sprite); },
+        // TES-HULL M2: the statics' own textures and places; placeFront(root) places the front statics
+        // for the canvas (true, as compose does) or for a render texture (false).
+        staticTex, sortedAt: plan.sorted.map((it) => ({ x: it.x, y: it.y })), placeFront };
       // Freed on unmount before the app is destroyed, each step on its own (teardown.ts).
       (app as any).__free = [
         () => floorRT?.destroy(true),
+        () => { for (const t of frontTex) t?.destroy(false); for (const t of frontRTs) t?.destroy(true); },
         () => floorRoot.destroy({ children: true }),
         () => { for (const t of owned) t.destroy(true); }, // read at unmount: textures made later are in it
       ];

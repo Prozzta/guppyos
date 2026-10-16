@@ -82,5 +82,8 @@ test('StationFloor uses a single linear semantic-fit cache downscale and no per-
   const src = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/scene/themes/StationFloor.tsx'), 'utf8');
   assert.match(src, /RenderTexture\.create\(\{ width: b\.w \* k, height: b\.h \* k, resolution: 1, scaleMode: frame0\.fit \? 'linear' : 'nearest' \}\)/);
   assert.match(src, /const pickFront = cached \? \(frame0\.fit \? exactPicker : frontPicker\)/);
-  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 1, 'only the cache build renders');
+  // TES-HULL M2: the front statics' linear textures are built with the floor texture, only when k changes.
+  assert.equal((src.match(/app\.renderer\.render\(/g) || []).length, 2, 'only the cache builds render: the floor texture and the front statics\' textures');
+  assert.match(src, /floorK = k;\s*if \(frame0\.fit\) buildFrontStatics\(k\);/);
+  assert.equal((src.match(/buildFrontStatics\(/g) || []).length, 1, 'the front statics\' textures are built only by buildFloor');
 });
