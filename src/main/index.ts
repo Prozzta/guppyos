@@ -13,6 +13,8 @@ import { worldView as buildClaimsWorldView } from './claims/world';
 import { buildClaimsWorldSnapshot } from './claims/worldSnapshot';
 import { createClaimViews, DEFAULT_WORKING_SET_BUDGET } from './claims/views';
 import { createClaimExport, type ClaimExport } from './claims/exportWiring';
+import { createLedgerUi } from './claims/ledgerUi';
+import { scrubExport } from './claims/exportLedger';
 import { importAtStart } from './claims/startupImport';
 import { makeW6Append } from './claims/w6Append';
 import { memoryMdReplaced, READER_WATCH_SYNC_MS, ReaderWatchers } from './claims/readerWatch';
@@ -1516,6 +1518,52 @@ const nativeMemory = new NativeMemoryWiring({
   onWorkerReady: () => { claimsAnchorCheck(); void claimsIndexSync()?.syncAll(); },
   searchLog: claimsSearchLog
 });
+// CLAIM-LEDGER W7: the Human's ledger UI. Reached ONLY from the renderer's Settings IPC below (never
+// an HTTP route, the hook server or an agent token). Revert, purge, export and a level drop from
+// writer each need main's own native confirm as well as the Human's click (G7.2).
+const ledgerUi = createLedgerUi({
+  store: () => claimsEndpoint()?.store ?? null,
+  agents: () => (claimsEndpoint() ? claimLedgerAgents() : []),
+  level: (agentId) => claimLevel(agentId),
+  savedLevel: () => readConfig().claimLedger,
+  saveLevel: (level) => { writeConfig({ claimLedger: level }); },
+  levelChanged: () => nativeMemory.claimLedgerChanged(),
+  registry: () => { const root = hive.root(); try { return root ? loadRegistry(root) : DEFAULT_KEY_REGISTRY; } catch { return DEFAULT_KEY_REGISTRY; } },
+  derive: deriveClaims,
+  verifiedPrefix,
+  exportComplete: (agentId) => claimExport().complete(agentId),
+  scrubExport: (agentId, ids) => {
+    const root = hive.root(); const ep = claimsEndpoint();
+    if (!root || !ep) return 0;
+    const prefix = verifiedPrefix(ep.store.readLedger(agentId));
+    if (!prefix) return 0;
+    let reg; try { reg = loadRegistry(root); } catch { reg = DEFAULT_KEY_REGISTRY; }
+    const state = deriveClaims(prefix.records, reg, { r4: false });
+    const render = createClaimViews(prefix.records, (t) => Math.ceil(t.length / 4)).renderExportLine;
+    const byId = new Map(prefix.records.map((r) => [r.id, r]));
+    return scrubExport(join(root, 'agents', agentId), new Set(ids), (id) => { const r = byId.get(id); return r ? render(r, state) : `- [purged] [c:${id}]`; });
+  },
+  confirm: async (q) => {
+    if (DEV_HIDDEN) return false;   // a hidden (harness) run never confirms a ledger write
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    const opts = { type: (q.danger ? 'warning' : 'question') as 'warning' | 'question', buttons: [q.ok, 'Cancel'], defaultId: 1, cancelId: 1, title: q.title, message: q.message, detail: q.detail, noLink: true };
+    const r = win && !win.isDestroyed() ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+    return r.response === 0;
+  },
+  log: (row) => hive.appendLog(row),
+});
+/** W7: only a top frame of one of the app's own windows may call the ledger UI. */
+function ledgerUiSender(evt: Electron.IpcMainInvokeEvent): boolean {
+  return !!BrowserWindow.fromWebContents(evt.sender) && evt.senderFrame === evt.sender.mainFrame;
+}
+const NOT_HERE = { ok: false as const, error: 'refused: not from the app window' };
+ipcMain.handle('claims-ui:summary', (evt) => (ledgerUiSender(evt) ? ledgerUi.summary() : NOT_HERE));
+ipcMain.handle('claims-ui:view', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.view(String(agentId)) : NOT_HERE));
+ipcMain.handle('claims-ui:preference', (evt, agentId: unknown, text: unknown, key: unknown) => (ledgerUiSender(evt) ? ledgerUi.addPreference(String(agentId), text, key) : NOT_HERE));
+ipcMain.handle('claims-ui:revert', (evt, agentId: unknown, eventId: unknown) => (ledgerUiSender(evt) ? ledgerUi.revert(String(agentId), eventId) : NOT_HERE));
+ipcMain.handle('claims-ui:purge', (evt, agentId: unknown, ids: unknown, typed: unknown) => (ledgerUiSender(evt) ? ledgerUi.purge(String(agentId), ids, typed) : NOT_HERE));
+ipcMain.handle('claims-ui:set-level', (evt, level: unknown) => (ledgerUiSender(evt) ? ledgerUi.setLevel(level) : NOT_HERE));
+ipcMain.handle('claims-ui:export', (evt, agentId: unknown) => (ledgerUiSender(evt) ? ledgerUi.exportNow(String(agentId)) : NOT_HERE));
 function claimsLedgerView(agentId: string) {
   const root = hive.root(); const ep = claimsEndpoint();
   if (!root || !ep) return null;
@@ -4983,6 +5031,8 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // config per tick so it gates immediately; this is for the PROMPT, which is
   // built per spawn, so flipping the toggle reaches god the next time he starts.
   if (typeof patch?.orchestratorMaySpawn === 'boolean') hive.setOrchestratorMaySpawn(patch.orchestratorMaySpawn);
+  // CLAIM-LEDGER W7: a running memory worker follows a changed ledger level at once (W3-1).
+  if (patch && 'claimLedger' in patch) void nativeMemory.claimLedgerChanged()?.catch((e) => hive.appendLog({ kind: 'claims-ui-level-push-failed', error: String(e).slice(0, 160) }));
   if (!hiveWasEnabled && hive.enabled()) {
     console.log('[hive] harnessHome configured — bootstrapping hive services');
     try { bootstrapHiveServices(); } catch (e) { console.error('[hive] bootstrap after onboarding:', e); }

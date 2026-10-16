@@ -13,6 +13,7 @@ import {
 } from '@shared/triggers';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
+import { ClaimLedgerSettings } from './ClaimLedgerSettings';
 import { CapacityDisplaySetting } from './CapacityDisplaySetting';
 import { GraphicsSetting } from './GraphicsSetting';
 import { CodexToolOutputSetting } from './CodexToolOutputSetting';
@@ -1342,6 +1343,10 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                           </PixelButton>
                         </div>
                       </div>
+
+                      <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+
+                      <ClaimLedgerSettings />
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

@@ -115,7 +115,8 @@ const DRAFT_EVENTS = new Set(['accept', 'dismiss', 'reconcile-answer', 'revert',
 const ANSWERS = new Set(['keep-both', 'supersedes', 'retract']);
 
 /** What the store remembers about one record (for the write-time rules). */
-interface Known { t: 'claim' | 'event'; source?: ClaimSource; kind?: ClaimKind }
+/** CL-W7 S2: an event's `by` (a revert of a Human step must come from the Human). */
+interface Known { t: 'claim' | 'event'; source?: ClaimSource; kind?: ClaimKind; by?: EventRec['by'] }
 
 interface AgentState {
   /** sha256 of the last line, '' when empty. */
@@ -167,6 +168,60 @@ function prevHolds(lines: Array<{ line: string; rec: LedgerRec | null }>): boole
     prev = sha256Hex(l.line);
   }
   return true;
+}
+
+/** W7: what a purge returns: the purge event id (null when every claim was purged already and only
+ *  the copies were scrubbed again), how many backup or aside files it rewrote, and the backup days
+ *  or asides it could NOT rewrite (CL-W7 S3: a purge of the same claims again retries them). */
+export type PurgeResult = { ok: true; id: string | null; copies: number; failedCopies: string[] } | { ok: false; error: string };
+/** W7: the text a purged claim keeps (its content is gone from the ledger, backups and asides). */
+export const PURGED_TEXT = '[purged]';
+
+/** A purged claim: the content goes, the structure derive needs stays. */
+export function tombstone(rec: ClaimRec): ClaimRec {
+  const { refs: _r, supersedesReason: _s, redacted: _d, legacy: _l, section: _c, ...rest } = rec;
+  void _r; void _s; void _d; void _l; void _c;
+  return { ...rest, text: PURGED_TEXT };
+}
+
+/**
+ * W7: tombstone `targets` in an ordered set of segment texts and re-chain every line from the first
+ * change on (prev and mac under `key`). Lines before the first change keep their bytes, so a
+ * backup (a prefix) maps to a prefix of the live result. Throws on an unparseable line.
+ */
+export function rechainSegments(files: Array<{ name: string; text: string }>, targets: Set<string>, key: Uint8Array):
+  { files: Array<{ name: string; text: string }>; head: string; lastId: string | null } {
+  let prev = '';
+  let lastId: string | null = null;
+  let changed = false;
+  const out = files.map((f) => {
+    const lines: string[] = [];
+    for (const line of f.text.split('\n')) {
+      if (!line) continue;
+      let rec = JSON.parse(line) as LedgerRec;
+      let text = line;
+      if (rec.t === 'claim' && targets.has(rec.id)) {
+        rec = tombstone(rec);
+        if (canonicalJson(rec) !== line) changed = true;
+      }
+      if (changed) {
+        rec.prev = prev;
+        rec.mac = recordMac(key, rec as unknown as Record<string, unknown>);
+        text = canonicalJson(rec);
+      }
+      lines.push(text);
+      prev = sha256Hex(text);
+      lastId = rec.id;
+    }
+    return { name: f.name, text: lines.map((l) => l + '\n').join('') };
+  });
+  return { files: out, head: prev, lastId };
+}
+
+/** Write a whole file and fsync it (a purge's new segments). */
+function writeDurable(file: string, text: string): void {
+  const fd = nodeFs.openSync(file, 'w');
+  try { nodeFs.writeSync(fd, text); nodeFs.fsyncSync(fd); } finally { nodeFs.closeSync(fd); }
 }
 
 function charLen(s: string): number {
@@ -247,6 +302,7 @@ export class ClaimStore {
 
   private readInner(agentId: string): ReadResult {
     if (!AGENT_RE.test(agentId)) return { records: [], torn: null, chain: { brokenAt: 'agent', reason: 'parse' } };
+    this.finishPurgeSwap(agentId);
     const files = this.segments(agentId);
     let torn: TornInfo | null = null;
     const lines: Array<ParsedLine & { file: string }> = [];
@@ -309,11 +365,26 @@ export class ClaimStore {
   private checkAnchor(agentId: string, lines: Array<{ line: string; rec: LedgerRec | null }>, advance: boolean): 'ok' | ChainBreak {
     const anchors = this.d.headAnchor;
     if (!anchors) return 'ok';
+    const head = lines.length ? sha256Hex(lines[lines.length - 1].line) : '';
+    const reaches = (h: string): boolean => h === head || lines.some((l) => sha256Hex(l.line) === h);
+    // CL-W7 B1: a purge's re-anchor is main's own record in user-data (set before the swap), never a
+    // file in the agent folder. The ledger reaching the purge's new head commits it; still reaching
+    // the old head (the swap never happened) drops it; reaching neither is a cut.
+    const stored = anchors.get(this.d.hiveRoot, agentId);
+    if (stored?.pending && !this.anchorTimers.has(agentId)) {
+      const to = stored.pending;
+      if (reaches(to.head)) {
+        if (advance) anchors.set(this.d.hiveRoot, agentId, { head: to.head, lastId: to.lastId });
+        if (advance && head !== to.head) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
+        return 'ok';
+      }
+      if (stored.head && !reaches(stored.head)) return { brokenAt: 'head-anchor', reason: 'prev' };
+      if (advance) anchors.set(this.d.hiveRoot, agentId, { head: stored.head, lastId: stored.lastId });
+    }
     // A head written by this process but not yet flushed is the newer anchor (Jim's note: a cut
     // inside the debounce window is caught in-process too).
-    const want = this.anchorTimers.get(agentId)?.head ?? anchors.get(this.d.hiveRoot, agentId)?.head ?? '';
-    const head = lines.length ? sha256Hex(lines[lines.length - 1].line) : '';
-    if (want && want !== head && !lines.some((l) => sha256Hex(l.line) === want)) {
+    const want = this.anchorTimers.get(agentId)?.head ?? stored?.head ?? '';
+    if (want && !reaches(want)) {
       return { brokenAt: 'head-anchor', reason: 'prev' };
     }
     if (advance && head && want !== head) this.anchorSoon(agentId, head, lines[lines.length - 1].rec?.id ?? '');
@@ -463,7 +534,7 @@ export class ClaimStore {
       if (r.t === 'claim') {
         known.set(r.id, { t: 'claim', source: r.source, kind: r.kind });
         if (typeof r.text === 'string') { const k = r1Identity(r); exact.set(k, [...(exact.get(k) ?? []), r.id]); }
-      } else known.set(r.id, { t: 'event' });
+      } else known.set(r.id, { t: 'event', by: r.by });
     }
     const last = lines.length ? lines[lines.length - 1] : null;
     const tailFile = files.length ? files[files.length - 1] : null;
@@ -694,7 +765,7 @@ export class ClaimStore {
     // Acked: remember it.
     s.head = sha256Hex(line);
     s.lastId = rec.id;
-    s.known.set(rec.id, rec.t === 'claim' ? { t: 'claim', source: rec.source, kind: rec.kind } : { t: 'event' });
+    s.known.set(rec.id, rec.t === 'claim' ? { t: 'claim', source: rec.source, kind: rec.kind } : { t: 'event', by: rec.by });
     if (rec.t === 'claim') { const k = r1Identity(rec); s.exact.set(k, [...(s.exact.get(k) ?? []), rec.id]); }
     if (s.tailFile !== file) { s.tailFile = file; s.segments += 1; }
     try { s.tailSize = nodeFs.statSync(file).size; } catch { this.state.delete(agentId); }
@@ -739,6 +810,12 @@ export class ClaimStore {
       const targets = this.idList(draft.targets, 'targets', s, draft.ev === 'revert' ? 'any' : 'claim');
       if ('error' in targets) return targets;
       if (targets.ids.length === 0) return { error: 'targets must name at least one record' };
+      // CL-W7 S2: a step the Human took (a purge, a rekey, the Human's own revert or pin) is undone by
+      // the Human only: an agent's revert of it would quietly reverse a Human decision.
+      if (draft.ev === 'revert' && origin !== 'ui-ipc') {
+        const human = targets.ids.find((id) => s.known.get(id)?.by === 'human');
+        if (human) return { error: `${human} is the Human's step; only the Human can revert it` };
+      }
       if (draft.answer !== undefined && (draft.ev !== 'reconcile-answer' || !ANSWERS.has(draft.answer))) return { error: 'bad answer' };
       if (draft.ev === 'reconcile-answer' && draft.answer === undefined) return { error: 'a reconcile answer needs answer' };
       const rec: EventRec = {
@@ -969,6 +1046,160 @@ export class ClaimStore {
     const want = this.anchorTimers.get(agentId)?.head ?? this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.head ?? '';
     if (want && !hashes.has(want)) return 'prev at head-anchor (the ledger no longer reaches its anchored head)';
     return { head: prev, lastId, ids };
+  }
+
+  // ---------------------------------------------------------------- purge (R8, W7, Human only)
+
+  /**
+   * W7 purge (plan R8, F13): the Human's erasure of claims' content. Never reachable from a draft, an
+   * endpoint or a token: only main's Human-confirmed UI action calls it. Under the agent's queue:
+   *   1. the ledger must verify (no purge of a read-only ledger: the Human first sees the alert);
+   *   2. each target claim becomes a TOMBSTONE (PURGED_TEXT; refs, reason note, section and legacy
+   *      provenance dropped; id, kind, times, source and links kept so derive still places it);
+   *   3. every line from the first tombstone on is re-chained (prev) and re-MACed with this hive's key;
+   *   4. a `purge` event (by human) is appended over the new head;
+   *   5. the new head is recorded as PENDING in main's head-anchor store (user-data, never the agent
+   *      folder: CL-W7 B1), then the segments are written to `claims.purge-new/`, fsynced, and swapped
+   *      in by two renames (claims -> claims.purge-old, purge-new -> claims); purge-old is then
+   *      deleted. An interrupted swap is finished on the next read (finishPurgeSwap), never left half
+   *      done, and only when main recorded it;
+   *   6. the read that reaches the new head commits the pending re-anchor (one still at the old head
+   *      drops it);
+   *   7. every backup day and every restore aside of the agent gets the same tombstone and re-chain,
+   *      so the old text is gone there too and each backup stays a byte prefix of the live ledger (G1.7).
+   * Returns the purge event id. Only ids are logged, never text.
+   */
+  purge(agentId: string, ids: string[], confirmedByHuman: true): Promise<PurgeResult> {
+    return this.serial(agentId, () => this.purgeNow(agentId, ids, confirmedByHuman));
+  }
+
+  private purgeNow(agentId: string, ids: string[], confirmedByHuman: true): PurgeResult {
+    if (confirmedByHuman !== true) return { ok: false, error: 'a purge needs the Human\'s confirmation' };
+    if (!AGENT_RE.test(agentId)) return { ok: false, error: 'bad agent id' };
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > LIST_MAX) return { ok: false, error: `name 1 to ${LIST_MAX} claims` };
+    if (ids.some((id) => typeof id !== 'string' || !ID_RE.test(id)) || new Set(ids).size !== ids.length) return { ok: false, error: 'bad or repeated claim id' };
+    this.closeFd(agentId);
+    this.flushAnchor(agentId);
+    const read = this.readLedger(agentId);
+    if (read.chain !== 'ok') return { ok: false, error: `the ledger is read-only (${read.chain.reason} at ${read.chain.brokenAt}); nothing was purged` };
+    const key = this.keys();
+    if (!key) return { ok: false, error: 'the ledger key is missing; nothing was purged' };
+    let registry;
+    try { registry = loadRegistry(this.d.hiveRoot); } catch { registry = undefined; }
+    const state = derive(read.records, registry ?? DEFAULT_KEY_REGISTRY, { r4: false });
+    for (const id of ids) {
+      const rec = read.records.find((r) => r.id === id);
+      if (!rec || rec.t !== 'claim') return { ok: false, error: `${id} is not a claim of ${agentId}` };
+    }
+    // CL-W7 S3: a claim purged already is not purged again (no second event); its copies are
+    // scrubbed again, so a backup day or aside a failed copy step left behind can be redone.
+    const fresh = ids.filter((id) => state.claims[id]?.status !== 'purged');
+    if (fresh.length === 0) {
+      const again = this.purgeCopies(agentId, new Set(ids), key);
+      this.log({ kind: 'claims-purge-rescrub', agentId, targets: [...ids], copies: again.changed, failedCopies: again.failed });
+      return { ok: true, id: null, copies: again.changed, failedCopies: again.failed };
+    }
+    const targets = new Set(fresh);
+    const dir = this.claimsDir(agentId);
+    const live = rechainSegments(this.segments(agentId).map((f) => ({ name: basename(f), text: nodeFs.readFileSync(f, 'utf8') })), targets, key);
+    const s: AgentState = { head: live.head, lastId: live.lastId, known: new Map(read.records.map((r): [string, Known] => [r.id, r.t === 'event' ? { t: 'event', by: r.by } : { t: 'claim' }])), tailFile: null, tailSize: 0, segments: 0, readOnly: null, exact: new Map() };
+    const wt = this.now().toISOString();
+    const ev: EventRec = {
+      v: LEDGER_RECORD_VERSION, id: this.newId('event', s), t: 'event', ev: 'purge', at: wt, wt, agent: agentId,
+      targets: [...fresh], by: 'human', prev: live.head, mac: '',
+    };
+    ev.mac = recordMac(key, ev as unknown as Record<string, unknown>);
+    const evLine = canonicalJson(ev);
+    const month = `${monthOf(wt)}.jsonl`;
+    const files = new Map(live.files.map((f) => [f.name, f.text]));
+    files.set(month, (files.get(month) ?? '') + evLine + '\n');
+    const newDir = `${dir}.purge-new`;
+    const old = `${dir}.purge-old`;
+    const head = sha256Hex(evLine);
+    // CL-W7 B1: the new head is recorded in main's user-data BEFORE the swap (as pending beside the
+    // old head), so a crash anywhere in it reads as the old ledger or the purged one, never as a cut,
+    // and nothing in the agent folder can move the anchor.
+    this.flushAnchor(agentId);
+    const cur = this.d.headAnchor?.get(this.d.hiveRoot, agentId);
+    try { this.d.headAnchor?.set(this.d.hiveRoot, agentId, { head: cur?.head ?? '', lastId: cur?.lastId ?? '', pending: { head, lastId: ev.id } }); }
+    catch (e) { this.log({ kind: 'claims-purge-failed', agentId, step: 'anchor', error: String(e).slice(0, 160) }); return { ok: false, error: 'the re-anchor could not be recorded; nothing was purged' }; }
+    try {
+      nodeFs.rmSync(newDir, { recursive: true, force: true });
+      nodeFs.mkdirSync(newDir, { recursive: true });
+      for (const [name, text] of files) writeDurable(join(newDir, name), text);
+      nodeFs.rmSync(old, { recursive: true, force: true });
+      nodeFs.renameSync(dir, old);
+      nodeFs.renameSync(newDir, dir);
+    } catch (e) {
+      this.log({ kind: 'claims-purge-failed', agentId, step: 'swap', error: String(e).slice(0, 160) });
+    }
+    this.state.delete(agentId);
+    // Finish (or drop) the swap and apply the re-anchor (F13): the purged ledger no longer reaches
+    // the old head, by design. A swap that failed half way is finished here when it can be.
+    this.finishPurgeSwap(agentId);
+    if (!this.segments(agentId).some((f) => nodeFs.readFileSync(f, 'utf8').includes(evLine))) {
+      return { ok: false, error: 'the purge could not be written; the ledger is unchanged' };
+    }
+    const copies = this.purgeCopies(agentId, new Set(ids), key);
+    const after = this.readLedger(agentId);
+    this.log({ kind: 'claims-purge', agentId, targets: [...fresh], event: ev.id, head, copies: copies.changed, failedCopies: copies.failed, chain: after.chain === 'ok' ? 'ok' : after.chain.reason });
+    if (after.chain !== 'ok') return { ok: false, error: `the purged ledger does not verify (${after.chain.reason} at ${after.chain.brokenAt}); the Human has been alerted` };
+    try { this.d.onAppend?.(agentId, ev.id, ev); } catch { /* the purge is written; indexing and export catch up */ }
+    return { ok: true, id: ev.id, copies: copies.changed, failedCopies: copies.failed };
+  }
+
+  /** Tombstone and re-chain the purged claims in every backup day and restore aside of the agent;
+   *  the files rewritten, and the days or asides that failed (by name). */
+  private purgeCopies(agentId: string, targets: Set<string>, key: Uint8Array): { changed: number; failed: string[] } {
+    const dirs: string[] = [];
+    const backups = join(this.d.hiveRoot, 'backups', 'claims', agentId);
+    try { for (const d of nodeFs.readdirSync(backups)) dirs.push(join(backups, d)); } catch { /* no backups */ }
+    const mem = join(this.agentDir(agentId), 'memory');
+    try { for (const d of nodeFs.readdirSync(mem)) if (d.startsWith('claims.pre-restore-')) dirs.push(join(mem, d)); } catch { /* none */ }
+    let changed = 0;
+    const failed: string[] = [];
+    for (const d of dirs) {
+      try {
+        const names = nodeFs.readdirSync(d).filter((n) => SEGMENT_RE.test(n)).sort();
+        const before = names.map((name) => ({ name, text: nodeFs.readFileSync(join(d, name), 'utf8') }));
+        const out = rechainSegments(before, targets, key);
+        out.files.forEach((f, i) => {
+          if (f.text === before[i].text) return;
+          const tmp = join(d, `${f.name}.purge-tmp`);
+          writeDurable(tmp, f.text);
+          nodeFs.renameSync(tmp, join(d, f.name));
+          changed++;
+        });
+      } catch (e) {
+        failed.push(basename(d));
+        this.log({ kind: 'claims-purge-failed', agentId, step: 'copy', dir: basename(d), error: String(e).slice(0, 160) });
+      }
+    }
+    return { changed, failed };
+  }
+
+  /**
+   * Finish a purge swap a crash interrupted (purgeNow step 5). Both renames are atomic, so the states
+   * are: only purge-new (the crash came before the first rename: the old ledger is intact, the new one
+   * is dropped); no claims dir but purge-new (between the renames: finish the swap); claims and
+   * purge-old (after both: delete the old copy).
+   */
+  private finishPurgeSwap(agentId: string): void {
+    const dir = this.claimsDir(agentId);
+    const fresh = `${dir}.purge-new`;
+    const old = `${dir}.purge-old`;
+    try {
+      const hasDir = nodeFs.existsSync(dir), hasFresh = nodeFs.existsSync(fresh), hasOld = nodeFs.existsSync(old);
+      // CL-W7 B1: only a swap main recorded (a pending re-anchor in user-data) is finished; a
+      // purge-new/purge-old pair made by anything else is left alone, and the anchor check judges
+      // the ledger as it is (a missing claims dir is a cut).
+      const pending = !!this.d.headAnchor?.get(this.d.hiveRoot, agentId)?.pending;
+      if (!hasDir && hasFresh && hasOld && pending) { nodeFs.renameSync(fresh, dir); this.log({ kind: 'claims-purge-finished', agentId }); }
+      else if (hasDir && hasFresh) { nodeFs.rmSync(fresh, { recursive: true, force: true }); this.log({ kind: 'claims-purge-dropped', agentId }); }
+      if (nodeFs.existsSync(dir) && hasOld) nodeFs.rmSync(old, { recursive: true, force: true });
+    } catch (e) {
+      this.log({ kind: 'claims-purge-failed', agentId, step: 'finish', error: String(e).slice(0, 160) });
+    }
   }
 
   // ---------------------------------------------------------------- usage, backups

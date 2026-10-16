@@ -175,6 +175,34 @@ export function syncExport(agentDir: string, records: LedgerRec[], state: Claims
   return n;
 }
 
+/**
+ * W7 purge: the continuous export is append-only EXCEPT for a purge, which must remove the content
+ * there too. Every record line tagged with a purged id is replaced by `lineFor(id)` (the tombstone's
+ * rendering), through a temp file and a rename. Marker lines name an id only and are kept. Returns
+ * the number of lines replaced.
+ */
+export function scrubExport(agentDir: string, ids: Set<string>, lineFor: (id: string) => string): number {
+  let n = 0;
+  for (const f of exportFiles(agentDir)) {
+    const file = join(agentDir, f);
+    const text = readFileSync(file, 'utf8');
+    let changed = false;
+    const out = text.split('\n').map((line) => {
+      if (line.includes(' status of [c:')) return line;
+      for (const m of line.matchAll(TAG_RE)) {
+        if (ids.has(m[1])) { changed = true; n++; return lineFor(m[1]).replace(/\r?\n$/, ''); }
+      }
+      return line;
+    });
+    if (!changed) continue;
+    const tmp = `${file}.purge-${process.pid}.tmp`;
+    const fd = openSync(tmp, 'w');
+    try { writeSync(fd, out.join('\n')); fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(tmp, file);
+  }
+  return n;
+}
+
 export const COMPLETE_EXPORT_NOTE = 'After a downgrade, the older app indexes this complete memory.md, the memory-ledger-export files and the old archives. Entries still in an archive are not exported again, so they are not doubled; a few recent ones can still show twice.';
 
 /**
