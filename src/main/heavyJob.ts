@@ -582,11 +582,55 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false)
   return { heavy: false };
 }
 
+/** Start-Process's own parameters that take a value (any other `-X` after the program is its switch). */
+const START_PROCESS_VALUED = /^-(filepath|argumentlist|args|workingdirectory|windowstyle|redirectstandard(output|error|input)|verb|credential|environment)$/i;
+
+/**
+ * The program and arguments a launcher starts, as words: PowerShell `Start-Process` (named
+ * -FilePath/-ArgumentList or positional) and cmd `start` (a "" title and /switches skipped).
+ * An argument list is split on commas and spaces, with `@(`, `)` and quotes dropped; a
+ * parenthesised subexpression (`(Join-Path $d 'x.ps1')`) is computed, so it becomes `$computed`.
+ */
+function launchedWords(args: string[]): string[] {
+  let file: string | undefined;
+  const list: string[] = [];
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (/^-(filepath)$/i.test(a)) { file = args[++i]; continue; }
+    if (/^-(argumentlist|args)$/i.test(a)) {
+      while (i + 1 < args.length && !START_PROCESS_VALUED.test(args[i + 1]) && !/^-(passthru|wait|nonewwindow|loaduserprofile|usenewenvironment)$/i.test(args[i + 1])) list.push(args[++i]);
+      continue;
+    }
+    if (START_PROCESS_VALUED.test(a)) { i++; continue; }
+    if (/^-[a-z]+$/i.test(a) && !file && !positional.length) continue;            // a switch (-PassThru)
+    if (/^\/[a-z]+$/i.test(a) && !positional.length) continue;                     // cmd start /b /wait
+    if (a === '' && !positional.length && !file) continue;                          // cmd start's "" title
+    if (/^-(passthru|wait|nonewwindow|loaduserprofile|usenewenvironment)$/i.test(a)) continue;
+    positional.push(a);
+  }
+  if (!file) file = positional.shift();
+  if (!file) return [];
+  const rest = [...list, ...positional].join(' ')
+    .replace(/@\(/g, ' ')
+    .replace(/\([^()]*\)/g, ' $computed ')
+    .replace(/[()]/g, ' ')
+    .replace(/['"]/g, '')
+    .split(/[\s,]+/)
+    .filter(Boolean);
+  return [file.replace(/^['"]|['"]$/g, ''), ...rest];
+}
+
 function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): HeavyClass {
   const raw = leading(ws0);
   const hasUnclosed = raw.some((w) => w.startsWith('__HEAVY_UNCLOSED_QUOTE__'));
   const ws = raw.map((w) => w.replace(/^__HEAVY_UNCLOSED_QUOTE__/, ''));
   if (!ws.length) return { heavy: false };
+  // HEAVY-LOCK-SHAPES-189: a PowerShell assignment runs its right-hand side (`$suite = Start-Process
+  // npm.cmd test`, `$r=npm test`); it read as a dynamic command word or a variable.
+  const psAssign = /^\$[A-Za-z_][A-Za-z0-9_:]*=(.*)$/.exec(ws[0]);
+  if (psAssign) return classifyWords([...(psAssign[1] ? [psAssign[1]] : []), ...ws.slice(1)], depth, ctx);
+  if (/^\$[A-Za-z_][A-Za-z0-9_:]*$/.test(ws[0]) && ws[1] === '=') return classifyWords(ws.slice(2), depth, ctx);
   // A dynamic command word is unnameable, but its arguments still identify common heavy runners.
   // Handle variable wrappers (`$CR node ...`), variable Node (`$NODE test/tools/run-tests.cjs`),
   // PowerShell environment variables, and the conventional `$(which node)` form.
@@ -634,6 +678,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
     const script = /^(bash|sh|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
     return script ? classifyScript(script, depth, ctx) : { heavy: false };
+  }
+  // HEAVY-LOCK-SHAPES-189 (god conv-cbab35, Dwight 18:18:34Z): a launcher runs its program, so the
+  // program decides. `Start-Process -FilePath npm.cmd -ArgumentList 'test'` (and `saps`, PowerShell's
+  // `start`, cmd's `start "" /b npm test`) started a full suite that the lock read as light.
+  if ((bin === 'start-process' || bin === 'saps' || bin === 'start') && args.length && depth + 1 < MAX_DEPTH) {
+    const launched = launchedWords(args);
+    return launched.length ? classifyWords(launched, depth + 1, ctx) : { heavy: false };
   }
   // A script run directly (`./suite.sh`, `scripts/gate.sh`; HEAVY-LOCK-SHAPES-189: `./x.ps1`).
   if (/\.(sh|bash|ps1)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
