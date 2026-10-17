@@ -58,7 +58,7 @@ import {
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { heavyActivity, rosterActivity, type HeavyLockView } from '../shared/activityView';
-import { silentTurnText, type SilentTurnView } from '../shared/agentBadges';
+import { heldInboxText, silentTurnText, type SilentTurnView } from '../shared/agentBadges';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
@@ -5024,6 +5024,7 @@ export class HiveManager {
           id: string; name?: string; role?: string; isGod?: boolean;
           breaker?: string; tokens?: number; usd?: number;
           lastTool?: string | null; lastActiveSecAgo?: number | null; inboxBacklog?: number;
+          inboxHeld?: number; heldUntil?: number;
           onHold?: boolean; runningTool?: { name: string; forSec: number } | null;
           silentTurn?: SilentTurnView | null;
         }>;
@@ -5059,7 +5060,10 @@ export class HiveManager {
           typeof a.lastActiveSecAgo === 'number' ? `active ${ago(a.lastActiveSecAgo)}` : 'no activity yet'];
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);
-        if (a.inboxBacklog) bits.push(`inbox ${a.inboxBacklog}`);
+        if (a.inboxBacklog) {
+          const held = typeof a.inboxHeld === 'number' && a.inboxHeld > 0 && typeof a.heldUntil === 'number';
+          bits.push(held ? heldInboxText(a.inboxBacklog, a.inboxHeld, a.heldUntil, nowMs) : `inbox ${a.inboxBacklog}`);
+        }
         if (a.breaker && a.breaker !== 'ok' && a.breaker !== 'none') bits.push(`breaker ${a.breaker}`);
         if (a.isGod) bits.push('you');
         // First in the row after the role would be louder, but this reads in

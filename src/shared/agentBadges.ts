@@ -73,8 +73,25 @@ export function taskChipTitle(count: number, flagged: readonly string[]): string
   return flagged.length ? `${base}\n! ${flagged.join('; ')}` : base;
 }
 
-export function mailBadgeTitle(count: number): string {
-  return `${count} message${count === 1 ? '' : 's'} waiting`;
+/** Local, explicitly human-facing release time.  The floor runs in the Human's local timezone,
+ * not UTC, so a bare ISO time would make a future release look two hours late in Berlin. */
+export function heldUntilText(heldUntil: number, now = Date.now()): string {
+  if (heldUntil <= now) return 'due';
+  return new Date(heldUntil).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/** The compact mailbox wording shared by the card and LIVE ROSTER. */
+export function heldInboxText(count: number, held = 0, heldUntil?: number, now = Date.now()): string {
+  const base = `inbox ${count}`;
+  if (!(held > 0) || typeof heldUntil !== 'number') return base;
+  const detail = heldUntilText(heldUntil, now) === 'due' ? 'held, due' : `held until ${heldUntilText(heldUntil, now)} local`;
+  return held === count ? `${base} (${detail})` : `${base}, ${held} ${detail}`;
+}
+
+export function mailBadgeTitle(count: number, held = 0, heldUntil?: number): string {
+  const base = `${count} message${count === 1 ? '' : 's'} waiting`;
+  if (!(held > 0) || typeof heldUntil !== 'number') return base;
+  return `${heldInboxText(count, held, heldUntil)}; ${base}; or sooner with other mail`;
 }
 
 /** FLEET-LIVENESS-BLIND: an agent shown working whose turn has gone silent (main's silentTurn.ts):

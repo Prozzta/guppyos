@@ -177,7 +177,10 @@ test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the ca
   assert.match(snap.slice(0, snap.indexOf('\n}\n')), /const silent = silentTurnsById\(now\);[^]*silentTurn: silent\[id\] \?\? null,/);
   assert.match(idx, /for \(const s of findSilentTurns\(silentTurnFacts\(\), now\)\) out\[s\.agentId\] = \{ kind: s\.kind, since: s\.since,/);
   assert.match(idx, /try \{ silentTurns = silentTurnsById\(Date\.now\(\)\); \} catch/);
-  assert.match(idx, /return \{ flags: boardMonitor\.flags\(\), inboxBacklog, silentTurns \};/);
+  assert.match(idx, /const inboxHeld: Record<string, number> = \{\};/);
+  assert.match(idx, /const heldUntil: Record<string, number> = \{\};/);
+  assert.match(idx, /if \(mail\.inboxHeld && mail\.heldUntil\) \{ inboxHeld\[id\] = mail\.inboxHeld; heldUntil\[id\] = mail\.heldUntil; \}/);
+  assert.match(idx, /return \{ flags: boardMonitor\.flags\(\), inboxBacklog, inboxHeld, heldUntil, silentTurns \};/);
   const strip = readSource('src/renderer/src/components/AgentStrip.tsx');
   assert.match(strip, /setSilentByAgent\(silent \?\? \{\}\);/);
   assert.match(strip, /silentTurn=\{silentByAgent\[a\.id\]\}/);

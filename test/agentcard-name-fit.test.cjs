@@ -28,7 +28,8 @@ test('source: the name has a tooltip and the status chip can fall back to its do
   assert.match(card, /const badgeLabel = badgeText\(held\.status, held\.label\);/);
   assert.match(card, /<PixelBadge status=\{held\.status\} label=\{held\.label\} blink=\{badgeBlinks\(held\.status\)\} style=\{\{ flexShrink: 0 \}\} \/>/);
   assert.match(card, /title=\{taskChipTitle\(doingCount, taskFlags\)\}/, 'the task chip stays');
-  assert.match(card, /title=\{mailBadgeTitle\(inboxBacklog\)\}/, 'the mail badge stays');
+  assert.match(card, /title=\{mailBadgeTitle\(inboxBacklog, inboxHeld, heldUntil\)\}/, 'the mail badge keeps backlog and held-mail context');
+  assert.match(card, /inboxHeld > 0 && heldUntil \? `\$\{MAIL_GLYPH\}\$\{inboxBacklog\} held \$\{heldUntilText\(heldUntil\)\}`/, 'the compact card badge renders both future and due held mail');
 });
 
 test('rendered: every card name shows at least 8 glyphs (or all of a shorter one)', { timeout: harnessTestTimeout(90_000) }, async () => {

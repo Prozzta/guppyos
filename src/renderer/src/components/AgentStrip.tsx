@@ -60,6 +60,8 @@ export function AgentStrip({ config }: AgentStripProps) {
   // task detail) — plus each agent's messages waiting, for the separate mail badge.
   const [badgeByAgent, setBadgeByAgent] = useState<Record<string, AgentBadge>>({});
   const [inboxByAgent, setInboxByAgent] = useState<Record<string, number>>({});
+  const [inboxHeldByAgent, setInboxHeldByAgent] = useState<Record<string, number>>({});
+  const [heldUntilByAgent, setHeldUntilByAgent] = useState<Record<string, number>>({});
   // FLEET-LIVENESS-BLIND: agents shown working whose turn went silent (display only).
   const [silentByAgent, setSilentByAgent] = useState<Record<string, SilentTurnView>>({});
   useEffect(() => {
@@ -72,6 +74,10 @@ export function AgentStrip({ config }: AgentStripProps) {
         setBadgeByAgent(agentBadges(raw, flags));
         const inbox = extra && typeof (extra as { inboxBacklog?: unknown }).inboxBacklog === 'object' ? (extra as { inboxBacklog: Record<string, number> }).inboxBacklog : {};
         setInboxByAgent(inbox ?? {});
+        const inboxHeld = extra && typeof (extra as { inboxHeld?: unknown }).inboxHeld === 'object' ? (extra as { inboxHeld: Record<string, number> }).inboxHeld : {};
+        const heldUntil = extra && typeof (extra as { heldUntil?: unknown }).heldUntil === 'object' ? (extra as { heldUntil: Record<string, number> }).heldUntil : {};
+        setInboxHeldByAgent(inboxHeld ?? {});
+        setHeldUntilByAgent(heldUntil ?? {});
         const silent = extra && typeof (extra as { silentTurns?: unknown }).silentTurns === 'object' ? (extra as { silentTurns: Record<string, SilentTurnView> }).silentTurns : {};
         setSilentByAgent(silent ?? {});
       } catch { /* keep last good */ }
@@ -152,6 +158,8 @@ export function AgentStrip({ config }: AgentStripProps) {
             doingCount={badgeByAgent[a.id]?.doing.length ?? 0}
             taskFlags={badgeByAgent[a.id]?.flagged}
             inboxBacklog={inboxByAgent[a.id] ?? 0}
+            inboxHeld={inboxHeldByAgent[a.id] ?? 0}
+            heldUntil={heldUntilByAgent[a.id]}
             silentTurn={silentByAgent[a.id]}
             onTaskNoteClick={() => {
               const first = badgeByAgent[a.id]?.doing[0];
