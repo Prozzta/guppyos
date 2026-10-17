@@ -227,9 +227,9 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (!chunk) return;
     const active = term.buffer.active;
     const follow = shouldFollowTerminalOutput(active.viewportY, active.baseY);
-    const firstWrite = startupRedrawPending(ptyId);
     // MODEL-NOT-KEPT-191: program output never parses inside a human key's window.
     endInputWindowForOutput(ptyId);
+    const firstWrite = startupRedrawPending(ptyId);
     term.write(chunk, () => {
       if (firstWrite) noteFirstAgentRedraw(ptyId);
       if (follow) {
