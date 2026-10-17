@@ -19,8 +19,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const loadTs = require('./load-ts.cjs');
-const { readSource } = require('./read-source.cjs');
+const loadTs = require('../load-ts.cjs');
+const { readSource } = require('../read-source.cjs');
 
 const HJ = loadTs('src/main/heavyJob.ts');
 const H = { heavy: true, kind: 'suite' };
@@ -272,7 +272,7 @@ test('the notice: system sender, wake "now", inform with no reply, plain words, 
 });
 
 // READS-QUIET-NOREPLY lives on fix/181-reads-quiet; this runs once both are merged (rc/1.1.81).
-const QUIET = fs.existsSync(path.join(__dirname, '..', 'src/shared/mailWakeClass.ts'));
+const QUIET = fs.existsSync(path.join(__dirname, '..', '..', 'src/shared/mailWakeClass.ts'));
 test('merged rc: the notice as sent is classified WAKE (from system, wakeNow), never held quiet', { skip: QUIET ? false : 'needs READS-QUIET-NOREPLY (mailWakeClass) in this tree' }, () => {
   const W = loadTs('src/shared/mailWakeClass.ts');
   const n = HJ.heavySlotFreeNotice('jim', 'suite', 0);

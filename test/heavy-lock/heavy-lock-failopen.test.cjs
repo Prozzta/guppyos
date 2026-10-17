@@ -32,7 +32,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
 const { HeavyJobLock, classifyCommand, HEAVY_SCAN_MS, HEAVY_CALL_SLACK_MS } = loadTs('src/main/heavyJob.ts');
 const mcp = loadTs('src/main/codexHookMcp.ts');
@@ -191,7 +191,7 @@ test('(+) visibility: the snapshot (fleet.json heavyLock.holders) says how long 
   assert.equal(s.heldMs, 4 * 60_000);
   assert.deepEqual([s.agentId, s.kind, s.background, s.openCalls, s.seenRunning, s.lastProbe], ['a', 'suite', false, 1, false, null]);
   assert.equal(s.since, new Date(T0).toISOString());
-  const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  const idx = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'main', 'index.ts'), 'utf8');
   assert.match(idx, /heavyLock: \{ limit: heavyLimit\(readConfig\(\)\.heavyJobsAtOnce\), holders: heavyLock\.snapshot\(\), \.\.\.heavyLock\.queueSnapshot\(\) \}/, 'the snapshot rides in fleet.json');
 });
 
@@ -283,6 +283,6 @@ test('(c) HOOK: a DEGRADED Codex PreToolUse whose pending commands include a hea
 });
 
 test('(c) wiring: the MCP route attaches the pending-command hint to a degraded PreToolUse only', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'main', 'hooks.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /if \(rebuilt\.degraded && event === 'PreToolUse' && tail\) \{\n\s+const hint = pendingExecCommands\(tail\);\n\s+if \(hint\.commands\.length\) p\.codex_commands = hint\.commands;/);
 });

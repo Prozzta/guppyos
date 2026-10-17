@@ -11,7 +11,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
 const { HeavyJobLock, HEAVY_SCAN_MS } = loadTs('src/main/heavyJob.ts');
 const mcp = loadTs('src/main/codexHookMcp.ts');

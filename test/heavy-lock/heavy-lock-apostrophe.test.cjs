@@ -13,7 +13,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 const { classifyCommand } = loadTs('src/main/heavyJob.ts');
 
 const SUITE = 'node test/tools/run-tests.cjs';

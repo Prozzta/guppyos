@@ -15,7 +15,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { Notification: class { show() {} static isSupported() { return false; } } } };

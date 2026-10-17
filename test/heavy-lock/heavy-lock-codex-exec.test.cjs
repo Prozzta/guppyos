@@ -14,7 +14,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
 const HJ = loadTs('src/main/heavyJob.ts');
 const M = loadTs('src/main/codexHookMcp.ts');

@@ -39,6 +39,14 @@ test('selectTestFiles takes every *.test.cjs and nothing else, sorted', () => {
   assert.strictEqual(total, 2);
 });
 
+test('discoverTestFiles retains feature-relative paths for nested test groups', () => {
+  const tree = {
+    test: [{ name: 'area', isDirectory: () => true, isFile: () => false }, { name: 'root.test.cjs', isDirectory: () => false, isFile: () => true }],
+    [path.join('test', 'area')]: [{ name: 'nested.test.cjs', isDirectory: () => false, isFile: () => true }, { name: 'note.md', isDirectory: () => false, isFile: () => true }]
+  };
+  assert.deepStrictEqual(runner.discoverTestFiles('test', (p) => tree[p]), [path.join('area', 'nested.test.cjs'), 'root.test.cjs']);
+});
+
 test('filters narrow by case-insensitive substring, de-duplicated and sorted', () => {
   const entries = ['wake-cold-boot.test.cjs', 'wake-stall.test.cjs', 'canary-lock.test.cjs', 'queue.test.cjs'];
   const { files, unmatched, total } = selectTestFiles(entries, ['WAKE', 'wake-stall', 'canary']);

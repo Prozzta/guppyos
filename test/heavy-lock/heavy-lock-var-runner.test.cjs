@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 const { classifyCommand } = loadTs('src/main/heavyJob.ts');
 
 test('a variable command word delegates classification to a nameable command', () => {
@@ -46,7 +46,7 @@ test('attached redirects consume a quoted target with spaces as one word', () =>
 });
 
 test('MUTANT CENSUS: attached redirects and dynamic Node runners fail closed', () => {
-  const filename = require('node:path').resolve(__dirname, '..', 'src/main/heavyJob.ts');
+  const filename = require('node:path').resolve(__dirname, '..', '..', 'src/main/heavyJob.ts');
   const source = require('node:fs').readFileSync(filename, 'utf8');
   const mutants = [
     {

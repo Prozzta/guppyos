@@ -26,7 +26,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
 const { HeavyJobLock, classifyCommand } = loadTs('src/main/heavyJob.ts');
 const mcp = loadTs('src/main/codexHookMcp.ts');
@@ -108,7 +108,7 @@ test('Jim S1-S3: optional and bracket calls are read; computed tool names count;
 });
 
 test('wiring: the MCP route carries the unnamed count on a degraded PreToolUse', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'main', 'hooks.ts'), 'utf8').replace(/\r\n/g, '\n');
   assert.match(src, /const hint = pendingExecCommands\(tail\);\n\s+if \(hint\.commands\.length\) p\.codex_commands = hint\.commands;\n\s+if \(hint\.unnamed\) p\.codex_unnamed_exec = hint\.unnamed;/);
 });
 
