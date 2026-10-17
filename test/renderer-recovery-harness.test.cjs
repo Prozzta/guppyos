@@ -1,8 +1,8 @@
 'use strict';
 
 /**
- * RENDERER-RECOVERY-164, RENDERED: a real hidden Electron window, a real
- * forcefullyCrashRenderer(), the real recovery module (test/electron-harness/recovery-main.cjs).
+ * RENDERER-RECOVERY-164, RENDERED: a real hidden Electron window, a real renderer kill (by pid),
+ * the real recovery module (test/electron-harness/recovery-main.cjs).
  * Proves the reload, the terminal stream reattaching, the recreate hand-over and the give-up.
  */
 const test = require('node:test');
@@ -60,7 +60,7 @@ test('RENDERED: crash 1 reloads the same window and the terminal stream reattach
   assert.equal(gaveUp.reloadedAnyway, false, 'crash 3: nothing is reloaded or recreated');
 
   assert.deepEqual(r.rows.map((x) => x.recovery), ['reload', 'recreate', 'give-up']);
-  assert.ok(r.rows.every((x) => x.reason === 'crashed' || x.reason === 'killed'), JSON.stringify(r.rows));
+  assert.ok(r.rows.every((x) => x.reason === 'killed'), `a plain kill of the pid each time: ${JSON.stringify(r.rows)}`);
   assert.ok(r.rows.every((x) => x.hasUptime && typeof x.pid === 'number' && x.pid > 0), 'every row carries pid and uptime');
   assert.equal(r.rows[0].pid, r.firstPid, 'the row names the renderer that died');
 });

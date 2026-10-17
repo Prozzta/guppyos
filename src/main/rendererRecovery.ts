@@ -14,7 +14,7 @@
  *
  * The policy is pure (time is passed in) so it is unit-tested without Electron; the wiring
  * takes its Electron pieces as dependencies so the hidden electron-harness can drive it with
- * a real BrowserWindow and a real `forcefullyCrashRenderer`.
+ * a real BrowserWindow and a real renderer kill.
  */
 
 export const RELOAD_DELAY_MS = 500;
@@ -135,12 +135,12 @@ export const MEMORY_CAUSE_MS = 15_000;
 /** A window the memory recovery can act on (a BrowserWindow, narrowed). */
 export interface MemoryRecoverableWindow {
   isDestroyed(): boolean;
-  webContents: { id: number; isDestroyed(): boolean; getOSProcessId(): number; forcefullyCrashRenderer(): void };
+  webContents: { id: number; isDestroyed(): boolean; getOSProcessId(): number };
 }
 
 /**
  * MEMSPIKE-167: recover a runaway renderer WITHOUT its cooperation. A frozen renderer may never
- * run a reload, so main kills its process (forcefullyCrashRenderer); the ordinary
+ * run a reload, so main kills its process (by its pid); the ordinary
  * render-process-gone recovery then reloads, recreates once, or gives up (its 2-minute streak is
  * what stops a memory loop). A renderer whose window already gave up is left alone: killing it
  * then would only leave a dead window. Returns what happened, for the log row.
@@ -149,13 +149,19 @@ export function recoverRendererForMemory<W extends MemoryRecoverableWindow>(
   pid: number,
   deps: { windows: () => W[]; givenUp: (w: W) => boolean; beforeKill: (w: W) => void }
 ): 'killed' | 'no-window' | 'given-up' | 'failed' {
+  // Jim NIT: on Windows process.kill(0) ends the CALLING process (libuv maps 0 to the current
+  // process), so a pid that is not a real other process is never killed, whatever window claims it.
+  if (!(Number.isInteger(pid) && pid > 0) || pid === process.pid) return 'failed';
   const win = deps.windows().find((w) => {
     try { return !w.isDestroyed() && !w.webContents.isDestroyed() && w.webContents.getOSProcessId() === pid; } catch { return false; }
   });
   if (!win) return 'no-window';
   if (deps.givenUp(win)) return 'given-up';
   try { deps.beforeKill(win); } catch { /* the kill matters more than the bookkeeping */ }
-  try { win.webContents.forcefullyCrashRenderer(); return 'killed'; } catch { return 'failed'; }
+  // FLAKE-RENDERER-RECOVERY-191: a plain kill of the pid (TerminateProcess, reason 'killed'), never
+  // forcefullyCrashRenderer: on Windows that first has crashpad dump the renderer and blocks main's
+  // thread on it (up to 10 s, a full dump of a renderer already over the limit) before it kills.
+  try { process.kill(pid); return 'killed'; } catch { return 'failed'; }
 }
 
 /** RENDERER-PROFILE: the DevTools-protocol surface profileRenderer needs (Electron's Debugger). */

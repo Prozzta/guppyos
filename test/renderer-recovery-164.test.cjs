@@ -99,6 +99,21 @@ test('WIRING: 1st crash reloads the SAME webContents after 500 ms, with a notice
   assert.equal(row.recentMemory.length, 1, 'the last memory samples ride along');
 });
 
+// FLAKE-RENDERER-RECOVERY-191: the memory kill is a plain kill of the pid (exit 1), which Electron
+// reports as 'killed', not 'crashed': it must be recovered exactly as a crash, once.
+test('WIRING: a KILLED renderer (the memory kill) is recovered like a crash: exactly one reload, one row, one notice', () => {
+  const w = rig();
+  const win = fakeWindow();
+  R.installRendererRecovery(win, w.deps);
+  win.webContents.emit('render-process-gone', {}, { reason: 'killed', exitCode: 1 });
+  w.run(5_000);
+  assert.equal(win.webContents.reloads, 1, 'reloaded once');
+  assert.equal(w.recreated.length, 0, 'no recreate for one kill');
+  assert.deepEqual(w.rows.map((r) => [r.reason, r.exitCode, r.recovery, r.streak]), [['killed', 1, 'reload', 1]]);
+  assert.deepEqual(w.notices.map((x) => [x.n.action, x.n.reason]), [['reload', 'killed']]);
+  assert.equal(w.timers.length, 0, 'nothing else queued (no second recovery)');
+});
+
 test('WIRING: 2nd crash within 2 min recreates the window once and re-arms it; the 3rd gives up; the new window keeps the streak', () => {
   const w = rig();
   const win = fakeWindow();

@@ -71,28 +71,62 @@ test('onDoubled fires once per pid, when it doubles', () => {
   assert.deepEqual(calls.doubled, [[7, 600]]);
 });
 
-function fakeWin(pid, { destroyed = false, throwsOnKill = false } = {}) {
-  const w = { killed: 0, isDestroyed: () => destroyed,
+// `crashed` counts forcefullyCrashRenderer calls (there must be none: the kill is by pid).
+function fakeWin(pid, { destroyed = false } = {}) {
+  const w = { crashed: 0, isDestroyed: () => destroyed,
     webContents: { id: pid * 10, isDestroyed: () => destroyed, getOSProcessId: () => pid,
-      forcefullyCrashRenderer: () => { if (throwsOnKill) throw new Error('x'); w.killed += 1; } } };
+      forcefullyCrashRenderer: () => { w.crashed += 1; } } };
   return w;
 }
+/** process.kill, mocked for the test (the fake pids are never really killed); returns the pids. */
+function mockKill(t, { throws = false } = {}) {
+  const kills = [];
+  t.mock.method(process, 'kill', (pid) => { if (throws) throw new Error('ESRCH'); kills.push(pid); return true; });
+  return kills;
+}
 
-test('recoverRendererForMemory: kills the window whose renderer is that pid (no cooperation needed); marks the cause first', () => {
+test('recoverRendererForMemory: kills the window whose renderer is that pid (no cooperation needed); marks the cause first', (t) => {
+  const kills = mockKill(t);
   const a = fakeWin(7); const b = fakeWin(8); const order = [];
-  const out = R.recoverRendererForMemory(8, { windows: () => [a, b], givenUp: () => false, beforeKill: (w) => order.push(['mark', w.webContents.id]) });
+  const out = R.recoverRendererForMemory(8, { windows: () => [a, b], givenUp: () => false, beforeKill: (w) => { order.push(['mark', w.webContents.id, kills.length]); } });
   assert.equal(out, 'killed');
-  assert.equal(b.killed, 1); assert.equal(a.killed, 0);
-  assert.deepEqual(order, [['mark', 80]]);
+  assert.deepEqual(kills, [8]);
+  assert.deepEqual(order, [['mark', 80, 0]], 'the cause is marked before the kill');
 });
 
-test('recoverRendererForMemory: never kills a window that already gave up (it would stay dead); no window / a failed kill are reported', () => {
+// FLAKE-RENDERER-RECOVERY-191: forcefullyCrashRenderer has crashpad dump the renderer first and
+// holds main's thread on it (up to 10 s on Windows); the kill is a plain one of the pid.
+test('recoverRendererForMemory: kills the renderer by its pid (process.kill), never by forcefullyCrashRenderer (a dump that holds main)', (t) => {
+  const kills = [];
+  t.mock.method(process, 'kill', (pid, sig) => { kills.push([pid, sig]); return true; });
+  const a = fakeWin(7); const b = fakeWin(8);
+  assert.equal(R.recoverRendererForMemory(8, { windows: () => [a, b], givenUp: () => false, beforeKill: () => {} }), 'killed');
+  assert.deepEqual(kills, [[8, undefined]]);
+  assert.equal(b.crashed, 0, 'no forcefullyCrashRenderer');
+  process.kill.mock.mockImplementation(() => { throw new Error('ESRCH'); });
+  assert.equal(R.recoverRendererForMemory(8, { windows: () => [b], givenUp: () => false, beforeKill: () => {} }), 'failed');
+});
+
+// Jim NIT (FLAKE-RENDERER-RECOVERY-191): process.kill(0) on Windows kills main itself.
+test('recoverRendererForMemory: never kills pid 0, a non-integer pid or main\'s own pid, even when a window claims it', (t) => {
+  const kills = mockKill(t);
+  const marks = [];
+  for (const pid of [0, -1, 1.5, NaN, process.pid]) {
+    assert.equal(R.recoverRendererForMemory(pid, { windows: () => [fakeWin(pid)], givenUp: () => false, beforeKill: () => { marks.push(pid); } }), 'failed', `pid ${pid}`);
+  }
+  assert.deepEqual(kills, [], 'nothing killed');
+  assert.deepEqual(marks, [], 'nothing marked');
+});
+
+test('recoverRendererForMemory: never kills a window that already gave up (it would stay dead); no window / a failed kill are reported', (t) => {
+  const kills = mockKill(t);
   const a = fakeWin(7);
   assert.equal(R.recoverRendererForMemory(7, { windows: () => [a], givenUp: () => true, beforeKill: () => {} }), 'given-up');
-  assert.equal(a.killed, 0);
   assert.equal(R.recoverRendererForMemory(5, { windows: () => [a], givenUp: () => false, beforeKill: () => {} }), 'no-window');
   assert.equal(R.recoverRendererForMemory(7, { windows: () => [fakeWin(7, { destroyed: true })], givenUp: () => false, beforeKill: () => {} }), 'no-window');
-  assert.equal(R.recoverRendererForMemory(7, { windows: () => [fakeWin(7, { throwsOnKill: true })], givenUp: () => false, beforeKill: () => {} }), 'failed');
+  assert.deepEqual(kills, [], 'nothing killed');
+  process.kill.mock.mockImplementation(() => { throw new Error('ESRCH'); });
+  assert.equal(R.recoverRendererForMemory(7, { windows: () => [a], givenUp: () => false, beforeKill: () => {} }), 'failed', 'a pid already gone: reported, never thrown');
 });
 
 test('the recovery loop is capped by the existing policy: kill, reload, kill, recreate, kill, give up (then no more kills)', () => {
