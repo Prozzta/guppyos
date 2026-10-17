@@ -94,6 +94,17 @@ test('a link that cannot be removed as a link: the force-remove is REFUSED, noth
   assert.match(run(s.repo, 'worktree', 'list'), /[\\/]wt\b/, 'still registered');
 });
 
+test('unlink refuses the junction (EPERM): a NON-recursive rmdir removes the link alone, the target survives', async (t) => {
+  const s = setup(t);
+  const shared = s.target('shared');
+  fs.symlinkSync(shared, path.join(s.wt, 'node_modules'), 'junction');
+  const ops = { unlink: async () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }); }, rmdir: (p) => fs.promises.rmdir(p) };
+  const r = await git.removeWorktree(s.repo, s.wt, ops);
+  assert.equal(r.ok, true, r.error);
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'THE TARGET SURVIVES');
+  assert.equal(fs.existsSync(s.wt), false);
+});
+
 test('the worker path (finalizeWorkerWorktree): a clean worker worktree with an ignored junction is gc-safe and removed, the target survives', async (t) => {
   const s = setup(t);
   const shared = s.target('shared');

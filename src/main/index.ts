@@ -1918,7 +1918,7 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
       void finalizeWorkerWorktree(wtPath, origCwd, worker);
     } else {
       void removeWorktree(origCwd, wtPath)
-        .then(r => { if (!r.ok) console.error('[worktree] removeWorktree failed:', r.error); })
+        .then(r => { if (!r.ok) noteWorktreeRemove(r, { agent: id, wtPath, origCwd, site: 'teardown' }); })
         .catch(e => console.error('[worktree] removeWorktree threw:', e));
     }
   }
@@ -1978,7 +1978,7 @@ async function finalizeWorkerWorktree(wtPath: string, origCwd: string, worker: W
       return;
     }
     const r = await removeWorktree(origCwd, wtPath);
-    if (!r.ok) { console.error('[worker] removeWorktree failed:', r.error); return; }
+    if (!r.ok) { noteWorktreeRemove(r, { agent: worker.workerId, wtPath, origCwd, site: 'worker-finalize' }); return; }
     // Worktree is gone (clean/integrated at teardown), but DEFER its scratch-dir
     // cleanup to the throttled GC sweep rather than deleting it synchronously here:
     // HIVE_ROOT/agents/<id> holds the worker's memory.md and the memory engine
@@ -1992,6 +1992,16 @@ async function finalizeWorkerWorktree(wtPath: string, origCwd: string, worker: W
     });
   } catch (e) {
     console.error('[worker] finalizeWorkerWorktree threw (worktree left in place):', e);
+  }
+}
+
+/** A worktree removal that did not happen. WORKTREE-REMOVE-JUNCTION-191: a refusal (a link
+ *  inside could not be removed as a link, so --force was not run) is a visible log.jsonl row;
+ *  the worktree stays on disk for a person to look at. */
+function noteWorktreeRemove(r: { error?: string; refused?: boolean }, ctx: { agent: string; wtPath: string; origCwd: string; site: string }): void {
+  console.error(`[worktree] removeWorktree ${r.refused ? 'REFUSED' : 'failed'} (${ctx.site}, ${ctx.agent}, kept ${ctx.wtPath}):`, r.error);
+  if (r.refused) {
+    try { hive.appendLog({ kind: 'worktree-remove-refused', agent: ctx.agent, site: ctx.site, wtPath: ctx.wtPath, origCwd: ctx.origCwd, reason: r.error ?? null }); } catch { /* logging never breaks teardown */ }
   }
 }
 
@@ -7268,7 +7278,7 @@ async function gcPreservedWorktrees(): Promise<void> {
       catch (err) { console.error('[worker gc] gc-safe check threw (keeping):', err); continue; }
       if (!safe.gc) continue; // keep — fail-safe
       const r = await removeWorktree(e.origCwd, e.wtPath);
-      if (!r.ok) { console.error(`[worker gc] removeWorktree failed (keeping ${e.workerId}):`, r.error); continue; }
+      if (!r.ok) { noteWorktreeRemove(r, { agent: e.workerId, wtPath: e.wtPath, origCwd: e.origCwd, site: 'worker-gc' }); continue; }
       removeWorkerScratch(e.workerId);
       preservedWorktrees.delete(key);
       console.log(`[worker gc] reclaimed ${e.workerId} (${safe.detail})`);

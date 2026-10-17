@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { promises as fsp } from 'node:fs';
+import { join } from 'node:path';
 import { openForRead, safeResolve } from './fs';
 
 /** Run git in `cwd` with `args`. Returns stdout text or an error. */
@@ -261,11 +263,53 @@ export async function addWorktree(
   return { ok: false, error: fallback.error };
 }
 
+/** The two removals unlinkLinksUnder uses (injectable for tests). */
+export interface LinkOps { unlink: (p: string) => Promise<void>; rmdir: (p: string) => Promise<void> }
+const fsLinkOps: LinkOps = { unlink: (p) => fsp.unlink(p), rmdir: (p) => fsp.rmdir(p) };
+
+/** WORKTREE-REMOVE-JUNCTION-191: remove every junction/symlink under `root` as a LINK, never
+ *  through it (scripts/worktree-reaper.cjs removeLinks). A junction is a directory link on
+ *  Windows: unlink can refuse it, and a NON-recursive rmdir then removes only the link. */
+export async function unlinkLinksUnder(
+  root: string, ops: LinkOps = fsLinkOps
+): Promise<{ removed: number; failed: { path: string; error: string }[] }> {
+  let removed = 0;
+  const failed: { path: string; error: string }[] = [];
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let names: string[] = [];
+    try { names = await fsp.readdir(dir); } catch { continue; }
+    for (const name of names) {
+      const p = join(dir, name);
+      let st;
+      try { st = await fsp.lstat(p); } catch { continue; }
+      if (st.isSymbolicLink()) {
+        try { await ops.unlink(p); removed++; } catch {
+          try { await ops.rmdir(p); removed++; } catch (e) { failed.push({ path: p, error: e instanceof Error ? e.message : String(e) }); }
+        }
+      } else if (st.isDirectory()) stack.push(p);
+    }
+  }
+  return { removed, failed };
+}
+
 /** Best-effort removal of an agent's worktree. Forced so a dirty tree doesn't
- *  block teardown; failures are surfaced but callers may ignore them. */
+ *  block teardown; failures are surfaced but callers may ignore them.
+ *  WORKTREE-REMOVE-JUNCTION-191: Git for Windows' `worktree remove --force` deletes THROUGH a
+ *  junction (it emptied MunderDev/node_modules on 2026-10-17), so every link inside goes first, as
+ *  a link; if one cannot, the force-remove is REFUSED (`refused`) and nothing is deleted. */
 export async function removeWorktree(
-  cwd: string, wtPath: string
-): Promise<{ ok: boolean; error?: string }> {
+  cwd: string, wtPath: string, ops?: LinkOps
+): Promise<{ ok: boolean; error?: string; refused?: boolean }> {
+  const links = await unlinkLinksUnder(wtPath, ops);
+  if (links.failed.length) {
+    const first = links.failed[0];
+    return {
+      ok: false, refused: true,
+      error: `refused: ${links.failed.length} link(s) inside could not be removed as links, and --force would delete through them (${first.path}: ${first.error})`
+    };
+  }
   const res = await runGit(cwd, ['worktree', 'remove', '--force', wtPath]);
   if (res.ok) return { ok: true };
   return { ok: false, error: res.error };
