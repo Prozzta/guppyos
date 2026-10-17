@@ -184,6 +184,45 @@ test('scrubInheritedEnv removes exactly the Stable identity keys and reports the
   assert.equal(Object.keys(env).some((k) => k.startsWith('OTEL_')), false);
 });
 
+// SCRUB1: the auth env vars Codex reads (codex-cli 0.157.1 `codex login status`
+// lists exactly OPENAI_API_KEY, CODEX_API_KEY, CODEX_ACCESS_TOKEN as "auth env
+// vars present"). Inherited from a Stable terminal they would sign a dev agent in
+// with the Human's key instead of its own isolated CODEX_HOME login.
+const CODEX_AUTH_KEYS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
+
+test('SCRUB1: the Codex auth env vars are in the scrub set', () => {
+  for (const k of CODEX_AUTH_KEYS) assert.ok(iso.STABLE_ENV_KEYS.includes(k), `${k} must be scrubbed`);
+});
+
+test('SCRUB1: an agent spawned by a scrubbed dev process does not carry the Codex auth vars', () => {
+  const { spawnSync } = require('node:child_process');
+  // The child stands in for the dev main process: it scrubs its own process.env as
+  // index.ts bootstrap does, builds an agent env with buildPtyEnv and spawns from it.
+  // On win32 one key is set in lower case: process.env lookups are case-insensitive
+  // there, so the scrub must still take it.
+  const child = `
+    const loadTs = require(${JSON.stringify(path.resolve(__dirname, 'load-ts.cjs'))});
+    const iso = loadTs(${JSON.stringify(path.resolve(__dirname, '../src/main/devIsolation.ts'))});
+    const { buildPtyEnv } = loadTs(${JSON.stringify(path.resolve(__dirname, '../src/main/ptyEnv.ts'))});
+    iso.scrubInheritedEnv(process.env);
+    const env = buildPtyEnv(process.env, process.env.PATH || '', {});
+    // Guppy's own BYOK key is materialized per agent (agentEnv layer) and must survive.
+    const byok = buildPtyEnv(process.env, process.env.PATH || '', { OPENAI_API_KEY: 'byok-from-broker' });
+    const r = require('node:child_process').spawnSync(process.execPath,
+      ['-e', 'process.stdout.write(JSON.stringify(Object.keys(process.env)))'], { env, encoding: 'utf8' });
+    process.stdout.write(JSON.stringify({ keys: JSON.parse(r.stdout), byok: byok.OPENAI_API_KEY }));`;
+  const env = { ...process.env, SCRUB1_CONTROL: 'kept' };
+  for (const k of CODEX_AUTH_KEYS) env[k] = 'sk-stable-test-value';
+  if (process.platform === 'win32') { delete env.CODEX_ACCESS_TOKEN; env.codex_access_token = 'sk-stable-test-value'; }
+  const r = spawnSync(process.execPath, ['-e', child], { env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.byok, 'byok-from-broker', 'a per-agent BYOK key is not scrubbed');
+  const keys = out.keys.map((k) => k.toUpperCase());
+  assert.ok(keys.includes('SCRUB1_CONTROL'), 'the grandchild inherits ordinary env');
+  for (const k of CODEX_AUTH_KEYS) assert.equal(keys.includes(k), false, `${k} reached the spawned agent`);
+});
+
 test('devWindowTitle: marks DEV only when isolation is on', () => {
   assert.equal(iso.devWindowTitle('Guppy', false), 'Guppy');
   assert.equal(iso.devWindowTitle('Guppy', true), 'Guppy DEV');
