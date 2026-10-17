@@ -121,9 +121,11 @@ test('(2b) pipe hooks require the same per-agent capability as HTTP, including a
   assert.equal(rec.handled.length, 0, 'missing, bad, and cross-agent tokens never reach handle');
   await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
   assert.equal(rec.handled.length, 1, 'the HTTP capability authorizes its matching pipe hook');
+  assert.deepEqual(rec.logs.filter((x) => x.kind === 'hook-auth-reject').map((x) => x.reason), ['missing', 'bad', 'revoked'], 'pipe rejects are visible, rate-limited by agent/reason');
   s.revokeHookToken(A);
   await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
   assert.equal(rec.handled.length, 1, 'a revoked capability no longer authorizes the pipe');
+  assert.equal(rec.logs.at(-1).reason, 'revoked');
 });
 
 test('(3) identity: the URL wins; a different body agent_id is a subagent (kept out of session/lifecycle/Stop); an incoming provider_agent_id is stripped', async (t) => {

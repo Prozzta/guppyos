@@ -1490,6 +1490,8 @@ export class HiveManager {
       const sock = this.sockPath();
       if (desc && sock) {
         env.HIVE_SOCK = sock;
+        const pipeToken = this.hookBroker?.tokenFor?.(meta.id) ?? null;
+        if (pipeToken) env.HIVE_HOOK_TOKEN = pipeToken;
         // READS-181: Codex lifecycle hooks use the loopback broker too. Give its
         // ledger helper the same per-spawn capability URL that Claude receives.
         const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
@@ -1603,7 +1605,7 @@ export class HiveManager {
             // the user hasn't set one.
             const upstream = process.env[desc.baseUrlEnv]
               || (desc.api === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.openai.com/v1');
-            const port = await this.startProxyBridge(meta.id, { sock, sessionId, api: desc.api, upstream });
+            const port = await this.startProxyBridge(meta.id, { sock, sessionId, api: desc.api, upstream, hookToken: pipeToken });
             // Only redirect the CLI through the proxy if the sidecar actually bound a
             // port. On failure leave routing untouched → the CLI talks to its real
             // upstream directly (degraded: no synthesized hive events, but it still
@@ -2454,7 +2456,7 @@ export class HiveManager {
    */
   private startProxyBridge(
     agentId: string,
-    cfg: { sock: string; sessionId: string; api: 'openai' | 'anthropic'; upstream: string }
+    cfg: { sock: string; sessionId: string; api: 'openai' | 'anthropic'; upstream: string; hookToken: string | null }
   ): Promise<number> {
     this.stopProxyBridge(agentId);
     const script = this.proxyShimPath();
@@ -2470,6 +2472,7 @@ export class HiveManager {
             // Run the .cjs under Electron's bundled Node, not as a second app window.
             ELECTRON_RUN_AS_NODE: '1',
             HIVE_SOCK: cfg.sock,
+            HIVE_HOOK_TOKEN: cfg.hookToken ?? '',
             AGENT_ID: agentId,
             UPSTREAM_BASE_URL: cfg.upstream,
             HIVE_PROXY_SESSION: cfg.sessionId,
@@ -5710,7 +5713,7 @@ process.stdin.on('end', () => {
   const part = partAt > 0 ? process.argv[partAt + 1] : null;
   if (part === 'briefing' || part === 'bundle') payload.munder_part = part;
   const sock = process.env.HIVE_SOCK;
-  if (!hookToken) { process.exit(0); }
+  if (!hookToken) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (_) {} process.exit(0); }
   payload.hook_token = hookToken;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.
@@ -5782,7 +5785,7 @@ process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
   if (!agentId || !sock) { process.exit(0); } // not a hive worker → ignore
-  if (!hookToken) { process.exit(0); }
+  if (!hookToken) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (_) {} process.exit(0); }
   let agy = {};
   try { agy = JSON.parse(data || '{}'); } catch (_) {}
   const tc = agy.toolCall || {};
@@ -5861,12 +5864,14 @@ const PI_EXTENSION = `'use strict';
 var net = require('node:net');
 var SOCK = process.env.HIVE_SOCK;
 var AGENT = process.env.AGENT_ID || null;
+var HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
 var AUTO = process.env.HIVE_AUTO_APPROVE === '1';
 function post(payload) {
   try {
-    if (!SOCK) return;
+    if (!SOCK || !HOOK_TOKEN) return;
     if (payload.agent_id && payload.agent_id !== AGENT) payload.provider_agent_id = payload.agent_id;
     payload.agent_id = AGENT || payload.agent_id || null;
+    payload.hook_token = HOOK_TOKEN;
     var c = net.createConnection(SOCK, function () { try { c.end(JSON.stringify(payload) + '\\n'); } catch (e) {} });
     c.on('error', function () {});
   } catch (e) {}
@@ -5900,11 +5905,13 @@ module.exports.default = module.exports;
 const OPENCODE_PLUGIN = `import { createConnection } from 'node:net';
 const SOCK = process.env.HIVE_SOCK;
 const AGENT = process.env.AGENT_ID || null;
+const HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
 function post(payload) {
   try {
-    if (!SOCK) return;
+    if (!SOCK || !HOOK_TOKEN) return;
     if (payload.agent_id && payload.agent_id !== AGENT) payload.provider_agent_id = payload.agent_id;
     payload.agent_id = AGENT || payload.agent_id || null;
+    payload.hook_token = HOOK_TOKEN;
     const c = createConnection(SOCK, () => { try { c.end(JSON.stringify(payload) + '\\n'); } catch (e) {} });
     c.on('error', () => {});
   } catch (e) {}
@@ -5944,6 +5951,7 @@ const { URL } = require('url');
 
 const SOCK = process.env.HIVE_SOCK;
 const AGENT_ID = process.env.AGENT_ID || null;
+const HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
 const UPSTREAM = process.env.UPSTREAM_BASE_URL || '';
 const SESSION = process.env.HIVE_PROXY_SESSION || null;
 const API = process.env.HIVE_PROXY_API === 'anthropic' ? 'anthropic' : 'openai';
@@ -5962,8 +5970,9 @@ function ctxSize(model) {
 
 // Fire-and-forget emit of a shim-shaped payload to the hive socket. Never throws.
 function emit(payload) {
-  if (!SOCK) return;
+  if (!SOCK || !HOOK_TOKEN) return;
   try {
+    payload.hook_token = HOOK_TOKEN;
     const c = net.createConnection(SOCK, function () { c.end(JSON.stringify(payload) + '\\n'); });
     c.on('error', function () {});
   } catch (e) {}
@@ -6157,12 +6166,13 @@ export const GEMINI_HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
 const agentId = process.env.AGENT_ID || null;
+const hookToken = process.env.HIVE_HOOK_TOKEN || null;
 let data = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
-  if (!agentId || !sock) { process.exit(0); }
+  if (!agentId || !sock || !hookToken) { process.exit(0); }
   let gemini = {};
   try { gemini = JSON.parse(data || '{}'); } catch (_) {}
   const names = {
@@ -6175,7 +6185,8 @@ process.stdin.on('end', () => {
   const payload = {
     ...gemini,
     hook_event_name: names[gemini.hook_event_name] || gemini.hook_event_name || 'Unknown',
-    agent_id: agentId
+    agent_id: agentId,
+    hook_token: hookToken
   };
   let resp = '';
   const done = () => {
@@ -6222,12 +6233,13 @@ export const GROK_HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
 const agentId = process.env.AGENT_ID || null;
+const hookToken = process.env.HIVE_HOOK_TOKEN || null;
 let data = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
-  if (!agentId || !sock) { process.exit(0); }
+  if (!agentId || !sock || !hookToken) { process.exit(0); }
   let grok = {};
   try { grok = JSON.parse(data || '{}'); } catch (_) {}
   const names = {
@@ -6249,6 +6261,7 @@ process.stdin.on('end', () => {
   const payload = {
     hook_event_name: names[grok.hookEventName] || grok.hookEventName || 'Unknown',
     agent_id: agentId,
+    hook_token: hookToken,
     session_id: grok.sessionId,
     cwd: grok.cwd || grok.workspaceRoot,
     tool_name: grok.toolName,

@@ -37,6 +37,8 @@ test('parseOnewayFrame: both headers (CRLF), a literal or empty agent id, and ba
   assert.deepEqual(h.body, AGY);
   const s = parseOnewayFrame(`agy-status ${TOKEN} phyllis\r\n{"agent_state":"idle"}`);
   assert.equal(s.kind, 'status'); assert.equal(s.token, TOKEN); assert.equal(s.agentId, 'phyllis');
+  const hiveStatus = parseOnewayFrame(`agy-status ${TOKEN} ${'ab'.repeat(16)} phyllis\r\n{"agent_state":"idle"}`);
+  assert.equal(hiveStatus.kind, 'status'); assert.equal(hiveStatus.token, TOKEN); assert.equal(hiveStatus.agentId, 'phyllis', 'the optional hook token is positional, not the status capability');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} %AGENT_ID%\r\n{}`).agentId, null, 'a literal %AGENT_ID% = no agent');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} \r\n{}`).agentId, null, 'empty = a user\'s own session');
   assert.equal(parseOnewayFrame('agy PostToolUse phyllis\r\n{}'), null, 'one-way hooks without a capability are rejected');
