@@ -83,6 +83,16 @@ test('the roster line carries the whole floor and its state', async (t) => {
   assert.ok(line.length < 1200, `too long for a 3-agent floor: ${line.length} chars`);
 });
 
+test('the roster makes a quiet-held inbox visibly bounded by its release time', async (t) => {
+  const { hive } = await floor(t);
+  const until = Date.UTC(2030, 0, 2, 6, 53, 0);
+  hive.writeFleetSnapshot({
+    ts: Date.now(),
+    agents: [{ id: 'jim-1', name: 'Jim', role: 'agent', breaker: 'ok', tokens: 0, usd: 0, lastActiveSecAgo: 0, inboxBacklog: 1, inboxHeld: 1, heldUntil: until }]
+  });
+  assert.match(hive.rosterContext(), /inbox 1 \(held until 06:53\)/);
+});
+
 test('each agent line carries its live context-window occupancy (ctx NN%)', async (t) => {
   const { hive, fire } = await floor(t);
   snapshot(hive);

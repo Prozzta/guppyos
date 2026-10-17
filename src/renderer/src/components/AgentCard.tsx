@@ -51,6 +51,9 @@ export interface AgentCardProps {
   taskFlags?: string[];
   /** Messages waiting (not yet acted on, fleet inboxBacklog): a separate mail badge. */
   inboxBacklog?: number;
+  /** Quiet mail held until its bounded automatic-release deadline (display only). */
+  inboxHeld?: number;
+  heldUntil?: number;
   /** FLEET-LIVENESS-BLIND: shown working, yet no hook or tool call (main's finding; display only). */
   silentTurn?: SilentTurnView;
   draggable?: boolean; // must sit on the <button> itself — Chromium won't start a drag on an ancestor from inside a form control
@@ -72,7 +75,7 @@ const fmtK = (n: number): string => `${Math.round(n / 1000)}k`;
 export function AgentCard({
   agentId, appearanceByTheme, name, character, accent, status: hookStatus, ptyId, project, action, progress = 0,
   contextTokens, contextLimit, selected, isGod, onClick, onRename,
-  doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, silentTurn, draggable, note, onEditNote
+  doingCount = 0, onTaskNoteClick, taskFlags = [], inboxBacklog = 0, inboxHeld = 0, heldUntil, silentTurn, draggable, note, onEditNote
 }: AgentCardProps) {
   const [hover, setHover] = useState(false);
   // CARD-IDLE-WHILE-WORKING: busy-or-not comes from main's liveness classification (a long tool
@@ -240,7 +243,7 @@ export function AgentCard({
       {inboxBacklog > 0 && (
         <span
           data-badge="mail"
-          title={mailBadgeTitle(inboxBacklog)}
+          title={mailBadgeTitle(inboxBacklog, inboxHeld, heldUntil)}
           style={{
             position: 'absolute', right: -5, top: -6, zIndex: 2,
             minWidth: 18, height: 18, padding: '0 4px', borderRadius: 9,
@@ -251,7 +254,7 @@ export function AgentCard({
             pointerEvents: 'none'
           }}
         >
-          {MAIL_GLYPH}{inboxBacklog}
+          {MAIL_GLYPH}{inboxBacklog}{inboxHeld > 0 && heldUntil && heldUntil > Date.now() ? ` held ${new Date(heldUntil).toISOString().slice(11, 16)}` : ''}
         </span>
       )}
       {/* FLEET-LIVENESS-BLIND: the SILENT badge, top-left (the other two use the right corners).

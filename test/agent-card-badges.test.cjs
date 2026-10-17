@@ -33,6 +33,12 @@ test('the mail badge says messages WAITING, never unread (MB1)', () => {
   assert.doesNotMatch(B.mailBadgeTitle(3), /unread/i);
 });
 
+test('the mail badge labels a bounded quiet hold with its UTC release time', () => {
+  const until = Date.now() + 15 * 60_000;
+  assert.match(B.mailBadgeTitle(1, 1, until), /^1 message waiting \(held until \d{2}:\d{2}\)$/);
+  assert.match(B.mailBadgeTitle(3, 1, until), /^3 messages waiting \(1 held until \d{2}:\d{2}\)$/);
+});
+
 test('per-agent doing cards and flag lines; duplicates once; archived assignees not counted (MB2)', () => {
   const tasks = { tasks: [
     { id: 'A', status: 'doing', assignee: 'jim' }, { id: 'B', status: 'doing', assignee: 'jim' },
@@ -58,7 +64,8 @@ test('AgentCard draws the chip from taskChipText and a distinct mail badge from 
   assert.match(CARD, /\{inboxBacklog > 0 && \(\s*<span\s+data-badge="mail"/);
   assert.match(mail, /\{MAIL_GLYPH\}\{inboxBacklog\}/);
   assert.doesNotMatch(mail, /doingCount/);
-  assert.match(mail, /title=\{mailBadgeTitle\(inboxBacklog\)\}/);
+  assert.match(mail, /title=\{mailBadgeTitle\(inboxBacklog, inboxHeld, heldUntil\)\}/);
+  assert.match(mail, /held \$\{new Date\(heldUntil\)\.toISOString\(\)\.slice\(11, 16\)\}/);
   assert.match(mail, /top: -6/, 'a different corner');
   assert.match(mail, /borderRadius: 9/, 'a different shape');
 });
@@ -67,10 +74,14 @@ test('the strip feeds both badges from main (flags + messages waiting)', () => {
   const strip = codeOnly(readSource('src/renderer/src/components/AgentStrip.tsx'));
   assert.match(strip, /setBadgeByAgent\(agentBadges\(raw, flags\)\)/);
   assert.match(strip, /inboxBacklog=\{inboxByAgent\[a\.id\] \?\? 0\}/);
+  assert.match(strip, /inboxHeld=\{inboxHeldByAgent\[a\.id\] \?\? 0\}/);
+  assert.match(strip, /heldUntil=\{heldUntilByAgent\[a\.id\]\}/);
   assert.match(strip, /taskFlags=\{badgeByAgent\[a\.id\]\?\.flagged\}/);
   const index = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   assert.match(index, /ipcMain\.handle\('hive:cardBadges'/);
-  assert.match(index, /inboxBacklog\[id\] = fleetMail\(id\)\.inboxBacklog/);
+  assert.match(index, /const mail = fleetMail\(id\);\n\s+inboxBacklog\[id\] = mail\.inboxBacklog/);
+  assert.match(index, /inboxHeld\[id\] = mail\.inboxHeld/);
+  assert.match(index, /heldUntil\[id\] = mail\.heldUntil/);
 });
 
 test('Kanban status age: exact, bounded (">="), missing', () => {

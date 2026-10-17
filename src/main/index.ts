@@ -2821,8 +2821,11 @@ const costTotals = new CostLedgerTotals();
 
 /** ZT-I1-MAIL §3 #6: one agent's mail fields for fleet.json, from its ledger. A ledger that
  *  cannot be read keeps the backlog (file count) and publishes no obligation lists. */
-function fleetMail(id: string): Partial<ReturnType<typeof fleetMailFields>> & { inboxBacklog: number } {
-  try { return fleetMailFields(hive.mail, id); } catch { return { inboxBacklog: hive.inboxBacklog(id) }; }
+function fleetMail(id: string): Partial<ReturnType<typeof fleetMailFields>> & { inboxBacklog: number; inboxHeld?: number; heldUntil?: number } {
+  const now = Date.now();
+  const heldUntil = [...workerWake.quietHeld(id).values()].filter((until) => Number.isFinite(until) && until > now);
+  const quiet = heldUntil.length ? { inboxHeld: heldUntil.length, heldUntil: Math.min(...heldUntil) } : {};
+  try { return { ...fleetMailFields(hive.mail, id), ...quiet }; } catch { return { inboxBacklog: hive.inboxBacklog(id), ...quiet }; }
 }
 
 /** Build + write the live fleet snapshot Michael reads (`<hive>/fleet.json`).
@@ -5447,12 +5450,18 @@ ipcMain.handle('hive:floorDigest', () => {
 });
 ipcMain.handle('hive:cardBadges', () => {
   const inboxBacklog: Record<string, number> = {};
+  const inboxHeld: Record<string, number> = {};
+  const heldUntil: Record<string, number> = {};
   try {
-    for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) inboxBacklog[id] = fleetMail(id).inboxBacklog;
+    for (const [id, a] of Object.entries(hive.registry().agents)) if (!a.archived) {
+      const mail = fleetMail(id);
+      inboxBacklog[id] = mail.inboxBacklog;
+      if (mail.inboxHeld && mail.heldUntil) { inboxHeld[id] = mail.inboxHeld; heldUntil[id] = mail.heldUntil; }
+    }
   } catch { /* hive unavailable: no mail badges */ }
   let silentTurns: Record<string, SilentTurnView> = {};
   try { silentTurns = silentTurnsById(Date.now()); } catch { /* no silent badges */ }
-  return { flags: boardMonitor.flags(), inboxBacklog, silentTurns };
+  return { flags: boardMonitor.flags(), inboxBacklog, inboxHeld, heldUntil, silentTurns };
 });
 ipcMain.handle('hive:log', (_evt, n: unknown) => hive.logTail(typeof n === 'number' ? n : 200));
 ipcMain.handle('hive:memory', (_evt, id: unknown) => (typeof id === 'string' ? hive.memory(id) : ''));

@@ -5024,6 +5024,7 @@ export class HiveManager {
           id: string; name?: string; role?: string; isGod?: boolean;
           breaker?: string; tokens?: number; usd?: number;
           lastTool?: string | null; lastActiveSecAgo?: number | null; inboxBacklog?: number;
+          inboxHeld?: number; heldUntil?: number;
           onHold?: boolean; runningTool?: { name: string; forSec: number } | null;
           silentTurn?: SilentTurnView | null;
         }>;
@@ -5059,7 +5060,12 @@ export class HiveManager {
           typeof a.lastActiveSecAgo === 'number' ? `active ${ago(a.lastActiveSecAgo)}` : 'no activity yet'];
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);
-        if (a.inboxBacklog) bits.push(`inbox ${a.inboxBacklog}`);
+        if (a.inboxBacklog) {
+          const held = typeof a.inboxHeld === 'number' && a.inboxHeld > 0 && typeof a.heldUntil === 'number' && a.heldUntil > nowMs;
+          const until = held ? new Date(a.heldUntil as number).toISOString().slice(11, 16) : null;
+          bits.push(held && a.inboxHeld === a.inboxBacklog ? `inbox ${a.inboxBacklog} (held until ${until})` : `inbox ${a.inboxBacklog}`);
+          if (held && a.inboxHeld !== a.inboxBacklog) bits.push(`${a.inboxHeld} held until ${until}`);
+        }
         if (a.breaker && a.breaker !== 'ok' && a.breaker !== 'none') bits.push(`breaker ${a.breaker}`);
         if (a.isGod) bits.push('you');
         // First in the row after the role would be louder, but this reads in

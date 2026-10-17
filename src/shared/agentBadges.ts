@@ -73,8 +73,11 @@ export function taskChipTitle(count: number, flagged: readonly string[]): string
   return flagged.length ? `${base}\n! ${flagged.join('; ')}` : base;
 }
 
-export function mailBadgeTitle(count: number): string {
-  return `${count} message${count === 1 ? '' : 's'} waiting`;
+export function mailBadgeTitle(count: number, held = 0, heldUntil?: number): string {
+  const base = `${count} message${count === 1 ? '' : 's'} waiting`;
+  if (!(held > 0) || typeof heldUntil !== 'number' || heldUntil <= Date.now()) return base;
+  const until = new Date(heldUntil).toISOString().slice(11, 16);
+  return `${base} (${held === count ? '' : `${held} `}held until ${until})`;
 }
 
 /** FLEET-LIVENESS-BLIND: an agent shown working whose turn has gone silent (main's silentTurn.ts):
