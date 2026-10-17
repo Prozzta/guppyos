@@ -294,4 +294,7 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
   ].join('\n');
   const c = classifyCommand(cmd, 0, HookServer.heavyScriptCtx(process.cwd()));
   assert.equal(c.heavy, true, 'the generated batch child runs arbitrary work');
+  for (const body of ['cmd //c "$B"', 'cmd //c "${B}"']) {
+    assert.equal(classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, body);
+  }
 });

@@ -814,7 +814,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       const body = args.slice(k + 1).join(' ');
       // A batch wrapper can generate a .cmd and reach it through `$(cygpath -w ...)`.
       // We can classify cygpath but not its resulting command, which cmd executes directly.
-      if (bin === 'cmd' && /\$\(|`/.test(body)) return { heavy: true, kind: 'bench', why: `cmd ${args[k]} (computed command the lock cannot read)`, provisional: true };
+      // In a sh wrapper any $ may be expanded to an unreadable batch path (including $B / ${B});
+      // this deliberately also treats rare light command substitutions conservatively.
+      if (bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) return { heavy: true, kind: 'bench', why: `cmd ${args[k]} (computed command the lock cannot read)`, provisional: true };
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
@@ -1441,6 +1443,8 @@ export interface HeavyLockDeps {
   log?: (row: Record<string, unknown>) => void;
   /** HEAVY-LOCK-SELF-WAIT: tell a queued agent that a slot is RESERVED for it until `until` (ms). */
   notify?: (agentId: string, kind: HeavyKind, until: number) => void;
+  /** A limit switched to Off releases every queued/reserved agent without a reservation. */
+  notifyUnlimited?: (agentId: string, kind: HeavyKind) => void;
   /** LOCK-WAIT-NOTICES: tell an agent it has left the queue: dropped as stale, or its reservation
    *  lapsed unused. Not called for the agent whose own heavy call is running, nor for a gone one. */
   notifyLapse?: (agentId: string, kind: HeavyKind, why: 'stale' | 'expired') => void;
@@ -1544,6 +1548,14 @@ export function heavyWaitLapsedNotice(agentId: string, kind: string, why: 'stale
     ? `You were taken out of the heavy-job queue because you had not asked again for ${Math.round(HEAVY_TTL_MS / 60_000)} min while the slot stayed busy, so no "HEAVY SLOT FREE" notice will come. If you still need your ${kind}, run it again to queue again. No reply is needed.`
     : `The heavy-job slot reserved for you was not used in time and has passed to the next agent in the queue (or is free). If you still need your ${kind}, run it again to queue again. No reply is needed.`;
   return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
+}
+
+export function heavyUnlimitedNotice(agentId: string, kind: string): {
+  message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
+  from: 'system'; steer: string;
+} {
+  const subject = `HEAVY LIMIT OFF: the ${kind} you queued can run now`;
+  return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body: 'Heavy jobs are now unlimited. Run your queued job now if you still need it. No reply is needed.', wake: 'now' }, from: 'system', steer: `${subject}.` };
 }
 
 export type HeavyDecision = { allow: true; acquired: boolean } | { allow: false; reason: string; holders: HeavyHolder[] };
@@ -1701,9 +1713,10 @@ export class HeavyJobLock {
   private grant(caller?: string): void {
     const limit = this.d.limit();
     if (limit === 'off') {
-      const had = this.waiters.length + this.reservations.size;
+      const pending = [...this.waiters, ...[...this.reservations.entries()].map(([agentId, r]) => ({ agentId, kind: r.kind }))];
       this.waiters.length = 0; this.reservations.clear();
-      if (had) this.changed();
+      if (pending.length) this.changed();
+      for (const w of pending) { try { this.d.notifyUnlimited?.(w.agentId, w.kind); } catch { /* best effort */ } }
       return;
     }
     while (this.waiters.length && this.holders.size + this.reservations.size < limit) {
