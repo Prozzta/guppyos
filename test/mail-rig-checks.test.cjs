@@ -107,6 +107,14 @@ async function c1UpToRepend(t, diagId = 'ag-1') {
   await waitFor(async () => (await rig.rows('mail-surface-late')).some((r) => r.ids.includes(m.id)), { what: 'mail-surface-late', diag });
   // The re-pend re-wakes ag-1: its prompt is submitted and its turn start now waits for the test.
   await waitFor(() => rig.transcript('ag-1').filter((r) => r.kind === 'start-held').length > held, { what: 'the re-wake\'s turn start is held', diag });
+  // The held stub records its start immediately after it accepts Enter, but the submit owner can
+  // still be verifying that Enter.  The old control must advance the clock only after that wake
+  // has settled; otherwise every step can precede the confirm timer and it no longer exercises C1.
+  await waitFor(async () => {
+    const fresh = (await rig.call('diags')).filter((d) => d.agentId === 'ag-1' && (d.stage === 'claim' || d.stage === 'settle')).slice(wakeBase);
+    return fresh.some((d) => d.stage === 'settle' && d.outcome === 'COMMITTED'
+      && fresh.some((claim) => claim.stage === 'claim' && claim.requestId === d.requestId));
+  }, { what: 'the held re-wake submission settled', diag });
   return { rig, m, wakeBase, release: () => rig.cue('ag-1', { cue: 'release-starts' }) };
 }
 const resurfaced = (rig, m) => () => rig.contexts('ag-1').filter((c) => c.ids.includes(m.id)).length >= 2;
@@ -155,8 +163,9 @@ test('C1 A1 proof: a re-wake whose turn start is held until released: the OLD st
   assert.equal(await unconfirmed(now.rig), b2, 'holdWhileBusy: never judged unconfirmed');
   const all = await wakeRows();
   const fresh = all.slice(now.wakeBase);
-  const settled = fresh.find((d) => d.stage === 'settle' && d.outcome === 'COMMITTED');
-  assert.ok(settled && fresh.some((d) => d.stage === 'claim' && d.requestId === settled.requestId),
+  const settled = fresh.find((d) => d.stage === 'settle' && d.outcome === 'COMMITTED'
+    && fresh.some((claim) => claim.stage === 'claim' && claim.requestId === d.requestId));
+  assert.ok(settled,
     `THE RE-WAKE WAS IN FLIGHT WHILE ITS TURN START WAS HELD: the re-pend's ag-1 wake was claimed and submitted (${JSON.stringify(fresh)})`);
   // Its turn start was held after that submit, and released only after the beat loop had held the clock.
   const tr = now.rig.transcript('ag-1');

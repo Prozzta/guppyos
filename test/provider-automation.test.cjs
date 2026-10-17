@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
 const {
@@ -13,6 +15,22 @@ const {
   terminalReadySettleMs,
   terminalReadyToReceive
 } = loadTs('src/shared/providerAutomation.ts');
+
+test('AGY submit verification is opt-in: a mutation back to write-level COMMITTED is killed', () => {
+  const policy = loadTs('src/shared/providerAutomation.ts');
+  assert.equal(policy.automaticVerifySubmit('antigravity'), true, 'the recognised AGY composer must verify Enter');
+  assert.equal(policy.automaticVerifySubmit('claude'), false, 'Claude remains unchanged');
+
+  const file = path.resolve(__dirname, '..', 'src/shared/providerAutomation.ts');
+  const source = fs.readFileSync(file, 'utf8');
+  const from = "return provider === 'codex' || provider === 'antigravity';";
+  assert.equal(source.split(from).length - 1, 1, 'the policy mutation target is unique');
+  const mutant = loadTs.fromText('src/shared/providerAutomation.ts', source.replace(from, "return provider === 'codex';"));
+  assert.throws(
+    () => assert.equal(mutant.automaticVerifySubmit('antigravity'), true, 'AGY must not fall back to write-level COMMITTED'),
+    /AGY must not fall back to write-level COMMITTED/
+  );
+});
 
 // — the queue's one-pending-compact invariant depends entirely on this predicate —
 
