@@ -343,14 +343,15 @@ static class HeavyJob
 
     // A job's name lasts only while a handle to it is open (its processes do not keep it), so the
     // agent's root process holds one too: a serve started after this one died still finds the job
-    // for as long as the agent lives.
-    static void Keep(IntPtr job, int pid)
+    // for as long as the agent lives. False: the name dies with this serve (the sweep says so).
+    static bool Keep(IntPtr job, int pid)
     {
         IntPtr p = OpenProcess(0x0040 /* DUP_HANDLE */, false, pid);
-        if (p == IntPtr.Zero) return;
+        if (p == IntPtr.Zero) return false;
         IntPtr d;
-        DuplicateHandle(GetCurrentProcess(), job, p, out d, 0, false, 2 /* SAME_ACCESS */);
+        bool ok = DuplicateHandle(GetCurrentProcess(), job, p, out d, 0, false, 2 /* SAME_ACCESS */);
         CloseHandle(p);
+        return ok;
     }
 
     // The agent's state in this serve, or its jobs opened again by name; null when it has none.
@@ -375,7 +376,7 @@ static class HeavyJob
         long rootCreated = Created(root);
         if (rootCreated == 0) throw new Exception("no process " + root);
         foreach (int pid in new List<int>(a.Seen.Keys)) if (Created(pid) != a.Seen[pid][0]) a.Seen.Remove(pid);
-        int added = 0, missed = 0, members = 0;
+        int added = 0, missed = 0, members = 0; bool kept = true;
         for (int pass = 0; pass < 5; pass++)
         {
             int newly = 0; missed = 0; members = 0;
@@ -394,7 +395,7 @@ static class HeavyJob
                     if (j != IntPtr.Zero)
                     {
                         Apply(j, a.Background, a.Half, true);
-                        if (AssignProcessToJobObject(j, h)) { a.Jobs.Add(j); Keep(j, root); inside = true; newly++; } else CloseHandle(j);
+                        if (AssignProcessToJobObject(j, h)) { a.Jobs.Add(j); if (!Keep(j, root)) kept = false; inside = true; newly++; } else CloseHandle(j);
                     }
                 }
                 CloseHandle(h);
@@ -409,7 +410,7 @@ static class HeavyJob
             added += newly;
             if (newly == 0) break;
         }
-        return "{\"ok\":true,\"jobs\":" + a.Jobs.Count + ",\"members\":" + members + ",\"added\":" + added + ",\"missed\":" + missed + ",\"total\":" + Total(a) + "}";
+        return "{\"ok\":true,\"jobs\":" + a.Jobs.Count + ",\"members\":" + members + ",\"added\":" + added + ",\"missed\":" + missed + ",\"total\":" + Total(a) + ",\"kept\":" + (kept ? "true" : "false") + "}";
     }
 
     // root and its descendants, parents first, each created at or after its parent (a recycled pid

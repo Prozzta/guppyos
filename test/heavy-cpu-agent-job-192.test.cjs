@@ -106,6 +106,32 @@ test('a shell never seen, after its Post: held while anything created in the job
   assert.equal(logs.at(-1).action, 'attach-missed', 'nothing new in the jobs: it ran outside (e.g. started by a service)');
 });
 
+test('a shell never seen, after its Post, with something fresh that never ends (a server it started): held only up to the unstarted limit', async () => {
+  const f = fakeServe(); const now = { t: 100 };
+  const { j, logs } = jobs(f, now);
+  await j.attachCall('a1', { command: 'npm run dev' }, 'unknown-shell');
+  f.state[100] = { shell: 0, alive: 0, fresh: 1, total: 9 };
+  j.callPost('a1', { command: 'npm run dev' });
+  now.t = 100 + C.HEAVY_JOB_UNSTARTED_MS - 1;
+  await j.poll(); await j.poll();
+  assert.equal(j.agentCallCount('a1'), 1, 'held while it may still be the call');
+  now.t = 100 + C.HEAVY_JOB_UNSTARTED_MS;
+  await j.poll();
+  assert.equal(j.agentCallCount('a1'), 0);
+  assert.equal(logs.at(-1).action, 'unseen-capped');
+  assert.ok(f.sent.includes('set a1-agent 0 0'), 'the agent is no longer limited');
+});
+
+test('the attach row says whether the agent holds its jobs\' names (kept false: a serve restart would lose them)', async () => {
+  for (const kept of [true, false]) {
+    const logs = [];
+    const j = new C.HeavyJobs({ platform: 'win32', options: () => ({ background: true, half: true }), exe: () => 'x', now: () => 1, setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r), root: () => 777,
+      channel: () => ({ request: async (line) => (line.startsWith('agent ') ? { ok: true, members: 1, missed: 0, total: 1, kept } : { ok: true }), close() {} }) });
+    await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+    assert.equal(logs.find((r) => r.action === 'attach').kept, kept);
+  }
+});
+
 test('a call with no Post: held until the agent\'s turn ends (a declined call), else the unstarted limit; a started or Posted call is not ended by the turn', async () => {
   const f = fakeServe(); const now = { t: 300 };
   const { j, logs } = jobs(f, now);
@@ -456,6 +482,7 @@ test('LIVE: a serve that dies leaves its agent jobs to the next one: it opens th
       a = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       const first = await new Promise((resolve) => { a.stdout.once('data', (d) => resolve(String(d))); a.stdin.write(`agent t1-agent ${watch.pid} 1 1 ${Date.now()}\n`); });
       assert.equal(JSON.parse(first).ok, true, first);
+      assert.equal(JSON.parse(first).kept, true, 'the agent holds its jobs\' names');
       go(w1);
       await until('limited in the job', () => rows(w2).length >= 1);
       assert.ok(bits(rows(w2)[0].mask) <= half, 'limited while serve A lives');
@@ -483,12 +510,13 @@ test('LIVE: a serve that dies leaves its agent jobs to the next one: it opens th
     }
   });
 
-// A stand-in serve: `slow` answers after 4 s (past the request limit), `bad` answers with a line
-// that is not JSON, anything else answers {"ok":true,"r":<line>}.
+// A stand-in serve: `slow` answers after 4 s (past the request limit), `hang` never answers, `bad`
+// answers with a line that is not JSON, anything else answers {"ok":true,"r":<line>}.
 const FAKE_SERVE = `
 using System;
 static class Fake { static void Main() { string l; while ((l = Console.ReadLine()) != null) {
   if (l == "slow") { System.Threading.Thread.Sleep(4000); Console.WriteLine("{\\"ok\\":true,\\"r\\":\\"slow\\"}"); }
+  else if (l == "hang") System.Threading.Thread.Sleep(System.Threading.Timeout.Infinite);
   else if (l == "bad") Console.WriteLine("not json");
   else Console.WriteLine("{\\"ok\\":true,\\"r\\":\\"" + l + "\\"}");
   Console.Out.Flush(); } } }
@@ -508,6 +536,30 @@ test('LIVE: the serve channel answers a slow or unreadable reply with an error, 
       assert.deepEqual(await ch.request('slow'), { ok: false, error: 'no reply in time' });
       assert.deepEqual(await ch.request('bad'), { ok: false, error: 'unreadable reply' });
       assert.deepEqual(await ch.request('x'), { ok: true, r: 'x' }, 'the late reply took its own place');
+    } finally {
+      ch?.close();
+      for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+    }
+  });
+
+test('LIVE: a serve that stops answering is hung after two requests in a row: it is ended and answers as a dead helper, so the next request starts a new one',
+  { skip: process.platform !== 'win32' ? 'Windows only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 60_000 },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-chan-'));
+    let ch = null;
+    try {
+      const exe = path.join(dir, 'fake.exe');
+      fs.writeFileSync(path.join(dir, 'fake.cs'), FAKE_SERVE);
+      const c = spawnSync(CSC, ['-nologo', `-out:${exe}`, path.join(dir, 'fake.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+      ch = C.serveChannel(exe);
+      assert.deepEqual(await ch.request('slow'), { ok: false, error: 'no reply in time' });
+      assert.deepEqual(await ch.request('x'), { ok: true, r: 'x' }, 'answered: the count of silences starts again');
+      assert.deepEqual(await ch.request('hang'), { ok: false, error: 'no reply in time' }, 'one silence is a slow helper');
+      assert.equal(await ch.request('y'), null, 'the second in a row: hung, answered as dead');
+      assert.equal(await ch.request('z'), null);
+      // Ended: its .exe is no longer in use.
+      await until('the hung serve ended', () => { try { fs.unlinkSync(exe); return true; } catch { return false; } }, 10_000);
     } finally {
       ch?.close();
       for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }

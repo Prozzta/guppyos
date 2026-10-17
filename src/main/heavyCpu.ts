@@ -42,6 +42,9 @@ export const HEAVY_JOB_UNSTARTED_MS = 30 * 60_000;
 export const HEAVY_JOB_POLL_MS = 15_000;
 /** One request to the helper: past this it is treated as failed. */
 export const HEAVY_JOB_REQUEST_MS = 3_000;
+/** This many requests in a row with no reply between: the helper is hung, and is ended and started
+ *  again (its agent jobs are named, so the new serve opens them). */
+export const HEAVY_JOB_HUNG_AFTER = 2;
 
 export interface HeavyCpuOptions { background: boolean; half: boolean }
 
@@ -108,12 +111,13 @@ export interface HeavyJobRow { pid: number; name: string; priorityClass: number;
 /** One line-oriented channel to `guppy-heavyjob serve` (injectable for tests). */
 export interface HeavyJobChannel { request(line: string): Promise<Record<string, unknown> | null>; close(): void }
 
-/** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order; null only when the helper is gone. */
+/** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order; null only when the helper is gone (or hung, and ended). */
 export function serveChannel(exe: string): HeavyJobChannel {
   const child = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
   const queue: Array<(r: Record<string, unknown> | null) => void> = [];
   let buf = '';
   let dead = false;
+  let unanswered = 0; // requests timed out since the last reply
   const fail = (): void => { dead = true; while (queue.length) queue.shift()!(null); };
   child.on('error', fail);
   child.on('exit', fail);
@@ -125,6 +129,7 @@ export function serveChannel(exe: string): HeavyJobChannel {
     while ((i = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, i).trim();
       buf = buf.slice(i + 1);
+      unanswered = 0;
       let r: Record<string, unknown> | null = null;
       // An unreadable line is an error, not a dead helper: its agent jobs are still in it.
       try { r = JSON.parse(line) as Record<string, unknown>; } catch { r = { ok: false, error: 'unreadable reply' }; }
@@ -136,8 +141,14 @@ export function serveChannel(exe: string): HeavyJobChannel {
       if (dead) return Promise.resolve(null);
       return new Promise((resolve) => {
         let settled = false;
-        // A slow helper is not a dead one: its late reply still takes this request's place in the queue.
-        const t = setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: 'no reply in time' }); } }, HEAVY_JOB_REQUEST_MS);
+        // A slow helper is not a dead one: its late reply still takes this request's place in the
+        // queue. One that stays silent is hung: it is ended, and this answers as a dead helper
+        // (Jim SHOULD-2 @6cf44b24).
+        const t = setTimeout(() => {
+          if (settled) return;
+          if (++unanswered >= HEAVY_JOB_HUNG_AFTER) { try { child.kill(); } catch { /* gone */ } fail(); return; }
+          settled = true; resolve({ ok: false, error: 'no reply in time' });
+        }, HEAVY_JOB_REQUEST_MS);
         t.unref?.();
         queue.push((r) => { if (!settled) { settled = true; clearTimeout(t); resolve(r); } });
         try { child.stdin.write(line + '\n'); } catch { fail(); }
@@ -244,7 +255,7 @@ export class HeavyJobs {
     this.agentSeen.add(agentId);
     const calls = this.agentCalls.get(agentId) ?? [];
     this.agentCalls.set(agentId, [...calls, { agentId, command, startMs: start, total0: Number(r.total) || 0, started: false, idleScans: 0, postSeen: false }]);
-    this.log({ action: 'attach', reason, agentId, provider, job: aid, background: o.background, half: o.half, members: r.members, missed: r.missed, ok: true });
+    this.log({ action: 'attach', reason, agentId, provider, job: aid, background: o.background, half: o.half, members: r.members, missed: r.missed, kept: r.kept, ok: true });
     this.arm();
   }
 
@@ -314,8 +325,9 @@ export class HeavyJobs {
    *  checks in a row. A shell never seen (its command line does not show the command): after its
    *  PostToolUse (which Codex sends while a long command still runs) the call is held while any
    *  process created in the jobs since it began lives, and ends 'unseen' when none has on two
-   *  checks ('attach-missed' when the jobs had no new process at all: it ran outside them); with
-   *  no PostToolUse it is held until the agent's turn ends (turnEnded) or HEAVY_JOB_UNSTARTED_MS. */
+   *  checks ('attach-missed' when the jobs had no new process at all: it ran outside them), or
+   *  'unseen-capped' at HEAVY_JOB_UNSTARTED_MS; with no PostToolUse it is held until the agent's
+   *  turn ends (turnEnded) or HEAVY_JOB_UNSTARTED_MS. */
   private async pollAgentCalls(): Promise<void> {
     for (const [agentId, calls] of [...this.agentCalls]) {
       for (const c of [...calls]) {
@@ -326,6 +338,9 @@ export class HeavyJobs {
           if (Number(r.alive) > 0) { c.idleScans = 0; continue; }
           if (++c.idleScans >= 2) await this.endCall(c, 'done');
         } else if (c.postSeen) {
+          // Anything fresh that keeps living (a server it started, a later call's shell) holds it
+          // only up to the unstarted limit (Jim SHOULD-1 @6cf44b24).
+          if (this.now() - c.startMs >= HEAVY_JOB_UNSTARTED_MS) { await this.endCall(c, 'unseen-capped'); continue; }
           if (Number(r.fresh) > 0) { c.idleScans = 0; continue; }
           if (++c.idleScans >= 2) await this.endCall(c, Number(r.total) > c.total0 ? 'unseen' : 'attach-missed');
         }
