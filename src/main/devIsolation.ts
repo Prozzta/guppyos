@@ -83,7 +83,15 @@ export const STABLE_ENV_KEYS = [
   'HIVE_PROXY_SESSION',
   'OPENAI_BASE_URL',
   'CRUSH_PROXY_BASE_URL',
-  'CLAUDE_CODE_ENABLE_TELEMETRY'
+  'CLAUDE_CODE_ENABLE_TELEMETRY',
+  // SCRUB1: the auth env vars Codex reads. codex-cli 0.157.1 `codex login status`
+  // reports exactly these three as "auth env vars present" (cli/src/main.rs). An
+  // inherited one would sign a dev agent in with the Human's key instead of its
+  // own isolated CODEX_HOME login. Guppy's BYOK key is set per agent at spawn
+  // (agentEnv), which this process-env scrub does not touch.
+  'OPENAI_API_KEY',
+  'CODEX_API_KEY',
+  'CODEX_ACCESS_TOKEN'
 ] as const;
 
 /** Prefixes scrubbed wholesale: Stable's OTel exporter settings for the
