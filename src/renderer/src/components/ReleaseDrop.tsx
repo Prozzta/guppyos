@@ -5,7 +5,7 @@
  * the other thing: a page the release author designs, shown once, at the size the
  * work deserves.
  *
- * The chrome follows the landing site (docs/DESIGN.md), not the app's pixel
+ * The chrome uses the release-drop warm-paper theme, not the app's pixel
  * idiom and not a generic rounded sheet: warm paper, square corners, a thick
  * ink border, a hard offset shadow with no blur, and a dark mono title bar with
  * three square dots. It is the `.win` window from munderdiffl.in, so the moment
@@ -43,7 +43,7 @@ export interface ReleaseDropProps {
   onDismiss: () => void;
 }
 
-// Landing site palette (docs/DESIGN.md §2). Restated here because the modal is
+// Release-drop warm-paper palette. Restated here because the modal is
 // app chrome and cannot reach the site's stylesheet; kept in one place so the
 // frame's tokens in shared/releaseDrop.ts and this chrome never drift apart.
 const PAPER = '#FFFDF7';

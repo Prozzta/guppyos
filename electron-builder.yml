@@ -38,7 +38,7 @@ afterSign: build/notarize.cjs
 # NATIVE-MEMORY prune (spec section 5): keep only the TARGET platform/arch CPU runtime of
 # onnxruntime-node (and drop DirectML, a GPU provider the engine never asks for). A hook, not a
 # `files` list: a platform-level `files` REPLACES the top-level list (measured: it packed docs/,
-# blog/ and the model twice into app.asar).
+# the app model twice into app.asar).
 afterPack: build/afterPack-memory-prune.cjs
 # REBRAND-ARTIFACT-NAMES: the Munder-Difflin-* copies 1.1.81 links to (see the header).
 afterAllArtifactBuild: build/legacyArtifactNames.cjs

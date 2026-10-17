@@ -83,7 +83,7 @@ function stripActiveContent(html: string): string {
  *  here — an author writing `var(--ink)` gets the app's palette for free, while
  *  a fully bespoke drop can ignore them entirely. */
 const FRAME_BASE_CSS = `
-  /* The landing site palette (docs/DESIGN.md §2): warm paper, near-black ink,
+  /* Warm paper palette: near-black ink,
      one yellow CTA, sky for a highlighted phrase, maroon for the brand. Square
      corners and hard offset shadows are the look; --radius is 0 on purpose.
      --accent and --line are kept as aliases so older drops still resolve. */
