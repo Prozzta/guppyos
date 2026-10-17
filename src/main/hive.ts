@@ -58,7 +58,7 @@ import {
 } from '../shared/agentProvider';
 import { MCP_CATALOG } from '../shared/mcpCatalog';
 import { heavyActivity, rosterActivity, type HeavyLockView } from '../shared/activityView';
-import { silentTurnText, type SilentTurnView } from '../shared/agentBadges';
+import { heldInboxText, silentTurnText, type SilentTurnView } from '../shared/agentBadges';
 import type { LivenessV1 } from '../shared/livenessV1';
 import { selectBroadcastTargets } from '../shared/broadcast';
 import { normalizeWakeField } from '../shared/mailWakeClass';
@@ -5062,10 +5062,7 @@ export class HiveManager {
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);
         if (a.inboxBacklog) {
           const held = typeof a.inboxHeld === 'number' && a.inboxHeld > 0 && typeof a.heldUntil === 'number';
-          const until = held ? new Date(a.heldUntil as number).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-          const due = held && (a.heldUntil as number) <= nowMs;
-          bits.push(held && a.inboxHeld === a.inboxBacklog ? `inbox ${a.inboxBacklog} (${due ? 'held (due)' : `held until ${until}`})` : `inbox ${a.inboxBacklog}`);
-          if (held && a.inboxHeld !== a.inboxBacklog) bits.push(`${a.inboxHeld} ${due ? 'held (due)' : `held until ${until}`}`);
+          bits.push(held ? heldInboxText(a.inboxBacklog, a.inboxHeld, a.heldUntil, nowMs) : `inbox ${a.inboxBacklog}`);
         }
         if (a.breaker && a.breaker !== 'ok' && a.breaker !== 'none') bits.push(`breaker ${a.breaker}`);
         if (a.isGod) bits.push('you');

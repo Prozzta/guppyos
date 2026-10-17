@@ -35,9 +35,9 @@ test('the mail badge says messages WAITING, never unread (MB1)', () => {
 
 test('the mail badge labels a bounded quiet hold in local time, and says a due hold is due', () => {
   const until = Date.now() + 15 * 60_000;
-  assert.match(B.mailBadgeTitle(1, 1, until), /^1 message waiting \(held until \d{2}:\d{2}; or sooner with other mail\)$/);
-  assert.match(B.mailBadgeTitle(3, 1, until), /^3 messages waiting \(1 held until \d{2}:\d{2}; or sooner with other mail\)$/);
-  assert.equal(B.heldInboxText(1, 1, until - 30 * 60_000, until), 'inbox 1 (held (due))');
+  assert.match(B.mailBadgeTitle(1, 1, until), /^inbox 1 \(held until \d{2}:\d{2} local\); 1 message waiting; or sooner with other mail$/);
+  assert.match(B.mailBadgeTitle(3, 1, until), /^inbox 3, 1 held until \d{2}:\d{2} local; 3 messages waiting; or sooner with other mail$/);
+  assert.equal(B.heldInboxText(1, 1, until - 30 * 60_000, until), 'inbox 1 (held, due)');
 });
 
 test('fleet mail keeps a due hold as the earliest release rather than skipping to a later one', () => {
@@ -71,10 +71,12 @@ test('AgentCard draws the chip from taskChipText and a distinct mail badge from 
   assert.match(chip, /bottom: -5/);
   const mail = CARD.slice(CARD.indexOf('data-badge="mail"'), CARD.indexOf('</span>', CARD.indexOf('data-badge="mail"')));
   assert.match(CARD, /\{inboxBacklog > 0 && \(\s*<span\s+data-badge="mail"/);
-  assert.match(mail, /heldInboxText\(inboxBacklog, inboxHeld, heldUntil\)/);
+  assert.match(mail, /\$\{MAIL_GLYPH\}\$\{inboxBacklog\} held \$\{heldUntilText\(heldUntil\)\}/);
   assert.doesNotMatch(mail, /doingCount/);
   assert.match(mail, /title=\{mailBadgeTitle\(inboxBacklog, inboxHeld, heldUntil\)\}/);
-  assert.match(mail, /left: 40, bottom: -5/, 'the full label avoids the top-right status pill');
+  assert.match(mail, /left: 40, bottom: -5/, 'the short label avoids the top-right status pill');
+  assert.match(mail, /maxWidth: 126/);
+  assert.match(mail, /whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'/);
   assert.match(mail, /borderRadius: 9/, 'a different shape');
 });
 

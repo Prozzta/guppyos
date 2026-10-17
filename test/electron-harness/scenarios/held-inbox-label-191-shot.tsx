@@ -30,14 +30,22 @@ window.__harnessRun = async () => {
         createElement(AgentCard, {
           agentId: 'phyllis', name: 'Phyllis', character: 'michael', accent: 'lemon', status: 'idle',
           project: 'Guppy', action: 'waiting for quiet mail', progress: 2,
+          doingCount: 1,
           inboxBacklog: 1, inboxHeld: 1, heldUntil: Date.UTC(2030, 0, 2, 6, 53)
         })));
     });
     await new Promise((resolve) => setTimeout(resolve, 120));
     const mail = document.querySelector('[data-badge="mail"]') as HTMLElement | undefined;
+    const task = document.querySelector('[data-badge="task"]') as HTMLElement | undefined;
+    const card = mail?.closest('[role="button"]') as HTMLElement | undefined;
+    const mailBox = mail?.getBoundingClientRect();
+    const taskBox = task?.getBoundingClientRect();
+    const cardBox = card?.getBoundingClientRect();
+    const layout = !!mailBox && !!taskBox && !!cardBox
+      && mailBox.width <= 126 && mailBox.right <= taskBox.left && mailBox.left >= cardBox.left;
     const png = await window.harness.capture(480, 140);
     await act(async () => { root.unmount(); });
-    window.harness.report({ ok: true, png: png.png, mail: { text: mail?.textContent, title: mail?.title } });
+    window.harness.report({ ok: true, png: png.png, mail: { text: mail?.textContent, title: mail?.title }, layout });
   } catch (error) {
     window.harness.report({ ok: false, error: error instanceof Error ? `${error.message}\n${error.stack}` : String(error) });
   }

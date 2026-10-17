@@ -84,16 +84,14 @@ export function heldUntilText(heldUntil: number, now = Date.now()): string {
 export function heldInboxText(count: number, held = 0, heldUntil?: number, now = Date.now()): string {
   const base = `inbox ${count}`;
   if (!(held > 0) || typeof heldUntil !== 'number') return base;
-  const detail = heldUntilText(heldUntil, now) === 'due' ? 'held (due)' : `held until ${heldUntilText(heldUntil, now)}`;
+  const detail = heldUntilText(heldUntil, now) === 'due' ? 'held, due' : `held until ${heldUntilText(heldUntil, now)} local`;
   return held === count ? `${base} (${detail})` : `${base}, ${held} ${detail}`;
 }
 
 export function mailBadgeTitle(count: number, held = 0, heldUntil?: number): string {
   const base = `${count} message${count === 1 ? '' : 's'} waiting`;
   if (!(held > 0) || typeof heldUntil !== 'number') return base;
-  const time = heldUntilText(heldUntil);
-  const detail = time === 'due' ? 'held (due)' : `${held === count ? '' : `${held} `}held until ${time}`;
-  return `${base} (${detail}; or sooner with other mail)`;
+  return `${heldInboxText(count, held, heldUntil)}; ${base}; or sooner with other mail`;
 }
 
 /** FLEET-LIVENESS-BLIND: an agent shown working whose turn has gone silent (main's silentTurn.ts):
