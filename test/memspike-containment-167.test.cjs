@@ -107,6 +107,17 @@ test('recoverRendererForMemory: kills the renderer by its pid (process.kill), ne
   assert.equal(R.recoverRendererForMemory(8, { windows: () => [b], givenUp: () => false, beforeKill: () => {} }), 'failed');
 });
 
+// Jim NIT (FLAKE-RENDERER-RECOVERY-191): process.kill(0) on Windows kills main itself.
+test('recoverRendererForMemory: never kills pid 0, a non-integer pid or main\'s own pid, even when a window claims it', (t) => {
+  const kills = mockKill(t);
+  const marks = [];
+  for (const pid of [0, -1, 1.5, NaN, process.pid]) {
+    assert.equal(R.recoverRendererForMemory(pid, { windows: () => [fakeWin(pid)], givenUp: () => false, beforeKill: () => { marks.push(pid); } }), 'failed', `pid ${pid}`);
+  }
+  assert.deepEqual(kills, [], 'nothing killed');
+  assert.deepEqual(marks, [], 'nothing marked');
+});
+
 test('recoverRendererForMemory: never kills a window that already gave up (it would stay dead); no window / a failed kill are reported', (t) => {
   const kills = mockKill(t);
   const a = fakeWin(7);

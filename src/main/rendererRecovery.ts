@@ -149,6 +149,9 @@ export function recoverRendererForMemory<W extends MemoryRecoverableWindow>(
   pid: number,
   deps: { windows: () => W[]; givenUp: (w: W) => boolean; beforeKill: (w: W) => void }
 ): 'killed' | 'no-window' | 'given-up' | 'failed' {
+  // Jim NIT: on Windows process.kill(0) ends the CALLING process (libuv maps 0 to the current
+  // process), so a pid that is not a real other process is never killed, whatever window claims it.
+  if (!(Number.isInteger(pid) && pid > 0) || pid === process.pid) return 'failed';
   const win = deps.windows().find((w) => {
     try { return !w.isDestroyed() && !w.webContents.isDestroyed() && w.webContents.getOSProcessId() === pid; } catch { return false; }
   });
