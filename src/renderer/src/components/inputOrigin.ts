@@ -20,7 +20,14 @@
  *   SAME-TICK  keydown/keypress/paste/wheel/mousedown/touchstart → `triggerDataEvent`
  *              synchronously inside the same dispatch (browser/Terminal.ts:1072, :1155,
  *              Clipboard.ts:54, Terminal.ts:824, CoreMouseService.ts:284). The window
- *              closes in a microtask, so it cannot leak into a later tick.
+ *              is THAT EVENT: it is open while the event our capture listener saw is
+ *              still the one being dispatched (`window.event`), so it covers xterm's
+ *              listener and closes when the dispatch ends, before any other task.
+ *              MODEL-NOT-KEPT-191: it used to close in a microtask. For a TRUSTED event
+ *              the browser runs a microtask checkpoint after EACH listener callback, so
+ *              it closed before xterm's listener ran and every key a person typed left
+ *              as CONTROL. A script `dispatchEvent` runs no checkpoint between listeners,
+ *              which is why the self-test and the synthetic harness never saw it.
  *   HELD       IME and `input` events do NOT emit synchronously. CompositionHelper
  *              finalises in a `setTimeout(0)` (CompositionHelper.ts:153) and textarea
  *              diffs go through another (`:186`), emitting up to three data events
@@ -90,8 +97,12 @@ export const HELD_EVENTS = ['input', 'compositionstart', 'compositionupdate', 'c
 export const EXCLUDED_EVENTS = ['focus', 'blur'] as const;
 
 interface HumanWindow {
-  /** Open for the remainder of the current dispatch; a microtask closes it. */
+  /** A `markHumanOrigin` from code we own: open for the rest of that synchronous run; a
+   *  microtask closes it (no listener boundary lies between the mark and its emit). */
   sameTick: boolean;
+  /** The same-tick DOM event our capture listener saw: open while it is still the event
+   *  being dispatched. Kept by identity, so a stale one never matches a later dispatch. */
+  domEvent: Event | null;
   /** Open until HELD_DRAIN_MS of quiet; re-armed by every classified byte. */
   held: boolean;
   holdTimer: ReturnType<typeof setTimeout> | null;
@@ -105,7 +116,7 @@ const windows = new Map<string, HumanWindow>();
 function ensure(ptyId: string): HumanWindow {
   let w = windows.get(ptyId);
   if (!w) {
-    w = { sameTick: false, held: false, holdTimer: null, lastReason: null, detach: null };
+    w = { sameTick: false, domEvent: null, held: false, holdTimer: null, lastReason: null, detach: null };
     windows.set(ptyId, w);
   }
   return w;
@@ -115,9 +126,22 @@ function openSameTick(w: HumanWindow, reason: HumanOriginReason): void {
   w.lastReason = reason;
   if (w.sameTick) return;
   w.sameTick = true;
-  // Microtask, not setTimeout: the close must land after xterm's synchronous
-  // handler in THIS dispatch and before any other task can run.
+  // Microtask, not setTimeout: a mark is followed by its emit in the same synchronous
+  // run, and the close must land before any other task can run.
   queueMicrotask(() => { w.sameTick = false; });
+}
+
+/** The event the browser is dispatching right now, set around each listener call and
+ *  undefined outside one (microtasks between listeners included). */
+const dispatching = (): Event | undefined => (globalThis as { event?: Event }).event;
+
+function openDomEvent(w: HumanWindow, ev: Event): void {
+  w.lastReason = 'dom';
+  w.domEvent = ev;
+}
+
+function sameTickOpen(w: HumanWindow): boolean {
+  return w.sameTick || (w.domEvent !== null && dispatching() === w.domEvent);
 }
 
 function rearmHold(w: HumanWindow, reason: HumanOriginReason | null): void {
@@ -144,7 +168,7 @@ export function attachInputOrigin(ptyId: string, term: Terminal): () => void {
   const w = ensure(ptyId);
   if (w.detach) return w.detach; // idempotent: one set of listeners per terminal
 
-  const onSameTick = () => openSameTick(w, 'dom');
+  const onSameTick = (ev: Event) => openDomEvent(w, ev);
   const onHeld = () => rearmHold(w, 'dom');
   const opts: AddEventListenerOptions = { capture: true, passive: true };
   for (const type of SAME_TICK_EVENTS) el.addEventListener(type, onSameTick, opts);
@@ -170,9 +194,20 @@ export function resetInputWindow(ptyId: string): void {
   const w = windows.get(ptyId);
   if (!w) return;
   w.sameTick = false;
+  w.domEvent = null;
   w.held = false;
   if (w.holdTimer) { clearTimeout(w.holdTimer); w.holdTimer = null; }
   w.lastReason = null;
+}
+
+/** Program output is about to be written: end the DOM window now. xterm parses the first
+ *  write after user input SYNCHRONOUSLY (WriteBuffer `_didUserInput`), so output written
+ *  inside the dispatch of the key that made xterm emit would parse, and its protocol
+ *  replies emit, inside that key's window. Output arrives on its own IPC task today; this
+ *  keeps a reply CONTROL even if a later change ever delivers it inside a dispatch. */
+export function endInputWindowForOutput(ptyId: string): void {
+  const w = windows.get(ptyId);
+  if (w) w.domEvent = null;
 }
 
 /** Is the DOM half attached for this terminal? The arming gate (stage 3) refuses to
@@ -212,7 +247,7 @@ export function classifyOutbound(ptyId: string, data: string): InputOrigin {
   // The same-tick window covers a synchronous DOM dispatch (a keystroke, a paste),
   // where an ESC-prefixed byte is a legitimate human arrow/escape key. So it does
   // NOT discriminate by shape - the whole byte is the human's.
-  if (w.sameTick) return 'HUMAN';
+  if (sameTickOpen(w)) return 'HUMAN';
   if (w.held) {
     // The held window exists ONLY for the IME/`input` drain, whose only legitimate
     // human bytes are the printable composition output (diff / DEL / newValue) - none
@@ -258,13 +293,19 @@ export function makeNonceCorrelatedProbe(expected: string, onResult: (origin: In
 }
 
 /**
- * THE STARTUP SELF-TEST (rev 13 step 7). Proves, on THIS terminal on THIS build, the two
- * things the reconstruction rests on and cannot get from any public contract:
- *   1. a keyboard event dispatched into the terminal produces a byte that classifies
- *      HUMAN - i.e. our capture listener runs before xterm's handler in the same
- *      dispatch, and xterm emits synchronously inside it;
- *   2. a terminal protocol reply (DSR, `ESC[6n`) produces a byte that classifies
- *      CONTROL - i.e. write() processing never lands inside a human window.
+ * THE STARTUP SELF-TEST (rev 13 step 7). Checks, on THIS terminal on THIS build, two of
+ * the things the reconstruction rests on and cannot get from any public contract:
+ *   1. a SCRIPT-DISPATCHED keyboard event produces a byte that classifies HUMAN - i.e. our
+ *      capture listener is attached, sees the event before xterm's handler, and xterm
+ *      emits synchronously inside the dispatch;
+ *   2. a terminal protocol reply (DECRQM) produces a byte that classifies CONTROL - i.e.
+ *      write() processing never lands inside a human window.
+ * WHAT IT DOES NOT PROVE (MODEL-NOT-KEPT-191): that a person's key classifies HUMAN. A
+ * script's `dispatchEvent` is untrusted and runs no microtask checkpoint between
+ * listeners; a real key runs one after each. 1.1.90 failed every real key and passed this
+ * test on every terminal. No page can synthesise a trusted key, so that property is held
+ * by test/input-origin-trusted-191.test.cjs (keys through Chromium's input pipeline), not
+ * here. 'pass' means "attached and ordered", never "a human's keys are seen".
  *
  * NOT ONE BYTE REACHES THE PTY. The caller supplies `armProbe`, which makes the very
  * next `onData` hand its byte HERE instead of to `writePty`. Without that swallow the
@@ -310,7 +351,7 @@ export async function runInputOriginSelfTest(
   } as KeyboardEventInit));
   if ((await keyResult) !== 'HUMAN') return 'fail';
 
-  // Close the same-tick window before the control half so its byte cannot ride it.
+  // The keydown's window closed with its dispatch; the control half's byte cannot ride it.
   await new Promise<void>((r) => { queueMicrotask(r); });
 
   // Half 2, NONCE-CORRELATED DECRQM (god fix-round-3 amendment; Phyllis Rank 1). A CPR is only
@@ -340,5 +381,5 @@ export async function runInputOriginSelfTest(
 export function inspectInputOrigin(ptyId: string): { sameTick: boolean; held: boolean; lastReason: HumanOriginReason | null; attached: boolean } | null {
   const w = windows.get(ptyId);
   if (!w) return null;
-  return { sameTick: w.sameTick, held: w.held, lastReason: w.lastReason, attached: w.detach != null };
+  return { sameTick: sameTickOpen(w), held: w.held, lastReason: w.lastReason, attached: w.detach != null };
 }

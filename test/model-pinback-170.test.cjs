@@ -58,6 +58,8 @@ function sandbox(t, seed) {
 }
 
 const entry = (hive, id) => hive.registry().agents[id];
+/** A pin row without MODEL-NOT-KEPT-191's window columns (humanAt/since/turnAt), asserted apart. */
+const noWindow = (row) => { if (!row) return row; const { humanAt, since, turnAt, ...rest } = row; return rest; };
 const codexConfig = (inj) => fs.readFileSync(path.join(inj.env.CODEX_HOME, 'config.toml'), 'utf8');
 
 // ─── G1 ─────────────────────────────────────────────────────────────────────
@@ -482,8 +484,11 @@ test('USER/AUTO: no human input since launch -> an AUTO pin, shown, logged, and 
   const e = entry(s.hive, 'cl-3');
   assert.equal(e.model, 'claude-sonnet-5');
   assert.equal(e.modelPinSource, 'auto');
-  assert.deepEqual(s.rows.filter((r) => r.kind === 'model-pinned'),
+  assert.deepEqual(s.rows.filter((r) => r.kind === 'model-pinned').map(noWindow),
     [{ kind: 'model-pinned', agentId: 'cl-3', provider: 'claude', source: 'auto', from: 'claude-opus-5-5', to: 'claude-sonnet-5', requested: 'claude-opus-5-5', evidence: 'status-line' }]);
+  const row = s.rows.find((r) => r.kind === 'model-pinned');
+  assert.equal(row.humanAt, null, 'MODEL-NOT-KEPT-191 F3: the row says no human input was seen');
+  assert.equal(typeof row.since, 'number', 'and when the window started');
 
   const r = P.resolveSpawnArgs(e, ['--model', 'claude-opus-5-5'], { fallback: cfg.defaultModel });
   assert.deepEqual(r.args, ['--model', 'claude-opus-5-5'], 'the respawn runs the picker model');
@@ -509,8 +514,12 @@ test('USER/AUTO: a keystroke only BEFORE the previous observation does not make 
   rollout(inj.env.CODEX_HOME, SID, [turnContext(SOL, Date.now() + 2000)]);
   server.handle(codexHook('dw-1', SID));
   assert.equal(entry(s.hive, 'dw-1').modelPinSource, 'auto');
-  assert.deepEqual(s.rows.find((x) => x.kind === 'model-pinned'),
+  const row = s.rows.find((x) => x.kind === 'model-pinned');
+  assert.deepEqual(noWindow(row),
     { kind: 'model-pinned', agentId: 'dw-1', provider: 'codex', source: 'auto', from: TERRA, to: SOL, requested: TERRA, evidence: 'rollout-turn_context', effort: 'medium', fromEffort: 'medium' }); // 1.1.79 M2: + effort columns
+  // MODEL-NOT-KEPT-191 F3: the row shows WHY it is auto - the key came before the window start.
+  assert.equal(typeof row.humanAt, 'number');
+  assert.ok(row.humanAt <= row.since, `the key (${row.humanAt}) is not after the window start (${row.since})`);
 });
 
 test('USER/AUTO: a user pin logs source user, is carried on respawn, and a clear logs too', async (t) => {
@@ -518,10 +527,16 @@ test('USER/AUTO: a user pin logs source user, is carried on respawn, and a clear
   const meta = { id: 'ag-1', name: 'Kelly', provider: 'antigravity', cwd: s.home };
   await s.hive.ensureAgent(meta, { spawnModel: { requested: PRO, launch: PRO } });
   const server = new HookServer(s.hive, () => null, () => ({}));
+  // MODEL-NOT-KEPT-191 F2: AGY reports its model from boot on; a process's first report is never
+  // the person's, so the switch comes after a launch-model tick, as it does live.
+  server.handle(agyTick('ag-1', PRO));
   s.type();
   server.handle(agyTick('ag-1', FLASH));
-  assert.deepEqual(s.rows.find((x) => x.kind === 'model-pinned'),
+  const row = s.rows.find((x) => x.kind === 'model-pinned');
+  assert.deepEqual(noWindow(row),
     { kind: 'model-pinned', agentId: 'ag-1', provider: 'antigravity', source: 'user', from: PRO, to: FLASH, requested: PRO, evidence: 'agy-statusline' });
+  assert.ok(row.humanAt > row.since, 'F3: the key is inside the window');
+  assert.ok(row.turnAt === null || row.turnAt < row.humanAt, 'F3: and no turn started after it');
   const r = P.resolveSpawnArgs(entry(s.hive, 'ag-1'), ['--model', PRO]);
   assert.deepEqual(r.args, ['--model', FLASH], 'a user pin is carried');
   await s.hive.ensureAgent(meta, { spawnModel: { requested: r.requested, launch: r.launch } });

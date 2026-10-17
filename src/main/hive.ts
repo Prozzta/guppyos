@@ -2002,17 +2002,33 @@ export class HiveManager {
       const from = agent.liveModel ?? agent.launchModel ?? before ?? null;
       // USER OR AUTO: did HUMAN input reach this agent's pty since the previous observation (or
       // since launch)? Unknown (no source wired, no live pty) is not proof of a human: 'auto'.
-      const since = this.modelObservedAt.get(agentId) ?? agent.launchedAt ?? 0;
+      const at = Math.min(opts.observedAt ?? now, now);
       const human = this.humanInputAt?.(agentId);
-      const humanInputSince = typeof human === 'number' && human > since;
+      const observed = this.modelObservedAt.get(agentId);
+      let since = observed ?? agent.launchedAt ?? 0;
+      let humanInputSince = typeof human === 'number' && human > since;
+      // MODEL-NOT-KEPT-191 F2 (Jim): AGY reports after EVERY render, so the marker is when the
+      // CURRENT value was first seen, and a picker-closing render still showing the old model
+      // cannot pass the person's Enter. The key must also be within AGY_HUMAN_SWITCH_GRACE_MS of
+      // the switch tick, with no turn started since it: a plan-limit fallback follows a prompt
+      // Enter and a PreInvocation, a model pick follows neither. A process's first observation
+      // is never the person's (AGY reports its stored model before `--model` applies).
+      const agy = provider === 'antigravity';
+      const value = `${model.trim()}\u0000${opts.effort ?? ''}`;
+      const turnAt = agy ? this.turnStartedAt.get(agentId) : undefined;
+      if (agy) {
+        // No observation yet: the window start is Infinity, so the first report is never USER.
+        since = Math.max(observed ?? Infinity, at - HiveManager.AGY_HUMAN_SWITCH_GRACE_MS);
+        humanInputSince = typeof human === 'number' && human > since && !(turnAt !== undefined && turnAt >= human);
+      }
       const r = applyLiveModel(agent, model, { ...opts, independentEffortPin: provider === 'claude', humanInputSince });
       // M1: the window marker is the observation's OWN time (a Codex turn_context's stamp; capped
       // at now, since a stamp is never in the future), never the reading hook's clock, and it
       // only moves forward. Re-reading the previous turn's turn_context at UserPromptSubmit must
-      // not move it past the person's `/model` keys.
-      if (r.action !== 'stale' && r.action !== 'unknown-launch') {
-        const at = Math.min(opts.observedAt ?? now, now);
-        if (at > (this.modelObservedAt.get(agentId) ?? -Infinity)) this.modelObservedAt.set(agentId, at);
+      // not move it past the person's `/model` keys. F2: on AGY it moves only on a new value.
+      if (r.action !== 'stale' && r.action !== 'unknown-launch' && (!agy || observed === undefined || this.modelObservedValue.get(agentId) !== value)) {
+        if (at > (observed ?? -Infinity)) this.modelObservedAt.set(agentId, at);
+        if (agy) this.modelObservedValue.set(agentId, value);
       }
       if (!r.changed) return;
       agent.lastSeen = now;
@@ -2025,7 +2041,10 @@ export class HiveManager {
       // M2: the effort is on the row only when the CLI reports one.
       const effortCols = agent.modelEffort !== undefined || fromEffort !== null ? { effort: agent.modelEffort ?? null, fromEffort } : {};
       if (agent.model !== undefined && (agent.model !== before || agent.modelPinnedFrom !== beforeFrom || agent.modelEffort !== beforeEffort)) {
-        this.appendLog({ kind: 'model-pinned', agentId, provider, source: agent.modelPinSource ?? null, from, to: agent.model, requested: agent.requestedModel ?? null, evidence, ...effortCols });
+        // MODEL-NOT-KEPT-191 F3: the window that decided user/auto, so a row can be checked
+        // against the keys: the last HUMAN input, the window start, and (AGY) the last turn start.
+        const windowCols = { humanAt: typeof human === 'number' ? human : null, since: Number.isFinite(since) ? since : null, ...(agy ? { turnAt: turnAt ?? null } : {}) };
+        this.appendLog({ kind: 'model-pinned', agentId, provider, source: agent.modelPinSource ?? null, from, to: agent.model, requested: agent.requestedModel ?? null, evidence, ...effortCols, ...windowCols });
       } else if (agent.model === undefined && before !== undefined) {
         this.appendLog({ kind: 'model-pin-cleared', agentId, provider, pinned: before, from, to: model.trim(), requested: agent.requestedModel ?? null, evidence });
       }
@@ -2035,6 +2054,17 @@ export class HiveManager {
   /** MODEL-PINBACK user/auto: when a live model was last observed per agent (in memory; a new
    *  process starts from its launch time). */
   private modelObservedAt = new Map<string, number>();
+  /** MODEL-NOT-KEPT-191 F2: the AGY value (model, effort) the marker belongs to. */
+  private modelObservedValue = new Map<string, string>();
+  /** MODEL-NOT-KEPT-191 F2: when each agent's latest turn started (AGY: a PreInvocation, or a
+   *  status tick leaving idle). In memory, cleared at spawn like the marker. */
+  private turnStartedAt = new Map<string, number>();
+  noteTurnStart(agentId: string, at = Date.now()): void {
+    if (at > (this.turnStartedAt.get(agentId) ?? -Infinity)) this.turnStartedAt.set(agentId, at);
+  }
+  /** MODEL-NOT-KEPT-191 F2 (Jim): the outer bound between the person's key and the AGY tick that
+   *  shows the switch. The tick follows the picker's Enter within a render or two. */
+  static readonly AGY_HUMAN_SWITCH_GRACE_MS = 10_000;
   /** SESSION-PROMPT-ROTATION: per agent, the prompt fingerprint of its CURRENT process and the
    *  session that process resumed (null = it started fresh). A session this process opens other
    *  than the resumed one was started with that prompt, so its first hook stamps it. */
@@ -2076,6 +2106,8 @@ export class HiveManager {
       delete entry.modelPinnedFromEffort;
     }
     this.modelObservedAt.delete(agentId);
+    this.modelObservedValue.delete(agentId);
+    this.turnStartedAt.delete(agentId);
     if (requested) entry.requestedModel = requested; else delete entry.requestedModel;
     if (launch) entry.launchModel = launch; else delete entry.launchModel;
     delete entry.liveModel;

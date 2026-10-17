@@ -476,6 +476,8 @@ export class HookServer {
   /** Bounded drift tally, keyed `version|driftCode`. Fixed-string keys only: the payload
    *  that drifted is never stored, so this can be read out or logged safely. */
   private agyDrift = new Map<string, number>();
+  /** MODEL-NOT-KEPT-191 F2: whether each agent's last AGY tick was busy (working/tool_use). */
+  private agyBusy = new Map<string, boolean>();
 
   /** A snapshot of the drift tally (diagnostics, tests). */
   agyDriftCounts(): Record<string, number> {
@@ -1049,6 +1051,13 @@ export class HookServer {
       if (!id) return;
       const now = Date.now();
       const readAt = typeof p.read_at === 'number' && Number.isFinite(p.read_at) && p.read_at <= now ? p.read_at : now;
+      // MODEL-NOT-KEPT-191 F2: a tick that LEAVES idle is a turn start (alongside PreInvocation),
+      // noted before the model is read, so a switch seen in that very tick is not the person's.
+      const busy = status.agent_state === 'working' || status.agent_state === 'tool_use';
+      if (busy && this.agyBusy.get(agentId) !== true) {
+        try { this.hive.noteTurnStart?.(agentId, readAt); } catch { /* telemetry */ }
+      }
+      this.agyBusy.set(agentId, busy);
       this.hive.observeLiveModel(agentId, 'antigravity', id, { observedAt: readAt });
     } catch { /* telemetry must never break the pipe */ }
   }
@@ -1958,6 +1967,11 @@ export class HookServer {
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
     if (agentId && !fromSubagent) this.trackTurn(agentId, event, p);
     if (agentId && !fromSubagent) this.noteRunningTool(agentId, event, p);
+    // MODEL-NOT-KEPT-191 F2: AGY's PreInvocation runs before every model call, so a plan-limit
+    // fallback always comes after one. A key before it was a prompt, not a model pick.
+    if (agentId && !fromSubagent && event === 'PreInvocation') {
+      try { this.hive.noteTurnStart?.(agentId); } catch { /* never breaks a hook */ }
+    }
     // A new response starts with no claims (a direct handle() call that nobody settled leaves none).
     this.mailClaims = [];
     if (!fromSubagent) {

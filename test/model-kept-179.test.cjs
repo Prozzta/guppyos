@@ -118,7 +118,9 @@ test('M1 REPLAY 2026-10-02 05:55:46: the Human\'s /model, re-read at Stop and la
   assert.equal(e.modelEffort, 'medium');
   assert.deepEqual(s.rows.filter((r) => r.kind === 'model-pinned'), [{
     kind: 'model-pinned', agentId: DWIGHT.id, provider: 'codex', source: 'user', from: TERRA, to: LUNA, requested: TERRA,
-    evidence: 'rollout-turn_context', effort: 'medium', fromEffort: 'high'
+    evidence: 'rollout-turn_context', effort: 'medium', fromEffort: 'high',
+    // MODEL-NOT-KEPT-191 F3: the window on the row - the pick's key, after the previous turn_context.
+    humanAt: T('2026-10-02T05:51:08.300Z'), since: T('2026-10-02T05:50:28.663Z')
   }]);
 });
 

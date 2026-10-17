@@ -28,7 +28,7 @@ test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic pas
 
   // Same-tick regime: a keyboard event classifies HUMAN and the window is shut a tick later.
   assert.equal(r.keyboard.origin, 'HUMAN', `keyboard -> HUMAN (data ${JSON.stringify(r.keyboard.data)})`);
-  assert.equal(r.keyboardWindowClosed, true, 'and the same-tick window closed in a microtask');
+  assert.equal(r.keyboardWindowClosed, true, 'and the same-tick window closed with its dispatch');
 
   // Constraint (i), by construction: xterm flags both of these wasUserInput=true internally.
   assert.equal(r.programmaticInput, 'CONTROL', 'term.input() with no DOM event is CONTROL');
