@@ -59,10 +59,10 @@ function sandbox(t, { source } = {}) {
   hive.appendLog = (e) => { rows.push(e); append(e); };
   const server = new HookServer(hive, () => null, () => ({}));
   /** A statusline tick READ at `iso` (the shim's read_at) and handled 20 ms later. */
-  const tick = (model, iso, state = 'idle') => {
+  const tick = (model, iso, state = 'idle', session = 'sess-1') => {
     clock.at = T(iso) + 20;
     server.handle({ hook_event_name: 'AgyStatusLine', agent_id: ID, read_at: T(iso), agy_status: {
-      version: '1.2.8', product: 'antigravity', agent_state: state, session_id: 'sess-1', model: { id: model, display_name: model }
+      version: '1.2.8', product: 'antigravity', agent_state: state, session_id: session, model: { id: model, display_name: model }
     } });
   };
   const hook = (event, iso) => { clock.at = T(iso); server.handle({ hook_event_name: event, agent_id: ID, session_id: 'sess-1' }); };
@@ -94,7 +94,9 @@ test('T2 (i) a prompt Enter, a turn start, then the plan-limit fallback 2 s late
     await t.test(turn, async (tt) => {
       const s = sandbox(tt);
       await s.spawn(ARG);
-      s.tick(ARG, '2026-10-16T19:00:00.000Z');
+      // Each variant isolates its own rule (Jim SHOULD 1): with the agent already busy, no tick
+      // leaves idle, so only the PreInvocation hook can mark the turn start.
+      s.tick(ARG, '2026-10-16T19:00:00.000Z', turn === 'pre-invocation' ? 'working' : 'idle');
       s.key('2026-10-16T19:00:10.000Z');                                  // the prompt's Enter
       if (turn === 'pre-invocation') s.hook('PreInvocation', '2026-10-16T19:00:10.300Z');
       else s.tick(ARG, '2026-10-16T19:00:10.400Z', 'working');
@@ -104,6 +106,26 @@ test('T2 (i) a prompt Enter, a turn start, then the plan-limit fallback 2 s late
       assert.equal(typeof s.rows.find((r) => r.kind === 'model-pinned').turnAt, 'number', 'F3: the turn start is on the row');
     });
   }
+});
+
+test('T2 (i) edges: a turn start at the key\'s own ms makes it AUTO; a new session\'s first busy tick is a turn start', async (t) => {
+  await t.test('same ms (Jim NIT 1: >= not >)', async (tt) => {
+    const s = sandbox(tt);
+    await s.spawn(ARG);
+    s.tick(ARG, '2026-10-16T19:00:00.000Z', 'working');
+    s.key('2026-10-16T19:00:10.000Z');
+    s.hook('PreInvocation', '2026-10-16T19:00:10.000Z');
+    s.tick(SON, '2026-10-16T19:00:12.000Z', 'working');
+    assert.deepEqual(s.pins(), [`${SON}:auto`]);
+  });
+  await t.test('new session (Jim NIT 2)', async (tt) => {
+    const s = sandbox(tt);
+    await s.spawn(ARG);
+    s.tick(ARG, '2026-10-16T19:00:00.000Z', 'working', 'sess-old');     // the old process ended busy
+    s.key('2026-10-16T19:00:10.000Z');
+    s.tick(SON, '2026-10-16T19:00:11.000Z', 'working', 'sess-new');     // the new process's first turn
+    assert.deepEqual(s.pins(), [`${SON}:auto`]);
+  });
 });
 
 test('T2 (i) a pick made DURING a long turn still counts: only a turn that STARTED after the key makes it auto', async (t) => {

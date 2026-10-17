@@ -477,7 +477,7 @@ export class HookServer {
    *  that drifted is never stored, so this can be read out or logged safely. */
   private agyDrift = new Map<string, number>();
   /** MODEL-NOT-KEPT-191 F2: whether each agent's last AGY tick was busy (working/tool_use). */
-  private agyBusy = new Map<string, boolean>();
+  private agyBusy = new Map<string, { busy: boolean; session: string }>();
 
   /** A snapshot of the drift tally (diagnostics, tests). */
   agyDriftCounts(): Record<string, number> {
@@ -1053,11 +1053,14 @@ export class HookServer {
       const readAt = typeof p.read_at === 'number' && Number.isFinite(p.read_at) && p.read_at <= now ? p.read_at : now;
       // MODEL-NOT-KEPT-191 F2: a tick that LEAVES idle is a turn start (alongside PreInvocation),
       // noted before the model is read, so a switch seen in that very tick is not the person's.
+      // Keyed by session too (Jim NIT 2): a new process whose old one ended busy still gets its first turn start.
       const busy = status.agent_state === 'working' || status.agent_state === 'tool_use';
-      if (busy && this.agyBusy.get(agentId) !== true) {
+      const session = typeof (status as { session_id?: unknown }).session_id === 'string' ? (status as { session_id: string }).session_id : '';
+      const prev = this.agyBusy.get(agentId);
+      if (busy && !(prev?.busy && prev.session === session)) {
         try { this.hive.noteTurnStart?.(agentId, readAt); } catch { /* telemetry */ }
       }
-      this.agyBusy.set(agentId, busy);
+      this.agyBusy.set(agentId, { busy, session });
       this.hive.observeLiveModel(agentId, 'antigravity', id, { observedAt: readAt });
     } catch { /* telemetry must never break the pipe */ }
   }
