@@ -44,6 +44,7 @@ const allSources = layerBSources().map((unit) => ({
   ...unit,
   sf: ts.createSourceFile(unit.name, unit.raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS),
 }));
+const allCode = allSources.map((unit) => unit.code).join('\n');
 
 function tmpRoot(t, prefix) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -290,14 +291,14 @@ test('R9: evidence is redacted (token-shaped strings, auth headers, token fields
 });
 
 test('SOURCE: no --force worktree removal (node_modules goes first), no fixed canary port, nothing without --go, the heavy-job gate', () => {
-  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(src), 'never --force as an argument');
+  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(allCode), 'never --force as an argument in any Layer B module');
   const rm = src.indexOf("['worktree', 'remove', dir]");
   assert.ok(rm > 0, 'the 1.1.74 worktree is removed');
   const clean = src.slice(src.indexOf('removeV1174() {'), rm);
   assert.ok(clean.indexOf('W.rm(nm)') > 0, 'node_modules removed before');
   assert.match(clean, /isSymbolicLink\(\)\) throw new Error\('node_modules is a link/, 'never removed through a link');
   assert.equal((src.match(/'worktree', 'remove'/g) || []).length, 1);
-  assert.ok(!/9333/.test(src));
+  assert.ok(!/9333/.test(allCode), 'no fixed canary port in any Layer B module');
   assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
   assert.match(src, /if \(!this\.args\.go\) \{[\s\S]{0,300}return 0;/);
   const main = src.slice(src.indexOf('async main() {'));
@@ -358,8 +359,8 @@ test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv 
     assert.ok(!argv.includes('windows'), argv.join(' '));
   }
   // Static, over the CODE (comments stripped): no 'sandbox', 'windows' pair and no "sandbox windows" string.
-  assert.ok(!/'sandbox',\s*'windows'/.test(src), 'no argv array with sandbox, windows');
-  assert.ok(!/["'`][^"'`\n]*sandbox windows[^"'`\n]*["'`]/.test(src), 'no string literal with "sandbox windows"');
+  assert.ok(!/'sandbox',\s*'windows'/.test(allCode), 'no argv array with sandbox, windows in any Layer B module');
+  assert.ok(!/["'`][^"'`\n]*sandbox windows[^"'`\n]*["'`]/.test(allCode), 'no string literal with "sandbox windows" in any Layer B module');
   // The version parse the step-1 check depends on.
   assert.equal(lb.parseCodexVersion('codex-cli 0.157.1\n'), '0.157.1');
   assert.equal(lb.parseCodexVersion('error: unrecognized'), null);
@@ -454,7 +455,7 @@ test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) star
 });
 
 test('R1 confinement: Codex runs workspace-write with jail-only roots, no network, unelevated; Claude\'s jail settings are an allowlist mirror + the hook', (t) => {
-  assert.ok(!/command = `codex[^`]*dangerously/.test(src), 'Codex never gets the bypass flag');
+  assert.ok(!/command = `codex[^`]*dangerously/.test(allCode), 'Codex never gets the bypass flag in any Layer B module');
   assert.match(src, /command = lbCodexCommand\(this\.args\.models\.codex\);/);
   assert.equal(lb.lbCodexCommand('m1'), 'codex --model m1 --sandbox workspace-write --ask-for-approval never');
   assert.match(src, /command = `claude --model \$\{this\.args\.models\.claude\} --permission-mode bypassPermissions`;/, 'Claude arguments unchanged from the product');
@@ -789,7 +790,7 @@ test('round 6: every PowerShell start is -EncodedCommand (never -Command - over 
     assert.match(c.arguments[1].getText(sf), /^psArgs\(/, `line ${line(c)} builds its arguments with psArgs`);
     assert.ok(!/stdin|input:/.test(c.getText(sf)), `line ${line(c)} feeds nothing on stdin`);
   }
-  assert.ok(!/'-Command'/.test(src), 'no -Command anywhere in the runner');
+  assert.ok(!/'-Command'/.test(allCode), 'no -Command anywhere in a Layer B module');
   const hook = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-jail-hook.cjs'), 'utf8');
   assert.ok(!/powershell|'-Command'/i.test(hook.replace(/PowerShell[,']/g, '')), 'the hook starts no PowerShell');
   // The before-snapshot is the first thing a --go run does, before the session watch and everything else.

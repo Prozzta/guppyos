@@ -204,7 +204,7 @@ const PPID_ALLOW = {
   'tools/file-watchdog.cjs': [/ParentProcessId/, /p\.ppid === parent\.pid && p\.startedAt >= parent\.startedAt/],
   // PowerShell text: ProcTracker's listing (its own reused-pid test), the watcher's and PS_TREE_CMDLINES' walks
   // (each pinned below with its CreationDate check); the codex child picked out of that checked tree
-  'tools/layer-b-run.cjs': [/ParentProcessId/, /x\.ppid === l\.pid && \/\^codex/],
+  'tools/layer-b-core.cjs': [/ParentProcessId/, /x\.ppid === l\.pid && \/\^codex/],
   'test-runner-glob.test.cjs': [/ParentProcessId/],                                   // a CreationDate-windowed listing; parse fixtures
   'heavy-job-lock.test.cjs': [/ParentProcessId/],                                     // parse fixtures
   'layer-b-codex-argv.test.cjs': [/c\.ppid === x\.pid/]                               // a fake table
@@ -212,7 +212,7 @@ const PPID_ALLOW = {
 test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-procs (an allow-list, each entry a listing or checked)', () => {
   const bad = hits(PPID).filter((h) => !(PPID_ALLOW[h.file] || []).some((re) => re.test(h.text)));
   assert.deepStrictEqual(bad.map((h) => `${h.file}:${h.line}: ${h.text.slice(0, 140)}`), []);
-  const lb = SOURCES.find((s) => s.file === 'tools/layer-b-run.cjs').code;
+  const lb = SOURCES.find((s) => s.file === 'tools/layer-b-core.cjs').code;
   assert.match(lb, /if \(-not \$c\.CreationDate -or \$c\.CreationDate -lt \$born\[\$x\]\) \{ continue \}/, 'the window watcher\'s walk');
   assert.match(lb, /\$p\.CreationDate -ge \$born\[\$pp\]\) \{ \$ids \+= \$p\.ProcessId/, 'PS_TREE_CMDLINES\' walk');
   const canary = SOURCES.find((s) => s.file === 'tools/packaged-condense-canary.cjs').code;
