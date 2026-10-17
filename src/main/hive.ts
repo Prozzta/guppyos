@@ -5061,10 +5061,11 @@ export class HiveManager {
         if (a.tokens) bits.push(`${Math.round(a.tokens / 1000)}k tok`);
         if (a.usd) bits.push(`$${a.usd.toFixed(2)}`);
         if (a.inboxBacklog) {
-          const held = typeof a.inboxHeld === 'number' && a.inboxHeld > 0 && typeof a.heldUntil === 'number' && a.heldUntil > nowMs;
-          const until = held ? new Date(a.heldUntil as number).toISOString().slice(11, 16) : null;
-          bits.push(held && a.inboxHeld === a.inboxBacklog ? `inbox ${a.inboxBacklog} (held until ${until})` : `inbox ${a.inboxBacklog}`);
-          if (held && a.inboxHeld !== a.inboxBacklog) bits.push(`${a.inboxHeld} held until ${until}`);
+          const held = typeof a.inboxHeld === 'number' && a.inboxHeld > 0 && typeof a.heldUntil === 'number';
+          const until = held ? new Date(a.heldUntil as number).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+          const due = held && (a.heldUntil as number) <= nowMs;
+          bits.push(held && a.inboxHeld === a.inboxBacklog ? `inbox ${a.inboxBacklog} (${due ? 'held (due)' : `held until ${until}`})` : `inbox ${a.inboxBacklog}`);
+          if (held && a.inboxHeld !== a.inboxBacklog) bits.push(`${a.inboxHeld} ${due ? 'held (due)' : `held until ${until}`}`);
         }
         if (a.breaker && a.breaker !== 'ok' && a.breaker !== 'none') bits.push(`breaker ${a.breaker}`);
         if (a.isGod) bits.push('you');

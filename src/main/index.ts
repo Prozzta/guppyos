@@ -2822,8 +2822,9 @@ const costTotals = new CostLedgerTotals();
 /** ZT-I1-MAIL §3 #6: one agent's mail fields for fleet.json, from its ledger. A ledger that
  *  cannot be read keeps the backlog (file count) and publishes no obligation lists. */
 function fleetMail(id: string): Partial<ReturnType<typeof fleetMailFields>> & { inboxBacklog: number; inboxHeld?: number; heldUntil?: number } {
-  const now = Date.now();
-  const heldUntil = [...workerWake.quietHeld(id).values()].filter((until) => Number.isFinite(until) && until > now);
+  // Keep a due hold in the display.  It releases on the next claim, so skipping it and
+  // showing a later hold falsely tells the Human that mail remains held until that later time.
+  const heldUntil = [...workerWake.quietHeld(id).values()].filter((until) => Number.isFinite(until));
   const quiet = heldUntil.length ? { inboxHeld: heldUntil.length, heldUntil: Math.min(...heldUntil) } : {};
   try { return { ...fleetMailFields(hive.mail, id), ...quiet }; } catch { return { inboxBacklog: hive.inboxBacklog(id), ...quiet }; }
 }

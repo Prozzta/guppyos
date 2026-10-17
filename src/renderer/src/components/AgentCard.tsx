@@ -12,7 +12,7 @@ import type { LooksByTheme } from '@/scene/themes/looks';
 import { impactBadge } from './agentImpactView';
 import { useAgentImpact } from '../hooks/useAgentImpact';
 import { useActivity } from './useActivity';
-import { MAIL_GLYPH, mailBadgeTitle, silentBadgeText, silentBadgeTitle, taskChipText, taskChipTitle, type SilentTurnView } from '@shared/agentBadges';
+import { MAIL_GLYPH, heldInboxText, mailBadgeTitle, silentBadgeText, silentBadgeTitle, taskChipText, taskChipTitle, type SilentTurnView } from '@shared/agentBadges';
 
 export interface AgentCardProps {
   /** Hive agent id: reads main's impact string for this agent (v1.1.45 unit #5). */
@@ -238,15 +238,15 @@ export function AgentCard({
           {taskChipText(doingCount)}{taskFlags.length ? '!' : ''}
         </span>
       )}
-      {/* The MAIL badge: a different shape (a round seal), colour and corner from the
-          task chip. Messages waiting = not yet acted on (ZT-I1-MAIL), not "unread". */}
+      {/* The MAIL badge: a different shape and row from the task chip.  It sits along the
+          lower edge so its full held label cannot cover the identity/status row. */}
       {inboxBacklog > 0 && (
         <span
           data-badge="mail"
           title={mailBadgeTitle(inboxBacklog, inboxHeld, heldUntil)}
           style={{
-            position: 'absolute', right: -5, top: -6, zIndex: 2,
-            minWidth: 18, height: 18, padding: '0 4px', borderRadius: 9,
+            position: 'absolute', left: 40, bottom: -5, zIndex: 2,
+            maxWidth: 150, height: 18, padding: '0 4px', borderRadius: 9,
             background: 'var(--cth-coral)',
             boxShadow: 'inset 0 0 0 1px var(--cth-ink-700), 1px 2px 0 rgba(26,19,32,0.18)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -254,7 +254,7 @@ export function AgentCard({
             pointerEvents: 'none'
           }}
         >
-          {MAIL_GLYPH}{inboxBacklog}{inboxHeld > 0 && heldUntil && heldUntil > Date.now() ? ` held ${new Date(heldUntil).toISOString().slice(11, 16)}` : ''}
+          {inboxHeld > 0 && heldUntil ? heldInboxText(inboxBacklog, inboxHeld, heldUntil) : `${MAIL_GLYPH}${inboxBacklog}`}
         </span>
       )}
       {/* FLEET-LIVENESS-BLIND: the SILENT badge, top-left (the other two use the right corners).

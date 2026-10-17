@@ -235,6 +235,6 @@ test('Guppy agent-card badges survive the token port', () => {
   assert.match(card, /<PixelBadge status=\{held\.status\} label=\{held\.label\}/);
   assert.match(card, /background: taskFlags\.length \? 'var\(--cth-warn-mark\)' : 'var\(--cth-sky\)'/);
   assert.match(card, /title=\{mailBadgeTitle\(inboxBacklog, inboxHeld, heldUntil\)\}[^]*?background: 'var\(--cth-coral\)'/);
-  assert.match(card, /inboxHeld > 0 && heldUntil && heldUntil > Date\.now\(\)/, 'held-mail label remains conditional on a future deadline');
+  assert.match(card, /inboxHeld > 0 && heldUntil \? heldInboxText\(inboxBacklog, inboxHeld, heldUntil\)/, 'held-mail label remains conditional on a real held deadline');
   assert.doesNotMatch(card, /var\(--cth-lemon\)/, 'no warning mark reads the raw accent');
 });

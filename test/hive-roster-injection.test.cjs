@@ -90,7 +90,8 @@ test('the roster makes a quiet-held inbox visibly bounded by its release time', 
     ts: Date.now(),
     agents: [{ id: 'jim-1', name: 'Jim', role: 'agent', breaker: 'ok', tokens: 0, usd: 0, lastActiveSecAgo: 0, inboxBacklog: 1, inboxHeld: 1, heldUntil: until }]
   });
-  assert.match(hive.rosterContext(), /inbox 1 \(held until 06:53\)/);
+  const local = new Date(until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+  assert.match(hive.rosterContext(), new RegExp(`inbox 1 \\(held until ${local}\\)`));
 });
 
 test('each agent line carries its live context-window occupancy (ctx NN%)', async (t) => {
