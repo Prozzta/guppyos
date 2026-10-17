@@ -1353,6 +1353,8 @@ function buildMutant(index, mutant, source) {
   text = text.replace("from './capacityAdmission'", "from '../../src/main/capacityAdmission'");
   // WAKE-SCREEN-GUARD (1.1.76): the owner also imports the shared Codex screen reader.
   text = text.replace("from '../shared/codexScreen'", "from '../../src/shared/codexScreen'");
+  // TUI-COMPOSER-ALLOWLIST-191: and the Claude/agy composer allowlist.
+  text = text.replace("from '../shared/tuiComposer'", "from '../../src/shared/tuiComposer'");
   const file = path.join(MUTANT_DIR, `m${index}.ts`);
   fs.writeFileSync(file, text, 'utf8');
   return loadTs(path.relative(path.resolve(__dirname, '..'), file));
