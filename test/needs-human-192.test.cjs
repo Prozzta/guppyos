@@ -80,8 +80,9 @@ test('an ask with needs_human and a card: one ASK ME entry on the card, its stat
   assert.equal(f.status('ASK-1'), 'doing', 'D2: the router never sets blocked');
   assert.equal(f.logRows('needs-human-surfaced').length, 1);
   assert.deepEqual(f.surfaced.map((e) => [e.card, e.name, e.subject]), [['ASK-1', 'Jim', 'invented: which colour?']], 'one desktop notice');
-  // The same message again (a sender-set id resent): no second entry, no second notice.
-  f.post('jim-1', 'god', { id: m.id, act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: which colour?', body: 'invented detail' });
+  // The same message routed again (a re-delivery, past the outbox's repeat filter): no second
+  // entry, no second notice.
+  f.hive.send({ id: m.id, to: 'god', act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: which colour?', body: 'invented detail' }, 'jim-1');
   assert.equal(f.qa('ASK-1').length, 1);
   assert.equal(f.surfaced.length, 1);
   assert.equal(f.notices().length, 0);
@@ -183,5 +184,11 @@ test('agents are told: the protocol line, and the ledger command takes needs_hum
   const bad = L.parseLedgerOp({ op: 'nh-2', message: { to: 'god', act: 'query', subject: 's', body: 'b', needs_human: 'yes' } });
   assert.equal(bad.ok, false);
   assert.match(bad.error, /message\.needs_human: true or false/);
-  assert.match(src('src/main/ledger.ts'), /\.\.\.\(m\.needs_human !== undefined \? \{ needs_human: m\.needs_human \} : \{\}\)/);
+  // and the message it writes to the caller's outbox carries the flag (the router reads it there)
+  const agentDir = path.join(f.hive.root(), 'agents', 'jim-1');
+  const deps = { agentId: 'jim-1', agentDir, isRecipient: (to) => to === 'god', readTasks: () => f.hive.tasks().tasks, addTask: () => false, patchTask: () => false, now: () => new Date('2026-10-17T12:00:00Z') };
+  const r = await L.applyLedgerOp({ op: 'nh-3', message: { to: 'god', act: 'query', subject: 'invented: ledger ask', body: 'b', card: 'ASK-1', needs_human: true } }, deps);
+  assert.equal(r.body.ok, true, JSON.stringify(r));
+  const written = JSON.parse(fs.readFileSync(path.join(agentDir, 'outbox', 'ledger-nh-3.json'), 'utf8'));
+  assert.equal(written.needs_human, true);
 });
