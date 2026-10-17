@@ -2,7 +2,7 @@
 
 /**
  * RENDERER-RECOVERY-164: the recovery module driven by a REAL, never-shown BrowserWindow whose
- * renderer is really crashed with webContents.forcefullyCrashRenderer().
+ * renderer is really killed (by its pid, as the app's memory recovery does).
  *
  * A stand-in "terminal" streams `pty:data:t1` every 40 ms to its OWNER webContents, the way
  * PtyManager routes a PTY (owner read at send time, reassigned on recreate). The page counts
@@ -65,6 +65,10 @@ const waiters = [];
 // An event that arrives BEFORE its waiter is registered is kept, not lost: under a busy machine
 // the page can report 'got3' before the harness awaits it (that race once failed the suite).
 const early = [];
+// FLAKE-RENDERER-RECOVERY-191: the renderer is killed by its pid, as the app's memory recovery
+// does. forcefullyCrashRenderer first has crashpad dump it and blocks main on that (up to 10 s
+// a call on Windows), which under load outran the 15 s wait for 'gone'.
+const killRenderer = (w) => { process.kill(w.webContents.getOSProcessId()); };
 const waitFor = (name, pred = () => true, ms = 15_000) => new Promise((resolve, reject) => {
   const hit = early.findIndex((e) => e.name === name && pred(e.data));
   if (hit >= 0) { const [e] = early.splice(hit, 1); resolve(e.data); return; }
@@ -115,7 +119,7 @@ app.whenReady().then(async () => {
     note({ phase: 'loaded', wcId: first.wcId, pid: firstPid, goneListeners: win.webContents.listenerCount('render-process-gone') });
 
     // Crash 1: reload the SAME webContents.
-    win.webContents.forcefullyCrashRenderer();
+    killRenderer(win);
     const gone1 = await waitFor('gone');
     const re = await waitFor('ready', (d) => d.wcId === first.wcId);
     await waitFor('got3', (d) => d.wcId === first.wcId);
@@ -123,7 +127,7 @@ app.whenReady().then(async () => {
     note({ phase: 'reloaded', sameWc: re.wcId === first.wcId, notice: re.notice, newPid: pidAfterReload !== firstPid, goneListeners: win.webContents.listenerCount('render-process-gone') });
 
     // Crash 2 (within 2 min): recreate once.
-    win.webContents.forcefullyCrashRenderer();
+    killRenderer(win);
     const gone2 = await waitFor('gone');
     const fresh = await waitFor('ready', (d) => d.wcId !== first.wcId);
     await waitFor('got3', (d) => d.wcId === fresh.wcId);
@@ -134,7 +138,7 @@ app.whenReady().then(async () => {
     // Crash 3: give up. No reload, no new window; the stream keeps running in main.
     // Both events fire in the same turn as the crash row, so wait for them BEFORE crashing.
     const goneP = waitFor('gone'); const gaveP = waitFor('gaveUp');
-    win.webContents.forcefullyCrashRenderer();
+    killRenderer(win);
     const [gone3, g] = await Promise.all([goneP, gaveP]);
     let reloadedAnyway = false;
     try { await waitFor('ready', () => true, 3000); reloadedAnyway = true; } catch { /* expected: nothing comes back */ }
