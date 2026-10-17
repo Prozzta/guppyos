@@ -102,8 +102,16 @@ test('ISO echo lag past the budget (text 17.5 s, erase 0 s): a VERIFIED erase (A
 
 // The late-erase re-read: the erase echo comes 7.5 s after the Ctrl-U, long after the first
 // reading at settleMs, so only the bounded re-read (goneBy) can see it gone; 7.5 s of load room.
+// The stub records 'pty-input' when it PROCESSES a chunk (after its lag), and the host writes the
+// Ctrl-U only after it has seen the text: so the erase was really late only if the stub took it
+// 7 s or more after the text (Jim NIT-2: with the erase lag lost, this passed by the first reading).
 test('ISO late erase echo inside the budget (erase 7.5 s): the re-read sees it gone (ABORTED), then the re-offer COMMITS', T, async (t) => {
   const { rig, settled, why } = await beyondBudget(t, 7_500);
+  const input = rig.transcript(ID).filter((r) => r.kind === 'pty-input');
+  const erase = input.findIndex((r) => String(r.data).includes('\u0015'));
+  assert.ok(erase > 0, `the erase (Ctrl-U) reached the stub after the text\n  ${why}`);
+  const lateMs = input[erase].t - input[erase - 1].t;
+  assert.ok(lateMs >= 7_000, `THE ERASE ECHO WAS LATE (${lateMs} ms after the text), so only the re-read saw it gone\n  ${why}`);
   await assertAbortedThenCommits(rig, settled, why);
 });
 
@@ -115,7 +123,9 @@ test('ISO erase echo past the budget (erase 22.5 s): INTERFERED ERASE_NOT_VERIFI
   assert.equal(settled.kind, 'INTERFERED', `AN UNVERIFIED ERASE IS HELD\n  ${why}`);
   assert.equal(settled.reason, 'ERASE_NOT_VERIFIED', why);
   assert.match(settled.detail, /^row=true count=1\/1$/, why);
-  for (let i = 0; i < 5; i += 1) { await rig.beat(); await sleep(1000); }
+  // The erase echo lands ~6.6 s after the hold (22.5 s vs ~15.9 s): watch well past it (Jim NIT-1),
+  // so 'no Enter, never committed' covers the composer going empty late.
+  for (let i = 0; i < 12; i += 1) { await rig.beat(); await sleep(1000); }
   const o = await outcomes(rig);
   assert.ok(!kinds(o).includes('COMMITTED'), `NEVER COMMITTED WHILE HELD\n  ${await story(rig)}`);
   const enters = rig.transcript(ID).filter((r) => r.kind === 'pty-input').reduce((n, r) => n + (String(r.data).match(/\r/g) || []).length, 0);
