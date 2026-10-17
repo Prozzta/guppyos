@@ -267,7 +267,7 @@ test('RENDERED: the Settings button - floor before, one refresh per click burst,
   assert.deepEqual(r.after.picker, ['CLI default', 'Gemini 3.9 Flash · High', 'Gemini 3.8 Flash · High'], 'the picker follows the pushed file');
   assert.equal(r.lastRefreshed, true);
   assert.deepEqual(r.after.claudeDefaults, ['CLI default', 'Claude New After Refresh'], 'the live Settings-default list follows the same pushed catalog without reopening');
-  assert.ok(r.screenshot.bytes > 1000 && r.screenshot.size.width === 900, 'captured refreshed Settings evidence');
+  assert.ok(r.screenshot.png.length > 1000 && r.screenshot.size.width === 900, 'captured refreshed Settings evidence');
   assert.deepEqual([r.after.button, r.after.disabled], ['Refresh models', false]);
 });
 
