@@ -26,9 +26,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const loadTs = require('./load-ts.cjs');
+const loadTs = require('../load-ts.cjs');
 
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '..', '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 function sandboxHome(t) {
