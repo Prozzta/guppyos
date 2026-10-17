@@ -810,7 +810,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
     // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
     // was read one level deep only).
-    if (k >= 0) return nested(args.slice(k + 1).join(' '), depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
+    if (k >= 0) {
+      const body = args.slice(k + 1).join(' ');
+      // A batch wrapper can generate a .cmd and reach it through `$(cygpath -w ...)`.
+      // We can classify cygpath but not its resulting command, which cmd executes directly.
+      if (bin === 'cmd' && /\$\(|`/.test(body)) return { heavy: true, kind: 'bench', why: `cmd ${args[k]} (computed command the lock cannot read)`, provisional: true };
+      return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
+    }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
     if (/^(powershell|pwsh)$/.test(bin)) {
       // Jim MUST 1: -EncodedCommand (-e, -ec, -enc ...) is base64 of UTF-16LE code; code that does not
@@ -1588,6 +1594,13 @@ export class HeavyJobLock {
   onChange(cb: () => void): () => void {
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };
+  }
+
+  /** A Settings change may create capacity without a holder releasing. Promote queued
+   *  agents immediately so the new slot is not stranded until another release. */
+  limitChanged(): void {
+    this.expire();
+    this.grant();
   }
 
   private changed(): void {

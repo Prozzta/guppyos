@@ -5381,6 +5381,8 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // transition so ordinary config writes never re-enter it.
   const hiveWasEnabled = hive.enabled();
   const next = writeConfig(patch);
+  // HEAVY-LIMIT-REEVAL-192: capacity changes must wake queued agents now.
+  if (patch && 'heavyJobsAtOnce' in patch) heavyLock.limitChanged();
   // Live opt-in/out from Settings → Privacy (TELEMETRY.md).
   if (typeof patch?.telemetryEnabled === 'boolean') analytics.setEnabled(patch.telemetryEnabled);
   // Keep the hive's mirror of the spawn gate current. The queue itself reads

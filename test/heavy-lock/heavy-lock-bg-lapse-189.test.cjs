@@ -281,3 +281,17 @@ test('LOCK N-a: a reclassify that throws keeps the hold', () => {
   l.settle('a1', 'j1', () => ({ heavy: false }));
   assert.equal(l.snapshot().length, 0, 'and the same call settles once it reads light');
 });
+
+test('REGRESSION: a shell wrapper that generates and invokes a batch child which starts burners cannot be light', () => {
+  const cmd = [
+    'P=/tmp/lock-wrapper',
+    'cat > $P/run.cmd <<EOF',
+    '@echo off',
+    'start /b node $P/stress-burn.cjs 999',
+    'node --test test/a.test.cjs',
+    'EOF',
+    'cmd //c "$(cygpath -w $P/run.cmd)"'
+  ].join('\n');
+  const c = classifyCommand(cmd, 0, HookServer.heavyScriptCtx(process.cwd()));
+  assert.equal(c.heavy, true, 'the generated batch child runs arbitrary work');
+});
