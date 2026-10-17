@@ -60,9 +60,12 @@ for (const lag of [1500, 5000]) {
   });
 }
 
-test('ISO echo lag past the budget (12 s): a VERIFIED erase (ABORTED), then the re-offer COMMITS once the load ends', T, async (t) => {
+// FLAKE-ISO-ECHO-LAG-191 (r7, a CPU-limited FULL): the loaded host wrote the erase late (up to
+// 5 s measured under 48 burners). One 12 s lag for both leaves the erase only 3.9 s inside its
+// 0.9 s settle plus the 15 s erase-verify budget.
+test('ISO echo lag past the budget (12 s, the erase 5 s later under load): a VERIFIED erase (ABORTED), then the re-offer COMMITS once the load ends', T, async (t) => {
   const rig = await startRig(t);
-  await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: 12_000 } }]);
+  await rig.setup([{ id: ID, flavour: 'codex', scenario: { echoLagMs: 12_000, echoLagChunks: 1, echoLagAfterMs: 17_000 } }]);
   await rig.call('send', { to: ID, subject: 'lag', body: 'hello' });
   const first = await beatUntil(rig, (x) => x.some((y) => y.kind !== 'REFUSED'), 60);
   let why = await story(rig);
