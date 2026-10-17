@@ -187,7 +187,12 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
       // A failed step must not leave the child waiting for its go file.
       // Only what this child started (pid + birth, own-procs), never a ParentProcessId walk.
       if (child && child.exitCode === null) own.killOwnTree({ pid: child.pid, bornMs, name: 'guppy-heavyjob.exe' });
-      if (serve) serve.kill();
+      // The helper .exe in the folder stays locked until serve has exited: wait for it before removing.
+      if (serve && serve.exitCode === null && serve.signalCode === null) {
+        const gone = new Promise((r) => serve.once('exit', r));
+        serve.kill();
+        await gone;
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });

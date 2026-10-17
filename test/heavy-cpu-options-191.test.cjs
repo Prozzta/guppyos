@@ -409,7 +409,10 @@ test('SPAWN: every agent spawn goes through spawnAgentCore, which clears the aut
   assert.equal(starts.length, 2);
   for (const at of starts) {
     assert.ok(at > core && at < end, 'a PTY start outside spawnAgentCore would skip the auto-approve record');
-    assert.match(idx.slice(at - 200, at), /if \(opts\.hive\?\.id\) heavyAutoApprove\.delete\(opts\.hive\.id\);\s*(const res = await )?$/, 'cleared right before the PTY starts');
+    const before = idx.slice(at - 600, at);
+    const cleared = before.lastIndexOf('if (opts.hive?.id) heavyAutoApprove.delete(opts.hive.id);');
+    assert.ok(cleared >= 0, 'cleared before the PTY starts');
+    assert.doesNotMatch(before.slice(cleared).replace(/const res = await $/, ''), /\bawait\b|\breturn\b/, 'nothing between the clear and the PTY start can wait or leave');
   }
   assert.match(idx.slice(core, end), /const res = await ptyManager\.spawn\(opts, owner\);\s+if \(res\.ok && opts\.hive\?\.id\) heavyAutoApprove\.set\(/, 'set only when the spawn succeeded');
   // Restart & Continue, wake respawn and model switch are renderer spawns: all through pty:spawn into spawnAgentCore.

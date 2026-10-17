@@ -4839,12 +4839,12 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (provider === 'codex' && opts.hive?.id) {
     await enableCodexRemoteForSpawn(opts, opts.hive.id);
   }
+  // Cleared first: a spawn that fails leaves no stale auto-approve from an earlier process (Jim NIT2).
+  if (opts.hive?.id) heavyAutoApprove.delete(opts.hive.id);
   // WAKE-SCREEN-GUARD R2-4: this Codex incarnation's own token, in its spawn env (the hook
   // shim copies it into each hook payload). Registered below once the PTY exists.
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
-  // Cleared first: a spawn that fails leaves no stale auto-approve from an earlier process (Jim NIT2).
-  if (opts.hive?.id) heavyAutoApprove.delete(opts.hive.id);
   const res = await ptyManager.spawn(opts, owner);
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (wakeToken && res.ok && opts.hive?.id) {
