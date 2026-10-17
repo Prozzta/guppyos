@@ -29,7 +29,7 @@ import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
-import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, rebuildToolHook, templatedToolInput } from './codexHookMcp';
+import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, execShellFields, pendingExecCommands, rebuildToolHook, templatedToolInput } from './codexHookMcp';
 import { withoutJoinLine, type HeavyJobs } from './heavyCpu';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
@@ -162,6 +162,9 @@ interface HookPayload {
   /** HEAVY-CPU-OPTIONS-191: that call asked for Windows cmd as its shell (its literal `shell` in the
    *  rollout), so its join line takes cmd's own separator. */
   hook_cmd_shell?: boolean;
+  /** CODEX-CMD-COMPUTED-SHELL-192: Guppy cannot read that call's shell (computed, or the call not
+   *  found), so no join line is known to run as written in it: the call is not wrapped. */
+  hook_shell_unknown?: boolean;
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
@@ -889,7 +892,7 @@ export class HookServer {
     if (rebuilt.degraded) p.payload_degraded = true;
     const ti = event === 'PreToolUse' ? templatedToolInput(args.ti) : undefined;
     if (ti) p.hook_tool_input = ti;
-    if (ti && tail && typeof ti.command === 'string' && isCmdShell(pendingExecShell(tail, ti.command))) p.hook_cmd_shell = true;
+    if (ti && typeof ti.command === 'string') Object.assign(p, execShellFields(tail, ti.command));
     // HEAVY-JOB-LOCK-FAILOPEN (c): a still-degraded PreToolUse carries the pending shell commands,
     // so the heavy-job lock can classify what is about to run (gates still see it as degraded).
     if (rebuilt.degraded && event === 'PreToolUse' && tail) {
@@ -2276,7 +2279,9 @@ export class HookServer {
       let provider: string = allows ? 'codex' : 'claude';
       try { provider = this.mailChannel(agentId).provider ?? provider; if (provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
       if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) {
-        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+        // CODEX-CMD-COMPUTED-SHELL-192: a Codex call in a shell Guppy cannot read runs as written.
+        if (own !== undefined && p.hook_shell_unknown === true) this.heavyJobs.skipUnknownShell(agentId, provider);
+        else if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap ={ agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
         else this.heavyJobs.skipAskFirst(agentId, provider);
       }
     }

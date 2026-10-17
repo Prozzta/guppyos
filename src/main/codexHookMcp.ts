@@ -324,6 +324,18 @@ export function pendingExecShell(tail: string, command: string): string | null |
   return undefined;
 }
 
+/**
+ * CODEX-CMD-COMPUTED-SHELL-192: what a PreToolUse knows of the shell its pending call runs in. A
+ * literal cmd takes cmd's join line; no shell (Codex's default) takes the `;` line; a shell Guppy
+ * cannot read (computed, or the call not found) is unknown. No join line runs the same in cmd and
+ * in PowerShell, and the `;` line in cmd loses carets, expands %VAR% twice and unescapes `>` and `|`.
+ */
+export function execShellFields(tail: string, command: string): { hook_cmd_shell?: true; hook_shell_unknown?: true } {
+  const shell = tail ? pendingExecShell(tail, command) : undefined;
+  if (shell === undefined) return { hook_shell_unknown: true };
+  return isCmdShell(shell) ? { hook_cmd_shell: true } : {};
+}
+
 /** HEAVY-CPU-OPTIONS-191: Windows cmd (`cmd`, `cmd.exe`, or a path to it). */
 export function isCmdShell(shell: string | null | undefined): boolean {
   return typeof shell === 'string' && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell.trim());

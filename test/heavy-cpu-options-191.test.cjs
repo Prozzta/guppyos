@@ -376,7 +376,7 @@ test('AGY shim: a rewrite becomes AGY\'s allow + overwrite, context rides along;
 });
 
 test('WIRING: config keys (default off), Settings rows beside "Heavy jobs at once", live apply, helper on PATH, built from source', () => {
-  assert.match(read('src/main/hooks.ts'), /if \(ti && tail && typeof ti\.command === 'string' && isCmdShell\(pendingExecShell\(tail, ti\.command\)\)\) p\.hook_cmd_shell = true;/, 'a Codex call that asked for cmd is marked from its rollout (M10)');
+  assert.match(read('src/main/hooks.ts'), /if \(ti && typeof ti\.command === 'string'\) Object\.assign\(p, execShellFields\(tail, ti\.command\)\);/, 'a Codex call that asked for cmd is marked from its rollout (M10; CODEX-CMD-COMPUTED-SHELL-192)');
   const cfg = read('src/main/config.ts');
   assert.match(cfg, /heavyJobsBackgroundPriority\?: boolean;/);
   assert.match(cfg, /heavyJobsHalfCores\?: boolean;/);

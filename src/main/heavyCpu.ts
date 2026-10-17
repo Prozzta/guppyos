@@ -197,6 +197,13 @@ export class HeavyJobs {
     this.log({ action: 'skip-ask-first', agentId, provider });
   }
 
+  /** A heavy Codex call that is not wrapped because Guppy cannot read the shell it runs in
+   *  (CODEX-CMD-COMPUTED-SHELL-192): logged, so the gap is visible. */
+  skipUnknownShell(agentId: string, provider: string): void {
+    if (this.d.platform !== 'win32' || !this.d.exe()) return;
+    this.log({ action: 'skip-unknown-shell', agentId, provider });
+  }
+
   /** A heavy call is about to run: its job is created with the limits in force now, and the tool
    *  input to run instead is returned (null: leave the call as it is). `cmd`: the call is known to
    *  run in Windows cmd. */
