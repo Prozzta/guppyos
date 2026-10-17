@@ -248,7 +248,8 @@ test('the router keeps "wake" through normalize, and the ledger records it as wa
   assert.match(norm.slice(0, 1500), /\.\.\.normalizeSupersedes\(partial\.supersedes\),\n      \.\.\.normalizeWakeField\(partial\.wake\),\n      \.\.\.\(cardIdValue\(partial\.card\) \? \{ card: cardIdValue\(partial\.card\)! \} : \{\}\)\n    \};/);
   const ledger = readSource('src/main/mailLedger.ts');
   assert.match(ledger, /\.\.\.\(msg\.wake === 'now' \? \{ wakeNow: true \} : \{\}\),/, 'entryFromMessage');
-  assert.match(ledger, /sender_id: typeof m\.sender_id === 'string' \? m\.sender_id : undefined,\n    wake: m\.wake,\n    card: m\.card\n  \};/, 'a ledger rebuilt from disk keeps it (and the card)');
+  // REQUESTS-AUTO-190 added needs_human after the card.
+  assert.match(ledger, /sender_id: typeof m\.sender_id === 'string' \? m\.sender_id : undefined,\n    wake: m\.wake,\n    card: m\.card,\n    needs_human: m\.needs_human\n  \};/, 'a ledger rebuilt from disk keeps it (and the card, and needs_human)');
 });
 
 test('behaviour: a delivered message with wake:"now" is a wakeNow ledger entry; without it, none', (t) => {

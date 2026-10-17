@@ -52,7 +52,31 @@ export interface DigestAgent {
  *  notice threshold (the Human has a banner; god gets a decision). */
 export interface DigestHeldWake { agentId: string; name?: string; messages: number; since: number }
 
+/** REQUESTS-AUTO-190: an ask the backstop closed (hive.autoCloseStaleObligations writes them). */
+export interface DigestBackstopClosed { agentId: string; from: string; id: string; subject: string; at: number }
+/** Under state/: the backstop closes of the last week, newest last, at most ASKS_BACKSTOP_KEEP. */
+export const ASKS_BACKSTOP_FILE = 'asks-backstop.json';
+export const ASKS_BACKSTOP_KEEP = 200;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function readBackstopClosed(root: string): DigestBackstopClosed[] {
+  try {
+    const s = JSON.parse(readFileSync(join(root, 'state', ASKS_BACKSTOP_FILE), 'utf8')) as { closed?: unknown };
+    return Array.isArray(s?.closed) ? s.closed.filter((c): c is DigestBackstopClosed => !!c && typeof c === 'object'
+      && typeof (c as DigestBackstopClosed).id === 'string' && typeof (c as DigestBackstopClosed).at === 'number') : [];
+  } catch { return []; }
+}
+
+export function recordBackstopClosed(root: string, add: readonly DigestBackstopClosed[], now: number): void {
+  if (add.length === 0) return;
+  const keep = [...readBackstopClosed(root).filter((c) => now - c.at < 7 * DAY_MS), ...add].slice(-ASKS_BACKSTOP_KEEP);
+  mkdirSync(join(root, 'state'), { recursive: true });
+  atomicWriteJson(join(root, 'state', ASKS_BACKSTOP_FILE), { v: 1, closed: keep });
+}
+
 export interface FloorDigestInput {
+  /** REQUESTS-AUTO-190: listed when any is from the last 24 h. */
+  backstopClosed?: DigestBackstopClosed[];
   heldWakes?: DigestHeldWake[];
   silentTurns?: SilentTurn[];
   tasks: unknown;
@@ -168,6 +192,13 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   for (const i of input.ledgerIssues.filter((x) => x.level === 'warning')) out.push(`- LEDGER ${i.cardId ?? ''}: ${i.message}`);
   out.push('');
 
+  const backstop = (input.backstopClosed ?? []).filter((c) => now - c.at < DAY_MS);
+  if (backstop.length) {
+    out.push('## Asks closed by the backstop (last 24 h)', '');
+    for (const c of backstop) out.push(`- ${c.agentId} <- ${c.from}: ${c.subject} (${c.id})`);
+    out.push('');
+  }
+
   out.push('## Roster', '');
   if (input.agents.length === 0) out.push('No agents.');
   for (const a of input.agents) {
@@ -277,7 +308,8 @@ export class FloorDigest {
       tasks: this.host.tasks(), meta: this.host.taskMeta(), flags: this.host.flags(),
       ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now,
       heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })(),
-      silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })()
+      silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
+      backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.
     const body = markdown.split('\n').filter((l) => !l.startsWith('_Written by the harness')).join('\n');

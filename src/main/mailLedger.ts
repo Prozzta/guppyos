@@ -105,6 +105,8 @@ export interface MailMessageLike {
   /** REQUESTS-BADGE-84 rule A: the task card this message is about (a sender's `card`, or the
    *  ledger op's card id). Only a well-formed card id is kept (cardIdValue). */
   card?: unknown;
+  /** REQUESTS-AUTO-190: the sender's `needs_human`; such an ask is never closed by the backstop. */
+  needs_human?: unknown;
 }
 
 export interface MailEntry {
@@ -124,6 +126,8 @@ export interface MailEntry {
   /** REQUESTS-BADGE-84 rule A: the card the ask was tied to when it was sent. The ask closes when
    *  that card becomes done after the ask arrived (staleObligations). Absent = not tied. */
   cardId?: string;
+  /** REQUESTS-AUTO-190: sent with `needs_human: true`. Absent = not (and every entry before 1.1.91). */
+  needsHuman?: boolean;
   /** sha256 of the body; null for a work order confirmed after a restart (Q14: body unknown). */
   bodyHash: string | null;
   /** The §4.1 duplicate key, hash(subject + body) (§11.18 #3). Null when the body is unknown. */
@@ -285,6 +289,7 @@ function entryFromMessage(msg: MailMessageLike, seq: number, now: number, via: M
     ...(Array.isArray(msg.supersedes) && msg.supersedes.length ? { supersedes: msg.supersedes.filter((s) => typeof s === 'string').slice(0, 10) } : {}),
     ...(msg.wake === 'now' ? { wakeNow: true } : {}),
     ...(cardIdValue(msg.card) ? { cardId: cardIdValue(msg.card)! } : {}),
+    ...(msg.needs_human === true ? { needsHuman: true } : {}),
     bodyHash: mailBodyHash(msg.body ?? ''),
     contentHash: mailContentHash(msg.subject ?? '', msg.body ?? ''),
     via,
@@ -800,8 +805,14 @@ const CARD_ID_RE = /\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b/g;
 const RELEASE_PREFIX_RE = /^\s*(?:rc\/)?v?(\d+)\.(\d+)\.(\d+)(?![.\d])/;
 
 export interface StaleObligation { agentId: string; id: string; reason: string }
-/** A card's status and when it became done (ms), or null when nothing on the card dates it. */
-export interface CardEvidence { status: string; doneAt: number | null }
+/** A card's status and when it became done (ms), or null when nothing on the card dates it.
+ *  `openQA`: the card has a humanQA question with no answer and not dismissed (REQUESTS-AUTO-190). */
+export interface CardEvidence { status: string; doneAt: number | null; openQA?: boolean }
+/** REQUESTS-AUTO-190 R4: the backstop. `now` absent = off. */
+export interface StaleOptions { now?: number; backstopMs?: number; godId?: string }
+/** REQUESTS-AUTO-190 R4: how long an ask stays open once its owner has written back to the
+ *  requester: max(24 h, the p99 reply latency of the hive's replied asks, 2.13 h on 2026-10-17). */
+export const ASK_BACKSTOP_MS = 24 * 60 * 60 * 1000;
 /** The first start of a packaged release on this hive (ms). */
 export interface ReleaseRun { version: string; firstRunAt: number }
 
@@ -828,15 +839,43 @@ function versionAtLeast(have: number[], want: number[]): boolean {
  *     (REQUESTS-BADGE-84: a status inform there is no answer);
  *  3. the subject opens with a release (`1.1.82: …`) and the first start of any release at or
  *     above it came after the ask arrived.
- * Never by age alone: a dropped ask with none of this evidence stays open. Pure.
+ * REQUESTS-AUTO-190, so that no ask needs a hand:
+ *  R1. an ask with no card and no card in its subject takes the card of its in_reply_to chain, else
+ *      of the first carded message in its conversation, and rule 1 applies to that card;
+ *  R4. the backstop (only with `opts.now`): the owner has written to the requester since the ask
+ *      and the ask is `backstopMs` old. Never for a needs_human ask, an ask on a card with an open
+ *      humanQA, or an ask to god on a card still doing: those stay open where they are seen.
+ * Never by age alone: an ask with none of this evidence stays open. Pure.
  */
-export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, cards: ReadonlyMap<string, CardEvidence>, releases: readonly ReleaseRun[]): StaleObligation[] {
+export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, cards: ReadonlyMap<string, CardEvidence>, releases: readonly ReleaseRun[], opts: StaleOptions = {}): StaleObligation[] {
   const runs = releases.map((r) => ({ v: versionParts(r.version), at: r.firstRunAt })).filter((r) => r.v && Number.isFinite(r.at));
   const sortedBack = new Map<string, MailEntry[]>();
   const backOf = (id: string): MailEntry[] => {
     let list = sortedBack.get(id);
     if (!list) { list = docs[id] ? Object.values(docs[id].entries).sort(bySeq) : []; sortedBack.set(id, list); }
     return list;
+  };
+  // R1: every delivered message by id (and sender id), and the first carded one per conversation.
+  const byId = new Map<string, MailEntry>();
+  const convCard = new Map<string, { at: number; card: string }>();
+  for (const d of Object.values(docs)) {
+    for (const x of Object.values(d.entries)) {
+      if (!byId.has(x.id)) byId.set(x.id, x);
+      if (x.senderId && !byId.has(x.senderId)) byId.set(x.senderId, x);
+      if (x.cardId && x.conversation) {
+        const c = convCard.get(x.conversation);
+        if (!c || x.deliveredAt < c.at) convCard.set(x.conversation, { at: x.deliveredAt, card: x.cardId });
+      }
+    }
+  }
+  const inherited = (e: MailEntry): string | null => {
+    const seen = new Set<string>();
+    for (let cur: MailEntry | undefined = e; cur?.inReplyTo && !seen.has(cur.inReplyTo) && seen.size < 50;) {
+      seen.add(cur.inReplyTo);
+      cur = byId.get(cur.inReplyTo);
+      if (cur?.cardId) return cur.cardId;
+    }
+    return (e.conversation && convCard.get(e.conversation)?.card) || null;
   };
   const out: StaleObligation[] = [];
   for (const [agentId, doc] of Object.entries(docs)) {
@@ -855,6 +894,8 @@ export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, 
       // REQUESTS-BADGE-84 rule A: the card the ask was tied to at send time decides alone.
       if (e.cardId && doneAfter(e.cardId)) reason = `auto:card-done:${e.cardId}`;
       else if (!e.cardId && named.length && named.every(doneAfter)) reason = `auto:card-done:${named.join(',')}`;
+      const inh = !e.cardId && !named.length ? inherited(e) : null;
+      if (!reason && inh && doneAfter(inh)) reason = `auto:card-done-inherited:${inh}`;
       if (!reason && e.conversation) {
         const isLatest = latest.get(`${e.from}\u0000${e.conversation}`) === e.id;
         const answer = backOf(e.from).find((x) => x.from === agentId && x.conversation === e.conversation
@@ -870,6 +911,12 @@ export function staleObligations(docs: Readonly<Record<string, MailLedgerDoc>>, 
         // that release (a bug in it), not for it, and a later release does not answer it.
         const firstAt = Math.min(...runs.filter((r) => versionAtLeast(r.v!, want)).map((r) => r.at));
         if (Number.isFinite(firstAt) && firstAt > e.deliveredAt) reason = `auto:release-shipped:${rel[1]}.${rel[2]}.${rel[3]}`;
+      }
+      if (!reason && opts.now !== undefined && opts.now - e.deliveredAt >= (opts.backstopMs ?? ASK_BACKSTOP_MS) && !e.needsHuman) {
+        const onCards = [...(e.cardId ? [e.cardId] : named), ...(inh ? [inh] : [])].map((id) => cards.get(id)).filter((c) => !!c);
+        const held = onCards.some((c) => c.openQA) || (agentId === (opts.godId ?? 'god') && onCards.some((c) => c.status === 'doing'));
+        const back = held ? undefined : backOf(e.from).find((x) => x.from === agentId && x.deliveredAt > e.deliveredAt && x.deliveredAt <= opts.now!);
+        if (back) reason = `auto:backstop:${back.id}`;
       }
       if (reason) out.push({ agentId, id: e.id, reason });
     }
@@ -1031,7 +1078,8 @@ function diskEntryMessage(f: DiskMessage): MailMessageLike {
     requires_reply: typeof m.requires_reply === 'boolean' ? m.requires_reply : undefined,
     sender_id: typeof m.sender_id === 'string' ? m.sender_id : undefined,
     wake: m.wake,
-    card: m.card
+    card: m.card,
+    needs_human: m.needs_human
   };
 }
 
