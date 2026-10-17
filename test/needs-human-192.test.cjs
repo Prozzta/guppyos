@@ -103,6 +103,13 @@ test('D3: a query, a propose and a requires_reply inform surface; an inform or d
   const flagged = D.readFlaggedForHuman(f.hive.root());
   assert.deepEqual(flagged.map((x) => [x.agentId, x.card, x.subject]), [['jim-1', 'TODO-1', 'invented: finding the Human should see'], ['jim-1', null, 'invented: cardless finding']]);
   assert.equal(f.logRows('needs-human-flagged').length, 2);
+  // and the scheduled digest reads them: floor-digest.md lists both
+  const root = f.hive.root();
+  const host = { root: () => root, tasks: () => f.hive.tasks(), taskMeta: () => ({}), flags: () => [], ledgerIssues: () => [], send: () => {}, appendLog: () => {} };
+  new D.FloorDigest(host, () => ({ ...D.FLOOR_DIGEST_DEFAULTS }), () => Date.now()).run();
+  const md = fs.readFileSync(path.join(root, D.FLOOR_DIGEST_FILE), 'utf8');
+  assert.match(md, /## Flagged for the Human \(last 24 h\)\n\n- Jim on TODO-1: invented: finding the Human should see \(/);
+  assert.match(md, /- Jim on no card: invented: cardless finding \(/);
 });
 
 test('no card on the ask: an ancestor\'s card, then the conversation\'s card', async (t) => {
