@@ -11,6 +11,45 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.90] — 2026-10-17
+
+**A CARDS tab to review every card, possible duplicates in the claim ledger, and AGY usage back on
+the capacity bar.** Rollback: 1.1.89 (reinstall).
+
+### Added
+
+- **The CARDS tab (Command Center).** Every card on the board as a review card: its status and how
+  long it has had it, the assignee, what it depends on, the latest result, the notes timeline and
+  the questions asked of you, newest activity first, with search and an assignee filter; done cards
+  are hidden until you ask for them. Nothing on the tab changes a card: the card's detail opens
+  read-only, and the one open question that waits on you for a blocked card links to ASK ME, where
+  it is answered. The Requests tab is hidden.
+
+- **Possible duplicates in the claim ledger panel.** Per agent, live claims that name the same card
+  or share a key are grouped, newest first. "Keep this one" marks the others replaced by it (it can
+  be reverted), and "keep all" keeps them side by side. Each asks for a confirmation, a large group
+  starts with nothing ticked, and nothing is ever replaced on its own.
+
+### Changed
+
+- **A new memory note is checked against the agent's related claims.** The note is offered the
+  claims it may replace, and a card note that meets a live claim with the same key must say whether
+  it replaces it or stands apart before anything is written. Until the claims are warm after
+  start-up, only a bounded set is compared, and the comparison stays warm across new notes, so a
+  first note on a large ledger takes a few seconds (it took 37 s or more). Card names such as
+  WAKE-155 are recognised as cards.
+
+### Fixed
+
+- **AGY usage is back on the capacity bar.** agy 1.4.0 reports its quota under a scoped key, which
+  the bar dropped; it now reads it.
+
+- **The heavy-job lock sees more of the commands that run a heavy job.** It now reads PowerShell
+  script blocks, iex and Invoke-Expression, -EncodedCommand, Start-Job and Invoke-Command
+  -FilePath, sourced and ./ scripts, node scripts without an extension, nested bash -c, powershell
+  -File, batch files, UTF-16 scripts and wrappers such as nohup, time and Start-Process. Most code
+  it cannot read is held as heavy, and a Codex tool event that names no tool no longer gets through.
+
 ## [1.1.89] — 2026-10-16
 
 **The claim ledger in Settings, a warning when a working agent goes silent, and a sharper, steadier
