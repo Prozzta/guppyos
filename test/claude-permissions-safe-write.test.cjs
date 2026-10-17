@@ -210,6 +210,21 @@ test('a write by someone else between our read and our rename wins: ours is drop
   assert.deepEqual(leftovers(env.h), []);
 });
 
+test('a publish that cannot rename leaves the old file intact (the write is tmp + rename, never in place)', (t) => {
+  const env = home(t);
+  fs.writeFileSync(env.cj, JSON.stringify(GOOD_CJ));
+  const before = bytes(env.cj);
+  const orig = fs.renameSync;
+  let calls = 0;
+  fs.renameSync = function () { calls++; const e = new Error('EACCES: denied'); e.code = 'EACCES'; throw e; };
+  let r;
+  try { r = run(env); } finally { fs.renameSync = orig; }
+  assert.ok(calls >= 1, 'the publish went through rename');
+  assert.equal(r.trust.status, 'failed');
+  assert.deepEqual(bytes(env.cj), before, 'THE USER FILE IS UNTOUCHED');
+  assert.deepEqual(leftovers(env.h), []);
+});
+
 // ── 6. Andy F1/F2: a symlink stays a symlink; the mode is kept ─────────────────────────────
 
 test('a symlinked ~/.claude.json: the link is kept and its target is updated', (t) => {
