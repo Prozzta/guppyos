@@ -182,9 +182,10 @@ async function server(t, limit, o) {
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined);
   s.setHeavyLock(new HeavyJobLock({ limit: () => limit, setTimer: () => ({}), clearTimer: () => {} }));
   const f = fakeChannel();
-  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => o, exe: () => 'x', channel: f.channel, setInterval: () => 1, clearInterval: () => {} }));
+  const logs = [];
+  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => o, exe: () => 'x', channel: f.channel, setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r) }));
   const fire = (agent_id, command, extra = {}) => s.handleWithClaimContext({ agent_id, hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command }, ...extra });
-  return { s, f, fire, hive };
+  return { s, f, fire, hive, logs };
 }
 
 test('HOOK: an allowed heavy call is rewritten for each provider; a light one and a denied one are not (M2, M3, M4)', async (t) => {
@@ -207,8 +208,9 @@ test('HOOK: an allowed heavy call is rewritten for each provider; a light one an
 });
 
 test('HOOK: Codex that asks its user first: no rewrite and no allow, so its approval prompt stays; the same call auto-approved is wrapped (Jim SHOULD-2)', async (t) => {
-  const { s, f, fire, hive } = await server(t, 'off', { background: false, half: true });
+  const { s, f, fire, hive, logs } = await server(t, 'off', { background: false, half: true });
   const asks = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
+  assert.deepEqual(logs.filter((r) => r.action === 'skip-ask-first'), [{ kind: 'heavy-cpu', action: 'skip-ask-first', agentId: 'a1', provider: 'claude' }], 'the declined call is logged with its agent and provider (Jim SHOULD-1 a)');
   assert.equal(asks?.hookSpecificOutput?.permissionDecision, undefined, 'no allow for an agent that asks');
   assert.equal(asks?.hookSpecificOutput?.updatedInput, undefined);
   assert.equal(f.sent.length, 0, 'no job made for a call that is not rewritten');
@@ -224,6 +226,7 @@ test('HOOK: Codex that asks its user first: no rewrite and no allow, so its appr
   await hive.ensureAgent({ id: 'g1', name: 'g1', provider: 'antigravity', cwd: os.tmpdir() });
   const agy = await fire('g1', 'npm ci', { transport: 'http' });
   assert.equal(agy?.hookSpecificOutput?.updatedInput, undefined, 'an AGY agent that asks is not rewritten');
+  assert.deepEqual(logs.filter((r) => r.action === 'skip-ask-first').map((r) => [r.agentId, r.provider]), [['a1', 'claude'], ['g1', 'antigravity']], 'only the declined calls are logged');
   s.setHeavyAutoApproves((id) => id === 'a1' || id === 'g1');
   const agyAuto = await fire('g1', 'npm ci', { transport: 'http' });
   assert.match(agyAuto.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join g1-\S+ 0 1; npm ci$/);
@@ -383,6 +386,8 @@ test('WIRING: config keys (default off), Settings rows beside "Heavy jobs at onc
   assert.ok(at > 0 && ui.indexOf('Heavy jobs at background priority') > at && ui.indexOf('Heavy jobs on half the processors') > at, 'the two rows follow "Heavy jobs at once"');
   assert.match(ui, /updateConfig\(\{ heavyJobsBackgroundPriority: next \}/);
   assert.match(ui, /updateConfig\(\{ heavyJobsHalfCores: next \}/);
+  const note = ui.indexOf('Codex and Antigravity agents that ask before running commands are not limited.');
+  assert.ok(note > ui.indexOf('Heavy jobs on half the processors'), 'the ask-first exemption is said under the two toggles (Jim SHOULD-1 b)');
   const idx = read('src/main/index.ts');
   assert.match(idx, /hookServer\.setHeavyJobs\(heavyJobs\);/);
   assert.match(idx, /options: \(\) => heavyCpuOptions\(readConfig\(\)\)/, 'read live');
@@ -392,4 +397,22 @@ test('WIRING: config keys (default off), Settings rows beside "Heavy jobs at onc
   assert.match(pkg.scripts.build, /node tools\/build-heavyjob\.cjs/);
   assert.match(read('electron-builder.yml'), /- from: resources\/heavyjob\/bin\s+to: heavyjob/);
   assert.match(read('.gitignore'), /^resources\/heavyjob\/bin\/$/m, 'never a committed .exe');
+});
+
+test('SPAWN: every agent spawn goes through spawnAgentCore, which clears the auto-approve record before its PTY starts (Jim NIT2)', () => {
+  const idx = read('src/main/index.ts').replace(/\r\n/g, '\n');
+  const core = idx.indexOf('async function spawnAgentCore(');
+  const end = idx.indexOf('\n}\n', core);
+  assert.ok(core > 0 && end > core);
+  // The only PTY starts in main are inside spawnAgentCore (the agent CLI, and the missing-CLI installer).
+  const starts = [...idx.matchAll(/ptyManager\.spawn\(/g)].map((m) => m.index);
+  assert.equal(starts.length, 2);
+  for (const at of starts) {
+    assert.ok(at > core && at < end, 'a PTY start outside spawnAgentCore would skip the auto-approve record');
+    assert.match(idx.slice(at - 200, at), /if \(opts\.hive\?\.id\) heavyAutoApprove\.delete\(opts\.hive\.id\);\s*(const res = await )?$/, 'cleared right before the PTY starts');
+  }
+  assert.match(idx.slice(core, end), /const res = await ptyManager\.spawn\(opts, owner\);\s+if \(res\.ok && opts\.hive\?\.id\) heavyAutoApprove\.set\(/, 'set only when the spawn succeeded');
+  // Restart & Continue, wake respawn and model switch are renderer spawns: all through pty:spawn into spawnAgentCore.
+  assert.match(idx, /ipcMain\.handle\('pty:spawn'[\s\S]{0,900}?return spawnAgentCore\(opts, owner\);/);
+  assert.equal([...read('src/preload/index.ts').matchAll(/ipcRenderer\.invoke\('pty:spawn'/g)].length, 1, 'the renderer reaches a PTY only through pty:spawn');
 });

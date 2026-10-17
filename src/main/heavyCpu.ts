@@ -74,7 +74,10 @@ export function joinLine(id: string, o: HeavyCpuOptions, cmd = false): string {
 /** Whether an agent started with this command line runs commands without asking its user: its
  *  provider's own auto-approve flag is on it. Codex applies a rewrite only with permissionDecision
  *  'allow', and AGY's rewrite is an allow; for an agent that asks first that allow could skip the
- *  user's prompt, so such an agent's calls are not rewritten (Jim SHOULD-2). */
+ *  user's prompt, so such an agent's calls are not rewritten (Jim SHOULD-2). Only the flag on the
+ *  command line counts: Codex auto-approval set by config (approval_policy = "never" in config.toml,
+ *  or -a never / --full-auto) reads as ask-first, so those calls run unlimited. That is the safe
+ *  direction: a wrong guess never skips a prompt (Jim NIT1). */
 export function approvesWithoutAsking(provider: AgentProvider, argv: string[]): boolean {
   const flag = autoModeFlagForProvider(provider).split(/\s+/).filter(Boolean);
   return flag.length > 0 && flag.every((f) => argv.includes(f));
@@ -185,6 +188,13 @@ export class HeavyJobs {
     // A dead helper is started again on the next request.
     if (r === null && this.ch === ch) { ch.close(); this.ch = null; }
     return r;
+  }
+
+  /** A heavy call that is not wrapped because its agent asks its user before running commands
+   *  (Codex, AGY): logged, so the gap is visible (Jim SHOULD-1). */
+  skipAskFirst(agentId: string, provider: string): void {
+    if (this.d.platform !== 'win32' || !this.d.exe()) return;
+    this.log({ action: 'skip-ask-first', agentId, provider });
   }
 
   /** A heavy call is about to run: its job is created with the limits in force now, and the tool

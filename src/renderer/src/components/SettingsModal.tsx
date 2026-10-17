@@ -1289,6 +1289,9 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                               {heavyHalf ? 'on' : 'off'}
                             </PixelButton>
                           </div>
+                          <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                            Codex and Antigravity agents that ask before running commands are not limited.
+                          </span>
                         </>
                       )}
 

@@ -2273,8 +2273,12 @@ export class HookServer {
       // A subagent's call is wrapped too: its processes are its agent's heavy job.
       // Codex and AGY take a rewrite only as an allow: not for an agent that asks its user first (SHOULD-2).
       let allows = p.transport === 'mcp';
-      try { if (this.mailChannel(agentId).provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
-      if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true) && (!allows || this.heavyAutoApproves(agentId))) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+      let provider: string = allows ? 'codex' : 'claude';
+      try { provider = this.mailChannel(agentId).provider ?? provider; if (provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
+      if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) {
+        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+        else this.heavyJobs.skipAskFirst(agentId, provider);
+      }
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
     // its job is done (a backgrounded one, or a missed Post, is left to the watcher). Andy N1 (1.1.81):
