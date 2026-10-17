@@ -105,12 +105,29 @@ window.__harnessRun = async () => {
       root.render(<CardsTab />);
     });
     await waitFor(() => document.querySelectorAll('[data-card]').length > 0, 'no cards rendered');
-    const search = document.querySelector('input[type="search"]') as HTMLInputElement;
-    const done = document.querySelector('.cth-cards-filters input[type="checkbox"]') as HTMLInputElement;
     const shots: Record<string, unknown> = {};
-    const census = () => ({ cards: [...document.querySelectorAll('[data-card]')].map((e) => e.getAttribute('data-card')), text: document.body.innerText.slice(0, 4000) });
+    const census = () => ({
+      cards: [...document.querySelectorAll('[data-card]')].map((e) => e.getAttribute('data-card')),
+      toggle: document.querySelector('.cth-cards-done-toggle')?.textContent ?? null,
+      text: document.body.innerText.slice(0, 4000)
+    });
 
-    await act(async () => { done.click(); });
+    // CARDS-TAB-CLEANUP-191: the default hides the done card behind SHOW DONE (1); pressing it
+    // shows the card, stores the choice, and a remounted tab opens with it still shown.
+    localStorage.removeItem('cth.cards.showDone');
+    if (census().cards.includes('RELEASE-1.1.89') || census().toggle !== 'SHOW DONE (1)') throw new Error(`default view: ${JSON.stringify(census())}`);
+    for (const [w, h] of [[1100, 900], [390, 1300]] as const) {
+      await sleep(150);
+      shots[`hidden-${w}`] = { ...(await window.harness.capture(w, h)), census: census() };
+    }
+    await act(async () => { (document.querySelector('.cth-cards-done-toggle') as HTMLButtonElement).click(); });
+    await waitFor(() => census().cards.includes('RELEASE-1.1.89'), 'SHOW DONE did not show the done card');
+    if (localStorage.getItem('cth.cards.showDone') !== '1') throw new Error('the choice was not stored');
+    await act(async () => { root.unmount(); });
+    const root2 = createRoot(host);
+    await act(async () => { root2.render(<CardsTab />); });
+    await waitFor(() => census().cards.length === 4 && census().toggle === 'HIDE DONE (1)', 'a remounted tab forgot the choice');
+    const search = document.querySelector('input[type="search"]') as HTMLInputElement;
     for (const [kind, id] of [['list', ''], ['busy', 'CAPACITY-STRIP-77'], ['done', 'RELEASE-1.1.89'], ['qa', 'THEME-DEFAULT-42']] as const) {
       await act(async () => { setInput(search, id); });
       await waitFor(() => (id ? census().cards.length === 1 && census().cards[0] === id : census().cards.length === 4), `${kind}: filter did not settle`);

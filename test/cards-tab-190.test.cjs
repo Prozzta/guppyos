@@ -169,7 +169,7 @@ test('render: long text collapses behind SHOW MORE; raw HTML in a title stays te
 test('list: default view hides done and says how to include it; counts; filtered-empty message', () => {
   const html = renderToStaticMarkup(React.createElement(CardsView, { cards, nameFor, now: NOW }));
   assert.ok(html.includes('3 of 4 cards'));
-  assert.ok(html.includes('done (1)'));
+  assert.ok(html.includes('SHOW DONE (1)'));
   assert.ok(!html.includes('data-card="DONE-1"'));
   assert.ok(html.indexOf('data-card="BUSY-1"') < html.indexOf('data-card="QA-1"'), 'newest activity first');
   const none = renderToStaticMarkup(React.createElement(CardsView, { cards: [byId('DONE-1')], nameFor, now: NOW }));

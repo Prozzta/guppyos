@@ -178,6 +178,23 @@ export interface CardFilter {
 
 export const DEFAULT_FILTER: CardFilter = { status: 'all', assignee: 'all', text: '', showDone: false };
 
+/** CARDS-TAB-CLEANUP-191: the SHOW DONE choice, remembered per viewer (this renderer's
+ *  localStorage). The cth. prefix puts it in what a fresh-home reset clears. */
+export const SHOW_DONE_KEY = 'cth.cards.showDone';
+type ChoiceStore = Pick<Storage, 'getItem' | 'setItem'>;
+/** `store` omitted = the viewer's localStorage, read inside the caller's try (the accessor itself can throw). */
+const viewerStore = (store?: ChoiceStore | null): ChoiceStore | null | undefined =>
+  store !== undefined ? store : typeof localStorage === 'undefined' ? undefined : localStorage;
+
+/** True only for a stored "shown"; a missing, blocked or throwing storage means hidden. */
+export function loadShowDone(store?: ChoiceStore | null): boolean {
+  try { return viewerStore(store)?.getItem(SHOW_DONE_KEY) === '1'; } catch { return false; }
+}
+
+export function saveShowDone(show: boolean, store?: ChoiceStore | null): void {
+  try { viewerStore(store)?.setItem(SHOW_DONE_KEY, show ? '1' : '0'); } catch { /* private window: not remembered */ }
+}
+
 export function filterCards(cards: ReviewCard[], f: CardFilter, nameFor: (id?: string) => string | undefined = () => undefined): ReviewCard[] {
   const q = f.text.trim().toLowerCase();
   return cards.filter((c) => {
