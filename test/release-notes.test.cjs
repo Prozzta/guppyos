@@ -97,7 +97,7 @@ test("the 'What's new' section wins over the release template's preamble", () =>
     '',
     '**A local hive of agents that run themselves** — the product tagline.',
     '',
-    '### → [**munderdiffl.in**](https://munderdiffl.in/) — see it in action',
+    '### → [**Guppyos on GitHub**](https://github.com/Prozzta/guppyos) — grab a build below',
     '',
     '---',
     '',

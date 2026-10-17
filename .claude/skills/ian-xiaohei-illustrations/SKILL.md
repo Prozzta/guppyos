@@ -20,7 +20,7 @@ description: 生成 Ian 风格的中文正文配图。用于用户要求为中�
 - `references/composition-patterns.md`：结构类型、原创隐喻方法和反复刻规则。
 - `references/prompt-template.md`：单张生图提示词模板。
 - `references/qa-checklist.md`：生成后检查和迭代规则。
-- `assets/examples/`：只作低频视觉校准，不进入默认生成路径。不要照抄这些案例的构图、物件或标注。
+- 示例 PNG 已从仓库移除；请使用下列文字参考进行视觉校准，不要照抄任何既有构图、物件或标注。
 
 ## 工作流
 
@@ -114,7 +114,7 @@ These project-level overrides apply on top of everything above whenever this ski
 1. **小黑是黄色的。** Xiaohei's body is ALWAYS filled with the Munder Difflin accent yellow **#FFCA54** with a thin black hand-drawn outline (no suit, no tie). Eyes become two small BLACK dots (white dots don't read on yellow). Keep the bean shape, thin legs, blank expression — every image, no exceptions.
 2. Annotations are hand-written in **English**, not Chinese (the blog is English).
 3. Annotation colors: **orange, blue, and yellow only — never red** (site-wide no-red rule).
-4. Output images for blog posts go to `blog/src/assets/media/<post-slug>/` and each generated file must be recorded in `blog/src/_data/media.json` (set the entry's `status` to `"ready"`).
+4. Save output images in the destination requested by the caller; this repository does not carry a blog media pipeline.
 5. Aspect 16:9, pure white background, one concept per image — unchanged from the core skill.
 
 Attribution: this skill is "Ian Xiaohei Illustrations" by Ian (https://github.com/helloianneo), MIT — see LICENSE and NOTICE.md in this folder.

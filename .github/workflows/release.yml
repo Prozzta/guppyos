@@ -20,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            args: --mac
           - os: windows-2022
             args: --win
           - os: ubuntu-latest
@@ -62,45 +60,23 @@ jobs:
         run: npx electron-builder ${{ matrix.args }} --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing + notarization — MUST be macOS-only. CSC_LINK is the
-          # Apple Developer ID .p12; if it leaks into the Windows/Linux runners,
-          # electron-builder tries to sign those targets with the mac cert and the
-          # build hard-fails ("cannot extract publisher name"). So gate on the OS.
-          #   APPLE_CERTIFICATE_P12       = base64 of the "Developer ID Application" .p12
-          #   APPLE_CERTIFICATE_PASSWORD  = that .p12's export password (REQUIRED if P12 set,
-          #                                 else electron-builder imports with an empty
-          #                                 password and fails "MAC verification failed")
-          # All optional: with the secrets unset every runner builds unsigned and stays green.
-          CSC_LINK: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_P12 || '' }}
-          CSC_KEY_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.os == 'macos-latest' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ matrix.os == 'macos-latest' && secrets.APPLE_TEAM_ID || '' }}
 
       - name: Generate checksums
         shell: bash
         run: |
           cd dist
           # hash only the distributable artifacts, not blockmaps/yml
-          files=$(ls *.dmg *.zip *.exe *.AppImage 2>/dev/null || true)
+          files=$(ls *.exe *.AppImage 2>/dev/null || true)
           [ -z "$files" ] && { echo "no artifacts to hash"; exit 0; }
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum $files > "SHA256SUMS-${{ matrix.os }}.txt"
-          else
-            shasum -a 256 $files > "SHA256SUMS-${{ matrix.os }}.txt"
-          fi
+          sha256sum $files > "SHA256SUMS-${{ matrix.os }}.txt"
           cat "SHA256SUMS-${{ matrix.os }}.txt"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}-dist
-          # zip + latest*.yml + blockmaps feed electron-updater (auto-update):
-          # latest-mac.yml points Squirrel.Mac at the zip; nsis/AppImage use
-          # latest.yml/latest-linux.yml + blockmaps for differential download.
+          # latest*.yml + blockmaps feed electron-updater (auto-update).
           path: |
-            dist/*.dmg
-            dist/*.zip
             dist/*.exe
             dist/*.AppImage
             dist/*.blockmap
@@ -123,7 +99,7 @@ jobs:
       - name: Flatten + merge checksums
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.dmg' -o -name '*.zip' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.exe' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' \) -exec cp {} release/ \;
           cat artifacts/*/SHA256SUMS-*.txt > release/SHA256SUMS.txt 2>/dev/null || true
           ls -la release
 
@@ -143,8 +119,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: false
           files: |
-            release/*.dmg
-            release/*.zip
             release/*.exe
             release/*.AppImage
             release/*.blockmap

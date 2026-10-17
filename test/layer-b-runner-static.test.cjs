@@ -31,7 +31,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const ts = require('typescript');
 const { readSource, codeOnly } = require('./read-source.cjs');
-const { selectTestFiles } = require('./tools/run-tests.cjs');
+const { discoverTestFiles } = require('./tools/run-tests.cjs');
 
 const RUNNER = path.join(__dirname, 'tools', 'layer-b-run.cjs');
 const lb = require(RUNNER);
@@ -65,10 +65,10 @@ const wObject = (() => {
   return found;
 })();
 
-test('the runner is NOT part of node --test (the runner only selects test/*.test.cjs)', () => {
-  const entries = fs.readdirSync(path.join(__dirname));
-  assert.ok(!selectTestFiles(entries).files.some((f) => /layer-b-run\.cjs$/.test(f)));
-  assert.equal(selectTestFiles(fs.readdirSync(path.join(__dirname, 'tools'))).files.length, 0, 'nothing in test/tools is a test file');
+test('the runner is NOT part of node --test (the runner recursively selects only *.test.cjs)', () => {
+  const files = discoverTestFiles(__dirname);
+  assert.ok(!files.some((f) => /layer-b-run\.cjs$/.test(f)));
+  assert.equal(files.filter((f) => f.startsWith('tools' + path.sep)).length, 0, 'nothing in test/tools is a test file');
   assert.ok(!/\.test\.cjs$/.test(RUNNER));
 });
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The focused-suite runner: enumerate `test/*.test.cjs` in Node and hand the expanded
+ * The focused-suite runner: recursively enumerate test files in Node and hand the expanded
  * list to `node --test`.
  *
  * WHY THIS EXISTS. `node --test test/*.test.cjs` relies on the SHELL expanding the glob.
@@ -86,7 +86,7 @@ function timedOutFiles(text) {
   return out;
 }
 
-/** Every top-level test file in `entries`, sorted, narrowed by `filters`. Pure. */
+/** Every test-file name in `entries`, sorted, narrowed by `filters`. Pure. */
 function selectTestFiles(entries, filters = []) {
   const all = entries.filter((n) => n.endsWith(TEST_SUFFIX)).sort();
   if (!filters.length) return { files: all, unmatched: [], total: all.length };
@@ -102,11 +102,35 @@ function selectTestFiles(entries, filters = []) {
   return { files, unmatched, total: all.length };
 }
 
+// Feature tests are deliberately opt-in: the focused suite historically ran the test/
+// root only, and unrelated nested suites (for example claims gates) have their own setup.
+const FEATURE_TEST_DIRS = Object.freeze(['heavy-lock', 'start-fixes-163']);
+
+/** Discover root tests plus the explicitly folded feature directories. */
+function discoverTestFiles(testDir, readdir = (d) => fs.readdirSync(d, { withFileTypes: true }), featureDirs = FEATURE_TEST_DIRS) {
+  const out = [];
+  const walkFeature = (relative) => {
+    for (const entry of readdir(path.join(testDir, relative))) {
+      if (typeof entry === 'string') { if (entry.endsWith(TEST_SUFFIX)) out.push(path.join(relative, entry)); continue; }
+      const child = path.join(relative, entry.name);
+      if (entry.isDirectory()) walkFeature(child);
+      else if (entry.isFile() && entry.name.endsWith(TEST_SUFFIX)) out.push(child);
+    }
+  };
+  for (const entry of readdir(testDir)) {
+    // String entries retain the small injected unit-test seam used by the runner tests.
+    if (typeof entry === 'string') { if (entry.endsWith(TEST_SUFFIX)) out.push(entry); continue; }
+    if (entry.isDirectory() && featureDirs.includes(entry.name)) walkFeature(entry.name);
+    else if (entry.isFile() && entry.name.endsWith(TEST_SUFFIX)) out.push(entry.name);
+  }
+  return out;
+}
+
 /** The runner proper. Every effect is injected; returns the process exit code. */
 function run({
   testDir,
   filters = [],
-  readdir = (d) => fs.readdirSync(d),
+  readdir = (d) => fs.readdirSync(d, { withFileTypes: true }),
   spawn = (args, opts) => spawnSync(process.execPath, args, opts),
   cwd = process.cwd(),
   timeoutMs = fileTimeoutMs(),
@@ -123,7 +147,7 @@ function run({
 } = {}) {
   let entries;
   try {
-    entries = readdir(testDir);
+    entries = discoverTestFiles(testDir, readdir);
   } catch (e) {
     err(`[test-runner] cannot read ${testDir}: ${String(e)}`);
     return 1;
@@ -207,7 +231,7 @@ function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, 
     err(`[test-runner] cannot read the perf lane ${perfDir}: ${String(e)}`);
     return { ...none, code: 1, state: 'fail' };
   }
-  const files = entries.filter((n) => n.endsWith(PERF_SUFFIX)).sort();
+  const files = entries.filter((n) => (typeof n === 'string' ? n : n.name).endsWith(PERF_SUFFIX)).map((n) => typeof n === 'string' ? n : n.name).sort();
   if (!files.length) {
     err(`[test-runner] no *${PERF_SUFFIX} files in ${perfDir} - refusing to report a perf lane that executed nothing`);
     return { ...none, code: 1, state: 'fail' };
@@ -252,7 +276,7 @@ function totals(code, counts, laneState, log) {
   return code;
 }
 
-module.exports = { selectTestFiles, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

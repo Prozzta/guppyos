@@ -9,7 +9,7 @@ on:
 jobs:
   typecheck:
     name: Typecheck
-    runs-on: macos-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,7 +23,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: macos-latest
+    runs-on: windows-latest
     # Build exercises the native node-pty rebuild; allowed to fail without blocking.
     continue-on-error: true
     steps:

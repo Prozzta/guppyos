@@ -1843,7 +1843,7 @@ fork never sends events anywhere.
 ## [0.4.1] — 2026-08-13
 
 **The app says what the site says.**
-munderdiffl.in describes Munder Difflin as a clone of you that works around the clock; the app
+The former upstream site described Munder Difflin as a clone of you that works around the clock; the app
 still called it a "GOD agent." This release closes that gap. Wording only — no behaviour changes.
 
 ### Changed
@@ -1869,7 +1869,7 @@ memory, and running agents carry over as-is; there is nothing to migrate.
 
 **The brand grew up — and the landing page with it.**
 Munder Difflin now looks like one product everywhere: a yellow "MD" mark, matching app icons on
-every platform, and a rebuilt munderdiffl.in that shows the real app instead of describing it.
+every platform, and a rebuilt upstream site that shows the real app instead of describing it.
 
 ### Added
 - **Real app screenshots on the landing page.** The Add Agent dialog, the memory panel, and
@@ -2089,7 +2089,7 @@ release your installed app can pick up on its own — 0.3.4 installs get the
 - **First auto-updated release.** 0.3.4 introduced the updater; 0.3.5 is the first
   version it delivers. Running 0.3.4 apps download this in the background and prompt
   "Restart to update" (never restarting on their own). 0.3.3 and older have no updater —
-  grab this one from [munderdiffl.in](https://munderdiffl.in) and you're on the train.
+  grab this one from the release repository and you're on the train.
 
 ## [0.3.4] — 2026-08-06
 
@@ -2448,7 +2448,7 @@ untrusted-input import pipeline.
 
 ### Added
 - **Shareable hires (#70, #71).** A portable `munder-difflin/hire@1` JSON manifest describing a role-configured agent — name, sprite, provider, model, command flags, goal, capability tags, token budget. Two import paths, one pipeline: a `munderdifflin://hire?src=<https-manifest-url>` deep link (fetched and validated in the main process, queued, then pulled by the renderer on mount) and an *import hire…* button in the Add-Agent modal that reads a local manifest file. Either way the manifest only **pre-fills** the Add-Agent modal behind an "imported" banner; spawning stays an explicit human click — import never auto-spawns. Protocol registration ships for all three platforms (macOS `open-url`, Windows/Linux single-instance lock + cold-start argv forwarding), and packaged builds register the scheme via `electron-builder.yml`.
-- **The Hiring Fair — community gallery** at [munderdiffl.in/hires](https://munderdiffl.in/hires/) (`docs/hires/`, static, no build step, served by the existing GitHub Pages setup). Seed roles drawn from the cast (Pam writes docs, Dwight enforces QA, Jim reviews PRs, Creed audits security, Angela audits the office's own token spend, Stanley does the migrations nobody wants), each with a Claude Code / Antigravity / Codex provider toggle (per-provider variants generated from one base manifest), function filters matching the landing page, and a client-side validator identical to the app's alongside a JSON schema (`docs/hires/spec/`). Model suggestions are data-driven (`docs/hires/models.json`), so new models are a one-line update.
+- **The Hiring Fair — community gallery** (`docs/hires/`, static, no build step, formerly served by the upstream GitHub Pages setup). Seed roles drawn from the cast (Pam writes docs, Dwight enforces QA, Jim reviews PRs, Creed audits security, Angela audits the office's own token spend, Stanley does the migrations nobody wants), each with a Claude Code / Antigravity / Codex provider toggle (per-provider variants generated from one base manifest), function filters matching the landing page, and a client-side validator identical to the app's alongside a JSON schema (`docs/hires/spec/`). Model suggestions are data-driven (`docs/hires/models.json`), so new models are a one-line update.
 
 ### Security
 - **A hire manifest is untrusted input — defense in depth.** No auto-spawn and no executable field: `provider: "custom"` is rejected and the binary always comes from the user's local provider preset. Embedded CLI flags are gated by a **default-deny allowlist** (`SAFE_FLAG_NAMES`) — only known-harmless flags pass, nothing system-prompt/settings-related — replacing an earlier denylist that drifted as each CLI added flags. `model` is constrained to a safe charset (`MODEL_RE`), and a command-line quoter neutralizes `cmd.exe` metacharacters (`& | ^ < > ( ) % !`) on **every** spawn path — closing a Windows command-injection class (PoC `"model":"x&calc"`). The manifest fetch is https-only, manual-redirect with per-hop re-validation (kills redirect SSRF into `127.0.0.1` / `169.254.169.254`, including an IPv6-bracket bypass), streamed with a 64 KB byte cap (no trusting `content-length`), a 10s timeout, and ≤5 hops. The dependency-free validator (`src/shared/hire.ts`) is shared by the main process, the renderer, the gallery (`docs/hires/validator.js`), and the JSON schema, so all four stay in sync.
@@ -2702,7 +2702,7 @@ Reported / requested by the community: @JLAD75 (Windows hive router / `hooks.soc
   Documents/Desktop/Downloads access **once** instead of on every agent action.
   Usage-description strings explain each prompt. Signing/notarization run in CI only
   when Apple credentials are present, so contributor builds stay unsigned and green.
-- **Blog at [/blog](https://munderdiffl.in/blog/)** — an Eleventy-generated static blog
+- **Blog** — an Eleventy-generated static blog
   sharing the landing page's neo-brutalist design system, seeded with the first posts
   on long-term memory, multi-agent harnesses, and MemPalace, plus tag/topic indexes and
   an RSS feed.
