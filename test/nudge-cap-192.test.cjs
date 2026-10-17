@@ -57,7 +57,8 @@ test('the oldest are the FIRST 8 as given: the wake passes its ids sorted (times
 test('bounded: with any number of real-shaped ids the nudge fits the 24-row reading at 80 columns', () => {
   for (const mode of MODES) for (const n of [9, 60, 500]) {
     const t = N.inboxNudgeText(ids(n), mode);
-    assert.ok(t.length <= N.INBOX_NUDGE_FIXED_CHARS + 8 * (id(0).length + 2) + 24, `${mode} ${n}: ${t.length}`);
+    // + 32: legacy-move's " - at least: " (13, absent from the id-less fixed text) + ", and 500 more" (14).
+    assert.ok(t.length <= N.INBOX_NUDGE_FIXED_CHARS + 8 * (id(0).length + 2) + 32, `${mode} ${n}: ${t.length}`);
     assert.ok(Math.ceil((t.length + 2) / 80) <= 10, `${mode} ${n}: ${Math.ceil((t.length + 2) / 80)} rows at 80 cols`);
   }
 });
