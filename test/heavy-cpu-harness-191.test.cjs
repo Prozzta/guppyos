@@ -19,6 +19,7 @@ const { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, s
 const { tmpdir } = require('node:os');
 const { join, relative } = require('node:path');
 const { harnessCpuMask, halfCpuMask, swiftShaderMask, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
+const own = require('./tools/own-procs.cjs');
 
 const root = join(__dirname, '..');
 const CSC = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
@@ -145,6 +146,7 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
     const dir = mkdtempSync(join(tmpdir(), 'hcpu-flip-'));
     let serve = null;
     let child = null;
+    let bornMs = 0;
     try {
       const exe = buildHelper(dir);
       const script = join(dir, 'child.cjs');
@@ -159,6 +161,7 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
       const ask = (line) => new Promise((r) => { serve.stdout.once('data', (d) => r(String(d))); serve.stdin.write(`${line}\n`); });
       assert.match(await ask(`create ${id} 0 0`), /"ok":true/);
       child = spawn(exe, ['join', id, '0', '0;', process.execPath, script, ready, go], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      bornMs = Date.now();
       let out = '';
       let err = '';
       child.stdout.on('data', (d) => { out += d; });
@@ -182,7 +185,8 @@ test('RENDERED (real App), live flip: a suite started with no limit, half then t
       assert.ok(Date.now() - started < 90_000, `took ${Date.now() - started} ms`);
     } finally {
       // A failed step must not leave the child waiting for its go file.
-      if (child && child.exitCode === null) spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true });
+      // Only what this child started (pid + birth, own-procs), never a ParentProcessId walk.
+      if (child && child.exitCode === null) own.killOwnTree({ pid: child.pid, bornMs, name: 'guppy-heavyjob.exe' });
       if (serve) serve.kill();
       rmSync(dir, { recursive: true, force: true });
     }
