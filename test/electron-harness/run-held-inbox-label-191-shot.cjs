@@ -10,7 +10,7 @@ if (!out) { console.error('--out <dir> is required'); process.exit(2); }
 (async () => {
   const result = await runScenario(join(__dirname, 'scenarios', 'held-inbox-label-191-shot.tsx'), { width: 480, height: 140, timeoutMs: 120_000 });
   const local = new Date(Date.UTC(2030, 0, 2, 6, 53)).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-  if (!result.ok || !result.layout || result.mail?.text !== `✉1 held ${local}` || result.mail?.title !== `inbox 1 (held until ${local} local); 1 message waiting; or sooner with other mail`) {
+  if (!result.ok || !result.layout || !result.untruncated || result.mail?.text !== `✉1 held ${local}` || result.mail?.title !== `inbox 1 (held until ${local} local); 1 message waiting; or sooner with other mail`) {
     console.error(JSON.stringify(result));
     process.exit(1);
   }

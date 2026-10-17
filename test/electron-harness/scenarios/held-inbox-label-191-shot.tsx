@@ -43,9 +43,10 @@ window.__harnessRun = async () => {
     const cardBox = card?.getBoundingClientRect();
     const layout = !!mailBox && !!taskBox && !!cardBox
       && mailBox.width <= 126 && mailBox.right <= taskBox.left && mailBox.left >= cardBox.left;
+    const untruncated = !!mail && mail.scrollWidth <= mail.clientWidth;
     const png = await window.harness.capture(480, 140);
     await act(async () => { root.unmount(); });
-    window.harness.report({ ok: true, png: png.png, mail: { text: mail?.textContent, title: mail?.title }, layout });
+    window.harness.report({ ok: true, png: png.png, mail: { text: mail?.textContent, title: mail?.title }, layout, untruncated });
   } catch (error) {
     window.harness.report({ ok: false, error: error instanceof Error ? `${error.message}\n${error.stack}` : String(error) });
   }
