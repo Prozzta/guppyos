@@ -90,7 +90,7 @@ test('the runner is NOT part of node --test (the runner recursively selects only
 test('the source/AST safety inventory covers the entry point and every extracted Layer B module', () => {
   assert.equal(allSources[0].name, 'layer-b-run.cjs');
   assert.equal(new Set(allSources.map((unit) => unit.file)).size, allSources.length, 'each source is listed once');
-  assert.ok(allSources.every((unit) => unit.name === 'layer-b-run.cjs' || unit.name.startsWith('layer-b/')), 'only the entry point and extracted modules are pinned');
+  assert.ok(allSources.every((unit) => unit.name === 'layer-b-run.cjs' || unit.name === 'layer-b-core.cjs' || unit.name.startsWith('layer-b/')), 'only the entry point, core, and extracted modules are pinned');
 });
 
 test('AST inventory: every extracted Layer B module is subject to the mutation and hidden-spawn pins', () => {
@@ -1130,7 +1130,7 @@ test('Jim LOW: the emergency credential shred LOGS its error (never swallowed si
   assert.equal(logs.length, 1);
   // Both emergency paths use it (no silent catch around deleteAll anywhere).
   assert.ok(!/try \{[^}]*creds\.deleteAll\(\)[^}]*\} catch \{/.test(src), 'no silent catch around deleteAll');
-  const tail = src.slice(src.indexOf('if (require.main === module) {'));
+  const tail = src.slice(src.indexOf('function runCli() {'));
   assert.equal((tail.match(/emergencyShred\(lb\)/g) || []).length, 2, 'the signal/crash path and the exit hook');
 });
 
