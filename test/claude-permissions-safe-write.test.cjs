@@ -189,6 +189,27 @@ test('empty and whitespace-only files count as {}; a BOM is stripped and the key
   assert.equal(JSON.parse(fs.readFileSync(env.cj, 'utf8')).oauthAccount.emailAddress, 'x@example.com');
 });
 
+test('Andy S1: a file truncated to empty after a good write does not overwrite the good backup', (t) => {
+  for (const blank of ['', '  \r\n\t', '﻿']) {
+    for (const file of ['cj', 'settings']) {
+      const env = home(t);
+      fs.writeFileSync(env[file], JSON.stringify(file === 'cj' ? GOOD_CJ : GOOD_SETTINGS, null, 2));
+      run(env);
+      const good = bytes(`${env[file]}.guppy-backup`);
+      assert.ok(good.length > 2, 'the first write made a real backup');
+      fs.writeFileSync(env[file], blank); // claude crashed mid-write
+      const r = run(env);
+      assert.equal(r[file === 'cj' ? 'trust' : 'settings'].status, 'written', `${file} ${JSON.stringify(blank)}`);
+      assert.deepEqual(bytes(`${env[file]}.guppy-backup`), good, `THE LAST GOOD BACKUP SURVIVES (${file} ${JSON.stringify(blank)})`);
+    }
+  }
+  // A blank file with no earlier backup leaves none behind (nothing worth keeping).
+  const env = home(t);
+  fs.writeFileSync(env.cj, '');
+  run(env);
+  assert.equal(fs.existsSync(`${env.cj}.guppy-backup`), false);
+});
+
 // ── 5. Andy F3: the file changed under us (a running `claude` wrote it) ─────────────────────
 
 test('a write by someone else between our read and our rename wins: ours is dropped, no temp left', (t) => {
