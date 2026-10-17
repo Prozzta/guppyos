@@ -4754,7 +4754,18 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
     // MUNDER_DEV=1: this writes the user's SHARED ~/.claude/settings.json and
     // ~/.claude.json (bypass + folder-trust acceptance). Stable already keeps
     // them accepted; a dev build must not write outside DevData, so skip.
-    if (!DEV_ISOLATION) { try { ensureClaudePermissionsAccepted(opts.cwd); } catch { /* never block spawn */ } }
+    // CLAUDE-JSON-WIPE: a user file that does not parse is left alone (never rewritten); the
+    // spawn goes on with the per-agent flags (hookSettings) and the skip is a log row.
+    if (!DEV_ISOLATION) {
+      try {
+        const r = ensureClaudePermissionsAccepted(opts.cwd);
+        for (const [gate, o] of [['settings', r.settings], ['trust', r.trust]] as const) {
+          if (o.status !== 'refused' && o.status !== 'failed') continue;
+          console.warn(`[claude-config] ${gate} ${o.status}: ${o.reason ?? ''}`);
+          hive.appendLog({ kind: 'claude-config-refused', agent: opts.hive?.id ?? null, gate, status: o.status, reason: o.reason ?? null });
+        }
+      } catch { /* never block spawn */ }
+    }
   }
   // Suppress first-run interactive prompts for providers that need it. (Codex 0.157.1's
   // directory-trust screen is NOT suppressed by CODEX_NON_INTERACTIVE; the agent's own cwd is

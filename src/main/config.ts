@@ -1,8 +1,8 @@
 import { app } from 'electron';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
 import { DEV_ISOLATION, devDataRoot, devHarnessHome } from './devIsolation';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
   autoModeFlagForProvider,
@@ -1222,38 +1222,104 @@ function treeHasNoFiles(dir: string): boolean {
  *   1. `~/.claude/settings.json` → `skipDangerousModePermissionPrompt` +
  *      `skipAutoPermissionPrompt` — these gate the bypass-mode warning (global).
  *   2. `~/.claude.json` → `projects[cwd].hasTrustDialogAccepted` — the per-folder
- *      "do you trust the files in this folder?" dialog. */
-export function ensureClaudePermissionsAccepted(cwd?: string): void {
+ *      "do you trust the files in this folder?" dialog.
+ *
+ *  CLAUDE-JSON-WIPE (1.1.91): these are the USER's files (oauthAccount, every project's
+ *  allowedTools, their own settings). Through 1.1.90 a file that did not parse became `{}` and
+ *  was written back, wiping it. Now a file that does not parse, or parses to the wrong shape, is
+ *  never written (the gate reports `refused` and the caller logs it); a write is atomic beside
+ *  the real target, keeps its mode, gives up if the file changed since it was read, and leaves
+ *  `<file>.guppy-backup`. Never throws. */
+export function ensureClaudePermissionsAccepted(cwd?: string): ClaudePermissionsReport {
   const home = homedir();
-  if (!home) return;
+  if (!home) return { settings: { status: 'skipped', reason: 'no home' }, trust: { status: 'skipped', reason: 'no home' } };
   // 1) Global bypass-mode warning gate.
+  const settings = patchClaudeUserFile(join(home, '.claude', 'settings.json'), (s) => {
+    if (s.skipDangerousModePermissionPrompt === true && s.skipAutoPermissionPrompt === true) return null;
+    return { ...s, skipDangerousModePermissionPrompt: true, skipAutoPermissionPrompt: true };
+  });
+  // 2) Per-folder trust dialog gate (only when this cwd isn't already trusted). On Windows the
+  // CLI looks the folder up with forward slashes (claude 2.1.302 j2(): replaceAll("\\","/")),
+  // so a path.join-style key is never read (Andy F10).
+  if (!cwd) return { settings, trust: { status: 'skipped', reason: 'no cwd' } };
+  const key = process.platform === 'win32' ? cwd.replaceAll('\\', '/') : cwd;
+  const trust = patchClaudeUserFile(join(home, '.claude.json'), (c) => {
+    const projects = Object.hasOwn(c, 'projects') ? c.projects : {};
+    if (!isPlainObject(projects)) return 'projects is not an object';
+    const entry = Object.hasOwn(projects, key) ? projects[key] : {};
+    if (!isPlainObject(entry)) return `projects[${key}] is not an object`;
+    if (entry.hasTrustDialogAccepted === true) return null;
+    return { ...c, projects: { ...projects, [key]: { ...entry, hasTrustDialogAccepted: true } } };
+  });
+  return { settings, trust };
+}
+
+export interface ClaudeGateOutcome { status: 'satisfied' | 'written' | 'refused' | 'failed' | 'skipped'; reason?: string }
+export interface ClaudePermissionsReport { settings: ClaudeGateOutcome; trust: ClaudeGateOutcome }
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Read a user JSON object file, let `patch` decide, and publish the result safely.
+ *  `patch` returns the new object, null (already satisfied) or a refusal reason. */
+function patchClaudeUserFile(p: string, patch: (obj: Record<string, unknown>) => Record<string, unknown> | string | null): ClaudeGateOutcome {
   try {
-    const dir = join(home, '.claude');
-    const p = join(dir, 'settings.json');
-    let s: Record<string, unknown> = {};
+    // F1: a symlinked file is read and published at its REAL path, so the link survives.
+    let target = p;
+    let before: Buffer | null = null;
     if (existsSync(p)) {
-      try { s = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>; } catch { s = {}; }
+      target = realpathSync(p);
+      before = readFileSync(target);
+    } else {
+      try { lstatSync(p); return { status: 'refused', reason: 'dangling symlink' }; } catch { /* truly missing */ }
     }
-    if (s.skipDangerousModePermissionPrompt !== true || s.skipAutoPermissionPrompt !== true) {
-      s.skipDangerousModePermissionPrompt = true;
-      s.skipAutoPermissionPrompt = true;
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(p, JSON.stringify(s, null, 2), 'utf8');
+    let obj: unknown = {};
+    let blank = true;
+    if (before) {
+      // F4: an empty or whitespace-only file is `{}`; a leading BOM is not part of the JSON.
+      const text = before.toString('utf8').replace(/^\uFEFF/, '');
+      blank = text.trim() === '';
+      if (!blank) {
+        try { obj = JSON.parse(text); } catch (error) {
+          return { status: 'refused', reason: `does not parse: ${error instanceof Error ? error.message : String(error)}` };
+        }
+      }
     }
-  } catch { /* best-effort; never block a spawn */ }
-  // 2) Per-folder trust dialog gate (only when this cwd isn't already trusted).
-  if (cwd) {
+    if (!isPlainObject(obj)) return { status: 'refused', reason: 'root is not an object' };
+    const next = patch(obj);
+    if (next === null) return { status: 'satisfied' };
+    if (typeof next === 'string') return { status: 'refused', reason: next };
+    const dir = dirname(target);
+    mkdirSync(dir, { recursive: true });
+    // F2: keep the file's mode (~/.claude.json holds oauthAccount; it may be 0600).
+    const mode = before ? statSync(target).mode & 0o777 : undefined;
+    // Andy S1: a blank file (claude truncated it mid-write) holds nothing to keep, and
+    // copying it would overwrite the last good backup.
+    if (before && !blank) copyFileSync(target, `${target}.guppy-backup`);
+    const tmp = join(dir, `${basename(target)}.guppy-tmp-${randomBytes(4).toString('hex')}`);
     try {
-      const p = join(home, '.claude.json');
-      let c: { projects?: Record<string, { hasTrustDialogAccepted?: boolean }> } = {};
-      if (existsSync(p)) {
-        try { c = JSON.parse(readFileSync(p, 'utf8')); } catch { c = {}; }
+      writeFileSync(tmp, JSON.stringify(next, null, 2), mode === undefined ? 'utf8' : { encoding: 'utf8', mode });
+      if (mode !== undefined && process.platform !== 'win32') chmodSync(tmp, mode);
+      // F3: re-read right before EACH rename: a running `claude` that wrote the file since we read
+      // it wins, and our change waits for the next spawn.
+      for (let attempt = 0; ; attempt++) {
+        const now = existsSync(target) ? readFileSync(target) : null;
+        if (!(now === null ? before === null : before !== null && now.equals(before))) {
+          rmSync(tmp, { force: true });
+          return { status: 'refused', reason: 'changed while being patched' };
+        }
+        try { renameSync(tmp, target); return { status: 'written' }; } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if ((code !== 'EPERM' && code !== 'EBUSY') || attempt === 2) throw error;
+          sleepSync(20 * (attempt + 1));
+        }
       }
-      if (c.projects?.[cwd]?.hasTrustDialogAccepted !== true) {
-        c.projects = c.projects ?? {};
-        c.projects[cwd] = { ...(c.projects[cwd] ?? {}), hasTrustDialogAccepted: true };
-        writeFileSync(p, JSON.stringify(c, null, 2), 'utf8');
-      }
-    } catch { /* best-effort */ }
+    } catch (error) {
+      try { rmSync(tmp, { force: true }); } catch { /* keep the publish error */ }
+      throw error;
+    }
+  } catch (error) {
+    return { status: 'failed', reason: error instanceof Error ? error.message : String(error) };
   }
 }
