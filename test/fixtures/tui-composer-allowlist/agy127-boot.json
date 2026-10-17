@@ -1,0 +1,19 @@
+{
+ "source": "REAL agy 1.2.7 boot (tui-clear-matrix, Oscar trial 1): empty composer",
+ "cols": 100,
+ "rows": 30,
+ "cursorRow": 8,
+ "lines": [
+  "",
+  "      ▄▀▀▄        Antigravity CLI 1.2.7",
+  "     ▀▀▀▀▀▀       agyuser00@example.com (Google AI Pro)",
+  "    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (Medium)",
+  "   ▄▀▀    ▀▀▄     C:/Dunder/_audit/oscar-agy-scratch",
+  "  ▄▀▀      ▀▀▄",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────",
+  ">",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "? for shortcuts                                                            Gemini 3.8 Flash · medium"
+ ]
+}
