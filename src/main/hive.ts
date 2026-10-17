@@ -2745,6 +2745,30 @@ export class HiveManager {
   /** The bound on the ancestor lookup's parse (findDeliveredMessage). */
   static readonly SUPERSEDE_SCAN_MAX_BYTES = 64 * 1024;
 
+  /**
+   * HOP-CAP-INERT-192: how many messages in a row, along the in_reply_to chain and ending with
+   * `msg`, ask for no reply. A message that asks for one starts work again: 0. Reply depth itself is
+   * not counted: real work conversations run 20 replies deep, while their acknowledgement runs stop
+   * at 7 (the live hive, 9,063 messages, 2026-10-17). Ancestors are read from the delivered files,
+   * never from their stored hops (senders wrote their own before 1.1.92); the walk stops one past
+   * the cap, at a parent that cannot be found, or at a cycle.
+   */
+  private ackRunLength(msg: HiveMessage): number {
+    const asksReply = (m: Partial<HiveMessage>): boolean => m.requires_reply ?? ['request', 'query', 'propose'].includes(String(m.act ?? 'inform'));
+    if (asksReply(msg)) return 0;
+    let count = 1;
+    const seen = new Set<string>([msg.id]);
+    let cur = msg.in_reply_to;
+    while (cur && count <= HOP_CAP && !seen.has(cur)) {
+      seen.add(cur);
+      const parent = this.findDeliveredMessage(cur);
+      if (!parent || asksReply(parent)) break;
+      count++;
+      cur = parent.in_reply_to ?? null;
+    }
+    return count;
+  }
+
   /** A delivered message by id: <id>.json in any agent's inbox or inbox/.done, or null. */
   private findDeliveredMessage(id: string): Partial<HiveMessage> | null {
     if (!/^[A-Za-z0-9._-]{1,200}$/.test(id)) return null;
@@ -2859,10 +2883,26 @@ export class HiveManager {
       msg.subject = `[superseded by ${esc(sup.id)} (${esc(String(sup.from))}: ${esc(String(sup.subject ?? '').slice(0, 80))}): sent before ${msg.from} read it] ${msg.subject}`;
       try { this.appendLog({ kind: 'superseded-delivery', id: msg.id, from: msg.from, to: msg.to, inReplyTo: msg.in_reply_to, supersededBy: sup.id }); } catch { /* noop */ }
     }
+    // HOP-CAP-INERT-192: the harness owns hops (the sender's value used to be kept, 0 when absent,
+    // so the cap never fired on a real ping-pong).
+    msg.hops = this.ackRunLength(msg);
     if (msg.hops > HOP_CAP) {
       // loop guard — drop a runaway message rather than let agents ping-pong.
       // There's no human queue to fall back on; the god agent owns conflicts.
-      this.appendLog({ kind: 'drop', reason: 'hop-cap', from: msg.from, to: msg.to, id: msg.id });
+      this.appendLog({ kind: 'drop', reason: 'hop-cap', from: msg.from, to: msg.to, id: msg.id, hops: msg.hops, conversation: msg.conversation });
+      // Never silent. The notice asks nothing and answers nothing, so it cannot extend the run.
+      if (this.registry().agents[msg.from]) {
+        const notice = this.normalize({
+          to: msg.from,
+          act: 'inform',
+          in_reply_to: null,
+          requires_reply: false,
+          subject: `[loop stopped] ${msg.subject}`.slice(0, 200),
+          body: `The hive router did not deliver your ${msg.act} to ${msg.to} ("${msg.subject}"): it would make ${msg.hops} messages in a row (more than ${HOP_CAP}) that answer each other without asking for a reply, which is how a loop of acknowledgements looks. Nothing is lost: it is in your outbox/.sent/. Do not acknowledge an acknowledgement; if it carries something new, send it as a fresh message (no in_reply_to) or as a request.`
+        }, 'system');
+        const notified = this.deliver(notice, msg.from);
+        this.emitMessage(notice, notified ? [msg.from] : []);
+      }
       return;
     }
     const reg = this.registry();
