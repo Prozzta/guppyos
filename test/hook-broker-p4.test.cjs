@@ -39,6 +39,8 @@ test('parseOnewayFrame: both headers (CRLF), a literal or empty agent id, and ba
   assert.equal(s.kind, 'status'); assert.equal(s.token, TOKEN); assert.equal(s.agentId, 'phyllis');
   const hiveStatus = parseOnewayFrame(`agy-status ${TOKEN} ${'ab'.repeat(16)} phyllis\r\n{"agent_state":"idle"}`);
   assert.equal(hiveStatus.kind, 'status'); assert.equal(hiveStatus.token, TOKEN); assert.equal(hiveStatus.agentId, 'phyllis', 'the optional hook token is positional, not the status capability');
+  assert.equal(hiveStatus.agentToken, 'ab'.repeat(16), 'the worker\'s own token is kept (SHOULD-1)');
+  assert.equal(s.agentToken, null, 'no token after the lease: none');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} %AGENT_ID%\r\n{}`).agentId, null, 'a literal %AGENT_ID% = no agent');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} \r\n{}`).agentId, null, 'empty = a user\'s own session');
   assert.equal(parseOnewayFrame('agy PostToolUse phyllis\r\n{}'), null, 'one-way hooks without a capability are rejected');
@@ -107,9 +109,9 @@ test('Y1: the AGY shim turns a PreInvocation steer into AGY\'s documented inject
 
 /** A real HookServer on a real pipe, with the lease token. */
 async function server(t, owner = TOKEN, control = undefined) {
-  const rec = { handled: [] };
+  const rec = { handled: [], logs: [] };
   const sock = WIN ? `\\\\.\\pipe\\p4-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(fs.mkdtempSync(path.join(JAIL, 'p4-')), 's.sock');
-  const hive = { sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {}, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {}, agyStatuslineOwnerToken: () => owner };
+  const hive = { sockPath: () => sock, codexHomeFor: () => null, recordSession: () => {}, appendLog: (x) => { rec.logs.push(x); }, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {}, agyStatuslineOwnerToken: () => owner };
   const s = new HookServer(hive, () => ({ send: () => {} }), () => ({}), control, undefined, undefined, () => {});
   const real = s.handle.bind(s); s.handle = (p) => { rec.handled.push(JSON.parse(JSON.stringify(p))); return real(p); };
   s.start(); t.after(() => s.stop());
@@ -187,6 +189,35 @@ test('REAL statusline: the lease token is required; a user\'s own session feeds 
   assert.deepEqual(rec.handled.map((p) => [p.hook_event_name, p.agent_id]), [['AgyStatusLine', 'phyllis'], ['AgyStatusLine', null]], 'the wrong token is dropped');
   assert.deepEqual(rec.handled[0].agy_status, JSON.parse(status));
   assert.equal(rec.handled[0].transport, 'pipe-oneway');
+});
+
+/** Write one raw frame to the pipe and wait for the server to close it. */
+function rawSend(sock, frame) {
+  return new Promise((resolve) => {
+    const c = net.createConnection(sock, () => c.end(frame));
+    const guard = setTimeout(() => { c.destroy(); resolve(); }, 5_000); // a hang guard only
+    c.on('error', resolve); c.on('close', () => { clearTimeout(guard); resolve(); });
+    c.resume();
+  });
+}
+
+// PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): the lease token sits in the personal AGY settings, which
+// any agent can read, so it may only feed a frame that names NO agent. Speaking for an agent takes
+// that agent's own token, on both the one-way and the JSON path.
+test('SHOULD-1: the lease token alone never speaks FOR an agent (one-way and JSON); that agent\'s own token does', async (t) => {
+  const { sock, rec, hookToken } = await server(t);
+  const status = '{"agent_state":"idle"}';
+  await rawSend(sock, `agy-status ${TOKEN} phyllis\r\n${status}\r\n`);
+  await rawSend(sock, `agy-status ${TOKEN} ${'cd'.repeat(16)} phyllis\r\n${status}\r\n`);
+  await rawSend(sock, `${JSON.stringify({ hook_event_name: 'AgyStatusLine', agent_id: 'phyllis', hook_token: TOKEN, agy_status: {} })}\n`);
+  await settle();
+  assert.deepEqual(rec.handled, [], 'a lease-only frame naming an agent, or one with another token, is refused');
+  assert.deepEqual(rec.logs.filter((x) => x.kind === 'hook-auth-reject').map((x) => [x.agentId, x.reason]), [['phyllis', 'missing'], ['phyllis', 'bad']], 'visible (the JSON one rate-limited as phyllis|bad)');
+  await rawSend(sock, `agy-status ${TOKEN} ${hookToken} phyllis\r\n${status}\r\n`);
+  await rawSend(sock, `agy-status ${TOKEN} \r\n${status}\r\n`);
+  await rawSend(sock, `${JSON.stringify({ hook_event_name: 'AgyStatusLine', agent_id: null, hook_token: TOKEN, agy_status: {} })}\n`);
+  await settle();
+  assert.deepEqual(rec.handled.map((p) => [p.hook_event_name, p.agent_id]), [['AgyStatusLine', 'phyllis'], ['AgyStatusLine', null], ['AgyStatusLine', null]], 'the worker\'s own token, and a user\'s own session on the lease, still pass');
 });
 
 test('REAL: with the app down (no pipe) the command exits 0 at once, printing nothing', { skip: !WIN }, async (t) => {

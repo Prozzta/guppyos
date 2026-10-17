@@ -217,10 +217,15 @@ interface EvidenceWait {
  * instead of the Electron shim (~450 ms): the first line is a header, the rest is AGY's raw JSON,
  * and the client closes without reading a reply. Headers:
  *   `agy <Event> <hookToken> <agentId>` PostToolUse / PostInvocation
- *   `agy-status <ownerToken> <agentId>` the statusline
+ *   `agy-status <ownerToken> <hookToken> <agentId>` the statusline
  * An empty agent id is a user's own (non-hive) AGY session.
  */
-export interface OnewayFrame { kind: 'hook' | 'status'; event: string; token: string; agentId: string | null; body: unknown; bodyOk: boolean }
+export interface OnewayFrame {
+  kind: 'hook' | 'status'; event: string; token: string; agentId: string | null;
+  /** status only: the HIVE_HOOK_TOKEN a hive worker's statusline carries after the owner token. */
+  agentToken?: string | null;
+  body: unknown; bodyOk: boolean;
+}
 export const ONEWAY_EVENTS = new Set(['PostToolUse', 'PostInvocation']);
 export function parseOnewayFrame(text: string): OnewayFrame | null {
   const nl = text.indexOf('\n');
@@ -235,7 +240,11 @@ export function parseOnewayFrame(text: string): OnewayFrame | null {
     // A global personal statusline can inherit HIVE_HOOK_TOKEN but has no AGENT_ID, leaving
     // the optional token as the last word. Never mistake that 32-hex capability for an id.
     const positional = parts[3] || parts[2] || null;
-    frame = { kind: 'status', event: 'AgyStatusLine', token: parts[1], agentId: positional && /^[0-9a-f]{32}$/i.test(positional) ? null : positional };
+    const hex = (s: string | undefined): boolean => !!s && /^[0-9a-f]{32}$/i.test(s);
+    // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): keep the worker's own token, so a frame that names
+    // an agent can be held to it (the owner lease alone is readable by any agent).
+    const agentToken = hex(parts[2]) ? parts[2] : null;
+    frame = { kind: 'status', event: 'AgyStatusLine', token: parts[1], agentToken, agentId: positional && hex(positional) ? null : positional };
   } else return null;
   // A literal %AGENT_ID% (the variable was not set) is the same as none.
   if (frame.agentId && /^%.*%$/.test(frame.agentId)) frame.agentId = null;
@@ -540,9 +549,12 @@ export class HookServer {
         const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : null;
         // A personal AGY statusline has no agent id. Its locator is protected by the
         // current statusline lease token, which is the capability it carries here.
-        const statusline = payload.hook_event_name === 'AgyStatusLine' && typeof token === 'string' && this.statuslineTokenMatches(token);
+        // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): only for a frame that names NO agent. The lease
+        // token sits in the personal AGY settings any agent can read, so a frame that names an
+        // agent must carry that agent's own token.
+        const statusline = !agentId && payload.hook_event_name === 'AgyStatusLine' && typeof token === 'string' && this.statuslineTokenMatches(token);
         if ((!agentId || typeof token !== 'string' || !this.hookTokenMatches(agentId, token)) && !statusline) {
-          this.logHookAuthReject(agentId, typeof token !== 'string' ? 'missing' : (!agentId || !this.hookTokens.has(agentId) ? 'revoked' : 'bad'));
+          this.logHookAuthReject(agentId, typeof token !== 'string' ? 'missing' : (!agentId ? 'no-agent' : (!this.hookTokens.has(agentId) ? 'revoked' : 'bad')));
           conn.end('{}'); return;
         }
         // MAIL-PIPE-SHIM-CLOCK (1): the shim's 5 s give-up started before this read. A shim that
@@ -857,7 +869,7 @@ export class HookServer {
     return owner.length === given.length && timingSafeEqual(owner, given);
   }
 
-  private logHookAuthReject(agentId: string | null, reason: 'missing' | 'bad' | 'revoked'): void {
+  private logHookAuthReject(agentId: string | null, reason: 'missing' | 'bad' | 'revoked' | 'no-agent'): void {
     const now = Date.now(), key = `${agentId ?? '-'}|${reason}`;
     if (now - (this.authRejectLogged.get(key) ?? 0) < 60_000) return;
     this.authRejectLogged.set(key, now);
@@ -1070,6 +1082,12 @@ export class HookServer {
       }
       const owner = this.hive.agyStatuslineOwnerToken() ?? null;
       if (!owner || f.token !== owner || !f.bodyOk) return;
+      // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): the owner lease lets a frame in, but only the named
+      // agent's own token lets it speak FOR that agent; without it the frame is refused.
+      if (f.agentId && !(f.agentToken && this.hookTokenMatches(f.agentId, f.agentToken))) {
+        this.logHookAuthReject(f.agentId, !f.agentToken ? 'missing' : (!this.hookTokens.has(f.agentId) ? 'revoked' : 'bad'));
+        return;
+      }
       void this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
     } catch { /* telemetry must never break the pipe */ }
   }

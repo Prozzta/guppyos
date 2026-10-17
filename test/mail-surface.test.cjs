@@ -366,9 +366,11 @@ async function pipeHook(f, payload) {
     if (ok) break;
     await new Promise((r) => setTimeout(r, 5));
   }
+  // PIPE-HOOK-NO-TOKEN-192: a pipe hook carries its spawn's token, as the real shim does.
+  const hook_token = payload.agent_id ? (f.server.hookToken(payload.agent_id) ?? spawnToken(f, payload.agent_id)) : undefined;
   return new Promise((resolve, reject) => {
     let b = '';
-    const c = net.createConnection(sock, () => c.write(JSON.stringify({ session_id: `s-${payload.agent_id}`, ...payload }) + '\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify({ session_id: `s-${payload.agent_id}`, hook_token, ...payload }) + '\n'));
     c.setEncoding('utf8');
     c.on('data', (d) => { b += d; });
     c.on('end', () => resolve(JSON.parse(b || '{}')));
@@ -723,11 +725,13 @@ test('N1: after 2 consecutive unconfirmed surfacings an id is confirmed by laten
 });
 
 /** The REAL AGY_HOOK_SHIM, run the way AGY runs it, against the REAL HookServer pipe. */
-function runAgyShim(dir, sock, event, agentId, stdin) {
+// PIPE-HOOK-NO-TOKEN-192: the shim carries its spawn's capability (minted as a spawn mints it).
+const spawnToken = (f, agentId) => { f.server.hookUrl(agentId); return f.server.hookToken(agentId); };
+function runAgyShim(dir, sock, event, agentId, stdin, token) {
   return new Promise((resolve) => {
     const shim = path.join(dir, 'agy-hook.cjs');
     fs.writeFileSync(shim, AGY_HOOK_SHIM);
-    const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: agentId, HIVE_SOCK: sock }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+    const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: agentId, HIVE_SOCK: sock, HIVE_HOOK_TOKEN: token }, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
     let out = ''; ch.stdout.on('data', (d) => { out += d; });
     const guard = setTimeout(() => { try { ch.kill(); } catch { /* gone */ } }, 30_000);
     ch.on('close', () => { clearTimeout(guard); resolve(out); });
@@ -739,7 +743,7 @@ test('AGY: the PreInvocation injectSteps userMessage carries the <hive-mail> blo
   const f = await floor(t, { providers: { 'ag-1': 'antigravity' } });
   const m = f.hive.send({ to: 'ag-1', act: 'request', subject: 'for agy', body: 'agy body' }, 'god-1');
   f.server.start();
-  const out = await runAgyShim(f.home, f.hive.sockPath(), 'PreInvocation', 'ag-1', JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }));
+  const out = await runAgyShim(f.home, f.hive.sockPath(), 'PreInvocation', 'ag-1', JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }), spawnToken(f, 'ag-1'));
   const parsed = JSON.parse(out);
   assert.equal(parsed.injectSteps.length, 1);
   const msg = parsed.injectSteps[0].userMessage;
@@ -781,7 +785,7 @@ test('GATE-178: an AGY pipe response flushed past the 2.5 s limit is late, never
   const stallMs = S.MAIL_PIPE_LATENCY_LIMIT_MS + 500;
   const real = f.hive.mail.claimSurfacing.bind(f.hive.mail);
   f.hive.mail.claimSurfacing = (...a) => { const t0 = Date.now(); while (Date.now() - t0 < stallMs) { /* stalled */ } return real(...a); };
-  await runAgyShim(f.home, f.hive.sockPath(), 'PreInvocation', 'ag-1', JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }));
+  await runAgyShim(f.home, f.hive.sockPath(), 'PreInvocation', 'ag-1', JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }), spawnToken(f, 'ag-1'));
   const late = await settledAgy(f, m.id);
   assert.ok(late, 'THE LATE BRANCH IS TAKEN: a mail-hook-late row for the id');
   assert.ok(late.latencyMs === null || late.latencyMs >= stallMs, `the row measures the stall: ${late.latencyMs}`);

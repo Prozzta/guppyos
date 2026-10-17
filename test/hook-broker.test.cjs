@@ -128,6 +128,15 @@ test('(2b) pipe hooks require the same per-agent capability as HTTP, including a
   assert.equal(rec.logs.at(-1).reason, 'revoked');
 });
 
+// PIPE-HOOK-NO-TOKEN-192 (Jim NIT-1): a frame with a token but no agent is not a revocation.
+test('(2c) a pipe hook that names no agent is refused with reason no-agent, never revoked', async (t) => {
+  const { s, rec, sock } = await broker(t);
+  const url = s.hookUrl(A);
+  await pipePost(sock, { hook_event_name: 'Stop', hook_token: url.slice(url.lastIndexOf('/') + 1) });
+  assert.equal(rec.handled.length, 0);
+  assert.deepEqual(rec.logs.filter((x) => x.kind === 'hook-auth-reject').map((x) => [x.agentId, x.reason]), [[null, 'no-agent']]);
+});
+
 test('(3) identity: the URL wins; a different body agent_id is a subagent (kept out of session/lifecycle/Stop); an incoming provider_agent_id is stripped', async (t) => {
   const { s, rec } = await broker(t);
   const url = s.hookUrl(A);

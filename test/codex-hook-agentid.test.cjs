@@ -48,7 +48,7 @@ async function throughShim(payload, t) {
   await new Promise((r) => server.listen(sock, r));
   try {
     await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [shim], { env: { ...process.env, AGENT_ID: HIVE_ID, HIVE_SOCK: sock }, stdio: ['pipe', 'ignore', 'ignore'] });
+      const child = spawn(process.execPath, [shim], { env: { ...process.env, AGENT_ID: HIVE_ID, HIVE_SOCK: sock, HIVE_HOOK_TOKEN: 'ab'.repeat(16) }, stdio: ['pipe', 'ignore', 'ignore'] });
       child.on('error', reject);
       child.on('close', resolve);
       child.stdin.end(JSON.stringify(payload));

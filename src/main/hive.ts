@@ -5860,11 +5860,12 @@ process.stdin.on('end', () => {
 // agent_end→Stop keeps the harness status in step (→ idle) so the renderer idle
 // inbox-wake nudge can deliver mail. Fully wrapped so a wrong API guess can never
 // break the spawn. LIVE-UNVERIFIED (Pi's exact extension surface needs BYOK keys).
-const PI_EXTENSION = `'use strict';
+export const PI_EXTENSION = `'use strict';
 var net = require('node:net');
 var SOCK = process.env.HIVE_SOCK;
 var AGENT = process.env.AGENT_ID || null;
 var HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
+if (SOCK && !HOOK_TOKEN) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (e) {} }
 var AUTO = process.env.HIVE_AUTO_APPROVE === '1';
 function post(payload) {
   try {
@@ -5902,10 +5903,11 @@ module.exports.default = module.exports;
 // after + session.idle. The session.idle→Stop keeps status in step (→ idle) so the
 // renderer idle inbox-wake nudge delivers mail. ESM (OpenCode runs on Bun). Fully
 // wrapped. LIVE-UNVERIFIED (plugin auto-load + session.idle firing need BYOK keys).
-const OPENCODE_PLUGIN = `import { createConnection } from 'node:net';
+export const OPENCODE_PLUGIN = `import { createConnection } from 'node:net';
 const SOCK = process.env.HIVE_SOCK;
 const AGENT = process.env.AGENT_ID || null;
 const HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
+if (SOCK && !HOOK_TOKEN) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (e) {} }
 function post(payload) {
   try {
     if (!SOCK || !HOOK_TOKEN) return;
@@ -5942,7 +5944,7 @@ export default HiveBridge;
 // citizen. NEVER logs bodies or keys; the captured body is parsed in-memory and
 // dropped. Idle is heuristic: a turn that ends with no tool call and no new request
 // within an ~800ms debounce → Stop (a new request cancels it).
-const PROXY_BRIDGE_SHIM = `#!/usr/bin/env node
+export const PROXY_BRIDGE_SHIM = `#!/usr/bin/env node
 'use strict';
 const http = require('http');
 const https = require('https');
@@ -5952,6 +5954,7 @@ const { URL } = require('url');
 const SOCK = process.env.HIVE_SOCK;
 const AGENT_ID = process.env.AGENT_ID || null;
 const HOOK_TOKEN = process.env.HIVE_HOOK_TOKEN || null;
+if (SOCK && !HOOK_TOKEN) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (e) {} }
 const UPSTREAM = process.env.UPSTREAM_BASE_URL || '';
 const SESSION = process.env.HIVE_PROXY_SESSION || null;
 const API = process.env.HIVE_PROXY_API === 'anthropic' ? 'anthropic' : 'openai';
@@ -6172,6 +6175,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
+  if (agentId && sock && !hookToken) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (_) {} }
   if (!agentId || !sock || !hookToken) { process.exit(0); }
   let gemini = {};
   try { gemini = JSON.parse(data || '{}'); } catch (_) {}
@@ -6239,6 +6243,7 @@ process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
+  if (agentId && sock && !hookToken) { try { process.stderr.write('[munder] missing HIVE_HOOK_TOKEN\\n'); } catch (_) {} }
   if (!agentId || !sock || !hookToken) { process.exit(0); }
   let grok = {};
   try { grok = JSON.parse(data || '{}'); } catch (_) {}

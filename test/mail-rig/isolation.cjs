@@ -118,5 +118,8 @@ function checkIsolation(env, sandbox, { allow = () => false, who = 'rig' } = {})
 
 /** The base URLs the host points at its own loopback fake LLM are the only allowed family names. */
 const allowRigBaseUrls = (k, v) => /^(OPENAI|ANTHROPIC|GEMINI)_BASE_URL$/i.test(k) && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/.test(String(v));
+/** PIPE-HOOK-NO-TOKEN-192: a stub also carries the hook capability the rig's own host minted for
+ *  its spawn (32 hex), exactly as a real agent does; no other token-shaped name. */
+const allowRigStub = (k, v) => allowRigBaseUrls(k, v) || (k === 'HIVE_HOOK_TOKEN' && /^[0-9a-f]{32}$/i.test(String(v)));
 
-module.exports = { rigEnv, checkIsolation, allowRigBaseUrls, SECRET_NAME, PROVIDER_COMMANDS, systemDirs };
+module.exports = { rigEnv, checkIsolation, allowRigBaseUrls, allowRigStub, SECRET_NAME, PROVIDER_COMMANDS, systemDirs };
