@@ -174,3 +174,20 @@ test('hive: a backstop close tells both sides once, logs its reason, is recorded
   assert.deepEqual(hive.autoCloseStaleObligations(null, later), [], 'idempotent');
   assert.equal(note('andy-1').length, 1, 'no second notice');
 });
+
+test('hive: many backstop closes in one sweep are ONE notice per recipient, naming every ask (Jim NIT-2)', async (t) => {
+  const hive = await floor(t);
+  const asks = [1, 2, 3].map((n) => hive.send({ to: 'andy-1', act: 'request', subject: `Ask ${n}`, body: 'go' }, 'god-1'));
+  hive.send({ to: 'god-1', act: 'inform', subject: 'something else', body: 'fyi' }, 'andy-1');
+  const before = { god: inbox(hive, 'god-1').length, andy: inbox(hive, 'andy-1').length };
+  const closed = hive.autoCloseStaleObligations(null, Date.now() + 25 * H);
+  assert.deepEqual(closed.map((s) => s.id).sort(), asks.map((a) => a.id).sort());
+  for (const [id, n] of [['andy-1', before.andy], ['god-1', before.god]]) {
+    const notes = inbox(hive, id).filter((m) => m.from === 'system' && /closed by the backstop/.test(m.subject));
+    assert.equal(notes.length, 1, `${id}: one notice for the sweep, not one per ask`);
+    assert.equal(inbox(hive, id).length, n + 1, `${id}: one new message`);
+    assert.equal(notes[0].requires_reply, false);
+    for (const a of asks) assert.match(notes[0].body, new RegExp(a.id), `${id}: names ${a.id}`);
+    assert.match(notes[0].subject, /3 asks/);
+  }
+});
