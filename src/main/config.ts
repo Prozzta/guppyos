@@ -1275,10 +1275,12 @@ function patchClaudeUserFile(p: string, patch: (obj: Record<string, unknown>) =>
       try { lstatSync(p); return { status: 'refused', reason: 'dangling symlink' }; } catch { /* truly missing */ }
     }
     let obj: unknown = {};
+    let blank = true;
     if (before) {
       // F4: an empty or whitespace-only file is `{}`; a leading BOM is not part of the JSON.
       const text = before.toString('utf8').replace(/^\uFEFF/, '');
-      if (text.trim() !== '') {
+      blank = text.trim() === '';
+      if (!blank) {
         try { obj = JSON.parse(text); } catch (error) {
           return { status: 'refused', reason: `does not parse: ${error instanceof Error ? error.message : String(error)}` };
         }
@@ -1292,7 +1294,9 @@ function patchClaudeUserFile(p: string, patch: (obj: Record<string, unknown>) =>
     mkdirSync(dir, { recursive: true });
     // F2: keep the file's mode (~/.claude.json holds oauthAccount; it may be 0600).
     const mode = before ? statSync(target).mode & 0o777 : undefined;
-    if (before) copyFileSync(target, `${target}.guppy-backup`);
+    // Andy S1: a blank file (claude truncated it mid-write) holds nothing to keep, and
+    // copying it would overwrite the last good backup.
+    if (before && !blank) copyFileSync(target, `${target}.guppy-backup`);
     const tmp = join(dir, `${basename(target)}.guppy-tmp-${randomBytes(4).toString('hex')}`);
     try {
       writeFileSync(tmp, JSON.stringify(next, null, 2), mode === undefined ? 'utf8' : { encoding: 'utf8', mode });
