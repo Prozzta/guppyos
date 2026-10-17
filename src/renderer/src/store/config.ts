@@ -449,6 +449,14 @@ export function modelsForProvider(provider: AgentProvider): ModelOption[] {
   return AGENT_MODELS;
 }
 
+/** A picker uses this instead of a compiled provider floor: it re-renders as soon as
+ * Settings refreshes models.json, then reads the same catalog-backed list as every
+ * other picker. */
+export function useModelsForProvider(provider: AgentProvider): ModelOption[] {
+  useModelCatalogVersion();
+  return modelsForProvider(provider);
+}
+
 /** The model a NEW agent (Add Agent, or a provider switch in Edit Agent) starts
  *  on for a provider: Claude from Settings' `defaultModel`, any other engine from
  *  its per-engine default (Settings → AI Engines). Neither set = undefined = the

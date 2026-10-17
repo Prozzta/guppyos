@@ -16,12 +16,15 @@
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 import { ModelsRefreshPanel } from '../../../src/renderer/src/components/ModelsRefreshPanel';
-import { loadModelCatalog, modelsForProvider, useModelCatalogVersion } from '../../../src/renderer/src/store/config';
+import { loadModelCatalog, modelsForProvider, useModelCatalogVersion, useModelsForProvider } from '../../../src/renderer/src/store/config';
 
 declare global {
   interface Window {
     __harnessRun: () => Promise<void>;
-    harness: { report: (payload: unknown) => void };
+    harness: {
+      report: (payload: unknown) => void;
+      capture: (width: number, height: number) => Promise<{ size: { width: number; height: number }; png: string }>;
+    };
   }
 }
 
@@ -33,14 +36,15 @@ const FILE = {
     antigravity: { status: 'ok', source: 'agy models', fetchedAt: 1, models: [
       { id: 'Gemini 3.9 Flash (High)', label: 'Gemini 3.9 Flash · High' },
       { id: 'Gemini 3.8 Flash (High)', label: 'Gemini 3.8 Flash · High' }] },
-    claude: { status: 'failed', source: 'claude initialize (the /model list)', reason: 'not signed in: open Claude Code and run /login' },
+    claude: { status: 'ok', source: 'claude initialize (the /model list)', models: [
+      { id: 'claude-new-after-refresh', label: 'Claude New After Refresh' }] },
     opencode: { status: 'not-installed', reason: 'opencode not found' },
     codex: { status: 'failed', reason: 'timeout', models: [{ id: 'gpt-6-astra', label: 'GPT-6 Astra' }] }
   }
 };
 const ROWS = [
   { provider: 'antigravity', status: 'ok', count: 2, added: ['Gemini 3.9 Flash (High)'], removed: ['Gemini 3.5 Flash (Medium)'], ms: 1800 },
-  { provider: 'claude', status: 'failed', count: 0, added: [], removed: [], reason: 'not signed in: open Claude Code and run /login', ms: 900 },
+  { provider: 'claude', status: 'ok', count: 1, added: ['Claude New After Refresh'], removed: [], ms: 900 },
   { provider: 'opencode', status: 'not-installed', count: 0, added: [], removed: [], reason: 'opencode not found', ms: 40 },
   { provider: 'codex', status: 'failed', count: 1, added: [], removed: [], reason: 'timeout', keptLast: true, ms: 20000 }
 ];
@@ -58,6 +62,12 @@ function PickerProbe() {
   return <ul id="agy-picker">{modelsForProvider('antigravity').map((m) => <li key={m.label}>{m.label}</li>)}</ul>;
 }
 
+/** The same live list used by SettingsModal's Default agent model buttons. */
+function ClaudeSettingsDefaultProbe() {
+  const models = useModelsForProvider('claude');
+  return <div id="settings-default-claude">{models.map((m) => <button key={m.label}>{m.label}</button>)}</div>;
+}
+
 const settle = (ms = 30) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
 const text = (sel: string) => (document.querySelector(sel)?.textContent ?? '');
 
@@ -65,17 +75,26 @@ window.__harnessRun = async () => {
   try {
     await loadModelCatalog();
     const root = createRoot(document.getElementById('root')!);
-    await act(async () => { root.render(<><ModelsRefreshPanel /><PickerProbe /></>); });
+    await act(async () => { root.render(<><ModelsRefreshPanel /><PickerProbe /><ClaudeSettingsDefaultProbe /></>); });
     await settle();
-    const before = { picker: [...document.querySelectorAll('#agy-picker li')].map((l) => l.textContent), panel: document.body.textContent ?? '', refreshCalls: calls.refreshModels };
+    const before = {
+      picker: [...document.querySelectorAll('#agy-picker li')].map((l) => l.textContent),
+      claudeDefaults: [...document.querySelectorAll('#settings-default-claude button')].map((b) => b.textContent),
+      panel: document.body.textContent ?? '', refreshCalls: calls.refreshModels
+    };
     const button = [...document.querySelectorAll('button')].find((b) => /Refresh models/.test(b.textContent ?? '')) as HTMLButtonElement;
     await act(async () => { button.click(); });
     const during = { label: button.textContent, disabled: button.disabled };
     await act(async () => { button.click(); }); // ignored while busy
     await settle(300);
     const rows = [...document.querySelectorAll('[data-testid="models-refresh-rows"] tr')].map((tr) => [...tr.querySelectorAll('td')].map((td) => td.textContent));
-    const after = { picker: [...document.querySelectorAll('#agy-picker li')].map((l) => l.textContent), panel: document.body.textContent ?? '', rows, button: button.textContent, disabled: button.disabled };
-    window.harness.report({ ok: true, calls, before, during, after, lastRefreshed: /Last refreshed/.test(text('body')) });
+    const after = {
+      picker: [...document.querySelectorAll('#agy-picker li')].map((l) => l.textContent),
+      claudeDefaults: [...document.querySelectorAll('#settings-default-claude button')].map((b) => b.textContent),
+      panel: document.body.textContent ?? '', rows, button: button.textContent, disabled: button.disabled
+    };
+    const screenshot = await window.harness.capture(900, 500);
+    window.harness.report({ ok: true, calls, before, during, after, screenshot: { size: screenshot.size, bytes: screenshot.png.length }, lastRefreshed: /Last refreshed/.test(text('body')) });
   } catch (e) {
     window.harness.report({ ok: false, error: String((e as Error)?.stack ?? e) });
   }

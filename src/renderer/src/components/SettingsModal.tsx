@@ -1,5 +1,5 @@
 import { useState, useEffect, type CSSProperties } from 'react';
-import { AGENT_MODELS, type HarnessConfig } from '@/store/config';
+import { useModelsForProvider, type HarnessConfig } from '@/store/config';
 import { ModelsRefreshPanel } from './ModelsRefreshPanel';
 import { useStore } from '@/store/store';
 import {
@@ -170,6 +170,7 @@ export type Section = 'General' | 'Prerequisites' | 'Agents & Models' | 'Autonom
 const NAV_SECTIONS: Section[] = ['General', 'Prerequisites', 'Agents & Models', 'Autonomy & Budgets', 'Connections', 'Voice', 'Memory & Knowledge'];
 
 export function SettingsModal({ config, onClose, initialSection }: SettingsModalProps) {
+  const claudeModels = useModelsForProvider('claude');
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [activeSection, setActiveSection] = useState<Section>(initialSection ?? 'General');
@@ -1108,7 +1109,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             A model set here is marked “· default” in the model pickers.
                           </span>
                           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                            {AGENT_MODELS.map((m) => (
+                            {claudeModels.map((m) => (
                               <button
                                 key={m.label}
                                 onClick={() => { void saveDefaultModel(m.id); }}
