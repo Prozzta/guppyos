@@ -56,6 +56,21 @@ function dialogRow(rows: readonly string[]): string | null {
   }
   return null;
 }
+/** The rows allowed under the box, all seen in the REAL captures: Claude's mode line, agy's
+ *  shortcuts line, a right-aligned status row (Claude's `/rc` and `● high · /effort`, agy's model),
+ *  and Claude's Remote Control notice. Any other row (a slash-command or @-path completion list,
+ *  an unknown notice) is not a footer, so the screen is refused (Andy SHOULD-1). */
+const FOOTER_ROWS: readonly RegExp[] = [
+  /^\s*$/,
+  /^\s*⏵⏵ /,
+  /^\s*\? for shortcuts/,
+  /^\s{30,}\S/,
+  /^\s*Remote Control (?:disconnected|connected|reconnecting|active)\b/
+];
+/** The first row under the box that is not an allowed footer row, or null. */
+function strangeFooterRow(rows: readonly string[]): string | null {
+  return rows.find((row) => !FOOTER_ROWS.some((re) => re.test(row))) ?? null;
+}
 /** How many bottom rows are searched for a dialog's rows when there is no composer. */
 const DIALOG_SCAN_ROWS = 16;
 const REASON_MAX = 120;
@@ -95,7 +110,7 @@ function ownClippedDraft(tail: readonly string[], expectedText: string): boolean
   if (bottom < 1) return false;
   const rows = tail.slice(0, bottom);
   if (rows.some((r) => RULE.test(r)) || dialogRow(rows) !== null) return false;
-  if (tail.slice(bottom + 1).some((r) => dialogRow([r]) !== null)) return false;
+  if (strangeFooterRow(tail.slice(bottom + 1)) !== null) return false;
   const seen = compact(rows.join(''));
   return seen.length >= OWN_TAIL_MIN_CHARS && compact(expectedText).endsWith(seen);
 }
@@ -119,6 +134,8 @@ export function classifyTuiComposer(provider: TuiGuardProvider, f: CodexScreenFa
   const footer = tail.slice(box.bottom + 1);
   const below = dialogRow(footer);
   if (below) return { cls: 'MODAL', reason: `${provider}-dialog:${clip(below.trim())}` };
+  const strange = strangeFooterRow(footer);
+  if (strange !== null) return { cls: 'UNKNOWN', reason: `footer-row:${clip(strange.trim())}` };
   const glyph = PROMPT_GLYPH[provider];
   const text = [box.rows[0].slice(glyph.length), ...box.rows.slice(1)].join('\n').trim();
   if (text === '' || (provider === 'claude' && CLAUDE_PLACEHOLDER.test(text))) {

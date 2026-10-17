@@ -130,6 +130,26 @@ test('(a) a select list drawn under the box (slash-command completion) is never 
   }
 });
 
+test('(a) footer allowlist (Andy SHOULD-1): an UNNUMBERED completion list under the box is never READY nor ours; every real footer is', () => {
+  // Claude's slash-command and @-path completions are unnumbered rows under the box (DERIVED
+  // shapes: no capture yet). Only the footer rows the REAL captures show are allowed there.
+  const text = '/compact the context';
+  for (const extra of [['  /compact   Clear conversation history but keep a summary'], ['  @src/', '  @src/main/'], ['  Auto-update failed']]) {
+    for (const prov of ['claude', 'antigravity']) {
+      const fx = prov === 'claude' ? fixture('claude-idle-120x40') : fixture('agy127-boot');
+      const idle = { ...fx, lines: [...fx.lines, ...extra] };
+      const staged = withComposer(fx, prov, text); staged.lines = [...staged.lines, ...extra];
+      const read = (x) => SHARED.extractCodexScreen((i) => x.lines[i], x.lines.length, x.cursorRow);
+      assert.notEqual(TUI.classifyTuiComposer(prov, read(idle)).cls, 'READY', `${prov} STAGE ${JSON.stringify(extra)}`);
+      assert.notEqual(TUI.classifyTuiComposer(prov, read(staged), text).cls, 'READY_OWN_DRAFT', `${prov} COMMIT ${JSON.stringify(extra)}`);
+    }
+  }
+  for (const name of ['claude-idle-120x40', 'claude-idle-80x24', 'claude-rc', 'claude-rc-notice', 'claude270-boot', 'claude270-afterclear', 'agy127-boot', 'agy127-afterclear']) {
+    const prov = name.startsWith('agy') ? 'antigravity' : 'claude';
+    assert.equal(TUI.classifyTuiComposer(prov, facts(fixture(name))).cls, 'READY', `${name}: its real footer is allowed`);
+  }
+});
+
 test('(a) agy readiness needs real output: hasOutput=false is not ready (0398e918 had exempted agy)', () => {
   for (const p of ['antigravity', 'claude', 'codex']) {
     assert.equal(PA.terminalReadyToReceive(false, 60_000, p), false, `${p}: nothing drawn = not ready`);
@@ -301,6 +321,8 @@ test('(a) own-draft-clipped: our own long wake text that wraps past the 24-row t
     assert.notEqual(TUI.classifyTuiComposer(prov, dialog, own).cls, 'READY_OWN_DRAFT', `${prov}: a dialog row among the rows is never ours`);
     const below = screen(prov, own, undefined, ['  ❯ 1. Yes, continue', '    2. No, exit']);
     assert.notEqual(TUI.classifyTuiComposer(prov, below, own).cls, 'READY_OWN_DRAFT', `${prov}: a select list under the box owns Enter`);
+    const completion = screen(prov, own, undefined, ['  ? for shortcuts', '  @src/']);
+    assert.notEqual(TUI.classifyTuiComposer(prov, completion, own).cls, 'READY_OWN_DRAFT', `${prov}: an unnumbered completion row under the box is not a footer`);
     const short = SHARED.extractCodexScreen((i) => [own.slice(-120), rule, '  ? for shortcuts'][i], 3, 2);
     assert.notEqual(TUI.classifyTuiComposer(prov, short, own).cls, 'READY_OWN_DRAFT', `${prov}: a short suffix proves nothing`);
   }
@@ -354,7 +376,7 @@ test('every Claude agent spawns with prompt suggestions off (env + settings), so
   const hive = new HiveManager(() => harness);
   t.after(() => {
     hive.dispose();
-    Object.assign(process.env, saved);
+    for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
     fs.rmSync(FAKE_HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
   for (const meta of [{ id: 'god', name: 'Michael', provider: 'claude', cwd: FAKE_HOME, isGod: true }, { id: 'jim-x', name: 'Jim', provider: 'claude', cwd: FAKE_HOME }]) {
