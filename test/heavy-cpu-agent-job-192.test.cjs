@@ -137,6 +137,8 @@ const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Fra
 // A probe: `record <dir>` writes "<affinity mask> <priority class>" to <dir>/<pid>; `fork <dir>`
 // records, starts `record` and exits at once; `fork2 <dir>` starts `fork` and exits at once (a
 // grandchild that forks and is gone in milliseconds); `hold <ms> <dir>` records and waits;
+// `watch <d1> <d2> <d3>` sets its own ABOVE_NORMAL and a first-and-last-processor affinity, records to d1, and to each next folder once the one before holds a `go`
+// file (a long-lived process of the agent, read back from inside before, during and after a call);
 // `breakaway <dir>` records whether a child may be created with CREATE_BREAKAWAY_FROM_JOB.
 const PROBE = `
 using System; using System.Diagnostics; using System.IO; using System.Runtime.InteropServices;
@@ -152,6 +154,10 @@ static class Probe {
     else if (a[0] == "fork") { Record(a[1]); Start("record \\"" + a[1] + "\\""); }
     else if (a[0] == "fork2") Start("fork \\"" + a[1] + "\\"");
     else if (a[0] == "hold") { Record(a[2]); System.Threading.Thread.Sleep(int.Parse(a[1])); }
+    else if (a[0] == "watch") {
+      var me = Process.GetCurrentProcess(); int n = Environment.ProcessorCount;
+      me.PriorityClass = ProcessPriorityClass.AboveNormal; me.ProcessorAffinity = (IntPtr)(n > 1 ? (1L | (1L << (n - 1))) : 1L);
+      for (int i = 1; i < a.Length; i++) { Record(a[i]); if (i + 1 < a.Length) while (!File.Exists(Path.Combine(a[i], "go"))) System.Threading.Thread.Sleep(20); } }
     else if (a[0] == "breakaway") {
       var si = new SI(); si.cb = Marshal.SizeOf(typeof(SI)); PI pi;
       bool ok = CreateProcessW(Self(), "probe record \\"" + a[1] + "\\"", IntPtr.Zero, IntPtr.Zero, false, 0x01000000 | 0x08000000, IntPtr.Zero, null, ref si, out pi);
@@ -201,6 +207,12 @@ test('LIVE: an ask-first call\'s whole tree, a grandchild that forks and exits a
       await until('baseline', () => fs.existsSync(path.join(before, 'breakaway')) && rows(before).length >= 1);
       const base = rows(before)[0];
       assert.ok(bits(base.mask) > half, 'the baseline is not limited');
+      // A long-lived process of the agent, there before the call and after it.
+      const [w1, w2, w3] = [sub('w1'), sub('w2'), sub('w3')];
+      run(`& '${probe}' watch '${w1}' '${w2}' '${w3}'`);
+      await until('long-lived member', () => rows(w1).length >= 1);
+      assert.equal(rows(w1)[0].prio, 32768, 'its own priority (ABOVE_NORMAL), not a default');
+      const go = (d) => fs.writeFileSync(path.join(d, 'go'), '');
 
       // The gated PreToolUse: the agent goes in its job and the limits go on; THEN the CLI starts the shell.
       const heavy = sub('heavy');
@@ -213,7 +225,9 @@ test('LIVE: an ask-first call\'s whole tree, a grandchild that forks and exits a
       const light = sub('light');
       run(`& '${probe}' record '${light}'`);
       await until('light call completes', () => rows(light).length >= 1);
-      for (const r of [...rows(heavy), ...rows(light)]) {
+      go(w1);
+      await until('long-lived member during the call', () => rows(w2).length >= 1);
+      for (const r of [...rows(heavy), ...rows(light), ...rows(w2)]) {
         assert.equal(bits(r.mask), half, `pid ${r.pid} on half the processors (mask ${r.mask})`);
         assert.equal(r.prio, 16384, `pid ${r.pid} at BELOW_NORMAL`);
       }
@@ -222,6 +236,10 @@ test('LIVE: an ask-first call\'s whole tree, a grandchild that forks and exits a
       assert.equal(j.agentCallCount('a1'), 1, 'still running (hold)');
       await until('call ends', () => { void j.poll(); return j.agentCallCount('a1') === 0; }, 60_000);
       assert.equal(logs.filter((r) => r.action === 'done').length, 1, JSON.stringify(logs));
+      // A process that was in the job all along has its own affinity and priority back.
+      go(w2);
+      await until('long-lived member after the call', () => rows(w3).length >= 1);
+      assert.deepEqual([rows(w3)[0].mask, rows(w3)[0].prio], [rows(w1)[0].mask, rows(w1)[0].prio], 'a member present during the call reads back its own affinity and priority after it');
 
       // After: the agent's new processes are as they were before, breakaway included.
       const after = sub('after');

@@ -217,17 +217,39 @@ static class HeavyJob
         return 0;
     }
 
-    static void SetJob(IntPtr job, bool background, bool half, bool agent = false)
+    // Lifting a job limit leaves its members as the limit set them (Windows does not restore them).
+    // A member whose own values were recorded before the limit (an agent's job) gets them back; any
+    // other is put back to normal.
+    static void SetJob(IntPtr job, bool background, bool half, bool agent = false, Dictionary<int, Own> own = null)
     {
         Apply(job, background, half, agent);
         foreach (int pid in Members(job))
         {
             IntPtr h = OpenProcess(0x0200 | 0x0400, false, pid); // SET_INFORMATION | QUERY_INFORMATION
             if (h == IntPtr.Zero) continue;
-            if (!background && GetPriorityClass(h) == BELOW_NORMAL) SetPriorityClass(h, NORMAL);
-            if (!half) { UIntPtr pm, sm; if (GetProcessAffinityMask(h, out pm, out sm) && pm != sm) SetProcessAffinityMask(h, sm); }
+            Own o;
+            if (own == null || !own.TryGetValue(pid, out o) || o.Created != Created(pid)) o = null;
+            if (!background) { if (o != null) SetPriorityClass(h, o.Prio); else if (GetPriorityClass(h) == BELOW_NORMAL) SetPriorityClass(h, NORMAL); }
+            if (!half)
+            {
+                UIntPtr pm, sm;
+                if (o != null) SetProcessAffinityMask(h, o.Mask);
+                else if (GetProcessAffinityMask(h, out pm, out sm) && pm != sm) SetProcessAffinityMask(h, sm);
+            }
             CloseHandle(h);
         }
+    }
+
+    // A process's own priority class and affinity, taken while no limit of ours is on it.
+    class Own { public long Created; public UIntPtr Mask; public uint Prio; }
+
+    static void Record(Dictionary<int, Own> own, int pid)
+    {
+        IntPtr h = OpenProcess(0x0400, false, pid); // QUERY_INFORMATION
+        if (h == IntPtr.Zero) return;
+        UIntPtr pm, sm; uint pc = GetPriorityClass(h);
+        if (pc != 0 && GetProcessAffinityMask(h, out pm, out sm)) own[pid] = new Own { Created = Created(pid), Mask = pm, Prio = pc };
+        CloseHandle(h);
     }
 
     static List<int> Members(IntPtr job)
@@ -283,7 +305,7 @@ static class HeavyJob
     // children it spawns in libuv's own job, whose children break away from it silently): one job
     // nested under each, all with the same limits. Membership is for good, so with no limit on the
     // jobs allow an explicit breakaway as before (Apply).
-    class AgentJob { public List<IntPtr> Jobs = new List<IntPtr>(); public bool Background, Half; }
+    class AgentJob { public List<IntPtr> Jobs = new List<IntPtr>(); public bool Background, Half; public Dictionary<int, Own> Own = new Dictionary<int, Own>(); }
 
     static string AgentSweep(AgentJob a, int root)
     {
@@ -299,6 +321,7 @@ static class HeavyJob
                 if (h == IntPtr.Zero) { missed++; continue; }
                 bool inside = false;
                 foreach (IntPtr j in a.Jobs) { bool r; if (IsProcessInJob(h, j, out r) && r) { inside = true; break; } }
+                if (!inside && (a.Background || a.Half)) Record(a.Own, pid); // its own values, before the limits reach it
                 if (!inside) foreach (IntPtr j in a.Jobs) if (AssignProcessToJobObject(j, h)) { inside = true; newly++; break; }
                 if (!inside)
                 {
@@ -460,8 +483,12 @@ static class HeavyJob
                 else if (w.Length == 4 && w[0] == "set" && agents.ContainsKey(w[1]))
                 {
                     AgentJob a = agents[w[1]];
+                    bool was = a.Background || a.Half;
                     a.Background = w[2] == "1"; a.Half = w[3] == "1";
-                    foreach (IntPtr j in a.Jobs) SetJob(j, a.Background, a.Half, true);
+                    // Limits going on: each member's own values first, to give back when they come off.
+                    if (!was && (a.Background || a.Half)) { a.Own.Clear(); foreach (IntPtr j in a.Jobs) foreach (int pid in Members(j)) Record(a.Own, pid); }
+                    foreach (IntPtr j in a.Jobs) SetJob(j, a.Background, a.Half, true, a.Own);
+                    if (!a.Background && !a.Half) a.Own.Clear();
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 2 && w[0] == "close" && agents.ContainsKey(w[1]))
