@@ -5924,6 +5924,8 @@ const closingTime = new ClosingTimeController(
   control
 );
 hive.setRoutedObserver((msg, targets) => closingTime.onRouted(msg, targets));
+// NEEDS-HUMAN-NO-ESCALATE-192: one desktop notice per agent ask the router put on ASK ME.
+hive.setNeedsHumanObserver(({ name, card, subject }) => breakerToast(`${name} needs you`, `${card}: ${subject}`.slice(0, 200)));
 ipcMain.handle('app:startClosingTime', () => closingTime.start());
 ipcMain.handle('app:cancelClosingTime', () => closingTime.cancel());
 

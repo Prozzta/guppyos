@@ -238,6 +238,9 @@ export interface HumanQA {
   recommended?: number;
   multi?: boolean;
   chosen?: number[];
+  /** NEEDS-HUMAN-NO-ESCALATE-192: on an entry the router added from an agent's needs_human ask. */
+  from?: string;
+  msgId?: string;
 }
 
 /** A card on the task kanban, persisted to hive/tasks.json. */

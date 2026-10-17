@@ -101,10 +101,11 @@ export function reviewCardOf(task: HiveTask, raw: Record<string, unknown> | unde
   const result = (datedResults[0] ?? results[results.length - 1])?.text ?? null;
   const rawQA: unknown[] = Array.isArray(r.humanQA) ? r.humanQA : [];
   // The one ask ASK ME shows for this card (TasksKanban's waitsOnHuman + openQuestion, the same
-  // rule on the same raw entries): the newest unanswered, undismissed one, on a BLOCKED card only.
-  // Only that entry may say "answer on ASK ME" (Jim: 4 real open asks sit on done cards).
+  // rule on the same raw entries): the newest unanswered, undismissed one, on a card that is NOT
+  // DONE (NEEDS-HUMAN-NO-ESCALATE-192: an agent's ask does not block its card). Only that entry may
+  // say "answer on ASK ME" (Jim: 4 real open asks sit on done cards).
   let askMeEntry: unknown;
-  if (task.status === 'blocked') {
+  if (task.status !== 'done') {
     for (let i = rawQA.length - 1; i >= 0; i--) {
       const e = rawQA[i] as { q?: unknown; a?: unknown; dismissedAt?: unknown } | null;
       if (e && typeof e.q === 'string' && !e.a && !e.dismissedAt) { askMeEntry = e; break; }

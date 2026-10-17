@@ -74,7 +74,31 @@ export function recordBackstopClosed(root: string, add: readonly DigestBackstopC
   atomicWriteJson(join(root, 'state', ASKS_BACKSTOP_FILE), { v: 1, closed: keep });
 }
 
+/** NEEDS-HUMAN-NO-ESCALATE-192: an inform or done an agent flagged needs_human (hive.ts writes them);
+ *  god decides whether it is worth the Human's time. Asks go to ASK ME on their card instead. */
+export interface DigestFlaggedForHuman { agentId: string; name?: string; card: string | null; id: string; subject: string; at: number }
+/** Under state/: the flagged FYIs of the last week, newest last, at most NEEDS_HUMAN_FLAGGED_KEEP. */
+export const NEEDS_HUMAN_FLAGGED_FILE = 'needs-human-flagged.json';
+export const NEEDS_HUMAN_FLAGGED_KEEP = 200;
+
+export function readFlaggedForHuman(root: string): DigestFlaggedForHuman[] {
+  try {
+    const s = JSON.parse(readFileSync(join(root, 'state', NEEDS_HUMAN_FLAGGED_FILE), 'utf8')) as { flagged?: unknown };
+    return Array.isArray(s?.flagged) ? s.flagged.filter((c): c is DigestFlaggedForHuman => !!c && typeof c === 'object'
+      && typeof (c as DigestFlaggedForHuman).id === 'string' && typeof (c as DigestFlaggedForHuman).at === 'number') : [];
+  } catch { return []; }
+}
+
+export function recordFlaggedForHuman(root: string, add: readonly DigestFlaggedForHuman[], now: number): void {
+  if (add.length === 0) return;
+  const keep = [...readFlaggedForHuman(root).filter((c) => now - c.at < 7 * DAY_MS), ...add].slice(-NEEDS_HUMAN_FLAGGED_KEEP);
+  mkdirSync(join(root, 'state'), { recursive: true });
+  atomicWriteJson(join(root, 'state', NEEDS_HUMAN_FLAGGED_FILE), { v: 1, flagged: keep });
+}
+
 export interface FloorDigestInput {
+  /** NEEDS-HUMAN-NO-ESCALATE-192: listed when any is from the last 24 h. */
+  flaggedForHuman?: DigestFlaggedForHuman[];
   /** REQUESTS-AUTO-190: listed when any is from the last 24 h. */
   backstopClosed?: DigestBackstopClosed[];
   heldWakes?: DigestHeldWake[];
@@ -177,13 +201,18 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   out.push('');
 
   out.push('## Blocked / ask-me', '');
+  const openQs = (c: Card): number => (Array.isArray(c.humanQA) ? c.humanQA as Array<Record<string, unknown>> : [])
+    .filter((e) => e && typeof e.q === 'string' && !e.a && !e.dismissedAt).length;
   const blocked = list.filter((c) => c.status === 'blocked');
-  if (blocked.length === 0) out.push('Nothing blocked.');
+  // NEEDS-HUMAN-NO-ESCALATE-192: an agent's needs_human ask lands on its card without blocking it
+  // (the board is god's): listed too, so god sets blocked when the work really waits.
+  const asking = list.filter((c) => c.status !== 'blocked' && c.status !== 'done' && openQs(c) > 0);
+  if (blocked.length === 0 && asking.length === 0) out.push('Nothing blocked.');
   for (const c of blocked) {
-    const qa = Array.isArray(c.humanQA) ? c.humanQA as Array<Record<string, unknown>> : [];
-    const open = qa.filter((e) => e && typeof e.q === 'string' && !e.a && !e.dismissedAt).length;
+    const open = openQs(c);
     out.push(`- ${c.id} (${who(c)})${age(c)}${open ? `: ${open} question(s) for the Human` : ''}`);
   }
+  for (const c of asking) out.push(`- ${c.id} (${who(c)})${age(c)}: ${openQs(c)} question(s) for the Human, card not blocked (set it blocked if the work waits)`);
   out.push('');
 
   out.push('## Flags', '');
@@ -196,6 +225,13 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   if (backstop.length) {
     out.push('## Asks closed by the backstop (last 24 h)', '');
     for (const c of backstop) out.push(`- ${c.agentId} <- ${c.from}: ${c.subject} (${c.id})`);
+    out.push('');
+  }
+
+  const flagged = (input.flaggedForHuman ?? []).filter((c) => now - c.at < DAY_MS);
+  if (flagged.length) {
+    out.push('## Flagged for the Human (last 24 h)', '');
+    for (const c of flagged) out.push(`- ${c.name ?? c.agentId} on ${c.card ?? 'no card'}: ${c.subject} (${c.id})`);
     out.push('');
   }
 
@@ -309,7 +345,8 @@ export class FloorDigest {
       ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now,
       heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })(),
       silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
-      backstopClosed: readBackstopClosed(root)
+      backstopClosed: readBackstopClosed(root),
+      flaggedForHuman: readFlaggedForHuman(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.
     const body = markdown.split('\n').filter((l) => !l.startsWith('_Written by the harness')).join('\n');
