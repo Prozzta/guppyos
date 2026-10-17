@@ -49,9 +49,10 @@ export function openQuestion(t: HiveTask): HumanQA | undefined {
   return undefined;
 }
 
-/** Waiting on the human = blocked with an unanswered question on the card. */
+/** Waiting on the human = an unanswered question on a card that is not done. An agent's needs_human
+ *  ask lands on its card without blocking it (NEEDS-HUMAN-NO-ESCALATE-192: the board is god's). */
 export function waitsOnHuman(t: HiveTask): boolean {
-  return t.status === 'blocked' && !!openQuestion(t);
+  return t.status !== 'done' && !!openQuestion(t);
 }
 
 type Status = HiveTask['status'];

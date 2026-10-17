@@ -25,6 +25,9 @@ export interface HumanQAFields {
   recommended?: number;
   multi?: boolean;
   chosen?: number[];
+  /** NEEDS-HUMAN-NO-ESCALATE-192: the asking agent and its message, on a router-added entry. */
+  from?: string;
+  msgId?: string;
 }
 
 /** More than this is a form, not a choice; the rest are dropped (the note field remains). */
@@ -187,6 +190,16 @@ export function recordAnswer<T extends HumanQAFields>(qa: T[], open: T, answer: 
 }
 
 /** The ASK ME answer path, mail side: the inbox message the god gets. */
+/** NEEDS-HUMAN-NO-ESCALATE-192: who gets the answer besides god (always mailed): the agent whose
+ *  needs_human ask the router put on the card (the entry's `from`). Not god again, and never a
+ *  routing word or anything that is not an agent id. */
+export function answerRecipients(open: { from?: unknown }, godId: string | undefined): string[] {
+  const from = open.from;
+  if (typeof from !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$/.test(from)) return [];
+  if (from === godId || ['god', 'human', 'system', 'broadcast'].includes(from)) return [];
+  return [from];
+}
+
 export function answerMail(task: { id: string; title: string }, open: HumanQAFields, answer: ComposedAnswer): { subject: string; body: string } {
   const indexed = normalizeOptionsIndexed(open.options);
   const opts = indexed?.options ?? [];

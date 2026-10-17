@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { PixelBadge } from './PixelBadge';
 import { HumanQuestionCard, type HumanAnswer } from './HumanQuestionCard';
-import { answerMail, normalizeHumanQA, recordAnswer } from './humanQuestion';
+import { answerMail, answerRecipients, normalizeHumanQA, recordAnswer } from './humanQuestion';
 import { useStore } from '@/store/store';
 import { type HiveTask, type HumanQA, openQuestion, waitsOnHuman } from './TasksKanban';
 
@@ -97,6 +97,9 @@ export function AskMeTab() {
       setTasks(next);
       // 2) Tell the god, so the card gets unblocked and work continues.
       await window.cth.hiveSend({ to: 'god', act: 'inform', ...answerMail(task, open, ans) }, 'human');
+      // 3) And the agent that asked, when the router put its needs_human ask here.
+      const godId = agents.find((a) => a.isGod)?.id;
+      for (const to of answerRecipients(open, godId)) await window.cth.hiveSend({ to, act: 'inform', ...answerMail(task, open, ans) }, 'human');
       setAnswerDraft(task.id, '');
     } catch { /* leave the draft so the user can retry */ }
     setSending(null);
