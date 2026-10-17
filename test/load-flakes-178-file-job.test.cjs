@@ -120,7 +120,8 @@ async function startFile(dir, exe, src = FILE, env = {}) {
 
 const until = async (what, ok, ms = 30_000) => { const end = Date.now() + ms; while (!ok()) { if (Date.now() > end) throw new Error(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-const pingOf = (cmdPid) => own.processTable().find((r) => r.ppid === cmdPid && /^ping/i.test(r.name));
+/** cmd's ping: a child by parent pid and birth (own-procs' check), never by parent pid alone. */
+const pingOf = (cmdPid) => { const t = own.processTable(); const cmd = t.find((r) => r.pid === cmdPid); return cmd ? own.childrenOf(t, cmd).find((r) => /^ping/i.test(r.name)) : undefined; };
 
 /** Leftovers of a failed run: only what is still the process we saw (pid and birth). */
 function sweep(rows) { own.killVerified(rows.filter(Boolean), {}); }

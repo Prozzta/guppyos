@@ -355,8 +355,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   assert.ok(files.includes('test-runner-glob.test.cjs'), 'the runner must pick up its own test');
   // int-1.1.91: 430 on repo-tidy-191, + 6 root tests from the other 1.1.91 branches (cards x2,
   // claude-json-wipe, model-not-kept x2, worktree-remove-junction), + 2 (requests-auto-190,
-  // tui-composer-allowlist-191).
-  assert.equal(files.length, 438, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // tui-composer-allowlist-191), + 1 (load-flakes-178-file-job).
+  assert.equal(files.length, 439, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
