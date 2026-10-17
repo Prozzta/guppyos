@@ -222,7 +222,7 @@ test('the hook reader: a real file in a temp dir, by a Git Bash /x/ path too; a 
 
 K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/hooks.ts')) => {
   assert.match(idx, /if \(patch && 'heavyJobsAtOnce' in patch\) heavyLock\.limitChanged\(\);/, 'A SETTINGS LIMIT CHANGE PROMOTES EXISTING WAITERS');
-  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
+  assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyUnlimited: \(agentId, kind\) => notifyHeavyUnlimited\(agentId, kind\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
   assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
   assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
   assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n(?:      \/\/[^\n]*\n)*      const own = p\.hook_tool_input;\n      const toolName = own \? 'Bash' : p\.tool_name;\n      const toolInput = own \?\? p\.tool_input;\n      let cls = classifyHeavy\(toolName, toolInput, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');

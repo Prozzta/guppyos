@@ -297,4 +297,22 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
   for (const body of ['cmd //c "$B"', 'cmd //c "${B}"']) {
     assert.equal(classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, body);
   }
+  assert.equal(classifyCommand('bash -c "$(cat run.sh)"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'computed bash -c body is unreadable');
+});
+
+test('MUTANTS: removing either computed-wrapper guard reopens the generated-child escape', () => {
+  const file = path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts');
+  const original = fs.readFileSync(file, 'utf8');
+  const cmdGuard = "if ((ctx.dialect === 'sh' && /\\$/.test(body)) || /`/.test(body)) return { heavy: true, kind: 'bench', why: 'cmd /c (computed command the lock cannot read)', provisional: true };";
+  assert.equal(original.split(cmdGuard).length - 1, 1, 'cmd guard mutation target is unique');
+  const genericCmdGuard = "(bin === 'cmd' && ((ctx.dialect === 'sh' && /\\$/.test(body)) || /`/.test(body)))";
+  assert.equal(original.split(genericCmdGuard).length - 1, 1, 'generic cmd guard mutation target is unique');
+  const noCmdGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(cmdGuard, '').replace(genericCmdGuard, 'false'));
+  for (const body of ['cmd //c "$B"', 'cmd //c "${B}"']) {
+    assert.equal(noCmdGuard.classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, `MUTANT: removed cmd guard reopens ${body}`);
+  }
+  const bashGuard = "((bin === 'bash' || bin === 'sh') && /(?:\\$\\(|`)/.test(body))";
+  assert.equal(original.split(bashGuard).length - 1, 1, 'bash guard mutation target is unique');
+  const noBashGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(bashGuard, 'false'));
+  assert.equal(noBashGuard.classifyCommand('bash -c "$(cat run.sh)"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: removed bash guard reopens command substitution');
 });

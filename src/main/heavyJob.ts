@@ -798,6 +798,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   const cmdBody = args.indexOf('/c');
   if (bin === 'cmd' && cmdBody >= 0 && args.length === cmdBody + 2) {
     const body = args[cmdBody + 1].replace(/^"|"$/g, '');
+    // A `cmd /c` body passed through sh can be a generated batch-path, including `$B` and
+    // `$(cygpath ...)`; cmd will expand neither but the outer shell already did.  The same
+    // applies to backticks.  Deliberately fail closed: even `cmd /c "echo $(date)"` is
+    // provisional because the classifier cannot safely recover the resulting command.
+    if ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body)) return { heavy: true, kind: 'bench', why: 'cmd /c (computed command the lock cannot read)', provisional: true };
     const spacedExe = /^([a-z]:\\.*?\.(?:exe|cmd))\s+(.+)$/i.exec(body);
     return classifyCommand(spacedExe ? `"${spacedExe[1]}" ${spacedExe[2]}` : body, depth + 1, { ...ctx, dialect: 'cmd' });
   }
@@ -812,11 +817,11 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // was read one level deep only).
     if (k >= 0) {
       const body = args.slice(k + 1).join(' ');
-      // A batch wrapper can generate a .cmd and reach it through `$(cygpath -w ...)`.
-      // We can classify cygpath but not its resulting command, which cmd executes directly.
-      // In a sh wrapper any $ may be expanded to an unreadable batch path (including $B / ${B});
-      // this deliberately also treats rare light command substitutions conservatively.
-      if (bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) return { heavy: true, kind: 'bench', why: `cmd ${args[k]} (computed command the lock cannot read)`, provisional: true };
+      // A command string expanded by a shell is not inspectable after expansion.  This covers
+      // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`) and `bash -c "$(cat run.sh)"`.
+      // Deliberately conservative: a rare light command substitution also reserves a slot.
+      if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
+          ((bin === 'bash' || bin === 'sh') && /(?:\$\(|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
@@ -1046,7 +1051,9 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // A file this command writes (a heredoc's target, even one rewritten since) is not "no such file".
   const where = ctx.missingAt;
   const missingAt = where ? (p: string, cd?: string): string | null => virtual.has(key(p, cd)) ? null : where(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
-  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
+  // Carry the resolved default dialect too: wrapper classification needs to know that a cmd
+  // body was supplied by an outer sh command, even when callers did not spell `dialect: 'sh'`.
+  let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
   for (const { seg, op, looped } of plan) {
