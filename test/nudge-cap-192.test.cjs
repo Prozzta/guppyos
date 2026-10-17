@@ -57,8 +57,8 @@ test('the oldest are the FIRST 8 as given: the wake passes its ids sorted (times
 test('bounded: with any number of real-shaped ids the nudge fits the 24-row reading at 80 columns', () => {
   for (const mode of MODES) for (const n of [9, 60, 500]) {
     const t = N.inboxNudgeText(ids(n), mode);
-    // + 32: legacy-move's " - at least: " (13, absent from the id-less fixed text) + ", and 500 more" (14).
-    assert.ok(t.length <= N.INBOX_NUDGE_FIXED_CHARS + 8 * (id(0).length + 2) + 32, `${mode} ${n}: ${t.length}`);
+    // The capped read-mode prose (NIT-1/2) is longer than the id-less fixed text; 700 is ~9 rows.
+    assert.ok(t.length <= 700, `${mode} ${n}: ${t.length}`);
     assert.ok(Math.ceil((t.length + 2) / 80) <= 10, `${mode} ${n}: ${Math.ceil((t.length + 2) / 80)} rows at 80 cols`);
   }
 });
@@ -67,8 +67,12 @@ test('a capped list never tells a read-mode agent to read only "those files": it
   for (const mode of ['legacy-read', 'work-order', 'degraded-read']) {
     const t = N.inboxNudgeText(ids(60), mode);
     assert.doesNotMatch(t, /those files/, mode);
-    assert.match(t, /[Rr]ead every file in your inbox\//, mode);
-    assert.match(t, /the harness archives them when your turn ends/, mode);
+    // Jim NIT-2: inbox/ means the files directly in it, never inbox/.done/.
+    assert.match(t, /[Rr]ead every file directly in your inbox\/ \(not inbox\/\.done\/\) and act/, mode);
+    // Jim NIT-1 / god: say exactly what Stop does. It archives only the ids this wake announced;
+    // a file that lands mid-turn stays for the next wake, which names it again: act on it once.
+    assert.doesNotMatch(t, /archives them/, `${mode}: "them" would read as every file`);
+    assert.match(t, /When your turn ends the harness archives only the ids this wake announced; a file that lands during your turn stays in inbox\/ for the next wake, which names it again: act on each file once\.$/, mode);
   }
   // The move modes already read every file (legacy-move: "Read your inbox (authoritative ...)").
   assert.match(N.inboxNudgeText(ids(60), 'degraded-move'), /read each file in your inbox\//);
