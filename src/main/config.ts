@@ -238,6 +238,13 @@ export interface HarnessConfig {
    *  further one is denied at PreToolUse, naming the holders. 'off' = no limit (the guard does
    *  nothing). Default 1. Read live on every hook: a change applies without restarting agents. */
   heavyJobsAtOnce?: number | 'off';
+  /** HEAVY-CPU-OPTIONS-191 (Settings → Autonomy & Budgets, beside "Heavy jobs at once"), Windows:
+   *  run every heavy job at background CPU priority (BELOW_NORMAL), every process of it. Independent
+   *  of the limit above (Off included). Default off. Applied live, to running jobs too. */
+  heavyJobsBackgroundPriority?: boolean;
+  /** HEAVY-CPU-OPTIONS-191, Windows: limit every heavy job to half the logical processors
+   *  (floor(n/2), at least 1). Independent of the other two. Default off. Applied live. */
+  heavyJobsHalfCores?: boolean;
   /** CODEX-BLOAT-165 fix 2 (Settings → Agents & Models, "Codex tool output cap"): the
    *  `tool_output_token_limit` written into each hive Codex agent's OWN config.toml, in Codex's
    *  estimated tokens (1000-10000), or 'off' (no key written). Default 4000. Never written to the
@@ -545,6 +552,8 @@ const DEFAULTS: HarnessConfig = {
   autoMode: true,
   orchestratorMaySpawn: false,
   heavyJobsAtOnce: 1,
+  heavyJobsBackgroundPriority: false,
+  heavyJobsHalfCores: false,
   codexToolOutputTokenLimit: CODEX_TOOL_OUTPUT_LIMIT_DEFAULT,
   codexInheritPlugins: false,
   defaultCommand: 'claude',

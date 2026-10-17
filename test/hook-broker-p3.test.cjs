@@ -213,7 +213,9 @@ test('config: mcp_tool ONLY for PreToolUse/PostToolUse (+ the MCP server); every
   const byEvent = {};
   for (const m of cfg.matchAll(/\[\[hooks\.(\w+)\.hooks\]\]\ntype = "(\w+)"/g)) byEvent[m[1]] = m[2];
   assert.deepEqual(byEvent, { PreToolUse: 'mcp_tool', PostToolUse: 'mcp_tool', Stop: 'command', SubagentStop: 'command', SessionStart: 'command', UserPromptSubmit: 'command', PreCompact: 'command', PostCompact: 'command' });
-  assert.match(cfg, new RegExp(`input = \\{ event = "PreToolUse", k = "${tok}" \\}`));
+  // HEAVY-CPU-OPTIONS-191: PreToolUse also carries the call's own tool input (Codex's ${tool_input} template).
+  assert.match(cfg, new RegExp(`input = \\{ event = "PreToolUse", k = "${tok}", ti = "\\$\\{tool_input\\}" \\}`));
+  assert.match(cfg, new RegExp(`input = \\{ event = "PostToolUse", k = "${tok}" \\}`));
   assert.doesNotMatch(cfg, /enabled_tools/, 'hiding the tool breaks the hooks (spike C)');
   assert.doesNotMatch(cfg, /type = "(prompt|agent)"/, 'never a hook type that runs the model');
   void blocks;

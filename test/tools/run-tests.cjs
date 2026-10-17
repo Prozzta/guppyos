@@ -143,7 +143,10 @@ function run({
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
-  perfDir = null
+  perfDir = null,
+  // HEAVY-CPU-OPTIONS-191: is this run in a CPU-limited heavy job? Asked once for the whole run and
+  // passed down in HARNESS_CPU_MASK, so each test file does not ask again (electron-bin.cjs).
+  cpuMask = () => require('../electron-harness/electron-bin.cjs').harnessCpuMask()
 } = {}) {
   let entries;
   try {
@@ -172,6 +175,7 @@ function run({
   // nested `node --test` into a reporting child (no real run, no reporters). It is a run of its own.
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
+  if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, err };
   const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.

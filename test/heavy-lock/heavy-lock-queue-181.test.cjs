@@ -200,7 +200,7 @@ K.wiring = (idx = readSource('src/main/index.ts'), hooks = readSource('src/main/
   assert.match(idx, /alive: \(agentId\) => \[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\),\n  notify: \(agentId, kind, until\) => notifyHeavySlotFree\(agentId, kind, until\),\n  notifyLapse: \(agentId, kind, why\) => notifyHeavyWaitLapsed\(agentId, kind, why\)\n\}\);/);
   assert.match(idx, /const n = heavySlotFreeNotice\(agentId, kind, until\);\n  try \{ hive\.send\(n\.message as Partial<HiveMessage>, n\.from\); \}/, 'THE NOTICE IS SENT AS BUILT (SYSTEM SENDER + WAKE NOW)');
   assert.match(idx, /try \{ control\.steer\(agentId, n\.steer\); \}/, 'AND REACHES A BUSY AGENT');
-  assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n      let cls = classifyHeavy\(p\.tool_name, p\.tool_input, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
+  assert.match(hooks, /const scripts = HookServer\.heavyScriptCtx\(p\.cwd\);\n(?:      \/\/[^\n]*\n)*      const own = p\.hook_tool_input;\n      const toolName = own \? 'Bash' : p\.tool_name;\n      const toolInput = own \?\? p\.tool_input;\n      let cls = classifyHeavy\(toolName, toolInput, scripts\);/, 'THE HOOK READS SCRIPTS AT PRETOOLUSE');
   assert.match(hooks, /const k = classifyCommand\(c, 0, scripts\);/);
   // Andy N1: Post frees by the held call id, never by classifying again.
   // HEAVY-LOCK-BG-LAPSE-189: a call held only for an unreadable script is classified again

@@ -47,7 +47,7 @@ if (process.platform !== 'win32') {
 
 // From plain Node (not inside Electron), the electron package exports the
 // path to the Electron executable.
-const electronBin = require('electron');
+const electronBin = require('./electron-harness/electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
 assert.strictEqual(typeof electronBin, 'string', 'expected electron package to export the binary path');
 
 const fixture = path.join(__dirname, 'fixtures', 'quit-sweep-main.cjs');

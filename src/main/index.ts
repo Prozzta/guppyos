@@ -102,6 +102,8 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
+import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
+import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
@@ -1218,6 +1220,23 @@ const heavyLock = new HeavyJobLock({
   notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
+// HEAVY-CPU-OPTIONS-191: the job every heavy call runs in (Settings: background priority, half the
+// processors; read live). The helper is compiled from source at build (tools/build-heavyjob.cjs).
+const heavyJobDir = (): string => app.isPackaged ? join(process.resourcesPath, 'heavyjob') : join(app.getAppPath(), 'resources', 'heavyjob', 'bin');
+const heavyJobExe = (): string | null => {
+  const exe = join(heavyJobDir(), 'guppy-heavyjob.exe');
+  return process.platform === 'win32' && existsSync(exe) ? exe : null;
+};
+const heavyJobs = new HeavyJobs({
+  platform: process.platform,
+  options: () => heavyCpuOptions(readConfig()),
+  exe: heavyJobExe,
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
+});
+hookServer.setHeavyJobs(heavyJobs);
+/** Per hive agent: started with its provider's auto-approve flag (recorded at each spawn). */
+const heavyAutoApprove = new Map<string, boolean>();
+hookServer.setHeavyAutoApproves((agentId) => heavyAutoApprove.get(agentId) === true);
 
 /** IDLE-MEANS-IDLE: the lock as the displays read it (who holds, waits for, or has a slot reserved). */
 function heavyLockView(): HeavyLockView {
@@ -4275,6 +4294,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // simply drops the ladder to the native/manual rung.
       const nodeInstaller = npmAvailable ? null : await resolveNodeInstaller();
       const rung = chooseInstallRung(installInfoForProvider(provider), npmAvailable, nodeInstaller);
+      if (opts.hive?.id) heavyAutoApprove.delete(opts.hive.id);
       const res = await ptyManager.spawn(
         {
           id: opts.id,
@@ -4453,6 +4473,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
+      // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
+      if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex
@@ -4842,11 +4864,14 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (provider === 'codex' && opts.hive?.id) {
     await enableCodexRemoteForSpawn(opts, opts.hive.id);
   }
+  // Cleared first: a spawn that fails leaves no stale auto-approve from an earlier process (Jim NIT2).
+  if (opts.hive?.id) heavyAutoApprove.delete(opts.hive.id);
   // WAKE-SCREEN-GUARD R2-4: this Codex incarnation's own token, in its spawn env (the hook
   // shim copies it into each hook payload). Registered below once the PTY exists.
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
     // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.
@@ -5078,6 +5103,8 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // config per tick so it gates immediately; this is for the PROMPT, which is
   // built per spawn, so flipping the toggle reaches god the next time he starts.
   if (typeof patch?.orchestratorMaySpawn === 'boolean') hive.setOrchestratorMaySpawn(patch.orchestratorMaySpawn);
+  // HEAVY-CPU-OPTIONS-191: a changed option reaches the heavy jobs already running.
+  if (patch && ('heavyJobsBackgroundPriority' in patch || 'heavyJobsHalfCores' in patch)) void heavyJobs.applyLive().catch(() => { /* logged per job */ });
   // CLAIM-LEDGER W7: a running memory worker follows a changed ledger level at once (W3-1).
   if (patch && 'claimLedger' in patch) void nativeMemory.claimLedgerChanged()?.catch((e) => hive.appendLog({ kind: 'claims-ui-level-push-failed', error: String(e).slice(0, 160) }));
   if (!hiveWasEnabled && hive.enabled()) {

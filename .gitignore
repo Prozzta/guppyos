@@ -1,4 +1,6 @@
 node_modules/
+# HEAVY-CPU-OPTIONS-191: compiled by tools/build-heavyjob.cjs on every build, never committed
+resources/heavyjob/bin/
 node_modules
 out/
 dist/

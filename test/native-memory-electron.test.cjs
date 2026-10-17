@@ -15,7 +15,7 @@ const { spawnSync } = require('node:child_process');
 
 const REPO = path.resolve(__dirname, '..');
 let ELECTRON = null;
-try { ELECTRON = require('electron'); } catch { ELECTRON = null; }
+try { ELECTRON = require('./electron-harness/electron-bin.cjs').harnessElectron(); /* HEAVY-CPU-OPTIONS-191 */ } catch { ELECTRON = null; }
 const HAVE_ELECTRON = typeof ELECTRON === 'string' && fs.existsSync(ELECTRON);
 const MODEL = path.join(REPO, 'resources', 'models', 'all-MiniLM-L6-v2', 'onnx', 'model.onnx');
 const HAVE_MODEL = fs.existsSync(MODEL);

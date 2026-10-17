@@ -14,7 +14,7 @@ const { createSandbox, removeSandbox } = require('./electron-harness/run.cjs');
 const MARKER = '__RECOVERY_RESULT__';
 
 function runRecovery() {
-  const electron = require('electron');
+  const electron = require('./electron-harness/electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const sandbox = createSandbox('rr164-');
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'recovery-main.cjs'), '--sandbox', sandbox], {

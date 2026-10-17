@@ -20,7 +20,7 @@ function dumpsIn(dir) {
 }
 
 function quit(mode) {
-  const electron = require('electron');
+  const electron = require('./electron-harness/electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const sandbox = createSandbox(`exitcrash-${mode}-`);
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'pty-quit-main.cjs'), '--sandbox', sandbox, '--mode', mode], {
