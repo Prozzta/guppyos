@@ -118,7 +118,29 @@ test('S1: a warmed whole pool uses the full vector order; cold remains bounded',
   const warm = await s('query', pool);
   assert.equal(warm.vector.length, pool.length, 'a warmed whole pool gets whole-pool cosine');
   assert.deepEqual(warm.vector, C.cosineOrder([1, 1], pool.map((c) => ({ id: c.id, vec: [Number(c.text.slice(6)), 1] }))));
+  pool.push(claim(111, { text: 'claim-111' }));
+  const steady = await s('query', pool);
+  assert.equal(steady.vector.length, pool.length, 'one just-written uncached claim preserves the warmed whole-pool path');
   assert.ok(calls.length >= 3);
+});
+
+test('S1 wiring: startup warms the live ledger only, after native prewarm', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(src, /nativeMemory\.prewarm\(\);[^\n]*warmClaimCandidateVectors\(\)/, 'candidate warm follows native prewarm');
+  assert.match(src, /view\.claims\.filter\(\(c\) => view\.status\(c\.id\) === 'live'\)/, 'only live claims enter startup warm pool');
+});
+
+test('S1: an over-cap warm warns once that complete whole-pool caching is impossible', async () => {
+  const s = C.makeLocalScorer(async (texts) => texts.map(() => [1, 1]), undefined, 2);
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try {
+    const pool = [claim(1), claim(2), claim(3)];
+    await s.warm(pool);
+    await s.warm(pool);
+  } finally { console.warn = warn; }
+  assert.deepEqual(warnings, ['[claims] candidate vector warm pool 3 exceeds cache cap 2; new notes use the bounded cold path until the uncached tail is small']);
 });
 
 // ---------------------------------------------------------------- the note verb, end to end

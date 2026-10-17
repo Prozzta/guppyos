@@ -184,10 +184,15 @@ export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<nu
   // S1: only vectorPool's claims are embedded (BM25 ranks the whole pool), so a cold cache costs at
   // most about VECTOR_LEXICAL + VECTOR_RECENT + focus texts. Eviction is oldest-inserted first.
   const cache = new Map<string, ArrayLike<number>>();
+  let warnedWarmPoolOverCache = false;
   const trim = (minimum = 0): void => {
     while (cache.size > Math.max(cacheMax, minimum)) cache.delete(cache.keys().next().value as string);
   };
   const warm = async (pool: PoolClaim[]): Promise<void> => {
+    if (pool.length > cacheMax && !warnedWarmPoolOverCache) {
+      warnedWarmPoolOverCache = true;
+      console.warn(`[claims] candidate vector warm pool ${pool.length} exceeds cache cap ${cacheMax}; new notes use the bounded cold path until the uncached tail is small`);
+    }
     const missing = [...new Set(pool.map((c) => c.text).filter((t) => !cache.has(t)))];
     if (missing.length) {
       const vecs = await embed(missing);
@@ -199,9 +204,10 @@ export function makeLocalScorer(embed: (texts: string[]) => Promise<ArrayLike<nu
     if (!pool.length) return { lexical: [], vector: [] };
     const stats = typeof corpus === 'function' ? corpus() : corpus;
     const lexical = bm25Order(query, pool, stats);
-    // S1: before startup warming completes, bound work for the first note. Once the complete
-    // current pool is cached, cosine covers it all and therefore matches whole-pool ranking.
-    const vpool = pool.every((c) => cache.has(c.text)) ? pool : vectorPool(pool, lexical, focus);
+    // S1: before startup warming completes, bound work for the first note. A warmed pool may have
+    // gained the just-written claim, though: embed that small tail and retain whole-pool cosine.
+    const uncached = pool.filter((c) => !cache.has(c.text));
+    const vpool = uncached.length <= VECTOR_RECENT ? pool : vectorPool(pool, lexical, focus);
     const missing = [...new Set(vpool.map((c) => c.text).filter((t) => !cache.has(t)))];
     const vecs = await embed([query, ...missing]);
     missing.forEach((t, i) => cache.set(t, vecs[i + 1]));
