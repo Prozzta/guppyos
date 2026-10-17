@@ -68,7 +68,13 @@ const early = [];
 // FLAKE-RENDERER-RECOVERY-191: the renderer is killed by its pid, as the app's memory recovery
 // does. forcefullyCrashRenderer first has crashpad dump it and blocks main on that (up to 10 s
 // a call on Windows), which under load outran the 15 s wait for 'gone'.
-const killRenderer = (w) => { process.kill(w.webContents.getOSProcessId()); };
+// On Windows process.kill(0) ends the calling process (main), so a pid that is not a real other
+// process fails the harness instead of being killed.
+const killRenderer = (w) => {
+  const pid = w.webContents.getOSProcessId();
+  if (!(Number.isInteger(pid) && pid > 0) || pid === process.pid) throw new Error(`killRenderer: refusing pid ${pid}`);
+  process.kill(pid);
+};
 const waitFor = (name, pred = () => true, ms = 15_000) => new Promise((resolve, reject) => {
   const hit = early.findIndex((e) => e.name === name && pred(e.data));
   if (hit >= 0) { const [e] = early.splice(hit, 1); resolve(e.data); return; }
