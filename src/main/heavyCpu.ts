@@ -155,14 +155,35 @@ export interface HeavyJobsDeps {
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (t: unknown) => void;
   log?: (row: Record<string, unknown>) => void;
+  /** The agent's PTY process (the root of its process tree), or null when it has none. */
+  root?: (agentId: string) => number | null;
 }
 
 interface TrackedJob { id: string; agentId: string; startMs: number; idleScans: number; started: boolean }
+
+/** A heavy call that runs in its agent's own job (no join line): CODEX-AGY-ASKFIRST-HEAVYCPU-192. */
+interface AgentCall { agentId: string; command: string; startMs: number; total0: number; started: boolean; idleScans: number; postSeen: boolean }
+
+/** The command a tool input runs (`command`: Claude, Codex; `CommandLine`: AGY), or null. */
+function commandOf(toolInput: unknown): string | null {
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)) return null;
+  const r = toolInput as Record<string, unknown>;
+  for (const key of ['command', 'CommandLine']) if (typeof r[key] === 'string' && (r[key] as string).trim()) return r[key] as string;
+  return null;
+}
+
+/** The id of an agent's own job in the helper's serve. */
+export function agentJobId(agentId: string): string {
+  return `${agentId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'agent'}-agent`;
+}
 
 /** The jobs Guppy made for heavy calls: created before the call, changed live, let go when done. */
 export class HeavyJobs {
   private ch: HeavyJobChannel | null = null;
   private readonly jobs = new Map<string, TrackedJob>();
+  private readonly agentCalls = new Map<string, AgentCall[]>();
+  /** Agents with a job in the helper's serve (closed when the agent goes). */
+  private readonly agentSeen = new Set<string>();
   private seq = 0;
   private timer: unknown = null;
   private readonly now: () => number;
@@ -190,18 +211,52 @@ export class HeavyJobs {
     return r;
   }
 
-  /** A heavy call that is not wrapped because its agent asks its user before running commands
-   *  (Codex, AGY): logged, so the gap is visible (Jim SHOULD-1). */
-  skipAskFirst(agentId: string, provider: string): void {
+  /**
+   * CODEX-AGY-ASKFIRST-HEAVYCPU-192: a heavy call that cannot take a join line (its agent asks its
+   * user first, so a rewrite with an allow could skip that prompt; or a Codex shell Guppy cannot
+   * read, CODEX-CMD-COMPUTED-SHELL-192) runs in its agent's own job. At the PreToolUse, before the
+   * hook answers, the agent's whole process tree is put in that job: the call's shell does not exist
+   * yet, so everything the call starts is created inside it. The job has the options in force while
+   * one such call of the agent lives; the whole agent runs limited for that time. A call ends when
+   * its shell's tree is gone (not at its PostToolUse: Codex returns from a long command while it
+   * still runs), and an agent with no live call has its limits lifted.
+   */
+  async attachCall(agentId: string, toolInput: unknown, reason: string, provider = ''): Promise<void> {
     if (this.d.platform !== 'win32' || !this.d.exe()) return;
-    this.log({ action: 'skip-ask-first', agentId, provider });
+    const command = commandOf(toolInput);
+    if (!command) return;
+    const root = this.d.root?.(agentId) ?? null;
+    const aid = agentJobId(agentId);
+    if (!root) { this.log({ action: 'attach-failed', reason, agentId, provider, why: 'no agent process' }); return; }
+    const start = this.now();
+    const r = await this.req(`agent ${aid} ${root}`);
+    if (r?.ok !== true) { this.log({ action: 'attach-failed', reason, agentId, provider, why: String(r?.error ?? 'no helper') }); return; }
+    this.agentSeen.add(agentId);
+    const calls = this.agentCalls.get(agentId) ?? [];
+    this.agentCalls.set(agentId, [...calls, { agentId, command, startMs: start, total0: Number(r.total) || 0, started: false, idleScans: 0, postSeen: false }]);
+    const o = this.d.options();
+    // The call's shell starts only after this hook answers: the limits are on before it exists.
+    const set = await this.req(`set ${aid} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
+    this.log({ action: 'attach', reason, agentId, provider, job: aid, background: o.background, half: o.half, members: r.members, missed: r.missed, ok: set?.ok === true });
+    this.arm();
   }
 
-  /** A heavy Codex call that is not wrapped because Guppy cannot read the shell it runs in
-   *  (CODEX-CMD-COMPUTED-SHELL-192): logged, so the gap is visible. */
-  skipUnknownShell(agentId: string, provider: string): void {
-    if (this.d.platform !== 'win32' || !this.d.exe()) return;
-    this.log({ action: 'skip-unknown-shell', agentId, provider });
+  /** The PostToolUse of a call run in its agent's job: a call whose shell was never seen ends at
+   *  the next check. */
+  callPost(agentId: string, toolInput: unknown): void {
+    const command = commandOf(toolInput);
+    const c = (this.agentCalls.get(agentId) ?? []).find((x) => !x.postSeen && x.command === command);
+    if (c) c.postSeen = true;
+  }
+
+  /** The agent's PTY is gone or replaced: its job is let go (no handle kept for a dead tree). */
+  async agentGone(agentId: string): Promise<void> {
+    const had = this.agentCalls.get(agentId);
+    this.agentCalls.delete(agentId);
+    if (!this.agentSeen.delete(agentId)) return;
+    await this.req(`close ${agentJobId(agentId)}`);
+    this.log({ action: 'agent-gone', agentId, job: agentJobId(agentId), live: had?.length ?? 0 });
+    if (!this.jobs.size && !this.agentCalls.size) this.disarm();
   }
 
   /** A heavy call is about to run: its job is created with the limits in force now, and the tool
@@ -232,7 +287,43 @@ export class HeavyJobs {
       const r = await this.req(`set ${j.id} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
       this.log({ action: 'apply-live', job: j.id, background: o.background, half: o.half, ok: r?.ok === true });
     }
+    for (const agentId of [...this.agentCalls.keys()]) {
+      const r = await this.req(`set ${agentJobId(agentId)} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
+      this.log({ action: 'apply-live', job: agentJobId(agentId), background: o.background, half: o.half, ok: r?.ok === true });
+    }
   }
+
+  /** One check of each call run in its agent's job: it ends when its shell's tree is gone on two
+   *  checks in a row. A shell never seen: after its PostToolUse it ran too briefly to be seen if the
+   *  job had new processes since the call began, and else ran outside the job (logged); with no
+   *  PostToolUse it never started (HEAVY_JOB_UNSTARTED_MS). */
+  private async pollAgentCalls(): Promise<void> {
+    for (const [agentId, calls] of [...this.agentCalls]) {
+      for (const c of [...calls]) {
+        const r = await this.req(`call ${agentJobId(agentId)} ${c.startMs} ${Buffer.from(c.command, 'utf8').toString('base64')}`);
+        if (!r || r.ok !== true) continue; // unknown: no miss counted
+        if (Number(r.shell) > 0) c.started = true;
+        if (c.started) {
+          if (Number(r.alive) > 0) { c.idleScans = 0; continue; }
+          if (++c.idleScans >= 2) await this.endCall(c, 'done');
+        } else if (c.postSeen) await this.endCall(c, Number(r.total) > c.total0 ? 'done-unseen' : 'attach-missed');
+        else if (this.now() - c.startMs >= HEAVY_JOB_UNSTARTED_MS) await this.endCall(c, 'never-started');
+      }
+    }
+  }
+
+  private async endCall(c: AgentCall, how: string): Promise<void> {
+    const rest = (this.agentCalls.get(c.agentId) ?? []).filter((x) => x !== c);
+    if (rest.length) this.agentCalls.set(c.agentId, rest);
+    else {
+      this.agentCalls.delete(c.agentId);
+      await this.req(`set ${agentJobId(c.agentId)} 0 0`);
+    }
+    this.log({ action: how, agentId: c.agentId, job: agentJobId(c.agentId), live: rest.length });
+  }
+
+  /** The calls of each agent running in its own job (for tests and the live proof). */
+  agentCallCount(agentId: string): number { return this.agentCalls.get(agentId)?.length ?? 0; }
 
   /** One check of every job: one with nothing of its call left (no process, or only processes
    *  created before the call started) on two checks in a row has its limits lifted and is let go.
@@ -259,14 +350,15 @@ export class HeavyJobs {
       this.jobs.delete(j.id);
       this.log({ action: rows.length ? 'lifted' : 'done', job: j.id, agentId: j.agentId, kept: rows.map((x) => x.name) });
     }
-    if (!this.jobs.size) this.disarm();
+    await this.pollAgentCalls();
+    if (!this.jobs.size && !this.agentCalls.size) this.disarm();
   }
 
   /** The jobs being tracked (for tests and the live proof). */
   ids(): string[] { return [...this.jobs.keys()]; }
 
   private arm(): void {
-    if (this.timer || !this.jobs.size) return;
+    if (this.timer || (!this.jobs.size && !this.agentCalls.size)) return;
     const si = this.d.setInterval ?? ((fn: () => void, ms: number) => { const t = setInterval(fn, ms); t.unref?.(); return t; });
     this.timer = si(() => { void this.poll(); }, HEAVY_JOB_POLL_MS);
   }

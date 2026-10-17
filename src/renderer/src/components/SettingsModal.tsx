@@ -1290,7 +1290,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                             </PixelButton>
                           </div>
                           <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                            Codex and Antigravity agents that ask before running commands are not limited.
+                            For Codex and Antigravity agents that ask before running commands, the whole agent is limited while a heavy command runs.
                           </span>
                         </>
                       )}

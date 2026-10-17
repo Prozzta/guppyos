@@ -22,7 +22,8 @@
 //   guppy-heavyjob serve
 //       Guppy's own channel (stdin/stdout, one JSON line per request): create, set, list and close
 //       <job>. It holds the handle of every job Guppy made, so a job keeps its name (a live change and
-//       the join line find it) until Guppy lets it go.
+//       the join line find it) until Guppy lets it go. It also keeps each agent's own job, for calls
+//       that cannot take a join line (see AgentSweep).
 //
 // background = PriorityClass BELOW_NORMAL (CPU priority only). half = affinity of floor(n/2) logical
 // processors (at least 1), n = the active logical processors of the machine.
@@ -64,8 +65,10 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snap, ref PROCESSENTRY32 e);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snap, ref PROCESSENTRY32 e);
+    [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
+    [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, IntPtr buf, int len, out int ret);
 
-    const uint LIMIT_AFFINITY = 0x10, LIMIT_PRIORITY_CLASS = 0x20;
+    const uint LIMIT_AFFINITY = 0x10, LIMIT_PRIORITY_CLASS = 0x20, LIMIT_BREAKAWAY_OK = 0x800;
     const uint BELOW_NORMAL = 0x4000, NORMAL = 0x20;
     const uint JOB_ALL = 0x1F001F;
     const uint PROC_SET_QUOTA_TERMINATE_QUERY = 0x0100 | 0x0001 | 0x0400 | 0x0200; // SET_QUOTA|TERMINATE|QUERY_INFORMATION|SET_INFORMATION
@@ -104,9 +107,12 @@ static class HeavyJob
         return x;
     }
 
-    static void Apply(IntPtr job, bool background, bool half)
+    static void Apply(IntPtr job, bool background, bool half, bool agent = false)
     {
         var x = Limits(background, half);
+        // An agent's job holds every process of the agent for good: with no limit on, an explicit
+        // CREATE_BREAKAWAY_FROM_JOB works as it did before the agent joined it.
+        if (agent && !background && !half) x.Basic.LimitFlags |= LIMIT_BREAKAWAY_OK;
         if (!SetInformationJobObject(job, 9, ref x, Marshal.SizeOf(typeof(EXT_LIMIT))))
             throw new Exception("SetInformationJobObject failed (" + Marshal.GetLastWin32Error() + ")");
     }
@@ -211,9 +217,9 @@ static class HeavyJob
         return 0;
     }
 
-    static void SetJob(IntPtr job, bool background, bool half)
+    static void SetJob(IntPtr job, bool background, bool half, bool agent = false)
     {
-        Apply(job, background, half);
+        Apply(job, background, half, agent);
         foreach (int pid in Members(job))
         {
             IntPtr h = OpenProcess(0x0200 | 0x0400, false, pid); // SET_INFORMATION | QUERY_INFORMATION
@@ -268,6 +274,141 @@ static class HeavyJob
         return rows.Count == 0 ? "" : string.Join(sep, rows) + (sep == "\n" ? "\n" : "");
     }
 
+    // CODEX-AGY-ASKFIRST-HEAVYCPU-192: an agent's own job, for a heavy call that cannot take a join
+    // line (an agent that asks its user first, or a Codex shell Guppy cannot read). Guppy sweeps the
+    // agent's whole process tree into it at the call's PreToolUse, before the hook answers: the call's
+    // shell does not exist yet, so it and everything below it are created inside the job (no window
+    // between a snapshot and an assign). Limits are on while one such call of the agent lives.
+    // A process sits in at most one job hierarchy, and an agent's tree spans several (node puts the
+    // children it spawns in libuv's own job, whose children break away from it silently): one job
+    // nested under each, all with the same limits. Membership is for good, so with no limit on the
+    // jobs allow an explicit breakaway as before (Apply).
+    class AgentJob { public List<IntPtr> Jobs = new List<IntPtr>(); public bool Background, Half; }
+
+    static string AgentSweep(AgentJob a, int root)
+    {
+        long rootCreated = Created(root);
+        if (rootCreated == 0) throw new Exception("no process " + root);
+        int added = 0, missed = 0, members = 0;
+        for (int pass = 0; pass < 5; pass++)
+        {
+            int newly = 0; missed = 0; members = 0;
+            foreach (int pid in Tree(root, rootCreated))
+            {
+                IntPtr h = OpenProcess(PROC_SET_QUOTA_TERMINATE_QUERY, false, pid);
+                if (h == IntPtr.Zero) { missed++; continue; }
+                bool inside = false;
+                foreach (IntPtr j in a.Jobs) { bool r; if (IsProcessInJob(h, j, out r) && r) { inside = true; break; } }
+                if (!inside) foreach (IntPtr j in a.Jobs) if (AssignProcessToJobObject(j, h)) { inside = true; newly++; break; }
+                if (!inside)
+                {
+                    // In a hierarchy none of the agent's jobs is in: a new job, nested there.
+                    IntPtr j = CreateJobObjectW(IntPtr.Zero, null);
+                    if (j != IntPtr.Zero)
+                    {
+                        Apply(j, a.Background, a.Half, true);
+                        if (AssignProcessToJobObject(j, h)) { a.Jobs.Add(j); inside = true; newly++; } else CloseHandle(j);
+                    }
+                }
+                CloseHandle(h);
+                if (inside) members++; else missed++;
+            }
+            added += newly;
+            if (newly == 0) break;
+        }
+        return "{\"ok\":true,\"jobs\":" + a.Jobs.Count + ",\"members\":" + members + ",\"added\":" + added + ",\"missed\":" + missed + ",\"total\":" + Total(a) + "}";
+    }
+
+    // root and its descendants, parents first, each created at or after its parent (a recycled pid
+    // is never taken for a child).
+    static List<int> Tree(int root, long rootCreated)
+    {
+        var kids = new Dictionary<int, List<int>>();
+        IntPtr snap = CreateToolhelp32Snapshot(0x2, 0);
+        var e = new PROCESSENTRY32 { dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+        if (Process32FirstW(snap, ref e)) do
+        {
+            int pp = (int)e.th32ParentProcessID, pid = (int)e.th32ProcessID;
+            if (pid == pp) continue;
+            List<int> l; if (!kids.TryGetValue(pp, out l)) kids[pp] = l = new List<int>(); l.Add(pid);
+        } while (Process32NextW(snap, ref e));
+        CloseHandle(snap);
+        var order = new List<int> { root }; var born = new Dictionary<int, long> { { root, rootCreated } };
+        for (int i = 0; i < order.Count; i++)
+        {
+            List<int> l; if (!kids.TryGetValue(order[i], out l)) continue;
+            foreach (int c in l)
+            {
+                long cc = Created(c);
+                if (cc == 0 || cc < born[order[i]] || born.ContainsKey(c)) continue;
+                born[c] = cc; order.Add(c);
+            }
+        }
+        return order;
+    }
+
+    // The call's shell: the earliest process of the agent's jobs created at or after the call started
+    // whose command line holds the command (quotes, backslashes and runs of white space aside), and
+    // how many processes of its tree are alive. It is already inside: this only tells when it ends.
+    static string CallState(AgentJob a, long startMs, string command)
+    {
+        string want = Norm(command);
+        var members = new HashSet<int>();
+        foreach (IntPtr j in a.Jobs) foreach (int pid in Members(j)) members.Add(pid);
+        int shell = 0; long shellMs = long.MaxValue;
+        foreach (int pid in members)
+        {
+            long ms = CreatedMs(pid);
+            if (ms == 0 || ms < startMs - 250 || ms >= shellMs || want.Length == 0) continue;
+            string cl = CommandLineOf(pid);
+            if (cl != null && Norm(cl).Contains(want)) { shell = pid; shellMs = ms; }
+        }
+        int alive = 0;
+        if (shell != 0) alive = Tree(shell, Created(shell)).FindAll(members.Contains).Count;
+        return "{\"ok\":true,\"shell\":" + shell + ",\"alive\":" + alive + ",\"total\":" + Total(a) + "}";
+    }
+
+    // Processes ever created in the agent's jobs (JobObjectBasicAccountingInformation.TotalProcesses).
+    static long Total(AgentJob a)
+    {
+        long n = 0; IntPtr buf = Marshal.AllocHGlobal(48);
+        try { foreach (IntPtr j in a.Jobs) if (QueryInformationJobObject(j, 1, buf, 48, IntPtr.Zero)) n += (uint)Marshal.ReadInt32(buf, 36); }
+        finally { Marshal.FreeHGlobal(buf); }
+        return n;
+    }
+
+    static string Norm(string s)
+    {
+        var b = new StringBuilder(); bool space = false;
+        foreach (char c in s)
+        {
+            if (c == '"' || c == '\\') continue;
+            if (char.IsWhiteSpace(c)) { space = b.Length > 0; continue; }
+            if (space) { b.Append(' '); space = false; }
+            b.Append(c);
+        }
+        return b.ToString();
+    }
+
+    static long CreatedMs(int pid) { long c = Created(pid); return c == 0 ? 0 : (c - 116444736000000000L) / 10000; }
+
+    // ProcessCommandLineInformation (60): a UNICODE_STRING followed by its text.
+    static string CommandLineOf(int pid)
+    {
+        IntPtr h = OpenProcess(0x1000, false, pid);
+        if (h == IntPtr.Zero) return null;
+        int len; NtQueryInformationProcess(h, 60, IntPtr.Zero, 0, out len);
+        if (len <= 0) { CloseHandle(h); return null; }
+        IntPtr buf = Marshal.AllocHGlobal(len);
+        try
+        {
+            if (NtQueryInformationProcess(h, 60, buf, len, out len) != 0) return null;
+            int n = (ushort)Marshal.ReadInt16(buf, 0);
+            return Marshal.PtrToStringUni(Marshal.ReadIntPtr(buf, IntPtr.Size), n / 2);
+        }
+        finally { Marshal.FreeHGlobal(buf); CloseHandle(h); }
+    }
+
     // Guppy's side: a long-lived process that HOLDS each job's handle. A named job loses its name
     // when its last handle closes even while processes are still in it, so without a holder a
     // running job could no longer be found for a live change of the options. One request per line
@@ -277,9 +418,13 @@ static class HeavyJob
     //   set <id> <b> <h>      change them on a running job (live apply; a limit turned off resets)
     //   list <id>             the processes in the job
     //   close <id>            drop the job's handle (Guppy is done with it)
+    //   agent <id> <rootPid>  put the agent's whole process tree into its own job (AgentSweep)
+    //   call <id> <startMs> <match>   the call's shell in that agent's job, and how much of its tree lives
+    //   set / close <id>      also take an agent's id
     static int Serve()
     {
         var jobs = new Dictionary<string, IntPtr>();
+        var agents = new Dictionary<string, AgentJob>();
         string line;
         while ((line = Console.In.ReadLine()) != null)
         {
@@ -298,6 +443,31 @@ static class HeavyJob
                         jobs[w[1]] = job;
                     }
                     Apply(job, w[2] == "1", w[3] == "1");
+                    reply = "{\"ok\":true}";
+                }
+                else if (w.Length == 3 && w[0] == "agent")
+                {
+                    AgentJob a;
+                    if (!agents.TryGetValue(w[1], out a)) { JobName(w[1]); a = new AgentJob(); agents[w[1]] = a; }
+                    reply = AgentSweep(a, int.Parse(w[2]));
+                }
+                else if (w.Length == 4 && w[0] == "call")
+                {
+                    AgentJob a;
+                    if (!agents.TryGetValue(w[1], out a)) throw new Exception("no agent job " + w[1]);
+                    reply = CallState(a, long.Parse(w[2]), Encoding.UTF8.GetString(Convert.FromBase64String(w[3])));
+                }
+                else if (w.Length == 4 && w[0] == "set" && agents.ContainsKey(w[1]))
+                {
+                    AgentJob a = agents[w[1]];
+                    a.Background = w[2] == "1"; a.Half = w[3] == "1";
+                    foreach (IntPtr j in a.Jobs) SetJob(j, a.Background, a.Half, true);
+                    reply = "{\"ok\":true}";
+                }
+                else if (w.Length == 2 && w[0] == "close" && agents.ContainsKey(w[1]))
+                {
+                    foreach (IntPtr j in agents[w[1]].Jobs) CloseHandle(j);
+                    agents.Remove(w[1]);
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 4 && w[0] == "set")

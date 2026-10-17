@@ -183,7 +183,7 @@ async function server(t, limit, o) {
   s.setHeavyLock(new HeavyJobLock({ limit: () => limit, setTimer: () => ({}), clearTimer: () => {} }));
   const f = fakeChannel();
   const logs = [];
-  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => o, exe: () => 'x', channel: f.channel, setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r) }));
+  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => o, exe: () => 'x', channel: f.channel, setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r), root: () => 4321 }));
   const fire = (agent_id, command, extra = {}) => s.handleWithClaimContext({ agent_id, hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command }, ...extra });
   return { s, f, fire, hive, logs };
 }
@@ -207,13 +207,14 @@ test('HOOK: an allowed heavy call is rewritten for each provider; a light one an
   assert.equal(codex.hookSpecificOutput.updatedInput, undefined);
 });
 
-test('HOOK: Codex that asks its user first: no rewrite and no allow, so its approval prompt stays; the same call auto-approved is wrapped (Jim SHOULD-2)', async (t) => {
+test('HOOK: Codex that asks its user first: no rewrite and no allow, so its approval prompt stays, and the agent goes in its own job; the same call auto-approved is wrapped (Jim SHOULD-2, CODEX-AGY-ASKFIRST-HEAVYCPU-192)', async (t) => {
   const { s, f, fire, hive, logs } = await server(t, 'off', { background: false, half: true });
+  const attached = () => logs.filter((r) => r.action === 'attach').map((r) => [r.agentId, r.provider, r.reason]);
   const asks = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
-  assert.deepEqual(logs.filter((r) => r.action === 'skip-ask-first'), [{ kind: 'heavy-cpu', action: 'skip-ask-first', agentId: 'a1', provider: 'claude' }], 'the declined call is logged with its agent and provider (Jim SHOULD-1 a)');
+  assert.deepEqual(attached(), [['a1', 'claude', 'ask-first']], 'the call is logged with its agent and provider (Jim SHOULD-1 a)');
   assert.equal(asks?.hookSpecificOutput?.permissionDecision, undefined, 'no allow for an agent that asks');
   assert.equal(asks?.hookSpecificOutput?.updatedInput, undefined);
-  assert.equal(f.sent.length, 0, 'no job made for a call that is not rewritten');
+  assert.deepEqual(f.sent, ['agent a1-agent 4321', 'set a1-agent 0 1'], 'no per-call job: the agent\'s tree goes in its own job, then the limits go on');
   s.setHeavyAutoApproves((id) => id === 'a1');
   const auto = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
   assert.equal(auto.hookSpecificOutput.permissionDecision, 'allow');
@@ -226,7 +227,7 @@ test('HOOK: Codex that asks its user first: no rewrite and no allow, so its appr
   await hive.ensureAgent({ id: 'g1', name: 'g1', provider: 'antigravity', cwd: os.tmpdir() });
   const agy = await fire('g1', 'npm ci', { transport: 'http' });
   assert.equal(agy?.hookSpecificOutput?.updatedInput, undefined, 'an AGY agent that asks is not rewritten');
-  assert.deepEqual(logs.filter((r) => r.action === 'skip-ask-first').map((r) => [r.agentId, r.provider]), [['a1', 'claude'], ['g1', 'antigravity']], 'only the declined calls are logged');
+  assert.deepEqual(attached(), [['a1', 'claude', 'ask-first'], ['g1', 'antigravity', 'ask-first']], 'only the calls that ask first go in the agent job');
   s.setHeavyAutoApproves((id) => id === 'a1' || id === 'g1');
   const agyAuto = await fire('g1', 'npm ci', { transport: 'http' });
   assert.match(agyAuto.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join g1-\S+ 0 1; npm ci$/);
@@ -386,8 +387,8 @@ test('WIRING: config keys (default off), Settings rows beside "Heavy jobs at onc
   assert.ok(at > 0 && ui.indexOf('Heavy jobs at background priority') > at && ui.indexOf('Heavy jobs on half the processors') > at, 'the two rows follow "Heavy jobs at once"');
   assert.match(ui, /updateConfig\(\{ heavyJobsBackgroundPriority: next \}/);
   assert.match(ui, /updateConfig\(\{ heavyJobsHalfCores: next \}/);
-  const note = ui.indexOf('Codex and Antigravity agents that ask before running commands are not limited.');
-  assert.ok(note > ui.indexOf('Heavy jobs on half the processors'), 'the ask-first exemption is said under the two toggles (Jim SHOULD-1 b)');
+  const note = ui.indexOf('For Codex and Antigravity agents that ask before running commands, the whole agent is limited while a heavy command runs.');
+  assert.ok(note > ui.indexOf('Heavy jobs on half the processors'), 'how an ask-first agent is limited is said under the two toggles (Jim SHOULD-1 b; CODEX-AGY-ASKFIRST-HEAVYCPU-192)');
   const idx = read('src/main/index.ts');
   assert.match(idx, /hookServer\.setHeavyJobs\(heavyJobs\);/);
   assert.match(idx, /options: \(\) => heavyCpuOptions\(readConfig\(\)\)/, 'read live');

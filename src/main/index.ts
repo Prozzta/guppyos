@@ -1231,7 +1231,9 @@ const heavyJobs = new HeavyJobs({
   platform: process.platform,
   options: () => heavyCpuOptions(readConfig()),
   exe: heavyJobExe,
-  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  // CODEX-AGY-ASKFIRST-HEAVYCPU-192: the agent's newest PTY process, the root of its tree.
+  root: (agentId) => ptyManager.list().filter((s) => ptyToAgent.get(s.id) === agentId && s.pid > 0).at(-1)?.pid ?? null
 });
 hookServer.setHeavyJobs(heavyJobs);
 /** Per hive agent: started with its provider's auto-approve flag (recorded at each spawn). */
@@ -1907,6 +1909,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     try { nativeMemory.agentExited(agentId); } catch { /* best-effort */ }
     // HEAVY-JOB-SERIALIZE: its jobs went with the PTY (unless another PTY of it is still alive).
     if (![...ptyToAgent.values()].includes(agentId)) { try { heavyLock.agentGone(agentId); } catch { /* best-effort */ } }
+    // CODEX-AGY-ASKFIRST-HEAVYCPU-192: and its own job is let go.
+    if (![...ptyToAgent.values()].includes(agentId)) void heavyJobs.agentGone(agentId).catch(() => { /* best-effort */ });
     // Drop breaker state so a dead agent can't leak/zombie a tripped level.
     try { breaker.forget(agentId); } catch { /* best-effort */ }
     // W1 — kill this agent's proxy-bridge sidecar (qwen), if any, so a dead
@@ -4847,6 +4851,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
+  // CODEX-AGY-ASKFIRST-HEAVYCPU-192: a new process of the agent starts with no own job; the old
+  // one's job is let go (its next gated call makes a new one for this tree).
+  if (res.ok && opts.hive?.id) void heavyJobs.agentGone(opts.hive.id).catch(() => { /* best-effort */ });
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
     // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.

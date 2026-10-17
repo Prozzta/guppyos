@@ -34,7 +34,7 @@ async function server(t, request) {
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined);
   s.setHeavyLock(new HeavyJobLock({ limit: () => 'off', setTimer: () => ({}), clearTimer: () => {} }));
   const logs = [];
-  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => ({ background: false, half: true }), exe: () => 'x', channel: () => ({ request, close() {} }), setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r) }));
+  s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => ({ background: false, half: true }), exe: () => 'x', channel: () => ({ request, close() {} }), setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r), root: () => 4321 }));
   s.setHeavyAutoApproves(() => true);
   return { s, logs, hive };
 }
@@ -124,17 +124,17 @@ async function fakeServer(t) {
 }
 const fire = (s, extra) => s.handleWithClaimContext({ agent_id: 'a1', hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: 'text(1)' }, transport: 'mcp', hook_tool_input: { command: 'npm ci' }, ...extra });
 
-test('HOOK: Codex with an unknown shell: no rewrite, no job, no allow, and a log row naming the agent', async (t) => {
+test('HOOK: Codex with an unknown shell: no rewrite and no allow; the agent goes in its own job, logged (CODEX-AGY-ASKFIRST-HEAVYCPU-192)', async (t) => {
   const { s, logs, sent } = await fakeServer(t);
   const r = await fire(s, { hook_shell_unknown: true });
   assert.equal(r?.hookSpecificOutput?.updatedInput, undefined, 'the call runs as written');
   assert.equal(r?.hookSpecificOutput?.permissionDecision, undefined, 'no allow: Codex\'s own approval stays');
-  assert.deepEqual(sent, [], 'no job made');
-  assert.deepEqual(logs.filter((x) => x.action === 'skip-unknown-shell'), [{ kind: 'heavy-cpu', action: 'skip-unknown-shell', agentId: 'a1', provider: 'codex' }]);
+  assert.deepEqual(sent, ['agent a1-agent 4321', 'set a1-agent 0 1'], 'no per-call job: the agent tree goes in its own job, then the limits go on');
+  assert.deepEqual(logs.filter((x) => x.action === 'attach').map((x) => [x.agentId, x.provider, x.reason]), [['a1', 'codex', 'unknown-shell']]);
   // Known shells are still wrapped, each with its own separator.
   assert.match((await fire(s, {})).hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1; npm ci$/);
   assert.match((await fire(s, { hook_cmd_shell: true })).hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1 & npm ci$/);
-  assert.equal(logs.filter((x) => x.action === 'skip-unknown-shell').length, 1);
+  assert.equal(logs.filter((x) => x.action === 'attach').length, 1);
 });
 
 test('HOOK: the unknown-shell field is Codex\'s alone: a Claude call carrying it is wrapped as before', async (t) => {
@@ -142,5 +142,5 @@ test('HOOK: the unknown-shell field is Codex\'s alone: a Claude call carrying it
   await hive.ensureAgent({ id: 'c1', name: 'c1', provider: 'claude', cwd: os.tmpdir() });
   const r = await s.handleWithClaimContext({ agent_id: 'c1', hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: 'npm ci' }, transport: 'http', hook_shell_unknown: true });
   assert.match(r.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join c1-\S+ 0 1; npm ci$/);
-  assert.equal(logs.filter((x) => x.action === 'skip-unknown-shell').length, 0);
+  assert.equal(logs.filter((x) => x.action === 'attach').length, 0);
 });

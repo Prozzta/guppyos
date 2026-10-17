@@ -1780,6 +1780,9 @@ export class HookServer {
   /** Set by handleHook for an allowed heavy PreToolUse; handleWithClaimContext makes the job and
    *  puts the rewritten command in the reply (making the job needs an await). */
   private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean } | null = null;
+  /** Set by handleHook for an allowed heavy PreToolUse that takes no rewrite; handleWithClaimContext
+   *  puts its agent in the agent's own job before the reply (CODEX-AGY-ASKFIRST-HEAVYCPU-192). */
+  private heavyAttach: { agentId: string; toolInput: unknown; reason: string; provider: string } | null = null;
 
   /** The id that pairs a heavy call's PreToolUse with its PostToolUse: the provider's tool-use
    *  id when it sends one, else the command itself, without the join line the Pre reply put
@@ -1948,6 +1951,13 @@ export class HookServer {
     const out = this.handle(p);
     const wrap = this.heavyWrap;
     this.heavyWrap = null;
+    const attach = this.heavyAttach;
+    this.heavyAttach = null;
+    // The reply is left as it is (no allow, so an agent that asks first still asks); it waits only
+    // until the agent is in its job, so the call's shell is created inside it.
+    if (attach && this.heavyJobs && (out as { hookSpecificOutput?: { permissionDecision?: unknown } } | null)?.hookSpecificOutput?.permissionDecision !== 'deny') {
+      try { await this.heavyJobs.attachCall(attach.agentId, attach.toolInput, attach.reason, attach.provider); } catch { /* the call runs as it is */ }
+    }
     if (!wrap || !this.heavyJobs) return out;
     return this.withHeavyJob(out, wrap);
   }
@@ -1971,6 +1981,7 @@ export class HookServer {
   private handle(p: HookPayload): unknown {
     this.openedTool = null;
     this.heavyWrap = null;
+    this.heavyAttach = null;
     const out = this.handleHook(p);
     // FLEET-LIVENESS-BLIND N1 (Creed): a PreToolUse this hook DENIES (heavy lock, HITL gate) never
     // runs and gets no PostToolUse, so the entry it opened would stay open and make a later hang
@@ -2279,10 +2290,12 @@ export class HookServer {
       let provider: string = allows ? 'codex' : 'claude';
       try { provider = this.mailChannel(agentId).provider ?? provider; if (provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
       if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) {
-        // CODEX-CMD-COMPUTED-SHELL-192: a Codex call in a shell Guppy cannot read runs as written.
-        if (own !== undefined && p.hook_shell_unknown === true) this.heavyJobs.skipUnknownShell(agentId, provider);
-        else if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap ={ agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
-        else this.heavyJobs.skipAskFirst(agentId, provider);
+        // CODEX-CMD-COMPUTED-SHELL-192: a Codex call in a shell Guppy cannot read runs as written,
+        // and so does a call of an agent that asks first; both run in their agent's own job
+        // (CODEX-AGY-ASKFIRST-HEAVYCPU-192).
+        if (own !== undefined && p.hook_shell_unknown === true) this.heavyAttach = { agentId, toolInput, reason: 'unknown-shell', provider };
+        else if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+        else this.heavyAttach = { agentId, toolInput, reason: 'ask-first', provider };
       }
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
@@ -2295,6 +2308,7 @@ export class HookServer {
       this.heavyLock.settle(agentId, HookServer.heavyCallId(p), () => classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)));
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
     }
+    if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId) this.heavyJobs?.callPost(agentId, p.tool_input);
 
     // 7C.2 — mid-run steering: inject queued operator guidance as context on the
     // next eligible hook (no fragile typing into the TUI). Delivered once.
