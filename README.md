@@ -536,8 +536,7 @@ parody and is not affiliated with NBC's *The Office* or Dunder Mifflin.
 
 - **[chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin)** —
   the upstream project this fork is built on: the concept, the office floor, the hive
-  design, and the foundation of everything above. Upstream's community links (Discord,
-  [munderdiffl.in](https://munderdiffl.in)) belong to the upstream project.
+  design, and the foundation of everything above.
 - [LimeZu](https://limezu.itch.io/) for the *Modern Interiors* pixel-art tilesets
   (Complete Version licence).
 - [`shahar061/the-office`](https://github.com/shahar061/the-office) for the office

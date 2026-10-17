@@ -114,7 +114,7 @@ These project-level overrides apply on top of everything above whenever this ski
 1. **小黑是黄色的。** Xiaohei's body is ALWAYS filled with the Munder Difflin accent yellow **#FFCA54** with a thin black hand-drawn outline (no suit, no tie). Eyes become two small BLACK dots (white dots don't read on yellow). Keep the bean shape, thin legs, blank expression — every image, no exceptions.
 2. Annotations are hand-written in **English**, not Chinese (the blog is English).
 3. Annotation colors: **orange, blue, and yellow only — never red** (site-wide no-red rule).
-4. Output images for blog posts go to `blog/src/assets/media/<post-slug>/` and each generated file must be recorded in `blog/src/_data/media.json` (set the entry's `status` to `"ready"`).
+4. Save output images in the destination requested by the caller; this repository does not carry a blog media pipeline.
 5. Aspect 16:9, pure white background, one concept per image — unchanged from the core skill.
 
 Attribution: this skill is "Ian Xiaohei Illustrations" by Ian (https://github.com/helloianneo), MIT — see LICENSE and NOTICE.md in this folder.

@@ -102,15 +102,26 @@ function selectTestFiles(entries, filters = []) {
   return { files, unmatched, total: all.length };
 }
 
-/** Recursively discover test files while keeping relative paths for Node's runner. */
-function discoverTestFiles(testDir, readdir = (d) => fs.readdirSync(d, { withFileTypes: true }), relative = '') {
+// Feature tests are deliberately opt-in: the focused suite historically ran the test/
+// root only, and unrelated nested suites (for example claims gates) have their own setup.
+const FEATURE_TEST_DIRS = Object.freeze(['heavy-lock', 'start-fixes-163']);
+
+/** Discover root tests plus the explicitly folded feature directories. */
+function discoverTestFiles(testDir, readdir = (d) => fs.readdirSync(d, { withFileTypes: true }), featureDirs = FEATURE_TEST_DIRS) {
   const out = [];
-  for (const entry of readdir(path.join(testDir, relative))) {
+  const walkFeature = (relative) => {
+    for (const entry of readdir(path.join(testDir, relative))) {
+      if (typeof entry === 'string') { if (entry.endsWith(TEST_SUFFIX)) out.push(path.join(relative, entry)); continue; }
+      const child = path.join(relative, entry.name);
+      if (entry.isDirectory()) walkFeature(child);
+      else if (entry.isFile() && entry.name.endsWith(TEST_SUFFIX)) out.push(child);
+    }
+  };
+  for (const entry of readdir(testDir)) {
     // String entries retain the small injected unit-test seam used by the runner tests.
-    if (typeof entry === 'string') { if (entry.endsWith(TEST_SUFFIX)) out.push(path.join(relative, entry)); continue; }
-    const child = path.join(relative, entry.name);
-    if (entry.isDirectory()) out.push(...discoverTestFiles(testDir, readdir, child));
-    else if (entry.isFile() && entry.name.endsWith(TEST_SUFFIX)) out.push(child);
+    if (typeof entry === 'string') { if (entry.endsWith(TEST_SUFFIX)) out.push(entry); continue; }
+    if (entry.isDirectory() && featureDirs.includes(entry.name)) walkFeature(entry.name);
+    else if (entry.isFile() && entry.name.endsWith(TEST_SUFFIX)) out.push(entry.name);
   }
   return out;
 }
@@ -265,7 +276,7 @@ function totals(code, counts, laneState, log) {
   return code;
 }
 
-module.exports = { selectTestFiles, discoverTestFiles, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

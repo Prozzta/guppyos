@@ -39,12 +39,12 @@ test('selectTestFiles takes every *.test.cjs and nothing else, sorted', () => {
   assert.strictEqual(total, 2);
 });
 
-test('discoverTestFiles retains feature-relative paths for nested test groups', () => {
+test('discoverTestFiles retains feature-relative paths for opted-in nested test groups', () => {
   const tree = {
     test: [{ name: 'area', isDirectory: () => true, isFile: () => false }, { name: 'root.test.cjs', isDirectory: () => false, isFile: () => true }],
     [path.join('test', 'area')]: [{ name: 'nested.test.cjs', isDirectory: () => false, isFile: () => true }, { name: 'note.md', isDirectory: () => false, isFile: () => true }]
   };
-  assert.deepStrictEqual(runner.discoverTestFiles('test', (p) => tree[p]), [path.join('area', 'nested.test.cjs'), 'root.test.cjs']);
+  assert.deepStrictEqual(runner.discoverTestFiles('test', (p) => tree[p], ['area']), [path.join('area', 'nested.test.cjs'), 'root.test.cjs']);
 });
 
 test('filters narrow by case-insensitive substring, de-duplicated and sorted', () => {
@@ -346,10 +346,18 @@ test('PIN: package.json test:focused invokes the runner and carries no shell glo
   assert.match(script, /run-tests\.cjs/);
 });
 
-test('PIN: against the REAL test directory the runner selects this file and many more', () => {
-  const { files } = selectTestFiles(fs.readdirSync(TEST_DIR));
+test('PIN: against the REAL test directory discovery is root tests plus only folded feature tests', () => {
+  const files = runner.discoverTestFiles(TEST_DIR);
+  const direct = selectTestFiles(fs.readdirSync(TEST_DIR)).files;
+  const folded = runner.FEATURE_TEST_DIRS.flatMap((dir) => fs.readdirSync(path.join(TEST_DIR, dir), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(runner.TEST_SUFFIX))
+    .map((entry) => path.join(dir, entry.name)));
   assert.ok(files.includes('test-runner-glob.test.cjs'), 'the runner must pick up its own test');
-  assert.ok(files.length > 100, `expected the whole suite, got ${files.length}`);
+  assert.equal(files.length, 430, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
+  assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
+  assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
+  assert.ok(!files.some((file) => file.startsWith(`claims-gates${path.sep}`)), 'claims gates are not a focused-suite feature folder');
   assert.ok(!files.includes('tools'), 'directories are not test files');
 });
 
