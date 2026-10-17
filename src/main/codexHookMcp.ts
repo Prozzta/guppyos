@@ -234,21 +234,7 @@ export function relaxedObjectLiteral(src: string): unknown {
  * skipped) are hints like any command (Jim F1). Strings and comments never count (S3).
  */
 export function pendingExecCommands(tail: string): { commands: string[]; complete: boolean; unnamed: number } {
-  const lines = tail.split('\n');
-  let turnSeen = false;
-  const outputs = new Set<string>();
-  const pending: Array<Record<string, unknown>> = [];
-  for (let i = lines.length - 1; i >= 0 && !turnSeen; i--) {
-    let j: { type?: unknown; payload?: Record<string, unknown> };
-    try { j = JSON.parse(lines[i]); } catch { continue; }
-    const p = j.payload;
-    if (!p || typeof p !== 'object') continue;
-    if ((j.type === 'turn_context' && typeof p.turn_id === 'string') || (j.type === 'event_msg' && p.type === 'task_started')) { turnSeen = true; continue; }
-    if (j.type !== 'response_item' || typeof p.type !== 'string') continue;
-    const callId = typeof p.call_id === 'string' ? p.call_id : '';
-    if (OUTPUT_TYPES.has(p.type) && callId) outputs.add(callId);
-    else if (CALL_TYPES.has(p.type) && callId && !outputs.has(callId)) pending.push(p);
-  }
+  const pending = pendingCallItems(tail);
   const commands: string[] = [];
   let complete = true;
   let unnamed = 0;
@@ -289,6 +275,58 @@ export function pendingExecCommands(tail: string): { commands: string[]; complet
     }
   }
   return { commands, complete, unnamed };
+}
+
+/** The current turn's calls that have no output yet, newest first. */
+function pendingCallItems(tail: string): Array<Record<string, unknown>> {
+  const lines = tail.split('\n');
+  let turnSeen = false;
+  const outputs = new Set<string>();
+  const pending: Array<Record<string, unknown>> = [];
+  for (let i = lines.length - 1; i >= 0 && !turnSeen; i--) {
+    let j: { type?: unknown; payload?: Record<string, unknown> };
+    try { j = JSON.parse(lines[i]); } catch { continue; }
+    const p = j.payload;
+    if (!p || typeof p !== 'object') continue;
+    if ((j.type === 'turn_context' && typeof p.turn_id === 'string') || (j.type === 'event_msg' && p.type === 'task_started')) { turnSeen = true; continue; }
+    if (j.type !== 'response_item' || typeof p.type !== 'string') continue;
+    const callId = typeof p.call_id === 'string' ? p.call_id : '';
+    if (OUTPUT_TYPES.has(p.type) && callId) outputs.add(callId);
+    else if (CALL_TYPES.has(p.type) && callId && !outputs.has(callId)) pending.push(p);
+  }
+  return pending;
+}
+
+/**
+ * HEAVY-CPU-OPTIONS-191: the shell asked for by the current turn's pending exec_command with this
+ * `cmd`. Returns its literal `shell` (a path or a name), null when it gave none (Codex's default
+ * shell), or undefined when no such call is found or its shell is computed. The heavy job's join
+ * line differs in cmd, which has no `;` separator.
+ */
+export function pendingExecShell(tail: string, command: string): string | null | undefined {
+  for (const p of pendingCallItems(tail)) {
+    if (p.name === 'exec' && typeof p.input === 'string') {
+      const src = p.input;
+      const code = codeMask(src);
+      const re = new RegExp(SHELL_INPUT_CALL.source, 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(src))) {
+        if (code[m.index] !== 't' || (m[1] ?? m[3]) === 'write_stdin') continue;
+        const span = objectSpan(src, m.index + m[0].length);
+        if (span && literalProp(span, 'cmd') === command) return literalProp(span, 'shell');
+      }
+    } else if (p.name === 'exec_command' && typeof p.arguments === 'string') {
+      let a: { cmd?: unknown; shell?: unknown } | null = null;
+      try { a = JSON.parse(p.arguments); } catch { a = null; }
+      if (a?.cmd === command) return typeof a.shell === 'string' ? a.shell : a.shell === undefined || a.shell === null ? null : undefined;
+    }
+  }
+  return undefined;
+}
+
+/** HEAVY-CPU-OPTIONS-191: Windows cmd (`cmd`, `cmd.exe`, or a path to it). */
+export function isCmdShell(shell: string | null | undefined): boolean {
+  return typeof shell === 'string' && /(?:^|[\\/])cmd(?:\.exe)?$/i.test(shell.trim());
 }
 
 /**
@@ -431,10 +469,26 @@ export class CodexThreadRollouts {
  *  Codex's MCP client, not this timeout; see the re-listen in hooks.ts.) */
 export const MCP_HOOK_TIMEOUT_S = 5;
 
+/** HEAVY-CPU-OPTIONS-191: the PreToolUse hook also carries the call's own tool input, filled in by
+ *  Codex (mcp_tool input templates, codex-rs hooks/src/engine/mcp_runner.rs at 0.157.1). In code mode the
+ *  rollout shows only the outer `exec` script; this is the nested exec_command's `{ command }`, the
+ *  shape a PreToolUse updatedInput rewrites. A Codex without templates sends the text unfilled. */
+export const MCP_TOOL_INPUT_TEMPLATE = '${tool_input}';
+
+/** The tool input Codex filled into a hook call's `ti`, or undefined (absent, unfilled, unreadable). */
+export function templatedToolInput(ti: unknown): Record<string, unknown> | undefined {
+  let v = ti;
+  if (typeof v === 'string') {
+    if (v.includes('${')) return undefined; // a Codex without input templates
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  return v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
+}
+
 /** The per-agent Codex config lines for the MCP-routed hooks (TOML). */
 export function codexMcpHookToml(url: string, token: string): { server: string; hook: (event: McpHookEvent) => string } {
   return {
     server: `\n[mcp_servers.${MCP_SERVER_NAME}]\nurl = "${url}"\ntool_timeout_sec = ${MCP_HOOK_TIMEOUT_S}\n`,
-    hook: (event) => `\n[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "mcp_tool"\nserver = "${MCP_SERVER_NAME}"\ntool = "${HIVE_HOOK_TOOL}"\ninput = { event = "${event}", k = "${token}" }\ntimeout = ${MCP_HOOK_TIMEOUT_S}\n`
+    hook: (event) => `\n[[hooks.${event}]]\n[[hooks.${event}.hooks]]\ntype = "mcp_tool"\nserver = "${MCP_SERVER_NAME}"\ntool = "${HIVE_HOOK_TOOL}"\ninput = { event = "${event}", k = "${token}"${event === 'PreToolUse' ? `, ti = "${MCP_TOOL_INPUT_TEMPLATE}"` : ''} }\ntimeout = ${MCP_HOOK_TIMEOUT_S}\n`
   };
 }

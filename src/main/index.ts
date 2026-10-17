@@ -102,6 +102,7 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
+import { HeavyJobs, heavyCpuOptions } from './heavyCpu';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
@@ -1218,6 +1219,20 @@ const heavyLock = new HeavyJobLock({
   notifyLapse: (agentId, kind, why) => notifyHeavyWaitLapsed(agentId, kind, why)
 });
 hookServer.setHeavyLock(heavyLock);
+// HEAVY-CPU-OPTIONS-191: the job every heavy call runs in (Settings: background priority, half the
+// processors; read live). The helper is compiled from source at build (tools/build-heavyjob.cjs).
+const heavyJobDir = (): string => app.isPackaged ? join(process.resourcesPath, 'heavyjob') : join(app.getAppPath(), 'resources', 'heavyjob', 'bin');
+const heavyJobExe = (): string | null => {
+  const exe = join(heavyJobDir(), 'guppy-heavyjob.exe');
+  return process.platform === 'win32' && existsSync(exe) ? exe : null;
+};
+const heavyJobs = new HeavyJobs({
+  platform: process.platform,
+  options: () => heavyCpuOptions(readConfig()),
+  exe: heavyJobExe,
+  log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
+});
+hookServer.setHeavyJobs(heavyJobs);
 
 /** IDLE-MEANS-IDLE: the lock as the displays read it (who holds, waits for, or has a slot reserved). */
 function heavyLockView(): HeavyLockView {
@@ -4439,6 +4454,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
+      // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
+      if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex
@@ -5053,6 +5070,8 @@ ipcMain.handle('config:update', (_evt, patch: Partial<HarnessConfig>) => {
   // config per tick so it gates immediately; this is for the PROMPT, which is
   // built per spawn, so flipping the toggle reaches god the next time he starts.
   if (typeof patch?.orchestratorMaySpawn === 'boolean') hive.setOrchestratorMaySpawn(patch.orchestratorMaySpawn);
+  // HEAVY-CPU-OPTIONS-191: a changed option reaches the heavy jobs already running.
+  if (patch && ('heavyJobsBackgroundPriority' in patch || 'heavyJobsHalfCores' in patch)) void heavyJobs.applyLive().catch(() => { /* logged per job */ });
   // CLAIM-LEDGER W7: a running memory worker follows a changed ledger level at once (W3-1).
   if (patch && 'claimLedger' in patch) void nativeMemory.claimLedgerChanged()?.catch((e) => hive.appendLog({ kind: 'claims-ui-level-push-failed', error: String(e).slice(0, 160) }));
   if (!hiveWasEnabled && hive.enabled()) {

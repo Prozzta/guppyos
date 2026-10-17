@@ -29,7 +29,8 @@ import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
-import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, pendingExecCommands, rebuildToolHook } from './codexHookMcp';
+import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, rebuildToolHook, templatedToolInput } from './codexHookMcp';
+import type { HeavyJobs } from './heavyCpu';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
@@ -155,6 +156,12 @@ interface HookPayload {
   /** HEAVY-LOCK-UNNAMED-EXEC: how many of those pending code-mode exec_command calls could NOT be
    *  read (a computed cmd, an alias): logged by the heavy-job lock, never classified. */
   codex_unnamed_exec?: number;
+  /** HEAVY-CPU-OPTIONS-191: a Codex PreToolUse's own tool input, filled in by Codex's hook template
+   *  (the nested exec_command's `{ command }`); used ONLY to wrap a heavy command in its job. */
+  hook_tool_input?: Record<string, unknown>;
+  /** HEAVY-CPU-OPTIONS-191: that call asked for Windows cmd as its shell (its literal `shell` in the
+   *  rollout), so its join line takes cmd's own separator. */
+  hook_cmd_shell?: boolean;
 }
 
 export type HookTransport = 'http' | 'pipe' | 'mcp' | 'pipe-oneway';
@@ -880,6 +887,9 @@ export class HookServer {
     if (rebuilt.toolInput !== undefined) p.tool_input = rebuilt.toolInput;
     if (rebuilt.toolResponse !== undefined) p.tool_response = rebuilt.toolResponse;
     if (rebuilt.degraded) p.payload_degraded = true;
+    const ti = event === 'PreToolUse' ? templatedToolInput(args.ti) : undefined;
+    if (ti) p.hook_tool_input = ti;
+    if (ti && tail && typeof ti.command === 'string' && isCmdShell(pendingExecShell(tail, ti.command))) p.hook_cmd_shell = true;
     // HEAVY-JOB-LOCK-FAILOPEN (c): a still-degraded PreToolUse carries the pending shell commands,
     // so the heavy-job lock can classify what is about to run (gates still see it as degraded).
     if (rebuilt.degraded && event === 'PreToolUse' && tail) {
@@ -1757,6 +1767,13 @@ export class HookServer {
   private heavyLock: HeavyJobLock | null = null;
   setHeavyLock(lock: HeavyJobLock | null): void { this.heavyLock = lock; }
 
+  /** HEAVY-CPU-OPTIONS-191: the jobs heavy calls run in (main wires it; null = no call is rewritten). */
+  private heavyJobs: HeavyJobs | null = null;
+  setHeavyJobs(jobs: HeavyJobs | null): void { this.heavyJobs = jobs; }
+  /** Set by handleHook for an allowed heavy PreToolUse; handleWithClaimContext makes the job and
+   *  puts the rewritten command in the reply (making the job needs an await). */
+  private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean } | null = null;
+
   /** The id that pairs a heavy call's PreToolUse with its PostToolUse: the provider's tool-use
    *  id when it sends one, else the command itself (identical in both hooks). */
   private static heavyCallId(p: HookPayload): string {
@@ -1920,11 +1937,32 @@ export class HookServer {
       try { claimWorkingSet = await this.claimWorkingSet?.(p.agent_id, p.source) ?? null; } catch { claimWorkingSet = null; }
       this.preparedClaimWorkingSets.set(p.agent_id, claimWorkingSet);
     }
-    return this.handle(p);
+    const out = this.handle(p);
+    const wrap = this.heavyWrap;
+    this.heavyWrap = null;
+    if (!wrap || !this.heavyJobs) return out;
+    return this.withHeavyJob(out, wrap);
+  }
+
+  /**
+   * HEAVY-CPU-OPTIONS-191: an allowed heavy call runs inside its own job with the options in force
+   * (background priority, half the processors): its command is rewritten to join the job first. Every
+   * provider's PreToolUse carries the rewrite: Claude applies `updatedInput` as it is; Codex only with
+   * permissionDecision 'allow' (its parser drops it otherwise; this hook already allowed the call); the
+   * AGY shim turns it into AGY's own `overwrite`. A failure leaves the call as it was.
+   */
+  private async withHeavyJob(out: unknown, wrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean }): Promise<unknown> {
+    const o = (out && typeof out === 'object' ? out : {}) as { hookSpecificOutput?: Record<string, unknown> };
+    if (o.hookSpecificOutput?.permissionDecision === 'deny') return out;
+    let updatedInput: Record<string, unknown> | null = null;
+    try { updatedInput = await this.heavyJobs!.begin(wrap.agentId, wrap.toolInput, wrap.cmd); } catch { updatedInput = null; }
+    if (!updatedInput) return out;
+    return { ...o, hookSpecificOutput: { ...(o.hookSpecificOutput ?? {}), hookEventName: 'PreToolUse', ...(wrap.transport === 'mcp' ? { permissionDecision: 'allow' } : {}), updatedInput } };
   }
 
   private handle(p: HookPayload): unknown {
     this.openedTool = null;
+    this.heavyWrap = null;
     const out = this.handleHook(p);
     // FLEET-LIVENESS-BLIND N1 (Creed): a PreToolUse this hook DENIES (heavy lock, HITL gate) never
     // runs and gets no PostToolUse, so the entry it opened would stay open and make a later hang
@@ -2190,10 +2228,15 @@ export class HookServer {
       // Jim N1: a DEGRADED Codex hook (rebuilt from the rollout tail) may carry no tool input:
       // it cannot be classified, so it is allowed and logged.
       const scripts = HookServer.heavyScriptCtx(p.cwd);
-      let cls = classifyHeavy(p.tool_name, p.tool_input, scripts);
-      let command = heavyCommandOf(p.tool_name, p.tool_input) ?? '';
+      // HEAVY-CPU-OPTIONS-191: a Codex hook that carries its own call's input (the hook template) is
+      // classified on that: the nested exec_command itself, not a rebuild from the rollout.
+      const own = p.hook_tool_input;
+      const toolName = own ? 'Bash' : p.tool_name;
+      const toolInput = own ?? p.tool_input;
+      let cls = classifyHeavy(toolName, toolInput, scripts);
+      let command = heavyCommandOf(toolName, toolInput) ?? '';
       let callId = HookServer.heavyCallId(p);
-      if (p.payload_degraded === true && commandFromToolInput(p.tool_input) === null) {
+      if (!own && p.payload_degraded === true && commandFromToolInput(p.tool_input) === null) {
         // HEAVY-JOB-LOCK-FAILOPEN (c): classify the pending commands the rollout shows (any heavy
         // one takes the slot); only a call with nothing readable is still let through unclassified.
         const hints = Array.isArray(p.codex_commands) ? p.codex_commands.filter((c): c is string => typeof c === 'string') : [];
@@ -2220,6 +2263,10 @@ export class HookServer {
           return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason } };
         }
       }
+      // HEAVY-CPU-OPTIONS-191: a heavy call that runs gets its job (whatever "Heavy jobs at once" is).
+      // Codex: the nested command its hook template carried (a degraded rebuild has none to rewrite).
+      // A subagent's call is wrapped too: its processes are its agent's heavy job.
+      if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
     // its job is done (a backgrounded one, or a missed Post, is left to the watcher). Andy N1 (1.1.81):

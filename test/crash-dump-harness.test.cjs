@@ -15,7 +15,7 @@ const { createSandbox, removeSandbox } = require('./electron-harness/run.cjs');
 
 const MARKER = '__CRASHDUMP_RESULT__';
 function run(args) {
-  const electron = require('electron');
+  const electron = require('./electron-harness/electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const sandbox = createSandbox('rr164dump-');
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'crash-dump-main.cjs'), '--sandbox', sandbox, ...args], {

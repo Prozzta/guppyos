@@ -14,7 +14,7 @@ const { createSandbox, removeSandbox } = require('./electron-harness/run.cjs');
 const MARKER = '__MEMRECOVERY_RESULT__';
 
 function run() {
-  const electron = require('electron');
+  const electron = require('./electron-harness/electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const sandbox = createSandbox('ms167-');
   return new Promise((resolve, reject) => {
     const child = spawn(electron, [join(__dirname, 'electron-harness', 'memory-recovery-main.cjs'), '--sandbox', sandbox, '--notice-delay-ms', '500'], {

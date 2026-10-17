@@ -5701,6 +5701,12 @@ process.stdin.on('end', () => {
       if (r.decision === 'block') out = { decision: 'block', reason: r.reason, stopReason: r.reason, systemMessage: r.reason };
       else if (r.hookSpecificOutput && r.hookSpecificOutput.permissionDecision === 'deny') out = { decision: 'deny', reason: r.hookSpecificOutput.permissionDecisionReason };
       else if (r.continue === false) out = { decision: 'block', stopReason: r.stopReason };
+      // HEAVY-CPU-OPTIONS-191: a heavy command rewritten to run in its job: agy's own rewrite is an
+      // allow with \`overwrite\` (the tool's new args), and any context rides along with it.
+      else if (r.hookSpecificOutput && r.hookSpecificOutput.updatedInput && typeof r.hookSpecificOutput.updatedInput === 'object') {
+        out = { decision: 'allow', overwrite: r.hookSpecificOutput.updatedInput };
+        if (r.hookSpecificOutput.additionalContext) out.systemMessage = r.hookSpecificOutput.additionalContext;
+      }
       // PreInvocation's documented output (agy hooks.md): injectSteps. A userMessage persists in
       // the conversation (an ephemeralMessage lasts one model call); an operator steer must stick.
       else if (event === 'PreInvocation' && r.hookSpecificOutput && r.hookSpecificOutput.additionalContext) out = { injectSteps: [{ userMessage: r.hookSpecificOutput.additionalContext }] };

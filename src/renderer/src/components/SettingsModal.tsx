@@ -239,6 +239,24 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
     try { await window.cth.updateConfig({ heavyJobsAtOnce: next } as Partial<HarnessConfig>); }
     catch { setHeavyAtOnce(prev); }
   };
+  // HEAVY-CPU-OPTIONS-191 (Windows): two independent options for every heavy job, applied live by
+  // main to the jobs already running too. Half = floor(n/2) logical processors, at least 1.
+  const [heavyBackground, setHeavyBackground] = useState<boolean>(cfgX.heavyJobsBackgroundPriority === true);
+  const [heavyHalf, setHeavyHalf] = useState<boolean>(cfgX.heavyJobsHalfCores === true);
+  const logicalCpus = Math.max(1, navigator.hardwareConcurrency || 1);
+  const halfCpus = Math.max(1, Math.floor(logicalCpus / 2));
+  const toggleHeavyBackground = async () => {
+    const next = !heavyBackground;
+    setHeavyBackground(next);
+    try { await window.cth.updateConfig({ heavyJobsBackgroundPriority: next } as Partial<HarnessConfig>); }
+    catch { setHeavyBackground(!next); }
+  };
+  const toggleHeavyHalf = async () => {
+    const next = !heavyHalf;
+    setHeavyHalf(next);
+    try { await window.cth.updateConfig({ heavyJobsHalfCores: next } as Partial<HarnessConfig>); }
+    catch { setHeavyHalf(!next); }
+  };
   // MODEL-DEFAULT-CLI: unset = "CLI default" (no --model); that entry is shown
   // selected, and picking it clears defaultModel (undefined crosses the IPC, and
   // writeConfig's JSON write drops the key — the same clear maxTurns uses).
@@ -1236,6 +1254,43 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                           </select>
                         </div>
                       </div>
+
+                      {window.cth.platform === 'win32' && (
+                        <>
+                          <div style={{ height: 1, background: 'var(--cth-ink-300)', margin: '12px 0' }} />
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                Heavy jobs at background priority
+                              </span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {heavyBackground
+                                  ? 'Every process of a heavy job runs below normal priority, so your own apps come first. Applies at once, to running jobs too.'
+                                  : 'Heavy jobs run at normal priority.'}
+                              </span>
+                            </div>
+                            <PixelButton title="Heavy jobs at background priority" variant={heavyBackground ? 'primary' : 'secondary'} size="sm" onClick={() => { void toggleHeavyBackground(); }}>
+                              {heavyBackground ? 'on' : 'off'}
+                            </PixelButton>
+                          </div>
+                          <div style={{ height: 1, background: 'var(--cth-ink-300)', margin: '12px 0' }} />
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ fontSize: 13, lineHeight: '20px', color: 'var(--cth-ink-900)' }}>
+                                Heavy jobs on half the processors
+                              </span>
+                              <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                                {heavyHalf
+                                  ? `Every heavy job runs on ${halfCpus} of this PC's ${logicalCpus} logical processors; the rest stay free for you. Applies at once, to running jobs too.`
+                                  : `Heavy jobs may use all ${logicalCpus} logical processors.`}
+                              </span>
+                            </div>
+                            <PixelButton title="Heavy jobs on half the processors" variant={heavyHalf ? 'primary' : 'secondary'} size="sm" onClick={() => { void toggleHeavyHalf(); }}>
+                              {heavyHalf ? 'on' : 'off'}
+                            </PixelButton>
+                          </div>
+                        </>
+                      )}
 
                       <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
 

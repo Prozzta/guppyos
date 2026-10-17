@@ -99,6 +99,12 @@ extraResources:
   # Electron-as-Node from <hive>/bin/ledger.
   - from: resources/ledger-cli.cjs
     to: ledger-cli.cjs
+  # HEAVY-CPU-OPTIONS-191: the heavy-job helper, compiled from source by tools/build-heavyjob.cjs (Windows;
+  # the folder is empty elsewhere). Its folder goes on every hive agent's PATH.
+  - from: resources/heavyjob/bin
+    to: heavyjob
+    filter:
+      - guppy-heavyjob.exe
   - from: resources/models
     to: models
     filter:

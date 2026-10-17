@@ -34,7 +34,7 @@ function runOne(name) {
   writeFileSync(join(userData, 'config.json'), CONFIG[name]);
   const result = join(dir, 'result.json');
   return new Promise((done) => {
-    const child = spawn(require('electron'), [main, userData, result], {
+    const child = spawn(require('./electron-bin.cjs').harnessElectron(), [main, userData, result], {
       cwd: root,
       env: { ...process.env, MUNDER_DEV: '', ELECTRON_ENABLE_LOGGING: '1',
         APPDATA: join(jail, 'AppData/Roaming'), LOCALAPPDATA: join(jail, 'AppData/Local'), USERPROFILE: jail, HOME: jail },

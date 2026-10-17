@@ -68,7 +68,7 @@ const harnessTestTimeout = (scenarioMs) => HARNESS_SETUP_TIMEOUT_MS + scenarioMs
  * @returns {Promise<any>} whatever the scenario reported
  */
 function runScenario(scenario, opts = {}) {
-  const electron = require('electron');
+  const electron = require('./electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const root = join(__dirname, '..', '..');
   const sandbox = createSandbox('l0-harness-', opts.tempRoot);
   const args = [
@@ -133,7 +133,7 @@ function runScenario(scenario, opts = {}) {
  *   node test/electron-harness/run-ipc-order.cjs --phase1 2000 --phase2 5000 --phase3 60
  */
 function runIpcOrder(opts = {}) {
-  const electron = require('electron');
+  const electron = require('./electron-bin.cjs').harnessElectron(); // HEAVY-CPU-OPTIONS-191
   const root = join(__dirname, '..', '..');
   const sandbox = createSandbox('l0-ipcorder-', opts.tempRoot);
   const args = [

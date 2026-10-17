@@ -20,12 +20,13 @@ export type HeavyKind = 'install' | 'build' | 'suite' | 'bench';
  *  closed on it, and may let it go once the script reads as light (HeavyJobLock.settle). */
 export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; provisional?: boolean }
 
-/** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). */
+/** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). `CommandLine`: AGY's
+ *  run_command (HEAVY-CPU-OPTIONS-191: it was not read, so AGY heavy calls were never classified). */
 export function commandFromToolInput(input: unknown): string | null {
   if (typeof input === 'string') return input;
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const r = input as Record<string, unknown>;
-  const v = r.command ?? r.cmd ?? r.script;
+  const v = r.command ?? r.cmd ?? r.script ?? r.CommandLine;
   if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return (v as string[]).join(' ');
   return typeof v === 'string' ? v : null;
 }
