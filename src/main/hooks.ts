@@ -2309,6 +2309,11 @@ export class HookServer {
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
     }
     if ((event === 'PostToolUse' || event === 'PostToolUseFailure') && agentId) this.heavyJobs?.callPost(agentId, p.tool_input);
+    // A turn that ended (AGY's mid-chain Stop is not an end) leaves no gated call to run later:
+    // one its user declined is not held in the limits until the unstarted limit.
+    if (agentId && !fromSubagent && ((event === 'Stop' && p.fully_idle !== false) || event === 'StopFailure' || event === 'UserPromptSubmit')) {
+      void this.heavyJobs?.turnEnded(agentId, event).catch(() => { /* the unstarted limit still ends it */ });
+    }
 
     // 7C.2 — mid-run steering: inject queued operator guidance as context on the
     // next eligible hook (no fragile typing into the TUI). Delivered once.

@@ -129,7 +129,7 @@ test('HOOK: Codex with an unknown shell: no rewrite and no allow; the agent goes
   const r = await fire(s, { hook_shell_unknown: true });
   assert.equal(r?.hookSpecificOutput?.updatedInput, undefined, 'the call runs as written');
   assert.equal(r?.hookSpecificOutput?.permissionDecision, undefined, 'no allow: Codex\'s own approval stays');
-  assert.deepEqual(sent, ['agent a1-agent 4321', 'set a1-agent 0 1'], 'no per-call job: the agent tree goes in its own job, then the limits go on');
+  assert.deepEqual(sent.map((l) => l.replace(/ [0-9]{13}$/, ' <start>')), ['agent a1-agent 4321 0 1 <start>'], 'no per-call job: the limits go on and the agent tree goes in its own job, in one request');
   assert.deepEqual(logs.filter((x) => x.action === 'attach').map((x) => [x.agentId, x.provider, x.reason]), [['a1', 'codex', 'unknown-shell']]);
   // Known shells are still wrapped, each with its own separator.
   assert.match((await fire(s, {})).hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1; npm ci$/);

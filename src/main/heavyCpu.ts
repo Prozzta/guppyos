@@ -108,7 +108,7 @@ export interface HeavyJobRow { pid: number; name: string; priorityClass: number;
 /** One line-oriented channel to `guppy-heavyjob serve` (injectable for tests). */
 export interface HeavyJobChannel { request(line: string): Promise<Record<string, unknown> | null>; close(): void }
 
-/** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order. */
+/** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order; null only when the helper is gone. */
 export function serveChannel(exe: string): HeavyJobChannel {
   const child = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
   const queue: Array<(r: Record<string, unknown> | null) => void> = [];
@@ -126,7 +126,8 @@ export function serveChannel(exe: string): HeavyJobChannel {
       const line = buf.slice(0, i).trim();
       buf = buf.slice(i + 1);
       let r: Record<string, unknown> | null = null;
-      try { r = JSON.parse(line) as Record<string, unknown>; } catch { r = null; }
+      // An unreadable line is an error, not a dead helper: its agent jobs are still in it.
+      try { r = JSON.parse(line) as Record<string, unknown>; } catch { r = { ok: false, error: 'unreadable reply' }; }
       queue.shift()?.(r);
     }
   });
@@ -135,7 +136,8 @@ export function serveChannel(exe: string): HeavyJobChannel {
       if (dead) return Promise.resolve(null);
       return new Promise((resolve) => {
         let settled = false;
-        const t = setTimeout(() => { if (!settled) { settled = true; resolve(null); } }, HEAVY_JOB_REQUEST_MS);
+        // A slow helper is not a dead one: its late reply still takes this request's place in the queue.
+        const t = setTimeout(() => { if (!settled) { settled = true; resolve({ ok: false, error: 'no reply in time' }); } }, HEAVY_JOB_REQUEST_MS);
         t.unref?.();
         queue.push((r) => { if (!settled) { settled = true; clearTimeout(t); resolve(r); } });
         try { child.stdin.write(line + '\n'); } catch { fail(); }
@@ -206,7 +208,7 @@ export class HeavyJobs {
     const ch = this.channel();
     if (!ch) return null;
     const r = await ch.request(line);
-    // A dead helper is started again on the next request.
+    // A dead helper is started again on the next request (a new serve opens the agent jobs again by name).
     if (r === null && this.ch === ch) { ch.close(); this.ch = null; }
     return r;
   }
@@ -229,15 +231,20 @@ export class HeavyJobs {
     const aid = agentJobId(agentId);
     if (!root) { this.log({ action: 'attach-failed', reason, agentId, provider, why: 'no agent process' }); return; }
     const start = this.now();
-    const r = await this.req(`agent ${aid} ${root}`);
-    if (r?.ok !== true) { this.log({ action: 'attach-failed', reason, agentId, provider, why: String(r?.error ?? 'no helper') }); return; }
+    const o = this.d.options();
+    // The limits go on, then the agent's tree goes in its job. The call's shell starts only after
+    // this hook answers, so it and its whole tree are created inside the limits.
+    const r = await this.req(`agent ${aid} ${root} ${o.background ? 1 : 0} ${o.half ? 1 : 0} ${start}`);
+    if (r?.ok !== true) {
+      this.agentSeen.add(agentId);
+      if (!this.agentCalls.get(agentId)?.length) await this.req(`set ${aid} 0 0`); // the limits it may have set
+      this.log({ action: 'attach-failed', reason, agentId, provider, why: String(r?.error ?? 'no helper') });
+      return;
+    }
     this.agentSeen.add(agentId);
     const calls = this.agentCalls.get(agentId) ?? [];
     this.agentCalls.set(agentId, [...calls, { agentId, command, startMs: start, total0: Number(r.total) || 0, started: false, idleScans: 0, postSeen: false }]);
-    const o = this.d.options();
-    // The call's shell starts only after this hook answers: the limits are on before it exists.
-    const set = await this.req(`set ${aid} ${o.background ? 1 : 0} ${o.half ? 1 : 0}`);
-    this.log({ action: 'attach', reason, agentId, provider, job: aid, background: o.background, half: o.half, members: r.members, missed: r.missed, ok: set?.ok === true });
+    this.log({ action: 'attach', reason, agentId, provider, job: aid, background: o.background, half: o.half, members: r.members, missed: r.missed, ok: true });
     this.arm();
   }
 
@@ -249,11 +256,21 @@ export class HeavyJobs {
     if (c) c.postSeen = true;
   }
 
-  /** The agent's PTY is gone or replaced: its job is let go (no handle kept for a dead tree). */
+  /** The agent's turn ended (Stop, StopFailure, a new prompt): a call that has not started and had
+   *  no PostToolUse never will (its user declined it), so the agent is not held limited for
+   *  HEAVY_JOB_UNSTARTED_MS. */
+  async turnEnded(agentId: string, why: string): Promise<void> {
+    for (const c of [...(this.agentCalls.get(agentId) ?? [])]) if (!c.started && !c.postSeen) await this.endCall(c, 'not-run', why);
+  }
+
+  /** The agent's PTY is gone or replaced: its limits are lifted (each process that outlives it,
+   *  a server the call started, gets its own values back) and its job is let go (no handle kept
+   *  for a dead tree). */
   async agentGone(agentId: string): Promise<void> {
     const had = this.agentCalls.get(agentId);
     this.agentCalls.delete(agentId);
     if (!this.agentSeen.delete(agentId)) return;
+    if (had?.length) await this.req(`set ${agentJobId(agentId)} 0 0`);
     await this.req(`close ${agentJobId(agentId)}`);
     this.log({ action: 'agent-gone', agentId, job: agentJobId(agentId), live: had?.length ?? 0 });
     if (!this.jobs.size && !this.agentCalls.size) this.disarm();
@@ -294,9 +311,11 @@ export class HeavyJobs {
   }
 
   /** One check of each call run in its agent's job: it ends when its shell's tree is gone on two
-   *  checks in a row. A shell never seen: after its PostToolUse it ran too briefly to be seen if the
-   *  job had new processes since the call began, and else ran outside the job (logged); with no
-   *  PostToolUse it never started (HEAVY_JOB_UNSTARTED_MS). */
+   *  checks in a row. A shell never seen (its command line does not show the command): after its
+   *  PostToolUse (which Codex sends while a long command still runs) the call is held while any
+   *  process created in the jobs since it began lives, and ends 'unseen' when none has on two
+   *  checks ('attach-missed' when the jobs had no new process at all: it ran outside them); with
+   *  no PostToolUse it is held until the agent's turn ends (turnEnded) or HEAVY_JOB_UNSTARTED_MS. */
   private async pollAgentCalls(): Promise<void> {
     for (const [agentId, calls] of [...this.agentCalls]) {
       for (const c of [...calls]) {
@@ -306,20 +325,25 @@ export class HeavyJobs {
         if (c.started) {
           if (Number(r.alive) > 0) { c.idleScans = 0; continue; }
           if (++c.idleScans >= 2) await this.endCall(c, 'done');
-        } else if (c.postSeen) await this.endCall(c, Number(r.total) > c.total0 ? 'done-unseen' : 'attach-missed');
+        } else if (c.postSeen) {
+          if (Number(r.fresh) > 0) { c.idleScans = 0; continue; }
+          if (++c.idleScans >= 2) await this.endCall(c, Number(r.total) > c.total0 ? 'unseen' : 'attach-missed');
+        }
         else if (this.now() - c.startMs >= HEAVY_JOB_UNSTARTED_MS) await this.endCall(c, 'never-started');
       }
     }
   }
 
-  private async endCall(c: AgentCall, how: string): Promise<void> {
-    const rest = (this.agentCalls.get(c.agentId) ?? []).filter((x) => x !== c);
+  private async endCall(c: AgentCall, how: string, why?: string): Promise<void> {
+    const calls = this.agentCalls.get(c.agentId) ?? [];
+    if (!calls.includes(c)) return; // ended already
+    const rest = calls.filter((x) => x !== c);
     if (rest.length) this.agentCalls.set(c.agentId, rest);
     else {
       this.agentCalls.delete(c.agentId);
       await this.req(`set ${agentJobId(c.agentId)} 0 0`);
     }
-    this.log({ action: how, agentId: c.agentId, job: agentJobId(c.agentId), live: rest.length });
+    this.log({ action: how, agentId: c.agentId, job: agentJobId(c.agentId), live: rest.length, ...(why ? { why } : {}) });
   }
 
   /** The calls of each agent running in its own job (for tests and the live proof). */
@@ -330,6 +354,15 @@ export class HeavyJobs {
    *  An empty job whose call never put a process in it has not started yet: it is kept, so a
    *  Settings change still reaches it, until HEAVY_JOB_UNSTARTED_MS. */
   async poll(): Promise<void> {
+    // One check at a time: two at once could end the same call twice (Jim NIT-2).
+    if (this.polling) return this.polling;
+    this.polling = this.pollOnce().finally(() => { this.polling = null; });
+    return this.polling;
+  }
+
+  private polling: Promise<void> | null = null;
+
+  private async pollOnce(): Promise<void> {
     for (const j of [...this.jobs.values()]) {
       const r = await this.req(`list ${j.id}`);
       if (!r || r.ok !== true || !Array.isArray(r.rows)) continue; // unknown: no miss counted

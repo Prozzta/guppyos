@@ -52,7 +52,8 @@ test('two calls of one agent overlap: the limits go on once, stay while either l
     now.t = 2000;
     await j.attachCall('a1', { command: 'npm run build' }, 'unknown-shell', 'codex');
     assert.equal(j.agentCallCount('a1'), 2);
-    assert.deepEqual(f.sent.filter((l) => l.startsWith('set ')), ['set a1-agent 1 1', 'set a1-agent 1 1'], 'limits on at each attach (a live change since is applied too)');
+    assert.deepEqual(f.sent.filter((l) => l.startsWith('agent ')), ['agent a1-agent 777 1 1 1000', 'agent a1-agent 777 1 1 2000'], 'limits on at each attach, in the same request as the sweep');
+    assert.ok(!f.sent.some((l) => l.startsWith('set ')));
     const startOf = { A: 1000, B: 2000 };
     f.state[1000] = { shell: 11, alive: 2 }; f.state[2000] = { shell: 22, alive: 2 };
     await j.poll();
@@ -83,51 +84,134 @@ test('a call ends when its shell\'s tree is gone, not at its PostToolUse (Codex 
   assert.ok(f.sent.includes('set a1-agent 0 0'));
 });
 
-test('a shell never seen: after the Post it is done if the job had new processes, else a logged attach-missed; with no Post it waits for the unstarted limit', async () => {
+test('a shell never seen, after its Post: held while anything created in the jobs since the call began lives (it may be the call), then unseen; attach-missed when the jobs got nothing new', async () => {
   const f = fakeServe(); const now = { t: 100 };
   const { j, logs } = jobs(f, now);
   await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
-  f.state[100] = { shell: 0, alive: 0, total: 9 };
+  f.state[100] = { shell: 0, alive: 0, fresh: 2, total: 9 }; // a shell whose command line does not show the command, still running
   j.callPost('a1', { command: 'npm ci' });
+  await j.poll(); await j.poll(); await j.poll();
+  assert.equal(j.agentCallCount('a1'), 1, 'still held (and limited) after its Post while it may run');
+  assert.ok(!f.sent.includes('set a1-agent 0 0'));
+  f.state[100] = { shell: 0, alive: 0, fresh: 0, total: 9 };
   await j.poll();
-  assert.equal(logs.at(-1).action, 'done-unseen', 'ran inside, too briefly to be seen');
+  assert.equal(j.agentCallCount('a1'), 1, 'one empty check is not the end');
+  await j.poll();
+  assert.equal(j.agentCallCount('a1'), 0);
+  assert.equal(logs.at(-1).action, 'unseen', 'not "done": its shell was never identified');
   now.t = 200;
   await j.attachCall('a1', { command: 'npm ci' }, 'unknown-shell');
   j.callPost('a1', { command: 'npm ci' });
-  await j.poll();
-  assert.equal(logs.at(-1).action, 'attach-missed', 'nothing new in the job: it ran outside (e.g. started by a service)');
-  now.t = 300;
-  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
-  await j.poll();
-  assert.equal(j.agentCallCount('a1'), 1, 'not run yet (its user has not approved it)');
-  now.t = 300 + C.HEAVY_JOB_UNSTARTED_MS;
-  await j.poll();
-  assert.equal(logs.at(-1).action, 'never-started');
-  assert.equal(j.agentCallCount('a1'), 0);
+  await j.poll(); await j.poll();
+  assert.equal(logs.at(-1).action, 'attach-missed', 'nothing new in the jobs: it ran outside (e.g. started by a service)');
 });
 
-test('the agent going (exit or respawn) lets its job go; an agent with no process logs a failed attach', async () => {
+test('a call with no Post: held until the agent\'s turn ends (a declined call), else the unstarted limit; a started or Posted call is not ended by the turn', async () => {
+  const f = fakeServe(); const now = { t: 300 };
+  const { j, logs } = jobs(f, now);
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first', 'codex');
+  await j.poll();
+  assert.equal(j.agentCallCount('a1'), 1, 'not run yet (its user has not answered)');
+  await j.turnEnded('a1', 'Stop');
+  assert.equal(j.agentCallCount('a1'), 0);
+  assert.deepEqual([logs.at(-1).action, logs.at(-1).why], ['not-run', 'Stop']);
+  assert.ok(f.sent.includes('set a1-agent 0 0'), 'limits off at once, not after 30 min');
+  now.t = 400;
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  f.state[400] = { shell: 9, alive: 1 };
+  await j.poll();
+  now.t = 500;
+  await j.attachCall('a1', { command: 'npm test' }, 'ask-first');
+  j.callPost('a1', { command: 'npm test' });
+  await j.turnEnded('a1', 'UserPromptSubmit');
+  assert.equal(j.agentCallCount('a1'), 2, 'a running call and a Posted one stay');
+  now.t = 600;
+  const g = jobs(fakeServe(), now);
+  await g.j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  now.t = 600 + C.HEAVY_JOB_UNSTARTED_MS;
+  await g.j.poll();
+  assert.equal(g.logs.at(-1).action, 'never-started', 'no turn end seen: the unstarted limit');
+});
+
+test('two checks at once end a call once (no second done row, no second lift)', async () => {
+  const f = fakeServe(); const now = { t: 700 };
+  const { j, logs } = jobs(f, now);
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  f.state[700] = { shell: 9, alive: 1 };
+  await j.poll();
+  f.state[700] = { shell: 9, alive: 0 };
+  await Promise.all([j.poll(), j.poll(), j.poll()]);
+  await Promise.all([j.poll(), j.poll(), j.poll()]);
+  await Promise.all([j.poll(), j.poll(), j.poll()]);
+  assert.equal(logs.filter((r) => r.action === 'done').length, 1);
+  assert.equal(f.sent.filter((l) => l === 'set a1-agent 0 0').length, 1);
+});
+
+test('the agent going (exit or respawn) lifts its limits first (what outlives it gets its own values back), then lets its job go; an agent with no process logs a failed attach', async () => {
   const f = fakeServe(); const now = { t: 1 };
   const { j, logs } = jobs(f, now);
   await j.agentGone('a1');
   assert.ok(!f.sent.includes('close a1-agent'), 'no job made yet: nothing to close');
   await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
   await j.agentGone('a1');
-  assert.ok(f.sent.includes('close a1-agent'));
+  assert.deepEqual(f.sent.slice(-2), ['set a1-agent 0 0', 'close a1-agent'], 'mid-call: lift, then close');
   assert.equal(j.agentCallCount('a1'), 0);
   assert.deepEqual(logs.at(-1), { kind: 'heavy-cpu', action: 'agent-gone', agentId: 'a1', job: 'a1-agent', live: 1 });
+  f.state[1] = { shell: 9, alive: 0 };
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  await j.poll(); await j.poll();
+  assert.equal(j.agentCallCount('a1'), 0);
+  const n = f.sent.length;
+  await j.agentGone('a1');
+  assert.deepEqual(f.sent.slice(n), ['close a1-agent'], 'no call live: the limits are off already');
   await j.attachCall('gone', { command: 'npm ci' }, 'ask-first', 'codex');
   assert.equal(logs.at(-1).action, 'attach-failed');
   assert.ok(!f.sent.some((l) => l.startsWith('agent gone')));
+});
+
+test('a sweep that fails takes back the limits it may have set when no other call of the agent is live', async () => {
+  const sent = [];
+  const logs = [];
+  const j = new C.HeavyJobs({ platform: 'win32', options: () => ({ background: true, half: true }), exe: () => 'x', now: () => 1, setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r), root: () => 777,
+    channel: () => ({ request: async (line) => { sent.push(line); return line.startsWith('agent ') ? { ok: false, error: 'no process 777' } : { ok: true }; }, close() {} }) });
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  assert.deepEqual(sent, ['agent a1-agent 777 1 1 1', 'set a1-agent 0 0']);
+  assert.deepEqual([logs.at(-1).action, logs.at(-1).why], ['attach-failed', 'no process 777']);
+  await j.agentGone('a1');
+  assert.equal(sent.at(-1), 'close a1-agent', 'its job is still let go');
+});
+
+test('a reply in error (slow or unreadable) keeps the helper: only a dead one is started again, so the agent jobs in it are not lost', async () => {
+  let made = 0;
+  const sent = [];
+  const reply = { v: { ok: false, error: 'no reply in time' } };
+  const j = new C.HeavyJobs({ platform: 'win32', options: () => ({ background: true, half: true }), exe: () => 'x', now: () => 1, setInterval: () => 1, clearInterval: () => {}, log: () => {}, root: () => 777,
+    channel: () => { made++; return { request: async (line) => { sent.push(line); return line.startsWith('agent ') ? { ok: true, total: 1 } : reply.v; }, close() {} }; } });
+  await j.attachCall('a1', { command: 'npm ci' }, 'ask-first');
+  await j.poll();
+  reply.v = { ok: false, error: 'unreadable reply' };
+  await j.poll();
+  assert.equal(made, 1, 'one helper for all of it');
+  assert.equal(j.agentCallCount('a1'), 1, 'the call is not ended by an unknown answer');
+  reply.v = null; // gone
+  await j.poll();
+  await j.poll();
+  assert.equal(made, 2, 'a dead helper is started again');
+});
+
+test('WIRING: the helper\'s error reply is one line (a message with a line break would be read as two replies)', () => {
+  const cs = fs.readFileSync(path.join(__dirname, '..', 'resources', 'heavyjob', 'guppy-heavyjob.cs'), 'utf8');
+  assert.ok(cs.includes('reply = "{\\"ok\\":false,\\"error\\":\\"" + e.Message.Replace("\\\\", "\\\\\\\\").Replace("\\"", "\\\\\\"").Replace("\\r", " ").Replace("\\n", " ") + "\\"}";'));
 });
 
 test('WIRING: main gives the agent\'s PTY process as its root and lets its job go at PTY exit and at each new spawn', () => {
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
   assert.match(idx, /root: \(agentId\) => ptyManager\.list\(\)\.filter\(\(s\) => ptyToAgent\.get\(s\.id\) === agentId && s\.pid > 0\)\.at\(-1\)\?\.pid \?\? null/);
   assert.match(idx, /if \(!\[\.\.\.ptyToAgent\.values\(\)\]\.includes\(agentId\)\) void heavyJobs\.agentGone\(agentId\)/, 'at PTY exit');
-  assert.match(idx, /if \(res\.ok && opts\.hive\?\.id\) void heavyJobs\.agentGone\(opts\.hive\.id\)/, 'at a new spawn');
+  assert.match(idx, /if \(res\.ok && opts\.hive\?\.id && !\[\.\.\.ptyToAgent\]\.some\(\(\[id, a\]\) => a === opts\.hive\?\.id && id !== opts\.id\)\) void heavyJobs\.agentGone\(opts\.hive\.id\)/, 'at a new spawn, when no other PTY of the agent runs');
   const hooks = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'hooks.ts'), 'utf8');
   assert.match(hooks, /this\.heavyJobs\?\.callPost\(agentId, p\.tool_input\)/);
+  assert.match(hooks, /if \(agentId && !fromSubagent && \(\(event === 'Stop' && p\.fully_idle !== false\) \|\| event === 'StopFailure' \|\| event === 'UserPromptSubmit'\)\) \{\r?\n\s+void this\.heavyJobs\?\.turnEnded\(agentId, event\)/, 'a turn end reaches the unstarted calls');
 });
 
 // ── LIVE: the real helper and a Codex-shaped agent ─────────────────────────────────────────
@@ -261,6 +345,171 @@ test('LIVE: an ask-first call\'s whole tree, a grandchild that forks and exits a
         await gone;
       }
       // The probes that hold are short-lived; wait for the folder to be free.
+      for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+    }
+  });
+
+test('LIVE: a call whose shell is not identified stays limited after its Post while it runs; a detached process started after a call outlives the agent, as with no call',
+  { skip: process.platform !== 'win32' ? 'Windows only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 180_000 },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-agent2-'));
+    const shims = []; let j = null; const held = [];
+    try {
+      const exe = path.join(dir, 'guppy-heavyjob.exe'); const probe = path.join(dir, 'probe.exe');
+      let c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, path.join(__dirname, '..', 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+      fs.writeFileSync(path.join(dir, 'probe.cs'), PROBE);
+      c = spawnSync(CSC, ['-nologo', '-O', `-out:${probe}`, path.join(dir, 'probe.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc probe: ${c.stdout}${c.stderr}`);
+      fs.writeFileSync(path.join(dir, 'shim.js'), SHIM); fs.writeFileSync(path.join(dir, 'cli.js'), CLI);
+      const agent = () => { const bornAt = Date.now(); const s = spawn(process.execPath, [path.join(dir, 'shim.js'), path.join(dir, 'cli.js')], { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }); s.bornAt = bornAt; shims.push(s); return s; };
+      const run = (s, cmd) => s.stdin.write(`${JSON.stringify({ cmd })}\n`);
+      const end = (s) => new Promise((r) => { if (s.exitCode !== null || s.signalCode !== null) r(); else { s.once('exit', r); s.stdin.end(); } });
+      const sub = (name) => { const d = path.join(dir, name); fs.mkdirSync(d); return d; };
+      const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      const half = C.halfCoreCount(os.cpus().length);
+      const bits = (m) => { let n = 0; for (let x = BigInt(m); x; x >>= 1n) n += Number(x & 1n); return n; };
+      const logs = []; let root = 0; let nowAt = null;
+      j = new C.HeavyJobs({ platform: 'win32', options: () => ({ background: true, half: true }), exe: () => exe, now: () => nowAt ?? Date.now(), setInterval: () => 1, clearInterval: () => {}, log: (r) => logs.push(r), root: () => root });
+
+      // A detached process started with no call ever made: it outlives the agent (the baseline).
+      const a0 = agent();
+      const d0 = sub('d0');
+      run(a0, `& '${probe}' hold 15000 '${d0}'`);
+      await until('baseline detached', () => rows(d0).length >= 1);
+      held.push(rows(d0)[0].pid);
+      await end(a0);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.ok(alive(rows(d0)[0].pid), 'baseline: a process the agent started outlives it');
+
+      const a1 = agent(); root = a1.pid;
+      // The agent is up (its CLI runs commands) before the call: what it started earlier is not the call's.
+      const up = sub('up');
+      run(a1, `& '${probe}' record '${up}'`);
+      await until('agent up', () => rows(up).length >= 1);
+      // A call whose shell Guppy cannot identify (its command line is not the command), still
+      // running after Codex's early Post: held in the limits while it runs.
+      const u = sub('u');
+      // Its first call begins as the agent starts (the start as early as the agent's own spawn): what
+      // its sweep found is the agent, not the call, however new it is.
+      nowAt = a1.bornAt;
+      await j.attachCall('a1', { command: 'npm run build -- --not-as-run' }, 'unknown-shell', 'codex');
+      nowAt = null;
+      run(a1, `& '${probe}' hold 3000 '${u}'`);
+      await until('unidentified call runs', () => rows(u).length >= 1);
+      j.callPost('a1', { command: 'npm run build -- --not-as-run' });
+      await j.poll(); await j.poll(); await j.poll();
+      assert.equal(j.agentCallCount('a1'), 1, 'held after its Post while it runs');
+      assert.equal(bits(rows(u)[0].mask), half); assert.equal(rows(u)[0].prio, 16384);
+      try {
+        await until('unidentified call ends', () => { void j.poll(); return j.agentCallCount('a1') === 0; }, 60_000);
+      } catch (e) {
+        const ch = C.serveChannel(exe); // what the jobs hold now, for the failure message
+        const r = await ch.request(`call a1-agent ${j.agentCalls.get('a1')?.[0]?.startMs ?? 0} ${Buffer.from('x').toString('base64')}`);
+        ch.close();
+        const own = require('./tools/own-procs.cjs');
+        const rowsNow = own.processTable();
+        const late = own.treeOf(rowsNow, rowsNow.find((x) => x.pid === root) ?? { pid: root, created: 0 }).map((x) => `${x.pid}<${x.ppid} ${x.name} ${x.created}`);
+        throw new Error(`${e.message}: ${JSON.stringify(r)} ${JSON.stringify(logs.slice(-6))} tree: ${late.join(', ')} start=${j.agentCalls.get('a1')?.[0]?.startMs} a1Spawned=${a1.bornAt}`);
+      }
+      assert.ok(logs.some((r) => r.action === 'unseen'), JSON.stringify(logs));
+
+      // After the call (no limit on): a detached process the agent starts outlives the agent.
+      const d1 = sub('d1');
+      run(a1, `& '${probe}' hold 15000 '${d1}'`);
+      await until('detached after a call', () => rows(d1).length >= 1);
+      held.push(rows(d1)[0].pid);
+      assert.ok(bits(rows(d1)[0].mask) > half, 'not limited: no call is live');
+      await end(a1);
+      await new Promise((r) => setTimeout(r, 500));
+      assert.ok(alive(rows(d1)[0].pid), 'a process started after a call outlives the agent, as with no call');
+      await j.agentGone('a1');
+    } finally {
+      j?.dispose();
+      for (const s of shims) if (s.exitCode === null && s.signalCode === null) { const g = new Promise((r) => s.once('exit', r)); try { s.stdin.end(); } catch { /* gone */ } await g; }
+      // The held probes end by themselves (15 s); wait for them, then for the folder to be free.
+      for (const pid of held) for (let i = 0; i < 200; i++) { try { process.kill(pid, 0); } catch { break; } await new Promise((r) => setTimeout(r, 100)); }
+      for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+    }
+  });
+
+test('LIVE: a serve that dies leaves its agent jobs to the next one: it opens them by name, answers for the call and lifts the limits',
+  { skip: process.platform !== 'win32' ? 'Windows only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-agent-'));
+    let watch = null; let a = null; let ch = null;
+    try {
+      const exe = path.join(dir, 'guppy-heavyjob.exe'); const probe = path.join(dir, 'probe.exe');
+      let c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, path.join(__dirname, '..', 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+      fs.writeFileSync(path.join(dir, 'probe.cs'), PROBE);
+      c = spawnSync(CSC, ['-nologo', '-O', `-out:${probe}`, path.join(dir, 'probe.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc probe: ${c.stdout}${c.stderr}`);
+      const [w1, w2, w3] = ['w1', 'w2', 'w3'].map((n) => { const d = path.join(dir, n); fs.mkdirSync(d); return d; });
+      const go = (d) => fs.writeFileSync(path.join(d, 'go'), '');
+      const half = C.halfCoreCount(os.cpus().length);
+      const bits = (m) => { let n = 0; for (let x = BigInt(m); x; x >>= 1n) n += Number(x & 1n); return n; };
+      watch = spawn(probe, ['watch', w1, w2, w3], { stdio: 'ignore', windowsHide: true });
+      await until('agent up', () => rows(w1).length >= 1);
+
+      // Serve A puts the "agent" in its job with the limits on, then dies.
+      a = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      const first = await new Promise((resolve) => { a.stdout.once('data', (d) => resolve(String(d))); a.stdin.write(`agent t1-agent ${watch.pid} 1 1 ${Date.now()}\n`); });
+      assert.equal(JSON.parse(first).ok, true, first);
+      go(w1);
+      await until('limited in the job', () => rows(w2).length >= 1);
+      assert.ok(bits(rows(w2)[0].mask) <= half, 'limited while serve A lives');
+      const gone = new Promise((r) => a.once('exit', r));
+      a.kill();
+      await gone;
+
+      // Serve B: the call is answered and the limits come off.
+      ch = C.serveChannel(exe);
+      const call = await ch.request(`call t1-agent ${Date.now()} ${Buffer.from('x', 'utf8').toString('base64')}`);
+      assert.equal(call?.ok, true, JSON.stringify(call));
+      assert.ok(Number(call.total) >= 1, 'the agent is still in the job it opened again');
+      const lift = await ch.request('set t1-agent 0 0');
+      assert.deepEqual(lift, { ok: true });
+      go(w2);
+      await until('after the lift', () => rows(w3).length >= 1);
+      assert.ok(bits(rows(w3)[0].mask) > half, 'the limits came off');
+      assert.notEqual(rows(w3)[0].prio, 0x4000, 'no longer below normal');
+      assert.deepEqual(await ch.request('close t1-agent'), { ok: true });
+    } finally {
+      ch?.close();
+      if (a && a.exitCode === null && a.signalCode === null) { const g = new Promise((r) => a.once('exit', r)); a.kill(); await g; }
+      if (watch && watch.exitCode === null && watch.signalCode === null) { const g = new Promise((r) => watch.once('exit', r)); watch.kill(); await g; }
+      for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+    }
+  });
+
+// A stand-in serve: `slow` answers after 4 s (past the request limit), `bad` answers with a line
+// that is not JSON, anything else answers {"ok":true,"r":<line>}.
+const FAKE_SERVE = `
+using System;
+static class Fake { static void Main() { string l; while ((l = Console.ReadLine()) != null) {
+  if (l == "slow") { System.Threading.Thread.Sleep(4000); Console.WriteLine("{\\"ok\\":true,\\"r\\":\\"slow\\"}"); }
+  else if (l == "bad") Console.WriteLine("not json");
+  else Console.WriteLine("{\\"ok\\":true,\\"r\\":\\"" + l + "\\"}");
+  Console.Out.Flush(); } } }
+`;
+
+test('LIVE: the serve channel answers a slow or unreadable reply with an error, not as a dead helper, and stays in step',
+  { skip: process.platform !== 'win32' ? 'Windows only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 60_000 },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hcpu-chan-'));
+    let ch = null;
+    try {
+      const exe = path.join(dir, 'fake.exe');
+      fs.writeFileSync(path.join(dir, 'fake.cs'), FAKE_SERVE);
+      const c = spawnSync(CSC, ['-nologo', `-out:${exe}`, path.join(dir, 'fake.cs')], { encoding: 'utf8', windowsHide: true });
+      assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+      ch = C.serveChannel(exe);
+      assert.deepEqual(await ch.request('slow'), { ok: false, error: 'no reply in time' });
+      assert.deepEqual(await ch.request('bad'), { ok: false, error: 'unreadable reply' });
+      assert.deepEqual(await ch.request('x'), { ok: true, r: 'x' }, 'the late reply took its own place');
+    } finally {
+      ch?.close();
       for (let i = 0; i < 100; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
     }
   });

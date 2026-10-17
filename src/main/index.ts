@@ -4852,8 +4852,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const res = await ptyManager.spawn(opts, owner);
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   // CODEX-AGY-ASKFIRST-HEAVYCPU-192: a new process of the agent starts with no own job; the old
-  // one's job is let go (its next gated call makes a new one for this tree).
-  if (res.ok && opts.hive?.id) void heavyJobs.agentGone(opts.hive.id).catch(() => { /* best-effort */ });
+  // one's job is lifted and let go (its next gated call makes a new one for this tree), unless
+  // another PTY of the agent still runs in it (its exit lets it go then).
+  if (res.ok && opts.hive?.id && ![...ptyToAgent].some(([id, a]) => a === opts.hive?.id && id !== opts.id)) void heavyJobs.agentGone(opts.hive.id).catch(() => { /* best-effort */ });
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
     // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.

@@ -214,7 +214,7 @@ test('HOOK: Codex that asks its user first: no rewrite and no allow, so its appr
   assert.deepEqual(attached(), [['a1', 'claude', 'ask-first']], 'the call is logged with its agent and provider (Jim SHOULD-1 a)');
   assert.equal(asks?.hookSpecificOutput?.permissionDecision, undefined, 'no allow for an agent that asks');
   assert.equal(asks?.hookSpecificOutput?.updatedInput, undefined);
-  assert.deepEqual(f.sent, ['agent a1-agent 4321', 'set a1-agent 0 1'], 'no per-call job: the agent\'s tree goes in its own job, then the limits go on');
+  assert.deepEqual(f.sent.map((l) => l.replace(/ [0-9]{13}$/, ' <start>')), ['agent a1-agent 4321 0 1 <start>'], 'no per-call job: the limits go on and the agent\'s tree goes in its own job, in one request');
   s.setHeavyAutoApproves((id) => id === 'a1');
   const auto = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
   assert.equal(auto.hookSpecificOutput.permissionDecision, 'allow');
