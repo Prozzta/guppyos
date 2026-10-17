@@ -69,6 +69,13 @@ function allCalls(pred) {
   }
   return out;
 }
+/** The terminal property is the callee name for both bare and qualified calls. */
+function callName(call) {
+  const callee = call.expression;
+  if (ts.isIdentifier(callee)) return callee.text;
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+  return '';
+}
 /** A class method's source (code only), from its signature to its closing brace. */
 const method = (sig) => { const at = src.indexOf(`  ${sig} {`); assert.ok(at >= 0, sig); return src.slice(at, src.indexOf('\n  }\n', at)); };
 const tmpDir = tmpRoot;
@@ -108,7 +115,7 @@ test('AST inventory: every extracted Layer B module is subject to the mutation a
     return !guarded;
   });
   assert.deepEqual(direct.map(({ n, unit }) => `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(n.getStart(unit.sf)).line + 1}`), [], 'a disk mutation outside W');
-  const spawns = allCalls((n) => /^(spawn|spawnSync)$/.test(n.expression.getText()));
+  const spawns = allCalls((n) => /^(spawn|spawnSync)$/.test(callName(n)));
   assert.ok(spawns.length >= 10, `found ${spawns.length} spawn calls`);
   const visible = spawns.filter(({ n }) => {
     const opts = n.arguments.find((a) => ts.isObjectLiteralExpression(a));
@@ -158,7 +165,7 @@ test('AST: every disk mutation in the runner\'s code sits inside the write guard
   assert.ok(opens.length >= 2);
   for (const o of opens) assert.equal(o.arguments[1] && o.arguments[1].getText(sf), "'r'", `line ${line(o)} opens read-only`);
   // Nothing requires fs/promises or a child-process-based copy (robocopy/xcopy/mklink) to dodge the guard.
-  assert.ok(!/require\('node:fs\/promises'\)|fs\.promises|robocopy|xcopy|mklink|New-Item/.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
+  assert.ok(!/require\('node:fs\/promises'\)|fs\.promises|robocopy|xcopy|mklink|New-Item/.test(allCode.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
 });
 
 test('AST: every spawn / spawnSync call, at any nesting, passes windowsHide: true', () => {
@@ -299,7 +306,7 @@ test('SOURCE: no --force worktree removal (node_modules goes first), no fixed ca
   assert.match(clean, /isSymbolicLink\(\)\) throw new Error\('node_modules is a link/, 'never removed through a link');
   assert.equal((src.match(/'worktree', 'remove'/g) || []).length, 1);
   assert.ok(!/9333/.test(allCode), 'no fixed canary port in any Layer B module');
-  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
+  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(allCode.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
   assert.match(src, /if \(!this\.args\.go\) \{[\s\S]{0,300}return 0;/);
   const main = src.slice(src.indexOf('async main() {'));
   assert.ok(main.indexOf('return 0;') < main.indexOf('W.allowRoot(s.base)'), 'without --go nothing is even registered for writing');
@@ -784,11 +791,12 @@ test('god 1a3c97 catch sweep (runner): listing, reading, monitoring and cleanup 
 });
 
 test('round 6: every PowerShell start is -EncodedCommand (never -Command - over stdin); the live before-snapshot comes first; the report states what happened', () => {
-  const psCalls = calls((n) => /^(spawn|spawnSync)$/.test(n.expression.getText(sf)) && n.arguments[0] && n.arguments[0].getText(sf) === 'PS');
+  const psCalls = allCalls((n, nodeSf) => /^(spawn|spawnSync)$/.test(callName(n)) && n.arguments[0] && n.arguments[0].getText(nodeSf) === 'PS');
   assert.ok(psCalls.length >= 3, `PowerShell starts found: ${psCalls.length}`);
-  for (const c of psCalls) {
-    assert.match(c.arguments[1].getText(sf), /^psArgs\(/, `line ${line(c)} builds its arguments with psArgs`);
-    assert.ok(!/stdin|input:/.test(c.getText(sf)), `line ${line(c)} feeds nothing on stdin`);
+  for (const { n: c, unit } of psCalls) {
+    const where = `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(c.getStart(unit.sf)).line + 1}`;
+    assert.match(c.arguments[1].getText(unit.sf), /^psArgs\(/, `${where} builds its arguments with psArgs`);
+    assert.ok(!/stdin|input:/.test(c.getText(unit.sf)), `${where} feeds nothing on stdin`);
   }
   assert.ok(!/'-Command'/.test(allCode), 'no -Command anywhere in a Layer B module');
   const hook = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-jail-hook.cjs'), 'utf8');
