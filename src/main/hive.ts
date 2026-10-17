@@ -3839,7 +3839,7 @@ export class HiveManager {
       .map((s) => ({ s, e: asked(s) }))
       .filter(({ s }) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
     const backstop = closed.filter(({ s, e }) => !!e && s.reason.startsWith('auto:backstop:'));
-    for (const { s, e } of backstop) this.noticeBackstopClose(s, e!, now);
+    this.noticeBackstopCloses(backstop.map(({ s, e }) => ({ s, e: e! })), now);
     const root = this.root();
     if (root && backstop.length) {
       try { recordBackstopClosed(root, backstop.map(({ s, e }) => ({ agentId: s.agentId, from: e!.from, id: s.id, subject: e!.subject, at: now })), now); }
@@ -3849,14 +3849,22 @@ export class HiveManager {
   }
 
   /** REQUESTS-AUTO-190 R4: a backstop close is told to both sides, once (the close is the dedupe:
-   *  a closed ask is never closed again). An inform with no reply owed; nothing to act on. */
-  private noticeBackstopClose(s: StaleObligation, e: MailLedgerDoc['entries'][string], now: number): void {
-    const hours = Math.round((now - e.deliveredAt) / 3_600_000);
-    const subject = `Ask closed by the backstop: ${String(e.subject).slice(0, 120)}`;
-    const body = `The ask ${s.id} from ${e.from} to ${s.agentId} was still open ${hours} h after it arrived, and ${s.agentId} has written to ${e.from} since (${s.reason.slice('auto:backstop:'.length)}), so the harness closed it (REQUESTS-AUTO-190). No reply is needed. If the work is not finished, carry on: answering it later is ordinary mail.`;
-    for (const to of new Set([s.agentId, e.from])) {
-      try { this.send({ to, act: 'inform', requires_reply: false, subject, body, ...(e.cardId ? { card: e.cardId } : {}) }, 'system'); }
-      catch (err) { try { this.appendLog({ kind: 'mail-ledger-error', agentId: to, id: s.id, op: 'backstop-notice', error: String(err) }); } catch { /* noop */ } }
+   *  a closed ask is never closed again). An inform with no reply owed; nothing to act on. One
+   *  notice per recipient per sweep (Jim NIT-2: a sweep after a long-down hive is not 2N wakes). */
+  private noticeBackstopCloses(list: { s: StaleObligation; e: MailLedgerDoc['entries'][string] }[], now: number): void {
+    const line = ({ s, e }: (typeof list)[number]): string => {
+      const hours = Math.round((now - e.deliveredAt) / 3_600_000);
+      return `The ask ${s.id} from ${e.from} to ${s.agentId} ("${String(e.subject).slice(0, 120)}") was still open ${hours} h after it arrived, and ${s.agentId} has written to ${e.from} since (${s.reason.slice('auto:backstop:'.length)}).`;
+    };
+    const byTo = new Map<string, (typeof list)[number][]>();
+    for (const c of list) for (const to of new Set([c.s.agentId, c.e.from])) byTo.set(to, [...(byTo.get(to) ?? []), c]);
+    for (const [to, mine] of byTo) {
+      const one = mine.length === 1 ? mine[0] : null;
+      const subject = one ? `Ask closed by the backstop: ${String(one.e.subject).slice(0, 120)}` : `${mine.length} asks closed by the backstop`;
+      const body = `${mine.map(line).join('\n')}\nSo the harness closed ${one ? 'it' : 'them'} (REQUESTS-AUTO-190). No reply is needed. If the work is not finished, carry on: answering later is ordinary mail.`;
+      const card = one?.e.cardId;
+      try { this.send({ to, act: 'inform', requires_reply: false, subject, body, ...(card ? { card } : {}) }, 'system'); }
+      catch (err) { try { this.appendLog({ kind: 'mail-ledger-error', agentId: to, ids: mine.map((c) => c.s.id), op: 'backstop-notice', error: String(err) }); } catch { /* noop */ } }
     }
   }
 
