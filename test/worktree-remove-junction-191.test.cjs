@@ -105,6 +105,30 @@ test('unlink refuses the junction (EPERM): a NON-recursive rmdir removes the lin
   assert.equal(fs.existsSync(s.wt), false);
 });
 
+test('a subdirectory that cannot be read (EACCES), or an lstat that fails: REFUSED, nothing deleted (Jim SHOULD-1)', async (t) => {
+  const s = setup(t);
+  const shared = s.target('shared');
+  fs.mkdirSync(path.join(s.wt, 'locked'));
+  fs.symlinkSync(shared, path.join(s.wt, 'locked', 'node_modules'), 'junction');
+  const locked = path.join(s.wt, 'locked');
+  const eacces = (p) => Object.assign(new Error(`EACCES: permission denied, scandir '${p}'`), { code: 'EACCES' });
+  const base = { unlink: (p) => fs.promises.unlink(p), rmdir: (p) => fs.promises.rmdir(p) };
+  const r = await git.removeWorktree(s.repo, s.wt, { ...base, readdir: async (p) => { if (p === locked) throw eacces(p); return fs.promises.readdir(p); } });
+  assert.equal(r.ok, false);
+  assert.equal(r.refused, true);
+  assert.match(r.error, /locked/);
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'THE TARGET SURVIVES');
+  assert.equal(fs.existsSync(path.join(s.wt, 'a.txt')), true, 'the worktree was not force-removed');
+  const r2 = await git.removeWorktree(s.repo, s.wt, { ...base, lstat: async (p) => { if (p === locked) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); return fs.promises.lstat(p); } });
+  assert.equal(r2.refused, true, 'an lstat failure refuses too');
+  assert.equal(fs.existsSync(sentinel(shared)), true);
+  // ENOENT is not a failure: an entry gone mid-walk (or the whole worktree) is nothing to unlink
+  const r3 = await git.removeWorktree(s.repo, s.wt, { ...base, lstat: async (p) => { if (p === path.join(s.wt, 'a.txt')) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); return fs.promises.lstat(p); } });
+  assert.equal(r3.ok, true, r3.error);
+  assert.equal(fs.existsSync(sentinel(shared)), true, 'and the normal path still removes the link as a link');
+  assert.equal(fs.existsSync(s.wt), false);
+});
+
 test('the worker path (finalizeWorkerWorktree): a clean worker worktree with an ignored junction is gc-safe and removed, the target survives', async (t) => {
   const s = setup(t);
   const shared = s.target('shared');

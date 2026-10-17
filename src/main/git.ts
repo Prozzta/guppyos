@@ -264,8 +264,15 @@ export async function addWorktree(
 }
 
 /** The two removals unlinkLinksUnder uses (injectable for tests). */
-export interface LinkOps { unlink: (p: string) => Promise<void>; rmdir: (p: string) => Promise<void> }
+export interface LinkOps {
+  unlink: (p: string) => Promise<void>;
+  rmdir: (p: string) => Promise<void>;
+  readdir?: (p: string) => Promise<string[]>;
+  lstat?: (p: string) => Promise<{ isSymbolicLink(): boolean; isDirectory(): boolean }>;
+}
 const fsLinkOps: LinkOps = { unlink: (p) => fsp.unlink(p), rmdir: (p) => fsp.rmdir(p) };
+const errText = (e: unknown): string => e instanceof Error ? e.message : String(e);
+const gone = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === 'ENOENT';
 
 /** WORKTREE-REMOVE-JUNCTION-191: remove every junction/symlink under `root` as a LINK, never
  *  through it (scripts/worktree-reaper.cjs removeLinks). A junction is a directory link on
@@ -275,18 +282,21 @@ export async function unlinkLinksUnder(
 ): Promise<{ removed: number; failed: { path: string; error: string }[] }> {
   let removed = 0;
   const failed: { path: string; error: string }[] = [];
+  const readdir = ops.readdir ?? ((p: string) => fsp.readdir(p));
+  const lstat = ops.lstat ?? ((p: string) => fsp.lstat(p));
   const stack = [root];
   while (stack.length) {
     const dir = stack.pop()!;
     let names: string[] = [];
-    try { names = await fsp.readdir(dir); } catch { continue; }
+    // A directory that cannot be read may hold links: a failure (the remove is refused), unless gone.
+    try { names = await readdir(dir); } catch (e) { if (!gone(e)) failed.push({ path: dir, error: errText(e) }); continue; }
     for (const name of names) {
       const p = join(dir, name);
       let st;
-      try { st = await fsp.lstat(p); } catch { continue; }
+      try { st = await lstat(p); } catch (e) { if (!gone(e)) failed.push({ path: p, error: errText(e) }); continue; }
       if (st.isSymbolicLink()) {
         try { await ops.unlink(p); removed++; } catch {
-          try { await ops.rmdir(p); removed++; } catch (e) { failed.push({ path: p, error: e instanceof Error ? e.message : String(e) }); }
+          try { await ops.rmdir(p); removed++; } catch (e) { failed.push({ path: p, error: errText(e) }); }
         }
       } else if (st.isDirectory()) stack.push(p);
     }
