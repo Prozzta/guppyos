@@ -136,6 +136,16 @@ test('REGRESSION: switching the limit Off tells every queued agent to run', () =
   assert.deepEqual(x.l.queueSnapshot(), { waiters: [], reserved: [] });
 });
 
+test('REGRESSION: switching the limit Off does not notify a gone waiter or reservation', () => {
+  const notes = []; const x = rig(HJ, 1, { notifyUnlimited: (a, k) => notes.push([a, k]) });
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.gone.add('b'); x.setLimit('off'); x.l.limitChanged();
+  assert.deepEqual(notes, [['c', 'suite']], 'the gone reservation receives no impossible wake');
+  assert.deepEqual(x.l.queueSnapshot(), { waiters: [], reserved: [] });
+});
+
 test('the re-entrant holder is unchanged, and a holder is never queued', () => {
   const x = rig();
   x.l.acquire('a', H, 'npm ci', 'a1', false);

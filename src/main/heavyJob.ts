@@ -222,7 +222,7 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
   return out.map((s) => s.trim()).filter(Boolean);
 }
 
-const WRAPPERS = new Set(['bash', 'sh', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bash.exe']);
+const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bash.exe']);
 /** The binaries a wrapper script can be asked to run (`node clean-run.cjs <bin> ...`). */
 const WRAPPED_BINS = new Set(['node', 'npm', 'npx', 'pnpm', 'yarn', 'electron', 'electron-builder', 'electron-rebuild', 'node-gyp', 'vitest', 'env', 'timeout', 'nice']);
 const BENCH_SCRIPT = /(mutant|mutation|replay|bench|backfill|parity|speed|stress|soak)[^\\/]*\.(c?m?js|ts)$/i;
@@ -789,8 +789,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   const prefix = ws0.slice(0, ws0.length - ws.length);
   const gate = prefix.find((w) => BENCH_ENV.test(w));
   if (gate) return { heavy: true, kind: 'bench', why: `${gate.split('=')[0]} (an opt-in bench gate)` };
-  const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
-  const args = ws.slice(1);
+  let bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
+  let args = ws.slice(1);
+  // busybox sh is a shell wrapper just like its standalone sh/dash siblings.
+  if (bin === 'busybox' && /^(?:sh|dash|ash)$/i.test(args[0] ?? '')) { bin = 'sh'; args = args.slice(1); }
   if (hasUnclosed && WRAPPERS.has(bin)) return { heavy: false };
   // cmd.exe /s /c uses doubled outer quotes for one Win32 command string. Reconstruct the inner
   // executable (including paths with spaces) before classifying; ignoring this opaque-looking
@@ -817,11 +819,12 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // was read one level deep only).
     if (k >= 0) {
       const body = args.slice(k + 1).join(' ');
-      // A command string expanded by a shell is not inspectable after expansion.  This covers
-      // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`) and `bash -c "$(cat run.sh)"`.
-      // Deliberately conservative: a rare light command substitution also reserves a slot.
+      // A command string expanded by a shell is not inspectable after expansion. This covers
+      // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`), shell `$C` indirection, `eval $C`,
+      // and `bash`/`dash`/`zsh`/busybox-sh `-c "$(cat run.sh)"`. Deliberately conservative:
+      // a rare light expansion also reserves a slot rather than reopening this escape class.
       if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
-          ((bin === 'bash' || bin === 'sh') && /(?:\$\(|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
+          ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
@@ -1614,6 +1617,11 @@ export class HeavyJobLock {
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };
   }
+  if (bin === 'eval') {
+    const body = args.join(' ');
+    if (ctx.dialect === 'sh' && /(?:\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };
+    return nested(body, depth, { ...ctx, dialect: 'sh' }, 'eval');
+  }
 
   /** A Settings change may create capacity without a holder releasing. Promote queued
    *  agents immediately so the new slot is not stranded until another release. */
@@ -1723,7 +1731,7 @@ export class HeavyJobLock {
       const pending = [...this.waiters, ...[...this.reservations.entries()].map(([agentId, r]) => ({ agentId, kind: r.kind }))];
       this.waiters.length = 0; this.reservations.clear();
       if (pending.length) this.changed();
-      for (const w of pending) { try { this.d.notifyUnlimited?.(w.agentId, w.kind); } catch { /* best effort */ } }
+      for (const w of pending) { try { if (!this.d.alive || this.d.alive(w.agentId)) this.d.notifyUnlimited?.(w.agentId, w.kind); } catch { /* best effort */ } }
       return;
     }
     while (this.waiters.length && this.holders.size + this.reservations.size < limit) {

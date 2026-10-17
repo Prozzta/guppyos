@@ -298,6 +298,10 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
     assert.equal(classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, body);
   }
   assert.equal(classifyCommand('bash -c "$(cat run.sh)"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'computed bash -c body is unreadable');
+  for (const shell of ['bash', 'sh', 'dash', 'zsh', 'busybox sh']) {
+    for (const body of ['$C', '${C}']) assert.equal(classifyCommand(`C=$(cat run.sh)\n${shell} -c "${body}"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, `${shell} ${body}`);
+  }
+  assert.equal(classifyCommand('C=$(cat run.sh)\neval "$C"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'computed eval body is unreadable');
 });
 
 test('MUTANTS: removing either computed-wrapper guard reopens the generated-child escape', () => {
@@ -311,8 +315,13 @@ test('MUTANTS: removing either computed-wrapper guard reopens the generated-chil
   for (const body of ['cmd //c "$B"', 'cmd //c "${B}"']) {
     assert.equal(noCmdGuard.classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, `MUTANT: removed cmd guard reopens ${body}`);
   }
-  const bashGuard = "((bin === 'bash' || bin === 'sh') && /(?:\\$\\(|`)/.test(body))";
+  const bashGuard = "((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && /(?:\\$|`)/.test(body))";
   assert.equal(original.split(bashGuard).length - 1, 1, 'bash guard mutation target is unique');
   const noBashGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(bashGuard, 'false'));
   assert.equal(noBashGuard.classifyCommand('bash -c "$(cat run.sh)"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: removed bash guard reopens command substitution');
+  for (const shell of ['bash', 'sh']) for (const body of ['$C', '${C}']) assert.equal(noBashGuard.classifyCommand(`C=$(cat run.sh)\n${shell} -c "${body}"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, `MUTANT: removed shell variable guard reopens ${shell} ${body}`);
+  const evalGuard = "if (ctx.dialect === 'sh' && /(?:\\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };";
+  assert.equal(original.split(evalGuard).length - 1, 1, 'eval guard mutation target is unique');
+  const noEvalGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(evalGuard, ''));
+  assert.equal(noEvalGuard.classifyCommand('C=$(cat run.sh)\neval "$C"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: removed eval guard reopens variable body');
 });
