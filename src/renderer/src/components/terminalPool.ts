@@ -26,7 +26,7 @@ import {
   classifyPathToken, isPathToken, pathTokenMatcher, stripPathToken, type PathAction
 } from '@shared/terminalPaths';
 import {
-  attachInputOrigin, classifyOutbound, markHumanOrigin, resetInputWindow,
+  attachInputOrigin, classifyOutbound, endInputWindowForOutput, markHumanOrigin, resetInputWindow,
   runInputOriginSelfTest, type ProbeConsumer
 } from './inputOrigin';
 import type { InputOrigin } from '@shared/inputOrigin';
@@ -227,6 +227,8 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (!chunk) return;
     const active = term.buffer.active;
     const follow = shouldFollowTerminalOutput(active.viewportY, active.baseY);
+    // MODEL-NOT-KEPT-191: program output never parses inside a human key's window.
+    endInputWindowForOutput(ptyId);
     const firstWrite = startupRedrawPending(ptyId);
     term.write(chunk, () => {
       if (firstWrite) noteFirstAgentRedraw(ptyId);

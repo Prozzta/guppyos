@@ -295,6 +295,17 @@ app.whenReady().then(async () => {
       return new Promise((resolve) => setTimeout(() => resolve(true), 80));
     });
 
+    // A REAL KEYSTROKE (MODEL-NOT-KEPT-191). `dispatchEvent(new KeyboardEvent(...))` is untrusted
+    // and runs no microtask checkpoint between listeners; this goes through Chromium's input
+    // pipeline to the focused element and arrives `isTrusted`, with a checkpoint after each
+    // listener, as a person's key does. `char` only for a printable key, as a keyboard sends it.
+    ipcMain.handle('harness:key', async (_e, { keyCode, char }) => {
+      win.webContents.sendInputEvent({ type: 'keyDown', keyCode });
+      if (char) win.webContents.sendInputEvent({ type: 'char', keyCode: char });
+      win.webContents.sendInputEvent({ type: 'keyUp', keyCode });
+      return new Promise((resolve) => setTimeout(() => resolve(true), 80));
+    });
+
     // THE ACCESSIBILITY TREE, NOT THE DOM. C2.11 #14 asks what a screen reader is
     // handed, which is a platform artifact computed from role, name and semantics -
     // routinely different from the markup, and not derivable from it. This is the

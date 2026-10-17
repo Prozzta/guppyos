@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('harness', {
   axTree: () => ipcRenderer.invoke('harness:axtree'),
   // A trusted click at window coordinates, through Chromium's input pipeline.
   click: (x, y) => ipcRenderer.invoke('harness:click', { x, y }),
+  // A trusted keystroke to the focused element (keyDown, char when printable, keyUp).
+  key: (keyCode, char) => ipcRenderer.invoke('harness:key', { keyCode, char }),
   // The renderer process's own private / working-set MB, read by main (IMPACT-LOOP-171).
   metrics: () => ipcRenderer.invoke('harness:metrics'),
   cpu: () => ipcRenderer.invoke('harness:cpu'),
