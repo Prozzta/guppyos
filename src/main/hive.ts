@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
+import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -79,7 +79,7 @@ import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHoo
 import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
 import { godHandoffFit } from './godStartup';
 import { MAIL_JOINED_BUDGET } from './mailSurface';
-import { FLOOR_DIGEST_FILE } from './floorDigest';
+import { FLOOR_DIGEST_FILE, recordBackstopClosed } from './floorDigest';
 import { BOARD_STATUS_FILE } from './boardStatus';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
@@ -3818,7 +3818,7 @@ export class HiveManager {
    * this only when packaged). Each close logs a `mail-obligation-closed` row with an `auto:`
    * reason. Data only: nothing wakes, no mail.
    */
-  autoCloseStaleObligations(runningVersion: string | null): StaleObligation[] {
+  autoCloseStaleObligations(runningVersion: string | null, now: number = Date.now()): StaleObligation[] {
     const reg = this.registry();
     const docs: Record<string, MailLedgerDoc> = {};
     for (const id of Object.keys(reg.agents ?? {})) {
@@ -3830,11 +3830,34 @@ export class HiveManager {
     const cards = new Map<string, CardEvidence>();
     for (const c of Array.isArray(list) ? list as Partial<HiveTask>[] : []) {
       if (c && typeof c.id === 'string' && typeof c.status === 'string') {
-        cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c, Object.prototype.hasOwnProperty.call(meta, c.id) ? meta[c.id] : null) });
+        const openQA = Array.isArray(c.humanQA) && c.humanQA.some((q) => !!q && typeof q.q === 'string' && !q.a && !q.dismissedAt);
+        cards.set(c.id, { status: c.status, doneAt: cardDoneAt(c, Object.prototype.hasOwnProperty.call(meta, c.id) ? meta[c.id] : null), ...(openQA ? { openQA } : {}) });
       }
     }
-    return staleObligations(docs, cards, this.releaseRuns(runningVersion))
-      .filter((s) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
+    const asked = (s: StaleObligation) => docs[s.agentId]?.entries[s.id];
+    const closed = staleObligations(docs, cards, this.releaseRuns(runningVersion), { now, backstopMs: ASK_BACKSTOP_MS, godId: reg.godId ?? 'god' })
+      .map((s) => ({ s, e: asked(s) }))
+      .filter(({ s }) => this.mail.autoCloseObligation(s.agentId, s.id, s.reason).length > 0);
+    const backstop = closed.filter(({ s, e }) => !!e && s.reason.startsWith('auto:backstop:'));
+    for (const { s, e } of backstop) this.noticeBackstopClose(s, e!, now);
+    const root = this.root();
+    if (root && backstop.length) {
+      try { recordBackstopClosed(root, backstop.map(({ s, e }) => ({ agentId: s.agentId, from: e!.from, id: s.id, subject: e!.subject, at: now })), now); }
+      catch (err) { try { this.appendLog({ kind: 'mail-ledger-error', op: 'backstop-record', error: String(err) }); } catch { /* noop */ } }
+    }
+    return closed.map(({ s }) => s);
+  }
+
+  /** REQUESTS-AUTO-190 R4: a backstop close is told to both sides, once (the close is the dedupe:
+   *  a closed ask is never closed again). An inform with no reply owed; nothing to act on. */
+  private noticeBackstopClose(s: StaleObligation, e: MailLedgerDoc['entries'][string], now: number): void {
+    const hours = Math.round((now - e.deliveredAt) / 3_600_000);
+    const subject = `Ask closed by the backstop: ${String(e.subject).slice(0, 120)}`;
+    const body = `The ask ${s.id} from ${e.from} to ${s.agentId} was still open ${hours} h after it arrived, and ${s.agentId} has written to ${e.from} since (${s.reason.slice('auto:backstop:'.length)}), so the harness closed it (REQUESTS-AUTO-190). No reply is needed. If the work is not finished, carry on: answering it later is ordinary mail.`;
+    for (const to of new Set([s.agentId, e.from])) {
+      try { this.send({ to, act: 'inform', requires_reply: false, subject, body, ...(e.cardId ? { card: e.cardId } : {}) }, 'system'); }
+      catch (err) { try { this.appendLog({ kind: 'mail-ledger-error', agentId: to, id: s.id, op: 'backstop-notice', error: String(err) }); } catch { /* noop */ } }
+    }
   }
 
   /**

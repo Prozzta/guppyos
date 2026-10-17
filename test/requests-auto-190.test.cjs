@@ -148,12 +148,18 @@ const inbox = (hive, id) => fs.readdirSync(path.join(hive.root(), 'agents', id, 
 test('hive: a backstop close tells both sides once, logs its reason, is recorded for the digest, and is idempotent', async (t) => {
   const hive = await floor(t);
   const ask = hive.send({ to: 'andy-1', act: 'request', subject: 'Look at the logs', body: 'go' }, 'god-1');
+  const human = hive.send({ to: 'andy-1', act: 'request', subject: 'Human must pick', body: 'go', needs_human: true }, 'god-1');
+  assert.equal(hive.mail.ledger('andy-1').entries[human.id].needsHuman, true, 'stamped at delivery through the real send path');
+  hive.addTask({ id: 'ASK-QA-1', title: 'needs the Human', status: 'blocked', dependsOn: [], humanQA: [{ q: 'Which one?', askedAt: new Date().toISOString() }] });
+  const onQA = hive.send({ to: 'andy-1', act: 'request', subject: 'build it once the Human picks', body: 'go', card: 'ASK-QA-1' }, 'god-1');
   hive.send({ to: 'god-1', act: 'inform', subject: 'something else', body: 'fyi' }, 'andy-1');
   assert.deepEqual(hive.autoCloseStaleObligations(null), [], 'fresh: open');
   const before = { god: inbox(hive, 'god-1').length, andy: inbox(hive, 'andy-1').length };
   const later = Date.now() + 25 * H;
   const closed = hive.autoCloseStaleObligations(null, later);
-  assert.deepEqual(closed.map((s) => [s.id, s.reason.replace(/:[^:]*$/, '')]), [[ask.id, 'auto:backstop']]);
+  assert.deepEqual(closed.map((s) => [s.id, s.reason.replace(/:[^:]*$/, '')]), [[ask.id, 'auto:backstop']],
+    'the needs_human ask and the ask on a card with an open humanQA stay open');
+  assert.deepEqual(hive.mailObligations().flatMap((a) => a.openRequests.map((o) => o.id)).sort(), [human.id, onQA.id].sort());
   const note = (id) => inbox(hive, id).filter((m) => m.from === 'system' && /closed by the backstop/.test(m.subject));
   assert.equal(note('andy-1').length, 1, 'the owner is told');
   assert.equal(note('god-1').length, 1, 'the requester is told');
