@@ -2280,6 +2280,11 @@ export class HiveManager {
       // JOB-ENV-IDENTITY: no agent view / background daemon for a hive agent (see the
       // CLAUDE_CODE_DISABLE_AGENT_VIEW spawn env; this is the settings form of the same switch).
       disableAgentView: true,
+      // CLAUDE-JSON-WIPE: the bypass-mode warning gates, per session (the CLI reads them from
+      // flagSettings), so an agent still starts clean when the user's global settings.json does
+      // not parse and ensureClaudePermissionsAccepted refuses to touch it.
+      skipDangerousModePermissionPrompt: true,
+      skipAutoPermissionPrompt: true,
       // W3 — default skills/MCP bundle. Written into the PER-SESSION settings file
       // only (never ~/.claude), so the user's own MCP servers are never clobbered;
       // Claude merges this additively. Omitted entirely when empty so a settings
