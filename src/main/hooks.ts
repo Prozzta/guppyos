@@ -826,6 +826,8 @@ export class HookServer {
     this.hookTokens.set(agentId, token);
     if (!this.http || this.httpPort === null || this.httpDown || this.httpStopped || !agentId) {
       // A spawn while HTTP is down gets command hooks using this same pipe capability.
+      // It has been reconfigured, so it no longer needs the broker-up respawn retry.
+      this.respawnNeeded.delete(agentId);
       return null;
     }
     return `http://127.0.0.1:${this.httpPort}/hook/${encodeURIComponent(agentId)}/${token.toString('hex')}`;

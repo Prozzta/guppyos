@@ -262,9 +262,11 @@ test('(10) STATIC: SessionStart is never an http hook, and the http shape is the
 
 test('the pipe path is stamped too (transport pipe, the same per-agent seq)', async (t) => {
   const { s, rec, sock } = await broker(t);
-  await post(s.hookUrl(A), { hook_event_name: 'PreToolUse' });
+  const url = s.hookUrl(A);
+  const token = url.slice(url.lastIndexOf('/') + 1);
+  await post(url, { hook_event_name: 'PreToolUse' });
   await new Promise((resolve, reject) => {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify({ hook_event_name: 'PostToolUse', agent_id: A, seq: 999, transport: 'http' }) + '\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify({ hook_event_name: 'PostToolUse', agent_id: A, hook_token: token, seq: 999, transport: 'http' }) + '\n'));
     c.on('data', () => {}); c.on('end', resolve); c.on('error', reject);
   });
   const last = rec.handled.at(-1);
