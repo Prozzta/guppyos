@@ -11,6 +11,7 @@ const { readSource, codeOnly } = require('../read-source.cjs');
 
 const TOOLS = __dirname;
 const ENTRY = path.join(TOOLS, 'layer-b-run.cjs');
+const CORE = path.join(TOOLS, 'layer-b-core.cjs');
 const MODULE_DIR = path.join(TOOLS, 'layer-b');
 
 function filesUnder(dir) {
@@ -23,7 +24,7 @@ function filesUnder(dir) {
 }
 
 function layerBSources() {
-  return [ENTRY, ...filesUnder(MODULE_DIR).sort()].map((file) => {
+  return [ENTRY, ...(fs.existsSync(CORE) ? [CORE] : []), ...filesUnder(MODULE_DIR).sort()].map((file) => {
     const raw = readSource(file);
     return {
       file,
@@ -34,4 +35,11 @@ function layerBSources() {
   });
 }
 
-module.exports = { ENTRY, MODULE_DIR, layerBSources };
+/** The orchestrating implementation; entry-point source pins follow it after a split. */
+function primaryLayerBSource() {
+  const primary = layerBSources().find((unit) => unit.raw.includes('class LayerB'));
+  if (!primary) throw new Error('Layer B orchestration source was not found');
+  return primary;
+}
+
+module.exports = { ENTRY, CORE, MODULE_DIR, layerBSources, primaryLayerBSource };

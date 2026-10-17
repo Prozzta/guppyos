@@ -13,9 +13,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const lb = require('./tools/layer-b-run.cjs');
-const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+const src = primaryLayerBSource().raw;
 const probeSrc = fs.readFileSync(path.join(__dirname, 'tools', 'codex-resolve-probe.cjs'), 'utf8').replace(/\r\n/g, '\n');
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'lb-resolve-'));

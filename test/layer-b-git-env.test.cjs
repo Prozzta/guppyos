@@ -12,6 +12,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const lb = require('./tools/layer-b-run.cjs');
 const pa = require('./tools/codex-product-argv.cjs');
@@ -92,7 +93,7 @@ test('FULL product chain: the product-built Codex agent env (HiveManager.ensureA
 });
 
 test('wiring: appEnv adds JAIL_GIT_ENV to the app env and REFUSES (throws) when the chain check fails', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+  const src = primaryLayerBSource().raw;
   const m = src.slice(src.indexOf('  appEnv(liveUserData) {'), src.indexOf('  appEnv(liveUserData) {') + 3000);
   assert.match(m, /Object\.assign\(env, \{ MUNDER_DEV: '1', MUNDER_HIDDEN: '1', MUNDER_DEV_ROOT: s\.devRoot, ELECTRON_ENABLE_LOGGING: '1' \}, JAIL_GIT_ENV\);/);
   assert.match(m, /const gitEnv = jailGitEnvChain\(env\);\n\s*if \(!this\.check\(!gitEnv\.length,[\s\S]*?throw new Error\(`the jailed git env is incomplete/);
@@ -131,7 +132,7 @@ test('GIT PROOF behaviour (real git config, local only, hidden): the jailed app 
 });
 
 test('GIT PROOF wiring: main runs it right after appEnv, before the seed and before the first launch (both modes)', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+  const src = primaryLayerBSource().raw;
   const main = src.slice(src.indexOf('async main() {'));
   const at = main.indexOf('this.proveNoGitCredentialHelper();');
   assert.ok(at > main.indexOf('this.appEnv(liveUserData);') && at < main.indexOf('this.seed();') && at < main.indexOf('await this.launch('));
@@ -142,7 +143,7 @@ test('GIT PROOF wiring: main runs it right after appEnv, before the seed and bef
 });
 
 test('Jim K2/K3: the helper preflight runs AGAIN after the seed and the credentials (before the first launch), and every proof, dry run included, lands in the report', (t) => {
-  const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+  const src = primaryLayerBSource().raw;
   const main = src.slice(src.indexOf('async main() {'));
   const second = main.indexOf("this.proveNoGitCredentialHelper('after the seed and the credentials');");
   assert.ok(second > main.indexOf('this.installCredentials();') && second > main.indexOf('this.seed();') && second < main.indexOf('await this.launch('), 'K2 order');

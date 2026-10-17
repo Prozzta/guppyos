@@ -19,10 +19,11 @@ const net = require('node:net');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { readSource, codeOnly } = require('./read-source.cjs');
+const { primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const RUNNER = path.join(__dirname, 'tools', 'layer-b-run.cjs');
 const lb = require(RUNNER);
-const src = codeOnly(readSource(RUNNER), 'layer-b-run.cjs');
+const src = codeOnly(primaryLayerBSource().raw, primaryLayerBSource().name);
 const method = (name) => { const a = src.indexOf(`  ${name} {`) >= 0 ? src.indexOf(`  ${name} {`) : src.indexOf(`  async ${name} {`); assert.ok(a >= 0, name); return src.slice(a, src.indexOf('\n  }\n', a)); };
 
 // ─────────────────────────────────────────────────────────────── (a) the stub hook client

@@ -32,13 +32,14 @@ const { spawn } = require('node:child_process');
 const ts = require('typescript');
 const { readSource, codeOnly } = require('./read-source.cjs');
 const { discoverTestFiles } = require('./tools/run-tests.cjs');
-const { layerBSources } = require('./tools/layer-b-sources.cjs');
+const { layerBSources, primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const RUNNER = path.join(__dirname, 'tools', 'layer-b-run.cjs');
 const lb = require(RUNNER);
-const raw = readSource(RUNNER);
-const src = codeOnly(raw, 'layer-b-run.cjs');
-const sf = ts.createSourceFile('layer-b-run.cjs', raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+const primary = primaryLayerBSource();
+const raw = primary.raw;
+const src = codeOnly(raw, primary.name);
+const sf = ts.createSourceFile(primary.name, raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
 const allSources = layerBSources().map((unit) => ({
   ...unit,
   sf: ts.createSourceFile(unit.name, unit.raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS),
