@@ -38,7 +38,10 @@ const { scrubExport } = loadTs(path.join(ROOT, 'src/main/claims/exportLedger.ts'
 const { createLedgerUi, PURGE_WORD, PURGE_KEEPS } = loadTs(path.join(ROOT, 'src/main/claims/ledgerUi.ts'));
 const { claimHistory, REVERTIBLE_EVENTS } = loadTs(path.join(ROOT, 'src/shared/claimsUi.ts'));
 
-const SECRET = 'the door code is 4417';
+// CLAIMS-UI-W7-FLAKE-191: the secret's marker is a fresh 32-hex-char token. A 4-digit marker
+// ('4417') turned up by chance in the ledger's hex hashes (1 run in 100, measured): a false fail.
+const MARK = require('node:crypto').randomBytes(16).toString('hex');
+const SECRET = `the door code is ${MARK}`;
 let n = 0;
 function setup() {
   const root = path.join(JAIL, `hive-${++n}`);
@@ -91,8 +94,8 @@ test('purge: the text is gone from the segments and backups, a purge event by th
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.ok(r.copies >= 1, 'the backup was rewritten');
   const live = x.allText(x.claimsDir('andy'));
-  assert.ok(!live.includes('4417'), 'the secret is gone from the live segments');
-  assert.ok(!x.allText(s.backup).includes('4417'), 'the secret is gone from the backup day');
+  assert.ok(!live.includes(MARK), 'the secret is gone from the live segments');
+  assert.ok(!x.allText(s.backup).includes(MARK), 'the secret is gone from the backup day');
   const after = store.readLedger('andy');
   assert.equal(after.chain, 'ok');
   assert.equal(after.records.length, before.records.length + 1, 'nothing dropped; one purge event added');
@@ -110,7 +113,7 @@ test('purge: the text is gone from the segments and backups, a purge event by th
   const memDir = path.dirname(x.claimsDir('andy'));
   assert.deepEqual(fs.readdirSync(memDir).filter((f) => f.startsWith('claims.')), []);
   assert.ok(!fs.readdirSync(x.claimsDir('andy')).some((f) => !f.endsWith('.jsonl')), 'no purge-anchor or temp file left');
-  assert.ok(!JSON.stringify(x.logs).includes('4417'), 'no text in the log');
+  assert.ok(!JSON.stringify(x.logs).includes(MARK), 'no text in the log');
   // A fresh store (a restart) reads the same verified ledger and can append on it.
   store.close();
   const s2 = x.mk();
@@ -129,11 +132,11 @@ test('purge: each backup stays a byte prefix of the live ledger (G1.7), and a re
   await ok(store.appendRecord('andy', note('after the restore'), 'endpoint'));
   const memDir = path.dirname(x.claimsDir('andy'));
   const aside = fs.readdirSync(memDir).find((f) => f.startsWith('claims.pre-restore-'));
-  assert.ok(aside && x.allText(path.join(memDir, aside)).includes('4417'));
+  assert.ok(aside && x.allText(path.join(memDir, aside)).includes(MARK));
   const r = await store.purge('andy', [s.secret], true);
   assert.equal(r.ok, true, JSON.stringify(r));
-  assert.ok(!x.allText(path.join(memDir, aside)).includes('4417'), 'the restore aside is scrubbed');
-  assert.ok(!x.allText(s.backup).includes('4417'));
+  assert.ok(!x.allText(path.join(memDir, aside)).includes(MARK), 'the restore aside is scrubbed');
+  assert.ok(!x.allText(s.backup).includes(MARK));
   const live = x.segs(x.claimsDir('andy'));
   for (const b of x.segs(s.backup)) {
     const l = live.find((f) => f.name === b.name);
@@ -174,7 +177,7 @@ test('purge: refused without the Human flag, on a read-only ledger, for a non-cl
   x3.keys.drop();
   const s4 = x3.mk();
   assert.equal((await s4.purge('andy', [t3.secret], true)).ok, false);
-  assert.ok(x3.allText(x3.claimsDir('andy')).includes('4417'));
+  assert.ok(x3.allText(x3.claimsDir('andy')).includes(MARK));
 });
 
 test('purge: no agent path can write one (the endpoint and the UI origin refuse a purge event)', async () => {
@@ -185,7 +188,7 @@ test('purge: no agent path can write one (the endpoint and the UI origin refuse 
     const r = await store.appendRecord('andy', { t: 'event', ev: 'purge', targets: [s.secret] }, origin);
     assert.equal(r.ok, false, origin); assert.match(r.error, /unsupported event/);
   }
-  assert.ok(x.allText(x.claimsDir('andy')).includes('4417'));
+  assert.ok(x.allText(x.claimsDir('andy')).includes(MARK));
 });
 
 test('purge swap crash states: the re-anchor is main\'s pending record (user-data); finished, dropped, or the old copy removed', async () => {
@@ -380,7 +383,7 @@ test('S3: a backup copy that fails is reported (UI note, log) and a purge of the
   const r = await u.api.purge('andy', [s.secret], PURGE_WORD);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.match(r.note, new RegExp(`NOT rewritten \\(the text may still be there\\): ${day}\\. Purge this claim again to retry them\\.`));
-  assert.ok(x.allText(s.backup).includes('4417'), 'the blocked backup still holds the text');
+  assert.ok(x.allText(s.backup).includes(MARK), 'the blocked backup still holds the text');
   assert.ok(x.logs.some((l) => l.kind === 'claims-purge-failed' && l.step === 'copy' && l.dir === day), 'the failure is logged');
   assert.ok(x.logs.some((l) => l.kind === 'claims-purge' && l.failedCopies.includes(day)));
   const events = store.readLedger('andy').records.length;
@@ -392,7 +395,7 @@ test('S3: a backup copy that fails is reported (UI note, log) and a purge of the
   assert.equal(again.id, undefined, 'no second purge event');
   assert.match(again.note, /^\d+ backup file\(s\) and \d+ export line\(s\) rewritten\.$/);
   assert.equal(u.calls.confirm[1].title, 'Scrub the copies again?');
-  assert.ok(!x.allText(s.backup).includes('4417'), 'the backup is scrubbed now');
+  assert.ok(!x.allText(s.backup).includes(MARK), 'the backup is scrubbed now');
   assert.equal(x.allText(x.claimsDir('andy')), live, 'the live ledger is unchanged');
   assert.equal(store.readLedger('andy').records.length, events);
   const liveSegs = x.segs(x.claimsDir('andy'));
@@ -505,7 +508,7 @@ test('UI: the purge needs the typed word and main\'s danger confirm; wrong word 
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(u.calls.confirm.length, 1); assert.equal(u.calls.confirm[0].danger, true);
   const text = fs.readFileSync(exp, 'utf8');
-  assert.ok(!text.includes('4417')); assert.ok(text.includes(`- third [c:${s.c}]`)); assert.ok(text.includes(`status of [c:${s.secret}]`));
+  assert.ok(!text.includes(MARK)); assert.ok(text.includes(`- third [c:${s.c}]`)); assert.ok(text.includes(`status of [c:${s.secret}]`));
   const v = u.api.view('andy');
   assert.equal(v.claims.find((c) => c.id === s.secret).status, 'purged');
   assert.equal(v.counts.purged, 1);
