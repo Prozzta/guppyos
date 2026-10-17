@@ -1180,39 +1180,8 @@ function ptyInputQuery(root) {
 /** RUNNER: one write as classes. Control and escape bytes are NAMED (ESC, CR, LF, TAB, BS, DEL,
  *  Ctrl-A..Ctrl-Z, 0xNN); printable runs are kept as short capped text, redacted. No raw control
  *  byte and no unredacted text reaches the evidence. */
-const CTRL_NAMES = { 0x1b: 'ESC', 0x0d: 'CR', 0x0a: 'LF', 0x09: 'TAB', 0x08: 'BS', 0x7f: 'DEL', 0x00: 'NUL' };
-function classifyPtyInput(data, capPerRun = 80, capTotal = 400) {
-  const s = String(data || '');
-  const out = [];
-  let run = '';
-  let kept = 0;
-  const flush = () => {
-    if (!run) return;
-    const room = Math.max(0, capTotal - kept);
-    const text = redact(run).slice(0, Math.min(capPerRun, room));
-    kept += text.length;
-    out.push({ text, chars: run.length, ...(text.length < run.length ? { capped: true } : {}) });
-    run = '';
-  };
-  for (const ch of s) {
-    const c = ch.codePointAt(0);
-    if (c < 0x20 || c === 0x7f) {
-      flush();
-      const name = CTRL_NAMES[c] || (c >= 1 && c <= 26 ? `Ctrl-${String.fromCharCode(64 + c)}` : `0x${c.toString(16).padStart(2, '0')}`);
-      const last = out[out.length - 1];
-      if (last && last.ctrl === name) last.n++; else out.push({ ctrl: name, n: 1 });
-    } else run += ch;
-  }
-  flush();
-  return out;
-}
-/** RUNNER: the evidence rows, with the pty id from the IPC context or the app's pid -> id map. */
-function ptyInputEvidence(q, pidToId) {
-  return (q && q.rows ? q.rows : []).map((r) => ({
-    at: new Date(r.at).toISOString(), ptyId: r.ptyId || (pidToId && pidToId[r.pid]) || null, pid: r.pid, bytes: Buffer.byteLength(String(r.data || '')), len: r.len,
-    source: r.source, origin: r.origin || null, classes: classifyPtyInput(r.data), ...(r.len > String(r.data || '').length ? { truncated: true } : {})
-  }));
-}
+const { createPtyInputTools } = require('./layer-b/pty-input.cjs');
+const { CTRL_NAMES, classifyPtyInput, ptyInputEvidence } = createPtyInputTools(redact);
 /** MAIN process: the captured tails and exits (JSON). */
 function ptyCaptureQuery(root) {
   const g = root.__lbPtyCapture;
