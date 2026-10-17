@@ -68,6 +68,18 @@ function post(url, body, raw) {
   });
 }
 
+/** Send one newline-framed command-hook payload over the real pipe. */
+function pipePost(sock, body) {
+  return new Promise((resolve, reject) => {
+    const c = net.createConnection(sock, () => c.end(JSON.stringify(body) + '\n'));
+    let out = '';
+    c.setEncoding('utf8');
+    c.on('data', (d) => { out += d; });
+    c.on('end', () => resolve(out ? JSON.parse(out) : {}));
+    c.on('error', reject);
+  });
+}
+
 test('(1) a POST with the right token reaches handle() with the URL identity, and replies with handle()\'s result', async (t) => {
   const { s, rec } = await broker(t, { deny: true });
   const url = s.hookUrl(A);
@@ -97,6 +109,21 @@ test('(2) a wrong token, an unknown agent or a revoked token is 403 and never ha
   assert.equal((await post(fresh, { hook_event_name: 'Stop' })).status, 403, 'a respawn\'s new token replaces the old one');
   assert.equal((await post(again, { hook_event_name: 'Stop' })).status, 200);
   assert.equal(rec.handled.length, 1, 'only the one valid request was handled');
+});
+
+test('(2b) pipe hooks require the same per-agent capability as HTTP, including after revocation', async (t) => {
+  const { s, rec, sock } = await broker(t);
+  const url = s.hookUrl(A);
+  const token = url.slice(url.lastIndexOf('/') + 1);
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A });
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: '0'.repeat(32) });
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: B, hook_token: token });
+  assert.equal(rec.handled.length, 0, 'missing, bad, and cross-agent tokens never reach handle');
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
+  assert.equal(rec.handled.length, 1, 'the HTTP capability authorizes its matching pipe hook');
+  s.revokeHookToken(A);
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
+  assert.equal(rec.handled.length, 1, 'a revoked capability no longer authorizes the pipe');
 });
 
 test('(3) identity: the URL wins; a different body agent_id is a subagent (kept out of session/lifecycle/Stop); an incoming provider_agent_id is stripped', async (t) => {

@@ -458,7 +458,7 @@ function shortRand(): string {
  *     `exit /b 0`: a closed app fails fast and silently.
  */
 export function agyOnewayCmd(pipe: string): string {
-  return ['@echo off', `((echo %1 %2 %AGENT_ID%& findstr /v /c:@@m@@) > ${pipe}) 2>nul`, 'exit /b 0', ''].join('\r\n');
+  return ['@echo off', `((echo %1 %2 %HIVE_HOOK_TOKEN% %AGENT_ID%& findstr /v /c:@@m@@) > ${pipe}) 2>nul`, 'exit /b 0', ''].join('\r\n');
 }
 
 /** HOOK-BROKER: what the hive asks the in-process hook endpoint for at spawn. */
@@ -467,6 +467,8 @@ export interface HookBroker {
   urlFor(agentId: string): string | null;
   /** P3: a Codex agent's MCP endpoint + the token its mcp_tool hooks carry, or null. */
   mcpFor?(agentId: string): { url: string; token: string } | null;
+  /** Current spawn's capability for command/pipe hooks; does not mint a new one. */
+  tokenFor?(agentId: string): string | null;
   revoke(agentId: string): void;
 }
 
@@ -1627,6 +1629,10 @@ export class HiveManager {
           }
         } catch (e) { console.error(`[hive] install ${desc.kind} bridge failed:`, e); }
       }
+      // Command hooks share the broker's per-spawn capability with HTTP/MCP. This is set after
+      // Codex writes its MCP config because that path may rotate the spawn token.
+      const pipeToken = this.hookBroker?.tokenFor?.(meta.id) ?? null;
+      if (pipeToken) env.HIVE_HOOK_TOKEN = pipeToken;
       // Inject the protocol text whichever way the CLI accepts it.
       // type-into-tui (Crush): the bare TUI reads a positional as a Cobra subcommand
       // → `Unknown command`. So DROP the positional and hand the protocol back as
@@ -1699,6 +1705,8 @@ export class HiveManager {
       const settingsPath = join(dir, 'settings.json');
       // HOOK-BROKER: this spawn's HTTP hook URL (a fresh token), or null -> command hooks.
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
+      const pipeToken = this.hookBroker?.tokenFor?.(meta.id) ?? null;
+      if (pipeToken) env.HIVE_HOOK_TOKEN = pipeToken;
       this.writeJson(settingsPath, withSkillOverrides(this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as object, trim));
       // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
@@ -5669,6 +5677,7 @@ export const HOOK_SHIM = `#!/usr/bin/env node
 'use strict';
 const net = require('net');
 const isStatus = process.argv.includes('--status');
+const hookToken = process.env.HIVE_HOOK_TOKEN || null;
 let data = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
@@ -5701,6 +5710,8 @@ process.stdin.on('end', () => {
   const part = partAt > 0 ? process.argv[partAt + 1] : null;
   if (part === 'briefing' || part === 'bundle') payload.munder_part = part;
   const sock = process.env.HIVE_SOCK;
+  if (!hookToken) { process.exit(0); }
+  payload.hook_token = hookToken;
   if (isStatus) {
     // Status-line mode: Claude Code pipes the session status JSON (incl.
     // context_window.total_input_tokens / .context_window_size) after every
@@ -5764,18 +5775,21 @@ export const AGY_HOOK_SHIM = `#!/usr/bin/env node
 const net = require('net');
 const event = process.argv[2] || 'Unknown';
 const agentId = process.env.AGENT_ID || null;
+const hookToken = process.env.HIVE_HOOK_TOKEN || null;
 let data = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (d) => { data += d; });
 process.stdin.on('end', () => {
   const sock = process.env.HIVE_SOCK;
   if (!agentId || !sock) { process.exit(0); } // not a hive worker → ignore
+  if (!hookToken) { process.exit(0); }
   let agy = {};
   try { agy = JSON.parse(data || '{}'); } catch (_) {}
   const tc = agy.toolCall || {};
   const payload = {
     hook_event_name: event,
     agent_id: agentId,
+    hook_token: hookToken,
     session_id: agy.conversationId,
     transcript_path: agy.transcriptPath,
     cwd: Array.isArray(agy.workspacePaths) ? agy.workspacePaths[0] : undefined,

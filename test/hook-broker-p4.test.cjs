@@ -4,8 +4,8 @@
  * HOOK-BROKER P4 (AGY, Jim's spike): AGY's observational hooks (PostToolUse, PostInvocation) and
  * its statusline go through `agy-oneway.cmd` (cmd built-ins + findstr, ~34 ms) into the HookServer
  * pipe, one-way, instead of cmd + the Electron shim (~450 ms). The events that must answer
- * (PreToolUse deny, PreInvocation steer (Y1), Stop block) keep the shim. Everything stays zero-token
- * (command hooks only).
+ * (PreToolUse deny, PreInvocation steer (Y1), Stop block) keep the shim. Every pipe delivery
+ * carries the same per-spawn capability as the HTTP/MCP broker routes.
  */
 
 const test = require('node:test');
@@ -32,17 +32,18 @@ const TOKEN = 'ab'.repeat(16);
 const AGY = { conversationId: 'conv-1', transcriptPath: 'C:/t.jsonl', workspacePaths: ['C:/w'], toolCall: { name: 'run_command', args: { CommandLine: 'echo "hi" & dir' } } };
 
 test('parseOnewayFrame: both headers (CRLF), a literal or empty agent id, and bad headers', () => {
-  const h = parseOnewayFrame(`agy PostToolUse phyllis\r\n${JSON.stringify(AGY)}\r\n`);
-  assert.deepEqual({ ...h, body: undefined }, { kind: 'hook', event: 'PostToolUse', token: '', agentId: 'phyllis', body: undefined, bodyOk: true });
+  const h = parseOnewayFrame(`agy PostToolUse ${TOKEN} phyllis\r\n${JSON.stringify(AGY)}\r\n`);
+  assert.deepEqual({ ...h, body: undefined }, { kind: 'hook', event: 'PostToolUse', token: TOKEN, agentId: 'phyllis', body: undefined, bodyOk: true });
   assert.deepEqual(h.body, AGY);
   const s = parseOnewayFrame(`agy-status ${TOKEN} phyllis\r\n{"agent_state":"idle"}`);
   assert.equal(s.kind, 'status'); assert.equal(s.token, TOKEN); assert.equal(s.agentId, 'phyllis');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} %AGENT_ID%\r\n{}`).agentId, null, 'a literal %AGENT_ID% = no agent');
   assert.equal(parseOnewayFrame(`agy-status ${TOKEN} \r\n{}`).agentId, null, 'empty = a user\'s own session');
+  assert.equal(parseOnewayFrame('agy PostToolUse phyllis\r\n{}'), null, 'one-way hooks without a capability are rejected');
   assert.equal(parseOnewayFrame('agy PreToolUse x\r\n{}'), null, 'only the observational events ride one-way');
   assert.equal(parseOnewayFrame('agy-status nothex x\r\n{}'), null);
   assert.equal(parseOnewayFrame('{"hook_event_name":"Stop"}\n'), null);
-  const trunc = parseOnewayFrame('agy PostToolUse phyllis\r\n{"toolCall": {"name": "x", "ar');
+  const trunc = parseOnewayFrame(`agy PostToolUse ${TOKEN} phyllis\r\n{"toolCall": {"name": "x", "ar`);
   assert.equal(trunc.bodyOk, false, 'findstr cuts lines over ~8 KB: degraded, header intact');
 });
 
@@ -55,7 +56,7 @@ function shimPayload(t, event, agy) {
     let got = null;
     const srv = net.createServer((c) => { let b = ''; c.on('data', (d) => { b += d; if (b.includes('\n')) { got = JSON.parse(b.split('\n')[0]); c.end('{}'); } }); });
     srv.listen(sock, () => {
-      const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: 'phyllis', HIVE_SOCK: sock }, stdio: ['pipe', 'ignore', 'ignore'] });
+      const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: 'phyllis', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: TOKEN }, stdio: ['pipe', 'ignore', 'ignore'] });
       ch.on('close', () => { srv.close(); got ? resolve(got) : reject(new Error('no payload')); });
       ch.stdin.end(JSON.stringify(agy));
     });
@@ -68,6 +69,7 @@ test('translation parity: agyHookPayload == what AGY_HOOK_SHIM sends today', asy
     const mine = JSON.parse(JSON.stringify(agyHookPayload(ev, 'phyllis', AGY)));
     for (const k of Object.keys(fromShim)) if (fromShim[k] === undefined) delete fromShim[k];
     delete fromShim.fully_idle;   // Stop-only field, absent on these events
+    delete fromShim.hook_token;   // transport authentication, not translation
     // MAIL-PIPE-SHIM-CLOCK: the shim's own clock is transport, not translation (the server strips it
     // before handle(); the one-way broker frame has no 5 s give-up to measure).
     assert.equal(typeof fromShim.shim_elapsed_ms, 'number', ev);
@@ -84,7 +86,7 @@ function shimOut(t, event, reply) {
     const sock = WIN ? `\\\\.\\pipe\\p4-shimo-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(dir, 's.sock');
     const srv = net.createServer((c) => { let b = ''; c.on('data', (d) => { b += d; if (b.includes('\n')) c.end(JSON.stringify(reply)); }); });
     srv.listen(sock, () => {
-      const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: 'phyllis', HIVE_SOCK: sock }, stdio: ['pipe', 'pipe', 'ignore'] });
+      const ch = spawn(process.execPath, [shim, event], { env: { ...process.env, AGENT_ID: 'phyllis', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: TOKEN }, stdio: ['pipe', 'pipe', 'ignore'] });
       let out = ''; ch.stdout.on('data', (d) => { out += d; });
       ch.on('close', () => { srv.close(); resolve(out); });
       ch.stdin.end('{}');
@@ -110,9 +112,11 @@ async function server(t, owner = TOKEN, control = undefined) {
   const real = s.handle.bind(s); s.handle = (p) => { rec.handled.push(JSON.parse(JSON.stringify(p))); return real(p); };
   s.start(); t.after(() => s.stop());
   for (let i = 0; i < 200 && s.hookBrokerPort() === null; i++) await new Promise((r) => setTimeout(r, 5));
+  const hookUrl = s.hookUrl('phyllis');
+  const hookToken = hookUrl.slice(hookUrl.lastIndexOf('/') + 1);
   const cmdFile = path.join(fs.mkdtempSync(path.join(JAIL, 'bin-')), 'agy-oneway.cmd');
   fs.writeFileSync(cmdFile, agyOnewayCmd(sock));
-  return { s, rec, sock, cmdFile };
+  return { s, rec, sock, cmdFile, hookToken };
 }
 /** Run the one-way command the way AGY does: `<agy-oneway.cmd> <header args>`, stdin = the payload. */
 function runOneway(cmdFile, args, env, stdin) {
@@ -130,8 +134,8 @@ function runOneway(cmdFile, args, env, stdin) {
 const settle = () => new Promise((r) => setTimeout(r, 150));
 
 test('REAL agy-oneway.cmd: a PostToolUse from a hive agent is delivered, translated, stamped pipe-oneway; no stdout; exit 0', { skip: !WIN }, async (t) => {
-  const { rec, cmdFile } = await server(t);
-  const r = await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: 'phyllis' }, JSON.stringify(AGY));
+  const { rec, cmdFile, hookToken } = await server(t);
+  const r = await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: 'phyllis', HIVE_HOOK_TOKEN: hookToken }, JSON.stringify(AGY));
   await settle();
   assert.equal(r.code, 0); assert.equal(r.out, '', 'AGY fail-closes on any stdout object: nothing may be printed');
   assert.equal(rec.handled.length, 1);
@@ -144,8 +148,8 @@ test('REAL agy-oneway.cmd: a PostToolUse from a hive agent is delivered, transla
 test('Y1 (P4 audit): a one-way PostToolUse never consumes a queued steer; the next answering PreInvocation delivers it ONCE', { skip: !WIN }, async (t) => {
   const steers = ['OPERATOR STEER: switch to task B'];
   const control = { shouldHalt: () => false, takeSteer: () => steers.shift(), toolDecision: () => ({ deny: false }) };
-  const { s, rec, cmdFile } = await server(t, TOKEN, control);
-  await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: 'phyllis' }, JSON.stringify(AGY));
+  const { s, rec, cmdFile, hookToken } = await server(t, TOKEN, control);
+  await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: 'phyllis', HIVE_HOOK_TOKEN: hookToken }, JSON.stringify(AGY));
   await settle();
   assert.equal(rec.handled.length, 1); assert.equal(rec.handled[0].transport, 'pipe-oneway');
   assert.equal(steers.length, 1, 'the steer is still queued: a one-way reply is never read');
@@ -162,9 +166,9 @@ test('Y1 (P4 audit): a one-way PostToolUse never consumes a queued steer; the ne
 });
 
 test('REAL: a body over findstr\'s ~8 KB line limit is still delivered (degraded, header intact); a user\'s own session is ignored', { skip: !WIN }, async (t) => {
-  const { rec, cmdFile } = await server(t);
-  await runOneway(cmdFile, ['agy', 'PostInvocation'], { AGENT_ID: 'phyllis' }, JSON.stringify({ ...AGY, big: 'x'.repeat(20000) }));
-  await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: '' }, JSON.stringify(AGY));
+  const { rec, cmdFile, hookToken } = await server(t);
+  await runOneway(cmdFile, ['agy', 'PostInvocation'], { AGENT_ID: 'phyllis', HIVE_HOOK_TOKEN: hookToken }, JSON.stringify({ ...AGY, big: 'x'.repeat(20000) }));
+  await runOneway(cmdFile, ['agy', 'PostToolUse'], { AGENT_ID: '', HIVE_HOOK_TOKEN: hookToken }, JSON.stringify(AGY));
   await settle();
   assert.equal(rec.handled.length, 1);
   assert.equal(rec.handled[0].hook_event_name, 'PostInvocation');
@@ -172,11 +176,11 @@ test('REAL: a body over findstr\'s ~8 KB line limit is still delivered (degraded
 });
 
 test('REAL statusline: the lease token is required; a user\'s own session feeds capacity with agent_id null', { skip: !WIN }, async (t) => {
-  const { rec, cmdFile } = await server(t);
+  const { rec, cmdFile, hookToken } = await server(t);
   const status = JSON.stringify({ agent_state: 'idle', model: { id: 'x' } });
-  await runOneway(cmdFile, ['agy-status', TOKEN], { AGENT_ID: 'phyllis' }, status);
-  await runOneway(cmdFile, ['agy-status', 'cd'.repeat(16)], { AGENT_ID: 'phyllis' }, status);
-  await runOneway(cmdFile, ['agy-status', TOKEN], { AGENT_ID: '' }, status);
+  await runOneway(cmdFile, ['agy-status', TOKEN], { AGENT_ID: 'phyllis', HIVE_HOOK_TOKEN: hookToken }, status);
+  await runOneway(cmdFile, ['agy-status', 'cd'.repeat(16)], { AGENT_ID: 'phyllis', HIVE_HOOK_TOKEN: hookToken }, status);
+  await runOneway(cmdFile, ['agy-status', TOKEN], { AGENT_ID: '', HIVE_HOOK_TOKEN: hookToken }, status);
   await settle();
   assert.deepEqual(rec.handled.map((p) => [p.hook_event_name, p.agent_id]), [['AgyStatusLine', 'phyllis'], ['AgyStatusLine', null]], 'the wrong token is dropped');
   assert.deepEqual(rec.handled[0].agy_status, JSON.parse(status));
@@ -238,7 +242,7 @@ test('config: AGY PostToolUse/PostInvocation are the one-way command; PreToolUse
     for (const ev of ['PreToolUse', 'PreInvocation', 'Stop']) assert.match(cmdOf(ev), /agy-hook\.cjs/, ev);
     for (const ev of Object.keys(hooks)) { assert.equal(handlerOf(ev).type, 'command'); assert.doesNotMatch(cmdOf(ev), /["']/, 'AGY passes quotes literally'); }
     const bat = fs.readFileSync(path.join(home, 'hive', 'bin', 'agy-oneway.cmd'), 'utf8');
-    assert.match(bat, /\(\(echo %1 %2 %AGENT_ID%& findstr \/v \/c:@@m@@\) > \\\\\.\\pipe\\munder-difflin-[0-9a-f]+\) 2>nul/);
+    assert.match(bat, /%1 %2 %HIVE_HOOK_TOKEN% %AGENT_ID%& findstr/);
     hive.dispose();
   } finally { process.env.HOME = JAIL; process.env.USERPROFILE = JAIL; }
 });
