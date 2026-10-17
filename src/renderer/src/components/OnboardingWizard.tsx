@@ -4,7 +4,7 @@ import { PixelButton } from './PixelButton';
 import { Icon, type IconName } from './Icon';
 import { SpritePortrait } from './SpritePortrait';
 import { ProviderLogo } from './ProviderLogo';
-import { AGENT_PROVIDER_PRESETS, modelsForProvider, type AgentProvider, type HarnessConfig } from '@/store/config';
+import { AGENT_PROVIDER_PRESETS, useModelsForProvider, type AgentProvider, type HarnessConfig } from '@/store/config';
 import { canReceiveInbox, providerPreset } from '@shared/agentProvider';
 import {
   classifyEngineAvailability, engineAvailabilityBadge, engineAvailabilityMessage, engineBlocksOnboarding
@@ -106,6 +106,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
   const [godModel, setGodModel] = useState<string | undefined>(
     providerPreset('claude').recommendedOrchestratorModel
   );
+  const godModels = useModelsForProvider(godProvider);
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
 
@@ -537,7 +538,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     onChange={(e) => setGodModel(e.target.value || undefined)}
                     style={inputStyle}
                   >
-                    {modelsForProvider(godProvider).map((m) => (
+                    {godModels.map((m) => (
                       <option key={m.label} value={m.id ?? ''}>{m.label}</option>
                     ))}
                   </select>

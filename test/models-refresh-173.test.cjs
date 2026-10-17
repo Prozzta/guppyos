@@ -206,6 +206,29 @@ test('pickers: the floor until a refresh; then each provider\'s own list; a fail
   }
 });
 
+test('a pushed Claude catalog reaches the Settings default buttons and every mounted model picker', () => {
+  const fresh = { version: 1, refreshedAt: 2, providers: {
+    claude: { status: 'ok', models: [{ id: 'claude-new-after-refresh', label: 'Claude New After Refresh' }] }
+  } };
+  C.setModelCatalog(fresh);
+  try {
+    assert.deepEqual(C.modelsForProvider('claude').map((m) => m.id), [undefined, 'claude-new-after-refresh'], 'the single live catalog supplies the new Claude model');
+    for (const file of ['AddAgentModal', 'EditAgentModal', 'CommandCenterPanel']) {
+      const src = read(`src/renderer/src/components/${file}.tsx`);
+      assert.match(src, /useModelCatalogVersion\(\)/, `${file}: re-renders when the live catalog changes`);
+      assert.match(src, /modelsForProvider\(/, `${file}: reads the live provider catalog`);
+    }
+    const settings = read('src/renderer/src/components/SettingsModal.tsx');
+    const onboarding = read('src/renderer/src/components/OnboardingWizard.tsx');
+    assert.match(settings, /useModelsForProvider\('claude'\)/, 'Settings subscribes to the live Claude catalog');
+    assert.match(onboarding, /const godModels = useModelsForProvider\(godProvider\)/, 'the mounted onboarding orchestrator picker subscribes too');
+    assert.match(settings, /claudeModels\.map\(\(m\) => \(/, 'Settings default buttons use the live Claude list');
+    assert.doesNotMatch(settings, /AGENT_MODELS\.map\(/, 'Settings never bypasses the refreshed catalog with the compiled floor');
+  } finally {
+    C.setModelCatalog(null);
+  }
+});
+
 // ── wiring: button-only, async-only ─────────────────────────────────────────────────────
 
 test('WIRING: nothing is looked up at startup or picker open; only models:refresh refreshes; async only', () => {
@@ -232,16 +255,19 @@ test('RENDERED: the Settings button - floor before, one refresh per click burst,
   assert.equal(r.before.refreshCalls, 0, 'mounting looks nothing up');
   assert.ok(r.before.picker.includes('Gemini 3.8 Flash · High') && !r.before.picker.some((l) => /3\.5/.test(l)), `floor: ${r.before.picker}`);
   assert.match(r.before.panel, /Not refreshed yet/);
+  assert.ok(!r.before.claudeDefaults.includes('Claude New After Refresh'), 'the compiled floor is shown before refresh');
   assert.deepEqual(r.during, { label: 'Refreshing…', disabled: true });
   assert.equal(r.calls.refreshModels, 1, 'a second click while busy does nothing');
   assert.deepEqual(r.after.rows, [
     ['antigravity', 'listed', '2 models · +1 new · −1 removed: Gemini 3.5 Flash (Medium)'],
-    ['claude', 'failed', 'not signed in: open Claude Code and run /login · built-in list used'],
+    ['claude', 'listed', '1 model · +1 new'],
     ['opencode', 'not installed', 'opencode not found'],
     ['codex', 'failed', 'timeout · kept the last list (1)']
   ]);
   assert.deepEqual(r.after.picker, ['CLI default', 'Gemini 3.9 Flash · High', 'Gemini 3.8 Flash · High'], 'the picker follows the pushed file');
   assert.equal(r.lastRefreshed, true);
+  assert.deepEqual(r.after.claudeDefaults, ['CLI default', 'Claude New After Refresh'], 'the live Settings-default list follows the same pushed catalog without reopening');
+  assert.ok(r.screenshot.bytes > 1000 && r.screenshot.size.width === 900, 'captured refreshed Settings evidence');
   assert.deepEqual([r.after.button, r.after.disabled], ['Refresh models', false]);
 });
 
