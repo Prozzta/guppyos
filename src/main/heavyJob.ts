@@ -823,6 +823,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`), shell `$C` indirection, `eval $C`,
       // and `bash`/`dash`/`zsh`/busybox-sh `-c "$(cat run.sh)"`. Deliberately conservative:
       // a rare light expansion also reserves a slot rather than reopening this escape class.
+      // `words()` intentionally discards quote kind, so a single-quoted `$HOME` is also
+      // provisional (like `cmd /c "echo $(date)"`); preserving that distinction would let
+      // computed outer-shell command strings evade the lock again.
       if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
           ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
@@ -842,8 +845,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, ctx) : { heavy: false };
     }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
-    const script = /^(bash|sh|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
+    const script = /^(bash|sh|dash|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
     return script ? classifyScript(script, depth, ctx) : { heavy: false };
+  }
+  // `eval` runs its argument as sh code. A variable/backtick-derived body is unknowable before
+  // expansion, while literal text can use the same nested classification as a shell `-c` body.
+  if (bin === 'eval') {
+    const body = args.join(' ');
+    if (ctx.dialect === 'sh' && /(?:\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };
+    return nested(body, depth, { ...ctx, dialect: 'sh' }, 'eval');
   }
   // HEAVY-LOCK-SHAPES-189 (god conv-cbab35, Dwight 18:18:34Z): a launcher runs its program, so the
   // program decides. `Start-Process -FilePath npm.cmd -ArgumentList 'test'` (and `saps`, PowerShell's
@@ -1617,12 +1627,6 @@ export class HeavyJobLock {
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };
   }
-  if (bin === 'eval') {
-    const body = args.join(' ');
-    if (ctx.dialect === 'sh' && /(?:\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };
-    return nested(body, depth, { ...ctx, dialect: 'sh' }, 'eval');
-  }
-
   /** A Settings change may create capacity without a holder releasing. Promote queued
    *  agents immediately so the new slot is not stranded until another release. */
   limitChanged(): void {
