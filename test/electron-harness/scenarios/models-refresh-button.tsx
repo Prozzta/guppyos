@@ -94,7 +94,7 @@ window.__harnessRun = async () => {
       panel: document.body.textContent ?? '', rows, button: button.textContent, disabled: button.disabled
     };
     const screenshot = await window.harness.capture(900, 500);
-    window.harness.report({ ok: true, calls, before, during, after, screenshot: { size: screenshot.size, bytes: screenshot.png.length }, lastRefreshed: /Last refreshed/.test(text('body')) });
+    window.harness.report({ ok: true, calls, before, during, after, screenshot, lastRefreshed: /Last refreshed/.test(text('body')) });
   } catch (e) {
     window.harness.report({ ok: false, error: String((e as Error)?.stack ?? e) });
   }
