@@ -86,6 +86,19 @@ test('recoverRendererForMemory: kills the window whose renderer is that pid (no 
   assert.deepEqual(order, [['mark', 80]]);
 });
 
+// FLAKE-RENDERER-RECOVERY-191: forcefullyCrashRenderer has crashpad dump the renderer first and
+// holds main's thread on it (up to 10 s on Windows); the kill is a plain one of the pid.
+test('recoverRendererForMemory: kills the renderer by its pid (process.kill), never by forcefullyCrashRenderer (a dump that holds main)', (t) => {
+  const kills = [];
+  t.mock.method(process, 'kill', (pid, sig) => { kills.push([pid, sig]); return true; });
+  const a = fakeWin(7); const b = fakeWin(8);
+  assert.equal(R.recoverRendererForMemory(8, { windows: () => [a, b], givenUp: () => false, beforeKill: () => {} }), 'killed');
+  assert.deepEqual(kills, [[8, undefined]]);
+  assert.equal(b.killed, 0, 'no forcefullyCrashRenderer');
+  process.kill.mock.mockImplementation(() => { throw new Error('ESRCH'); });
+  assert.equal(R.recoverRendererForMemory(8, { windows: () => [b], givenUp: () => false, beforeKill: () => {} }), 'failed');
+});
+
 test('recoverRendererForMemory: never kills a window that already gave up (it would stay dead); no window / a failed kill are reported', () => {
   const a = fakeWin(7);
   assert.equal(R.recoverRendererForMemory(7, { windows: () => [a], givenUp: () => true, beforeKill: () => {} }), 'given-up');

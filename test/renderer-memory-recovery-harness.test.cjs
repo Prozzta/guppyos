@@ -46,3 +46,19 @@ test('RENDERED: a FROZEN renderer that keeps allocating is killed by main on a c
   assert.ok(r.ptyTicks > 0, 'main (the PTY side) kept running throughout');
   console.log(`recovered in ${r.recoverMs} ms; acted at ${r.actions[0].mb} MB (limit ${r.limitMb})`);
 });
+
+// FLAKE-RENDERER-RECOVERY-191: on Windows, forcefullyCrashRenderer first has crashpad dump the
+// renderer (CrashDumpHungChildProcess) and blocks main's thread on it, up to 10 s, before the
+// kill; under load that alone outran 'gone'. In the app the reporter is on, so every memory
+// recovery froze the UI and wrote a dump of a renderer already over 1.5 GB.
+test('RENDERED: the memory kill never dumps the renderer and never holds main (a plain kill of its pid)', { timeout: 1_500_000 }, async () => {
+  const r = await run();
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.actions.length, 1, 'one recovery for one runaway renderer');
+  assert.equal(r.actions[0].outcome, 'killed');
+  assert.equal(r.dumps, 0, `no minidump of the killed renderer (found ${r.dumps})`);
+  assert.equal(r.gone.reason, 'killed', 'a plain kill (exit 1), not the hung-renderer crash (exit 2)');
+  assert.ok(r.actions[0].killMs < 1_000, `the kill returns at once; main was held ${r.actions[0].killMs} ms`);
+  assert.equal(r.gone.recovery, 'reload', 'the ordinary recovery still takes over');
+  console.log(`kill held main ${r.actions[0].killMs} ms; dumps ${r.dumps}; gone ${r.gone.reason}`);
+});

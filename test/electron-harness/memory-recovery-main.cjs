@@ -117,10 +117,12 @@ app.whenReady().then(async () => {
       metrics: () => app.getAppMetrics(), now: () => Date.now(), alert: (r) => note({ alert: r.why, mb: r.mb }),
       alertMb: LIMIT_MB,
       onOverLimit: (pid, mb) => {
+        // FLAKE-RENDERER-RECOVERY-191: how long the kill holds main's thread (it runs on it).
+        const killAt = Date.now();
         const outcome = R.recoverRendererForMemory(pid, {
           windows: () => BrowserWindow.getAllWindows(), givenUp: () => policy.givenUp, beforeKill: () => { memoryAt = Date.now(); memoryKillPending = true; }
         });
-        actions.push({ pid, mb, outcome, at: Date.now() });
+        actions.push({ pid, mb, outcome, at: Date.now(), killMs: Date.now() - killAt });
         note({ phase: 'over-limit', pid, mb, outcome });
       }
     });
@@ -134,7 +136,10 @@ app.whenReady().then(async () => {
     clearInterval(timer);
     const ticksAtEnd = ticks;
     note({ phase: 'recovered', notice: re.notice, sameWc: re.wcId === first.wcId, newPid: win.webContents.getOSProcessId() });
-    finish({ ok: true, actions, gone: { reason: gone.reason, recovery: gone.recovery }, notice: re.notice, recoverMs: Date.now() - hogStart, ptyTicks: ticksAtEnd, limitMb: LIMIT_MB });
+    // FLAKE-RENDERER-RECOVERY-191: the reporter is on (as in the app), so a kill that dumps the
+    // renderer first leaves a minidump here; a plain kill leaves none.
+    let dumps = -1; try { dumps = require('node:fs').readdirSync(app.getPath('crashDumps'), { recursive: true }).filter((f) => /\.dmp$/i.test(f)).length; } catch { /* unread */ }
+    finish({ ok: true, actions, gone: { reason: gone.reason, recovery: gone.recovery }, notice: re.notice, recoverMs: Date.now() - hogStart, ptyTicks: ticksAtEnd, limitMb: LIMIT_MB, dumps });
   } catch (e) {
     finish({ ok: false, error: e.message });
   }
