@@ -9,11 +9,14 @@
  * file's process: a ConPTY conhost is not in node's kill-on-close job, so it outlived the file (the
  * rc/1.1.76 gate hang: a PTY killed before its first output). This kills it with the file.
  *
- * Usage: node file-watchdog.cjs <runnerPid> <limitMs> <outJsonl> [pollMs]
+ * LOAD-FLAKES-178: with a job tool (file-job.cs; each file joined its own job at start) the kill is
+ * that job's, atomic; the snapshot's tree is the fallback when a file has no job.
+ *
+ * Usage: node file-watchdog.cjs <runnerPid> <limitMs> <outJsonl> [pollMs] [jobExe]
  * It exits on its own when the runner process is gone.
  */
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const own = require('./own-procs.cjs');
 
 /** Parse PowerShell's ConvertTo-Json rows ({ProcessId, ParentProcessId, Name, CommandLine, CreationDate:"/Date(ms)/"}). */
@@ -84,6 +87,23 @@ function killTree(procs, pid, deps) {
   return own.killVerified([root, ...own.treeOf(rows, root)], deps);
 }
 
+/**
+ * LOAD-FLAKES-178: kill a due file through its own job (file-job.cs, joined by the file's preload
+ * before any test code ran). TerminateJobObject takes every process in it at once, whenever it was
+ * born; the snapshot's tree misses a child born after the snapshot (an orphan ping kept the file's
+ * temp folder in use: EBUSY). The tool checks that the pid is still the process the snapshot saw.
+ * Falls back to the snapshot's tree only when there is no job for the file. Returns how it went.
+ */
+function killFile(procs, pid, { jobExe, run = spawnSync, tree = killTree } = {}) {
+  const row = procs.find((p) => p.pid === pid);
+  if (jobExe && row && Number.isFinite(row.startedAt)) {
+    const r = run(jobExe, ['kill', String(pid), String(row.startedAt)], { windowsHide: true, stdio: 'ignore', timeout: 30_000 });
+    if (r.status === 0) return { by: 'job' };
+    if (r.status === 4) return { by: 'none', why: 'another process has the pid now' };
+  }
+  return { by: 'tree', ...tree(procs, pid) };
+}
+
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 
 function snapshot() {
@@ -93,10 +113,10 @@ function snapshot() {
   return parseRows(out);
 }
 
-module.exports = { parseRows, fileOf, dueFiles, killDue, killTree };
+module.exports = { parseRows, fileOf, dueFiles, killDue, killTree, killFile, snapshot };
 
 if (require.main === module) {
-  const [runnerPid, limitMs, outFile, pollMs = '30000'] = process.argv.slice(2);
+  const [runnerPid, limitMs, outFile, pollMs = '30000', jobExe = ''] = process.argv.slice(2);
   const runner = Number(runnerPid); const limit = Number(limitMs); const poll = Number(pollMs);
   const killed = new Set();
   const tick = () => {
@@ -106,7 +126,7 @@ if (require.main === module) {
     killDue(dueFiles(procs, runner, limit, Date.now()), {
       killed,
       record: (d) => fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `killed with its process tree after ${d.ageMs} ms (limit ${limit} ms)`, by: 'watchdog' })}\n`),
-      kill: (pid) => killTree(procs, pid)
+      kill: (pid) => killFile(procs, pid, { jobExe })
     });
   };
   setInterval(tick, poll);
