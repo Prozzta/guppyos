@@ -302,6 +302,8 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
     for (const body of ['$C', '${C}']) assert.equal(classifyCommand(`C=$(cat run.sh)\n${shell} -c "${body}"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, `${shell} ${body}`);
   }
   assert.deepEqual(classifyCommand("bash -c 'cd $HOME && git status'", 0, HookServer.heavyScriptCtx(process.cwd())), { heavy: false }, 'a single-quoted -c body is expanded by the inner shell and remains inspectable');
+  for (const shell of ['sh', 'bash']) assert.equal(classifyCommand(`C=$(cat run.sh)\n${shell} -c "bash -c '$C'"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, `${shell}: an inner single quote cannot exempt the outer computed body`);
+  assert.equal(classifyCommand('C=$(cat run.sh)\nbash -c "$C" -c \'x\'', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'a later inner-looking -c quote cannot exempt this computed body');
   assert.equal(classifyCommand('C=$(cat run.sh)\neval "$C"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'computed eval body is unreadable');
 });
 
@@ -325,6 +327,10 @@ test('MUTANTS: removing either computed-wrapper guard reopens the generated-chil
   assert.equal(original.split(singleQuoteGuard).length - 1, 1, 'single-quote guard mutation target is unique');
   const noSingleQuoteException = loadTs.fromText('src/main/heavyJob.ts', original.replace(singleQuoteGuard, 'true'));
   assert.equal(noSingleQuoteException.classifyCommand("bash -c 'cd $UNSET_FOR_QUOTE_PIN && git status'", 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'MUTANT: removing single-quote exception queues an inspectable inner-shell body');
+  const anchoredQuote = "return /^(?:\\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\\S+)\\s+)*)?(?:(?:\\S+[/\\\\])?(?:bash|sh|dash|zsh)|busybox\\s+sh)(?:\\s+(?:-[A-Za-z]+|--\\S+))*\\s+-c\\s+'/.test(segment);";
+  assert.equal(original.split(anchoredQuote).length - 1, 1, 'anchored quote mutation target is unique');
+  const unanchoredQuote = loadTs.fromText('src/main/heavyJob.ts', original.replace(anchoredQuote, "return /(?:^|\\s)-c\\s+(')/.test(segment);"));
+  assert.equal(unanchoredQuote.classifyCommand("C=$(cat run.sh)\nsh -c \"bash -c '$C'\"", 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: unanchored inner quote reopens the outer computed body');
   const evalGuard = "if (ctx.dialect === 'sh' && /(?:\\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };";
   assert.equal(original.split(evalGuard).length - 1, 1, 'eval guard mutation target is unique');
   const noEvalGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(evalGuard, ''));

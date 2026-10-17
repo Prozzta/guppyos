@@ -132,8 +132,9 @@ function words(s: string, d: ShellDialect = 'sh'): string[] {
 /** A single-quoted sh `-c` body is expanded by its inner shell, not the outer one. */
 function singleQuotedDashCBody(segment: string | undefined, option: string): boolean {
   if (!segment || option !== '-c') return false;
-  const hit = /(?:^|\s)-c\s+(')/.exec(segment);
-  return !!hit;
+  // This must describe the wrapper at this recursion depth, rather than an inner
+  // `bash -c '...'` merely mentioned inside its double-quoted body.
+  return /^(?:\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*)?(?:(?:\S+[/\\])?(?:bash|sh|dash|zsh)|busybox\s+sh)(?:\s+(?:-[A-Za-z]+|--\S+))*\s+-c\s+'/.test(segment);
 }
 
 /** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
