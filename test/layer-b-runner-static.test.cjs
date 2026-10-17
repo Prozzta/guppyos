@@ -32,12 +32,19 @@ const { spawn } = require('node:child_process');
 const ts = require('typescript');
 const { readSource, codeOnly } = require('./read-source.cjs');
 const { discoverTestFiles } = require('./tools/run-tests.cjs');
+const { layerBSources, primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const RUNNER = path.join(__dirname, 'tools', 'layer-b-run.cjs');
 const lb = require(RUNNER);
-const raw = readSource(RUNNER);
-const src = codeOnly(raw, 'layer-b-run.cjs');
-const sf = ts.createSourceFile('layer-b-run.cjs', raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+const primary = primaryLayerBSource();
+const raw = primary.raw;
+const src = codeOnly(raw, primary.name);
+const sf = ts.createSourceFile(primary.name, raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+const allSources = layerBSources().map((unit) => ({
+  ...unit,
+  sf: ts.createSourceFile(unit.name, unit.raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS),
+}));
+const allCode = allSources.map((unit) => unit.code).join('\n');
 
 function tmpRoot(t, prefix) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -52,6 +59,22 @@ function calls(pred) {
   const visit = (n) => { if (ts.isCallExpression(n) && pred(n)) out.push(n); ts.forEachChild(n, visit); };
   visit(sf);
   return out;
+}
+/** Calls across the entry point and every extracted Layer B module. */
+function allCalls(pred) {
+  const out = [];
+  for (const unit of allSources) {
+    const visit = (n) => { if (ts.isCallExpression(n) && pred(n, unit.sf)) out.push({ n, unit }); ts.forEachChild(n, visit); };
+    visit(unit.sf);
+  }
+  return out;
+}
+/** The terminal property is the callee name for both bare and qualified calls. */
+function callName(call) {
+  const callee = call.expression;
+  if (ts.isIdentifier(callee)) return callee.text;
+  if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+  return '';
 }
 /** A class method's source (code only), from its signature to its closing brace. */
 const method = (sig) => { const at = src.indexOf(`  ${sig} {`); assert.ok(at >= 0, sig); return src.slice(at, src.indexOf('\n  }\n', at)); };
@@ -70,6 +93,35 @@ test('the runner is NOT part of node --test (the runner recursively selects only
   assert.ok(!files.some((f) => /layer-b-run\.cjs$/.test(f)));
   assert.equal(files.filter((f) => f.startsWith('tools' + path.sep)).length, 0, 'nothing in test/tools is a test file');
   assert.ok(!/\.test\.cjs$/.test(RUNNER));
+});
+
+test('the source/AST safety inventory covers the entry point and every extracted Layer B module', () => {
+  assert.equal(allSources[0].name, 'layer-b-run.cjs');
+  assert.equal(new Set(allSources.map((unit) => unit.file)).size, allSources.length, 'each source is listed once');
+  assert.ok(allSources.every((unit) => unit.name === 'layer-b-run.cjs' || unit.name === 'layer-b-core.cjs' || unit.name.startsWith('layer-b/')), 'only the entry point, core, and extracted modules are pinned');
+});
+
+test('AST inventory: every extracted Layer B module is subject to the mutation and hidden-spawn pins', () => {
+  const MUT = /^(writeFileSync|appendFileSync|mkdirSync|rmSync|rmdirSync|renameSync|copyFileSync|cpSync|unlinkSync|symlinkSync|linkSync|truncateSync|writeSync|writeFile|appendFile|mkdir|rm|rename|copyFile|cp|unlink|symlink|link|truncate)$/;
+  const mutations = allCalls((n, nodeSf) => ts.isPropertyAccessExpression(n.expression) && /^(fs|fsp|fs\.promises)$/.test(n.expression.expression.getText(nodeSf)) && MUT.test(n.expression.name.text));
+  const direct = mutations.filter(({ n, unit }) => {
+    let guarded = false;
+    const visit = (node) => {
+      if (ts.isVariableDeclaration(node) && node.name.getText(unit.sf) === 'W' && node.initializer && ts.isObjectLiteralExpression(node.initializer)
+        && n.getStart(unit.sf) >= node.getStart(unit.sf) && n.getEnd() <= node.getEnd()) guarded = true;
+      ts.forEachChild(node, visit);
+    };
+    visit(unit.sf);
+    return !guarded;
+  });
+  assert.deepEqual(direct.map(({ n, unit }) => `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(n.getStart(unit.sf)).line + 1}`), [], 'a disk mutation outside W');
+  const spawns = allCalls((n) => /^(spawn|spawnSync)$/.test(callName(n)));
+  assert.ok(spawns.length >= 10, `found ${spawns.length} spawn calls`);
+  const visible = spawns.filter(({ n }) => {
+    const opts = n.arguments.find((a) => ts.isObjectLiteralExpression(a));
+    return !(opts && opts.properties.some((p) => ts.isPropertyAssignment(p) && p.name.getText() === 'windowsHide' && p.initializer.getText() === 'true'));
+  });
+  assert.deepEqual(visible.map(({ n, unit }) => `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(n.getStart(unit.sf)).line + 1}`), [], 'a visible spawn');
 });
 
 test('W refuses every live location and anything outside the run\'s own roots; shred and removeProbeMarker are strict', (t) => {
@@ -113,7 +165,7 @@ test('AST: every disk mutation in the runner\'s code sits inside the write guard
   assert.ok(opens.length >= 2);
   for (const o of opens) assert.equal(o.arguments[1] && o.arguments[1].getText(sf), "'r'", `line ${line(o)} opens read-only`);
   // Nothing requires fs/promises or a child-process-based copy (robocopy/xcopy/mklink) to dodge the guard.
-  assert.ok(!/require\('node:fs\/promises'\)|fs\.promises|robocopy|xcopy|mklink|New-Item/.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
+  assert.ok(!/require\('node:fs\/promises'\)|fs\.promises|robocopy|xcopy|mklink|New-Item/.test(allCode.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
 });
 
 test('AST: every spawn / spawnSync call, at any nesting, passes windowsHide: true', () => {
@@ -246,15 +298,15 @@ test('R9: evidence is redacted (token-shaped strings, auth headers, token fields
 });
 
 test('SOURCE: no --force worktree removal (node_modules goes first), no fixed canary port, nothing without --go, the heavy-job gate', () => {
-  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(src), 'never --force as an argument');
+  assert.ok(!/['"]--force['"]|['"]-f['"]/.test(allCode), 'never --force as an argument in any Layer B module');
   const rm = src.indexOf("['worktree', 'remove', dir]");
   assert.ok(rm > 0, 'the 1.1.74 worktree is removed');
   const clean = src.slice(src.indexOf('removeV1174() {'), rm);
   assert.ok(clean.indexOf('W.rm(nm)') > 0, 'node_modules removed before');
   assert.match(clean, /isSymbolicLink\(\)\) throw new Error\('node_modules is a link/, 'never removed through a link');
   assert.equal((src.match(/'worktree', 'remove'/g) || []).length, 1);
-  assert.ok(!/9333/.test(src));
-  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(src.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
+  assert.ok(!/9333/.test(allCode), 'no fixed canary port in any Layer B module');
+  assert.ok(!/Start-Process|ShellExecute|\bstart\s+""/i.test(allCode.replace(/const PS_WATCH[\s\S]*?\n`;/, '')));
   assert.match(src, /if \(!this\.args\.go\) \{[\s\S]{0,300}return 0;/);
   const main = src.slice(src.indexOf('async main() {'));
   assert.ok(main.indexOf('return 0;') < main.indexOf('W.allowRoot(s.base)'), 'without --go nothing is even registered for writing');
@@ -314,8 +366,8 @@ test('real step 1: the codex argvs are the 0.157.1 syntax; NO runner codex argv 
     assert.ok(!argv.includes('windows'), argv.join(' '));
   }
   // Static, over the CODE (comments stripped): no 'sandbox', 'windows' pair and no "sandbox windows" string.
-  assert.ok(!/'sandbox',\s*'windows'/.test(src), 'no argv array with sandbox, windows');
-  assert.ok(!/["'`][^"'`\n]*sandbox windows[^"'`\n]*["'`]/.test(src), 'no string literal with "sandbox windows"');
+  assert.ok(!/'sandbox',\s*'windows'/.test(allCode), 'no argv array with sandbox, windows in any Layer B module');
+  assert.ok(!/["'`][^"'`\n]*sandbox windows[^"'`\n]*["'`]/.test(allCode), 'no string literal with "sandbox windows" in any Layer B module');
   // The version parse the step-1 check depends on.
   assert.equal(lb.parseCodexVersion('codex-cli 0.157.1\n'), '0.157.1');
   assert.equal(lb.parseCodexVersion('error: unrecognized'), null);
@@ -410,7 +462,7 @@ test('R8 / Dwight (c): the session window watch (this runner\'s whole tree) star
 });
 
 test('R1 confinement: Codex runs workspace-write with jail-only roots, no network, unelevated; Claude\'s jail settings are an allowlist mirror + the hook', (t) => {
-  assert.ok(!/command = `codex[^`]*dangerously/.test(src), 'Codex never gets the bypass flag');
+  assert.ok(!/command = `codex[^`]*dangerously/.test(allCode), 'Codex never gets the bypass flag in any Layer B module');
   assert.match(src, /command = lbCodexCommand\(this\.args\.models\.codex\);/);
   assert.equal(lb.lbCodexCommand('m1'), 'codex --model m1 --sandbox workspace-write --ask-for-approval never');
   assert.match(src, /command = `claude --model \$\{this\.args\.models\.claude\} --permission-mode bypassPermissions`;/, 'Claude arguments unchanged from the product');
@@ -739,13 +791,14 @@ test('god 1a3c97 catch sweep (runner): listing, reading, monitoring and cleanup 
 });
 
 test('round 6: every PowerShell start is -EncodedCommand (never -Command - over stdin); the live before-snapshot comes first; the report states what happened', () => {
-  const psCalls = calls((n) => /^(spawn|spawnSync)$/.test(n.expression.getText(sf)) && n.arguments[0] && n.arguments[0].getText(sf) === 'PS');
+  const psCalls = allCalls((n, nodeSf) => /^(spawn|spawnSync)$/.test(callName(n)) && n.arguments[0] && n.arguments[0].getText(nodeSf) === 'PS');
   assert.ok(psCalls.length >= 3, `PowerShell starts found: ${psCalls.length}`);
-  for (const c of psCalls) {
-    assert.match(c.arguments[1].getText(sf), /^psArgs\(/, `line ${line(c)} builds its arguments with psArgs`);
-    assert.ok(!/stdin|input:/.test(c.getText(sf)), `line ${line(c)} feeds nothing on stdin`);
+  for (const { n: c, unit } of psCalls) {
+    const where = `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(c.getStart(unit.sf)).line + 1}`;
+    assert.match(c.arguments[1].getText(unit.sf), /^psArgs\(/, `${where} builds its arguments with psArgs`);
+    assert.ok(!/stdin|input:/.test(c.getText(unit.sf)), `${where} feeds nothing on stdin`);
   }
-  assert.ok(!/'-Command'/.test(src), 'no -Command anywhere in the runner');
+  assert.ok(!/'-Command'/.test(allCode), 'no -Command anywhere in a Layer B module');
   const hook = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-jail-hook.cjs'), 'utf8');
   assert.ok(!/powershell|'-Command'/i.test(hook.replace(/PowerShell[,']/g, '')), 'the hook starts no PowerShell');
   // The before-snapshot is the first thing a --go run does, before the session watch and everything else.
@@ -1086,7 +1139,7 @@ test('Jim LOW: the emergency credential shred LOGS its error (never swallowed si
   assert.equal(logs.length, 1);
   // Both emergency paths use it (no silent catch around deleteAll anywhere).
   assert.ok(!/try \{[^}]*creds\.deleteAll\(\)[^}]*\} catch \{/.test(src), 'no silent catch around deleteAll');
-  const tail = src.slice(src.indexOf('if (require.main === module) {'));
+  const tail = src.slice(src.indexOf('function runCli() {'));
   assert.equal((tail.match(/emergencyShred\(lb\)/g) || []).length, 2, 'the signal/crash path and the exit hook');
 });
 

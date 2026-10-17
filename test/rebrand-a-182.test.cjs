@@ -380,7 +380,7 @@ test('packaged canaries + layer-b: the exe is Guppy.exe (old name still found); 
   for (const f of ['test/tools/packaged-condense-canary.cjs', 'test/tools/packaged-wake-canary.cjs']) {
     assert.match(read(f), /const APP_EXE = \['Guppy\.exe', 'Munder Difflin\.exe'\]/, f);
   }
-  const lb = read('test/tools/layer-b-run.cjs');
+  const lb = read('test/tools/layer-b-core.cjs');
   for (const p of ["path.join(appData, 'Guppy')", "path.join(localAppData, 'Programs', 'Guppy')", "path.join(localAppData, 'guppy-updater')",
     "path.join(appData, 'munder-difflin')", "path.join(localAppData, 'Programs', 'Munder Difflin')"]) assert.ok(lb.includes(p), p);
   assert.equal(lb.split('/munder difflin|guppy/i.test(').length - 1, 3);

@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { primaryLayerBSource } = require('./tools/layer-b-sources.cjs');
 
 const REPO = path.join(__dirname, '..');
 const lb = require('./tools/layer-b-run.cjs');
@@ -300,7 +301,7 @@ test('dry #10 ROLLBACK: the rollback binds its own stub rb-lb-codex.cjs in BOTH 
 });
 
 test('runner wiring: after EVERY launch (phase A, phase B, rollback) the real run checks lb-codex\'s argv with the PRODUCT gate, and a failure stops the run', () => {
-  const src = fs.readFileSync(path.join(__dirname, 'tools', 'layer-b-run.cjs'), 'utf8').replace(/\r\n/g, '\n');
+  const src = primaryLayerBSource().raw;
   for (const label of ['phase A', 'phase B']) {
     assert.match(src, new RegExp(`await this\\.waitAgentsUp\\('${label}'\\);\\n\\s*this\\.checkCodexArgv\\('${label}'\\);`), label);
   }
