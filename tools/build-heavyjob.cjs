@@ -20,7 +20,7 @@ if (process.platform !== 'win32') {
   console.log('[build-heavyjob] not Windows: skipped');
   process.exit(0);
 }
-const csc = join(process.env.WINDIR || 'C:\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+const csc = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 if (!existsSync(csc)) {
   console.error(`[build-heavyjob] no C# compiler at ${csc}`);
   process.exit(1);

@@ -1281,7 +1281,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                               </span>
                               <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
                                 {heavyHalf
-                                  ? `Every heavy job runs on ${halfCpus} of this PC's ${logicalCpus} logical processors; the rest stay free for you. Applies at once, to running jobs too.`
+                                  ? `Every heavy job runs on ${halfCpus} of this PC's ${logicalCpus} logical processors; the rest stay free for you. Applies at once, to running jobs too. They are always the lowest-numbered ${halfCpus}, so on a CPU with two threads per core that can be fewer than ${halfCpus} physical cores.`
                                   : `Heavy jobs may use all ${logicalCpus} logical processors.`}
                               </span>
                             </div>

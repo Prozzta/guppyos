@@ -16,12 +16,18 @@
  * commands (god b43582): a job whose only processes are ones created BEFORE its call started has
  * nothing of the heavy job left in it, so its limits are lifted and Guppy lets it go.
  *
+ * A courtesy limit, not a security boundary: any process of the user's session can open the named
+ * job and change or lift its limits (`guppy-heavyjob set <job> 0 0`), so an agent can lift its own.
+ * Lifting a limit resets the members (the helper's SetJob): priority NORMAL and affinity the whole
+ * machine, even for a process that had narrowed its own affinity before.
+ *
  * Option 2 and Electron: under an affinity limit Electron 32's SwiftShader GPU process deadlocks
- * (heavycpu/ROOTCAUSE.md), so inside a limited job a test starts Electron from a view of its folder
- * whose SwiftShader.ini keeps those workers on the job's processors
- * (test/electron-harness/electron-bin.cjs). The app itself never runs in a heavy job.
+ * (heavycpu/ROOTCAUSE.md), so on Windows a test always starts Electron from a view of its folder
+ * whose SwiftShader.ini keeps those workers on option 2's processors, limit or not, since the limit
+ * can be turned on while a suite runs (test/electron-harness/electron-bin.cjs). The app itself never runs in a heavy job.
  */
 import { spawn } from 'node:child_process';
+import { autoModeFlagForProvider, type AgentProvider } from '../shared/agentProvider';
 
 /** Option 2's switch (god 123473: held off until the harness SwiftShader stall was fixed; 7ef310: on). */
 export const HEAVY_HALF_CORES_AVAILABLE = true;
@@ -63,6 +69,22 @@ export function heavyJobId(agentId: string, seq: number, now: number): string {
  *  the helper, which runs it under a second cmd. */
 export function joinLine(id: string, o: HeavyCpuOptions, cmd = false): string {
   return `${HEAVY_JOB_COMMAND} join ${id} ${o.background ? 1 : 0} ${o.half ? 1 : 0}${cmd ? ' & ' : '; '}`;
+}
+
+/** Whether an agent started with this command line runs commands without asking its user: its
+ *  provider's own auto-approve flag is on it. Codex applies a rewrite only with permissionDecision
+ *  'allow', and AGY's rewrite is an allow; for an agent that asks first that allow could skip the
+ *  user's prompt, so such an agent's calls are not rewritten (Jim SHOULD-2). */
+export function approvesWithoutAsking(provider: AgentProvider, argv: string[]): boolean {
+  const flag = autoModeFlagForProvider(provider).split(/\s+/).filter(Boolean);
+  return flag.length > 0 && flag.every((f) => argv.includes(f));
+}
+
+/** The command without a leading join line: a PostToolUse carries the rewritten command, and a
+ *  provider with no tool-use id pairs Pre with Post by the command (Jim SHOULD-1). */
+export function withoutJoinLine(command: string): string {
+  const m = /^guppy-heavyjob join [A-Za-z0-9_-]+ [01] [01](?:; | & )/.exec(command);
+  return m ? command.slice(m[0].length) : command;
 }
 
 /** The tool input with the join line before its command (`command`: Claude Bash/PowerShell and

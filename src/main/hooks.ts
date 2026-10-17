@@ -30,7 +30,7 @@ import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } 
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
 import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, rebuildToolHook, templatedToolInput } from './codexHookMcp';
-import type { HeavyJobs } from './heavyCpu';
+import { withoutJoinLine, type HeavyJobs } from './heavyCpu';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
 import { normalizeAgentProvider, type AgentProvider } from '../shared/agentProvider';
@@ -1770,16 +1770,21 @@ export class HookServer {
   /** HEAVY-CPU-OPTIONS-191: the jobs heavy calls run in (main wires it; null = no call is rewritten). */
   private heavyJobs: HeavyJobs | null = null;
   setHeavyJobs(jobs: HeavyJobs | null): void { this.heavyJobs = jobs; }
+  /** Whether the agent runs commands without asking its user (main records it at spawn; heavyCpu.ts
+   *  approvesWithoutAsking). Unknown: it asks. */
+  private heavyAutoApproves: (agentId: string) => boolean = () => false;
+  setHeavyAutoApproves(fn: (agentId: string) => boolean): void { this.heavyAutoApproves = fn; }
   /** Set by handleHook for an allowed heavy PreToolUse; handleWithClaimContext makes the job and
    *  puts the rewritten command in the reply (making the job needs an await). */
   private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean } | null = null;
 
   /** The id that pairs a heavy call's PreToolUse with its PostToolUse: the provider's tool-use
-   *  id when it sends one, else the command itself (identical in both hooks). */
+   *  id when it sends one, else the command itself, without the join line the Pre reply put
+   *  before it (HEAVY-CPU-OPTIONS-191), so it is the same in both hooks. */
   private static heavyCallId(p: HookPayload): string {
     const id = (p as { tool_use_id?: unknown }).tool_use_id;
     if (typeof id === 'string' && id) return `id:${id}`;
-    return `cmd:${(commandFromToolInput(p.tool_input) ?? '').slice(0, 500)}`;
+    return `cmd:${withoutJoinLine(commandFromToolInput(p.tool_input) ?? '').slice(0, 500)}`;
   }
 
   /** HEAVY-LOCK-SCRIPT-WRAPPER: the classifier may read a script the call runs (`bash suite.sh`),
@@ -2266,7 +2271,10 @@ export class HookServer {
       // HEAVY-CPU-OPTIONS-191: a heavy call that runs gets its job (whatever "Heavy jobs at once" is).
       // Codex: the nested command its hook template carried (a degraded rebuild has none to rewrite).
       // A subagent's call is wrapped too: its processes are its agent's heavy job.
-      if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+      // Codex and AGY take a rewrite only as an allow: not for an agent that asks its user first (SHOULD-2).
+      let allows = p.transport === 'mcp';
+      try { if (this.mailChannel(agentId).provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
+      if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true) && (!allows || this.heavyAutoApproves(agentId))) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
     }
     // A heavy FOREGROUND call returned, succeeded or FAILED (a suite exiting 1 fires PostToolUseFailure):
     // its job is done (a backgrounded one, or a missed Post, is left to the watcher). Andy N1 (1.1.81):

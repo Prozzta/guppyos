@@ -134,11 +134,15 @@ static class HeavyJob
         List<int> chain = ShellChain(out hosts);
         if (self) chain.Insert(0, GetCurrentProcessId()); // what this helper runs for cmd starts inside the job
         if (chain.Count == 0) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: no shell to join"); return 0; }
-        IntPtr job = CreateJobObjectW(IntPtr.Zero, name);
-        if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
         // Guppy created it (with the limits as they are NOW: a live change may have followed). Only a
         // job this line had to create itself gets the limits from its own arguments.
-        if (Marshal.GetLastWin32Error() != 183) Apply(job, background, half); // ERROR_ALREADY_EXISTS
+        IntPtr job = OpenJobObjectW(JOB_ALL, false, name);
+        if (job == IntPtr.Zero)
+        {
+            job = CreateJobObjectW(IntPtr.Zero, name);
+            if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+            Apply(job, background, half);
+        }
         // Top of the chain first: the shell that will start the command's processes joins before the
         // fork stub below it exits.
         for (int i = chain.Count - 1; i >= 0; i--)

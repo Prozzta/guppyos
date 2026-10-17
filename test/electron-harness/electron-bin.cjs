@@ -2,16 +2,17 @@
 /**
  * HEAVY-CPU-OPTIONS-191: the Electron a test starts.
  *
- * Outside a CPU limit it is the installed one, require('electron'). Inside a heavy job limited to
- * part of the processors (Settings, "Heavy jobs on half the processors") the harness's software
- * renderer, SwiftShader (--disable-gpu), would hang. Its marl worker threads ask for every processor
- * of the machine, the job refuses them, and the GPU process waits forever for workers that never
- * started (heavycpu/ROOTCAUSE.md; Phyllis PRIOR-ART Q3). SwiftShader reads SwiftShader.ini from the
- * folder of the executable ([Processor] AffinityMask) and then asks only for those processors. So
- * under a limit a test starts Electron from a view of its dist folder (hard links, so nothing is
- * copied when the volume allows) with that file in it, set to processors the job allows. The flags
- * and the renderer stay the same, so the pixels do too. The hardware GPU and WARP were tried
- * instead, and both miss the floor's exact texel check.
+ * On Windows a test always starts Electron from a view of its dist folder (hard links, so nothing is
+ * copied when the volume allows) whose SwiftShader.ini keeps the harness's software renderer on the
+ * processors option 2 allows. Inside a heavy job limited to part of the processors (Settings, "Heavy
+ * jobs on half the processors") SwiftShader (--disable-gpu) would otherwise hang. Its marl worker threads
+ * ask for every processor of the machine, the job refuses them, and the GPU process waits forever for
+ * workers that never started (heavycpu/ROOTCAUSE.md; Phyllis PRIOR-ART Q3). SwiftShader reads
+ * SwiftShader.ini from the folder of the executable ([Processor] AffinityMask) and then asks only for
+ * those processors. The limit can be turned on while a suite runs (live apply), so the view is used
+ * with no limit too: a later limit never takes a processor the workers were given (Jim MUST-1, r9).
+ * The flags and the renderer stay the same, so the pixels do too. The hardware GPU and WARP were tried
+ * instead, and both miss the floor's exact texel check. Elsewhere it is the installed Electron.
  */
 const fs = require('node:fs');
 const os = require('node:os');
@@ -85,11 +86,24 @@ function swiftShaderView(exe, mask, tmp = os.tmpdir()) {
   return join(dir, basename(exe));
 }
 
+/**
+ * The processors option 2 allows: the lowest floor(n/2) logical ones, at least 1, as the helper sets
+ * them (resources/heavyjob/guppy-heavyjob.cs HalfMask). Where Node sees fewer processors than the
+ * helper (one processor group), the mask is a subset of the helper's, which is still inside it.
+ */
+function halfCpuMask(logical = os.cpus().length) {
+  return (1n << BigInt(Math.max(1, Math.floor(Math.min(logical, 64) / 2)))) - 1n;
+}
+
 /** The Electron executable for a test to start. */
 function harnessElectron(env = process.env) {
   const exe = require('electron');
-  const mask = harnessCpuMask(env);
-  return mask === null ? exe : swiftShaderView(exe, mask);
+  if (process.platform !== 'win32') return exe;
+  // The processors of option 2 (a limit turned on later never takes one away), within any limit
+  // already in force; a limit outside them all is used as it is.
+  const limit = harnessCpuMask(env);
+  const half = halfCpuMask();
+  return swiftShaderView(exe, limit === null ? half : (limit & half) || limit);
 }
 
-module.exports = { harnessElectron, harnessCpuMask, swiftShaderMask, swiftShaderView };
+module.exports = { harnessElectron, harnessCpuMask, halfCpuMask, swiftShaderMask, swiftShaderView };

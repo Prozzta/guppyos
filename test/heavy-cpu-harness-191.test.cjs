@@ -4,9 +4,10 @@
  *
  * With --disable-gpu a harness Electron runs WebGL on SwiftShader, whose worker threads ask for every
  * processor of the machine. Inside a heavy job limited to half of them those threads cannot start and
- * the GPU process waits for them forever, so every App scenario stalled (heavycpu/ROOTCAUSE.md). Inside
- * such a job a test now starts Electron from a view of its dist folder with a SwiftShader.ini that
- * keeps the workers on processors the job allows (electron-bin.cjs); flags and renderer are unchanged.
+ * the GPU process waits for them forever, so every App scenario stalled (heavycpu/ROOTCAUSE.md). On
+ * Windows a test now always starts Electron from a view of its dist folder with a SwiftShader.ini that
+ * keeps the workers on the processors option 2 allows (electron-bin.cjs), limit or not, because the
+ * limit can be turned on while a suite runs; flags and renderer are unchanged.
  *
  * The RENDERED test runs a real App scenario inside a real job built by the helper Guppy ships
  * (resources/heavyjob/guppy-heavyjob.cs, compiled here with the in-box csc) with the half-processor limit.
@@ -17,7 +18,7 @@ const { spawn, spawnSync } = require('node:child_process');
 const { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, relative } = require('node:path');
-const { harnessCpuMask, swiftShaderMask, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
+const { harnessCpuMask, halfCpuMask, swiftShaderMask, swiftShaderView } = require('./electron-harness/electron-bin.cjs');
 
 const root = join(__dirname, '..');
 const CSC = join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
@@ -27,6 +28,13 @@ test('the SwiftShader.ini mask: the job\'s processors below bit 31 (SwiftShader 
   assert.equal(swiftShaderMask(0xffffffffn), 0x7fffffff, 'half of 64: the 31 lowest, never a negative int');
   assert.equal(swiftShaderMask(0x1n), 1);
   assert.throws(() => swiftShaderMask(0xffff00000000n), /no processor below 31/);
+});
+
+test('option 2\'s processors: the lowest floor(n/2), at least 1, counting at most 64', () => {
+  assert.equal(halfCpuMask(32), 0xffffn);
+  assert.equal(halfCpuMask(3), 1n);
+  assert.equal(halfCpuMask(1), 1n);
+  assert.equal(halfCpuMask(128), 0xffffffffn, 'the helper counts at most 64');
 });
 
 test('HARNESS_CPU_MASK, when the runner set it, is the answer; nothing else is asked', () => {
@@ -107,14 +115,85 @@ const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron
 })().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
 `;
 
+/** The helper Guppy ships, compiled here with the in-box csc. */
+function buildHelper(dir) {
+  const exe = join(dir, 'guppy-heavyjob.exe');
+  const c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
+  assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+  return exe;
+}
+
+const FLIP_CHILD = `
+const fs = require('node:fs');
+const { runScenario } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'run.cjs'))});
+const { harnessCpuMask } = require(${JSON.stringify(join(root, 'test', 'electron-harness', 'electron-bin.cjs'))});
+(async () => {
+  // As the test runner does: the mask is asked once, at the start, before any limit.
+  process.env.HARNESS_CPU_MASK = String(harnessCpuMask() ?? '');
+  const atStart = process.env.HARNESS_CPU_MASK;
+  fs.writeFileSync(process.argv[2], 'ready');
+  while (!fs.existsSync(process.argv[3])) await new Promise((r) => setTimeout(r, 100));
+  const limited = harnessCpuMask({}) !== null;
+  const r = await runScenario(${JSON.stringify(join(root, 'test', 'electron-harness', 'scenarios', 'app-recovery.tsx'))}, { timeoutMs: 90_000 });
+  process.stdout.write('HCPU ' + JSON.stringify({ atStart, limited, ok: r.ok, error: r.error || null, picker: r.normal && r.normal.picker }) + '\\n');
+})().catch((e) => { process.stdout.write('HCPU ' + JSON.stringify({ ok: false, error: String(e && e.message || e).slice(0, 2000) }) + '\\n'); });
+`;
+
+test('RENDERED (real App), live flip: a suite started with no limit, half then turned on for its job, then a scenario starts: it does not stall (Jim MUST-1)',
+  { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 600_000 },
+  async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hcpu-flip-'));
+    let serve = null;
+    let child = null;
+    try {
+      const exe = buildHelper(dir);
+      const script = join(dir, 'child.cjs');
+      writeFileSync(script, FLIP_CHILD);
+      const ready = join(dir, 'ready');
+      const go = join(dir, 'go');
+      const env = { ...process.env };
+      delete env.HARNESS_CPU_MASK;
+      const id = `hcpu-flip-${process.pid}-${Date.now().toString(36)}`;
+      // Guppy's side: the job is made with no limit and held by serve, as begin() does.
+      serve = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      const ask = (line) => new Promise((r) => { serve.stdout.once('data', (d) => r(String(d))); serve.stdin.write(`${line}\n`); });
+      assert.match(await ask(`create ${id} 0 0`), /"ok":true/);
+      child = spawn(exe, ['join', id, '0', '0;', process.execPath, script, ready, go], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { err += d; });
+      const closed = new Promise((r) => child.on('close', r));
+      const until = Date.now() + 60_000;
+      while (!existsSync(ready) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+      assert.ok(existsSync(ready), `the child never got ready.\n${out}\n${err}`);
+      // Settings, option 2 turned on while the suite runs: the job the child is in gets the half limit.
+      assert.match(await ask(`set ${id} 0 1`), /"ok":true/);
+      const started = Date.now();
+      writeFileSync(go, '');
+      const code = await closed;
+      const at = out.lastIndexOf('HCPU ');
+      assert.ok(at >= 0, `no result (exit ${code}).\n${out}\n${err}`);
+      const r = JSON.parse(out.slice(at + 5).split('\n')[0]);
+      assert.equal(r.atStart, '', 'the suite started with no limit');
+      assert.equal(r.limited, true, 'the scenario ran inside the half-processor limit');
+      assert.equal(r.ok, true, r.error);
+      assert.equal(r.picker, true, 'the App rendered its launch picker');
+      assert.ok(Date.now() - started < 90_000, `took ${Date.now() - started} ms`);
+    } finally {
+      // A failed step must not leave the child waiting for its go file.
+      if (child && child.exitCode === null) spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true });
+      if (serve) serve.kill();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 test('RENDERED (real App) inside a heavy job limited to half the processors: the scenario runs, it does not stall',
   { skip: process.platform !== 'win32' ? 'heavy jobs are Windows-only' : !existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 600_000 },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hcpu-harness-'));
     try {
-      const exe = join(dir, 'guppy-heavyjob.exe');
-      const c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, join(root, 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
-      assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
+      const exe = buildHelper(dir);
       const script = join(dir, 'child.cjs');
       writeFileSync(script, CHILD);
       const env = { ...process.env };

@@ -184,7 +184,7 @@ async function server(t, limit, o) {
   const f = fakeChannel();
   s.setHeavyJobs(new C.HeavyJobs({ platform: 'win32', options: () => o, exe: () => 'x', channel: f.channel, setInterval: () => 1, clearInterval: () => {} }));
   const fire = (agent_id, command, extra = {}) => s.handleWithClaimContext({ agent_id, hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command }, ...extra });
-  return { s, f, fire };
+  return { s, f, fire, hive };
 }
 
 test('HOOK: an allowed heavy call is rewritten for each provider; a light one and a denied one are not (M2, M3, M4)', async (t) => {
@@ -206,8 +206,42 @@ test('HOOK: an allowed heavy call is rewritten for each provider; a light one an
   assert.equal(codex.hookSpecificOutput.updatedInput, undefined);
 });
 
+test('HOOK: Codex that asks its user first: no rewrite and no allow, so its approval prompt stays; the same call auto-approved is wrapped (Jim SHOULD-2)', async (t) => {
+  const { s, f, fire, hive } = await server(t, 'off', { background: false, half: true });
+  const asks = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
+  assert.equal(asks?.hookSpecificOutput?.permissionDecision, undefined, 'no allow for an agent that asks');
+  assert.equal(asks?.hookSpecificOutput?.updatedInput, undefined);
+  assert.equal(f.sent.length, 0, 'no job made for a call that is not rewritten');
+  s.setHeavyAutoApproves((id) => id === 'a1');
+  const auto = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'npm ci' } });
+  assert.equal(auto.hookSpecificOutput.permissionDecision, 'allow');
+  assert.match(auto.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1; npm ci$/);
+  // Claude (http) needs no allow: wrapped whatever its approval mode.
+  const claude = await fire('a2', 'npm ci', { transport: 'http' });
+  assert.match(claude.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a2-\S+ 0 1; npm ci$/);
+  assert.equal(claude.hookSpecificOutput.permissionDecision, undefined);
+  // AGY's rewrite is an allow too: only for an agent that auto-approves.
+  await hive.ensureAgent({ id: 'g1', name: 'g1', provider: 'antigravity', cwd: os.tmpdir() });
+  const agy = await fire('g1', 'npm ci', { transport: 'http' });
+  assert.equal(agy?.hookSpecificOutput?.updatedInput, undefined, 'an AGY agent that asks is not rewritten');
+  s.setHeavyAutoApproves((id) => id === 'a1' || id === 'g1');
+  const agyAuto = await fire('g1', 'npm ci', { transport: 'http' });
+  assert.match(agyAuto.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join g1-\S+ 0 1; npm ci$/);
+});
+
+test('approvesWithoutAsking: the provider\'s own auto-approve flag, every token of it', () => {
+  const { approvesWithoutAsking } = C;
+  assert.equal(approvesWithoutAsking('codex', ['codex', '--dangerously-bypass-approvals-and-sandbox']), true);
+  assert.equal(approvesWithoutAsking('codex', ['codex', '-a', 'on-request']), false);
+  assert.equal(approvesWithoutAsking('antigravity', ['agy', '--dangerously-skip-permissions']), true);
+  assert.equal(approvesWithoutAsking('antigravity', ['agy']), false);
+  assert.equal(approvesWithoutAsking('claude', ['claude', '--permission-mode', 'bypassPermissions']), true);
+  assert.equal(approvesWithoutAsking('claude', ['claude', '--permission-mode', 'default']), false);
+});
+
 test('HOOK: Codex with the lock Off: the nested command from the hook template is wrapped, with allow; a cmd call gets the cmd separator (M3, M10)', async (t) => {
-  const { fire } = await server(t, 'off', { background: false, half: true });
+  const { s, fire } = await server(t, 'off', { background: false, half: true });
+  s.setHeavyAutoApproves(() => true);
   const r = await fire('a1', 'text(1)', { transport: 'mcp', tool_name: 'Bash', hook_tool_input: { command: 'node test/tools/run-tests.cjs' } });
   assert.equal(r.hookSpecificOutput.permissionDecision, 'allow', 'Codex drops updatedInput without allow');
   assert.match(r.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1; node test\/tools\/run-tests\.cjs$/);
@@ -218,6 +252,22 @@ test('HOOK: Codex with the lock Off: the nested command from the hook template i
   assert.match(cmd.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a1-\S+ 0 1 & npm ci$/);
   const claude = await fire('a2', 'npm ci', { transport: 'http', hook_cmd_shell: true });
   assert.match(claude.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a2-\S+ 0 1; npm ci$/);
+});
+
+test('HOOK: with no tool-use id (AGY, some Codex paths) the PostToolUse of a wrapped call releases its slot (Jim SHOULD-1)', async (t) => {
+  const { s, fire } = await server(t, 1, { background: false, half: true });
+  const pre = await fire('a1', 'npm ci', { transport: 'http' });
+  const wrapped = pre.hookSpecificOutput.updatedInput.command;
+  assert.match(wrapped, /^guppy-heavyjob join a1-\S+ 0 1; npm ci$/);
+  assert.equal((await fire('a2', 'npm run build', { transport: 'http' })).hookSpecificOutput.permissionDecision, 'deny', 'a1 holds the slot');
+  // The Post carries the command as it ran: the rewritten one.
+  await s.handleWithClaimContext({ agent_id: 'a1', hook_event_name: 'PostToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: wrapped }, transport: 'http' });
+  const next = await fire('a2', 'npm run build', { transport: 'http' });
+  assert.notEqual(next?.hookSpecificOutput?.permissionDecision, 'deny', 'the slot was released by the Post');
+  assert.match(next.hookSpecificOutput.updatedInput.command, /^guppy-heavyjob join a2-\S+ 0 1; npm run build$/);
+  const { withoutJoinLine } = C;
+  assert.equal(withoutJoinLine('guppy-heavyjob join a1-x_y-1 1 0 & npm ci'), 'npm ci');
+  assert.equal(withoutJoinLine('npm ci; guppy-heavyjob join a1 1 0; x'), 'npm ci; guppy-heavyjob join a1 1 0; x', 'only a leading join line');
 });
 
 test('Codex cmd: the pending exec_command\'s literal shell is read from the rollout; only cmd takes `&` (M10)', () => {

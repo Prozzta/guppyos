@@ -102,7 +102,8 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
-import { HeavyJobs, heavyCpuOptions } from './heavyCpu';
+import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
+import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
 import { CapacityProbeWatch, lastVisibleLine } from './capacityProbeWatch';
 import { CapacityRuntime } from './capacityRuntime';
@@ -1233,6 +1234,9 @@ const heavyJobs = new HeavyJobs({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } }
 });
 hookServer.setHeavyJobs(heavyJobs);
+/** Per hive agent: started with its provider's auto-approve flag (recorded at each spawn). */
+const heavyAutoApprove = new Map<string, boolean>();
+hookServer.setHeavyAutoApproves((agentId) => heavyAutoApprove.get(agentId) === true);
 
 /** IDLE-MEANS-IDLE: the lock as the displays read it (who holds, waits for, or has a slot reserved). */
 function heavyLockView(): HeavyLockView {
@@ -4839,6 +4843,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
     // Jim N3: a new process gets a new run, and a new banner if it, too, is refused for minutes.
