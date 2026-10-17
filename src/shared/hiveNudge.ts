@@ -44,21 +44,33 @@ export const CODEX_INBOX_WAKE_SENTINEL = '[hive] check inbox';
  * used to repeat (act autonomously, when to message god) are in the protocol already.
  */
 export function inboxNudgeText(ids: string[], mode: NudgeMailMode = 'inject'): string {
-  const list = ids.join(', ');
+  // NUDGE-CAP-192: the first INBOX_NUDGE_MAX_IDS ids (the wake passes them sorted, so the oldest),
+  // then a count: 60 listed ids wrapped past the 24-row screen reading. Capped, a read-mode agent
+  // is sent to every file, since its Stop archives every announced id, named or not. Jim NIT-1/2:
+  // the capped text says exactly what that Stop does, so a file that lands mid-turn (not announced,
+  // not archived, named again by the next wake) is acted on once; and inbox/ is not inbox/.done/.
+  const more = ids.length - INBOX_NUDGE_MAX_IDS;
+  const list = more > 0 ? `${ids.slice(0, INBOX_NUDGE_MAX_IDS).join(', ')}, and ${more} more` : ids.join(', ');
+  const readAct = more > 0
+    ? 'every file directly in your inbox/ (not inbox/.done/) and act. When your turn ends the harness archives only the ids this wake announced; a file that lands during your turn stays in inbox/ for the next wake, which names it again: act on each file once.'
+    : 'those files in your inbox/ and act; the harness archives them when your turn ends.';
   // ZT-I1-MAIL §5 P4: the ids stay (the submit attestation and "did I already see this?", #58);
   // the read/move instruction goes. The bodies are in the hook context of this very turn.
   if (mode === 'inject') return `${NUDGE_HEAD} (delivered in context below)${ids.length ? `: ${list}` : ''}.`;
   // Creed Q27: a degraded injection agent still runs with the injection P1 ("you do not read or
   // move inbox files") until it respawns, so its nudge says the channel changed and what to do.
   if (mode === 'degraded-move') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Mail channel degraded: read each file in your inbox/ and move it to inbox/.done/ yourself once handled.`;
-  if (mode === 'degraded-read') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Mail channel degraded: read those files in your inbox/ and act; the harness archives them when your turn ends.`;
+  if (mode === 'degraded-read') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Mail channel degraded: read ${readAct}`;
   // Legacy-read (§2.2): the agent reads the files; the harness archives them at its Stop. Also a
   // terminal work-order agent (Creed Q26: never "move"; its mail normally arrives typed whole).
-  if (mode === 'legacy-read' || mode === 'work-order') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Read those files in your inbox/ and act; the harness archives them when your turn ends.`;
+  if (mode === 'legacy-read' || mode === 'work-order') return `${NUDGE_HEAD}${ids.length ? `: ${list}` : ''}. Read ${readAct}`;
   // Legacy-move (§11.7: no Stop signal): the 1.1.74 text, unchanged.
   const named = ids.length ? ` - at least: ${list}` : '';
   return `${LEGACY_NUDGE_HEAD}${named}. Read your inbox (authoritative; ids already in inbox/.done/ were handled), act, move handled ones to inbox/.done/.`;
 }
+
+/** NUDGE-CAP-192: how many ids a nudge names before "and N more". */
+export const INBOX_NUDGE_MAX_IDS = 8;
 
 /** The nudge without ids, for size checks (tests, docs): the longest fixed text of the modes. */
 export const INBOX_NUDGE_FIXED_CHARS = Math.max(...NUDGE_MODES.map((m) => inboxNudgeText([], m).length));
