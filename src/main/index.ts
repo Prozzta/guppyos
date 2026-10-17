@@ -1588,6 +1588,14 @@ const hiveCandidateCorpus = new HiveCorpus({ agents: () => Object.keys(hive.regi
 // CL-M4-FORWARD-PATH: one scorer for the app, so its claim-vector cache outlives a note (the own pool
 // is the whole ledger now).
 const claimCandidateScorer = makeLocalScorer(embedViaWorker((texts) => nativeMemory.embed(texts)), () => hiveCandidateCorpus.corpus());
+/** S1: off the interactive note path, fill the shared scorer with every live own-ledger claim. */
+function warmClaimCandidateVectors(): Promise<void> {
+  const pool = claimLedgerAgents().flatMap((agentId) => {
+    const view = claimsLedgerView(agentId);
+    return view ? view.claims.filter((c) => view.status(c.id) === 'live').map((c) => ({ id: c.id, owner: agentId, wt: c.wt, key: c.key, text: c.text, status: 'live' as const })) : [];
+  });
+  return claimCandidateScorer.warm(pool);
+}
 function claimNoteCandidates(agentId: string, text: string, o: { key?: string } = {}): Promise<CandidateResult> {
   return collectNoteCandidates(ledgerCandidateDeps({
     ledger: claimsLedgerView,
@@ -7868,7 +7876,7 @@ app.whenReady().then(() => {
   // REL-184 S0: either way the claims import runs first (claimsImportReady); the worker forks after it.
   mainWindow?.webContents.once('did-finish-load', () => {
     startupTiming.mark('window-ready');
-    const t = setTimeout(() => { void claimsImportReady().then(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } }); }, NATIVE_MEMORY_PREWARM_DELAY_MS);
+    const t = setTimeout(() => { void claimsImportReady().then(() => { try { nativeMemory.prewarm(); } catch (e) { console.error('[native-memory] prewarm failed:', e); } void warmClaimCandidateVectors().catch((e) => console.error('[claims] candidate vector warm failed:', e)); }); }, NATIVE_MEMORY_PREWARM_DELAY_MS);
     t.unref?.();
     // CODEX-WAKE-161 (b): the app-start row, off the start-up path (resolving a command can
     // start a login shell on macOS). Only when Codex is installed at all.

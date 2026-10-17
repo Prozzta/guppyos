@@ -107,6 +107,42 @@ test('makeLocalScorer: claim vectors are cached by text across notes; the query 
   assert.deepEqual(out.vector.length, 2);
 });
 
+test('S1: a warmed whole pool uses the full vector order; cold remains bounded', async () => {
+  const calls = [];
+  const embed = async (texts) => { calls.push(texts.slice()); return texts.map((t) => [t === 'query' ? 1 : Number(t.slice(6)), 1]); };
+  const s = C.makeLocalScorer(embed, undefined, 5000);
+  const pool = Array.from({ length: 110 }, (_, i) => claim(i + 1, { text: `claim-${i + 1}` }));
+  const cold = await s('query', pool);
+  assert.ok(cold.vector.length < pool.length, 'cold notes use vectorPool');
+  await s.warm(pool);
+  const warm = await s('query', pool);
+  assert.equal(warm.vector.length, pool.length, 'a warmed whole pool gets whole-pool cosine');
+  assert.deepEqual(warm.vector, C.cosineOrder([1, 1], pool.map((c) => ({ id: c.id, vec: [Number(c.text.slice(6)), 1] }))));
+  pool.push(claim(111, { text: 'claim-111' }));
+  const steady = await s('query', pool);
+  assert.equal(steady.vector.length, pool.length, 'one just-written uncached claim preserves the warmed whole-pool path');
+  assert.ok(calls.length >= 3);
+});
+
+test('S1 wiring: startup warms the live ledger only, after native prewarm', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(src, /nativeMemory\.prewarm\(\);[^\n]*warmClaimCandidateVectors\(\)/, 'candidate warm follows native prewarm');
+  assert.match(src, /view\.claims\.filter\(\(c\) => view\.status\(c\.id\) === 'live'\)/, 'only live claims enter startup warm pool');
+});
+
+test('S1: an over-cap warm warns once that complete whole-pool caching is impossible', async () => {
+  const s = C.makeLocalScorer(async (texts) => texts.map(() => [1, 1]), undefined, 2);
+  const warnings = [];
+  const warn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try {
+    const pool = [claim(1), claim(2), claim(3)];
+    await s.warm(pool);
+    await s.warm(pool);
+  } finally { console.warn = warn; }
+  assert.deepEqual(warnings, ['[claims] candidate vector warm pool 3 exceeds cache cap 2; new notes use the bounded cold path until the uncached tail is small']);
+});
+
 // ---------------------------------------------------------------- the note verb, end to end
 
 let hiveN = 0;
@@ -397,6 +433,10 @@ test('S3 through the ledger command: refused before anything is written; key / s
   let r = await L.applyLedgerOp(op('s3-1', { append: 'card one is done', key: 'card.card-1' }), deps());
   assert.equal(r.status, 409); assert.match(r.body.line, new RegExp(`^refused: your live claim ${old} already has key card\\.card-1\\.`));
   assert.equal(recs(store).length, before); assert.equal(patches, 0, 'the card is not patched'); assert.deepEqual(outbox(), [], 'no message sent');
+  // P1 / S2: a syntactically valid but unrelated --separate does not bypass the ledger refusal.
+  r = await L.applyLedgerOp(op('s3-p1', { append: 'card one is also done', key: 'card.card-1', separate: ['c-000000000000'] }), deps());
+  assert.equal(r.status, 409); assert.match(r.body.line, new RegExp(`^refused: your live claim ${old} already has key card\\.card-1\\.`));
+  assert.equal(recs(store).length, before);
   // The same op name, now with a choice: applied (a refused op was never recorded).
   r = await L.applyLedgerOp(op('s3-1', { append: 'card one is done', key: 'card.card-1', supersedes: [old], reason: 'changed' }), deps());
   assert.equal(r.status, 200, r.body.line);
@@ -410,6 +450,7 @@ test('S3 through the ledger command: refused before anything is written; key / s
     [{ append: 'x', supersedes: [old] }, /needs "reason"/], [{ append: 'x', reason: 'changed' }, /goes with memory.supersedes/],
     [{ append: 'x', supersedes: [old], separate: [old], reason: 'changed' }, /not both/], [{ append: 'x', separate: ['nope'] }, /memory.separate/],
     [{ append: 'x', supersedes: [old, old], reason: 'moved' }, /memory.supersedes/], [{ append: 'x', key: 7 }, /memory.key/],
+    [{ append: 'x', key: 'k'.repeat(201) }, /memory.key: a key of at most 200 chars/],
   ]) { const x = await L.applyLedgerOp(op('s3-bad', m), deps()); assert.equal(x.status, 400, JSON.stringify(m)); assert.match(x.body.line, re); }
   // Below writer: memory.md as before; the key is not checked (memory.md has no keys).
   r = await L.applyLedgerOp({ op: 's3-3', memory: { append: '- a plain note', key: 'card.card-1' } }, deps('reader'));
@@ -419,6 +460,10 @@ test('S3 through the ledger command: refused before anything is written; key / s
   const idx = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8');
   assert.match(idx, /precheck: \(args\) => cardKeyRefusal\(d, agentId, args\)\?\.text \?\? null/);
   assert.match(idx, /liveByKey: \(agentId, key\) =>/);
+  // Pin the production endpoint wiring, not the test-only wire() helper: live claims are newest
+  // first and dead claims do not grant a ledger-route bypass (K17/K18).
+  assert.match(idx, /\.filter\(\(c\) => c\.key === key && view\.status\(c\.id\) === 'live'\)/);
+  assert.match(idx, /\.sort\(\(a, b\) => Date\.parse\(b\.wt\) - Date\.parse\(a\.wt\)/);
 });
 
 test('nit 5: a leading kind word sets the kind (and says so); --kind wins; a lone word stays text', async () => {

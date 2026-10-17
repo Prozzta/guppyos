@@ -103,9 +103,13 @@ function parseRefs(v: unknown): Ref[] | string {
 export function cardKeyRefusal(d: Pick<ClaimsEndpointDeps, 'liveByKey'>, agentId: string, args: Record<string, unknown>): { text: string; ids: string[] } | null {
   const key = args.key;
   if (typeof key !== 'string' || !key.startsWith('card.')) return null;
-  if (args.supersedes !== undefined || (args.separate !== undefined && args.separate !== true)) return null;
   const live = d.liveByKey?.(agentId, key) ?? [];
   if (!live.length) return null;
+  // A ledger route cannot show the candidate offer.  A non-bare separate therefore counts only
+  // when it explicitly keeps at least one of this key's live claims apart.
+  const apart = args.separate === undefined || args.separate === true ? null : ids(args.separate);
+  if (args.separate !== undefined && args.separate !== true && (!apart || !apart.length)) return null;
+  if (args.supersedes !== undefined || (apart && apart.some((id) => live.includes(id)))) return null;
   const list = live.slice(0, 5);
   return {
     ids: list,
