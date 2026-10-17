@@ -301,6 +301,7 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
   for (const shell of ['bash', 'sh', 'dash', 'zsh', 'busybox sh']) {
     for (const body of ['$C', '${C}']) assert.equal(classifyCommand(`C=$(cat run.sh)\n${shell} -c "${body}"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, `${shell} ${body}`);
   }
+  assert.deepEqual(classifyCommand("bash -c 'cd $HOME && git status'", 0, HookServer.heavyScriptCtx(process.cwd())), { heavy: false }, 'a single-quoted -c body is expanded by the inner shell and remains inspectable');
   assert.equal(classifyCommand('C=$(cat run.sh)\neval "$C"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'computed eval body is unreadable');
 });
 
@@ -315,11 +316,15 @@ test('MUTANTS: removing either computed-wrapper guard reopens the generated-chil
   for (const body of ['cmd //c "$B"', 'cmd //c "${B}"']) {
     assert.equal(noCmdGuard.classifyCommand(`B=$(cygpath -w $P/run.cmd)\n${body}`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, `MUTANT: removed cmd guard reopens ${body}`);
   }
-  const bashGuard = "((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && /(?:\\$|`)/.test(body))";
+  const bashGuard = "((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && !singleQuotedDashCBody(ctx.segment, args[k]) && /(?:\\$|`)/.test(body))";
   assert.equal(original.split(bashGuard).length - 1, 1, 'bash guard mutation target is unique');
   const noBashGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(bashGuard, 'false'));
   assert.equal(noBashGuard.classifyCommand('bash -c "$(cat run.sh)"', 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: removed bash guard reopens command substitution');
   for (const shell of ['bash', 'sh']) for (const body of ['$C', '${C}']) assert.equal(noBashGuard.classifyCommand(`C=$(cat run.sh)\n${shell} -c "${body}"`, 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, `MUTANT: removed shell variable guard reopens ${shell} ${body}`);
+  const singleQuoteGuard = '!singleQuotedDashCBody(ctx.segment, args[k])';
+  assert.equal(original.split(singleQuoteGuard).length - 1, 1, 'single-quote guard mutation target is unique');
+  const noSingleQuoteException = loadTs.fromText('src/main/heavyJob.ts', original.replace(singleQuoteGuard, 'true'));
+  assert.equal(noSingleQuoteException.classifyCommand("bash -c 'cd $UNSET_FOR_QUOTE_PIN && git status'", 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'MUTANT: removing single-quote exception queues an inspectable inner-shell body');
   const evalGuard = "if (ctx.dialect === 'sh' && /(?:\\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };";
   assert.equal(original.split(evalGuard).length - 1, 1, 'eval guard mutation target is unique');
   const noEvalGuard = loadTs.fromText('src/main/heavyJob.ts', original.replace(evalGuard, ''));

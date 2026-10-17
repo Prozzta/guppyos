@@ -129,6 +129,13 @@ function words(s: string, d: ShellDialect = 'sh'): string[] {
   return out;
 }
 
+/** A single-quoted sh `-c` body is expanded by its inner shell, not the outer one. */
+function singleQuotedDashCBody(segment: string | undefined, option: string): boolean {
+  if (!segment || option !== '-c') return false;
+  const hit = /(?:^|\s)-c\s+(')/.exec(segment);
+  return !!hit;
+}
+
 /** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
  *  stdin (a python/node edit script, a file's text), never commands this shell runs, so a line in
  *  it must not be classified. The `<<` line itself stays; the terminator line is dropped too. */
@@ -362,6 +369,11 @@ export interface ClassifyCtx {
    *  that absolute path (for the deny text: "no such file at ..."); null when one is there, or when
    *  the path is not resolvable. Absent = the reason stays "cannot read yet". */
   missingAt?: (path: string, cd?: string) => string | null;
+  /** Command-local literal assignments expanded before a nested wrapper is classified. Computed
+   * values remain visibly computed, so the wrapper still fails closed. */
+  expandKnown?: (text: string) => string;
+  /** Raw current segment, retained solely to identify a single-quoted sh `-c` body. */
+  segment?: string;
 }
 
 /** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
@@ -818,16 +830,15 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
     // was read one level deep only).
     if (k >= 0) {
-      const body = args.slice(k + 1).join(' ');
+      const body = (ctx.expandKnown ?? ((text: string) => text))(args.slice(k + 1).join(' '));
       // A command string expanded by a shell is not inspectable after expansion. This covers
       // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`), shell `$C` indirection, `eval $C`,
       // and `bash`/`dash`/`zsh`/busybox-sh `-c "$(cat run.sh)"`. Deliberately conservative:
       // a rare light expansion also reserves a slot rather than reopening this escape class.
-      // `words()` intentionally discards quote kind, so a single-quoted `$HOME` is also
-      // provisional (like `cmd /c "echo $(date)"`); preserving that distinction would let
-      // computed outer-shell command strings evade the lock again.
+      // A single-quoted `-c` body has no outer-shell expansion; its inner shell is inspected.
+      // Known literal variables are expanded above. Any still-computed `$` / backtick fails closed.
       if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
-          ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
+          ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && !singleQuotedDashCBody(ctx.segment, args[k]) && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
@@ -851,7 +862,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // `eval` runs its argument as sh code. A variable/backtick-derived body is unknowable before
   // expansion, while literal text can use the same nested classification as a shell `-c` body.
   if (bin === 'eval') {
-    const body = args.join(' ');
+    const body = (ctx.expandKnown ?? ((text: string) => text))(args.join(' '));
     if (ctx.dialect === 'sh' && /(?:\$|`)/.test(body)) return { heavy: true, kind: 'bench', why: 'eval (computed command the lock cannot read)', provisional: true };
     return nested(body, depth, { ...ctx, dialect: 'sh' }, 'eval');
   }
@@ -1123,7 +1134,7 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     // Jim n2: `cat <<'EOF' | node -`: the heredoc of an earlier segment is what the pipe feeds `-`.
     if (stdin === undefined && bodies.length && raw.includes('-')) stdin = bodies.join('\n');
     const at = looped ? { ...here, loopWord: true } : here;
-    const c = classifyWords(ws, depth, stdin === undefined ? at : { ...at, stdin });
+    const c = classifyWords(ws, depth, { ...(stdin === undefined ? at : { ...at, stdin }), expandKnown: expand, segment: seg });
     if (c.heavy && !c.provisional) return c;
     if (c.heavy && !maybe) maybe = c;
     const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : new Set<string>();
