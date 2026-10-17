@@ -88,6 +88,27 @@ test('an ask with needs_human and a card: one ASK ME entry on the card, its stat
   assert.equal(f.notices().length, 0);
 });
 
+test('Jim SHOULD-1: an ask its sender supersedes leaves ASK ME (dismissed, kept on the card); nobody else can', async (t) => {
+  const f = await floor(t);
+  const first = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, subject: 'invented: blue or green?' });
+  const other = f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true, subject: 'invented: unrelated ask' });
+  // god naming jim's ask in its own supersedes does not touch it
+  f.post('god-1', 'jim-1', { act: 'inform', supersedes: [first.id], subject: 'invented: god supersedes' });
+  assert.equal(f.qa('ASK-1').filter((e) => e.dismissedAt).length, 0);
+  // jim corrects it: the old entry is dismissed, the corrected one is open, the unrelated one untouched
+  const fixed = f.post('jim-1', 'god', { act: 'request', card: 'ASK-1', needs_human: true, supersedes: [first.id], subject: 'invented: blue, green or red?' });
+  const q = f.qa('ASK-1');
+  assert.equal(q.length, 3);
+  const by = (id) => q.find((e) => e.msgId === id);
+  assert.ok(by(first.id).dismissedAt, 'the superseded ask is off ASK ME');
+  assert.equal(by(first.id).dismissedReason, `superseded by ${fixed.id}`);
+  assert.equal(by(first.id).a, undefined, 'no answer is made up');
+  assert.equal(by(other.id).dismissedAt, undefined);
+  assert.equal(by(fixed.id).dismissedAt, undefined);
+  assert.equal(f.status('ASK-1'), 'doing');
+  assert.equal(f.logRows('needs-human-dismissed').length, 1);
+});
+
 test('D3: a query, a propose and a requires_reply inform surface; an inform or done does not reach ASK ME', async (t) => {
   const f = await floor(t);
   f.post('jim-1', 'god', { act: 'query', card: 'ASK-1', needs_human: true });
@@ -133,6 +154,7 @@ test('no card found, a done card or an unknown card: delivered to god as before,
     assert.equal(got.length, 1, JSON.stringify(extra));
     assert.match(got[0].body, why);
     assert.match(got[0].body, /resend it with its card/);
+    assert.match(got[0].body, /was sent to god, but/, 'Jim NIT-1: the notice is written before delivery');
     assert.equal(got[0].requires_reply, false);
   }
   assert.equal(f.qa('DONE-1').length, 0);
@@ -185,6 +207,7 @@ test('agents are told: the protocol line, and the ledger command takes needs_hum
   assert.match(p, /## Asking the Human\n/);
   assert.match(p, /an ask \(request, query or propose\) to god with `needs_human: true` and its `card`/);
   assert.match(p, /An inform or done with `needs_human` goes to god's floor digest/);
+  assert.match(p, /To withdraw or correct\nsuch an ask, name it in `supersedes`: it leaves ASK ME\./);
   const ok = L.parseLedgerOp({ op: 'nh-1', message: { to: 'god', act: 'query', subject: 's', body: 'b', card: 'ASK-1', needs_human: true } });
   assert.equal(ok.ok, true, ok.error);
   assert.equal(ok.op.message.needs_human, true);
