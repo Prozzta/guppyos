@@ -95,6 +95,10 @@ async function postLiveHook(server, agentId, payload) {
 /** One payload down the hook pipe (the command shim's route; only it may mark a briefing). */
 async function pipeLiveHook(server, payload) {
   server.start();
+  // PIPE-HOOK-NO-TOKEN-192: a pipe hook carries its spawn's token, as the real shim does (read
+  // before any await, so two concurrent entries share one token instead of minting twice).
+  const id = payload.agent_id;
+  if (id) { if (!server.hookToken(id)) server.hookUrl(id); payload = { ...payload, hook_token: server.hookToken(id) }; }
   const sock = server.hive.sockPath();
   for (let i = 0; i < 200; i++) {
     const ok = await new Promise((r) => { const c = require('node:net').createConnection(sock, () => { c.destroy(); r(true); }); c.on('error', () => r(false)); });
