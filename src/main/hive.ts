@@ -2781,10 +2781,32 @@ export class HiveManager {
       const notice = this.normalize({
         to: msg.from, act: 'inform', in_reply_to: null, requires_reply: false,
         subject: `[needs_human not surfaced] ${msg.subject}`.slice(0, 200),
-        body: `Your ${msg.act} "${msg.subject}" (${msg.id}) was delivered to ${msg.to}, but it is not in front of the Human: ${why}. A needs_human ask reaches ASK ME only on a card that is not done: resend it with its card if the Human must answer it.`
+        body: `Your ${msg.act} "${msg.subject}" (${msg.id}) was sent to ${msg.to}, but it is not in front of the Human: ${why}. A needs_human ask reaches ASK ME only on a card that is not done: resend it with its card if the Human must answer it.`
       }, 'system');
       const notified = this.deliver(notice, msg.from);
       this.emitMessage(notice, notified ? [msg.from] : []);
+    } catch (e) {
+      try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
+    }
+  }
+
+  /** NEEDS-HUMAN-NO-ESCALATE-192 (Jim SHOULD-1): an agent that cancels or corrects its needs_human
+   *  ask with `supersedes` takes it off ASK ME: each open entry it put there for a named message is
+   *  dismissed (the history stays on the card), so the Human never answers a dead question. */
+  private dismissSupersededAsks(msg: HiveMessage, reg: Registry): void {
+    try {
+      if (!Object.prototype.hasOwnProperty.call(reg.agents, msg.from)) return;
+      const named = new Set(msg.supersedes ?? []);
+      const ledger = this.tasksForMutation();
+      const tasks = Array.isArray(ledger?.tasks) ? ledger.tasks : [];
+      for (const task of tasks) {
+        const qa = Array.isArray(task?.humanQA) ? task.humanQA : [];
+        const hit = (e: HumanQA | null | undefined): boolean => !!e && !e.a && !e.dismissedAt && e.from === msg.from && typeof e.msgId === 'string' && named.has(e.msgId);
+        if (!qa.some(hit)) continue;
+        const at = new Date().toISOString();
+        const next = qa.map((e) => (hit(e) ? { ...e, dismissedAt: at, dismissedReason: `superseded by ${msg.id}` } : e));
+        if (this.patchTask(task.id, { humanQA: next }, 'needs-human')) this.appendLog({ kind: 'needs-human-dismissed', from: msg.from, id: msg.id, card: task.id });
+      }
     } catch (e) {
       try { this.appendLog({ kind: 'needs-human-error', from: msg.from, id: msg.id, error: String(e) }); } catch { /* noop */ }
     }
@@ -2943,6 +2965,7 @@ export class HiveManager {
     // each agent's Claude Code session (and approvable remotely). A message aimed
     // at "human" is handled by the god/orchestrator, the human's proxy here.
     const resolveTo = (to: string): string => (to === 'human' || to === 'god' ? godId : to);
+    if (msg.supersedes?.length) this.dismissSupersededAsks(msg, reg);
     if (msg.needs_human === true) this.surfaceNeedsHuman(msg, reg, resolveTo(msg.to));
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
     // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
@@ -5587,7 +5610,8 @@ unread, is delivered flagged: the harness sets \`superseded_by\` and prefixes th
 To put a question in front of the Human, send
 an ask (request, query or propose) to god with \`needs_human: true\` and its \`card\`: it appears
 at once on that card in ASK ME, and the Human's answer comes back to you and to god. Without a card (on the message, an earlier message it
-answers, or its conversation) it only reaches god, and you are told.
+answers, or its conversation) it only reaches god, and you are told. To withdraw or correct
+such an ask, name it in \`supersedes\`: it leaves ASK ME.
 An inform or done with \`needs_human\` goes to god's floor digest, and god decides whether it is
 worth the Human's time.
 
