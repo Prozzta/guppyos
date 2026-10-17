@@ -32,12 +32,17 @@ const { spawn } = require('node:child_process');
 const ts = require('typescript');
 const { readSource, codeOnly } = require('./read-source.cjs');
 const { discoverTestFiles } = require('./tools/run-tests.cjs');
+const { layerBSources } = require('./tools/layer-b-sources.cjs');
 
 const RUNNER = path.join(__dirname, 'tools', 'layer-b-run.cjs');
 const lb = require(RUNNER);
 const raw = readSource(RUNNER);
 const src = codeOnly(raw, 'layer-b-run.cjs');
 const sf = ts.createSourceFile('layer-b-run.cjs', raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+const allSources = layerBSources().map((unit) => ({
+  ...unit,
+  sf: ts.createSourceFile(unit.name, unit.raw, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS),
+}));
 
 function tmpRoot(t, prefix) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -51,6 +56,15 @@ function calls(pred) {
   const out = [];
   const visit = (n) => { if (ts.isCallExpression(n) && pred(n)) out.push(n); ts.forEachChild(n, visit); };
   visit(sf);
+  return out;
+}
+/** Calls across the entry point and every extracted Layer B module. */
+function allCalls(pred) {
+  const out = [];
+  for (const unit of allSources) {
+    const visit = (n) => { if (ts.isCallExpression(n) && pred(n, unit.sf)) out.push({ n, unit }); ts.forEachChild(n, visit); };
+    visit(unit.sf);
+  }
   return out;
 }
 /** A class method's source (code only), from its signature to its closing brace. */
@@ -70,6 +84,35 @@ test('the runner is NOT part of node --test (the runner recursively selects only
   assert.ok(!files.some((f) => /layer-b-run\.cjs$/.test(f)));
   assert.equal(files.filter((f) => f.startsWith('tools' + path.sep)).length, 0, 'nothing in test/tools is a test file');
   assert.ok(!/\.test\.cjs$/.test(RUNNER));
+});
+
+test('the source/AST safety inventory covers the entry point and every extracted Layer B module', () => {
+  assert.equal(allSources[0].name, 'layer-b-run.cjs');
+  assert.equal(new Set(allSources.map((unit) => unit.file)).size, allSources.length, 'each source is listed once');
+  assert.ok(allSources.every((unit) => unit.name === 'layer-b-run.cjs' || unit.name.startsWith('layer-b/')), 'only the entry point and extracted modules are pinned');
+});
+
+test('AST inventory: every extracted Layer B module is subject to the mutation and hidden-spawn pins', () => {
+  const MUT = /^(writeFileSync|appendFileSync|mkdirSync|rmSync|rmdirSync|renameSync|copyFileSync|cpSync|unlinkSync|symlinkSync|linkSync|truncateSync|writeSync|writeFile|appendFile|mkdir|rm|rename|copyFile|cp|unlink|symlink|link|truncate)$/;
+  const mutations = allCalls((n, nodeSf) => ts.isPropertyAccessExpression(n.expression) && /^(fs|fsp|fs\.promises)$/.test(n.expression.expression.getText(nodeSf)) && MUT.test(n.expression.name.text));
+  const direct = mutations.filter(({ n, unit }) => {
+    let guarded = false;
+    const visit = (node) => {
+      if (ts.isVariableDeclaration(node) && node.name.getText(unit.sf) === 'W' && node.initializer && ts.isObjectLiteralExpression(node.initializer)
+        && n.getStart(unit.sf) >= node.getStart(unit.sf) && n.getEnd() <= node.getEnd()) guarded = true;
+      ts.forEachChild(node, visit);
+    };
+    visit(unit.sf);
+    return !guarded;
+  });
+  assert.deepEqual(direct.map(({ n, unit }) => `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(n.getStart(unit.sf)).line + 1}`), [], 'a disk mutation outside W');
+  const spawns = allCalls((n) => /^(spawn|spawnSync)$/.test(n.expression.getText()));
+  assert.ok(spawns.length >= 10, `found ${spawns.length} spawn calls`);
+  const visible = spawns.filter(({ n }) => {
+    const opts = n.arguments.find((a) => ts.isObjectLiteralExpression(a));
+    return !(opts && opts.properties.some((p) => ts.isPropertyAssignment(p) && p.name.getText() === 'windowsHide' && p.initializer.getText() === 'true'));
+  });
+  assert.deepEqual(visible.map(({ n, unit }) => `${unit.name}:${unit.sf.getLineAndCharacterOfPosition(n.getStart(unit.sf)).line + 1}`), [], 'a visible spawn');
 });
 
 test('W refuses every live location and anything outside the run\'s own roots; shred and removeProbeMarker are strict', (t) => {
