@@ -18,7 +18,7 @@ import { HumanQuestionCard, SafeMarkdown } from './HumanQuestionCard';
 import { formatStamp } from './humanQuestion';
 import { statusAgeText } from '@shared/agentBadges';
 import {
-  DEFAULT_FILTER, TIMELINE_SHOWN, collapsed, filterCards,
+  DEFAULT_FILTER, TIMELINE_SHOWN, collapsed, filterCards, loadShowDone, saveShowDone,
   type CardFilter, type CardStatus, type ReviewCard, type TimelineEntry
 } from './cardsReview';
 
@@ -182,20 +182,21 @@ export const SEARCH_DEBOUNCE_MS = 150;
 const noName = (): string | undefined => undefined;
 
 /** The list with its filters. Presentational: the cards come in, nothing goes out but a click. */
-export function CardsView({ cards, nameFor = noName, now: nowProp, initialFilter = DEFAULT_FILTER, onOpen, onOpenLink, onOpenAskMe }: {
+export function CardsView({ cards, nameFor = noName, now: nowProp, initialFilter, onOpen, onOpenLink, onOpenAskMe }: {
   cards: ReviewCard[];
   nameFor?: (id?: string) => string | undefined;
   /** Fixed clock for tests; live, it ticks once a minute (one stable Date between ticks, so the
    *  memoised cards are not all re-rendered by a fresh Date on every render). */
   now?: Date;
+  /** Wins over the viewer's stored SHOW DONE choice (CARDS-TAB-CLEANUP-191) when given. */
   initialFilter?: CardFilter;
   onOpen?: (id: string) => void;
   onOpenLink?: (href: string) => void;
   onOpenAskMe?: () => void;
 }) {
-  const [f, setF] = useState<CardFilter>(initialFilter);
+  const [f, setF] = useState<CardFilter>(() => initialFilter ?? { ...DEFAULT_FILTER, showDone: loadShowDone() });
   // The box shows every keystroke at once; the filter takes the text SEARCH_DEBOUNCE_MS later.
-  const [typed, setTyped] = useState(initialFilter.text);
+  const [typed, setTyped] = useState(f.text);
   useEffect(() => {
     if (typed === f.text) return;
     const t = setTimeout(() => setF((cur) => ({ ...cur, text: typed })), SEARCH_DEBOUNCE_MS);
@@ -236,15 +237,21 @@ export function CardsView({ cards, nameFor = noName, now: nowProp, initialFilter
           <option value="all">everyone</option>
           {assignees.map((a) => <option key={a || '-'} value={a}>{a ? (nameFor(a) ?? a) : 'unassigned'}</option>)}
         </select>
-        <label style={{ ...small, display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
-          <input type="checkbox" checked={f.showDone} onChange={(e) => setF({ ...f, showDone: e.target.checked })} />
-          done ({doneCount})
-        </label>
+        {/* CARDS-TAB-CLEANUP-191: done cards are hidden until this is pressed; the choice is kept per viewer */}
+        <button
+          type="button" className="cth-cards-done-toggle" aria-pressed={f.showDone}
+          title={f.showDone ? 'hide the done cards' : 'include the done cards'}
+          onClick={() => { const show = !f.showDone; setF({ ...f, showDone: show }); saveShowDone(show); }}
+          style={{
+            ...control, cursor: 'pointer', fontFamily: 'var(--cth-font-display)', fontSize: 9, padding: '5px 8px',
+            background: f.showDone ? 'var(--cth-mint-light)' : 'var(--cth-paper-100)'
+          }}
+        >{f.showDone ? 'HIDE' : 'SHOW'} DONE ({doneCount})</button>
       </div>
       <div style={small}>{shown.length} of {cards.length} cards · newest activity first</div>
       {shown.length === 0 && (
         <div style={{ textAlign: 'center', padding: '24px 12px', color: 'var(--cth-ink-500)', fontSize: 12 }}>
-          No card matches.{!f.showDone && f.status === 'all' && doneCount > 0 ? ' Done cards are hidden: tick "done" to include them.' : ''}
+          No card matches.{!f.showDone && f.status === 'all' && doneCount > 0 ? ' Done cards are hidden: press SHOW DONE to include them.' : ''}
         </div>
       )}
       {shown.slice(0, limit).map((c) => (
