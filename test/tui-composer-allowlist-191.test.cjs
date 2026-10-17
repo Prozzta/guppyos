@@ -279,6 +279,33 @@ test('(b) G6: a dialog that opens after STAGE gets no Enter and no Ctrl-U; it is
   }
 });
 
+test('(a) own-draft-clipped: our own long wake text that wraps past the 24-row tail is ours at COMMIT, never at STAGE, never with a dialog', () => {
+  // The wake nudge names every pending id; at 80 columns 60 ids wrap to ~26 rows, so the box's
+  // top rule and glyph scroll above the reading (DERIVED: the box shape of the REAL idle captures).
+  const ids = Array.from({ length: 60 }, (_, i) => `2026-10-17T08-${String(i).padStart(2, '0')}-00-000Z-abc${i}`);
+  const own = `You have new hive mail (delivered in context below): ${ids.join(' ')}`;
+  const rule = '─'.repeat(80);
+  const screen = (prov, text, mutate = (r) => r, footer = ['  ? for shortcuts']) => {
+    const wrapped = `${GLYPH[prov]} ${text}`.match(/.{1,78}/g);
+    const lines = ['header', '', rule, ...mutate(wrapped), rule, ...footer];
+    return SHARED.extractCodexScreen((i) => lines[i], lines.length, lines.length - 1);
+  };
+  for (const prov of ['claude', 'antigravity']) {
+    const f = screen(prov, own);
+    assert.ok(!f.tail.includes(rule) || f.tail.indexOf(rule) === f.tail.lastIndexOf(rule), `${prov}: the top rule is out of the tail`);
+    assert.equal(TUI.tuiComposerBox(prov, f.tail), null, `${prov}: no whole box in the reading`);
+    assert.deepEqual(TUI.classifyTuiComposer(prov, f, own), { cls: 'READY_OWN_DRAFT', reason: 'own-draft-clipped' }, `${prov}: our clipped text`);
+    assert.notEqual(TUI.classifyTuiComposer(prov, f).cls, 'READY', `${prov}: STAGE never takes a clipped box as empty`);
+    assert.notEqual(TUI.classifyTuiComposer(prov, f, own.replace('abc59', 'abd59')).cls, 'READY_OWN_DRAFT', `${prov}: different text is not ours`);
+    const dialog = screen(prov, own, (r) => [...r.slice(0, -3), 'Do you trust the files in this folder?', ...r.slice(-3)]);
+    assert.notEqual(TUI.classifyTuiComposer(prov, dialog, own).cls, 'READY_OWN_DRAFT', `${prov}: a dialog row among the rows is never ours`);
+    const below = screen(prov, own, undefined, ['  ❯ 1. Yes, continue', '    2. No, exit']);
+    assert.notEqual(TUI.classifyTuiComposer(prov, below, own).cls, 'READY_OWN_DRAFT', `${prov}: a select list under the box owns Enter`);
+    const short = SHARED.extractCodexScreen((i) => [own.slice(-120), rule, '  ? for shortcuts'][i], 3, 2);
+    assert.notEqual(TUI.classifyTuiComposer(prov, short, own).cls, 'READY_OWN_DRAFT', `${prov}: a short suffix proves nothing`);
+  }
+});
+
 test('R4 control: Codex is unchanged: its trust screen is refused with zero bytes by its own allowlist', async () => {
   for (const name of ['1-untrusted-trust-120x40', '1-untrusted-trust-80x24']) {
     const r = rig({ provider: 'codex', screen: name, dir: WSG });

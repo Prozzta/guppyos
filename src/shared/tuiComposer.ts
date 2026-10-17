@@ -31,8 +31,9 @@ const RULE = /^─{20,}$/;
 /** Rows below the closing rule: Claude's mode line and its second row (`/rc`, effort), agy's
  *  shortcuts line, and one notice. More than this is a popup under the box (slash commands). */
 export const TUI_FOOTER_MAX_ROWS = 3;
-/** Rows between the two rules: a long or multi-line draft wraps; the tail keeps 24 rows. */
-const COMPOSER_MAX_ROWS = 16;
+/** Rows between the two rules: a long or multi-line draft wraps; the tail keeps 24 rows, so a
+ *  box whose top rule is still in the reading is always found. */
+const COMPOSER_MAX_ROWS = 22;
 /** Claude's empty-composer placeholder (claude.exe 2.1.302: `Try "${example}"`; claude 2.1.270's
  *  boot capture shows `❯ Try "fix lint errors"`). It is not text in the composer. */
 const CLAUDE_PLACEHOLDER = /^Try "[^"]+"$/;
@@ -64,9 +65,7 @@ const compact = (s: string): string => s.replace(/\s+/g, '');
 
 /** The composer box at the bottom of `tail`: its rule rows and the rows between them, or null. */
 export function tuiComposerBox(provider: TuiGuardProvider, tail: readonly string[]): { top: number; bottom: number; rows: string[] } | null {
-  const last = tail.length - 1;
-  let bottom = -1;
-  for (let i = last; i >= Math.max(0, last - TUI_FOOTER_MAX_ROWS); i -= 1) if (RULE.test(tail[i])) { bottom = i; break; }
+  const bottom = bottomRule(tail);
   if (bottom < 2) return null;
   let top = -1;
   for (let i = bottom - 1; i >= Math.max(0, bottom - 1 - COMPOSER_MAX_ROWS); i -= 1) if (RULE.test(tail[i])) { top = i; break; }
@@ -78,6 +77,29 @@ export function tuiComposerBox(provider: TuiGuardProvider, tail: readonly string
   return { top, bottom, rows };
 }
 
+/** The closing rule of a composer box among the last rows of `tail`, or -1. */
+function bottomRule(tail: readonly string[]): number {
+  const last = tail.length - 1;
+  for (let i = last; i >= Math.max(0, last - TUI_FOOTER_MAX_ROWS); i -= 1) if (RULE.test(tail[i])) return i;
+  return -1;
+}
+
+/** Our own staged text may wrap taller than the tail shows (the wake nudge names every pending
+ *  id): then the box's top rule and prompt glyph are above the reading. It still counts as ours
+ *  when every row above the closing rule is box content (no rule, no dialog row) and together they
+ *  are a long suffix of exactly what we typed. Only ever for COMMIT/REENTER (expected text);
+ *  STAGE always needs the whole empty box. */
+const OWN_TAIL_MIN_CHARS = 200;
+function ownClippedDraft(tail: readonly string[], expectedText: string): boolean {
+  const bottom = bottomRule(tail);
+  if (bottom < 1) return false;
+  const rows = tail.slice(0, bottom);
+  if (rows.some((r) => RULE.test(r)) || dialogRow(rows) !== null) return false;
+  if (tail.slice(bottom + 1).some((r) => dialogRow([r]) !== null)) return false;
+  const seen = compact(rows.join(''));
+  return seen.length >= OWN_TAIL_MIN_CHARS && compact(expectedText).endsWith(seen);
+}
+
 /**
  * Condition 2 for Claude and agy. STAGE wants READY (the empty composer, or Claude's placeholder);
  * COMMIT and REENTER want READY_OWN_DRAFT (the composer holds exactly `expectedText`, compared
@@ -87,6 +109,7 @@ export function classifyTuiComposer(provider: TuiGuardProvider, f: CodexScreenFa
   const tail = f.tail;
   if (!Array.isArray(tail) || tail.length === 0) return { cls: 'UNKNOWN', reason: 'no-tail' };
   const box = tuiComposerBox(provider, tail);
+  if (!box && expectedText !== undefined && ownClippedDraft(tail, expectedText)) return { cls: 'READY_OWN_DRAFT', reason: 'own-draft-clipped' };
   if (!box) {
     const scan = tail.slice(-DIALOG_SCAN_ROWS);
     const hit = dialogRow(scan);
