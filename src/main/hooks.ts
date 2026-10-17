@@ -538,7 +538,10 @@ export class HookServer {
         const token = (payload as Record<string, unknown>).hook_token;
         delete (payload as Record<string, unknown>).hook_token;
         const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : null;
-        if (!agentId || typeof token !== 'string' || !this.hookTokenMatches(agentId, token)) {
+        // A personal AGY statusline has no agent id. Its locator is protected by the
+        // current statusline lease token, which is the capability it carries here.
+        const statusline = payload.hook_event_name === 'AgyStatusLine' && typeof token === 'string' && this.statuslineTokenMatches(token);
+        if ((!agentId || typeof token !== 'string' || !this.hookTokenMatches(agentId, token)) && !statusline) {
           this.logHookAuthReject(agentId, typeof token !== 'string' ? 'missing' : (!agentId || !this.hookTokens.has(agentId) ? 'revoked' : 'bad'));
           conn.end('{}'); return;
         }
@@ -840,6 +843,16 @@ export class HookServer {
     const expected = this.hookTokens.get(agentId);
     const given = Buffer.from(token, 'hex');
     return !!expected && expected.length === given.length && timingSafeEqual(expected, given);
+  }
+
+  /** The personal AGY statusline uses its current lease capability, not a spawned-agent token. */
+  private statuslineTokenMatches(token: string): boolean {
+    if (!/^[0-9a-f]{32}$/i.test(token)) return false;
+    let expected: string | null = null;
+    try { expected = this.hive.agyStatuslineOwnerToken?.() ?? null; } catch { return false; }
+    if (!expected || !/^[0-9a-f]{32}$/i.test(expected)) return false;
+    const given = Buffer.from(token, 'hex'), owner = Buffer.from(expected, 'hex');
+    return owner.length === given.length && timingSafeEqual(owner, given);
   }
 
   private logHookAuthReject(agentId: string | null, reason: 'missing' | 'bad' | 'revoked'): void {

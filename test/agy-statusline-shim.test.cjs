@@ -196,7 +196,7 @@ const CONNECT_MS = 150;
 test('SHIM: one sanitized line out, one envelope to HIVE_SOCK, exit 0 - fast', async (t) => {
   const { dir, file } = shimFile(t);
   const srv = await server(t, dir);
-  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock, AGENT_ID: 'andy-1' }, stretchWatchdog: true });
+  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock, HIVE_HOOK_TOKEN: OWNER, AGENT_ID: 'andy-1' }, stretchWatchdog: true });
   t.diagnostic(`fast path: ${r.cpuMs} ms CPU, ${r.inProcess} ms in-process, ${r.ms} ms from spawn`);
 
   assert.equal(r.code, 0, 'exits by itself - with the watchdog out of reach, a hang would be killed by the guard');
@@ -213,9 +213,10 @@ test('SHIM: one sanitized line out, one envelope to HIVE_SOCK, exit 0 - fast', a
   // Exact shape on purpose: a new envelope field must be noticed here. `read_at` joined in
   // the c4 rework - the shim runs at READING time, and arrival times through one socket are
   // monotone, so without it the wake coordinator's ordering guard can never fire.
-  assert.deepEqual(Object.keys(env).sort(), ['agent_id', 'agy_status', 'hook_event_name', 'read_at']);
+  assert.deepEqual(Object.keys(env).sort(), ['agent_id', 'agy_status', 'hook_event_name', 'hook_token', 'read_at']);
   assert.equal(env.hook_event_name, 'AgyStatusLine');
   assert.equal(env.agent_id, 'andy-1');
+  assert.equal(env.hook_token, OWNER, 'the inherited pipe capability travels in the envelope');
   assert.ok(Number.isFinite(env.read_at) && env.read_at > 0, 'read_at is a real instant');
   assert.ok(Math.abs(Date.now() - env.read_at) < 60_000, 'stamped on this machine\'s clock, now');
   assert.deepEqual(env.agy_status, golden(), 'the payload travels whole, to be normalized in main');
@@ -251,9 +252,10 @@ test('SHIM: control characters and escapes are stripped; the model is cut at 48'
 test('SHIM: a personal session (no AGENT_ID) sends agent_id null - never invented', async (t) => {
   const { dir, file } = shimFile(t);
   const srv = await server(t, dir);
-  await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock } });
+  await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: srv.sock, HIVE_HOOK_TOKEN: OWNER } });
   assert.equal(await received(srv, 1), 1, 'the envelope arrived');
   assert.equal(JSON.parse(srv.got[0]).agent_id, null);
+  assert.equal(JSON.parse(srv.got[0]).hook_token, OWNER);
 });
 
 // ─── every failure path exits 0, quickly ────────────────────────────────────
@@ -302,7 +304,7 @@ test('SHIM CONNECT DEADLINE: a socket that never connects is abandoned at ~150 m
   fs.writeFileSync(hang,
     "const net = require('net');\n" +
     "net.createConnection = function () { return new net.Socket(); };\n");
-  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: 'unused-by-the-fake' }, preload: hang, stretchWatchdog: true });
+  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: 'unused-by-the-fake', HIVE_HOOK_TOKEN: OWNER }, preload: hang, stretchWatchdog: true });
   // With the watchdog out of reach, only the deadline can end this: without it the shim hangs
   // until the hang guard kills it (code 'killed:...'), whatever the machine's load.
   assert.equal(r.code, 0, 'the DEADLINE ended it (a missing deadline hangs until the guard kills it)');
@@ -352,7 +354,7 @@ test('LOCATOR: an inherited HIVE_SOCK wins over any locator', async (t) => {
   const worker = await server(t, dir);
   const personal = await server(t, dir);
   const loc = locator(dir, { sock: personal.sock, token: OWNER });
-  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: worker.sock }, args: ['--owner', OWNER, '--locator', loc] });
+  const r = await runShim(file, { stdin: JSON.stringify(golden()), env: { HIVE_SOCK: worker.sock, HIVE_HOOK_TOKEN: OWNER }, args: ['--owner', OWNER, '--locator', loc] });
   assert.equal(r.connects, 1, 'exactly one connection');
   assert.equal(await received(worker, 1), 1);
   assert.equal(personal.got.length, 0);
