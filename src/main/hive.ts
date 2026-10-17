@@ -1655,6 +1655,11 @@ export class HiveManager {
     // own switch ("Disable agent view (`claude agents`, `--bg`, /background, the on-demand
     // daemon)"); the per-agent settings file sets disableAgentView too.
     env.CLAUDE_CODE_DISABLE_AGENT_VIEW = '1';
+    // TUI-COMPOSER-ALLOWLIST-191: no prompt suggestions. Claude Code draws its guess at the next
+    // prompt as text in the empty composer, which the screen gate (shared/tuiComposer.ts) cannot
+    // tell from a person's draft, so every wake after a turn would be refused as DRAFT. A hive
+    // agent's next prompt comes from its mail, not a guess. The settings file sets it too.
+    env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION = 'false';
 
     // READS-PROMPT-TRIM (1.1.83, shared/claudePromptTrim.ts): leave out the tools, skills and
     // claude.ai connectors this role never uses. Env, one argv token and the settings file below,
@@ -2317,6 +2322,8 @@ export class HiveManager {
       // not parse and ensureClaudePermissionsAccepted refuses to touch it.
       skipDangerousModePermissionPrompt: true,
       skipAutoPermissionPrompt: true,
+      // TUI-COMPOSER-ALLOWLIST-191: the settings form of CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false.
+      promptSuggestionEnabled: false,
       // W3 — default skills/MCP bundle. Written into the PER-SESSION settings file
       // only (never ~/.claude), so the user's own MCP servers are never clobbered;
       // Claude merges this additively. Omitted entirely when empty so a settings

@@ -67,7 +67,7 @@ class EchoTui {
 }
 
 interface Pty {
-  tui: EchoTui; generation: number; lastHumanInputAt: number | undefined;
+  tui: EchoTui; generation: number; outputGeneration: number; lastHumanInputAt: number | undefined;
   inputState: unknown; promptState: TerminalPromptState | undefined; promptBlocks: unknown[];
   log: LogEntry[];
 }
@@ -75,17 +75,21 @@ const ptys = new Map<string, Pty>();
 const pty = (id: string): Pty => {
   let p = ptys.get(id);
   if (!p) {
-    p = { tui: new EchoTui(), generation: 0, lastHumanInputAt: undefined, inputState: undefined, promptState: undefined, promptBlocks: [], log: [] };
+    p = { tui: new EchoTui(), generation: 0, outputGeneration: 0, lastHumanInputAt: undefined, inputState: undefined, promptState: undefined, promptBlocks: [], log: [] };
     ptys.set(id, p);
   }
   return p;
 };
 
-let screenReadListener: ((req: { requestId: string; ptyId: string; needle: string }) => void) | null = null;
+let screenReadListener: ((req: { requestId: string; ptyId: string; needle: string; expectedTail?: string; codex?: boolean }) => void) | null = null;
 let screenAnswers = 0;
-const broker = new ScreenReadingBroker((ptyId, requestId, needle) => {
+/** The screen gate's own readings (requestCodexScreen) share the broker; screenAnswers counts
+ *  only the erase oracle's. */
+const guardRequests = new Set<string>();
+const broker = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail, codex) => {
   if (!screenReadListener) return false;
-  screenReadListener({ requestId, ptyId, needle });
+  if (codex) guardRequests.add(requestId);
+  screenReadListener({ requestId, ptyId, needle, ...(expectedTail !== undefined ? { expectedTail } : {}), ...(codex ? { codex } : {}) });
   return true;
 });
 
@@ -99,7 +103,7 @@ const parkedCpr = new Map<string, { data: string; origin: string }[]>();
 function installBridgeStub(): void {
   const unsub = () => () => { /* nothing subscribed */ };
   window.cth = {
-    onPtyData: (id: string, cb: (chunk: string) => void) => { pty(id).tui.emit = cb; return () => { /* kept */ }; },
+    onPtyData: (id: string, cb: (chunk: string) => void) => { const p = pty(id); p.tui.emit = (chunk) => { p.outputGeneration += 1; cb(chunk); }; return () => { /* kept */ }; },
     onPtyExit: unsub(), onPtyRelaunch: unsub(),
     // `pty.ts`'s accounting, restated (see the header): HUMAN advances the generation.
     writePty: (id: string, data: string, origin: string) => {
@@ -125,7 +129,7 @@ function installBridgeStub(): void {
       return Promise.resolve({ ok: true });
     },
     onScreenReadRequest: (cb: typeof screenReadListener) => { screenReadListener = cb; return () => { screenReadListener = null; }; },
-    answerScreenReading: (requestId: string, reading: unknown) => { screenAnswers += 1; broker.answer(requestId, reading); }
+    answerScreenReading: (requestId: string, reading: unknown) => { if (!guardRequests.delete(requestId)) screenAnswers += 1; broker.answer(requestId, reading); }
   };
 }
 
@@ -153,6 +157,7 @@ const owner = new AutomaticSubmitOwner(buildOwnerDeps({
     humanInputGeneration: (id) => ptys.get(id)?.generation,
     lastHumanInputAt: (id) => ptys.get(id)?.lastHumanInputAt,
     hasOutput: (id) => (ptys.has(id) ? true : undefined),
+    outputGeneration: (id) => ptys.get(id)?.outputGeneration,
     inputState: (id) => ptys.get(id)?.inputState as never,
     promptState: (id) => ptys.get(id)?.promptState
   },
@@ -165,7 +170,16 @@ const owner = new AutomaticSubmitOwner(buildOwnerDeps({
   },
   ptyForAgent: (agentId) => agentId.replace(/^agent-/, ''),
   providerForPty: () => 'claude',
-  requestScreenReading: (ptyId, needle) => broker.request(ptyId, needle)
+  requestScreenReading: (ptyId, needle) => broker.request(ptyId, needle),
+  // TUI-COMPOSER-ALLOWLIST-191: Claude's screen gate reads the composer box at the bottom of the
+  // screen (shared/tuiComposer.ts). The echo TUI draws only `> line`, so its REAL rendered cursor
+  // row (the production readCodexScreen over this xterm) is put inside the box Claude draws.
+  requestCodexScreen: (ptyId, expectedTail) => broker.request(ptyId, '', expectedTail, true).then((r) => {
+    const row = r?.codex?.cursorRow;
+    if (!r?.codex || typeof row !== 'string' || !row.startsWith('>')) return r;
+    const rule = '─'.repeat(80);
+    return { ...r, codex: { ...r.codex, tail: [rule, `❯${row.slice(1)}`, rule] } };
+  })
 }));
 
 const root = () => document.getElementById('root')!;

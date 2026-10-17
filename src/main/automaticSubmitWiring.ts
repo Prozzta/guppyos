@@ -71,6 +71,9 @@ export interface OwnerWiring {
   onEnterWrite?: OwnerDeps['onEnterWrite'];
 }
 
+/** The providers whose automatic typing is screen-gated (allowlist, fail-closed). */
+export const SCREEN_GUARDED_PROVIDERS: ReadonlySet<string> = new Set(['codex', 'claude', 'antigravity']);
+
 export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
   /** Once a given incarnation has been ready it stays ready: the settle is about the
    *  FIRST frame, and re-waiting it before every message would add it to each delivery. */
@@ -127,9 +130,11 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
       const provider = w.providerForPty(ptyId);
       return provider ? automaticStageQuietMs(provider) : null;
     },
-    // WAKE-SCREEN-GUARD: fail-closed for Codex only (god's ruling); every other provider is
-    // unchanged.
-    screenGuard: (ptyId) => (w.providerForPty(ptyId) === 'codex' ? 'ENFORCE' : 'OFF'),
+    // WAKE-SCREEN-GUARD: fail-closed for Codex; TUI-COMPOSER-ALLOWLIST-191: and for Claude and
+    // Antigravity, each against its own composer allowlist (shared/tuiComposer.ts). Every other
+    // provider is unchanged.
+    screenGuard: (ptyId) => (SCREEN_GUARDED_PROVIDERS.has(w.providerForPty(ptyId) ?? '') ? 'ENFORCE' : 'OFF'),
+    screenProvider: (ptyId) => w.providerForPty(ptyId),
     // The stamp (incarnation + output generation) is taken in the SAME turn as the request is
     // sent: the send flushes every byte main holds to the renderer ahead of the request, and
     // the renderer reads behind them, so the reading covers exactly this generation.

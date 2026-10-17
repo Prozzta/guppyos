@@ -197,9 +197,16 @@ async function buildFloor() {
     const draft = screenDraft(ptyId, c);
     if (draft === null) return null;
     const row = draft.split('\n').pop();
+    // TUI-COMPOSER-ALLOWLIST-191: a Claude or agy terminal is judged on the composer box at the
+    // bottom of the screen (shared/tuiComposer.ts), so the stub draws it: rule, prompt, rule, footer.
+    const glyph = { claude: '\u276f', antigravity: '>' }[ptyProvider.get(ptyId)];
+    const rule = '\u2500'.repeat(80);
+    // Like a real 80-column terminal: the draft wraps, and the reading keeps the last 24 rows.
+    const wrapped = draft.split('\n').map((l, i) => (i === 0 ? `${glyph} ${l}` : `  ${l}`)).flatMap((l) => l.match(/.{1,78}/g) ?? ['']);
+    const tail = glyph ? [rule, ...wrapped, rule, '  ? for shortcuts'].slice(-24) : undefined;
     return {
       onPromptRow: false, screenCount: 0,
-      codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: draft ? `\u203a ${row}` : '\u203a Ask Codex to do anything', footer: [] },
+      codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: glyph ? wrapped[wrapped.length - 1] : draft ? `\u203a ${row}` : '\u203a Ask Codex to do anything', footer: [], ...(tail ? { tail } : {}) },
       ...(expectedTail !== undefined ? { promptTailMatches: draft.endsWith(expectedTail) } : {})
     };
   };

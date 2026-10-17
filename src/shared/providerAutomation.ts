@@ -250,9 +250,9 @@ export function terminalReadyToReceive(
   elapsedMs: number,
   provider: AgentProvider
 ): boolean {
-  if (provider === 'antigravity') {
-    return elapsedMs >= terminalReadySettleMs(provider);
-  }
+  // TUI-COMPOSER-ALLOWLIST-191: agy needs its first frame too (0398e918 had exempted it, which let
+  // a wake go to an agy that had drawn nothing). Its composer itself is then proven by the
+  // screen gate (screenGuard ENFORCE, shared/tuiComposer.ts), on a reading of real output.
   return hasOutput !== false && elapsedMs >= terminalReadySettleMs(provider);
 }
 

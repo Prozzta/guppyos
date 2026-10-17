@@ -830,7 +830,7 @@ test('wiring: the reading is stamped with the incarnation and generation AT REQU
     requestCodexScreen: () => { sent += 1; pty.gen += 2; return Promise.resolve({ onPromptRow: false, screenCount: 0, codex: facts(fixture('2-trusted-handoff-120x40')) }); }
   });
   assert.equal(deps.screenGuard('p1'), 'ENFORCE');
-  assert.equal(deps.screenGuard('p2'), 'OFF');
+  assert.equal(deps.screenGuard('p2'), 'ENFORCE', 'TUI-COMPOSER-ALLOWLIST-191: claude is screen-gated too');
   const got = await deps.readGuardScreen('p1');
   assert.equal(sent, 1);
   assert.equal(got.incarnation, 3);

@@ -1,0 +1,15 @@
+{
+ "source": "DERIVED: the \"Paste code here if prompted > \" field holding our wake text (Creed G5)",
+ "cols": 120,
+ "rows": 40,
+ "cursorRow": 6,
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.302",
+  "",
+  "  Browser didn't open? Use the url below to sign in (c to copy)",
+  "",
+  "  https://claude.ai/oauth/authorize?code=true&client_id=…",
+  "",
+  "  Paste code here if prompted > [hive] check inbox"
+ ]
+}

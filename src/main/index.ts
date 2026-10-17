@@ -890,7 +890,7 @@ function noteScreenGuard(r: ScreenGuardRecord): void {
     if (!r.ok && screenGuardLastReason.get(key) !== r.reason) {
       hive.appendLog({
         kind: 'wake-screen-guard', agentId: r.agentId, ptyId: r.ptyId, requestId: r.requestId,
-        provider: 'codex', admissionClass: r.admissionClass, phase: r.phase, reason: r.reason,
+        provider: ptyProvider.get(r.ptyId) ?? null, admissionClass: r.admissionClass, phase: r.phase, reason: r.reason,
         incarnation: typeof r.incarnation === 'number' ? r.incarnation : null,
         observedGeneration: r.observedGeneration, currentGeneration: r.currentGeneration, latched: r.latched,
         // DWIGHT-HELD-INTERFERED fix 4: what a COMMIT refusal saw.

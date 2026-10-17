@@ -1,0 +1,16 @@
+{
+ "source": "DERIVED: the Remote Control dialog shape of terminal-automation.test.cjs (synthetic, kept)",
+ "cols": 120,
+ "rows": 40,
+ "cursorRow": 7,
+ "lines": [
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  Remote Control",
+  "",
+  "  ❯ 1. Disconnect this session",
+  "    2. Show QR code",
+  "    3. Continue",
+  "",
+  "  Enter to confirm · Esc to cancel"
+ ]
+}

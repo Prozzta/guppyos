@@ -1,0 +1,18 @@
+{
+ "source": "DERIVED from claude.exe 2.1.302 strings (\"Select login method:\" + its three options); not reachable offline",
+ "cols": 120,
+ "rows": 40,
+ "cursorRow": 9,
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.302",
+  "",
+  "  Select login method:",
+  "",
+  "  ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise",
+  "",
+  "    2. Anthropic Console account · API usage billing",
+  "",
+  "    3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI",
+  ""
+ ]
+}

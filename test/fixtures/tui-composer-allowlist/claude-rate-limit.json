@@ -1,0 +1,17 @@
+{
+ "source": "DERIVED from claude.exe 2.1.302 strings (\"What do you want to do?\", \"Stop and wait for limit to reset\", \"Upgrade your plan\"); Creed R5",
+ "cols": 120,
+ "rows": 40,
+ "cursorRow": 8,
+ "lines": [
+  "⎿  You've hit your limit · resets 3pm",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  What do you want to do?",
+  "",
+  "  ❯ 1. Stop and wait for limit to reset",
+  "    2. Upgrade your plan",
+  "",
+  "  Enter to confirm · Esc to cancel"
+ ]
+}

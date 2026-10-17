@@ -34,6 +34,7 @@
 import { ADMISSION_REASON, type AdmissionDecision, type AdmissionVerdict, type WorkClass } from './capacityAdmission';
 import type { PromptBlock } from '../shared/promptState';
 import { CODEX_EMPTY_COMPOSER_ROW, classifyCodexComposer, codexPastStartup, codexPopup, codexPopupText, type CodexScreenFacts } from '../shared/codexScreen';
+import { classifyTuiComposer, tuiPastStartup, type TuiGuardProvider } from '../shared/tuiComposer';
 
 export type { PromptBlock };
 
@@ -607,6 +608,9 @@ export interface OwnerDeps {
   verifySubmit?: (ptyId: string) => boolean;
   /** WAKE-SCREEN-GUARD: whether the Codex screen gate applies. Absent = OFF. */
   screenGuard?: (ptyId: string) => ScreenGuardMode;
+  /** TUI-COMPOSER-ALLOWLIST-191: the PTY's provider, which picks the screen gate's allowlist
+   *  (shared/tuiComposer.ts for claude and antigravity). Absent or any other value = Codex's. */
+  screenProvider?: (ptyId: string) => string | undefined;
   /** WAKE-SCREEN-GUARD: a FRESH Codex screen reading, stamped by main. Null = no reading. */
   readGuardScreen?: (ptyId: string, expectedTail?: string) => Promise<GuardReading | null>;
   /** WAKE-SCREEN-GUARD: the live output generation (undefined = no live session). */
@@ -701,6 +705,9 @@ export type InterferenceReason =
   /** CODEX-MODEL-SWITCH-PROMPT P3: a Codex popup was on screen when the erase would have run.
    *  The app never types into a popup (not the erase, not Esc): held for a person, visibly. */
   | 'CODEX_POPUP_OPEN'
+  /** TUI-COMPOSER-ALLOWLIST-191 G6: on Claude or agy the erase would have gone to a screen that is
+   *  not their composer holding text (a dialog, a picker, nothing readable). Held, nothing written. */
+  | 'SCREEN_DIALOG_OPEN'
   /** GOD-STARTUP-WAITS-ENTER G2: a boot prompt's Enter (and at most one more of our own) brought
    *  no UserPromptSubmit from the provider: the prompt sits typed but unsent. Held for a person,
    *  visibly; never a third Enter, and none at all after a person's key. */
@@ -1016,10 +1023,11 @@ export class AutomaticSubmitOwner {
     const incarnation = deps.incarnation(ptyId);
     const r = await this.readGuard(ptyId);
     if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
-    const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const tui = this.tuiProvider(ptyId);
+    const past = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts).cls) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     this.reportStartupReading(ptyId, incarnation, past, r);
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
-    if (this.threadProof(ptyId, r)) {
+    if (!tui && this.threadProof(ptyId, r)) {
       this.postHandoff.set(ptyId, incarnation);
       this.reportStartupReading(ptyId, incarnation, { open: true, reason: 'thread-settings' }, r);
       return true;
@@ -1428,6 +1436,15 @@ export class AutomaticSubmitOwner {
     try { return this.deps.screenGuard?.(ptyId) === 'ENFORCE' ? 'ENFORCE' : 'OFF'; } catch { return 'ENFORCE'; }
   }
 
+  /** TUI-COMPOSER-ALLOWLIST-191: claude or antigravity, judged by their composer allowlist; null =
+   *  Codex's rules (which refuse every Claude or agy screen, so a failure here stays closed). */
+  private tuiProvider(ptyId: string): TuiGuardProvider | null {
+    try {
+      const p = this.deps.screenProvider?.(ptyId);
+      return p === 'claude' || p === 'antigravity' ? p : null;
+    } catch { return null; }
+  }
+
   /**
    * WAKE-SCREEN-GUARD: one FRESH Codex screen reading, judged. STAGE needs the empty
    * composer; COMMIT and REENTER need the composer holding exactly `expectedTail` (our own
@@ -1441,12 +1458,16 @@ export class AutomaticSubmitOwner {
     if (!r) verdict = { ok: false, reason: 'no-reading' };
     else if (r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) verdict = { ok: false, reason: 'incarnation' };
     else {
-      const past = codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      // TUI-COMPOSER-ALLOWLIST-191: Claude and agy are judged from the bottom of the screen (their
+      // composer box), never the cursor, and condition 1 is that box seen in this incarnation.
+      const tui = this.tuiProvider(ptyId);
+      const comp = tui ? classifyTuiComposer(tui, r.facts, expectedTail)
+        : classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
+      const past = tui ? tuiPastStartup(comp.cls) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
       // Jim N1: only a reading that covers real PTY output can latch (a blank terminal has none).
       if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
       // DWIGHT-INPUT-DEAD-179 F4: Codex's own "chat configured" record, for a screen with no marker.
-      else if (this.postHandoff.get(ptyId) !== incarnation && this.threadProof(ptyId, r)) this.postHandoff.set(ptyId, incarnation);
-      const comp = classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
+      else if (!tui && this.postHandoff.get(ptyId) !== incarnation && this.threadProof(ptyId, r)) this.postHandoff.set(ptyId, incarnation);
       const want = phase === 'STAGE' ? 'READY' : 'READY_OWN_DRAFT';
       // CODEX-MODEL-SWITCH-PROMPT P2: a Codex popup (rate limits, trust, update...) is named first,
       // so the Human reads what Codex is asking. A refusal either way; MODAL is never admitted.
@@ -1599,7 +1620,9 @@ export class AutomaticSubmitOwner {
     if (deps.outputGeneration?.(ptyId) !== g.outputGeneration) return stay('screen-changed', screen);
     // CODEX-MODEL-SWITCH-PROMPT P3: a Codex popup is NEVER answered by the app: no key at all, not
     // the erase, not Esc. It stays held, and the notice tells the Human what Codex is asking.
-    const modal = classifyCodexComposer(g.facts);
+    const tui = this.tuiProvider(ptyId);
+    const judge = (): { cls: string; reason: string } => (tui ? classifyTuiComposer(tui, g.facts) : classifyCodexComposer(g.facts));
+    const modal = judge();
     if (modal.cls === 'MODAL') return stay(`${modal.cls}:${modal.reason}`, screen);
     if (seen.onPromptRow && seen.screenCount >= 1) {
       // Our own text is on the prompt: the verified erase can run now (it needed to see it first).
@@ -1619,11 +1642,11 @@ export class AutomaticSubmitOwner {
       return { kind: 'NONE' };
     }
     if (seen.screenCount > 0) return stay('own-text-on-screen', screen);
-    const past = codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const past = tui ? tuiPastStartup(modal.cls) : codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     if (this.postHandoff.get(ptyId) !== held.incarnation || (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting'))) {
       return stay(`startup:${past.reason}`, screen);
     }
-    const comp = classifyCodexComposer(g.facts);
+    const comp = judge();
     if (comp.cls !== 'READY') return stay(`${comp.cls}:${comp.reason}`, screen);
     this.inhibited.delete(ptyId);
     if (held.decision) deps.capacity.cancelGrant(held.decision);
@@ -1839,10 +1862,20 @@ export class AutomaticSubmitOwner {
     }
     // CODEX-MODEL-SWITCH-PROMPT P3: never a key into a Codex popup, not even the erase: one more
     // guard reading, and a popup on it holds the item for the Human with nothing written.
+    const tui = this.tuiProvider(s.ptyId);
     if (this.guardMode(s.ptyId) === 'ENFORCE') {
       const g = await this.readGuard(s.ptyId);
-      const popup = g && g.incarnation === s.incarnation ? codexPopup(g.facts) : null;
-      if (popup) return this.interfere(s, 'CODEX_POPUP_OPEN', codexPopupText(popup));
+      if (tui) {
+        // TUI-COMPOSER-ALLOWLIST-191 G6: the erase is a key too. Only onto the composer box holding
+        // text; a dialog, a picker or no reading at all is held for a person.
+        const comp = g && g.incarnation === s.incarnation ? classifyTuiComposer(tui, g.facts, s.req.text) : null;
+        if (!comp || (comp.cls !== 'READY_OWN_DRAFT' && comp.cls !== 'DRAFT')) {
+          return this.interfere(s, 'SCREEN_DIALOG_OPEN', comp ? `${comp.cls}:${comp.reason}` : 'no-reading');
+        }
+      } else {
+        const popup = g && g.incarnation === s.incarnation ? codexPopup(g.facts) : null;
+        if (popup) return this.interfere(s, 'CODEX_POPUP_OPEN', codexPopupText(popup));
+      }
     }
     // FRESH, and adjacent to the destructive write: no yield between this and the clear.
     const blocked = postStageGuard(s, deps);
@@ -1868,7 +1901,7 @@ export class AutomaticSubmitOwner {
     // WSG-FOLLOWUPS: a HALF erase (the needle gone, a fragment of our text left in the Codex
     // composer) would be refused at the re-offer's STAGE for ever, silently. POSITIVE evidence
     // of our own residue holds it instead, visibly; nothing more is written.
-    if (this.guardMode(s.ptyId) === 'ENFORCE') {
+    if (this.guardMode(s.ptyId) === 'ENFORCE' && !tui) {
       // Jim N-F1: a human key during the erase's verification is reported as such, not as residue.
       const blocked = postStageGuard(s, deps);
       if (blocked?.kind === 'FAILED') { if (s.decision) deps.capacity.cancelGrant(s.decision); return { kind: 'FAILED', reason: blocked.reason }; }
