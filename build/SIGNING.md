@@ -36,11 +36,13 @@ npm run dist:mac
 Keep these out of git — `.env.signing`, `*.p12`, and `*.p8` are gitignored.
 Source them from a local `.env.signing` if you like.
 
-## CI (tagged release) setup
+## CI signing secrets (not used today)
 
-`.github/workflows/release.yml` reads the secrets below and passes them to
-electron-builder on the macOS runner. Add them under **Settings → Secrets and
-variables → Actions** (all optional; omit them to keep releases unsigned):
+Releases are cut and published locally (`docs/release-checklist.md`).
+`.github/workflows/release.yml` is a by-hand dry build that never publishes, and its
+matrix has no macOS runner, so nothing in CI signs a build. The secrets below are what a
+macOS signing job would read, if one is added. Add them under **Settings → Secrets and
+variables → Actions** (all optional; omit them to keep builds unsigned):
 
 | GitHub secret                  | Value                                              |
 | ------------------------------ | -------------------------------------------------- |
@@ -50,8 +52,8 @@ variables → Actions** (all optional; omit them to keep releases unsigned):
 | `APPLE_APP_SPECIFIC_PASSWORD`  | the app-specific password from above               |
 | `APPLE_TEAM_ID`                | your 10-char Team ID                               |
 
-Then push a `v*` tag as usual; the produced `.dmg` will be signed, notarized,
-and stapled.
+With those set, a macOS job that runs electron-builder signs, notarizes and staples
+the `.dmg`. A `v*` tag push no longer starts any build.
 
 ## Verify a build is properly signed
 

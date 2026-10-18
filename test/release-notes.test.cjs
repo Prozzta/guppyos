@@ -214,9 +214,9 @@ test('code fences, comments and quoted callouts are handled', () => {
 });
 
 test("the project's own RELEASE.md digests to something a toast can hold", () => {
-  // The body electron-updater actually hands us is this file (see
-  // .github/workflows/release.yml → `body_path: RELEASE.md`), so it is the one
-  // fixture guaranteed to stay realistic.
+  // Releases before 1.1.92 were published with this file as their body (the old
+  // release.yml `body_path`), so it is still the longest realistic fixture. Releases
+  // since are published by hand with the CHANGELOG section (docs/release-checklist.md).
   const body = fs.readFileSync(path.resolve(__dirname, '..', 'RELEASE.md'), 'utf8');
   const digest = summarizeReleaseNotes(body);
 

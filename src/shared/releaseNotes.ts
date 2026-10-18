@@ -9,7 +9,8 @@
  *
  * Why this is not just `body.slice(0, 280)`:
  *
- *   1. The body is RELEASE.md (see .github/workflows/release.yml → `body_path`),
+ *   1. The body is whatever the release was published with: the CHANGELOG section
+ *      (docs/release-checklist.md step 6), or, in releases before 1.1.92, RELEASE.md,
  *      which is ~200 lines: a tagline, a link, download tables for three
  *      platforms, build-from-source instructions, a "Previously" list. The
  *      actual news sits under a `## What's new in <version>` heading a third of
