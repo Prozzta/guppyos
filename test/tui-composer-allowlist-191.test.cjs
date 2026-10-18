@@ -470,3 +470,93 @@ test('HOTFIX-191 (b): the real owner delivers on the live footer shape, and an u
   assert.ok(reasons.includes('startup:UNKNOWN:footer-row:Auto-update failed'), `the guard row names the row it refused: ${JSON.stringify(reasons)}`);
   assert.ok(!reasons.includes('startup:no-composer'), 'never the bare no-composer');
 });
+
+// ─── COMMIT-GATE-HOTFIX-192: the live reading drops the cell after the glyph ─────────────
+
+/** The EXACT rows of the live refusal (hive/log.jsonl, wake-screen-guard COMMIT, jim, 1.1.92,
+ *  2026-10-18 14:50Z, the same on 4/4 agents): the prompt row reads U+276F then 'Y' (no
+ *  separator), the closing rule is 194 cells, and Guppy's statusline and the mode line follow. */
+const LIVE192_RULE = '─'.repeat(194);
+const LIVE192_DRAFT = 'You have new hive mail (delivered in context below): 2026-10-18T14-50-00-948Z-2babeb.';
+const LIVE192_FOOTER = [LIVE192_RULE, 'ctx 121k/1000k (12%)', '⏵⏵ bypass permissions on (shift+tab to cycle)'];
+/** A screen of `prompt` inside the live box: transcript rows, the top rule, the prompt, the footer. */
+const live192 = (prompt) => {
+  const lines = ['● Done: the card is closed.', '', LIVE192_RULE, prompt, ...LIVE192_FOOTER];
+  return { lines, cursorRow: 3 };
+};
+
+test('HOTFIX-192 (a): the EXACT live rows: STAGE "❯" is READY, COMMIT "❯You have…" is READY_OWN_DRAFT', () => {
+  const stage = facts(live192('❯'));
+  assert.deepEqual(stage.tail.slice(-5), [LIVE192_RULE, '❯', ...LIVE192_FOOTER], 'the reading holds the live rows');
+  assert.deepEqual(TUI.classifyTuiComposer('claude', stage), { cls: 'READY', reason: 'empty-composer' });
+  const commit = facts(live192(`❯${LIVE192_DRAFT}`));
+  assert.equal(commit.cursorRow, `❯${LIVE192_DRAFT}`, 'the logged cursor row, byte for byte');
+  assert.deepEqual(commit.tail.slice(-3), LIVE192_FOOTER, 'the logged footer rows');
+  assert.deepEqual(TUI.classifyTuiComposer('claude', commit, LIVE192_DRAFT), { cls: 'READY_OWN_DRAFT', reason: 'own-draft' });
+  assert.deepEqual(TUI.tuiPastStartup(TUI.classifyTuiComposer('claude', commit, LIVE192_DRAFT)), { open: true, reason: 'composer-seen' });
+  // The same rows WITH the separator were always ours; both readings agree now.
+  assert.deepEqual(TUI.classifyTuiComposer('claude', facts(live192(`❯ ${LIVE192_DRAFT}`)), LIVE192_DRAFT), { cls: 'READY_OWN_DRAFT', reason: 'own-draft' });
+});
+
+test('HOTFIX-192 (a): a person\'s draft with no separator is DRAFT, never READY nor ours', () => {
+  for (const [prov, row] of [['claude', '❯hello'], ['antigravity', '>hello']]) {
+    const f = facts(live192(row));
+    assert.deepEqual(TUI.classifyTuiComposer(prov, f), { cls: 'DRAFT', reason: 'composer-holds-text' }, row);
+    assert.deepEqual(TUI.classifyTuiComposer(prov, f, LIVE192_DRAFT), { cls: 'DRAFT', reason: 'composer-holds-text' }, `${row}: not our text`);
+  }
+  // Our text with a person's extra text after it is not ours.
+  assert.equal(TUI.classifyTuiComposer('claude', facts(live192(`❯${LIVE192_DRAFT} and more`)), LIVE192_DRAFT).cls, 'DRAFT');
+});
+
+test('HOTFIX-192 (a): only the separator is relaxed: a column-0 option row in a box is still refused, and every dialog fixture still is', () => {
+  for (const [prov, row] of [['claude', '❯1. Yes, proceed'], ['claude', '❯2. No, exit'], ['antigravity', '>1. Exit and fix manually']]) {
+    const f = facts(live192(row));
+    assert.equal(TUI.tuiComposerBox(prov, f.tail), null, `${row}: no composer box`);
+    for (const exp of [undefined, LIVE192_DRAFT]) {
+      const out = TUI.classifyTuiComposer(prov, f, exp);
+      assert.equal(out.cls, 'MODAL', `${row}: refused as a dialog (got ${JSON.stringify(out)})`);
+    }
+  }
+  // An indented glyph is not column 0; a glyph of the other provider is not this one's.
+  assert.equal(TUI.classifyTuiComposer('claude', facts(live192(`  ❯${LIVE192_DRAFT}`)), LIVE192_DRAFT).cls, 'UNKNOWN');
+  assert.equal(TUI.classifyTuiComposer('claude', facts(live192(`>${LIVE192_DRAFT}`)), LIVE192_DRAFT).cls, 'UNKNOWN');
+  for (const [prov, name] of DIALOGS) {
+    const out = TUI.classifyTuiComposer(prov, facts(fixture(name)), TEXT);
+    assert.ok(out.cls === 'MODAL' || out.cls === 'UNKNOWN', `${name}: still refused (got ${JSON.stringify(out)})`);
+  }
+});
+
+/** The rig's screen drawn as the live 1.1.92 reading: the glyph with no separator after it. */
+function live192View(r) {
+  return () => live192(`${GLYPH[r.provider]}${r.prompt}`);
+}
+
+test('HOTFIX-192 (b): the real owner delivers onto the live reading (text, then Enter), STAGE and COMMIT both pass', async () => {
+  const r = rig({ provider: 'claude' });
+  r.view = live192View(r);
+  const out = await r.submit('w1');
+  assert.equal(out.kind, 'COMMITTED', `delivered (got ${JSON.stringify(out)})`);
+  assert.deepEqual(r.writes, [TEXT, '\r']);
+  const phases = r.guard.map((g) => `${g.phase}:${g.reason}`);
+  assert.ok(phases.includes('STAGE:ok') && phases.includes('COMMIT:ok'), JSON.stringify(phases));
+  assert.ok(!phases.some((p) => p.endsWith('no-composer')), 'never no-composer');
+});
+
+test('HOTFIX-192 (b): a wake held before the fix is recovered by the held recheck on the live reading (verified erase, released), not held for ever', async () => {
+  // The hold: a dialog after STAGE (G6) leaves our text staged and the wake INTERFERED.
+  const r = rig({ provider: 'claude', screen: 'claude-idle-120x40', afterStage: 'claude-rate-limit', forceOnPromptRow: true });
+  const held = await r.submit('w1');
+  assert.equal(held.kind, 'INTERFERED');
+  assert.deepEqual(r.writes, [TEXT]);
+  // The dialog is gone; the screen is the live 1.1.92 reading of our own staged text.
+  r.afterStage = null; r.forceOnPromptRow = false;
+  r.view = live192View(r);
+  const out = await r.settle(r.owner.recheckHeld('pty-jim', 'w1'));
+  assert.equal(out.kind, 'ERASED', `the hold ends (got ${JSON.stringify(out)}); on dfae556c it stayed erase:SCREEN_DIALOG_OPEN`);
+  assert.equal(r.prompt, '', 'our staged text was erased through the verified abort');
+  assert.equal(r.owner.inhibition('pty-jim'), null, 'no hold remains');
+  // The released id is re-offered and delivered on the same live reading.
+  const again = await r.submit('w2');
+  assert.equal(again.kind, 'COMMITTED', `re-offer delivered (got ${JSON.stringify(again)})`);
+  assert.equal(r.writes.at(-1), '\r');
+});
