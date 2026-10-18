@@ -60,10 +60,10 @@ function rig(over = {}) {
   const r = {
     now: T0, mono: 0, seq: 0, timers: [],
     writes: [], record: [], logs: [],
-    session: { incarnation: 1, gen: 0, lastHumanAt: undefined, hasOutput: true,
+    session: { incarnation: 1, gen: 0, outputGeneration: 1, lastHumanAt: undefined, hasOutput: true,
       inputState: { mouseTrackingMode: 'none', inputOriginAttached: true, selfTest: 'pass' },
       promptState: { block: null } },
-    provider: 'codex',
+    provider: 'codex', enter: 'submits', enterCount: 0,
     prompt: '', oracle: 'answers',
     ...over
   };
@@ -86,8 +86,13 @@ function rig(over = {}) {
       if (r.writeThrows && r.writeThrows(data)) throw new Error('pty exploded');
       r.writes.push(data);
       const state = r.tracker.pool(POOL)?.state ?? 'NONE';
-      if (data === '\r') { r.record.push(`enter:${state}`); r.prompt = ''; }
-      else if (data === '\x15') { r.record.push(`abort:${state}`); r.prompt = ''; }
+      if (data === '\r') {
+        r.record.push(`enter:${state}`); r.enterCount += 1;
+        const lost = r.enter === 'lost-always' || (r.enter === 'lost-once' && r.enterCount === 1);
+        if (lost) r.session.outputGeneration += 1;
+        else { r.prompt = ''; r.session.outputGeneration += 1; }
+      }
+      else if (data === '\x15') { r.record.push(`abort:${state}`); r.prompt = ''; r.session.outputGeneration += 1; }
       else { r.prompt += data; if (r.onStaged) r.onStaged(); }
       return { ok: true };
     },
@@ -97,7 +102,7 @@ function rig(over = {}) {
     hasOutput: () => r.session?.hasOutput,
     inputState: () => r.session?.inputState,
     promptState: () => r.session?.promptState,
-    outputGeneration: () => (r.session ? 1 : undefined),
+    outputGeneration: () => r.session?.outputGeneration,
     spawnCwd: () => undefined
   };
   r.deps = buildOwnerDeps({
@@ -108,7 +113,9 @@ function rig(over = {}) {
       if (r.oracle === 'silent') return new Promise(() => {});
       return Promise.resolve({ onPromptRow: r.prompt.includes(needle), screenCount: r.prompt.includes(needle) ? 1 : 0 });
     },
-    requestCodexScreen: (ptyId, expectedTail) => Promise.resolve(codexComposerReading(r.prompt, expectedTail)),
+    requestCodexScreen: (ptyId, expectedTail) => Promise.resolve(
+      r.provider === 'antigravity' ? agyComposerReading(r.prompt, expectedTail) : codexComposerReading(r.prompt, expectedTail)
+    ),
     now: () => r.now, setTimer
   });
   r.owner = new (over.Owner ?? AutomaticSubmitOwner)(r.deps);
@@ -140,6 +147,18 @@ function codexComposerReading(prompt, expectedTail) {
   return {
     onPromptRow: false, screenCount: 0,
     codex: { header: 'MODEL', startingAfterHeader: false, cursorRow: prompt ? `\u203a ${prompt}` : '\u203a Ask Codex to do anything', footer: ['? for shortcuts'] },
+    ...(expectedTail ? { promptTailMatches: prompt.endsWith(expectedTail) } : {})
+  };
+}
+
+/** The real agy composer shape: a boxed `>` prompt and its shortcuts footer. */
+function agyComposerReading(prompt, expectedTail) {
+  return {
+    onPromptRow: false, screenCount: 0,
+    codex: {
+      header: 'NONE', startingAfterHeader: false, cursorRow: '', footer: [],
+      tail: ['\u2500'.repeat(40), prompt ? `> ${prompt}` : '>', '\u2500'.repeat(40), '? for shortcuts']
+    },
     ...(expectedTail ? { promptTailMatches: prompt.endsWith(expectedTail) } : {})
   };
 }
@@ -180,6 +199,24 @@ test('L0-WAKE via the owner: a permitted wake types, in order - the gate is not 
   assert.deepEqual(r.writes, ['You have new hive inbox message(s)', '\r'], 'the nudge, then the TUI gap, then Enter');
   assert.deepEqual(r.record, ['enter:AVAILABLE']);
   assert.equal(out.kind, 'COMMITTED');
+});
+
+test('AGY submit verification: a lost first Enter is retried from its recognised composer, never settled at write level', async () => {
+  const r = rig({ provider: 'antigravity', enter: 'lost-once' });
+  r.runtime.ingest('jim', obs());
+  const out = await r.settle(wake(r));
+  assert.deepEqual(out, { kind: 'COMMITTED' });
+  assert.deepEqual(r.writes, ['You have new hive inbox message(s)', '\r', '\r'], 'the draft is typed once; only Enter is retried');
+  assert.equal(r.prompt, '', 'the second Enter was visibly accepted');
+});
+
+test('AGY submit verification: two lost Enters are not reported COMMITTED', async () => {
+  const r = rig({ provider: 'antigravity', enter: 'lost-always' });
+  r.runtime.ingest('jim', obs());
+  const out = await r.settle(wake(r));
+  assert.equal(out.kind, 'ABORTED', 'the measured Ctrl-U clear proves the unsent draft was cancelled for re-offer');
+  assert.deepEqual(r.writes, ['You have new hive inbox message(s)', '\r', '\r', '\x15']);
+  assert.equal(r.prompt, '');
 });
 
 test('L0-WAKE via the owner: a limit arriving INSIDE the gap stops the Enter and erases the nudge', async () => {

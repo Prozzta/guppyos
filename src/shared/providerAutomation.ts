@@ -356,11 +356,13 @@ export function automaticEnterGapMs(provider: AgentProvider, textLength = 0): nu
 /**
  * CODEX-WAKE-161 F3: providers where the owner reads the composer after its Enter and settles
  * COMMITTED only once our text has left it. Codex: the provider whose Enter was observed
- * turning into a newline. (Claude's own turn confirmation already covers it in the wake
- * coordinator; widening this is a measured decision, not a default.)
+ * turning into a newline. Antigravity: the CPU-limited C1 proof recorded COMMITTED
+ * after an empty Enter (no prompt reached the fake CLI); its recognised composer and measured
+ * Ctrl-U abort let the owner retry once and then prove an unsent draft cancelled. Claude's own
+ * turn confirmation already covers it in the wake coordinator; this is not a default.
  */
 export function automaticVerifySubmit(provider: AgentProvider): boolean {
-  return provider === 'codex';
+  return provider === 'codex' || provider === 'antigravity';
 }
 
 /**
