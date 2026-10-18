@@ -93,7 +93,14 @@ export function tuiComposerBox(provider: TuiGuardProvider, tail: readonly string
   const rows = tail.slice(top + 1, bottom);
   const glyph = PROMPT_GLYPH[provider];
   // claude 2.1.270 draws a NO-BREAK SPACE after its glyph (`❯ Try …`); \s covers it.
-  if (!rows[0].startsWith(glyph) || (rows[0].length > glyph.length && !/\s/.test(rows[0][glyph.length]))) return null;
+  // COMMIT-GATE-HOTFIX-192: the live renderer's reading (xterm translateToString, Unicode 11) can
+  // lose that separator cell, so our staged draft reads `❯You have new hive mail …` with nothing
+  // between the glyph and the text (4/4 agents, 2026-10-18 14:50Z) and every COMMIT was refused as
+  // no-composer. The column-0 glyph inside the two rules is the composer whatever follows it (a
+  // dialog's option rows are indented); only a row that reads like a dialog row (`❯1. Yes`)
+  // without the separator is still refused, so nothing else is widened.
+  if (!rows[0].startsWith(glyph)) return null;
+  if (rows[0].length > glyph.length && !/\s/.test(rows[0][glyph.length]) && dialogRow([rows[0]]) !== null) return null;
   return { top, bottom, rows };
 }
 
