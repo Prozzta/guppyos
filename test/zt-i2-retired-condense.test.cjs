@@ -30,9 +30,34 @@ function walk(dir, out = []) {
   return out;
 }
 const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
-/** Source without // and block comments (a comment may name the retired code). */
+/** Source without // and block comments (a comment may name the retired code). The TypeScript scanner
+ *  knows strings, templates and regexes, so a '/*' inside a string hides no code from the scans; a
+ *  comment keeps its line breaks, so line numbers stay true. */
+const ts = require('typescript');
 function code(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1');
+  const sc = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.JSX, text);
+  const K = ts.SyntaxKind;
+  // After these a '/' divides; anywhere else it starts a regex.
+  const VALUE_END = new Set([K.Identifier, K.NumericLiteral, K.BigIntLiteral, K.StringLiteral, K.NoSubstitutionTemplateLiteral, K.TemplateTail,
+    K.RegularExpressionLiteral, K.CloseParenToken, K.CloseBracketToken, K.CloseBraceToken, K.ThisKeyword, K.SuperKeyword, K.TrueKeyword,
+    K.FalseKeyword, K.NullKeyword, K.PlusPlusToken, K.MinusMinusToken, K.ExclamationToken]);
+  const braces = [];   // per open `${`: the `{` depth inside it
+  let out = '';
+  let prev = null;
+  for (let k = sc.scan(); k !== K.EndOfFileToken; k = sc.scan()) {
+    if (k === K.SingleLineCommentTrivia) continue;
+    if (k === K.MultiLineCommentTrivia) { out += sc.getTokenText().replace(/[^\n]/g, ''); continue; }
+    if ((k === K.SlashToken || k === K.SlashEqualsToken) && !VALUE_END.has(prev)) k = sc.reScanSlashToken();
+    else if (k === K.CloseBraceToken && braces.length && braces[braces.length - 1] === 0) {
+      k = sc.reScanTemplateToken(false);
+      if (k === K.TemplateTail) braces.pop();
+    } else if (k === K.OpenBraceToken && braces.length) braces[braces.length - 1]++;
+    else if (k === K.CloseBraceToken && braces.length) braces[braces.length - 1]--;
+    if (k === K.TemplateHead) braces.push(0);
+    if (k !== K.WhitespaceTrivia && k !== K.NewLineTrivia) prev = k;
+    out += sc.getTokenText();
+  }
+  return out;
 }
 const SRC = walk(path.join(ROOT, 'src')).map((p) => ({ file: rel(p), text: fs.readFileSync(p, 'utf8') }));
 
@@ -47,24 +72,46 @@ test('ZT-I2 (3): the hidden condense is deleted and nothing reaches for it', () 
   }
 });
 
-test('ZT-I2 (3): no upkeep path in src/main spawns claude in print mode', () => {
-  // The one print-mode argv allowed: the model list's initialize handshake (no prompt is sent).
-  const ALLOWED = new Set(['src/main/providerModels.ts']);
-  // heavyJob.ts reads a command's node -p/-e argv to classify it; it spawns nothing with them.
-  const PARSES_ONLY = new Set(['src/main/heavyJob.ts']);
+test('ZT-I2 (3): no upkeep path in src/main or src/shared spawns claude in print mode', () => {
+  const PRINT = /['"`](?:-p|--print)['"`]|\bclaude(?:\.cmd|\.exe)?["']?\s+(?:[^'"`\n]*\s)?(?:-p|--print)\b/;
+  // Andy NIT-3: exact LINES, never whole files, so a new print-mode argv anywhere is a hit.
+  const ALLOWED = [
+    // The model list's initialize handshake: no prompt in its argv (pinned whole below), none on stdin.
+    ['src/main/providerModels.ts', "export const CLAUDE_LIST_ARGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];"],
+    // heavyJob.ts reads a command's node -e/-p argv to classify it (its one spawn is pinned below).
+    ['src/main/heavyJob.ts', "const e = args.findIndex((a) => a === '-e' || a === '--eval' || a === '-p' || a === '--print');"],
+    // Copilot's visible worker session takes its brief this way: an agent the Human sees, not upkeep.
+    ['src/shared/agentProvider.ts', "initialPromptFlag: '-p',"]
+  ];
   // Prose the app shows an agent (god's monitoring hint), not a command the app runs.
   const PROSE = ['Use `claude -p "..." --output-format json` for a one-off headless query.'];
+  // The command reference shown to the Human and written to COMMANDS.md: one `cli` entry per line, text
+  // only (the file imports nothing, pinned below, so nothing in it can run).
+  const CATALOG = 'src/shared/claudeCommands.ts';
+  const CATALOG_ITEM = /^\{ cmd: 'claude -p "[^"']*"[^']*', kind: 'cli', desc: '[^']*'(?:, usage: '[^']*')? \},?$/;
   const hits = [];
+  const used = new Set();
   for (const { file, text } of SRC) {
-    if (!file.startsWith('src/main/') || PARSES_ONLY.has(file)) continue;
+    if (!file.startsWith('src/main/') && !file.startsWith('src/shared/')) continue;
     code(text).split('\n').forEach((line, i) => {
-      if (!/['"`](?:-p|--print)['"`]|\bclaude(?:\.cmd|\.exe)?["']?\s+(?:[^'"`\n]*\s)?(?:-p|--print)\b/.test(line)) return;
-      if (ALLOWED.has(file) || PROSE.some((p) => line.includes(p))) return;
+      if (!PRINT.test(line)) return;
+      const ok = ALLOWED.findIndex(([f, l]) => f === file && line.trim() === l);
+      if (ok >= 0 && !used.has(ok)) { used.add(ok); return; }
+      if (PROSE.some((p) => line.includes(p))) return;
+      if (file === CATALOG && CATALOG_ITEM.test(line.trim())) return;
       hits.push(`${file}:${i + 1}`);
     });
   }
-  assert.deepEqual(hits, [], 'a print-mode claude argv outside the model-list handshake');
+  assert.deepEqual(hits, [], 'a print-mode argv outside the allowed lines (each allowed once)');
+  assert.equal(used.size, ALLOWED.length, 'every allowed line is still where it was');
+  const catalog = code(fs.readFileSync(path.join(ROOT, ...CATALOG.split('/')), 'utf8'));
+  assert.doesNotMatch(catalog, /^\s*import\b|\brequire\(|\bimport\(/m, 'the command reference imports nothing, so it runs nothing');
+  const hj = code(fs.readFileSync(path.join(ROOT, 'src', 'main', 'heavyJob.ts'), 'utf8'));
+  assert.doesNotMatch(hj, /(?<![.\w$])(?:spawn|spawnSync|execSync|execFileSync|fork|exec)\s*\(/, 'heavyJob runs no other child');
+  assert.match(hj, /^import \{ execFile \} from 'node:child_process';$/m, 'and imports nothing else from child_process');
+  assert.deepEqual(hj.match(/\bexecFile\(\s*'[^']*'/g), ["execFile('powershell.exe'"], 'its one child is the process listing');
   const pm = code(fs.readFileSync(path.join(ROOT, 'src', 'main', 'providerModels.ts'), 'utf8'));
+  assert.deepEqual(pm.match(/\bargs = [^;\n]*/g), ['args = CLAUDE_LIST_ARGS', "args = ['/d', '/s', '/c', `\"\"${exe}\" ${CLAUDE_LIST_ARGS.join(' ')}\"`]"], 'claude is spawned with the handshake argv only (no prompt in argv)');
   const writes = pm.match(/stdin\?*\.write\(/g) || [];
   assert.equal(writes.length, 1, 'the handshake writes exactly one line to claude');
   assert.match(pm, /stdin\?\.write\(`\$\{JSON\.stringify\(\{ type: 'control_request', request_id: CLAUDE_REQUEST_ID, request: \{ subtype: 'initialize' \} \}\)\}\\n`\)/, 'and it is the initialize control request');

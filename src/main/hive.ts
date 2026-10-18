@@ -933,12 +933,19 @@ export class HiveManager {
     if (!dir) return null;
     try {
       const r = rolloverMemory(dir, Date.now(), MEMORY_STOP_ROLLOVER_BYTES);
+      this.logRolloverSide(id, r, 'stop');
       if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
       else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
       else if (r.replaceFailed) this.appendLog({ kind: 'memory-rollover-failed', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, code: r.replaceFailed, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
       else if (r.pinnedTooLarge) this.appendLog({ kind: 'memory-pinned-too-large', agentId: id, at: 'stop', pinnedBytes: r.pinnedBytes, bytesBefore: r.bytesBefore });
       return r;
     } catch (e) { console.warn('[hive] memory rollover at stop failed:', e); return null; }
+  }
+
+  /** ZT-I2 (Andy SHOULD-1, NIT-2): what a rollover did beside its own result. */
+  private logRolloverSide(agentId: string, r: RolloverResult, at: 'spawn' | 'stop'): void {
+    if (r.recovered?.length || r.recoverFailed) this.appendLog({ kind: 'memory-rollover-recovered', agentId, at, files: r.recovered ?? [], ...(r.recoverFailed ? { failed: r.recoverFailed } : {}) });
+    if (r.noLink) this.appendLog({ kind: 'memory-rollover-nolink', agentId, at });
   }
 
   /** READS-181 B: where an agent's condensed tool outputs are kept in full, or null (no hive). */
@@ -1366,6 +1373,7 @@ export class HiveManager {
       // process of this agent is appending to it. Best-effort: never blocks a spawn.
       try {
         const r = rolloverMemory(dir);
+        this.logRolloverSide(meta.id, r, 'spawn');
         if (r.pinnedBytes !== undefined) pinnedBytes = r.pinnedBytes;
         if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: meta.id, bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
         // undoFailed: the archive append stayed (the next rollover may archive the same notes again).

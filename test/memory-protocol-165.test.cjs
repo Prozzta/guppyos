@@ -75,7 +75,8 @@ test('a second rollover appends to the same day archive and keeps ONE pointer li
   assert.equal(r.rotated, true);
   const kept = fs.readFileSync(path.join(dir, 'memory.md'), 'utf8');
   assert.equal(kept.split('_Older notes are archived in').length - 1, 1, 'one pointer');
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['memory-archive-2026-09-27.md', 'memory.md']);
+  // ZT-I2 (Andy NIT-1): the replaced file waits as .settled-<n> until the next rollover reads it once more.
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => !/^memory\.md\.rollover-\d+\.settled-\d+$/.test(n)).sort(), ['memory-archive-2026-09-27.md', 'memory.md']);
   assert.match(fs.readFileSync(r.archive, 'utf8'), /later-0\n/);
 });
 

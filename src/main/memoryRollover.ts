@@ -19,7 +19,7 @@
  * research collapsed). The section is lifted out before the cut, kept directly under the header,
  * and never archived; the spawn seeds an empty one (seedPinnedSection).
  */
-import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync, linkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync, unlinkSync, truncateSync, linkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { isGeneratedMemory } from './claims/generated';
 
@@ -213,29 +213,143 @@ export const rolloverTestHooks: {
   afterPlace?: (file: string, asides: string[]) => void;
 } = {};
 
+/** A filesystem without hard links: a check-then-rename was used (a by-path write in between could
+ *  be replaced). Set by the moves below, reported as RolloverResult.noLink. */
+interface MoveFlags { noLink: boolean }
+
+/** A link refused because this filesystem has no hard links (not EXDEV: every move stays in one folder). */
+const noHardLinks = (e: unknown): boolean => {
+  const code = (e as NodeJS.ErrnoException)?.code;
+  return code === 'ENOTSUP' || code === 'ENOSYS';
+};
+
+/**
+ * ZT-I2 (Andy MUST-1): move `from` to the first free name of `to`, `to-2`, `to-3`, ... and return
+ * it. A rename replaces an existing destination on Windows (a leftover aside's notes were lost that
+ * way), so the move is a hard link, which refuses an existing name (EEXIST: try the next one), then
+ * the unlink of `from`. `rename` (tests only) replaces the move to the first free name.
+ */
+function moveNoReplace(from: string, to: string, flags: MoveFlags, rename?: (from: string, to: string) => void): string {
+  for (let n = 1; n <= 100; n++) {
+    const dest = n === 1 ? to : `${to}-${n}`;
+    if (rename) {
+      if (existsSync(dest)) continue;
+      rename(from, dest);
+      return dest;
+    }
+    try { (rolloverTestHooks.link ?? linkSync)(from, dest); } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code === 'EEXIST') continue;
+      if (noHardLinks(e) && !existsSync(dest)) { flags.noLink = true; renameSync(from, dest); return dest; }
+      throw e;
+    }
+    // `dest` is ours now and is the same file, so the rename replaces nothing. A rename, not an
+    // unlink: on Windows an unlinked name stays taken while a writer holds the file open, and the
+    // fresh memory.md could not be placed (EPERM).
+    try {
+      renameSync(from, dest);
+      // POSIX leaves both names when they are one file: drop `from`'s.
+      if (existsSync(from) && statSync(from).ino === statSync(dest).ino) unlinkSync(from);
+    } catch (e) { try { unlinkSync(dest); } catch { /* two names of one file: nothing lost */ } throw e; }
+    return dest;
+  }
+  throw Object.assign(new Error(`no free name for ${to}`), { code: 'EEXIST' });
+}
+
 /**
  * ZT-I2-CONDENSE (god f2315f condition 1): put `src` at `file` without overwriting anything. A
  * writer by path that found memory.md gone made a fresh one meanwhile: that file is moved aside in
  * turn and its bytes are appended to `src` first, until the link lands. Every moved-aside file is
  * pushed to `asides` with the bytes taken from it. A filesystem without hard links falls back to a
- * rename when memory.md is absent.
+ * rename when memory.md is absent (flags.noLink).
  */
-function placeWithoutOverwrite(src: string, file: string, asides: { path: string; taken: number }[]): void {
+function placeWithoutOverwrite(src: string, file: string, asides: { path: string; taken: number }[], flags: MoveFlags): void {
   for (let i = 0; ; i++) {
     try { (rolloverTestHooks.link ?? linkSync)(src, file); return; } catch (e) {
       const code = (e as NodeJS.ErrnoException)?.code;
       if (code !== 'EEXIST') {
-        if ((code === 'ENOTSUP' || code === 'ENOSYS' || code === 'EXDEV') && !existsSync(file)) { renameSync(src, file); return; }
+        if (noHardLinks(e) && !existsSync(file)) { flags.noLink = true; renameSync(src, file); return; }
         throw e;
       }
       if (i >= 20) throw e;
     }
-    const aside = `${src}.aside-${i}`;
-    renameSync(file, aside);
+    const aside = moveNoReplace(file, `${src}.aside`, flags);
     const got = readFileSync(aside);
     asides.push({ path: aside, taken: got.length });
     appendFileSync(src, got);
   }
+}
+
+/** The prefix of every file a rollover leaves beside memory.md: `memory.md.rollover-<pid>.<what>`. */
+const LEFTOVER = /^memory\.md\.rollover-(\d+)\.(.+)$/;
+/** A moved file whose bytes up to <taken> are in memory.md; kept until the next rollover reads it once more. */
+const SETTLED = /^settled-(\d+)(?:-\d+)?$/;
+
+/**
+ * Andy NIT-1: a moved file is not removed at once: a write through a handle opened before the move
+ * could land between the last read and the removal, and be lost. It is renamed (no-replace) to
+ * `.settled-<bytes taken>`, and the next rollover appends anything past that, then removes it.
+ * A late write that reached it before now is appended here. One that cannot be read stays on disk.
+ */
+function settle(file: string, list: { path: string; taken: number }[], flags: MoveFlags): void {
+  for (const a of list) {
+    try {
+      const got = readFileSync(a.path);
+      if (got.length > a.taken) appendFileSync(file, got.subarray(a.taken));
+      moveNoReplace(a.path, `${file}.rollover-${process.pid}.settled-${got.length}`, flags);
+    } catch { /* left on disk */ }
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException)?.code === 'EPERM'; }
+}
+
+/**
+ * Andy SHOULD-1: at the start of every rollover, put back what an earlier one left beside memory.md
+ * (this process's, or a process that is gone: a restart changes the pid; a live one's may be in use).
+ *   - `.settled-<n>`: bytes past <n> were written late through an old handle: appended, then removed.
+ *   - any other moved file (`.aside...`): its bytes may be in no other file (a restore that failed
+ *     half-way left the original notes there, and memory.md absent or fresh). They are OLDER than
+ *     memory.md's: memory.md is moved aside, appended to the leftover, and the leftover placed as
+ *     memory.md the no-overwrite way. A duplicate is possible; a loss is not.
+ * Returns the names put back, and the first error (the rest is left for the next rollover).
+ */
+function recoverLeftovers(dir: string, file: string, flags: MoveFlags): { recovered: string[]; error?: string } {
+  const recovered: string[] = [];
+  let names: string[];
+  try { names = readdirSync(dir); } catch { return { recovered }; }
+  // Moved files only (`aside`, `aside-2`, `tmp.aside`, `settled-<n>`...): never a tmp, never a folder.
+  const isFile = (n: string): boolean => { try { return statSync(join(dir, n)).isFile(); } catch { return false; } };
+  const mine = names.map((n) => ({ n, m: LEFTOVER.exec(n) })).filter((x) => x.m && (/(^|\.)aside(-\d+)?$/.test(x.m[2]) || SETTLED.test(x.m[2]))
+    && (Number(x.m[1]) === process.pid || !pidAlive(Number(x.m[1]))) && isFile(x.n));
+  try {
+    for (const { n, m } of mine) {
+      const s = SETTLED.exec(m![2]);
+      if (!s) continue;
+      const p = join(dir, n);
+      const got = readFileSync(p);
+      if (got.length > Number(s[1])) { appendFileSync(file, got.subarray(Number(s[1]))); recovered.push(n); }
+      rmSync(p, { force: true });
+    }
+    // Oldest first: each one's notes go before everything written after it.
+    const moved = mine.filter(({ m }) => !SETTLED.test(m![2])).map(({ n }) => ({ n, p: join(dir, n), born: statSync(join(dir, n)).birthtimeMs }))
+      .sort((a, b) => a.born - b.born);
+    for (const { n, p } of moved) {
+      const taken: { path: string; taken: number }[] = [];
+      if (existsSync(file)) {
+        const cur = moveNoReplace(file, `${file}.rollover-${process.pid}.aside`, flags);
+        const got = readFileSync(cur);
+        appendFileSync(p, got);
+        taken.push({ path: cur, taken: got.length });
+      }
+      const fresh: { path: string; taken: number }[] = [];
+      placeWithoutOverwrite(p, file, fresh, flags);
+      unlinkSync(p);   // memory.md is the same file now (the link)
+      settle(file, [...taken, ...fresh], flags);
+      recovered.push(n);
+    }
+  } catch (e) { return { recovered, error: String((e as NodeJS.ErrnoException)?.code ?? e) }; }
+  return { recovered };
 }
 
 export interface RolloverResult {
@@ -256,14 +370,33 @@ export interface RolloverResult {
   /** With raced/replaceFailed: the archive append was NOT undone ('archive-changed' when another rollover
    *  appended since, else the error code), so the next rollover may archive the same notes again. */
   undoFailed?: string;
+  /** Andy SHOULD-1: files an earlier rollover left beside memory.md, put back first. */
+  recovered?: string[];
+  /** Putting a leftover back failed (the error code): it stays on disk for the next rollover. */
+  recoverFailed?: string;
+  /** Andy NIT-2: no hard links here, so a check-then-rename was used for a move. */
+  noLink?: boolean;
 }
 
 /**
  * Roll `<dir>/memory.md` over if it is above `limit`. The archive is written (appended) BEFORE
- * memory.md is replaced, and memory.md is replaced by rename, so a crash never loses text.
+ * memory.md is replaced, and memory.md is replaced without overwriting anything, so a crash never
+ * loses text. First, whatever an earlier rollover left beside memory.md is put back.
  */
 export function rolloverMemory(dir: string, now: number = Date.now(), limit: number = MEMORY_ROLLOVER_BYTES, keepBytes: number = MEMORY_KEEP_TAIL_BYTES): RolloverResult {
   const file = join(dir, 'memory.md');
+  const flags: MoveFlags = { noLink: false };
+  const rec = recoverLeftovers(dir, file, flags);
+  const r = rolloverOnce(dir, file, flags, now, limit, keepBytes);
+  return {
+    ...r,
+    ...(rec.recovered.length ? { recovered: rec.recovered } : {}),
+    ...(rec.error ? { recoverFailed: rec.error } : {}),
+    ...(flags.noLink ? { noLink: true } : {})
+  };
+}
+
+function rolloverOnce(dir: string, file: string, flags: MoveFlags, now: number, limit: number, keepBytes: number): RolloverResult {
   if (!existsSync(file)) return { rotated: false };
   const st0 = statSync(file);
   const before = st0.size;
@@ -339,22 +472,12 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   // file. Whatever either wrote is merged into the new memory.md, which is placed by a hard link so
   // it never overwrites a fresh one, and each moved file is checked once more for a late write
   // before it is removed. Main runs this between ledger ops of the agent (index.ts ledgerQueue).
-  const aside = `${file}.rollover-${process.pid}.aside`;
-  try { (rolloverTestHooks.rename ?? renameSync)(file, aside); } catch (e) { return failed(e); }
+  // Andy MUST-1: never onto an existing name (a leftover aside would be replaced, its notes lost).
+  let aside: string;
+  try { aside = moveNoReplace(file, `${file}.rollover-${process.pid}.aside`, flags, rolloverTestHooks.rename); } catch (e) { return failed(e); }
   rolloverTestHooks.afterAside?.(file, aside);
   // Fresh memory.md files moved aside while placing (their bytes are in tmp, or in aside on a restore).
   const asides: { path: string; taken: number }[] = [];
-  // A write that reached a moved file after its bytes were taken is appended to memory.md; then the
-  // moved file is removed. One that cannot be read is left on disk: a leftover is safe, a loss is not.
-  const settle = (list: { path: string; taken: number }[]): void => {
-    for (const a of list) {
-      try {
-        const got = readFileSync(a.path);
-        if (got.length > a.taken) appendFileSync(file, got.subarray(a.taken));
-        rmSync(a.path, { force: true });
-      } catch { /* left on disk */ }
-    }
-  };
   // Put the original back, with every write made meanwhile, and undo the archive append.
   const restore = (why: { raced: true } | { replaceFailed: string }): RolloverResult => {
     try { rmSync(tmp, { force: true }); } catch { /* best effort */ }
@@ -362,9 +485,9 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
     try {
       for (const a of asides) appendFileSync(aside, readFileSync(a.path).subarray(0, a.taken));
       const fresh: { path: string; taken: number }[] = [];
-      placeWithoutOverwrite(aside, file, fresh);
+      placeWithoutOverwrite(aside, file, fresh, flags);
       rmSync(aside, { force: true });   // memory.md is the same file now (the link)
-      settle([...asides, ...fresh]);
+      settle(file, [...asides, ...fresh], flags);
       undoFailed = undo();
     } catch (e) { undoFailed = `restore:${errCode(e)}`; }   // the moved file stays on disk: nothing is lost
     return { rotated: false, bytesBefore: before, ...why, ...(undoFailed ? { undoFailed } : {}), archive, pinnedBytes };
@@ -375,12 +498,12 @@ export function rolloverMemory(dir: string, now: number = Date.now(), limit: num
   if (seen.length < rawBuf.length || !seen.subarray(0, rawBuf.length).equals(rawBuf)) return restore({ raced: true });
   try {
     if (seen.length > rawBuf.length) appendFileSync(tmp, seen.subarray(rawBuf.length));
-    placeWithoutOverwrite(tmp, file, asides);
+    placeWithoutOverwrite(tmp, file, asides, flags);
   } catch (e) { return restore({ replaceFailed: errCode(e) }); }
   try { rmSync(tmp, { force: true }); } catch { /* memory.md is in place; the name is a second link */ }
   const moved = [{ path: aside, taken: seen.length }, ...asides];
   rolloverTestHooks.afterPlace?.(file, moved.map((a) => a.path));
-  settle(moved);
+  settle(file, moved, flags);
   return { rotated: true, bytesBefore: before, bytesAfter: statSync(file).size, archive, pinnedBytes };
 }
 
