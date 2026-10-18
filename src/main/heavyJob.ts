@@ -467,9 +467,6 @@ const JS_MARKER = /onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transform
  *  tokenizer drops comments); a string that merely holds the words is not a declaration. */
 const LIVE_TAG = /^[ \t]*(?:\/\/+|\/?\*+)[ \t]*@heavy-lock[: \t]+live\b/m;
 const LIVE_TAG_CHARS = 4096;
-/** HEAVY-LOCK-LIVE-FILE-192 (a): live test files known by name, for a branch whose file does not declare
- *  itself yet (the pid-attach branch's file spawns real job helpers and holds them for about 40 s). */
-const LIVE_FILES = new Set(['heavy-cpu-agent-job-192.test.cjs']);
 /** A spawned `node --test`'s options that take the next element as their value. */
 const TEST_VALUED = /^(--test-(name-pattern|skip-pattern|reporter|reporter-destination|concurrency|timeout|shard|coverage-include|coverage-exclude)|--(import|require|loader|experimental-loader|env-file)|-r)$/;
 /** HEAVY-LOCK-LIVE-FILE-192 (a): test/perf's wall-clock gates (CLAIMS-PERF-LANE) are benches. */
@@ -744,7 +741,6 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false,
     const base = key.split('/').pop()!;
     if (hop === 0 || test) {
       if (LIVE_TAG.test(text.slice(0, LIVE_TAG_CHARS))) return { heavy: true, kind: 'bench', why: `node ${base} (declares @heavy-lock live)` };
-      if (LIVE_FILES.has(base)) return { heavy: true, kind: 'bench', why: `node ${base} (a known live test file)` };
     }
     const s = scanJs(text);
     if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);

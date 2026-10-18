@@ -37,7 +37,8 @@ const files = {
   [MUT]: LOOP_RUNNER,
   [`${S}/pa.cjs`]: LOOP_RUNNER,
   [`${S}/ok.cjs`]: "console.log('ok');\n",
-  [LIVE]: "'use strict';\nconst test = require('node:test');\n",
+  // The pid-attach file as it merges: it declares itself (Jim's HLF NIT; the name list is gone).
+  [LIVE]: "'use strict';\n// @heavy-lock live: spawns real job helpers and holds them for about 40 s\nconst test = require('node:test');\n",
   'test/tagged.test.cjs': "'use strict';\n// @heavy-lock live: spawns real CLIs\nconst test = require('node:test');\n",
   'test/block-tag.test.cjs': "/**\n * The pid-attach box.\n * @heavy-lock live\n */\nconst test = require('node:test');\n",
   'test/mention.test.cjs': "'use strict';\nconst s = '// @heavy-lock live';\nconst t = require('node:test');\n",
@@ -72,8 +73,8 @@ test('(a) a live test file is heavy as a single node --test run: tag, list, harn
   assert.equal(cls('node --test test/tagged.test.cjs'), 'heavy:bench', 'the declared tag (M4)');
   assert.match(classifyCommand('node --test test/tagged.test.cjs', 0, ctx).why, /declares @heavy-lock live/);
   assert.equal(cls('node --test test/block-tag.test.cjs'), 'heavy:bench', 'the tag as a block-comment line');
-  assert.equal(cls(`node --test ${LIVE}`), 'heavy:bench', 'the known live-file list (M15)');
-  assert.match(classifyCommand(`node --test ${LIVE}`, 0, ctx).why, /a known live test file/);
+  assert.equal(cls(`node --test ${LIVE}`), 'heavy:bench', 'the pid-attach file, by its own tag');
+  assert.match(classifyCommand(`node --test ${LIVE}`, 0, ctx).why, /declares @heavy-lock live/);
   assert.equal(cls('node --test test/harness.test.cjs'), 'heavy:bench', 'the Electron harness runner (M5)');
   assert.equal(cls('node --test test/perf/claims-derive-w2.perf.cjs'), 'heavy:bench', 'a wall-clock perf gate (M6)');
   assert.equal(cls('node --test test/plain.test.cjs test/tagged.test.cjs'), 'heavy:bench', 'one live file among several (M7)');
