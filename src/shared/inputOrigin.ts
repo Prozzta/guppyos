@@ -26,9 +26,12 @@
  * RECONSTRUCTION with a refusal-to-arm around the cases it cannot see, and the human
  * accepted it on exactly those terms. Do not upgrade it to a guarantee in a comment.
  */
-export type InputOrigin = 'HUMAN' | 'CONTROL' | 'PROGRAMMATIC';
+export type InputOrigin = 'HUMAN' | 'CONTROL' | 'PROGRAMMATIC' | 'GOD';
 
-export const INPUT_ORIGINS: readonly InputOrigin[] = ['HUMAN', 'CONTROL', 'PROGRAMMATIC'];
+/** GOD-TERMINAL-CONTROL: GOD is the orchestrator typing through main's `term` route. It advances
+ *  the human-input generation exactly as HUMAN does (a wake never lands on god's typing), and,
+ *  like PROGRAMMATIC, it is refused on the renderer's `pty:write` channel: only main writes it. */
+export const INPUT_ORIGINS: readonly InputOrigin[] = ['HUMAN', 'CONTROL', 'PROGRAMMATIC', 'GOD'];
 
 /** Runtime guard for the IPC boundary. A write with no recognisable origin is
  *  REFUSED there, not defaulted: an omitted origin is a missing fact, and the

@@ -273,7 +273,9 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
 /** The broker's URLs: /hook/<agentId>/<32-hex token> (Claude HTTP hooks),
  *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3) and /ledger/<agentId>/<token> (the
  *  `ledger` command, READS-181 A: the same per-spawn token, so the caller cannot be forged). */
-const HOOK_ROUTE = /^\/(hook|mcp|status|ledger)\/([^/?#]+)\/([0-9a-f]{32})$/;
+const HOOK_ROUTE = /^\/(hook|mcp|status|ledger|term)\/([^/?#]+)\/([0-9a-f]{32})$/;
+/** GOD-TERMINAL-CONTROL: one `term` request (an action, an agent id, at most 16K characters of text). */
+export const TERM_HTTP_BODY_MAX = 128 * 1024;
 /** READS-181 A: one ledger operation (a card, a message, a memory note) is small. */
 export const LEDGER_HTTP_BODY_MAX = 256 * 1024;
 export type LedgerHttpHandler = (agentId: string, body: unknown) => { status: number; body: unknown } | Promise<{ status: number; body: unknown }>;
@@ -583,6 +585,25 @@ export class HookServer {
     this.ledgerHandler = h;
   }
 
+  /** GOD-TERMINAL-CONTROL: set by main; null = the term route answers 404. The caller is the agent
+   *  the per-spawn token in the URL proves; main decides (at request time) whether it is god. */
+  private termHandler: LedgerHttpHandler | null = null;
+  setTermHandler(h: LedgerHttpHandler | null): void {
+    this.termHandler = h;
+  }
+
+  /** GOD-TERMINAL-CONTROL: a term body is UTF-8 JSON, like a ledger body. */
+  private onTerm(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
+    const handler = this.termHandler;
+    if (!handler) { reply(404, { ok: false, line: 'refused: term is not available in this build' }); return; }
+    let body: unknown;
+    try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw).replace(/^﻿/, '') || '{}'); } catch {
+      reply(400, { ok: false, line: 'refused: the input is not valid UTF-8 JSON' }); return;
+    }
+    const failed = (e: unknown): void => reply(500, { ok: false, line: `refused: term failed (${String(e).slice(0, 160)})` });
+    try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
+  }
+
   /** READS-181 A: a ledger body is UTF-8 JSON (invalid UTF-8 is refused, never repaired). */
   private onLedger(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
     const handler = this.ledgerHandler;
@@ -760,7 +781,7 @@ export class HookServer {
     const chunks: Buffer[] = [];
     let size = 0;
     let tooBig = false;
-    const bodyMax = route === 'ledger' ? LEDGER_HTTP_BODY_MAX : HOOK_HTTP_BODY_MAX;
+    const bodyMax = route === 'ledger' ? LEDGER_HTTP_BODY_MAX : route === 'term' ? TERM_HTTP_BODY_MAX : HOOK_HTTP_BODY_MAX;
     req.on('data', (d: Buffer) => {
       if (tooBig) return;
       size += d.length;
@@ -783,6 +804,7 @@ export class HookServer {
         return;
       }
       if (route === 'ledger') { this.onLedger(agentId, Buffer.concat(chunks), reply); return; }
+      if (route === 'term') { this.onTerm(agentId, Buffer.concat(chunks), reply); return; }
       let payload: Record<string, unknown> = {};
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');

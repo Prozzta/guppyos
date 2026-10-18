@@ -97,6 +97,8 @@ function startFakeLlm() {
 
 // ————————————————————————————————————————————————————————————— the floor
 
+/** GOD-TERMINAL-CONTROL: the id the rig's term channel treats as god (no god agent is spawned). */
+const RIG_GOD = 'god-rig';
 const PROVIDER_OF = { claude: 'claude', codex: 'codex', agy: 'antigravity', gemini: 'gemini', custom: 'custom', cursor: 'cursor', qwen: 'qwen' };
 
 async function buildFloor() {
@@ -117,6 +119,8 @@ async function buildFloor() {
   const readers = loadTs('src/main/mailReaders.ts');
   const { mailNudgeMode } = loadTs('src/main/mailSurface.ts');
   const { inboxWakeTextForProvider } = loadTs('src/shared/hiveNudge.ts');
+  const { TermControl } = loadTs('src/main/termControl.ts');
+  const { createTerminalMirror } = loadTs('src/main/terminalMirror.ts');
 
   // The simulated clock of the coordinator/bridge. `at(t)` maps a REAL timestamp another part
   // stamped (a statusline read, a rollout line, PTY output) onto the simulated timeline, using the
@@ -130,13 +134,14 @@ async function buildFloor() {
   };
   const diags = [];
   const outcomes = [];
-  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Set(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
+  const rig = { clock, diags, outcomes, llm, bootSeen: new Set(), echoSeen: new Map(),stall: new Map(), interfere: new Map(), humanDirty: new Set(), capacityHold: false, holdArchives: false, settleDelay: new Map() };
 
   // index.ts:361 - the ONE hive; this sandbox's harness home is the "live" home of THIS instance,
   // so the per-provider global writers (AGY hooks.json, statusline) write into the jailed HOME.
   const hive = new HiveManager(() => HARNESS_HOME, (channel, payload) => rendererEmit(channel, payload), {}, (home) => path.resolve(home) === path.resolve(HARNESS_HOME));
   const control = new ControlRegistry();                          // index.ts:377
   const ptyManager = new PtyManager();                            // index.ts:233
+  ptyManager.setMirrorFactory((cols, rows) => createTerminalMirror(cols, rows));   // GOD-TERMINAL-CONTROL (index.ts, after TERM_CLI)
   const workerWake = new WorkerWakeWatchdog();                    // index.ts:449
   const codexLifecycle = new CodexRolloutLifecycleSource();       // index.ts:451
   const ptyToAgent = new Map();
@@ -167,15 +172,19 @@ async function buildFloor() {
       // A PERSON types right after the owner staged its text (F6): the key lands in the gap.
       const agentId = ptyToAgent.get(id);
       if (r.ok && agentId && rig.interfere.has(agentId) && data !== '\r' && data.length > 1) {
+        const by = rig.interfere.get(agentId);
         rig.interfere.delete(agentId);
         // 20 ms after the paste: inside the owner's GAP_MS (140 ms) before its Enter, on the same
-        // timer queue as the owner's own wait, so the order is fixed.
-        setTimeout(() => { ptyManager.write(id, 'x', 'HUMAN'); rig.humanDirty.add(id); }, 20);
+        // timer queue as the owner's own wait, so the order is fixed. GOD-TERMINAL-CONTROL: or god's
+        // own `term type` lands there (main's GOD writer; the renderer never saw those keys).
+        if (by === 'GOD') setTimeout(() => { void termControl.handle(RIG_GOD, { action: 'type', agent: agentId, text: ' and god' }); }, 20);
+        else setTimeout(() => { ptyManager.write(id, 'x', 'HUMAN'); rig.humanDirty.add(id); }, 20);
       }
       return r;
     },
     incarnation: (id) => ptyManager.incarnation(id),
     humanInputGeneration: (id) => ptyManager.humanInputGeneration(id),
+    godInputGeneration: (id) => ptyManager.godInputGeneration(id),
     lastHumanInputAt: (id) => ptyManager.lastHumanInputAt(id),
     hasOutput: (id) => ptyManager.hasOutput(id),
     inputState: (id) => (ptyManager.incarnation(id) === undefined ? undefined : { mouseTrackingMode: 'none', inputOriginAttached: true, selfTest: 'pass' }),
@@ -235,6 +244,21 @@ async function buildFloor() {
     onScreenGuard: (r) => { diags.push({ stage: 'screen-guard', agentId: r.agentId, why: r.phase + ':' + (r.ok ? 'ok' : 'NO') + ':' + r.reason + ':gen=' + r.observedGeneration + '/' + r.currentGeneration, at: clock.now() }); if (diags.length > 5000) diags.shift(); },
     onOutcome: (r) => { outcomes.push({ agentId: r.agentId, requestId: r.requestId, cls: r.admissionClass, outcome: r.outcome, at: r.at }); if (outcomes.length > 500) outcomes.shift(); }
   }));
+
+  // GOD-TERMINAL-CONTROL (index.ts termControl): god's direct channel over the same PtyManager,
+  // origin GOD, with the mirror's screen. The rig has no registry god: RIG_GOD stands in for it.
+  const termControl = new TermControl({
+    godId: () => RIG_GOD,
+    ptyOf: (agentId) => ptyForAgent(agentId),
+    providerOf: (agentId) => { const p = ptyForAgent(agentId); return p ? (ptyProvider.get(p) ?? null) : null; },
+    readScreen: (ptyId, rows) => ptyManager.readScreen(ptyId, rows),
+    write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
+    outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
+    log: (row) => hive.appendLog(row),
+    now: Date.now,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  });
+  rig.termControl = termControl;
 
   // useHive's terminal-handoff queue (N2): type the work order, and report the COMMITTED write.
   const workOrderText = (m) => ['WORK ORDER FROM HIVE', `Message: ${m.id}`, `From: ${m.from}`, `Subject: ${m.subject}`, `Act: ${m.act}${m.requiresReply ? ' (reply expected)' : ''}`, `Issued: ${m.createdAt}`, '', m.body, '', 'Notes:', '- This arrived through your terminal because this provider does not support hive inbox.'].join('\n');
@@ -508,7 +532,18 @@ async function main() {
     resume: ({ id }) => { control.resume(id); return control.snapshot(id); },
     steer: ({ id, text }) => { control.steer(id, text); return true; },
     capacityHold: ({ on }) => { rig.capacityHold = on; if (!on) f.inboxWake.onCapacityChange(); return on; },
-    armInterfere: ({ id }) => { rig.interfere.add(id); return true; },
+    armInterfere: ({ id, by = 'HUMAN' }) => { rig.interfere.set(id, by); return true; },
+    // GOD-TERMINAL-CONTROL: god's `term` request, as the hook broker's /term/ route hands it over.
+    term: ({ body, as = RIG_GOD }) => rig.termControl.handle(as, body),
+    // index.ts heldInterference: one look at a held wake (recheck), and its `released` ruling.
+    recheckHeld: async ({ id }) => {
+      const p = ptyOf(id);
+      const held = automaticSubmit.inhibition(p);
+      if (!held) return { kind: 'NONE' };
+      const r = await automaticSubmit.recheckHeld(p, held.requestId);
+      if (r.kind === 'RELEASED' || r.kind === 'ERASED' || r.kind === 'SUBMITTED') f.inboxWake.onInterferenceResolved(id, r.kind === 'SUBMITTED' ? 'ALREADY_HANDLED' : 'SEND_AGAIN');
+      return r;
+    },
     resolveInterference: ({ id, how }) => { const ok = automaticSubmit.resolveInterference(ptyOf(id), how); if (ok) f.inboxWake.onInterferenceResolved(id, how); return ok; },
     inhibition: ({ id }) => automaticSubmit.inhibition(ptyOf(id)),
     sendNow: ({ id }) => rig.sendNow(id),

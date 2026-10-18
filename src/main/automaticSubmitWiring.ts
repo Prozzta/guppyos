@@ -21,6 +21,7 @@ export interface OwnerPty {
   write(id: string, data: string, origin: 'PROGRAMMATIC'): { ok: boolean; error?: string };
   incarnation(id: string): number | undefined;
   humanInputGeneration(id: string): number | undefined;
+  godInputGeneration?(id: string): number | undefined;
   lastHumanInputAt(id: string): number | undefined;
   hasOutput(id: string): boolean | undefined;
   inputState(id: string): TerminalInputState | undefined;
@@ -95,6 +96,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     resolvePty: (agentId) => w.ptyForAgent(agentId) ?? null,
     incarnation: (ptyId) => w.pty.incarnation(ptyId),
     humanGeneration: (ptyId) => w.pty.humanInputGeneration(ptyId),
+    godGeneration: (ptyId) => w.pty.godInputGeneration?.(ptyId),
     lastHumanInputAt: (ptyId) => w.pty.lastHumanInputAt(ptyId),
     // THE OWNER'S ONLY WRITE. Declared PROGRAMMATIC, so it can never advance the human
     // generation — the owner must not be able to interfere with itself.

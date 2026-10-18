@@ -332,6 +332,9 @@ export interface HarnessConfig {
   /** GPU-SETTING-188: Settings → Graphics, 'auto' (default) | 'gpu' | 'cpu'. Read once at startup, before
    *  app ready (src/main/graphics.ts); a change takes effect after a restart. */
   graphicsMode?: GraphicsMode;
+  /** GOD-TERMINAL-CONTROL M1: false turns off main's headless screen mirror per PTY (and with it
+   *  `term read`). Unset = on; the cost sampler turns it off by itself past its bar. Read at startup. */
+  terminalMirror?: boolean;
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];

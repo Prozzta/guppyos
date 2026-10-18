@@ -278,6 +278,68 @@ K.personTouchedStaysHeld = async (M = OWNER) => {
 };
 test('fix 1: a person\'s key since the hold keeps it held (before or during the look)', () => K.personTouchedStaysHeld());
 
+// ─── GOD-TERMINAL-CONTROL (Jim MUST 1): god's term keys since the hold are god's ruling ───
+
+/** A held wake, then god at the keyboard: `keys` GOD steps of the human generation (pty.ts
+ *  counts both), plus `person` steps that were a person's. */
+async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitted } = {}, M = OWNER) {
+  const s = { god: 0, submitted: undefined };
+  const { r, out } = await heldLikeDwight({ deps: {
+    godGeneration: () => s.god,
+    lastHumanInputAt: () => (lastAt === undefined || !s.r ? undefined : s.r.now - lastAt),
+    submittedSince: () => s.submitted
+  } }, M);
+  assert.equal(out.kind, 'INTERFERED');
+  r.human += keys + person; s.god += keys; r.prompt = prompt; r.gen += 1;
+  s.submitted = submitted; s.r = r;
+  return { r, s };
+}
+
+K.godEraseReleases = async (M = OWNER) => {
+  const { r } = await heldThenGod({}, M);
+  const res = await r.recheck('w1');
+  assert.equal(res.kind, 'RELEASED', `AFTER GOD'S ERASE A CLEAN COMPOSER RELEASES IT (got ${JSON.stringify(res)})`);
+  assert.equal(r.owner.inhibition('p1'), null, "AFTER GOD'S ERASE A CLEAN COMPOSER RELEASES IT: not inhibited");
+  assert.deepEqual(await r.submit('w1'), COMMITTED, 'the id is free again: the retry is delivered');
+};
+test('GOD: god\'s own term keys since the hold do not hold it like a person\'s: a clean composer after god\'s erase releases it to retry', () => K.godEraseReleases());
+
+K.godPlusPersonStaysHeld = async (M = OWNER) => {
+  const { r } = await heldThenGod({ person: 1 }, M);
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'human-input-since-hold'], "A PERSON'S KEY BESIDE GOD'S KEEPS IT HELD");
+};
+test('GOD: a person\'s key beside god\'s keeps it held', () => K.godPlusPersonStaysHeld());
+
+K.godDraftNeverErased = async (M = OWNER) => {
+  const { r } = await heldThenGod({ prompt: `${TEXT} and god's words` }, M);
+  const n = r.writes.length;
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'god-draft-on-prompt'], "GOD'S DRAFT ON THE PROMPT IS NEVER ERASED");
+  assert.equal(r.writes.length, n, "GOD'S DRAFT ON THE PROMPT IS NEVER ERASED: the look wrote nothing");
+};
+test('GOD: our text on the prompt after god\'s keys may carry god\'s draft: it stays held, nothing erased', () => K.godDraftNeverErased());
+
+K.godSubmitHandled = async (M = OWNER) => {
+  const { r } = await heldThenGod({ submitted: true }, M);
+  const confirms = r.grants.confirm;
+  const res = await r.recheck('w1');
+  assert.equal(res.kind, 'SUBMITTED', `GOD'S REPORTED SUBMIT ENDS THE HOLD AS HANDLED (got ${JSON.stringify(res)})`);
+  assert.equal(r.owner.inhibition('p1'), null);
+  assert.equal(r.grants.confirm, confirms + 1, 'the turn god started spent the grant');
+  assert.deepEqual(await r.submit('w1'), { kind: 'HUMAN_HANDLED' }, 'the id is never typed again');
+};
+test('GOD: a submit the provider reports after god\'s send ends the hold as handled (the mail surfaces in god\'s turn)', () => K.godSubmitHandled());
+
+test('GOD: while god is still typing (within HUMAN_QUIET_MS) the look waits; with no GOD count it is a person\'s key', async () => {
+  const { r } = await heldThenGod({ lastAt: 200, submitted: true });
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'god-input-recent']);
+  const b = await heldLikeDwight({});
+  b.r.human += 1; b.r.prompt = '';
+  assert.deepEqual([(await b.r.recheck('w1')).why], ['human-input-since-hold'], 'no godGeneration dep: every step is a person\'s, as before');
+});
+
 K.ownTextOnPromptErased = async (M = OWNER) => {
   const { r } = await heldLikeDwight({}, M);
   r.prompt = TEXT;                                   // our text is on the prompt row after all
@@ -486,10 +548,22 @@ const MUTANTS = [
     killer: 'ownTextOnScreenStaysHeld', dies: /OUR TEXT ON SCREEN KEEPS IT HELD/ },
   { name: 'fix 1 unsound: a person\'s key since the hold is ignored', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [
-      ["    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');\n    const needle", '    const needle'],
-      ["    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');\n    if (!g ||", '    if (!g ||']
+      ["    if (by === 'PERSON') return stay('human-input-since-hold');\n", ''],
+      ["    if (deps.humanGeneration(ptyId) !== gen0) return stay('human-input-since-hold');\n", '']
     ],
     killer: 'personTouchedStaysHeld', dies: /A PERSON'S KEY SINCE THE HOLD KEEPS IT HELD/ },
+  { name: 'GOD: god\'s keys hold it like a person\'s (the mail stuck behind god\'s fix)', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["    return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';", "    return 'PERSON';"]],
+    killer: 'godEraseReleases', dies: /AFTER GOD'S ERASE A CLEAN COMPOSER RELEASES IT/ },
+  { name: 'GOD unsound: any key since the hold counts as god\'s', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["    return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';", "    return 'GOD';"]],
+    killer: 'godPlusPersonStaysHeld', dies: /A PERSON'S KEY BESIDE GOD'S KEEPS IT HELD/ },
+  { name: 'GOD unsound: the erase runs over god\'s draft', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["      if (by === 'GOD') return stay('god-draft-on-prompt', screen);\n", '']],
+    killer: 'godDraftNeverErased', dies: /GOD'S DRAFT ON THE PROMPT IS NEVER ERASED/ },
+  { name: 'GOD: god\'s reported submit is not seen', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['    if (this.submitReport(ptyId, held.agentId, held.at) !== true) return null;', '    return null;']],
+    killer: 'godSubmitHandled', dies: /GOD'S REPORTED SUBMIT ENDS THE HOLD AS HANDLED/ },
   { name: 'fix 1: our text on the prompt row is never erased', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [['    if (seen.onPromptRow && seen.screenCount >= 1) {', '    if (false) {']],
     killer: 'ownTextOnPromptErased', dies: /OUR TEXT ON THE PROMPT ROW IS ERASED/ },

@@ -60,6 +60,8 @@ export const STABLE_ENV_KEYS = [
   'MUNDER_MEMORY_URL',
   // READS-181 A: the `ledger` command's endpoint (a Stable agent's broker token).
   'HIVE_LEDGER_URL',
+  // GOD-TERMINAL-CONTROL: Stable god's `term` endpoint (it drives Stable agents' terminals).
+  'HIVE_TERM_URL',
   'MUNDER_HIVE_ROOT',
   // Provider routing Stable injects per agent (Dwight M3 matrix): each would
   // point a dev-spawned agent at a Stable-owned home or endpoint.

@@ -563,6 +563,9 @@ export interface OwnerDeps {
   incarnation: (ptyId: string) => unknown;
   /** The per-live-PTY HUMAN-origin generation (section 4). Opaque; equality only. */
   humanGeneration: (ptyId: string) => number | undefined;
+  /** GOD-TERMINAL-CONTROL (Jim MUST 1): how many of those generation steps were GOD's (`term`).
+   *  Absent = unknown: every step since a hold is then a person's, as before. */
+  godGeneration?: (ptyId: string) => number | undefined;
   /** The owner's own write. Never advances the human generation. */
   write: (ptyId: string, data: string) => OwnerWriteResult;
   /** 'READY' to type, 'WAIT' and ask again, 'GONE' if the PTY died. Main answers this. */
@@ -796,6 +799,9 @@ interface HeldInterference extends Inhibition {
    *  look can find our text and know whether a person has touched the terminal since. */
   text: string;
   humanStage: number;
+  /** GOD-TERMINAL-CONTROL: the GOD steps at the same instant, so a recheck can tell god's term
+   *  input since the hold from a person's (inputSinceHold). */
+  godStage?: number;
   /** WAKE-STALL-INTERFERED-192 C: for PRIOR_TEXT_ON_PROMPT, the earlier text found on the prompt. */
   prior?: string;
   /** C: how many Enters the rechecks pressed on our own held draft (at most HELD_OWN_ENTER_MAX). */
@@ -899,6 +905,8 @@ interface Staged {
   /** Null for the bypass classes: capacity was never asked, so none is re-asked. */
   decision: AdmissionDecision | null;
   humanStage: number;
+  /** GOD-TERMINAL-CONTROL: the GOD steps at the same instant (undefined = not counted). */
+  godStage?: number;
   /** WAKE-SCREEN-GUARD: the output generation of the reading that cleared this Enter.
    *  Set = the Enter needs the live generation to still equal it. */
   screenGen?: number;
@@ -1298,7 +1306,7 @@ export class AutomaticSubmitOwner {
           this.priorUnreadable.set(ptyId, u);
           if (u.count >= PRIOR_TEXT_UNREADABLE_MAX || now - u.since >= PRIOR_TEXT_UNREADABLE_HOLD_MS) {
             this.priorUnreadable.delete(ptyId);
-            return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0 }, 'PRIOR_TEXT_UNREADABLE', `${u.count} unreadable checks over ${Math.round((now - u.since) / 1000)} s`);
+            return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0, godStage: deps.godGeneration?.(ptyId) }, 'PRIOR_TEXT_UNREADABLE', `${u.count} unreadable checks over ${Math.round((now - u.since) / 1000)} s`);
           }
           return this.refuse(decision, 'PRIOR_TEXT_UNVERIFIED', 'no screen reading');
         }
@@ -1337,7 +1345,7 @@ export class AutomaticSubmitOwner {
             }
             return retried;
           }
-          return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0 }, 'PRIOR_TEXT_ON_PROMPT', undefined);
+          return this.interfere({ req, ptyId, incarnation, decision, humanStage: deps.humanGeneration(ptyId) ?? 0, godStage: deps.godGeneration?.(ptyId) }, 'PRIOR_TEXT_ON_PROMPT', undefined);
         }
       }
     }
@@ -1399,7 +1407,7 @@ export class AutomaticSubmitOwner {
       if (decision) deps.capacity.cancelGrant(decision);
       return { kind: 'FAILED', reason: 'PTY_GONE_AFTER_STAGE' };
     }
-    const staged: Staged = { req, ptyId, incarnation, decision, humanStage };
+    const staged: Staged = { req, ptyId, incarnation, decision, humanStage, godStage: deps.godGeneration?.(ptyId) };
 
     // ── GAP ──────────────────────────────────────────────────────────────────────────
     // CODEX-WAKE-161 F1: a provider may need a longer gap (Codex: an Enter inside its paste-burst
@@ -1579,7 +1587,7 @@ export class AutomaticSubmitOwner {
       requestId: s.req.requestId, reason, at: now, incarnation: s.incarnation,
       agentId: s.req.agentId, admissionClass: s.req.admissionClass,
       binding: this.known.get(s.req.requestId)?.binding ?? { agentId: s.req.agentId, admissionClass: s.req.admissionClass, payload: '' },
-      decision: s.decision, text: s.req.text, humanStage: s.humanStage,
+      decision: s.decision, text: s.req.text, humanStage: s.humanStage, godStage: s.godStage,
       ...(reason === 'PRIOR_TEXT_ON_PROMPT' && s.req.priorText !== undefined ? { prior: s.req.priorText } : {})
     });
     try {
@@ -1646,15 +1654,21 @@ export class AutomaticSubmitOwner {
     // WAKE-STALL-INTERFERED-192 C: the held text is our own unsent draft: the app recovers it.
     const own = await this.enterHeldOwnDraft(ptyId, requestId, held);
     if (own) return own;
+    // GOD-TERMINAL-CONTROL (Jim MUST 1): god's own `term` keys since the hold do not keep it held
+    // the way a person's do: a reported submit ends it as handled; otherwise the screen decides.
+    const godRuled = this.godRuledHold(ptyId, held);
+    if (godRuled) return godRuled;
     if (this.guardMode(ptyId) !== 'ENFORCE') return stay('no-screen-guard');
-    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');
+    const by = this.inputSinceHold(ptyId, held);
+    if (by === 'PERSON') return stay('human-input-since-hold');
+    const gen0 = deps.humanGeneration(ptyId);
     const needle = needleFor(held.text);
     if (!needle) return stay('no-needle');
     const g = await this.readGuard(ptyId);
     const seen = await this.readScreen(ptyId, needle);
     // The readings yielded: everything they are judged against is read again now.
     if (!this.inhibition(ptyId) || this.inhibited.get(ptyId) !== held) return { kind: 'NONE' };
-    if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');
+    if (deps.humanGeneration(ptyId) !== gen0) return stay('human-input-since-hold');
     if (!g || !seen || g.incarnation !== held.incarnation) return stay('no-reading');
     const screen = screenFacts(g.facts);
     if (deps.outputGeneration?.(ptyId) !== g.outputGeneration) return stay('screen-changed', screen);
@@ -1665,6 +1679,8 @@ export class AutomaticSubmitOwner {
     const modal = judge();
     if (modal.cls === 'MODAL') return stay(`${modal.cls}:${modal.reason}`, screen);
     if (seen.onPromptRow && seen.screenCount >= 1) {
+      // GOD-TERMINAL-CONTROL: after god's keys the line may hold god's draft too: never erased here.
+      if (by === 'GOD') return stay('god-draft-on-prompt', screen);
       // Our own text is on the prompt: the verified erase can run now (it needed to see it first).
       this.inhibited.delete(ptyId);
       const s: Staged = {
@@ -1746,6 +1762,29 @@ export class AutomaticSubmitOwner {
     try {
       deps.onOutcome?.({ requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at });
     } catch { /* diagnostics never decide */ }
+    return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null };
+  }
+
+  /** GOD-TERMINAL-CONTROL: whose keys moved the human-input generation since the hold: NONE, GOD
+   *  (every step was god's `term` input) or PERSON (any other step, or GOD steps not counted). */
+  private inputSinceHold(ptyId: string, held: HeldInterference): 'NONE' | 'GOD' | 'PERSON' {
+    const gen = this.deps.humanGeneration(ptyId);
+    if (gen === held.humanStage) return 'NONE';
+    const god = this.deps.godGeneration?.(ptyId);
+    if (gen === undefined || god === undefined || held.godStage === undefined) return 'PERSON';
+    return gen - held.humanStage === god - held.godStage ? 'GOD' : 'PERSON';
+  }
+
+  /** GOD-TERMINAL-CONTROL (Jim MUST 1): only god typed since the hold, and has gone quiet. A
+   *  submit the provider reports since the hold is god's turn, which surfaces the held mail: the
+   *  hold ends as a person's ALREADY_HANDLED would (SUBMITTED). null = the screen recheck decides
+   *  (a clean composer releases it to retry; god's draft on the prompt stays held). */
+  private godRuledHold(ptyId: string, held: HeldInterference): HeldRecheck | null {
+    if (this.inputSinceHold(ptyId, held) !== 'GOD') return null;
+    const last = this.deps.lastHumanInputAt(ptyId);
+    if (last !== undefined && this.deps.now() - last < HUMAN_QUIET_MS) return { kind: 'HELD', why: 'god-input-recent', screen: null };
+    if (this.submitReport(ptyId, held.agentId, held.at) !== true) return null;
+    this.resolveInterference(ptyId, 'ALREADY_HANDLED');
     return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null };
   }
 

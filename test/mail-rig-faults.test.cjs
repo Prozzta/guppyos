@@ -269,6 +269,49 @@ test('F6 INTERFERED, then ALREADY_HANDLED / SEND_AGAIN: the ledger follows the t
   assert.ok(rig.contexts('cl-b')[0].ids.includes(mb.id));
 });
 
+// ——————————————————————————————————————————————————————————————————————————— G1
+
+// GOD-TERMINAL-CONTROL (M1 done criterion, Jim MUST 1): the mail-rig unstick proof. God's own typing
+// over a staged wake holds it INTERFERED like a person's; god then reads, clears and sends through
+// `term` (origin GOD, no screen gate, no admission); the turn god started acts the mail; the held
+// look sees only god's keys since the hold, releases the claim, and nothing is typed twice.
+test('G1 god unsticks a held wake through term: INTERFERED by god, god clears and sends, the mail is acted once, the held look releases', T, async (t) => {
+  const rig = await startRig(t);
+  await rig.setup([{ id: 'cl-a', flavour: 'claude', scenario: {} }]);
+  await rig.call('armInterfere', { id: 'cl-a', by: 'GOD' });
+  const m = await rig.call('send', { to: 'cl-a', subject: 'g1', body: 'stuck behind god' });
+  await rig.beat();
+  await waitFor(async () => (await rig.call('outcomes')).some((o) => o.agentId === 'cl-a' && o.outcome.kind === 'INTERFERED'), { what: 'cl-a INTERFERED by god' });
+  const held = (await rig.call('outcomes')).find((o) => o.agentId === 'cl-a' && o.outcome.kind === 'INTERFERED');
+  assert.equal(held.outcome.reason, 'HUMAN_INPUT_AFTER_STAGE', "god's keys between STAGE and COMMIT are interference");
+  assert.ok(await rig.call('inhibition', { id: 'cl-a' }), 'the PTY is held');
+  assert.equal(rig.prompts('cl-a').length, 0, 'no Enter on god\'s text');
+  await sleep(1_700);   // HUMAN_QUIET_MS after god's key
+  const look0 = await rig.call('recheckHeld', { id: 'cl-a' });
+  assert.deepEqual([look0.kind, look0.why], ['HELD', 'god-draft-on-prompt'], "god's draft on the prompt is never erased by the look");
+
+  const read = await rig.call('term', { body: { action: 'read', agent: 'cl-a' } });
+  assert.equal(read.body.ok, true, read.body.line);
+  assert.ok(Array.isArray(read.body.screen) && read.body.screen.length > 0, 'the mirror has the live screen');
+  assert.equal((await rig.call('term', { body: { action: 'keys', agent: 'cl-a', keys: ['ctrl-u'] } })).body.ok, true);
+  const sent = await rig.call('term', { body: { action: 'send', agent: 'cl-a', text: 'read your inbox' } });
+  assert.equal(sent.body.ok, true, sent.body.line);
+  await waitFor(() => acted(rig, 'cl-a', m.id), { what: "god's turn acts the mail" });
+
+  await sleep(1_700);   // HUMAN_QUIET_MS after god's last key
+  const look = await rig.call('recheckHeld', { id: 'cl-a' });
+  assert.ok(['RELEASED', 'SUBMITTED'].includes(look.kind), `only god's keys since the hold: the look releases it (got ${JSON.stringify(look)})`);
+  assert.equal(await rig.call('inhibition', { id: 'cl-a' }), null, 'the hold is gone');
+  for (let i = 0; i < 3; i++) { await rig.call('advance', { ms: 70_000 }); await rig.beat(); await sleep(300); }
+  assert.equal(rig.prompts('cl-a').length, 1, "exactly god's one turn: no second wake");
+  assert.ok(rig.contexts('cl-a')[0].ids.includes(m.id), "surfaced in the turn god started");
+
+  const forged = await rig.call('term', { as: 'cl-a', body: { action: 'read', agent: 'cl-a' } });
+  assert.equal(forged.status, 403, 'a non-god caller is refused');
+  const rows = (await rig.rows('term')).filter((r) => r.by === 'god-rig');
+  assert.deepEqual(rows.map((r) => r.action), ['type', 'read', 'keys', 'send'], 'every god action is logged');
+});
+
 // ——————————————————————————————————————————————————————————————————————————— F7
 
 test('F7 20-message burst of 4,000 characters: drip across PostToolUse, each surfaced exactly once, none lost, every injection within the joined budget', T, async (t) => {

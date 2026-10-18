@@ -1303,8 +1303,12 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
   // 1.1.47 narrowed this to ONE: hiddenClaude stopped driving a PTY when condensation
   // moved to a bounded `claude --print` process, so the submit owner is now the only
   // place in main that spells a carriage return at all.
-  assert.deepEqual(files, ['src/main/automaticSubmit.ts'],
-    `a bare Enter is written ONLY by the submit owner; found ${writers.join(', ')}`);
+  // GOD-TERMINAL-CONTROL (1.1.94 M1): god's `term send` is the one other, by design: god types as a
+  // person would and is NOT admission (design section 2). Its Enter is the send's one Enter, after the
+  // settle and the provider gap, written with origin GOD by main's binding.
+  assert.deepEqual(files, ['src/main/automaticSubmit.ts', 'src/main/termControl.ts'],
+    `a bare Enter is written ONLY by the submit owner and god's term send; found ${writers.join(', ')}`);
+  assert.equal(writers.filter((w) => w.startsWith('src/main/termControl.ts')).length, 1, 'term spells its Enter once');
   // The owner's one Enter is inside the critical section, nowhere else.
   const owner = read('src/main/automaticSubmit.ts');
   const section = owner.slice(owner.indexOf('export function commitSection('));
@@ -1336,12 +1340,15 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
 // census of names. The no-alias and node-pty-importer checks are what stand in its way.
 const PTY_WRITERS = {
   'src/main/pty.ts': { 's.proc': 1 },                       // THE raw write, inside write(id, data, origin)
-  'src/main/index.ts': { ptyManager: 1 },                   // the pty:write handler (renderer origin; PROGRAMMATIC refused)
+  'src/main/index.ts': { ptyManager: 2 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD)
   'src/main/automaticSubmitWiring.ts': { 'w.pty': 1 },      // the ONLY PROGRAMMATIC producer
-  'src/main/automaticSubmit.ts': { deps: 1 }                // safeWrite - the owner's one write
+  'src/main/termControl.ts': { 'this.deps': 2 },            // GOD-TERMINAL-CONTROL: god's type/keys and send's one Enter, via main's GOD-bound writer (god is not admission)
+  'src/main/automaticSubmit.ts': { deps: 1 }               // safeWrite - the owner's one write
 };
 const NON_PTY_WRITERS = {
-  'src/main/index.ts': ['stream', 'roster'],                // a download stream; the roster file
+  'src/main/terminalMirror.ts': ['t'],                      // GOD-TERMINAL-CONTROL: the headless mirror's parser (PTY output in; its onData is never wired), never a pty
+  'src/main/pty.ts': ['session.mirror'],                    // GOD-TERMINAL-CONTROL: deliverData feeds a PTY's OUTPUT to its mirror, never input
+  'src/main/index.ts': ['stream', 'roster', 'm'],           // + GOD-TERMINAL-CONTROL: 'm' is the cost calibration's throwaway mirror, never a pty                // a download stream; the roster file
   'src/main/slack.ts': ['req'],                             // an https request body
   'src/main/rendererRecovery.ts': ['opts'],                 // RENDERER-PROFILE: the .cpuprofile file writer (saveRendererProfile), never a terminal
   'src/main/boardStatus.ts': ['this'],                      // ZT-I3: BoardStatusWriter.write() renders hive/board-status.md (a file), never a terminal
@@ -1612,8 +1619,9 @@ test('workerWake.ts decides WHO and types nothing; every wake goes through the o
   const wakeSrc = read('src/main/workerWake.ts');
   assert.ok(!/submitWorkerNudge|writeSubmit|writeText|delaySubmit|ptyManager/.test(wakeSrc), 'the private order is gone');
   const index = read('src/main/index.ts');
-  assert.equal(index.split('ptyManager.write(').length - 1, 1,
-    'index.ts has exactly ONE direct ptyManager.write: the declared-origin pty:write handler');
+  assert.equal(index.split('ptyManager.write(').length - 1, 2,
+    'index.ts has exactly TWO direct ptyManager.write: the declared-origin pty:write handler and god\'s term writer');
+  assert.equal(index.split("ptyManager.write(ptyId, data, 'GOD')").length - 1, 1, "the second is term's, bound to origin GOD");
   const beat = index.slice(index.indexOf('function runWorkerWakeBeat'), index.indexOf('/** (Re)arm the always-on beats'));
   assert.match(beat, /inboxWake\.reconcileAll\(live\)/, 'the beat is reconciliation through the one bridge path');
   assert.ok(!/automaticSubmit\.submit|ptyManager/.test(beat), 'no second submit implementation in the beat');

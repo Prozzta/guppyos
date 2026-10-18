@@ -82,7 +82,7 @@ import { isTerminalPromptState } from '../shared/promptState';
 import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
 import { ScreenGuardNotices, StartupProbe, WakeIncarnationTokens, WAKE_INCARNATION_ENV } from './codexScreenGuard';
-import type { ScreenGuardRecord } from './automaticSubmit';
+import type { ScreenGuardRecord, ScreenReading } from './automaticSubmit';
 import { ALERT_MB, installRendererRecovery, MEMORY_CAUSE_MS, performRecreate, recoverRendererForMemory, RendererProbe, saveRendererProfile, RecoveryPolicy, RendererMemorySampler, SAMPLE_MS, type RecoveryNotice } from './rendererRecovery';
 import { KEEP_DUMPS, pruneDumps, startLocalCrashReporter, waitForDump } from './crashDumps';
 import { applyGraphicsModeAtStartup, appliedGraphicsMode, graphicsStatus, logGraphicsWhenKnown, watchGpuReports } from './graphics';
@@ -101,6 +101,10 @@ import { applyLedgerOp, perAgentQueue, type LedgerDeps } from './ledger';
 import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
+import { TermControl } from './termControl';
+import { createTerminalMirror } from './terminalMirror';
+import { MirrorCostGuard, calibrationSample } from './mirrorCost';
+import { ShadowDiff } from './termShadow';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
@@ -919,7 +923,7 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   providerForPty: (ptyId) => ptyProvider.get(ptyId),
   requestScreenReading: (ptyId, needle, expectedTail) => screenReadings.request(ptyId, needle, expectedTail),
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
-  requestCodexScreen: (ptyId, expectedTail) => screenReadings.request(ptyId, '', expectedTail, true),
+  requestCodexScreen: (ptyId, expectedTail) => shadowed(ptyId, screenReadings.request(ptyId, '', expectedTail, true)),
   onScreenGuard: (r) => noteScreenGuard(r),
   // DWIGHT-INPUT-DEAD-179 F4: Codex's own record that this incarnation's chat is configured: a
   // `thread_settings_applied` in its newest rollout, stamped after the PTY was spawned. A resumed
@@ -1737,6 +1741,87 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
 }
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
+// GOD-TERMINAL-CONTROL M1: god's `term` command (read the live screen, type, keys, send) on the same
+// broker and per-spawn token as `ledger`. The god check is made HERE, per request, against the
+// registry's god now (termControl.ts); the env URL being god-only is hygiene, not the boundary.
+// Writes carry origin GOD, which advances the human-input generation (no wake lands on god's typing).
+const TERM_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'term-cli.cjs');
+const termControl = new TermControl({
+  godId: () => hive.registry().godId ?? null,
+  ptyOf: (agentId) => ptyForAgent(agentId),
+  providerOf: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? (a.provider ?? 'claude') : null;
+  },
+  readScreen: (ptyId, rows) => ptyManager.readScreen(ptyId, rows),
+  write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
+  outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
+  log: (row) => hive.appendLog(row),
+  now: Date.now,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+});
+hookServer.setTermHandler((agentId, body) => termControl.handle(agentId, body));
+// The mirror per PTY (config `terminalMirror: false` = off), its cost guard and its shadow diff.
+const termShadow = new ShadowDiff((row) => hive.appendLog(row), Date.now);
+if (readConfig().terminalMirror !== false) ptyManager.setMirrorFactory((cols, rows) => createTerminalMirror(cols, rows));
+/** Arms the cost guard once app is ready: calibrates on a synthetic sample, then samples each second. */
+async function armMirrorCostGuard(): Promise<void> {
+  if (readConfig().terminalMirror === false) return;
+  let msPerChar: number;
+  try {
+    const sample = calibrationSample();
+    const m = createTerminalMirror(120, 40);
+    const t0 = performance.now();
+    m.write(sample);
+    await m.read(1);
+    msPerChar = (performance.now() - t0) / sample.length;
+    m.dispose();
+  } catch (e) {
+    ptyManager.setMirrorFactory(null);
+    ptyManager.disposeMirrors();
+    hive.appendLog({ kind: 'mirror-auto-off', reason: 'calibration-failed', error: String(e) });
+    return;
+  }
+  const eld = monitorEventLoopDelay({ resolution: 10 });
+  eld.enable();
+  const guard = new MirrorCostGuard({
+    bytes: () => ptyManager.mirrorBytes(),
+    msPerChar,
+    eldMs: () => { const v = eld.mean / 1e6; eld.reset(); return Number.isFinite(v) ? v : null; },
+    turnOff: () => { ptyManager.setMirrorFactory(null); ptyManager.disposeMirrors(); eld.disable(); clearInterval(timer); },
+    log: (row) => hive.appendLog(row),
+    now: Date.now
+  });
+  hive.appendLog({ kind: 'mirror-cost-armed', msPerChar });
+  const timer = setInterval(() => { guard.tick(); }, 1000);
+  timer.unref?.();
+}
+/** The shadow diff's tap on a screen-gate request: the gate's answer is returned untouched, and the
+ *  mirror's facts are compared with it afterwards (never awaited by the gate). */
+function shadowed(ptyId: string, reading: Promise<ScreenReading | null>): Promise<ScreenReading | null> {
+  const gen0 = ptyManager.outputGeneration(ptyId);
+  void reading.then(async (r) => {
+    if (!r?.codex) return;
+    const mirror = await ptyManager.readFacts(ptyId);
+    if (!mirror) return;
+    const agentId = ptyToAgent.get(ptyId) ?? null;
+    const provider = ptyProvider.get(ptyId) ?? null;
+    termShadow.record({ agentId, ptyId, provider, gate: r.codex, mirror, still: gen0 !== undefined && ptyManager.outputGeneration(ptyId) === gen0 });
+  }).catch(() => { /* the shadow never affects the gate */ });
+  return reading;
+}
+/** SHOULD 5: DECSET 2004 / alt screen / app-cursor per provider, read from the mirror 5 s and 30 s after
+ *  every spawn (a resume is a spawn), so framing decisions rest on measured rows. */
+function logTermModes(agentId: string, ptyId: string, provider: string, resume: boolean): void {
+  for (const at of [5_000, 30_000]) {
+    const t = setTimeout(() => {
+      void ptyManager.readScreen(ptyId, 1).then((r) => {
+        if (r) hive.appendLog({ kind: 'term-mode', agentId, ptyId, provider, resume, atMs: at, bracketedPaste: r.bracketedPaste, appCursor: r.appCursor, altScreen: r.altScreen });
+      });
+    }, at);
+    t.unref?.();
+  }
+}
 /** Delete a memory-engine index file and its WAL/SHM. Call only after nativeMemory.shutdown()
  *  (Jim M1); retries ride out a handle Windows releases a moment after the worker exits. */
 function deleteMemoryIndex(file: string | null): void {
@@ -1883,6 +1968,7 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
   try { integrationBroker.revoke(id); } catch { /* best-effort */ }
   // WAKE-SCREEN-GUARD (Jim N2): a torn-down PTY's incarnation token names nothing any more.
   wakeIncarnationTokens.forgetPty(id);
+  termShadow.forget(id);
   // 1) Archive the agent — retained + flagged; only live-PTY agents are active.
   const agentId = ptyToAgent.get(id);
   if (agentId) {
@@ -4480,6 +4566,11 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
+      // GOD-TERMINAL-CONTROL: `term` on god's PATH only (the broker refuses any other caller anyway).
+      if (opts.hive.isGod) {
+        const termDir = hive.writeTermCommand(TERM_CLI);
+        if (termDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), termDir];
+      }
       // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
       if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
     } catch (e) {
@@ -4878,6 +4969,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok && opts.hive?.id) logTermModes(opts.hive.id, opts.id, provider, didResume);
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
@@ -4910,6 +5002,8 @@ ipcMain.handle('pty:write', (_evt, id: string, data: string, origin: unknown) =>
   // module holds a raw text+Enter capability at all (design section 10). HUMAN and
   // CONTROL are what this channel is for.
   if (origin === 'PROGRAMMATIC') return { ok: false, error: 'origin not permitted on this channel' };
+  // GOD-TERMINAL-CONTROL: GOD is written only by main's god-only `term` route, never by a renderer.
+  if (origin === 'GOD') return { ok: false, error: 'origin not permitted on this channel' };
   return ptyManager.write(id, data, origin);
 });
 // L0-FUSION stage 3. The mirror is validated at the boundary and stored on the live
@@ -7872,6 +7966,8 @@ app.whenReady().then(() => {
 
   // STARTUP-TIMING-162: arm the first-60-s recorder (it stops by itself) and its PTY markers.
   startupTiming.start();
+  // GOD-TERMINAL-CONTROL M1: the mirrors' cost bar (calibration, then a sample per second).
+  void armMirrorCostGuard();
   // RENDERER-RECOVERY-164: what starting the local crash reporter cost, on the same clock.
   startupTiming.mark('crash-reporter-start', undefined, crashReporterStart.startedAt);
   startupTiming.mark('crash-reporter-ready', undefined, crashReporterStart.readyAt);

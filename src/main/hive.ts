@@ -1021,6 +1021,12 @@ export class HiveManager {
     return this.writeCommandDir('ledger', script);
   }
 
+  /** GOD-TERMINAL-CONTROL: `<root>/bin/term/`, god's `term` command (read/type/keys/send another
+   *  agent's terminal). Prepended to god's PATH only; the broker refuses every other caller. */
+  writeTermCommand(script: string): string | null {
+    return this.writeCommandDir('term', script);
+  }
+
   /** `<root>/bin/<name>/` holding ONLY `<name>.cmd` + `<name>` (Windows) or `<name>` (POSIX). */
   private writeCommandDir(name: string, script: string): string | null {
     const root = this.root();
@@ -1480,6 +1486,9 @@ export class HiveManager {
         // ledger helper the same per-spawn capability URL that Claude receives.
         const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
         if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
+        // GOD-TERMINAL-CONTROL: the `term` capability URL exists only in god's environment
+        // (hygiene; the broker's request-time god check is the boundary).
+        if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
         try {
           if (desc.kind === 'hooks') {
             // The agy and grok bridges write GLOBAL config (~/.gemini/…/hooks.json,
@@ -1514,6 +1523,8 @@ export class HiveManager {
               // installCodexHooks may mint a newer broker token for Codex's MCP
               // config; prefer that same live capability for ledger requests.
               if (codex.mcpUrl) env.HIVE_LEDGER_URL = codex.mcpUrl.replace('/mcp/', '/ledger/');
+              // GOD-TERMINAL-CONTROL: env only, never written into Codex's config.toml.
+              if (codex.mcpUrl && meta.isGod) env.HIVE_TERM_URL = codex.mcpUrl.replace('/mcp/', '/term/');
               if (codex.developerInstructions) developerInstructionsSet = true;
               // WAKE-SCREEN-GUARD R2-2: no startup update prompt on any Codex argv (fresh and
               // `codex resume` alike: `-c` is a global flag). The same key is in its config.toml.
@@ -1685,6 +1696,8 @@ export class HiveManager {
       this.writeJson(settingsPath, withSkillOverrides(this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as object, trim));
       // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
+      // GOD-TERMINAL-CONTROL: `term` uses the same token, and only god's environment has the URL.
+      if (hookUrl && meta.isGod) env.HIVE_TERM_URL = hookUrl.replace('/hook/', '/term/');
       args.push('--settings', settingsPath);
     }
     return { args, env };

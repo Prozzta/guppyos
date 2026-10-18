@@ -1,5 +1,7 @@
 import * as pty from 'node-pty';
 import type { InputOrigin } from '../shared/inputOrigin';
+import type { MirrorReading, TerminalMirror } from './terminalMirror';
+import type { CodexScreenFacts } from '../shared/codexScreen';
 import type { TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
 import type { WebContents } from 'electron';
@@ -78,6 +80,10 @@ interface PtySession {
    *  write and the generation. Closes the one-IPC-message window in which the generation
    *  already counts a keystroke and the prompt mirror does not yet show its draft. */
   lastHumanInputAt?: number;
+  /** GOD-TERMINAL-CONTROL (Jim MUST 1): how many of the human-input generation's steps were
+   *  GOD's (absent = 0). A held wake's recheck tells "only god typed since the hold" from a
+   *  person's keys with it. Same scope and meaning as the generation: equality only. */
+  godInputGeneration?: number;
   /** L0-FUSION stage 5: the renderer's mirror of whose the prompt is (picker latch, human
    *  draft, settle). Absent = UNKNOWN, which automatic delivery refuses. Dies with the
    *  session. NOT a provenance fact and not an erase oracle - see shared/promptState.ts. */
@@ -92,6 +98,9 @@ interface PtySession {
   /** ZERO-TOKEN-LIVENESS: the harness asked for this incarnation to end (kill, window close).
    *  Set BEFORE the kill, so the exit that follows is EXITED, never CRASHED. */
   explicitTeardown?: boolean;
+  /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
+   *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
+  mirror?: TerminalMirror;
 }
 
 /** ZERO-TOKEN-LIVENESS: one PTY incarnation ended. Reported before its session is removed. */
@@ -502,6 +511,50 @@ export class PtyManager {
     try {
       this.endObserver?.({ id, incarnation: session.incarnation, explicit: session.explicitTeardown === true, exitCode: typeof exitCode === 'number' ? exitCode : null, at: Date.now() });
     } catch { /* an observer never breaks a kill or node-pty's exit callback */ }
+    // GOD-TERMINAL-CONTROL: every incarnation's end (exit and kill both come through here).
+    session.mirror?.dispose();
+    session.mirror = undefined;
+  }
+
+  /** GOD-TERMINAL-CONTROL M1: makes each new session's headless screen; null = no mirror.
+   *  Injected by main so this module never loads the headless terminal itself. */
+  private mirrorFactory: ((cols: number, rows: number) => TerminalMirror) | null = null;
+  setMirrorFactory(f: ((cols: number, rows: number) => TerminalMirror) | null): void {
+    this.mirrorFactory = f;
+  }
+
+  /** GOD-TERMINAL-CONTROL M1: the live screen of this PTY from its mirror, or null (no PTY, no
+   *  mirror). Never the renderer's: it works with the tab never opened. */
+  async readScreen(id: string, rows?: number): Promise<MirrorReading | null> {
+    const s = this.sessions.get(id);
+    if (!s?.mirror) return null;
+    const m = s.mirror;
+    const r = await m.read(rows);
+    // The session may have ended or been replaced while the read drained.
+    return this.sessions.get(id) === s && s.mirror === m ? r : null;
+  }
+
+  /** GOD-TERMINAL-CONTROL M1: the screen-gate facts from this PTY's mirror, or null; the shadow
+   *  diff's half of each comparison. */
+  async readFacts(id: string): Promise<CodexScreenFacts | null> {
+    const s = this.sessions.get(id);
+    if (!s?.mirror) return null;
+    const m = s.mirror;
+    const f = await m.facts();
+    return this.sessions.get(id) === s && s.mirror === m ? f : null;
+  }
+
+  /** GOD-TERMINAL-CONTROL M1: chars fed to mirrors since start, monotonic (an ended session's count
+   *  stays in), the cost sampler's input. */
+  private mirrorFed = 0;
+  mirrorBytes(): number {
+    return this.mirrorFed;
+  }
+
+  /** GOD-TERMINAL-CONTROL M1: drop every live mirror (the cost guard's auto-off). New sessions
+   *  get none while the factory is null. */
+  disposeMirrors(): void {
+    for (const s of this.sessions.values()) { s.mirror?.dispose(); s.mirror = undefined; }
   }
 
   /** MEMSPIKE-167: per-PTY traffic since the last takeTraffic() (output chars and chunks sent
@@ -541,6 +594,8 @@ export class PtyManager {
     if (this.outputObserver) { try { this.outputObserver(id); } catch { /* never breaks output */ } }
     // PROBE-REISSUE (B): the last few KB of raw output, for a diagnostic row's tail line.
     session.tail = (session.tail + data).slice(-PTY_TAIL_CHARS);
+    // GOD-TERMINAL-CONTROL M1: the same chunk, in order, after the identity guard above.
+    if (session.mirror) { this.mirrorFed += data.length; try { session.mirror.write(data); } catch { /* the mirror never breaks output */ } }
     if (session.out) session.out.push(data);
     else this.safeSend(`pty:data:${id}`, data, session.owner);
   }
@@ -828,6 +883,12 @@ export class PtyManager {
       // Route to the session's owner window (multi-window owner routing), read at SEND
       // time. Batched: one IPC message per burst, not per ~170-byte conpty chunk.
       session.out = createPtyDataBatcher((data) => this.safeSend(`pty:data:${opts.id}`, data, session.owner));
+      // GOD-TERMINAL-CONTROL M1: a fresh screen for this incarnation; a replaced one's goes now.
+      if (this.mirrorFactory) {
+        try { session.mirror = this.mirrorFactory(proc.cols, proc.rows); } catch { session.mirror = undefined; }
+      }
+      const replaced = this.sessions.get(opts.id);
+      if (replaced && replaced !== session) { replaced.mirror?.dispose(); replaced.mirror = undefined; }
       this.sessions.set(opts.id, session);
 
       proc.onData((data) => this.deliverData(opts.id, session, data));
@@ -862,7 +923,10 @@ export class PtyManager {
     if (!s) return { ok: false, error: `no pty: ${id}` };
     try {
       s.proc.write(data);
-      if (origin === 'HUMAN') { s.humanInputGeneration++; s.lastHumanInputAt = Date.now(); }
+      // GOD-TERMINAL-CONTROL (Jim MUST 1): god at the keyboard counts as a person, so a wake is
+      // never staged or committed over god's typing.
+      if (origin === 'HUMAN' || origin === 'GOD') { s.humanInputGeneration++; s.lastHumanInputAt = Date.now(); }
+      if (origin === 'GOD') s.godInputGeneration = (s.godInputGeneration ?? 0) + 1;
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -874,6 +938,13 @@ export class PtyManager {
    *  the number itself carries no meaning and must not be persisted. */
   humanInputGeneration(id: string): number | undefined {
     return this.sessions.get(id)?.humanInputGeneration;
+  }
+
+  /** GOD-TERMINAL-CONTROL: how many GOD writes this LIVE pty has accepted, or undefined if there
+   *  is no pty. Compared with the human-input generation's steps by a held wake's recheck. */
+  godInputGeneration(id: string): number | undefined {
+    const s = this.sessions.get(id);
+    return s ? (s.godInputGeneration ?? 0) : undefined;
   }
 
   /** The identity of the LIVE process behind this id, or undefined when there is none. */
@@ -936,6 +1007,7 @@ export class PtyManager {
     this.trafficOf(id).resizes += 1;
     try {
       s.proc.resize(cols, rows);
+      s.mirror?.resize(cols, rows);   // GOD-TERMINAL-CONTROL: the mirror keeps the PTY's geometry
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };

@@ -67,8 +67,9 @@ function writePtyCalls(text) {
 
 // ─── the wire type ──────────────────────────────────────────────────────────
 
-test('the wire origin is exactly three values and nothing else passes', () => {
-  assert.deepEqual([...INPUT_ORIGINS].sort(), ['CONTROL', 'HUMAN', 'PROGRAMMATIC']);
+test('the wire origin is exactly four values and nothing else passes', () => {
+  // GOD-TERMINAL-CONTROL added GOD (main's `term` writer); pty:write refuses it like PROGRAMMATIC.
+  assert.deepEqual([...INPUT_ORIGINS].sort(), ['CONTROL', 'GOD', 'HUMAN', 'PROGRAMMATIC']);
   for (const ok of INPUT_ORIGINS) assert.equal(isInputOrigin(ok), true, ok);
   // Every plausible mistake a caller could make. `undefined` is the important one:
   // an OMITTED origin must be refused at the boundary, not defaulted to CONTROL.
