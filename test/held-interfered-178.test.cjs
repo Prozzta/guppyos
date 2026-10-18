@@ -19,10 +19,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const SHARED = loadTs('src/shared/codexScreen.ts');
@@ -570,14 +570,6 @@ test('wiring: main runs the watch, resolves a release as "let it retry", and wor
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────
 
-function newMutantDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'mutants-held178-'));
-}
-
-function cleanupMutantDir(mutantDir) {
-  fs.rmSync(mutantDir, { recursive: true, force: true });
-}
-
 function mutate(mutantDir, rel, edits, tag) {
   let text = readSource(rel);
   for (const [from, to] of edits) {
@@ -690,8 +682,8 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
   }
 });
 
-function isTempChild(dir) {
-  const relative = path.relative(os.tmpdir(), dir);
+function isTestChild(dir) {
+  const relative = path.relative(__dirname, dir);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
@@ -699,16 +691,18 @@ test('MUTANT CENSUS: scratch directories are unique and cleanup is scoped', () =
   const first = newMutantDir();
   const second = newMutantDir();
   const sentinel = path.join(first, 'must-survive-second-cleanup');
+  let secondCleaned = false;
   try {
     assert.notEqual(first, second, 'each census must receive its own scratch directory');
-    assert.ok(isTempChild(first), 'first scratch directory must be under os.tmpdir()');
-    assert.ok(isTempChild(second), 'second scratch directory must be under os.tmpdir()');
+    assert.ok(isTestChild(first), 'first scratch directory must be under test/');
+    assert.ok(isTestChild(second), 'second scratch directory must be under test/');
     fs.writeFileSync(sentinel, 'present', 'utf8');
     cleanupMutantDir(second);
+    secondCleaned = true;
     assert.ok(fs.existsSync(first), 'cleaning a later census must not remove an earlier directory');
     assert.ok(fs.existsSync(sentinel), 'cleaning a later census must not remove earlier mutant files');
   } finally {
     cleanupMutantDir(first);
-    cleanupMutantDir(second);
+    if (!secondCleaned) cleanupMutantDir(second);
   }
 });
