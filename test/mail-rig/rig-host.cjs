@@ -185,6 +185,7 @@ async function buildFloor() {
     incarnation: (id) => ptyManager.incarnation(id),
     humanInputGeneration: (id) => ptyManager.humanInputGeneration(id),
     godInputGeneration: (id) => ptyManager.godInputGeneration(id),
+    godEnterAt: (id) => ptyManager.godEnterAt(id),
     lastHumanInputAt: (id) => ptyManager.lastHumanInputAt(id),
     hasOutput: (id) => ptyManager.hasOutput(id),
     inputState: (id) => (ptyManager.incarnation(id) === undefined ? undefined : { mouseTrackingMode: 'none', inputOriginAttached: true, selfTest: 'pass' }),

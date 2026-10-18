@@ -1135,7 +1135,7 @@ heldInterference = new HeldInterferenceWatch({
   recheck: (h) => automaticSubmit.recheckHeld(h.ptyId, h.requestId),
   released: (h, r, now) => {
     try {
-      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : r.kind === 'SUBMITTED' ? 'entered-own-draft' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
+      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : r.kind === 'SUBMITTED' ? (r.how ?? 'entered-own-draft') : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
     } catch { /* logging only */ }
     pushAgentImpact();
     // The same ruling as a person's "let it retry": the ids go back through every gate.

@@ -282,16 +282,21 @@ test('fix 1: a person\'s key since the hold keeps it held (before or during the 
 
 /** A held wake, then god at the keyboard: `keys` GOD steps of the human generation (pty.ts
  *  counts both), plus `person` steps that were a person's. */
-async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitted } = {}, M = OWNER) {
-  const s = { god: 0, submitted: undefined };
+async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitted, godEnter, reportAt } = {}, M = OWNER) {
+  const s = { god: 0, submitted: undefined, enterAt: undefined, reportAt: undefined };
   const { r, out } = await heldLikeDwight({ deps: {
     godGeneration: () => s.god,
+    // god 8df2e3: `godEnter` / `reportAt` are ms from now: god's `term` Enter, and the one submit
+    // the provider reports (then answered by time, at or after `since`).
+    godEnterAt: () => s.enterAt,
     lastHumanInputAt: () => (lastAt === undefined || !s.r ? undefined : s.r.now - lastAt),
-    submittedSince: () => s.submitted
+    submittedSince: (_p, _a, since) => (s.reportAt === undefined ? s.submitted : since <= s.reportAt)
   } }, M);
   assert.equal(out.kind, 'INTERFERED');
   r.human += keys + person; s.god += keys; r.prompt = prompt; r.gen += 1;
   s.submitted = submitted; s.r = r;
+  if (godEnter !== undefined) s.enterAt = r.now + godEnter;
+  if (reportAt !== undefined) s.reportAt = r.now + reportAt;
   return { r, s };
 }
 
@@ -325,11 +330,41 @@ K.godSubmitHandled = async (M = OWNER) => {
   const confirms = r.grants.confirm;
   const res = await r.recheck('w1');
   assert.equal(res.kind, 'SUBMITTED', `GOD'S REPORTED SUBMIT ENDS THE HOLD AS HANDLED (got ${JSON.stringify(res)})`);
+  assert.equal(res.how, 'god-turn', 'the row says whose turn it was');
   assert.equal(r.owner.inhibition('p1'), null);
   assert.equal(r.grants.confirm, confirms + 1, 'the turn god started spent the grant');
   assert.deepEqual(await r.submit('w1'), { kind: 'HUMAN_HANDLED' }, 'the id is never typed again');
 };
 test('GOD: a submit the provider reports after god\'s send ends the hold as handled (the mail surfaces in god\'s turn)', () => K.godSubmitHandled());
+
+// God 8df2e3: god's send is the ruling, also on a hold a person's keys are part of (goal 1: god
+// can clear anyone). The link from the report to god's Enter is correlated, and labelled so.
+K.godSendRulesPersonHold = async (M = OWNER) => {
+  const { r } = await heldThenGod({ person: 1, godEnter: 10, reportAt: 20 }, M);
+  const confirms = r.grants.confirm;
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.how], ['SUBMITTED', 'god-send'], `GOD'S REPORTED SEND ENDS A PERSON'S HOLD (got ${JSON.stringify(res)})`);
+  assert.equal(r.owner.inhibition('p1'), null, "GOD'S REPORTED SEND ENDS A PERSON'S HOLD: not inhibited");
+  assert.equal(r.grants.confirm, confirms + 1, 'the turn god started spent the grant');
+  assert.deepEqual(await r.submit('w1'), { kind: 'HUMAN_HANDLED' }, 'the id is never typed again');
+};
+test('GOD (god 8df2e3): a submit reported after god\'s term Enter ends a person-caused hold as handled, labelled god-send', () => K.godSendRulesPersonHold());
+
+K.godSendBeforeHoldIgnored = async (M = OWNER) => {
+  const { r } = await heldThenGod({ person: 1, godEnter: -10_000_000, reportAt: 20 }, M);
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'human-input-since-hold'], "A GOD ENTER FROM BEFORE THE HOLD IS NO RULING");
+};
+test('GOD (god 8df2e3): god\'s Enter from before the hold rules nothing: the person\'s hold stays', () => K.godSendBeforeHoldIgnored());
+
+K.godSendNeedsReportAfterEnter = async (M = OWNER) => {
+  const { r } = await heldThenGod({ person: 1, godEnter: 10, reportAt: 5 }, M);
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'human-input-since-hold'], "ONLY A SUBMIT AFTER GOD'S ENTER IS GOD'S SEND");
+  const b = await heldThenGod({ person: 1, godEnter: 10 }, M);
+  assert.deepEqual([(await b.r.recheck('w1')).why], ['human-input-since-hold'], 'no report: still held');
+};
+test('GOD (god 8df2e3): a submit reported before god\'s Enter (the person\'s own) is not god\'s ruling', () => K.godSendNeedsReportAfterEnter());
 
 test('GOD: while god is still typing (within HUMAN_QUIET_MS) the look waits; with no GOD count it is a person\'s key', async () => {
   const { r } = await heldThenGod({ lastAt: 200, submitted: true });
@@ -562,8 +597,17 @@ const MUTANTS = [
     edits: [["      if (by === 'GOD') return stay('god-draft-on-prompt', screen);\n", '']],
     killer: 'godDraftNeverErased', dies: /GOD'S DRAFT ON THE PROMPT IS NEVER ERASED/ },
   { name: 'GOD: god\'s reported submit is not seen', file: 'src/main/automaticSubmit.ts', real: OWNER,
-    edits: [['    if (this.submitReport(ptyId, held.agentId, held.at) !== true) return null;', '    return null;']],
+    edits: [["    const how = by === 'GOD' && this.submitReport(ptyId, held.agentId, held.at) === true ? 'god-turn'", "    const how = false ? 'god-turn'"]],
     killer: 'godSubmitHandled', dies: /GOD'S REPORTED SUBMIT ENDS THE HOLD AS HANDLED/ },
+  { name: 'god 8df2e3: god\'s send never rules a person\'s hold', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["    const godSent = by !== 'NONE' && enterAt !== undefined && enterAt >= held.at;", '    const godSent = false;']],
+    killer: 'godSendRulesPersonHold', dies: /GOD'S REPORTED SEND ENDS A PERSON'S HOLD/ },
+  { name: 'god 8df2e3 unsound: a god Enter from before the hold rules it', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["enterAt !== undefined && enterAt >= held.at;", 'enterAt !== undefined;']],
+    killer: 'godSendBeforeHoldIgnored', dies: /A GOD ENTER FROM BEFORE THE HOLD IS NO RULING/ },
+  { name: 'god 8df2e3 unsound: any report since the hold is god\'s send', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['      : godSent && this.submitReport(ptyId, held.agentId, enterAt) === true', '      : godSent && this.submitReport(ptyId, held.agentId, held.at) === true']],
+    killer: 'godSendNeedsReportAfterEnter', dies: /ONLY A SUBMIT AFTER GOD'S ENTER IS GOD'S SEND/ },
   { name: 'fix 1: our text on the prompt row is never erased', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [['    if (seen.onPromptRow && seen.screenCount >= 1) {', '    if (false) {']],
     killer: 'ownTextOnPromptErased', dies: /OUR TEXT ON THE PROMPT ROW IS ERASED/ },

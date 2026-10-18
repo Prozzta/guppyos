@@ -22,6 +22,7 @@ export interface OwnerPty {
   incarnation(id: string): number | undefined;
   humanInputGeneration(id: string): number | undefined;
   godInputGeneration?(id: string): number | undefined;
+  godEnterAt?(id: string): number | undefined;
   lastHumanInputAt(id: string): number | undefined;
   hasOutput(id: string): boolean | undefined;
   inputState(id: string): TerminalInputState | undefined;
@@ -98,6 +99,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     incarnation: (ptyId) => w.pty.incarnation(ptyId),
     humanGeneration: (ptyId) => w.pty.humanInputGeneration(ptyId),
     godGeneration: (ptyId) => w.pty.godInputGeneration?.(ptyId),
+    godEnterAt: (ptyId) => w.pty.godEnterAt?.(ptyId),
     lastHumanInputAt: (ptyId) => w.pty.lastHumanInputAt(ptyId),
     // THE OWNER'S ONLY WRITE. Declared PROGRAMMATIC, so it can never advance the human
     // generation — the owner must not be able to interfere with itself.

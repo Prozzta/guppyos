@@ -543,7 +543,10 @@ export type HeldRecheck =
   | { kind: 'ERASED'; screen: GuardScreenFacts }
   /** WAKE-STALL-INTERFERED-192 C: the held text was our own proven draft; an Enter on it started a
    *  turn (the provider reported the submit). Delivered: the hold ends as handled. */
-  | { kind: 'SUBMITTED'; screen: GuardScreenFacts | null }
+  | { kind: 'SUBMITTED'; screen: GuardScreenFacts | null;
+      /** GOD-TERMINAL-CONTROL: a turn god's `term` keys started, not our own Enter. 'god-send' is
+       *  CORRELATED (a submit reported at or after god's Enter), not proven god's. */
+      how?: 'god-turn' | 'god-send' }
   | { kind: 'HELD'; why: string; screen: GuardScreenFacts | null };
 
 /** WAKE-SCREEN-GUARD: the pause between post-echo readings after a stage write. */
@@ -604,6 +607,9 @@ export interface OwnerDeps {
   /** GOD-TERMINAL-CONTROL (Jim MUST 1): how many of those generation steps were GOD's (`term`).
    *  Absent = unknown: every step since a hold is then a person's, as before. */
   godGeneration?: (ptyId: string) => number | undefined;
+  /** GOD-TERMINAL-CONTROL (god 8df2e3): when god's last `term` Enter landed on this PTY. Absent =
+   *  god's send never ends a hold a person's keys are part of. */
+  godEnterAt?: (ptyId: string) => number | undefined;
   /** The owner's own write. Never advances the human generation. */
   write: (ptyId: string, data: string) => OwnerWriteResult;
   /** 'READY' to type, 'WAIT' and ask again, 'GONE' if the PTY died. Main answers this. */
@@ -1862,14 +1868,22 @@ export class AutomaticSubmitOwner {
   /** GOD-TERMINAL-CONTROL (Jim MUST 1): only god typed since the hold, and has gone quiet. A
    *  submit the provider reports since the hold is god's turn, which surfaces the held mail: the
    *  hold ends as a person's ALREADY_HANDLED would (SUBMITTED). null = the screen recheck decides
-   *  (a clean composer releases it to retry; god's draft on the prompt stays held). */
+   *  (a clean composer releases it to retry; god's draft on the prompt stays held).
+   *  God 8df2e3: god's send is a ruling even on a hold a person's keys are part of: a submit
+   *  reported at or after god's `term` Enter (since the hold) ends it the same way. That link is
+   *  CORRELATED, not proven (how: 'god-send'): the report does not say whose Enter it was. */
   private godRuledHold(ptyId: string, held: HeldInterference): HeldRecheck | null {
-    if (this.inputSinceHold(ptyId, held) !== 'GOD') return null;
+    const by = this.inputSinceHold(ptyId, held);
+    const enterAt = this.deps.godEnterAt?.(ptyId);
+    const godSent = by !== 'NONE' && enterAt !== undefined && enterAt >= held.at;
+    if (by !== 'GOD' && !godSent) return null;
     const last = this.deps.lastHumanInputAt(ptyId);
     if (last !== undefined && this.deps.now() - last < HUMAN_QUIET_MS) return { kind: 'HELD', why: 'god-input-recent', screen: null };
-    if (this.submitReport(ptyId, held.agentId, held.at) !== true) return null;
+    const how = by === 'GOD' && this.submitReport(ptyId, held.agentId, held.at) === true ? 'god-turn'
+      : godSent && this.submitReport(ptyId, held.agentId, enterAt) === true ? 'god-send' : null;
+    if (!how) return null;
     this.resolveInterference(ptyId, 'ALREADY_HANDLED');
-    return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null };
+    return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null, how };
   }
 
   /** The held id is free again (not delivered): a re-admission of it is a new attempt. */

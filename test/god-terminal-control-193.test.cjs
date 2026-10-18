@@ -409,6 +409,20 @@ test('PtyManager.write: GOD advances the human generation AND lastHumanInputAt, 
   assert.match(idx, /write: \(ptyId, data\) => ptyManager\.write\(ptyId, data, 'GOD'\)/, "term's writer binds GOD");
 });
 
+test('PtyManager.godEnterAt (god 8df2e3): only a GOD write carrying an Enter stamps it; the owner reads it through the wiring', () => {
+  const pm = new PtyManager();
+  pm.sessions.set('t1', { id: 't1', cwd: '', command: '', owner: null, lastOutputAt: 0, hasOutput: true, humanInputGeneration: 0, proc: { write: () => {} } });
+  pm.write('t1', 'text', 'GOD');
+  pm.write('t1', '\r', 'HUMAN');
+  pm.write('t1', '\r', 'PROGRAMMATIC');
+  assert.equal(pm.godEnterAt('t1'), undefined, "god's text, a person's Enter and the app's Enter are no god Enter");
+  const before = Date.now();
+  pm.write('t1', '\r', 'GOD');
+  assert.ok(pm.godEnterAt('t1') >= before);
+  assert.equal(pm.godEnterAt('nope'), undefined);
+  assert.match(src('src/main/automaticSubmitWiring.ts'), /godEnterAt: \(ptyId\) => w\.pty\.godEnterAt\?\.\(ptyId\),/);
+});
+
 /** The owner over a REAL PtyManager session: the only human signal is what pty.ts records. */
 function ownerWorld() {
   const pm = new PtyManager();

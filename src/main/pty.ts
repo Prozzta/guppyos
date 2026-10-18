@@ -84,6 +84,9 @@ interface PtySession {
    *  GOD's (absent = 0). A held wake's recheck tells "only god typed since the hold" from a
    *  person's keys with it. Same scope and meaning as the generation: equality only. */
   godInputGeneration?: number;
+  /** GOD-TERMINAL-CONTROL (god 8df2e3): when god's last write carrying an Enter was accepted. A
+   *  submit the provider reports at or after it is correlated with god's send (not proven). */
+  godEnterAt?: number;
   /** L0-FUSION stage 5: the renderer's mirror of whose the prompt is (picker latch, human
    *  draft, settle). Absent = UNKNOWN, which automatic delivery refuses. Dies with the
    *  session. NOT a provenance fact and not an erase oracle - see shared/promptState.ts. */
@@ -926,7 +929,10 @@ export class PtyManager {
       // GOD-TERMINAL-CONTROL (Jim MUST 1): god at the keyboard counts as a person, so a wake is
       // never staged or committed over god's typing.
       if (origin === 'HUMAN' || origin === 'GOD') { s.humanInputGeneration++; s.lastHumanInputAt = Date.now(); }
-      if (origin === 'GOD') s.godInputGeneration = (s.godInputGeneration ?? 0) + 1;
+      if (origin === 'GOD') {
+        s.godInputGeneration = (s.godInputGeneration ?? 0) + 1;
+        if (data.includes('\r')) s.godEnterAt = Date.now();
+      }
       return { ok: true };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -945,6 +951,12 @@ export class PtyManager {
   godInputGeneration(id: string): number | undefined {
     const s = this.sessions.get(id);
     return s ? (s.godInputGeneration ?? 0) : undefined;
+  }
+
+  /** GOD-TERMINAL-CONTROL (god 8df2e3): when god's last accepted write carrying an Enter landed
+   *  on this LIVE pty, or undefined (none, or no pty). */
+  godEnterAt(id: string): number | undefined {
+    return this.sessions.get(id)?.godEnterAt;
   }
 
   /** The identity of the LIVE process behind this id, or undefined when there is none. */
