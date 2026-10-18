@@ -22,6 +22,7 @@ module.exports = async function* fileTimeoutReporter(source) {
     if (ev.type !== 'test:fail') continue;
     const d = ev.data || {};
     const error = (d.details && d.details.error) || {};
+    if (d.file) yield `${JSON.stringify({ failure: { file: d.file, name: String(d.name || d.file) } })}\n`;
     if (d.nesting === 0 && d.file && d.name === d.file && error.failureType === 'testTimeoutFailure') {
       yield `${JSON.stringify({ file: d.file, message: String(error.message || error) })}\n`;
     }

@@ -149,6 +149,11 @@ test('WIRING: the known roots are main-owned (registry, live PTYs, this run\'s s
   assert.match(body, /hive\.registry\(\)\.agents/);
   assert.match(body, /rootTrusted\(root, known\)/);
   assert.doesNotMatch(body, /roster/);
-  assert.match(INDEX, /const res = await ptyManager\.spawn\(opts, owner\);\r?\n  if \(res\.ok && opts\.hive\?\.id\) heavyAutoApprove\.set\([^\n]*\n  if \(res\.ok\) fsSpawnedCwds\.add\(opts\.cwd\);/,
+  const spawnStart = INDEX.indexOf('const res = await ptyManager.spawn(opts, owner);');
+  const spawnEnd = INDEX.indexOf('\n}', spawnStart);
+  assert.ok(spawnStart >= 0 && spawnEnd > spawnStart, 'the spawn result block exists');
+  const spawnBlock = INDEX.slice(spawnStart, spawnEnd);
+  assert.match(spawnBlock, /if \(res\.ok && opts\.hive\?\.id\) heavyAutoApprove\.set\([^\n]*/);
+  assert.match(spawnBlock, /if \(res\.ok\) fsSpawnedCwds\.add\(opts\.cwd\);/,
     'a successful agent spawn records its cwd');
 });
