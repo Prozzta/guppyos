@@ -15,8 +15,10 @@
 //       the tool call). Always exits 0 so the command after it keeps its own exit code; a failure is
 //       one line on stderr.
 //   guppy-heavyjob set <jobName> <background 0|1> <half 0|1>
-//       Live apply: replaces the job's limits. A limit turned off also resets the members (removing a
-//       limit leaves a process where the limit put it): priority NORMAL, affinity the system mask.
+//       Live apply: replaces the job's limits. A limit turned off also gives the members back what it
+//       took (removing a limit leaves a process where the limit put it): their own values when serve
+//       recorded them, else priority NORMAL and affinity the system mask. A limit that was off is not
+//       touched (see SetJob).
 //   guppy-heavyjob list <jobName>
 //       One JSON line per process in the job: pid, name, priorityClass, cpus, mask, createdMs.
 //   guppy-heavyjob serve
@@ -222,10 +224,18 @@ static class HeavyJob
     }
 
     // Lifting a job limit leaves its members as the limit set them (Windows does not restore them).
-    // A member whose own values were recorded before the limit (an agent's job) gets them back; any
-    // other is put back to normal.
+    // HEAVY-CPU-LIVE-OFF-RESET-192: only a limit that comes OFF is given back (one that was off stays
+    // the members' own business: a process that lowered its own priority, or narrowed its own
+    // affinity, is not widened by a change to the other limit). A limit that comes ON with members
+    // already in the job records their own values first (when `own` is kept for the job). A member
+    // whose own value was recorded gets it back exactly; any other goes back to normal.
     static void SetJob(IntPtr job, bool background, bool half, bool agent = false, Dictionary<int, Own> own = null)
     {
+        EXT_LIMIT was; bool known = Current(job, out was);
+        // Unreadable limits: give both back, as before (a limit left on a member is the worse error).
+        bool wasBackground = !known || (was.Basic.LimitFlags & LIMIT_PRIORITY_CLASS) != 0;
+        bool wasHalf = !known || (was.Basic.LimitFlags & LIMIT_AFFINITY) != 0;
+        if (own != null) foreach (int pid in Members(job)) Record(own, pid, background && !wasBackground, half && !wasHalf);
         Apply(job, background, half, agent);
         foreach (int pid in Members(job))
         {
@@ -233,27 +243,53 @@ static class HeavyJob
             if (h == IntPtr.Zero) continue;
             Own o;
             if (own == null || !own.TryGetValue(pid, out o) || o.Created != Created(pid)) o = null;
-            if (!background) { if (o != null) SetPriorityClass(h, o.Prio); else if (GetPriorityClass(h) == BELOW_NORMAL) SetPriorityClass(h, NORMAL); }
-            if (!half)
+            if (wasBackground && !background)
             {
-                UIntPtr pm, sm;
-                if (o != null) SetProcessAffinityMask(h, o.Mask);
-                else if (GetProcessAffinityMask(h, out pm, out sm) && pm != sm) SetProcessAffinityMask(h, sm);
+                if (o != null && o.Prio != 0) SetPriorityClass(h, o.Prio);
+                else if (GetPriorityClass(h) == BELOW_NORMAL) SetPriorityClass(h, NORMAL);
+            }
+            UIntPtr pm, sm;
+            // Under the affinity limit a member's mask is the job's (its own SetProcessAffinityMask
+            // does not hold there, pinned live), so the limit coming off has only its record to go by.
+            if (wasHalf && !half && GetProcessAffinityMask(h, out pm, out sm))
+            {
+                if (o != null && o.Mask != UIntPtr.Zero) SetProcessAffinityMask(h, o.Mask);
+                else if (pm != sm) SetProcessAffinityMask(h, sm);
             }
             CloseHandle(h);
         }
     }
 
-    // A process's own priority class and affinity, taken while no limit of ours is on it.
+    static bool Current(IntPtr job, out EXT_LIMIT x)
+    {
+        x = new EXT_LIMIT();
+        int size = Marshal.SizeOf(typeof(EXT_LIMIT)); IntPtr buf = Marshal.AllocHGlobal(size);
+        try
+        {
+            if (!QueryInformationJobObject(job, 9, buf, size, IntPtr.Zero)) return false; // JobObjectExtendedLimitInformation
+            x = (EXT_LIMIT)Marshal.PtrToStructure(buf, typeof(EXT_LIMIT));
+            return true;
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    // A process's own priority class and affinity, taken while no limit of ours is on it (0 = not
+    // taken: each is taken when its own limit comes on).
     class Own { public long Created; public UIntPtr Mask; public uint Prio; }
 
-    static void Record(Dictionary<int, Own> own, int pid)
+    static void Record(Dictionary<int, Own> own, int pid, bool prio = true, bool mask = true)
     {
+        if (!prio && !mask) return;
         IntPtr h = OpenProcess(0x0400, false, pid); // QUERY_INFORMATION
         if (h == IntPtr.Zero) return;
-        UIntPtr pm, sm; uint pc = GetPriorityClass(h);
-        if (pc != 0 && GetProcessAffinityMask(h, out pm, out sm)) own[pid] = new Own { Created = Created(pid), Mask = pm, Prio = pc };
+        UIntPtr pm, sm; uint pc = GetPriorityClass(h); bool am = GetProcessAffinityMask(h, out pm, out sm);
         CloseHandle(h);
+        long created = Created(pid);
+        Own o;
+        if (!own.TryGetValue(pid, out o) || o.Created != created) o = new Own { Created = created };
+        if (prio && pc != 0) o.Prio = pc;
+        if (mask && am) o.Mask = pm;
+        if (o.Prio != 0 || o.Mask != UIntPtr.Zero) own[pid] = o;
     }
 
     static List<int> Members(IntPtr job)
@@ -530,6 +566,8 @@ static class HeavyJob
     {
         var jobs = new Dictionary<string, IntPtr>();
         var agents = new Dictionary<string, AgentJob>();
+        // A per-call job's members' own values, taken when a limit comes on mid-call (see SetJob).
+        var callOwn = new Dictionary<string, Dictionary<int, Own>>();
         string line;
         while ((line = Console.In.ReadLine()) != null)
         {
@@ -580,7 +618,10 @@ static class HeavyJob
                 else if (w.Length == 4 && w[0] == "set")
                 {
                     if (!jobs.TryGetValue(w[1], out job)) throw new Exception("no job " + w[1]);
-                    SetJob(job, w[2] == "1", w[3] == "1");
+                    Dictionary<int, Own> own;
+                    if (!callOwn.TryGetValue(w[1], out own)) callOwn[w[1]] = own = new Dictionary<int, Own>();
+                    SetJob(job, w[2] == "1", w[3] == "1", false, own);
+                    if (w[2] != "1" && w[3] != "1") own.Clear();
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 2 && w[0] == "list")
@@ -591,6 +632,7 @@ static class HeavyJob
                 else if (w.Length == 2 && w[0] == "close")
                 {
                     if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); }
+                    callOwn.Remove(w[1]);
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 1 && w[0] == "cpus") reply = "{\"ok\":true,\"logical\":" + GetActiveProcessorCount(0xFFFF) + ",\"half\":" + HalfCount() + "}";
