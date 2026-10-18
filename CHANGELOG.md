@@ -11,6 +11,37 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.95] — 2026-10-18
+
+**God can read and drive any agent's terminal.** Rollback: 1.1.94 (reinstall).
+
+### Added
+
+- **`term`: god's direct channel to agent terminals.** The coordinating agent (god) can read an
+  agent's live screen (`term read`), type text (`term type`), type and press Enter (`term send`)
+  and press named keys (`term keys`). Only god can use it. It is checked on every request, and
+  the command and its address are given to god's terminal alone. Each action is logged with
+  its text clipped and the screen before and after. Text is sanitised before it is written:
+  escape sequences are stripped, and other control characters are refused. Text that could open a
+  menu instead of being typed (starting with `?`, `!` or `/`) is refused unless god passes
+  `--raw`. A Codex send waits longer before its Enter for long text, so the text arrives first.
+- **A hidden copy of every terminal's screen**, kept in the app as the terminal's output arrives,
+  so god's reading does not depend on an open tab. It never answers the program running in the
+  terminal. If keeping it costs more than 2% of the app's time, it switches itself off and logs
+  that it did.
+
+### Changed
+
+- **God's typing counts as a person's.** An automatic wake is never typed over god's text. A wake
+  held because of god's keys counts as delivered once god's send starts a turn, and is sent again
+  once god clears the line. A wake held because of a person's keys also counts as delivered once
+  the agent reports a prompt submitted after god's send. That
+  link is inferred from timing, not proven, and the log row says so (`god-send`). A `/model`
+  switch god types sticks, as one typed by a person does.
+- **More log rows for diagnosis:** the terminal modes 5 and 30 seconds after each start, a
+  comparison of the hidden screen copy with the visible terminal's reading, and the copy's cost
+  every 10 minutes. They stay in the local `log.jsonl`.
+
 ## [1.1.94] — 2026-10-18
 
 **A third hotfix: quiet agents are woken after a restart.** Rollback: 1.1.93 (reinstall).
