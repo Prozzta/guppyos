@@ -1055,7 +1055,7 @@ export class AutomaticSubmitOwner {
     const r = await this.readGuard(ptyId);
     if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
     const tui = this.tuiProvider(ptyId);
-    const past = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts).cls) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const past = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts)) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     this.reportStartupReading(ptyId, incarnation, past, r);
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
     if (!tui && this.threadProof(ptyId, r)) {
@@ -1499,7 +1499,7 @@ export class AutomaticSubmitOwner {
       const tui = this.tuiProvider(ptyId);
       const comp = tui ? classifyTuiComposer(tui, r.facts, expectedTail)
         : classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
-      const past = tui ? tuiPastStartup(comp.cls) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      const past = tui ? tuiPastStartup(comp) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
       // Jim N1: only a reading that covers real PTY output can latch (a blank terminal has none).
       if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
       // DWIGHT-INPUT-DEAD-179 F4: Codex's own "chat configured" record, for a screen with no marker.
@@ -1682,7 +1682,7 @@ export class AutomaticSubmitOwner {
       return { kind: 'NONE' };
     }
     if (seen.screenCount > 0) return stay('own-text-on-screen', screen);
-    const past = tui ? tuiPastStartup(modal.cls) : codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const past = tui ? tuiPastStartup(modal) : codexPastStartup(g.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
     if (this.postHandoff.get(ptyId) !== held.incarnation || (!past.open && (past.reason === 'header-loading' || past.reason === 'session-starting'))) {
       return stay(`startup:${past.reason}`, screen);
     }

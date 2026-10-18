@@ -1,0 +1,18 @@
+{
+ "source": "REAL claude 2.1.302 at 160x40, --dangerously-skip-permissions, statusLine = Guppy's statusGauge (hooks.ts) verbatim: the boot composer with the hive ctx row and Claude's right-aligned effort status on it (COMPOSER-FOOTER-HOTFIX-191)",
+ "cols": 160,
+ "rows": 40,
+ "cursorRow": 6,
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.302",
+  "▝▜██████▀  Opus 5.5 · Claude Max",
+  " ▝▝   ▝▝   C:\\Dunder",
+  "",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ctx 0k/1000k (0%)                                                                                                                         ◐ medium · /effort  ",
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+ ]
+}
