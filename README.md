@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.93" src="https://img.shields.io/badge/version-1.1.93-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.94" src="https://img.shields.io/badge/version-1.1.94-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -288,8 +288,11 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   confirmed.
 - **Wakes reach Claude agents again** (1.1.92) — a hotfix: the prompt
   check recognises Guppy's own context line under the Claude prompt, so messages are delivered.
-- **Wakes are sent again** (1.1.93, the current release) — a second hotfix: Guppy recognises
+- **Wakes are sent again** (1.1.93) — a second hotfix: Guppy recognises
   its own typed wake in the Claude prompt and presses Enter on it.
+- **Quiet agents are woken after a restart** (1.1.94, the current release) — a third hotfix: a
+  resumed Claude agent that stays quiet is recognised as ready without anyone typing, and a wake
+  waits until the resumed session has settled.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
