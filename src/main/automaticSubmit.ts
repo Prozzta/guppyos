@@ -434,8 +434,13 @@ export interface ScreenGuardRecord {
    *  footer, each row already bounded to CODEX_ROW_MAX), so "is our text still staged?" can be
    *  answered from the log. */
   screen?: GuardScreenFacts;
+  /** STARTUP-LATCH-QUIET-193 (a): on a COMMIT refusal, the screen's last REFUSAL_TAIL_ROWS rows. */
+  tail?: string[];
   /** DWIGHT-INPUT-DEAD-179 F2: on a `startup:` refusal, what condition 1 was decided on. */
   startupScreen?: StartupScreenFacts;
+  /** STARTUP-LATCH-QUIET-193 (a): on a COMMIT or `startup:` refusal, the class of the staged
+   *  text's first character (never the text). */
+  staged?: StagedFirstChar;
 }
 
 /** DWIGHT-HELD-INTERFERED fix 4: the part of a guard reading the log keeps. CODEX-MODEL-SWITCH-
@@ -447,18 +452,44 @@ function screenFacts(f: CodexScreenFacts): GuardScreenFacts {
   return { cursorRow: f.cursorRow, footer: [...f.footer], ...(popup ? { popup: codexPopupText(popup) } : {}) };
 }
 
+/** STARTUP-LATCH-QUIET-193 (a): how many of the screen's last non-empty rows a refusal record
+ *  keeps. The 16:05 and 16:07 refusals on 1.1.93 could only be guessed from the cursor row and
+ *  footer: neither showed what stood where the composer box should be. */
+export const REFUSAL_TAIL_ROWS = 8;
+
+function clipRow(row: string): string {
+  return row.length > STARTUP_ROW_MAX ? `${row.slice(0, STARTUP_ROW_MAX - 1)}…` : row;
+}
+
+/** STARTUP-LATCH-QUIET-193 (a): the bottom of the screen a refusal was decided on, small. */
+function refusalTail(f: CodexScreenFacts): string[] {
+  return (f.tail ?? []).slice(-REFUSAL_TAIL_ROWS).map(clipRow);
+}
+
+/** STARTUP-LATCH-QUIET-193 (a): what the staged text starts with, as a class, never the text.
+ *  Claude reads a lone leading `?` in an empty composer as "show shortcuts", `!` as shell mode,
+ *  `/` as a command and `#` as a memory note; the log must say whether ours began with one. */
+export type StagedFirstChar = 'empty' | 'space' | 'help' | 'shell' | 'command' | 'memory' | 'mention' | 'text';
+
+export function stagedFirstChar(text: string): StagedFirstChar {
+  const c = text.charAt(0);
+  if (c === '') return 'empty';
+  if (/\s/.test(c)) return 'space';
+  return c === '?' ? 'help' : c === '!' ? 'shell' : c === '/' ? 'command' : c === '#' ? 'memory' : c === '@' ? 'mention' : 'text';
+}
+
 /** DWIGHT-INPUT-DEAD-179 F2: the longest row a startup record keeps. */
 export const STARTUP_ROW_MAX = 160;
 /** DWIGHT-INPUT-DEAD-179 F2: what a startup (condition 1) verdict was decided on, small. The
- *  10-01 and 10-02 holds could only be explained from screen text the Human pasted. The rows ABOVE
- *  the cursor (the conversation) are never kept: the cursor row and the footer under it only. */
-export interface StartupScreenFacts { header: CodexScreenFacts['header']; startingAfterHeader: boolean; cursorRow: string; footer: string[] }
+ *  10-01 and 10-02 holds could only be explained from screen text the Human pasted. The cursor
+ *  row, the footer under it and (STARTUP-LATCH-QUIET-193 (a)) the last REFUSAL_TAIL_ROWS
+ *  non-empty rows, each clipped: the 1.1.93 refusal showed a blank cursor row and nothing else. */
+export interface StartupScreenFacts { header: CodexScreenFacts['header']; startingAfterHeader: boolean; cursorRow: string; footer: string[]; tail: string[] }
 
 function startupScreenFacts(f: CodexScreenFacts): StartupScreenFacts {
-  const cut = (row: string): string => (row.length > STARTUP_ROW_MAX ? `${row.slice(0, STARTUP_ROW_MAX - 1)}…` : row);
   return {
-    header: f.header, startingAfterHeader: f.startingAfterHeader, cursorRow: cut(f.cursorRow),
-    footer: f.footer.map(cut)
+    header: f.header, startingAfterHeader: f.startingAfterHeader, cursorRow: clipRow(f.cursorRow),
+    footer: f.footer.map(clipRow), tail: refusalTail(f)
   };
 }
 
@@ -472,7 +503,14 @@ export interface StartupReadingRecord {
   reason: string;
   outputGeneration: number;
   screen: StartupScreenFacts;
+  /** STARTUP-LATCH-QUIET-193 (b): how many readings of this incarnation have had this reason so
+   *  far, this one included. A repeat is logged when the output generation moved (bounded by
+   *  STARTUP_READING_LOG_MAX); readings of an unchanged generation are only counted. */
+  seen: number;
 }
+
+/** STARTUP-LATCH-QUIET-193 (b): the most startup-reading rows one incarnation logs per reason. */
+export const STARTUP_READING_LOG_MAX = 20;
 
 /** DWIGHT-HELD-INTERFERED fix 4: one INTERFERED hold, with the last screen facts the owner saw
  *  on that PTY (and how old they are). Diagnostics only. */
@@ -643,6 +681,13 @@ export interface OwnerDeps {
    *  then a settle) has not arrived: refused, nothing typed, the caller asks again. `undefined`
    *  = this provider has no such proof (the plain terminal-ready rule applies). */
   bootReady?: (ptyId: string, agentId: string) => boolean | undefined;
+  /** STARTUP-LATCH-QUIET-193 (d): may a Claude/agy composer seen now latch condition 1 for this
+   *  PTY's live incarnation? `false` = not yet: the provider's session-up proof (Claude's
+   *  SessionStart + a settle) has not arrived, or output has not been quiet long enough since.
+   *  On 1.1.93 god latched on the FIRST PAINT (gen 8, 2.4 s after spawn), just before the 47.8k
+   *  resume replay. Absent or `undefined` = no such proof for this provider (the composer alone
+   *  latches); throwing = false. */
+  startupSettled?: (ptyId: string) => boolean | undefined;
   /** GOD-STARTUP-WAITS-ENTER G2: has the provider reported a submitted prompt (Claude's
    *  UserPromptSubmit) for this PTY's live incarnation at or after `enterAt`? `undefined` = this
    *  provider has no such report, and a boot Enter is not verified. */
@@ -697,7 +742,10 @@ export type RefusalReason =
    *  own proven unsent draft and the provider reported no turn in WAKE_SUBMIT_CONFIRM_MS. The
    *  draft is still on the prompt and still ours (kept), nothing else was written, and the wake
    *  coordinator offers the ids again after its backoff (never a hold for a person). */
-  | 'SUBMIT_UNCONFIRMED';
+  | 'SUBMIT_UNCONFIRMED'
+  /** STARTUP-LATCH-QUIET-193 (c): Claude would read this text as a mode key, not a draft
+   *  (claudeModeKey; the detail names which). Nothing typed; a queued message stays queued. */
+  | 'TEXT_ENTERS_MODE';
 
 export type InterferenceReason =
   | 'HUMAN_INPUT_AFTER_STAGE'
@@ -864,6 +912,18 @@ const MAX_NEEDLE = 16;
  *  some TUIs (agy) treat the markers as literal input, so single-line stays raw (#24). */
 export function payloadFor(text: string): string {
   return text.includes('\n') ? `\x1b[200~${text}\x1b[201~` : text;
+}
+
+/** STARTUP-LATCH-QUIET-193 (c): would `text`, typed into an EMPTY Claude composer, switch Claude
+ *  into a mode instead of becoming the draft? `lone-?` opens the shortcuts panel and the `?` is
+ *  gone (god's 16:05:16 queue message: an empty composer under that panel, and a text too short
+ *  for a needle); `leading-!` enters shell mode (the box is replaced, and an Enter would run a
+ *  shell command). Measured on Claude 2.1.302 through ConPTY, framed or raw alike (Andy's
+ *  GOD-TERMINAL-CONTROL-DESIGN section 11; Creed's temp-home rig). `?hello`, `? hi`, `#x`, `@x`
+ *  and `/command` in ONE write land literally and stay deliverable. Null = types as a draft. */
+export function claudeModeKey(text: string): 'lone-?' | 'leading-!' | null {
+  if (text.trim() === '?') return 'lone-?';
+  return text.charAt(0) === '!' ? 'leading-!' : null;
 }
 
 /** The slice of our own text the screen oracle looks for: the head of the first
@@ -1063,7 +1123,8 @@ export class AutomaticSubmitOwner {
     const r = await this.readGuard(ptyId);
     if (!r || r.incarnation !== incarnation || deps.incarnation(ptyId) !== incarnation) return false;
     const tui = this.tuiProvider(ptyId);
-    const past = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts)) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const seenPast = tui ? tuiPastStartup(classifyTuiComposer(tui, r.facts)) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+    const past = seenPast.open && !this.latchSettled(ptyId, tui) ? { open: false, reason: 'session-settling' } : seenPast;
     this.reportStartupReading(ptyId, incarnation, past, r);
     if (past.open && r.outputGeneration > 0) { this.postHandoff.set(ptyId, incarnation); return true; }
     if (!tui && this.threadProof(ptyId, r)) {
@@ -1089,20 +1150,28 @@ export class AutomaticSubmitOwner {
 
   /** DWIGHT-INPUT-DEAD-179 F2: which startup verdict reasons were already reported, per PTY, for
    *  its current incarnation (a new incarnation starts a new set; at most one row per reason). */
-  private readonly startupReported = new Map<string, { incarnation: unknown; reasons: Set<string> }>();
+  private readonly startupReported = new Map<string, { incarnation: unknown; reasons: Map<string, { seen: number; logged: number; gen: number }> }>();
 
   private reportStartupReading(ptyId: string, incarnation: unknown, past: { open: boolean; reason: string }, r: GuardReading): void {
     try {
       let seen = this.startupReported.get(ptyId);
       if (!seen || seen.incarnation !== incarnation) {
-        seen = { incarnation, reasons: new Set() };
+        seen = { incarnation, reasons: new Map() };
         this.startupReported.set(ptyId, seen);
       }
-      if (seen.reasons.has(past.reason)) return;
-      seen.reasons.add(past.reason);
+      // STARTUP-LATCH-QUIET-193 (b): one row per reason hid every re-read (Jim's screen WAS re-read
+      // on 1.1.93 and the log showed none). A repeat with new output is logged, up to a cap; one
+      // of the same generation is only counted, and the count rides on the next row.
+      const prev = seen.reasons.get(past.reason);
+      const entry = prev ?? { seen: 0, logged: 0, gen: -1 };
+      entry.seen += 1;
+      seen.reasons.set(past.reason, entry);
+      if (prev && (prev.gen === r.outputGeneration || prev.logged >= STARTUP_READING_LOG_MAX)) return;
+      entry.logged += 1;
+      entry.gen = r.outputGeneration;
       this.deps.onStartupReading?.({
         ptyId, incarnation, open: past.open, reason: past.reason, outputGeneration: r.outputGeneration,
-        screen: startupScreenFacts(r.facts)
+        screen: startupScreenFacts(r.facts), seen: entry.seen
       });
     } catch { /* diagnostics never decide */ }
   }
@@ -1254,6 +1323,10 @@ export class AutomaticSubmitOwner {
     if (this.inhibition(ptyId)) return this.refuse(null, 'PTY_INHIBITED');
     const incarnation = deps.incarnation(ptyId);
     if (incarnation === undefined) return this.refuse(null, 'PTY_GONE');
+    // STARTUP-LATCH-QUIET-193 (c): the staged text goes out as ONE raw write; text Claude would
+    // take as a mode key (a lone `?`, a leading `!`) is never typed at all.
+    const modeKey = this.tuiProvider(ptyId) === 'claude' ? claudeModeKey(req.text) : null;
+    if (modeKey) return this.refuse(null, 'TEXT_ENTERS_MODE', modeKey);
     let decision: AdmissionDecision | null = null;
     if (ASKS_CAPACITY[cls]) {
       decision = deps.capacity.admit(req.agentId, 'ORDINARY_TURN');
@@ -1482,6 +1555,13 @@ export class AutomaticSubmitOwner {
 
   /** TUI-COMPOSER-ALLOWLIST-191: claude or antigravity, judged by their composer allowlist; null =
    *  Codex's rules (which refuse every Claude or agy screen, so a failure here stays closed). */
+  /** STARTUP-LATCH-QUIET-193 (d): a TUI composer latches condition 1 only once the provider says
+   *  its session settled (startupSettled). Codex keeps its own rules (always true here). */
+  private latchSettled(ptyId: string, tui: TuiGuardProvider | null): boolean {
+    if (!tui) return true;
+    try { return this.deps.startupSettled?.(ptyId) !== false; } catch { return false; }
+  }
+
   private tuiProvider(ptyId: string): TuiGuardProvider | null {
     try {
       const p = this.deps.screenProvider?.(ptyId);
@@ -1507,7 +1587,10 @@ export class AutomaticSubmitOwner {
       const tui = this.tuiProvider(ptyId);
       const comp = tui ? classifyTuiComposer(tui, r.facts, expectedTail)
         : classifyCodexComposer(r.facts, expectedTail === undefined ? undefined : r.promptTailMatches);
-      const past = tui ? tuiPastStartup(comp) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      const seenPast = tui ? tuiPastStartup(comp) : codexPastStartup(r.facts, deps.spawnCwd?.(ptyId), deps.homeDir?.());
+      // STARTUP-LATCH-QUIET-193 (d): a TUI composer seen while its session is still settling
+      // (the resume replay) does not latch.
+      const past = seenPast.open && !this.latchSettled(ptyId, tui) ? { open: false, reason: 'session-settling' } : seenPast;
       // Jim N1: only a reading that covers real PTY output can latch (a blank terminal has none).
       if (past.open && r.outputGeneration > 0) this.postHandoff.set(ptyId, incarnation);
       // DWIGHT-INPUT-DEAD-179 F4: Codex's own "chat configured" record, for a screen with no marker.
@@ -1534,8 +1617,9 @@ export class AutomaticSubmitOwner {
         ok: verdict.ok, reason: verdict.ok ? 'ok' : verdict.reason, incarnation,
         observedGeneration: r ? r.outputGeneration : null, currentGeneration: current ?? null,
         latched: this.postHandoff.get(ptyId) === incarnation,
-        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts) } : {}),
-        ...(!verdict.ok && r && verdict.reason.startsWith('startup:') ? { startupScreen: startupScreenFacts(r.facts) } : {})
+        ...(phase === 'COMMIT' && !verdict.ok && r ? { screen: screenFacts(r.facts), tail: refusalTail(r.facts) } : {}),
+        ...(!verdict.ok && r && verdict.reason.startsWith('startup:') ? { startupScreen: startupScreenFacts(r.facts) } : {}),
+        ...(!verdict.ok && (phase === 'COMMIT' || verdict.reason.startsWith('startup:')) ? { staged: stagedFirstChar(req.text) } : {})
       });
     } catch { /* diagnostics never decide */ }
     return verdict;

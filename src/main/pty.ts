@@ -1071,6 +1071,12 @@ export class PtyManager {
     return { incarnation: s.incarnation, spawnedAt: s.spawnedAt ?? 0, lastTrafficAt: s.hasOutput ? s.lastOutputAt : 0 };
   }
 
+  /** STARTUP-LATCH-QUIET-193 (A): this PTY's grid as last set (spawn or resize), or undefined. */
+  grid(id: string): { cols: number; rows: number } | undefined {
+    const p = this.sessions.get(id)?.proc;
+    return p ? { cols: p.cols, rows: p.rows } : undefined;
+  }
+
   /** Epoch ms of this PTY's most recent output, or undefined if no such PTY. */
   lastOutputAt(id: string): number | undefined {
     return this.sessions.get(id)?.lastOutputAt;

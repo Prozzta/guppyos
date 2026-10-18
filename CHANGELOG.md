@@ -11,6 +11,33 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.94] — 2026-10-18
+
+**A third hotfix: quiet agents are woken after a restart.** Rollback: 1.1.93 (reinstall).
+
+### Fixed
+
+- **A resumed Claude agent that stayed quiet after a restart was never woken (1.1.93).** Guppy
+  reads each agent's screen from a hidden terminal. A tab that had never been opened kept the
+  default 80x24 size, while the agent drew for 100x30, so the prompt's border lines wrapped and the
+  prompt was not recognised. The screen was read again only when new output arrived, so a quiet
+  agent stayed unrecognised until someone opened its tab, and every wake to it was refused. The
+  hidden terminal is now sized to match the agent and redrawn, and the startup reading is retried
+  with no output (1 to 30 seconds, bounded). The prompt check itself is not loosened.
+- **A wake typed during the resume could open Claude's help panel (1.1.93).** An agent was
+  treated as ready on the first screen it drew, during the resume replay. A wake whose whole text
+  is `?` opens Claude's shortcuts help instead of being typed, and one starting with `!` enters
+  shell mode. A Claude agent is now treated as ready only once its session has started and its
+  output has been quiet for 1.5 seconds. A wake that is a lone `?` or starts with `!` is refused
+  untyped and stays queued, and staged text always goes out in one write.
+
+### Changed
+
+- **Refusal log rows carry more context.** A refused wake now logs the last 8 screen rows, each
+  clipped to 160 characters, and what kind of character its text starts with. Startup readings are
+  logged again when the screen changes. Privacy: those 8 rows can include conversation text, and
+  they stay in the local `log.jsonl`.
+
 ## [1.1.93] — 2026-10-18
 
 **A second hotfix: Claude wakes are sent again.** Rollback: 1.1.90 (reinstall); 1.1.91 and

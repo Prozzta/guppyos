@@ -66,6 +66,13 @@ export class WakeIncarnationTokens {
  *  (the header box is drawn by then; a reading mid-burst would just be taken again). */
 export const STARTUP_PROBE_SETTLE_MS = 400;
 
+/** STARTUP-LATCH-QUIET-193: when a reading left the PTY un-latched and no output followed, read
+ *  again after these waits (then stop until the next output). On 1.1.93 a resumed Claude that
+ *  went quiet after an unusable reading was never read again until the Human typed into it: a
+ *  reading taken before the session settled, or before the renderer's grid matched the PTY's,
+ *  has nothing later to replace it. */
+export const STARTUP_PROBE_RETRY_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+
 export interface StartupProbeDeps {
   /** The screen gate applies to this PTY and its live incarnation is not latched yet. */
   wanted: (ptyId: string) => boolean;
@@ -81,26 +88,52 @@ export interface StartupProbeDeps {
  * reading is taken. So the header is read right after spawn (the first burst draws it), and
  * again after each later burst until a reading or a turn latches the incarnation. A latched
  * PTY costs one Map lookup per chunk. At most one reading per PTY is in flight.
+ * STARTUP-LATCH-QUIET-193: a reading that leaves the PTY wanted, with no output since, is
+ * retried after STARTUP_PROBE_RETRY_MS (each wait once, in order); output starts the waits over.
  */
 export class StartupProbe {
   private readonly timers = new Map<string, unknown>();
   private readonly inFlight = new Set<string>();
+  /** How many retry waits each PTY has used since its last output. */
+  private readonly retries = new Map<string, number>();
 
-  constructor(private readonly deps: StartupProbeDeps, private readonly settleMs: number = STARTUP_PROBE_SETTLE_MS) {}
+  constructor(
+    private readonly deps: StartupProbeDeps,
+    private readonly settleMs: number = STARTUP_PROBE_SETTLE_MS,
+    private readonly retryMs: readonly number[] = STARTUP_PROBE_RETRY_MS
+  ) {}
 
   output(ptyId: string): void {
     let wanted = false;
     try { wanted = this.deps.wanted(ptyId); } catch { wanted = false; }
     if (!wanted) { this.cancel(ptyId); return; }
-    const prev = this.timers.get(ptyId);
-    if (prev !== undefined) this.deps.clearTimer(prev);
-    this.timers.set(ptyId, this.deps.setTimer(() => this.fire(ptyId), this.settleMs));
+    this.retries.delete(ptyId);
+    this.arm(ptyId, this.settleMs);
   }
 
   /** The PTY went away or was replaced. */
   cancel(ptyId: string): void {
     const t = this.timers.get(ptyId);
     if (t !== undefined) { this.deps.clearTimer(t); this.timers.delete(ptyId); }
+    this.retries.delete(ptyId);
+  }
+
+  private arm(ptyId: string, ms: number): void {
+    const prev = this.timers.get(ptyId);
+    if (prev !== undefined) this.deps.clearTimer(prev);
+    this.timers.set(ptyId, this.deps.setTimer(() => this.fire(ptyId), ms));
+  }
+
+  /** After a reading: still wanted and nothing armed it since (no output) = the next retry wait. */
+  private retry(ptyId: string): void {
+    if (this.timers.has(ptyId)) return;
+    let wanted = false;
+    try { wanted = this.deps.wanted(ptyId); } catch { wanted = false; }
+    if (!wanted) { this.retries.delete(ptyId); return; }
+    const used = this.retries.get(ptyId) ?? 0;
+    if (used >= this.retryMs.length) return;
+    this.retries.set(ptyId, used + 1);
+    this.arm(ptyId, this.retryMs[used]);
   }
 
   get pending(): number {
@@ -115,8 +148,8 @@ export class StartupProbe {
     if (!wanted) return;
     this.inFlight.add(ptyId);
     let p: Promise<unknown>;
-    try { p = this.deps.probe(ptyId); } catch { this.inFlight.delete(ptyId); return; }
-    Promise.resolve(p).catch(() => undefined).then(() => { this.inFlight.delete(ptyId); });
+    try { p = this.deps.probe(ptyId); } catch { this.inFlight.delete(ptyId); this.retry(ptyId); return; }
+    Promise.resolve(p).catch(() => undefined).then(() => { this.inFlight.delete(ptyId); this.retry(ptyId); });
   }
 }
 
