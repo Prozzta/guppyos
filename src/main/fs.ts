@@ -381,18 +381,41 @@ export async function statAbs(p: string): Promise<{ exists: boolean; isFile: boo
  */
 export function samePath(a: string | null | undefined, b: string | null | undefined): boolean {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const norm = (p: string): string | null => {
-    const abs = expandTilde(p);
-    if (!abs || !isAbsolute(abs)) return null;
-    // `expandTilde` has already resolved this to an absolute, normalized path - trailing
-    // separators and `..` segments included - so the only normalization left to do is
-    // the one it cannot do: follow symlinks. (Two earlier mutants, a trailing-separator
-    // trim and a second `resolve`, both survived because they were dead code.)
-    let out = abs;
-    try { out = realpathSync(out); } catch { /* not created yet: the normalized path stands */ }
-    return process.platform === 'win32' || process.platform === 'darwin' ? out.toLowerCase() : out;
-  };
-  const x = norm(a);
-  const y = norm(b);
+  const x = comparablePath(a);
+  const y = comparablePath(b);
   return x !== null && y !== null && x === y;
+}
+
+function comparablePath(p: string): string | null {
+  const abs = expandTilde(p);
+  if (!abs || !isAbsolute(abs)) return null;
+  // `expandTilde` has already resolved this to an absolute, normalized path - trailing
+  // separators and `..` segments included - so the only normalization left to do is
+  // the one it cannot do: follow symlinks. (Two earlier mutants, a trailing-separator
+  // trim and a second `resolve`, both survived because they were dead code.)
+  let out = abs;
+  try { out = realpathSync(out); } catch { /* not created yet: the normalized path stands */ }
+  return process.platform === 'win32' || process.platform === 'darwin' ? out.toLowerCase() : out;
+}
+
+/**
+ * FS-IPC-ROOT-TRUST-192: may the fs:* IPC open `root`? Only when it is, or lies inside, one
+ * of `known` - the working folders of agents MAIN knows. `safeResolve` keeps every path
+ * inside its root, but a root the renderer chose freely (`C:\`, `/`) made that confinement
+ * cover the whole disk.
+ *
+ * Both sides go through `comparablePath`, so a link inside a cwd that points out of it
+ * resolves to where it points and is refused, and case folds where the filesystem folds it.
+ */
+export function rootTrusted(root: unknown, known: Iterable<string | null | undefined>): boolean {
+  if (typeof root !== 'string' || !root || root.includes('\0')) return false;
+  const r = comparablePath(root);
+  if (r === null) return false;
+  for (const k of known) {
+    const c = typeof k === 'string' ? comparablePath(k) : null;
+    if (c === null) continue;
+    const rel = relative(c, r);
+    if (rel === '' || (rel.split(sep)[0] !== '..' && !isAbsolute(rel))) return true;
+  }
+  return false;
 }
