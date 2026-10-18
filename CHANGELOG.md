@@ -11,6 +11,83 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.91] — 2026-10-18
+
+**Guppy never types over your draft, a stalled wake comes to the floor, heavy jobs can leave the
+PC to you, and Antigravity wakes are confirmed.** Rollback: 1.1.90 (reinstall).
+
+### Added
+
+- **Two CPU options for heavy jobs (Settings, beside "Heavy jobs at once").** "Heavy jobs at
+  background priority" runs every process of a heavy job below normal priority, so your own apps
+  come first. "Heavy jobs on half the processors" keeps every heavy job on the lowest-numbered half
+  of the logical processors. Both apply at once, to jobs already running too. Limitation: Codex and
+  Antigravity agents that ask before running commands are not limited, and Settings says so.
+
+- **Held mail shows as held.** An agent's inbox reads "inbox 1 (held until 06:53)" instead of a
+  bare count that looks stuck.
+
+### Changed
+
+- **Guppy types only into an empty prompt it recognises.** For Claude and Antigravity too, as
+  already for Codex: automatic typing (a wake, a nudge) goes only into a composer Guppy recognises
+  as empty, and it waits rather than type over or beside a person's unsent draft. A person's keys
+  count as theirs, so a model or effort you choose in the terminal is kept across restarts (Codex
+  and Antigravity used to drop it).
+
+- **Prompt suggestions are off for agents.** Claude Code no longer draws its guess at the next
+  prompt into an agent's input box, where it read as text already typed.
+
+- **Antigravity wakes are confirmed.** After a wake is typed, Guppy checks that the turn really
+  started, as it already did for Codex, and Claude's wake waits for its screen to go quiet first.
+
+- **The wake nudge stays short.** It lists the 8 oldest mail ids, then "and N more", instead of a
+  list that wrapped past the screen.
+
+- **Open asks close themselves.** An open ask closes when its card's work is over, and one left
+  open for a day is shown with one-click actions.
+
+- **Done cards are hidden on the CARDS tab** until you ask for them.
+
+### Fixed
+
+- **Wakes no longer stall for hours.** Guppy's own unsent wake text is no longer read as a
+  person's draft. A hold that outlives the wake it held is rechecked by itself. Any wake stalled
+  for 5 minutes, or refused 3 times because the terminal never went quiet, is put to the floor
+  as a decision.
+
+- **Mail redelivered after a lost Stop reaches the agent.** When Antigravity or Codex never
+  reported the end of a turn, the mail it was given is offered again once, instead of waiting for
+  ever behind a wake still marked in flight. A person typing during that wake no longer causes a
+  second delivery.
+
+- **The app no longer freezes for up to 10 seconds** while it recovers a renderer that ran out of
+  memory.
+
+- **Echo checks allow for a busy PC.** The check that typed text reached the prompt now gives the
+  text and its erase their own time, so a loaded machine no longer reads as a failed wake.
+
+- **Stopping an isolated agent never deletes through a link.** Removing its worktree first unlinks
+  any junction or symlink inside it, so the folder it points to (such as your repository's
+  node_modules) is left alone.
+
+- **A damaged ~/.claude.json or settings.json is left as it is.** Guppy no longer rewrites a file
+  it cannot parse, and an empty file never replaces the last good backup.
+
+- **"Refresh models" updates the model buttons** listed below it in Settings > Agents & Models.
+
+- **A development build no longer passes its OpenAI and Codex keys** (OPENAI_API_KEY,
+  CODEX_API_KEY, CODEX_ACCESS_TOKEN) on to the agents it starts.
+
+### Internal
+
+- **Test runs:** every test file runs in its own job, which kills everything the file started
+  when the file ends, so a timing test is no longer disturbed by leftovers. A few timing-sensitive
+  tests were made robust under load.
+
+- **Repository tidy:** single-fix tests are folded into feature folders, the packaged-run tool is
+  split up, and unused upstream sample images are removed.
+
 ## [1.1.90] — 2026-10-17
 
 **A CARDS tab to review every card, possible duplicates in the claim ledger, and AGY usage back on

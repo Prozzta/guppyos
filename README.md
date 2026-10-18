@@ -25,7 +25,7 @@ and unattended.
 
 <p>
   <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-F4D35E.svg?style=flat-square&labelColor=6E1423"></a>
-  <img alt="Version: 1.1.90" src="https://img.shields.io/badge/version-1.1.90-F4D35E.svg?style=flat-square&labelColor=6E1423">
+  <img alt="Version: 1.1.91" src="https://img.shields.io/badge/version-1.1.91-F4D35E.svg?style=flat-square&labelColor=6E1423">
   <img alt="Fork of chaitanyagiri/munder-difflin" src="https://img.shields.io/badge/fork%20of-chaitanyagiri%2Fmunder--difflin-F4F1EA.svg?style=flat-square&labelColor=6E1423">
 </p>
 
@@ -279,9 +279,13 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
 - **The claim ledger in Settings** (1.1.89) — Settings shows and edits
   each agent's claims, a working agent that goes silent is flagged, and the TES station keeps its
   proportions with thought clouds that point at the head.
-- **A CARDS tab** (1.1.90, the current release) — the Command Center shows every card for
+- **A CARDS tab** (1.1.90) — the Command Center shows every card for
   review without changing it, the claim ledger groups possible duplicates, and AGY usage is back
   on the capacity bar.
+- **Guppy keeps its hands off your draft** (1.1.91, the current release) — automatic typing
+  goes only into an empty prompt it recognises, a stalled wake is brought to the floor, heavy
+  jobs can run at background priority or on half the processors, and Antigravity wakes are
+  confirmed.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
