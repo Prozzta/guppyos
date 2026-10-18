@@ -326,7 +326,7 @@ export class InboxWakeBridge {
     const delivered = this.deps.inboxIds(agentId);
     const turnEnded = reason === 'stop' || reason === 'stop-failure' || reason === 'stop-before-settle';
     // F11: a close while the claim that surfaced these ids is still in flight is settled there.
-    if (redelivered.length) this.deps.coordinator.noteEpochClosed(agentId, redelivered);
+    if (redelivered.length) this.deps.coordinator.noteEpochClosed(agentId, redelivered, reason);
     let n1Due: string[] = [];
     try { n1Due = this.deps.mail?.n1DueIds?.(agentId) ?? []; } catch { n1Due = []; }
     const r = this.deps.coordinator.repend(agentId, delivered, this.deps.now(), { turnEnded, n1Due });

@@ -486,10 +486,12 @@ export class WorkerWakeWatchdog {
    * F11 (1.1.91): a mail epoch closed with these ids re-delivered. When they belong to the claim
    * still in flight, that claim's turn surfaced them and its epoch is over: repend() cannot
    * re-offer ids it never saw announced, so settle() must (see claimEpochClosed).
+   * Not a close at a new prompt (Jim SHOULD-1): 'interrupted'/'next-turn' re-surface the ids in
+   * that live turn (hooks.ts UserPromptSubmit), so the claim's mail is carried and its turn runs.
    */
-  noteEpochClosed(agentId: string, redelivered: readonly string[]): void {
+  noteEpochClosed(agentId: string, redelivered: readonly string[], reason: string): void {
     const r = this.agents.get(agentId);
-    if (!r?.inFlight) return;
+    if (!r?.inFlight || reason === 'interrupted' || reason === 'next-turn') return;
     if (redelivered.some((id) => r.inFlight!.ids.includes(id))) r.claimEpochClosed = true;
   }
 
