@@ -197,7 +197,7 @@ export class ScreenReadingBroker {
    *             there is nobody to hand it to, which resolves null at once.
    */
   constructor(
-    private readonly send: (ptyId: string, requestId: string, needle: string, expectedTail?: string, codex?: boolean) => boolean,
+    private readonly send: (ptyId: string, requestId: string, needle: string, expectedTail?: string, codex?: boolean, shadow?: boolean) => boolean,
     /** A request nobody answers is forgotten after this long, so a renderer that went
      *  away cannot grow this map. The OWNER has its own, shorter, timeout and does not
      *  depend on this one. */
@@ -209,12 +209,17 @@ export class ScreenReadingBroker {
     }
   ) {}
 
-  request(ptyId: string, needle: string, expectedTail?: string, codex?: boolean): Promise<ScreenReading | null> {
+  /** GTC M2: `shadow` = the gate was answered elsewhere (main's mirror) and this reading is only
+   *  compared, so the renderer must not act on it (no grid align, no redraw: Jim MUST 2). */
+  request(ptyId: string, needle: string, expectedTail?: string, codex?: boolean, shadow?: boolean): Promise<ScreenReading | null> {
     const requestId = `scr-${(this.seq += 1)}`;
     return new Promise((resolve) => {
       this.pending.set(requestId, resolve);
       let sent = false;
-      try { sent = codex ? this.send(ptyId, requestId, needle, expectedTail, true) : this.send(ptyId, requestId, needle, expectedTail); } catch { sent = false; }
+      try {
+        sent = shadow ? this.send(ptyId, requestId, needle, expectedTail, codex === true, true)
+          : codex ? this.send(ptyId, requestId, needle, expectedTail, true) : this.send(ptyId, requestId, needle, expectedTail);
+      } catch { sent = false; }
       if (!sent) this.settle(requestId, null);
       else this.setTimer(() => this.settle(requestId, null), this.forgetAfterMs);
     });

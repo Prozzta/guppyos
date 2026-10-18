@@ -759,8 +759,8 @@ const api = {
   /** L0-FUSION stage 5: main asks this renderer to READ A RENDERED SCREEN for the submit
    *  owner's erase verification. The renderer answers with `answerScreenReading`; it
    *  decides nothing, and silence is read by main as "no reading", never as "erased". */
-  onScreenReadRequest: (cb: (req: { requestId: string; ptyId: string; needle: string; expectedTail?: string; codex?: boolean; grid?: { cols: number; rows: number } }) => void): (() => void) => {
-    const listener = (_e: IpcRendererEvent, req: { requestId: string; ptyId: string; needle: string; expectedTail?: string; codex?: boolean; grid?: { cols: number; rows: number } }) => cb(req);
+  onScreenReadRequest: (cb: (req: { requestId: string; ptyId: string; needle: string; expectedTail?: string; shadow?: boolean; codex?: boolean; grid?: { cols: number; rows: number } }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, req: { requestId: string; ptyId: string; needle: string; expectedTail?: string; shadow?: boolean; codex?: boolean; grid?: { cols: number; rows: number } }) => cb(req);
     ipcRenderer.on('autoSubmit:readScreen', listener);
     return () => ipcRenderer.removeListener('autoSubmit:readScreen', listener);
   },

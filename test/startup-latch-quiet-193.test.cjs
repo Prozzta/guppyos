@@ -102,7 +102,8 @@ test('A wiring: main sends the PTY grid with a guard reading; the renderer align
   assert.match(pool, /const hostSized = host\.isConnected && host\.clientWidth > 0 && host\.clientHeight > 0;\s*if \(screenGridAction\(\{ cols: entry\.term\.cols, rows: entry\.term\.rows \}, req\.grid, hostSized\) === 'align' && req\.grid\) \{\s*try \{ entry\.term\.resize\(req\.grid\.cols, req\.grid\.rows\); \} catch \{[^}]*\}\s*void window\.cth\.redrawPty\(req\.ptyId\);\s*window\.cth\.answerScreenReading\(req\.requestId, null\);\s*return;/);
   // The align branch runs before the normal read, and only for guard (codex) readings.
   assert.ok(pool.indexOf("screenGridAction({ cols") < pool.indexOf("entry.term.write('', () => {\n      const tail"));
-  assert.match(pool, /if \(req\.codex === true && entry\.opened && !entry\.exited\) \{/);
+  // GTC M2 (Jim MUST 2): a shadow read never aligns or redraws; test/gtc-m2-196 runs it.
+  assert.match(pool, /if \(req\.codex === true && req\.shadow !== true && entry\.opened && !entry\.exited\) \{/);
   const preload = readSource('src/preload/index.ts');
   assert.match(preload, /codex\?: boolean; grid\?: \{ cols: number; rows: number \} \}\) => void/);
 });

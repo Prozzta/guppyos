@@ -171,31 +171,36 @@ test('ShadowDiff: moving readings never count as disagreement; disagreement rows
   let t = 0;
   const rows = [];
   const d = new SH.ShadowDiff((r) => rows.push(r), () => t);
-  const a = plainFacts(['x', '❯'], 1);
-  const b = plainFacts(['x', '❯ typed'], 1);
-  assert.equal(d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: b, still: false }), 'moving');
+  // GTC M2: a sample names its reading kind and the host that answered; both readings are whole.
+  const a = { onPromptRow: false, screenCount: 0, codex: plainFacts(['x', '❯'], 1) };
+  const b = { onPromptRow: false, screenCount: 0, codex: plainFacts(['x', '❯ typed'], 1) };
+  const s = (renderer, mirror, still) => ({ agentId: 'a1', ptyId: 'p', provider: 'claude', kind: 'codex', answeredBy: 'renderer', renderer, mirror, still });
+  assert.equal(d.record(s(a, b, false)), 'moving');
   assert.equal(rows.length, 0);
-  assert.equal(d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: a, still: true }), 'agree');
-  assert.equal(d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: b, still: true }), 'disagree');
-  assert.equal(d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: b, still: true }), 'disagree');
+  assert.equal(d.record(s(a, a, true)), 'agree');
+  assert.equal(d.record(s(a, b, true)), 'disagree');
+  assert.equal(d.record(s(a, b, true)), 'disagree');
   assert.equal(rows.length, 1, 'one row per PTY per gap');
   assert.equal(rows[0].kind, 'term-shadow');
+  assert.equal(rows[0].reading, 'codex');
+  assert.equal(rows[0].answeredBy, 'renderer');
   assert.ok(rows[0].fields.includes('cursorRow'));
-  assert.deepEqual(Object.keys(rows[0].gate).sort(), [...rows[0].fields].sort(), 'only the differing fields are logged');
+  assert.deepEqual(Object.keys(rows[0].renderer).sort(), [...new Set([...rows[0].fields.filter((k) => k !== 'class'), 'cursorRow', 'tail'])].sort(), 'only the differing fields are logged, and the tail to judge them by');
   t = SH.SHADOW_ROW_GAP_MS;
-  d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: b, still: true });
+  d.record(s(a, b, true));
   assert.equal(rows.length, 2);
   t = SH.SHADOW_SUMMARY_MS;
-  d.record({ agentId: 'a1', ptyId: 'p', provider: 'claude', gate: a, mirror: a, still: true });
-  assert.deepEqual(rows.at(-1), { kind: 'term-shadow-summary', agree: 2, disagree: 3, moving: 1 });
+  d.record(s(a, a, true));
+  const counts = { agree: 2, disagree: 3, moving: 1, rendererNull: 0, mirrorNull: 0, bothNull: 0 };
+  assert.deepEqual(rows.at(-1), { kind: 'term-shadow-summary', ...counts, by: { 'codex/claude': counts } });
 });
 
-test('shadow wiring: the gate gets the renderer reading untouched; the mirror read happens after, and never feeds the gate', () => {
+test('shadow wiring: both readings go through the source-aware gate (GTC M2; test/gtc-m2-196 runs it)', () => {
   const idx = src('src/main/index.ts');
-  assert.match(idx, /requestCodexScreen: \(ptyId, expectedTail\) => shadowed\(ptyId, screenReadings\.request\(ptyId, '', expectedTail, true\)\)/);
-  const fn = idx.slice(idx.indexOf('function shadowed('), idx.indexOf('function logTermModes('));
-  assert.match(fn, /return reading;\n\}/, 'returns the same promise');
-  assert.match(fn, /still: gen0 !== undefined && ptyManager\.outputGeneration\(ptyId\) === gen0/);
+  assert.match(idx, /requestScreenReading: \(ptyId, needle, expectedTail\) => screenGate\.needle\(ptyId, needle, expectedTail\),/);
+  assert.match(idx, /requestCodexScreen: \(ptyId, expectedTail\) => screenGate\.codex\(ptyId, expectedTail\),/);
+  assert.match(idx, /generation: \(ptyId\) => ptyManager\.outputGeneration\(ptyId\),/);
+  assert.match(idx, /record: \(sample\) => termShadow\.record\(sample\),/);
 });
 
 // ─── 3. TermControl ──────────────────────────────────────────────────────────────────────

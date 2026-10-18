@@ -16,8 +16,12 @@ import { performance } from 'node:perf_hooks';
 import { Terminal } from '@xterm/headless';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { extractCodexScreen, type CodexScreenFacts } from '../shared/codexScreen';
+import { codexReading, needleReading, type CodexReading, type NeedleReading } from '../shared/screenReading';
+import { TERMINAL_SCROLLBACK_LINES } from '../shared/terminalScrollback';
 
-export const MIRROR_SCROLLBACK = 1000;
+/** GTC M2 (Jim MUST 1): the renderer's scrollback. The Codex reading scans the WHOLE buffer for the
+ *  newest session header, so a shorter mirror would read NONE where the renderer reads MODEL. */
+export const MIRROR_SCROLLBACK = TERMINAL_SCROLLBACK_LINES;
 
 /** One reading of the mirror. `lines` are the viewport rows, right-trimmed, top to bottom. */
 export interface MirrorReading {
@@ -41,6 +45,10 @@ export interface TerminalMirror {
   /** The screen-gate facts (shared/codexScreen.ts) over the WHOLE buffer, scrollback included, read
    *  exactly as the renderer's readCodexScreen reads them: the shadow diff compares the two. */
   facts(): Promise<CodexScreenFacts>;
+  /** GTC M2: the screen gate's two readings (shared/screenReading.ts, the renderer's own code), after
+   *  every byte written so far is parsed. Null = not evidence, as the renderer's null is. */
+  needleReading(needle: string, expectedTail?: string): Promise<NeedleReading | null>;
+  codexReading(expectedTail?: string): Promise<CodexReading | null>;
   /** Bytes handed to write() since the mirror was made (the cost sampler's input). */
   bytesWritten(): number;
   dispose(): void;
@@ -132,6 +140,14 @@ export function createTerminalMirror(cols: number, rows: number, make: (c: numbe
       await drained();
       const b = t.buffer.active;
       return extractCodexScreen((i) => b.getLine(i)?.translateToString(true), b.length, b.baseY + b.cursorY);
+    },
+    async needleReading(needle, expectedTail) {
+      await drained();
+      return disposed ? null : needleReading(t.buffer.active, t.rows, needle, expectedTail);
+    },
+    async codexReading(expectedTail) {
+      await drained();
+      return disposed ? null : codexReading(t.buffer.active, expectedTail);
     },
     bytesWritten: () => written,
     dispose() {
