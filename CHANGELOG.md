@@ -11,6 +11,20 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.92] — 2026-10-18
+
+**A hotfix: messages reach Claude agents again.** Rollback: 1.1.90 (reinstall); 1.1.91 has the
+defect this release fixes.
+
+### Fixed
+
+- **Inbox wakes and message-box messages to Claude agents were all held (1.1.91).** The check
+  that lets Guppy type only into an empty prompt it recognises did not know Guppy's own context
+  line (`ctx 42k/1000k (4%)`) under the Claude prompt, so it never recognised the prompt and held
+  every message. It now allows that line, and only that line; a menu or a list under the prompt
+  is still refused. When the check does hold a message, the log now says what it saw (for example
+  `startup:UNKNOWN:footer-row:…`) instead of a bare `startup:no-composer`.
+
 ## [1.1.91] — 2026-10-18
 
 **Guppy never types over your draft, a stalled wake comes to the floor, heavy jobs can leave the
