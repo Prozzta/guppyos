@@ -242,6 +242,28 @@ test('Andy SHOULD-1: only moved files are put back: a dead rollover\'s .tmp rewr
   assert.ok(fs.existsSync(stray) && fs.statSync(folder).isDirectory());
 });
 
+// Andy SHOULD-1 (2nd audit): a restore that died between placing a leftover (a hard link to
+// memory.md) and unlinking it leaves a second name of memory.md itself. Moved kind and settled kind.
+for (const kind of ['aside', 'settled-40']) {
+  test(`Andy SHOULD-1 (2nd): a leftover ${kind} that is a hard link of memory.md is only dropped: every note once, twice over`, (t) => {
+    const dir = tmp(t, 'zti2-link-');
+    const file = path.join(dir, 'memory.md');
+    let o = HEAD;
+    for (let i = 0; i < 50; i++) o += `- ORIGINAL note ${i}\n`;
+    fs.writeFileSync(file, o);
+    const name = `memory.md.rollover-4194301.${kind}`;
+    fs.linkSync(file, path.join(dir, name));
+    clearHooks(t);
+    const r = M.rolloverMemory(dir);
+    assert.deepEqual(r.recovered, [name], JSON.stringify(r));
+    assert.equal(r.recoverFailed, undefined);
+    assert.equal(fs.readFileSync(file, 'utf8'), o, 'memory.md as it was: nothing appended');
+    assert.deepEqual(fs.readdirSync(dir), ['memory.md'], 'the second name is gone');
+    assert.equal(M.rolloverMemory(dir).recovered, undefined);
+    assert.equal(originals(fs.readFileSync(file, 'utf8')), 50);
+  });
+}
+
 test('Andy NIT-1: a write through an old handle after the rollover is kept: the next rollover appends it, then removes the file', (t) => {
   const dir = tmp(t, 'zti2-');
   const file = path.join(dir, 'memory.md');
