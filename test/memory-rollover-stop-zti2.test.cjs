@@ -42,8 +42,14 @@ function missingFacts(dir, n) {
   for (let i = 0; i < n; i++) if (!all.includes(` fact-${i}\n`)) missing++;
   return missing;
 }
+/** What a rollover left that the next one must put back: .settled-<n> files are expected (Andy NIT-1),
+ *  and must hold nothing past <n>. */
 function leftovers(dir) {
-  return fs.readdirSync(dir).filter((n) => n.includes('.rollover-') || n.endsWith('.tmp') || n.includes('.aside'));
+  for (const n of fs.readdirSync(dir)) {
+    const s = /^memory\.md\.rollover-\d+\.settled-(\d+)(?:-\d+)?$/.exec(n);
+    if (s) assert.equal(fs.statSync(path.join(dir, n)).size, Number(s[1]), `${n}: nothing unread`);
+  }
+  return fs.readdirSync(dir).filter((n) => (n.includes('.rollover-') || n.endsWith('.tmp') || n.includes('.aside')) && !/\.settled-\d+(-\d+)?$/.test(n));
 }
 function clearHooks(t) {
   t.after(() => { for (const k of Object.keys(M.rolloverTestHooks)) M.rolloverTestHooks[k] = undefined; });
@@ -144,6 +150,146 @@ test('ZT-I2 (1e): a held new file (antivirus EPERM on placing it) leaves memory.
   assert.equal(fs.readFileSync(file, 'utf8'), `${before}- MEANWHILE-NOTE\n`);
   assert.deepEqual(fs.readdirSync(dir).filter((n) => n.startsWith('memory-archive-')), [], 'the archive append was undone');
   assert.deepEqual(leftovers(dir), []);
+});
+
+// ─── Andy's audit of febacf37: a leftover aside is never overwritten, and is put back ─────────
+
+/** Every file in the folder, whatever its name (a note anywhere on disk is not lost). */
+function allBytes(dir) {
+  return fs.readdirSync(dir).filter((f) => fs.statSync(path.join(dir, f)).isFile()).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+}
+function originals(text) { return (text.match(/ORIGINAL note \d+\n/g) || []).length; }
+/** Andy's probe: a leftover aside with 400 ORIGINAL notes (a restore that failed half-way) and a fresh memory.md over the limit. */
+function probe(t, pid = process.pid) {
+  const dir = tmp(t, 'zti2-aside-');
+  const file = path.join(dir, 'memory.md');
+  const aside = `${file}.rollover-${pid}.aside`;
+  let o = HEAD;
+  for (let i = 0; i < 400; i++) o += `- ORIGINAL note ${i}\n`;
+  fs.writeFileSync(aside, o);
+  fs.writeFileSync(file, bigMemory(14));
+  return { dir, file, aside };
+}
+
+test('Andy MUST-1 (his probe): a leftover aside is put back, never overwritten: all 400 ORIGINAL notes kept', (t) => {
+  const { dir, file, aside } = probe(t);
+  clearHooks(t);
+  const r = M.rolloverMemory(dir, Date.now(), 8 * 1024);
+  assert.equal(r.rotated, true, JSON.stringify(r));
+  assert.deepEqual(r.recovered, [path.basename(aside)]);
+  assert.equal(originals(allText(dir)), 400, 'every ORIGINAL note is in memory.md or an archive');
+  assert.equal(missingFacts(dir, 14), 0, 'and every note of the fresh memory.md');
+  const all = allText(dir);
+  assert.ok(all.indexOf('ORIGINAL note 399') < all.indexOf(' fact-0\n'), 'the leftover is older: its notes come first');
+  assert.deepEqual(leftovers(dir), []);
+});
+
+test('Andy MUST-1: a move never lands on an existing name, even when the leftover cannot be put back yet', (t) => {
+  const { dir, file, aside } = probe(t);
+  clearHooks(t);
+  // Placing the leftover fails (an antivirus holds it): the recovery stops half-way.
+  M.rolloverTestHooks.link = (from, to) => {
+    if (from === aside && to === file) throw Object.assign(new Error('EPERM'), { code: 'EPERM', syscall: 'link' });
+    fs.linkSync(from, to);
+  };
+  const r = M.rolloverMemory(dir, Date.now(), 8 * 1024);
+  assert.equal(r.recoverFailed, 'EPERM', JSON.stringify(r));
+  assert.equal(originals(allBytes(dir)), 400, 'the ORIGINAL notes are still on disk (memory.md went to a NEW name, not over them)');
+  assert.ok(fs.existsSync(`${aside}-2`), 'memory.md was moved to the next free name');
+  M.rolloverTestHooks.link = undefined;
+  const r2 = M.rolloverMemory(dir, Date.now(), 8 * 1024);
+  assert.ok(r2.recovered && r2.recovered.length >= 2, JSON.stringify(r2));
+  assert.equal(originals(allText(dir)) >= 400, true, 'all back in memory.md or an archive (a duplicate is safe)');
+  for (let i = 0; i < 400; i++) assert.ok(allText(dir).includes(`ORIGINAL note ${i}\n`), `note ${i}`);
+  assert.equal(missingFacts(dir, 14), 0);
+  assert.deepEqual(leftovers(dir), []);
+});
+
+test('Andy SHOULD-1: after a restart (another pid, gone) a leftover aside with memory.md absent becomes memory.md, even under the limit', (t) => {
+  const { dir, file, aside } = probe(t, 4194301);
+  fs.rmSync(file);
+  clearHooks(t);
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.rotated, false);
+  assert.deepEqual(r.recovered, [path.basename(aside)]);
+  assert.equal(originals(fs.readFileSync(file, 'utf8')), 400);
+  assert.deepEqual(leftovers(dir), []);
+});
+
+test('Andy SHOULD-1: a live process\'s aside is not touched (its rollover may be running)', (t) => {
+  const { dir, aside } = probe(t, process.ppid);
+  const before = fs.readFileSync(aside, 'utf8');
+  clearHooks(t);
+  const r = M.rolloverMemory(dir, Date.now(), 8 * 1024);
+  assert.equal(r.rotated, true);
+  assert.equal(r.recovered, undefined);
+  assert.equal(fs.readFileSync(aside, 'utf8'), before);
+});
+
+test('Andy SHOULD-1: only moved files are put back: a dead rollover\'s .tmp rewrite (a copy) and a folder are left alone', (t) => {
+  const dir = tmp(t, 'zti2-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, HEAD + '- the live notes\n');
+  const stray = `${file}.rollover-4194301.tmp`;
+  fs.writeFileSync(stray, HEAD + '- a half-written rewrite\n');
+  const folder = `${file}.rollover-4194301.aside`;
+  fs.mkdirSync(folder);
+  clearHooks(t);
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.recovered, undefined, JSON.stringify(r));
+  assert.equal(r.recoverFailed, undefined);
+  assert.equal(fs.readFileSync(file, 'utf8'), HEAD + '- the live notes\n', 'memory.md as it was');
+  assert.ok(fs.existsSync(stray) && fs.statSync(folder).isDirectory());
+});
+
+test('Andy NIT-1: a write through an old handle after the rollover is kept: the next rollover appends it, then removes the file', (t) => {
+  const dir = tmp(t, 'zti2-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  clearHooks(t);
+  let settled = null;
+  M.rolloverTestHooks.afterPlace = (f, asides) => { settled = asides[0]; };
+  const fd = fs.openSync(file, 'a');   // a writer that holds memory.md open across the rollover
+  t.after(() => { try { fs.closeSync(fd); } catch { /* closed */ } });
+  assert.equal(M.rolloverMemory(dir).rotated, true);
+  const parked = fs.readdirSync(dir).filter((n) => /\.settled-\d+$/.test(n));
+  assert.equal(parked.length, 1, `the replaced file waits as .settled (${settled})`);
+  fs.writeSync(fd, '- LATE-THROUGH-OLD-HANDLE\n');
+  fs.closeSync(fd);
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.rotated, false);
+  assert.deepEqual(r.recovered, parked);
+  assert.match(fs.readFileSync(file, 'utf8'), /LATE-THROUGH-OLD-HANDLE\n$/);
+  assert.deepEqual(fs.readdirSync(dir).filter((n) => n.includes('.rollover-')), [], 'read once more, then removed');
+});
+
+test('Andy NIT-2: no hard links: the rename fallback is reported; EXDEV is no longer taken for it', (t) => {
+  const dir = tmp(t, 'zti2-');
+  const file = path.join(dir, 'memory.md');
+  fs.writeFileSync(file, bigMemory(90));
+  clearHooks(t);
+  M.rolloverTestHooks.link = () => { throw Object.assign(new Error('ENOTSUP'), { code: 'ENOTSUP', syscall: 'link' }); };
+  const r = M.rolloverMemory(dir);
+  assert.equal(r.rotated, true, JSON.stringify(r));
+  assert.equal(r.noLink, true);
+  assert.equal(missingFacts(dir, 90), 0);
+  const dir2 = tmp(t, 'zti2-');
+  const file2 = path.join(dir2, 'memory.md');
+  fs.writeFileSync(file2, bigMemory(90));
+  const before = fs.readFileSync(file2, 'utf8');
+  M.rolloverTestHooks.link = () => { throw Object.assign(new Error('EXDEV'), { code: 'EXDEV', syscall: 'link' }); };
+  const r2 = M.rolloverMemory(dir2);
+  assert.equal(r2.replaceFailed, 'EXDEV', JSON.stringify(r2));
+  assert.equal(r2.noLink, undefined);
+  assert.equal(fs.readFileSync(file2, 'utf8'), before, 'memory.md as it was');
+});
+
+test('Andy SHOULD-1 / NIT-2 rows: the hive logs a recovery and a no-link rollover, at spawn and at Stop', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'main', 'hive.ts'), 'utf8');
+  assert.match(src, /const r = rolloverMemory\(dir, Date\.now\(\), MEMORY_STOP_ROLLOVER_BYTES\);\s*this\.logRolloverSide\(id, r, 'stop'\);/);
+  assert.match(src, /const r = rolloverMemory\(dir\);\s*this\.logRolloverSide\(meta\.id, r, 'spawn'\);/);
+  assert.match(src, /if \(r\.recovered\?\.length \|\| r\.recoverFailed\) this\.appendLog\(\{ kind: 'memory-rollover-recovered', agentId, at, files: r\.recovered \?\? \[\]/);
+  assert.match(src, /if \(r\.noLink\) this\.appendLog\(\{ kind: 'memory-rollover-nolink', agentId, at \}\);/);
 });
 
 // ─── Condition (2): the long-lived agent, rolled over at its Stop ──────────────────────────────
