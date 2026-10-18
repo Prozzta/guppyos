@@ -223,6 +223,14 @@ const noHardLinks = (e: unknown): boolean => {
   return code === 'ENOTSUP' || code === 'ENOSYS';
 };
 
+/** Two names of one file (dev+ino). Bigint stats: a Windows file id can pass 2^53. */
+const sameFile = (a: string, b: string): boolean => {
+  try {
+    const x = statSync(a, { bigint: true }), y = statSync(b, { bigint: true });
+    return x.ino === y.ino && x.dev === y.dev;
+  } catch { return false; }
+};
+
 /**
  * ZT-I2 (Andy MUST-1): move `from` to the first free name of `to`, `to-2`, `to-3`, ... and return
  * it. A rename replaces an existing destination on Windows (a leftover aside's notes were lost that
@@ -248,7 +256,7 @@ function moveNoReplace(from: string, to: string, flags: MoveFlags, rename?: (fro
     try {
       renameSync(from, dest);
       // POSIX leaves both names when they are one file: drop `from`'s.
-      if (existsSync(from) && statSync(from).ino === statSync(dest).ino) unlinkSync(from);
+      if (sameFile(from, dest)) unlinkSync(from);
     } catch (e) { try { unlinkSync(dest); } catch { /* two names of one file: nothing lost */ } throw e; }
     return dest;
   }
@@ -327,6 +335,9 @@ function recoverLeftovers(dir: string, file: string, flags: MoveFlags): { recove
       const s = SETTLED.exec(m![2]);
       if (!s) continue;
       const p = join(dir, n);
+      // Andy SHOULD-1 (2nd audit): a crash between placing and unlinking leaves the leftover as a
+      // second name of memory.md itself. Its notes are already there: drop the name, append nothing.
+      if (sameFile(p, file)) { unlinkSync(p); recovered.push(n); continue; }
       const got = readFileSync(p);
       if (got.length > Number(s[1])) { appendFileSync(file, got.subarray(Number(s[1]))); recovered.push(n); }
       rmSync(p, { force: true });
@@ -335,6 +346,7 @@ function recoverLeftovers(dir: string, file: string, flags: MoveFlags): { recove
     const moved = mine.filter(({ m }) => !SETTLED.test(m![2])).map(({ n }) => ({ n, p: join(dir, n), born: statSync(join(dir, n)).birthtimeMs }))
       .sort((a, b) => a.born - b.born);
     for (const { n, p } of moved) {
+      if (sameFile(p, file)) { unlinkSync(p); recovered.push(n); continue; }
       const taken: { path: string; taken: number }[] = [];
       if (existsSync(file)) {
         const cur = moveNoReplace(file, `${file}.rollover-${process.pid}.aside`, flags);
