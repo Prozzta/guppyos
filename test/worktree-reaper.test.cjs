@@ -1,4 +1,5 @@
 'use strict';
+// @heavy-lock live: sustained work: real git worktrees (about 41 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 /**
  * WORKTREE-REAPER (1.1.80 candidate): scripts/worktree-reaper.cjs.
  * - The planner is pure: one synthetic entry per KEEP/REAP rule.

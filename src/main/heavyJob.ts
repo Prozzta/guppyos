@@ -210,6 +210,9 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     if (c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>')) { cur += c; continue; }
     // sh's clobber redirect `>|` (and `2>|`) is one operator, not a `>` then a pipe.
     if (d === 'sh' && c === '|' && cmd[i - 1] === '>') { cur += c; continue; }
+    // HEAVY-LOCK-LIVE-FILE-192 (b): a lone `&` that starts a command backgrounds nothing; it is
+    // PowerShell's call operator (`& "$p" K3`), kept as a word so the program it calls is classified.
+    if (c === '&' && !cur.trim() && cmd[i + 1] !== '&') { cur += '& '; continue; }
     if (c === ';' || c === '\n' || c === '|' || c === '&') {
       if (c === '&' && cmd[i + 1] !== '&' && cmd[i - 1] !== '&') { cur += ' &'; out.push(cur); cur = ''; continue; } // a lone & = background
       out.push(cur); cur = '';
@@ -263,6 +266,9 @@ function leading(ws: string[]): string[] {
     if (w === 'timeout' || w === 'nice') { i++; while (i < ws.length && (/^-/.test(ws[i]) || /^\d+[smhd]?$/.test(ws[i]))) i++; continue; }
     // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): `nohup npm test &`, `time npm test`, `setsid npm test` run what follows.
     if (w === 'nohup' || w === 'time' || w === 'setsid') { i++; while (i < ws.length && /^-/.test(ws[i])) i++; continue; }
+    // HEAVY-LOCK-LIVE-FILE-192: a compound command's keyword is not its program (`for m in a b; do node
+    // "$S" $m; done` read as the program `do`, so a 10-minute mutant loop ran beside a held slot).
+    if (/^(do|then|else|elif|if|while|until|!)$/.test(w)) { i++; continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
   }
@@ -356,12 +362,30 @@ export interface ClassifyCtx {
    *  variable the command itself assigns wins. Absent = such a path stays unreadable (fail closed). */
   env?: Readonly<Record<string, string>>;
   /** HEAVY-LOCK-FALSE-HEAVY-198, set by classifyCommand: a word with the variables this command set
-   *  to a literal (and the spawn env) substituted, as the shell will (`f=x.test.cjs && node --test $f`). */
+   *  to a literal (and the spawn env) substituted, as the shell will (`f=x.test.cjs && node --test $f`).
+   *  HEAVY-LOCK-LIVE-FILE-192: so a program named through `$S` is judged by the path it names. */
   expand?: (word: string) => string;
   /** HEAVY-LOCK-FALSE-HEAVY-198 (Jim, god 2d273e): where a path readScript resolves to has no file,
    *  that absolute path (for the deny text: "no such file at ..."); null when one is there, or when
    *  the path is not resolvable. Absent = the reason stays "cannot read yet". */
   missingAt?: (path: string, cd?: string) => string | null;
+}
+
+/** HEAVY-LOCK-LIVE-FILE-192: a word still computed after expansion (a variable the command did not
+ *  set, `$(...)`, a backtick, a PowerShell subexpression). */
+const COMPUTED = /[$`]/;
+
+/** HEAVY-LOCK-LIVE-FILE-192: what `word` names, expanded; null when that is still computed. */
+function named(word: string, ctx: ClassifyCtx): string | null {
+  const w = word.replace(/^["']|["']$/g, '');
+  const x = COMPUTED.test(w) && ctx.expand ? ctx.expand(w) : w;
+  return COMPUTED.test(x) ? null : x;
+}
+
+/** HEAVY-LOCK-LIVE-FILE-192 (b): a program reached through a path the lock cannot name is unknown:
+ *  heavy, provisional, as an unreadable script is. */
+function unnamed(what: string): HeavyClass {
+  return { heavy: true, kind: 'bench', why: `${what} (a path the lock cannot name)`, provisional: true };
 }
 
 /** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
@@ -435,7 +459,21 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: 
  * (`const { spawnSync: run } = require('child_process')`), `node` fed by a pipe with no `-`, and
  * loaders other than node, tsx and ts-node.
  */
-const JS_MARKER = /onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory\/+(?:embedder|engine)\b|claims-drill|claims-bed\/+run\b|test\/+tools\/+run-tests/;
+// HEAVY-LOCK-LIVE-FILE-192 (a): the Electron harness runner launches a real Electron (and renderer).
+const JS_MARKER = /onnxruntime(?:-node|-web)?|@(?:huggingface|xenova)\/transformers|nativeMemory\/+(?:embedder|engine)\b|claims-drill|claims-bed\/+run\b|test\/+tools\/+run-tests|electron-harness\/+run\b/;
+/** HEAVY-LOCK-LIVE-FILE-192 (a): a script that DECLARES itself live (it spawns real CLIs or native
+ *  helpers, or does sustained work the scan cannot see), in a comment near its top:
+ *  `// @heavy-lock live`, a line of its own (or of a block comment). Read from the raw text (the
+ *  tokenizer drops comments); a string that merely holds the words is not a declaration. */
+const LIVE_TAG = /^[ \t]*(?:\/\/+|\/?\*+)[ \t]*@heavy-lock[: \t]+live\b/m;
+const LIVE_TAG_CHARS = 4096;
+/** HEAVY-LOCK-LIVE-FILE-192 (a): live test files known by name, for a branch whose file does not declare
+ *  itself yet (the pid-attach branch's file spawns real job helpers and holds them for about 40 s). */
+const LIVE_FILES = new Set(['heavy-cpu-agent-job-192.test.cjs']);
+/** A spawned `node --test`'s options that take the next element as their value. */
+const TEST_VALUED = /^(--test-(name-pattern|skip-pattern|reporter|reporter-destination|concurrency|timeout|shard|coverage-include|coverage-exclude)|--(import|require|loader|experimental-loader|env-file)|-r)$/;
+/** HEAVY-LOCK-LIVE-FILE-192 (a): test/perf's wall-clock gates (CLAIMS-PERF-LANE) are benches. */
+const PERF_FILE = /\.perf\.[cm]?js$/i;
 const JS_SPAWN = new Set(['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']);
 /** A script node runs: .js/.cjs/.mjs/.ts (also .cts/.mts). */
 const JS_SCRIPT = /\.[cm]?[jt]s$/i;
@@ -505,9 +543,10 @@ function normPath(p: string): string {
 }
 
 /** What a script's text loads: the first heavy marker (or null) and the helper paths to read next. */
-function scanJs(text: string): { marker: string | null; helpers: string[] } {
+function scanJs(text: string): { marker: string | null; helpers: string[]; tests?: string[] } {
   const ts = jsTokens(text);
   const helpers: string[] = [];
+  const tests: string[] = [];
   const consts = new Map<string, string>();
   const requires = new Set(['require', 'loadTs']);
   // `const s = '…'` (string constants a spawn may name) and `const req = createRequire(…)`.
@@ -569,14 +608,40 @@ function scanJs(text: string): { marker: string | null; helpers: string[] } {
       const owner = dotted ? ts[k - 2]?.v ?? '' : '';
       if (x.v === 'exec' && dotted && !/^(child_process|cp|childProcess)$/.test(owner)) continue;   // RegExp#exec
       const args = call(k + 1).all.map((a) => (a.t === 'id' && consts.has(a.v) ? { t: 'str' as const, v: consts.get(a.v)! } : a));
-      for (const a of args) {
+      for (let j = 0; j < args.length; j++) {
+        const a = args[j];
         if (a.t !== 'str') continue;
+        // HEAVY-LOCK-LIVE-FILE-192: a script that spawns `node --test` runs the file it names: a named
+        // file is read like a helper; a computed one (a mutant or repeat loop's `['--test', file]`) is
+        // unknown work. `__filename` is this file, already read.
+        if (a.v === '--test') {
+          // The elements after it, to the end of the list: options (and a valued one's value) pass.
+          const els: JsTok[][] = [[]];
+          for (let d = 0, i = j + 1; i < args.length; i++) {
+            const b = args[i];
+            if (b.t === 'p' && '([{'.includes(b.v)) d++;
+            if (b.t === 'p' && ')]}'.includes(b.v) && --d < 0) break;
+            if (d === 0 && b.t === 'p' && b.v === ',') els.push([]); else els[els.length - 1].push(b);
+          }
+          let computed = false;
+          for (let e = 0; e < els.length; e++) {
+            const [x0, ...rest] = els[e];
+            if (!x0) continue;
+            const one = !rest.length;
+            if (one && x0.t === 'str' && x0.v.startsWith('-')) { if (TEST_VALUED.test(x0.v)) e++; continue; }
+            if (one && x0.t === 'str') { if (JS_SCRIPT.test(x0.v)) tests.push(x0.v); continue; }
+            if (one && x0.v === '__filename') continue;
+            computed = true;
+          }
+          if (computed) return { marker: 'spawns node --test of a computed file', helpers };
+          continue;
+        }
         const m = JS_MARKER.exec(norm(a.v)) ?? /\bELECTRON_RUN_AS_NODE=/.exec(a.v);
         if (m) return { marker: m[0].replace(/=$/, ''), helpers };
       }
     }
   }
-  return { marker: null, helpers };
+  return { marker: null, helpers, tests };
 }
 
 /** HEAVY-LOCK-ADHOC-NODE: the program `node …` will run (script, preloads, inline or stdin code). */
@@ -632,8 +697,8 @@ function nodeProgram(args: string[]): NodeProgram {
 }
 
 /** Inline code, stdin code, or a script file (plus preloads and helpers, two hops deep) that loads a heavy runtime. */
-function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false): HeavyClass {
-  const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (loads ${marker})` });
+function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false, maxFiles = HEAVY_JS_MAX_FILES): HeavyClass {
+  const hit = (marker: string, where: string): HeavyClass => ({ heavy: true, kind: 'bench', why: `node ${where} (${marker.startsWith('spawns ') ? '' : 'loads '}${marker})` });
   // HEAVY-LOCK-SHAPES-189: node runs an extensionless script as node resolves it (`node run`: the
   // file run, else run.js, else run/index.js); a shebang script (`./run`, anyName) is the file itself.
   // One that does not read stays as before (not judged): the replay showed the name is mostly not a
@@ -659,10 +724,10 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false)
   if (!roots.length) return { heavy: false };
   const name = (prog.script ?? roots[0]).replace(/\\/g, '/').split('/').pop()!;
   const seen = new Set<string>();
-  const queue = roots.map((r) => ({ path: r, hop: 0 }));
+  const queue: { path: string; hop: number; test?: boolean }[] = roots.map((r) => ({ path: r, hop: 0 }));
   let read = 0; let tries = 0;
-  while (queue.length && read < HEAVY_JS_MAX_FILES && tries < 4 * HEAVY_JS_MAX_FILES) {
-    const { path, hop } = queue.shift()!;
+  while (queue.length && read < maxFiles && tries < 4 * maxFiles) {
+    const { path, hop, test } = queue.shift()!;
     const key = normPath(path);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -676,8 +741,15 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false)
     if (text === null && hop === 0 && (path === prog.script || /^(\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])/.test(path))) return unreadable(path, ctx);
     if (!text) continue;   // unreadable helper, or an empty file: decided by the rest
     read++;
+    const base = key.split('/').pop()!;
+    if (hop === 0 || test) {
+      if (LIVE_TAG.test(text.slice(0, LIVE_TAG_CHARS))) return { heavy: true, kind: 'bench', why: `node ${base} (declares @heavy-lock live)` };
+      if (LIVE_FILES.has(base)) return { heavy: true, kind: 'bench', why: `node ${base} (a known live test file)` };
+    }
     const s = scanJs(text);
     if (s.marker) return hit(s.marker, hop === 0 && roots.length === 1 ? name : `${name} via ${key.split('/').pop()}`);
+    // A test file it spawns is named from the working directory, and its own tag counts.
+    for (const t of s.tests ?? []) queue.push({ path: t, hop: hop + 1, test: true });
     if (hop >= 2) continue;
     const dir = key.includes('/') ? key.slice(0, key.lastIndexOf('/') + 1) : '';
     for (const h of s.helpers) {
@@ -778,6 +850,12 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   if (/^\$\((?:which|command\s+-v)\s+node\)$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
   if (/^`(?:which|command\s+-v)\s+node`$/.test(ws[0])) return classifyWords(['node', ...ws.slice(1)], depth, ctx);
   if (/^\$(?:[A-Za-z_][A-Za-z0-9_]*|env:[A-Za-z_][A-Za-z0-9_]*)$/.test(ws[0]) || /^\$\{[A-Za-z_][A-Za-z0-9_]*(?::[-=+?][^}]*)?\}$/.test(ws[0])) {
+    // HEAVY-LOCK-LIVE-FILE-192 (b): a program this command named (`p=.../mut.cjs; & $p K3`, PowerShell's
+    // `&` being sh's background operator here) is the program it names.
+    const program = named(ws[0], ctx);
+    if (program !== null && depth + 1 < MAX_DEPTH) return classifyWords([program, ...ws.slice(1)], depth + 1, ctx);
+    // An unnamed program alone is unknown (`& $exe`): heavy, provisional.
+    if (ws.length === 1) return unnamed(ws[0]);
     if (ws.length > 1) {
       const next = ws[1].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
       if (/^(?:node|npm|pnpm|yarn|npx|electron-vite|electron-builder|electron-rebuild|vitest)$/.test(next)) return classifyWords(ws.slice(1), depth, ctx);
@@ -857,12 +935,27 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     const f = args.findIndex((a) => PS_FILE_PARAM.test(a));
     if (f >= 0 && args[f + 1]) return classifyScript(args[f + 1], depth, ctx);
   }
+  // HEAVY-LOCK-LIVE-FILE-192 (b): PowerShell's call operator runs the program it names (`& $p K3`,
+  // `& "C:\...\node.exe" --test x`); it read as the program `&`. A name still computed after the
+  // command's own assignments (`& $exe`, `& (Join-Path $d x.ps1)`) is unknown: heavy, provisional.
+  if (bin === '&' && args.length && !args[0].startsWith('{')) {
+    const target = args[0].startsWith('(') ? null : named(args[0], ctx);
+    if (target === null) {
+      // A variable program's arguments may still name the runner (`& $node test/tools/run-tests.cjs`).
+      const byArgs = args.length > 1 && depth + 1 < MAX_DEPTH ? classifyWords(args, depth + 1, ctx) : null;
+      return byArgs?.heavy ? byArgs : unnamed(`& ${args[0]}`);
+    }
+    return depth + 1 >= MAX_DEPTH ? capped('&') : classifyWords([target, ...args.slice(1)], depth + 1, ctx);
+  }
   // A { } script block runs: PowerShell's `Start-Job { npm test }`, `Invoke-Command -ScriptBlock {...}`,
   // `... | ForEach-Object { npm test }`, `& { ... }`, and sh's group `{ npm test; }`.
   const block = ws[0].startsWith('{') ? scriptBlock(ws) : PS_BLOCK_BIN.test(bin) ? scriptBlock(args) : null;
   if (block !== null) return block ? nested(block, depth, ctx, `${bin} { }`) : { heavy: false };
   // A script run directly (`./suite.sh`, `scripts/gate.sh`; HEAVY-LOCK-SHAPES-189: `./x.ps1`).
   if (/\.(sh|bash|ps1)$/i.test(ws[0])) return classifyScript(ws[0], depth, ctx);
+  // HEAVY-LOCK-LIVE-FILE-192 (b): a JS file run directly (`& $p K3` with `$p = '...\mut.cjs'`, a
+  // shebang `./mut.cjs`) runs under node: node's script rules decide.
+  if (/\.[cm]?js$/i.test(ws[0]) && depth + 1 < MAX_DEPTH) return classifyWords(['node', ...ws], depth + 1, ctx);
   // HEAVY-LOCK-SHAPES-189: `source x.sh` / `. x.sh` run the script in this shell.
   if ((bin === 'source' || ws[0] === '.') && args[0]) return classifyScript(args[0], depth, ctx);
   // HEAVY-LOCK-SHAPES-189: a batch file (`cmd /c x.bat`, `call x.cmd`, `x.bat`) runs its text as cmd.
@@ -936,17 +1029,40 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
         if (e === a) files.push(a); else files.push(...e.split(/\s+/).filter(Boolean));
       }
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
-      if (files.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
+      if (files.some((f) => /[*?]/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
+      // HEAVY-LOCK-LIVE-FILE-192 (b): a test file named through a variable is the file it names; one
+      // the lock cannot name (`for f in ...; do node --test test/$f.test.cjs`) is unknown: heavy,
+      // provisional (HEAVY-LOCK-SHAPES-189 let it through as a loop of single files; a loop of LIVE
+      // files is exactly what ran beside a held slot).
+      const paths: string[] = [];
+      for (const f of files) {
+        const p = named(f, ctx);
+        if (p === null) return unnamed(`node --test ${f}`);
+        paths.push(p);
+      }
+      if (paths.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
+      const perf = paths.find((p) => PERF_FILE.test(p));
+      if (perf) return { heavy: true, kind: 'bench', why: `node --test ${perf.replace(/\\/g, '/').split('/').pop()} (a wall-clock perf gate)` };
       // HEAVY-LOCK-SHAPES-189: a named test file the lock cannot read (made later in the call) is
-      // unknown, as an unreadable script is: heavy, provisional. A computed name (`for f in ...; do
-      // node --test test/$f.test.cjs`) stays as before: the replay showed it is a loop of single files.
-      if (ctx.readScript && !ctx.loopWord) {
-        for (const f of files.filter((x) => !x.includes('$'))) {
+      // unknown, as an unreadable script is: heavy, provisional. LIVE-FILE-192 (B, god 66dee2): one
+      // iteration of a short literal loop (GLOB-LOOP-196 planned it, its word written in) keeps the
+      // replay's reading for a file it cannot read: a loop of single files, light. A loop whose list is
+      // not literal never gets here (loopPlan makes it a suite), and a name still computed is unnamed().
+      if (ctx.readScript) {
+        const readable: string[] = [];
+        for (const f of paths) {
           let t: string | null = null;
           try { t = ctx.readScript(f, ctx.cd); } catch { t = null; }
-          if (t === null) return unreadable(f, ctx);
+          if (t !== null) readable.push(f);
+          else if (!ctx.loopWord) return unreadable(f, ctx);
         }
+        // HEAVY-LOCK-LIVE-FILE-192 (a): a test file is judged by what it loads, as `node x.cjs` is (the
+        // Electron harness, the embedder, a suite runner), or by its own `@heavy-lock live` line. A
+        // single LIVE file (40 s of real helpers and holds) read as light. Every readable file is read,
+        // in a loop too (B): each value's file, so a loop over live files is heavy by their tags.
+        const c = classifyNodeCode({ script: null, preloads: readable, inline: null, stdin: false }, { ...ctx, stdin: undefined }, false, readable.length + HEAVY_JS_MAX_FILES);
+        if (c.heavy) return c;
       }
       return { heavy: false };
     }
@@ -954,7 +1070,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
     // it; the value of `--require x` / `-r x` / `--import x` is not the script (it made
     // `node --require x test/tools/run-tests.cjs` light). `-e` code has no script.
     const at = nodeScriptIndex(args);
-    const script = at >= 0 ? args[at] : undefined;
+    // HEAVY-LOCK-LIVE-FILE-192 (b): a script named through a variable (`S=.../mutants-pa.cjs; node
+    // "$S" K3`) is judged by the path it names: its name and its text. One the lock cannot name is
+    // unknown: heavy, provisional.
+    const script0 = at >= 0 ? args[at] : undefined;
+    const script = script0 === undefined ? undefined : named(script0, ctx) ?? undefined;
+    if (script0 !== undefined && script === undefined) return unnamed(`${bin} ${script0}`);
+    if (script !== undefined && script !== script0) args[at] = script;
     if (script && BENCH_SCRIPT.test(script)) return { heavy: true, kind: 'bench', why: `node ${script.replace(/\\/g, '/').split('/').pop()}` };
     // Jim MF2: a whole-suite runner script with no filter argument is the suite.
     if (script && SUITE_RUNNER.test(script)) {
@@ -1024,7 +1146,14 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // caller passed (`$TEMP`, `${HOME}`, PowerShell's `$env:TEMP`), and a leading `~` to its HOME.
   const env = ctx.env ?? {};
   const envGet = (n: string): string | undefined => env[n] ?? env[Object.keys(env).find((k) => k.toLowerCase() === n.toLowerCase()) ?? ''];
+  // HEAVY-LOCK-LIVE-FILE-192: a substitution or `bash -c` body sees the variables of the command that
+  // runs it (`J=/x; for f in a b; do echo $(node $J/ok.cjs); done`).
+  const outer = ctx.expand;
   const expand = (v: string): string => {
+    const s0 = expand1(v);
+    return outer && COMPUTED.test(s0) ? outer(s0) : s0;
+  };
+  const expand1 = (v: string): string => {
     const s = v.replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (m, p: string | undefined, n: string | undefined) =>
       p ? envGet(p) ?? m : vars.get(n!) ?? env[n!] ?? m);
     return env.HOME && /^~(?=[\\/]|$)/.test(s) ? `${env.HOME.replace(/[\\/]+$/, '')}${s.slice(1)}` : s;
@@ -1085,6 +1214,14 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
         const at = w.indexOf('=');
         vars.set(w.slice(0, at), expand(w.slice(at + 1).replace(/^["']|["']$/g, '')));
       }
+    }
+    // HEAVY-LOCK-LIVE-FILE-192 (b): PowerShell's `$p = 'C:\x\mut.cjs'` (or `$p='...'`) sets $p for a
+    // later `node $p` / `& $p`. Only a literal: anything computed stays unset (unknown, fail closed).
+    const psSet = ws.length === 1 ? /^\$([A-Za-z_][A-Za-z0-9_]*)=(.+)$/.exec(ws[0])
+      : ws.length === 3 && ws[1] === '=' ? /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(ws[0]) : null;
+    if (psSet) {
+      const v = (ws.length === 1 ? psSet[2] : ws[2]).replace(/^["']|["']$/g, '');
+      if (!/[$`(@[]/.test(v)) vars.set(psSet[1], v);
     }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `cd X && bash suite.sh` reads X/suite.sh.
     if ((ws[0] === 'cd' || ws[0] === 'pushd') && ws[1] && !ws[1].startsWith('-')) {

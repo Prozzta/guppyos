@@ -1,4 +1,5 @@
 'use strict';
+// @heavy-lock live: sustained work: rasterises scenes (about 43 s in the 1.1.91 FULL). HEAVY-LOCK-LIVE-FILE-192: one run of this file takes the heavy slot.
 
 // TES-GUPPY-RASTER, TES-FLOOR-EASE-188: drawn whole every frame, TES's 'below' and statics cost
 // about twice the office's raster time, and at a fractional zoom each sprite rounded on its own
