@@ -286,8 +286,10 @@ wholesale merges. The shape of the line, as evidence for the three ideas above:
   goes only into an empty prompt it recognises, a stalled wake is brought to the floor, heavy
   jobs can run at background priority or on half the processors, and Antigravity wakes are
   confirmed.
-- **Wakes reach Claude agents again** (1.1.92, the current release) — a hotfix: the prompt
+- **Wakes reach Claude agents again** (1.1.92) — a hotfix: the prompt
   check recognises Guppy's own context line under the Claude prompt, so messages are delivered.
+- **Wakes are sent again** (1.1.93, the current release) — a second hotfix: Guppy recognises
+  its own typed wake in the Claude prompt and presses Enter on it.
 
 Every milestone carries a dated human acceptance and evidence tag in the fork's
 internal mission ledger; this README keeps only the shape.
