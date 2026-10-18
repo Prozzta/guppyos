@@ -1,4 +1,5 @@
 'use strict';
+// @heavy-lock live: spawns real job helpers and holds them for about 40 s
 /**
  * CODEX-AGY-ASKFIRST-HEAVYCPU-192: a heavy call that cannot take a join line (an agent that asks
  * its user first, or a Codex shell Guppy cannot read) runs in its agent's own job. The agent's tree
