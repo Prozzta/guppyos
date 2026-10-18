@@ -19,8 +19,9 @@ All notable changes to this project are documented here. The format is based on
 ### Fixed
 
 - **Wakes to Claude agents were typed but never sent (1.1.92).** Guppy typed the wake into the
-  prompt, then checked that the prompt held only its own text before pressing Enter. On screen,
-  that text can read with no space after the prompt mark (`❯You have new hive mail …`). The check
+  prompt, then checked that the prompt held only its own text before pressing Enter. Claude
+  echoes typed text at the terminal cursor; in live sessions it lands on the separator cell, so
+  the staged wake reads with no space after the prompt mark (`❯You have new hive mail …`). The check
   did not accept that, so it never pressed Enter, and every wake was held. The prompt mark now
   counts with or without the space. A row that reads like a menu option (`❯1. Yes`) is still
   refused, and a person's own text in the prompt is still never sent.
