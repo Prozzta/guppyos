@@ -286,7 +286,7 @@ async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitte
   const s = { god: 0, submitted: undefined, enterAt: undefined, reportAt: undefined };
   const { r, out } = await heldLikeDwight({ deps: {
     godGeneration: () => s.god,
-    // god 8df2e3: `godEnter` / `reportAt` are ms from now: god's `term` Enter, and the one submit
+    // god 8df2e3: `godEnter` / `reportAt` are ms from the hold: god's `term` Enter, and the one submit
     // the provider reports (then answered by time, at or after `since`).
     godEnterAt: () => s.enterAt,
     lastHumanInputAt: () => (lastAt === undefined || !s.r ? undefined : s.r.now - lastAt),
@@ -295,8 +295,9 @@ async function heldThenGod({ keys = 1, person = 0, prompt = '', lastAt, submitte
   assert.equal(out.kind, 'INTERFERED');
   r.human += keys + person; s.god += keys; r.prompt = prompt; r.gen += 1;
   s.submitted = submitted; s.r = r;
-  if (godEnter !== undefined) s.enterAt = r.now + godEnter;
-  if (reportAt !== undefined) s.reportAt = r.now + reportAt;
+  const holdAt = r.owner.inhibited.get('p1').at;
+  if (godEnter !== undefined) s.enterAt = holdAt + godEnter;
+  if (reportAt !== undefined) s.reportAt = holdAt + reportAt;
   return { r, s };
 }
 
@@ -351,11 +352,20 @@ K.godSendRulesPersonHold = async (M = OWNER) => {
 test('GOD (god 8df2e3): a submit reported after god\'s term Enter ends a person-caused hold as handled, labelled god-send', () => K.godSendRulesPersonHold());
 
 K.godSendBeforeHoldIgnored = async (M = OWNER) => {
-  const { r } = await heldThenGod({ person: 1, godEnter: -10_000_000, reportAt: 20 }, M);
+  // Jim SC-1: 1 ms before the hold, its report just after: that is god's EARLIER prompt, no ruling.
+  const { r } = await heldThenGod({ person: 1, godEnter: -1, reportAt: 1 }, M);
   const res = await r.recheck('w1');
   assert.deepEqual([res.kind, res.why], ['HELD', 'human-input-since-hold'], "A GOD ENTER FROM BEFORE THE HOLD IS NO RULING");
 };
-test('GOD (god 8df2e3): god\'s Enter from before the hold rules nothing: the person\'s hold stays', () => K.godSendBeforeHoldIgnored());
+test('GOD (god 8df2e3): god\'s Enter from before the hold (even 1 ms) rules nothing: the person\'s hold stays', () => K.godSendBeforeHoldIgnored());
+
+K.godSendWaitsForQuiet = async (M = OWNER) => {
+  const { r } = await heldThenGod({ person: 1, godEnter: 10, reportAt: 20, lastAt: 200 }, M);
+  const res = await r.recheck('w1');
+  assert.deepEqual([res.kind, res.why], ['HELD', 'god-input-recent'], "GOD'S SEND RULES A PERSON'S HOLD ONLY ONCE INPUT IS QUIET");
+  assert.ok(r.owner.inhibition('p1'), 'still held');
+};
+test('GOD (Jim SC-2): on the god-send path too, input within HUMAN_QUIET_MS keeps the look waiting', () => K.godSendWaitsForQuiet());
 
 K.godSendNeedsReportAfterEnter = async (M = OWNER) => {
   const { r } = await heldThenGod({ person: 1, godEnter: 10, reportAt: 5 }, M);
@@ -605,6 +615,12 @@ const MUTANTS = [
   { name: 'god 8df2e3 unsound: a god Enter from before the hold rules it', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [["enterAt !== undefined && enterAt >= held.at;", 'enterAt !== undefined;']],
     killer: 'godSendBeforeHoldIgnored', dies: /A GOD ENTER FROM BEFORE THE HOLD IS NO RULING/ },
+  { name: 'Jim SC S2: a god Enter up to a minute before the hold rules it', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [["enterAt !== undefined && enterAt >= held.at;", 'enterAt !== undefined && enterAt >= held.at - 60000;']],
+    killer: 'godSendBeforeHoldIgnored', dies: /A GOD ENTER FROM BEFORE THE HOLD IS NO RULING/ },
+  { name: 'Jim SC S3: the quiet check only on the god-only path', file: 'src/main/automaticSubmit.ts', real: OWNER,
+    edits: [['    if (last !== undefined && this.deps.now() - last < HUMAN_QUIET_MS)', "    if (by === 'GOD' && last !== undefined && this.deps.now() - last < HUMAN_QUIET_MS)"]],
+    killer: 'godSendWaitsForQuiet', dies: /GOD'S SEND RULES A PERSON'S HOLD ONLY ONCE INPUT IS QUIET/ },
   { name: 'god 8df2e3 unsound: any report since the hold is god\'s send', file: 'src/main/automaticSubmit.ts', real: OWNER,
     edits: [['      : godSent && this.submitReport(ptyId, held.agentId, enterAt) === true', '      : godSent && this.submitReport(ptyId, held.agentId, held.at) === true']],
     killer: 'godSendNeedsReportAfterEnter', dies: /ONLY A SUBMIT AFTER GOD'S ENTER IS GOD'S SEND/ },
