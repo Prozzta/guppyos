@@ -1,0 +1,24 @@
+{
+ "source": "REAL claude 2.1.302 (Opus 5.5 1M) at 160x40, --dangerously-skip-permissions, statusLine = Guppy's statusGauge verbatim: the idle composer after one turn, ctx 42k/1000k (4%) under the box, as on every hive agent (COMPOSER-FOOTER-HOTFIX-191)",
+ "cols": 160,
+ "rows": 40,
+ "cursorRow": 12,
+ "lines": [
+  " ▐▛███▛█   Claude Code v2.1.302",
+  "▝▜██████▀  Opus 5.5 (1M context) · Claude Max",
+  " ▝▝   ▝▝   C:\\Dunder",
+  "",
+  "",
+  "❯ Reply with the single word ok.",
+  "",
+  "● ok",
+  "  ",
+  "✻ Brewed for 2s · done 15:06",
+  "",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "❯ ",
+  "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+  "  ctx 42k/1000k (4%)",
+  "  ⏵⏵ bypass permissions on (shift+tab to cycle)"
+ ]
+}

@@ -28,9 +28,10 @@ export type TuiComposerClass = 'READY' | 'READY_OWN_DRAFT' | 'DRAFT' | 'MODAL' |
 const PROMPT_GLYPH: Record<TuiGuardProvider, string> = { claude: '❯', antigravity: '>' };
 /** A full-width box rule (both TUIs draw it across the whole terminal; 20 is a floor, not a width). */
 const RULE = /^─{20,}$/;
-/** Rows below the closing rule: Claude's mode line and its second row (`/rc`, effort), agy's
- *  shortcuts line, and one notice. More than this is a popup under the box (slash commands). */
-export const TUI_FOOTER_MAX_ROWS = 3;
+/** Rows below the closing rule: Guppy's statusline row (every hive Claude agent), Claude's mode
+ *  line and its second row (`/rc`, effort), agy's shortcuts line, and one notice. More than this
+ *  is a popup under the box (slash commands), and its rows are refused by FOOTER_ROWS anyway. */
+export const TUI_FOOTER_MAX_ROWS = 4;
 /** Rows between the two rules: a long or multi-line draft wraps; the tail keeps 24 rows, so a
  *  box whose top rule is still in the reading is always found. */
 const COMPOSER_MAX_ROWS = 22;
@@ -59,9 +60,13 @@ function dialogRow(rows: readonly string[]): string | null {
 /** The rows allowed under the box, all seen in the REAL captures: Claude's mode line, agy's
  *  shortcuts line, a right-aligned status row (Claude's `/rc` and `● high · /effort`, agy's model),
  *  and Claude's Remote Control notice. Any other row (a slash-command or @-path completion list,
- *  an unknown notice) is not a footer, so the screen is refused (Andy SHOULD-1). */
+ *  an unknown notice) is not a footer, so the screen is refused (Andy SHOULD-1).
+ *  COMPOSER-FOOTER-HOTFIX-191: and Guppy's own statusline, the exact text of statusGauge
+ *  (hooks.ts) left-aligned under the box, with Claude's right-aligned status after a gap. The
+ *  1.1.91 fixtures were captured without it, so every hive Claude screen was refused. */
 const FOOTER_ROWS: readonly RegExp[] = [
   /^\s*$/,
+  /^\s*ctx \d+k\/\d+k \(\d+%\)(?:\s{2,}\S.*)?$/,
   /^\s*⏵⏵ /,
   /^\s*\? for shortcuts/,
   /^\s{30,}\S/,
@@ -151,9 +156,11 @@ export function classifyTuiComposer(provider: TuiGuardProvider, f: CodexScreenFa
 }
 
 /** Condition 1 for Claude and agy: this reading shows the composer (empty or holding our text).
- *  The owner latches it per incarnation on a reading that covers real output, as for Codex. */
-export function tuiPastStartup(cls: string): { open: boolean; reason: string } {
-  return cls === 'READY' || cls === 'READY_OWN_DRAFT' || cls === 'DRAFT'
+ *  The owner latches it per incarnation on a reading that covers real output, as for Codex.
+ *  COMPOSER-FOOTER-HOTFIX-191: a refusal names the class and reason the composer check gave
+ *  (`UNKNOWN:footer-row:…`, `MODAL:claude-dialog:…`), not a bare `no-composer`. */
+export function tuiPastStartup(comp: { cls: string; reason: string }): { open: boolean; reason: string } {
+  return comp.cls === 'READY' || comp.cls === 'READY_OWN_DRAFT' || comp.cls === 'DRAFT'
     ? { open: true, reason: 'composer-seen' }
-    : { open: false, reason: 'no-composer' };
+    : { open: false, reason: `${comp.cls}:${comp.reason}` };
 }

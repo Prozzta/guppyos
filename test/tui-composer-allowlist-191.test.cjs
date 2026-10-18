@@ -65,6 +65,8 @@ const IDLE = [
   ['claude', 'claude-rc', 'empty-composer'],
   ['claude', 'claude-rc-notice', 'empty-composer'],
   ['claude', 'claude-noauth-idle', 'empty-composer'],
+  ['claude', 'claude-hive-statusline-boot', 'empty-composer'],
+  ['claude', 'claude-hive-statusline-idle', 'empty-composer'],
   ['claude', 'claude270-boot', 'placeholder'],
   ['claude', 'claude270-afterclear', 'placeholder'],
   ['antigravity', 'agy127-boot', 'empty-composer'],
@@ -86,7 +88,7 @@ test('(a) G1-G5: every captured dialog is refused (MODAL or UNKNOWN), and it nam
     assert.ok(out.cls === 'MODAL' || out.cls === 'UNKNOWN', `${name}: refused (got ${JSON.stringify(out)})`);
     assert.match(out.reason, why, `${name}: the reason names the dialog`);
     // Not past startup either: a dialog never latches condition 1.
-    assert.equal(TUI.tuiPastStartup(out.cls).open, false, `${name}: no latch`);
+    assert.equal(TUI.tuiPastStartup(out).open, false, `${name}: no latch`);
     // And with our own text expected (COMMIT), still not ours.
     const own = TUI.classifyTuiComposer(prov, facts(fixture(name)), TEXT).cls;
     assert.ok(own !== 'READY_OWN_DRAFT' && own !== 'READY', `${name}: never our draft (${own})`);
@@ -103,7 +105,7 @@ test('(a) positives: every REAL idle composer (plain, compact, Remote Control, 2
   for (const [prov, name, reason] of IDLE) {
     const out = TUI.classifyTuiComposer(prov, facts(fixture(name)));
     assert.deepEqual(out, { cls: 'READY', reason }, name);
-    assert.equal(TUI.tuiPastStartup(out.cls).open, true, `${name}: latches`);
+    assert.equal(TUI.tuiPastStartup(out).open, true, `${name}: latches`);
   }
 });
 
@@ -144,7 +146,7 @@ test('(a) footer allowlist (Andy SHOULD-1): an UNNUMBERED completion list under 
       assert.notEqual(TUI.classifyTuiComposer(prov, read(staged), text).cls, 'READY_OWN_DRAFT', `${prov} COMMIT ${JSON.stringify(extra)}`);
     }
   }
-  for (const name of ['claude-idle-120x40', 'claude-idle-80x24', 'claude-rc', 'claude-rc-notice', 'claude270-boot', 'claude270-afterclear', 'agy127-boot', 'agy127-afterclear']) {
+  for (const name of ['claude-idle-120x40', 'claude-idle-80x24', 'claude-hive-statusline-boot', 'claude-hive-statusline-idle', 'claude-rc', 'claude-rc-notice', 'claude270-boot', 'claude270-afterclear', 'agy127-boot', 'agy127-afterclear']) {
     const prov = name.startsWith('agy') ? 'antigravity' : 'claude';
     assert.equal(TUI.classifyTuiComposer(prov, facts(fixture(name))).cls, 'READY', `${name}: its real footer is allowed`);
   }
@@ -385,4 +387,86 @@ test('every Claude agent spawns with prompt suggestions off (env + settings), so
     const i = inj.args.indexOf('--settings');
     assert.equal(JSON.parse(fs.readFileSync(inj.args[i + 1], 'utf8')).promptSuggestionEnabled, false, meta.id);
   }
+});
+
+// ─── COMPOSER-FOOTER-HOTFIX-191: Guppy's own statusline under the box ───────────────────
+
+/** The footer rows of the live refusals (hive/log.jsonl wake-screen-guard rows, 1.1.91 at about
+ *  11:25Z-12:58Z on 2026-10-18): the trimmed rows under the cursor. */
+const LIVE_FOOTERS = [
+  ['ctx 179k/1000k (18%)', '⏵⏵ bypass permissions on (shift+tab to cycle)'],
+  ['ctx 0k/1000k (0%)', '⏵⏵ bypass permissions on (shift+tab to cycle)']
+];
+/** A REAL hive screen with its rows under the closing rule replaced. */
+function withFooter(name, rows) {
+  const fx = fixture(name);
+  const bottom = fx.lines.findLastIndex((l) => RULE.test(l));
+  return { ...fx, lines: [...fx.lines.slice(0, bottom + 1), ...rows] };
+}
+const read = (x) => SHARED.extractCodexScreen((i) => x.lines[i], x.lines.length, x.cursorRow);
+
+test('HOTFIX-191: the REAL hive screens (ctx statusline under the box) are READY and latch condition 1', () => {
+  for (const name of ['claude-hive-statusline-boot', 'claude-hive-statusline-idle']) {
+    const fx = fixture(name);
+    assert.ok(fx.lines.some((l) => /^\s*ctx \d+k\/\d+k \(\d+%\)/.test(l)), `${name}: the capture holds the statusline row`);
+    const out = TUI.classifyTuiComposer('claude', facts(fx));
+    assert.deepEqual(out, { cls: 'READY', reason: 'empty-composer' }, name);
+    assert.deepEqual(TUI.tuiPastStartup(out), { open: true, reason: 'composer-seen' }, name);
+  }
+  // The rows of the live refusals, as the log kept them (column 0, no right side).
+  for (const rows of LIVE_FOOTERS) {
+    assert.equal(TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', rows))).cls, 'READY', JSON.stringify(rows));
+  }
+});
+
+test('HOTFIX-191: our own staged text above the statusline is READY_OWN_DRAFT (COMMIT is not refused)', () => {
+  const staged = withComposer(fixture('claude-hive-statusline-idle'), 'claude', TEXT);
+  assert.equal(TUI.classifyTuiComposer('claude', read(staged), TEXT).cls, 'READY_OWN_DRAFT');
+  assert.equal(TUI.classifyTuiComposer('claude', read(staged)).cls, 'DRAFT', 'someone else\'s text is still a draft');
+});
+
+test('HOTFIX-191: the statusline allowance is the gauge only; a list or a notice under it is still refused', () => {
+  const ctx = '  ctx 42k/1000k (4%)';
+  const mode = '  ⏵⏵ bypass permissions on (shift+tab to cycle)';
+  // A completion list drawn under the box with the statusline: never READY.
+  for (const extra of [['  ❯ 1. /compact', '    2. /clear'], ['  /compact   Clear conversation history but keep a summary'], ['  @src/', '  @src/main/'], ['  Auto-update failed']]) {
+    const out = TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', [ctx, ...extra])));
+    assert.notEqual(out.cls, 'READY', JSON.stringify(extra));
+  }
+  assert.equal(TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', [ctx, '  ❯ 1. /compact']))).cls, 'MODAL');
+  // Rows that only look like the gauge are not it.
+  for (const row of ['  ctx is high', '  ctx 42k/1000k (4%)/compact', '  ctx 42k/1000k (4%) x', '  @ctx 42k/1000k (4%)', '  ctx 42k/1000k']) {
+    const out = TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', [row, mode])));
+    assert.equal(out.cls, 'UNKNOWN', row);
+    assert.match(out.reason, /^footer-row:/, row);
+  }
+  // Four rows under the box (statusline, mode line, status, notice) are a footer; five are not.
+  const four = [ctx, mode, '                                                  ◐ medium · /effort', 'Remote Control disconnected'];
+  assert.equal(TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', four))).cls, 'READY');
+  assert.notEqual(TUI.classifyTuiComposer('claude', read(withFooter('claude-hive-statusline-idle', [...four, '  ⏵⏵ bypass permissions on']))).cls, 'READY');
+});
+
+test('HOTFIX-191: a startup refusal names the class and reason the composer check gave, not a bare no-composer', () => {
+  assert.deepEqual(TUI.tuiPastStartup({ cls: 'UNKNOWN', reason: 'footer-row:ctx 1k' }), { open: false, reason: 'UNKNOWN:footer-row:ctx 1k' });
+  assert.deepEqual(TUI.tuiPastStartup({ cls: 'MODAL', reason: 'claude-dialog:Do you trust' }), { open: false, reason: 'MODAL:claude-dialog:Do you trust' });
+  for (const cls of ['READY', 'READY_OWN_DRAFT', 'DRAFT']) assert.equal(TUI.tuiPastStartup({ cls, reason: 'x' }).open, true, cls);
+});
+
+test('HOTFIX-191 (b): the real owner delivers on the live footer shape, and an unknown row is refused with its own reason logged', async () => {
+  for (const rows of LIVE_FOOTERS) {
+    const r = rig({ provider: 'claude', screen: 'claude-hive-statusline-idle' });
+    const base = r.view;
+    r.view = () => { const fx = base(); const bottom = fx.lines.findLastIndex((l) => RULE.test(l)); return { ...fx, lines: [...fx.lines.slice(0, bottom + 1), ...rows] }; };
+    const out = await r.submit('w1');
+    assert.equal(out.kind, 'COMMITTED', `${JSON.stringify(rows)}: delivered (got ${JSON.stringify(out)})`);
+    assert.deepEqual(r.writes, [TEXT, '\r']);
+  }
+  const r = rig({ provider: 'claude', screen: 'claude-hive-statusline-idle' });
+  r.view = () => withFooter('claude-hive-statusline-idle', ['  Auto-update failed', '  ⏵⏵ bypass permissions on (shift+tab to cycle)']);
+  const out = await r.submit('w1');
+  assert.equal(out.kind, 'REFUSED');
+  assert.deepEqual(r.writes, []);
+  const reasons = r.guard.map((g) => g.reason);
+  assert.ok(reasons.includes('startup:UNKNOWN:footer-row:Auto-update failed'), `the guard row names the row it refused: ${JSON.stringify(reasons)}`);
+  assert.ok(!reasons.includes('startup:no-composer'), 'never the bare no-composer');
 });
