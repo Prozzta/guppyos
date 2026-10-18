@@ -121,8 +121,8 @@ import { AgentImpactPushGate, agentImpactPushOf } from './agentImpactPush';
 import { capacityDetailView } from './capacityDetail';
 import { CapacityDetailTicker } from './capacityDetailTick';
 import { CAPACITY_DETAIL_CHANNEL, CAPACITY_DETAIL_CLOSED, CAPACITY_DETAIL_PUSH, validateCapacityDetail, type ProviderCapacityDetailView } from '../shared/capacityDetail';
-import { AgentUsagePushGate, agentUsagePushOf, agentUsageView } from './capacityAgentUsage';
-import { CAPACITY_AGENT_USAGE, CAPACITY_AGENT_USAGE_PUSH, validateAgentUsageView } from '../shared/agentUsage';
+import { AgentUsagePushGate, agentUsagePushOf, agentUsageViewFor, requestedUsageDisplay, type UsagePoolSource } from './capacityAgentUsage';
+import { CAPACITY_AGENT_USAGE, CAPACITY_AGENT_USAGE_PUSH, offeredUsageDisplays, validateAgentUsageView } from '../shared/agentUsage';
 import { capacityDisplayThresholdOf } from '../shared/capacityThreshold';
 import {
   CAPACITY_STRIP_CHANNEL, CAPACITY_STRIP_CURRENT, CAPACITY_NOTICE_DISMISS,
@@ -603,11 +603,17 @@ const usageProvider: UsageProvider = telemetry;
 // Circuit breaker (Lane A #6.6b) — the REAL policy (replaces Lane C's interim
 // glue). POLICY only; the heartbeat beat feeds it signals (via usageProvider) +
 // enforces its decisions. Config read live so a settings change applies next beat.
+// AGY-MONITOR-1.4: the provider a usage choice is checked against (a legacy entry with no
+// provider is Claude, as at spawn). A choice the provider does not offer reads as budget.
+function usageProviderOf(agentId: string): string | undefined {
+  const a = hive.registry().agents[agentId];
+  return a ? (a.provider ?? 'claude') : undefined;
+}
 const breaker = new CircuitBreaker(() => {
   const c = readConfig();
   return {
     ...(c.circuitBreaker ?? {}), costCapUsd: c.costCapUsd, costCapTokens: c.costCapTokens, agentTokenCaps: c.agentTokenCaps,
-    agentUsageDisplay: c.agentUsageDisplay
+    agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)
   };
 });
 // Always-on beats (decoupled from the optional heartbeat): the live fleet snapshot
@@ -2824,19 +2830,25 @@ function pushCapacityStrip(): void {
 }
 
 const agentUsagePushGate = new AgentUsagePushGate();
+/** AGY-MONITOR-1.4: what a Monitor usage line resolves against (an AGY family display reads that family's pool). */
+const usagePoolSource: UsagePoolSource = {
+  poolKeyOf: (agentId) => providerCapacity.poolKeyOf(agentId),
+  poolKeyForAgyFamily: (agentId, family) => providerCapacity.poolKeyForAgyFamily(agentId, family),
+  pool: (poolKey) => providerCapacity.tracker.pool(poolKey),
+  poolIdOf: (poolKey) => capacityStrip.poolIdOf(poolKey)
+};
 /**
  * v1.1.45 unit #13 (crit 15): the Monitor 5H / Weekly lines are PUSHED, never polled. The
- * rows for every agent whose persisted display is 5H or Weekly go to every window on their
- * OWN channel (not control:snapshot, no pool identity), only when the rows changed. The
- * owner's onChange carries time-driven FRESH -> STALE decay, so that pushes too.
+ * rows for every agent whose persisted display is a provider window (5H, Weekly, or one of
+ * the four AGY family windows) go to every window on their OWN channel (not
+ * control:snapshot, no pool key; an AGY row carries the strip's opaque poolId), only when
+ * the rows changed. The owner's onChange carries time-driven FRESH -> STALE decay, so that
+ * pushes too.
  */
 function pushAgentUsage(): void {
   let push;
   try {
-    push = agentUsagePushGate.next(agentUsagePushOf(readConfig().agentUsageDisplay, (agentId) => {
-      const poolKey = providerCapacity.poolKeyOf(agentId);
-      return poolKey ? providerCapacity.tracker.pool(poolKey) : null;
-    }, Date.now()));
+    push = agentUsagePushGate.next(agentUsagePushOf(offeredUsageDisplays(readConfig().agentUsageDisplay, usageProviderOf), usagePoolSource, Date.now()));
   } catch (e) { console.warn('[capacity-usage]', e instanceof Error ? e.message : e); return; }
   if (!push) return;
   for (const w of allWindows) {
@@ -6425,10 +6437,12 @@ function capacityStatusNote(members: readonly string[]): string | null {
   return capacityStateNote(gate.evidence);
 }
 
-ipcMain.handle(CAPACITY_AGENT_USAGE, (_evt, agentId: unknown) => {
+// AGY-MONITOR-1.4: the renderer names the display it is drawing (its choice can be ahead of the
+// persisted write); main validates it and resolves the pool itself.
+ipcMain.handle(CAPACITY_AGENT_USAGE, (_evt, agentId: unknown, display?: unknown) => {
   if (typeof agentId !== 'string') return null;
-  const poolKey = providerCapacity.poolKeyOf(agentId);
-  const view = agentUsageView(poolKey ? providerCapacity.tracker.pool(poolKey) : null, Date.now());
+  const asked = requestedUsageDisplay(display, readConfig().agentUsageDisplay?.[agentId]);
+  const view = agentUsageViewFor(usagePoolSource, agentId, asked, Date.now());
   const errors = validateAgentUsageView(view);
   if (errors.length) { console.warn('[capacity-usage] refused:', errors.slice(0, 3).join('; ')); return null; }
   return view;

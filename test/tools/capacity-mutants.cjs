@@ -35,7 +35,7 @@ const TESTS = ['test/capacity-strip-contract.test.cjs', 'test/capacity-strip-ui.
   'test/capacity-composer-note.test.cjs', 'test/capacity-copy-guards.test.cjs',
   'test/capacity-tidy-pins.test.cjs', 'test/capacity-usage-push.test.cjs',
   'test/capacity-piedot.test.cjs', 'test/capacity-impact-push.test.cjs', 'test/capacity-stale-retain.test.cjs',
-  'test/capacity-detail-tick.test.cjs'];
+  'test/capacity-detail-tick.test.cjs', 'test/agy-monitor-14.test.cjs'];
 
 const STRIP = 'src/main/capacityStrip.ts';
 const SHARED = 'src/shared/capacityStrip.ts';
@@ -215,10 +215,16 @@ const MUTANTS = [
   ['mon exemption never reaches evaluate()', BREAKER,
     '        exempt(input.agentId)\n      );', '        false\n      );'],
   ['mon any non-budget value exempts (malformed switches a limit off)', USAGE,
-    "  return display === 'fiveHour' || display === 'weekly';", "  return display !== 'budget' && display !== undefined;"],
+    "  return usageWindowOf(display) !== null;", "  return display !== 'budget' && display !== undefined;"],
   ['mon the breaker never sees the choice', INDEX,
-    '    agentUsageDisplay: c.agentUsageDisplay\n  };', '  };'],
-  ['mon Budget stored explicitly instead of as absent', CONFIG,
+    '    agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)\n  };', '  };'],
+  // AGY-MONITOR-1.4 audit SHOULD-1: a choice the provider does not offer never exempts.
+  ['agy the breaker reads the unfiltered choice (provider-blind exemption)', INDEX,
+    'agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)', 'agentUsageDisplay: c.agentUsageDisplay'],
+  ['agy the push reads the unfiltered choice', INDEX,
+    'agentUsagePushOf(offeredUsageDisplays(readConfig().agentUsageDisplay, usageProviderOf),', 'agentUsagePushOf(readConfig().agentUsageDisplay,'],
+  ['agy the filter ignores the provider', USAGE,
+    'provider !== undefined && isAgentUsageDisplay(display) && usageDisplaysFor(provider).includes(display)', 'isAgentUsageDisplay(display)'],  ['mon Budget stored explicitly instead of as absent', CONFIG,
     '  if (display === \'budget\') delete agentUsageDisplay[agentId];\n  else agentUsageDisplay[agentId] = display;',
     '  agentUsageDisplay[agentId] = display;'],
   // ── CAPUI-MONITOR: the usage projection and its channel ──────────────────────
@@ -233,7 +239,7 @@ const MUTANTS = [
     'capacityEvidence: f.gate.evidence, interfered: f.interfered, impact: f.impact };', 'capacityEvidence: f.gate.evidence, interfered: f.interfered, impact: f.impact, agentUsage: null };'],
   // ── CAPUI-MONITOR: the Monitor line ─────────────────────────────────────────
   ['mon the select offered to every provider', PANEL,
-    "const usageCapable = agentProvider === 'claude' || agentProvider === 'codex';", 'const usageCapable = true;'],
+    'const usageOptions = usageDisplayOptions(agentProvider);', "const usageOptions = usageDisplayOptions('claude');"],
   ['mon the usage bar is not the strip meter', USAGE_LINE,
     '<CapacityMeter percent={view.usedPercent} valueText={view.text} color={STATE_COLOR[view.state]} dataRole="usage" />',
     '<span style={{ width: 96, height: 8 }} />'],
@@ -366,7 +372,7 @@ const MUTANTS = [
   ['tidy F6 a departed pool keeps its latch', STRIP,
     "    for (const k of [...this.latches.keys()]) if (!live.has(k.split('|')[0])) this.latches.delete(k);\n", ''],
   ['tidy F7 a Budget line polls usage anyway', USAGE_LINE,
-    "    if (display === 'budget') { setView(null); return; }\n", ''],
+    "    if (!which) { setLine(null); return; }\n", ''],
   ['tidy F8 the restored gate dropped from the detail', DETAIL,
     "const current = pool.freshness === 'FRESH' && !restored;", "const current = pool.freshness === 'FRESH';"],
   ['tidy F9 an unmatched attributed id invents the Weekly cause', STRIP,
@@ -397,7 +403,7 @@ const MUTANTS = [
   ['u13 usage pushed on control:snapshot', INDEX,
     'w.webContents.send(CAPACITY_AGENT_USAGE_PUSH, push)', "w.webContents.send('control:snapshot', push)"],
   ['u13 a late mount answer overwrites a newer push', USAGE_LINE,
-    'if (alive && !pushed) setView(pick(u));', 'if (alive) setView(pick(u));'],
+    'if (alive && !pushed) setLine(pick(u));', 'if (alive) setLine(pick(u));'],
   ['u13 Budget agents get pushed rows', USAGE_MAIN,
     '.filter((id) => isBudgetExempt(displays?.[id]))', ''],
   ['u13 F11 pushed flagged before the row check', USAGE_LINE,

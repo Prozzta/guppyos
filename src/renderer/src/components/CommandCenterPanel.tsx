@@ -1,7 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { AgentImpactBadge } from './AgentImpactBadge';
-import { AgentUsageSelect, AgentUsageWindow } from './AgentUsageLine';
+import { AgentUsageSelect, AgentUsageWindow, shownUsageDisplay, usageDisplayOptions } from './AgentUsageLine';
 import type { AgentUsageDisplay } from '@shared/agentUsage';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
@@ -691,9 +691,11 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
           const armed = !!breaker && (breaker.level === 'constrained' || breaker.level === 'stopped');
           const tokens = sample ? sample.input + sample.output + sample.cacheRead + sample.cacheCreation : 0;
           const agentCap = agentTokenCaps[a.id]; // per-agent limit, if set
-          // 5H / Weekly exist only for providers that report those windows.
-          const usageCapable = agentProvider === 'claude' || agentProvider === 'codex';
-          const usageDisplay: AgentUsageDisplay = usageCapable ? (agentUsageDisplay[a.id] ?? 'budget') : 'budget';
+          // Provider windows exist only for providers that report them: 5H / Weekly for
+          // Claude/Codex, the four 3P / Gemini windows for Antigravity (AGY-MONITOR-1.4).
+          const usageOptions = usageDisplayOptions(agentProvider);
+          const usageCapable = usageOptions.length > 1;
+          const usageDisplay: AgentUsageDisplay = shownUsageDisplay(agentProvider, agentUsageDisplay[a.id]);
           const denom = agentCap && agentCap > 0 ? agentCap : floorCap;
           const pct = Math.min(100, Math.round((tokens / denom) * 100));
           const meterColor = armed || pct >= 90 ? 'var(--cth-coral)' : pct >= 60 ? 'var(--cth-warn-mark)' : 'var(--cth-mint)';
@@ -758,9 +760,9 @@ export function FloorTab({ seed }: { seed: { text: string; seq: number } }) {
                   background: 'var(--cth-paper-200)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', color: 'var(--cth-ink-700)'
                 }}>{lastTool[a.id]}</span>
               )}
-              {/* v1.1.45 CAPUI-MONITOR: Claude/Codex choose what this first line shows. */}
+              {/* v1.1.45 CAPUI-MONITOR: Claude/Codex (and, AGY-MONITOR-1.4, Antigravity) choose what this first line shows. */}
               {usageCapable
-                ? <AgentUsageSelect value={usageDisplay} onChange={(v) => setUsageDisplay(a.id, v)} />
+                ? <AgentUsageSelect value={usageDisplay} options={usageOptions} onChange={(v) => setUsageDisplay(a.id, v)} />
                 : <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0 }}>budget</span>}
               {usageDisplay === 'budget' ? (
                 <>

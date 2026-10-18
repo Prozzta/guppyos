@@ -13,7 +13,7 @@ import {
 } from '../shared/agentProvider';
 import { defaultMcpDefaults } from '../shared/mcpCatalog';
 import { MAX_AGENT_TOKEN_CAP } from '../shared/tokenCaps';
-import { isAgentUsageDisplay } from '../shared/agentUsage';
+import { isAgentUsageDisplay, type AgentUsageDisplay } from '../shared/agentUsage';
 import { codexLayerOptInKey } from './codexProjectLayers';
 import { parseCapacityDisplayThreshold } from '../shared/capacityThreshold';
 import { parseGraphicsMode, type GraphicsMode } from '../shared/graphicsMode';
@@ -323,9 +323,10 @@ export interface HarnessConfig {
    *  floor budget). Set from each agent's card in the Command Center. */
   agentTokenCaps?: Record<string, number>;
   /** v1.1.45 CAPUI-MONITOR: what each agent's first Monitor line shows. Absent = 'budget'.
-   *  'fiveHour' / 'weekly' show that provider window's usage AND exempt the agent from the
-   *  budget limits (see src/shared/agentUsage.ts). Claude/Codex agents only. */
-  agentUsageDisplay?: Record<string, 'budget' | 'fiveHour' | 'weekly'>;
+   *  'fiveHour' / 'weekly' (Claude/Codex) and the four AGY family windows (Antigravity,
+   *  AGY-MONITOR-1.4) show that provider window's usage AND exempt the agent from the
+   *  budget limits (see src/shared/agentUsage.ts). */
+  agentUsageDisplay?: Record<string, AgentUsageDisplay>;
   /** v1.1.45 unit #8 (C2.8): the capacity-display threshold, an integer 1-99 (default 15).
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
