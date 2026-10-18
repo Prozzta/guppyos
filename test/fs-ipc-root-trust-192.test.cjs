@@ -99,6 +99,47 @@ test('WIRING: every root-taking fs handler refuses an untrusted root before it t
   }
 });
 
+const { SpawnedCwds, SPAWNED_CWDS_MAX } = loadTs('src/main/spawnedCwds.ts');
+
+test('Jim SHOULD 1: after a restart, a stopped non-hive agent\'s folder (no PTY, no registry entry) is still trusted, from the spawn file alone', (t) => {
+  const { base, proj } = tree(t);
+  const file = path.join(base, 'userData', 'fs-spawned-cwds.json');
+  const run1 = new SpawnedCwds(() => file);
+  run1.add(proj);
+  // The restart: a fresh instance over the same file, and no other source at all.
+  const run2 = new SpawnedCwds(() => file);
+  assert.equal(rootTrusted(path.join(proj, 'src'), run2.list()), true, 'A STOPPED AGENT\'S FOLDER STAYS OPEN AFTER A RESTART');
+  assert.equal(rootTrusted(path.join(base, 'proj2'), run2.list()), false, 'a folder never spawned is still refused');
+  assert.equal(rootTrusted(base, run2.list()), false, 'a parent of a spawned folder is still refused');
+});
+
+test('the spawn file is bounded (newest kept, a re-spawn moves to the newest end), and a bad file is an empty list', (t) => {
+  const { base } = tree(t);
+  const file = path.join(base, 'cwds.json');
+  const p = (...ds) => ds.map((d) => path.join(base, d));
+  const s = new SpawnedCwds(() => file, 3);
+  for (const d of ['a', 'b', 'c', 'd']) s.add(path.join(base, d));   // over the bound: the oldest (a) goes
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).cwds, p('b', 'c', 'd'), 'THE FILE ON DISK IS BOUNDED');
+  const r = new SpawnedCwds(() => path.join(base, 'cwds2.json'), 5);
+  for (const d of ['a', 'b', 'a']) r.add(path.join(base, d));       // a re-spawn: once, now the newest
+  assert.deepEqual(r.list(), p('b', 'a'), 'A RE-SPAWN MOVES THE FOLDER TO THE NEWEST END, ONCE');
+  assert.deepEqual(new SpawnedCwds(() => file, 3).list(), p('b', 'c', 'd'));
+  assert.ok(SPAWNED_CWDS_MAX > 0 && SPAWNED_CWDS_MAX <= 1000, 'the default bound is set');
+  for (const bad of ['not json', '{"v":2,"cwds":["x"]}', '{"v":1,"cwds":"x"}', '{"v":1,"cwds":[1,null,""]}']) {
+    fs.writeFileSync(file, bad);
+    assert.deepEqual(new SpawnedCwds(() => file).list(), [], `bad file ${bad} is an empty list`);
+  }
+  const unwritable = new SpawnedCwds(() => { throw new Error('no userData'); });
+  unwritable.add(path.join(base, 'a'));
+  assert.deepEqual(unwritable.list(), [path.join(base, 'a')], 'a failed write keeps this run\'s list');
+});
+
+test('WIRING: the spawn file lives under userData, main-only (no renderer channel writes it)', () => {
+  assert.match(INDEX, /const fsSpawnedCwds = new SpawnedCwds\(\(\) => join\(app\.getPath\('userData'\), 'fs-spawned-cwds\.json'\)\);/);
+  assert.equal(INDEX.split('fsSpawnedCwds.add(').length - 1, 1, 'only the spawn path adds');
+  assert.doesNotMatch(INDEX, /fs-spawned-cwds\.json[\s\S]{0,40}ipcMain/, 'no IPC around it');
+});
+
 test('WIRING: the known roots are main-owned (registry, live PTYs, this run\'s spawns), never the roster', () => {
   const start = INDEX.indexOf('function fsRootKnown(');
   assert.ok(start >= 0, 'fsRootKnown exists');

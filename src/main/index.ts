@@ -73,6 +73,7 @@ import {
   type FloorState, type StandupDecision, type StandupSkipRecord
 } from './standupDelta';
 import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde, samePath, rootTrusted } from './fs';
+import { SpawnedCwds } from './spawnedCwds';
 import { applyProjectHomeChange, isProjectThemeId, projectThemeHomeKey } from '../shared/projectTheme';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
@@ -5303,12 +5304,14 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 // ─── IPC: filesystem (sandboxed to a root) ──────────────────────────────────
 // FS-IPC-ROOT-TRUST-192: the root is the renderer's to name but main's to accept. It must be
 // (or lie inside) the cwd of an agent main knows: in the hive registry, with a live PTY, or
-// spawned this run (so a stopped non-hive agent's files stay open). Never the roster: the
-// renderer writes that.
-const fsSpawnedCwds = new Set<string>();
+// spawned by main (kept across restarts in userData, so a stopped non-hive agent's files stay
+// open). Never the roster: the renderer writes that.
+// Jim INFO 1: this guards against renderer bugs and bad roots. It is NOT a boundary against a
+// compromised renderer, which can pty:spawn any command in any cwd (and that cwd is then known).
+const fsSpawnedCwds = new SpawnedCwds(() => join(app.getPath('userData'), 'fs-spawned-cwds.json'));
 const FS_ROOT_REFUSED = 'not an agent folder';
 function fsRootKnown(root: string): boolean {
-  const known: string[] = [...fsSpawnedCwds];
+  const known: string[] = fsSpawnedCwds.list();
   for (const s of ptyManager.list()) known.push(s.cwd);
   try { for (const a of Object.values(hive.registry().agents)) known.push(a.cwd); } catch { /* unreadable registry: the other sources stand */ }
   return rootTrusted(root, known);
