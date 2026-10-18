@@ -560,6 +560,28 @@ export class PtyManager {
     for (const s of this.sessions.values()) { s.mirror?.dispose(); s.mirror = undefined; }
   }
 
+  /** MIRROR-STARTUP-196: the cost guard's re-arm. New sessions get a mirror again, and each live
+   *  session gets a fresh one seeded with its last output tail (PTY_TAIL_CHARS); the TUI's next
+   *  repaint fills in the rest of the screen. */
+  rearmMirrors(f: (cols: number, rows: number) => TerminalMirror): void {
+    this.mirrorFactory = f;
+    for (const s of this.sessions.values()) {
+      if (s.mirror) continue;
+      try {
+        s.mirror = f(s.proc.cols, s.proc.rows);
+        if (s.tail) { this.mirrorFed += s.tail.length; s.mirror.write(s.tail); }
+      } catch { s.mirror = undefined; }
+    }
+  }
+
+  /** MIRROR-STARTUP-196: when the newest live PTY was spawned (0 = none); the cost guard judges
+   *  nothing while a fresh one (a resume) is still repainting. */
+  lastSpawnAt(): number {
+    let at = 0;
+    for (const s of this.sessions.values()) at = Math.max(at, s.spawnedAt ?? 0);
+    return at;
+  }
+
   /** MEMSPIKE-167: per-PTY traffic since the last takeTraffic() (output chars and chunks sent
    *  toward the renderer, resizes, redraws). Counters only: nothing is kept but the numbers. */
   private traffic = new Map<string, { chars: number; chunks: number; resizes: number; redraws: number }>();

@@ -102,8 +102,8 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
-import { createTerminalMirror } from './terminalMirror';
-import { MirrorCostGuard, calibrationSample } from './mirrorCost';
+import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
+import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
@@ -535,6 +535,9 @@ const boardStatus = new BoardStatusWriter({
 });
 /** WAKE-STALL-INTERFERED-192: wakes refused in a row because the terminal never went quiet. */
 const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
+/** MIRROR-STARTUP-196: the armed mirror cost guard (null before arming, or with the mirror off by
+ *  config). Declared before the digest, which reads it. */
+let mirrorGuard: MirrorCostGuard | null = null;
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -548,6 +551,8 @@ const floorDigest = new FloorDigest({
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
+  // MIRROR-STARTUP-196: the mirrors are auto-off (god's term cannot read screens until re-arm).
+  mirrorOff: () => mirrorGuard?.status() ?? null,
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
@@ -1763,6 +1768,7 @@ const termControl = new TermControl({
     return a ? (a.provider ?? 'claude') : null;
   },
   readScreen: (ptyId, rows) => ptyManager.readScreen(ptyId, rows),
+  mirrorOff: () => { const off = mirrorGuard?.status() ?? null; return off ? mirrorOffWords(off, Date.now()) : null; },
   write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
   outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
   log: (row) => hive.appendLog(row),
@@ -1793,17 +1799,29 @@ async function armMirrorCostGuard(): Promise<void> {
   }
   const eld = monitorEventLoopDelay({ resolution: 10 });
   eld.enable();
+  let elu = performance.eventLoopUtilization();
+  // MIRROR-STARTUP-196: the cost is the mirrors' measured parse; an off re-arms on the guard's
+  // back-off, and both are surfaced (god's floor digest and the floor's integrity banner).
   const guard = new MirrorCostGuard({
     bytes: () => ptyManager.mirrorBytes(),
+    parseMs: () => mirrorParseMs(),
     msPerChar,
     eldMs: () => { const v = eld.mean / 1e6; eld.reset(); return Number.isFinite(v) ? v : null; },
-    turnOff: () => { ptyManager.setMirrorFactory(null); ptyManager.disposeMirrors(); eld.disable(); clearInterval(timer); },
+    eluActiveMs: () => { const next = performance.eventLoopUtilization(); const d = performance.eventLoopUtilization(next, elu); elu = next; return Number.isFinite(d.active) ? d.active : null; },
+    lastSpawnAt: () => ptyManager.lastSpawnAt(),
+    turnOff: () => { ptyManager.setMirrorFactory(null); ptyManager.disposeMirrors(); mirrorSurfaced(); },
+    turnOn: () => { ptyManager.rearmMirrors((cols, rows) => createTerminalMirror(cols, rows)); mirrorSurfaced(); },
     log: (row) => hive.appendLog(row),
     now: Date.now
   });
-  hive.appendLog({ kind: 'mirror-cost-armed', msPerChar });
+  mirrorGuard = guard;
+  hive.appendLog({ kind: 'mirror-cost-armed', msPerChar, measured: mirrorParseMs() !== null });
   const timer = setInterval(() => { guard.tick(); }, 1000);
   timer.unref?.();
+}
+/** An auto-off or a re-arm: god's digest is re-run now, and the banner polls hive:integrity. */
+function mirrorSurfaced(): void {
+  try { floorDigest.run(); } catch (e) { console.error('[floor-digest]', e); }
 }
 /** The shadow diff's tap on a screen-gate request: the gate's answer is returned untouched, and the
  *  mirror's facts are compared with it afterwards (never awaited by the gate). */
@@ -5582,7 +5600,11 @@ ipcMain.handle('liveness:reoffer', (_evt, agentId: unknown) => {
   try { hive.appendLog({ kind: 'liveness-operator', action: 'reoffer', agentId, ok }); } catch { /* best-effort */ }
   return ok;
 });
-ipcMain.handle('hive:integrity', () => hive.integrityIssues());
+// MIRROR-STARTUP-196: a mirror auto-off is a notice on the floor while it lasts.
+ipcMain.handle('hive:integrity', () => {
+  const off = mirrorGuard?.status() ?? null;
+  return off ? [...hive.integrityIssues(), mirrorOffNotice(off, Date.now())] : hive.integrityIssues();
+});
 ipcMain.handle('config:integrity', () => configIntegrityIssue());
 ipcMain.handle('hive:renameAgent', (_evt, id: unknown, name: unknown) => {
   if (typeof id !== 'string' || typeof name !== 'string') {

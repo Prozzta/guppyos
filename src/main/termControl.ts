@@ -45,6 +45,8 @@ export interface TermDeps {
   ptyOf(agentId: string): string | undefined;
   providerOf(agentId: string): AgentProvider | null;
   readScreen(ptyId: string, rows?: number): Promise<MirrorReading | null>;
+  /** MIRROR-STARTUP-196: why the mirrors are auto-off and when they re-arm, in words; null = not auto-off. */
+  mirrorOff?(): string | null;
   /** Writes with origin GOD (the caller binds it; this module never chooses an origin). */
   write(ptyId: string, data: string): { ok: boolean; error?: string };
   outputGeneration(ptyId: string): number | undefined;
@@ -157,7 +159,11 @@ export class TermControl {
     if (action === 'read') {
       const rows = Number.isInteger(b.rows) && (b.rows as number) > 0 ? Math.min(b.rows as number, TERM_ROWS_MAX) : undefined;
       const r = await this.deps.readScreen(ptyId, rows);
-      if (!r) { this.logRow({ by, agent, action, ok: false, error: 'no screen mirror' }); return { status: 503, body: { ok: false, line: `refused: no screen mirror for ${agent} (the mirror is off or failed)` } }; }
+      if (!r) {
+        const off = (() => { try { return this.deps.mirrorOff?.() ?? null; } catch { return null; } })();
+        this.logRow({ by, agent, action, ok: false, error: 'no screen mirror' });
+        return { status: 503, body: { ok: false, line: `refused: no screen mirror for ${agent} (${off ?? 'the mirror is off or failed'})` } };
+      }
       this.logRow({ by, agent, action, ok: true, rows: r.lines.length, mode2004: r.bracketedPaste });
       return { status: 200, body: { ok: true, line: `${agent}: ${header(r)}`, header: header(r), screen: r.lines } };
     }
