@@ -59,7 +59,7 @@ test('a parent, a filesystem root, a sibling and a .. escape are refused', (t) =
 test('bad input and bad known entries are refused, never thrown', (t) => {
   assert.equal(typeof rootTrusted, 'function', 'fs.ts exports rootTrusted');
   const { proj } = tree(t);
-  for (const bad of [undefined, null, 42, '', 'relative/path', `${proj}\0x`]) {
+  for (const bad of [undefined, null, 42, '', 'relative/path', path.join(proj, 'a\0b')]) {
     assert.equal(rootTrusted(bad, [proj]), false, `root ${JSON.stringify(bad)}`);
   }
   assert.equal(rootTrusted(proj, ['', null, undefined, 'relative']), false, 'unusable known entries match nothing');
@@ -78,6 +78,9 @@ test('on a case-folding filesystem a different case is the same folder', { skip:
   const { proj } = tree(t);
   assert.equal(rootTrusted(proj.toUpperCase(), [proj]), true);
   assert.equal(rootTrusted(path.join(proj, 'SRC'), [proj.toLowerCase()]), true);
+  // A folder that does not exist yet keeps the case it was typed in (realpath fails). On
+  // win32 path.relative compares case-insensitively anyway; on darwin the fold carries it.
+  assert.equal(rootTrusted(path.join(proj.toUpperCase(), 'not-yet'), [proj]), true);
 });
 
 test('WIRING: every root-taking fs handler refuses an untrusted root before it touches the disk', () => {
