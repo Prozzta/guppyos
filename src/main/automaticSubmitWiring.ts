@@ -62,6 +62,7 @@ export interface OwnerWiring {
   onInterfered?: OwnerDeps['onInterfered'];
   /** GOD-STARTUP-WAITS-ENTER G1/G2: the provider's own boot evidence (Claude hooks). */
   bootReady?: OwnerDeps['bootReady'];
+  startupSettled?: OwnerDeps['startupSettled'];
   bootSubmitted?: OwnerDeps['bootSubmitted'];
   /** WAKE-STALL-INTERFERED-192 B: the same report for any prompt (a wake's turn evidence). */
   submittedSince?: OwnerDeps['submittedSince'];
@@ -161,6 +162,7 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     onInterfered: w.onInterfered,
     bootReady: w.bootReady,
     bootSubmitted: w.bootSubmitted,
+    startupSettled: w.startupSettled,
     submittedSince: w.submittedSince,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),

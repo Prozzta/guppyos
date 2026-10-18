@@ -146,11 +146,13 @@ K.startupReadingOncePerReason = async (Owner) => {
   const unnamed = { lines: ['\u2022 a transcript row', '', '\u203a Ask Codex to do anything', '', '  gpt-5.5 high \u00b7 C:\\elsewhere \u00b7 Check inbox'], cursorRow: 2 };
   const r = rig(Owner, unnamed);
   for (let i = 0; i < 3; i += 1) assert.equal(await r.settle(r.owner.observeStartup('p1')), false);
+  // STARTUP-LATCH-QUIET-193 (b): readings of an unchanged output generation are counted, not logged.
   assert.equal(r.startup.length, 1, 'ONE ROW PER INCARNATION AND REASON');
   const rec = r.startup[0];
   assert.deepEqual([rec.ptyId, rec.incarnation, rec.open, rec.reason, rec.outputGeneration], ['p1', 1, false, 'no-marker', 10]);
-  assert.deepEqual(rec.screen, { header: 'NONE', startingAfterHeader: false, cursorRow: '\u203a Ask Codex to do anything', footer: ['gpt-5.5 high \u00b7 C:\\elsewhere \u00b7 Check inbox'] },
-    'the cursor row and the footer only: never the conversation above it');
+  // STARTUP-LATCH-QUIET-193 (a): and the last REFUSAL_TAIL_ROWS non-empty rows.
+  assert.deepEqual(rec.screen, { header: 'NONE', startingAfterHeader: false, cursorRow: '\u203a Ask Codex to do anything', footer: ['gpt-5.5 high \u00b7 C:\\elsewhere \u00b7 Check inbox'],
+    tail: ['\u2022 a transcript row', '\u203a Ask Codex to do anything', '  gpt-5.5 high \u00b7 C:\\elsewhere \u00b7 Check inbox'] });
   r.incarnation = 2;
   await r.settle(r.owner.observeStartup('p1'));
   assert.equal(r.startup.length, 2, 'A NEW INCARNATION IS REPORTED AGAIN');
@@ -235,7 +237,7 @@ const MUTANTS = [
     edits: [['  return parts.slice(1).some((part) => isSpawnCwdShown(part, spawnCwd, home));', '  return parts.length === 2 && isSpawnCwdShown(parts[1], spawnCwd, home);']],
     killer: 'namedScreenPastStartup', dies: /THE PURGED NAMED SCREEN IS PAST STARTUP/ },
   { name: 'F2: no dedupe (a row per reading)', file: 'src/main/automaticSubmit.ts', owner: true,
-    edits: [['      if (seen.reasons.has(past.reason)) return;\n', '']],
+    edits: [['      if (prev && (prev.gen === r.outputGeneration || prev.logged >= STARTUP_READING_LOG_MAX)) return;\n', '']],
     killer: 'startupReadingOncePerReason', dies: /ONE ROW PER INCARNATION AND REASON/ },
   { name: 'F2: a new incarnation is never reported', file: 'src/main/automaticSubmit.ts', owner: true,
     edits: [['      if (!seen || seen.incarnation !== incarnation) {', '      if (!seen) {']],

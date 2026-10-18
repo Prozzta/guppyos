@@ -166,7 +166,7 @@ import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
-import { BootHookClock } from './bootSubmitEvidence';
+import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
 import { HistoryService } from './historyService';
@@ -847,7 +847,7 @@ const providerCapacity = new CapacityRuntime({
 // automaticSubmit.ts for the transaction and automaticSubmitWiring.ts for what each of
 // its effects means here.
 const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail, codex) =>
-  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true } : {}) }));
+  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true, grid: ptyManager.grid(ptyId) } : {}) }));
 // WAKE-SCREEN-GUARD: R2-4's per-incarnation tokens, and the F5 watch (codexScreenGuard.ts).
 const wakeIncarnationTokens = new WakeIncarnationTokens();
 // WSG-ALERT-NOT-DISMISSABLE: the alert is raised AND lifted here (an ok reading, a latch, a respawn).
@@ -963,6 +963,15 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   bootSubmitted: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
     : undefined),
+  // STARTUP-LATCH-QUIET-193 (d): a Claude composer latches condition 1 only after that same
+  // SessionStart proof AND quiet output (not the first paint of a resume). Others: undefined.
+  startupSettled: (ptyId) => {
+    const agentId = ptyToAgent.get(ptyId);
+    if (ptyProvider.get(ptyId) !== 'claude') return undefined;
+    // A Claude PTY that is no agent has no hook clock: quiet output alone.
+    const up = agentId ? bootHooks.bootReady(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, Date.now()) : true;
+    return startupSettled(up, ptyManager.idleFor(ptyId));
+  },
   // WAKE-STALL-INTERFERED-192 B: the same UserPromptSubmit report is a wake's turn evidence.
   submittedSince: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
