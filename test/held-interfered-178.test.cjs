@@ -19,6 +19,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
@@ -569,17 +570,24 @@ test('wiring: main runs the watch, resolves a release as "let it retry", and wor
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────
 
-const MUTANT_DIR = path.join(__dirname, '.mutants-held178');
-function mutate(rel, edits, tag) {
+function newMutantDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'mutants-held178-'));
+}
+
+function cleanupMutantDir(mutantDir) {
+  fs.rmSync(mutantDir, { recursive: true, force: true });
+}
+
+function mutate(mutantDir, rel, edits, tag) {
   let text = readSource(rel);
   for (const [from, to] of edits) {
     const hits = text.split(from).length - 1;
     assert.equal(hits, 1, `mutant ${tag}: edit target must match EXACTLY ONCE, matched ${hits}: ${JSON.stringify(from.slice(0, 80))}`);
     text = text.replace(from, () => to);
   }
-  // A copy in MUTANT_DIR resolves its relative imports back to the real files.
-  text = text.replace(/from '(\.\.?\/[^']+)'/g, (_, m) => `from '${path.relative(MUTANT_DIR, path.join(ROOT, path.dirname(rel), m)).replace(/\\/g, '/')}'`);
-  const file = path.join(MUTANT_DIR, `${tag}.ts`);
+  // A copy in this run's temp directory resolves imports back to the real files.
+  text = text.replace(/from '(\.\.?\/[^']+)'/g, (_, m) => `from '${path.relative(mutantDir, path.join(ROOT, path.dirname(rel), m)).replace(/\\/g, '/')}'`);
+  const file = path.join(mutantDir, `${tag}.ts`);
   fs.writeFileSync(file, text, 'utf8');
   return loadTs(path.relative(ROOT, file));
 }
@@ -664,12 +672,11 @@ const MUTANTS = [
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir();
   try {
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
-        const mod = mutate(m.file, m.edits, `m${i}`);
+        const mod = mutate(mutantDir, m.file, m.edits, `m${i}`);
         await K[m.killer](m.real);                    // the killer PASSES on the real module...
         let died = null;
         try { await K[m.killer](mod); } catch (e) { died = e; }
@@ -679,6 +686,29 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
+  }
+});
+
+function isTempChild(dir) {
+  const relative = path.relative(os.tmpdir(), dir);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+test('MUTANT CENSUS: scratch directories are unique and cleanup is scoped', () => {
+  const first = newMutantDir();
+  const second = newMutantDir();
+  const sentinel = path.join(first, 'must-survive-second-cleanup');
+  try {
+    assert.notEqual(first, second, 'each census must receive its own scratch directory');
+    assert.ok(isTempChild(first), 'first scratch directory must be under os.tmpdir()');
+    assert.ok(isTempChild(second), 'second scratch directory must be under os.tmpdir()');
+    fs.writeFileSync(sentinel, 'present', 'utf8');
+    cleanupMutantDir(second);
+    assert.ok(fs.existsSync(first), 'cleaning a later census must not remove an earlier directory');
+    assert.ok(fs.existsSync(sentinel), 'cleaning a later census must not remove earlier mutant files');
+  } finally {
+    cleanupMutantDir(first);
+    cleanupMutantDir(second);
   }
 });
