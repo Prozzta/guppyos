@@ -161,8 +161,9 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
-import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
+import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
+import { QuietRefusalWatch } from './quietRefusalWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { BootHookClock } from './bootSubmitEvidence';
@@ -528,6 +529,8 @@ const boardStatus = new BoardStatusWriter({
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   flags: () => boardMonitor.flags()
 });
+/** WAKE-STALL-INTERFERED-192: wakes refused in a row because the terminal never went quiet. */
+const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -539,6 +542,8 @@ const floorDigest = new FloorDigest({
   heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
   // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
+  quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
+  wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
@@ -958,6 +963,10 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   bootSubmitted: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
     : undefined),
+  // WAKE-STALL-INTERFERED-192 B: the same UserPromptSubmit report is a wake's turn evidence.
+  submittedSince: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
+    ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
+    : undefined),
   homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
@@ -971,6 +980,7 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   onOutcome: (r) => {
     // An outcome can raise an INTERFERED hold or settle one: the impact string moves.
     pushAgentImpact();
+    quietRefusals.outcome(r.agentId, r.outcome, r.at);
     if (r.outcome.kind === 'COMMITTED') {
       if (r.admissionClass === 'BOOT_SEQUENCE') {
         console.log(`[boot-sequence] ${r.agentId} on ${r.ptyId ?? '-'}: COMMITTED`);
@@ -1106,21 +1116,18 @@ wakeDiag('bridge-built', { ok: !!inboxWake });
 // at again about once a minute (the owner decides, on positive screen evidence only), and the
 // Human is told after HELD_NOTICE_AFTER_MS. A person's queued message is never re-examined here.
 heldInterference = new HeldInterferenceWatch({
-  heldWakes: () => workerWake.heldClaims().flatMap(({ agentId, claim }) => {
-    const ptyId = ptyForAgent(agentId);
-    const inh = ptyId ? automaticSubmit.inhibition(ptyId) : null;
-    return ptyId && inh && inh.requestId === claim.requestId
-      ? [{ agentId, requestId: claim.requestId, ptyId, messages: claim.ids.length, since: inh.at, reason: inh.reason }]
-      : [];
-  }),
+  // WAKE-OWNER-HOLD-ORPHAN: from the owner's holds, so one outliving the coordinator's claim stays seen.
+  heldWakes: () => heldWakesOf(ptyToAgent, (ptyId) => automaticSubmit.inhibition(ptyId),
+    (agentId) => workerWake.state(agentId).held, (agentId) => workerWake.state(agentId).pending.length),
   recheck: (h) => automaticSubmit.recheckHeld(h.ptyId, h.requestId),
   released: (h, r, now) => {
     try {
-      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
+      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : r.kind === 'SUBMITTED' ? 'entered-own-draft' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
     } catch { /* logging only */ }
     pushAgentImpact();
     // The same ruling as a person's "let it retry": the ids go back through every gate.
-    inboxWake?.onInterferenceResolved(h.agentId, 'SEND_AGAIN');
+    // WAKE-STALL-INTERFERED-192 C: our own draft was submitted (the provider said so): delivered.
+    inboxWake?.onInterferenceResolved(h.agentId, r.kind === 'SUBMITTED' ? 'ALREADY_HANDLED' : 'SEND_AGAIN');
   },
   notice: {
     raise: (h, now, asking) => hive.mail.noteHeldInterferedAlert(h.agentId, {

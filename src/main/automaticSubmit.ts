@@ -503,6 +503,9 @@ export type HeldRecheck =
   | { kind: 'NONE' }
   | { kind: 'RELEASED'; screen: GuardScreenFacts }
   | { kind: 'ERASED'; screen: GuardScreenFacts }
+  /** WAKE-STALL-INTERFERED-192 C: the held text was our own proven draft; an Enter on it started a
+   *  turn (the provider reported the submit). Delivered: the hold ends as handled. */
+  | { kind: 'SUBMITTED'; screen: GuardScreenFacts | null }
   | { kind: 'HELD'; why: string; screen: GuardScreenFacts | null };
 
 /** WAKE-SCREEN-GUARD: the pause between post-echo readings after a stage write. */
@@ -641,6 +644,11 @@ export interface OwnerDeps {
    *  UserPromptSubmit) for this PTY's live incarnation at or after `enterAt`? `undefined` = this
    *  provider has no such report, and a boot Enter is not verified. */
   bootSubmitted?: (ptyId: string, agentId: string, enterAt: number) => boolean | undefined;
+  /** WAKE-STALL-INTERFERED-192 B: the same report for ANY prompt (Claude's UserPromptSubmit of the
+   *  live incarnation at or after `since`). It is the turn evidence an own draft is kept until, and
+   *  a re-Enter is COMMITTED on. `undefined` = no such report: an own draft is kept only until its
+   *  re-Enter, as before. */
+  submittedSince?: (ptyId: string, agentId: string, since: number) => boolean | undefined;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -681,7 +689,12 @@ export type RefusalReason =
   /** WAKE-SCREEN-GUARD: a Codex screen that is not proven to be the post-handoff composer. */
   | 'SCREEN_NOT_READY'
   /** WAKE-SCREEN-GUARD: Codex output arrived after the screen reading that admitted this. */
-  | 'SCREEN_CHANGED';
+  | 'SCREEN_CHANGED'
+  /** WAKE-STALL-INTERFERED-192 B: the one exception to "nothing typed". An Enter was pressed on our
+   *  own proven unsent draft and the provider reported no turn in WAKE_SUBMIT_CONFIRM_MS. The
+   *  draft is still on the prompt and still ours (kept), nothing else was written, and the wake
+   *  coordinator offers the ids again after its backoff (never a hold for a person). */
+  | 'SUBMIT_UNCONFIRMED';
 
 export type InterferenceReason =
   | 'HUMAN_INPUT_AFTER_STAGE'
@@ -783,7 +796,22 @@ interface HeldInterference extends Inhibition {
    *  look can find our text and know whether a person has touched the terminal since. */
   text: string;
   humanStage: number;
+  /** WAKE-STALL-INTERFERED-192 C: for PRIOR_TEXT_ON_PROMPT, the earlier text found on the prompt. */
+  prior?: string;
+  /** C: how many Enters the rechecks pressed on our own held draft (at most HELD_OWN_ENTER_MAX). */
+  ownEnters?: number;
 }
+
+/** WAKE-STALL-INTERFERED-192 C: Enters a held recheck may press on our own draft before it leaves
+ *  the hold to the person it has been shown to (a TUI that takes no Enter at all). */
+export const HELD_OWN_ENTER_MAX = 3;
+
+/** WAKE-STALL-INTERFERED-192 B: the last text this owner staged and Entered on a live PTY. */
+interface OwnDraft { text: string; humanStage: number; incarnation: unknown; enteredAt: number }
+
+/** WAKE-STALL-INTERFERED-192 B: how long a re-Enter on our own draft waits for the provider's
+ *  report of a submitted prompt before it is SUBMIT_UNCONFIRMED (the boot prompt's bound). */
+export const WAKE_SUBMIT_CONFIRM_MS = 5_000;
 
 /** The irreducible TUI interval between a paste and its Enter. */
 export const GAP_MS = 140;
@@ -975,8 +1003,11 @@ export class AutomaticSubmitOwner {
   private readonly priorUnreadable = new Map<string, { count: number; since: number }>();
   /** The last text this owner staged and Entered on each live PTY. A later retry may press
    * Enter again only when the renderer proves that exact text still occupies the composer
-   * AND no human generation advanced since we staged it. */
-  private readonly ownDrafts = new Map<string, { text: string; humanStage: number; incarnation: unknown }>();
+   * AND no human generation advanced since we staged it. WAKE-STALL-INTERFERED-192 B: where the
+   * provider reports submits, a draft is forgotten only when one is reported after its Enter (or
+   * its terminal is replaced), never at a re-Enter: Jim 2026-10-17 lost his after a re-Enter that
+   * started no turn, and the next check held our own text as a person's. */
+  private readonly ownDrafts = new Map<string, OwnDraft>();
   /** WAKE-SCREEN-GUARD condition 1: the Codex incarnation on each PTY that has been proven
    *  past its startup phase (trust, login and update all precede the handoff, so within one
    *  process that phase never comes back). A new incarnation starts un-latched. Never a
@@ -1279,7 +1310,7 @@ export class AutomaticSubmitOwner {
         // prompt marker down to the cursor) tells them apart: after a real submit the cursor
         // row IS the new, empty prompt, so our text is not in that composer.
         if (seen.onPromptRow || seen.promptTailMatches === true) {
-          const own = this.ownDrafts.get(ptyId);
+          const own = this.ownDraft(ptyId, req.agentId);
           // WAKE-SELF-TEXT-HOLD: our previous Enter may have reached the PTY while the
           // provider left the line unsent. This is safe to re-enter only with all three
           // proofs: the renderer's whole composer tail matches our exact text, the owner
@@ -1293,7 +1324,12 @@ export class AutomaticSubmitOwner {
               if (!g.ok) return this.refuse(decision, 'SCREEN_NOT_READY', g.reason);
               reenterGen = g.gen;
             }
+            const enterAt = deps.now();
             const retried = this.reenterOwnDraft(req, ptyId, incarnation, decision, own.humanStage, reenterGen);
+            // WAKE-STALL-INTERFERED-192 B: COMMITTED only on the provider's turn evidence.
+            if (retried.kind === 'COMMITTED' && this.submitReport(ptyId, req.agentId, own.enteredAt) !== undefined) {
+              return this.confirmReentered(ptyId, req.agentId, own, enterAt);
+            }
             if (retried.kind === 'COMMITTED') this.ownDrafts.delete(ptyId);
             // F3 for this Enter too: the draft being re-entered is the prior text.
             if (retried.kind === 'COMMITTED' && deps.verifySubmit?.(ptyId)) {
@@ -1410,7 +1446,7 @@ export class AutomaticSubmitOwner {
     switch (verdict.kind) {
       case 'ENTERED':
         if (verdict.ok) {
-          this.ownDrafts.set(ptyId, { text: req.text, humanStage: staged.humanStage, incarnation: staged.incarnation });
+          this.ownDrafts.set(ptyId, { text: req.text, humanStage: staged.humanStage, incarnation: staged.incarnation, enteredAt: enterAt });
           // GOD-STARTUP-WAITS-ENTER G2: a boot prompt is COMMITTED only on the provider's report.
           if (cls === 'BOOT_SEQUENCE' && this.bootVerifiable(ptyId, req.agentId)) return this.verifyBootSubmitted(staged, enterAt);
           if (deps.verifySubmit?.(ptyId)) return this.verifySubmitted(staged);
@@ -1543,7 +1579,8 @@ export class AutomaticSubmitOwner {
       requestId: s.req.requestId, reason, at: now, incarnation: s.incarnation,
       agentId: s.req.agentId, admissionClass: s.req.admissionClass,
       binding: this.known.get(s.req.requestId)?.binding ?? { agentId: s.req.agentId, admissionClass: s.req.admissionClass, payload: '' },
-      decision: s.decision, text: s.req.text, humanStage: s.humanStage
+      decision: s.decision, text: s.req.text, humanStage: s.humanStage,
+      ...(reason === 'PRIOR_TEXT_ON_PROMPT' && s.req.priorText !== undefined ? { prior: s.req.priorText } : {})
     });
     try {
       const sc = this.lastScreen.get(s.ptyId);
@@ -1606,6 +1643,9 @@ export class AutomaticSubmitOwner {
     if (!held || held.requestId !== requestId) return { kind: 'NONE' };
     const stay = (why: string, screen: GuardScreenFacts | null = null): HeldRecheck => ({ kind: 'HELD', why, screen });
     if (held.admissionClass !== 'CAPACITY_GATED') return stay('not-automatic');
+    // WAKE-STALL-INTERFERED-192 C: the held text is our own unsent draft: the app recovers it.
+    const own = await this.enterHeldOwnDraft(ptyId, requestId, held);
+    if (own) return own;
     if (this.guardMode(ptyId) !== 'ENFORCE') return stay('no-screen-guard');
     if (deps.humanGeneration(ptyId) !== held.humanStage) return stay('human-input-since-hold');
     const needle = needleFor(held.text);
@@ -1654,9 +1694,109 @@ export class AutomaticSubmitOwner {
     return { kind: 'RELEASED', screen };
   }
 
+  /**
+   * WAKE-STALL-INTERFERED-192 C: a held automatic wake whose text on the prompt is provably OUR OWN
+   * unsent draft is recovered by the app, not left for a person's ruling. The proofs are the
+   * re-Enter's (the composer's whole tail is exactly the draft this owner staged and Entered in
+   * this incarnation, no person's key since, no submitted prompt reported since), and the provider
+   * must report submits, because the outcome is judged on that report:
+   *   reported   SUBMITTED: the hold ends as delivered (the grant is spent);
+   *   not        the hold stays, as it was; at most HELD_OWN_ENTER_MAX Enters per hold.
+   * null = not provably ours (or not this provider): the plain recheck decides, nothing written.
+   */
+  private async enterHeldOwnDraft(ptyId: string, requestId: string, held: HeldInterference): Promise<HeldRecheck | null> {
+    const deps = this.deps;
+    const own = this.ownDraft(ptyId, held.agentId);
+    if (!own || own.incarnation !== held.incarnation || own.humanStage !== deps.humanGeneration(ptyId)) return null;
+    if (own.text !== held.prior && own.text !== held.text) return null;
+    if (this.submitReport(ptyId, held.agentId, own.enteredAt) === undefined) return null;
+    const stay = (why: string): HeldRecheck => ({ kind: 'HELD', why, screen: this.lastScreen.get(ptyId)?.facts ?? null });
+    if ((held.ownEnters ?? 0) >= HELD_OWN_ENTER_MAX) return stay('own-draft:not-accepted');
+    const needle = needleFor(own.text);
+    if (!needle) return null;
+    const seen = await this.readScreen(ptyId, needle, own.text);
+    if (this.inhibited.get(ptyId) !== held) return { kind: 'NONE' };
+    if (!seen || seen.promptTailMatches !== true) return null;
+    const req: SubmitRequest = { requestId, agentId: held.agentId, admissionClass: held.admissionClass, text: own.text };
+    let gen: number | undefined;
+    if (this.guardMode(ptyId) === 'ENFORCE') {
+      const g = await this.screenGate(req, ptyId, held.incarnation, 'REENTER', own.text);
+      if (this.inhibited.get(ptyId) !== held) return { kind: 'NONE' };
+      if (!g.ok) return stay(`own-draft:${g.reason}`);
+      gen = g.gen;
+    }
+    if (this.ownDrafts.get(ptyId) !== own) return null;
+    held.ownEnters = (held.ownEnters ?? 0) + 1;
+    // The hold is lifted for the Enter; any outcome but a reported submit puts THIS hold back.
+    this.inhibited.delete(ptyId);
+    const enterAt = deps.now();
+    const out = this.reenterOwnDraft(req, ptyId, held.incarnation, null, own.humanStage, gen);
+    const confirmed = out.kind === 'COMMITTED' ? await this.confirmReentered(ptyId, held.agentId, own, enterAt) : out;
+    if (confirmed.kind !== 'COMMITTED') {
+      // A new hold (a person's key, or a failed write, between the reading and the Enter) is the
+      // truer one, and keeps the count; otherwise THIS hold goes back.
+      const fresh = this.inhibited.get(ptyId);
+      if (fresh) fresh.ownEnters = held.ownEnters; else this.inhibited.set(ptyId, held);
+      return stay(`own-draft:${confirmed.kind}:${'reason' in confirmed ? confirmed.reason : ''}`);
+    }
+    if (held.decision) deps.capacity.confirmLaunch(held.decision);
+    const at = deps.now();
+    const outcome: SubmitOutcome = { kind: 'COMMITTED' };
+    this.known.set(requestId, { binding: held.binding, promise: Promise.resolve(outcome), settled: { at } });
+    try {
+      deps.onOutcome?.({ requestId, agentId: held.agentId, ptyId, admissionClass: held.admissionClass, outcome, at });
+    } catch { /* diagnostics never decide */ }
+    return { kind: 'SUBMITTED', screen: this.lastScreen.get(ptyId)?.facts ?? null };
+  }
+
   /** The held id is free again (not delivered): a re-admission of it is a new attempt. */
   private releaseHeldId(held: HeldInterference): void {
     if (this.known.get(held.requestId)?.binding === held.binding) this.known.delete(held.requestId);
+  }
+
+  /** WAKE-STALL-INTERFERED-192 B: the provider's report of a prompt submitted at or after `since`
+   *  on this PTY's live incarnation; `undefined` = this provider has no such report. */
+  private submitReport(ptyId: string, agentId: string, since: number): boolean | undefined {
+    try { return this.deps.submittedSince?.(ptyId, agentId, since); } catch { return undefined; }
+  }
+
+  /** B: our own draft on this PTY while it is still ours: the same live incarnation, and no
+   *  submitted prompt reported since its last Enter (one consumed it). */
+  private ownDraft(ptyId: string, agentId: string): OwnDraft | undefined {
+    const own = this.ownDrafts.get(ptyId);
+    if (!own) return undefined;
+    if (own.incarnation !== this.deps.incarnation(ptyId) || this.submitReport(ptyId, agentId, own.enteredAt) === true) {
+      this.ownDrafts.delete(ptyId);
+      return undefined;
+    }
+    return own;
+  }
+
+  /**
+   * B: a re-Enter on our own draft is COMMITTED only when the provider reports a submitted prompt
+   * since the draft's previous Enter (so a first Enter that lands late counts too, and is not
+   * followed by a second turn: a submitted composer is empty, and an Enter on it starts nothing).
+   * No report in WAKE_SUBMIT_CONFIRM_MS: SUBMIT_UNCONFIRMED, and the draft stays ours.
+   * A person's key during the wait (Jim NIT-1): SUBMIT_UNCONFIRMED at once, report or not; the
+   * submit may be the person's own prompt, so it is never counted as our wake's turn.
+   */
+  private async confirmReentered(ptyId: string, agentId: string, own: OwnDraft, enterAt: number): Promise<SubmitOutcome> {
+    const since = own.enteredAt;
+    own.enteredAt = enterAt;
+    const until = this.deps.now() + WAKE_SUBMIT_CONFIRM_MS;
+    for (;;) {
+      if (this.deps.humanGeneration(ptyId) !== own.humanStage) {
+        return { kind: 'REFUSED', reason: 'SUBMIT_UNCONFIRMED', detail: 'a person typed while the re-Enter was being confirmed' };
+      }
+      if (this.submitReport(ptyId, agentId, since) === true) {
+        if (this.ownDrafts.get(ptyId) === own) this.ownDrafts.delete(ptyId);
+        return { kind: 'COMMITTED' };
+      }
+      if (this.deps.now() >= until) {
+        return { kind: 'REFUSED', reason: 'SUBMIT_UNCONFIRMED', detail: `no submitted prompt reported ${WAKE_SUBMIT_CONFIRM_MS} ms after the re-Enter` };
+      }
+      await this.sleep(SUBMIT_VERIFY_POLL_MS);
+    }
   }
 
   /** Re-press Enter on a composer that is positively our untouched prior write. This is
