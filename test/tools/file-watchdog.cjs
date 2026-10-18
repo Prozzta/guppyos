@@ -62,19 +62,33 @@ function dueFiles(procs, runnerPid, limitMs, now) {
 }
 
 /**
- * Act on the due files: RECORD each one, THEN kill its tree. The order matters: the kill ends the
+ * Act on the due files: RECORD each one as due, THEN kill its tree, THEN record what the kill did. The order matters: the kill ends the
  * file, `node --test` then returns, and the runner stops this watchdog at once; a record written
  * after a slow `taskkill` (a loaded machine) could be lost with it, leaving a failed run that names
  * no file (the 1.1.76 final gate #4, round 3/a). A due file has overrun the limit, so it is named
  * whether or not the kill still finds it.
  */
-function killDue(due, { killed, record, kill }) {
+function killDue(due, { killed, record, kill, outcome = () => {} }) {
   for (const d of due) {
     if (killed.has(d.pid)) continue;
     killed.add(d.pid);
     try { record(d); } catch { /* noop */ }
-    try { kill(d.pid); } catch { /* already gone */ }
+    // Jim NIT-1: the first row says only that the file is due; what the kill did is written after
+    // it (by job / tree / none), so a recycled pid is never logged as killed.
+    let r;
+    try { r = kill(d.pid); } catch (e) { r = { by: 'none', why: `the kill threw: ${String(e && e.message || e).slice(0, 120)}` }; }
+    try { outcome(d, r || { by: 'none', why: 'no result' }); } catch { /* noop */ }
   }
+}
+
+/** The row written AFTER a due file's kill: what was done, never more. */
+function outcomeRow(d, r, limit) {
+  const by = r.by;
+  let message;
+  if (by === 'none') message = `not killed: ${r.why || 'nothing to kill'}`;
+  else if (r.alive) message = `killed through its ${by === 'job' ? 'job' : 'process tree'}, but ${r.alive} process(es) still alive after 5 s`;
+  else message = `killed through its ${by === 'job' ? 'job' : 'process tree'} after ${d.ageMs} ms (limit ${limit} ms)`;
+  return { file: d.file, message, by: 'watchdog', kill: by, ...(r.alive ? { alive: r.alive } : {}) };
 }
 
 /** The tree of a due file, from the same snapshot (each link created at or after its parent), killed
@@ -97,9 +111,10 @@ function killTree(procs, pid, deps) {
 function killFile(procs, pid, { jobExe, run = spawnSync, tree = killTree } = {}) {
   const row = procs.find((p) => p.pid === pid);
   if (jobExe && row && Number.isFinite(row.startedAt)) {
-    const r = run(jobExe, ['kill', String(pid), String(row.startedAt)], { windowsHide: true, stdio: 'ignore', timeout: 30_000 });
+    const r = run(jobExe, ['kill', String(pid), String(row.startedAt)], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 30_000 });
     if (r.status === 0) return { by: 'job' };
     if (r.status === 4) return { by: 'none', why: 'another process has the pid now' };
+    if (r.status === 5) { const m = /alive (\d+)/.exec(String(r.stdout || '')); return { by: 'job', alive: m ? Number(m[1]) : -1 }; }
   }
   return { by: 'tree', ...tree(procs, pid) };
 }
@@ -113,7 +128,7 @@ function snapshot() {
   return parseRows(out);
 }
 
-module.exports = { parseRows, fileOf, dueFiles, killDue, killTree, killFile, snapshot };
+module.exports = { parseRows, fileOf, dueFiles, killDue, outcomeRow, killTree, killFile, snapshot };
 
 if (require.main === module) {
   const [runnerPid, limitMs, outFile, pollMs = '30000', jobExe = ''] = process.argv.slice(2);
@@ -125,8 +140,9 @@ if (require.main === module) {
     try { procs = snapshot(); } catch { return; }   // one missed poll is not fatal
     killDue(dueFiles(procs, runner, limit, Date.now()), {
       killed,
-      record: (d) => fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `killed with its process tree after ${d.ageMs} ms (limit ${limit} ms)`, by: 'watchdog' })}\n`),
-      kill: (pid) => killFile(procs, pid, { jobExe })
+      record: (d) => fs.appendFileSync(outFile, `${JSON.stringify({ file: d.file, message: `over the limit after ${d.ageMs} ms (limit ${limit} ms): killing it`, by: 'watchdog' })}\n`),
+      kill: (pid) => killFile(procs, pid, { jobExe }),
+      outcome: (d, r) => fs.appendFileSync(outFile, `${JSON.stringify(outcomeRow(d, r, limit))}\n`)
     });
   };
   setInterval(tick, poll);

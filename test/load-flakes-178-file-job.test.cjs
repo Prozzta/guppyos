@@ -57,6 +57,34 @@ test('the watchdog kills a due file through its job; the snapshot tree only when
   assert.equal(W.killFile(procs, 10, { tree: (p, pid) => { trees.push(pid); return {}; } }).by, 'tree', 'no tool: the snapshot tree');
 });
 
+test('Jim NIT-2: a job still not empty after the wait (exit 5) is reported with its count, not as done', () => {
+  const procs = [{ pid: 10, ppid: 1, name: 'node.exe', cmd: 'x', startedAt: 5000 }];
+  const r = W.killFile(procs, 10, { jobExe: 'J', run: () => ({ status: 5, stdout: 'alive 3\r\n' }), tree: () => { throw new Error('no tree'); } });
+  assert.deepEqual(r, { by: 'job', alive: 3 });
+  const row = W.outcomeRow({ file: 'a.test.cjs', ageMs: 9 }, r, 8);
+  assert.equal(row.alive, 3);
+  assert.match(row.message, /3 process\(es\) still alive after 5 s/);
+  // The tool says so itself: exit 5 with the count, after the bounded wait.
+  const cs = fs.readFileSync(path.join(__dirname, 'tools', 'file-job.cs'), 'utf8');
+  assert.match(cs, /if \(left > 0\) \{ Console\.Out\.WriteLine\("alive " \+ left\); return 5; \}/);
+});
+
+test('Jim NIT-1: the row after the kill says what was done; a recycled pid is never logged as killed', () => {
+  const d = { file: 'a.test.cjs', ageMs: 9 };
+  const none = W.outcomeRow(d, { by: 'none', why: 'another process has the pid now' }, 8);
+  assert.equal(none.kill, 'none');
+  assert.doesNotMatch(none.message, /^killed/);
+  assert.match(none.message, /not killed: another process has the pid now/);
+  assert.match(W.outcomeRow(d, { by: 'job' }, 8).message, /^killed through its job after 9 ms/);
+  assert.match(W.outcomeRow(d, { by: 'tree', killed: [10] }, 8).message, /^killed through its process tree/);
+  // The row written BEFORE the kill claims nothing about it.
+  const src = fs.readFileSync(path.join(__dirname, 'tools', 'file-watchdog.cjs'), 'utf8');
+  const rec = /record: \(d\) => fs\.appendFileSync\(outFile, `\$\{JSON\.stringify\(\{ file: d\.file, message: `([^`]*)`/.exec(src);
+  assert.ok(rec, 'the due row');
+  assert.doesNotMatch(rec[1], /killed/);
+  assert.match(src, /outcome: \(d, r\) => fs\.appendFileSync\(outFile, `\$\{JSON\.stringify\(outcomeRow\(d, r, limit\)\)\}\\n`\)/);
+});
+
 // ── LIVE: the real tool, a file process and what it starts ────────────────────────────────
 
 const LIVE = { skip: process.platform !== 'win32' ? 'Windows only' : false, timeout: 180_000 };

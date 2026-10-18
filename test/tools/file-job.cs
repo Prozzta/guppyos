@@ -10,7 +10,8 @@
 //   file-job kill <pid> <createdMs>   The watchdog: the job of that file, only while <pid> is
 //                                     still the process born at <createdMs> and in it; then
 //                                     TerminateJobObject, and wait until it holds no process.
-// Exit codes: 0 done, 3 no job for the pid, 4 the pid is another process now, 1 an error.
+// Exit codes: 0 done, 3 no job for the pid, 4 the pid is another process now, 5 terminated but
+// still not empty after 5 s ("alive <n>" on stdout), 1 an error.
 using System;
 using System.Runtime.InteropServices;
 
@@ -93,12 +94,18 @@ static class FileJob
         if (Math.Abs(ms - createdMs) > 1 || !IsProcessInJob(p, job, out inJob) || !inJob) return 4;
         CloseHandle(p);
         if (!TerminateJobObject(job, 1)) throw new Exception("TerminateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
+        // Jim NIT-2: a job still not empty after the wait is said (exit 5, the count on stdout), not
+        // passed off as done: on a loaded box the lag then shows as a row, not as a later EBUSY.
+        uint left = 0;
         for (int i = 0; i < 200; i++)
         {
             BASIC_ACCOUNTING acc;
-            if (!QueryInformationJobObject(job, 1, out acc, Marshal.SizeOf(typeof(BASIC_ACCOUNTING)), IntPtr.Zero) || acc.ActiveProcesses == 0) break;
+            if (!QueryInformationJobObject(job, 1, out acc, Marshal.SizeOf(typeof(BASIC_ACCOUNTING)), IntPtr.Zero)) { left = 0; break; }
+            left = acc.ActiveProcesses;
+            if (left == 0) break;
             System.Threading.Thread.Sleep(25);
         }
+        if (left > 0) { Console.Out.WriteLine("alive " + left); return 5; }
         return 0;
     }
 }
