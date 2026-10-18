@@ -414,3 +414,105 @@ test('B coordinator: SUBMIT_UNCONFIRMED is settled UNCONFIRMED: the ids wait out
   const claim2 = bridge.requestInboxWake('jim', 'reconcile', 'reconcile');
   assert.ok(claim2 && claim2.recheck, 'and the prompt check is still carried');
 });
+
+// ─── Jim NIT-1: a person's key during the 5 s confirm ──────────────────────────────────────
+
+test('B (Jim NIT-1): a person who types and submits during the re-Enter\'s confirm wait: SUBMIT_UNCONFIRMED at once, never our turn', async () => {
+  const r = rig();
+  await newlineDraft(r);
+  r.advance(67_000);
+  const t1 = r.now;
+  r.at(t1 + 2_000, () => { r.gen += 1; r.turns.push('their own prompt'); r.ups.push(r.now); r.out += 1; });
+  const a1 = await r.submit('inbox-wake:jim:4aea08:1', { priorText: TEXT });
+  assert.deepEqual(a1, { kind: 'REFUSED', reason: 'SUBMIT_UNCONFIRMED', detail: 'a person typed while the re-Enter was being confirmed' },
+    'the reported submit may be the person\'s: not COMMITTED');
+  assert.ok(r.now - t1 < OWN.WAKE_SUBMIT_CONFIRM_MS, 'settled when the key arrived, not at the end of the wait');
+  assert.deepEqual(r.writes, ['\r'], 'one Enter on our draft, nothing else');
+});
+
+test('C (Jim NIT-1): a person who types and submits during the held re-Enter\'s confirm: the hold stays, not SUBMITTED', async () => {
+  const r = rig();
+  await heldOnOwnDraft(r);
+  r.advance(60_000);
+  r.at(r.now + 2_000, () => { r.gen += 1; r.turns.push('their own prompt'); r.ups.push(r.now); r.out += 1; });
+  const out = await r.settle(r.owner.recheckHeld('pty-jim', 'inbox-wake:jim:4aea08:1'));
+  assert.equal(out.kind, 'HELD', `not delivered on the person's submit (got ${JSON.stringify(out)})`);
+  assert.equal(out.why, 'own-draft:REFUSED:SUBMIT_UNCONFIRMED');
+  assert.deepEqual(r.writes, ['\r'], 'the Enter went out before the key');
+  assert.ok(r.owner.inhibition('pty-jim'), 'still held');
+});
+
+// ─── Jim SHOULD-1: a Claude that never goes quiet is a decision, never a silent stall ─────────
+
+const QW = loadTs('src/main/quietRefusalWatch.ts');
+const D = loadTs('src/main/floorDigest.ts');
+const NOT_QUIET = { kind: 'REFUSED', reason: 'SCREEN_NOT_READY', detail: 'output-not-quiet' };
+
+test('SHOULD-1: QUIET_REFUSAL_ALERT_AFTER in a row raises one row and a stall; a wake past the gate clears it', () => {
+  assert.equal(QW.QUIET_REFUSAL_ALERT_AFTER, 3, 'measured: an idle Claude draws nothing for hours, so 3 in a row is never normal');
+  const rows = [];
+  const w = new QW.QuietRefusalWatch((row) => rows.push(row));
+  w.outcome('jim', NOT_QUIET, T0);
+  w.outcome('jim', NOT_QUIET, T0 + 300_000);
+  assert.deepEqual(rows, []);
+  assert.deepEqual(w.stalls(), [], 'not yet');
+  w.outcome('andy', NOT_QUIET, T0 + 1);
+  w.outcome('jim', { kind: 'REFUSED', reason: 'CAPACITY_HOLD' }, T0 + 400_000);
+  w.outcome('jim', NOT_QUIET, T0 + 600_000);
+  assert.deepEqual(rows, [{ kind: 'wake-not-quiet', event: 'raised', agentId: 'jim', count: 3, since: T0 }],
+    'a refusal before the quiet gate neither counts nor breaks the run');
+  w.outcome('jim', NOT_QUIET, T0 + 900_000);
+  assert.equal(rows.length, 1, 'raised once per run');
+  assert.deepEqual(w.stalls(), [{ agentId: 'jim', count: 4, since: T0 }], 'per agent: andy has 1');
+  w.outcome('jim', COMMITTED, T0 + 1_200_000);
+  assert.deepEqual(rows[1], { kind: 'wake-not-quiet', event: 'cleared', agentId: 'jim', count: 4, since: T0 });
+  assert.deepEqual(w.stalls(), []);
+});
+
+test('SHOULD-1: the screen gate\'s own refusal is past the quiet gate: it ends the run', () => {
+  const rows = [];
+  const w = new QW.QuietRefusalWatch((row) => rows.push(row));
+  w.outcome('jim', NOT_QUIET, T0);
+  w.outcome('jim', NOT_QUIET, T0 + 1);
+  w.outcome('jim', { kind: 'REFUSED', reason: 'SCREEN_NOT_READY', detail: 'composer-not-empty' }, T0 + 2);
+  w.outcome('jim', NOT_QUIET, T0 + 3);
+  w.outcome('jim', NOT_QUIET, T0 + 4);
+  assert.deepEqual(rows, [], 'two runs of 2, no alert');
+});
+
+test('SHOULD-1 through the real owner: a Claude that never goes quiet is a stall after 3 wakes, with nothing typed', async () => {
+  const r = rig();
+  const rows = [];
+  const w = new QW.QuietRefusalWatch((row) => rows.push(row));
+  r.deps.onOutcome = (rec) => w.outcome(rec.agentId, rec.outcome, rec.at);
+  r.drawUntil(T0 + 3_600_000);
+  for (let i = 0; i < 3; i += 1) {
+    const out = await r.submit(`inbox-wake:jim:4aea08:${i}`);
+    assert.deepEqual(out, NOT_QUIET, `wake ${i}`);
+    r.advance(60_000);
+  }
+  assert.deepEqual(r.writes, [], 'nothing typed');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event, 'raised');
+  assert.equal(w.stalls()[0].count, 3);
+});
+
+test('SHOULD-1: a stall is a floor-digest decision (god is woken), one per run', () => {
+  const stall = { agentId: 'jim-mtujpe28', name: 'Jim', count: 3, since: T0 };
+  const items = D.decisionItems([], [], T0 + 900_000, [], [], [stall]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].id, `wake-not-quiet:jim-mtujpe28:${T0}`);
+  assert.match(items[0].line, /^Jim: 3 automatic wakes in a row refused over .*nothing typed.*never went quiet \(output-not-quiet\) - its mail is not being delivered/);
+  const { decisionItems: viaBuild, markdown } = D.buildFloorDigest({ tasks: { tasks: [] }, meta: {}, flags: [], ledgerIssues: [], agents: [], now: T0 + 900_000, quietStalls: [stall] });
+  assert.deepEqual(viaBuild.map((i) => i.id), [items[0].id]);
+  assert.ok(markdown.includes(items[0].id));
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'floorDigest.ts'), 'utf8');
+  assert.match(src, /quietStalls: \(\(\) => \{ try \{ return this\.host\.quietStalls\?\.\(\) \?\? \[\]; \} catch \{ return \[\]; \} \}\)\(\),/);
+});
+
+test('SHOULD-1 main wiring: every owner outcome reaches the watch, and its stalls reach the digest', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(src, /onOutcome: \(r\) => \{\s*\/\/[^\n]*\n\s*pushAgentImpact\(\);\s*quietRefusals\.outcome\(r\.agentId, r\.outcome, r\.at\);/);
+  assert.match(src, /quietStalls: \(\) => quietRefusals\.stalls\(\)\.map\(\(q\) => \(\{ \.\.\.q, name: agentDisplayName\(q\.agentId\) \}\)\),/);
+  assert.match(src, /const quietRefusals = new QuietRefusalWatch\(\(row\) => \{ try \{ hive\.appendLog\(row\); \} catch/);
+});

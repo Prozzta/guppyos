@@ -52,6 +52,10 @@ export interface DigestAgent {
  *  notice threshold (the Human has a banner; god gets a decision). */
 export interface DigestHeldWake { agentId: string; name?: string; messages: number; since: number }
 
+/** WAKE-STALL-INTERFERED-192: automatic wakes refused in a row because the terminal never went
+ *  quiet (quietRefusalWatch.ts): nothing typed, so nothing else alarms. */
+export interface DigestQuietStall { agentId: string; name?: string; count: number; since: number }
+
 /** REQUESTS-AUTO-190: an ask the backstop closed (hive.autoCloseStaleObligations writes them). */
 export interface DigestBackstopClosed { agentId: string; from: string; id: string; subject: string; at: number }
 /** Under state/: the backstop closes of the last week, newest last, at most ASKS_BACKSTOP_KEEP. */
@@ -79,6 +83,7 @@ export interface FloorDigestInput {
   backstopClosed?: DigestBackstopClosed[];
   heldWakes?: DigestHeldWake[];
   silentTurns?: SilentTurn[];
+  quietStalls?: DigestQuietStall[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -94,8 +99,16 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = []): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
+  // One item per run of refusals (its id carries when the run began).
+  for (const q of quietStalls) {
+    const who = q.name ?? q.agentId;
+    items.push({
+      id: `wake-not-quiet:${q.agentId}:${q.since}`, cardId: null,
+      line: `${who}: ${q.count} automatic wakes in a row refused over ${ageText(now - q.since)}, nothing typed, because ${who}'s terminal never went quiet (output-not-quiet) - its mail is not being delivered; look at ${who}'s terminal for something that keeps redrawing`
+    });
+  }
   // FLEET-LIVENESS-BLIND: shown working, no hook or tool call (silentTurn.ts). The id carries when
   // the silence began, so one silence wakes god once and a later one is a new decision.
   for (const s of silentTurns) {
@@ -150,7 +163,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? []);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? []);
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -268,6 +281,8 @@ export interface FloorDigestHost {
   heldWakes?(): DigestHeldWake[];
   /** FLEET-LIVENESS-BLIND: agents shown working with no hook or tool call. Optional. */
   silentTurns?(): SilentTurn[];
+  /** WAKE-STALL-INTERFERED-192: agents whose wakes keep being refused output-not-quiet. Optional. */
+  quietStalls?(): DigestQuietStall[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -309,6 +324,7 @@ export class FloorDigest {
       ledgerIssues: this.host.ledgerIssues(), agents: this.agents(root), now,
       heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })(),
       silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
+      quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
       backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.

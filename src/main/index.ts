@@ -163,6 +163,7 @@ import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
+import { QuietRefusalWatch } from './quietRefusalWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
 import { BootHookClock } from './bootSubmitEvidence';
@@ -528,6 +529,8 @@ const boardStatus = new BoardStatusWriter({
   taskMeta: () => hive.ledgerGuard.taskMeta().cards,
   flags: () => boardMonitor.flags()
 });
+/** WAKE-STALL-INTERFERED-192: wakes refused in a row because the terminal never went quiet. */
+const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row); } catch { /* logging only */ } });
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -539,6 +542,7 @@ const floorDigest = new FloorDigest({
   heldWakes: () => (heldInterference?.noticed() ?? []).map((h) => ({ agentId: h.agentId, name: agentDisplayName(h.agentId), messages: h.messages, since: h.since })),
   // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
+  quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
@@ -975,6 +979,7 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   onOutcome: (r) => {
     // An outcome can raise an INTERFERED hold or settle one: the impact string moves.
     pushAgentImpact();
+    quietRefusals.outcome(r.agentId, r.outcome, r.at);
     if (r.outcome.kind === 'COMMITTED') {
       if (r.admissionClass === 'BOOT_SEQUENCE') {
         console.log(`[boot-sequence] ${r.agentId} on ${r.ptyId ?? '-'}: COMMITTED`);

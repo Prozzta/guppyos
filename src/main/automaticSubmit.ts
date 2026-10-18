@@ -1777,12 +1777,17 @@ export class AutomaticSubmitOwner {
    * since the draft's previous Enter (so a first Enter that lands late counts too, and is not
    * followed by a second turn: a submitted composer is empty, and an Enter on it starts nothing).
    * No report in WAKE_SUBMIT_CONFIRM_MS: SUBMIT_UNCONFIRMED, and the draft stays ours.
+   * A person's key during the wait (Jim NIT-1): SUBMIT_UNCONFIRMED at once, report or not; the
+   * submit may be the person's own prompt, so it is never counted as our wake's turn.
    */
   private async confirmReentered(ptyId: string, agentId: string, own: OwnDraft, enterAt: number): Promise<SubmitOutcome> {
     const since = own.enteredAt;
     own.enteredAt = enterAt;
     const until = this.deps.now() + WAKE_SUBMIT_CONFIRM_MS;
     for (;;) {
+      if (this.deps.humanGeneration(ptyId) !== own.humanStage) {
+        return { kind: 'REFUSED', reason: 'SUBMIT_UNCONFIRMED', detail: 'a person typed while the re-Enter was being confirmed' };
+      }
       if (this.submitReport(ptyId, agentId, since) === true) {
         if (this.ownDrafts.get(ptyId) === own) this.ownDrafts.delete(ptyId);
         return { kind: 'COMMITTED' };
