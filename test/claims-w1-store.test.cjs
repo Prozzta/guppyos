@@ -121,7 +121,7 @@ test('G1.2 single writer: 3 agents plus ledger-route parts concurrently; no inte
   const io = {
     openSync: (p, f) => fs.openSync(p, f),
     writeSync: (fd, buf) => { ops.push('write'); return fs.writeSync(fd, buf); },
-    fsyncSync: (fd) => { ops.push('fsync'); fs.fsyncSync(fd); },
+    fsync: (fd, cb) => { ops.push('fsync'); fs.fsync(fd, cb); },
     closeSync: (fd) => fs.closeSync(fd),
   };
   const { store } = mkStore(root, { io });
@@ -149,6 +149,80 @@ test('G1.2 single writer: 3 agents plus ledger-route parts concurrently; no inte
     for (const l of ls) { const r = JSON.parse(l); assert.equal(r.agent, a); assert.match(r.text, new RegExp(`^${a} `)); }
     assert.equal(mkStore(root, { keys: store.d.keys }).store.readLedger(a).chain, 'ok');
   }
+});
+
+/** An io whose fsyncs are held until the test releases them (CLAIMS-FSYNC-196). */
+function heldIo() {
+  const held = [];
+  const ops = [];
+  const io = {
+    openSync: (p, f) => fs.openSync(p, f),
+    writeSync: (fd, buf) => { ops.push('write'); return fs.writeSync(fd, buf); },
+    fsync: (fd, cb) => { ops.push('fsync-start'); held.push(() => fs.fsync(fd, (e) => { ops.push('fsync-done'); cb(e); })); },
+    closeSync: (fd) => { ops.push('close'); fs.closeSync(fd); },
+  };
+  return { io, held, ops };
+}
+const pause = (ms) => new Promise((res) => setTimeout(res, ms));
+/** Release held fsyncs until `p` settles (later appends add more while it runs). */
+async function releaseUntil(held, p) {
+  let fin = false;
+  void p.then(() => { fin = true; }, () => { fin = true; });
+  while (!fin) { while (held.length) held.shift()(); await pause(2); }
+  return p;
+}
+
+test('CLAIMS-FSYNC-196: the fsync runs off the event loop; the ack waits for it to COMPLETE; the agent\'s next append waits for that ack', async () => {
+  const root = hive();
+  const { io, held, ops } = heldIo();
+  const { store } = mkStore(root, { io });
+  const p1 = store.appendRecord('andy', note('one'), 'endpoint').then((r) => { ops.push('ack andy'); return r; });
+  const p2 = store.appendRecord('andy', note('two'), 'endpoint').then((r) => { ops.push('ack andy'); return r; });
+  const pp = store.appendRecord('pam', note('another agent'), 'endpoint').then((r) => { ops.push('ack pam'); return r; });
+  await pause(20);   // a timer fires while both flushes are held: the loop is not blocked
+  assert.deepEqual(ops, ['write', 'fsync-start', 'write', 'fsync-start'], "andy's first line and pam's line; andy's second waits");
+  held.shift()();   // andy's first flush completes
+  assert.equal((await p1).ok, true);
+  await pause(20);
+  assert.deepEqual(ops.slice(4), ['fsync-done', 'ack andy', 'write', 'fsync-start'], "andy's second line is written only after the first ack");
+  const [r2, rp] = await releaseUntil(held, Promise.all([p2, pp]));
+  assert.equal(r2.ok, true); assert.equal(rp.ok, true);
+  let done = 0, acks = 0;
+  for (const op of ops) {
+    if (op === 'fsync-done') done++;
+    if (op.startsWith('ack')) { acks++; assert.ok(done >= acks, `every ack follows a completed fsync: ${ops.join(',')}`); }
+  }
+  for (const a of ['andy', 'pam']) assert.equal(mkStore(root, { keys: store.d.keys }).store.readLedger(a).chain, 'ok');
+  assert.equal(lines(root, 'andy').length, 2);
+});
+
+test('CLAIMS-FSYNC-196: a close while a flush is in flight keeps the handle until the flush completes; the append is acked', async () => {
+  const root = hive();
+  const { io, held, ops } = heldIo();
+  const { store } = mkStore(root, { io });
+  const p = store.appendRecord('andy', note('closing'), 'endpoint');
+  await pause(10);
+  store.close();
+  assert.equal(ops.includes('close'), false, 'not closed under the flush');
+  const r = await releaseUntil(held, p);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  await pause(10);
+  assert.ok(ops.indexOf('close') > ops.indexOf('fsync-done'), ops.join(','));
+  assert.equal(mkStore(root, { keys: store.d.keys }).store.readLedger('andy').chain, 'ok');
+});
+
+test('CLAIMS-FSYNC-196: a failed fsync is not an ack, the handle is dropped, and the next append chains on', async () => {
+  const root = hive();
+  let fail = true;
+  const io = {
+    openSync: (p, f) => fs.openSync(p, f), writeSync: (fd, buf) => fs.writeSync(fd, buf), closeSync: (fd) => fs.closeSync(fd),
+    fsync: (fd, cb) => { if (fail) { fail = false; setImmediate(() => cb(new Error('simulated EIO'))); return; } fs.fsync(fd, cb); },
+  };
+  const { store, logs } = mkStore(root, { io });
+  await refused(store.appendRecord('andy', note('lost flush'), 'endpoint'), /nothing was acked/);
+  assert.ok(logs.some((l) => l.kind === 'claims-append-failed' && /simulated EIO/.test(l.error)));
+  await ok(store.appendRecord('andy', note('after it'), 'endpoint'));
+  assert.equal(mkStore(root, { keys: store.d.keys }).store.readLedger('andy').chain, 'ok');
 });
 
 // ------------------------------------------------------------------ G1.3
@@ -664,7 +738,7 @@ test('F5: a rekey whose line fails for one agent records no new key id; every le
       if (s.includes('"ev":"rekey"') && s.includes('"agent":"dwight"') && tore === 0) { tore++; fs.writeSync(fd, buf.subarray(0, 40)); throw new Error('simulated crash mid rekey'); }
       return fs.writeSync(fd, buf);
     },
-    fsyncSync: (fd) => fs.fsyncSync(fd), closeSync: (fd) => fs.closeSync(fd),
+    fsync: (fd, cb) => fs.fsync(fd, cb), closeSync: (fd) => fs.closeSync(fd),
   };
   const r1 = mkStore(root, { keys, now, io });
   now.advance(60_000);

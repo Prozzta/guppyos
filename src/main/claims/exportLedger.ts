@@ -36,6 +36,7 @@
  * unchanged): default "every record"; W6 passes the archive-backed one.
  */
 import { closeSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ClaimsState, LedgerRec, RenderExportLineFn, RenderMemoryMdFn, Status, WorldView } from '../../shared/claims';
 import { GENERATED_MEMORY_PREFIX, isGeneratedMemory } from './generated';
@@ -101,9 +102,27 @@ export function exportFileFor(agentDir: string, month: string, adding: number): 
   return { name: exportName(month, Number(EXPORT_RE.exec(last)![2] ?? 1) + 1), fresh: true };
 }
 
-function appendDurable(file: string, text: string): void {
+/**
+ * CLAIMS-FSYNC-196: where an export append's fsync goes. Without one, each append is fsynced before
+ * it returns (the start-up sync, as before). With one, the text is still written at once, so the
+ * order and what a purge's scrub sees are exactly as before, and its file is only noted:
+ * `flushExport` then fsyncs each noted file ONCE, on the libuv threadpool, off the event loop.
+ * fsync flushes the file, whichever handle wrote it (FlushFileBuffers on Windows, the inode on POSIX).
+ */
+export type ExportFlush = Set<string>;
+
+function appendDurable(file: string, text: string, flush?: ExportFlush): void {
   const fd = openSync(file, 'a');
-  try { writeSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+  try { writeSync(fd, text); if (!flush) fsyncSync(fd); } finally { closeSync(fd); }
+  flush?.add(file);
+}
+
+/** fsync every file an export batch wrote, one at a time, without blocking the event loop. */
+export async function flushExport(flush: ExportFlush): Promise<void> {
+  for (const file of flush) {
+    const h = await open(file, 'a');
+    try { await h.sync(); } finally { await h.close(); }
+  }
 }
 
 /** One record's export text: W4's line, guaranteed to carry its [c:<id>] tag and to end with a newline. */
@@ -118,18 +137,18 @@ export function statusMarkerLine(id: string, from: Status | null, to: Status, at
   return `- ${at} status of [c:${id}]: ${from ?? 'new'} -> ${to}\n`;
 }
 
-function appendText(agentDir: string, agent: string, month: string, text: string): string {
+function appendText(agentDir: string, agent: string, month: string, text: string, flush?: ExportFlush): string {
   const bytes = Buffer.byteLength(text, 'utf8');
   if (bytes > EXPORT_SPLIT_BYTES) throw new Error(`export: one line of ${bytes} bytes is over the split size`);
   const { name, fresh } = exportFileFor(agentDir, month, bytes);
   const head = fresh ? `# Memory ledger export - ${agent} - ${month}\n\n_A continuous, append-only export of this agent's claims ledger, for older app versions. Generated; do not edit._\n\n` : '';
-  appendDurable(join(agentDir, name), head + text);
+  appendDurable(join(agentDir, name), head + text, flush);
   return name;
 }
 
 /** Append one record to the continuous export (writer mode, after the ledger append succeeded). */
-export function appendExport(agentDir: string, rec: LedgerRec, state: ClaimsState, render: RenderExportLineFn): string {
-  return appendText(agentDir, rec.agent, rec.wt.slice(0, 7), exportLine(rec, state, render));
+export function appendExport(agentDir: string, rec: LedgerRec, state: ClaimsState, render: RenderExportLineFn, flush?: ExportFlush): string {
+  return appendText(agentDir, rec.agent, rec.wt.slice(0, 7), exportLine(rec, state, render), flush);
 }
 
 /** The status changes between two derived states (a claim new in `next` counts only if not live). */
@@ -145,9 +164,9 @@ export function statusChanges(prev: ClaimsState | null, next: ClaimsState): Arra
 }
 
 /** Append marker lines for every status change (month of `at`). */
-export function appendStatusMarkers(agentDir: string, agent: string, prev: ClaimsState | null, next: ClaimsState, at: string): number {
+export function appendStatusMarkers(agentDir: string, agent: string, prev: ClaimsState | null, next: ClaimsState, at: string, flush?: ExportFlush): number {
   const ch = statusChanges(prev, next);
-  if (ch.length) appendText(agentDir, agent, at.slice(0, 7), ch.map((c) => statusMarkerLine(c.id, c.from, c.to, at)).join(''));
+  if (ch.length) appendText(agentDir, agent, at.slice(0, 7), ch.map((c) => statusMarkerLine(c.id, c.from, c.to, at)).join(''), flush);
   return ch.length;
 }
 
@@ -168,10 +187,10 @@ export function exportedIds(agentDir: string): Set<string> {
  * not yet in it, in order, except the archive-backed legacy claims (recomputed on every call, so a
  * claim whose archive is gone or changed is exported by the next sync).
  */
-export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn, exclude: Set<string> = archiveBackedIds(agentDir, records, state)): number {
+export function syncExport(agentDir: string, records: LedgerRec[], state: ClaimsState, render: RenderExportLineFn, exclude: Set<string> = archiveBackedIds(agentDir, records, state), flush?: ExportFlush): number {
   const have = exportedIds(agentDir);
   let n = 0;
-  for (const r of records) if (!have.has(r.id) && !exclude.has(r.id)) { appendExport(agentDir, r, state, render); n++; }
+  for (const r of records) if (!have.has(r.id) && !exclude.has(r.id)) { appendExport(agentDir, r, state, render, flush); n++; }
   return n;
 }
 

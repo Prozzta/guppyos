@@ -268,9 +268,12 @@ test('M-B a no-yield burst: the export work runs after the whole burst, and each
   const r = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst withdrawal', retracts: [c] }, 'endpoint')).id;
   // A later record changes an EARLIER claim's status: a non-positional "before" would see it early.
   const dd = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst second replacement', supersedes: [b] }, 'endpoint')).id;
-  // Every job runs only now, against the whole ledger (the burst had no yield to the queue).
-  while (held.length) { held.shift()(); await new Promise((res) => setImmediate(res)); }
-  await x.exp.drain();
+  // Every job runs only now, against the whole ledger (the burst had no yield to the queue). A job's
+  // flush (CLAIMS-FSYNC-196) is awaited before the next job is deferred, so pump until the queue drains.
+  let drained = false;
+  const done = x.exp.drain().then(() => { drained = true; });
+  while (!drained) { while (held.length) held.shift()(); await new Promise((res) => setImmediate(res)); }
+  await done;
   const markers = x.exportText().split('\n').filter((l) => l.includes(' status of [c:'));
   assert.deepEqual(markers.map((l) => l.replace(/^- \S+ /, '')).sort(), [`status of [c:${a}]: live -> superseded`, `status of [c:${c}]: live -> retracted`, `status of [c:${b}]: live -> superseded`].sort(), markers.join('\n'));
   assert.equal(E.exportedIds(x.dir()).size, 5, [a, b, c, r, dd].join(','));

@@ -81,6 +81,32 @@ test('syncExport: catches up the records a crash left out, in order, and is idem
   assert.deepEqual(order, records.map((r) => r.id));
 });
 
+test('CLAIMS-FSYNC-196: with a flush set, an export append does no sync fsync; each file it wrote is noted once and flushed off the loop; without one (start-up sync), every append still fsyncs', async () => {
+  const realSync = fs.fsyncSync;
+  let syncs = 0;
+  fs.fsyncSync = (fd) => { syncs++; return realSync(fd); };
+  try {
+    const d = dir();
+    const { records, state } = ledger(10);
+    const flush = new Set();
+    for (const r of records.slice(0, 4)) E.appendExport(d, r, state, renderers(records).renderExportLine, flush);
+    const next = JSON.parse(JSON.stringify(state));
+    next.claims.c1.status = 'superseded';
+    assert.equal(E.appendStatusMarkers(d, 'ag-1', state, next, '2026-10-03T13:00:00.000Z', flush), 1);
+    assert.equal(syncs, 0, 'no fsyncSync on the append path');
+    assert.deepEqual([...flush], [path.join(d, 'memory-ledger-export-2026-10.md')], 'one entry per file written');
+    let ticked = false;
+    setImmediate(() => { ticked = true; });
+    await E.flushExport(flush);
+    assert.equal(ticked, true, 'the flush yields to the loop');
+    assert.equal(syncs, 0, 'the flush is the async fsync, not fsyncSync');
+    assert.equal(E.syncExport(d, records, state, renderers(records).renderExportLine), 6);
+    assert.equal(syncs, 6, 'no flush set: one fsync per append, as before');
+    const order = [...fs.readFileSync(path.join(d, 'memory-ledger-export-2026-10.md'), 'utf8').matchAll(/\[c:(c\d+)\]/g)].map((m) => m[1]);
+    assert.deepEqual(order.filter((id, i) => order.indexOf(id) === i), records.map((r) => r.id));
+  } finally { fs.fsyncSync = realSync; }
+});
+
 test('status changes are appended as marker lines, never edits; markers do not count as exports', () => {
   const d = dir();
   const { records, state } = ledger(3);
