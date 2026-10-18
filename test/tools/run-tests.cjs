@@ -63,12 +63,40 @@ function watchdogPollMs(limitMs) { return Math.min(30_000, Math.max(1_000, Math.
 function backstopMs(limitMs) { return limitMs + Math.max(3 * watchdogPollMs(limitMs), BACKSTOP_MIN_MARGIN_MS); }
 
 /** win32: start the per-file tree-kill watchdog (file-watchdog.cjs) beside the blocking run. */
-function startWatchdog(limitMs, outFile) {
+function startWatchdog(limitMs, outFile, jobExe = null) {
   if (process.platform !== 'win32') return { stop: () => {} };
-  const child = spawnAsync(process.execPath, [WATCHDOG, String(process.pid), String(limitMs), outFile, String(watchdogPollMs(limitMs))], { stdio: 'ignore', windowsHide: true });
+  const child = spawnAsync(process.execPath, [WATCHDOG, String(process.pid), String(limitMs), outFile, String(watchdogPollMs(limitMs)), jobExe || ''], { stdio: 'ignore', windowsHide: true });
   child.on('error', () => {});
   return { stop: () => { try { child.kill(); } catch { /* gone */ } } };
 }
+
+/**
+ * LOAD-FLAKES-178: the per-file job tool (file-job.cs), built once with the in-box csc and kept in
+ * the temp folder under its source's hash. Each file joins its own job at start (file-job-preload.cjs),
+ * and the watchdog kills a hung file's job at once instead of the tree in its snapshot, which missed
+ * a process born between the snapshot and the kill. { exe } or { exe: null, why }.
+ */
+const FILE_JOB_SRC = path.join(__dirname, 'file-job.cs');
+const FILE_JOB_PRELOAD = path.join(__dirname, 'file-job-preload.cjs');
+const CSC = path.join(process.env.WINDIR || 'C:/Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = os.tmpdir() } = {}) {
+  if (process.platform !== 'win32') return { exe: null, why: 'not Windows' };
+  if (!fs.existsSync(csc)) return { exe: null, why: `no in-box csc at ${csc}` };
+  const hash = require('crypto').createHash('sha256').update(fs.readFileSync(src)).digest('hex').slice(0, 12);
+  const exe = path.join(dir, `guppy-file-job-${hash}.exe`);
+  if (fs.existsSync(exe)) return { exe };
+  // Built beside it and moved in: two runs at once never see half a file.
+  const tmp = path.join(dir, `guppy-file-job-${hash}-${process.pid}.exe`);
+  const r = spawnSync(csc, ['-nologo', '-O', `-out:${tmp}`, src], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
+  if (r.status !== 0) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* none */ }
+    return { exe: null, why: `csc failed: ${`${r.stdout || ''}${r.stderr || ''}`.trim().slice(0, 300) || String(r.error)}` };
+  }
+  try { fs.renameSync(tmp, exe); } catch { try { fs.rmSync(tmp, { force: true }); } catch { /* none */ } }
+  return fs.existsSync(exe) ? { exe } : { exe: null, why: `could not place ${exe}` };
+}
+
+const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, opts);
 
 /** The limit to use: TEST_FILE_TIMEOUT_MS when it is a positive integer, else FILE_TIMEOUT_MS. */
 function fileTimeoutMs(env = process.env) {
@@ -131,7 +159,7 @@ function run({
   testDir,
   filters = [],
   readdir = (d) => fs.readdirSync(d, { withFileTypes: true }),
-  spawn = (args, opts) => spawnSync(process.execPath, args, opts),
+  spawn = nodeSpawn,
   cwd = process.cwd(),
   timeoutMs = fileTimeoutMs(),
   // node --test's own default: spec on a terminal, TAP otherwise (the gate logs grep TAP).
@@ -140,6 +168,8 @@ function run({
   readFile = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } },
   removeFile = (p) => { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } },
   watchdog = startWatchdog,
+  // The real runs only: an injected spawn or watchdog runs nothing to put in a job.
+  fileJob = spawn === nodeSpawn && watchdog === startWatchdog ? prepareFileJob : () => ({ exe: null, why: null }),
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
@@ -176,7 +206,17 @@ function run({
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
-  const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, err };
+  const job = fileJob();
+  if (job.exe) {
+    const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
+    env.GUPPY_FILE_JOB_EXE = job.exe;
+    env.GUPPY_FILE_JOB_OPT = opt;
+  } else if (job.why) {
+    // Loud, once per run: the fallback must never pass for the normal path.
+    err(`[test-runner] per-file jobs are unavailable (${job.why}): a hung file is killed from a process snapshot, which can miss a process born just before the kill (LOAD-FLAKES-178)`);
+  }
+  const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
   const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log);
@@ -192,10 +232,10 @@ function run({
  * timeout as the backstop, the normal reporter on stdout and the file-timeout reporter (which also
  * records the run's summary counts) on `eventsFile`. Timed-out files are named on stderr.
  */
-function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, err }) {
+function runNodeTest({ rel, extraArgs = [], label, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, jobExe = null, err }) {
   // The watchdog and node --test each write their own record file (node truncates its destination).
   const watchFile = `${eventsFile}.watchdog`;
-  const dog = watchdog(timeoutMs, watchFile);
+  const dog = watchdog(timeoutMs, watchFile, jobExe);
   const args = [
     '--test', ...extraArgs, `--test-timeout=${backstopMs(timeoutMs)}`,
     '--test-reporter', isTTY ? 'spec' : 'tap', '--test-reporter-destination', 'stdout',
@@ -224,7 +264,7 @@ function spawnFailed(res, label, err) {
 }
 
 /** CLAIMS-PERF-LANE: every *.perf.cjs, serially (--test-concurrency=1), after the parallel run. */
-function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, log, err }) {
+function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, jobExe = null, log, err }) {
   const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped' };
   if (filters.length) {
     log(`[test-runner] perf lane SKIPPED: a filtered run (${filters.join(', ')}); run the full suite (npm test) for the wall-clock gates`);
@@ -242,7 +282,7 @@ function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, 
   }
   log(`[test-runner] perf lane: running ${files.length} wall-clock file(s) serially (--test-concurrency=1), after the parallel suite (per-file limit ${timeoutMs} ms)`);
   const rel = files.map((n) => path.join(path.relative(cwd, perfDir) || '.', n));
-  const lane = runNodeTest({ rel, extraArgs: ['--test-concurrency=1'], label: 'perf lane ', spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, err });
+  const lane = runNodeTest({ rel, extraArgs: ['--test-concurrency=1'], label: 'perf lane ', spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, jobExe, err });
   if (spawnFailed(lane.res, 'perf lane ', err)) return { code: 1, counts: lane.counts, state: 'fail' };
   const code = lane.hung.length && lane.res.status === 0 ? 1 : lane.res.status;
   if (code !== 0) err('[test-runner] the perf lane FAILED (a wall-clock gate, measured serially)');
@@ -280,7 +320,7 @@ function totals(code, counts, laneState, log) {
   return code;
 }
 
-module.exports = { selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

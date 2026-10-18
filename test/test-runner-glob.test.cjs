@@ -356,8 +356,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // int-1.1.91: 430 on repo-tidy-191, + 6 root tests from the other 1.1.91 branches (cards x2,
   // claude-json-wipe, model-not-kept x2, worktree-remove-junction), + 2 (requests-auto-190,
   // tui-composer-allowlist-191), + 1 (nudge-cap-192), + 3 (heavy-cpu-options-191: harness, options,
-  // settings).
-  assert.equal(files.length, 442, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // settings), + 1 (load-flakes-178-file-job).
+  assert.equal(files.length, 443, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
@@ -397,10 +397,12 @@ test('watchdog: a due file is RECORDED before its tree is killed, once, and name
   const { killDue } = require('./tools/file-watchdog.cjs');
   const order = [];
   const killed = new Set();
-  const opts = { killed, record: (d) => order.push(`record ${d.file}`), kill: (pid) => { order.push(`kill ${pid}`); if (pid === 31) throw new Error('gone'); } };
+  const opts = { killed, record: (d) => order.push(`record ${d.file}`), kill: (pid) => { order.push(`kill ${pid}`); if (pid === 31) throw new Error('gone'); return { by: 'job' }; },
+    outcome: (d, r) => order.push(`outcome ${d.file} ${r.by}`) };
   killDue([{ pid: 30, file: 'a.test.cjs', ageMs: 6 }, { pid: 31, file: 'b.test.cjs', ageMs: 6 }], opts);
   killDue([{ pid: 30, file: 'a.test.cjs', ageMs: 7 }], opts);
-  assert.deepStrictEqual(order, ['record a.test.cjs', 'kill 30', 'record b.test.cjs', 'kill 31']);
+  // Jim NIT-1: what the kill did is written after it; a kill that threw is 'none', never 'killed'.
+  assert.deepStrictEqual(order, ['record a.test.cjs', 'kill 30', 'outcome a.test.cjs job', 'record b.test.cjs', 'kill 31', 'outcome b.test.cjs none']);
 });
 
 test('END TO END, the backstop alone (no watchdog): node --test\'s own file timeout is NAMED through the timeout reporter', { timeout: 120_000 }, () => {
