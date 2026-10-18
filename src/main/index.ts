@@ -72,7 +72,7 @@ import {
   runStandupTick, projectTasks,
   type FloorState, type StandupDecision, type StandupSkipRecord
 } from './standupDelta';
-import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde, samePath } from './fs';
+import { listDir, readFileText, readFileBinary, writeFileText, statAbs, expandTilde, samePath, rootTrusted } from './fs';
 import { applyProjectHomeChange, isProjectThemeId, projectThemeHomeKey } from '../shared/projectTheme';
 import { resolveGodNameFromRegistry } from '../shared/godIdentity';
 import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
@@ -4871,6 +4871,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   const wakeToken = provider === 'codex' && opts.hive?.id ? WakeIncarnationTokens.mint() : null;
   if (wakeToken) opts.env = { ...(opts.env ?? {}), [WAKE_INCARNATION_ENV]: wakeToken };
   const res = await ptyManager.spawn(opts, owner);
+  if (res.ok) fsSpawnedCwds.add(opts.cwd);
   if (res.ok && opts.hive?.id) heavyAutoApprove.set(opts.hive.id, approvesWithoutAsking(provider, [...tokenizeCommand(opts.command), ...(opts.args ?? [])]));
   if (wakeToken && res.ok && opts.hive?.id) {
     wakeIncarnationTokens.register(wakeToken, opts.hive.id, opts.id, ptyManager.incarnation(opts.id));
@@ -5300,12 +5301,26 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
 });
 
 // ─── IPC: filesystem (sandboxed to a root) ──────────────────────────────────
+// FS-IPC-ROOT-TRUST-192: the root is the renderer's to name but main's to accept. It must be
+// (or lie inside) the cwd of an agent main knows: in the hive registry, with a live PTY, or
+// spawned this run (so a stopped non-hive agent's files stay open). Never the roster: the
+// renderer writes that.
+const fsSpawnedCwds = new Set<string>();
+const FS_ROOT_REFUSED = 'not an agent folder';
+function fsRootKnown(root: string): boolean {
+  const known: string[] = [...fsSpawnedCwds];
+  for (const s of ptyManager.list()) known.push(s.cwd);
+  try { for (const a of Object.values(hive.registry().agents)) known.push(a.cwd); } catch { /* unreadable registry: the other sources stand */ }
+  return rootTrusted(root, known);
+}
 ipcMain.handle('fs:listDir', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
+  if (!fsRootKnown(root)) return { ok: false, error: FS_ROOT_REFUSED };
   return listDir(root, rel);
 });
 ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
+  if (!fsRootKnown(root)) return { ok: false, error: FS_ROOT_REFUSED };
   return readFileText(root, rel);
 });
 // Raw bytes for files the text reader refuses (images). The renderer cannot
@@ -5314,12 +5329,14 @@ ipcMain.handle('fs:readFile', (_evt, root: unknown, rel: unknown) => {
 // URL on the other side. Same root confinement as every other fs handler.
 ipcMain.handle('fs:readBinary', (_evt, root: unknown, rel: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string') return { ok: false, error: 'invalid args' };
+  if (!fsRootKnown(root)) return { ok: false, error: FS_ROOT_REFUSED };
   return readFileBinary(root, rel);
 });
 ipcMain.handle('fs:writeFile', (_evt, root: unknown, rel: unknown, content: unknown) => {
   if (typeof root !== 'string' || typeof rel !== 'string' || typeof content !== 'string') {
     return { ok: false, error: 'invalid args' };
   }
+  if (!fsRootKnown(root)) return { ok: false, error: FS_ROOT_REFUSED };
   return writeFileText(root, rel, content);
 });
 // v0.3.4: existence check for the terminal ⌘-click markdown flow (metadata only).

@@ -50,6 +50,10 @@ test('a parent, a filesystem root, a sibling and a .. escape are refused', (t) =
   assert.equal(rootTrusted(path.join(base, 'proj2'), [proj]), false, 'a sibling that shares the prefix');
   assert.equal(rootTrusted(path.join(proj, '..', 'outside'), [proj]), false, 'a .. escape');
   assert.equal(rootTrusted(proj, []), false, 'no agent is known');
+  if (process.platform === 'win32') {
+    const other = /^z:/i.test(proj) ? 'Y:\\' : 'Z:\\';
+    assert.equal(rootTrusted(other, [proj]), false, 'another drive (relative() returns an absolute path)');
+  }
 });
 
 test('bad input and bad known entries are refused, never thrown', (t) => {
