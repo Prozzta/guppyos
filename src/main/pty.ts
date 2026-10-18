@@ -891,6 +891,8 @@ export class PtyManager {
         try { session.mirror = this.mirrorFactory(proc.cols, proc.rows); } catch { session.mirror = undefined; }
       }
       const replaced = this.sessions.get(opts.id);
+      // Defence only (Jim G13, equivalent): spawn refuses a live id and kill() ends the mirror
+      // first, so no mirror is left here today; this keeps it so if either ever changes.
       if (replaced && replaced !== session) { replaced.mirror?.dispose(); replaced.mirror = undefined; }
       this.sessions.set(opts.id, session);
 
