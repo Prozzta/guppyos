@@ -369,8 +369,16 @@ export function automaticVerifySubmit(provider: AgentProvider): boolean {
  * screen (Dwight 20:27:41: `task_complete` 105 ms after the Stop, then the end-of-stream redraw),
  * so a STAGE reading taken in a gap between those frames can pass on a composer that is about to
  * be redrawn, and the typed text does not stay on the prompt row. null = no wait.
+ *
+ * WAKE-STALL-INTERFERED-192 A: Claude too. Jim 2026-10-17 22:22:52: the wake text and its Enter
+ * went out 33 and 173 ms after the Stop, while Claude was still drawing the end of a 7505-message
+ * turn; the Enter became a newline (our text stayed on the row above an empty cursor row) and
+ * no turn started. Staged only once Claude's output has been quiet, the text reaches an idle
+ * input loop on its own, ahead of the Enter.
  */
 export const CODEX_STAGE_QUIET_MS = 750;
+export const CLAUDE_STAGE_QUIET_MS = 750;
 export function automaticStageQuietMs(provider: AgentProvider): number | null {
+  if (provider === 'claude') return CLAUDE_STAGE_QUIET_MS;
   return provider === 'codex' ? CODEX_STAGE_QUIET_MS : null;
 }

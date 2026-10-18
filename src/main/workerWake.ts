@@ -1129,6 +1129,15 @@ export class WorkerWakeWatchdog {
       r.recheck = null;
     } else if (outcomeKind === 'INTERFERED') {
       r.held = claim;                  // no automatic retry until a human rules
+    } else if (outcomeKind === 'UNCONFIRMED') {
+      // WAKE-STALL-INTERFERED-192 B: the owner pressed Enter on our own unsent draft and no turn
+      // started. The draft is still on the prompt, so the recheck stays; the ids wait out the F4
+      // backoff (never a hold for a person, never an Enter a minute).
+      for (const id of claim.ids) {
+        if (r.announced.has(id)) continue;
+        const next = (r.retries.get(id)?.attempt ?? 0) + 1;
+        r.retries.set(id, { attempt: next, at: at + wakeRetryDelayMs(next) });
+      }
     } else {
       for (const id of claim.ids) if (!r.announced.has(id)) r.pending.add(id);
     }

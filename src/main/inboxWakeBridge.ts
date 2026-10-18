@@ -211,7 +211,10 @@ export class InboxWakeBridge {
           ...(typeof outcome.detail === 'string' ? { detail: outcome.detail.slice(0, 200) } : {}),
           requestId: claim.requestId
         });
-        const settled = coordinator.settle(claim, kind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
+        // WAKE-STALL-INTERFERED-192 B: an Enter on our own draft that started no turn is UNCONFIRMED
+        // to the coordinator (offered again after the backoff, the prompt check kept).
+        const settleKind = kind === 'REFUSED' && outcome.reason === 'SUBMIT_UNCONFIRMED' ? 'UNCONFIRMED' : kind;
+        const settled = coordinator.settle(claim, settleKind, this.deps.now(), kind === 'COMMITTED' && (this.deps.confirmsTurnStart?.(agentId) ?? false));
         if (kind === 'COMMITTED') this.noteMailCommit(agentId, claim);
         // P1: the claim's typed turn already ended before this COMMITTED. Its Stop's repend skipped
         // the in-flight ids; they go through THE SAME repend() now (spent once, n1Due honoured).

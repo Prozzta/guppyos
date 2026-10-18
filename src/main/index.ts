@@ -958,6 +958,10 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   bootSubmitted: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
     : undefined),
+  // WAKE-STALL-INTERFERED-192 B: the same UserPromptSubmit report is a wake's turn evidence.
+  submittedSince: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
+    ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
+    : undefined),
   homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
@@ -1116,11 +1120,12 @@ heldInterference = new HeldInterferenceWatch({
   recheck: (h) => automaticSubmit.recheckHeld(h.ptyId, h.requestId),
   released: (h, r, now) => {
     try {
-      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
+      hive.appendLog({ kind: 'interference-self-released', agentId: h.agentId, requestId: h.requestId, how: r.kind === 'ERASED' ? 'erased-own-text' : r.kind === 'SUBMITTED' ? 'entered-own-draft' : 'empty-composer', reason: h.reason, heldMs: now - h.since, screen: r.screen });
     } catch { /* logging only */ }
     pushAgentImpact();
     // The same ruling as a person's "let it retry": the ids go back through every gate.
-    inboxWake?.onInterferenceResolved(h.agentId, 'SEND_AGAIN');
+    // WAKE-STALL-INTERFERED-192 C: our own draft was submitted (the provider said so): delivered.
+    inboxWake?.onInterferenceResolved(h.agentId, r.kind === 'SUBMITTED' ? 'ALREADY_HANDLED' : 'SEND_AGAIN');
   },
   notice: {
     raise: (h, now, asking) => hive.mail.noteHeldInterferedAlert(h.agentId, {

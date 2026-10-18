@@ -214,9 +214,11 @@ test('fix 3: output that never goes quiet types nothing and is asked again (not 
 
 K.codexQuietWindow = (P = PROVIDER) => {
   assert.equal(P.automaticStageQuietMs('codex'), 750, 'CODEX IS STAGED AFTER 750 MS OF QUIET');
-  for (const p of ['claude', 'antigravity', 'cursor']) assert.equal(P.automaticStageQuietMs(p), null, `${p}: no wait`);
+  // WAKE-STALL-INTERFERED-192 A: Claude waits for quiet too (its own test pins the reason).
+  assert.equal(P.automaticStageQuietMs('claude'), 750, 'claude: staged after 750 ms of quiet');
+  for (const p of ['antigravity', 'cursor']) assert.equal(P.automaticStageQuietMs(p), null, `${p}: no wait`);
 };
-test('fix 3: the quiet window is Codex\'s only (750 ms)', () => K.codexQuietWindow());
+test('fix 3: the quiet window is Codex\'s and Claude\'s (750 ms each)', () => K.codexQuietWindow());
 
 K.personSendNowNotDelayed = async (M = OWNER) => {
   for (const cls of ['USER_RELEASED', 'BOOT_SEQUENCE']) {
@@ -441,7 +443,8 @@ test('wiring: main runs the watch, resolves a release as "let it retry", and wor
   assert.match(idx, /return ptyId && inh && inh\.requestId === claim\.requestId/, 'only a held WAKE claim whose owner hold is that request');
   assert.match(idx, /recheck: \(h\) => automaticSubmit\.recheckHeld\(h\.ptyId, h\.requestId\),/);
   assert.match(idx, /kind: 'interference-self-released'/);
-  assert.match(idx, /inboxWake\?\.onInterferenceResolved\(h\.agentId, 'SEND_AGAIN'\);/, 'the same ruling as a person\'s "let it retry"');
+  assert.match(idx, /inboxWake\?\.onInterferenceResolved\(h\.agentId, r\.kind === 'SUBMITTED' \? 'ALREADY_HANDLED' : 'SEND_AGAIN'\);/,
+    'the same ruling as a person\'s "let it retry"; WAKE-STALL-INTERFERED-192 C: our own draft, reported submitted, is delivered');
   assert.match(idx, /raise: \(h, now, asking\) => hive\.mail\.noteHeldInterferedAlert\(/);
   assert.match(idx, /requestId: h\.requestId, asking,/, '1.1.79 P2: the popup the latest look saw reaches the notice');
   assert.match(idx, /clear: \(agentId\) => hive\.mail\.clearHeldInterferedAlert\(agentId\)/);

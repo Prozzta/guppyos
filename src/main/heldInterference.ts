@@ -8,7 +8,8 @@
  * message is never re-examined here):
  *   fix 1  about once a minute, the owner takes a fresh look (`recheckHeld`): positive evidence
  *          that the prompt is clean releases the hold as "let it retry" (`interference-self-released`);
- *          our own text on the prompt row lets the verified erase run; anything else stays held.
+ *          our own text on the prompt row lets the verified erase run; our own proven unsent draft
+ *          gets an Enter (WAKE-STALL-INTERFERED-192 C: SUBMITTED, delivered); anything else stays held.
  *   fix 2  a hold that lasts HELD_NOTICE_AFTER_MS raises a plain-words notice for the Human (the
  *          `hive:integrity` banner, dismissible like the screen-guard notice) and is listed for
  *          god's floor digest as a decision; both go the moment the hold does, however it ends
@@ -42,7 +43,7 @@ export interface HeldWake {
   reason: string;
 }
 
-export type HeldRelease = Extract<HeldRecheck, { kind: 'RELEASED' | 'ERASED' }>;
+export type HeldRelease = Extract<HeldRecheck, { kind: 'RELEASED' | 'ERASED' | 'SUBMITTED' }>;
 
 export interface HeldInterferenceDeps {
   /** Every wake claim the coordinator holds INTERFERED whose owner hold is that same request. */
@@ -106,7 +107,7 @@ export class HeldInterferenceWatch {
   private settle(h: HeldWake, key: string, r: HeldRecheck): void {
     this.inFlight.delete(key);
     const now = this.deps.now();
-    if (r.kind === 'RELEASED' || r.kind === 'ERASED') {
+    if (r.kind === 'RELEASED' || r.kind === 'ERASED' || r.kind === 'SUBMITTED') {
       this.lastCheck.delete(key);
       this.lastWhy.delete(key);
       this.asking.delete(key);
