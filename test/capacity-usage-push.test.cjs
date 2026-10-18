@@ -96,7 +96,7 @@ test('main pushes on the owner onChange (carries FRESH -> STALE decay), agent le
   assert.match(main, /ipcMain\.handle\('config:setAgentUsageDisplay', \(_evt, agentId: unknown, display: unknown\) => \{\s*const next = setAgentUsageDisplay\(agentId, display\);\s*pushAgentUsage\(\);\s*return next;/);
   const fnStart = main.indexOf('function pushAgentUsage(');
   const fn = main.slice(fnStart, main.indexOf('\n}\n', fnStart));
-  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(readConfig\(\)\.agentUsageDisplay,/);
+  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(readConfig\(\)\.agentUsageDisplay, usagePoolSource,/);
   assert.match(fn, /w\.webContents\.send\(CAPACITY_AGENT_USAGE_PUSH, push\)/, 'its OWN channel');
   assert.ok(!/collectionRevision|lastPushedCapacityStrip/.test(fn), 'never keyed on the strip revision');
   assert.equal(usage.CAPACITY_AGENT_USAGE_PUSH, 'capacity:agentUsagePush');
@@ -104,7 +104,7 @@ test('main pushes on the owner onChange (carries FRESH -> STALE decay), agent le
   const preload = readSource('src/preload/index.ts');
   assert.match(preload, /ipcRenderer\.on\('capacity:agentUsagePush', listener\)/);
   assert.match(preload, /ipcRenderer\.removeListener\('capacity:agentUsagePush', listener\)/);
-  assert.match(preload, /ipcRenderer\.invoke\('capacity:agentUsage', agentId\)/, 'the mount-time invoke is kept');
+  assert.match(preload, /ipcRenderer\.invoke\('capacity:agentUsage', agentId, display\)/, 'the mount-time invoke is kept (AGY-MONITOR-1.4: it names the display)');
 });
 
 // ─── Renderer: no polling, by census ────────────────────────────────────────────────
@@ -124,7 +124,8 @@ function runHook(agentId, display, bridge) {
   const saved = { useEffect: React.useEffect, useState: React.useState, window: global.window,
     setInterval: global.setInterval, setTimeout: global.setTimeout };
   React.useEffect = (fn) => { const c = fn(); if (typeof c === 'function') cleanups.push(c); };
-  React.useState = (init) => [init, (v) => views.push(v)];
+  // AGY-MONITOR-1.4: the hook's state is { window, poolId }; these tests read the window.
+  React.useState = (init) => [init, (v) => views.push(v === null ? null : v.window)];
   global.window = { cth: bridge };
   // Recorded, never started: a timer in the hook must FAIL this test, not hang the process.
   global.setInterval = (...a) => { timers.push(['setInterval', a[1]]); return 0; };

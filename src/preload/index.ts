@@ -19,7 +19,7 @@ export type { IntegrationRecord, IntegrationTemplate } from '../shared/integrati
 import type { UpdateStatus } from '../shared/updateState';
 import type { CapacityStripCollection } from '../shared/capacityStrip';
 import type { AgentImpact, AgentImpactPush } from '../shared/deliveryHold';
-import type { AgentUsagePush, AgentUsageView } from '../shared/agentUsage';
+import type { AgentUsageDisplay, AgentUsagePush, AgentUsageView } from '../shared/agentUsage';
 import type { HistoryPage, HistoryRequest } from '../shared/history';
 import type { ProviderCapacityDetailView } from '../shared/capacityDetail';
 export type { ProviderCapacityDetailView } from '../shared/capacityDetail';
@@ -414,9 +414,10 @@ export interface HarnessConfig {
   costCapTokens?: number;
   agentTokenCaps?: Record<string, number>;
   /** v1.1.45 CAPUI-MONITOR: what each agent's first Monitor line shows. Absent = 'budget'.
-   *  'fiveHour' / 'weekly' show that provider window's usage AND exempt the agent from the
-   *  budget limits (see src/shared/agentUsage.ts). Claude/Codex agents only. */
-  agentUsageDisplay?: Record<string, 'budget' | 'fiveHour' | 'weekly'>;
+   *  'fiveHour' / 'weekly' (Claude/Codex) and the four AGY family windows (Antigravity,
+   *  AGY-MONITOR-1.4) show that provider window's usage AND exempt the agent from the
+   *  budget limits (see src/shared/agentUsage.ts). */
+  agentUsageDisplay?: Record<string, AgentUsageDisplay>;
   /** v1.1.45 unit #8 (C2.8): the capacity-display threshold, an integer 1-99 (default 15).
    *  Display only: it gates the strip's Weekly reveal and the 5h/Weekly reset hints. */
   capacityWeeklyDisplayThreshold?: number;
@@ -884,7 +885,7 @@ const api = {
   setProjectTheme: (theme: ProjectThemeId): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setProjectTheme', theme),
   /** v1.1.45 CAPUI-MONITOR: persist an agent's Monitor line; 5H/Weekly also exempt it from the budget. */
-  setAgentUsageDisplay: (agentId: string, display: 'budget' | 'fiveHour' | 'weekly'): Promise<HarnessConfig> =>
+  setAgentUsageDisplay: (agentId: string, display: AgentUsageDisplay): Promise<HarnessConfig> =>
     ipcRenderer.invoke('config:setAgentUsageDisplay', agentId, display),
   /** v1.1.45 unit #8: set the capacity-display threshold (1-99). Rejects invalid input; the stored value stays. */
   setCapacityDisplayThreshold: (value: number): Promise<HarnessConfig> =>
@@ -897,8 +898,8 @@ const api = {
   restartForGraphics: (): Promise<void> => ipcRenderer.invoke('graphics:restart'),
   /** v1.1.45 CAPUI-MONITOR: one agent's 5h + weekly usage, on its OWN channel (not control:snapshot).
    *  Literal channel name: a test pins it to CAPACITY_AGENT_USAGE in src/shared/agentUsage.ts. */
-  capacityAgentUsage: (agentId: string): Promise<AgentUsageView | null> =>
-    ipcRenderer.invoke('capacity:agentUsage', agentId),
+  capacityAgentUsage: (agentId: string, display?: AgentUsageDisplay): Promise<AgentUsageView | null> =>
+    ipcRenderer.invoke('capacity:agentUsage', agentId, display),
   /** Push (unit #13): every 5H / Weekly agent's usage rows, on their OWN channel. The
    *  invoke above stays for the mount-time initial state. */
   onAgentUsage: (cb: (push: AgentUsagePush) => void): (() => void) => {

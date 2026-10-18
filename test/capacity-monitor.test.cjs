@@ -41,7 +41,8 @@ test('only an explicit 5H or Weekly exempts; absent, budget and anything malform
   for (const v of [undefined, null, 'budget', 'FIVEHOUR', 'five_hour', '', 1, true, {}]) {
     assert.equal(usage.isBudgetExempt(v), false, `${JSON.stringify(v)} must not switch a limit off`);
   }
-  assert.deepEqual([...usage.AGENT_USAGE_DISPLAYS], ['budget', 'fiveHour', 'weekly']);
+  // AGY-MONITOR-1.4 adds the four Antigravity family windows (test/agy-monitor-14.test.cjs).
+  assert.deepEqual([...usage.AGENT_USAGE_DISPLAYS], ['budget', 'fiveHour', 'weekly', 'agy3pFiveHour', 'agy3pWeekly', 'agyGeminiFiveHour', 'agyGeminiWeekly']);
 });
 
 // ─── The breaker: per-agent cap ─────────────────────────────────────────────────
@@ -205,12 +206,14 @@ test('usage schema: additionalProperties false; no pool key, account, remaining 
 
 test('usage channel: its OWN invoke, validated before answering; control:snapshot still carries no pool data', () => {
   assert.equal(usage.CAPACITY_AGENT_USAGE, 'capacity:agentUsage');
-  assert.match(readSource('src/preload/index.ts'), /ipcRenderer\.invoke\('capacity:agentUsage', agentId\)/);
+  assert.match(readSource('src/preload/index.ts'), /ipcRenderer\.invoke\('capacity:agentUsage', agentId, display\)/);
   const main = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const start = main.indexOf('ipcMain.handle(CAPACITY_AGENT_USAGE');
   const handler = main.slice(start, main.indexOf('});', start));
   assert.ok(start > 0);
-  assert.match(handler, /providerCapacity\.poolKeyOf\(agentId\)/, 'the agent OWN pool, from its own readings');
+  // AGY-MONITOR-1.4: resolved through main's usagePoolSource; a non-AGY display reads the agent's OWN pool.
+  assert.match(handler, /agentUsageViewFor\(usagePoolSource, agentId, asked, Date\.now\(\)\)/);
+  assert.match(main, /poolKeyOf: \(agentId\) => providerCapacity\.poolKeyOf\(agentId\)/, 'the agent OWN pool, from its own readings');
   assert.match(handler, /validateAgentUsageView\(view\)/);
   const snap = main.slice(main.indexOf("ipcMain.handle('control:snapshot'"));
   const snapHandler = snap.slice(0, snap.indexOf('});'));
@@ -249,11 +252,13 @@ test('the select: budget (default), 5H, Weekly, and its tooltip says 5H and Week
   assert.match(line.USAGE_SELECT_TITLE, /Provider capacity limits still apply/);
 });
 
-test('Floor tab: select only for Claude and Codex; Budget keeps the old line; 5H and Weekly swap in the usage; persisted via main', () => {
+test('Floor tab: select only for Claude, Codex and Antigravity; Budget keeps the old line; 5H and Weekly swap in the usage; persisted via main', () => {
   const cc = codeOnly(readSource('src/renderer/src/components/CommandCenterPanel.tsx'), 'CommandCenterPanel.tsx');
-  assert.match(cc, /const usageCapable = agentProvider === 'claude' \|\| agentProvider === 'codex';/);
-  assert.match(cc, /const usageDisplay: AgentUsageDisplay = usageCapable \? \(agentUsageDisplay\[a\.id\] \?\? 'budget'\) : 'budget';/);
-  assert.match(cc, /\{usageCapable\s*\? <AgentUsageSelect value=\{usageDisplay\} onChange=\{\(v\) => setUsageDisplay\(a\.id, v\)\} \/>/);
+  // The per-provider choices and the persisted-value fallback are pinned behaviourally in agy-monitor-14.
+  assert.match(cc, /const usageOptions = usageDisplayOptions\(agentProvider\);/);
+  assert.match(cc, /const usageCapable = usageOptions\.length > 1;/);
+  assert.match(cc, /const usageDisplay: AgentUsageDisplay = shownUsageDisplay\(agentProvider, agentUsageDisplay\[a\.id\]\);/);
+  assert.match(cc, /\{usageCapable\s*\? <AgentUsageSelect value=\{usageDisplay\} options=\{usageOptions\} onChange=\{\(v\) => setUsageDisplay\(a\.id, v\)\} \/>/);
   assert.match(cc, /\{usageDisplay === 'budget' \? \(/);
   assert.match(cc, /<AgentUsageWindow agentId=\{a\.id\} display=\{usageDisplay\} \/>/);
   assert.match(cc, /window\.cth\.setAgentUsageDisplay\(id, display\)/);
