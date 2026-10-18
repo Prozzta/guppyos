@@ -162,7 +162,7 @@ test('lag the mirror does not explain never turns it off (unrelated ELD, light m
   assert.deepEqual(unrelated.off, [], 'ELD from other work, with a real but small mirror cost');
   const untimed = rig({ untimed: true, eld: 200, active: 10, msPerChar: 1e-5 });
   untimed.pastStartup();
-  for (let i = 0; i < 60; i++) untimed.second(1000);   // tiny estimated share
+  for (let i = 0; i < 60; i++) untimed.second(1_000_000);   // an estimated 10 ms/s: 1%, all of the 10 ms busy time
   assert.deepEqual(untimed.off, [], 'with no measured parse the mirror is never blamed for lag');
   const fallback = rig({ untimed: true, msPerChar: 1e-5 });
   fallback.pastStartup();
@@ -264,16 +264,19 @@ test('back-off: doubles per off up to the cap; an hour back on forgets the earli
   const r = rig();
   r.pastStartup();
   const offs = [];
+  // Bounded: a guard that never goes off (or never re-arms) fails here, it never hangs.
+  const hotUntilOff = () => { for (let i = 0; i < 100; i++) if (r.second(0, HOT)) return; assert.fail('a sustained overload never turned it off'); };
+  const quietUntilOn = () => { for (let i = 0; i < 2 * COST.MIRROR_REARM_MAX_MS / 1000 && r.g.isOff(); i++) r.second(0, 0); assert.equal(r.g.isOff(), false, 'never re-armed'); };
   for (let n = 0; n < 8; n++) {
-    while (!r.second(0, HOT)) { /* hot until off */ }
+    hotUntilOff();
     offs.push(r.logs.filter((l) => l.kind === 'mirror-auto-off').at(-1).rearmInMs);
-    while (r.g.isOff()) r.second(0, 0);
+    quietUntilOn();
   }
   assert.deepEqual(offs, [1, 2, 4, 8, 16, 30, 30, 30].map((m) => m * 60_000));
   assert.equal(r.on, 8, 'every off re-armed');
   assert.equal(r.logs.filter((l) => l.kind === 'mirror-rearm').length, 8, 'every re-arm is a row');
   for (let i = 0; i < COST.MIRROR_OFFS_RESET_MS / 1000; i++) r.second(0, 0);
-  while (!r.second(0, HOT)) { /* hot until off */ }
+  hotUntilOff();
   assert.equal(r.logs.filter((l) => l.kind === 'mirror-auto-off').at(-1).offs, 1, 'an hour on: the next off is the first again');
   assert.equal(r.logs.filter((l) => l.kind === 'mirror-auto-off').at(-1).rearmInMs, COST.MIRROR_REARM_BASE_MS);
 });
