@@ -454,7 +454,6 @@ test('WIRING: every main-process resolver caller goes through the shared async r
   assert.match(idx, /ipcMain\.handle\('tools:status', async /, 'the setup catalog');
   assert.match(idx, /pendingInstallRelaunch\.delete\(id\);[\s\S]{0,400}invalidateCommandCache\(\);/, 'an installer exit drops the cached misses');
   assert.match(idx, /await ptyManager\.spawn\(opts, owner\)/);
-  assert.match(read('src/main/hiddenClaude.ts'), /resolveCommandAsync\(b\)/, 'hidden claude');
   assert.doesNotMatch(read('src/main/shellEnv.ts'), /export function resolveCommand\b|captureFromLoginShell\(/, 'the sync resolver and capture are gone');
 });
 

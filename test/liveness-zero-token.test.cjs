@@ -7,7 +7,8 @@
  * Metering alone is not proof: hidden condense calls write no ledger row (Jim TOKEN-PROOF-VERIFY
  * P3(c)). So every path that could spend a token is TRAPPED while a monitor method runs: the owner's
  * submit, a terminal write, any child_process spawn/exec (a provider CLI), the network (fetch, http,
- * https, net), and every export of hiddenClaude.ts and reflect.ts (the condense path). The WWR's own
+ * https, net), and every export of memoryRollover.ts (the memory upkeep path; 1.1.92 ZT-I2 deleted the
+ * Haiku condense, hiddenClaude.ts and reflect.ts, that it replaced). The WWR's own
  * re-offer goes through the existing owner (the bridge's submit) and is attributed to it, not to the
  * monitor. The monitor's module graph is pinned too: it can only reach the shared type and the wake
  * constants.
@@ -15,7 +16,7 @@
  * Scenarios: L1 compaction without Stop (the replay, three ways), L2 a 30-min started rollout, L3
  * PTY traffic, L4 a 10-min stuck turn, L5 the cap of three, L6 an unexpected exit, L7 an expected
  * exit, L8 archive and delete.
- * Named mutant: M21 the monitor invokes condense / hiddenClaude (an import or a call) must die.
+ * Named mutant: M21 the monitor invokes the memory upkeep (an import or a call) must die.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -44,8 +45,8 @@ for (const [mod, names, label] of [
 }
 const realFetch = globalThis.fetch;
 globalThis.fetch = (...args) => { hit('fetch'); return realFetch(...args); };
-// The condense path: every exported function of hiddenClaude.ts and reflect.ts.
-for (const rel of ['src/main/hiddenClaude.ts', 'src/main/reflect.ts']) {
+// The memory upkeep path: every exported function of memoryRollover.ts.
+for (const rel of ['src/main/memoryRollover.ts']) {
   const mod = loadTs(rel);
   for (const [k, v] of Object.entries(mod)) {
     if (typeof v === 'function' && !/^[A-Z]/.test(k)) mod[k] = function (...args) { hit(`${path.basename(rel)}:${k}`); return v.apply(this, args); };
@@ -296,8 +297,8 @@ test('L8: archive (explicit, orphan) and delete are lifecycle edges only: no wak
 test('the traps work: a trapped call made inside a monitor method is recorded (the proof can fail)', () => {
   trap.hits.length = 0;
   const w = floor('t', { start: at('2026-10-01T15:00:00Z'), provider: 'claude' });
-  w.monitor.onLivenessChange(() => { loadTs('src/main/hiddenClaude.ts').readEnvelope('', 's'); });
+  w.monitor.onLivenessChange(() => { loadTs('src/main/memoryRollover.ts').rolloverMemory(path.join(__dirname, 'no-such-agent-dir')); });
   w.monitor.sampleAll();
-  assert.deepEqual(trap.hits, ['hiddenClaude.ts:readEnvelope']);
+  assert.deepEqual(trap.hits, ['memoryRollover.ts:rolloverMemory']);
   trap.hits.length = 0;
 });

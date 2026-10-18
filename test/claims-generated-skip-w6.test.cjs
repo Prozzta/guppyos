@@ -4,7 +4,7 @@
  * line = GENERATED_MEMORY_MARKER) is never touched by the 1.1.83 janitors:
  *   - the rollover (rolloverMemory) leaves it byte for byte, however large, and reports generated;
  *   - the pinned-section seed (seedPinnedSection) leaves it byte for byte;
- *   - the Haiku condense (reflect.ts) never runs on it, not even on demand, and never calls the model.
+ *   - the rollover at Stop (1.1.92 ZT-I2-CONDENSE, which replaced the Haiku condense) leaves it too.
  * And an ordinary memory.md is still handled as before (the skip keys on the marker only).
  * The marker is an HTML comment, so the import's split never turns it into a claim.
  */
@@ -19,7 +19,6 @@ const ROOT = path.join(__dirname, '..');
 const G = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'generated.ts'));
 const R = loadTs(path.join(ROOT, 'src', 'main', 'memoryRollover.ts'));
 const M = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'migrate.ts'));
-const { MemoryReflector } = loadTs(path.join(ROOT, 'src', 'main', 'reflect.ts'));
 
 function generatedView(bytes) {
   const lines = [G.GENERATED_MEMORY_MARKER, '# Memory: andy', '', '## How I work (standing lessons)', '- a lesson [c:c1]', '', '## Working set'];
@@ -67,22 +66,15 @@ test('G6.6 seed: nothing is seeded into a generated memory.md, even one with no 
   assert.equal(fs.readFileSync(path.join(dir, 'memory.md'), 'utf8'), text);
 });
 
-test('G6.6 condense: the reflector skips a generated memory.md, on demand too, and never calls the model', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
-  const dir = path.join(home, 'hive', 'agents', 'andy');
-  fs.mkdirSync(dir, { recursive: true });
+test('G6.6 Stop rollover (ZT-I2): the rollover at its Stop limit leaves a generated memory.md byte for byte', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
   const text = generatedView(200 * 1024);
   fs.writeFileSync(path.join(dir, 'memory.md'), text);
-  let calls = 0;
-  const reflector = new MemoryReflector(
-    () => home, () => 'claude', () => ({}),
-    () => ({ enabled: true, intervalMs: 60_000, byteTriggerPct: 1, sectionTrigger: 1, recentKeep: 5, minBytes: 1 }),
-    () => {}, async () => { calls++; return { ok: false }; }
-  );
-  assert.deepEqual(await reflector.reflectNow('andy'), []);
-  assert.deepEqual(await reflector.reflectNow(), []);
-  assert.equal(calls, 0);
+  const r = R.rolloverMemory(dir, Date.now(), R.MEMORY_STOP_ROLLOVER_BYTES);
+  assert.equal(r.rotated, false);
+  assert.equal(r.generated, true);
   assert.equal(fs.readFileSync(path.join(dir, 'memory.md'), 'utf8'), text);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('the marker never becomes a claim: the import split skips it as a comment', () => {

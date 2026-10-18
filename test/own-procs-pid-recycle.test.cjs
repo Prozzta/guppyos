@@ -233,8 +233,6 @@ test('PIN (all of test/): no tree walk by ParentProcessId alone outside own-proc
   const lb = SOURCES.find((s) => s.file === 'tools/layer-b-core.cjs').code;
   assert.match(lb, /if \(-not \$c\.CreationDate -or \$c\.CreationDate -lt \$born\[\$x\]\) \{ continue \}/, 'the window watcher\'s walk');
   assert.match(lb, /\$p\.CreationDate -ge \$born\[\$pp\]\) \{ \$ids \+= \$p\.ProcessId/, 'PS_TREE_CMDLINES\' walk');
-  const canary = SOURCES.find((s) => s.file === 'tools/packaged-condense-canary.cjs').code;
-  assert.match(canary, /own\.treeOf\(rows, r\)/, 'the condense canary\'s tree');
   // the detector itself: Jim's surviving mutant (leftBehind back to a JS ppid-only filter) must be caught
   const revert = { file: 'test-runner-glob.test.cjs', code: '  const tree = own.processTable().filter((r) => r.ppid === rec.pid);' };
   assert.strictEqual(hits(PPID, [revert]).filter((h) => !PPID_ALLOW[h.file].some((re) => re.test(h.text))).length, 1);
