@@ -126,7 +126,6 @@ import {
 import { CircuitBreaker, type BreakerInput } from './breaker';
 import type { UsageProvider } from './usage';
 import { KnowledgeManager } from './knowledge';
-import { MemoryReflector, type ReflectSettings } from './reflect';
 import { PersistStore } from './db';
 import { mayReadClaudeTranscripts, readAgentUsage, readContextTokens, seedSessionTranscript, resolveSessionCwd, shouldRecordSampleSession, chooseResumeSession, sessionTranscriptPath } from './transcript';
 import { godFreshStart, readClaudeVersion, type GodFreshReason } from './godStartup';
@@ -1712,6 +1711,9 @@ hookServer.setLedgerHandler((agentId, body) => ledgerQueue(agentId, () => {
     closeAsk: (id, by, reason) => hive.closeAsk(agentId, id, by, reason)
   });
 }));
+// ZT-I2-CONDENSE (replaces the hidden Haiku condense): at each turn end, through the same per-agent
+// queue as the ledger, so a ledger memory note and the rollover never interleave.
+hookServer.setMemoryUpkeepListener((agentId) => { void ledgerQueue(agentId, () => hive.rolloverMemoryAtStop(agentId)); });
 /** CLAIM-LEDGER W6 (G6.6): the `ledger` memory part as a claim, through the endpoint's note verb with
  *  origin 'ledger-route' (400 characters, no source or legacy); null when the ledger is not wired. */
 function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
@@ -1740,29 +1742,6 @@ function deleteMemoryIndex(file: string | null): void {
 }
 // Enterprise Knowledge Graph — file-backed store + agent CLI (default OFF).
 const knowledge = new KnowledgeManager();
-/** Reads the reflect tunables from config each tick (defaults baked in here so a
- *  pre-existing config.json without the keys still gets sane values). */
-function reflectSettings(): ReflectSettings {
-  const c = readConfig();
-  return {
-    enabled: c.reflectEnabled !== false,
-    intervalMs: c.reflectIntervalMs ?? 1_800_000,
-    byteTriggerPct: c.reflectByteTriggerPct ?? 50,
-    sectionTrigger: c.reflectSectionTrigger ?? 50,
-    recentKeep: c.reflectRecentKeep ?? 12,
-    minBytes: c.reflectMinBytes ?? 16_384
-  };
-}
-// Finishes the janitor's missing condense half: bounds each agent's memory.md
-// (Haiku tail-summary, backup→verify→atomic-swap) so it never grows unbounded.
-const reflector = new MemoryReflector(
-  () => readConfig().harnessHome,
-  () => readConfig().defaultCommand ?? 'claude',
-  // The reflector's Haiku call needs no memory env.
-  () => ({}),
-  reflectSettings,
-  (event) => { try { hive.appendLog(event); } catch { /* best-effort */ } }
-);
 // Durable harness state (SQLite, main process). Phase A: window bounds (kv) +
 // net-new command history. Opened in whenReady, closed in the teardown blocks.
 const persist = new PersistStore();
@@ -5244,7 +5223,6 @@ ipcMain.handle('config:changeHome', async (_evt, payload: unknown) => {
   // old one is deleted after a successful move (Jim M1: shut the worker down FIRST).
   const oldIndex = nativeMemory.dbFile();
   const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
-  try { reflector.stop(); } catch (e) { console.error('[changeHome] reflector.stop:', e); }
   // Close the hive's kept-open log and ledger before the copy (and the relaunch).
   try { hive.dispose(); } catch (e) { console.error('[changeHome] hive.dispose:', e); }
 
@@ -5750,10 +5728,6 @@ ipcMain.handle('hive:memoryWakeUp', async (_evt, wing: unknown) => {
   await claimsImportReady();
   return memoryReply(await nativeMemory.query('wake-up', typeof wing === 'string' && wing ? { wing } : {}));
 });
-// Condense memory.md on demand: an explicit id condenses that one agent (skips
-// the size trigger — a "condense now" button); no id runs a full threshold scan.
-ipcMain.handle('memory:reflectNow', (_evt, id: unknown) =>
-  reflector.reflectNow(typeof id === 'string' && id ? id : undefined));
 
 // ─── IPC: enterprise Knowledge Graph (multimodal context for agents) ─────────
 ipcMain.handle('kg:status', () => knowledge.status());
@@ -5889,7 +5863,6 @@ function teardownAndQuit(): void {
   try { telemetry.stop(); } catch (e) { console.error('[quit] telemetry.stop:', e); }
   try { stopSlackServer(); } catch (e) { console.error('[quit] slack.stop:', e); }
   try { stopWebhookServer(); } catch (e) { console.error('[quit] webhook.stop:', e); }
-  try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
   // The slow step (every agent's process tree) runs async;
@@ -5975,7 +5948,6 @@ ipcMain.handle('app:resetAll', async () => {
   // fails with EBUSY on Windows (and was swallowed). Shut it down FIRST (bounded), then delete.
   const memoryIndex = nativeMemory.dbFile();
   const memoryStopped = nativeMemory.shutdown().catch(() => undefined);
-  try { reflector.stop(); } catch (e) { console.error('[reset] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[reset] persist.close:', e); }
   // SYNC-CHILD-CALLS: async bulk kill, still BEFORE hive.dispose and the rm below.
   ptyManager.refuseNewSpawns('The app is resetting; agents cannot start now.');
@@ -7633,7 +7605,6 @@ function bootstrapHiveServices(): void {
   // Nothing to start for memory: the engine forks lazily / at prewarm.
   const retiredKeys = pruneRetiredConfigKeys();
   if (retiredKeys.length) { try { hive.appendLog({ kind: 'config-retired-keys-removed', keys: retiredKeys }); } catch { /* best-effort */ } }
-  reflector.start(); // bound oversized memory.md files on a timer (no-op until threshold)
 
   armAlwaysOnBeats();
 }

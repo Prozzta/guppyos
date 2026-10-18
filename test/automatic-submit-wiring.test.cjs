@@ -1272,12 +1272,8 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
   const owner = read('src/main/automaticSubmit.ts');
   const section = owner.slice(owner.indexOf('export function commitSection('));
   assert.ok(section.slice(0, section.indexOf('\n}\n')).includes("safeWrite(deps, s.ptyId, '\\r')"), 'and the owner writes it inside commitSection');
-  // hiddenClaude used to be the second speller, as a declared private PTY. It now runs a
-  // print-mode child with the prompt on STDIN, so the exclusion it needed is gone: there
-  // is no terminal, no Enter, and nothing to declare. Pinned so it cannot quietly return.
-  const hidden = read('src/main/hiddenClaude.ts');
-  assert.ok(!/node-pty/.test(hidden), 'hiddenClaude must not go back to driving a PTY');
-  assert.ok(!/ptyManager/.test(codeOnly(hidden)), 'hiddenClaude never touches an AGENT terminal: its code has no reference to ptyManager at all');
+  // hiddenClaude used to be the second speller, as a declared private PTY; 1.1.92 (ZT-I2-CONDENSE)
+  // deleted it with the condense. zt-i2-retired-condense pins that it stays gone.
 });
 
 // ─── THE CALLEE CENSUS: who can write to an agent terminal AT ALL (design section 10) ───

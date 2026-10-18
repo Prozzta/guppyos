@@ -349,6 +349,8 @@ export class HookServer {
   private preparedClaimWorkingSets = new Map<string, string | null>();
   /** CLAIM-LEDGER W5 (god): told at each completed turn (Stop), for the reconcile lease. */
   private claimTurnCompleted?: (agentId: string) => void;
+  /** ZT-I2-CONDENSE: told at each completed turn (Stop), for the memory.md rollover. */
+  private memoryUpkeep?: (agentId: string) => void;
   /** CARD-IDLE-WHILE-WORKING (1.1.78): each agent's tool call in progress, from its own
    *  PreToolUse until the PostToolUse, the next prompt or the turn's end. */
   private readonly runningTools = new Map<string, RunningTool[]>();
@@ -390,6 +392,10 @@ export class HookServer {
 
   setClaimTurnCompletedListener(fn: ((agentId: string) => void) | undefined): void {
     this.claimTurnCompleted = fn;
+  }
+
+  setMemoryUpkeepListener(fn: ((agentId: string) => void) | undefined): void {
+    this.memoryUpkeep = fn;
   }
 
   /** CLAIM-LEDGER G4.4 (Jim M-3): the working set rides only on SessionStart (startup, resume,
@@ -2040,6 +2046,9 @@ export class HookServer {
     // CLAIM-LEDGER W5 hook (god): the completed-turn boundary for the claims reconcile lease.
     if (agentId && !fromSubagent && event === 'Stop') {
       try { this.claimTurnCompleted?.(agentId); } catch { /* never breaks a hook */ }
+      // ZT-I2-CONDENSE: the turn has ended, so no tool of this agent is mid-append; a long-lived
+      // agent's memory.md is rolled over here (a subagent's Stop is not the turn end).
+      try { this.memoryUpkeep?.(agentId); } catch { /* never breaks a hook */ }
     }
     // READS-ROTATE-AT-SIZE pilot: one `compact-health` row per compaction (before any early return:
     // a SessionStart(compact) that re-injects mail returns with it below).

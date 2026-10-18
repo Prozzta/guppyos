@@ -356,8 +356,9 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // int-1.1.91: 430 on repo-tidy-191, + 6 root tests from the other 1.1.91 branches (cards x2,
   // claude-json-wipe, model-not-kept x2, worktree-remove-junction), + 2 (requests-auto-190,
   // tui-composer-allowlist-191), + 1 (nudge-cap-192), + 3 (heavy-cpu-options-191: harness, options,
-  // settings).
-  assert.equal(files.length, 442, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // settings). 1.1.92 ZT-I2-CONDENSE: - 3 (hidden-claude, reflect-condense, reflect-heading-demote:
+  // the condense is gone), + 2 (memory-rollover-stop-zti2, zt-i2-retired-condense).
+  assert.equal(files.length, 441, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');

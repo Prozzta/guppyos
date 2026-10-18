@@ -526,22 +526,6 @@ export interface HarnessConfig {
    *  factory `defaultModel` seed is cleared once, so new agents start on their
    *  CLI's own default). Set once it has run; a later explicit choice is kept. */
   defaultModelCliMigratedV1?: boolean;
-
-  // ─── Memory reflection (the janitor's condense half) ───────────────────────
-  /** Master toggle for the in-process MemoryReflector. Default on. */
-  reflectEnabled?: boolean;
-  /** How often to scan agent memory.md files for condensing (default 30 min). */
-  reflectIntervalMs?: number;
-  /** Condense when bytes exceed this percent of the 128 KB budget (matches the
-   *  janitor's TRIGGER_PCT). DECIDED: 50. */
-  reflectByteTriggerPct?: number;
-  /** ...OR when `## ` section count exceeds this (AND bytes > floor). DECIDED: 50. */
-  reflectSectionTrigger?: number;
-  /** Newest K verbatim `## ` sections kept untouched on each condense. */
-  reflectRecentKeep?: number;
-  /** Never condense a file smaller than this; also the section-trigger byte floor.
-   *  DECIDED: 16 KB. */
-  reflectMinBytes?: number;
 }
 
 const DEFAULTS: HarnessConfig = {
@@ -600,15 +584,6 @@ const DEFAULTS: HarnessConfig = {
   webhookTriggers: [],
   orgTrigger: DEFAULT_ORG_TRIGGER,
   triggersMigratedV1: false,
-  // Memory reflection — preventive; nobody is over threshold today, so it sits
-  // dark until an agent's memory crosses one of these (the verify gate is the
-  // safety for the LLM step). Thresholds DECIDED by god 2026-06-06.
-  reflectEnabled: true,
-  reflectIntervalMs: 1_800_000,
-  reflectByteTriggerPct: 50,
-  reflectSectionTrigger: 50,
-  reflectRecentKeep: 12,
-  reflectMinBytes: 16_384,
   // Enterprise Knowledge Graph — opt-in; dark until the user enables it.
   // v0.3.4 fix: default OFF, matching the field's own documentation ("Default
   // OFF / dark until enabled") — the true default contradicted it. Existing
@@ -836,8 +811,12 @@ export function takeClearedDefaultModel(): string | null {
 }
 
 /** Keys older builds persisted that nothing reads any more (1.1.60: the retired indexer's model
- *  choice). readConfig drops them, and pruneRetiredConfigKeys rewrites the file once. */
-export const RETIRED_CONFIG_KEYS = ['embeddingModel'] as const;
+ *  choice; 1.1.92 ZT-I2-CONDENSE: the retired Haiku condense's tunables). readConfig drops them,
+ *  and pruneRetiredConfigKeys rewrites the file once. */
+export const RETIRED_CONFIG_KEYS = [
+  'embeddingModel',
+  'reflectEnabled', 'reflectIntervalMs', 'reflectByteTriggerPct', 'reflectSectionTrigger', 'reflectRecentKeep', 'reflectMinBytes'
+] as const;
 
 /** Remove RETIRED_CONFIG_KEYS from config.json on disk, touching nothing else (no defaults are
  *  merged in). Best-effort; returns the keys removed. */

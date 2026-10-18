@@ -33,7 +33,7 @@ import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, c
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
-import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES } from './memoryRollover';
+import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES, MEMORY_STOP_ROLLOVER_BYTES, type RolloverResult } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
 import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './codexProjectLayers';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
@@ -920,6 +920,25 @@ export class HiveManager {
     const root = this.root();
     if (!root || !id || !this.registry().agents[id]) return null;
     return join(root, 'agents', id);
+  }
+
+  /**
+   * ZT-I2-CONDENSE (replaces the hidden Haiku condense, reflect.ts): at a registered agent's Stop,
+   * roll memory.md over when it is above MEMORY_STOP_ROLLOVER_BYTES. Spawn keeps its own 32 KB
+   * rollover; this covers an agent that never respawns. The same rows as at spawn, with at 'stop'.
+   * Null for an unknown agent. Best-effort: never throws.
+   */
+  rolloverMemoryAtStop(id: string): RolloverResult | null {
+    const dir = this.agentHome(id);
+    if (!dir) return null;
+    try {
+      const r = rolloverMemory(dir, Date.now(), MEMORY_STOP_ROLLOVER_BYTES);
+      if (r.rotated) this.appendLog({ kind: 'memory-rollover', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, bytesAfter: r.bytesAfter, archive: r.archive ? basename(r.archive) : null });
+      else if (r.raced) this.appendLog({ kind: 'memory-rollover-raced', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
+      else if (r.replaceFailed) this.appendLog({ kind: 'memory-rollover-failed', agentId: id, at: 'stop', bytesBefore: r.bytesBefore, code: r.replaceFailed, ...(r.undoFailed ? { undoFailed: r.undoFailed } : {}) });
+      else if (r.pinnedTooLarge) this.appendLog({ kind: 'memory-pinned-too-large', agentId: id, at: 'stop', pinnedBytes: r.pinnedBytes, bytesBefore: r.bytesBefore });
+      return r;
+    } catch (e) { console.warn('[hive] memory rollover at stop failed:', e); return null; }
   }
 
   /** READS-181 B: where an agent's condensed tool outputs are kept in full, or null (no hive). */

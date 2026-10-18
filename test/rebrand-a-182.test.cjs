@@ -377,7 +377,7 @@ test('check-release-links: Prozzta/guppyos, and electron-builder.yml makes the n
 });
 
 test('packaged canaries + layer-b: the exe is Guppy.exe (old name still found); Guppy\'s live paths are protected', () => {
-  for (const f of ['test/tools/packaged-condense-canary.cjs', 'test/tools/packaged-wake-canary.cjs']) {
+  for (const f of ['test/tools/packaged-wake-canary.cjs']) {   // the condense canary went with the condense (1.1.92 ZT-I2)
     assert.match(read(f), /const APP_EXE = \['Guppy\.exe', 'Munder Difflin\.exe'\]/, f);
   }
   const lb = read('test/tools/layer-b-core.cjs');

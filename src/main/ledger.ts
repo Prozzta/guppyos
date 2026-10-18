@@ -5,8 +5,8 @@
  * Why: god and the agents spent 2-4 tool calls on that bookkeeping, and each call re-reads the
  * whole context (10-02: 111 of god's 328 requests, 20M of its 66M reads). Why in main: tasks.json
  * has no lock (writeTasks re-reads, merges and swaps, so an outside writer can race it), and the
- * memory reflector re-reads memory.md just before its swap (reflect.ts 4b), which an in-process
- * append cannot fall between.
+ * memory.md rollover at an agent's Stop runs in main through the same per-agent queue as these ops
+ * (index.ts ledgerQueue), so an in-process append cannot fall inside it.
  *
  * Contract:
  * - The input is ONE JSON object, sent by the CLI from a file or stdin (never shell arguments, so
