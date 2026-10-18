@@ -42,7 +42,7 @@ export interface WakeStall {
 }
 
 export class WakeStallWatch {
-  private readonly watching = new Map<string, { why: string; since: number; announced: boolean }>();
+  private readonly watching = new Map<string, { why: string; since: number; announced: boolean; inboxIds: number }>();
 
   /**
    * Fold one refusal in. Returns a stall to announce EXACTLY ONCE per unbroken run of the
@@ -55,7 +55,8 @@ export class WakeStallWatch {
     const cur = this.watching.get(agentId);
     // A DIFFERENT reason is progress of a kind — the state machine is moving. Restart the
     // clock rather than blaming the new guard for the old one's wait.
-    if (!cur || cur.why !== why) { this.watching.set(agentId, { why, since: now, announced: false }); return null; }
+    if (!cur || cur.why !== why) { this.watching.set(agentId, { why, since: now, announced: false, inboxIds }); return null; }
+    cur.inboxIds = inboxIds;
     if (cur.announced) return null;
     const stalledMs = now - cur.since;
     if (stalledMs < WAKE_STALL_AFTER_MS) return null;
@@ -69,7 +70,13 @@ export class WakeStallWatch {
   }
 
   /** Read-only view for diagnostics and tests. */
-  watchingFor(agentId: string): { why: string; since: number; announced: boolean } | null {
+  watchingFor(agentId: string): { why: string; since: number; announced: boolean; inboxIds: number } | null {
     return this.watching.get(agentId) ?? null;
+  }
+
+  /** WAKE-OWNER-HOLD-ORPHAN (1.1.91): the stalls announced and still running, for god's floor
+   *  digest. A row alone was silent: Jim and Andy sat `owner-inhibited` for hours. */
+  stalls(): Array<{ agentId: string; why: string; since: number; inboxIds: number }> {
+    return [...this.watching].filter(([, w]) => w.announced).map(([agentId, w]) => ({ agentId, why: w.why, since: w.since, inboxIds: w.inboxIds }));
   }
 }

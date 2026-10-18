@@ -440,7 +440,9 @@ test('fix 2: the floor digest lists a held wake as a decision for god', () => K.
 test('wiring: main runs the watch, resolves a release as "let it retry", and words the notice', () => {
   const idx = readSource('src/main/index.ts');
   assert.match(idx, /heldInterferenceTimer = setInterval\(\(\) => \{ try \{ heldInterference\?\.tick\(Date\.now\(\)\); \}/, 'the watch ticks');
-  assert.match(idx, /return ptyId && inh && inh\.requestId === claim\.requestId/, 'only a held WAKE claim whose owner hold is that request');
+  // WAKE-OWNER-HOLD-ORPHAN (1.1.91): from the owner's holds on this agent's automatic wakes, with or
+  // without the coordinator's claim (wake-owner-hold-orphan-191 pins which holds count).
+  assert.match(idx, /heldWakes: \(\) => heldWakesOf\(ptyToAgent, \(ptyId\) => automaticSubmit\.inhibition\(ptyId\),/, 'the owner\'s holds on automatic wakes');
   assert.match(idx, /recheck: \(h\) => automaticSubmit\.recheckHeld\(h\.ptyId, h\.requestId\),/);
   assert.match(idx, /kind: 'interference-self-released'/);
   assert.match(idx, /inboxWake\?\.onInterferenceResolved\(h\.agentId, r\.kind === 'SUBMITTED' \? 'ALREADY_HANDLED' : 'SEND_AGAIN'\);/,
@@ -501,7 +503,7 @@ const MUTANTS = [
     edits: [["      if (!keys.has(`${agentId}|${requestId}`)) this.lift(agentId);", '      void agentId; void requestId;']],
     killer: 'noticeLiftsWhenHoldEnds', dies: /THE NOTICE LIFTS WHEN THE HOLD ENDS/ },
   { name: 'fix 2: the digest leaves held wakes out', file: 'src/main/floorDigest.ts', real: DIGEST,
-    edits: [['  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? []);', '  const items = decisionItems(input.flags, input.ledgerIssues, now, [], input.silentTurns ?? [], input.quietStalls ?? []);'],
+    edits: [['  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);', '  const items = decisionItems(input.flags, input.ledgerIssues, now, [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);'],
       ['  for (const h of heldWakes) {', '  for (const h of heldWakes.slice(0, 0)) {']],
     killer: 'digestListsHeldWake', dies: /A HELD WAKE IS A DECISION FOR GOD/ },
   { name: 'fix 3: no quiet window (the 20:27:41 race)', file: 'src/main/automaticSubmit.ts', real: OWNER,

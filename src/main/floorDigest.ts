@@ -56,6 +56,10 @@ export interface DigestHeldWake { agentId: string; name?: string; messages: numb
  *  quiet (quietRefusalWatch.ts): nothing typed, so nothing else alarms. */
 export interface DigestQuietStall { agentId: string; name?: string; count: number; since: number }
 
+/** WAKE-OWNER-HOLD-ORPHAN (1.1.91): any wake stall (wakeStall.ts) past WAKE_STALL_AFTER_MS, whatever
+ *  guard refuses (`owner-inhibited` included), so no stall is only a log row. */
+export interface DigestWakeStall { agentId: string; name?: string; why: string; inboxIds: number; since: number }
+
 /** REQUESTS-AUTO-190: an ask the backstop closed (hive.autoCloseStaleObligations writes them). */
 export interface DigestBackstopClosed { agentId: string; from: string; id: string; subject: string; at: number }
 /** Under state/: the backstop closes of the last week, newest last, at most ASKS_BACKSTOP_KEEP. */
@@ -84,6 +88,7 @@ export interface FloorDigestInput {
   heldWakes?: DigestHeldWake[];
   silentTurns?: SilentTurn[];
   quietStalls?: DigestQuietStall[];
+  wakeStalls?: DigestWakeStall[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -99,8 +104,19 @@ export { ageText };
 /** The decision items: decision flags, plus every ledger ERROR (a duplicate id, an unknown
  *  status), which only god can fix by hand. A STALE item's id carries the day, so it
  *  re-arms once a day while the card stays stale. */
-export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = []): DecisionItem[] {
+export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonly LedgerIssue[], now: number, heldWakes: readonly DigestHeldWake[] = [], silentTurns: readonly SilentTurn[] = [], quietStalls: readonly DigestQuietStall[] = [], wakeStalls: readonly DigestWakeStall[] = []): DecisionItem[] {
   const items: DecisionItem[] = [];
+  // One item per stall run (its id carries when the run began). A hold or a never-quiet terminal
+  // already has its own item below, with what to do about it: one decision per agent, not two.
+  const covered = new Set([...heldWakes.map((h) => h.agentId), ...quietStalls.map((q) => q.agentId)]);
+  for (const s of wakeStalls) {
+    if (covered.has(s.agentId) || s.why === 'held-interfered') continue;
+    const who = s.name ?? s.agentId;
+    items.push({
+      id: `wake-stall:${s.agentId}:${s.since}`, cardId: null,
+      line: `${who}: ${s.inboxIds} message(s) undrained for ${ageText(now - s.since)}, every automatic wake refused as "${s.why}" - look at ${who}'s terminal and chat box`
+    });
+  }
   // One item per run of refusals (its id carries when the run began).
   for (const q of quietStalls) {
     const who = q.name ?? q.agentId;
@@ -163,7 +179,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     const raw = Array.isArray(t) ? t : (t && typeof t === 'object' && Array.isArray((t as { tasks?: unknown }).tasks)) ? (t as { tasks: unknown[] }).tasks : [];
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
-  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? []);
+  const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -283,6 +299,8 @@ export interface FloorDigestHost {
   silentTurns?(): SilentTurn[];
   /** WAKE-STALL-INTERFERED-192: agents whose wakes keep being refused output-not-quiet. Optional. */
   quietStalls?(): DigestQuietStall[];
+  /** WAKE-OWNER-HOLD-ORPHAN: every announced wake stall. Optional. */
+  wakeStalls?(): DigestWakeStall[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -325,6 +343,7 @@ export class FloorDigest {
       heldWakes: (() => { try { return this.host.heldWakes?.() ?? []; } catch { return []; } })(),
       silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
       quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
+      wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
       backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.

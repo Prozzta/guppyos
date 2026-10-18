@@ -43,7 +43,35 @@ export interface HeldWake {
   reason: string;
 }
 
-export type HeldRelease = Extract<HeldRecheck, { kind: 'RELEASED' | 'ERASED' | 'SUBMITTED' }>;
+/** The owner's hold on one PTY (`AutomaticSubmitOwner.inhibition`). */
+export interface OwnerHold { requestId: string; reason: string; at: number }
+
+/**
+ * WAKE-OWNER-HOLD-ORPHAN (1.1.91): the held wakes, from the OWNER's holds. The coordinator drops its
+ * held claim when the claim's ids leave the inbox (a turn surfaced them), but the owner's hold on the
+ * terminal stays and refuses every later wake (`owner-inhibited`). Read from the coordinator alone,
+ * that hold had no recheck, no notice and no floor item: Jim and Andy, 2026-10-17/18, silent for
+ * hours. So every owner hold on this agent's automatic wake counts, with or without the claim;
+ * without it, `messages` is the mail it now keeps waiting.
+ */
+export function heldWakesOf(
+  ptys: Iterable<[ptyId: string, agentId: string]>,
+  hold: (ptyId: string) => OwnerHold | null,
+  heldClaim: (agentId: string) => { requestId: string; ids: readonly string[] } | null,
+  waiting: (agentId: string) => number
+): HeldWake[] {
+  const out: HeldWake[] = [];
+  for (const [ptyId, agentId] of ptys) {
+    const inh = hold(ptyId);
+    if (!inh || !inh.requestId.startsWith(`inbox-wake:${agentId}:`)) continue;
+    const claim = heldClaim(agentId);
+    const messages = claim && claim.requestId === inh.requestId ? claim.ids.length : waiting(agentId);
+    out.push({ agentId, requestId: inh.requestId, ptyId, messages, since: inh.at, reason: inh.reason });
+  }
+  return out;
+}
+
+export type HeldRelease =Extract<HeldRecheck, { kind: 'RELEASED' | 'ERASED' | 'SUBMITTED' }>;
 
 export interface HeldInterferenceDeps {
   /** Every wake claim the coordinator holds INTERFERED whose owner hold is that same request. */

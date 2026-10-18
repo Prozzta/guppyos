@@ -161,7 +161,7 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WorkerWakeWatchdog } from './workerWake';
-import { HeldInterferenceWatch, HELD_TICK_MS } from './heldInterference';
+import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
@@ -543,6 +543,7 @@ const floorDigest = new FloorDigest({
   // FLEET-LIVENESS-BLIND: shown working with no hook or tool call (silentTurn.ts; alert only).
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
+  wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   send: (msg, from) => { hive.send(msg, from); },
   appendLog: (row) => hive.appendLog(row)
 }, () => ({ ...FLOOR_DIGEST_DEFAULTS, ...(readConfig().floorDigest ?? {}) }));
@@ -1115,13 +1116,9 @@ wakeDiag('bridge-built', { ok: !!inboxWake });
 // at again about once a minute (the owner decides, on positive screen evidence only), and the
 // Human is told after HELD_NOTICE_AFTER_MS. A person's queued message is never re-examined here.
 heldInterference = new HeldInterferenceWatch({
-  heldWakes: () => workerWake.heldClaims().flatMap(({ agentId, claim }) => {
-    const ptyId = ptyForAgent(agentId);
-    const inh = ptyId ? automaticSubmit.inhibition(ptyId) : null;
-    return ptyId && inh && inh.requestId === claim.requestId
-      ? [{ agentId, requestId: claim.requestId, ptyId, messages: claim.ids.length, since: inh.at, reason: inh.reason }]
-      : [];
-  }),
+  // WAKE-OWNER-HOLD-ORPHAN: from the owner's holds, so one outliving the coordinator's claim stays seen.
+  heldWakes: () => heldWakesOf(ptyToAgent, (ptyId) => automaticSubmit.inhibition(ptyId),
+    (agentId) => workerWake.state(agentId).held, (agentId) => workerWake.state(agentId).pending.length),
   recheck: (h) => automaticSubmit.recheckHeld(h.ptyId, h.requestId),
   released: (h, r, now) => {
     try {
