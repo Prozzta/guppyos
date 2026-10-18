@@ -46,3 +46,14 @@ export class BootHookClock {
     return p !== undefined && spawnedAt > 0 && p >= spawnedAt && p >= since;
   }
 }
+
+/** STARTUP-LATCH-QUIET-193 (d): how long a Claude PTY's output must have been quiet before a
+ *  composer seen on it latches condition 1. */
+export const STARTUP_LATCH_QUIET_MS = 1_500;
+
+/** STARTUP-LATCH-QUIET-193 (d): may a composer seen now latch condition 1? G1's session-up proof
+ *  (`sessionUp`) AND no output for `quietMs` (`idleMs` = time since the last output). On 1.1.93
+ *  god latched on the first paint, 2.4 s after spawn, just before the 47.8k resume replay. */
+export function startupSettled(sessionUp: boolean, idleMs: number | undefined, quietMs = STARTUP_LATCH_QUIET_MS): boolean {
+  return sessionUp && idleMs !== undefined && idleMs >= quietMs;
+}

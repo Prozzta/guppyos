@@ -313,3 +313,21 @@ export function classifyCodexComposer(f: CodexScreenFacts, ownTailMatches?: bool
   if (transient) return { cls: 'UNKNOWN', reason: 'transient-footer' };
   return { cls: 'UNKNOWN', reason: 'not-the-empty-composer' };
 }
+
+/** A terminal grid (columns x rows). */
+export interface ScreenGrid { cols: number; rows: number }
+
+/**
+ * STARTUP-LATCH-QUIET-193 (A): may a guard reading be taken from a renderer terminal of grid
+ * `term`, mirroring a PTY of grid `pty`? `read` = yes. `align` = no: the grids differ and the
+ * terminal has no sized host to fit it, so the caller resizes the terminal to the PTY's grid, asks
+ * the PTY for a fresh frame, and answers "no reading" (the frame is output, which brings the next
+ * reading). On 1.1.93 a resumed agent whose tab was never opened was mirrored in xterm's default
+ * 80x24 while its PTY ran at 100x30: Claude's 100-wide rules wrapped into an 80 piece and a 20
+ * piece, no composer box could be found, and the agent never latched until the Human opened it.
+ * A sized host keeps `read` (its fit resizes the PTY to the terminal); no PTY grid = `read`.
+ */
+export function screenGridAction(term: ScreenGrid, pty: ScreenGrid | undefined, hostSized: boolean): 'read' | 'align' {
+  if (!pty || !(pty.cols > 0) || !(pty.rows > 0) || hostSized) return 'read';
+  return term.cols === pty.cols && term.rows === pty.rows ? 'read' : 'align';
+}

@@ -32,7 +32,7 @@ import {
 import type { InputOrigin } from '@shared/inputOrigin';
 import { sameInputState, type TerminalInputState } from '@shared/inputProvenance';
 import type { PromptBlock } from '@shared/promptState';
-import { extractCodexScreen, type CodexScreenFacts } from '@shared/codexScreen';
+import { extractCodexScreen, screenGridAction, type CodexScreenFacts } from '@shared/codexScreen';
 import {
   createTerminalRecoveryState,
   normalizePtyChunk,
@@ -748,6 +748,20 @@ function ensureScreenReadResponder(): void {
     if (!req || typeof req.requestId !== 'string') return;
     const entry = typeof req.ptyId === 'string' ? pool.get(req.ptyId) : undefined;
     if (!entry) { window.cth.answerScreenReading(req.requestId, null); return; }
+    // STARTUP-LATCH-QUIET-193 (A): a never-shown terminal keeps xterm's default grid while its PTY
+    // runs at the spawn grid; Claude's frame drawn into the wrong width reads as no composer.
+    // Align the grid, ask for a fresh frame, and answer "no reading" (the frame is new output,
+    // which brings main's next reading).
+    if (req.codex === true && entry.opened && !entry.exited) {
+      const host = entry.host;
+      const hostSized = host.isConnected && host.clientWidth > 0 && host.clientHeight > 0;
+      if (screenGridAction({ cols: entry.term.cols, rows: entry.term.rows }, req.grid, hostSized) === 'align' && req.grid) {
+        try { entry.term.resize(req.grid.cols, req.grid.rows); } catch { /* answered null either way */ }
+        void window.cth.redrawPty(req.ptyId);
+        window.cth.answerScreenReading(req.requestId, null);
+        return;
+      }
+    }
     // Read only after xterm has parsed everything already queued for this terminal: an
     // empty write is ordered behind pending PTY output (the same public FIFO barrier the
     // provenance self-test uses), so the reading reflects the repaint a clear provoked
