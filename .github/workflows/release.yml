@@ -1,16 +1,16 @@
 name: Release
 
-# Build installers for every platform and publish them to a GitHub Release
-# whenever a v* tag is pushed. Run manually (workflow_dispatch) to dry-build
-# without publishing.
+# Dry-build installers for every platform, run by hand (workflow_dispatch).
+# This workflow never publishes. A release has one path: the verified local cut
+# (embedding model by manifest digest, release markers, code and identity
+# scans, payload asar = built asar), whose assets are uploaded to the release
+# by hand. A tag push used to publish CI's own build over those assets (1.1.91:
+# no embedding model, natives from another toolchain).
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -55,11 +55,7 @@ jobs:
           POSTHOG_HOST: ${{ secrets.POSTHOG_HOST }}
 
       - name: Package installers
-        # GH_TOKEN lets electron-builder skip its own publish; we upload via the
-        # release step below for full control over the asset set.
         run: npx electron-builder ${{ matrix.args }} --publish never
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate checksums
         shell: bash
@@ -83,44 +79,3 @@ jobs:
             dist/latest*.yml
             dist/SHA256SUMS-*.txt
           if-no-files-found: warn
-
-  publish:
-    name: Publish release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Flatten + merge checksums
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name '*.exe' -o -name '*.AppImage' -o -name '*.blockmap' -o -name 'latest*.yml' \) -exec cp {} release/ \;
-          cat artifacts/*/SHA256SUMS-*.txt > release/SHA256SUMS.txt 2>/dev/null || true
-          ls -la release
-
-      - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          # RELEASE.md is the human-facing notes; GitHub shows it as the body.
-          body_path: RELEASE.md
-          # A tag carrying a pre-release suffix (v0.4.4-rc.1, -beta.2 …) publishes
-          # as a PRE-RELEASE. This is load-bearing, not cosmetic: the in-app
-          # updater polls /releases/latest, and GitHub excludes pre-releases from
-          # that endpoint. So an rc gets a real, public, shareable download page
-          # WITHOUT offering itself to every installed copy of the app — which is
-          # exactly what you want for a build that needs testing on a platform the
-          # authors cannot run. A clean `vX.Y.Z` tag is unaffected and still ships
-          # as the latest release to everyone.
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          fail_on_unmatched_files: false
-          files: |
-            release/*.exe
-            release/*.AppImage
-            release/*.blockmap
-            release/latest*.yml
-            release/SHA256SUMS.txt
