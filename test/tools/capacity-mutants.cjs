@@ -217,8 +217,14 @@ const MUTANTS = [
   ['mon any non-budget value exempts (malformed switches a limit off)', USAGE,
     "  return usageWindowOf(display) !== null;", "  return display !== 'budget' && display !== undefined;"],
   ['mon the breaker never sees the choice', INDEX,
-    '    agentUsageDisplay: c.agentUsageDisplay\n  };', '  };'],
-  ['mon Budget stored explicitly instead of as absent', CONFIG,
+    '    agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)\n  };', '  };'],
+  // AGY-MONITOR-1.4 audit SHOULD-1: a choice the provider does not offer never exempts.
+  ['agy the breaker reads the unfiltered choice (provider-blind exemption)', INDEX,
+    'agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)', 'agentUsageDisplay: c.agentUsageDisplay'],
+  ['agy the push reads the unfiltered choice', INDEX,
+    'agentUsagePushOf(offeredUsageDisplays(readConfig().agentUsageDisplay, usageProviderOf),', 'agentUsagePushOf(readConfig().agentUsageDisplay,'],
+  ['agy the filter ignores the provider', USAGE,
+    'provider !== undefined && isAgentUsageDisplay(display) && usageDisplaysFor(provider).includes(display)', 'isAgentUsageDisplay(display)'],  ['mon Budget stored explicitly instead of as absent', CONFIG,
     '  if (display === \'budget\') delete agentUsageDisplay[agentId];\n  else agentUsageDisplay[agentId] = display;',
     '  agentUsageDisplay[agentId] = display;'],
   // ── CAPUI-MONITOR: the usage projection and its channel ──────────────────────

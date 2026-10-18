@@ -96,7 +96,7 @@ test('main pushes on the owner onChange (carries FRESH -> STALE decay), agent le
   assert.match(main, /ipcMain\.handle\('config:setAgentUsageDisplay', \(_evt, agentId: unknown, display: unknown\) => \{\s*const next = setAgentUsageDisplay\(agentId, display\);\s*pushAgentUsage\(\);\s*return next;/);
   const fnStart = main.indexOf('function pushAgentUsage(');
   const fn = main.slice(fnStart, main.indexOf('\n}\n', fnStart));
-  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(readConfig\(\)\.agentUsageDisplay, usagePoolSource,/);
+  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(offeredUsageDisplays\(readConfig\(\)\.agentUsageDisplay, usageProviderOf\), usagePoolSource,/);
   assert.match(fn, /w\.webContents\.send\(CAPACITY_AGENT_USAGE_PUSH, push\)/, 'its OWN channel');
   assert.ok(!/collectionRevision|lastPushedCapacityStrip/.test(fn), 'never keyed on the strip revision');
   assert.equal(usage.CAPACITY_AGENT_USAGE_PUSH, 'capacity:agentUsagePush');

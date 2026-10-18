@@ -138,6 +138,40 @@ test('the breaker skips an AGY-mode agent\'s per-agent cap and floor share, exac
   assert.notEqual(run({ agentTokenCaps: { phyllis: 100 }, agentUsageDisplay: { phyllis: 'budget' } }, [['phyllis', 500]]).phyllis.level, 'healthy', 'control: budget still trips');
 });
 
+test('a choice the agent\'s provider does not offer reads as budget in main too: never exempt while the line says budget (audit SHOULD-1)', () => {
+  const providers = { oscar: 'codex', phyllis: 'antigravity', pam: 'claude', kim: 'kimi' };
+  const providerOf = (id) => providers[id];
+  const stored = { oscar: 'agyGeminiFiveHour', phyllis: 'agy3pWeekly', pam: 'weekly', kim: 'fiveHour', ghost: 'weekly', bad: 7 };
+  const offered = usage.offeredUsageDisplays(stored, providerOf);
+  assert.deepEqual(offered, { phyllis: 'agy3pWeekly', pam: 'weekly' }, 'kept only where the provider offers it; an unknown agent keeps nothing');
+  assert.deepEqual(usage.offeredUsageDisplays({ phyllis: 'fiveHour' }, providerOf), {}, 'the generic 5H on an AGY agent is ambiguous: budget');
+  assert.deepEqual(usage.offeredUsageDisplays(undefined, providerOf), {});
+  for (const [id, v] of Object.entries(stored)) {
+    const shown = providers[id] ? line.shownUsageDisplay(providers[id], v) : 'budget';
+    assert.equal(usage.isBudgetExempt(offered[id]), shown !== 'budget', `${id}: main agrees with the selector`);
+  }
+
+  // The breaker fed the filtered map: the Codex agent with an AGY value is held to its cap again.
+  const T = 1_000_000_000_000;
+  const sample = (agentId, tokens) => ({ agentId, sessionId: 's', ts: T, input: tokens, output: 0, cacheRead: 0, cacheCreation: 0, model: 'm', usd: 0 });
+  const b = new CircuitBreaker(() => ({ enabled: true, hardStop: false, repeatedToolLimit: 8, errorStormLimit: 5, tokenVelocityPerMin: 1e12,
+    agentTokenCaps: { oscar: 100, phyllis: 100 }, agentUsageDisplay: usage.offeredUsageDisplays(stored, providerOf) }));
+  const out = Object.fromEntries(b.tick([['oscar', 500], ['phyllis', 500]].map(([id, tok]) => ({ agentId: id, sample: sample(id, tok), progressing: true })), T).map((d) => [d.state.agentId, d.state.level]));
+  assert.notEqual(out.oscar, 'healthy', 'the not-offered value no longer switches the cap off');
+  assert.equal(out.phyllis, 'healthy', 'an offered AGY value still exempts');
+
+  // The push leaves the not-offered row out too.
+  const rows = agentUsagePushOf(offered, () => null, T).rows.map((r) => r.agentId);
+  assert.deepEqual(rows, ['pam', 'phyllis']);
+
+  // Main feeds both readers through the filter, with the registry provider (legacy = claude).
+  const main = codeOnly(readSource('src/main/index.ts'), 'index.ts');
+  assert.match(main, /function usageProviderOf\(agentId: string\): string \| undefined \{\s*const a = hive\.registry\(\)\.agents\[agentId\];\s*return a \? \(a\.provider \?\? 'claude'\) : undefined;\s*\}/);
+  assert.match(main, /agentUsageDisplay: offeredUsageDisplays\(c\.agentUsageDisplay, usageProviderOf\)/, 'the breaker');
+  assert.match(main, /agentUsagePushOf\(offeredUsageDisplays\(readConfig\(\)\.agentUsageDisplay, usageProviderOf\),/, 'the push');
+  assert.equal((main.match(/\.agentUsageDisplay\b/g) ?? []).length, 3, 'no other unfiltered reader of the stored map in main (breaker, push, the invoke fallback)');
+});
+
 test('config: the setter persists each AGY value (and still refuses anything else)', () => {
   const src = codeOnly(readSource('src/main/config.ts'), 'config.ts');
   assert.match(src, /setAgentUsageDisplay\(agentId: unknown, display: unknown\): HarnessConfig \{\s*if \(typeof agentId !== 'string' \|\| agentId\.trim\(\)\.length === 0 \|\| !isAgentUsageDisplay\(display\)\)/,
@@ -254,7 +288,7 @@ test('no per-agent interval: main pushes from the shared event-driven gate; the 
   const main = codeOnly(readSource('src/main/index.ts'), 'index.ts');
   const fnStart = main.indexOf('function pushAgentUsage(');
   const fn = main.slice(fnStart, main.indexOf('\n}\n', fnStart));
-  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(readConfig\(\)\.agentUsageDisplay, usagePoolSource, Date\.now\(\)\)\)/);
+  assert.match(fn, /agentUsagePushGate\.next\(agentUsagePushOf\(offeredUsageDisplays\(readConfig\(\)\.agentUsageDisplay, usageProviderOf\), usagePoolSource, Date\.now\(\)\)\)/);
   for (const m of main.matchAll(/setInterval\(([\s\S]{0,200})/g)) assert.ok(!/pushAgentUsage|agentUsage/i.test(m[1]), 'no interval drives the usage line');
   const src = codeOnly(readSource('src/renderer/src/components/AgentUsageLine.tsx'), 'AgentUsageLine.tsx');
   assert.ok(!/\bsetInterval\b|\bsetTimeout\b|requestAnimationFrame|USAGE_POLL_MS/.test(src), 'no poll, no timer');

@@ -66,6 +66,26 @@ export function isBudgetExempt(display: unknown): boolean {
   return usageWindowOf(display) !== null;
 }
 
+/**
+ * The persisted choices that still apply. A value the agent's provider does not offer (a direct
+ * config write, or one kept from an earlier provider) is dropped, so it reads as 'budget', which
+ * is what the selector shows (shownUsageDisplay), and never exempts the agent. An unknown agent
+ * (no provider) keeps nothing. Main feeds the breaker and the usage push through this.
+ */
+export function offeredUsageDisplays(
+  displays: Record<string, unknown> | undefined,
+  providerOf: (agentId: string) => string | undefined
+): Record<string, AgentUsageDisplay> {
+  const out: Record<string, AgentUsageDisplay> = {};
+  for (const [agentId, display] of Object.entries(displays ?? {})) {
+    const provider = providerOf(agentId);
+    if (provider !== undefined && isAgentUsageDisplay(display) && usageDisplaysFor(provider).includes(display)) {
+      out[agentId] = display;
+    }
+  }
+  return out;
+}
+
 // ─── The usage projection main returns on `capacity:agentUsage` ─────────────────────────
 
 /** Invoke channel: one agent's 5h + weekly usage. Its OWN channel, never control:snapshot. */

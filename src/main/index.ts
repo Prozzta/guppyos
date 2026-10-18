@@ -121,7 +121,7 @@ import { capacityDetailView } from './capacityDetail';
 import { CapacityDetailTicker } from './capacityDetailTick';
 import { CAPACITY_DETAIL_CHANNEL, CAPACITY_DETAIL_CLOSED, CAPACITY_DETAIL_PUSH, validateCapacityDetail, type ProviderCapacityDetailView } from '../shared/capacityDetail';
 import { AgentUsagePushGate, agentUsagePushOf, agentUsageViewFor, requestedUsageDisplay, type UsagePoolSource } from './capacityAgentUsage';
-import { CAPACITY_AGENT_USAGE, CAPACITY_AGENT_USAGE_PUSH, validateAgentUsageView } from '../shared/agentUsage';
+import { CAPACITY_AGENT_USAGE, CAPACITY_AGENT_USAGE_PUSH, offeredUsageDisplays, validateAgentUsageView } from '../shared/agentUsage';
 import { capacityDisplayThresholdOf } from '../shared/capacityThreshold';
 import {
   CAPACITY_STRIP_CHANNEL, CAPACITY_STRIP_CURRENT, CAPACITY_NOTICE_DISMISS,
@@ -597,11 +597,17 @@ const usageProvider: UsageProvider = telemetry;
 // Circuit breaker (Lane A #6.6b) — the REAL policy (replaces Lane C's interim
 // glue). POLICY only; the heartbeat beat feeds it signals (via usageProvider) +
 // enforces its decisions. Config read live so a settings change applies next beat.
+// AGY-MONITOR-1.4: the provider a usage choice is checked against (a legacy entry with no
+// provider is Claude, as at spawn). A choice the provider does not offer reads as budget.
+function usageProviderOf(agentId: string): string | undefined {
+  const a = hive.registry().agents[agentId];
+  return a ? (a.provider ?? 'claude') : undefined;
+}
 const breaker = new CircuitBreaker(() => {
   const c = readConfig();
   return {
     ...(c.circuitBreaker ?? {}), costCapUsd: c.costCapUsd, costCapTokens: c.costCapTokens, agentTokenCaps: c.agentTokenCaps,
-    agentUsageDisplay: c.agentUsageDisplay
+    agentUsageDisplay: offeredUsageDisplays(c.agentUsageDisplay, usageProviderOf)
   };
 });
 // Always-on beats (decoupled from the optional heartbeat): the live fleet snapshot
@@ -2822,7 +2828,7 @@ const usagePoolSource: UsagePoolSource = {
 function pushAgentUsage(): void {
   let push;
   try {
-    push = agentUsagePushGate.next(agentUsagePushOf(readConfig().agentUsageDisplay, usagePoolSource, Date.now()));
+    push = agentUsagePushGate.next(agentUsagePushOf(offeredUsageDisplays(readConfig().agentUsageDisplay, usageProviderOf), usagePoolSource, Date.now()));
   } catch (e) { console.warn('[capacity-usage]', e instanceof Error ? e.message : e); return; }
   if (!push) return;
   for (const w of allWindows) {
