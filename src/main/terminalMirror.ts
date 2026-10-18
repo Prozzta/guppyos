@@ -85,9 +85,10 @@ export function timeParse(t: unknown, add: (ms: number) => void): boolean {
   return true;
 }
 
-/** The real headless terminal. Throws if the module is missing (the caller then runs mirror-less). */
-export function createHeadless(cols: number, rows: number): HeadlessLike {
-  const t = new Terminal({ cols, rows, scrollback: MIRROR_SCROLLBACK, allowProposedApi: true });
+/** The real headless terminal. Throws if the module is missing (the caller then runs mirror-less).
+ *  `Term` is the class (a test passes a stub without the slice method: the untimed path). */
+export function createHeadless(cols: number, rows: number, Term: typeof Terminal = Terminal): HeadlessLike {
+  const t = new Term({ cols, rows, scrollback: MIRROR_SCROLLBACK, allowProposedApi: true });
   t.loadAddon(new Unicode11Addon());
   t.unicode.activeVersion = '11';
   if (!timeParse(t, (ms) => { parsedMs += ms; })) untimed = true;

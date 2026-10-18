@@ -43,11 +43,11 @@ const { PtyManager } = loadTs('src/main/pty.ts');
 
 /** A pure guard rig on a fake clock; `parse` is the measured parse ms of each second. */
 function rig(o = {}) {
-  const r = { t: 0, bytes: 0, parse: 0, off: [], on: 0, logs: [], spawnAt: 0, eld: o.eld ?? 80, active: o.active ?? 150 };
+  const r = { t: 0, bytes: 0, parse: 0, off: [], on: 0, logs: [], spawnAt: 0, enabled: true, eld: o.eld ?? 80, active: o.active ?? 150 };
   r.g = new COST.MirrorCostGuard({
     bytes: () => r.bytes, parseMs: () => (o.untimed ? null : r.parse), msPerChar: o.msPerChar ?? 1e-5,
     eldMs: () => r.eld, eluActiveMs: () => r.active, lastSpawnAt: () => r.spawnAt,
-    turnOff: (why) => r.off.push(why), turnOn: () => { r.on += 1; }, log: (row) => r.logs.push(row), now: () => r.t
+    turnOff: (why) => r.off.push(why), turnOn: () => { r.on += 1; }, enabled: () => r.enabled, log: (row) => r.logs.push(row), now: () => r.t
   });
   r.second = (chars = 0, parse = chars * (o.msPerChar ?? 1e-5)) => { r.t += 1000; r.bytes += chars; r.parse += parse; return r.g.tick(); };
   r.pastStartup = () => { while (r.t + 1000 < COST.MIRROR_STARTUP_GRACE_MS) r.second(0, 0); };
@@ -114,7 +114,7 @@ test('REPLAY 1.1.95 startup: 6 resume bursts (real mirrors) plus ~50 ms unrelate
     eldMs: () => 52.67,          // the startup's own lag, all session long here
     eluActiveMs: () => 900,      // the loop busy with startup work
     lastSpawnAt: () => Math.max(0, ...agents.filter((a) => a.mirror).map((a) => a.at)),
-    turnOff: (why) => r.off.push(why), turnOn: () => {}, log: (row) => r.logs.push(row), now: () => r.t
+    turnOff: (why) => r.off.push(why), turnOn: () => {}, enabled: () => true, log: (row) => r.logs.push(row), now: () => r.t
   });
   // The 1.1.95 rule, replayed beside it: any tick with ELD > 50 and an estimated share >= 0.5%.
   const oldShares = [];
@@ -202,7 +202,7 @@ test('a sustained REAL mirror overload turns it off; it re-arms after the back-o
     bytes: () => pm.mirrorBytes(), parseMs: () => M.mirrorParseMs(), msPerChar: 1e-9,
     eldMs: () => 80, eluActiveMs: () => r.active, lastSpawnAt: () => pm.lastSpawnAt(),
     turnOff: (why) => { r.off.push(why); pm.setMirrorFactory(null); pm.disposeMirrors(); },
-    turnOn: () => { r.on += 1; pm.rearmMirrors(factory); },
+    turnOn: () => { r.on += 1; pm.rearmMirrors(factory); }, enabled: () => true,
     log: (row) => r.logs.push(row), now: () => r.t
   });
   while (r.t + 1000 < COST.MIRROR_STARTUP_GRACE_MS) { r.t += 1000; g.tick(); }
@@ -281,6 +281,36 @@ test('back-off: doubles per off up to the cap; an hour back on forgets the earli
   assert.equal(r.logs.filter((l) => l.kind === 'mirror-auto-off').at(-1).rearmInMs, COST.MIRROR_REARM_BASE_MS);
 });
 
+test('Jim SHOULD 2: a config off set while auto-off wins over the re-arm (logged skipped, never turned on, no banner)', () => {
+  const r = rig();
+  r.pastStartup();
+  for (let i = 0; i < COST.MIRROR_COST_WINDOW; i++) r.second(0, HOT);
+  assert.equal(r.g.isOff(), true);
+  r.enabled = false;   // the Human sets terminalMirror:false after reading the banner
+  for (let i = 0; i < COST.MIRROR_REARM_BASE_MS / 1000 + 5; i++) r.second(0, 0);
+  assert.equal(r.on, 0, 'THE HUMAN\'S OFF WINS: the mirrors are never turned back on');
+  const row = r.logs.find((l) => l.kind === 'mirror-rearm');
+  assert.equal(row.skipped, 'config');
+  assert.equal(r.g.status(), null, 'no auto-off banner or digest item for a config off');
+  for (let i = 0; i < 3 * COST.MIRROR_COST_WINDOW; i++) assert.equal(r.second(0, HOT), null, 'the guard stops for the session');
+  assert.deepEqual(r.off, ['share']);
+});
+
+test('Jim SHOULD 1: an xterm without the slice method makes the parse UNTIMED (mirrorParseMs null), never a number that stays 0', () => {
+  // A child process: the untimed flag is process-wide, so it must not leak into the tests above.
+  const { spawnSync } = require('node:child_process');
+  const script = `
+    const loadTs = require(${JSON.stringify(path.join(__dirname, 'load-ts.cjs'))});
+    const M = loadTs('src/main/terminalMirror.ts');
+    class Stub { constructor() { this._core = { _writeBuffer: {} }; this.unicode = {}; } loadAddon() {} }
+    const before = M.mirrorParseMs();
+    M.createHeadless(80, 24, Stub);
+    process.stdout.write(JSON.stringify({ before, after: M.mirrorParseMs() }));`;
+  const r = spawnSync(process.execPath, ['-e', script], { cwd: ROOT, encoding: 'utf8', env: { ...process.env, HOME: JAIL, USERPROFILE: JAIL } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { before: 0, after: null });
+});
+
 // ─── 4. visible: god's digest, the floor's banner, term read ───────────────────────────────
 
 test('surfaces: a digest decision for god per off, the floor notice, and term read\'s refusal words', async () => {
@@ -319,6 +349,7 @@ test('WIRING: measured parse, ELU, spawn grace, re-arm, and the off surfaced to 
   assert.match(arm, /lastSpawnAt: \(\) => ptyManager\.lastSpawnAt\(\),/);
   assert.match(arm, /turnOff: \(\) => \{ ptyManager\.setMirrorFactory\(null\); ptyManager\.disposeMirrors\(\); mirrorSurfaced\(\); \},/);
   assert.match(arm, /turnOn: \(\) => \{ ptyManager\.rearmMirrors\(\(cols, rows\) => createTerminalMirror\(cols, rows\)\); mirrorSurfaced\(\); \},/);
+  assert.match(arm, /enabled: \(\) => readConfig\(\)\.terminalMirror !== false,/, 'the Human\'s config off is read at re-arm time');
   assert.doesNotMatch(arm, /clearInterval\(timer\)|eld\.disable\(\)/, 'an off never stops the sampler: it must be able to re-arm');
   assert.match(arm, /mirrorGuard = guard;/);
   assert.match(idx, /function mirrorSurfaced\(\): void \{\n  try \{ floorDigest\.run\(\); \}/);

@@ -1811,6 +1811,7 @@ async function armMirrorCostGuard(): Promise<void> {
     lastSpawnAt: () => ptyManager.lastSpawnAt(),
     turnOff: () => { ptyManager.setMirrorFactory(null); ptyManager.disposeMirrors(); mirrorSurfaced(); },
     turnOn: () => { ptyManager.rearmMirrors((cols, rows) => createTerminalMirror(cols, rows)); mirrorSurfaced(); },
+    enabled: () => readConfig().terminalMirror !== false,
     log: (row) => hive.appendLog(row),
     now: Date.now
   });

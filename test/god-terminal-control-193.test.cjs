@@ -641,7 +641,7 @@ test('env: HIVE_TERM_URL only in god\'s spawn env (Claude and Codex), never in C
 function costRig(msPerChar, eld = () => null, active = () => null) {
   const r = { t: 0, bytes: 0, parse: 0, off: [], logs: [] };
   r.g = new COST.MirrorCostGuard({ bytes: () => r.bytes, parseMs: () => r.parse, msPerChar, eldMs: eld, eluActiveMs: active, lastSpawnAt: () => 0,
-    turnOff: (why) => r.off.push(why), turnOn: () => {}, log: (row) => r.logs.push(row), now: () => r.t });
+    turnOff: (why) => r.off.push(why), turnOn: () => {}, enabled: () => true, log: (row) => r.logs.push(row), now: () => r.t });
   r.second = (chars, parse = chars * msPerChar) => { r.t += 1000; r.bytes += chars; r.parse += parse; return r.g.tick(); };
   while (r.t + 1000 < COST.MIRROR_STARTUP_GRACE_MS) r.second(0);
   return r;
@@ -691,7 +691,9 @@ test('cost bar: the 6-agent resume burst (6 x 48k chars inside 3 s) is under the
   const burstMs = performance.now() - b0;
   for (const m of mirrors) m.dispose();
   const r = costRig(msPerChar);
-  for (let s = 0; s < 3; s++) r.second((6 * 48_000) / 3);
+  // MIRROR-STARTUP-196: the guard is charged the MEASURED parse (here the burst's wall time, an
+  // upper bound), not chars x the cold calibration (under suite load that estimate alone passed 2%).
+  for (let s = 0; s < 3; s++) r.second((6 * 48_000) / 3, burstMs / 3);
   for (let s = 0; s < 7; s++) r.second(500);
   assert.deepEqual(r.off, [], `the burst stays on (calibrated ${msPerChar.toExponential(2)} ms/char, burst parsed in ${burstMs.toFixed(0)} ms)`);
   assert.ok(burstMs < 3000 * 0.25, `six 48k resumes parse in ${burstMs.toFixed(0)} ms, well inside their 3 s`);

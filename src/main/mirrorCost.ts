@@ -49,6 +49,8 @@ export interface MirrorCostDeps {
   lastSpawnAt(): number;
   turnOff(reason: string): void;
   turnOn(): void;
+  /** Config still allows the mirrors (`terminalMirror !== false`): a person's explicit off wins over a re-arm. */
+  enabled(): boolean;
   log(row: Record<string, unknown>): void;
   now(): number;
 }
@@ -69,6 +71,7 @@ export class MirrorCostGuard {
   private offStatus: MirrorOffStatus | null = null;
   private offs = 0;
   private onSince: number;
+  private stopped = false;
 
   constructor(private readonly deps: MirrorCostDeps) {
     this.lastBytes = deps.bytes();
@@ -85,6 +88,7 @@ export class MirrorCostGuard {
 
   /** One sample (main calls it every second). Returns the reason when this tick turned it off. */
   tick(): string | null {
+    if (this.stopped) return null;
     const now = this.deps.now();
     const bytes = this.deps.bytes();
     const parse = this.deps.parseMs();
@@ -135,6 +139,13 @@ export class MirrorCostGuard {
   private rearm(now: number): void {
     const was = this.offStatus;
     this.offStatus = null;
+    if (!this.deps.enabled()) {
+      // Jim SHOULD 2: the Human turned the mirrors off in config after the auto-off: they stay
+      // off (no banner: this is not an auto-off any more), and the guard stops for the session.
+      this.stopped = true;
+      this.deps.log({ kind: 'mirror-rearm', skipped: 'config', reason: was?.reason, offMs: was ? now - was.since : null, offs: this.offs });
+      return;
+    }
     this.onSince = now;
     this.deps.log({ kind: 'mirror-rearm', reason: was?.reason, offMs: was ? now - was.since : null, offs: this.offs });
     this.deps.turnOn();
