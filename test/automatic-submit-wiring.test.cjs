@@ -1341,7 +1341,7 @@ const PTY_WRITERS = {
 };
 const NON_PTY_WRITERS = {
   'src/main/terminalMirror.ts': ['t'],                      // GOD-TERMINAL-CONTROL: the headless mirror's parser (PTY output in; its onData is never wired), never a pty
-  'src/main/pty.ts': ['session.mirror'],                    // GOD-TERMINAL-CONTROL: deliverData feeds a PTY's OUTPUT to its mirror, never input
+  'src/main/pty.ts': ['session.mirror', 's.mirror'],       // GOD-TERMINAL-CONTROL: deliverData feeds a PTY's OUTPUT to its mirror, never input; MIRROR-STARTUP-196: rearmMirrors seeds a fresh mirror with the output tail
   'src/main/index.ts': ['stream', 'roster', 'm'],           // + GOD-TERMINAL-CONTROL: 'm' is the cost calibration's throwaway mirror, never a pty                // a download stream; the roster file
   'src/main/slack.ts': ['req'],                             // an https request body
   'src/main/rendererRecovery.ts': ['opts'],                 // RENDERER-PROFILE: the .cpuprofile file writer (saveRendererProfile), never a terminal

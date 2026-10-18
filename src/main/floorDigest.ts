@@ -89,6 +89,7 @@ export interface FloorDigestInput {
   silentTurns?: SilentTurn[];
   quietStalls?: DigestQuietStall[];
   wakeStalls?: DigestWakeStall[];
+  mirrorOff?: DigestMirrorOff | null;
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -170,6 +171,18 @@ export function decisionItems(flags: readonly BoardFlag[], ledgerIssues: readonl
   return items;
 }
 
+/** MIRROR-STARTUP-196: the mirror cost guard's auto-off (mirrorCost.ts MirrorOffStatus). */
+export interface DigestMirrorOff { reason: string; since: number; offs: number; rearmAt: number }
+
+/** One item per off (its id carries when it began, so each off wakes god once). */
+export function mirrorOffItem(m: DigestMirrorOff, now: number): DecisionItem {
+  const rearm = m.rearmAt > now ? `re-arms in ${ageText(m.rearmAt - now)}` : 're-arms on the next sample';
+  return {
+    id: `mirror-off:${m.since}`, cardId: null,
+    line: `terminal mirrors auto-off for ${ageText(now - m.since)} (${m.reason}, off #${m.offs}); term read is refused (type/send still write, blind) until it ${rearm} - nothing to do unless it keeps going off (see mirror-auto-off in the log)`
+  };
+}
+
 type Card = Record<string, unknown> & { id: string };
 
 export function buildFloorDigest(input: FloorDigestInput): { markdown: string; decisionItems: DecisionItem[] } {
@@ -180,6 +193,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
   const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);
+  if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -301,6 +315,8 @@ export interface FloorDigestHost {
   quietStalls?(): DigestQuietStall[];
   /** WAKE-OWNER-HOLD-ORPHAN: every announced wake stall. Optional. */
   wakeStalls?(): DigestWakeStall[];
+  /** MIRROR-STARTUP-196: the terminal mirrors' auto-off, while it lasts. Optional. */
+  mirrorOff?(): DigestMirrorOff | null;
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -344,6 +360,7 @@ export class FloorDigest {
       silentTurns: (() => { try { return this.host.silentTurns?.() ?? []; } catch { return []; } })(),
       quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
       wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
+      mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.

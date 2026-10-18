@@ -12,6 +12,7 @@
  *
  * Unicode 11 widths, as the renderer uses (measured: the addon loads and works in headless).
  */
+import { performance } from 'node:perf_hooks';
 import { Terminal } from '@xterm/headless';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { extractCodexScreen, type CodexScreenFacts } from '../shared/codexScreen';
@@ -55,11 +56,42 @@ export interface HeadlessLike {
   dispose(): void;
 }
 
-/** The real headless terminal. Throws if the module is missing (the caller then runs mirror-less). */
-export function createHeadless(cols: number, rows: number): HeadlessLike {
-  const t = new Terminal({ cols, rows, scrollback: MIRROR_SCROLLBACK, allowProposedApi: true });
+/** MIRROR-STARTUP-196: the main-thread ms every real mirror has spent parsing, measured (not
+ *  chars x a calibration), monotonic; and whether every real mirror made so far could be timed. */
+let parsedMs = 0;
+let untimed = false;
+export function mirrorParseMs(): number | null {
+  return untimed ? null : parsedMs;
+}
+
+/**
+ * MIRROR-STARTUP-196: times the real parse. @xterm/headless queues write() and parses in
+ * WriteBuffer._innerWrite slices (setTimeout, about 12 ms each), so the sync time of that one
+ * method IS the mirror's main-thread cost. Only the outermost call is timed (it can call itself
+ * directly when a handler resumes). An xterm without the method is reported, never guessed: the
+ * guard then cannot blame the mirror for lag (test/mirror-startup-196 pins the method on the
+ * installed xterm, so an upgrade that drops it fails there).
+ */
+export function timeParse(t: unknown, add: (ms: number) => void): boolean {
+  const wb = (t as { _core?: { _writeBuffer?: Record<string, unknown> } })?._core?._writeBuffer;
+  const inner = wb?._innerWrite;
+  if (!wb || typeof inner !== 'function') return false;
+  let depth = 0;
+  wb._innerWrite = function timed(this: unknown, ...a: unknown[]): unknown {
+    if (depth++ > 0) { try { return inner.apply(this, a); } finally { depth--; } }
+    const t0 = performance.now();
+    try { return inner.apply(this, a); } finally { depth--; add(performance.now() - t0); }
+  };
+  return true;
+}
+
+/** The real headless terminal. Throws if the module is missing (the caller then runs mirror-less).
+ *  `Term` is the class (a test passes a stub without the slice method: the untimed path). */
+export function createHeadless(cols: number, rows: number, Term: typeof Terminal = Terminal): HeadlessLike {
+  const t = new Term({ cols, rows, scrollback: MIRROR_SCROLLBACK, allowProposedApi: true });
   t.loadAddon(new Unicode11Addon());
   t.unicode.activeVersion = '11';
+  if (!timeParse(t, (ms) => { parsedMs += ms; })) untimed = true;
   return t as unknown as HeadlessLike;
 }
 

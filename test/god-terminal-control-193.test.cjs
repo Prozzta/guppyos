@@ -636,10 +636,14 @@ test('env: HIVE_TERM_URL only in god\'s spawn env (Claude and Codex), never in C
 
 // ─── 6. the cost bar (Jim SHOULD 9) ──────────────────────────────────────────────────────
 
-function costRig(msPerChar, eld = () => null) {
-  const r = { t: 0, bytes: 0, off: [], logs: [] };
-  r.g = new COST.MirrorCostGuard({ bytes: () => r.bytes, msPerChar, eldMs: eld, turnOff: (why) => r.off.push(why), log: (row) => r.logs.push(row), now: () => r.t });
-  r.second = (chars) => { r.t += 1000; r.bytes += chars; return r.g.tick(); };
+// MIRROR-STARTUP-196: the guard judges nothing in its startup window, so the rig starts past it.
+// `parse` is the measured parse ms of the second (default: chars x msPerChar).
+function costRig(msPerChar, eld = () => null, active = () => null) {
+  const r = { t: 0, bytes: 0, parse: 0, off: [], logs: [] };
+  r.g = new COST.MirrorCostGuard({ bytes: () => r.bytes, parseMs: () => r.parse, msPerChar, eldMs: eld, eluActiveMs: active, lastSpawnAt: () => 0,
+    turnOff: (why) => r.off.push(why), turnOn: () => {}, enabled: () => true, log: (row) => r.logs.push(row), now: () => r.t });
+  r.second = (chars, parse = chars * msPerChar) => { r.t += 1000; r.bytes += chars; r.parse += parse; return r.g.tick(); };
+  while (r.t + 1000 < COST.MIRROR_STARTUP_GRACE_MS) r.second(0);
   return r;
 }
 
@@ -659,13 +663,15 @@ test('cost bar: the measured live peak stays far under 2%; 2% sustained over the
   assert.equal(hot.off.length, 1);
 });
 
-test('cost bar: event-loop delay turns it off only while the mirrors carry real load', () => {
+test('cost bar: event-loop delay turns it off only when the mirrors\' measured parse explains it, over the full window', () => {
   const msPerChar = 1e-5;
-  const idle = costRig(msPerChar, () => 200);
+  const idle = costRig(msPerChar, () => 200, () => 900);
   for (let i = 0; i < 20; i++) idle.second(10);
   assert.deepEqual(idle.off, [], 'lag from another cause never turns the mirror off');
-  const busy = costRig(msPerChar, () => 80);
-  assert.equal(busy.second((0.01 * 1000) / msPerChar), 'event-loop-delay');
+  const busy = costRig(msPerChar, () => 80, () => 15);
+  const chars = (0.01 * 1000) / msPerChar;   // 1% of a core (10 ms/s): under the share bar, most of the 15 ms busy time
+  for (let i = 0; i < COST.MIRROR_COST_WINDOW - 1; i++) assert.equal(busy.second(chars), null, 'never on one tick');
+  assert.equal(busy.second(chars), 'event-loop-delay');
 });
 
 test('cost bar: the 6-agent resume burst (6 x 48k chars inside 3 s) is under the bar at the calibrated real parse cost', async () => {
@@ -685,7 +691,9 @@ test('cost bar: the 6-agent resume burst (6 x 48k chars inside 3 s) is under the
   const burstMs = performance.now() - b0;
   for (const m of mirrors) m.dispose();
   const r = costRig(msPerChar);
-  for (let s = 0; s < 3; s++) r.second((6 * 48_000) / 3);
+  // MIRROR-STARTUP-196: the guard is charged the MEASURED parse (here the burst's wall time, an
+  // upper bound), not chars x the cold calibration (under suite load that estimate alone passed 2%).
+  for (let s = 0; s < 3; s++) r.second((6 * 48_000) / 3, burstMs / 3);
   for (let s = 0; s < 7; s++) r.second(500);
   assert.deepEqual(r.off, [], `the burst stays on (calibrated ${msPerChar.toExponential(2)} ms/char, burst parsed in ${burstMs.toFixed(0)} ms)`);
   assert.ok(burstMs < 3000 * 0.25, `six 48k resumes parse in ${burstMs.toFixed(0)} ms, well inside their 3 s`);
@@ -695,6 +703,7 @@ test('cost wiring: calibrated at ready, sampled per second, auto-off drops every
   const idx = src('src/main/index.ts');
   assert.match(idx, /if \(readConfig\(\)\.terminalMirror !== false\) ptyManager\.setMirrorFactory\(\(cols, rows\) => createTerminalMirror\(cols, rows\)\);/);
   assert.match(idx, /turnOff: \(\) => \{ ptyManager\.setMirrorFactory\(null\); ptyManager\.disposeMirrors\(\);/);
+  assert.match(idx, /turnOn: \(\) => \{ ptyManager\.rearmMirrors\(\(cols, rows\) => createTerminalMirror\(cols, rows\)\);/);
   assert.match(idx, /void armMirrorCostGuard\(\);/);
   assert.match(idx, /logTermModes\(opts\.hive\.id, opts\.id, provider, didResume\)/);
 });
