@@ -21,6 +21,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -329,12 +330,9 @@ const WWR_W2_MUTANTS = [
     dies: /a later real PreCompact is still allowed/
   }
 ];
-const WWR_W2_MUTANT_DIR = path.join(__dirname, '.mutants-wwr-w2');
-
 test('MUTANT CENSUS WWR-W2: orphan PostCompact memory mutants apply once and die at named guarantees', async (t) => {
   const source = readSource('src/main/workerWake.ts');
-  fs.rmSync(WWR_W2_MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(WWR_W2_MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir('wwr-w2');
   try {
     for (const [i, mutant] of WWR_W2_MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, () => {
@@ -344,7 +342,7 @@ test('MUTANT CENSUS WWR-W2: orphan PostCompact memory mutants apply once and die
           assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
           text = text.replace(from, to);
         }
-        const file = path.join(WWR_W2_MUTANT_DIR, `m${i}.ts`);
+        const file = path.join(mutantDir, `m${i}.ts`);
         fs.writeFileSync(file, text, 'utf8');
         const mod = loadTs(path.relative(path.resolve(__dirname, '..'), file));
         let died = null;
@@ -354,7 +352,7 @@ test('MUTANT CENSUS WWR-W2: orphan PostCompact memory mutants apply once and die
       });
     }
   } finally {
-    fs.rmSync(WWR_W2_MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });
 

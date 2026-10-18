@@ -41,6 +41,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -193,12 +194,9 @@ const MUTANTS = [
     edits: [['  return join(userData, CAPACITY_STORE_FILE);', '  return join(process.env.CODEX_HOME || userData, CAPACITY_STORE_FILE);']],
     killer: 'theStoreCanNeverResolveOntoStableOrAProviderHome', dies: /NO ENVIRONMENT VARIABLE CAN MOVE THE STORE/ }
 ];
-const MUTANT_DIR = path.join(__dirname, '.mutants-dev-isolation-capacity');
-
 test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertion that names its guarantee', async (t) => {
   const source = readSource(SRC);
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir('dev-isolation-capacity');
   try {
     for (const [i, mutant] of MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, () => {
@@ -209,7 +207,7 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
           text = text.replace(from, () => to);
         }
         text = text.replace(/from '\.\/(\w+)'/g, "from '../../src/main/$1'").replace(/from '\.\.\/shared\//g, "from '../../src/shared/");
-        const file = path.join(MUTANT_DIR, `m${i}.ts`);
+        const file = path.join(mutantDir, `m${i}.ts`);
         fs.writeFileSync(file, text, 'utf8');
         const mod = loadTs(path.relative(path.resolve(__dirname, '..'), file));
         let died = null;
@@ -220,7 +218,7 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });
 

@@ -15,6 +15,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -89,12 +90,9 @@ const MUTANTS = [
     edits: [['{ host.clear(handle); handle = null; }', '{ host.clear(handle); }']],
     killer: 'theLastOneOutStopsItAndTheNextOneInRestartsIt', dies: /THE TIMER STOPS WHEN THE POOL EMPTIES|AND RESTARTS with the next terminal/ }
 ];
-const MUTANT_DIR = path.join(__dirname, '.mutants-pool-timer');
-
 test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertion that names its guarantee', async (t) => {
   const source = readSource(SRC);
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir('pool-timer');
   try {
     for (const [i, mutant] of MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, () => {
@@ -104,7 +102,7 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
           assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}": edit target must match EXACTLY ONCE`);
           text = text.replace(from, () => to);
         }
-        const file = path.join(MUTANT_DIR, `m${i}.ts`);
+        const file = path.join(mutantDir, `m${i}.ts`);
         fs.writeFileSync(file, text, 'utf8');
         const mod = loadTs(path.relative(path.resolve(__dirname, '..'), file));
         let died = null;
@@ -115,6 +113,6 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });
