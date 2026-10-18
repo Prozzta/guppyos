@@ -19,6 +19,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
 
@@ -220,7 +221,7 @@ test('fix 3: INTERFERED, the pause and capacity keep their precedence; a release
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────
 
-const MUTANT_DIR = path.join(__dirname, '.mutants-wsg178');
+let MUTANT_DIR;
 function mutate(rel, edits, tag) {
   let text = readSource(rel);
   for (const [from, to] of edits) {
@@ -264,8 +265,7 @@ const MUTANTS = [
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  MUTANT_DIR = newMutantDir('wsg178');
   try {
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
@@ -279,6 +279,6 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(MUTANT_DIR);
   }
 });

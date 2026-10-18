@@ -25,6 +25,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource, codeOnly } = require('./read-source.cjs');
 
@@ -402,12 +403,9 @@ test('this file reads source only through read-source.cjs', () => {
 });
 
 // ── MUTANT CENSUS ─────────────────────────────────────────────────────────────────────
-const MUTANT_DIR = path.join(__dirname, '.mutants-delivery-hold');
-
 test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertion that names its guarantee', async (t) => {
   const source = readSource(SRC);
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir('delivery-hold');
   try {
     for (const mutant of MUTANTS) {
       await t.test(`mutant: ${mutant.name}`, async () => {
@@ -430,6 +428,6 @@ test('MUTANT CENSUS: every mutant applies exactly once, and dies at the assertio
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });

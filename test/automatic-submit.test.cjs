@@ -35,6 +35,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const os = require('node:os');
 const loadTs = require('./load-ts.cjs');
 const { readSource, bothEolRenderings } = require('./read-source.cjs');
@@ -1339,7 +1340,7 @@ for (const cls of Object.keys(RULED)) {
   });
 }
 
-const MUTANT_DIR = path.join(__dirname, '.mutants');
+let MUTANT_DIR;
 
 function buildMutant(index, mutant, source) {
   let text = source;
@@ -1362,8 +1363,7 @@ function buildMutant(index, mutant, source) {
 
 test('MUTANT CENSUS: every mutant applies, and dies at the assertion that names its guarantee', async (t) => {
   const source = readSource(SRC);
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  MUTANT_DIR = newMutantDir('automatic-submit');
   try {
     for (const [i, mutant] of MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, async () => {
@@ -1380,6 +1380,6 @@ test('MUTANT CENSUS: every mutant applies, and dies at the assertion that names 
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(MUTANT_DIR);
   }
 });

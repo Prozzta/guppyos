@@ -24,6 +24,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const net = require('node:net');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const { spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 const { readSource } = require('./read-source.cjs');
@@ -1234,7 +1235,7 @@ test('full path: reconcileAll -> requestInboxWake -> the owner -> exactly the PR
 
 // ─── Mutants: the proofs must kill the wrong implementations ────────────────────────────
 
-const MUTANT_DIR = path.join(__dirname, '.mutants-wsg');
+let MUTANT_DIR;
 function mutate(rel, edits, tag) {
   let text = readSource(rel);
   for (const [from, to] of edits) {
@@ -1355,8 +1356,7 @@ const MUTANTS = [
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  MUTANT_DIR = newMutantDir('wsg');
   try {
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async (tt) => {
@@ -1375,6 +1375,6 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
       });
     }
   } finally {
-    fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(MUTANT_DIR);
   }
 });

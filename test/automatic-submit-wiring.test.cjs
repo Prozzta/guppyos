@@ -20,6 +20,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 const { readSource: read, codeOnly } = require('./read-source.cjs');
 
@@ -338,8 +339,7 @@ const ADMISSION_MUTANTS = [
 
 test('MUTANT CENSUS (capacityAdmission.holdGrantForHuman): every mutant applies exactly once and dies at the named assertion', async (t) => {
   const source = read('src/main/capacityAdmission.ts');
-  fs.rmSync(RUNTIME_MUTANT_DIR + '-adm', { recursive: true, force: true });
-  fs.mkdirSync(RUNTIME_MUTANT_DIR + '-adm', { recursive: true });
+  const mutantDir = newMutantDir('capacity-admission');
   try {
     for (const [i, mutant] of ADMISSION_MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, async () => {
@@ -351,7 +351,7 @@ test('MUTANT CENSUS (capacityAdmission.holdGrantForHuman): every mutant applies 
           text = text.replace(from, () => to);
         }
         text = text.replace(/from '\.\/(\w+)'/g, "from '../../src/main/$1'").replace(/from '\.\.\/shared\//g, "from '../../src/shared/");
-        const file = path.join(RUNTIME_MUTANT_DIR + '-adm', `a${i}.ts`);
+        const file = path.join(mutantDir, `a${i}.ts`);
         fs.writeFileSync(file, text, 'utf8');
         const Mutant = loadTs(path.relative(path.resolve(__dirname, '..'), file)).CapacityAdmission;
         let died = null;
@@ -362,7 +362,7 @@ test('MUTANT CENSUS (capacityAdmission.holdGrantForHuman): every mutant applies 
       });
     }
   } finally {
-    fs.rmSync(RUNTIME_MUTANT_DIR + '-adm', { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });
 
@@ -570,12 +570,9 @@ const RUNTIME_MUTANTS = [
     killer: 'ownReservationIsNotARefusal', dies: /handed back/ }
 ];
 
-const RUNTIME_MUTANT_DIR = path.join(__dirname, '.mutants-capacity-runtime');
-
 test('MUTANT CENSUS (capacityRuntime.revalidate): every mutant applies exactly once and dies at the named assertion', async (t) => {
   const source = read('src/main/capacityRuntime.ts');
-  fs.rmSync(RUNTIME_MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(RUNTIME_MUTANT_DIR, { recursive: true });
+  const mutantDir = newMutantDir('capacity-runtime');
   try {
     for (const [i, mutant] of RUNTIME_MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, () => {
@@ -589,7 +586,7 @@ test('MUTANT CENSUS (capacityRuntime.revalidate): every mutant applies exactly o
         }
         // The copy lives two directories away from src/main, so its relative imports move.
         text = text.replace(/from '\.\/(\w+)'/g, "from '../../src/main/$1'").replace(/from '\.\.\/shared\//g, "from '../../src/shared/");
-        const file = path.join(RUNTIME_MUTANT_DIR, `m${i}.ts`);
+        const file = path.join(mutantDir, `m${i}.ts`);
         fs.writeFileSync(file, text, 'utf8');
         const Mutant = loadTs(path.relative(path.resolve(__dirname, '..'), file)).CapacityRuntime;
         let died = null;
@@ -600,7 +597,7 @@ test('MUTANT CENSUS (capacityRuntime.revalidate): every mutant applies exactly o
       });
     }
   } finally {
-    fs.rmSync(RUNTIME_MUTANT_DIR, { recursive: true, force: true });
+    cleanupMutantDir(mutantDir);
   }
 });
 
@@ -993,9 +990,7 @@ test('MUTANT (automaticSubmit.ts): terminal death RETURNING the held probe lets 
   const source = read('src/main/automaticSubmit.ts');
   assert.equal(source.split(from).length - 1, 1, 'the edit target matches EXACTLY ONCE');
   await K1A.aDeadTerminalSpendsTheProbeAndOnlyAFreshReadingLiftsIt({});
-  const dir = RUNTIME_MUTANT_DIR + '-own';
-  fs.rmSync(dir, { recursive: true, force: true });
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = newMutantDir('automatic-submit-own');
   try {
     const text = source.replace(from, () => '      if (held.decision) this.deps.capacity.cancelGrant(held.decision);\n      if (this.known')
       .replace(/from '\.\/(\w+)'/g, "from '../../src/main/$1'").replace(/from '\.\.\/shared\//g, "from '../../src/shared/");
@@ -1007,14 +1002,13 @@ test('MUTANT (automaticSubmit.ts): terminal death RETURNING the held probe lets 
     assert.ok(died instanceof assert.AssertionError, `must die by ASSERTION, got: ${died && died.stack}`);
     assert.match(died.message, /TERMINAL DEATH SPENDS THE HELD PROBE|NO SECOND PROBE goes out/);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    cleanupMutantDir(dir);
   }
 });
 
 test('MUTANT CENSUS (capacityAdmission, the post-reset probe): every mutant applies exactly once and dies at the named assertion', async (t) => {
   const source = read('src/main/capacityAdmission.ts');
-  const dir = RUNTIME_MUTANT_DIR + '-adm';
-  fs.mkdirSync(dir, { recursive: true });
+  const dir = newMutantDir('capacity-admission-post-reset');
   try {
     for (const [i, mutant] of POST_RESET_MUTANTS.entries()) {
       await t.test(`mutant: ${mutant.name}`, async () => {
@@ -1037,7 +1031,7 @@ test('MUTANT CENSUS (capacityAdmission, the post-reset probe): every mutant appl
       });
     }
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    cleanupMutantDir(dir);
   }
 });
 

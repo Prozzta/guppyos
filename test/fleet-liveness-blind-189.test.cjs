@@ -18,6 +18,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { newMutantDir, cleanupMutantDir } = require('./mutant-dir-helper.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -309,7 +310,7 @@ test('FLEET-LIVENESS-BLIND: main wires the hook clock and the open tool into the
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────
 
-const MUTANT_DIR = path.join(__dirname, '.mutants-fleet189');
+let MUTANT_DIR;
 
 function mutate(rel, edits, tag) {
   let text = readSource(rel);
@@ -375,8 +376,7 @@ const MUTANTS = [
 const MOD_KEY = { [STF]: 'ST', [DGF]: 'D', 'src/main/hive.ts': 'HIVE', 'src/shared/agentBadges.ts': 'B', 'src/main/hooks.ts': 'HOOKS', 'src/shared/activityView.ts': 'A' };
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
-  fs.rmSync(MUTANT_DIR, { recursive: true, force: true });
-  fs.mkdirSync(MUTANT_DIR, { recursive: true });
+  MUTANT_DIR = newMutantDir('fleet189');
   try {
     for (const [i, m] of MUTANTS.entries()) {
       await t.test(`mutant: ${m.name}`, async () => {
@@ -391,5 +391,5 @@ test('MUTANT CENSUS: every mutant applies once and dies at the assertion that na
         assert.match(died.message, m.dies, `"${m.name}" died at the wrong assertion: ${died.message}`);
       });
     }
-  } finally { fs.rmSync(MUTANT_DIR, { recursive: true, force: true }); }
+  } finally { cleanupMutantDir(MUTANT_DIR); }
 });
