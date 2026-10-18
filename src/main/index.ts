@@ -2733,8 +2733,10 @@ function lastCoordinationAt(agentId: string): number {
   return Math.max(...times);
 }
 
-// MODEL-PINBACK user/auto: a live model switch counts as the user's only when HUMAN-origin
+// MODEL-PINBACK user/auto: a live model switch counts as the user's only when HUMAN- or GOD-origin
 // terminal input (never an app write: those are PROGRAMMATIC/CONTROL) reached the agent's pty.
+// GOD-TERMINAL-CONTROL (Jim SHOULD 1): god's `term send --raw "/model ..."` is a deliberate
+// switch, so it sticks as 'user' (lastHumanInputAt is stamped by GOD writes too).
 hive.setHumanInputSource((agentId) => {
   const ptyId = ptyForAgent(agentId);
   return ptyId ? ptyManager.lastHumanInputAt(ptyId) : undefined;

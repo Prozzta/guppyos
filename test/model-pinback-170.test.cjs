@@ -595,6 +595,18 @@ test('USER/AUTO: only HUMAN-origin pty writes move lastHumanInputAt (app writes 
   assert.ok(pm.lastHumanInputAt('pty-x') >= before);
 });
 
+test('USER/AUTO (GOD-TERMINAL-CONTROL, Jim SHOULD 1): god\'s term write counts as a person\'s, so god\'s deliberate /model switch is pinned as user', () => {
+  const { PtyManager } = loadTs('src/main/pty.ts');
+  const pm = new PtyManager();
+  pm.sessions.set('pty-g', { id: 'pty-g', cwd: '', command: '', owner: null, lastOutputAt: 0, hasOutput: true, humanInputGeneration: 0, incarnation: 1, proc: { write: () => {} } });
+  const before = Date.now();
+  pm.write('pty-g', '/model gpt-5.6-sol', 'GOD');
+  assert.ok(pm.lastHumanInputAt('pty-g') >= before, 'a GOD write stamps the source the pin reads');
+  const idx = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+  assert.match(idx, /hive\.setHumanInputSource\(\(agentId\) => \{\s*const ptyId = ptyForAgent\(agentId\);\s*return ptyId \? ptyManager\.lastHumanInputAt\(ptyId\) : undefined;/,
+    'the pin reads lastHumanInputAt (HUMAN and GOD), not a HUMAN-only stamp');
+});
+
 test('G3 panel text: pinned (user) vs auto vs none', () => {
   const user = P.modelPinLabel({ model: SOL, modelPinSource: 'user', liveModel: SOL, launchModel: TERRA }, TERRA);
   assert.equal(user.model, SOL);

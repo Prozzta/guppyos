@@ -2090,8 +2090,9 @@ export class HiveManager {
   /** Session ids retired by a Start fresh or a rotation: a late hook from the old process may
    *  not write them back as the resume key. In memory; a restart has no old process left. */
   private retiredSessions = new Map<string, Set<string>>();
-  /** MODEL-PINBACK user/auto: when HUMAN-origin input last reached the agent's live pty (main
-   *  wires this to PtyManager.lastHumanInputAt). Unset = never a human: every pin is 'auto'. */
+  /** MODEL-PINBACK user/auto: when HUMAN- or GOD-origin input last reached the agent's live pty
+   *  (main wires this to PtyManager.lastHumanInputAt; a god `term` switch is deliberate, so it is
+   *  'user'). Unset = never a human: every pin is 'auto'. */
   private humanInputAt: ((agentId: string) => number | undefined) | null = null;
   setHumanInputSource(fn: ((agentId: string) => number | undefined) | null): void { this.humanInputAt = fn; }
 
