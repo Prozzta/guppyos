@@ -294,6 +294,10 @@ interface AgentWake {
    *  typed turn already ENDED before the owner reported COMMITTED. */
   claimTurnSeen: boolean;
   claimTurnId: string | null;
+  /** F11 (1.1.91): the mail epoch that carried the current claim's ids was closed (the 30-minute
+   *  stale back-edge, or any close without a Stop) while the claim was still in flight. Its turn
+   *  is over as far as the mail is concerned: settle() treats it as ended, like a Stop before it. */
+  claimEpochClosed: boolean;
   /** WAKE-WATCHDOG-RECOVERY: the newest hook or provider-status reading from the agent (0 = none). */
   lastTrafficAt: number;
   /** ZERO-TOKEN-LIVENESS (Dwight F1): the same, MAIN session only: a SubagentStop never sets it.
@@ -398,7 +402,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], orphanPostCompacts: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null,
+        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null, claimEpochClosed: false,
         lastTrafficAt: 0, lastMainTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
@@ -476,6 +480,19 @@ export class WorkerWakeWatchdog {
     }
     if (out.attempt) out.retryInMs = wakeRetryDelayMs(out.attempt);
     return out;
+  }
+
+  /**
+   * F11 (1.1.91): a mail epoch closed with these ids re-delivered. When they belong to the claim
+   * still in flight, that claim's turn surfaced them and its epoch is over: repend() cannot
+   * re-offer ids it never saw announced, so settle() must (see claimEpochClosed).
+   * Not a close at a new prompt (Jim SHOULD-1): 'interrupted'/'next-turn' re-surface the ids in
+   * that live turn (hooks.ts UserPromptSubmit), so the claim's mail is carried and its turn runs.
+   */
+  noteEpochClosed(agentId: string, redelivered: readonly string[], reason: string): void {
+    const r = this.agents.get(agentId);
+    if (!r?.inFlight || reason === 'interrupted' || reason === 'next-turn') return;
+    if (redelivered.some((id) => r.inFlight!.ids.includes(id))) r.claimEpochClosed = true;
   }
 
   private known(r: AgentWake, id: string): boolean {
@@ -1065,6 +1082,7 @@ export class WorkerWakeWatchdog {
     r.claimedAt = now;
     r.claimTurnSeen = false;
     r.claimTurnId = null;
+    r.claimEpochClosed = false;
     // Every announcement of this id set is a NEW request (see inboxWakeClaimId): the owner replays
     // a remembered COMMITTED without typing, so a re-pend, an N1 back-edge, an unconfirmed submit or
     // an F4 retry must never reuse an earlier id.
@@ -1107,10 +1125,12 @@ export class WorkerWakeWatchdog {
       // the SAME repend() for the claim's ids (its Stop skipped them: they were in flight), so an
       // epoch is spent exactly once. Case B (a Stop with NO start seen) and C (the settle before the
       // turn's Stop) are unchanged: provisional/active as before.
+      // F11: or the epoch that turn surfaced was closed before this settle (no Stop came): the
+      // close's repend skipped the in-flight ids, so they take the same path as a Stop's.
       const startedAfterClaim = r.claimedAt > 0 && r.turnStartAt >= r.claimedAt && r.claimTurnSeen;
-      const ended = startedAfterClaim && (r.claimTurnId !== null
+      const ended = startedAfterClaim && (r.claimEpochClosed || (r.claimTurnId !== null
         ? r.closedTurns.includes(r.claimTurnId)
-        : r.stoppedAt >= r.turnStartAt);
+        : r.stoppedAt >= r.turnStartAt));
       if (ended) {
         r.commitIds = claim.ids;
         r.provisional = false;
