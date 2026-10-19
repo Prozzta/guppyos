@@ -110,6 +110,10 @@ extraResources:
   # Electron-as-Node from <hive>/bin/term, on god's PATH only.
   - from: resources/term-cli.cjs
     to: term-cli.cjs
+  # HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), run on
+  # Electron-as-Node from <hive>/bin/heavy, on every hive agent's PATH.
+  - from: resources/heavy-cli.cjs
+    to: heavy-cli.cjs
   # HEAVY-CPU-OPTIONS-191: the heavy-job helper, compiled from source by tools/build-heavyjob.cjs (Windows;
   # the folder is empty elsewhere). Its folder goes on every hive agent's PATH.
   # HEAVY-LOCK-OPAQUE-SCRIPT-196: the heavy preload, on every hive agent's NODE_OPTIONS (--require).

@@ -1027,6 +1027,12 @@ export class HiveManager {
     return this.writeCommandDir('term', script);
   }
 
+  /** HEAVY-LOCK-RESERVATION-RELEASE: `<root>/bin/heavy/`, the `heavy` command (`heavy status`,
+   *  `heavy release`) on the heavy lock's route. Prepended to every hive agent's PATH. */
+  writeHeavyCommand(script: string): string | null {
+    return this.writeCommandDir('heavy', script);
+  }
+
   /** `<root>/bin/<name>/` holding ONLY `<name>.cmd` + `<name>` (Windows) or `<name>` (POSIX). */
   private writeCommandDir(name: string, script: string): string | null {
     const root = this.root();

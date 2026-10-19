@@ -1778,6 +1778,8 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
 const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-preload.cjs');
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
+// HEAVY-LOCK-RESERVATION-RELEASE: the `heavy` command (status; give up a reserved slot), shipped the same way.
+const HEAVY_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-cli.cjs');
 // GOD-TERMINAL-CONTROL M1: god's `term` command (read the live screen, type, keys, send) on the same
 // broker and per-spawn token as `ledger`. The god check is made HERE, per request, against the
 // registry's god now (termControl.ts); the env URL being god-only is hygiene, not the boundary.
@@ -4715,6 +4717,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       // MUNDER_LEDGER_URL the Claude spawn sets; elsewhere it says it is unavailable).
       const ledgerDir = hive.writeLedgerCommand(LEDGER_CLI);
       if (ledgerDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), ledgerDir];
+      // HEAVY-LOCK-RESERVATION-RELEASE: `heavy` on every hive agent's PATH (same URL, token and reach).
+      const heavyDir = hive.writeHeavyCommand(HEAVY_CLI);
+      if (heavyDir) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyDir];
       // GOD-TERMINAL-CONTROL: `term` on god's PATH only (the broker refuses any other caller anyway).
       if (opts.hive.isGod) {
         const termDir = hive.writeTermCommand(TERM_CLI);
