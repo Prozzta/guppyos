@@ -59,8 +59,9 @@ test('the watchdog kills a due file through its job; the snapshot tree only when
 
 test('Jim NIT-2: a job still not empty after the wait (exit 5) is reported with its count, not as done', () => {
   const procs = [{ pid: 10, ppid: 1, name: 'node.exe', cmd: 'x', startedAt: 5000 }];
-  const r = W.killFile(procs, 10, { jobExe: 'J', run: () => ({ status: 5, stdout: 'alive 3\r\n' }), tree: () => { throw new Error('no tree'); } });
-  assert.deepEqual(r, { by: 'job', alive: 3 });
+  const r = W.killFile(procs, 10, { jobExe: 'J', run: () => ({ status: 5, stdout: 'active 4\r\nwaited 4\r\nalive 3\r\n' }), tree: () => { throw new Error('no tree'); } });
+  assert.deepEqual(r, { by: 'job', alive: 3, active: 4, waited: 4 });
+  assert.deepEqual(W.killFile(procs, 10, { jobExe: 'J', run: () => ({ status: 0, stdout: 'active 5\r\nwaited 5\r\n' }) }), { by: 'job', active: 5, waited: 5 }, 'the counts of a kill that finished');
   const row = W.outcomeRow({ file: 'a.test.cjs', ageMs: 9 }, r, 8);
   assert.equal(row.alive, 3);
   assert.match(row.message, /3 process\(es\) still alive after 5 s/);
@@ -174,6 +175,85 @@ test('LIVE: a child born between the watchdog\'s snapshot and its kill dies with
       assert.ok(!alive(pid), `${name} ${pid} is gone when the kill returns`);
     }
     fs.rmSync(dir, { recursive: true }); // nothing holds the folder (the EBUSY of LOAD-FLAKES-178)
+  } finally {
+    sweep(rows);
+    if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }
+    for (let i = 0; i < 100 && fs.existsSync(dir); i++) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { await new Promise((res) => setTimeout(res, 100)); } }
+  }
+});
+
+// LOAD-FLAKES-178-EBUSY-195 (1.1.95 FULL #2: EBUSY on the rmdir above, under load): a process
+// leaves the job's count, and reads as exited, before its handles (its cwd) are closed. Measured
+// idle: rmdir failed 40/40 at the moment the job read empty, passed 40/40 once each process handle
+// was signaled. Idle the gap is about 1-3 ms, inside the old 25 ms poll, so only a starved box
+// showed it; the kill now waits for each process itself (the pin below), and when it returns the
+// folder is free AT ONCE: no retry, no wait, each round.
+test('the kill waits for every process of the job to be signaled, listed after the job takes no new one (source pin)', () => {
+  const cs = fs.readFileSync(path.join(__dirname, 'tools', 'file-job.cs'), 'utf8');
+  const kill = cs.slice(cs.indexOf('static int Kill('), cs.indexOf('static int[] Pids('));
+  const at = (re) => { const m = re.exec(kill); assert.ok(m, `Kill has ${re}`); return m.index; };
+  const limit = at(/LimitFlags = FLAGS \| ACTIVE_PROCESS; x\.Basic\.ActiveProcessLimit = 1;/);
+  const list = at(/foreach \(int id in Pids\(job\)\) \{ IntPtr h = OpenProcess\(SYNCHRONIZE, false, id\);/);
+  const term = at(/TerminateJobObject\(job, 1\)/);
+  const wait = at(/foreach \(IntPtr h in procs\) if \(WaitForSingleObject\(h, 0\) != 0\) left\+\+;/);
+  assert.ok(limit < list && list < term && term < wait, 'closed to new processes, listed, terminated, then each one waited for');
+  assert.match(kill, /if \(left > 0\) \{ Console\.Out\.WriteLine\("alive " \+ left\); return 5; \}/, 'a process still not gone is said, not passed off as done');
+  // Jim SHOULD 2: the wait is bounded (a handle that never signals would hang the watchdog's kill to spawnSync's 30 s)
+  const bound = at(/var end = DateTime\.UtcNow\.AddSeconds\(5\);/);
+  assert.ok(term < bound && bound < wait);
+  assert.match(kill, /if \(left == 0 \|\| DateTime\.UtcNow > end\) break;/);
+  // Jim SHOULD 1: the limit and the list are best effort; neither can stop TerminateJobObject
+  assert.match(kill, /if \(!SetInformationJobObject\(job, 9, ref x, Marshal\.SizeOf\(typeof\(EXT_LIMIT\)\)\)\) Console\.Error\.WriteLine\("\[file-job\] limit failed/);
+  assert.match(kill, /try \{ foreach \(int id in Pids\(job\)\) \{[^\n]*\} \}\s*catch \(Exception le\) \{ Console\.Error\.WriteLine\("\[file-job\] list failed: "/);
+  assert.ok(term > at(/catch \(Exception le\)/), 'terminated after the list, whatever the list did');
+});
+
+test('LIVE: when the kill returns, nothing the file started still holds its folder (rmdir at once, no retry, 8 rounds)', LIVE, async () => {
+  const { exe } = R.prepareFileJob();
+  const busy = [];
+  for (let round = 0; round < 8; round++) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf178-'));
+    let file = null; let rows = [];
+    try {
+      file = await startFile(dir, exe);
+      const kids = await file.started();
+      let ping = null;
+      await until('ping', () => (ping = pingOf(kids.cmd)) != null);
+      rows = own.processTable().filter((r) => [kids.cmd, kids.detached, ping.pid].includes(r.pid));
+      const f = own.lookupPids([file.f.pid])[0];
+      const k = W.killFile([{ pid: f.pid, startedAt: f.created }], f.pid, { jobExe: exe });
+      assert.equal(k.by, 'job');
+      // Jim MUST 1: every process the job held reached the wait (node, cmd, ping, the detached node at least)
+      assert.ok(k.active >= 4, `the job held the file's tree (${k.active})`);
+      assert.equal(k.waited, k.active, `round ${round}: the kill waited on a handle for each process the job held`);
+      fs.rmSync(path.join(dir, 'f.cjs'));
+      try { fs.rmdirSync(dir); } catch (e) { busy.push(`round ${round}: ${e.code}`); }
+    } finally {
+      sweep(rows);
+      if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }
+      for (let i = 0; i < 100 && fs.existsSync(dir); i++) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { await new Promise((res) => setTimeout(res, 100)); } }
+    }
+  }
+  assert.deepEqual(busy, [], 'the folder was still in use right after the kill returned');
+});
+
+test('LIVE (Jim SHOULD 1): a process list that fails is said, and the job is still terminated and waited on by its count', LIVE, async () => {
+  const { exe } = R.prepareFileJob();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lf178-'));
+  let file = null; let rows = [];
+  try {
+    file = await startFile(dir, exe);
+    const kids = await file.started();
+    let ping = null;
+    await until('ping', () => (ping = pingOf(kids.cmd)) != null);
+    rows = own.processTable().filter((r) => [kids.cmd, kids.detached, ping.pid].includes(r.pid));
+    const f = own.lookupPids([file.f.pid])[0];
+    const r = require('node:child_process').spawnSync(exe, ['kill', String(f.pid), String(f.created)],
+      { windowsHide: true, encoding: 'utf8', timeout: 30_000, env: { ...process.env, FILE_JOB_LIST_FAILS: '1' } });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /\[file-job\] list failed: FILE_JOB_LIST_FAILS/);
+    assert.match(r.stdout, /waited 0\b/, 'no handle listed');
+    for (const p of [file.f.pid, kids.cmd, kids.detached, ping.pid]) assert.ok(!alive(p), `${p} is gone: the job was terminated all the same`);
   } finally {
     sweep(rows);
     if (file && file.f.exitCode === null && file.f.signalCode === null) { const g = new Promise((res) => file.f.once('exit', res)); file.f.kill(); await g; }

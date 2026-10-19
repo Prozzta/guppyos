@@ -9,10 +9,13 @@
 //                                     the handle closes and the rest goes with it.
 //   file-job kill <pid> <createdMs>   The watchdog: the job of that file, only while <pid> is
 //                                     still the process born at <createdMs> and in it; then
-//                                     TerminateJobObject, and wait until it holds no process.
+//                                     TerminateJobObject, and wait until it holds no process and
+//                                     every process it held is fully gone (handles closed).
 // Exit codes: 0 done, 3 no job for the pid, 4 the pid is another process now, 5 terminated but
-// still not empty after 5 s ("alive <n>" on stdout), 1 an error.
+// still not gone after 5 s ("alive <n>" on stdout), 1 an error. A kill also prints "active <n>"
+// (the job's processes just before it) and "waited <n>" (the process handles it waited on).
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 static class FileJob
@@ -42,8 +45,12 @@ static class FileJob
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
     [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
     [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long create, out long exit, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr ret);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
 
     const uint JOB_ALL = 0x1F001F;
+    const uint SYNCHRONIZE = 0x00100000;
+    const uint ACTIVE_PROCESS = 0x0008;
     const uint KILL_ON_JOB_CLOSE = 0x2000;
     // No BREAKAWAY_OK and no SILENT_BREAKAWAY_OK: a job nested inside (libuv's, which allows silent
     // breakaway) cannot take a process out past this one.
@@ -93,19 +100,64 @@ static class FileJob
         long ms = (c - 116444736000000000L) / 10000;
         if (Math.Abs(ms - createdMs) > 1 || !IsProcessInJob(p, job, out inJob) || !inJob) return 4;
         CloseHandle(p);
+        // LOAD-FLAKES-178-EBUSY-195: an empty job is NOT a released folder. A process leaves the
+        // job's count (and reads as exited) before its handles, its cwd among them, are closed:
+        // measured, rmdir failed 40/40 the moment the count read 0, and passed 40/40 once every
+        // process handle was signaled. So the kill waits for each process itself. The job first
+        // takes no new process, so the list taken next is every process the kill will take.
+        // Jim SHOULD 1: the limit and the list are best effort. A failure is said on stderr and the
+        // job is still terminated, then waited on by its count alone (never back to the tree kill).
+        var x = new EXT_LIMIT();
+        x.Basic.LimitFlags = FLAGS | ACTIVE_PROCESS; x.Basic.ActiveProcessLimit = 1;
+        if (!SetInformationJobObject(job, 9, ref x, Marshal.SizeOf(typeof(EXT_LIMIT)))) Console.Error.WriteLine("[file-job] limit failed (" + Marshal.GetLastWin32Error() + ")");
+        var procs = new List<IntPtr>();
+        try { foreach (int id in Pids(job)) { IntPtr h = OpenProcess(SYNCHRONIZE, false, id); if (h != IntPtr.Zero) procs.Add(h); } }
+        catch (Exception le) { Console.Error.WriteLine("[file-job] list failed: " + le.Message); }
+        // Jim MUST 1: what the job held (the OS count) and how many handles the kill waits on, so a
+        // test can see each one reach the wait.
+        BASIC_ACCOUNTING before;
+        uint active = QueryInformationJobObject(job, 1, out before, Marshal.SizeOf(typeof(BASIC_ACCOUNTING)), IntPtr.Zero) ? before.ActiveProcesses : 0;
+        Console.Out.WriteLine("active " + active);
+        Console.Out.WriteLine("waited " + procs.Count);
         if (!TerminateJobObject(job, 1)) throw new Exception("TerminateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
         // Jim NIT-2: a job still not empty after the wait is said (exit 5, the count on stdout), not
         // passed off as done: on a loaded box the lag then shows as a row, not as a later EBUSY.
         uint left = 0;
-        for (int i = 0; i < 200; i++)
+        var end = DateTime.UtcNow.AddSeconds(5);
+        for (;;)
         {
             BASIC_ACCOUNTING acc;
-            if (!QueryInformationJobObject(job, 1, out acc, Marshal.SizeOf(typeof(BASIC_ACCOUNTING)), IntPtr.Zero)) { left = 0; break; }
-            left = acc.ActiveProcesses;
-            if (left == 0) break;
+            left = QueryInformationJobObject(job, 1, out acc, Marshal.SizeOf(typeof(BASIC_ACCOUNTING)), IntPtr.Zero) ? acc.ActiveProcesses : 0;
+            foreach (IntPtr h in procs) if (WaitForSingleObject(h, 0) != 0) left++;
+            if (left == 0 || DateTime.UtcNow > end) break;
             System.Threading.Thread.Sleep(25);
         }
+        foreach (IntPtr h in procs) CloseHandle(h);
         if (left > 0) { Console.Out.WriteLine("alive " + left); return 5; }
         return 0;
+    }
+
+    /** The pids in the job (JobObjectBasicProcessIdList), the buffer grown until they fit. */
+    static int[] Pids(IntPtr job)
+    {
+        // the test's failure seam (Jim SHOULD 1): a list that fails must not stop the kill
+        if (Environment.GetEnvironmentVariable("FILE_JOB_LIST_FAILS") == "1") throw new Exception("FILE_JOB_LIST_FAILS");
+        for (int room = 64; ; room *= 4)
+        {
+            IntPtr buf = Marshal.AllocHGlobal(8 + 8 * room);
+            try
+            {
+                if (!QueryInformationJobObject(job, 3, buf, 8 + 8 * room, IntPtr.Zero))
+                {
+                    if (Marshal.GetLastWin32Error() == 234 /* MORE_DATA */) continue;
+                    throw new Exception("process id list failed (" + Marshal.GetLastWin32Error() + ")");
+                }
+                int n = Marshal.ReadInt32(buf, 4);
+                var ids = new int[n];
+                for (int i = 0; i < n; i++) ids[i] = (int)Marshal.ReadInt64(buf, 8 + 8 * i);
+                return ids;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
     }
 }

@@ -112,9 +112,11 @@ function killFile(procs, pid, { jobExe, run = spawnSync, tree = killTree } = {})
   const row = procs.find((p) => p.pid === pid);
   if (jobExe && row && Number.isFinite(row.startedAt)) {
     const r = run(jobExe, ['kill', String(pid), String(row.startedAt)], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', timeout: 30_000 });
-    if (r.status === 0) return { by: 'job' };
+    // "active <n>" / "waited <n>": the job's processes just before the kill, and the handles it waited on
+    const count = (word) => { const m = new RegExp(`${word} (\\d+)`).exec(String(r.stdout || '')); return m ? Number(m[1]) : -1; };
+    if (r.status === 0) return { by: 'job', active: count('active'), waited: count('waited') };
     if (r.status === 4) return { by: 'none', why: 'another process has the pid now' };
-    if (r.status === 5) { const m = /alive (\d+)/.exec(String(r.stdout || '')); return { by: 'job', alive: m ? Number(m[1]) : -1 }; }
+    if (r.status === 5) return { by: 'job', alive: count('alive'), active: count('active'), waited: count('waited') };
   }
   return { by: 'tree', ...tree(procs, pid) };
 }
