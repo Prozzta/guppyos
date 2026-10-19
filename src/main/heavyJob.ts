@@ -355,6 +355,9 @@ export interface ClassifyCtx {
    *  from (HOME, USERPROFILE, TEMP, TMP, ...): `bash $TEMP/x.sh`, `bash ~/x.sh` read that file. A
    *  variable the command itself assigns wins. Absent = such a path stays unreadable (fail closed). */
   env?: Readonly<Record<string, string>>;
+  /** HEAVY-LOCK-FALSE-HEAVY-198, set by classifyCommand: a word with the variables this command set
+   *  to a literal (and the spawn env) substituted, as the shell will (`f=x.test.cjs && node --test $f`). */
+  expand?: (word: string) => string;
 }
 
 /** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
@@ -917,7 +920,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       for (let i = 0; i < args.length; i++) {
         const a = args[i];
         if (a.startsWith('-')) { if (NODE_VALUE_FLAGS.has(a)) i++; continue; }
-        files.push(a);
+        // HEAVY-LOCK-FALSE-HEAVY-198 (Andy, 2026-10-19 20:21Z): `f=<one file> && node --test $f` was
+        // "a glob or a directory" (the word `$f` is not a .js name). A variable the command set to a
+        // literal is that literal; one it did not set stays as written (still heavy: fails closed).
+        files.push(ctx.expand ? ctx.expand(a) : a);
       }
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
       if (files.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
@@ -1019,7 +1025,7 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const k = key(p, cd);
     return virtual.has(k) ? virtual.get(k)! : base(expand(p), cd === undefined ? cd : expand(cd));
   } : undefined;
-  let here: ClassifyCtx = { ...ctx, stdin: undefined, ...(readScript ? { readScript } : {}) };
+  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ...(readScript ? { readScript } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
   for (const { seg, op, looped } of plan) {
