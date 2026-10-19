@@ -32,7 +32,7 @@ import {
 import type { InputOrigin } from '@shared/inputOrigin';
 import { sameInputState, type TerminalInputState } from '@shared/inputProvenance';
 import type { PromptBlock } from '@shared/promptState';
-import { extractCodexScreen, screenGridAction, type CodexScreenFacts } from '@shared/codexScreen';
+import { screenGridAction, type CodexScreenFacts } from '@shared/codexScreen';
 import {
   createTerminalRecoveryState,
   normalizePtyChunk,
@@ -49,7 +49,7 @@ import {
   type TerminalAutomationBlock
 } from './terminalAutomation';
 import { sanitizeTerminalSelection } from './terminalSelection';
-import { composerRegionEndsWith, needleMatcher } from './composerAttestation';
+import { codexReading, needleReading } from '@shared/screenReading';   // GTC M2: shared with main's mirror
 import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalEntry {
@@ -691,22 +691,7 @@ export function readScreenForNeedle(ptyId: string, needle: string, expectedTail?
   const entry = pool.get(ptyId);
   if (!entry || entry.exited || !entry.opened || !needle) return null;
   try {
-    const buf = entry.term.buffer.active;
-    const promptLine = buf.getLine(buf.baseY + buf.cursorY);
-    if (!promptLine) return null;
-    const has = needleMatcher(needle);   // CODEX-WAKE-162: tolerant of TUI-dropped characters
-    let screenCount = 0;
-    for (let y = 0; y < entry.term.rows; y += 1) {
-      const line = buf.getLine(buf.baseY + y);
-      if (line && has(line.translateToString(true))) screenCount += 1;
-    }
-    return {
-      onPromptRow: has(promptLine.translateToString(true)),
-      screenCount,
-      ...(typeof expectedTail === 'string' && expectedTail.length > 0 && expectedTail.length <= 8192
-        ? { promptTailMatches: composerRegionEndsWith(buf, buf.baseY + buf.cursorY, expectedTail) }
-        : {})
-    };
+    return needleReading(entry.term.buffer.active, entry.term.rows, needle, expectedTail);   // GTC M2: shared with main's mirror
   } catch {
     return null;
   }
@@ -721,17 +706,7 @@ export function readCodexScreen(ptyId: string, expectedTail?: string): { onPromp
   const entry = pool.get(ptyId);
   if (!entry || entry.exited || !entry.opened) return null;
   try {
-    const buf = entry.term.buffer.active;
-    const cursor = buf.baseY + buf.cursorY;
-    const codex = extractCodexScreen((i) => buf.getLine(i)?.translateToString(true), buf.length, cursor);
-    return {
-      onPromptRow: false,
-      screenCount: 0,
-      ...(typeof expectedTail === 'string' && expectedTail.length > 0 && expectedTail.length <= 8192
-        ? { promptTailMatches: composerRegionEndsWith(buf, cursor, expectedTail) }
-        : {}),
-      codex
-    };
+    return codexReading(entry.term.buffer.active, expectedTail);   // GTC M2: shared with main's mirror
   } catch {
     return null;
   }
@@ -752,7 +727,10 @@ function ensureScreenReadResponder(): void {
     // runs at the spawn grid; Claude's frame drawn into the wrong width reads as no composer.
     // Align the grid, ask for a fresh frame, and answer "no reading" (the frame is new output,
     // which brings main's next reading).
-    if (req.codex === true && entry.opened && !entry.exited) {
+    // GTC M2: never for a SHADOW read (the gate was answered by main's mirror; this one is only
+    // compared). A resize and a redraw would be new output: a side effect of looking, and the very
+    // thing that makes the comparison not 'still'. A shadow read answers what the screen has.
+    if (req.codex === true && req.shadow !== true && entry.opened && !entry.exited) {
       const host = entry.host;
       const hostSized = host.isConnected && host.clientWidth > 0 && host.clientHeight > 0;
       if (screenGridAction({ cols: entry.term.cols, rows: entry.term.rows }, req.grid, hostSized) === 'align' && req.grid) {

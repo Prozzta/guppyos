@@ -106,6 +106,7 @@ import { TermControl } from './termControl';
 import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
+import { createScreenGate, screenGateSourceOf } from './screenGate';
 import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
@@ -862,8 +863,8 @@ const providerCapacity = new CapacityRuntime({
 // final check sits next to main's Enter with nothing that can yield between them. See
 // automaticSubmit.ts for the transaction and automaticSubmitWiring.ts for what each of
 // its effects means here.
-const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail, codex) =>
-  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true, grid: ptyManager.grid(ptyId) } : {}) }));
+const screenReadings = new ScreenReadingBroker((ptyId, requestId, needle, expectedTail, codex, shadow) =>
+  ptyManager.sendToOwner(ptyId, 'autoSubmit:readScreen', { requestId, ptyId, needle, expectedTail, ...(codex ? { codex: true, grid: ptyManager.grid(ptyId) } : {}), ...(shadow ? { shadow: true } : {}) }));
 // WAKE-SCREEN-GUARD: R2-4's per-incarnation tokens, and the F5 watch (codexScreenGuard.ts).
 const wakeIncarnationTokens = new WakeIncarnationTokens();
 // WSG-ALERT-NOT-DISMISSABLE: the alert is raised AND lifted here (an ok reading, a latch, a respawn).
@@ -933,9 +934,10 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   capacity: providerCapacity,
   ptyForAgent: (agentId) => ptyForAgent(agentId),
   providerForPty: (ptyId) => ptyProvider.get(ptyId),
-  requestScreenReading: (ptyId, needle, expectedTail) => screenReadings.request(ptyId, needle, expectedTail),
+  // GTC M2: both readings go through the source-aware gate (config screenGateSource; screenGate.ts).
+  requestScreenReading: (ptyId, needle, expectedTail) => screenGate.needle(ptyId, needle, expectedTail),
   // WAKE-SCREEN-GUARD: the Codex screen facts, and every gate evaluation's diagnostics.
-  requestCodexScreen: (ptyId, expectedTail) => shadowed(ptyId, screenReadings.request(ptyId, '', expectedTail, true)),
+  requestCodexScreen: (ptyId, expectedTail) => screenGate.codex(ptyId, expectedTail),
   onScreenGuard: (r) => noteScreenGuard(r),
   // DWIGHT-INPUT-DEAD-179 F4: Codex's own record that this incarnation's chat is configured: a
   // `thread_settings_applied` in its newest rollout, stamped after the PTY was spawned. A resumed
@@ -1785,6 +1787,19 @@ const termControl = new TermControl({
 hookServer.setTermHandler((agentId, body) => termControl.handle(agentId, body));
 // The mirror per PTY (config `terminalMirror: false` = off), its cost guard and its shadow diff.
 const termShadow = new ShadowDiff((row) => hive.appendLog(row), Date.now);
+/** GTC M2: the screen gate's source, per request. The answering host's reading goes to the gate
+ *  untouched; the other host is read afterwards for the shadow diff, never awaited by the gate. */
+const screenGate = createScreenGate({
+  source: () => screenGateSourceOf(readConfig().screenGateSource),
+  renderer: (ptyId, needle, expectedTail, codex, shadow) => screenReadings.request(ptyId, needle, expectedTail, codex, shadow),
+  mirror: (ptyId, kind, needle, expectedTail) => ptyManager.mirrorGateReading(ptyId, kind, needle, expectedTail),
+  whyNoMirror: () => (readConfig().terminalMirror === false ? 'config-off' : mirrorGuard?.status() ? 'auto-off' : 'failed'),
+  generation: (ptyId) => ptyManager.outputGeneration(ptyId),
+  who: (ptyId) => ({ agentId: ptyToAgent.get(ptyId) ?? null, provider: ptyProvider.get(ptyId) ?? null }),
+  record: (sample) => termShadow.record(sample),
+  log: (row) => hive.appendLog(row),
+  now: Date.now
+});
 if (readConfig().terminalMirror !== false) ptyManager.setMirrorFactory((cols, rows) => createTerminalMirror(cols, rows));
 /** Arms the cost guard once app is ready: calibrates on a synthetic sample, then samples each second. */
 async function armMirrorCostGuard(): Promise<void> {
@@ -1830,20 +1845,6 @@ async function armMirrorCostGuard(): Promise<void> {
 /** An auto-off or a re-arm: god's digest is re-run now, and the banner polls hive:integrity. */
 function mirrorSurfaced(): void {
   try { floorDigest.run(); } catch (e) { console.error('[floor-digest]', e); }
-}
-/** The shadow diff's tap on a screen-gate request: the gate's answer is returned untouched, and the
- *  mirror's facts are compared with it afterwards (never awaited by the gate). */
-function shadowed(ptyId: string, reading: Promise<ScreenReading | null>): Promise<ScreenReading | null> {
-  const gen0 = ptyManager.outputGeneration(ptyId);
-  void reading.then(async (r) => {
-    if (!r?.codex) return;
-    const mirror = await ptyManager.readFacts(ptyId);
-    if (!mirror) return;
-    const agentId = ptyToAgent.get(ptyId) ?? null;
-    const provider = ptyProvider.get(ptyId) ?? null;
-    termShadow.record({ agentId, ptyId, provider, gate: r.codex, mirror, still: gen0 !== undefined && ptyManager.outputGeneration(ptyId) === gen0 });
-  }).catch(() => { /* the shadow never affects the gate */ });
-  return reading;
 }
 /** SHOULD 5: DECSET 2004 / alt screen / app-cursor per provider, read from the mirror 5 s and 30 s after
  *  every spawn (a resume is a spawn), so framing decisions rest on measured rows. */
@@ -2004,6 +2005,7 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
   // WAKE-SCREEN-GUARD (Jim N2): a torn-down PTY's incarnation token names nothing any more.
   wakeIncarnationTokens.forgetPty(id);
   termShadow.forget(id);
+  screenGate.forget(id);
   // 1) Archive the agent — retained + flagged; only live-PTY agents are active.
   const agentId = ptyToAgent.get(id);
   if (agentId) {

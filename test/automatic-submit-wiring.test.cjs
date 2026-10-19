@@ -1580,13 +1580,20 @@ test('the absence census CAN FAIL: each retired name, put back into code, is fou
 test('the erase oracle reads the SCREEN and never the keystroke model (design 5.1 prohibition)', () => {
   const pool = read('src/renderer/src/components/terminalPool.ts');
   const start = pool.indexOf('export function readScreenForNeedle(');
-  const body = pool.slice(start, pool.indexOf('\n}\n', start));
-  assert.ok(start > 0 && body.length > 100, 'the oracle exists');
+  const wrapper = pool.slice(start, pool.indexOf('\n}\n', start));
+  assert.ok(start > 0, 'the oracle exists');
+  // GTC M2: the body is shared with main's mirror (shared/screenReading.ts); the pool's function
+  // is the entry lookup and the call over the visible rows.
+  assert.match(wrapper, /return needleReading\(entry\.term\.buffer\.active, entry\.term\.rows, needle, expectedTail\);/, 'the pool reads its active buffer over the visible rows');
+  const shared = read('src/shared/screenReading.ts');
+  const s0 = shared.indexOf('export function needleReading(');
+  const body = shared.slice(s0, shared.indexOf('\n}\n', s0));
+  assert.ok(s0 > 0 && body.length > 100, 'the shared oracle exists');
   for (const banned of ['inputDirty', 'hasTerminalDraft', 'lineBuf', 'promptLineHasText', 'writePty']) {
-    assert.ok(!body.includes(banned), `the erase oracle must not consult or call \`${banned}\``);
+    assert.ok(!wrapper.includes(banned) && !body.includes(banned), `the erase oracle must not consult or call \`${banned}\``);
   }
   assert.match(body, /buf\.baseY \+ buf\.cursorY/, 'the prompt row is baseY + cursorY');
-  assert.match(body, /entry\.term\.rows/, 'and the screen half walks the visible rows');
+  assert.match(body, /for \(let y = 0; y < rows; y \+= 1\)/, 'and the screen half walks the visible rows');
 });
 
 test('the prompt mirror is re-derived at every site that changes it, and caches only on ACK', () => {

@@ -238,5 +238,5 @@ test('WIRING: the owner passes the payload length to the gap; the wiring forward
   const read = (p) => fs.readFileSync(path.join(__dirname, '..', p), 'utf8');
   assert.match(read('src/main/automaticSubmit.ts'), /await this\.sleep\(deps\.enterGapMs\?\.\(ptyId, req\.text\.length\) \?\? GAP_MS\);/);
   assert.match(read('src/main/automaticSubmitWiring.ts'), /enterGapMs: \(ptyId, textLength\) => \{[\s\S]*?automaticEnterGapMs\(provider, textLength\)/);
-  assert.match(read('src/renderer/src/components/terminalPool.ts'), /const has = needleMatcher\(needle\);[\s\S]*?onPromptRow: has\(promptLine\.translateToString\(true\)\)/);
+  assert.match(read('src/shared/screenReading.ts'), /const has = needleMatcher\(needle\);[\s\S]*?onPromptRow: has\(promptLine\.translateToString\(true\)\)/);
 });

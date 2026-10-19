@@ -969,8 +969,11 @@ test('R2-4 wiring: the spawn env names the token, the hook observer hands it on,
 
 test('renderer: a Codex request is answered by readCodexScreen over the whole buffer, behind pending output', () => {
   const pool = readSource('src/renderer/src/components/terminalPool.ts');
-  assert.match(pool, /import \{ extractCodexScreen, screenGridAction, type CodexScreenFacts \} from '@shared\/codexScreen';/);
-  assert.match(pool, /const codex = extractCodexScreen\(\(i\) => buf\.getLine\(i\)\?\.translateToString\(true\), buf\.length, cursor\);/);
+  assert.match(pool, /import \{ screenGridAction, type CodexScreenFacts \} from '@shared\/codexScreen';/);
+  assert.match(pool, /import \{ codexReading, needleReading \} from '@shared\/screenReading';/);
+  // GTC M2: the reading is the shared one main's mirror also uses.
+  assert.match(pool, /return codexReading\(entry\.term\.buffer\.active, expectedTail\);/);
+  assert.match(readSource('src/shared/screenReading.ts'), /const codex = extractCodexScreen\(\(i\) => buf\.getLine\(i\)\?\.translateToString\(true\), buf\.length, cursor\);/);
   assert.match(pool, /entry\.term\.write\('', \(\) => \{\s*const tail = [^\n]+\n\s*window\.cth\.answerScreenReading\(req\.requestId, req\.codex === true\s*\? readCodexScreen\(req\.ptyId, tail\)/);
 });
 

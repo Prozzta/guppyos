@@ -1,6 +1,7 @@
 import * as pty from 'node-pty';
 import type { InputOrigin } from '../shared/inputOrigin';
 import type { MirrorReading, TerminalMirror } from './terminalMirror';
+import type { CodexReading, NeedleReading } from '../shared/screenReading';
 import type { CodexScreenFacts } from '../shared/codexScreen';
 import type { TerminalInputState } from '../shared/inputProvenance';
 import type { TerminalPromptState } from '../shared/promptState';
@@ -14,6 +15,9 @@ import { createPtyDataBatcher, type PtyDataBatcher } from './ptyDataBatcher';
 import { userShellPathAsync } from './shellEnv';
 import { commandResolver, type CommandResolver, type ResolvedCommand } from './commandResolver';
 import { cliStatus, lossyRouteRefusal, type ShimInterpreterProblem } from './cliLookupPolicy';
+
+/** GTC M2: why a PTY's mirror gave the screen gate no reading. */
+export type MirrorGateNull = 'no-pty' | 'no-mirror' | 'seeded' | 'unreadable' | 'replaced';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -104,6 +108,10 @@ interface PtySession {
   /** GOD-TERMINAL-CONTROL M1: this incarnation's headless screen (terminalMirror.ts), fed every
    *  accepted chunk. Absent when the mirror is off or could not be made. Dies with the session. */
   mirror?: TerminalMirror;
+  /** GTC M2 (Jim MUST 1): the mirror was made by rearmMirrors on a live session, from the output
+   *  tail only, so it lacks the scrollback the renderer has (the Codex header among it). It is no
+   *  source for the screen gate until the session respawns with a mirror fed from the start. */
+  mirrorSeeded?: boolean;
 }
 
 /** ZERO-TOKEN-LIVENESS: one PTY incarnation ended. Reported before its session is removed. */
@@ -547,6 +555,26 @@ export class PtyManager {
     return this.sessions.get(id) === s && s.mirror === m ? f : null;
   }
 
+  /** GTC M2: one screen-gate reading from this PTY's mirror, or why there is none. The caller
+   *  falls back to the renderer on every null; the renderer's own nulls (exited, never opened)
+   *  have their twin here as 'no-pty' / 'no-mirror' (an ended session's mirror is disposed). */
+  async mirrorGateReading(id: string, kind: 'needle' | 'codex', needle: string, expectedTail?: string): Promise<{ reading: NeedleReading | CodexReading | null; reason?: MirrorGateNull; ms?: number }> {
+    const s = this.sessions.get(id);
+    if (!s) return { reading: null, reason: 'no-pty' };
+    if (!s.mirror) return { reading: null, reason: 'no-mirror' };
+    if (s.mirrorSeeded) return { reading: null, reason: 'seeded' };
+    const m = s.mirror;
+    let r: NeedleReading | CodexReading | null;
+    let ms: number | undefined;
+    const took = (x: number): void => { ms = x; };
+    try { r = kind === 'codex' ? await m.codexReading(expectedTail, took) : await m.needleReading(needle, expectedTail, took); } catch { r = null; }
+    // The session may have ended or been replaced while the read drained: a reading of an old or
+    // disposed mirror is not evidence (Jim SHOULD 1), and it is a race, not the mirrors being off (INFO 2).
+    if (this.sessions.get(id) !== s || s.mirror !== m) return { reading: null, reason: 'replaced' };
+    const t = ms === undefined ? {} : { ms };
+    return r ? { reading: r, ...t } : { reading: null, reason: 'unreadable', ...t };
+  }
+
   /** GOD-TERMINAL-CONTROL M1: chars fed to mirrors since start, monotonic (an ended session's count
    *  stays in), the cost sampler's input. */
   private mirrorFed = 0;
@@ -569,6 +597,7 @@ export class PtyManager {
       if (s.mirror) continue;
       try {
         s.mirror = f(s.proc.cols, s.proc.rows);
+        s.mirrorSeeded = true;
         if (s.tail) { this.mirrorFed += s.tail.length; s.mirror.write(s.tail); }
       } catch { s.mirror = undefined; }
     }
