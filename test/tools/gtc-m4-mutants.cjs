@@ -55,6 +55,9 @@ const MUTANTS = [
   ['c the bridge settles a Stop-continue as a typed wake', BRIDGE,
     'this.deps.coordinator.settle(claim, kind, this.deps.now(), blocked, blocked);',
     'this.deps.coordinator.settle(claim, kind, this.deps.now(), blocked, false);'],
+  ['c an unconfirmed Stop-continue epoch leaves a recheck (Jim 24e45c)', WAKE,
+    'if (r.provisional && r.commitIds.length && !r.viaStop) r.recheck = r.commitIds;',
+    'if (r.provisional && r.commitIds.length) r.recheck = r.commitIds;'],
   ['c a blocked Stop settles REFUSED (the ids go back to pending)', BRIDGE,
     "const kind = blocked ? 'COMMITTED' : 'REFUSED';", "const kind = 'REFUSED';"],
   // — the WakeSender: DELIVERED (MUST 1, SHOULD 2) —

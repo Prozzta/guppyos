@@ -544,6 +544,20 @@ test('MUST 3: a tool-free continuation 90 s long does not re-pend; one Stop late
   assert.ok(STOP_CONFIRM_MS > SUBMIT_CONFIRM_MS + 30_000);
 });
 
+test('Jim 24e45c SHOULD: a Stop-continue epoch never confirmed leaves no recheck: the next wake carries no prior text', async (t) => {
+  const w = await floor(t);
+  const m1 = await turnWithMail(w);
+  assert.equal(w.fire('Stop').decision, 'block');
+  // The continued turn never shows a hook: past STOP_CONFIRM_MS the epoch ends unconfirmed.
+  await w.beat(STOP_CONFIRM_MS + 1_000);
+  assert.ok(w.diags.some((d) => d.stage === 'submit-unconfirmed') || w.coordinator.state('a1').lifecycle !== 'active', 'the epoch ended unconfirmed');
+  w.fire('Stop', { fully_idle: true });
+  await w.beat(1_000);
+  assert.ok(w.reqs.length >= 1, 'the mail is woken again');
+  for (const r of w.reqs) assert.equal(r.priorText, undefined, 'no nudge was ever typed for a Stop-continue: nothing to recheck');
+  assert.ok(w.reqs.some((r) => r.text.includes(m1.id)));
+});
+
 test('MUST 3: Codex: the continued turn\'s PostToolUse (same turn id) confirms; new mail waits for its real Stop', async (t) => {
   const w = await floor(t, { provider: 'codex' });
   await turnWithMail(w, { turn_id: 'T1' });
