@@ -1041,7 +1041,8 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       continue;
     }
     const raw = words(seg.replace(/\s&$/, ''), d);
-    const ws = stripRedirects(raw);
+    // HEAVY-LOCK-SHELL-KEYWORD-196: `do npm ci`, `then npm test`: a keyword is not the program.
+    const ws = stripKeywords(stripRedirects(raw), d);
     // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).
     let stdin: string | null | undefined;
     for (let i = 0; i < raw.length; i++) {
@@ -1085,6 +1086,14 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
 }
 
 const HEREDOC_OP = /^\d*<<-?(?!<)/;
+
+/** HEAVY-LOCK-SHELL-KEYWORD-196: drop the shell keywords that open a segment before its program. */
+function stripKeywords(ws: string[], d: ShellDialect): string[] {
+  if (d === 'cmd') return ws;
+  let i = 0;
+  while (i < ws.length && SHELL_KEYWORDS.has(ws[i])) i++;
+  return i ? ws.slice(i) : ws;
+}
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
