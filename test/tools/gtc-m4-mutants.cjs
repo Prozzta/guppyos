@@ -43,6 +43,8 @@ const MUTANTS = [
   ['h the Stop reason is not the mail (the bare nudge)', HOOKS,
     "      reason = this.surfaceMail(agentId, 'Stop', p, channel.provider, [], channel.provider === 'codex' ? CODEX_STOP_MAIL_BUDGET : undefined);",
     "      reason = this.surfaceMail(agentId, 'Stop', p, channel.provider, [], channel.provider === 'codex' ? CODEX_STOP_MAIL_BUDGET : undefined) === null ? null : 'You have new hive mail';"],
+  ['h a blocked Stop takes the claims lease (INT-1.1.97)', HOOKS,
+    "if (agentId && !fromSubagent && event === 'Stop' && stopReason === null) {", "if (agentId && !fromSubagent && event === 'Stop') {"],
   ['h a blocked Stop is answered as non-blocking', HOOKS,
     "      return { decision: 'block', reason: stopReason };", '      return {};'],
   ['s the AGY shim answers a Stop block with block (a hard stop for AGY)', HIVE,

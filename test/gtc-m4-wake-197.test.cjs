@@ -644,6 +644,24 @@ test('guard 3: a draft or a person\'s recent key at the Stop = no block', async 
   assert.equal(k.fire('Stop').decision, undefined);
 });
 
+// INT-1.1.97 (autocompact-pilot-181): the compact-health watcher sees EVERY Stop before any early
+// return; a blocked Stop still ends a provider request. Only the claims lease (a completed turn) waits.
+test('a blocked Stop still reaches compact-health and the incarnation latch; it takes no claims lease', async (t) => {
+  const w = await floor(t);
+  const seen = [];
+  w.server.setCompactHealth({ noteCompact: () => {}, onStop: (a) => seen.push(`health:${a}`), noteRead: () => {}, noteCarry: () => {} });
+  w.server.setClaimTurnCompletedListener((a) => seen.push(`lease:${a}`));
+  w.server.setWakeIncarnationObserver((a, inc) => seen.push(`inc:${a}:${inc}`));
+  await turnWithMail(w);
+  assert.equal(w.fire('Stop', { munder_wake_incarnation: 'inc-1', transcript_path: 'C:/t/a1.jsonl' }).decision, 'block');
+  assert.ok(seen.includes('health:a1'), 'A BLOCKED STOP STILL REACHES COMPACT-HEALTH');
+  assert.ok(seen.includes('inc:a1:inc-1'), 'a blocked Stop still latches the incarnation');
+  assert.ok(!seen.includes('lease:a1'), 'a continued turn is not a completed one: no claims lease');
+  await w.flush();
+  assert.equal(w.fire('Stop', { fully_idle: true }).decision, undefined);
+  assert.deepEqual(seen.filter((s) => !s.startsWith('inc:')), ['health:a1', 'lease:a1', 'health:a1'], 'the continued turn\'s own Stop is the completed one');
+});
+
 test('a subagent\'s Stop is never blocked', async (t) => {
   const w = await floor(t);
   await turnWithMail(w);

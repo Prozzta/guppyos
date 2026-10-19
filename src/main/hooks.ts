@@ -2129,11 +2129,6 @@ export class HookServer {
         });
       } catch { /* never breaks a hook */ }
     }
-    if (stopReason !== null && agentId) {
-      try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ }
-      // The continued turn is not a completed one: no claims lease, no compact-health Stop.
-      return { decision: 'block', reason: stopReason };
-    }
     // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
     // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.
     // WSG-CODEX-STARTUP-NO-MARKER fix 1(b): so does its own Stop. A turn that ended is proof the
@@ -2146,7 +2141,8 @@ export class HookServer {
       this.transcriptPaths.set(agentId, p.transcript_path);
     }
     // CLAIM-LEDGER W5 hook (god): the completed-turn boundary for the claims reconcile lease.
-    if (agentId && !fromSubagent && event === 'Stop') {
+    // GTC M4: a Stop continued with mail is not a completed turn: no claims lease.
+    if (agentId && !fromSubagent && event === 'Stop' && stopReason === null) {
       try { this.claimTurnCompleted?.(agentId); } catch { /* never breaks a hook */ }
     }
     // READS-ROTATE-AT-SIZE pilot: one `compact-health` row per compaction (before any early return:
@@ -2161,6 +2157,12 @@ export class HookServer {
           if (r) this.compactHealth.noteRead(agentId, r.path, r.inbox);
         }
       } catch { /* observation only: never breaks a hook */ }
+    }
+    // GTC M4: a Stop continued with mail returns here, after the observers above (the incarnation
+    // latch, the transcript path, compact-health): a blocked Stop still ends a provider request.
+    if (stopReason !== null && agentId) {
+      try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ }
+      return { decision: 'block', reason: stopReason };
     }
     // §11.1: the record of an earlier response lands after it, so every later hook of the agent
     // (Stop included) looks for the evidence while tentative ids wait.

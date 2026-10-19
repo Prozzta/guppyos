@@ -140,7 +140,9 @@ test('(3) wiring: boot-submit rows per attempt/outcome, per Enter write, THREW i
   assert.match(idx, /const bootSubmitRowDue = createBootSubmitRowGate\(\);/);
   // Jim N1: the recorded gap is marked to stay equal to the pinned sleep.
   assert.match(read('src/main/automaticSubmit.ts'), /KEEP EQUAL to the sleep below[\s\S]{0,200}const gapMs = deps\.enterGapMs\?\.\(ptyId, req\.text\.length\) \?\? GAP_MS;\s*await this\.sleep\(deps\.enterGapMs\?\.\(ptyId, req\.text\.length\) \?\? GAP_MS\);/);
-  assert.match(idx, /\}\)\.then\(\(outcome\) => \{[\s\S]*?return outcome;/, 'every outcome passes through unchanged');
+  // GTC M4: the boot prompt goes through the wake sender (the owner byte for byte on wakePath
+  // 'owner') or the owner; both doors sit inside the ONE .then, so every outcome still gets its row.
+  assert.match(idx, /return \(boot && wakeSender \? wakeSender\.submit\(sub\) : automaticSubmit\.submit\(sub\)\)\.then\(\(outcome\) => \{[\s\S]*?return outcome;/, 'every outcome passes through unchanged');
   assert.match(idx, /outcome: 'ENTER_WRITE', ok: r\.ok, reason: r\.error \?\? null, gapMs: r\.gapMs/);
   assert.match(idx, /ipcMain\.on\('autoSubmit:bootSubmitThrew'/);
   const hive = read('src/renderer/src/hooks/useHive.ts');

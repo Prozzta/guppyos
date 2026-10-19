@@ -239,7 +239,13 @@ test('T3 a queued agent is still woken by HEAVY SLOT FREE, and the overlay never
   // The wake owner reads its own lifecycle; nothing of the lock or the display reaches it.
   const wake = readSource('src/main/workerWake.ts');
   assert.doesNotMatch(wake, /activityView|heavyActivity|heavyLock|HeavyLockView|activityStatus/);
-  assert.match(wake, /if \(mode === 'event'\) \{\s*if \(r\.lifecycle !== 'idle'\) return no\(`lifecycle-\$\{r\.lifecycle\}`\);/);
+  // GTC M4: the one bypass is `atStop`, the Stop hook in hand (the provider's own turn end), set
+  // only by claimAtStop; it is no lock or display input either.
+  assert.match(wake, /if \(mode === 'event'\) \{\s*(?:\/\/[^\n]*\n\s*)*if \(!atStop && r\.lifecycle !== 'idle'\) return no\(`lifecycle-\$\{r\.lifecycle\}`\);/);
+  assert.match(wake, /claim\(f: WorkerWakeFacts, cause: WakeCause, mode: WakeMode, now = Date\.now\(\), atStop = false\): WakeClaim \| null \{/);
+  assert.deepEqual(wake.match(/this\.claim\([^)]*\)/g).filter((c) => /,\s*true\)$/.test(c)), ["this.claim(f, 'hook', 'event', now, true)"], 'atStop is set only by claimAtStop');
+  assert.match(wake, /claimAtStop\(f: WorkerWakeFacts, now = Date\.now\(\)\): WakeClaim \| null \{\s*(?:\/\/[^\n]*\n\s*)*return this\.claim\(f, 'hook', 'event', now, true\);/);
+  assert.match(readSource('src/main/inboxWakeBridge.ts'), /const claim = coordinator\.claim\(\s*f \? [^\n]*\n\s*cause, mode, now\);/, 'the typed wake never passes atStop');
   assert.match(wake, /if \(!\(r\.lifecycle === 'idle' \|\| \(r\.lifecycle === 'unknown' && quiescent\)\)\) \{/);
   // Nor the liveness classifier (LIVENESS-V1 is frozen).
   for (const f of ['src/shared/livenessV1.ts', 'src/main/agentLiveness.ts']) {

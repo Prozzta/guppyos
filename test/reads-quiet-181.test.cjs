@@ -412,6 +412,29 @@ test('bridge: a request still wakes at once, and carries the held quiet mail wit
   assert.equal(r.diag.find((d) => d.stage === 'hold-released').reason, 'with-mail');
 });
 
+// GTC M4: the Stop-continue claims too (InboxWakeBridge.claimAtStop), and holds quiet mail first,
+// exactly as the typed wake does: a quiet delivery is never carried into a turn by a Stop block.
+K.bridgeStopHolds = (mods = real) => {
+  const r = rig(mods);
+  r.now.t += 1_000;
+  r.coordinator.noteHook('alice', 'UserPromptSubmit', '', r.now.t);
+  // Its delivery callback was lost (or main restarted): only the Stop's own reconcile finds it.
+  r.ledger.set('q1', entry('q1', { deliveredAt: r.now.t }));
+  r.now.t += 1_000;
+  assert.equal(r.bridge.claimAtStop('alice'), null, 'A QUIET DELIVERY IS NOT CARRIED BY A STOP-CONTINUE');
+};
+test('bridge (GTC M4): a Stop-continue claims no quiet mail; a request at the Stop carries the held quiet mail with it', () => {
+  K.bridgeStopHolds();
+  const r = rig();
+  r.now.t += 1_000;
+  r.coordinator.noteHook('alice', 'UserPromptSubmit', '', r.now.t);
+  r.deliver('q1');
+  r.deliver('r1', { act: 'request', requiresReply: true, from: 'god' });
+  r.now.t += 1_000;
+  const c = r.bridge.claimAtStop('alice');
+  assert.deepEqual([...c.ids].sort(), ['q1', 'r1']);
+});
+
 K.bridgeFailsOpen = (mods = real) => {
   const r = rig(mods, { quietThrows: true });
   r.deliver('q1');
@@ -587,7 +610,10 @@ const MUTANTS = [
   { name: 'hold takes an in-flight id', file: WW, kind: 'ww',
     edits: [['    for (const id of [...r.pending].sort()) {\n      const until = holds.get(id);', '    for (const id of [...r.pending, ...(r.inFlight?.ids ?? [])].sort()) {\n      const until = holds.get(id);']], killer: 'holdOnlyPending', dies: /AN IN-FLIGHT ID IS NOT HELD/ },
   { name: 'bridge never holds', file: BRIDGE, kind: 'bridge',
-    edits: [['    this.holdQuiet(agentId, now);\n', '']], killer: 'bridgeHoldsAndReleases', dies: /A QUIET DELIVERY TYPES NOTHING/ },
+    // The typed-wake claim path (GTC M4 added a second call, in claimAtStop: pinned below).
+    edits: [["    this.holdQuiet(agentId, now);\n    this.deps.diag?.('facts', {", "    this.deps.diag?.('facts', {"]], killer: 'bridgeHoldsAndReleases', dies: /A QUIET DELIVERY TYPES NOTHING/ },
+  { name: 'the Stop-continue never holds (GTC M4)', file: BRIDGE, kind: 'bridge',
+    edits: [['    this.holdQuiet(agentId, now);\n    const claim = coordinator.claimAtStop(', '    const claim = coordinator.claimAtStop(']], killer: 'bridgeStopHolds', dies: /A QUIET DELIVERY IS NOT CARRIED BY A STOP-CONTINUE/ },
   { name: 'bridge fails closed (a throw holds everything)', file: BRIDGE, kind: 'bridge',
     edits: [['    try { holds = quietUntil(agentId, pending, now); } catch { return; }', '    try { holds = quietUntil(agentId, pending, now); } catch { holds = new Map(pending.map((id) => [id, now + 1800000])); }']], killer: 'bridgeFailsOpen', dies: /NO LEDGER ANSWER = NO HOLD: IT WAKES/ },
   { name: 'a waiting card is still STALE', file: STALE, kind: 'stale',

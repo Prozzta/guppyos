@@ -58,7 +58,7 @@ const MUTANTS = [
     "    if (event === 'SubagentStop') return r.lifecycle === 'idle';",
     "    if (event === 'SubagentStop') { r.lifecycle = 'idle'; return true; }"],
   ['w event mode accepts no idle evidence', WAKE,
-    "      if (r.lifecycle !== 'idle') return no(`lifecycle-${r.lifecycle}`);\n", ''],
+    "      if (!atStop && r.lifecycle !== 'idle') return no(`lifecycle-${r.lifecycle}`);\n", ''],
   ['w D3 reverted: an ACTIVE agent is claimed on PTY quiescence', WAKE,
     "      if (!(r.lifecycle === 'idle' || (r.lifecycle === 'unknown' && quiescent))) {",
     "      if (r.lifecycle !== 'idle' && !quiescent) {"],
