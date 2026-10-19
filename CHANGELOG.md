@@ -11,6 +11,47 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.96] — 2026-10-19
+
+**Heavy jobs are counted where they really run, and god's screen reading survives a busy start.**
+Rollback: 1.1.95 (reinstall).
+
+### Added
+
+- **Test processes ask for a heavy-job slot themselves.** Every agent's Node processes load a
+  small preload that, in a test process, checks with the app before any test runs. A test run
+  the agent's own command shows (`node --test` of named files) stays light. A run hidden inside
+  a script, an alias or a computed command counts as a heavy job: it takes a slot, shares its
+  agent's slot, or waits in the queue. If the app cannot be reached, the run goes ahead and one
+  log row says so.
+- **Antigravity usage choices on the Floor tab:** 3P 5H, 3P Weekly, Gemini 5H and Gemini Weekly
+  beside the budget. The line names the family, and clicking it opens that family's detail.
+
+### Changed
+
+- **The hidden screen copy survives a busy app start.** On 1.1.95 it switched itself off about
+  6 seconds after start, so god's `term read` found no screen. Its cost is now measured, not
+  estimated, and judged only over a full window, never in the first 30 seconds or 20 seconds
+  after an agent starts. If it does switch off, it comes back after 1, 2, 4 and up to 30
+  minutes.
+- **The screen check can read the hidden copy.** The setting `screenGateSource` (default
+  `renderer`) can be set to `mirror`. If the copy cannot answer, the check falls back to the
+  visible terminal and logs why.
+- **Commands that start with a shell keyword are classified** (`if`, `then`, `do`, `{` and
+  similar), so a heavy command inside them is counted.
+- **Memory notes answer faster under disk load.** The per-line disk flush runs off the request
+  path. A note is still acknowledged only after it is on disk.
+
+### Fixed
+
+- **File requests from the window are limited to agent folders.** The app's file list, read and
+  write requests refuse any folder that is not an agent folder it knows.
+- **`npm ci` builds inside agent shells.** node-pty's winpty build called two batch files by a
+  bare name, which fails when `NoDefaultCurrentDirectoryInExePath` is set (as in Claude Code's
+  shells). Both calls are now qualified, and the install checks it.
+- **A release has one path: the verified local build.** The GitHub Release workflow no longer
+  publishes on a tag push. It runs only by hand, as a dry build.
+
 ## [1.1.95] — 2026-10-18
 
 **God can read and drive any agent's terminal.** Rollback: 1.1.94 (reinstall).
