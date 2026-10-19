@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const lb = require('./tools/layer-b-run.cjs');
 
 const T = { timeout: 120_000, skip: process.platform !== 'win32' ? 'Windows only' : false };
+const WATCHER_EXIT_MS = 30_000;
 
 test('psArgs: -EncodedCommand (UTF-16LE base64) that decodes back to the script, never -Command -, bounded length', () => {
   const script = lb.PS_WATCH(1234);
@@ -41,8 +42,10 @@ test('REAL: the window watcher runs for ~5 s on this process and reports ok:true
   assert.ok(Array.isArray(w.last.visible) && Array.isArray(w.last.browsers) && Array.isArray(w.last.alerts));
   assert.deepEqual(hits, [], 'this headless test process tree shows no window');
   assert.equal(w.healthy(), true);
-  await new Promise((r) => setTimeout(r, 1500));
-  assert.ok(w.child.exitCode !== null || w.child.signalCode !== null, 'the watcher process was killed');
+  // LOAD-BURST-196: its exit event, not a fixed 1.5 s (in a FULL's opening burst the exit can be
+  // later); the bound is load-tolerant and the failure names the phase and the kill's error.
+  const exit = await Promise.race([w.exited, new Promise((r) => setTimeout(() => r(null), WATCHER_EXIT_MS))]);
+  assert.ok(exit, `the watcher process was killed: phase "watcher stop": no exit within ${WATCHER_EXIT_MS} ms of stop() (kill error: ${w.stopError || 'none'})`);
 });
 
 test('REAL: the process scan runs once (async and sync) and returns a parseable result that includes this process', T, async () => {

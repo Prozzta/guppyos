@@ -142,12 +142,29 @@ async function startFile(dir, exe, src = FILE, env = {}) {
   let out = ''; let errText = '';
   f.stdout.setEncoding('utf8'); f.stdout.on('data', (d) => { out += d; });
   f.stderr.setEncoding('utf8'); f.stderr.on('data', (d) => { errText += d; });
-  await until('file up', () => out.includes('up\n'));
+  // LOAD-BURST-196: its 'up' line or its exit, whichever comes first, under a load-tolerant bound
+  // (in a FULL's opening burst the file's start can take far longer than alone); a failure names
+  // the phase, the time it took, the pid, the exit and the stderr.
+  let exit = null;
+  f.once('exit', (code, signal) => { exit = { code, signal }; });
+  const up = await until('file up', () => out.includes('up\n') || exit != null, FILE_UP_MS).then(() => null, (e) => e);
+  const said = () => `phase "file up": pid ${f.pid}, ${Date.now() - bornMs} ms after spawn, exit ${JSON.stringify(exit)}, stderr ${JSON.stringify(errText.slice(-400))}`;
+  assert.ok(!up && out.includes('up\n'), `the file started: ${up ? 'no "up" line in time' : 'it exited first'}: ${said()}`);
   assert.equal(errText, '', 'the file joined its job');
   return { f, bornMs, started: async () => { f.stdin.write('go\n'); await until('children', () => /\{.*\}/.test(out)); return JSON.parse(/\{.*\}/.exec(out)[0]); } };
 }
 
-const until = async (what, ok, ms = 30_000) => { const end = Date.now() + ms; while (!ok()) { if (Date.now() > end) throw new Error(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+const FILE_UP_MS = 120_000;
+// A check that throws (pingOf's process table: a PowerShell CIM query a load burst can time out)
+// is polled again; a timeout names the phase, the bound and the check's last error.
+const until = async (what, ok, ms = 30_000) => {
+  const t0 = Date.now(); let last = null;
+  for (;;) {
+    try { if (ok()) return; last = null; } catch (e) { last = e; }
+    if (Date.now() - t0 > ms) throw new Error(`timed out: phase "${what}" after ${Date.now() - t0} ms (bound ${ms} ms)${last ? `; last check failed: ${String(last.message).split('\n')[0]}` : ''}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+};
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 /** cmd's ping: a child by parent pid and birth (own-procs' check), never by parent pid alone. */
 const pingOf = (cmdPid) => { const t = own.processTable(); const cmd = t.find((r) => r.pid === cmdPid); return cmd ? own.childrenOf(t, cmd).find((r) => /^ping/i.test(r.name)) : undefined; };
