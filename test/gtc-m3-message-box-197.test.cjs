@@ -283,6 +283,17 @@ test('MUST 2: text that never reaches the composer (a dialog ate it): no Enter, 
   assert.deepEqual(await send(w), o, 'answered: never typed again');
 });
 
+test('Jim SHOULD 2 (9e6216): a paste token proves only MULTI-line text; a one-line text beside a stale token is NOT_IN_COMPOSER', async () => {
+  for (const token of ['[Pasted text #1 +3 lines]', '[Pasted Content 812 chars]']) {
+    const one = world({ showsText: false, prompt: token });
+    assert.deepEqual(await send(one), { kind: 'TYPED_NOT_SENT', reason: 'NOT_IN_COMPOSER' }, token);
+    assert.ok(!boxWrites(one).includes('\r'), `${token}: no Enter`);
+    // The control: the same screen does prove a multi-line text (the provider folds it to the token).
+    const multi = world({ showsText: false, prompt: token });
+    assert.deepEqual(await send(multi, { text: 'please review\nthe diff' }), { kind: 'COMMITTED', via: 'term', command: false }, token);
+  }
+});
+
 test('MUST 2: someone types during the gap: no Enter (it would submit the mixed text)', async () => {
   const w = world();
   w.onBoxSettle = async () => { w.human('zz'); };
@@ -336,6 +347,18 @@ test('confirm: the UPS carrying our text = DELIVERED; another UPS does not confi
   assert.deepEqual(await send(u), { kind: 'COMMITTED', via: 'term', command: false }, 'asked again, it is answered, not re-typed');
   assert.deepEqual(boxWrites(u), [payloadFor('please review the diff'), '\r'], 'UNKNOWN never retries');
   assert.equal(fingerprintOf('  a\n b  '), 'a b');
+});
+
+test('Jim SHOULD 1 (9e6216): a second send while the first waits for its UPS settles the first as SUPERSEDED, with a row', async () => {
+  const w = world();
+  await send(w);
+  w.lastHumanAt = undefined;   // past the quiet window
+  assert.equal((await send(w, { requestId: 'queue:alice:m2', text: 'and then run the tests' })).kind, 'COMMITTED');
+  w.box.noteHook('alice', 'UserPromptSubmit', { prompt: 'and then run the tests' });
+  await later(w, MESSAGE_BOX_CONFIRM_MS + 1);
+  assert.deepEqual(w.rows.filter((r) => r.kind === 'message-box-confirm').map((r) => `${r.requestId}=${r.confirm}`),
+    ['queue:alice:m1=SUPERSEDED', 'queue:alice:m2=DELIVERED'], 'each item gets exactly one confirm row; the first never vanishes');
+  assert.deepEqual(w.box.attentionItems(), [], 'a superseded item is no alarm');
 });
 
 test('confirm: AGY PreInvocation = DELIVERED-CORRELATED; a slash command = COMMAND, no alarm (SHOULD 1)', async () => {

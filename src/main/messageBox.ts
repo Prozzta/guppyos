@@ -93,7 +93,7 @@ export type MessageBoxRefusal =
   | 'BAD_REQUEST' | 'NOT_FROM_APP_WINDOW' | 'NO_PTY' | 'TEXT_ENTERS_MODE' | 'NOT_IDLE'
   | 'DRAFT_IN_TERMINAL' | 'PICKER_OPEN' | 'PROMPT_SETTLING' | 'TERMINAL_EXITED' | 'HUMAN_TYPING' | 'OWNER_BUSY' | 'WRITE_FAILED';
 export type TypedNotSent = 'NOT_IN_COMPOSER' | 'HUMAN_TYPED' | 'ENTER_FAILED';
-export type Confirm = 'DELIVERED' | 'DELIVERED-CORRELATED' | 'COMMAND' | 'UNKNOWN' | 'UNCONFIRMED_BUSY';
+export type Confirm = 'DELIVERED' | 'DELIVERED-CORRELATED' | 'COMMAND' | 'UNKNOWN' | 'UNCONFIRMED_BUSY' | 'SUPERSEDED';
 
 export type MessageBoxOutcome =
   | { kind: 'COMMITTED'; via: 'term'; command: boolean }
@@ -298,6 +298,10 @@ export class MessageBox {
 
   private arm(req: MessageBoxRequest, provider: AgentProvider | null, busy: boolean): void {
     const p: Pending = { requestId: req.requestId, fingerprint: fingerprintOf(req.text), sentAt: this.d.now(), agy: provider === 'antigravity', done: false };
+    // Jim SHOULD 1 (9e6216): one pending confirm per agent, so an older one still waiting is settled
+    // with its own row, never silently overwritten.
+    const prior = this.pending.get(req.agentId);
+    if (prior && !prior.done) this.confirm(req.agentId, prior, 'SUPERSEDED');
     this.pending.set(req.agentId, p);
     this.d.setTimer(() => {
       if (p.done || this.pending.get(req.agentId) !== p) return;
