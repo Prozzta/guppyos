@@ -95,8 +95,8 @@ test('one reader: the renderer functions are the pool lookup plus the shared cal
   assert.match(codex, /if \(!entry \|\| entry\.exited \|\| !entry\.opened\) return null;\s*try \{\s*return codexReading\(entry\.term\.buffer\.active, expectedTail\);/);
   assert.ok(codex.split('\n').length <= 9, 'a thin wrapper, no reader of its own');
   const mirror = src('src/main/terminalMirror.ts');
-  assert.match(mirror, /async needleReading\(needle, expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => needleReading\(t\.buffer\.active, t\.rows, needle, expectedTail\)\);/);
-  assert.match(mirror, /async codexReading\(expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => codexReading\(t\.buffer\.active, expectedTail\)\);/);
+  assert.match(mirror, /async needleReading\(needle, expectedTail, onMs\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => needleReading\(t\.buffer\.active, t\.rows, needle, expectedTail\), onMs\);/);
+  assert.match(mirror, /async codexReading\(expectedTail, onMs\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => codexReading\(t\.buffer\.active, expectedTail\), onMs\);/);
   // The moved helpers: the renderer paths re-export the shared ones, so nothing can fork.
   assert.match(src('src/renderer/src/components/composerAttestation.ts'), /^\/\/[^\n]*\nexport \* from '@shared\/composerAttestation';\n$/);
   assert.match(src('src/renderer/src/components/terminalScrollback.ts'), /^\/\/[^\n]*\nexport \{ TERMINAL_SCROLLBACK_LINES \} from '@shared\/terminalScrollback';\n$/);
@@ -220,8 +220,8 @@ test('MUST 1: a mirror made by a re-arm is no source (seeded); one fed from the 
 function heldMirror(reading = { onPromptRow: true, screenCount: 1 }, ms = 4.2) {
   let open;
   const gate = new Promise((r) => { open = r; });
-  const read = async () => { await gate; return reading; };
-  return { mirror: { codexReading: read, needleReading: read, lastReadMs: () => ms, dispose() {} }, open };
+  const read = (onMs) => async () => { await gate; onMs?.(ms); return reading; };
+  return { mirror: { codexReading: (tail, onMs) => read(onMs)(), needleReading: (n, tail, onMs) => read(onMs)(), dispose() {} }, open };
 }
 
 test('SHOULD 1: a session that ends, or a mirror replaced, while the drain awaits answers null with "replaced", never the old reading', async () => {
@@ -256,16 +256,37 @@ test('SHOULD 1: a session that ends, or a mirror replaced, while the drain await
   assert.equal(r.rows[0].fallback, 'replaced');
 });
 
+test('re-check MUST 1: overlapping reads of one mirror each get their OWN time (a full-scrollback codex scan, not the needle time)', async () => {
+  const pm = new PtyManager();
+  const m = M.createTerminalMirror(120, 40);
+  const row = 'x'.repeat(87);
+  let bytes = '';
+  for (let i = 0; i < M.MIRROR_SCROLLBACK + 40; i++) bytes += `${row} ${i}\r\n`;
+  m.write(`${bytes}› x`);
+  pm.sessions.set('p', session('p', m));
+  try {
+    // Started together: both drains resolve in one xterm flush, so both readings run before either caller resumes.
+    const [codex, needle] = await Promise.all([pm.mirrorGateReading('p', 'codex', '', undefined), pm.mirrorGateReading('p', 'needle', 'x', undefined)]);
+    assert.ok(codex.reading && needle.reading, 'both read');
+    assert.ok(codex.ms > needle.ms, `the whole-buffer codex scan (${codex.ms} ms) is not logged at the viewport needle's time (${needle.ms} ms)`);
+  } finally { m.dispose(); }
+});
+
 test('SHOULD 2: the real mirror times its sync read; the gate sums the read time per kind into the summary', async () => {
   const m = drawn(Array.from({ length: 300 }, (_, i) => `line ${i}`).concat(['› x']), 300, 40);
   try {
-    assert.equal(m.lastReadMs(), 0, 'nothing read yet');
-    await m.codexReading();
-    const a = m.lastReadMs();
-    assert.ok(Number.isFinite(a) && a > 0, `a codex read is timed (${a})`);
-    await m.needleReading('x');
-    assert.ok(Number.isFinite(m.lastReadMs()) && m.lastReadMs() > 0, 'a needle read is timed');
+    const ms = [];
+    assert.deepEqual(await m.codexReading(undefined, (x) => ms.push(x)), await m.codexReading(), 'the sink does not change the reading');
+    await m.needleReading('x', undefined, (x) => ms.push(x));
+    assert.equal(ms.length, 2, 'one time per reading that took one');
+    assert.ok(ms.every((x) => Number.isFinite(x) && x > 0), `each read is timed (${ms})`);
+    await m.codexReading(undefined, () => { throw new Error('sink'); });
   } finally { m.dispose(); }
+  const gone = drawn(['› x'], 0, 40);
+  gone.dispose();
+  const none = [];
+  assert.equal(await gone.codexReading(undefined, (x) => none.push(x)), null);
+  assert.deepEqual(none, [], 'a disposed mirror reads nothing, so it times nothing');
   // The mirror source: each answered or null reading carries ms; a reading without ms is not counted.
   const r = gateRig({ src: 'mirror', mirrorAns: { reading: M_READ, ms: 2 } });
   await r.gate.codex('p1');

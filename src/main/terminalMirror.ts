@@ -47,11 +47,11 @@ export interface TerminalMirror {
   facts(): Promise<CodexScreenFacts>;
   /** GTC M2: the screen gate's two readings (shared/screenReading.ts, the renderer's own code), after
    *  every byte written so far is parsed. Null = not evidence, as the renderer's null is. */
-  needleReading(needle: string, expectedTail?: string): Promise<NeedleReading | null>;
-  codexReading(expectedTail?: string): Promise<CodexReading | null>;
-  /** GTC M2 (Jim SHOULD 2): ms of main's synchronous work in the last reading (after the drain);
-   *  the Codex reading scans the whole 10,000-line buffer, which the parse-time guard does not see. */
-  lastReadMs(): number;
+  /** GTC M2 (Jim SHOULD 2): `onMs` gets THIS reading's ms of main's synchronous work after the drain
+   *  (the Codex reading scans the whole 10,000-line buffer, which the parse-time guard does not see).
+   *  Per call, never a shared last value: overlapping reads drain in one flush (Jim re-check MUST 1). */
+  needleReading(needle: string, expectedTail?: string, onMs?: (ms: number) => void): Promise<NeedleReading | null>;
+  codexReading(expectedTail?: string, onMs?: (ms: number) => void): Promise<CodexReading | null>;
   /** Bytes handed to write() since the mirror was made (the cost sampler's input). */
   bytesWritten(): number;
   dispose(): void;
@@ -112,8 +112,10 @@ export function createTerminalMirror(cols: number, rows: number, make: (c: numbe
   const t = make(clamp(cols, 100), clamp(rows, 30));
   let written = 0;
   let disposed = false;
-  let readMs = 0;
-  const timed = <T>(f: () => T): T => { const t0 = performance.now(); try { return f(); } finally { readMs = performance.now() - t0; } };
+  const timed = <T>(f: () => T, onMs?: (ms: number) => void): T => {
+    const t0 = performance.now();
+    try { return f(); } finally { try { onMs?.(performance.now() - t0); } catch { /* a sink never breaks the read */ } }
+  };
   const drained = (): Promise<void> => new Promise((resolve) => { if (disposed) resolve(); else t.write('', resolve); });
   return {
     write(data) {
@@ -146,15 +148,14 @@ export function createTerminalMirror(cols: number, rows: number, make: (c: numbe
       const b = t.buffer.active;
       return extractCodexScreen((i) => b.getLine(i)?.translateToString(true), b.length, b.baseY + b.cursorY);
     },
-    async needleReading(needle, expectedTail) {
+    async needleReading(needle, expectedTail, onMs) {
       await drained();
-      return disposed ? null : timed(() => needleReading(t.buffer.active, t.rows, needle, expectedTail));
+      return disposed ? null : timed(() => needleReading(t.buffer.active, t.rows, needle, expectedTail), onMs);
     },
-    async codexReading(expectedTail) {
+    async codexReading(expectedTail, onMs) {
       await drained();
-      return disposed ? null : timed(() => codexReading(t.buffer.active, expectedTail));
+      return disposed ? null : timed(() => codexReading(t.buffer.active, expectedTail), onMs);
     },
-    lastReadMs: () => readMs,
     bytesWritten: () => written,
     dispose() {
       if (disposed) return;

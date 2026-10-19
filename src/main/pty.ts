@@ -565,12 +565,14 @@ export class PtyManager {
     if (s.mirrorSeeded) return { reading: null, reason: 'seeded' };
     const m = s.mirror;
     let r: NeedleReading | CodexReading | null;
-    try { r = kind === 'codex' ? await m.codexReading(expectedTail) : await m.needleReading(needle, expectedTail); } catch { r = null; }
+    let ms: number | undefined;
+    const took = (x: number): void => { ms = x; };
+    try { r = kind === 'codex' ? await m.codexReading(expectedTail, took) : await m.needleReading(needle, expectedTail, took); } catch { r = null; }
     // The session may have ended or been replaced while the read drained: a reading of an old or
     // disposed mirror is not evidence (Jim SHOULD 1), and it is a race, not the mirrors being off (INFO 2).
     if (this.sessions.get(id) !== s || s.mirror !== m) return { reading: null, reason: 'replaced' };
-    const ms = m.lastReadMs();
-    return r ? { reading: r, ms } : { reading: null, reason: 'unreadable', ms };
+    const t = ms === undefined ? {} : { ms };
+    return r ? { reading: r, ...t } : { reading: null, reason: 'unreadable', ...t };
   }
 
   /** GOD-TERMINAL-CONTROL M1: chars fed to mirrors since start, monotonic (an ended session's count
