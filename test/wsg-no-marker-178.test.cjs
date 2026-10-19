@@ -129,7 +129,8 @@ test('fix 4 wiring: main raises and lifts through the coordinator; the snapshot 
   assert.match(idx, /screenGuardNotices\.reading\(r\.agentId, r\.ok, r\.reason, r\.admissionClass === 'CAPACITY_GATED', Date\.now\(\)\);/);
   assert.match(idx, /hive\.mail\.noteScreenGuardAlert\(a\.agentId, a\.reason, a\.refusedMs, a\.refusals, agentDisplayName\(a\.agentId\), Date\.now\(\)\);/);
   assert.match(idx, /if \(latched && agentId\) screenGuardNotices\.latched\(agentId\);/);
-  assert.match(idx, /screenHold: screenGuardNotices\.hold\(agentId, Date\.now\(\)\) \};/);
+  // GTC M3 adds the message-box view after the screen hold.
+  assert.match(idx, /screenHold: screenGuardNotices\.hold\(agentId, Date\.now\(\)\),\s*(?:\/\/[^\n]*\n\s*)?messageBox: messageBox\?\.view\(agentId\)/);
   assert.doesNotMatch(idx, /ScreenGuardAlertWatch/, 'one owner of the alert');
 });
 
@@ -215,7 +216,7 @@ test('fix 3: INTERFERED, the pause and capacity keep their precedence; a release
   assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: sh, headManual: true }).kind, 'SCREEN', 'a "send now" head is held by the same check: still said');
   assert.equal(HOLD.deliveryHoldView({ ...base, screenHold: null }), null);
   const composer = readSource('src/renderer/src/components/MessageQueueComposer.tsx');
-  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold\);/, 'no "send now" for a screen hold');
+  assert.match(composer, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold \|\| delivery\.boxStale\);/, 'no "send now" for a screen hold');
   assert.match(composer, /screenHold: delivery\.screenHold\s*\}\);/);
 });
 

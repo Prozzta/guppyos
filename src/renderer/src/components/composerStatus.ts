@@ -27,6 +27,10 @@ export interface ComposerStatusInput {
   block: TerminalAutomationBlock;
   capacityNote: string | null;
   capacityEvidence: CapacityEvidenceName | null | undefined;
+  /** GTC M3: main's message-box note about the last send (unconfirmed, typed but not sent). */
+  boxNote?: string | null;
+  /** GTC M3: the head item has waited over 5 min for idle while the terminal is quiet. */
+  boxStale?: boolean;
 }
 
 export interface ComposerStatus {
@@ -39,6 +43,9 @@ export interface ComposerStatus {
 export function composerStatus(i: ComposerStatusInput): ComposerStatus | null {
   const own = (text: string): ComposerStatus => ({ text, title: text });
   if (i.hold?.kind === 'INTERFERED') return { text: i.hold.hint, title: i.hold.title };
+  // GTC M3: the box's own words come first; a send that may not have landed outranks the queue.
+  if (i.boxNote) return own(`${i.agentName}: ${i.boxNote}`);
+  if (i.boxStale && i.queueLength > 0) return own(`waiting over 5 min for ${i.agentName} to go idle, and its terminal is quiet — check it; "send now" sends anyway`);
   if (i.queueLength === 0) return i.capacityNote && i.capacityEvidence !== 'NO_POOL' ? own(i.capacityNote) : null;
   if (!i.idle) {
     const text = `${i.agentName} is busy — ${i.queueLength} queued`;

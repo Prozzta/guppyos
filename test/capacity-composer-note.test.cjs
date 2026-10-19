@@ -79,10 +79,10 @@ test('a non-empty queue reads exactly as before: busy, hold, blocks, sending (+ 
 
 test('the composer renders composerStatus; send-now and the hold stay queue-driven', () => {
   const src = codeOnly(readSource('src/renderer/src/components/MessageQueueComposer.tsx'), 'MessageQueueComposer.tsx');
-  assert.match(src, /const status = composerStatus\(\{ agentName: agent\.name, queueLength: queue\.length, idle: shownIdle, hold, block, capacityNote,\s+capacityEvidence: delivery\.capacityEvidence \}\);/);
+  assert.match(src, /const status = composerStatus\(\{ agentName: agent\.name, queueLength: queue\.length, idle: shownIdle, hold, block, capacityNote,\s+capacityEvidence: delivery\.capacityEvidence, boxNote: delivery\.boxNote, boxStale: delivery\.boxStale \}\);/);
   assert.match(src, /title=\{status\.title\}/);
   assert.match(src, />\{status\.text\}<\/span>/);
   assert.ok(!/statusHint/.test(src), 'the old inline gate is gone');
-  assert.match(src, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold\);/);
+  assert.match(src, /const releasable = !delivery\.interfered && \(delivery\.paused \|\| delivery\.capacityHold \|\| delivery\.boxStale\);/);
   assert.match(src, /headManual: !!queue\[0\]\?\.manual/);
 });

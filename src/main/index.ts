@@ -103,6 +103,7 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
+import { MessageBox, messageBoxPathOf } from './messageBox';
 import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
@@ -540,6 +541,8 @@ const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row)
 /** MIRROR-STARTUP-196: the armed mirror cost guard (null before arming, or with the mirror off by
  *  config). Declared before the digest, which reads it. */
 let mirrorGuard: MirrorCostGuard | null = null;
+/** GTC M3: the Human's message box (built with termControl below). Declared before the digest. */
+let messageBox: MessageBox | null = null;
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -553,6 +556,8 @@ const floorDigest = new FloorDigest({
   silentTurns: () => findSilentTurns(silentTurnFacts(), Date.now()),
   quietStalls: () => quietRefusals.stalls().map((q) => ({ ...q, name: agentDisplayName(q.agentId) })),
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
+  // GTC M3: the Human's message-box items that need a look (never retried by the box).
+  messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // MIRROR-STARTUP-196: the mirrors are auto-off (god's term cannot read screens until re-arm).
   mirrorOff: () => mirrorGuard?.status() ?? null,
   send: (msg, from) => { hive.send(msg, from); },
@@ -1788,6 +1793,36 @@ const termControl = new TermControl({
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
 hookServer.setTermHandler((agentId, body) => termControl.handle(agentId, body));
+// GTC M3: the Human's message box. Its writes carry origin HUMAN (it IS the Human's input), so
+// only the app window's own IPC reaches it ('messageBox:deliver', ledgerUiSender), and only
+// `human: true` queue items (MessageQueueComposer) are sent there. Config `messageBoxPath: 'owner'`
+// sends them through the submit owner as before.
+messageBox = new MessageBox({
+  ptyOf: (agentId) => ptyForAgent(agentId),
+  providerOf: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? (a.provider ?? 'claude') : null;
+  },
+  idleFacts: (agentId) => workerWake.livenessFacts(agentId),
+  promptBlock: (ptyId) => { const s = ptyManager.promptState(ptyId); return s ? s.block : undefined; },
+  lastHumanInputAt: (ptyId) => ptyManager.lastHumanInputAt(ptyId),
+  humanGeneration: (ptyId) => ptyManager.humanInputGeneration(ptyId),
+  mirrorNeedle: async (ptyId, needle, expectedTail) => {
+    const r = await ptyManager.mirrorGateReading(ptyId, 'needle', needle, expectedTail);
+    return { reading: r.reading as { onPromptRow: boolean; promptTailMatches?: boolean } | null, reason: r.reason };
+  },
+  exclusive: (ptyId, fn, startMs) => automaticSubmit.exclusive(ptyId, fn, startMs),
+  slot: (agentId, fn) => termControl.slot(agentId, fn),
+  settle: (ptyId) => termControl.settle(ptyId),
+  write: (ptyId, data) => ptyManager.write(ptyId, data, 'HUMAN'),
+  ownerSubmit: (r) => automaticSubmit.submit({ requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass, text: r.text }),
+  outputQuietMs: (ptyId) => ptyManager.idleFor(ptyId),
+  log: (row) => hive.appendLog(row),
+  now: Date.now,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  setTimer: (fn, ms) => setTimeout(fn, ms)
+}, () => messageBoxPathOf(readConfig().messageBoxPath));
+hookServer.setTurnObserver((agentId, event, f) => messageBox?.noteHook(agentId, event, f));
 // The mirror per PTY (config `terminalMirror: false` = off), its cost guard and its shadow diff.
 const termShadow = new ShadowDiff((row) => hive.appendLog(row), Date.now);
 /** GTC M2: the screen gate's source, per request. The answering host's reading goes to the gate
@@ -2037,6 +2072,8 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
     // ZT-I1-MAIL §1.1: the PTY exited (or crashed): its open mail epoch ends abnormally. Not when
     // another PTY of the same agent is alive (a restart in place spawns the new one first).
     if (![...ptyToAgent.values()].includes(agentId)) { try { hookServer.abortMailTurn(agentId, 'pty-exit'); } catch { /* best-effort */ } }
+    // GTC M3: likewise the message box's session mark, pending confirm and waits.
+    if (![...ptyToAgent.values()].includes(agentId)) { try { messageBox?.forget(agentId); } catch { /* best-effort */ } }
     try { nativeMemory.agentExited(agentId); } catch { /* best-effort */ }
     // HEAVY-JOB-SERIALIZE: its jobs went with the PTY (unless another PTY of it is still alive).
     if (![...ptyToAgent.values()].includes(agentId)) { try { heavyLock.agentGone(agentId); } catch { /* best-effort */ } }
@@ -6469,7 +6506,9 @@ ipcMain.handle('control:snapshot', (_evt, agentId: unknown) => {
   const f = controlFactsOf(agentId);
   return { ...f.snap, capacityHold: f.gate.holds, capacityEvidence: f.gate.evidence, interfered: f.interfered, impact: f.impact,
     // WSG fix 3: the Codex screen check is holding this agent's automatic deliveries.
-    screenHold: screenGuardNotices.hold(agentId, Date.now()) };
+    screenHold: screenGuardNotices.hold(agentId, Date.now()),
+    // GTC M3: which path the Human's own items take, and what the composer should say about them.
+    messageBox: messageBox?.view(agentId) ?? { path: messageBoxPathOf(readConfig().messageBoxPath), note: null, stale: false } };
 });
 
 /** The snapshot's settled facts for one agent - the ONE computation behind both the
@@ -6542,6 +6581,19 @@ function agentImpactFor(
  *
  * Resolves with what HAPPENED; it never rejects for a delivery reason.
  */
+/** GTC M3: the Human's own queued message (MessageQueueComposer, `human: true`). Its writes carry
+ *  origin HUMAN, so it is accepted only from a top frame of the app's own window (Jim MUST 3). */
+ipcMain.handle('messageBox:deliver', (evt, req: unknown) => {
+  if (!ledgerUiSender(evt)) return { kind: 'REFUSED', reason: 'NOT_FROM_APP_WINDOW' };
+  const r = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>;
+  if (typeof r.requestId !== 'string' || !r.requestId || typeof r.agentId !== 'string' || !r.agentId
+    || typeof r.text !== 'string' || !r.text || !messageBox) {
+    return { kind: 'REJECTED', reason: 'BAD_REQUEST' };
+  }
+  return messageBox.deliver({ requestId: r.requestId, agentId: r.agentId, text: r.text, now: r.now === true })
+    .catch((e: unknown) => ({ kind: 'REFUSED', reason: 'WRITE_FAILED', detail: `message box error: ${String(e)}` }));
+});
+
 ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
   const r = (req && typeof req === 'object' ? req : {}) as Record<string, unknown>;
   if (typeof r.requestId !== 'string' || !r.requestId || typeof r.agentId !== 'string' || !r.agentId

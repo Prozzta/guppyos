@@ -90,6 +90,7 @@ export interface FloorDigestInput {
   quietStalls?: DigestQuietStall[];
   wakeStalls?: DigestWakeStall[];
   mirrorOff?: DigestMirrorOff | null;
+  messageBox?: DigestMessageBox[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -183,6 +184,22 @@ export function mirrorOffItem(m: DigestMirrorOff, now: number): DecisionItem {
   };
 }
 
+/** GTC M3: a Human message-box send nobody can vouch for (messageBox.ts): typed but not confirmed,
+ *  typed but not sent, or a wait for idle that looks stale. */
+export interface DigestMessageBox { agentId: string; name?: string; why: string; at: number }
+
+/** One item per event (its id carries when it happened). */
+export function messageBoxItem(m: DigestMessageBox, now: number): DecisionItem {
+  const who = m.name ?? m.agentId;
+  const what = m.why === 'UNKNOWN' ? 'was typed and Entered, but the agent never confirmed it'
+    : m.why === 'STALE_WAIT' ? 'has waited over 5 min for the agent to go idle while its terminal is quiet (the hooks may be wrong)'
+      : `was typed but not sent (${m.why})`;
+  return {
+    id: `message-box:${m.agentId}:${m.why}:${m.at}`, cardId: null,
+    line: `${who}: the Human's message ${what}, ${ageText(now - m.at)} ago - term read ${m.agentId} (nothing is retried)`
+  };
+}
+
 type Card = Record<string, unknown> & { id: string };
 
 export function buildFloorDigest(input: FloorDigestInput): { markdown: string; decisionItems: DecisionItem[] } {
@@ -194,6 +211,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   })();
   const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);
   if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
+  for (const m of input.messageBox ?? []) items.push(messageBoxItem(m, now));
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -317,6 +335,8 @@ export interface FloorDigestHost {
   wakeStalls?(): DigestWakeStall[];
   /** MIRROR-STARTUP-196: the terminal mirrors' auto-off, while it lasts. Optional. */
   mirrorOff?(): DigestMirrorOff | null;
+  /** GTC M3: the Human's message-box sends that need a look (the last hour). Optional. */
+  messageBox?(): DigestMessageBox[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -361,6 +381,7 @@ export class FloorDigest {
       quietStalls: (() => { try { return this.host.quietStalls?.() ?? []; } catch { return []; } })(),
       wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
+      messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
       backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.

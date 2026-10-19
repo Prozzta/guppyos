@@ -340,6 +340,10 @@ export interface HarnessConfig {
    *  xterm (the shadow diff compares the mirror); 'mirror' = main's headless mirror, falling back
    *  to the renderer whenever the mirror has no reading. Read at every request (screenGate.ts). */
   screenGateSource?: 'renderer' | 'mirror';
+  /** GTC M3 (1.1.97): how the Human's own queued messages are delivered. Unset or 'term' = main's
+   *  message box (hook idle, TermControl, origin HUMAN; messageBox.ts); 'owner' = the submit owner,
+   *  as up to 1.1.96. Read at every request. 'owner' is kept for one release. */
+  messageBoxPath?: 'term' | 'owner';
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];

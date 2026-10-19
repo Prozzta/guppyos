@@ -627,6 +627,14 @@ export type AutoSubmitOutcome =
    *  never typed again; the queue drops it. */
   | { kind: 'HUMAN_HANDLED' };
 
+/** GTC M3: `messageBox:deliver`'s answer. On the 'owner' fallback it is the owner's own outcome.
+ *  TYPED_NOT_SENT = the text was typed and no Enter pressed: never resend it. */
+export type MessageBoxOutcome =
+  | AutoSubmitOutcome
+  | { kind: 'COMMITTED'; via: 'term'; command: boolean }
+  | { kind: 'REFUSED'; reason: string; detail?: string; since?: number; stale?: boolean }
+  | { kind: 'TYPED_NOT_SENT'; reason: string };
+
 /** How a person resolves an INTERFERED hold. No default exists - see main's handler. */
 export type InterferenceResolution = 'SEND_AGAIN' | 'ALREADY_HANDLED';
 
@@ -657,6 +665,9 @@ export interface AgentControlSnapshot {
   impact?: AgentImpact | null;
   /** WSG fix 3 (1.1.78): the Codex screen check is refusing this agent's automatic deliveries. */
   screenHold?: { reason: string } | null;
+  /** GTC M3: the path the Human's own items take ('term' = main's message box), the composer's
+   *  note about the last send, and whether a wait for idle looks stale (Send-now is offered). */
+  messageBox?: { path: 'term' | 'owner'; note: string | null; stale: boolean };
   autoDeliveryPaused: boolean;
   gatedTools: string[];
   pendingSteers: number;
@@ -1165,9 +1176,9 @@ const api = {
     ipcRenderer.invoke('hive:send', msg, from),
 
   onHiveHookEvent: (
-    cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => void
+    cb: (e: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; fullyIdle?: boolean; blocked?: boolean }) => void
   ): (() => void) => {
-    const listener = (_e: IpcRendererEvent, payload: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; blocked?: boolean }) => cb(payload);
+    const listener = (_e: IpcRendererEvent, payload: { agentId?: string; event: string; tool?: string; notificationType?: string; source?: string; message?: string; fullyIdle?: boolean; blocked?: boolean }) => cb(payload);
     ipcRenderer.on('hive:hookEvent', listener);
     return () => ipcRenderer.removeListener('hive:hookEvent', listener);
   },
@@ -1418,6 +1429,9 @@ const api = {
    */
   autoSubmit: (req: { requestId: string; agentId: string; admissionClass: AutoSubmitClass; text: string; settleMs?: number; attempt?: number }): Promise<AutoSubmitOutcome> =>
     ipcRenderer.invoke('autoSubmit:submit', req),
+  /** GTC M3: deliver one of the Human's own queued messages (main's message box). */
+  messageBoxDeliver: (req: { requestId: string; agentId: string; text: string; now: boolean }): Promise<MessageBoxOutcome> =>
+    ipcRenderer.invoke('messageBox:deliver', req),
   /** START-FIXES-163 (3): a boot prompt was given up on; main writes a boot-submit THREW row. */
   logBootSubmitThrew: (agentId: string, message: string): void =>
     ipcRenderer.send('autoSubmit:bootSubmitThrew', agentId, message),
