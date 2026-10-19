@@ -173,8 +173,9 @@ test('end to end (a real nested node --test): the totals match node\'s own count
     const go = () => {
       const logs = []; const errs = [];
       const code = R.run({ testDir: path.join(dir, 'test'), perfDir: path.join(dir, 'test', 'perf'), cwd: dir, timeoutMs: 3000, isTTY: false,
-        spawn: (a, o) => spawnSync(process.execPath, a, { ...o, stdio: 'pipe' }), log: (l) => logs.push(l), err: (l) => errs.push(l) });
-      return { code, last: logs[logs.length - 1], errs: errs.join('\n') };
+        spawn: (a, o) => spawnSync(process.execPath, a, { ...o, stdio: 'pipe' }), log: (l) => logs.push(l), err: (l) => errs.push(l),
+        failureFile: () => path.join(dir, 'failures.json') });
+      return { code, last: logs[logs.length - 1], logs, errs: errs.join('\n') };
     };
     const ok = go();
     assert.equal(ok.last, '[test-runner] totals: tests 4 pass 3 fail 0 cancelled 0 skipped 1 lane pass exit 0');
@@ -183,6 +184,8 @@ test('end to end (a real nested node --test): the totals match node\'s own count
     const hung = go();
     assert.notEqual(hung.code, 0);
     assert.match(hung.errs, /perf lane FILE TIMED OUT after 3000 ms .*stuck\.perf\.cjs/);
+    assert.ok(hung.logs.some((line) => line.includes('FAIL') && line.includes('stuck.perf.cjs')));
+    assert.match(fs.readFileSync(path.join(dir, 'failures.json'), 'utf8'), /stuck\.perf\.cjs/);
     assert.match(hung.last, /lane fail exit [1-9]/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
