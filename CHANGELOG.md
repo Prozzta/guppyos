@@ -11,6 +11,55 @@ All notable changes to this project are documented here. The format is based on
 > v0.4.5 (below). Earlier 1.1.x releases are described on the
 > [releases page](https://github.com/Prozzta/guppyos/releases).
 
+## [1.1.97] — 2026-10-19
+
+**Your message box types into the agent's terminal when the agent is ready; agent wakes can too.**
+Rollback: 1.1.96 (reinstall), or per feature by config (below).
+
+### Added
+
+- **The message box sends through the agent's terminal (GTC M3).** A message you queue for an
+  agent is typed into its terminal once the agent's own hooks say it is idle (never a guess from
+  the screen), with nobody typing and no picker or draft in the way. It is confirmed by the
+  agent's own prompt hook. If the text does not reach the prompt row, nothing is sent and the
+  item is dropped with a note; Send-now skips only the idle wait. Config `messageBoxPath: 'owner'`
+  keeps the old path for this release.
+- **Agent wakes through hook readiness and a confirmed typed send (GTC M4), opt-in.** With config
+  `wakePath: 'term'`, inbox wakes and boot prompts are typed only when main's hook state says the
+  agent is idle, and count as delivered only on the provider's own confirm (Claude's prompt hook,
+  Codex's sentinel, Antigravity's PreInvocation); nothing is retried blindly. `stopContinue` per
+  provider lets a Stop hook carry waiting mail into the same turn. The screen check only shadows
+  these sends and decides nothing. The default stays `wakePath: 'owner'`, the 1.1.96 path.
+- **Release cuts gate on identity and on every mutant runner.** Each cut now runs
+  `scripts/verify-packaged-identity.cjs` on the built app and requires every
+  `test/tools/*-mutants.cjs` runner to kill all its mutants at the cut commit.
+
+### Changed
+
+- **Test runs start without a load burst (LOAD-BURST).** The test runner lets at most a quarter of
+  the cores' worth of test files load at once and records each file's start. The first minute's
+  median load time halves (2.4 s to 1.2 s; p95 12.4 s to 5.8 s) at the same wall time. Three
+  fixed sleeps in the test rigs became waits on the real event, with failures that name what
+  they waited for.
+- **A loop over a test glob is a heavy job (HGL196).** `for f in test/*.test.cjs; do node --test
+  "$f"; done`, a computed file list or many repeated runs counts as a suite and takes a slot.
+  Writing the file names out keeps a short loop light.
+
+### Fixed
+
+- **Installers no longer carry native build leftovers (BLU).** 91 node-pty build files (MSBuild
+  projects, linker intermediates and logs) shipped in 1.1.95 and 1.1.96, 30 of them holding the
+  build machine's user folder. Only node-pty's 5 runtime files ship now.
+- **An Antigravity Stop in the middle of a tool chain keeps the tab working.** The hook stream to
+  the window dropped `fully_idle`, so the tab went idle while the agent was still running.
+- **Four guarantees GTC M4 had broken are back.** A blocked Stop runs the compact-health watcher
+  and the session observers again (autocompact pilot). Idle still means idle, quiet mail stays
+  quiet, and every boot-submit outcome keeps its row, now pinned on the new lines.
+- **Mutant runners that had gone inert kill again.** inbox-wake (5 mutants inert since about
+  2026-09-24) is 36/36, the Antigravity runner is 32/32 again, and the capacity runner (6 mutants
+  inert since before 1.1.95) kills all 198. Each re-anchored mutant breaks the same behaviour on
+  its current line.
+
 ## [1.1.96] — 2026-10-19
 
 **Heavy jobs are counted where they really run, and god's screen reading survives a busy start.**
