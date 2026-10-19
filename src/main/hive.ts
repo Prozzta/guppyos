@@ -4556,7 +4556,7 @@ export class HiveManager {
    *  Codex's hook contract is already Claude-shaped: snake_case stdin
    *  (hook_event_name/tool_name/tool_input/session_id/cwd) and a matching response
    *  contract, where `Stop` honoring {decision:'block',reason} means "continue,
-   *  using reason as the next prompt" — never used: the Stop reply is non-blocking. So we
+   *  using reason as the next prompt" — used only by the GTC M4 Stop-continue wake (off by default). So we
    *  reuse the Claude `cth-hook` shim VERBATIM (no translator, unlike agy) and let
    *  HookServer handle everything unchanged.
    *
@@ -5791,7 +5791,9 @@ process.stdin.on('end', () => {
     let out = null;
     try {
       const r = JSON.parse(resp || '{}');
-      if (r.decision === 'block') out = { decision: 'block', reason: r.reason, stopReason: r.reason, systemMessage: r.reason };
+      // GTC M4 (15.5): a Stop-continue wake. agy's Stop continues the turn on 'continue' + reason.
+      if (event === 'Stop' && r.decision === 'block') out = { decision: 'continue', reason: r.reason };
+      else if (r.decision === 'block') out = { decision: 'block', reason: r.reason, stopReason: r.reason, systemMessage: r.reason };
       else if (r.hookSpecificOutput && r.hookSpecificOutput.permissionDecision === 'deny') out = { decision: 'deny', reason: r.hookSpecificOutput.permissionDecisionReason };
       else if (r.continue === false) out = { decision: 'block', stopReason: r.stopReason };
       // HEAVY-CPU-OPTIONS-191: a heavy command rewritten to run in its job: agy's own rewrite is an

@@ -1302,8 +1302,11 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
   // settle and the provider gap, written with origin GOD by main's binding.
   // GTC M3 (1.1.97): the message box is the third, for the Human's own queue items only: their one
   // Enter, inside the owner's chain and term's slot, written with origin HUMAN by main's binding.
-  assert.deepEqual(files, ['src/main/automaticSubmit.ts', 'src/main/messageBox.ts', 'src/main/termControl.ts'],
-    `a bare Enter is written ONLY by the submit owner, god's term send and the Human's message box; found ${writers.join(', ')}`);
+  // GTC M4 (1.1.97): the wake sender is the fourth: a wake's one Enter, inside the owner's chain and
+  // term's slot, written with origin PROGRAMMATIC by main's binding (config wakePath 'term' only).
+  assert.deepEqual(files, ['src/main/automaticSubmit.ts', 'src/main/messageBox.ts', 'src/main/termControl.ts', 'src/main/wakeSender.ts'],
+    `a bare Enter is written ONLY by the submit owner, god's term send, the Human's message box and the wake sender; found ${writers.join(', ')}`);
+  assert.equal(writers.filter((w) => w.startsWith('src/main/wakeSender.ts')).length, 1, 'the wake sender spells its Enter once');
   assert.equal(writers.filter((w) => w.startsWith('src/main/termControl.ts')).length, 1, 'term spells its Enter once');
   assert.equal(writers.filter((w) => w.startsWith('src/main/messageBox.ts')).length, 1, 'the message box spells its Enter once');
   // The owner's one Enter is inside the critical section, nowhere else.
@@ -1337,9 +1340,10 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
 // census of names. The no-alias and node-pty-importer checks are what stand in its way.
 const PTY_WRITERS = {
   'src/main/pty.ts': { 's.proc': 1 },                       // THE raw write, inside write(id, data, origin)
-  'src/main/index.ts': { ptyManager: 3 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD) + GTC M3: the message box's writer (origin HUMAN; app-window IPC only)
+  'src/main/index.ts': { ptyManager: 4 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD) + GTC M3: the message box's writer (origin HUMAN; app-window IPC only) + GTC M4: the wake sender's writer (origin PROGRAMMATIC)
   'src/main/messageBox.ts': { d: 2 },                       // GTC M3: the Human's text and its one Enter, via main's HUMAN-bound writer (the Human's own queue items only)
-  'src/main/automaticSubmitWiring.ts': { 'w.pty': 1 },      // the ONLY PROGRAMMATIC producer
+  'src/main/wakeSender.ts': { d: 2 },                       // GTC M4: a wake's text and its one Enter, via main's PROGRAMMATIC-bound writer (wakePath 'term')
+  'src/main/automaticSubmitWiring.ts': { 'w.pty': 1 },      // the owner's PROGRAMMATIC producer (the wake sender's binding in index.ts is the other)
   'src/main/termControl.ts': { 'this.deps': 2 },            // GOD-TERMINAL-CONTROL: god's type/keys and send's one Enter, via main's GOD-bound writer (god is not admission)
   'src/main/automaticSubmit.ts': { deps: 1 }               // safeWrite - the owner's one write
 };
@@ -1530,7 +1534,8 @@ test('the one door: autoSubmit:submit names an AGENT and a CLASS, never a PTY', 
   const body = handler.slice(0, handler.indexOf('\n});'));
   assert.ok(!/ptyId/.test(body), 'a renderer cannot name the terminal: main resolves it (design section 7)');
   assert.match(body, /\(ADMISSION_CLASSES as readonly string\[\]\)\.includes\(r\.admissionClass\)/, 'an unknown class is rejected, not defaulted');
-  assert.match(body, /return automaticSubmit\.submit\(\{/);
+  // GTC M4: a boot prompt goes through the wake sender (the owner byte for byte on wakePath 'owner').
+  assert.match(body, /return \(boot && wakeSender \? wakeSender\.submit\(sub\) : automaticSubmit\.submit\(sub\)\)/);
 });
 
 /** The five retired `CapacityRuntime` members (stage 5.5), and the machinery only they used. */
@@ -1624,14 +1629,16 @@ test('workerWake.ts decides WHO and types nothing; every wake goes through the o
   const wakeSrc = read('src/main/workerWake.ts');
   assert.ok(!/submitWorkerNudge|writeSubmit|writeText|delaySubmit|ptyManager/.test(wakeSrc), 'the private order is gone');
   const index = read('src/main/index.ts');
-  assert.equal(index.split('ptyManager.write(').length - 1, 3,
-    'index.ts has exactly THREE direct ptyManager.write: the declared-origin pty:write handler, god\'s term writer and the message box\'s');
+  assert.equal(index.split('ptyManager.write(').length - 1, 4,
+    'index.ts has exactly FOUR direct ptyManager.write: the declared-origin pty:write handler, god\'s term writer, the message box\'s and the wake sender\'s');
+  assert.equal(index.split("ptyManager.write(ptyId, data, 'PROGRAMMATIC')").length - 1, 1, "GTC M4: the fourth is the wake sender's, bound to origin PROGRAMMATIC");
   assert.equal(index.split("ptyManager.write(ptyId, data, 'GOD')").length - 1, 1, "the second is term's, bound to origin GOD");
   assert.equal(index.split("ptyManager.write(ptyId, data, 'HUMAN')").length - 1, 1, "GTC M3: the third is the message box's, bound to origin HUMAN");
   const beat = index.slice(index.indexOf('function runWorkerWakeBeat'), index.indexOf('/** (Re)arm the always-on beats'));
   assert.match(beat, /inboxWake\.reconcileAll\(live\)/, 'the beat is reconciliation through the one bridge path');
   assert.ok(!/automaticSubmit\.submit|ptyManager/.test(beat), 'no second submit implementation in the beat');
-  assert.match(index, /submit: \(req\) => automaticSubmit\.submit\(req\)/, 'the bridge submits through the owner');
+  assert.match(index, /submit: \(req\) => \(wakeSender \? wakeSender\.submit\(req\) as Promise<\{ kind: string \}> : automaticSubmit\.submit\(req\)\)/,
+    'the bridge submits through the wake sender (GTC M4), whose owner path is the owner byte for byte');
   const bridge = codeOnlyWake(read('src/main/inboxWakeBridge.ts'), 'inboxWakeBridge.ts');
   assert.match(bridge, /admissionClass: 'CAPACITY_GATED'/, 'as CAPACITY_GATED work');
   assert.ok(!/providerCapacity\.(admit|maySubmitNow|confirmLaunch|cancelGrant)/.test(index.slice(index.indexOf('inboxWake = new InboxWakeBridge'), index.indexOf('const hookServer = new HookServer('))),

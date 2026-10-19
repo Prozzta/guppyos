@@ -96,7 +96,9 @@ test('Y1: the AGY shim turns a PreInvocation steer into AGY\'s documented inject
   const ctx = { hookSpecificOutput: { hookEventName: 'PreInvocation', additionalContext: 'OPERATOR STEER: B' } };
   assert.deepEqual(JSON.parse(await shimOut(t, 'PreInvocation', ctx)), { injectSteps: [{ userMessage: 'OPERATOR STEER: B' }] });
   assert.equal(await shimOut(t, 'PreInvocation', {}), '', 'no directive: prints nothing');
-  assert.deepEqual(JSON.parse(await shimOut(t, 'Stop', { decision: 'block', reason: 'r' })), { decision: 'block', reason: 'r', stopReason: 'r', systemMessage: 'r' });
+  // GTC M4 (15.5): a Stop block is a Stop-continue wake: agy continues the turn on 'continue' + reason.
+  assert.deepEqual(JSON.parse(await shimOut(t, 'Stop', { decision: 'block', reason: 'r' })), { decision: 'continue', reason: 'r' });
+  assert.deepEqual(JSON.parse(await shimOut(t, 'PostInvocation', { decision: 'block', reason: 'r' })), { decision: 'block', reason: 'r', stopReason: 'r', systemMessage: 'r' });
 });
 
 /** A real HookServer on a real pipe, with the lease token. */

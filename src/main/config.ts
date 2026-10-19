@@ -344,6 +344,14 @@ export interface HarnessConfig {
    *  message box (hook idle, TermControl, origin HUMAN; messageBox.ts); 'owner' = the submit owner,
    *  as up to 1.1.96. Read at every request. 'owner' is kept for one release. */
   messageBoxPath?: 'term' | 'owner';
+  /** GTC M4 (1.1.97): how an automatic inbox wake and a boot prompt are delivered. Unset or 'owner' =
+   *  the submit owner, as up to 1.1.96; 'term' = main's wake sender (hook readiness, a typed send
+   *  with origin PROGRAMMATIC, the provider's own confirm; wakeSender.ts). Read at every request. */
+  wakePath?: 'owner' | 'term';
+  /** GTC M4: per provider, whether a Stop that finds mail waiting is blocked with the mail as its
+   *  reason (the turn continues) instead of ending and getting a typed wake. Unset = off. Honoured
+   *  only with wakePath 'term'. Read at every Stop. */
+  stopContinue?: { claude?: boolean; codex?: boolean; antigravity?: boolean };
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];

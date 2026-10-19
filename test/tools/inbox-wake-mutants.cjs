@@ -37,7 +37,7 @@ const MUTANTS = [
     "    if (r.inFlight) return no('in-flight');",
     "    if ((f as { isGod?: boolean }).isGod) return no('is-god');\n    if (r.inFlight) return no('in-flight');"],
   ['w a direct PTY write in the wake path', INDEX,
-    '  submit: (req) => automaticSubmit.submit(req),',
+    '  submit: (req) => (wakeSender ? wakeSender.submit(req) as Promise<{ kind: string }> : automaticSubmit.submit(req)),',
     "  submit: (req) => { ptyManager.write(ptyForAgent(req.agentId) ?? '', `${req.text}\\r`, 'PROGRAMMATIC'); return Promise.resolve({ kind: 'COMMITTED' }); },"],
   ['w ids announced at claim time, before COMMITTED', WAKE,
     '    r.pending.clear();\n', '    r.pending.clear();\n    for (const id of ids) r.announced.add(id);\n'],
