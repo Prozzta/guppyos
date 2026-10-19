@@ -3,13 +3,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const ROOT = path.resolve(__dirname, '..');
-const runner = path.join(ROOT, 'test/tools/agy-mutants.cjs');
-const source = path.join(ROOT, 'src/main/capacityNormalize.ts');
-const journal = path.join(ROOT, '.mutant-runner-recovery.json');
 
 const waitFor = async (predicate, message) => {
   const deadline = Date.now() + 90_000;
@@ -21,6 +19,17 @@ const waitFor = async (predicate, message) => {
 };
 
 test('MUTANT RUNNER KILL SAFE: hard-killed runner restores its source before the next run', { timeout: 120_000 }, async () => {
+  // This must not share the FULL suite's source tree or recovery journal: the
+  // assertion deliberately leaves a killed process' mutation in place briefly.
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runner-kill-safe-'));
+  const runner = path.join(sandbox, 'test/tools/agy-mutants.cjs');
+  const source = path.join(sandbox, 'src/main/capacityNormalize.ts');
+  const journal = path.join(sandbox, '.mutant-runner-recovery.json');
+  fs.mkdirSync(path.dirname(runner), { recursive: true });
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  for (const rel of ['test/tools/agy-mutants.cjs', 'test/tools/mutant-runner-helper.cjs', 'src/main/capacityNormalize.ts']) {
+    fs.copyFileSync(path.join(ROOT, rel), path.join(sandbox, rel));
+  }
   const original = fs.readFileSync(source, 'utf8');
   let child;
   try {
@@ -42,7 +51,6 @@ test('MUTANT RUNNER KILL SAFE: hard-killed runner restores its source before the
     assert.equal(fs.existsSync(journal), false, 'successful recovery consumes its journal');
   } finally {
     if (child && child.exitCode === null) child.kill('SIGKILL');
-    fs.writeFileSync(source, original, 'utf8');
-    fs.rmSync(journal, { force: true });
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
