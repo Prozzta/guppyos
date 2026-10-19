@@ -96,6 +96,20 @@ function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = os.tmpdir() } = {
   return fs.existsSync(exe) ? { exe } : { exe: null, why: `could not place ${exe}` };
 }
 
+/**
+ * LOAD-BURST-196: the start gate (file-start-gate.cjs): at most `slots` test files load at once, and
+ * each file's start-up is recorded for the burst summary. GUPPY_START_SLOTS overrides the default
+ * (0 = record only, no cap: the before measurement). { slots, dir } with a fresh gate folder.
+ */
+const START_GATE_PRELOAD = path.join(__dirname, 'file-start-gate.cjs');
+const startSlots = (env = process.env, cores = os.availableParallelism()) => {
+  const n = Number(env.GUPPY_START_SLOTS);
+  return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
+};
+function prepareStartGate({ dir = os.tmpdir(), slots = startSlots() } = {}) {
+  return { slots, dir: fs.mkdtempSync(path.join(dir, 'run-tests-start-')) };
+}
+
 const nodeSpawn = (args, opts) => spawnSync(process.execPath, args, opts);
 
 /** The limit to use: TEST_FILE_TIMEOUT_MS when it is a positive integer, else FILE_TIMEOUT_MS. */
@@ -172,6 +186,8 @@ function run({
   watchdog = startWatchdog,
   // The real runs only: an injected spawn or watchdog runs nothing to put in a job.
   fileJob = spawn === nodeSpawn && watchdog === startWatchdog ? prepareFileJob : () => ({ exe: null, why: null }),
+  // LOAD-BURST-196: the real runs only, as for fileJob. null = no gate.
+  startGate = spawn === nodeSpawn && watchdog === startWatchdog ? prepareStartGate : () => null,
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
@@ -208,6 +224,34 @@ function run({
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
+  // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
+  let gate = null;
+  try { gate = startGate(); } catch (e) { err(`[test-runner] no start gate (${String(e)}): every file loads at once (LOAD-BURST-196)`); }
+  if (gate) {
+    const opt = `--require "${START_GATE_PRELOAD.split(path.sep).join('/')}"`;
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
+    env.GUPPY_START_GATE = `${gate.slots}|${gate.dir}`;
+    env.GUPPY_START_OPT = opt;
+  }
+  try {
+    return runGated({ filters, rel, env, gate, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
+  } finally {
+    if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  }
+}
+
+/** LOAD-BURST-196: the opening burst, one line, from the gate's start records. */
+function burstLine(text, slots) {
+  const s = require('./file-start-gate.cjs').burstSummary(text);
+  const cap = slots > 0 ? `${slots} start slots` : 'no start cap (GUPPY_START_SLOTS=0)';
+  if (!s) return `[test-runner] start-up burst: no start records (${cap})`;
+  return `[test-runner] start-up burst: ${s.files} files, ${cap}; in the first ${s.windowMs / 1000} s ${s.early} files started, `
+    + `load p50 ${s.loadP50} ms p95 ${s.loadP95} ms max ${s.loadMax} ms (without the gate wait p50 ${s.netP50} ms p95 ${s.netP95} ms max ${s.netMax} ms), gate wait max ${s.waitMax} ms, at most ${s.peakLoading} loading (${s.peakHolding} past the gate) at once`
+    + `${s.noSlot ? `; ${s.noSlot} started without a slot` : ''}`;
+}
+
+/** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
+function runGated({ rel, env, gate, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -220,6 +264,7 @@ function run({
   }
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
   const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
+  if (gate) log(burstLine(readFile(path.join(gate.dir, 'starts.jsonl')), gate.slots));
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
   // A timed-out file fails the run whatever node's own exit code says.
@@ -350,7 +395,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

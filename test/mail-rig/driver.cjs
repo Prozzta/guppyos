@@ -55,10 +55,17 @@ function pidAlive(pid) { try { process.kill(pid, 0); return true; } catch { retu
 /** Kill a process the rig started, with its tree. `rec` = { pid, bornMs }. TEST-GLOB-PID-RECYCLE: on win32 only
  *  while the pid is still that process (birth within own-procs' slack) and only its own tree (each child
  *  created after its parent), never `taskkill /T` on a pid that may have been reused. */
-function killTree(rec) {
+function killTree(rec, kill = own.killOwnTree) {
   if (!rec || !rec.pid || !pidAlive(rec.pid)) return;
-  if (process.platform === 'win32') own.killOwnTree(rec);
-  else { try { process.kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } }
+  if (process.platform !== 'win32') { try { process.kill(rec.pid, 'SIGKILL'); } catch { /* gone */ } return; }
+  // LOAD-BURST-196: own-procs' process table is a PowerShell CIM query, which a FULL's opening burst
+  // can time out. Once more, then a named cleanup failure (never a bare ETIMEDOUT from the test's after).
+  try { kill(rec); } catch (first) {
+    if (!pidAlive(rec.pid)) return;
+    try { kill(rec); } catch (e) {
+      throw new Error(`rig cleanup failed: phase "kill tree" of pid ${rec.pid}, twice (${first.message.split('\n')[0]}; then ${e.message.split('\n')[0]})`);
+    }
+  }
 }
 
 class Rig {
@@ -168,11 +175,15 @@ class Rig {
   /** Kill EVERYTHING this rig started (hosts, stubs, their trees), then remove the sandbox. */
   async destroy() {
     if (process.env.RIG_DEBUG) await this.dump().catch((e) => process.stderr.write(`dump failed: ${e}\n`));
-    try { await this.stop(); } catch { /* keep going */ }
-    for (const rec of this.hostRecs) killTree(rec);
-    await this.waitStubsGone(4_000);
-    for (const rec of this.stubRecs()) killTree(rec);
+    // Every step runs whatever an earlier one threw; the failures are reported together at the end.
+    const failed = [];
+    const step = async (f) => { try { await f(); } catch (e) { failed.push(e.message); } };
+    await step(() => this.stop());
+    for (const rec of this.hostRecs) await step(() => killTree(rec));
+    await step(() => this.waitStubsGone(4_000));
+    for (const rec of this.stubRecs()) await step(() => killTree(rec));
     await removeSandbox(this.sandbox);
+    if (failed.length) throw new Error(`rig cleanup failed (${failed.length}): ${failed.join(' | ')}`);
   }
 
   /** RIG_DEBUG=1: what happened, for a failing test (wake diagnostics, owner outcomes, stubs). */
@@ -468,4 +479,4 @@ async function waitFor(fn, { timeoutMs = 20_000, intervalMs = 60, what = 'condit
 const markersIn = (text) => [...String(text ?? '').matchAll(/\[hive-mail:([^\]]+)\]/g)].map((m) => m[1]);
 const REDELIVERED = '(re-delivered: this may already have been handled';
 
-module.exports = { startRig, waitFor, sleep, markersIn, REDELIVERED, scrubbedEnv, Rig, pidAlive };
+module.exports = { startRig, waitFor, sleep, markersIn, REDELIVERED, scrubbedEnv, Rig, pidAlive, killTree };

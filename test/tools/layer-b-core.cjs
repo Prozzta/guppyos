@@ -596,6 +596,8 @@ class WindowWatch {
       while ((i = this.buf.indexOf('\n')) >= 0) { const line = this.buf.slice(0, i).trim(); this.buf = this.buf.slice(i + 1); if (line) this.ingest(line); }
     });
     this.child.on('exit', (code) => { if (!this.stopped) this.onBlind(`the window watcher exited (code ${code}; ${this.lines} line(s); stderr: ${this.stderr.trim().slice(-300) || 'none'})`); });
+    // LOAD-BURST-196: its exit, for a caller that waits on it instead of a fixed sleep.
+    this.exited = new Promise((resolve) => this.child.once('exit', (code, signal) => resolve({ code, signal })));
     this.startedAt = Date.now();
     return this;
   }
@@ -614,7 +616,9 @@ class WindowWatch {
   stop() {
     this.stopped = true;
     // its own tree, verified (own-procs), not taskkill /T (TEST-GLOB-PID-RECYCLE)
-    if (this.child && this.child.exitCode === null) { try { require('./own-procs.cjs').killOwnTree(this.childRec); } catch { /* gone */ } }
+    // LOAD-BURST-196: a kill that failed (a process-table query timed out under load) is kept, not
+    // swallowed, so a watcher that outlives its stop says why.
+    if (this.child && this.child.exitCode === null) { try { require('./own-procs.cjs').killOwnTree(this.childRec); } catch (e) { this.stopError = String((e && e.message) || e).slice(0, 300); } }
   }
 }
 
