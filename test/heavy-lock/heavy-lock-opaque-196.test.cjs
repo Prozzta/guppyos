@@ -28,6 +28,7 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
+const own = require('../tools/own-procs.cjs');
 
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { Notification: class { show() {} static isSupported() { return false; } } } };
@@ -325,11 +326,12 @@ function cleanEnv(extra) {
 function start(args, { url, agent = 'a', preload = PRELOAD, root = JAIL } = {}) {
   const env = cleanEnv({ NODE_OPTIONS: `--require "${preload.replace(/\\/g, '/')}"`, HIVE_LEDGER_URL: url, HIVE_ROOT: root, AGENT_ID: agent });
   const child = spawn(args[0], args.slice(1), { cwd: FIX, env, windowsHide: true });
+  const bornMs = Date.now();
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d; });
   child.stdout.resume();
   const done = new Promise((resolve) => child.on('close', (code) => resolve({ code, stderr })));
-  return { child, done };
+  return { child, done, bornMs };
 }
 const within = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r('timeout'), ms))]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -337,9 +339,10 @@ async function until(cond, ms, what) {
   const end = Date.now() + ms;
   while (!cond()) { if (Date.now() > end) throw new Error(`timed out waiting for ${what}`); await sleep(50); }
 }
-function killTree(pid) {
-  if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true });
-  else try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
+/** Kill a start()ed child and its tree: on win32 only what own-procs proves is ours (no taskkill /T). */
+function killTree({ child, bornMs }) {
+  if (process.platform === 'win32') own.killOwnTree({ pid: child.pid, bornMs });
+  else try { process.kill(-child.pid, 'SIGKILL'); } catch { try { process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ } }
 }
 
 async function broker(t, M, deps = {}) {
@@ -446,8 +449,8 @@ K.e2eCrashAndDeadWaiter = async (t, M = HJ, preload = PRELOAD) => {
   const wb = start([process.execPath, 'wrapper.cjs'], { url: b.url('b'), agent: 'b', preload });
   await until(() => b.lock.queueSnapshot().waiters.some((w) => w.agentId === 'b'), 15_000, "b's wait");
   assert.equal(b.lock.acquire('c', H, 'npm test', 'hc', false).allow, false);
-  killTree(wb.child.pid);
-  killTree(run.child.pid);
+  killTree(wb);
+  killTree(run);
   await wb.done; await run.done;
   await b.lock.scan();
   await until(() => b.notes.includes('c'), 15_000, "c's notice");
