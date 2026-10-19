@@ -153,14 +153,14 @@ const TABLE = [
     expect: /D3 REGRESSION/ },
   { id: 'D-15', file: WAKE, tests: [LIFECYCLE],
     what: 'associate a null-agent PERSONAL tick with a hive worker',
-    from: "    if (!agentId) return false;\n    const r = this.rec(agentId);\n    if (sessionId) {",
-    to: "    const r = this.rec(agentId ?? 'personal');\n    if (sessionId) {",
+    from: "    if (!agentId) return false;\n    const r = this.rec(agentId);\n    if (Number.isFinite(at)) r.lastTrafficAt",
+    to: "    const r = this.rec(agentId ?? 'personal');\n    if (Number.isFinite(at)) r.lastTrafficAt",
     expect: /A PERSONAL tick \(no agent id\) never touches a floor agent/ },
 
   // ── added by the audits; each one was a real hole or a real ruling ────────
   { id: 'N-1', file: WAKE, tests: [LIFECYCLE],
     what: 'AUDIT c4: remove the confirm grace (a stale idle double-types into a live turn)',
-    from: "      if (r.lifecycle === 'active' && r.activeSince > 0 && at - r.activeSince < PROVIDER_IDLE_CONFIRM_MS) {\n        return false;\n      }\n",
+    from: "      if (r.lifecycle === 'active' && r.activeSince > 0 && at - r.activeSince < PROVIDER_IDLE_CONFIRM_MS) {\n        r.pendingIdleAt = Math.max(r.pendingIdleAt, at);\n        return false;\n      }\n",
     to: "", expect: /RACE REPLAY/ },
   { id: 'N-2', file: WAKE, tests: [LIFECYCLE],
     what: 'AUDIT c4: the grace requires a running tick first (re-creates the stall)',
@@ -175,11 +175,14 @@ const TABLE = [
     what: 'AUDIT c4: the shim stops stamping read_at (the ordering guard goes blind)',
     from: "    read_at: Date.now(),\n", to: "",
     expect: /READ_AT: the shim stamps it|EXACT-KEY|envelope/i },
-  { id: 'N-5', file: WAKE, tests: [LIFECYCLE],
-    what: "RULING d: wire PreInvocation as a coordinator active edge",
-    from: "const ACTIVE_EVENTS = new Set(['UserPromptSubmit',",
-    to: "const ACTIVE_EVENTS = new Set(['PreInvocation', 'UserPromptSubmit',",
-    expect: /N9: PreInvocation is NOT a coordinator active edge/ },
+  // Retargeted (2026-10-19): 1.1.53 (a978e05e) reversed ruling d, so PreInvocation IS an active
+  // edge and the old mutation (add it) became a duplicate Set member that only a text pin saw.
+  // The live regression is now its REMOVAL; measured to die at a behavioural test.
+  { id: 'N-5', file: WAKE, tests: [LIFECYCLE, 'test/wake-confirm-153.test.cjs'],
+    what: 'RULING d reversed in 1.1.53: drop PreInvocation as a coordinator active edge (an AGY turn inside the grace never opens)',
+    from: "const ACTIVE_EVENTS = new Set(['UserPromptSubmit', 'PreInvocation', 'PreToolUse',",
+    to: "const ACTIVE_EVENTS = new Set(['UserPromptSubmit', 'PreToolUse',",
+    expect: /AGY \(1a\) a GENUINE new turn inside the window still opens/ },
   { id: 'N-6', file: WAKE, tests: [LIFECYCLE],
     what: 'AUDIT c4: a Stop with fullyIdle:false is terminal after all',
     from: "      if (fullyIdle === false) return false;   // the provider says the turn is not over\n",
