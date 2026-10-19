@@ -105,6 +105,9 @@ extraResources:
     to: term-cli.cjs
   # HEAVY-CPU-OPTIONS-191: the heavy-job helper, compiled from source by tools/build-heavyjob.cjs (Windows;
   # the folder is empty elsewhere). Its folder goes on every hive agent's PATH.
+  # HEAVY-LOCK-OPAQUE-SCRIPT-196: the heavy preload, on every hive agent's NODE_OPTIONS (--require).
+  - from: resources/heavy-preload.cjs
+    to: heavy-preload.cjs
   - from: resources/heavyjob/bin
     to: heavyjob
     filter:

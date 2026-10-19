@@ -53,13 +53,17 @@ const isPathKey = (k: string): boolean => k.toUpperCase() === 'PATH';
  * losing the memory command's dir. Now every PATH-like key is dropped from both layers, and
  * the one `PATH` is: `pathPrepend` dirs first, then the agent's own PATH value if it set one,
  * else `userPath`.
+ *
+ * HEAVY-LOCK-OPAQUE-SCRIPT-196: `nodeRequire` preloads are APPENDED to NODE_OPTIONS (the agent's
+ * value, else the inherited one), never replacing what is there.
  */
 export function buildPtyEnv(
   parentEnv: NodeJS.ProcessEnv,
   userPath: string,
   agentEnv?: Record<string, string>,
   platform: NodeJS.Platform = process.platform,
-  pathPrepend: string[] = []
+  pathPrepend: string[] = [],
+  nodeRequire: string[] = []
 ): Record<string, string> {
   // Layer 1 — inherit, minus the parent session's Claude identity. Only this
   // layer is stripped: a marker set deliberately via `agentEnv` below survives,
@@ -81,6 +85,11 @@ export function buildPtyEnv(
   const sep = platform === 'win32' ? ';' : ':';
   const front = pathPrepend.filter(Boolean);
   const rest = (agentPath ?? userPath).split(sep).filter((p) => p && !front.includes(p));
+  // Forward slashes inside double quotes: node splits NODE_OPTIONS itself, and a backslash there is
+  // an escape (a Windows path in it broke node's start).
+  const baseOptions = agent.NODE_OPTIONS ?? inherited.NODE_OPTIONS ?? '';
+  const requires = nodeRequire.filter(Boolean).map((p) => `--require "${p.replace(/\\/g, '/')}"`).filter((r) => !baseOptions.includes(r));
+  const nodeOptions: Record<string, string> = requires.length ? { NODE_OPTIONS: [baseOptions.trim(), ...requires].filter(Boolean).join(' ') } : {};
   return {
     ...inherited,
     PATH: [...front, ...rest].join(sep),
@@ -107,6 +116,7 @@ export function buildPtyEnv(
             parentEnv.LC_ALL ?? parentEnv.LC_CTYPE ?? parentEnv.LANG ?? 'en_US.UTF-8'
         }),
     // Per-agent hive identity (AGENT_ID, HIVE_ROOT, …) when provided (its PATH is merged above).
-    ...agent
+    ...agent,
+    ...nodeOptions
   };
 }

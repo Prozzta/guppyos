@@ -179,6 +179,8 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   /** Dirs put FIRST on the child's one PATH (the memory command's dir). Set by main only. */
   pathPrepend?: string[];
+  /** HEAVY-LOCK-OPAQUE-SCRIPT-196: files appended to the child's NODE_OPTIONS as `--require`. Set by main only. */
+  nodeRequire?: string[];
   /** When set, run this string as a VISIBLE shell script instead of resolving/
    *  spawning `command`. Used by the missing-CLI auto-install path: the script
    *  (a banner + an install command) streams to the same Terminal tab. Routed
@@ -908,7 +910,7 @@ export class PtyManager {
         // Inherited env minus the parent Claude session's identity markers,
         // then the app's defaults and locale, then per-agent values — see
         // ptyEnv.ts for why the strip exists and why it is prefix-based.
-        env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend)
+        env: buildPtyEnv(process.env, userPath, opts.env, process.platform, opts.pathPrepend, opts.nodeRequire)
       });
       // PTY-EARLY-KILL-LEAK: a kill before the first output must close the pseudoconsole now.
       armEarlyKill(proc);

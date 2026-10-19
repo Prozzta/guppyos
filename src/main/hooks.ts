@@ -18,7 +18,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { join } from 'node:path';
 import { Notification, type WebContents } from 'electron';
 import type { HiveManager } from './hive';
-import { classifyCommand, classifyHeavy, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock } from './heavyJob';
+import { classifyCommand, classifyHeavy, commandFromToolInput, heavyCommandOf, isBackground, scriptReaderFor, type ClassifyCtx, type HeavyJobLock, type HeavyLeaseRequest } from './heavyJob';
 import { compactCarryText, readPathOf, type CarryCard, type CarryObligation, type CompactHealthWatch } from './compactHealth';
 import { modelForHiveSpawn, type HarnessConfig } from './config';
 import { TOOL_OUTPUT_CAP_READ, capForCommand, commandOf, condenseOutput, effectiveCap, isReadCommand, outputText, shouldCondense, type BashLikeResponse } from './toolOutputCondense';
@@ -274,6 +274,9 @@ export const HOOK_HTTP_RELISTEN_DELAYS_MS = [250, 1_000, 2_000, 5_000, 10_000, 1
  *  /mcp/<agentId>/<token> (Codex mcp_tool hooks, P3) and /ledger/<agentId>/<token> (the
  *  `ledger` command, READS-181 A: the same per-spawn token, so the caller cannot be forged). */
 const HOOK_ROUTE = /^\/(hook|mcp|status|ledger|term)\/([^/?#]+)\/([0-9a-f]{32})$/;
+/** HEAVY-LOCK-OPAQUE-SCRIPT-196: /heavy/<agentId>/<token>, the heavy preload's lease requests (the same
+ *  per-spawn token; the preload derives it from HIVE_LEDGER_URL). */
+const HEAVY_ROUTE = /^\/(heavy)\/([^/?#]+)\/([0-9a-f]{32})$/;
 /** GOD-TERMINAL-CONTROL: one `term` request (an action, an agent id, at most 16K characters of text). */
 export const TERM_HTTP_BODY_MAX = 128 * 1024;
 /** READS-181 A: one ledger operation (a card, a message, a memory note) is small. */
@@ -604,6 +607,17 @@ export class HookServer {
     try { Promise.resolve(handler(agentId, body)).then((r) => reply(r.status, r.body), failed); } catch (e) { failed(e); }
   }
 
+  /** HEAVY-LOCK-OPAQUE-SCRIPT-196: a test process's lease request (the heavy preload). The answer
+   *  may wait (a long poll) while the agent is queued; `gone` says the preload has hung up. */
+  private onHeavy(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void, gone: () => boolean): void {
+    const lock = this.heavyLock;
+    if (!lock) { reply(404, { ok: false, line: 'refused: the heavy lock is not available in this build' }); return; }
+    let body: unknown;
+    try { body = JSON.parse(raw.toString('utf8') || '{}'); } catch { reply(400, { ok: false, line: 'refused: the input is not valid JSON' }); return; }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) { reply(400, { ok: false, line: 'refused: the input is not an object' }); return; }
+    lock.lease(agentId, body as HeavyLeaseRequest, gone).then((a) => reply(200, a), (e) => reply(400, { ok: false, line: `refused: ${String(e).slice(0, 160)}` }));
+  }
+
   /** READS-181 A: a ledger body is UTF-8 JSON (invalid UTF-8 is refused, never repaired). */
   private onLedger(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
     const handler = this.ledgerHandler;
@@ -764,7 +778,7 @@ export class HookServer {
     };
     const mem = req.url ? MEMORY_ROUTE.exec(req.url) : null;
     if (mem) { this.onMemory(mem[1], req, res); return; }
-    const m = req.url ? HOOK_ROUTE.exec(req.url) : null;
+    const m = req.url ? HOOK_ROUTE.exec(req.url) ?? HEAVY_ROUTE.exec(req.url) : null;
     if (!m) { req.resume(); reply(404, {}); return; }
     const route = m[1];
     // MCP clients may end a session with DELETE, or probe with GET (no SSE here).
@@ -805,6 +819,7 @@ export class HookServer {
       }
       if (route === 'ledger') { this.onLedger(agentId, Buffer.concat(chunks), reply); return; }
       if (route === 'term') { this.onTerm(agentId, Buffer.concat(chunks), reply); return; }
+      if (route === 'heavy') { this.onHeavy(agentId, Buffer.concat(chunks), reply, () => res.destroyed || res.writableEnded); return; }
       let payload: Record<string, unknown> = {};
       try {
         const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
@@ -2296,6 +2311,9 @@ export class HookServer {
           try { this.hive.appendLog({ kind: 'heavy-lock', action: 'unnamed-exec', agentId, unnamed, hinted: hints.length, heavy: cls.heavy }); } catch { /* best effort */ }
         }
       }
+      // HEAVY-LOCK-OPAQUE-SCRIPT-196: every call is noted (light ones too): a test process the
+      // preload reports is VISIBLE only when it is this call's own `node --test` run.
+      if (command) this.heavyLock.noteCall(agentId, callId, command);
       if (cls.heavy) {
         // A call whose PostToolUse may not pair back (Codex's mcp hooks can arrive degraded) is
         // freed like a background one: by the process check, PTY exit or the TTL (Jim N1).
@@ -2328,6 +2346,7 @@ export class HookServer {
       // classified again now that the script exists, and freed at once if it is light.
       this.heavyLock.settle(agentId, HookServer.heavyCallId(p), () => classifyHeavy(p.tool_name, p.tool_input, HookServer.heavyScriptCtx(p.cwd)));
       this.heavyLock.callDone(agentId, HookServer.heavyCallId(p));
+      this.heavyLock.noteCallEnd(agentId, HookServer.heavyCallId(p));
     }
 
     // 7C.2 — mid-run steering: inject queued operator guidance as context on the
