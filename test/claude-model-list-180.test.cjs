@@ -123,12 +123,13 @@ process.stdin.on('data', (d) => {
   const account = mode === 'signedout' ? { tokenSource: 'none', apiProvider: 'firstParty' } : ACCOUNT;
   out({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: mode === 'signedout' ? SIGNED_OUT : mode === 'empty' ? [] : MODELS, account, pid: process.pid } } });
 });
-// like the real CLI: alive until its tree is killed, or until the test's cleanup asks it to go (its stop file),
-// or its parent (the .cmd shim) is gone: a stop file it never sees then leaves no orphan
-const parent = process.ppid;
+// like the real CLI: alive until its tree is killed, or until the test's cleanup asks it to go (its stop file).
+// The hang guard: its parent (the .cmd shim) gone for 3 polls in a row means no orphan is left, but it is SAID
+// (Jim MUST 1 of 6eccc347): a kill that took the shim and not the tree must still fail C3/C4 and the census.
+const parent = process.ppid; let orphanPolls = 0;
 setInterval(() => {
   if (process.env.FAKE_CLAUDE_STOP && fs.existsSync(process.env.FAKE_CLAUDE_STOP)) process.exit(0);
-  try { process.kill(parent, 0); } catch { process.exit(0); }
+  try { process.kill(parent, 0); orphanPolls = 0; } catch { if (++orphanPolls >= 3) { fs.appendFileSync(log, JSON.stringify({ left: 'parent-gone' }) + '\\n'); process.exit(0); } }
 }, 100);
 `);
 const FAKE = WIN ? path.join(JAIL, 'claude.cmd') : path.join(JAIL, 'claude');
@@ -137,6 +138,8 @@ if (!WIN) fs.chmodSync(FAKE, 0o755);
 
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDECODE|CLAUDE_CODE_|HIVE_|AGENT_|MEMORY_|MUNDER_|FAKE_)/.test(k)));
 let n = 0;
+/** Every real fake's log, for the hang guard's 'parent-gone' line (orphanedFakes). */
+const fakeLogs = [];
 /** Deps: real spawn and real taskkill; `where` / `command -v` answer with the fake (or nothing). */
 function deps(mode, { found = true, extra = {} } = {}) {
   const log = path.join(JAIL, `log-${++n}.jsonl`);
@@ -153,12 +156,24 @@ function deps(mode, { found = true, extra = {} } = {}) {
   };
   // A fake killed before it wrote (or mid-line) leaves an empty or partial line: skip it, never throw.
   const entries = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').flatMap((l) => { try { return l.trim() ? [JSON.parse(l)] : []; } catch { return []; } }) : []);
-  return { d, log, tmpDir, entries };
+  const parentGone = () => entries().some((e) => e.left === 'parent-gone');
+  fakeLogs.push({ entries, seen: false });
+  return { d, log, tmpDir, entries, parentGone };
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 /** MODEL-LIST-CENSUS-MASK-196: a fake left alive (a mutant) is stopped through its handle, and a stop that
  *  leaves one running is an error, raised only after the checks' own verdict (verdict()). */
-async function cleanFakes(stop = stopFakes) { const left = await stop(); if (left) throw new Error(`${left} fake claude(s) outlived the stop`); }
+async function cleanFakes(stop = stopFakes) {
+  const left = await stop(); if (left) throw new Error(`${left} fake claude(s) outlived the stop`);
+  const orphaned = orphanedFakes(false); if (orphaned) throw new Error(`${orphaned} fake claude(s) left only because their shim died`);
+}
+/** Fakes that left by the hang guard (their shim gone, no stop file seen) and not yet counted by the
+ *  census; only the census (judge) marks them counted, so a check's own cleanup cannot hide one from it. */
+function orphanedFakes(mark = true) {
+  let k = 0;
+  for (const l of fakeLogs) if (!l.seen && l.entries().some((e) => e.left === 'parent-gone')) { if (mark) l.seen = true; k++; }
+  return k;
+}
 async function gone(pid, ms = 4000) { const t = Date.now(); while (alive(pid) && Date.now() - t < ms) await new Promise((r) => setTimeout(r, 100)); return !alive(pid); }
 const sameDir = (a, b) => fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase();
 const noKey = () => undefined;
@@ -176,6 +191,7 @@ async function successChecks(R, { cleanup = cleanFakes } = {}) {
     assert.deepEqual(got.req, { type: 'control_request', request_id: R.CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } }, 'one initialize request');
     assert.ok(sameDir(start.cwd, f.tmpDir), `C11: claude runs in the temp dir, never an agent's project (${start.cwd})`);
     assert.equal(alive(start.pid), false, 'C3: the claude process (below the .cmd shim) is already gone when the call resolves');
+    assert.equal(f.parentGone(), false, 'C3: and the kill took it (its tree), not its shim alone (it never left by the hang guard)');
   }, cleanup);
 }
 test('REAL fake claude, success: 11 models, the four flags, one initialize, temp cwd, the process TREE killed', { timeout: 30_000 }, () => successChecks(P));
@@ -209,6 +225,7 @@ async function hangChecks(R, { cleanup = cleanFakes } = {}) {
     assert.ok(Date.now() - t0 < 19_000);
     assert.ok(Number.isInteger(pid), 'the fake started and logged its pid inside the box');
     assert.equal(alive(pid), false, 'C4: and its process tree is already gone when the call resolves');
+    assert.equal(f.parentGone(), false, 'C4: the kill took the tree, not the shim alone (it never left by the hang guard)');
   }, cleanup);
 }
 test('REAL fake claude, hang: timed out inside the box and the tree killed', { timeout: 30_000 }, () => hangChecks(P));
@@ -377,17 +394,19 @@ const MUTANTS = [
   ['C20 the kill result ignored', '(e) => res(!e || (e as ExecErr).code === 128));', '() => res(true));', killRetryChecks],
   ['C21 POSIX probe straight after SIGKILL (sees the zombie)', "try { kill(-pid, 'SIGKILL'); res(true); return; } catch (e) {", "try { kill(-pid, 'SIGKILL'); try { kill(-pid, 0); res(false); } catch { res(true); } return; } catch (e) {", posixKillChecks],
   ['C22 POSIX group not probed after the exit', "      if (d.platform === 'win32') return true;\n", "      return true;\n", posixKillChecks],
-  ['C16 not detached on POSIX', "...(d.platform === 'win32' ? {} : { detached: true }), ", '', groupKillChecks]
+  ['C16 not detached on POSIX', "...(d.platform === 'win32' ? {} : { detached: true }), ", '', groupKillChecks],
+  ['C23 the shim killed, not its tree (no /T; Jim G8)', "d.exec('taskkill', ['/PID', String(pid), '/T', '/F'],", "d.exec('taskkill', ['/PID', String(pid), '/F'],", successChecks]
 ];
 
-test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C22 each apply once and die', { timeout: 300_000 }, async (t) => {
+test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C23 each apply once and die', { timeout: 300_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, '..', SRC), 'utf8').replace(/\r\n/g, '\n');
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, async () => {
       assert.equal(source.split(from).length - 1, 1, `${name}: the edit applies exactly once`);
-      const { died, left } = await judge(killer, loadTs.fromText(SRC, source.replace(from, () => to)));
+      const { died, left, orphaned } = await judge(killer, loadTs.fromText(SRC, source.replace(from, () => to)));
       assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${name}${died ? ` (died of ${died.message})` : ''}`);
       assert.equal(left, 0, `${name}: every fake stopped after the mutant`);
+      assert.equal(orphaned, 0, `${name}: every fake left by its stop file, none only because its shim died`);
     });
   }
 });
@@ -397,7 +416,8 @@ test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C22 each apply once and die', { timeou
 async function judge(killer, R, opts) {
   let died = null;
   try { await killer(R, opts); } catch (e) { died = e; }
-  return { died, left: await stopFakes() };
+  const left = await stopFakes();
+  return { died, left, orphaned: orphanedFakes() };
 }
 
 // ── MODEL-LIST-CENSUS-MASK-196: the cleanup can never mask the verdict; the fake dies by its handle ──
@@ -509,10 +529,13 @@ test('MASK pins: no pid lookup or WMI here; checks judge through verdict(); the 
     assert.doesNotMatch(body, /\bfinally\b/, `${fn}: no cleanup in a finally (it replaced the verdict)`);
   }
   assert.equal(code.match(/\}, cleanup\);/g).length, 2, 'successChecks and hangChecks clean up through verdict()');
-  assert.match(code, /async function judge\(killer, R, opts\) \{\s*let died = null;\s*try \{ await killer\(R, opts\); \} catch \(e\) \{ died = e; \}\s*return \{ died, left: await stopFakes\(\) \};/);
-  assert.match(code, /const \{ died, left \} = await judge\(killer, loadTs\.fromText/);
+  assert.match(code, /async function judge\(killer, R, opts\) \{\s*let died = null;\s*try \{ await killer\(R, opts\); \} catch \(e\) \{ died = e; \}\s*const left = await stopFakes\(\);\s*return \{ died, left, orphaned: orphanedFakes\(\) \};/);
+  assert.match(code, /assert\.equal\(orphaned, 0, `\$\{name\}: every fake left by its stop file/, 'the census fails a fake that left only by the hang guard');
+  assert.match(code, /if \(\+\+orphanPolls >= 3\) \{ fs\.appendFileSync\(log, JSON\.stringify\(\{ left: 'parent-gone' \}\)/, 'the hang guard says so in the log');
+  assert.match(code, /const \{ died, left, orphaned \} = await judge\(killer, loadTs\.fromText/);
+  assert.match(code, /const orphaned = orphanedFakes\(false\);/, 'a check\'s cleanup only looks; the census counts');
   assert.match(code, /spawn: \(f, a, o\) => fakes\.track\(f, a, o, stop, \(\) => entries\(\)\[0\]\?\.pid\)/, 'every real fake is tracked by its handle and its logged pid');
-  assert.match(code, /try \{ process\.kill\(parent, 0\); \} catch \{ process\.exit\(0\); \}/, 'the fake leaves when its shim is gone');
+  assert.match(code, /try \{ process\.kill\(parent, 0\); orphanPolls = 0; \} catch \{ if \(\+\+orphanPolls >= 3\)/, 'the fake leaves when its shim is gone (3 polls)');
   assert.match(code, /test\.after\(async \(\) => \{ await stopFakes\(\); fs\.rmSync\(JAIL/);
 });
 
