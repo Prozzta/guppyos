@@ -167,6 +167,8 @@ function run({
   eventsFile = path.join(os.tmpdir(), `run-tests-timeouts-${process.pid}-${Date.now()}.jsonl`),
   readFile = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return ''; } },
   removeFile = (p) => { try { fs.rmSync(p, { force: true }); } catch { /* noop */ } },
+  failureFile = () => path.join(os.tmpdir(), `run-tests-failures-${process.pid}-${Date.now()}.json`),
+  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8'),
   watchdog = startWatchdog,
   // The real runs only: an injected spawn or watchdog runs nothing to put in a job.
   fileJob = spawn === nodeSpawn && watchdog === startWatchdog ? prepareFileJob : () => ({ exe: null, why: null }),
@@ -219,12 +221,12 @@ function run({
   const fx = { spawn, cwd, timeoutMs, isTTY, env, readFile, removeFile, watchdog, jobExe: job.exe, err };
   const main = runNodeTest({ ...fx, rel, eventsFile, label: '' });
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
-  if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures);
+  if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
   // A timed-out file fails the run whatever node's own exit code says.
   const mainCode = main.hung.length && main.res.status === 0 ? 1 : main.res.status;
-  if (!perfDir) return totals(mainCode, main.counts, 'off', log, main.failures);
+  if (!perfDir) return totals(mainCode, main.counts, 'off', log, main.failures, { failureFile, writeFailureFile });
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
-  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(main.counts, lane.counts), lane.state, log, [...main.failures, ...lane.failures]);
+  return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(main.counts, lane.counts), lane.state, log, [...main.failures, ...lane.failures], { failureFile, writeFailureFile });
 }
 
 /**
@@ -328,15 +330,18 @@ function failingTests(text) {
 }
 
 /** Prints the one totals line and returns `code`. Unknown counts print as '?'. */
-function totals(code, counts, laneState, log, failures = []) {
+function totals(code, counts, laneState, log, failures = [], {
+  failureFile = () => path.join(os.tmpdir(), `run-tests-failures-${process.pid}-${Date.now()}.json`),
+  writeFailureFile = (p, text) => fs.writeFileSync(p, text, 'utf8')
+} = {}) {
   const n = (k) => (counts[k] === null ? '?' : String(counts[k]));
   if (failures.length) {
     log(`[test-runner] failing tests (${failures.length}):`);
     for (const f of failures) log(`[test-runner] FAIL ${f.file} :: ${f.name}`);
-    const failureFile = path.join(os.tmpdir(), `run-tests-failures-${process.pid}-${Date.now()}.json`);
+    const output = failureFile();
     try {
-      fs.writeFileSync(failureFile, `${JSON.stringify(failures, null, 2)}\n`, 'utf8');
-      log(`[test-runner] failing-test list written to ${failureFile}`);
+      writeFailureFile(output, `${JSON.stringify(failures, null, 2)}\n`);
+      log(`[test-runner] failing-test list written to ${output}`);
     } catch (e) {
       log(`[test-runner] could not write failing-test list: ${String(e)}`);
     }

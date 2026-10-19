@@ -105,6 +105,46 @@ test('the run ends with ONE totals line combining the main run and the lane (unk
   assert.match(noLane.last, /lane off exit 0$/);
 });
 
+test('failingTests ignores torn records and preserves the first-seen unique failures', () => {
+  const first = { file: 'test/a.test.cjs', name: 'first failure' };
+  const second = { file: 'test/b.test.cjs', name: 'second failure' };
+  const records = [
+    JSON.stringify({ failure: first }),
+    '{torn reporter record',
+    JSON.stringify({ failure: first }),
+    JSON.stringify({ failure: second })
+  ].join('\n');
+  assert.deepEqual(R.failingTests(records), [first, second]);
+});
+
+test('a failed run prints and writes its deduped failure list before its final totals line', () => {
+  const first = { file: 'test/a.test.cjs', name: 'first failure' };
+  const second = { file: 'test/b.test.cjs', name: 'second failure' };
+  const events = [
+    counts({ tests: 3, pass: 1, fail: 2, cancelled: 0, skipped: 0, todo: 0 }),
+    JSON.stringify({ failure: first }),
+    '{torn reporter record',
+    JSON.stringify({ failure: first }),
+    JSON.stringify({ failure: second })
+  ].join('\n');
+  const logs = []; const writes = [];
+  const code = R.run({
+    testDir: path.join(ROOT, 'test'), cwd: ROOT, perfDir: null, timeoutMs: 60_000, isTTY: false, eventsFile: 'ev',
+    readdir: () => ['a.test.cjs'], spawn: () => ({ status: 1 }), readFile: (p) => p === 'ev' ? events : '', removeFile: () => {},
+    watchdog: () => ({ stop: () => {} }), log: (line) => logs.push(line), err: () => {},
+    failureFile: () => 'failure-list.json', writeFailureFile: (p, text) => writes.push({ p, text })
+  });
+  assert.equal(code, 1);
+  assert.deepEqual(writes, [{ p: 'failure-list.json', text: `${JSON.stringify([first, second], null, 2)}\n` }]);
+  assert.deepEqual(logs.slice(-5), [
+    '[test-runner] failing tests (2):',
+    '[test-runner] FAIL test/a.test.cjs :: first failure',
+    '[test-runner] FAIL test/b.test.cjs :: second failure',
+    '[test-runner] failing-test list written to failure-list.json',
+    '[test-runner] totals: tests 3 pass 1 fail 2 cancelled 0 skipped 0 lane off exit 1'
+  ]);
+});
+
 test('the lane gets the main run\'s per-file timeout: watchdog, backstop, timeout reporter, a NAMED failure', () => {
   const calls = []; const errs = []; let started = 0; let stopped = 0; const removed = [];
   const rec = JSON.stringify({ file: path.join(ROOT, 'test', 'perf', 'claims-derive-w2.perf.cjs'), message: 'timed out' });
