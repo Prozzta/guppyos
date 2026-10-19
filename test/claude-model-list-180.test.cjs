@@ -123,8 +123,13 @@ process.stdin.on('data', (d) => {
   const account = mode === 'signedout' ? { tokenSource: 'none', apiProvider: 'firstParty' } : ACCOUNT;
   out({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: mode === 'signedout' ? SIGNED_OUT : mode === 'empty' ? [] : MODELS, account, pid: process.pid } } });
 });
-// like the real CLI: alive until its tree is killed, or until the test's cleanup asks it to go (its stop file)
-setInterval(() => { if (process.env.FAKE_CLAUDE_STOP && fs.existsSync(process.env.FAKE_CLAUDE_STOP)) process.exit(0); }, 100);
+// like the real CLI: alive until its tree is killed, or until the test's cleanup asks it to go (its stop file),
+// or its parent (the .cmd shim) is gone: a stop file it never sees then leaves no orphan
+const parent = process.ppid;
+setInterval(() => {
+  if (process.env.FAKE_CLAUDE_STOP && fs.existsSync(process.env.FAKE_CLAUDE_STOP)) process.exit(0);
+  try { process.kill(parent, 0); } catch { process.exit(0); }
+}, 100);
 `);
 const FAKE = WIN ? path.join(JAIL, 'claude.cmd') : path.join(JAIL, 'claude');
 fs.writeFileSync(FAKE, WIN ? `@"${process.execPath}" "${FAKE_JS}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${FAKE_JS}" "$@"\n`);
@@ -144,7 +149,7 @@ function deps(mode, { found = true, extra = {} } = {}) {
       if (file === 'where' || (file === '/bin/sh' && args[0] === '-lc')) { setImmediate(() => cb(found ? null : Object.assign(new Error('nf'), { code: 1 }), found ? `${FAKE}\n` : '')); return { pid: 0 }; }
       return execFile(file, args, opts, (e, so) => cb(e, String(so ?? '')));
     },
-    spawn: (f, a, o) => fakes.track(f, a, o, stop)
+    spawn: (f, a, o) => fakes.track(f, a, o, stop, () => entries()[0]?.pid)
   };
   // A fake killed before it wrote (or mid-line) leaves an empty or partial line: skip it, never throw.
   const entries = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').flatMap((l) => { try { return l.trim() ? [JSON.parse(l)] : []; } catch { return []; } }) : []);
@@ -153,7 +158,7 @@ function deps(mode, { found = true, extra = {} } = {}) {
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 /** MODEL-LIST-CENSUS-MASK-196: a fake left alive (a mutant) is stopped through its handle, and a stop that
  *  leaves one running is an error, raised only after the checks' own verdict (verdict()). */
-async function cleanFakes() { const left = await stopFakes(); if (left) throw new Error(`${left} fake claude(s) outlived the stop`); }
+async function cleanFakes(stop = stopFakes) { const left = await stop(); if (left) throw new Error(`${left} fake claude(s) outlived the stop`); }
 async function gone(pid, ms = 4000) { const t = Date.now(); while (alive(pid) && Date.now() - t < ms) await new Promise((r) => setTimeout(r, 100)); return !alive(pid); }
 const sameDir = (a, b) => fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase();
 const noKey = () => undefined;
@@ -462,6 +467,39 @@ async function stopFileChecks(fp) {
 }
 test('MASK: stop() writes the stop file, so the fake below a .cmd shim exits by itself', { timeout: 60_000 }, () => stopFileChecks(require(`./${FP}`)));
 
+async function orphanChecks(fp) {
+  // Jim MUST 1 (his G7): a fake below the shim that never sees a stop file. Killing the shim's handle
+  // ends the handle only; stop() must count the fake as left, and close our pipe ends so it cannot hang us.
+  const t = fp.tracker();
+  const js = path.join(JAIL, `orphan-${++n}.cjs`), pidFile = `${js}.pid`, out = `${js}.out`;
+  fs.writeFileSync(js, `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n`
+    + `setInterval(() => { if (require('fs').existsSync(${JSON.stringify(out)})) process.exit(0); }, 100);\n`);
+  const shim = WIN ? path.join(JAIL, `orphan-${n}.cmd`) : null;
+  if (WIN) fs.writeFileSync(shim, `@"${process.execPath}" "${js}"\r\n`);
+  const pid = () => (fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, 'utf8')) || undefined : undefined);
+  const c = WIN ? t.track(process.env.ComSpec || 'cmd.exe', ['/d', '/c', shim], { stdio: 'pipe', windowsHide: true }, null, pid)
+    : t.track(process.execPath, [js], { stdio: 'pipe' }, null, pid);
+  const closed = new Promise((r) => c.once('close', r));
+  await fp.verdict(async () => {
+    const t0 = Date.now();
+    while (!pid() && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(pid(), 'the orphan-to-be started');
+    const t1 = Date.now();
+    const left = await Promise.race([t.stop(500), new Promise((r) => setTimeout(() => r('HUNG'), 5000))]);
+    assert.ok(Date.now() - t1 < 5000, 'bounded');
+    if (WIN) {
+      assert.equal(left, 1, 'the shim was killed but the fake below it runs: counted as left, not 0');
+      assert.ok(alive(pid()), 'the fake still runs (the case to count)');
+    } else assert.equal(left, 0, 'POSIX: the handle is the fake itself');
+    assert.equal(await Promise.race([closed.then(() => 'closed'), new Promise((r) => setTimeout(() => r('OPEN'), 3000))]), 'closed', 'our pipe ends are closed: an orphan cannot keep this file up');
+  }, async () => { fs.writeFileSync(out, ''); c.kill('SIGKILL'); if (pid()) await gone(pid()); });
+}
+test('MASK (Jim MUST 1): a fake orphaned below its killed shim is counted as left, and cannot hang the file', { timeout: 60_000 }, () => orphanChecks(require(`./${FP}`)));
+
+test('MASK (Jim SHOULD 1): a passing check with a fake left after the stop still fails', { timeout: 30_000 }, async () => {
+  await assert.rejects(successChecks(P, { cleanup: () => cleanFakes(async () => { await stopFakes(); return 1; }) }), /1 fake claude\(s\) outlived the stop/);
+});
+
 test('MASK pins: no pid lookup or WMI here; checks judge through verdict(); the census stops fakes after each mutant', () => {
   const code = codeOnly(read('test/claude-model-list-180.test.cjs'));
   // bracketed so this line does not match itself
@@ -473,7 +511,8 @@ test('MASK pins: no pid lookup or WMI here; checks judge through verdict(); the 
   assert.equal(code.match(/\}, cleanup\);/g).length, 2, 'successChecks and hangChecks clean up through verdict()');
   assert.match(code, /async function judge\(killer, R, opts\) \{\s*let died = null;\s*try \{ await killer\(R, opts\); \} catch \(e\) \{ died = e; \}\s*return \{ died, left: await stopFakes\(\) \};/);
   assert.match(code, /const \{ died, left \} = await judge\(killer, loadTs\.fromText/);
-  assert.match(code, /spawn: \(f, a, o\) => fakes\.track\(f, a, o, stop\)/, 'every real fake is tracked by its handle');
+  assert.match(code, /spawn: \(f, a, o\) => fakes\.track\(f, a, o, stop, \(\) => entries\(\)\[0\]\?\.pid\)/, 'every real fake is tracked by its handle and its logged pid');
+  assert.match(code, /try \{ process\.kill\(parent, 0\); \} catch \{ process\.exit\(0\); \}/, 'the fake leaves when its shim is gone');
   assert.match(code, /test\.after\(async \(\) => \{ await stopFakes\(\); fs\.rmSync\(JAIL/);
 });
 
@@ -482,7 +521,9 @@ const FP_MUTANTS = [
   ['F2 cleanup error wins', '  if (failed) {\n', '  if (cleanupError) throw cleanupError;\n  if (failed) {\n', verdictChecks],
   ['F3 no handle kill', "for (const h of live) { try { h.c.kill('SIGKILL'); }", 'for (const h of live) { try { void h; }', handleKillChecks],
   ['F4 unbounded wait', 'while (live.size && Date.now() - t0 < ms)', 'while (live.size)', handleKillChecks],
-  ['F5 no stop file', "if (h.stopFile) fs.writeFileSync(h.stopFile, '');", 'void 0;', stopFileChecks]
+  ['F5 no stop file', "if (h.stopFile) fs.writeFileSync(h.stopFile, '');", 'void 0;', stopFileChecks],
+  ['F6 orphan below the shim not counted', ' || (Number.isInteger(h.pid()) && alive(h.pid()))', '', orphanChecks],
+  ['F7 pipes left open', 'try { if (s) s.destroy(); }', 'try { void s; }', orphanChecks]
 ];
 test('MUTANT CENSUS FAKE-PROCS: F1-F5 each apply once and die', { timeout: 180_000 }, async (t) => {
   const source = fs.readFileSync(path.join(__dirname, FP), 'utf8').replace(/\r\n/g, '\n');

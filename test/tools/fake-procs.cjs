@@ -26,26 +26,34 @@ async function verdict(check, cleanup) {
   if (cleanupError) throw cleanupError;
 }
 
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
 function tracker() {
   const live = new Set();
-  /** spawn(), keeping the handle until its exit; `stopFile` is the file the child polls for. */
-  function track(file, args, opts, stopFile) {
+  /** spawn(), keeping the handle until its exit; `stopFile` is the file the child polls for, `pid()`
+   *  the fake's own pid once it logged it (below a .cmd shim it is not the handle's). */
+  function track(file, args, opts, stopFile, pid = () => undefined) {
     const c = spawn(file, args, opts);
-    const h = { c, stopFile };
+    const h = { c, stopFile, pid };
     live.add(h);
     c.once('exit', () => live.delete(h));
     c.once('error', () => live.delete(h));
     return c;
   }
-  /** Stop every live child; resolves with the number still live after the handle kill. */
+  /** Stop every live child; resolves with how many are left: a live handle, or (Jim MUST 1) a fake
+   *  below a killed shim whose logged pid still answers. Never 0 while one runs. */
   async function stop(ms = 5000) {
-    for (const h of live) { try { if (h.stopFile) fs.writeFileSync(h.stopFile, ''); } catch { /* jail gone */ } }
+    const was = [...live];
+    for (const h of was) { try { if (h.stopFile) fs.writeFileSync(h.stopFile, ''); } catch { /* jail gone */ } }
     const t0 = Date.now();
     while (live.size && Date.now() - t0 < ms) await new Promise((r) => setTimeout(r, 50));
     for (const h of live) { try { h.c.kill('SIGKILL'); } catch { /* exited meanwhile */ } }
+    // an orphan below the shim holds the other ends of the pipes: ours are closed, so it cannot keep this process up
+    for (const h of was) for (const s of [h.c.stdin, h.c.stdout, h.c.stderr]) { try { if (s) s.destroy(); } catch { /* closed */ } }
+    const left = () => was.filter((h) => live.has(h) || (Number.isInteger(h.pid()) && alive(h.pid()))).length;
     const t1 = Date.now();
-    while (live.size && Date.now() - t1 < 1000) await new Promise((r) => setTimeout(r, 50));
-    return live.size;
+    while (left() && Date.now() - t1 < 1000) await new Promise((r) => setTimeout(r, 50));
+    return left();
   }
   return { track, stop, live };
 }
