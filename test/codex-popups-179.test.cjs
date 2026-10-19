@@ -438,8 +438,11 @@ test('P2: a screen-guard notice already up is reworded when a popup appears (onc
 // ─── Static wiring ──────────────────────────────────────────────────────────────────────
 
 test('wiring: the renderer extracts the tail with the facts, and main passes the popup to the held notice', () => {
+  // GTC M2: the reading moved to src/shared/screenReading.ts (shared with main's mirror); the renderer calls it on its buffer
   const pool = fs.readFileSync(path.join(__dirname, '..', 'src/renderer/src/components/terminalPool.ts'), 'utf8');
-  assert.match(pool, /extractCodexScreen\(\(i\) => buf\.getLine\(i\)\?\.translateToString\(true\), buf\.length, cursor\)/, 'the renderer reads the whole buffer (the tail is its bottom)');
+  assert.match(pool, /return codexReading\(entry\.term\.buffer\.active, expectedTail\);/, 'the renderer reads its own whole buffer');
+  const reading = fs.readFileSync(path.join(__dirname, '..', 'src/shared/screenReading.ts'), 'utf8');
+  assert.match(reading, /extractCodexScreen\(\(i\) => buf\.getLine\(i\)\?\.translateToString\(true\), buf\.length, cursor\)/, 'the renderer reads the whole buffer (the tail is its bottom)');
   const idx = fs.readFileSync(path.join(__dirname, '..', 'src/main/index.ts'), 'utf8');
   assert.match(idx, /raise: \(h, now, asking\) => hive\.mail\.noteHeldInterferedAlert\(h\.agentId, \{[\s\S]{0,200}requestId: h\.requestId, asking,/);
 });
