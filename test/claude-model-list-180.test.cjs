@@ -22,7 +22,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
-const own = require('./tools/own-procs.cjs');
+const { verdict, tracker } = require('./tools/fake-procs.cjs');
 const { readSource: read, codeOnly } = require('./read-source.cjs');
 
 const SRC = 'src/main/providerModels.ts';
@@ -99,7 +99,10 @@ test('failures in plain words', () => {
 // ── a fake claude: a real process speaking the protocol ─────────────────────────────────
 
 const JAIL = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-list-'));
-test.after(() => fs.rmSync(JAIL, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+const fakes = tracker();
+/** Every fake this file spawned is stopped by its handle (never a pid lookup), so the jail is free to remove. */
+const stopFakes = () => fakes.stop();
+test.after(async () => { await stopFakes(); fs.rmSync(JAIL, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
 const FAKE_JS = path.join(JAIL, 'fake-claude.cjs');
 fs.writeFileSync(FAKE_JS, `'use strict';
 const fs = require('fs');
@@ -120,7 +123,8 @@ process.stdin.on('data', (d) => {
   const account = mode === 'signedout' ? { tokenSource: 'none', apiProvider: 'firstParty' } : ACCOUNT;
   out({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: mode === 'signedout' ? SIGNED_OUT : mode === 'empty' ? [] : MODELS, account, pid: process.pid } } });
 });
-setInterval(() => {}, 1000); // like the real CLI: alive until its tree is killed
+// like the real CLI: alive until its tree is killed, or until the test's cleanup asks it to go (its stop file)
+setInterval(() => { if (process.env.FAKE_CLAUDE_STOP && fs.existsSync(process.env.FAKE_CLAUDE_STOP)) process.exit(0); }, 100);
 `);
 const FAKE = WIN ? path.join(JAIL, 'claude.cmd') : path.join(JAIL, 'claude');
 fs.writeFileSync(FAKE, WIN ? `@"${process.execPath}" "${FAKE_JS}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${FAKE_JS}" "$@"\n`);
@@ -132,37 +136,34 @@ let n = 0;
 function deps(mode, { found = true, extra = {} } = {}) {
   const log = path.join(JAIL, `log-${++n}.jsonl`);
   const tmpDir = fs.mkdtempSync(path.join(JAIL, 'cwd-'));
-  const env = { ...baseEnv, FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_LOG: log, SHELL: '/bin/sh', ...extra };
+  const stop = path.join(JAIL, `stop-${n}`);
+  const env = { ...baseEnv, FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_STOP: stop, SHELL: '/bin/sh', ...extra };
   const d = {
     platform: process.platform, env, tmpDir, exists: (p) => fs.existsSync(p),
     exec: (file, args, opts, cb) => {
       if (file === 'where' || (file === '/bin/sh' && args[0] === '-lc')) { setImmediate(() => cb(found ? null : Object.assign(new Error('nf'), { code: 1 }), found ? `${FAKE}\n` : '')); return { pid: 0 }; }
       return execFile(file, args, opts, (e, so) => cb(e, String(so ?? '')));
     },
-    spawn: (f, a, o) => spawn(f, a, o)
+    spawn: (f, a, o) => fakes.track(f, a, o, stop)
   };
   // A fake killed before it wrote (or mid-line) leaves an empty or partial line: skip it, never throw.
   const entries = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').flatMap((l) => { try { return l.trim() ? [JSON.parse(l)] : []; } catch { return []; } }) : []);
   return { d, log, tmpDir, entries };
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-/** TEST-GLOB-PID-RECYCLE: the fake is killed only while its pid is still the fake (name and birth, own-procs),
- *  never a process that took the pid over. Not on POSIX: nothing to verify it with there. */
-function killIfOurs(e) {
-  if (!e || !e.pid || !alive(e.pid) || !WIN) return;
-  const root = own.stillOurs({ pid: e.pid, bornMs: e.born, name: 'node.exe' });
-  if (root) own.killVerified([root]);
-}
+/** MODEL-LIST-CENSUS-MASK-196: a fake left alive (a mutant) is stopped through its handle, and a stop that
+ *  leaves one running is an error, raised only after the checks' own verdict (verdict()). */
+async function cleanFakes() { const left = await stopFakes(); if (left) throw new Error(`${left} fake claude(s) outlived the stop`); }
 async function gone(pid, ms = 4000) { const t = Date.now(); while (alive(pid) && Date.now() - t < ms) await new Promise((r) => setTimeout(r, 100)); return !alive(pid); }
 const sameDir = (a, b) => fs.realpathSync.native(a).toLowerCase() === fs.realpathSync.native(b).toLowerCase();
 const noKey = () => undefined;
 const noFetch = async () => { throw new Error('the API must not be called'); };
 
-async function successChecks(R) {
+async function successChecks(R, { cleanup = cleanFakes } = {}) {
   const f = deps('success');
   const r = await R.claudeAdapter(f.d, noKey, noFetch)();
   const [start, got] = f.entries();
-  try {
+  await verdict(() => {
     assert.equal(r.status, 'ok', JSON.stringify(r));
     assert.deepEqual(r.models.map((m) => m.id), EXPECTED_IDS);
     assert.equal(r.source, 'claude initialize (the /model list)');
@@ -170,7 +171,7 @@ async function successChecks(R) {
     assert.deepEqual(got.req, { type: 'control_request', request_id: R.CLAUDE_REQUEST_ID, request: { subtype: 'initialize' } }, 'one initialize request');
     assert.ok(sameDir(start.cwd, f.tmpDir), `C11: claude runs in the temp dir, never an agent's project (${start.cwd})`);
     assert.equal(alive(start.pid), false, 'C3: the claude process (below the .cmd shim) is already gone when the call resolves');
-  } finally { killIfOurs(start); }
+  }, cleanup);
 }
 test('REAL fake claude, success: 11 models, the four flags, one initialize, temp cwd, the process TREE killed', { timeout: 30_000 }, () => successChecks(P));
 
@@ -191,19 +192,19 @@ test('REAL fake claude, auth error / no --verbose / empty list: plain words', { 
   }
 });
 
-async function hangChecks(R) {
+async function hangChecks(R, { cleanup = cleanFakes } = {}) {
   const f = deps('hang');
   const t0 = Date.now();
   // The box must let the fake START under suite load (node can take seconds then); 1.5 s once cut it
   // off before it logged its pid, and the test had nothing to check (FLAKE-CLAUDE-MODEL-LIST-HANG).
   const r = await Promise.race([R.runClaudeInit(f.d, FAKE, 5000), new Promise((res) => setTimeout(() => res({ reason: 'NO TIME BOX' }), 20_000))]);
   const first = f.entries()[0], pid = first?.pid;
-  try {
+  await verdict(() => {
     assert.deepEqual(r, { reason: R.CLAUDE_REASONS.timeout }, 'C4: a claude that never answers is cut off by the time box');
     assert.ok(Date.now() - t0 < 19_000);
     assert.ok(Number.isInteger(pid), 'the fake started and logged its pid inside the box');
     assert.equal(alive(pid), false, 'C4: and its process tree is already gone when the call resolves');
-  } finally { killIfOurs(first); }
+  }, cleanup);
 }
 test('REAL fake claude, hang: timed out inside the box and the tree killed', { timeout: 30_000 }, () => hangChecks(P));
 
@@ -379,10 +380,118 @@ test('MUTANT CENSUS CLAUDE-MODEL-LIST: C1-C22 each apply once and die', { timeou
   for (const [name, from, to, killer] of MUTANTS) {
     await t.test(name, async () => {
       assert.equal(source.split(from).length - 1, 1, `${name}: the edit applies exactly once`);
-      const R = loadTs.fromText(SRC, source.replace(from, () => to));
-      let died = null;
-      try { await killer(R); } catch (e) { died = e; }
+      const { died, left } = await judge(killer, loadTs.fromText(SRC, source.replace(from, () => to)));
       assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${name}${died ? ` (died of ${died.message})` : ''}`);
+      assert.equal(left, 0, `${name}: every fake stopped after the mutant`);
+    });
+  }
+});
+
+/** One census verdict: the killer's error, then a fake that outlived its mutant is stopped by its handle
+ *  at once, never waited on (MODEL-LIST-CENSUS-MASK-196). */
+async function judge(killer, R, opts) {
+  let died = null;
+  try { await killer(R, opts); } catch (e) { died = e; }
+  return { died, left: await stopFakes() };
+}
+
+// ── MODEL-LIST-CENSUS-MASK-196: the cleanup can never mask the verdict; the fake dies by its handle ──
+
+const FP = 'tools/fake-procs.cjs';
+const fpFrom = (text) => { const m = new (require('node:module'))(path.join(__dirname, FP)); m.paths = module.paths; m._compile(text, path.join(__dirname, FP)); return m.exports; };
+const etimedout = () => Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'), { code: 'ETIMEDOUT' });
+
+test('MASK: under C4 a cleanup that throws ETIMEDOUT still reports KILLED, and the fake is stopped', { timeout: 60_000 }, async () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', SRC), 'utf8').replace(/\r\n/g, '\n');
+  const c4 = MUTANTS.find(([name]) => name.startsWith('C4 '));
+  const R = loadTs.fromText(SRC, source.replace(c4[1], () => c4[2]));
+  let ran = 0;
+  const { died, left } = await judge(hangChecks, R, { cleanup: async () => { ran++; await stopFakes(); throw etimedout(); } });
+  assert.ok(died instanceof assert.AssertionError, `KILLED, not masked (died of ${died && died.message})`);
+  assert.equal(died.cleanupError && died.cleanupError.code, 'ETIMEDOUT', 'the cleanup error rides on the verdict');
+  assert.equal(ran, 1);
+  assert.equal(left, 0, 'the hanging fake was stopped');
+});
+
+async function verdictChecks(fp) {
+  const fail = new assert.AssertionError({ message: 'the check' });
+  let runs = 0;
+  const cleanup = (err) => async () => { runs++; if (err) throw err; };
+  const caught = async (p) => { try { await p; return null; } catch (e) { return e; } };
+  const a = await caught(fp.verdict(() => { throw fail; }, cleanup(etimedout())));
+  assert.equal(a, fail, 'a throwing cleanup never replaces the check\'s error');
+  assert.equal(a.cleanupError.code, 'ETIMEDOUT');
+  const b = await caught(fp.verdict(() => {}, cleanup(etimedout())));
+  assert.equal(b && b.code, 'ETIMEDOUT', 'a passing check still reports a failed cleanup');
+  assert.equal(await caught(fp.verdict(() => {}, cleanup())), null);
+  assert.equal(runs, 3, 'the cleanup runs once per verdict');
+}
+test('MASK: verdict() keeps the check\'s error over the cleanup\'s, and still reports a failed cleanup', () => verdictChecks(require(`./${FP}`)));
+
+async function handleKillChecks(fp) {
+  // a child that ignores its stop file: the handle kill ends it, inside the bound
+  const t = fp.tracker();
+  const c = t.track(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true }, null);
+  const exit = new Promise((r) => c.once('exit', (code, sig) => r({ code, sig })));
+  await fp.verdict(async () => {
+    const t0 = Date.now();
+    const left = await Promise.race([t.stop(300), new Promise((r) => setTimeout(() => r('HUNG'), 5000))]);
+    assert.equal(left, 0, 'the stop killed it by its handle, inside the bound');
+    assert.ok(Date.now() - t0 < 5000);
+    assert.equal((await exit).sig, 'SIGKILL');
+  }, () => { c.kill('SIGKILL'); });
+}
+test('MASK: a child that ignores its stop file is killed by its ChildProcess handle, in bounded time', { timeout: 30_000 }, () => handleKillChecks(require(`./${FP}`)));
+
+async function stopFileChecks(fp) {
+  // the real fake below its .cmd shim (Windows): killing the shim's handle alone would leave node running
+  const t = fp.tracker();
+  const log = path.join(JAIL, `log-stop-${++n}.jsonl`), stop = path.join(JAIL, `stop-stop-${n}`);
+  const env = { ...baseEnv, FAKE_CLAUDE_MODE: 'hang', FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_STOP: stop };
+  const c = WIN ? t.track(process.env.ComSpec || 'cmd.exe', ['/d', '/c', FAKE], { env, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }, stop)
+    : t.track(FAKE, [], { env, stdio: ['pipe', 'ignore', 'ignore'] }, stop);
+  const exit = new Promise((r) => c.once('exit', (code, sig) => r({ code, sig })));
+  await fp.verdict(async () => {
+    const t0 = Date.now();
+    while (!fs.existsSync(log) && Date.now() - t0 < 20_000) await new Promise((r) => setTimeout(r, 100));
+    const pid = JSON.parse(fs.readFileSync(log, 'utf8').split('\n')[0]).pid;
+    assert.equal(await t.stop(), 0);
+    assert.deepEqual(await exit, { code: 0, sig: null }, 'the fake left by itself (its stop file), not by the handle kill');
+    assert.ok(await gone(pid), 'the fake below the shim is gone');
+  }, () => { try { fs.writeFileSync(stop, ''); } catch { /* jail gone */ } c.kill('SIGKILL'); });
+}
+test('MASK: stop() writes the stop file, so the fake below a .cmd shim exits by itself', { timeout: 60_000 }, () => stopFileChecks(require(`./${FP}`)));
+
+test('MASK pins: no pid lookup or WMI here; checks judge through verdict(); the census stops fakes after each mutant', () => {
+  const code = codeOnly(read('test/claude-model-list-180.test.cjs'));
+  // bracketed so this line does not match itself
+  assert.doesNotMatch(code, /own[-]procs|still[O]urs|kill[V]erified|Win32[_]Process|Cim[I]nstance|wm[i]c\b/, 'no WMI lookup in this file');
+  for (const fn of ['successChecks', 'hangChecks']) {
+    const body = code.slice(code.indexOf(`async function ${fn}(`)).split('\ntest(')[0];
+    assert.doesNotMatch(body, /\bfinally\b/, `${fn}: no cleanup in a finally (it replaced the verdict)`);
+  }
+  assert.equal(code.match(/\}, cleanup\);/g).length, 2, 'successChecks and hangChecks clean up through verdict()');
+  assert.match(code, /async function judge\(killer, R, opts\) \{\s*let died = null;\s*try \{ await killer\(R, opts\); \} catch \(e\) \{ died = e; \}\s*return \{ died, left: await stopFakes\(\) \};/);
+  assert.match(code, /const \{ died, left \} = await judge\(killer, loadTs\.fromText/);
+  assert.match(code, /spawn: \(f, a, o\) => fakes\.track\(f, a, o, stop\)/, 'every real fake is tracked by its handle');
+  assert.match(code, /test\.after\(async \(\) => \{ await stopFakes\(\); fs\.rmSync\(JAIL/);
+});
+
+const FP_MUTANTS = [
+  ['F1 cleanup in finally', '  try { await check(); } catch (e) { failed = e; }\n', '  try { await check(); } finally { await cleanup(); }\n', verdictChecks],
+  ['F2 cleanup error wins', '  if (failed) {\n', '  if (cleanupError) throw cleanupError;\n  if (failed) {\n', verdictChecks],
+  ['F3 no handle kill', "for (const h of live) { try { h.c.kill('SIGKILL'); }", 'for (const h of live) { try { void h; }', handleKillChecks],
+  ['F4 unbounded wait', 'while (live.size && Date.now() - t0 < ms)', 'while (live.size)', handleKillChecks],
+  ['F5 no stop file', "if (h.stopFile) fs.writeFileSync(h.stopFile, '');", 'void 0;', stopFileChecks]
+];
+test('MUTANT CENSUS FAKE-PROCS: F1-F5 each apply once and die', { timeout: 180_000 }, async (t) => {
+  const source = fs.readFileSync(path.join(__dirname, FP), 'utf8').replace(/\r\n/g, '\n');
+  for (const [name, from, to, killer] of FP_MUTANTS) {
+    await t.test(name, async () => {
+      assert.equal(source.split(from).length - 1, 1, `${name}: the edit applies exactly once`);
+      const { died, left } = await judge(killer, fpFrom(source.replace(from, () => to)));
+      assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${name}${died ? ` (died of ${died.message})` : ''}`);
+      assert.equal(left, 0);
     });
   }
 });
