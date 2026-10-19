@@ -179,7 +179,8 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   // INTERFERED: main refuses every programmatic delivery to that terminal, so offering it
   // would be offering something that cannot happen. The same for a Codex screen hold (WSG-178
   // W1): main's screen check applies to "send now" too.
-  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold);
+  // GTC M3: and out of a wait for idle that looks stale (the hooks may have missed a turn end).
+  const releasable = !delivery.interfered && (delivery.paused || delivery.capacityHold || delivery.boxStale);
   const capacityNote = capacityStateNote(delivery.capacityEvidence);
 
   // A PERSON ends an INTERFERED hold, and says HOW (human ruling, option B): the message
@@ -199,7 +200,7 @@ export function MessageQueueComposer({ agent }: MessageQueueComposerProps) {
   // and the terminal stays refused until a person resolves it. So is the capacity note
   // (unit #11): a limited, recovering or stale pool must not be invisible on an empty queue.
   const status = composerStatus({ agentName: agent.name, queueLength: queue.length, idle: shownIdle, hold, block, capacityNote,
-    capacityEvidence: delivery.capacityEvidence });
+    capacityEvidence: delivery.capacityEvidence, boxNote: delivery.boxNote, boxStale: delivery.boxStale });
 
   return (
     <div
@@ -468,8 +469,11 @@ interface DeliveryState {
   capacityEvidence: CapacityEvidenceName | null;
   interfered: InterferedView | null;
   screenHold: { reason: string } | null;
+  /** GTC M3: main's message-box note and stale-wait flag. */
+  boxNote: string | null;
+  boxStale: boolean;
 }
-const NOT_HELD: DeliveryState = { paused: false, capacityHold: false, capacityEvidence: null, interfered: null, screenHold: null };
+const NOT_HELD: DeliveryState = { paused: false, capacityHold: false, capacityEvidence: null, interfered: null, screenHold: null, boxNote: null, boxStale: false };
 
 /** Poll what MAIN is holding this agent's delivery for: the floor-wide pause, provider
  * capacity, an unresolved INTERFERED. All three are computed in main and only READ here.
@@ -490,7 +494,9 @@ function useDeliveryState(agentId: string): DeliveryState & { refresh: () => voi
             capacityHold: !!s?.capacityHold,
             capacityEvidence: s?.capacityEvidence ?? null,
             interfered: s?.interfered ?? null,
-            screenHold: s?.screenHold ?? null
+            screenHold: s?.screenHold ?? null,
+            boxNote: s?.messageBox?.note ?? null,
+            boxStale: s?.messageBox?.stale === true
           });
         })
         .catch(() => { /* main not ready — assume nothing is held */ });

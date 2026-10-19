@@ -22,7 +22,7 @@ import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../sh
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
 import { toolEnded, toolStarted } from '@shared/activityView';
 import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery, stopKeepsTurnOpen } from './queueDelivery';
-import type { AutoSubmitOutcome } from '../../../preload';
+import type { MessageBoxOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 import { themeBuilder } from '@/scene/themes/themeCatalog';
 import { lookFromRequest } from '@/scene/themes/looks';
@@ -813,10 +813,14 @@ export function useHive(config: HarnessConfig | null): void {
       // Idle, or breaker-pinned with a terminal that has genuinely gone quiet.
       // This gate is a don't-type-mid-stream safety check, so `manual` does NOT
       // bypass it — "send now" releases the auto-delivery PAUSE below, not this.
-      if (!canDeliverToAgent(target.status, ptyQuietMs(target.ptyId, now), QUIESCE_IDLE_MS)) {
-        return { sent: false };
-      }
+      const idleHere = canDeliverToAgent(target.status, ptyQuietMs(target.ptyId, now), QUIESCE_IDLE_MS);
+      // GTC M3: the Human's own items (`human: true`, set by MessageQueueComposer alone) go to
+      // main's message box on the 'term' path, and MAIN judges idle (its hook state), the draft
+      // and the picker; so this tab's status and screen guess are not asked for them.
+      if (!idleHere && next.human !== true) return { sent: false };
       const control = await window.cth.controlSnapshot(target.id);
+      const viaBox = next.human === true && control?.messageBox?.path === 'term';
+      if (!idleHere && !viaBox) return { sent: false };
       // The pause gate holds everything EXCEPT messages the user explicitly
       // released with "send now" (m.manual) — otherwise a paused floor leaves
       // the queue with no escape hatch at all. Idle/draft/picker safety below
@@ -835,7 +839,7 @@ export function useHive(config: HarnessConfig | null): void {
       // opened, holds delivery. Both blocks expire after half an hour, and when
       // one does we simply type after whatever is there — automation never
       // erases the user's text and never closes the user's menu.
-      if (!isTerminalAutomationSafe(target.ptyId, now)) return { sent: false };
+      if (!viaBox && !isTerminalAutomationSafe(target.ptyId, now)) return { sent: false };
       if (now - (lastFlush.current[target.id] ?? 0) < FLUSH_COOLDOWN_MS) return { sent: false };
       // Last gate before we type: re-check the message's delivery-time
       // precondition. A queue item is decided at enqueue time and delivered an
@@ -863,9 +867,15 @@ export function useHive(config: HarnessConfig | null): void {
         // Main delivers an id AT MOST ONCE: a refusal frees it for the next ask, a COMMIT
         // is remembered — so a reload between main's Enter and this acknowledgement can
         // no longer type the message twice.
-        let outcome: AutoSubmitOutcome;
+        let outcome: MessageBoxOutcome;
         try {
-          outcome = await window.cth.autoSubmit({
+          outcome = viaBox ? await window.cth.messageBoxDeliver({
+            requestId: `queue:${srcId}:${next.id}`,
+            agentId: target.id,
+            text: withStandingGoal(target, wrap ? wrap(next) : (next.instruction ?? next.text)),
+            // Send-now: the Human is the judge of idle; every other check still applies.
+            now: next.manual === true
+          }) : await window.cth.autoSubmit({
             requestId: `queue:${srcId}:${next.id}`,
             agentId: target.id,
             admissionClass: next.manual ? 'USER_RELEASED' : 'CAPACITY_GATED',
@@ -914,6 +924,15 @@ export function useHive(config: HarnessConfig | null): void {
         // handled - drop". Main recorded that against the id; it is never typed again. The
         // composer normally removes the row itself - this is the backstop for a copy that
         // was asked for again before it did. It is not a delivery: no send side-effects.
+        // GTC M3 TYPED_NOT_SENT: the message box typed the text but pressed no Enter (it did not
+        // reach the composer, or someone typed during the send). It is on the terminal now:
+        // never typed again. Main's composer note and digest item say so.
+        if (outcome.kind === 'TYPED_NOT_SENT') {
+          delete sendFailures[next.id];
+          removeQueuedMessage(srcId, next.id);
+          console.warn(`[queue-drain] message ${next.id} for ${target.id} typed but not sent (${outcome.reason}); not retried`);
+          return { sent: false };
+        }
         if (outcome.kind === 'HUMAN_HANDLED') {
           delete sendFailures[next.id];
           removeQueuedMessage(srcId, next.id);
@@ -990,8 +1009,11 @@ export function useHive(config: HarnessConfig | null): void {
       for (const a of agents) {
         // Same gate as dispatch() — this pre-filter runs first, so relaxing only
         // the one inside dispatch would have changed nothing.
-        if (!a.ptyId || !canDeliverToAgent(a.status, ptyQuietMs(a.ptyId, now), QUIESCE_IDLE_MS)) continue;
-        if (!messageQueues[a.id]?.length) continue;
+        if (!a.ptyId || !messageQueues[a.id]?.length) continue;
+        // GTC M3: a Human item at the head is asked about anyway; dispatch() learns the path
+        // from main's snapshot and applies this gate itself unless main's message box decides.
+        if (!canDeliverToAgent(a.status, ptyQuietMs(a.ptyId, now), QUIESCE_IDLE_MS)
+          && pickQueuedForDelivery(messageQueues[a.id], refusedAutomatic)?.human !== true) continue;
         void dispatch(a.id, a).then(({ sent, message }) => {
           if (sent && message?.slack) void ensureSlackCard(message);
         });

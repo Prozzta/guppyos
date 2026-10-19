@@ -1334,7 +1334,8 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
 // census of names. The no-alias and node-pty-importer checks are what stand in its way.
 const PTY_WRITERS = {
   'src/main/pty.ts': { 's.proc': 1 },                       // THE raw write, inside write(id, data, origin)
-  'src/main/index.ts': { ptyManager: 2 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD)
+  'src/main/index.ts': { ptyManager: 3 },                   // the pty:write handler (renderer origin; PROGRAMMATIC and GOD refused) + god's term writer (origin GOD) + GTC M3: the message box's writer (origin HUMAN; app-window IPC only)
+  'src/main/messageBox.ts': { d: 2 },                       // GTC M3: the Human's text and its one Enter, via main's HUMAN-bound writer (the Human's own queue items only)
   'src/main/automaticSubmitWiring.ts': { 'w.pty': 1 },      // the ONLY PROGRAMMATIC producer
   'src/main/termControl.ts': { 'this.deps': 2 },            // GOD-TERMINAL-CONTROL: god's type/keys and send's one Enter, via main's GOD-bound writer (god is not admission)
   'src/main/automaticSubmit.ts': { deps: 1 }               // safeWrite - the owner's one write
@@ -1620,9 +1621,10 @@ test('workerWake.ts decides WHO and types nothing; every wake goes through the o
   const wakeSrc = read('src/main/workerWake.ts');
   assert.ok(!/submitWorkerNudge|writeSubmit|writeText|delaySubmit|ptyManager/.test(wakeSrc), 'the private order is gone');
   const index = read('src/main/index.ts');
-  assert.equal(index.split('ptyManager.write(').length - 1, 2,
-    'index.ts has exactly TWO direct ptyManager.write: the declared-origin pty:write handler and god\'s term writer');
+  assert.equal(index.split('ptyManager.write(').length - 1, 3,
+    'index.ts has exactly THREE direct ptyManager.write: the declared-origin pty:write handler, god\'s term writer and the message box\'s');
   assert.equal(index.split("ptyManager.write(ptyId, data, 'GOD')").length - 1, 1, "the second is term's, bound to origin GOD");
+  assert.equal(index.split("ptyManager.write(ptyId, data, 'HUMAN')").length - 1, 1, "GTC M3: the third is the message box's, bound to origin HUMAN");
   const beat = index.slice(index.indexOf('function runWorkerWakeBeat'), index.indexOf('/** (Re)arm the always-on beats'));
   assert.match(beat, /inboxWake\.reconcileAll\(live\)/, 'the beat is reconciliation through the one bridge path');
   assert.ok(!/automaticSubmit\.submit|ptyManager/.test(beat), 'no second submit implementation in the beat');

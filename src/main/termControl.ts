@@ -142,8 +142,14 @@ export class TermControl {
     if (agent === callerId) return refuse(400, 'god cannot drive its own terminal');
     const ptyId = this.deps.ptyOf(agent);
     if (!ptyId) return refuse(404, `${agent} has no live terminal`);
+    return this.slot(agent, () => this.run(callerId, agent, ptyId, action, b));
+  }
+
+  /** GTC M3: run `fn` as the agent's one action (god's `term` and the Human's message box share
+   *  it, so the two never interleave on one terminal). */
+  slot<T>(agent: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.chains.get(agent) ?? Promise.resolve();
-    const run = prev.catch(() => undefined).then(() => this.run(callerId, agent, ptyId, action, b));
+    const run = prev.catch(() => undefined).then(fn);
     const tail = run.catch(() => undefined);
     this.chains.set(agent, tail);
     void tail.then(() => { if (this.chains.get(agent) === tail) this.chains.delete(agent); });
@@ -216,7 +222,7 @@ export class TermControl {
   }
 
   /** Until the output generation stops moving for TERM_SETTLE_QUIET_MS, at most TERM_SETTLE_CAP_MS. */
-  private async settle(ptyId: string): Promise<void> {
+  async settle(ptyId: string): Promise<void> {
     const start = this.deps.now();
     let gen = this.deps.outputGeneration(ptyId);
     let quietSince = start;

@@ -592,6 +592,14 @@ export class HookServer {
     this.termHandler = h;
   }
 
+  /** GTC M3: the message box confirms a send from the agent's own next hooks (UserPromptSubmit's
+   *  `prompt`, AGY's PreInvocation) and learns READY from SessionStart's `source`. Main-session
+   *  hooks only; an observer that throws never breaks a hook. */
+  private turnObserver: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string }) => void) | null = null;
+  setTurnObserver(fn: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string }) => void) | null): void {
+    this.turnObserver = fn;
+  }
+
   /** GOD-TERMINAL-CONTROL: a term body is UTF-8 JSON, like a ledger body. */
   private onTerm(agentId: string, raw: Buffer, reply: (status: number, body: unknown) => void): void {
     const handler = this.termHandler;
@@ -2047,6 +2055,12 @@ export class HookServer {
       this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
         typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
         typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
+      try {
+        this.turnObserver?.(agentId, event, {
+          prompt: typeof p.prompt === 'string' ? p.prompt : undefined,
+          source: typeof p.source === 'string' ? p.source : undefined
+        });
+      } catch { /* never breaks a hook */ }
     }
     // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
     // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.

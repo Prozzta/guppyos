@@ -1311,6 +1311,26 @@ export class AutomaticSubmitOwner {
     return result;
   }
 
+  /** GTC M3 (Jim MUST 1): run `fn` (the Human's message-box send) as a turn of this PTY's ONE
+   *  chain, so no owner STAGE..COMMIT or post-COMMIT settle can interleave with it, and the next
+   *  owner run starts only after its own settle. `ran: false` = the chain did not reach it within
+   *  `startMs`; it is then never run. */
+  exclusive<T>(ptyId: string, fn: () => Promise<T>, startMs: number): Promise<{ ran: true; value: T } | { ran: false }> {
+    return new Promise((resolve, reject) => {
+      let state: 'wait' | 'run' | 'gave-up' = 'wait';
+      this.deps.setTimer(() => { if (state === 'wait') { state = 'gave-up'; resolve({ ran: false }); } }, startMs);
+      const prev = this.chains.get(ptyId) ?? Promise.resolve();
+      const result = prev.then(async () => {
+        if (state !== 'wait') return;
+        state = 'run';
+        try { resolve({ ran: true, value: await fn() }); } catch (e) { reject(e); }
+      });
+      const tail: Promise<void> = result.then(() => (state === 'run' ? this.sleep(SETTLE_MS) : undefined));
+      this.chains.set(ptyId, tail);
+      void tail.then(() => { if (this.chains.get(ptyId) === tail) this.chains.delete(ptyId); });
+    });
+  }
+
   private sleep(ms: number): Promise<void> {
     return new Promise((r) => { this.deps.setTimer(r, ms); });
   }
