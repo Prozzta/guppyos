@@ -175,41 +175,65 @@ const K = {
   lockFrees(HJm) {
     const L = lockRig(HJm);
     L.lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true);
-    L.lock.noteJob(AGENT, 'call-1');
-    L.lock.jobExited(AGENT, 'call-1');
+    L.lock.noteJob(AGENT, 'call-1', 'job-1');
+    L.lock.jobExited(AGENT, 'call-1', 'job-1');
     assert.equal(L.held(), false, 'EVERY CALL EXITED FREES THE SLOT AT ONCE');
     assert.equal(L.released()[0].reason, 'job-exit', 'the release names the job exit');
   },
   lockUnwrapped(HJm) {
     const L = lockRig(HJm);
     L.lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true);
-    L.lock.noteJob(AGENT, 'call-1');
+    L.lock.noteJob(AGENT, 'call-1', 'job-1');
     L.lock.acquire(AGENT, BENCH, 'npm ci', 'call-2', true);   // re-entry, never wrapped
-    L.lock.jobExited(AGENT, 'call-1');
+    L.lock.jobExited(AGENT, 'call-1', 'job-1');
     assert.equal(L.held(), true, 'A CALL WITHOUT A HELD JOB LEAVES THE SLOT TO THE WATCHER');
   },
   lockSecond(HJm) {
     const L = lockRig(HJm);
     L.lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true);
-    L.lock.noteJob(AGENT, 'call-1');
+    L.lock.noteJob(AGENT, 'call-1', 'job-1');
     L.lock.acquire(AGENT, BENCH, 'npm ci', 'call-2', false);
-    L.lock.noteJob(AGENT, 'call-2');
-    L.lock.jobExited(AGENT, 'call-1');
+    L.lock.noteJob(AGENT, 'call-2', 'job-2');
+    L.lock.jobExited(AGENT, 'call-1', 'job-1');
     assert.equal(L.held(), true, 'A CALL STILL RUNNING IN ITS JOB KEEPS THE SLOT');
-    L.lock.jobExited(AGENT, 'call-2');
+    L.lock.jobExited(AGENT, 'call-2', 'job-2');
     assert.equal(L.held(), false, 'the last job out frees it');
+  },
+  lockSameCall(HJm) {
+    // Jim MUST 1: with no tool_use_id the callId is 'cmd:<command>', so the same heavy command run twice
+    // (a background npm test, then again in the foreground) is two windows and two jobs under ONE callId.
+    const CALL = 'cmd:npm test';
+    const L = lockRig(HJm);
+    L.lock.acquire(AGENT, BENCH, 'npm test', CALL, true);
+    L.lock.noteJob(AGENT, CALL, 'job-a');
+    L.lock.acquire(AGENT, BENCH, 'npm test', CALL, false);
+    L.lock.noteJob(AGENT, CALL, 'job-b');
+    L.lock.jobExited(AGENT, CALL, 'job-a');
+    assert.equal(L.held(), true, 'A SECOND JOB OF ONE CALL STILL RUNNING KEEPS THE SLOT');
+    L.lock.jobExited(AGENT, CALL, 'job-a');
+    assert.equal(L.held(), true, 'A SECOND JOB OF ONE CALL STILL RUNNING KEEPS THE SLOT (a repeated exit of the first)');
+    L.lock.jobExited(AGENT, CALL, 'job-b');
+    assert.equal(L.held(), false, 'THE LAST JOB OF THE CALL OUT FREES THE SLOT');
+    assert.equal(L.released()[0].reason, 'job-exit', 'the release names the job exit');
+    // The second run's job is not held yet (or never will be): the first job's exit frees nothing.
+    const M = lockRig(HJm);
+    M.lock.acquire(AGENT, BENCH, 'npm test', CALL, true);
+    M.lock.noteJob(AGENT, CALL, 'job-a');
+    M.lock.acquire(AGENT, BENCH, 'npm test', CALL, false);
+    M.lock.jobExited(AGENT, CALL, 'job-a');
+    assert.equal(M.held(), true, 'A SECOND RUN OF ONE CALL WITHOUT ITS OWN HELD JOB KEEPS THE SLOT');
   },
   lockStrange(HJm) {
     const L = lockRig(HJm);
     L.lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true);
-    L.lock.jobExited(AGENT, 'call-1');
+    L.lock.jobExited(AGENT, 'call-1', 'job-1');
     assert.equal(L.held(), true, 'AN EXIT FOR A CALL WITH NO HELD JOB FREES NOTHING');
     // A job noted for a call the holder never took must not stand in for that call's own job later.
-    L.lock.noteJob(AGENT, 'call-9');
-    L.lock.jobExited(AGENT, 'call-9');
+    L.lock.noteJob(AGENT, 'call-9', 'job-9');
+    L.lock.jobExited(AGENT, 'call-9', 'job-9');
     L.lock.acquire(AGENT, BENCH, 'npm ci', 'call-9', true);   // now taken; its own job is not held
-    L.lock.noteJob(AGENT, 'call-1');
-    L.lock.jobExited(AGENT, 'call-1');
+    L.lock.noteJob(AGENT, 'call-1', 'job-1');
+    L.lock.jobExited(AGENT, 'call-1', 'job-1');
     assert.equal(L.held(), true, "ANOTHER CALL'S JOB IS NOT THIS HOLDER'S: a job noted before its call was taken frees nothing");
   },
   wiring() {
@@ -217,7 +241,7 @@ const K = {
     const index = read('src/main/index.ts');
     assert.ok(hooks.includes('begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId)'), 'THE WRAP CARRIES THE CALL ID TO THE JOB');
     assert.ok(/this\.heavyWrap = \{[^}]*callId \}/.test(hooks), 'THE WRAP CARRIES THE CALL ID TO THE JOB (the PreToolUse call id)');
-    assert.ok(index.includes("onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId); else heavyLock.jobExited(e.agentId, e.callId); }"), 'MAIN TELLS THE LOCK EVERY HELD AND EXITED JOB');
+    assert.ok(index.includes("onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId, e.job); else heavyLock.jobExited(e.agentId, e.callId, e.job); }"), 'MAIN TELLS THE LOCK EVERY HELD AND EXITED JOB');
   },
   helper() {
     const cs = read('resources/heavyjob/guppy-heavyjob.cs');
@@ -261,7 +285,7 @@ async function liveRelease(t, o) {
   const lock = new HJ.HeavyJobLock({ limit: () => 1, log: (r) => rows.push({ ...r, ts: Date.now() }) });
   const jobs = new Cm.HeavyJobs({
     platform: 'win32', options: () => ({ background: false, half: false }), exe: () => exe, log: (r) => rows.push({ ...r, ts: Date.now() }),
-    onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId); else lock.jobExited(e.agentId, e.callId); }
+    onJob: (e) => { if (e.state === 'held') lock.noteJob(e.agentId, e.callId, e.job); else lock.jobExited(e.agentId, e.callId, e.job); }
   });
   t.after(() => jobs.dispose());
   assert.equal(lock.acquire(AGENT, BENCH, 'bash cut.sh', 'call-1', true).acquired, true);
@@ -350,12 +374,16 @@ const MUTANTS = [
   { name: 'a job the helper did not make is told', file: CPU_FILE, edits: [["      if (callId) this.tell(agentId, callId, id, 'held');\n    }", "    }\n    if (callId) this.tell(agentId, callId, id, 'held');"]], killer: 'held', dies: /A JOB THE HELPER DID NOT MAKE IS NOT TOLD/ },
   { name: 'the exit does not name its call', file: CPU_FILE, edits: [["    if (j.callId) this.tell(j.agentId, j.callId, j.id, 'exited');", "    if (j.callId) this.tell(j.agentId, 'call', j.id, 'exited');"]], killer: 'notice', dies: /THE LOCK IS TOLD THE CALL THE JOB WAS MADE FOR/ },
   { name: 'event lines answer requests', file: CPU_FILE, live: true, edits: [["      if (r && typeof r.event === 'string') { try { onEvent?.(r); } catch { /* a listener never breaks the channel */ } continue; }\n", '']], dies: /THE SLOT IS FREED WITHIN 2 S/ },
-  { name: 'the lock frees on the first exited job', file: LOCK_FILE, edits: [['    if (!h.windows.every((w) => h.jobs.get(w.callId) === true)) return;\n', '']], killer: 'lockUnwrapped', dies: /A CALL WITHOUT A HELD JOB LEAVES THE SLOT TO THE WATCHER/ },
-  { name: 'an unwrapped call counts as exited', file: LOCK_FILE, edits: [['h.windows.every((w) => h.jobs.get(w.callId) === true)', 'h.windows.every((w) => h.jobs.get(w.callId) !== false)']], killer: 'lockUnwrapped', dies: /A CALL WITHOUT A HELD JOB LEAVES THE SLOT TO THE WATCHER/ },
+  { name: 'the lock frees on the first exited job', file: LOCK_FILE, edits: [['    if (!h.windows.every((w) => this.callJobsExited(h, w.callId))) return;\n', '']], killer: 'lockUnwrapped', dies: /A CALL WITHOUT A HELD JOB LEAVES THE SLOT TO THE WATCHER/ },
+  { name: 'an unwrapped call counts as exited', file: LOCK_FILE, edits: [['    if (!js) return false;', '    if (!js) return true;']], killer: 'lockUnwrapped', dies: /A CALL WITHOUT A HELD JOB LEAVES THE SLOT TO THE WATCHER/ },
   { name: 'a job exit is never a release', file: LOCK_FILE, edits: [["    this.release(agentId, 'job-exit');\n", '']], killer: 'lockFrees', dies: /EVERY CALL EXITED FREES THE SLOT AT ONCE/ },
-  { name: 'a running job is marked exited when held', file: LOCK_FILE, edits: [['    h.jobs.set(callId, false);', '    h.jobs.set(callId, true);']], killer: 'lockSecond', dies: /A CALL STILL RUNNING IN ITS JOB KEEPS THE SLOT/ },
-  { name: "another call's job is noted", file: LOCK_FILE, edits: [['    if (!h || !h.windows.some((w) => w.callId === callId) || h.jobs.has(callId)) return;', '    if (!h || h.jobs.has(callId)) return;']], killer: 'lockStrange', dies: /ANOTHER CALL'S JOB IS NOT THIS HOLDER'S/ },
-  { name: 'an exit with no held job is taken', file: LOCK_FILE, edits: [['    if (!h || !h.jobs.has(callId)) return;\n    h.jobs.set(callId, true);', '    if (!h) return;\n    h.jobs.set(callId, true);']], killer: 'lockStrange', dies: /AN EXIT FOR A CALL WITH NO HELD JOB FREES NOTHING/ }
+  { name: 'a running job is marked exited when held', file: LOCK_FILE, edits: [['    if (!js.has(job)) js.set(job, false);', '    if (!js.has(job)) js.set(job, true);']], killer: 'lockSecond', dies: /A CALL STILL RUNNING IN ITS JOB KEEPS THE SLOT/ },
+  { name: "another call's job is noted", file: LOCK_FILE, edits: [['    if (!h || !h.windows.some((w) => w.callId === callId)) return;\n    const js', '    if (!h) return;\n    const js']], killer: 'lockStrange', dies: /ANOTHER CALL'S JOB IS NOT THIS HOLDER'S/ },
+  { name: 'an exit with no held job is taken', file: LOCK_FILE, edits: [['    if (!h || !js || !js.has(job)) return;\n    js.set(job, true);', '    if (!h) return;\n    h.jobs.set(callId, new Map([...(js ?? []), [job, true]]));']], killer: 'lockStrange', dies: /AN EXIT FOR A CALL WITH NO HELD JOB FREES NOTHING/ },
+  // Jim MUST 1: keyed by callId again (one job per call), a second job of the same call is never counted.
+  { name: 'keyed by call: a second job of one call is not counted', file: LOCK_FILE, edits: [['    if (!js.has(job)) js.set(job, false);', '    if (!js.size) js.set(job, false);']], killer: 'lockSameCall', dies: /THE LAST JOB OF THE CALL OUT FREES THE SLOT/ },
+  { name: 'keyed by call: the first job of a call stands for every window of it', file: LOCK_FILE, edits: [['    if (js.size < h.windows.filter((w) => w.callId === callId).length) return false;\n', '']], killer: 'lockSameCall', dies: /A SECOND RUN OF ONE CALL WITHOUT ITS OWN HELD JOB KEEPS THE SLOT/ },
+  { name: 'keyed by call: any exited job ends the call', file: LOCK_FILE, edits: [['    return [...js.values()].every((exited) => exited);', '    return [...js.values()].some((exited) => exited);']], killer: 'lockSameCall', dies: /A SECOND JOB OF ONE CALL STILL RUNNING KEEPS THE SLOT/ }
 ];
 
 // (Dropping MSG_ABNORMAL_EXIT_PROCESS alone is equivalent here: the shell's own exit and the job going

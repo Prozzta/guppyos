@@ -1281,7 +1281,7 @@ const heavyJobs = new HeavyJobs({
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
   // HEAVY-LOCK-RELEASE-LAG-197: the job's own exit frees the slot (within about a second), not the
   // watcher's second clean scan 20-40 s later; the watcher stays as the fallback.
-  onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId); else heavyLock.jobExited(e.agentId, e.callId); }
+  onJob: (e) => { if (e.state === 'held') heavyLock.noteJob(e.agentId, e.callId, e.job); else heavyLock.jobExited(e.agentId, e.callId, e.job); }
 });
 hookServer.setHeavyJobs(heavyJobs);
 /** Per hive agent: started with its provider's auto-approve flag (recorded at each spawn). */
