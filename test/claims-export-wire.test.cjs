@@ -268,14 +268,48 @@ test('M-B a no-yield burst: the export work runs after the whole burst, and each
   const r = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst withdrawal', retracts: [c] }, 'endpoint')).id;
   // A later record changes an EARLIER claim's status: a non-positional "before" would see it early.
   const dd = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic burst second replacement', supersedes: [b] }, 'endpoint')).id;
-  // Every job runs only now, against the whole ledger (the burst had no yield to the queue).
-  while (held.length) { held.shift()(); await new Promise((res) => setImmediate(res)); }
-  await x.exp.drain();
+  // Every job runs only now, against the whole ledger (the burst had no yield to the queue). A job's
+  // flush (CLAIMS-FSYNC-196) is awaited before the next job is deferred, so pump until the queue drains.
+  let drained = false;
+  const done = x.exp.drain().then(() => { drained = true; });
+  while (!drained) { while (held.length) held.shift()(); await new Promise((res) => setImmediate(res)); }
+  await done;
   const markers = x.exportText().split('\n').filter((l) => l.includes(' status of [c:'));
   assert.deepEqual(markers.map((l) => l.replace(/^- \S+ /, '')).sort(), [`status of [c:${a}]: live -> superseded`, `status of [c:${c}]: live -> retracted`, `status of [c:${b}]: live -> superseded`].sort(), markers.join('\n'));
   assert.equal(E.exportedIds(x.dir()).size, 5, [a, b, c, r, dd].join(','));
   const at = (id) => x.store.readLedger('a1').records.find((rec) => rec.id === id).wt;
   assert.ok(markers.some((l) => l.startsWith(`- ${at(b)} status of [c:${a}]`)), 'a marker carries the time of the record that caused it');
+});
+
+test("CLAIMS-FSYNC-196 (Jim K4): an export task ends only after its flush completes; the agent's next task waits for it", async () => {
+  const fsp = require('node:fs/promises');
+  const realOpen = fsp.open;
+  const syncs = [];   // one entry per held FileHandle.sync: its release
+  fsp.open = async (...args) => {
+    const h = await realOpen(...args);
+    const sync = h.sync.bind(h);
+    h.sync = () => new Promise((res, rej) => { syncs.push(() => sync().then(res, rej)); });
+    return h;
+  };
+  try {
+    const x = setup();
+    const a = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic flushed fact' }, 'endpoint')).id;
+    const b = (await x.store.appendRecord('a1', { t: 'claim', kind: 'fact', text: 'synthetic second fact' }, 'endpoint')).id;
+    let drained = false;
+    const done = x.exp.drain().then(() => { drained = true; });
+    for (let i = 0; i < 50 && !syncs.length; i++) await new Promise((res) => setTimeout(res, 5));
+    assert.equal(syncs.length, 1, 'the first task is held in its flush');
+    await new Promise((res) => setTimeout(res, 30));
+    const rows = () => x.logs.filter((l) => l.kind === 'claims-export-append').map((l) => l.id);
+    assert.deepEqual(rows(), [], 'no export-append row before the flush completes');
+    // The second task (b's) has nothing left to write (the first caught b up) and so no flush: had
+    // it started, its row would be here already.
+    assert.equal(syncs.length, 1, "the agent's next task has not started");
+    assert.equal(drained, false);
+    while (!drained) { while (syncs.length) syncs.shift()(); await new Promise((res) => setTimeout(res, 5)); }
+    await done;
+    assert.deepEqual(rows(), [a, b]);
+  } finally { fsp.open = realOpen; }
 });
 
 test('main wires all three callers (index.ts loads only under Electron, so its wiring is pinned by source)', () => {

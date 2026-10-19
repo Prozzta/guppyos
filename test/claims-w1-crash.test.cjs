@@ -56,7 +56,7 @@ test(`G1.1 crash safety: ${N} appends with simulated crashes; every acked record
       }
       return fs.writeSync(fd, buf);
     },
-    fsyncSync: (fd) => { if (mode === 'fsync') throw new Error('simulated crash before the fsync returned'); fs.fsyncSync(fd); },
+    fsync: (fd, cb) => { if (mode === 'fsync') { cb(new Error('simulated crash before the fsync returned')); return; } fs.fsync(fd, cb); },
     closeSync: (fd) => fs.closeSync(fd),
   };
   const logs = [];

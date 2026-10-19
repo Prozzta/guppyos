@@ -21,7 +21,7 @@
  *   The export format is exportLedger.ts's and W4's; nothing here renders.
  */
 import type { ClaimsState, DeriveFn, KeyRegistry, LedgerLevel, LedgerRec, ReadResult, WorldView } from '../../shared/claims';
-import { appendStatusMarkers, archiveBackedIds, exportComplete, syncExport } from './exportLedger';
+import { appendStatusMarkers, archiveBackedIds, exportComplete, flushExport, syncExport, type ExportFlush } from './exportLedger';
 import { verifiedPrefix } from './indexSync';
 import { createClaimViews } from './views';
 
@@ -64,10 +64,11 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
   };
   // One agent's export work at a time, in append order (a chain per agent).
   const chains = new Map<string, Promise<void>>();
-  const enqueue = (agentId: string, fn: () => void): void => {
-    const run = (): void => { try { fn(); } catch (e) { fail(agentId, 'append', e); } };
+  // A task's writes run in one turn; its flush (fsync) is awaited before the agent's next task.
+  const enqueue = (agentId: string, fn: () => void | Promise<void>): void => {
+    const run = async (): Promise<void> => { try { await fn(); } catch (e) { fail(agentId, 'append', e); } };
     const prev = chains.get(agentId) ?? Promise.resolve();
-    const next = prev.then(() => new Promise<void>((resolve) => defer(() => { run(); resolve(); })));
+    const next = prev.then(() => new Promise<void>((resolve) => defer(() => { void run().then(resolve); })));
     chains.set(agentId, next);
     void next.then(() => { if (chains.get(agentId) === next) chains.delete(agentId); });
   };
@@ -85,7 +86,7 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
     return prefix;
   };
 
-  const exportAppend = (agentId: string, id: string, rec: LedgerRec): void => {
+  const exportAppend = (agentId: string, id: string, rec: LedgerRec): void | Promise<void> => {
     if (d.level(agentId) !== 'writer') return;
     const dir = d.agentDir(agentId);
     if (!dir) return;
@@ -96,9 +97,11 @@ export function createClaimExport(d: ClaimExportDeps): ClaimExport {
     const at = records.findIndex((r) => r.id === id);
     const after = at < 0 ? null : derive(records.slice(0, at + 1));
     const state = after && at === records.length - 1 ? after : derive(records);
-    const lines = syncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine);
-    const markers = after ? appendStatusMarkers(dir, agentId, derive(records.slice(0, at)), after, rec.wt) : 0;
-    d.log({ kind: 'claims-export-append', agentId, id, lines, markers });
+    // CLAIMS-FSYNC-196: the lines are written now; each file they touched is fsynced once, off the loop.
+    const flush: ExportFlush = new Set();
+    const lines = syncExport(dir, records, state, createClaimViews(records, NO_TOKENS).renderExportLine, undefined, flush);
+    const markers = after ? appendStatusMarkers(dir, agentId, derive(records.slice(0, at)), after, rec.wt, flush) : 0;
+    return flushExport(flush).then(() => { d.log({ kind: 'claims-export-append', agentId, id, lines, markers }); });
   };
 
   return {

@@ -39,7 +39,7 @@ module.exports = async (drill) => {
       if (!tore && text.includes('"ev":"rekey"') && text.includes('"agent":"dwight"')) { tore++; fs.writeSync(fd, buf.subarray(0, 40)); throw new Error('simulated crash mid rekey'); }
       return fs.writeSync(fd, buf);
     },
-    fsyncSync: (fd) => fs.fsyncSync(fd), closeSync: (fd) => fs.closeSync(fd),
+    fsync: (fd, cb) => fs.fsync(fd, cb), closeSync: (fd) => fs.closeSync(fd),
   };
   t += 60_000;
   s = mk(io);

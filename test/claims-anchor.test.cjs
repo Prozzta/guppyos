@@ -129,15 +129,15 @@ test('a restore re-anchors; the Human reset re-anchors after review; a rekey kee
   t = Date.parse('2026-10-31T09:00:00Z');
   await ok(store.appendRecord('andy', note('day two'), 'endpoint'));
   store.close();
-  const r = store.restoreBackup('andy', '2026-10-30');
+  const r = await store.restoreBackup('andy', '2026-10-30');
   assert.equal(r.chain, 'ok', 'the restored (shorter) ledger is the anchored one');
   assert.equal(x.mk().store.readLedger('andy').chain, 'ok');
   // Deleted, reviewed by the Human, reset.
   fs.rmSync(x.claimsDir('andy'), { recursive: true });
   const m = x.mk();
   assert.equal(m.store.readLedger('andy').chain.reason, 'prev');
-  assert.equal(m.store.resetAnchor('andy', undefined), false, 'only with the Human confirm');
-  assert.equal(m.store.resetAnchor('andy', true), true);
+  assert.equal(await m.store.resetAnchor('andy', undefined), false, 'only with the Human confirm');
+  assert.equal(await m.store.resetAnchor('andy', true), true);
   assert.equal(m.store.readLedger('andy').chain, 'ok');
   await ok(m.store.appendRecord('andy', note('after the reset'), 'endpoint'));
   m.store.close();
@@ -178,7 +178,7 @@ test('Jim A-1: a cut made while the key is lost is still a head-anchor break, an
   assert.equal(x.mk().store.readLedger('dwight').chain, 'ok');
   // Only the Human's explicit reset (after review) accepts the cut.
   const h = x.mk();
-  assert.equal(h.store.resetAnchor('a1', true), true);
+  assert.equal(await h.store.resetAnchor('a1', true), true);
   assert.notEqual(h.store.readLedger('a1').chain.brokenAt, 'head-anchor');
 });
 

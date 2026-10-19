@@ -62,9 +62,13 @@ import { clampSection, R1_LEGACY_REASON } from './migrate';
 export interface LedgerIo {
   openSync(path: string, flags: string): number;
   writeSync(fd: number, buf: Uint8Array): number;
-  fsyncSync(fd: number): void;
+  /** Asynchronous (the threadpool), so a slow disk never blocks the event loop (CLAIMS-FSYNC-196). */
+  fsync(fd: number, cb: (err: NodeJS.ErrnoException | null) => void): void;
   closeSync(fd: number): void;
 }
+
+/** An agent's open append handle; `flushing` is the fsync in flight, which a close waits for. */
+interface AppendHandle { file: string; fd: number; idle: ReturnType<typeof setTimeout> | null; flushing: Promise<void> | null }
 
 export interface ClaimStoreDeps {
   hiveRoot: string;
@@ -240,7 +244,7 @@ export class ClaimStore {
   /** One open append handle per agent, on its newest segment: a close per append costs ~7 ms on
    *  Windows (an antivirus scan). Closed on a failure, a new month, a restore, close(), and after
    *  FD_IDLE_MS without an append (so an idle handle never pins an agent's folder). */
-  private readonly fds = new Map<string, { file: string; fd: number; idle: ReturnType<typeof setTimeout> | null }>();
+  private readonly fds = new Map<string, AppendHandle>();
   /** The key once loaded (a decrypt per append would be a DPAPI call per append). */
   private key: Uint8Array | null = null;
 
@@ -432,8 +436,16 @@ export class ClaimStore {
     catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, error: String(e).slice(0, 160) }); }
   }
 
-  /** The Human's explicit reset of an agent's anchor to its current head (after review). */
-  resetAnchor(agentId: string, confirmedByHuman: true): boolean {
+  /**
+   * The Human's explicit reset of an agent's anchor to its current head (after review). Queued
+   * behind the agent's appends (CLAIMS-FSYNC-196): an append spans its fsync, and the head read
+   * here must not include a line that is written but not yet acked.
+   */
+  resetAnchor(agentId: string, confirmedByHuman: true): Promise<boolean> {
+    return this.serial(agentId, () => this.resetAnchorNow(agentId, confirmedByHuman));
+  }
+
+  private resetAnchorNow(agentId: string, confirmedByHuman: true): boolean {
     if (confirmedByHuman !== true || !this.d.headAnchor) return false;
     const files = this.segments(agentId);
     let head = '';
@@ -585,7 +597,7 @@ export class ClaimStore {
 
   // ---------------------------------------------------------------- write
 
-  private serial<T>(agentId: string, fn: () => T): Promise<T> {
+  private serial<T>(agentId: string, fn: () => T | Promise<T>): Promise<T> {
     const prior = this.queues.get(agentId) ?? Promise.resolve();
     const next = prior.then(fn, fn);
     this.queues.set(agentId, next.catch(() => undefined));
@@ -622,7 +634,7 @@ export class ClaimStore {
     });
   }
 
-  private appendNow(agentId: string, draft: RecordDraft, origin: AppendOrigin): AppendResult {
+  private appendNow(agentId: string, draft: RecordDraft, origin: AppendOrigin): AppendResult | Promise<AppendResult> {
     if (!AGENT_RE.test(agentId)) return { ok: false, error: 'bad agent id' };
     let s: AgentState;
     try { s = this.current(agentId); } catch (e) { return { ok: false, error: `the ledger could not be read (${String(e).slice(0, 120)})` }; }
@@ -668,9 +680,10 @@ export class ClaimStore {
     rec.mac = recordMac(key, rec as unknown as Record<string, unknown>);
     const line = canonicalJson(rec);
     const bytes = Buffer.from(line + '\n', 'utf8');
-    const res = this.writeLine(agentId, s, rec, line, bytes, sighting ? null : built.registryAdded);
-    if (sighting && res.ok) this.log({ kind: 'claims-r1-sighting', agentId, id: sighting.id, target: sighting.targets[0] });
-    return res;
+    return this.writeLine(agentId, s, rec, line, bytes, sighting ? null : built.registryAdded).then((res) => {
+      if (sighting && res.ok) this.log({ kind: 'claims-r1-sighting', agentId, id: sighting.id, target: sighting.targets[0] });
+      return res;
+    });
   }
 
   /**
@@ -739,15 +752,23 @@ export class ClaimStore {
     return out;
   }
 
-  private writeLine(agentId: string, s: AgentState, rec: LedgerRec, line: string, bytes: Buffer, registryAdded: (() => void) | null): AppendResult {
+  /**
+   * One write, then the fsync, then the ack. CLAIMS-FSYNC-196: the write stays synchronous (the
+   * order and the chain are exactly as before), but the fsync runs on the libuv threadpool, so the
+   * event loop (every other request, the export, the CLI's own timers) keeps running while the disk
+   * flushes. The ack still waits for it: an acked record is fsynced, as before. The per-agent queue
+   * (serial) holds this agent's next append until the ack or the failure.
+   */
+  private writeLine(agentId: string, s: AgentState, rec: LedgerRec, line: string, bytes: Buffer, registryAdded: (() => void) | null): Promise<AppendResult> {
     const dir = this.claimsDir(agentId);
     const file = join(dir, `${monthOf(rec.wt)}.jsonl`);
+    let h: AppendHandle | undefined;
     try {
-      let h = this.fds.get(agentId);
+      h = this.fds.get(agentId);
       if (h && h.file !== file) { this.closeFd(agentId); h = undefined; }
       if (!h) {
         nodeFs.mkdirSync(dir, { recursive: true });
-        h = { file, fd: this.fs.openSync(file, 'a'), idle: null };
+        h = { file, fd: this.fs.openSync(file, 'a'), idle: null, flushing: null };
         this.fds.set(agentId, h);
       }
       if (h.idle) clearTimeout(h.idle);
@@ -755,13 +776,27 @@ export class ClaimStore {
       h.idle.unref?.();
       const n = this.fs.writeSync(h.fd, bytes);
       if (n !== bytes.length) throw new Error(`short write ${n}/${bytes.length}`);
-      this.fs.fsyncSync(h.fd);
     } catch (e) {
-      this.closeFd(agentId);
-      this.state.delete(agentId);   // re-read (and repair the torn tail) before the next append
-      this.log({ kind: 'claims-append-failed', agentId, error: String(e).slice(0, 200) });
-      return { ok: false, error: `the append failed (${String(e).slice(0, 120)}); nothing was acked` };
+      return Promise.resolve(this.appendFailed(agentId, e));
     }
+    const handle = h;
+    const flushed = new Promise<void>((resolve, reject) => {
+      try { this.fs.fsync(handle.fd, (err) => { if (err) reject(err); else resolve(); }); } catch (e) { reject(e); }
+    });
+    handle.flushing = flushed.then(() => undefined, () => undefined);
+    return flushed.then(
+      () => { handle.flushing = null; return this.acked(agentId, s, rec, line, file, registryAdded); },
+      (e) => { handle.flushing = null; return this.appendFailed(agentId, e); });
+  }
+
+  private appendFailed(agentId: string, e: unknown): AppendResult {
+    this.closeFd(agentId);
+    this.state.delete(agentId);   // re-read (and repair the torn tail) before the next append
+    this.log({ kind: 'claims-append-failed', agentId, error: String(e).slice(0, 200) });
+    return { ok: false, error: `the append failed (${String(e).slice(0, 120)}); nothing was acked` };
+  }
+
+  private acked(agentId: string, s: AgentState, rec: LedgerRec, line: string, file: string, registryAdded: (() => void) | null): AppendResult {
     // Acked: remember it.
     s.head = sha256Hex(line);
     s.lastId = rec.id;
@@ -781,7 +816,9 @@ export class ClaimStore {
     if (!h) return;
     this.fds.delete(agentId);
     if (h.idle) clearTimeout(h.idle);
-    try { this.fs.closeSync(h.fd); } catch { /* already gone */ }
+    const close = (): void => { try { this.fs.closeSync(h.fd); } catch { /* already gone */ } };
+    // A flush in flight keeps its handle: closing under it would fail an append that is fine.
+    if (h.flushing) void h.flushing.then(close); else close();
   }
 
   /** Close every append handle (quit, hive change). Appends after it reopen. */
@@ -984,7 +1021,7 @@ export class ClaimStore {
     const rekeyed: string[] = [];
     const failed: string[] = [];
     for (const a of eligible) {
-      const done = await this.serial(a, () => {
+      const done = await this.serial(a, async () => {
         // The new key cannot verify the old records (that is the point), so this step checks the
         // prev chain only, as the Human's acceptance does (C2), and never raises a MAC alert.
         const tail = this.prevChainOnly(a);
@@ -1001,7 +1038,7 @@ export class ClaimStore {
         };
         rec.mac = recordMac(made.key, rec as unknown as Record<string, unknown>);
         const line = canonicalJson(rec);
-        const w = this.writeLine(a, s, rec, line, Buffer.from(line + '\n', 'utf8'), null);
+        const w = await this.writeLine(a, s, rec, line, Buffer.from(line + '\n', 'utf8'), null);
         this.state.delete(a);
         return w.ok;
       });
@@ -1237,9 +1274,14 @@ export class ClaimStore {
   /**
    * Restore an agent's segments from a backup day (a Human action): the live segments move to
    * `claims.pre-restore-<stamp>/` (nothing is deleted), the backup's are copied in, and the ledger
-   * is re-read and verified.
+   * is re-read and verified. Queued behind the agent's appends (CLAIMS-FSYNC-196): an append in
+   * flight holds its handle open until the fsync completes, and Windows refuses the rename then.
    */
-  restoreBackup(agentId: string, day: string): ReadResult {
+  restoreBackup(agentId: string, day: string): Promise<ReadResult> {
+    return this.serial(agentId, () => this.restoreBackupNow(agentId, day));
+  }
+
+  private restoreBackupNow(agentId: string, day: string): ReadResult {
     const src = this.backupDir(agentId, day);
     if (!nodeFs.existsSync(src)) throw new Error(`no backup ${day} for ${agentId}`);
     this.closeFd(agentId);
@@ -1251,7 +1293,7 @@ export class ClaimStore {
     this.state.delete(agentId);
     this.log({ kind: 'claims-restore', agentId, day, aside });
     // A restore is the Human's: the restored (shorter) ledger becomes the anchored head.
-    this.resetAnchor(agentId, true);
+    this.resetAnchorNow(agentId, true);
     return this.readLedger(agentId);
   }
 }
