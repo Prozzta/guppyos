@@ -225,6 +225,32 @@ test('CLAIMS-FSYNC-196: a failed fsync is not an ack, the handle is dropped, and
   assert.equal(mkStore(root, { keys: store.d.keys }).store.readLedger('andy').chain, 'ok');
 });
 
+test('CLAIMS-FSYNC-196 (Jim SHOULD 1): a restore and an anchor reset queue behind an append whose fsync is in flight', async () => {
+  const root = hive();
+  const now = clock('2026-10-30T09:00:00Z');
+  const { io, held, ops } = heldIo();
+  const { store } = mkStore(root, { io, now });
+  const day1 = [];
+  for (let i = 0; i < 2; i++) day1.push(await releaseUntil(held, store.appendRecord('andy', note(`day one ${i}`), 'endpoint')));
+  now.set('2026-10-31T09:00:00Z');
+  const inflight = store.appendRecord('andy', note('day two, flush held'), 'endpoint');
+  await pause(10);
+  assert.equal(held.length, 1, 'the fsync is in flight');
+  const order = [];
+  void inflight.then(() => order.push('ack'));
+  const restore = store.restoreBackup('andy', '2026-10-30').then((x) => { order.push('restore'); return x; });
+  const reset = store.resetAnchor('andy', true).then((x) => { order.push('reset'); return x; });
+  await pause(20);
+  assert.equal(ops.includes('close'), false, 'nothing closed or renamed under the flush');
+  const [w, r, z] = await releaseUntil(held, Promise.all([inflight, restore, reset]));
+  assert.equal(w.ok, true, JSON.stringify(w));
+  assert.equal(r.chain, 'ok', 'the restore ran after the ack (no EPERM on the open handle)');
+  assert.deepEqual(r.records.map((x) => x.id), [day1[0].id], "the 10-30 backup (taken at that day's first append)");
+  assert.equal(z, false, 'no head anchor is configured here, so the reset answers false, but only in its turn');
+  assert.deepEqual(order, ['ack', 'restore', 'reset']);
+  assert.equal(mkStore(root, { keys: store.d.keys, now }).store.readLedger('andy').chain, 'ok');
+});
+
 // ------------------------------------------------------------------ G1.3
 
 function wiring(root, store, level = 'writer') {
@@ -521,7 +547,7 @@ test('G1.7 daily backups are byte prefixes of the live segments; a restore round
     }
   }
   // Restore 10-31: the records up to that day's first append, verified.
-  const r = store.restoreBackup('andy', '2026-10-31');
+  const r = await store.restoreBackup('andy', '2026-10-31');
   assert.equal(r.chain, 'ok');
   assert.deepEqual(r.records.map((x) => x.id), [...byDay['2026-10-30'], byDay['2026-10-31'][0]]);
   const aside = fs.readdirSync(path.join(root, 'agents', 'andy', 'memory')).filter((n) => n.startsWith('claims.pre-restore-'));

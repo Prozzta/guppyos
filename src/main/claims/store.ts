@@ -436,8 +436,16 @@ export class ClaimStore {
     catch (e) { this.log({ kind: 'claims-anchor-failed', agentId, error: String(e).slice(0, 160) }); }
   }
 
-  /** The Human's explicit reset of an agent's anchor to its current head (after review). */
-  resetAnchor(agentId: string, confirmedByHuman: true): boolean {
+  /**
+   * The Human's explicit reset of an agent's anchor to its current head (after review). Queued
+   * behind the agent's appends (CLAIMS-FSYNC-196): an append spans its fsync, and the head read
+   * here must not include a line that is written but not yet acked.
+   */
+  resetAnchor(agentId: string, confirmedByHuman: true): Promise<boolean> {
+    return this.serial(agentId, () => this.resetAnchorNow(agentId, confirmedByHuman));
+  }
+
+  private resetAnchorNow(agentId: string, confirmedByHuman: true): boolean {
     if (confirmedByHuman !== true || !this.d.headAnchor) return false;
     const files = this.segments(agentId);
     let head = '';
@@ -1266,9 +1274,14 @@ export class ClaimStore {
   /**
    * Restore an agent's segments from a backup day (a Human action): the live segments move to
    * `claims.pre-restore-<stamp>/` (nothing is deleted), the backup's are copied in, and the ledger
-   * is re-read and verified.
+   * is re-read and verified. Queued behind the agent's appends (CLAIMS-FSYNC-196): an append in
+   * flight holds its handle open until the fsync completes, and Windows refuses the rename then.
    */
-  restoreBackup(agentId: string, day: string): ReadResult {
+  restoreBackup(agentId: string, day: string): Promise<ReadResult> {
+    return this.serial(agentId, () => this.restoreBackupNow(agentId, day));
+  }
+
+  private restoreBackupNow(agentId: string, day: string): ReadResult {
     const src = this.backupDir(agentId, day);
     if (!nodeFs.existsSync(src)) throw new Error(`no backup ${day} for ${agentId}`);
     this.closeFd(agentId);
@@ -1280,7 +1293,7 @@ export class ClaimStore {
     this.state.delete(agentId);
     this.log({ kind: 'claims-restore', agentId, day, aside });
     // A restore is the Human's: the restored (shorter) ledger becomes the anchored head.
-    this.resetAnchor(agentId, true);
+    this.resetAnchorNow(agentId, true);
     return this.readLedger(agentId);
   }
 }

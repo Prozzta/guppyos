@@ -127,7 +127,7 @@ test('purge: each backup stays a byte prefix of the live ledger (G1.7), and a re
   const store = x.mk();
   const s = await seeded(x, store);
   // A restore puts the live segments aside (claims.pre-restore-*) and brings the backup back.
-  const restored = store.restoreBackup('andy', '2026-10-02');
+  const restored = await store.restoreBackup('andy', '2026-10-02');
   assert.equal(restored.chain, 'ok');
   await ok(store.appendRecord('andy', note('after the restore'), 'endpoint'));
   const memDir = path.dirname(x.claimsDir('andy'));
