@@ -10,10 +10,12 @@
  * wake committed until the 12:48Z restart, and god was never told.
  *
  * Fix: FloorWakeStallWatch (wakeStall.ts). The digest samples every live agent's pending mail; when
- * FLOOR_STALL_MIN_AGENTS agents have waited FLOOR_STALL_AFTER_MS and nothing moved floor-wide (no
- * committed wake, no pending id drained), it is one decision item, through the same digest and
- * decideGodWake as SHIPPED_INSTALLED. A human's hold (paused, halted, auto-delivery paused, a
- * quiet-held or HITL refusal) is not a stall.
+ * FLOOR_STALL_MIN_AGENTS agents have each waited FLOOR_STALL_AFTER_MS with no progress of their own
+ * (no committed wake, no pending id drained; another agent committing hides nothing, Jim SHOULD), it
+ * is one decision item, through the same digest and decideGodWake as SHIPPED_INSTALLED. A human's
+ * hold is not a stall, read from LIVE state only (paused, halted, auto-delivery paused, a HITL
+ * prompt inside its re-arm, quiet mail inside its hold): a past refusal's reason never hides an
+ * agent (Jim MUST 1).
  *
  * Mutants that must die: MUTANT CENSUS at the bottom.
  */
@@ -42,7 +44,7 @@ function digestRun(W, D, watch, rows, now, state) {
 
 /** Drive a floor: `at(now)` gives that tick's rows; `events(from, to)` feeds refusals and commits. */
 function drive(W, D, { from, to, at, events = () => {} }) {
-  const watch = new W.FloorWakeStallWatch(from);
+  const watch = new W.FloorWakeStallWatch();
   let state = { woken: {}, pendingSince: null };
   const wakes = [];
   const ids = new Set();
@@ -85,8 +87,8 @@ K.replay191 = (W = WS, D = FD) => {
   assert.ok(first, 'THE 1.1.91 FLOOR REACHES GOD');
   assert.ok(first.now - T0 <= 40 * MIN, `god is woken within 40 min of the stall starting, not 83: ${(first.now - T0) / MIN} min`);
   const item = first.items.find((i) => i.id.startsWith('floor-wake-stall:'));
-  assert.equal(item.id, `floor-wake-stall:${T0}`, 'THE ID IS THE LAST PROGRESS');
-  assert.match(item.line, /3 agents have mail waiting \(jim-mtujpe28 4, andy-mtuk4y4x 1, creed-mukyiphw 1\)/, 'IT NAMES WHO WAITS');
+  assert.equal(item.id, `floor-wake-stall:${T0 + W.FLOOR_STALL_AFTER_MS}`, 'THE ID IS WHEN THE STALL WAS FIRST SEEN');
+  assert.match(item.line, /3 agents have mail waiting with no wake committed and nothing delivered to them for 30 min \(jim-mtujpe28 4, andy-mtuk4y4x 1, creed-mukyiphw 1\)/, 'IT NAMES WHO WAITS');
   assert.match(item.line, /most refusals were "SCREEN_NOT_READY:startup:no-composer" \(\d+ of \d+\)/, 'IT NAMES THE DOMINANT REFUSAL');
   assert.equal(ids.size, 1, 'ONE STALL IS ONE DECISION');
   assert.equal(wakes.filter((w) => w.items.some((i) => i.id.startsWith('floor-wake-stall:'))).length, 1, 'ONE STALL WAKES GOD ONCE');
@@ -103,51 +105,69 @@ K.quietNight = (W = WS, D = FD) => {
   silent(() => LIVE.map((agentId) => ({ agentId, ids: [], deliberate: false })), (w) => { w.refusal('god', 'no-pending-ids'); }, 'AN IDLE NIGHT WITH NO MAIL IS SILENT');
   silent(() => LIVE.map((agentId) => ({ agentId, ids: agentId === 'jim-mtujpe28' ? ['m1', 'm2'] : [], deliberate: false })), undefined, "ONE AGENT'S WAIT IS NOT A FLOOR STALL");
   silent(() => LIVE.map((agentId) => ({ agentId, ids: agentId === 'god' ? [] : ['m1'], deliberate: agentId !== 'god' })), undefined, "A HUMAN'S PAUSE IS NOT A STALL");
-  silent(() => LIVE.map((agentId) => ({ agentId, ids: ['inform-1'], deliberate: false })),
-    (w) => { for (const a of LIVE) w.refusal(a, 'quiet-held'); }, 'QUIET-HELD MAIL IS NOT A STALL');
 };
-test('quiet nights stay silent: no mail, one waiting agent, paused agents, quiet-held informs', () => K.quietNight());
+test('quiet nights stay silent: no mail, one waiting agent, paused agents', () => K.quietNight());
 
 K.progress = (W = WS, D = FD) => {
   const from = Date.parse('2026-10-19T09:00:00Z');
   const to = from + 3 * 60 * MIN;
   const stuck = ['jim-mtujpe28', 'andy-mtuk4y4x'];
-  const rowsWith = (extra) => (now) => [...stuck.map((agentId) => ({ agentId, ids: ['m1'], deliberate: false })), ...extra(now)];
-  const commits = drive(W, D, { from, to, at: rowsWith(() => []),
-    events: (w, a, b) => { for (let t = a; t < b; t += MIN) if ((t - from) % (10 * MIN) === 0) w.commit('god', t); } });
-  assert.equal(commits.ids.size, 0, 'A COMMIT ELSEWHERE KEEPS THE FLOOR MOVING');
-  // Creed's mail is surfaced by hooks (a new id each tick, the old one gone): delivered, so moving.
-  const drains = drive(W, D, { from, to, at: rowsWith((now) => [{ agentId: 'creed-mukyiphw', ids: [`c${now}`], deliberate: false }]) });
-  assert.equal(drains.ids.size, 0, 'DRAINED MAIL IS PROGRESS');
-  // The same floor with nothing moving: a stall, as a control.
-  assert.equal(drive(W, D, { from, to, at: rowsWith(() => []) }).ids.size, 1, 'the control stalls');
+  const stuckRows = () => stuck.map((agentId) => ({ agentId, ids: ['m1'], deliberate: false }));
+  const every10 = (who) => (w, a, b) => { for (let t = a; t < b; t += MIN) if ((t - from) % (10 * MIN) === 0) w.commit(who); };
+  // Jim SHOULD: a third agent committing every 10 min must not hide two stuck ones.
+  assert.equal(drive(W, D, { from, to, at: stuckRows, events: every10('god') }).ids.size, 1, 'ONE HEALTHY AGENT DOES NOT MASK A STALL');
+  // Jim's wake commits every 10 min: only Andy is stuck, which is not a floor stall.
+  assert.equal(drive(W, D, { from, to, at: stuckRows, events: every10('jim-mtujpe28') }).ids.size, 0, "AN AGENT'S OWN COMMIT IS PROGRESS");
+  // Jim's mail is surfaced by hooks (a new id each tick, the old one gone): delivered, so he moves.
+  const ownDrain = drive(W, D, { from, to, at: (now) => [{ agentId: 'jim-mtujpe28', ids: [`j${now}`], deliberate: false }, { agentId: 'andy-mtuk4y4x', ids: ['m1'], deliberate: false }] });
+  assert.equal(ownDrain.ids.size, 0, "AN AGENT'S OWN DRAIN IS PROGRESS");
 };
-test('progress anywhere keeps it silent: a committed wake, or mail drained by a hook', () => K.progress());
+test('progress is per agent: its own commit or drain moves it; another agent committing hides nothing', () => K.progress());
+
+K.stickyHold = (W = WS) => {
+  // Jim MUST 1: a deliberate refusal in the past must not hide an agent whose mail is really stuck now.
+  const t = Date.parse('2026-10-19T09:00:00Z');
+  const rows = [{ agentId: 'jim', ids: ['1'], deliberate: false }, { agentId: 'andy', ids: ['2'], deliberate: false }];
+  const run = (setup, sampleRows = rows) => {
+    const w = new W.FloorWakeStallWatch();
+    setup(w);
+    for (let now = t; now <= t + 60 * MIN; now += TICK) w.sample(sampleRows, now);
+    return w.stall(t + 60 * MIN);
+  };
+  assert.deepEqual(run(() => {}).agents.map((a) => a.agentId), ['jim', 'andy'], 'the control stalls');
+  for (const why of ['quiet-held', 'hitl-hold']) {
+    assert.ok(run((w) => { w.refusal('jim', why); }), `A PAST ${why} REFUSAL DOES NOT HIDE A STUCK AGENT`);
+    assert.ok(run((w) => { w.refusal('jim', why); w.commit('jim'); }), `A PAST ${why} THEN A COMMIT DOES NOT HIDE A STUCK AGENT`);
+  }
+  assert.equal(run(() => {}, [rows[0], { ...rows[1], deliberate: true }]), null, 'a live human hold still excludes the agent');
+};
+test('a past deliberate refusal (quiet-held, hitl-hold) never hides an agent; only live state does', () => K.stickyHold());
 
 K.nextStall = (W = WS) => {
   const t = Date.parse('2026-10-19T09:00:00Z');
-  const w = new W.FloorWakeStallWatch(t);
+  const w = new W.FloorWakeStallWatch();
   const rows = [{ agentId: 'a', ids: ['1'], deliberate: false }, { agentId: 'b', ids: ['2'], deliberate: false }];
   w.sample(rows, t);
   assert.equal(w.stall(t + W.FLOOR_STALL_AFTER_MS - 1), null, 'not before FLOOR_STALL_AFTER_MS');
-  assert.equal(w.stall(t + W.FLOOR_STALL_AFTER_MS)?.since, t);
+  assert.equal(w.stall(t + W.FLOOR_STALL_AFTER_MS)?.since, t + W.FLOOR_STALL_AFTER_MS);
+  assert.equal(w.stall(t + 25 * MIN)?.since, t + W.FLOOR_STALL_AFTER_MS, 'the id holds while the stall lasts');
   w.refusal('a', 'in-flight');
-  w.commit('c', t + 30 * MIN);   // another agent's wake: a and b still wait
+  w.commit('a');
   w.sample(rows, t + 30 * MIN);
   assert.equal(w.stall(t + 49 * MIN), null, 'A COMMIT ENDS THE STALL');
   const next = w.stall(t + 50 * MIN);
-  assert.equal(next?.since, t + 30 * MIN, 'THE NEXT STALL IS A NEW DECISION');
-  assert.equal(next.refusals, 0, 'refusals are counted from the last progress');
+  assert.equal(next?.since, t + 50 * MIN, 'THE NEXT STALL IS A NEW DECISION');
+  assert.equal(next.refusals, 0, "refusals are counted from the agent's own last progress");
   assert.equal(next.top, null);
 };
 test('a commit ends the stall; the next one carries a new since (a new decision)', () => K.nextStall());
 
 K.wiring = () => {
   const src = readSource('src/main/index.ts');
-  assert.ok(src.includes("if (fields.outcome === 'COMMITTED') floorStalls.commit(String(fields.agentId ?? ''), Date.now());"), 'EVERY COMMITTED SETTLE IS PROGRESS');
+  assert.ok(src.includes("if (fields.outcome === 'COMMITTED') floorStalls.commit(String(fields.agentId ?? ''));"), 'EVERY COMMITTED SETTLE IS PROGRESS');
   assert.ok(src.includes("if (Number(fields.inboxIds ?? 0) > 0) floorStalls.refusal(String(fields.agentId ?? ''), String(fields.why ?? ''));"), 'A NO-CLAIM IS A REFUSAL');
   assert.ok(src.includes('const ids = mailPendingIds(agentId).filter((id) => !((quiet.get(id) ?? 0) > now));'), 'THE SAMPLE IS THE WAKE PATH\'S OWN PENDING IDS, LESS HELD QUIET MAIL');
-  assert.ok(src.includes('return { agentId, ids, deliberate: snap.paused || snap.halted || snap.autoDeliveryPaused };'), 'A HUMAN\'S HOLD IS DELIBERATE');
+  assert.ok(src.includes('return { agentId, ids, deliberate: snap.paused || snap.halted || snap.autoDeliveryPaused || (hitl > 0 && now - hitl < WORKER_WAKE_HITL_REARM_MS) };'), 'A HUMAN\'S HOLD IS DELIBERATE, FROM LIVE STATE');
   assert.ok(src.includes('.filter((id) => !!ptyForAgent(id))'), 'ONLY LIVE AGENTS ARE SAMPLED');
   const fd = readSource(FDF);
   assert.ok(fd.includes('floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),'), 'THE DIGEST ASKS THE HOST, FAIL-SAFE');
@@ -166,26 +186,29 @@ function mutateText(rel, edits, tag) {
   return text;
 }
 const MUTANTS = [
-  { file: WSF, name: 'no progress gate', edits: [['    if (now - this.progressAt < FLOOR_STALL_AFTER_MS) return null;\n', '']],
-    killer: 'progress', dies: /A COMMIT ELSEWHERE KEEPS THE FLOOR MOVING/ },
-  { file: WSF, name: 'a commit is not progress', edits: [['  commit(agentId: string, now: number): void {\n    this.progress(now);\n', '  commit(agentId: string, now: number): void {\n']],
-    killer: 'progress', dies: /A COMMIT ELSEWHERE KEEPS THE FLOOR MOVING/ },
-  { file: WSF, name: 'a drained id is not progress', edits: [['      if (drained) this.progress(now);\n', '']],
-    killer: 'progress', dies: /DRAINED MAIL IS PROGRESS/ },
-  { file: WSF, name: "a human's pause is ignored", edits: [['const held = r.deliberate || ', 'const held = ']],
+  { file: WSF, name: 'a commit clears every agent (one healthy agent masks a stall)', edits: [['  private moved(agentId: string): void { this.waiting.delete(agentId); this.reasons.delete(agentId); }', '  private moved(agentId: string): void { this.waiting.clear(); this.reasons.delete(agentId); }']],
+    killer: 'progress', dies: /ONE HEALTHY AGENT DOES NOT MASK A STALL/ },
+  { file: WSF, name: 'a commit is not progress', edits: [['  commit(agentId: string): void {\n    this.moved(agentId);\n', '  commit(agentId: string): void {\n']],
+    killer: 'progress', dies: /AN AGENT'S OWN COMMIT IS PROGRESS/ },
+  { file: WSF, name: 'a drained id is not progress', edits: [['since: before && !drained ? before.since : now', 'since: before ? before.since : now']],
+    killer: 'progress', dies: /AN AGENT'S OWN DRAIN IS PROGRESS/ },
+  { file: WSF, name: 'the sticky deliberate reason is back (Jim MUST 1)', edits: [
+    ['  private readonly reasons = new Map<string, Map<string, number>>();\n', '  private readonly reasons = new Map<string, Map<string, number>>();\n  private readonly lastWhy = new Map<string, string>();\n'],
+    ['    if (!agentId || DELIBERATE.has(why)) return;\n', '    if (agentId) this.lastWhy.set(agentId, why);\n    if (!agentId || DELIBERATE.has(why)) return;\n'],
+    ['      if (r.ids.length === 0 || r.deliberate) { this.moved(r.agentId); continue; }', "      if (r.ids.length === 0 || r.deliberate || DELIBERATE.has(this.lastWhy.get(r.agentId) ?? '')) { this.moved(r.agentId); continue; }"]],
+    killer: 'stickyHold', dies: /A PAST quiet-held REFUSAL DOES NOT HIDE A STUCK AGENT/ },
+  { file: WSF, name: "a human's pause is ignored", edits: [['      if (r.ids.length === 0 || r.deliberate) { this.moved(r.agentId); continue; }', '      if (r.ids.length === 0) { this.moved(r.agentId); continue; }']],
     killer: 'quietNight', dies: /A HUMAN'S PAUSE IS NOT A STALL/ },
-  { file: WSF, name: 'a quiet-held refusal is ignored', edits: [["const held = r.deliberate || DELIBERATE.has(this.lastWhy.get(r.agentId) ?? '');", 'const held = r.deliberate;']],
-    killer: 'quietNight', dies: /QUIET-HELD MAIL IS NOT A STALL/ },
-  { file: WSF, name: 'one agent is a floor stall', edits: [['    if (agents.length < FLOOR_STALL_MIN_AGENTS) return null;\n', '    if (agents.length < 1) return null;\n']],
+  { file: WSF, name: 'one agent is a floor stall', edits: [['    if (agents.length < FLOOR_STALL_MIN_AGENTS) { this.seenSince = null; return null; }', '    if (agents.length < 1) { this.seenSince = null; return null; }']],
     killer: 'quietNight', dies: /ONE AGENT'S WAIT IS NOT A FLOOR STALL/ },
   { file: WSF, name: "an agent's wait restarts every sample", edits: [['since: before && !drained ? before.since : now', 'since: now']],
     killer: 'replay191', dies: /THE 1\.1\.91 FLOOR REACHES GOD/ },
-  { file: WSF, name: 'a commit does not reset the stall', edits: [['  private progress(now: number): void { this.progressAt = now; this.reasons.clear(); }', '  private progress(now: number): void { this.reasons.clear(); }']],
-    killer: 'nextStall', dies: /A COMMIT ENDS THE STALL/ },
+  { file: WSF, name: 'a cleared stall keeps its id', edits: [['    if (agents.length < FLOOR_STALL_MIN_AGENTS) { this.seenSince = null; return null; }', '    if (agents.length < FLOOR_STALL_MIN_AGENTS) return null;']],
+    killer: 'nextStall', dies: /THE NEXT STALL IS A NEW DECISION/ },
   { file: FDF, name: 'the digest drops the floor stall', edits: [['  if (input.floorStall) items.unshift(floorStallItem(input.floorStall, now));\n', '']],
     killer: 'replay191', dies: /THE 1\.1\.91 FLOOR REACHES GOD/ },
   { file: FDF, name: 'the item id moves every run', edits: [['    id: `floor-wake-stall:${s.since}`, cardId: null,', '    id: `floor-wake-stall:${now}`, cardId: null,']],
-    killer: 'replay191', dies: /THE ID IS THE LAST PROGRESS/ }
+    killer: 'replay191', dies: /THE ID IS WHEN THE STALL WAS FIRST SEEN/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

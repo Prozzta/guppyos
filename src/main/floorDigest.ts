@@ -204,19 +204,20 @@ export function messageBoxItem(m: DigestMessageBox, now: number): DecisionItem {
 /** SCREEN-GUARD-ALERT-FLOOR-193: the floor-wide wake stall (wakeStall.ts FloorWakeStallWatch). */
 export interface DigestFloorStall {
   since: number;
-  agents: Array<{ agentId: string; name?: string; pending: number }>;
+  agents: Array<{ agentId: string; name?: string; pending: number; since: number }>;
   refusals: number;
   top: { why: string; count: number } | null;
 }
 
-/** One item per stall (its id carries the last progress, so a stall wakes god once and the next
- *  one, after anything moved, is a new decision). */
+/** One item per stall (its id carries when the stall was first seen, so a stall wakes god once and
+ *  the next one, after it cleared, is a new decision). */
 export function floorStallItem(s: DigestFloorStall, now: number): DecisionItem {
   const who = s.agents.map((a) => `${a.name ?? a.agentId} ${a.pending}`).join(', ');
+  const oldest = Math.min(...s.agents.map((a) => a.since));
   const top = s.top ? `; most refusals were "${s.top.why}" (${s.top.count} of ${s.refusals})` : '; no refusal was even recorded';
   return {
     id: `floor-wake-stall:${s.since}`, cardId: null,
-    line: `floor: no wake committed and no mail delivered for ${ageText(now - s.since)} while ${s.agents.length} agents have mail waiting (${who})${top} - wake delivery looks stalled floor-wide; look at a waiting agent's terminal (nothing was retried or restarted)`
+    line: `floor: ${s.agents.length} agents have mail waiting with no wake committed and nothing delivered to them for ${ageText(now - oldest)} (${who})${top} - wake delivery looks stalled; look at a waiting agent's terminal (nothing was retried or restarted)`
   };
 }
 

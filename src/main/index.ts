@@ -170,7 +170,7 @@ import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, IN
 import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
-import { WorkerWakeWatchdog, type WakeClaim } from './workerWake';
+import { WORKER_WAKE_HITL_REARM_MS, WorkerWakeWatchdog, type WakeClaim } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
@@ -564,14 +564,16 @@ const floorDigest = new FloorDigest({
   // GTC M3: the Human's message-box items that need a look (never retried by the box).
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
   // SCREEN-GUARD-ALERT-FLOOR-193: every live agent's pending mail, less the quiet mail still inside
-  // its hold (paused/halted/auto-delivery paused is a human's hold, not a stall), then the stall.
+  // its hold, then the stall. Deliberate is LIVE state only (paused/halted/auto-delivery paused, a
+  // HITL prompt inside its re-arm window), never a past refusal's reason (Jim MUST 1).
   floorStall: () => {
     const now = Date.now();
     floorStalls.sample(Object.keys(hive.registry().agents ?? {}).filter((id) => !!ptyForAgent(id)).map((agentId) => {
       const snap = control.snapshot(agentId);
       const quiet = workerWake.quietHeld(agentId);
       const ids = mailPendingIds(agentId).filter((id) => !((quiet.get(id) ?? 0) > now));
-      return { agentId, ids, deliberate: snap.paused || snap.halted || snap.autoDeliveryPaused };
+      const hitl = workerWake.livenessFacts(agentId).lastHumanNeedsAt;
+      return { agentId, ids, deliberate: snap.paused || snap.halted || snap.autoDeliveryPaused || (hitl > 0 && now - hitl < WORKER_WAKE_HITL_REARM_MS) };
     }), now);
     const s = floorStalls.stall(now);
     return s ? { ...s, agents: s.agents.map((a) => ({ ...a, name: agentDisplayName(a.agentId) })) } : null;
@@ -689,7 +691,7 @@ const wakeTelemetry = new WakeTelemetry(Date.now());
 // THE STALL WATCHDOG (god's ruling A2). Decision in wakeStall.ts; this is the voice.
 const wakeStalls = new WakeStallWatch();
 // SCREEN-GUARD-ALERT-FLOOR-193: the floor-wide stall (any refusing path), sampled by the digest.
-const floorStalls = new FloorWakeStallWatch(Date.now());
+const floorStalls = new FloorWakeStallWatch();
 
 // ZERO-TOKEN-LIVENESS (1.1.77): the deterministic liveness monitor. It observes the facts below and
 // publishes liveness-v1 records (log rows on edges, fleet.json, getLiveness / onLivenessChange). It
@@ -1157,7 +1159,7 @@ inboxWake = new InboxWakeBridge({
       if (Number(fields.inboxIds ?? 0) > 0) floorStalls.refusal(String(fields.agentId ?? ''), String(fields.why ?? ''));
     } else if (stage === 'settle') {
       // SCREEN-GUARD-ALERT-FLOOR-193: a COMMITTED settle is the floor moving, on every wake path.
-      if (fields.outcome === 'COMMITTED') floorStalls.commit(String(fields.agentId ?? ''), Date.now());
+      if (fields.outcome === 'COMMITTED') floorStalls.commit(String(fields.agentId ?? ''));
       else floorStalls.refusal(String(fields.agentId ?? ''), [fields.reason ?? fields.outcome, fields.detail].filter((x) => x !== undefined && x !== null && x !== '').join(':'));
     } else if (stage === 'claim') {
       wakeStalls.clear(String(fields.agentId ?? ''));   // it moved; nothing is stuck
