@@ -366,8 +366,9 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // + 0 (agy-mutants-drift-197 updates an existing mutant census only).
   // + 1 (load-burst-196).
   // + 1 (build-leftovers-username-197).
-  // + 1 (screen-guard-alert-floor-193).
-  assert.equal(files.length, 463, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // 1.1.98: + 1 (screen-guard-alert-floor-193), + 1 (heavy-lock-release-lag-197),
+  // + 1 (heavy-lock-reservation-release-198), + 1 (mutant-runner-kill-safe-197).
+  assert.equal(files.length, 466, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
