@@ -19,8 +19,8 @@
  *                     it reports strength that was never measured.)
  *
  * SAFETY. Every file is restored from the exact bytes read before the edit, and the run
- * ends by re-hashing every file it touched. A mutant runner killed mid-run STRANDS a
- * mutation in src/ - if that ever happens, `git status src` and `git checkout --` it.
+ * ends by re-hashing every file it touched. Before every edit the shared harness journals
+ * the original bytes; a later runner start repairs an interrupted hard-killed run first.
  *
  * NOT part of `node --test`: it rewrites source files. Run it directly:
  *   node test/tools/agy-mutants.cjs            (all)
@@ -31,8 +31,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
 
 const REPO = path.resolve(__dirname, '..', '..');
+recover(REPO);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const f = (rel) => path.join(REPO, rel);
 
 const NORM = f('src/main/capacityNormalize.ts');
@@ -240,7 +243,7 @@ for (const m of chosen) {
   }
   let mutated = norm.replace(m.from, m.to);
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
-  fs.writeFileSync(m.file, mutated);
+  mutateFile(REPO, m.file, original, mutated);
   let failed = [];
   let ran = false;
   try {
@@ -257,7 +260,7 @@ for (const m of chosen) {
       failed = ['(module failed to load - the export it needs is gone)'];
     }
   } finally {
-    fs.writeFileSync(m.file, original);
+    restoreFile(REPO, m.file, original);
   }
   const restored = sha(m.file) === baseline[m.file];
   const named = failed.some((n) => m.expect.test(n));

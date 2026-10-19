@@ -11,8 +11,11 @@
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/gtc-m4-wake-197.test.cjs', 'test/hook-broker-p4.test.cjs', 'test/mail-epochs.test.cjs', 'test/inbox-wake-bridge.test.cjs', 'test/worker-wake.test.cjs'];
 const HOOKS = 'src/main/hooks.ts';
 const SEND = 'src/main/wakeSender.ts';
@@ -156,14 +159,14 @@ for (const [name, file, from, to] of selected) {
   let mutated = lf.slice(0, at) + to + lf.slice(at + from.length);
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8', timeout: 300_000 });
     const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
     const dead = r.status !== 0;
     if (dead) killed++;
     console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails})`);
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
 }
 console.log(`\n${killed}/${selected.length} killed${inert ? `, ${inert} INERT` : ''}`);
