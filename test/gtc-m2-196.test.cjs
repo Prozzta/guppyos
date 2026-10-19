@@ -95,8 +95,8 @@ test('one reader: the renderer functions are the pool lookup plus the shared cal
   assert.match(codex, /if \(!entry \|\| entry\.exited \|\| !entry\.opened\) return null;\s*try \{\s*return codexReading\(entry\.term\.buffer\.active, expectedTail\);/);
   assert.ok(codex.split('\n').length <= 9, 'a thin wrapper, no reader of its own');
   const mirror = src('src/main/terminalMirror.ts');
-  assert.match(mirror, /async needleReading\(needle, expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : needleReading\(t\.buffer\.active, t\.rows, needle, expectedTail\);/);
-  assert.match(mirror, /async codexReading\(expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : codexReading\(t\.buffer\.active, expectedTail\);/);
+  assert.match(mirror, /async needleReading\(needle, expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => needleReading\(t\.buffer\.active, t\.rows, needle, expectedTail\)\);/);
+  assert.match(mirror, /async codexReading\(expectedTail\) \{\s*await drained\(\);\s*return disposed \? null : timed\(\(\) => codexReading\(t\.buffer\.active, expectedTail\)\);/);
   // The moved helpers: the renderer paths re-export the shared ones, so nothing can fork.
   assert.match(src('src/renderer/src/components/composerAttestation.ts'), /^\/\/[^\n]*\nexport \* from '@shared\/composerAttestation';\n$/);
   assert.match(src('src/renderer/src/components/terminalScrollback.ts'), /^\/\/[^\n]*\nexport \{ TERMINAL_SCROLLBACK_LINES \} from '@shared\/terminalScrollback';\n$/);
@@ -216,6 +216,84 @@ test('MUST 1: a mirror made by a re-arm is no source (seeded); one fed from the 
   pm.disposeMirrors();
 });
 
+/** A mirror whose reading resolves only when the test says (the drain held open). */
+function heldMirror(reading = { onPromptRow: true, screenCount: 1 }, ms = 4.2) {
+  let open;
+  const gate = new Promise((r) => { open = r; });
+  const read = async () => { await gate; return reading; };
+  return { mirror: { codexReading: read, needleReading: read, lastReadMs: () => ms, dispose() {} }, open };
+}
+
+test('SHOULD 1: a session that ends, or a mirror replaced, while the drain awaits answers null with "replaced", never the old reading', async () => {
+  const swaps = {
+    'session replaced': (pm, id) => pm.sessions.set(id, session(id, heldMirror().mirror)),
+    'session ended': (pm, id) => pm.sessions.delete(id),
+    'mirror replaced': (pm, id) => { pm.sessions.get(id).mirror = heldMirror().mirror; },
+    'mirror dropped': (pm, id) => { pm.sessions.get(id).mirror = undefined; }
+  };
+  for (const [name, swap] of Object.entries(swaps)) {
+    for (const kind of ['codex', 'needle']) {
+      const pm = new PtyManager();
+      const h = heldMirror();
+      pm.sessions.set('p', session('p', h.mirror));
+      const got = pm.mirrorGateReading('p', kind, 'x', undefined);
+      await flush();
+      swap(pm, 'p');
+      h.open();
+      assert.deepEqual(await got, { reading: null, reason: 'replaced' }, `${name} (${kind})`);
+    }
+  }
+  // The control: no swap, the same reading, with the mirror's read time (SHOULD 2).
+  const pm = new PtyManager();
+  const h = heldMirror();
+  pm.sessions.set('p', session('p', h.mirror));
+  const got = pm.mirrorGateReading('p', 'codex', '', undefined);
+  h.open();
+  assert.deepEqual(await got, { reading: { onPromptRow: true, screenCount: 1 }, ms: 4.2 });
+  // Through the gate: a race falls back to the renderer, logged as 'replaced', not as the mirrors' state.
+  const r = gateRig({ src: 'mirror', mirrorAns: { reading: null, reason: 'replaced' }, why: 'auto-off' });
+  assert.equal(await r.gate.codex('p1'), R_READ);
+  assert.equal(r.rows[0].fallback, 'replaced');
+});
+
+test('SHOULD 2: the real mirror times its sync read; the gate sums the read time per kind into the summary', async () => {
+  const m = drawn(Array.from({ length: 300 }, (_, i) => `line ${i}`).concat(['› x']), 300, 40);
+  try {
+    assert.equal(m.lastReadMs(), 0, 'nothing read yet');
+    await m.codexReading();
+    const a = m.lastReadMs();
+    assert.ok(Number.isFinite(a) && a > 0, `a codex read is timed (${a})`);
+    await m.needleReading('x');
+    assert.ok(Number.isFinite(m.lastReadMs()) && m.lastReadMs() > 0, 'a needle read is timed');
+  } finally { m.dispose(); }
+  // The mirror source: each answered or null reading carries ms; a reading without ms is not counted.
+  const r = gateRig({ src: 'mirror', mirrorAns: { reading: M_READ, ms: 2 } });
+  await r.gate.codex('p1');
+  r.mirrorAns = { reading: M_READ, ms: 6 };
+  await r.gate.codex('p1');
+  r.mirrorAns = { reading: null, reason: 'unreadable', ms: 1 };
+  await r.gate.needle('p1', 'x');
+  r.mirrorAns = { reading: M_READ };
+  await r.gate.needle('p1', 'x');
+  r.t = G.SCREEN_SOURCE_SUMMARY_MS;
+  await r.gate.needle('p1', 'x');
+  assert.deepEqual(r.rows.at(-1), { kind: 'screen-source-summary', mirror: 4, 'fallback:unreadable': 1,
+    mirrorReadMs: { codex: { n: 2, ms: 8, max: 6 }, needle: { n: 1, ms: 1, max: 1 } } });
+  // The window resets: the next summary carries only its own reads.
+  r.mirrorAns = { reading: M_READ, ms: 3 };
+  await r.gate.codex('p1');
+  r.t = 2 * G.SCREEN_SOURCE_SUMMARY_MS;
+  await r.gate.codex('p1');
+  assert.deepEqual(r.rows.at(-1).mirrorReadMs, { codex: { n: 2, ms: 6, max: 3 } });
+  // The renderer source (the default): the shadow's mirror read is counted too.
+  const d = gateRig({ src: 'renderer', mirrorAns: { reading: M_READ, ms: 5.25 } });
+  await d.gate.codex('p1');
+  await flush();
+  d.t = G.SCREEN_SOURCE_SUMMARY_MS;
+  await d.gate.codex('p1');
+  assert.deepEqual(d.rows.at(-1), { kind: 'screen-source-summary', renderer: 2, mirrorReadMs: { codex: { n: 1, ms: 5.3, max: 5.3 } } });
+});
+
 test('MUST 1: with source mirror, a re-armed mirror and a 1,000-line... fall back to the renderer with the reason', async () => {
   const pm = new PtyManager();
   pm.sessions.set('live', session('live', undefined, '› tail'));
@@ -304,6 +382,7 @@ test('fallback: every mirror null is answered by the renderer as the gate, with 
     [{ reading: null, reason: 'seeded' }, 'auto-off', 'seeded'],
     [{ reading: null, reason: 'no-pty' }, 'auto-off', 'no-pty'],
     [{ reading: null, reason: 'unreadable' }, 'auto-off', 'unreadable'],
+    [{ reading: null, reason: 'replaced' }, 'config-off', 'replaced'],
     [() => Promise.reject(new Error('boom')), 'auto-off', 'unreadable']
   ];
   for (const [mirrorAns, why, want] of cases) {

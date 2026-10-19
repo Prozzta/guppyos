@@ -17,7 +17,7 @@ import { commandResolver, type CommandResolver, type ResolvedCommand } from './c
 import { cliStatus, lossyRouteRefusal, type ShimInterpreterProblem } from './cliLookupPolicy';
 
 /** GTC M2: why a PTY's mirror gave the screen gate no reading. */
-export type MirrorGateNull = 'no-pty' | 'no-mirror' | 'seeded' | 'unreadable';
+export type MirrorGateNull = 'no-pty' | 'no-mirror' | 'seeded' | 'unreadable' | 'replaced';
 
 /** APPEND the hive's bundled-node dir (`<HIVE_ROOT>/bin/runtime`, which holds a
  *  shim literally named `node`) to a child's PATH.
@@ -558,7 +558,7 @@ export class PtyManager {
   /** GTC M2: one screen-gate reading from this PTY's mirror, or why there is none. The caller
    *  falls back to the renderer on every null; the renderer's own nulls (exited, never opened)
    *  have their twin here as 'no-pty' / 'no-mirror' (an ended session's mirror is disposed). */
-  async mirrorGateReading(id: string, kind: 'needle' | 'codex', needle: string, expectedTail?: string): Promise<{ reading: NeedleReading | CodexReading | null; reason?: MirrorGateNull }> {
+  async mirrorGateReading(id: string, kind: 'needle' | 'codex', needle: string, expectedTail?: string): Promise<{ reading: NeedleReading | CodexReading | null; reason?: MirrorGateNull; ms?: number }> {
     const s = this.sessions.get(id);
     if (!s) return { reading: null, reason: 'no-pty' };
     if (!s.mirror) return { reading: null, reason: 'no-mirror' };
@@ -566,9 +566,11 @@ export class PtyManager {
     const m = s.mirror;
     let r: NeedleReading | CodexReading | null;
     try { r = kind === 'codex' ? await m.codexReading(expectedTail) : await m.needleReading(needle, expectedTail); } catch { r = null; }
-    // The session may have ended or been replaced while the read drained.
-    if (this.sessions.get(id) !== s || s.mirror !== m) return { reading: null, reason: 'no-mirror' };
-    return r ? { reading: r } : { reading: null, reason: 'unreadable' };
+    // The session may have ended or been replaced while the read drained: a reading of an old or
+    // disposed mirror is not evidence (Jim SHOULD 1), and it is a race, not the mirrors being off (INFO 2).
+    if (this.sessions.get(id) !== s || s.mirror !== m) return { reading: null, reason: 'replaced' };
+    const ms = m.lastReadMs();
+    return r ? { reading: r, ms } : { reading: null, reason: 'unreadable', ms };
   }
 
   /** GOD-TERMINAL-CONTROL M1: chars fed to mirrors since start, monotonic (an ended session's count

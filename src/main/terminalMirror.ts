@@ -49,6 +49,9 @@ export interface TerminalMirror {
    *  every byte written so far is parsed. Null = not evidence, as the renderer's null is. */
   needleReading(needle: string, expectedTail?: string): Promise<NeedleReading | null>;
   codexReading(expectedTail?: string): Promise<CodexReading | null>;
+  /** GTC M2 (Jim SHOULD 2): ms of main's synchronous work in the last reading (after the drain);
+   *  the Codex reading scans the whole 10,000-line buffer, which the parse-time guard does not see. */
+  lastReadMs(): number;
   /** Bytes handed to write() since the mirror was made (the cost sampler's input). */
   bytesWritten(): number;
   dispose(): void;
@@ -109,6 +112,8 @@ export function createTerminalMirror(cols: number, rows: number, make: (c: numbe
   const t = make(clamp(cols, 100), clamp(rows, 30));
   let written = 0;
   let disposed = false;
+  let readMs = 0;
+  const timed = <T>(f: () => T): T => { const t0 = performance.now(); try { return f(); } finally { readMs = performance.now() - t0; } };
   const drained = (): Promise<void> => new Promise((resolve) => { if (disposed) resolve(); else t.write('', resolve); });
   return {
     write(data) {
@@ -143,12 +148,13 @@ export function createTerminalMirror(cols: number, rows: number, make: (c: numbe
     },
     async needleReading(needle, expectedTail) {
       await drained();
-      return disposed ? null : needleReading(t.buffer.active, t.rows, needle, expectedTail);
+      return disposed ? null : timed(() => needleReading(t.buffer.active, t.rows, needle, expectedTail));
     },
     async codexReading(expectedTail) {
       await drained();
-      return disposed ? null : codexReading(t.buffer.active, expectedTail);
+      return disposed ? null : timed(() => codexReading(t.buffer.active, expectedTail));
     },
+    lastReadMs: () => readMs,
     bytesWritten: () => written,
     dispose() {
       if (disposed) return;
