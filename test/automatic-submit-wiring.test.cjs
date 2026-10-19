@@ -1300,9 +1300,12 @@ test('TRIPWIRE, NOT THE GUARANTEE: a bare Enter is SPELLED in exactly one place 
   // GOD-TERMINAL-CONTROL (1.1.94 M1): god's `term send` is the one other, by design: god types as a
   // person would and is NOT admission (design section 2). Its Enter is the send's one Enter, after the
   // settle and the provider gap, written with origin GOD by main's binding.
-  assert.deepEqual(files, ['src/main/automaticSubmit.ts', 'src/main/termControl.ts'],
-    `a bare Enter is written ONLY by the submit owner and god's term send; found ${writers.join(', ')}`);
+  // GTC M3 (1.1.97): the message box is the third, for the Human's own queue items only: their one
+  // Enter, inside the owner's chain and term's slot, written with origin HUMAN by main's binding.
+  assert.deepEqual(files, ['src/main/automaticSubmit.ts', 'src/main/messageBox.ts', 'src/main/termControl.ts'],
+    `a bare Enter is written ONLY by the submit owner, god's term send and the Human's message box; found ${writers.join(', ')}`);
   assert.equal(writers.filter((w) => w.startsWith('src/main/termControl.ts')).length, 1, 'term spells its Enter once');
+  assert.equal(writers.filter((w) => w.startsWith('src/main/messageBox.ts')).length, 1, 'the message box spells its Enter once');
   // The owner's one Enter is inside the critical section, nowhere else.
   const owner = read('src/main/automaticSubmit.ts');
   const section = owner.slice(owner.indexOf('export function commitSection('));

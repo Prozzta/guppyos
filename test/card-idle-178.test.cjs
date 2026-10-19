@@ -203,7 +203,10 @@ test('wiring: the card, the roster row, the panel, the Command Center badge and 
 
 test('display only: delivery still gates on the agent\'s own status', () => {
   const hive = readSource('src/renderer/src/hooks/useHive.ts');
-  assert.match(hive, /if \(!canDeliverToAgent\(target\.status, ptyQuietMs\(target\.ptyId, now\), QUIESCE_IDLE_MS\)\) \{/);
+  // GTC M3: the agent's own status still gates every item, except the Human's own on the 'term' path
+  // (main's message box then judges idle from its hook state).
+  assert.match(hive, /const idleHere = canDeliverToAgent\(target\.status, ptyQuietMs\(target\.ptyId, now\), QUIESCE_IDLE_MS\);/);
+  assert.match(hive, /if \(!idleHere && !viaBox\) return \{ sent: false \};/);
   assert.doesNotMatch(hive, /canDeliverToAgent\(activityStatus/);
 });
 

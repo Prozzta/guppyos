@@ -1319,8 +1319,8 @@ export class AutomaticSubmitOwner {
     return new Promise((resolve, reject) => {
       let state: 'wait' | 'run' | 'gave-up' = 'wait';
       this.deps.setTimer(() => { if (state === 'wait') { state = 'gave-up'; resolve({ ran: false }); } }, startMs);
-      const prev = this.chains.get(ptyId) ?? Promise.resolve();
-      const result = prev.then(async () => {
+      const ahead = this.chains.get(ptyId) ?? Promise.resolve();
+      const result = ahead.then(async () => {
         if (state !== 'wait') return;
         state = 'run';
         try { resolve({ ran: true, value: await fn() }); } catch (e) { reject(e); }
