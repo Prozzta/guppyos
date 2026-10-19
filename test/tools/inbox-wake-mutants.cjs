@@ -52,8 +52,8 @@ const MUTANTS = [
     '      r.held = claim;                  // no automatic retry until a human rules',
     '      for (const id of claim.ids) r.pending.add(id);'],
   ['w a refused wake spends its ids', WAKE,
-    '      for (const id of claim.ids) if (!r.announced.has(id)) r.pending.add(id);\n    }\n  }',
-    '      for (const id of claim.ids) r.announced.add(id);\n    }\n  }'],
+    '      for (const id of claim.ids) if (!r.announced.has(id)) r.pending.add(id);\n    }\n    return { endedBeforeSettle: false };',
+    '      for (const id of claim.ids) r.announced.add(id);\n    }\n    return { endedBeforeSettle: false };'],
   ['w SubagentStop turns an active main agent idle', WAKE,
     "    if (event === 'SubagentStop') return r.lifecycle === 'idle';",
     "    if (event === 'SubagentStop') { r.lifecycle = 'idle'; return true; }"],
@@ -74,19 +74,19 @@ const MUTANTS = [
     '    r.pending.add(messageId);\n    return true;',
     '    r.pending.add(messageId);\n    if (r.inFlight) (r.inFlight.ids as string[]).push?.(messageId);\n    return true;'],
   ['w a stale outcome settles the current claim', WAKE,
-    '    if (!r || r.inFlight?.requestId !== claim.requestId) return;',
-    '    if (!r) return;'],
+    '    if (!r || r.inFlight?.requestId !== claim.requestId) return { endedBeforeSettle: false };',
+    '    if (!r) return { endedBeforeSettle: false };'],
   ['w ALREADY_HANDLED submits again', BRIDGE,
     "    if (this.deps.coordinator.resolveInterference(agentId, how) && how === 'SEND_AGAIN') {",
     '    if (this.deps.coordinator.resolveInterference(agentId, how)) {\n      this.deps.coordinator.resolveInterference(agentId, how);\n      this.deps.coordinator.reconcile(agentId, []);\n      this.deps.coordinator.noteDelivery(agentId, `${agentId}-again`);'],
   ['w the bridge skips the authoritative inbox re-read', BRIDGE,
-    '    coordinator.reconcile(agentId, ids);\n', ''],
+    '    if (!readIds) coordinator.reconcile(agentId, ids, this.openIds(agentId));\n', ''],
   ['w events are not coalesced per agent per turn', BRIDGE,
     "    if (this.scheduled.has(agentId)) { this.deps.diag?.('schedule', { agentId, cause, took: 'coalesced' }); return; }\n",
     ''],
   ['w a Stop no longer retries pending work', WAKE,
-    "    if (event === 'Stop') { r.lifecycle = 'idle'; return true; }",
-    "    if (event === 'Stop') { r.lifecycle = 'idle'; return false; }"],
+    '      return true;\n    }\n    // FALSEACTIVE-STALL-2.',
+    '      return false;\n    }\n    // FALSEACTIVE-STALL-2.'],
   // ── the router and the control edges ──
   ['w the delivery edge fires before the durable write', HIVE,
     "    this.atomicWriteJson(file, msg);\n",
@@ -138,8 +138,8 @@ const MUTANTS = [
     "  'no-pending-ids', 'paused', 'halted', 'auto-delivery-paused', 'hitl-hold'",
     "  'no-pending-ids'"],
   ['w a session boundary no longer clears a stale active label', WAKE,
-    "    if (event === 'SessionStart' || event === 'SessionEnd') { r.lifecycle = 'unknown'; return false; }",
-    "    if (event === 'SessionEnd') { r.lifecycle = 'unknown'; return false; }"]
+    "    if (event === 'SessionStart' || event === 'SessionEnd') { this.endEpoch(r, 'unknown');",
+    "    if (event === 'SessionEnd') { this.endEpoch(r, 'unknown');"]
 ];
 
 // THE BASELINE MUST BE GREEN.
