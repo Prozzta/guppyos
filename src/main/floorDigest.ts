@@ -91,6 +91,7 @@ export interface FloorDigestInput {
   wakeStalls?: DigestWakeStall[];
   mirrorOff?: DigestMirrorOff | null;
   messageBox?: DigestMessageBox[];
+  floorStall?: DigestFloorStall | null;
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -200,6 +201,25 @@ export function messageBoxItem(m: DigestMessageBox, now: number): DecisionItem {
   };
 }
 
+/** SCREEN-GUARD-ALERT-FLOOR-193: the floor-wide wake stall (wakeStall.ts FloorWakeStallWatch). */
+export interface DigestFloorStall {
+  since: number;
+  agents: Array<{ agentId: string; name?: string; pending: number }>;
+  refusals: number;
+  top: { why: string; count: number } | null;
+}
+
+/** One item per stall (its id carries the last progress, so a stall wakes god once and the next
+ *  one, after anything moved, is a new decision). */
+export function floorStallItem(s: DigestFloorStall, now: number): DecisionItem {
+  const who = s.agents.map((a) => `${a.name ?? a.agentId} ${a.pending}`).join(', ');
+  const top = s.top ? `; most refusals were "${s.top.why}" (${s.top.count} of ${s.refusals})` : '; no refusal was even recorded';
+  return {
+    id: `floor-wake-stall:${s.since}`, cardId: null,
+    line: `floor: no wake committed and no mail delivered for ${ageText(now - s.since)} while ${s.agents.length} agents have mail waiting (${who})${top} - wake delivery looks stalled floor-wide; look at a waiting agent's terminal (nothing was retried or restarted)`
+  };
+}
+
 type Card = Record<string, unknown> & { id: string };
 
 export function buildFloorDigest(input: FloorDigestInput): { markdown: string; decisionItems: DecisionItem[] } {
@@ -210,6 +230,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
     return firstOccurrenceById(raw.filter((c): c is Card => !!c && typeof c === 'object' && typeof (c as { id?: unknown }).id === 'string'), (c) => c.id);
   })();
   const items = decisionItems(input.flags, input.ledgerIssues, now, input.heldWakes ?? [], input.silentTurns ?? [], input.quietStalls ?? [], input.wakeStalls ?? []);
+  if (input.floorStall) items.unshift(floorStallItem(input.floorStall, now));
   if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
   for (const m of input.messageBox ?? []) items.push(messageBoxItem(m, now));
   const flagsByCard = new Map<string, BoardFlag[]>();
@@ -337,6 +358,8 @@ export interface FloorDigestHost {
   mirrorOff?(): DigestMirrorOff | null;
   /** GTC M3: the Human's message-box sends that need a look (the last hour). Optional. */
   messageBox?(): DigestMessageBox[];
+  /** SCREEN-GUARD-ALERT-FLOOR-193: samples the floor's pending mail, then its stall if any. Optional. */
+  floorStall?(): DigestFloorStall | null;
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -382,6 +405,7 @@ export class FloorDigest {
       wakeStalls: (() => { try { return this.host.wakeStalls?.() ?? []; } catch { return []; } })(),
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
+      floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),
       backstopClosed: readBackstopClosed(root)
     });
     // The timestamp line changes every run; rewrite the file only when the content did.

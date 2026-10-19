@@ -80,3 +80,79 @@ export class WakeStallWatch {
     return [...this.watching].filter(([, w]) => w.announced).map(([agentId, w]) => ({ agentId, why: w.why, since: w.since, inboxIds: w.inboxIds }));
   }
 }
+
+/**
+ * SCREEN-GUARD-ALERT-FLOOR-193: the FLOOR-WIDE stall. In 1.1.91 every Claude agent's wakes were
+ * refused for 90 min and god was never told: the refusal reason kept changing (screen gate,
+ * cooldown, lifecycle, in-flight), so no per-agent run above ever held one reason for 5 min,
+ * and then the refusals stopped being made at all. This watch asks nothing about reasons: mail
+ * waits for FLOOR_STALL_MIN_AGENTS agents and nothing moved for FLOOR_STALL_AFTER_MS, whatever
+ * path refused it (screen gate, term, owner).
+ */
+export const FLOOR_STALL_AFTER_MS = 20 * 60_000;
+export const FLOOR_STALL_MIN_AGENTS = 2;
+
+/** One agent's mail at a sample: its pending ids, and whether a human state holds them. */
+export interface FloorPending { agentId: string; ids: readonly string[]; deliberate: boolean }
+
+export interface FloorWakeStall {
+  /** The last progress (a committed wake or a drained id), or the watch's start. */
+  since: number;
+  agents: Array<{ agentId: string; pending: number; since: number }>;
+  /** Refusals since `since`, and the most frequent reason among them. */
+  refusals: number;
+  top: { why: string; count: number } | null;
+}
+
+export class FloorWakeStallWatch {
+  private progressAt: number;
+  private readonly waiting = new Map<string, { since: number; ids: Set<string> }>();
+  private readonly lastWhy = new Map<string, string>();
+  private readonly reasons = new Map<string, number>();
+
+  constructor(startedAt: number) { this.progressAt = startedAt; }
+
+  private progress(now: number): void { this.progressAt = now; this.reasons.clear(); }
+
+  /** A wake committed (any path: event submit, Stop-continue): the floor moves. */
+  commit(agentId: string, now: number): void {
+    this.progress(now);
+    this.waiting.delete(agentId);
+  }
+
+  /** Any refusal (a no-claim or a refused settle): counted for the decision's text only. */
+  refusal(agentId: string, why: string): void {
+    if (!agentId) return;
+    this.lastWhy.set(agentId, why);
+    if (!DELIBERATE.has(why)) this.reasons.set(why, (this.reasons.get(why) ?? 0) + 1);
+  }
+
+  /** Fold one sample of every live agent's pending mail in. A pending id that is gone since the
+   *  last sample was delivered (a hook surfaced it, the agent read it): that is progress too. */
+  sample(rows: readonly FloorPending[], now: number): void {
+    const seen = new Set<string>();
+    for (const r of rows) {
+      const held = r.deliberate || DELIBERATE.has(this.lastWhy.get(r.agentId) ?? '');
+      if (r.ids.length === 0 || held) { this.waiting.delete(r.agentId); continue; }
+      seen.add(r.agentId);
+      const ids = new Set(r.ids);
+      const before = this.waiting.get(r.agentId);
+      const drained = before ? [...before.ids].some((id) => !ids.has(id)) : false;
+      if (drained) this.progress(now);
+      this.waiting.set(r.agentId, { since: before && !drained ? before.since : now, ids });
+    }
+    for (const id of [...this.waiting.keys()]) if (!seen.has(id)) this.waiting.delete(id);
+  }
+
+  /** The stall, while it lasts. Its `since` is fixed until something moves, so it is one decision. */
+  stall(now: number): FloorWakeStall | null {
+    if (now - this.progressAt < FLOOR_STALL_AFTER_MS) return null;
+    const agents = [...this.waiting].filter(([, w]) => now - w.since >= FLOOR_STALL_AFTER_MS)
+      .map(([agentId, w]) => ({ agentId, pending: w.ids.size, since: w.since }));
+    if (agents.length < FLOOR_STALL_MIN_AGENTS) return null;
+    let top: { why: string; count: number } | null = null;
+    let refusals = 0;
+    for (const [why, count] of this.reasons) { refusals += count; if (!top || count > top.count) top = { why, count }; }
+    return { since: this.progressAt, agents, refusals, top };
+  }
+}
