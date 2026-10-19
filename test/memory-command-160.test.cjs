@@ -84,7 +84,7 @@ test('spawn: the memory env and the dir come from ONE decision; pty.ts hands the
   assert.match(spawn, /if \(mem\) \{\n\s+opts\.env = \{ \.\.\.opts\.env, \.\.\.mem\.env \};\n\s+opts\.pathPrepend = \[mem\.commandDir\];/);
   const clear = INDEX.indexOf('opts.pathPrepend = undefined;');
   assert.ok(clear > 0 && clear < INDEX.indexOf('const mem = nativeMemory.spawnEnv(opts.hive.id);'), 'cleared before the hive block');
-  assert.match(read('src/main/pty.ts'), /env: buildPtyEnv\(process\.env, userPath, opts\.env, process\.platform, opts\.pathPrepend\)/);
+  assert.match(read('src/main/pty.ts'), /env: buildPtyEnv\(process\.env, userPath, opts\.env, process\.platform, opts\.pathPrepend, opts\.nodeRequire\)/);
 });
 
 // ── the text agents read ─────────────────────────────────────────────────────

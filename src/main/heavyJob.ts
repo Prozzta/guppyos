@@ -269,6 +269,73 @@ function leading(ws: string[]): string[] {
   return ws.slice(i);
 }
 
+/**
+ * HEAVY-LOCK-OPAQUE-SCRIPT-196 (Jim MUST A): the `node --test` runs a command IS, each as its file
+ * arguments ([] = no files: node's own discovery, a suite; ANY_TEST_FILE for an argument the shell
+ * expands, `test/$f.test.cjs` in a loop), or null when it has none, or when any other segment is a
+ * program that can itself start a shell-parented node --test (a script, node, npm, make, anything
+ * not known to be quiet). A command that only MENTIONS the files (`node gen-mut.cjs muts.json root
+ * test/a.cjs`) is null, so a test process it spawns can never match it; `npx tsc --noEmit && node
+ * --test a.cjs` and a per-file `for` loop are their test runs (Jim MUST 1). `bash -c` /
+ * `powershell -Command` bodies and `$(...)` substitutions are followed (Codex wraps its calls).
+ */
+export function testInvocation(command: string): string[][] | null {
+  const r = invocationOf(command, 0);
+  return r.launches || !r.runs.length ? null : r.runs;
+}
+export const ANY_TEST_FILE = '<any>';
+/** Programs that never start a node --test of their own (beside a call's own run, they leave it its run). */
+const QUIET_BINS = new Set(['cd', 'pushd', 'popd', 'export', 'unset', 'set', 'local', 'read', 'shift', 'exit', 'return', 'break', 'continue',
+  'echo', 'printf', 'date', 'sleep', 'true', 'false', 'test', '[', '[[', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'cat', 'wc', 'sed',
+  'awk', 'sort', 'uniq', 'tr', 'cut', 'tee', 'ls', 'pwd', 'git', 'tsc', 'which', 'type', 'mkdir', 'rm', 'cp', 'mv', 'touch', 'jq', 'diff',
+  'cmp', 'basename', 'dirname', 'realpath', 'stat', 'du', 'df', 'ps', 'tasklist', 'whoami', 'hostname', 'write-output', 'write-host',
+  'get-date', 'select-string', 'select-object', 'measure-object', 'out-null']);
+/** `npx <tool>` for a tool that runs no tests. */
+const QUIET_NPX = new Set(['tsc', 'eslint', 'prettier']);
+const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'while', 'until', 'if', '!', '{', '}', '(', ')', 'time', 'done', 'fi', 'esac']);
+function invocationOf(command: string, depth: number): { runs: string[][]; launches: boolean } {
+  const runs: string[][] = [];
+  const deeper = (body: string): boolean => {
+    if (depth >= MAX_DEPTH) return true;
+    const inner = invocationOf(body, depth + 1);
+    runs.push(...inner.runs);
+    return inner.launches;
+  };
+  for (const seg of segments(stripHeredocs(command))) {
+    // A `$(...)` substitution is a command of its own (`r=$(node --test "$f" | tail -1)`).
+    for (let i = 0, q = false; i < seg.length; i++) {
+      if (seg[i] === "'") q = !q;
+      else if (!q && seg[i] === '$' && seg[i + 1] === '(') { const e = substEnd(seg, i); if (deeper(seg.slice(i + 2, e - 1))) return { runs, launches: true }; i = e - 1; }
+    }
+    let ws = leading(stripRedirects(words(seg.replace(/\s&$/, ''))));
+    while (ws.length && SHELL_KEYWORDS.has(ws[0])) ws = leading(ws.slice(1));
+    // A loop header (`for f in a b`, `case $x in`) runs nothing itself.
+    if (!ws.length || ws[0] === 'for' || ws[0] === 'case') continue;
+    const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
+    if (WRAPPERS.has(bin)) {
+      const k = ws.findIndex((a, i) => i > 0 && /^(-l?c|\/\/?c|-command)$/i.test(a));
+      // `bash x.sh` runs a script the lock cannot read: it launches.
+      if (k <= 0 || deeper(ws.slice(k + 1).join(' '))) return { runs, launches: true };
+      continue;
+    }
+    if (QUIET_BINS.has(bin) || (bin === 'npx' && QUIET_NPX.has((ws[1] ?? '').toLowerCase()))) continue;
+    if (bin !== 'node') return { runs, launches: true };
+    const files: string[] = [];
+    let test = false;
+    for (let i = 1; i < ws.length; i++) {
+      const w = ws[i];
+      // `node x.cjs --test` passes --test to x.cjs: node's own flags come before the script.
+      if (w === '--test' && !files.length) { test = true; continue; }
+      if (w.startsWith('-')) { if (NODE_VALUE_FLAGS.has(w)) i++; continue; }
+      // `node --test` runs the files; anything after a non-flag is still a file argument.
+      files.push(/[$`*?]/.test(w) ? ANY_TEST_FILE : w);
+    }
+    if (!test) return { runs, launches: true };
+    runs.push(files);
+  }
+  return { runs, launches: false };
+}
+
 /** HEAVY-LOCK-SCRIPT-WRAPPER: what the classifier may read besides the command line. */
 export interface ClassifyCtx {
   /** The text of a script file the command runs (`bash suite.sh`, `./gate.sh`), resolved against the
@@ -974,7 +1041,8 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
       continue;
     }
     const raw = words(seg.replace(/\s&$/, ''), d);
-    const ws = stripRedirects(raw);
+    // HEAVY-LOCK-SHELL-KEYWORD-196: `do npm ci`, `then npm test`: a keyword is not the program.
+    const ws = stripKeywords(stripRedirects(raw), d);
     // HEAVY-LOCK-ADHOC-NODE: what this segment reads on stdin (a heredoc body, a `< file`).
     let stdin: string | null | undefined;
     for (let i = 0; i < raw.length; i++) {
@@ -1018,6 +1086,14 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
 }
 
 const HEREDOC_OP = /^\d*<<-?(?!<)/;
+
+/** HEAVY-LOCK-SHELL-KEYWORD-196: drop the shell keywords that open a segment before its program. */
+function stripKeywords(ws: string[], d: ShellDialect): string[] {
+  if (d === 'cmd') return ws;
+  let i = 0;
+  while (i < ws.length && SHELL_KEYWORDS.has(ws[i])) i++;
+  return i ? ws.slice(i) : ws;
+}
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
@@ -1214,6 +1290,8 @@ export const HEAVY_CALL_SLACK_MS = 3_000;
  * callDone) can no longer leave an open-ended window that claims the agent's later processes.
  */
 export const HEAVY_CALL_SPAWN_MS = 60_000;
+/** HEAVY-LOCK-OPAQUE-SCRIPT-196: the longest a loop call's run matches without its PostToolUse (the Bash tool caps a call at 10 min). */
+export const HEAVY_LOOP_CALL_MS = 15 * 60_000;
 
 /** One process of the listing. `createdMs` (epoch ms) is what the watcher judges by (Jim MF3). */
 export interface ProcRow { pid: number; parentPid: number; commandLine: string; createdMs?: number }
@@ -1236,7 +1314,50 @@ export interface HeavyLockDeps {
   notifyLapse?: (agentId: string, kind: HeavyKind, why: 'stale' | 'expired') => void;
   /** Is this agent still live (a PTY)? A gone waiter is skipped. Absent = every agent is live. */
   alive?: (agentId: string) => boolean;
+  /** HEAVY-LOCK-OPAQUE-SCRIPT-196: the image name of a process (a test process's parent: is it the
+   *  call's shell?), or null. Absent = unknown, so no test process is VISIBLE. */
+  parentImage?: (pid: number) => Promise<string | null>;
+  /** Is this pid running? (A run named by GUPPY_TEST_RUN; its createdMs is checked by the scan.) */
+  pidAlive?: (pid: number) => boolean;
+  /** How long one lease request waits for a queued agent's slot before answering 'wait'. */
+  leasePollMs?: number;
 }
+
+/**
+ * HEAVY-LOCK-OPAQUE-SCRIPT-196: what the heavy preload (resources/heavyjob/heavy-preload.cjs) asks,
+ * from inside a test process (`node --test`, or a suite runner) an agent started, however it was
+ * started (a node script, a bash script: the PreToolUse classifier cannot read those). This is
+ * COOPERATIVE, not enforcement: it rides on NODE_OPTIONS, which an agent can unset. So a broker
+ * the preload cannot reach fails open, and every fail-open is a hive row (Jim SHOULD 1).
+ */
+export interface HeavyLeaseRequest {
+  op?: 'acquire' | 'release';
+  /** acquire: the test process, its creation time (epoch ms) and its parent. */
+  pid?: number;
+  createdMs?: number;
+  ppid?: number;
+  /** The `node --test` file arguments as the process got them. */
+  files?: string[];
+  /** `node --test` with no files (node's own discovery: a suite). */
+  suite?: boolean;
+  /** A suite runner's argv after node (argv[1] is run-tests.cjs): classified as PreToolUse would. */
+  runner?: string[];
+  /** GUPPY_TEST_RUN as the process inherited it: '<pid>:<createdMs>' of an enclosing classified run. */
+  parentRun?: string;
+  /** release: the lease an acquire answered. */
+  leaseId?: string;
+}
+export type HeavyLeaseAnswer =
+  | { state: 'light'; run: string; why: string }
+  | { state: 'held'; run: string; leaseId: string | null; why: string }
+  | { state: 'wait'; position: number; holders: string[] }
+  | { state: 'released' };
+/** How long one lease request may wait (a long poll; the preload asks again). */
+export const HEAVY_LEASE_POLL_MS = 25_000;
+/** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
+ *  prefix the classifier strips): Jim MUST A. A node, python or any other program is not. */
+const CALL_PARENT = /^(bash|sh|zsh|dash|cmd|powershell|pwsh|env|timeout|nice|nohup|setsid|time)(\.exe)?$/i;
+const normFile = (f: string): string => f.replace(/\\/g, '/').replace(/^(\.\/)+/, '').toLowerCase();
 
 export const HEAVY_TTL_MS = 60 * 60_000;
 /** HEAVY-LOCK-SELF-WAIT: how long a freed slot is kept for the queued agent it was offered to.
@@ -1295,8 +1416,20 @@ export type HeavyDecision = { allow: true; acquired: boolean } | { allow: false;
  */
 export class HeavyJobLock {
   private readonly holders = new Map<string, HeavyHolder>();
-  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number }> = [];
-  private readonly reservations = new Map<string, { kind: HeavyKind; until: number }>();
+  /** `procs`: HEAVY-LOCK-OPAQUE-SCRIPT-196 (Jim MUST C), the test processes waiting in a lease
+   *  request; `hooked`: the agent was also denied at PreToolUse (it waits for the notice, not a
+   *  process). A waiter with no live process and no hooked deny has left: the scan drops it. */
+  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean }> = [];
+  private readonly reservations = new Map<string, { kind: HeavyKind; until: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean }>();
+  /** HEAVY-LOCK-OPAQUE-SCRIPT-196: each agent's recent calls that ARE one `node --test` of named files
+   *  (testInvocation), each consumed by the one test process it starts (Jim MUST A). */
+  private readonly testCalls = new Map<string, Array<{ callId: string; files: string[]; start: number; end: number | null; used: boolean }>>();
+  /** Held leases by id ('lease:<pid>:<createdMs>'): released by the preload at exit, or by the scan. */
+  private readonly leases = new Map<string, { agentId: string; pid: number; createdMs: number; run: string }>();
+  /** Classified runs ('<pid>:<createdMs>') a nested test process may name in GUPPY_TEST_RUN (MUST B). */
+  private readonly runs = new Map<string, { agentId: string; held: boolean }>();
+  /** Agents queued only by a waiting test process (no PreToolUse deny told them to wait). */
+  private readonly leaseOnly = new Set<string>();
   private timer: unknown = null;
   /** IDLE-MEANS-IDLE: told of every change to who holds, waits for or has a slot reserved. */
   private readonly listeners = new Set<() => void>();
@@ -1368,7 +1501,7 @@ export class HeavyJobLock {
     const reserved = this.reservations.has(agentId);
     if (!reserved && this.holders.size + this.reservations.size >= limit) {
       const holders = [...this.holders.values()];
-      const position = this.enqueue(agentId, cls.kind);
+      const position = this.enqueue(agentId, cls.kind, !callId.startsWith('lease:'));
       const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
       const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
       const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
@@ -1380,6 +1513,7 @@ export class HeavyJobLock {
     }
     if (reserved) this.reservations.delete(agentId);
     this.dequeue(agentId);
+    this.leaseOnly.delete(agentId);
     this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}) });
     this.changed();
@@ -1397,11 +1531,14 @@ export class HeavyJobLock {
   }
 
   /** Queue a denied agent once (FIFO); its 1-based position. */
-  private enqueue(agentId: string, kind: HeavyKind): number {
+  private enqueue(agentId: string, kind: HeavyKind, hooked = true): number {
     const i = this.waiters.findIndex((w) => w.agentId === agentId);
     // A re-deny keeps its place and shows the agent still wants the slot (the waiter TTL restarts).
+    if (hooked) this.leaseOnly.delete(agentId);
+    if (i >= 0 && hooked) this.waiters[i].hooked = true;
     if (i >= 0) { this.waiters[i].since = this.now(); return i + 1; }
-    this.waiters.push({ agentId, kind, since: this.now() });
+    this.waiters.push({ agentId, kind, since: this.now(), procs: [], hooked });
+    if (!hooked) this.leaseOnly.add(agentId);
     return this.waiters.length;
   }
 
@@ -1427,10 +1564,13 @@ export class HeavyJobLock {
       // reserved for it would sit unused for HEAVY_RESERVE_MS.
       if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }
       const until = this.now() + HEAVY_RESERVE_MS;
-      this.reservations.set(w.agentId, { kind: w.kind, until });
+      this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked });
       this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since });
       this.changed();
+      // HEAVY-LOCK-OPAQUE-SCRIPT-196: a waiter that is only a waiting test process takes the slot
+      // itself (its lease request is told); the agent was never told to wait for a notice.
       if (w.agentId === caller) continue;
+      if (!w.hooked) continue;
       try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }
     }
     this.arm();
@@ -1488,10 +1628,11 @@ export class HeavyJobLock {
    *  while its agent's PTY tree has ANY descendant CREATED at or after its acquire: exact for every
    *  wrapper, shim and tool, and conservative (the agent's other calls only extend the hold). The
    *  PTY root itself and its long-lived children (created earlier) never count. */
-  private async heavyAgents(): Promise<{ busy: Set<string>; seen: Set<string> } | null> {
+  private async heavyAgents(given?: { procs: ProcRow[] | null }): Promise<{ busy: Set<string>; seen: Set<string> } | null> {
     if (!this.d.probe || !this.d.roots) return null;
     let procs: ProcRow[] | null;
-    try { procs = await this.d.probe(); } catch { procs = null; }
+    if (given) procs = given.procs;
+    else try { procs = await this.d.probe(); } catch { procs = null; }
     // Jim MF4: a failed, empty or createdMs-less listing (most likely a TIMEOUT while heavy jobs load
     // the machine) is UNKNOWN, never "nothing running": the caller counts no miss.
     if (!procs || !procs.length || !procs.some((p) => typeof p.createdMs === 'number')) {
@@ -1553,6 +1694,9 @@ export class HeavyJobLock {
         if (p && p.createdMs === created) busy.add(h.agentId); else h.attributed.delete(pid);
       }
     }
+    // HEAVY-LOCK-OPAQUE-SCRIPT-196: a held lease's test process keeps its agent busy while it runs
+    // (it may have been created long before its lease: it waited in the queue).
+    for (const l of this.leases.values()) if (procLive(byPid, l.pid, l.createdMs)) busy.add(l.agentId);
     return { busy, seen: rootsSeen };
   }
 
@@ -1576,7 +1720,13 @@ export class HeavyJobLock {
     this.changed();
     // HEAVY-LOCK-SELF-WAIT: the freed slot goes to the oldest waiter (reserved), not to whoever asks first.
     this.grant();
-    if (!this.holders.size && !this.reservations.size && this.timer) { this.clearTimer(this.timer); this.timer = null; }
+    if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
+  }
+
+  /** The watcher has work: a slot held or reserved, or a test process waiting (Jim MUST C: a dead
+   *  waiter must leave the queue even while nobody holds). */
+  private watching(): boolean {
+    return this.holders.size > 0 || this.reservations.size > 0 || this.waiters.some((w) => w.procs.length > 0);
   }
 
   /** LOCK-WAIT-NOTICES: tell an agent it left the queue: not the one whose own call is running, and
@@ -1584,6 +1734,9 @@ export class HeavyJobLock {
    *  without grant()'s gone check). */
   private lapse(agentId: string, kind: HeavyKind, why: 'stale' | 'expired'): void {
     if (agentId === this.calling) return;
+    // HEAVY-LOCK-OPAQUE-SCRIPT-196: an agent queued only by a waiting test process was never told
+    // to wait for a notice (its process waits, or has gone).
+    if (this.leaseOnly.has(agentId)) return;
     try {
       if (this.d.alive && !this.d.alive(agentId)) return;
       this.d.notifyLapse?.(agentId, kind, why);
@@ -1620,7 +1773,7 @@ export class HeavyJobLock {
   /** The watcher runs only while a slot is held or reserved: TTL and reservation expiry, and a
    *  process check for background holders (a hidden listing every HEAVY_SCAN_MS). */
   private arm(): void {
-    if (this.timer || (!this.holders.size && !this.reservations.size)) return;
+    if (this.timer || !this.watching()) return;
     this.timer = this.setTimer(() => { this.timer = null; void this.scan().finally(() => this.arm()); }, HEAVY_SCAN_MS);
   }
 
@@ -1632,8 +1785,13 @@ export class HeavyJobLock {
     // pin a slot for the whole TTL. The listing runs only while a slot is held. A miss counts only
     // once the holder is at least one scan interval old (its job has had time to start).
     const held = [...this.holders.values()];
-    if (!held.length || !this.d.probe || !this.d.roots) return;
-    const probed = await this.heavyAgents();
+    const leaseWork = this.leases.size > 0 || this.waiters.some((w) => w.procs.length > 0) || [...this.reservations.values()].some((r) => r.procs.length > 0);
+    if (!this.d.probe || ((!held.length || !this.d.roots) && !leaseWork)) return;
+    let procs: ProcRow[] | null;
+    try { procs = await this.d.probe(); } catch { procs = null; }
+    this.sweepLeases(procs);
+    if (!held.length || !this.d.roots) return;
+    const probed = await this.heavyAgents({ procs });
     if (!probed) return;   // Jim MF4: unknown, not a miss
     const { busy, seen } = probed;
     const t = this.now();
@@ -1648,6 +1806,190 @@ export class HeavyJobLock {
       // call bookkeeping says (an open call here is one whose PostToolUse never came).
       if (h.misses >= HEAVY_SCAN_MISSES) { h.calls.clear(); this.release(h.agentId, 'process-exit'); }
     }
+  }
+
+  /** HEAVY-LOCK-OPAQUE-SCRIPT-196: PreToolUse of any call. One that IS a `node --test` of named files
+   *  may make the one test process it starts VISIBLE (light). */
+  noteCall(agentId: string, callId: string, command: string): void {
+    // A run with no files is node's own discovery (a suite): never VISIBLE.
+    const runs = (testInvocation(command) ?? []).filter((files) => files.length);
+    if (!runs.length) return;
+    const t = this.now();
+    const list = (this.testCalls.get(agentId) ?? []).filter((c) => this.callOpen(c, t));
+    for (const files of runs) list.push({ callId, files: files.map(normFile), start: t, end: null, used: false });
+    this.testCalls.set(agentId, list.slice(-16));
+  }
+
+  /** PostToolUse: the call's window closes (a test process may still report for HEAVY_CALL_SLACK_MS). */
+  noteCallEnd(agentId: string, callId: string): void {
+    const t = this.now();
+    for (const c of this.testCalls.get(agentId) ?? []) if (c.callId === callId && c.end === null) c.end = t;
+  }
+
+  private callOpen(c: { start: number; end: number | null; files?: string[] }, t: number): boolean {
+    // A loop's run (`node --test test/$f.test.cjs`) starts its processes all through the call, so it
+    // matches while the call is open (bounded, if its PostToolUse never comes).
+    if (c.files?.length === 1 && c.files[0] === ANY_TEST_FILE) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
+    return t - c.start <= HEAVY_CALL_SPAWN_MS && (c.end === null || t - c.end <= HEAVY_CALL_SLACK_MS);
+  }
+
+  /**
+   * HEAVY-LOCK-OPAQUE-SCRIPT-196: a test process asks (the preload, before any test runs).
+   *  - Part of a classified run (GUPPY_TEST_RUN names a LIVE run of this agent; Jim MUST B): it
+   *    inherits that run's class. It grants nothing on its own: the run is checked live.
+   *  - VISIBLE (the call's own `node --test` of exactly these files, its parent the call's shell; Jim
+   *    MUST A): the PreToolUse classifier already judged it, so it is light (or shares the agent's slot).
+   *  - Otherwise (an opaque wrapper started it, or it is a suite runner): a heavy job. It takes a slot,
+   *    shares its agent's, or WAITS in the queue (a long poll; the preload asks again).
+   */
+  async lease(agentId: string, r: HeavyLeaseRequest, gone?: () => boolean): Promise<HeavyLeaseAnswer> {
+    if (r.op === 'release') { this.leaseEnd(agentId, String(r.leaseId ?? ''), 'released'); return { state: 'released' }; }
+    const pid = Number(r.pid);
+    const createdMs = Math.round(Number(r.createdMs));
+    if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(createdMs)) throw new Error('a lease needs pid and createdMs');
+    const run = `${pid}:${createdMs}`;
+    this.pruneRuns();
+    const parent = typeof r.parentRun === 'string' ? this.runs.get(r.parentRun) : undefined;
+    if (parent && parent.agentId === agentId && this.runAlive(r.parentRun!)) {
+      const held = parent.held && this.holders.has(agentId);
+      this.runs.set(run, { agentId, held });
+      this.log({ kind: 'heavy-lock', action: 'lease-inherit', agentId, pid, held });
+      return held ? { state: 'held', run, leaseId: null, why: 'part of a held run' } : { state: 'light', run, why: 'part of a light run' };
+    }
+    // A suite runner is judged by its own argv, as PreToolUse judges it: a filtered run
+    // (`run-tests.cjs wake`) is light, whoever started it.
+    let suite = r.suite === true;
+    if (Array.isArray(r.runner)) {
+      const argv = ['node', ...r.runner.map(String)].map((a) => `"${a.replace(/["\\$`]/g, '\\$&')}"`).join(' ');
+      if (!classifyCommand(argv).heavy) {
+        this.runs.set(run, { agentId, held: this.holders.has(agentId) });
+        return { state: 'light', run, why: 'a filtered suite runner' };
+      }
+      suite = true;
+    }
+    if (!suite && await this.visible(agentId, r)) {
+      this.runs.set(run, { agentId, held: this.holders.has(agentId) });
+      return { state: 'light', run, why: "the call's own node --test" };
+    }
+    const kind: HeavyKind = suite ? 'suite' : 'bench';
+    const cls: HeavyClass = { heavy: true, kind, why: suite ? 'a suite run (heavy preload)' : 'a node --test its call does not show (heavy preload)' };
+    const id = `lease:${run}`;
+    const deadline = this.now() + (this.d.leasePollMs ?? HEAVY_LEASE_POLL_MS);
+    for (;;) {
+      // A waiting process asks again only when a slot may be its own (no deny row every poll).
+      const queued = this.waiters.find((w) => w.agentId === agentId && w.procs.some((p) => p.pid === pid));
+      const limit = this.d.limit();
+      const full = limit !== 'off' && this.holders.size + this.reservations.size >= limit;
+      if (!(queued && full && !this.reservations.has(agentId) && !this.holders.has(agentId))) {
+        const shared = this.holders.has(agentId);
+        const d = this.acquire(agentId, cls, `node --test (pid ${pid})`, id, false);
+        if (d.allow) {
+          // 'off' (or nothing held after all): nothing to release.
+          if (!this.holders.get(agentId)?.calls.has(id)) { this.runs.set(run, { agentId, held: false }); return { state: 'light', run, why: 'heavy jobs are unlimited' }; }
+          this.leases.set(id, { agentId, pid, createdMs, run });
+          this.runs.set(run, { agentId, held: true });
+          const mine = [...this.leases.values()].filter((l) => l.agentId === agentId).length;
+          this.log({ kind: 'heavy-lock', action: 'lease', agentId, heavyKind: kind, pid, shared });
+          // Jim SHOULD 3: two heavy jobs of one agent on its one slot (today's share semantics).
+          if (mine > 1) this.log({ kind: 'heavy-lock', action: 'shared-concurrent', agentId, leases: mine });
+          this.arm();
+          return { state: 'held', run, leaseId: id, why: cls.why! };
+        }
+        const w = this.waiters.find((x) => x.agentId === agentId);
+        this.arm();
+        // The first answer to a newly queued process is at once, so it can say it waits; later ones long-poll.
+        if (w && !w.procs.some((p) => p.pid === pid)) {
+          w.procs.push({ pid, createdMs });
+          return { state: 'wait', position: this.waiters.indexOf(w) + 1, holders: [...this.holders.keys()] };
+        }
+      } else queued.since = this.now();
+      const left = deadline - this.now();
+      if (left <= 0 || gone?.() || !(await this.waitFor(left, () => this.reservations.has(agentId) || !!gone?.())) || gone?.()) {
+        const position = this.waiters.findIndex((x) => x.agentId === agentId) + 1;
+        return { state: 'wait', position, holders: [...this.holders.keys()] };
+      }
+    }
+  }
+
+  /** Resolve true as soon as `ok()` holds after a change, false after `ms`. */
+  private waitFor(ms: number, ok: () => boolean): Promise<boolean> {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v: boolean): void => { if (done) return; done = true; off(); this.clearTimer(timer); resolve(v); };
+      const off = this.onChange(() => { if (ok()) finish(true); });
+      const timer = this.setTimer(() => finish(false), ms);
+    });
+  }
+
+  /** A lease ends: the preload released it at exit, or the scan found its process gone. */
+  private leaseEnd(agentId: string, id: string, reason: 'released' | 'gone'): void {
+    const l = this.leases.get(id);
+    if (!l || l.agentId !== agentId) return;
+    this.leases.delete(id);
+    this.runs.delete(l.run);
+    this.log({ kind: 'heavy-lock', action: reason === 'gone' ? 'lease-gone' : 'lease-end', agentId, pid: l.pid });
+    this.callDone(agentId, id);
+  }
+
+  /** Jim MUST A: the test files match a recent call of this agent that IS that run, unused, and the
+   *  test process's parent is the call's shell. Consumed once. */
+  private async visible(agentId: string, r: HeavyLeaseRequest): Promise<boolean> {
+    const files = Array.isArray(r.files) ? r.files.filter((f): f is string => typeof f === 'string').map(normFile) : [];
+    if (!files.length) return false;
+    const t = this.now();
+    // Jim MUST 1 (b): a loop's run matches any single-file process while its call is open, never consumed.
+    const loop = (c: { files: string[] }): boolean => c.files.length === 1 && c.files[0] === ANY_TEST_FILE && files.length === 1;
+    const match = (): { used: boolean; files: string[] } | undefined => (this.testCalls.get(agentId) ?? []).find((c) => this.callOpen(c, t)
+      && (loop(c) || (!c.used && c.files.length === files.length && c.files.every((f, i) => f === files[i]))));
+    if (!match() || !this.d.parentImage || typeof r.ppid !== 'number') return false;
+    let image: string | null;
+    try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
+    const name = (image ?? '').replace(/\\/g, '/').split('/').pop()!;
+    if (!CALL_PARENT.test(name)) { this.log({ kind: 'heavy-lock', action: 'lease-not-own', agentId, parent: image }); return false; }
+    const c = match();
+    if (!c) return false;
+    if (!loop(c)) c.used = true;
+    return true;
+  }
+
+  private runAlive(run: string): boolean {
+    const pid = Number(run.split(':')[0]);
+    try { return this.d.pidAlive ? this.d.pidAlive(pid) : pidRunning(pid); } catch { return false; }
+  }
+
+  /** Runs whose process has exited are forgotten (a light run never says it ended). */
+  private pruneRuns(): void {
+    if (this.runs.size < 64) return;
+    for (const run of [...this.runs.keys()]) if (!this.runAlive(run)) this.runs.delete(run);
+  }
+
+  /** One listing (the scan's): leases and runs whose process is gone end; a test process that died
+   *  waiting leaves the queue, and a slot reserved for it passes on (Jim MUST C). A failed listing
+   *  is unknown: nothing changes. */
+  private sweepLeases(procs: ProcRow[] | null): void {
+    if (!procs || !procs.length || !procs.some((p) => typeof p.createdMs === 'number')) return;
+    const byPid = new Map(procs.map((p) => [p.pid, p]));
+    for (const [id, l] of [...this.leases]) if (!procLive(byPid, l.pid, l.createdMs)) this.leaseEnd(l.agentId, id, 'gone');
+    for (const run of [...this.runs.keys()]) { const [pid, created] = run.split(':').map(Number); if (!procLive(byPid, pid, created)) this.runs.delete(run); }
+    for (const w of [...this.waiters]) {
+      if (!w.procs.length) continue;
+      w.procs = w.procs.filter((p) => procLive(byPid, p.pid, p.createdMs));
+      if (w.procs.length || w.hooked) continue;
+      this.dequeue(w.agentId);
+      this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'waiter-gone' });
+      this.changed();
+    }
+    let freed = false;
+    for (const [agentId, r] of [...this.reservations]) {
+      if (!r.procs.length) continue;
+      r.procs = r.procs.filter((p) => procLive(byPid, p.pid, p.createdMs));
+      if (r.procs.length || r.hooked) continue;
+      this.reservations.delete(agentId);
+      this.log({ kind: 'heavy-lock', action: 'reserve-dropped', agentId, reason: 'waiter-gone' });
+      this.changed();
+      freed = true;
+    }
+    if (freed) this.grant();
   }
 
   private log(row: Record<string, unknown>): void { try { this.d.log?.(row); } catch { /* best effort */ } }
@@ -1673,5 +2015,32 @@ export function probeProcesses(): Promise<ProcRow[] | null> {
   if (process.platform !== 'win32') return Promise.resolve(null);
   return new Promise((resolve) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
     resolve(err ? null : parseProcessListing(String(stdout)));
+  }));
+}
+
+/** HEAVY-LOCK-OPAQUE-SCRIPT-196: is `pid` listed with this creation time (within the clock skew)? */
+function procLive(byPid: Map<number, ProcRow>, pid: number, createdMs: number): boolean {
+  const p = byPid.get(pid);
+  return !!p && typeof p.createdMs === 'number' && Math.abs(p.createdMs - createdMs) <= HEAVY_CREATED_SKEW_MS;
+}
+
+/** Is `pid` running? (EPERM: it is, as another user's.) */
+export function pidRunning(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/** HEAVY-LOCK-OPAQUE-SCRIPT-196: the image name of one process (a test process's parent), or null.
+ *  tasklist, not the CIM listing: it answers in ~0.1 s and runs once per single-file test run. */
+export function processImage(pid: number): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 0) return Promise.resolve(null);
+  const [cmd, args] = process.platform === 'win32'
+    ? ['tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']]
+    : ['ps', ['-o', 'comm=', '-p', String(pid)]];
+  return new Promise((resolve) => execFile(cmd, args, { windowsHide: true, timeout: 5_000 }, (err, stdout) => {
+    if (err) { resolve(null); return; }
+    const out = String(stdout).trim();
+    if (process.platform !== 'win32') { resolve(out || null); return; }
+    const m = /^"([^"]+)","(\d+)"/.exec(out);
+    resolve(m && Number(m[2]) === pid ? m[1] : null);
   }));
 }

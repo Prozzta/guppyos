@@ -111,7 +111,7 @@ import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
 import { createScreenGate, screenGateSourceOf } from './screenGate';
-import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses } from './heavyJob';
+import { HeavyJobLock, heavyLimit, heavySlotFreeNotice, heavyWaitLapsedNotice, probeProcesses, processImage } from './heavyJob';
 import { HeavyJobs, approvesWithoutAsking, heavyCpuOptions } from './heavyCpu';
 import { tokenizeCommand } from '../shared/commandLine';
 import { heavyActivity, heavyFleetField, type HeavyLockView } from '../shared/activityView';
@@ -1259,6 +1259,8 @@ const heavyLock = new HeavyJobLock({
   roots: () => ptyManager.list().flatMap((s) => { const a = ptyToAgent.get(s.id); return a && s.pid > 0 ? [{ agentId: a, pid: s.pid }] : []; }),
   probe: probeProcesses,
   log: (row) => { try { hive.appendLog(row); } catch { /* best effort */ } },
+  // HEAVY-LOCK-OPAQUE-SCRIPT-196: is a test process the call's own node (its parent the call's shell)?
+  parentImage: processImage,
   // HEAVY-LOCK-SELF-WAIT: a queued agent is told when a slot is RESERVED for it, so it never polls.
   alive: (agentId) => [...ptyToAgent.values()].includes(agentId),
   notify: (agentId, kind, until) => notifyHeavySlotFree(agentId, kind, until),
@@ -1774,6 +1776,7 @@ function ledgerMemoryClaim(agentId: string): LedgerDeps['memoryClaim'] {
   };
 }
 /** READS-181 A: the `ledger` command's script, shipped like memory-cli.cjs (extraResources). */
+const HEAVY_PRELOAD = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'heavy-preload.cjs');
 const LEDGER_CLI = join(app.isPackaged ? process.resourcesPath : join(app.getAppPath(), 'resources'), 'ledger-cli.cjs');
 // GOD-TERMINAL-CONTROL M1: god's `term` command (read the live screen, type, keys, send) on the same
 // broker and per-spawn token as `ledger`. The god check is made HERE, per request, against the
@@ -4618,6 +4621,7 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   let seedPrompt: string | undefined;
   // `pathPrepend` is main's alone (the memory command's dir); never taken from the renderer.
   opts.pathPrepend = undefined;
+  opts.nodeRequire = undefined;
   // MODEL-PINBACK: the model this spawn really runs. The renderer's `--model` is the request (the
   // picker); a pinned in-TUI switch replaces it while that request is unchanged (see
   // src/shared/modelPin.ts). Resolved BEFORE ensureAgent, so the registry records it and a Codex
@@ -4718,6 +4722,9 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
       }
       // HEAVY-CPU-OPTIONS-191: `guppy-heavyjob`, which a heavy call's rewritten command runs first.
       if (heavyJobExe()) opts.pathPrepend = [...(opts.pathPrepend ?? []), heavyJobDir()];
+      // HEAVY-LOCK-OPAQUE-SCRIPT-196: every node process of a hive agent loads the heavy preload; a
+      // test process in it asks the lock (a script the classifier cannot read still counts).
+      if (existsSync(HEAVY_PRELOAD)) opts.nodeRequire = [HEAVY_PRELOAD];
     } catch (e) {
       // POLICY: hive provisioning is best-effort IN GENERAL — an unexpected failure is
       // logged here and never blocks a spawn — EXCEPT the F1 fail-closed Codex
