@@ -38,7 +38,8 @@ test('MUTANT RUNNER KILL SAFE: hard-killed runner restores its source before the
       env: { ...process.env, MUTANT_RUNNER_PAUSE_AFTER_MUTATE_MS: '30000' },
       stdio: 'ignore'
     });
-    await waitFor(() => fs.existsSync(journal), 'runner never reached its journaled mutation');
+    // The journal is renamed into place before the source is written: wait for both (Jim aba53e).
+    await waitFor(() => fs.existsSync(journal) && fs.readFileSync(source, 'utf8') !== original, 'runner never reached its journaled mutation');
     assert.notEqual(fs.readFileSync(source, 'utf8'), original, 'runner must be paused after the source mutation');
     child.kill('SIGKILL');
     await new Promise((resolve) => child.once('close', resolve));
