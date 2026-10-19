@@ -271,26 +271,55 @@ function leading(ws: string[]): string[] {
 
 /**
  * HEAVY-LOCK-OPAQUE-SCRIPT-196 (Jim MUST A): the `node --test` runs a command IS, each as its file
- * arguments ([] = no files: node's own discovery, a suite), or null when the command is anything
- * else: no node --test at all, or any other node / npm / wrapper program beside them. A command that
- * only MENTIONS the files (`node gen-mut.cjs muts.json root test/a.cjs`) is null, so a test process
- * it spawns can never match it. `bash -c` / `powershell -Command` bodies are followed (Codex wraps
- * its calls).
+ * arguments ([] = no files: node's own discovery, a suite; ANY_TEST_FILE for an argument the shell
+ * expands, `test/$f.test.cjs` in a loop), or null when it has none, or when any other segment is a
+ * program that can itself start a shell-parented node --test (a script, node, npm, make, anything
+ * not known to be quiet). A command that only MENTIONS the files (`node gen-mut.cjs muts.json root
+ * test/a.cjs`) is null, so a test process it spawns can never match it; `npx tsc --noEmit && node
+ * --test a.cjs` and a per-file `for` loop are their test runs (Jim MUST 1). `bash -c` /
+ * `powershell -Command` bodies and `$(...)` substitutions are followed (Codex wraps its calls).
  */
-export function testInvocation(command: string, depth = 0): string[][] | null {
+export function testInvocation(command: string): string[][] | null {
+  const r = invocationOf(command, 0);
+  return r.launches || !r.runs.length ? null : r.runs;
+}
+export const ANY_TEST_FILE = '<any>';
+/** Programs that never start a node --test of their own (beside a call's own run, they leave it its run). */
+const QUIET_BINS = new Set(['cd', 'pushd', 'popd', 'export', 'unset', 'set', 'local', 'read', 'shift', 'exit', 'return', 'break', 'continue',
+  'echo', 'printf', 'date', 'sleep', 'true', 'false', 'test', '[', '[[', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'cat', 'wc', 'sed',
+  'awk', 'sort', 'uniq', 'tr', 'cut', 'tee', 'ls', 'pwd', 'git', 'tsc', 'which', 'type', 'mkdir', 'rm', 'cp', 'mv', 'touch', 'jq', 'diff',
+  'cmp', 'basename', 'dirname', 'realpath', 'stat', 'du', 'df', 'ps', 'tasklist', 'whoami', 'hostname', 'write-output', 'write-host',
+  'get-date', 'select-string', 'select-object', 'measure-object', 'out-null']);
+/** `npx <tool>` for a tool that runs no tests. */
+const QUIET_NPX = new Set(['tsc', 'eslint', 'prettier']);
+const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'while', 'until', 'if', '!', '{', '}', '(', ')', 'time', 'done', 'fi', 'esac']);
+function invocationOf(command: string, depth: number): { runs: string[][]; launches: boolean } {
   const runs: string[][] = [];
+  const deeper = (body: string): boolean => {
+    if (depth >= MAX_DEPTH) return true;
+    const inner = invocationOf(body, depth + 1);
+    runs.push(...inner.runs);
+    return inner.launches;
+  };
   for (const seg of segments(stripHeredocs(command))) {
-    const ws = leading(stripRedirects(words(seg.replace(/\s&$/, ''))));
-    if (!ws.length) continue;
+    // A `$(...)` substitution is a command of its own (`r=$(node --test "$f" | tail -1)`).
+    for (let i = 0, q = false; i < seg.length; i++) {
+      if (seg[i] === "'") q = !q;
+      else if (!q && seg[i] === '$' && seg[i + 1] === '(') { const e = substEnd(seg, i); if (deeper(seg.slice(i + 2, e - 1))) return { runs, launches: true }; i = e - 1; }
+    }
+    let ws = leading(stripRedirects(words(seg.replace(/\s&$/, ''))));
+    while (ws.length && SHELL_KEYWORDS.has(ws[0])) ws = leading(ws.slice(1));
+    // A loop header (`for f in a b`, `case $x in`) runs nothing itself.
+    if (!ws.length || ws[0] === 'for' || ws[0] === 'case') continue;
     const bin = ws[0].replace(/\\/g, '/').split('/').pop()!.toLowerCase().replace(/\.(exe|cmd)$/, '');
     if (WRAPPERS.has(bin)) {
       const k = ws.findIndex((a, i) => i > 0 && /^(-l?c|\/\/?c|-command)$/i.test(a));
-      const inner: string[][] | null = k > 0 && depth < MAX_DEPTH ? testInvocation(ws.slice(k + 1).join(' '), depth + 1) : null;
-      if (!inner) return null;
-      runs.push(...inner);
+      // `bash x.sh` runs a script the lock cannot read: it launches.
+      if (k <= 0 || deeper(ws.slice(k + 1).join(' '))) return { runs, launches: true };
       continue;
     }
-    if (bin !== 'node') { if (WRAPPED_BINS.has(bin)) return null; continue; }
+    if (QUIET_BINS.has(bin) || (bin === 'npx' && QUIET_NPX.has((ws[1] ?? '').toLowerCase()))) continue;
+    if (bin !== 'node') return { runs, launches: true };
     const files: string[] = [];
     let test = false;
     for (let i = 1; i < ws.length; i++) {
@@ -299,12 +328,12 @@ export function testInvocation(command: string, depth = 0): string[][] | null {
       if (w === '--test' && !files.length) { test = true; continue; }
       if (w.startsWith('-')) { if (NODE_VALUE_FLAGS.has(w)) i++; continue; }
       // `node --test` runs the files; anything after a non-flag is still a file argument.
-      files.push(w);
+      files.push(/[$`*?]/.test(w) ? ANY_TEST_FILE : w);
     }
-    if (!test) return null;
+    if (!test) return { runs, launches: true };
     runs.push(files);
   }
-  return runs.length ? runs : null;
+  return { runs, launches: false };
 }
 
 /** HEAVY-LOCK-SCRIPT-WRAPPER: what the classifier may read besides the command line. */
@@ -1252,6 +1281,8 @@ export const HEAVY_CALL_SLACK_MS = 3_000;
  * callDone) can no longer leave an open-ended window that claims the agent's later processes.
  */
 export const HEAVY_CALL_SPAWN_MS = 60_000;
+/** HEAVY-LOCK-OPAQUE-SCRIPT-196: the longest a loop call's run matches without its PostToolUse (the Bash tool caps a call at 10 min). */
+export const HEAVY_LOOP_CALL_MS = 15 * 60_000;
 
 /** One process of the listing. `createdMs` (epoch ms) is what the watcher judges by (Jim MF3). */
 export interface ProcRow { pid: number; parentPid: number; commandLine: string; createdMs?: number }
@@ -1786,7 +1817,10 @@ export class HeavyJobLock {
     for (const c of this.testCalls.get(agentId) ?? []) if (c.callId === callId && c.end === null) c.end = t;
   }
 
-  private callOpen(c: { start: number; end: number | null }, t: number): boolean {
+  private callOpen(c: { start: number; end: number | null; files?: string[] }, t: number): boolean {
+    // A loop's run (`node --test test/$f.test.cjs`) starts its processes all through the call, so it
+    // matches while the call is open (bounded, if its PostToolUse never comes).
+    if (c.files?.length === 1 && c.files[0] === ANY_TEST_FILE) return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;
     return t - c.start <= HEAVY_CALL_SPAWN_MS && (c.end === null || t - c.end <= HEAVY_CALL_SLACK_MS);
   }
 
@@ -1894,8 +1928,10 @@ export class HeavyJobLock {
     const files = Array.isArray(r.files) ? r.files.filter((f): f is string => typeof f === 'string').map(normFile) : [];
     if (!files.length) return false;
     const t = this.now();
-    const match = (): { used: boolean } | undefined => (this.testCalls.get(agentId) ?? []).find((c) => !c.used && this.callOpen(c, t)
-      && c.files.length === files.length && c.files.every((f, i) => f === files[i]));
+    // Jim MUST 1 (b): a loop's run matches any single-file process while its call is open, never consumed.
+    const loop = (c: { files: string[] }): boolean => c.files.length === 1 && c.files[0] === ANY_TEST_FILE && files.length === 1;
+    const match = (): { used: boolean; files: string[] } | undefined => (this.testCalls.get(agentId) ?? []).find((c) => this.callOpen(c, t)
+      && (loop(c) || (!c.used && c.files.length === files.length && c.files.every((f, i) => f === files[i]))));
     if (!match() || !this.d.parentImage || typeof r.ppid !== 'number') return false;
     let image: string | null;
     try { image = await this.d.parentImage(r.ppid); } catch { image = null; }
@@ -1903,7 +1939,7 @@ export class HeavyJobLock {
     if (!CALL_PARENT.test(name)) { this.log({ kind: 'heavy-lock', action: 'lease-not-own', agentId, parent: image }); return false; }
     const c = match();
     if (!c) return false;
-    c.used = true;
+    if (!loop(c)) c.used = true;
     return true;
   }
 

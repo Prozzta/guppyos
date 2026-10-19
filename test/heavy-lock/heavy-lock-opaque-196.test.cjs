@@ -68,16 +68,40 @@ const K = {};
 K.invocation = (M = HJ) => {
   const ti = M.testInvocation;
   assert.deepEqual(ti('node --test test/a.test.cjs'), [['test/a.test.cjs']]);
-  assert.deepEqual(ti('cd x && node --test --test-name-pattern "x y" a.cjs b.cjs 2>&1 | tail -5'), [['a.cjs', 'b.cjs']]);
+  assert.deepEqual(ti('cd x && node --test --test-name-pattern "x y" a.cjs b.cjs 2>&1 | tail -5'), [['a.cjs', 'b.cjs']], 'A QUIET PROGRAM BESIDE THE RUN (cd, tail) LEAVES IT ITS RUN');
   assert.deepEqual(ti('bash -lc "node --test a.cjs"'), [['a.cjs']], 'a wrapper body is read');
   assert.deepEqual(ti('node --test a.cjs; node --test b.cjs'), [['a.cjs'], ['b.cjs']]);
   assert.deepEqual(ti('node --test'), [[]], 'no files: node\'s own discovery');
+  // Jim MUST 1: a quiet program beside the run leaves the call its run (as PreToolUse judges it light).
+  assert.deepEqual(ti('npx tsc --noEmit && node --test test/a.test.cjs'), [['test/a.test.cjs']], 'A TSC CHAIN IS ITS TEST RUN');
+  assert.deepEqual(ti('if true; then node --test a.cjs; fi'), [['a.cjs']]);
+  assert.deepEqual(ti('for f in a b; do node --test test/$f.test.cjs 2>&1 | grep -E "^# (pass|fail)"; done'), [[HJ.ANY_TEST_FILE]], 'A PER-FILE LOOP IS ITS TEST RUN (any one file)');
+  assert.deepEqual(ti('for f in a b; do echo "$f $(node --test test/$f.test.cjs 2>&1 | tail -1)"; done'), [[HJ.ANY_TEST_FILE]], 'a run inside $(...) is read');
   for (const c of ['node gen-mut.cjs muts.json root test/a.test.cjs,test/b.test.cjs', 'node gen-mut.cjs m.json r test/a.test.cjs && node --test test/a.test.cjs',
+    'bash muts.sh && node --test a.cjs', 'python x.py; node --test a.cjs', 'r=$(node scratch.cjs); node --test a.cjs', 'npm run x && node --test a.cjs',
     'bash x.sh', 'node scratch.cjs', 'node x.cjs --test', 'npm test', 'echo hi']) {
     assert.equal(ti(c), null, `AN ARGUMENTS-WRAPPER IS NOT ITS TEST RUN: ${c}`);
   }
 };
-test('MUST A: a call IS a node --test run only when nothing else runs beside it (an arguments-wrapper is not)', () => K.invocation());
+test('MUST A: a call IS a node --test run only when nothing beside it can start one (an arguments-wrapper, a script, npm cannot; tsc, grep, a loop header can)', () => K.invocation());
+
+K.loopLight = async (M = HJ) => {
+  const x = rig(M);
+  x.l.acquire('b', H, 'npm test', 'hb', false);
+  x.images.set(50, 'bash.exe');
+  x.l.noteCall('a', 'c1', 'for f in one two; do node --test test/$f.test.cjs | tail -3; done');
+  assert.equal((await ask(x, 'a', 1201, { files: ['test/one.test.cjs'] })).state, 'light', "A PER-FILE LOOP'S RUNS ARE LIGHT (while another agent holds)");
+  x.tick(5 * 60_000);   // later in the same call: still open
+  assert.equal((await ask(x, 'a', 1202, { files: ['test/two.test.cjs'] })).state, 'light', 'EVERY RUN OF THE LOOP IS LIGHT, NOT ONLY THE FIRST');
+  assert.equal((await ask(x, 'a', 1203, { files: ['a.cjs', 'b.cjs'] })).state, 'wait', 'a loop run matches single-file processes only');
+  x.images.set(51, 'node.exe');
+  assert.equal((await ask(x, 'a', 1204, { files: ['test/one.test.cjs'], ppid: 51 })).state, 'wait', "a process under another program is not the loop's");
+  x.l.noteCallEnd('a', 'c1');
+  assert.equal((await ask(x, 'a', 1205, { files: ['test/one.test.cjs'] })).state, 'wait', 'A LOOP RUN MATCHES ONLY WHILE ITS CALL IS OPEN');
+  x.l.noteCall('a', 'c2', 'npx tsc --noEmit && node --test test/a.test.cjs');
+  assert.equal((await ask(x, 'a', 1206, { files: ['test/a.test.cjs'] })).state, 'light', "A TSC CHAIN'S RUN IS LIGHT");
+};
+test("Jim MUST 1: a per-file loop's runs are light while the call is open (single files, under its shell); a tsc chain's run is light", () => K.loopLight());
 
 K.visibleLight = async (M = HJ) => {
   const x = rig(M);
@@ -400,6 +424,15 @@ K.e2eFailOpen = async (t, M = HJ, preload = PRELOAD) => {
   assert.match(r.stderr, /\[guppy\] heavy lock unreachable, running unlocked/);
   const rows = fs.existsSync(path.join(root, 'log.jsonl')) ? fs.readFileSync(path.join(root, 'log.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
   assert.equal(rows.filter((x) => x.kind === 'heavy-lock' && x.action === 'lease-fail-open' && x.agentId === 'a').length, 1, 'A FAIL-OPEN IS ONE HIVE ROW');
+  // Jim SHOULD 1: an older app (no /heavy route) answers 404; the row says so.
+  const old = http.createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(404); res.end('{}'); }); });
+  await new Promise((res) => old.listen(0, '127.0.0.1', res));
+  t.after(() => old.close());
+  const root2 = fs.mkdtempSync(path.join(JAIL, 'root-'));
+  const r2 = await start([process.execPath, '--test', 'leaf.test.cjs'], { url: `http://127.0.0.1:${old.address().port}/ledger/a/${'0'.repeat(32)}`, preload, root: root2 }).done;
+  assert.equal(r2.code, 0, r2.stderr);
+  const row = JSON.parse(fs.readFileSync(path.join(root2, 'log.jsonl'), 'utf8').trim().split('\n')[0]);
+  assert.match(row.why, /^status 404: /, 'A VERSION SKEW READS AS ONE (the status is in the row)');
 };
 test('E2E SHOULD 1: a broker the preload cannot reach fails open, with one hive row', { timeout: 60_000 }, (t) => K.e2eFailOpen(t));
 
@@ -439,16 +472,31 @@ const PRE = 'resources/heavy-preload.cjs';
 
 const MUTANTS = [
   { name: 'an arguments-wrapper reads as its test run (other node segments ignored)', file: HJF, module: true,
-    edits: [["    if (!test) return null;\n    runs.push(files);", '    if (!test) continue;\n    runs.push(files);']],
+    edits: [["    if (!test) return { runs, launches: true };\n    runs.push(files);", '    if (!test) continue;\n    runs.push(files);']],
     killer: 'invocation', dies: /AN ARGUMENTS-WRAPPER IS NOT ITS TEST RUN/ },
   { name: 'an arguments-wrapper reads as its test run (the lock side: any call mentioning the files)', file: HJF, module: true,
     edits: [['    const runs = (testInvocation(command) ?? []).filter((files) => files.length);', "    const runs = (testInvocation(command) ?? [command.split(' ').slice(-1)[0].split(',')]).filter((files) => files.length);"]],
     killer: 'argsWrapper', dies: /AN ARGUMENTS-WRAPPER'S TEST RUN HOLDS THE SLOT/ },
+  { name: 'every program beside the run nulls it (a tsc chain waits)', file: HJF, module: true,
+    edits: [["    if (QUIET_BINS.has(bin) || (bin === 'npx' && QUIET_NPX.has((ws[1] ?? '').toLowerCase()))) continue;\n", '']],
+    killer: 'invocation', dies: /A QUIET PROGRAM BESIDE THE RUN|A TSC CHAIN IS ITS TEST RUN/ },
+  { name: "a script beside the run is quiet (its own children read as the call's run)", file: HJF, module: true,
+    edits: [["      if (k <= 0 || deeper(ws.slice(k + 1).join(' '))) return { runs, launches: true };", "      if (k > 0 && deeper(ws.slice(k + 1).join(' '))) return { runs, launches: true };"]],
+    killer: 'invocation', dies: /AN ARGUMENTS-WRAPPER IS NOT ITS TEST RUN: bash muts\.sh/ },
+  { name: 'the loop match is dropped', file: HJF, module: true,
+    edits: [['    const loop = (c: { files: string[] }): boolean => c.files.length === 1 && c.files[0] === ANY_TEST_FILE && files.length === 1;', '    const loop = (c: { files: string[] }): boolean => false;']],
+    killer: 'loopLight', dies: /A PER-FILE LOOP'S RUNS ARE LIGHT/ },
+  { name: 'a loop run is consumed by its first process', file: HJF, module: true,
+    edits: [['    if (!loop(c)) c.used = true;', '    c.used = true;'], ['      && (loop(c) || (!c.used', '      && ((loop(c) && !c.used) || (!c.used']],
+    killer: 'loopLight', dies: /EVERY RUN OF THE LOOP IS LIGHT/ },
+  { name: 'a loop run outlives its call', file: HJF, module: true,
+    edits: [['return c.end === null && t - c.start <= HEAVY_LOOP_CALL_MS;', 'return t - c.start <= HEAVY_LOOP_CALL_MS;']],
+    killer: 'loopLight', dies: /A LOOP RUN MATCHES ONLY WHILE ITS CALL IS OPEN/ },
   { name: 'the parent is not checked', file: HJF, module: true,
     edits: [['    if (!CALL_PARENT.test(name)) {', '    if (false) {']],
     killer: 'visibleLight', dies: /A TEST PROCESS UNDER ANOTHER PROGRAM IS NOT THE CALL'S OWN/ },
   { name: 'a call is never consumed', file: HJF, module: true,
-    edits: [['    c.used = true;\n    return true;', '    return true;']],
+    edits: [['    if (!loop(c)) c.used = true;\n    return true;', '    return true;']],
     killer: 'visibleLight', dies: /A CALL IS CONSUMED BY ONE TEST PROCESS/ },
   { name: 'nothing is visible (every single file waits)', file: HJF, module: true,
     edits: [["    if (!suite && await this.visible(agentId, r)) {", '    if (false) {']],
@@ -505,6 +553,9 @@ const MUTANTS = [
   { name: 'preload: the lease is not released at exit', file: PRE, preload: true,
     edits: [["      process.on('exit', () => { ask({ op: 'release', leaseId }, 5_000); });\n", '']],
     killer: 'e2eOpaque', dies: /THE LEASE IS RELEASED AT EXIT/ },
+  { name: 'preload: a fail-open row does not name the status', file: PRE, preload: true,
+    edits: [['  failOpen(a && a.status ? `status ${a.status}: ${why}` : why);', '  failOpen(why);']],
+    killer: 'e2eFailOpen', dies: /A VERSION SKEW READS AS ONE/ },
   { name: 'preload: a fail-open writes no row', file: PRE, preload: true,
     edits: [["    if (root) require('node:fs').appendFileSync(", "    if (false) require('node:fs').appendFileSync("]],
     killer: 'e2eFailOpen', dies: /A FAIL-OPEN IS ONE HIVE ROW/ }

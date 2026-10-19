@@ -94,6 +94,8 @@ for (;;) {
     told = true;
     continue;
   }
-  failOpen(a && a.line ? a.line : `unexpected answer ${JSON.stringify(a).slice(0, 120)}`);
+  // Jim SHOULD 1: the status names a version skew (an older app has no /heavy route: 404).
+  const why = a && a.line ? a.line : `unexpected answer ${JSON.stringify(a).slice(0, 120)}`;
+  failOpen(a && a.status ? `status ${a.status}: ${why}` : why);
   break;
 }
