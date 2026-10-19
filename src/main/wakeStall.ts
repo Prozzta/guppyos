@@ -80,3 +80,79 @@ export class WakeStallWatch {
     return [...this.watching].filter(([, w]) => w.announced).map(([agentId, w]) => ({ agentId, why: w.why, since: w.since, inboxIds: w.inboxIds }));
   }
 }
+
+/**
+ * SCREEN-GUARD-ALERT-FLOOR-193: the FLOOR-WIDE stall. In 1.1.91 every Claude agent's wakes were
+ * refused for 90 min and god was never told: the refusal reason kept changing (screen gate,
+ * cooldown, lifecycle, in-flight), so no per-agent run above ever held one reason for 5 min,
+ * and then the refusals stopped being made at all. This watch asks nothing about reasons: mail
+ * waits for FLOOR_STALL_MIN_AGENTS agents, none of whom moved for FLOOR_STALL_AFTER_MS, whatever
+ * path refused it (screen gate, term, owner). Each agent's own progress counts, not the floor's:
+ * one healthy agent committing must not hide two stuck ones (Jim SHOULD).
+ */
+export const FLOOR_STALL_AFTER_MS = 20 * 60_000;
+export const FLOOR_STALL_MIN_AGENTS = 2;
+
+/** One agent's mail at a sample: its pending ids, and whether a human state holds them NOW
+ *  (live state only: a past refusal's reason must not hide an agent for good, Jim MUST 1). */
+export interface FloorPending { agentId: string; ids: readonly string[]; deliberate: boolean }
+
+export interface FloorWakeStall {
+  /** When this stall was first seen; fixed while it lasts, so it is one decision. */
+  since: number;
+  agents: Array<{ agentId: string; pending: number; since: number }>;
+  /** The stuck agents' refusals since each began waiting, and the most frequent reason. */
+  refusals: number;
+  top: { why: string; count: number } | null;
+}
+
+export class FloorWakeStallWatch {
+  private readonly waiting = new Map<string, { since: number; ids: Set<string> }>();
+  private readonly reasons = new Map<string, Map<string, number>>();
+  private seenSince: number | null = null;
+
+  private moved(agentId: string): void { this.waiting.delete(agentId); this.reasons.delete(agentId); }
+
+  /** A wake committed for this agent (any path: event submit, Stop-continue): it moves. */
+  commit(agentId: string): void {
+    this.moved(agentId);
+  }
+
+  /** Any refusal (a no-claim or a refused settle): counted for the decision's text only. */
+  refusal(agentId: string, why: string): void {
+    if (!agentId || DELIBERATE.has(why)) return;
+    const m = this.reasons.get(agentId) ?? new Map<string, number>();
+    m.set(why, (m.get(why) ?? 0) + 1);
+    this.reasons.set(agentId, m);
+  }
+
+  /** Fold one sample of every live agent's pending mail in. A pending id that is gone since the
+   *  last sample was delivered (a hook surfaced it, the agent read it): that agent moved. */
+  sample(rows: readonly FloorPending[], now: number): void {
+    const seen = new Set<string>();
+    for (const r of rows) {
+      if (r.ids.length === 0 || r.deliberate) { this.moved(r.agentId); continue; }
+      seen.add(r.agentId);
+      const ids = new Set(r.ids);
+      const before = this.waiting.get(r.agentId);
+      const drained = before ? [...before.ids].some((id) => !ids.has(id)) : false;
+      if (drained) this.reasons.delete(r.agentId);
+      this.waiting.set(r.agentId, { since: before && !drained ? before.since : now, ids });
+    }
+    for (const id of [...this.waiting.keys()]) if (!seen.has(id)) this.moved(id);
+  }
+
+  /** The stall, while it lasts (called once per digest run). */
+  stall(now: number): FloorWakeStall | null {
+    const agents = [...this.waiting].filter(([, w]) => now - w.since >= FLOOR_STALL_AFTER_MS)
+      .map(([agentId, w]) => ({ agentId, pending: w.ids.size, since: w.since }));
+    if (agents.length < FLOOR_STALL_MIN_AGENTS) { this.seenSince = null; return null; }
+    this.seenSince ??= now;
+    const all = new Map<string, number>();
+    for (const a of agents) for (const [why, n] of this.reasons.get(a.agentId) ?? []) all.set(why, (all.get(why) ?? 0) + n);
+    let top: { why: string; count: number } | null = null;
+    let refusals = 0;
+    for (const [why, count] of all) { refusals += count; if (!top || count > top.count) top = { why, count }; }
+    return { since: this.seenSince, agents, refusals, top };
+  }
+}
