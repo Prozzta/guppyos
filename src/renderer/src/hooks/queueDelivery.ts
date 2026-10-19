@@ -74,6 +74,13 @@ export function canDeliverToAgent(
   return ptyQuietMs !== null && ptyQuietMs >= quiesceMs;
 }
 
+/** GTC M3 (d): an unblocked Stop that does NOT end the turn: AGY's mid-chain Stop carries
+ *  `fully_idle: false` (main's watchdog ignores it too). Read as idle, the tab and
+ *  `canDeliverToAgent` let the queue type into a running tool chain. */
+export function stopKeepsTurnOpen(e: { event: string; fullyIdle?: boolean }): boolean {
+  return e.event === 'Stop' && e.fullyIdle === false;
+}
+
 /** The subset of a QueuedMessage this module needs. Kept structural so the
  *  gate is testable without dragging the store (and zustand) into the test. */
 export interface DeliveryGateMessage {

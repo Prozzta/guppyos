@@ -21,7 +21,7 @@ import { bridgeOf, providerPreset } from '../../../shared/agentProvider';
 import { isDurableRole, preferredAgentRole, roleForHiveSpawn } from '../../../shared/agentRole';
 import { acquireTerminal, resetTerminal, isTerminalAutomationSafe } from '@/components/terminalPool';
 import { toolEnded, toolStarted } from '@shared/activityView';
-import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery } from './queueDelivery';
+import { canDeliverToAgent, deliverWithAcknowledgement, checkPrecondition, pickQueuedForDelivery, stopKeepsTurnOpen } from './queueDelivery';
 import type { AutoSubmitOutcome } from '../../../preload';
 import { OFFICE_CAST, DEFAULT_CHARACTER } from '@/scene/office/cast';
 import { themeBuilder } from '@/scene/themes/themeCatalog';
@@ -484,6 +484,10 @@ export function useHive(config: HarnessConfig | null): void {
         // inbox — it's NOT idle, so keep it working until it genuinely stops.
         if (e.blocked) {
           if (!breakerArmed) updateAgent(e.agentId, { status: 'working', action: 'reading inbox', carrying: undefined });
+        } else if (stopKeepsTurnOpen(e)) {
+          // GTC M3 (d): AGY's mid-chain Stop (fully_idle:false). Main's watchdog stays active on it;
+          // so does the tab, and with it canDeliverToAgent, so the queue never fires into the chain.
+          if (!breakerArmed) updateAgent(e.agentId, { status: 'working' });
         } else {
           // A genuine stop clears any breaker override — the run is over.
           breakerLevel.current[e.agentId] = 'healthy';

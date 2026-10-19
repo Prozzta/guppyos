@@ -2523,6 +2523,9 @@ export class HookServer {
       notificationType: p.notification_type,
       source: p.source,
       message: p.message,
+      // GTC M3 (d): an AGY Stop mid-chain says fully_idle:false; without it the renderer read
+      // every Stop as idle while main's watchdog (hooks.ts handle) correctly stayed active.
+      fullyIdle: typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
       blocked
     });
   }
