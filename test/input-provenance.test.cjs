@@ -232,7 +232,8 @@ test('SOURCE CENSUS: the PROGRAMMATIC literal appears ONLY in the two allowed ow
   // programmatically at all, so the literal has exactly ONE producer in the whole tree -
   // the submit owner's wiring. index.ts names it once, and that one is the REFUSAL: the
   // `pty:write` handler turning away a renderer that declares it.
-  const owners = { 'src/main/automaticSubmitWiring.ts': 2, 'src/main/index.ts': 1 };
+  // GTC M4: index.ts's second is the wake sender's writer binding (the term-path wake, origin PROGRAMMATIC).
+  const owners = { 'src/main/automaticSubmitWiring.ts': 2, 'src/main/index.ts': 2 };
   assert.equal((src('src/renderer/src/hooks/useHive.ts').match(/'PROGRAMMATIC'/g) || []).length, 0,
     'the renderer no longer declares PROGRAMMATIC anywhere');
   assert.match(src('src/main/index.ts'),

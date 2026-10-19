@@ -781,7 +781,11 @@ export type InterferenceReason =
   /** GOD-STARTUP-WAITS-ENTER G2: a boot prompt's Enter (and at most one more of our own) brought
    *  no UserPromptSubmit from the provider: the prompt sits typed but unsent. Held for a person,
    *  visibly; never a third Enter, and none at all after a person's key. */
-  | 'BOOT_NOT_SUBMITTED';
+  | 'BOOT_NOT_SUBMITTED'
+  /** GTC M4 (15.6): the term-path wake typed its text and a person's key landed in the gap, or the
+   *  text was not in the composer before the Enter. No Enter was sent, no grant is in suspense
+   *  (it was returned), and nothing of the hold is erased or re-Entered by a recheck. */
+  | 'WAKE_TYPED_NOT_SENT';
 
 export type SubmitOutcome =
   /** The Enter went out. The one outcome a caller may acknowledge a queue item on. */
@@ -1280,6 +1284,30 @@ export class AutomaticSubmitOwner {
     return true;
   }
 
+  /** GTC M4 (15.6): the term-path WakeSender typed text it did not send. The PTY is held exactly as
+   *  an owner INTERFERED (the same notice, recheck and resolve path), with no grant in suspense:
+   *  the sender returned it. The id is not in `known`, so SEND_AGAIN frees nothing of the owner's;
+   *  the binding is the request's own, so ALREADY_HANDLED answers HUMAN_HANDLED to that request. */
+  holdTyped(ptyId: string, req: SubmitRequest, reason: 'WAKE_TYPED_NOT_SENT' | 'BOOT_NOT_SUBMITTED', detail: string): void {
+    if (this.inhibition(ptyId)) return;   // an earlier hold stands
+    const now = this.deps.now();
+    this.inhibited.set(ptyId, {
+      requestId: req.requestId, reason, at: now, incarnation: this.deps.incarnation(ptyId),
+      agentId: req.agentId, admissionClass: req.admissionClass,
+      binding: { agentId: req.agentId, admissionClass: req.admissionClass, payload: payloadIdentity(req.text) },
+      decision: null, text: req.text, humanStage: this.deps.humanGeneration(ptyId) ?? 0, godStage: this.deps.godGeneration?.(ptyId)
+    });
+    try {
+      this.deps.onInterfered?.({
+        requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass,
+        reason, detail, screen: null, screenAgeMs: null, needle: null
+      });
+    } catch { /* diagnostics never decide */ }
+    try {
+      this.deps.onOutcome?.({ requestId: req.requestId, agentId: req.agentId, ptyId, admissionClass: req.admissionClass, outcome: { kind: 'INTERFERED', reason, detail }, at: now });
+    } catch { /* diagnostics never decide */ }
+  }
+
   private sweep(): void {
     const now = this.deps.now();
     for (const [id, k] of this.known) {
@@ -1761,6 +1789,8 @@ export class AutomaticSubmitOwner {
     if (!held || held.requestId !== requestId) return { kind: 'NONE' };
     const stay = (why: string, screen: GuardScreenFacts | null = null): HeldRecheck => ({ kind: 'HELD', why, screen });
     if (held.admissionClass !== 'CAPACITY_GATED') return stay('not-automatic');
+    // GTC M4: a term-path wake's typed text is a person's to rule (Jim Q4): never erased or re-Entered.
+    if (held.reason === 'WAKE_TYPED_NOT_SENT') return stay('typed-not-sent');
     // WAKE-STALL-INTERFERED-192 C: the held text is our own unsent draft: the app recovers it.
     const own = await this.enterHeldOwnDraft(ptyId, requestId, held);
     if (own) return own;

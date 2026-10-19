@@ -225,6 +225,40 @@ export class InboxWakeBridge {
   }
 
   /**
+   * GTC M4 (design 15.5, 15.10): the Stop-continue's claim, taken synchronously inside the Stop hook
+   * before that Stop reaches the coordinator (HookServer then reports the blocked Stop as not
+   * terminal). The same reconcile and quiet holds as a wake; every event-mode refusal but the
+   * lifecycle one (WorkerWakeWatchdog.claimAtStop). Null = no block.
+   */
+  claimAtStop(agentId: string): WakeClaim | null {
+    const { coordinator } = this.deps;
+    const ids = this.deps.inboxIds(agentId);
+    coordinator.reconcile(agentId, ids, this.openIds(agentId));
+    const f = this.deps.facts(agentId);
+    if (!f) return null;
+    const now = this.deps.now();
+    this.holdQuiet(agentId, now);
+    const claim = coordinator.claimAtStop({ agentId, ...f }, now);
+    if (!claim) {
+      if (ids.length) this.deps.diag?.('no-claim', { agentId, cause: 'hook', mode: 'stop', why: coordinator.whyNoClaim(agentId), inboxIds: ids.length });
+      return null;
+    }
+    this.deps.diag?.('claim', { agentId, cause: 'hook', mode: 'stop', ids: claim.ids.length, requestId: claim.requestId });
+    return claim;
+  }
+
+  /** The Stop-continue's outcome: blocked = COMMITTED, a provisional epoch the continued turn
+   *  confirms (STOP_CONFIRM_MS); not blocked = REFUSED, the ids go back to pending and this Stop's
+   *  own retry edge types the wake. */
+  settleAtStop(claim: WakeClaim, blocked: boolean): void {
+    const kind = blocked ? 'COMMITTED' : 'REFUSED';
+    this.deps.diag?.('settle', { agentId: claim.agentId, cause: 'hook', mode: 'stop', outcome: kind, requestId: claim.requestId });
+    this.deps.coordinator.settle(claim, kind, this.deps.now(), blocked, blocked);
+    if (blocked) this.noteMailCommit(claim.agentId, claim);
+    this.deps.log?.(`[inbox-wake] ${blocked ? 'stop-continue' : 'release'} ${claim.agentId} cause=hook outcome=${kind}`);
+  }
+
+  /**
    * READS-QUIET-NOREPLY (1.1.81): before every claim, the pending ids that are quiet mail still
    * inside their hold leave pending (WorkerWakeWatchdog.hold), so they cannot start a turn on their
    * own; the claim releases them when the oldest hold ends or when other mail wakes the agent.

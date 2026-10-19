@@ -42,6 +42,7 @@ import {
   type MailBlock, type MailBlockItem, type MailChannelMode, type MailEvidenceKind
 } from './mailSurface';
 import { ALWAYS_WAKE_SENDERS } from '../shared/mailWakeClass';
+import { CODEX_STOP_MAIL_BUDGET, type StopClaim } from './wakeSender';
 
 /**
  * ZT-I1-MAIL slice 3: what the mail epochs need from the wake coordinator (main wires it; tests
@@ -59,6 +60,13 @@ export interface MailCoordination {
   onEpochClosed?(agentId: string, outcome: 'normal' | 'abnormal', reason: string, redelivered: readonly string[]): void;
   /** §11.10: a mail block was returned to this agent (degradation input). */
   onMailBlock?(agentId: string): void;
+}
+
+/** GTC M4 (15.5, 15.10): the Stop-continue wake. `stopClaim` takes the coordinator's claim inside
+ *  the agent's own Stop; HookServer builds the reason (the <hive-mail> block) and reports back. */
+export interface StopContinue {
+  stopClaim(agentId: string): StopClaim | null;
+  stopSettle(agentId: string, requestId: string, blocked: boolean, reasonChars: number): void;
 }
 
 /**
@@ -595,9 +603,45 @@ export class HookServer {
   /** GTC M3: the message box confirms a send from the agent's own next hooks (UserPromptSubmit's
    *  `prompt`, AGY's PreInvocation) and learns READY from SessionStart's `source`. Main-session
    *  hooks only; an observer that throws never breaks a hook. */
-  private turnObserver: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string }) => void) | null = null;
-  setTurnObserver(fn: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string }) => void) | null): void {
+  private turnObserver: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string; stopHookActive?: boolean }) => void) | null = null;
+  setTurnObserver(fn: ((agentId: string | undefined, event: string, f: { prompt?: string; source?: string; stopHookActive?: boolean }) => void) | null): void {
     this.turnObserver = fn;
+  }
+
+  /** GTC M4: the Stop-continue wake (null = every Stop reply stays non-blocking). */
+  private stopContinue: StopContinue | null = null;
+  setStopContinue(s: StopContinue | null): void {
+    this.stopContinue = s;
+  }
+  /** Guard 4 (15.10 INFO 1): the turn epoch a Stop-continue already blocked. One block per turn:
+   *  a real Stop closes the turn, and the next turn's snapshot carries a new epoch. */
+  private readonly stopBlocked = new Map<string, string>();
+
+  /** The agent's own Stop, continued with its waiting mail as the reason: the `<hive-mail>` block
+   *  the UserPromptSubmit path builds, claimed as surfacing in THIS epoch with hookKind 'Stop'
+   *  (Jim MUST 2). Null = the Stop stays non-blocking. */
+  private stopContinueReason(agentId: string, p: HookPayload): string | null {
+    const sc = this.stopContinue;
+    if (!sc || p.stop_hook_active || p.fully_idle === false || p.transport === 'pipe-oneway') return null;
+    const t = this.turns.get(agentId);
+    const turnId = typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : null;
+    if (!t?.open || (turnId && t.epoch !== turnId) || this.stopBlocked.get(agentId) === t.epoch) return null;
+    if (this.control?.shouldHalt(agentId)) return null;
+    const channel = this.mailChannel(agentId);
+    if (channel.mode !== 'inject') return null;
+    const claim = sc.stopClaim(agentId);
+    if (!claim) return null;
+    const before = this.mailClaims.length;
+    let reason: string | null = null;
+    try {
+      reason = this.surfaceMail(agentId, 'Stop', p, channel.provider, [], channel.provider === 'codex' ? CODEX_STOP_MAIL_BUDGET : undefined);
+    } catch { reason = null; }
+    // Headers alone claim nothing: the turn would go on with no mail to read.
+    const blocked = !!reason && this.mailClaims.length > before;
+    try { sc.stopSettle(agentId, claim.requestId, blocked, blocked ? reason!.length : 0); } catch { /* never breaks a hook */ }
+    if (!blocked) return null;
+    this.stopBlocked.set(agentId, t.epoch);
+    return reason;
   }
 
   /** GOD-TERMINAL-CONTROL: a term body is UTF-8 JSON, like a ledger body. */
@@ -1612,7 +1656,7 @@ export class HookServer {
    * The `<hive-mail>` block for this hook, inside the joined budget (§11.2), and the claim of its
    * ids as `surfacing` in the current epoch. Null when nothing is pending or nothing fits.
    */
-  private surfaceMail(agentId: string, event: string, p: HookPayload, provider: AgentProvider | undefined, others: Array<string | null>): string | null {
+  private surfaceMail(agentId: string, event: string, p: HookPayload, provider: AgentProvider | undefined, others: Array<string | null>, budgetCap?: number): string | null {
     const mail = this.hive.mail;
     if (!mail) return null;
     const t = this.turns.get(agentId);
@@ -1622,7 +1666,8 @@ export class HookServer {
     const { items, more } = this.mailItems(agentId, t);
     if (!items.length && !more.length) return null;
     const blockedBefore = this.mailBlocked.get(agentId);
-    const block = buildMailBlock({ items, more, budget: mailBudgetFor(others), phase, reminders: this.mailReminders(agentId), skippable: blockedBefore });
+    const budget = budgetCap === undefined ? mailBudgetFor(others) : Math.min(mailBudgetFor(others), budgetCap);
+    const block = buildMailBlock({ items, more, budget, phase, reminders: this.mailReminders(agentId), skippable: blockedBefore });
     // Q11: what held the block back at THIS hook may be passed over at the next one.
     const nextBlocked = new Set([...(blockedBefore ?? [])].filter((id) => !block.surfacing.includes(id)));
     for (const id of block.blocked) nextBlocked.add(id);
@@ -2040,27 +2085,39 @@ export class HookServer {
     // a finished turn), and a subagent's Stop is not this agent's Stop.
     const fromSubagent = typeof p.provider_agent_id === 'string' && p.provider_agent_id !== '' && p.provider_agent_id !== agentId;
     if (agentId && typeof p.env_agent_id === 'string' && p.env_agent_id) this.noteIdentityMismatch(agentId, p.env_agent_id, event, p.session_id);
+    // A new response starts with no claims (a direct handle() call that nobody settled leaves none).
+    this.mailClaims = [];
+    // GTC M4: a Stop continued with mail is not a turn end. Its epoch stays open (the surfaced ids
+    // are acted at the continued turn's own Stop) and the coordinator sees it as mid-chain.
+    let stopReason: string | null = null;
+    if (agentId && !fromSubagent && event === 'Stop') {
+      try { stopReason = this.stopContinueReason(agentId, p); } catch { stopReason = null; }
+    }
     // MIDTURN-MAIL-BLIND L1: turn boundaries, before any early return below.
-    if (agentId && !fromSubagent) this.trackTurn(agentId, event, p);
+    if (agentId && !fromSubagent && stopReason === null) this.trackTurn(agentId, event, p);
     if (agentId && !fromSubagent) this.noteRunningTool(agentId, event, p);
     // MODEL-NOT-KEPT-191 F2: AGY's PreInvocation runs before every model call, so a plan-limit
     // fallback always comes after one. A key before it was a prompt, not a model pick.
     if (agentId && !fromSubagent && event === 'PreInvocation') {
       try { this.hive.noteTurnStart?.(agentId); } catch { /* never breaks a hook */ }
     }
-    // A new response starts with no claims (a direct handle() call that nobody settled leaves none).
-    this.mailClaims = [];
     if (!fromSubagent) {
       // §11.9: `source` (SessionStart startup|resume|clear|compact) reaches the hook diag row.
-      this.onEvent?.(agentId, event, p.message, typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
+      this.onEvent?.(agentId, event, p.message, stopReason !== null ? false : typeof p.fully_idle === 'boolean' ? p.fully_idle : undefined,
         typeof p.turn_id === 'string' && p.turn_id ? p.turn_id : undefined,
         typeof p.source === 'string' && p.source ? p.source.slice(0, 40) : undefined);
       try {
         this.turnObserver?.(agentId, event, {
           prompt: typeof p.prompt === 'string' ? p.prompt : undefined,
-          source: typeof p.source === 'string' ? p.source : undefined
+          source: typeof p.source === 'string' ? p.source : undefined,
+          stopHookActive: p.stop_hook_active === true
         });
       } catch { /* never breaks a hook */ }
+    }
+    if (stopReason !== null && agentId) {
+      try { this.coordination?.onMailBlock?.(agentId); } catch { /* never breaks a hook */ }
+      // The continued turn is not a completed one: no claims lease, no compact-health Stop.
+      return { decision: 'block', reason: stopReason };
     }
     // WAKE-SCREEN-GUARD R2-4: the agent's OWN SessionStart hands on its spawn's incarnation token
     // (copied by the hook shim). Diagnostics-grade: it can only add a latch main verifies.
@@ -2241,9 +2298,9 @@ export class HookServer {
     if ((event === 'Stop' || event === 'SubagentStop') && agentId) {
       // Respect any upstream Stop hook that already re-entered this boundary.
       if (p.stop_hook_active) { this.emit(agentId, event, p); return {}; }
-      // Never turn unread hive mail into a forced continuation at Stop. That old
-      // path bypassed terminal-draft/HITL safety and could spend credits while a
-      // user was answering a question. Inbox files remain durable; main's inbox-wake
+      // Unread hive mail turns into a continuation at Stop ONLY through the GTC M4 Stop-continue
+      // wake above (off by default; it runs the draft/picker/human-quiet/capacity gates and the
+      // coordinator's claim first). Otherwise inbox files remain durable; main's inbox-wake
       // bridge treats this Stop as a retry EDGE and wakes the agent after this response,
       // through the one guarded submit owner. This return stays non-blocking.
       this.notify(agentId ?? 'Agent', 'finished — idle');

@@ -80,7 +80,7 @@ import { normalizeWeekly, weeklyDelayMs } from '../shared/weeklySchedule';
 import { isInputOrigin } from '../shared/inputOrigin';
 import { automaticDeliveryEligibility, isTerminalInputState } from '../shared/inputProvenance';
 import { isTerminalPromptState } from '../shared/promptState';
-import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, capacityGateOf, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
+import { AutomaticSubmitOwner, ADMISSION_CLASSES, INTERFERENCE_RESOLUTIONS, UNKNOWN_POLICY, capacityGateOf, resolveAdmission, type AdmissionClass, type CapacityGate, type InterferenceResolution } from './automaticSubmit';
 import { buildOwnerDeps, ScreenReadingBroker } from './automaticSubmitWiring';
 import { ScreenGuardNotices, StartupProbe, WakeIncarnationTokens, WAKE_INCARNATION_ENV } from './codexScreenGuard';
 import type { ScreenGuardRecord, ScreenReading } from './automaticSubmit';
@@ -104,6 +104,9 @@ import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxM
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
 import { MessageBox, messageBoxPathOf } from './messageBox';
+import { WakeSender, wakePathOf } from './wakeSender';
+import type { GateReading } from './termShadow';
+import type { AdmissionDecision } from './capacityAdmission';
 import { createTerminalMirror, mirrorParseMs } from './terminalMirror';
 import { MirrorCostGuard, calibrationSample, mirrorOffNotice, mirrorOffWords } from './mirrorCost';
 import { ShadowDiff } from './termShadow';
@@ -167,7 +170,7 @@ import { validateBaseUrl, buildAuthHeaders, resolveUpstreamUrl, secretRefFor, IN
 import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
-import { WorkerWakeWatchdog } from './workerWake';
+import { WorkerWakeWatchdog, type WakeClaim } from './workerWake';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
@@ -543,6 +546,8 @@ const quietRefusals = new QuietRefusalWatch((row) => { try { hive.appendLog(row)
 let mirrorGuard: MirrorCostGuard | null = null;
 /** GTC M3: the Human's message box (built with termControl below). Declared before the digest. */
 let messageBox: MessageBox | null = null;
+/** GTC M4: the wake sender (built with the message box below); null only during module start-up. */
+let wakeSender: WakeSender | null = null;
 /** ZT-I4: the floor digest (hive/floor-digest.md) and the decision-only wake of god. */
 const floorDigest = new FloorDigest({
   root: () => hive.root(),
@@ -1120,7 +1125,8 @@ inboxWake = new InboxWakeBridge({
   // L0-FUSION stage 5: a wake starts a provider turn nobody asked for in this moment, so
   // it is CAPACITY_GATED work through the one submit owner - admission, the READY gate,
   // the prompt and human-draft guards, the final revalidation next to the Enter.
-  submit: (req) => automaticSubmit.submit(req),
+  // GTC M4: through the wake sender, which is the owner byte for byte on config wakePath 'owner'.
+  submit: (req) => (wakeSender ? wakeSender.submit(req) as Promise<{ kind: string }> : automaticSubmit.submit(req)),
   // ZT-I1-MAIL §5 P4 / §11.7: the nudge follows the agent's mail mode (inject: "delivered in
   // context"; legacy-read: read, no move; no Stop signal: the 1.1.74 read-and-move text).
   text: (ids, agentId) => inboxWakeTextForProvider(agentId ? hive.registry().agents[agentId]?.provider : undefined, [...ids], agentId ? wakeMailMode(agentId) : 'inject'),
@@ -1819,7 +1825,63 @@ messageBox = new MessageBox({
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   setTimer: (fn, ms) => setTimeout(fn, ms)
 }, () => messageBoxPathOf(readConfig().messageBoxPath));
-hookServer.setTurnObserver((agentId, event, f) => messageBox?.noteHook(agentId, event, f));
+// GTC M4: agent wakes (inbox and boot) on hook readiness, a typed send and the provider's own
+// DELIVERED event; Stop-continue mid-turn. Writes carry origin PROGRAMMATIC. Config `wakePath`
+// ('owner' default) and `stopContinue` per provider. The screen gate only shadows (read only).
+wakeSender = new WakeSender({
+  ptyOf: (agentId) => ptyForAgent(agentId),
+  providerOf: (agentId) => {
+    const a = hive.registry().agents[agentId];
+    return a ? (a.provider ?? 'claude') : null;
+  },
+  idleFacts: (agentId) => workerWake.livenessFacts(agentId),
+  spawnedAt: (ptyId) => ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0,
+  promptBlock: (ptyId) => { const s = ptyManager.promptState(ptyId); return s ? s.block : undefined; },
+  lastHumanInputAt: (ptyId) => ptyManager.lastHumanInputAt(ptyId),
+  humanGeneration: (ptyId) => ptyManager.humanInputGeneration(ptyId),
+  inhibited: (ptyId) => automaticSubmit.inhibition(ptyId) !== null,
+  mirrorNeedle: async (ptyId, needle, expectedTail) => {
+    const r = await ptyManager.mirrorGateReading(ptyId, 'needle', needle, expectedTail);
+    return { reading: r.reading as { onPromptRow: boolean; promptTailMatches?: boolean } | null, reason: r.reason };
+  },
+  exclusive: (ptyId, fn, startMs) => automaticSubmit.exclusive(ptyId, fn, startMs),
+  slot: (agentId, fn) => termControl.slot(agentId, fn),
+  settle: (ptyId) => termControl.settle(ptyId),
+  write: (ptyId, data) => ptyManager.write(ptyId, data, 'PROGRAMMATIC'),
+  ownerSubmit: (r) => automaticSubmit.submit({
+    requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass as AdmissionClass, text: r.text,
+    ...(r.priorText !== undefined ? { priorText: r.priorText } : {}), ...(r.settleMs !== undefined ? { settleMs: r.settleMs } : {})
+  }),
+  admit: (agentId) => {
+    const decision = providerCapacity.admit(agentId, 'ORDINARY_TURN');
+    const a = resolveAdmission(decision, UNKNOWN_POLICY);
+    return { proceed: a.action === 'PROCEED', basis: a.basis, decision };
+  },
+  confirmLaunch: (decision) => providerCapacity.confirmLaunch(decision as AdmissionDecision),
+  cancelGrant: (decision) => providerCapacity.cancelGrant(decision as AdmissionDecision),
+  holdTyped: (ptyId, r, reason, detail) => automaticSubmit.holdTyped(ptyId, {
+    requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass as AdmissionClass, text: r.text
+  }, reason, detail),
+  claimAtStop: (agentId) => inboxWake?.claimAtStop(agentId) ?? null,
+  settleAtStop: (claim, blocked) => inboxWake?.settleAtStop(claim as WakeClaim, blocked),
+  log: (row) => hive.appendLog(row),
+  now: Date.now,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  setTimer: (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; }
+}, {
+  codexFacts: async (ptyId) => {
+    const r = await ptyManager.mirrorGateReading(ptyId, 'codex', '', undefined);
+    return { reading: r.reading as GateReading | null, reason: r.reason };
+  }
+}, () => { const c = readConfig(); return { path: wakePathOf(c.wakePath), stopContinue: c.stopContinue }; });
+hookServer.setStopContinue({
+  stopClaim: (agentId) => wakeSender?.stopClaim(agentId) ?? null,
+  stopSettle: (agentId, requestId, blocked, chars) => wakeSender?.stopSettle(agentId, requestId, blocked, chars)
+});
+hookServer.setTurnObserver((agentId, event, f) => {
+  messageBox?.noteHook(agentId, event, f);
+  try { wakeSender?.noteHook(agentId, event, f); } catch { /* never breaks a hook */ }
+});
 // The mirror per PTY (config `terminalMirror: false` = off), its cost guard and its shadow diff.
 const termShadow = new ShadowDiff((row) => hive.appendLog(row), Date.now);
 /** GTC M2: the screen gate's source, per request. The answering host's reading goes to the gate
@@ -2041,6 +2103,7 @@ function teardownPty(id: string, archiveReason: ArchiveReason = 'explicit'): voi
   wakeIncarnationTokens.forgetPty(id);
   termShadow.forget(id);
   screenGate.forget(id);
+  { const gone = ptyToAgent.get(id); if (gone) wakeSender?.forget(gone, id); }
   // 1) Archive the agent — retained + flagged; only live-PTY agents are active.
   const agentId = ptyToAgent.get(id);
   if (agentId) {
@@ -6601,10 +6664,9 @@ ipcMain.handle('autoSubmit:submit', (_evt, req: unknown) => {
   const boot = r.admissionClass === 'BOOT_SEQUENCE'
     ? { kind: 'boot-submit', agentId: r.agentId, requestId: r.requestId, attempt: typeof r.attempt === 'number' && Number.isInteger(r.attempt) && r.attempt > 0 ? r.attempt : null }
     : null;
-  return automaticSubmit.submit({
-    requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass as AdmissionClass,
-    text: r.text, settleMs
-  }).then((outcome) => {
+  const sub = { requestId: r.requestId, agentId: r.agentId, admissionClass: r.admissionClass as AdmissionClass, text: r.text, settleMs };
+  // GTC M4: a boot prompt goes through the wake sender (the owner byte for byte on wakePath 'owner').
+  return (boot && wakeSender ? wakeSender.submit(sub) : automaticSubmit.submit(sub)).then((outcome) => {
     const o = outcome as { kind: string; reason?: string; detail?: string };
     // Logging is wrapped so it can never turn an outcome into a rejection.
     try { if (boot && bootSubmitRowDue(boot.requestId, o.kind, o.reason)) hive.appendLog({ ...boot, outcome: o.kind, reason: o.reason ?? null, ...(o.detail ? { detail: o.detail } : {}) }); } catch { /* logging only */ }

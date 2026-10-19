@@ -465,5 +465,6 @@ test('hooks: the turn observer gets every main-session hook\'s prompt and source
   const obs = src.indexOf('this.turnObserver?.(agentId, event, {');
   assert.ok(on > 0 && obs > on && obs - on < 600);
   const idx = codeOnly(readSource('src/main/index.ts'));
-  assert.match(idx, /hookServer\.setTurnObserver\(\(agentId, event, f\) => messageBox\?\.noteHook\(agentId, event, f\)\);/);
+  // GTC M4: the wake sender observes the same hooks, after the message box.
+  assert.match(idx, /hookServer\.setTurnObserver\(\(agentId, event, f\) => \{\s*messageBox\?\.noteHook\(agentId, event, f\);/);
 });

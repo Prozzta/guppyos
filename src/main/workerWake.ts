@@ -82,6 +82,10 @@ export const STOP_SETTLE_MS = 5_000;
  * long, the lifecycle goes back to `unknown` and the claim's ids are re-pended ONCE.
  */
 export const SUBMIT_CONFIRM_MS = 60_000;
+/** GTC M4 (design 15.10 MUST 3): an epoch opened by a Stop-continue (the provider's own turn goes
+ *  on with our mail as the Stop's reason) is provisional this long. Its continued turn confirms it
+ *  through noteHook like any turn start, but the first hook of a tool-free answer is its next Stop. */
+export const STOP_CONFIRM_MS = 5 * 60_000;
 
 /**
  * CODEX-WAKE-161 F4 (Jim, CODEX-WAKE-ROOTCAUSE). A wake whose re-announcement ALSO went
@@ -265,6 +269,9 @@ interface AgentWake {
   /** The active epoch was opened by our COMMITTED and the provider has not confirmed a
    *  turn yet (only for a provider that reports turn starts). */
   provisional: boolean;
+  /** GTC M4: the active epoch was opened by a Stop-continue, not a typed nudge (STOP_CONFIRM_MS;
+   *  nothing of ours can sit in the composer). */
+  viaStop: boolean;
   /** When the current in-flight claim was taken (a turn start after it confirms it). */
   claimedAt: number;
   /** The ids of the commit that opened the provisional epoch. */
@@ -402,7 +409,7 @@ export class WorkerWakeWatchdog {
     if (!r) {
       r = {
         pending: new Set(), announced: new Set(), inFlight: null, held: null, lifecycle: 'unknown', lastHumanNeedsAt: 0, lastReconcileAttemptAt: 0, providerSession: null, activeSince: 0, closedTurns: [], orphanPostCompacts: [], openTurnId: null,
-        stoppedAt: 0, turnStartAt: 0, provisional: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null, claimEpochClosed: false,
+        stoppedAt: 0, turnStartAt: 0, provisional: false, viaStop: false, claimedAt: 0, commitIds: [], pendingIdleAt: 0, reannounced: new Set(), n1Reoffered: new Set(), retries: new Map(), quiet: new Map(), recheck: null, invoking: false, claimTurnSeen: false, claimTurnId: null, claimEpochClosed: false,
         lastTrafficAt: 0, lastMainTrafficAt: 0, stuckEpoch: 0, stuckRecoveries: 0, compactEpoch: false
       };
       this.agents.set(agentId, r);
@@ -423,6 +430,7 @@ export class WorkerWakeWatchdog {
     r.lifecycle = to;
     r.compactEpoch = false;
     r.provisional = false;
+    r.viaStop = false;
     r.pendingIdleAt = 0;
   }
 
@@ -960,7 +968,7 @@ export class WorkerWakeWatchdog {
       r.activeSince = 0;
       return { kind: 'deferred-idle' };
     }
-    if (r.lifecycle === 'active' && r.provisional && now - r.activeSince >= SUBMIT_CONFIRM_MS) {
+    if (r.lifecycle === 'active' && r.provisional && now - r.activeSince >= (r.viaStop ? STOP_CONFIRM_MS : SUBMIT_CONFIRM_MS)) {
       const ids: string[] = [];
       const exhausted: string[] = [];
       let attempt = 0;
@@ -1001,7 +1009,7 @@ export class WorkerWakeWatchdog {
   /** A provisional epoch ends without the provider ever confirming a turn: the nudge that
    *  opened it may still be unsent in the composer, so the next claim checks first. */
   private closeUnconfirmed(r: AgentWake): void {
-    if (r.provisional && r.commitIds.length) r.recheck = r.commitIds;
+    if (r.provisional && r.commitIds.length && !r.viaStop) r.recheck = r.commitIds;
   }
 
   /**
@@ -1038,7 +1046,7 @@ export class WorkerWakeWatchdog {
    * `reconcile` may also accept PTY quiescence, but ONLY for an agent whose lifecycle is
    * unknown (never one known to be active), rate-limited per agent.
    */
-  claim(f: WorkerWakeFacts, cause: WakeCause, mode: WakeMode, now = Date.now()): WakeClaim | null {
+  claim(f: WorkerWakeFacts, cause: WakeCause, mode: WakeMode, now = Date.now(), atStop = false): WakeClaim | null {
     const r = this.rec(f.agentId);
     // DIAGNOSIS ONLY (diag-1.1.46-wake): every `return null` below names itself, so a
     // packaged run can say WHICH guard is holding instead of just "no wake". `no()` is
@@ -1058,7 +1066,8 @@ export class WorkerWakeWatchdog {
     const spawned = this.spawnedAt.get(f.ptyId) ?? 0;
     if (spawned > 0 && now - spawned < WORKER_WAKE_BOOT_GRACE_MS) return no('boot-grace');
     if (mode === 'event') {
-      if (r.lifecycle !== 'idle') return no(`lifecycle-${r.lifecycle}`);
+      // GTC M4: inside a Stop hook the Stop in hand IS the provider's turn end (claimAtStop).
+      if (!atStop && r.lifecycle !== 'idle') return no(`lifecycle-${r.lifecycle}`);
     } else {
       const quiescent = f.lastOutputAt > 0 && now - f.lastOutputAt >= WORKER_WAKE_IDLE_MS;
       // D3 (god ruling, Dwight's tightening): PTY silence stands in ONLY when the lifecycle is
@@ -1097,6 +1106,16 @@ export class WorkerWakeWatchdog {
   }
 
   /**
+   * GTC M4 (design 15.5): the claim a Stop-continue makes, synchronously inside that Stop's hook and
+   * BEFORE the Stop reaches noteHook. Every fail-closed reason of an event claim applies (pause,
+   * halt, auto-delivery pause, an owner hold, a HITL prompt, boot grace, in flight, held, nothing
+   * pending) except the lifecycle one: the Stop in hand is the provider's own turn end.
+   */
+  claimAtStop(f: WorkerWakeFacts, now = Date.now()): WakeClaim | null {
+    return this.claim(f, 'hook', 'event', now, true);
+  }
+
+  /**
    * The owner's outcome for a claim. Only the CURRENT in-flight claim is settled.
    *
    * `confirms`: this agent's provider reports its own turn starts (a UserPromptSubmit or
@@ -1105,7 +1124,7 @@ export class WorkerWakeWatchdog {
    * reading - COMMITTED is active until its Stop - since waiting for a confirmation that can
    * never come would re-announce every turn.
    */
-  settle(claim: WakeClaim, outcomeKind: string, at = Date.now(), confirms = false): { endedBeforeSettle: boolean } {
+  settle(claim: WakeClaim, outcomeKind: string, at = Date.now(), confirms = false, viaStop = false): { endedBeforeSettle: boolean } {
     const r = this.agents.get(claim.agentId);
     if (!r || r.inFlight?.requestId !== claim.requestId) return { endedBeforeSettle: false };
     r.inFlight = null;
@@ -1142,6 +1161,7 @@ export class WorkerWakeWatchdog {
       r.pendingIdleAt = 0;
       // Already confirmed if the provider's turn start beat our settle here.
       r.provisional = confirms && !(r.claimedAt > 0 && r.turnStartAt >= r.claimedAt);
+      r.viaStop = viaStop;
       r.commitIds = claim.ids;
       if (claim.recheck) r.recheck = null;   // the prompt was seen clear, and this went out
     } else if (outcomeKind === 'HUMAN_HANDLED') {
