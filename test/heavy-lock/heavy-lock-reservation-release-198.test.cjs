@@ -118,6 +118,30 @@ K.nothingAndHolder = async (M = HJ) => {
 };
 test('heavy release with nothing reserved or queued, or by the holder, changes nothing', () => K.nothingAndHolder());
 
+K.waitingProcSaid = async (M = HJ) => {
+  // Queued by a waiting test process (a lease), then released: that process re-queues on its next poll.
+  const x = rig(M);
+  x.l.acquire('a', H, 'npm ci', 'a1', false);
+  assert.equal((await x.l.lease('b', { pid: 4242, createdMs: 1, suite: true })).state, 'wait');
+  assert.deepEqual(await x.l.lease('b', { op: 'unreserve' }), { state: 'unreserved', reserved: false, queued: true, next: null, waiting: true }, 'A QUEUED WAITING PROCESS IS SAID (Jim INFO 1)');
+  // Reserved for it (the slot freed while the process waited), then released.
+  assert.equal((await x.l.lease('c', { pid: 4343, createdMs: 1, suite: true })).state, 'wait');
+  x.l.callDone('a', 'a1');
+  assert.deepEqual(x.l.queueSnapshot().reserved.map((r) => r.agentId), ['c']);
+  assert.deepEqual(await x.l.lease('c', { op: 'unreserve' }), { state: 'unreserved', reserved: true, queued: false, next: null, waiting: true }, 'A RESERVED WAITING PROCESS IS SAID (Jim INFO 1)');
+  assert.match(CLI.describe({ state: 'unreserved', reserved: true, queued: false, next: null, waiting: true }), /\nheavy: a test process of yours is still waiting for the slot; within 25 s it asks again and queues you again \(at the back\)\./);
+  assert.doesNotMatch(CLI.describe({ state: 'unreserved', reserved: true, queued: false, next: null }), /still waiting/);
+};
+test('heavy release says when a test process of the caller still waits and will queue it again (Jim INFO 1)', () => K.waitingProcSaid());
+
+K.toCapped = async (M = HJ) => {
+  const x = reserved(M, ['b', 'c']);
+  const a = await x.l.lease('b', { op: 'unreserve', to: 'x'.repeat(5000) });
+  assert.equal(a.to, 'not-queued');
+  assert.equal(x.logs.find((r) => r.action === 'reserve-released').to, 'x'.repeat(80), "THE ROUTE CAPS 'to' (Jim INFO 3)");
+};
+test("unreserve caps 'to' at 80 characters on the route, not only in the CLI (Jim INFO 3)", () => K.toCapped());
+
 K.status = async (M = HJ) => {
   const x = reserved(M, ['b', 'c']);
   const s = await x.l.lease('c', { op: 'status' });
@@ -230,6 +254,12 @@ const MUTANTS = [
     killer: 'queuedOnlyLeaves', dies: /THE QUEUE PLACE IS GIVEN UP/ },
   { name: 'no-op still signals a change', edits: [['    if (reserved || queued) this.changed();\n', '    this.changed();\n']],
     killer: 'nothingAndHolder', dies: /no change for a no-op/ },
+  { name: 'INFO 1 off: a queued waiting process not said', edits: [['const waiting = !!own?.procs.length || ', 'const waiting = ']],
+    killer: 'waitingProcSaid', dies: /A QUEUED WAITING PROCESS IS SAID/ },
+  { name: 'INFO 1 off: a reserved waiting process not said', edits: [[' || !!this.reservations.get(agentId)?.procs.length;', ';']],
+    killer: 'waitingProcSaid', dies: /A RESERVED WAITING PROCESS IS SAID/ },
+  { name: "INFO 3 off: 'to' not capped", edits: [['    if (to !== undefined) to = to.slice(0, 80);\n', '']],
+    killer: 'toCapped', dies: /THE ROUTE CAPS 'to'/ },
   { name: 'no status op', edits: [["    if (r.op === 'status') {\n", "    if (r.op === 'status' && false) {\n"]],
     killer: 'status', dies: /a lease needs pid and createdMs/ },
   { name: 'the notice does not name heavy release', edits: [[' If you no longer need it, run \\`heavy release\\` so it passes on at once (\\`heavy release --to <agent>\\` gives it to that queued agent first).', '']],

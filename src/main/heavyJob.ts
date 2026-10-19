@@ -1451,8 +1451,9 @@ export type HeavyLeaseAnswer =
   | HeavyUnreserveAnswer
   | { state: 'status'; holders: string[]; waiters: string[]; reserved: Array<{ agentId: string; until: string }> };
 /** `reserved`/`queued`: what the caller gave up; `next`: who the slot is now reserved for (null: no
- *  one waits, so it is free); `to`: the asked-for agent was not queued, so it went in FIFO order. */
-export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued' };
+ *  one waits, so it is free); `to`: the asked-for agent was not queued, so it went in FIFO order;
+ *  `waiting`: a test process of the caller's still waits in a lease and will queue it again. */
+export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true };
 /** How long one lease request may wait (a long poll; the preload asks again). */
 export const HEAVY_LEASE_POLL_MS = 25_000;
 /** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
@@ -1818,7 +1819,13 @@ export class HeavyJobLock {
    *  queue place (`heavy release`): the slot passes on at once, to `to` first when that agent is
    *  queued, else to the oldest waiter. A held slot is not touched: it frees when its job ends. */
   unreserve(agentId: string, to?: string): HeavyUnreserveAnswer {
-    const queued = this.waiters.some((w) => w.agentId === agentId);
+    // Jim INFO 3: the route takes any string; an agent id is short, and `to` is logged verbatim.
+    if (to !== undefined) to = to.slice(0, 80);
+    const own = this.waiters.find((w) => w.agentId === agentId);
+    const queued = !!own;
+    // Jim INFO 1: a test process of the caller's still waiting in a lease asks again within
+    // HEAVY_LEASE_POLL_MS and queues the agent again (at the back): the answer says so.
+    const waiting = !!own?.procs.length || !!this.reservations.get(agentId)?.procs.length;
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
     const r = this.reservations.get(agentId);
@@ -1836,7 +1843,7 @@ export class HeavyJobLock {
     if (reserved) this.grant();
     const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
     if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
-    return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}) };
+    return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}), ...(waiting ? { waiting: true as const } : {}) };
   }
 
   private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running' | 'settled-light'): void {

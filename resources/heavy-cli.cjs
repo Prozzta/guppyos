@@ -62,7 +62,8 @@ function describe(b) {
   const gave = b.reserved ? 'released your reserved slot' : 'left the queue';
   const to = b.to === 'not-queued' ? ' (the agent you named is not queued, so it went in queue order)' : '';
   const next = b.reserved ? `; it is now ${b.next ? `reserved for ${b.next}` : 'free (no one is queued)'}${to}` : '';
-  return `heavy: ${gave}${next}\n`;
+  const waiting = b.waiting ? '\nheavy: a test process of yours is still waiting for the slot; within 25 s it asks again and queues you again (at the back). Stop it if you do not need it.' : '';
+  return `heavy: ${gave}${next}${waiting}\n`;
 }
 
 async function main(argv, env, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }) {
