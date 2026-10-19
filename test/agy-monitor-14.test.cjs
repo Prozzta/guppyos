@@ -90,6 +90,30 @@ function geminiBound() {
   return f;
 }
 
+// The AGY twin of capacity-strip-contract's 'onChange fires ... on a membership move': a tick
+// that moves an agent between the families (or adds a member) with no domain change is still a
+// display change, because the strip's member lists and the agent's usage line move.
+test('runtime: an AGY membership move with no domain change still fires onChange, once', () => {
+  let now = T0;
+  const calls = [];
+  const r = new CapacityRuntime({
+    deliver: () => calls.push('deliver'), onChange: () => calls.push('change'), now: () => now,
+    setTimer: () => 0, clearTimer: () => {}
+  }, new ProviderCapacityTracker(L0_SEM_POLICY, () => now, () => now));
+  r.ingestAgyTick('phyllis-1', tickAt(T0));
+  assert.equal(r.poolKeyOf('phyllis-1'), PG);
+  calls.length = 0;
+  r.ingestAgyTick('phyllis-1', tickAt(T0, { model: 'Claude Sonnet 4.6 (Thinking)' }));   // the same readings: no publication
+  assert.equal(r.poolKeyOf('phyllis-1'), P3, 'fixture: the active family moved to 3P');
+  assert.deepEqual(calls, ['change'], 'AN AGY FAMILY MOVE IS A DISPLAY CHANGE');
+  calls.length = 0;
+  r.ingestAgyTick('kelly-1', tickAt(T0));
+  assert.deepEqual(calls, ['change'], 'a new AGY member is a display change even with no domain change');
+  calls.length = 0;
+  r.ingestAgyTick('kelly-1', tickAt(T0));
+  assert.deepEqual(calls, [], 'nothing moved, nothing to re-project');
+});
+
 // ─── the four values and the exemption rule ────────────────────────────────────────
 
 test('the four AGY values exist, are valid displays, and Claude/Codex keep exactly their three', () => {
