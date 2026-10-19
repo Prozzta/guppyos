@@ -1629,14 +1629,16 @@ test('workerWake.ts decides WHO and types nothing; every wake goes through the o
   const wakeSrc = read('src/main/workerWake.ts');
   assert.ok(!/submitWorkerNudge|writeSubmit|writeText|delaySubmit|ptyManager/.test(wakeSrc), 'the private order is gone');
   const index = read('src/main/index.ts');
-  assert.equal(index.split('ptyManager.write(').length - 1, 3,
-    'index.ts has exactly THREE direct ptyManager.write: the declared-origin pty:write handler, god\'s term writer and the message box\'s');
+  assert.equal(index.split('ptyManager.write(').length - 1, 4,
+    'index.ts has exactly FOUR direct ptyManager.write: the declared-origin pty:write handler, god\'s term writer, the message box\'s and the wake sender\'s');
+  assert.equal(index.split("ptyManager.write(ptyId, data, 'PROGRAMMATIC')").length - 1, 1, "GTC M4: the fourth is the wake sender's, bound to origin PROGRAMMATIC");
   assert.equal(index.split("ptyManager.write(ptyId, data, 'GOD')").length - 1, 1, "the second is term's, bound to origin GOD");
   assert.equal(index.split("ptyManager.write(ptyId, data, 'HUMAN')").length - 1, 1, "GTC M3: the third is the message box's, bound to origin HUMAN");
   const beat = index.slice(index.indexOf('function runWorkerWakeBeat'), index.indexOf('/** (Re)arm the always-on beats'));
   assert.match(beat, /inboxWake\.reconcileAll\(live\)/, 'the beat is reconciliation through the one bridge path');
   assert.ok(!/automaticSubmit\.submit|ptyManager/.test(beat), 'no second submit implementation in the beat');
-  assert.match(index, /submit: \(req\) => automaticSubmit\.submit\(req\)/, 'the bridge submits through the owner');
+  assert.match(index, /submit: \(req\) => \(wakeSender \? wakeSender\.submit\(req\) as Promise<\{ kind: string \}> : automaticSubmit\.submit\(req\)\)/,
+    'the bridge submits through the wake sender (GTC M4), whose owner path is the owner byte for byte');
   const bridge = codeOnlyWake(read('src/main/inboxWakeBridge.ts'), 'inboxWakeBridge.ts');
   assert.match(bridge, /admissionClass: 'CAPACITY_GATED'/, 'as CAPACITY_GATED work');
   assert.ok(!/providerCapacity\.(admit|maySubmitNow|confirmLaunch|cancelGrant)/.test(index.slice(index.indexOf('inboxWake = new InboxWakeBridge'), index.indexOf('const hookServer = new HookServer('))),

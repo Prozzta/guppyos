@@ -34,7 +34,8 @@ test('no direct PTY write in the wake path: the bridge submits through the owner
   const index = src('src/main/index.ts');
   const wiring = between(index, 'inboxWake = new InboxWakeBridge(', 'const hookServer = new HookServer(');
   assert.ok(!/ptyManager\.write|\.write\(/.test(wiring), 'the bridge wiring types nothing itself');
-  assert.match(wiring, /submit: \(req\) => automaticSubmit\.submit\(req\)/);
+  // GTC M4: through the wake sender, whose 'owner' path (the 1.1.97 default) is the owner byte for byte.
+  assert.match(wiring, /submit: \(req\) => \(wakeSender \? wakeSender\.submit\(req\) as Promise<\{ kind: string \}> : automaticSubmit\.submit\(req\)\)/);
   for (const f of ['src/main/workerWake.ts', 'src/main/inboxWakeBridge.ts']) {
     assert.ok(!/ptyManager|\.write\(|sendToOwner/.test(src(f)), `${f}: no terminal access`);
   }

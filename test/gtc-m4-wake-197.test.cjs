@@ -476,6 +476,8 @@ test('MUST 2: the Stop block carries the <hive-mail> block itself, claimed in TH
   assert.equal(res.decision, 'block');
   assert.match(res.reason, /<hive-mail/);
   assert.deepEqual(markersIn(res.reason), [m1.id]);
+  const st = w.coordinator.state('a1');
+  assert.ok(st.announced.includes(m1.id) && !st.pending.includes(m1.id), 'the Stop-continue spent the ids (COMMITTED, not REFUSED)');
   const e = w.entry(m1.id);
   assert.equal(e.state, 'surfacing');
   assert.equal(e.hookKind, 'Stop');
@@ -581,6 +583,21 @@ test('guard 4 / INFO 1: one block per turn; a new turn has a fresh key', async (
   w.reqs.length = 0;
   await turnWithMail(w);
   assert.equal(w.fire('Stop', { fully_idle: true }).decision, 'block', 'the next turn\'s Stop can carry mail again');
+});
+
+test('guard 1: a Stop with stop_hook_active (another Stop hook continued this turn) is never blocked', async (t) => {
+  const w = await floor(t);
+  await turnWithMail(w);
+  assert.equal(w.fire('Stop', { stop_hook_active: true }).decision, undefined);
+  assert.deepEqual(w.rowsOf('wake-stop'), [], 'no claim was even asked');
+});
+
+test('a Stop with no mail to carry: no block, and the grant goes back', async (t) => {
+  const w = await floor(t);
+  w.fire('UserPromptSubmit', { prompt: 'go' });
+  await w.flush();
+  assert.equal(w.fire('Stop').decision, undefined);
+  assert.deepEqual(w.grants, [['cancel', 1]]);
 });
 
 test('AGY: a mid-chain Stop (fully_idle false) is never blocked', async (t) => {
