@@ -1369,6 +1369,10 @@ export interface HeavyHolder {
   windows: Array<{ callId: string; start: number; end: number | null }>;
   /** The last process check for this holder: 'ok', or 'failed' (the listing failed; kept, fail closed). */
   lastProbe: 'ok' | 'failed' | null;
+  /** HEAVY-LOCK-RELEASE-LAG-197: the calls whose processes run in a job Guppy holds (callId -> that job
+   *  has nothing of the call left). When EVERY call of the holder is one and all have exited, the slot
+   *  is freed at once; a call without such a job leaves the holder to the process checks. */
+  jobs: Map<string, boolean>;
 }
 
 /** A process created this long after its call's PostToolUse still belongs to the call (a
@@ -1606,7 +1610,7 @@ export class HeavyJobLock {
     if (reserved) this.reservations.delete(agentId);
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map() });
     this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}) });
     this.changed();
     this.arm();
@@ -1804,7 +1808,27 @@ export class HeavyJobLock {
     else if (had) this.grant();
   }
 
-  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running' | 'settled-light'): void {
+  /** HEAVY-LOCK-RELEASE-LAG-197: the heavy call `callId` runs in a job Guppy holds (HeavyJobs 'held'). */
+  noteJob(agentId: string, callId: string): void {
+    const h = this.holders.get(agentId);
+    if (!h || !h.windows.some((w) => w.callId === callId) || h.jobs.has(callId)) return;
+    h.jobs.set(callId, false);
+  }
+
+  /** HEAVY-LOCK-RELEASE-LAG-197: nothing of `callId` is left in its job (the helper's exit notice,
+   *  confirmed by a list; or the job poll). The slot is freed now, not on the watcher's second clean
+   *  scan, when every heavy call of the holder ran in a held job and all of them have exited. Any
+   *  other call (unwrapped, a lease, a job that was never held) leaves it to the watcher. */
+  jobExited(agentId: string, callId: string): void {
+    const h = this.holders.get(agentId);
+    if (!h || !h.jobs.has(callId)) return;
+    h.jobs.set(callId, true);
+    if (!h.windows.every((w) => h.jobs.get(w.callId) === true)) return;
+    h.calls.clear();
+    this.release(agentId, 'job-exit');
+  }
+
+  private release(agentId: string, reason: 'posttool' | 'process-exit' | 'job-exit' | 'pty-exit' | 'ttl' | 'expired-still-running' | 'settled-light'): void {
     const h = this.holders.get(agentId);
     if (!h) return;
     this.holders.delete(agentId);

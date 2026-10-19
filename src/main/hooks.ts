@@ -1878,7 +1878,7 @@ export class HookServer {
   setHeavyAutoApproves(fn: (agentId: string) => boolean): void { this.heavyAutoApproves = fn; }
   /** Set by handleHook for an allowed heavy PreToolUse; handleWithClaimContext makes the job and
    *  puts the rewritten command in the reply (making the job needs an await). */
-  private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean } | null = null;
+  private heavyWrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean; callId: string } | null = null;
 
   /** The id that pairs a heavy call's PreToolUse with its PostToolUse: the provider's tool-use
    *  id when it sends one, else the command itself, without the join line the Pre reply put
@@ -2058,11 +2058,11 @@ export class HookServer {
    * permissionDecision 'allow' (its parser drops it otherwise; this hook already allowed the call); the
    * AGY shim turns it into AGY's own `overwrite`. A failure leaves the call as it was.
    */
-  private async withHeavyJob(out: unknown, wrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean }): Promise<unknown> {
+  private async withHeavyJob(out: unknown, wrap: { agentId: string; toolInput: unknown; transport: HookTransport | undefined; cmd: boolean; callId: string }): Promise<unknown> {
     const o = (out && typeof out === 'object' ? out : {}) as { hookSpecificOutput?: Record<string, unknown> };
     if (o.hookSpecificOutput?.permissionDecision === 'deny') return out;
     let updatedInput: Record<string, unknown> | null = null;
-    try { updatedInput = await this.heavyJobs!.begin(wrap.agentId, wrap.toolInput, wrap.cmd); } catch { updatedInput = null; }
+    try { updatedInput = await this.heavyJobs!.begin(wrap.agentId, wrap.toolInput, wrap.cmd, wrap.callId); } catch { updatedInput = null; }
     if (!updatedInput) return out;
     return { ...o, hookSpecificOutput: { ...(o.hookSpecificOutput ?? {}), hookEventName: 'PreToolUse', ...(wrap.transport === 'mcp' ? { permissionDecision: 'allow' } : {}), updatedInput } };
   }
@@ -2406,7 +2406,7 @@ export class HookServer {
       let provider: string = allows ? 'codex' : 'claude';
       try { provider = this.mailChannel(agentId).provider ?? provider; if (provider === 'antigravity') allows = true; } catch { /* unknown: Claude's http */ }
       if (this.heavyJobs && cls.heavy && (own || p.payload_degraded !== true)) {
-        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true };
+        if (!allows || this.heavyAutoApproves(agentId)) this.heavyWrap = { agentId, toolInput, transport: p.transport, cmd: own !== undefined && p.hook_cmd_shell === true, callId };
         else this.heavyJobs.skipAskFirst(agentId, provider);
       }
     }
