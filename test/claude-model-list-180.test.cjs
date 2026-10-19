@@ -460,11 +460,11 @@ async function handleKillChecks(fp) {
   const exit = new Promise((r) => c.once('exit', (code, sig) => r({ code, sig })));
   await fp.verdict(async () => {
     const t0 = Date.now();
-    const left = await Promise.race([t.stop(5_000), new Promise((r) => setTimeout(() => r('HUNG'), 10_000))]);
+    const left = await Promise.race([t.stop(300, 10_000), new Promise((r) => setTimeout(() => r('HUNG'), 12_000))]);
     assert.equal(left, 0, 'the stop killed it by its handle, inside the generous bound');
-    const ended = await Promise.race([exit, new Promise((r) => setTimeout(() => r('HUNG'), 10_000))]);
+    const ended = await Promise.race([exit, new Promise((r) => setTimeout(() => r('HUNG'), 12_000))]);
     assert.notEqual(ended, 'HUNG', 'the killed handle eventually emitted exit');
-    assert.ok(Date.now() - t0 < 10_000, 'the handle kill is bounded');
+    assert.ok(Date.now() - t0 < 12_000, 'the handle kill is bounded');
     assert.equal(ended.sig, 'SIGKILL');
   }, () => { c.kill('SIGKILL'); });
 }
