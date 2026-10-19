@@ -147,7 +147,7 @@ test('a recorded file timeout is NAMED and fails the run, even when node --test 
   assert.doesNotMatch(clean.lines.join('\n'), /TIMED OUT/);
 });
 
-test('the timeout reporter records ONLY a file-level timeout (not a per-test timeout, not a plain failure)', async () => {
+test('the timeout reporter records every failure while retaining exactly one file-level timeout record', async () => {
   const reporter = require('./tools/file-timeout-reporter.cjs');
   const F = 'C:\\r\\test\\x.test.cjs';
   const fail = (data) => ({ type: 'test:fail', data });
@@ -161,8 +161,10 @@ test('the timeout reporter records ONLY a file-level timeout (not a per-test tim
   async function* source() { for (const e of events) yield e; }
   const out = [];
   for await (const chunk of reporter(source())) out.push(chunk);
-  assert.strictEqual(out.length, 1);
-  assert.deepStrictEqual(JSON.parse(out[0]), { file: F, message: 'test timed out after 5ms' });
+  const records = out.map(JSON.parse);
+  assert.strictEqual(records.filter((r) => r.file && r.message).length, 1);
+  assert.deepStrictEqual(records.find((r) => r.file && r.message), { file: F, message: 'test timed out after 5ms' });
+  assert.deepStrictEqual(records.filter((r) => r.failure).map((r) => r.failure.name), [F, 'a slow test', F, F]);
 });
 
 // THE rc/1.1.76 HANG, for real: a ConPTY killed before its first output (node-pty defers the kill

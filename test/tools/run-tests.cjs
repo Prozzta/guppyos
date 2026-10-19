@@ -266,7 +266,7 @@ function spawnFailed(res, label, err) {
 
 /** CLAIMS-PERF-LANE: every *.perf.cjs, serially (--test-concurrency=1), after the parallel run. */
 function runPerfLane({ perfDir, filters, readdir, spawn, cwd, timeoutMs, isTTY, env, eventsFile, readFile, removeFile, watchdog, jobExe = null, log, err }) {
-  const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped' };
+  const none = { code: 0, counts: ZERO_COUNTS, state: 'skipped', failures: [] };
   if (filters.length) {
     log(`[test-runner] perf lane SKIPPED: a filtered run (${filters.join(', ')}); run the full suite (npm test) for the wall-clock gates`);
     return none;
@@ -330,7 +330,6 @@ function failingTests(text) {
 /** Prints the one totals line and returns `code`. Unknown counts print as '?'. */
 function totals(code, counts, laneState, log, failures = []) {
   const n = (k) => (counts[k] === null ? '?' : String(counts[k]));
-  log(`[test-runner] totals: tests ${n('tests')} pass ${n('pass')} fail ${n('fail')} cancelled ${n('cancelled')} skipped ${n('skipped')} lane ${laneState} exit ${code}`);
   if (failures.length) {
     log(`[test-runner] failing tests (${failures.length}):`);
     for (const f of failures) log(`[test-runner] FAIL ${f.file} :: ${f.name}`);
@@ -342,6 +341,7 @@ function totals(code, counts, laneState, log, failures = []) {
       log(`[test-runner] could not write failing-test list: ${String(e)}`);
     }
   }
+  log(`[test-runner] totals: tests ${n('tests')} pass ${n('pass')} fail ${n('fail')} cancelled ${n('cancelled')} skipped ${n('skipped')} lane ${laneState} exit ${code}`);
   return code;
 }
 
