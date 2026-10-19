@@ -23,7 +23,9 @@ function checked(root, file) {
 }
 
 // The OS's start time for pid, as an opaque string, or null when the pid is gone or unreadable.
+// MUTANT_RUNNER_UNREADABLE_START_PID simulates a failed read (powershell error or timeout) for one pid.
 function processStart(pid) {
+  if (String(pid) === process.env.MUTANT_RUNNER_UNREADABLE_START_PID) return null;
   if (process.platform === 'linux') {
     try {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -43,11 +45,12 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
 
-// Our own runner's processes: their start time is always readable, so an unreadable one is not the owner.
+// A live pid whose start time cannot be read now (a failed or timed-out read) may be the owner:
+// fail closed.  The cost is a manual journal delete when a reused pid stays unreadable.
 function ownerLive(owner) {
   if (!owner || !Number.isInteger(owner.pid) || owner.pid === process.pid || !alive(owner.pid)) return false;
   const start = processStart(owner.pid);
-  return start !== null && start === owner.start;
+  return start === null || start === owner.start;
 }
 
 let self = null;
@@ -94,8 +97,9 @@ function writeJournal(root, records) {
 function recover(root) {
   const { owner, records } = readJournal(root);
   if (records.length && ownerLive(owner)) {
-    throw new Error(`mutant runner pid ${owner.pid} (started ${owner.start}) is still running and owns ${journalPath(root)}; `
-      + 'not restoring its live mutant. Wait for it to finish, or stop that runner first.');
+    throw new Error(`mutant runner pid ${owner.pid} (started ${owner.start}) is still running, or its start time cannot be read to confirm it is not, `
+      + `and owns ${journalPath(root)}; not restoring its live mutant. Wait for it to finish, or stop that runner first `
+      + '(if that pid is not a mutant runner, delete the journal by hand).');
   }
   for (const record of records) fs.writeFileSync(record.file, record.original, 'utf8');
   if (records.length) writeJournal(root, []);

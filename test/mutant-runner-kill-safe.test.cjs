@@ -75,9 +75,9 @@ function sandboxed(helperText) {
   };
 }
 
-function recoverOnly(runner) {
+function recoverOnly(runner, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [runner, '--recover-only'], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(process.execPath, [runner, '--recover-only'], { cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', (d) => { stderr += d; });
     child.once('close', (code) => resolve({ code, stderr }));
@@ -135,17 +135,38 @@ const K = {
     } finally {
       fs.rmSync(sb.sandbox, { recursive: true, force: true });
     }
+  },
+  // Jim 31ba45: a live owner whose start time cannot be read right now (powershell failed or timed out)
+  // might still be mutating, so recovery fails closed.
+  async unreadableStart(helperText) {
+    const sb = sandboxed(helperText);
+    const original = fs.readFileSync(sb.source, 'utf8');
+    const mutant = `${original}\n// mutant\n`;
+    try {
+      fs.writeFileSync(sb.source, mutant);
+      fs.writeFileSync(sb.journal, JSON.stringify({ owner: { pid: process.pid, start: 'whatever-it-was' },
+        records: [{ file: sb.source, original: Buffer.from(original, 'utf8').toString('base64') }] }));
+      const r = await recoverOnly(sb.runner, { MUTANT_RUNNER_UNREADABLE_START_PID: String(process.pid) });
+      assert.notEqual(r.code, 0, 'A LIVE PID WITH AN UNREADABLE START FAILS CLOSED');
+      assert.match(r.stderr, new RegExp(`pid ${process.pid}\\b`), 'the refusal names the pid');
+      assert.equal(fs.readFileSync(sb.source, 'utf8'), mutant, 'the mutant bytes are untouched');
+      assert.ok(fs.existsSync(sb.journal), 'the journal is kept');
+    } finally {
+      fs.rmSync(sb.sandbox, { recursive: true, force: true });
+    }
   }
 };
 
 test('MUTANT RUNNER OWNER: a live owner refuses recovery and keeps its mutant; a dead one recovers', { timeout: 180_000 }, () => K.liveOwner());
 test('MUTANT RUNNER OWNER: a reused pid (start time differs) and an ownerless journal recover', { timeout: 120_000 }, () => K.reusedPid());
+test('MUTANT RUNNER OWNER: a live pid whose start time cannot be read fails closed', { timeout: 120_000 }, () => K.unreadableStart());
 
 test('MUTANT RUNNER OWNER: MUTANT CENSUS', { timeout: 400_000 }, async () => {
   const helper = fs.readFileSync(path.join(ROOT, HELPER), 'utf8');
   const mutants = [
     ['the liveness check is dropped', 'if (records.length && ownerLive(owner)) {', 'if (false) {', 'liveOwner', /A LIVE OWNER'S JOURNAL IS NOT RECOVERED/],
-    ['the pid alone decides (no start time)', 'return start !== null && start === owner.start;', 'return true;', 'reusedPid', /A REUSED PID IS NOT THE OWNER/]
+    ['the pid alone decides (no start time)', 'return start === null || start === owner.start;', 'return true;', 'reusedPid', /A REUSED PID IS NOT THE OWNER/],
+    ['an unreadable start fails open (Jim 31ba45)', 'return start === null || start === owner.start;', 'return start !== null && start === owner.start;', 'unreadableStart', /A LIVE PID WITH AN UNREADABLE START FAILS CLOSED/]
   ];
   for (const [name, from, to, killer, dies] of mutants) {
     assert.equal(helper.split(from).length, 2, `anchor for "${name}" is unique`);
