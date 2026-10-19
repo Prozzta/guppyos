@@ -5,6 +5,9 @@
  * by a shell keyword was never classified: its program read as `do` or `then`, so
  * `if true; then npm test; fi` and `while true; do npm ci; done` took no slot. The leading keywords
  * (SHELL_KEYWORDS: do/then/else/if/!/time/...) are not the program now (not in cmd).
+ * HEAVY-LOCK-GLOB-LOOP-196 (Jim 9a7378, god 531e28): nor are a `case WORD in` head, a case arm's
+ * pattern (`a)`) or a function head (`function f {`, `f() {`): a function body is classified where
+ * it is defined.
  *
  * Mutants that must die: MUTANT CENSUS at the bottom.
  */
@@ -34,6 +37,36 @@ K.stacked = (M = HJ) => {
   assert.equal(c('until ! npm run build; do sleep 1; done').kind, 'build', 'STACKED KEYWORDS ARE ALL STRIPPED (until !)');
 };
 test('stacked keywords (if !, until !) are all stripped', () => K.stacked());
+
+K.caseArms = (M = HJ) => {
+  // Jim 9a7378: a case arm's pattern is not the program, nor is the `case WORD in` head before it.
+  const c = M.classifyCommand;
+  assert.equal(c('case x in a) npm test;; esac').kind, 'suite', 'A CASE ARM IS CLASSIFIED BY ITS PROGRAM (on the head line)');
+  assert.equal(c('case $x in\n  a|b) npm ci ;;\n  *) echo no ;;\nesac').kind, 'install', 'A CASE ARM IS CLASSIFIED BY ITS PROGRAM (a|b) on its own line)');
+  assert.equal(c('case "$1" in (build) npm run build;; esac').kind, 'build', 'A CASE ARM IS CLASSIFIED BY ITS PROGRAM ((pat))');
+  assert.equal(c('case $x in *) echo no;; esac').heavy, false, 'a light arm stays light');
+};
+test('a case arm (on the case line or its own) is classified by its program', () => K.caseArms());
+
+K.funcs = (M = HJ) => {
+  // Jim 9a7378 INFO, god 531e28: a function body is classified where it is defined, called or not.
+  const c = M.classifyCommand;
+  assert.equal(c('function f { npm test; }').kind, 'suite', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (function f)');
+  assert.equal(c('f() { npm test; }; f').kind, 'suite', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (f())');
+  assert.equal(c('f () { npm ci; }').kind, 'install', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (f ())');
+  assert.equal(c('function f() {\n  npm run build\n}\nf').kind, 'build', 'A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED (multi-line)');
+  for (const cmd of ['function f { echo hi; }; f', 'f() { echo; }', 'echo function', 'function']) assert.equal(c(cmd).heavy, false, `a light function stays light: ${cmd}`);
+};
+test('a function body (function f {, f() {, f () {) is classified where it is defined', () => K.funcs());
+
+K.subshell = (M = HJ) => {
+  // Jim 2e2f8a SHOULD 2: the subshell's `)` glued to the last word is not part of it.
+  const c = M.classifyCommand;
+  assert.equal(c('(cd test; npm test)').kind, 'suite', 'A GLUED SUBSHELL ) IS NOT PART OF THE LAST WORD');
+  assert.equal(c('(npm run build)').kind, 'build', 'A GLUED SUBSHELL ) IS NOT PART OF THE LAST WORD (one segment)');
+  for (const cmd of ['echo $(date)', '(echo hi)', 'f() { echo; }']) assert.equal(c(cmd).heavy, false, `stays light: ${cmd}`);
+};
+test("a subshell's ) glued to the last word is stripped", () => K.subshell());
 
 K.light = (M = HJ) => {
   const c = M.classifyCommand;
@@ -70,9 +103,16 @@ function mutateText(rel, edits, tag) {
 
 const MUTANTS = [
   { name: 'keywords are the program again', edits: [['    const ws = stripKeywords(stripRedirects(raw), d);', '    const ws = stripRedirects(raw);']], killer: 'keywords', dies: /A SEGMENT OPENED BY A KEYWORD IS CLASSIFIED/ },
-  { name: 'only one keyword is stripped', edits: [['  while (i < ws.length && SHELL_KEYWORDS.has(ws[i])) i++;', '  if (i < ws.length && SHELL_KEYWORDS.has(ws[i])) i++;']], killer: 'stacked', dies: /STACKED KEYWORDS ARE ALL STRIPPED/ },
-  { name: '`do` is not a keyword', edits: [["new Set(['do', 'then',", "new Set(['then',"]], killer: 'keywords', dies: /A SEGMENT OPENED BY A KEYWORD IS CLASSIFIED \(do\)/ },
-  { name: '`else` is not a keyword', edits: [["'then', 'else', 'elif',", "'then', 'elif',"]], killer: 'keywords', dies: /A SEGMENT OPENED BY A KEYWORD IS CLASSIFIED \(else\)/ },
+  { name: 'only one keyword is stripped', edits: [['    if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;', '    if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) { i++; break; }']], killer: 'stacked', dies: /STACKED KEYWORDS ARE ALL STRIPPED/ },
+  { name: '`do` is not a keyword', edits: [["const SHELL_KEYWORDS = new Set(['do', 'then',", "const SHELL_KEYWORDS = new Set(['then',"]], killer: 'keywords', dies: /A SEGMENT OPENED BY A KEYWORD IS CLASSIFIED \(do\)/ },
+  { name: '`else` is not a keyword', edits: [["const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif',", "const SHELL_KEYWORDS = new Set(['do', 'then', 'elif',"]], killer: 'keywords', dies: /A SEGMENT OPENED BY A KEYWORD IS CLASSIFIED \(else\)/ },
+  { name: 'a case arm is the program again', edits: [['    if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;', '    if (SHELL_KEYWORDS.has(ws[i]) || FUNC_HEAD.test(ws[i])) i++;']], killer: 'caseArms', dies: /A CASE ARM IS CLASSIFIED BY ITS PROGRAM/ },
+  { name: 'the case head is the program again', edits: [["    else if (ws[i] === 'case' && ws[i + 2] === 'in') i += 3;\n", '']], killer: 'caseArms', dies: /A CASE ARM IS CLASSIFIED BY ITS PROGRAM \(on the head line\)/ },
+  { name: 'an f() head is the program again', edits: [['CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;', 'CASE_ARM.test(ws[i])) i++;']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f\(\)\)/ },
+  { name: 'a `function f` head is the program again', edits: [["    else if (ws[i] === 'function' && ws[i + 1]) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(function f\)/ },
+  { name: 'an `f ()` head is the program again', edits: [["    else if (ws[i + 1] === '()' && /^[A-Za-z_][\\w.:-]*$/.test(ws[i])) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f \(\)\)/ },
+  { name: "a glued ) stays on the last word", edits: [["  return out.length > 1 && /^[^()'\"$`]+\\)$/.test(last) ? [...out.slice(0, -1), last.slice(0, -1)] : out;", '  return out;']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD/ },
+  { name: 'a glued ( stays on the first word', edits: [["  if (out.length > 1 && /^\\([^()'\"$`]+$/.test(out[0])) out = [out[0].slice(1), ...out.slice(1)];\n", '']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD \(one segment\)/ },
   { name: 'cmd strips keywords too', edits: [["  if (d === 'cmd') return ws;\n", '']], killer: 'cmdDialect', dies: /CMD KEEPS ITS FIRST WORD AS THE PROGRAM/ }
 ];
 

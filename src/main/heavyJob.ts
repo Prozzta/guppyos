@@ -338,6 +338,9 @@ function invocationOf(command: string, depth: number): { runs: string[][]; launc
 
 /** HEAVY-LOCK-SCRIPT-WRAPPER: what the classifier may read besides the command line. */
 export interface ClassifyCtx {
+  /** HEAVY-LOCK-GLOB-LOOP-196: this segment is one iteration of a short loop, its variable replaced
+   *  by a word: a test file named through it is a computed name (not read; see node --test). */
+  loopWord?: boolean;
   /** The text of a script file the command runs (`bash suite.sh`, `./gate.sh`), resolved against the
    *  call's cwd and size-capped by the caller; null when unreadable. Absent = scripts are not read. */
   readScript?: (path: string, cd?: string) => string | null;
@@ -922,7 +925,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       // HEAVY-LOCK-SHAPES-189: a named test file the lock cannot read (made later in the call) is
       // unknown, as an unreadable script is: heavy, provisional. A computed name (`for f in ...; do
       // node --test test/$f.test.cjs`) stays as before: the replay showed it is a loop of single files.
-      if (ctx.readScript) {
+      if (ctx.readScript && !ctx.loopWord) {
         for (const f of files.filter((x) => !x.includes('$'))) {
           let t: string | null = null;
           try { t = ctx.readScript(f, ctx.cd); } catch { t = null; }
@@ -983,6 +986,8 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   // with a body stripHeredocs found (the two scans agree); otherwise nothing is virtual (fail closed).
   const segs = segments(text, d);
   const ops = segs.map((g) => words(g.replace(/\s&$/, ''), d).filter((w) => HEREDOC_OP.test(w)).length);
+  const plan: Array<{ seg: string; op: number; looped?: boolean }> | HeavyClass = d === 'cmd' ? segs.map((seg, si) => ({ seg, op: ops[si] })) : loopPlan(segs, ops, d);
+  if (!Array.isArray(plan)) return plan;
   // A null entry: a heredoc-made file that a later segment rewrote by other means (cp, mv, sed -i,
   // a `>` that is not a heredoc's), so its text at run time is unknown and it reads as unreadable
   // (S1). A file on disk edited that way is still read as it is now (HEAVY-LOCK-SHAPES-189).
@@ -1017,10 +1022,9 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   let here: ClassifyCtx = { ...ctx, stdin: undefined, ...(readScript ? { readScript } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
-  for (let si = 0; si < segs.length; si++) {
-    const seg = segs[si];
-    const mine = paired ? bodies.slice(body, body + ops[si]) : [];
-    body += ops[si];
+  for (const { seg, op, looped } of plan) {
+    const mine = paired ? bodies.slice(body, body + op) : [];
+    body += op;
     // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
     // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite. B1: classified where it runs,
     // with this point's cd and variables (`J=/x; X="$(bash $J/light.sh)"` reads /x/light.sh).
@@ -1071,7 +1075,8 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     }
     // Jim n2: `cat <<'EOF' | node -`: the heredoc of an earlier segment is what the pipe feeds `-`.
     if (stdin === undefined && bodies.length && raw.includes('-')) stdin = bodies.join('\n');
-    const c = classifyWords(ws, depth, stdin === undefined ? here : { ...here, stdin });
+    const at = looped ? { ...here, loopWord: true } : here;
+    const c = classifyWords(ws, depth, stdin === undefined ? at : { ...at, stdin });
     if (c.heavy && !c.provisional) return c;
     if (c.heavy && !maybe) maybe = c;
     const wrote = mine.length === 1 ? heredocWrite(raw, ws, mine[0], here, virtual, key, rewritten) : new Set<string>();
@@ -1087,13 +1092,100 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
 
 const HEREDOC_OP = /^\d*<<-?(?!<)/;
 
-/** HEAVY-LOCK-SHELL-KEYWORD-196: drop the shell keywords that open a segment before its program. */
+/** A case arm's pattern (`a)`, `a|b)` after the pipe split, `*)`, `(a)`); not a `$(...)` word. */
+const CASE_ARM = /^\(?[^()$`'"]*\)$/;
+/** A function definition's head: `f()` as one word, or `f` then `()`. */
+const FUNC_HEAD = /^[A-Za-z_][\w.:-]*\(\)$/;
+/**
+ * HEAVY-LOCK-SHELL-KEYWORD-196: drop what opens a segment before its program: the shell keywords.
+ * HEAVY-LOCK-GLOB-LOOP-196 (Jim 9a7378, god 531e28): also a `case WORD in` head, a case arm's
+ * pattern (`case x in a) npm test;; esac`) and a function head (`function f {`, `f() {`), so a
+ * function body is classified where it is defined, called or not (fails closed).
+ */
 function stripKeywords(ws: string[], d: ShellDialect): string[] {
   if (d === 'cmd') return ws;
   let i = 0;
-  while (i < ws.length && SHELL_KEYWORDS.has(ws[i])) i++;
-  return i ? ws.slice(i) : ws;
+  while (i < ws.length) {
+    if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;
+    else if (ws[i] === 'case' && ws[i + 2] === 'in') i += 3;
+    else if (ws[i] === 'function' && ws[i + 1]) i += 2;
+    else if (ws[i + 1] === '()' && /^[A-Za-z_][\w.:-]*$/.test(ws[i])) i += 2;
+    else break;
+  }
+  let out = i ? ws.slice(i) : ws;
+  // `(cd test; npm test)`, `(npm run build)`: a subshell's `(` and `)` are glued to the first and
+  // last words (Jim 2e2f8a).
+  if (out.length > 1 && /^\([^()'"$`]+$/.test(out[0])) out = [out[0].slice(1), ...out.slice(1)];
+  const last = out[out.length - 1];
+  return out.length > 1 && /^[^()'"$`]+\)$/.test(last) ? [...out.slice(0, -1), last.slice(0, -1)] : out;
 }
+
+/**
+ * HEAVY-LOCK-GLOB-LOOP-196: a `for VAR in WORDS` loop whose body runs `node --test` on $VAR.
+ * - WORDS a glob, computed (`$(...)`, `$files`) or SUITE_MANY_FILES or more: the loop is a serial
+ *   run over the suite: a suite (god 0f986b), whatever each iteration is alone.
+ * - a short explicit list: a body that uses $VAR is classified once per word, with $VAR replaced by
+ *   it (so a per-file loop over named files stays light, as each of its runs would be alone).
+ * - nested loops: a body is planned with `mult`, the product of the enclosing short lists' lengths,
+ *   so 10 x 10 words count as 100 runs (Jim 9a7378). A glob or computed list is unbounded: its body
+ *   is a suite once it runs node --test, an inner loop's runs included (Jim 2e2f8a).
+ * - the runs are words x mult x the body's node --test segments, whether or not they use $VAR, so a
+ *   repeat loop (`for i in $(seq 50); do node --test a.test.cjs`) is a suite too (Jim 2e2f8a).
+ * - the plan is capped at PLAN_CAP segments: past it a body is planned once, not per word, so
+ *   a deep nest of long lists costs a fixed time on the main thread (Jim 2e2f8a MUST).
+ * - while/until loops are not counted (unbounded, but rare as an agent shape): each segment is
+ *   classified as it stands.
+ * Returns the segments to classify (a body is repeated per word; one with a heredoc is kept as is),
+ * or the suite class.
+ */
+const PLAN_CAP = 2000;
+const NODE_TEST = (s: string): boolean => /(^|[\s("'/\\])node(\.exe)?["']?\s/.test(s) && /\s--test\b/.test(s);
+function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Array<{ seg: string; op: number; looped?: boolean }> | HeavyClass {
+  const out: Array<{ seg: string; op: number; looped?: boolean }> = [];
+  for (let si = 0; si < segs.length; si++) {
+    out.push({ seg: segs[si], op: ops[si] });
+    const head = stripKeywords(words(segs[si].replace(/\s&$/, ''), d), d);
+    if (head[0] !== 'for' || head[2] !== 'in' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(head[1] ?? '')) continue;
+    // The body: up to the `done` that closes this loop (nested loops counted).
+    let depth = 1; let end = si + 1;
+    for (; end < segs.length; end++) {
+      const w = words(segs[end].replace(/\s&$/, ''), d);
+      const opener = w.find((x) => !['do', 'then', 'else', 'elif', '!', '{'].includes(x));
+      if (opener === 'for' || opener === 'while' || opener === 'until') depth++;
+      if (w[0] === 'done' && --depth === 0) break;
+    }
+    const name = head[1];
+    const list = head.slice(3);
+    const body = segs.slice(si + 1, end);
+    const at = `\\$\\{?${name}\\}?(?![A-Za-z0-9_])`;
+    const ref = new RegExp(at, 'g');
+    const tests = body.filter(NODE_TEST).length;
+    const open = list.some((w) => /[*?[$`]/.test(w));   // a glob or a computed list: unbounded
+    const runs = open ? Infinity : list.length * mult;
+    // The hint only where writing the names out helps: this list is the glob or computed one and the
+    // body runs on $VAR (a repeat loop such as `for i in $(seq 50)` stays a suite written out; Jim 050139).
+    const uses = body.some((s) => new RegExp(at).test(s));
+    const hint = uses && open ? ' (write the file names out to run it light)' : '';
+    const big = runs === Infinity ? `a glob or a computed list${hint}`
+      : runs * tests >= SUITE_MANY_FILES ? `${runs * tests} runs${mult > 1 ? ' (nested lists)' : ''}` : null;
+    if (tests && big) return { heavy: true, kind: 'suite', why: `a loop of node --test over ${big}` };
+    if (!list.length) continue;
+    const inner = loopPlan(body, ops.slice(si + 1, end), d, runs);
+    if (!Array.isArray(inner)) return inner;
+    if (!uses || body.some((_, k) => ops[si + 1 + k] > 0) || out.length + list.length * inner.length > PLAN_CAP) out.push(...inner);
+    else for (const w of list) for (const p of inner) out.push({ seg: p.seg.replace(ref, () => w), op: 0, looped: true });
+    si = end - 1;   // the body is planned; `done` (if any) comes next
+  }
+  return out;
+}
+
+/** The number of segments loopPlan plans for `cmd` (sh), or -1 when it settles the command itself (exported for tests). */
+export function planSize(cmd: string): number {
+  const segs = segments(stripHeredocs(cmd, []), 'sh');
+  const plan = loopPlan(segs, segs.map(() => 0), 'sh');
+  return Array.isArray(plan) ? plan.length : -1;
+}
+export { PLAN_CAP };
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
