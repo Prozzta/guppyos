@@ -358,6 +358,10 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-FALSE-HEAVY-198, set by classifyCommand: a word with the variables this command set
    *  to a literal (and the spawn env) substituted, as the shell will (`f=x.test.cjs && node --test $f`). */
   expand?: (word: string) => string;
+  /** HEAVY-LOCK-FALSE-HEAVY-198 (Jim, god 2d273e): where a path readScript resolves to has no file,
+   *  that absolute path (for the deny text: "no such file at ..."); null when one is there, or when
+   *  the path is not resolvable. Absent = the reason stays "cannot read yet". */
+  missingAt?: (path: string, cd?: string) => string | null;
 }
 
 /** HEAVY-LOCK-SHAPES-189: the nesting a classification follows (`bash -c "bash -c 'bash x.sh'"`, a
@@ -365,8 +369,11 @@ export interface ClassifyCtx {
 const MAX_DEPTH = 4;
 
 /** HEAVY-LOCK-BG-LAPSE-189: the class of a script the lock cannot read at PreToolUse. */
-function unreadable(path: string): HeavyClass {
-  return { heavy: true, kind: 'bench', why: `${path.replace(/\\/g, '/').split('/').pop()} (a script the lock cannot read yet)`, provisional: true };
+function unreadable(path: string, ctx?: ClassifyCtx): HeavyClass {
+  // HEAVY-LOCK-FALSE-HEAVY-198 (Jim): a mistyped path says so, so the agent fixes it rather than waits.
+  let at: string | null = null;
+  try { at = ctx?.missingAt?.(path, ctx.cd) ?? null; } catch { at = null; }
+  return { heavy: true, kind: 'bench', why: `${path.replace(/\\/g, '/').split('/').pop()} (a script the lock cannot read yet${at ? `: no such file at ${at}` : ''})`, provisional: true };
 }
 
 /** HEAVY-LOCK-SHAPES-189 (Jim NIT 1): nesting past MAX_DEPTH is not followed, so it is unknown:
@@ -392,7 +399,7 @@ function classifyScript(path: string, depth: number, ctx: ClassifyCtx, dialect: 
   try { text = ctx.readScript(path, ctx.cd); } catch { text = null; }
   // HEAVY-LOCK-BG-LAPSE-189: a script the lock cannot read (not created yet, too big, a computed
   // path) is an unknown program: heavy, as an unreadable stdin script already is (FAILOPEN).
-  if (text === null) return unreadable(path);
+  if (text === null) return unreadable(path, ctx);
   // HEAVY-LOCK-SHAPES-189 (Jim MUST 2): PowerShell 5.1's Out-File and `>` write UTF-16LE with a BOM,
   // so a .ps1 holds a NUL beside every ASCII character. Decoded first (a command is ASCII, so the
   // NULs go), and a named script (x.ps1, x.sh, x.bat) with NULs and no BOM is UTF-16 too.
@@ -666,7 +673,7 @@ function classifyNodeCode(prog0: NodeProgram, ctx: ClassifyCtx, anyName = false)
     if (text === null && path !== key) { try { text = ctx.readScript(path, ctx.cd); } catch { text = null; } }
     // HEAVY-LOCK-BG-LAPSE-189: the script itself (or a preload named by a file path) unreadable is
     // an unknown program: heavy. A helper (hop >= 1) is a guess among extensions: the rest decides.
-    if (text === null && hop === 0 && (path === prog.script || /^(\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])/.test(path))) return unreadable(path);
+    if (text === null && hop === 0 && (path === prog.script || /^(\.{1,2}[\\/]|[A-Za-z]:[\\/]|[\\/])/.test(path))) return unreadable(path, ctx);
     if (!text) continue;   // unreadable helper, or an empty file: decided by the rest
     read++;
     const s = scanJs(text);
@@ -923,7 +930,10 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
         // HEAVY-LOCK-FALSE-HEAVY-198 (Andy, 2026-10-19 20:21Z): `f=<one file> && node --test $f` was
         // "a glob or a directory" (the word `$f` is not a .js name). A variable the command set to a
         // literal is that literal; one it did not set stays as written (still heavy: fails closed).
-        files.push(ctx.expand ? ctx.expand(a) : a);
+        // Jim SHOULD (be555f99): a value splits on whitespace as the shell splits an unquoted `$F`, so
+        // `F="a b" && node --test $F` is two files (counted, each read), not one word naming the last.
+        const e = ctx.expand ? ctx.expand(a) : a;
+        if (e === a) files.push(a); else files.push(...e.split(/\s+/).filter(Boolean));
       }
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
       if (files.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
@@ -935,7 +945,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
         for (const f of files.filter((x) => !x.includes('$'))) {
           let t: string | null = null;
           try { t = ctx.readScript(f, ctx.cd); } catch { t = null; }
-          if (t === null) return unreadable(f);
+          if (t === null) return unreadable(f, ctx);
         }
       }
       return { heavy: false };
@@ -1025,7 +1035,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const k = key(p, cd);
     return virtual.has(k) ? virtual.get(k)! : base(expand(p), cd === undefined ? cd : expand(cd));
   } : undefined;
-  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ...(readScript ? { readScript } : {}) };
+  // A file this command writes (a heredoc's target, even one rewritten since) is not "no such file".
+  const where = ctx.missingAt;
+  const missingAt = where ? (p: string, cd?: string): string | null => virtual.has(key(p, cd)) ? null : where(expand(p), cd === undefined ? cd : expand(cd)) : undefined;
+  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
   for (const { seg, op, looped } of plan) {
@@ -1316,13 +1329,22 @@ export const HEAVY_SCRIPT_MAX_BYTES = 256 * 1024;
 
 /** A ClassifyCtx reading scripts relative to `cwd` (the tool call's), size-capped; null on any failure. */
 export function scriptReaderFor(cwd: string | null | undefined, read: (absPath: string) => { size: number; text: () => string } | null): ClassifyCtx {
+  const resolve = (p: string, cd?: string): string | null => {
+    const raw = p.replace(/^["']|["']$/g, '');
+    if (!raw || raw.includes('$') || cd?.includes('$') || cd?.startsWith('~')) return null;
+    const isAbs = (x: string): boolean => /^([A-Za-z]:[\\/]|[\\/])/.test(x);
+    const base = cd ? (isAbs(cd) || !cwd ? cd : `${cwd.replace(/[\\/]+$/, '')}/${cd}`) : cwd;
+    return isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
+  };
   return {
+    missingAt: (p: string, cd?: string): string | null => {
+      const abs = resolve(p, cd);
+      if (abs === null || read(abs)) return null;
+      return abs.replace(/\\/g, '/').replace(/^\/([A-Za-z])\//, (_m, d: string) => `${d.toUpperCase()}:/`);
+    },
     readScript: (p: string, cd?: string): string | null => {
-      const raw = p.replace(/^["']|["']$/g, '');
-      if (!raw || raw.includes('$') || cd?.includes('$') || cd?.startsWith('~')) return null;
-      const isAbs = (x: string): boolean => /^([A-Za-z]:[\\/]|[\\/])/.test(x);
-      const base = cd ? (isAbs(cd) || !cwd ? cd : `${cwd.replace(/[\\/]+$/, '')}/${cd}`) : cwd;
-      const abs = isAbs(raw) || !base ? raw : `${base.replace(/[\\/]+$/, '')}/${raw}`;
+      const abs = resolve(p, cd);
+      if (abs === null) return null;
       const f = read(abs);
       if (!f || f.size > HEAVY_SCRIPT_MAX_BYTES) return null;
       // Jim (HEAVY-LOCK-ADHOC-NODE audit): the read can race the stat (deleted, locked): no throw.
