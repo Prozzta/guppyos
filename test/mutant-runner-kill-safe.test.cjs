@@ -54,3 +54,101 @@ test('MUTANT RUNNER KILL SAFE: hard-killed runner restores its source before the
     fs.rmSync(sandbox, { recursive: true, force: true });
   }
 });
+
+// Jim d54462 (SHOULD on MKS197): recover() runs at every runner start, so a second runner started
+// mid-mutant restored the first one's live mutation and the first reported a false survival. The
+// journal now names its owner (pid + process start time) and recovery refuses while it lives.
+const HELPER = 'test/tools/mutant-runner-helper.cjs';
+
+function sandboxed(helperText) {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'mutant-runner-owner-'));
+  for (const rel of ['test/tools/agy-mutants.cjs', HELPER, 'src/main/capacityNormalize.ts']) {
+    fs.mkdirSync(path.dirname(path.join(sandbox, rel)), { recursive: true });
+    fs.copyFileSync(path.join(ROOT, rel), path.join(sandbox, rel));
+  }
+  if (helperText !== undefined) fs.writeFileSync(path.join(sandbox, HELPER), helperText);
+  return {
+    sandbox,
+    runner: path.join(sandbox, 'test/tools/agy-mutants.cjs'),
+    source: path.join(sandbox, 'src/main/capacityNormalize.ts'),
+    journal: path.join(sandbox, '.mutant-runner-recovery.json')
+  };
+}
+
+function recoverOnly(runner) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [runner, '--recover-only'], { cwd: ROOT, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.once('close', (code) => resolve({ code, stderr }));
+  });
+}
+
+const K = {
+  async liveOwner(helperText) {
+    const sb = sandboxed(helperText);
+    const original = fs.readFileSync(sb.source, 'utf8');
+    let child;
+    try {
+      child = spawn(process.execPath, [sb.runner, 'D-1'], {
+        cwd: ROOT, env: { ...process.env, MUTANT_RUNNER_PAUSE_AFTER_MUTATE_MS: '60000' }, stdio: 'ignore'
+      });
+      await waitFor(() => fs.existsSync(sb.journal) && fs.readFileSync(sb.source, 'utf8') !== original, 'runner never reached its journaled mutation');
+      const mutant = fs.readFileSync(sb.source, 'utf8');
+      assert.equal(JSON.parse(fs.readFileSync(sb.journal, 'utf8')).owner.pid, child.pid, 'the journal names its owner');
+
+      const second = await recoverOnly(sb.runner);
+      assert.notEqual(second.code, 0, 'A LIVE OWNER\'S JOURNAL IS NOT RECOVERED: a second runner start refuses');
+      assert.match(second.stderr, new RegExp(`pid ${child.pid}\\b`), 'the refusal names the owner pid');
+      assert.equal(fs.readFileSync(sb.source, 'utf8'), mutant, 'the live mutant bytes are untouched');
+      assert.ok(fs.existsSync(sb.journal), 'the live owner keeps its journal');
+
+      child.kill('SIGKILL');
+      await new Promise((resolve) => child.once('close', resolve));
+      const third = await recoverOnly(sb.runner);
+      assert.equal(third.code, 0, 'A DEAD OWNER\'S JOURNAL IS RECOVERED');
+      assert.equal(fs.readFileSync(sb.source, 'utf8'), original, 'the dead owner\'s source is restored byte for byte');
+      assert.equal(fs.existsSync(sb.journal), false, 'recovery consumes the journal');
+    } finally {
+      if (child && child.exitCode === null) child.kill('SIGKILL');
+      fs.rmSync(sb.sandbox, { recursive: true, force: true });
+    }
+  },
+  // A live process that reused the owner's pid (this test process, with another start time), and a
+  // journal from before the guard (a bare array, no owner): both are crashes, so both recover.
+  async reusedPid(helperText) {
+    const sb = sandboxed(helperText);
+    const original = fs.readFileSync(sb.source, 'utf8');
+    const record = { file: sb.source, original: Buffer.from(original, 'utf8').toString('base64') };
+    try {
+      for (const [label, journal] of [
+        ['A REUSED PID IS NOT THE OWNER', { owner: { pid: process.pid, start: '2000-01-01T00:00:00.0000000Z' }, records: [record] }],
+        ['A JOURNAL WITHOUT AN OWNER IS RECOVERED', [record]]
+      ]) {
+        fs.writeFileSync(sb.source, `${original}\n// mutant\n`);
+        fs.writeFileSync(sb.journal, JSON.stringify(journal));
+        const r = await recoverOnly(sb.runner);
+        assert.equal(r.code, 0, `${label}: ${r.stderr}`);
+        assert.equal(fs.readFileSync(sb.source, 'utf8'), original, `${label}: restored`);
+        assert.equal(fs.existsSync(sb.journal), false, `${label}: journal consumed`);
+      }
+    } finally {
+      fs.rmSync(sb.sandbox, { recursive: true, force: true });
+    }
+  }
+};
+
+test('MUTANT RUNNER OWNER: a live owner refuses recovery and keeps its mutant; a dead one recovers', { timeout: 180_000 }, () => K.liveOwner());
+test('MUTANT RUNNER OWNER: a reused pid (start time differs) and an ownerless journal recover', { timeout: 120_000 }, () => K.reusedPid());
+
+test('MUTANT RUNNER OWNER: MUTANT CENSUS', { timeout: 400_000 }, async () => {
+  const helper = fs.readFileSync(path.join(ROOT, HELPER), 'utf8');
+  const mutants = [
+    ['the liveness check is dropped', 'if (records.length && ownerLive(owner)) {', 'if (false) {', 'liveOwner', /A LIVE OWNER'S JOURNAL IS NOT RECOVERED/],
+    ['the pid alone decides (no start time)', 'return start !== null && start === owner.start;', 'return true;', 'reusedPid', /A REUSED PID IS NOT THE OWNER/]
+  ];
+  for (const [name, from, to, killer, dies] of mutants) {
+    assert.equal(helper.split(from).length, 2, `anchor for "${name}" is unique`);
+    await assert.rejects(() => K[killer](helper.replace(from, to)), dies, `mutant "${name}" must fail ${killer}`);
+  }
+});

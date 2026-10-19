@@ -3,8 +3,14 @@
 // A finally block cannot run after taskkill/SIGKILL.  Keep the original bytes on
 // disk before each edit so the next mutant-runner invocation repairs an interrupted
 // run before it reads a baseline or writes another mutant.
+// The journal names its owner (pid + process start time).  A second runner started
+// while the owner is still mutating must not restore the owner's live mutant (the
+// owner would then measure the original source and report a false survival), so
+// recovery refuses while that exact process lives.  The start time tells a reused
+// pid apart from the owner.
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const journalPath = (root) => path.join(root, '.mutant-runner-recovery.json');
 
@@ -16,15 +22,57 @@ function checked(root, file) {
   return path.resolve(file);
 }
 
+// The OS's start time for pid, as an opaque string, or null when the pid is gone or unreadable.
+function processStart(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] || null;
+    } catch { return null; }
+  }
+  const r = process.platform === 'win32'
+    ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().ToString('o') }`],
+    { encoding: 'utf8', windowsHide: true, timeout: 60_000 })
+    : spawnSync('ps', ['-o', 'lstart=', '-p', String(Number(pid))], { encoding: 'utf8', timeout: 60_000 });
+  const out = r.status === 0 ? String(r.stdout || '').trim() : '';
+  return out || null;
+}
+
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
+
+// Our own runner's processes: their start time is always readable, so an unreadable one is not the owner.
+function ownerLive(owner) {
+  if (!owner || !Number.isInteger(owner.pid) || owner.pid === process.pid || !alive(owner.pid)) return false;
+  const start = processStart(owner.pid);
+  return start !== null && start === owner.start;
+}
+
+let self = null;
+function selfOwner() {
+  if (self) return self;
+  const start = processStart(process.pid);
+  if (!start) throw new Error(`cannot read this runner's own process start time (pid ${process.pid}); refusing to mutate without an owner guard`);
+  return (self = { pid: process.pid, start });
+}
+
 function readJournal(root) {
   const journal = journalPath(root);
-  if (!fs.existsSync(journal)) return [];
-  const records = JSON.parse(fs.readFileSync(journal, 'utf8'));
+  if (!fs.existsSync(journal)) return { owner: null, records: [] };
+  const parsed = JSON.parse(fs.readFileSync(journal, 'utf8'));
+  // A journal from before the owner guard is a bare array: no owner, so nothing can be live.
+  const owner = Array.isArray(parsed) ? null : parsed && parsed.owner;
+  const records = Array.isArray(parsed) ? parsed : parsed && parsed.records;
   if (!Array.isArray(records)) throw new Error(`invalid mutant recovery journal: ${journal}`);
-  return records.map((record) => ({
-    file: checked(root, record.file),
-    original: Buffer.from(record.original, 'base64').toString('utf8')
-  }));
+  return {
+    owner: owner && typeof owner === 'object' ? owner : null,
+    records: records.map((record) => ({
+      file: checked(root, record.file),
+      original: Buffer.from(record.original, 'base64').toString('utf8')
+    }))
+  };
 }
 
 function writeJournal(root, records) {
@@ -34,14 +82,21 @@ function writeJournal(root, records) {
     return;
   }
   const temp = `${journal}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(records.map(({ file, original }) => ({
-    file, original: Buffer.from(original, 'utf8').toString('base64')
-  }))), 'utf8');
+  fs.writeFileSync(temp, JSON.stringify({
+    owner: selfOwner(),
+    records: records.map(({ file, original }) => ({
+      file, original: Buffer.from(original, 'utf8').toString('base64')
+    }))
+  }), 'utf8');
   fs.renameSync(temp, journal);
 }
 
 function recover(root) {
-  const records = readJournal(root);
+  const { owner, records } = readJournal(root);
+  if (records.length && ownerLive(owner)) {
+    throw new Error(`mutant runner pid ${owner.pid} (started ${owner.start}) is still running and owns ${journalPath(root)}; `
+      + 'not restoring its live mutant. Wait for it to finish, or stop that runner first.');
+  }
   for (const record of records) fs.writeFileSync(record.file, record.original, 'utf8');
   if (records.length) writeJournal(root, []);
   return records.length;
@@ -49,7 +104,11 @@ function recover(root) {
 
 function mutateFile(root, file, original, mutated) {
   const abs = checked(root, file);
-  const records = readJournal(root);
+  const { owner, records } = readJournal(root);
+  // Another runner started between our mutants and is now mutating: do not take its journal over.
+  if (records.length && owner && owner.pid !== process.pid && ownerLive(owner)) {
+    throw new Error(`mutant runner pid ${owner.pid} is mutating this tree concurrently; stopping`);
+  }
   if (records.some((record) => record.file === abs)) throw new Error(`already mutating ${abs}`);
   writeJournal(root, [...records, { file: abs, original }]);
   fs.writeFileSync(abs, mutated, 'utf8');
@@ -60,7 +119,7 @@ function mutateFile(root, file, original, mutated) {
 function restoreFile(root, file, original) {
   const abs = checked(root, file);
   fs.writeFileSync(abs, original, 'utf8');
-  writeJournal(root, readJournal(root).filter((record) => record.file !== abs));
+  writeJournal(root, readJournal(root).records.filter((record) => record.file !== abs));
 }
 
 module.exports = { recover, mutateFile, restoreFile, journalPath };
