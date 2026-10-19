@@ -1423,7 +1423,9 @@ export interface HeavyLockDeps {
  * the preload cannot reach fails open, and every fail-open is a hive row (Jim SHOULD 1).
  */
 export interface HeavyLeaseRequest {
-  op?: 'acquire' | 'release';
+  /** HEAVY-LOCK-RESERVATION-RELEASE: 'unreserve' (the `heavy release` command) gives up the
+   *  caller's reservation and its queue place; 'status' (`heavy status`) reads the lock. */
+  op?: 'acquire' | 'release' | 'unreserve' | 'status';
   /** acquire: the test process, its creation time (epoch ms) and its parent. */
   pid?: number;
   createdMs?: number;
@@ -1438,12 +1440,20 @@ export interface HeavyLeaseRequest {
   parentRun?: string;
   /** release: the lease an acquire answered. */
   leaseId?: string;
+  /** unreserve: a queued agent the freed slot goes to first (else the oldest waiter). */
+  to?: string;
 }
 export type HeavyLeaseAnswer =
   | { state: 'light'; run: string; why: string }
   | { state: 'held'; run: string; leaseId: string | null; why: string }
   | { state: 'wait'; position: number; holders: string[] }
-  | { state: 'released' };
+  | { state: 'released' }
+  | HeavyUnreserveAnswer
+  | { state: 'status'; holders: string[]; waiters: string[]; reserved: Array<{ agentId: string; until: string }> };
+/** `reserved`/`queued`: what the caller gave up; `next`: who the slot is now reserved for (null: no
+ *  one waits, so it is free); `to`: the asked-for agent was not queued, so it went in FIFO order;
+ *  `waiting`: a test process of the caller's still waits in a lease and will queue it again. */
+export type HeavyUnreserveAnswer = { state: 'unreserved'; reserved: boolean; queued: boolean; next: string | null; to?: 'not-queued'; waiting?: true };
 /** How long one lease request may wait (a long poll; the preload asks again). */
 export const HEAVY_LEASE_POLL_MS = 25_000;
 /** A test process is the call's OWN node when its parent is the call's shell (or a pass-through
@@ -1472,7 +1482,7 @@ export function heavySlotFreeNotice(agentId: string, kind: string, until: number
 } {
   const at = `${new Date(until).toISOString().slice(11, 16)}Z`;
   const subject = `HEAVY SLOT FREE: the ${kind} you were denied can run now; the slot is reserved for you until ${at}`;
-  const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. No reply is needed.`;
+  const body = `The heavy-job slot you were queued for is now reserved for you until ${at}. Run your ${kind} now if you still need it; if you do not run it by then, it passes to the next agent in the queue. If you no longer need it, run \`heavy release\` so it passes on at once (\`heavy release --to <agent>\` gives it to that queued agent first). No reply is needed.`;
   return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system', steer: `${subject}.` };
 }
 
@@ -1804,6 +1814,38 @@ export class HeavyJobLock {
     else if (had) this.grant();
   }
 
+  /** HEAVY-LOCK-RESERVATION-RELEASE (card, 2026-10-04: Jim got HEAVY SLOT FREE, wanted to hand it to
+   *  Creed and could only let it idle for 5 min). The agent gives up its unused reservation and its
+   *  queue place (`heavy release`): the slot passes on at once, to `to` first when that agent is
+   *  queued, else to the oldest waiter. A held slot is not touched: it frees when its job ends. */
+  unreserve(agentId: string, to?: string): HeavyUnreserveAnswer {
+    // Jim INFO 3: the route takes any string; an agent id is short, and `to` is logged verbatim.
+    if (to !== undefined) to = to.slice(0, 80);
+    const own = this.waiters.find((w) => w.agentId === agentId);
+    const queued = !!own;
+    // Jim INFO 1: a test process of the caller's still waiting in a lease asks again within
+    // HEAVY_LEASE_POLL_MS and queues the agent again (at the back): the answer says so.
+    const waiting = !!own?.procs.length || !!this.reservations.get(agentId)?.procs.length;
+    this.dequeue(agentId);
+    this.leaseOnly.delete(agentId);
+    const r = this.reservations.get(agentId);
+    const reserved = this.reservations.delete(agentId);
+    let missed = false;
+    if (r && to !== undefined && to !== agentId) {
+      const i = this.waiters.findIndex((w) => w.agentId === to);
+      if (i > 0) this.waiters.unshift(...this.waiters.splice(i, 1));
+      missed = i < 0;
+    }
+    if (r) this.log({ kind: 'heavy-lock', action: 'reserve-released', agentId, heavyKind: r.kind, ...(to ? { to } : {}) });
+    else if (queued) this.log({ kind: 'heavy-lock', action: 'queue-left', agentId });
+    if (reserved || queued) this.changed();
+    const before = new Set(this.reservations.keys());
+    if (reserved) this.grant();
+    const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
+    if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
+    return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}), ...(waiting ? { waiting: true as const } : {}) };
+  }
+
   private release(agentId: string, reason: 'posttool' | 'process-exit' | 'pty-exit' | 'ttl' | 'expired-still-running' | 'settled-light'): void {
     const h = this.holders.get(agentId);
     if (!h) return;
@@ -1936,6 +1978,11 @@ export class HeavyJobLock {
    */
   async lease(agentId: string, r: HeavyLeaseRequest, gone?: () => boolean): Promise<HeavyLeaseAnswer> {
     if (r.op === 'release') { this.leaseEnd(agentId, String(r.leaseId ?? ''), 'released'); return { state: 'released' }; }
+    if (r.op === 'unreserve') return this.unreserve(agentId, typeof r.to === 'string' ? r.to : undefined);
+    if (r.op === 'status') {
+      const q = this.queueSnapshot();
+      return { state: 'status', holders: [...this.holders.keys()], waiters: q.waiters.map((w) => w.agentId), reserved: q.reserved.map((x) => ({ agentId: x.agentId, until: x.until })) };
+    }
     const pid = Number(r.pid);
     const createdMs = Math.round(Number(r.createdMs));
     if (!Number.isInteger(pid) || pid <= 0 || !Number.isFinite(createdMs)) throw new Error('a lease needs pid and createdMs');
