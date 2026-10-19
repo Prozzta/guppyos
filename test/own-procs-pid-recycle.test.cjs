@@ -184,15 +184,33 @@ const TASKKILL_LINE = /['"`]\s*taskkill(?:\.exe)?\s[^'"`]*\/T\b/i;   // a comman
 const TASKKILL_ALLOW = {
   'sync-child-calls-173.test.cjs': /rogue\(\): void \{ spawnSync\('taskkill'/   // a fake product source the scanner must REJECT
 };
+/** True when index `at` of `line` lies inside a string literal ('', "" or ``). */
+function inString(line, at) {
+  let q = null;
+  for (let i = 0; i < at; i++) {
+    const c = line[i];
+    if (q) { if (c === '\\') i++; else if (c === q) q = null; } else if (c === "'" || c === '"' || c === '`') q = c;
+  }
+  return q !== null;
+}
+/** A CALL spelled inside a string is data (a mutant table's from/to, e.g. claude-model-list-180 C23): it
+ *  counts only when one of its matches starts outside a string literal. */
+const isTaskkillCall = (text) => [...text.matchAll(new RegExp(TASKKILL_CALL.source, 'gi'))].some((m) => !inString(text, m.index));
 test('PIN (all of test/): no taskkill /T outside own-procs (it walks ParentProcessId alone, strangers included)', () => {
-  const bad = [...hits(TASKKILL_CALL), ...hits(TASKKILL_LINE)].filter((h) => !(TASKKILL_ALLOW[h.file] && TASKKILL_ALLOW[h.file].test(h.text)));
+  const calls = hits(TASKKILL_CALL).filter((h) => isTaskkillCall(h.text));
+  const bad = [...calls, ...hits(TASKKILL_LINE)].filter((h) => !(TASKKILL_ALLOW[h.file] && TASKKILL_ALLOW[h.file].test(h.text)));
   assert.deepStrictEqual(bad.map((h) => `${h.file}:${h.line}: ${h.text.slice(0, 140)}`), []);
   // the detector itself: the reverts Jim's mutants made must be caught
   for (const revert of [
     "  try { execFileSync('taskkill', ['/PID', String(rec.pid), '/T', '/F'], { stdio: 'ignore' }); } catch { /* gone */ }",
     "    spawnSync('taskkill', ['/pid', String(pid), '/t', '/f']);",
     "  execSync(`taskkill /PID ${pid} /T /F`);"
-  ]) assert.strictEqual(hits(/./, [{ file: 'mail-rig/driver.cjs', code: revert }]).some((h) => TASKKILL_CALL.test(h.text) || TASKKILL_LINE.test(h.text)), true, revert);
+  ]) assert.strictEqual(hits(/./, [{ file: 'mail-rig/driver.cjs', code: revert }]).some((h) => isTaskkillCall(h.text) || TASKKILL_LINE.test(h.text)), true, revert);
+  // ...a call spelled as a string is data, and a real call beside such data is still a call
+  const data = `  ['C23 the shim killed', "d.exec('taskkill', ['/PID', String(pid), '/T', '/F'],", "d.exec('taskkill', ['/PID', String(pid), '/F'],", successChecks]`;
+  assert.strictEqual(isTaskkillCall(data) || TASKKILL_LINE.test(data), false, 'mutant-table data is not a call');
+  assert.strictEqual(isTaskkillCall(`const row = "it's data"; d.exec('taskkill', ['/PID', String(pid), '/T', '/F']);`), true, 'a real call after a string');
+  assert.strictEqual(isTaskkillCall(`const t = 'x\\'y'; spawnSync('taskkill', ['/pid', p, '/t']);`), true, 'an escaped quote does not hide a call');
 });
 
 /**
