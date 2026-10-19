@@ -197,6 +197,7 @@ test('FLEET-LIVENESS-BLIND: fleet.json, the card-badge IPC, the strip and the ca
 // ─── Creed N1/N2 (third commit): the open-tool bookkeeping this card relies on ───────────────
 
 const HOOKS = loadTs('src/main/hooks.ts');
+const HEAVY = loadTs('src/main/heavyJob.ts');
 const A = loadTs('src/shared/activityView.ts');
 
 /** A HookServer on stubs; `deny` = the heavy lock refuses every heavy call, `gate` = the HITL gate refuses `gate`. */
@@ -204,7 +205,13 @@ function hookServer(Hook, { deny = false, gate = null } = {}) {
   const hive = { sockPath: () => null, codexHomeFor: () => null, recordSession: () => {}, appendLog: () => {}, registry: () => ({ agents: {} }), isGod: () => false, rosterContext: () => '', recordModel: () => {}, appendCostLedger: () => {} };
   const control = { shouldHalt: () => false, takeSteer: () => null, toolDecision: (_a, tool) => (tool === gate ? { deny: true, reason: 'gated' } : { deny: false }) };
   const s = new Hook(hive, () => null, () => ({}), control, undefined, undefined, () => {});
-  if (deny) s.setHeavyLock({ acquire: () => ({ allow: false, reason: 'slot busy' }), settle: () => {}, callDone: () => {} });
+  // A REAL lock that refuses every acquire: a hand-made partial stub broke when HLO196 added
+  // noteCall/noteCallEnd to the interface hooks.ts calls (FLEET-LIVENESS-STUB-196).
+  if (deny) {
+    const lock = new HEAVY.HeavyJobLock({ limit: () => 1, setTimer: () => ({}), clearTimer: () => {} });
+    lock.acquire = () => ({ allow: false, reason: 'slot busy', holders: [] });
+    s.setHeavyLock(lock);
+  }
   return s;
 }
 const SUITE = { command: 'node test/tools/run-tests.cjs' };
