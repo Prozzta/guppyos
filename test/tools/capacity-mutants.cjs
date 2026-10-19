@@ -7,8 +7,8 @@
  * scratchpad cannot be reproduced, and a count nobody can reproduce is not evidence.
  *
  * Each mutant injects ONE named defect into ONE source file, runs the capacity test
- * files, and must turn them RED. The file is always restored in `finally`, even on a
- * crash. An anchor that is missing or not unique is reported as INERT and counts as a
+ * files, and must turn them RED. The file is restored in `finally`; hard-kill recovery is
+ * journaled by the shared mutant-runner harness. An anchor that is missing or not unique is reported as INERT and counts as a
  * failure of the run, because a mutant that edits nothing proves nothing.
  *
  * Anchors are matched on LF-normalised text and the file is written back with its
@@ -26,8 +26,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { recover, mutateFile, restoreFile } = require('./mutant-runner-helper.cjs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
+recover(ROOT);
+if (process.argv.includes('--recover-only')) process.exit(0);
 const TESTS = ['test/capacity-strip-contract.test.cjs', 'test/capacity-strip-ui.test.cjs',
   'test/capacity-agent-impact.test.cjs', 'test/delivery-hold.test.cjs', 'test/capacity-monitor.test.cjs',
   'test/capacity-threshold.test.cjs', 'test/capacity-detail.test.cjs',
@@ -604,14 +607,14 @@ for (const [name, file, from, to] of selected) {
   let mutated = lf.slice(0, at) + to + lf.slice(at + from.length);
   if (crlf) mutated = mutated.replace(/\n/g, '\r\n');
   try {
-    fs.writeFileSync(abs, mutated);
+    mutateFile(ROOT, abs, original, mutated);
     const r = spawnSync(process.execPath, ['--test', ...TESTS], { cwd: ROOT, encoding: 'utf8' });
     const fails = (String(r.stdout).match(/^# fail (\d+)/m) || [])[1] ?? '?';
     const dead = r.status !== 0;
     if (dead) killed++;
     console.log(`${dead ? 'KILLED  ' : 'SURVIVED'}  ${name}  (failing tests: ${fails})`);
   } finally {
-    fs.writeFileSync(abs, original);
+    restoreFile(ROOT, abs, original);
   }
 }
 console.log(`\n${killed}/${selected.length} killed${inert ? `, ${inert} INERT` : ''}`);

@@ -30,6 +30,8 @@ build/AuthKey_*.p8
 # Mutant census scratch directories; unique names are removed on exit, ignored after a crash.
 test/.mutants-*/
 test/electron-harness/.mutant-run-*.cjs
+# Persistent crash-recovery journal for source-mutating mutant runners.
+.mutant-runner-recovery.json
 
 # NATIVE-MEMORY: the bundled model is provisioned by scripts/fetch-memory-model.cjs (digest-pinned
 # in resources/models/native-memory-manifest.json); the 90 MB binaries are never committed.
