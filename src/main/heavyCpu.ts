@@ -42,6 +42,10 @@ export const HEAVY_JOB_UNSTARTED_MS = 30 * 60_000;
 export const HEAVY_JOB_POLL_MS = 15_000;
 /** One request to the helper: past this it is treated as failed. */
 export const HEAVY_JOB_REQUEST_MS = 3_000;
+/** HEAVY-LOCK-RELEASE-LAG-197: after the helper's last exit notice for a job, this long passes before
+ *  the one check that may call the job over (a shell that outlives its call starts its next process
+ *  right after the join line exits; a new process inside this window keeps the job running). */
+export const HEAVY_JOB_EXIT_CONFIRM_MS = 400;
 
 export interface HeavyCpuOptions { background: boolean; half: boolean }
 
@@ -106,12 +110,18 @@ export function wrapToolInput(toolInput: unknown, id: string, o: HeavyCpuOptions
 export interface HeavyJobRow { pid: number; name: string; priorityClass: number; cpus: number; mask: string; createdMs: number }
 
 /** One line-oriented channel to `guppy-heavyjob serve` (injectable for tests). */
-export interface HeavyJobChannel { request(line: string): Promise<Record<string, unknown> | null>; close(): void }
+export interface HeavyJobChannel {
+  request(line: string): Promise<Record<string, unknown> | null>;
+  close(): void;
+  /** HEAVY-LOCK-RELEASE-LAG-197: the helper's unsolicited lines ({"event": ...}), never a reply. */
+  onEvent?(fn: (e: Record<string, unknown>) => void): void;
+}
 
 /** The real channel: the helper's serve mode on stdin/stdout. Requests are answered in order. */
 export function serveChannel(exe: string): HeavyJobChannel {
   const child = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
   const queue: Array<(r: Record<string, unknown> | null) => void> = [];
+  let onEvent: ((e: Record<string, unknown>) => void) | null = null;
   let buf = '';
   let dead = false;
   const fail = (): void => { dead = true; while (queue.length) queue.shift()!(null); };
@@ -127,6 +137,8 @@ export function serveChannel(exe: string): HeavyJobChannel {
       buf = buf.slice(i + 1);
       let r: Record<string, unknown> | null = null;
       try { r = JSON.parse(line) as Record<string, unknown>; } catch { r = null; }
+      // An event line is not the answer to the oldest request: it goes to its listener only.
+      if (r && typeof r.event === 'string') { try { onEvent?.(r); } catch { /* a listener never breaks the channel */ } continue; }
       queue.shift()?.(r);
     }
   });
@@ -141,7 +153,8 @@ export function serveChannel(exe: string): HeavyJobChannel {
         try { child.stdin.write(line + '\n'); } catch { fail(); }
       });
     },
-    close() { try { child.stdin.end(); } catch { /* gone */ } }
+    close() { try { child.stdin.end(); } catch { /* gone */ } },
+    onEvent(fn) { onEvent = fn; }
   };
 }
 
@@ -155,9 +168,22 @@ export interface HeavyJobsDeps {
   setInterval?: (fn: () => void, ms: number) => unknown;
   clearInterval?: (t: unknown) => void;
   log?: (row: Record<string, unknown>) => void;
+  setTimeout?: (fn: () => void, ms: number) => unknown;
+  clearTimeout?: (t: unknown) => void;
+  /** HEAVY-LOCK-RELEASE-LAG-197: a job the helper holds was made for `callId` ('held'), and nothing of
+   *  that call is left in it any more ('exited', once per job). The heavy lock frees its slot on it. */
+  onJob?: (e: { agentId: string; callId: string; job: string; state: 'held' | 'exited' }) => void;
 }
 
-interface TrackedJob { id: string; agentId: string; startMs: number; idleScans: number; started: boolean }
+interface TrackedJob {
+  id: string; agentId: string; startMs: number; idleScans: number; started: boolean;
+  /** HEAVY-LOCK-RELEASE-LAG-197: the heavy call it was made for (none: nobody is told it ended). */
+  callId: string | null;
+  exited: boolean;
+  /** The pending confirm after an exit notice, and when the first notice of this burst came. */
+  confirm: unknown;
+  noticeAt: number | null;
+}
 
 /** The jobs Guppy made for heavy calls: created before the call, changed live, let go when done. */
 export class HeavyJobs {
@@ -178,6 +204,7 @@ export class HeavyJobs {
     const exe = this.d.exe();
     if (!exe) return null;
     this.ch = (this.d.channel ?? serveChannel)(exe);
+    this.ch.onEvent?.((e) => this.onEvent(e));
     return this.ch;
   }
 
@@ -200,7 +227,7 @@ export class HeavyJobs {
   /** A heavy call is about to run: its job is created with the limits in force now, and the tool
    *  input to run instead is returned (null: leave the call as it is). `cmd`: the call is known to
    *  run in Windows cmd. */
-  async begin(agentId: string, toolInput: unknown, cmd = false): Promise<Record<string, unknown> | null> {
+  async begin(agentId: string, toolInput: unknown, cmd = false, callId: string | null = null): Promise<Record<string, unknown> | null> {
     if (this.d.platform !== 'win32' || !this.d.exe()) return null;
     const o = this.d.options();
     const start = this.now();
@@ -211,8 +238,9 @@ export class HeavyJobs {
     // Not created: the join line still makes the job with these limits itself (the options hold);
     // only a later live change cannot reach it.
     if (r?.ok === true) {
-      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false });
+      this.jobs.set(id, { id, agentId, startMs: start, idleScans: 0, started: false, callId, exited: false, confirm: null, noticeAt: null });
       this.arm();
+      if (callId) this.tell(agentId, callId, id, 'held');
     }
     this.log({ action: 'wrap', agentId, job: id, background: o.background, half: o.half, held: r?.ok === true });
     return wrapped;
@@ -244,15 +272,63 @@ export class HeavyJobs {
         this.log({ action: 'never-started', job: j.id, agentId: j.agentId });
         continue;
       }
-      const own = rows.filter((x) => typeof x.createdMs !== 'number' || x.createdMs === 0 || x.createdMs >= j.startMs - HEAVY_JOB_START_SKEW_MS);
+      const own = this.own(j, rows);
       if (own.length) { j.idleScans = 0; continue; }
       if (++j.idleScans < 2) continue;
       if (rows.length) await this.req(`set ${j.id} 0 0`);
       await this.req(`close ${j.id}`);
       this.jobs.delete(j.id);
+      this.cancelConfirm(j);
+      // The fallback when no exit notice came (Windows does not promise them).
+      this.exited(j, 'poll');
       this.log({ action: rows.length ? 'lifted' : 'done', job: j.id, agentId: j.agentId, kept: rows.map((x) => x.name) });
     }
     if (!this.jobs.size) this.disarm();
+  }
+
+  /** HEAVY-LOCK-RELEASE-LAG-197: a process of a job exited (or the job went empty). Every notice
+   *  restarts the confirm, so the check runs HEAVY_JOB_EXIT_CONFIRM_MS after the last one of a burst. */
+  private onEvent(e: Record<string, unknown>): void {
+    if (e.event !== 'exit' || typeof e.job !== 'string') return;
+    const j = this.jobs.get(e.job);
+    if (!j || j.exited) return;
+    j.started = true;
+    if (j.noticeAt === null) j.noticeAt = this.now();
+    this.cancelConfirm(j);
+    const st = this.d.setTimeout ?? ((fn: () => void, ms: number) => { const t = setTimeout(fn, ms); t.unref?.(); return t; });
+    j.confirm = st(() => { j.confirm = null; void this.confirmExit(j); }, HEAVY_JOB_EXIT_CONFIRM_MS);
+  }
+
+  private cancelConfirm(j: TrackedJob): void {
+    if (j.confirm === null) return;
+    (this.d.clearTimeout ?? ((t: unknown) => clearTimeout(t as ReturnType<typeof setTimeout>)))(j.confirm);
+    j.confirm = null;
+  }
+
+  /** One list after the notices settle: nothing of the call left (only processes from before it) is
+   *  an exit now. A failed list says nothing: the poll still decides. */
+  private async confirmExit(j: TrackedJob): Promise<void> {
+    if (j.exited || this.jobs.get(j.id) !== j) return;
+    const r = await this.req(`list ${j.id}`);
+    if (!r || r.ok !== true || !Array.isArray(r.rows)) return;
+    if (j.confirm !== null || this.jobs.get(j.id) !== j) return;   // a newer notice re-armed it, or it was let go
+    if (this.own(j, r.rows as HeavyJobRow[]).length) { j.noticeAt = null; return; }
+    this.exited(j, 'notice');
+  }
+
+  private own(j: TrackedJob, rows: HeavyJobRow[]): HeavyJobRow[] {
+    return rows.filter((x) => typeof x.createdMs !== 'number' || x.createdMs === 0 || x.createdMs >= j.startMs - HEAVY_JOB_START_SKEW_MS);
+  }
+
+  private exited(j: TrackedJob, by: 'notice' | 'poll'): void {
+    if (j.exited) return;
+    j.exited = true;
+    this.log({ action: 'exited', job: j.id, agentId: j.agentId, by, ...(j.noticeAt !== null ? { afterNoticeMs: this.now() - j.noticeAt } : {}) });
+    if (j.callId) this.tell(j.agentId, j.callId, j.id, 'exited');
+  }
+
+  private tell(agentId: string, callId: string, job: string, state: 'held' | 'exited'): void {
+    try { this.d.onJob?.({ agentId, callId, job, state }); } catch { /* the lock's own checks still run */ }
   }
 
   /** The jobs being tracked (for tests and the live proof). */
@@ -270,5 +346,5 @@ export class HeavyJobs {
     this.timer = null;
   }
 
-  dispose(): void { this.disarm(); this.ch?.close(); this.ch = null; }
+  dispose(): void { this.disarm(); for (const j of this.jobs.values()) this.cancelConfirm(j); this.ch?.close(); this.ch = null; }
 }

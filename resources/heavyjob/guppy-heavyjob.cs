@@ -23,6 +23,10 @@
 //       Guppy's own channel (stdin/stdout, one JSON line per request): create, set, list and close
 //       <job>. It holds the handle of every job Guppy made, so a job keeps its name (a live change and
 //       the join line find it) until Guppy lets it go.
+//       HEAVY-LOCK-RELEASE-LAG-197: every job it creates is tied to one completion port; a process of
+//       a job exiting (normally or not) or the job going empty is written at once as an unsolicited
+//       line {"event":"exit","job":<id>,"msg":<n>,"pid":<pid>}, between replies, never inside one.
+//       Windows does not guarantee these messages, so Guppy's own checks stay as the fallback.
 //
 // background = PriorityClass BELOW_NORMAL (CPU priority only). half = affinity of floor(n/2) logical
 // processors (at least 1), n = the active logical processors of the machine.
@@ -64,6 +68,10 @@ static class HeavyJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32FirstW(IntPtr snap, ref PROCESSENTRY32 e);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool Process32NextW(IntPtr snap, ref PROCESSENTRY32 e);
+    [StructLayout(LayoutKind.Sequential)] struct PORT_INFO { public IntPtr CompletionKey, CompletionPort; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref PORT_INFO info, int len);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateIoCompletionPort(IntPtr file, IntPtr port, UIntPtr key, uint threads);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetQueuedCompletionStatus(IntPtr port, out uint bytes, out UIntPtr key, out IntPtr overlapped, uint ms);
 
     const uint LIMIT_AFFINITY = 0x10, LIMIT_PRIORITY_CLASS = 0x20;
     const uint BELOW_NORMAL = 0x4000, NORMAL = 0x20;
@@ -277,9 +285,45 @@ static class HeavyJob
     //   set <id> <b> <h>      change them on a running job (live apply; a limit turned off resets)
     //   list <id>             the processes in the job
     //   close <id>            drop the job's handle (Guppy is done with it)
+    // HEAVY-LOCK-RELEASE-LAG-197: the job messages that mean a process of the job is gone.
+    const uint MSG_ACTIVE_PROCESS_ZERO = 4, MSG_EXIT_PROCESS = 7, MSG_ABNORMAL_EXIT_PROCESS = 8;
+    const int JobObjectAssociateCompletionPortInformation = 7;
+    static readonly object Out = new object();
+    static readonly Dictionary<long, string> PortKeys = new Dictionary<long, string>();
+
+    static void Write(string line) { lock (Out) { Console.Out.WriteLine(line); Console.Out.Flush(); } }
+
+    // Ties a new job to the port under a fresh key. A failure only loses the early notice.
+    static long Watch(IntPtr port, IntPtr job, string id, ref long next)
+    {
+        if (port == IntPtr.Zero) return 0;
+        long key = ++next;
+        lock (PortKeys) PortKeys[key] = id;
+        var info = new PORT_INFO { CompletionKey = (IntPtr)key, CompletionPort = port };
+        if (!SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, ref info, Marshal.SizeOf(typeof(PORT_INFO))))
+        { lock (PortKeys) PortKeys.Remove(key); return 0; }
+        return key;
+    }
+
+    static void PortLoop(IntPtr port)
+    {
+        uint msg; UIntPtr key; IntPtr pid;
+        while (GetQueuedCompletionStatus(port, out msg, out key, out pid, 0xFFFFFFFF))
+        {
+            if (msg != MSG_EXIT_PROCESS && msg != MSG_ABNORMAL_EXIT_PROCESS && msg != MSG_ACTIVE_PROCESS_ZERO) continue;
+            string id;
+            lock (PortKeys) if (!PortKeys.TryGetValue((long)key.ToUInt64(), out id)) continue;
+            Write("{\"event\":\"exit\",\"job\":\"" + id + "\",\"msg\":" + msg + ",\"pid\":" + pid.ToInt64() + "}");
+        }
+    }
+
     static int Serve()
     {
         var jobs = new Dictionary<string, IntPtr>();
+        var keys = new Dictionary<string, long>();
+        long next = 0;
+        IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, UIntPtr.Zero, 1);
+        if (port != IntPtr.Zero) new System.Threading.Thread(() => PortLoop(port)) { IsBackground = true }.Start();
         string line;
         while ((line = Console.In.ReadLine()) != null)
         {
@@ -296,6 +340,7 @@ static class HeavyJob
                         job = CreateJobObjectW(IntPtr.Zero, name);
                         if (job == IntPtr.Zero) throw new Exception("CreateJobObject failed (" + Marshal.GetLastWin32Error() + ")");
                         jobs[w[1]] = job;
+                        keys[w[1]] = Watch(port, job, w[1], ref next);
                     }
                     Apply(job, w[2] == "1", w[3] == "1");
                     reply = "{\"ok\":true}";
@@ -313,15 +358,14 @@ static class HeavyJob
                 }
                 else if (w.Length == 2 && w[0] == "close")
                 {
-                    if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); }
+                    if (jobs.TryGetValue(w[1], out job)) { CloseHandle(job); jobs.Remove(w[1]); long k; if (keys.TryGetValue(w[1], out k)) { lock (PortKeys) PortKeys.Remove(k); keys.Remove(w[1]); } }
                     reply = "{\"ok\":true}";
                 }
                 else if (w.Length == 1 && w[0] == "cpus") reply = "{\"ok\":true,\"logical\":" + GetActiveProcessorCount(0xFFFF) + ",\"half\":" + HalfCount() + "}";
                 else throw new Exception("bad request");
             }
             catch (Exception e) { reply = "{\"ok\":false,\"error\":\"" + e.Message.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"}"; }
-            Console.Out.WriteLine(reply);
-            Console.Out.Flush();
+            Write(reply);
         }
         return 0;
     }
