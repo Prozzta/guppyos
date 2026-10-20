@@ -9,6 +9,7 @@ const { estimateCostUsd, normalizeModel, priceFor } = loadTs('src/main/pricing.t
 test('pricing resolves every shipped Claude picker id to its published rate row', () => {
   const cases = [
     ['claude-fable-5-1', { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWrite5mPerM: 12.5, cacheWrite1hPerM: 20 }],
+    ['claude-mythos-5-1', { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWrite5mPerM: 12.5, cacheWrite1hPerM: 20 }],
     ['claude-fable-5', { inputPerM: 10, outputPerM: 50, cacheReadPerM: 1, cacheWrite5mPerM: 12.5, cacheWrite1hPerM: 20 }],
     ['claude-opus-5-5', { inputPerM: 4, outputPerM: 20, cacheReadPerM: 0.2, cacheWrite5mPerM: 5, cacheWrite1hPerM: 8 }],
     ['claude-opus-5-5[1m]', { inputPerM: 4, outputPerM: 20, cacheReadPerM: 0.2, cacheWrite5mPerM: 5, cacheWrite1hPerM: 8 }],

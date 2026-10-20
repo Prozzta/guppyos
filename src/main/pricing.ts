@@ -60,6 +60,7 @@ export function priceFor(model: string | undefined | null): ModelPrice {
   const m = normalizeModel(model).toLowerCase();
   if (m === 'claude-opus-5-5') return OPUS_5_5;
   if (m === 'claude-fable-5-1') return FABLE_5_1;
+  if (m === 'claude-mythos-5-1') return FABLE_5_1;
   if (m === 'claude-fable-5' || m.startsWith('claude-mythos-5')) return FABLE_5;
   if (m === 'claude-opus-5' || m === 'claude-opus-4-8') return OPUS_5;
   if (m === 'claude-sonnet-5') return SONNET_5;
