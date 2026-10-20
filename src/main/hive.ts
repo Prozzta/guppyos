@@ -3448,6 +3448,12 @@ export class HiveManager {
           if (partial.in_reply_to !== undefined && partial.in_reply_to !== null && typeof partial.in_reply_to !== 'string') {
             throw new Error('unroutable: in_reply_to must be a string or null');
           }
+          // MAIL-EMPTY-SUBJECT-BODY-195: a message that says nothing (no subject and no body, or only
+          // whitespace) was delivered as an empty mail. Either one alone is a message (a one-line
+          // subject, or a body under no title), so only both blank is refused.
+          if (partial.subject !== undefined && typeof partial.subject !== 'string') throw new Error('unroutable: subject must be a string');
+          if (partial.body !== undefined && typeof partial.body !== 'string') throw new Error('unroutable: body must be a string');
+          if (!partial.subject?.trim() && !partial.body?.trim()) throw new Error('unroutable: subject and body are both empty');
           const msg = this.normalize(partial, id);
           msg.from = id; // sender is authoritative — the owning directory
           // HIVE-DUP-DONE-MAIL: an exact repeat within the window is archived, not delivered. The

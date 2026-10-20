@@ -215,6 +215,82 @@ test('MUTANT CENSUS REPLY-LINK-GAP: reply-schema mutants apply once and die at t
   }
 });
 
+// MAIL-EMPTY-SUBJECT-BODY-195 (Dwight 2026-10-18T20-12-50): a message with no subject and no body
+// was delivered as an empty mail. Both blank (whitespace counts as blank) is refused to the sender
+// as unroutable; either one alone is a message and routes; a non-string subject or body is refused.
+async function emptyMailKiller(t, Manager, L) {
+  const { hive, outbox } = await floor(t, Manager);
+  const refused = [
+    ['empty.json', { to: 'god-1', act: 'inform' }, /subject and body are both empty/],
+    ['blank.json', { to: 'god-1', act: 'inform', subject: '  ', body: '\n\t' }, /subject and body are both empty/],
+    ['number-subject.json', { to: 'god-1', act: 'inform', subject: 5, body: 'x' }, /subject must be a string/],
+    ['object-body.json', { to: 'god-1', act: 'inform', subject: 's', body: {} }, /body must be a string/]
+  ];
+  const routed = [
+    ['subject-only.json', { to: 'god-1', act: 'done', subject: 'PASS @abc' }],
+    ['body-only.json', { to: 'god-1', act: 'inform', body: 'just a body' }]
+  ];
+  for (const [file, payload] of [...refused, ...routed]) {
+    const f = path.join(outbox, file);
+    fs.writeFileSync(f, JSON.stringify(payload));
+    olderThanFreshWriteGrace(f);
+  }
+  assert.equal(hive.routeOnce(), routed.length, 'EMPTY MAIL: only the messages that say something route');
+  for (const [file, , reason] of refused) {
+    assert.equal(fs.existsSync(path.join(outbox, '.sent', `bad-${file}`)), true, `EMPTY MAIL: ${file} goes to the failed state`);
+    const notice = hive.inbox('jim-1').find((m) => m.subject.endsWith(file));
+    assert.ok(notice, `EMPTY MAIL: the sender is told why ${file} was refused`);
+    assert.match(notice.subject, reason, `EMPTY MAIL: ${file} names its reason`);
+  }
+  const got = hive.inbox('god-1');
+  assert.deepEqual(got.map((m) => [m.subject, m.body]).sort(), [['', 'just a body'], ['PASS @abc', '']], 'EMPTY MAIL: a subject alone or a body alone is delivered');
+  // The ledger path: a subject is required, and a blank one is none.
+  const op = (message) => L.parseLedgerOp({ op: 'mesb-1', message: { to: 'god-1', act: 'inform', ...message } });
+  assert.match(String(op({ subject: '  ', body: '' }).error), /message\.subject: required/, 'EMPTY MAIL: the ledger refuses a blank subject');
+  assert.match(String(op({ subject: '', body: '' }).error), /message\.subject: required/, 'EMPTY MAIL: the ledger refuses an empty subject');
+  assert.equal(op({ subject: 'PASS', body: '' }).ok, true, 'EMPTY MAIL: the ledger takes a subject alone');
+}
+
+const LEDGER = loadTs('src/main/ledger.ts');
+
+test('MAIL-EMPTY-SUBJECT-BODY-195: a message with no subject and no body is refused to its sender; either alone routes', async (t) => {
+  await emptyMailKiller(t, HiveManager, LEDGER);
+});
+
+const EMPTY_MAIL_MUTANTS = [
+  { name: 'MESB-M1: both empty is delivered', file: 'src/main/hive.ts',
+    edits: [["if (!partial.subject?.trim() && !partial.body?.trim()) throw", "if (false) throw"]] },
+  { name: 'MESB-M2: whitespace counts as text', file: 'src/main/hive.ts',
+    edits: [["if (!partial.subject?.trim() && !partial.body?.trim()) throw", "if (!partial.subject && !partial.body) throw"]] },
+  { name: 'MESB-M3: either one empty is refused', file: 'src/main/hive.ts',
+    edits: [["if (!partial.subject?.trim() && !partial.body?.trim()) throw", "if (!partial.subject?.trim() || !partial.body?.trim()) throw"]] },
+  { name: 'MESB-M4: a non-string subject is not checked', file: 'src/main/hive.ts',
+    edits: [["if (partial.subject !== undefined && typeof partial.subject !== 'string') throw", "if (false) throw"]] },
+  { name: 'MESB-M5: a non-string body is not checked', file: 'src/main/hive.ts',
+    edits: [["if (partial.body !== undefined && typeof partial.body !== 'string') throw", "if (false) throw"]] },
+  { name: 'MESB-M6: the ledger takes a blank subject', file: 'src/main/ledger.ts',
+    edits: [['if (!str(m.subject, 1000) || !m.subject.trim()) return', 'if (!str(m.subject, 1000)) return']] }
+];
+
+test('MUTANT CENSUS MAIL-EMPTY-SUBJECT-BODY-195: every mutant applies once and dies at an EMPTY MAIL assertion', async (t) => {
+  for (const mutant of EMPTY_MAIL_MUTANTS) {
+    await t.test(`mutant: ${mutant.name}`, async (subtest) => {
+      let text = readSource(mutant.file);
+      for (const [from, to] of mutant.edits) {
+        assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
+        text = text.replace(from, () => to);
+      }
+      const mutated = loadTs.fromText(mutant.file, text);
+      const Manager = mutant.file === 'src/main/hive.ts' ? mutated.HiveManager : HiveManager;
+      const L = mutant.file === 'src/main/ledger.ts' ? mutated : LEDGER;
+      let died = null;
+      try { await emptyMailKiller(subtest, Manager, L); } catch (e) { died = e; }
+      assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name} (${died && died.message})`);
+      assert.match(died.message, /EMPTY MAIL/, `${mutant.name} died at the wrong assertion: ${died.message}`);
+    });
+  }
+});
+
 test('a delivered message retries only its archive when .sent is temporarily unavailable', async (t) => {
   const { hive, events, outbox } = await floor(t);
   const sent = path.join(outbox, '.sent');
