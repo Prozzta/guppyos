@@ -139,6 +139,7 @@ const K = {
     const held = [['b', r.take('b', BUILD)]];
     for (let i = 1; i < N; i++) held.push([`c${i}`, r.take(`c${i}`, BUILD)]);
     assert.equal(r.take('x', BUILD).allow, false);
+    assert.equal(r.take('z', BUILD).allow, false, 'z queues behind x');
     const [c, cd] = held.pop();
     r.l.callDone(c, cd.id);
     assert.deepEqual(reserved(r), ['x'], 'x is reserved for its build');
@@ -146,7 +147,7 @@ const K = {
     assert.equal(x.allow, false, `A SHARED RESERVATION IS NOT THE EMPTY MACHINE: a FULL on it waits (${N} slots)`);
     assert.equal(r.l.snapshot().some((h) => h.agentId === 'x'), false, 'x holds nothing');
     const q = r.l.queueSnapshot();
-    assert.deepEqual([q.waiters[0].agentId, q.waiters[0].exclusive, q.reserved.length], ['x', true, 0], 'x waits, exclusive, at the head');
+    assert.deepEqual([q.waiters[0].agentId, q.waiters[0].exclusive, q.reserved.length], ['x', true, 0], 'X KEEPS ITS TURN: it waits, exclusive, at the head, ahead of z');
     assert.equal(r.take('y', BUILD).allow, false, 'NOTHING PASSES IT');
     for (const [a, d] of held.slice(0, -1)) { r.l.callDone(a, d.id); assert.deepEqual(reserved(r), [], 'not reserved while another job runs'); }
     const [a, d] = held[held.length - 1];
@@ -315,6 +316,9 @@ const MUTANTS = [
   { name: 'a shared reservation takes a FULL (Jim MUST-1)',
     edits: [['    if (reserved && excl && !this.fits(agentId, true, limit)) {', '    if (false) {']],
     killer: 'reservedShared', dies: /A SHARED RESERVATION IS NOT THE EMPTY MACHINE/ },
+  { name: 'the FULL goes to the back of the queue (Jim NIT-1)',
+    edits: [['      this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind,', '      this.waiters.push({ agentId, kind: cls.kind as HeavyKind,']],
+    killer: 'reservedShared', dies: /X KEEPS ITS TURN/ },
   { name: 'a holder\'s FULL queues behind a waiter (re-entry admits)',
     edits: [['      if (excl && !mine.exclusive && !reserved && !this.fits(agentId, true, limit)) return', '      if (excl && !mine.exclusive && !reserved && !this.admits(agentId, true, limit)) return']],
     killer: 'reentryAhead', dies: /A HOLDER'S FULL DOES NOT QUEUE BEHIND A WAITER/ },
