@@ -504,7 +504,7 @@ test('MF4 LIVE (Windows): the real hidden listing returns this node process with
     // fail here with this reason, not hang until the file timeout).
     const RERUN_BOX_MS = 60_000;
     const r0 = performance.now();
-    rows = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: RERUN_BOX_MS, maxBuffer: 16 * 1024 * 1024 },
+    rows = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', PROCESS_LISTING_SCRIPT], { windowsHide: true, timeout: RERUN_BOX_MS, maxBuffer: 16 * 1024 * 1024, env: require('./tools/ps-env.cjs').psEnv() },
       (err, out) => res(err ? null : parseProcessListing(String(out)))));
     const rerunMs = Math.round(performance.now() - r0);
     // J-LF3 (b): the re-run's duration is always reported, so a listing that has become STRUCTURALLY

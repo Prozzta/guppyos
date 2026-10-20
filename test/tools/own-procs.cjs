@@ -20,6 +20,7 @@
  * Not on win32: no process table, so nothing can be verified and nothing is killed.
  */
 const { execFileSync } = require('node:child_process');
+const { psEnv } = require('./ps-env.cjs');
 
 /**
  * ONLY for the orphans of a root that is gone: how far before `bornMs` a child of ours may have been
@@ -138,7 +139,7 @@ const ROW = '"$($_.ProcessId)|$($_.ParentProcessId)|$(([DateTimeOffset]$_.Creati
 function powershell(script) {
   const body = `$ProgressPreference = 'SilentlyContinue'\n${script}`;
   return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(body, 'utf16le').toString('base64')],
-    { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+    { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: psEnv() });
 }
 
 /** The process table (win32; [] elsewhere). `filter` is a WQL filter, e.g. "ParentProcessId=12". */

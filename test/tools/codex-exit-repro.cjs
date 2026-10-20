@@ -47,7 +47,7 @@ const cwd = path.join(base, 'w');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const strip = (s) => String(s).replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b[()][A-Za-z0-9]/g, '').replace(/\x1b[=>78DEHMNOZc]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
 const PS = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-const ps = (script) => spawnSync(PS, lb.psArgs(script), { encoding: 'utf8', windowsHide: true, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
+const ps = (script) => spawnSync(PS, lb.psArgs(script), { encoding: 'utf8', windowsHide: true, timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'], env: require('./ps-env.cjs').psEnv() });
 
 const rec = { id, base, events: [], output: '', exit: null, aborted: null, typed: null, tree: {}, killed: [], survivors: [], leftovers: null, gone: null };
 const t0 = Date.now();

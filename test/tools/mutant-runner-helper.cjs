@@ -35,7 +35,7 @@ function processStart(pid) {
   const r = process.platform === 'win32'
     ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `$p = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().ToString('o') }`],
-    { encoding: 'utf8', windowsHide: true, timeout: 60_000 })
+    { encoding: 'utf8', windowsHide: true, timeout: 60_000, env: require('./ps-env.cjs').psEnv() })
     : spawnSync('ps', ['-o', 'lstart=', '-p', String(Number(pid))], { encoding: 'utf8', timeout: 60_000 });
   const out = r.status === 0 ? String(r.stdout || '').trim() : '';
   return out || null;

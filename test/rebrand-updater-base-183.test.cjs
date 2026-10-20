@@ -162,7 +162,7 @@ test('compiled: a pending installer that is in use (a 1.1.81 updater runs it) st
   const stop = path.join(ctl, 'stop');
   const holder = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
     "$f=[IO.File]::Open($env:F,'Open','Read','Read'); Set-Content -Path $env:R -Value 1; $n=0; while(-not (Test-Path $env:S) -and $n -lt 600){Start-Sleep -Milliseconds 100; $n++}; $f.Close()"],
-  { env: { ...process.env, F: running, R: ready, S: stop }, windowsHide: true, stdio: 'ignore' });
+  { env: require('./tools/ps-env.cjs').psEnv({ ...process.env, F: running, R: ready, S: stop }), windowsHide: true, stdio: 'ignore' });
   try {
     const t0 = Date.now();
     while (!fs.existsSync(ready) && Date.now() - t0 < 30_000) spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},100)']);

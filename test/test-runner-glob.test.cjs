@@ -220,7 +220,7 @@ function recentProcesses(seconds = 120) {
   try {
     return require('node:child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -gt (Get-Date).AddSeconds(-${seconds}) } | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $($_.Name)" }`],
-    { encoding: 'utf8', windowsHide: true }).split(/\r?\n/).filter(Boolean).join(', ');
+    { encoding: 'utf8', windowsHide: true, env: require('./tools/ps-env.cjs').psEnv() }).split(/\r?\n/).filter(Boolean).join(', ');
   } catch (e) { return `(no process list: ${e.message})`; }
 }
 
@@ -372,7 +372,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // 1.1.98 stage 3: + 1 (heavy-slot-exclusive-192), + 1 (needs-human-192), + 1 (hook-token-writers-192),
   // ZT-I2-CONDENSE: - 3 (hidden-claude, reflect-condense, reflect-heading-demote retired),
   // + 2 (memory-rollover-stop-zti2, zt-i2-retired-condense); + 0 (wakeup-wing-wrong-set-191), + 1 (hop-cap-192).
-  // + 1 (heavy-lock-live-file-192), + 1 (heavy-lock-cmd-for-198).
+  // + 1 (heavy-lock-live-file-192).
+  // 1.1.98 stage 4: + 1 (heavy-lock-cmd-for-198), + 1 (ps-modcache-leak).
   assert.equal(files.length, 472, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');

@@ -31,7 +31,7 @@ function harnessCpuMask(env = process.env) {
   try {
     out = require('node:child_process').execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       '"$([uint64][int64][Diagnostics.Process]::GetCurrentProcess().ProcessorAffinity) $env:NUMBER_OF_PROCESSORS"'],
-      { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+      { encoding: 'utf8', windowsHide: true, timeout: 15_000, env: require('../tools/ps-env.cjs').psEnv() });
   } catch {
     return null; // unknown: the installed Electron, as before
   }

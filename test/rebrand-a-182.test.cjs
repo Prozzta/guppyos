@@ -291,7 +291,7 @@ function nsisTools() {
 }
 
 const ps = (script, env) => spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
-  { env: { ...process.env, ...env }, encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+  { env: require('./tools/ps-env.cjs').psEnv({ ...process.env, ...env }), encoding: 'utf8', windowsHide: true, timeout: 60_000 });
 const makeLnk = (lnk, target) => assert.equal(ps('$s=(New-Object -ComObject WScript.Shell).CreateShortcut($env:L); $s.TargetPath=$env:T; $s.Save()', { L: lnk, T: target }).status, 0);
 const lnkTarget = (lnk) => ps('[Console]::Out.Write((New-Object -ComObject WScript.Shell).CreateShortcut($env:L).TargetPath)', { L: lnk }).stdout;
 

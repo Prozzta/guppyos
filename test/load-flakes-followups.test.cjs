@@ -107,7 +107,7 @@ test('J-LF2: the fake agent records `hung` in composer.json and rewrites it on h
 test('J-LF3 / RPROF: the timing checks are reported always and fail only under MUNDER_QUIET_TIMING_CHECKS=1; the re-run has a hang box', () => {
   const hj = fs.readFileSync(path.join(__dirname, 'heavy-job-lock.test.cjs'), 'utf8');
   assert.match(hj, /const RERUN_BOX_MS = 60_000;/);
-  assert.match(hj, /\{ windowsHide: true, timeout: RERUN_BOX_MS, maxBuffer: 16 \* 1024 \* 1024 \}/);
+  assert.match(hj, /\{ windowsHide: true, timeout: RERUN_BOX_MS, maxBuffer: 16 \* 1024 \* 1024, env: require\('\.\/tools\/ps-env\.cjs'\)\.psEnv\(\) \}/);
   assert.match(hj, /t\.diagnostic\(`unboxed re-run took \$\{rerunMs\} ms/);
   assert.match(hj, /if \(process\.env\.MUNDER_QUIET_TIMING_CHECKS === '1'\) assert\.ok\(rerunMs < PROBE_BOX_MS/);
   const rp = fs.readFileSync(path.join(__dirname, 'renderer-profile-harness.test.cjs'), 'utf8');

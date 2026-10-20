@@ -323,7 +323,7 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
       // (Start-Process makes a new console; without -Wait, which would put the shell in a job of its own.)
       const ownFile = path.join(dir, 'own.txt');
       const ps = `$p = Start-Process -FilePath $env:ComSpec -ArgumentList '/d /s /c "${joinLineFor(id)}guppy-heavyjob list ${id}"' -WindowStyle Hidden -RedirectStandardOutput '${ownFile}' -PassThru; $p.WaitForExit(); exit $p.ExitCode`;
-      const ps1 = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', env, windowsHide: true });
+      const ps1 = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8', env: require('./tools/ps-env.cjs').psEnv(env), windowsHide: true });
       assert.equal(ps1.status, 0, ps1.stderr);
       const ownOut = fs.readFileSync(ownFile, 'utf8');
       const ownRows = ownOut.trim().split(/\r?\n/).map((l) => JSON.parse(l));

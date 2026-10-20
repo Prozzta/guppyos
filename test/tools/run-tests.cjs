@@ -221,7 +221,9 @@ function run({
   log(`[test-runner] running ${files.length}${filters.length ? ` of ${total}` : ''} test files via node --test (per-file limit ${timeoutMs} ms)`);
   // A runner started from inside a node:test file inherits NODE_TEST_CONTEXT, which turns the
   // nested `node --test` into a reporting child (no real run, no reporters). It is a run of its own.
-  const env = { ...process.env };
+  // TEST-PS-MODCACHE-LEAK: one PowerShell module-cache path in a temp folder for every file, so a
+  // PowerShell that a test or the product under test starts never writes it under the repo root.
+  const env = require('./ps-env.cjs').psEnv(process.env);
   delete env.NODE_TEST_CONTEXT;
   if (env.HARNESS_CPU_MASK === undefined) env.HARNESS_CPU_MASK = String(cpuMask() ?? '');
   // LOAD-BURST-196: the gate loads first, so a file's job join below is inside its start slot too.
