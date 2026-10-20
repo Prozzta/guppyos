@@ -68,6 +68,8 @@ export interface OwnerWiring {
   bootSubmitted?: OwnerDeps['bootSubmitted'];
   /** WAKE-STALL-INTERFERED-192 B: the same report for any prompt (a wake's turn evidence). */
   submittedSince?: OwnerDeps['submittedSince'];
+  wakeSubmitted?: OwnerDeps['wakeSubmitted'];
+  wakeVerifiable?: OwnerDeps['wakeVerifiable'];
   /** WAKE-SCREEN-GUARD (Jim B2): the user's home (os.homedir in main). */
   homeDir?: () => string | undefined;
   now?: () => number;
@@ -168,6 +170,8 @@ export function buildOwnerDeps(w: OwnerWiring): OwnerDeps {
     bootSubmitted: w.bootSubmitted,
     startupSettled: w.startupSettled,
     submittedSince: w.submittedSince,
+    wakeSubmitted: w.wakeSubmitted,
+    wakeVerifiable: w.wakeVerifiable,
     capacity: {
       admit: (agentId, workClass) => w.capacity.admit(agentId, workClass),
       revalidate: (claim) => w.capacity.revalidate(claim, claim.target),

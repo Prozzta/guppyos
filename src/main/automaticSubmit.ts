@@ -703,6 +703,10 @@ export interface OwnerDeps {
    *  a re-Enter is COMMITTED on. `undefined` = no such report: an own draft is kept only until its
    *  re-Enter, as before. */
   submittedSince?: (ptyId: string, agentId: string, since: number) => boolean | undefined;
+  /** CODEX-REPLAY-SWALLOWS-INPUT: Codex rollout proof that an automatic wake actually
+   * reached its conversation. Undefined leaves non-Codex wake behaviour unchanged. */
+  wakeSubmitted?: (ptyId: string, agentId: string, since: number, text: string) => boolean | undefined;
+  wakeVerifiable?: (ptyId: string, agentId: string) => boolean;
 }
 
 // ─── Requests and outcomes ────────────────────────────────────────────────────────────
@@ -1584,6 +1588,7 @@ export class AutomaticSubmitOwner {
           this.ownDrafts.set(ptyId, { text: req.text, humanStage: staged.humanStage, incarnation: staged.incarnation, enteredAt: enterAt });
           // GOD-STARTUP-WAITS-ENTER G2: a boot prompt is COMMITTED only on the provider's report.
           if (cls === 'BOOT_SEQUENCE' && this.bootVerifiable(ptyId, req.agentId)) return this.verifyBootSubmitted(staged, enterAt);
+          if (cls === 'CAPACITY_GATED' && this.wakeVerifiable(ptyId, req.agentId)) return this.verifyWakeSubmitted(staged, enterAt);
           if (deps.verifySubmit?.(ptyId)) return this.verifySubmitted(staged);
           return { kind: 'COMMITTED' };
         }
@@ -2031,6 +2036,47 @@ export class AutomaticSubmitOwner {
   /** GOD-STARTUP-WAITS-ENTER G2: does this PTY's provider report submitted prompts? */
   private bootVerifiable(ptyId: string, agentId: string): boolean {
     try { return this.deps.bootSubmitted?.(ptyId, agentId, this.deps.now()) !== undefined; } catch { return false; }
+  }
+
+  private wakeVerifiable(ptyId: string, agentId: string): boolean {
+    try { return this.deps.wakeVerifiable?.(ptyId, agentId) === true; } catch { return false; }
+  }
+
+  private async wakeConfirmed(s: Staged, since: number): Promise<boolean | undefined> {
+    const until = this.deps.now() + BOOT_SUBMIT_CONFIRM_MS;
+    for (;;) {
+      let ok: boolean | undefined;
+      try { ok = this.deps.wakeSubmitted?.(s.ptyId, s.req.agentId, since, s.req.text); } catch { ok = undefined; }
+      if (ok === true) return true;
+      // A bound but brand-new rollout with no user record is not a usable confirmation
+      // source yet. Preserve its prior wake behaviour rather than holding every first turn.
+      if (ok === undefined) return undefined;
+      if (this.deps.now() >= until) return false;
+      await this.sleep(SUBMIT_VERIFY_POLL_MS);
+    }
+  }
+
+  /** Codex can redraw away a draft without accepting it.  A CAPACITY_GATED wake is therefore
+   * consumed only on its rollout user_message.  One re-Enter is permitted solely when the exact
+   * draft remains visible; a vanished replay draft is held, never falsely committed. */
+  private async verifyWakeSubmitted(s: Staged, enterAt: number): Promise<SubmitOutcome> {
+    const first = await this.wakeConfirmed(s, enterAt);
+    if (first !== false) return { kind: 'COMMITTED' };
+    if (this.deps.incarnation(s.ptyId) !== s.incarnation) return this.interfere(s, 'SUBMIT_NOT_ACCEPTED', 'the terminal was replaced');
+    if (this.deps.humanGeneration(s.ptyId) !== s.humanStage) return this.interfere(s, 'SUBMIT_NOT_ACCEPTED', 'a person typed after our Enter');
+    const needle = needleFor(s.req.text);
+    const seen = needle ? await this.readScreen(s.ptyId, needle, s.req.text) : null;
+    if (!seen || seen.promptTailMatches !== true) return this.interfere(s, 'SUBMIT_NOT_ACCEPTED', 'not reported submitted, and the prompt is not provably our draft');
+    const again: Staged = { ...s, decision: null };
+    const at = this.deps.now();
+    const verdict = commitSection(again, this.deps);
+    if (verdict.kind === 'FAILED') return { kind: 'FAILED', reason: verdict.reason };
+    if (verdict.kind === 'INTERFERED') return this.interfere(again, verdict.reason, verdict.detail);
+    if (verdict.kind === 'SCREEN_CHANGED') return this.interfere(again, 'SUBMIT_NOT_ACCEPTED', 'output after the reading');
+    if (verdict.kind !== 'ENTERED' || !verdict.ok) return this.interfere(again, 'ENTER_WRITE_FAILED', verdict.kind === 'ENTERED' ? verdict.error : verdict.basis);
+    const second = await this.wakeConfirmed(again, at);
+    if (second !== false) return { kind: 'COMMITTED' };
+    return this.interfere(again, 'SUBMIT_NOT_ACCEPTED', 'not reported submitted after two Enters');
   }
 
   /** G2: wait (bounded) for the provider's report of a prompt submitted at or after `since`. */

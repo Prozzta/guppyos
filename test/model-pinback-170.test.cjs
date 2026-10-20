@@ -23,7 +23,7 @@ const loadTs = require('./load-ts.cjs');
 
 const C = loadTs('src/main/codexAgentConfig.ts');
 const P = loadTs('src/shared/modelPin.ts');
-const { CodexRolloutCapacitySource, latestTurnContextModel } = loadTs('src/main/codexRolloutCapacity.ts');
+const { CodexRolloutCapacitySource, latestTurnContextModel, latestUserMessageAt, codexUserMessageMatches } = loadTs('src/main/codexRolloutCapacity.ts');
 const { HiveManager } = loadTs('src/main/hive.ts');
 const { HookServer } = loadTs('src/main/hooks.ts');
 
@@ -158,6 +158,22 @@ test('latestTurnContextModel: the newest turn_context model with its own time', 
   assert.equal(latestTurnContextModel('{"type":"event_msg"}'), null);
 });
 
+test('latestUserMessageAt: only Codex user_message evidence confirms a submitted prompt', () => {
+  const tail = [
+    JSON.stringify({ timestamp: '2026-10-20T21:00:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'wake' }] } }),
+    JSON.stringify({ timestamp: '2026-10-20T21:00:01.000Z', type: 'turn_context', payload: { model: SOL } })
+  ].join('\n');
+  assert.equal(latestUserMessageAt(tail), Date.parse('2026-10-20T21:00:00.000Z'));
+  assert.equal(latestUserMessageAt(tail.replace('role":"user', 'role":"developer')), null);
+});
+
+test('multi-line CRLF message-box input confirms after Codex whitespace reflow', () => {
+  assert.equal(codexUserMessageMatches(
+    '  [hive] check inbox\n  Please inspect the new task.  ',
+    '[hive] check inbox\r\n\r\nPlease inspect the new task.'
+  ), true);
+});
+
 test('observeRollout: the model comes from the SAME tail read, bound to the hook session', (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pin170-roll-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -165,7 +181,15 @@ test('observeRollout: the model comes from the SAME tail read, bound to the hook
   rollout(home, OTHER, [turnContext(SOL, Date.now() + 5000)]);
   const src = new CodexRolloutCapacitySource(() => 'scope');
   assert.equal(src.observeRollout(home, { sessionId: SID }).turnModel.model, TERRA, 'not the other session, even if newer');
-  assert.deepEqual(src.observeRollout(home, { sessionId: SID }), { capacity: null, turnModel: null, usage: null }, 'an unchanged file is not re-read');
+  assert.deepEqual(src.observeRollout(home, { sessionId: SID }), { capacity: null, turnModel: null, usage: null, userMessage: undefined }, 'an unchanged file is not re-read');
+});
+
+test('observeRollout retains a real Codex role:user acknowledgement and its text', (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pin170-user-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  rollout(home, SID, [JSON.stringify({ timestamp: '2026-10-20T21:00:00.000Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '[hive] check inbox' }] } })]);
+  const read = new CodexRolloutCapacitySource(() => 'scope').observeRollout(home, { sessionId: SID });
+  assert.deepEqual(read.userMessage, { observedAt: Date.parse('2026-10-20T21:00:00.000Z'), text: '[hive] check inbox' });
 });
 
 test('G2 Codex: first turn_context = launch model does not pin; a switch pins; a return clears; stale lines never pin', async (t) => {

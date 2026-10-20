@@ -50,6 +50,7 @@ interface HomeCache {
   file: string | null;
   mtimeMs: number;
   size: number;
+  userMessage?: { observedAt: number; text: string };
 }
 
 /** Newest `rollout-*.jsonl` for this session under `<home>/sessions`, by mtime.
@@ -238,6 +239,42 @@ export function latestCodexRolloutUsage(tail: string): CodexRolloutUsage | null 
   return null;
 }
 
+/** The newest Codex-owned acknowledgement that text reached the conversation. Current Codex
+ * writes response_item/message role:user; legacy event_msg/user_message remains accepted. */
+export function latestUserMessage(tail: string): { observedAt: number; text: string } | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line || (!line.includes('user_message') && !line.includes('"role":"user"'))) continue;
+    let obj: unknown;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (typeof obj !== 'object' || obj === null) continue;
+    const rec = obj as Record<string, unknown>;
+    const payload = (typeof rec.payload === 'object' && rec.payload !== null) ? rec.payload as Record<string, unknown> : null;
+    const legacy = rec.type === 'user_message' || (rec.type === 'event_msg' && payload?.type === 'user_message');
+    const real = rec.type === 'response_item' && payload?.type === 'message' && payload.role === 'user';
+    if (!legacy && !real) continue;
+    const ts = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : NaN;
+    if (!Number.isFinite(ts)) continue;
+    const content = payload?.content;
+    const text = typeof payload?.message === 'string' ? payload.message
+      : Array.isArray(content) ? content.map((p) => typeof p === 'object' && p !== null && (p as Record<string, unknown>).type === 'input_text' ? (p as Record<string, unknown>).text : '').filter((p): p is string => typeof p === 'string').join('')
+      : '';
+    return { observedAt: ts, text };
+  }
+  return null;
+}
+
+export function latestUserMessageAt(tail: string): number | null { return latestUserMessage(tail)?.observedAt ?? null; }
+
+/** Message-box input can be wrapped or reflowed by Codex's transcript writer. Compare the
+ * human-visible text rather than preserving platform line endings or layout whitespace. */
+export function codexUserMessageMatches(recorded: string, expected: string): boolean {
+  const normalize = (text: string): string => text.replace(/\r\n?/g, '\n').replace(/\s+/g, ' ').trim();
+  const needle = normalize(expected);
+  return needle.length > 0 && normalize(recorded).includes(needle);
+}
+
 /** One rollout read: the capacity observation and the thread's live model, from ONE tail. */
 export interface CodexRolloutRead {
   capacity: CapacityObservation | null;
@@ -245,6 +282,8 @@ export interface CodexRolloutRead {
   turnModel: { model: string; observedAt: number | null; effort: string | null } | null;
   /** The newest cumulative token_count snapshot from the same bounded tail. */
   usage: CodexRolloutUsage | null;
+  /** Newest user_message in this newly-read tail; null when none was observed. */
+  userMessage: { observedAt: number; text: string } | undefined;
 }
 
 /**
@@ -270,7 +309,7 @@ export class CodexRolloutCapacitySource {
   /** `observe`, plus live model and usage from the SAME tail read (MODEL-PINBACK G2). Nothing new
    *  (an unchanged file) is `{ capacity: null, turnModel: null, usage: null }`. */
   observeRollout(codexHome: string, opts: { rescan?: boolean; sessionId?: string; now?: number } = {}): CodexRolloutRead {
-    const none: CodexRolloutRead = { capacity: null, turnModel: null, usage: null };
+    const none = (e?: HomeCache): CodexRolloutRead => ({ capacity: null, turnModel: null, usage: null, userMessage: e?.userMessage });
     const now = opts.now ?? Date.now();
     let entry = this.cache.get(codexHome);
     const cachedSessionMatches = !opts.sessionId || (entry?.file !== null && entry?.file !== undefined
@@ -280,7 +319,7 @@ export class CodexRolloutCapacitySource {
       entry = { file, mtimeMs: 0, size: 0 };
       this.cache.set(codexHome, entry);
     }
-    if (!entry.file) return none;
+    if (!entry.file) return none(entry);
 
     let mtimeMs: number;
     let size: number;
@@ -288,11 +327,11 @@ export class CodexRolloutCapacitySource {
       const stat = statSync(entry.file);
       mtimeMs = stat.mtimeMs;
       size = stat.size;
-    } catch { entry.file = null; return none; }
+    } catch { entry.file = null; return none(entry); }
     // Windows can hold an open rollout's mtime at creation while it grows. Either
     // a size increase OR an mtime advance makes the tail worth reading; an idle
     // agent still pays just this one stat per hook boundary.
-    if (size <= entry.size && mtimeMs <= entry.mtimeMs) return none;
+    if (size <= entry.size && mtimeMs <= entry.mtimeMs) return none(entry);
     entry.mtimeMs = mtimeMs;
     entry.size = size;
 
@@ -314,7 +353,20 @@ export class CodexRolloutCapacitySource {
       receivedAt: now,
       source: 'codex-rollout'
     }));
-    return { capacity, turnModel: latestTurnContextModel(tail), usage: latestCodexRolloutUsage(tail) };
+    const userMessage = latestUserMessage(tail);
+    if (userMessage && (!entry.userMessage || userMessage.observedAt >= entry.userMessage.observedAt)) entry.userMessage = userMessage;
+    return { capacity, turnModel: latestTurnContextModel(tail), usage: latestCodexRolloutUsage(tail), userMessage: entry.userMessage };
+  }
+
+  /** Resolve/bind this home/session without reading its tail. */
+  bound(codexHome: string, sessionId?: string): boolean {
+    let entry = this.cache.get(codexHome);
+    const matches = !sessionId || (entry?.file !== null && entry?.file !== undefined && basename(entry.file).endsWith(`-${sessionId}.jsonl`));
+    if (!entry || !entry.file || !existsSync(entry.file) || !matches) {
+      entry = { file: findNewestRollout(codexHome, sessionId), mtimeMs: 0, size: 0 };
+      this.cache.set(codexHome, entry);
+    }
+    return entry.file !== null;
   }
 
   /** Drop a home's cache — used when an agent is removed. */
