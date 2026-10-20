@@ -3590,6 +3590,8 @@ export class HiveManager {
           }
           // The sender replaced the stranded file, so route the new payload normally.
           this.outboxDeliveredArchives.delete(full);
+          // Its earlier archive failure belongs to the replaced payload, not this one.
+          this.outboxArchiveFailures.delete(full);
         }
         const priorRejection = this.outboxRejectNotices.get(full);
         if (priorRejection !== undefined) {
