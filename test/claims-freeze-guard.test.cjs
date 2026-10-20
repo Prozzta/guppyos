@@ -16,6 +16,7 @@ const write = (cwd, rel, text) => { fs.mkdirSync(path.dirname(path.join(cwd, rel
 const state = (window, frozenVersions = {}) => `${JSON.stringify({ paths: ['src/main/claims', 'src/shared/cardIds.ts'], window, frozenVersions }, null, 2)}\n`;
 const commit = (cwd, msg) => { git(cwd, ['add', '-A']); git(cwd, ['commit', '-q', '-m', msg]); return git(cwd, ['rev-parse', 'HEAD']).trim(); };
 const version = (cwd, v) => write(cwd, 'package.json', `${JSON.stringify({ name: 'x', version: v })}\n`);
+const AUTH = 'origin/guppy/int-1.1.90';
 
 /** A repo at the measured release 1.1.90 (base), then INT with the window opened on it. */
 function repo(t) {
@@ -38,7 +39,16 @@ function repo(t) {
     if (on !== 'int') git(cwd, ['branch', '-f', 'int', h]);
     return h;
   };
-  const run = (...argv) => { const lines = []; const code = cf.main(argv, { cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }); return { code, text: lines.join('\n') }; };
+  // INT lives on a remote, as for real: the gate fetches origin/guppy/int-1.1.90 itself. `int` in a
+  // gate call stands for that ref, pushed from the local int first.
+  const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-freeze-origin-'));
+  t.after(() => fs.rmSync(origin, { recursive: true, force: true }));
+  git(origin, ['init', '-q', '--bare']);
+  git(cwd, ['remote', 'add', 'origin', origin]);
+  const run = (...argv) => {
+    if (argv[0] === 'gate' && argv[2] === 'int') { git(cwd, ['push', '-q', '-f', 'origin', `int:${AUTH.slice('origin/'.length)}`]); argv = [argv[0], argv[1], AUTH]; }
+    const lines = []; const code = cf.main(argv, { cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }); return { code, text: lines.join('\n') };
+  };
   return { cwd, base, open, run };
 }
 
@@ -191,7 +201,7 @@ test('authority: a tip that edits its own state to slip past the gate is REFUSED
     const out = r.run('gate', 'HEAD', 'int');
     assert.strictEqual(out.code, 1, `${name}: ${out.text}`);
     assert.match(out.text, why, name);
-    assert.match(out.text, /disagrees with the authority int/, name);
+    assert.match(out.text, /disagrees with the authority origin\/guppy\/int-1\.1\.90/, name);
   }
 });
 
@@ -220,9 +230,31 @@ test('authority: a stale release branch made before the window opened is REFUSED
   const lag = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(lag.code, 0, lag.text);
   assert.match(lag.text, /waived \(the Human, later\)/);
-  const missing = r.run('gate', 'HEAD', 'no-such-ref');
+  const missing = r.run('gate', 'HEAD', 'origin/guppy/int-9.9.9');
   assert.strictEqual(missing.code, 1, missing.text);
-  assert.match(missing.text, /cannot read the authority no-such-ref/);
+  assert.match(missing.text, /cannot fetch the authority origin\/guppy\/int-9\.9\.9/);
+});
+
+test('authority: only origin/guppy/int-<x> is an authority; the tip, a sha, a local branch are REFUSED (Jim SHOULD 45cc4090)', (t) => {
+  const r = repo(t);
+  r.open();
+  git(r.cwd, ['checkout', '-q', '-b', 'release']);
+  write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
+  version(r.cwd, '1.1.91');
+  write(r.cwd, cf.FILE, state({ id: 'CL-M4-TEST', baseVersion: '1.1.90', baseCommit: r.base, waivers: { '1.1.91': 'self' } }));
+  const tip = commit(r.cwd, 'release 1.1.91 waives itself');
+  assert.strictEqual(r.run('gate', 'HEAD', 'int').code, 1, 'the control: INT refuses the self-waiver');
+  for (const auth of [tip, 'HEAD', 'release', 'int', 'origin/release', 'origin/guppy/int-1.1.90^', 'origin/guppy/int-1.1.90~1']) {
+    const lines = []; // cf.main directly: r.run maps `int` to the INT ref
+    assert.strictEqual(cf.main(['gate', 'HEAD', auth], { cwd: r.cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }), 1, auth);
+    assert.match(lines.join('\n'), /the authority must be origin\/guppy\/int-<x>/, auth);
+  }
+  // A release cut straight from the INT tip is legitimate: the authority may be the tip.
+  git(r.cwd, ['checkout', '-q', 'int']);
+  const atInt = r.run('gate', 'HEAD', 'int');
+  assert.strictEqual(atInt.code, 0, atInt.text);
+  const same = r.run('gate', AUTH, AUTH);
+  assert.strictEqual(same.code, 0, same.text);
 });
 
 test('record: <commit> must be <version>, and a local v<version> tag must name it (Jim MUST)', (t) => {

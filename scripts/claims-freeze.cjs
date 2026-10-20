@@ -13,8 +13,9 @@
  *                  empty against baseCommit. The measurement harness reads this list.
  *
  *   node scripts/claims-freeze.cjs gate <tip> <authority>
- *     Before the FULL on the release tip. <authority> is the INT ref that owns the state
- *     (origin/guppy/int-<x>, fetched first). The version comes from <tip>'s tree. The tip's state
+ *     Before the FULL on the release tip. <authority> is the INT ref that owns the state: it must
+ *     be origin/guppy/int-<x>, and it is fetched first (a sha, a local branch or the tip is
+ *     refused, so one argument cannot turn the gate off; the tip may BE the INT tip). The version comes from <tip>'s tree. The tip's state
  *     must agree with the authority's: the same paths and the same window (id, baseVersion,
  *     baseCommit), and no waiver the authority lacks. Only the authority's waivers count, so a
  *     release branch cannot turn the gate off by editing its own copy (Jim SHOULD).
@@ -115,10 +116,11 @@ function main(argv, { cwd = process.cwd(), out = console.log, err = console.erro
   const [cmd, a, b] = argv;
   try {
     if (cmd === 'gate' && a && b) {
-      const remote = /^origin\/(.+)$/.exec(b);
-      if (remote) {
-        try { git(['fetch', '-q', 'origin', remote[1]]); } catch (e) { throw new Error(`cannot fetch the authority ${b}: ${String(e.message).split('\n')[0]}`); }
-      }
+      // Jim SHOULD (45cc4090): the authority is always the fetched INT ref, never a sha, a local
+      // branch or the tip itself, so one argument cannot turn the gate off either.
+      const remote = /^origin\/(guppy\/int-[\w.-]+)$/.exec(b);
+      if (!remote) throw new Error(`the authority must be origin/guppy/int-<x> (the fetched INT ref), not ${b}`);
+      try { git(['fetch', '-q', 'origin', remote[1]]); } catch (e) { throw new Error(`cannot fetch the authority ${b}: ${String(e.message).split('\n')[0]}`); }
       const tip = git(['rev-parse', '--verify', `${a}^{commit}`]).trim();
       let state;
       try { state = parseState(git(['show', `${b}:${FILE}`])); } catch (e) { throw new Error(`cannot read the authority ${b}: ${String(e.message).split('\n')[0]}`); }
