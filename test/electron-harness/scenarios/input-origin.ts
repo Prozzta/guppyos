@@ -26,7 +26,7 @@ declare global {
   }
 }
 
-interface Sent { id: string; data: string; origin: string }
+interface Sent { id: string; data: string; origin: string; binary?: boolean }
 const sent: Sent[] = [];
 const reported: unknown[] = [];
 
@@ -34,7 +34,8 @@ function installBridgeStub(): void {
   const unsub = () => () => { /* nothing subscribed */ };
   window.cth = {
     onPtyData: unsub(), onPtyExit: unsub(), onPtyRelaunch: unsub(),
-    writePty: (id: string, data: string, origin: string) => { sent.push({ id, data, origin }); return Promise.resolve({ ok: true }); },
+    writePty: (id: string, data: string, origin: string) => { sent.push({ id, data, origin, binary: false }); return Promise.resolve({ ok: true }); },
+    writePtyBinary: (id: string, data: string, origin: string) => { sent.push({ id, data, origin, binary: true }); return Promise.resolve({ ok: true }); },
     redrawPty: () => { /* no pty */ }, resizePty: () => { /* no pty */ },
     copyToClipboard: () => { /* unused */ },
     readClipboard: () => Promise.resolve(''), readClipboardSync: () => '',
@@ -49,6 +50,7 @@ const sleep = (ms: number) => new Promise<void>((r) => { setTimeout(r, ms); });
 const write = (term: { write: (d: string, cb?: () => void) => void }, data: string): Promise<void> =>
   new Promise((resolve) => term.write(data, () => resolve()));
 const lastOrigin = () => sent.length ? sent[sent.length - 1].origin : null;
+const octets = (data: string | undefined): number[] => data ? Array.from(data, (c) => c.charCodeAt(0)) : [];
 const key = (ta: HTMLTextAreaElement, k: string, code: number) =>
   ta.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: k, keyCode: code, which: code, bubbles: true, cancelable: true } as KeyboardEventInit));
 
@@ -161,6 +163,31 @@ window.__harnessRun = async () => {
       afterOn: onReport?.mouseTrackingMode, afterOff: offReport?.mouseTrackingMode,
       xtermNow: term.modes.mouseTrackingMode, reports: reported.length
     };
+
+    // ARM 8b - X10/default mouse encoding uses xterm's BINARY callback. Column
+    // 101 makes its encoded coordinate 0x85 (> 0x7f), so a text/UTF-8 path would
+    // turn it into c2 85. Drive CoreMouseService rather than hand-emitting a fake
+    // callback: this is xterm's real legacy mouse encoder and public onBinary path.
+    term.resize(120, 24);
+    await write(term, '\x1b[?1000h');
+    sent.length = 0;
+    const binarySent = (term as unknown as { _core: { coreMouseService: { triggerMouseEvent: (event: {
+      col: number; row: number; x: number; y: number; button: number; action: number;
+      ctrl: boolean; alt: boolean; shift: boolean;
+    }) => boolean } } })._core.coreMouseService.triggerMouseEvent({
+      col: 100, row: 0, x: 0, y: 0, button: 0, action: 1, ctrl: false, alt: false, shift: false
+    });
+    result.binaryMouse = { emitted: binarySent, origin: lastOrigin(), binary: sent[sent.length - 1]?.binary, bytes: octets(sent[sent.length - 1]?.data) };
+    // DECSET 1006 makes xterm use SGR, which deliberately remains onData.
+    await write(term, '\x1b[?1006h'); sent.length = 0;
+    const sgrSent = (term as unknown as { _core: { coreMouseService: { triggerMouseEvent: (event: {
+      col: number; row: number; x: number; y: number; button: number; action: number;
+      ctrl: boolean; alt: boolean; shift: boolean;
+    }) => boolean } } })._core.coreMouseService.triggerMouseEvent({
+      col: 100, row: 0, x: 0, y: 0, button: 0, action: 1, ctrl: false, alt: false, shift: false
+    });
+    result.sgrMouse = { emitted: sgrSent, binary: sent[sent.length - 1]?.binary, data: sent[sent.length - 1]?.data };
+    await write(term, '\x1b[?1006l\x1b[?1000l');
 
     // ARM 9 - BLOCKER 4 (Dwight 23.3): a same-id respawn re-establishes provenance.
     // resetTerminal mirrors the relaunch path. After it the entry must reset to 'unknown'

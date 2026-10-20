@@ -48,11 +48,11 @@ function walk(rel) {
   return out;
 }
 
-/** Every `.writePty(` call in `text`, each returned as its balanced-paren argument
+/** Every terminal-input bridge call in `text`, each returned as its balanced-paren argument
  *  substring - so a MULTILINE call is read whole rather than by its first line. */
 function writePtyCalls(text) {
   const calls = [];
-  const re = /\.writePty\s*\(/g;
+  const re = /\.(writePty|writePtyBinary)\s*\(/g;
   let m;
   while ((m = re.exec(text))) {
     let depth = 1, i = m.index + m[0].length;
@@ -191,12 +191,12 @@ test('the generation is per-session and dies with the session', () => {
 
 // ─── the call graph, read from the source ───────────────────────────────────
 
-test('SOURCE CENSUS: every writePty call in the WHOLE renderer tree declares an origin', () => {
+test('SOURCE CENSUS: every terminal-input bridge call in the WHOLE renderer tree declares an origin', () => {
   // Exhaustive over src/renderer, not three named files, and balanced-paren so a
   // multiline call is read whole. This is a census of the CURRENT tree's call sites
   // (Dwight 23.4) - it proves no present renderer writePty omits an origin, not future
   // call-graph closure. A new caller anywhere under src/renderer is included the moment
-  // it exists; a wrapper that hides `.writePty(` behind another name is the residual
+  // it exists; a wrapper that hides either bridge name behind another name is the residual
   // this census does not chase, and the claim is bounded to that.
   const calls = [];
   for (const f of walk('src/renderer')) for (const c of writePtyCalls(src(f))) calls.push({ f, c });
@@ -205,7 +205,7 @@ test('SOURCE CENSUS: every writePty call in the WHOLE renderer tree declares an 
   // renderer no longer types programmatically at all. So a renderer call may now only
   // declare HUMAN or CONTROL (or ask the one classification point): PROGRAMMATIC is no
   // longer an acceptable ending here, and main's pty:write refuses it regardless.
-  assert.equal(calls.length, 6, `expected exactly the six known calls, found ${calls.length}: ${calls.map((x) => x.f).join(', ')}`);
+  assert.equal(calls.length, 7, `expected exactly the seven known calls, found ${calls.length}: ${calls.map((x) => x.f).join(', ')}`);
   for (const { f, c } of calls) {
     assert.match(c, /, ?'(HUMAN|CONTROL)'\)$|, ?classifyOutbound\([^)]*\)\)$/,
       `${f}: ${c} does not end in a declared HUMAN/CONTROL origin`);
