@@ -123,6 +123,26 @@ function rig(Owner = OWNER.AutomaticSubmitOwner, over = {}) {
 }
 const ENTERS = (r) => r.writes.filter((w) => w === '\r').length;
 
+/** Codex replay can erase the render of the staged draft without creating a rollout
+ * user_message.  The wake must stay held: visually gone is not delivery evidence. */
+K.replayDropsDraft = async (Owner = OWNER.AutomaticSubmitOwner) => {
+  const r = rig(Owner, { provider: 'codex', submitAfterEnter: null });
+  r.deps.capacity = {
+    admit: () => ({ verdict: 'ALLOW', reason: 'AVAILABLE', poolKey: null, state: null, workClass: 'ORDINARY_TURN', limitEpochAt: null }),
+    revalidate: () => ({ verdict: 'ALLOW', reason: 'AVAILABLE', poolKey: null, state: null, workClass: 'ORDINARY_TURN', limitEpochAt: null }),
+    confirmLaunch() {}, cancelGrant() {}, holdGrant() {}
+  };
+  r.deps.wakeSubmitted = () => false;
+  r.deps.wakeVerifiable = () => true;
+  r.onEnter = () => { r.ownDraft = false; }; // the replay ate the typed text
+  r.owner = new Owner(r.deps);
+  const out = await r.settle(r.owner.submit({ requestId: 'wake:replay:1', agentId: 'dwight', admissionClass: 'CAPACITY_GATED', text: TEXT }));
+  assert.equal(ENTERS(r), 1, 'replay-dropped draft gets no blind second Enter');
+  assert.deepEqual([out.kind, out.reason], ['INTERFERED', 'SUBMIT_NOT_ACCEPTED'], 'the request id remains held, not consumed');
+};
+
+test('Codex replay dropping the draft: no rollout user_message means held, never COMMITTED', () => K.replayDropsDraft());
+
 K.refusedBeforeSessionStart = async (Owner) => {
   const r = rig(Owner, { ready: false });
   const out = await r.boot();
@@ -249,7 +269,10 @@ const MUTANTS = [
     killer: 'noEnterWithoutOwnDraft', dies: /G2: NO SECOND ENTER WITHOUT THE OWN-DRAFT PROOF/ },
   { name: 'G2: unsent after two Enters is called COMMITTED', file: 'src/main/automaticSubmit.ts', owner: true,
     edits: [["    return this.interfere(again, 'BOOT_NOT_SUBMITTED', 'not reported submitted after two Enters');", "    return { kind: 'COMMITTED' };"]],
-    killer: 'unsentGetsOneMoreEnter', dies: /G2: STILL UNSENT = HELD FOR A PERSON/ }
+    killer: 'unsentGetsOneMoreEnter', dies: /G2: STILL UNSENT = HELD FOR A PERSON/ },
+  { name: 'Codex replay gate off: dropped draft is called COMMITTED', file: 'src/main/automaticSubmit.ts', owner: true,
+    edits: [["          if (cls === 'CAPACITY_GATED' && this.wakeVerifiable(ptyId, req.agentId)) return this.verifyWakeSubmitted(staged, enterAt);\n", '']],
+    killer: 'replayDropsDraft', dies: /the request id remains held, not consumed/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {

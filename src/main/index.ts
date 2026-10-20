@@ -176,6 +176,7 @@ import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
 import type { SilentTurnView } from '../shared/agentBadges';
 import { CodexRolloutLifecycleSource, threadSettingsAppliedSince } from './codexRolloutLifecycle';
+import { CodexRolloutCapacitySource, codexUserMessageMatches } from './codexRolloutCapacity';
 import { BootHookClock, startupSettled } from './bootSubmitEvidence';
 import { AgentLivenessMonitor, type LivenessFacts } from './agentLiveness';
 import { CODEX_ROTATE_MAX_ROLLOUT_BYTES, decideAgyRotation, decideThreadRotation, findAgyConversation, findCodexRollout, threadRotatedLogRow } from './codexThreadRotation';
@@ -673,6 +674,9 @@ function standingGoalFromRoster(agentId: string): string | null {
 const workerWake = new WorkerWakeWatchdog();
 // FALSEACTIVE-STALL-2 (B1): Codex's own turn boundaries, read from a bounded rollout tail.
 const codexLifecycle = new CodexRolloutLifecycleSource();
+// A separate bounded-reader cache: hooks and telemetry may have consumed their own changed
+// read, while the submit owner needs to see this PTY's next user_message independently.
+const codexWakeEvidence = new CodexRolloutCapacitySource();
 // ─── DIAGNOSIS ONLY (branch diag-1.1.46-wake) ───────────────────────────────
 // The 1.1.46 packaged canary produced no wakes and could not say why, because every
 // breadcrumb on the wake path is console.log and a packaged Windows Electron app has
@@ -1021,6 +1025,15 @@ const automaticSubmit = new AutomaticSubmitOwner(buildOwnerDeps({
   submittedSince: (ptyId, agentId, since) => (ptyProvider.get(ptyId) === 'claude'
     ? bootHooks.submittedSince(agentId, ptyManager.livenessFacts(ptyId)?.spawnedAt ?? 0, since)
     : undefined),
+  wakeSubmitted: (ptyId, agentId, since, text) => {
+    if (ptyProvider.get(ptyId) !== 'codex') return undefined;
+    const home = hive.codexHomeFor(agentId);
+    const sessionId = hive.registry().agents[agentId]?.sessionId;
+    const user = home ? codexWakeEvidence.observeRollout(home, { sessionId }).userMessage : undefined;
+    return user === undefined ? undefined : user.observedAt >= since && codexUserMessageMatches(user.text, text);
+  },
+  wakeVerifiable: (ptyId, agentId) => ptyProvider.get(ptyId) === 'codex' && !!hive.codexHomeFor(agentId)
+    && codexWakeEvidence.bound(hive.codexHomeFor(agentId)!, hive.registry().agents[agentId]?.sessionId),
   homeDir: () => homedir(),
   // START-FIXES-163 (3): every Enter the owner writes for a BOOT_SEQUENCE prompt, ok or
   // not, with the gap it waited. Logging only: it changes no submit behaviour.
