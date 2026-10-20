@@ -416,9 +416,11 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     // arrives here on one callback with no origin attached. `classifyOutbound`
     // answers from the human window that `inputOrigin.ts` owns; nothing here
     // guesses from the bytes.
-    const origin = classifyOutbound(ptyId, data);
-    if (binary) window.cth.writePtyBinary(ptyId, data, origin);
-    else window.cth.writePty(ptyId, data, origin);
+    // This is intentionally a second classification after the probe's read above:
+    // it preserves the established writer boundary, and classifyOutbound's held
+    // rearm is idempotent (it resets one deadline rather than incrementing state).
+    if (binary) window.cth.writePtyBinary(ptyId, data, classifyOutbound(ptyId, data));
+    else window.cth.writePty(ptyId, data, classifyOutbound(ptyId, data));
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {
