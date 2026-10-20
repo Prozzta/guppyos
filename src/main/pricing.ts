@@ -19,7 +19,8 @@ export interface ModelPrice {
   inputPerM: number;
   outputPerM: number;
   cacheReadPerM: number;
-  cacheWritePerM: number;
+  cacheWrite5mPerM: number;
+  cacheWrite1hPerM: number;
 }
 
 // Anthropic list prices, USD per million tokens. Approximate, fallback-only —
@@ -27,11 +28,19 @@ export interface ModelPrice {
 // Opus 5.5: https://www.anthropic.com/claude-opus-5-5 (2026-09-22).
 // Fable 5.1: https://www.anthropic.com/claude/fable (September 2026). Its
 // cache-write value is the standard 5-minute 1.25x input-price multiplier.
-const OPUS_5_5: ModelPrice = { inputPerM: 4, outputPerM: 20, cacheReadPerM: 0.2, cacheWritePerM: 5 };
-const FABLE_5_1: ModelPrice = { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWritePerM: 12.5 };
-const OPUS: ModelPrice = { inputPerM: 15, outputPerM: 75, cacheReadPerM: 1.5, cacheWritePerM: 18.75 };
-const SONNET: ModelPrice = { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWritePerM: 3.75 };
-const HAIKU: ModelPrice = { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWritePerM: 1.0 };
+// Source: https://platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-20).
+// Claude Code transcripts record ephemeral_1h cache writes, so the estimator
+// deliberately uses cacheWrite1hPerM below.
+const OPUS_5_5: ModelPrice = { inputPerM: 4, outputPerM: 20, cacheReadPerM: 0.2, cacheWrite5mPerM: 5, cacheWrite1hPerM: 8 };
+const FABLE_5_1: ModelPrice = { inputPerM: 10, outputPerM: 50, cacheReadPerM: 0.25, cacheWrite5mPerM: 12.5, cacheWrite1hPerM: 20 };
+const FABLE_5: ModelPrice = { inputPerM: 10, outputPerM: 50, cacheReadPerM: 1, cacheWrite5mPerM: 12.5, cacheWrite1hPerM: 20 };
+const OPUS_5: ModelPrice = { inputPerM: 5, outputPerM: 25, cacheReadPerM: 0.5, cacheWrite5mPerM: 6.25, cacheWrite1hPerM: 10 };
+const SONNET_5: ModelPrice = { inputPerM: 2, outputPerM: 10, cacheReadPerM: 0.2, cacheWrite5mPerM: 2.5, cacheWrite1hPerM: 4 };
+const SONNET_4_6: ModelPrice = { inputPerM: 3, outputPerM: 15, cacheReadPerM: 0.3, cacheWrite5mPerM: 3.75, cacheWrite1hPerM: 6 };
+const HAIKU_4_5: ModelPrice = { inputPerM: 1, outputPerM: 5, cacheReadPerM: 0.1, cacheWrite5mPerM: 1.25, cacheWrite1hPerM: 2 };
+const OPUS: ModelPrice = { inputPerM: 15, outputPerM: 75, cacheReadPerM: 1.5, cacheWrite5mPerM: 18.75, cacheWrite1hPerM: 30 };
+const SONNET: ModelPrice = SONNET_4_6;
+const HAIKU: ModelPrice = { inputPerM: 0.8, outputPerM: 4, cacheReadPerM: 0.08, cacheWrite5mPerM: 1, cacheWrite1hPerM: 1.6 };
 
 /** When the model id is unknown, assume Sonnet (the historical default). */
 const DEFAULT_PRICE: ModelPrice = SONNET;
@@ -51,6 +60,11 @@ export function priceFor(model: string | undefined | null): ModelPrice {
   const m = normalizeModel(model).toLowerCase();
   if (m === 'claude-opus-5-5') return OPUS_5_5;
   if (m === 'claude-fable-5-1') return FABLE_5_1;
+  if (m === 'claude-fable-5' || m.startsWith('claude-mythos-5')) return FABLE_5;
+  if (m === 'claude-opus-5' || m === 'claude-opus-4-8') return OPUS_5;
+  if (m === 'claude-sonnet-5') return SONNET_5;
+  if (m === 'claude-sonnet-4-6') return SONNET_4_6;
+  if (m === 'claude-haiku-4-5-20251001') return HAIKU_4_5;
   if (m.includes('opus')) return OPUS;
   if (m.includes('haiku')) return HAIKU;
   if (m.includes('sonnet')) return SONNET;
@@ -75,6 +89,6 @@ export function estimateCostUsd(model: string | undefined | null, tokens: TokenS
     (tokens.inputTokens / 1_000_000) * p.inputPerM +
     (tokens.outputTokens / 1_000_000) * p.outputPerM +
     (tokens.cacheReadTokens / 1_000_000) * p.cacheReadPerM +
-    (tokens.cacheWriteTokens / 1_000_000) * p.cacheWritePerM
+    (tokens.cacheWriteTokens / 1_000_000) * p.cacheWrite1hPerM
   );
 }
