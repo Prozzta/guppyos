@@ -25,7 +25,9 @@
     "dist": "npm run build && electron-builder",
     "dist:trial": "node tools/build-trial.cjs",
     "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win",
+    "dist:win:raw": "npm run build && electron-builder --win",
+    "dist:win": "node scripts/cut-cmd-natives.cjs --dist-only",
+    "cut:win": "node scripts/cut-cmd-natives.cjs",
     "dist:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
