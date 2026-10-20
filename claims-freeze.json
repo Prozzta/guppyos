@@ -1,0 +1,8 @@
+{
+  "paths": [
+    "src/main/claims",
+    "src/shared/cardIds.ts"
+  ],
+  "window": null,
+  "frozenVersions": {}
+}

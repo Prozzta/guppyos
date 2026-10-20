@@ -5,7 +5,11 @@ A release has one path: the verified local cut. The Release workflow
 
 1. **Version commit**: the version in `package.json` and both lock root entries, the
    version test pins, the README badge and history, and a CHANGELOG section.
-2. **FULL alone on that tip**: 0 fails, with the wall time against the last release's.
+2. **Claims freeze gate** on that tip: `node scripts/claims-freeze.cjs gate <tip>` must print
+   `CLAIMS FREEZE OK`. While a measurement window is open in `claims-freeze.json`, a release that
+   changes `src/main/claims` or `src/shared/cardIds.ts` is refused unless the Human's waiver for
+   its version is in `window.waivers`. Then **FULL alone on that tip**: 0 fails, with the wall
+   time against the last release's.
 3. **Identity gate** on every commit being pushed, and on the tagger: authors, committers,
    messages and patches. Only the release identity and the noreply co-author may appear.
 4. **Push and tag from origin**: resolve the tip and the tags with `git ls-remote origin`,
@@ -15,6 +19,10 @@ A release has one path: the verified local cut. The Release workflow
      `git show <tip>:.github/workflows/release.yml` has no `push` trigger. GitHub runs the
      tag's workflows from the tagged commit, so a release branch made before this fix still
      carries the publishing workflow.
+   - After the tag push, while a window is open: on INT, run
+     `node scripts/claims-freeze.cjs record <version> <tag commit>` and commit `claims-freeze.json`.
+     It lists the release as claims-frozen only when its frozen diff is empty, so its install
+     does not force the measurement's cut. A waived release is never recorded.
 5. **Cut** in a fresh worktree at the tag's commit, with a scrubbed env and `npm ci`:
    - `node scripts/release-markers.cjs` on the source tree and again on the build. It must print
      `ALL 12 MARKERS OK`.
