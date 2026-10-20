@@ -1437,8 +1437,26 @@ export { PLAN_CAP };
  * Returns null when the text does not open a FOR this reads (cmd itself would refuse it).
  */
 const CMD_FOR = /^@?for\s+((?:\/[dlrf](?:\s+(?!%)(?:"[^"]*"|[^\s"%/]\S*))?\s+)*)(%%?)([A-Za-z])\s+in\s*\(/i;
-/** HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd joins a line that ends in an unescaped `^` to the next one. */
-const caretJoin = (s: string): string => s.replace(/(^|[^^])((?:\^\^)*)\^\r?\n/g, '$1$2');
+/**
+ * HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd joins a line that ends in an unescaped `^` to the next one.
+ * HEAVY-LOCK-CMD-QUOTED-CARET-198: only outside a quote. Inside a `"` opened on its line a `^` is
+ * literal, and the quote ends with the line (segments() then separates there).
+ */
+function caretJoin(s: string): string {
+  let out = ''; let q = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\n') { q = false; out += c; continue; }
+    if (c === '"') q = !q;
+    if (c === '^' && !q) {
+      const nl = s[i + 1] === '\r' && s[i + 2] === '\n' ? 2 : s[i + 1] === '\n' ? 1 : 0;
+      if (nl) { i += nl; continue; }
+      out += c + (s[i + 1] ?? ''); i++; continue;
+    }
+    out += c;
+  }
+  return out;
+}
 /** A cmd block from its `(`: the text inside, and what follows its own `)` (quotes, `^` and nesting respected). */
 function cmdBlock(s: string): { body: string; after: string } {
   let k = 1; let n = 1; let q: string | null = null;

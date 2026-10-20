@@ -62,7 +62,30 @@ K.kept = (M = HJ) => {
   suite(M, 'closed.bat', 'A QUOTE CLOSED ON ITS LINE CHANGES NOTHING');
 };
 
+// Jim's delta (b59e06): FOLLOWUPS' caretJoin runs on IF/FOR text before segments(); it must not join a
+// `^` inside a quote opened on its line, or the body swallows the next line again.
+K.body = (M = HJ) => {
+  suite(M, 'if exist x echo "abc^\nnpm test', 'AN IF BODY: A QUOTED CARET JOINS NOTHING', CMD);
+  suite(M, 'if exist x echo "abc^\r\nnpm test', 'AN IF BODY: A QUOTED CARET JOINS NOTHING (CRLF)', CMD);
+  suite(M, 'for %f in (b) do echo "abc^\nnpm test', 'A FOR BODY: A QUOTED CARET JOINS NOTHING', CMD);
+  suite(M, 'for /l %i in (1,1,20) do echo "x^\nnpm test', 'A /L BODY: A QUOTED CARET JOINS NOTHING', CMD);
+  suite(M, 'if exist x (echo "abc^\nnpm test\n)', 'AN IF BLOCK: A QUOTED CARET JOINS NOTHING', CMD);
+  suite(M, 'cmd /c "if exist x echo \\"abc^\nnpm test"', 'AN IF BODY: A QUOTED CARET JOINS NOTHING (CMD /C)');
+};
+
+K.join = (M = HJ) => {
+  // The line after the loop runs once: one test file there is light, as at a prompt.
+  light(M, 'for /l %i in (1,1,20) do echo "x^\nnode --test test/a.test.cjs', 'THE NEXT LINE RUNS ONCE, AFTER THE LOOP', CMD);
+  light(M, 'if exist x echo abc ^\nnpm test', 'AN UNQUOTED CARET STILL JOINS', CMD);
+  // The quote left open on line 1 ends there, so line 2's `"` opens a new one and its caret is literal.
+  suite(M, 'if exist x (\necho "abc\necho "a^\nnpm test\n)', 'A QUOTE ENDS WITH ITS LINE: THE NEXT QUOTE OPENS AGAIN', CMD);
+  suite(M, 'if exist x echo ^^\nnpm test', 'AN ESCAPED ^^ JOINS NOTHING', CMD);
+  suite(M, 'if exist x echo "a^^" ^\n& npm test', 'A CARET AFTER A CLOSED QUOTE STILL JOINS', CMD);
+};
+
 test('a ^ at the end of a line inside an open quote continues nothing: the next line is classified', () => K.caret());
+test('in IF and FOR bodies too: caretJoin does not join a quoted caret', () => K.body());
+test('caretJoin still joins an unquoted caret, after a quote closed or ended on an earlier line, and not after ^^', () => K.join());
 test('any quote open at the end of a line ends there, and the next line is read outside it', () => K.open());
 test('unchanged: sh quotes span lines, a quoted & on one line, a closed quote, a caret outside quotes', () => K.kept());
 
@@ -85,6 +108,11 @@ const MUTANTS = [
   { name: 'the quote ends but the newline does not separate', edits: [[FIX, "if (q && d === 'cmd' && c === '\\n') { q = null; cur += c; continue; }"]], killer: 'caret', dies: /A CARET IN AN OPEN QUOTE CONTINUES NOTHING/ },
   { name: 'the newline separates but the quote stays open', edits: [[FIX, "if (q && d === 'cmd' && c === '\\n') { out.push(cur); cur = ''; continue; }"]], killer: 'open', dies: /THE NEXT LINE IS READ OUTSIDE ANY QUOTE/ },
   { name: 'only a caret before the newline ends the quote', edits: [[FIX, FIX.replace("c === '\\n')", "c === '\\n' && /\\^\\r?$/.test(cur))")]], killer: 'open', dies: /A QUOTE OPEN AT THE END OF A LINE ENDS THERE/ },
+  { name: 'caretJoin is the FOLLOWUPS regex (not quote-aware)', edits: [["function caretJoin(s: string): string {", "const caretJoin = (s: string): string => s.replace(/(^|[^^])((?:\\^\\^)*)\\^\\r?\\n/g, '$1$2');\nfunction caretJoinOld(s: string): string {"]], killer: 'body', dies: /A QUOTED CARET JOINS NOTHING/ },
+  { name: 'caretJoin joins a ^ inside a quote', edits: [["if (c === '^' && !q) {", "if (c === '^') {"]], killer: 'body', dies: /A QUOTED CARET JOINS NOTHING/ },
+  { name: 'caretJoin keeps a quote open across a line end', edits: [["if (c === '\\n') { q = false; out += c; continue; }", "if (c === '\\n') { out += c; continue; }"]], killer: 'join', dies: /A QUOTE ENDS WITH ITS LINE: THE NEXT QUOTE OPENS AGAIN/ },
+  { name: 'caretJoin reads ^^ as two carets', edits: [["out += c + (s[i + 1] ?? ''); i++; continue;", 'out += c; continue;']], killer: 'join', dies: /AN ESCAPED \^\^ JOINS NOTHING/ },
+  { name: 'caretJoin joins nothing', edits: [["if (nl) { i += nl; continue; }", 'if (nl) { out += c; continue; }']], killer: 'join', dies: /AN UNQUOTED CARET STILL JOINS/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 30_000 }, async (t) => {
