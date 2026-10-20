@@ -223,6 +223,63 @@ test('SCRUB1: an agent spawned by a scrubbed dev process does not carry the Code
   for (const k of CODEX_AUTH_KEYS) assert.equal(keys.includes(k), false, `${k} reached the spawned agent`);
 });
 
+// DEV-ISO-HOOK-TOKEN-198: the hive ids and secrets a Stable agent shell exports. A dev main process
+// started from that shell scrubs them all; what it keeps is not Stable's identity (a sidecar's API
+// word, a test run id the dev lock does not know, the dev's own knobs).
+const HIVE_SCRUB = ['HIVE_HOOK_TOKEN', 'MUNDER_WAKE_INCARNATION', 'HIVE_SOCK', 'HIVE_LEDGER_URL', 'HIVE_TERM_URL', 'HIVE_ROOT',
+  'HIVE_NODE', 'HIVE_AUTO_APPROVE', 'AGENT_ID', 'AGENT_DIR', 'AGENT_NAME', 'MEMORY_TOKEN', 'MUNDER_MEMORY_URL', 'MUNDER_HIVE_ROOT',
+  'MD_BROKER_URL', 'MD_BROKER_TOKEN', 'HIVE_PROXY_SESSION'];
+const HIVE_KEEP = ['HIVE_PROXY_API', 'GUPPY_TEST_RUN', 'MUNDER_DEV', 'MUNDER_DEV_ROOT', 'MUNDER_DEV_DATA'];
+
+const KT = {
+  // A dev env built from a Stable agent env carries no hook token (nor any other hive id or secret).
+  hookToken(I = iso) {
+    const env = { PATH: 'keep' };
+    for (const k of [...HIVE_SCRUB, ...HIVE_KEEP]) env[k] = 'stable-value';
+    I.scrubInheritedEnv(env);
+    assert.equal('HIVE_HOOK_TOKEN' in env, false, 'A DEV ENV HAS NO STABLE HOOK TOKEN');
+    for (const k of HIVE_SCRUB) assert.equal(k in env, false, `${k} must not reach a dev build`);
+    for (const k of HIVE_KEEP) assert.equal(env[k], 'stable-value', `${k} is kept`);
+  }
+};
+
+test('DEV-ISO-HOOK-TOKEN-198: a dev env built from a Stable agent env has no hook token, no hive id or secret', () => KT.hookToken());
+
+test('DEV-ISO-HOOK-TOKEN-198: an agent spawned by a scrubbed dev process does not carry the Stable hook token', () => {
+  const { spawnSync } = require('node:child_process');
+  // As SCRUB1: the child stands in for the dev main process (bootstrap scrub, then an agent env).
+  const child = `
+    const loadTs = require(${JSON.stringify(path.resolve(__dirname, 'load-ts.cjs'))});
+    const iso = loadTs(${JSON.stringify(path.resolve(__dirname, '../src/main/devIsolation.ts'))});
+    const { buildPtyEnv } = loadTs(${JSON.stringify(path.resolve(__dirname, '../src/main/ptyEnv.ts'))});
+    iso.scrubInheritedEnv(process.env);
+    const env = buildPtyEnv(process.env, process.env.PATH || '', {});
+    process.stdout.write(JSON.stringify(Object.keys(env).map((k) => k.toUpperCase())));`;
+  const env = { ...process.env, HIVE_SOCK: '\\\\.\\pipe\\munder-hive', MUNDER_WAKE_INCARNATION: 'w1' };
+  // On win32 the token is set in lower case: process.env lookups are case-insensitive there.
+  if (process.platform === 'win32') { delete env.HIVE_HOOK_TOKEN; env.hive_hook_token = 'ab'.repeat(16); } else env.HIVE_HOOK_TOKEN = 'ab'.repeat(16);
+  const r = spawnSync(process.execPath, ['-e', child], { env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const keys = JSON.parse(r.stdout);
+  for (const k of ['HIVE_HOOK_TOKEN', 'HIVE_SOCK', 'MUNDER_WAKE_INCARNATION']) assert.equal(keys.includes(k), false, `${k} reached the spawned agent`);
+});
+
+test('DEV-ISO-HOOK-TOKEN-198 MUTANT CENSUS: dropping a scrub key dies at its assertion', async (t) => {
+  const { readSource } = require('./read-source.cjs');
+  const rel = 'src/main/devIsolation.ts';
+  for (const [name, from, dies] of [
+    ['the hook token is not scrubbed', "  'HIVE_HOOK_TOKEN',\n", /A DEV ENV HAS NO STABLE HOOK TOKEN/],
+    ['the wake incarnation is not scrubbed', "  'MUNDER_WAKE_INCARNATION',\n", /MUNDER_WAKE_INCARNATION must not reach a dev build/]
+  ]) {
+    await t.test(`mutant: ${name}`, () => {
+      const text = readSource(rel);
+      assert.equal(text.split(from).length - 1, 1, `mutant ${name}: target must match exactly once`);
+      const I = loadTs.fromText(rel, text.replace(from, () => ''));
+      assert.throws(() => KT.hookToken(I), (e) => { assert.match(String(e && e.message), dies, `${name}: died for the wrong reason: ${e && e.message}`); return true; });
+    });
+  }
+});
+
 test('devWindowTitle: marks DEV only when isolation is on', () => {
   assert.equal(iso.devWindowTitle('Guppy', false), 'Guppy');
   assert.equal(iso.devWindowTitle('Guppy', true), 'Guppy DEV');
