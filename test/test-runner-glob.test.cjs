@@ -369,6 +369,9 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // 1.1.98: + 1 (screen-guard-alert-floor-193), + 1 (heavy-lock-release-lag-197),
   // + 1 (heavy-lock-reservation-release-198), + 1 (mutant-runner-kill-safe-197),
   // + 1 (heavy-lock-false-heavy-198), + 1 (heavy-slot-exclusive-192).
+  // + 1 (heavy-lock-false-heavy-198).
+  // ZT-I2-CONDENSE: - 3 (hidden-claude, reflect-condense, reflect-heading-demote retired),
+  // + 2 (memory-rollover-stop-zti2, zt-i2-retired-condense).
   assert.equal(files.length, 468, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');

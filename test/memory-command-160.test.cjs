@@ -114,7 +114,7 @@ test('the command ships as resources/memory-cli.cjs (packaged beside the models)
 // ── the old engine's pieces are gone ─────────────────────────────────────────
 
 test('IPC: search / wake-up / status go to the memory engine; there is no old-data delete, no start-up legacy note, no legacy module', () => {
-  const ipc = between(INDEX, '// ─── IPC: semantic memory (the memory engine)', '// Condense memory.md on demand');
+  const ipc = between(INDEX, '// ─── IPC: semantic memory (the memory engine)', '// ─── IPC: enterprise Knowledge Graph');
   assert.match(ipc, /nativeMemory\.statusReport\(\)/, 'MEMORY-STATUS-LAZY: status goes through statusReport, which never forks the worker');
   assert.match(ipc, /nativeMemory\.query\('search', \{ query,/);
   assert.match(ipc, /nativeMemory\.query\('wake-up'/);
@@ -172,7 +172,8 @@ test('pruneRetiredHiveFiles: removes the old mode file and each agent .gitignore
 test('config: the retired model-choice key is removed from config.json once at start (nothing else in the file changes) and dropped on read', () => {
   {
     const { readConfig, pruneRetiredConfigKeys, RETIRED_CONFIG_KEYS } = loadTs('src/main/config.ts');
-    assert.deepEqual([...RETIRED_CONFIG_KEYS], ['embeddingModel']);
+    // 1.1.92 ZT-I2-CONDENSE added the retired condense's keys after it (pinned in memory-rollover-stop-zti2).
+    assert.equal(RETIRED_CONFIG_KEYS[0], 'embeddingModel');
     const file = path.join(USERDATA, 'config.json');
     fs.writeFileSync(file, JSON.stringify({ embeddingModel: 'minilm', semanticMemory: true, custom: { a: 1 } }));
     assert.deepEqual(pruneRetiredConfigKeys(), ['embeddingModel']);

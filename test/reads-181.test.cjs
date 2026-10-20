@@ -7,7 +7,6 @@
  *  B. a PostToolUse condenser: a successful Bash/PowerShell result over the cap (1500) is replaced
  *     by its outcome, error lines, head, tail and the full output's path (kept on disk);
  *  C. scripts/reads-measure.cjs: requests and re-reads per agent and day, from the transcripts.
- * Plus the memory reflector keeping an append made while its summary ran.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -502,48 +501,6 @@ test('A (MSG-COMPOSE-SHELL-INJECTION): the documented bash form (a quoted heredo
   assert.equal(r.code, 0, r.err);
   assert.equal(fs.existsSync(canary), false, 'the canary command never ran');
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.agentDir, 'outbox', 'ledger-bash-1.json'), 'utf8')).body, body);
-});
-
-// ── A: the reflector keeps an append made while its summary ran ─────────────────────────────
-const { MemoryReflector } = loadTs('src/main/reflect.ts');
-function reflectFixture(onSummary, ReflectorClass = MemoryReflector) {
-  const home = tmp('reflect-');
-  const agentDir = path.join(home, 'hive', 'agents', 'andy');
-  fs.mkdirSync(agentDir, { recursive: true });
-  const mem = path.join(agentDir, 'memory.md');
-  const recent = [];
-  for (let i = 0; i < 40; i++) recent.push(`## day ${i}`, `work item ${i}: ${'detail '.repeat(200)}`, '');
-  fs.writeFileSync(mem, ['# Andy memory', '', '## 🗜 Condensed history', 'old', '', '## Recent', ...recent].join('\n'));
-  const logs = [];
-  let calls = 0;
-  const reflector = new ReflectorClass(() => home, () => 'claude', () => ({}),
-    () => ({ enabled: true, intervalMs: 60_000, byteTriggerPct: 50, sectionTrigger: 10, recentKeep: 5, minBytes: 1 }),
-    (e) => logs.push(e),
-    async () => { if (calls++ === 0) onSummary(mem); return { ok: true, structuredOutput: { condensed: 'a much shorter history', hoist: [] } }; });
-  return { mem, logs, reflector };
-}
-
-test('A: an APPEND made while the summary ran survives the swap; any other change aborts the pass', async () => {
-  const f = reflectFixture((mem) => fs.appendFileSync(mem, '\n- 2026-10-03 appended by the ledger mid-summary\n'));
-  await f.reflector.reflectNow('andy');
-  const after = fs.readFileSync(f.mem, 'utf8');
-  assert.ok(after.includes('a much shorter history'), 'it did condense');
-  assert.ok(after.includes('- 2026-10-03 appended by the ledger mid-summary'), 'the append is kept');
-  const g = reflectFixture((mem) => fs.writeFileSync(mem, '# rewritten by hand\n'));
-  const [r] = await g.reflector.reflectNow('andy');
-  assert.equal(fs.readFileSync(g.mem, 'utf8'), '# rewritten by hand\n', 'a rewrite is never overwritten');
-  assert.ok(g.logs.some((e) => e.kind === 'condense-abort' && e.reason === 'changed-during-condense') || r.reason === 'changed-during-condense', JSON.stringify(r));
-});
-
-test('MUTANT A-M1 (swap the rebuilt text, not the re-read): the mid-summary append is lost', async () => {
-  const file = 'src/main/reflect.ts';
-  const src = normaliseEol(fs.readFileSync(path.join(ROOT, file), 'utf8'));
-  const from = 'atomicWrite(mem, toWrite);';
-  assert.ok(src.includes(from));
-  const M = loadTs.fromText(file, src.replace(from, 'atomicWrite(mem, rebuilt);'));
-  const f = reflectFixture((mem) => fs.appendFileSync(mem, '\n- appended mid-summary\n'), M.MemoryReflector);
-  await f.reflector.reflectNow('andy');
-  assert.equal(fs.readFileSync(f.mem, 'utf8').includes('- appended mid-summary'), false);
 });
 
 // ── wiring (source) ─────────────────────────────────────────────────────────────────────────
