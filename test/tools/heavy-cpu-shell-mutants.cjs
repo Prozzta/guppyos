@@ -29,6 +29,7 @@ const MUTANTS = [
   ['S5 a member is the binding', TS, "if (p === '.') continue; // a member", "if (false) continue; // a member", CONST],
   ['S6 the key twice takes the last', TS, 'if (name !== undefined) return undefined; // the key twice', 'if (false) return undefined; // the key twice', CONST],
   ['S7 the declaration counts as a mention', TS, 'if (decls.some((d) => at > d.at && at < d.end)) continue;', 'if (false) continue;', CONST],
+  ['S8 a line starting with in/instanceof ends the const', TS, '(?!(?:in|instanceof)(?![\\w$]))', '', CONST],
   ['M13 the helper re-parses the rest', CS, 'EscapeRest(cmdRest)', 'cmdRest', LIVE],
   ['H1 the percent stand-in is unset', CS, 'psi.EnvironmentVariables["GUPPY_HEAVYJOB_PCT"] = "%";', '', LIVE],
   ['H2 carets escaped inside quotes', CS, 'else if (!quoted && "^&|<>".IndexOf(c) >= 0)', 'else if ("^&|<>".IndexOf(c) >= 0)', LIVE],

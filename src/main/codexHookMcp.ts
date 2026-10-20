@@ -319,8 +319,9 @@ function constString(src: string, code: string, name: string): string | undefine
       let j = i + 1;
       while (j < src.length && src[j] !== q) { if (src[j] === '\\') j += 1; j += 1; }
       end = j + 1;
-      // Then the statement ends: `;`, `,`, or a line break the next line cannot continue.
-      const after = /^[ \t]*(?:[;,]|\r?\n\s*(?:[A-Za-z_$}]|$)|$)/.test(src.slice(end));
+      // Then the statement ends: `;`, `,`, or a line break the next line cannot continue (a word
+      // can, if it is the operator `in` or `instanceof`: Jim NIT).
+      const after = /^[ \t]*(?:[;,]|\r?\n\s*(?:(?!(?:in|instanceof)(?![\w$]))[A-Za-z_$}]|$)|$)/.test(src.slice(end));
       if (j < src.length && after && !(q === '`' && src.slice(i, j).includes('${'))) {
         try { const v: unknown = JSON.parse(q === '"' ? src.slice(i, end) : asJsonString(src.slice(i + 1, j))); value = typeof v === 'string' ? v : undefined; } catch { value = undefined; }
       }

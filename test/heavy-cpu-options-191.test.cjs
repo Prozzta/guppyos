@@ -300,6 +300,7 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
   for (const [program, want] of [
     ['const sh = "cmd.exe";\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'cmd.exe'],
     ["const shell = 'cmd'\nawait tools.exec_command({ cmd: 'npm ci', shell });", 'cmd'],
+    ['const sh = "cmd"\ninput = 1;\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'cmd'],
     ['const SH = `C:\\\\Windows\\\\System32\\\\cmd.exe`, x = 1;\nawait tools.exec_command({shell: SH, cmd: "npm ci"});', 'C:\\Windows\\System32\\cmd.exe'],
     ['const sh = "cmd"; // a comment naming sh\nconst o = { sh: 1 }; o.sh;\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'cmd'],
     ['const sh = "pwsh";\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'pwsh'],
@@ -313,6 +314,8 @@ test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads
     'const sh = "cmd";\nconst t = `${sh = 1}`;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
     'const sh = "cm" + "d";\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
     'const sh = "cmd"\n  + ".exe";\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd"\ninstanceof Object;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd"\n  in o;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
     'const sh = `${"cmd"}`;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
     'const sh = pick();\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
     'const sh = "cmd";\nawait tools.exec_command({cmd: "npm ci", shell: sh ? sh : "pwsh"});',
