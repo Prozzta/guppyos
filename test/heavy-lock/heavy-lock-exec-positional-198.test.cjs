@@ -57,6 +57,9 @@ K.command = (M = HJ) => {
   as(M, 'command -p npm test', 'suite', 'A command -p RUNS WHAT FOLLOWS');
   light(M, 'command -v npm test', 'A command -v ONLY LOOKS UP');
   light(M, 'command -V npm', 'A command -V ONLY LOOKS UP');
+  as(M, 'builtin exec npm test', 'suite', 'A builtin RUNS ITS BUILTIN (exec)');
+  as(M, `sh -c 'builtin command "$@"' _ npm test`, 'suite', 'A builtin RUNS ITS BUILTIN (command)');
+  light(M, 'builtin echo npm test', 'A builtin echo STAYS LIGHT');
 };
 
 K.script = (M = HJ) => {
@@ -99,6 +102,7 @@ const MUTANTS = [
   { name: 'exec options are not skipped', edits: [[EXEC, "    if (w === 'exec') { i++; continue; }\n"]], killer: 'exec', dies: /AN exec OPTION IS NOT THE PROGRAM/ },
   { name: 'exec -a takes no name', edits: [['if (/^-[cl]*a$/.test(ws[i])) i++; ', '']], killer: 'exec', dies: /AN exec -a TAKES A NAME/ },
   { name: 'command is not a prefix', edits: [[COMMAND, '']], killer: 'command', dies: /A command RUNS WHAT FOLLOWS/ },
+  { name: 'builtin is not a prefix', edits: [["    if (w === 'builtin') { i++; continue; }\n", '']], killer: 'command', dies: /A builtin RUNS ITS BUILTIN \(exec\)/ },
   { name: 'command -v runs the name', edits: [['if (/[vV]/.test(ws[i])) return []; ', '']], killer: 'command', dies: /A command -v ONLY LOOKS UP/ },
   { name: 'the script is the first word without a dash', edits: [['const script = sh ? args[sh.body] : undefined;', "const script = sh ? args.find((a) => !a.startsWith('-')) : undefined;"]], killer: 'script', dies: /THE SCRIPT IS THE FIRST OPERAND \(-O\)/ },
   { name: 'any NAME= before a positional is an assignment', edits: [['/(?:^|[\\s;&|(){}])[A-Za-z_][A-Za-z0-9_]*=\\S*$/', '/[A-Za-z_][A-Za-z0-9_]*=\\S*$/']], killer: 'assign', dies: /AN OPTION=\$1 IS FILLED, NOT AN ASSIGNMENT/ },
