@@ -132,8 +132,28 @@ static class HeavyJob
         try { JoinChain(name, background, half, cmdRest != null); }
         catch (Exception e) { Console.Error.WriteLine("[guppy] heavy-job limits not applied: " + e.Message); }
         if (string.IsNullOrEmpty(cmdRest)) return 0;
-        var psi = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", "/d /s /c \"" + cmdRest + "\"") { UseShellExecute = false };
+        // CODEX-CMD-COMPUTED-SHELL-192: cmd already parsed the rest once (carets taken, %VAR%
+        // expanded). The second cmd must take it as it is: every % is %GUPPY_HEAVYJOB_PCT% (one %),
+        // every ^ & | < > outside quotes is escaped, and delayed expansion is off.
+        var psi = new System.Diagnostics.ProcessStartInfo(Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe", "/d /v:off /s /c \"" + EscapeRest(cmdRest) + "\"") { UseShellExecute = false };
+        psi.EnvironmentVariables["GUPPY_HEAVYJOB_PCT"] = "%";
         using (var p = System.Diagnostics.Process.Start(psi)) { p.WaitForExit(); return p.ExitCode; }
+    }
+
+    // The rest as cmd's second parse gives it back unchanged. Parentheses stay: they are only
+    // special at the start of a block, which the rest already was.
+    static string EscapeRest(string rest)
+    {
+        var sb = new System.Text.StringBuilder();
+        bool quoted = false;
+        foreach (char c in rest)
+        {
+            if (c == '%') { sb.Append("%GUPPY_HEAVYJOB_PCT%"); continue; }
+            if (c == '"') quoted = !quoted;
+            else if (!quoted && "^&|<>".IndexOf(c) >= 0) sb.Append('^');
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     static int JoinChain(string name, bool background, bool half, bool self)

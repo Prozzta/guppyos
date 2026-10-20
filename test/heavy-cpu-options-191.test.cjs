@@ -18,6 +18,10 @@
  *   M8 a Settings change does not reach running jobs
  *   M9 a job whose call has not started yet is let go as done (a later Settings change misses it)
  *   M10 a Codex call that asked for cmd gets the `;` line (the helper re-parses it: carets and %VAR% change)
+ *   M11 a shell named by a const is not read (a const cmd gets the `;` line, unlike a literal one)
+ *   M12 a const that is not provably one string is read anyway (shadowed, reassigned, a parameter)
+ *   M13 the helper's second cmd re-parses the `;` line's rest (carets lost, %VAR% expanded twice)
+ * test/tools/heavy-cpu-shell-mutants.cjs runs M11-M13 and more.
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -287,7 +291,41 @@ test('Codex cmd: the pending exec_command\'s literal shell is read from the roll
   for (const s of [null, undefined, 'powershell', 'pwsh.exe', 'bash', 'C:\\tools\\mycmd.exe']) assert.equal(isCmdShell(s), false, String(s));
 });
 
-const CSC = path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
+test('CODEX-CMD-COMPUTED-SHELL-192: a shell named by a const of one string reads as that string, so it gets cmd\'s `&` line like a literal (M11, M12)', () => {
+  const { pendingExecShell } = loadTs('src/main/codexHookMcp.ts');
+  const turn = JSON.stringify({ type: 'turn_context', payload: { turn_id: 't1' } });
+  const exec = (input) => JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: 'c1', input } });
+  const shellOf = (program) => pendingExecShell([turn, exec(program)].join('\n'), 'npm ci');
+  // Provable: one const, read only as a call's shell.
+  for (const [program, want] of [
+    ['const sh = "cmd.exe";\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'cmd.exe'],
+    ["const shell = 'cmd'\nawait tools.exec_command({ cmd: 'npm ci', shell });", 'cmd'],
+    ['const SH = `C:\\\\Windows\\\\System32\\\\cmd.exe`, x = 1;\nawait tools.exec_command({shell: SH, cmd: "npm ci"});', 'C:\\Windows\\System32\\cmd.exe'],
+    ['const sh = "cmd"; // a comment naming sh\nconst o = { sh: 1 }; o.sh;\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'cmd'],
+    ['const sh = "pwsh";\nawait tools.exec_command({cmd: "npm ci", shell: sh});', 'pwsh'],
+  ]) assert.equal(shellOf(program), want, program);
+  // Not provable: unknown (the `;` line, which the helper now runs once-parsed).
+  for (const program of [
+    'let sh = "cmd";\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd";\n{ const sh = "pwsh"; await tools.exec_command({cmd: "npm ci", shell: sh}); }',
+    'const sh = "cmd";\nconst f = (sh) => tools.exec_command({cmd: "npm ci", shell: sh}); await f("pwsh");',
+    'const sh = "cmd";\nconsole.log(sh);\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd";\nconst t = `${sh = 1}`;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cm" + "d";\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd"\n  + ".exe";\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = `${"cmd"}`;\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = pick();\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd";\nawait tools.exec_command({cmd: "npm ci", shell: sh ? sh : "pwsh"});',
+    'await tools.exec_command({cmd: "npm ci", shell: sh});',
+    'const sh = "cmd";\nconst t = "pwsh";\nawait tools.exec_command({cmd: "npm ci", shell: sh, shell: t});',
+    'const sh = "cmd";\nfoo({x: sh});\nawait tools.exec_command({cmd: "npm ci", shell: sh});',
+  ]) assert.equal(shellOf(program), undefined, program);
+  // Parity: hooks.ts marks hook_cmd_shell from isCmdShell(pendingExecShell(...)) (source pin, M10),
+  // and a marked call gets the `&` line (the HOOK test above): the const and the literal read alike.
+  assert.equal(shellOf('const sh = "cmd";\nawait tools.exec_command({cmd: "npm ci", shell: sh});'), shellOf('await tools.exec_command({cmd: "npm ci", shell: "cmd"});'));
+});
+
+const CSC =path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
 
 test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (output and exit code), and its processes are in the job',
   { skip: process.platform !== 'win32' ? 'cmd is Windows-only' : !fs.existsSync(CSC) ? `no in-box csc at ${CSC}` : false, timeout: 120_000 },
@@ -299,13 +337,13 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
       const exe = path.join(dir, 'guppy-heavyjob.exe');
       const c = spawnSync(CSC, ['-nologo', '-O', `-out:${exe}`, path.join(__dirname, '..', 'resources', 'heavyjob', 'guppy-heavyjob.cs')], { encoding: 'utf8', windowsHide: true });
       assert.equal(c.status, 0, `csc: ${c.stdout}${c.stderr}`);
-      const env = { ...process.env, PATH: `${dir};${process.env.PATH}`, HCPU_V: 'v^1' };
+      const env = { ...process.env, PATH: `${dir};${process.env.PATH}`, HCPU_V: 'v^1', HCPU_OUTER: '%HCPU_INNER%', HCPU_INNER: 'expanded-twice' };
       const id = `hcpu-cmd-${process.pid}`;
       // Guppy's side: the job is made and held by serve, as begin() does.
       serve.child = spawn(exe, ['serve'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       const created = await new Promise((r) => { serve.child.stdout.once('data', (d) => r(String(d))); serve.child.stdin.write(`create ${id} 0 1\n`); });
       assert.match(created, /"ok":true/);
-      const run = (line) => spawnSync(env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { encoding: 'utf8', env, windowsHide: true, windowsVerbatimArguments: true });
+      const run = (line) => spawnSync(env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${line}"`], { cwd: dir, encoding: 'utf8', env, windowsHide: true, windowsVerbatimArguments: true }); // a re-parsed `^>` writes here, not in the repo
       // Carets, a variable (expanded once), quotes, a second command, a pipe, a trailing space, the exit code.
       for (const line of ['echo a^&b %HCPU_V% "q^x" & echo second', 'echo x| findstr x', 'echo t ', 'echo 7 & exit /b 7']) {
         const plain = run(line);
@@ -314,6 +352,22 @@ test('LIVE cmd: the `&` join line leaves the command exactly as cmd runs it (out
         assert.equal(joined.status, plain.status, line);
         assert.doesNotMatch(joined.stderr, /limits not applied/, joined.stderr);
       }
+      // CODEX-CMD-COMPUTED-SHELL-192 (M13): a shell Guppy cannot know gets the `;` line, and under
+      // cmd the helper re-runs what cmd handed it. That second cmd must change nothing: carets,
+      // a variable whose value names another (expanded once), escaped operators, quotes, a
+      // percent, redirection, a pipe, chains, a block, the exit code, all as plain cmd gives them.
+      for (const line of ['echo a^&b %HCPU_V% "q^x" & echo second', 'echo %HCPU_OUTER%', 'echo "a^b" c^^d', 'echo a^|b ^> c ^< d',
+        'echo ^"a^&b', 'echo 50% done', 'echo r> NUL & echo after', 'echo x| findstr x', 'echo a && echo b || echo c',
+        'if 1==1 (echo yes) else (echo no)', 'for %f in (1 2) do @echo %f', 'echo 7 & exit /b 7',
+        'node -e "process.stdout.write(process.argv.slice(1).join(String.fromCharCode(124)))" a "b c" d^e "%HCPU_OUTER%"']) {
+        const plain = run(line);
+        const joined = run(C.joinLine(id, { background: false, half: true }, false) + line);
+        assert.equal(joined.stdout, plain.stdout, `; ${line}`);
+        assert.equal(joined.status, plain.status, `; ${line}`);
+        assert.doesNotMatch(joined.stderr, /limits not applied/, joined.stderr);
+      }
+      // The known limit of the `;` line: a block holding an operator, `(a & b)`, is split by the outer
+      // cmd before the helper runs. Only a shell Guppy knows is cmd gets the `&` line that keeps it.
       // The command's processes run inside the job: it lists itself from inside.
       const inside = run(joinLineFor(id) + `guppy-heavyjob list ${id}`);
       const rows = inside.stdout.trim().split(/\r?\n/).map((l) => JSON.parse(l)); // one JSON line per process
