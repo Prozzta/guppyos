@@ -145,12 +145,71 @@ function words(s: string, d: ShellDialect = 'sh'): string[] {
   return out;
 }
 
+/** HEAVY-LOCK-POSITIONAL-192: an sh option word that includes `c` (`-c`, `-lc`, `-ec`); `-C` is noclobber. */
+const SH_DASH_C = /^-[A-Za-z]*c[A-Za-z]*$/;
 /** A single-quoted sh `-c` body is expanded by its inner shell, not the outer one. */
 function singleQuotedDashCBody(segment: string | undefined, option: string): boolean {
-  if (!segment || option !== '-c') return false;
+  // HEAVY-LOCK-POSITIONAL-192: `-lc`, `-ec` ... are -c with other flags (SH_DASH_C).
+  if (!segment || !SH_DASH_C.test(option)) return false;
   // This must describe the wrapper at this recursion depth, rather than an inner
   // `bash -c '...'` merely mentioned inside its double-quoted body.
-  return /^(?:\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*)?(?:(?:\S+[/\\])?(?:bash|sh|dash|zsh)|busybox\s+sh)(?:\s+(?:-[A-Za-z]+|--\S+))*\s+-c\s+'/.test(segment);
+  return /^(?:\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*)?(?:(?:\S+[/\\])?(?:bash|sh|dash|zsh)|busybox\s+sh)(?:\s+(?:-[A-Za-z]+|--\S+))*\s+-[A-Za-z]*c[A-Za-z]*\s+'/.test(segment);
+}
+
+/**
+ * HEAVY-LOCK-POSITIONAL-192 (Jim MUST 1): an sh shell's options come before its first operand: `c`
+ * is the index of its -c option (-1: none), `body` the index of the first operand (the command
+ * string with -c, else the script). `-o`/`+o`/`-O`/`+O`, --rcfile and --init-file take a value.
+ */
+function shOptions(args: string[]): { c: number; body: number } {
+  let c = -1; let i = 0;
+  for (; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--' || a === '-') { i++; break; }
+    if (!/^[-+]./.test(a)) break;
+    if (/^[-+][oO]$|^--(?:rcfile|init-file)$/.test(a)) { i++; continue; }
+    if (c < 0 && SH_DASH_C.test(a)) c = i;
+  }
+  return { c, body: i };
+}
+
+/**
+ * HEAVY-LOCK-POSITIONAL-192: a -c body with its positional arguments ($0-$9, ${N}, $@, $*) put in
+ * from `params` (params[0] is $0), as the shell running the body expands them:
+ * - not inside a single quote, and not after a backslash; a body with a backslash or an inner sh -c
+ *   that references a positional is unknown (Jim MUST 2: `bash -c 'bash -c "npm $1" _ test'`);
+ * - `$@` inside double quotes is a word per argument (`"$@"`); `$*` there, and both unquoted, join.
+ * Returns null (unknown) when a referenced argument is not a plain literal word (a `$`, backtick,
+ * quote, space or shell syntax), for a `${N...}` with an operator (`${1:-test}`, Jim SHOULD), and
+ * when a positional is assigned to a variable (`x=$1; npm $x`, Jim NIT 1).
+ */
+function positional(body: string, params: string[]): string | null {
+  let unknown = false;
+  const lit = (w: string): string => { if (!/^[\w@%+=:,./-]*$/.test(w)) unknown = true; return w; };
+  // A backslash or an inner sh -c makes the quoting the lock sees uncertain (words() keeps the `\` of
+  // `'\''`): a positional in such a body is unknown, never filled.
+  const nest = /\\|\b(?:ba|z|da)?sh(?:\s+-\S+)*\s+-[A-Za-z]*c[A-Za-z]*\s/.test(body);
+  let out = ''; let q: string | null = null;
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (q === "'") { out += c; if (c === "'") q = null; continue; }
+    if (c === '\\') { out += c + (body[i + 1] ?? ''); i++; continue; }
+    if (c === "'" && !q) { q = c; out += c; continue; }
+    if (c === '"') { q = q ? null : c; out += c; continue; }
+    const m = c === '$' ? /^\$(?:\{([^}]*)\}|(\d|[@*]))/.exec(body.slice(i)) : null;
+    if (!m) { out += c; continue; }
+    const r = m[1] ?? m[2];
+    if (m[1] !== undefined && !/^(?:\d+|[@*])$/.test(r)) {
+      if (/^[#!]?[\d@*]/.test(r)) unknown = true;   // ${1:-x}, ${#1}, ${!1}: an operator on a positional
+      out += m[0]; i += m[0].length - 1; continue;   // ${HOME}, ${#}: not a positional
+    }
+    if (/[A-Za-z_][A-Za-z0-9_]*=\S*$/.test(out)) unknown = true;   // x=$1
+    if (nest) unknown = true;
+    const args = params.slice(1).map(lit);
+    out += r === '@' && q === '"' ? args.join('" "') : r === '@' || r === '*' ? args.join(' ') : lit(params[Number(r)] ?? '');
+    i += m[0].length - 1;
+  }
+  return unknown ? null : out;
 }
 
 /** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
@@ -254,6 +313,8 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
 }
 
 const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bash.exe']);
+/** HEAVY-LOCK-POSITIONAL-192: the WRAPPERS that are sh shells (their -c may be combined: `-lc`). */
+const SH_BINS = new Set(['bash', 'sh', 'dash', 'zsh', 'bash.exe']);
 /** The binaries a wrapper script can be asked to run (`node clean-run.cjs <bin> ...`). */
 const WRAPPED_BINS = new Set(['node', 'npm', 'npx', 'pnpm', 'yarn', 'electron', 'electron-builder', 'electron-rebuild', 'node-gyp', 'vitest', 'env', 'timeout', 'nice']);
 const BENCH_SCRIPT = /(mutant|mutation|replay|bench|backfill|parity|speed|stress|soak)[^\\/]*\.(c?m?js|ts)$/i;
@@ -921,12 +982,17 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // `bash -c "bash run.sh"`); classifyScript stops at depth 2.
   if (WRAPPERS.has(bin)) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
-    const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
+    // HEAVY-LOCK-POSITIONAL-192 (Jim MUST 1): an sh shell takes options only before its first operand
+    // (`bash suite.sh -coverage` runs suite.sh), and its command string is the first operand after
+    // them (`bash -c -e 'npm test'`).
+    const sh = SH_BINS.has(bin) ? shOptions(args) : null;
+    const k = sh ? sh.c : args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
     // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
     // was read one level deep only).
     if (k >= 0) {
-      const body = (ctx.expandKnown ?? ((text: string) => text))(args.slice(k + 1).join(' '));
+      const from = sh ? sh.body : k + 1;
+      const body = (ctx.expandKnown ?? ((text: string) => text))(args.slice(from).join(' '));
       // A command string expanded by a shell is not inspectable after expansion. This covers
       // generated cmd paths (`$B`, `${B}`, `$(cygpath ...)`), shell `$C` indirection, `eval $C`,
       // and `bash`/`dash`/`zsh`/busybox-sh `-c "$(cat run.sh)"`. Deliberately conservative:
@@ -935,6 +1001,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       // Known literal variables are expanded above. Any still-computed `$` / backtick fails closed.
       if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
           ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && !singleQuotedDashCBody(ctx.segment, args[k]) && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
+      // HEAVY-LOCK-POSITIONAL-192: the words after a single-quoted sh -c body are its $0, $1, ...,
+      // not commands: `bash -c 'npm "$1"' _ test` runs npm test.
+      if (ctx.dialect === 'sh' && singleQuotedDashCBody(ctx.segment, args[k])) {
+        const filled = positional((ctx.expandKnown ?? ((text: string) => text))(args[from] ?? ''), args.slice(from + 1));
+        if (filled === null) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (positional arguments the lock cannot read)`, provisional: true };
+        return nested(filled, depth, { ...ctx, dialect: 'sh' }, `${bin} ${args[k]}`);
+      }
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.
