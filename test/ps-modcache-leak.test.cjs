@@ -107,6 +107,8 @@ function testFiles(dir) {
 }
 
 // The PowerShell spawns of 2026-10-20 (file: count). A new one must be added here AND pass psEnv.
+// Not seen here: test/fixtures/quit-sweep-main.cjs starts one through the product PtyManager (a path
+// variable) with cwd os.tmpdir(), and gets the runner's env in suite runs.
 const KNOWN = {
   'electron-harness/electron-bin.cjs': 1,
   'heavy-cpu-options-191.test.cjs': 1,
