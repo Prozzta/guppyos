@@ -145,12 +145,33 @@ function words(s: string, d: ShellDialect = 'sh'): string[] {
   return out;
 }
 
+/** HEAVY-LOCK-POSITIONAL-192: an sh option word that includes `c` (`-c`, `-lc`, `-ec`); `-C` is noclobber. */
+const SH_DASH_C = /^-[A-Za-z]*c[A-Za-z]*$/;
 /** A single-quoted sh `-c` body is expanded by its inner shell, not the outer one. */
 function singleQuotedDashCBody(segment: string | undefined, option: string): boolean {
-  if (!segment || option !== '-c') return false;
+  // HEAVY-LOCK-POSITIONAL-192: `-lc`, `-ec` ... are -c with other flags (SH_DASH_C).
+  if (!segment || !SH_DASH_C.test(option)) return false;
   // This must describe the wrapper at this recursion depth, rather than an inner
   // `bash -c '...'` merely mentioned inside its double-quoted body.
-  return /^(?:\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*)?(?:(?:\S+[/\\])?(?:bash|sh|dash|zsh)|busybox\s+sh)(?:\s+(?:-[A-Za-z]+|--\S+))*\s+-c\s+'/.test(segment);
+  return /^(?:\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)*)?(?:(?:\S+[/\\])?(?:bash|sh|dash|zsh)|busybox\s+sh)(?:\s+(?:-[A-Za-z]+|--\S+))*\s+-[A-Za-z]*c[A-Za-z]*\s+'/.test(segment);
+}
+
+/**
+ * HEAVY-LOCK-POSITIONAL-192: a -c body with its positional arguments ($0-$9, ${N}, $@, $*) put in
+ * from `params` (params[0] is $0). `"$@"` is one quoted word per argument; elsewhere $@ and $* are
+ * the arguments joined. Returns null when a referenced argument is not a plain literal word (a `$`
+ * or backtick, a quote, shell syntax): what it runs is unknown.
+ */
+function positional(body: string, params: string[]): string | null {
+  let unknown = false;
+  const lit = (w: string): string => { if (!/^[\w@%+=:,./-]*$/.test(w)) unknown = true; return w; };
+  const out = body
+    .replace(/"\$(?:@|\{@\})"/g, () => params.slice(1).map((w) => `"${lit(w)}"`).join(' '))
+    .replace(/\$(?:\{(\d+|[@*])\}|(\d|[@*]))/g, (_m, a: string | undefined, b: string | undefined) => {
+      const r = a ?? b ?? '';
+      return r === '@' || r === '*' ? params.slice(1).map(lit).join(' ') : lit(params[Number(r)] ?? '');
+    });
+  return unknown ? null : out;
 }
 
 /** HEAVY-CLASSIFIER-FP: drop every heredoc BODY (`<<'EOF'` ... `EOF`). The body is data fed to
@@ -254,6 +275,8 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
 }
 
 const WRAPPERS = new Set(['bash', 'sh', 'dash', 'zsh', 'cmd', 'cmd.exe', 'powershell', 'powershell.exe', 'pwsh', 'pwsh.exe', 'bash.exe']);
+/** HEAVY-LOCK-POSITIONAL-192: the WRAPPERS that are sh shells (their -c may be combined: `-lc`). */
+const SH_BINS = new Set(['bash', 'sh', 'dash', 'zsh', 'bash.exe']);
 /** The binaries a wrapper script can be asked to run (`node clean-run.cjs <bin> ...`). */
 const WRAPPED_BINS = new Set(['node', 'npm', 'npx', 'pnpm', 'yarn', 'electron', 'electron-builder', 'electron-rebuild', 'node-gyp', 'vitest', 'env', 'timeout', 'nice']);
 const BENCH_SCRIPT = /(mutant|mutation|replay|bench|backfill|parity|speed|stress|soak)[^\\/]*\.(c?m?js|ts)$/i;
@@ -921,7 +944,7 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
   // `bash -c "bash run.sh"`); classifyScript stops at depth 2.
   if (WRAPPERS.has(bin)) {
     // -c (sh), /c /k (cmd; Git Bash spells it //c), -Command (PowerShell)
-    const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a));
+    const k = args.findIndex((a) => /^(-c|\/\/?c|\/\/?k|-command)$/i.test(a) || (SH_BINS.has(bin) && SH_DASH_C.test(a)));
     // HEAVY-LOCK-APOSTROPHE-SWALLOW: a cmd body is read with cmd's quoting (`'` is literal there).
     // HEAVY-LOCK-SHAPES-189: nested wrappers are followed to MAX_DEPTH (`bash -c "bash -c '...'"`
     // was read one level deep only).
@@ -935,6 +958,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       // Known literal variables are expanded above. Any still-computed `$` / backtick fails closed.
       if ((bin === 'cmd' && ((ctx.dialect === 'sh' && /\$/.test(body)) || /`/.test(body))) ||
           ((bin === 'bash' || bin === 'sh' || bin === 'dash' || bin === 'zsh') && ctx.dialect === 'sh' && !singleQuotedDashCBody(ctx.segment, args[k]) && /(?:\$|`)/.test(body))) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (computed command the lock cannot read)`, provisional: true };
+      // HEAVY-LOCK-POSITIONAL-192: the words after a single-quoted sh -c body are its $0, $1, ...,
+      // not commands: `bash -c 'npm "$1"' _ test` runs npm test.
+      if (ctx.dialect === 'sh' && singleQuotedDashCBody(ctx.segment, args[k])) {
+        const filled = positional((ctx.expandKnown ?? ((text: string) => text))(args[k + 1] ?? ''), args.slice(k + 2));
+        if (filled === null) return { heavy: true, kind: 'bench', why: `${bin} ${args[k]} (positional arguments the lock cannot read)`, provisional: true };
+        return nested(filled, depth, { ...ctx, dialect: 'sh' }, `${bin} ${args[k]}`);
+      }
       return nested(body, depth, { ...ctx, dialect: bin === 'cmd' ? 'cmd' : 'sh' }, `${bin} ${args[k]}`);
     }
     // HEAVY-LOCK-SHAPES-189: `powershell -File x.ps1` runs the script's text.

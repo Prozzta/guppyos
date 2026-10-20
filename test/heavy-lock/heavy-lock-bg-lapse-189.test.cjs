@@ -327,7 +327,7 @@ test('MUTANTS: removing either computed-wrapper guard reopens the generated-chil
   assert.equal(original.split(singleQuoteGuard).length - 1, 1, 'single-quote guard mutation target is unique');
   const noSingleQuoteException = loadTs.fromText('src/main/heavyJob.ts', original.replace(singleQuoteGuard, 'true'));
   assert.equal(noSingleQuoteException.classifyCommand("bash -c 'cd $UNSET_FOR_QUOTE_PIN && git status'", 0, HookServer.heavyScriptCtx(process.cwd())).heavy, true, 'MUTANT: removing single-quote exception queues an inspectable inner-shell body');
-  const anchoredQuote = "return /^(?:\\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\\S+)\\s+)*)?(?:(?:\\S+[/\\\\])?(?:bash|sh|dash|zsh)|busybox\\s+sh)(?:\\s+(?:-[A-Za-z]+|--\\S+))*\\s+-c\\s+'/.test(segment);";
+  const anchoredQuote = "return /^(?:\\s*(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\\S+)\\s+)*)?(?:(?:\\S+[/\\\\])?(?:bash|sh|dash|zsh)|busybox\\s+sh)(?:\\s+(?:-[A-Za-z]+|--\\S+))*\\s+-[A-Za-z]*c[A-Za-z]*\\s+'/.test(segment);";
   assert.equal(original.split(anchoredQuote).length - 1, 1, 'anchored quote mutation target is unique');
   const unanchoredQuote = loadTs.fromText('src/main/heavyJob.ts', original.replace(anchoredQuote, "return /(?:^|\\s)-c\\s+(')/.test(segment);"));
   assert.equal(unanchoredQuote.classifyCommand("C=$(cat run.sh)\nsh -c \"bash -c '$C'\"", 0, HookServer.heavyScriptCtx(process.cwd())).heavy, false, 'MUTANT: unanchored inner quote reopens the outer computed body');
