@@ -24,6 +24,8 @@ const { readSource } = require('../read-source.cjs');
 
 const HJ = loadTs('src/main/heavyJob.ts');
 const H = { heavy: true, kind: 'suite' };
+// HEAVY-SLOT-EXCLUSIVE-192: a suite runs alone at 2+ slots; the slot-counting tests use a class that shares.
+const S = { heavy: true, kind: 'install' };
 
 function rig(M = HJ, limit = 1, extra = {}) {
   let now = 1_000_000; let lim = limit; const logs = []; const notes = []; const gone = new Set();
@@ -102,10 +104,10 @@ test('a reserved agent whose PTY exits drops its reservation; the next waiter ge
 
 test('a raised limit serves the queue before a newcomer; Off keeps no queue', () => {
   const x = rig();
-  x.l.acquire('a', H, 'npm ci', 'a1', false);
-  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('a', S, 'npm ci', 'a1', false);
+  x.l.acquire('b', S, 'npm ci', 'b1', false);
   x.setLimit(2);
-  assert.equal(x.l.acquire('n', H, 'npm ci', 'n1', false).allow, false, 'the free slot went to b first');
+  assert.equal(x.l.acquire('n', S, 'npm ci', 'n1', false).allow, false, 'the free slot went to b first');
   assert.deepEqual(x.notes.map((n) => n.a), ['b']);
   x.setLimit('off');
   x.l.callDone('a', 'a1');
@@ -252,10 +254,10 @@ test('N2: a re-deny keeps the place AND restarts the waiter TTL', () => {
 
 K.noSelfNotify = (M = HJ) => {
   const x = rig(M);
-  x.l.acquire('a', H, 'npm ci', 'a1', false);
-  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('a', S, 'npm ci', 'a1', false);
+  x.l.acquire('b', S, 'npm ci', 'b1', false);
   x.setLimit(2);
-  assert.deepEqual(x.l.acquire('b', H, 'npm ci', 'b2', false), { allow: true, acquired: true });
+  assert.deepEqual(x.l.acquire('b', S, 'npm ci', 'b2', false), { allow: true, acquired: true });
   assert.deepEqual(x.notes, [], 'THE CALLER IS NOT TOLD ABOUT THE SLOT IT IS TAKING');
 };
 test('N3: when the limit is raised, the first waiter calling again takes its slot without a "slot free" notice', () => K.noSelfNotify());
@@ -297,7 +299,9 @@ function mutateText(rel, edits, tag) {
 const HJF = 'src/main/heavyJob.ts';
 const MUTANTS = [
   { name: 'others may take a reserved slot', file: HJF, module: true,
-    edits: [['if (!reserved && this.holders.size + this.reservations.size >= limit) {', 'if (!reserved && this.holders.size >= limit) {']],
+    // HEAVY-SLOT-EXCLUSIVE-192: the acquire's count moved into admits()/fits() (the grant asks fits()
+    // too, so the acquire's own check is what goes: it counts the holders only, as before).
+    edits: [['if (!reserved && !this.admits(agentId, excl, limit)) return this.deny(agentId, cls, limit, callId);', 'if (!reserved && this.holders.size >= limit) return this.deny(agentId, cls, limit, callId);']],
     killer: 'fifoReserveNotify', dies: /NOBODY ELSE TAKES A RESERVED SLOT/ },
   { name: 'LIFO instead of FIFO', file: HJF, module: true,
     edits: [['const w = this.waiters.shift()!;', 'const w = this.waiters.pop()!;']],
@@ -306,7 +310,7 @@ const MUTANTS = [
     edits: [['      try { this.d.notify?.(w.agentId, w.kind, until); } catch { /* best effort: the reservation stands */ }\n', '']],
     killer: 'fifoReserveNotify', dies: /THE OLDEST WAITER IS RESERVED AND NOTIFIED/ },
   { name: 'a retry queues the agent again', file: HJF, module: true,
-    edits: [['    if (i >= 0) { this.waiters[i].since = this.now(); return i + 1; }\n    this.waiters.push', '    this.waiters.push']],
+    edits: [['    if (i >= 0) { this.waiters[i].since = this.now(); this.waiters[i].exclusive ||= exclusive; return i + 1; }\n    this.waiters.push', '    this.waiters.push']],
     killer: 'fifoReserveNotify', dies: /QUEUED ONCE: A RETRY KEEPS ITS PLACE/ },
   { name: 'a reservation never expires', file: HJF, module: true,
     edits: [['      if (t < r.until) continue;', '      if (t < r.until || r.until > 0) continue;']],

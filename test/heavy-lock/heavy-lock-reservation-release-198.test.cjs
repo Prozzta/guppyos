@@ -240,7 +240,7 @@ const MUTANTS = [
     killer: 'releaseHandsOn', dies: /a lease needs pid and createdMs/ },
   { name: 'the reservation is kept', edits: [['    const reserved = this.reservations.delete(agentId);', '    const reserved = this.reservations.has(agentId);']],
     killer: 'releaseHandsOn', dies: /THE SLOT PASSES ON AT ONCE|A RESERVED AGENT CAN GIVE ITS SLOT UP/ },
-  { name: 'no grant: the slot idles', edits: [['    if (reserved) this.grant();\n', '']],
+  { name: 'no grant: the slot idles', edits: [['    if (reserved || queued) this.grant();\n', '']],
     killer: 'releaseHandsOn', dies: /A RESERVED AGENT CAN GIVE ITS SLOT UP/ },
   { name: 'not logged', edits: [["    if (r) this.log({ kind: 'heavy-lock', action: 'reserve-released', agentId, heavyKind: r.kind, ...(to ? { to } : {}) });\n    else if", '    if (false) {}\n    else if']],
     killer: 'releaseHandsOn', dies: /THE RELEASE IS LOGGED/ },
