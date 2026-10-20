@@ -120,12 +120,16 @@ function main(argv, { cwd = process.cwd(), out = console.log, err = console.erro
       // branch or the tip itself, so one argument cannot turn the gate off either.
       const remote = /^origin\/(guppy\/int-[\w.-]+)$/.exec(b);
       if (!remote) throw new Error(`the authority must be origin/guppy/int-<x> (the fetched INT ref), not ${b}`);
-      try { git(['fetch', '-q', 'origin', remote[1]]); } catch (e) { throw new Error(`cannot fetch the authority ${b}: ${String(e.message).split('\n')[0]}`); }
+      // Jim SHOULD (26d22905): the full ref, so a local branch or tag named origin/guppy/int-<x>
+      // (which git prefers for the short name) cannot stand in for the fetched one. The refspec
+      // writes it explicitly, whatever fetch refspec the clone has.
+      const auth = `refs/remotes/origin/${remote[1]}`;
+      try { git(['fetch', '-q', 'origin', `+refs/heads/${remote[1]}:${auth}`]); } catch (e) { throw new Error(`cannot fetch the authority ${b}: ${String(e.message).split('\n')[0]}`); }
       const tip = git(['rev-parse', '--verify', `${a}^{commit}`]).trim();
       let state;
-      try { state = parseState(git(['show', `${b}:${FILE}`])); } catch (e) { throw new Error(`cannot read the authority ${b}: ${String(e.message).split('\n')[0]}`); }
+      try { state = parseState(git(['show', `${auth}:${FILE}`])); } catch (e) { throw new Error(`cannot read the authority ${auth}: ${String(e.message).split('\n')[0]}`); }
       const off = disagreement(parseState(git(['show', `${tip}:${FILE}`])), state);
-      if (off) throw new Error(`${a} disagrees with the authority ${b}: ${off}`);
+      if (off) throw new Error(`${a} disagrees with the authority ${auth}: ${off}`);
       const version = JSON.parse(git(['show', `${tip}:package.json`])).version;
       const r = gate({ state, tip, version, git });
       for (const f of r.files) out(`  ${f}`);

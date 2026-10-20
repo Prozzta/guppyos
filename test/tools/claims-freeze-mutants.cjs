@@ -39,7 +39,8 @@ const MUTANTS = [
   ['C22 the authority is not checked', 'if (off) throw new Error(', 'if (false) throw new Error(', /not ok \d+ - authority: a tip that edits its own state/],
   ['C23 any ref is an authority', 'if (!remote) throw new Error(`the authority must be', 'if (false) throw new Error(`the authority must be', /not ok \d+ - authority: only origin\/guppy\/int-<x> is an authority/],
   ['C24 the authority pattern takes any origin ref', '/^origin\\/(guppy\\/int-[\\w.-]+)$/', '/^origin\\/(.+)$/', /not ok \d+ - authority: only origin\/guppy\/int-<x> is an authority/],
-  ['C25 the authority is not fetched', "try { git(['fetch', '-q', 'origin', remote[1]]); }", 'try { }', /not ok \d+ - authority: a stale release branch/],
+  ['C25 the authority is not fetched', "try { git(['fetch', '-q', 'origin', `+refs/heads/${remote[1]}:${auth}`]); }", 'try { }', /not ok \d+ - authority: a stale release branch/],
+  ['C26 the authority is read by its short name', "git(['show', `${auth}:${FILE}`])", "git(['show', `${b}:${FILE}`])", /not ok \d+ - authority: only origin\/guppy\/int-<x> is an authority/],
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

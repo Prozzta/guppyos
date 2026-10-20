@@ -201,7 +201,7 @@ test('authority: a tip that edits its own state to slip past the gate is REFUSED
     const out = r.run('gate', 'HEAD', 'int');
     assert.strictEqual(out.code, 1, `${name}: ${out.text}`);
     assert.match(out.text, why, name);
-    assert.match(out.text, /disagrees with the authority origin\/guppy\/int-1\.1\.90/, name);
+    assert.match(out.text, /disagrees with the authority refs\/remotes\/origin\/guppy\/int-1\.1\.90/, name);
   }
 });
 
@@ -248,6 +248,16 @@ test('authority: only origin/guppy/int-<x> is an authority; the tip, a sha, a lo
     const lines = []; // cf.main directly: r.run maps `int` to the INT ref
     assert.strictEqual(cf.main(['gate', 'HEAD', auth], { cwd: r.cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }), 1, auth);
     assert.match(lines.join('\n'), /the authority must be origin\/guppy\/int-<x>/, auth);
+  }
+  // Jim SHOULD (26d22905): a local branch or a tag named like the INT ref shadows it for the short
+  // name; the gate reads the fetched remote ref, so neither lets the self-waiver through.
+  r.run('gate', 'HEAD', 'int'); // pushes INT to origin
+  for (const shadow of [['branch', 'origin/guppy/int-1.1.90', tip], ['tag', 'origin/guppy/int-1.1.90', tip]]) {
+    git(r.cwd, shadow);
+    const lines = [];
+    assert.strictEqual(cf.main(['gate', 'HEAD', AUTH], { cwd: r.cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }), 1, shadow[0]);
+    assert.match(lines.join('\n'), /disagrees with the authority refs\/remotes\/origin\/guppy\/int-1\.1\.90: the tip waives 1\.1\.91/, shadow[0]);
+    git(r.cwd, shadow[0] === 'branch' ? ['branch', '-D', shadow[1]] : ['tag', '-d', shadow[1]]);
   }
   // A release cut straight from the INT tip is legitimate: the authority may be the tip.
   git(r.cwd, ['checkout', '-q', 'int']);
