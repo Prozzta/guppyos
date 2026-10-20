@@ -193,7 +193,7 @@ test('a hook fires with NO node on PATH, and its payload reaches HIVE_SOCK', { s
   await new Promise((resolve) => server.listen(sock, resolve));
   t.after(() => server.close());
 
-  const env = { PATH: STRIPPED_PATH, HIVE_SOCK: sock, AGENT_ID: 'a1', HOME: home };
+  const env = { PATH: STRIPPED_PATH, HIVE_SOCK: sock, AGENT_ID: 'a1', HOME: home, HIVE_HOOK_TOKEN: 'ab'.repeat(16) };
   const shim = path.join(home, 'hive/bin/cth-hook.cjs');
 
   // Control: the command shape used before the fix. Only meaningful if node is

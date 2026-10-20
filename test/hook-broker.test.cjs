@@ -68,6 +68,18 @@ function post(url, body, raw) {
   });
 }
 
+/** Send one newline-framed command-hook payload over the real pipe. */
+function pipePost(sock, body) {
+  return new Promise((resolve, reject) => {
+    const c = net.createConnection(sock, () => c.end(JSON.stringify(body) + '\n'));
+    let out = '';
+    c.setEncoding('utf8');
+    c.on('data', (d) => { out += d; });
+    c.on('end', () => resolve(out ? JSON.parse(out) : {}));
+    c.on('error', reject);
+  });
+}
+
 test('(1) a POST with the right token reaches handle() with the URL identity, and replies with handle()\'s result', async (t) => {
   const { s, rec } = await broker(t, { deny: true });
   const url = s.hookUrl(A);
@@ -97,6 +109,32 @@ test('(2) a wrong token, an unknown agent or a revoked token is 403 and never ha
   assert.equal((await post(fresh, { hook_event_name: 'Stop' })).status, 403, 'a respawn\'s new token replaces the old one');
   assert.equal((await post(again, { hook_event_name: 'Stop' })).status, 200);
   assert.equal(rec.handled.length, 1, 'only the one valid request was handled');
+});
+
+test('(2b) pipe hooks require the same per-agent capability as HTTP, including after revocation', async (t) => {
+  const { s, rec, sock } = await broker(t);
+  const url = s.hookUrl(A);
+  const token = url.slice(url.lastIndexOf('/') + 1);
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A });
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: '0'.repeat(32) });
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: B, hook_token: token });
+  assert.equal(rec.handled.length, 0, 'missing, bad, and cross-agent tokens never reach handle');
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
+  assert.equal(rec.handled.length, 1, 'the HTTP capability authorizes its matching pipe hook');
+  assert.deepEqual(rec.logs.filter((x) => x.kind === 'hook-auth-reject').map((x) => x.reason), ['missing', 'bad', 'revoked'], 'pipe rejects are visible, rate-limited by agent/reason');
+  s.revokeHookToken(A);
+  await pipePost(sock, { hook_event_name: 'Stop', agent_id: A, hook_token: token });
+  assert.equal(rec.handled.length, 1, 'a revoked capability no longer authorizes the pipe');
+  assert.equal(rec.logs.at(-1).reason, 'revoked');
+});
+
+// PIPE-HOOK-NO-TOKEN-192 (Jim NIT-1): a frame with a token but no agent is not a revocation.
+test('(2c) a pipe hook that names no agent is refused with reason no-agent, never revoked', async (t) => {
+  const { s, rec, sock } = await broker(t);
+  const url = s.hookUrl(A);
+  await pipePost(sock, { hook_event_name: 'Stop', hook_token: url.slice(url.lastIndexOf('/') + 1) });
+  assert.equal(rec.handled.length, 0);
+  assert.deepEqual(rec.logs.filter((x) => x.kind === 'hook-auth-reject').map((x) => [x.agentId, x.reason]), [[null, 'no-agent']]);
 });
 
 test('(3) identity: the URL wins; a different body agent_id is a subagent (kept out of session/lifecycle/Stop); an incoming provider_agent_id is stripped', async (t) => {
@@ -233,9 +271,11 @@ test('(10) STATIC: SessionStart is never an http hook, and the http shape is the
 
 test('the pipe path is stamped too (transport pipe, the same per-agent seq)', async (t) => {
   const { s, rec, sock } = await broker(t);
-  await post(s.hookUrl(A), { hook_event_name: 'PreToolUse' });
+  const url = s.hookUrl(A);
+  const token = url.slice(url.lastIndexOf('/') + 1);
+  await post(url, { hook_event_name: 'PreToolUse' });
   await new Promise((resolve, reject) => {
-    const c = net.createConnection(sock, () => c.write(JSON.stringify({ hook_event_name: 'PostToolUse', agent_id: A, seq: 999, transport: 'http' }) + '\n'));
+    const c = net.createConnection(sock, () => c.write(JSON.stringify({ hook_event_name: 'PostToolUse', agent_id: A, hook_token: token, seq: 999, transport: 'http' }) + '\n'));
     c.on('data', () => {}); c.on('end', resolve); c.on('error', reject);
   });
   const last = rec.handled.at(-1);

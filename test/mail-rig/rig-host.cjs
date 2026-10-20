@@ -371,7 +371,7 @@ async function buildFloor() {
     onMailBlock: (agentId) => inboxWake?.onMailBlock(agentId)
   });
   // index.ts:757
-  hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), revoke: (id) => hookServer.revokeHookToken(id) });
+  hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), tokenFor: (id) => hookServer.hookToken(id), revoke: (id) => hookServer.revokeHookToken(id) });
   // index.ts:6376 hive.setDeliveryObserver (bootstrapHiveServices)
   hive.setDeliveryObserver(({ agentId, messageId }) => inboxWake?.onDelivery(agentId, messageId));
 

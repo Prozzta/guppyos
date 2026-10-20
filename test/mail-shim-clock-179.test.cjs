@@ -89,8 +89,14 @@ async function floor(t) {
   const entryOf = (id) => hive.mail.ledger('ag-1').entries[id];
   const logRows = () => { try { return fs.readFileSync(path.join(hive.root(), 'log.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
   s.start();
-  return { hive, server: s, entryOf, logRows, home };
+  // PIPE-HOOK-NO-TOKEN-192: every pipe frame carries its spawn's capability, as a spawned agent's
+  // HIVE_HOOK_TOKEN does (hookUrl mints it, also while HTTP is down).
+  const tokens = {};
+  for (const id of ['god-1', 'ag-1']) { s.hookUrl(id); tokens[id] = s.hookToken(id); }
+  return { hive, server: s, entryOf, logRows, home, tokens };
 }
+/** A raw pipe frame with its agent's token, as the shims send it. */
+const withToken = (f, payload) => ({ ...payload, hook_token: f.tokens[payload.agent_id] });
 
 /** One AGY PreInvocation through the real shim and the real HookServer pipe; the settled outcome. */
 async function agyRound(t, deschedule) {
@@ -108,7 +114,7 @@ async function agyRound(t, deschedule) {
     const handle = f.server.handle.bind(f.server);
     f.server.handle = (p) => { const res = handle(p); setImmediate(() => fs.writeFileSync(sentinel, '1')); return res; };
   }
-  const r = await runShim(AGY_HOOK_SHIM, ['PreInvocation'], { AGENT_ID: 'ag-1', HIVE_SOCK: f.hive.sockPath() }, JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }), { ...deschedule, sentinel });
+  const r = await runShim(AGY_HOOK_SHIM, ['PreInvocation'], { AGENT_ID: 'ag-1', HIVE_SOCK: f.hive.sockPath(), HIVE_HOOK_TOKEN: f.tokens['ag-1'] }, JSON.stringify({ conversationId: 'conv-1', workspacePaths: [f.home] }), { ...deschedule, sentinel });
   const late = () => f.logRows().find((x) => x.kind === 'mail-hook-late' && x.ids.includes(m.id));
   for (let i = 0; i < 400 && f.entryOf(m.id).state !== 'surfaced' && !late(); i++) await new Promise((res) => setTimeout(res, 5));
   const e = f.entryOf(m.id);
@@ -203,7 +209,7 @@ async function hangUpBeforeReply(f, payload) {
     return handle(p);
   };
   await new Promise((resolve) => {
-    const c = net.createConnection(f.hive.sockPath(), () => { c.write(JSON.stringify(payload) + '\n'); setImmediate(() => { c.destroy(); resolve(); }); });
+    const c = net.createConnection(f.hive.sockPath(), () => { c.write(JSON.stringify(withToken(f, payload)) + '\n'); setImmediate(() => { c.destroy(); resolve(); }); });
     c.on('error', resolve);
   });
   await closed;
@@ -238,7 +244,7 @@ async function briefingRound(t, ms) {
   const f = await floor(t);
   const text = '# Memory working set — god-1 (slow)';
   f.server.setClaimWorkingSetProvider(async () => { await new Promise((r) => setTimeout(r, ms)); return text; });
-  const r = await runShim(HOOK_SHIM, ['--agent', 'god-1', '--part', 'briefing'], { AGENT_ID: 'god-1', HIVE_SOCK: f.hive.sockPath() },
+  const r = await runShim(HOOK_SHIM, ['--agent', 'god-1', '--part', 'briefing'], { AGENT_ID: 'god-1', HIVE_SOCK: f.hive.sockPath(), HIVE_HOOK_TOKEN: f.tokens['god-1'] },
     JSON.stringify({ hook_event_name: 'SessionStart', session_id: 's-god-1', source: 'compact' }));
   const rows = await rowsWithin(f, (x) => x.kind === 'claims-briefing-flush' || x.kind === 'claims-briefing-late');
   return { printed: r.out.includes(text), ms: r.ms, text, rows };
@@ -318,7 +324,7 @@ test('(1) the server strips shim_elapsed_ms before handling, and an older shim (
   const handle = f.server.handle.bind(f.server);
   f.server.handle = (p) => { seen.push({ ...p }); return handle(p); };
   const send = (payload) => new Promise((resolve) => {
-    const c = net.createConnection(f.hive.sockPath(), () => c.write(JSON.stringify(payload) + '\n'));
+    const c = net.createConnection(f.hive.sockPath(), () => c.write(JSON.stringify(withToken(f, payload)) + '\n'));
     let out = ''; c.setEncoding('utf8'); c.on('data', (d) => { out += d; }); c.on('end', () => resolve(out)); c.on('error', () => resolve(null));
   });
   await send({ hook_event_name: 'PostToolUse', agent_id: 'ag-1', shim_elapsed_ms: 1_000 });
@@ -346,6 +352,7 @@ test('(1) the server strips shim_elapsed_ms before handling, and an older shim (
 // Every request/response pipe shim with the 5 s give-up carries (1) and (a): a fake pipe server
 // that records the request and answers at once; the shim is descheduled 3 s before its request and,
 // after it, until the reply is in the pipe and its give-up is due (a sentinel, never a guessed time).
+const FAKE_TOKEN = 'ab'.repeat(16);
 const SHIMS = [
   ['HOOK_SHIM (Claude/Codex command hooks)', () => HOOK_SHIM, ['--agent', 'cx-1'], { hook_event_name: 'UserPromptSubmit' }],
   ['AGY_HOOK_SHIM', () => AGY_HOOK_SHIM, ['PreInvocation'], { conversationId: 'c' }],
@@ -369,8 +376,9 @@ for (const [name, src, args, input] of SHIMS) {
     });
     await new Promise((res) => server.listen(sock, res));
     try {
-      const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock }, JSON.stringify(input), { pre: 3_000, sentinel });
+      const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: FAKE_TOKEN }, JSON.stringify(input), { pre: 3_000, sentinel });
       assert.equal(got.length, 1, 'the request arrived');
+      assert.equal(got[0].hook_token, FAKE_TOKEN, 'PIPE-HOOK-NO-TOKEN-192: the shim sends its spawn\'s HIVE_HOOK_TOKEN');
       assert.ok(got[0].shim_elapsed_ms >= 3_000, `(1): shim_elapsed_ms ${got[0].shim_elapsed_ms} counts the 3 s before sending`);
       assert.ok(r.out.includes('CTX-REACHED-THE-CLI'), `(a): printed at the give-up (${r.ms} ms): ${JSON.stringify(r.out)}`);
     } finally { server.close(); }
@@ -383,7 +391,7 @@ for (const [name, src, args, input] of SHIMS) {
     const server = net.createServer((conn) => { conn.on('data', () => conn.write('{"hookSpecificOutput":{"additionalCon')); conn.on('error', () => {}); });
     await new Promise((res) => server.listen(sock, res));
     try {
-      const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock }, JSON.stringify(input), {});
+      const r = await runShim(src(), args, { AGENT_ID: 'cx-1', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: FAKE_TOKEN }, JSON.stringify(input), {});
       assert.equal(r.out, '', 'nothing printed: a partial reply is no reply (AGY even reads any stdout object as a decision)');
       assert.ok(r.ms >= 4_900 && r.ms < 28_000, `gave up at its 5 s bound, not earlier (${r.ms} ms; the upper bound is a hang guard)`);
     } finally { server.close(); }

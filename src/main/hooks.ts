@@ -216,21 +216,35 @@ interface EvidenceWait {
  * transport, so its observational events run `agy-oneway.cmd` (cmd built-ins + findstr, ~34 ms)
  * instead of the Electron shim (~450 ms): the first line is a header, the rest is AGY's raw JSON,
  * and the client closes without reading a reply. Headers:
- *   `agy <Event> <agentId>`            PostToolUse / PostInvocation
- *   `agy-status <ownerToken> <agentId>` the statusline
+ *   `agy <Event> <hookToken> <agentId>` PostToolUse / PostInvocation
+ *   `agy-status <ownerToken> <hookToken> <agentId>` the statusline
  * An empty agent id is a user's own (non-hive) AGY session.
  */
-export interface OnewayFrame { kind: 'hook' | 'status'; event: string; token: string; agentId: string | null; body: unknown; bodyOk: boolean }
+export interface OnewayFrame {
+  kind: 'hook' | 'status'; event: string; token: string; agentId: string | null;
+  /** status only: the HIVE_HOOK_TOKEN a hive worker's statusline carries after the owner token. */
+  agentToken?: string | null;
+  body: unknown; bodyOk: boolean;
+}
 export const ONEWAY_EVENTS = new Set(['PostToolUse', 'PostInvocation']);
 export function parseOnewayFrame(text: string): OnewayFrame | null {
   const nl = text.indexOf('\n');
   const header = (nl < 0 ? text : text.slice(0, nl)).replace(/\r$/, '').trim();
   const parts = header.split(/\s+/);
   let frame: Omit<OnewayFrame, 'body' | 'bodyOk'>;
-  if (parts[0] === 'agy' && ONEWAY_EVENTS.has(parts[1] ?? '')) {
-    frame = { kind: 'hook', event: parts[1], token: '', agentId: parts[2] || null };
+  if (parts[0] === 'agy' && ONEWAY_EVENTS.has(parts[1] ?? '') && /^[0-9a-f]{32}$/i.test(parts[2] ?? '')) {
+    frame = { kind: 'hook', event: parts[1], token: parts[2], agentId: parts[3] || null };
   } else if (parts[0] === 'agy-status' && /^[0-9a-f]{16,}$/i.test(parts[1] ?? '')) {
-    frame = { kind: 'status', event: 'AgyStatusLine', token: parts[1], agentId: parts[2] || null };
+    // Hive-worker status commands also carry HIVE_HOOK_TOKEN before AGENT_ID; the owner lease
+    // remains the status capability, while personal AGY keeps its original three fields.
+    // A global personal statusline can inherit HIVE_HOOK_TOKEN but has no AGENT_ID, leaving
+    // the optional token as the last word. Never mistake that 32-hex capability for an id.
+    const positional = parts[3] || parts[2] || null;
+    const hex = (s: string | undefined): boolean => !!s && /^[0-9a-f]{32}$/i.test(s);
+    // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): keep the worker's own token, so a frame that names
+    // an agent can be held to it (the owner lease alone is readable by any agent).
+    const agentToken = hex(parts[2]) ? parts[2] : null;
+    frame = { kind: 'status', event: 'AgyStatusLine', token: parts[1], agentToken, agentId: positional && hex(positional) ? null : positional };
   } else return null;
   // A literal %AGENT_ID% (the variable was not set) is the same as none.
   if (frame.agentId && /^%.*%$/.test(frame.agentId)) frame.agentId = null;
@@ -520,6 +534,7 @@ export class HookServer {
     this.server = createServer((conn) => {
       let buf = '';
       let oneway = false;
+      let handled = false;
       let receivedAt = 0;
       conn.on('end', () => { if (oneway) this.onOneway(buf); });
       conn.on('data', (d) => {
@@ -529,8 +544,25 @@ export class HookServer {
         if (oneway || /^agy(-status)? /.test(buf)) { oneway = true; if (buf.length > HOOK_HTTP_BODY_MAX) { oneway = false; conn.destroy(); } return; }
         const nl = buf.indexOf('\n');
         if (nl === -1) return; // wait for the full line
-        let payload: HookPayload = {};
-        try { payload = JSON.parse(buf.slice(0, nl)); } catch { /* ignore */ }
+        if (handled) return;
+        handled = true;
+        let decoded: unknown = {};
+        try { decoded = JSON.parse(buf.slice(0, nl)); } catch { /* ignored below */ }
+        if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) { conn.end('{}'); return; }
+        const payload = decoded as HookPayload;
+        const token = (payload as Record<string, unknown>).hook_token;
+        delete (payload as Record<string, unknown>).hook_token;
+        const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : null;
+        // A personal AGY statusline has no agent id. Its locator is protected by the
+        // current statusline lease token, which is the capability it carries here.
+        // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): only for a frame that names NO agent. The lease
+        // token sits in the personal AGY settings any agent can read, so a frame that names an
+        // agent must carry that agent's own token.
+        const statusline = !agentId && payload.hook_event_name === 'AgyStatusLine' && typeof token === 'string' && this.statuslineTokenMatches(token);
+        if ((!agentId || typeof token !== 'string' || !this.hookTokenMatches(agentId, token)) && !statusline) {
+          this.logHookAuthReject(agentId, typeof token !== 'string' ? 'missing' : (!agentId ? 'no-agent' : (!this.hookTokens.has(agentId) ? 'revoked' : 'bad')));
+          conn.end('{}'); return;
+        }
         // MAIL-PIPE-SHIM-CLOCK (1): the shim's 5 s give-up started before this read. A shim that
         // was descheduled before sending, or a server that read the request late, used up time
         // this side never saw; on a Windows pipe the flush also "finishes" when the shim CLOSES at
@@ -589,6 +621,8 @@ export class HookServer {
   private transportCounts = new Map<string, Record<HookTransport, number>>();
   private countsMinute = 0;
   private oversizeLogged = new Set<string>();
+  /** One auth-reject row per agent/reason per minute: visible wiring failures, never a log flood. */
+  private authRejectLogged = new Map<string, number>();
   /** NATIVE-MEMORY: set by main when the engine is past `legacy`; null = the route is 404. */
   private memoryHandler: MemoryHttpHandler | null = null;
 
@@ -802,17 +836,50 @@ export class HookServer {
     this.flushTransportCounts();
   }
 
-  /** The URL this agent's Claude hooks POST to, minting a fresh token (the previous spawn's is
-   *  revoked). Null when the broker is not listening: the caller then writes command hooks. */
+  /** Mint this spawn's shared HTTP/pipe capability. The URL is null while HTTP is down, but the
+   *  named pipe stays authenticated rather than silently losing command-hook coverage. */
   hookUrl(agentId: string): string | null {
-    if (!this.http || this.httpPort === null || this.httpDown || this.httpStopped || !agentId) {
-      // A spawn while the broker is down gets command hooks: its previous URL is dead weight.
-      if (agentId) this.revokeHookToken(agentId);
-      return null;
-    }
+    if (!agentId) return null;
     const token = randomBytes(16);
     this.hookTokens.set(agentId, token);
+    if (!this.http || this.httpPort === null || this.httpDown || this.httpStopped || !agentId) {
+      // A spawn while HTTP is down gets command hooks using this same pipe capability.
+      // It has been reconfigured, so it no longer needs the broker-up respawn retry.
+      this.respawnNeeded.delete(agentId);
+      return null;
+    }
     return `http://127.0.0.1:${this.httpPort}/hook/${encodeURIComponent(agentId)}/${token.toString('hex')}`;
+  }
+
+  /** The current spawn's pipe capability, never minting or extending its lifetime. */
+  hookToken(agentId: string): string | null {
+    const token = this.hookTokens.get(agentId);
+    return token ? token.toString('hex') : null;
+  }
+
+  /** Constant-time capability check shared by the HTTP and named-pipe hook transports. */
+  private hookTokenMatches(agentId: string, token: string): boolean {
+    if (!/^[0-9a-f]{32}$/i.test(token)) return false;
+    const expected = this.hookTokens.get(agentId);
+    const given = Buffer.from(token, 'hex');
+    return !!expected && expected.length === given.length && timingSafeEqual(expected, given);
+  }
+
+  /** The personal AGY statusline uses its current lease capability, not a spawned-agent token. */
+  private statuslineTokenMatches(token: string): boolean {
+    if (!/^[0-9a-f]{32}$/i.test(token)) return false;
+    let expected: string | null = null;
+    try { expected = this.hive.agyStatuslineOwnerToken?.() ?? null; } catch { return false; }
+    if (!expected || !/^[0-9a-f]{32}$/i.test(expected)) return false;
+    const given = Buffer.from(token, 'hex'), owner = Buffer.from(expected, 'hex');
+    return owner.length === given.length && timingSafeEqual(owner, given);
+  }
+
+  private logHookAuthReject(agentId: string | null, reason: 'missing' | 'bad' | 'revoked' | 'no-agent'): void {
+    const now = Date.now(), key = `${agentId ?? '-'}|${reason}`;
+    if (now - (this.authRejectLogged.get(key) ?? 0) < 60_000) return;
+    this.authRejectLogged.set(key, now);
+    try { this.hive.appendLog({ kind: 'hook-auth-reject', agentId, reason }); } catch { /* best effort */ }
   }
 
   revokeHookToken(agentId: string): void {
@@ -1015,11 +1082,18 @@ export class HookServer {
     try {
       if (f.kind === 'hook') {
         if (!f.agentId) return;   // a user's own AGY session: not ours (the shim no-ops too)
+        if (!this.hookTokenMatches(f.agentId, f.token)) return;
         void this.handle(this.stampArrival(agyHookPayload(f.event, f.agentId, f.body as Record<string, unknown> | null), 'pipe-oneway'));
         return;
       }
       const owner = this.hive.agyStatuslineOwnerToken() ?? null;
       if (!owner || f.token !== owner || !f.bodyOk) return;
+      // PIPE-HOOK-NO-TOKEN-192 (Jim SHOULD-1): the owner lease lets a frame in, but only the named
+      // agent's own token lets it speak FOR that agent; without it the frame is refused.
+      if (f.agentId && !(f.agentToken && this.hookTokenMatches(f.agentId, f.agentToken))) {
+        this.logHookAuthReject(f.agentId, !f.agentToken ? 'missing' : (!this.hookTokens.has(f.agentId) ? 'revoked' : 'bad'));
+        return;
+      }
       void this.handle(this.stampArrival({ hook_event_name: 'AgyStatusLine', agent_id: f.agentId, read_at: Date.now(), agy_status: f.body }, 'pipe-oneway'));
     } catch { /* telemetry must never break the pipe */ }
   }

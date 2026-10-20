@@ -137,7 +137,7 @@ test('R1 gauge parity: statusGauge prints exactly what the command shim printed'
   const shim = path.join(dir, 'cth-hook.cjs'); fs.writeFileSync(shim, HOOK_SHIM);
   for (const c of cases) {
     const out = await new Promise((resolve) => {
-      const ch = spawn(process.execPath, [shim, '--status'], { env: { ...process.env, HIVE_SOCK: '', AGENT_ID: 'a1' } });
+      const ch = spawn(process.execPath, [shim, '--status'], { env: { ...process.env, HIVE_SOCK: '', AGENT_ID: 'a1', HIVE_HOOK_TOKEN: 'ab'.repeat(16) } });
       let o = ''; ch.stdout.on('data', (d) => { o += d; }); ch.on('close', () => resolve(o)); ch.stdin.end(JSON.stringify(c));
     });
     assert.equal(statusGauge(c), out, JSON.stringify(c));

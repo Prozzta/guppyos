@@ -79,7 +79,8 @@ function printLine(p) {
 
 function endpoint() {
   var inherited = process.env.HIVE_SOCK;
-  if (inherited) return inherited;
+  var inheritedToken = process.env.HIVE_HOOK_TOKEN;
+  if (inherited && inheritedToken) return { sock: inherited, token: inheritedToken };
   var locator = arg('--locator');
   var owner = arg('--owner');
   if (!locator || !owner || !path.isAbsolute(locator)) return null;
@@ -87,12 +88,12 @@ function endpoint() {
   try { l = JSON.parse(fs.readFileSync(locator, 'utf8')); } catch (e) { return null; }
   if (!l || l.schema !== 1 || l.token !== owner || typeof l.sock !== 'string' || !Number.isInteger(l.pid)) return null;
   try { process.kill(l.pid, 0); } catch (e) { if (e && e.code === 'ESRCH') return null; }
-  return l.sock;
+  return { sock: l.sock, token: l.token };
 }
 
 function send(p) {
-  var sock = endpoint();
-  if (!sock) return quit();
+  var target = endpoint();
+  if (!target) return quit();
   // read_at is when THIS shim read the status, not when main received it. The payload
   // carries no generation time of its own, and arrival times through one socket are
   // monotone - so without this the ordering guard in the wake coordinator can never fire.
@@ -100,6 +101,9 @@ function send(p) {
   var envelope = JSON.stringify({
     hook_event_name: 'AgyStatusLine',
     agent_id: process.env.AGENT_ID || null,
+    // The inherited worker capability or the personal statusline lease capability.
+    // Both are required by HookServer before it accepts a JSON pipe envelope.
+    hook_token: target.token,
     read_at: Date.now(),
     agy_status: p
   }) + NL;
@@ -109,7 +113,7 @@ function send(p) {
     quit();
   }, CONNECT_MS);
   try {
-    c = net.createConnection(sock, function () {
+    c = net.createConnection(target.sock, function () {
       c.end(envelope, function () { clearTimeout(deadline); quit(); });
     });
     c.on('error', quit);

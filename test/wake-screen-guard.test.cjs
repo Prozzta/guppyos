@@ -942,7 +942,7 @@ test('R2-4: the REAL hook shim copies MUNDER_WAKE_INCARNATION into the payload a
     try {
       await new Promise((resolve, reject) => {
         const base = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(HIVE_|AGENT_|MUNDER_)/i.test(k)));
-        const child = spawn(process.execPath, [shim], { env: { ...base, AGENT_ID: 'dwight', HIVE_SOCK: sock, ...env }, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+        const child = spawn(process.execPath, [shim], { env: { ...base, AGENT_ID: 'dwight', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: 'ab'.repeat(16), ...env }, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
         child.on('error', reject); child.on('close', resolve);
         child.stdin.end(JSON.stringify(payload));
       });

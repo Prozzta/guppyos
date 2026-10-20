@@ -357,7 +357,7 @@ function shimOut(reply) {
     const sock = process.platform === 'win32' ? `\\\\.\\pipe\\hcpu-shim-${process.pid}-${Math.random().toString(36).slice(2)}` : path.join(dir, 's.sock');
     const srv = net.createServer((c) => { let b = ''; c.on('data', (d) => { b += d; if (b.includes('\n')) c.end(JSON.stringify(reply)); }); });
     srv.listen(sock, () => {
-      const ch = spawn(process.execPath, [shim, 'PreToolUse'], { env: { ...process.env, AGENT_ID: 'a1', HIVE_SOCK: sock }, stdio: ['pipe', 'pipe', 'ignore'] });
+      const ch = spawn(process.execPath, [shim, 'PreToolUse'], { env: { ...process.env, AGENT_ID: 'a1', HIVE_SOCK: sock, HIVE_HOOK_TOKEN: 'ab'.repeat(16) }, stdio: ['pipe', 'pipe', 'ignore'] });
       let out = '';
       ch.stdout.on('data', (d) => { out += d; });
       ch.on('error', reject);

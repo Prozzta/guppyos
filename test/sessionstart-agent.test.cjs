@@ -54,7 +54,7 @@ async function throughShim(payload, { args = [], envAgent }, t) {
     c.on('data', (d) => { buf += d; if (buf.includes('\n')) { got = JSON.parse(buf.split('\n')[0]); c.end('{}'); } });
   });
   await new Promise((r) => server.listen(sock, r));
-  const env = { ...process.env, HIVE_SOCK: sock };
+  const env = { ...process.env, HIVE_SOCK: sock, HIVE_HOOK_TOKEN: 'ab'.repeat(16) };
   delete env.AGENT_ID;
   if (envAgent) env.AGENT_ID = envAgent;
   try {

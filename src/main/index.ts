@@ -1367,7 +1367,7 @@ hookServer.setMailCoordination({
 // hook). The hive asks for a per-spawn URL; with the broker not listening it gets null and
 // writes the command hooks exactly as before.
 // LOG-STALL-AV F1: the app keeps log.jsonl / cost-ledger.jsonl open (closed on quit).
-hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), revoke: (id) => hookServer.revokeHookToken(id) });
+hive.setHookBroker({ urlFor: (id) => hookServer.hookUrl(id), mcpFor: (id) => hookServer.mcpEndpoint(id), tokenFor: (id) => hookServer.hookToken(id), revoke: (id) => hookServer.revokeHookToken(id) });
 // NATIVE-MEMORY: the memory engine (the only memory). It runs in a
 // utility process forked on the first memory request or the post-start prewarm, never at
 // start-up itself. Settings' semantic memory (`semanticMemory`) is its master switch.
