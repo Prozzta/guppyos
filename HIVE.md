@@ -33,11 +33,10 @@ stream, retrieval, reflection, and planning.
 
 ## 2. Locked design decisions
 
-1. **Git as the coordination/audit layer, single committer.** Everything the
-   hive knows is files in one local git repo. To avoid `.git/index.lock`
-   corruption with many concurrent agents, **only the Electron main process
-   commits**. Agents never call git — they write plain files. (Research:
-   GitHub Desktop's commit-queue pattern; lazygit/git-retry backoff.)
+1. **Files as the coordination/audit layer.** Everything the hive knows is
+   persisted under one local hive directory. Since 1.1.53, Guppy does not
+   initialise or commit a hive git repository: the process cost outweighed a
+   history nobody read. An existing `hive/.git` is left untouched for its owner.
 2. **Single-writer-per-file.** Each agent writes only inside its own
    `agents/<id>/` directory. Cross-agent delivery happens by the **router**
    (main process) moving messages from a sender's `outbox/` into a recipient's
@@ -55,15 +54,16 @@ stream, retrieval, reflection, and planning.
    (Letta/Mem0/Zep) is *not* needed at 5–15 agents and is architecturally wrong
    here (they want to own the agent runtime; our runtime is the `claude` CLI).
    Semantic recall came later as the app's own memory engine (see Phase 3).
-5. **Autonomous loop = `Stop` hook.** An agent that finishes drains its inbox via
-   a `Stop` hook that returns `{"decision":"block","reason":…}` to keep it
-   working, guarded by `stop_hook_active` to prevent infinite loops.
+5. **Inbox-aware `Stop` hook.** At a safe, fully idle Stop, waiting injectable
+   mail may continue that turn with `{"decision":"block","reason":…}`. It
+   blocks at most once per turn and never when `stop_hook_active` is set; otherwise
+   Stop remains non-blocking.
 
 ---
 
 ## 3. On-disk layout — the "hive"
 
-Lives under `<harnessHome>/hive/`, a git repo committed only by the main process.
+Lives under `<harnessHome>/hive/`, a local directory persisted by the main process.
 
 ```
 hive/
@@ -129,7 +129,7 @@ agent B mid-task needs something from agent C
 │  Router watches every outbox/                                             │
 │    → deliver to agents/C/inbox/   (to:"human" → routed to the god proxy;  │
 │       the god surfaces critical calls natively in its own session)        │
-│    → append to log.jsonl → git commit (single committer, retry+backoff)   │
+│    → append to log.jsonl                                                   │
 └──────────────────────────────────────────────────────────────────────────┘
         │ delivered to C's inbox
         ▼
@@ -169,10 +169,10 @@ is the primary control surface — tune the prompt, not the code.
 - **Phase 0 — Foundation** ✅: `hive.ts` on-disk layer + spawn injection
   (identity, protocol, env) + IPC to read hive state. Agents are hive-aware: they
   read their memory/inbox at task start and send via outbox; the router delivers;
-  everything is committed and visible.
-- **Phase 1 — Autonomy** ✅: `hooks.ts` UDS server + `cth-hook` shim (attached per
-  agent via `--settings`) + `Stop`-loop so agents drain their inbox automatically
-  and keep running (guarded by `stop_hook_active` + cursor); hook events stream to
+  everything is persisted and visible.
+- **Phase 1 — Autonomy** ✅: `hooks.ts` local pipe and loopback HTTP broker +
+  provider hooks. At a safe Stop, pending injectable mail can continue one turn;
+  `stop_hook_active` prevents a loop. Hook events stream to
   the renderer to drive avatars.
 - **Phase 2 — God mode** ✅: the god agent auto-spawns into Michael's room
   (`desk-ceo` reserved) and, on a fresh spawn, is started with `/remote-control`
@@ -195,8 +195,8 @@ is the primary control surface — tune the prompt, not the code.
 
 | Risk | Mitigation |
 | --- | --- |
-| `index.lock` corruption | Single committer (main process), retry+backoff, stale-lock cleanup |
-| Infinite Stop-hook loop | Guard on `stop_hook_active`; `hops` cap; `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` |
+| Accidental hive-history dependence | The app does not initialise or commit a hive repo; an existing `.git` is untouched |
+| Repeated Stop continuation | One block per turn plus `stop_hook_active`; `hops` cap; `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` |
 | Two agents ping-ponging | Only request/query/propose obligate replies; hop cap → god escalates |
 | Reprocessing messages | Per-agent `cursor.json`; processed messages move to `inbox/.done/` |
 | `memory.md` unbounded growth | Phase 3 reflection/summarization |
