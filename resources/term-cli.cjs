@@ -9,9 +9,12 @@
  *   term send <agent> [--raw] [--file F]   the same, then Enter once the echo settles
  *   term keys <agent> <key> [<key>...]     enter esc tab shift-tab backspace space ctrl-c ctrl-d
  *                                          ctrl-l ctrl-u up down left right home end pgup pgdn y n 0-9
+ *   term hold on [reason] | term hold off  the floor hold (a Human pause): no owed-work continuations
  *
  * Text is NEVER taken from arguments: a shell string gets its backticks and $(...) executed
- * (MSG-COMPOSE-SHELL-INJECTION). One trailing newline of the input is dropped (echo/here-doc add it).
+ * (MSG-COMPOSE-SHELL-INJECTION). The one exception is the `hold on` reason, a short label god
+ * writes itself: single-quote it, and never paste a broadcast into it (backticks or $(...) would
+ * run in the shell before term sees them). One trailing newline of the input is dropped (echo/here-doc add it).
  * The app refuses a lone "?" and a leading "!" or "/" (they act as keys) unless --raw.
  *
  * God only: the app checks the caller against the registry's god on every request.
@@ -26,13 +29,19 @@ const EXIT = { ok: 0, refused: 1, usage: 2, unavailable: 3, timeout: 4 };
 const REQUEST_TIMEOUT_MS = 60000;
 const INPUT_MAX = 16 * 1024;
 const ROWS_MAX = 200;
-const USAGE = 'usage: term read <agent> [--rows N] | term type|send <agent> [--raw] [--file <path>] (text on stdin) | term keys <agent> <key>...\n';
+const USAGE = 'usage: term read <agent> [--rows N] | term type|send <agent> [--raw] [--file <path>] (text on stdin) | term keys <agent> <key>... | term hold on [reason] | term hold off\n';
 
 /** The request body, or throws with the reason. `needsText` = the text still has to be read. */
 function parseArgs(argv) {
   if (argv.length === 1 && (argv[0] === '-h' || argv[0] === '--help')) return { help: true };
   const [action, agent, ...rest] = argv;
-  if (!['read', 'type', 'send', 'keys'].includes(action)) throw new Error('the first argument is read, type, send or keys');
+  if (action === 'hold') {
+    // The floor hold: floor state, no agent. The reason is a short label (single-quote it).
+    if (agent === 'off' && rest.length === 0) return { body: { action, state: 'off' } };
+    if (agent === 'on') return { body: { action, state: 'on', reason: rest.join(' ') } };
+    throw new Error('hold: on [reason] or off');
+  }
+  if (!['read', 'type', 'send', 'keys'].includes(action)) throw new Error('the first argument is read, type, send, keys or hold');
   if (!agent || agent.startsWith('-')) throw new Error('an agent id is required');
   if (action === 'keys') {
     if (rest.length === 0) throw new Error('keys: name at least one key');

@@ -171,6 +171,9 @@ import { RosterStore } from './roster';
 import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WORKER_WAKE_HITL_REARM_MS, WorkerWakeWatchdog, type WakeClaim } from './workerWake';
+import { OwedContinuation, type OwedSent } from './owedContinuation';
+import { floorHoldWords, parseFloorHold } from './floorHold';
+import { owesWork } from './mailLedger';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
 import { QuietRefusalWatch } from './quietRefusalWatch';
@@ -578,6 +581,8 @@ const floorDigest = new FloorDigest({
     const s = floorStalls.stall(now);
     return s ? { ...s, agents: s.agents.map((a) => ({ ...a, name: agentDisplayName(a.agentId) })) } : null;
   },
+  // HIVE-DWIGHT-BG-REINVOKE: the floor hold god set with `term hold on`.
+  floorHold: () => parseFloorHold(readConfig().floorHold),
   // MIRROR-STARTUP-196: the mirrors are auto-off (god's term cannot read screens until re-arm).
   mirrorOff: () => mirrorGuard?.status() ?? null,
   send: (msg, from) => { hive.send(msg, from); },
@@ -1832,6 +1837,7 @@ const termControl = new TermControl({
   write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
   outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
   log: (row) => hive.appendLog(row),
+  floorHold: { get: () => parseFloorHold(readConfig().floorHold), set: (h) => { writeConfig({ floorHold: h }); } },
   now: Date.now,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
@@ -3188,7 +3194,9 @@ function writeFleetSnapshot(): void {
       });
     // HEAVY-JOB-SERIALIZE: who holds the heavy-job slots (god reads fleet.json every standup).
     // ZERO-TOKEN-LIVENESS: the current liveness-v1 records (every LIVE agent, recent non-LIVE ones).
-    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now) });
+    // HIVE-DWIGHT-BG-REINVOKE: the floor hold (null = none), with its words.
+    const hold = parseFloorHold(readConfig().floorHold);
+    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now), floorHold: hold ? { ...hold, line: floorHoldWords(hold, now) } : null });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }
@@ -7988,6 +7996,51 @@ const WORKER_WAKE_POLL_MS = 15_000;
 let workerWakeTimer: ReturnType<typeof setInterval> | null = null;
 let heldInterferenceTimer: ReturnType<typeof setInterval> | null = null;
 
+/** HIVE-DWIGHT-BG-REINVOKE: the owed-work continuation (owedContinuation.ts), after the wake
+ *  reconcile on the same beat. Its mail goes through hive.send + wake:'now', so the claim path's
+ *  own guards still apply on top of the watcher's suppressors. */
+const owedContinuation = new OwedContinuation(Date.now(), () => hive.registry().godId ?? null);
+function runOwedContinuation(live: string[]): void {
+  try {
+    const now = Date.now();
+    const sent = new Map<string, OwedSent[]>();
+    for (const owner of Object.keys(hive.registry().agents ?? {})) {
+      for (const e of Object.values(hive.mail.ledger(owner).entries)) {
+        if (!live.includes(e.from)) continue;
+        const list = sent.get(e.from) ?? [];
+        list.push({ id: e.id, to: owner, act: e.act, at: e.deliveredAt, open: owesWork(e) });
+        sent.set(e.from, list);
+      }
+    }
+    const q = heavyLock.queueSnapshot();
+    const holders = heavyLock.snapshot();
+    const floorHeld = parseFloorHold(readConfig().floorHold) !== null;
+    for (const agentId of live) {
+      const snap = control.snapshot(agentId);
+      const lf = workerWake.livenessFacts(agentId);
+      const d = owedContinuation.tick(agentId, {
+        now,
+        lifecycle: lf.lifecycle,
+        lastTurnEndAt: lf.lastTurnEndAt,
+        inFlight: !!workerWake.state(agentId).inFlight,
+        pendingMail: mailPendingIds(agentId).length,
+        paused: snap.paused,
+        halted: snap.halted,
+        autoDeliveryPaused: snap.autoDeliveryPaused,
+        hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
+        heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
+        heavyHolder: holders.some((h) => h.agentId === agentId),
+        floorHeld,
+        entries: Object.values(hive.mail.ledger(agentId).entries),
+        sent: sent.get(agentId) ?? []
+      });
+      for (const row of d.rows) { try { hive.appendLog(row); } catch { /* logging only */ } }
+      if (d.nudge) { try { hive.send(d.nudge.message as Partial<HiveMessage>, 'system'); } catch { /* best effort */ } }
+      if (d.notice) { try { hive.send(d.notice.message as Partial<HiveMessage>, 'system'); } catch { /* best effort */ } }
+    }
+  } catch { /* best effort: the next beat retries */ }
+}
+
 /** Inbox-wake RECONCILIATION (pre-M1 bridge). Every live, non-archived agent - god
  *  included, with no exclusion - goes through the SAME `requestInboxWake` the events use,
  *  in reconcile mode (PTY quiescence may stand in for a missed Stop, rate-limited per
@@ -8017,6 +8070,7 @@ function runWorkerWakeBeat(): void {
     } catch { /* best effort: the next beat retries */ }
   }
   inboxWake.reconcileAll(live);
+  runOwedContinuation(live);
   // ZERO-TOKEN-LIVENESS: after the WWR ran (it records its own STUCK edges first), every agent.
   sampleLivenessAll();
 }

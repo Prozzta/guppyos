@@ -19,6 +19,7 @@ import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
 import { ageText } from '../shared/agentBadges';
+import { floorHoldWords, type FloorHold } from './floorHold';
 import type { SilentTurn } from './silentTurn';
 
 export interface FloorDigestConfig {
@@ -116,6 +117,8 @@ export interface FloorDigestInput {
   mirrorOff?: DigestMirrorOff | null;
   messageBox?: DigestMessageBox[];
   floorStall?: DigestFloorStall | null;
+  /** HIVE-DWIGHT-BG-REINVOKE: the floor hold god set (floorHold.ts), shown under the title. */
+  floorHold?: FloorHold | null;
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -267,6 +270,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   };
   const who = (c: Card): string => (typeof c.assignee === 'string' && c.assignee && c.assignee !== 'unassigned' ? c.assignee : 'unassigned');
   const out: string[] = [`# Floor digest`, '', `_Written by the harness at ${new Date(now).toISOString()}. Zero model tokens; do not edit._`, ''];
+  if (input.floorHold) out.push(`**${floorHoldWords(input.floorHold, now)}**`, '');
 
   out.push('## Decisions needed', '');
   if (items.length === 0) out.push('None.');
@@ -397,6 +401,8 @@ export interface FloorDigestHost {
   messageBox?(): DigestMessageBox[];
   /** SCREEN-GUARD-ALERT-FLOOR-193: samples the floor's pending mail, then its stall if any. Optional. */
   floorStall?(): DigestFloorStall | null;
+  /** HIVE-DWIGHT-BG-REINVOKE: the floor hold, while it is on. Optional. */
+  floorHold?(): FloorHold | null;
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -443,6 +449,7 @@ export class FloorDigest {
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
       floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),
+      floorHold: (() => { try { return this.host.floorHold?.() ?? null; } catch { return null; } })(),
       backstopClosed: readBackstopClosed(root),
       flaggedForHuman: readFlaggedForHuman(root)
     });

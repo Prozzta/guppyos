@@ -29,7 +29,7 @@ import { homedir } from 'node:os';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { AppendFile, LOG_KEEP_ROTATED, rotatedFiles } from './appendLog';
 import { atomicWriteJson as atomicWriteJsonFile } from './atomicJson';
-import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isOpenObligation, isValidMailId, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
+import { ASK_BACKSTOP_MS, ASK_CLOSE_REASON_MAX, MailLedger, answeredByMessage, cardIdValue, freshMailId, isValidMailId, owesWork, replyTracked, staleObligations, supersededByMessage, type CardEvidence, type MailLedgerDoc, type ReleaseRun, type StaleObligation } from './mailLedger';
 import { mailObligationsView, type MailObligationsAgent } from './mailReaders';
 import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliveredSeen, readUndeliveredReport, restoreUndeliveredFiles, runMailMigration, setAsideUndelivered, type MailMigrationResult, type UndeliveredReport } from './mailMigration';
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
@@ -3072,7 +3072,8 @@ export class HiveManager {
     // ZT-I1-MAIL §4.3 + §11.13(B): a reply from an agent closes the reply/outcome obligation it
     // answers in that agent's ledger (id or sender_id alias). Zero-token: tracking only, no wake.
     if (msg.in_reply_to) {
-      try { this.mail.markReplied(msg.from, msg.in_reply_to, msg.id, resolveTo(msg.to)); } catch (e) {
+      // HIVE-DWIGHT-BG-REINVOKE (A): the act decides whether the reply discharges the work.
+      try { this.mail.markReplied(msg.from, msg.in_reply_to, msg.id, resolveTo(msg.to), msg.needs_human === true ? 'blocked' : msg.act); } catch (e) {
         try { this.appendLog({ kind: 'mail-ledger-error', agentId: msg.from, id: msg.id, op: 'replied', error: String(e) }); } catch { /* noop */ }
       }
     }
@@ -4050,7 +4051,7 @@ export class HiveManager {
       } catch { return null; }
     };
     const own = ask(caller);
-    if (own && isOpenObligation(own)) return { by: 'owner', open: [caller] };
+    if (own && owesWork(own)) return { by: 'owner', open: [caller] };
     const reg = this.registry();
     let sent = false;
     const open: string[] = [];
@@ -4059,7 +4060,7 @@ export class HiveManager {
       const e = ask(a);
       if (e?.from !== caller) continue;
       sent = true;
-      if (isOpenObligation(e)) open.push(a);
+      if (owesWork(e)) open.push(a);
     }
     if (sent) return { by: 'requester', open };
     return own ? { by: 'owner', open: [] } : null;
@@ -5777,6 +5778,14 @@ In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool a
 - An ask closes when you answer it (\`in_reply_to\` its id, or a \`done\`/\`refuse\` to the asker
   that cites its id or is in its conversation; an \`inform\` is a status and closes nothing), when its
   card is done, or when its sender supersedes it. FYIs go as \`inform\`.
+- Finishing a request: the work you owe on a request ends only with a reply that has \`in_reply_to\`
+  its id and act \`done\` or \`refuse\`, or with \`needs_human: true\` (blocked on the Human); a
+  \`close\` or the sender's supersede also ends it. An \`inform\` or \`agree\` reply is progress and
+  keeps the work owed: an agent idle with work owed is sent a CONTINUE mail 3 minutes after its
+  turn ends. So send your final answer (a verdict, "merged", "passed") as \`done\`.
+- Floor hold (god): for a Human pause, run \`term hold on [reason]\` with the pause broadcast and
+  \`term hold off\` with the resume. While it holds, no CONTINUE mail is sent; fleet.json
+  (\`floorHold\`) and floor-digest.md show it.
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
 - An \`inform\` or \`agree\` that needs no reply does not wake an idle recipient: it reaches the
