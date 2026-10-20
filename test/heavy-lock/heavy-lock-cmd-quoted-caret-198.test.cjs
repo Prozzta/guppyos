@@ -80,6 +80,9 @@ K.join = (M = HJ) => {
   // The quote left open on line 1 ends there, so line 2's `"` opens a new one and its caret is literal.
   suite(M, 'if exist x (\necho "abc\necho "a^\nnpm test\n)', 'A QUOTE ENDS WITH ITS LINE: THE NEXT QUOTE OPENS AGAIN', CMD);
   suite(M, 'if exist x echo ^^\nnpm test', 'AN ESCAPED ^^ JOINS NOTHING', CMD);
+  // CONSERVATIVE, not cmd's behaviour (Jim 6cde8c): a ^ + newline also escapes the next line's first
+  // character, so real cmd prints `& npm test` as text. Reading it heavy is the safe direction; do not
+  // "fix" it to light without teaching caretJoin that escape.
   suite(M, 'if exist x echo "a^^" ^\n& npm test', 'A CARET AFTER A CLOSED QUOTE STILL JOINS', CMD);
 };
 
