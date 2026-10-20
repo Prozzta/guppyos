@@ -1230,8 +1230,10 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
     const own = seg.replace(/\s+&$/, '');   // segments() marks a lone `&` (background) with ` &`
     const segAt = d === 'cmd' ? text.indexOf(own, cursor) : -1;
     if (segAt >= 0) cursor = segAt + own.length;
-    if (segAt >= 0 && /^@?for$/i.test(words(seg, d)[0] ?? '')) {
-      const loop = cmdFor(text.slice(segAt), depth, here);
+    // HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: an IF runs its body the same way (the condition is not the program).
+    const head = segAt >= 0 ? words(seg, d)[0] ?? '' : '';
+    if (/^@?(?:for|if)$/i.test(head)) {
+      const loop = /^@?for$/i.test(head) ? cmdFor(text.slice(segAt), depth, here) : cmdIf(text.slice(segAt), depth, here);
       if (loop) {
         if (loop.cls.heavy && !loop.cls.provisional) return loop.cls;
         if (loop.cls.heavy && !maybe) maybe = loop.cls;
@@ -1431,10 +1433,61 @@ export { PLAN_CAP };
  * Returns null when the text does not open a FOR this reads (cmd itself would refuse it).
  */
 const CMD_FOR = /^@?for\s+((?:\/[dlrf](?:\s+(?!%)(?:"[^"]*"|[^\s"%/]\S*))?\s+)*)(%%?)([A-Za-z])\s+in\s*\(/i;
-function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClass; rest: string } | null {
-  const m = CMD_FOR.exec(text.trimStart());
+/** HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd joins a line that ends in an unescaped `^` to the next one. */
+const caretJoin = (s: string): string => s.replace(/(^|[^^])((?:\^\^)*)\^\r?\n/g, '$1$2');
+/** A cmd block from its `(`: the text inside, and what follows its own `)` (quotes, `^` and nesting respected). */
+function cmdBlock(s: string): { body: string; after: string } {
+  let k = 1; let n = 1; let q: string | null = null;
+  for (; k < s.length; k++) {
+    const c = s[k];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"') { q = c; continue; }
+    if (c === '^') { k++; continue; }
+    if (c === '(') n++;
+    if (c === ')' && --n === 0) break;
+  }
+  return { body: s.slice(1, k), after: s.slice(k + 1).replace(/^[ \t]*(?:&&?|\|\|?)/, '') };
+}
+/** A bare cmd body runs to the end of its line; the lines after it are the rest. */
+function cmdLine(s: string): { body: string; after: string } {
+  const nl = s.indexOf('\n');
+  return nl >= 0 ? { body: s.slice(0, nl), after: s.slice(nl + 1) } : { body: s, after: '' };
+}
+/**
+ * HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd's `if [/i] [not] <condition> body [else body]`. The condition
+ * (errorlevel N, exist f, defined v, a==b, a EQU b, ...) runs nothing; either body may run, so each is
+ * classified, a bare one to the end of its line (an `else` there is just words) and a block to its `)`.
+ * Returns null when the text does not open an IF this reads.
+ */
+const CMD_IF = /^@?if\s+(?:\/i\s+)?(?:not\s+)?(?:(?:errorlevel|cmdextversion)\s+\S+|(?:exist|defined)\s+(?:"[^"]*"|\S+)|(?:"[^"]*"|[^\s=]+)\s*==\s*(?:"[^"]*"|[^\s=]+)|(?:"[^"]*"|\S+)\s+(?:equ|neq|lss|leq|gtr|geq)\s+(?:"[^"]*"|\S+))\s+/i;
+function cmdIf(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClass; rest: string } | null {
+  const src = caretJoin(text.trimStart());
+  const m = CMD_IF.exec(src);
   if (!m) return null;
-  const src = text.trimStart();
+  const s = src.slice(m[0].length);
+  const then = s.startsWith('(') ? cmdBlock(s) : cmdLine(s);
+  const bodies = [then.body];
+  let rest = then.after;
+  const e = s.startsWith('(') ? /^\s*else\s+/i.exec(then.after) : null;
+  if (e) {
+    const t = then.after.slice(e[0].length);
+    const other = t.startsWith('(') ? cmdBlock(t) : cmdLine(t);
+    bodies.push(other.body);
+    rest = other.after;
+  }
+  const here: ClassifyCtx = { ...ctx, dialect: 'cmd' };
+  let maybe: HeavyClass | null = null;
+  for (const b of bodies) {
+    const c = classifyCommand(b, depth, here);
+    if (c.heavy && !c.provisional) return { cls: c, rest };
+    if (c.heavy && !maybe) maybe = c;
+  }
+  return { cls: maybe ?? { heavy: false }, rest };
+}
+function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClass; rest: string } | null {
+  const src = caretJoin(text.trimStart());
+  const m = CMD_FOR.exec(src);
+  if (!m) return null;
   const opts = m[1].toLowerCase();
   const f = /\/f/.test(opts); const l = /\/l/.test(opts); const r = /\/r/.test(opts);
   // The set, to its `)`; a /f set's quotes hold their own parentheses.
@@ -1450,24 +1503,8 @@ function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClas
   const set = src.slice(m[0].length, i).trim();
   const doAt = /^\s*do\s+/i.exec(src.slice(i + 1));
   if (!doAt) return null;
-  let body = src.slice(i + 1 + doAt[0].length);
-  let rest = '';
-  if (body.startsWith('(')) {
-    let k = 1; let n = 1; q = null;
-    for (; k < body.length; k++) {
-      const c = body[k];
-      if (q) { if (c === q) q = null; continue; }
-      if (c === '"') { q = c; continue; }
-      if (c === '^') { k++; continue; }
-      if (c === '(') n++;
-      if (c === ')' && --n === 0) break;
-    }
-    rest = body.slice(k + 1).replace(/^[ \t]*(?:&&?|\|\|?)/, '');
-    body = body.slice(1, k);
-  } else {
-    const nl = body.indexOf('\n');
-    if (nl >= 0) { rest = body.slice(nl + 1); body = body.slice(0, nl); }
-  }
+  const tail = src.slice(i + 1 + doAt[0].length);
+  const { body, after: rest } = tail.startsWith('(') ? cmdBlock(tail) : cmdLine(tail);
   const here: ClassifyCtx = { ...ctx, dialect: 'cmd' };
   let maybe: HeavyClass | null = null;
   // A /f set's command runs once, before the loop.
@@ -1488,11 +1525,20 @@ function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClas
   if (tests && (runs === Infinity || runs * tests >= SUITE_MANY_FILES)) {
     return { cls: { heavy: true, kind: 'suite', why: `a cmd FOR loop of node --test over ${runs === Infinity ? 'an open set (a glob, /r, /f or a variable)' : `${runs * tests} runs`}` }, rest };
   }
-  const ref = new RegExp(`${m[2]}(~[A-Za-z]*)?${m[3]}`, 'g');
-  const one = (b: string): HeavyClass => classifyCommand(b, depth, { ...here, loopWord: true, loopMult: runs === Infinity ? runs : Math.max(runs, 1) });
+  // FOLLOWUPS-198: a %NAME% variable is not the loop's %n (`%foo%` stays), and %~$PATH:v names v too. A
+  // one-letter %a% is the loop's (nested `%a%b` is a then b: the line keeps an undefined %a% for FOR).
+  const ref = new RegExp(`(%[A-Za-z_][A-Za-z0-9_]+%)|${m[2]}(?:~[A-Za-z]*(?:\\$[A-Za-z_][A-Za-z0-9_]*:)?)?${m[3]}`, 'g');
+  const put = (b: string, v: string): string => b.replace(ref, (x, name?: string) => name ? x : v);
+  // A body still holding a %NAME% / !NAME! is not all loop-made: it is read as it would be outside a loop.
+  // Any length (Jim 36f8db): the loop's own letter is already replaced by then (nested %a%b reads l%b).
+  // But at a prompt cmd expands an environment %f% before the FOR runs (Jim d68c16): the text cannot say
+  // whether f is set, so a raw %<loop letter>% (single-% form) is not loop-made either.
+  const unmade = /%[A-Za-z_][A-Za-z0-9_]*%|![^!\r\n]+!/;
+  const envLetter = m[2] === '%' && body.includes(`%${m[3]}%`);
+  const one = (b: string): HeavyClass => classifyCommand(b, depth, { ...here, loopWord: !envLetter && !unmade.test(b), loopMult: runs === Infinity ? runs : Math.max(runs, 1) });
   const each = runs !== Infinity && !l && values.length && runs <= PLAN_CAP
-    ? values.map((v) => body.replace(ref, () => v))   // cmd's words drop a value's quotes, so %~f reads as %f
-    : [l && runs !== Infinity ? body.replace(ref, String(set.split(/[\s,;=]+/).filter(Boolean)[0])) : body];
+    ? values.map((v) => put(body, v))   // cmd's words drop a value's quotes, so %~f reads as %f
+    : [l && runs !== Infinity ? put(body, String(set.split(/[\s,;=]+/).filter(Boolean)[0])) : body];
   for (const b of each) {
     const c = one(b);
     if (c.heavy && !c.provisional) return { cls: c, rest };
