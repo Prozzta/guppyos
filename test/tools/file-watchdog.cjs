@@ -126,7 +126,7 @@ function alive(pid) { try { process.kill(pid, 0); return true; } catch { return 
 function snapshot() {
   const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate | ConvertTo-Json -Compress'],
-  { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 60_000 });
+  { encoding: 'utf8', windowsHide: true, maxBuffer: 64 * 1024 * 1024, timeout: 60_000, env: require('./ps-env.cjs').psEnv() });
   return parseRows(out);
 }
 

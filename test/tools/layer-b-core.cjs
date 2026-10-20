@@ -429,7 +429,7 @@ class ProcTracker {
   livePids() { return [...this.known.keys()]; }
   async scan() {
     const out = await new Promise((res) => {
-      const c = spawn(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      const c = spawn(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, env: require('./ps-env.cjs').psEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
       let so = ''; let se = '';
       c.stdout.on('data', (d) => { so += d; });
       c.stderr.on('data', (d) => { se += d; });
@@ -440,7 +440,7 @@ class ProcTracker {
   }
   /** The same scan, synchronously (signal / exit paths). */
   scanSync() {
-    const r = spawnSync(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(PS, psArgs(PS_SCAN(this.livePids())), { windowsHide: true, env: require('./ps-env.cjs').psEnv(), stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
     return this.ingest({ so: r.stdout || '', se: r.stderr || String(r.error || '') });
   }
   ingest(out) {
@@ -587,7 +587,7 @@ class WindowWatch {
     this.lines = 0; this.lastAt = 0; this.errors = 0; this.hits = []; this.buf = ''; this.stderr = ''; this.last = null;
   }
   start() {
-    this.child = spawn(PS, psArgs(PS_WATCH(this.rootPid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    this.child = spawn(PS, psArgs(PS_WATCH(this.rootPid)), { windowsHide: true, env: require('./ps-env.cjs').psEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     this.childRec = { pid: this.child.pid, bornMs: Date.now() };
     this.child.stderr.on('data', (d) => { this.stderr = (this.stderr + d).slice(-2000); });
     this.child.stdout.on('data', (d) => {
@@ -3634,7 +3634,7 @@ process.stdout.write('LBPROBE' + JSON.stringify(out));`);
     let err = null;
     // `procQuery` is injectable for the tests only; the run uses the PowerShell tree query.
     const query = this.procQuery || ((pid) => {
-      const r = spawnSync(PS, psArgs(PS_TREE_CMDLINES(pid)), { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
+      const r = spawnSync(PS, psArgs(PS_TREE_CMDLINES(pid)), { windowsHide: true, env: require('./ps-env.cjs').psEnv(), stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 60_000 });
       if (r.status !== 0) throw new Error(`exit ${r.status}: ${String(r.stderr || '').slice(0, 300)}`);
       return JSON.parse(String(r.stdout || '[]').trim() || '[]');
     });
