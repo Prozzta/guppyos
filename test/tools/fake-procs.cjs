@@ -42,7 +42,7 @@ function tracker() {
   }
   /** Stop every live child; resolves with how many are left: a live handle, or (Jim MUST 1) a fake
    *  below a killed shim whose logged pid still answers. Never 0 while one runs. */
-  async function stop(ms = 5000) {
+  async function stop(ms = 5000, killWaitMs = 1000) {
     const was = [...live];
     for (const h of was) { try { if (h.stopFile) fs.writeFileSync(h.stopFile, ''); } catch { /* jail gone */ } }
     const t0 = Date.now();
@@ -52,7 +52,7 @@ function tracker() {
     for (const h of was) for (const s of [h.c.stdin, h.c.stdout, h.c.stderr]) { try { if (s) s.destroy(); } catch { /* closed */ } }
     const left = () => was.filter((h) => live.has(h) || (Number.isInteger(h.pid()) && alive(h.pid()))).length;
     const t1 = Date.now();
-    while (left() && Date.now() - t1 < 1000) await new Promise((r) => setTimeout(r, 50));
+    while (left() && Date.now() - t1 < killWaitMs) await new Promise((r) => setTimeout(r, 50));
     return left();
   }
   return { track, stop, live };

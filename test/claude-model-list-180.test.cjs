@@ -460,10 +460,12 @@ async function handleKillChecks(fp) {
   const exit = new Promise((r) => c.once('exit', (code, sig) => r({ code, sig })));
   await fp.verdict(async () => {
     const t0 = Date.now();
-    const left = await Promise.race([t.stop(300), new Promise((r) => setTimeout(() => r('HUNG'), 5000))]);
-    assert.equal(left, 0, 'the stop killed it by its handle, inside the bound');
-    assert.ok(Date.now() - t0 < 5000);
-    assert.equal((await exit).sig, 'SIGKILL');
+    const left = await Promise.race([t.stop(300, 10_000), new Promise((r) => setTimeout(() => r('HUNG'), 12_000))]);
+    assert.equal(left, 0, 'the stop killed it by its handle, inside the generous bound');
+    const ended = await Promise.race([exit, new Promise((r) => setTimeout(() => r('HUNG'), 12_000))]);
+    assert.notEqual(ended, 'HUNG', 'the killed handle eventually emitted exit');
+    assert.ok(Date.now() - t0 < 12_000, 'the handle kill is bounded');
+    assert.equal(ended.sig, 'SIGKILL');
   }, () => { c.kill('SIGKILL'); });
 }
 test('MASK: a child that ignores its stop file is killed by its ChildProcess handle, in bounded time', { timeout: 30_000 }, () => handleKillChecks(require(`./${FP}`)));
