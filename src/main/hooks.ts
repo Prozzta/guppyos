@@ -29,7 +29,7 @@ import { estimateCostUsd } from './pricing';
 import { classifyAgyStatusLine, normalizeClaudeStatusLine, type AgyStatusTick } from './capacityNormalize';
 import { agyAccountScope, claudeAccountScope } from './capacityScope';
 import { CodexRolloutCapacitySource } from './codexRolloutCapacity';
-import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, pendingExecWorkdir, rebuildToolHook, templatedToolInput } from './codexHookMcp';
+import { CodexThreadRollouts, HIVE_HOOK_TOOL, MCP_SERVER_NAME, isCmdShell, pendingExecCommands, pendingExecShell, pendingExecWorkdir, rebuildToolHook, templatedToolInput, turnCwd } from './codexHookMcp';
 import { withoutJoinLine, type HeavyJobs } from './heavyCpu';
 import type { CapacityObservation } from '../shared/providerCapacity';
 import { CODEX_INBOX_WAKE_SENTINEL } from '../shared/hiveNudge';
@@ -1055,10 +1055,11 @@ export class HookServer {
     if (ti) p.hook_tool_input = ti;
     if (ti && tail && typeof ti.command === 'string' && isCmdShell(pendingExecShell(tail, ti.command))) p.hook_cmd_shell = true;
     // HEAVY-LOCK-SINGLE-FILE-DENIAL-198: a Codex hook carries no cwd. The heavy lock reads a
-    // relative script against the folder the call runs in: its workdir, else the agent's folder.
+    // relative script against the folder the call runs in: its workdir, else the turn's cwd as
+    // Codex records it, else the agent's folder.
     const runs = typeof ti?.command === 'string' ? ti.command : commandFromToolInput(rebuilt.toolName === 'Bash' ? rebuilt.toolInput : undefined);
     const workdir = event === 'PreToolUse' && tail && runs ? pendingExecWorkdir(tail, runs) : undefined;
-    const folder = this.hive.registry().agents[agentId]?.cwd;
+    const folder = (workdir !== undefined ? turnCwd(tail) : null) ?? this.hive.registry().agents[agentId]?.cwd;
     if (typeof workdir === 'string' && (isAbsolute(workdir) || folder)) p.cwd = isAbsolute(workdir) ? workdir : join(folder as string, workdir);
     else if (workdir === null && folder) p.cwd = folder;
     // HEAVY-JOB-LOCK-FAILOPEN (c): a still-degraded PreToolUse carries the pending shell commands,

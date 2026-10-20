@@ -303,6 +303,7 @@ function pendingCallItems(tail: string): Array<Record<string, unknown>> {
  * or the value is computed.
  */
 function pendingExecArg(tail: string, command: string, key: 'shell' | 'workdir'): string | null | undefined {
+  const found: Array<string | null | undefined> = [];
   for (const p of pendingCallItems(tail)) {
     if (p.name === 'exec' && typeof p.input === 'string') {
       const src = p.input;
@@ -312,15 +313,29 @@ function pendingExecArg(tail: string, command: string, key: 'shell' | 'workdir')
       while ((m = re.exec(src))) {
         if (code[m.index] !== 't' || (m[1] ?? m[3]) === 'write_stdin') continue;
         const span = objectSpan(src, m.index + m[0].length);
-        if (span && literalProp(span, 'cmd') === command) return literalProp(span, key);
+        if (span && literalProp(span, 'cmd') === command) found.push(literalProp(span, key));
       }
     } else if (p.name === 'exec_command' && typeof p.arguments === 'string') {
       let a: Record<string, unknown> | null = null;
       try { a = JSON.parse(p.arguments); } catch { a = null; }
-      if (a?.cmd === command) { const v = a[key]; return typeof v === 'string' ? v : v === undefined || v === null ? null : undefined; }
+      if (a?.cmd === command) { const v = a[key]; found.push(typeof v === 'string' ? v : v === undefined || v === null ? null : undefined); }
     }
   }
-  return undefined;
+  // Every pending call with this cmd must agree: otherwise one call's script could be read in
+  // another's folder, or with another's shell (Jim NIT 1). Undefined is the old, cautious answer.
+  if (new Set(found).size > 1) return undefined;
+  return found[0];
+}
+
+/** HEAVY-LOCK-SINGLE-FILE-DENIAL-198 (Jim NIT 2): the current turn's cwd, as Codex itself records it. */
+export function turnCwd(tail: string): string | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let j: { type?: unknown; payload?: { cwd?: unknown } } | null = null;
+    try { j = JSON.parse(lines[i]); } catch { continue; }
+    if (j?.type === 'turn_context') return typeof j.payload?.cwd === 'string' && j.payload.cwd ? j.payload.cwd : null;
+  }
+  return null;
 }
 
 /**

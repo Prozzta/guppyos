@@ -13,6 +13,10 @@
  *   W2 a relative workdir is taken as it is, not under the agent's folder
  *   W3 a call with no workdir gets no cwd (not the agent's folder)
  *   W4 pendingExecWorkdir reads `shell` instead of `workdir`
+ *   W5 calls with the same cmd in different folders: the newest folder is claimed
+ *   W6 the turn's cwd is ignored (the registry folder wins)
+ *   W7 the agreement rule covers the folder only, not the shell
+ *   W8 turnCwd reads the OLDEST turn_context
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -36,15 +40,18 @@ const TURN = '01a0a169-b0e4-71f0-970a-4a8033cc0001';
 // A file name no checkout has, so Guppy's own folder can never answer for it.
 const ONE = 'test/sfd-only-here-198.test.cjs';
 
-/** The agent's folder holds ONE, and so do `wt` (a worktree beside it) and `agent/sub`. */
+/** The agent's registry folder holds ONE, and so do Codex's turn cwd, `wt` (a worktree beside them) and each `sub`. */
 const AGENT = path.join(JAIL, 'agent');
+const SESSION = path.join(JAIL, 'session');
 const WT = path.join(JAIL, 'wt');
-for (const d of [AGENT, WT, path.join(AGENT, 'sub')]) {
+for (const d of [AGENT, SESSION, WT, path.join(AGENT, 'sub'), path.join(SESSION, 'sub')]) {
   fs.mkdirSync(path.join(d, 'test'), { recursive: true });
   fs.writeFileSync(path.join(d, ONE), "require('node:test')('x', () => {});\n");
 }
 
-const turn = JSON.stringify({ timestamp: 't', type: 'turn_context', payload: { turn_id: TURN, cwd: 'C:\\x' } });
+/** The turn_context line; `cwd` undefined leaves it out. */
+const turnAt = (cwd) => JSON.stringify({ timestamp: 't', type: 'turn_context', payload: cwd === undefined ? { turn_id: TURN } : { turn_id: TURN, cwd } });
+const turn = turnAt(SESSION);
 const call = (input) => JSON.stringify({ timestamp: 't', type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'c1', name: 'exec', input } });
 /** Codex 0.157.1's exec program: bare keys, one nested exec_command. */
 const EX = (cmd, extra = '') => `const r = await tools.exec_command({cmd:${JSON.stringify(cmd)}${extra},yield_time_ms:30000}); text(r.output ?? '');`;
@@ -68,8 +75,8 @@ async function server(t) {
   const held = await s.handleWithClaimContext({ agent_id: 'b1', hook_event_name: 'PreToolUse', session_id: 's', tool_name: 'Bash', tool_input: { command: 'GUPPY_BENCH=1 node bench.cjs' }, tool_use_id: 'u1', transport: 'http' });
   assert.notEqual(held?.hookSpecificOutput?.permissionDecision, 'deny', 'b1 takes the slot');
   /** One Codex PreToolUse for `program` (with the hook template's {command} when `ti` is given). */
-  const pre = async (program, ti) => {
-    fs.writeFileSync(rollout, [turn, call(program)].join('\n') + '\n');
+  const pre = async (program, ti, turnLine = turn) => {
+    fs.writeFileSync(rollout, [turnLine, call(program)].join('\n') + '\n');
     const ep = s.mcpEndpoint('cx');
     const args = { event: 'PreToolUse', k: ep.token };
     if (ti) args.ti = JSON.stringify({ command: ti });
@@ -100,14 +107,31 @@ test('Dwight\'s call: one test file in the exec_command workdir runs during anot
   assert.equal(denied(rebuilt.out), false);
 });
 
-test('a relative workdir is under the agent\'s folder; no workdir is the agent\'s folder (W2, W3)', async (t) => {
+test('a relative workdir is under the turn\'s cwd; no workdir is the turn\'s cwd; with no turn cwd, the agent\'s folder (W2, W3, W6)', async (t) => {
   const { pre } = await server(t);
   const rel = await pre(EX(`node --test ${ONE}`, ',workdir:"sub"'), `node --test ${ONE}`);
-  assert.equal(slash(rel.p.cwd), slash(path.join(AGENT, 'sub')));
+  assert.equal(slash(rel.p.cwd), slash(path.join(SESSION, 'sub')), 'Codex\'s own turn cwd, not the registry folder (Jim NIT 2)');
   assert.equal(denied(rel.out), false);
   const none = await pre(EX(`node --test ${ONE}`), `node --test ${ONE}`);
-  assert.equal(none.p.cwd, AGENT);
+  assert.equal(none.p.cwd, SESSION);
   assert.equal(denied(none.out), false);
+  const relNoTurn = await pre(EX(`node --test ${ONE}`, ',workdir:"sub"'), `node --test ${ONE}`, turnAt(undefined));
+  assert.equal(slash(relNoTurn.p.cwd), slash(path.join(AGENT, 'sub')));
+  const noneNoTurn = await pre(EX(`node --test ${ONE}`), `node --test ${ONE}`, turnAt(undefined));
+  assert.equal(noneNoTurn.p.cwd, AGENT);
+  assert.equal(denied(noneNoTurn.out), false);
+});
+
+test('two pending calls with the same cmd in different folders: no folder is claimed, the file is held as before (W5)', async (t) => {
+  const { pre } = await server(t);
+  const cmd = `node --test ${ONE}`;
+  const two = `await tools.exec_command({cmd:${JSON.stringify(cmd)},workdir:${JSON.stringify(WT)}}); await tools.exec_command({cmd:${JSON.stringify(cmd)},workdir:${JSON.stringify(AGENT)}});`;
+  const r = await pre(two, cmd);
+  assert.equal(r.p.cwd, undefined, 'ambiguous: one call\'s script could be read in the other\'s folder');
+  assert.equal(denied(r.out), true, 'the old provisional bench');
+  // The same folder twice is not ambiguous.
+  const same = `await tools.exec_command({cmd:${JSON.stringify(cmd)},workdir:${JSON.stringify(WT)}}); await tools.exec_command({cmd:${JSON.stringify(cmd)},workdir:${JSON.stringify(WT)}});`;
+  assert.equal((await pre(same, cmd)).p.cwd, WT);
 });
 
 test('the boundary stays: a test file missing from the call\'s folder is still held, and the deny row names that folder', async (t) => {
@@ -134,4 +158,18 @@ test('pendingExecWorkdir: the literal workdir of the pending call with that cmd 
   // A plain function_call exec_command (JSON arguments).
   const fn = [turn, JSON.stringify({ timestamp: 't', type: 'response_item', payload: { type: 'function_call', call_id: 'c1', name: 'exec_command', arguments: JSON.stringify({ cmd: 'a', workdir: 'C:\\w3' }) } })].join('\n') + '\n';
   assert.equal(mcp.pendingExecWorkdir(fn, 'a'), 'C:\\w3');
+});
+
+test('the shell lookup takes the same rule: two pending calls with the same cmd and different shells claim none (W7)', () => {
+  const tail = (input) => [turn, call(input)].join('\n') + '\n';
+  const mixed = 'await tools.exec_command({cmd:"a",shell:"cmd"}); await tools.exec_command({cmd:"a",shell:"powershell"});';
+  assert.equal(mcp.pendingExecShell(tail(mixed), 'a'), undefined);
+  assert.equal(mcp.pendingExecShell(tail('await tools.exec_command({cmd:"a",shell:"cmd"}); await tools.exec_command({cmd:"a",shell:"cmd"});'), 'a'), 'cmd');
+  assert.equal(mcp.pendingExecShell(tail('await tools.exec_command({cmd:"a",shell:"cmd"}); await tools.exec_command({cmd:"b"});'), 'a'), 'cmd', 'another cmd does not count');
+});
+
+test('turnCwd: the newest turn_context\'s cwd, null when it has none (W8)', () => {
+  assert.equal(mcp.turnCwd([turnAt('C:\\old'), turnAt('C:\\new'), call('x')].join('\n')), 'C:\\new');
+  assert.equal(mcp.turnCwd([turnAt('C:\\old'), turnAt(undefined)].join('\n')), null);
+  assert.equal(mcp.turnCwd(call('x')), null);
 });
