@@ -12,7 +12,9 @@
  *   term hold on [reason] | term hold off  the floor hold (a Human pause): no owed-work continuations
  *
  * Text is NEVER taken from arguments: a shell string gets its backticks and $(...) executed
- * (MSG-COMPOSE-SHELL-INJECTION). One trailing newline of the input is dropped (echo/here-doc add it).
+ * (MSG-COMPOSE-SHELL-INJECTION). The one exception is the `hold on` reason, a short label god
+ * writes itself: single-quote it, and never paste a broadcast into it (backticks or $(...) would
+ * run in the shell before term sees them). One trailing newline of the input is dropped (echo/here-doc add it).
  * The app refuses a lone "?" and a leading "!" or "/" (they act as keys) unless --raw.
  *
  * God only: the app checks the caller against the registry's god on every request.
