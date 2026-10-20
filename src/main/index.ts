@@ -172,6 +172,7 @@ import { buildWorkerLaunch } from './workerLaunch';
 import { ControlRegistry } from './control';
 import { WORKER_WAKE_HITL_REARM_MS, WorkerWakeWatchdog, type WakeClaim } from './workerWake';
 import { OwedContinuation, type OwedSent } from './owedContinuation';
+import { floorHoldWords, parseFloorHold } from './floorHold';
 import { owesWork } from './mailLedger';
 import { HeldInterferenceWatch, HELD_TICK_MS, heldWakesOf } from './heldInterference';
 import { findSilentTurns, type SilentTurnFacts } from './silentTurn';
@@ -580,6 +581,8 @@ const floorDigest = new FloorDigest({
     const s = floorStalls.stall(now);
     return s ? { ...s, agents: s.agents.map((a) => ({ ...a, name: agentDisplayName(a.agentId) })) } : null;
   },
+  // HIVE-DWIGHT-BG-REINVOKE: the floor hold god set with `term hold on`.
+  floorHold: () => parseFloorHold(readConfig().floorHold),
   // MIRROR-STARTUP-196: the mirrors are auto-off (god's term cannot read screens until re-arm).
   mirrorOff: () => mirrorGuard?.status() ?? null,
   send: (msg, from) => { hive.send(msg, from); },
@@ -1833,6 +1836,7 @@ const termControl = new TermControl({
   write: (ptyId, data) => ptyManager.write(ptyId, data, 'GOD'),
   outputGeneration: (ptyId) => ptyManager.outputGeneration(ptyId),
   log: (row) => hive.appendLog(row),
+  floorHold: { get: () => parseFloorHold(readConfig().floorHold), set: (h) => { writeConfig({ floorHold: h }); } },
   now: Date.now,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 });
@@ -3179,7 +3183,9 @@ function writeFleetSnapshot(): void {
       });
     // HEAVY-JOB-SERIALIZE: who holds the heavy-job slots (god reads fleet.json every standup).
     // ZERO-TOKEN-LIVENESS: the current liveness-v1 records (every LIVE agent, recent non-LIVE ones).
-    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now) });
+    // HIVE-DWIGHT-BG-REINVOKE: the floor hold (null = none), with its words.
+    const hold = parseFloorHold(readConfig().floorHold);
+    hive.writeFleetSnapshot({ ts: now, agents, wake: wakeTelemetry.snapshot(now), heavyLock: { limit: heavyLimit(readConfig().heavyJobsAtOnce), holders: heavyLock.snapshot(), ...heavyLock.queueSnapshot() }, liveness: agentLiveness.fleetRecords(now), floorHold: hold ? { ...hold, line: floorHoldWords(hold, now) } : null });
   } catch (e) {
     console.error('[fleet] snapshot failed:', e);
   }
@@ -7995,6 +8001,8 @@ function runOwedContinuation(live: string[]): void {
       }
     }
     const q = heavyLock.queueSnapshot();
+    const holders = heavyLock.snapshot();
+    const floorHeld = parseFloorHold(readConfig().floorHold) !== null;
     for (const agentId of live) {
       const snap = control.snapshot(agentId);
       const lf = workerWake.livenessFacts(agentId);
@@ -8009,6 +8017,8 @@ function runOwedContinuation(live: string[]): void {
         autoDeliveryPaused: snap.autoDeliveryPaused,
         hitl: lf.lastHumanNeedsAt > 0 && now - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
         heavyQueued: q.waiters.some((w) => w.agentId === agentId) || q.reserved.some((r) => r.agentId === agentId),
+        heavyHolder: holders.some((h) => h.agentId === agentId),
+        floorHeld,
         entries: Object.values(hive.mail.ledger(agentId).entries),
         sent: sent.get(agentId) ?? []
       });

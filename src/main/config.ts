@@ -355,6 +355,9 @@ export interface HarnessConfig {
   /** Agent ids whose automatic inbox/queue delivery is paused. Pending messages
    *  stay durable until the operator explicitly resumes delivery. */
   autoDeliveryPausedAgents?: string[];
+  /** HIVE-DWIGHT-BG-REINVOKE: the floor hold god sets with `term hold on|off` (floorHold.ts).
+   *  null or unset = no hold. Kept here so a restart keeps it. */
+  floorHold?: { by: string; reason: string; since: number } | null;
   /** CODEX-TRUST-LAYER (1.1.76): project folders the Human allowed with one click. A Codex agent
    *  there starts even though the folder's own `.codex` hooks / MCP servers / rules would run
    *  unreviewed (with a visible warning); anywhere else such a folder refuses the spawn. Keys are

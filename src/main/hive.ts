@@ -5778,6 +5778,14 @@ In PowerShell: \`@' {...} '@ | ledger\`. Or write the JSON with your file tool a
 - An ask closes when you answer it (\`in_reply_to\` its id, or a \`done\`/\`refuse\` to the asker
   that cites its id or is in its conversation; an \`inform\` is a status and closes nothing), when its
   card is done, or when its sender supersedes it. FYIs go as \`inform\`.
+- Finishing a request: the work you owe on a request ends only with a reply that has \`in_reply_to\`
+  its id and act \`done\` or \`refuse\`, or with \`needs_human: true\` (blocked on the Human); a
+  \`close\` or the sender's supersede also ends it. An \`inform\` or \`agree\` reply is progress and
+  keeps the work owed: an agent idle with work owed is sent a CONTINUE mail 3 minutes after its
+  turn ends. So send your final answer (a verdict, "merged", "passed") as \`done\`.
+- Floor hold (god): for a Human pause, run \`term hold on [reason]\` with the pause broadcast and
+  \`term hold off\` with the resume. While it holds, no CONTINUE mail is sent; fleet.json
+  (\`floorHold\`) and floor-digest.md show it.
 - Only \`request\`, \`query\`, and \`propose\` expect a reply. \`inform\` and \`done\` are terminal —
   don't reply to them, or two agents will loop forever.
 - An \`inform\` or \`agree\` that needs no reply does not wake an idle recipient: it reaches the

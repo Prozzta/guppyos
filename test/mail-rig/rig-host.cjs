@@ -475,6 +475,8 @@ async function buildFloor() {
           autoDeliveryPaused: snap.autoDeliveryPaused,
           hitl: lf.lastHumanNeedsAt > 0 && Date.now() - lf.lastHumanNeedsAt < WORKER_WAKE_HITL_REARM_MS,
           heavyQueued: false,
+          heavyHolder: false,
+          floorHeld: false,
           entries: Object.values(hive.mail.ledger(agentId).entries),
           sent: sent.get(agentId) ?? []
         });

@@ -8,7 +8,10 @@
  *  B. the watcher (src/main/owedContinuation.ts): both real incidents replayed from the log rows
  *     (2026-10-20 07:18Z two requests unreplied; 02:59Z a request answered only with an inform),
  *     the 3 min grace, the suppressors, pause/halt, never while active, the caps and the god notice;
- *  the wiring in index.ts and hive.ts (source pins).
+ *  the wiring in index.ts and hive.ts (source pins);
+ *  C. (Jim 0dbf11, god 911143) the protocol text names exactly the discharging acts; the floor hold
+ *     (`term hold on|off`, god-only, kept in config, in fleet.json and the digest) holds it back,
+ *     replayed on the 12:26Z mail-only pause; a heavy-lock holder holds it back.
  * Pure: a simulated clock, no timers.
  */
 
@@ -40,7 +43,7 @@ function actedDoc(agentId, delivered, epoch, surfacedAt, actedAt, doc = L.emptyL
 function facts(doc, stop, now, extra = {}) {
   return {
     now, lifecycle: 'idle', lastTurnEndAt: stop, inFlight: false, pendingMail: 0,
-    paused: false, halted: false, autoDeliveryPaused: false, hitl: false, heavyQueued: false,
+    paused: false, halted: false, autoDeliveryPaused: false, hitl: false, heavyQueued: false, heavyHolder: false, floorHeld: false,
     entries: Object.values(doc.entries), sent: [], ...extra
   };
 }
@@ -197,6 +200,8 @@ test('OWED SUPPRESS: a legitimate wait holds it back, with one row per edge', ()
   const { doc, sent, stop } = incident0718();
   const now = stop + O.OWED_GRACE_MS;
   const cases = [
+    ['floor-paused', { floorHeld: true }],
+    ['heavy-holder', { heavyHolder: true }],
     ['paused', { paused: true }],
     ['halted', { halted: true }],
     ['auto-delivery-paused', { autoDeliveryPaused: true }],
@@ -330,9 +335,137 @@ test('OWED WIRING: the 15 s beat runs it after the wake reconcile, with the live
     /inFlight: !!workerWake\.state\(agentId\)\.inFlight,/, /pendingMail: mailPendingIds\(agentId\)\.length,/,
     /lifecycle: lf\.lifecycle,/, /lastTurnEndAt: lf\.lastTurnEndAt,/,
     /heavyQueued: q\.waiters\.some\(\(w\) => w\.agentId === agentId\) \|\| q\.reserved\.some\(\(r\) => r\.agentId === agentId\),/,
+    /const holders = heavyLock\.snapshot\(\);/, /heavyHolder: holders\.some\(\(h\) => h\.agentId === agentId\),/,
+    /const floorHeld = parseFloorHold\(readConfig\(\)\.floorHold\) !== null;/, /\n        floorHeld,\n/,
     /open: owesWork\(e\)/,
     /hive\.send\(d\.nudge\.message as Partial<HiveMessage>, 'system'\)/,
     /hive\.send\(d\.notice\.message as Partial<HiveMessage>, 'system'\)/,
     /hive\.appendLog\(row\)/
   ]) assert.match(fn, re);
+});
+
+// ————————————————————————————————————————————————— Jim 0dbf11 / god 911143: the protocol rule
+
+test('OWED PROTOCOL: the protocol text names exactly the discharging acts, and the nudge says how to close', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/hive.ts'), 'utf8').replace(/\r\n/g, '\n');
+  const proto = src.slice(src.indexOf('const PROTOCOL_MD = `'), src.indexOf('## Rules of the road') + 3000);
+  const rule = proto.slice(proto.indexOf('- Finishing a request:'), proto.indexOf('\n- ', proto.indexOf('- Finishing a request:') + 3));
+  assert.ok(rule.startsWith('- Finishing a request:'), 'the rule is in PROTOCOL.md');
+  const ends = rule.slice(rule.indexOf('ends only with'), rule.indexOf('also ends it'));
+  const named = new Set([...ends.matchAll(/\\`([a-z_]+)(?:: true)?\\`/g)].map((m) => m[1]).filter((a) => a !== 'in_reply_to' && a !== 'close'));
+  const expected = new Set([...L.DISCHARGING_REPLY_ACTS].map((a) => (a === 'blocked' ? 'needs_human' : a)));
+  assert.deepEqual([...named].sort(), [...expected].sort(), 'the text and DISCHARGING_REPLY_ACTS name the same acts');
+  assert.match(ends, /needs_human: true\\` \(blocked/);
+  assert.match(rule, /An \\`inform\\` or \\`agree\\` reply is progress and\n  keeps the work owed/);
+  const n = O.owedNudge(DW, [{ id: 'q1', from: 'god', subject: 's' }]);
+  assert.match(n.message.body, /If this is finished, reply done with in_reply_to <id>/);
+});
+
+// ————————————————————————————————————————————————— Jim 0dbf11 MUST 2 / god 911143: the floor hold
+
+const FH = loadTs('src/main/floorHold.ts');
+const T = loadTs('src/main/termControl.ts');
+const D = loadTs('src/main/floorDigest.ts');
+const CLI = require('../resources/term-cli.cjs');
+
+/** A term control whose floor-hold store is a config object, the way index.ts wires config.json. */
+function holdRig(config = {}) {
+  const r = { config, logs: [], t: at('2026-10-20T12:26:10.000Z') };
+  r.tc = new T.TermControl({
+    godId: () => 'god', ptyOf: () => undefined, providerOf: () => null, readScreen: async () => null,
+    write: () => ({ ok: false }), outputGeneration: () => 0, log: (row) => r.logs.push(row),
+    floorHold: { get: () => FH.parseFloorHold(r.config.floorHold), set: (h) => { r.config = JSON.parse(JSON.stringify({ ...r.config, floorHold: h })); } },
+    now: () => r.t, sleep: async () => {}
+  });
+  return r;
+}
+
+test('OWED FLOOR HOLD 12:26Z: a mail-only Human pause gives no nudge; under the hold none, after it one', async () => {
+  // God's PAUSE 1577cb went out as mail at 12:26Z and set no control state (log: no control/pause/halt
+  // rows 12:24-12:32Z). Dwight owed god's request, acted 12:20; the PAUSE inform was acted at the 12:27 Stop.
+  const T0 = at('2026-10-20T12:20:00.000Z');
+  let doc = actedDoc(DW, [{ id: 'req-1220', from: 'god', act: 'request', at: T0 }], 'e1', T0 + 1000, T0 + 2000);
+  doc = actedDoc(DW, [{ id: '2026-10-20T12-26-00-000Z-1577cb', from: 'god', act: 'inform', subject: 'PAUSE: the Human says stop', at: at('2026-10-20T12:26:00.000Z') }],
+    'e2', at('2026-10-20T12:26:30.000Z'), at('2026-10-20T12:27:00.000Z'), doc);
+  const stop = at('2026-10-20T12:27:00.000Z');
+  const now = stop + O.OWED_GRACE_MS;
+  assert.ok(watcher(T0 - HOUR).tick(DW, facts(doc, stop, now)).nudge, 'without a hold the mail-only pause is invisible (the finding)');
+
+  const r = holdRig();
+  const on = await r.tc.handle('god', { action: 'hold', state: 'on', reason: 'the Human said stop (1577cb)' });
+  assert.equal(on.status, 200);
+  const w = watcher(T0 - HOUR);
+  const held = () => FH.parseFloorHold(r.config.floorHold) !== null;
+  const d = w.tick(DW, facts(doc, stop, now, { floorHeld: held() }));
+  assert.equal(d.nudge, undefined);
+  assert.deepEqual(d.rows.map((x) => [x.stage, x.suppressedBy]), [['continuation', 'floor-paused']]);
+  for (let t = now + 15_000; t < at('2026-10-20T19:30:00.000Z'); t += 30 * MIN) {
+    const beat = w.tick(DW, facts(doc, stop, t, { floorHeld: held() }));
+    assert.equal(beat.nudge, undefined, new Date(t).toISOString());
+    assert.equal(beat.notice, undefined);
+    assert.deepEqual(beat.rows, [], 'one row for the whole hold');
+  }
+  // The real hold lasted to 19:30Z, past the 6 h window of a 12:20 request (god's RESUME mail wakes the
+  // agent then). Lifted inside the window, the continuation goes.
+  r.t = at('2026-10-20T16:00:00.000Z');
+  assert.equal((await r.tc.handle('god', { action: 'hold', state: 'off' })).status, 200);
+  assert.ok(w.tick(DW, facts(doc, stop, r.t, { floorHeld: held() })).nudge, 'the resume lets it through');
+});
+
+test('OWED FLOOR HOLD: god-only, persisted in config across a restart, one floor-hold row per edge', async () => {
+  const r = holdRig();
+  const denied = await r.tc.handle('jim-1', { action: 'hold', state: 'on' });
+  assert.equal(denied.status, 403);
+  assert.equal(r.config.floorHold, undefined, 'a non-god changes nothing');
+  assert.equal((await r.tc.handle('god', { action: 'hold', state: 'maybe' })).status, 400);
+  assert.equal((await r.tc.handle('god', { action: 'hold', state: 'on', reason: 'x'.repeat(FH.FLOOR_HOLD_REASON_MAX + 1) })).status, 400);
+  assert.equal(r.config.floorHold, undefined);
+
+  const on = await r.tc.handle('god', { action: 'hold', state: 'on', reason: 'Human pause' });
+  assert.deepEqual(r.config.floorHold, { by: 'god', reason: 'Human pause', since: r.t });
+  assert.match(on.body.line, /^FLOOR HOLD on since 2026-10-20T12:26:10\.000Z .* by god: Human pause\./);
+  r.t += 5 * MIN;
+  const again = await r.tc.handle('god', { action: 'hold', state: 'on', reason: 'other' });
+  assert.match(again.body.line, /^already held: /);
+  assert.equal(r.config.floorHold.since, r.t - 5 * MIN, 'a repeat keeps the first hold');
+  assert.deepEqual(r.logs.filter((x) => x.kind === 'floor-hold'), [{ kind: 'floor-hold', state: 'on', by: 'god', reason: 'Human pause' }]);
+
+  // Restart: a new app reads the same config.json (JSON round trip), a new term control and watcher.
+  const restarted = holdRig(JSON.parse(JSON.stringify(r.config)));
+  restarted.t = r.t + HOUR;
+  assert.deepEqual(FH.parseFloorHold(restarted.config.floorHold), r.config.floorHold, 'the hold survives the restart');
+  const req = actedDoc('jim-1', [{ id: 'q', from: 'god', act: 'request', at: restarted.t - MIN }], 'e', restarted.t - MIN, restarted.t - MIN);
+  const after = new O.OwedContinuation(restarted.t - 2 * MIN, () => 'god')
+    .tick('jim-1', facts(req, restarted.t, restarted.t + O.OWED_GRACE_MS, { floorHeld: FH.parseFloorHold(restarted.config.floorHold) !== null }));
+  assert.equal(after.rows[0].suppressedBy, 'floor-paused', 'still held after the restart');
+  const off = await restarted.tc.handle('god', { action: 'hold', state: 'off' });
+  assert.match(off.body.line, /^floor hold lifted \(held 65 min\)/);
+  assert.equal(restarted.config.floorHold, null);
+  assert.deepEqual(restarted.logs.filter((x) => x.kind === 'floor-hold'), [{ kind: 'floor-hold', state: 'off', by: 'god', reason: 'Human pause', heldMs: 65 * MIN }]);
+  assert.match((await restarted.tc.handle('god', { action: 'hold', state: 'off' })).body.line, /^no floor hold is on/);
+  assert.equal(restarted.logs.filter((x) => x.kind === 'floor-hold').length, 1, 'a repeat off is no edge');
+
+  for (const bad of [null, 'x', { by: '', since: 1 }, { by: 'god' }, { by: 'god', since: 'yesterday' }]) assert.equal(FH.parseFloorHold(bad), null, JSON.stringify(bad));
+  const noStore = new T.TermControl({ ...holdRig().tc.deps, floorHold: undefined });
+  assert.equal((await noStore.handle('god', { action: 'hold', state: 'on' })).status, 503);
+});
+
+test('OWED FLOOR HOLD: the term CLI, fleet.json and the floor digest show it; index wires it to config', () => {
+  assert.deepEqual(CLI.parseArgs(['hold', 'on', 'the', 'Human', 'said', 'stop']), { body: { action: 'hold', state: 'on', reason: 'the Human said stop' } });
+  assert.deepEqual(CLI.parseArgs(['hold', 'on']), { body: { action: 'hold', state: 'on', reason: '' } });
+  assert.deepEqual(CLI.parseArgs(['hold', 'off']), { body: { action: 'hold', state: 'off' } });
+  assert.throws(() => CLI.parseArgs(['hold', 'off', 'now']), /hold: on \[reason\] or off/);
+  assert.throws(() => CLI.parseArgs(['hold']), /hold: on \[reason\] or off/);
+
+  const now = at('2026-10-20T13:26:00.000Z');
+  const hold = { by: 'god', reason: 'Human pause', since: at('2026-10-20T12:26:00.000Z') };
+  const base = { tasks: [], meta: {}, flags: [], ledgerIssues: [], agents: [], now };
+  const md = D.buildFloorDigest({ ...base, floorHold: hold }).markdown;
+  assert.ok(md.split('\n').includes(`**${FH.floorHoldWords(hold, now)}**`), 'the digest shows the hold under its title');
+  assert.ok(!D.buildFloorDigest(base).markdown.includes('FLOOR HOLD'));
+
+  const src = fs.readFileSync(path.join(ROOT, 'src/main/index.ts'), 'utf8').replace(/\r\n/g, '\n');
+  assert.match(src, /floorHold: \{ get: \(\) => parseFloorHold\(readConfig\(\)\.floorHold\), set: \(h\) => \{ writeConfig\(\{ floorHold: h \}\); \} \},/);
+  assert.match(src, /liveness: agentLiveness\.fleetRecords\(now\), floorHold: hold \? \{ \.\.\.hold, line: floorHoldWords\(hold, now\) \} : null \}\);/);
+  assert.match(src, /floorHold: \(\) => parseFloorHold\(readConfig\(\)\.floorHold\),\n  \/\/ MIRROR-STARTUP-196/);
 });

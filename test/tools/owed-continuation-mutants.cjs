@@ -16,6 +16,8 @@ const OWED = 'src/main/owedContinuation.ts';
 const LEDGER = 'src/main/mailLedger.ts';
 const HIVE = 'src/main/hive.ts';
 const INDEX = 'src/main/index.ts';
+const TERM = 'src/main/termControl.ts';
+const DIGEST = 'src/main/floorDigest.ts';
 
 const MUTANTS = [
   ['M1 a done never upgrades an interim reply', LEDGER, 'const discharging = !!replyAct && DISCHARGING_REPLY_ACTS.has(replyAct);', 'const discharging = false;', /not ok \d+ - OWED A: a later done upgrades/],
@@ -44,7 +46,20 @@ const MUTANTS = [
   ['M23 system mail counts', OWED, "e.act === 'request' && e.from !== 'system' && ", "e.act === 'request' && ", /not ok \d+ - OWED SCOPE/],
   ['M24 god told about itself', OWED, '      if (god && god !== agentId) {', '      if (god) {', /not ok \d+ - OWED CAP: no god notice/],
   ['M25 the beat never runs it', INDEX, '  runOwedContinuation(live);\n', '', /not ok \d+ - OWED WIRING/],
-  ['M26 a reservation is not a heavy wait', INDEX, ' || q.reserved.some((r) => r.agentId === agentId),', ',', /not ok \d+ - OWED WIRING/]
+  ['M26 a reservation is not a heavy wait', INDEX, ' || q.reserved.some((r) => r.agentId === agentId),', ',', /not ok \d+ - OWED WIRING/],
+  // Jim 0dbf11 / god 911143: the floor hold, the heavy holder, the protocol rule.
+  ['M27 the floor hold is ignored', OWED, "  if (f.floorHeld) return 'floor-paused';\n", '', /not ok \d+ - OWED FLOOR HOLD 12:26Z/],
+  ['M28 the heavy holder is ignored', OWED, "  if (f.heavyHolder) return 'heavy-holder';\n", '', /not ok \d+ - OWED SUPPRESS: a legitimate wait/],
+  ['M29 the beat never sees a holder', INDEX, 'heavyHolder: holders.some((h) => h.agentId === agentId),', 'heavyHolder: false,', /not ok \d+ - OWED WIRING/],
+  ['M30 the beat never sees the hold', INDEX, 'const floorHeld = parseFloorHold(readConfig().floorHold) !== null;', 'const floorHeld = false;', /not ok \d+ - OWED WIRING/],
+  ['M31 term hold saves nothing', TERM, 'try { store.set(next); }', 'try { void next; }', /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
+  ['M32 term hold is not god-only', TERM, "    if (!god || callerId !== god) return refuse(403, 'term is god-only');\n    if (b.action === 'hold')", "    if (b.action === 'hold') return Promise.resolve(this.hold(callerId, b, refuse));\n    if (!god || callerId !== god) return refuse(403, 'term is god-only');\n    if (b.action === 'hold')", /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
+  ['M33 a repeat on restarts the hold', TERM, "if (b.state === 'on' && cur) {", 'if (false) {', /not ok \d+ - OWED FLOOR HOLD: god-only, persisted/],
+  ['M34 the digest hides the hold', DIGEST, '  if (input.floorHold) out.push(', '  if (false) out.push(', /not ok \d+ - OWED FLOOR HOLD: the term CLI/],
+  ['M35 fleet.json hides the hold', INDEX, ', floorHold: hold ? { ...hold, line: floorHoldWords(hold, now) } : null });', ' });', /not ok \d+ - OWED FLOOR HOLD: the term CLI/],
+  ['M36 the protocol lets an inform discharge', HIVE, 'act \\`done\\` or \\`refuse\\`, or with', 'act \\`done\\`, \\`inform\\` or \\`refuse\\`, or with', /not ok \d+ - OWED PROTOCOL/],
+  ['M37 the allow-list drifts from the protocol', LEDGER, "new Set(['done', 'refuse', 'blocked'])", "new Set(['done', 'refuse', 'blocked', 'agree'])", /not ok \d+ - OWED PROTOCOL/],
+  ['M38 the nudge does not say how to close', OWED, 'If this is finished, reply done with in_reply_to <id>', 'Continue', /not ok \d+ - OWED PROTOCOL/]
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

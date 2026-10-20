@@ -11,10 +11,15 @@
  * its guards) to an agent that is idle past OWED_GRACE_MS after its last Stop while it owes work:
  * a request it has acted on and not discharged (no reply, or only an inform/agree reply; see
  * mailLedger.owesWork). Legitimate waits suppress it: the agent's own outgoing request still
- * open, a heavy-lock queue place or reservation, its newest sent message being a request, pause,
- * halt, auto-delivery pause, a recent HITL prompt. Caps: one nudge per obligation per hour (and
- * only after a new Stop), two in total; then one stall row and one notice to god, never a loop.
+ * open, a heavy-lock slot it holds (its own background run) or a queue place or reservation, its
+ * newest sent message being a request, the floor hold (floorHold.ts: a Human pause), pause, halt,
+ * auto-delivery pause, a recent HITL prompt. Caps: one nudge per obligation per hour (and only
+ * after a new Stop), two in total; then one stall row and one notice to god, never a loop.
  * Pure: main supplies the facts and sends what it returns.
+ *
+ * Restarts (Jim 0dbf11 NIT): `startedAt` is the app start and the tallies live in memory, so a
+ * restart drops every obligation acted before it (a stall that straddles a restart is not
+ * followed) and resets the caps. Accepted: the 6 h window bounds what could be followed anyway.
  */
 import { owesWork, type MailEntry } from './mailLedger';
 
@@ -50,13 +55,17 @@ export interface OwedFacts {
   hitl: boolean;
   /** Queued on the heavy lock or holding a reservation. */
   heavyQueued: boolean;
+  /** Holds a heavy-lock slot (its own suite or bench is running). */
+  heavyHolder: boolean;
+  /** The floor hold is on (god's `term hold on`, a Human pause). */
+  floorHeld: boolean;
   /** The agent's own ledger entries. */
   entries: MailEntry[];
   /** Messages the agent sent (from the other agents' ledgers). */
   sent: OwedSent[];
 }
 
-export type OwedSuppressor = 'paused' | 'halted' | 'auto-delivery-paused' | 'hitl' | 'heavy-queued' | 'outgoing-request' | 'newest-sent-request';
+export type OwedSuppressor = 'floor-paused' | 'paused' | 'halted' | 'auto-delivery-paused' | 'hitl' | 'heavy-holder' | 'heavy-queued' | 'outgoing-request' | 'newest-sent-request';
 
 export interface OwedNudge {
   message: { to: string; act: 'inform'; requires_reply: false; subject: string; body: string; wake: 'now' };
@@ -89,10 +98,12 @@ export function owedEntries(agentId: string, entries: MailEntry[], since: number
  * answered before the owed work arrived.
  */
 export function owedSuppressor(f: OwedFacts): OwedSuppressor | null {
+  if (f.floorHeld) return 'floor-paused';
   if (f.paused) return 'paused';
   if (f.halted) return 'halted';
   if (f.autoDeliveryPaused) return 'auto-delivery-paused';
   if (f.hitl) return 'hitl';
+  if (f.heavyHolder) return 'heavy-holder';
   if (f.heavyQueued) return 'heavy-queued';
   const recent = f.sent.filter((s) => s.at >= f.now - OWED_WINDOW_MS);
   if (recent.some((s) => s.act === 'request' && s.open)) return 'outgoing-request';
@@ -104,7 +115,7 @@ export function owedSuppressor(f: OwedFacts): OwedSuppressor | null {
 export function owedNudge(agentId: string, owed: MailEntry[]): OwedNudge {
   const list = owed.map((e) => `- ${e.id} from ${e.from}${e.subject ? `: "${e.subject}"` : ''}`).join('\n');
   const subject = `CONTINUE: your turn ended with work still owed (${owed.length} request${owed.length === 1 ? '' : 's'})`;
-  const body = `Your last turn ended while these requests are still owed (not answered, or answered only with an inform/agree):\n${list}\n\nContinue the work now. When it is finished, send a done (or refuse) reply with in_reply_to set to the request id. If you are waiting on someone or something, say so in a reply with needs_human, or send your own request to who you are waiting on.`;
+  const body = `Your last turn ended while these requests are still owed (not answered, or answered only with an inform/agree):\n${list}\n\nIf this is finished, reply done with in_reply_to <id> (one short reply per request; that ends it). Otherwise continue the work now and send a done (or refuse) with in_reply_to the request id when it is. If you are waiting on someone or something, say so in a reply with needs_human, or send your own request to who you are waiting on.`;
   return { message: { to: agentId, act: 'inform', requires_reply: false, subject, body, wake: 'now' }, from: 'system' };
 }
 

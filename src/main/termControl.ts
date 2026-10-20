@@ -20,6 +20,7 @@
 import type { AgentProvider } from '../shared/agentProvider';
 import { automaticEnterGapMs } from '../shared/providerAutomation';
 import { screenTail, type MirrorReading } from './terminalMirror';
+import { FLOOR_HOLD_REASON_MAX, floorHoldWords, type FloorHold } from './floorHold';
 
 export const TERM_TEXT_MAX = 16 * 1024;
 export const TERM_KEYS_MAX = 16;
@@ -51,6 +52,8 @@ export interface TermDeps {
   write(ptyId: string, data: string): { ok: boolean; error?: string };
   outputGeneration(ptyId: string): number | undefined;
   log(row: Record<string, unknown>): void;
+  /** HIVE-DWIGHT-BG-REINVOKE: the persisted floor hold (floorHold.ts); absent = `term hold` refused. */
+  floorHold?: { get(): FloorHold | null; set(h: FloorHold | null): void };
   now(): number;
   sleep(ms: number): Promise<void>;
 }
@@ -137,7 +140,8 @@ export class TermControl {
     };
     const god = this.deps.godId();
     if (!god || callerId !== god) return refuse(403, 'term is god-only');
-    if (!action) return refuse(400, `action must be one of ${ACTIONS.join(', ')}`);
+    if (b.action === 'hold') return Promise.resolve(this.hold(callerId, b, refuse));
+    if (!action) return refuse(400, `action must be one of ${ACTIONS.join(', ')}, hold`);
     if (!agent) return refuse(400, 'agent: required');
     if (agent === callerId) return refuse(400, 'god cannot drive its own terminal');
     const ptyId = this.deps.ptyOf(agent);
@@ -154,6 +158,32 @@ export class TermControl {
     this.chains.set(agent, tail);
     void tail.then(() => { if (this.chains.get(agent) === tail) this.chains.delete(agent); });
     return run;
+  }
+
+  /** HIVE-DWIGHT-BG-REINVOKE: `term hold on [reason]` / `term hold off`, the floor hold (floorHold.ts).
+   *  No agent and no terminal: it is floor state. Each change is one 'floor-hold' row; a repeat is
+   *  answered with the current state and changes nothing. */
+  private hold(by: string, b: Record<string, unknown>, refuse: (status: number, line: string) => Promise<TermReply>): Promise<TermReply> | TermReply {
+    const store = this.deps.floorHold;
+    if (!store) return refuse(503, 'hold: this app has no floor hold');
+    if (b.state !== 'on' && b.state !== 'off') return refuse(400, 'hold: state must be on or off');
+    const reason = typeof b.reason === 'string' ? b.reason.trim() : '';
+    if (reason.length > FLOOR_HOLD_REASON_MAX) return refuse(400, `hold: the reason is over ${FLOOR_HOLD_REASON_MAX} characters`);
+    const now = this.deps.now();
+    const cur = store.get();
+    if (b.state === 'on' && cur) {
+      this.logRow({ by, agent: null, action: 'hold', state: 'on', ok: true, changed: false });
+      return { status: 200, body: { ok: true, line: `already held: ${floorHoldWords(cur, now)}` } };
+    }
+    if (b.state === 'off' && !cur) {
+      this.logRow({ by, agent: null, action: 'hold', state: 'off', ok: true, changed: false });
+      return { status: 200, body: { ok: true, line: 'no floor hold is on' } };
+    }
+    const next: FloorHold | null = b.state === 'on' ? { by, reason, since: now } : null;
+    try { store.set(next); } catch (e) { return refuse(500, `hold: not saved (${e instanceof Error ? e.message : String(e)})`); }
+    this.logRow({ by, agent: null, action: 'hold', state: b.state, ok: true, changed: true });
+    try { this.deps.log({ kind: 'floor-hold', state: b.state, by, reason: next ? reason : cur?.reason ?? '', ...(cur && !next ? { heldMs: now - cur.since } : {}) }); } catch { /* logging only */ }
+    return { status: 200, body: { ok: true, line: next ? floorHoldWords(next, now) : `floor hold lifted (held ${Math.round((now - (cur as FloorHold).since) / 60_000)} min)` } };
   }
 
   private logRow(row: Record<string, unknown>): void {
