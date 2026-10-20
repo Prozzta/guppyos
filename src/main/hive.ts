@@ -762,6 +762,8 @@ export class HiveManager {
   private readonly outboxRejectNotices = new Map<string, string | null>();
   /** A delivered file whose normal archive failed must never be delivered twice. */
   private readonly outboxDeliveredArchives = new Map<string, string | null>();
+  /** Archive failures already reported for the current contents of each live outbox file. */
+  private readonly outboxArchiveFailures = new Map<string, string | null>();
   /** HIVE-DUP-DONE-MAIL: recent deliveries by outboxDedupKey, loaded from the hive root's OUTBOX_DEDUP_FILE. */
   private outboxDedup: { root: string; entries: Map<string, { id: string; ts: number }> } | null = null;
   /** A corrupt authority file is copied aside once per bad contents. Repeating a
@@ -3532,9 +3534,22 @@ export class HiveManager {
     } catch (error) {
       // Held: the next scan retries only the archive (same as a delivered file whose archive failed).
       this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
-      this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });
+      this.noteOutboxArchiveFailure(full, from, file, error);
       return null;
     }
+  }
+
+  /** Report an archive lock once for these contents, then report when it eventually clears. */
+  private noteOutboxArchiveFailure(full: string, from: string, file: string, error: unknown): void {
+    const fingerprint = this.outboxFingerprint(full);
+    if (this.outboxArchiveFailures.has(full) && this.outboxArchiveFailures.get(full) === fingerprint) return;
+    this.outboxArchiveFailures.set(full, fingerprint);
+    this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });
+  }
+
+  private noteOutboxArchiveCleared(full: string, from: string, file: string): void {
+    if (!this.outboxArchiveFailures.delete(full)) return;
+    this.appendLog({ kind: 'outbox-archive-cleared', from, file });
   }
 
   /** Archive after delivery; a transient archive lock is never a route failure. */
@@ -3542,10 +3557,11 @@ export class HiveManager {
     try {
       renameSync(full, join(outbox, '.sent', file));
       this.outboxDeliveredArchives.delete(full);
+      this.noteOutboxArchiveCleared(full, from, file);
       return true;
     } catch (error) {
       this.outboxDeliveredArchives.set(full, this.outboxFingerprint(full));
-      this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });
+      this.noteOutboxArchiveFailure(full, from, file, error);
       return false;
     }
   }
@@ -3703,6 +3719,9 @@ export class HiveManager {
     }
     for (const full of this.outboxDeliveredArchives.keys()) {
       if (!liveOutboxFiles.has(full)) this.outboxDeliveredArchives.delete(full);
+    }
+    for (const full of this.outboxArchiveFailures.keys()) {
+      if (!liveOutboxFiles.has(full)) this.outboxArchiveFailures.delete(full);
     }
     if (routed > 0 || rejected > 0 || archived > 0) {
     }

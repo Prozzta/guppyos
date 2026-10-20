@@ -291,8 +291,8 @@ test('MUTANT CENSUS MAIL-EMPTY-SUBJECT-BODY-195: every mutant applies once and d
   }
 });
 
-test('a delivered message retries only its archive when .sent is temporarily unavailable', async (t) => {
-  const { hive, events, outbox } = await floor(t);
+async function archiveFailureLogKiller(t, Manager = HiveManager) {
+  const { hive, events, outbox } = await floor(t, Manager);
   const sent = path.join(outbox, '.sent');
   const heldSent = path.join(outbox, '.sent-held');
   fs.renameSync(sent, heldSent);
@@ -309,6 +309,10 @@ test('a delivered message retries only its archive when .sent is temporarily una
   assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 1);
 
   assert.equal(hive.routeOnce(), 0, 'an unchanged delivered file must only retry archival');
+  assert.equal(hive.routeOnce(), 0, 'a third scan must still only retry archival');
+  assert.equal(hive.routeOnce(), 0, 'a fourth scan must still only retry archival');
+  assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-failed').length, 1,
+    'ARCHIVE LOG NOISE: a held archive is reported once across repeated scans');
   assert.equal(hive.inbox('god-1').length, 1, 'archive retry must never redeliver');
   assert.equal(hive.inbox('jim-1').length, 0, 'archive failure must not reject the sender');
 
@@ -317,9 +321,39 @@ test('a delivered message retries only its archive when .sent is temporarily una
   assert.equal(fs.existsSync(path.join(sent, 'delivered-before-archive.json')), true);
   assert.equal(hive.inbox('god-1').length, 1, 'successful archive retry still must not redeliver');
   assert.equal(hive.inbox('jim-1').length, 0);
+  assert.deepEqual(hive.logTail(100)
+    .filter((entry) => /^outbox-archive-(failed|cleared)$/.test(entry.kind))
+    .map((entry) => entry.kind), ['outbox-archive-failed', 'outbox-archive-cleared'],
+  'ARCHIVE LOG NOISE: the single stuck row is followed by one clear row');
   assert.equal(events.filter(({ channel, payload }) =>
     channel === 'hive:message' && /^\[outbox rejected/.test(payload.subject)
   ).length, 0, 'archive failure must produce no sender rejection notice');
+}
+
+test('a delivered message retries only its archive when .sent is temporarily unavailable', async (t) => {
+  await archiveFailureLogKiller(t);
+});
+
+const ARCHIVE_LOG_NOISE_MUTANTS = [{
+  name: 'ARCHIVE-LOG-NOISE-M1: log every held archive scan', file: 'src/main/hive.ts',
+  edits: [['if (this.outboxArchiveFailures.has(full) && this.outboxArchiveFailures.get(full) === fingerprint) return;', 'if (false) return;']]
+}];
+
+test('MUTANT CENSUS ROUTER-ARCHIVE-FAILED-LOG-NOISE: per-scan logging dies at the noise pin', async (t) => {
+  for (const mutant of ARCHIVE_LOG_NOISE_MUTANTS) {
+    await t.test(`mutant: ${mutant.name}`, async (subtest) => {
+      let text = readSource(mutant.file);
+      for (const [from, to] of mutant.edits) {
+        assert.equal(text.split(from).length - 1, 1, `mutant "${mutant.name}" edit applies exactly once`);
+        text = text.replace(from, () => to);
+      }
+      const MutatedManager = loadTs.fromText(mutant.file, text).HiveManager;
+      let died = null;
+      try { await archiveFailureLogKiller(subtest, MutatedManager); } catch (error) { died = error; }
+      assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name} (${died && died.message})`);
+      assert.match(died.message, /ARCHIVE LOG NOISE/, `${mutant.name} died at the wrong assertion`);
+    });
+  }
 });
 
 /**
