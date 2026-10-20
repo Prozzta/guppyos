@@ -228,6 +228,7 @@ function run({
   startGate = spawn === nodeSpawn && watchdog === startWatchdog ? prepareStartGate : () => null,
   // TEST-TEMP-HYGIENE: the real runs only, as for fileJob. null = no temp check.
   tempJail = spawn === nodeSpawn && watchdog === startWatchdog ? prepareTempJail : () => null,
+  removeJail = (root) => fs.rmSync(root, { recursive: true, force: true }),
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
@@ -287,7 +288,7 @@ function run({
     return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
-    if (jail) { try { fs.rmSync(jail.root, { recursive: true, force: true }); } catch { /* a child still holds a file */ } }
+    if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
   }
 }
 

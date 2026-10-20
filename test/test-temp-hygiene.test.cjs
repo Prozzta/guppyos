@@ -109,6 +109,16 @@ test('RUN: a real run of a leaking and a clean file fails, names the leaking one
   assert.deepEqual(fs.readdirSync(jailDir), [], 'TEMP RUN: the run\'s temp folders are removed afterwards');
 });
 
+test('RUN: a run whose temp folders cannot be removed says so, naming the folder (Jim NIT 1)', () => {
+  const root = fresh('held');
+  const errs = [];
+  const code = runner.run({ testDir: 'test', readdir: () => ['a.test.cjs'], spawn: () => ({ status: 0 }), log: () => {}, err: (l) => errs.push(l),
+    readFile: () => '', removeFile: () => {}, cpuMask: () => null, tempJail: () => ({ root }),
+    removeJail: () => { const e = new Error('held'); e.code = 'ENOTEMPTY'; throw e; } });
+  assert.equal(code, 0, `TEMP RUN: nothing leaked, so the run itself passes\n${errs.join('\n')}`);
+  assert.ok(errs.some((l) => l.includes('could not be removed (ENOTEMPTY') && l.includes(root)), `TEMP RUN: the root left behind is named\n${errs.join('\n')}`);
+});
+
 test('RUNNER pins: the preload goes in NODE_OPTIONS for the real runs, and a leak fails a run that would pass', () => {
   const src = fs.readFileSync(path.join(__dirname, 'tools', 'run-tests.cjs'), 'utf8');
   assert.match(src, /tempJail = spawn === nodeSpawn && watchdog === startWatchdog \? prepareTempJail : \(\) => null,/, 'TEMP PIN: real runs only');
