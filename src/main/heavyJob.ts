@@ -220,6 +220,10 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     const c = cmd[i];
     // HEAVY-JOB-LOCK-FAILOPEN: a command substitution is opaque (its pipes and quotes are its own).
     if (d === 'sh' && q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
+    // HEAVY-LOCK-CMD-QUOTED-CARET-198: cmd reads a script line by line, and a quote still open at
+    // the end of a line ends there (a `^` inside it is literal, so it continues nothing): in
+    // `echo "abc^` + newline + `npm test`, real cmd runs npm test. The newline separates.
+    if (q && d === 'cmd' && c === '\n') { q = null; out.push(cur); cur = ''; continue; }
     // A-S1: `'` closes at the next `'` unconditionally (a backslash escapes nothing inside it), and
     // cmd has no backslash escape at all; only inside sh's "..." does `\"` stay open.
     if (q) { cur += c; if (c === q && (q === "'" || d === 'cmd' || closesDouble(cmd, i))) q = null; continue; }
