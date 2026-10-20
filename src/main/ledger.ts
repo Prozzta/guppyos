@@ -36,7 +36,8 @@ const ACTS = ['request', 'inform', 'propose', 'query', 'agree', 'refuse', 'done'
 const TOP_KEYS = new Set(['op', 'card', 'message', 'close', 'memory']);
 const CARD_KEYS = new Set(['id', 'create', 'patch', 'appendResult', 'appendNote']);
 const CREATE_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
-const PATCH_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn']);
+const PATCH_KEYS = new Set(['title', 'description', 'assignee', 'status', 'priority', 'dependsOn', 'parked', 'waitingFor', 'fixVersion']);
+const FIX_VERSION_RE = /^\d+\.\d+\.\d+$/;
 const MESSAGE_KEYS = new Set(['to', 'act', 'subject', 'body', 'conversation', 'in_reply_to', 'supersedes', 'card', 'needs_human']);
 const CLOSE_KEYS = new Set(['id', 'reason']);
 /** REQUESTS-BADGE-84 D/E: at most this many asks closed by one op. */
@@ -55,7 +56,7 @@ const OPS_KEPT = 200;
 export interface LedgerCard {
   id: string;
   create?: { title: string; description?: string; assignee?: string; status?: HiveTask['status']; priority?: number; dependsOn?: string[] };
-  patch?: Partial<Pick<HiveTask, 'title' | 'description' | 'assignee' | 'status' | 'priority' | 'dependsOn'>>;
+  patch?: Partial<Pick<HiveTask, 'title' | 'description' | 'assignee' | 'status' | 'priority' | 'dependsOn'>> & { parked?: boolean; waitingFor?: 'install' | null; fixVersion?: string | null };
   appendResult?: string;
   appendNote?: string;
 }
@@ -230,6 +231,9 @@ function checkCardFields(o: Record<string, unknown>, where: string): string | nu
   if (o.status !== undefined && !(STATUSES as readonly unknown[]).includes(o.status)) return `${where}.status: one of ${STATUSES.join(', ')}`;
   if (o.priority !== undefined && (typeof o.priority !== 'number' || !Number.isFinite(o.priority))) return `${where}.priority: a number`;
   if (o.dependsOn !== undefined && (!Array.isArray(o.dependsOn) || !o.dependsOn.every((d) => str(d, 120)))) return `${where}.dependsOn: a list of card ids`;
+  if (o.parked !== undefined && typeof o.parked !== 'boolean') return `${where}.parked: true or false`;
+  if (o.waitingFor !== undefined && o.waitingFor !== null && o.waitingFor !== 'install') return `${where}.waitingFor: "install" or null`;
+  if (o.fixVersion !== undefined && o.fixVersion !== null && (typeof o.fixVersion !== 'string' || !FIX_VERSION_RE.test(o.fixVersion))) return `${where}.fixVersion: x.y.z or null`;
   return null;
 }
 
