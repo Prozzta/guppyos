@@ -60,6 +60,14 @@ test('INPUT ORIGIN on a rendered terminal: regimes, exclusions, programmatic pas
   assert.equal(r.mirror.xtermNow, 'none');
   assert.ok(r.mirror.reports >= 2, 'at least one report per change');
 
+  // X10's default encoding is delivered by xterm.onBinary. The high coordinate
+  // byte is the regression: it must cross the renderer bridge as one 0x85 byte,
+  // not disappear (missing listener) or become UTF-8 c2 85.
+  assert.equal(r.binaryMouse.emitted, true, 'the real xterm legacy mouse encoder emitted a report');
+  assert.equal(r.binaryMouse.origin, 'CONTROL', 'an injected protocol report has no human DOM origin');
+  assert.deepEqual(r.binaryMouse.bytes, [0x1b, 0x5b, 0x4d, 0x20, 0x85, 0x21],
+    'xterm onBinary reaches writePty as its exact bytes, including >0x7f');
+
   // BLOCKER 4 (Dwight 23.3): same-id respawn re-establishes provenance; a rejected report retries.
   assert.equal(r.selfTestResetImmediate, 'unknown', 'a reset returns the entry to unproven at once');
   assert.equal(r.selfTestAfterReset, 'pass', 'and the self-test re-runs to pass for the new incarnation');

@@ -103,6 +103,7 @@ import { cardKeyRefusal, handleClaimVerb } from './claims/endpoint';
 import { actionableBacklog, coordinatorPendingIds, fleetMailFields, ledgerInboxMessages, mailCoordinationAt } from './mailReaders';
 import { HookServer } from './hooks';
 import { TermControl } from './termControl';
+import { isPtyInput } from '../shared/ptyInput';
 import { MessageBox, messageBoxPathOf } from './messageBox';
 import { WakeSender, wakePathOf } from './wakeSender';
 import type { GateReading } from './termShadow';
@@ -5157,8 +5158,8 @@ async function spawnAgentCore(opts: AgentSpawnOptions, owner: Electron.WebConten
   // record matches what the registry and the PTY actually used.
   return { ...res, cwd: opts.cwd, ...(worktreePath ? { worktreePath } : {}), ...(resumeNotFound ? { resumeNotFound: true } : {}), ...(didResume ? { resumed: true } : {}), ...(seedPrompt ? { seedPrompt } : {}), ...(orientationOnArgv ? { orientationOnArgv: true } : {}) };
 }
-ipcMain.handle('pty:write', (_evt, id: string, data: string, origin: unknown) => {
-  if (typeof id !== 'string' || typeof data !== 'string') return { ok: false, error: 'invalid args' };
+ipcMain.handle('pty:write', (_evt, id: string, data: unknown, origin: unknown) => {
+  if (typeof id !== 'string' || !isPtyInput(data)) return { ok: false, error: 'invalid args' };
   // An unrecognised or missing origin is REFUSED, not defaulted. A write that
   // cannot say who is behind it is a missing fact, and the fail-closed rule says a
   // missing fact is UNKNOWN — never CONTROL, and never quietly HUMAN.
@@ -5172,7 +5173,9 @@ ipcMain.handle('pty:write', (_evt, id: string, data: string, origin: unknown) =>
   if (origin === 'PROGRAMMATIC') return { ok: false, error: 'origin not permitted on this channel' };
   // GOD-TERMINAL-CONTROL: GOD is written only by main's god-only `term` route, never by a renderer.
   if (origin === 'GOD') return { ok: false, error: 'origin not permitted on this channel' };
-  return ptyManager.write(id, data, origin);
+  // `onBinary` crosses Electron as a Uint8Array.  Buffer makes node-pty write
+  // those octets directly; passing its JS string would UTF-8 expand bytes >= 0x80.
+  return ptyManager.write(id, typeof data === 'string' ? data : Buffer.from(data), origin);
 });
 // L0-FUSION stage 3. The mirror is validated at the boundary and stored on the live
 // session; a malformed report is refused rather than stored as something it is not.

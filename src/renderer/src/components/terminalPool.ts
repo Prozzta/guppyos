@@ -49,6 +49,7 @@ import {
   type TerminalAutomationBlock
 } from './terminalAutomation';
 import { sanitizeTerminalSelection } from './terminalSelection';
+import { binaryStringToBytes } from '@shared/ptyInput';
 import { codexReading, needleReading } from '@shared/screenReading';   // GTC M2: shared with main's mirror
 import '@xterm/xterm/css/xterm.css';
 
@@ -402,7 +403,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
   // Keystrokes → pty. A small line buffer surfaces the last submitted prompt.
   // It lives on the entry (see TerminalEntry.lineBuf) so every prompt-clearing
   // path resets it too.
-  term.onData((data) => {
+  const forwardTerminalInput = (data: string, binary = false) => {
     if (entry.exited) return;
     // Self-test swallow, CORRELATED: the probe is offered this byte's origin and data
     // and returns true only if it is the byte it awaits, in which case it is consumed
@@ -416,7 +417,7 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     // arrives here on one callback with no origin attached. `classifyOutbound`
     // answers from the human window that `inputOrigin.ts` owns; nothing here
     // guesses from the bytes.
-    window.cth.writePty(ptyId, data, classifyOutbound(ptyId, data));
+    window.cth.writePty(ptyId, binary ? binaryStringToBytes(data) : data, classifyOutbound(ptyId, data));
     // A lone Escape or Ctrl-C closes interactive pickers. Arrow-key escape
     // sequences must NOT clear the block while the user navigates a picker.
     if (data === '\x1b' || data === '\x03') {
@@ -461,7 +462,11 @@ export function acquireTerminal(ptyId: string, theme?: ThemeMap, fontSize = 14):
     if (entry.inputDirty) entry.inputDirtyAt = Date.now();
     // The draft or the picker latch may just have changed: tell main (deduped on ACK).
     reportPromptState(entry);
-  });
+  };
+  term.onData((data) => forwardTerminalInput(data));
+  // Legacy/X10 mouse reports are emitted on onBinary, not onData. Their code
+  // units are bytes, so preserve them as Uint8Array across Electron IPC.
+  term.onBinary((data) => forwardTerminalInput(data, true));
 
   pool.set(ptyId, entry);
 

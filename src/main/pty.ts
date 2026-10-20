@@ -976,7 +976,7 @@ export class PtyManager {
    *  write (a refused write must not count) and not in a separate notification
    *  (two operations can be separated, dropped or reordered — Oscar's review).
    *  "Accepted" means node-pty took the bytes, not that the child read them. */
-  write(id: string, data: string, origin: InputOrigin): { ok: boolean; error?: string } {
+  write(id: string, data: string | Buffer, origin: InputOrigin): { ok: boolean; error?: string } {
     const s = this.sessions.get(id);
     if (!s) return { ok: false, error: `no pty: ${id}` };
     try {
