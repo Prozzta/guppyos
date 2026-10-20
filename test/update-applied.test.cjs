@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 // analytics.ts reads __POSTHOG_KEY__ (an electron-vite `define`, absent here)
@@ -28,7 +28,7 @@ const { updateTransition, readVersionStamp, writeVersionStamp, updateVia, readUp
   loadTs('src/main/analytics.ts');
 
 function stateDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'md-update-applied-'));
+  return tempDir('md-update-applied-');
 }
 
 // ── the decision ────────────────────────────────────────────────────────────
@@ -233,7 +233,7 @@ test('e2e: an unwritable state dir reports no transition, on any boot', () => {
   // path as a real state DIRECTORY, and the cleanup below throws EISDIR. Worse,
   // the directory outlives the run and every later suite on that machine fails
   // here until someone deletes it by hand. Per-run name, so runs cannot collide.
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'md-update-applied-')), 'file-not-a-dir');
+  const dir = path.join(tempDir('md-update-applied-'), 'file-not-a-dir');
   fs.writeFileSync(dir, 'x');                  // mkdirSync/writeFileSync will throw
   try {
     for (let i = 0; i < 3; i++) {

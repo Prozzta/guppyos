@@ -18,6 +18,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./tools/test-temp.cjs');
 const asar = require('@electron/asar');
 const { readSource: read } = require('./read-source.cjs');
 const { verify, releaseNotesOf } = require('../scripts/verify-packaged-changelog.cjs');
@@ -34,9 +35,8 @@ test('electron-builder.yml: CHANGELOG.md is included AFTER the md exclude (patte
 
 async function pack(t, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clpack-'));
-  // Best-effort: on Windows a freshly written asar can stay locked for a moment (a scanner), and a
-  // leftover temp dir is not what this test is about.
-  t.after(() => { try { asar.uncacheAll(); fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* leave it */ } });
+  // On Windows a freshly written asar can stay locked for a moment: removeDir waits for it.
+  t.after(async () => { try { asar.uncacheAll(); } catch { /* nothing cached */ } await removeDir(dir); });
   const src = path.join(dir, 'app');
   for (const [rel, body] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(src, rel)), { recursive: true });

@@ -14,6 +14,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('../tools/test-temp.cjs');
 const loadTs = require('../load-ts.cjs');
 const { readSource } = require('../read-source.cjs');
 
@@ -252,16 +253,19 @@ test('HOOK: at 2 slots a FULL from one agent denies another agent\'s build (the 
   const ph = process.env.HOME; const pu = process.env.USERPROFILE;
   process.env.HOME = home; process.env.USERPROFILE = home;
   assert.equal(os.homedir(), home, 'HOME jailed before any hive');
-  t.after(() => {
+  let hive = null;
+  t.after(async () => {
     if (ph === undefined) delete process.env.HOME; else process.env.HOME = ph;
     if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu;
-    // The hive may still be writing (ENOTEMPTY): retry, and a leftover temp dir is not a failure.
-    try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); } catch { /* temp */ }
+    // The hive keeps its log open until dispose, and may still be writing (ENOTEMPTY): removeDir
+    // waits for it (TEST-TEMP-HYGIENE: a leftover fails the run).
+    if (hive) hive.dispose();
+    await removeDir(home);
   });
   const { HiveManager } = loadTs('src/main/hive.ts');
   const { HookServer } = loadTs('src/main/hooks.ts');
   const { HeavyJobLock } = loadTs(HJF);
-  const hive = new HiveManager(() => home);
+  hive = new HiveManager(() => home);
   for (const id of ['a1', 'a2']) await hive.ensureAgent({ id, name: id, provider: 'claude', cwd: home });
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };
   const s = new HookServer(hive, () => null, () => ({ notifications: false }), control, undefined);

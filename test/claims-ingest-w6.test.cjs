@@ -12,8 +12,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -21,7 +21,7 @@ const I = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'ingest.ts'));
 const C = loadTs(path.join(ROOT, 'src', 'shared', 'claims.ts'));
 
 function hive() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-ingest-'));
+  const root = tempDir('claims-ingest-');
   const dir = path.join(root, 'agents', 'ag-1');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'memory-archive-2026-09-30.md'), '# Memory\n\n## 2026-09-29\n- archived fact\n');

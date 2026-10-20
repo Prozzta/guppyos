@@ -12,12 +12,12 @@
 
 const assert = require('node:assert');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const ts = require('typescript');
 
 const SHARED = path.join(__dirname, '..', 'src', 'shared');
-const out = fs.mkdtempSync(path.join(os.tmpdir(), 'agentprov-'));
+const out = tempDir('agentprov-');
 for (const name of ['claudeCommands', 'codexCommands', 'grokCommands', 'agentProvider']) {
   const src = fs.readFileSync(path.join(SHARED, `${name}.ts`), 'utf8');
   const js = ts.transpileModule(src, {

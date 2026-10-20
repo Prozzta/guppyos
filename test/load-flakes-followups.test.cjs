@@ -20,14 +20,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const { spawnSync } = require('node:child_process');
 const { Rig } = require('./mail-rig/driver.cjs');
 
 /** A Rig on a fake clock (sleep advances it), with a scripted host and a scripted progress count. */
 function fakeRig({ busy = true, progressUntil = 0 } = {}) {
-  const rig = new Rig(fs.mkdtempSync(path.join(os.tmpdir(), 'lff-')));
+  const rig = new Rig(tempDir('lff-'));
   const clock = { t: 0 };
   rig.clock = { now: () => clock.t, sleep: async (ms) => { clock.t += ms; } };
   rig.call = async (cmd) => (cmd === 'busy' ? busy : cmd === 'inFlight' ? false : cmd === 'outcomes' ? [] : true);

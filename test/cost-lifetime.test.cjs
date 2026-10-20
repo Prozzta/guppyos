@@ -3,8 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const { CostLedgerTotals } = loadTs('src/main/costLifetime.ts');
@@ -18,7 +18,7 @@ function row(agent, session, usd) {
 }
 
 function ledgerWith(lines) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-cost-'));
+  const dir = tempDir('md-cost-');
   const p = path.join(dir, 'cost-ledger.jsonl');
   fs.writeFileSync(p, lines.length ? `${lines.join('\n')}\n` : '');
   return p;

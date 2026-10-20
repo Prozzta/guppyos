@@ -281,7 +281,7 @@ test('END TO END: a file that finishes its tests but never exits is killed at th
     // Captured, so the inner TAP never mixes into this file's own report.
     const spawn = (args, opts) => { const r = spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' }); out = r.stdout; return r; };
     const t0 = Date.now();
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write });
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json') });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.ok(Date.now() - t0 < 60_000, `ended at the limit, not never (${Date.now() - t0} ms)`);
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 4000 ms .*a-hung\.test\.cjs/);
@@ -372,8 +372,8 @@ test('PIN: against the REAL test directory discovery is root tests plus only fol
   // 1.1.98 stage 3: + 1 (heavy-slot-exclusive-192), + 1 (needs-human-192), + 1 (hook-token-writers-192),
   // ZT-I2-CONDENSE: - 3 (hidden-claude, reflect-condense, reflect-heading-demote retired),
   // + 2 (memory-rollover-stop-zti2, zt-i2-retired-condense); + 0 (wakeup-wing-wrong-set-191), + 1 (hop-cap-192).
-  // + 1 (heavy-lock-live-file-192), + 1 (ps-modcache-leak).
-  assert.equal(files.length, 472, `the focused suite must retain its pre-fold file count, got ${files.length}`);
+  // + 1 (heavy-lock-live-file-192), + 1 (ps-modcache-leak), + 1 (test-temp-hygiene).
+  assert.equal(files.length, 473, `the focused suite must retain its pre-fold file count, got ${files.length}`);
   assert.deepStrictEqual([...files].sort(), [...direct, ...folded].sort(), 'the complete focused set is the root set plus the 16 folded tests');
   assert.ok(files.includes(path.join('heavy-lock', 'heavy-lock-adhoc-node.test.cjs')), 'the heavy-lock feature folder is included');
   assert.ok(files.includes(path.join('start-fixes-163', 'start-fixes-163-boot-submit.test.cjs')), 'the start-fixes feature folder is included');
@@ -429,7 +429,7 @@ test('END TO END, the backstop alone (no watchdog): node --test\'s own file time
     fs.writeFileSync(path.join(dir, 'a-hung.test.cjs'), "require('node:test')('done', () => { setInterval(() => {}, 1000); });\n");
     const e = sink();
     const spawn = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
-    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, watchdog: () => ({ stop: () => {} }) });
+    const code = run({ testDir: dir, cwd: dir, spawn, timeoutMs: 3_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: () => ({ stop: () => {} }) });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     assert.match(e.lines.join('\n'), /FILE TIMED OUT after 3000 ms .*a-hung\.test\.cjs/);
   } finally {
@@ -487,7 +487,7 @@ test('GATE-178: a watchdog whose snapshot is 8 s late still TREE-kills a hung Co
       return { stop: () => { try { own.killOwnTree(rec); } catch { /* gone */ } } };
     };
     const spawnTap = (args, opts) => spawnSync(process.execPath, args, { ...opts, stdio: 'pipe', encoding: 'utf8' });
-    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, watchdog: lateWatchdog });
+    const code = run({ testDir: dir, cwd: dir, spawn: spawnTap, timeoutMs: 4_000, isTTY: false, log: () => {}, err: e.write, failureFile: () => path.join(dir, 'failures.json'), watchdog: lateWatchdog });
     assert.notStrictEqual(code, 0, 'a hung file fails the run');
     const left = leftBehind(readRec(filePidFile, 'node.exe'));
     assert.deepStrictEqual(left, [], `A LATE WATCHDOG STILL TREE-KILLS FIRST: the hung file's tree outlived the run: ${left.join(', ')}`);

@@ -22,6 +22,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./tools/test-temp.cjs');
 const { spawn, spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
@@ -262,7 +263,7 @@ const LIVE_SKIP = process.platform !== 'win32' ? 'Windows only (Job Objects)' : 
 let helperExe = null;
 const helperDirs = [];
 // Removed once every test is done: a helper's serve process may still be exiting after its test.
-test.after(() => { for (const d of helperDirs) { try { fs.rmSync(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); } catch { /* temp: best effort */ } } });
+test.after(async () => { for (const d of helperDirs) await removeDir(d); });
 function helper(t, src) {
   if (!src && helperExe) return helperExe;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hlr197-'));

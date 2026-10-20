@@ -9,8 +9,8 @@
 
 const assert = require('node:assert');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const { spawnSync } = require('node:child_process');
 
 const kg = require('../src/main/kg-core.cjs');
@@ -23,7 +23,7 @@ async function test(name, fn) {
 }
 
 function tmpRoot() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'kg-test-'));
+  return tempDir('kg-test-');
 }
 function writeFixture(dir, name, content) {
   const p = path.join(dir, name);

@@ -16,16 +16,17 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const ts = require('typescript');
 
 // Sandbox HOME so projectDir() maps into a throwaway dir, never the user's
 // real ~/.claude/projects. os.homedir() reads $HOME/$USERPROFILE per call.
-const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));
+const FAKE_HOME = tempDir('home-');
 process.env.HOME = FAKE_HOME;
 process.env.USERPROFILE = FAKE_HOME;
 
 const SRC = path.join(__dirname, '..', 'src', 'main');
-const out = fs.mkdtempSync(path.join(os.tmpdir(), 'transcript-'));
+const out = tempDir('transcript-');
 for (const name of ['pricing', 'transcript']) {
   const js = ts.transpileModule(fs.readFileSync(path.join(SRC, `${name}.ts`), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true }
@@ -36,7 +37,7 @@ const { readAgentUsage, projectDir } = require(path.join(out, 'transcript.js'));
 
 /** A fake cwd whose projectDir we can write transcripts into. */
 function makeProject() {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-'));
+  const cwd = tempDir('proj-');
   const dir = projectDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   return { cwd, dir };

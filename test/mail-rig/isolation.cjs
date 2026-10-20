@@ -16,7 +16,6 @@
  * Windows system dirs, and no provider command that resolves anywhere but the rig's bin.
  */
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 
 /** Credential families that must never reach a rig process (names, case-insensitive). */
@@ -40,7 +39,7 @@ function systemDirs(env = process.env) {
  * held open by the antivirus scan for seconds, which made the sandbox removal fail (EPERM).
  */
 function jailedNodeDir() {
-  const dir = path.join(os.tmpdir(), `md-rig-node-${process.version}`);
+  const dir = path.join(require('../tools/shared-temp.cjs').sharedTemp(), `md-rig-node-${process.version}`);
   const exe = path.join(dir, path.basename(process.execPath));
   if (fs.existsSync(exe)) return dir;
   fs.mkdirSync(dir, { recursive: true });

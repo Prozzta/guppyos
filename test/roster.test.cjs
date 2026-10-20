@@ -3,14 +3,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const { RosterStore, rosterPath, rosterBackupDir } = loadTs('src/main/roster.ts');
 
 function tmpHome() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'md-roster-'));
+  return tempDir('md-roster-');
 }
 
 /** A store bound to `home`. A fresh instance is a fresh RUN — which is what the

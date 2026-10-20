@@ -19,11 +19,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 // config.ts pulls app.getPath('userData') from electron; outside Electron that
 // resolve gives a path string, so seed the cache with a temp userData dir.
-const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-config-'));
+const userData = tempDir('md-config-');
 const electron = require.resolve('electron');
 require.cache[electron] = {
   id: electron,

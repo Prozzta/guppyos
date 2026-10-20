@@ -24,10 +24,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 
-const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'home-'));
+const FAKE_HOME = tempDir('home-');
 process.env.HOME = FAKE_HOME;
 process.env.USERPROFILE = FAKE_HOME;
 
@@ -54,7 +54,7 @@ function assistantRecord(sessionId, outputTokens) {
 /** A fresh cwd with a project dir standing in for a long-lived, shared repo:
  *  one foreign/older session already left tens of millions of tokens behind. */
 function makeSharedProject() {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-'));
+  const cwd = tempDir('proj-');
   const dir = projectDir(cwd);
   fs.mkdirSync(dir, { recursive: true });
   const foreignLines = Array.from({ length: 20 }, () => assistantRecord('foreign-session', 50_000));

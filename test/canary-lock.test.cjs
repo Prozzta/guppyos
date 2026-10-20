@@ -9,9 +9,9 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } = require('node:fs');
+const { writeFileSync, existsSync, readFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
-const { tmpdir } = require('node:os');
+const { tempDir } = require('./tools/test-temp.cjs');
 
 const { lockDecision, acquire, release, noteStash, readLock, lockPath, STALE_AFTER_MS } =
   require('./tools/canary-lock.cjs');
@@ -67,7 +67,7 @@ test('CANARY_FORCE overrides both a live holder and a dirty lock', () => {
 });
 
 test('acquire / noteStash / release round-trip on a real directory', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const rec = acquire(dir, { agent: 'andy', now: NOW });
@@ -82,7 +82,7 @@ test('acquire / noteStash / release round-trip on a real directory', (t) => {
 });
 
 test('a failed run KEEPS the lock, marked dirty, naming the stash', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   acquire(dir, { agent: 'andy', now: NOW });
@@ -98,7 +98,7 @@ test('a failed run KEEPS the lock, marked dirty, naming the stash', (t) => {
 });
 
 test('a second live canary cannot take a held lock', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   // A lock held by THIS process is by definition alive.
   writeFileSync(lockPath(dir), JSON.stringify({ pid: process.pid, agent: 'other-agent', startedAt: NOW, devRoot: dir, dirty: false }));
@@ -107,7 +107,7 @@ test('a second live canary cannot take a held lock', (t) => {
 });
 
 test('release by a process that does not hold the lock is a no-op', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const foreign = JSON.stringify({ pid: process.pid + 1, agent: 'someone-else', startedAt: NOW, devRoot: dir });
   writeFileSync(lockPath(dir), foreign);
@@ -131,7 +131,7 @@ test('the canary acquires BEFORE it stashes, and marks dirty on failure', () => 
 // ─── Jim's two hardening observations ───────────────────────────────────────
 
 test('OBS-1: two canaries stealing the SAME stale lock — only one wins', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   // A stale lock both would judge stealable: old, and its process is long gone.
@@ -161,7 +161,7 @@ test('OBS-1: two canaries stealing the SAME stale lock — only one wins', (t) =
 });
 
 test('OBS-1: a clean steal still succeeds and the lock ends up OURS', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(lockPath(dir), JSON.stringify({
     pid: 999_999, agent: 'crashed', startedAt: NOW - 10 * STALE_AFTER_MS, devRoot: dir, dirty: false, stashed: []
@@ -236,7 +236,7 @@ function stealOps({ reread, created = [] , unlinked = [] }) {
 }
 
 test('OBS-1b: a stale lock REPLACED by a live one before the steal is refused, not removed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   writeFileSync(lockPath(dir), JSON.stringify(STALE_REC(dir)));
   const unlinked = [];
   // Between our judgement and our unlink, a live canary took the lock for itself.
@@ -250,7 +250,7 @@ test('OBS-1b: a stale lock REPLACED by a live one before the steal is refused, n
 });
 
 test('OBS-1b: the SAME stale lock is still stolen - the guard must not break recovery', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   const stale = STALE_REC(dir);
   writeFileSync(lockPath(dir), JSON.stringify(stale));
   const unlinked = [];
@@ -262,7 +262,7 @@ test('OBS-1b: the SAME stale lock is still stolen - the guard must not break rec
 });
 
 test('OBS-1b: a lock that VANISHED before the steal is fine - wx still settles the race', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   writeFileSync(lockPath(dir), JSON.stringify(STALE_REC(dir)));
   const unlinked = [];
   const gone = () => { const e = new Error('ENOENT'); e.code = 'ENOENT'; throw e; };
@@ -273,7 +273,7 @@ test('OBS-1b: a lock that VANISHED before the steal is fine - wx still settles t
 });
 
 test('OBS-1b: CANARY_FORCE still overrides - it means override ANYTHING', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   writeFileSync(lockPath(dir), JSON.stringify(STALE_REC(dir)));
   const unlinked = [];
   const fresh = JSON.stringify({ ...STALE_REC(dir), pid: 4242, agent: 'jim', startedAt: NOW });
@@ -285,7 +285,7 @@ test('OBS-1b: CANARY_FORCE still overrides - it means override ANYTHING', () => 
 });
 
 test('OBS-1b: PID REUSE - same pid, different startedAt, is still a DIFFERENT run', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   const stale = STALE_REC(dir);
   writeFileSync(lockPath(dir), JSON.stringify(stale));
   const unlinked = [];
@@ -303,7 +303,7 @@ test('OBS-1b: PID REUSE - same pid, different startedAt, is still a DIFFERENT ru
 });
 
 test('OBS-1b: and the mirror - same startedAt, different pid, also refuses', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'canary-lock-'));
+  const dir = tempDir('canary-lock-');
   const stale = STALE_REC(dir);
   writeFileSync(lockPath(dir), JSON.stringify(stale));
   const unlinked = [];

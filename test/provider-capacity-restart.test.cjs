@@ -22,9 +22,9 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } = require('node:fs');
+const { writeFileSync, existsSync, readFileSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
-const { tmpdir } = require('node:os');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const { ProviderCapacityTracker, L0_SEM_POLICY, REASON, RETENTION_CAPS, TIMER_GROWTH_RESERVE_PER_POOL } =
@@ -76,7 +76,7 @@ function acrossRestart(from, startWall) {
 }
 
 function tmp() {
-  const dir = mkdtempSync(join(tmpdir(), 'cap-restart-'));
+  const dir = tempDir('cap-restart-');
   test.after(() => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } });
   return join(dir, 'capacity-observations.json');
 }
@@ -319,7 +319,7 @@ test('RESTART: a STALE restored observation is still disclosed as a pool', () =>
 test('STORE: a clean first install restores nothing and stays honestly absent', () => {
   // The required fixture, and the thing the refused presence record would have
   // broken. No file, no pool, no invented identity.
-  const file = join(mkdtempSync(join(tmpdir(), 'cap-clean-')), 'capacity-observations.json');
+  const file = join(tempDir('cap-clean-'), 'capacity-observations.json');
   assert.deepEqual(loadCapacityStore(file), [], 'a missing store is empty, not an error');
   const p = proc();
   assert.equal(new CapacityStore(file, p.t).restore(), 0);

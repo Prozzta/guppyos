@@ -13,13 +13,13 @@
 
 const assert = require('node:assert');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const ts = require('typescript');
 const { spawn, execFileSync } = require('node:child_process');
 
 const SRC = path.join(__dirname, '..', 'src', 'main', 'procKill.ts');
-const out = fs.mkdtempSync(path.join(os.tmpdir(), 'prockill-'));
+const out = tempDir('prockill-');
 const js = ts.transpileModule(fs.readFileSync(SRC, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 }
 }).outputText;
