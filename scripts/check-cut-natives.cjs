@@ -15,6 +15,12 @@ if (!electron || !modules) {
 const electronPath = path.resolve(electron);
 const modulesPath = path.resolve(modules);
 const archiveModules = path.join(path.dirname(path.dirname(modulesPath)), 'app.asar', 'node_modules');
+function deleteEnvCaseInsensitive(target, name) {
+  const wanted = name.toLowerCase();
+  for (const key of Object.keys(target)) {
+    if (key.toLowerCase() === wanted) delete target[key];
+  }
+}
 const probe = [
   `const pty = require(${JSON.stringify(path.join(archiveModules, 'node-pty'))});`,
   `const Database = require(${JSON.stringify(path.join(archiveModules, 'better-sqlite3'))});`,
@@ -24,9 +30,9 @@ const probe = [
   "db.close(); console.log('CUT NATIVES OK: node-pty + better-sqlite3');"
 ].join('\n');
 const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
-delete env.NoDefaultCurrentDirectoryInExePath;
-delete env.NODE_PATH;
-delete env.NODE_OPTIONS;
+deleteEnvCaseInsensitive(env, 'NoDefaultCurrentDirectoryInExePath');
+deleteEnvCaseInsensitive(env, 'NODE_PATH');
+deleteEnvCaseInsensitive(env, 'NODE_OPTIONS');
 const r = spawnSync(electronPath, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
 if (r.error || r.status !== 0 || !r.stdout.includes('CUT NATIVES OK')) {
   console.error('CUT NATIVES FAILED');

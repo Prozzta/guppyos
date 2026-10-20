@@ -38,8 +38,8 @@ test('post-cut probe runs Electron as Node and loads both native modules', () =>
   assert.match(check, /select 42 as n/);
   assert.match(check, /const modulesPath = path\.resolve\(modules\)/);
   assert.match(check, /path\.dirname\(path\.dirname\(modulesPath\)\)/);
-  assert.match(check, /delete env\.NODE_PATH/);
-  assert.match(check, /delete env\.NODE_OPTIONS/);
+  assert.match(check, /deleteEnvCaseInsensitive\(env, 'NODE_PATH'\)/);
+  assert.match(check, /deleteEnvCaseInsensitive\(env, 'NODE_OPTIONS'\)/);
   assert.match(cut, /check-cut-natives\.cjs/);
 });
 
@@ -55,7 +55,7 @@ test('packaged probe rejects a missing archive dependency despite inherited NODE
     write(path.join(dev, 'missing-cut-dependency', 'index.js'), 'module.exports = {};');
     fs.mkdirSync(modules, { recursive: true });
     const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'check-cut-natives.cjs'), process.execPath, modules], {
-      encoding: 'utf8', env: { ...process.env, NODE_PATH: dev }
+      encoding: 'utf8', env: { ...process.env, nOdE_pAtH: dev }
     });
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /CUT NATIVES FAILED/);
