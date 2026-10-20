@@ -115,17 +115,51 @@ test('a raised limit serves the queue before a newcomer; Off keeps no queue', ()
 });
 
 test('REGRESSION: raising the limit immediately reserves the new slot for the oldest queued agent', () => {
+  // HEAVY-SLOT-EXCLUSIVE-192: a class that shares (a suite runs alone; the next test pins that side).
   const x = rig();
-  x.l.acquire('a', H, 'npm ci', 'a1', false);
-  x.l.acquire('b', H, 'npm ci', 'b1', false);
-  x.l.acquire('c', H, 'npm ci', 'c1', false);
+  x.l.acquire('a', S, 'npm ci', 'a1', false);
+  x.l.acquire('b', S, 'npm ci', 'b1', false);
+  x.l.acquire('c', S, 'npm ci', 'c1', false);
   x.setLimit(2);
   x.l.limitChanged();
   assert.deepEqual(x.notes.map((n) => n.a), ['b'], 'the first queued agent is notified without a release');
   assert.deepEqual(x.l.queueSnapshot(), {
-    waiters: [{ agentId: 'c', kind: 'suite', since: new Date(x.now()).toISOString(), position: 1 }],
-    reserved: [{ agentId: 'b', kind: 'suite', until: new Date(x.now() + HJ.HEAVY_RESERVE_MS).toISOString() }]
+    waiters: [{ agentId: 'c', kind: 'install', since: new Date(x.now()).toISOString(), position: 1 }],
+    reserved: [{ agentId: 'b', kind: 'install', until: new Date(x.now() + HJ.HEAVY_RESERVE_MS).toISOString() }]
   });
+});
+
+test('REGRESSION: raising the limit while a suite holds reserves nothing; the queued suite is granted when it releases', () => {
+  // HEAVY-SLOT-EXCLUSIVE-192 x LIMIT-REEVAL: the raised limit is not a slot beside a suite.
+  const x = rig();
+  x.l.acquire('a', H, 'node test/tools/run-tests.cjs', 'a1', false);
+  x.l.acquire('b', H, 'node test/tools/run-tests.cjs', 'b1', false);
+  x.setLimit(2);
+  x.l.limitChanged();
+  assert.deepEqual(x.notes, [], 'NOTHING IS RESERVED BESIDE A SUITE THAT HOLDS');
+  assert.deepEqual(x.l.queueSnapshot().reserved, []);
+  assert.deepEqual(x.l.queueSnapshot().waiters.map((w) => w.agentId), ['b']);
+  x.l.callDone('a', 'a1');
+  assert.deepEqual(x.notes.map((n) => n.a), ['b'], 'THE QUEUED SUITE IS GRANTED WHEN THE SUITE RELEASES');
+  assert.deepEqual(x.l.acquire('b', H, 'node test/tools/run-tests.cjs', 'b2', false), { allow: true, acquired: true });
+  // and a class that shares gets no slot beside the suite either
+  const y = rig();
+  y.l.acquire('a', H, 'node test/tools/run-tests.cjs', 'a1', false);
+  y.l.acquire('b', S, 'npm ci', 'b1', false);
+  y.setLimit(2);
+  y.l.limitChanged();
+  assert.deepEqual(y.notes, [], 'NOTHING SHARES A SLOT WITH A SUITE THAT HOLDS');
+  y.l.callDone('a', 'a1');
+  assert.deepEqual(y.notes.map((n) => n.a), ['b']);
+  // and a queued suite gets no raised slot beside a holder that shares
+  const z = rig();
+  z.l.acquire('a', S, 'npm ci', 'a1', false);
+  z.l.acquire('b', H, 'node test/tools/run-tests.cjs', 'b1', false);
+  z.setLimit(2);
+  z.l.limitChanged();
+  assert.deepEqual(z.notes, [], 'A QUEUED SUITE WAITS FOR AN EMPTY MACHINE');
+  z.l.callDone('a', 'a1');
+  assert.deepEqual(z.notes.map((n) => n.a), ['b']);
 });
 
 test('REGRESSION: switching the limit Off tells every queued agent to run', () => {
