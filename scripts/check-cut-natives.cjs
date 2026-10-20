@@ -23,8 +23,10 @@ const probe = [
   "if (db.prepare('select 42 as n').get().n !== 42) throw new Error('better-sqlite3 query failed');",
   "db.close(); console.log('CUT NATIVES OK: node-pty + better-sqlite3');"
 ].join('\n');
-const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_PATH: [archiveModules, process.env.NODE_PATH].filter(Boolean).join(path.delimiter) };
+const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
 delete env.NoDefaultCurrentDirectoryInExePath;
+delete env.NODE_PATH;
+delete env.NODE_OPTIONS;
 const r = spawnSync(electronPath, ['-e', probe], { encoding: 'utf8', env, windowsHide: true });
 if (r.error || r.status !== 0 || !r.stdout.includes('CUT NATIVES OK')) {
   console.error('CUT NATIVES FAILED');

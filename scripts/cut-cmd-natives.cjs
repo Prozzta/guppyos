@@ -8,10 +8,12 @@ const path = require('node:path');
 
 const root = path.join(__dirname, '..');
 const env = { ...process.env };
-delete env.NoDefaultCurrentDirectoryInExePath;
+for (const key of Object.keys(env)) {
+  if (key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath') delete env[key];
+}
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 if (process.argv.includes('--print-plan')) {
-  console.log(JSON.stringify({ npmCi: ['ci'], inheritedNoDefaultCurrentDirectoryInExePath: Object.hasOwn(env, 'NoDefaultCurrentDirectoryInExePath') }));
+  console.log(JSON.stringify({ npmCi: ['ci'], inheritedNoDefaultCurrentDirectoryInExePath: Object.keys(env).some((key) => key.toLowerCase() === 'nodefaultcurrentdirectoryinexepath') }));
   process.exit(0);
 }
 function run(command, args) {
