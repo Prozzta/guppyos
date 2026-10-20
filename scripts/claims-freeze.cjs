@@ -12,14 +12,19 @@
  *   frozenVersions { version: release commit }, the releases whose frozen paths were checked
  *                  empty against baseCommit. The measurement harness reads this list.
  *
- *   node scripts/claims-freeze.cjs gate <tip>
- *     Before the FULL on the release tip. The state and the version come from <tip>'s own tree.
+ *   node scripts/claims-freeze.cjs gate <tip> <authority>
+ *     Before the FULL on the release tip. <authority> is the INT ref that owns the state
+ *     (origin/guppy/int-<x>, fetched first). The version comes from <tip>'s tree. The tip's state
+ *     must agree with the authority's: the same paths and the same window (id, baseVersion,
+ *     baseCommit), and no waiver the authority lacks. Only the authority's waivers count, so a
+ *     release branch cannot turn the gate off by editing its own copy (Jim SHOULD).
  *     Prints CLAIMS FREEZE OK, or CLAIMS FREEZE REFUSED (exit 1) when a window is open and <tip>
- *     changes a frozen path, unless the window waives <tip>'s version. Fails closed: a malformed
- *     state or a diff that cannot run refuses.
+ *     changes a frozen path, unless the authority waives <tip>'s version. Fails closed: a malformed
+ *     or disagreeing state, an authority that cannot be read, or a diff that cannot run refuses.
  *   node scripts/claims-freeze.cjs record <version> <commit>
- *     After the tag push. When a window is open and the frozen diff is empty, adds
- *     { version: commit } to the working tree's claims-freeze.json, for a follow-up commit on INT.
+ *     After the tag push. When a window is open, <commit>'s package.json says <version> (and a local
+ *     v<version> tag, if any, names <commit>), and the frozen diff is empty, adds { version: commit }
+ *     to the working tree's claims-freeze.json, for a follow-up commit on INT (Jim MUST).
  *     A release whose diff is not empty is never recorded, waived or not: its install forces the cut.
  */
 'use strict';
@@ -54,6 +59,18 @@ function frozenDiff(git, base, tip, paths) {
   return git(['diff', '--name-only', '--no-renames', '-z', base, tip, '--', ...paths]).split('\0').filter(Boolean);
 }
 
+/** Why the tip's state disagrees with the authority's, or null when it agrees. frozenVersions may lag. */
+function disagreement(tip, auth) {
+  if (JSON.stringify(tip.paths) !== JSON.stringify(auth.paths)) return `the tip's paths ${JSON.stringify(tip.paths)} are not the authority's ${JSON.stringify(auth.paths)}`;
+  const [t, a] = [tip.window, auth.window];
+  if (!t !== !a) return `the tip's window is ${t ? t.id : 'null'}, the authority's is ${a ? a.id : 'null'}`;
+  if (!a) return null;
+  for (const k of ['id', 'baseVersion', 'baseCommit']) if (t[k] !== a[k]) return `the tip's window.${k} ${t[k]} is not the authority's ${a[k]}`;
+  const extra = Object.keys(t.waivers).filter((v) => a.waivers[v] !== t.waivers[v]);
+  if (extra.length) return `the tip waives ${extra.join(', ')}, which the authority does not`;
+  return null;
+}
+
 /** The cut-time gate. { ok, files, waived, why }. */
 function gate({ state, tip, version, git }) {
   const w = state.window;
@@ -75,6 +92,14 @@ function record({ state, version, commit, git }) {
   if (!HASH.test(commit)) throw new Error(`not recorded: ${commit} is not a 40-hex commit`);
   const had = Object.hasOwn(state.frozenVersions, version) ? state.frozenVersions[version] : null;
   if (had && had !== commit) throw new Error(`not recorded: ${version} is already recorded at ${had}`);
+  let says;
+  try { says = JSON.parse(git(['show', `${commit}:package.json`])).version; } catch (e) {
+    throw new Error(`not recorded: cannot read ${commit}'s package.json: ${String(e.message).split('\n')[0]}`);
+  }
+  if (says !== version) throw new Error(`not recorded: ${commit} is ${says}, not ${version}`);
+  let tagged = null;
+  try { tagged = git(['rev-parse', '-q', '--verify', `refs/tags/v${version}^{commit}`]).trim(); } catch { /* no such tag */ }
+  if (tagged && tagged !== commit) throw new Error(`not recorded: tag v${version} names ${tagged}, not ${commit}`);
   let files;
   try { files = frozenDiff(git, w.baseCommit, commit, state.paths); } catch (e) {
     throw new Error(`not recorded: cannot verify ${version}: ${String(e.message).split('\n')[0]}`);
@@ -89,9 +114,16 @@ function main(argv, { cwd = process.cwd(), out = console.log, err = console.erro
   const git = gitAt(cwd);
   const [cmd, a, b] = argv;
   try {
-    if (cmd === 'gate' && a) {
+    if (cmd === 'gate' && a && b) {
+      const remote = /^origin\/(.+)$/.exec(b);
+      if (remote) {
+        try { git(['fetch', '-q', 'origin', remote[1]]); } catch (e) { throw new Error(`cannot fetch the authority ${b}: ${String(e.message).split('\n')[0]}`); }
+      }
       const tip = git(['rev-parse', '--verify', `${a}^{commit}`]).trim();
-      const state = parseState(git(['show', `${tip}:${FILE}`]));
+      let state;
+      try { state = parseState(git(['show', `${b}:${FILE}`])); } catch (e) { throw new Error(`cannot read the authority ${b}: ${String(e.message).split('\n')[0]}`); }
+      const off = disagreement(parseState(git(['show', `${tip}:${FILE}`])), state);
+      if (off) throw new Error(`${a} disagrees with the authority ${b}: ${off}`);
       const version = JSON.parse(git(['show', `${tip}:package.json`])).version;
       const r = gate({ state, tip, version, git });
       for (const f of r.files) out(`  ${f}`);
@@ -111,9 +143,9 @@ function main(argv, { cwd = process.cwd(), out = console.log, err = console.erro
     out(cmd === 'gate' ? 'CLAIMS FREEZE REFUSED' : 'NOT RECORDED');
     return 1;
   }
-  err('usage: claims-freeze.cjs gate <tip> | record <version> <commit>');
+  err('usage: claims-freeze.cjs gate <tip> <authority> | record <version> <commit>');
   return 2;
 }
 
-module.exports = { parseState, frozenDiff, gate, record, main, FILE };
+module.exports = { parseState, frozenDiff, disagreement, gate, record, main, FILE };
 if (require.main === module) process.exit(main(process.argv.slice(2)));

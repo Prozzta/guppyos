@@ -30,6 +30,13 @@ const MUTANTS = [
   ['C13 frozenVersions unchecked', '!Object.values(s.frozenVersions).every((h) => HASH.test(h))', 'false', /not ok \d+ - fails closed/],
   ['C14 waivers unchecked', '!isObj(w.waivers) || ', '', /not ok \d+ - fails closed/],
   ['C15 record drops the new entry', 'frozenVersions: { ...state.frozenVersions, [version]: commit }', 'frozenVersions: { ...state.frozenVersions }', /not ok \d+ - record: an empty diff appends/],
+  ['C16 record takes any version for the commit', 'if (says !== version) throw', 'if (false) throw', /not ok \d+ - record: <commit> must be <version>/],
+  ['C17 record ignores a moved tag', 'if (tagged && tagged !== commit) throw', 'if (false) throw', /not ok \d+ - record: <commit> must be <version>/],
+  ['C18 the tip may narrow the paths', 'if (JSON.stringify(tip.paths) !== JSON.stringify(auth.paths)) return', 'if (false) return', /not ok \d+ - authority: a tip that edits its own state/],
+  ['C19 the tip may close the window', 'if (!t !== !a) return', 'if (false) return', /not ok \d+ - authority: a tip that edits its own state/],
+  ['C20 the tip may waive itself', 'if (extra.length) return', 'if (false) return', /not ok \d+ - authority: a tip that edits its own state/],
+  ['C21 the gate decides on the tip state', 'const r = gate({ state, tip, version, git });', "const r = gate({ state: parseState(git(['show', `${tip}:${FILE}`])), tip, version, git });", /not ok \d+ - authority: a stale release branch/],
+  ['C22 the authority is not checked', 'if (off) throw new Error(', 'if (false) throw new Error(', /not ok \d+ - authority: a tip that edits its own state/],
 ];
 
 const run = () => spawnSync(process.execPath, ['--test', TEST], { cwd: ROOT, encoding: 'utf8', windowsHide: true, timeout: 300_000 });

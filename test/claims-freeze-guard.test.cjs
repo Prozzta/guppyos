@@ -28,7 +28,16 @@ function repo(t) {
   write(cwd, 'src/main/other.ts', 'export const o = 1;\n');
   write(cwd, cf.FILE, state(null));
   const base = commit(cwd, 'release 1.1.90');
-  const open = (waivers = {}) => { write(cwd, cf.FILE, state({ id: 'CL-M4-TEST', baseVersion: '1.1.90', baseCommit: base, waivers })); return commit(cwd, 'open the window'); };
+  // `int` is the authority: the INT branch that owns the state. The release tip grows on HEAD.
+  git(cwd, ['branch', 'int']);
+  const open = (waivers = {}) => {
+    write(cwd, cf.FILE, state({ id: 'CL-M4-TEST', baseVersion: '1.1.90', baseCommit: base, waivers }));
+    const h = commit(cwd, 'open the window');
+    let on = '';
+    try { on = git(cwd, ['symbolic-ref', '-q', '--short', 'HEAD']).trim(); } catch { /* detached */ }
+    if (on !== 'int') git(cwd, ['branch', '-f', 'int', h]);
+    return h;
+  };
   const run = (...argv) => { const lines = []; const code = cf.main(argv, { cwd, out: (l) => lines.push(l), err: (l) => lines.push(l) }); return { code, text: lines.join('\n') }; };
   return { cwd, base, open, run };
 }
@@ -38,7 +47,7 @@ test('no window open: the gate passes, even over claims changes', (t) => {
   write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
   version(r.cwd, '1.1.91');
   commit(r.cwd, 'claims change');
-  const out = r.run('gate', 'HEAD');
+  const out = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(out.code, 0, out.text);
   assert.match(out.text, /no measurement window is open\nCLAIMS FREEZE OK$/);
 });
@@ -50,7 +59,7 @@ test('window open: a release that changes src/main/claims is REFUSED and names t
   write(r.cwd, 'src/main/claims/new.ts', 'export const n = 1;\n');
   version(r.cwd, '1.1.96');
   commit(r.cwd, 'claims change');
-  const out = r.run('gate', 'HEAD');
+  const out = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(out.code, 1, out.text);
   assert.match(out.text, /^ {2}src\/main\/claims\/a\.ts$/m);
   assert.match(out.text, /^ {2}src\/main\/claims\/new\.ts$/m);
@@ -64,13 +73,13 @@ test('window open: src/shared/cardIds.ts is frozen too; a change elsewhere passe
   write(r.cwd, 'src/main/other.ts', 'export const o = 2;\n');
   version(r.cwd, '1.1.91');
   commit(r.cwd, 'non-claims change');
-  const ok = r.run('gate', 'HEAD');
+  const ok = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(ok.code, 0, ok.text);
   assert.match(ok.text, /1\.1\.91 leaves the frozen paths unchanged since 1\.1\.90; record it after the tag push\nCLAIMS FREEZE OK$/);
   write(r.cwd, 'src/shared/cardIds.ts', 'export const ids = 2;\n');
   version(r.cwd, '1.1.92');
   commit(r.cwd, 'cardIds change');
-  const no = r.run('gate', 'HEAD');
+  const no = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(no.code, 1, no.text);
   assert.match(no.text, /^ {2}src\/shared\/cardIds\.ts$/m);
 });
@@ -81,7 +90,7 @@ test('window open: moving a file out of src/main/claims is REFUSED (renames coun
   git(r.cwd, ['mv', 'src/main/claims/a.ts', 'src/main/a.ts']);
   version(r.cwd, '1.1.91');
   commit(r.cwd, 'move');
-  const out = r.run('gate', 'HEAD');
+  const out = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(out.code, 1, out.text);
   assert.match(out.text, /^ {2}src\/main\/claims\/a\.ts$/m);
 });
@@ -92,7 +101,7 @@ test('waiver: only the waived version passes, and a waived release is never reco
   write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
   version(r.cwd, '1.1.96');
   const tip = commit(r.cwd, 'waived claims change');
-  const ok = r.run('gate', 'HEAD');
+  const ok = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(ok.code, 0, ok.text);
   assert.match(ok.text, /waived \(the Human, 2026-10-20\)\. It is not claims-frozen: its install forces the cut\nCLAIMS FREEZE OK$/);
   const rec = r.run('record', '1.1.96', tip);
@@ -101,7 +110,7 @@ test('waiver: only the waived version passes, and a waived release is never reco
   assert.deepStrictEqual(cf.parseState(fs.readFileSync(path.join(r.cwd, cf.FILE), 'utf8')).frozenVersions, {});
   version(r.cwd, '1.1.97');
   commit(r.cwd, 'the next release, not waived');
-  const no = r.run('gate', 'HEAD');
+  const no = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(no.code, 1, no.text);
 });
 
@@ -137,12 +146,13 @@ test('fails closed: a malformed state, an unknown base commit or a tip without t
   write(r.cwd, cf.FILE, state({ id: 'W', baseVersion: '1.1.90', baseCommit: 'b'.repeat(40), waivers: {} }));
   version(r.cwd, '1.1.91');
   commit(r.cwd, 'a base that is not here');
-  const out = r.run('gate', 'HEAD');
+  git(r.cwd, ['branch', '-f', 'int', 'HEAD']);
+  const out = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(out.code, 1, out.text);
   assert.match(out.text, /cannot verify 1\.1\.91 against W base b{40}/);
   fs.rmSync(path.join(r.cwd, cf.FILE));
   commit(r.cwd, 'no state file');
-  const gone = r.run('gate', 'HEAD');
+  const gone = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(gone.code, 1, gone.text);
   assert.match(gone.text, /CLAIMS FREEZE REFUSED$/);
 });
@@ -155,9 +165,86 @@ test('the gate reads the state and the version from the tip, not the working tre
   commit(r.cwd, 'claims change');
   write(r.cwd, cf.FILE, state(null));
   version(r.cwd, '9.9.9');
-  const out = r.run('gate', 'HEAD');
+  const out = r.run('gate', 'HEAD', 'int');
   assert.strictEqual(out.code, 1, out.text);
   assert.match(out.text, /1\.1\.96 changes frozen paths/);
+});
+
+test('authority: a tip that edits its own state to slip past the gate is REFUSED (Jim SHOULD)', (t) => {
+  const r = repo(t);
+  r.open();
+  write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
+  version(r.cwd, '1.1.99');
+  const tip = commit(r.cwd, 'claims change');
+  const control = r.run('gate', 'HEAD', 'int');
+  assert.strictEqual(control.code, 1, control.text);
+  const base = r.base;
+  const cases = [
+    ['window: null', state(null), /the tip's window is null, the authority's is CL-M4-TEST/],
+    ['paths narrowed', `${JSON.stringify({ paths: ['src/main/other.ts'], window: { id: 'CL-M4-TEST', baseVersion: '1.1.90', baseCommit: base, waivers: {} }, frozenVersions: {} }, null, 2)}\n`, /the tip's paths .* are not the authority's/],
+    ['its own waiver', state({ id: 'CL-M4-TEST', baseVersion: '1.1.90', baseCommit: base, waivers: { '1.1.99': 'self' } }), /the tip waives 1\.1\.99, which the authority does not/],
+  ];
+  for (const [name, text, why] of cases) {
+    git(r.cwd, ['checkout', '-q', '--detach', tip]);
+    write(r.cwd, cf.FILE, text);
+    commit(r.cwd, name);
+    const out = r.run('gate', 'HEAD', 'int');
+    assert.strictEqual(out.code, 1, `${name}: ${out.text}`);
+    assert.match(out.text, why, name);
+    assert.match(out.text, /disagrees with the authority int/, name);
+  }
+});
+
+test('authority: a stale release branch made before the window opened is REFUSED; the authority waiver counts', (t) => {
+  const r = repo(t);
+  git(r.cwd, ['checkout', '-q', '-b', 'release']);
+  write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
+  version(r.cwd, '1.1.91');
+  commit(r.cwd, 'stale branch, claims change');
+  git(r.cwd, ['checkout', '-q', 'int']);
+  r.open({ '1.1.91': 'the Human, on INT' });
+  git(r.cwd, ['checkout', '-q', 'release']);
+  const stale = r.run('gate', 'HEAD', 'int');
+  assert.strictEqual(stale.code, 1, stale.text);
+  assert.match(stale.text, /the tip's window is null, the authority's is CL-M4-TEST/);
+  git(r.cwd, ['merge', '-q', '--no-edit', 'int']);
+  const merged = r.run('gate', 'HEAD', 'int');
+  assert.strictEqual(merged.code, 0, merged.text);
+  assert.match(merged.text, /waived \(the Human, on INT\)/);
+  // A waiver added on INT after the branch merged it still counts: the tip's copy may lag.
+  git(r.cwd, ['checkout', '-q', 'int']);
+  r.open({ '1.1.91': 'the Human, on INT', '1.1.92': 'the Human, later' });
+  git(r.cwd, ['checkout', '-q', 'release']);
+  version(r.cwd, '1.1.92');
+  commit(r.cwd, 'release 1.1.92, the tip lags INT');
+  const lag = r.run('gate', 'HEAD', 'int');
+  assert.strictEqual(lag.code, 0, lag.text);
+  assert.match(lag.text, /waived \(the Human, later\)/);
+  const missing = r.run('gate', 'HEAD', 'no-such-ref');
+  assert.strictEqual(missing.code, 1, missing.text);
+  assert.match(missing.text, /cannot read the authority no-such-ref/);
+});
+
+test('record: <commit> must be <version>, and a local v<version> tag must name it (Jim MUST)', (t) => {
+  const r = repo(t);
+  r.open();
+  write(r.cwd, 'src/main/other.ts', 'export const o = 2;\n');
+  version(r.cwd, '1.1.98');
+  const clean = commit(r.cwd, 'release 1.1.98');
+  write(r.cwd, 'src/main/claims/a.ts', 'export const a = 2;\n');
+  version(r.cwd, '1.1.99');
+  const dirty = commit(r.cwd, 'release 1.1.99, claims change');
+  const wrong = r.run('record', '1.1.99', clean);
+  assert.strictEqual(wrong.code, 1, wrong.text);
+  assert.match(wrong.text, new RegExp(`not recorded: ${clean} is 1\\.1\\.98, not 1\\.1\\.99`));
+  git(r.cwd, ['tag', 'v1.1.98', dirty]);
+  const moved = r.run('record', '1.1.98', clean);
+  assert.strictEqual(moved.code, 1, moved.text);
+  assert.match(moved.text, new RegExp(`not recorded: tag v1\\.1\\.98 names ${dirty}, not ${clean}`));
+  git(r.cwd, ['tag', '-f', 'v1.1.98', clean]);
+  const ok = r.run('record', '1.1.98', clean);
+  assert.strictEqual(ok.code, 0, ok.text);
+  assert.deepStrictEqual(cf.parseState(fs.readFileSync(path.join(r.cwd, cf.FILE), 'utf8')).frozenVersions, { '1.1.98': clean });
 });
 
 test('PIN: the repo state parses, freezes exactly the claims paths, is not packaged, and the checklist runs both steps', () => {
@@ -166,6 +253,6 @@ test('PIN: the repo state parses, freezes exactly the claims paths, is not packa
   const builder = fs.readFileSync(path.join(ROOT, 'electron-builder.yml'), 'utf8');
   assert.doesNotMatch(builder, /claims-freeze/, 'claims-freeze.json is not in the packaged files');
   const checklist = fs.readFileSync(path.join(ROOT, 'docs', 'release-checklist.md'), 'utf8');
-  assert.match(checklist, /node scripts\/claims-freeze\.cjs gate <tip>/);
+  assert.match(checklist, /node scripts\/claims-freeze\.cjs gate <tip> origin\/guppy\/int-<x>/);
   assert.match(checklist, /node scripts\/claims-freeze\.cjs record <version> <tag commit>/);
 });
