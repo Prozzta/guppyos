@@ -50,6 +50,8 @@ export interface AgentUsageSample {
   /** Claude-precomputed cost (live path) / transcript-fallback estimate (interim).
    *  Never recomputed by a consumer. */
   usd: number;
+  /** True only when the provider reports an intentionally non-authoritative cost. */
+  usdEstimated?: boolean;
 }
 
 /** The seam both backends implement. */
