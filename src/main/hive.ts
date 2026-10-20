@@ -35,7 +35,8 @@ import { UNDELIVERED_DIR, dropUndeliveredItems, mailMigrationDone, markUndeliver
 import { mailChannelMode, mailPromptMode, type MailPromptMode } from './mailSurface';
 import { rolloverMemory, seedPinnedSection, pinnedOverCapDue, PINNED_SEED, PINNED_SOFT_CAP_BYTES, MEMORY_STOP_ROLLOVER_BYTES, type RolloverResult } from './memoryRollover';
 import { shouldSeedCodexTrust, withAgentTrust, codexProjectLayerRiskKeys } from './codexTrustSeed';
-import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice } from './codexProjectLayers';
+import { codexProjectLayers, decideCodexLayers, type CodexLayerNotice, type CodexLayerReport } from './codexProjectLayers';
+import { AGY_OWN_KEY, GROK_OWN_FILE, findingsText, foreignHookFiles, scanCodexToml, scanForeignHookFile, stripCodexModelHooks, stripHookMap, stripSettingsHooks, type ForeignHookFile, type HookFinding, type HookFs, type HookProvider } from './hookTypeGuard';
 import { CODEX_TUI_KEYS, codexAutoCompactTokenLimitForAgent, disableCodexPlugins, isCodexAutoCompactTokenLimitOverride, codexTopLevelString, setCodexFeatureFlags, setCodexModel, setCodexReasoningEffort, setCodexRootTableKeys, setCodexTuiKeys } from './codexAgentConfig';
 import { applyLiveModel, CODEX_EFFORT_KEY, normEffort, resolveSpawnModel, type ModelPinFields } from '../shared/modelPin';
 import { codexToolOutputLimitForConfig } from '../shared/codexToolOutputLimit';
@@ -79,7 +80,7 @@ import { codexMcpHookToml, MCP_HOOK_EVENTS, type McpHookEvent } from './codexHoo
 import { CANONICAL_PROMPT, canonicalPromptFingerprint, promptVariant, withSessionStamp } from './sessionRotation';
 import { godHandoffFit } from './godStartup';
 import { MAIL_JOINED_BUDGET } from './mailSurface';
-import { FLOOR_DIGEST_FILE, recordBackstopClosed, recordFlaggedForHuman } from './floorDigest';
+import { FLOOR_DIGEST_FILE, recordBackstopClosed, recordFlaggedForHuman, type DigestModelHooks } from './floorDigest';
 import { BOARD_STATUS_FILE } from './boardStatus';
 
 /** The subset of HarnessConfig the hive consumes for the default-MCP merge.
@@ -1543,6 +1544,7 @@ export class HiveManager {
             // installer, so a future caller cannot route around it.
             if (desc.shim === 'agy') {
               this.installAgyHooks();
+              this.scanForeignHooks(meta.id, 'antigravity', meta.cwd);
               // The statusline lease is checked immediately before every interactive
               // AGY spawn: a user may have replaced it since startup, and then capture
               // stays off for this run rather than being forced back over their choice.
@@ -1565,6 +1567,7 @@ export class HiveManager {
               // F1 fail-closed: provisioning refused, so this agent must not start.
               if (codex.refusal) return { args: [], env: {}, refusal: codex.refusal, ...(codex.codexLayerOptIn ? { codexLayerOptIn: codex.codexLayerOptIn } : {}) };
               env.CODEX_HOME = codex.home;
+              this.scanForeignHooks(meta.id, 'codex', meta.cwd);
               // installCodexHooks may mint a newer broker token for Codex's MCP
               // config; prefer that same live capability for ledger requests.
               if (codex.mcpUrl) env.HIVE_LEDGER_URL = codex.mcpUrl.replace('/mcp/', '/ledger/');
@@ -1623,10 +1626,12 @@ export class HiveManager {
             else if (desc.shim === 'gemini') {
               // Point only this worker at a per-agent system settings file so
               // the bridge is trusted and ~/.gemini/settings.json stays untouched.
-              env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = this.installGeminiHooks(dir);
+              env.GEMINI_CLI_SYSTEM_SETTINGS_PATH = this.installGeminiHooks(dir, meta.id);
+              this.scanForeignHooks(meta.id, 'gemini', meta.cwd);
             }
             else if (desc.shim === 'grok') {
               this.installGrokHooks();
+              this.scanForeignHooks(meta.id, 'grok', meta.cwd);
             }
           } else if (desc.kind === 'proxy') {
             // Stable per-spawn session id, stamped on every synthesized payload so
@@ -1744,7 +1749,9 @@ export class HiveManager {
       const hookUrl = this.hookBroker?.urlFor(meta.id) ?? null;
       const pipeToken = this.hookBroker?.tokenFor?.(meta.id) ?? null;
       if (pipeToken) env.HIVE_HOOK_TOKEN = pipeToken;
-      this.writeJson(settingsPath, withSkillOverrides(this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as object, trim));
+      // RULE-FIX-HOOK-NO-MODEL: only zero-token hook types reach the file; the merged layers are warned on.
+      this.writeJson(settingsPath, this.guardHookSettings(meta.id, 'claude', settingsPath, withSkillOverrides(this.hookSettings(shim, meta.cwd, opts.mcpDefaults, opts.theme, hookUrl, meta.id) as object, trim)));
+      this.scanForeignHooks(meta.id, 'claude', meta.cwd);
       // READS-181 A: the `ledger` command posts to the same broker with this spawn's token.
       if (hookUrl) env.HIVE_LEDGER_URL = hookUrl.replace('/hook/', '/ledger/');
       // GOD-TERMINAL-CONTROL: `term` uses the same token, and only god's environment has the URL.
@@ -4524,6 +4531,70 @@ export class HiveManager {
     }
   }
 
+  // — RULE-FIX-HOOK-NO-MODEL: the hook-type guard (hookTypeGuard.ts) —
+  //
+  // What Guppy writes carries only zero-token hook types (a prompt/agent hook calls a model on
+  // every event it fires for): a disallowed handler is stripped and the strip is logged. Files
+  // the CLIs merge in that Guppy does not own are READ only: a model hook there is a
+  // 'hook-model-warning' row (once per change) and a floor decision while it stands.
+
+  /** Reads for the scan; nothing here writes. */
+  private readonly hookFs: HookFs = {
+    readFile: (p) => { try { return readFileSync(p, 'utf8'); } catch { return null; } },
+    list: (p) => { try { return readdirSync(p, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() })); } catch { return []; } }
+  };
+  /** File -> its standing model-hook warning. */
+  private readonly modelHookFiles = new Map<string, DigestModelHooks>();
+
+  private guardHookMap<T>(agentId: string | null, provider: HookProvider, file: string, hooks: T): T {
+    const r = stripHookMap(hooks);
+    if (r.stripped.length) this.appendLog({ kind: 'hook-type-guard', agentId, provider, file, action: 'strip', stripped: r.stripped });
+    return r.hooks;
+  }
+
+  private guardHookSettings<T extends object>(agentId: string | null, provider: HookProvider, file: string, settings: T): T {
+    const r = stripSettingsHooks(settings);
+    if (r.stripped.length) this.appendLog({ kind: 'hook-type-guard', agentId, provider, file, action: 'strip', stripped: r.stripped });
+    return r.settings;
+  }
+
+  /** Scan the files `provider`'s CLI merges in for this spawn (warn only; never edits them). */
+  scanForeignHooks(agentId: string | null, provider: HookProvider, cwd: string | null | undefined): void {
+    try {
+      const home = homedir();
+      for (const f of foreignHookFiles(provider, { home, cwd: cwd ?? null, fs: this.hookFs })) {
+        this.noteModelHooks(agentId, provider, f.path, f.label, scanForeignHookFile(f, this.hookFs), f.kind === 'codex-toml');
+      }
+    } catch (e) { console.warn('[hive] scanForeignHooks failed:', e); }
+  }
+
+  /** The model hooks of the Codex project layers that load for this spawn (codexProjectLayers). */
+  private scanCodexLayerHooks(agentId: string | null, report: CodexLayerReport): void {
+    try {
+      for (const l of report.layers) {
+        const dir = l.hooksFrom ?? l.dotCodex;
+        const toml: ForeignHookFile = { path: join(dir, 'config.toml'), kind: 'codex-toml', label: "a Codex project layer's config" };
+        const json: ForeignHookFile = { path: join(dir, 'hooks.json'), kind: 'settings', label: "a Codex project layer's hooks.json" };
+        for (const f of [toml, json]) this.noteModelHooks(agentId, 'codex', f.path, f.label, scanForeignHookFile(f, this.hookFs), false);
+      }
+    } catch (e) { console.warn('[hive] scanCodexLayerHooks failed:', e); }
+  }
+
+  private noteModelHooks(agentId: string | null, provider: HookProvider, file: string, label: string, findings: HookFinding[], stripped: boolean): void {
+    const prev = this.modelHookFiles.get(file);
+    if (!findings.length) {
+      if (prev) { this.modelHookFiles.delete(file); this.appendLog({ kind: 'hook-model-warning', agentId, provider, file, label, findings: [], cleared: true }); }
+      return;
+    }
+    const text = findingsText(findings);
+    if (prev && prev.findings === text) return;
+    this.modelHookFiles.set(file, { file, label, provider, findings: text, stripped, since: Date.now() });
+    this.appendLog({ kind: 'hook-model-warning', agentId, provider, file, label, findings, stripped });
+  }
+
+  /** The standing model-hook warnings (the floor digest's decision items). */
+  modelHookWarnings(): DigestModelHooks[] { return [...this.modelHookFiles.values()]; }
+
   private installAgyHooks(): void {
     const root = this.root();
     if (!root) return;
@@ -4548,13 +4619,14 @@ export class HiveManager {
     const oneway = this.writeAgyOneway();
     const cheapHandler = (event: string) => ({ type: 'command', command: `${oneway} agy ${event}`, timeout: 0 });
     const cheapTool = (event: string) => ({ matcher: '*', hooks: [cheapHandler(event)] });
-    const group = {
+    // RULE-FIX-HOOK-NO-MODEL: our group carries only zero-token hook types.
+    const group = this.guardHookMap(null, 'antigravity', `hooks.json[${AGY_OWN_KEY}]`, {
       PreToolUse: [tool('PreToolUse')],
       PostToolUse: [oneway ? cheapTool('PostToolUse') : tool('PostToolUse')],
       PreInvocation: [plain('PreInvocation')],
       PostInvocation: [oneway ? cheapHandler('PostInvocation') : plain('PostInvocation')],
       Stop: [plain('Stop')]
-    };
+    });
     const gem = join(homedir(), '.gemini');
     for (const p of [join(gem, 'config', 'hooks.json'), join(gem, 'antigravity-cli', 'hooks.json')]) {
       try {
@@ -4747,7 +4819,7 @@ export class HiveManager {
    *  The system settings path is per agent. Gemini merges object and array
    *  settings across layers, so auth and user settings remain in their normal
    *  GEMINI_CLI_HOME while this trusted bridge stays isolated. */
-  private installGeminiHooks(dir: string): string {
+  private installGeminiHooks(dir: string, agentId: string | null = null): string {
     const home = join(dir, '.gemini-hive');
     const settingsPath = join(home, 'system-settings.json');
     try {
@@ -4774,7 +4846,8 @@ export class HiveManager {
           AfterAgent: [hook('after-agent')]
         }
       };
-      writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+      // RULE-FIX-HOOK-NO-MODEL: only zero-token hook types reach the file.
+      writeFileSync(settingsPath, JSON.stringify(this.guardHookSettings(agentId, 'gemini', settingsPath, settings), null, 2), 'utf8');
     } catch (e) { console.error('[hive] installGeminiHooks failed:', e); }
     return settingsPath;
   }
@@ -4984,6 +5057,21 @@ export class HiveManager {
       // tools and instructions to every request. Only this generated file changes; the user's
       // ~/.codex/config.toml is read, never written.
       if (config && !inheritPlugins) config = disableCodexPlugins(config).text;
+      // RULE-FIX-HOOK-NO-MODEL: the seed's prompt/agent hook tables are dropped from OUR copy (the
+      // user's file is read, never written; scanForeignHooks warns about it). A seed that cannot be
+      // made clean refuses the spawn rather than burn a model call on every event.
+      if (config) {
+        const g = stripCodexModelHooks(config);
+        if (!g.clean) {
+          const reason = `Not started: your Codex config (${join(userHome, 'config.toml')}) has model-invoking hooks (${findingsText(g.stripped)}) that Guppy could not remove from this agent's copy. Change them to command hooks or remove them, then start the agent again.`;
+          this.appendLog({ kind: 'hook-type-guard', agentId: agentId ?? null, provider: 'codex', file: join(home, 'config.toml'), action: 'refuse', stripped: g.stripped, reason });
+          return { home, refusal: reason };
+        }
+        if (g.stripped.length) {
+          config = g.text;
+          this.appendLog({ kind: 'hook-type-guard', agentId: agentId ?? null, provider: 'codex', file: join(home, 'config.toml'), action: 'strip', stripped: g.stripped, allHooksDropped: g.allHooksDropped });
+        }
+      }
       // CODEX-BLOAT-165 fix 6: compact at ~120K instead of the model default (~220-243K
       // measured). Sane only because threads now rotate (fix 1); it replaces a seed's value.
       config = setCodexRootTableKeys(config, '', {
@@ -5039,6 +5127,8 @@ export class HiveManager {
         try {
           const report = codexProjectLayers({ cwd, configBeforeSeed, configAfterSeed: config, codexHome: home, codexVersion: layer.codexVersion });
           const decision = decideCodexLayers(report, layer.optIns);
+          // RULE-FIX-HOOK-NO-MODEL: a loading layer's model hooks are warned on (it is not ours).
+          this.scanCodexLayerHooks(agentId ?? null, report);
           if (decision.action !== 'start') {
             this.appendLog({ kind: 'codex-trust-layer', agentId: agentId ?? null, action: decision.action, cwd, folder: report.projectFolder, optInKey: decision.optInKey, codexVersion: layer.codexVersion, layers: decision.layers, unknown: report.unknown, reason: decision.reason });
             try { this.codexLayerSink?.({ agentId: agentId ?? null, action: decision.action, reason: decision.reason, optInKey: decision.optInKey, folder: report.projectFolder, at: Date.now() }); } catch { /* the log row stands */ }
@@ -5075,6 +5165,13 @@ export class HiveManager {
         const withDev = HiveManager.withCodexDeveloperInstructions(config, developerInstructions);
         if (withDev !== null) { config = withDev; devSet = true; }
         else console.warn(`[hive] ${join(home, 'config.toml')}: the seed defines developer_instructions on several lines; Codex keeps the positional prompt`);
+      }
+      // RULE-FIX-HOOK-NO-MODEL: the last word on what we write (a parse failure is not a finding).
+      const finalHooks = scanCodexToml(config);
+      if (finalHooks && finalHooks.length) {
+        const reason = `Not started: this Codex agent's generated config would carry model-invoking hooks (${findingsText(finalHooks)}), so it is refused rather than burn a model call on every event.`;
+        this.appendLog({ kind: 'hook-type-guard', agentId: agentId ?? null, provider: 'codex', file: join(home, 'config.toml'), action: 'refuse', stripped: finalHooks, reason });
+        return { home, refusal: reason };
       }
       writeFileSync(join(home, 'config.toml'), config, 'utf8');
     } catch (e) {
@@ -5245,7 +5342,8 @@ export class HiveManager {
       mkdirSync(hookDir, { recursive: true });
       writeFileSync(
         join(hookDir, 'munder-hive.json'),
-        JSON.stringify({ hooks }, null, 2),
+        // RULE-FIX-HOOK-NO-MODEL: only zero-token hook types reach the file.
+        JSON.stringify(this.guardHookSettings(null, 'grok', GROK_OWN_FILE, { hooks }), null, 2),
         'utf8'
       );
     } catch (e) { console.error('[hive] installGrokHooks failed:', e); }

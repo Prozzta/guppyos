@@ -563,6 +563,8 @@ const floorDigest = new FloorDigest({
   wakeStalls: () => wakeStalls.stalls().map((s) => ({ ...s, name: agentDisplayName(s.agentId) })),
   // GTC M3: the Human's message-box items that need a look (never retried by the box).
   messageBox: () => (messageBox?.attentionItems() ?? []).map((m) => ({ ...m, name: agentDisplayName(m.agentId) })),
+  // RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own (warn only).
+  modelHooks: () => hive.modelHookWarnings(),
   // SCREEN-GUARD-ALERT-FLOOR-193: every live agent's pending mail, less the quiet mail still inside
   // its hold, then the stall. Deliberate is LIVE state only (paused/halted/auto-delivery paused, a
   // HITL prompt inside its re-arm window), never a past refusal's reason (Jim MUST 1).

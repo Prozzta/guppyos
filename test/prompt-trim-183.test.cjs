@@ -114,7 +114,8 @@ K.wiring = (hive = readSource('src/main/hive.ts'), idx = readSource('src/main/in
   assert.ok(claude.length > 500, 'the Claude spawn block is found');
   assert.match(claude, /const trim = claudePromptTrimFor\(\{ isGod: meta\.isGod \}, opts\.claudePromptTrim !== false, syncedClaudeSkillNames\(\)\);/, 'THE TRIM IS RESOLVED PER ROLE WITH THE CONFIG SWITCH');
   assert.match(claude, /\n    Object\.assign\(env, trim\.env\);\n    if \(trim\.arg\) \{\n      args\.push\(trim\.arg\);/, 'THE FLAG AND THE ENV REACH THE SPAWN');
-  assert.match(claude, /this\.writeJson\(settingsPath, withSkillOverrides\(this\.hookSettings\([^\n]*, trim\)\);/, 'THE SKILL OVERRIDES REACH THE SETTINGS FILE');
+  // RULE-FIX-HOOK-NO-MODEL: the hook-type guard wraps the whole settings object.
+  assert.match(claude, /this\.writeJson\(settingsPath, this\.guardHookSettings\(meta\.id, 'claude', settingsPath, withSkillOverrides\(this\.hookSettings\([^\n]*, trim\)\)\);/, 'THE SKILL OVERRIDES REACH THE SETTINGS FILE');
   // Only after the non-Claude early return: other CLIs are untouched.
   assert.ok(hive.indexOf('    if (!claudeProvider) return { args, env };') < hive.indexOf('const trim = claudePromptTrimFor('), 'CLAUDE SPAWNS ONLY');
   assert.match(idx, /claudePromptTrim: readConfig\(\)\.claudePromptTrim !== false,/, 'THE CONFIG SWITCH IS PASSED TO THE SPAWN');
@@ -163,7 +164,7 @@ const MUTANTS = [
     edits: [['claudePromptTrimFor({ isGod: meta.isGod }, opts.claudePromptTrim !== false, syncedClaudeSkillNames())', 'claudePromptTrimFor({ isGod: meta.isGod }, true, syncedClaudeSkillNames())']],
     killer: 'wiring', dies: /THE TRIM IS RESOLVED PER ROLE WITH THE CONFIG SWITCH/ },
   { name: 'the settings file never gets the overrides', file: 'src/main/hive.ts', hive: true,
-    edits: [[', meta.id) as object, trim));', ', meta.id));']],
+    edits: [[', meta.id) as object, trim)));', ', meta.id)));']],
     killer: 'wiring', dies: /THE SKILL OVERRIDES REACH THE SETTINGS FILE/ },
   { name: 'a skill is turned off', file: SH, module: true,
     edits: [["skillOverrides[name] = 'name-only';", "skillOverrides[name] = 'off' as 'name-only';"]], killer: 'skills', dies: /NEVER TURNED OFF/ },

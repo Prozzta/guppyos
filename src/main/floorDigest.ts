@@ -14,7 +14,7 @@
  */
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { atomicWriteJson, renameWithRetry } from './atomicJson';
 import type { BoardFlag } from '../shared/boardStale';
 import { firstOccurrenceById, type LedgerIssue } from '../shared/taskLedger';
@@ -116,6 +116,7 @@ export interface FloorDigestInput {
   mirrorOff?: DigestMirrorOff | null;
   messageBox?: DigestMessageBox[];
   floorStall?: DigestFloorStall | null;
+  modelHooks?: DigestModelHooks[];
   tasks: unknown;
   meta: Record<string, { statusSince: number; statusSinceExact?: boolean } | undefined>;
   flags: BoardFlag[];
@@ -245,6 +246,22 @@ export function floorStallItem(s: DigestFloorStall, now: number): DecisionItem {
   };
 }
 
+/** RULE-FIX-HOOK-NO-MODEL: a file Guppy does not own that gives a CLI model-invoking hooks
+ *  (hive.ts modelHookWarnings). `stripped` = Guppy drops them from its agents' copies (the Codex
+ *  seed); otherwise the CLI merges the file itself and only its owner can remove them. */
+export interface DigestModelHooks { file: string; label: string; provider: string; findings: string; stripped: boolean; since: number }
+
+/** One item per file and finding set (a changed set is a new decision; a fixed file drops out). */
+export function modelHooksItem(m: DigestModelHooks, now: number): DecisionItem {
+  const effect = m.stripped
+    ? `Guppy drops them from every ${m.provider} agent's copy, but the file still has them`
+    : `every ${m.provider} agent merges them in and calls a model on each event (silent usage burn)`;
+  return {
+    id: `hook-model:${createHash('sha1').update(`${m.file}\n${m.findings}`).digest('hex').slice(0, 12)}`, cardId: null,
+    line: `${m.label} (${m.file}) has model-invoking hooks (${m.findings}), seen ${ageText(now - m.since)} ago: ${effect} - remove them or change them to command hooks (Guppy never edits this file)`
+  };
+}
+
 type Card = Record<string, unknown> & { id: string };
 
 export function buildFloorDigest(input: FloorDigestInput): { markdown: string; decisionItems: DecisionItem[] } {
@@ -258,6 +275,7 @@ export function buildFloorDigest(input: FloorDigestInput): { markdown: string; d
   if (input.floorStall) items.unshift(floorStallItem(input.floorStall, now));
   if (input.mirrorOff) items.unshift(mirrorOffItem(input.mirrorOff, now));
   for (const m of input.messageBox ?? []) items.push(messageBoxItem(m, now));
+  for (const m of input.modelHooks ?? []) items.push(modelHooksItem(m, now));
   const flagsByCard = new Map<string, BoardFlag[]>();
   for (const f of input.flags) flagsByCard.set(f.cardId, [...(flagsByCard.get(f.cardId) ?? []), f]);
   const age = (c: Card): string => {
@@ -397,6 +415,8 @@ export interface FloorDigestHost {
   messageBox?(): DigestMessageBox[];
   /** SCREEN-GUARD-ALERT-FLOOR-193: samples the floor's pending mail, then its stall if any. Optional. */
   floorStall?(): DigestFloorStall | null;
+  /** RULE-FIX-HOOK-NO-MODEL: model-invoking hooks in files Guppy does not own. Optional. */
+  modelHooks?(): DigestModelHooks[];
   send(msg: { to: string; act: 'inform'; subject: string; body: string }, from: string): void;
   appendLog(row: Record<string, unknown>): void;
 }
@@ -443,6 +463,7 @@ export class FloorDigest {
       mirrorOff: (() => { try { return this.host.mirrorOff?.() ?? null; } catch { return null; } })(),
       messageBox: (() => { try { return this.host.messageBox?.() ?? []; } catch { return []; } })(),
       floorStall: (() => { try { return this.host.floorStall?.() ?? null; } catch { return null; } })(),
+      modelHooks: (() => { try { return this.host.modelHooks?.() ?? []; } catch { return []; } })(),
       backstopClosed: readBackstopClosed(root),
       flaggedForHuman: readFlaggedForHuman(root)
     });
