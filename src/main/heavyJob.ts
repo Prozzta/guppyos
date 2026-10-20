@@ -266,9 +266,6 @@ function leading(ws: string[]): string[] {
     if (w === 'timeout' || w === 'nice') { i++; while (i < ws.length && (/^-/.test(ws[i]) || /^\d+[smhd]?$/.test(ws[i]))) i++; continue; }
     // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): `nohup npm test &`, `time npm test`, `setsid npm test` run what follows.
     if (w === 'nohup' || w === 'time' || w === 'setsid') { i++; while (i < ws.length && /^-/.test(ws[i])) i++; continue; }
-    // HEAVY-LOCK-LIVE-FILE-192: a compound command's keyword is not its program (`for m in a b; do node
-    // "$S" $m; done` read as the program `do`, so a 10-minute mutant loop ran beside a held slot).
-    if (/^(do|then|else|elif|if|while|until|!)$/.test(w)) { i++; continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
   }
