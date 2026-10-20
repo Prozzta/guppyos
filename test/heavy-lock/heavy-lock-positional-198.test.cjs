@@ -182,7 +182,7 @@ const MUTANTS = [
   { name: 'a single quote in the body does not hide a positional', edits: [[`    if (q === "'") { out += c; if (c === "'") q = null; continue; }\n`, '']], killer: 'inner', dies: /A POSITIONAL IN A SINGLE QUOTE OF THE BODY IS NOT FILLED/ },
   { name: 'an inner -c / backslash body is filled', edits: [['    if (nest) unknown = true;\n', '']], killer: 'inner', dies: /A POSITIONAL UNDER AN INNER -c IS UNKNOWN/ },
   { name: 'an operator on a positional is ignored', edits: [['      if (/^[#!]?[\\d@*]/.test(r)) unknown = true;', '']], killer: 'operator', dies: /AN OPERATOR ON A POSITIONAL IS UNKNOWN/ },
-  { name: 'an assigned positional is filled', edits: [['    if (/[A-Za-z_][A-Za-z0-9_]*=\\S*$/.test(out)) unknown = true;', '']], killer: 'assigned', dies: /A POSITIONAL ASSIGNED TO A VARIABLE IS UNKNOWN/ },
+  { name: 'an assigned positional is filled', edits: [['    if (/(?:^|[\\s;&|(){}])[A-Za-z_][A-Za-z0-9_]*=\\S*$/.test(out)) unknown = true;', '']], killer: 'assigned', dies: /A POSITIONAL ASSIGNED TO A VARIABLE IS UNKNOWN/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 60_000 }, async (t) => {

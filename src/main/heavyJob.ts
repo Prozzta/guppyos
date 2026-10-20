@@ -203,7 +203,8 @@ function positional(body: string, params: string[]): string | null {
       if (/^[#!]?[\d@*]/.test(r)) unknown = true;   // ${1:-x}, ${#1}, ${!1}: an operator on a positional
       out += m[0]; i += m[0].length - 1; continue;   // ${HOME}, ${#}: not a positional
     }
-    if (/[A-Za-z_][A-Za-z0-9_]*=\S*$/.test(out)) unknown = true;   // x=$1
+    // x=$1, export x=$1; a NAME= that starts a word (Jim NIT 2: `--test-reporter=$1` is an option).
+    if (/(?:^|[\s;&|(){}])[A-Za-z_][A-Za-z0-9_]*=\S*$/.test(out)) unknown = true;
     if (nest) unknown = true;
     const args = params.slice(1).map(lit);
     out += r === '@' && q === '"' ? args.join('" "') : r === '@' || r === '*' ? args.join(' ') : lit(params[Number(r)] ?? '');
@@ -356,6 +357,10 @@ function leading(ws: string[]): string[] {
     if (w === 'timeout' || w === 'nice') { i++; while (i < ws.length && (/^-/.test(ws[i]) || /^\d+[smhd]?$/.test(ws[i]))) i++; continue; }
     // HEAVY-LOCK-SHAPES-189 (Jim MUST 1): `nohup npm test &`, `time npm test`, `setsid npm test` run what follows.
     if (w === 'nohup' || w === 'time' || w === 'setsid') { i++; while (i < ws.length && /^-/.test(ws[i])) i++; continue; }
+    // HEAVY-LOCK-EXEC-POSITIONAL: `exec npm test` (`sh -c 'exec "$@"' _ npm test`) and `command npm test`
+    // run what follows; `exec -a NAME` takes a value, `command -v`/`-V` only looks the name up.
+    if (w === 'exec') { i++; while (i < ws.length && /^-/.test(ws[i])) { if (/^-[cl]*a$/.test(ws[i])) i++; i++; } continue; }
+    if (w === 'command') { i++; while (i < ws.length && /^-/.test(ws[i])) { if (/[vV]/.test(ws[i])) return []; i++; } continue; }
     if (w === 'cd' || w === 'pushd') return []; // `cd x` alone is its own segment
     break;
   }
@@ -1025,7 +1030,9 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       return f >= 0 && args[f + 1] ? classifyScript(args[f + 1], depth, ctx) : { heavy: false };
     }
     // HEAVY-LOCK-SCRIPT-WRAPPER: `bash suite.sh` / `sh ./gate.sh`: the script's own text decides.
-    const script = /^(bash|sh|dash|zsh|bash\.exe)$/.test(bin) ? args.find((a) => !a.startsWith('-')) : undefined;
+    // HEAVY-LOCK-EXEC-POSITIONAL (Jim NIT 1): the script is the first operand after the options, so
+    // `bash -O extglob suite.sh` runs suite.sh, not "extglob".
+    const script = sh ? args[sh.body] : undefined;
     return script ? classifyScript(script, depth, ctx) : { heavy: false };
   }
   // `eval` runs its argument as sh code. A variable/backtick-derived body is unknowable before
