@@ -348,7 +348,10 @@ const ARCHIVE_LOG_NOISE_MUTANTS = [
     killer: replacedArchiveFailureLogKiller },
   { name: 'ARCHIVE-LOG-NOISE-M5: duplicate archive bypasses the once-only reporter',
     edits: [['this.noteOutboxArchiveFailure(full, from, file, error);\n      return null;', "this.appendLog({ kind: 'outbox-archive-failed', from, file, error: String(error) });\n      return null;"]],
-    killer: prunedDuplicateArchiveFailureLogKiller }
+    killer: prunedDuplicateArchiveFailureLogKiller },
+  { name: 'ARCHIVE-LOG-NOISE-M7: replacement retains the old failure entry',
+    edits: [['this.outboxDeliveredArchives.delete(full);\n          // Its earlier archive failure belongs to the replaced payload, not this one.\n          this.outboxArchiveFailures.delete(full);', 'this.outboxDeliveredArchives.delete(full);']],
+    killer: replacedThenArchivedKiller }
 ];
 
 test('MUTANT CENSUS ROUTER-ARCHIVE-FAILED-LOG-NOISE: per-scan logging dies at the noise pin', async (t) => {
@@ -363,7 +366,7 @@ test('MUTANT CENSUS ROUTER-ARCHIVE-FAILED-LOG-NOISE: per-scan logging dies at th
       let died = null;
       try { await mutant.killer(subtest, MutatedManager); } catch (error) { died = error; }
       assert.ok(died instanceof assert.AssertionError, `SURVIVED: ${mutant.name} (${died && died.message})`);
-      assert.match(died.message, /ARCHIVE (LOG NOISE|FINGERPRINT|PRUNE)/, `${mutant.name} died at the wrong assertion`);
+      assert.match(died.message, /ARCHIVE (LOG NOISE|FINGERPRINT|PRUNE|REPLACE CLEAR)/, `${mutant.name} died at the wrong assertion`);
     });
   }
 });
@@ -387,8 +390,28 @@ async function replacedArchiveFailureLogKiller(t, Manager = HiveManager) {
     'ARCHIVE FINGERPRINT: replacing a held file is not an archive clear');
 }
 
+async function replacedThenArchivedKiller(t, Manager = HiveManager) {
+  const { hive, outbox } = await floor(t, Manager);
+  const sent = path.join(outbox, '.sent');
+  const heldSent = path.join(outbox, '.sent-held');
+  fs.renameSync(sent, heldSent);
+  t.after(() => { if (fs.existsSync(heldSent) && !fs.existsSync(sent)) fs.renameSync(heldSent, sent); });
+  const file = path.join(outbox, 'replaced-then-archived.json');
+  fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'held original' }));
+  assert.equal(hive.routeOnce(), 1);
+  fs.writeFileSync(file, JSON.stringify({ to: 'god-1', act: 'inform', subject: 'replacement archives first try', body: 'new' }));
+  fs.renameSync(heldSent, sent);
+  assert.equal(hive.routeOnce(), 1);
+  assert.equal(hive.logTail(100).filter((entry) => entry.kind === 'outbox-archive-cleared').length, 0,
+    'ARCHIVE REPLACE CLEAR: a replacement that never stuck must not clear the old failure');
+}
+
 test('a replaced held outbox file is a new archive-failure epoch, not a clear', async (t) => {
   await replacedArchiveFailureLogKiller(t);
+});
+
+test('a replacement archived on its first try does not clear the old held payload', async (t) => {
+  await replacedThenArchivedKiller(t);
 });
 
 async function prunedDuplicateArchiveFailureLogKiller(t, Manager = HiveManager) {
