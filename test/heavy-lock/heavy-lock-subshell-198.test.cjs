@@ -62,9 +62,31 @@ K.kept = (M = HJ) => {
   light(M, '(npm test)', 'CMD IS UNTOUCHED', { dialect: 'cmd' });
 };
 
+// Jim e33e76 SHOULD: a one-word segment kept its parens (and a last word like `./suite.sh)` was
+// read as a case arm), so a script run in a subshell was not resolved.
+const files = { 'suite.sh': 'npm test\n', 'ok.sh': 'echo hi\n' };
+const norm = (p) => p.replace(/\\/g, '/').replace(/^\.\//, '');
+const ctx = { readScript: (p) => files[norm(p)] ?? null, missingAt: (p) => (files[norm(p)] === undefined ? p : null) };
+K.oneWord = (M = HJ) => {
+  suite(M, '(./suite.sh)', 'A ONE-WORD SUBSHELL RUNS ITS SCRIPT', ctx);
+  suite(M, '((./suite.sh))', 'A ONE-WORD SUBSHELL RUNS ITS SCRIPT (nested)', ctx);
+  suite(M, '( ./suite.sh)', 'A LAST WORD ./suite.sh) IS NOT A CASE ARM', ctx);
+  suite(M, '( cd . && ./suite.sh)', 'A LAST WORD ./suite.sh) IS NOT A CASE ARM (cd)', ctx);
+  suite(M, '(echo; ./suite.sh)', 'A LAST WORD ./suite.sh) IS NOT A CASE ARM (;)', ctx);
+  suite(M, 'echo ok && (./suite.sh)', 'A ONE-WORD SUBSHELL RUNS ITS SCRIPT (after &&)', ctx);
+  for (const cmd of ['(./nope.sh)', '(echo; ./nope.sh)']) {
+    const r = M.classifyCommand(cmd, 0, ctx);
+    assert.ok(r.heavy && r.provisional, `AN UNREADABLE SCRIPT IN A SUBSHELL FAILS CLOSED: ${cmd} -> ${JSON.stringify(r)}`);
+  }
+  light(M, '(./ok.sh)', 'a light script in a subshell stays light', ctx);
+  suite(M, 'case x in\na)\nnpm test\n;;\nesac', 'A CASE ARM ON ITS OWN LINE IS STILL AN ARM');
+  light(M, 'case x in (a) echo;; esac', 'a light case arm stays light');
+};
+
 test('a plain subshell is classified by what it runs: ( ), (cd && ), ( ) &, a pipe, a newline', () => K.plain());
 test('a nested subshell is classified, its ( and ) glued or spaced', () => K.nested());
 test('a ) standing alone after the last word is not a path', () => K.alone());
+test('a one-word subshell runs its script: (./suite.sh), ( cd . && ./suite.sh), an unreadable one fails closed', () => K.oneWord());
 test('unchanged: light subshells, quoted parens, arithmetic, cmd', () => K.kept());
 
 // ─── MUTANT CENSUS ──────────────────────────────────────────────────────────────────────────
@@ -79,11 +101,16 @@ function mutateText(rel, edits, tag) {
   return text;
 }
 
-const LEAD = "  if (out.length > 1 && /^\\(+[^()'\"$`]+$/.test(out[0])) out = [out[0].replace(/^\\(+/, ''), ...out.slice(1)];";
+const LEAD = "  if (out.length && /^\\(+[^()'\"$`]+\\)*$/.test(out[0])) out = [out[0].replace(/^\\(+/, ''), ...out.slice(1)];";
 const ALONE = "  while (out.length > 1 && out[out.length - 1] === ')') out = out.slice(0, -1);";
-const TAIL = "  return out.length > 1 && /^[^()'\"$`]+\\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\\)+$/, '')] : out;";
+const TAIL = "  return out.length && /^[^()'\"$`]+\\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\\)+$/, '')] : out;";
+const ARM = '    if (i === ws.length - 1 && CASE_ARM.test(ws[i])) break;';
 const MUTANTS = [
   { name: 'one glued ( only (the old rule)', edits: [[LEAD, "  if (out.length > 1 && /^\\([^()'\"$`]+$/.test(out[0])) out = [out[0].slice(1), ...out.slice(1)];"]], killer: 'nested', dies: /A NESTED SUBSHELL IS CLASSIFIED \(\( GLUED/ },
+  { name: 'a last word like ./suite.sh) is a case arm again', edits: [[ARM, '']], killer: 'oneWord', dies: /A ONE-WORD SUBSHELL RUNS ITS SCRIPT/ },
+  { name: 'a one-word ( is kept (the >1 guard)', edits: [[LEAD, LEAD.replace('out.length &&', 'out.length > 1 &&')]], killer: 'oneWord', dies: /A ONE-WORD SUBSHELL RUNS ITS SCRIPT/ },
+  { name: 'a ( word ending in ) is kept', edits: [[LEAD, LEAD.replace("+\\)*$/", '+$/')]], killer: 'oneWord', dies: /A ONE-WORD SUBSHELL RUNS ITS SCRIPT/ },
+  { name: 'a one-word ) is kept (the >1 guard)', edits: [[TAIL, TAIL.replace('out.length &&', 'out.length > 1 &&')]], killer: 'oneWord', dies: /A ONE-WORD SUBSHELL RUNS ITS SCRIPT/ },
   { name: 'only the first glued ( is stripped', edits: [[LEAD, LEAD.replace("out[0].replace(/^\\(+/, '')", 'out[0].slice(1)')]], killer: 'nested', dies: /A NESTED SUBSHELL IS CLASSIFIED \(\( GLUED/ },
   { name: 'one glued ) only (the old rule)', edits: [[TAIL, "  return out.length > 1 && /^[^()'\"$`]+\\)$/.test(last) ? [...out.slice(0, -1), last.slice(0, -1)] : out;"]], killer: 'nested', dies: /A NESTED SUBSHELL IS CLASSIFIED \)\) GLUED/ },
   { name: 'only the last glued ) is stripped', edits: [[TAIL, TAIL.replace("last.replace(/\\)+$/, '')", 'last.slice(0, -1)')]], killer: 'nested', dies: /A NESTED SUBSHELL IS CLASSIFIED \)\) GLUED/ },

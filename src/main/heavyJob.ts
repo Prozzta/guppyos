@@ -1338,6 +1338,9 @@ function stripKeywords(ws: string[], d: ShellDialect): string[] {
   if (d === 'cmd') return ws;
   let i = 0;
   while (i < ws.length) {
+    // HEAVY-LOCK-LOOP-BODY-198 (Jim e33e76): a case arm is followed by its command; a last word that
+    // looks like one is a subshell's (`(./suite.sh)`, `( cd . && ./suite.sh)`), so it stays a word.
+    if (i === ws.length - 1 && CASE_ARM.test(ws[i])) break;
     if (SHELL_KEYWORDS.has(ws[i]) || CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;
     else if (ws[i] === 'case' && ws[i + 2] === 'in') i += 3;
     else if (ws[i] === 'function' && ws[i + 1]) i += 2;
@@ -1348,10 +1351,11 @@ function stripKeywords(ws: string[], d: ShellDialect): string[] {
   // `(cd test; npm test)`, `(npm run build)`: a subshell's `(` and `)` are glued to the first and
   // last words (Jim 2e2f8a). HEAVY-LOCK-LOOP-BODY-198 (subshells): nested ones glue several,
   // `((cd x && npm test) )`, `(cd x && (npm test))`, and a `)` may stand alone after the last word.
-  if (out.length > 1 && /^\(+[^()'"$`]+$/.test(out[0])) out = [out[0].replace(/^\(+/, ''), ...out.slice(1)];
+  // A one-word segment too: `(./suite.sh)`, `((./suite.sh))` (Jim e33e76).
+  if (out.length && /^\(+[^()'"$`]+\)*$/.test(out[0])) out = [out[0].replace(/^\(+/, ''), ...out.slice(1)];
   while (out.length > 1 && out[out.length - 1] === ')') out = out.slice(0, -1);
   const last = out[out.length - 1];
-  return out.length > 1 && /^[^()'"$`]+\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\)+$/, '')] : out;
+  return out.length && /^[^()'"$`]+\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\)+$/, '')] : out;
 }
 
 /**
