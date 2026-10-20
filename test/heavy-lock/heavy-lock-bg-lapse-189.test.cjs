@@ -308,7 +308,7 @@ test('REGRESSION: a shell wrapper that generates and invokes a batch child which
 });
 
 test('MUTANTS: removing either computed-wrapper guard reopens the generated-child escape', () => {
-  const file = path.join(__dirname, '..', 'src', 'main', 'heavyJob.ts');
+  const file = path.join(__dirname, '..', '..', 'src', 'main', 'heavyJob.ts');
   const original = fs.readFileSync(file, 'utf8');
   const cmdGuard = "if ((ctx.dialect === 'sh' && /\\$/.test(body)) || /`/.test(body)) return { heavy: true, kind: 'bench', why: 'cmd /c (computed command the lock cannot read)', provisional: true };";
   assert.equal(original.split(cmdGuard).length - 1, 1, 'cmd guard mutation target is unique');
