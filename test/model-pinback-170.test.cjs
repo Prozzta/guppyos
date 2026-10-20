@@ -165,7 +165,7 @@ test('observeRollout: the model comes from the SAME tail read, bound to the hook
   rollout(home, OTHER, [turnContext(SOL, Date.now() + 5000)]);
   const src = new CodexRolloutCapacitySource(() => 'scope');
   assert.equal(src.observeRollout(home, { sessionId: SID }).turnModel.model, TERRA, 'not the other session, even if newer');
-  assert.deepEqual(src.observeRollout(home, { sessionId: SID }), { capacity: null, turnModel: null }, 'an unchanged file is not re-read');
+  assert.deepEqual(src.observeRollout(home, { sessionId: SID }), { capacity: null, turnModel: null, usage: null }, 'an unchanged file is not re-read');
 });
 
 test('G2 Codex: first turn_context = launch model does not pin; a switch pins; a return clears; stale lines never pin', async (t) => {

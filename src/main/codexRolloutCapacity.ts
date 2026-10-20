@@ -192,11 +192,59 @@ export function latestTurnContextModel(tail: string): { model: string; observedA
   return null;
 }
 
+/** The newest cumulative token snapshot in a rollout tail.  This deliberately
+ * shares the capacity reader's bounded tail: token_count is the one stable Codex
+ * event that carries both the current context and the cumulative thread totals. */
+export interface CodexRolloutUsage {
+  observedAt: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  contextTokens: number;
+  modelContextWindow: number;
+}
+
+export function latestCodexRolloutUsage(tail: string): CodexRolloutUsage | null {
+  const lines = tail.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line || !line.includes('token_count')) continue;
+    let obj: unknown;
+    try { obj = JSON.parse(line); } catch { continue; }
+    if (typeof obj !== 'object' || obj === null) continue;
+    const rec = obj as Record<string, unknown>;
+    const payload = typeof rec.payload === 'object' && rec.payload !== null ? rec.payload as Record<string, unknown> : null;
+    if (payload?.type !== 'token_count') continue;
+    const info = typeof payload.info === 'object' && payload.info !== null ? payload.info as Record<string, unknown> : null;
+    const total = typeof info?.total_token_usage === 'object' && info.total_token_usage !== null ? info.total_token_usage as Record<string, unknown> : null;
+    const last = typeof info?.last_token_usage === 'object' && info.last_token_usage !== null ? info.last_token_usage as Record<string, unknown> : null;
+    const n = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0;
+    const ts = typeof rec.timestamp === 'string' ? Date.parse(rec.timestamp) : NaN;
+    const context = n(info?.model_context_window);
+    if (!total || !last || !Number.isFinite(ts) || !context) continue;
+    // Codex's input_tokens includes its cached subset (the real event's
+    // total_tokens is input + output), whereas AgentUsage splits cache reads out.
+    // De-overlap before handing it to the shared billing/display seam.
+    const cacheRead = n(total.cached_input_tokens);
+    const input = Math.max(0, n(total.input_tokens) - cacheRead);
+    const output = n(total.output_tokens);
+    // last_token_usage is the current request's live context, unlike the cumulative
+    // thread totals above; model_context_window validates the provider supplied a
+    // real window rather than a synthetic counter.
+    const contextTokens = n(last.input_tokens) + n(last.output_tokens);
+    return { observedAt: ts, input, output, cacheRead, cacheCreation: n(total.cache_write_input_tokens), contextTokens, modelContextWindow: context };
+  }
+  return null;
+}
+
 /** One rollout read: the capacity observation and the thread's live model, from ONE tail. */
 export interface CodexRolloutRead {
   capacity: CapacityObservation | null;
   /** The newest turn_context's model, when the tail was read (the file changed) and held one. */
   turnModel: { model: string; observedAt: number | null; effort: string | null } | null;
+  /** The newest cumulative token_count snapshot from the same bounded tail. */
+  usage: CodexRolloutUsage | null;
 }
 
 /**
@@ -219,10 +267,10 @@ export class CodexRolloutCapacitySource {
     return this.observeRollout(codexHome, opts).capacity;
   }
 
-  /** `observe`, plus the live model from the SAME tail read (MODEL-PINBACK G2). Nothing new
-   *  (an unchanged file) is `{ capacity: null, turnModel: null }`. */
+  /** `observe`, plus live model and usage from the SAME tail read (MODEL-PINBACK G2). Nothing new
+   *  (an unchanged file) is `{ capacity: null, turnModel: null, usage: null }`. */
   observeRollout(codexHome: string, opts: { rescan?: boolean; sessionId?: string; now?: number } = {}): CodexRolloutRead {
-    const none: CodexRolloutRead = { capacity: null, turnModel: null };
+    const none: CodexRolloutRead = { capacity: null, turnModel: null, usage: null };
     const now = opts.now ?? Date.now();
     let entry = this.cache.get(codexHome);
     const cachedSessionMatches = !opts.sessionId || (entry?.file !== null && entry?.file !== undefined
@@ -266,7 +314,7 @@ export class CodexRolloutCapacitySource {
       receivedAt: now,
       source: 'codex-rollout'
     }));
-    return { capacity, turnModel: latestTurnContextModel(tail) };
+    return { capacity, turnModel: latestTurnContextModel(tail), usage: latestCodexRolloutUsage(tail) };
   }
 
   /** Drop a home's cache — used when an agent is removed. */

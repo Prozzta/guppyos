@@ -16,7 +16,7 @@ const os = require('node:os');
 const path = require('node:path');
 const loadTs = require('./load-ts.cjs');
 
-const { CodexRolloutCapacitySource, latestUsableRateLimits } = loadTs('src/main/codexRolloutCapacity.ts');
+const { CodexRolloutCapacitySource, latestUsableRateLimits, latestCodexRolloutUsage, readTail } = loadTs('src/main/codexRolloutCapacity.ts');
 
 /** Stands in for the normaliser in the pure-tail test: accept anything with windows. */
 const acceptAnyWindows = (rateLimits, observedAt) =>
@@ -54,6 +54,30 @@ function makeHome(lines, day = ['2026', '09', '09'], name = 'rollout-2026-09-09T
 }
 
 const source = () => new CodexRolloutCapacitySource(() => 'scope-x');
+
+test('FLEET-CODEX-ACTIVITY: a real rollout token_count excerpt supplies cumulative usage and live context', () => {
+  // Sanitized verbatim shape from Dwight's active Codex rollout on 2026-10-20.
+  const excerpt = JSON.stringify({ timestamp: '2026-10-20T21:07:20.924Z', ordinal: 8589, type: 'event_msg', payload: { type: 'token_count', info: {
+    total_token_usage: { input_tokens: 68191296, cached_input_tokens: 65868032, cache_write_input_tokens: 0, output_tokens: 319688, reasoning_output_tokens: 85401, total_tokens: 68510984 },
+    last_token_usage: { input_tokens: 22259, cached_input_tokens: 20224, cache_write_input_tokens: 0, output_tokens: 463, reasoning_output_tokens: 26, total_tokens: 22722 },
+    model_context_window: 258400
+  } } });
+  assert.deepEqual(latestCodexRolloutUsage(`partial\n${excerpt}\n`), {
+    observedAt: Date.parse('2026-10-20T21:07:20.924Z'), input: 2323264, output: 319688,
+    cacheRead: 65868032, cacheCreation: 0, contextTokens: 22722, modelContextWindow: 258400
+  });
+});
+
+test('FLEET-CODEX-ACTIVITY: rollout reads are tail-bounded even on a large file', () => {
+  const h = makeHome([]);
+  const filler = Buffer.alloc(3 * 256 * 1024, 0x78);
+  fs.writeFileSync(h.file, filler);
+  fs.appendFileSync(h.file, `\n${line(1, 1, '2026-10-20T21:07:20.924Z')}\n`);
+  const tail = readTail(h.file);
+  assert.ok(Buffer.byteLength(tail) <= 256 * 1024, 'never loads the large rollout');
+  assert.match(tail, /token_count/);
+  h.cleanup();
+});
 
 test('the newest snapshot in the rollout is the one reported', () => {
   const h = makeHome([

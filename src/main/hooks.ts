@@ -366,6 +366,8 @@ export class HookServer {
    *  get_agent_detail / list_agents) can report "how full is each agent's context"
    *  without depending on a renderer round-trip. */
   private contextById = new Map<string, { tokens: number; limit: number; ts: number }>();
+  /** Session that supplied a Codex context value, so a fresh prompt never shows its predecessor's ctx. */
+  private codexContextSession = new Map<string, string>();
   /** L0 — Codex allowance, read from the rollout a Codex worker is already writing.
    *  Holds only a per-home cache (rollout path + last size/mtime seen). */
   private codexCapacity = new CodexRolloutCapacitySource();
@@ -1144,7 +1146,22 @@ export class HookServer {
     try {
       const home = this.hive.codexHomeFor(agentId);
       if (!home) return;
+      if (event === 'SessionStart' && sessionId && !fromSubagent
+        && this.codexContextSession.get(agentId) !== sessionId) {
+        this.contextById.delete(agentId);
+        this.codexContextSession.set(agentId, sessionId);
+      }
       const read = this.codexCapacity.observeRollout(home, { rescan: event === 'SessionStart', sessionId });
+      // Codex has no Status status-line. Its own token_count carries the same two
+      // context facts, and this is the already-bounded tail read used for capacity.
+      // Keep it on the normal context path so the renderer and god's LIVE ROSTER
+      // receive a real ctx percentage rather than treating active Codex as unknown.
+      if (read.usage && !fromSubagent) {
+        const context = { tokens: read.usage.contextTokens, limit: read.usage.modelContextWindow, ts: read.usage.observedAt };
+        this.contextById.set(agentId, context);
+        if (sessionId) this.codexContextSession.set(agentId, sessionId);
+        this.getWebContents()?.send('hive:contextUpdate', { agentId, tokens: context.tokens, limit: context.limit });
+      }
       // MODEL-PINBACK G2: the live model, from the tail read above (no second walk or read).
       // Only the agent's OWN session: the rollout is bound to this hook's session id, and a
       // subagent's rollout runs the subagent's model. A line older than this process's launch
