@@ -1469,6 +1469,30 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
 
                       <div style={{ height: 2, background: 'var(--cth-ink-300)' }} />
 
+                      {/* Shared by Slack and generic webhook listeners. */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
+                          <span style={slackLabelStyle}>Inbound LAN/router forwarding (Slack + webhooks)</span>
+                          <PixelButton
+                            variant={inboundBindAllInterfaces ? 'primary' : 'secondary'}
+                            size="sm"
+                            onClick={() => {
+                              const next = !inboundBindAllInterfaces;
+                              setInboundBindAllInterfaces(next);
+                              // Use the shared inbound IPC route to rebind live listeners.
+                              void window.cth.slackSetConfig({ inboundBindAllInterfaces: next });
+                            }}
+                          >
+                            {inboundBindAllInterfaces ? 'on' : 'loopback only'}
+                          </PixelButton>
+                        </div>
+                        <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
+                          Keep this off for tunnel forwarding. Turn it on only when intentionally forwarding a LAN or router port; live listeners rebind immediately.
+                        </span>
+                      </div>
+
+                      <div style={{ height: 2, background: 'var(--cth-ink-300)' }} />
+
                       {/* Slack integration */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                         <div style={{
@@ -1596,24 +1620,6 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                                 {slackProactivePosting ? 'on' : 'off'}
                               </PixelButton>
                             </div>
-
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between' }}>
-                              <span style={slackLabelStyle}>LAN/router forwarding (bind all interfaces)</span>
-                              <PixelButton
-                                variant={inboundBindAllInterfaces ? 'primary' : 'secondary'}
-                                size="sm"
-                                onClick={() => {
-                                  const next = !inboundBindAllInterfaces;
-                                  setInboundBindAllInterfaces(next);
-                                  void window.cth.updateConfig({ inboundBindAllInterfaces: next });
-                                }}
-                              >
-                                {inboundBindAllInterfaces ? 'on' : 'loopback only'}
-                              </PixelButton>
-                            </div>
-                            <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                              Keep this off for tunnel forwarding. Turn it on only when intentionally forwarding a LAN or router port, then save or start.
-                            </span>
 
                             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                               {/* Start disabled once connected; Stop only when running. */}

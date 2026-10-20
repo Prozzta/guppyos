@@ -1,60 +1,75 @@
 'use strict';
 
-/*
- * INBOUND-BIND-LOOPBACK-198: the public tunnel can reach a loopback listener;
- * opening 0.0.0.0 is an explicit LAN/router-forwarding choice, never the
- * default. Keep these pins textual so neither test starts a tunnel or binds a
- * fixed port.
- */
+/* INBOUND-BIND-LOOPBACK-198: bind only loopback unless the operator explicitly
+ * opts into LAN/router forwarding. These use private listen() on port 0, never
+ * start tunnelmole, and prove the address the OS actually accepted. */
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const loadTs = require('./load-ts.cjs');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
-const targets = [
-  ['webhook', 'src/main/webhook.ts'],
-  ['slack', 'src/main/slack.ts']
-];
-const hostChoice = "opts.bindAllInterfaces ? '0.0.0.0' : '127.0.0.1'";
 
-for (const [name, file] of targets) {
-  test(`${name}: default bind is loopback and all-interface bind is explicit`, () => {
-    const source = read(file);
-    assert.equal(source.split(hostChoice).length - 1, 1, `${name} must choose one explicit host`);
-    assert.match(source, /server\.listen\(this\.port, this\.host, \(\) => \{/,
-      `${name} must pass the selected host to listen()`);
+function webhookOptions(bindAllInterfaces) {
+  return {
+    port: 0, bindAllInterfaces,
+    endpoints: [{ id: 'test', name: 'Test', secret: 'secret', schema: '{}' }],
+    onMessage: () => null, lookupStatus: () => null
+  };
+}
+function slackOptions(bindAllInterfaces) {
+  return { port: 0, bindAllInterfaces, signingSecret: 'secret', onMessage: () => {} };
+}
+
+async function boundAddress(ServerClass, options) {
+  const instance = new ServerClass(options);
+  await instance.listen();
+  const address = instance.server.address();
+  instance.stop();
+  return address.address;
+}
+
+for (const [name, file, exportName, options] of [
+  ['webhook', 'src/main/webhook.ts', 'WebhookServer', webhookOptions],
+  ['slack', 'src/main/slack.ts', 'SlackWebhookServer', slackOptions]
+]) {
+  test(`${name}: default bind is loopback and all-interface bind is explicit`, async () => {
+    const ServerClass = loadTs(file)[exportName];
+    assert.equal(await boundAddress(ServerClass, options(undefined)), '127.0.0.1');
+    assert.equal(await boundAddress(ServerClass, options(false)), '127.0.0.1');
+    assert.equal(await boundAddress(ServerClass, options(true)), '0.0.0.0');
   });
 }
+
+test('config default keeps inbound listeners loopback-only', () => {
+  assert.match(read('src/main/config.ts'), /inboundBindAllInterfaces:\s*false/);
+});
 
 test('main passes the one explicit config opt-in to both inbound listeners', () => {
   const source = read('src/main/index.ts');
   const pin = 'bindAllInterfaces: cfg.inboundBindAllInterfaces === true,';
   assert.equal(source.split(pin).length - 1, 2, 'both webhook and Slack constructors receive the opt-in');
+  assert.match(source, /function rebindInboundServers\(/, 'a bind setting change recreates live listeners');
+  assert.equal(source.split('rebindInboundServers(previousBindAllInterfaces);').length - 1, 2,
+    'both inbound settings IPC routes rebind live listeners after an address change');
 });
 
-test('MUTANT CENSUS: every bind safety pin applies once and dies', () => {
-  const mutants = [
-    ['webhook default becomes public', 'src/main/webhook.ts', hostChoice,
-      "opts.bindAllInterfaces ? '0.0.0.0' : '0.0.0.0'", /loopback/],
-    ['slack default becomes public', 'src/main/slack.ts', hostChoice,
-      "opts.bindAllInterfaces ? '0.0.0.0' : '0.0.0.0'", /loopback/],
-    ['webhook ignores host', 'src/main/webhook.ts', 'server.listen(this.port, this.host, () => {',
-      'server.listen(this.port, () => {', /selected host/],
-    ['slack ignores host', 'src/main/slack.ts', 'server.listen(this.port, this.host, () => {',
-      'server.listen(this.port, () => {', /selected host/]
-  ];
-  for (const [name, file, from, to, dies] of mutants) {
+test('MUTANT CENSUS: default-public binds and default-public config die behaviorally', async () => {
+  const hostChoice = "opts.bindAllInterfaces ? '0.0.0.0' : '127.0.0.1'";
+  for (const [name, file, exportName, options] of [
+    ['webhook', 'src/main/webhook.ts', 'WebhookServer', webhookOptions],
+    ['slack', 'src/main/slack.ts', 'SlackWebhookServer', slackOptions]
+  ]) {
     const source = read(file);
-    assert.equal(source.split(from).length - 1, 1, `${name}: target must match exactly once`);
-    const altered = source.replace(from, to);
-    assert.throws(() => {
-      if (from === hostChoice) {
-        assert.equal(altered.split(hostChoice).length - 1, 1, `${name}: default bind is loopback`);
-      } else {
-        assert.match(altered, /server\.listen\(this\.port, this\.host, \(\) => \{/, `${name}: selected host reaches listen()`);
-      }
-    }, (err) => dies.test(String(err?.message)), `${name}: SURVIVED`);
+    assert.equal(source.split(hostChoice).length - 1, 1, `${name}: target must match exactly once`);
+    const Mutant = loadTs.fromText(file, source.replace(hostChoice, "opts.bindAllInterfaces ? '0.0.0.0' : '0.0.0.0'"))[exportName];
+    await assert.rejects(async () => {
+      assert.equal(await boundAddress(Mutant, options(undefined)), '127.0.0.1');
+    }, /Expected values to be strictly equal/, `${name}: default-public mutant SURVIVED`);
   }
+  const alteredConfig = read('src/main/config.ts').replace('inboundBindAllInterfaces: false', 'inboundBindAllInterfaces: true');
+  assert.throws(() => assert.match(alteredConfig, /inboundBindAllInterfaces:\s*false/), /matches/,
+    'config default-public mutant SURVIVED');
 });
