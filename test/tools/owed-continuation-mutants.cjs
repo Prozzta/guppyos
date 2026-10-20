@@ -18,8 +18,9 @@ const HIVE = 'src/main/hive.ts';
 const INDEX = 'src/main/index.ts';
 
 const MUTANTS = [
-  ['M1 a done never upgrades an interim reply', LEDGER, 'const discharging = !!replyAct && !INTERIM_REPLY_ACTS.has(replyAct);', 'const discharging = false;', /not ok \d+ - OWED A: a later done upgrades/],
-  ['M2 agree discharges', LEDGER, "new Set(['inform', 'agree'])", "new Set(['inform'])", /not ok \d+ - OWED A: an inform or agree reply keeps/],
+  ['M1 a done never upgrades an interim reply', LEDGER, 'const discharging = !!replyAct && DISCHARGING_REPLY_ACTS.has(replyAct);', 'const discharging = false;', /not ok \d+ - OWED A: a later done upgrades/],
+  ['M2 blocked does not discharge', LEDGER, "new Set(['done', 'refuse', 'blocked'])", "new Set(['done', 'refuse'])", /not ok \d+ - OWED A: an inform, agree or onward request/],
+  ['M2b only inform and agree are interim (an onward request discharges)', LEDGER, '!!e.replyAct && !DISCHARGING_REPLY_ACTS.has(e.replyAct)', "['inform', 'agree'].includes(e.replyAct ?? '')", /not ok \d+ - OWED A: an inform, agree or onward request/],
   ['M3 an interim reply discharges (the old rule)', LEDGER, '  return isOpenObligation(e) || isInterimReplied(e);', '  return isOpenObligation(e);', /not ok \d+ - OWED REPLAY 02:59Z: a request answered only with an inform/],
   ['M4 the rebuild drops the act', LEDGER, "replyAct: typeof r.replyAct === 'string' ? r.replyAct : null }", 'replyAct: null }', /not ok \d+ - OWED A: the rebuild restores the act/],
   ['M5 needs_human is not blocked', HIVE, "msg.needs_human === true ? 'blocked' : msg.act", 'msg.act', /not ok \d+ - OWED A: hive routes needs_human as blocked/],

@@ -49,9 +49,9 @@ const watcher = (startedAt, god = 'god') => new O.OwedContinuation(startedAt, ()
 
 // ————————————————————————————————————————————————— A: the reply act
 
-test('OWED A: an inform or agree reply keeps the request owed; done, refuse and blocked discharge it', () => {
+test('OWED A: an inform, agree or onward request reply keeps the request owed; only done, refuse and blocked discharge it', () => {
   const base = actedDoc('jim-1', [{ id: 'q', from: 'god', act: 'request', at: 1000 }], 'e1', 1001, 1002);
-  for (const act of ['inform', 'agree']) {
+  for (const act of ['inform', 'agree', 'request', 'query']) {
     const s = L.applyReplied(base, 'q', 'r1', 2000, 'god', act);
     const e = s.doc.entries.q;
     assert.equal(e.replyAct, act);

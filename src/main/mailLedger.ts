@@ -319,13 +319,15 @@ export function isOpenObligation(e: MailEntry): boolean {
   return replyTracked(e) && !e.repliedAt && !e.closedAt;
 }
 
-/** HIVE-DWIGHT-BG-REINVOKE (god 7e4159): reply acts that keep the work in progress. Only done,
- *  refuse, blocked (needs_human), dismiss or supersede discharge it. */
-export const INTERIM_REPLY_ACTS: ReadonlySet<string> = new Set(['inform', 'agree']);
+/** HIVE-DWIGHT-BG-REINVOKE (god 7e4159): the reply acts that discharge the work. Only done, refuse,
+ *  blocked (needs_human), or a dismiss/supersede (closedAt) do; inform, agree and any other act
+ *  (a request or query onward) keep it in progress. */
+export const DISCHARGING_REPLY_ACTS: ReadonlySet<string> = new Set(['done', 'refuse', 'blocked']);
 
-/** A tracked obligation answered only with an interim reply (inform/agree), not closed. */
+/** A tracked obligation answered only with an interim reply (not a discharging act), not closed.
+ *  A legacy entry with no act recorded counts as discharged. */
 export function isInterimReplied(e: MailEntry): boolean {
-  return replyTracked(e) && !!e.repliedAt && !e.closedAt && INTERIM_REPLY_ACTS.has(e.replyAct ?? '');
+  return replyTracked(e) && !!e.repliedAt && !e.closedAt && !!e.replyAct && !DISCHARGING_REPLY_ACTS.has(e.replyAct);
 }
 
 /** The receiver still owes work on this obligation: not replied, or replied only in the interim. */
@@ -669,7 +671,7 @@ export function applyCloseEpoch(doc: MailLedgerDoc, epoch: string, outcome: Epoc
 export function applyReplied(doc: MailLedgerDoc, ref: string, replyId: string, now: number, replyTo?: string | null, replyAct?: string | null): MailStep {
   const exact = doc.entries[ref];
   // HIVE-DWIGHT-BG-REINVOKE (A): a discharging reply also upgrades an interim-replied entry.
-  const discharging = !!replyAct && !INTERIM_REPLY_ACTS.has(replyAct);
+  const discharging = !!replyAct && DISCHARGING_REPLY_ACTS.has(replyAct);
   const candidates = [...(exact ? [exact] : []), ...Object.values(doc.entries).filter((e) => e.senderId === ref && e.id !== ref).sort(bySeq)]
     .filter((e) => isOpenObligation(e) || (discharging && isInterimReplied(e)));
   const e = (replyTo ? candidates.find((c) => c.from === replyTo) : undefined) ?? candidates[0];
