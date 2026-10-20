@@ -369,6 +369,9 @@ export interface ClassifyCtx {
   /** HEAVY-LOCK-GLOB-LOOP-196: this segment is one iteration of a short loop, its variable replaced
    *  by a word: a test file named through it is a computed name (not read; see node --test). */
   loopWord?: boolean;
+  /** HEAVY-LOCK-CMD-FOR-198: how many times the enclosing cmd FOR loops run this text (nested lists
+   *  multiply, as loopPlan's `mult` does for sh). Absent = 1. */
+  loopMult?: number;
   /** The text of a script file the command runs (`bash suite.sh`, `./gate.sh`), resolved against the
    *  call's cwd and size-capped by the caller; null when unreadable. Absent = scripts are not read. */
   readScript?: (path: string, cd?: string) => string | null;
@@ -1218,9 +1221,28 @@ export function classifyCommand(cmd: string, depth = 0, ctx: ClassifyCtx = {}): 
   let here: ClassifyCtx = { ...ctx, dialect: d, stdin: undefined, expand, ...(readScript ? { readScript } : {}), ...(missingAt ? { missingAt } : {}) };
   let body = 0;
   let maybe: HeavyClass | null = null;
+  let cursor = 0;
   for (const { seg, op, looped } of plan) {
     const mine = paired ? bodies.slice(body, body + op) : [];
     body += op;
+    // HEAVY-LOCK-CMD-FOR-198: a cmd FOR runs its body (to the end of the line, `&`/`|` included, or to
+    // its block's `)`), so the loop is classified from where it starts in the text, not by segment.
+    const own = seg.replace(/\s+&$/, '');   // segments() marks a lone `&` (background) with ` &`
+    const segAt = d === 'cmd' ? text.indexOf(own, cursor) : -1;
+    if (segAt >= 0) cursor = segAt + own.length;
+    if (segAt >= 0 && /^@?for$/i.test(words(seg, d)[0] ?? '')) {
+      const loop = cmdFor(text.slice(segAt), depth, here);
+      if (loop) {
+        if (loop.cls.heavy && !loop.cls.provisional) return loop.cls;
+        if (loop.cls.heavy && !maybe) maybe = loop.cls;
+        if (loop.rest.trim()) {
+          const c = classifyCommand(loop.rest, depth, here);   // a shorter text: no depth to spend
+          if (c.heavy && !c.provisional) return c;
+          if (c.heavy && !maybe) maybe = c;
+        }
+        break;
+      }
+    }
     // HEAVY-JOB-LOCK-FAILOPEN: a substitution is opaque to the segment split (its pipes are its own),
     // but it RUNS: `X="$(node test/tools/run-tests.cjs)"` is a suite. B1: classified where it runs,
     // with this point's cd and variables (`J=/x; X="$(bash $J/light.sh)"` reads /x/light.sh).
@@ -1393,6 +1415,91 @@ export function planSize(cmd: string): number {
   return Array.isArray(plan) ? plan.length : -1;
 }
 export { PLAN_CAP };
+
+/**
+ * HEAVY-LOCK-CMD-FOR-198 (Jim 74a22b): cmd's `for [/d | /r [dir] | /l | /f ["opts"]] %v in (set) do
+ * body` (`%%v` in a .bat/.cmd), planned as loopPlan plans a bash for:
+ * - the body is everything after `do` to the end of the line, `&`, `&&`, `|`, `||` included (cmd runs
+ *   them all per iteration), or, after `do (`, the block up to its `)` (lines included); what follows
+ *   the block (`) & echo done`, the next lines of a script) is the `rest`, classified as it stands;
+ * - the set is OPEN (a glob, a /r walk, a /f read, a `%VAR%` or `!VAR!`) or a count: an explicit list
+ *   (its length) or a /l range ((end - start) / step + 1); nested loops multiply (ctx.loopMult);
+ * - a body that runs node --test is a suite over an open set or SUITE_MANY_FILES runs, as in sh;
+ * - otherwise the body is classified once per value with %v (and %~nv-style refs) replaced, as one
+ *   iteration of a loop (loopWord); an open set, a /l range or more than PLAN_CAP runs once as written;
+ * - a /f set's `'command'` (`` `command` `` with usebackq) RUNS: it is classified too.
+ * Returns null when the text does not open a FOR this reads (cmd itself would refuse it).
+ */
+const CMD_FOR = /^@?for\s+((?:\/[dlrf](?:\s+(?!%)(?:"[^"]*"|[^\s"%/]\S*))?\s+)*)(%%?)([A-Za-z])\s+in\s*\(/i;
+function cmdFor(text: string, depth: number, ctx: ClassifyCtx): { cls: HeavyClass; rest: string } | null {
+  const m = CMD_FOR.exec(text.trimStart());
+  if (!m) return null;
+  const src = text.trimStart();
+  const opts = m[1].toLowerCase();
+  const f = /\/f/.test(opts); const l = /\/l/.test(opts); const r = /\/r/.test(opts);
+  // The set, to its `)`; a /f set's quotes hold their own parentheses.
+  let i = m[0].length; let q: string | null = null;
+  const quotes = f ? `"'\`` : '"';
+  for (; i < src.length; i++) {
+    const c = src[i];
+    if (q) { if (c === q) q = null; continue; }
+    if (quotes.includes(c)) { q = c; continue; }
+    if (c === ')') break;
+  }
+  if (i >= src.length) return null;
+  const set = src.slice(m[0].length, i).trim();
+  const doAt = /^\s*do\s+/i.exec(src.slice(i + 1));
+  if (!doAt) return null;
+  let body = src.slice(i + 1 + doAt[0].length);
+  let rest = '';
+  if (body.startsWith('(')) {
+    let k = 1; let n = 1; q = null;
+    for (; k < body.length; k++) {
+      const c = body[k];
+      if (q) { if (c === q) q = null; continue; }
+      if (c === '"') { q = c; continue; }
+      if (c === '^') { k++; continue; }
+      if (c === '(') n++;
+      if (c === ')' && --n === 0) break;
+    }
+    rest = body.slice(k + 1).replace(/^[ \t]*(?:&&?|\|\|?)/, '');
+    body = body.slice(1, k);
+  } else {
+    const nl = body.indexOf('\n');
+    if (nl >= 0) { rest = body.slice(nl + 1); body = body.slice(0, nl); }
+  }
+  const here: ClassifyCtx = { ...ctx, dialect: 'cmd' };
+  let maybe: HeavyClass | null = null;
+  // A /f set's command runs once, before the loop.
+  const ran = f ? /^(['`])(.*)\1$/s.exec(set) : null;
+  if (ran) {
+    const c = classifyCommand(ran[2], depth + 1, here);
+    if (c.heavy && !c.provisional) return { cls: c, rest };
+    if (c.heavy) maybe = c;
+  }
+  const values = l || f ? [] : (set.match(/"[^"]*"|[^\s,;=]+/g) ?? []);
+  let count = Infinity;
+  if (l) {
+    const n = set.split(/[\s,;=]+/).filter(Boolean).map(Number);
+    if (n.length === 3 && n.every(Number.isFinite) && n[1] !== 0) count = Math.max(0, Math.floor((n[2] - n[0]) / n[1]) + 1);
+  } else if (!f && !r && !values.some((v) => /[*?%!]/.test(v))) count = values.length;
+  const runs = count * (ctx.loopMult ?? 1);
+  const tests = segments(body, 'cmd').filter(NODE_TEST).length;
+  if (tests && (runs === Infinity || runs * tests >= SUITE_MANY_FILES)) {
+    return { cls: { heavy: true, kind: 'suite', why: `a cmd FOR loop of node --test over ${runs === Infinity ? 'an open set (a glob, /r, /f or a variable)' : `${runs * tests} runs`}` }, rest };
+  }
+  const ref = new RegExp(`${m[2]}(~[A-Za-z]*)?${m[3]}`, 'g');
+  const one = (b: string): HeavyClass => classifyCommand(b, depth, { ...here, loopWord: true, loopMult: runs === Infinity ? runs : Math.max(runs, 1) });
+  const each = runs !== Infinity && !l && values.length && runs <= PLAN_CAP
+    ? values.map((v) => body.replace(ref, () => v))   // cmd's words drop a value's quotes, so %~f reads as %f
+    : [l && runs !== Infinity ? body.replace(ref, String(set.split(/[\s,;=]+/).filter(Boolean)[0])) : body];
+  for (const b of each) {
+    const c = one(b);
+    if (c.heavy && !c.provisional) return { cls: c, rest };
+    if (c.heavy && !maybe) maybe = c;
+  }
+  return { cls: maybe ?? { heavy: false }, rest };
+}
 
 /** HEAVY-LOCK-BG-LAPSE-189: `cat > f <<EOF` / `cat <<EOF >> f` / `tee [-a] f <<EOF` write the body to f. */
 function heredocWrite(raw: string[], ws: string[], body: string, here: ClassifyCtx, virtual: Map<string, string | null>, vkey: (p: string, cd?: string) => string, rewritten: ReadonlySet<string>): Set<string> {
