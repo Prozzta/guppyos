@@ -231,6 +231,8 @@ export interface HumanQA {
   askedAt?: string;
   answeredAt?: string;
   dismissedAt?: string;
+  /** NEEDS-HUMAN-NO-ESCALATE-192: why it was dismissed (`superseded by <msg id>`). */
+  dismissedReason?: string;
   /** ASKME-REVAMP (optional; a string-only entry still works): choices shown as buttons, */
   /** the index of the recommended one, whether several may be picked, and the indexes the */
   /** human picked (written with `a`, which carries the chosen labels and any note). */
