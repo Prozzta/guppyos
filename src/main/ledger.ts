@@ -165,7 +165,8 @@ export function parseLedgerOp(raw: unknown): { ok: true; op: LedgerOp } | { ok: 
     if (x.length) return { ok: false, error: `message: unknown field(s): ${x.join(', ')}` };
     if (!str(m.to, 120)) return { ok: false, error: 'message.to: required (an agent id, "god" or "broadcast")' };
     if (typeof m.act !== 'string' || !(ACTS as readonly string[]).includes(m.act)) return { ok: false, error: `message.act: one of ${ACTS.join(', ')}` };
-    if (!str(m.subject, 1000)) return { ok: false, error: 'message.subject: required' };
+    // MAIL-EMPTY-SUBJECT-BODY-195: a whitespace subject is no subject (it let a blank message through).
+    if (!str(m.subject, 1000) || !m.subject.trim()) return { ok: false, error: 'message.subject: required' };
     if (typeof m.body !== 'string' || m.body.length > LEDGER_TEXT_MAX) return { ok: false, error: `message.body: a string of at most ${LEDGER_TEXT_MAX} chars` };
     if (m.conversation !== undefined && !str(m.conversation, 120)) return { ok: false, error: 'message.conversation: a short string' };
     if (m.in_reply_to !== undefined && m.in_reply_to !== null && !str(m.in_reply_to, 200)) return { ok: false, error: 'message.in_reply_to: a message id or null' };
