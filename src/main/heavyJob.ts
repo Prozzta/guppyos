@@ -28,6 +28,9 @@ export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; pr
  * and starts nothing beside it while it holds. A class may also say so itself (`exclusive: true`);
  * the explicit marker for any command is an env gate before it (`GUPPY_HEAVY_EXCLUSIVE=1 <cmd>`,
  * BENCH_ENV). Installs and builds share. At one slot this changes nothing.
+ * As for every BENCH_ENV gate (pre-existing behaviour): the marker counts only as a prefix of the
+ * same command (`export X=1; npm run build` and `$env:X=1; ...` still share), and a gate word inside
+ * a longer name counts too (`NON_EXCLUSIVE=1 node --test x` is a bench: it fails closed).
  */
 export function heavyExclusive(cls: HeavyClass): boolean {
   return cls.heavy && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
@@ -1662,6 +1665,16 @@ export class HeavyJobLock {
       return { allow: true, acquired: false };
     }
     if (!reserved && !this.admits(agentId, excl, limit)) return this.deny(agentId, cls, limit, callId);
+    if (reserved && excl && !this.fits(agentId, true, limit)) {
+      // HEAVY-SLOT-EXCLUSIVE-192 (Jim MUST-1): a slot reserved for a shared job is not the empty
+      // machine. The exclusive call goes back to the HEAD of the queue: nothing passes it or joins the
+      // others, and it is told "HEAVY SLOT FREE" when they are done.
+      const r = this.reservations.get(agentId)!;
+      this.reservations.delete(agentId);
+      this.dequeue(agentId);
+      this.waiters.unshift({ agentId, kind: cls.kind as HeavyKind, since: this.now(), procs: r.procs, hooked: r.hooked, exclusive: true });
+      return this.deny(agentId, cls, limit, callId);
+    }
     if (reserved) this.reservations.delete(agentId);
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
@@ -1935,7 +1948,7 @@ export class HeavyJobLock {
     const before = new Set(this.reservations.keys());
     // HEAVY-SLOT-EXCLUSIVE-192: a queue place given up may have held back the waiters behind it.
     if (reserved || queued) this.grant();
-    const next =[...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
+    const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
     if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
     return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}), ...(waiting ? { waiting: true as const } : {}) };
   }

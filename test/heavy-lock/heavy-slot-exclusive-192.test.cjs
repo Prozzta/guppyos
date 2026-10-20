@@ -26,11 +26,11 @@ const FULL = { heavy: true, kind: 'suite', why: 'npm test' };
 const BENCH = { heavy: true, kind: 'bench', why: 'node capacity-mutants.cjs' };
 const BUILD = { heavy: true, kind: 'build', why: 'npm run build' };
 
-function rig(M, limit) {
+function rig(M, limit, extra = {}) {
   let now = 1_000_000; const logs = []; const notes = []; const gone = new Set();
   const l = new M.HeavyJobLock({
     limit: () => limit, now: () => now, setTimer: () => ({}), clearTimer: () => {}, log: (r) => logs.push(r),
-    notify: (a, k) => notes.push(a), alive: (a) => !gone.has(a)
+    notify: (a, k) => notes.push(a), alive: (a) => !gone.has(a), ...extra
   });
   let n = 0;
   const take = (a, cls) => { const id = `c${++n}`; const d = l.acquire(a, cls, cls.why, id, false); return { ...d, id }; };
@@ -132,6 +132,92 @@ const K = {
     void a;
   },
 
+  // Jim MUST-1: a slot reserved for a queued BUILD is not the empty machine. A FULL run on it goes
+  // back to the head of the queue; nothing passes it; it is told when the others are done.
+  reservedShared(M = HJ, N = 2) {
+    const r = rig(M, N);
+    const held = [['b', r.take('b', BUILD)]];
+    for (let i = 1; i < N; i++) held.push([`c${i}`, r.take(`c${i}`, BUILD)]);
+    assert.equal(r.take('x', BUILD).allow, false);
+    const [c, cd] = held.pop();
+    r.l.callDone(c, cd.id);
+    assert.deepEqual(reserved(r), ['x'], 'x is reserved for its build');
+    const x = r.take('x', FULL);
+    assert.equal(x.allow, false, `A SHARED RESERVATION IS NOT THE EMPTY MACHINE: a FULL on it waits (${N} slots)`);
+    assert.equal(r.l.snapshot().some((h) => h.agentId === 'x'), false, 'x holds nothing');
+    const q = r.l.queueSnapshot();
+    assert.deepEqual([q.waiters[0].agentId, q.waiters[0].exclusive, q.reserved.length], ['x', true, 0], 'x waits, exclusive, at the head');
+    assert.equal(r.take('y', BUILD).allow, false, 'NOTHING PASSES IT');
+    for (const [a, d] of held.slice(0, -1)) { r.l.callDone(a, d.id); assert.deepEqual(reserved(r), [], 'not reserved while another job runs'); }
+    const [a, d] = held[held.length - 1];
+    r.l.callDone(a, d.id);
+    assert.deepEqual(reserved(r), ['x'], 'reserved when the machine is empty');
+    assert.equal(r.notes[r.notes.length - 1], 'x', 'and told');
+    assert.equal(r.take('x', FULL).allow, true);
+    assert.equal(r.l.snapshot()[0].exclusive, true);
+  },
+
+  // Jim SHOULD 1: a holder's FULL waits for the other HOLDERS, not behind a waiter (it already holds).
+  reentryAhead(M = HJ, N = 2) {
+    const r = rig(M, N);
+    r.take('a', BUILD);
+    const c = r.take('c', BUILD);
+    assert.equal(r.take('w', FULL).allow, false);
+    r.l.callDone('c', c.id);
+    const a = r.take('a', FULL);
+    assert.equal(a.allow, true, `A HOLDER'S FULL DOES NOT QUEUE BEHIND A WAITER (${N} slots)`);
+    assert.equal(r.l.snapshot()[0].exclusive, true);
+    assert.equal(r.l.queueSnapshot().waiters[0].agentId, 'w', 'w still waits');
+  },
+
+  // Jim SHOULD 2: a stale exclusive head dropped by the TTL scan lets the waiter behind it in.
+  staleHead(M = HJ, N = 2) {
+    const r = rig(M, N);
+    r.take('b', BUILD);
+    assert.equal(r.take('x', FULL).allow, false);
+    assert.equal(r.take('y', BUILD).allow, false);
+    r.tick(M.HEAVY_TTL_MS - 1_000);
+    r.take('b', BUILD);
+    assert.equal(r.take('y', BUILD).allow, false, 'y asks again inside its TTL');
+    r.tick(2_000);
+    assert.deepEqual(reserved(r), ['y'], `A STALE EXCLUSIVE HEAD LETS THE NEXT ONE IN (${N} slots)`);
+  },
+
+  // Jim SHOULD 3: a waiter queued for a BUILD that is denied again for a FULL waits as an exclusive.
+  reDeny(M = HJ, N = 2) {
+    const r = rig(M, N);
+    const held = [];
+    for (let i = 1; i <= N; i++) held.push([`b${i}`, r.take(`b${i}`, BUILD)]);
+    assert.equal(r.take('x', BUILD).allow, false);
+    assert.equal(r.take('x', FULL).allow, false);
+    r.l.callDone(held[0][0], held[0][1].id);
+    assert.deepEqual(reserved(r), [], `A RE-DENY FOR A FULL MAKES THE WAITER EXCLUSIVE (${N} slots)`);
+  },
+
+  // Jim SHOULD 4: a waiting test process (a lease, no hook) that dies at the head lets the next one in.
+  async leaseGone(M = HJ, N = 2) {
+    let procs = null;
+    const r = rig(M, N, { probe: async () => procs });
+    for (let i = 1; i < N; i++) r.take(`b${i}`, BUILD);
+    const w = await r.l.lease('x', { op: 'acquire', pid: 111, createdMs: 5_000, suite: true });
+    assert.equal(w.state, 'wait');
+    assert.equal(r.take('y', BUILD).allow, false);
+    procs = [{ pid: 999, parentPid: 0, commandLine: 'other', createdMs: 1 }];
+    await r.l.scan();
+    assert.deepEqual(reserved(r), ['y'], `A TEST PROCESS THAT DIES AT THE HEAD LETS THE NEXT ONE IN (${N} slots)`);
+  },
+
+  // Jim SHOULD 5: a queued test process asking again while an exclusive cannot fit is not denied again.
+  async leasePoll(M = HJ, N = 2) {
+    const r = rig(M, N, { leasePollMs: 0 });
+    for (let i = 1; i < N; i++) r.take(`b${i}`, BUILD);
+    const ask = () => r.l.lease('x', { op: 'acquire', pid: 111, createdMs: 5_000, suite: true });
+    assert.equal((await ask()).state, 'wait');
+    assert.equal((await ask()).state, 'wait');
+    const denies = r.logs.filter((x) => x.action === 'deny' && x.agentId === 'x').length;
+    assert.equal(denies, 1, `A WAITING TEST PROCESS ASKS AGAIN WITHOUT A NEW DENY (${N} slots)`);
+  },
+
   // One slot is always alone: the same grants, denies and texts as before.
   one(M = HJ) {
     const r = rig(M, 1);
@@ -150,6 +236,12 @@ for (const N of [2, 3]) {
   test(`N=${N}: FIFO, builds coming and going do not starve a waiting FULL`, () => K.fifo(HJ, N));
   test(`N=${N}: an exclusive head that leaves the queue lets the next in`, () => K.headLeaves(HJ, N));
   test(`N=${N}: a holder's own FULL waits for the others, then runs alone`, () => K.reentry(HJ, N));
+  test(`N=${N}: a FULL on a slot reserved for a build waits at the head for the drain`, () => K.reservedShared(HJ, N));
+  test(`N=${N}: a holder's FULL does not queue behind a waiter`, () => K.reentryAhead(HJ, N));
+  test(`N=${N}: a stale exclusive head lets the next one in`, () => K.staleHead(HJ, N));
+  test(`N=${N}: a build waiter denied again for a FULL waits as an exclusive`, () => K.reDeny(HJ, N));
+  test(`N=${N}: a waiting test process that dies at the head lets the next one in`, () => K.leaseGone(HJ, N));
+  test(`N=${N}: a waiting test process asks again without a new deny`, () => K.leasePoll(HJ, N));
 }
 test('the classes: FULLs, benches, mutant runners and the explicit marker are exclusive', () => K.classes());
 test('N=1: exclusive changes nothing', () => K.one());
@@ -219,14 +311,32 @@ const MUTANTS = [
     killer: 'classes', dies: /A FULL, A BENCH, A MUTANT RUNNER OR THE MARKER RUNS ALONE/ },
   { name: 'no explicit marker',
     edits: [['(SCALE|BENCH|STRESS|SOAK|EXCLUSIVE)', '(SCALE|BENCH|STRESS|SOAK)']],
-    killer: 'classes', dies: /A FULL, A BENCH, A MUTANT RUNNER OR THE MARKER RUNS ALONE: GUPPY_HEAVY_EXCLUSIVE/ }
+    killer: 'classes', dies: /A FULL, A BENCH, A MUTANT RUNNER OR THE MARKER RUNS ALONE: GUPPY_HEAVY_EXCLUSIVE/ },
+  { name: 'a shared reservation takes a FULL (Jim MUST-1)',
+    edits: [['    if (reserved && excl && !this.fits(agentId, true, limit)) {', '    if (false) {']],
+    killer: 'reservedShared', dies: /A SHARED RESERVATION IS NOT THE EMPTY MACHINE/ },
+  { name: 'a holder\'s FULL queues behind a waiter (re-entry admits)',
+    edits: [['      if (excl && !mine.exclusive && !reserved && !this.fits(agentId, true, limit)) return', '      if (excl && !mine.exclusive && !reserved && !this.admits(agentId, true, limit)) return']],
+    killer: 'reentryAhead', dies: /A HOLDER'S FULL DOES NOT QUEUE BEHIND A WAITER/ },
+  { name: 'a stale head leaves without a grant',
+    edits: [['    if (passed || left) this.grant();', '    if (passed) this.grant();']],
+    killer: 'staleHead', dies: /A STALE EXCLUSIVE HEAD LETS THE NEXT ONE IN/ },
+  { name: 'a re-deny keeps the waiter shared',
+    edits: [['this.waiters[i].exclusive ||= exclusive; ', '']],
+    killer: 'reDeny', dies: /A RE-DENY FOR A FULL MAKES THE WAITER EXCLUSIVE/ },
+  { name: 'a dead waiting test process leaves without a grant',
+    edits: [['    let freed = waiterLeft;', '    let freed = false;']],
+    killer: 'leaseGone', dies: /A TEST PROCESS THAT DIES AT THE HEAD LETS THE NEXT ONE IN/ },
+  { name: 'the lease counts slots, not fits()',
+    edits: [["      const full = limit !== 'off' && !this.fits(agentId, heavyExclusive(cls), limit);", "      const full = limit !== 'off' && this.holders.size + this.reservations.size >= limit;"]],
+    killer: 'leasePoll', dies: /A WAITING TEST PROCESS ASKS AGAIN WITHOUT A NEW DENY/ }
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', async (t) => {
   for (const m of MUTANTS) {
-    await t.test(`mutant: ${m.name}`, () => {
+    await t.test(`mutant: ${m.name}`, async () => {
       const M = loadTs.fromText(HJF, mutateText(HJF, m.edits, m.name));
-      assert.throws(() => K[m.killer](M, m.n ?? 2), (e) => {
+      await assert.rejects(async () => K[m.killer](M, m.n ?? 2), (e) => {
         assert.match(String(e && e.message), m.dies, `${m.name}: died for the wrong reason: ${e && e.message}`);
         return true;
       });
