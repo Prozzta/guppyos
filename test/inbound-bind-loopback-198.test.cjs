@@ -70,6 +70,6 @@ test('MUTANT CENSUS: default-public binds and default-public config die behavior
     }, /Expected values to be strictly equal/, `${name}: default-public mutant SURVIVED`);
   }
   const alteredConfig = read('src/main/config.ts').replace('inboundBindAllInterfaces: false', 'inboundBindAllInterfaces: true');
-  assert.throws(() => assert.match(alteredConfig, /inboundBindAllInterfaces:\s*false/), /matches/,
+  assert.throws(() => assert.match(alteredConfig, /inboundBindAllInterfaces:\s*false/), /did not match/,
     'config default-public mutant SURVIVED');
 });

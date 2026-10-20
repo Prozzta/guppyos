@@ -1487,7 +1487,7 @@ export function SettingsModal({ config, onClose, initialSection }: SettingsModal
                           </PixelButton>
                         </div>
                         <span style={{ fontSize: 12, lineHeight: '16px', color: 'var(--cth-ink-500)' }}>
-                          Keep this off for tunnel forwarding. Turn it on only when intentionally forwarding a LAN or router port; live listeners rebind immediately.
+                          Keep this off for tunnel forwarding. Turn it on only when intentionally forwarding a LAN or router port; live listeners rebind immediately and get a new tunnel URL.
                         </span>
                       </div>
 
