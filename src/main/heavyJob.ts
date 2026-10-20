@@ -1346,10 +1346,12 @@ function stripKeywords(ws: string[], d: ShellDialect): string[] {
   }
   let out = i ? ws.slice(i) : ws;
   // `(cd test; npm test)`, `(npm run build)`: a subshell's `(` and `)` are glued to the first and
-  // last words (Jim 2e2f8a).
-  if (out.length > 1 && /^\([^()'"$`]+$/.test(out[0])) out = [out[0].slice(1), ...out.slice(1)];
+  // last words (Jim 2e2f8a). HEAVY-LOCK-LOOP-BODY-198 (subshells): nested ones glue several,
+  // `((cd x && npm test) )`, `(cd x && (npm test))`, and a `)` may stand alone after the last word.
+  if (out.length > 1 && /^\(+[^()'"$`]+$/.test(out[0])) out = [out[0].replace(/^\(+/, ''), ...out.slice(1)];
+  while (out.length > 1 && out[out.length - 1] === ')') out = out.slice(0, -1);
   const last = out[out.length - 1];
-  return out.length > 1 && /^[^()'"$`]+\)$/.test(last) ? [...out.slice(0, -1), last.slice(0, -1)] : out;
+  return out.length > 1 && /^[^()'"$`]+\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\)+$/, '')] : out;
 }
 
 /**
