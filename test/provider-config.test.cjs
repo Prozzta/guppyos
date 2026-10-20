@@ -16,6 +16,7 @@ const {
   modelProvidersForAgent,
   modelsForProvider
 } = loadTs('src/renderer/src/store/config.ts');
+const { tokenizeCommand } = loadTs('src/shared/commandLine.ts');
 
 const autoConfig = { defaultCommand: 'claude', autoMode: true };
 
@@ -115,6 +116,38 @@ test('Claude picker offers the verified Opus 5.5 and Fable 5.1 ids', () => {
   assert.ok(ids.includes('claude-fable-5-1'));
   assert.ok(ids.includes('claude-opus-5-5'));
   assert.ok(ids.includes('claude-opus-5-5[1m]'));
+});
+
+test('spawn commands preserve hostile model bytes through the shared argv path', () => {
+  const model = String.raw`model "quote" 'apostrophe' \`tick\` $cash a\\b c \\"tail`;
+  for (const provider of ['claude', 'codex', 'antigravity']) {
+    const command = buildSpawnCommand({ defaultCommand: 'claude', autoMode: false }, model, provider);
+    const args = tokenizeCommand(command);
+    assert.equal(args[args.indexOf('--model') + 1], model, provider);
+  }
+  if (process.platform === 'win32') {
+    const { spawnSync } = require('node:child_process');
+    const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', model], { encoding: 'utf8', windowsHide: true });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, model, 'the Windows child receives byte-exact argv');
+  }
+});
+
+test('shared tokenizer follows Windows backslash runs and keeps malformed input compatible', () => {
+  assert.deepEqual(tokenizeCommand(String.raw`claude --add-dir "\\server\share\x"`), [
+    'claude', '--add-dir', String.raw`\\server\share\x`
+  ]);
+  assert.deepEqual(tokenizeCommand(String.raw`claude --add-dir "\\?\C:\long\path"`), [
+    'claude', '--add-dir', String.raw`\\?\C:\long\path`
+  ]);
+  assert.deepEqual(tokenizeCommand(String.raw`claude --model "a\\b c"`), [
+    'claude', '--model', String.raw`a\\b c`
+  ]);
+  assert.deepEqual(tokenizeCommand(String.raw`claude --add-dir "C:\work\" --model x`), [
+    'claude', '--add-dir', 'C:\\work\\', '--model', 'x'
+  ]);
+  assert.deepEqual(tokenizeCommand("claude it's still here"), ['claude', "it's", 'still', 'here']);
+  assert.deepEqual(tokenizeCommand('claude a""b --flag="a b"'), ['claude', 'ab', '--flag=a b']);
 });
 
 test('Command Center model choices round-trip provider and model', () => {

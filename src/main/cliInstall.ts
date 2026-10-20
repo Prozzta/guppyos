@@ -52,6 +52,10 @@ export function chooseInstallRung(
  *  Windows) — `platform` is a parameter only so the Windows branch is reachable
  *  from a test on macOS. The only user-derived value (the missing binary name) is
  *  sanitized to a safe identifier; the install commands are trusted constants. */
+export function quotePosixBanner(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 export function buildMissingCliScript(
   bin: string,
   provider: AgentProvider,
@@ -59,6 +63,8 @@ export function buildMissingCliScript(
   platform: string = process.platform,
   nodeInstaller?: NodeInstaller | null
 ): string {
+  // POSIX has no escape sequence inside a single-quoted word: close, emit a
+  // literal apostrophe in double quotes, then reopen the quoted banner text.
   const info: ProviderInstallInfo = installInfoForProvider(provider, platform);
   const safeBin = (bin || provider).replace(/[^A-Za-z0-9._-]/g, '') || provider;
   const rung = chooseInstallRung(info, npmAvailable, nodeInstaller);
@@ -127,7 +133,7 @@ export function buildMissingCliScript(
   const lines: string[] = [
     `echo ''`,
     `echo '${rule}'`,
-    `echo '  Engine CLI not found:  ${safeBin}'`,
+    `echo ${quotePosixBanner(`  Engine CLI not found:  ${safeBin}`)}`,
     `echo ''`
   ];
   if (nodeSteps && nodeInstaller) {
@@ -157,7 +163,7 @@ export function buildMissingCliScript(
         : [`echo '  Installing the ${label} CLI now so you can watch — finish any'`,
            `echo '  sign-in it prompts for, then come back to this terminal.'`]),
       `echo ''`,
-      `echo '    ${cmd}'`,
+      `echo ${quotePosixBanner(`    ${cmd}`)}`,
       `echo '${rule}'`,
       `echo ''`,
       cmd,
@@ -167,8 +173,8 @@ export function buildMissingCliScript(
       `  echo '  [done] Installed — launching the agent…'`,
       `else`,
       `  echo "  [x] Install exited with code $__clirc — finish it manually:"`,
-      `  echo '    ${cmd}'`,
-      ...(docs ? [`  echo '    Docs: ${docs}'`] : []),
+      `  echo ${quotePosixBanner(`    ${cmd}`)}`,
+      ...(docs ? [`  echo ${quotePosixBanner(`    Docs: ${docs}`)}`] : []),
       `  echo '  Then restart the agent to launch it.'`,
       `fi`
     );
@@ -177,9 +183,9 @@ export function buildMissingCliScript(
     // Say what is actually missing instead of running a command that cannot work.
     lines.push(
       `echo '  Install Node.js (nodejs.org), then the ${label} CLI:'`,
-      ...(info.command ? [`echo '    ${info.command}'`] : []),
+      ...(info.command ? [`echo ${quotePosixBanner(`    ${info.command}`)}`] : []),
       `echo '  …or install the CLI by whatever method its docs recommend.'`,
-      ...(docs ? [`echo '  Docs: ${docs}'`] : []),
+      ...(docs ? [`echo ${quotePosixBanner(`  Docs: ${docs}`)}`] : []),
       `echo '${rule}'`
     );
   } else {

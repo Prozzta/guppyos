@@ -535,9 +535,11 @@ export function buildSpawnCommand(
         : preset.defaultCommand;
   let cmd = base;
   if (preset.supportsModel && model && preset.modelFlag) {
-    // Quote model values that contain whitespace (agy labels like
-    // "Gemini 3.1 Pro (High)") so the command tokenizer keeps them one arg.
-    const m = /\s/.test(model) ? `"${model}"` : model;
+    // Quote whitespace and quotes themselves so the shared command tokenizer
+    // passes the picker value byte-for-byte to spawnPty.
+    const m = /[\s"]/.test(model)
+      ? `"${model.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+      : model;
     cmd = `${cmd} ${preset.modelFlag} ${m}`;
   }
   // AGENT-MODEL-NOT-KEPT M3: a picked Codex effort is the request main reads back off the argv
