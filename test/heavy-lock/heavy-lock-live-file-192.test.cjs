@@ -22,6 +22,7 @@
  *   M15 the known live-file list is empty
  *   M16 a spawned --test option's value is read as a file
  *   M17 a literal loop's values are not read for the live tag (B, god 66dee2)
+ *   M18 the loop word's reference is the old `\$\{?f\}?` (`${a}x` and `$a$b` lose their value)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -44,6 +45,8 @@ const files = {
   'test/block-tag.test.cjs': "/**\n * The pid-attach box.\n * @heavy-lock live\n */\nconst test = require('node:test');\n",
   'test/mention.test.cjs': "'use strict';\nconst s = '// @heavy-lock live';\nconst t = require('node:test');\n",
   'test/late-tag.test.cjs': `'use strict';\n${'// filler\n'.repeat(500)}// @heavy-lock live\n`,
+  'test/ab.test.cjs': "// @heavy-lock live\n",
+  'test/ax.test.cjs': "// @heavy-lock live\n",
   'test/harness.test.cjs': "const { runScenario } = require('./electron-harness/run.cjs');\n",
   'test/plain.test.cjs': "const test = require('node:test');\ntest('x', () => {});\n",
   'test/hive-task-mutation.test.cjs': "const test = require('node:test');\n",
@@ -116,6 +119,9 @@ test('(B, god 66dee2) a loop: a literal list reads every value for the live tag;
   assert.equal(cls('for f in plain harness; do node --test test/$f.test.cjs; done'), 'heavy:bench', 'a value that loads the harness');
   assert.equal(cls('for f in plain one-run; do node --test test/$f.test.cjs; done'), 'light', 'a loop of plain files');
   assert.equal(cls('for f in a b; do node --test test/$f.test.cjs; done'), 'light', 'files made later in the call: the replay\'s light');
+  // The value is written in as the shell reads the word (Jim SHOULD-1): `$a$b` is a then b, `${a}x` is a then x (M18).
+  assert.equal(cls('for a in a; do for b in b; do node --test test/$a$b.test.cjs; done; done'), 'heavy:bench', 'GLUED $a$b NAMES ab (M18)');
+  assert.equal(cls('for a in a; do node --test test/${a}x.test.cjs; done'), 'heavy:bench', 'BRACED ${a}x NAMES ax (M18)');
   // The seam: a list that is not literal is a suite (GLOB-LOOP-196) or a name the lock cannot name (b).
   const seam = [
     ['for f in $(ls test); do node --test test/$f; done', 'heavy:suite'],
