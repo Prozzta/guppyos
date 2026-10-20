@@ -213,7 +213,11 @@ export class NativeMemoryWiring {
     }
     let text = r.text;
     if (cmd === 'wake-up' && r.ok) {
-      try { const claims = await this.claimWakeup?.(agentId); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
+      // The native reply and claims view must name the same wing: agentId is the caller,
+      // while --wing explicitly selects a different agent's wake-up.
+      const v = validateRequest((body ?? {}) as Record<string, unknown>, agentId);
+      const wing = !('exit' in v) && typeof v.args.wing === 'string' ? v.args.wing : agentId;
+      try { const claims = await this.claimWakeup?.(wing); if (claims) text = [text, claims].filter(Boolean).join('\n\n'); } catch { /* memory wake-up remains available */ }
     }
     return { status: 200, body: { exit: r.exit, text, json: r.json, error: r.error } };
   }
