@@ -395,6 +395,7 @@ export interface HarnessConfig {
    *  Mirrors main + renderer HarnessConfig. */
   telemetryEnabled?: boolean;
   slackEnabled?: boolean;
+  inboundBindAllInterfaces?: boolean;
   slackSigningSecret?: string;
   slackBotToken?: string;
   slackChannelId?: string;
@@ -1559,7 +1560,7 @@ const api = {
   /** Persist Slack settings (and stop the server if disabled / secret cleared). */
   slackSetConfig: (patch: {
     signingSecret?: string; botToken?: string; channelId?: string; port?: number; enabled?: boolean;
-    proactivePosting?: boolean;
+    proactivePosting?: boolean; inboundBindAllInterfaces?: boolean;
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('slack:setConfig', patch),
 
@@ -1579,7 +1580,7 @@ const api = {
     ipcRenderer.invoke('webhook:generateSecret'),
   /** Persist webhook settings (and stop the server if disabled / secret cleared). */
   webhookSetConfig: (patch: {
-    secret?: string; port?: number; enabled?: boolean;
+    secret?: string; port?: number; enabled?: boolean; inboundBindAllInterfaces?: boolean;
   }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('webhook:setConfig', patch),
 

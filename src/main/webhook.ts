@@ -103,6 +103,8 @@ export interface WebhookTaskStatus {
 export interface WebhookServerOptions {
   /** Local TCP port the HTTP server binds to (and the tunnel forwards to). */
   port: number;
+  /** Explicit LAN/router-forwarding opt-in; otherwise bind loopback only. */
+  bindAllInterfaces?: boolean;
   /** The endpoints to serve. May be swapped later with `setEndpoints`. */
   endpoints: WebhookEndpoint[];
   /**
@@ -145,6 +147,7 @@ export class WebhookServer {
   private server: Server | null = null;
   private tunnelUrl: string | null = null;
   private readonly port: number;
+  private readonly host: '127.0.0.1' | '0.0.0.0';
   private endpoints = new Map<string, WebhookEndpoint>();
   private readonly onMessage: (msg: WebhookInbound, endpoint: WebhookEndpointRef) => WebhookDispatch | null;
   private readonly lookupStatus: (token: string) => WebhookTaskStatus | null;
@@ -158,6 +161,7 @@ export class WebhookServer {
 
   constructor(opts: WebhookServerOptions) {
     this.port = opts.port;
+    this.host = opts.bindAllInterfaces ? '0.0.0.0' : '127.0.0.1';
     this.onMessage = opts.onMessage;
     this.lookupStatus = opts.lookupStatus;
     this.setEndpoints(opts.endpoints);
@@ -246,7 +250,7 @@ export class WebhookServer {
       const server = createServer((req, res) => this.handleRequest(req, res));
       const onError = (e: Error): void => reject(e);
       server.once('error', onError);
-      server.listen(this.port, () => {
+      server.listen(this.port, this.host, () => {
         server.off('error', onError);
         this.server = server;
         resolve();

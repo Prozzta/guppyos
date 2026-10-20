@@ -3503,6 +3503,7 @@ async function startSlackServer(): Promise<{ ok: boolean; url?: string; error?: 
   slackServer?.stop();
   slackServer = new SlackWebhookServer({
     port: cfg.slackPort && cfg.slackPort > 0 ? cfg.slackPort : 3847,
+    bindAllInterfaces: cfg.inboundBindAllInterfaces === true,
     signingSecret: cfg.slackSigningSecret,
     channelId: cfg.slackChannelId,
     // Fires from the HTTP server's event loop (not the IPC thread); route through
@@ -3911,6 +3912,7 @@ async function startWebhookServer(): Promise<{ ok: boolean; url?: string; error?
   const cfg = readConfig();
   const server = new WebhookServer({
     port: cfg.webhookPort && cfg.webhookPort > 0 ? cfg.webhookPort : WEBHOOK_DEFAULT_PORT,
+    bindAllInterfaces: cfg.inboundBindAllInterfaces === true,
     endpoints,
     onMessage: handleWebhookMessage,
     lookupStatus: lookupWebhookStatus
@@ -3958,6 +3960,26 @@ function stopWebhookServer(): void {
   webhookServer = null;
   // The done-observer deliberately OUTLIVES the server (it is a ledger concern,
   // not a transport one) — it is torn down with the process/hive, not here.
+}
+
+/** Recreate live inbound listeners after their shared bind address changes.
+ * Endpoint edits deliberately keep a healthy listener (and its tunnel) intact,
+ * but an address edit cannot take effect until the socket is rebound. */
+function rebindInboundServers(previousBindAllInterfaces: boolean): void {
+  const cfg = readConfig();
+  if (previousBindAllInterfaces === (cfg.inboundBindAllInterfaces === true)) return;
+
+  const restartSlack = slackServer !== null;
+  const restartWebhook = webhookServer !== null;
+  if (restartSlack) stopSlackServer();
+  if (restartWebhook) stopWebhookServer();
+
+  if (restartSlack && cfg.slackEnabled && cfg.slackSigningSecret) {
+    void startSlackServer().then((r) => {
+      if (!r.ok) console.error('[slack] rebind failed:', r.error);
+    });
+  }
+  if (restartWebhook) reconcileWebhookServer();
 }
 
 /** The persisted main-window geometry (kv key `window.bounds`). */
@@ -6898,8 +6920,9 @@ ipcMain.handle('slack:reply', (_evt, arg: unknown) => {
 ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   const p = (patch ?? {}) as {
     signingSecret?: unknown; botToken?: unknown; channelId?: unknown; port?: unknown; enabled?: unknown;
-    proactivePosting?: unknown;
+    proactivePosting?: unknown; inboundBindAllInterfaces?: unknown;
   };
+  const previousBindAllInterfaces = readConfig().inboundBindAllInterfaces === true;
   const next: Partial<HarnessConfig> = {};
   // Trim string fields; an emptied field clears back to undefined.
   if (typeof p.signingSecret === 'string') next.slackSigningSecret = p.signingSecret.trim() || undefined;
@@ -6907,8 +6930,10 @@ ipcMain.handle('slack:setConfig', (_evt, patch: unknown) => {
   if (typeof p.channelId === 'string') next.slackChannelId = p.channelId.trim() || undefined;
   if (typeof p.port === 'number' && Number.isFinite(p.port)) next.slackPort = p.port;
   if (typeof p.enabled === 'boolean') next.slackEnabled = p.enabled;
+  if (typeof p.inboundBindAllInterfaces === 'boolean') next.inboundBindAllInterfaces = p.inboundBindAllInterfaces;
   if (typeof p.proactivePosting === 'boolean') next.slackProactivePosting = p.proactivePosting;
   writeConfig(next);
+  rebindInboundServers(previousBindAllInterfaces);
   // Reconcile the running server: disabling (or clearing the secret) stops it. We
   // deliberately do NOT auto-(re)start here — the user presses Start in Settings
   // to fetch the fresh (ephemeral) tunnel URL.
@@ -7104,12 +7129,15 @@ ipcMain.handle('webhook:generateSecret', () => {
   return { ok: true, secret };
 });
 ipcMain.handle('webhook:setConfig', (_evt, patch: unknown) => {
-  const p = (patch ?? {}) as { secret?: unknown; port?: unknown; enabled?: unknown };
+  const p = (patch ?? {}) as { secret?: unknown; port?: unknown; enabled?: unknown; inboundBindAllInterfaces?: unknown };
+  const previousBindAllInterfaces = readConfig().inboundBindAllInterfaces === true;
   const next: Partial<HarnessConfig> = {};
   if (typeof p.secret === 'string') next.webhookSecret = p.secret.trim() || undefined;
   if (typeof p.port === 'number' && Number.isFinite(p.port)) next.webhookPort = p.port;
   if (typeof p.enabled === 'boolean') next.webhookEnabled = p.enabled;
+  if (typeof p.inboundBindAllInterfaces === 'boolean') next.inboundBindAllInterfaces = p.inboundBindAllInterfaces;
   writeConfig(next);
+  rebindInboundServers(previousBindAllInterfaces);
   upsertLegacyWebhookTrigger({
     secret: typeof p.secret === 'string' ? p.secret.trim() : undefined,
     enabled: typeof p.enabled === 'boolean' ? p.enabled : undefined

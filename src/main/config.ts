@@ -468,6 +468,8 @@ export interface HarnessConfig {
   providerDefaultModels?: Partial<Record<AgentProvider, string>>;
   /** Master toggle for the Slack → Michael's-queue integration. */
   slackEnabled?: boolean;
+  /** Expose inbound webhook/Slack listeners beyond loopback (default false). */
+  inboundBindAllInterfaces?: boolean;
   /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */
   slackSigningSecret?: string;
   /** Bot token (xoxb-…) — only needed if the bot ever replies; optional for now. */
@@ -584,6 +586,7 @@ const DEFAULTS: HarnessConfig = {
   tvShowOffices: false,
   officeTheme: 'office',
   slackEnabled: false,
+  inboundBindAllInterfaces: false,
   slackSigningSecret: undefined,
   slackBotToken: undefined,
   slackChannelId: undefined,
