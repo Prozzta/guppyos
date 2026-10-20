@@ -5,8 +5,14 @@
 Guppy is a **local-first desktop app**. It spawns local processes in PTYs and
 reads/writes files under directories you register. Its in-app hook server uses a
 local pipe and an HTTP broker bound only to `127.0.0.1` on an ephemeral port. Every
-HTTP hook URL carries a fresh per-spawn token, checked in constant time; there is no
-remote listener or remote surface by design.
+HTTP hook URL carries a fresh per-spawn token, checked in constant time.
+
+Inbound webhooks and Slack events are off by default. When an operator enables and
+configures either integration, its listener binds the configured port on all
+interfaces and is intended to be tunnel-forwarded: webhook requests require a
+per-endpoint secret and Slack events require a signing secret, both checked in
+constant time. These opt-in public surfaces are distinct from the loopback-only
+hook broker.
 
 ## Supported versions
 
