@@ -24,6 +24,8 @@ const { readSource } = require('../read-source.cjs');
 
 const HJ = loadTs('src/main/heavyJob.ts');
 const H = { heavy: true, kind: 'suite' };
+// HEAVY-SLOT-EXCLUSIVE-192: a suite runs alone at 2+ slots; the slot-counting tests use a class that shares.
+const S = { heavy: true, kind: 'install' };
 
 function rig(M = HJ, limit = 1, extra = {}) {
   let now = 1_000_000; let lim = limit; const logs = []; const notes = []; const gone = new Set();
@@ -102,10 +104,10 @@ test('a reserved agent whose PTY exits drops its reservation; the next waiter ge
 
 test('a raised limit serves the queue before a newcomer; Off keeps no queue', () => {
   const x = rig();
-  x.l.acquire('a', H, 'npm ci', 'a1', false);
-  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('a', S, 'npm ci', 'a1', false);
+  x.l.acquire('b', S, 'npm ci', 'b1', false);
   x.setLimit(2);
-  assert.equal(x.l.acquire('n', H, 'npm ci', 'n1', false).allow, false, 'the free slot went to b first');
+  assert.equal(x.l.acquire('n', S, 'npm ci', 'n1', false).allow, false, 'the free slot went to b first');
   assert.deepEqual(x.notes.map((n) => n.a), ['b']);
   x.setLimit('off');
   x.l.callDone('a', 'a1');
@@ -252,10 +254,10 @@ test('N2: a re-deny keeps the place AND restarts the waiter TTL', () => {
 
 K.noSelfNotify = (M = HJ) => {
   const x = rig(M);
-  x.l.acquire('a', H, 'npm ci', 'a1', false);
-  x.l.acquire('b', H, 'npm ci', 'b1', false);
+  x.l.acquire('a', S, 'npm ci', 'a1', false);
+  x.l.acquire('b', S, 'npm ci', 'b1', false);
   x.setLimit(2);
-  assert.deepEqual(x.l.acquire('b', H, 'npm ci', 'b2', false), { allow: true, acquired: true });
+  assert.deepEqual(x.l.acquire('b', S, 'npm ci', 'b2', false), { allow: true, acquired: true });
   assert.deepEqual(x.notes, [], 'THE CALLER IS NOT TOLD ABOUT THE SLOT IT IS TAKING');
 };
 test('N3: when the limit is raised, the first waiter calling again takes its slot without a "slot free" notice', () => K.noSelfNotify());

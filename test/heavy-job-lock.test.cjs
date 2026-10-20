@@ -131,6 +131,8 @@ function lock(limit, extra = {}) {
   return { l, logs, timers, tick: (ms) => { now += ms; }, setLimit: (v) => { lim = v; } };
 }
 const H = { heavy: true, kind: 'suite' };
+// HEAVY-SLOT-EXCLUSIVE-192: a suite runs alone at 2+ slots; the slot-counting tests use a class that shares.
+const S = { heavy: true, kind: 'install' };
 
 test('N=1: the first heavy job takes the slot; another agent is DENIED naming the holder; the holder re-enters; its foreground PostToolUse frees it', () => {
   const x = lock(1);
@@ -158,25 +160,25 @@ test('N=1: the first heavy job takes the slot; another agent is DENIED naming th
 
 test('N=2: two agents hold; the THIRD is denied naming BOTH', () => {
   const x = lock(2);
-  assert.equal(x.l.acquire('a', H, 'npm ci', '1', false).allow, true);
-  assert.equal(x.l.acquire('b', H, 'npm run build', '2', false).allow, true);
-  const d = x.l.acquire('c', H, 'npm test', '3', false);
+  assert.equal(x.l.acquire('a', S, 'npm ci', '1', false).allow, true);
+  assert.equal(x.l.acquire('b', S, 'npm run build', '2', false).allow, true);
+  const d = x.l.acquire('c', S, 'npm test', '3', false);
   assert.equal(d.allow, false);
   assert.match(d.reason, /allows 2 heavy jobs at once and they are held by a \(.*\); b \(/);
 });
 
 test('OFF: never denies and holds nothing; a LIVE change applies at the next acquire (1 -> 2 -> off)', () => {
   const x = lock('off');
-  for (const a of ['a', 'b', 'c']) assert.deepEqual(x.l.acquire(a, H, 'npm ci', a, false), { allow: true, acquired: false });
+  for (const a of ['a', 'b', 'c']) assert.deepEqual(x.l.acquire(a, S, 'npm ci', a, false), { allow: true, acquired: false });
   assert.equal(x.l.snapshot().length, 0);
   const y = lock(1);
-  y.l.acquire('a', H, 'npm ci', '1', false);
-  assert.equal(y.l.acquire('b', H, 'npm ci', '2', false).allow, false);
+  y.l.acquire('a', S, 'npm ci', '1', false);
+  assert.equal(y.l.acquire('b', S, 'npm ci', '2', false).allow, false);
   y.setLimit(2);
-  assert.equal(y.l.acquire('b', H, 'npm ci', '2', false).allow, true, 'raised live');
-  assert.equal(y.l.acquire('c', H, 'npm ci', '3', false).allow, false);
+  assert.equal(y.l.acquire('b', S, 'npm ci', '2', false).allow, true, 'raised live');
+  assert.equal(y.l.acquire('c', S, 'npm ci', '3', false).allow, false);
   y.setLimit('off');
-  assert.equal(y.l.acquire('c', H, 'npm ci', '3', false).allow, true, 'off live');
+  assert.equal(y.l.acquire('c', S, 'npm ci', '3', false).allow, true, 'off live');
 });
 
 test('BACKGROUND: its PostToolUse does NOT free the slot; the process check does, after 2 scans with no heavy process under the holder\'s PTY', async () => {
