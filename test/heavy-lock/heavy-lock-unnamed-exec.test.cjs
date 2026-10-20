@@ -26,6 +26,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { tempDir, removeDir } = require('../tools/test-temp.cjs');
 const loadTs = require('../load-ts.cjs');
 
 const { HeavyJobLock, classifyCommand } = loadTs('src/main/heavyJob.ts');
@@ -113,14 +114,16 @@ test('wiring: the MCP route carries the unnamed count on a degraded PreToolUse',
 });
 
 async function server(t, limit) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'md-heavyun-'));
+  const home = tempDir('md-heavyun-');
   const ph = process.env.HOME; const pu = process.env.USERPROFILE;
   process.env.HOME = home; process.env.USERPROFILE = home;
   assert.equal(os.homedir(), home, 'HOME jailed before any hive');
   const hive = new HiveManager(() => home);
-  t.after(() => {
+  t.after(async () => {
     if (ph === undefined) delete process.env.HOME; else process.env.HOME = ph;
     if (pu === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = pu;
+    hive.dispose(); // closes its log, or the folder cannot be removed
+    await removeDir(home);
   });
   for (const id of ['a1', 'a2']) await hive.ensureAgent({ id, name: id, provider: 'codex', cwd: home });
   const control = { takeSteer: () => null, shouldHalt: () => false, toolDecision: () => ({ deny: false }) };

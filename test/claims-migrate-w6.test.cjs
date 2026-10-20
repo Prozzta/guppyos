@@ -13,8 +13,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const crypto = require('node:crypto');
 const loadTs = require('./load-ts.cjs');
 
@@ -23,7 +23,7 @@ const M = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'migrate.ts'));
 const C = loadTs(path.join(ROOT, 'src', 'shared', 'claims.ts'));
 const R = loadTs(path.join(ROOT, 'src', 'main', 'memoryRollover.ts'));
 const sha = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claims-w6-'));
+const tmp = () => tempDir('claims-w6-');
 
 /** Records as the ledger would hold them after appending drafts (W1 assigns the ids). */
 const asRecords = (drafts, from = 0) => drafts.map((d, i) => ({ v: 1, id: `c${from + i}`, at: d.at || '2026-10-03T00:00:00.000Z', wt: '2026-10-03T00:00:00.000Z', agent: 'a', prev: '', mac: '', ...d }));

@@ -79,7 +79,7 @@ function startWatchdog(limitMs, outFile, jobExe = null) {
 const FILE_JOB_SRC = path.join(__dirname, 'file-job.cs');
 const FILE_JOB_PRELOAD = path.join(__dirname, 'file-job-preload.cjs');
 const CSC = path.join(process.env.WINDIR || 'C:/Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe');
-function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = os.tmpdir() } = {}) {
+function prepareFileJob({ csc = CSC, src = FILE_JOB_SRC, dir = require('./shared-temp.cjs').sharedTemp() } = {}) {
   if (process.platform !== 'win32') return { exe: null, why: 'not Windows' };
   if (!fs.existsSync(csc)) return { exe: null, why: `no in-box csc at ${csc}` };
   const hash = require('crypto').createHash('sha256').update(fs.readFileSync(src)).digest('hex').slice(0, 12);
@@ -106,6 +106,44 @@ const startSlots = (env = process.env, cores = os.availableParallelism()) => {
   const n = Number(env.GUPPY_START_SLOTS);
   return env.GUPPY_START_SLOTS !== undefined && env.GUPPY_START_SLOTS !== '' && Number.isInteger(n) && n >= 0 ? n : Math.max(2, Math.ceil(cores / 4));
 };
+/**
+ * TEST-TEMP-HYGIENE: every test-file process gets a temp folder of its own under one run folder
+ * (temp-jail-preload.cjs), so a leak is named by its file and other processes' use of the shared
+ * temp folder never counts. { root }.
+ */
+const TEMP_JAIL_PRELOAD = path.join(__dirname, 'temp-jail-preload.cjs');
+function prepareTempJail({ dir = os.tmpdir() } = {}) {
+  return { root: fs.mkdtempSync(path.join(dir, 'run-tests-temp-')) };
+}
+
+/** The files whose temp folder under `root` is not empty: [{ file, entries }], entries sorted. */
+function tempLeaks(root, { readdir = (d) => fs.readdirSync(d), readFile = (p) => fs.readFileSync(p, 'utf8') } = {}) {
+  const out = [];
+  let names;
+  try { names = readdir(root); } catch { return out; }
+  for (const name of names) {
+    const pid = /^(\d+)-[A-Za-z0-9]+$/.exec(name);
+    if (!pid) continue;
+    let entries;
+    try { entries = readdir(path.join(root, name)); } catch { continue; }
+    if (!entries.length) continue;
+    let file;
+    try { file = readFile(path.join(root, `${name}.file`)).trim(); } catch { file = ''; }
+    out.push({ file: file || `(pid ${pid[1]})`, entries: [...entries].sort() });
+  }
+  return out.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+}
+
+/** Names each leaking file on stderr; returns how many leaked. */
+function reportTempLeaks(leaks, err) {
+  for (const l of leaks) {
+    const shown = l.entries.slice(0, 8).join(', ') + (l.entries.length > 8 ? `, ... (${l.entries.length} in all)` : '');
+    err(`[test-runner] TEMP LEAK: ${l.file} left ${l.entries.length} entr${l.entries.length === 1 ? 'y' : 'ies'} in its temp folder: ${shown}`);
+  }
+  if (leaks.length) err(`[test-runner] ${leaks.length} test file(s) left files in the temp folder - the run FAILS (remove your temp in finally / t.after)`);
+  return leaks.length;
+}
+
 function prepareStartGate({ dir = os.tmpdir(), slots = startSlots() } = {}) {
   return { slots, dir: fs.mkdtempSync(path.join(dir, 'run-tests-start-')) };
 }
@@ -188,6 +226,9 @@ function run({
   fileJob = spawn === nodeSpawn && watchdog === startWatchdog ? prepareFileJob : () => ({ exe: null, why: null }),
   // LOAD-BURST-196: the real runs only, as for fileJob. null = no gate.
   startGate = spawn === nodeSpawn && watchdog === startWatchdog ? prepareStartGate : () => null,
+  // TEST-TEMP-HYGIENE: the real runs only, as for fileJob. null = no temp check.
+  tempJail = spawn === nodeSpawn && watchdog === startWatchdog ? prepareTempJail : () => null,
+  removeJail = (root) => fs.rmSync(root, { recursive: true, force: true }),
   log = (line) => process.stdout.write(`${line}\n`),
   err = (line) => process.stderr.write(`${line}\n`),
   // CLAIMS-PERF-LANE: the serial lane's folder (the CLI passes test/perf); absent = no lane.
@@ -235,10 +276,19 @@ function run({
     env.GUPPY_START_GATE = `${gate.slots}|${gate.dir}`;
     env.GUPPY_START_OPT = opt;
   }
+  let jail = null;
+  try { jail = tempJail(); } catch (e) { err(`[test-runner] no temp jail (${String(e)}): temp leaks are not checked (TEST-TEMP-HYGIENE)`); }
+  if (jail) {
+    const opt = `--require "${TEMP_JAIL_PRELOAD.split(path.sep).join('/')}"`;
+    env.NODE_OPTIONS = [env.NODE_OPTIONS, opt].filter(Boolean).join(' ');
+    env.GUPPY_TEMP_JAIL = jail.root;
+    env.GUPPY_TEMP_JAIL_OPT = opt;
+  }
   try {
-    return runGated({ filters, rel, env, gate, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
+    return runGated({ filters, rel, env, gate, jail, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, readdir });
   } finally {
     if (gate) { try { fs.rmSync(gate.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+    if (jail) { try { removeJail(jail.root); } catch (e) { err(`[test-runner] the run's temp folders could not be removed (${e.code || e.message}; a child still holds a file): ${jail.root} (TEST-TEMP-HYGIENE)`); } }
   }
 }
 
@@ -253,7 +303,7 @@ function burstLine(text, slots) {
 }
 
 /** run() from the per-file jobs on, with the start gate in place (LOAD-BURST-196). */
-function runGated({ rel, env, gate, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
+function runGated({ rel, env, gate, jail = null, spawn, cwd, timeoutMs, isTTY, eventsFile, readFile, removeFile, failureFile, writeFailureFile, watchdog, fileJob, log, err, perfDir, filters, readdir }) {
   const job = fileJob();
   if (job.exe) {
     const opt = `--require "${FILE_JOB_PRELOAD.split(path.sep).join('/')}"`;
@@ -270,9 +320,15 @@ function runGated({ rel, env, gate, spawn, cwd, timeoutMs, isTTY, eventsFile, re
   // A child that never started, or was killed by a signal (status null), is a failure, not a pass.
   if (spawnFailed(main.res, '', err)) return totals(1, main.counts, 'not run', log, main.failures, { failureFile, writeFailureFile });
   // A timed-out file fails the run whatever node's own exit code says.
-  const mainCode = main.hung.length && main.res.status === 0 ? 1 : main.res.status;
-  if (!perfDir) return totals(mainCode, main.counts, 'off', log, main.failures, { failureFile, writeFailureFile });
+  // TEST-TEMP-HYGIENE: a file that left anything in its temp folder fails the run, as a timed-out one does.
+  const leaked = () => (jail ? reportTempLeaks(tempLeaks(jail.root), err) : 0);
+  const hungCode = main.hung.length && main.res.status === 0 ? 1 : main.res.status;
+  if (!perfDir) {
+    const n = leaked();
+    return totals(n && hungCode === 0 ? 1 : hungCode, main.counts, 'off', log, main.failures, { failureFile, writeFailureFile });
+  }
   const lane = runPerfLane({ perfDir, filters, readdir, ...fx, eventsFile: `${eventsFile}.perf`, log });
+  const mainCode = leaked() && hungCode === 0 ? 1 : hungCode;
   return totals(mainCode !== 0 ? mainCode : lane.code, sumCounts(main.counts, lane.counts), lane.state, log, [...main.failures, ...lane.failures], { failureFile, writeFailureFile });
 }
 
@@ -397,7 +453,7 @@ function totals(code, counts, laneState, log, failures = [], {
   return code;
 }
 
-module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
+module.exports = { prepareFileJob, FILE_JOB_PRELOAD, prepareTempJail, TEMP_JAIL_PRELOAD, tempLeaks, reportTempLeaks,prepareStartGate, startSlots, START_GATE_PRELOAD, burstLine, selectTestFiles, discoverTestFiles, FEATURE_TEST_DIRS, run, runPerfLane, runCounts, failingTests, TEST_SUFFIX, PERF_SUFFIX, FILE_TIMEOUT_MS, fileTimeoutMs, timedOutFiles, watchdogPollMs, backstopMs, BACKSTOP_MIN_MARGIN_MS, WATCHDOG };
 
 if (require.main === module) {
   const repoRoot = path.resolve(__dirname, '..', '..');

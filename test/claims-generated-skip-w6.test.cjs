@@ -11,8 +11,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -36,7 +36,7 @@ test('marker: recognised with or without a BOM; ordinary text is not', () => {
 
 test('G6.6 rollover: a generated memory.md far over the limit is left byte for byte, and no archive appears', () => {
   for (const eol of ['\n', '\r\n']) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
+    const dir = tempDir('claims-gen-');
     const text = generatedView(R.MEMORY_ROLLOVER_BYTES * 3).replace(/\n/g, eol);
     fs.writeFileSync(path.join(dir, 'memory.md'), text);
     const r = R.rolloverMemory(dir, Date.parse('2026-10-03T12:00:00Z'));
@@ -48,7 +48,7 @@ test('G6.6 rollover: a generated memory.md far over the limit is left byte for b
 });
 
 test('G6.6 rollover: an ordinary memory.md over the limit still rolls (the skip keys on the marker only)', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
+  const dir = tempDir('claims-gen-');
   const text = generatedView(R.MEMORY_ROLLOVER_BYTES * 3).split('\n').slice(1).join('\n');   // no marker
   fs.writeFileSync(path.join(dir, 'memory.md'), text);
   const r = R.rolloverMemory(dir, Date.parse('2026-10-03T12:00:00Z'));
@@ -57,7 +57,7 @@ test('G6.6 rollover: an ordinary memory.md over the limit still rolls (the skip 
 });
 
 test('G6.6 seed: nothing is seeded into a generated memory.md, even one with no pinned heading', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
+  const dir = tempDir('claims-gen-');
   const text = `${G.GENERATED_MEMORY_MARKER}\n# Memory: x\n\n## Working set\n- a fact [c:c1]\n`;
   fs.writeFileSync(path.join(dir, 'memory.md'), text);
   const r = R.seedPinnedSection(dir);
@@ -67,7 +67,7 @@ test('G6.6 seed: nothing is seeded into a generated memory.md, even one with no 
 });
 
 test('G6.6 Stop rollover (ZT-I2): the rollover at its Stop limit leaves a generated memory.md byte for byte', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-gen-'));
+  const dir = tempDir('claims-gen-');
   const text = generatedView(200 * 1024);
   fs.writeFileSync(path.join(dir, 'memory.md'), text);
   const r = R.rolloverMemory(dir, Date.now(), R.MEMORY_STOP_ROLLOVER_BYTES);

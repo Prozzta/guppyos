@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./tools/test-temp.cjs');
 const asar = require('@electron/asar');
 const { verify, verifyBundleText } = require('../scripts/verify-packaged-no-seams.cjs');
 
@@ -24,7 +25,7 @@ const SEAMS = NORMAL.replace('LAYERB_SEAMS_BUILT = false', 'LAYERB_SEAMS_BUILT =
 
 async function pack(t, mainText) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-noseams-'));
-  t.after(() => { try { asar.uncacheAll(); fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* leave it */ } });
+  t.after(async () => { try { asar.uncacheAll(); } catch { /* nothing cached */ } await removeDir(dir); });
   const src = path.join(dir, 'app');
   fs.mkdirSync(path.join(src, 'out', 'main'), { recursive: true });
   fs.writeFileSync(path.join(src, 'package.json'), '{}');

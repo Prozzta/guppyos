@@ -16,6 +16,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { removeDir } = require('./tools/test-temp.cjs');
 const Module = require('node:module');
 const asar = require('@electron/asar');
 const { readSource: read } = require('./read-source.cjs');
@@ -95,7 +96,7 @@ K.hits = (c = C) => {
 
 async function pack(t, files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'blu197-'));
-  t.after(() => { try { asar.uncacheAll(); fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* leave it */ } });
+  t.after(async () => { try { asar.uncacheAll(); } catch { /* nothing cached */ } await removeDir(dir); });
   const src = path.join(dir, 'app');
   for (const [rel, body] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(src, rel)), { recursive: true });

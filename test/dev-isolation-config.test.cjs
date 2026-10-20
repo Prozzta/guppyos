@@ -19,6 +19,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 
 process.env.MUNDER_DEV = '1';
 // The layer-b seams are absent here: this file pins the FIXED root's clamp (the override has its
@@ -27,7 +28,7 @@ delete process.env.MUNDER_DEV_ROOT;
 delete process.env.MUNDER_HIDDEN;
 const loadTs = require('./load-ts.cjs');
 
-const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'md-devcfg-'));
+const userData = tempDir('md-devcfg-');
 const electron = require.resolve('electron');
 require.cache[electron] = { id: electron, filename: electron, loaded: true, exports: { app: { getPath: () => userData } } };
 
@@ -186,7 +187,7 @@ const F1_SENTINEL = 'external-credential-sentinel-not-a-real-token';
 /** A throwaway Dev-shaped tree. Returns the dev root, the agent's .codex dir and
  *  the auth.json path inside it. */
 function f1Tree(name) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-f1-' + name + '-'));
+  const root = tempDir('md-f1-' + name + '-');
   const codexDir = path.join(root, 'hive', 'agents', 'dev-agent-1', '.codex');
   fs.mkdirSync(codexDir, { recursive: true });
   return { root, codexDir, authDest: path.join(codexDir, 'auth.json') };
@@ -194,7 +195,7 @@ function f1Tree(name) {
 
 /** An external "credential" well outside the dev root. A sentinel, never a real one. */
 function f1External(root) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-f1-outside-'));
+  const dir = tempDir('md-f1-outside-');
   const file = path.join(dir, 'auth.json');
   fs.writeFileSync(file, F1_SENTINEL, 'utf8');
   assert.equal(iso.isInside(file, root), false, 'the sentinel must be outside the dev root');
@@ -263,7 +264,7 @@ test('F1/5 the destination bound requires a STRICT descendant — the agents dir
   assert.equal(r.ok, false, 'isInside() is true for an exact match, so strictness must be explicit');
   assert.match(r.reason, /not inside a DEV agent home/);
   // And somewhere else entirely.
-  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'md-f1-elsewhere-'));
+  const elsewhere = tempDir('md-f1-elsewhere-');
   const r2 = iso.codexAuthDestBound({ authDest: path.join(elsewhere, 'auth.json'), devDataRoot: root });
   assert.equal(r2.ok, false);
 });
@@ -401,7 +402,7 @@ test('F1/11 with DEV OFF even an external link is left completely untouched', (t
 
 test('F1/12 a parent reparse escape whose target EXISTS is refused, nothing touched', (t) => {
   const { root } = f1Tree('escape');
-  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-f1-escapedir-'));
+  const outsideDir = tempDir('md-f1-escapedir-');
   const target = path.join(outsideDir, 'auth.json');
   fs.writeFileSync(target, F1_SENTINEL, 'utf8');
   // An agent home whose .codex is a junction pointing OUT of the dev root.

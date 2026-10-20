@@ -13,15 +13,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
-const tmp = (tag) => fs.mkdtempSync(path.join(os.tmpdir(), `rebrand-a-${tag}-`));
+const tmp = (tag) => tempDir(`rebrand-a-${tag}-`);
 
 const M = loadTs('src/main/userDataMigration.ts');
 const { installerUrl, artifactPrefix, GUPPY_ARTIFACTS_FROM } = loadTs('src/shared/updateState.ts');

@@ -23,8 +23,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -139,7 +139,7 @@ let baselineOnce = null;
 function baseline(src) {
   baselineOnce = baselineOnce || (async () => {
     const cand = snapshotChecklist(src);
-    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'claims-g63-baseline-'));
+    const base = tempDir('claims-g63-baseline-');
     fs.mkdirSync(path.join(base, 'hive', 'agents'), { recursive: true });
     fs.cpSync(src, path.join(base, 'hive', 'agents'), { recursive: true });
     const { runDrill } = require(RUNNER);
@@ -156,7 +156,7 @@ function baseline(src) {
 }
 
 function sandbox(scenario, real = null) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), `claims-g63-${scenario}-`));
+  const base = tempDir(`claims-g63-${scenario}-`);
   const hive = path.join(base, 'hive');
   const home = path.join(base, 'home');
   fs.mkdirSync(path.join(hive, 'agents'), { recursive: true });

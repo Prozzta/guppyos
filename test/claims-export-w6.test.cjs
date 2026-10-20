@@ -14,8 +14,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+const { tempDir } = require('./tools/test-temp.cjs');
 const loadTs = require('./load-ts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -27,7 +27,7 @@ const V = loadTs(path.join(ROOT, 'src', 'main', 'claims', 'views.ts'));
 const renderers = (records) => V.createClaimViews(records, () => 0);
 const view = { flags: {}, counters: {} };
 
-const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'claims-export-'));
+const dir = () => tempDir('claims-export-');
 function ledger(n, { textLen = 40, month = '2026-10', kindEvery = 0 } = {}) {
   const records = [];
   const claims = {};

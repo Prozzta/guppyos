@@ -67,7 +67,7 @@ function linkTree(from, to) {
 }
 
 /** The view of the dist folder for this mask, made once and shared (under the temp folder). */
-function swiftShaderView(exe, mask, tmp = os.tmpdir()) {
+function swiftShaderView(exe, mask, tmp = require('../tools/shared-temp.cjs').sharedTemp()) {
   const version = require('electron/package.json').version;
   const sm = swiftShaderMask(mask);
   const dir = join(tmp, 'guppy-electron-view', `${version}-${sm.toString(16)}`);
