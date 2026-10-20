@@ -18,7 +18,20 @@ export type HeavyKind = 'install' | 'build' | 'suite' | 'bench';
 /** `provisional`: HEAVY-LOCK-BG-LAPSE-189, heavy only because a script the command runs could not be
  *  read at PreToolUse (it does not exist yet, it is too big, its path is computed): the lock fails
  *  closed on it, and may let it go once the script reads as light (HeavyJobLock.settle). */
-export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; provisional?: boolean }
+export interface HeavyClass { heavy: boolean; kind?: HeavyKind; why?: string; provisional?: boolean; exclusive?: boolean }
+
+/**
+ * HEAVY-SLOT-EXCLUSIVE-192: a whole suite (a FULL uses 21-24 of 32 logical CPUs) and a bench (load
+ * benches start 48+ burners; the mutant runners; an opt-in bench gate) must not share the machine
+ * with another heavy job when "Heavy jobs at once" is 2 or more: timing-sensitive tests ran
+ * contaminated, twice. Such a call is EXCLUSIVE: the lock grants it only when every slot is free,
+ * and starts nothing beside it while it holds. A class may also say so itself (`exclusive: true`);
+ * the explicit marker for any command is an env gate before it (`GUPPY_HEAVY_EXCLUSIVE=1 <cmd>`,
+ * BENCH_ENV). Installs and builds share. At one slot this changes nothing.
+ */
+export function heavyExclusive(cls: HeavyClass): boolean {
+  return cls.heavy && (cls.exclusive === true || cls.kind === 'suite' || cls.kind === 'bench');
+}
 
 /** Command-shaped tool input (the same reading as DESKTOP-LAUNCH-GUARD's). `CommandLine`: AGY's
  *  run_command (HEAVY-CPU-OPTIONS-191: it was not read, so AGY heavy calls were never classified). */
@@ -231,7 +244,8 @@ export const SUITE_MANY_FILES = 20;
 const SUITE_RUNNER = /(^|[\\/])(run-?tests?|test-?runner|run-?all(-?tests)?)\.[cm]?[jt]s$/i;
 /** Jim MF2: an opt-in scale/bench gate in the env prefix (THREAD_VIEW_SCALE=1 node --test x) makes
  *  even a single test file a bench. */
-const BENCH_ENV = /^[A-Z0-9_]*(SCALE|BENCH|STRESS|SOAK)[A-Z0-9_]*=(1|true|yes|on)$/i;
+// HEAVY-SLOT-EXCLUSIVE-192: EXCLUSIVE is the explicit marker (`GUPPY_HEAVY_EXCLUSIVE=1 <cmd>`): a bench, so it runs alone.
+const BENCH_ENV = /^[A-Z0-9_]*(SCALE|BENCH|STRESS|SOAK|EXCLUSIVE)[A-Z0-9_]*=(1|true|yes|on)$/i;
 /** node flags that take their value as the NEXT argument (so that value is not a test file).
  *  HEAVY-LOCK-NODE-FLAGS-COMPLETE: every `=...` option of `node --help` (node 20.19.5), each
  *  MEASURED: `node F VALUE s.cjs` runs s.cjs, so F consumed VALUE (or, for --policy-integrity,
@@ -1403,6 +1417,8 @@ export interface HeavyHolder {
    *  EVERY window of the holder has its own held job and all have exited, the slot is freed at once; a
    *  window without such a job leaves the holder to the process checks. */
   jobs: Map<string, Map<string, boolean>>;
+  /** HEAVY-SLOT-EXCLUSIVE-192: it runs alone (an exclusive re-entry makes it so). */
+  exclusive: boolean;
 }
 
 /** A process created this long after its call's PostToolUse still belongs to the call (a
@@ -1555,8 +1571,8 @@ export class HeavyJobLock {
   /** `procs`: HEAVY-LOCK-OPAQUE-SCRIPT-196 (Jim MUST C), the test processes waiting in a lease
    *  request; `hooked`: the agent was also denied at PreToolUse (it waits for the notice, not a
    *  process). A waiter with no live process and no hooked deny has left: the scan drops it. */
-  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean }> = [];
-  private readonly reservations = new Map<string, { kind: HeavyKind; until: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean }>();
+  private readonly waiters: Array<{ agentId: string; kind: HeavyKind; since: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean }> = [];
+  private readonly reservations = new Map<string, { kind: HeavyKind; until: number; procs: Array<{ pid: number; createdMs: number }>; hooked: boolean; exclusive: boolean }>();
   /** HEAVY-LOCK-OPAQUE-SCRIPT-196: each agent's recent calls that ARE one `node --test` of named files
    *  (testInvocation), each consumed by the one test process it starts (Jim MUST A). */
   private readonly testCalls = new Map<string, Array<{ callId: string; files: string[]; start: number; end: number | null; used: boolean }>>();
@@ -1597,12 +1613,13 @@ export class HeavyJobLock {
   /** The current holders (fleet.json, the deny text, tests). Expired ones are released first.
    *  HEAVY-JOB-LOCK-FAILOPEN: with how long each has held the slot and what keeps it (so agents read
    *  fleet.json instead of polling the log). */
-  snapshot(): Array<{ agentId: string; kind: HeavyKind; command: string; since: string; heldMs: number; background: boolean; openCalls: number; seenRunning: boolean; lastProbe: 'ok' | 'failed' | null }> {
+  snapshot(): Array<{ agentId: string; kind: HeavyKind; command: string; since: string; heldMs: number; background: boolean; openCalls: number; seenRunning: boolean; lastProbe: 'ok' | 'failed' | null; exclusive?: true }> {
     this.expire();
     const t = this.now();
     return [...this.holders.values()].map((h) => ({
       agentId: h.agentId, kind: h.kind, command: h.command, since: new Date(h.since).toISOString(), heldMs: t - h.since,
-      background: h.background, openCalls: h.calls.size, seenRunning: h.seenRunning, lastProbe: h.lastProbe
+      background: h.background, openCalls: h.calls.size, seenRunning: h.seenRunning, lastProbe: h.lastProbe,
+      ...(h.exclusive ? { exclusive: true as const } : {})
     }));
   }
 
@@ -1621,59 +1638,97 @@ export class HeavyJobLock {
     // A slot that is free while agents wait (the limit was raised) goes to them first. Andy N3: a
     // slot reserved here for the CALLER itself is taken at once below, so it is not notified.
     if (this.waiters.length) this.grant(agentId);
+    // HEAVY-SLOT-EXCLUSIVE-192: a whole suite or a bench runs alone.
+    const excl = heavyExclusive(cls);
+    // HEAVY-LOCK-SELF-WAIT: a slot reserved for THIS agent is its own; the others count as taken.
+    const reserved = this.reservations.has(agentId);
     const mine = this.holders.get(agentId);
     if (mine) {
+      // HEAVY-SLOT-EXCLUSIVE-192: an exclusive call of an agent that holds a shared slot waits, like
+      // anyone's, until the other holders are done (its own slot stays held meanwhile). fits(), not
+      // admits(): it already holds, so a waiter behind it does not put it back in the queue (Jim MUST-1).
+      if (excl && !mine.exclusive && !reserved && !this.fits(agentId, true, limit)) return this.deny(agentId, cls, limit, callId);
       // Re-entrant: an agent's heavy calls share its one slot (and refresh its TTL).
       const flipped = background && !mine.background;
+      const alone = excl && !mine.exclusive;
+      if (excl && reserved) { this.reservations.delete(agentId); this.dequeue(agentId); }
       mine.calls.add(callId); mine.background = mine.background || background; mine.touched = this.now(); mine.misses = 0;
+      if (alone) mine.exclusive = true;
       if (cls.provisional) mine.provisional.add(callId); else mine.definite = true;
       mine.windows.push({ callId, start: this.now(), end: null });
-      this.log({ kind: 'heavy-lock', action: 'reenter', agentId, heavyKind: cls.kind, command: command.slice(0, 200) });
-      if (flipped) this.changed();
+      this.log({ kind: 'heavy-lock', action: 'reenter', agentId, heavyKind: cls.kind, command: command.slice(0, 200), ...(alone ? { exclusive: true } : {}) });
+      if (flipped || alone) this.changed();
       this.arm();
       return { allow: true, acquired: false };
     }
-    // HEAVY-LOCK-SELF-WAIT: a slot reserved for THIS agent is its own; the others count as taken.
-    const reserved = this.reservations.has(agentId);
-    if (!reserved && this.holders.size + this.reservations.size >= limit) {
-      const holders = [...this.holders.values()];
-      const position = this.enqueue(agentId, cls.kind, !callId.startsWith('lease:'));
-      const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
-      const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
-      const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
-      const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}. You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told.`;
-      // Jim N3: the denied command's CLASS is logged, not the command itself.
-      this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: cls.kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position });
-      this.changed();
-      return { allow: false, reason, holders };
-    }
+    if (!reserved && !this.admits(agentId, excl, limit)) return this.deny(agentId, cls, limit, callId);
     if (reserved) this.reservations.delete(agentId);
     this.dequeue(agentId);
     this.leaseOnly.delete(agentId);
-    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map() });
-    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}) });
+    this.holders.set(agentId, { agentId, kind: cls.kind, command: command.slice(0, 200), since: this.now(), touched: this.now(), calls: new Set([callId]), background, provisional: new Set(cls.provisional ? [callId] : []), definite: !cls.provisional, misses: 0, seenRunning: false, attributed: new Map(), windows: [{ callId, start: this.now(), end: null }], lastProbe: null, jobs: new Map(), exclusive: excl });
+    this.log({ kind: 'heavy-lock', action: 'acquire', agentId, heavyKind: cls.kind, command: command.slice(0, 200), background, limit, ...(reserved ? { reserved: true } : {}), ...(excl ? { exclusive: true } : {}) });
     this.changed();
     this.arm();
     return { allow: true, acquired: true };
   }
 
+  /**
+   * HEAVY-SLOT-EXCLUSIVE-192: may `agentId` take a slot now (not counting a slot or reservation of
+   * its own)? Never ahead of a queued agent: a free slot left behind an exclusive waiter at the head
+   * is not for a newcomer, or the waiter would never see the machine empty (FIFO keeps an exclusive
+   * from starving). Then fits().
+   */
+  private admits(agentId: string, exclusive: boolean, limit: number): boolean {
+    const at = this.waiters.findIndex((w) => w.agentId === agentId);
+    if ((at < 0 ? this.waiters.length : at) > 0) return false;
+    return this.fits(agentId, exclusive, limit);
+  }
+
+  /** Not beside an exclusive holder or reservation; an exclusive call only when no one else holds or
+   *  has a slot reserved; otherwise while fewer than `limit` are taken. */
+  private fits(agentId: string, exclusive: boolean, limit: number): boolean {
+    let others = 0;
+    for (const h of this.holders.values()) { if (h.agentId === agentId) continue; if (h.exclusive) return false; others++; }
+    for (const [a, r] of this.reservations) { if (a === agentId) continue; if (r.exclusive) return false; others++; }
+    return exclusive ? others === 0 : this.holders.size + this.reservations.size < limit;
+  }
+
+  private deny(agentId: string, cls: HeavyClass, limit: number, callId: string): HeavyDecision {
+    const kind = cls.kind as HeavyKind;
+    const excl = heavyExclusive(cls);
+    const holders = [...this.holders.values()];
+    const position = this.enqueue(agentId, kind, !callId.startsWith('lease:'), excl);
+    const who = holders.map((h) => `${h.agentId} (${h.kind}: ${h.command.slice(0, 80)}, since ${new Date(h.since).toISOString().slice(11, 19)}Z)`).join('; ');
+    const others = [...this.reservations.entries()].map(([a, r]) => `reserved for ${a} until ${new Date(r.until).toISOString().slice(11, 19)}Z`).join('; ');
+    const held = holders.length ? `${holders.length === 1 ? 'it is' : 'they are'} held by ${who}` : 'no job is running';
+    // HEAVY-SLOT-EXCLUSIVE-192: with 2+ slots, say why a free slot is not yours (one slot is always alone).
+    const alone = limit > 1 && (excl || holders.some((h) => h.exclusive) || [...this.reservations.values()].some((r) => r.exclusive) || this.waiters.some((w) => w.exclusive && w.agentId !== agentId))
+      ? ' A whole test suite or a bench runs alone: it starts only when every slot is free, and nothing else starts beside it or ahead of it.' : '';
+    const reason = `Denied by HEAVY-JOB-LOCK: the machine allows ${limit} heavy job${limit === 1 ? '' : 's'} at once and ${held}${others ? ` (${others})` : ''}.${alone} You are QUEUED (position ${position}): when a slot frees it is reserved for you for ${Math.round(HEAVY_RESERVE_MS / 60_000)} min and you are told "HEAVY SLOT FREE". Do not retry this or a variant of it now, and do not poll for the slot: carry on with light work (single test files, reads, edits are not limited) until you are told.`;
+    // Jim N3: the denied command's CLASS is logged, not the command itself.
+    this.log({ kind: 'heavy-lock', action: 'deny', agentId, heavyKind: kind, why: cls.why ?? null, holders: holders.map((h) => ({ agentId: h.agentId, kind: h.kind, since: new Date(h.since).toISOString() })), limit, position, ...(excl ? { exclusive: true } : {}) });
+    this.changed();
+    return { allow: false, reason, holders };
+  }
+
   /** The queue as fleet.json shows it (oldest first), with the open reservations. */
-  queueSnapshot(): { waiters: Array<{ agentId: string; kind: HeavyKind; since: string; position: number }>; reserved: Array<{ agentId: string; kind: HeavyKind; until: string }> } {
+  queueSnapshot(): { waiters: Array<{ agentId: string; kind: HeavyKind; since: string; position: number; exclusive?: true }>; reserved: Array<{ agentId: string; kind: HeavyKind; until: string; exclusive?: true }> } {
     this.expire();
+    const ex = (on: boolean): { exclusive?: true } => (on ? { exclusive: true } : {});
     return {
-      waiters: this.waiters.map((w, i) => ({ agentId: w.agentId, kind: w.kind, since: new Date(w.since).toISOString(), position: i + 1 })),
-      reserved: [...this.reservations.entries()].map(([agentId, r]) => ({ agentId, kind: r.kind, until: new Date(r.until).toISOString() }))
+      waiters: this.waiters.map((w, i) => ({ agentId: w.agentId, kind: w.kind, since: new Date(w.since).toISOString(), position: i + 1, ...ex(w.exclusive) })),
+      reserved: [...this.reservations.entries()].map(([agentId, r]) => ({ agentId, kind: r.kind, until: new Date(r.until).toISOString(), ...ex(r.exclusive) }))
     };
   }
 
   /** Queue a denied agent once (FIFO); its 1-based position. */
-  private enqueue(agentId: string, kind: HeavyKind, hooked = true): number {
+  private enqueue(agentId: string, kind: HeavyKind, hooked = true, exclusive = false): number {
     const i = this.waiters.findIndex((w) => w.agentId === agentId);
     // A re-deny keeps its place and shows the agent still wants the slot (the waiter TTL restarts).
     if (hooked) this.leaseOnly.delete(agentId);
     if (i >= 0 && hooked) this.waiters[i].hooked = true;
-    if (i >= 0) { this.waiters[i].since = this.now(); return i + 1; }
-    this.waiters.push({ agentId, kind, since: this.now(), procs: [], hooked });
+    if (i >= 0) { this.waiters[i].since = this.now(); this.waiters[i].exclusive ||= exclusive; return i + 1; }
+    this.waiters.push({ agentId, kind, since: this.now(), procs: [], hooked, exclusive });
     if (!hooked) this.leaseOnly.add(agentId);
     return this.waiters.length;
   }
@@ -1693,15 +1748,17 @@ export class HeavyJobLock {
       if (had) this.changed();
       return;
     }
-    while (this.waiters.length && this.holders.size + this.reservations.size < limit) {
+    // HEAVY-SLOT-EXCLUSIVE-192: FIFO; an exclusive waiter at the head waits for the empty machine,
+    // and the waiters behind it wait with it.
+    while (this.waiters.length && this.fits(this.waiters[0].agentId, this.waiters[0].exclusive, limit)) {
       const w = this.waiters.shift()!;
       if (this.d.alive && !this.d.alive(w.agentId)) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'gone' }); this.changed(); continue; }
       // Andy N2: a waiter not denied again within HEAVY_TTL_MS has most likely moved on; a slot
       // reserved for it would sit unused for HEAVY_RESERVE_MS.
       if (this.now() - w.since >= HEAVY_TTL_MS) { this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' }); this.changed(); this.lapse(w.agentId, w.kind, 'stale'); continue; }
       const until = this.now() + HEAVY_RESERVE_MS;
-      this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked });
-      this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since });
+      this.reservations.set(w.agentId, { kind: w.kind, until, procs: w.procs, hooked: w.hooked, exclusive: w.exclusive });
+      this.log({ kind: 'heavy-lock', action: 'reserve', agentId: w.agentId, heavyKind: w.kind, until: new Date(until).toISOString(), waitedMs: this.now() - w.since, ...(w.exclusive ? { exclusive: true } : {}) });
       this.changed();
       // HEAVY-LOCK-OPAQUE-SCRIPT-196: a waiter that is only a waiting test process takes the slot
       // itself (its lease request is told); the agent was never told to wait for a notice.
@@ -1845,6 +1902,8 @@ export class HeavyJobLock {
     if (had) this.log({ kind: 'heavy-lock', action: 'reserve-dropped', agentId, reason: 'pty-exit' });
     if (queued || had) this.changed();
     if (this.holders.has(agentId)) this.release(agentId, 'pty-exit');
+    // HEAVY-SLOT-EXCLUSIVE-192: a gone exclusive head held back the waiters behind it.
+    else if (queued) this.grant();
     else if (had) this.grant();
   }
 
@@ -1874,8 +1933,9 @@ export class HeavyJobLock {
     else if (queued) this.log({ kind: 'heavy-lock', action: 'queue-left', agentId });
     if (reserved || queued) this.changed();
     const before = new Set(this.reservations.keys());
-    if (reserved) this.grant();
-    const next = [...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
+    // HEAVY-SLOT-EXCLUSIVE-192: a queue place given up may have held back the waiters behind it.
+    if (reserved || queued) this.grant();
+    const next =[...this.reservations.keys()].find((a) => !before.has(a)) ?? null;
     if (!this.watching() && this.timer) { this.clearTimer(this.timer); this.timer = null; }
     return { state: 'unreserved', reserved, queued, next, ...(missed ? { to: 'not-queued' as const } : {}), ...(waiting ? { waiting: true as const } : {}) };
   }
@@ -1947,12 +2007,16 @@ export class HeavyJobLock {
     // LOCK-WAIT-NOTICES (Jim NIT 1): a waiter not denied again for HEAVY_TTL_MS leaves the queue on
     // schedule, not only when a slot next frees (grant() keeps its own check): until then fleet.json
     // and the displays said QUEUED #n for an agent the lock would never serve. It is told.
+    // HEAVY-SLOT-EXCLUSIVE-192: a dropped waiter may have held back the ones behind it (an exclusive
+    // head waits for the empty machine), so the queue is offered the free slots again.
+    let left = false;
     for (const w of [...this.waiters]) {
       if (t - w.since < HEAVY_TTL_MS) continue;
       this.dequeue(w.agentId);
       this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'stale' });
       this.changed();
       this.lapse(w.agentId, w.kind, 'stale');
+      left = true;
     }
     // Jim N5: a TTL expiry while the watcher last SAW the job running is logged distinctly.
     for (const h of [...this.holders.values()]) if (t - h.touched >= HEAVY_TTL_MS) this.release(h.agentId, h.seenRunning ? 'expired-still-running' : 'ttl');
@@ -1966,7 +2030,7 @@ export class HeavyJobLock {
       this.lapse(agentId, r.kind, 'expired');
       passed = true;
     }
-    if (passed) this.grant();
+    if (passed || left) this.grant();
   }
 
   /** The watcher runs only while a slot is held or reserved: TTL and reservation expiry, and a
@@ -2083,7 +2147,8 @@ export class HeavyJobLock {
       // A waiting process asks again only when a slot may be its own (no deny row every poll).
       const queued = this.waiters.find((w) => w.agentId === agentId && w.procs.some((p) => p.pid === pid));
       const limit = this.d.limit();
-      const full = limit !== 'off' && this.holders.size + this.reservations.size >= limit;
+      // HEAVY-SLOT-EXCLUSIVE-192: a lease is a suite or a bench, so it fits only an empty machine.
+      const full = limit !== 'off' && !this.fits(agentId, heavyExclusive(cls), limit);
       if (!(queued && full && !this.reservations.has(agentId) && !this.holders.has(agentId))) {
         const shared = this.holders.has(agentId);
         const d = this.acquire(agentId, cls, `node --test (pid ${pid})`, id, false);
@@ -2175,6 +2240,7 @@ export class HeavyJobLock {
     const byPid = new Map(procs.map((p) => [p.pid, p]));
     for (const [id, l] of [...this.leases]) if (!procLive(byPid, l.pid, l.createdMs)) this.leaseEnd(l.agentId, id, 'gone');
     for (const run of [...this.runs.keys()]) { const [pid, created] = run.split(':').map(Number); if (!procLive(byPid, pid, created)) this.runs.delete(run); }
+    let waiterLeft = false;
     for (const w of [...this.waiters]) {
       if (!w.procs.length) continue;
       w.procs = w.procs.filter((p) => procLive(byPid, p.pid, p.createdMs));
@@ -2182,8 +2248,10 @@ export class HeavyJobLock {
       this.dequeue(w.agentId);
       this.log({ kind: 'heavy-lock', action: 'queue-dropped', agentId: w.agentId, reason: 'waiter-gone' });
       this.changed();
+      // HEAVY-SLOT-EXCLUSIVE-192: it may have been an exclusive head holding the others back.
+      waiterLeft = true;
     }
-    let freed = false;
+    let freed = waiterLeft;
     for (const [agentId, r] of [...this.reservations]) {
       if (!r.procs.length) continue;
       r.procs = r.procs.filter((p) => procLive(byPid, p.pid, p.createdMs));
