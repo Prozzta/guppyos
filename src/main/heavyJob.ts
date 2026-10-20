@@ -220,6 +220,10 @@ function segments(cmd: string, d: ShellDialect = 'sh'): string[] {
     const c = cmd[i];
     // HEAVY-JOB-LOCK-FAILOPEN: a command substitution is opaque (its pipes and quotes are its own).
     if (d === 'sh' && q !== "'" && c === '$' && cmd[i + 1] === '(') { const e = substEnd(cmd, i); cur += cmd.slice(i, e); i = e - 1; continue; }
+    // HEAVY-LOCK-CMD-QUOTED-CARET-198: cmd reads a script line by line, and a quote still open at
+    // the end of a line ends there (a `^` inside it is literal, so it continues nothing): in
+    // `echo "abc^` + newline + `npm test`, real cmd runs npm test. The newline separates.
+    if (q && d === 'cmd' && c === '\n') { q = null; out.push(cur); cur = ''; continue; }
     // A-S1: `'` closes at the next `'` unconditionally (a backslash escapes nothing inside it), and
     // cmd has no backslash escape at all; only inside sh's "..." does `\"` stay open.
     if (q) { cur += c; if (c === q && (q === "'" || d === 'cmd' || closesDouble(cmd, i))) q = null; continue; }
@@ -1433,8 +1437,26 @@ export { PLAN_CAP };
  * Returns null when the text does not open a FOR this reads (cmd itself would refuse it).
  */
 const CMD_FOR = /^@?for\s+((?:\/[dlrf](?:\s+(?!%)(?:"[^"]*"|[^\s"%/]\S*))?\s+)*)(%%?)([A-Za-z])\s+in\s*\(/i;
-/** HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd joins a line that ends in an unescaped `^` to the next one. */
-const caretJoin = (s: string): string => s.replace(/(^|[^^])((?:\^\^)*)\^\r?\n/g, '$1$2');
+/**
+ * HEAVY-LOCK-CMD-FOR-FOLLOWUPS-198: cmd joins a line that ends in an unescaped `^` to the next one.
+ * HEAVY-LOCK-CMD-QUOTED-CARET-198: only outside a quote. Inside a `"` opened on its line a `^` is
+ * literal, and the quote ends with the line (segments() then separates there).
+ */
+function caretJoin(s: string): string {
+  let out = ''; let q = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\n') { q = false; out += c; continue; }
+    if (c === '"') q = !q;
+    if (c === '^' && !q) {
+      const nl = s[i + 1] === '\r' && s[i + 2] === '\n' ? 2 : s[i + 1] === '\n' ? 1 : 0;
+      if (nl) { i += nl; continue; }
+      out += c + (s[i + 1] ?? ''); i++; continue;
+    }
+    out += c;
+  }
+  return out;
+}
 /** A cmd block from its `(`: the text inside, and what follows its own `)` (quotes, `^` and nesting respected). */
 function cmdBlock(s: string): { body: string; after: string } {
   let k = 1; let n = 1; let q: string | null = null;

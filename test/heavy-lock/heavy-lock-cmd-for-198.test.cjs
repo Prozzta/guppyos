@@ -197,8 +197,8 @@ const MUTANTS = [
   { name: 'a !x! needs two letters', edits: [['|![^!\\r\\n]+!/;', '|![A-Za-z_][A-Za-z0-9_]+!/;']], killer: 'names', dies: /A !x! OF ANY LENGTH IS A VARIABLE/ },
   { name: 'a one-letter %a% is read as a %NAME% variable', edits: [['(%[A-Za-z_][A-Za-z0-9_]+%)|', '(%[A-Za-z_][A-Za-z0-9_]*%)|']], killer: 'nested', dies: /A NESTED LOOP READS BOTH VALUES/ },
   { name: 'a %~$PATH: ref is not replaced', edits: [['(?:\\\\$[A-Za-z_][A-Za-z0-9_]*:)?', '']], killer: 'names', dies: /A %~\$PATH: REF NAMES THE VALUE/ },
-  { name: 'a ^ does not continue the line', edits: [["\\^\\r?\\n/g, '$1$2'", "\\^\\r?\\n(?!)/g, '$1$2'"]], killer: 'caret', dies: /A CARET CONTINUES THE LINE/ },
-  { name: 'an escaped ^^ continues the line', edits: [["s.replace(/(^|[^^])((?:\\^\\^)*)\\^", "s.replace(/()()\\^"]], killer: 'caret', dies: /AN ESCAPED CARET \(\^\^\) ENDS THE LINE/ },
+  { name: 'a ^ does not continue the line', edits: [['if (nl) { i += nl; continue; }', 'if (false) { i += nl; continue; }']], killer: 'caret', dies: /A CARET CONTINUES THE LINE/ },
+  { name: 'an escaped ^^ continues the line', edits: [["out += c + (s[i + 1] ?? ''); i++; continue;", 'out += c; continue;']], killer: 'caret', dies: /AN ESCAPED CARET \(\^\^\) ENDS THE LINE/ },
 ];
 
 test('MUTANT CENSUS: every mutant applies once and dies at the assertion that names its guarantee', { timeout: 30_000 }, async (t) => {
