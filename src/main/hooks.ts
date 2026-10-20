@@ -134,6 +134,8 @@ interface HookPayload {
   output?: number;
   cache_read?: number;
   cache_creation?: number;
+  cache_creation_5m?: number;
+  cache_creation_1h?: number;
   /** AgyStatusLine envelopes only: Antigravity's statusline payload, forwarded whole by
    *  the statusline shim. NEVER logged, retained or re-sent - it carries the account's
    *  email. The normaliser reads the fields it needs and everything else is dropped. */
@@ -2351,6 +2353,8 @@ export class HookServer {
         const output = p.output ?? 0;
         const cacheRead = p.cache_read ?? 0;
         const cacheCreation = p.cache_creation ?? 0;
+        const cacheCreation5m = p.cache_creation_5m;
+        const cacheCreation1h = p.cache_creation_1h;
         this.hive.appendCostLedger({
           agentId,
           sessionId: p.session_id,
@@ -2364,7 +2368,9 @@ export class HookServer {
             inputTokens: input,
             outputTokens: output,
             cacheReadTokens: cacheRead,
-            cacheWriteTokens: cacheCreation
+            cacheWriteTokens: cacheCreation,
+            cacheWrite5mTokens: cacheCreation5m,
+            cacheWrite1hTokens: cacheCreation1h
           })
         });
       }

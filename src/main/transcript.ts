@@ -226,6 +226,8 @@ export interface AgentUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  cacheWrite5mTokens: number;
+  cacheWrite1hTokens: number;
   estimatedCostUsd: number;
   /** The most-recently-seen model id (normalized, e.g. `claude-opus-4-8`), or
    *  undefined if no priced record was found. Lets the UI label the row. */
@@ -233,7 +235,7 @@ export interface AgentUsage {
 }
 
 function zero(): AgentUsage {
-  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, estimatedCostUsd: 0 };
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, cacheWrite5mTokens: 0, cacheWrite1hTokens: 0, estimatedCostUsd: 0 };
 }
 
 export interface ReadUsageOptions {
@@ -291,10 +293,15 @@ function parseUsageLines(text: string, sessionId: string | undefined, acc: Agent
     const rIn = num(u.input_tokens);
     const rOut = num(u.output_tokens);
     const rCacheWrite = num(u.cache_creation_input_tokens);
+    const cacheCreation = u.cache_creation as Record<string, unknown> | undefined;
+    const rCacheWrite5m = num(cacheCreation?.ephemeral_5m_input_tokens);
+    const rCacheWrite1h = num(cacheCreation?.ephemeral_1h_input_tokens);
     const rCacheRead = num(u.cache_read_input_tokens);
     acc.inputTokens += rIn;
     acc.outputTokens += rOut;
     acc.cacheWriteTokens += rCacheWrite;
+    acc.cacheWrite5mTokens += rCacheWrite5m;
+    acc.cacheWrite1hTokens += rCacheWrite1h;
     acc.cacheReadTokens += rCacheRead;
     // Price THIS record by its own model, then accumulate — so a mixed-model
     // agent (rare) is still costed correctly rather than at one flat rate.
@@ -302,7 +309,9 @@ function parseUsageLines(text: string, sessionId: string | undefined, acc: Agent
       inputTokens: rIn,
       outputTokens: rOut,
       cacheReadTokens: rCacheRead,
-      cacheWriteTokens: rCacheWrite
+      cacheWriteTokens: rCacheWrite,
+      cacheWrite5mTokens: rCacheWrite5m,
+      cacheWrite1hTokens: rCacheWrite1h
     });
   }
 }
@@ -377,6 +386,8 @@ export function readAgentUsage(cwd: string, opts: ReadUsageOptions = { provider:
       usage.inputTokens += entry.totals.inputTokens;
       usage.outputTokens += entry.totals.outputTokens;
       usage.cacheWriteTokens += entry.totals.cacheWriteTokens;
+      usage.cacheWrite5mTokens += entry.totals.cacheWrite5mTokens;
+      usage.cacheWrite1hTokens += entry.totals.cacheWrite1hTokens;
       usage.cacheReadTokens += entry.totals.cacheReadTokens;
       usage.estimatedCostUsd += entry.totals.estimatedCostUsd;
       if (entry.totals.model) lastModel = entry.totals.model;

@@ -69,6 +69,17 @@ test('sums usage across records and files', () => {
   assert.ok(u.estimatedCostUsd > 0);
 });
 
+test('redacted Claude usage fixture preserves 5m/1h cache writes for exact pricing', () => {
+  const { cwd, dir } = makeProject();
+  const fixture = fs.readFileSync(path.join(__dirname, 'fixtures', 'pricing-cache-ttl-split', 'claude-usage-redacted.jsonl'), 'utf8');
+  fs.writeFileSync(path.join(dir, 'redacted.jsonl'), fixture);
+  const u = readAgentUsage(cwd, { provider: 'claude' });
+  assert.equal(u.cacheWriteTokens, 1_000_000);
+  assert.equal(u.cacheWrite5mTokens, 400_000);
+  assert.equal(u.cacheWrite1hTokens, 600_000);
+  assert.equal(u.estimatedCostUsd, 6.8);
+});
+
 test('appended records are picked up (incremental tail parse)', () => {
   const { cwd, dir } = makeProject();
   const f = path.join(dir, 'a.jsonl');
