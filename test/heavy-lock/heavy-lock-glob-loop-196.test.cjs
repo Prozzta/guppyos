@@ -56,9 +56,10 @@ K.shortLoop = (M = HJ) => {
     'for f in a b\ndo\n  node --test test/$f.test.cjs\ndone', 'for f in test/*.json; do echo $f; done']) {
     assert.equal(c(cmd).heavy, false, `A PER-FILE LOOP OVER A SHORT EXPLICIT LIST STAYS LIGHT: ${cmd}`);
   }
-  // A name made through the loop variable is not read (as `test/$f.test.cjs` was not): no provisional.
+  // A name made through the loop variable that the lock cannot read stays light: no provisional.
+  // (LIVE-FILE-192 (B): one it can read is read for the live tag; heavy-lock-live-file-192 pins that.)
   const read = { readScript: () => null };
-  assert.deepEqual(c('for f in a b; do node --test test/$f.test.cjs; done', 0, read), { heavy: false }, 'A LOOP-MADE TEST NAME IS NOT READ');
+  assert.deepEqual(c('for f in a b; do node --test test/$f.test.cjs; done', 0, read), { heavy: false }, 'A LOOP-MADE TEST NAME IT CANNOT READ STAYS LIGHT');
   assert.equal(c('node --test test/a.test.cjs', 0, read).provisional, true, 'a literal one still is');
   // Each iteration is what it would be alone.
   assert.equal(c('for f in a test/tools/run-tests.cjs; do node "$f"; done').kind, 'suite', 'AN ITERATION IS CLASSIFIED WITH ITS WORD');
@@ -145,8 +146,9 @@ const MUTANTS = [
   { name: 'the word count is ignored', edits: [[': runs * tests >= SUITE_MANY_FILES ?', ': false ?']], killer: 'longLoop', dies: /A LOOP OVER SUITE_MANY_FILES WORDS IS A SUITE/ },
   { name: 'off by one: more than SUITE_MANY_FILES', edits: [[': runs * tests >= SUITE_MANY_FILES ?', ': runs * tests > SUITE_MANY_FILES ?']], killer: 'longLoop', dies: /A LOOP OVER SUITE_MANY_FILES WORDS IS A SUITE/ },
   { name: 'any loop is a suite (the body is not checked)', edits: [['    if (tests && big) return', '    if (big) return']], killer: 'shortLoop', dies: /A PER-FILE LOOP OVER A SHORT EXPLICIT LIST STAYS LIGHT: for f in test\/\*\.json/ },
-  { name: 'the variable is not replaced per word', edits: [['    else for (const w of list) for (const p of inner) out.push({ seg: p.seg.replace(ref, () => w), op: 0, looped: true });', '    else out.push(...inner);']], killer: 'shortLoop', dies: /A PER-FILE LOOP OVER A SHORT EXPLICIT LIST STAYS LIGHT|AN ITERATION IS CLASSIFIED WITH ITS WORD/ },
-  { name: 'a loop-made test name is read (a per-file loop goes provisional)', edits: [['      if (ctx.readScript && !ctx.loopWord) {', '      if (ctx.readScript) {']], killer: 'shortLoop', dies: /A LOOP-MADE TEST NAME IS NOT READ/ },
+  { name: 'the variable is not replaced per word', edits: [["    else for (const w of list) for (const p of inner) out.push({ seg: p.seg.replace(glued, '$${$1}').replace(ref, () => w), op: 0, looped: true });", '    else out.push(...inner);']], killer: 'shortLoop', dies: /A PER-FILE LOOP OVER A SHORT EXPLICIT LIST STAYS LIGHT|AN ITERATION IS CLASSIFIED WITH ITS WORD/ },
+  { name: 'an outer $a glued to an inner word is not braced ($a$b reads as $ab)', edits: [[".replace(glued, '$${$1}')", '']], killer: 'nested', dies: /a product under SUITE_MANY_FILES stays light/ },
+  { name: 'a loop-made test name the lock cannot read goes provisional', edits: [['          else if (!ctx.loopWord) return unreadable(f, ctx);', '          else return unreadable(f, ctx);']], killer: 'shortLoop', dies: /A LOOP-MADE TEST NAME IT CANNOT READ STAYS LIGHT/ },
   { name: 'the loop plan is not used', edits: [['  if (!Array.isArray(plan)) return plan;', '  if (!Array.isArray(plan)) { /* ignored */ }']], killer: 'globLoop', dies: /A LOOP OVER A TEST GLOB IS A SUITE|plan is not iterable/ },
   { name: 'nested loops are not counted (the outer body ends at the inner done)', edits: [["      if (opener === 'for' || opener === 'while' || opener === 'until') depth++;\n", '']], killer: 'nested', dies: /THE OUTER BODY RUNS PAST THE INNER DONE/ },
   { name: 'the plan is not capped', edits: [[' || out.length + list.length * inner.length > PLAN_CAP) out.push(...inner);', ') out.push(...inner);']], killer: 'capSize', dies: /THE PLAN NEVER PASSES PLAN_CAP SEGMENTS/ },

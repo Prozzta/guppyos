@@ -85,7 +85,8 @@ const ROWS = [
   ['6 node --test missing', 'node --test missing.test.cjs', 'provisional'],     // light
   ['6 node --test present', 'node --test ok.test.cjs', 'light'],                // light
   // HEAVY-LOCK-LIVE-FILE-192 (b): a test file the lock cannot name is unknown work (it was light).
-  ['6 a loop of single files', 'for f in a b; do node --test test/$f.test.cjs; done', 'provisional'], // light
+  // (B, god 66dee2): a short literal loop names each file; unreadable ones keep the replay's light.
+  ['6 a loop of single files', 'for f in a b; do node --test test/$f.test.cjs; done', 'light'], // light
   ['6 a computed name', 'node --test test/$f.test.cjs', 'provisional'],        // light
   ['7 $TEMP', 'bash $TEMP/s.sh', 'heavy:suite'],                                // provisional
   ['7 ${HOME}', 'bash ${HOME}/s.sh', 'heavy:suite'],                            // provisional

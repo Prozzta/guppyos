@@ -21,6 +21,7 @@
  *   M13 PowerShell's $p = '...' is not recorded  M14 $(...) does not see the outer variables
  *   M15 the known live-file list is empty
  *   M16 a spawned --test option's value is read as a file
+ *   M17 a literal loop's values are not read for the live tag (B, god 66dee2)
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -106,6 +107,29 @@ test('(b) a path the lock cannot name fails closed; one this command named is ex
   assert.equal(cls(`P=${S}/pa.cjs; node --test $P`), 'heavy:bench');
   assert.equal(cls(`J=${S}; for f in a b; do echo $(node $J/ok.cjs); done`), 'light', 'M14');
   assert.equal(cls(`J=${S}; for f in a b; do echo $(node $J/pa.cjs); done`), 'heavy:bench', 'M14');
+});
+
+test('(B, god 66dee2) a loop: a literal list reads every value for the live tag; any other list is never light', () => {
+  // A short literal list is planned per value (GLOB-LOOP-196) and each file is read (M17).
+  assert.equal(cls('for f in plain tagged; do node --test test/$f.test.cjs; done'), 'heavy:bench', 'a live file among the values (M17)');
+  assert.match(classifyCommand('for f in plain tagged; do node --test test/$f.test.cjs; done', 0, ctx).why, /declares @heavy-lock live/);
+  assert.equal(cls('for f in plain harness; do node --test test/$f.test.cjs; done'), 'heavy:bench', 'a value that loads the harness');
+  assert.equal(cls('for f in plain one-run; do node --test test/$f.test.cjs; done'), 'light', 'a loop of plain files');
+  assert.equal(cls('for f in a b; do node --test test/$f.test.cjs; done'), 'light', 'files made later in the call: the replay\'s light');
+  // The seam: a list that is not literal is a suite (GLOB-LOOP-196) or a name the lock cannot name (b).
+  const seam = [
+    ['for f in $(ls test); do node --test test/$f; done', 'heavy:suite'],
+    ['for f in `ls test`; do node --test test/$f; done', 'heavy:suite'],
+    ['for f in $FILES; do node --test $f; done', 'heavy:suite'],
+    ['for f in "$@"; do node --test $f; done', 'heavy:suite'],
+    ['for f in test/*.test.cjs; do node --test $f; done', 'heavy:suite'],
+    ['for f in plain $X; do node --test test/$f.test.cjs; done', 'heavy:suite'],
+    ['ls test | while read f; do node --test test/$f; done', 'provisional'],
+    ['while read f; do node --test "$f"; done < list.txt', 'provisional'],
+    ['for f in a b; do node --test test/$f-$X.test.cjs; done', 'provisional'],
+    ['for f in a b; do node --test $(echo test/$f.test.cjs); done', 'provisional'],
+  ];
+  for (const [cmd, want] of seam) assert.equal(cls(cmd), want, cmd);
 });
 
 test('(b) PowerShell: $p = \'...\' then node $p / & $p, the call operator, a JS file run directly', () => {

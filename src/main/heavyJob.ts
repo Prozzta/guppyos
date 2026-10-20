@@ -1027,15 +1027,13 @@ function classifyWords(ws0: string[], depth: number, ctx: ClassifyCtx = {}): Hea
       if (!files.length) return { heavy: true, kind: 'suite', why: 'node --test (all)' };
       if (files.some((f) => /[*?]/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       if (files.length >= SUITE_MANY_FILES) return { heavy: true, kind: 'suite', why: `node --test (${files.length} files)` };
-      // HEAVY-LOCK-LIVE-FILE-192 (b): a test file named through a variable is the file it names; one
-      // the lock cannot name (`for f in ...; do node --test test/$f.test.cjs`) is unknown: heavy,
-      // provisional (HEAVY-LOCK-SHAPES-189 let it through as a loop of single files; a loop of LIVE
-      // files is exactly what ran beside a held slot).
+      // HEAVY-LOCK-LIVE-FILE-192 (b): a test file named through a variable is the file it names (the
+      // words are expanded above); one still computed (`node --test test/$f.test.cjs` with no `f=`,
+      // `$(...)`) is unknown: heavy, provisional. A short literal loop wrote its value in (B).
       const paths: string[] = [];
       for (const f of files) {
-        const p = named(f, ctx);
-        if (p === null) return unnamed(`node --test ${f}`);
-        paths.push(p);
+        if (COMPUTED.test(f)) return unnamed(`node --test ${f}`);
+        paths.push(f);
       }
       if (paths.some((f) => /[*?]/.test(f) || !/\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };
       const perf = paths.find((p) => PERF_FILE.test(p));
@@ -1309,7 +1307,7 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
     const name = head[1];
     const list = head.slice(3);
     const body = segs.slice(si + 1, end);
-    const at = `\\$\\{?${name}\\}?(?![A-Za-z0-9_])`;
+    const at = `\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`;   // `${f}x` is $f then x
     const ref = new RegExp(at, 'g');
     const tests = body.filter(NODE_TEST).length;
     const open = list.some((w) => /[*?[$`]/.test(w));   // a glob or a computed list: unbounded
@@ -1324,8 +1322,11 @@ function loopPlan(segs: string[], ops: number[], d: ShellDialect, mult = 1): Arr
     if (!list.length) continue;
     const inner = loopPlan(body, ops.slice(si + 1, end), d, runs);
     if (!Array.isArray(inner)) return inner;
+    // LIVE-FILE-192 (B): an outer `$a` right before this word is braced first, so `$a$b` with b=x is
+    // `${a}x` (the shell's reading), not a new name `$ax` the outer loop never writes in.
+    const glued = new RegExp(`\\$([A-Za-z_][A-Za-z0-9_]*)(?=${at})`, 'g');
     if (!uses || body.some((_, k) => ops[si + 1 + k] > 0) || out.length + list.length * inner.length > PLAN_CAP) out.push(...inner);
-    else for (const w of list) for (const p of inner) out.push({ seg: p.seg.replace(ref, () => w), op: 0, looped: true });
+    else for (const w of list) for (const p of inner) out.push({ seg: p.seg.replace(glued, '$${$1}').replace(ref, () => w), op: 0, looped: true });
     si = end - 1;   // the body is planned; `done` (if any) comes next
   }
   return out;

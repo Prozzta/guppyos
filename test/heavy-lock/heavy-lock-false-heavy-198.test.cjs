@@ -50,7 +50,8 @@ test('node --test $f, with f set to one test file in the same command, is light'
 
 K.failsClosed = (M = HJ) => {
   const c = (cmd) => M.classifyCommand(`cd /c/w && ${cmd}`, 0, ctx);
-  assert.equal(c('node --test $F').why, 'node --test (a glob or a directory)', 'A VARIABLE THE COMMAND DID NOT SET STAYS HEAVY');
+  // HEAVY-LOCK-LIVE-FILE-192 (b, god 66dee2): a name still computed is a path the lock cannot name.
+  assert.equal(c('node --test $F').why, 'node --test $F (a path the lock cannot name)', 'A VARIABLE THE COMMAND DID NOT SET STAYS HEAVY');
   assert.equal(c("f='test/*.test.cjs' && node --test $f").why, 'node --test (a glob or a directory)', 'A VARIABLE SET TO A GLOB IS A GLOB');
   assert.equal(c('d=test && node --test $d').why, 'node --test (a glob or a directory)', 'A VARIABLE SET TO A DIRECTORY IS A DIRECTORY');
   assert.equal(c('f=$(ls test/*.test.cjs | head -1) && node --test $f').why, 'node --test (a glob or a directory)', 'A COMPUTED VALUE STAYS HEAVY');
@@ -134,7 +135,8 @@ const MUTANTS = [
     killer: 'missingSaid', dies: /A FILE THAT IS THERE \(TOO BIG TO READ\) IS NOT CALLED MISSING/ },
   { name: 'classifyCommand does not pass expand', edits: [['  let here: ClassifyCtx = { ...ctx, stdin: undefined, expand, ', '  let here: ClassifyCtx = { ...ctx, stdin: undefined, ']],
     killer: 'varFile', dies: /A VARIABLE SET TO ONE FILE IS THAT FILE/ },
-  { name: 'every $word is taken as a .js file (fails open)', edits: [["      if (files.some((f) => /[*?]/.test(f) || !/\\.[cm]?[jt]s$/.test(f))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };", "      if (files.some((f) => !f.includes('$') && (/[*?]/.test(f) || !/\\.[cm]?[jt]s$/.test(f)))) return { heavy: true, kind: 'suite', why: 'node --test (a glob or a directory)' };"]],
+  // LIVE-FILE-192 re-base: a $word is caught as unnamed before the .js check, so the fail-open is there now.
+  { name: 'a $word the lock cannot name is light (fails open)', edits: [['        if (COMPUTED.test(f)) return unnamed(`node --test ${f}`);\n', '        if (COMPUTED.test(f)) return { heavy: false };\n']],
     killer: 'failsClosed', dies: /A VARIABLE THE COMMAND DID NOT SET STAYS HEAVY/ }
 ];
 
