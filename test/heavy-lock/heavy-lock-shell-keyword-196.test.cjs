@@ -111,8 +111,8 @@ const MUTANTS = [
   { name: 'an f() head is the program again', edits: [['CASE_ARM.test(ws[i]) || FUNC_HEAD.test(ws[i])) i++;', 'CASE_ARM.test(ws[i])) i++;']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f\(\)\)/ },
   { name: 'a `function f` head is the program again', edits: [["    else if (ws[i] === 'function' && ws[i + 1]) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(function f\)/ },
   { name: 'an `f ()` head is the program again', edits: [["    else if (ws[i + 1] === '()' && /^[A-Za-z_][\\w.:-]*$/.test(ws[i])) i += 2;\n", '']], killer: 'funcs', dies: /A FUNCTION BODY IS CLASSIFIED WHERE IT IS DEFINED \(f \(\)\)/ },
-  { name: "a glued ) stays on the last word", edits: [["  return out.length > 1 && /^[^()'\"$`]+\\)$/.test(last) ? [...out.slice(0, -1), last.slice(0, -1)] : out;", '  return out;']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD/ },
-  { name: 'a glued ( stays on the first word', edits: [["  if (out.length > 1 && /^\\([^()'\"$`]+$/.test(out[0])) out = [out[0].slice(1), ...out.slice(1)];\n", '']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD \(one segment\)/ },
+  { name: "a glued ) stays on the last word", edits: [["  return out.length && /^[^()'\"$`]+\\)+$/.test(last) ? [...out.slice(0, -1), last.replace(/\\)+$/, '')] : out;", '  return out;']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD/ },
+  { name: 'a glued ( stays on the first word', edits: [["  if (out.length && /^\\(+[^()'\"$`]+\\)*$/.test(out[0])) out = [out[0].replace(/^\\(+/, ''), ...out.slice(1)];\n", '']], killer: 'subshell', dies: /A GLUED SUBSHELL \) IS NOT PART OF THE LAST WORD \(one segment\)/ },
   { name: 'cmd strips keywords too', edits: [["  if (d === 'cmd') return ws;\n", '']], killer: 'cmdDialect', dies: /CMD KEEPS ITS FIRST WORD AS THE PROGRAM/ }
 ];
 
