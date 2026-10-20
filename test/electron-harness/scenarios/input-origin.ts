@@ -34,7 +34,7 @@ function installBridgeStub(): void {
   const unsub = () => () => { /* nothing subscribed */ };
   window.cth = {
     onPtyData: unsub(), onPtyExit: unsub(), onPtyRelaunch: unsub(),
-    writePty: (id: string, data: string, origin: string) => { sent.push({ id, data, origin }); return Promise.resolve({ ok: true }); },
+    writePty: (id: string, data: string, origin: string) => { sent.push({ id, data, origin, binary: false }); return Promise.resolve({ ok: true }); },
     writePtyBinary: (id: string, data: string, origin: string) => { sent.push({ id, data, origin, binary: true }); return Promise.resolve({ ok: true }); },
     redrawPty: () => { /* no pty */ }, resizePty: () => { /* no pty */ },
     copyToClipboard: () => { /* unused */ },
